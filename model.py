@@ -1,17 +1,16 @@
-def analyze_coin(symbol, candles, backtest=False):
-    # 기존 로직은 유지
-    ...
+import torch
+import torch.nn as nn
 
-    # 백테스트용 현재가 설정
-    current_price = candles[-1]['close'] if backtest else candles[-1]['close']  # 동일하나 구조유지용
+class CryptoPredictor(nn.Module):
+    def __init__(self, input_size=6, hidden_size=64, num_layers=2):
+        super(CryptoPredictor, self).__init__()
+        self.bilstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
+        self.gru = nn.GRU(hidden_size * 2, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, 1)
+        self.sigmoid = nn.Sigmoid()
 
-    # 기존 텍스트 출력 부분에서 진입가 대신 current_price 사용
-    message = f"""
-📌 코인: {symbol}
-📈 진입가: {round(current_price, 3)} USDT
-🎯 목표가: {round(target_price, 3)} USDT
-🛑 손절가: {round(stop_loss, 3)} USDT
-📊 전략: {strategy_type} / {expected_return}%
-📅 정확도 사유: {reason}
-"""
-    return message.strip()
+    def forward(self, x):
+        lstm_out, _ = self.bilstm(x)
+        gru_out, _ = self.gru(lstm_out)
+        out = self.fc(gru_out[:, -1, :])
+        return self.sigmoid(out)
