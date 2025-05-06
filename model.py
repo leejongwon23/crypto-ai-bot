@@ -1,23 +1,20 @@
+# model.py
 import torch
 import torch.nn as nn
 
-class GRUBiLSTMModel(nn.Module):
-    def __init__(self, input_size=10, hidden_size=64, num_layers=2, output_size=1):
-        super(GRUBiLSTMModel, self).__init__()
-        self.gru = nn.GRU(input_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
-        self.bilstm = nn.LSTM(hidden_size * 2, hidden_size, num_layers, batch_first=True, bidirectional=True)
-        self.fc = nn.Sequential(
-            nn.Linear(hidden_size * 2, 32),
-            nn.ReLU(),
-            nn.Linear(32, output_size)
-        )
+class LSTMModel(nn.Module):
+    def __init__(self, input_size=1, hidden_size=50, num_layers=1, output_size=1):
+        super(LSTMModel, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
 
     def forward(self, x):
-        gru_out, _ = self.gru(x)
-        lstm_out, _ = self.bilstm(gru_out)
-        out = self.fc(lstm_out[:, -1, :])
-        return out
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size)
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size)
 
-def get_model(input_size=10):
-    model = GRUBiLSTMModel(input_size=input_size)
-    return model
+        out, _ = self.lstm(x, (h0, c0))  # LSTM 통과
+        out = self.fc(out[:, -1, :])     # 마지막 시점만 사용
+        return out
