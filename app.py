@@ -1,35 +1,39 @@
-from flask import Flask
-from recommend import generate_recommendation, fine_tune_model
+import os
+import time
+from flask import Flask, request
+from recommend import recommend_all
 from telegram_bot import send_recommendation
 
-import datetime
+# ✅ 자동 학습 트리거 (최초 실행 시 모델 학습)
+if not os.path.exists("best_model.pt"):
+    import train_model  # 자동으로 best_model.pt 생성
+
+# ✅ 쿨타임 제한 설정
+last_run_time = 0
+COOLTIME = 60 * 60  # 1시간
 
 app = Flask(__name__)
-last_run_date = None  # ⏱️ 쿨타임: 하루 1회
+
+@app.route("/")
+def home():
+    return "🚀 Crypto AI Bot is running!"
 
 @app.route("/run")
 def run():
-    global last_run_date
-    today = datetime.date.today()
-    if last_run_date == today:
-        return "이미 오늘 실행됨"
+    global last_run_time
+    now = time.time()
 
-    # 학습 자동화
-    fine_tune_model("BTCUSDT")
+    if now - last_run_time < COOLTIME:
+        return "⏳ 쿨타임 중입니다. 잠시 후 다시 시도해주세요."
 
-    # 분석 전송
-    result = generate_recommendation("BTCUSDT")
-    if result:
-        msg = (
-            f"🔍 코인: {result['symbol']}\n"
-            f"💵 진입가: {result['entry']}\n"
-            f"📈 현재가: {result['current_price']}\n"
-            f"🎯 목표가: {result['target']} (+{result['profit_pct']}%)\n"
-            f"⚠️ 손절가: {result['stop']} (-{result['loss_pct']}%)\n"
-            f"✅ 적중률: {result['hit_rate']}\n"
-            f"📌 분석사유: {result['reason']}"
-        )
-        send_recommendation(msg)
-        last_run_date = today
-        return "자동학습 및 추천 전송 완료"
-    return "추천 실패"
+    results = recommend_all()
+    if results:
+        for msg in results:
+            send_recommendation(msg)
+        last_run_time = now
+        return "✅ 추천이 완료되어 텔레그램으로 전송되었습니다."
+    else:
+        return "❌ 분석에 실패했습니다. 캔들 데이터 부족 또는 모델 문제일 수 있습니다."
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
