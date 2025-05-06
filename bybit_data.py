@@ -1,53 +1,36 @@
 import requests
+import pandas as pd
 import numpy as np
 
-def get_kline(symbol):
-    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval=60&limit=200"
+def get_kline(symbol, interval=60, limit=200, end_time=None):
+    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
+    if end_time:
+        url += f"&end={int(end_time.timestamp()) * 1000}"
     try:
-        res = requests.get(url)
-        data = res.json()
-        items = data["result"]["list"]
-        result = []
+        response = requests.get(url)
+        data = response.json()
+        raw = data['result']['list']
+        candles = []
+        for row in raw:
+            candles.append({
+                "timestamp": int(row[0]),
+                "open": float(row[1]),
+                "high": float(row[2]),
+                "low": float(row[3]),
+                "close": float(row[4]),
+                "volume": float(row[5])
+            })
+        return add_technical_indicators(candles)
+    except:
+        return None
 
-        closes = [float(i[4]) for i in items]
-        volumes = [float(i[5]) for i in items]
-
-        # MA20
-        ma20 = np.convolve(closes, np.ones(20) / 20, mode='valid')
-        ma20 = [None]*(len(closes)-len(ma20)) + list(ma20)
-
-        # RSI
-        rsi = []
-        for i in range(1, len(closes)):
-            diff = closes[i] - closes[i-1]
-            up = max(diff, 0)
-            down = max(-diff, 0)
-            rsi.append((up, down))
-
-        rsi_values = []
-        for i in range(14, len(rsi)):
-            avg_gain = np.mean([r[0] for r in rsi[i-14:i]])
-            avg_loss = np.mean([r[1] for r in rsi[i-14:i]])
-            rs = avg_gain / avg_loss if avg_loss != 0 else 0
-            rsi_values.append(100 - (100 / (1 + rs)))
-        rsi = [None]*15 + rsi_values
-
-        for i in range(len(closes)):
-            if None in (ma20[i], rsi[i]):
-                continue
-            result.append([closes[i], volumes[i], ma20[i], rsi[i]])
-        return result
-    except Exception as e:
-        print(f"[에러] 캔들 데이터 조회 실패 ({symbol}): {e}")
-        return []
-
-def get_current_price(symbol):
-    url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol}"
-    try:
-        res = requests.get(url)
-        data = res.json()
-        price = float(data["result"]["list"][0]["lastPrice"])
-        return price
-    except Exception as e:
-        print(f"[에러] 현재가 조회 실패 ({symbol}): {e}")
-        return "N/A"
+def add_technical_indicators(candles):
+    closes = np.array([c['close'] for c in candles])
+    df = pd.Series(closes)
+    ema12 = df.ewm(span=12).mean()
+    ema26 = df.ewm(span=26).mean()
+    candles[-1]['macd'] = float(ema12.iloc[-1] - ema26.iloc[-1])
+    ma20 = df.rolling(window=20).mean()
+    std20 = df.rolling(window=20).std()
+    candles[-1]['bollinger_upper'] = float(ma20.iloc[-1] + 2 * std20.iloc[-1])
+    return candles
