@@ -44,7 +44,10 @@ def predict_with_model(model, X):
 # ✅ 단일 전략 추천
 def recommend_strategy(df, model_path='best_model.pt'):
     df_feat = extract_features(df)
+    print(f"🔍 피처 수: {len(df_feat)}")  # ✅ 추가
+
     if len(df_feat) < 30:
+        print("❌ 피처 수 부족")
         return None
 
     scaler = MinMaxScaler()
@@ -55,6 +58,7 @@ def recommend_strategy(df, model_path='best_model.pt'):
     if os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path))
     else:
+        print("❌ 모델 파일 없음")
         return None
 
     prediction = predict_with_model(model, X_input)
@@ -74,12 +78,16 @@ def recommend_all():
     messages = []
     for symbol in symbols:
         try:
+            print(f"🔥 {symbol} 시작")  # ✅ 추가
             candles = get_kline(symbol)
+            print(f"  ▶ 캔들 수: {len(candles) if candles else 0}")  # ✅ 추가
+
             if not candles or len(candles) < 100:
                 print(f"❌ 데이터 부족: {symbol}")
                 continue
 
             df = pd.DataFrame(candles)
+            print(f"  ▶ 피처 수: {len(df.dropna())}")  # ✅ 추가
 
             if 'volume' not in df.columns or 'close' not in df.columns:
                 print(f"❌ 컬럼 누락: {symbol}")
@@ -92,7 +100,6 @@ def recommend_all():
             if result:
                 trend, confidence = result
 
-                # ✅ 진입가/목표가/손절가 계산 (고도화 포함)
                 entry_price = round(float(df["close"].iloc[-1]), 4)
                 if trend == "📈 상승":
                     target_price = round(entry_price * 1.03, 4)
