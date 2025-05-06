@@ -34,3 +34,16 @@ def add_technical_indicators(candles):
     std20 = df.rolling(window=20).std()
     candles[-1]['bollinger_upper'] = float(ma20.iloc[-1] + 2 * std20.iloc[-1])
     return candles
+import requests
+
+def get_kline(symbol, interval=60, limit=200, end_time=None):
+    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
+    if end_time:
+        url += f"&end={int(end_time.timestamp() * 1000)}"
+    try:
+        res = requests.get(url)
+        data = res.json()
+        return data["result"]["list"]
+    except Exception as e:
+        print(f"[에러] {symbol} 캔들 데이터 조회 실패: {e}")
+        return []
