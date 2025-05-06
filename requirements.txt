@@ -1,0 +1,8 @@
+flask
+requests
+pandas
+numpy
+scikit-learn
+matplotlib
+torch
+python-telegram-bot==13.15
