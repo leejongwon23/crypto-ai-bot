@@ -3,7 +3,6 @@ import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 from model import get_model
 import torch
-import torch.nn as nn
 import os
 from bybit_data import get_kline
 
@@ -60,7 +59,7 @@ def recommend_strategy(df, model_path='best_model.pt'):
 
     prediction = predict_with_model(model, X_input)
     trend = "📈 상승" if prediction > 0.5 else "📉 하락"
-    confidence = round(float(prediction) * 100, 2) if prediction > 0.5 else round((1 - float(prediction)) * 100, 2)
+    confidence = round(prediction * 100, 2) if prediction > 0.5 else round((1 - prediction) * 100, 2)
     return trend, confidence
 
 # ✅ 전체 코인 추천 실행
@@ -92,23 +91,20 @@ def recommend_all():
             result = recommend_strategy(df)
             if result:
                 trend, confidence = result
-                current_price = round(df["close"].iloc[-1], 2)
 
-                # ✅ 목표가 및 손절가 계산
+                # ✅ 진입가/목표가/손절가 계산 (고도화 포함)
+                entry_price = round(float(df["close"].iloc[-1]), 4)
                 if trend == "📈 상승":
-                    target_price = round(current_price * 1.02, 2)  # +2%
-                    stop_loss = round(current_price * 0.985, 2)    # -1.5%
+                    target_price = round(entry_price * 1.03, 4)
+                    stop_price = round(entry_price * 0.98, 4)
                 else:
-                    target_price = round(current_price * 0.98, 2)  # -2%
-                    stop_loss = round(current_price * 1.015, 2)    # +1.5%
+                    target_price = round(entry_price * 0.97, 4)
+                    stop_price = round(entry_price * 1.02, 4)
 
                 msg = (
                     f"<b>{symbol}</b>\n"
-                    f"예측: {trend}\n"
-                    f"신뢰도: {confidence}%\n"
-                    f"진입가: {current_price}\n"
-                    f"🎯 목표가: {target_price}\n"
-                    f"🛑 손절가: {stop_loss}"
+                    f"예측: {trend} / 신뢰도: {confidence}%\n"
+                    f"📍 진입가: {entry_price}\n🎯 목표가: {target_price}\n⛔ 손절가: {stop_price}"
                 )
                 messages.append(msg)
 
@@ -117,3 +113,4 @@ def recommend_all():
             continue
 
     return messages
+
