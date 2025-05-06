@@ -8,7 +8,7 @@ from model import get_model
 import os
 
 # CSV 파일 불러오기
-df = pd.read_csv("sample_training_data.csv")  # 이미 생성됨
+df = pd.read_csv("sample_training_data.csv")
 
 # 기술적 지표 생성
 def compute_rsi(series, period=14):
@@ -24,8 +24,8 @@ def compute_macd(series, fast=12, slow=26):
     return ema_fast - ema_slow
 
 def compute_bollinger(series, window=20):
-    sma = series.rolling(window).mean()
-    std = series.rolling(window).std()
+    sma = series.rolling(window=window).mean()
+    std = series.rolling(window=window).std()
     return (series - sma) / (2 * std)
 
 def compute_features(df):
@@ -47,7 +47,6 @@ def make_sequences(data, window=30):
         targets.append(target)
     return np.array(sequences), np.array(targets)
 
-# 데이터 전처리
 features = compute_features(df)
 scaler = MinMaxScaler()
 features_scaled = scaler.fit_transform(features)
@@ -56,7 +55,6 @@ X, y = make_sequences(features_scaled, window=30)
 X_tensor = torch.tensor(X, dtype=torch.float32)
 y_tensor = torch.tensor(y, dtype=torch.float32).unsqueeze(1)
 
-# 모델 훈련
 model = get_model(input_size=7)
 criterion = nn.BCELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
@@ -69,9 +67,7 @@ for epoch in range(epochs):
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
-    print(f"Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}")
+    print(f"✅ Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}")
 
-# 모델 저장
 torch.save(model.state_dict(), "best_model.pt")
 print("✅ 학습된 모델이 best_model.pt 로 저장되었습니다.")
-
