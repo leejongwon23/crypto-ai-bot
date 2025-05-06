@@ -92,7 +92,24 @@ def recommend_all():
             result = recommend_strategy(df)
             if result:
                 trend, confidence = result
-                msg = f"<b>{symbol}</b>\n예측: {trend}\n신뢰도: {confidence}%"
+                current_price = round(df["close"].iloc[-1], 2)
+
+                # ✅ 목표가 및 손절가 계산
+                if trend == "📈 상승":
+                    target_price = round(current_price * 1.02, 2)  # +2%
+                    stop_loss = round(current_price * 0.985, 2)    # -1.5%
+                else:
+                    target_price = round(current_price * 0.98, 2)  # -2%
+                    stop_loss = round(current_price * 1.015, 2)    # +1.5%
+
+                msg = (
+                    f"<b>{symbol}</b>\n"
+                    f"예측: {trend}\n"
+                    f"신뢰도: {confidence}%\n"
+                    f"진입가: {current_price}\n"
+                    f"🎯 목표가: {target_price}\n"
+                    f"🛑 손절가: {stop_loss}"
+                )
                 messages.append(msg)
 
         except Exception as e:
