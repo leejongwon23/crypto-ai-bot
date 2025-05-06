@@ -1,4 +1,3 @@
-# app.py
 import os
 import time
 from flask import Flask, request
@@ -24,19 +23,18 @@ def run():
     global last_run_time
     now = time.time()
 
-    # 쿨타임 제한
+    # ✅ 쿨타임 제한
     if now - last_run_time < COOLTIME:
         remain = int(COOLTIME - (now - last_run_time))
-        return f"⏳ 쿨타임 중입니다. {remain}초 후에 다시 실행하세요."
+        return f"⏳ 쿨타임 중입니다. {remain}초 후 다시 시도해주세요."
 
+    print("📊 추천 실행 시작")
     results = recommend_all()
+    last_run_time = now
+
     if results:
         for msg in results:
             send_recommendation(msg)
-        last_run_time = now
-        return f"✅ 총 {len(results)}개 종목 추천 완료 / 텔레그램 전송됨"
+        return "✅ 추천 완료 및 텔레그램 전송 완료"
     else:
-        return "❌ 추천할 종목이 없습니다. 데이터 부족 또는 모델 문제일 수 있습니다."
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+        return "❌ 추천 결과 없음 (데이터 부족 또는 분석 실패)"
