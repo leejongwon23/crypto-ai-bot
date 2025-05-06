@@ -1,47 +1,36 @@
 from flask import Flask
-from recommend import generate_recommendation
+from recommend import analyze
 from telegram_bot import send_recommendation
-from bybit_data import get_current_price  # 추가됨
 import time
 
 app = Flask(__name__)
+last_run_time = 0
+COOLTIME = 3600  # 1시간 쿨타임 (초 단위)
 
-# 쿨타임 설정 (1시간)
-last_called = 0
-cooldown = 3600
-
-SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "ADAUSDT", "XRPUSDT", "SOLUSDT",
-    "AVAXUSDT", "ONDOUSDT", "SUIUSDT", "LINKUSDT", "DOGEUSDT",
-    "TRUUSDT", "BCHUSDT", "XLMUSDT", "TRXUSDT", "HBARUSDT",
-    "SANDUSDT", "BORAUSDT", "ARBUSDT", "UNIUSDT", "FILUSDT"
-]
+@app.route("/")
+def home():
+    return "🔄 Crypto AI Bot is live."
 
 @app.route("/run")
 def run():
-    global last_called
+    global last_run_time
     now = time.time()
+    if now - last_run_time < COOLTIME:
+        return f"🕒 잠시 후 다시 시도해주세요. 쿨타임 남음: {int(COOLTIME - (now - last_run_time))}초"
 
-    if now - last_called < cooldown:
-        return "⏱ 호출 제한 중 (쿨타임 1시간 미도달)"
+    last_run_time = now
+    results = analyze()
+    for r in results:
+        message = f"""📊 [LSTM 전략 분석 결과]
 
-    last_called = now
-
-    count = 0
-    for symbol in SYMBOLS:
-        current_price = get_current_price(symbol)
-        result = generate_recommendation(symbol)
-
-        if result:
-            msg = f"""
-📈 코인명: {result['symbol']}
-💵 현재가(진입가): {current_price}
-🎯 목표가: {result['target']} ({result['profit_pct']}%)
-⚠️ 손절가: {result['stop']} ({result['loss_pct']}%)
-✅ 적중률: {result['hit_rate']}
-📌 분석사유: {result['reason']}
+📌 코인명: {r['symbol']}
+💰 진입가: {r['entry']:.2f}
+📈 현재가: {r['current']:.2f}
+🎯 목표가: {r['target']:.2f} (+{r['profit_pct']}%)
+🛑 손절가: {r['stop']:.2f} (-{r['loss_pct']}%)
+📊 방향성: {"📈 상승" if r['target'] > r['entry'] else "📉 하락"}
+📡 적중률: {r['hit_rate']}
+📌 분석근거: {r['reason']}
 """
-            send_recommendation(msg.strip())
-            count += 1
-
-    return f"{count}개 코인 분석 및 전송 완료"
+        send_recommendation(message)
+    return "✅ 분석 완료 및 전송됨."
