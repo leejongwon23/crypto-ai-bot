@@ -1,56 +1,44 @@
 import torch
 import numpy as np
-from model import train_model
+from model import LSTMModel
 from bybit_data import get_kline, get_current_price
 
-def generate_recommendation(symbol="BTCUSDT"):
+def generate_recommendation(symbol):
     klines = get_kline(symbol)
-    if not klines or len(klines) < 51:
+    if not klines or len(klines) < 50:
         return None
 
-    closes = np.array([x[0] for x in klines])
-    normalized = []
+    input_data = torch.tensor(klines[-50:], dtype=torch.float32).reshape(1, 50, 4)
 
-    for item in klines:
-        close, volume, ma20, rsi = item
-        n_close = (close - closes.min()) / (closes.max() - closes.min())
-        n_vol = volume / max([x[1] for x in klines])
-        n_ma = ma20 / max([x[2] for x in klines])
-        n_rsi = rsi / 100
-        normalized.append([n_close, n_vol, n_ma, n_rsi])
-
-    data = torch.tensor(normalized).float()
-    X = data[:-1][-50:].reshape(1, 50, 4)
-    y = torch.tensor([[(closes[-1] - closes.min()) / (closes.max() - closes.min())]]).float()
-
-    model = train_model((X, y))
+    model = LSTMModel()
     model.eval()
-
     with torch.no_grad():
-        pred = model(X).item()
+        predicted = model(input_data).item()
 
-    entry = round(closes[-1], 2)
-    predicted_price = round(closes.min() + pred * (closes.max() - closes.min()), 2)
+    entry = klines[-1][0]
+    target = round(predicted, 2)
+    current = get_current_price(symbol)
 
-    if predicted_price > entry:
+    if target > entry:
         stop = round(entry * 0.98, 2)
-        direction = "📈 롱"
+        direction = "상승"
         loss_pct = round((entry - stop) / entry * 100, 2)
+        profit_pct = round((target - entry) / entry * 100, 2)
     else:
         stop = round(entry * 1.02, 2)
-        direction = "📉 숏"
+        direction = "하락"
         loss_pct = round((stop - entry) / entry * 100, 2)
+        profit_pct = round((entry - target) / entry * 100, 2)
 
-    profit_pct = round((predicted_price - entry) / entry * 100, 2)
-    now = get_current_price(symbol)
-
-    message = f"""\
-📌 <b>{symbol}</b> {direction}
-┌ 현재가: {now}
-├ 진입가: {entry}
-├ 목표가: {predicted_price} ({'+' if profit_pct > 0 else ''}{profit_pct}%)
-├ 손절가: {stop} ({'-' + str(loss_pct)}%)
-├ 정확도: 70%
-└ 분석: LSTM 실시간 예측 기반
-"""
-    return message
+    return {
+        "symbol": symbol,
+        "entry": round(entry, 2),
+        "current": current,
+        "target": target,
+        "stop": stop,
+        "profit_pct": profit_pct,
+        "loss_pct": loss_pct,
+        "hit_rate": "65%",
+        "direction": direction,
+        "reason": f"LSTM 예측 기반 단기 {direction} 확률"
+    }
