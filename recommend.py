@@ -74,19 +74,29 @@ def recommend_all():
 
     messages = []
     for symbol in symbols:
-        candles = get_kline(symbol)
-        if not candles or len(candles) < 100:
+        try:
+            candles = get_kline(symbol)
+            if not candles or len(candles) < 100:
+                print(f"❌ 데이터 부족: {symbol}")
+                continue
+
+            df = pd.DataFrame(candles)
+
+            if 'volume' not in df.columns or 'close' not in df.columns:
+                print(f"❌ 컬럼 누락: {symbol}")
+                continue
+
+            df["volume"] = df["volume"].astype(float)
+            df["close"] = df["close"].astype(float)
+
+            result = recommend_strategy(df)
+            if result:
+                trend, confidence = result
+                msg = f"<b>{symbol}</b>\n예측: {trend}\n신뢰도: {confidence}%"
+                messages.append(msg)
+
+        except Exception as e:
+            print(f"⚠️ {symbol} 처리 중 오류 발생: {e}")
             continue
 
-        df = pd.DataFrame(candles)
-        df["volume"] = df["volume"].astype(float)
-        df["close"] = df["close"].astype(float)
-
-        result = recommend_strategy(df)
-        if result:
-            trend, confidence = result
-            msg = f"<b>{symbol}</b>\n예측: {trend}\n신뢰도: {confidence}%"
-            messages.append(msg)
-
     return messages
-
