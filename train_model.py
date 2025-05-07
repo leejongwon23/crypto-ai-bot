@@ -1,4 +1,4 @@
-# train_model.py (왕1 보완 기능: 반복 학습 + 모델 저장)
+# train_model.py (accuracy_logger + logger 통합)
 
 import torch
 import torch.nn as nn
@@ -8,6 +8,8 @@ from bybit_data import get_kline
 from sklearn.preprocessing import MinMaxScaler
 import numpy as np
 import os
+import csv
+from datetime import datetime
 
 # 코인 리스트 (왕1 기준 21개)
 symbols = [
@@ -17,7 +19,7 @@ symbols = [
     "APEUSDT", "SANDUSDT", "FTMUSDT", "EOSUSDT", "CHZUSDT", "ETCUSDT"
 ]
 
-# 입력 특징 추출 함수 (recommend와 동일)
+# 기술지표 계산 함수
 def compute_features(df):
     df["ma5"] = df["close"].rolling(window=5).mean()
     df["ma20"] = df["close"].rolling(window=20).mean()
@@ -53,6 +55,28 @@ def make_sequences(data, window=30):
         y.append(target)
     return np.array(X), np.array(y)
 
+# 예측 정확도 로깅 함수
+def log_prediction(symbol, timeframe, true_label, predicted_prob):
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, "prediction_accuracy.csv")
+
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    predicted_label = 1 if predicted_prob >= 0.5 else 0
+    correct = 1 if predicted_label == true_label else 0
+
+    row = [now, symbol, timeframe, true_label, predicted_label, predicted_prob, correct]
+    header = ["timestamp", "symbol", "timeframe", "true_label", "predicted_label", "predicted_prob", "correct"]
+    write_header = not os.path.exists(log_path)
+
+    with open(log_path, "a", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        if write_header:
+            writer.writerow(header)
+        writer.writerow(row)
+
+    print(f"✅ {symbol} [{timeframe}] 로그 기록 완료: 정확도={correct}, 확률={predicted_prob:.2f}")
+
 def train_model():
     for symbol in symbols:
         for tf_name, interval in zip(["short", "mid", "long"], ["15", "60", "240"]):
@@ -73,7 +97,6 @@ def train_model():
                 criterion = nn.BCELoss()
                 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-                # 학습 루프
                 for epoch in range(10):
                     model.train()
                     output = torch.sigmoid(model(X_tensor))
@@ -87,5 +110,12 @@ def train_model():
                 torch.save(model.state_dict(), model_path)
                 print(f"✅ 모델 저장됨: {model_path}")
 
+                # 예측 정확도 로깅 (마지막 epoch 기준)
+                with torch.no_grad():
+                    preds = torch.sigmoid(model(X_tensor)).numpy().flatten()
+                    for i in range(len(y)):
+                        log_prediction(symbol, tf_name, int(y[i]), float(preds[i]))
+
             except Exception as e:
                 print(f"❌ {symbol} [{tf_name}] 학습 실패: {e}")
+
