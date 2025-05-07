@@ -1,3 +1,25 @@
+# model.py
+import torch.nn as nn
+
+class GRUBLSTMModel(nn.Module):
+    def __init__(self, input_size=10):
+        super(GRUBLSTMModel, self).__init__()
+        self.gru = nn.GRU(input_size, 64, batch_first=True)
+        self.lstm = nn.LSTM(64, 32, batch_first=True)
+        self.fc = nn.Linear(32, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x, _ = self.gru(x)
+        x, _ = self.lstm(x)
+        x = self.fc(x[:, -1, :])
+        return self.sigmoid(x)
+
+def get_model(input_size=10):
+    return GRUBLSTMModel(input_size=input_size)
+
+
+# recommend.py
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
@@ -6,7 +28,6 @@ import torch
 import os
 from bybit_data import get_kline
 
-# ✅ 기술 지표 추출
 def extract_features(df):
     df['ma5'] = df['close'].rolling(window=5).mean()
     df['ma20'] = df['close'].rolling(window=20).mean()
@@ -33,7 +54,6 @@ def compute_bollinger(series, window=20):
     std = series.rolling(window=window).std()
     return (series - sma) / (2 * std)
 
-# ✅ 모델 예측
 def predict_with_model(model, X):
     model.eval()
     with torch.no_grad():
@@ -41,13 +61,12 @@ def predict_with_model(model, X):
         prediction = model(X_tensor).item()
     return prediction
 
-# ✅ 단일 전략 추천
 def recommend_strategy(df, model_path='best_model.pt'):
     df_feat = extract_features(df)
-    print(f"▶ 피처 수: {len(df_feat)}")
+    print(f"▶ 피쳐 수: {len(df_feat)}")
 
     if len(df_feat) < 30:
-        print("❌ 피처 수 부족")
+        print("❌ 피쳐 수 부족")
         return None
 
     scaler = MinMaxScaler()
@@ -62,11 +81,10 @@ def recommend_strategy(df, model_path='best_model.pt'):
         return None
 
     prediction = predict_with_model(model, X_input)
-    trend = "📈 상승" if prediction > 0.5 else "📉 하락"
+    trend = "📈 상승" if prediction > 0.5 else "📉 하닝"
     confidence = round(prediction * 100, 2) if prediction > 0.5 else round((1 - prediction) * 100, 2)
     return trend, confidence
 
-# ✅ 전체 코인 추천 실행
 def recommend_all():
     symbols = [
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT",
@@ -80,7 +98,7 @@ def recommend_all():
         try:
             print(f"🔥 {symbol} 시작")
             candles = get_kline(symbol)
-            print(f"▶ 캔들 수: {len(candles) if candles else 0}")
+            print(f"▶ 카드 수: {len(candles) if candles else 0}")
 
             if not candles or len(candles) < 100:
                 print(f"❌ 데이터 부족: {symbol}")
@@ -108,7 +126,7 @@ def recommend_all():
 
                 msg = (
                     f"<b>{symbol}</b>\n"
-                    f"예측: {trend} / 신뢰도: {confidence}%\n"
+                    f"예측: {trend} / 신리도: {confidence}%\n"
                     f"📍 진입가: {entry_price}\n🎯 목표가: {target_price}\n⛔ 손절가: {stop_price}"
                 )
                 messages.append(msg)
