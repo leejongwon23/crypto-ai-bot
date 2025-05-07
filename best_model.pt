@@ -1,9 +1,0 @@
-# 아래 코드를 별도 파일로 저장하고 실행
-# 파일명 예시: save_model.py
-
-from model import get_model
-import torch
-
-model = get_model(input_size=7)
-torch.save(model.state_dict(), "best_model.pt")
-print("✅ 모델 저장 완료!")
