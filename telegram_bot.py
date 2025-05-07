@@ -1,19 +1,18 @@
-# telegram_bot.py (쿨타임 제어 포함)
-
 from telegram import Bot
 import os
 import time
 
+# 환경변수에서 텔레그램 설정 가져오기
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
 bot = Bot(token=BOT_TOKEN)
 
-# ⏳ 쿨타임 설정 (텔레그램 메시지 제한)
+# ⏳ 쿨타임 설정
 last_sent_time = 0
 cooldown_seconds = 3600  # 1시간
 
-def send_recommendation(message):
+def send_recommendation(messages: list):
     global last_sent_time
     now = time.time()
 
@@ -23,7 +22,9 @@ def send_recommendation(message):
         return
 
     try:
-        bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="HTML")
+        for msg in messages:
+            bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="HTML")
+            time.sleep(1.5)  # 메시지 전송 간 딜레이
         last_sent_time = now
         print("✅ 텔레그램 전송 완료")
     except Exception as e:
