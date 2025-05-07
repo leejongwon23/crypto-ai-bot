@@ -5,9 +5,8 @@ from model import GRUModel
 import os
 
 def train_gru_model(model_path="gru_model.pt"):
-    # 예시용 데이터 생성 (실전에서는 실제 데이터로 교체)
     x = np.sin(np.linspace(0, 100, 500))
-    x = (x - x.min()) / (x.max() - x.min())  # 정규화
+    x = (x - x.min()) / (x.max() - x.min())
 
     inputs = torch.tensor(x[:-1].reshape(-1, 1, 1), dtype=torch.float32)
     targets = torch.tensor(x[1:].reshape(-1, 1), dtype=torch.float32)
@@ -23,7 +22,6 @@ def train_gru_model(model_path="gru_model.pt"):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-
         print(f"📚 epoch {epoch+1}, loss = {loss.item():.6f}")
 
     torch.save(model.state_dict(), model_path)
