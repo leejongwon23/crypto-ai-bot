@@ -1,39 +1,80 @@
-# bybit_data.py
-import requests
 import pandas as pd
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.preprocessing import MinMaxScaler
+from model import get_model
+import os
 
-def get_kline(symbol, interval=60, limit=200, end_time=None):
-    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
-    if end_time:
-        url += f"&end={int(end_time.timestamp())}"
+# ✅ 학습용 샘플 데이터 불러오기
+df = pd.read_csv("sample_training_data.csv")
 
-    try:
-        response = requests.get(url)
-        data = response.json()
+# ✅ 특성 엔지니어링
+def compute_features(df):
+    df["ma5"] = df["close"].rolling(window=5).mean()
+    df["ma20"] = df["close"].rolling(window=20).mean()
+    df["rsi"] = compute_rsi(df["close"])
+    df["macd"] = compute_macd(df["close"])
+    df["bollinger"] = compute_bollinger(df["close"])
+    df = df.dropna()
+    return df[["close", "volume", "ma5", "ma20", "rsi", "macd", "bollinger"]].values
 
-        # ✅ 데이터 유효성 검사
-        if "result" not in data or "list" not in data["result"]:
-            print(f"[에러] {symbol} 캔들 데이터 조회 실패: 'result' 또는 'list' 누락")
-            return []
+# ✅ 기술적 지표들 계산 함수들
+def compute_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(window=period).mean()
+    loss = -delta.clip(upper=0).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
-        rows = data["result"]["list"]
-        if not rows or len(rows) < limit:
-            print(f"[에러] {symbol} 캔들 데이터 부족: {len(rows)}개")
-            return []
+def compute_macd(series, fast=12, slow=26):
+    ema_fast = series.ewm(span=fast).mean()
+    ema_slow = series.ewm(span=slow).mean()
+    return ema_fast - ema_slow
 
-        # ✅ DataFrame 생성
-        df = pd.DataFrame(rows, columns=[
-            "timestamp", "open", "high", "low", "close", "volume", "turnover"
-        ])
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit='ms')
-        df["open"] = df["open"].astype(float)
-        df["high"] = df["high"].astype(float)
-        df["low"] = df["low"].astype(float)
-        df["close"] = df["close"].astype(float)
-        df["volume"] = df["volume"].astype(float)
-        return df
+def compute_bollinger(series, window=20):
+    sma = series.rolling(window=window).mean()
+    std = series.rolling(window=window).std()
+    return (series - sma) / (2 * std)
 
-    except Exception as e:
-        print(f"[예외 발생] {symbol} 처리 중 오류: {e}")
-        return []
+# ✅ 시퀀스 생성
+def make_sequences(data, window=30):
+    sequences, targets = [], []
+    for i in range(len(data) - window - 1):
+        seq = data[i:i+window]
+        target = 1 if data[i+window][0] > data[i+window-1][0] else 0
+        sequences.append(seq)
+        targets.append(target)
+    return np.array(sequences), np.array(targets)
+
+# ✅ 전처리
+features = compute_features(df)
+scaler = MinMaxScaler()
+features_scaled = scaler.fit_transform(features)
+X, y = make_sequences(features_scaled, window=30)
+
+X_tensor = torch.tensor(X, dtype=torch.float32)
+y_tensor = torch.tensor(y, dtype=torch.float32).unsqueeze(1)
+
+# ✅ 모델 불러오기 및 학습 설정
+model = get_model(input_size=7)
+criterion = nn.BCELoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+# ✅ 학습 루프
+epochs = 20
+for epoch in range(epochs):
+    model.train()
+    outputs = torch.sigmoid(model(X_tensor))
+    loss = criterion(outputs, y_tensor)
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    print(f"Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}")
+
+# ✅ 학습된 모델 저장
+torch.save(model.state_dict(), "best_model.pt")
+print("✅ 모델 저장 완료: best_model.pt")
