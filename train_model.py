@@ -1,9 +1,9 @@
-# train_model.py (accuracy_logger + logger 통합)
+# train_model.py (통합: accuracy_logger + logger + train_model_4H + train_model_gru)
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from model import get_model
+from model import get_model, get_gru_model  # GRU 모델 지원
 from bybit_data import get_kline
 from sklearn.preprocessing import MinMaxScaler
 import numpy as np
@@ -55,7 +55,8 @@ def make_sequences(data, window=30):
         y.append(target)
     return np.array(X), np.array(y)
 
-# 예측 정확도 로깅 함수
+# 정확도 로깅
+
 def log_prediction(symbol, timeframe, true_label, predicted_prob):
     log_dir = "logs"
     os.makedirs(log_dir, exist_ok=True)
@@ -77,9 +78,15 @@ def log_prediction(symbol, timeframe, true_label, predicted_prob):
 
     print(f"✅ {symbol} [{timeframe}] 로그 기록 완료: 정확도={correct}, 확률={predicted_prob:.2f}")
 
-def train_model():
+# 모델 학습
+
+def train_model(use_gru=False, only_4h=False):
     for symbol in symbols:
-        for tf_name, interval in zip(["short", "mid", "long"], ["15", "60", "240"]):
+        timeframes = [("short", "15"), ("mid", "60"), ("long", "240")]
+        if only_4h:
+            timeframes = [("long", "240")]
+
+        for tf_name, interval in timeframes:
             try:
                 df = get_kline(symbol, interval)
                 if df is None or len(df) < 100:
@@ -93,7 +100,7 @@ def train_model():
                 X_tensor = torch.tensor(X, dtype=torch.float32)
                 y_tensor = torch.tensor(y, dtype=torch.float32).unsqueeze(1)
 
-                model = get_model(input_size=7)
+                model = get_gru_model(7) if use_gru else get_model(7)
                 criterion = nn.BCELoss()
                 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
@@ -106,11 +113,12 @@ def train_model():
                     optimizer.step()
 
                 os.makedirs("models", exist_ok=True)
-                model_path = f"models/{symbol}_{tf_name}.pt"
+                model_name = "gru" if use_gru else "lstm"
+                model_path = f"models/{symbol}_{tf_name}_{model_name}.pt"
                 torch.save(model.state_dict(), model_path)
                 print(f"✅ 모델 저장됨: {model_path}")
 
-                # 예측 정확도 로깅 (마지막 epoch 기준)
+                # 정확도 로깅
                 with torch.no_grad():
                     preds = torch.sigmoid(model(X_tensor)).numpy().flatten()
                     for i in range(len(y)):
@@ -118,4 +126,3 @@ def train_model():
 
             except Exception as e:
                 print(f"❌ {symbol} [{tf_name}] 학습 실패: {e}")
-
