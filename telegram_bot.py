@@ -1,31 +1,33 @@
-from telegram import Bot
-import os
+import telegram
 import time
+from recommend import recommend_strategy
 
-# 환경변수에서 텔레그램 설정 가져오기
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+# 텔레그램 봇 설정
+TELEGRAM_TOKEN = "여기에_본인_봇_토큰"
+CHAT_ID = "여기에_본인_채팅_ID"
 
-bot = Bot(token=BOT_TOKEN)
+bot = telegram.Bot(token=TELEGRAM_TOKEN)
 
-# ⏳ 쿨타임 설정
+# 쿨타임 설정 (1시간)
+cooldown = 3600
 last_sent_time = 0
-cooldown_seconds = 3600  # 1시간
 
-def send_recommendation(messages: list):
+def send_recommendations():
     global last_sent_time
     now = time.time()
 
-    if now - last_sent_time < cooldown_seconds:
-        remaining = int(cooldown_seconds - (now - last_sent_time))
-        print(f"⏳ 텔레그램 쿨타임 중... {remaining}초 남음")
+    if now - last_sent_time < cooldown:
+        print("⏳ 쿨타임 미도래, 메시지 전송 생략")
         return
 
-    try:
-        for msg in messages:
-            bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="HTML")
-            time.sleep(1.5)  # 메시지 전송 간 딜레이
-        last_sent_time = now
-        print("✅ 텔레그램 전송 완료")
-    except Exception as e:
-        print(f"❌ [텔레그램 오류] {e}")
+    messages = recommend_strategy()
+
+    for msg in messages:
+        try:
+            bot.send_message(chat_id=CHAT_ID, text=msg)
+            time.sleep(1.5)  # 텔레그램 API 제한 방지
+        except Exception as e:
+            print(f"❌ 메시지 전송 실패: {e}")
+
+    last_sent_time = now
+    print("✅ 모든 메시지 전송 완료")
