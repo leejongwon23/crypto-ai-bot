@@ -1,26 +1,21 @@
 import pandas as pd
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from sklearn.preprocessing import MinMaxScaler
 from model import get_model
+from bybit_data import get_kline
 import os
 
-# ✅ 학습용 샘플 데이터 불러오기
-df = pd.read_csv("sample_training_data.csv")
 
-# ✅ 특성 엔지니어링
-def compute_features(df):
-    df["ma5"] = df["close"].rolling(window=5).mean()
-    df["ma20"] = df["close"].rolling(window=20).mean()
-    df["rsi"] = compute_rsi(df["close"])
-    df["macd"] = compute_macd(df["close"])
-    df["bollinger"] = compute_bollinger(df["close"])
+def extract_features(df):
+    df['ma5'] = df['close'].rolling(window=5).mean()
+    df['ma20'] = df['close'].rolling(window=20).mean()
+    df['rsi'] = compute_rsi(df['close'], 14)
+    df['macd'] = compute_macd(df['close'])
+    df['bollinger'] = compute_bollinger(df['close'])
     df = df.dropna()
-    return df[["close", "volume", "ma5", "ma20", "rsi", "macd", "bollinger"]].values
+    return df[['close', 'volume', 'ma5', 'ma20', 'rsi', 'macd', 'bollinger']]
 
-# ✅ 기술적 지표들 계산 함수들
 def compute_rsi(series, period=14):
     delta = series.diff()
     gain = delta.clip(lower=0).rolling(window=period).mean()
@@ -38,43 +33,70 @@ def compute_bollinger(series, window=20):
     std = series.rolling(window=window).std()
     return (series - sma) / (2 * std)
 
-# ✅ 시퀀스 생성
-def make_sequences(data, window=30):
-    sequences, targets = [], []
-    for i in range(len(data) - window - 1):
-        seq = data[i:i+window]
-        target = 1 if data[i+window][0] > data[i+window-1][0] else 0
-        sequences.append(seq)
-        targets.append(target)
-    return np.array(sequences), np.array(targets)
+def predict(model, X):
+    model.eval()
+    with torch.no_grad():
+        X_tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(0)
+        return model(X_tensor).item()
 
-# ✅ 전처리
-features = compute_features(df)
-scaler = MinMaxScaler()
-features_scaled = scaler.fit_transform(features)
-X, y = make_sequences(features_scaled, window=30)
+def backtest_symbol(symbol, interval='60'):
+    candles = get_kline(symbol, interval=interval)
+    if not candles or len(candles) < 100:
+        print(f"❌ 캔들 부족: {symbol}")
+        return None
 
-X_tensor = torch.tensor(X, dtype=torch.float32)
-y_tensor = torch.tensor(y, dtype=torch.float32).unsqueeze(1)
+    df = pd.DataFrame(candles)
+    if 'close' not in df or 'volume' not in df:
+        return None
 
-# ✅ 모델 불러오기 및 학습 설정
-model = get_model(input_size=7)
-criterion = nn.BCELoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+    df['close'] = df['close'].astype(float)
+    df['volume'] = df['volume'].astype(float)
+    features = extract_features(df)
 
-# ✅ 학습 루프
-epochs = 20
-for epoch in range(epochs):
-    model.train()
-    outputs = torch.sigmoid(model(X_tensor))
-    loss = criterion(outputs, y_tensor)
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(features)
 
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
+    model = get_model(input_size=scaled.shape[1])
+    if not os.path.exists("best_model.pt"):
+        return None
+    model.load_state_dict(torch.load("best_model.pt"))
 
-    print(f"Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}")
+    win = 0
+    total = 0
+    for i in range(30, len(scaled) - 1):
+        X_input = scaled[i - 30:i]
+        pred = predict(model, X_input)
+        actual = df['close'].iloc[i + 1]
+        prev = df['close'].iloc[i]
 
-# ✅ 학습된 모델 저장
-torch.save(model.state_dict(), "best_model.pt")
-print("✅ 모델 저장 완료: best_model.pt")
+        direction = 1 if actual > prev else 0
+        signal = 1 if pred > 0.5 else 0
+
+        if direction == signal:
+            win += 1
+        total += 1
+
+    accuracy = round((win / total) * 100, 2) if total > 0 else 0
+    print(f"[백테스트] {symbol} 정확도: {accuracy}%")
+    return {'symbol': symbol, 'accuracy': accuracy}
+
+
+def run_backtest():
+    symbols = [
+        "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT",
+        "TRXUSDT", "LINKUSDT", "DOGEUSDT", "BCHUSDT", "SUIUSDT"
+    ]
+
+    results = []
+    for sym in symbols:
+        result = backtest_symbol(sym)
+        if result:
+            results.append(result)
+
+    df_result = pd.DataFrame(results)
+    df_result.to_csv("backtest_result.csv", index=False)
+    print("✅ 백테스트 완료. 결과 저장됨: backtest_result.csv")
+
+
+if __name__ == "__main__":
+    run_backtest()
