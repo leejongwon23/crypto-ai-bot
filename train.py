@@ -7,30 +7,29 @@ import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from data.utils import SYMBOLS, STRATEGY_CONFIG, get_kline_by_strategy, compute_features
 
-# 전략별 수익률 구간
+# 전략별 수익률 구간 (롱/숏 대칭)
 STRATEGY_GAIN_LEVELS = {
     "단기": [0.05, 0.07, 0.10],
     "중기": [0.10, 0.20, 0.30],
     "장기": [0.15, 0.30, 0.60]
 }
-MAX_LOSS = 0.03  # 손절 기준 3%
+
+# 손절 기준: ±2%
+MAX_LOSS = 0.02
 
 def label_gain_class(current, future, strategy):
     levels = STRATEGY_GAIN_LEVELS[strategy]
     change = (future - current) / current
 
-    # 손절 또는 무의미한 변동은 제외
     if -MAX_LOSS < change < MAX_LOSS:
-        return 0
+        return 0  # 손절/수익 기준 미달
 
-    # 숏 (하락) 클래스: 뒤쪽 클래스부터 부여
     for i, threshold in reversed(list(enumerate(levels, start=1))):
         if change <= -threshold:
-            return len(levels) + i
-    # 롱 (상승) 클래스
+            return len(levels) + i  # 숏 구간
     for i, threshold in enumerate(levels, start=1):
         if change >= threshold:
-            return i
+            return i  # 롱 구간
 
     return 0
 
@@ -81,18 +80,23 @@ def train_model(symbol, strategy, input_size=11, window=30, batch_size=32, epoch
             self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout)
             self.attn = nn.Linear(hidden_size, 1)
             self.bn = nn.BatchNorm1d(hidden_size)
-            self.dropout = nn.Dropout(dropout)
+            self.drop = nn.Dropout(dropout)
             self.fc = nn.Linear(hidden_size, num_classes)
 
         def forward(self, x):
             lstm_out, _ = self.lstm(x)
-            weights = torch.softmax(self.attn(lstm_out).squeeze(-1), dim=1)
-            context = torch.sum(lstm_out * weights.unsqueeze(-1), dim=1)
+            w = torch.softmax(self.attn(lstm_out).squeeze(-1), dim=1)
+            context = torch.sum(lstm_out * w.unsqueeze(-1), dim=1)
             context = self.bn(context)
-            context = self.dropout(context)
+            context = self.drop(context)
             return self.fc(context)
 
     model = DualGainClassifier(input_size=input_size)
+    save_path = f"models/{symbol}_{strategy}_dual.pt"
+    if os.path.exists(save_path):
+        print(f"📦 이전 모델 로드: {save_path}")
+        model.load_state_dict(torch.load(save_path, map_location='cpu'))
+
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -109,13 +113,12 @@ def train_model(symbol, strategy, input_size=11, window=30, batch_size=32, epoch
         print(f"[{symbol}-{strategy}] Epoch {epoch+1}/{epochs} - Loss: {total_loss:.4f}")
 
     os.makedirs("models", exist_ok=True)
-    save_path = f"models/{symbol}_{strategy}_dual.pt"
     torch.save(model.state_dict(), save_path)
     print(f"✅ 저장 완료: {save_path}")
 
 def main():
     while True:
-        for strategy in STRATEGY_GAIN_LEVELS.keys():
+        for strategy in STRATEGY_GAIN_LEVELS:
             for symbol in SYMBOLS:
                 try:
                     train_model(symbol, strategy)
