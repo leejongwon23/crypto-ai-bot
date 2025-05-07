@@ -8,6 +8,9 @@ import time
 from recommend import recommend_strategy
 from telegram_bot import send_recommendation
 
+results = recommend_strategy()
+send_recommendation(results)
+
 app = FastAPI()
 
 # ⏳ 쿨타임 전송 제한 (서버 레벨)
