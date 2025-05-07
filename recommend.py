@@ -1,3 +1,5 @@
+from telegram_bot import send_message  # 텔레그램 전송 기능 추가
+
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -118,6 +120,7 @@ def main():
                 if result:
                     message = format_message(result)
                     print(message)
+                    send_message(message)
                     print("-" * 80)
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
