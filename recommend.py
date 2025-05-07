@@ -1,42 +1,26 @@
-# model.py
-import torch.nn as nn
-
-class GRUBLSTMModel(nn.Module):
-    def __init__(self, input_size=10):
-        super(GRUBLSTMModel, self).__init__()
-        self.gru = nn.GRU(input_size, 64, batch_first=True)
-        self.lstm = nn.LSTM(64, 32, batch_first=True)
-        self.fc = nn.Linear(32, 1)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        x, _ = self.gru(x)
-        x, _ = self.lstm(x)
-        x = self.fc(x[:, -1, :])
-        return self.sigmoid(x)
-
-def get_model(input_size=10):
-    return GRUBLSTMModel(input_size=input_size)
-
-
-# recommend.py
-import numpy as np
 import pandas as pd
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
 from sklearn.preprocessing import MinMaxScaler
 from model import get_model
-import torch
 import os
-from bybit_data import get_kline
 
-def extract_features(df):
-    df['ma5'] = df['close'].rolling(window=5).mean()
-    df['ma20'] = df['close'].rolling(window=20).mean()
-    df['rsi'] = compute_rsi(df['close'], 14)
-    df['macd'] = compute_macd(df['close'])
-    df['bollinger'] = compute_bollinger(df['close'])
+# ✅ 학습용 샘플 데이터 불러오기
+df = pd.read_csv("sample_training_data.csv")
+
+# ✅ 특성 엔지니어링
+def compute_features(df):
+    df["ma5"] = df["close"].rolling(window=5).mean()
+    df["ma20"] = df["close"].rolling(window=20).mean()
+    df["rsi"] = compute_rsi(df["close"])
+    df["macd"] = compute_macd(df["close"])
+    df["bollinger"] = compute_bollinger(df["close"])
     df = df.dropna()
-    return df[['close', 'volume', 'ma5', 'ma20', 'rsi', 'macd', 'bollinger']]
+    return df[["close", "volume", "ma5", "ma20", "rsi", "macd", "bollinger"]].values
 
+# ✅ 기술적 지표들 계산 함수들
 def compute_rsi(series, period=14):
     delta = series.diff()
     gain = delta.clip(lower=0).rolling(window=period).mean()
@@ -54,85 +38,43 @@ def compute_bollinger(series, window=20):
     std = series.rolling(window=window).std()
     return (series - sma) / (2 * std)
 
-def predict_with_model(model, X):
-    model.eval()
-    with torch.no_grad():
-        X_tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(0)
-        prediction = model(X_tensor).item()
-    return prediction
+# ✅ 시퀀스 생성
+def make_sequences(data, window=30):
+    sequences, targets = [], []
+    for i in range(len(data) - window - 1):
+        seq = data[i:i+window]
+        target = 1 if data[i+window][0] > data[i+window-1][0] else 0
+        sequences.append(seq)
+        targets.append(target)
+    return np.array(sequences), np.array(targets)
 
-def recommend_strategy(df, model_path='best_model.pt'):
-    df_feat = extract_features(df)
-    print(f"▶ 피쳐 수: {len(df_feat)}")
+# ✅ 전처리
+features = compute_features(df)
+scaler = MinMaxScaler()
+features_scaled = scaler.fit_transform(features)
+X, y = make_sequences(features_scaled, window=30)
 
-    if len(df_feat) < 30:
-        print("❌ 피쳐 수 부족")
-        return None
+X_tensor = torch.tensor(X, dtype=torch.float32)
+y_tensor = torch.tensor(y, dtype=torch.float32).unsqueeze(1)
 
-    scaler = MinMaxScaler()
-    X_scaled = scaler.fit_transform(df_feat)
-    X_input = X_scaled[-30:]
+# ✅ 모델 불러오기 및 학습 설정
+model = get_model(input_size=7)
+criterion = nn.BCELoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-    model = get_model(input_size=X_input.shape[1])
-    if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path))
-    else:
-        print("❌ 모델 파일 없음")
-        return None
+# ✅ 학습 루프
+epochs = 20
+for epoch in range(epochs):
+    model.train()
+    outputs = torch.sigmoid(model(X_tensor))
+    loss = criterion(outputs, y_tensor)
 
-    prediction = predict_with_model(model, X_input)
-    trend = "📈 상승" if prediction > 0.5 else "📉 하닝"
-    confidence = round(prediction * 100, 2) if prediction > 0.5 else round((1 - prediction) * 100, 2)
-    return trend, confidence
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
 
-def recommend_all():
-    symbols = [
-        "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT",
-        "TRXUSDT", "LINKUSDT", "DOGEUSDT", "BCHUSDT", "STXUSDT", "SUIUSDT",
-        "TONUSDT", "FILUSDT", "TRUMPUSDT", "HBARUSDT", "ARBUSDT", "APTUSDT",
-        "UNIUSMARGUSDT", "BORAUSDT", "SANDUSDT"
-    ]
+    print(f"Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}")
 
-    messages = []
-    for symbol in symbols:
-        try:
-            print(f"🔥 {symbol} 시작")
-            candles = get_kline(symbol)
-            print(f"▶ 카드 수: {len(candles) if candles else 0}")
-
-            if not candles or len(candles) < 100:
-                print(f"❌ 데이터 부족: {symbol}")
-                continue
-
-            df = pd.DataFrame(candles)
-            if 'volume' not in df.columns or 'close' not in df.columns:
-                print(f"❌ 컬럼 누락: {symbol}")
-                continue
-
-            df["volume"] = df["volume"].astype(float)
-            df["close"] = df["close"].astype(float)
-
-            result = recommend_strategy(df)
-            if result:
-                trend, confidence = result
-
-                entry_price = round(float(df["close"].iloc[-1]), 4)
-                if trend == "📈 상승":
-                    target_price = round(entry_price * 1.03, 4)
-                    stop_price = round(entry_price * 0.98, 4)
-                else:
-                    target_price = round(entry_price * 0.97, 4)
-                    stop_price = round(entry_price * 1.02, 4)
-
-                msg = (
-                    f"<b>{symbol}</b>\n"
-                    f"예측: {trend} / 신리도: {confidence}%\n"
-                    f"📍 진입가: {entry_price}\n🎯 목표가: {target_price}\n⛔ 손절가: {stop_price}"
-                )
-                messages.append(msg)
-
-        except Exception as e:
-            print(f"⚠️ {symbol} 처리 중 오류 발생: {e}")
-            continue
-
-    return messages
+# ✅ 학습된 모델 저장
+torch.save(model.state_dict(), "best_model.pt")
+print("✅ 모델 저장 완료: best_model.pt")
