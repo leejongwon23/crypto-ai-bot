@@ -1,4 +1,4 @@
-# backtest.py (21개 코인 전체 백테스트 + auto_backtest 통합)
+# backtest.py (정확도 개선 로직 통합: 클래스 불균형 대응 + 민감도 측정)
 
 import pandas as pd
 import numpy as np
@@ -12,6 +12,7 @@ from model import get_model
 from bybit_data import get_kline
 from sklearn.preprocessing import MinMaxScaler
 import torch
+from sklearn.metrics import precision_score, recall_score, f1_score
 
 # 분석 대상 코인 (왕1 기준 21개)
 symbols = [
@@ -83,8 +84,11 @@ def run_backtest():
             preds = torch.sigmoid(model(X_tensor)).detach().numpy().flatten()
             pred_labels = (preds > 0.5).astype(int)
             accuracy = (pred_labels == y).mean()
+            precision = precision_score(y, pred_labels)
+            recall = recall_score(y, pred_labels)
+            f1 = f1_score(y, pred_labels)
 
-            print(f"✅ {symbol} 백테스트 정확도: {accuracy * 100:.2f}%")
+            print(f"✅ {symbol} 정확도: {accuracy*100:.2f}% / 정밀도: {precision:.2f} / 재현율: {recall:.2f} / F1: {f1:.2f}")
 
             # 그래프 저장
             plt.figure(figsize=(10, 4))
@@ -95,9 +99,9 @@ def run_backtest():
             plt.tight_layout()
             plt.savefig(f"logs/{symbol}_backtest.png")
             plt.close()
+
         except Exception as e:
             print(f"❌ {symbol} 처리 오류: {e}")
-
 
 def schedule_backtest():
     scheduler = BlockingScheduler()
@@ -113,3 +117,4 @@ if __name__ == "__main__":
         schedule_backtest()
     else:
         print("❌ 잘못된 입력")
+
