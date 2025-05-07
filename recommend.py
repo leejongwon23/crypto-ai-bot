@@ -1,17 +1,17 @@
-from telegram_bot import send_message  # 텔레그램 전송 기능 추가
+from telegram_bot import send_message
 
 import torch
 import torch.nn.functional as F
 import numpy as np
 from model.base_model import LSTMPricePredictor
-from data.utils import SYMBOLS, STRATEGY_CONFIG, get_kline_by_strategy, compute_features, get_realtime_prices, get_long_short_ratio, get_trade_strength
+from data.utils import SYMBOLS, STRATEGY_CONFIG, get_kline_by_strategy, compute_features
 
 STRATEGY_GAIN_LEVELS = {
     "단기": [0.05, 0.07, 0.10],
     "중기": [0.10, 0.20, 0.30],
     "장기": [0.15, 0.30, 0.60]
 }
-STOP_LOSS_PCT = 0.03
+STOP_LOSS_PCT = 0.02
 WINDOW = 30
 DEVICE = torch.device("cpu")
 
@@ -106,7 +106,7 @@ def format_message(data):
         f"{'상승' if data['direction'] == '롱' else '하락'} 예상\n"
         f"진입가: {data['price']:.2f} USDT\n"
         f"목표가: {data['target']:.2f} USDT (+{data['rate']*100:.2f}%)\n"
-        f"손절가: {data['stop']:.2f} USDT (-3.00%)\n\n"
+        f"손절가: {data['stop']:.2f} USDT (-2.00%)\n\n"
         f"신호 방향: {'상승' if data['direction'] == '롱' else '하락'}\n"
         f"신뢰도: {data['confidence']*100:.2f}%\n"
         f"추천 사유: {data['reason']}"
