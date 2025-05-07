@@ -16,10 +16,12 @@ from sklearn.metrics import precision_score, recall_score, f1_score
 
 # 분석 대상 코인 (왕1 기준 21개)
 symbols = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT",
-    "LTCUSDT", "TRXUSDT", "DOTUSDT", "AVAXUSDT", "LINKUSDT",
-    "ADAUSDT", "BNBUSDT", "ATOMUSDT", "NEARUSDT", "MATICUSDT",
-    "APEUSDT", "SANDUSDT", "FTMUSDT", "EOSUSDT", "CHZUSDT", "ETCUSDT"
+    "BTCUSDT", "ADAUSDT", "XRPUSDT", "SOLUSDT", "ETHUSDT",
+    "XLMUSDT", "SUIUSDT", "ONDOUSDT", "LINKUSDT", "AVAXUSDT",
+    "ETCUSDT", "UNIUSDT", "FILUSDT", "DOTUSDT", "LTCUSDT",
+    "TRXUSDT", "FLOWUSDT", "STORJUSDT", "WAVESUSDT", "QTUMUSDT",
+    "IOTAUSDT", "NEOUSDT", "DOGEUSDT", "SOLARUSDT", "TRUMPUSDT",
+    "SHIBUSDT", "BCHUSDT", "SANDUSDT", "HBARUSDT", "GASUSDT"
 ]
 timeframe = "60"  # 1시간봉
 window = 30
@@ -117,4 +119,3 @@ if __name__ == "__main__":
         schedule_backtest()
     else:
         print("❌ 잘못된 입력")
-
