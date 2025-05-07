@@ -1,77 +1,102 @@
-# backtest.py
-
-import os
-import torch
-import datetime
 import pandas as pd
-from sklearn.metrics import accuracy_score
+import numpy as np
+import torch
+from sklearn.preprocessing import MinMaxScaler
+from model import get_model
 from bybit_data import get_kline
-from recommend import analyze_coin, get_model, extract_features, predict_with_model
+import os
 
-# 백테스트 설정
-symbols = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT",
-    "TRXUSDT", "LINKUSDT", "DOGEUSDT", "BCHUSDT", "STXUSDT", "SUIUSDT",
-    "TONUSDT", "FILUSDT", "TRUMPUSDT", "HBARUSDT", "ARBUSDT", "APTUSDT",
-    "UNISWAPUSDT", "BORAUSDT", "SANDUSDT"
-]
-target_datetime = datetime.datetime(2025, 5, 1, 9, 0)
 
-# 모델 불러오기
-model_path = "best_model.pt"
+def extract_features(df):
+    df['ma5'] = df['close'].rolling(window=5).mean()
+    df['ma20'] = df['close'].rolling(window=20).mean()
+    df['rsi'] = compute_rsi(df['close'], 14)
+    df['macd'] = compute_macd(df['close'])
+    df['bollinger'] = compute_bollinger(df['close'])
+    df = df.dropna()
+    return df[['close', 'volume', 'ma5', 'ma20', 'rsi', 'macd', 'bollinger']]
 
-def backtest_symbol(symbol):
-    candles = get_kline(symbol, interval=60, limit=240, end_time=target_datetime)
-    if candles is None or len(candles) < 100:
+def compute_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(window=period).mean()
+    loss = -delta.clip(upper=0).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def compute_macd(series, fast=12, slow=26):
+    ema_fast = series.ewm(span=fast).mean()
+    ema_slow = series.ewm(span=slow).mean()
+    return ema_fast - ema_slow
+
+def compute_bollinger(series, window=20):
+    sma = series.rolling(window=window).mean()
+    std = series.rolling(window=window).std()
+    return (series - sma) / (2 * std)
+
+def predict(model, X):
+    model.eval()
+    with torch.no_grad():
+        X_tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(0)
+        return model(X_tensor).item()
+
+def backtest_symbol(symbol, interval='60'):
+    candles = get_kline(symbol, interval=interval)
+    if not candles or len(candles) < 100:
+        print(f"❌ 캔들 부족: {symbol}")
         return None
 
-    df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df["close"] = df["close"].astype(float)
-    df["volume"] = df["volume"].astype(float)
+    df = pd.DataFrame(candles)
+    if 'close' not in df or 'volume' not in df:
+        return None
 
+    df['close'] = df['close'].astype(float)
+    df['volume'] = df['volume'].astype(float)
     features = extract_features(df)
-    if len(features) < 30:
+
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(features)
+
+    model = get_model(input_size=scaled.shape[1])
+    if not os.path.exists("best_model.pt"):
         return None
+    model.load_state_dict(torch.load("best_model.pt"))
 
-    X = features[-30:].values
-    model = get_model(input_size=X.shape[1])
+    win = 0
+    total = 0
+    for i in range(30, len(scaled) - 1):
+        X_input = scaled[i - 30:i]
+        pred = predict(model, X_input)
+        actual = df['close'].iloc[i + 1]
+        prev = df['close'].iloc[i]
 
-    if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path))
-    else:
-        print("❌ 모델 파일이 없습니다.")
-        return None
+        direction = 1 if actual > prev else 0
+        signal = 1 if pred > 0.5 else 0
 
-    prediction = predict_with_model(model, X)
-    predicted_trend = 1 if prediction > 0.5 else 0
+        if direction == signal:
+            win += 1
+        total += 1
 
-    # 실제 결과 비교 (분석 시간 이후 5개의 캔들 기준 상승/하락 판단)
-    future_data = get_kline(symbol, interval=60, limit=5, end_time=target_datetime + datetime.timedelta(hours=5))
-    if not future_data or len(future_data) < 5:
-        return None
+    accuracy = round((win / total) * 100, 2) if total > 0 else 0
+    print(f"[백테스트] {symbol} 정확도: {accuracy}%")
+    return {'symbol': symbol, 'accuracy': accuracy}
 
-    entry_price = df["close"].values[-1]
-    future_prices = [float(c[4]) for c in future_data]
-    avg_future = sum(future_prices) / len(future_prices)
-    real_trend = 1 if avg_future > entry_price else 0
 
-    return predicted_trend, real_trend
+def run_backtest():
+    symbols = [
+        "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT",
+        "TRXUSDT", "LINKUSDT", "DOGEUSDT", "BCHUSDT", "SUIUSDT"
+    ]
 
-# 전체 백테스트 실행
-results = []
-for symbol in symbols:
-    try:
-        result = backtest_symbol(symbol)
+    results = []
+    for sym in symbols:
+        result = backtest_symbol(sym)
         if result:
             results.append(result)
-            print(f"✅ {symbol} 예측: {result[0]} | 실제: {result[1]}")
-    except Exception as e:
-        print(f"⚠️ {symbol} 분석 실패: {e}")
 
-# 정확도 계산
-if results:
-    y_pred, y_true = zip(*results)
-    acc = accuracy_score(y_true, y_pred)
-    print(f"\n📊 총 테스트: {len(results)}개 | 예측 정확도: {round(acc * 100, 2)}%")
-else:
-    print("❌ 분석 결과 없음.")
+    df_result = pd.DataFrame(results)
+    df_result.to_csv("backtest_result.csv", index=False)
+    print("✅ 백테스트 완료. 결과 저장됨: backtest_result.csv")
+
+
+if __name__ == "__main__":
+    run_backtest()
