@@ -13,18 +13,26 @@ STRATEGY_GAIN_LEVELS = {
     "중기": [0.10, 0.20, 0.30],
     "장기": [0.15, 0.30, 0.60]
 }
-# 공통 손절 기준: -3%
-MAX_LOSS = 0.03
+MAX_LOSS = 0.03  # 손절 기준 3%
 
 def label_gain_class(current, future, strategy):
     levels = STRATEGY_GAIN_LEVELS[strategy]
     change = (future - current) / current
-    if change <= -MAX_LOSS:
-        return 0  # 손절
+
+    # 손절 또는 무의미한 변동은 제외
+    if -MAX_LOSS < change < MAX_LOSS:
+        return 0
+
+    # 숏 (하락) 클래스: 뒤쪽 클래스부터 부여
+    for i, threshold in reversed(list(enumerate(levels, start=1))):
+        if change <= -threshold:
+            return len(levels) + i
+    # 롱 (상승) 클래스
     for i, threshold in enumerate(levels, start=1):
-        if change < threshold:
+        if change >= threshold:
             return i
-    return len(levels)  # 최고 구간 이상
+
+    return 0
 
 def create_dataset(features, strategy, window=30):
     X, y = [], []
@@ -32,18 +40,17 @@ def create_dataset(features, strategy, window=30):
         x_seq = features[i:i+window]
         current_close = features[i+window-1]['close']
         future_close = features[i+window]['close']
-
-        gain_class = label_gain_class(current_close, future_close, strategy)
-        if gain_class == 0:
-            continue  # 손절은 학습 제외
-
+        label = label_gain_class(current_close, future_close, strategy)
+        if label == 0:
+            continue
         X.append([list(row.values()) for row in x_seq])
-        y.append(gain_class)
+        y.append(label - 1)  # 클래스 인덱스 0부터 시작
     return np.array(X), np.array(y)
 
 def train_model(symbol, strategy, input_size=11, window=30, batch_size=32, epochs=10, lr=1e-3):
     gain_levels = STRATEGY_GAIN_LEVELS[strategy]
-    print(f"📚 학습 시작: {symbol} / {strategy} / 수익률 구간: {gain_levels}, 손절 ≤ 3%")
+    num_classes = len(gain_levels) * 2
+    print(f"📚 학습 시작: {symbol} / {strategy} / 클래스 수: {num_classes}")
 
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or len(df) < window + 20:
@@ -61,16 +68,14 @@ def train_model(symbol, strategy, input_size=11, window=30, batch_size=32, epoch
 
     X, y = create_dataset(feature_dicts, strategy=strategy, window=window)
     if len(X) == 0:
-        print(f"⚠️ 학습 불가: {symbol} / {strategy} 라벨 부족")
+        print(f"⚠️ 라벨 부족: {symbol} / {strategy}")
         return
 
     X_tensor = torch.tensor(X, dtype=torch.float32)
     y_tensor = torch.tensor(y, dtype=torch.long)
     loader = DataLoader(TensorDataset(X_tensor, y_tensor), batch_size=batch_size, shuffle=True)
 
-    num_classes = len(gain_levels) + 1  # 클래스 수 (손절 제외하고 1~n)
-
-    class MultiGainClassifier(nn.Module):
+    class DualGainClassifier(nn.Module):
         def __init__(self, input_size, hidden_size=128, num_layers=3, dropout=0.3, num_classes=num_classes):
             super().__init__()
             self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout)
@@ -87,7 +92,7 @@ def train_model(symbol, strategy, input_size=11, window=30, batch_size=32, epoch
             context = self.dropout(context)
             return self.fc(context)
 
-    model = MultiGainClassifier(input_size=input_size)
+    model = DualGainClassifier(input_size=input_size)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -104,7 +109,7 @@ def train_model(symbol, strategy, input_size=11, window=30, batch_size=32, epoch
         print(f"[{symbol}-{strategy}] Epoch {epoch+1}/{epochs} - Loss: {total_loss:.4f}")
 
     os.makedirs("models", exist_ok=True)
-    save_path = f"models/{symbol}_{strategy}_gaincls.pt"
+    save_path = f"models/{symbol}_{strategy}_dual.pt"
     torch.save(model.state_dict(), save_path)
     print(f"✅ 저장 완료: {save_path}")
 
