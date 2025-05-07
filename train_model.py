@@ -1,20 +1,22 @@
 import pandas as pd
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.optim as optim
 from sklearn.preprocessing import MinMaxScaler
 from model import get_model
-from bybit_data import get_kline
+from bybit_data import get_training_data
 import os
 
-
-def extract_features(df):
-    df['ma5'] = df['close'].rolling(window=5).mean()
-    df['ma20'] = df['close'].rolling(window=20).mean()
-    df['rsi'] = compute_rsi(df['close'], 14)
-    df['macd'] = compute_macd(df['close'])
-    df['bollinger'] = compute_bollinger(df['close'])
+# ✅ 기술적 지표 계산
+def compute_features(df):
+    df["ma5"] = df["close"].rolling(window=5).mean()
+    df["ma20"] = df["close"].rolling(window=20).mean()
+    df["rsi"] = compute_rsi(df["close"])
+    df["macd"] = compute_macd(df["close"])
+    df["bollinger"] = compute_bollinger(df["close"])
     df = df.dropna()
-    return df[['close', 'volume', 'ma5', 'ma20', 'rsi', 'macd', 'bollinger']]
+    return df[["close", "volume", "ma5", "ma20", "rsi", "macd", "bollinger"]].values
 
 def compute_rsi(series, period=14):
     delta = series.diff()
@@ -29,74 +31,48 @@ def compute_macd(series, fast=12, slow=26):
     return ema_fast - ema_slow
 
 def compute_bollinger(series, window=20):
-    sma = series.rolling(window=window).mean()
-    std = series.rolling(window=window).std()
+    sma = series.rolling(window).mean()
+    std = series.rolling(window).std()
     return (series - sma) / (2 * std)
 
-def predict(model, X):
-    model.eval()
-    with torch.no_grad():
-        X_tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(0)
-        return model(X_tensor).item()
+# ✅ 시퀀스 데이터 생성
+def make_sequences(data, window=30):
+    sequences = []
+    targets = []
+    for i in range(len(data) - window - 1):
+        seq = data[i:i+window]
+        target = 1 if data[i+window][0] > data[i+window-1][0] else 0
+        sequences.append(seq)
+        targets.append(target)
+    return np.array(sequences), np.array(targets)
 
-def backtest_symbol(symbol, interval='60'):
-    candles = get_kline(symbol, interval=interval)
-    if not candles or len(candles) < 100:
-        print(f"❌ 캔들 부족: {symbol}")
-        return None
+# ✅ 주기별 학습 함수 (1시간봉, 4시간봉, 일봉 확장 가능)
+def train_model_with_interval(interval='60', model_path='best_model.pt'):
+    df = get_training_data(interval=interval)
+    if df is None or len(df) < 50:
+        print("❌ 학습 데이터 부족")
+        return
 
-    df = pd.DataFrame(candles)
-    if 'close' not in df or 'volume' not in df:
-        return None
-
-    df['close'] = df['close'].astype(float)
-    df['volume'] = df['volume'].astype(float)
-    features = extract_features(df)
-
+    features = compute_features(df)
     scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(features)
+    features_scaled = scaler.fit_transform(features)
+    X, y = make_sequences(features_scaled, window=30)
 
-    model = get_model(input_size=scaled.shape[1])
-    if not os.path.exists("best_model.pt"):
-        return None
-    model.load_state_dict(torch.load("best_model.pt"))
+    X_tensor = torch.tensor(X, dtype=torch.float32)
+    y_tensor = torch.tensor(y, dtype=torch.float32).unsqueeze(1)
 
-    win = 0
-    total = 0
-    for i in range(30, len(scaled) - 1):
-        X_input = scaled[i - 30:i]
-        pred = predict(model, X_input)
-        actual = df['close'].iloc[i + 1]
-        prev = df['close'].iloc[i]
+    model = get_model(input_size=X.shape[2])
+    criterion = nn.BCELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-        direction = 1 if actual > prev else 0
-        signal = 1 if pred > 0.5 else 0
+    for epoch in range(20):
+        model.train()
+        outputs = torch.sigmoid(model(X_tensor))
+        loss = criterion(outputs, y_tensor)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        print(f"[Interval: {interval}] Epoch {epoch+1}/20, Loss: {loss.item():.4f}")
 
-        if direction == signal:
-            win += 1
-        total += 1
-
-    accuracy = round((win / total) * 100, 2) if total > 0 else 0
-    print(f"[백테스트] {symbol} 정확도: {accuracy}%")
-    return {'symbol': symbol, 'accuracy': accuracy}
-
-
-def run_backtest():
-    symbols = [
-        "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT",
-        "TRXUSDT", "LINKUSDT", "DOGEUSDT", "BCHUSDT", "SUIUSDT"
-    ]
-
-    results = []
-    for sym in symbols:
-        result = backtest_symbol(sym)
-        if result:
-            results.append(result)
-
-    df_result = pd.DataFrame(results)
-    df_result.to_csv("backtest_result.csv", index=False)
-    print("✅ 백테스트 완료. 결과 저장됨: backtest_result.csv")
-
-
-if __name__ == "__main__":
-    run_backtest()
+    torch.save(model.state_dict(), model_path)
+    print(f"✅ 모델 저장됨: {model_path}")
