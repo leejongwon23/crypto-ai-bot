@@ -1,9 +1,7 @@
-# train_model.py (통합: accuracy_logger + logger + train_model_4H + train_model_gru)
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from model import get_model, get_gru_model  # GRU 모델 지원
+from model import get_model, get_gru_model
 from bybit_data import get_kline
 from sklearn.preprocessing import MinMaxScaler
 import numpy as np
@@ -11,15 +9,16 @@ import os
 import csv
 from datetime import datetime
 
-# 코인 리스트 (왕1 기준 21개)
+# 30개 심볼
 symbols = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT",
-    "LTCUSDT", "TRXUSDT", "DOTUSDT", "AVAXUSDT", "LINKUSDT",
-    "ADAUSDT", "BNBUSDT", "ATOMUSDT", "NEARUSDT", "MATICUSDT",
-    "APEUSDT", "SANDUSDT", "FTMUSDT", "EOSUSDT", "CHZUSDT", "ETCUSDT"
+    "BTCUSDT", "ADAUSDT", "XRPUSDT", "SOLUSDT", "ETHUSDT",
+    "XLMUSDT", "SUIUSDT", "ONDOUSDT", "LINKUSDT", "AVAXUSDT",
+    "ETCUSDT", "UNIUSDT", "FILUSDT", "DOTUSDT", "LTCUSDT",
+    "TRXUSDT", "FLOWUSDT", "STORJUSDT", "WAVESUSDT", "QTUMUSDT",
+    "IOTAUSDT", "NEOUSDT", "DOGEUSDT", "SOLARUSDT", "TRUMPUSDT",
+    "SHIBUSDT", "BCHUSDT", "SANDUSDT", "HBARUSDT", "GASUSDT"
 ]
 
-# 기술지표 계산 함수
 def compute_features(df):
     df["ma5"] = df["close"].rolling(window=5).mean()
     df["ma20"] = df["close"].rolling(window=20).mean()
@@ -47,15 +46,13 @@ def compute_bollinger(series, window=20):
     return (series - sma) / (2 * std)
 
 def make_sequences(data, window=30):
-    X, y = [], []
+    sequences, targets = [], []
     for i in range(len(data) - window - 1):
         seq = data[i:i+window]
         target = 1 if data[i+window][0] > data[i+window-1][0] else 0
-        X.append(seq)
-        y.append(target)
-    return np.array(X), np.array(y)
-
-# 정확도 로깅
+        sequences.append(seq)
+        targets.append(target)
+    return np.array(sequences), np.array(targets)
 
 def log_prediction(symbol, timeframe, true_label, predicted_prob):
     log_dir = "logs"
@@ -77,8 +74,6 @@ def log_prediction(symbol, timeframe, true_label, predicted_prob):
         writer.writerow(row)
 
     print(f"✅ {symbol} [{timeframe}] 로그 기록 완료: 정확도={correct}, 확률={predicted_prob:.2f}")
-
-# 모델 학습
 
 def train_model(use_gru=False, only_4h=False):
     for symbol in symbols:
@@ -118,7 +113,6 @@ def train_model(use_gru=False, only_4h=False):
                 torch.save(model.state_dict(), model_path)
                 print(f"✅ 모델 저장됨: {model_path}")
 
-                # 정확도 로깅
                 with torch.no_grad():
                     preds = torch.sigmoid(model(X_tensor)).numpy().flatten()
                     for i in range(len(y)):
