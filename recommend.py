@@ -1,19 +1,25 @@
+from bybit_data import get_kline
+from model import get_model
+import torch
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
-from model import get_ensemble_models
-import torch
-import os
-from bybit_data import get_kline
 
-def extract_features(df):
-    df['ma5'] = df['close'].rolling(window=5).mean()
-    df['ma20'] = df['close'].rolling(window=20).mean()
-    df['rsi'] = compute_rsi(df['close'], 14)
-    df['macd'] = compute_macd(df['close'])
-    df['bollinger'] = compute_bollinger(df['close'])
+symbols = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT",
+    "LTCUSDT", "TRXUSDT", "DOTUSDT", "AVAXUSDT", "LINKUSDT",
+    "ADAUSDT", "BNBUSDT", "ATOMUSDT", "NEARUSDT", "MATICUSDT",
+    "APEUSDT", "SANDUSDT", "FTMUSDT", "EOSUSDT", "CHZUSDT", "ETCUSDT"
+]
+
+def compute_features(df):
+    df["ma5"] = df["close"].rolling(window=5).mean()
+    df["ma20"] = df["close"].rolling(window=20).mean()
+    df["rsi"] = compute_rsi(df["close"])
+    df["macd"] = compute_macd(df["close"])
+    df["boll"] = compute_bollinger(df["close"])
     df = df.dropna()
-    return df[['close', 'volume', 'ma5', 'ma20', 'rsi', 'macd', 'bollinger']]
+    return df[["close", "volume", "ma5", "ma20", "rsi", "macd", "boll"]]
 
 def compute_rsi(series, period=14):
     delta = series.diff()
@@ -32,78 +38,64 @@ def compute_bollinger(series, window=20):
     std = series.rolling(window=window).std()
     return (series - sma) / (2 * std)
 
-def predict_with_ensemble(models, X):
-    preds = []
-    for model in models:
-        model.eval()
-        with torch.no_grad():
-            X_tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(0)
-            pred = model(X_tensor).item()
-            preds.append(pred)
-    return sum(preds) / len(preds)
+def get_targets(entry):
+    return None, None  # 고정 수익률 제한 제거됨
 
-def recommend_strategy(df, model_paths=['best_model_lstm.pt', 'best_model_gru.pt']):
-    df_feat = extract_features(df)
-    if len(df_feat) < 30:
-        return None
-
+def predict(df, model):
+    features = compute_features(df)
     scaler = MinMaxScaler()
-    X_scaled = scaler.fit_transform(df_feat)
-    X_input = X_scaled[-30:]
+    scaled = scaler.fit_transform(features)
+    if len(scaled) < 31:
+        return None
+    seq = scaled[-30:]
+    x = torch.tensor(seq[np.newaxis, :, :], dtype=torch.float32)
+    pred = model(x)
+    prob = torch.sigmoid(pred).item()
+    return prob
 
-    models = get_ensemble_models(input_size=X_input.shape[1])
-    for model, path in zip(models, model_paths):
-        if os.path.exists(path):
-            model.load_state_dict(torch.load(path))
-        else:
-            return None
-
-    prediction = predict_with_ensemble(models, X_input)
-    trend = "📈 상승" if prediction > 0.5 else "📉 하락"
-    confidence = round(prediction * 100, 2) if prediction > 0.5 else round((1 - prediction) * 100, 2)
-    return trend, confidence
-
-def recommend_all():
-    symbols = [
-        "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT",
-        "TRXUSDT", "LINKUSDT", "DOGEUSDT", "BCHUSDT", "STXUSDT", "SUIUSDT",
-        "TONUSDT", "FILUSDT", "TRUMPUSDT", "HBARUSDT", "ARBUSDT", "APTUSDT",
-        "UNIUSMARGUSDT", "BORAUSDT", "SANDUSDT"
-    ]
-
-    messages = []
+def recommend_strategy():
+    result_msgs = []
     for symbol in symbols:
         try:
-            candles = get_kline(symbol)
-            if not candles or len(candles) < 100:
+            df_short = get_kline(symbol, interval="15")
+            df_mid = get_kline(symbol, interval="60")
+            df_long = get_kline(symbol, interval="240")
+            if df_short is None or df_mid is None or df_long is None:
                 continue
 
-            df = pd.DataFrame(candles)
-            if 'volume' not in df.columns or 'close' not in df.columns:
-                continue
+            model_s = get_model(7)
+            model_s.load_state_dict(torch.load(f"models/{symbol}_short.pt"))
+            model_s.eval()
+            prob_s = predict(df_short, model_s)
 
-            df["volume"] = df["volume"].astype(float)
-            df["close"] = df["close"].astype(float)
+            model_m = get_model(7)
+            model_m.load_state_dict(torch.load(f"models/{symbol}_mid.pt"))
+            model_m.eval()
+            prob_m = predict(df_mid, model_m)
 
-            result = recommend_strategy(df)
-            if result:
-                trend, confidence = result
-                entry_price = round(float(df["close"].iloc[-1]), 4)
-                if trend == "📈 상승":
-                    target_price = round(entry_price * 1.03, 4)
-                    stop_price = round(entry_price * 0.98, 4)
-                else:
-                    target_price = round(entry_price * 0.97, 4)
-                    stop_price = round(entry_price * 1.02, 4)
+            model_l = get_model(7)
+            model_l.load_state_dict(torch.load(f"models/{symbol}_long.pt"))
+            model_l.eval()
+            prob_l = predict(df_long, model_l)
 
+            last_price = round(df_short["close"].iloc[-1], 2)
+
+            for label, prob in zip(["단기", "중기", "장기"], [prob_s, prob_m, prob_l]):
+                if prob is None:
+                    continue
+                trend = "📈 상승" if prob > 0.5 else "📉 하락"
+                confidence = round(prob * 100, 2)
                 msg = (
-                    f"<b>{symbol}</b>\n"
-                    f"예측: {trend} / 신뢰도: {confidence}%\n"
-                    f"📍 진입가: {entry_price}\n🎯 목표가: {target_price}\n⛔ 손절가: {stop_price}"
+                    f"📌 {symbol} ({label})\n"
+                    f"진입가: {last_price} USDT\n"
+                    f"목표가: 전략별 수익률 설정 필요\n"
+                    f"손절가: 전략별 리스크 기준 설정 필요\n"
+                    f"신뢰도: {confidence}%\n"
+                    f"예측: {trend}"
                 )
-                messages.append(msg)
+                result_msgs.append(msg)
         except Exception as e:
-            print(f"⚠️ {symbol} 오류: {e}")
+            print(f"❌ {symbol} 처리 오류: {e}")
             continue
+    return result_msgs
 
-    return messages
