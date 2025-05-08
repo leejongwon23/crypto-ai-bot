@@ -5,7 +5,6 @@ import time
 
 BASE_URL = "https://api.bybit.com"
 
-# 고정된 30개 코인 리스트
 SYMBOLS = [
     "BTCUSDT", "ADAUSDT", "XRPUSDT", "SOLUSDT", "ETHUSDT",
     "XLMUSDT", "SUIUSDT", "ONDOUSDT", "LINKUSDT", "AVAXUSDT",
@@ -15,7 +14,6 @@ SYMBOLS = [
     "SHIBUSDT", "BCHUSDT", "SANDUSDT", "HBARUSDT", "GASUSDT"
 ]
 
-# 전략별 캔들 구성
 STRATEGY_CONFIG = {
     "단기": {"interval": "15", "limit": 96},
     "중기": {"interval": "60", "limit": 168},
@@ -34,8 +32,9 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 200):
         rows = data["result"]["list"]
         if not rows:
             return None
-        df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume", "_", "_"])
-        df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+        df = pd.DataFrame(rows)
+        df = df.iloc[:, :6]
+        df.columns = ["timestamp", "open", "high", "low", "close", "volume"]
         df = df.astype({
             "timestamp": "int64", "open": "float", "high": "float",
             "low": "float", "close": "float", "volume": "float"
