@@ -1,7 +1,11 @@
 from flask import Flask
-from recommend import main  # 여포 1.4 기준 main() 함수 호출
+from recommend import main  # 여포 1.4 ~ 1.8 구조 기준: 메시지 루프 포함
 
 app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return "Yopo server is running"
 
 @app.route("/ping")
 def ping():
