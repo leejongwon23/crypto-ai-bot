@@ -7,6 +7,10 @@ app = Flask(__name__)
 def home():
     return "Yopo server is running"
 
+@app.route("/ping")
+def ping():
+    return "pong", 200
+
 @app.route("/run")
 def run_recommend():
     subprocess.Popen(["python", "recommend.py"])
