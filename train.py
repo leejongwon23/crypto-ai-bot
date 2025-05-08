@@ -7,17 +7,40 @@ import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from data.utils import SYMBOLS, STRATEGY_CONFIG, get_kline_by_strategy, compute_features
 from model.base_model import LSTMPricePredictor
-from wrong_data_loader import load_wrong_prediction_data  # ✅ 추가 모듈 (기능만 추가)
+from wrong_data_loader import load_wrong_prediction_data  # 오답 학습용 보조 모듈
 
 WINDOW = 30
+GAIN_RANGES = {
+    "단기": (0.05, 0.15),
+    "중기": (0.10, 0.30),
+    "장기": (0.20, 1.00)
+}
+MAX_LOSS = 0.02  # 손절가 -2%
 
-def create_dataset(features, window=30):
+def label_gain_class(current, future, strategy):
+    change = (future - current) / current
+    min_gain, max_gain = GAIN_RANGES[strategy]
+    if abs(change) < min_gain or abs(change) > max_gain:
+        return 0
+    return 1 if change > 0 else 0
+
+def create_dataset(features, strategy, window=30):
     X, y = [], []
     for i in range(len(features) - window - 1):
         x_seq = features[i:i+window]
         current_close = features[i+window-1]['close']
         future_close = features[i+window]['close']
-        label = 1 if future_close > current_close * 1.01 else 0  # ✅ 기존 구조 그대로
+        change = (future_close - current_close) / current_close
+
+        # 전략별 수익률 범위 반영
+        label = label_gain_class(current_close, future_close, strategy)
+        if label is None:
+            continue
+
+        # 손절 -2% 이상인 경우 제거
+        if change <= -MAX_LOSS:
+            continue
+
         X.append([list(row.values()) for row in x_seq])
         y.append(label)
     return np.array(X), np.array(y)
@@ -39,7 +62,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     scaled = scaler.fit_transform(df_feat.values)
     feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
 
-    X, y = create_dataset(feature_dicts, window=WINDOW)
+    X, y = create_dataset(feature_dicts, strategy, window=WINDOW)
     if len(X) == 0:
         print(f"⚠️ 라벨 부족: {symbol} / {strategy}")
         return
@@ -65,10 +88,10 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
 
     model.train()
 
-    # ✅ 오답 데이터 우선 학습 (새 기능 추가, 기존 학습 구조 그대로 유지)
+    # 오답 학습 우선 처리
     wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=WINDOW)
     if wrong_data:
-        print(f"⚠️ 오답 데이터 우선 학습 중: {symbol} / {strategy}")
+        print(f"⚠️ 오답 우선 학습 실행 중: {symbol} / {strategy}")
         wrong_loader = DataLoader(wrong_data, batch_size=batch_size, shuffle=True)
         for xb, yb in wrong_loader:
             signal_pred, _ = model(xb)
@@ -77,7 +100,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
             loss.backward()
             optimizer.step()
 
-    # ✅ 기존 일반 학습 (수정 없이 그대로 유지)
+    # 일반 데이터 학습
     for epoch in range(epochs):
         total_loss = 0
         for xb, yb in train_loader:
