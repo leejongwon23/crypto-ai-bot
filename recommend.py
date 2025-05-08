@@ -1,5 +1,4 @@
 from telegram_bot import send_message
-
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -32,7 +31,6 @@ def get_model(symbol, strategy, input_size, num_classes):
             context = self.drop(context)
             return self.fc(context)
 
-    num_classes = len(STRATEGY_GAIN_LEVELS[strategy]) * 2
     model = DualGainClassifier()
     path = f"models/{symbol}_{strategy}_dual.pt"
     model.load_state_dict(torch.load(path, map_location=DEVICE))
