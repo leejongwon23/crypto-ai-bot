@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 from model.base_model import LSTMPricePredictor
 from data.utils import SYMBOLS, STRATEGY_CONFIG, get_kline_by_strategy, compute_features
+import time
 
 STRATEGY_GAIN_LEVELS = {
     "단기": [0.05, 0.07, 0.10],
@@ -124,4 +125,10 @@ def main():
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
 
 if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            print("⏰ 추천 루프 시작")
+            main()
+        except Exception as err:
+            print(f"[FATAL ERROR] 추천 루프 중단: {err}")
+        time.sleep(1800)  # 30분마다 반복
