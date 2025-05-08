@@ -2,9 +2,11 @@ from telegram_bot import send_message
 import torch
 import torch.nn.functional as F
 import numpy as np
+import time
+import datetime
+import logger
 from model.base_model import LSTMPricePredictor
 from data.utils import SYMBOLS, STRATEGY_CONFIG, get_kline_by_strategy, compute_features
-import time
 
 STRATEGY_GAIN_LEVELS = {
     "단기": [0.05, 0.07, 0.10],
@@ -14,6 +16,11 @@ STRATEGY_GAIN_LEVELS = {
 STOP_LOSS_PCT = 0.02
 WINDOW = 30
 DEVICE = torch.device("cpu")
+
+def get_price_now(symbol):
+    from data.utils import get_realtime_prices
+    prices = get_realtime_prices()
+    return prices.get(symbol)
 
 def get_model(symbol, strategy, input_size, num_classes):
     class DualGainClassifier(torch.nn.Module):
@@ -112,6 +119,7 @@ def format_message(data):
     )
 
 def main():
+    logger.evaluate_predictions(get_price_now)
     for strategy in STRATEGY_GAIN_LEVELS:
         for symbol in SYMBOLS:
             try:
@@ -120,6 +128,15 @@ def main():
                     message = format_message(result)
                     print(message)
                     send_message(message)
+                    logger.log_prediction(
+                        symbol=result["symbol"],
+                        strategy=result["strategy"],
+                        direction=result["direction"],
+                        entry_price=result["price"],
+                        target_price=result["target"],
+                        timestamp=datetime.datetime.utcnow().isoformat(),
+                        confidence=result["confidence"]
+                    )
                     print("-" * 80)
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
