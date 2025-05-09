@@ -156,24 +156,12 @@ def get_price_now(symbol):
     prices = get_realtime_prices()
     return prices.get(symbol)
 
-def main():
-    logger.evaluate_predictions(get_price_now)
+def auto_train_all():  # ✅ 자동 학습 추가된 부분
     for strategy in STRATEGY_GAIN_LEVELS:
         for symbol in SYMBOLS:
             try:
-                result = predict(symbol, strategy)
-                if result:
-                    logger.log_prediction(
-                        symbol=result["symbol"],
-                        strategy=result["strategy"],
-                        direction=result["direction"],
-                        entry_price=result["price"],
-                        target_price=result["target"],
-                        timestamp=datetime.datetime.utcnow().isoformat(),
-                        confidence=result["confidence"]
-                    )
-                    if result["confidence"] > 0.7:
-                        msg = format_message(result)
-                        send_message(msg)
+                print(f"[학습 중] {symbol} - {strategy}")
+                train_model(symbol, strategy)
             except Exception as e:
-                print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
+                print(f"[학습 실패] {symbol}-{strategy}: {e}")
+
