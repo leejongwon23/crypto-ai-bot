@@ -3,9 +3,8 @@ from telegram_bot import send_message
 from train import predict, STRATEGY_GAIN_LEVELS
 from logger import log_prediction, evaluate_predictions
 from data.utils import SYMBOLS, get_realtime_prices
-from src.message_formatter import format_message
 
-
+# format_message는 recommend.py에서 직접 정의
 
 def format_message(data):
     return (
@@ -45,3 +44,4 @@ def main():
                         send_message(msg)
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
+
