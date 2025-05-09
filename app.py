@@ -1,42 +1,22 @@
-from flask import Flask
-from recommend import main
-import train
-import os
-import threading
-from apscheduler.schedulers.background import BackgroundScheduler
+from flask import Flask from recommend import main import train import os import threading from apscheduler.schedulers.background import BackgroundScheduler import pytz
 
-# 학습 백그라운드 실행
-def start_background_training():
-    threading.Thread(target=train.auto_train_all, daemon=True).start()
+학습 백그라운드 실행
 
-# 예측 백그라운드 실행 (5분 간격)
-def start_scheduler():
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(main, 'interval', minutes=5)
-    scheduler.start()
+def start_background_training(): threading.Thread(target=train.auto_train_all, daemon=True).start()
 
-start_background_training()
-start_scheduler()
+예측 백그라운드 실행 (5분 간격)
 
-app = Flask(__name__)
+def start_scheduler(): scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Seoul')) scheduler.add_job(main, 'interval', minutes=5) scheduler.start()
 
-@app.route("/")
-def index():
-    return "Yopo server is running"
+start_background_training() start_scheduler()
 
-@app.route("/ping")
-def ping():
-    return "pong"
+app = Flask(name)
 
-@app.route("/run")
-def run():
-    try:
-        main()
-        return "Recommendation started"
-    except Exception as e:
-        print(f"[ERROR] /run 실패: {e}")
-        return f"Error: {e}", 500
+@app.route("/") def index(): return "Yopo server is running"
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+@app.route("/ping") def ping(): return "pong"
+
+@app.route("/run") def run(): try: main() return "Recommendation started" except Exception as e: print(f"[ERROR] /run 실패: {e}") return f"Error: {e}", 500
+
+if name == "main": port = int(os.environ.get("PORT", 10000)) app.run(host="0.0.0.0", port=port)
+
