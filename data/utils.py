@@ -15,10 +15,11 @@ SYMBOLS = [
 ]
 
 STRATEGY_CONFIG = {
-    "단기": {"interval": "15", "limit": 96},
-    "중기": {"interval": "60", "limit": 168},
-    "장기": {"interval": "D", "limit": 90}
+    "단기": {"interval": "4h", "limit": 90},
+    "중기": {"interval": "1d", "limit": 90},
+    "장기": {"interval": "1w", "limit": 90}
 }
+
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 200):
     url = f"{BASE_URL}/v5/market/kline"
