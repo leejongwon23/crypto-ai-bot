@@ -1,6 +1,7 @@
 import os
 import time
 import datetime
+import threading
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -156,7 +157,7 @@ def get_price_now(symbol):
     prices = get_realtime_prices()
     return prices.get(symbol)
 
-def auto_train_all():  # ✅ 자동 학습 추가된 부분
+def auto_train_all():
     for strategy in STRATEGY_GAIN_LEVELS:
         for symbol in SYMBOLS:
             try:
@@ -165,3 +166,15 @@ def auto_train_all():  # ✅ 자동 학습 추가된 부분
             except Exception as e:
                 print(f"[학습 실패] {symbol}-{strategy}: {e}")
 
+def background_auto_train(interval_sec=3600):
+    def loop():
+        while True:
+            print("[자동학습] 모든 코인-전략 학습 시작")
+            auto_train_all()
+            print("[자동학습] 완료. 다음 학습까지 대기...")
+            time.sleep(interval_sec)
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+
+# 서버에서 import만 해도 자동 실행됨
+background_auto_train(interval_sec=3600)
