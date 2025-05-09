@@ -95,6 +95,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
             optimizer.step()
 
     os.makedirs("models", exist_ok=True)
+    print("✅ models 폴더 생성됨", flush=True)
     torch.save(model.state_dict(), model_path)
 
 def predict(symbol, strategy):
