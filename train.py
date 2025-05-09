@@ -12,6 +12,9 @@ from data.utils import SYMBOLS, STRATEGY_CONFIG, get_kline_by_strategy, compute_
 from model.base_model import LSTMPricePredictor
 from wrong_data_loader import load_wrong_prediction_data
 import logger
+from logger import get_actual_success_rate  # ✅ 성공률 기반 신뢰도 보정 함수
+from recommend import format_message  # ✅ 메시지 포맷 함수
+from telegram_bot import send_message  # ✅ 텔레그램 전송 함수
 
 DEVICE = torch.device("cpu")
 WINDOW = 30
@@ -181,5 +184,33 @@ def background_auto_train(interval_sec=3600):
     t = threading.Thread(target=loop, daemon=True)
     t.start()
 
-# 서버에서 import만 해도 자동 실행됨
+# ✅ main 함수 추가: 예측 및 메시지 전송 포함
+
+def main():
+    logger.evaluate_predictions(get_price_now)
+    for strategy in STRATEGY_GAIN_LEVELS:
+        for symbol in SYMBOLS:
+            try:
+                result = predict(symbol, strategy)
+                if result:
+                    logger.log_prediction(
+                        symbol=result["symbol"],
+                        strategy=result["strategy"],
+                        direction=result["direction"],
+                        entry_price=result["price"],
+                        target_price=result["target"],
+                        timestamp=datetime.datetime.utcnow().isoformat(),
+                        confidence=result["confidence"]
+                    )
+
+                    actual_rate = get_actual_success_rate(result["strategy"], threshold=0.7)
+                    adjusted_conf = result["confidence"] * actual_rate
+
+                    if adjusted_conf > 0.7:
+                        msg = format_message(result)
+                        send_message(msg)
+            except Exception as e:
+                print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
+
+# 자동 실행 루프 시작
 background_auto_train(interval_sec=3600)
