@@ -81,3 +81,19 @@ def evaluate_predictions(get_price_fn):
         writer = csv.DictWriter(f, fieldnames=updated_rows[0].keys())
         writer.writeheader()
         writer.writerows(updated_rows)
+        
+def get_actual_success_rate(strategy, threshold=0.7):
+    import pandas as pd
+    try:
+        df = pd.read_csv(PREDICTION_LOG)
+        df = df[df["strategy"] == strategy]
+        df = df[df["confidence"] >= threshold]
+
+        if len(df) == 0:
+            return 1.0  # 데이터 부족 시 기본값
+
+        success_df = df[df["status"] == "success"]
+        return len(success_df) / len(df)
+    except Exception as e:
+        print(f"[경고] 성공률 계산 실패: {e}")
+        return 1.0
