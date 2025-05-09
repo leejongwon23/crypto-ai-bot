@@ -5,6 +5,7 @@ import os
 import threading
 from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
+import traceback  # ← 예외 전체 로그 출력용
 
 # 학습 백그라운드 실행
 def start_background_training():
@@ -37,7 +38,8 @@ def run():
         print("[RUN] main() 실행 완료")
         return "Recommendation started"
     except Exception as e:
-        print(f"[ERROR] /run 실패: {e}")
+        print("[ERROR] /run 실패:")
+        traceback.print_exc()  # ← 전체 예외 로그 출력
         return f"Error: {e}", 500
 
 if __name__ == "__main__":
