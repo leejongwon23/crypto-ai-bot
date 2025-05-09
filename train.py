@@ -204,13 +204,16 @@ def main():
                     )
 
                     actual_rate = get_actual_success_rate(result["strategy"], threshold=0.7)
-                    adjusted_conf = result["confidence"] * actual_rate
+                    # ✅ 신뢰도와 실제 성공률의 평균으로 보정
+                    adjusted_conf = (result["confidence"] + actual_rate) / 2
 
                     if adjusted_conf > 0.7:
                         msg = format_message(result)
                         send_message(msg)
+
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
+
 
 # 자동 실행 루프 시작
 background_auto_train(interval_sec=3600)
