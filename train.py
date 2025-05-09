@@ -172,7 +172,7 @@ def main():
                         timestamp=datetime.datetime.utcnow().isoformat(),
                         confidence=result["confidence"]
                     )
-                    if result["confidence"] > 0.8:
+                    if result["confidence"] > 0.7:
                         msg = format_message(result)
                         send_message(msg)
             except Exception as e:
