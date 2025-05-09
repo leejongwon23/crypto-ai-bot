@@ -61,12 +61,12 @@ class CNNLSTMPricePredictor(nn.Module):
         confidence = torch.sigmoid(self.fc_confidence(context)).squeeze(-1)
         return signal, confidence
 
-# 선택할 수 있도록 모델 매핑 딕셔너리 정의
+# cnn_lstm 기본값으로 설정
 MODEL_CLASSES = {
     "lstm": LSTMPricePredictor,
     "cnn_lstm": CNNLSTMPricePredictor
 }
 
-def get_model(model_type: str, input_size: int):
-    model_cls = MODEL_CLASSES.get(model_type, LSTMPricePredictor)
+def get_model(model_type: str = "cnn_lstm", input_size: int = 11):
+    model_cls = MODEL_CLASSES.get(model_type, CNNLSTMPricePredictor)
     return model_cls(input_size=input_size)
