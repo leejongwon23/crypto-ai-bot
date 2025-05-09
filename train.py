@@ -172,5 +172,8 @@ def main():
                         timestamp=datetime.datetime.utcnow().isoformat(),
                         confidence=result["confidence"]
                     )
+                    if result["confidence"] > 0.8:
+                        msg = format_message(result)
+                        send_message(msg)
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
