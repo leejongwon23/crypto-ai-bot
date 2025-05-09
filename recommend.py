@@ -3,7 +3,8 @@ from telegram_bot import send_message
 from train import predict, STRATEGY_GAIN_LEVELS
 from logger import log_prediction, evaluate_predictions
 from data.utils import SYMBOLS, get_realtime_prices
-from message_formatter import format_message  # ✅ 여기가 핵심 수정
+from src.message_formatter import format_message
+
 
 
 def format_message(data):
