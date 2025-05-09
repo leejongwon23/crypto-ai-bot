@@ -56,9 +56,11 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     scaled = scaler.fit_transform(df_feat.values)
     feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
 
-    X, y = create_dataset(feature_dicts, strategy, window=WINDOW)
-    if len(X) == 0:
-        return
+  X, y = create_dataset(feature_dicts, strategy, window=WINDOW)
+if len(X) == 0:
+    print(f"⚠️ {symbol}-{strategy} 학습 안 됨: 조건에 맞는 데이터 없음", flush=True)
+    return
+
 
     X_tensor = torch.tensor(X, dtype=torch.float32)
     y_tensor = torch.tensor(y, dtype=torch.float32)
