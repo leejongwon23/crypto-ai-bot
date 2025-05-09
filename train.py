@@ -125,7 +125,7 @@ def predict(symbol, strategy):
         prob = signal.squeeze().item()
         confidence = confidence.squeeze().item()
 
-    price = df["close"].iloc[-1]
+    price = df["close"].iloc[-1]  # ✅ 진입가 기준 명시
     levels = STRATEGY_GAIN_LEVELS[strategy]
     direction = "롱" if prob > 0.5 else "숏"
     rate = levels[-1]
@@ -150,7 +150,7 @@ def predict(symbol, strategy):
         "symbol": symbol,
         "strategy": strategy,
         "direction": direction,
-        "price": price,
+        "price": price,  # ✅ 예측 진입가
         "target": target,
         "stop": stop,
         "confidence": confidence,
@@ -184,8 +184,7 @@ def background_auto_train(interval_sec=3600):
     t = threading.Thread(target=loop, daemon=True)
     t.start()
 
-# ✅ main 함수 추가: 예측 및 메시지 전송 포함
-
+# ✅ main 함수: 예측 + 메시지 전송 포함
 def main():
     logger.evaluate_predictions(get_price_now)
     for strategy in STRATEGY_GAIN_LEVELS:
@@ -204,16 +203,13 @@ def main():
                     )
 
                     actual_rate = get_actual_success_rate(result["strategy"], threshold=0.7)
-                    # ✅ 신뢰도와 실제 성공률의 평균으로 보정
-                    adjusted_conf = (result["confidence"] + actual_rate) / 2
+                    adjusted_conf = result["confidence"] * actual_rate
 
                     if adjusted_conf > 0.7:
                         msg = format_message(result)
                         send_message(msg)
-
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
 
-
-# 자동 실행 루프 시작
+# 서버 import 시 자동 실행
 background_auto_train(interval_sec=3600)
