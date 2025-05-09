@@ -13,8 +13,9 @@ from model.base_model import get_model  # ← ✅ 핵심 변경
 from wrong_data_loader import load_wrong_prediction_data
 import logger
 from logger import get_actual_success_rate
-from recommend import format_message
+from message_formatter import format_message  # ✅ 수정된 import
 from telegram_bot import send_message
+
 
 DEVICE = torch.device("cpu")
 WINDOW = 30
