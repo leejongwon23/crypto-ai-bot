@@ -8,7 +8,6 @@ class Attention(nn.Module):
         self.attn = nn.Linear(hidden_size, 1)
 
     def forward(self, lstm_out):
-        # lstm_out: [batch_size, seq_len, hidden_size]
         weights = self.attn(lstm_out).squeeze(-1)  # [batch_size, seq_len]
         weights = F.softmax(weights, dim=1)
         context = torch.sum(lstm_out * weights.unsqueeze(-1), dim=1)  # [batch_size, hidden_size]
@@ -29,11 +28,35 @@ class LSTMPricePredictor(nn.Module):
         self.fc_confidence = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
-        # x: [batch, seq_len, input_size]
-        lstm_out, _ = self.lstm(x)  # [batch, seq_len, hidden]
-        context, _ = self.attention(lstm_out)  # [batch, hidden]
+        lstm_out, _ = self.lstm(x)
+        context, _ = self.attention(lstm_out)
         context = self.bn(context)
         context = self.dropout(context)
-        signal = torch.sigmoid(self.fc_signal(context)).squeeze(-1)       # 상승/하락 확률
-        confidence = torch.sigmoid(self.fc_confidence(context)).squeeze(-1)  # 예측의 신뢰도
+        signal = torch.sigmoid(self.fc_signal(context)).squeeze(-1)
+        confidence = torch.sigmoid(self.fc_confidence(context)).squeeze(-1)
+        return signal, confidence
+
+class CNNLSTMPricePredictor(nn.Module):
+    def __init__(self, input_size: int, cnn_channels: int = 32, lstm_hidden_size: int = 64, lstm_layers: int = 2, dropout: float = 0.3):
+        super(CNNLSTMPricePredictor, self).__init__()
+        self.conv1 = nn.Conv1d(input_size, cnn_channels, kernel_size=3, padding=1)
+        self.relu = nn.ReLU()
+        self.lstm = nn.LSTM(input_size=cnn_channels,
+                            hidden_size=lstm_hidden_size,
+                            num_layers=lstm_layers,
+                            batch_first=True)
+        self.attention = Attention(lstm_hidden_size)
+        self.dropout = nn.Dropout(dropout)
+        self.fc_signal = nn.Linear(lstm_hidden_size, 1)
+        self.fc_confidence = nn.Linear(lstm_hidden_size, 1)
+
+    def forward(self, x):
+        x = x.permute(0, 2, 1)  # [batch, input_size, seq_len]
+        x = self.relu(self.conv1(x))
+        x = x.permute(0, 2, 1)  # [batch, seq_len, channels]
+        lstm_out, _ = self.lstm(x)
+        context, _ = self.attention(lstm_out)
+        context = self.dropout(context)
+        signal = torch.sigmoid(self.fc_signal(context)).squeeze(-1)
+        confidence = torch.sigmoid(self.fc_confidence(context)).squeeze(-1)
         return signal, confidence
