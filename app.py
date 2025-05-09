@@ -32,7 +32,9 @@ def ping():
 @app.route("/run")
 def run():
     try:
+        print("[RUN] main() 실행 시작")
         main()
+        print("[RUN] main() 실행 완료")
         return "Recommendation started"
     except Exception as e:
         print(f"[ERROR] /run 실패: {e}")
