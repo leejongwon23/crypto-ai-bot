@@ -9,12 +9,12 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from data.utils import SYMBOLS, STRATEGY_CONFIG, get_kline_by_strategy, compute_features
-from model.base_model import LSTMPricePredictor
+from model.base_model import get_model  # ← ✅ 핵심 변경
 from wrong_data_loader import load_wrong_prediction_data
 import logger
-from logger import get_actual_success_rate  # ✅ 성공률 기반 신뢰도 보정 함수
-from recommend import format_message  # ✅ 메시지 포맷 함수
-from telegram_bot import send_message  # ✅ 텔레그램 전송 함수
+from logger import get_actual_success_rate
+from recommend import format_message
+from telegram_bot import send_message
 
 DEVICE = torch.device("cpu")
 WINDOW = 30
@@ -72,7 +72,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     train_set, val_set = random_split(dataset, [train_len, val_len])
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
 
-    model = LSTMPricePredictor(input_size=input_size)
+    model = get_model(input_size=input_size)  # ← ✅ 핵심 변경
     model_path = f"models/{symbol}_{strategy}_lstm.pt"
     if os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path))
@@ -115,7 +115,7 @@ def predict(symbol, strategy):
     X = np.expand_dims(X, axis=0)
     X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
 
-    model = LSTMPricePredictor(input_size=X.shape[2])
+    model = get_model(input_size=X.shape[2])  # ← ✅ 핵심 변경
     model_path = f"models/{symbol}_{strategy}_lstm.pt"
     model.load_state_dict(torch.load(model_path, map_location=DEVICE))
     model.to(DEVICE)
@@ -125,7 +125,7 @@ def predict(symbol, strategy):
         prob = signal.squeeze().item()
         confidence = confidence.squeeze().item()
 
-    price = df["close"].iloc[-1]  # ✅ 진입가 기준 명시
+    price = df["close"].iloc[-1]
     levels = STRATEGY_GAIN_LEVELS[strategy]
     direction = "롱" if prob > 0.5 else "숏"
     rate = levels[-1]
@@ -150,7 +150,7 @@ def predict(symbol, strategy):
         "symbol": symbol,
         "strategy": strategy,
         "direction": direction,
-        "price": price,  # ✅ 예측 진입가
+        "price": price,
         "target": target,
         "stop": stop,
         "confidence": confidence,
@@ -184,7 +184,6 @@ def background_auto_train(interval_sec=3600):
     t = threading.Thread(target=loop, daemon=True)
     t.start()
 
-# ✅ main 함수: 예측 + 메시지 전송 포함
 def main():
     logger.evaluate_predictions(get_price_now)
     for strategy in STRATEGY_GAIN_LEVELS:
@@ -201,7 +200,6 @@ def main():
                         timestamp=datetime.datetime.utcnow().isoformat(),
                         confidence=result["confidence"]
                     )
-
                     actual_rate = get_actual_success_rate(result["strategy"], threshold=0.7)
                     adjusted_conf = result["confidence"] * actual_rate
 
@@ -211,5 +209,5 @@ def main():
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
 
-# 서버 import 시 자동 실행
 background_auto_train(interval_sec=3600)
+
