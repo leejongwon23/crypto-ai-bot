@@ -158,6 +158,7 @@ def get_price_now(symbol):
     return prices.get(symbol)
 
 def auto_train_all():
+    print("[자동 학습 시작] 모든 코인-전략 조합을 학습합니다.")
     for strategy in STRATEGY_GAIN_LEVELS:
         for symbol in SYMBOLS:
             try:
@@ -165,6 +166,7 @@ def auto_train_all():
                 train_model(symbol, strategy)
             except Exception as e:
                 print(f"[학습 실패] {symbol}-{strategy}: {e}")
+    print("[자동 학습 완료]")
 
 def background_auto_train(interval_sec=3600):
     def loop():
