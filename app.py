@@ -1,14 +1,22 @@
 from flask import Flask
-from recommend import main  # 여포 1.4 메시지 포맷 포함
-import train  # 🔄 수정: auto_train_all만 불러오던 것에서 전체 train 모듈을 불러오도록 변경
+from recommend import main
+import train
 import os
 import threading
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# ✅ 백그라운드에서 학습 실행
+# 학습 백그라운드 실행
 def start_background_training():
     threading.Thread(target=train.auto_train_all, daemon=True).start()
 
-start_background_training()  # 서버 실행과 동시에 자동 학습 시작 (Render 대응)
+# 예측 백그라운드 실행 (5분 간격)
+def start_scheduler():
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(main, 'interval', minutes=5)
+    scheduler.start()
+
+start_background_training()
+start_scheduler()
 
 app = Flask(__name__)
 
@@ -30,5 +38,5 @@ def run():
         return f"Error: {e}", 500
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))  # Render 환경 대응
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
