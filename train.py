@@ -59,9 +59,11 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
 
     X, y = create_dataset(feature_dicts, strategy, window=WINDOW)
     print(f"▶️ {symbol}-{strategy} 데이터 개수: X={len(X)}, y={len(y)}", flush=True)
-    
+
     if len(X) == 0:
         print(f"⚠️ {symbol}-{strategy} 학습 안 됨: 조건에 맞는 데이터 없음", flush=True)
+        with open("train_log.txt", "a") as f:
+            f.write(f"[{datetime.datetime.utcnow()}] ❌ {symbol}-{strategy} 학습 실패 (데이터 없음)\n")
         return
 
     X_tensor = torch.tensor(X, dtype=torch.float32)
@@ -103,7 +105,6 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     print("✅ models 폴더 생성됨", flush=True)
     print(f"✅ 모델 저장됨: {model_path}", flush=True)
 
-    # ✅ 로그 파일 기록 추가 (수정된 들여쓰기)
     with open("train_log.txt", "a") as f:
         f.write(f"[{datetime.datetime.utcnow()}] ✅ 저장됨: {model_path}\n")
 
