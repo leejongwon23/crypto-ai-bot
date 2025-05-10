@@ -58,6 +58,8 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
 
     X, y = create_dataset(feature_dicts, strategy, window=WINDOW)
+    print(f"▶️ {symbol}-{strategy} 데이터 개수: X={len(X)}, y={len(y)}", flush=True)
+    
     if len(X) == 0:
         print(f"⚠️ {symbol}-{strategy} 학습 안 됨: 조건에 맞는 데이터 없음", flush=True)
         return
