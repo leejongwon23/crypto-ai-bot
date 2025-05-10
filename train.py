@@ -39,11 +39,6 @@ def create_dataset(features, strategy, window=30):
         if abs(change) < min_gain or abs(change) > 1.0:
             continue
 
-        if change > 0 and change <= -STOP_LOSS_PCT:
-            continue
-        if change < 0 and change >= STOP_LOSS_PCT:
-            continue
-
         label = 1 if change > 0 else 0
         X.append([list(row.values()) for row in x_seq])
         y.append(label)
@@ -106,7 +101,6 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     print("✅ models 폴더 생성됨", flush=True)
     print(f"✅ 모델 저장됨: {model_path}", flush=True)
 
-    # ✅ 모델 폴더 내 파일 출력 추가
     print("📁 models 폴더 내용:")
     for file in os.listdir("models"):
         print(" -", file)
