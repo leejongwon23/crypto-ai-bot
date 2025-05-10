@@ -38,10 +38,14 @@ def create_dataset(features, strategy, window=30):
         min_gain = levels[0]
         if abs(change) < min_gain or abs(change) > 1.0:
             continue
-        label = 1 if change > 0 else 0
-        if change <= -STOP_LOSS_PCT:
-            continue
 
+        # ✅ 방향별 손절 조건
+        if change > 0 and change <= -STOP_LOSS_PCT:
+            continue  # 롱인데 -2% 이상 하락 → 제외
+        if change < 0 and change >= STOP_LOSS_PCT:
+            continue  # 숏인데 +2% 이상 상승 → 제외
+
+        label = 1 if change > 0 else 0
         X.append([list(row.values()) for row in x_seq])
         y.append(label)
     return np.array(X), np.array(y)
@@ -61,7 +65,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
 
     X, y = create_dataset(feature_dicts, strategy, window=WINDOW)
     if len(X) == 0:
-        print(f"⚠️ {symbol}-{strategy} 학습 안 되뉴: 조건에 맞는 데이터 없음", flush=True)
+        print(f"⚠️ {symbol}-{strategy} 학습 안 됨: 조건에 맞는 데이터 없음", flush=True)
         return
 
     X_tensor = torch.tensor(X, dtype=torch.float32)
@@ -99,7 +103,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
             optimizer.step()
 
     os.makedirs("models", exist_ok=True)
-    print("✅ models 포드 생성됨", flush=True)
+    print("✅ models 폴더 생성됨", flush=True)
     torch.save(model.state_dict(), model_path)
     print(f"✅ 모델 저장됨: {model_path}", flush=True)
 
@@ -140,9 +144,9 @@ def predict(symbol, strategy):
     macd = features["macd"].iloc[-1]
     boll = features["bollinger"].iloc[-1]
     reason = []
-    if rsi < 30: reason.append("RSI 가매도")
-    elif rsi > 70: reason.append("RSI 가매수")
-    reason.append("MACD 상승 전환" if macd > 0 else "MACD 하늘 전환")
+    if rsi < 30: reason.append("RSI 과매도")
+    elif rsi > 70: reason.append("RSI 과매수")
+    reason.append("MACD 상승 전환" if macd > 0 else "MACD 하락 전환")
     if boll > 1: reason.append("볼린저 상단 돌파")
     elif boll < -1: reason.append("볼린저 하단 이탈")
 
