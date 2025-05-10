@@ -4,8 +4,13 @@ import datetime
 
 PREDICTION_LOG = "prediction_log.csv"
 WRONG_PREDICTIONS = "wrong_predictions.csv"
-EVALUATION_GAP_HOURS = 6
 THRESHOLD_TOLERANCE = 0.01  # 예: 목표 수익률의 99% 이상 도달 시 성공 처리
+
+STRATEGY_LIMIT_HOURS = {
+    "단기": 4,
+    "중기": 24,
+    "장기": 168
+}
 
 def log_prediction(symbol, strategy, direction, entry_price, target_price, timestamp, confidence):
     row = {
@@ -43,8 +48,10 @@ def evaluate_predictions(get_price_fn):
             continue
 
         pred_time = datetime.datetime.fromisoformat(row["timestamp"])
+        strategy = row["strategy"]
+        limit_hours = STRATEGY_LIMIT_HOURS.get(strategy, 6)
         hours_passed = (now - pred_time).total_seconds() / 3600
-        if hours_passed < EVALUATION_GAP_HOURS:
+        if hours_passed < limit_hours:
             updated_rows.append(row)
             continue
 
@@ -81,7 +88,7 @@ def evaluate_predictions(get_price_fn):
         writer = csv.DictWriter(f, fieldnames=updated_rows[0].keys())
         writer.writeheader()
         writer.writerows(updated_rows)
-        
+
 def get_actual_success_rate(strategy, threshold=0.7):
     import pandas as pd
     try:
