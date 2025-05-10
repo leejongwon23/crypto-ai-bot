@@ -6,7 +6,7 @@ import threading
 from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
 import traceback  # 예외 전체 로그 출력용
-import sys         # ← 로그 출력 강제 플러시용 추가
+import sys        # ← 로그 출력 강제 플러시용 추가
 
 # 학습 백그라운드 실행
 def start_background_training():
@@ -51,6 +51,16 @@ def run():
         traceback.print_exc()
         sys.stdout.flush()
         return f"Error: {e}", 500
+
+# ✅ train_log.txt 로그 출력 경로 추가
+@app.route("/train-log")
+def train_log():
+    try:
+        with open("train_log.txt", "r") as f:
+            content = f.read()
+        return f"<pre>{content}</pre>"
+    except Exception as e:
+        return f"로그 파일을 읽을 수 없습니다: {e}", 500
 
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
