@@ -104,6 +104,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     print(f"✅ 모델 저장됨: {model_path}", flush=True)
 
     with open("train_log.txt", "a") as f:
+        
     f.write(f"[{datetime.datetime.utcnow()}] ✅ 저장됨: {model_path}\n")
 
 
