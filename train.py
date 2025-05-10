@@ -9,13 +9,12 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from data.utils import SYMBOLS, STRATEGY_CONFIG, get_kline_by_strategy, compute_features
-from model.base_model import get_model  # ← ✅ 핵심 변경
+from model.base_model import get_model
 from wrong_data_loader import load_wrong_prediction_data
 import logger
 from logger import get_actual_success_rate
-from src.message_formatter import format_message # ✅ 수정된 import
+from src.message_formatter import format_message
 from telegram_bot import send_message
-
 
 DEVICE = torch.device("cpu")
 WINDOW = 30
@@ -28,7 +27,7 @@ STRATEGY_GAIN_LEVELS = {
 }
 
 def create_dataset(features, strategy, window=30):
-    X, y = [], []
+    X, y = [] ,[]
     for i in range(len(features) - window - 1):
         x_seq = features[i:i+window]
         current_close = features[i+window-1]['close']
@@ -62,7 +61,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
 
     X, y = create_dataset(feature_dicts, strategy, window=WINDOW)
     if len(X) == 0:
-        print(f"⚠️ {symbol}-{strategy} 학습 안 됨: 조건에 맞는 데이터 없음", flush=True)
+        print(f"⚠️ {symbol}-{strategy} 학습 안 되뉴: 조건에 맞는 데이터 없음", flush=True)
         return
 
     X_tensor = torch.tensor(X, dtype=torch.float32)
@@ -73,7 +72,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     train_set, val_set = random_split(dataset, [train_len, val_len])
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
 
-    model = get_model(input_size=input_size)  # ← ✅ 핵심 변경
+    model = get_model(input_size=input_size)
     model_path = f"models/{symbol}_{strategy}_lstm.pt"
     if os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path))
@@ -100,7 +99,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
             optimizer.step()
 
     os.makedirs("models", exist_ok=True)
-    print("✅ models 폴더 생성됨", flush=True)
+    print("✅ models 포드 생성됨", flush=True)
     torch.save(model.state_dict(), model_path)
     print(f"✅ 모델 저장됨: {model_path}", flush=True)
 
@@ -116,7 +115,7 @@ def predict(symbol, strategy):
     X = np.expand_dims(X, axis=0)
     X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
 
-    model = get_model(input_size=X.shape[2])  # ← ✅ 핵심 변경
+    model = get_model(input_size=X.shape[2])
     model_path = f"models/{symbol}_{strategy}_lstm.pt"
     model.load_state_dict(torch.load(model_path, map_location=DEVICE))
     model.to(DEVICE)
@@ -141,9 +140,9 @@ def predict(symbol, strategy):
     macd = features["macd"].iloc[-1]
     boll = features["bollinger"].iloc[-1]
     reason = []
-    if rsi < 30: reason.append("RSI 과매도")
-    elif rsi > 70: reason.append("RSI 과매수")
-    reason.append("MACD 상승 전환" if macd > 0 else "MACD 하락 전환")
+    if rsi < 30: reason.append("RSI 가매도")
+    elif rsi > 70: reason.append("RSI 가매수")
+    reason.append("MACD 상승 전환" if macd > 0 else "MACD 하늘 전환")
     if boll > 1: reason.append("볼린저 상단 돌파")
     elif boll < -1: reason.append("볼린저 하단 이탈")
 
@@ -211,4 +210,3 @@ def main():
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
 
 background_auto_train(interval_sec=3600)
-
