@@ -39,11 +39,10 @@ def create_dataset(features, strategy, window=30):
         if abs(change) < min_gain or abs(change) > 1.0:
             continue
 
-        # ✅ 방향별 손절 조건
         if change > 0 and change <= -STOP_LOSS_PCT:
-            continue  # 롱인데 -2% 이상 하락 → 제외
+            continue
         if change < 0 and change >= STOP_LOSS_PCT:
-            continue  # 숏인데 +2% 이상 상승 → 제외
+            continue
 
         label = 1 if change > 0 else 0
         X.append([list(row.values()) for row in x_seq])
@@ -103,9 +102,14 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
             optimizer.step()
 
     os.makedirs("models", exist_ok=True)
-    print("✅ models 폴더 생성됨", flush=True)
     torch.save(model.state_dict(), model_path)
+    print("✅ models 폴더 생성됨", flush=True)
     print(f"✅ 모델 저장됨: {model_path}", flush=True)
+
+    # ✅ 모델 폴더 내 파일 출력 추가
+    print("📁 models 폴더 내용:")
+    for file in os.listdir("models"):
+        print(" -", file)
 
 def predict(symbol, strategy):
     df = get_kline_by_strategy(symbol, strategy)
