@@ -20,14 +20,14 @@ DEVICE = torch.device("cpu")
 WINDOW = 30
 STOP_LOSS_PCT = 0.02
 
-STRATEGY_GAIN_LEVELS = {
-    "단기": [0.03, 0.05, 0.08],
-    "중기": [0.05, 0.10, 0.15],
-    "장기": [0.10, 0.30, 0.60]
+STRATEGY_GAIN_RANGE = {
+    "단기": (0.03, 0.50),
+    "중기": (0.05, 0.80),
+    "장기": (0.10, 1.00)
 }
 
 LOG_DIR = "logs"
-os.makedirs(LOG_DIR, exist_ok=True)  # ✅ logs 폴더 자동 생성
+os.makedirs(LOG_DIR, exist_ok=True)
 LOG_FILE = os.path.join(LOG_DIR, "train_log.txt")
 
 def create_dataset(features, strategy, window=30):
@@ -38,8 +38,7 @@ def create_dataset(features, strategy, window=30):
         future_close = features[i+window]['close']
         change = (future_close - current_close) / current_close
 
-        levels = STRATEGY_GAIN_LEVELS[strategy]
-        min_gain = levels[0]
+        min_gain = STRATEGY_GAIN_RANGE[strategy][0]
         if abs(change) < min_gain or abs(change) > 1.0:
             continue
 
@@ -144,14 +143,21 @@ def predict(symbol, strategy):
         confidence = confidence.squeeze().item()
 
     price = df["close"].iloc[-1]
-    levels = STRATEGY_GAIN_LEVELS[strategy]
     direction = "롱" if prob > 0.5 else "숏"
-    rate = levels[-1]
+
+    predicted_gain = prob if direction == "롱" else 1 - prob
+    min_gain, max_gain = STRATEGY_GAIN_RANGE[strategy]
+
+    if predicted_gain < min_gain:
+        return None
+    if predicted_gain > max_gain:
+        predicted_gain = max_gain
+
     if direction == "롱":
-        target = price * (1 + rate)
+        target = price * (1 + predicted_gain)
         stop = price * (1 - STOP_LOSS_PCT)
     else:
-        target = price * (1 - rate)
+        target = price * (1 - predicted_gain)
         stop = price * (1 + STOP_LOSS_PCT)
 
     rsi = features["rsi"].iloc[-1]
@@ -172,7 +178,7 @@ def predict(symbol, strategy):
         "target": target,
         "stop": stop,
         "confidence": confidence,
-        "rate": rate,
+        "rate": predicted_gain,
         "reason": ", ".join(reason)
     }
 
@@ -183,7 +189,7 @@ def get_price_now(symbol):
 
 def auto_train_all():
     print("[자동 학습 시작] 모든 코인-전략 조합을 학습합니다.")
-    for strategy in STRATEGY_GAIN_LEVELS:
+    for strategy in STRATEGY_GAIN_RANGE:
         for symbol in SYMBOLS:
             try:
                 print(f"[학습 중] {symbol} - {strategy}")
@@ -204,7 +210,7 @@ def background_auto_train(interval_sec=3600):
 
 def main():
     logger.evaluate_predictions(get_price_now)
-    for strategy in STRATEGY_GAIN_LEVELS:
+    for strategy in STRATEGY_GAIN_RANGE:
         for symbol in SYMBOLS:
             try:
                 result = predict(symbol, strategy)
@@ -219,7 +225,7 @@ def main():
                         confidence=result["confidence"]
                     )
                     actual_rate = get_actual_success_rate(result["strategy"], threshold=0.7)
-                    adjusted_conf = result["confidence"] * actual_rate
+                    adjusted_conf = (result["confidence"] + actual_rate) / 2
 
                     if adjusted_conf > 0.7:
                         msg = format_message(result)
