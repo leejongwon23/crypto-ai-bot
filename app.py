@@ -74,6 +74,19 @@ def write_test():
     except Exception as e:
         return f"파일 생성 실패: {e}", 500
 
+# ✅ models 폴더 내부 파일 목록 확인용 경로 추가
+@app.route("/models")
+def list_model_files():
+    try:
+        if not os.path.exists("models"):
+            return "models 폴더가 존재하지 않습니다."
+        files = os.listdir("models")
+        if not files:
+            return "models 폴더가 비어 있습니다."
+        return "<pre>" + "\n".join(files) + "</pre>"
+    except Exception as e:
+        return f"모델 파일 확인 중 오류 발생: {e}", 500
+
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
     sys.stdout.flush()
