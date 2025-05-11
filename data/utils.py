@@ -22,7 +22,12 @@ STRATEGY_CONFIG = {
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 200):
     url = f"{BASE_URL}/v5/market/kline"
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "limit": limit,
+        "category": "linear"  # ✅ 중요 파라미터 추가
+    }
     try:
         res = requests.get(url, params=params, timeout=10)
         print(f"[DEBUG] {symbol} 요청 URL: {res.url}")
