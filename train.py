@@ -27,7 +27,7 @@ STRATEGY_GAIN_LEVELS = {
 }
 
 def create_dataset(features, strategy, window=30):
-    X, y = [] ,[]
+    X, y = [], []
     for i in range(len(features) - window - 1):
         x_seq = features[i:i+window]
         current_close = features[i+window-1]['close']
@@ -47,10 +47,12 @@ def create_dataset(features, strategy, window=30):
 def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3):
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or len(df) < WINDOW + 20:
+        print(f"⛔️ {symbol}-{strategy} 수집된 원시 데이터 없음 또는 너무 짧음: {len(df) if df is not None else 'None'}", flush=True)
         return
 
     df_feat = compute_features(df)
     if len(df_feat) < WINDOW + 1:
+        print(f"⛔️ {symbol}-{strategy} 특징 추출 후 데이터 부족: {len(df_feat)}", flush=True)
         return
 
     scaler = MinMaxScaler()
