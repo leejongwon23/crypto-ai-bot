@@ -26,7 +26,7 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 200):
     try:
         res = requests.get(url, params=params, timeout=10)
         print(f"[DEBUG] {symbol} 요청 URL: {res.url}")
-        print(f"[DEBUG] {symbol} 응답 내용: {res.text}")  # ✅ 응답 확인
+        print(f"[DEBUG] {symbol} 응답 내용: {res.text}")
         res.raise_for_status()
         data = res.json()
         if "result" not in data or "list" not in data["result"]:
