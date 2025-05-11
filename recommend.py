@@ -1,9 +1,16 @@
 import datetime
 from telegram_bot import send_message
-from train import predict, STRATEGY_GAIN_LEVELS
+from train import predict
 from logger import log_prediction, evaluate_predictions
 from data.utils import SYMBOLS, get_realtime_prices
 from src.message_formatter import format_message  # ✅ 외부 파일에서 메시지 포맷 불러옴
+
+# ✅ 전략별 수익률 구간 설정 (3~50%, 5~80%, 10~100%)
+STRATEGY_GAIN_LEVELS = {
+    "단기": [0.03, 0.50],
+    "중기": [0.05, 0.80],
+    "장기": [0.10, 1.00]
+}
 
 def get_price_now(symbol):
     prices = get_realtime_prices()
