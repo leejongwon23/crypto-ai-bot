@@ -53,7 +53,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     if df is None:
         print(f"⛔️ {symbol}-{strategy} 수집된 원시 데이터 없음: None", flush=True)
         return
-    if len(df) < WINDOW + 20:
+    if len(df) < WINDOW + 10:
         print(f"⛔️ {symbol}-{strategy} 수집된 원시 데이터 너무 짧음: {len(df)}개", flush=True)
         return
 
