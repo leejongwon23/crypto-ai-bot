@@ -26,6 +26,10 @@ STRATEGY_GAIN_LEVELS = {
     "장기": [0.10, 0.30, 0.60]
 }
 
+LOG_DIR = "logs"
+os.makedirs(LOG_DIR, exist_ok=True)  # ✅ logs 폴더 자동 생성
+LOG_FILE = os.path.join(LOG_DIR, "train_log.txt")
+
 def create_dataset(features, strategy, window=30):
     X, y = [], []
     for i in range(len(features) - window - 1):
@@ -67,7 +71,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
 
     if len(X) == 0:
         print(f"⚠️ {symbol}-{strategy} 학습 안 됨: 유효 시퀀스 없음", flush=True)
-        with open("train_log.txt", "a") as f:
+        with open(LOG_FILE, "a") as f:
             f.write(f"[{datetime.datetime.utcnow()}] ❌ {symbol}-{strategy} 학습 실패 (데이터 없음)\n")
         return
 
@@ -110,7 +114,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     print("✅ models 폴더 생성됨", flush=True)
     print(f"✅ 모델 저장됨: {model_path}", flush=True)
 
-    with open("train_log.txt", "a") as f:
+    with open(LOG_FILE, "a") as f:
         f.write(f"[{datetime.datetime.utcnow()}] ✅ 저장됨: {model_path}\n")
 
     print("📁 models 폴더 내용:")
