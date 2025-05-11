@@ -14,7 +14,6 @@ SYMBOLS = [
     "SHIBUSDT", "BCHUSDT", "SANDUSDT", "HBARUSDT", "GASUSDT"
 ]
 
-# ✅ 캔들 수량 증가
 STRATEGY_CONFIG = {
     "단기": {"interval": "4h", "limit": 300},
     "중기": {"interval": "1d", "limit": 365},
@@ -26,6 +25,8 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 200):
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     try:
         res = requests.get(url, params=params, timeout=10)
+        print(f"[DEBUG] {symbol} 요청 URL: {res.url}")
+        print(f"[DEBUG] {symbol} 응답 내용: {res.text}")  # ✅ 응답 확인
         res.raise_for_status()
         data = res.json()
         if "result" not in data or "list" not in data["result"]:
