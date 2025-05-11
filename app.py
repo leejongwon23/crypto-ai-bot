@@ -3,6 +3,7 @@ from recommend import main
 import train
 import os
 import threading
+import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
 import traceback  # 예외 전체 로그 출력용
