@@ -53,11 +53,11 @@ def run():
         sys.stdout.flush()
         return f"Error: {e}", 500
 
-# ✅ train_log.txt 로그 출력 경로 추가
+# ✅ train_log.txt 로그 출력 경로 수정됨 (logs 폴더 기준)
 @app.route("/train-log")
 def train_log():
     try:
-        with open("train_log.txt", "r") as f:
+        with open("logs/train_log.txt", "r") as f:
             content = f.read()
         return f"<pre>{content}</pre>"
     except Exception as e:
