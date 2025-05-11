@@ -9,6 +9,9 @@ import pytz
 import traceback  # 예외 전체 로그 출력용
 import sys        # ← 로그 출력 강제 플러시용 추가
 
+# ✅ logs 폴더 생성 (맨 위에서 추가됨)
+os.makedirs("logs", exist_ok=True)
+
 # 학습 백그라운드 실행
 def start_background_training():
     print(">>> start_background_training() 호출됨")
