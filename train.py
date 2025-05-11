@@ -46,13 +46,16 @@ def create_dataset(features, strategy, window=30):
 
 def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3):
     df = get_kline_by_strategy(symbol, strategy)
-    if df is None or len(df) < WINDOW + 20:
-        print(f"⛔️ {symbol}-{strategy} 수집된 원시 데이터 없음 또는 너무 짧음: {len(df) if df is not None else 'None'}", flush=True)
+    if df is None:
+        print(f"⛔️ {symbol}-{strategy} 수집된 원시 데이터 없음: None", flush=True)
+        return
+    if len(df) < WINDOW + 20:
+        print(f"⛔️ {symbol}-{strategy} 수집된 원시 데이터 너무 짧음: {len(df)}개", flush=True)
         return
 
     df_feat = compute_features(df)
     if len(df_feat) < WINDOW + 1:
-        print(f"⛔️ {symbol}-{strategy} 특징 추출 후 데이터 부족: {len(df_feat)}", flush=True)
+        print(f"⛔️ {symbol}-{strategy} 특징 추출 후 데이터 부족: {len(df_feat)}개", flush=True)
         return
 
     scaler = MinMaxScaler()
@@ -63,7 +66,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     print(f"▶️ {symbol}-{strategy} 데이터 개수: X={len(X)}, y={len(y)}", flush=True)
 
     if len(X) == 0:
-        print(f"⚠️ {symbol}-{strategy} 학습 안 됨: 조건에 맞는 데이터 없음", flush=True)
+        print(f"⚠️ {symbol}-{strategy} 학습 안 됨: 유효 시퀀스 없음", flush=True)
         with open("train_log.txt", "a") as f:
             f.write(f"[{datetime.datetime.utcnow()}] ❌ {symbol}-{strategy} 학습 실패 (데이터 없음)\n")
         return
