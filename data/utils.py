@@ -5,13 +5,14 @@ import time
 
 BASE_URL = "https://api.bybit.com"
 
-# ✅ 거래 가능 코인 21개로 축소
+# ✅ 전체 30개 심볼 복원
 SYMBOLS = [
     "BTCUSDT", "ADAUSDT", "XRPUSDT", "SOLUSDT", "ETHUSDT",
     "XLMUSDT", "SUIUSDT", "ONDOUSDT", "LINKUSDT", "AVAXUSDT",
-    "ETCUSDT", "UNIUSDT", "FILUSDT", "DOTUSDT", "TRXUSDT",
-    "STORJUSDT", "WAVESUSDT", "DOGEUSDT", "TRUMPUSDT",
-    "BCHUSDT", "HBARUSDT"
+    "ETCUSDT", "UNIUSDT", "FILUSDT", "DOTUSDT", "LTCUSDT",
+    "TRXUSDT", "FLOWUSDT", "STORJUSDT", "WAVESUSDT", "QTUMUSDT",
+    "IOTAUSDT", "NEOUSDT", "DOGEUSDT", "SOLARUSDT", "TRUMPUSDT",
+    "SHIBUSDT", "BCHUSDT", "SANDUSDT", "HBARUSDT", "GASUSDT"
 ]
 
 STRATEGY_CONFIG = {
@@ -26,7 +27,7 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 200):
         "symbol": symbol,
         "interval": interval,
         "limit": limit,
-        "category": "linear"  # ✅ 중요 파라미터
+        "category": "linear"
     }
     try:
         res = requests.get(url, params=params, timeout=10)
