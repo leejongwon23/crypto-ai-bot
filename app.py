@@ -62,6 +62,17 @@ def train_log():
     except Exception as e:
         return f"로그 파일을 읽을 수 없습니다: {e}", 500
 
+# ✅ write_test.txt 저장 테스트용 경로 추가
+@app.route("/write-test")
+def write_test():
+    try:
+        path = "write_test.txt"
+        with open(path, "w") as f:
+            f.write(f"[{datetime.datetime.utcnow()}] ✅ 파일 저장 테스트 성공\n")
+        return f"파일 생성 성공: {path}"
+    except Exception as e:
+        return f"파일 생성 실패: {e}", 500
+
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
     sys.stdout.flush()
