@@ -15,9 +15,9 @@ SYMBOLS = [
 ]
 
 STRATEGY_CONFIG = {
-    "단기": {"interval": "4h", "limit": 300},
-    "중기": {"interval": "1d", "limit": 300},
-    "장기": {"interval": "1w", "limit": 300}
+    "단기": {"interval": "240", "limit": 300},
+    "중기": {"interval": "D", "limit": 300},
+    "장기": {"interval": "w", "limit": 300}
 }
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 200):
