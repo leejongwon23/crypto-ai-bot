@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from data.utils import SYMBOLS, STRATEGY_CONFIG, get_kline_by_strategy, compute_features
-from model.base_model import get_model
+from model.base_model import get_model, format_prediction
 from wrong_data_loader import load_wrong_prediction_data
 import logger
 from logger import get_actual_success_rate
@@ -50,15 +50,15 @@ def create_dataset(features, strategy, window=30):
 def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3):
     df = get_kline_by_strategy(symbol, strategy)
     if df is None:
-        print(f"⛔️ {symbol}-{strategy} 수집된 원시 데이터 없음: None", flush=True)
+        print(f"\u274c {symbol}-{strategy} 수집된 원시 데이터 없음: None", flush=True)
         return
     if len(df) < WINDOW + 10:
-        print(f"⛔️ {symbol}-{strategy} 수집된 원시 데이터 너무 짧음: {len(df)}개", flush=True)
+        print(f"\u274c {symbol}-{strategy} 수집된 원시 데이터 너무 짧음: {len(df)}개", flush=True)
         return
 
     df_feat = compute_features(df)
     if len(df_feat) < WINDOW + 1:
-        print(f"⛔️ {symbol}-{strategy} 특징 추출 후 데이터 부족: {len(df_feat)}개", flush=True)
+        print(f"\u274c {symbol}-{strategy} 특징 추출 후 데이터 부족: {len(df_feat)}개", flush=True)
         return
 
     scaler = MinMaxScaler()
@@ -66,12 +66,12 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
 
     X, y = create_dataset(feature_dicts, strategy, window=WINDOW)
-    print(f"▶️ {symbol}-{strategy} 데이터 개수: X={len(X)}, y={len(y)}", flush=True)
+    print(f"\u25b6\ufe0f {symbol}-{strategy} 데이터 개수: X={len(X)}, y={len(y)}", flush=True)
 
     if len(X) == 0:
-        print(f"⚠️ {symbol}-{strategy} 학습 안 됨: 유효 시퀀스 없음", flush=True)
+        print(f"\u26a0\ufe0f {symbol}-{strategy} 학습 안 됨: 유효 시퀀스 없음", flush=True)
         with open(LOG_FILE, "a") as f:
-            f.write(f"[{datetime.datetime.utcnow()}] ❌ {symbol}-{strategy} 학습 실패 (데이터 없음)\n")
+            f.write(f"[{datetime.datetime.utcnow()}] \u274c {symbol}-{strategy} 학습 실패 (데이터 없음)\n")
         return
 
     X_tensor = torch.tensor(X, dtype=torch.float32)
@@ -110,13 +110,13 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
 
     os.makedirs("models", exist_ok=True)
     torch.save(model.state_dict(), model_path)
-    print("✅ models 폴더 생성됨", flush=True)
-    print(f"✅ 모델 저장됨: {model_path}", flush=True)
+    print("\u2705 models 폴더 생성됨", flush=True)
+    print(f"\u2705 모델 저장됨: {model_path}", flush=True)
 
     with open(LOG_FILE, "a") as f:
-        f.write(f"[{datetime.datetime.utcnow()}] ✅ 저장됨: {model_path}\n")
+        f.write(f"[{datetime.datetime.utcnow()}] \u2705 저장됨: {model_path}\n")
 
-    print("📁 models 폴더 내용:")
+    print("\ud83d\udcc1 models 폴더 내용:")
     for file in os.listdir("models"):
         print(" -", file)
 
@@ -132,32 +132,49 @@ def predict(symbol, strategy):
     X = np.expand_dims(X, axis=0)
     X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
 
-    model = get_model(input_size=X.shape[2])
-    model_path = f"models/{symbol}_{strategy}_lstm.pt"
-    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
-    model.to(DEVICE)
-    model.eval()
-    with torch.no_grad():
-        signal, confidence = model(X_tensor)
-        prob = signal.squeeze().item()
-        confidence = confidence.squeeze().item()
+    models = {}
+    directions = []
+    confidences = []
+    rates = []
+
+    for model_type in ["lstm", "cnn_lstm", "transformer"]:
+        model = get_model(model_type=model_type, input_size=X.shape[2])
+        model_path = f"models/{symbol}_{strategy}_{model_type}.pt"
+        if not os.path.exists(model_path):
+            return None
+        model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+        model.to(DEVICE)
+        model.eval()
+        with torch.no_grad():
+            signal, confidence = model(X_tensor)
+            signal = signal.squeeze().item()
+            confidence = confidence.squeeze().item()
+            rate = abs(signal - 0.5) * 2
+            result = format_prediction(signal, confidence, rate)
+            directions.append(result["direction"])
+            confidences.append(result["confidence"])
+            rates.append(result["rate"])
+
+    if not (directions[0] == directions[1] == directions[2]):
+        return None
+
+    direction = directions[0]
+    avg_conf = sum(confidences) / 3
+    avg_rate = sum(rates) / 3
 
     price = df["close"].iloc[-1]
-    direction = "롱" if prob > 0.5 else "숏"
-
-    predicted_gain = prob if direction == "롱" else 1 - prob
     min_gain, max_gain = STRATEGY_GAIN_RANGE[strategy]
 
-    if predicted_gain < min_gain:
+    if avg_rate < min_gain:
         return None
-    if predicted_gain > max_gain:
-        predicted_gain = max_gain
+    if avg_rate > max_gain:
+        avg_rate = max_gain
 
     if direction == "롱":
-        target = price * (1 + predicted_gain)
+        target = price * (1 + avg_rate)
         stop = price * (1 - STOP_LOSS_PCT)
     else:
-        target = price * (1 - predicted_gain)
+        target = price * (1 - avg_rate)
         stop = price * (1 + STOP_LOSS_PCT)
 
     rsi = features["rsi"].iloc[-1]
@@ -177,8 +194,8 @@ def predict(symbol, strategy):
         "price": price,
         "target": target,
         "stop": stop,
-        "confidence": confidence,
-        "rate": predicted_gain,
+        "confidence": avg_conf,
+        "rate": avg_rate,
         "reason": ", ".join(reason)
     }
 
