@@ -29,19 +29,12 @@ def main():
                 result = predict(symbol, strategy)
                 print(f"📊 예측 결과: {result}")
                 if result and result["confidence"] >= 0.85:
-                    # ✅ 단기만 수익률 5% 이상, 나머지는 기존 전략 기준 유지
-                    if strategy == "단기":
-                        if result["rate"] >= 0.05:
-                            print(f"✅ 조건 만족 (단기): {symbol} - {strategy}")
-                            all_results.append(result)
-                        else:
-                            print(f"❌ 수익률 미달 (단기): {result['rate']}")
+                    min_gain = STRATEGY_GAIN_LEVELS[strategy][0]
+                    if result["rate"] >= min_gain:
+                        print(f"✅ 조건 만족: {symbol} - {strategy}")
+                        all_results.append(result)
                     else:
-                        if result["rate"] >= STRATEGY_GAIN_LEVELS[strategy][0]:
-                            print(f"✅ 조건 만족: {symbol} - {strategy}")
-                            all_results.append(result)
-                        else:
-                            print(f"❌ 수익률 미달: {result['rate']}")
+                        print(f"❌ 수익률 미달: {result['rate']}")
                 else:
                     print(f"❌ 신뢰도 미달 또는 결과 없음")
             except Exception as e:
