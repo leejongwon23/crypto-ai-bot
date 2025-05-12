@@ -36,6 +36,8 @@ def create_dataset(features, strategy, window=30):
         x_seq = features[i:i+window]
         current_close = features[i+window-1]['close']
         future_close = features[i+window]['close']
+        if current_close == 0:
+            continue
         change = (future_close - current_close) / current_close
 
         min_gain = STRATEGY_GAIN_RANGE[strategy][0]
@@ -74,14 +76,6 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
             f.write(f"[{datetime.datetime.utcnow()}] ❌ {symbol}-{strategy} 학습 실패 (데이터 없음)\n")
         return
 
-    X_tensor = torch.tensor(X, dtype=torch.float32)
-    y_tensor = torch.tensor(y, dtype=torch.float32)
-    dataset = TensorDataset(X_tensor, y_tensor)
-    val_len = int(len(dataset) * 0.2)
-    train_len = len(dataset) - val_len
-    train_set, val_set = random_split(dataset, [train_len, val_len])
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
-
     os.makedirs("models", exist_ok=True)
 
     for model_type in ["lstm", "cnn_lstm", "transformer"]:
@@ -90,9 +84,18 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
         if os.path.exists(model_path):
             print(f"⚠️ {model_path} 기존 모델 삭제 후 재학습합니다.", flush=True)
             os.remove(model_path)
+
         model.train()
         criterion = nn.BCELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+        X_tensor = torch.tensor(X, dtype=torch.float32)
+        y_tensor = torch.tensor(y, dtype=torch.float32)
+        dataset = TensorDataset(X_tensor, y_tensor)
+        val_len = int(len(dataset) * 0.2)
+        train_len = len(dataset) - val_len
+        train_set, val_set = random_split(dataset, [train_len, val_len])
+        train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
 
         wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=WINDOW)
         if wrong_data:
@@ -133,7 +136,6 @@ def predict(symbol, strategy):
     X = np.expand_dims(X, axis=0)
     X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
 
-    models = {}
     directions = []
     confidences = []
     rates = []
@@ -252,3 +254,4 @@ def main():
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
 
 background_auto_train(interval_sec=3600)
+main()
