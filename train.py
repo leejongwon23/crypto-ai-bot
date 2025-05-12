@@ -254,4 +254,3 @@ def main():
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
 
 background_auto_train(interval_sec=3600)
-main()
