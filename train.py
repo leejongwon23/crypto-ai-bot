@@ -228,4 +228,4 @@ def get_price_now(symbol):
     prices = get_realtime_prices()
     return prices.get(symbol)
 
-background_auto_train(interval_sec=3600)
+background_auto_train(interval_sec=10800)
