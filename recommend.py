@@ -41,6 +41,14 @@ def main():
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
 
     print(f"📦 최종 조건 만족 예측 수: {len(all_results)}")
+
+    # 추가: 조건 만족하는 코인들 출력
+    if len(all_results) > 0:
+        print("✅ 추천할 코인 리스트:")
+        for result in all_results:
+            print(f"- {result['symbol']} ({result['strategy']})")
+
+    # 가장 신뢰도가 높은 1개 결과만 선택
     top_results = sorted(all_results, key=lambda x: x["confidence"], reverse=True)[:1]
 
     for result in top_results:
