@@ -1,9 +1,10 @@
-from flask import Flask
+from flask import Flask, jsonify
 from recommend import main
 import train
 import os
 import threading
 import datetime
+import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
 import traceback  # 예외 전체 로그 출력용
@@ -89,6 +90,20 @@ def list_model_files():
         return "<pre>" + "\n".join(files) + "</pre>"
     except Exception as e:
         return f"모델 파일 확인 중 오류 발생: {e}", 500
+
+# ✅ prediction_log.csv 최근 10줄 확인 라우트 추가
+@app.route("/check-log")
+def check_log():
+    try:
+        log_path = "prediction_log.csv"
+        if not os.path.exists(log_path):
+            return jsonify({"error": "prediction_log.csv not found"})
+
+        df = pd.read_csv(log_path)
+        last_10 = df.tail(10).to_dict(orient='records')
+        return jsonify(last_10)
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
