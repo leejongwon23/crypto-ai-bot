@@ -18,27 +18,40 @@ def get_price_now(symbol):
     return prices.get(symbol)
 
 def main():
+    print("✅ 예측 평가 시작")
     evaluate_predictions(get_price_now)
     all_results = []
 
     for strategy in STRATEGY_GAIN_LEVELS:
         for symbol in SYMBOLS:
             try:
+                print(f"⏳ 예측 중: {symbol} - {strategy}")
                 result = predict(symbol, strategy)
+                print(f"📊 예측 결과: {result}")
                 if result and result["confidence"] >= 0.85:
                     # ✅ 단기만 수익률 5% 이상, 나머지는 기존 전략 기준 유지
                     if strategy == "단기":
                         if result["rate"] >= 0.05:
+                            print(f"✅ 조건 만족 (단기): {symbol} - {strategy}")
                             all_results.append(result)
+                        else:
+                            print(f"❌ 수익률 미달 (단기): {result['rate']}")
                     else:
                         if result["rate"] >= STRATEGY_GAIN_LEVELS[strategy][0]:
+                            print(f"✅ 조건 만족: {symbol} - {strategy}")
                             all_results.append(result)
+                        else:
+                            print(f"❌ 수익률 미달: {result['rate']}")
+                else:
+                    print(f"❌ 신뢰도 미달 또는 결과 없음")
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
 
-    # ✅ 전략 구분 없이 전체 예측 중 신뢰도 Top 1개만 전송
+    print(f"📦 최종 조건 만족 예측 수: {len(all_results)}")
     top_results = sorted(all_results, key=lambda x: x["confidence"], reverse=True)[:1]
+
     for result in top_results:
+        print("📤 메시지 전송 준비:", result)
         log_prediction(
             symbol=result["symbol"],
             strategy=result["strategy"],
@@ -49,5 +62,5 @@ def main():
             confidence=result["confidence"]
         )
         msg = format_message(result)
+        print("📨 메시지 내용:", msg)
         send_message(msg)
-
