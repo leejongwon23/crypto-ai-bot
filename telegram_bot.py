@@ -19,5 +19,6 @@ def send_message(text: str):
         res = requests.post(url, data=data, timeout=10)
         res.raise_for_status()
         print("[TELEGRAM] 메시지 전송 성공")
+        print(f"[텔레그램 응답] {res.status_code} - {res.text}")  # ✅ 로그 추가
     except Exception as e:
         print(f"[TELEGRAM ERROR] 메시지 전송 실패: {e}")
