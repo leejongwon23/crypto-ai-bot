@@ -17,7 +17,7 @@ from src.message_formatter import format_message
 from telegram_bot import send_message
 
 DEVICE = torch.device("cpu")
-WINDOW = 10
+WINDOW = 30
 STOP_LOSS_PCT = 0.02
 
 STRATEGY_GAIN_RANGE = {
@@ -30,7 +30,7 @@ LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 LOG_FILE = os.path.join(LOG_DIR, "train_log.txt")
 
-def create_dataset(features, strategy, window=10):
+def create_dataset(features, strategy, window=30):
     X, y = [], []
     for i in range(len(features) - window - 1):
         x_seq = features[i:i+window]
