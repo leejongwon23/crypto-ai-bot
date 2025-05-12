@@ -108,5 +108,6 @@ def check_log():
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
     sys.stdout.flush()
+    main()  # ✅ 예측 메시지 전송 테스트 실행
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
