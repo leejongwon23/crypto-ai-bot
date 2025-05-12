@@ -37,16 +37,19 @@ def create_dataset(features, strategy, window=10):
         current_close = features[i+window-1]['close']
         future_close = features[i+window]['close']
         if current_close == 0:
+            print(f"[무시됨] current_close = 0 at index {i}")
             continue
         change = (future_close - current_close) / current_close
 
         min_gain = STRATEGY_GAIN_RANGE[strategy][0]
         if abs(change) < min_gain or abs(change) > 1.0:
+            print(f"[무시됨] change={change:.4f}가 조건 불충족 (min_gain={min_gain})")
             continue
 
         label = 1 if change > 0 else 0
         X.append([list(row.values()) for row in x_seq])
         y.append(label)
+    print(f"[create_dataset] 최종 생성된 학습데이터 개수: {len(X)}")
     return np.array(X), np.array(y)
 
 def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3):
@@ -136,9 +139,7 @@ def predict(symbol, strategy):
     X = np.expand_dims(X, axis=0)
     X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
 
-    directions = []
-    confidences = []
-    rates = []
+    directions, confidences, rates = [], [], []
 
     for model_type in ["lstm", "cnn_lstm", "transformer"]:
         model = get_model(model_type=model_type, input_size=X.shape[2])
@@ -202,27 +203,17 @@ def predict(symbol, strategy):
         "reason": ", ".join(reason)
     }
 
-def get_price_now(symbol):
-    from data.utils import get_realtime_prices
-    prices = get_realtime_prices()
-    return prices.get(symbol)
-
-def auto_train_all():
-    print("[자동 학습 시작] 모든 코인-전략 조합을 학습합니다.")
-    for strategy in STRATEGY_GAIN_RANGE:
-        for symbol in SYMBOLS:
-            try:
-                print(f"[학습 중] {symbol} - {strategy}")
-                train_model(symbol, strategy)
-            except Exception as e:
-                print(f"[학습 실패] {symbol}-{strategy}: {e}")
-    print("[자동 학습 완료]")
-
 def background_auto_train(interval_sec=3600):
     def loop():
         while True:
             print("[자동학습] 모든 코인-전략 학습 시작")
-            auto_train_all()
+            for strategy in STRATEGY_GAIN_RANGE:
+                for symbol in SYMBOLS:
+                    try:
+                        print(f"[학습 중] {symbol} - {strategy}")
+                        train_model(symbol, strategy)
+                    except Exception as e:
+                        print(f"[학습 실패] {symbol}-{strategy}: {e}")
             print("[자동학습] 완료. 다음 학습까지 대기...")
             time.sleep(interval_sec)
     t = threading.Thread(target=loop, daemon=True)
@@ -253,4 +244,10 @@ def main():
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
 
+def get_price_now(symbol):
+    from data.utils import get_realtime_prices
+    prices = get_realtime_prices()
+    return prices.get(symbol)
+
 background_auto_train(interval_sec=3600)
+
