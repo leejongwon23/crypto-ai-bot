@@ -127,6 +127,16 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     for file in os.listdir("models"):
         print(" -", file)
 
+def auto_train_all():
+    print("[auto_train_all] 전체 코인 및 전략 학습 시작")
+    for strategy in STRATEGY_GAIN_RANGE:
+        for symbol in SYMBOLS:
+            try:
+                print(f"[학습 중] {symbol} - {strategy}")
+                train_model(symbol, strategy)
+            except Exception as e:
+                print(f"[오류] {symbol}-{strategy} 학습 실패: {e}")
+
 def predict(symbol, strategy):
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or len(df) < WINDOW + 1:
@@ -206,14 +216,7 @@ def predict(symbol, strategy):
 def background_auto_train(interval_sec=3600):
     def loop():
         while True:
-            print("[자동학습] 모든 코인-전략 학습 시작")
-            for strategy in STRATEGY_GAIN_RANGE:
-                for symbol in SYMBOLS:
-                    try:
-                        print(f"[학습 중] {symbol} - {strategy}")
-                        train_model(symbol, strategy)
-                    except Exception as e:
-                        print(f"[학습 실패] {symbol}-{strategy}: {e}")
+            auto_train_all()
             print("[자동학습] 완료. 다음 학습까지 대기...")
             time.sleep(interval_sec)
     t = threading.Thread(target=loop, daemon=True)
@@ -250,4 +253,3 @@ def get_price_now(symbol):
     return prices.get(symbol)
 
 background_auto_train(interval_sec=3600)
-
