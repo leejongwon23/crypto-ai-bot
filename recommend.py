@@ -19,27 +19,35 @@ def get_price_now(symbol):
 
 def main():
     evaluate_predictions(get_price_now)
+    all_results = []
+
     for strategy in STRATEGY_GAIN_LEVELS:
-        results = []
         for symbol in SYMBOLS:
             try:
                 result = predict(symbol, strategy)
-                if result and result["confidence"] >= 0.8 and result["rate"] >= STRATEGY_GAIN_LEVELS[strategy][0]:
-                    results.append(result)
+                if result and result["confidence"] >= 0.85:
+                    # ✅ 단기만 수익률 5% 이상, 나머지는 기존 전략 기준 유지
+                    if strategy == "단기":
+                        if result["rate"] >= 0.05:
+                            all_results.append(result)
+                    else:
+                        if result["rate"] >= STRATEGY_GAIN_LEVELS[strategy][0]:
+                            all_results.append(result)
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
 
-        # ✅ 신뢰도 기준 상위 2개만 메시지 전송
-        top_results = sorted(results, key=lambda x: x["confidence"], reverse=True)[:2]
-        for result in top_results:
-            log_prediction(
-                symbol=result["symbol"],
-                strategy=result["strategy"],
-                direction=result["direction"],
-                entry_price=result["price"],
-                target_price=result["target"],
-                timestamp=datetime.datetime.utcnow().isoformat(),
-                confidence=result["confidence"]
-            )
-            msg = format_message(result)
-            send_message(msg)
+    # ✅ 전략 구분 없이 전체 예측 중 신뢰도 Top 1개만 전송
+    top_results = sorted(all_results, key=lambda x: x["confidence"], reverse=True)[:1]
+    for result in top_results:
+        log_prediction(
+            symbol=result["symbol"],
+            strategy=result["strategy"],
+            direction=result["direction"],
+            entry_price=result["price"],
+            target_price=result["target"],
+            timestamp=datetime.datetime.utcnow().isoformat(),
+            confidence=result["confidence"]
+        )
+        msg = format_message(result)
+        send_message(msg)
+
