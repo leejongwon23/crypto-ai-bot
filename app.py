@@ -9,6 +9,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
 import traceback  # 예외 전체 로그 출력용
 import sys        # ← 로그 출력 강제 플러시용 추가
+from telegram_bot import send_message  # ✅ 테스트 메시지 전송용 추가
 
 # ✅ logs 폴더 생성 (맨 위에서 추가됨)
 os.makedirs("logs", exist_ok=True)
@@ -108,6 +109,15 @@ def check_log():
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
     sys.stdout.flush()
-    main()  # ✅ 예측 메시지 전송 테스트 실행
+
+    # ✅ 예측 루틴 1회 실행
+    main()
+
+    # ✅ 텔레그램 테스트 메시지 전송
+    test_message = "[시스템 테스트] Flask 앱이 정상적으로 실행되었으며 텔레그램 메시지도 전송됩니다."
+    send_message(test_message)
+    print("✅ 테스트 메시지 전송 완료")
+    sys.stdout.flush()
+
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
