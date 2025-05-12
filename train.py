@@ -82,6 +82,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     train_set, val_set = random_split(dataset, [train_len, val_len])
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
 
+    os.makedirs("models", exist_ok=True)  # ✅ 여기에 추가
     model = get_model(input_size=input_size)
     model_path = f"models/{symbol}_{strategy}_lstm.pt"
     if os.path.exists(model_path):
@@ -109,7 +110,6 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
             loss.backward()
             optimizer.step()
 
-    os.makedirs("models", exist_ok=True)
     torch.save(model.state_dict(), model_path)
     print("\u2705 models 폴더 생성됨", flush=True)
     print(f"\u2705 모델 저장됨: {model_path}", flush=True)
