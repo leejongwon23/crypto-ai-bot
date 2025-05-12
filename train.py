@@ -50,15 +50,15 @@ def create_dataset(features, strategy, window=30):
 def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3):
     df = get_kline_by_strategy(symbol, strategy)
     if df is None:
-        print(f"\u274c {symbol}-{strategy} 수집된 원시 데이터 없음: None", flush=True)
+        print(f"❌ {symbol}-{strategy} 수집된 원시 데이터 없음: None", flush=True)
         return
     if len(df) < WINDOW + 10:
-        print(f"\u274c {symbol}-{strategy} 수집된 원시 데이터 너무 짧음: {len(df)}개", flush=True)
+        print(f"❌ {symbol}-{strategy} 수집된 원시 데이터 너무 짧음: {len(df)}개", flush=True)
         return
 
     df_feat = compute_features(df)
     if len(df_feat) < WINDOW + 1:
-        print(f"\u274c {symbol}-{strategy} 특징 추출 후 데이터 부족: {len(df_feat)}개", flush=True)
+        print(f"❌ {symbol}-{strategy} 특징 추출 후 데이터 부족: {len(df_feat)}개", flush=True)
         return
 
     scaler = MinMaxScaler()
@@ -66,12 +66,12 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
 
     X, y = create_dataset(feature_dicts, strategy, window=WINDOW)
-    print(f"\u25b6\ufe0f {symbol}-{strategy} 데이터 개수: X={len(X)}, y={len(y)}", flush=True)
+    print(f"▶️ {symbol}-{strategy} 데이터 개수: X={len(X)}, y={len(y)}", flush=True)
 
     if len(X) == 0:
-        print(f"\u26a0\ufe0f {symbol}-{strategy} 학습 안 됨: 유효 시퀀스 없음", flush=True)
+        print(f"⚠️ {symbol}-{strategy} 학습 안 됨: 유효 시퀀스 없음", flush=True)
         with open(LOG_FILE, "a") as f:
-            f.write(f"[{datetime.datetime.utcnow()}] \u274c {symbol}-{strategy} 학습 실패 (데이터 없음)\n")
+            f.write(f"[{datetime.datetime.utcnow()}] ❌ {symbol}-{strategy} 학습 실패 (데이터 없음)\n")
         return
 
     X_tensor = torch.tensor(X, dtype=torch.float32)
@@ -82,42 +82,42 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     train_set, val_set = random_split(dataset, [train_len, val_len])
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
 
-    os.makedirs("models", exist_ok=True)  # ✅ 여기에 추가
-    model = get_model(input_size=input_size)
-    model_path = f"models/{symbol}_{strategy}_lstm.pt"
-    if os.path.exists(model_path):
-        print(f"⚠️ {model_path} 기존 모델 삭제 후 재학습합니다.", flush=True)
-        os.remove(model_path)
-    model.train()
-    criterion = nn.BCELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    os.makedirs("models", exist_ok=True)
 
-    wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=WINDOW)
-    if wrong_data:
-        wrong_loader = DataLoader(wrong_data, batch_size=batch_size, shuffle=True)
-        for xb, yb in wrong_loader:
-            pred, _ = model(xb)
-            loss = criterion(pred, yb)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+    for model_type in ["lstm", "cnn_lstm", "transformer"]:
+        model = get_model(model_type=model_type, input_size=input_size)
+        model_path = f"models/{symbol}_{strategy}_{model_type}.pt"
+        if os.path.exists(model_path):
+            print(f"⚠️ {model_path} 기존 모델 삭제 후 재학습합니다.", flush=True)
+            os.remove(model_path)
+        model.train()
+        criterion = nn.BCELoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    for epoch in range(epochs):
-        for xb, yb in train_loader:
-            pred, _ = model(xb)
-            loss = criterion(pred, yb)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=WINDOW)
+        if wrong_data:
+            wrong_loader = DataLoader(wrong_data, batch_size=batch_size, shuffle=True)
+            for xb, yb in wrong_loader:
+                pred, _ = model(xb)
+                loss = criterion(pred, yb)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-    torch.save(model.state_dict(), model_path)
-    print("\u2705 models 폴더 생성됨", flush=True)
-    print(f"\u2705 모델 저장됨: {model_path}", flush=True)
+        for epoch in range(epochs):
+            for xb, yb in train_loader:
+                pred, _ = model(xb)
+                loss = criterion(pred, yb)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-    with open(LOG_FILE, "a") as f:
-        f.write(f"[{datetime.datetime.utcnow()}] \u2705 저장됨: {model_path}\n")
+        torch.save(model.state_dict(), model_path)
+        print(f"✅ 모델 저장됨: {model_path}", flush=True)
+        with open(LOG_FILE, "a") as f:
+            f.write(f"[{datetime.datetime.utcnow()}] ✅ 저장됨: {model_path}\n")
 
-    print("\ud83d\udcc1 models 폴더 내용:")
+    print("📁 models 폴더 내용:")
     for file in os.listdir("models"):
         print(" -", file)
 
