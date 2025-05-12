@@ -85,7 +85,8 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     model = get_model(input_size=input_size)
     model_path = f"models/{symbol}_{strategy}_lstm.pt"
     if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path))
+        print(f"⚠️ {model_path} 기존 모델 삭제 후 재학습합니다.", flush=True)
+        os.remove(model_path)
     model.train()
     criterion = nn.BCELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
