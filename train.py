@@ -53,6 +53,8 @@ def create_dataset(features, strategy, window=10):
     return np.array(X), np.array(y)
 
 def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3):
+    print(f"[train_model] 시작: {symbol}-{strategy}")  # ✅ 추가 1
+    
     df = get_kline_by_strategy(symbol, strategy)
     if df is None:
         print(f"❌ {symbol}-{strategy} 수집된 원시 데이터 없음: None", flush=True)
@@ -61,10 +63,13 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
         print(f"❌ {symbol}-{strategy} 수집된 원시 데이터 너무 짧음: {len(df)}개", flush=True)
         return
 
+    print(f"✅ {symbol}-{strategy} 원시 데이터 수집 성공: {len(df)}행")  # ✅ 이게 정위치
+
     df_feat = compute_features(df)
     if len(df_feat) < WINDOW + 1:
         print(f"❌ {symbol}-{strategy} 특징 추출 후 데이터 부족: {len(df_feat)}개", flush=True)
         return
+
 
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(df_feat.values)
