@@ -42,13 +42,15 @@ def main():
 
     print(f"📦 최종 조건 만족 예측 수: {len(all_results)}")
 
-    # 추가: 조건 만족하는 코인들 출력
+    # 조건 만족 코인 출력 또는 미충족 안내
     if len(all_results) > 0:
         print("✅ 추천할 코인 리스트:")
         for result in all_results:
             print(f"- {result['symbol']} ({result['strategy']})")
+    else:
+        print("⚠️ 추천 조건을 만족하는 코인이 없습니다.")
 
-    # 가장 신뢰도가 높은 1개 결과만 선택
+    # 가장 신뢰도 높은 1개만 전송
     top_results = sorted(all_results, key=lambda x: x["confidence"], reverse=True)[:1]
 
     for result in top_results:
@@ -65,3 +67,12 @@ def main():
         msg = format_message(result)
         print("📨 메시지 내용:", msg)
         send_message(msg)
+
+if __name__ == "__main__":
+    # 메인 실행
+    main()
+
+    # ✅ 테스트용 메시지
+    test_message = "[시스템 테스트] 텔레그램 메시지가 정상 작동합니다."
+    send_message(test_message)
+    print("✅ 테스트 메시지 전송 완료")
