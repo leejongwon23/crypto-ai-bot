@@ -146,9 +146,32 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df['trend_slope'] = df['ema10'].diff()
     df['percent_diff'] = (df['close'] - df['ma20']) / df['ma20']
     df['volume_delta'] = df['volume'].diff()
+
+    # ✅ OBV 추가
+    obv = [0]
+    for i in range(1, len(df)):
+        if df['close'].iloc[i] > df['close'].iloc[i-1]:
+            obv.append(obv[-1] + df['volume'].iloc[i])
+        elif df['close'].iloc[i] < df['close'].iloc[i-1]:
+            obv.append(obv[-1] - df['volume'].iloc[i])
+        else:
+            obv.append(obv[-1])
+    df['obv'] = obv
+
+    # ✅ CCI 추가
+    tp = (df['high'] + df['low'] + df['close']) / 3
+    cci = (tp - tp.rolling(20).mean()) / (0.015 * tp.rolling(20).std())
+    df['cci'] = cci
+
+    # ✅ Stochastic RSI 추가
+    min_rsi = df['rsi'].rolling(14).min()
+    max_rsi = df['rsi'].rolling(14).max()
+    df['stoch_rsi'] = (df['rsi'] - min_rsi) / (max_rsi - min_rsi)
+
     df = df.dropna()
     return df[[
         'close', 'volume', 'ma5', 'ma20', 'rsi', 'macd',
         'bollinger', 'volatility', 'trend_slope',
-        'percent_diff', 'volume_delta'
+        'percent_diff', 'volume_delta',
+        'obv', 'cci', 'stoch_rsi'
     ]]
