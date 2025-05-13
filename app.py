@@ -16,6 +16,7 @@ PERSIST_DIR = "/persistent"
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
 LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.txt")
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
+WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 
 os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 
@@ -76,7 +77,6 @@ def run():
         sys.stdout.flush()
         return f"Error: {e}", 500
 
-# ✅ 수동 전체 학습 트리거 추가
 @app.route("/train-now")
 def train_now():
     try:
@@ -123,8 +123,19 @@ def check_log():
     try:
         if not os.path.exists(PREDICTION_LOG):
             return jsonify({"error": "prediction_log.csv not found"})
-
         df = pd.read_csv(PREDICTION_LOG)
+        last_10 = df.tail(10).to_dict(orient='records')
+        return jsonify(last_10)
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+# ✅ 실패 예측 확인용 엔드포인트 추가
+@app.route("/check-wrong")
+def check_wrong():
+    try:
+        if not os.path.exists(WRONG_PREDICTIONS):
+            return jsonify({"error": "wrong_predictions.csv not found"})
+        df = pd.read_csv(WRONG_PREDICTIONS)
         last_10 = df.tail(10).to_dict(orient='records')
         return jsonify(last_10)
     except Exception as e:
