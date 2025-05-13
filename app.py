@@ -7,25 +7,37 @@ import datetime
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
-import traceback  # 예외 전체 로그 출력용
-import sys        # ← 로그 출력 강제 플러시용 추가
-from telegram_bot import send_message  # ✅ 테스트 메시지 전송용 추가
+import traceback
+import sys
+from telegram_bot import send_message
 
-# ✅ logs 폴더 생성 (맨 위에서 추가됨)
 os.makedirs("logs", exist_ok=True)
 
-# 학습 백그라운드 실행
+# ✅ 예측 루프 조건 함수 (09, 13, 16, 20, 22, 01시)
+def is_prediction_hour():
+    now = datetime.datetime.now(pytz.timezone('Asia/Seoul'))
+    return now.hour in [9, 13, 16, 20, 22, 1]
+
 def start_background_training():
     print(">>> start_background_training() 호출됨")
     sys.stdout.flush()
     threading.Thread(target=train.auto_train_all, daemon=True).start()
 
-# 예측 백그라운드 실행 (5분 간격)
 def start_scheduler():
     print(">>> start_scheduler() 호출됨")
     sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Seoul'))
-    scheduler.add_job(main, 'interval', minutes=5)
+
+    def scheduled_job():
+        if is_prediction_hour():
+            print(f"[예측 루프 실행 중 - 허용된 시간대] {datetime.datetime.now()}")
+            sys.stdout.flush()
+            main()
+        else:
+            print(f"[예측 생략 - 비활성 시간대] {datetime.datetime.now()}")
+            sys.stdout.flush()
+
+    scheduler.add_job(scheduled_job, 'interval', minutes=5)
     scheduler.start()
 
 start_background_training()
@@ -58,7 +70,6 @@ def run():
         sys.stdout.flush()
         return f"Error: {e}", 500
 
-# ✅ train_log.txt 로그 출력 경로 수정됨 (logs 폴더 기준)
 @app.route("/train-log")
 def train_log():
     try:
@@ -68,7 +79,6 @@ def train_log():
     except Exception as e:
         return f"로그 파일을 읽을 수 없습니다: {e}", 500
 
-# ✅ write_test.txt 저장 테스트용 경로 추가
 @app.route("/write-test")
 def write_test():
     try:
@@ -79,7 +89,6 @@ def write_test():
     except Exception as e:
         return f"파일 생성 실패: {e}", 500
 
-# ✅ models 폴더 내부 파일 목록 확인용 경로 추가
 @app.route("/models")
 def list_model_files():
     try:
@@ -92,7 +101,6 @@ def list_model_files():
     except Exception as e:
         return f"모델 파일 확인 중 오류 발생: {e}", 500
 
-# ✅ prediction_log.csv 최근 10줄 확인 라우트 추가
 @app.route("/check-log")
 def check_log():
     try:
@@ -110,10 +118,8 @@ if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
     sys.stdout.flush()
 
-    # ✅ 예측 루틴 1회 실행
-    main()
+    main()  # 최초 1회 실행
 
-    # ✅ 텔레그램 테스트 메시지 전송
     test_message = "[시스템 테스트] Flask 앱이 정상적으로 실행되었으며 텔레그램 메시지도 전송됩니다."
     send_message(test_message)
     print("✅ 테스트 메시지 전송 완료")
