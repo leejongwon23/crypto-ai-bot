@@ -22,8 +22,7 @@ def main():
     evaluate_predictions(get_price_now)
 
     for strategy in STRATEGY_GAIN_LEVELS:
-        strategy_results = []  # 조건 만족 결과만 따로 모음
-        all_predictions = []   # 전체 예측 결과 저장용
+        strategy_results = []
 
         for symbol in SYMBOLS:
             try:
@@ -32,7 +31,7 @@ def main():
                 print(f"📊 예측 결과: {result}")
 
                 if result:
-                    # 모든 예측 결과를 평가 대상으로 저장
+                    # 예측 결과 기록 (모든 결과 저장)
                     log_prediction(
                         symbol=result["symbol"],
                         strategy=result["strategy"],
@@ -43,9 +42,11 @@ def main():
                         confidence=result["confidence"]
                     )
 
+                    # ✅ 1. 방향 일치 기준 (3모델 일치했을 경우만 predict가 결과 반환)
+                    # ✅ 2. 수익률 기준
                     min_gain = STRATEGY_GAIN_LEVELS[strategy][0]
                     if result["rate"] >= min_gain:
-                        print(f"✅ 조건 만족: {symbol} - {strategy}")
+                        print(f"✅ 기준 만족: {symbol} - {strategy}")
                         strategy_results.append(result)
                     else:
                         print(f"❌ 수익률 미달: {result['rate']}")
@@ -55,19 +56,18 @@ def main():
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
 
-        print(f"📦 전략 [{strategy}] 조건 만족 예측 수: {len(strategy_results)}")
+        print(f"📦 전략 [{strategy}] 기준 통과 수: {len(strategy_results)}")
 
+        # ✅ 3. 전략별 Top 1 전송 (신뢰도 기준)
         if strategy_results:
-            # 신뢰도 기준 Top 1 선택
             top_result = sorted(strategy_results, key=lambda x: x["confidence"], reverse=True)[0]
             print(f"📤 메시지 전송 준비: {top_result}")
 
-            # 메시지용 log (이미 위에서 기록했지만 중복 저장해도 무방)
             msg = format_message(top_result)
             print("📨 메시지 내용:", msg)
             send_message(msg)
         else:
-            print(f"⚠️ [{strategy}] 전략에 추천 조건을 만족하는 코인이 없습니다.")
+            print(f"⚠️ [{strategy}] 추천 조건 만족 코인 없음")
 
 if __name__ == "__main__":
     main()
