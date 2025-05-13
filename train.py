@@ -80,20 +80,15 @@ def predict(symbol, strategy):
     avg_rate = sum(r["rate"] for r in results) / len(results)
     price = features["close"].iloc[-1]
 
-    # reason 설명 추가
     rsi = features["rsi"].iloc[-1] if "rsi" in features else 50
     macd = features["macd"].iloc[-1] if "macd" in features else 0
     boll = features["bollinger"].iloc[-1] if "bollinger" in features else 0
     reason = []
-    if rsi < 30:
-        reason.append("RSI 과매도")
-    elif rsi > 70:
-        reason.append("RSI 과매수")
+    if rsi < 30: reason.append("RSI 과매도")
+    elif rsi > 70: reason.append("RSI 과매수")
     reason.append("MACD 상승 전환" if macd > 0 else "MACD 하락 전환")
-    if boll > 1:
-        reason.append("볼린저 상단 돌파")
-    elif boll < -1:
-        reason.append("볼린저 하단 이탈")
+    if boll > 1: reason.append("볼린저 상단 돌파")
+    elif boll < -1: reason.append("볼린저 하단 이탈")
 
     return {
         "symbol": symbol,
@@ -116,17 +111,16 @@ def create_dataset(features, strategy, window=30):
         if current_close == 0:
             continue
         change = (future_close - current_close) / current_close
-        min_gain = STRATEGY_GAIN_RANGE[strategy][0]
-        if abs(change) < min_gain or abs(change) > 1.0:
-            continue
         label = 1 if change > 0 else 0
         X.append([list(row.values()) for row in x_seq])
         y.append(label)
     return np.array(X), np.array(y)
 
 def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3):
+    print(f"[train_model] 시작: {symbol}-{strategy}")
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or len(df) < WINDOW + 10:
+        print(f"❌ {symbol}-{strategy} 데이터 부족")
         return
     df_feat = compute_features(df)
     if len(df_feat) < WINDOW + 1:
@@ -136,6 +130,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
     X, y = create_dataset(feature_dicts, strategy, window=WINDOW)
     if len(X) == 0:
+        print(f"⚠️ {symbol}-{strategy} 유효 시퀀스 없음")
         return
     for model_type in ["lstm", "cnn_lstm", "transformer"]:
         model = get_model(model_type=model_type, input_size=input_size)
@@ -169,8 +164,10 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
                 loss.backward()
                 optimizer.step()
         torch.save(model.state_dict(), model_path)
+        print(f"✅ 모델 저장됨: {model_path}")
 
 def auto_train_all():
+    print("[auto_train_all] 전체 코인 및 전략 학습 시작")
     for strategy in STRATEGY_GAIN_RANGE:
         for symbol in SYMBOLS:
             try:
@@ -185,7 +182,6 @@ def background_auto_train(interval_sec=1800):
         nonlocal idx
         while True:
             current_strategy = strategies[idx % len(strategies)]
-            print(f"[전략별 학습 시작] → {current_strategy}")
             for symbol in SYMBOLS:
                 try:
                     train_model(symbol, current_strategy)
@@ -193,7 +189,6 @@ def background_auto_train(interval_sec=1800):
                 except Exception as e:
                     print(f"[오류] {symbol}-{current_strategy} 학습 실패: {e}")
             idx += 1
-            print(f"[전략별 학습 종료] → {current_strategy}, 다음 전략 대기 중...")
             time.sleep(interval_sec)
     t = threading.Thread(target=loop, daemon=True)
     t.start()
