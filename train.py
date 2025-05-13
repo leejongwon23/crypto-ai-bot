@@ -146,7 +146,7 @@ def predict(symbol, strategy):
         model = get_model(model_type=model_type, input_size=X.shape[2])
         model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.pt")
         if not os.path.exists(model_path):
-            return None
+            continue
         model.load_state_dict(torch.load(model_path, map_location=DEVICE))
         model.to(DEVICE)
         model.eval()
@@ -156,34 +156,40 @@ def predict(symbol, strategy):
             confidence = confidence.squeeze().item()
             rate = abs(signal - 0.5) * 2
             result = format_prediction(signal, confidence, rate)
-            result.update({"model": model_type})
+            result.update({
+                "model": model_type,
+                "symbol": symbol,
+                "strategy": strategy,
+                "price": features["close"].iloc[-1],
+                "confidence": confidence,
+                "rate": rate,
+                "direction": result["direction"]
+            })
             results.append(result)
-    if not (results[0]["direction"] == results[1]["direction"] == results[2]["direction"]):
+
+    if not results:
         return None
-    filtered = [r for r in results if r["rate"] >= STRATEGY_GAIN_RANGE[strategy][0]]
-    if not filtered:
-        return None
-    top = sorted(filtered, key=lambda x: (x["confidence"], x["rate"], ["cnn_lstm", "lstm", "transformer"].index(x["model"]), x["symbol"]), reverse=True)[0]
-    df_close = df["close"].iloc[-1]
-    if top["rate"] > STRATEGY_GAIN_RANGE[strategy][1]:
-        top["rate"] = STRATEGY_GAIN_RANGE[strategy][1]
-    if top["direction"] == "롱":
-        top["target"] = df_close * (1 + top["rate"])
-        top["stop"] = df_close * (1 - STOP_LOSS_PCT)
+
+    # 우선 다수 모델의 방향으로 결정
+    direction_votes = [r["direction"] for r in results]
+    final_direction = max(set(direction_votes), key=direction_votes.count)
+    avg_confidence = sum(r["confidence"] for r in results) / len(results)
+    avg_rate = sum(r["rate"] for r in results) / len(results)
+    top = {
+        "symbol": symbol,
+        "strategy": strategy,
+        "direction": final_direction,
+        "confidence": avg_confidence,
+        "rate": avg_rate,
+        "price": results[0]["price"]
+    }
+    if final_direction == "롱":
+        top["target"] = top["price"] * (1 + top["rate"])
+        top["stop"] = top["price"] * (1 - STOP_LOSS_PCT)
     else:
-        top["target"] = df_close * (1 - top["rate"])
-        top["stop"] = df_close * (1 + STOP_LOSS_PCT)
-    top["price"] = df_close
-    rsi = features["rsi"].iloc[-1]
-    macd = features["macd"].iloc[-1]
-    boll = features["bollinger"].iloc[-1]
-    reason = []
-    if rsi < 30: reason.append("RSI 과매도")
-    elif rsi > 70: reason.append("RSI 과매수")
-    reason.append("MACD 상승 전환" if macd > 0 else "MACD 하락 전환")
-    if boll > 1: reason.append("볼린저 상단 돌파")
-    elif boll < -1: reason.append("볼린저 하단 이탈")
-    top["reason"] = ", ".join(reason)
+        top["target"] = top["price"] * (1 - top["rate"])
+        top["stop"] = top["price"] * (1 + STOP_LOSS_PCT)
+
     return top
 
 def background_auto_train(interval_sec=1800):
