@@ -30,7 +30,7 @@ def main():
                 result = predict(symbol, strategy)
                 print(f"📊 예측 결과: {result}")
 
-                if result and result["confidence"] > 0.75:
+                if result:
                     min_gain = STRATEGY_GAIN_LEVELS[strategy][0]
                     if result["rate"] >= min_gain:
                         print(f"✅ 조건 만족: {symbol} - {strategy}")
@@ -38,7 +38,7 @@ def main():
                     else:
                         print(f"❌ 수익률 미달: {result['rate']}")
                 else:
-                    print("❌ 신뢰도 미달 또는 결과 없음")
+                    print("❌ 예측 결과 없음")
 
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
