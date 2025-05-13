@@ -11,7 +11,13 @@ import traceback
 import sys
 from telegram_bot import send_message
 
-os.makedirs("logs", exist_ok=True)
+# ✅ Persistent 경로 기준 설정
+PERSIST_DIR = "/persistent"
+MODEL_DIR = os.path.join(PERSIST_DIR, "models")
+LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.txt")
+PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
+
+os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 
 # ✅ 예측 루프 조건 함수 (09, 13, 16, 20, 22, 01시)
 def is_prediction_hour():
@@ -73,7 +79,7 @@ def run():
 @app.route("/train-log")
 def train_log():
     try:
-        with open("logs/train_log.txt", "r") as f:
+        with open(LOG_FILE, "r") as f:
             content = f.read()
         return f"<pre>{content}</pre>"
     except Exception as e:
@@ -82,7 +88,7 @@ def train_log():
 @app.route("/write-test")
 def write_test():
     try:
-        path = "write_test.txt"
+        path = os.path.join(PERSIST_DIR, "write_test.txt")
         with open(path, "w") as f:
             f.write(f"[{datetime.datetime.utcnow()}] ✅ 파일 저장 테스트 성공\n")
         return f"파일 생성 성공: {path}"
@@ -92,9 +98,9 @@ def write_test():
 @app.route("/models")
 def list_model_files():
     try:
-        if not os.path.exists("models"):
+        if not os.path.exists(MODEL_DIR):
             return "models 폴더가 존재하지 않습니다."
-        files = os.listdir("models")
+        files = os.listdir(MODEL_DIR)
         if not files:
             return "models 폴더가 비어 있습니다."
         return "<pre>" + "\n".join(files) + "</pre>"
@@ -104,11 +110,10 @@ def list_model_files():
 @app.route("/check-log")
 def check_log():
     try:
-        log_path = "prediction_log.csv"
-        if not os.path.exists(log_path):
+        if not os.path.exists(PREDICTION_LOG):
             return jsonify({"error": "prediction_log.csv not found"})
 
-        df = pd.read_csv(log_path)
+        df = pd.read_csv(PREDICTION_LOG)
         last_10 = df.tail(10).to_dict(orient='records')
         return jsonify(last_10)
     except Exception as e:
