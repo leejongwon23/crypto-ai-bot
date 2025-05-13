@@ -25,9 +25,17 @@ STRATEGY_GAIN_RANGE = {
     "장기": (0.10, 1.00)
 }
 
-LOG_DIR = "logs"
-os.makedirs(LOG_DIR, exist_ok=True)
+# ✅ Persistent 디스크 경로 설정
+PERSIST_DIR = "/persistent"
+MODEL_DIR = os.path.join(PERSIST_DIR, "models")
+WRONG_DIR = os.path.join(PERSIST_DIR, "wrong")
+LOG_DIR = os.path.join(PERSIST_DIR, "logs")
 LOG_FILE = os.path.join(LOG_DIR, "train_log.txt")
+PRED_LOG_FILE = os.path.join(PERSIST_DIR, "prediction_log.csv")
+
+os.makedirs(MODEL_DIR, exist_ok=True)
+os.makedirs(WRONG_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
 
 def create_dataset(features, strategy, window=30):
     X, y = [], []
@@ -73,10 +81,9 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
         with open(LOG_FILE, "a") as f:
             f.write(f"[{datetime.datetime.utcnow()}] ❌ {symbol}-{strategy} 학습 실패 (데이터 없음)\n")
         return
-    os.makedirs("models", exist_ok=True)
     for model_type in ["lstm", "cnn_lstm", "transformer"]:
         model = get_model(model_type=model_type, input_size=input_size)
-        model_path = f"models/{symbol}_{strategy}_{model_type}.pt"
+        model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.pt")
         if os.path.exists(model_path):
             print(f"⚠️ {model_path} 기존 모델 삭제 후 재학습합니다.", flush=True)
             os.remove(model_path)
@@ -111,7 +118,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
         with open(LOG_FILE, "a") as f:
             f.write(f"[{datetime.datetime.utcnow()}] ✅ 저장됨: {model_path}\n")
     print("📁 models 폴더 내용:")
-    for file in os.listdir("models"):
+    for file in os.listdir(MODEL_DIR):
         print(" -", file)
 
 def auto_train_all():
@@ -137,7 +144,7 @@ def predict(symbol, strategy):
     results = []
     for model_type in ["lstm", "cnn_lstm", "transformer"]:
         model = get_model(model_type=model_type, input_size=X.shape[2])
-        model_path = f"models/{symbol}_{strategy}_{model_type}.pt"
+        model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.pt")
         if not os.path.exists(model_path):
             return None
         model.load_state_dict(torch.load(model_path, map_location=DEVICE))
