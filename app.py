@@ -22,7 +22,7 @@ os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 # ✅ 예측 루프 조건 함수 (09, 13, 16, 20, 22, 01시)
 def is_prediction_hour():
     now = datetime.datetime.now(pytz.timezone('Asia/Seoul'))
-    return now.hour in [9, 13, 16, 20, 22, 1]
+    return now.hour in [1, 3, 5, 7, 9, 11, 13, 15, 16, 18, 20, 22, 0]
 
 def start_background_training():
     print(">>> start_background_training() 호출됨")
