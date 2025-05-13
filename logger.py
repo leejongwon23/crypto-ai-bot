@@ -2,8 +2,10 @@ import os
 import csv
 import datetime
 
-PREDICTION_LOG = "prediction_log.csv"
-WRONG_PREDICTIONS = "wrong_predictions.csv"
+# ✅ Persistent 경로로 변경
+PERSIST_DIR = "/persistent"
+PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
+WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 THRESHOLD_TOLERANCE = 0.01  # 예: 목표 수익률의 99% 이상 도달 시 성공 처리
 
 # ✅ 전략별 평가 대기 시간 설정 (단기: 3h, 중기: 6h, 장기: 12h)
@@ -25,6 +27,7 @@ def log_prediction(symbol, strategy, direction, entry_price, target_price, times
         "status": "pending"
     }
 
+    os.makedirs(PERSIST_DIR, exist_ok=True)
     file_exists = os.path.isfile(PREDICTION_LOG)
     with open(PREDICTION_LOG, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=row.keys())
