@@ -6,10 +6,11 @@ PREDICTION_LOG = "prediction_log.csv"
 WRONG_PREDICTIONS = "wrong_predictions.csv"
 THRESHOLD_TOLERANCE = 0.01  # 예: 목표 수익률의 99% 이상 도달 시 성공 처리
 
+# ✅ 전략별 평가 대기 시간 설정 (단기: 3h, 중기: 6h, 장기: 12h)
 STRATEGY_LIMIT_HOURS = {
-    "단기": 4,
-    "중기": 24,
-    "장기": 168
+    "단기": 3,
+    "중기": 6,
+    "장기": 12
 }
 
 def log_prediction(symbol, strategy, direction, entry_price, target_price, timestamp, confidence):
