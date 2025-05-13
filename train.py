@@ -13,6 +13,7 @@ from wrong_data_loader import load_wrong_prediction_data
 import logger
 from src.message_formatter import format_message
 from telegram_bot import send_message
+import gc
 
 DEVICE = torch.device("cpu")
 WINDOW = 30
@@ -189,11 +190,23 @@ def predict(symbol, strategy):
         "reason": ", ".join(reason)
     }
 
-def background_auto_train(interval_sec=3600):
+# ✅ 전략별 시간차 학습 구조로 6시간마다 순차 학습
+def background_auto_train(interval_sec=21600):
+    strategies = list(STRATEGY_GAIN_RANGE.keys())
+    idx = 0
     def loop():
+        nonlocal idx
         while True:
-            auto_train_all()
-            print("[자동학습] 완료. 다음 학습까지 대기...")
+            current_strategy = strategies[idx % len(strategies)]
+            print(f"[전략별 학습 시작] → {current_strategy}")
+            for symbol in SYMBOLS:
+                try:
+                    train_model(symbol, current_strategy)
+                    gc.collect()
+                except Exception as e:
+                    print(f"[오류] {symbol}-{current_strategy} 학습 실패: {e}")
+            idx += 1
+            print(f"[전략별 학습 종료] → {current_strategy}, 다음 전략 대기 중...")
             time.sleep(interval_sec)
     t = threading.Thread(target=loop, daemon=True)
     t.start()
@@ -228,4 +241,4 @@ def get_price_now(symbol):
     prices = get_realtime_prices()
     return prices.get(symbol)
 
-background_auto_train(interval_sec=10800)
+background_auto_train()
