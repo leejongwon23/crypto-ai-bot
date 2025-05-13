@@ -179,7 +179,7 @@ def predict(symbol, strategy):
     top["reason"] = ", ".join(reason)
     return top
 
-def background_auto_train(interval_sec=21600):
+def background_auto_train(interval_sec=3600):
     strategies = list(STRATEGY_GAIN_RANGE.keys())
     idx = 0
     def loop():
