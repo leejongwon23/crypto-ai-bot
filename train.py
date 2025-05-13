@@ -134,7 +134,7 @@ def predict(symbol, strategy):
     X = features.iloc[-WINDOW:].values
     X = np.expand_dims(X, axis=0)
     X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
-    directions, confidences, rates = [], [], []
+    results = []
     for model_type in ["lstm", "cnn_lstm", "transformer"]:
         model = get_model(model_type=model_type, input_size=X.shape[2])
         model_path = f"models/{symbol}_{strategy}_{model_type}.pt"
@@ -149,26 +149,24 @@ def predict(symbol, strategy):
             confidence = confidence.squeeze().item()
             rate = abs(signal - 0.5) * 2
             result = format_prediction(signal, confidence, rate)
-            directions.append(result["direction"])
-            confidences.append(result["confidence"])
-            rates.append(result["rate"])
-    if not (directions[0] == directions[1] == directions[2]):
+            result.update({"model": model_type})
+            results.append(result)
+    if not (results[0]["direction"] == results[1]["direction"] == results[2]["direction"]):
         return None
-    direction = directions[0]
-    avg_conf = sum(confidences) / 3
-    avg_rate = sum(rates) / 3
-    price = df["close"].iloc[-1]
-    min_gain, max_gain = STRATEGY_GAIN_RANGE[strategy]
-    if avg_rate < min_gain:
+    filtered = [r for r in results if r["rate"] >= STRATEGY_GAIN_RANGE[strategy][0]]
+    if not filtered:
         return None
-    if avg_rate > max_gain:
-        avg_rate = max_gain
-    if direction == "롱":
-        target = price * (1 + avg_rate)
-        stop = price * (1 - STOP_LOSS_PCT)
+    top = sorted(filtered, key=lambda x: (x["confidence"], x["rate"], ["cnn_lstm", "lstm", "transformer"].index(x["model"]), x["symbol"]), reverse=True)[0]
+    df_close = df["close"].iloc[-1]
+    if top["rate"] > STRATEGY_GAIN_RANGE[strategy][1]:
+        top["rate"] = STRATEGY_GAIN_RANGE[strategy][1]
+    if top["direction"] == "롱":
+        top["target"] = df_close * (1 + top["rate"])
+        top["stop"] = df_close * (1 - STOP_LOSS_PCT)
     else:
-        target = price * (1 - avg_rate)
-        stop = price * (1 + STOP_LOSS_PCT)
+        top["target"] = df_close * (1 - top["rate"])
+        top["stop"] = df_close * (1 + STOP_LOSS_PCT)
+    top["price"] = df_close
     rsi = features["rsi"].iloc[-1]
     macd = features["macd"].iloc[-1]
     boll = features["bollinger"].iloc[-1]
@@ -178,19 +176,9 @@ def predict(symbol, strategy):
     reason.append("MACD 상승 전환" if macd > 0 else "MACD 하락 전환")
     if boll > 1: reason.append("볼린저 상단 돌파")
     elif boll < -1: reason.append("볼린저 하단 이탈")
-    return {
-        "symbol": symbol,
-        "strategy": strategy,
-        "direction": direction,
-        "price": price,
-        "target": target,
-        "stop": stop,
-        "confidence": avg_conf,
-        "rate": avg_rate,
-        "reason": ", ".join(reason)
-    }
+    top["reason"] = ", ".join(reason)
+    return top
 
-# ✅ 전략별 시간차 학습 구조로 6시간마다 순차 학습
 def background_auto_train(interval_sec=21600):
     strategies = list(STRATEGY_GAIN_RANGE.keys())
     idx = 0
@@ -218,22 +206,21 @@ def main():
         for symbol in SYMBOLS:
             try:
                 result = predict(symbol, strategy)
-                if result and result["confidence"] > 0.75:
+                if result:
                     results.append(result)
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
         if results:
-            top = sorted(results, key=lambda x: x["confidence"], reverse=True)[0]
             logger.log_prediction(
-                symbol=top["symbol"],
-                strategy=top["strategy"],
-                direction=top["direction"],
-                entry_price=top["price"],
-                target_price=top["target"],
+                symbol=results[0]["symbol"],
+                strategy=results[0]["strategy"],
+                direction=results[0]["direction"],
+                entry_price=results[0]["price"],
+                target_price=results[0]["target"],
                 timestamp=datetime.datetime.utcnow().isoformat(),
-                confidence=top["confidence"]
+                confidence=results[0]["confidence"]
             )
-            msg = format_message(top)
+            msg = format_message(results[0])
             send_message(msg)
 
 def get_price_now(symbol):
