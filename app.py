@@ -76,6 +76,17 @@ def run():
         sys.stdout.flush()
         return f"Error: {e}", 500
 
+# ✅ 수동 전체 학습 트리거 추가
+@app.route("/train-now")
+def train_now():
+    try:
+        print("[TRAIN-NOW] 전체 학습 즉시 실행 시작")
+        sys.stdout.flush()
+        threading.Thread(target=train.auto_train_all, daemon=True).start()
+        return "✅ 모든 코인 + 전략 학습이 지금 바로 시작됐습니다!"
+    except Exception as e:
+        return f"학습 시작 실패: {e}", 500
+
 @app.route("/train-log")
 def train_log():
     try:
