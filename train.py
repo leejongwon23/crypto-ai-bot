@@ -175,23 +175,27 @@ def auto_train_all():
             except Exception as e:
                 print(f"[오류] {symbol}-{strategy} 학습 실패: {e}")
 
-def background_auto_train(interval_sec=1800):
-    strategies = list(STRATEGY_GAIN_RANGE.keys())
-    idx = 0
-    def loop():
-        nonlocal idx
+def background_auto_train():
+    def loop(strategy, interval_sec):
         while True:
-            current_strategy = strategies[idx % len(strategies)]
+            print(f"[전략별 학습 시작] → {strategy}")
             for symbol in SYMBOLS:
                 try:
-                    train_model(symbol, current_strategy)
+                    train_model(symbol, strategy)
                     gc.collect()
                 except Exception as e:
-                    print(f"[오류] {symbol}-{current_strategy} 학습 실패: {e}")
-            idx += 1
+                    print(f"[오류] {symbol}-{strategy} 학습 실패: {e}")
+            print(f"[전략별 학습 종료] → {strategy}")
             time.sleep(interval_sec)
-    t = threading.Thread(target=loop, daemon=True)
-    t.start()
+
+    strategy_intervals = {
+        "단기": 10800,   # 3시간
+        "중기": 21600,  # 6시간
+        "장기": 43200   # 12시간
+    }
+
+    for strategy, interval in strategy_intervals.items():
+        threading.Thread(target=loop, args=(strategy, interval), daemon=True).start()
 
 def main():
     logger.evaluate_predictions(get_price_now)
