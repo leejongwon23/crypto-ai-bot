@@ -2,7 +2,7 @@ services:
   - type: web
     name: yopo-ai
     env: python
-    plan: free
+    plan: standard  # ✅ 여기만 'free' → 'standard' 로 변경
     buildCommand: pip install -r requirements.txt
     startCommand: python app.py
     envVars:
