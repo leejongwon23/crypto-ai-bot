@@ -47,7 +47,6 @@ def predict(symbol, strategy):
     X = np.expand_dims(X, axis=0)
     X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
 
-    # ✅ input_size 자동 계산
     input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
 
     results = []
@@ -155,6 +154,12 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
         train_len = len(dataset) - val_len
         train_set, val_set = random_split(dataset, [train_len, val_len])
         train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
+
+        # ✅ 학습 데이터가 2개 미만이면 건너뛴다
+        if len(train_loader.dataset) < 2:
+            print(f"[스킵] {symbol}-{strategy} 데이터 부족 → 샘플 수: {len(train_loader.dataset)}")
+            continue
+
         wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=WINDOW)
         if wrong_data:
             wrong_loader = DataLoader(wrong_data, batch_size=batch_size, shuffle=True)
