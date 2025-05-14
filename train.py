@@ -16,7 +16,7 @@ from telegram_bot import send_message
 import gc
 
 DEVICE = torch.device("cpu")
-WINDOW = 30
+WINDOW = 20
 STOP_LOSS_PCT = 0.02
 
 STRATEGY_GAIN_RANGE = {
@@ -108,7 +108,7 @@ def predict(symbol, strategy):
         "reason": ", ".join(reason)
     }
 
-def create_dataset(features, strategy, window=30):
+def create_dataset(features, strategy, window=20):
     X, y = [], []
     for i in range(len(features) - window - 1):
         x_seq = features[i:i+window]
