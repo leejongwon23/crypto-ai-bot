@@ -46,14 +46,21 @@ def predict(symbol, strategy):
     X = features.iloc[-WINDOW:].values
     X = np.expand_dims(X, axis=0)
     X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
-    results = []
 
+    # ✅ input_size 자동 계산
+    input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
+
+    results = []
     for model_type in ["lstm", "cnn_lstm", "transformer"]:
-        model = get_model(model_type=model_type, input_size=X.shape[2])
+        model = get_model(model_type=model_type, input_size=input_size)
         model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.pt")
         if not os.path.exists(model_path):
             continue
-        model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+        try:
+            model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+        except RuntimeError:
+            print(f"[오류] {model_path} 모델 구조 불일치로 불러오기 실패")
+            continue
         model.to(DEVICE)
         model.eval()
         with torch.no_grad():
@@ -132,6 +139,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     if len(X) == 0:
         print(f"⚠️ {symbol}-{strategy} 유효 시퀀스 없음")
         return
+    input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
     for model_type in ["lstm", "cnn_lstm", "transformer"]:
         model = get_model(model_type=model_type, input_size=input_size)
         model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.pt")
@@ -189,9 +197,9 @@ def background_auto_train():
             time.sleep(interval_sec)
 
     strategy_intervals = {
-        "단기": 10800,   # 3시간
-        "중기": 21600,  # 6시간
-        "장기": 43200   # 12시간
+        "단기": 10800,
+        "중기": 21600,
+        "장기": 43200
     }
 
     for strategy, interval in strategy_intervals.items():
