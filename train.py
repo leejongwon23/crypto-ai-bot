@@ -108,7 +108,6 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
                 loss.backward()
                 optimizer.step()
 
-        # ✅ 성능 평가 및 기록
         model.eval()
         with torch.no_grad():
             val_loader = DataLoader(val_set, batch_size=batch_size)
@@ -124,7 +123,6 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
                 loss = log_loss(y_true, y_prob)
                 logger.log_training_result(symbol, strategy, model_type, acc, f1, loss)
 
-        # ✅ 중요도 분석 with 데이터 길이 체크
         if model_type == "lstm":
             feature_names = list(df_feat.columns)
             required = len(val_set) + best_window
@@ -282,5 +280,12 @@ def get_price_now(symbol):
     prices = get_realtime_prices()
     return prices.get(symbol)
 
-background_auto_train()
+def train_model_loop(strategy):
+    print(f"[train_model_loop] {strategy} 전략 전체 학습 루프 시작")
+    for symbol in SYMBOLS:
+        try:
+            train_model(symbol, strategy)
+        except Exception as e:
+            print(f"[오류] {symbol}-{strategy} 학습 실패: {e}")
 
+background_auto_train()
