@@ -16,6 +16,7 @@ from src.message_formatter import format_message
 from telegram_bot import send_message
 from feature_importance import compute_feature_importance, save_feature_importance
 from window_optimizer import find_best_window
+from model_weight_loader import get_model_weight
 import gc
 
 DEVICE = torch.device("cpu")
@@ -169,9 +170,7 @@ def background_auto_train():
         threading.Thread(target=loop, args=(strategy, interval), daemon=True).start()
 
 def predict(symbol, strategy):
-    from window_optimizer import find_best_window
     best_window = find_best_window(symbol, strategy)
-
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or len(df) < best_window + 1:
         return None
@@ -181,7 +180,6 @@ def predict(symbol, strategy):
     X = features.iloc[-best_window:].values
     X = np.expand_dims(X, axis=0)
     X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
-
     input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
 
     results = []
@@ -203,13 +201,18 @@ def predict(symbol, strategy):
             signal, confidence = model(X_tensor)
             signal = signal.squeeze().item()
             confidence = confidence.squeeze().item()
-            rate = abs(signal - 0.5) * 2
             direction = "롱" if signal > 0.5 else "숏"
+            weight = get_model_weight(model_type, strategy)
+            score = confidence * weight
+            rate = abs(signal - 0.5) * 2
+
             results.append({
                 "model": model_type,
                 "symbol": symbol,
                 "strategy": strategy,
                 "confidence": confidence,
+                "weight": weight,
+                "score": score,
                 "rate": rate,
                 "direction": direction
             })
@@ -217,8 +220,9 @@ def predict(symbol, strategy):
     if not results:
         return None
 
-    direction_votes = [r["direction"] for r in results]
-    final_direction = max(set(direction_votes), key=direction_votes.count)
+    long_score = sum(r["score"] for r in results if r["direction"] == "롱")
+    short_score = sum(r["score"] for r in results if r["direction"] == "숏")
+    final_direction = "롱" if long_score > short_score else "숏"
     avg_confidence = sum(r["confidence"] for r in results) / len(results)
     avg_rate = sum(r["rate"] for r in results) / len(results)
     price = features["close"].iloc[-1]
