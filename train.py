@@ -58,8 +58,10 @@ def predict(symbol, strategy):
         try:
             model.load_state_dict(torch.load(model_path, map_location=DEVICE))
         except RuntimeError:
-            print(f"[오류] {model_path} 모델 구조 불일치로 불러오기 실패")
+            print(f"[오류] {model_path} 모델 구조 불일치 → 삭제 후 재학습 대기")
+            os.remove(model_path)  # ✅ 에러가 발생했을 때만 삭제
             continue
+            
         model.to(DEVICE)
         model.eval()
         with torch.no_grad():
