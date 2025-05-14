@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request  # ✅ request 추가됨
+from flask import Flask, jsonify, request
 from recommend import main
 import train
 import os
@@ -10,9 +10,8 @@ import pytz
 import traceback
 import sys
 from telegram_bot import send_message
-import logger  # ✅ 통계 함수 사용을 위한 import
+import logger
 
-# ✅ Persistent 경로 기준 설정
 PERSIST_DIR = "/persistent"
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
 LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.txt")
@@ -21,35 +20,40 @@ WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 
 os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 
-# ✅ 예측 루프 조건 함수 (09, 13, 16, 20, 22, 01시)
-def is_prediction_hour():
-    now = datetime.datetime.now(pytz.timezone('Asia/Seoul'))
-    return now.hour in [1, 3, 5, 7, 9, 11, 13, 15, 16, 18, 20, 22, 0]
-
-def start_background_training():
-    print(">>> start_background_training() 호출됨")
-    sys.stdout.flush()
-    threading.Thread(target=train.auto_train_all, daemon=True).start()
-
 def start_scheduler():
     print(">>> start_scheduler() 호출됨")
     sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Seoul'))
 
-    def scheduled_job():
-        if is_prediction_hour():
-            print(f"[예측 루프 실행 중 - 허용된 시간대] {datetime.datetime.now()}")
-            sys.stdout.flush()
+    # ✅ 예측: 매 정시마다 실행 (1시간마다)
+    def run_prediction():
+        print(f"[예측 시작] {datetime.datetime.now()}")
+        sys.stdout.flush()
+        try:
             main()
-        else:
-            print(f"[예측 생략 - 비활성 시간대] {datetime.datetime.now()}")
-            sys.stdout.flush()
+        except Exception as e:
+            print(f"[예측 오류] {e}")
 
-    scheduler.add_job(scheduled_job, 'cron', hour='1,3,5,7,9,11,13,15,16,18,20,22,0')
+    scheduler.add_job(run_prediction, 'cron', minute=0)  # 매 정시
+
+    # ✅ 학습: 전략별 시간 분리
+    def train_short():  # 단기
+        print("[단기 학습 시작]")
+        threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start()
+
+    def train_mid():  # 중기
+        print("[중기 학습 시작]")
+        threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start()
+
+    def train_long():  # 장기
+        print("[장기 학습 시작]")
+        threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start()
+
+    scheduler.add_job(train_short, 'cron', hour='0,3,6,9,12,15,18,21', minute=30)
+    scheduler.add_job(train_mid,   'cron', hour='1,7,13,19', minute=30)
+    scheduler.add_job(train_long,  'cron', hour='2,14', minute=30)
+
     scheduler.start()
-
-start_background_training()
-start_scheduler()
 
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료")
@@ -141,7 +145,6 @@ def check_wrong():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# ✅ 예측 정확도 통계 요약 API (예쁘게 출력)
 @app.route("/check-stats")
 def check_stats():
     try:
@@ -154,7 +157,6 @@ def check_stats():
     except Exception as e:
         return f"정확도 통계 출력 실패: {e}", 500
 
-# ✅ /reset-all (비밀번호 3572 포함)
 @app.route("/reset-all")
 def reset_all():
     import glob
@@ -176,6 +178,8 @@ def reset_all():
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
     sys.stdout.flush()
+
+    start_scheduler()
 
     test_message = "[시스템 테스트] Flask 앱이 정상적으로 실행되었으며 텔레그램 메시지도 전송됩니다."
     send_message(test_message)
