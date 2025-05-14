@@ -1,6 +1,7 @@
 import os
 import csv
 import datetime
+import pandas as pd
 
 # ✅ Persistent 경로로 변경
 PERSIST_DIR = "/persistent"
@@ -94,7 +95,6 @@ def evaluate_predictions(get_price_fn):
         writer.writerows(updated_rows)
 
 def get_actual_success_rate(strategy, threshold=0.7):
-    import pandas as pd
     try:
         df = pd.read_csv(PREDICTION_LOG)
         df = df[df["strategy"] == strategy]
@@ -108,3 +108,36 @@ def get_actual_success_rate(strategy, threshold=0.7):
     except Exception as e:
         print(f"[경고] 성공률 계산 실패: {e}")
         return 1.0
+
+# ✅ 정확도 요약 함수 추가
+def print_prediction_stats():
+    if not os.path.exists(PREDICTION_LOG):
+        return "예측 기록이 없습니다."
+
+    try:
+        df = pd.read_csv(PREDICTION_LOG)
+        total = len(df)
+        success = len(df[df["status"] == "success"])
+        fail = len(df[df["status"] == "fail"])
+        pending = len(df[df["status"] == "pending"])
+        success_rate = (success / (success + fail)) * 100 if (success + fail) > 0 else 0
+
+        summary = [
+            f"📊 전체 예측 수: {total}",
+            f"✅ 성공: {success}",
+            f"❌ 실패: {fail}",
+            f"⏳ 평가 대기중: {pending}",
+            f"🎯 성공률: {success_rate:.2f}%",
+        ]
+
+        for strategy in df["strategy"].unique():
+            strat_df = df[df["strategy"] == strategy]
+            s = len(strat_df[strat_df["status"] == "success"])
+            f = len(strat_df[strat_df["status"] == "fail"])
+            rate = (s / (s + f)) * 100 if (s + f) > 0 else 0
+            summary.append(f"📌 {strategy} 성공률: {rate:.2f}%")
+
+        return "\n".join(summary)
+
+    except Exception as e:
+        return f"[오류] 통계 계산 실패: {e}"
