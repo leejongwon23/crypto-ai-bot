@@ -31,39 +31,38 @@ def predict(symbol, strategy):
 
         results = []
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
-            model = get_model(model_type=model_type, input_size=input_size)
             model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.pt")
-
             if not os.path.exists(model_path):
+                print(f"[SKIP] 모델 없음: {model_path}")
                 continue
 
             try:
+                model = get_model(model_type=model_type, input_size=input_size)
                 model.load_state_dict(torch.load(model_path, map_location=DEVICE))
-            except RuntimeError:
-                print(f"[SKIP] {model_type} 모델 로드 실패 → {symbol}-{strategy}")
-                continue
+                model.to(DEVICE)
+                model.eval()
+                with torch.no_grad():
+                    signal, confidence = model(X_tensor)
+                    signal = signal.squeeze().item()
+                    confidence = confidence.squeeze().item()
+                    direction = "롱" if signal > 0.5 else "숏"
+                    weight = get_model_weight(model_type, strategy)
+                    score = confidence * weight
+                    rate = abs(signal - 0.5) * 2
 
-            model.to(DEVICE)
-            model.eval()
-            with torch.no_grad():
-                signal, confidence = model(X_tensor)
-                signal = signal.squeeze().item()
-                confidence = confidence.squeeze().item()
-                direction = "롱" if signal > 0.5 else "숏"
-                weight = get_model_weight(model_type, strategy)
-                score = confidence * weight
-                rate = abs(signal - 0.5) * 2
+                    results.append({
+                        "model": model_type,
+                        "symbol": symbol,
+                        "strategy": strategy,
+                        "confidence": confidence,
+                        "weight": weight,
+                        "score": score,
+                        "rate": rate,
+                        "direction": direction
+                    })
 
-                results.append({
-                    "model": model_type,
-                    "symbol": symbol,
-                    "strategy": strategy,
-                    "confidence": confidence,
-                    "weight": weight,
-                    "score": score,
-                    "rate": rate,
-                    "direction": direction
-                })
+            except Exception as e:
+                print(f"[ERROR] {model_type} 로드 실패: {symbol}-{strategy} → {e}")
 
         if not results:
             return None
