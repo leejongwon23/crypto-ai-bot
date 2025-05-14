@@ -10,6 +10,7 @@ import pytz
 import traceback
 import sys
 from telegram_bot import send_message
+import logger  # ✅ 통계 함수 사용을 위한 import
 
 # ✅ Persistent 경로 기준 설정
 PERSIST_DIR = "/persistent"
@@ -44,7 +45,6 @@ def start_scheduler():
             print(f"[예측 생략 - 비활성 시간대] {datetime.datetime.now()}")
             sys.stdout.flush()
 
-    # ✅ 수정된 cron 표현 사용 (문자열로 시간 명시)
     scheduler.add_job(scheduled_job, 'cron', hour='1,3,5,7,9,11,13,15,16,18,20,22,0')
     scheduler.start()
 
@@ -141,11 +141,23 @@ def check_wrong():
     except Exception as e:
         return jsonify({"error": str(e)})
 
+# ✅ 예측 정확도 통계 요약 API (예쁘게 출력)
+@app.route("/check-stats")
+def check_stats():
+    try:
+        result = logger.print_prediction_stats()
+        formatted = result.replace("📊", "<b>📊</b>").replace("✅", "<b style='color:green'>✅</b>") \
+                          .replace("❌", "<b style='color:red'>❌</b>").replace("⏳", "<b>⏳</b>") \
+                          .replace("🎯", "<b>🎯</b>").replace("📌", "<b>📌</b>")
+        formatted = formatted.replace("\n", "<br>")
+        return f"<div style='font-family:monospace; line-height:1.6;'>{formatted}</div>"
+    except Exception as e:
+        return f"정확도 통계 출력 실패: {e}", 500
+
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
     sys.stdout.flush()
 
-    # main() 호출 제거
     test_message = "[시스템 테스트] Flask 앱이 정상적으로 실행되었으며 텔레그램 메시지도 전송됩니다."
     send_message(test_message)
     print("✅ 테스트 메시지 전송 완료")
