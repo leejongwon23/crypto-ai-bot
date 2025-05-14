@@ -8,6 +8,8 @@ PERSIST_DIR = "/persistent"
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 THRESHOLD_TOLERANCE = 0.01  # 목표 수익률의 99% 이상 도달 시 성공 처리
+LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.csv")
+os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 
 # ✅ 전략별 평가 대기 시간 (단기: 3h, 중기: 6h, 장기: 12h)
 STRATEGY_LIMIT_HOURS = {
@@ -140,3 +142,24 @@ def print_prediction_stats():
 
     except Exception as e:
         return f"[오류] 통계 계산 실패: {e}"
+
+# ✅ 모델 학습 결과 성능 기록 함수
+def log_training_result(symbol, strategy, model_name, acc, f1, loss):
+    timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = {
+        "timestamp": timestamp,
+        "symbol": symbol,
+        "strategy": strategy,
+        "model": model_name,
+        "accuracy": acc,
+        "f1_score": f1,
+        "loss": loss
+    }
+
+    df = pd.DataFrame([log_entry])
+    if os.path.exists(LOG_FILE):
+        df.to_csv(LOG_FILE, mode='a', header=False, index=False)
+    else:
+        df.to_csv(LOG_FILE, index=False)
+
+    print(f"[LOG] Training result logged for {symbol} - {strategy} - {model_name}")
