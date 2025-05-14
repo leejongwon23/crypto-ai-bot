@@ -94,7 +94,6 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
                 print(f"[스킵] {symbol}-{strategy} 학습 샘플 부족 → {len(train_loader.dataset)}")
                 continue
 
-            # --- 오답 학습 ---
             wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=best_window)
             if wrong_data:
                 wrong_loader = DataLoader(wrong_data, batch_size=batch_size, shuffle=True)
@@ -103,14 +102,12 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
                     loss = criterion(pred, yb)
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            # --- 정규 학습 ---
             for epoch in range(epochs):
                 for xb, yb in train_loader:
                     pred, _ = model(xb)
                     loss = criterion(pred, yb)
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            # --- 성능 평가 ---
             model.eval()
             with torch.no_grad():
                 val_loader = DataLoader(val_set, batch_size=batch_size)
@@ -126,17 +123,18 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
                     loss = log_loss(y_true, y_prob)
                     logger.log_training_result(symbol, strategy, model_type, acc, f1, loss)
 
-            # --- 중요도 분석 ---
             if model_type == "lstm":
                 required = len(val_set) + best_window
-                if len(feature_dicts) > required:
-                    compute_X_val = torch.tensor(
-                        [list(row.values()) for row in feature_dicts[-required:-best_window]],
-                        dtype=torch.float32
-                    ).view(len(val_set), best_window, input_size)
+                flat = feature_dicts[-required:-best_window]
+                flat_tensor = torch.tensor([list(row.values()) for row in flat], dtype=torch.float32)
+                expected_shape = (len(val_set), best_window, input_size)
+                if flat_tensor.numel() == np.prod(expected_shape):
+                    compute_X_val = flat_tensor.view(*expected_shape)
                     compute_y_val = y_tensor[-len(val_set):]
                     importances = compute_feature_importance(model, compute_X_val, compute_y_val, list(df_feat.columns))
                     save_feature_importance(importances, symbol, strategy, model_type)
+                else:
+                    print(f"[SKIP] {symbol}-{strategy} 중요도 분석 생략 (view 실패)")
 
             torch.save(model.state_dict(), model_path)
             print(f"✅ 모델 저장 완료: {model_path}")
@@ -144,7 +142,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
     except Exception as e:
         print(f"[FATAL] {symbol}-{strategy} 학습 실패: {e}")
 
-# --- [예측 함수] ---
+# --- [예측] ---
 def predict(symbol, strategy):
     best_window = find_best_window(symbol, strategy)
     df = get_kline_by_strategy(symbol, strategy)
@@ -177,20 +175,13 @@ def predict(symbol, strategy):
             weight = get_model_weight(model_type, strategy)
             score = confidence * weight
             rate = abs(signal - 0.5) * 2
-
             results.append({
-                "model": model_type,
-                "symbol": symbol,
-                "strategy": strategy,
-                "confidence": confidence,
-                "weight": weight,
-                "score": score,
-                "rate": rate,
-                "direction": direction
+                "model": model_type, "symbol": symbol, "strategy": strategy,
+                "confidence": confidence, "weight": weight, "score": score,
+                "rate": rate, "direction": direction
             })
 
-    if not results:
-        return None
+    if not results: return None
 
     long_score = sum(r["score"] for r in results if r["direction"] == "롱")
     short_score = sum(r["score"] for r in results if r["direction"] == "숏")
@@ -209,21 +200,16 @@ def predict(symbol, strategy):
     elif boll < -1: reason.append("볼린저 하단 이탈")
 
     return {
-        "symbol": symbol,
-        "strategy": strategy,
-        "direction": final_direction,
-        "confidence": avg_confidence,
-        "rate": avg_rate,
-        "price": price,
+        "symbol": symbol, "strategy": strategy, "direction": final_direction,
+        "confidence": avg_confidence, "rate": avg_rate, "price": price,
         "target": price * (1 + avg_rate) if final_direction == "롱" else price * (1 - avg_rate),
         "stop": price * (1 - STOP_LOSS_PCT) if final_direction == "롱" else price * (1 + STOP_LOSS_PCT),
         "reason": ", ".join(reason)
     }
 
-# --- [전체 실행 main()] ---
+# --- [Main] ---
 def get_price_now(symbol):
-    prices = get_realtime_prices()
-    return prices.get(symbol)
+    return get_realtime_prices().get(symbol)
 
 def main():
     logger.evaluate_predictions(get_price_now)
@@ -232,25 +218,20 @@ def main():
         for symbol in SYMBOLS:
             try:
                 result = predict(symbol, strategy)
-                if result:
-                    results.append(result)
+                if result: results.append(result)
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
         if results:
             top = sorted(results, key=lambda x: x["confidence"], reverse=True)[0]
             logger.log_prediction(
-                symbol=top["symbol"],
-                strategy=top["strategy"],
-                direction=top["direction"],
-                entry_price=top["price"],
-                target_price=top["target"],
-                timestamp=datetime.datetime.utcnow().isoformat(),
-                confidence=top["confidence"]
+                symbol=top["symbol"], strategy=top["strategy"], direction=top["direction"],
+                entry_price=top["price"], target_price=top["target"],
+                timestamp=datetime.datetime.utcnow().isoformat(), confidence=top["confidence"]
             )
             msg = format_message(top)
             send_message(msg)
 
-# --- [자동 학습 루프] ---
+# --- [학습 루프] ---
 def train_model_loop(strategy):
     print(f"[train_model_loop] {strategy} 전략 전체 학습 루프 시작")
     for symbol in SYMBOLS:
@@ -259,6 +240,13 @@ def train_model_loop(strategy):
         except Exception as e:
             print(f"[오류] {symbol}-{strategy} 학습 실패: {e}")
 
+# --- [auto_train_all: 수동 호출용] ---
+def auto_train_all():
+    print("[auto_train_all] 전체 전략 수동 학습 시작")
+    for strategy in STRATEGY_GAIN_RANGE:
+        train_model_loop(strategy)
+
+# --- [백그라운드 자동 주기 학습] ---
 def background_auto_train():
     def loop(strategy, interval_sec):
         while True:
@@ -277,9 +265,8 @@ def background_auto_train():
         "중기": 21600,
         "장기": 43200
     }
-
     for strategy, interval in strategy_intervals.items():
         threading.Thread(target=loop, args=(strategy, interval), daemon=True).start()
 
-# --- [자동 학습 시작] ---
+# --- [실행] ---
 background_auto_train()
