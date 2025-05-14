@@ -124,16 +124,20 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
                 loss = log_loss(y_true, y_prob)
                 logger.log_training_result(symbol, strategy, model_type, acc, f1, loss)
 
-        # ✅ 중요도 분석
+        # ✅ 중요도 분석 with 데이터 길이 체크
         if model_type == "lstm":
             feature_names = list(df_feat.columns)
-            compute_X_val = torch.tensor(
-                [list(row.values()) for row in feature_dicts[-(len(val_set)+best_window):-(best_window)]],
-                dtype=torch.float32
-            ).view(len(val_set), best_window, input_size)
-            compute_y_val = y_tensor[-len(val_set):]
-            importances = compute_feature_importance(model, compute_X_val, compute_y_val, feature_names)
-            save_feature_importance(importances, symbol, strategy, model_type)
+            required = len(val_set) + best_window
+            if len(feature_dicts) > required:
+                compute_X_val = torch.tensor(
+                    [list(row.values()) for row in feature_dicts[-required:-best_window]],
+                    dtype=torch.float32
+                ).view(len(val_set), best_window, input_size)
+                compute_y_val = y_tensor[-len(val_set):]
+                importances = compute_feature_importance(model, compute_X_val, compute_y_val, feature_names)
+                save_feature_importance(importances, symbol, strategy, model_type)
+            else:
+                print(f"[SKIP] {symbol}-{strategy} 중요도 분석 생략 (데이터 부족)")
 
         torch.save(model.state_dict(), model_path)
         print(f"✅ 모델 저장됨: {model_path}")
@@ -279,3 +283,4 @@ def get_price_now(symbol):
     return prices.get(symbol)
 
 background_auto_train()
+
