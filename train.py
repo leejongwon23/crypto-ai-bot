@@ -7,6 +7,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import accuracy_score, f1_score, log_loss
 from data.utils import SYMBOLS, STRATEGY_CONFIG, get_kline_by_strategy, compute_features
 from model.base_model import get_model, format_prediction
 from wrong_data_loader import load_wrong_prediction_data
@@ -35,80 +36,6 @@ PRED_LOG_FILE = os.path.join(PERSIST_DIR, "prediction_log.csv")
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(WRONG_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
-
-def predict(symbol, strategy):
-    df = get_kline_by_strategy(symbol, strategy)
-    if df is None or len(df) < WINDOW + 1:
-        return None
-    features = compute_features(df)
-    if len(features) < WINDOW + 1:
-        return None
-    X = features.iloc[-WINDOW:].values
-    X = np.expand_dims(X, axis=0)
-    X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
-
-    input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
-
-    results = []
-    for model_type in ["lstm", "cnn_lstm", "transformer"]:
-        model = get_model(model_type=model_type, input_size=input_size)
-        model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.pt")
-        if not os.path.exists(model_path):
-            continue
-        try:
-            model.load_state_dict(torch.load(model_path, map_location=DEVICE))
-        except RuntimeError:
-            print(f"[오류] {model_path} 모델 구조 불일치 → 삭제 후 재학습 대기")
-            os.remove(model_path)  # ✅ 에러가 발생했을 때만 삭제
-            continue
-            
-        model.to(DEVICE)
-        model.eval()
-        with torch.no_grad():
-            signal, confidence = model(X_tensor)
-            signal = signal.squeeze().item()
-            confidence = confidence.squeeze().item()
-            rate = abs(signal - 0.5) * 2
-            direction = "롱" if signal > 0.5 else "숏"
-            results.append({
-                "model": model_type,
-                "symbol": symbol,
-                "strategy": strategy,
-                "confidence": confidence,
-                "rate": rate,
-                "direction": direction
-            })
-
-    if not results:
-        return None
-
-    direction_votes = [r["direction"] for r in results]
-    final_direction = max(set(direction_votes), key=direction_votes.count)
-    avg_confidence = sum(r["confidence"] for r in results) / len(results)
-    avg_rate = sum(r["rate"] for r in results) / len(results)
-    price = features["close"].iloc[-1]
-
-    rsi = features["rsi"].iloc[-1] if "rsi" in features else 50
-    macd = features["macd"].iloc[-1] if "macd" in features else 0
-    boll = features["bollinger"].iloc[-1] if "bollinger" in features else 0
-    reason = []
-    if rsi < 30: reason.append("RSI 과매도")
-    elif rsi > 70: reason.append("RSI 과매수")
-    reason.append("MACD 상승 전환" if macd > 0 else "MACD 하락 전환")
-    if boll > 1: reason.append("볼린저 상단 돌파")
-    elif boll < -1: reason.append("볼린저 하단 이탈")
-
-    return {
-        "symbol": symbol,
-        "strategy": strategy,
-        "direction": final_direction,
-        "confidence": avg_confidence,
-        "rate": avg_rate,
-        "price": price,
-        "target": price * (1 + avg_rate) if final_direction == "롱" else price * (1 - avg_rate),
-        "stop": price * (1 - STOP_LOSS_PCT) if final_direction == "롱" else price * (1 + STOP_LOSS_PCT),
-        "reason": ", ".join(reason)
-    }
 
 def create_dataset(features, strategy, window=20):
     X, y = [], []
@@ -157,7 +84,6 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
         train_set, val_set = random_split(dataset, [train_len, val_len])
         train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
 
-        # ✅ 학습 데이터가 2개 미만이면 건너뛴다
         if len(train_loader.dataset) < 2:
             print(f"[스킵] {symbol}-{strategy} 데이터 부족 → 샘플 수: {len(train_loader.dataset)}")
             continue
@@ -178,9 +104,26 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+
+        # ✅ 성능 평가 및 기록
+        model.eval()
+        with torch.no_grad():
+            val_loader = DataLoader(val_set, batch_size=batch_size)
+            y_true, y_pred, y_prob = [], [], []
+            for xb, yb in val_loader:
+                out, _ = model(xb)
+                y_prob.extend(out.squeeze().numpy().tolist())
+                y_true.extend(yb.numpy().tolist())
+                y_pred.extend((out.squeeze().numpy() > 0.5).astype(int).tolist())
+            if len(y_true) >= 1:
+                acc = accuracy_score(y_true, y_pred)
+                f1 = f1_score(y_true, y_pred)
+                loss = log_loss(y_true, y_prob)
+                logger.log_training_result(symbol, strategy, model_type, acc, f1, loss)
+
         torch.save(model.state_dict(), model_path)
         print(f"✅ 모델 저장됨: {model_path}")
-
+        
 def auto_train_all():
     print("[auto_train_all] 전체 코인 및 전략 학습 시작")
     for strategy in STRATEGY_GAIN_RANGE:
@@ -212,6 +155,80 @@ def background_auto_train():
     for strategy, interval in strategy_intervals.items():
         threading.Thread(target=loop, args=(strategy, interval), daemon=True).start()
 
+def predict(symbol, strategy):
+    df = get_kline_by_strategy(symbol, strategy)
+    if df is None or len(df) < WINDOW + 1:
+        return None
+    features = compute_features(df)
+    if len(features) < WINDOW + 1:
+        return None
+    X = features.iloc[-WINDOW:].values
+    X = np.expand_dims(X, axis=0)
+    X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
+
+    input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
+
+    results = []
+    for model_type in ["lstm", "cnn_lstm", "transformer"]:
+        model = get_model(model_type=model_type, input_size=input_size)
+        model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.pt")
+        if not os.path.exists(model_path):
+            continue
+        try:
+            model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+        except RuntimeError:
+            print(f"[오류] {model_path} 모델 구조 불일치 → 삭제 후 재학습 대기")
+            os.remove(model_path)
+            continue
+
+        model.to(DEVICE)
+        model.eval()
+        with torch.no_grad():
+            signal, confidence = model(X_tensor)
+            signal = signal.squeeze().item()
+            confidence = confidence.squeeze().item()
+            rate = abs(signal - 0.5) * 2
+            direction = "롱" if signal > 0.5 else "숏"
+            results.append({
+                "model": model_type,
+                "symbol": symbol,
+                "strategy": strategy,
+                "confidence": confidence,
+                "rate": rate,
+                "direction": direction
+            })
+
+    if not results:
+        return None
+
+    direction_votes = [r["direction"] for r in results]
+    final_direction = max(set(direction_votes), key=direction_votes.count)
+    avg_confidence = sum(r["confidence"] for r in results) / len(results)
+    avg_rate = sum(r["rate"] for r in results) / len(results)
+    price = features["close"].iloc[-1]
+
+    rsi = features["rsi"].iloc[-1] if "rsi" in features else 50
+    macd = features["macd"].iloc[-1] if "macd" in features else 0
+    boll = features["bollinger"].iloc[-1] if "bollinger" in features else 0
+    reason = []
+    if rsi < 30: reason.append("RSI 과매도")
+    elif rsi > 70: reason.append("RSI 과매수")
+    reason.append("MACD 상승 전환" if macd > 0 else "MACD 하락 전환")
+    if boll > 1: reason.append("볼린저 상단 돌파")
+    elif boll < -1: reason.append("볼린저 하단 이탈")
+
+    return {
+        "symbol": symbol,
+        "strategy": strategy,
+        "direction": final_direction,
+        "confidence": avg_confidence,
+        "rate": avg_rate,
+        "price": price,
+        "target": price * (1 + avg_rate) if final_direction == "롱" else price * (1 - avg_rate),
+        "stop": price * (1 - STOP_LOSS_PCT) if final_direction == "롱" else price * (1 + STOP_LOSS_PCT),
+        "reason": ", ".join(reason)
+    }
+
 def main():
     logger.evaluate_predictions(get_price_now)
     for strategy in STRATEGY_GAIN_RANGE:
@@ -242,3 +259,4 @@ def get_price_now(symbol):
     return prices.get(symbol)
 
 background_auto_train()
+
