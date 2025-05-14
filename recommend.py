@@ -1,5 +1,6 @@
 # recommend.py
 import datetime
+import os
 from telegram_bot import send_message
 from train import predict
 from logger import log_prediction, evaluate_predictions
@@ -12,6 +13,16 @@ STRATEGY_GAIN_LEVELS = {
     "중기": [0.05, 0.80],
     "장기": [0.10, 1.00]
 }
+
+# ✅ 모델 존재 여부 확인 함수
+def model_exists(symbol, strategy):
+    model_dir = "/persistent/models"
+    models = [
+        f"{symbol}_{strategy}_lstm.pt",
+        f"{symbol}_{strategy}_cnn_lstm.pt",
+        f"{symbol}_{strategy}_transformer.pt"
+    ]
+    return all(os.path.exists(os.path.join(model_dir, m)) for m in models)
 
 def get_price_now(symbol):
     prices = get_realtime_prices()
@@ -26,6 +37,11 @@ def main():
 
         for symbol in SYMBOLS:
             try:
+                # ✅ 모델 없으면 예측 건너뜀
+                if not model_exists(symbol, strategy):
+                    print(f"❌ 모델 없음: {symbol} - {strategy} → 예측 생략")
+                    continue
+
                 print(f"⏳ 예측 중: {symbol} - {strategy}")
                 result = predict(symbol, strategy)
                 print(f"📊 예측 결과: {result}")
