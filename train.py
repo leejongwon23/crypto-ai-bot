@@ -15,10 +15,10 @@ import logger
 from src.message_formatter import format_message
 from telegram_bot import send_message
 from feature_importance import compute_feature_importance, save_feature_importance
+from window_optimizer import find_best_window
 import gc
 
 DEVICE = torch.device("cpu")
-WINDOW = 20
 STOP_LOSS_PCT = 0.02
 
 STRATEGY_GAIN_RANGE = {
@@ -54,17 +54,18 @@ def create_dataset(features, strategy, window=20):
 
 def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3):
     print(f"[train_model] 시작: {symbol}-{strategy}")
+    best_window = find_best_window(symbol, strategy)
     df = get_kline_by_strategy(symbol, strategy)
-    if df is None or len(df) < WINDOW + 10:
+    if df is None or len(df) < best_window + 10:
         print(f"❌ {symbol}-{strategy} 데이터 부족")
         return
     df_feat = compute_features(df)
-    if len(df_feat) < WINDOW + 1:
+    if len(df_feat) < best_window + 1:
         return
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(df_feat.values)
     feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
-    X, y = create_dataset(feature_dicts, strategy, window=WINDOW)
+    X, y = create_dataset(feature_dicts, strategy, window=best_window)
     if len(X) == 0:
         print(f"⚠️ {symbol}-{strategy} 유효 시퀀스 없음")
         return
@@ -89,7 +90,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
             print(f"[스킵] {symbol}-{strategy} 데이터 부족 → 샘플 수: {len(train_loader.dataset)}")
             continue
 
-        wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=WINDOW)
+        wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=best_window)
         if wrong_data:
             wrong_loader = DataLoader(wrong_data, batch_size=batch_size, shuffle=True)
             for xb, yb in wrong_loader:
@@ -126,9 +127,9 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
         if model_type == "lstm":
             feature_names = list(df_feat.columns)
             compute_X_val = torch.tensor(
-                [list(row.values()) for row in feature_dicts[-(len(val_set)+WINDOW):-(WINDOW)]],
+                [list(row.values()) for row in feature_dicts[-(len(val_set)+best_window):-(best_window)]],
                 dtype=torch.float32
-            ).view(len(val_set), WINDOW, input_size)
+            ).view(len(val_set), best_window, input_size)
             compute_y_val = y_tensor[-len(val_set):]
             importances = compute_feature_importance(model, compute_X_val, compute_y_val, feature_names)
             save_feature_importance(importances, symbol, strategy, model_type)
@@ -168,13 +169,16 @@ def background_auto_train():
         threading.Thread(target=loop, args=(strategy, interval), daemon=True).start()
 
 def predict(symbol, strategy):
+    from window_optimizer import find_best_window
+    best_window = find_best_window(symbol, strategy)
+
     df = get_kline_by_strategy(symbol, strategy)
-    if df is None or len(df) < WINDOW + 1:
+    if df is None or len(df) < best_window + 1:
         return None
     features = compute_features(df)
-    if len(features) < WINDOW + 1:
+    if len(features) < best_window + 1:
         return None
-    X = features.iloc[-WINDOW:].values
+    X = features.iloc[-best_window:].values
     X = np.expand_dims(X, axis=0)
     X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
 
