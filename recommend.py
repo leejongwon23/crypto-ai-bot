@@ -1,4 +1,3 @@
-# recommend.py
 import datetime
 import os
 from telegram_bot import send_message
@@ -7,14 +6,6 @@ from logger import log_prediction, evaluate_predictions
 from data.utils import SYMBOLS, get_realtime_prices
 from src.message_formatter import format_message
 
-# ✅ 전략별 수익률 구간 설정 (3~50%, 5~80%, 10~100%)
-STRATEGY_GAIN_LEVELS = {
-    "단기": [0.03, 0.50],
-    "중기": [0.05, 0.80],
-    "장기": [0.10, 1.00]
-}
-
-# ✅ 모델 존재 여부 확인 함수
 def model_exists(symbol, strategy):
     model_dir = "/persistent/models"
     models = [
@@ -32,14 +23,13 @@ def main():
     print("✅ 예측 평가 시작")
     evaluate_predictions(get_price_now)
 
-    for strategy in STRATEGY_GAIN_LEVELS:
+    for strategy in ["단기", "중기", "장기"]:
         strategy_results = []
 
         for symbol in SYMBOLS:
             try:
-                # ✅ 모델 없으면 예측 건너뜀
                 if not model_exists(symbol, strategy):
-                    print(f"❌ 모델 없음: {symbol} - {strategy} → 예측 생략")
+                    print(f"❌ 모델 없음: {symbol} - {strategy}")
                     continue
 
                 print(f"⏳ 예측 중: {symbol} - {strategy}")
@@ -47,7 +37,6 @@ def main():
                 print(f"📊 예측 결과: {result}")
 
                 if result:
-                    # 예측 결과 기록 (모든 결과 저장)
                     log_prediction(
                         symbol=result["symbol"],
                         strategy=result["strategy"],
@@ -58,17 +47,18 @@ def main():
                         confidence=result["confidence"]
                     )
 
-                    # ✅ 1. 방향 일치 기준 (3모델 일치했을 경우만 predict가 결과 반환)
-                    # ✅ 2. 수익률 기준
-                    min_gain = STRATEGY_GAIN_LEVELS[strategy][0]
-                    if result["rate"] >= min_gain:
+                    # ✅ 여포 3.0 필터 기준 적용
+                    if (
+                        result["confidence"] >= 0.7 and
+                        result["rate"] >= 0.03 and
+                        ("과매도" in result["reason"] or "과매수" in result["reason"])
+                    ):
                         print(f"✅ 기준 만족: {symbol} - {strategy}")
                         strategy_results.append(result)
                     else:
-                        print(f"❌ 수익률 미달: {result['rate']}")
+                        print(f"❌ 필터 미통과: conf={result['confidence']}, rate={result['rate']}, reason={result['reason']}")
                 else:
                     print("❌ 예측 결과 없음")
-                    # ✅ 예측 자체 실패도 오답으로 기록
                     log_prediction(
                         symbol=symbol,
                         strategy=strategy,
@@ -78,17 +68,14 @@ def main():
                         timestamp=datetime.datetime.utcnow().isoformat(),
                         confidence=0.0
                     )
-
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
 
         print(f"📦 전략 [{strategy}] 기준 통과 수: {len(strategy_results)}")
 
-        # ✅ 3. 전략별 Top 1 전송 (신뢰도 기준)
         if strategy_results:
             top_result = sorted(strategy_results, key=lambda x: x["confidence"], reverse=True)[0]
             print(f"📤 메시지 전송 준비: {top_result}")
-
             msg = format_message(top_result)
             print("📨 메시지 내용:", msg)
             send_message(msg)
@@ -97,8 +84,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-    # ✅ 테스트 메시지
     test_message = "[시스템 테스트] 텔레그램 메시지가 정상 작동합니다."
     send_message(test_message)
     print("✅ 테스트 메시지 전송 완료")
