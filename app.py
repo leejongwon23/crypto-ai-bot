@@ -44,7 +44,8 @@ def start_scheduler():
             print(f"[예측 생략 - 비활성 시간대] {datetime.datetime.now()}")
             sys.stdout.flush()
 
-    scheduler.add_job(scheduled_job, 'interval', minutes=5)
+    # ✅ 5분마다 실행하는 interval 스케줄러 제거
+    scheduler.add_job(scheduled_job, 'cron', hour=[1, 3, 5, 7, 9, 11, 13, 15, 16, 18, 20, 22, 0])
     scheduler.start()
 
 start_background_training()
@@ -129,7 +130,6 @@ def check_log():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# ✅ 실패 예측 확인용 엔드포인트 추가
 @app.route("/check-wrong")
 def check_wrong():
     try:
@@ -145,8 +145,7 @@ if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
     sys.stdout.flush()
 
-    main()  # 최초 1회 실행
-
+    # main() 호출 제거
     test_message = "[시스템 테스트] Flask 앱이 정상적으로 실행되었으며 텔레그램 메시지도 전송됩니다."
     send_message(test_message)
     print("✅ 테스트 메시지 전송 완료")
