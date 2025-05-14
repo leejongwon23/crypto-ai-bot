@@ -68,6 +68,16 @@ def main():
                         print(f"❌ 수익률 미달: {result['rate']}")
                 else:
                     print("❌ 예측 결과 없음")
+                    # ✅ 예측 자체 실패도 오답으로 기록
+                    log_prediction(
+                        symbol=symbol,
+                        strategy=strategy,
+                        direction="예측실패",
+                        entry_price=0,
+                        target_price=0,
+                        timestamp=datetime.datetime.utcnow().isoformat(),
+                        confidence=0.0
+                    )
 
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
