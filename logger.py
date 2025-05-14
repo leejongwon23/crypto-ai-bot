@@ -1,143 +1,190 @@
+from flask import Flask, jsonify, request
+from recommend import main
+import train
 import os
-import csv
+import threading
 import datetime
 import pandas as pd
+from apscheduler.schedulers.background import BackgroundScheduler
+import pytz
+import traceback
+import sys
+from telegram_bot import send_message
+import logger
 
-# ✅ Persistent 경로로 변경
 PERSIST_DIR = "/persistent"
+MODEL_DIR = os.path.join(PERSIST_DIR, "models")
+LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.txt")
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
-THRESHOLD_TOLERANCE = 0.01  # 예: 목표 수익률의 99% 이상 도달 시 성공 처리
 
-# ✅ 전략별 평가 대기 시간 설정 (단기: 3h, 중기: 6h, 장기: 12h)
-STRATEGY_LIMIT_HOURS = {
-    "단기": 3,
-    "중기": 6,
-    "장기": 12
-}
+os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 
-def log_prediction(symbol, strategy, direction, entry_price, target_price, timestamp, confidence):
-    row = {
-        "timestamp": timestamp,
-        "symbol": symbol,
-        "strategy": strategy,
-        "direction": direction,
-        "entry_price": entry_price,
-        "target_price": target_price,
-        "confidence": confidence,
-        "status": "pending"
-    }
+def start_scheduler():
+    print(">>> start_scheduler() 호출됨")
+    sys.stdout.flush()
+    scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Seoul'))
 
-    os.makedirs(PERSIST_DIR, exist_ok=True)
-    file_exists = os.path.isfile(PREDICTION_LOG)
-    with open(PREDICTION_LOG, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=row.keys())
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
+    # ✅ 예측: 매 정시마다 실행 (1시간마다)
+    def run_prediction():
+        print(f"[예측 시작] {datetime.datetime.now()}")
+        sys.stdout.flush()
+        try:
+            main()
+        except Exception as e:
+            print(f"[예측 오류] {e}")
 
-def evaluate_predictions(get_price_fn):
-    if not os.path.exists(PREDICTION_LOG):
-        return
+    scheduler.add_job(run_prediction, 'cron', minute=0)  # 매 정시
 
-    with open(PREDICTION_LOG, "r") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
+    # ✅ 학습: 전략별 시간 분리
+    def train_short():  # 단기
+        print("[단기 학습 시작]")
+        threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start()
 
-    now = datetime.datetime.utcnow()
-    updated_rows = []
+    def train_mid():  # 중기
+        print("[중기 학습 시작]")
+        threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start()
 
-    for row in rows:
-        if row["status"] != "pending":
-            updated_rows.append(row)
-            continue
+    def train_long():  # 장기
+        print("[장기 학습 시작]")
+        threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start()
 
-        pred_time = datetime.datetime.fromisoformat(row["timestamp"])
-        strategy = row["strategy"]
-        limit_hours = STRATEGY_LIMIT_HOURS.get(strategy, 6)
-        hours_passed = (now - pred_time).total_seconds() / 3600
-        if hours_passed < limit_hours:
-            updated_rows.append(row)
-            continue
+    scheduler.add_job(train_short, 'cron', hour='0,3,6,9,12,15,18,21', minute=30)
+    scheduler.add_job(train_mid,   'cron', hour='1,7,13,19', minute=30)
+    scheduler.add_job(train_long,  'cron', hour='2,14', minute=30)
 
-        symbol = row["symbol"]
-        entry_price = float(row["entry_price"])
-        target_price = float(row["target_price"])
-        direction = row["direction"]
+    scheduler.start()
 
-        current_price = get_price_fn(symbol)
-        if current_price is None:
-            updated_rows.append(row)
-            continue
+app = Flask(__name__)
+print(">>> Flask 앱 생성 완료")
+sys.stdout.flush()
 
-        actual_gain = (current_price - entry_price) / entry_price
-        expected_gain = (target_price - entry_price) / entry_price
-        if direction == "숏":
-            actual_gain *= -1
-            expected_gain *= -1
+@app.route("/")
+def index():
+    return "Yopo server is running"
 
-        success = actual_gain >= expected_gain * (1 - THRESHOLD_TOLERANCE)
-        row["status"] = "success" if success else "fail"
+@app.route("/ping")
+def ping():
+    return "pong"
 
-        if not success:
-            with open(WRONG_PREDICTIONS, "a", newline="") as wf:
-                writer = csv.writer(wf)
-                writer.writerow([
-                    row["timestamp"], symbol, row["strategy"], direction,
-                    entry_price, target_price, current_price, actual_gain
-                ])
-
-        updated_rows.append(row)
-
-    with open(PREDICTION_LOG, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=updated_rows[0].keys())
-        writer.writeheader()
-        writer.writerows(updated_rows)
-
-def get_actual_success_rate(strategy, threshold=0.7):
+@app.route("/run")
+def run():
     try:
-        df = pd.read_csv(PREDICTION_LOG)
-        df = df[df["strategy"] == strategy]
-        df = df[df["confidence"] >= threshold]
-
-        if len(df) == 0:
-            return 1.0  # 데이터 부족 시 기본값
-
-        success_df = df[df["status"] == "success"]
-        return len(success_df) / len(df)
+        print("[RUN] main() 실행 시작")
+        sys.stdout.flush()
+        main()
+        print("[RUN] main() 실행 완료")
+        sys.stdout.flush()
+        return "Recommendation started"
     except Exception as e:
-        print(f"[경고] 성공률 계산 실패: {e}")
-        return 1.0
+        print("[ERROR] /run 실패:")
+        traceback.print_exc()
+        sys.stdout.flush()
+        return f"Error: {e}", 500
 
-# ✅ 정확도 요약 함수 추가
-def print_prediction_stats():
-    if not os.path.exists(PREDICTION_LOG):
-        return "예측 기록이 없습니다."
+@app.route("/train-now")
+def train_now():
+    try:
+        print("[TRAIN-NOW] 전체 학습 즉시 실행 시작")
+        sys.stdout.flush()
+        threading.Thread(target=train.auto_train_all, daemon=True).start()
+        return "✅ 모든 코인 + 전략 학습이 지금 바로 시작됐습니다!"
+    except Exception as e:
+        return f"학습 시작 실패: {e}", 500
+
+@app.route("/train-log")
+def train_log():
+    try:
+        with open(LOG_FILE, "r") as f:
+            content = f.read()
+        return f"<pre>{content}</pre>"
+    except Exception as e:
+        return f"로그 파일을 읽을 수 없습니다: {e}", 500
+
+@app.route("/write-test")
+def write_test():
+    try:
+        path = os.path.join(PERSIST_DIR, "write_test.txt")
+        with open(path, "w") as f:
+            f.write(f"[{datetime.datetime.utcnow()}] ✅ 파일 저장 테스트 성공\n")
+        return f"파일 생성 성공: {path}"
+    except Exception as e:
+        return f"파일 생성 실패: {e}", 500
+
+@app.route("/models")
+def list_model_files():
+    try:
+        if not os.path.exists(MODEL_DIR):
+            return "models 폴더가 존재하지 않습니다."
+        files = os.listdir(MODEL_DIR)
+        if not files:
+            return "models 폴더가 비어 있습니다."
+        return "<pre>" + "\n".join(files) + "</pre>"
+    except Exception as e:
+        return f"모델 파일 확인 중 오류 발생: {e}", 500
+
+@app.route("/check-log")
+def check_log():
+    try:
+        if not os.path.exists(PREDICTION_LOG):
+            return jsonify({"error": "prediction_log.csv not found"})
+        df = pd.read_csv(PREDICTION_LOG)
+        last_10 = df.tail(10).to_dict(orient='records')
+        return jsonify(last_10)
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+@app.route("/check-wrong")
+def check_wrong():
+    try:
+        if not os.path.exists(WRONG_PREDICTIONS):
+            return jsonify({"error": "wrong_predictions.csv not found"})
+        df = pd.read_csv(WRONG_PREDICTIONS)
+        last_10 = df.tail(10).to_dict(orient='records')
+        return jsonify(last_10)
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+@app.route("/check-stats")
+def check_stats():
+    try:
+        result = logger.print_prediction_stats()
+        formatted = result.replace("📊", "<b>📊</b>").replace("✅", "<b style='color:green'>✅</b>") \
+                          .replace("❌", "<b style='color:red'>❌</b>").replace("⏳", "<b>⏳</b>") \
+                          .replace("🎯", "<b>🎯</b>").replace("📌", "<b>📌</b>")
+        formatted = formatted.replace("\n", "<br>")
+        return f"<div style='font-family:monospace; line-height:1.6;'>{formatted}</div>"
+    except Exception as e:
+        return f"정확도 통계 출력 실패: {e}", 500
+
+@app.route("/reset-all")
+def reset_all():
+    import glob
+    secret_key = "3572"
+    request_key = request.args.get("key")
+    if request_key != secret_key:
+        return "❌ 인증 실패: 잘못된 접근", 403
 
     try:
-        df = pd.read_csv(PREDICTION_LOG)
-        total = len(df)
-        success = len(df[df["status"] == "success"])
-        fail = len(df[df["status"] == "fail"])
-        pending = len(df[df["status"] == "pending"])
-        success_rate = (success / (success + fail)) * 100 if (success + fail) > 0 else 0
-
-        summary = [
-            f"📊 전체 예측 수: {total}",
-            f"✅ 성공: {success}",
-            f"❌ 실패: {fail}",
-            f"⏳ 평가 대기중: {pending}",
-            f"🎯 성공률: {success_rate:.2f}%",
-        ]
-
-        for strategy in df["strategy"].unique():
-            strat_df = df[df["strategy"] == strategy]
-            s = len(strat_df[strat_df["status"] == "success"])
-            f = len(strat_df[strat_df["status"] == "fail"])
-            rate = (s / (s + f)) * 100 if (s + f) > 0 else 0
-            summary.append(f"📌 {strategy} 성공률: {rate:.2f}%")
-
-        return "\n".join(summary)
-
+        open(PREDICTION_LOG, "w").close()
+        open(WRONG_PREDICTIONS, "w").close()
+        open(LOG_FILE, "w").close()
+        for f in glob.glob(os.path.join(MODEL_DIR, "*.pt")):
+            os.remove(f)
+        return "✅ 예측 기록, 실패 기록, 학습 로그, 모델 전부 삭제 완료"
     except Exception as e:
-        return f"[오류] 통계 계산 실패: {e}"
+        return f"삭제 실패: {e}", 500
+
+if __name__ == "__main__":
+    print(">>> __main__ 진입, 서버 실행 준비")
+    sys.stdout.flush()
+
+    start_scheduler()
+
+    test_message = "[시스템 테스트] Flask 앱이 정상적으로 실행되었으며 텔레그램 메시지도 전송됩니다."
+    send_message(test_message)
+    print("✅ 테스트 메시지 전송 완료")
+    sys.stdout.flush()
+
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
