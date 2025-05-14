@@ -42,9 +42,11 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 200):
         res.raise_for_status()
         data = res.json()
         if "result" not in data or "list" not in data["result"]:
+            print(f"[스킵] {symbol} - 데이터 형식 오류")
             return None
         rows = data["result"]["list"]
         if not rows:
+            print(f"[스킵] {symbol} - 응답 list가 비어 있음")
             return None
         df = pd.DataFrame(rows)
         df = df.iloc[:, :6]
