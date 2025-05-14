@@ -154,6 +154,26 @@ def check_stats():
     except Exception as e:
         return f"정확도 통계 출력 실패: {e}", 500
 
+# 🔽 여기에 붙이면 됨
+
+@app.route("/reset-all")
+def reset_all():
+    import glob
+    try:
+        # 로그 초기화
+        open(PREDICTION_LOG, "w").close()
+        open(WRONG_PREDICTIONS, "w").close()
+        open(LOG_FILE, "w").close()
+
+        # 모델 삭제
+        for f in glob.glob(os.path.join(MODEL_DIR, "*.pt")):
+            os.remove(f)
+
+        return "✅ 예측 기록, 실패 기록, 학습 로그, 모델 전부 삭제 완료"
+    except Exception as e:
+        return f"삭제 실패: {e}", 500
+
+
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
     sys.stdout.flush()
