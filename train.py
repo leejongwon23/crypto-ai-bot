@@ -21,8 +21,8 @@ DEVICE = torch.device("cpu")
 STOP_LOSS_PCT = 0.02
 PERSIST_DIR = "/persistent"
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
-WRONG_DIR = os.path.join(PERSIST_DIR, "wrong")
 LOG_DIR = os.path.join(PERSIST_DIR, "logs")
+WRONG_DIR = os.path.join(PERSIST_DIR, "wrong")
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(WRONG_DIR, exist_ok=True)
@@ -123,8 +123,8 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
                     loss = log_loss(y_true, y_prob)
                     logger.log_training_result(symbol, strategy, model_type, acc, f1, loss)
 
-            # 중요도 분석 (LSTM만)
-            if model_type == "lstm":
+            # 중요도 분석
+            if model_type in ["lstm", "cnn_lstm", "transformer"]:
                 required = len(val_set) + best_window
                 flat = feature_dicts[-required:-best_window]
                 flat_tensor = torch.tensor([list(row.values()) for row in flat], dtype=torch.float32)
@@ -135,7 +135,7 @@ def train_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e
                     importances = compute_feature_importance(model, compute_X_val, compute_y_val, list(df_feat.columns))
                     save_feature_importance(importances, symbol, strategy, model_type)
                 else:
-                    print(f"[SKIP] {symbol}-{strategy} 중요도 분석 생략 (view 실패)")
+                    print(f"[SKIP] {symbol}-{strategy}-{model_type} 중요도 분석 생략 (view 실패)")
 
             torch.save(model.state_dict(), model_path)
             print(f"✅ 모델 저장 완료: {model_path}")
