@@ -1,12 +1,13 @@
 import datetime
 import os
+import csv
 from telegram_bot import send_message
 from predict import predict
 from logger import log_prediction, evaluate_predictions, get_model_success_rate
 from data.utils import SYMBOLS, get_realtime_prices
 from src.message_formatter import format_message
 
-# --- 공격형 필터 설정 ---
+# --- 필터 설정 ---
 MIN_CONFIDENCE = 0.60
 MAX_TOP_CONFIDENCE = 100
 MIN_GAIN_BY_STRATEGY = {
@@ -16,6 +17,26 @@ MIN_GAIN_BY_STRATEGY = {
 }
 TOP_PER_STRATEGY = 2
 FINAL_SEND_LIMIT = 10
+
+# --- 운영 추적 로그 경로 ---
+AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
+os.makedirs("/persistent/logs", exist_ok=True)
+
+def log_audit(symbol, strategy, result, status):
+    now = datetime.datetime.utcnow().isoformat()
+    row = {
+        "timestamp": now,
+        "symbol": symbol,
+        "strategy": strategy,
+        "result": str(result),
+        "status": status
+    }
+    file_exists = os.path.exists(AUDIT_LOG)
+    with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=row.keys())
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
 
 def get_price_now(symbol):
     prices = get_realtime_prices()
@@ -44,6 +65,7 @@ def main():
                         confidence=result["confidence"],
                         model=result.get("model", "unknown")
                     )
+                    log_audit(symbol, strategy, result, "예측+기록 완료")
                     result["strategy"] = strategy
                     result["symbol"] = symbol
                     all_results.append(result)
@@ -59,17 +81,16 @@ def main():
                         confidence=0.0,
                         model="unknown"
                     )
+                    log_audit(symbol, strategy, None, "예측 실패")
 
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
+                log_audit(symbol, strategy, None, f"예외 발생: {e}")
 
-    # --- 1단계: confidence 필터 ---
+    # --- 필터 ---
     candidates = [r for r in all_results if r["confidence"] >= MIN_CONFIDENCE]
-
-    # --- 2단계: 상위 confidence 유지 ---
     candidates = sorted(candidates, key=lambda x: x["confidence"], reverse=True)[:MAX_TOP_CONFIDENCE]
 
-    # --- 3단계: 전략별 최소 수익률 + Top N 추출 ---
     strategy_grouped = {}
     for r in candidates:
         strategy = r["strategy"]
@@ -82,13 +103,11 @@ def main():
         sorted_items = sorted(items, key=lambda x: x["rate"], reverse=True)[:TOP_PER_STRATEGY]
         filtered_results.extend(sorted_items)
 
-    # --- 4단계: success_rate 정렬 ---
     for r in filtered_results:
         r["success_rate"] = get_model_success_rate(r["symbol"], r["strategy"], r.get("model", "unknown"))
 
     final = sorted(filtered_results, key=lambda x: (-x["rate"], -x["success_rate"]))[:FINAL_SEND_LIMIT]
 
-    # --- 전송 ---
     if final:
         for res in final:
             msg = format_message(res)
