@@ -3,14 +3,12 @@ import csv
 import datetime
 import pandas as pd
 
-# ✅ 경로 설정
 PERSIST_DIR = "/persistent"
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.csv")
 os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 
-# ✅ 내부 성공률 누적용 캐시 구조
 model_success_tracker = {}
 
 def update_model_success(symbol, strategy, model, success: bool):
@@ -27,10 +25,9 @@ def get_model_success_rate(symbol, strategy, model, min_total=10):
     record = model_success_tracker.get(key, {"success": 0, "fail": 0})
     total = record["success"] + record["fail"]
     if total < min_total:
-        return 0.5  # default 중립값
+        return 0.5
     return record["success"] / total
 
-# ✅ 전략별 평가 기준 (수익률 % / 평가 대기 시간 h)
 STRATEGY_EVAL_CONFIG = {
     "단기": {"gain_pct": 0.03, "hours": 4},
     "중기": {"gain_pct": 0.06, "hours": 24},
@@ -51,7 +48,7 @@ def log_prediction(symbol, strategy, direction, entry_price, target_price, times
         "status": "pending"
     }
     file_exists = os.path.isfile(PREDICTION_LOG)
-    with open(PREDICTION_LOG, "a", newline="") as f:
+    with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=row.keys())
         if not file_exists:
             writer.writeheader()
@@ -61,7 +58,7 @@ def evaluate_predictions(get_price_fn):
     if not os.path.exists(PREDICTION_LOG):
         return
 
-    with open(PREDICTION_LOG, "r") as f:
+    with open(PREDICTION_LOG, "r", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
 
@@ -98,25 +95,15 @@ def evaluate_predictions(get_price_fn):
         success = False
 
         if direction == "롱":
-            if gain >= min_gain:
-                success = True
-            elif gain <= -STOP_LOSS_PCT:
-                success = False
+            success = gain >= min_gain or gain > -STOP_LOSS_PCT
         elif direction == "숏":
-            if -gain >= min_gain:
-                success = True
-            elif -gain <= -STOP_LOSS_PCT:
-                success = False
-        else:
-            success = False
+            success = -gain >= min_gain or -gain > -STOP_LOSS_PCT
 
         row["status"] = "success" if success else "fail"
-
-        # ✅ 모델 성공률 누적
         update_model_success(symbol, strategy, row.get("model", "unknown"), success)
 
         if not success:
-            with open(WRONG_PREDICTIONS, "a", newline="") as wf:
+            with open(WRONG_PREDICTIONS, "a", newline="", encoding="utf-8-sig") as wf:
                 writer = csv.writer(wf)
                 writer.writerow([
                     row["timestamp"], symbol, strategy, direction,
@@ -125,14 +112,14 @@ def evaluate_predictions(get_price_fn):
 
         updated_rows.append(row)
 
-    with open(PREDICTION_LOG, "w", newline="") as f:
+    with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=updated_rows[0].keys())
         writer.writeheader()
         writer.writerows(updated_rows)
 
 def get_actual_success_rate(strategy, threshold=0.7):
     try:
-        df = pd.read_csv(PREDICTION_LOG)
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
         df = df[df["strategy"] == strategy]
         df = df[df["confidence"] >= threshold]
         if len(df) == 0:
@@ -148,7 +135,7 @@ def print_prediction_stats():
         return "예측 기록이 없습니다."
 
     try:
-        df = pd.read_csv(PREDICTION_LOG)
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
         total = len(df)
         success = len(df[df["status"] == "success"])
         fail = len(df[df["status"] == "fail"])
@@ -189,8 +176,8 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
 
     df = pd.DataFrame([log_entry])
     if os.path.exists(LOG_FILE):
-        df.to_csv(LOG_FILE, mode='a', header=False, index=False)
+        df.to_csv(LOG_FILE, mode='a', header=False, index=False, encoding="utf-8-sig")
     else:
-        df.to_csv(LOG_FILE, index=False)
+        df.to_csv(LOG_FILE, index=False, encoding="utf-8-sig")
 
     print(f"[LOG] Training result logged for {symbol} - {strategy} - {model_name}")
