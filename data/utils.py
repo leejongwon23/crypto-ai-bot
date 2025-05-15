@@ -34,17 +34,16 @@ def get_btc_dominance():
         return BTC_DOMINANCE_CACHE["value"]
 
     try:
-        url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=BTC.D"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=10)
+        url = "https://api.coinpaprika.com/v1/global"
+        res = requests.get(url, timeout=10)
         res.raise_for_status()
         data = res.json()
-        dom = data["quoteResponse"]["result"][0]["regularMarketPrice"]
+        dom = data["market_cap_percentage"]["btc"]
         value = round(dom / 100, 4)
         BTC_DOMINANCE_CACHE = {"value": value, "timestamp": now}
         return value
     except Exception as e:
-        print(f"[ERROR] BTC 도미넌스 조회 실패 (Yahoo): {e}")
+        print(f"[ERROR] BTC 도미넌스 조회 실패 (CoinPaprika): {e}")
         return BTC_DOMINANCE_CACHE["value"]
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 200):
@@ -122,7 +121,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df['volatility'] = df['close'].pct_change().rolling(window=20).std()
     df['ema10'] = df['close'].ewm(span=10, adjust=False).mean()
     df['trend_slope'] = df['ema10'].diff()
-    df['percent_diff'] = (df['close'] - df['ma20']) / df['ma20']
+    df['percent_diff'] = (df['close"] - df['ma20']) / df['ma20']
     df['volume_delta'] = df['volume'].diff()
 
     obv = [0]
