@@ -37,11 +37,8 @@ def create_dataset(features, window):
     X, y = [], []
     for i in range(len(features) - window - 1):
         x_seq = features[i:i+window]
-
-        # 1️⃣ 내부 row feature 길이 검사
         if any(len(row.values()) != len(features[0].values()) for row in x_seq):
             continue
-
         current_close = features[i+window-1]['close']
         future_close = features[i+window]['close']
         if current_close == 0:
@@ -51,7 +48,6 @@ def create_dataset(features, window):
         X.append([list(row.values()) for row in x_seq])
         y.append(label)
 
-    # 2️⃣ 최빈 시퀀스 길이 기준 필터링
     if not X:
         return np.array([]), np.array([])
     seq_lens = [len(x) for x in X]
@@ -120,7 +116,6 @@ def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, 
         print(f"[스킵] {symbol}-{strategy} 학습 샘플 부족")
         return
 
-    # 오답 학습
     wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=best_window)
     if wrong_data:
         try:
@@ -131,24 +126,31 @@ def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, 
                 wrong_loader = DataLoader(wrong_data, batch_size=batch_size, shuffle=True)
                 for xb, yb in wrong_loader:
                     pred, _ = model(xb)
+                    if pred is None:
+                        print(f"[오답 무시] {symbol}-{strategy} → None 반환")
+                        continue
                     loss = criterion(pred, yb)
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
         except Exception as e:
             print(f"[오답 학습 실패] {symbol}-{strategy} → {e}")
 
-    # 정규 학습
     for epoch in range(epochs):
         for xb, yb in train_loader:
             pred, _ = model(xb)
+            if pred is None:
+                print(f"[학습 무시] {symbol}-{strategy} → None 반환")
+                continue
             loss = criterion(pred, yb)
             optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-    # 성능 평가
     model.eval()
     with torch.no_grad():
         y_true, y_pred, y_prob = [], [], []
         for xb, yb in val_loader:
             out, _ = model(xb)
+            if out is None:
+                print(f"[평가 무시] {symbol}-{strategy} → None 반환")
+                continue
             y_prob.extend(out.squeeze().numpy().tolist())
             y_true.extend(yb.numpy().tolist())
             y_pred.extend((out.squeeze().numpy() > 0.5).astype(int).tolist())
@@ -156,7 +158,6 @@ def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, 
         f1 = f1_score(y_true, y_pred)
         logger.log_training_result(symbol, strategy, model_type, acc, f1, log_loss(y_true, y_prob))
 
-    # 성능 비교 후 저장 여부 결정
     val_X_tensor = torch.stack([xb for xb, _ in val_loader])
     val_y_tensor = torch.tensor(y_true, dtype=torch.float32)
     current_score = acc + f1
@@ -170,10 +171,11 @@ def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, 
     if current_score > previous_score:
         torch.save(model.state_dict(), model_path)
         print(f"✅ 저장됨: {model_path} (new score: {current_score:.4f} > old: {previous_score:.4f})")
+    elif current_score == previous_score:
+        print(f"ℹ️ 저장 안함: 기존과 성능 동일 (score: {current_score:.4f})")
     else:
-        print(f"❌ 저장 안됨: 기존보다 성능 낮음 (new: {current_score:.4f} <= old: {previous_score:.4f})")
+        print(f"❌ 저장 안됨: 기존보다 성능 낮음 (new: {current_score:.4f} < old: {previous_score:.4f})")
 
-    # 중요도 분석
     required = len(val_set) + best_window
     flat = feature_dicts[-required:-best_window]
     flat_tensor = torch.tensor([list(row.values()) for row in flat], dtype=torch.float32)
