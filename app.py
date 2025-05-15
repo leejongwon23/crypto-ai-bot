@@ -27,7 +27,6 @@ def start_scheduler():
     sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Seoul'))
 
-    # ✅ 예측: 매 정시마다 실행
     def run_prediction():
         print(f"[예측 시작] {datetime.datetime.now()}")
         sys.stdout.flush()
@@ -38,7 +37,6 @@ def start_scheduler():
 
     scheduler.add_job(run_prediction, 'cron', minute=0)
 
-    # ✅ 학습 스케줄링
     def train_short():
         print("[단기 학습 시작]")
         threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start()
@@ -99,7 +97,7 @@ def train_log():
     try:
         if not os.path.exists(LOG_FILE):
             return "아직 학습 로그가 없습니다."
-        with open(LOG_FILE, "r") as f:
+        with open(LOG_FILE, "r", encoding="utf-8-sig") as f:
             return "<pre>" + f.read() + "</pre>"
     except Exception as e:
         return f"로그 파일을 읽을 수 없습니다: {e}", 500
@@ -131,7 +129,7 @@ def check_log():
     try:
         if not os.path.exists(PREDICTION_LOG):
             return jsonify({"error": "prediction_log.csv not found"})
-        df = pd.read_csv(PREDICTION_LOG)
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
         last_10 = df.tail(10).to_dict(orient='records')
         return jsonify(last_10)
     except Exception as e:
@@ -142,7 +140,7 @@ def check_wrong():
     try:
         if not os.path.exists(WRONG_PREDICTIONS):
             return jsonify({"error": "wrong_predictions.csv not found"})
-        df = pd.read_csv(WRONG_PREDICTIONS)
+        df = pd.read_csv(WRONG_PREDICTIONS, encoding="utf-8-sig")
         last_10 = df.tail(10).to_dict(orient='records')
         return jsonify(last_10)
     except Exception as e:
