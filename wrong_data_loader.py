@@ -37,6 +37,11 @@ def load_wrong_prediction_data(symbol, strategy, input_size, window=30):
     X, y = [], []
     for i in range(len(feature_dicts) - window - 1):
         x_seq = feature_dicts[i:i+window]
+
+        # 1️⃣ 각 row의 feature 수 일치 여부 확인
+        if any(len(row.values()) != len(feature_dicts[0].values()) for row in x_seq):
+            continue
+
         current_close = feature_dicts[i+window-1]['close']
         future_close = feature_dicts[i+window]['close']
         change = (future_close - current_close) / current_close
@@ -47,6 +52,14 @@ def load_wrong_prediction_data(symbol, strategy, input_size, window=30):
     if not X:
         return None
 
+    # 2️⃣ 최빈 시퀀스 길이 기준 필터링
+    seq_lens = [len(x) for x in X]
+    mode_len = max(set(seq_lens), key=seq_lens.count)
+    filtered = [(x, l) for x, l in zip(X, y) if len(x) == mode_len]
+    if not filtered:
+        return None
+
+    X, y = zip(*filtered)
     X_tensor = torch.tensor(np.array(X), dtype=torch.float32)
     y_tensor = torch.tensor(np.array(y), dtype=torch.float32)
     return TensorDataset(X_tensor, y_tensor)
