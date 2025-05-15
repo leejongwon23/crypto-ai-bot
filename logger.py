@@ -47,10 +47,27 @@ def log_prediction(symbol, strategy, direction, entry_price, target_price, times
         "model": model or "unknown",
         "status": "pending"
     }
+
+    fieldnames = [
+        "timestamp", "symbol", "strategy", "direction",
+        "entry_price", "target_price", "confidence",
+        "model", "status"
+    ]
+
     file_exists = os.path.isfile(PREDICTION_LOG)
+    write_header = True
+    if file_exists:
+        try:
+            with open(PREDICTION_LOG, "r", encoding="utf-8-sig") as f:
+                header = f.readline()
+                if all(name in header for name in fieldnames):
+                    write_header = False
+        except:
+            pass
+
     with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=row.keys())
-        if not file_exists:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
             writer.writeheader()
         writer.writerow(row)
 
