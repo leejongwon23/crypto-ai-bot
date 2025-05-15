@@ -6,7 +6,7 @@ from logger import log_prediction, evaluate_predictions, get_model_success_rate
 from data.utils import SYMBOLS, get_realtime_prices
 from src.message_formatter import format_message
 
-# 필터 설정 (공격형)
+# --- 공격형 필터 설정 ---
 MIN_CONFIDENCE = 0.60
 MAX_TOP_CONFIDENCE = 100
 MIN_GAIN_BY_STRATEGY = {
@@ -33,8 +33,8 @@ def main():
                 result = predict(symbol, strategy)
                 print(f"[예측] {symbol}-{strategy} → {result}")
 
+                # --- 무조건 기록 ---
                 if result:
-                    # 로그 기록
                     log_prediction(
                         symbol=result["symbol"],
                         strategy=result["strategy"],
@@ -56,18 +56,20 @@ def main():
                         entry_price=0,
                         target_price=0,
                         timestamp=datetime.datetime.utcnow().isoformat(),
-                        confidence=0.0
+                        confidence=0.0,
+                        model="unknown"
                     )
+
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
 
-    # 1단계: confidence 필터
+    # --- 1단계: confidence 필터 ---
     candidates = [r for r in all_results if r["confidence"] >= MIN_CONFIDENCE]
 
-    # 2단계: confidence 상위 100개 유지
+    # --- 2단계: 상위 confidence 유지 ---
     candidates = sorted(candidates, key=lambda x: x["confidence"], reverse=True)[:MAX_TOP_CONFIDENCE]
 
-    # 3단계: 전략별 최소 수익률 & Top 2 추출
+    # --- 3단계: 전략별 최소 수익률 + Top N 추출 ---
     strategy_grouped = {}
     for r in candidates:
         strategy = r["strategy"]
@@ -80,13 +82,13 @@ def main():
         sorted_items = sorted(items, key=lambda x: x["rate"], reverse=True)[:TOP_PER_STRATEGY]
         filtered_results.extend(sorted_items)
 
-    # 4단계: success_rate 기준 정렬 (동일 수익률 시 우선)
+    # --- 4단계: success_rate 정렬 ---
     for r in filtered_results:
         r["success_rate"] = get_model_success_rate(r["symbol"], r["strategy"], r.get("model", "unknown"))
 
     final = sorted(filtered_results, key=lambda x: (-x["rate"], -x["success_rate"]))[:FINAL_SEND_LIMIT]
 
-    # 전송
+    # --- 전송 ---
     if final:
         for res in final:
             msg = format_message(res)
