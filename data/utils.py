@@ -27,6 +27,17 @@ STRATEGY_CONFIG = {
     "장기": {"interval": "w", "limit": 300}
 }
 
+def get_btc_dominance():
+    try:
+        url = "https://api.coingecko.com/api/v3/global"
+        res = requests.get(url, timeout=10)
+        res.raise_for_status()
+        data = res.json()
+        return round(data["data"]["market_cap_percentage"]["btc"] / 100, 4)
+    except Exception as e:
+        print(f"[ERROR] BTC 도미넌스 조회 실패: {e}")
+        return 0.5
+
 def get_kline(symbol: str, interval: str = "60", limit: int = 200):
     url = f"{BASE_URL}/v5/market/kline"
     params = {
@@ -150,7 +161,6 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df['percent_diff'] = (df['close'] - df['ma20']) / df['ma20']
     df['volume_delta'] = df['volume'].diff()
 
-    # ✅ OBV 추가
     obv = [0]
     for i in range(1, len(df)):
         if df['close'].iloc[i] > df['close'].iloc[i-1]:
@@ -161,20 +171,22 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
             obv.append(obv[-1])
     df['obv'] = obv
 
-    # ✅ CCI 추가
     tp = (df['high'] + df['low'] + df['close']) / 3
     cci = (tp - tp.rolling(20).mean()) / (0.015 * tp.rolling(20).std())
     df['cci'] = cci
 
-    # ✅ Stochastic RSI 추가
     min_rsi = df['rsi'].rolling(14).min()
     max_rsi = df['rsi'].rolling(14).max()
     df['stoch_rsi'] = (df['rsi'] - min_rsi) / (max_rsi - min_rsi)
+
+    # ✅ BTC 도미넌스 추가
+    btc_dom = get_btc_dominance()
+    df["btc_dominance"] = btc_dom
 
     df = df.dropna()
     return df[[
         'close', 'volume', 'ma5', 'ma20', 'rsi', 'macd',
         'bollinger', 'volatility', 'trend_slope',
         'percent_diff', 'volume_delta',
-        'obv', 'cci', 'stoch_rsi'
+        'obv', 'cci', 'stoch_rsi', 'btc_dominance'
     ]]
