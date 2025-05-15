@@ -11,7 +11,7 @@ from data.utils import SYMBOLS, get_kline_by_strategy, compute_features
 from model.base_model import get_model
 from model_weight_loader import get_model_weight
 from wrong_data_loader import load_wrong_prediction_data
-from feature_importance import compute_feature_importance, save_feature_importance, drop_low_importance_features
+from feature_importance import compute_feature_importance, save_feature_importance
 import logger
 from window_optimizer import find_best_window
 
@@ -160,7 +160,6 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         torch.save(best_model_obj.state_dict(), model_path)
         print(f"✅ Best 모델 저장됨: {model_path} (score: {best_score:.4f})")
 
-        # 중요도 분석
         compute_X_val = val_X_tensor
         compute_y_val = val_y_tensor
         importances = compute_feature_importance(best_model_obj, compute_X_val, compute_y_val, list(df_feat.columns))
