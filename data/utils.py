@@ -29,13 +29,14 @@ STRATEGY_CONFIG = {
 
 def get_btc_dominance():
     try:
-        url = "https://api.coingecko.com/api/v3/global"
+        url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=BTC.D"
         res = requests.get(url, timeout=10)
         res.raise_for_status()
         data = res.json()
-        return round(data["data"]["market_cap_percentage"]["btc"] / 100, 4)
+        dom = data["quoteResponse"]["result"][0]["regularMarketPrice"]
+        return round(dom / 100, 4)
     except Exception as e:
-        print(f"[ERROR] BTC 도미넌스 조회 실패: {e}")
+        print(f"[ERROR] BTC 도미넌스 조회 실패 (Yahoo): {e}")
         return 0.5
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 200):
@@ -95,51 +96,6 @@ def get_realtime_prices():
         print(f"[ERROR] 실시간 가격 조회 실패: {e}")
         return {}
 
-def filter_by_volume(df: pd.DataFrame, min_volume: float = 1000000):
-    recent_volume = df["volume"].iloc[-1]
-    return recent_volume >= min_volume
-
-def get_long_short_ratio(symbol: str):
-    url = f"{BASE_URL}/v5/market/account-ratio"
-    params = {"category": "linear", "symbol": symbol, "period": "1h", "limit": 1}
-    try:
-        res = requests.get(url, params=params, timeout=10)
-        res.raise_for_status()
-        data = res.json()
-        if "result" not in data or "list" not in data["result"]:
-            return None
-        ratio_data = data["result"]["list"][0]
-        return {
-            "long": float(ratio_data["buyRatio"]),
-            "short": float(ratio_data["sellRatio"])
-        }
-    except Exception as e:
-        print(f"[ERROR] {symbol} 롱숏 비율 조회 실패: {e}")
-        return None
-
-def get_trade_strength(symbol: str):
-    url = f"{BASE_URL}/v5/market/public-trading-history"
-    params = {"category": "linear", "symbol": symbol, "limit": 200}
-    try:
-        res = requests.get(url, params=params, timeout=10)
-        res.raise_for_status()
-        data = res.json()
-        if "result" not in data or "list" not in data["result"]:
-            return None
-        trades = data["result"]["list"]
-        buy_count = sum(1 for t in trades if t["side"] == "Buy")
-        sell_count = sum(1 for t in trades if t["side"] == "Sell")
-        total = buy_count + sell_count
-        if total == 0:
-            return None
-        return {
-            "buy_ratio": buy_count / total,
-            "sell_ratio": sell_count / total
-        }
-    except Exception as e:
-        print(f"[ERROR] {symbol} 체결강도 조회 실패: {e}")
-        return None
-
 def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df['ma5'] = df['close'].rolling(window=5).mean()
@@ -179,9 +135,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     max_rsi = df['rsi'].rolling(14).max()
     df['stoch_rsi'] = (df['rsi'] - min_rsi) / (max_rsi - min_rsi)
 
-    # ✅ BTC 도미넌스 추가
-    btc_dom = get_btc_dominance()
-    df["btc_dominance"] = btc_dom
+    df["btc_dominance"] = get_btc_dominance()
 
     df = df.dropna()
     return df[[
