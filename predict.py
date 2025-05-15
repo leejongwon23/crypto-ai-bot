@@ -26,11 +26,13 @@ def predict(symbol, strategy):
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
         input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
 
+        # 모델 경로 구성
         model_paths = {
             mt: os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{mt}.pt")
             for mt in ["lstm", "cnn_lstm", "transformer"]
         }
 
+        # 존재하는 모델만 필터링
         available_models = {
             mt: path for mt, path in model_paths.items()
             if os.path.exists(path)
@@ -74,6 +76,7 @@ def predict(symbol, strategy):
             print(f"[SKIP] {symbol}-{strategy} → 유효 예측 부족")
             return None
 
+        # 다수결 방향
         dir_count = {"롱": 0, "숏": 0}
         for r in results:
             dir_count[r["direction"]] += 1
