@@ -7,6 +7,7 @@ PERSIST_DIR = "/persistent"
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.csv")
+AUDIT_LOG = os.path.join(PERSIST_DIR, "logs", "evaluation_audit.csv")
 os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 
 model_success_tracker = {}
@@ -35,6 +36,22 @@ STRATEGY_EVAL_CONFIG = {
 }
 STOP_LOSS_PCT = 0.02
 
+def log_audit(symbol, strategy, status, reason):
+    now = datetime.datetime.utcnow().isoformat()
+    row = {
+        "timestamp": now,
+        "symbol": symbol,
+        "strategy": strategy,
+        "status": status,
+        "reason": reason
+    }
+    file_exists = os.path.exists(AUDIT_LOG)
+    with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=row.keys())
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
 def log_prediction(symbol, strategy, direction, entry_price, target_price, timestamp, confidence, model=None):
     row = {
         "timestamp": timestamp,
@@ -48,12 +65,7 @@ def log_prediction(symbol, strategy, direction, entry_price, target_price, times
         "status": "pending"
     }
 
-    fieldnames = [
-        "timestamp", "symbol", "strategy", "direction",
-        "entry_price", "target_price", "confidence",
-        "model", "status"
-    ]
-
+    fieldnames = list(row.keys())
     file_exists = os.path.isfile(PREDICTION_LOG)
     write_header = True
     if file_exists:
@@ -87,45 +99,54 @@ def evaluate_predictions(get_price_fn):
             updated_rows.append(row)
             continue
 
-        pred_time = datetime.datetime.fromisoformat(row["timestamp"])
-        strategy = row["strategy"]
-        direction = row["direction"]
-        config = STRATEGY_EVAL_CONFIG.get(strategy, {"gain_pct": 0.06, "hours": 6})
-        eval_hours = config["hours"]
-        min_gain = config["gain_pct"]
-        hours_passed = (now - pred_time).total_seconds() / 3600
+        try:
+            pred_time = datetime.datetime.fromisoformat(row["timestamp"])
+            strategy = row["strategy"]
+            direction = row["direction"]
+            config = STRATEGY_EVAL_CONFIG.get(strategy, {"gain_pct": 0.06, "hours": 6})
+            eval_hours = config["hours"]
+            min_gain = config["gain_pct"]
+            hours_passed = (now - pred_time).total_seconds() / 3600
 
-        if hours_passed < eval_hours:
-            updated_rows.append(row)
-            continue
+            if hours_passed < eval_hours:
+                log_audit(row["symbol"], strategy, "대기중", f"{hours_passed:.2f}h < {eval_hours}h")
+                updated_rows.append(row)
+                continue
 
-        symbol = row["symbol"]
-        entry_price = float(row["entry_price"])
-        target_price = float(row["target_price"])
-        current_price = get_price_fn(symbol)
+            symbol = row["symbol"]
+            entry_price = float(row["entry_price"])
+            target_price = float(row["target_price"])
+            current_price = get_price_fn(symbol)
 
-        if current_price is None:
-            updated_rows.append(row)
-            continue
+            if current_price is None:
+                log_audit(symbol, strategy, "실패", "현재가 조회 실패")
+                updated_rows.append(row)
+                continue
 
-        gain = (current_price - entry_price) / entry_price
-        success = False
+            gain = (current_price - entry_price) / entry_price
+            success = False
 
-        if direction == "롱":
-            success = gain >= min_gain or gain > -STOP_LOSS_PCT
-        elif direction == "숏":
-            success = -gain >= min_gain or -gain > -STOP_LOSS_PCT
+            if direction == "롱":
+                success = gain >= min_gain or gain > -STOP_LOSS_PCT
+            elif direction == "숏":
+                success = -gain >= min_gain or -gain > -STOP_LOSS_PCT
 
-        row["status"] = "success" if success else "fail"
-        update_model_success(symbol, strategy, row.get("model", "unknown"), success)
+            row["status"] = "success" if success else "fail"
+            update_model_success(symbol, strategy, row.get("model", "unknown"), success)
 
-        if not success:
-            with open(WRONG_PREDICTIONS, "a", newline="", encoding="utf-8-sig") as wf:
-                writer = csv.writer(wf)
-                writer.writerow([
-                    row["timestamp"], symbol, strategy, direction,
-                    entry_price, target_price, current_price, gain
-                ])
+            if not success:
+                log_audit(symbol, strategy, "실패", f"수익률 미달: {gain:.4f}")
+                with open(WRONG_PREDICTIONS, "a", newline="", encoding="utf-8-sig") as wf:
+                    writer = csv.writer(wf)
+                    writer.writerow([
+                        row["timestamp"], symbol, strategy, direction,
+                        entry_price, target_price, current_price, gain
+                    ])
+            else:
+                log_audit(symbol, strategy, "성공", f"수익률 달성: {gain:.4f}")
+
+        except Exception as e:
+            log_audit(row.get("symbol", "?"), row.get("strategy", "?"), "실패", f"예외: {e}")
 
         updated_rows.append(row)
 
