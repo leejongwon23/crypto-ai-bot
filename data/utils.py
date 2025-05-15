@@ -4,9 +4,9 @@ import numpy as np
 import time
 
 BASE_URL = "https://api.bybit.com"
+BTC_DOMINANCE_CACHE = {"value": 0.5, "timestamp": 0}
 
-# ✅ 전체 60개 심볼
-SYMBOLS = [
+SYMBOLS = [  # 전체 60개 심볼
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT",
     "AVAXUSDT", "DOGEUSDT", "MATICUSDT", "DOTUSDT", "TRXUSDT",
     "LTCUSDT", "BCHUSDT", "LINKUSDT", "ATOMUSDT", "XLMUSDT",
@@ -28,16 +28,24 @@ STRATEGY_CONFIG = {
 }
 
 def get_btc_dominance():
+    global BTC_DOMINANCE_CACHE
+    now = time.time()
+    if now - BTC_DOMINANCE_CACHE["timestamp"] < 1800:  # 30분 캐시
+        return BTC_DOMINANCE_CACHE["value"]
+
     try:
         url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=BTC.D"
-        res = requests.get(url, timeout=10)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=10)
         res.raise_for_status()
         data = res.json()
         dom = data["quoteResponse"]["result"][0]["regularMarketPrice"]
-        return round(dom / 100, 4)
+        value = round(dom / 100, 4)
+        BTC_DOMINANCE_CACHE = {"value": value, "timestamp": now}
+        return value
     except Exception as e:
         print(f"[ERROR] BTC 도미넌스 조회 실패 (Yahoo): {e}")
-        return 0.5
+        return BTC_DOMINANCE_CACHE["value"]
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 200):
     url = f"{BASE_URL}/v5/market/kline"
