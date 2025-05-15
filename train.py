@@ -39,13 +39,29 @@ def create_dataset(features, window):
         x_seq = features[i:i+window]
         current_close = features[i+window-1]['close']
         future_close = features[i+window]['close']
-        if current_close == 0:
-            continue
+        if current_close == 0: continue
         change = (future_close - current_close) / current_close
         label = 1 if change > 0 else 0
         X.append([list(row.values()) for row in x_seq])
         y.append(label)
     return np.array(X), np.array(y)
+
+# --- [기존 모델 성능 평가] ---
+def evaluate_existing_model(model_path, model, X_val, y_val):
+    if not os.path.exists(model_path): return -1  # 모델 없음
+    try:
+        model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+        model.eval()
+        with torch.no_grad():
+            out, _ = model(X_val)
+            y_prob = out.squeeze().numpy()
+            y_pred = (y_prob > 0.5).astype(int)
+            y_true = y_val.numpy()
+            acc = accuracy_score(y_true, y_pred)
+            f1 = f1_score(y_true, y_pred)
+            return acc + f1
+    except:
+        return -1
 
 # --- [개별 모델 학습 함수] ---
 def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, epochs=10, lr=1e-3):
@@ -71,7 +87,6 @@ def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, 
     input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
     model = get_model(model_type=model_type, input_size=input_size)
     model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.pt")
-    if os.path.exists(model_path): os.remove(model_path)
 
     model.train()
     criterion = nn.BCELoss()
@@ -83,6 +98,7 @@ def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, 
     train_len = len(dataset) - val_len
     train_set, val_set = random_split(dataset, [train_len, val_len])
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_set, batch_size=batch_size)
 
     if len(train_loader.dataset) < 2:
         print(f"[스킵] {symbol}-{strategy} 학습 샘플 부족")
@@ -104,21 +120,31 @@ def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, 
             loss = criterion(pred, yb)
             optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-    # 평가
+    # 성능 평가
     model.eval()
     with torch.no_grad():
-        val_loader = DataLoader(val_set, batch_size=batch_size)
         y_true, y_pred, y_prob = [], [], []
         for xb, yb in val_loader:
             out, _ = model(xb)
             y_prob.extend(out.squeeze().numpy().tolist())
             y_true.extend(yb.numpy().tolist())
             y_pred.extend((out.squeeze().numpy() > 0.5).astype(int).tolist())
-        if len(y_true) >= 1:
-            acc = accuracy_score(y_true, y_pred)
-            f1 = f1_score(y_true, y_pred)
-            loss = log_loss(y_true, y_prob)
-            logger.log_training_result(symbol, strategy, model_type, acc, f1, loss)
+        acc = accuracy_score(y_true, y_pred)
+        f1 = f1_score(y_true, y_pred)
+        logger.log_training_result(symbol, strategy, model_type, acc, f1, log_loss(y_true, y_prob))
+
+    # 성능 비교 후 저장 여부 결정
+    val_X_tensor = torch.stack([xb for xb, _ in val_loader])
+    val_y_tensor = torch.tensor(y_true, dtype=torch.float32)
+
+    current_score = acc + f1
+    previous_score = evaluate_existing_model(model_path, get_model(model_type, input_size), val_X_tensor.view(len(val_y_tensor), best_window, input_size), val_y_tensor)
+
+    if current_score > previous_score:
+        torch.save(model.state_dict(), model_path)
+        print(f"✅ 저장됨: {model_path} (new score: {current_score:.4f} > old: {previous_score:.4f})")
+    else:
+        print(f"❌ 저장 안됨: 기존보다 성능 낮음 (new: {current_score:.4f} <= old: {previous_score:.4f})")
 
     # 중요도 분석
     required = len(val_set) + best_window
@@ -130,15 +156,9 @@ def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, 
         compute_y_val = y_tensor[-len(val_set):]
         importances = compute_feature_importance(model, compute_X_val, compute_y_val, list(df_feat.columns))
         save_feature_importance(importances, symbol, strategy, model_type)
-    else:
-        print(f"[SKIP] {symbol}-{strategy}-{model_type} 중요도 분석 생략 (view 실패)")
-
-    torch.save(model.state_dict(), model_path)
-    print(f"✅ 저장 완료: {model_path}")
 
 # --- [전략별 전체 모델 학습 함수] ---
 def train_one_strategy(strategy):
-    print(f"[train_one_strategy] {strategy} 전략 전체 모델 학습 시작")
     for symbol in SYMBOLS:
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             try:
@@ -148,15 +168,13 @@ def train_one_strategy(strategy):
 
 # --- [전체 전략 학습 함수] ---
 def train_all_models():
-    print("[train_all_models] 모든 전략 전체 모델 학습 시작")
     for strategy in STRATEGY_GAIN_RANGE:
         train_one_strategy(strategy)
 
-# --- [주기적 자동 학습 함수] ---
+# --- [백그라운드 자동 학습] ---
 def background_auto_train():
     def loop(strategy, interval_sec):
         while True:
-            print(f"[주기적 학습] {strategy} 시작")
             for symbol in SYMBOLS:
                 for model_type in ["lstm", "cnn_lstm", "transformer"]:
                     try:
@@ -164,16 +182,11 @@ def background_auto_train():
                         gc.collect()
                     except Exception as e:
                         print(f"[오류] {symbol}-{strategy}-{model_type} 학습 실패: {e}")
-            print(f"[주기적 학습] {strategy} 종료")
             time.sleep(interval_sec)
 
-    strategy_intervals = {
-        "단기": 10800,
-        "중기": 21600,
-        "장기": 43200
-    }
-    for strategy, interval in strategy_intervals.items():
+    intervals = {"단기": 10800, "중기": 21600, "장기": 43200}
+    for strategy, interval in intervals.items():
         threading.Thread(target=loop, args=(strategy, interval), daemon=True).start()
 
-# --- [실행 시작] ---
+# --- [실행] ---
 background_auto_train()
