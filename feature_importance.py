@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import os
 import json
+import pandas as pd
 
 PERSIST_DIR = "/persistent"
 IMPORTANCE_DIR = os.path.join(PERSIST_DIR, "importances")
@@ -66,3 +67,16 @@ def save_feature_importance(importances, symbol, strategy, model_type):
     with open(path, "w") as f:
         json.dump(importances, f, indent=2)
     print(f"✅ 중요도 저장됨: {path}")
+
+# ✅ 중요도 기반 feature 제거 함수
+def drop_low_importance_features(df: pd.DataFrame, importances: dict, threshold: float = 0.05) -> pd.DataFrame:
+    """
+    중요도가 낮은 feature들을 제거한 새로운 DataFrame 반환
+    """
+    drop_cols = [col for col, imp in importances.items() if imp < threshold]
+    remaining_cols = [col for col in df.columns if col not in drop_cols]
+    if not remaining_cols:
+        print("[경고] 모든 feature가 제거되었음. 최소 1개 이상 유지 필요.")
+        return df
+    print(f"🧹 제거된 feature 수: {len(drop_cols)} → {drop_cols}")
+    return df[remaining_cols]
