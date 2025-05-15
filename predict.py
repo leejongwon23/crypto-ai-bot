@@ -1,4 +1,3 @@
-# --- [필수 import] ---
 import os
 import torch
 import numpy as np
@@ -7,12 +6,10 @@ from model.base_model import get_model
 from model_weight_loader import get_model_weight
 from window_optimizer import find_best_window
 
-# --- [설정] ---
 DEVICE = torch.device("cpu")
 STOP_LOSS_PCT = 0.02
 MODEL_DIR = "/persistent/models"
 
-# --- [예측 함수] ---
 def predict(symbol, strategy):
     try:
         best_window = find_best_window(symbol, strategy)
@@ -52,29 +49,39 @@ def predict(symbol, strategy):
 
                     results.append({
                         "model": model_type,
-                        "symbol": symbol,
-                        "strategy": strategy,
+                        "direction": direction,
                         "confidence": confidence,
                         "weight": weight,
                         "score": score,
-                        "rate": rate,
-                        "direction": direction
+                        "rate": rate
                     })
-
             except Exception as e:
                 print(f"[ERROR] {model_type} 로드 실패: {symbol}-{strategy} → {e}")
+                continue
 
         if not results:
             return None
 
-        long_score = sum(r["score"] for r in results if r["direction"] == "롱")
-        short_score = sum(r["score"] for r in results if r["direction"] == "숏")
-        final_direction = "롱" if long_score > short_score else "숏"
-        avg_confidence = sum(r["confidence"] for r in results) / len(results)
-        avg_rate = sum(r["rate"] for r in results) / len(results)
+        # --- 방향 일치 기준 적용 (2개 이상 동일 방향일 때만 예측 인정) ---
+        dir_count = {"롱": 0, "숏": 0}
+        for r in results:
+            dir_count[r["direction"]] += 1
+
+        final_direction = None
+        if dir_count["롱"] >= 2:
+            final_direction = "롱"
+        elif dir_count["숏"] >= 2:
+            final_direction = "숏"
+        else:
+            print(f"[SKIP] {symbol}-{strategy} → 방향 일치 부족 (예측 무효)")
+            return None
+
+        valid_results = [r for r in results if r["direction"] == final_direction]
+        avg_confidence = sum(r["confidence"] for r in valid_results) / len(valid_results)
+        avg_rate = sum(r["rate"] for r in valid_results) / len(valid_results)
         price = features["close"].iloc[-1]
 
-        # 설명용 기술 지표 해석
+        # --- 설명용 기술 지표 ---
         rsi = features["rsi"].iloc[-1] if "rsi" in features else 50
         macd = features["macd"].iloc[-1] if "macd" in features else 0
         boll = features["bollinger"].iloc[-1] if "bollinger" in features else 0
