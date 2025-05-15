@@ -15,9 +15,11 @@ def load_wrong_prediction_data(symbol, strategy, input_size, window=30):
     with open(file, "r") as f:
         reader = csv.reader(f)
         for row in reader:
-            _, sym, strat, _, _, _, _, _ = row
+            if len(row) < 4:
+                continue
+            _, sym, strat, direction, *_ = row
             if sym == symbol and strat == strategy:
-                rows.append(row)
+                rows.append((row, direction))
 
     if not rows:
         return None
@@ -38,21 +40,27 @@ def load_wrong_prediction_data(symbol, strategy, input_size, window=30):
     for i in range(len(feature_dicts) - window - 1):
         x_seq = feature_dicts[i:i+window]
 
-        # 1️⃣ 각 row의 feature 수 일치 여부 확인
         if any(len(row.values()) != len(feature_dicts[0].values()) for row in x_seq):
             continue
 
-        current_close = feature_dicts[i+window-1]['close']
-        future_close = feature_dicts[i+window]['close']
-        change = (future_close - current_close) / current_close
-        label = 1 if change > 0 else 0
-        X.append([list(r.values()) for r in x_seq])
-        y.append(label)
+        # 🚩 예측 실패 row 목록에 포함되는지 확인
+        for fail_row, direction in rows:
+            try:
+                entry_price = float(fail_row[4])
+                timestamp = fail_row[0]
+                close_price = df["close"].iloc[i + window - 1]
+                ts_index = df.index[i + window - 1]
+                if abs(close_price - entry_price) / entry_price < 0.001:
+                    label = 1 if direction == "롱" else 0
+                    X.append([list(r.values()) for r in x_seq])
+                    y.append(label)
+                    break
+            except:
+                continue
 
     if not X:
         return None
 
-    # 2️⃣ 최빈 시퀀스 길이 기준 필터링
     seq_lens = [len(x) for x in X]
     mode_len = max(set(seq_lens), key=seq_lens.count)
     filtered = [(x, l) for x, l in zip(X, y) if len(x) == mode_len]
