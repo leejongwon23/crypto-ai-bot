@@ -12,20 +12,22 @@ import sys
 from telegram_bot import send_message
 import logger
 
+# ✅ 경로 설정
 PERSIST_DIR = "/persistent"
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
-LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.txt")
+LOG_DIR = os.path.join(PERSIST_DIR, "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+LOG_FILE = os.path.join(LOG_DIR, "train_log.csv")
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
-
-os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 
 def start_scheduler():
     print(">>> start_scheduler() 호출됨")
     sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Seoul'))
 
-    # ✅ 예측: 매 정시마다 실행 (1시간마다)
+    # ✅ 예측: 매 정시마다 실행
     def run_prediction():
         print(f"[예측 시작] {datetime.datetime.now()}")
         sys.stdout.flush()
@@ -34,18 +36,18 @@ def start_scheduler():
         except Exception as e:
             print(f"[예측 오류] {e}")
 
-    scheduler.add_job(run_prediction, 'cron', minute=0)  # 매 정시
+    scheduler.add_job(run_prediction, 'cron', minute=0)
 
-    # ✅ 학습: 전략별 시간 분리
-    def train_short():  # 단기
+    # ✅ 학습 스케줄링
+    def train_short():
         print("[단기 학습 시작]")
         threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start()
 
-    def train_mid():  # 중기
+    def train_mid():
         print("[중기 학습 시작]")
         threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start()
 
-    def train_long():  # 장기
+    def train_long():
         print("[장기 학습 시작]")
         threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start()
 
@@ -95,9 +97,10 @@ def train_now():
 @app.route("/train-log")
 def train_log():
     try:
+        if not os.path.exists(LOG_FILE):
+            return "아직 학습 로그가 없습니다."
         with open(LOG_FILE, "r") as f:
-            content = f.read()
-        return f"<pre>{content}</pre>"
+            return "<pre>" + f.read() + "</pre>"
     except Exception as e:
         return f"로그 파일을 읽을 수 없습니다: {e}", 500
 
