@@ -1,5 +1,4 @@
 # --- [추천 메시지 전송 기능 전용 recommend.py] ---
-
 import datetime
 import os
 from telegram_bot import send_message
@@ -8,11 +7,11 @@ from logger import log_prediction, evaluate_predictions
 from data.utils import SYMBOLS, get_realtime_prices
 from src.message_formatter import format_message
 
-# --- 전략별 수익률 기준 (YOPO 3.0 고정 구조) ---
+# --- 전략별 수익률 기준 및 추천 score 기준 ---
 STRATEGY_GAIN_LEVELS = {
-    "단기": 0.03,
-    "중기": 0.05,
-    "장기": 0.10
+    "단기": {"min_rate": 0.03, "min_score": 0.60},
+    "중기": {"min_rate": 0.06, "min_score": 0.65},
+    "장기": {"min_rate": 0.10, "min_score": 0.70}
 }
 
 # --- 모델 파일 존재 여부 확인 ---
@@ -35,7 +34,7 @@ def main():
     print("✅ 예측 평가 시작")
     evaluate_predictions(get_price_now)
 
-    for strategy, min_gain in STRATEGY_GAIN_LEVELS.items():
+    for strategy, rule in STRATEGY_GAIN_LEVELS.items():
         strategy_results = []
 
         for symbol in SYMBOLS:
@@ -49,7 +48,7 @@ def main():
                 print(f"📊 예측 결과: {result}")
 
                 if result:
-                    # --- 예측 결과 기록 (모든 결과 기록) ---
+                    # --- 예측 결과 기록 ---
                     log_prediction(
                         symbol=result["symbol"],
                         strategy=result["strategy"],
@@ -60,14 +59,17 @@ def main():
                         confidence=result["confidence"]
                     )
 
-                    # --- 강화 필터 조건: 수익률 + 신뢰도 ---
-                    if result["rate"] >= min_gain and result["confidence"] >= 0.60:
+                    # --- 강화된 필터 조건: score & 수익률 ---
+                    score = result["confidence"]  # 이미 가중치 반영된 avg_confidence로 처리됨
+                    rate = result["rate"]
+
+                    if score >= rule["min_score"] and rate >= rule["min_rate"]:
                         print(f"✅ 조건 만족: {symbol}-{strategy} "
-                              f"(rate: {result['rate']:.2%}, conf: {result['confidence']:.2f})")
+                              f"(score: {score:.2f}, rate: {rate:.2%})")
                         strategy_results.append(result)
                     else:
                         print(f"❌ 조건 미달: {symbol}-{strategy} "
-                              f"(rate: {result['rate']:.2%}, conf: {result['confidence']:.2f})")
+                              f"(score: {score:.2f}, rate: {rate:.2%})")
                 else:
                     print(f"❌ 예측 결과 없음 (None)")
                     log_prediction(
@@ -83,7 +85,7 @@ def main():
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 중 오류: {e}")
 
-        # --- 전략별 전송 대상 결정 (신뢰도 기준 상위 1개) ---
+        # --- 전략별 최고 조건 결과 전송 ---
         if strategy_results:
             top = sorted(strategy_results, key=lambda x: x["confidence"], reverse=True)[0]
             print(f"📤 메시지 전송 대상: {top['symbol']} ({strategy})")
