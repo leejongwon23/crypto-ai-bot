@@ -11,6 +11,7 @@ import traceback
 import sys
 from telegram_bot import send_message
 import logger
+from predict_test import test_all_predictions  # ✅ 예측 점검 루틴 import 추가
 
 # ✅ 경로 설정
 PERSIST_DIR = "/persistent"
@@ -52,6 +53,15 @@ def start_scheduler():
     scheduler.add_job(train_short, 'cron', hour='0,3,6,9,12,15,18,21', minute=30)
     scheduler.add_job(train_mid,   'cron', hour='1,7,13,19', minute=30)
     scheduler.add_job(train_long,  'cron', hour='2,14', minute=30)
+
+    # ✅ 예측 점검 루프: 매 1시간마다 정각+10분에 실행
+    scheduler.add_job(
+        test_all_predictions,
+        'cron',
+        minute=10,
+        id='predict_test',
+        replace_existing=True
+    )
 
     scheduler.start()
 
