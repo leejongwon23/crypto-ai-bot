@@ -37,18 +37,34 @@ def create_dataset(features, window):
     X, y = [], []
     for i in range(len(features) - window - 1):
         x_seq = features[i:i+window]
+
+        # 1️⃣ 내부 row feature 길이 검사
+        if any(len(row.values()) != len(features[0].values()) for row in x_seq):
+            continue
+
         current_close = features[i+window-1]['close']
         future_close = features[i+window]['close']
-        if current_close == 0: continue
+        if current_close == 0:
+            continue
         change = (future_close - current_close) / current_close
         label = 1 if change > 0 else 0
         X.append([list(row.values()) for row in x_seq])
         y.append(label)
+
+    # 2️⃣ 최빈 시퀀스 길이 기준 필터링
+    if not X:
+        return np.array([]), np.array([])
+    seq_lens = [len(x) for x in X]
+    mode_len = max(set(seq_lens), key=seq_lens.count)
+    filtered = [(x, l) for x, l in zip(X, y) if len(x) == mode_len]
+    if not filtered:
+        return np.array([]), np.array([])
+    X, y = zip(*filtered)
     return np.array(X), np.array(y)
 
 # --- [기존 모델 성능 평가] ---
 def evaluate_existing_model(model_path, model, X_val, y_val):
-    if not os.path.exists(model_path): return -1  # 모델 없음
+    if not os.path.exists(model_path): return -1
     try:
         model.load_state_dict(torch.load(model_path, map_location=DEVICE))
         model.eval()
@@ -107,11 +123,18 @@ def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, 
     # 오답 학습
     wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=best_window)
     if wrong_data:
-        wrong_loader = DataLoader(wrong_data, batch_size=batch_size, shuffle=True)
-        for xb, yb in wrong_loader:
-            pred, _ = model(xb)
-            loss = criterion(pred, yb)
-            optimizer.zero_grad(); loss.backward(); optimizer.step()
+        try:
+            shapes = set([x[0].shape for x in wrong_data])
+            if len(shapes) > 1:
+                print(f"[무시됨] {symbol}-{strategy} 오답 시퀀스 shape 불일치: {shapes}")
+            else:
+                wrong_loader = DataLoader(wrong_data, batch_size=batch_size, shuffle=True)
+                for xb, yb in wrong_loader:
+                    pred, _ = model(xb)
+                    loss = criterion(pred, yb)
+                    optimizer.zero_grad(); loss.backward(); optimizer.step()
+        except Exception as e:
+            print(f"[오답 학습 실패] {symbol}-{strategy} → {e}")
 
     # 정규 학습
     for epoch in range(epochs):
@@ -136,9 +159,13 @@ def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, 
     # 성능 비교 후 저장 여부 결정
     val_X_tensor = torch.stack([xb for xb, _ in val_loader])
     val_y_tensor = torch.tensor(y_true, dtype=torch.float32)
-
     current_score = acc + f1
-    previous_score = evaluate_existing_model(model_path, get_model(model_type, input_size), val_X_tensor.view(len(val_y_tensor), best_window, input_size), val_y_tensor)
+    previous_score = evaluate_existing_model(
+        model_path,
+        get_model(model_type, input_size),
+        val_X_tensor.view(len(val_y_tensor), best_window, input_size),
+        val_y_tensor
+    )
 
     if current_score > previous_score:
         torch.save(model.state_dict(), model_path)
