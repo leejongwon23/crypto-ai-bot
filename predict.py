@@ -40,6 +40,9 @@ def predict(symbol, strategy):
                 model.eval()
                 with torch.no_grad():
                     signal, confidence = model(X_tensor)
+                    if signal is None or confidence is None:
+                        print(f"[SKIP] {symbol}-{strategy} {model_type} → None 반환")
+                        continue
                     signal = signal.squeeze().item()
                     confidence = confidence.squeeze().item()
                     direction = "롱" if signal > 0.5 else "숏"
@@ -62,7 +65,6 @@ def predict(symbol, strategy):
         if not results:
             return None
 
-        # --- 방향 일치 기준 적용 (2개 이상 동일 방향일 때만 예측 인정) ---
         dir_count = {"롱": 0, "숏": 0}
         for r in results:
             dir_count[r["direction"]] += 1
@@ -81,7 +83,6 @@ def predict(symbol, strategy):
         avg_rate = sum(r["rate"] for r in valid_results) / len(valid_results)
         price = features["close"].iloc[-1]
 
-        # --- 설명용 기술 지표 ---
         rsi = features["rsi"].iloc[-1] if "rsi" in features else 50
         macd = features["macd"].iloc[-1] if "macd" in features else 0
         boll = features["bollinger"].iloc[-1] if "bollinger" in features else 0
