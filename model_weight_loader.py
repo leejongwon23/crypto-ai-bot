@@ -14,7 +14,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", max_records=100):
     # --- accuracy 기반 계산 ---
     if os.path.exists(LOG_FILE):
         try:
-            df = pd.read_csv(LOG_FILE)
+            df = pd.read_csv(LOG_FILE, encoding="utf-8-sig")
             if symbol != "ALL":
                 df = df[df["symbol"] == symbol]
             df = df[(df["model"] == model_type) & (df["strategy"] == strategy)]
