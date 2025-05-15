@@ -24,6 +24,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or len(df) < max(window_list) + 10:
         return 20  # 기본값
+
     df_feat = compute_features(df)
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(df_feat.values)
@@ -36,6 +37,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         X, y = create_dataset(feature_dicts, window)
         if len(X) == 0:
             continue
+
         input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
         model = get_model(model_type="lstm", input_size=input_size)
         model.train()
@@ -47,6 +49,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         train_y = y_tensor[:train_len]
         val_X = X_tensor[train_len:]
         val_y = y_tensor[train_len:]
+
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
         criterion = torch.nn.BCELoss()
 
@@ -60,16 +63,20 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         model.eval()
         with torch.no_grad():
             pred_val, _ = model(val_X)
-            pred_label = (pred_val.squeeze().numpy() > 0.5).astype(int)
+            pred_prob = pred_val.squeeze().numpy()
+            pred_label = (pred_prob > 0.5).astype(int)
             acc = accuracy_score(val_y.numpy(), pred_label)
-            if acc > best_score:
-                best_score = acc
+            conf = np.mean(np.abs(pred_prob - 0.5)) * 2  # confidence-like score
+
+            score = acc * conf  # 정확도와 신뢰도 반영
+
+            if score > best_score:
+                best_score = score
                 best_window = window
 
-    # 저장
     save_path = f"/persistent/logs/best_window_{symbol}_{strategy}.txt"
     with open(save_path, "w") as f:
         f.write(str(best_window))
 
-    print(f"[최적 WINDOW] {symbol}-{strategy} → {best_window} (acc: {best_score:.4f})")
+    print(f"[최적 WINDOW] {symbol}-{strategy} → {best_window} (score: {best_score:.4f})")
     return best_window
