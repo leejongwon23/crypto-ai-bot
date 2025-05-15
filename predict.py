@@ -3,6 +3,7 @@ import torch
 import numpy as np
 from data.utils import get_kline_by_strategy, compute_features
 from model.base_model import get_model
+from model_weight_loader import get_model_weight
 from window_optimizer import find_best_window
 
 DEVICE = torch.device("cpu")
@@ -25,34 +26,72 @@ def predict(symbol, strategy):
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
         input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
 
-        model_type = None
-        for mt in ["lstm", "cnn_lstm", "transformer"]:
-            model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{mt}.pt")
-            if os.path.exists(model_path):
-                model_type = mt
-                break
+        model_paths = {
+            mt: os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{mt}.pt")
+            for mt in ["lstm", "cnn_lstm", "transformer"]
+        }
 
-        if model_type is None:
-            print(f"[SKIP] {symbol}-{strategy} → 저장된 모델 없음")
+        available_models = {
+            mt: path for mt, path in model_paths.items()
+            if os.path.exists(path)
+        }
+
+        if len(available_models) < 2:
+            print(f"[SKIP] {symbol}-{strategy} → 사용 가능한 모델 부족 ({len(available_models)})")
             return None
 
-        model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.pt")
-        model = get_model(model_type=model_type, input_size=input_size)
-        model.load_state_dict(torch.load(model_path, map_location=DEVICE))
-        model.to(DEVICE)
-        model.eval()
+        results = []
+        for model_type, model_path in available_models.items():
+            try:
+                model = get_model(model_type=model_type, input_size=input_size)
+                model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+                model.to(DEVICE)
+                model.eval()
+                with torch.no_grad():
+                    signal, confidence = model(X_tensor)
+                    if signal is None or confidence is None:
+                        continue
+                    signal = signal.squeeze().item()
+                    confidence = confidence.squeeze().item()
+                    direction = "롱" if signal > 0.5 else "숏"
+                    weight = get_model_weight(model_type, strategy)
+                    score = confidence * weight
+                    rate = abs(signal - 0.5) * 2
 
-        with torch.no_grad():
-            signal, confidence = model(X_tensor)
-            if signal is None or confidence is None:
-                print(f"[SKIP] {symbol}-{strategy} {model_type} → None 반환")
-                return None
-            signal = signal.squeeze().item()
-            confidence = confidence.squeeze().item()
-            direction = "롱" if signal > 0.5 else "숏"
-            rate = abs(signal - 0.5) * 2
+                    results.append({
+                        "model": model_type,
+                        "direction": direction,
+                        "confidence": confidence,
+                        "weight": weight,
+                        "score": score,
+                        "rate": rate
+                    })
+            except Exception as e:
+                print(f"[ERROR] {symbol}-{strategy}-{model_type} 로딩 실패: {e}")
+                continue
 
+        if len(results) < 2:
+            print(f"[SKIP] {symbol}-{strategy} → 유효 예측 부족")
+            return None
+
+        dir_count = {"롱": 0, "숏": 0}
+        for r in results:
+            dir_count[r["direction"]] += 1
+
+        final_direction = None
+        if dir_count["롱"] >= 2:
+            final_direction = "롱"
+        elif dir_count["숏"] >= 2:
+            final_direction = "숏"
+        else:
+            print(f"[SKIP] {symbol}-{strategy} → 방향 불일치")
+            return None
+
+        valid_results = [r for r in results if r["direction"] == final_direction]
+        avg_confidence = sum(r["confidence"] for r in valid_results) / len(valid_results)
+        avg_rate = sum(r["rate"] for r in valid_results) / len(valid_results)
         price = features["close"].iloc[-1]
+
         rsi = features["rsi"].iloc[-1] if "rsi" in features else 50
         macd = features["macd"].iloc[-1] if "macd" in features else 0
         boll = features["bollinger"].iloc[-1] if "bollinger" in features else 0
@@ -66,13 +105,13 @@ def predict(symbol, strategy):
         return {
             "symbol": symbol,
             "strategy": strategy,
-            "model": model_type,
-            "direction": direction,
-            "confidence": confidence,
-            "rate": rate,
+            "model": "ensemble",
+            "direction": final_direction,
+            "confidence": avg_confidence,
+            "rate": avg_rate,
             "price": price,
-            "target": price * (1 + rate) if direction == "롱" else price * (1 - rate),
-            "stop": price * (1 - STOP_LOSS_PCT) if direction == "롱" else price * (1 + STOP_LOSS_PCT),
+            "target": price * (1 + avg_rate) if final_direction == "롱" else price * (1 - avg_rate),
+            "stop": price * (1 - STOP_LOSS_PCT) if final_direction == "롱" else price * (1 + STOP_LOSS_PCT),
             "reason": ", ".join(reason)
         }
 
