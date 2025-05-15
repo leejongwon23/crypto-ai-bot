@@ -3,20 +3,21 @@ import csv
 import datetime
 import pandas as pd
 
-# ✅ Persistent 경로로 설정
+# ✅ 경로 설정
 PERSIST_DIR = "/persistent"
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
-THRESHOLD_TOLERANCE = 0.01  # 목표 수익률의 99% 이상 도달 시 성공 처리
 LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.csv")
 os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 
-# ✅ 전략별 평가 대기 시간 (단기: 3h, 중기: 6h, 장기: 12h)
-STRATEGY_LIMIT_HOURS = {
-    "단기": 3,
-    "중기": 6,
-    "장기": 12
+# ✅ 전략별 평가 기준 (수익률 % / 평가 대기 시간 h)
+STRATEGY_EVAL_CONFIG = {
+    "단기": {"gain_pct": 0.03, "hours": 4},
+    "중기": {"gain_pct": 0.06, "hours": 24},
+    "장기": {"gain_pct": 0.10, "hours": 144}
 }
+
+STOP_LOSS_PCT = 0.02  # 손절 -2%
 
 def log_prediction(symbol, strategy, direction, entry_price, target_price, timestamp, confidence):
     row = {
@@ -56,37 +57,44 @@ def evaluate_predictions(get_price_fn):
 
         pred_time = datetime.datetime.fromisoformat(row["timestamp"])
         strategy = row["strategy"]
-        limit_hours = STRATEGY_LIMIT_HOURS.get(strategy, 6)
+        direction = row["direction"]
+        config = STRATEGY_EVAL_CONFIG.get(strategy, {"gain_pct": 0.06, "hours": 6})
+        eval_hours = config["hours"]
+        min_gain = config["gain_pct"]
         hours_passed = (now - pred_time).total_seconds() / 3600
-        if hours_passed < limit_hours:
+
+        if hours_passed < eval_hours:
             updated_rows.append(row)
             continue
 
         symbol = row["symbol"]
         entry_price = float(row["entry_price"])
         target_price = float(row["target_price"])
-        direction = row["direction"]
-
         current_price = get_price_fn(symbol)
+
         if current_price is None:
             updated_rows.append(row)
             continue
 
-        actual_gain = (current_price - entry_price) / entry_price
-        expected_gain = (target_price - entry_price) / entry_price
+        gain = (current_price - entry_price) / entry_price
         if direction == "숏":
-            actual_gain *= -1
-            expected_gain *= -1
+            gain = -gain
 
-        success = actual_gain >= expected_gain * (1 - THRESHOLD_TOLERANCE)
-        row["status"] = "success" if success else "fail"
+        # ✅ 성공: 목표 수익률 도달
+        # ✅ 실패: -2% 손실 or 시간 내 미달
+        if gain >= min_gain:
+            row["status"] = "success"
+        elif gain <= -STOP_LOSS_PCT:
+            row["status"] = "fail"
+        else:
+            row["status"] = "fail"
 
-        if not success:
+        if row["status"] == "fail":
             with open(WRONG_PREDICTIONS, "a", newline="") as wf:
                 writer = csv.writer(wf)
                 writer.writerow([
-                    row["timestamp"], symbol, row["strategy"], direction,
-                    entry_price, target_price, current_price, actual_gain
+                    row["timestamp"], symbol, strategy, direction,
+                    entry_price, target_price, current_price, gain
                 ])
 
         updated_rows.append(row)
@@ -101,10 +109,8 @@ def get_actual_success_rate(strategy, threshold=0.7):
         df = pd.read_csv(PREDICTION_LOG)
         df = df[df["strategy"] == strategy]
         df = df[df["confidence"] >= threshold]
-
         if len(df) == 0:
             return 1.0
-
         success_df = df[df["status"] == "success"]
         return len(success_df) / len(df)
     except Exception as e:
@@ -143,7 +149,6 @@ def print_prediction_stats():
     except Exception as e:
         return f"[오류] 통계 계산 실패: {e}"
 
-# ✅ 모델 학습 결과 성능 기록 함수
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = {
