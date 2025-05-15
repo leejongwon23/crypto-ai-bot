@@ -49,7 +49,7 @@ def main():
                 print(f"📊 예측 결과: {result}")
 
                 if result:
-                    # 예측 결과 기록 (성공/실패와 관계없이 전부 기록)
+                    # --- 예측 결과 기록 (모든 결과 기록) ---
                     log_prediction(
                         symbol=result["symbol"],
                         strategy=result["strategy"],
@@ -60,13 +60,14 @@ def main():
                         confidence=result["confidence"]
                     )
 
-                    # 조건 만족 시 메시지 후보에 등록
-                    if result["rate"] >= min_gain:
-                        print(f"✅ 조건 만족: {symbol}-{strategy} (rate: {result['rate']:.2%})")
+                    # --- 강화 필터 조건: 수익률 + 신뢰도 ---
+                    if result["rate"] >= min_gain and result["confidence"] >= 0.60:
+                        print(f"✅ 조건 만족: {symbol}-{strategy} "
+                              f"(rate: {result['rate']:.2%}, conf: {result['confidence']:.2f})")
                         strategy_results.append(result)
                     else:
-                        print(f"❌ 수익률 미달: {symbol}-{strategy} ({result['rate']:.2%})")
-
+                        print(f"❌ 조건 미달: {symbol}-{strategy} "
+                              f"(rate: {result['rate']:.2%}, conf: {result['confidence']:.2f})")
                 else:
                     print(f"❌ 예측 결과 없음 (None)")
                     log_prediction(
@@ -82,7 +83,7 @@ def main():
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 중 오류: {e}")
 
-        # 전략별 전송 대상 결정 (최상위 1개 confidence 기준)
+        # --- 전략별 전송 대상 결정 (신뢰도 기준 상위 1개) ---
         if strategy_results:
             top = sorted(strategy_results, key=lambda x: x["confidence"], reverse=True)[0]
             print(f"📤 메시지 전송 대상: {top['symbol']} ({strategy})")
