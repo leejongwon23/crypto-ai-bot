@@ -6,7 +6,7 @@ import time
 BASE_URL = "https://api.bybit.com"
 BTC_DOMINANCE_CACHE = {"value": 0.5, "timestamp": 0}
 
-SYMBOLS = [  # 전체 60개 심볼
+SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT",
     "AVAXUSDT", "DOGEUSDT", "MATICUSDT", "DOTUSDT", "TRXUSDT",
     "LTCUSDT", "BCHUSDT", "LINKUSDT", "ATOMUSDT", "XLMUSDT",
@@ -30,21 +30,18 @@ STRATEGY_CONFIG = {
 def get_btc_dominance():
     global BTC_DOMINANCE_CACHE
     now = time.time()
-    if now - BTC_DOMINANCE_CACHE["timestamp"] < 1800:  # 30분 캐시 유지
+    if now - BTC_DOMINANCE_CACHE["timestamp"] < 1800:  # 30분 캐시
         return BTC_DOMINANCE_CACHE["value"]
-
     try:
-        url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=BTC.D"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=10)
+        url = "https://api.coinpaprika.com/v1/global"
+        res = requests.get(url, timeout=10)
         res.raise_for_status()
         data = res.json()
-        dom = data["quoteResponse"]["result"][0]["regularMarketPrice"]
-        value = round(dom / 100, 4)
-        BTC_DOMINANCE_CACHE = {"value": value, "timestamp": now}
-        return value
+        dom = float(data["bitcoin_dominance_percentage"]) / 100
+        BTC_DOMINANCE_CACHE = {"value": round(dom, 4), "timestamp": now}
+        return BTC_DOMINANCE_CACHE["value"]
     except Exception as e:
-        print(f"[ERROR] BTC 도미넌스 조회 실패 (Yahoo): {e}")
+        print(f"[ERROR] BTC 도미넌스 조회 실패 (CoinPaprika): {e}")
         return BTC_DOMINANCE_CACHE["value"]
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 200):
@@ -57,12 +54,17 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 200):
     }
     try:
         res = requests.get(url, params=params, timeout=10)
+        print(f"[DEBUG] {symbol} 요청 URL: {res.url}")
+        preview = res.text[:300].replace("\n", "")
+        print(f"[DEBUG] {symbol} 응답 내용 (요약): {preview}...")
         res.raise_for_status()
         data = res.json()
         if "result" not in data or "list" not in data["result"]:
+            print(f"[스킵] {symbol} - 데이터 형식 오류")
             return None
         rows = data["result"]["list"]
         if not rows:
+            print(f"[스킵] {symbol} - 응답 list가 비어 있음")
             return None
         df = pd.DataFrame(rows)
         df = df.iloc[:, :6]
@@ -138,7 +140,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     max_rsi = df['rsi'].rolling(14).max()
     df['stoch_rsi'] = (df['rsi'] - min_rsi) / (max_rsi - min_rsi)
 
-    df['btc_dominance'] = get_btc_dominance()
+    df["btc_dominance"] = get_btc_dominance()
 
     df = df.dropna()
     return df[[
