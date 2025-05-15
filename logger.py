@@ -10,17 +10,35 @@ WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.csv")
 os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 
+# ✅ 내부 성공률 누적용 캐시 구조
+model_success_tracker = {}
+
+def update_model_success(symbol, strategy, model, success: bool):
+    key = (symbol, strategy, model)
+    if key not in model_success_tracker:
+        model_success_tracker[key] = {"success": 0, "fail": 0}
+    if success:
+        model_success_tracker[key]["success"] += 1
+    else:
+        model_success_tracker[key]["fail"] += 1
+
+def get_model_success_rate(symbol, strategy, model, min_total=10):
+    key = (symbol, strategy, model)
+    record = model_success_tracker.get(key, {"success": 0, "fail": 0})
+    total = record["success"] + record["fail"]
+    if total < min_total:
+        return 0.5  # default 중립값
+    return record["success"] / total
+
 # ✅ 전략별 평가 기준 (수익률 % / 평가 대기 시간 h)
 STRATEGY_EVAL_CONFIG = {
     "단기": {"gain_pct": 0.03, "hours": 4},
     "중기": {"gain_pct": 0.06, "hours": 24},
     "장기": {"gain_pct": 0.10, "hours": 144}
 }
+STOP_LOSS_PCT = 0.02
 
-STOP_LOSS_PCT = 0.02  # 손절 -2%
-
-
-def log_prediction(symbol, strategy, direction, entry_price, target_price, timestamp, confidence):
+def log_prediction(symbol, strategy, direction, entry_price, target_price, timestamp, confidence, model=None):
     row = {
         "timestamp": timestamp,
         "symbol": symbol,
@@ -29,17 +47,15 @@ def log_prediction(symbol, strategy, direction, entry_price, target_price, times
         "entry_price": entry_price,
         "target_price": target_price,
         "confidence": confidence,
+        "model": model or "unknown",
         "status": "pending"
     }
-
-    os.makedirs(PERSIST_DIR, exist_ok=True)
     file_exists = os.path.isfile(PREDICTION_LOG)
     with open(PREDICTION_LOG, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=row.keys())
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
-
 
 def evaluate_predictions(get_price_fn):
     if not os.path.exists(PREDICTION_LOG):
@@ -79,11 +95,8 @@ def evaluate_predictions(get_price_fn):
             continue
 
         gain = (current_price - entry_price) / entry_price
-        target_gain = (target_price - entry_price) / entry_price
-
         success = False
 
-        # ✅ 평가 로직: 롱/숏 방향별 수익률 목표 도달 확인
         if direction == "롱":
             if gain >= min_gain:
                 success = True
@@ -98,6 +111,9 @@ def evaluate_predictions(get_price_fn):
             success = False
 
         row["status"] = "success" if success else "fail"
+
+        # ✅ 모델 성공률 누적
+        update_model_success(symbol, strategy, row.get("model", "unknown"), success)
 
         if not success:
             with open(WRONG_PREDICTIONS, "a", newline="") as wf:
@@ -114,7 +130,6 @@ def evaluate_predictions(get_price_fn):
         writer.writeheader()
         writer.writerows(updated_rows)
 
-
 def get_actual_success_rate(strategy, threshold=0.7):
     try:
         df = pd.read_csv(PREDICTION_LOG)
@@ -127,7 +142,6 @@ def get_actual_success_rate(strategy, threshold=0.7):
     except Exception as e:
         print(f"[경고] 성공률 계산 실패: {e}")
         return 1.0
-
 
 def print_prediction_stats():
     if not os.path.exists(PREDICTION_LOG):
@@ -160,7 +174,6 @@ def print_prediction_stats():
 
     except Exception as e:
         return f"[오류] 통계 계산 실패: {e}"
-
 
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
