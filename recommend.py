@@ -33,7 +33,6 @@ def main():
                 result = predict(symbol, strategy)
                 print(f"[예측] {symbol}-{strategy} → {result}")
 
-                # --- 무조건 기록 ---
                 if result:
                     log_prediction(
                         symbol=result["symbol"],
@@ -49,6 +48,7 @@ def main():
                     result["symbol"] = symbol
                     all_results.append(result)
                 else:
+                    print(f"[로그 기록] {symbol}-{strategy} → 예측 실패로 기본값 기록")
                     log_prediction(
                         symbol=symbol,
                         strategy=strategy,
