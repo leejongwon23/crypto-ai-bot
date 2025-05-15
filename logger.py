@@ -19,6 +19,7 @@ STRATEGY_EVAL_CONFIG = {
 
 STOP_LOSS_PCT = 0.02  # 손절 -2%
 
+
 def log_prediction(symbol, strategy, direction, entry_price, target_price, timestamp, confidence):
     row = {
         "timestamp": timestamp,
@@ -38,6 +39,7 @@ def log_prediction(symbol, strategy, direction, entry_price, target_price, times
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+
 
 def evaluate_predictions(get_price_fn):
     if not os.path.exists(PREDICTION_LOG):
@@ -77,19 +79,27 @@ def evaluate_predictions(get_price_fn):
             continue
 
         gain = (current_price - entry_price) / entry_price
-        if direction == "숏":
-            gain = -gain
+        target_gain = (target_price - entry_price) / entry_price
 
-        # ✅ 성공: 목표 수익률 도달
-        # ✅ 실패: -2% 손실 or 시간 내 미달
-        if gain >= min_gain:
-            row["status"] = "success"
-        elif gain <= -STOP_LOSS_PCT:
-            row["status"] = "fail"
+        success = False
+
+        # ✅ 평가 로직: 롱/숏 방향별 수익률 목표 도달 확인
+        if direction == "롱":
+            if gain >= min_gain:
+                success = True
+            elif gain <= -STOP_LOSS_PCT:
+                success = False
+        elif direction == "숏":
+            if -gain >= min_gain:
+                success = True
+            elif -gain <= -STOP_LOSS_PCT:
+                success = False
         else:
-            row["status"] = "fail"
+            success = False
 
-        if row["status"] == "fail":
+        row["status"] = "success" if success else "fail"
+
+        if not success:
             with open(WRONG_PREDICTIONS, "a", newline="") as wf:
                 writer = csv.writer(wf)
                 writer.writerow([
@@ -104,6 +114,7 @@ def evaluate_predictions(get_price_fn):
         writer.writeheader()
         writer.writerows(updated_rows)
 
+
 def get_actual_success_rate(strategy, threshold=0.7):
     try:
         df = pd.read_csv(PREDICTION_LOG)
@@ -116,6 +127,7 @@ def get_actual_success_rate(strategy, threshold=0.7):
     except Exception as e:
         print(f"[경고] 성공률 계산 실패: {e}")
         return 1.0
+
 
 def print_prediction_stats():
     if not os.path.exists(PREDICTION_LOG):
@@ -148,6 +160,7 @@ def print_prediction_stats():
 
     except Exception as e:
         return f"[오류] 통계 계산 실패: {e}"
+
 
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
