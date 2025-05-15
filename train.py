@@ -28,7 +28,7 @@ os.makedirs(WRONG_DIR, exist_ok=True)
 
 STRATEGY_GAIN_RANGE = {
     "단기": (0.03, 0.50),
-    "중기": (0.05, 0.80),
+    "중기": (0.06, 0.80),
     "장기": (0.10, 1.00)
 }
 
@@ -116,7 +116,7 @@ def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, 
         print(f"[스킵] {symbol}-{strategy} 학습 샘플 부족")
         return
 
-    # --- 오답 학습 ---
+    # --- 오답 학습 (롱/숏 포함) ---
     wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=best_window)
     if wrong_data:
         try:
