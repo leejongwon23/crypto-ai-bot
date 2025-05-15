@@ -28,6 +28,9 @@ class LSTMPricePredictor(nn.Module):
         self.fc_confidence = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
+        if self.training and x.size(0) == 1:
+            self.eval()  # 배치 크기 1이면 에러 방지를 위해 평가모드로 변경
+
         lstm_out, _ = self.lstm(x)
         context, _ = self.attention(lstm_out)
         context = self.bn(context)
@@ -61,7 +64,6 @@ class CNNLSTMPricePredictor(nn.Module):
         confidence = torch.sigmoid(self.fc_confidence(context)).squeeze(-1)
         return signal, confidence
 
-# ✅ Transformer 모델 추가
 class TransformerEncoderLayer(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward=256, dropout=0.3):
         super().__init__()
@@ -91,16 +93,18 @@ class TransformerPricePredictor(nn.Module):
         self.fc_confidence = nn.Linear(d_model, 1)
 
     def forward(self, x):
+        if self.training and x.size(0) == 1:
+            self.eval()
+
         x = self.input_proj(x)
         x = self.encoder(x)
-        x = x.mean(dim=1)  # 평균 풀링
+        x = x.mean(dim=1)
         x = self.norm(x)
         x = self.dropout(x)
         signal = torch.sigmoid(self.fc_signal(x)).squeeze(-1)
         confidence = torch.sigmoid(self.fc_confidence(x)).squeeze(-1)
         return signal, confidence
 
-# ✅ 모델 사전 정의 (Transformer 추가됨)
 MODEL_CLASSES = {
     "lstm": LSTMPricePredictor,
     "cnn_lstm": CNNLSTMPricePredictor,
@@ -111,14 +115,7 @@ def get_model(model_type: str = "cnn_lstm", input_size: int = 11):
     model_cls = MODEL_CLASSES.get(model_type, CNNLSTMPricePredictor)
     return model_cls(input_size=input_size)
 
-# ✅ 예측 결과 표준 포맷 함수 (rate 제한 없이 반영)
 def format_prediction(signal: float, confidence: float, rate: float) -> dict:
-    """
-    모델이 계산한 수익률(rate)을 그대로 반영하는 구조
-    - signal: 0~1 값 (0.5 초과 시 롱, 이하 시 숏)
-    - confidence: 신뢰도 (0~1)
-    - rate: 실제 모델이 예측한 수익률 값
-    """
     direction = "롱" if signal > 0.5 else "숏"
     return {
         "direction": direction,
