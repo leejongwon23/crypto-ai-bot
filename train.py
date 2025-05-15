@@ -1,5 +1,5 @@
 # --- [필수 import] ---
-import os, time, datetime, threading, gc
+import os, time, threading, gc
 import torch
 import torch.nn as nn
 import numpy as np
@@ -77,15 +77,15 @@ def evaluate_existing_model(model_path, model, X_val, y_val):
 
 # --- [개별 모델 학습 함수] ---
 def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, epochs=10, lr=1e-3):
-    print(f"[train] {symbol}-{strategy} ({model_type}) \ud559\uc2b5 \uc2dc\uc791")
+    print(f"[train] {symbol}-{strategy} ({model_type}) 학습 시작")
     best_window = find_best_window(symbol, strategy)
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or len(df) < best_window + 10:
-        print(f"❌ {symbol}-{strategy} \ub370\uc774\ud130 \ubd80족")
+        print(f"❌ {symbol}-{strategy} 데이터 부족")
         return
     df_feat = compute_features(df)
     if len(df_feat) < best_window + 1:
-        print(f"❌ {symbol}-{strategy} feature \ubd80족")
+        print(f"❌ {symbol}-{strategy} feature 부족")
         return
 
     scaler = MinMaxScaler()
@@ -93,7 +93,7 @@ def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, 
     feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
     X, y = create_dataset(feature_dicts, best_window)
     if len(X) < 2:
-        print(f"[SKIP] {symbol}-{strategy} \uc720형 \uc2dc컷스 \ubd80족 \2192 {len(X)}개")
+        print(f"[SKIP] {symbol}-{strategy} 유효 시퀀스 부족 → {len(X)}개")
         return
 
     input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
@@ -110,10 +110,10 @@ def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, 
     train_len = len(dataset) - val_len
     train_set, val_set = random_split(dataset, [train_len, val_len])
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=batch_size)
+    val_loader = DataLoader(val_set, batch_size=batch_size, drop_last=True)
 
     if len(train_loader.dataset) < 2:
-        print(f"[스킬] {symbol}-{strategy} \ud559\uc2b5 \uc0bc항 \ubd80족")
+        print(f"[스킵] {symbol}-{strategy} 학습 샘플 부족")
         return
 
     # --- 오답 학습 ---
@@ -146,6 +146,7 @@ def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, 
     model.eval()
     with torch.no_grad():
         y_true, y_pred, y_prob = [], [], []
+        val_x_list, val_y_list = [], []
         for xb, yb in val_loader:
             out, _ = model(xb)
             if out is None:
@@ -153,14 +154,18 @@ def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, 
             y_prob.extend(out.squeeze().numpy().tolist())
             y_true.extend(yb.numpy().tolist())
             y_pred.extend((out.squeeze().numpy() > 0.5).astype(int).tolist())
+            val_x_list.append(xb)
+            val_y_list.append(yb)
+        if not val_x_list:
+            print(f"[스킵] {symbol}-{strategy} 유효한 validation 배치 없음")
+            return
+        val_X_tensor = torch.cat(val_x_list, dim=0)
+        val_y_tensor = torch.cat(val_y_list, dim=0)
         acc = accuracy_score(y_true, y_pred)
         f1 = f1_score(y_true, y_pred)
         logger.log_training_result(symbol, strategy, model_type, acc, f1, log_loss(y_true, y_prob))
 
     # --- 기존 성능과 비교 후 저장 여부 결정 ---
-    val_X_tensor = torch.stack([xb for xb, _ in val_loader])
-    val_y_tensor = torch.tensor(y_true, dtype=torch.float32)
-    current_score = acc + f1
     previous_score = evaluate_existing_model(
         model_path,
         get_model(model_type, input_size),
@@ -168,13 +173,14 @@ def train_one_model(symbol, strategy, model_type, input_size=11, batch_size=32, 
         val_y_tensor
     )
 
+    current_score = acc + f1
     if current_score > previous_score:
         torch.save(model.state_dict(), model_path)
-        print(f"✅ \uc800장됨: {model_path} (new score: {current_score:.4f} > old: {previous_score:.4f})")
+        print(f"✅ 저장됨: {model_path} (new score: {current_score:.4f} > old: {previous_score:.4f})")
     elif current_score == previous_score:
-        print(f"ℹ️ \uc800장 안함: \uae30존과 \uc131능 동일 (score: {current_score:.4f})")
+        print(f"ℹ️ 저장 안함: 기존과 성능 동일 (score: {current_score:.4f})")
     else:
-        print(f"❌ \uc800장 안함: \uae30존보다 성능 낮음 (new: {current_score:.4f} < old: {previous_score:.4f})")
+        print(f"❌ 저장 안됨: 기존보다 성능 낮음 (new: {current_score:.4f} < old: {previous_score:.4f})")
 
     # --- 중요도 분석 ---
     required = len(val_set) + best_window
