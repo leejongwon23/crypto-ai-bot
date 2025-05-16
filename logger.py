@@ -1,8 +1,10 @@
+# ✅ 기존 import 그대로 유지
 import os
 import csv
 import datetime
 import pandas as pd
 
+# ✅ 경로 설정
 PERSIST_DIR = "/persistent"
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
@@ -52,18 +54,23 @@ def log_audit(symbol, strategy, status, reason):
             writer.writeheader()
         writer.writerow(row)
 
-def log_prediction(symbol, strategy, direction, entry_price, target_price, timestamp, confidence, model=None):
+def log_prediction(symbol, strategy, direction=None, entry_price=None, target_price=None, timestamp=None, confidence=None, model=None, success=True, reason=""):
+    now = timestamp or datetime.datetime.utcnow().isoformat()
     row = {
-        "timestamp": timestamp,
+        "timestamp": now,
         "symbol": symbol,
         "strategy": strategy,
-        "direction": direction,
-        "entry_price": entry_price,
-        "target_price": target_price,
-        "confidence": confidence,
+        "direction": direction or "N/A",
+        "entry_price": entry_price or 0,
+        "target_price": target_price or 0,
+        "confidence": confidence or 0,
         "model": model or "unknown",
-        "status": "pending"
+        "status": "pending" if success else "fail"
     }
+
+    # 실패 예측일 경우 audit에도 기록
+    if not success:
+        log_audit(symbol, strategy, "예측실패", reason)
 
     fieldnames = list(row.keys())
     file_exists = os.path.isfile(PREDICTION_LOG)
