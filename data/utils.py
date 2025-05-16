@@ -30,7 +30,7 @@ STRATEGY_CONFIG = {
 def get_btc_dominance():
     global BTC_DOMINANCE_CACHE
     now = time.time()
-    if now - BTC_DOMINANCE_CACHE["timestamp"] < 1800:  # 30분 캐시
+    if now - BTC_DOMINANCE_CACHE["timestamp"] < 1800:
         return BTC_DOMINANCE_CACHE["value"]
     try:
         url = "https://api.coinpaprika.com/v1/global"
@@ -149,3 +149,12 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
         'percent_diff', 'volume_delta',
         'obv', 'cci', 'stoch_rsi', 'btc_dominance'
     ]]
+
+def get_latest_price(symbol: str):
+    """
+    평가 시점에서 사용할 실시간 종가를 조회합니다.
+    """
+    df = get_kline(symbol, interval="60", limit=1)
+    if df is not None and not df.empty:
+        return float(df["close"].iloc[-1])
+    return None
