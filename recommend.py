@@ -54,23 +54,8 @@ def main():
                 result = predict(symbol, strategy)
                 print(f"[예측] {symbol}-{strategy} → {result}")
 
-                if result:
-                    log_prediction(
-                        symbol=result["symbol"],
-                        strategy=result["strategy"],
-                        direction=result["direction"],
-                        entry_price=result["price"],
-                        target_price=result["target"],
-                        timestamp=datetime.datetime.utcnow().isoformat(),
-                        confidence=result["confidence"],
-                        model=result.get("model", "unknown")
-                    )
-                    log_audit(symbol, strategy, result, "예측+기록 완료")
-                    result["strategy"] = strategy
-                    result["symbol"] = symbol
-                    all_results.append(result)
-                else:
-                    print(f"[로그 기록] {symbol}-{strategy} → 예측 실패로 기본값 기록")
+                # ✅ 예측이 실패해도 무조건 기록
+                if result is None:
                     log_prediction(
                         symbol=symbol,
                         strategy=strategy,
@@ -82,9 +67,36 @@ def main():
                         model="unknown"
                     )
                     log_audit(symbol, strategy, None, "예측 실패")
+                    continue
+
+                # ✅ 예측 성공 결과 기록
+                log_prediction(
+                    symbol=result["symbol"],
+                    strategy=result["strategy"],
+                    direction=result["direction"],
+                    entry_price=result["price"],
+                    target_price=result["target"],
+                    timestamp=datetime.datetime.utcnow().isoformat(),
+                    confidence=result["confidence"],
+                    model=result.get("model", "unknown")
+                )
+                log_audit(symbol, strategy, result, "예측+기록 완료")
+                result["strategy"] = strategy
+                result["symbol"] = symbol
+                all_results.append(result)
 
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
+                log_prediction(
+                    symbol=symbol,
+                    strategy=strategy,
+                    direction="예외",
+                    entry_price=0,
+                    target_price=0,
+                    timestamp=datetime.datetime.utcnow().isoformat(),
+                    confidence=0.0,
+                    model="unknown"
+                )
                 log_audit(symbol, strategy, None, f"예외 발생: {e}")
 
     # --- 필터 ---
