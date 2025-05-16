@@ -1,5 +1,5 @@
 # --- [필수 import] ---
-import os, time, threading, gc
+import os, time, threading, gc, json
 import torch
 import torch.nn as nn
 import numpy as np
@@ -55,6 +55,21 @@ def create_dataset(features, window):
     X, y = zip(*filtered)
     return np.array(X), np.array(y)
 
+def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
+    meta = {
+        "symbol": symbol,
+        "strategy": strategy,
+        "model": model_type,
+        "accuracy": round(acc, 4),
+        "f1_score": round(f1, 4),
+        "loss": round(loss, 6),
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+    path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json")
+    with open(path, "w") as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False)
+    print(f"📝 체크포인트 저장됨: {path}")
+
 def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3, repeat=3, repeat_wrong=2):
     print(f"[train] {symbol}-{strategy} 전체 모델 학습 시작")
     best_window = find_best_window(symbol, strategy)
@@ -82,6 +97,7 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
 
     scores = {}
     models = {}
+    metrics = {}
 
     for model_type in ["lstm", "cnn_lstm", "transformer"]:
         model = get_model(model_type=model_type, input_size=input_size)
@@ -97,8 +113,6 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
 
         for r in range(repeat):
             print(f"[{symbol}-{strategy}] {model_type} 반복학습 {r+1}/{repeat}")
-
-            # --- (1) 오답 학습 반복 ---
             for _ in range(repeat_wrong):
                 wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=best_window)
                 if wrong_data:
@@ -119,7 +133,6 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
                     except Exception as e:
                         print(f"[오답 학습 실패] {symbol}-{strategy} → {e}")
 
-            # --- (2) 정규 학습 ---
             for epoch in range(epochs):
                 for xb, yb in train_loader:
                     pred, _ = model(xb)
@@ -142,15 +155,19 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
                 logger.log_training_result(symbol, strategy, model_type, acc, f1, logloss)
                 scores[model_type] = score
                 models[model_type] = model
+                metrics[model_type] = (acc, f1, logloss)
         except Exception as e:
             print(f"[평가 오류] {symbol}-{strategy}-{model_type} → {e}")
 
     if scores:
         best_model_type = max(scores, key=scores.get)
         best_model_obj = models[best_model_type]
+        best_acc, best_f1, best_loss = metrics[best_model_type]
         model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{best_model_type}.pt")
         torch.save(best_model_obj.state_dict(), model_path)
         print(f"✅ Best 모델 저장됨: {model_path} (score: {scores[best_model_type]:.4f})")
+
+        save_model_metadata(symbol, strategy, best_model_type, best_acc, best_f1, best_loss)
 
         compute_X_val = val_X_tensor
         compute_y_val = val_y_tensor
