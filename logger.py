@@ -74,18 +74,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=None, target_pr
 
     fieldnames = list(row.keys())
 
-    write_header = False
-    if not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0:
-        write_header = True
-    else:
-        try:
-            with open(PREDICTION_LOG, "r", encoding="utf-8-sig") as f:
-                header_line = f.readline()
-                if not all(name in header_line for name in fieldnames):
-                    write_header = True
-        except:
-            write_header = True
-
+    write_header = not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0
     try:
         with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -152,10 +141,10 @@ def evaluate_predictions(get_price_fn):
 
             if not success:
                 log_audit(symbol, strategy, "실패", f"수익률 미달: {gain:.4f}")
-                write_header = not os.path.exists(WRONG_PREDICTIONS)
+                file_exists = os.path.exists(WRONG_PREDICTIONS)
                 with open(WRONG_PREDICTIONS, "a", newline="", encoding="utf-8-sig") as wf:
                     writer = csv.writer(wf)
-                    if write_header:
+                    if not file_exists:
                         writer.writerow(["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "current_price", "gain"])
                     writer.writerow([
                         row["timestamp"], symbol, strategy, direction,
@@ -184,12 +173,14 @@ def get_actual_success_rate(strategy, threshold=0.7):
         df = df[df["strategy"] == strategy]
         df = df[df["confidence"] >= threshold]
         if len(df) == 0:
-            return 1.0
-        success_df = df[df["status"] == "success"]
-        return len(success_df) / len(df)
+            return 0.0  # 기존은 1.0이었음 → 오히려 잘못된 인식
+        evaluated = df[df["status"].isin(["success", "fail"])]
+        if len(evaluated) == 0:
+            return 0.0
+        return len(evaluated[evaluated["status"] == "success"]) / len(evaluated)
     except Exception as e:
         print(f"[경고] 성공률 계산 실패: {e}")
-        return 1.0
+        return 0.0
 
 def print_prediction_stats():
     if not os.path.exists(PREDICTION_LOG):
