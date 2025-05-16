@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 from recommend import main
 import train
 import os
@@ -22,6 +22,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 LOG_FILE = os.path.join(LOG_DIR, "train_log.csv")
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
+AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")  # ✅ 추가된 평가 로그 경로
 
 def start_scheduler():
     print(">>> start_scheduler() 호출됨")
@@ -54,14 +55,7 @@ def start_scheduler():
     scheduler.add_job(train_mid,   'cron', hour='1,7,13,19', minute=30)
     scheduler.add_job(train_long,  'cron', hour='2,14', minute=30)
 
-    # ✅ 예측 점검 루프: 매 1시간마다 정각+10분에 실행
-    scheduler.add_job(
-        test_all_predictions,
-        'cron',
-        minute=10,
-        id='predict_test',
-        replace_existing=True
-    )
+    scheduler.add_job(test_all_predictions, 'cron', minute=10, id='predict_test', replace_existing=True)
 
     scheduler.start()
 
@@ -185,6 +179,28 @@ def reset_all():
         return "✅ 예측 기록, 실패 기록, 학습 로그, 모델 전부 삭제 완료"
     except Exception as e:
         return f"삭제 실패: {e}", 500
+
+# ✅ 추가된 라우트 1: 최근 평가 결과 30개 JSON으로 반환
+@app.route("/audit-log")
+def audit_log():
+    try:
+        if not os.path.exists(AUDIT_LOG):
+            return jsonify({"error": "audit log not found"})
+        df = pd.read_csv(AUDIT_LOG, encoding="utf-8-sig")
+        last_30 = df.tail(30).to_dict(orient="records")
+        return jsonify(last_30)
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+# ✅ 추가된 라우트 2: 전체 평가 로그 다운로드용 CSV 텍스트 반환
+@app.route("/audit-log-download")
+def audit_log_download():
+    try:
+        if not os.path.exists(AUDIT_LOG):
+            return "평가 로그가 없습니다.", 404
+        return send_file(AUDIT_LOG, mimetype="text/csv", as_attachment=True, download_name="evaluation_audit.csv")
+    except Exception as e:
+        return f"다운로드 실패: {e}", 500
 
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
