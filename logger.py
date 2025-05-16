@@ -11,11 +11,11 @@ LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.csv")
 AUDIT_LOG = os.path.join(PERSIST_DIR, "logs", "evaluation_audit.csv")
 os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 
-# ✅ 전략별 평가 기준
+# ✅ 전략별 평가 기준 (최소 수익률 기준으로 변경됨)
 STRATEGY_EVAL_CONFIG = {
-    "단기": {"gain_pct": 0.03, "hours": 4},
-    "중기": {"gain_pct": 0.06, "hours": 24},
-    "장기": {"gain_pct": 0.10, "hours": 144}
+    "단기": {"gain_pct": 0.01, "hours": 4},
+    "중기": {"gain_pct": 0.03, "hours": 24},
+    "장기": {"gain_pct": 0.05, "hours": 144}
 }
 STOP_LOSS_PCT = 0.02
 
@@ -110,7 +110,7 @@ def evaluate_predictions(get_price_fn):
             model = row.get("model", "unknown")
             entry_price = float(row.get("entry_price", 0))
 
-            config = STRATEGY_EVAL_CONFIG.get(strategy, {"gain_pct": 0.06, "hours": 6})
+            config = STRATEGY_EVAL_CONFIG.get(strategy, {"gain_pct": 0.05, "hours": 6})
             eval_hours = config["hours"]
             min_gain = config["gain_pct"]
             hours_passed = (now - pred_time).total_seconds() / 3600
