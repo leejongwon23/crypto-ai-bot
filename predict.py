@@ -18,15 +18,19 @@ STRATEGY_RATE_LIMITS = {
 }
 
 def failed_result(symbol, strategy, reason):
+    dummy_price = 1.0
     return {
         "symbol": symbol,
         "strategy": strategy,
         "success": False,
         "reason": reason,
-        "direction": "N/A",
-        "model": "unknown",
+        "direction": "롱",  # 기본 방향 제공
+        "model": "ensemble",  # 평가를 위해 모델 지정
         "confidence": 0.0,
-        "rate": 0.0
+        "rate": 0.0,
+        "price": dummy_price,
+        "target": dummy_price,
+        "stop": dummy_price
     }
 
 def predict(symbol, strategy):
