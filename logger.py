@@ -1,71 +1,3 @@
-# ✅ 기존 import 그대로 유지
-import os
-import csv
-import datetime
-import pandas as pd
-
-# ✅ 경로 설정
-PERSIST_DIR = "/persistent"
-PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
-WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
-LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.csv")
-AUDIT_LOG = os.path.join(PERSIST_DIR, "logs", "evaluation_audit.csv")
-os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
-
-model_success_tracker = {}
-
-def update_model_success(symbol, strategy, model, success: bool):
-    key = (symbol, strategy, model)
-    if key not in model_success_tracker:
-        model_success_tracker[key] = {"success": 0, "fail": 0}
-    if success:
-        model_success_tracker[key]["success"] += 1
-    else:
-        model_success_tracker[key]["fail"] += 1
-
-def get_model_success_rate(symbol, strategy, model, min_total=10):
-    key = (symbol, strategy, model)
-    record = model_success_tracker.get(key, {"success": 0, "fail": 0})
-    total = record["success"] + record["fail"]
-    if total < min_total:
-        return 0.5
-    return record["success"] / total
-
-# ✅ 5단계: 전체 모델/전략별 성공률 요약 함수
-def summarize_model_stats():
-    if not model_success_tracker:
-        return "모델 성공률 데이터 없음"
-
-    summary = ["📊 모델별 성공률 요약:"]
-    for (symbol, strategy, model), result in model_success_tracker.items():
-        total = result["success"] + result["fail"]
-        rate = (result["success"] / total) * 100 if total > 0 else 0
-        summary.append(f"- {symbol} | {strategy} | {model} → 성공률: {rate:.2f}% ({result['success']}/{total})")
-    return "\n".join(summary)
-
-STRATEGY_EVAL_CONFIG = {
-    "단기": {"gain_pct": 0.03, "hours": 4},
-    "중기": {"gain_pct": 0.06, "hours": 24},
-    "장기": {"gain_pct": 0.10, "hours": 144}
-}
-STOP_LOSS_PCT = 0.02
-
-def log_audit(symbol, strategy, status, reason):
-    now = datetime.datetime.utcnow().isoformat()
-    row = {
-        "timestamp": now,
-        "symbol": symbol,
-        "strategy": strategy,
-        "status": status,
-        "reason": reason
-    }
-    file_exists = os.path.exists(AUDIT_LOG)
-    with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=row.keys())
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
-
 def log_prediction(symbol, strategy, direction=None, entry_price=None, target_price=None, timestamp=None, confidence=None, model=None, success=True, reason=""):
     now = timestamp or datetime.datetime.utcnow().isoformat()
     row = {
@@ -80,7 +12,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=None, target_pr
         "status": "pending" if success else "fail"
     }
 
-    # 실패 예측일 경우 audit에도 기록
     if not success:
         log_audit(symbol, strategy, "예측실패", reason)
 
@@ -226,9 +157,9 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
         "symbol": symbol,
         "strategy": strategy,
         "model": model_name,
-        "accuracy": acc,
-        "f1_score": f1,
-        "loss": loss
+        "accuracy": float(acc),
+        "f1_score": float(f1),
+        "loss": float(loss)
     }
 
     df = pd.DataFrame([log_entry])
