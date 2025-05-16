@@ -74,7 +74,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=None, target_pr
 
     fieldnames = list(row.keys())
 
-    # ✅ 항상 헤더를 강제로 써야 하는 경우를 감지
     write_header = False
     if not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0:
         write_header = True
@@ -153,8 +152,11 @@ def evaluate_predictions(get_price_fn):
 
             if not success:
                 log_audit(symbol, strategy, "실패", f"수익률 미달: {gain:.4f}")
+                write_header = not os.path.exists(WRONG_PREDICTIONS)
                 with open(WRONG_PREDICTIONS, "a", newline="", encoding="utf-8-sig") as wf:
                     writer = csv.writer(wf)
+                    if write_header:
+                        writer.writerow(["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "current_price", "gain"])
                     writer.writerow([
                         row["timestamp"], symbol, strategy, direction,
                         entry_price, target_price, current_price, gain
