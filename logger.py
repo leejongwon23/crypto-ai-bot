@@ -73,17 +73,19 @@ def log_prediction(symbol, strategy, direction=None, entry_price=None, target_pr
         log_audit(symbol, strategy, "예측실패", reason)
 
     fieldnames = list(row.keys())
-    file_exists = os.path.isfile(PREDICTION_LOG)
-    write_header = not file_exists
 
-    if file_exists:
+    # ✅ 항상 헤더를 강제로 써야 하는 경우를 감지
+    write_header = False
+    if not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0:
+        write_header = True
+    else:
         try:
             with open(PREDICTION_LOG, "r", encoding="utf-8-sig") as f:
-                header = f.readline()
-                if all(name in header for name in fieldnames):
-                    write_header = False
+                header_line = f.readline()
+                if not all(name in header_line for name in fieldnames):
+                    write_header = True
         except:
-            pass
+            write_header = True
 
     try:
         with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
