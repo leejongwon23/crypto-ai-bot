@@ -1,3 +1,60 @@
+import os
+import csv
+import datetime
+import pandas as pd
+
+# ✅ 경로 설정
+PERSIST_DIR = "/persistent"
+PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
+WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
+LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.csv")
+AUDIT_LOG = os.path.join(PERSIST_DIR, "logs", "evaluation_audit.csv")
+os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
+
+# ✅ 전략별 평가 기준
+STRATEGY_EVAL_CONFIG = {
+    "단기": {"gain_pct": 0.03, "hours": 4},
+    "중기": {"gain_pct": 0.06, "hours": 24},
+    "장기": {"gain_pct": 0.10, "hours": 144}
+}
+STOP_LOSS_PCT = 0.02
+
+# ✅ 성공률 추적용 내부 기록
+model_success_tracker = {}
+
+def update_model_success(symbol, strategy, model, success: bool):
+    key = (symbol, strategy, model)
+    if key not in model_success_tracker:
+        model_success_tracker[key] = {"success": 0, "fail": 0}
+    if success:
+        model_success_tracker[key]["success"] += 1
+    else:
+        model_success_tracker[key]["fail"] += 1
+
+def get_model_success_rate(symbol, strategy, model, min_total=10):
+    key = (symbol, strategy, model)
+    record = model_success_tracker.get(key, {"success": 0, "fail": 0})
+    total = record["success"] + record["fail"]
+    if total < min_total:
+        return 0.5
+    return record["success"] / total
+
+def log_audit(symbol, strategy, status, reason):
+    now = datetime.datetime.utcnow().isoformat()
+    row = {
+        "timestamp": now,
+        "symbol": symbol,
+        "strategy": strategy,
+        "status": status,
+        "reason": reason
+    }
+    file_exists = os.path.exists(AUDIT_LOG)
+    with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=row.keys())
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
 def log_prediction(symbol, strategy, direction=None, entry_price=None, target_price=None, timestamp=None, confidence=None, model=None, success=True, reason=""):
     now = timestamp or datetime.datetime.utcnow().isoformat()
     row = {
@@ -135,7 +192,7 @@ def print_prediction_stats():
             f"✅ 성공: {success}",
             f"❌ 실패: {fail}",
             f"⏳ 평가 대기중: {pending}",
-            f"🎯 성공률: {success_rate:.2f}%",
+            f"🎯 성공률: {success_rate:.2f}%"
         ]
 
         for strategy in df["strategy"].unique():
