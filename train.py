@@ -139,7 +139,8 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
                     if pred is None: continue
                     loss = criterion(pred, yb)
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
-                            model.eval()
+
+        model.eval()
         try:
             with torch.no_grad():
                 out, _ = model(val_X_tensor)
