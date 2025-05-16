@@ -12,6 +12,7 @@ import sys
 from telegram_bot import send_message
 import logger
 from predict_test import test_all_predictions
+from data.utils import get_latest_price  # ✅ 평가에 사용될 가격 함수 import
 
 PERSIST_DIR = "/persistent"
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
@@ -36,7 +37,17 @@ def start_scheduler():
         except Exception as e:
             print(f"[예측 오류] {e}")
 
+    def run_evaluation():
+        print(f"[평가 시작] {datetime.datetime.now()}")
+        sys.stdout.flush()
+        try:
+            logger.evaluate_predictions(get_latest_price)
+            print("[평가 완료]")
+        except Exception as e:
+            print(f"[평가 오류] {e}")
+
     scheduler.add_job(run_prediction, 'cron', minute=0)
+    scheduler.add_job(run_evaluation, 'cron', minute=20, id='eval_loop', replace_existing=True)
 
     def train_short():
         print("[단기 학습 시작]")
