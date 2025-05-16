@@ -4,7 +4,7 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import accuracy_score
 from data.utils import get_kline_by_strategy, compute_features
 from model.base_model import get_model
-import os
+import os, json
 
 def create_dataset(features, window=20):
     X, y = [], []
@@ -23,7 +23,8 @@ def create_dataset(features, window=20):
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or len(df) < max(window_list) + 10:
-        return 20  # 기본값
+        print(f"[경고] {symbol}-{strategy} → 데이터 부족으로 기본값 반환")
+        return 20
 
     df_feat = compute_features(df)
     scaler = MinMaxScaler()
@@ -32,6 +33,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
 
     best_score = -1
     best_window = window_list[0]
+    best_result = {}
 
     for window in window_list:
         X, y = create_dataset(feature_dicts, window)
@@ -53,30 +55,44 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
         criterion = torch.nn.BCELoss()
 
-        for _ in range(3):  # 빠르게 3 epoch만
-            pred, _ = model(train_X)
-            loss = criterion(pred.squeeze(), train_y)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        try:
+            for _ in range(3):  # 빠르게 3 epoch만
+                pred, _ = model(train_X)
+                loss = criterion(pred.squeeze(), train_y)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-        model.eval()
-        with torch.no_grad():
-            pred_val, _ = model(val_X)
-            pred_prob = pred_val.squeeze().numpy()
-            pred_label = (pred_prob > 0.5).astype(int)
-            acc = accuracy_score(val_y.numpy(), pred_label)
-            conf = np.mean(np.abs(pred_prob - 0.5)) * 2  # confidence-like score
+            model.eval()
+            with torch.no_grad():
+                pred_val, _ = model(val_X)
+                pred_prob = pred_val.squeeze().numpy()
+                pred_label = (pred_prob > 0.5).astype(int)
+                acc = accuracy_score(val_y.numpy(), pred_label)
+                conf = np.mean(np.abs(pred_prob - 0.5)) * 2
+                score = acc * conf
 
-            score = acc * conf  # 정확도와 신뢰도 반영
+                if score > best_score:
+                    best_score = score
+                    best_window = window
+                    best_result = {
+                        "window": window,
+                        "accuracy": round(acc, 4),
+                        "confidence": round(conf, 4),
+                        "score": round(score, 4)
+                    }
 
-            if score > best_score:
-                best_score = score
-                best_window = window
+        except Exception as e:
+            print(f"[오류] window={window} 평가 실패 → {e}")
+            continue
 
-    save_path = f"/persistent/logs/best_window_{symbol}_{strategy}.txt"
-    with open(save_path, "w") as f:
+    save_txt = f"/persistent/logs/best_window_{symbol}_{strategy}.txt"
+    save_json = f"/persistent/logs/best_window_{symbol}_{strategy}.json"
+
+    with open(save_txt, "w") as f:
         f.write(str(best_window))
+    with open(save_json, "w") as f:
+        json.dump(best_result or {"window": best_window, "score": 0}, f, indent=2)
 
     print(f"[최적 WINDOW] {symbol}-{strategy} → {best_window} (score: {best_score:.4f})")
     return best_window
