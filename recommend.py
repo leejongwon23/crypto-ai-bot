@@ -54,6 +54,10 @@ def main():
                 result = predict(symbol, strategy)
                 print(f"[예측] {symbol}-{strategy} → {result}")
 
+                # 결과가 None이거나 dict가 아닌 경우 강제 실패 처리
+                if not isinstance(result, dict):
+                    raise ValueError("predict() 반환값이 dict가 아님")
+
                 # ✅ 예측 결과는 성공/실패 무관하게 모두 기록
                 log_prediction(
                     symbol=result.get("symbol", symbol),
@@ -76,19 +80,25 @@ def main():
 
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
-                log_prediction(
-                    symbol=symbol,
-                    strategy=strategy,
-                    direction="예외",
-                    entry_price=0,
-                    target_price=0,
-                    timestamp=datetime.datetime.utcnow().isoformat(),
-                    confidence=0.0,
-                    model="unknown",
-                    success=False,
-                    reason=f"예외 발생: {e}"
-                )
-                log_audit(symbol, strategy, None, f"예외 발생: {e}")
+                try:
+                    log_prediction(
+                        symbol=symbol,
+                        strategy=strategy,
+                        direction="예외",
+                        entry_price=0,
+                        target_price=0,
+                        timestamp=datetime.datetime.utcnow().isoformat(),
+                        confidence=0.0,
+                        model="unknown",
+                        success=False,
+                        reason=f"예외 발생: {e}"
+                    )
+                except Exception as le:
+                    print(f"[치명적] log_prediction 실패: {le}")
+                try:
+                    log_audit(symbol, strategy, None, f"예외 발생: {e}")
+                except Exception as la:
+                    print(f"[치명적] log_audit 실패: {la}")
 
     # --- 필터 단계 ---
     candidates = [r for r in all_results if r.get("confidence", 0) >= MIN_CONFIDENCE]
