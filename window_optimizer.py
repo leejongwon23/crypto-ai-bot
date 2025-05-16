@@ -56,7 +56,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         criterion = torch.nn.BCELoss()
 
         try:
-            for _ in range(3):  # 빠르게 3 epoch만
+            for _ in range(3):
                 pred, _ = model(train_X)
                 loss = criterion(pred.squeeze(), train_y)
                 optimizer.zero_grad()
@@ -76,10 +76,10 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                     best_score = score
                     best_window = window
                     best_result = {
-                        "window": window,
-                        "accuracy": round(acc, 4),
-                        "confidence": round(conf, 4),
-                        "score": round(score, 4)
+                        "window": int(window),
+                        "accuracy": float(round(acc, 4)),
+                        "confidence": float(round(conf, 4)),
+                        "score": float(round(score, 4))
                     }
 
         except Exception as e:
