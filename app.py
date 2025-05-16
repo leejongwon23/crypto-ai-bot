@@ -142,8 +142,8 @@ def check_log():
 @app.route("/check-wrong")
 def check_wrong():
     try:
-        if not os.path.exists(WRONG_PREDICTIONS):
-            return jsonify({"error": "wrong_predictions.csv not found"})
+        if not os.path.exists(WRONG_PREDICTIONS) or os.path.getsize(WRONG_PREDICTIONS) == 0:
+            return jsonify([])
         df = pd.read_csv(WRONG_PREDICTIONS, encoding="utf-8-sig")
         last_10 = df.tail(10).to_dict(orient='records')
         return jsonify(last_10)
@@ -154,6 +154,8 @@ def check_wrong():
 def check_stats():
     try:
         result = logger.print_prediction_stats()
+        if not isinstance(result, str):
+            return f"출력 형식 오류: {result}", 500
         formatted = result.replace("📊", "<b>📊</b>").replace("✅", "<b style='color:green'>✅</b>") \
                           .replace("❌", "<b style='color:red'>❌</b>").replace("⏳", "<b>⏳</b>") \
                           .replace("🎯", "<b>🎯</b>").replace("📌", "<b>📌</b>")
