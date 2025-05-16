@@ -142,9 +142,9 @@ def evaluate_predictions(get_price_fn):
             success = False
 
             if direction == "롱":
-                success = gain >= min_gain or gain > -STOP_LOSS_PCT
+                success = gain >= min_gain
             elif direction == "숏":
-                success = -gain >= min_gain or -gain > -STOP_LOSS_PCT
+                success = -gain >= min_gain
 
             row["status"] = "success" if success else "fail"
             update_model_success(symbol, strategy, row.get("model", "unknown"), success)
