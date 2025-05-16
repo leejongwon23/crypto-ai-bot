@@ -1,3 +1,4 @@
+# [앞부분 코드 동일 - 생략 없이 유지됨]
 # --- [필수 import] ---
 import os, time, threading, gc
 import torch
@@ -55,7 +56,7 @@ def create_dataset(features, window):
     X, y = zip(*filtered)
     return np.array(X), np.array(y)
 
-def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3):
+def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3, repeat=3):
     print(f"[train] {symbol}-{strategy} 전체 모델 학습 시작")
     best_window = find_best_window(symbol, strategy)
     df = get_kline_by_strategy(symbol, strategy)
@@ -96,35 +97,39 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         train_set, val_set = random_split(dataset, [train_len, val_len])
         train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
 
-        # 오답 학습
-        wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=best_window)
-        if wrong_data:
-            try:
-                shapes = [x[0].shape for x in wrong_data]
-                mode_shape = max(set(shapes), key=shapes.count)
-                filtered = [(x, y) for x, y in wrong_data if x.shape == mode_shape]
-                if len(filtered) > 1:
-                    xb_all = torch.stack([x for x, _ in filtered])
-                    yb_all = torch.tensor([y for _, y in filtered], dtype=torch.float32)
-                    for i in range(0, len(xb_all), batch_size):
-                        xb = xb_all[i:i+batch_size]
-                        yb = yb_all[i:i+batch_size]
-                        pred, _ = model(xb)
-                        if pred is not None:
-                            loss = criterion(pred, yb)
-                            optimizer.zero_grad(); loss.backward(); optimizer.step()
-            except Exception as e:
-                print(f"[오답 학습 실패] {symbol}-{strategy} → {e}")
+        # 🔁 반복 학습 루프 시작
+        for r in range(repeat):
+            print(f"[{symbol}-{strategy}] {model_type} 반복학습 {r+1}/{repeat}")
 
-        # 정규 학습
-        for epoch in range(epochs):
-            for xb, yb in train_loader:
-                pred, _ = model(xb)
-                if pred is None: continue
-                loss = criterion(pred, yb)
-                optimizer.zero_grad(); loss.backward(); optimizer.step()
+            # 1️⃣ 오답 학습
+            wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=best_window)
+            if wrong_data:
+                try:
+                    shapes = [x[0].shape for x in wrong_data]
+                    mode_shape = max(set(shapes), key=shapes.count)
+                    filtered = [(x, y) for x, y in wrong_data if x.shape == mode_shape]
+                    if len(filtered) > 1:
+                        xb_all = torch.stack([x for x, _ in filtered])
+                        yb_all = torch.tensor([y for _, y in filtered], dtype=torch.float32)
+                        for i in range(0, len(xb_all), batch_size):
+                            xb = xb_all[i:i+batch_size]
+                            yb = yb_all[i:i+batch_size]
+                            pred, _ = model(xb)
+                            if pred is not None:
+                                loss = criterion(pred, yb)
+                                optimizer.zero_grad(); loss.backward(); optimizer.step()
+                except Exception as e:
+                    print(f"[오답 학습 실패] {symbol}-{strategy} → {e}")
 
-        # 평가 및 기록
+            # 2️⃣ 정규 학습
+            for epoch in range(epochs):
+                for xb, yb in train_loader:
+                    pred, _ = model(xb)
+                    if pred is None: continue
+                    loss = criterion(pred, yb)
+                    optimizer.zero_grad(); loss.backward(); optimizer.step()
+
+        # ✅ 평가 및 저장
         model.eval()
         try:
             with torch.no_grad():
