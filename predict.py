@@ -17,24 +17,28 @@ STRATEGY_RATE_LIMITS = {
     "장기": 0.10
 }
 
+def failed_result(symbol, strategy, reason):
+    return {
+        "symbol": symbol,
+        "strategy": strategy,
+        "success": False,
+        "reason": reason,
+        "direction": "N/A",
+        "model": "unknown",
+        "confidence": 0.0,
+        "rate": 0.0
+    }
+
 def predict(symbol, strategy):
     try:
         best_window = find_best_window(symbol, strategy)
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < best_window + 1:
-            return {
-                "symbol": symbol, "strategy": strategy,
-                "success": False, "reason": "데이터 부족",
-                "direction": "N/A", "model": "unknown", "confidence": 0.0
-            }
+            return failed_result(symbol, strategy, "데이터 부족")
 
         features = compute_features(df)
         if features is None or len(features) < best_window + 1:
-            return {
-                "symbol": symbol, "strategy": strategy,
-                "success": False, "reason": "feature 부족",
-                "direction": "N/A", "model": "unknown", "confidence": 0.0
-            }
+            return failed_result(symbol, strategy, "feature 부족")
 
         try:
             X_raw = features.iloc[-best_window:].values
@@ -44,11 +48,7 @@ def predict(symbol, strategy):
             if len(X.shape) != 3:
                 raise ValueError("시퀀스 형상 오류")
         except Exception as e:
-            return {
-                "symbol": symbol, "strategy": strategy,
-                "success": False, "reason": f"입력 시퀀스 오류: {e}",
-                "direction": "N/A", "model": "unknown", "confidence": 0.0
-            }
+            return failed_result(symbol, strategy, f"입력 시퀀스 오류: {e}")
 
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
         input_size = X.shape[2]
@@ -59,11 +59,7 @@ def predict(symbol, strategy):
         }
         available_models = {mt: path for mt, path in model_paths.items() if os.path.exists(path)}
         if not available_models:
-            return {
-                "symbol": symbol, "strategy": strategy,
-                "success": False, "reason": "모델 없음",
-                "direction": "N/A", "model": "unknown", "confidence": 0.0
-            }
+            return failed_result(symbol, strategy, "모델 없음")
 
         max_rate = STRATEGY_RATE_LIMITS.get(strategy, 0.05)
         results = []
@@ -114,11 +110,7 @@ def predict(symbol, strategy):
                 continue
 
         if not results:
-            return {
-                "symbol": symbol, "strategy": strategy,
-                "success": False, "reason": "모든 모델 예측 실패",
-                "direction": "N/A", "model": "unknown", "confidence": 0.0
-            }
+            return failed_result(symbol, strategy, "모든 모델 예측 실패")
 
         dir_count = {"롱": 0, "숏": 0}
         for r in results:
@@ -131,18 +123,13 @@ def predict(symbol, strategy):
         elif len(results) == 1:
             final_direction = results[0]["direction"]
         else:
-            return {
-                "symbol": symbol, "strategy": strategy,
-                "success": False, "reason": "모델 방향 불일치",
-                "direction": "N/A", "model": "ensemble", "confidence": 0.0
-            }
+            return failed_result(symbol, strategy, "모델 방향 불일치")
 
         valid_results = [r for r in results if r["direction"] == final_direction]
         avg_confidence = sum(r["confidence"] for r in valid_results) / len(valid_results)
         avg_rate = sum(r["rate"] for r in valid_results) / len(valid_results)
         price = features["close"].iloc[-1]
 
-        # Reason 판단
         rsi = features["rsi"].iloc[-1] if "rsi" in features else 50
         macd = features["macd"].iloc[-1] if "macd" in features else 0
         boll = features["bollinger"].iloc[-1] if "bollinger" in features else 0
@@ -179,8 +166,4 @@ def predict(symbol, strategy):
 
     except Exception as e:
         print(f"[FATAL] {symbol}-{strategy} 예측 실패: {e}")
-        return {
-            "symbol": symbol, "strategy": strategy,
-            "success": False, "reason": f"예외 발생: {e}",
-            "direction": "N/A", "model": "unknown", "confidence": 0.0
-        }
+        return failed_result(symbol, strategy, f"예외 발생: {e}")
