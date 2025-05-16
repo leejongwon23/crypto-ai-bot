@@ -19,7 +19,7 @@ def predict(symbol, strategy):
             return {
                 "symbol": symbol, "strategy": strategy,
                 "success": False, "reason": "데이터 부족",
-                "direction": "N/A", "model": "unknown"
+                "direction": "N/A", "model": "unknown", "confidence": 0.0
             }
 
         features = compute_features(df)
@@ -27,7 +27,7 @@ def predict(symbol, strategy):
             return {
                 "symbol": symbol, "strategy": strategy,
                 "success": False, "reason": "feature 부족",
-                "direction": "N/A", "model": "unknown"
+                "direction": "N/A", "model": "unknown", "confidence": 0.0
             }
 
         try:
@@ -41,7 +41,7 @@ def predict(symbol, strategy):
             return {
                 "symbol": symbol, "strategy": strategy,
                 "success": False, "reason": f"입력 시퀀스 오류: {e}",
-                "direction": "N/A", "model": "unknown"
+                "direction": "N/A", "model": "unknown", "confidence": 0.0
             }
 
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
@@ -56,7 +56,7 @@ def predict(symbol, strategy):
             return {
                 "symbol": symbol, "strategy": strategy,
                 "success": False, "reason": "모델 없음",
-                "direction": "N/A", "model": "unknown"
+                "direction": "N/A", "model": "unknown", "confidence": 0.0
             }
 
         results = []
@@ -106,7 +106,7 @@ def predict(symbol, strategy):
             return {
                 "symbol": symbol, "strategy": strategy,
                 "success": False, "reason": "모든 모델 예측 실패",
-                "direction": "N/A", "model": "unknown"
+                "direction": "N/A", "model": "unknown", "confidence": 0.0
             }
 
         dir_count = {"롱": 0, "숏": 0}
@@ -123,7 +123,7 @@ def predict(symbol, strategy):
             return {
                 "symbol": symbol, "strategy": strategy,
                 "success": False, "reason": "모델 방향 불일치",
-                "direction": "N/A", "model": "ensemble"
+                "direction": "N/A", "model": "ensemble", "confidence": 0.0
             }
 
         valid_results = [r for r in results if r["direction"] == final_direction]
@@ -160,5 +160,5 @@ def predict(symbol, strategy):
         return {
             "symbol": symbol, "strategy": strategy,
             "success": False, "reason": f"예외 발생: {e}",
-            "direction": "N/A", "model": "unknown"
+            "direction": "N/A", "model": "unknown", "confidence": 0.0
         }
