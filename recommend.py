@@ -14,9 +14,9 @@ MIN_CONFIDENCE = 0.70
 MIN_CONFIDENCE_OVERRIDE = 0.85
 SUCCESS_RATE_THRESHOLD = 0.70
 MIN_GAIN_BY_STRATEGY = {
-    "단기": 0.03,
-    "중기": 0.06,
-    "장기": 0.10
+    "단기": 0.01,
+    "중기": 0.03,
+    "장기": 0.05
 }
 FINAL_SEND_LIMIT = 5  # 최종 메시지 최대 개수
 
@@ -114,7 +114,7 @@ def main():
         rate = r.get("rate", 0)
 
         # 필터 3. 전략별 최소 수익률
-        if rate < MIN_GAIN_BY_STRATEGY.get(strategy, 0.03):
+        if rate < MIN_GAIN_BY_STRATEGY.get(strategy, 0.01):
             continue
 
         # 필터 1. 모델 방향 일치 (ensemble이거나, conf ≥ 0.85)
