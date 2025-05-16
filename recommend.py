@@ -1,11 +1,13 @@
 import datetime
 import os
 import csv
+import threading
 from telegram_bot import send_message
 from predict import predict
 from logger import log_prediction, evaluate_predictions, get_model_success_rate
 from data.utils import SYMBOLS, get_realtime_prices
 from src.message_formatter import format_message
+import train  # ✅ 모델 자동 학습을 위해 추가
 
 # --- 필터 기준 설정 ---
 MIN_CONFIDENCE = 0.70
@@ -53,6 +55,11 @@ def main():
             try:
                 result = predict(symbol, strategy)
                 print(f"[예측] {symbol}-{strategy} → {result}")
+
+                # ✅ 모델 없음 시 자동 학습 트리거
+                if result.get("reason") == "모델 없음":
+                    print(f"[자동학습] {symbol}-{strategy} → 모델 없음 → 학습 시도")
+                    threading.Thread(target=train.train_model, args=(symbol, strategy), daemon=True).start()
 
                 if not isinstance(result, dict):
                     raise ValueError("predict() 반환값이 dict가 아님")
