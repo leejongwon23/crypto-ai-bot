@@ -16,25 +16,22 @@ def predict(symbol, strategy):
         best_window = find_best_window(symbol, strategy)
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < best_window + 1:
-            print(f"[SKIP] {symbol}-{strategy} → 데이터 부족")
             return {"symbol": symbol, "strategy": strategy, "success": False, "reason": "데이터 부족"}
 
         features = compute_features(df)
         if features is None or len(features) < best_window + 1:
-            print(f"[SKIP] {symbol}-{strategy} → feature 부족")
             return {"symbol": symbol, "strategy": strategy, "success": False, "reason": "feature 부족"}
 
-        try:
-            X = features.iloc[-best_window:].values
-            if X.shape[0] != best_window:
-                raise ValueError("시퀀스 길이 부족")
-            X = np.expand_dims(X, axis=0)
-        except Exception as e:
-            print(f"[SKIP] {symbol}-{strategy} → 시퀀스 오류: {e}")
-            return {"symbol": symbol, "strategy": strategy, "success": False, "reason": f"시퀀스 오류: {e}"}
+        X_raw = features.iloc[-best_window:].values
+        if X_raw.shape[0] != best_window:
+            return {"symbol": symbol, "strategy": strategy, "success": False, "reason": "시퀀스 부족"}
+
+        X = np.expand_dims(X_raw, axis=0)  # (1, window, features)
+        if len(X.shape) != 3:
+            return {"symbol": symbol, "strategy": strategy, "success": False, "reason": "시퀀스 형상 오류"}
 
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
-        input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
+        input_size = X.shape[2]
 
         model_paths = {
             mt: os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{mt}.pt")
@@ -58,15 +55,13 @@ def predict(symbol, strategy):
                     signal = signal.squeeze().item()
                     confidence = confidence.squeeze().item()
 
-                    # ❗ 예측 확신 구간 확인
                     if 0.49 <= signal <= 0.51:
-                        continue  # 너무 애매한 경우는 무시
+                        continue
 
                     direction = "롱" if signal > 0.5 else "숏"
                     rate = abs(signal - 0.5) * 2
                     weight = get_model_weight(model_type, strategy)
 
-                    # ❗ confidence 보정: 낮은 logloss일수록 높게 반영
                     fake_y = np.array([1 if signal > 0.5 else 0])
                     fake_p = np.array([signal])
                     try:
@@ -85,7 +80,7 @@ def predict(symbol, strategy):
                         "rate": rate
                     })
             except Exception as e:
-                print(f"[ERROR] {symbol}-{strategy}-{model_type} → 예측 실패: {e}")
+                print(f"[ERROR] {symbol}-{strategy}-{model_type} 예측 실패: {e}")
                 continue
 
         if not results:
