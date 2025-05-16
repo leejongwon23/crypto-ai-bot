@@ -72,6 +72,7 @@ def start_scheduler():
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료")
 sys.stdout.flush()
+
 @app.route("/")
 def index():
     return "Yopo server is running"
@@ -123,7 +124,7 @@ def list_model_files():
         files = os.listdir(MODEL_DIR)
         if not files:
             return "models 폴더가 비어 있습니다."
-        return "<pre>" + "\\n".join(files) + "</pre>"
+        return "<pre>" + "\n".join(files) + "</pre>"
     except Exception as e:
         return f"모델 파일 확인 중 오류 발생: {e}", 500
 
@@ -200,6 +201,7 @@ def audit_log_download():
         return send_file(AUDIT_LOG, mimetype="text/csv", as_attachment=True, download_name="evaluation_audit.csv")
     except Exception as e:
         return f"다운로드 실패: {e}", 500
+
 @app.route("/health-check")
 def health_check():
     results = []
@@ -269,11 +271,12 @@ def health_check():
         summary.append("- 전략별 성공률 확인 실패")
 
     if all(r.startswith("✅") for r in results):
-        summary.append("\\n🟢 YOPO는 현재 정상 운영 중입니다. 신뢰하고 사용하셔도 됩니다.")
+        summary.append("🟢 YOPO는 현재 정상 운영 중입니다. 신뢰하고 사용하셔도 됩니다.")
     else:
-        summary.append("\\n⚠️ YOPO에서 일부 이상이 감지되었습니다. 위 내용을 확인하세요.")
+        summary.append("⚠️ YOPO에서 일부 이상이 감지되었습니다. 위 내용을 확인하세요.")
 
-    return "<pre>" + "\\n".join(results + [""] + summary) + "</pre>"
+    formatted = "<br>".join(results + [""] + summary)
+    return f"<div style='font-family:monospace; line-height:1.6;'>{formatted}</div>"
 
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
