@@ -15,18 +15,31 @@ def predict(symbol, strategy):
         best_window = find_best_window(symbol, strategy)
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < best_window + 1:
-            return None
+            print(f"[SKIP] {symbol}-{strategy} → 데이터 부족")
+            return {
+                "symbol": symbol, "strategy": strategy, "success": False,
+                "reason": "데이터 부족"
+            }
 
         features = compute_features(df)
         if features is None or len(features) < best_window + 1:
-            return None
+            print(f"[SKIP] {symbol}-{strategy} → feature 부족")
+            return {
+                "symbol": symbol, "strategy": strategy, "success": False,
+                "reason": "feature 부족"
+            }
 
         try:
             X = features.iloc[-best_window:].values
+            if X.shape[0] != best_window:
+                raise ValueError("시퀀스 길이 부족")
             X = np.expand_dims(X, axis=0)
         except Exception as e:
             print(f"[SKIP] {symbol}-{strategy} → 시퀀스 오류: {e}")
-            return None
+            return {
+                "symbol": symbol, "strategy": strategy, "success": False,
+                "reason": f"시퀀스 오류: {e}"
+            }
 
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
         input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
@@ -43,7 +56,10 @@ def predict(symbol, strategy):
 
         if len(available_models) == 0:
             print(f"[SKIP] {symbol}-{strategy} → 모델 없음")
-            return None
+            return {
+                "symbol": symbol, "strategy": strategy, "success": False,
+                "reason": "모델 없음"
+            }
 
         results = []
         for model_type, model_path in available_models.items():
@@ -75,8 +91,10 @@ def predict(symbol, strategy):
                 continue
 
         if len(results) == 0:
-            print(f"[SKIP] {symbol}-{strategy} → 모든 모델 예측 실패")
-            return None
+            return {
+                "symbol": symbol, "strategy": strategy, "success": False,
+                "reason": "모든 모델 예측 실패"
+            }
 
         dir_count = {"롱": 0, "숏": 0}
         for r in results:
@@ -89,14 +107,17 @@ def predict(symbol, strategy):
         elif len(results) == 1:
             final_direction = results[0]["direction"]
         else:
-            print(f"[SKIP] {symbol}-{strategy} → 방향 불일치")
-            return None
+            return {
+                "symbol": symbol, "strategy": strategy, "success": False,
+                "reason": "모델 방향 불일치"
+            }
 
         valid_results = [r for r in results if r["direction"] == final_direction]
         avg_confidence = sum(r["confidence"] for r in valid_results) / len(valid_results)
         avg_rate = sum(r["rate"] for r in valid_results) / len(valid_results)
         price = features["close"].iloc[-1]
 
+        # 보조지표 기반 해석 추가
         rsi = features["rsi"].iloc[-1] if "rsi" in features else 50
         macd = features["macd"].iloc[-1] if "macd" in features else 0
         boll = features["bollinger"].iloc[-1] if "bollinger" in features else 0
@@ -117,9 +138,13 @@ def predict(symbol, strategy):
             "price": price,
             "target": price * (1 + avg_rate) if final_direction == "롱" else price * (1 - avg_rate),
             "stop": price * (1 - STOP_LOSS_PCT) if final_direction == "롱" else price * (1 + STOP_LOSS_PCT),
-            "reason": ", ".join(reason)
+            "reason": ", ".join(reason),
+            "success": True
         }
 
     except Exception as e:
         print(f"[FATAL] {symbol}-{strategy} 예측 실패: {e}")
-        return None
+        return {
+            "symbol": symbol, "strategy": strategy, "success": False,
+            "reason": f"예외 발생: {e}"
+        }
