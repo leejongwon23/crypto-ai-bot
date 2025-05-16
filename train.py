@@ -140,7 +140,6 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
                     loss = criterion(pred, yb)
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-        # 평가
         model.eval()
         try:
             with torch.no_grad():
@@ -167,7 +166,15 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         torch.save(best_model_obj.state_dict(), model_path)
         print(f"✅ Best 모델 저장됨: {model_path} (score: {scores[best_model_type]:.4f})")
 
-        save_model_metadata(symbol, strategy, best_model_type, best_acc, best_f1, best_loss)
+        # ✅ float 변환 추가 (직렬화 오류 방지)
+        save_model_metadata(
+            symbol,
+            strategy,
+            best_model_type,
+            float(best_acc),
+            float(best_f1),
+            float(best_loss)
+        )
 
         compute_X_val = val_X_tensor
         compute_y_val = val_y_tensor
