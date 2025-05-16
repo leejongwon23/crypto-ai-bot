@@ -10,6 +10,7 @@ from src.message_formatter import format_message
 # --- 필터 기준 설정 ---
 MIN_CONFIDENCE = 0.70
 MIN_CONFIDENCE_OVERRIDE = 0.85
+SUCCESS_RATE_THRESHOLD = 0.70
 MIN_GAIN_BY_STRATEGY = {
     "단기": 0.03,
     "중기": 0.06,
@@ -97,36 +98,46 @@ def main():
                 except Exception as la:
                     print(f"[치명적] log_audit 실패: {la}")
 
-    # --- 최상필터 구조 적용 ---
+    # --- 최상필터 적용 ---
     filtered = []
     for r in all_results:
         conf = r.get("confidence", 0)
         model = r.get("model", "")
-        direction = r.get("direction")
         strategy = r.get("strategy")
         rate = r.get("rate", 0)
 
-        if conf < MIN_CONFIDENCE:
-            continue
-
+        # 필터 3. 전략별 최소 수익률
         if rate < MIN_GAIN_BY_STRATEGY.get(strategy, 0.03):
             continue
 
-        # 모델 방향 2개 이상 일치 or confidence ≥ 0.85 우선 통과
-        if model == "ensemble":
-            filtered.append(r)
-        elif conf >= MIN_CONFIDENCE_OVERRIDE:
-            filtered.append(r)
+        # 필터 1. 모델 방향 일치 (ensemble이거나, conf ≥ 0.85)
+        if model == "ensemble" or conf >= MIN_CONFIDENCE_OVERRIDE:
+            pass
+        else:
+            continue
 
-    # 점수 계산
-    for r in filtered:
-        success_rate = get_model_success_rate(r["symbol"], r["strategy"], r.get("model", "unknown"))
+        # 필터 2. confidence ≥ 0.70
+        if conf < MIN_CONFIDENCE:
+            continue
+
+        # 필터 4. success rate ≥ 70%
+        success_rate = get_model_success_rate(r["symbol"], strategy, model)
+        if success_rate < SUCCESS_RATE_THRESHOLD:
+            continue
+
         r["success_rate"] = success_rate
-        score = success_rate * r["rate"] * r["confidence"]
-        r["score"] = score
+        r["score"] = conf * rate * success_rate
+        filtered.append(r)
 
-    # 점수 기준 정렬 후 Top 5 추출 (5개 미만이면 전부)
-    final = sorted(filtered, key=lambda x: -x["score"])[:FINAL_SEND_LIMIT]
+    # 필터 5. 전략별 Top 1만 추출
+    top_per_strategy = {}
+    for item in filtered:
+        strat = item["strategy"]
+        if strat not in top_per_strategy or item["score"] > top_per_strategy[strat]["score"]:
+            top_per_strategy[strat] = item
+
+    final = list(top_per_strategy.values())
+    final = sorted(final, key=lambda x: -x["score"])[:FINAL_SEND_LIMIT]
 
     if final:
         for res in final:
