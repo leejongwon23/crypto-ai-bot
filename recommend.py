@@ -54,8 +54,7 @@ def main():
                 result = predict(symbol, strategy)
                 print(f"[예측] {symbol}-{strategy} → {result}")
 
-                # ✅ 예측이 실패해도 무조건 기록
-                if result is None:
+                if result is None or not result.get("success", False):
                     log_prediction(
                         symbol=symbol,
                         strategy=strategy,
@@ -64,12 +63,13 @@ def main():
                         target_price=0,
                         timestamp=datetime.datetime.utcnow().isoformat(),
                         confidence=0.0,
-                        model="unknown"
+                        model="unknown",
+                        success=False,
+                        reason=result["reason"] if result and "reason" in result else "예측 실패"
                     )
-                    log_audit(symbol, strategy, None, "예측 실패")
+                    log_audit(symbol, strategy, result, "예측 실패")
                     continue
 
-                # ✅ 예측 성공 결과 기록
                 log_prediction(
                     symbol=result["symbol"],
                     strategy=result["strategy"],
@@ -78,11 +78,10 @@ def main():
                     target_price=result["target"],
                     timestamp=datetime.datetime.utcnow().isoformat(),
                     confidence=result["confidence"],
-                    model=result.get("model", "unknown")
+                    model=result.get("model", "unknown"),
+                    success=True
                 )
                 log_audit(symbol, strategy, result, "예측+기록 완료")
-                result["strategy"] = strategy
-                result["symbol"] = symbol
                 all_results.append(result)
 
             except Exception as e:
@@ -95,12 +94,14 @@ def main():
                     target_price=0,
                     timestamp=datetime.datetime.utcnow().isoformat(),
                     confidence=0.0,
-                    model="unknown"
+                    model="unknown",
+                    success=False,
+                    reason=f"예외 발생: {e}"
                 )
                 log_audit(symbol, strategy, None, f"예외 발생: {e}")
 
     # --- 필터 ---
-    candidates = [r for r in all_results if r["confidence"] >= MIN_CONFIDENCE]
+    candidates = [r for r in all_results if r.get("confidence", 0) >= MIN_CONFIDENCE]
     candidates = sorted(candidates, key=lambda x: x["confidence"], reverse=True)[:MAX_TOP_CONFIDENCE]
 
     strategy_grouped = {}
