@@ -55,22 +55,6 @@ def create_dataset(features, window):
     X, y = zip(*filtered)
     return np.array(X), np.array(y)
 
-def evaluate_existing_model(model_path, model, X_val, y_val):
-    if not os.path.exists(model_path): return -1
-    try:
-        model.load_state_dict(torch.load(model_path, map_location=DEVICE))
-        model.eval()
-        with torch.no_grad():
-            out, _ = model(X_val)
-            y_prob = out.squeeze().numpy()
-            y_pred = (y_prob > 0.5).astype(int)
-            y_true = y_val.numpy()
-            acc = accuracy_score(y_true, y_pred)
-            f1 = f1_score(y_true, y_pred)
-            return acc + f1
-    except:
-        return -1
-
 def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3):
     print(f"[train] {symbol}-{strategy} 전체 모델 학습 시작")
     best_window = find_best_window(symbol, strategy)
@@ -112,16 +96,19 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         train_set, val_set = random_split(dataset, [train_len, val_len])
         train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
 
-        # --- 오답 학습 ---
+        # 오답 학습
         wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=best_window)
         if wrong_data:
             try:
-                shapes = set([x[0].shape for x in wrong_data])
-                mode_shape = max(shapes, key=lambda s: [x[0].shape for x in wrong_data].count(s))
+                shapes = [x[0].shape for x in wrong_data]
+                mode_shape = max(set(shapes), key=shapes.count)
                 filtered = [(x, y) for x, y in wrong_data if x.shape == mode_shape]
                 if len(filtered) > 1:
-                    wrong_loader = DataLoader(filtered, batch_size=batch_size, shuffle=True)
-                    for xb, yb in wrong_loader:
+                    xb_all = torch.stack([x for x, _ in filtered])
+                    yb_all = torch.tensor([y for _, y in filtered], dtype=torch.float32)
+                    for i in range(0, len(xb_all), batch_size):
+                        xb = xb_all[i:i+batch_size]
+                        yb = yb_all[i:i+batch_size]
                         pred, _ = model(xb)
                         if pred is not None:
                             loss = criterion(pred, yb)
@@ -129,31 +116,35 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
             except Exception as e:
                 print(f"[오답 학습 실패] {symbol}-{strategy} → {e}")
 
-        # --- 정규 학습 ---
+        # 정규 학습
         for epoch in range(epochs):
             for xb, yb in train_loader:
                 pred, _ = model(xb)
-                if pred is None:
-                    continue
+                if pred is None: continue
                 loss = criterion(pred, yb)
                 optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-        # --- 평가 ---
+        # 평가 및 기록
         model.eval()
-        with torch.no_grad():
-            out, _ = model(val_X_tensor)
-            y_prob = out.squeeze().numpy()
-            y_pred = (y_prob > 0.5).astype(int)
-            y_true = val_y_tensor.numpy()
-            acc = accuracy_score(y_true, y_pred)
-            f1 = f1_score(y_true, y_pred)
-            score = acc + f1
-            logger.log_training_result(symbol, strategy, model_type, acc, f1, log_loss(y_true, y_prob))
+        try:
+            with torch.no_grad():
+                out, _ = model(val_X_tensor)
+                y_prob = out.squeeze().numpy()
+                y_pred = (y_prob > 0.5).astype(int)
+                y_true = val_y_tensor.numpy()
+                acc = accuracy_score(y_true, y_pred)
+                f1 = f1_score(y_true, y_pred)
+                logloss = log_loss(y_true, y_prob, labels=[0,1])
+                score = acc + f1
+                logger.log_training_result(symbol, strategy, model_type, acc, f1, logloss)
 
-            if score > best_score:
-                best_score = score
-                best_model_type = model_type
-                best_model_obj = model
+                if score > best_score:
+                    best_score = score
+                    best_model_type = model_type
+                    best_model_obj = model
+        except Exception as e:
+            print(f"[평가 오류] {symbol}-{strategy}-{model_type} → {e}")
+            continue
 
     if best_model_obj:
         model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{best_model_type}.pt")
@@ -164,6 +155,8 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         compute_y_val = val_y_tensor
         importances = compute_feature_importance(best_model_obj, compute_X_val, compute_y_val, list(df_feat.columns))
         save_feature_importance(importances, symbol, strategy, best_model_type)
+    else:
+        print(f"❗ 최종 저장 실패: {symbol}-{strategy} 모든 모델 평가 실패")
 
 def train_one_strategy(strategy):
     for symbol in SYMBOLS:
