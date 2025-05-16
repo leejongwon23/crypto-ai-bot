@@ -68,10 +68,10 @@ def start_scheduler():
     scheduler.add_job(test_all_predictions, 'cron', minute=10, id='predict_test', replace_existing=True)
 
     scheduler.start()
+
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료")
 sys.stdout.flush()
-
 @app.route("/")
 def index():
     return "Yopo server is running"
@@ -200,32 +200,36 @@ def audit_log_download():
         return send_file(AUDIT_LOG, mimetype="text/csv", as_attachment=True, download_name="evaluation_audit.csv")
     except Exception as e:
         return f"다운로드 실패: {e}", 500
-
 @app.route("/health-check")
 def health_check():
     results = []
+    summary = []
 
-    # 예측 로그 확인
     try:
         if os.path.exists(PREDICTION_LOG):
             df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-            results.append(f"✅ 예측 기록 OK ({len(df)}건)")
+            total = len(df)
+            done = len(df[df["status"].isin(["success", "fail"])])
+            rate = (done / total * 100) if total > 0 else 0
+            results.append(f"✅ 예측 기록 OK ({total}건)")
+            summary.append(f"- 최근 예측 {total}건 중 {done}건 평가 완료 (평가율 {rate:.1f}%)")
         else:
             results.append("❌ 예측 기록 없음")
+            summary.append("- 예측 기록 없음")
     except Exception as e:
         results.append(f"❌ 예측 로그 확인 실패: {e}")
 
-    # 실패 예측 로그 확인
     try:
         if os.path.exists(WRONG_PREDICTIONS) and os.path.getsize(WRONG_PREDICTIONS) > 0:
             df = pd.read_csv(WRONG_PREDICTIONS, encoding="utf-8-sig")
             results.append(f"✅ 실패 예측 기록 OK ({len(df)}건)")
+            summary.append("- 실패 예측 기록 누락 없음")
         else:
             results.append("❌ 실패 예측 기록 없음")
+            summary.append("- 실패 예측 기록 없음")
     except Exception as e:
         results.append(f"❌ 실패 로그 확인 실패: {e}")
 
-    # 평가 로그 확인
     try:
         if os.path.exists(AUDIT_LOG):
             df = pd.read_csv(AUDIT_LOG, encoding="utf-8-sig")
@@ -235,39 +239,41 @@ def health_check():
     except Exception as e:
         results.append(f"❌ 평가 로그 확인 실패: {e}")
 
-    # 모델 파일 확인
     try:
         if os.path.exists(MODEL_DIR):
-            files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
-            if files:
-                results.append(f"✅ 모델 파일 OK ({len(files)}개)")
-            else:
-                results.append("❌ 모델 파일 없음")
+            models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
+            results.append(f"✅ 모델 파일 OK ({len(models)}개)")
+            summary.append(f"- 모델 파일 {len(models)}개 정상 저장됨")
         else:
             results.append("❌ 모델 폴더 없음")
+            summary.append("- 모델 폴더 없음")
     except Exception as e:
         results.append(f"❌ 모델 확인 실패: {e}")
 
-    # 정확도 통계 확인
-    try:
-        stats = logger.print_prediction_stats()
-        results.append("✅ 정확도 통계 OK")
-    except Exception as e:
-        results.append(f"❌ 정확도 통계 실패: {e}")
-
-    # 메시지 전송 기록 확인
     try:
         if os.path.exists(MESSAGE_LOG) and os.path.getsize(MESSAGE_LOG) > 0:
             df = pd.read_csv(MESSAGE_LOG, encoding="utf-8-sig")
-            recent = df.tail(10)
-            results.append(f"✅ 메시지 전송 기록 OK (최근 {len(recent)}건)")
+            results.append(f"✅ 메시지 전송 기록 OK (최근 {len(df)}건)")
+            summary.append(f"- 최근 메시지 {len(df)}건 전송 완료")
         else:
             results.append("❌ 메시지 전송 기록 없음")
+            summary.append("- 메시지 전송 기록 없음")
     except Exception as e:
         results.append(f"❌ 메시지 로그 확인 실패: {e}")
 
-    formatted = "\n".join(results)
-    return f"<pre>{formatted}</pre>"
+    try:
+        for s in ["단기", "중기", "장기"]:
+            r = logger.get_actual_success_rate(s)
+            summary.append(f"- {s} 전략 성공률: {r*100:.1f}%")
+    except:
+        summary.append("- 전략별 성공률 확인 실패")
+
+    if all(r.startswith("✅") for r in results):
+        summary.append("\\n🟢 YOPO는 현재 정상 운영 중입니다. 신뢰하고 사용하셔도 됩니다.")
+    else:
+        summary.append("\\n⚠️ YOPO에서 일부 이상이 감지되었습니다. 위 내용을 확인하세요.")
+
+    return "<pre>" + "\\n".join(results + [""] + summary) + "</pre>"
 
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
@@ -275,7 +281,7 @@ if __name__ == "__main__":
 
     start_scheduler()
 
-    test_message = "[시스템 테스트] Flask 앱이 정상적으로 실행되었으며 텔레그램 메시지도 전송됩니다."
+    test_message = "[시스템 테스트] YOPO 서버가 정상적으로 실행되었으며 텔레그램 메시지도 전송됩니다."
     send_message(test_message)
     print("✅ 테스트 메시지 전송 완료")
     sys.stdout.flush()
