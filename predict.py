@@ -11,6 +11,12 @@ DEVICE = torch.device("cpu")
 STOP_LOSS_PCT = 0.02
 MODEL_DIR = "/persistent/models"
 
+STRATEGY_RATE_LIMITS = {
+    "단기": 0.03,
+    "중기": 0.06,
+    "장기": 0.10
+}
+
 def predict(symbol, strategy):
     try:
         best_window = find_best_window(symbol, strategy)
@@ -59,7 +65,9 @@ def predict(symbol, strategy):
                 "direction": "N/A", "model": "unknown", "confidence": 0.0
             }
 
+        max_rate = STRATEGY_RATE_LIMITS.get(strategy, 0.05)
         results = []
+
         for model_type, model_path in available_models.items():
             try:
                 model = get_model(model_type=model_type, input_size=input_size)
@@ -78,22 +86,25 @@ def predict(symbol, strategy):
                         continue
 
                     direction = "롱" if signal > 0.5 else "숏"
-                    rate = abs(signal - 0.5) * 2
+                    raw_rate = abs(signal - 0.5) * 2
+                    rate = min(raw_rate * max_rate, max_rate)
                     weight = get_model_weight(model_type, strategy)
 
                     fake_y = np.array([1 if signal > 0.5 else 0])
                     fake_p = np.array([signal])
                     try:
                         conf_penalty = log_loss(fake_y, fake_p, labels=[0, 1])
-                        adjusted_confidence = max(0.01, 1 - conf_penalty)
+                        conf_adjusted = max(0.01, 1 - conf_penalty)
                     except:
-                        adjusted_confidence = confidence
+                        conf_adjusted = confidence
 
-                    score = adjusted_confidence * weight * rate
+                    final_confidence = (confidence + conf_adjusted) / 2
+                    score = final_confidence * weight * rate
+
                     results.append({
                         "model": model_type,
                         "direction": direction,
-                        "confidence": adjusted_confidence,
+                        "confidence": final_confidence,
                         "weight": weight,
                         "score": score,
                         "rate": rate
@@ -131,15 +142,26 @@ def predict(symbol, strategy):
         avg_rate = sum(r["rate"] for r in valid_results) / len(valid_results)
         price = features["close"].iloc[-1]
 
+        # Reason 판단
         rsi = features["rsi"].iloc[-1] if "rsi" in features else 50
         macd = features["macd"].iloc[-1] if "macd" in features else 0
         boll = features["bollinger"].iloc[-1] if "bollinger" in features else 0
+
         reason = []
-        if rsi < 30: reason.append("RSI 과매도")
-        elif rsi > 70: reason.append("RSI 과매수")
-        reason.append("MACD 상승 전환" if macd > 0 else "MACD 하락 전환")
-        if boll > 1: reason.append("볼린저 상단 돌파")
-        elif boll < -1: reason.append("볼린저 하단 이탈")
+        if final_direction == "롱":
+            if rsi < 30:
+                reason.append("RSI 과매도")
+            if macd > 0:
+                reason.append("MACD 상승 전환")
+        elif final_direction == "숏":
+            if rsi > 70:
+                reason.append("RSI 과매수")
+            if macd < 0:
+                reason.append("MACD 하락 전환")
+        if boll > 1:
+            reason.append("볼린저 상단 돌파")
+        elif boll < -1:
+            reason.append("볼린저 하단 이탈")
 
         return {
             "symbol": symbol,
