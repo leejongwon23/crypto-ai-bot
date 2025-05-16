@@ -66,7 +66,7 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
     }
     path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json")
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"📝 체크포인트 저장됨: {path}")
 
@@ -92,6 +92,9 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
 
     input_size = X_raw.shape[2]
     val_len = int(len(X_raw) * 0.2)
+    if val_len == 0:
+        print(f"[SKIP] {symbol}-{strategy} 검증셋 부족")
+        return
     val_X_tensor = torch.tensor(X_raw[-val_len:], dtype=torch.float32)
     val_y_tensor = torch.tensor(y_raw[-val_len:], dtype=torch.float32)
 
@@ -104,11 +107,10 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         model.train()
         criterion = nn.BCELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-        dataset = TensorDataset(torch.tensor(X_raw, dtype=torch.float32),
-                                torch.tensor(y_raw, dtype=torch.float32))
-        val_len = int(len(dataset) * 0.2)
+
+        dataset = TensorDataset(torch.tensor(X_raw, dtype=torch.float32), torch.tensor(y_raw, dtype=torch.float32))
         train_len = len(dataset) - val_len
-        train_set, val_set = random_split(dataset, [train_len, val_len])
+        train_set, _ = random_split(dataset, [train_len, val_len])
         train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
 
         for r in range(repeat):
@@ -136,7 +138,8 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
             for epoch in range(epochs):
                 for xb, yb in train_loader:
                     pred, _ = model(xb)
-                    if pred is None: continue
+                    if pred is None:
+                        continue
                     loss = criterion(pred, yb)
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
@@ -145,11 +148,13 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
             with torch.no_grad():
                 out, _ = model(val_X_tensor)
                 y_prob = out.squeeze().numpy()
+                if len(y_prob.shape) == 0:
+                    y_prob = np.array([y_prob])
                 y_pred = (y_prob > 0.5).astype(int)
                 y_true = val_y_tensor.numpy()
                 acc = float(accuracy_score(y_true, y_pred))
                 f1 = float(f1_score(y_true, y_pred))
-                logloss = float(log_loss(y_true, y_prob, labels=[0,1]))
+                logloss = float(log_loss(y_true, y_prob, labels=[0, 1]))
                 score = acc + f1
                 logger.log_training_result(symbol, strategy, model_type, acc, f1, logloss)
                 scores[model_type] = score
@@ -166,18 +171,11 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         torch.save(best_model_obj.state_dict(), model_path)
         print(f"✅ Best 모델 저장됨: {model_path} (score: {scores[best_model_type]:.4f})")
 
-        save_model_metadata(
-            symbol,
-            strategy,
-            best_model_type,
-            best_acc,
-            best_f1,
-            best_loss
-        )
+        save_model_metadata(symbol, strategy, best_model_type, best_acc, best_f1, best_loss)
 
-        compute_X_val = val_X_tensor
-        compute_y_val = val_y_tensor
-        importances = compute_feature_importance(best_model_obj, compute_X_val, compute_y_val, list(df_feat.columns))
+        importances = compute_feature_importance(
+            best_model_obj, val_X_tensor, val_y_tensor, list(df_feat.columns)
+        )
         save_feature_importance(importances, symbol, strategy, best_model_type)
     else:
         print(f"❗ 최종 저장 실패: {symbol}-{strategy} 모든 모델 평가 실패")
@@ -209,5 +207,3 @@ def background_auto_train():
         threading.Thread(target=loop, args=(strategy, interval), daemon=True).start()
 
 background_auto_train()
-
-
