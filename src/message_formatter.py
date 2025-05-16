@@ -12,6 +12,9 @@ def format_message(data):
     rate_pct = data['rate'] * 100
     suffix = "+" if rate_pct > max_rate.get(data['strategy'], 100) else ""
 
+    # ✅ 성공률 포맷 추가 (소수점 2자리)
+    success_rate_pct = data.get("success_rate", 0.5) * 100
+
     return (
         f"[{data['strategy']} 전략] {data['symbol']} {data['direction']} 추천\n"
         f"예측 수익률 구간: {rate_pct:.1f}%{suffix} "
@@ -21,5 +24,6 @@ def format_message(data):
         f"손절가: {stop_loss:.2f} USDT (-2.00%)\n\n"
         f"신호 방향: {'상승' if data['direction'] == '롱' else '하락'}\n"
         f"신뢰도: {data['confidence']*100:.2f}%\n"
+        f"성공률: {success_rate_pct:.2f}%\n"
         f"추천 사유: {data['reason']}"
     )
