@@ -23,6 +23,7 @@ LOG_FILE = os.path.join(LOG_DIR, "train_log.csv")
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
+MESSAGE_LOG = os.path.join(LOG_DIR, "message_log.csv")
 
 def start_scheduler():
     print(">>> start_scheduler() 호출됨")
@@ -64,11 +65,9 @@ def start_scheduler():
     scheduler.add_job(train_short, 'cron', hour='0,3,6,9,12,15,18,21', minute=30)
     scheduler.add_job(train_mid, 'cron', hour='1,7,13,19', minute=30)
     scheduler.add_job(train_long, 'cron', hour='2,14', minute=30)
-
     scheduler.add_job(test_all_predictions, 'cron', minute=10, id='predict_test', replace_existing=True)
 
     scheduler.start()
-
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료")
 sys.stdout.flush()
@@ -124,7 +123,7 @@ def list_model_files():
         files = os.listdir(MODEL_DIR)
         if not files:
             return "models 폴더가 비어 있습니다."
-        return "<pre>" + "\n".join(files) + "</pre>"
+        return "<pre>" + "\\n".join(files) + "</pre>"
     except Exception as e:
         return f"모델 파일 확인 중 오류 발생: {e}", 500
 
@@ -205,6 +204,8 @@ def audit_log_download():
 @app.route("/health-check")
 def health_check():
     results = []
+
+    # 예측 로그 확인
     try:
         if os.path.exists(PREDICTION_LOG):
             df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
@@ -212,8 +213,9 @@ def health_check():
         else:
             results.append("❌ 예측 기록 없음")
     except Exception as e:
-        results.append(f"❌ 예측 기록 확인 실패: {e}")
+        results.append(f"❌ 예측 로그 확인 실패: {e}")
 
+    # 실패 예측 로그 확인
     try:
         if os.path.exists(WRONG_PREDICTIONS) and os.path.getsize(WRONG_PREDICTIONS) > 0:
             df = pd.read_csv(WRONG_PREDICTIONS, encoding="utf-8-sig")
@@ -221,8 +223,9 @@ def health_check():
         else:
             results.append("❌ 실패 예측 기록 없음")
     except Exception as e:
-        results.append(f"❌ 실패 예측 확인 실패: {e}")
+        results.append(f"❌ 실패 로그 확인 실패: {e}")
 
+    # 평가 로그 확인
     try:
         if os.path.exists(AUDIT_LOG):
             df = pd.read_csv(AUDIT_LOG, encoding="utf-8-sig")
@@ -232,6 +235,7 @@ def health_check():
     except Exception as e:
         results.append(f"❌ 평가 로그 확인 실패: {e}")
 
+    # 모델 파일 확인
     try:
         if os.path.exists(MODEL_DIR):
             files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
@@ -242,13 +246,25 @@ def health_check():
         else:
             results.append("❌ 모델 폴더 없음")
     except Exception as e:
-        results.append(f"❌ 모델 파일 확인 실패: {e}")
+        results.append(f"❌ 모델 확인 실패: {e}")
 
+    # 정확도 통계 확인
     try:
         stats = logger.print_prediction_stats()
         results.append("✅ 정확도 통계 OK")
     except Exception as e:
         results.append(f"❌ 정확도 통계 실패: {e}")
+
+    # 메시지 전송 기록 확인
+    try:
+        if os.path.exists(MESSAGE_LOG) and os.path.getsize(MESSAGE_LOG) > 0:
+            df = pd.read_csv(MESSAGE_LOG, encoding="utf-8-sig")
+            recent = df.tail(10)
+            results.append(f"✅ 메시지 전송 기록 OK (최근 {len(recent)}건)")
+        else:
+            results.append("❌ 메시지 전송 기록 없음")
+    except Exception as e:
+        results.append(f"❌ 메시지 로그 확인 실패: {e}")
 
     formatted = "\n".join(results)
     return f"<pre>{formatted}</pre>"
