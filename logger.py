@@ -73,7 +73,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=None, target_pr
         log_audit(symbol, strategy, "예측실패", reason)
 
     fieldnames = list(row.keys())
-
     write_header = not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0
     try:
         with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
@@ -108,6 +107,9 @@ def evaluate_predictions(get_price_fn):
             pred_time = datetime.datetime.fromisoformat(row["timestamp"])
             strategy = row["strategy"]
             direction = row["direction"]
+            model = row.get("model", "unknown")
+            entry_price = float(row.get("entry_price", 0))
+
             config = STRATEGY_EVAL_CONFIG.get(strategy, {"gain_pct": 0.06, "hours": 6})
             eval_hours = config["hours"]
             min_gain = config["gain_pct"]
@@ -118,8 +120,13 @@ def evaluate_predictions(get_price_fn):
                 updated_rows.append(row)
                 continue
 
+            if direction not in ["롱", "숏"] or model == "unknown" or entry_price == 0:
+                log_audit(row["symbol"], strategy, "실패", "평가 불가: 예측 데이터 미비")
+                row["status"] = "fail"
+                updated_rows.append(row)
+                continue
+
             symbol = row["symbol"]
-            entry_price = float(row["entry_price"])
             target_price = float(row["target_price"])
             current_price = get_price_fn(symbol)
 
@@ -129,15 +136,10 @@ def evaluate_predictions(get_price_fn):
                 continue
 
             gain = (current_price - entry_price) / entry_price
-            success = False
-
-            if direction == "롱":
-                success = gain >= min_gain
-            elif direction == "숏":
-                success = -gain >= min_gain
+            success = gain >= min_gain if direction == "롱" else -gain >= min_gain
 
             row["status"] = "success" if success else "fail"
-            update_model_success(symbol, strategy, row.get("model", "unknown"), success)
+            update_model_success(symbol, strategy, model, success)
 
             if not success:
                 log_audit(symbol, strategy, "실패", f"수익률 미달: {gain:.4f}")
@@ -173,7 +175,7 @@ def get_actual_success_rate(strategy, threshold=0.7):
         df = df[df["strategy"] == strategy]
         df = df[df["confidence"] >= threshold]
         if len(df) == 0:
-            return 0.0  # 기존은 1.0이었음 → 오히려 잘못된 인식
+            return 0.0
         evaluated = df[df["status"].isin(["success", "fail"])]
         if len(evaluated) == 0:
             return 0.0
