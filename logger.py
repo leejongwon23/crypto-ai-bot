@@ -98,15 +98,19 @@ def evaluate_predictions(get_price_fn):
     if not os.path.exists(PREDICTION_LOG):
         return
 
-    with open(PREDICTION_LOG, "r", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
+    try:
+        with open(PREDICTION_LOG, "r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+    except Exception as e:
+        print(f"[경고] 평가 로그 읽기 실패: {e}")
+        return
 
     now = datetime.datetime.utcnow()
     updated_rows = []
 
     for row in rows:
-        if row["status"] != "pending":
+        if row.get("status") != "pending":
             updated_rows.append(row)
             continue
 
@@ -161,10 +165,14 @@ def evaluate_predictions(get_price_fn):
 
         updated_rows.append(row)
 
-    with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=updated_rows[0].keys())
-        writer.writeheader()
-        writer.writerows(updated_rows)
+    if updated_rows:
+        try:
+            with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=updated_rows[0].keys())
+                writer.writeheader()
+                writer.writerows(updated_rows)
+        except Exception as e:
+            print(f"[경고] 예측 로그 저장 실패: {e}")
 
 def get_actual_success_rate(strategy, threshold=0.7):
     try:
@@ -224,9 +232,12 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     }
 
     df = pd.DataFrame([log_entry])
-    if os.path.exists(LOG_FILE):
-        df.to_csv(LOG_FILE, mode='a', header=False, index=False, encoding="utf-8-sig")
+    try:
+        if os.path.exists(LOG_FILE):
+            df.to_csv(LOG_FILE, mode='a', header=False, index=False, encoding="utf-8-sig")
+        else:
+            df.to_csv(LOG_FILE, index=False, encoding="utf-8-sig")
+    except Exception as e:
+        print(f"[오류] 학습 로그 저장 실패: {e}")
     else:
-        df.to_csv(LOG_FILE, index=False, encoding="utf-8-sig")
-
-    print(f"[LOG] Training result logged for {symbol} - {strategy} - {model_name}")
+        print(f"[LOG] Training result logged for {symbol} - {strategy} - {model_name}")
