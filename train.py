@@ -60,9 +60,9 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
         "symbol": symbol,
         "strategy": strategy,
         "model": model_type,
-        "accuracy": round(acc, 4),
-        "f1_score": round(f1, 4),
-        "loss": round(loss, 6),
+        "accuracy": float(round(acc, 4)),
+        "f1_score": float(round(f1, 4)),
+        "loss": float(round(loss, 6)),
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
     }
     path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json")
@@ -139,17 +139,16 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
                     if pred is None: continue
                     loss = criterion(pred, yb)
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
-
-        model.eval()
+                            model.eval()
         try:
             with torch.no_grad():
                 out, _ = model(val_X_tensor)
                 y_prob = out.squeeze().numpy()
                 y_pred = (y_prob > 0.5).astype(int)
                 y_true = val_y_tensor.numpy()
-                acc = accuracy_score(y_true, y_pred)
-                f1 = f1_score(y_true, y_pred)
-                logloss = log_loss(y_true, y_prob, labels=[0,1])
+                acc = float(accuracy_score(y_true, y_pred))
+                f1 = float(f1_score(y_true, y_pred))
+                logloss = float(log_loss(y_true, y_prob, labels=[0,1]))
                 score = acc + f1
                 logger.log_training_result(symbol, strategy, model_type, acc, f1, logloss)
                 scores[model_type] = score
@@ -166,14 +165,13 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         torch.save(best_model_obj.state_dict(), model_path)
         print(f"✅ Best 모델 저장됨: {model_path} (score: {scores[best_model_type]:.4f})")
 
-        # ✅ float 변환 추가 (직렬화 오류 방지)
         save_model_metadata(
             symbol,
             strategy,
             best_model_type,
-            float(best_acc),
-            float(best_f1),
-            float(best_loss)
+            best_acc,
+            best_f1,
+            best_loss
         )
 
         compute_X_val = val_X_tensor
@@ -210,3 +208,5 @@ def background_auto_train():
         threading.Thread(target=loop, args=(strategy, interval), daemon=True).start()
 
 background_auto_train()
+
+
