@@ -54,7 +54,7 @@ def main():
                 result = predict(symbol, strategy)
                 print(f"[예측] {symbol}-{strategy} → {result}")
 
-                # 모든 예측 결과를 무조건 로그에 기록
+                # ✅ 예측 결과는 성공/실패 무관하게 모두 기록
                 log_prediction(
                     symbol=result.get("symbol", symbol),
                     strategy=result.get("strategy", strategy),
@@ -90,7 +90,7 @@ def main():
                 )
                 log_audit(symbol, strategy, None, f"예외 발생: {e}")
 
-    # --- 필터 ---
+    # --- 필터 단계 ---
     candidates = [r for r in all_results if r.get("confidence", 0) >= MIN_CONFIDENCE]
     candidates = sorted(candidates, key=lambda x: x["confidence"], reverse=True)[:MAX_TOP_CONFIDENCE]
 
