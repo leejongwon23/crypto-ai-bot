@@ -18,21 +18,28 @@ def predict(symbol, strategy):
             return None
 
         features = compute_features(df)
-        if len(features) < best_window + 1:
+        if features is None or len(features) < best_window + 1:
+            print(f"[SKIP] {symbol}-{strategy} → feature 부족 ({len(features)})")
             return None
 
-        X = features.iloc[-best_window:].values
-        X = np.expand_dims(X, axis=0)
+        if features.shape[0] < best_window:
+            print(f"[SKIP] {symbol}-{strategy} → 시퀀스 길이 부족 ({features.shape[0]})")
+            return None
+
+        try:
+            X = features.iloc[-best_window:].values
+            X = np.expand_dims(X, axis=0)
+        except Exception as e:
+            print(f"[SKIP] {symbol}-{strategy} → 시퀀스 변환 실패: {e}")
+            return None
+
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
         input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
 
-        # 모델 경로 구성
         model_paths = {
             mt: os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{mt}.pt")
             for mt in ["lstm", "cnn_lstm", "transformer"]
         }
-
-        # 존재하는 모델만 필터링
         available_models = {
             mt: path for mt, path in model_paths.items()
             if os.path.exists(path)
@@ -57,15 +64,13 @@ def predict(symbol, strategy):
                     confidence = confidence.squeeze().item()
                     direction = "롱" if signal > 0.5 else "숏"
                     weight = get_model_weight(model_type, strategy)
-                    score = confidence * weight
                     rate = abs(signal - 0.5) * 2
-
                     results.append({
                         "model": model_type,
                         "direction": direction,
                         "confidence": confidence,
                         "weight": weight,
-                        "score": score,
+                        "score": confidence * weight,
                         "rate": rate
                     })
             except Exception as e:
@@ -76,7 +81,6 @@ def predict(symbol, strategy):
             print(f"[SKIP] {symbol}-{strategy} → 유효 예측 부족")
             return None
 
-        # 다수결 방향
         dir_count = {"롱": 0, "숏": 0}
         for r in results:
             dir_count[r["direction"]] += 1
