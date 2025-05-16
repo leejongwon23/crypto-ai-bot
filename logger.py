@@ -74,7 +74,8 @@ def log_prediction(symbol, strategy, direction=None, entry_price=None, target_pr
 
     fieldnames = list(row.keys())
     file_exists = os.path.isfile(PREDICTION_LOG)
-    write_header = True
+    write_header = not file_exists
+
     if file_exists:
         try:
             with open(PREDICTION_LOG, "r", encoding="utf-8-sig") as f:
@@ -84,11 +85,14 @@ def log_prediction(symbol, strategy, direction=None, entry_price=None, target_pr
         except:
             pass
 
-    with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        if write_header:
-            writer.writeheader()
-        writer.writerow(row)
+    try:
+        with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+    except Exception as e:
+        print(f"[오류] 예측 로그 기록 실패: {e}")
 
 def evaluate_predictions(get_price_fn):
     if not os.path.exists(PREDICTION_LOG):
