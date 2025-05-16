@@ -19,18 +19,13 @@ def predict(symbol, strategy):
 
         features = compute_features(df)
         if features is None or len(features) < best_window + 1:
-            print(f"[SKIP] {symbol}-{strategy} → feature 부족 ({len(features)})")
-            return None
-
-        if features.shape[0] < best_window:
-            print(f"[SKIP] {symbol}-{strategy} → 시퀀스 길이 부족 ({features.shape[0]})")
             return None
 
         try:
             X = features.iloc[-best_window:].values
             X = np.expand_dims(X, axis=0)
         except Exception as e:
-            print(f"[SKIP] {symbol}-{strategy} → 시퀀스 변환 실패: {e}")
+            print(f"[SKIP] {symbol}-{strategy} → 시퀀스 오류: {e}")
             return None
 
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
@@ -40,13 +35,14 @@ def predict(symbol, strategy):
             mt: os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{mt}.pt")
             for mt in ["lstm", "cnn_lstm", "transformer"]
         }
+
         available_models = {
             mt: path for mt, path in model_paths.items()
             if os.path.exists(path)
         }
 
-        if len(available_models) < 2:
-            print(f"[SKIP] {symbol}-{strategy} → 사용 가능한 모델 부족 ({len(available_models)})")
+        if len(available_models) == 0:
+            print(f"[SKIP] {symbol}-{strategy} → 모델 없음")
             return None
 
         results = []
@@ -64,32 +60,34 @@ def predict(symbol, strategy):
                     confidence = confidence.squeeze().item()
                     direction = "롱" if signal > 0.5 else "숏"
                     weight = get_model_weight(model_type, strategy)
+                    score = confidence * weight
                     rate = abs(signal - 0.5) * 2
                     results.append({
                         "model": model_type,
                         "direction": direction,
                         "confidence": confidence,
                         "weight": weight,
-                        "score": confidence * weight,
+                        "score": score,
                         "rate": rate
                     })
             except Exception as e:
-                print(f"[ERROR] {symbol}-{strategy}-{model_type} 로딩 실패: {e}")
+                print(f"[ERROR] {symbol}-{strategy}-{model_type} → 예측 실패: {e}")
                 continue
 
-        if len(results) < 2:
-            print(f"[SKIP] {symbol}-{strategy} → 유효 예측 부족")
+        if len(results) == 0:
+            print(f"[SKIP] {symbol}-{strategy} → 모든 모델 예측 실패")
             return None
 
         dir_count = {"롱": 0, "숏": 0}
         for r in results:
             dir_count[r["direction"]] += 1
 
-        final_direction = None
         if dir_count["롱"] >= 2:
             final_direction = "롱"
         elif dir_count["숏"] >= 2:
             final_direction = "숏"
+        elif len(results) == 1:
+            final_direction = results[0]["direction"]
         else:
             print(f"[SKIP] {symbol}-{strategy} → 방향 불일치")
             return None
