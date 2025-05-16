@@ -31,6 +31,18 @@ def get_model_success_rate(symbol, strategy, model, min_total=10):
         return 0.5
     return record["success"] / total
 
+# ✅ 5단계: 전체 모델/전략별 성공률 요약 함수
+def summarize_model_stats():
+    if not model_success_tracker:
+        return "모델 성공률 데이터 없음"
+
+    summary = ["📊 모델별 성공률 요약:"]
+    for (symbol, strategy, model), result in model_success_tracker.items():
+        total = result["success"] + result["fail"]
+        rate = (result["success"] / total) * 100 if total > 0 else 0
+        summary.append(f"- {symbol} | {strategy} | {model} → 성공률: {rate:.2f}% ({result['success']}/{total})")
+    return "\n".join(summary)
+
 STRATEGY_EVAL_CONFIG = {
     "단기": {"gain_pct": 0.03, "hours": 4},
     "중기": {"gain_pct": 0.06, "hours": 24},
