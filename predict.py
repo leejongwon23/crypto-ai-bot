@@ -22,13 +22,15 @@ def predict(symbol, strategy):
         if features is None or len(features) < best_window + 1:
             return {"symbol": symbol, "strategy": strategy, "success": False, "reason": "feature 부족"}
 
-        X_raw = features.iloc[-best_window:].values
-        if X_raw.shape[0] != best_window:
-            return {"symbol": symbol, "strategy": strategy, "success": False, "reason": "시퀀스 부족"}
-
-        X = np.expand_dims(X_raw, axis=0)  # (1, window, features)
-        if len(X.shape) != 3:
-            return {"symbol": symbol, "strategy": strategy, "success": False, "reason": "시퀀스 형상 오류"}
+        try:
+            X_raw = features.iloc[-best_window:].values
+            if X_raw.shape[0] != best_window:
+                raise ValueError("시퀀스 길이 부족")
+            X = np.expand_dims(X_raw, axis=0)
+            if len(X.shape) != 3:
+                raise ValueError("시퀀스 형상 오류")
+        except Exception as e:
+            return {"symbol": symbol, "strategy": strategy, "success": False, "reason": f"입력 시퀀스 오류: {e}"}
 
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
         input_size = X.shape[2]
@@ -54,7 +56,8 @@ def predict(symbol, strategy):
                         continue
                     signal = signal.squeeze().item()
                     confidence = confidence.squeeze().item()
-
+                    if not (0.0 <= signal <= 1.0):
+                        continue
                     if 0.49 <= signal <= 0.51:
                         continue
 
