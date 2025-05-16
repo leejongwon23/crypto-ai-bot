@@ -7,18 +7,17 @@ from logger import log_prediction, evaluate_predictions, get_model_success_rate
 from data.utils import SYMBOLS, get_realtime_prices
 from src.message_formatter import format_message
 
-# --- 필터 설정 ---
-MIN_CONFIDENCE = 0.60
-MAX_TOP_CONFIDENCE = 100
+# --- 필터 기준 설정 ---
+MIN_CONFIDENCE = 0.70
+MIN_CONFIDENCE_OVERRIDE = 0.85
 MIN_GAIN_BY_STRATEGY = {
-    "단기": 0.025,
-    "중기": 0.05,
-    "장기": 0.08
+    "단기": 0.03,
+    "중기": 0.06,
+    "장기": 0.10
 }
-TOP_PER_STRATEGY = 2
-FINAL_SEND_LIMIT = 10
+FINAL_SEND_LIMIT = 5  # 최종 메시지 최대 개수
 
-# --- 운영 추적 로그 경로 ---
+# --- 로그 경로 설정 ---
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
 
@@ -54,11 +53,9 @@ def main():
                 result = predict(symbol, strategy)
                 print(f"[예측] {symbol}-{strategy} → {result}")
 
-                # 결과가 None이거나 dict가 아닌 경우 강제 실패 처리
                 if not isinstance(result, dict):
                     raise ValueError("predict() 반환값이 dict가 아님")
 
-                # ✅ 예측 결과는 성공/실패 무관하게 모두 기록
                 log_prediction(
                     symbol=result.get("symbol", symbol),
                     strategy=result.get("strategy", strategy),
@@ -100,32 +97,42 @@ def main():
                 except Exception as la:
                     print(f"[치명적] log_audit 실패: {la}")
 
-    # --- 필터 단계 ---
-    candidates = [r for r in all_results if r.get("confidence", 0) >= MIN_CONFIDENCE]
-    candidates = sorted(candidates, key=lambda x: x["confidence"], reverse=True)[:MAX_TOP_CONFIDENCE]
+    # --- 최상필터 구조 적용 ---
+    filtered = []
+    for r in all_results:
+        conf = r.get("confidence", 0)
+        model = r.get("model", "")
+        direction = r.get("direction")
+        strategy = r.get("strategy")
+        rate = r.get("rate", 0)
 
-    strategy_grouped = {}
-    for r in candidates:
-        strategy = r["strategy"]
-        if r["rate"] < MIN_GAIN_BY_STRATEGY.get(strategy, 0.03):
+        if conf < MIN_CONFIDENCE:
             continue
-        strategy_grouped.setdefault(strategy, []).append(r)
 
-    filtered_results = []
-    for strategy, items in strategy_grouped.items():
-        sorted_items = sorted(items, key=lambda x: x["rate"], reverse=True)[:TOP_PER_STRATEGY]
-        filtered_results.extend(sorted_items)
+        if rate < MIN_GAIN_BY_STRATEGY.get(strategy, 0.03):
+            continue
 
-    for r in filtered_results:
-        r["success_rate"] = get_model_success_rate(r["symbol"], r["strategy"], r.get("model", "unknown"))
+        # 모델 방향 2개 이상 일치 or confidence ≥ 0.85 우선 통과
+        if model == "ensemble":
+            filtered.append(r)
+        elif conf >= MIN_CONFIDENCE_OVERRIDE:
+            filtered.append(r)
 
-    final = sorted(filtered_results, key=lambda x: (-x["rate"], -x["success_rate"]))[:FINAL_SEND_LIMIT]
+    # 점수 계산
+    for r in filtered:
+        success_rate = get_model_success_rate(r["symbol"], r["strategy"], r.get("model", "unknown"))
+        r["success_rate"] = success_rate
+        score = success_rate * r["rate"] * r["confidence"]
+        r["score"] = score
+
+    # 점수 기준 정렬 후 Top 5 추출 (5개 미만이면 전부)
+    final = sorted(filtered, key=lambda x: -x["score"])[:FINAL_SEND_LIMIT]
 
     if final:
         for res in final:
             msg = format_message(res)
             send_message(msg)
-            print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%}")
+            print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%} | 성공률: {res['success_rate']:.2%}")
     else:
         print("⚠️ 조건 만족 결과 없음 → 메시지 전송 생략")
 
