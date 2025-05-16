@@ -22,7 +22,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 LOG_FILE = os.path.join(LOG_DIR, "train_log.csv")
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
-AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")  # ✅ 추가된 평가 로그 경로
+AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
 
 def start_scheduler():
     print(">>> start_scheduler() 호출됨")
@@ -91,7 +91,7 @@ def train_now():
     try:
         print("[TRAIN-NOW] 전체 학습 즉시 실행 시작")
         sys.stdout.flush()
-        threading.Thread(target=train.auto_train_all, daemon=True).start()
+        threading.Thread(target=train.train_all_models, daemon=True).start()
         return "✅ 모든 코인 + 전략 학습이 지금 바로 시작됐습니다!"
     except Exception as e:
         return f"학습 시작 실패: {e}", 500
@@ -180,7 +180,6 @@ def reset_all():
     except Exception as e:
         return f"삭제 실패: {e}", 500
 
-# ✅ 추가된 라우트 1: 최근 평가 결과 30개 JSON으로 반환
 @app.route("/audit-log")
 def audit_log():
     try:
@@ -192,26 +191,7 @@ def audit_log():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# ✅ 추가된 라우트 2: 전체 평가 로그 다운로드용 CSV 텍스트 반환
 @app.route("/audit-log-download")
 def audit_log_download():
     try:
-        if not os.path.exists(AUDIT_LOG):
-            return "평가 로그가 없습니다.", 404
-        return send_file(AUDIT_LOG, mimetype="text/csv", as_attachment=True, download_name="evaluation_audit.csv")
-    except Exception as e:
-        return f"다운로드 실패: {e}", 500
-
-if __name__ == "__main__":
-    print(">>> __main__ 진입, 서버 실행 준비")
-    sys.stdout.flush()
-
-    start_scheduler()
-
-    test_message = "[시스템 테스트] Flask 앱이 정상적으로 실행되었으며 텔레그램 메시지도 전송됩니다."
-    send_message(test_message)
-    print("✅ 테스트 메시지 전송 완료")
-    sys.stdout.flush()
-
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+        if not os.path.exists(AUDIT_LOG_
