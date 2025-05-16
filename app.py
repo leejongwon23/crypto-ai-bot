@@ -12,7 +12,7 @@ import sys
 from telegram_bot import send_message
 import logger
 from predict_test import test_all_predictions
-from data.utils import get_latest_price  # ✅ 평가에 사용될 가격 함수 import
+from data.utils import get_latest_price
 
 PERSIST_DIR = "/persistent"
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
@@ -201,6 +201,57 @@ def audit_log_download():
         return send_file(AUDIT_LOG, mimetype="text/csv", as_attachment=True, download_name="evaluation_audit.csv")
     except Exception as e:
         return f"다운로드 실패: {e}", 500
+
+@app.route("/health-check")
+def health_check():
+    results = []
+    try:
+        if os.path.exists(PREDICTION_LOG):
+            df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+            results.append(f"✅ 예측 기록 OK ({len(df)}건)")
+        else:
+            results.append("❌ 예측 기록 없음")
+    except Exception as e:
+        results.append(f"❌ 예측 기록 확인 실패: {e}")
+
+    try:
+        if os.path.exists(WRONG_PREDICTIONS) and os.path.getsize(WRONG_PREDICTIONS) > 0:
+            df = pd.read_csv(WRONG_PREDICTIONS, encoding="utf-8-sig")
+            results.append(f"✅ 실패 예측 기록 OK ({len(df)}건)")
+        else:
+            results.append("❌ 실패 예측 기록 없음")
+    except Exception as e:
+        results.append(f"❌ 실패 예측 확인 실패: {e}")
+
+    try:
+        if os.path.exists(AUDIT_LOG):
+            df = pd.read_csv(AUDIT_LOG, encoding="utf-8-sig")
+            results.append(f"✅ 평가 기록 OK ({len(df)}건)")
+        else:
+            results.append("❌ 평가 기록 없음")
+    except Exception as e:
+        results.append(f"❌ 평가 로그 확인 실패: {e}")
+
+    try:
+        if os.path.exists(MODEL_DIR):
+            files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
+            if files:
+                results.append(f"✅ 모델 파일 OK ({len(files)}개)")
+            else:
+                results.append("❌ 모델 파일 없음")
+        else:
+            results.append("❌ 모델 폴더 없음")
+    except Exception as e:
+        results.append(f"❌ 모델 파일 확인 실패: {e}")
+
+    try:
+        stats = logger.print_prediction_stats()
+        results.append("✅ 정확도 통계 OK")
+    except Exception as e:
+        results.append(f"❌ 정확도 통계 실패: {e}")
+
+    formatted = "\n".join(results)
+    return f"<pre>{formatted}</pre>"
 
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
