@@ -8,7 +8,7 @@ PERSIST_DIR = "/persistent"
 IMPORTANCE_DIR = os.path.join(PERSIST_DIR, "importances")
 os.makedirs(IMPORTANCE_DIR, exist_ok=True)
 
-# --- 중요도 분석 (모델 출력이 튜플인지 안전 체크 포함)
+# --- 중요도 분석 (기본 모델용)
 def compute_feature_importance(model, X_val, y_val, feature_names):
     model.eval()
 
@@ -34,7 +34,7 @@ def compute_feature_importance(model, X_val, y_val, feature_names):
 
     return dict(zip(feature_names, importances))
 
-# --- CNN_LSTM & Transformer용 permutation 중요도 (예외 처리 포함)
+# --- CNN_LSTM & Transformer용 permutation 중요도
 def compute_permutation_importance(model, X_val, y_val, feature_names):
     model.eval()
 
@@ -61,18 +61,24 @@ def compute_permutation_importance(model, X_val, y_val, feature_names):
 
     return dict(zip(feature_names, importances))
 
+# --- 중요도 저장 (.json + .csv)
 def save_feature_importance(importances, symbol, strategy, model_type):
-    fname = f"{symbol}_{strategy}_{model_type}_importance.json"
-    path = os.path.join(IMPORTANCE_DIR, fname)
-    with open(path, "w") as f:
-        json.dump(importances, f, indent=2)
-    print(f"✅ 중요도 저장됨: {path}")
+    fname_json = f"{symbol}_{strategy}_{model_type}_importance.json"
+    fname_csv = f"{symbol}_{strategy}_{model_type}_importance.csv"
+    path_json = os.path.join(IMPORTANCE_DIR, fname_json)
+    path_csv = os.path.join(IMPORTANCE_DIR, fname_csv)
 
-# ✅ 중요도 기반 feature 제거 함수
+    # 저장
+    with open(path_json, "w") as f:
+        json.dump(importances, f, indent=2)
+
+    df = pd.DataFrame(importances.items(), columns=["feature", "importance"]).sort_values(by="importance", ascending=False)
+    df.to_csv(path_csv, index=False, encoding="utf-8-sig")
+
+    print(f"✅ 중요도 저장 완료: {path_json}, {path_csv}")
+
+# --- 중요도 기반 feature 제거
 def drop_low_importance_features(df: pd.DataFrame, importances: dict, threshold: float = 0.05) -> pd.DataFrame:
-    """
-    중요도가 낮은 feature들을 제거한 새로운 DataFrame 반환
-    """
     drop_cols = [col for col, imp in importances.items() if imp < threshold]
     remaining_cols = [col for col in df.columns if col not in drop_cols]
     if not remaining_cols:
@@ -80,3 +86,11 @@ def drop_low_importance_features(df: pd.DataFrame, importances: dict, threshold:
         return df
     print(f"🧹 제거된 feature 수: {len(drop_cols)} → {drop_cols}")
     return df[remaining_cols]
+
+# --- 중요도 시각화용: 상위 N개만 반환
+def get_top_features(importances: dict, top_n: int = 10) -> pd.DataFrame:
+    if not importances:
+        return pd.DataFrame(columns=["feature", "importance"])
+    df = pd.DataFrame(importances.items(), columns=["feature", "importance"])
+    df_sorted = df.sort_values(by="importance", ascending=False).head(top_n)
+    return df_sorted
