@@ -11,9 +11,8 @@ import traceback
 import sys
 from telegram_bot import send_message
 import logger
-from predict_test import test_all_predictions  # ✅ 예측 점검 루틴 import 추가
+from predict_test import test_all_predictions
 
-# ✅ 경로 설정
 PERSIST_DIR = "/persistent"
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
 LOG_DIR = os.path.join(PERSIST_DIR, "logs")
@@ -52,8 +51,8 @@ def start_scheduler():
         threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start()
 
     scheduler.add_job(train_short, 'cron', hour='0,3,6,9,12,15,18,21', minute=30)
-    scheduler.add_job(train_mid,   'cron', hour='1,7,13,19', minute=30)
-    scheduler.add_job(train_long,  'cron', hour='2,14', minute=30)
+    scheduler.add_job(train_mid, 'cron', hour='1,7,13,19', minute=30)
+    scheduler.add_job(train_long, 'cron', hour='2,14', minute=30)
 
     scheduler.add_job(test_all_predictions, 'cron', minute=10, id='predict_test', replace_existing=True)
 
@@ -105,16 +104,6 @@ def train_log():
             return "<pre>" + f.read() + "</pre>"
     except Exception as e:
         return f"로그 파일을 읽을 수 없습니다: {e}", 500
-
-@app.route("/write-test")
-def write_test():
-    try:
-        path = os.path.join(PERSIST_DIR, "write_test.txt")
-        with open(path, "w") as f:
-            f.write(f"[{datetime.datetime.utcnow()}] ✅ 파일 저장 테스트 성공\n")
-        return f"파일 생성 성공: {path}"
-    except Exception as e:
-        return f"파일 생성 실패: {e}", 500
 
 @app.route("/models")
 def list_model_files():
@@ -194,4 +183,22 @@ def audit_log():
 @app.route("/audit-log-download")
 def audit_log_download():
     try:
-        if not os.path.exists(AUDIT_LOG_
+        if not os.path.exists(AUDIT_LOG):
+            return "평가 로그가 없습니다.", 404
+        return send_file(AUDIT_LOG, mimetype="text/csv", as_attachment=True, download_name="evaluation_audit.csv")
+    except Exception as e:
+        return f"다운로드 실패: {e}", 500
+
+if __name__ == "__main__":
+    print(">>> __main__ 진입, 서버 실행 준비")
+    sys.stdout.flush()
+
+    start_scheduler()
+
+    test_message = "[시스템 테스트] Flask 앱이 정상적으로 실행되었으며 텔레그램 메시지도 전송됩니다."
+    send_message(test_message)
+    print("✅ 테스트 메시지 전송 완료")
+    sys.stdout.flush()
+
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
