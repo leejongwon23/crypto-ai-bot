@@ -54,35 +54,25 @@ def main():
                 result = predict(symbol, strategy)
                 print(f"[예측] {symbol}-{strategy} → {result}")
 
-                if result is None or not result.get("success", False):
-                    log_prediction(
-                        symbol=symbol,
-                        strategy=strategy,
-                        direction="예측실패",
-                        entry_price=0,
-                        target_price=0,
-                        timestamp=datetime.datetime.utcnow().isoformat(),
-                        confidence=0.0,
-                        model="unknown",
-                        success=False,
-                        reason=result["reason"] if result and "reason" in result else "예측 실패"
-                    )
-                    log_audit(symbol, strategy, result, "예측 실패")
-                    continue
-
+                # 모든 예측 결과를 무조건 로그에 기록
                 log_prediction(
-                    symbol=result["symbol"],
-                    strategy=result["strategy"],
-                    direction=result["direction"],
-                    entry_price=result["price"],
-                    target_price=result["target"],
+                    symbol=result.get("symbol", symbol),
+                    strategy=result.get("strategy", strategy),
+                    direction=result.get("direction", "예측실패"),
+                    entry_price=result.get("price", 0),
+                    target_price=result.get("target", 0),
                     timestamp=datetime.datetime.utcnow().isoformat(),
-                    confidence=result["confidence"],
+                    confidence=result.get("confidence", 0.0),
                     model=result.get("model", "unknown"),
-                    success=True
+                    success=result.get("success", False),
+                    reason=result.get("reason", "예측 실패")
                 )
-                log_audit(symbol, strategy, result, "예측+기록 완료")
-                all_results.append(result)
+
+                status_msg = "예측 성공" if result.get("success") else "예측 실패"
+                log_audit(symbol, strategy, result, status_msg)
+
+                if result.get("success"):
+                    all_results.append(result)
 
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
