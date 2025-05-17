@@ -109,9 +109,9 @@ def evaluate_predictions(get_price_fn):
             direction = row["direction"]
             model = row.get("model", "unknown")
             entry_price = float(row.get("entry_price", 0))
+            rate = float(row.get("rate", 0))  # ✅ 예측된 수익률 기준
             symbol = row["symbol"]
             eval_hours = STRATEGY_HOURS.get(strategy, 6)
-            min_gain = get_min_gain(symbol, strategy)
             hours_passed = (now - pred_time).total_seconds() / 3600
 
             if hours_passed > eval_hours + EVAL_EXPIRY_BUFFER:
@@ -131,7 +131,6 @@ def evaluate_predictions(get_price_fn):
                 updated_rows.append(row)
                 continue
 
-            # ✅ 6단계: 모델 파일 존재 여부 확인
             model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model}.pt")
             if not os.path.exists(model_path):
                 row["status"] = "invalid_model"
@@ -146,12 +145,12 @@ def evaluate_predictions(get_price_fn):
                 continue
 
             gain = (current_price - entry_price) / entry_price
-            success = gain >= min_gain if direction == "롱" else -gain >= min_gain
+            success = gain >= rate if direction == "롱" else -gain >= rate
             row["status"] = "success" if success else "fail"
             update_model_success(symbol, strategy, model, success)
 
             if not success:
-                log_audit(symbol, strategy, "실패", f"수익률 미달: {gain:.4f}")
+                log_audit(symbol, strategy, "실패", f"수익률 미달: {gain:.4f} < 예측 {rate:.4f}")
                 write_header = not os.path.exists(WRONG_PREDICTIONS)
                 with open(WRONG_PREDICTIONS, "a", newline="", encoding="utf-8-sig") as wf:
                     writer = csv.writer(wf)
@@ -162,7 +161,7 @@ def evaluate_predictions(get_price_fn):
                         entry_price, row["target_price"], current_price, gain
                     ])
             else:
-                log_audit(symbol, strategy, "성공", f"수익률 달성: {gain:.4f}")
+                log_audit(symbol, strategy, "성공", f"수익률 달성: {gain:.4f} >= 예측 {rate:.4f}")
         except Exception as e:
             log_audit(row.get("symbol", "?"), row.get("strategy", "?"), "실패", f"예외: {e}")
         updated_rows.append(row)
