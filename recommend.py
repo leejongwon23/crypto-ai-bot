@@ -5,7 +5,7 @@ import threading
 from telegram_bot import send_message
 from predict import predict
 from logger import log_prediction, evaluate_predictions, get_model_success_rate
-from data.utils import SYMBOLS, get_realtime_prices
+from data.utils import SYMBOLS, get_realtime_prices, get_min_gain
 from src.message_formatter import format_message
 import train
 
@@ -13,12 +13,7 @@ import train
 MIN_CONFIDENCE = 0.70
 MIN_CONFIDENCE_OVERRIDE = 0.85
 SUCCESS_RATE_THRESHOLD = 0.70
-MIN_GAIN_BY_STRATEGY = {
-    "단기": 0.01,
-    "중기": 0.03,
-    "장기": 0.05
-}
-FINAL_SEND_LIMIT = 5
+FINAL_SEND_LIMIT = 5  # 최대 전송 개수
 
 # --- 로그 경로 설정 ---
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
@@ -111,15 +106,19 @@ def main():
         model = r.get("model", "")
         strategy = r.get("strategy")
         rate = r.get("rate", 0)
+        symbol = r.get("symbol")
 
-        if rate < MIN_GAIN_BY_STRATEGY.get(strategy, 0.01):
+        min_gain = get_min_gain(symbol, strategy)
+        if rate < min_gain:
             continue
+
         if not (model == "ensemble" or conf >= MIN_CONFIDENCE_OVERRIDE):
             continue
+
         if conf < MIN_CONFIDENCE:
             continue
 
-        success_rate = get_model_success_rate(r["symbol"], strategy, model)
+        success_rate = get_model_success_rate(symbol, strategy, model)
         if success_rate < SUCCESS_RATE_THRESHOLD:
             continue
 
@@ -141,7 +140,7 @@ def main():
         for res in final:
             msg = format_message(res)
             send_message(msg)
-            print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%} | 성공률: {res['success_rate']:.2%}")
+            print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%} | 성공률: {res['success_rate']:.2f}")
     else:
         print("⚠️ 조건 만족 결과 없음 → 메시지 전송 생략")
 
