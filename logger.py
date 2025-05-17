@@ -75,7 +75,8 @@ def log_prediction(symbol, strategy, direction=None, entry_price=None, target_pr
         "target_price": target_price or 0,
         "confidence": confidence or 0,
         "model": model or "unknown",
-        "status": "pending" if success else "fail"
+        "status": "pending" if success else "fail",
+        "reason": reason or ""
     }
     if not success:
         log_audit(symbol, strategy, "예측실패", reason)
@@ -116,41 +117,50 @@ def evaluate_predictions(get_price_fn):
 
             if hours_passed > eval_hours + EVAL_EXPIRY_BUFFER:
                 row["status"] = "skipped"
-                log_audit(symbol, strategy, "스킵", f"평가 유효시간 초과: {hours_passed:.2f}h")
+                row["reason"] = f"평가 유효시간 초과: {hours_passed:.2f}h"
+                log_audit(symbol, strategy, "스킵", row["reason"])
                 updated_rows.append(row)
                 continue
 
             if hours_passed < eval_hours:
-                log_audit(symbol, strategy, "대기중", f"{hours_passed:.2f}h < {eval_hours}h")
+                row["reason"] = f"{hours_passed:.2f}h < {eval_hours}h"
+                log_audit(symbol, strategy, "대기중", row["reason"])
                 updated_rows.append(row)
                 continue
 
             if direction not in ["롱", "숏"] or model == "unknown" or entry_price == 0:
                 row["status"] = "fail"
-                log_audit(symbol, strategy, "실패", "평가 불가: 데이터 부족")
+                row["reason"] = "평가 불가: 데이터 부족"
+                log_audit(symbol, strategy, "실패", row["reason"])
                 updated_rows.append(row)
                 continue
 
             model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model}.pt")
             if not os.path.exists(model_path):
                 row["status"] = "invalid_model"
-                log_audit(symbol, strategy, "실패", f"모델 파일 없음: {model_path}")
+                row["reason"] = f"모델 파일 없음: {model_path}"
+                log_audit(symbol, strategy, "실패", row["reason"])
                 updated_rows.append(row)
                 continue
 
             current_price = get_price_fn(symbol)
             if current_price is None:
-                log_audit(symbol, strategy, "실패", "현재가 조회 실패")
+                row["reason"] = "현재가 조회 실패"
+                log_audit(symbol, strategy, "실패", row["reason"])
                 updated_rows.append(row)
                 continue
 
             gain = (current_price - entry_price) / entry_price
             success = gain >= rate if direction == "롱" else -gain >= rate
             row["status"] = "success" if success else "fail"
+            row["reason"] = (
+                f"수익률 달성: {gain:.4f} >= 예측 {rate:.4f}" if success
+                else f"수익률 미달: {gain:.4f} < 예측 {rate:.4f}"
+            )
             update_model_success(symbol, strategy, model, success)
 
             if not success:
-                log_audit(symbol, strategy, "실패", f"수익률 미달: {gain:.4f} < 예측 {rate:.4f}")
+                log_audit(symbol, strategy, "실패", row["reason"])
                 write_header = not os.path.exists(WRONG_PREDICTIONS)
                 with open(WRONG_PREDICTIONS, "a", newline="", encoding="utf-8-sig") as wf:
                     writer = csv.writer(wf)
@@ -161,9 +171,11 @@ def evaluate_predictions(get_price_fn):
                         entry_price, row["target_price"], current_price, gain
                     ])
             else:
-                log_audit(symbol, strategy, "성공", f"수익률 달성: {gain:.4f} >= 예측 {rate:.4f}")
+                log_audit(symbol, strategy, "성공", row["reason"])
         except Exception as e:
-            log_audit(row.get("symbol", "?"), row.get("strategy", "?"), "실패", f"예외: {e}")
+            row["status"] = "fail"
+            row["reason"] = f"예외: {e}"
+            log_audit(row.get("symbol", "?"), row.get("strategy", "?"), "실패", row["reason"])
         updated_rows.append(row)
 
     if updated_rows:
