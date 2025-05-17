@@ -27,6 +27,24 @@ STRATEGY_CONFIG = {
     "장기": {"interval": "w", "limit": 300}
 }
 
+DEFAULT_MIN_GAIN = {
+    "단기": 0.01,
+    "중기": 0.03,
+    "장기": 0.05
+}
+
+def get_min_gain(symbol: str, strategy: str):
+    try:
+        df = get_kline_by_strategy(symbol, strategy)
+        if df is None or len(df) < 10:
+            return DEFAULT_MIN_GAIN[strategy]
+        df = df.tail(7)
+        pct_changes = df["close"].pct_change().abs()
+        avg_volatility = pct_changes.mean()
+        return max(avg_volatility, DEFAULT_MIN_GAIN[strategy])
+    except:
+        return DEFAULT_MIN_GAIN[strategy]
+
 def get_btc_dominance():
     global BTC_DOMINANCE_CACHE
     now = time.time()
@@ -151,9 +169,6 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     ]]
 
 def get_latest_price(symbol: str):
-    """
-    평가 시점에서 사용할 실시간 종가를 조회합니다.
-    """
     df = get_kline(symbol, interval="60", limit=1)
     if df is not None and not df.empty:
         return float(df["close"].iloc[-1])
