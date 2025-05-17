@@ -24,6 +24,7 @@ PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
 MESSAGE_LOG = os.path.join(LOG_DIR, "message_log.csv")
+FAILURE_COUNT_LOG = os.path.join(LOG_DIR, "failure_count.csv")
 
 def start_scheduler():
     print(">>> start_scheduler() 호출됨")
@@ -173,12 +174,16 @@ def reset_all():
         return "❌ 인증 실패: 잘못된 접근", 403
 
     try:
-        open(PREDICTION_LOG, "w").close()
-        open(WRONG_PREDICTIONS, "w").close()
-        open(LOG_FILE, "w").close()
+        # 초기화 대상 파일들
+        for file_path in [PREDICTION_LOG, WRONG_PREDICTIONS, LOG_FILE, AUDIT_LOG, MESSAGE_LOG, FAILURE_COUNT_LOG]:
+            if os.path.exists(file_path):
+                open(file_path, "w").close()
+
+        # 모델 삭제
         for f in glob.glob(os.path.join(MODEL_DIR, "*.pt")):
             os.remove(f)
-        return "✅ 예측 기록, 실패 기록, 학습 로그, 모델 전부 삭제 완료"
+
+        return "✅ 예측 기록, 실패 기록, 학습 로그, 평가 로그, 메시지 로그, 실패횟수, 모델 전부 삭제 완료"
     except Exception as e:
         return f"삭제 실패: {e}", 500
 
