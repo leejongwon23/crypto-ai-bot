@@ -2,6 +2,7 @@ import os
 import csv
 import datetime
 import pandas as pd
+from data.utils import get_kline_by_strategy
 
 # ✅ 경로 설정
 PERSIST_DIR = "/persistent"
@@ -11,16 +12,28 @@ LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.csv")
 AUDIT_LOG = os.path.join(PERSIST_DIR, "logs", "evaluation_audit.csv")
 os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 
-# ✅ 전략별 평가 기준
-STRATEGY_EVAL_CONFIG = {
-    "단기": {"gain_pct": 0.01, "hours": 4},
-    "중기": {"gain_pct": 0.03, "hours": 24},
-    "장기": {"gain_pct": 0.05, "hours": 144}
+STRATEGY_HOURS = {
+    "단기": 4,
+    "중기": 24,
+    "장기": 144
 }
 STOP_LOSS_PCT = 0.02
-
-# ✅ 성공률 추적용 내부 기록
 model_success_tracker = {}
+
+def get_min_gain(symbol, strategy):
+    df = get_kline_by_strategy(symbol, strategy)
+    if df is None or len(df) < 20:
+        return {"단기": 0.01, "중기": 0.03, "장기": 0.05}.get(strategy, 0.05)
+
+    volatility = df["close"].pct_change().rolling(window=20).std()
+    v = volatility.iloc[-1] if not volatility.isna().all() else 0.01
+    if strategy == "단기":
+        return max(round(v * 1.2, 4), 0.005)
+    elif strategy == "중기":
+        return max(round(v * 1.2, 4), 0.01)
+    elif strategy == "장기":
+        return max(round(v * 1.2, 4), 0.02)
+    return 0.03
 
 def update_model_success(symbol, strategy, model, success: bool):
     key = (symbol, strategy, model)
@@ -110,9 +123,8 @@ def evaluate_predictions(get_price_fn):
             model = row.get("model", "unknown")
             entry_price = float(row.get("entry_price", 0))
 
-            config = STRATEGY_EVAL_CONFIG.get(strategy, {"gain_pct": 0.06, "hours": 6})
-            eval_hours = config["hours"]
-            min_gain = config["gain_pct"]
+            eval_hours = STRATEGY_HOURS.get(strategy, 6)
+            min_gain = get_min_gain(row["symbol"], strategy)
             hours_passed = (now - pred_time).total_seconds() / 3600
 
             if hours_passed < eval_hours:
@@ -127,7 +139,6 @@ def evaluate_predictions(get_price_fn):
                 continue
 
             symbol = row["symbol"]
-            target_price = float(row["target_price"])
             current_price = get_price_fn(symbol)
 
             if current_price is None:
@@ -137,7 +148,6 @@ def evaluate_predictions(get_price_fn):
 
             gain = (current_price - entry_price) / entry_price
             success = gain >= min_gain if direction == "롱" else -gain >= min_gain
-
             row["status"] = "success" if success else "fail"
             update_model_success(symbol, strategy, model, success)
 
@@ -150,7 +160,7 @@ def evaluate_predictions(get_price_fn):
                         writer.writerow(["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "current_price", "gain"])
                     writer.writerow([
                         row["timestamp"], symbol, strategy, direction,
-                        entry_price, target_price, current_price, gain
+                        entry_price, row["target_price"], current_price, gain
                     ])
             else:
                 log_audit(symbol, strategy, "성공", f"수익률 달성: {gain:.4f}")
