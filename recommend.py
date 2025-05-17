@@ -13,7 +13,7 @@ import train
 MIN_CONFIDENCE = 0.70
 MIN_CONFIDENCE_OVERRIDE = 0.85
 SUCCESS_RATE_THRESHOLD = 0.70
-VOLATILITY_THRESHOLD = 0.003  # ✅ 추가: 변동성 기준
+VOLATILITY_THRESHOLD = 0.003
 FINAL_SEND_LIMIT = 5
 
 # --- 로그 경로 설정 ---
@@ -49,7 +49,7 @@ def main():
     for strategy in ["단기", "중기", "장기"]:
         for symbol in SYMBOLS:
             try:
-                # ✅ 2단계 추가안: 변동성 기준 트리거
+                # 변동성 기반 필터링 (2단계 추가안)
                 df = get_kline_by_strategy(symbol, strategy)
                 if df is None or len(df) < 20:
                     print(f"[스킵] {symbol}-{strategy} → 데이터 부족")
@@ -128,7 +128,7 @@ def main():
             continue
 
         success_rate = get_model_success_rate(symbol, strategy, model)
-        if success_rate < 0:
+        if success_rate < SUCCESS_RATE_THRESHOLD:
             continue
 
         soft_weight = 0.5 + 0.5 * success_rate
@@ -136,6 +136,7 @@ def main():
         r["score"] = conf * rate * soft_weight
         filtered.append(r)
 
+    # 전략별 Top 1
     top_per_strategy = {}
     for item in filtered:
         strat = item["strategy"]
@@ -147,9 +148,12 @@ def main():
 
     if final:
         for res in final:
-            msg = format_message(res)
-            send_message(msg)
-            print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%} | 성공률: {res['success_rate']:.2f}")
+            try:
+                msg = format_message(res)
+                send_message(msg)
+                print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%} | 성공률: {res['success_rate']:.2f}")
+            except Exception as e:
+                print(f"[ERROR] 메시지 전송 실패: {e}")
     else:
         print("⚠️ 조건 만족 결과 없음 → 메시지 전송 생략")
 
