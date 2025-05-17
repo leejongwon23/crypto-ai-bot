@@ -120,8 +120,9 @@ def main():
         if success_rate < SUCCESS_RATE_THRESHOLD:
             continue
 
+        soft_weight = 0.5 + 0.5 * success_rate
         r["success_rate"] = success_rate
-        r["score"] = conf * rate * success_rate
+        r["score"] = conf * rate * soft_weight
         filtered.append(r)
 
     # 전략별 Top 1
