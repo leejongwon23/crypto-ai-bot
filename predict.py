@@ -77,12 +77,12 @@ def predict(symbol, strategy):
                     confidence = confidence.squeeze().item()
                     if not (0.0 <= signal <= 1.0):
                         continue
-                    if 0.49 <= signal <= 0.51:
+                    if 0.495 <= signal <= 0.505:  # ✅ 완화된 필터 범위
                         continue
 
                     direction = "롱" if signal > 0.5 else "숏"
                     raw_rate = abs(signal - 0.5) * 2
-                    rate = raw_rate * min_gain  # ✅ 변동성 기반 수익률 반영
+                    rate = raw_rate * min_gain
                     weight = get_model_weight(model_type, strategy)
 
                     fake_y = np.array([1 if signal > 0.5 else 0])
