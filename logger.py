@@ -11,11 +11,8 @@ LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.csv")
 AUDIT_LOG = os.path.join(PERSIST_DIR, "logs", "evaluation_audit.csv")
 os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 
-STRATEGY_HOURS = {
-    "단기": 4,
-    "중기": 24,
-    "장기": 144
-}
+STRATEGY_HOURS = {"단기": 4, "중기": 24, "장기": 144}
+EVAL_EXPIRY_BUFFER = 12  # 평가 만료 허용 여유 시간
 STOP_LOSS_PCT = 0.02
 model_success_tracker = {}
 
@@ -23,7 +20,6 @@ def get_min_gain(symbol, strategy):
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or len(df) < 20:
         return {"단기": 0.01, "중기": 0.03, "장기": 0.05}.get(strategy, 0.05)
-
     volatility = df["close"].pct_change().rolling(window=20).std()
     v = volatility.iloc[-1] if not volatility.isna().all() else 0.01
     if strategy == "단기":
@@ -80,10 +76,8 @@ def log_prediction(symbol, strategy, direction=None, entry_price=None, target_pr
         "model": model or "unknown",
         "status": "pending" if success else "fail"
     }
-
     if not success:
         log_audit(symbol, strategy, "예측실패", reason)
-
     fieldnames = list(row.keys())
     write_header = not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0
     try:
@@ -122,10 +116,15 @@ def evaluate_predictions(get_price_fn):
             model = row.get("model", "unknown")
             entry_price = float(row.get("entry_price", 0))
             symbol = row["symbol"]
-
             eval_hours = STRATEGY_HOURS.get(strategy, 6)
             min_gain = get_min_gain(symbol, strategy)
             hours_passed = (now - pred_time).total_seconds() / 3600
+
+            if hours_passed > eval_hours + EVAL_EXPIRY_BUFFER:
+                row["status"] = "skipped"
+                log_audit(symbol, strategy, "스킵", f"평가 시간 초과 {hours_passed:.2f}h > {eval_hours}+{EVAL_EXPIRY_BUFFER}")
+                updated_rows.append(row)
+                continue
 
             if hours_passed < eval_hours:
                 log_audit(symbol, strategy, "대기중", f"{hours_passed:.2f}h < {eval_hours}h")
@@ -133,8 +132,8 @@ def evaluate_predictions(get_price_fn):
                 continue
 
             if direction not in ["롱", "숏"] or model == "unknown" or entry_price == 0:
-                log_audit(symbol, strategy, "실패", "평가 불가: 예측 데이터 미비")
                 row["status"] = "fail"
+                log_audit(symbol, strategy, "실패", "평가 불가: 예측 데이터 미비")
                 updated_rows.append(row)
                 continue
 
@@ -202,6 +201,7 @@ def print_prediction_stats():
         success = len(df[df["status"] == "success"])
         fail = len(df[df["status"] == "fail"])
         pending = len(df[df["status"] == "pending"])
+        skipped = len(df[df["status"] == "skipped"])
         success_rate = (success / (success + fail)) * 100 if (success + fail) > 0 else 0
 
         summary = [
@@ -209,6 +209,7 @@ def print_prediction_stats():
             f"✅ 성공: {success}",
             f"❌ 실패: {fail}",
             f"⏳ 평가 대기중: {pending}",
+            f"⏭️ 스킵: {skipped}",
             f"🎯 성공률: {success_rate:.2f}%"
         ]
 
