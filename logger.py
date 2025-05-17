@@ -4,7 +4,6 @@ import datetime
 import pandas as pd
 from data.utils import get_kline_by_strategy
 
-# ✅ 경로 설정
 PERSIST_DIR = "/persistent"
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
@@ -34,9 +33,6 @@ def get_min_gain(symbol, strategy):
     elif strategy == "장기":
         return max(round(v * 1.2, 4), 0.02)
     return 0.03
-
-def get_fixed_eval_gain(strategy):
-    return {"단기": 0.01, "중기": 0.03, "장기": 0.05}.get(strategy, 0.03)
 
 def update_model_success(symbol, strategy, model, success: bool):
     key = (symbol, strategy, model)
@@ -125,25 +121,24 @@ def evaluate_predictions(get_price_fn):
             direction = row["direction"]
             model = row.get("model", "unknown")
             entry_price = float(row.get("entry_price", 0))
+            symbol = row["symbol"]
 
             eval_hours = STRATEGY_HOURS.get(strategy, 6)
-            min_gain = get_fixed_eval_gain(strategy)
+            min_gain = get_min_gain(symbol, strategy)
             hours_passed = (now - pred_time).total_seconds() / 3600
 
             if hours_passed < eval_hours:
-                log_audit(row["symbol"], strategy, "대기중", f"{hours_passed:.2f}h < {eval_hours}h")
+                log_audit(symbol, strategy, "대기중", f"{hours_passed:.2f}h < {eval_hours}h")
                 updated_rows.append(row)
                 continue
 
             if direction not in ["롱", "숏"] or model == "unknown" or entry_price == 0:
-                log_audit(row["symbol"], strategy, "실패", "평가 불가: 예측 데이터 미비")
+                log_audit(symbol, strategy, "실패", "평가 불가: 예측 데이터 미비")
                 row["status"] = "fail"
                 updated_rows.append(row)
                 continue
 
-            symbol = row["symbol"]
             current_price = get_price_fn(symbol)
-
             if current_price is None:
                 log_audit(symbol, strategy, "실패", "현재가 조회 실패")
                 updated_rows.append(row)
