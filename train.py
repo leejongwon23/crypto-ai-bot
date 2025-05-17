@@ -186,6 +186,16 @@ def train_all_models():
     for strategy in ["단기", "중기", "장기"]:
         train_one_strategy(strategy)
 
+# ✅ 새로 추가된 전략 반복 학습 함수 (app.py에서 사용)
+def train_model_loop(strategy):
+    for symbol in SYMBOLS:
+        try:
+            train_one_model(symbol, strategy)
+            gc.collect()
+        except Exception as e:
+            print(f"[루프오류] {symbol}-{strategy} 학습 실패: {e}")
+
+# ✅ 백그라운드 자동 루프 (기존 유지)
 def background_auto_train():
     def loop(strategy, interval_sec):
         while True:
