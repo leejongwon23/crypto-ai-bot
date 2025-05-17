@@ -7,7 +7,7 @@ from predict import predict
 from logger import log_prediction, evaluate_predictions, get_model_success_rate
 from data.utils import SYMBOLS, get_realtime_prices
 from src.message_formatter import format_message
-import train  # ✅ 모델 자동 학습을 위해 추가
+import train
 
 # --- 필터 기준 설정 ---
 MIN_CONFIDENCE = 0.70
@@ -18,7 +18,7 @@ MIN_GAIN_BY_STRATEGY = {
     "중기": 0.03,
     "장기": 0.05
 }
-FINAL_SEND_LIMIT = 5  # 최종 메시지 최대 개수
+FINAL_SEND_LIMIT = 5
 
 # --- 로그 경로 설정 ---
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
@@ -56,7 +56,6 @@ def main():
                 result = predict(symbol, strategy)
                 print(f"[예측] {symbol}-{strategy} → {result}")
 
-                # ✅ 모델 없음 시 자동 학습 트리거
                 if result.get("reason") == "모델 없음":
                     print(f"[자동학습] {symbol}-{strategy} → 모델 없음 → 학습 시도")
                     threading.Thread(target=train.train_model, args=(symbol, strategy), daemon=True).start()
@@ -105,7 +104,7 @@ def main():
                 except Exception as la:
                     print(f"[치명적] log_audit 실패: {la}")
 
-    # --- 최상필터 적용 ---
+    # --- 필터 적용 ---
     filtered = []
     for r in all_results:
         conf = r.get("confidence", 0)
@@ -113,21 +112,13 @@ def main():
         strategy = r.get("strategy")
         rate = r.get("rate", 0)
 
-        # 필터 3. 전략별 최소 수익률
         if rate < MIN_GAIN_BY_STRATEGY.get(strategy, 0.01):
             continue
-
-        # 필터 1. 모델 방향 일치 (ensemble이거나, conf ≥ 0.85)
-        if model == "ensemble" or conf >= MIN_CONFIDENCE_OVERRIDE:
-            pass
-        else:
+        if not (model == "ensemble" or conf >= MIN_CONFIDENCE_OVERRIDE):
             continue
-
-        # 필터 2. confidence ≥ 0.70
         if conf < MIN_CONFIDENCE:
             continue
 
-        # 필터 4. success rate ≥ 70%
         success_rate = get_model_success_rate(r["symbol"], strategy, model)
         if success_rate < SUCCESS_RATE_THRESHOLD:
             continue
@@ -136,7 +127,7 @@ def main():
         r["score"] = conf * rate * success_rate
         filtered.append(r)
 
-    # 필터 5. 전략별 Top 1만 추출
+    # 전략별 Top 1
     top_per_strategy = {}
     for item in filtered:
         strat = item["strategy"]
