@@ -4,7 +4,7 @@ import csv
 import threading
 from telegram_bot import send_message
 from predict import predict
-from logger import log_prediction, evaluate_predictions, get_model_success_rate, get_min_gain
+from logger import log_prediction, evaluate_predictions, get_model_success_rate
 from data.utils import SYMBOLS, get_realtime_prices, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
@@ -14,7 +14,6 @@ MIN_CONFIDENCE = 0.70
 MIN_CONFIDENCE_OVERRIDE = 0.85
 SUCCESS_RATE_THRESHOLD = 0.70
 VOLATILITY_THRESHOLD = 0.003
-FINAL_SEND_LIMIT = 5
 FAILURE_TRIGGER_LIMIT = 3
 
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
@@ -130,6 +129,7 @@ def main():
 
     save_failure_count(failure_map)
 
+    # ✅ 필터링: 신뢰도, 성공률 기반 점수 필터
     filtered = []
     for r in all_results:
         conf = r.get("confidence", 0)
@@ -138,9 +138,6 @@ def main():
         symbol = r.get("symbol")
         rate = r.get("rate", 0)
 
-        min_gain = get_min_gain(symbol, strategy)
-        if rate < min_gain:
-            continue
         if not (model == "ensemble" or conf >= MIN_CONFIDENCE_OVERRIDE):
             continue
         if conf < MIN_CONFIDENCE:
@@ -150,12 +147,12 @@ def main():
         if success_rate < SUCCESS_RATE_THRESHOLD:
             continue
 
-        # ✅ soft penalty 적용
         penalty = 1.0 - (1.0 - success_rate) ** 2
         r["success_rate"] = success_rate
         r["score"] = conf * rate * penalty
         filtered.append(r)
 
+    # ✅ 전략별 Top 1만 유지 (최종 상위 5개 제거)
     top_per_strategy = {}
     for item in filtered:
         strat = item["strategy"]
@@ -163,7 +160,6 @@ def main():
             top_per_strategy[strat] = item
 
     final = list(top_per_strategy.values())
-    final = sorted(final, key=lambda x: -x["score"])[:FINAL_SEND_LIMIT]
 
     if final:
         for res in final:
