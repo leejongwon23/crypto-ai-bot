@@ -35,6 +35,9 @@ def get_min_gain(symbol, strategy):
         return max(round(v * 1.2, 4), 0.02)
     return 0.03
 
+def get_fixed_eval_gain(strategy):
+    return {"단기": 0.01, "중기": 0.03, "장기": 0.05}.get(strategy, 0.03)
+
 def update_model_success(symbol, strategy, model, success: bool):
     key = (symbol, strategy, model)
     if key not in model_success_tracker:
@@ -124,7 +127,7 @@ def evaluate_predictions(get_price_fn):
             entry_price = float(row.get("entry_price", 0))
 
             eval_hours = STRATEGY_HOURS.get(strategy, 6)
-            min_gain = get_min_gain(row["symbol"], strategy)
+            min_gain = get_fixed_eval_gain(strategy)
             hours_passed = (now - pred_time).total_seconds() / 3600
 
             if hours_passed < eval_hours:
