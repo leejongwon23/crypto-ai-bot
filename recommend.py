@@ -9,12 +9,15 @@ from data.utils import SYMBOLS, get_realtime_prices, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
 
-# --- 필터 기준 설정 ---
+# --- 필터 기준 ---
 MIN_CONFIDENCE = 0.70
 MIN_CONFIDENCE_OVERRIDE = 0.85
 SUCCESS_RATE_THRESHOLD = 0.70
 VOLATILITY_THRESHOLD = 0.003
 FAILURE_TRIGGER_LIMIT = 3
+MIN_SCORE_THRESHOLD = 0.005
+STRATEGY_BAN_THRESHOLD = 0.40  # 최근 성공률 40% 이하 전략 배제
+FINAL_SEND_LIMIT = 5
 
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
 FAILURE_LOG = "/persistent/logs/failure_count.csv"
@@ -61,7 +64,17 @@ def main():
     all_results = []
     failure_map = load_failure_count()
 
+    # --- 전략별 최근 성공률 계산 (3일 이내 예측 기준)
+    from logger import get_actual_success_rate
+    banned_strategies = {
+        s for s in ["단기", "중기", "장기"]
+        if get_actual_success_rate(s, threshold=0.0) < STRATEGY_BAN_THRESHOLD
+    }
+
     for strategy in ["단기", "중기", "장기"]:
+        if strategy in banned_strategies:
+            print(f"[차단] 최근 성공률 낮은 전략 {strategy} → 배제")
+            continue
         for symbol in SYMBOLS:
             try:
                 df = get_kline_by_strategy(symbol, strategy)
@@ -92,8 +105,7 @@ def main():
                     reason=result.get("reason", "예측 실패")
                 )
 
-                status_msg = "예측 성공" if result.get("success") else "예측 실패"
-                log_audit(symbol, strategy, result, status_msg)
+                log_audit(symbol, strategy, result, "예측 성공" if result.get("success") else "예측 실패")
 
                 key = f"{symbol}-{strategy}"
                 if not result.get("success", False):
@@ -129,14 +141,14 @@ def main():
 
     save_failure_count(failure_map)
 
-    # ✅ 필터링: 신뢰도, 성공률 기반 점수 필터
+    # --- 필터링 ---
     filtered = []
     for r in all_results:
         conf = r.get("confidence", 0)
         model = r.get("model", "")
-        strategy = r.get("strategy")
-        symbol = r.get("symbol")
         rate = r.get("rate", 0)
+        symbol = r.get("symbol")
+        strategy = r.get("strategy")
 
         if not (model == "ensemble" or conf >= MIN_CONFIDENCE_OVERRIDE):
             continue
@@ -148,19 +160,23 @@ def main():
             continue
 
         penalty = 1.0 - (1.0 - success_rate) ** 2
+        score = conf * rate * penalty
+        if score < MIN_SCORE_THRESHOLD:
+            continue
+
         r["success_rate"] = success_rate
-        r["score"] = conf * rate * penalty
+        r["score"] = score
         filtered.append(r)
 
-    # ✅ 전략별 Top 1만 유지 (최종 상위 5개 제거)
-    top_per_strategy = {}
-    for item in filtered:
-        strat = item["strategy"]
-        if strat not in top_per_strategy or item["score"] > top_per_strategy[strat]["score"]:
-            top_per_strategy[strat] = item
+    final = sorted(filtered, key=lambda x: -x["score"])[:FINAL_SEND_LIMIT]
 
-    final = list(top_per_strategy.values())
+    # --- 심야 시간 필터링 ---
+    now_hour = datetime.datetime.now().hour
+    if 2 <= now_hour < 6:
+        print(f"[전송 제한] 심야 시간대({now_hour}시) → 메시지 전송 생략")
+        return
 
+    # --- 메시지 전송 ---
     if final:
         for res in final:
             try:
