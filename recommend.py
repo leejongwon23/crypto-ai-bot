@@ -5,7 +5,7 @@ import threading
 from telegram_bot import send_message
 from predict import predict
 from logger import log_prediction, evaluate_predictions, get_model_success_rate, get_min_gain
-from data.utils import SYMBOLS, get_realtime_prices
+from data.utils import SYMBOLS, get_realtime_prices, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
 
@@ -13,6 +13,7 @@ import train
 MIN_CONFIDENCE = 0.70
 MIN_CONFIDENCE_OVERRIDE = 0.85
 SUCCESS_RATE_THRESHOLD = 0.70
+VOLATILITY_THRESHOLD = 0.003  # ✅ 추가: 변동성 기준
 FINAL_SEND_LIMIT = 5
 
 # --- 로그 경로 설정 ---
@@ -48,6 +49,16 @@ def main():
     for strategy in ["단기", "중기", "장기"]:
         for symbol in SYMBOLS:
             try:
+                # ✅ 2단계 추가안: 변동성 기준 트리거
+                df = get_kline_by_strategy(symbol, strategy)
+                if df is None or len(df) < 20:
+                    print(f"[스킵] {symbol}-{strategy} → 데이터 부족")
+                    continue
+                volatility = df["close"].pct_change().rolling(window=20).std().iloc[-1]
+                if volatility < VOLATILITY_THRESHOLD:
+                    print(f"[스킵] {symbol}-{strategy} → 변동성 {volatility:.4f} < {VOLATILITY_THRESHOLD}")
+                    continue
+
                 result = predict(symbol, strategy)
                 print(f"[예측] {symbol}-{strategy} → {result}")
 
@@ -117,7 +128,7 @@ def main():
             continue
 
         success_rate = get_model_success_rate(symbol, strategy, model)
-        if success_rate < SUCCESS_RATE_THRESHOLD:
+        if success_rate < 0:
             continue
 
         soft_weight = 0.5 + 0.5 * success_rate
@@ -125,7 +136,6 @@ def main():
         r["score"] = conf * rate * soft_weight
         filtered.append(r)
 
-    # 전략별 Top 1
     top_per_strategy = {}
     for item in filtered:
         strat = item["strategy"]
@@ -139,7 +149,7 @@ def main():
         for res in final:
             msg = format_message(res)
             send_message(msg)
-            print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%} | 성공률: {res['success_rate']:.2%}")
+            print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%} | 성공률: {res['success_rate']:.2f}")
     else:
         print("⚠️ 조건 만족 결과 없음 → 메시지 전송 생략")
 
