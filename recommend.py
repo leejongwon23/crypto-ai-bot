@@ -15,10 +15,27 @@ MIN_CONFIDENCE_OVERRIDE = 0.85
 SUCCESS_RATE_THRESHOLD = 0.70
 VOLATILITY_THRESHOLD = 0.003
 FINAL_SEND_LIMIT = 5
+FAILURE_TRIGGER_LIMIT = 3  # ✅ 예측 실패 3회 이상이면 학습 트리거
 
-# --- 로그 경로 설정 ---
+# --- 로그 경로 ---
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
+FAILURE_LOG = "/persistent/logs/failure_count.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
+
+# --- 실패 카운트 불러오기/저장 ---
+def load_failure_count():
+    if not os.path.exists(FAILURE_LOG):
+        return {}
+    with open(FAILURE_LOG, "r", encoding="utf-8-sig") as f:
+        return {f"{r['symbol']}-{r['strategy']}": int(r["failures"]) for r in csv.DictReader(f)}
+
+def save_failure_count(failure_map):
+    with open(FAILURE_LOG, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=["symbol", "strategy", "failures"])
+        writer.writeheader()
+        for key, count in failure_map.items():
+            symbol, strategy = key.split("-")
+            writer.writerow({"symbol": symbol, "strategy": strategy, "failures": count})
 
 def log_audit(symbol, strategy, result, status):
     now = datetime.datetime.utcnow().isoformat()
@@ -29,10 +46,10 @@ def log_audit(symbol, strategy, result, status):
         "result": str(result),
         "status": status
     }
-    file_exists = os.path.exists(AUDIT_LOG)
+    write_header = not os.path.exists(AUDIT_LOG)
     with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=row.keys())
-        if not file_exists:
+        if write_header:
             writer.writeheader()
         writer.writerow(row)
 
@@ -45,6 +62,7 @@ def main():
     evaluate_predictions(get_price_now)
 
     all_results = []
+    failure_map = load_failure_count()
 
     for strategy in ["단기", "중기", "장기"]:
         for symbol in SYMBOLS:
@@ -60,10 +78,6 @@ def main():
 
                 result = predict(symbol, strategy)
                 print(f"[예측] {symbol}-{strategy} → {result}")
-
-                if result.get("reason") == "모델 없음":
-                    print(f"[자동학습] {symbol}-{strategy} → 모델 없음 → 학습 시도")
-                    threading.Thread(target=train.train_model, args=(symbol, strategy), daemon=True).start()
 
                 if not isinstance(result, dict):
                     raise ValueError("predict() 반환값이 dict가 아님")
@@ -84,6 +98,18 @@ def main():
                 status_msg = "예측 성공" if result.get("success") else "예측 실패"
                 log_audit(symbol, strategy, result, status_msg)
 
+                key = f"{symbol}-{strategy}"
+
+                # ✅ 실패 누적 기록 또는 초기화
+                if not result.get("success", False):
+                    failure_map[key] = failure_map.get(key, 0) + 1
+                    if failure_map[key] >= FAILURE_TRIGGER_LIMIT:
+                        print(f"[학습 트리거] {symbol}-{strategy} → 실패 {failure_map[key]}회 → 학습 실행")
+                        threading.Thread(target=train.train_model, args=(symbol, strategy), daemon=True).start()
+                        failure_map[key] = 0  # 초기화
+                else:
+                    failure_map[key] = 0  # 성공 시 초기화
+
                 if result.get("success"):
                     all_results.append(result)
 
@@ -102,12 +128,12 @@ def main():
                         success=False,
                         reason=f"예외 발생: {e}"
                     )
-                except Exception as le:
-                    print(f"[치명적] log_prediction 실패: {le}")
-                try:
                     log_audit(symbol, strategy, None, f"예외 발생: {e}")
-                except Exception as la:
-                    print(f"[치명적] log_audit 실패: {la}")
+                except Exception as err:
+                    print(f"[치명적] 로그 기록 실패: {err}")
+
+    # 실패 카운트 저장
+    save_failure_count(failure_map)
 
     # --- 필터 적용 ---
     filtered = []
@@ -135,7 +161,6 @@ def main():
         r["score"] = conf * rate * soft_weight
         filtered.append(r)
 
-    # 전략별 Top 1
     top_per_strategy = {}
     for item in filtered:
         strat = item["strategy"]
