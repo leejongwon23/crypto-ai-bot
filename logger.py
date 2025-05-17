@@ -109,7 +109,7 @@ def evaluate_predictions(get_price_fn):
             direction = row["direction"]
             model = row.get("model", "unknown")
             entry_price = float(row.get("entry_price", 0))
-            rate = float(row.get("rate", 0))  # ✅ 예측된 수익률 기준
+            rate = float(row.get("rate", 0))
             symbol = row["symbol"]
             eval_hours = STRATEGY_HOURS.get(strategy, 6)
             hours_passed = (now - pred_time).total_seconds() / 3600
@@ -184,6 +184,15 @@ def get_actual_success_rate(strategy, threshold=0.7):
         return len(evaluated[evaluated["status"] == "success"]) / len(evaluated)
     except:
         return 0.0
+
+def get_strategy_eval_count(strategy):
+    try:
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        df = df[df["strategy"] == strategy]
+        evaluated = df[df["status"].isin(["success", "fail"])]
+        return len(evaluated)
+    except:
+        return 0
 
 def print_prediction_stats():
     if not os.path.exists(PREDICTION_LOG):
