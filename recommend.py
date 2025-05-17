@@ -15,14 +15,12 @@ MIN_CONFIDENCE_OVERRIDE = 0.85
 SUCCESS_RATE_THRESHOLD = 0.70
 VOLATILITY_THRESHOLD = 0.003
 FINAL_SEND_LIMIT = 5
-FAILURE_TRIGGER_LIMIT = 3  # ✅ 예측 실패 3회 이상이면 학습 트리거
+FAILURE_TRIGGER_LIMIT = 3
 
-# --- 로그 경로 ---
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
 FAILURE_LOG = "/persistent/logs/failure_count.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
 
-# --- 실패 카운트 불러오기/저장 ---
 def load_failure_count():
     if not os.path.exists(FAILURE_LOG):
         return {}
@@ -99,16 +97,14 @@ def main():
                 log_audit(symbol, strategy, result, status_msg)
 
                 key = f"{symbol}-{strategy}"
-
-                # ✅ 실패 누적 기록 또는 초기화
                 if not result.get("success", False):
                     failure_map[key] = failure_map.get(key, 0) + 1
                     if failure_map[key] >= FAILURE_TRIGGER_LIMIT:
                         print(f"[학습 트리거] {symbol}-{strategy} → 실패 {failure_map[key]}회 → 학습 실행")
                         threading.Thread(target=train.train_model, args=(symbol, strategy), daemon=True).start()
-                        failure_map[key] = 0  # 초기화
+                        failure_map[key] = 0
                 else:
-                    failure_map[key] = 0  # 성공 시 초기화
+                    failure_map[key] = 0
 
                 if result.get("success"):
                     all_results.append(result)
@@ -132,10 +128,8 @@ def main():
                 except Exception as err:
                     print(f"[치명적] 로그 기록 실패: {err}")
 
-    # 실패 카운트 저장
     save_failure_count(failure_map)
 
-    # --- 필터 적용 ---
     filtered = []
     for r in all_results:
         conf = r.get("confidence", 0)
@@ -156,9 +150,10 @@ def main():
         if success_rate < SUCCESS_RATE_THRESHOLD:
             continue
 
-        soft_weight = 0.5 + 0.5 * success_rate
+        # ✅ soft penalty 적용
+        penalty = 1.0 - (1.0 - success_rate) ** 2
         r["success_rate"] = success_rate
-        r["score"] = conf * rate * soft_weight
+        r["score"] = conf * rate * penalty
         filtered.append(r)
 
     top_per_strategy = {}
