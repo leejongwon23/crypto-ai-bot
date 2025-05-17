@@ -6,16 +6,11 @@ from model.base_model import get_model
 from model_weight_loader import get_model_weight
 from window_optimizer import find_best_window
 from sklearn.metrics import log_loss
+from logger import get_min_gain  # ✅ 최소 수익률 기준 import
 
 DEVICE = torch.device("cpu")
 STOP_LOSS_PCT = 0.02
 MODEL_DIR = "/persistent/models"
-
-STRATEGY_RATE_LIMITS = {
-    "단기": 0.03,
-    "중기": 0.06,
-    "장기": 0.10
-}
 
 def failed_result(symbol, strategy, reason):
     dummy_price = 1.0
@@ -24,8 +19,8 @@ def failed_result(symbol, strategy, reason):
         "strategy": strategy,
         "success": False,
         "reason": reason,
-        "direction": "롱",  # 기본 방향 제공
-        "model": "ensemble",  # 평가를 위해 모델 지정
+        "direction": "롱",
+        "model": "ensemble",
         "confidence": 0.0,
         "rate": 0.0,
         "price": dummy_price,
@@ -65,7 +60,7 @@ def predict(symbol, strategy):
         if not available_models:
             return failed_result(symbol, strategy, "모델 없음")
 
-        max_rate = STRATEGY_RATE_LIMITS.get(strategy, 0.05)
+        min_gain = get_min_gain(symbol, strategy)
         results = []
 
         for model_type, model_path in available_models.items():
@@ -87,7 +82,7 @@ def predict(symbol, strategy):
 
                     direction = "롱" if signal > 0.5 else "숏"
                     raw_rate = abs(signal - 0.5) * 2
-                    rate = min(raw_rate * max_rate, max_rate)
+                    rate = raw_rate * min_gain  # ✅ 변동성 기반 수익률 반영
                     weight = get_model_weight(model_type, strategy)
 
                     fake_y = np.array([1 if signal > 0.5 else 0])
