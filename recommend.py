@@ -4,7 +4,10 @@ import csv
 import threading
 from telegram_bot import send_message
 from predict import predict
-from logger import log_prediction, evaluate_predictions, get_model_success_rate, get_actual_success_rate
+from logger import (
+    log_prediction, evaluate_predictions, get_model_success_rate,
+    get_actual_success_rate, get_strategy_eval_count
+)
 from data.utils import SYMBOLS, get_realtime_prices, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
@@ -78,10 +81,13 @@ def main():
         failure_map = {}
 
     try:
-        banned_strategies = {
-            s for s in ["단기", "중기", "장기"]
-            if get_actual_success_rate(s, threshold=0.0) < STRATEGY_BAN_THRESHOLD
-        }
+        banned_strategies = set()
+        for s in ["단기", "중기", "장기"]:
+            eval_count = get_strategy_eval_count(s)
+            if eval_count >= 10:
+                sr = get_actual_success_rate(s, threshold=0.0)
+                if sr < STRATEGY_BAN_THRESHOLD:
+                    banned_strategies.add(s)
     except Exception as e:
         print(f"[ERROR] 전략 성공률 평가 실패: {e}")
         banned_strategies = set()
