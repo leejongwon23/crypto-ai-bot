@@ -8,6 +8,7 @@ from logger import log_prediction, evaluate_predictions, get_model_success_rate,
 from data.utils import SYMBOLS, get_realtime_prices, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
+import sys
 
 # --- 필터 기준 ---
 MIN_CONFIDENCE = 0.70
@@ -58,22 +59,38 @@ def get_price_now(symbol):
     return prices.get(symbol)
 
 def main():
+    print(">>> [main] recommend.py 진입 성공")
+    sys.stdout.flush()
+
     print("✅ 예측 평가 시작")
-    evaluate_predictions(get_price_now)
+    sys.stdout.flush()
+    try:
+        evaluate_predictions(get_price_now)
+    except Exception as e:
+        print(f"[ERROR] 평가 루틴 실패: {e}")
+        sys.stdout.flush()
 
     all_results = []
-    failure_map = load_failure_count()
+    try:
+        failure_map = load_failure_count()
+    except Exception as e:
+        print(f"[ERROR] 실패 카운트 로딩 실패: {e}")
+        failure_map = {}
 
-    # --- 전략별 성공률 차단 ---
-    banned_strategies = {
-        s for s in ["단기", "중기", "장기"]
-        if get_actual_success_rate(s, threshold=0.0) < STRATEGY_BAN_THRESHOLD
-    }
+    try:
+        banned_strategies = {
+            s for s in ["단기", "중기", "장기"]
+            if get_actual_success_rate(s, threshold=0.0) < STRATEGY_BAN_THRESHOLD
+        }
+    except Exception as e:
+        print(f"[ERROR] 전략 성공률 평가 실패: {e}")
+        banned_strategies = set()
 
     for strategy in ["단기", "중기", "장기"]:
         if strategy in banned_strategies:
             print(f"[차단] 전략 성공률 낮음 → {strategy} 제외")
             continue
+
         for symbol in SYMBOLS:
             try:
                 df = get_kline_by_strategy(symbol, strategy)
@@ -87,6 +104,7 @@ def main():
 
                 result = predict(symbol, strategy)
                 print(f"[예측] {symbol}-{strategy} → {result}")
+                sys.stdout.flush()
 
                 if not isinstance(result, dict):
                     raise ValueError("predict() 반환값이 dict가 아님")
@@ -121,6 +139,7 @@ def main():
 
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
+                sys.stdout.flush()
                 try:
                     log_prediction(
                         symbol=symbol,
@@ -140,7 +159,6 @@ def main():
 
     save_failure_count(failure_map)
 
-    # --- 필터링 ---
     filtered = []
     for r in all_results:
         conf = r.get("confidence", 0)
@@ -169,13 +187,11 @@ def main():
 
     final = sorted(filtered, key=lambda x: -x["score"])[:FINAL_SEND_LIMIT]
 
-    # --- 야간 시간 제한 (02:00 ~ 06:00) ---
     now_hour = datetime.datetime.now().hour
     if 2 <= now_hour < 6:
         print(f"[전송 차단] 현재 {now_hour}시 → 야간 전송 제한")
         return
 
-    # --- 메시지 전송 ---
     if final:
         for res in final:
             try:
@@ -187,5 +203,5 @@ def main():
     else:
         print("⚠️ 조건 만족 결과 없음 → 메시지 전송 생략")
 
-if __name__ == "__main__":
-    main()
+    print(">>> [main] recommend.py 실행 완료")
+    sys.stdout.flush()
