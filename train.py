@@ -13,6 +13,7 @@ from model_weight_loader import get_model_weight
 from wrong_data_loader import load_wrong_prediction_data
 from feature_importance import compute_feature_importance, save_feature_importance
 import logger
+from logger import get_min_gain
 from window_optimizer import find_best_window
 
 DEVICE = torch.device("cpu")
@@ -24,12 +25,6 @@ WRONG_DIR = os.path.join(PERSIST_DIR, "wrong")
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(WRONG_DIR, exist_ok=True)
-
-STRATEGY_GAIN_RANGE = {
-    "단기": (0.03, 0.50),
-    "중기": (0.06, 0.80),
-    "장기": (0.10, 1.00)
-}
 
 def create_dataset(features, window):
     X, y = [], []
@@ -188,7 +183,7 @@ def train_one_strategy(strategy):
             print(f"[오류] {symbol}-{strategy} 학습 실패: {e}")
 
 def train_all_models():
-    for strategy in STRATEGY_GAIN_RANGE:
+    for strategy in ["단기", "중기", "장기"]:
         train_one_strategy(strategy)
 
 def background_auto_train():
