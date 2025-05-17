@@ -49,7 +49,6 @@ def main():
     for strategy in ["단기", "중기", "장기"]:
         for symbol in SYMBOLS:
             try:
-                # 변동성 기반 필터링 (2단계 추가안)
                 df = get_kline_by_strategy(symbol, strategy)
                 if df is None or len(df) < 20:
                     print(f"[스킵] {symbol}-{strategy} → 데이터 부족")
