@@ -6,7 +6,7 @@ from model.base_model import get_model
 from model_weight_loader import get_model_weight
 from window_optimizer import find_best_window
 from sklearn.metrics import log_loss
-from logger import get_min_gain  # ✅ 최소 수익률 기준 import
+from logger import get_min_gain
 
 DEVICE = torch.device("cpu")
 STOP_LOSS_PCT = 0.02
@@ -52,18 +52,22 @@ def predict(symbol, strategy):
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
         input_size = X.shape[2]
 
-        model_paths = {
-            mt: os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{mt}.pt")
-            for mt in ["lstm", "cnn_lstm", "transformer"]
-        }
-        available_models = {mt: path for mt, path in model_paths.items() if os.path.exists(path)}
-        if not available_models:
+        # --- ✅ 모델 자동 탐색 ---
+        model_paths = {}
+        for file in os.listdir(MODEL_DIR):
+            if not file.endswith(".pt"):
+                continue
+            if file.startswith(f"{symbol}_{strategy}_"):
+                model_type = file.replace(f"{symbol}_{strategy}_", "").replace(".pt", "")
+                model_paths[model_type] = os.path.join(MODEL_DIR, file)
+
+        if not model_paths:
             return failed_result(symbol, strategy, "모델 없음")
 
         min_gain = get_min_gain(symbol, strategy)
         results = []
 
-        for model_type, model_path in available_models.items():
+        for model_type, model_path in model_paths.items():
             try:
                 model = get_model(model_type=model_type, input_size=input_size)
                 model.load_state_dict(torch.load(model_path, map_location=DEVICE))
@@ -77,7 +81,7 @@ def predict(symbol, strategy):
                     confidence = confidence.squeeze().item()
                     if not (0.0 <= signal <= 1.0):
                         continue
-                    if 0.495 <= signal <= 0.505:  # ✅ 완화된 필터 범위
+                    if 0.495 <= signal <= 0.505:
                         continue
 
                     direction = "롱" if signal > 0.5 else "숏"
