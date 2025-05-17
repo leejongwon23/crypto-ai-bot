@@ -4,7 +4,7 @@ import csv
 import threading
 from telegram_bot import send_message
 from predict import predict
-from logger import log_prediction, evaluate_predictions, get_model_success_rate
+from logger import log_prediction, evaluate_predictions, get_model_success_rate, get_actual_success_rate
 from data.utils import SYMBOLS, get_realtime_prices, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
@@ -16,7 +16,7 @@ SUCCESS_RATE_THRESHOLD = 0.70
 VOLATILITY_THRESHOLD = 0.003
 FAILURE_TRIGGER_LIMIT = 3
 MIN_SCORE_THRESHOLD = 0.005
-STRATEGY_BAN_THRESHOLD = 0.40  # 최근 성공률 40% 이하 전략 배제
+STRATEGY_BAN_THRESHOLD = 0.40
 FINAL_SEND_LIMIT = 5
 
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
@@ -64,8 +64,7 @@ def main():
     all_results = []
     failure_map = load_failure_count()
 
-    # --- 전략별 최근 성공률 계산 (3일 이내 예측 기준)
-    from logger import get_actual_success_rate
+    # --- 전략별 성공률 차단 ---
     banned_strategies = {
         s for s in ["단기", "중기", "장기"]
         if get_actual_success_rate(s, threshold=0.0) < STRATEGY_BAN_THRESHOLD
@@ -73,7 +72,7 @@ def main():
 
     for strategy in ["단기", "중기", "장기"]:
         if strategy in banned_strategies:
-            print(f"[차단] 최근 성공률 낮은 전략 {strategy} → 배제")
+            print(f"[차단] 전략 성공률 낮음 → {strategy} 제외")
             continue
         for symbol in SYMBOLS:
             try:
@@ -111,7 +110,7 @@ def main():
                 if not result.get("success", False):
                     failure_map[key] = failure_map.get(key, 0) + 1
                     if failure_map[key] >= FAILURE_TRIGGER_LIMIT:
-                        print(f"[학습 트리거] {symbol}-{strategy} → 실패 {failure_map[key]}회 → 학습 실행")
+                        print(f"[학습 트리거] {symbol}-{strategy} 실패 {failure_map[key]}회 → 학습")
                         threading.Thread(target=train.train_model, args=(symbol, strategy), daemon=True).start()
                         failure_map[key] = 0
                 else:
@@ -170,10 +169,10 @@ def main():
 
     final = sorted(filtered, key=lambda x: -x["score"])[:FINAL_SEND_LIMIT]
 
-    # --- 심야 시간 필터링 ---
+    # --- 야간 시간 제한 (02:00 ~ 06:00) ---
     now_hour = datetime.datetime.now().hour
     if 2 <= now_hour < 6:
-        print(f"[전송 제한] 심야 시간대({now_hour}시) → 메시지 전송 생략")
+        print(f"[전송 차단] 현재 {now_hour}시 → 야간 전송 제한")
         return
 
     # --- 메시지 전송 ---
