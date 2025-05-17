@@ -65,7 +65,7 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"📝 체크포인트 저장됨: {path}")
 
-def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3, repeat=3, repeat_wrong=2):
+def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3, repeat=4, repeat_wrong=4):
     print(f"[train] {symbol}-{strategy} 전체 모델 학습 시작")
     best_window = find_best_window(symbol, strategy)
     df = get_kline_by_strategy(symbol, strategy)
