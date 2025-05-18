@@ -27,20 +27,6 @@ AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
 FAILURE_LOG = "/persistent/logs/failure_count.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
 
-def get_symbols_by_volatility(strategy, threshold=0.003):
-    selected = []
-    for symbol in SYMBOLS:
-        try:
-            df = get_kline_by_strategy(symbol, strategy)
-            if df is None or len(df) < 20:
-                continue
-            vol = df["close"].pct_change().rolling(window=20).std().iloc[-1]
-            if vol is not None and vol >= threshold:
-                selected.append(symbol)
-        except Exception as e:
-            print(f"[변동성 계산 실패] {symbol}-{strategy}: {e}")
-    return selected
-
 def load_failure_count():
     if not os.path.exists(FAILURE_LOG):
         return {}
@@ -75,12 +61,25 @@ def get_price_now(symbol):
     prices = get_realtime_prices()
     return prices.get(symbol)
 
+def should_predict(symbol, strategy):
+    try:
+        rate = get_model_success_rate(symbol, strategy, "ensemble")
+        eval_count = get_strategy_eval_count(strategy)
+        if eval_count < 10:
+            return True  # 평가가 충분치 않으면 항상 예측
+        if rate < 0.5:
+            return True  # 낮은 성공률이면 자주 예측
+        if rate > 0.8:
+            return False  # 높은 성공률이면 예측 빈도 줄임
+        return True
+    except:
+        return True
+
 def main():
     print(">>> [main] recommend.py 진입 성공")
     sys.stdout.flush()
 
     print("✅ 예측 평가 시작")
-    sys.stdout.flush()
     try:
         evaluate_predictions(get_price_now)
     except Exception as e:
@@ -111,8 +110,20 @@ def main():
             print(f"[차단] 전략 성공률 낮음 → {strategy} 제외")
             continue
 
-        for symbol in get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
+        for symbol in SYMBOLS:
             try:
+                df = get_kline_by_strategy(symbol, strategy)
+                if df is None or len(df) < 20:
+                    continue
+
+                vol = df["close"].pct_change().rolling(window=20).std().iloc[-1]
+                if vol is None or vol < VOLATILITY_THRESHOLD:
+                    continue
+
+                if not should_predict(symbol, strategy):
+                    print(f"[스킵] {symbol}-{strategy} 성공률 높음 → 예측 건너뜀")
+                    continue
+
                 result = predict(symbol, strategy)
                 print(f"[예측] {symbol}-{strategy} → {result}")
                 sys.stdout.flush()
@@ -150,7 +161,6 @@ def main():
 
             except Exception as e:
                 print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
-                sys.stdout.flush()
                 try:
                     log_prediction(
                         symbol=symbol,
