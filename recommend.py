@@ -1,3 +1,4 @@
+# --- [필수 import] ---
 import datetime
 import os
 import csv
@@ -114,9 +115,21 @@ def run_prediction_loop(strategy, symbols):
             print(f"[예측] {symbol}-{strategy} → {result}")
             sys.stdout.flush()
 
-            if result.get("reason") == "모델 없음":
-                print(f"[SKIP] {symbol}-{strategy} → 모델 없음으로 예측 제외")
-                log_audit(symbol, strategy, result, "모델 없음")
+            if result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
+                print(f"[SKIP] {symbol}-{strategy} → 예측 불가 이유: {result['reason']}")
+                log_prediction(
+                    symbol=symbol,
+                    strategy=strategy,
+                    direction="N/A",
+                    entry_price=0,
+                    target_price=0,
+                    timestamp=datetime.datetime.utcnow().isoformat(),
+                    confidence=0.0,
+                    model="unknown",
+                    success=False,
+                    reason=result["reason"],
+                )
+                log_audit(symbol, strategy, result, result["reason"])
                 continue
 
             if not isinstance(result, dict):
@@ -186,7 +199,7 @@ def run_prediction_loop(strategy, symbols):
 
         success_rate = get_model_success_rate(symbol, strategy, model)
         if success_rate < SUCCESS_RATE_THRESHOLD:
-            continue  # ✅ 메시지 추천만 제외, 예측 기록/평가는 유지
+            continue
 
         penalty = 1.0 - (1.0 - success_rate) ** 2
         score = conf * rate * penalty
@@ -209,7 +222,6 @@ def run_prediction_loop(strategy, symbols):
             msg = format_message(res)
             send_message(msg)
 
-            # ✅ 메시지 로그 기록
             try:
                 with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
                     writer = csv.writer(f)
