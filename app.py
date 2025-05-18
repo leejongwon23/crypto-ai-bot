@@ -28,31 +28,58 @@ AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
 MESSAGE_LOG = os.path.join(LOG_DIR, "message_log.csv")
 FAILURE_COUNT_LOG = os.path.join(LOG_DIR, "failure_count.csv")
 
-# --- 예측 루프 1: 고정 전략별 주기 ---
+VOLATILITY_THRESHOLD = {
+    "단기": 0.003,
+    "중기": 0.005,
+    "장기": 0.008
+}
+
+def get_symbols_by_volatility(strategy):
+    threshold = VOLATILITY_THRESHOLD.get(strategy, 0.003)
+    selected = []
+    for symbol in SYMBOLS:
+        try:
+            df = get_kline_by_strategy(symbol, strategy)
+            if df is None or len(df) < 20:
+                continue
+            vol = df["close"].pct_change().rolling(window=20).std().iloc[-1]
+            if vol is not None and vol >= threshold:
+                selected.append(symbol)
+        except Exception as e:
+            print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
+    return selected
+
 def start_regular_prediction_loop():
-    def loop():
+    def loop(strategy, interval_sec):
         while True:
             try:
-                print(f"[정기 예측] {datetime.datetime.now()} - main() 실행")
+                print(f"[정기 예측] {strategy} - {datetime.datetime.now()} - main() 실행")
                 sys.stdout.flush()
-                main()
+                main(strategy)
             except Exception as e:
-                print(f"[정기 예측 오류] {e}")
-            time.sleep(3600)
-    threading.Thread(target=loop, daemon=True).start()
+                print(f"[정기 예측 오류] {strategy}: {e}")
+            time.sleep(interval_sec)
+    threading.Thread(target=loop, args=("단기", 7200), daemon=True).start()
+    threading.Thread(target=loop, args=("중기", 21600), daemon=True).start()
+    threading.Thread(target=loop, args=("장기", 86400), daemon=True).start()
 
-# --- 예측 루프 2: 변동성 기반 실시간 트리거 ---
 def start_volatility_prediction_loop():
     def loop():
         while True:
             try:
                 now = datetime.datetime.now()
-                print(f"[변동성 예측] {now} - 전략별 실시간 예측 시작")
+                print(f"[변동성 예측] {now} - 조건 기반 전략 예측 실행")
                 sys.stdout.flush()
-                main()
+                for strategy in ["단기", "중기", "장기"]:
+                    volatile = get_symbols_by_volatility(strategy)
+                    if volatile:
+                        print(f"[트리거] {strategy} 변동성 높은 코인 {len(volatile)}개 → 예측 실행")
+                        main(strategy)
+                    else:
+                        print(f"[스킵] {strategy} 변동성 기준 미달")
             except Exception as e:
                 print(f"[변동성 예측 오류] {e}")
-            time.sleep(1800)
+            time.sleep(3600)
     threading.Thread(target=loop, daemon=True).start()
 
 def start_scheduler():
