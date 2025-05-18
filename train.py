@@ -220,3 +220,6 @@ def train_all_models():
                 train_one_model(symbol, strategy)
             except Exception as e:
                 print(f"[오류] 전체 학습 실패: {symbol}-{strategy} → {e}")
+
+# ✅ 개별 학습 alias 함수 (호환성 유지)
+train_model = train_one_model
