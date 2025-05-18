@@ -171,23 +171,33 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
     else:
         print(f"❗ 최종 저장 실패: {symbol}-{strategy} 모든 모델 평가 실패")
 
-# ✅ 전략별 조건 기반 학습 루프
+# ✅ 전략별 조건 기반 학습 루프 (무한 루프 보호)
 def conditional_train_loop():
+    recent_train_time = {}  # (symbol, strategy) 기준 최소 1시간 간격 보장
+
     def loop(strategy):
         while True:
             for symbol in SYMBOLS:
                 try:
+                    key = (symbol, strategy)
+                    now = time.time()
+                    last_time = recent_train_time.get(key, 0)
+                    if now - last_time < 3600:
+                        continue
+
                     fail_rate = get_strategy_fail_rate(symbol, strategy)
                     eval_count = get_strategy_eval_count(symbol, strategy)
+
                     if fail_rate >= 0.3 or eval_count >= 5:
                         print(f"[학습조건충족] {symbol}-{strategy} → 실패율: {fail_rate:.2f}, 평가횟수: {eval_count}")
                         train_one_model(symbol, strategy)
                         gc.collect()
+                        recent_train_time[key] = time.time()
                     else:
                         print(f"[SKIP] {symbol}-{strategy} 실패율 낮음({fail_rate:.2f}) 또는 평가 부족({eval_count})")
                 except Exception as e:
                     print(f"[조건루프오류] {symbol}-{strategy} 학습 실패: {e}")
-            time.sleep(600)  # 10분 간격 점검
+            time.sleep(600)
 
     for strategy in ["단기", "중기", "장기"]:
         threading.Thread(target=loop, args=(strategy,), daemon=True).start()
