@@ -194,7 +194,7 @@ def conditional_train_loop():
                         continue
 
                     fail_rate = get_strategy_fail_rate(symbol, strategy)
-                    eval_count = get_strategy_eval_count(strategy)  # ✅ 수정됨
+                    eval_count = get_strategy_eval_count(symbol, strategy)
 
                     if fail_rate >= 0.3 or eval_count < 10 or now - recent_train_time.get(key, 0) > gap * 2:
                         print(f"[학습조건충족] {symbol}-{strategy} → 실패율: {fail_rate:.2f}, 평가: {eval_count}")
@@ -211,3 +211,12 @@ def conditional_train_loop():
         threading.Thread(target=loop, args=(s,), daemon=True).start()
 
 conditional_train_loop()
+
+# ✅ 전체 학습용 함수 추가 (/train-now 대응)
+def train_all_models():
+    for strategy in ["단기", "중기", "장기"]:
+        for symbol in SYMBOLS:
+            try:
+                train_one_model(symbol, strategy)
+            except Exception as e:
+                print(f"[오류] 전체 학습 실패: {symbol}-{strategy} → {e}")
