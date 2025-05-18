@@ -1,5 +1,3 @@
-# [생략 없이 전체 recommend.py 수정본]
-
 import datetime
 import os
 import csv
@@ -209,16 +207,18 @@ def run_prediction_loop(strategy, symbols):
         except Exception as e:
             print(f"[ERROR] 메시지 전송 실패: {e}")
 
-def main():
+def main(strategy=None):
     print(">>> [main] recommend.py 실행")
     sys.stdout.flush()
 
-    # 변동성 기반 예측 실행
-    for strategy in ["단기", "중기", "장기"]:
+    if strategy:
         symbols = get_symbols_by_volatility(strategy)
         run_prediction_loop(strategy, symbols)
+    else:
+        for strategy in ["단기", "중기", "장기"]:
+            symbols = get_symbols_by_volatility(strategy)
+            run_prediction_loop(strategy, symbols)
 
-# ✅ 전략별 고정 주기 예측 루프 추가
 def start_regular_prediction_loop():
     def loop():
         while True:
