@@ -14,6 +14,7 @@ import logger
 from predict_test import test_all_predictions
 from data.utils import get_latest_price
 import shutil
+import time
 
 PERSIST_DIR = "/persistent"
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
@@ -27,18 +28,22 @@ AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
 MESSAGE_LOG = os.path.join(LOG_DIR, "message_log.csv")
 FAILURE_COUNT_LOG = os.path.join(LOG_DIR, "failure_count.csv")
 
+def start_auto_prediction_loop():
+    def loop():
+        while True:
+            try:
+                print(f"[AUTO-PREDICT] {datetime.datetime.now()} - main() 실행")
+                sys.stdout.flush()
+                main()
+            except Exception as e:
+                print(f"[AUTO-PREDICT ERROR] {e}")
+            time.sleep(3600)  # 1시간마다 실행
+    threading.Thread(target=loop, daemon=True).start()
+
 def start_scheduler():
     print(">>> start_scheduler() 호출됨")
     sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Seoul'))
-
-    def run_prediction():
-        print(f"[예측 시작] {datetime.datetime.now()}")
-        sys.stdout.flush()
-        try:
-            main()
-        except Exception as e:
-            print(f"[예측 오류] {e}")
 
     def run_evaluation():
         print(f"[평가 시작] {datetime.datetime.now()}")
@@ -48,9 +53,6 @@ def start_scheduler():
             print("[평가 완료]")
         except Exception as e:
             print(f"[평가 오류] {e}")
-
-    scheduler.add_job(run_prediction, 'cron', minute=0)
-    scheduler.add_job(run_evaluation, 'cron', minute=20, id='eval_loop', replace_existing=True)
 
     def train_short():
         print("[단기 학습 시작]")
@@ -64,11 +66,11 @@ def start_scheduler():
         print("[장기 학습 시작]")
         threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start()
 
+    scheduler.add_job(run_evaluation, 'cron', minute=20, id='eval_loop', replace_existing=True)
     scheduler.add_job(train_short, 'cron', hour='0,3,6,9,12,15,18,21', minute=30)
     scheduler.add_job(train_mid, 'cron', hour='1,7,13,19', minute=30)
     scheduler.add_job(train_long, 'cron', hour='2,14', minute=30)
     scheduler.add_job(test_all_predictions, 'cron', minute=10, id='predict_test', replace_existing=True)
-
     scheduler.start()
 
 app = Flask(__name__)
@@ -286,6 +288,7 @@ if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
     sys.stdout.flush()
     start_scheduler()
+    start_auto_prediction_loop()
     send_message("[시스템 테스트] YOPO 서버가 정상적으로 실행되었으며 텔레그램 메시지도 전송됩니다.")
     print("✅ 테스트 메시지 전송 완료")
     sys.stdout.flush()
