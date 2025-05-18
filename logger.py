@@ -63,8 +63,8 @@ def log_audit(symbol, strategy, status, reason):
             writer.writeheader()
         writer.writerow(row)
 
-def log_prediction(symbol, strategy, direction=None, entry_price=None, target_price=None, timestamp=None,
-                   confidence=None, model=None, success=True, reason="", rate=0.0):
+def log_prediction(symbol, strategy, direction=None, entry_price=None, target_price=None,
+                   timestamp=None, confidence=None, model=None, success=True, reason="", rate=0.0):
     now = timestamp or datetime.datetime.utcnow().isoformat()
     row = {
         "timestamp": now,
@@ -87,56 +87,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=None, target_pr
         if write_header:
             writer.writeheader()
         writer.writerow(row)
-
-def get_actual_success_rate(strategy, threshold=0.7):
-    try:
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-        df = df[(df["strategy"] == strategy) & (df["confidence"] >= threshold)]
-        if df.empty:
-            return 0.0
-        evaluated = df[df["status"].isin(["success", "fail"])]
-        if evaluated.empty:
-            return 0.0
-        return len(evaluated[evaluated["status"] == "success"]) / len(evaluated)
-    except:
-        return 0.0
-
-def get_strategy_eval_count(strategy):
-    try:
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-        df = df[df["strategy"] == strategy]
-        evaluated = df[df["status"].isin(["success", "fail"])]
-        return len(evaluated)
-    except:
-        return 0
-
-def get_strategy_fail_rate(symbol, strategy):
-    try:
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-        df = df[(df["strategy"] == strategy) & (df["symbol"] == symbol)]
-        df = df[df["status"].isin(["success", "fail"])]
-        if df.empty:
-            return 0.0
-        fail_rate = len(df[df["status"] == "fail"]) / len(df)
-        return fail_rate
-    except:
-        return 0.0
-
-def get_dynamic_eval_wait(strategy):
-    rate = get_actual_success_rate(strategy)
-    if strategy == "단기":
-        if rate >= 0.7: return 2
-        elif rate >= 0.4: return 4
-        else: return 6
-    elif strategy == "중기":
-        if rate >= 0.7: return 6
-        elif rate >= 0.4: return 12
-        else: return 24
-    elif strategy == "장기":
-        if rate >= 0.7: return 24
-        elif rate >= 0.4: return 48
-        else: return 72
-    return 6
 
 def evaluate_predictions(get_price_fn):
     if not os.path.exists(PREDICTION_LOG):
@@ -179,24 +129,25 @@ def evaluate_predictions(get_price_fn):
                 continue
 
             if direction not in ["롱", "숏"] or model == "unknown" or entry_price == 0:
-                row["status"] = "fail"
-                row["reason"] = "평가 불가: 데이터 부족"
-                log_audit(symbol, strategy, "실패", row["reason"])
+                row["status"] = "skip_eval"
+                row["reason"] = "평가 불가: 입력데이터 부족"
+                log_audit(symbol, strategy, "스킵", row["reason"])
                 updated_rows.append(row)
                 continue
 
             model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model}.pt")
             if not os.path.exists(model_path):
-                row["status"] = "invalid_model"
-                row["reason"] = f"모델 파일 없음: {model_path}"
-                log_audit(symbol, strategy, "실패", row["reason"])
+                row["status"] = "skip_eval"
+                row["reason"] = f"모델 없음: {model_path}"
+                log_audit(symbol, strategy, "스킵", row["reason"])
                 updated_rows.append(row)
                 continue
 
             current_price = get_price_fn(symbol)
             if current_price is None:
+                row["status"] = "skip_eval"
                 row["reason"] = "현재가 조회 실패"
-                log_audit(symbol, strategy, "실패", row["reason"])
+                log_audit(symbol, strategy, "스킵", row["reason"])
                 updated_rows.append(row)
                 continue
 
@@ -230,9 +181,9 @@ def evaluate_predictions(get_price_fn):
             updated_rows.append(row)
 
         except Exception as e:
-            row["status"] = "fail"
-            row["reason"] = f"예외: {e}"
-            log_audit(row.get("symbol", "?"), row.get("strategy", "?"), "실패", row["reason"])
+            row["status"] = "skip_eval"
+            row["reason"] = f"예외 발생: {e}"
+            log_audit(row.get("symbol", "?"), row.get("strategy", "?"), "스킵", row["reason"])
             updated_rows.append(row)
 
     if updated_rows:
@@ -240,6 +191,44 @@ def evaluate_predictions(get_price_fn):
             writer = csv.DictWriter(f, fieldnames=updated_rows[0].keys())
             writer.writeheader()
             writer.writerows(updated_rows)
+
+def get_dynamic_eval_wait(strategy):
+    rate = get_actual_success_rate(strategy)
+    if strategy == "단기":
+        return 2 if rate >= 0.7 else 4 if rate >= 0.4 else 6
+    elif strategy == "중기":
+        return 6 if rate >= 0.7 else 12 if rate >= 0.4 else 24
+    elif strategy == "장기":
+        return 24 if rate >= 0.7 else 48 if rate >= 0.4 else 72
+    return 6
+
+def get_actual_success_rate(strategy, threshold=0.7):
+    try:
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        df = df[(df["strategy"] == strategy) & (df["confidence"] >= threshold)]
+        df = df[df["status"].isin(["success", "fail"])]
+        if df.empty: return 0.0
+        return len(df[df["status"] == "success"]) / len(df)
+    except:
+        return 0.0
+
+def get_strategy_eval_count(strategy):
+    try:
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        df = df[df["strategy"] == strategy]
+        return len(df[df["status"].isin(["success", "fail"])])
+    except:
+        return 0
+
+def get_strategy_fail_rate(symbol, strategy):
+    try:
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        df = df[(df["strategy"] == strategy) & (df["symbol"] == symbol)]
+        df = df[df["status"].isin(["success", "fail"])]
+        if df.empty: return 0.0
+        return len(df[df["status"] == "fail"]) / len(df)
+    except:
+        return 0.0
 
 def print_prediction_stats():
     if not os.path.exists(PREDICTION_LOG):
@@ -252,6 +241,8 @@ def print_prediction_stats():
         pending = len(df[df["status"] == "pending"])
         skipped = len(df[df["status"] == "skipped"])
         invalid = len(df[df["status"] == "invalid_model"])
+        skipped_eval = len(df[df["status"] == "skip_eval"])
+
         success_rate = (success / (success + fail)) * 100 if (success + fail) > 0 else 0
 
         summary = [
@@ -261,6 +252,7 @@ def print_prediction_stats():
             f"⏳ 평가 대기중: {pending}",
             f"⏭️ 스킵: {skipped}",
             f"⚠️ 모델없음: {invalid}",
+            f"🟡 평가제외: {skipped_eval}",
             f"🎯 성공률: {success_rate:.2f}%"
         ]
 
