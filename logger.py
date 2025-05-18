@@ -108,7 +108,6 @@ def get_strategy_eval_count(strategy):
     except:
         return 0
 
-# ✅ [추가됨] 전략별 실패율 계산 (train.py에서 import 필요)
 def get_strategy_fail_rate(symbol, strategy):
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
@@ -201,16 +200,23 @@ def evaluate_predictions(get_price_fn):
                 continue
 
             gain = (current_price - entry_price) / entry_price
-            success = gain >= rate if direction == "롱" else -gain >= rate
-            row["status"] = "success" if success else "fail"
-            row["reason"] = (
-                f"수익률 달성: {gain:.4f} >= 예측 {rate:.4f}" if success
-                else f"수익률 미달: {gain:.4f} < 예측 {rate:.4f}"
-            )
-            update_model_success(symbol, strategy, model, success)
+            min_gain = get_min_gain(symbol, strategy)
 
-            if not success:
+            if abs(gain) < min_gain:
+                row["status"] = "fail"
+                row["reason"] = f"수익률 미달: {gain:.4f} < 최소요건 {min_gain:.4f}"
                 log_audit(symbol, strategy, "실패", row["reason"])
+            else:
+                success = gain >= rate if direction == "롱" else -gain >= rate
+                row["status"] = "success" if success else "fail"
+                row["reason"] = (
+                    f"수익률 달성: {gain:.4f} ≥ 예측 {rate:.4f}" if success
+                    else f"예측 미달: {gain:.4f} < 예측 {rate:.4f}"
+                )
+                log_audit(symbol, strategy, "성공" if success else "실패", row["reason"])
+                update_model_success(symbol, strategy, model, success)
+
+            if row["status"] == "fail":
                 write_header = not os.path.exists(WRONG_PREDICTIONS)
                 with open(WRONG_PREDICTIONS, "a", newline="", encoding="utf-8-sig") as wf:
                     writer = csv.writer(wf)
@@ -220,13 +226,13 @@ def evaluate_predictions(get_price_fn):
                         row["timestamp"], symbol, strategy, direction,
                         entry_price, row["target_price"], current_price, gain
                     ])
-            else:
-                log_audit(symbol, strategy, "성공", row["reason"])
+            updated_rows.append(row)
+
         except Exception as e:
             row["status"] = "fail"
             row["reason"] = f"예외: {e}"
             log_audit(row.get("symbol", "?"), row.get("strategy", "?"), "실패", row["reason"])
-        updated_rows.append(row)
+            updated_rows.append(row)
 
     if updated_rows:
         with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
