@@ -17,7 +17,6 @@ from logger import get_min_gain, get_strategy_fail_rate, get_strategy_eval_count
 from window_optimizer import find_best_window
 
 DEVICE = torch.device("cpu")
-STOP_LOSS_PCT = 0.02
 PERSIST_DIR = "/persistent"
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
 LOG_DIR = os.path.join(PERSIST_DIR, "logs")
@@ -25,6 +24,8 @@ WRONG_DIR = os.path.join(PERSIST_DIR, "wrong")
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(WRONG_DIR, exist_ok=True)
+
+STRATEGY_GAP = {"단기": 7200, "중기": 21600, "장기": 43200}  # 초 단위 간격
 
 def create_dataset(features, window):
     X, y = [], []
@@ -150,9 +151,8 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
                 acc = float(accuracy_score(y_true, y_pred))
                 f1 = float(f1_score(y_true, y_pred))
                 logloss = float(log_loss(y_true, y_prob, labels=[0, 1]))
-                score = acc + f1
                 logger.log_training_result(symbol, strategy, model_type, acc, f1, logloss)
-                scores[model_type] = score
+                scores[model_type] = acc + f1
                 models[model_type] = model
                 metrics[model_type] = (acc, f1, logloss)
         except Exception as e:
@@ -171,9 +171,9 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
     else:
         print(f"❗ 최종 저장 실패: {symbol}-{strategy} 모든 모델 평가 실패")
 
-# ✅ 전략별 조건 기반 학습 루프 (무한 루프 보호)
+# ✅ 전략별 변동성 기반 조건 루프
 def conditional_train_loop():
-    recent_train_time = {}  # (symbol, strategy) 기준 최소 1시간 간격 보장
+    recent_train_time = {}
 
     def loop(strategy):
         while True:
@@ -181,25 +181,33 @@ def conditional_train_loop():
                 try:
                     key = (symbol, strategy)
                     now = time.time()
-                    last_time = recent_train_time.get(key, 0)
-                    if now - last_time < 3600:
+                    gap = STRATEGY_GAP.get(strategy, 3600)
+                    if now - recent_train_time.get(key, 0) < gap:
+                        continue
+
+                    df = get_kline_by_strategy(symbol, strategy)
+                    if df is None or len(df) < 20:
+                        continue
+                    vol = df["close"].pct_change().rolling(window=20).std().iloc[-1]
+                    if vol is None or vol < 0.002:
+                        print(f"[SKIP] {symbol}-{strategy} → 변동성 부족")
                         continue
 
                     fail_rate = get_strategy_fail_rate(symbol, strategy)
                     eval_count = get_strategy_eval_count(symbol, strategy)
 
-                    if fail_rate >= 0.3 or eval_count >= 5:
-                        print(f"[학습조건충족] {symbol}-{strategy} → 실패율: {fail_rate:.2f}, 평가횟수: {eval_count}")
+                    if fail_rate >= 0.3 or eval_count < 10 or now - recent_train_time.get(key, 0) > gap * 2:
+                        print(f"[학습조건충족] {symbol}-{strategy} → 실패율: {fail_rate:.2f}, 평가: {eval_count}")
                         train_one_model(symbol, strategy)
                         gc.collect()
                         recent_train_time[key] = time.time()
                     else:
-                        print(f"[SKIP] {symbol}-{strategy} 실패율 낮음({fail_rate:.2f}) 또는 평가 부족({eval_count})")
+                        print(f"[SKIP] {symbol}-{strategy} → 조건 미충족")
                 except Exception as e:
-                    print(f"[조건루프오류] {symbol}-{strategy} 학습 실패: {e}")
+                    print(f"[오류] 학습 루프 실패: {symbol}-{strategy} → {e}")
             time.sleep(600)
 
-    for strategy in ["단기", "중기", "장기"]:
-        threading.Thread(target=loop, args=(strategy,), daemon=True).start()
+    for s in ["단기", "중기", "장기"]:
+        threading.Thread(target=loop, args=(s,), daemon=True).start()
 
 conditional_train_loop()
