@@ -108,7 +108,19 @@ def get_strategy_eval_count(strategy):
     except:
         return 0
 
-# ✅ 전략별 성공률 기반 동적 평가 대기시간 계산
+# ✅ [추가됨] 전략별 실패율 계산 (train.py에서 import 필요)
+def get_strategy_fail_rate(symbol, strategy):
+    try:
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        df = df[(df["strategy"] == strategy) & (df["symbol"] == symbol)]
+        df = df[df["status"].isin(["success", "fail"])]
+        if df.empty:
+            return 0.0
+        fail_rate = len(df[df["status"] == "fail"]) / len(df)
+        return fail_rate
+    except:
+        return 0.0
+
 def get_dynamic_eval_wait(strategy):
     rate = get_actual_success_rate(strategy)
     if strategy == "단기":
