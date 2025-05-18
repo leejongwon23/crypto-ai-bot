@@ -12,6 +12,28 @@ DEVICE = torch.device("cpu")
 STOP_LOSS_PCT = 0.02
 MODEL_DIR = "/persistent/models"
 
+# --- ✅ 변동성 기반 예측 주기 계산 함수 ---
+def get_volatility(symbol, strategy):
+    df = get_kline_by_strategy(symbol, strategy)
+    if df is None or len(df) < 30:
+        return 0.0
+    closes = df["close"].astype(float)
+    log_returns = np.log(closes / closes.shift(1)).dropna()
+    volatility = np.std(log_returns) * np.sqrt(len(log_returns))
+    return float(volatility)
+
+def get_predict_interval(strategy, symbol):
+    vol = get_volatility(symbol, strategy)
+    if strategy == "단기":
+        base = 60  # base 60분
+    elif strategy == "중기":
+        base = 120
+    else:  # 장기
+        base = 360
+    adj = min(2.0, max(0.5, 1 / (vol + 1e-6)))  # 변동성 낮으면 2배 느리게, 높으면 최대 0.5배 빠르게
+    return int(base * adj)
+
+# --- ✅ 예측 실패 응답 구조 ---
 def failed_result(symbol, strategy, reason):
     dummy_price = 1.0
     return {
@@ -28,6 +50,7 @@ def failed_result(symbol, strategy, reason):
         "stop": dummy_price
     }
 
+# --- ✅ 메인 예측 함수 ---
 def predict(symbol, strategy):
     try:
         best_window = find_best_window(symbol, strategy)
@@ -52,7 +75,7 @@ def predict(symbol, strategy):
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
         input_size = X.shape[2]
 
-        # --- ✅ 모델 자동 탐색 ---
+        # --- 모델 자동 탐색 ---
         model_paths = {}
         for file in os.listdir(MODEL_DIR):
             if not file.endswith(".pt"):
