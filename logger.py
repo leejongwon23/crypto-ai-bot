@@ -63,7 +63,8 @@ def log_audit(symbol, strategy, status, reason):
             writer.writeheader()
         writer.writerow(row)
 
-def log_prediction(symbol, strategy, direction=None, entry_price=None, target_price=None, timestamp=None, confidence=None, model=None, success=True, reason=""):
+def log_prediction(symbol, strategy, direction=None, entry_price=None, target_price=None, timestamp=None,
+                   confidence=None, model=None, success=True, reason="", rate=0.0):
     now = timestamp or datetime.datetime.utcnow().isoformat()
     row = {
         "timestamp": now,
@@ -74,6 +75,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=None, target_pr
         "target_price": target_price or 0,
         "confidence": confidence or 0,
         "model": model or "unknown",
+        "rate": rate or 0,
         "status": "pending",
         "reason": reason or ""
     }
@@ -152,7 +154,6 @@ def evaluate_predictions(get_price_fn):
         if row.get("status") != "pending":
             updated_rows.append(row)
             continue
-
         try:
             pred_time = datetime.datetime.fromisoformat(row["timestamp"])
             strategy = row["strategy"]
