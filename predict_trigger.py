@@ -1,29 +1,68 @@
-# predict_trigger.py
+# predict_trigger.py (YOPO 전조 패턴 기반 예측 트리거)
 
-import random
+import pandas as pd
 from data.utils import SYMBOLS, get_kline_by_strategy
+from recommend import run_prediction
+import traceback
 
-# 전략별 최소 변동성 기준
-MIN_VOLATILITY = {
-    "단기": 0.005,
-    "중기": 0.01,
-    "장기": 0.015
-}
+# 예측 트리거 실행 간 최소 간격 (중복 방지용)
+last_trigger_time = {}
 
-def get_symbols_to_predict(strategy):
-    selected = []
+def check_pre_burst_conditions(df):
+    try:
+        # 1. 거래량 점진 증가 (최근 3개 캔들)
+        vol_increasing = (
+            df['volume'].iloc[-3] < df['volume'].iloc[-2] < df['volume'].iloc[-1]
+        )
+
+        # 2. 최근 30분간 가격 횡보 (±0.5% 이내)
+        price_range = df['close'].iloc[-6:]
+        stable_price = (price_range.max() - price_range.min()) / price_range.mean() < 0.005
+
+        # 3. 체결강도 급증 (최근 1개 > 평균 2배)
+        if 'strength' in df.columns:
+            avg_strength = df['strength'].iloc[-10:-1].mean()
+            sudden_strength = df['strength'].iloc[-1] > avg_strength * 2
+        else:
+            sudden_strength = False  # 미지원 시 비활성
+
+        # 4. 이평선 압축 (5/15/60 EMA가 거의 같은 위치)
+        ema_5 = df['close'].ewm(span=5).mean().iloc[-1]
+        ema_15 = df['close'].ewm(span=15).mean().iloc[-1]
+        ema_60 = df['close'].ewm(span=60).mean().iloc[-1]
+        ma_pack = max(ema_5, ema_15, ema_60) - min(ema_5, ema_15, ema_60)
+        ema_compressed = ma_pack / df['close'].iloc[-1] < 0.003
+
+        # 5. 볼린저밴드 수축 후 확장 (밴드폭 최저치 후 증가 시작)
+        bb_std = df['close'].rolling(window=20).std()
+        expanding_band = bb_std.iloc[-2] < bb_std.iloc[-1] and bb_std.iloc[-1] > 0.002
+
+        # 총 만족 조건 수
+        satisfied = sum([
+            vol_increasing,
+            stable_price,
+            sudden_strength,
+            ema_compressed,
+            expanding_band
+        ])
+
+        return satisfied >= 2
+
+    except Exception:
+        traceback.print_exc()
+        return False
+
+def run():
+    print("[트리거 실행] 전조 패턴 감지 시작")
     for symbol in SYMBOLS:
         try:
-            df = get_kline_by_strategy(symbol, strategy)
-            if df is None or len(df) < 20:
+            df = get_kline_by_strategy(symbol, "단기")  # 단기 캔들 기준
+            if df is None or len(df) < 60:
                 continue
-            vol = df["close"].pct_change().rolling(20).std().iloc[-1]
-            if vol is None or vol < MIN_VOLATILITY[strategy]:
-                continue
-            selected.append(symbol)
+
+            if check_pre_burst_conditions(df):
+                print(f"[트리거 포착] {symbol} - 예측 실행")
+                run_prediction(symbol)
+
         except Exception as e:
-            print(f"[오류] {symbol}-{strategy} 변동성 계산 실패: {e}")
-    if not selected:
-        # 아무 것도 선택되지 않으면 랜덤 5개라도 예측
-        selected = random.sample(SYMBOLS, min(5, len(SYMBOLS)))
-    return selected
+            print(f"[트리거 오류] {symbol}: {e}")
