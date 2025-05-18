@@ -12,7 +12,6 @@ LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.csv")
 AUDIT_LOG = os.path.join(PERSIST_DIR, "logs", "evaluation_audit.csv")
 os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 
-STRATEGY_HOURS = {"단기": 4, "중기": 24, "장기": 144}
 EVAL_EXPIRY_BUFFER = 12
 STOP_LOSS_PCT = 0.02
 model_success_tracker = {}
@@ -75,7 +74,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=None, target_pr
         "target_price": target_price or 0,
         "confidence": confidence or 0,
         "model": model or "unknown",
-        "status": "pending",  # ✅ 항상 pending 고정
+        "status": "pending",
         "reason": reason or ""
     }
     if not success:
@@ -86,6 +85,45 @@ def log_prediction(symbol, strategy, direction=None, entry_price=None, target_pr
         if write_header:
             writer.writeheader()
         writer.writerow(row)
+
+def get_actual_success_rate(strategy, threshold=0.7):
+    try:
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        df = df[(df["strategy"] == strategy) & (df["confidence"] >= threshold)]
+        if df.empty:
+            return 0.0
+        evaluated = df[df["status"].isin(["success", "fail"])]
+        if evaluated.empty:
+            return 0.0
+        return len(evaluated[evaluated["status"] == "success"]) / len(evaluated)
+    except:
+        return 0.0
+
+def get_strategy_eval_count(strategy):
+    try:
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        df = df[df["strategy"] == strategy]
+        evaluated = df[df["status"].isin(["success", "fail"])]
+        return len(evaluated)
+    except:
+        return 0
+
+# ✅ 전략별 성공률 기반 동적 평가 대기시간 계산
+def get_dynamic_eval_wait(strategy):
+    rate = get_actual_success_rate(strategy)
+    if strategy == "단기":
+        if rate >= 0.7: return 2
+        elif rate >= 0.4: return 4
+        else: return 6
+    elif strategy == "중기":
+        if rate >= 0.7: return 6
+        elif rate >= 0.4: return 12
+        else: return 24
+    elif strategy == "장기":
+        if rate >= 0.7: return 24
+        elif rate >= 0.4: return 48
+        else: return 72
+    return 6
 
 def evaluate_predictions(get_price_fn):
     if not os.path.exists(PREDICTION_LOG):
@@ -112,7 +150,7 @@ def evaluate_predictions(get_price_fn):
             entry_price = float(row.get("entry_price", 0))
             rate = float(row.get("rate", 0))
             symbol = row["symbol"]
-            eval_hours = STRATEGY_HOURS.get(strategy, 6)
+            eval_hours = get_dynamic_eval_wait(strategy)
             hours_passed = (now - pred_time).total_seconds() / 3600
 
             if hours_passed > eval_hours + EVAL_EXPIRY_BUFFER:
@@ -183,28 +221,6 @@ def evaluate_predictions(get_price_fn):
             writer = csv.DictWriter(f, fieldnames=updated_rows[0].keys())
             writer.writeheader()
             writer.writerows(updated_rows)
-
-def get_actual_success_rate(strategy, threshold=0.7):
-    try:
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-        df = df[(df["strategy"] == strategy) & (df["confidence"] >= threshold)]
-        if df.empty:
-            return 0.0
-        evaluated = df[df["status"].isin(["success", "fail"])]
-        if evaluated.empty:
-            return 0.0
-        return len(evaluated[evaluated["status"] == "success"]) / len(evaluated)
-    except:
-        return 0.0
-
-def get_strategy_eval_count(strategy):
-    try:
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-        df = df[df["strategy"] == strategy]
-        evaluated = df[df["status"].isin(["success", "fail"])]
-        return len(evaluated)
-    except:
-        return 0
 
 def print_prediction_stats():
     if not os.path.exists(PREDICTION_LOG):
