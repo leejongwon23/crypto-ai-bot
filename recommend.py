@@ -207,6 +207,7 @@ def run_prediction_loop(strategy, symbols):
         except Exception as e:
             print(f"[ERROR] 메시지 전송 실패: {e}")
 
+# ✅ main 함수는 인자 없이 또는 strategy 인자로 호출 가능하게 변경
 def main(strategy=None):
     print(">>> [main] recommend.py 실행")
     sys.stdout.flush()
@@ -219,6 +220,7 @@ def main(strategy=None):
             symbols = get_symbols_by_volatility(strategy)
             run_prediction_loop(strategy, symbols)
 
+# ✅ 전략별 정기 예측 루프
 def start_regular_prediction_loop():
     def loop():
         while True:
