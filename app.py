@@ -13,6 +13,7 @@ from telegram_bot import send_message
 import logger
 from predict_test import test_all_predictions
 from data.utils import get_latest_price
+import shutil
 
 PERSIST_DIR = "/persistent"
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
@@ -167,21 +168,19 @@ def check_stats():
 
 @app.route("/reset-all")
 def reset_all():
-    import glob
     secret_key = "3572"
     request_key = request.args.get("key")
     if request_key != secret_key:
         return "❌ 인증 실패: 잘못된 접근", 403
 
     try:
-        # 초기화 대상 파일들
         for file_path in [PREDICTION_LOG, WRONG_PREDICTIONS, LOG_FILE, AUDIT_LOG, MESSAGE_LOG, FAILURE_COUNT_LOG]:
             if os.path.exists(file_path):
                 open(file_path, "w").close()
 
-        # 모델 삭제
-        for f in glob.glob(os.path.join(MODEL_DIR, "*.pt")):
-            os.remove(f)
+        if os.path.exists(MODEL_DIR):
+            shutil.rmtree(MODEL_DIR)
+        os.makedirs(MODEL_DIR, exist_ok=True)
 
         return "✅ 예측 기록, 실패 기록, 학습 로그, 평가 로그, 메시지 로그, 실패횟수, 모델 전부 삭제 완료"
     except Exception as e:
@@ -286,12 +285,9 @@ def health_check():
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
     sys.stdout.flush()
-
     start_scheduler()
-
     send_message("[시스템 테스트] YOPO 서버가 정상적으로 실행되었으며 텔레그램 메시지도 전송됩니다.")
     print("✅ 테스트 메시지 전송 완료")
     sys.stdout.flush()
-
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
