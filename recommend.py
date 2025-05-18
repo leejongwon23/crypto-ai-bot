@@ -1,3 +1,5 @@
+# [생략 없이 전체 recommend.py 수정본]
+
 import datetime
 import os
 import csv
@@ -12,6 +14,7 @@ from data.utils import SYMBOLS, get_realtime_prices, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
 import sys
+import time
 
 # --- 필터 기준 ---
 MIN_CONFIDENCE = 0.70
@@ -89,100 +92,79 @@ def should_predict(symbol, strategy):
     except:
         return True
 
-def main():
-    print(">>> [main] recommend.py 진입 성공")
+def run_prediction_loop(strategy, symbols):
+    print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼")
     sys.stdout.flush()
-
-    print("✅ 예측 평가 시작")
     try:
         evaluate_predictions(get_price_now)
     except Exception as e:
-        print(f"[ERROR] 평가 루틴 실패: {e}")
+        print(f"[ERROR] 평가 실패: {e}")
         sys.stdout.flush()
 
     all_results = []
     try:
         failure_map = load_failure_count()
-    except Exception as e:
-        print(f"[ERROR] 실패 카운트 로딩 실패: {e}")
+    except Exception:
         failure_map = {}
 
-    try:
-        banned_strategies = set()
-        for s in ["단기", "중기", "장기"]:
-            eval_count = get_strategy_eval_count(s)
-            if eval_count >= 10:
-                sr = get_actual_success_rate(s, threshold=0.0)
-                if sr < STRATEGY_BAN_THRESHOLD:
-                    banned_strategies.add(s)
-    except Exception as e:
-        print(f"[ERROR] 전략 성공률 평가 실패: {e}")
-        banned_strategies = set()
+    for symbol in symbols:
+        try:
+            if not should_predict(symbol, strategy):
+                continue
 
-    for strategy in ["단기", "중기", "장기"]:
-        if strategy in banned_strategies:
-            print(f"[차단] 전략 성공률 낮음 → {strategy} 제외")
-            continue
+            result = predict(symbol, strategy)
+            print(f"[예측] {symbol}-{strategy} → {result}")
+            sys.stdout.flush()
 
-        for symbol in get_symbols_by_volatility(strategy):
-            try:
-                if not should_predict(symbol, strategy):
-                    print(f"[SKIP] {symbol}-{strategy} → 예측 조건 불충족")
-                    continue
+            if not isinstance(result, dict):
+                raise ValueError("predict() 반환값이 dict가 아님")
 
-                result = predict(symbol, strategy)
-                print(f"[예측] {symbol}-{strategy} → {result}")
-                sys.stdout.flush()
+            log_prediction(
+                symbol=result.get("symbol", symbol),
+                strategy=result.get("strategy", strategy),
+                direction=result.get("direction", "예측실패"),
+                entry_price=result.get("price", 0),
+                target_price=result.get("target", 0),
+                timestamp=datetime.datetime.utcnow().isoformat(),
+                confidence=result.get("confidence", 0.0),
+                model=result.get("model", "unknown"),
+                success=result.get("success", False),
+                reason=result.get("reason", "예측 실패")
+            )
 
-                if not isinstance(result, dict):
-                    raise ValueError("predict() 반환값이 dict가 아님")
+            log_audit(symbol, strategy, result, "예측 성공" if result.get("success") else "예측 실패")
 
-                log_prediction(
-                    symbol=result.get("symbol", symbol),
-                    strategy=result.get("strategy", strategy),
-                    direction=result.get("direction", "예측실패"),
-                    entry_price=result.get("price", 0),
-                    target_price=result.get("target", 0),
-                    timestamp=datetime.datetime.utcnow().isoformat(),
-                    confidence=result.get("confidence", 0.0),
-                    model=result.get("model", "unknown"),
-                    success=result.get("success", False),
-                    reason=result.get("reason", "예측 실패")
-                )
-
-                log_audit(symbol, strategy, result, "예측 성공" if result.get("success") else "예측 실패")
-
-                key = f"{symbol}-{strategy}"
-                if not result.get("success", False):
-                    failure_map[key] = failure_map.get(key, 0) + 1
-                    if failure_map[key] >= FAILURE_TRIGGER_LIMIT:
-                        print(f"[학습 트리거] {symbol}-{strategy} 실패 {failure_map[key]}회 → 학습")
-                        threading.Thread(target=train.train_model, args=(symbol, strategy), daemon=True).start()
-                        failure_map[key] = 0
-                else:
+            key = f"{symbol}-{strategy}"
+            if not result.get("success", False):
+                failure_map[key] = failure_map.get(key, 0) + 1
+                if failure_map[key] >= FAILURE_TRIGGER_LIMIT:
+                    print(f"[학습 트리거] {symbol}-{strategy} 실패 {failure_map[key]}회 → 학습")
+                    threading.Thread(target=train.train_model, args=(symbol, strategy), daemon=True).start()
                     failure_map[key] = 0
+            else:
+                failure_map[key] = 0
 
-                if result.get("success"):
-                    all_results.append(result)
+            if result.get("success"):
+                all_results.append(result)
 
-            except Exception as e:
-                print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
-                try:
-                    log_prediction(
-                        symbol=symbol,
-                        strategy=strategy,
-                        direction="예외",
-                        entry_price=0,
-                        target_price=0,
-                        timestamp=datetime.datetime.utcnow().isoformat(),
-                        confidence=0.0,
-                        model="unknown",
-                        success=False,
-                        reason=f"예외 발생: {e}"
-                    )
-                    log_audit(symbol, strategy, None, f"예외 발생: {e}")
-                except Exception as err:
-                    print(f"[치명적] 로그 기록 실패: {err}")
+        except Exception as e:
+            print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
+            try:
+                log_prediction(
+                    symbol=symbol,
+                    strategy=strategy,
+                    direction="예외",
+                    entry_price=0,
+                    target_price=0,
+                    timestamp=datetime.datetime.utcnow().isoformat(),
+                    confidence=0.0,
+                    model="unknown",
+                    success=False,
+                    reason=f"예외 발생: {e}"
+                )
+                log_audit(symbol, strategy, None, f"예외 발생: {e}")
+            except:
+                pass
 
     save_failure_count(failure_map)
 
@@ -219,16 +201,29 @@ def main():
         print(f"[전송 차단] 현재 {now_hour}시 → 야간 전송 제한")
         return
 
-    if final:
-        for res in final:
-            try:
-                msg = format_message(res)
-                send_message(msg)
-                print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%} | 성공률: {res['success_rate']:.2f}")
-            except Exception as e:
-                print(f"[ERROR] 메시지 전송 실패: {e}")
-    else:
-        print("⚠️ 조건 만족 결과 없음 → 메시지 전송 생략")
+    for res in final:
+        try:
+            msg = format_message(res)
+            send_message(msg)
+            print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%} | 성공률: {res['success_rate']:.2f}")
+        except Exception as e:
+            print(f"[ERROR] 메시지 전송 실패: {e}")
 
-    print(">>> [main] recommend.py 실행 완료")
+def main():
+    print(">>> [main] recommend.py 실행")
     sys.stdout.flush()
+
+    # 변동성 기반 예측 실행
+    for strategy in ["단기", "중기", "장기"]:
+        symbols = get_symbols_by_volatility(strategy)
+        run_prediction_loop(strategy, symbols)
+
+# ✅ 전략별 고정 주기 예측 루프 추가
+def start_regular_prediction_loop():
+    def loop():
+        while True:
+            for strategy in ["단기", "중기", "장기"]:
+                print(f"[정기예측] {strategy} 전체 예측 실행")
+                run_prediction_loop(strategy, SYMBOLS)
+            time.sleep(3600)
+    threading.Thread(target=loop, daemon=True).start()
