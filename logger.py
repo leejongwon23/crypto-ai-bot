@@ -75,7 +75,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=None, target_pr
         "target_price": target_price or 0,
         "confidence": confidence or 0,
         "model": model or "unknown",
-        "status": "pending" if success else "fail",
+        "status": "pending",  # ✅ 항상 pending 고정
         "reason": reason or ""
     }
     if not success:
@@ -103,6 +103,7 @@ def evaluate_predictions(get_price_fn):
         if row.get("status") != "pending":
             updated_rows.append(row)
             continue
+
         try:
             pred_time = datetime.datetime.fromisoformat(row["timestamp"])
             strategy = row["strategy"]
