@@ -103,7 +103,6 @@ def evaluate_predictions(get_price_fn):
         if row.get("status") != "pending":
             updated_rows.append(row)
             continue
-
         try:
             pred_time = datetime.datetime.fromisoformat(row["timestamp"])
             strategy = row["strategy"]
