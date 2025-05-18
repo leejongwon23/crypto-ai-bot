@@ -27,6 +27,20 @@ AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
 FAILURE_LOG = "/persistent/logs/failure_count.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
 
+def get_symbols_by_volatility(strategy, threshold=0.003):
+    selected = []
+    for symbol in SYMBOLS:
+        try:
+            df = get_kline_by_strategy(symbol, strategy)
+            if df is None or len(df) < 20:
+                continue
+            vol = df["close"].pct_change().rolling(window=20).std().iloc[-1]
+            if vol is not None and vol >= threshold:
+                selected.append(symbol)
+        except Exception as e:
+            print(f"[변동성 계산 실패] {symbol}-{strategy}: {e}")
+    return selected
+
 def load_failure_count():
     if not os.path.exists(FAILURE_LOG):
         return {}
@@ -97,17 +111,8 @@ def main():
             print(f"[차단] 전략 성공률 낮음 → {strategy} 제외")
             continue
 
-        for symbol in SYMBOLS:
+        for symbol in get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
             try:
-                df = get_kline_by_strategy(symbol, strategy)
-                if df is None or len(df) < 20:
-                    print(f"[스킵] {symbol}-{strategy} → 데이터 부족")
-                    continue
-                volatility = df["close"].pct_change().rolling(window=20).std().iloc[-1]
-                if volatility < VOLATILITY_THRESHOLD:
-                    print(f"[스킵] {symbol}-{strategy} → 변동성 {volatility:.4f} < {VOLATILITY_THRESHOLD}")
-                    continue
-
                 result = predict(symbol, strategy)
                 print(f"[예측] {symbol}-{strategy} → {result}")
                 sys.stdout.flush()
