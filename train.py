@@ -13,7 +13,7 @@ from model_weight_loader import get_model_weight
 from wrong_data_loader import load_wrong_prediction_data
 from feature_importance import compute_feature_importance, save_feature_importance
 import logger
-from logger import get_min_gain
+from logger import get_min_gain, get_strategy_fail_rate, get_strategy_eval_count
 from window_optimizer import find_best_window
 
 DEVICE = torch.device("cpu")
@@ -165,50 +165,31 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{best_model_type}.pt")
         torch.save(best_model_obj.state_dict(), model_path)
         print(f"✅ Best 모델 저장됨: {model_path} (score: {scores[best_model_type]:.4f})")
-
         save_model_metadata(symbol, strategy, best_model_type, best_acc, best_f1, best_loss)
-
-        importances = compute_feature_importance(
-            best_model_obj, val_X_tensor, val_y_tensor, list(df_feat.columns)
-        )
+        importances = compute_feature_importance(best_model_obj, val_X_tensor, val_y_tensor, list(df_feat.columns))
         save_feature_importance(importances, symbol, strategy, best_model_type)
     else:
         print(f"❗ 최종 저장 실패: {symbol}-{strategy} 모든 모델 평가 실패")
 
-def train_one_strategy(strategy):
-    for symbol in SYMBOLS:
-        try:
-            train_one_model(symbol, strategy)
-        except Exception as e:
-            print(f"[오류] {symbol}-{strategy} 학습 실패: {e}")
-
-def train_all_models():
-    for strategy in ["단기", "중기", "장기"]:
-        train_one_strategy(strategy)
-
-# ✅ 새로 추가된 전략 반복 학습 함수 (app.py에서 사용)
-def train_model_loop(strategy):
-    for symbol in SYMBOLS:
-        try:
-            train_one_model(symbol, strategy)
-            gc.collect()
-        except Exception as e:
-            print(f"[루프오류] {symbol}-{strategy} 학습 실패: {e}")
-
-# ✅ 백그라운드 자동 루프 (기존 유지)
-def background_auto_train():
-    def loop(strategy, interval_sec):
+# ✅ 전략별 조건 기반 학습 루프
+def conditional_train_loop():
+    def loop(strategy):
         while True:
             for symbol in SYMBOLS:
                 try:
-                    train_one_model(symbol, strategy)
-                    gc.collect()
+                    fail_rate = get_strategy_fail_rate(symbol, strategy)
+                    eval_count = get_strategy_eval_count(symbol, strategy)
+                    if fail_rate >= 0.3 or eval_count >= 5:
+                        print(f"[학습조건충족] {symbol}-{strategy} → 실패율: {fail_rate:.2f}, 평가횟수: {eval_count}")
+                        train_one_model(symbol, strategy)
+                        gc.collect()
+                    else:
+                        print(f"[SKIP] {symbol}-{strategy} 실패율 낮음({fail_rate:.2f}) 또는 평가 부족({eval_count})")
                 except Exception as e:
-                    print(f"[오류] {symbol}-{strategy} 학습 실패: {e}")
-            time.sleep(interval_sec)
+                    print(f"[조건루프오류] {symbol}-{strategy} 학습 실패: {e}")
+            time.sleep(600)  # 10분 간격 점검
 
-    intervals = {"단기": 10800, "중기": 21600, "장기": 43200}
-    for strategy, interval in intervals.items():
-        threading.Thread(target=loop, args=(strategy, interval), daemon=True).start()
+    for strategy in ["단기", "중기", "장기"]:
+        threading.Thread(target=loop, args=(strategy,), daemon=True).start()
 
-background_auto_train()
+conditional_train_loop()
