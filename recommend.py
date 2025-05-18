@@ -26,6 +26,7 @@ FINAL_SEND_LIMIT = 5
 
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
 FAILURE_LOG = "/persistent/logs/failure_count.csv"
+MESSAGE_LOG = "/persistent/logs/message_log.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
 
 def load_failure_count():
@@ -114,7 +115,6 @@ def run_prediction_loop(strategy, symbols):
             print(f"[예측] {symbol}-{strategy} → {result}")
             sys.stdout.flush()
 
-            # ✅ 모델 없음 예측 차단
             if result.get("reason") == "모델 없음":
                 print(f"[SKIP] {symbol}-{strategy} → 모델 없음으로 예측 제외")
                 log_audit(symbol, strategy, result, "모델 없음")
@@ -209,11 +209,21 @@ def run_prediction_loop(strategy, symbols):
         try:
             msg = format_message(res)
             send_message(msg)
+
+            # ✅ 메시지 전송 로그 기록 추가
+            try:
+                with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
+                    writer = csv.writer(f)
+                    if os.stat(MESSAGE_LOG).st_size == 0:
+                        writer.writerow(["timestamp", "symbol", "strategy", "message"])
+                    writer.writerow([datetime.datetime.utcnow().isoformat(), res["symbol"], res["strategy"], msg])
+            except Exception as e:
+                print(f"[ERROR] 메시지 로그 기록 실패: {e}")
+
             print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%} | 성공률: {res['success_rate']:.2f}")
         except Exception as e:
             print(f"[ERROR] 메시지 전송 실패: {e}")
 
-# ✅ main 함수는 인자 없이 또는 strategy 인자로 호출 가능하게 변경
 def main(strategy=None):
     print(">>> [main] recommend.py 실행")
     sys.stdout.flush()
@@ -226,7 +236,6 @@ def main(strategy=None):
             symbols = get_symbols_by_volatility(strategy)
             run_prediction_loop(strategy, symbols)
 
-# ✅ 전략별 정기 예측 루프
 def start_regular_prediction_loop():
     def loop():
         while True:
