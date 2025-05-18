@@ -21,7 +21,6 @@ SUCCESS_RATE_THRESHOLD = 0.70
 VOLATILITY_THRESHOLD = 0.003
 FAILURE_TRIGGER_LIMIT = 3
 MIN_SCORE_THRESHOLD = 0.005
-STRATEGY_BAN_THRESHOLD = 0.40
 FINAL_SEND_LIMIT = 5
 
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
@@ -187,7 +186,7 @@ def run_prediction_loop(strategy, symbols):
 
         success_rate = get_model_success_rate(symbol, strategy, model)
         if success_rate < SUCCESS_RATE_THRESHOLD:
-            continue
+            continue  # ✅ 메시지 추천만 제외, 예측 기록/평가는 유지
 
         penalty = 1.0 - (1.0 - success_rate) ** 2
         score = conf * rate * penalty
@@ -210,7 +209,7 @@ def run_prediction_loop(strategy, symbols):
             msg = format_message(res)
             send_message(msg)
 
-            # ✅ 메시지 전송 로그 기록 추가
+            # ✅ 메시지 로그 기록
             try:
                 with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
                     writer = csv.writer(f)
