@@ -61,16 +61,30 @@ def get_price_now(symbol):
     prices = get_realtime_prices()
     return prices.get(symbol)
 
+def get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
+    selected = []
+    for symbol in SYMBOLS:
+        try:
+            df = get_kline_by_strategy(symbol, strategy)
+            if df is None or len(df) < 20:
+                continue
+            vol = df["close"].pct_change().rolling(window=20).std().iloc[-1]
+            if vol is not None and vol >= threshold:
+                selected.append(symbol)
+        except Exception as e:
+            print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
+    return selected
+
 def should_predict(symbol, strategy):
     try:
         rate = get_model_success_rate(symbol, strategy, "ensemble")
         eval_count = get_strategy_eval_count(strategy)
         if eval_count < 10:
-            return True  # 평가가 충분치 않으면 항상 예측
+            return True
         if rate < 0.5:
-            return True  # 낮은 성공률이면 자주 예측
-        if rate > 0.8:
-            return False  # 높은 성공률이면 예측 빈도 줄임
+            return True
+        if rate > 0.85:
+            return False
         return True
     except:
         return True
@@ -110,18 +124,10 @@ def main():
             print(f"[차단] 전략 성공률 낮음 → {strategy} 제외")
             continue
 
-        for symbol in SYMBOLS:
+        for symbol in get_symbols_by_volatility(strategy):
             try:
-                df = get_kline_by_strategy(symbol, strategy)
-                if df is None or len(df) < 20:
-                    continue
-
-                vol = df["close"].pct_change().rolling(window=20).std().iloc[-1]
-                if vol is None or vol < VOLATILITY_THRESHOLD:
-                    continue
-
                 if not should_predict(symbol, strategy):
-                    print(f"[스킵] {symbol}-{strategy} 성공률 높음 → 예측 건너뜀")
+                    print(f"[SKIP] {symbol}-{strategy} → 예측 조건 불충족")
                     continue
 
                 result = predict(symbol, strategy)
