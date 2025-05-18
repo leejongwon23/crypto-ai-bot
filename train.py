@@ -194,7 +194,7 @@ def conditional_train_loop():
                         continue
 
                     fail_rate = get_strategy_fail_rate(symbol, strategy)
-                    eval_count = get_strategy_eval_count(symbol, strategy)
+                    eval_count = get_strategy_eval_count(strategy)  # ✅ 여기 수정됨
 
                     if fail_rate >= 0.3 or eval_count < 10 or now - recent_train_time.get(key, 0) > gap * 2:
                         print(f"[학습조건충족] {symbol}-{strategy} → 실패율: {fail_rate:.2f}, 평가: {eval_count}")
@@ -221,5 +221,5 @@ def train_all_models():
             except Exception as e:
                 print(f"[오류] 전체 학습 실패: {symbol}-{strategy} → {e}")
 
-# ✅ 개별 학습 alias 함수 (호환성 유지)
+# ✅ 개별 학습 alias 함수
 train_model = train_one_model
