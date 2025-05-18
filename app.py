@@ -37,7 +37,7 @@ def start_auto_prediction_loop():
                 main()
             except Exception as e:
                 print(f"[AUTO-PREDICT ERROR] {e}")
-            time.sleep(3600)  # 1시간마다 실행
+            time.sleep(3600)
     threading.Thread(target=loop, daemon=True).start()
 
 def start_scheduler():
