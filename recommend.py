@@ -114,6 +114,12 @@ def run_prediction_loop(strategy, symbols):
             print(f"[예측] {symbol}-{strategy} → {result}")
             sys.stdout.flush()
 
+            # ✅ 모델 없음 예측 차단
+            if result.get("reason") == "모델 없음":
+                print(f"[SKIP] {symbol}-{strategy} → 모델 없음으로 예측 제외")
+                log_audit(symbol, strategy, result, "모델 없음")
+                continue
+
             if not isinstance(result, dict):
                 raise ValueError("predict() 반환값이 dict가 아님")
 
