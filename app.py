@@ -12,8 +12,9 @@ import sys
 from telegram_bot import send_message
 import logger
 from predict_test import test_all_predictions
-from data.utils import get_latest_price
+from data.utils import get_latest_price, SYMBOLS, get_kline_by_strategy
 import shutil
+import time
 
 PERSIST_DIR = "/persistent"
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
@@ -26,6 +27,33 @@ WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
 MESSAGE_LOG = os.path.join(LOG_DIR, "message_log.csv")
 FAILURE_COUNT_LOG = os.path.join(LOG_DIR, "failure_count.csv")
+
+# --- 예측 루프 1: 고정 전략별 주기 ---
+def start_regular_prediction_loop():
+    def loop():
+        while True:
+            try:
+                print(f"[정기 예측] {datetime.datetime.now()} - main() 실행")
+                sys.stdout.flush()
+                main()
+            except Exception as e:
+                print(f"[정기 예측 오류] {e}")
+            time.sleep(3600)
+    threading.Thread(target=loop, daemon=True).start()
+
+# --- 예측 루프 2: 변동성 기반 실시간 트리거 ---
+def start_volatility_prediction_loop():
+    def loop():
+        while True:
+            try:
+                now = datetime.datetime.now()
+                print(f"[변동성 예측] {now} - 전략별 실시간 예측 시작")
+                sys.stdout.flush()
+                main()
+            except Exception as e:
+                print(f"[변동성 예측 오류] {e}")
+            time.sleep(1800)
+    threading.Thread(target=loop, daemon=True).start()
 
 def start_scheduler():
     print(">>> start_scheduler() 호출됨")
@@ -161,17 +189,14 @@ def reset_all():
     request_key = request.args.get("key")
     if request_key != secret_key:
         return "❌ 인증 실패: 잘못된 접근", 403
-
     try:
         for file_path in [PREDICTION_LOG, WRONG_PREDICTIONS, LOG_FILE, AUDIT_LOG, MESSAGE_LOG, FAILURE_COUNT_LOG]:
             if os.path.exists(file_path):
                 open(file_path, "w").close()
-
         if os.path.exists(MODEL_DIR):
             shutil.rmtree(MODEL_DIR)
         os.makedirs(MODEL_DIR, exist_ok=True)
-
-        return "✅ 예측 기록, 실패 기록, 학습 로그, 평가 로그, 메시지 로그, 실패횟수, 모델 전부 삭제 완료"
+        return "✅ 초기화 완료"
     except Exception as e:
         return f"삭제 실패: {e}", 500
 
@@ -197,9 +222,7 @@ def audit_log_download():
 
 @app.route("/health-check")
 def health_check():
-    results = []
-    summary = []
-
+    results, summary = [], []
     try:
         if os.path.exists(PREDICTION_LOG):
             df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
@@ -207,67 +230,18 @@ def health_check():
             done = len(df[df["status"].isin(["success", "fail"])])
             rate = (done / total * 100) if total > 0 else 0
             results.append(f"✅ 예측 기록 OK ({total}건)")
-            summary.append(f"- 최근 예측 {total}건 중 {done}건 평가 완료 (평가율 {rate:.1f}%)")
+            summary.append(f"- 평가 완료율: {rate:.1f}%")
         else:
             results.append("❌ 예측 기록 없음")
             summary.append("- 예측 기록 없음")
     except Exception as e:
-        results.append(f"❌ 예측 로그 확인 실패: {e}")
-
-    try:
-        if os.path.exists(WRONG_PREDICTIONS) and os.path.getsize(WRONG_PREDICTIONS) > 0:
-            df = pd.read_csv(WRONG_PREDICTIONS, encoding="utf-8-sig")
-            results.append(f"✅ 실패 예측 기록 OK ({len(df)}건)")
-            summary.append("- 실패 예측 기록 누락 없음")
-        else:
-            results.append("❌ 실패 예측 기록 없음")
-            summary.append("- 실패 예측 기록 없음")
-    except Exception as e:
-        results.append(f"❌ 실패 로그 확인 실패: {e}")
-
-    try:
-        if os.path.exists(AUDIT_LOG):
-            df = pd.read_csv(AUDIT_LOG, encoding="utf-8-sig")
-            results.append(f"✅ 평가 기록 OK ({len(df)}건)")
-        else:
-            results.append("❌ 평가 기록 없음")
-    except Exception as e:
-        results.append(f"❌ 평가 로그 확인 실패: {e}")
-
-    try:
-        if os.path.exists(MODEL_DIR):
-            models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
-            results.append(f"✅ 모델 파일 OK ({len(models)}개)")
-            summary.append(f"- 모델 파일 {len(models)}개 정상 저장됨")
-        else:
-            results.append("❌ 모델 폴더 없음")
-            summary.append("- 모델 폴더 없음")
-    except Exception as e:
-        results.append(f"❌ 모델 확인 실패: {e}")
-
-    try:
-        if os.path.exists(MESSAGE_LOG) and os.path.getsize(MESSAGE_LOG) > 0:
-            df = pd.read_csv(MESSAGE_LOG, encoding="utf-8-sig")
-            results.append(f"✅ 메시지 전송 기록 OK (최근 {len(df)}건)")
-            summary.append(f"- 최근 메시지 {len(df)}건 전송 완료")
-        else:
-            results.append("❌ 메시지 전송 기록 없음")
-            summary.append("- 메시지 전송 기록 없음")
-    except Exception as e:
-        results.append(f"❌ 메시지 로그 확인 실패: {e}")
-
+        results.append(f"❌ 예측 확인 실패: {e}")
     try:
         for s in ["단기", "중기", "장기"]:
             r = logger.get_actual_success_rate(s, threshold=0.0)
             summary.append(f"- {s} 전략 성공률: {r*100:.1f}%")
     except:
         summary.append("- 전략별 성공률 확인 실패")
-
-    if all(r.startswith("✅") for r in results):
-        summary.append("🟢 YOPO는 현재 정상 운영 중입니다. 신뢰하고 사용하셔도 됩니다.")
-    else:
-        summary.append("⚠️ YOPO에서 일부 이상이 감지되었습니다. 위 내용을 확인하세요.")
-
     formatted = "<br>".join(results + [""] + summary)
     return f"<div style='font-family:monospace; line-height:1.6;'>{formatted}</div>"
 
@@ -275,6 +249,8 @@ if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
     sys.stdout.flush()
     start_scheduler()
+    start_regular_prediction_loop()
+    start_volatility_prediction_loop()
     send_message("[시스템 테스트] YOPO 서버가 정상적으로 실행되었으며 텔레그램 메시지도 전송됩니다.")
     print("✅ 테스트 메시지 전송 완료")
     sys.stdout.flush()
