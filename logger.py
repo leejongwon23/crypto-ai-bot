@@ -1,4 +1,3 @@
-# --- 생략 없이 전체 수정된 logger.py 시작 ---
 import os
 import csv
 import datetime
@@ -16,20 +15,6 @@ os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 EVAL_EXPIRY_BUFFER = 12
 STOP_LOSS_PCT = 0.02
 model_success_tracker = {}
-
-def get_min_gain(symbol, strategy):
-    df = get_kline_by_strategy(symbol, strategy)
-    if df is None or len(df) < 20:
-        return {"단기": 0.01, "중기": 0.03, "장기": 0.05}.get(strategy, 0.05)
-    volatility = df["close"].pct_change().rolling(window=20).std()
-    v = volatility.iloc[-1] if not volatility.isna().all() else 0.01
-    if strategy == "단기":
-        return max(round(v * 1.2, 4), 0.005)
-    elif strategy == "중기":
-        return max(round(v * 1.2, 4), 0.01)
-    elif strategy == "장기":
-        return max(round(v * 1.2, 4), 0.02)
-    return 0.03
 
 def update_model_success(symbol, strategy, model, success: bool):
     key = (symbol, strategy, model)
