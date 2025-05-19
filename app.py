@@ -31,11 +31,19 @@ AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
 MESSAGE_LOG = os.path.join(LOG_DIR, "message_log.csv")
 FAILURE_COUNT_LOG = os.path.join(LOG_DIR, "failure_count.csv")
 
+# --- 전략별 조건 ---
 VOLATILITY_THRESHOLD = {
     "단기": 0.003,
     "중기": 0.005,
     "장기": 0.008
 }
+
+PREDICTION_INTERVALS = {
+    "단기": 3600,
+    "중기": 10800,
+    "장기": 21600
+}
+last_prediction_time = {s: 0 for s in PREDICTION_INTERVALS.keys()}
 
 def get_symbols_by_volatility(strategy):
     if strategy not in ["단기", "중기", "장기"]:
@@ -56,18 +64,21 @@ def get_symbols_by_volatility(strategy):
     return selected
 
 def start_regular_prediction_loop():
-    def loop(strategy, interval_sec):
+    def loop():
         while True:
-            try:
-                print(f"[정기 예측] {strategy} - {datetime.datetime.now()} - main() 실행")
-                sys.stdout.flush()
-                main(strategy)
-            except Exception as e:
-                print(f"[정기 예측 오류] {strategy}: {e}")
-            time.sleep(interval_sec)
-    threading.Thread(target=loop, args=("단기", 3600), daemon=True).start()
-    threading.Thread(target=loop, args=("중기", 10800), daemon=True).start()
-    threading.Thread(target=loop, args=("장기", 21600), daemon=True).start()
+            now = time.time()
+            for strategy in ["단기", "중기", "장기"]:
+                interval = PREDICTION_INTERVALS[strategy]
+                if now - last_prediction_time[strategy] >= interval:
+                    try:
+                        print(f"[정기 예측] {strategy} - {datetime.datetime.now()} - main() 실행")
+                        sys.stdout.flush()
+                        main(strategy)
+                        last_prediction_time[strategy] = time.time()
+                    except Exception as e:
+                        print(f"[정기 예측 오류] {strategy}: {e}")
+            time.sleep(60)
+    threading.Thread(target=loop, daemon=True).start()
 
 def start_scheduler():
     print(">>> start_scheduler() 호출됨")
@@ -131,74 +142,6 @@ def run():
         sys.stdout.flush()
         return f"Error: {e}", 500
 
-@app.route("/check-log")
-def check_log():
-    try:
-        if not os.path.exists(PREDICTION_LOG):
-            return jsonify({"error": "prediction_log.csv not found"})
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-        return jsonify(df.tail(10).to_dict(orient='records'))
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
-@app.route("/train-now")
-def train_now():
-    try:
-        print("[TRAIN-NOW] 전체 학습 즉시 실행 시작")
-        sys.stdout.flush()
-        threading.Thread(target=train.train_all_models, daemon=True).start()
-        return "✅ 모든 코인 + 전략 학습이 지금 바로 시작됐습니다!"
-    except Exception as e:
-        return f"학습 시작 실패: {e}", 500
-
-@app.route("/train-log")
-def train_log():
-    try:
-        if not os.path.exists(LOG_FILE):
-            return "아직 학습 로그가 없습니다."
-        with open(LOG_FILE, "r", encoding="utf-8-sig") as f:
-            return "<pre>" + f.read() + "</pre>"
-    except Exception as e:
-        return f"로그 파일을 읽을 수 없습니다: {e}", 500
-
-@app.route("/models")
-def list_model_files():
-    try:
-        if not os.path.exists(MODEL_DIR):
-            return "models 폴더가 존재하지 않습니다."
-        files = os.listdir(MODEL_DIR)
-        if not files:
-            return "models 폴더가 비어 있습니다."
-        return "<pre>" + "\n".join(files) + "</pre>"
-    except Exception as e:
-        return f"모델 파일 확인 중 오류 발생: {e}", 500
-
-@app.route("/check-wrong")
-def check_wrong():
-    try:
-        if not os.path.exists(WRONG_PREDICTIONS) or os.path.getsize(WRONG_PREDICTIONS) == 0:
-            return jsonify([])
-        df = pd.read_csv(WRONG_PREDICTIONS, encoding="utf-8-sig")
-        return jsonify(df.tail(10).to_dict(orient='records'))
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
-@app.route("/check-stats")
-def check_stats():
-    try:
-        import logger
-        result = logger.print_prediction_stats()
-        if not isinstance(result, str):
-            return f"출력 형식 오류: {result}", 500
-        formatted = result.replace("\n", "<br>").replace("📊", "<b>📊</b>") \
-                          .replace("✅", "<b style='color:green'>✅</b>") \
-                          .replace("❌", "<b style='color:red'>❌</b>") \
-                          .replace("⏳", "<b>⏳</b>").replace("🎯", "<b>🎯</b>") \
-                          .replace("📌", "<b>📌</b>")
-        return f"<div style='font-family:monospace; line-height:1.6;'>" + formatted + "</div>"
-    except Exception as e:
-        return f"정확도 통계 출력 실패: {e}", 500
-
 @app.route("/reset-all")
 def reset_all():
     key = request.args.get("key")
@@ -250,7 +193,8 @@ def health_check():
     try:
         if os.path.exists(PREDICTION_LOG):
             df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-            total, done = len(df), len(df[df["status"].isin(["success", "fail"])])
+            total = len(df)
+            done = len(df[df["status"].isin(["success", "fail"])])
             results.append(f"✅ 예측 기록 OK ({total}건)")
             summary.append(f"- 평가 완료율: {(done/total*100):.1f}%" if total else "- 평가 없음")
         else:
@@ -258,8 +202,9 @@ def health_check():
     except Exception as e:
         results.append(f"❌ 예측 확인 실패: {e}")
     try:
-        models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")] if os.path.exists(MODEL_DIR) else []
-        results.append(f"✅ 모델 파일 OK ({len(models)}개)" if models else "❌ 모델 없음")
+        if os.path.exists(MODEL_DIR):
+            models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
+            results.append(f"✅ 모델 파일 OK ({len(models)}개)" if models else "❌ 모델 없음")
     except Exception as e:
         results.append(f"❌ 모델 확인 실패: {e}")
     try:
