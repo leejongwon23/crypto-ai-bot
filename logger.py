@@ -104,7 +104,8 @@ def evaluate_predictions(get_price_fn):
         if row.get("status") != "pending":
             updated_rows.append(row)
             continue
-        try:
+
+try:
             pred_time = datetime.datetime.fromisoformat(row["timestamp"])
             strategy = row["strategy"]
             direction = row["direction"]
@@ -180,7 +181,6 @@ def evaluate_predictions(get_price_fn):
                         entry_price, row["target_price"], gain
                     ])
             updated_rows.append(row)
-
         except Exception as e:
             row["status"] = "skip_eval"
             row["reason"] = f"예외 발생: {e}"
