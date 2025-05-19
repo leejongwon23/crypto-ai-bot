@@ -81,7 +81,7 @@ def get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
 def should_predict(symbol, strategy):
     try:
         rate = get_model_success_rate(symbol, strategy, "ensemble")
-        eval_count = get_strategy_eval_count(strategy)
+        eval_count, _ = get_strategy_eval_count(strategy)  # ✅ 수정 적용
         if eval_count < 10:
             return True
         if rate < 0.5:
