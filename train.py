@@ -25,7 +25,7 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(WRONG_DIR, exist_ok=True)
 
-STRATEGY_GAP = {"단기": 7200, "중기": 21600, "장기": 43200}  # 초 단위 간격
+STRATEGY_GAP = {"단기": 7200, "중기": 21600, "장기": 43200}
 
 def create_dataset(features, window):
     X, y = [], []
@@ -195,6 +195,8 @@ def conditional_train_loop():
                         fail_rate = fail_rate[0]
 
                     eval_count = get_strategy_eval_count(strategy)
+                    if isinstance(eval_count, tuple):
+                        eval_count = eval_count[0]
 
                     if fail_rate >= 0.3 or eval_count < 10 or now - recent_train_time.get(key, 0) > gap * 2:
                         print(f"[학습조건충족] {symbol}-{strategy} → 실패율: {fail_rate:.2f}, 평가: {eval_count}")
