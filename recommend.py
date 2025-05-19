@@ -117,7 +117,20 @@ def run_prediction_loop(strategy, symbols):
             sys.stdout.flush()
 
             if not isinstance(result, dict):
-                raise ValueError("predict() 반환값이 dict가 아님")
+                log_prediction(
+                    symbol=symbol,
+                    strategy=strategy,
+                    direction="N/A",
+                    entry_price=0,
+                    target_price=0,
+                    timestamp=datetime.datetime.utcnow().isoformat(),
+                    confidence=0.0,
+                    model="unknown",
+                    success=False,
+                    reason="predict() 반환값 None"
+                )
+                log_audit(symbol, strategy, result, "예측 실패 (None)")
+                continue
 
             if result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
                 print(f"[SKIP] {symbol}-{strategy} → 예측 불가 이유: {result['reason']}")
@@ -223,14 +236,11 @@ def run_prediction_loop(strategy, symbols):
             msg = format_message(res)
             send_message(msg)
 
-            try:
-                with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
-                    writer = csv.writer(f)
-                    if os.stat(MESSAGE_LOG).st_size == 0:
-                        writer.writerow(["timestamp", "symbol", "strategy", "message"])
-                    writer.writerow([datetime.datetime.utcnow().isoformat(), res["symbol"], res["strategy"], msg])
-            except Exception as e:
-                print(f"[ERROR] 메시지 로그 기록 실패: {e}")
+            with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                if os.stat(MESSAGE_LOG).st_size == 0:
+                    writer.writerow(["timestamp", "symbol", "strategy", "message"])
+                writer.writerow([datetime.datetime.utcnow().isoformat(), res["symbol"], res["strategy"], msg])
 
             print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%} | 성공률: {res['success_rate']:.2f}")
         except Exception as e:
