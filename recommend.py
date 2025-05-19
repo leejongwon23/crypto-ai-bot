@@ -14,6 +14,7 @@ from src.message_formatter import format_message
 import train
 import sys
 import time
+from model_weight_loader import model_exists  # ✅ 모델 존재 확인 함수 추가
 
 # --- 필터 기준 ---
 MIN_CONFIDENCE = 0.70
@@ -109,6 +110,22 @@ def run_prediction_loop(strategy, symbols):
 
     for symbol in symbols:
         try:
+            if not model_exists(symbol, strategy):
+                log_prediction(
+                    symbol=symbol,
+                    strategy=strategy,
+                    direction="N/A",
+                    entry_price=0,
+                    target_price=0,
+                    timestamp=datetime.datetime.utcnow().isoformat(),
+                    confidence=0.0,
+                    model="unknown",
+                    success=False,
+                    reason="모델 없음"
+                )
+                log_audit(symbol, strategy, None, "모델 없음")
+                continue
+
             if not should_predict(symbol, strategy):
                 continue
 
@@ -144,7 +161,7 @@ def run_prediction_loop(strategy, symbols):
                     confidence=0.0,
                     model="unknown",
                     success=False,
-                    reason=result["reason"],
+                    reason=result["reason"]
                 )
                 log_audit(symbol, strategy, result, result["reason"])
                 continue
