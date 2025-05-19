@@ -166,7 +166,6 @@ def run_prediction_loop(strategy, symbols):
                 log_audit(symbol, strategy, result, result["reason"])
                 continue
 
-            # ✅ 예측 성공은 무조건 success=True로 기록 → 평가 대상이 되도록
             log_prediction(
                 symbol=result.get("symbol", symbol),
                 strategy=result.get("strategy", strategy),
@@ -176,7 +175,7 @@ def run_prediction_loop(strategy, symbols):
                 timestamp=datetime.datetime.utcnow().isoformat(),
                 confidence=result.get("confidence", 0.0),
                 model=result.get("model", "unknown"),
-                success=True,  # ✅ 고정
+                success=True,
                 reason=result.get("reason", "예측 성공"),
                 rate=result.get("rate", 0.0)
             )
@@ -254,13 +253,11 @@ def run_prediction_loop(strategy, symbols):
         try:
             msg = format_message(res)
             send_message(msg)
-
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
                 if os.stat(MESSAGE_LOG).st_size == 0:
                     writer.writerow(["timestamp", "symbol", "strategy", "message"])
                 writer.writerow([datetime.datetime.utcnow().isoformat(), res["symbol"], res["strategy"], msg])
-
             print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%} | 성공률: {res['success_rate']:.2f}")
         except Exception as e:
             print(f"[ERROR] 메시지 전송 실패: {e}")
@@ -268,7 +265,6 @@ def run_prediction_loop(strategy, symbols):
 def main(strategy=None):
     print(">>> [main] recommend.py 실행")
     sys.stdout.flush()
-
     if strategy:
         symbols = get_symbols_by_volatility(strategy)
         run_prediction_loop(strategy, symbols)
