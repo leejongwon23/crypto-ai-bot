@@ -163,16 +163,6 @@ def list_model_files():
     except Exception as e:
         return f"모델 파일 확인 중 오류 발생: {e}", 500
 
-@app.route("/check-log")
-def check_log():
-    try:
-        if not os.path.exists(PREDICTION_LOG):
-            return jsonify({"error": "prediction_log.csv not found"})
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-        return jsonify(df.tail(10).to_dict(orient='records'))
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
 @app.route("/check-wrong")
 def check_wrong():
     try:
@@ -283,9 +273,8 @@ if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
     sys.stdout.flush()
     start_scheduler()
-    # 🔥 자동 예측 루프 제거
-    # start_regular_prediction_loop()  ← ❌ 주석 처리됨
+    start_regular_prediction_loop()
     send_message("[시스템 시작] YOPO 서버가 정상적으로 실행되었으며 예측은 자동 스케줄에 따라 작동합니다.")
-    print("✅ 서버 초기화 완료 (예측 루프 제거됨, 트리거만 작동 중)")
+    print("✅ 서버 초기화 완료 (예측 루프 복원됨)")
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
