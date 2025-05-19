@@ -94,6 +94,7 @@ def should_predict(symbol, strategy):
 def run_prediction_loop(strategy, symbols):
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼")
     sys.stdout.flush()
+
     try:
         evaluate_predictions(get_price_now)
     except Exception as e:
@@ -115,6 +116,9 @@ def run_prediction_loop(strategy, symbols):
             print(f"[예측] {symbol}-{strategy} → {result}")
             sys.stdout.flush()
 
+            if not isinstance(result, dict):
+                raise ValueError("predict() 반환값이 dict가 아님")
+
             if result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
                 print(f"[SKIP] {symbol}-{strategy} → 예측 불가 이유: {result['reason']}")
                 log_prediction(
@@ -131,8 +135,6 @@ def run_prediction_loop(strategy, symbols):
                 )
                 log_audit(symbol, strategy, result, result["reason"])
                 continue
-            if not isinstance(result, dict):
-                raise ValueError("predict() 반환값이 dict가 아님")
 
             log_prediction(
                 symbol=result.get("symbol", symbol),
@@ -250,8 +252,8 @@ def start_regular_prediction_loop():
     def loop():
         while True:
             for strategy in ["단기", "중기", "장기"]:
-                print(f"[정기예측] {strategy} 전체 예측 실행")
-                run_prediction_loop(strategy, SYMBOLS)
+                symbols = get_symbols_by_volatility(strategy)
+                run_prediction_loop(strategy, symbols)
             time.sleep(3600)
     threading.Thread(target=loop, daemon=True).start()
 
