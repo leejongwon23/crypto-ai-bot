@@ -1,3 +1,4 @@
+# 1~100줄
 # --- 필수 임포트 ---
 from flask import Flask, jsonify, request, send_file
 from recommend import main
@@ -11,9 +12,9 @@ import pytz
 import traceback
 import sys
 from telegram_bot import send_message
-import logger
 from predict_test import test_all_predictions
 from data.utils import get_latest_price, SYMBOLS, get_kline_by_strategy
+from predict_trigger import run as trigger_run
 import shutil
 import time
 import csv
@@ -62,29 +63,10 @@ def start_regular_prediction_loop():
             except Exception as e:
                 print(f"[정기 예측 오류] {strategy}: {e}")
             time.sleep(interval_sec)
-    threading.Thread(target=loop, args=("단기", 7200), daemon=True).start()
-    threading.Thread(target=loop, args=("중기", 21600), daemon=True).start()
-    threading.Thread(target=loop, args=("장기", 86400), daemon=True).start()
-
-def start_volatility_prediction_loop():
-    def loop():
-        while True:
-            try:
-                now = datetime.datetime.now()
-                print(f"[변동성 예측] {now} - 조건 기반 전략 예측 실행")
-                sys.stdout.flush()
-                for strategy in ["단기", "중기", "장기"]:
-                    volatile = get_symbols_by_volatility(strategy)
-                    if volatile:
-                        print(f"[트리거] {strategy} 변동성 높은 코인 {len(volatile)}개 → 예측 실행")
-                        main(strategy)
-                    else:
-                        print(f"[스킵] {strategy} 변동성 기준 미달")
-            except Exception as e:
-                print(f"[변동성 예측 오류] {e}")
-            time.sleep(3600)
-    threading.Thread(target=loop, daemon=True).start()
-
+    threading.Thread(target=loop, args=("단기", 3600), daemon=True).start()
+    threading.Thread(target=loop, args=("중기", 10800), daemon=True).start()
+    threading.Thread(target=loop, args=("장기", 21600), daemon=True).start()
+# 101~200줄
 def start_scheduler():
     print(">>> start_scheduler() 호출됨")
     sys.stdout.flush()
@@ -94,6 +76,7 @@ def start_scheduler():
         print(f"[평가 시작] {datetime.datetime.now()}")
         sys.stdout.flush()
         try:
+            import logger
             logger.evaluate_predictions(get_latest_price)
             print("[평가 완료]")
         except Exception as e:
@@ -116,13 +99,13 @@ def start_scheduler():
     scheduler.add_job(train_mid, 'cron', hour='1,7,13,19', minute=30)
     scheduler.add_job(train_long, 'cron', hour='2,14', minute=30)
     scheduler.add_job(test_all_predictions, 'cron', minute=10, id='predict_test', replace_existing=True)
+    scheduler.add_job(trigger_run, 'interval', minutes=30, id='trigger_loop', replace_existing=True)
     scheduler.start()
 
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료")
 sys.stdout.flush()
 
-# --- API 라우트 ---
 @app.route("/")
 def index():
     return "Yopo server is running"
@@ -155,7 +138,7 @@ def train_now():
         return "✅ 모든 코인 + 전략 학습이 지금 바로 시작됐습니다!"
     except Exception as e:
         return f"학습 시작 실패: {e}", 500
-
+# 201~300줄
 @app.route("/train-log")
 def train_log():
     try:
@@ -201,6 +184,7 @@ def check_wrong():
 @app.route("/check-stats")
 def check_stats():
     try:
+        import logger
         result = logger.print_prediction_stats()
         if not isinstance(result, str):
             return f"출력 형식 오류: {result}", 500
@@ -238,7 +222,7 @@ def reset_all():
         return "✅ 초기화 완료 (헤더 포함)"
     except Exception as e:
         return f"삭제 실패: {e}", 500
-
+# 301~307줄
 @app.route("/audit-log")
 def audit_log():
     try:
@@ -283,6 +267,7 @@ def health_check():
     except Exception as e:
         results.append(f"❌ 메시지 확인 실패: {e}")
     try:
+        import logger
         for s in ["단기", "중기", "장기"]:
             r = logger.get_actual_success_rate(s, threshold=0.0)
             summary.append(f"- {s} 전략 성공률: {r*100:.1f}%")
@@ -296,11 +281,8 @@ if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
     sys.stdout.flush()
     start_scheduler()
-    # ✅ 자동 루프 제거 (정기 예측, 변동성 예측)
-    # start_regular_prediction_loop()
-    # start_volatility_prediction_loop()
+    start_regular_prediction_loop()
     send_message("[시스템 시작] YOPO 서버가 정상적으로 실행되었으며 예측은 자동 스케줄에 따라 작동합니다.")
-    print("✅ 서버 초기화 완료 (자동 주기 루프 대기 중)")
-    sys.stdout.flush()
+    print("✅ 서버 초기화 완료 (예측 루프 + 트리거 작동 중)")
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
