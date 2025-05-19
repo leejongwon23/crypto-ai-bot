@@ -3,6 +3,7 @@ import pandas as pd
 import logger
 
 LOG_FILE = "/persistent/logs/train_log.csv"
+MODEL_DIR = "/persistent/models"
 
 def get_model_weight(model_type, strategy, symbol="ALL", max_records=100):
     """
@@ -45,3 +46,16 @@ def get_model_weight(model_type, strategy, symbol="ALL", max_records=100):
 
     print(f"[가중치 계산] {symbol}-{strategy}-{model_type} → acc: {round(acc_score,4)} / sr: {round(success_score,4)} → weight: {weight}")
     return weight
+
+
+def model_exists(symbol, strategy):
+    """
+    해당 symbol-strategy 조합의 모델이 최소 1개라도 존재하는지 확인
+    """
+    try:
+        for file in os.listdir(MODEL_DIR):
+            if file.startswith(f"{symbol}_{strategy}_") and file.endswith(".pt"):
+                return True
+    except Exception as e:
+        print(f"[오류] 모델 존재 확인 실패: {e}")
+    return False
