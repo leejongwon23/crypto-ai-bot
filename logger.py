@@ -247,7 +247,7 @@ def print_prediction_stats():
             f"✅ 성공: {success}",
             f"❌ 실패: {fail}",
             f"⏳ 평가 대기중: {pending}",
-            f"⏭️ 스킥: {skipped}",
+            f"⏭️ 스킵: {skipped}",
             f"⚠️ 모델없음: {invalid}",
             f"🟡 평가제외: {skipped_eval}",
             f"🎯 성공률: {success_rate:.2f}%"
@@ -281,4 +281,3 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
         print(f"[오류] 학습 로그 저장 실패: {e}")
     else:
         print(f"[LOG] Training result logged for {symbol} - {strategy} - {model_name}")
-
