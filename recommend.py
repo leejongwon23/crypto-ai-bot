@@ -131,7 +131,6 @@ def run_prediction_loop(strategy, symbols):
                 )
                 log_audit(symbol, strategy, result, result["reason"])
                 continue
-
             if not isinstance(result, dict):
                 raise ValueError("predict() 반환값이 dict가 아님")
 
@@ -255,3 +254,6 @@ def start_regular_prediction_loop():
                 run_prediction_loop(strategy, SYMBOLS)
             time.sleep(3600)
     threading.Thread(target=loop, daemon=True).start()
+
+# ✅ app.py 등 외부에서 run_prediction으로 실행 가능하도록 alias 지정
+run_prediction = main
