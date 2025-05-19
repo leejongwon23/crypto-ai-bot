@@ -8,9 +8,9 @@ class Attention(nn.Module):
         self.attn = nn.Linear(hidden_size, 1)
 
     def forward(self, lstm_out):
-        weights = self.attn(lstm_out).squeeze(-1)  # [batch_size, seq_len]
+        weights = self.attn(lstm_out).squeeze(-1)
         weights = F.softmax(weights, dim=1)
-        context = torch.sum(lstm_out * weights.unsqueeze(-1), dim=1)  # [batch_size, hidden_size]
+        context = torch.sum(lstm_out * weights.unsqueeze(-1), dim=1)
         return context, weights
 
 class LSTMPricePredictor(nn.Module):
@@ -29,8 +29,7 @@ class LSTMPricePredictor(nn.Module):
 
     def forward(self, x):
         if self.training and x.size(0) == 1:
-            self.eval()  # 배치 크기 1이면 에러 방지를 위해 평가모드로 변경
-
+            self.eval()
         lstm_out, _ = self.lstm(x)
         context, _ = self.attention(lstm_out)
         context = self.bn(context)
@@ -54,9 +53,9 @@ class CNNLSTMPricePredictor(nn.Module):
         self.fc_confidence = nn.Linear(lstm_hidden_size, 1)
 
     def forward(self, x):
-        x = x.permute(0, 2, 1)  # [batch, input_size, seq_len]
+        x = x.permute(0, 2, 1)
         x = self.relu(self.conv1(x))
-        x = x.permute(0, 2, 1)  # [batch, seq_len, channels]
+        x = x.permute(0, 2, 1)
         lstm_out, _ = self.lstm(x)
         context, _ = self.attention(lstm_out)
         context = self.dropout(context)
@@ -95,7 +94,6 @@ class TransformerPricePredictor(nn.Module):
     def forward(self, x):
         if self.training and x.size(0) == 1:
             self.eval()
-
         x = self.input_proj(x)
         x = self.encoder(x)
         x = x.mean(dim=1)
@@ -112,6 +110,8 @@ MODEL_CLASSES = {
 }
 
 def get_model(model_type: str = "cnn_lstm", input_size: int = 11):
+    if model_type not in MODEL_CLASSES:
+        print(f"[경고] 알 수 없는 모델 타입 '{model_type}', 기본 모델 cnn_lstm 사용")
     model_cls = MODEL_CLASSES.get(model_type, CNNLSTMPricePredictor)
     return model_cls(input_size=input_size)
 
