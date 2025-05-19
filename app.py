@@ -273,8 +273,8 @@ if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
     sys.stdout.flush()
     start_scheduler()
-    # ✅ 자동 예측 루프 제거 (서버 시작 시 즉시 예측 방지)
-    send_message("[시스템 시작] YOPO 서버가 정상적으로 실행되었습니다. 예측은 스케줄 또는 수동으로 작동합니다.")
-    print("✅ 서버 초기화 완료 (자동 예측 루프 비활성화)")
+    start_regular_prediction_loop()  # ✅ 전략별 자동 예측 루프 복원
+    send_message("[시스템 시작] YOPO 서버가 정상적으로 실행되었습니다. 전략별 예측은 주기적으로 자동 작동합니다.")
+    print("✅ 서버 초기화 완료 (정기 예측 루프 포함)")
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
