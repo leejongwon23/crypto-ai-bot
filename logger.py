@@ -104,8 +104,7 @@ def evaluate_predictions(get_price_fn):
         if row.get("status") != "pending":
             updated_rows.append(row)
             continue
-
-try:
+        try:
             pred_time = datetime.datetime.fromisoformat(row["timestamp"])
             strategy = row["strategy"]
             direction = row["direction"]
@@ -203,14 +202,18 @@ def get_dynamic_eval_wait(strategy):
         return 24 if rate >= 0.7 else 48 if rate >= 0.4 else 72
     return 6
 
+# ✅ 수정된 성공률 함수
 def get_actual_success_rate(strategy, threshold=0.7):
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-        df = df[(df["strategy"] == strategy) & (df["confidence"] >= threshold)]
-        df = df[df["status"].isin(["success", "fail"])]
-        if df.empty: return 0.0
+        df = df[(df["strategy"] == strategy) &
+                (df["confidence"] >= threshold) &
+                (df["status"].isin(["success", "fail"]))]
+        if df.empty:
+            return 0.0
         return len(df[df["status"] == "success"]) / len(df)
-    except:
+    except Exception as e:
+        print(f"[오류] get_actual_success_rate 실패: {e}")
         return 0.0
 
 def get_strategy_eval_count(strategy):
