@@ -128,39 +128,43 @@ def evaluate_predictions(get_price_fn):
                 updated_rows.append(row)
                 continue
 
-            if direction not in ["롱", "숏"] or model == "unknown" or entry_price == 0:
+            df = get_kline_by_strategy(symbol, strategy)
+            if df is None or df.empty:
                 row["status"] = "skip_eval"
-                row["reason"] = "평가 불가: 입력데이터 부족"
+                row["reason"] = "평가용 데이터 없음"
                 log_audit(symbol, strategy, "스킵", row["reason"])
                 updated_rows.append(row)
                 continue
 
-            model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model}.pt")
-            if not os.path.exists(model_path):
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            eval_df = df[df["timestamp"] >= pred_time]
+
+            if eval_df.empty:
                 row["status"] = "skip_eval"
-                row["reason"] = f"모델 없음: {model_path}"
+                row["reason"] = "평가 구간 데이터 부족"
                 log_audit(symbol, strategy, "스킵", row["reason"])
                 updated_rows.append(row)
                 continue
 
-            current_price = get_price_fn(symbol)
-            if current_price is None:
-                row["status"] = "skip_eval"
-                row["reason"] = "현재가 조회 실패"
-                log_audit(symbol, strategy, "스킵", row["reason"])
-                updated_rows.append(row)
-                continue
-
-            gain = (current_price - entry_price) / entry_price
             if direction == "롱":
+                max_price = eval_df["high"].max()
+                gain = (max_price - entry_price) / entry_price
+                success = gain >= rate
+            elif direction == "숏":
+                min_price = eval_df["low"].min()
+                gain = (entry_price - min_price) / entry_price
                 success = gain >= rate
             else:
-                success = -gain >= rate
+                row["status"] = "skip_eval"
+                row["reason"] = "방향 정보 없음"
+                log_audit(symbol, strategy, "스킵", row["reason"])
+                updated_rows.append(row)
+                continue
 
             row["status"] = "success" if success else "fail"
             row["reason"] = (
-                f"수익률 달성: {gain:.4f} ≥ 예측 {rate:.4f}" if success
-                else f"예측 미달: {gain:.4f} < 예측 {rate:.4f}"
+                f"수익률 도달: {gain:.4f} ≥ 예측 {rate:.4f}" if success
+                else f"미달: {gain:.4f} < 예측 {rate:.4f}"
             )
             log_audit(symbol, strategy, "성공" if success else "실패", row["reason"])
             update_model_success(symbol, strategy, model, success)
@@ -170,10 +174,10 @@ def evaluate_predictions(get_price_fn):
                 with open(WRONG_PREDICTIONS, "a", newline="", encoding="utf-8-sig") as wf:
                     writer = csv.writer(wf)
                     if write_header:
-                        writer.writerow(["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "current_price", "gain"])
+                        writer.writerow(["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "gain"])
                     writer.writerow([
                         row["timestamp"], symbol, strategy, direction,
-                        entry_price, row["target_price"], current_price, gain
+                        entry_price, row["target_price"], gain
                     ])
             updated_rows.append(row)
 
