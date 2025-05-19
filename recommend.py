@@ -81,7 +81,7 @@ def get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
 def should_predict(symbol, strategy):
     try:
         rate = get_model_success_rate(symbol, strategy, "ensemble")
-        eval_count, _ = get_strategy_eval_count(strategy)  # ✅ 수정 적용
+        eval_count = get_strategy_eval_count(strategy)
         if eval_count < 10:
             return True
         if rate < 0.5:
@@ -166,6 +166,7 @@ def run_prediction_loop(strategy, symbols):
                 log_audit(symbol, strategy, result, result["reason"])
                 continue
 
+            # ✅ 예측 성공은 무조건 success=True로 기록 → 평가 대상이 되도록
             log_prediction(
                 symbol=result.get("symbol", symbol),
                 strategy=result.get("strategy", strategy),
@@ -175,11 +176,12 @@ def run_prediction_loop(strategy, symbols):
                 timestamp=datetime.datetime.utcnow().isoformat(),
                 confidence=result.get("confidence", 0.0),
                 model=result.get("model", "unknown"),
-                success=result.get("success", False),
-                reason=result.get("reason", "예측 실패")
+                success=True,  # ✅ 고정
+                reason=result.get("reason", "예측 성공"),
+                rate=result.get("rate", 0.0)
             )
 
-            log_audit(symbol, strategy, result, "예측 성공" if result.get("success") else "예측 실패")
+            log_audit(symbol, strategy, result, "예측 성공")
 
             key = f"{symbol}-{strategy}"
             if not result.get("success", False):
@@ -284,5 +286,4 @@ def start_regular_prediction_loop():
             time.sleep(3600)
     threading.Thread(target=loop, daemon=True).start()
 
-# ✅ app.py 등 외부에서 run_prediction으로 실행 가능하도록 alias 지정
 run_prediction = main
