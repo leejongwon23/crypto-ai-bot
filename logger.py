@@ -213,9 +213,10 @@ def get_strategy_eval_count(strategy):
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
         df = df[df["strategy"] == strategy]
-        return len(df[df["status"].isin(["success", "fail"])]), len(df)
+        df = df[df["status"].isin(["success", "fail"])]
+        return len(df)
     except:
-        return 0, 0
+        return 0
 
 def get_strategy_fail_rate(symbol, strategy):
     try:
