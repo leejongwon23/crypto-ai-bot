@@ -38,6 +38,9 @@ VOLATILITY_THRESHOLD = {
 }
 
 def get_symbols_by_volatility(strategy):
+    if strategy not in ["단기", "중기", "장기"]:
+        print(f"[SKIP] 잘못된 strategy 입력: {strategy}")
+        return []
     threshold = VOLATILITY_THRESHOLD.get(strategy, 0.003)
     selected = []
     for symbol in SYMBOLS:
