@@ -165,7 +165,7 @@ def evaluate_predictions(get_price_fn):
             log_audit(symbol, strategy, "성공" if success else "실패", row["reason"])
             update_model_success(symbol, strategy, model, success)
 
-            if row["status"] == "fail":
+            if not success:
                 write_header = not os.path.exists(WRONG_PREDICTIONS)
                 with open(WRONG_PREDICTIONS, "a", newline="", encoding="utf-8-sig") as wf:
                     writer = csv.writer(wf)
@@ -213,9 +213,9 @@ def get_strategy_eval_count(strategy):
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
         df = df[df["strategy"] == strategy]
-        return len(df[df["status"].isin(["success", "fail"])])
+        return len(df[df["status"].isin(["success", "fail"])]), len(df)
     except:
-        return 0
+        return 0, 0
 
 def get_strategy_fail_rate(symbol, strategy):
     try:
