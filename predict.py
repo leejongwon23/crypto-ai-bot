@@ -1,3 +1,4 @@
+# --- [필수 import] ---
 import os
 import torch
 import numpy as np
@@ -25,12 +26,12 @@ def get_volatility(symbol, strategy):
 def get_predict_interval(strategy, symbol):
     vol = get_volatility(symbol, strategy)
     if strategy == "단기":
-        base = 60  # base 60분
+        base = 60
     elif strategy == "중기":
         base = 120
-    else:  # 장기
+    else:
         base = 360
-    adj = min(2.0, max(0.5, 1 / (vol + 1e-6)))  # 변동성 낮으면 2배 느리게, 높으면 최대 0.5배 빠르게
+    adj = min(2.0, max(0.5, 1 / (vol + 1e-6)))
     return int(base * adj)
 
 # --- ✅ 예측 실패 응답 구조 ---
@@ -75,7 +76,6 @@ def predict(symbol, strategy):
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
         input_size = X.shape[2]
 
-        # --- 모델 자동 탐색 ---
         model_paths = {}
         for file in os.listdir(MODEL_DIR):
             if not file.endswith(".pt"):
