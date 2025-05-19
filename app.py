@@ -131,6 +131,16 @@ def run():
         sys.stdout.flush()
         return f"Error: {e}", 500
 
+@app.route("/check-log")
+def check_log():
+    try:
+        if not os.path.exists(PREDICTION_LOG):
+            return jsonify({"error": "prediction_log.csv not found"})
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        return jsonify(df.tail(10).to_dict(orient='records'))
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
 @app.route("/train-now")
 def train_now():
     try:
@@ -240,7 +250,7 @@ def health_check():
     try:
         if os.path.exists(PREDICTION_LOG):
             df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-            total, done = len(df), len(df[df["status"].isin(["success", "fail"])]);
+            total, done = len(df), len(df[df["status"].isin(["success", "fail"])])
             results.append(f"✅ 예측 기록 OK ({total}건)")
             summary.append(f"- 평가 완료율: {(done/total*100):.1f}%" if total else "- 평가 없음")
         else:
