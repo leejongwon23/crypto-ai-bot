@@ -1,4 +1,3 @@
-# 1~100줄
 # --- 필수 임포트 ---
 from flask import Flask, jsonify, request, send_file
 from recommend import main
@@ -66,7 +65,7 @@ def start_regular_prediction_loop():
     threading.Thread(target=loop, args=("단기", 3600), daemon=True).start()
     threading.Thread(target=loop, args=("중기", 10800), daemon=True).start()
     threading.Thread(target=loop, args=("장기", 21600), daemon=True).start()
-# 101~200줄
+
 def start_scheduler():
     print(">>> start_scheduler() 호출됨")
     sys.stdout.flush()
@@ -138,7 +137,7 @@ def train_now():
         return "✅ 모든 코인 + 전략 학습이 지금 바로 시작됐습니다!"
     except Exception as e:
         return f"학습 시작 실패: {e}", 500
-# 201~300줄
+
 @app.route("/train-log")
 def train_log():
     try:
@@ -193,7 +192,7 @@ def check_stats():
                           .replace("❌", "<b style='color:red'>❌</b>") \
                           .replace("⏳", "<b>⏳</b>").replace("🎯", "<b>🎯</b>") \
                           .replace("📌", "<b>📌</b>")
-        return f"<div style='font-family:monospace; line-height:1.6;'>{formatted}</div>"
+        return f"<div style='font-family:monospace; line-height:1.6;'>" + formatted + "</div>"
     except Exception as e:
         return f"정확도 통계 출력 실패: {e}", 500
 
@@ -222,7 +221,7 @@ def reset_all():
         return "✅ 초기화 완료 (헤더 포함)"
     except Exception as e:
         return f"삭제 실패: {e}", 500
-# 301~307줄
+
 @app.route("/audit-log")
 def audit_log():
     try:
@@ -248,7 +247,7 @@ def health_check():
     try:
         if os.path.exists(PREDICTION_LOG):
             df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-            total, done = len(df), len(df[df["status"].isin(["success", "fail"])])
+            total, done = len(df), len(df[df["status"].isin(["success", "fail"])]);
             results.append(f"✅ 예측 기록 OK ({total}건)")
             summary.append(f"- 평가 완료율: {(done/total*100):.1f}%" if total else "- 평가 없음")
         else:
@@ -274,15 +273,16 @@ def health_check():
     except:
         summary.append("- 전략별 성공률 확인 실패")
     formatted = "<br>".join(results + [""] + summary)
-    return f"<div style='font-family:monospace; line-height:1.6;'>{formatted}</div>"
+    return f"<div style='font-family:monospace; line-height:1.6;'>" + formatted + "</div>"
 
 # --- 서버 시작 ---
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비")
     sys.stdout.flush()
     start_scheduler()
-    start_regular_prediction_loop()
+    # 🔥 자동 예측 루프 제거
+    # start_regular_prediction_loop()  ← ❌ 주석 처리됨
     send_message("[시스템 시작] YOPO 서버가 정상적으로 실행되었으며 예측은 자동 스케줄에 따라 작동합니다.")
-    print("✅ 서버 초기화 완료 (예측 루프 + 트리거 작동 중)")
+    print("✅ 서버 초기화 완료 (예측 루프 제거됨, 트리거만 작동 중)")
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
