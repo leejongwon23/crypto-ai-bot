@@ -191,6 +191,9 @@ def conditional_train_loop():
                         continue
 
                     fail_rate = get_strategy_fail_rate(symbol, strategy)
+                    if isinstance(fail_rate, tuple):
+                        fail_rate = fail_rate[0]
+
                     eval_count = get_strategy_eval_count(strategy)
 
                     if fail_rate >= 0.3 or eval_count < 10 or now - recent_train_time.get(key, 0) > gap * 2:
