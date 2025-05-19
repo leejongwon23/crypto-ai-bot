@@ -1,4 +1,5 @@
-# --- [필수 import] ---
+# ✅ 2번 수정 내용 반영 완료본 (전체 덮어쓰기용)
+
 import os, time, threading, gc, json
 import torch
 import torch.nn as nn
@@ -9,7 +10,7 @@ from sklearn.metrics import accuracy_score, f1_score, log_loss
 
 from data.utils import SYMBOLS, get_kline_by_strategy, compute_features
 from model.base_model import get_model
-from model_weight_loader import get_model_weight
+from model_weight_loader import get_model_weight  # ✅ 2번 개선 포함
 from wrong_data_loader import load_wrong_prediction_data
 from feature_importance import compute_feature_importance, save_feature_importance
 import logger
@@ -83,7 +84,7 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
     feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
     X_raw, y_raw = create_dataset(feature_dicts, best_window)
     if len(X_raw) < 2:
-        print(f"[SKIP] {symbol}-{strategy} 유효 시퀀스 부족 → {len(X_raw)}개")
+        print(f"[SKIP] {symbol}-{strategy} 유효 시템스 부족 → {len(X_raw)}개")
         return
 
     input_size = X_raw.shape[2]
@@ -127,7 +128,7 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
                                     loss = criterion(pred, yb)
                                     optimizer.zero_grad(); loss.backward(); optimizer.step()
                     except Exception as e:
-                        print(f"[오답 학습 실패] {symbol}-{strategy} → {e}")
+                        print(f"[오단 학습 실패] {symbol}-{strategy} → {e}")
 
             for epoch in range(epochs):
                 for xb, yb in train_loader:
@@ -167,7 +168,7 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         importances = compute_feature_importance(best_model_obj, val_X_tensor, val_y_tensor, list(df_feat.columns))
         save_feature_importance(importances, symbol, strategy, best_model_type)
     else:
-        print(f"❗ 최종 저장 실패: {symbol}-{strategy} 모든 모델 평가 실패")
+        print(f"❗ 차원 저장 실패: {symbol}-{strategy} 모든 모델 평가 실패")
 
 def conditional_train_loop():
     recent_train_time = {}
@@ -199,12 +200,12 @@ def conditional_train_loop():
                         eval_count = eval_count[0]
 
                     if fail_rate >= 0.3 or eval_count < 10 or now - recent_train_time.get(key, 0) > gap * 2:
-                        print(f"[학습조건충족] {symbol}-{strategy} → 실패율: {fail_rate:.2f}, 평가: {eval_count}")
+                        print(f"[학습조건측중] {symbol}-{strategy} → 실패\uc율: {fail_rate:.2f}, 평가: {eval_count}")
                         train_one_model(symbol, strategy)
                         gc.collect()
                         recent_train_time[key] = time.time()
                     else:
-                        print(f"[SKIP] {symbol}-{strategy} → 조건 미충족")
+                        print(f"[SKIP] {symbol}-{strategy} → 조건 미측중")
                 except Exception as e:
                     print(f"[오류] 학습 루프 실패: {symbol}-{strategy} → {e}")
             time.sleep(600)
