@@ -1,3 +1,4 @@
+# --- 생략 없이 전체 수정된 logger.py 시작 ---
 import os
 import csv
 import datetime
@@ -152,21 +153,18 @@ def evaluate_predictions(get_price_fn):
                 continue
 
             gain = (current_price - entry_price) / entry_price
-            min_gain = get_min_gain(symbol, strategy)
-
-            if abs(gain) < min_gain:
-                row["status"] = "fail"
-                row["reason"] = f"수익률 미달: {gain:.4f} < 최소요건 {min_gain:.4f}"
-                log_audit(symbol, strategy, "실패", row["reason"])
+            if direction == "롱":
+                success = gain >= rate
             else:
-                success = gain >= rate if direction == "롱" else -gain >= rate
-                row["status"] = "success" if success else "fail"
-                row["reason"] = (
-                    f"수익률 달성: {gain:.4f} ≥ 예측 {rate:.4f}" if success
-                    else f"예측 미달: {gain:.4f} < 예측 {rate:.4f}"
-                )
-                log_audit(symbol, strategy, "성공" if success else "실패", row["reason"])
-                update_model_success(symbol, strategy, model, success)
+                success = -gain >= rate
+
+            row["status"] = "success" if success else "fail"
+            row["reason"] = (
+                f"수익률 달성: {gain:.4f} ≥ 예측 {rate:.4f}" if success
+                else f"예측 미달: {gain:.4f} < 예측 {rate:.4f}"
+            )
+            log_audit(symbol, strategy, "성공" if success else "실패", row["reason"])
+            update_model_success(symbol, strategy, model, success)
 
             if row["status"] == "fail":
                 write_header = not os.path.exists(WRONG_PREDICTIONS)
@@ -191,7 +189,6 @@ def evaluate_predictions(get_price_fn):
             writer = csv.DictWriter(f, fieldnames=updated_rows[0].keys())
             writer.writeheader()
             writer.writerows(updated_rows)
-
 def get_dynamic_eval_wait(strategy):
     rate = get_actual_success_rate(strategy)
     if strategy == "단기":
@@ -284,3 +281,4 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
         print(f"[오류] 학습 로그 저장 실패: {e}")
     else:
         print(f"[LOG] Training result logged for {symbol} - {strategy} - {model_name}")
+
