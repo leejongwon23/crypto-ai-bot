@@ -16,6 +16,20 @@ EVAL_EXPIRY_BUFFER = 12
 STOP_LOSS_PCT = 0.02
 model_success_tracker = {}
 
+def get_min_gain(symbol, strategy):
+    df = get_kline_by_strategy(symbol, strategy)
+    if df is None or len(df) < 20:
+        return {"단기": 0.01, "중기": 0.03, "장기": 0.05}.get(strategy, 0.05)
+    volatility = df["close"].pct_change().rolling(window=20).std()
+    v = volatility.iloc[-1] if not volatility.isna().all() else 0.01
+    if strategy == "단기":
+        return max(round(v * 1.2, 4), 0.005)
+    elif strategy == "중기":
+        return max(round(v * 1.2, 4), 0.01)
+    elif strategy == "장기":
+        return max(round(v * 1.2, 4), 0.02)
+    return 0.03
+
 def update_model_success(symbol, strategy, model, success: bool):
     key = (symbol, strategy, model)
     if key not in model_success_tracker:
@@ -174,6 +188,7 @@ def evaluate_predictions(get_price_fn):
             writer = csv.DictWriter(f, fieldnames=updated_rows[0].keys())
             writer.writeheader()
             writer.writerows(updated_rows)
+
 def get_dynamic_eval_wait(strategy):
     rate = get_actual_success_rate(strategy)
     if strategy == "단기":
@@ -232,7 +247,7 @@ def print_prediction_stats():
             f"✅ 성공: {success}",
             f"❌ 실패: {fail}",
             f"⏳ 평가 대기중: {pending}",
-            f"⏭️ 스킵: {skipped}",
+            f"⏭️ 스킥: {skipped}",
             f"⚠️ 모델없음: {invalid}",
             f"🟡 평가제외: {skipped_eval}",
             f"🎯 성공률: {success_rate:.2f}%"
