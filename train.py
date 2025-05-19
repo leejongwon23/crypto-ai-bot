@@ -1,5 +1,3 @@
-# ✅ 2번 수정 내용 반영 완료본 (전체 덮어쓰기용)
-
 import os, time, threading, gc, json
 import torch
 import torch.nn as nn
@@ -10,7 +8,7 @@ from sklearn.metrics import accuracy_score, f1_score, log_loss
 
 from data.utils import SYMBOLS, get_kline_by_strategy, compute_features
 from model.base_model import get_model
-from model_weight_loader import get_model_weight  # ✅ 2번 개선 포함
+from model_weight_loader import get_model_weight
 from wrong_data_loader import load_wrong_prediction_data
 from feature_importance import compute_feature_importance, save_feature_importance
 import logger
@@ -65,7 +63,7 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
     path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
-    print(f"📝 체크포인트 저장됨: {path}")
+    print(f"🗘 체크폰트 저장됨: {path}")
 
 def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3, repeat=4, repeat_wrong=4):
     print(f"[train] {symbol}-{strategy} 전체 모델 학습 시작")
@@ -84,7 +82,7 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
     feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
     X_raw, y_raw = create_dataset(feature_dicts, best_window)
     if len(X_raw) < 2:
-        print(f"[SKIP] {symbol}-{strategy} 유효 시템스 부족 → {len(X_raw)}개")
+        print(f"[SKIP] {symbol}-{strategy} 유효 시컷스 부족 → {len(X_raw)}개")
         return
 
     input_size = X_raw.shape[2]
@@ -200,12 +198,12 @@ def conditional_train_loop():
                         eval_count = eval_count[0]
 
                     if fail_rate >= 0.3 or eval_count < 10 or now - recent_train_time.get(key, 0) > gap * 2:
-                        print(f"[학습조건측중] {symbol}-{strategy} → 실패\uc율: {fail_rate:.2f}, 평가: {eval_count}")
+                        print(f"[학습조건충족] {symbol}-{strategy} → 실패율: {fail_rate:.2f}, 평가: {eval_count}")
                         train_one_model(symbol, strategy)
                         gc.collect()
                         recent_train_time[key] = time.time()
                     else:
-                        print(f"[SKIP] {symbol}-{strategy} → 조건 미측중")
+                        print(f"[SKIP] {symbol}-{strategy} → 조건 미충족")
                 except Exception as e:
                     print(f"[오류] 학습 루프 실패: {symbol}-{strategy} → {e}")
             time.sleep(600)
