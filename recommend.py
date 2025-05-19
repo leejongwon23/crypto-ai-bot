@@ -76,7 +76,7 @@ def get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
             if vol is not None and vol >= threshold:
                 selected.append({
                     "symbol": symbol,
-                    "volatility": vol  # ✅ 2단계: 변동성 함께 리턴
+                    "volatility": vol  # ✅ 2단계: 변동성 포함
                 })
         except Exception as e:
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
@@ -158,7 +158,7 @@ def run_prediction_loop(strategy, symbol_data_list):
                 log_audit(symbol, strategy, result, result["reason"])
                 continue
 
-            result["volatility"] = volatility  # ✅ 3단계: 예측결과에 변동성 포함
+            result["volatility"] = volatility  # ✅ 3단계: 변동성 포함
 
             log_prediction(
                 symbol=result.get("symbol", symbol),
@@ -223,7 +223,7 @@ def run_prediction_loop(strategy, symbol_data_list):
         if success_rate < SUCCESS_RATE_THRESHOLD:
             continue
 
-        # ✅ 4단계: soft-penalty + 변동성 점수 포함
+        # ✅ 4단계: soft-penalty + 변동성 score 포함 (변동성 예측만 적용)
         penalty = 1.0 - (1.0 - success_rate) ** 2
         score = conf * rate * penalty * (1 + vol)
         if score < MIN_SCORE_THRESHOLD:
@@ -260,9 +260,7 @@ def main(strategy=None):
         symbol_data_list = get_symbols_by_volatility(strategy)
         run_prediction_loop(strategy, symbol_data_list)
     else:
-        for strategy in ["단기", "중기", "장기"]:
-            symbol_data_list = get_symbols_by_volatility(strategy)
-            run_prediction_loop(strategy, symbol_data_list)
+        print(">>> main()이 호출됐지만 전략은 명시되어야 합니다. 예측은 자동 루프에 의해 작동합니다.")
 
 def start_regular_prediction_loop():
     def loop():
