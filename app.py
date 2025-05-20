@@ -18,8 +18,6 @@ FAILURE_COUNT_LOG = os.path.join(LOG_DIR, "failure_count.csv")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 VOLATILITY_THRESHOLD = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
-PREDICTION_INTERVALS = {"단기": 3600, "중기": 10800, "장기": 21600}
-last_prediction_time = {s: 0 for s in PREDICTION_INTERVALS}
 
 def now_kst():
     return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
@@ -37,32 +35,25 @@ def get_symbols_by_volatility(strategy):
             print(f"[ERROR] {symbol}-{strategy} 변동성 계산 실패: {e}")
     return selected
 
-def start_regular_prediction_loop():
-    def loop():
-        while True:
-            now = time.time()
-            for s in PREDICTION_INTERVALS:
-                if now - last_prediction_time[s] >= PREDICTION_INTERVALS[s]:
-                    try:
-                        print(f"[정기 예측] {s} {now_kst()} 실행")
-                        sys.stdout.flush()
-                        main(s)
-                        last_prediction_time[s] = time.time()
-                    except Exception as e:
-                        print(f"[정기 예측 오류] {s}: {e}")
-            time.sleep(60)
-    threading.Thread(target=loop, daemon=True).start()
-
 def start_scheduler():
     print(">>> start_scheduler() 호출됨")
     sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Seoul'))
+
+    # 평가 + 학습 스케줄
     scheduler.add_job(lambda: __import__('logger').evaluate_predictions(get_latest_price), 'cron', minute=20)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start(), 'cron', hour='0,3,6,9,12,15,18,21', minute=30)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start(), 'cron', hour='1,7,13,19', minute=30)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start(), 'cron', hour='2,14', minute=30)
+
+    # ✅ 예측 스케줄 (절대 시간 기준)
+    scheduler.add_job(lambda: main("단기"), 'cron', hour='*', minute=0)
+    scheduler.add_job(lambda: main("중기"), 'cron', hour='0,3,6,9,12,15,18,21', minute=0)
+    scheduler.add_job(lambda: main("장기"), 'cron', hour='0,6,12,18', minute=0)
+
     scheduler.add_job(test_all_predictions, 'cron', minute=10)
     scheduler.add_job(trigger_run, 'interval', minutes=30)
+
     scheduler.start()
 
 app = Flask(__name__)
@@ -209,7 +200,6 @@ def health_check():
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비"); sys.stdout.flush()
     start_scheduler()
-    start_regular_prediction_loop()
     send_message("[시스템 시작] YOPO 서버가 정상적으로 실행되었습니다. 전략별 예측은 주기적으로 자동 작동합니다.")
     print("✅ 서버 초기화 완료 (정기 예측 루프 포함)")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
