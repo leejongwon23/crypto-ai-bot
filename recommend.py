@@ -1,3 +1,4 @@
+# --- 필수 import ---
 import datetime
 import os
 import csv
@@ -16,6 +17,7 @@ from src.message_formatter import format_message
 import train
 from model_weight_loader import model_exists
 
+# --- 설정 상수 ---
 MIN_CONFIDENCE = 0.70
 MIN_CONFIDENCE_OVERRIDE = 0.85
 SUCCESS_RATE_THRESHOLD = 0.70
@@ -24,14 +26,17 @@ FAILURE_TRIGGER_LIMIT = 3
 MIN_SCORE_THRESHOLD = 0.005
 FINAL_SEND_LIMIT = 5
 
+# --- 경로 설정 ---
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
 FAILURE_LOG = "/persistent/logs/failure_count.csv"
 MESSAGE_LOG = "/persistent/logs/message_log.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
 
+# --- KST 기준 시간 함수 ---
 def now_kst():
     return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
+# --- 실패 횟수 로딩 및 저장 ---
 def load_failure_count():
     if not os.path.exists(FAILURE_LOG):
         return {}
@@ -46,6 +51,7 @@ def save_failure_count(failure_map):
             symbol, strategy = key.split("-")
             writer.writerow({"symbol": symbol, "strategy": strategy, "failures": count})
 
+# --- 감사 로그 기록 ---
 def log_audit(symbol, strategy, result, status):
     now = now_kst().isoformat()
     row = {
@@ -62,10 +68,12 @@ def log_audit(symbol, strategy, result, status):
             writer.writeheader()
         writer.writerow(row)
 
+# --- 실시간 가격 조회 ---
 def get_price_now(symbol):
     prices = get_realtime_prices()
     return prices.get(symbol)
 
+# --- 변동성 기준 필터링 ---
 def get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
     threshold *= 1.2
     selected = []
@@ -81,6 +89,7 @@ def get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
     return selected
 
+# --- 예측 실행 여부 판단 ---
 def should_predict(symbol, strategy):
     try:
         rate = get_model_success_rate(symbol, strategy, "ensemble")
@@ -93,9 +102,11 @@ def should_predict(symbol, strategy):
     except:
         return True
 
+# --- 예측 루프 실행 ---
 def run_prediction_loop(strategy, symbol_data_list):
     print(f"[예측 시작 - {strategy}] {len(symbol_data_list)}개 심볼")
     sys.stdout.flush()
+
     try:
         evaluate_predictions(get_price_now)
     except Exception as e:
@@ -114,19 +125,13 @@ def run_prediction_loop(strategy, symbol_data_list):
         try:
             if not model_exists(symbol, strategy):
                 log_prediction(
-                    symbol=symbol,
-                    strategy=strategy,
-                    direction="N/A",
-                    entry_price=0,
-                    target_price=0,
-                    timestamp=now_kst().isoformat(),
-                    confidence=0.0,
-                    model="unknown",
-                    success=False,
-                    reason="모델 없음"
+                    symbol=symbol, strategy=strategy, direction="N/A", entry_price=0, target_price=0,
+                    timestamp=now_kst().isoformat(), confidence=0.0, model="unknown",
+                    success=False, reason="모델 없음"
                 )
                 log_audit(symbol, strategy, None, "모델 없음")
                 continue
+
             if not should_predict(symbol, strategy):
                 continue
 
@@ -136,16 +141,9 @@ def run_prediction_loop(strategy, symbol_data_list):
 
             if not isinstance(result, dict):
                 log_prediction(
-                    symbol=symbol,
-                    strategy=strategy,
-                    direction="N/A",
-                    entry_price=0,
-                    target_price=0,
-                    timestamp=now_kst().isoformat(),
-                    confidence=0.0,
-                    model="unknown",
-                    success=False,
-                    reason="predict() 반환값 None"
+                    symbol=symbol, strategy=strategy, direction="N/A", entry_price=0, target_price=0,
+                    timestamp=now_kst().isoformat(), confidence=0.0, model="unknown",
+                    success=False, reason="predict() 반환값 None"
                 )
                 log_audit(symbol, strategy, result, "예측 실패 (None)")
                 continue
@@ -153,16 +151,9 @@ def run_prediction_loop(strategy, symbol_data_list):
             if result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
                 print(f"[SKIP] {symbol}-{strategy} → 예측 불가 이유: {result['reason']}")
                 log_prediction(
-                    symbol=symbol,
-                    strategy=strategy,
-                    direction="N/A",
-                    entry_price=0,
-                    target_price=0,
-                    timestamp=now_kst().isoformat(),
-                    confidence=0.0,
-                    model="unknown",
-                    success=False,
-                    reason=result["reason"]
+                    symbol=symbol, strategy=strategy, direction="N/A", entry_price=0, target_price=0,
+                    timestamp=now_kst().isoformat(), confidence=0.0, model="unknown",
+                    success=False, reason=result["reason"]
                 )
                 log_audit(symbol, strategy, result, result["reason"])
                 continue
@@ -199,22 +190,16 @@ def run_prediction_loop(strategy, symbol_data_list):
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
             try:
                 log_prediction(
-                    symbol=symbol,
-                    strategy=strategy,
-                    direction="예외",
-                    entry_price=0,
-                    target_price=0,
-                    timestamp=now_kst().isoformat(),
-                    confidence=0.0,
-                    model="unknown",
-                    success=False,
-                    reason=f"예외 발생: {e}"
+                    symbol=symbol, strategy=strategy, direction="예외", entry_price=0, target_price=0,
+                    timestamp=now_kst().isoformat(), confidence=0.0, model="unknown",
+                    success=False, reason=f"예외 발생: {e}"
                 )
                 log_audit(symbol, strategy, None, f"예외 발생: {e}")
             except:
                 pass
 
     save_failure_count(failure_map)
+
     filtered = []
     for r in all_results:
         conf = r.get("confidence", 0)
@@ -242,26 +227,26 @@ def run_prediction_loop(strategy, symbol_data_list):
         try:
             msg = format_message(res)
             send_message(msg)
+            if not os.path.exists(MESSAGE_LOG):
+                with open(MESSAGE_LOG, "w", newline="", encoding="utf-8-sig") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["timestamp", "symbol", "strategy", "message"])
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
-                if os.stat(MESSAGE_LOG).st_size == 0:
-                    writer.writerow(["timestamp", "symbol", "strategy", "message"])
                 writer.writerow([now_kst().isoformat(), res["symbol"], res["strategy"], msg])
             print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%} | 성공률: {res['success_rate']:.2f}")
         except Exception as e:
             print(f"[ERROR] 메시지 전송 실패: {e}")
 
+# --- 단일 예측 실행 진입점 ---
 def run_prediction(symbol, strategy):
-    """
-    단일 심볼과 전략에 대한 예측 실행 함수.
-    predict_trigger.py에서 직접 호출 가능하도록 설계.
-    """
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
     try:
         run_prediction_loop(strategy, [{"symbol": symbol}])
     except Exception as e:
         print(f"[run_prediction 오류] {symbol} - {strategy}: {e}")
 
+# --- 메인 진입점 ---
 def main(strategy=None):
     print(">>> [main] recommend.py 실행")
     if strategy:
