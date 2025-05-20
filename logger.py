@@ -51,18 +51,20 @@ def log_audit(symbol, strategy, status, reason):
     now = datetime.datetime.utcnow().isoformat()
     row = {
         "timestamp": now,
-        "symbol": symbol,
-        "strategy": strategy,
-        "status": status,
-        "reason": reason
+        "symbol": str(symbol),
+        "strategy": str(strategy),
+        "status": str(status),
+        "reason": str(reason)
     }
     write_header = not os.path.exists(AUDIT_LOG)
-    with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=row.keys())
-        if write_header:
-            writer.writeheader()
-        writer.writerow(row)
-
+    try:
+        with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=row.keys())
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+    except Exception as e:
+        print(f"[오류] log_audit 기록 실패: {e}")
 def log_prediction(symbol, strategy, direction=None, entry_price=None, target_price=None,
                    timestamp=None, confidence=None, model=None, success=True, reason="", rate=0.0):
     now = timestamp or datetime.datetime.utcnow().isoformat()
@@ -112,7 +114,6 @@ def evaluate_predictions(get_price_fn):
         if row.get("status") != "pending":
             updated_rows.append(row)
             continue
-
         try:
             pred_time = datetime.datetime.fromisoformat(row["timestamp"])
             strategy = row["strategy"]
@@ -148,7 +149,6 @@ def evaluate_predictions(get_price_fn):
 
             df["timestamp"] = pd.to_datetime(df["timestamp"])
             eval_df = df[df["timestamp"] >= pred_time]
-
             if eval_df.empty:
                 row["status"] = "skip_eval"
                 row["reason"] = "평가 구간 데이터 부족"
@@ -202,7 +202,6 @@ def evaluate_predictions(get_price_fn):
             writer = csv.DictWriter(f, fieldnames=updated_rows[0].keys())
             writer.writeheader()
             writer.writerows(updated_rows)
-
 def get_dynamic_eval_wait(strategy):
     rate = get_actual_success_rate(strategy)
     if strategy == "단기":
