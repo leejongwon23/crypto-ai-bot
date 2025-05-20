@@ -2,6 +2,7 @@ import requests
 import pandas as pd
 import numpy as np
 import time
+import pytz
 
 BASE_URL = "https://api.bybit.com"
 BTC_DOMINANCE_CACHE = {"value": 0.5, "timestamp": 0}
@@ -91,7 +92,7 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 200):
             "timestamp": "int64", "open": "float", "high": "float",
             "low": "float", "close": "float", "volume": "float"
         })
-        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms").dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
         df = df.sort_values("datetime").reset_index(drop=True)
         return df
     except Exception as e:
