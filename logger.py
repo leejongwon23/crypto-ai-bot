@@ -16,6 +16,7 @@ EVAL_EXPIRY_BUFFER = 12
 STOP_LOSS_PCT = 0.02
 model_success_tracker = {}
 
+
 def get_min_gain(symbol, strategy):
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or len(df) < 20:
@@ -30,6 +31,7 @@ def get_min_gain(symbol, strategy):
         return max(round(v * 1.2, 4), 0.02)
     return 0.03
 
+
 def update_model_success(symbol, strategy, model, success: bool):
     key = (symbol, strategy, model)
     if key not in model_success_tracker:
@@ -39,6 +41,7 @@ def update_model_success(symbol, strategy, model, success: bool):
     else:
         model_success_tracker[key]["fail"] += 1
 
+
 def get_model_success_rate(symbol, strategy, model, min_total=10):
     key = (symbol, strategy, model)
     record = model_success_tracker.get(key, {"success": 0, "fail": 0})
@@ -46,6 +49,7 @@ def get_model_success_rate(symbol, strategy, model, min_total=10):
     if total < min_total:
         return 0.5
     return record["success"] / total
+
 
 def log_audit(symbol, strategy, status, reason):
     now = datetime.datetime.utcnow().isoformat()
@@ -62,6 +66,7 @@ def log_audit(symbol, strategy, status, reason):
         if write_header:
             writer.writeheader()
         writer.writerow(row)
+
 
 def log_prediction(symbol, strategy, direction=None, entry_price=None, target_price=None,
                    timestamp=None, confidence=None, model=None, success=True, reason="", rate=0.0):
@@ -88,6 +93,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=None, target_pr
             writer.writeheader()
         writer.writerow(row)
 
+
 def evaluate_predictions(get_price_fn):
     if not os.path.exists(PREDICTION_LOG):
         return
@@ -100,10 +106,12 @@ def evaluate_predictions(get_price_fn):
 
     now = datetime.datetime.utcnow()
     updated_rows = []
+
     for row in rows:
         if row.get("status") != "pending":
             updated_rows.append(row)
             continue
+
         try:
             pred_time = datetime.datetime.fromisoformat(row["timestamp"])
             strategy = row["strategy"]
@@ -112,6 +120,7 @@ def evaluate_predictions(get_price_fn):
             entry_price = float(row.get("entry_price", 0))
             rate = float(row.get("rate", 0))
             symbol = row["symbol"]
+
             eval_hours = get_dynamic_eval_wait(strategy)
             hours_passed = (now - pred_time).total_seconds() / 3600
 
@@ -179,7 +188,9 @@ def evaluate_predictions(get_price_fn):
                         row["timestamp"], symbol, strategy, direction,
                         entry_price, row["target_price"], gain
                     ])
+
             updated_rows.append(row)
+
         except Exception as e:
             row["status"] = "skip_eval"
             row["reason"] = f"예외 발생: {e}"
@@ -192,6 +203,7 @@ def evaluate_predictions(get_price_fn):
             writer.writeheader()
             writer.writerows(updated_rows)
 
+
 def get_dynamic_eval_wait(strategy):
     rate = get_actual_success_rate(strategy)
     if strategy == "단기":
@@ -201,6 +213,7 @@ def get_dynamic_eval_wait(strategy):
     elif strategy == "장기":
         return 24 if rate >= 0.7 else 48 if rate >= 0.4 else 72
     return 6
+
 
 def get_actual_success_rate(strategy=None, threshold=0.7):
     try:
@@ -216,6 +229,7 @@ def get_actual_success_rate(strategy=None, threshold=0.7):
         print(f"[오류] get_actual_success_rate 실패: {e}")
         return 0.0
 
+
 def get_strategy_eval_count(strategy):
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
@@ -224,6 +238,7 @@ def get_strategy_eval_count(strategy):
         return len(df)
     except:
         return 0
+
 
 def get_strategy_fail_rate(symbol, strategy):
     try:
@@ -235,6 +250,7 @@ def get_strategy_fail_rate(symbol, strategy):
         return len(df[df["status"] == "fail"]) / len(df)
     except:
         return 0.0
+
 
 def print_prediction_stats():
     if not os.path.exists(PREDICTION_LOG):
@@ -282,6 +298,7 @@ def print_prediction_stats():
         return "\n".join(summary)
     except Exception as e:
         return f"[오류] 통계 출력 실패: {e}"
+
 
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
