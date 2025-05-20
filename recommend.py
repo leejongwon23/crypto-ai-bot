@@ -29,16 +29,11 @@ FAILURE_LOG = "/persistent/logs/failure_count.csv"
 MESSAGE_LOG = "/persistent/logs/message_log.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
 
-
 def load_failure_count():
     if not os.path.exists(FAILURE_LOG):
         return {}
     with open(FAILURE_LOG, "r", encoding="utf-8-sig") as f:
-        return {
-            f"{r['symbol']}-{r['strategy']}": int(r["failures"])
-            for r in csv.DictReader(f)
-        }
-
+        return {f"{r['symbol']}-{r['strategy']}": int(r["failures"]) for r in csv.DictReader(f)}
 
 def save_failure_count(failure_map):
     with open(FAILURE_LOG, "w", newline="", encoding="utf-8-sig") as f:
@@ -47,7 +42,6 @@ def save_failure_count(failure_map):
         for key, count in failure_map.items():
             symbol, strategy = key.split("-")
             writer.writerow({"symbol": symbol, "strategy": strategy, "failures": count})
-
 
 def log_audit(symbol, strategy, result, status):
     now = datetime.datetime.utcnow().isoformat()
@@ -65,11 +59,9 @@ def log_audit(symbol, strategy, result, status):
             writer.writeheader()
         writer.writerow(row)
 
-
 def get_price_now(symbol):
     prices = get_realtime_prices()
     return prices.get(symbol)
-
 
 def get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
     threshold *= 1.2
@@ -86,7 +78,6 @@ def get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
     return selected
 
-
 def should_predict(symbol, strategy):
     try:
         rate = get_model_success_rate(symbol, strategy, "ensemble")
@@ -100,7 +91,6 @@ def should_predict(symbol, strategy):
         return True
     except:
         return True
-
 
 def run_prediction_loop(strategy, symbol_data_list):
     print(f"[예측 시작 - {strategy}] {len(symbol_data_list)}개 심볼")
@@ -240,11 +230,6 @@ def run_prediction_loop(strategy, symbol_data_list):
 
     final = sorted(filtered, key=lambda x: -x["score"])[:FINAL_SEND_LIMIT]
 
-    now_hour = datetime.datetime.now().hour
-    if 2 <= now_hour < 6:
-        print(f"[전송 차단] 현재 {now_hour}시 → 야간 전송 제한")
-        return
-
     for res in final:
         try:
             msg = format_message(res)
@@ -258,7 +243,6 @@ def run_prediction_loop(strategy, symbol_data_list):
         except Exception as e:
             print(f"[ERROR] 메시지 전송 실패: {e}")
 
-
 def main(strategy=None):
     print(">>> [main] recommend.py 실행")
     sys.stdout.flush()
@@ -268,7 +252,6 @@ def main(strategy=None):
     else:
         print(">>> main()이 호출됐지만 전략은 명시되어야 합니다. 예측은 자동 루프에 의해 작동합니다.")
 
-
 def start_regular_prediction_loop():
     def loop():
         while True:
@@ -276,8 +259,6 @@ def start_regular_prediction_loop():
                 symbol_data_list = get_symbols_by_volatility(strategy)
                 run_prediction_loop(strategy, symbol_data_list)
             time.sleep(3600)
-
     threading.Thread(target=loop, daemon=True).start()
-
 
 run_prediction = main
