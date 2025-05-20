@@ -4,22 +4,22 @@ import torch
 import numpy as np
 import datetime
 import pytz
+from sklearn.metrics import log_loss
+
 from data.utils import get_kline_by_strategy, compute_features
 from model.base_model import get_model
 from model_weight_loader import get_model_weight
 from window_optimizer import find_best_window
-from sklearn.metrics import log_loss
 from logger import get_min_gain
 
+# --- 설정 ---
 DEVICE = torch.device("cpu")
 STOP_LOSS_PCT = 0.02
 MODEL_DIR = "/persistent/models"
 
-# --- ✅ 시간 함수 ---
 def now_kst():
     return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-# --- ✅ 실패 결과 반환 구조 ---
 def failed_result(symbol, strategy, reason):
     dummy_price = 1.0
     return {
@@ -30,7 +30,6 @@ def failed_result(symbol, strategy, reason):
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
     }
 
-# --- ✅ 메인 예측 함수 ---
 def predict(symbol, strategy):
     try:
         best_window = find_best_window(symbol, strategy)
@@ -50,7 +49,7 @@ def predict(symbol, strategy):
             if len(X.shape) != 3:
                 raise ValueError("시퀀스 형상 오류")
         except Exception as e:
-            return failed_result(symbol, strategy, f"입력 오류: {e}")
+            return failed_result(symbol, strategy, f"입력 시퀀스 오류: {e}")
 
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
         input_size = X.shape[2]
@@ -81,20 +80,22 @@ def predict(symbol, strategy):
                         continue
 
                     direction = "롱" if signal > 0.5 else "숏"
-                    raw_rate = ((signal - 0.5) * 2) ** 2  # 제곱 보정
-                    rate = raw_rate * min_gain * 0.8
-
+                    raw_rate = abs(signal - 0.5) * 2
                     weight = get_model_weight(model_type, strategy)
-                    fake_y = np.array([1 if signal > 0.5 else 0])
-                    fake_p = np.array([signal])
-                    try:
-                        loss = log_loss(fake_y, fake_p, labels=[0, 1])
-                        penalty = max(0.01, 1 - loss)
-                    except:
-                        penalty = confidence
 
-                    final_conf = (confidence + penalty + weight) / 3
-                    score = final_conf * rate * weight
+                    # --- 수익률 보정: confidence 기반 가중 적용 ---
+                    confidence_penalty = 1.0
+                    try:
+                        fake_y = np.array([1 if signal > 0.5 else 0])
+                        fake_p = np.array([signal])
+                        loss_penalty = log_loss(fake_y, fake_p, labels=[0, 1])
+                        confidence_penalty = max(0.1, 1.0 - loss_penalty)
+                    except:
+                        confidence_penalty = confidence
+
+                    final_conf = (confidence + confidence_penalty) / 2
+                    rate = raw_rate * min_gain * final_conf
+                    score = final_conf * weight * rate
 
                     results.append({
                         "model": model_type,
@@ -115,39 +116,38 @@ def predict(symbol, strategy):
             dir_count[r["direction"]] += 1
 
         if dir_count["롱"] >= 2:
-            final_dir = "롱"
+            final_direction = "롱"
         elif dir_count["숏"] >= 2:
-            final_dir = "숏"
+            final_direction = "숏"
         elif len(results) == 1:
-            final_dir = results[0]["direction"]
+            final_direction = results[0]["direction"]
         else:
             return failed_result(symbol, strategy, "모델 방향 불일치")
 
-        final_results = [r for r in results if r["direction"] == final_dir]
-        avg_conf = sum(r["confidence"] for r in final_results) / len(final_results)
-        avg_rate = sum(r["rate"] for r in final_results) / len(final_results)
+        valid = [r for r in results if r["direction"] == final_direction]
+        avg_conf = sum(r["confidence"] for r in valid) / len(valid)
+        avg_rate = sum(r["rate"] for r in valid) / len(valid)
         price = features["close"].iloc[-1]
 
-        # 보조지표 해석
-        rsi = features["rsi"].iloc[-1] if "rsi" in features else 50
-        macd = features["macd"].iloc[-1] if "macd" in features else 0
-        boll = features["bollinger"].iloc[-1] if "bollinger" in features else 0
         reason = []
-        if final_dir == "롱":
+        rsi = features.get("rsi", [50])[-1]
+        macd = features.get("macd", [0])[-1]
+        boll = features.get("bollinger", [0])[-1]
+        if final_direction == "롱":
             if rsi < 30: reason.append("RSI 과매도")
-            if macd > 0: reason.append("MACD 상승 전환")
-        else:
+            if macd > 0: reason.append("MACD 상승")
+        if final_direction == "숏":
             if rsi > 70: reason.append("RSI 과매수")
-            if macd < 0: reason.append("MACD 하락 전환")
-        if boll > 1: reason.append("볼린저 상단 돌파")
-        elif boll < -1: reason.append("볼린저 하단 이탈")
+            if macd < 0: reason.append("MACD 하락")
+        if boll > 1: reason.append("볼린저 상단")
+        elif boll < -1: reason.append("볼린저 하단")
 
         return {
             "symbol": symbol, "strategy": strategy, "model": "ensemble",
-            "direction": final_dir, "confidence": avg_conf, "rate": avg_rate,
-            "price": price,
-            "target": price * (1 + avg_rate) if final_dir == "롱" else price * (1 - avg_rate),
-            "stop": price * (1 - STOP_LOSS_PCT) if final_dir == "롱" else price * (1 + STOP_LOSS_PCT),
+            "direction": final_direction, "confidence": avg_conf,
+            "rate": avg_rate, "price": price,
+            "target": price * (1 + avg_rate) if final_direction == "롱" else price * (1 - avg_rate),
+            "stop": price * (1 - STOP_LOSS_PCT) if final_direction == "롱" else price * (1 + STOP_LOSS_PCT),
             "reason": ", ".join(reason), "success": True,
             "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
         }
