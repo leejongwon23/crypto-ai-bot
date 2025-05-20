@@ -2,6 +2,7 @@ import os
 import csv
 import datetime
 import pandas as pd
+import pytz
 from data.utils import get_kline_by_strategy
 
 PERSIST_DIR = "/persistent"
@@ -15,6 +16,9 @@ os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 EVAL_EXPIRY_BUFFER = 12
 STOP_LOSS_PCT = 0.02
 model_success_tracker = {}
+
+def now_kst():
+    return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def get_min_gain(symbol, strategy):
     df = get_kline_by_strategy(symbol, strategy)
@@ -35,7 +39,7 @@ def get_model_success_rate(symbol, strategy, model, min_total=10):
     return 0.5 if total < min_total else r["success"] / total
 
 def log_audit(symbol, strategy, status, reason):
-    now = datetime.datetime.utcnow().isoformat()
+    now = now_kst().isoformat()
     row = {
         "timestamp": now,
         "symbol": str(symbol),
@@ -54,7 +58,7 @@ def log_audit(symbol, strategy, status, reason):
 
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, confidence=0, model="unknown", success=True, reason="", rate=0.0):
-    now = timestamp or datetime.datetime.utcnow().isoformat()
+    now = timestamp or now_kst().isoformat()
     row = {
         "timestamp": now,
         "symbol": str(symbol or "UNKNOWN"),
@@ -89,13 +93,13 @@ def evaluate_predictions(get_price_fn):
         print(f"[경고] 평가 로그 읽기 실패: {e}")
         return
 
-    now, updated_rows = datetime.datetime.utcnow(), []
+    now, updated_rows = now_kst(), []
     for row in rows:
         if row.get("status") != "pending":
             updated_rows.append(row)
             continue
         try:
-            pred_time = datetime.datetime.fromisoformat(row["timestamp"])
+            pred_time = datetime.datetime.fromisoformat(row["timestamp"]).astimezone(pytz.timezone("Asia/Seoul"))
             hours_passed = (now - pred_time).total_seconds() / 3600
             strategy, direction = row["strategy"], row["direction"]
             model = row.get("model", "unknown")
@@ -113,7 +117,7 @@ def evaluate_predictions(get_price_fn):
                 if df is None or df.empty or df[df["timestamp"] >= pred_time].empty:
                     row["status"], row["reason"] = "skip_eval", "평가용 데이터 없음 또는 부족"
                 else:
-                    df["timestamp"] = pd.to_datetime(df["timestamp"])
+                    df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
                     eval_df = df[df["timestamp"] >= pred_time]
                     price = eval_df["high"].max() if direction == "롱" else eval_df["low"].min()
                     gain = (price - entry_price) / entry_price if direction == "롱" else (entry_price - price) / entry_price
@@ -204,7 +208,7 @@ def print_prediction_stats():
 
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     row = {
-        "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
         "symbol": symbol, "strategy": strategy, "model": model_name,
         "accuracy": float(acc), "f1_score": float(f1), "loss": float(loss)
     }
