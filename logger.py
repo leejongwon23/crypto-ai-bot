@@ -116,9 +116,9 @@ def evaluate_predictions(get_price_fn):
             hours_passed = (now - pred_time).total_seconds() / 3600
 
             if hours_passed > eval_hours + EVAL_EXPIRY_BUFFER:
-                row["status"] = "skipped"
+                row["status"] = "expired"
                 row["reason"] = f"평가 유효시간 초과: {hours_passed:.2f}h"
-                log_audit(symbol, strategy, "스킵", row["reason"])
+                log_audit(symbol, strategy, "만료", row["reason"])
                 updated_rows.append(row)
                 continue
 
@@ -245,6 +245,7 @@ def print_prediction_stats():
         fail = len(df[df["status"] == "fail"])
         pending = len(df[df["status"] == "pending"])
         skipped = len(df[df["status"] == "skipped"])
+        expired = len(df[df["status"] == "expired"])
         invalid = len(df[df["status"] == "invalid_model"])
         skipped_eval = len(df[df["status"] == "skip_eval"])
 
@@ -256,6 +257,7 @@ def print_prediction_stats():
             f"❌ 실패: {fail}",
             f"⏳ 평가 대기중: {pending}",
             f"⏭️ 스킵: {skipped}",
+            f"⌛ 만료: {expired}",
             f"⚠️ 모델없음: {invalid}",
             f"🟡 평가제외: {skipped_eval}",
             f"🎯 성공률: {success_rate:.2f}%"
