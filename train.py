@@ -5,6 +5,8 @@ import numpy as np
 from torch.utils.data import DataLoader, TensorDataset, random_split
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import accuracy_score, f1_score, log_loss
+from datetime import datetime
+import pytz
 
 from data.utils import SYMBOLS, get_kline_by_strategy, compute_features
 from model.base_model import get_model
@@ -25,6 +27,10 @@ os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(WRONG_DIR, exist_ok=True)
 
 STRATEGY_GAP = {"단기": 7200, "중기": 21600, "장기": 43200}
+
+
+def now_kst():
+    return datetime.now(pytz.timezone("Asia/Seoul"))
 
 
 def create_dataset(features, window):
@@ -60,13 +66,12 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
         "accuracy": float(round(acc, 4)),
         "f1_score": float(round(f1, 4)),
         "loss": float(round(loss, 6)),
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+        "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
     }
     path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"🗘 체크포인트 저장됨: {path}")
-
 
 def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3, repeat=4, repeat_wrong=4):
     print(f"[train] {symbol}-{strategy} 전체 모델 학습 시작")
@@ -185,7 +190,7 @@ def conditional_train_loop():
             for symbol in SYMBOLS:
                 try:
                     key = (symbol, strategy)
-                    now = time.time()
+                    now = now_kst().timestamp()
                     gap = STRATEGY_GAP.get(strategy, 3600)
                     if now - recent_train_time.get(key, 0) < gap:
                         continue
@@ -211,7 +216,7 @@ def conditional_train_loop():
                         print(f"[학습조건충족] {symbol}-{strategy} → 실패율: {fail_rate:.2f}, 평가: {eval_count}")
                         train_one_model(symbol, strategy)
                         gc.collect()
-                        recent_train_time[key] = time.time()
+                        recent_train_time[key] = now_kst().timestamp()
                     else:
                         print(f"[SKIP] {symbol}-{strategy} → 조건 미충족")
                 except Exception as e:
