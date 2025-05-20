@@ -10,6 +10,8 @@ PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.csv")
 AUDIT_LOG = os.path.join(PERSIST_DIR, "logs", "evaluation_audit.csv")
+MESSAGE_LOG = os.path.join(PERSIST_DIR, "logs", "message_log.csv")
+FAILURE_LOG = os.path.join(PERSIST_DIR, "logs", "failure_count.csv")
 os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
 
 EVAL_EXPIRY_BUFFER = 12
@@ -169,14 +171,14 @@ def print_prediction_stats():
     if not os.path.exists(PREDICTION_LOG): return "예측 기록이 없습니다."
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-        counts = {k: len(df[df["status"] == k]) for k in ["success", "fail", "pending", "skipped", "expired", "invalid_model", "skip_eval"]}
+        counts = {k: len(df[df["status"] == k]) for k in ["success", "fail", "pending", "skipped", "expired", "invalid_model", "skip_eval"] if k in df["status"].unique()}
         summary = [
             f"📊 전체 예측 수: {len(df)}",
-            f"✅ 성공: {counts['success']}", f"❌ 실패: {counts['fail']}",
-            f"⏳ 평가 대기중: {counts['pending']}", f"⏭️ 스킵: {counts['skipped']}",
-            f"⌛ 만료: {counts['expired']}", f"⚠️ 모델없음: {counts['invalid_model']}",
-            f"🟡 평가제외: {counts['skip_eval']}",
-            f"🎯 성공률: {(counts['success'] / (counts['success'] + counts['fail']) * 100):.2f}%" if (counts['success'] + counts['fail']) > 0 else "🎯 성공률: 0.00%"
+            f"✅ 성공: {counts.get('success', 0)}", f"❌ 실패: {counts.get('fail', 0)}",
+            f"⏳ 평가 대기중: {counts.get('pending', 0)}", f"⏭️ 스킵: {counts.get('skipped', 0)}",
+            f"⌛ 만료: {counts.get('expired', 0)}", f"⚠️ 모델없음: {counts.get('invalid_model', 0)}",
+            f"🟡 평가제외: {counts.get('skip_eval', 0)}",
+            f"🎯 성공률: {(counts.get('success', 0) / (counts.get('success', 0) + counts.get('fail', 0)) * 100):.2f}%" if (counts.get('success', 0) + counts.get('fail', 0)) > 0 else "🎯 성공률: 0.00%"
         ]
         for strategy in df["strategy"].unique():
             s = df[df["strategy"] == strategy]
@@ -204,3 +206,32 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
         print(f"[LOG] Training result logged for {symbol} - {strategy} - {model_name}")
     except Exception as e:
         print(f"[오류] 학습 로그 저장 실패: {e}")
+
+# ✅ 헬스체크 통합 진단 함수
+def get_overall_health():
+    summary = {
+        "prediction_count": 0,
+        "evaluation_complete": 0,
+        "evaluation_pending": 0,
+        "success_rate": 0.0,
+        "message_count": 0,
+        "model_count": 0
+    }
+    try:
+        if os.path.exists(PREDICTION_LOG):
+            df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+            summary["prediction_count"] = len(df)
+            summary["evaluation_complete"] = len(df[df["status"].isin(["success", "fail"])])
+            summary["evaluation_pending"] = len(df[df["status"] == "pending"])
+            evals = df[df["status"].isin(["success", "fail"])]
+            if len(evals) > 0:
+                summary["success_rate"] = round(len(evals[evals["status"] == "success"]) / len(evals) * 100, 2)
+        if os.path.exists(MESSAGE_LOG):
+            df = pd.read_csv(MESSAGE_LOG, encoding="utf-8-sig")
+            summary["message_count"] = len(df)
+        if os.path.exists(MODEL_DIR):
+            models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
+            summary["model_count"] = len(models)
+    except Exception as e:
+        summary["error"] = f"진단 실패: {e}"
+    return summary
