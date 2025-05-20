@@ -128,7 +128,7 @@ def evaluate_predictions(get_price_fn):
                 updated_rows.append(row)
                 continue
 
-df = get_kline_by_strategy(symbol, strategy)
+            df = get_kline_by_strategy(symbol, strategy)
             if df is None or df.empty:
                 row["status"] = "skip_eval"
                 row["reason"] = "평가용 데이터 없음"
@@ -145,8 +145,7 @@ df = get_kline_by_strategy(symbol, strategy)
                 log_audit(symbol, strategy, "스킵", row["reason"])
                 updated_rows.append(row)
                 continue
-
-            if direction == "롱":
+if direction == "롱":
                 max_price = eval_df["high"].max()
                 gain = (max_price - entry_price) / entry_price
                 success = gain >= rate
@@ -230,7 +229,8 @@ def get_strategy_fail_rate(symbol, strategy):
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
         df = df[(df["strategy"] == strategy) & (df["symbol"] == symbol)]
         df = df[df["status"].isin(["success", "fail"])]
-        if df.empty: return 0.0
+        if df.empty:
+            return 0.0
         return len(df[df["status"] == "fail"]) / len(df)
     except:
         return 0.0
@@ -263,7 +263,6 @@ def print_prediction_stats():
             f"🎯 성공률: {success_rate:.2f}%"
         ]
 
-        # 전략별 성공률
         for strategy in df["strategy"].unique():
             s_df = df[df["strategy"] == strategy]
             s_succ = len(s_df[s_df["status"] == "success"])
@@ -271,14 +270,14 @@ def print_prediction_stats():
             s_rate = (s_succ / (s_succ + s_fail)) * 100 if (s_succ + s_fail) > 0 else 0
             summary.append(f"📌 {strategy} 성공률: {s_rate:.2f}%")
 
-        # 코인별 성공률
-        summary.append("")  # 줄 바꿈
+        summary.append("")
         for symbol in df["symbol"].unique():
             s_df = df[df["symbol"] == symbol]
             s_succ = len(s_df[s_df["status"] == "success"])
             s_fail = len(s_df[s_df["status"] == "fail"])
             s_rate = (s_succ / (s_succ + s_fail)) * 100 if (s_succ + s_fail) > 0 else 0
             summary.append(f"📍 {symbol} 성공률: {s_rate:.2f}%")
+
         return "\n".join(summary)
     except Exception as e:
         return f"[오류] 통계 출력 실패: {e}"
