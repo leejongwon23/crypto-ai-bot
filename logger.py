@@ -128,7 +128,7 @@ def evaluate_predictions(get_price_fn):
                 updated_rows.append(row)
                 continue
 
-            df = get_kline_by_strategy(symbol, strategy)
+df = get_kline_by_strategy(symbol, strategy)
             if df is None or df.empty:
                 row["status"] = "skip_eval"
                 row["reason"] = "평가용 데이터 없음"
@@ -263,12 +263,22 @@ def print_prediction_stats():
             f"🎯 성공률: {success_rate:.2f}%"
         ]
 
+        # 전략별 성공률
         for strategy in df["strategy"].unique():
             s_df = df[df["strategy"] == strategy]
             s_succ = len(s_df[s_df["status"] == "success"])
             s_fail = len(s_df[s_df["status"] == "fail"])
             s_rate = (s_succ / (s_succ + s_fail)) * 100 if (s_succ + s_fail) > 0 else 0
             summary.append(f"📌 {strategy} 성공률: {s_rate:.2f}%")
+
+        # 코인별 성공률
+        summary.append("")  # 줄 바꿈
+        for symbol in df["symbol"].unique():
+            s_df = df[df["symbol"] == symbol]
+            s_succ = len(s_df[s_df["status"] == "success"])
+            s_fail = len(s_df[s_df["status"] == "fail"])
+            s_rate = (s_succ / (s_succ + s_fail)) * 100 if (s_succ + s_fail) > 0 else 0
+            summary.append(f"📍 {symbol} 성공률: {s_rate:.2f}%")
         return "\n".join(summary)
     except Exception as e:
         return f"[오류] 통계 출력 실패: {e}"
