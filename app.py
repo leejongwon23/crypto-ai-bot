@@ -6,6 +6,7 @@ from telegram_bot import send_message
 from predict_test import test_all_predictions
 from data.utils import get_latest_price, SYMBOLS, get_kline_by_strategy
 from predict_trigger import run as trigger_run
+from logger import get_actual_success_rate, get_success_trend
 
 PERSIST_DIR = "/persistent"
 MODEL_DIR, LOG_DIR = os.path.join(PERSIST_DIR, "models"), os.path.join(PERSIST_DIR, "logs")
@@ -54,7 +55,7 @@ def start_scheduler():
     print(">>> start_scheduler() 호출됨")
     sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Seoul'))
-    scheduler.add_job(lambda: logger.evaluate_predictions(get_latest_price), 'cron', minute=20)
+    scheduler.add_job(lambda: __import__('logger').evaluate_predictions(get_latest_price), 'cron', minute=20)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start(), 'cron', hour='0,3,6,9,12,15,18,21', minute=30)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start(), 'cron', hour='1,7,13,19', minute=30)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start(), 'cron', hour='2,14', minute=30)
@@ -176,32 +177,61 @@ def audit_log_download():
 @app.route("/health-check")
 def health_check():
     results, summary = [], []
+
     try:
         if os.path.exists(PREDICTION_LOG):
             df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
             total, done = len(df), len(df[df["status"].isin(["success", "fail"])])
             results.append(f"✅ 예측 기록 OK ({total}건)")
             summary.append(f"- 평가 완료율: {(done/total*100):.1f}%" if total else "- 평가 없음")
-        else: results.append("❌ 예측 기록 없음")
+        else:
+            results.append("❌ 예측 기록 없음")
     except Exception as e:
         results.append(f"❌ 예측 확인 실패: {e}")
+
     try:
         models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
         results.append(f"✅ 모델 파일 OK ({len(models)}개)" if models else "❌ 모델 없음")
     except Exception as e:
         results.append(f"❌ 모델 확인 실패: {e}")
+
     try:
         if os.path.exists(MESSAGE_LOG):
             df = pd.read_csv(MESSAGE_LOG, encoding="utf-8-sig")
             results.append(f"✅ 메시지 로그 OK ({len(df)}건)")
     except Exception as e:
         results.append(f"❌ 메시지 확인 실패: {e}")
+
     try:
         for s in ["단기", "중기", "장기"]:
-            r = __import__('logger').get_actual_success_rate(s, threshold=0.0)
+            r = get_actual_success_rate(s, threshold=0.0)
             summary.append(f"- {s} 전략 성공률: {r*100:.1f}%")
-    except: summary.append("- 전략별 성공률 확인 실패")
-    return f"<div style='font-family:monospace; line-height:1.6;'>" + "<br>".join(results + [""] + summary) + "</div>"
+    except:
+        summary.append("- 전략별 성공률 확인 실패")
+
+    try:
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig").tail(50)
+        fail_rate = len(df[df["status"] == "fail"]) / len(df)
+        summary.append(f"- 최근 50건 실패율: {fail_rate*100:.1f}%")
+    except:
+        summary.append("- 최근 실패율 분석 실패")
+
+    try:
+        df = pd.read_csv(LOG_FILE, encoding="utf-8-sig")
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        recent = df[df["timestamp"] >= datetime.datetime.utcnow() - datetime.timedelta(days=2)]
+        summary.append(f"- 최근 학습 기록: {len(recent)}건 (48시간 이내)")
+    except:
+        summary.append("- 학습 로그 확인 실패")
+
+    try:
+        for strat in ["단기", "중기", "장기"]:
+            trend = get_success_trend(strat)
+            summary.append(f"- {strat} 성공률 추이: {trend}")
+    except:
+        summary.append("- 전략별 성공률 추이 분석 실패")
+
+    return "<div style='font-family:monospace; line-height:1.6;'>" + "<br>".join(results + [""] + summary) + "</div>"
 
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비"); sys.stdout.flush()
