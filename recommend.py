@@ -9,7 +9,7 @@ import pytz
 from telegram_bot import send_message
 from predict import predict
 from logger import (
-    log_prediction, evaluate_predictions, get_model_success_rate,
+    log_prediction, get_model_success_rate,
     get_actual_success_rate, get_strategy_eval_count
 )
 from data.utils import SYMBOLS, get_realtime_prices, get_kline_by_strategy
@@ -106,12 +106,6 @@ def should_predict(symbol, strategy):
 def run_prediction_loop(strategy, symbol_data_list):
     print(f"[예측 시작 - {strategy}] {len(symbol_data_list)}개 심볼")
     sys.stdout.flush()
-
-    try:
-        evaluate_predictions(get_price_now)
-    except Exception as e:
-        print(f"[ERROR] 평가 실패: {e}")
-        sys.stdout.flush()
 
     all_results = []
     try:
