@@ -110,8 +110,14 @@ def evaluate_predictions(get_price_fn):
 
             if hours_passed > eval_hours + EVAL_EXPIRY_BUFFER:
                 row["status"], row["reason"] = "expired", f"평가 유효시간 초과: {hours_passed:.2f}h"
+
             elif hours_passed < eval_hours:
                 row["reason"] = f"{hours_passed:.2f}h < {eval_hours}h"
+
+            elif float(entry_price) == 0 or model == "unknown" or "모델 없음" in row["reason"]:
+                row["status"] = "invalid_model"
+                row["reason"] = f"모델 없음 또는 entry_price=0 (평가 시각 경과: {hours_passed:.2f}h)"
+
             else:
                 df = get_kline_by_strategy(symbol, strategy)
                 if df is None or df.empty or df[df["timestamp"] >= pred_time].empty:
