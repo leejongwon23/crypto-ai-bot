@@ -88,9 +88,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=None, target_pr
             writer.writeheader()
         writer.writerow(row)
 
-
-def 
-evaluate_predictions(get_price_fn):
+def evaluate_predictions(get_price_fn):
     if not os.path.exists(PREDICTION_LOG):
         return
     try:
