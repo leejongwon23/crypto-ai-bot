@@ -1,51 +1,35 @@
 from flask import Flask, jsonify, request, send_file
 from recommend import main
-import train
-import os
-import threading
-import datetime
-import pandas as pd
+import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, time, csv
 from apscheduler.schedulers.background import BackgroundScheduler
-import pytz
-import traceback
-import sys
 from telegram_bot import send_message
 from predict_test import test_all_predictions
 from data.utils import get_latest_price, SYMBOLS, get_kline_by_strategy
 from predict_trigger import run as trigger_run
-import shutil
-import time
-import csv
 
 PERSIST_DIR = "/persistent"
-MODEL_DIR = os.path.join(PERSIST_DIR, "models")
-LOG_DIR = os.path.join(PERSIST_DIR, "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
-
+MODEL_DIR, LOG_DIR = os.path.join(PERSIST_DIR, "models"), os.path.join(PERSIST_DIR, "logs")
 LOG_FILE = os.path.join(LOG_DIR, "train_log.csv")
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
 MESSAGE_LOG = os.path.join(LOG_DIR, "message_log.csv")
 FAILURE_COUNT_LOG = os.path.join(LOG_DIR, "failure_count.csv")
+os.makedirs(LOG_DIR, exist_ok=True)
 
 VOLATILITY_THRESHOLD = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
 PREDICTION_INTERVALS = {"단기": 3600, "중기": 10800, "장기": 21600}
 last_prediction_time = {s: 0 for s in PREDICTION_INTERVALS}
 
 def get_symbols_by_volatility(strategy):
-    if strategy not in VOLATILITY_THRESHOLD:
-        return []
-    threshold = VOLATILITY_THRESHOLD[strategy]
-    selected = []
+    if strategy not in VOLATILITY_THRESHOLD: return []
+    threshold, selected = VOLATILITY_THRESHOLD[strategy], []
     for symbol in SYMBOLS:
         try:
             df = get_kline_by_strategy(symbol, strategy)
-            if df is None or len(df) < 20:
-                continue
+            if df is None or len(df) < 20: continue
             vol = df["close"].pct_change().rolling(window=20).std().iloc[-1]
-            if vol and vol >= threshold:
-                selected.append(symbol)
+            if vol and vol >= threshold: selected.append(symbol)
         except Exception as e:
             print(f"[ERROR] {symbol}-{strategy} 변동성 계산 실패: {e}")
     return selected
@@ -54,16 +38,15 @@ def start_regular_prediction_loop():
     def loop():
         while True:
             now = time.time()
-            for strategy in ["단기", "중기", "장기"]:
-                interval = PREDICTION_INTERVALS[strategy]
-                if now - last_prediction_time[strategy] >= interval:
+            for s in PREDICTION_INTERVALS:
+                if now - last_prediction_time[s] >= PREDICTION_INTERVALS[s]:
                     try:
-                        print(f"[정기 예측] {strategy} {datetime.datetime.now()} 실행")
+                        print(f"[정기 예측] {s} {datetime.datetime.now()} 실행")
                         sys.stdout.flush()
-                        main(strategy)
-                        last_prediction_time[strategy] = time.time()
+                        main(s)
+                        last_prediction_time[s] = time.time()
                     except Exception as e:
-                        print(f"[정기 예측 오류] {strategy}: {e}")
+                        print(f"[정기 예측 오류] {s}: {e}")
             time.sleep(60)
     threading.Thread(target=loop, daemon=True).start()
 
@@ -71,25 +54,10 @@ def start_scheduler():
     print(">>> start_scheduler() 호출됨")
     sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Seoul'))
-
-    def run_evaluation():
-        print(f"[평가 시작] {datetime.datetime.now()}")
-        sys.stdout.flush()
-        try:
-            import logger
-            logger.evaluate_predictions(get_latest_price)
-            print("[평가 완료]")
-        except Exception as e:
-            print(f"[평가 오류] {e}")
-
-    def train_short(): threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start()
-    def train_mid(): threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start()
-    def train_long(): threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start()
-
-    scheduler.add_job(run_evaluation, 'cron', minute=20)
-    scheduler.add_job(train_short, 'cron', hour='0,3,6,9,12,15,18,21', minute=30)
-    scheduler.add_job(train_mid, 'cron', hour='1,7,13,19', minute=30)
-    scheduler.add_job(train_long, 'cron', hour='2,14', minute=30)
+    scheduler.add_job(lambda: logger.evaluate_predictions(get_latest_price), 'cron', minute=20)
+    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start(), 'cron', hour='0,3,6,9,12,15,18,21', minute=30)
+    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start(), 'cron', hour='1,7,13,19', minute=30)
+    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start(), 'cron', hour='2,14', minute=30)
     scheduler.add_job(test_all_predictions, 'cron', minute=10)
     scheduler.add_job(trigger_run, 'interval', minutes=30)
     scheduler.start()
@@ -99,33 +67,26 @@ print(">>> Flask 앱 생성 완료")
 sys.stdout.flush()
 
 @app.route("/")
-def index():
-    return "Yopo server is running"
+def index(): return "Yopo server is running"
 
 @app.route("/ping")
-def ping():
-    return "pong"
+def ping(): return "pong"
 
 @app.route("/run")
 def run():
     try:
-        print("[RUN] main() 실행 시작")
-        sys.stdout.flush()
+        print("[RUN] main() 실행 시작"); sys.stdout.flush()
         main()
-        print("[RUN] main() 실행 완료")
-        sys.stdout.flush()
+        print("[RUN] main() 실행 완료"); sys.stdout.flush()
         return "Recommendation started"
     except Exception as e:
-        print("[ERROR] /run 실패:")
-        traceback.print_exc()
-        sys.stdout.flush()
+        print("[ERROR] /run 실패:"); traceback.print_exc(); sys.stdout.flush()
         return f"Error: {e}", 500
 
 @app.route("/check-log")
 def check_log():
     try:
-        if not os.path.exists(PREDICTION_LOG):
-            return jsonify({"error": "prediction_log.csv not found"})
+        if not os.path.exists(PREDICTION_LOG): return jsonify({"error": "prediction_log.csv not found"})
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
         return jsonify(df.tail(10).to_dict(orient='records'))
     except Exception as e:
@@ -134,8 +95,6 @@ def check_log():
 @app.route("/train-now")
 def train_now():
     try:
-        print("[TRAIN-NOW] 전체 학습 즉시 실행 시작")
-        sys.stdout.flush()
         threading.Thread(target=train.train_all_models, daemon=True).start()
         return "✅ 모든 코인 + 전략 학습이 지금 바로 시작됐습니다!"
     except Exception as e:
@@ -144,8 +103,7 @@ def train_now():
 @app.route("/train-log")
 def train_log():
     try:
-        if not os.path.exists(LOG_FILE):
-            return "아직 학습 로그가 없습니다."
+        if not os.path.exists(LOG_FILE): return "아직 학습 로그가 없습니다."
         with open(LOG_FILE, "r", encoding="utf-8-sig") as f:
             return "<pre>" + f.read() + "</pre>"
     except Exception as e:
@@ -154,20 +112,16 @@ def train_log():
 @app.route("/models")
 def list_model_files():
     try:
-        if not os.path.exists(MODEL_DIR):
-            return "models 폴더가 존재하지 않습니다."
+        if not os.path.exists(MODEL_DIR): return "models 폴더가 존재하지 않습니다."
         files = os.listdir(MODEL_DIR)
-        if not files:
-            return "models 폴더가 비어 있습니다."
-        return "<pre>" + "\n".join(files) + "</pre>"
+        return "<pre>" + "\n".join(files) + "</pre>" if files else "models 폴더가 비어 있습니다."
     except Exception as e:
         return f"모델 파일 확인 중 오류 발생: {e}", 500
 
 @app.route("/check-wrong")
 def check_wrong():
     try:
-        if not os.path.exists(WRONG_PREDICTIONS):
-            return jsonify([])
+        if not os.path.exists(WRONG_PREDICTIONS): return jsonify([])
         df = pd.read_csv(WRONG_PREDICTIONS, encoding="utf-8-sig")
         return jsonify(df.tail(10).to_dict(orient='records'))
     except Exception as e:
@@ -176,41 +130,28 @@ def check_wrong():
 @app.route("/check-stats")
 def check_stats():
     try:
-        import logger
-        result = logger.print_prediction_stats()
-        if not isinstance(result, str):
-            return f"출력 형식 오류: {result}", 500
-        formatted = result.replace("\n", "<br>").replace("📊", "<b>📊</b>") \
-                          .replace("✅", "<b style='color:green'>✅</b>") \
-                          .replace("❌", "<b style='color:red'>❌</b>") \
-                          .replace("⏳", "<b>⏳</b>").replace("🎯", "<b>🎯</b>") \
-                          .replace("📌", "<b>📌</b>")
-        return f"<div style='font-family:monospace; line-height:1.6;'>" + formatted + "</div>"
+        result = __import__('logger').print_prediction_stats()
+        if not isinstance(result, str): return f"출력 형식 오류: {result}", 500
+        for s, r in {"📊":"<b>📊</b>", "✅":"<b style='color:green'>✅</b>", "❌":"<b style='color:red'>❌</b>", "⏳":"<b>⏳</b>", "🎯":"<b>🎯</b>", "📌":"<b>📌</b>"}.items():
+            result = result.replace(s, r)
+        return f"<div style='font-family:monospace; line-height:1.6;'>{result.replace(chr(10),'<br>')}</div>"
     except Exception as e:
         return f"정확도 통계 출력 실패: {e}", 500
 
 @app.route("/reset-all")
 def reset_all():
-    key = request.args.get("key")
-    if key != "3572":
-        return "❌ 인증 실패: 잘못된 접근", 403
+    if request.args.get("key") != "3572": return "❌ 인증 실패: 잘못된 접근", 403
     try:
-        def safe_clear_csv(path, headers):
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                writer = csv.DictWriter(f, fieldnames=headers)
-                writer.writeheader()
-
-        if os.path.exists(MODEL_DIR):
-            shutil.rmtree(MODEL_DIR)
+        def clear(path, headers):
+            with open(path, "w", newline="", encoding="utf-8-sig") as f: csv.DictWriter(f, fieldnames=headers).writeheader()
+        if os.path.exists(MODEL_DIR): shutil.rmtree(MODEL_DIR)
         os.makedirs(MODEL_DIR, exist_ok=True)
-
-        safe_clear_csv(PREDICTION_LOG, ["symbol", "strategy", "direction", "price", "target", "timestamp", "confidence", "model", "success", "reason", "status"])
-        safe_clear_csv(WRONG_PREDICTIONS, ["symbol", "strategy", "reason", "timestamp"])
-        safe_clear_csv(LOG_FILE, ["timestamp", "symbol", "strategy", "model", "accuracy", "f1", "loss"])
-        safe_clear_csv(AUDIT_LOG, ["timestamp", "symbol", "strategy", "result", "status"])
-        safe_clear_csv(MESSAGE_LOG, ["timestamp", "symbol", "strategy", "message"])
-        safe_clear_csv(FAILURE_COUNT_LOG, ["symbol", "strategy", "failures"])
-
+        clear(PREDICTION_LOG, ["symbol", "strategy", "direction", "price", "target", "timestamp", "confidence", "model", "success", "reason", "status"])
+        clear(WRONG_PREDICTIONS, ["symbol", "strategy", "reason", "timestamp"])
+        clear(LOG_FILE, ["timestamp", "symbol", "strategy", "model", "accuracy", "f1", "loss"])
+        clear(AUDIT_LOG, ["timestamp", "symbol", "strategy", "result", "status"])
+        clear(MESSAGE_LOG, ["timestamp", "symbol", "strategy", "message"])
+        clear(FAILURE_COUNT_LOG, ["symbol", "strategy", "failures"])
         return "✅ 초기화 완료 (헤더 포함)"
     except Exception as e:
         return f"삭제 실패: {e}", 500
@@ -218,8 +159,7 @@ def reset_all():
 @app.route("/audit-log")
 def audit_log():
     try:
-        if not os.path.exists(AUDIT_LOG):
-            return jsonify({"error": "audit log not found"})
+        if not os.path.exists(AUDIT_LOG): return jsonify({"error": "audit log not found"})
         df = pd.read_csv(AUDIT_LOG, encoding="utf-8-sig")
         return jsonify(df.tail(30).to_dict(orient="records"))
     except Exception as e:
@@ -228,8 +168,7 @@ def audit_log():
 @app.route("/audit-log-download")
 def audit_log_download():
     try:
-        if not os.path.exists(AUDIT_LOG):
-            return "평가 로그가 없습니다.", 404
+        if not os.path.exists(AUDIT_LOG): return "평가 로그가 없습니다.", 404
         return send_file(AUDIT_LOG, mimetype="text/csv", as_attachment=True, download_name="evaluation_audit.csv")
     except Exception as e:
         return f"다운로드 실패: {e}", 500
@@ -240,12 +179,10 @@ def health_check():
     try:
         if os.path.exists(PREDICTION_LOG):
             df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-            total = len(df)
-            done = len(df[df["status"].isin(["success", "fail"])])
+            total, done = len(df), len(df[df["status"].isin(["success", "fail"])])
             results.append(f"✅ 예측 기록 OK ({total}건)")
             summary.append(f"- 평가 완료율: {(done/total*100):.1f}%" if total else "- 평가 없음")
-        else:
-            results.append("❌ 예측 기록 없음")
+        else: results.append("❌ 예측 기록 없음")
     except Exception as e:
         results.append(f"❌ 예측 확인 실패: {e}")
     try:
@@ -260,21 +197,16 @@ def health_check():
     except Exception as e:
         results.append(f"❌ 메시지 확인 실패: {e}")
     try:
-        import logger
         for s in ["단기", "중기", "장기"]:
-            r = logger.get_actual_success_rate(s, threshold=0.0)
+            r = __import__('logger').get_actual_success_rate(s, threshold=0.0)
             summary.append(f"- {s} 전략 성공률: {r*100:.1f}%")
-    except:
-        summary.append("- 전략별 성공률 확인 실패")
-    formatted = "<br>".join(results + [""] + summary)
-    return f"<div style='font-family:monospace; line-height:1.6;'>" + formatted + "</div>"
+    except: summary.append("- 전략별 성공률 확인 실패")
+    return f"<div style='font-family:monospace; line-height:1.6;'>" + "<br>".join(results + [""] + summary) + "</div>"
 
 if __name__ == "__main__":
-    print(">>> __main__ 진입, 서버 실행 준비")
-    sys.stdout.flush()
+    print(">>> __main__ 진입, 서버 실행 준비"); sys.stdout.flush()
     start_scheduler()
-    start_regular_prediction_loop()  # ✅ 전략별 자동 예측 루프 복원
+    start_regular_prediction_loop()
     send_message("[시스템 시작] YOPO 서버가 정상적으로 실행되었습니다. 전략별 예측은 주기적으로 자동 작동합니다.")
     print("✅ 서버 초기화 완료 (정기 예측 루프 포함)")
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
