@@ -153,10 +153,7 @@ def evaluate_predictions(get_price_fn):
             writer.writerows(updated_rows)
 
 def get_dynamic_eval_wait(strategy):
-    rate = get_actual_success_rate(strategy)
-    return {"단기": 2 if rate >= 0.7 else 4 if rate >= 0.4 else 6,
-            "중기": 6 if rate >= 0.7 else 12 if rate >= 0.4 else 24,
-            "장기": 24 if rate >= 0.7 else 48 if rate >= 0.4 else 72}.get(strategy, 6)
+    return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 6)
 
 def get_actual_success_rate(strategy=None, threshold=0.7):
     try:
@@ -195,7 +192,7 @@ def print_prediction_stats():
             f"⏳ 평가 대기중: {counts['pending']}", f"⏭️ 스킵: {counts['skipped']}",
             f"⌛ 만료: {counts['expired']}", f"⚠️ 모델없음: {counts['invalid_model']}",
             f"🟡 평가제외: {counts['skip_eval']}",
-            f"🎯 성공률: {(counts['success'] / (counts['success'] + counts['fail']) * 100):.2f}%" if (counts['success'] + counts['fail']) > 0 else "🎯 성공률: 0.00%"
+            f"🌟 성공률: {(counts['success'] / (counts['success'] + counts['fail']) * 100):.2f}%" if (counts['success'] + counts['fail']) > 0 else "🌟 성공률: 0.00%"
         ]
         for strategy in df["strategy"].unique():
             s = df[df["strategy"] == strategy]
