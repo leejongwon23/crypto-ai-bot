@@ -1,12 +1,15 @@
+import datetime
+import pytz
+
+def now_kst():
+    return datetime.datetime.now(pytz.timezone("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+
 def format_message(data):
     price = data['price']
     stop_loss = price * (1 - 0.02) if data['direction'] == '롱' else price * (1 + 0.02)
 
-    # ✅ 수익률 % 계산
     rate_pct = data['rate'] * 100
     direction = '상승' if data['direction'] == '롱' else '하락'
-
-    # ✅ 성공률 % 계산
     success_rate_pct = data.get("success_rate", 0.5) * 100
 
     return (
@@ -18,5 +21,6 @@ def format_message(data):
         f"신호 방향: {direction}\n"
         f"신뢰도: {data['confidence']*100:.2f}%\n"
         f"성공률: {success_rate_pct:.2f}%\n"
-        f"추천 사유: {data['reason']}"
+        f"추천 사유: {data['reason']}\n\n"
+        f"(기준시각: {now_kst()} KST)"
     )
