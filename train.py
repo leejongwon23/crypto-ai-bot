@@ -5,7 +5,7 @@ import numpy as np
 from torch.utils.data import DataLoader, TensorDataset, random_split
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import accuracy_score, f1_score, log_loss
-from datetime import datetime
+import datetime
 import pytz
 
 from data.utils import SYMBOLS, get_kline_by_strategy, compute_features
@@ -29,7 +29,7 @@ os.makedirs(WRONG_DIR, exist_ok=True)
 STRATEGY_GAP = {"단기": 7200, "중기": 21600, "장기": 43200}
 
 def now_kst():
-    return datetime.now(pytz.timezone("Asia/Seoul"))
+    return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def create_dataset(features, window):
     X, y = [], []
@@ -178,7 +178,6 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
     else:
         print(f"❗ 모델 저장 실패: {symbol}-{strategy} 모든 모델 평가 실패")
 
-
 def train_all_models():
     for strategy in ["단기", "중기", "장기"]:
         for symbol in SYMBOLS:
@@ -186,6 +185,5 @@ def train_all_models():
                 train_one_model(symbol, strategy)
             except Exception as e:
                 print(f"[오류] 전체 학습 실패: {symbol}-{strategy} → {e}")
-
 
 train_model = train_one_model
