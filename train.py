@@ -186,4 +186,11 @@ def train_all_models():
             except Exception as e:
                 print(f"[오류] 전체 학습 실패: {symbol}-{strategy} → {e}")
 
+def train_model_loop(strategy):
+    for symbol in SYMBOLS:
+        try:
+            train_one_model(symbol, strategy)
+        except Exception as e:
+            print(f"[학습 루프 실패] {symbol}-{strategy} → {e}")
+
 train_model = train_one_model
