@@ -1,4 +1,5 @@
 import datetime, os, csv, threading, sys, time
+import pytz
 from telegram_bot import send_message
 from predict import predict
 from logger import (
@@ -23,6 +24,9 @@ FAILURE_LOG = "/persistent/logs/failure_count.csv"
 MESSAGE_LOG = "/persistent/logs/message_log.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
 
+def now_kst():
+    return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+
 def load_failure_count():
     if not os.path.exists(FAILURE_LOG): return {}
     with open(FAILURE_LOG, "r", encoding="utf-8-sig") as f:
@@ -37,7 +41,7 @@ def save_failure_count(failure_map):
             writer.writerow({"symbol": symbol, "strategy": strategy, "failures": count})
 
 def log_audit(symbol, strategy, result, status):
-    now = datetime.datetime.utcnow().isoformat()
+    now = now_kst().isoformat()
     row = {
         "timestamp": now,
         "symbol": symbol,
@@ -94,7 +98,7 @@ def run_prediction_loop(strategy, symbol_data_list):
         try:
             if not model_exists(symbol, strategy):
                 log_prediction(symbol=symbol, strategy=strategy, direction="N/A", entry_price=0, target_price=0,
-                               timestamp=datetime.datetime.utcnow().isoformat(), confidence=0.0,
+                               timestamp=now_kst().isoformat(), confidence=0.0,
                                model="unknown", success=False, reason="모델 없음")
                 log_audit(symbol, strategy, None, "모델 없음")
                 continue
@@ -104,14 +108,14 @@ def run_prediction_loop(strategy, symbol_data_list):
 
             if not isinstance(result, dict):
                 log_prediction(symbol=symbol, strategy=strategy, direction="N/A", entry_price=0, target_price=0,
-                               timestamp=datetime.datetime.utcnow().isoformat(), confidence=0.0,
+                               timestamp=now_kst().isoformat(), confidence=0.0,
                                model="unknown", success=False, reason="predict() 반환값 None")
                 log_audit(symbol, strategy, result, "예측 실패 (None)")
                 continue
             if result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
                 print(f"[SKIP] {symbol}-{strategy} → 예측 불가 이유: {result['reason']}")
                 log_prediction(symbol=symbol, strategy=strategy, direction="N/A", entry_price=0, target_price=0,
-                               timestamp=datetime.datetime.utcnow().isoformat(), confidence=0.0,
+                               timestamp=now_kst().isoformat(), confidence=0.0,
                                model="unknown", success=False, reason=result["reason"])
                 log_audit(symbol, strategy, result, result["reason"])
                 continue
@@ -120,7 +124,7 @@ def run_prediction_loop(strategy, symbol_data_list):
             log_prediction(
                 symbol=result.get("symbol", symbol), strategy=result.get("strategy", strategy),
                 direction=result.get("direction", "예측실패"), entry_price=result.get("price", 0),
-                target_price=result.get("target", 0), timestamp=datetime.datetime.utcnow().isoformat(),
+                target_price=result.get("target", 0), timestamp=now_kst().isoformat(),
                 confidence=result.get("confidence", 0.0), model=result.get("model", "unknown"),
                 success=True, reason=result.get("reason", "예측 성공"), rate=result.get("rate", 0.0)
             )
@@ -140,7 +144,7 @@ def run_prediction_loop(strategy, symbol_data_list):
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
             try:
                 log_prediction(symbol=symbol, strategy=strategy, direction="예외", entry_price=0, target_price=0,
-                               timestamp=datetime.datetime.utcnow().isoformat(), confidence=0.0,
+                               timestamp=now_kst().isoformat(), confidence=0.0,
                                model="unknown", success=False, reason=f"예외 발생: {e}")
                 log_audit(symbol, strategy, None, f"예외 발생: {e}")
             except: pass
@@ -169,7 +173,7 @@ def run_prediction_loop(strategy, symbol_data_list):
                 writer = csv.writer(f)
                 if os.stat(MESSAGE_LOG).st_size == 0:
                     writer.writerow(["timestamp", "symbol", "strategy", "message"])
-                writer.writerow([datetime.datetime.utcnow().isoformat(), res["symbol"], res["strategy"], msg])
+                writer.writerow([now_kst().isoformat(), res["symbol"], res["strategy"], msg])
             print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%} | 성공률: {res['success_rate']:.2f}")
         except Exception as e:
             print(f"[ERROR] 메시지 전송 실패: {e}")
