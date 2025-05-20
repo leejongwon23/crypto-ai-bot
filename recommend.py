@@ -1,8 +1,9 @@
-# --- [필수 import] ---
 import datetime
 import os
 import csv
 import threading
+import sys
+import time
 from telegram_bot import send_message
 from predict import predict
 from logger import (
@@ -12,8 +13,6 @@ from logger import (
 from data.utils import SYMBOLS, get_realtime_prices, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
-import sys
-import time
 from model_weight_loader import model_exists
 
 # --- 필터 기준 ---
@@ -30,11 +29,16 @@ FAILURE_LOG = "/persistent/logs/failure_count.csv"
 MESSAGE_LOG = "/persistent/logs/message_log.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
 
+
 def load_failure_count():
     if not os.path.exists(FAILURE_LOG):
         return {}
     with open(FAILURE_LOG, "r", encoding="utf-8-sig") as f:
-        return {f"{r['symbol']}-{r['strategy']}": int(r["failures"]) for r in csv.DictReader(f)}
+        return {
+            f"{r['symbol']}-{r['strategy']}": int(r["failures"])
+            for r in csv.DictReader(f)
+        }
+
 
 def save_failure_count(failure_map):
     with open(FAILURE_LOG, "w", newline="", encoding="utf-8-sig") as f:
@@ -44,6 +48,7 @@ def save_failure_count(failure_map):
             symbol, strategy = key.split("-")
             writer.writerow({"symbol": symbol, "strategy": strategy, "failures": count})
 
+
 def log_audit(symbol, strategy, result, status):
     now = datetime.datetime.utcnow().isoformat()
     row = {
@@ -51,7 +56,7 @@ def log_audit(symbol, strategy, result, status):
         "symbol": symbol,
         "strategy": strategy,
         "result": str(result),
-        "status": status
+        "status": status,
     }
     write_header = not os.path.exists(AUDIT_LOG)
     with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
@@ -60,12 +65,14 @@ def log_audit(symbol, strategy, result, status):
             writer.writeheader()
         writer.writerow(row)
 
+
 def get_price_now(symbol):
     prices = get_realtime_prices()
     return prices.get(symbol)
 
+
 def get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
-    threshold *= 1.2  # ✅ 1단계: 수치 강화
+    threshold *= 1.2
     selected = []
     for symbol in SYMBOLS:
         try:
@@ -74,13 +81,11 @@ def get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
                 continue
             vol = df["close"].pct_change().rolling(window=20).std().iloc[-1]
             if vol is not None and vol >= threshold:
-                selected.append({
-                    "symbol": symbol,
-                    "volatility": vol  # ✅ 2단계: 변동성 포함
-                })
+                selected.append({"symbol": symbol, "volatility": vol})
         except Exception as e:
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
     return selected
+
 
 def should_predict(symbol, strategy):
     try:
@@ -95,6 +100,7 @@ def should_predict(symbol, strategy):
         return True
     except:
         return True
+
 
 def run_prediction_loop(strategy, symbol_data_list):
     print(f"[예측 시작 - {strategy}] {len(symbol_data_list)}개 심볼")
@@ -114,7 +120,7 @@ def run_prediction_loop(strategy, symbol_data_list):
 
     for item in symbol_data_list:
         symbol = item["symbol"]
-        volatility = item.get("volatility", 0)  # ✅ 변동성 유지
+        volatility = item.get("volatility", 0)
 
         try:
             if not model_exists(symbol, strategy):
@@ -158,7 +164,7 @@ def run_prediction_loop(strategy, symbol_data_list):
                 log_audit(symbol, strategy, result, result["reason"])
                 continue
 
-            result["volatility"] = volatility  # ✅ 3단계: 변동성 포함
+            result["volatility"] = volatility
 
             log_prediction(
                 symbol=result.get("symbol", symbol),
@@ -223,7 +229,6 @@ def run_prediction_loop(strategy, symbol_data_list):
         if success_rate < SUCCESS_RATE_THRESHOLD:
             continue
 
-        # ✅ 4단계: soft-penalty + 변동성 score 포함 (변동성 예측만 적용)
         penalty = 1.0 - (1.0 - success_rate) ** 2
         score = conf * rate * penalty * (1 + vol)
         if score < MIN_SCORE_THRESHOLD:
@@ -253,6 +258,7 @@ def run_prediction_loop(strategy, symbol_data_list):
         except Exception as e:
             print(f"[ERROR] 메시지 전송 실패: {e}")
 
+
 def main(strategy=None):
     print(">>> [main] recommend.py 실행")
     sys.stdout.flush()
@@ -262,6 +268,7 @@ def main(strategy=None):
     else:
         print(">>> main()이 호출됐지만 전략은 명시되어야 합니다. 예측은 자동 루프에 의해 작동합니다.")
 
+
 def start_regular_prediction_loop():
     def loop():
         while True:
@@ -269,6 +276,8 @@ def start_regular_prediction_loop():
                 symbol_data_list = get_symbols_by_volatility(strategy)
                 run_prediction_loop(strategy, symbol_data_list)
             time.sleep(3600)
+
     threading.Thread(target=loop, daemon=True).start()
+
 
 run_prediction = main
