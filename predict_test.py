@@ -2,11 +2,15 @@ import os
 from predict import predict
 from data.utils import SYMBOLS
 import datetime
+import pytz
 
 STRATEGIES = ["단기", "중기", "장기"]
 
+def now_kst():
+    return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+
 def test_all_predictions():
-    print(f"\n[예측 점검 시작] {datetime.datetime.utcnow().isoformat()}")
+    print(f"\n[예측 점검 시작] {now_kst().isoformat()}")
 
     total = 0
     success = 0
