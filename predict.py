@@ -2,6 +2,9 @@
 import os
 import torch
 import numpy as np
+from datetime import datetime
+import pytz
+
 from data.utils import get_kline_by_strategy, compute_features
 from model.base_model import get_model
 from model_weight_loader import get_model_weight
@@ -12,6 +15,10 @@ from logger import get_min_gain
 DEVICE = torch.device("cpu")
 STOP_LOSS_PCT = 0.02
 MODEL_DIR = "/persistent/models"
+
+# --- ✅ KST 시간 기준 함수 ---
+def now_kst():
+    return datetime.now(pytz.timezone("Asia/Seoul"))
 
 # --- ✅ 변동성 기반 예측 주기 계산 함수 ---
 def get_volatility(symbol, strategy):
@@ -48,7 +55,8 @@ def failed_result(symbol, strategy, reason):
         "rate": 0.0,
         "price": dummy_price,
         "target": dummy_price,
-        "stop": dummy_price
+        "stop": dummy_price,
+        "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
     }
 
 # --- ✅ 메인 예측 함수 ---
@@ -193,7 +201,8 @@ def predict(symbol, strategy):
             "target": price * (1 + avg_rate) if final_direction == "롱" else price * (1 - avg_rate),
             "stop": price * (1 - STOP_LOSS_PCT) if final_direction == "롱" else price * (1 + STOP_LOSS_PCT),
             "reason": ", ".join(reason),
-            "success": True
+            "success": True,
+            "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
         }
 
     except Exception as e:
