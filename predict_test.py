@@ -1,6 +1,7 @@
 import os
 from predict import predict
 from data.utils import SYMBOLS
+from model_weight_loader import model_exists
 import datetime
 import pytz
 
@@ -15,10 +16,16 @@ def test_all_predictions():
     total = 0
     success = 0
     failed = 0
+    skipped = 0
     failed_cases = []
 
     for strategy in STRATEGIES:
         for symbol in SYMBOLS:
+            if not model_exists(symbol, strategy):
+                skipped += 1
+                print(f"[SKIP] {symbol}-{strategy} → 모델 없음")
+                continue
+
             total += 1
             try:
                 result = predict(symbol, strategy)
@@ -38,6 +45,7 @@ def test_all_predictions():
     print(f"총 시도: {total}")
     print(f"성공: {success}")
     print(f"실패: {failed}")
+    print(f"모델 없음으로 SKIP: {skipped}")
     if failed_cases:
         print("실패 목록:")
         for sym, strat in failed_cases:
