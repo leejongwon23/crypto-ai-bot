@@ -6,17 +6,18 @@ from telegram_bot import send_message
 from predict_test import test_all_predictions
 from data.utils import get_latest_price, SYMBOLS, get_kline_by_strategy
 from predict_trigger import run as trigger_run
-from logger import get_actual_success_rate, get_success_trend
 
 PERSIST_DIR = "/persistent"
-MODEL_DIR, LOG_DIR = os.path.join(PERSIST_DIR, "models"), os.path.join(PERSIST_DIR, "logs")
+MODEL_DIR = os.path.join(PERSIST_DIR, "models")
+LOG_DIR = os.path.join(PERSIST_DIR, "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
 LOG_FILE = os.path.join(LOG_DIR, "train_log.csv")
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
 MESSAGE_LOG = os.path.join(LOG_DIR, "message_log.csv")
 FAILURE_COUNT_LOG = os.path.join(LOG_DIR, "failure_count.csv")
-os.makedirs(LOG_DIR, exist_ok=True)
 
 VOLATILITY_THRESHOLD = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
 PREDICTION_INTERVALS = {"단기": 3600, "중기": 10800, "장기": 21600}
@@ -144,7 +145,8 @@ def reset_all():
     if request.args.get("key") != "3572": return "❌ 인증 실패: 잘못된 접근", 403
     try:
         def clear(path, headers):
-            with open(path, "w", newline="", encoding="utf-8-sig") as f: csv.DictWriter(f, fieldnames=headers).writeheader()
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                csv.DictWriter(f, fieldnames=headers).writeheader()
         if os.path.exists(MODEL_DIR): shutil.rmtree(MODEL_DIR)
         os.makedirs(MODEL_DIR, exist_ok=True)
         clear(PREDICTION_LOG, ["symbol", "strategy", "direction", "price", "target", "timestamp", "confidence", "model", "success", "reason", "status"])
@@ -177,7 +179,6 @@ def audit_log_download():
 @app.route("/health-check")
 def health_check():
     results, summary = [], []
-
     try:
         if os.path.exists(PREDICTION_LOG):
             df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
@@ -202,36 +203,7 @@ def health_check():
     except Exception as e:
         results.append(f"❌ 메시지 확인 실패: {e}")
 
-    try:
-        for s in ["단기", "중기", "장기"]:
-            r = get_actual_success_rate(s, threshold=0.0)
-            summary.append(f"- {s} 전략 성공률: {r*100:.1f}%")
-    except:
-        summary.append("- 전략별 성공률 확인 실패")
-
-    try:
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig").tail(50)
-        fail_rate = len(df[df["status"] == "fail"]) / len(df)
-        summary.append(f"- 최근 50건 실패율: {fail_rate*100:.1f}%")
-    except:
-        summary.append("- 최근 실패율 분석 실패")
-
-    try:
-        df = pd.read_csv(LOG_FILE, encoding="utf-8-sig")
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
-        recent = df[df["timestamp"] >= datetime.datetime.utcnow() - datetime.timedelta(days=2)]
-        summary.append(f"- 최근 학습 기록: {len(recent)}건 (48시간 이내)")
-    except:
-        summary.append("- 학습 로그 확인 실패")
-
-    try:
-        for strat in ["단기", "중기", "장기"]:
-            trend = get_success_trend(strat)
-            summary.append(f"- {strat} 성공률 추이: {trend}")
-    except:
-        summary.append("- 전략별 성공률 추이 분석 실패")
-
-    return "<div style='font-family:monospace; line-height:1.6;'>" + "<br>".join(results + [""] + summary) + "</div>"
+    return f"<div style='font-family:monospace; line-height:1.6;'>" + "<br>".join(results + [""] + summary) + "</div>"
 
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비"); sys.stdout.flush()
