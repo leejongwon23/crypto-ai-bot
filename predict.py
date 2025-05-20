@@ -2,7 +2,7 @@
 import os
 import torch
 import numpy as np
-from datetime import datetime
+import datetime
 import pytz
 
 from data.utils import get_kline_by_strategy, compute_features
@@ -18,7 +18,7 @@ MODEL_DIR = "/persistent/models"
 
 # --- ✅ KST 시간 기준 함수 ---
 def now_kst():
-    return datetime.now(pytz.timezone("Asia/Seoul"))
+    return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 # --- ✅ 변동성 기반 예측 주기 계산 함수 ---
 def get_volatility(symbol, strategy):
@@ -32,12 +32,7 @@ def get_volatility(symbol, strategy):
 
 def get_predict_interval(strategy, symbol):
     vol = get_volatility(symbol, strategy)
-    if strategy == "단기":
-        base = 60
-    elif strategy == "중기":
-        base = 120
-    else:
-        base = 360
+    base = 60 if strategy == "단기" else 120 if strategy == "중기" else 360
     adj = min(2.0, max(0.5, 1 / (vol + 1e-6)))
     return int(base * adj)
 
@@ -87,13 +82,11 @@ def predict(symbol, strategy):
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
         input_size = X.shape[2]
 
-        model_paths = {}
-        for file in os.listdir(MODEL_DIR):
-            if not file.endswith(".pt"):
-                continue
-            if file.startswith(f"{symbol}_{strategy}_"):
-                model_type = file.replace(f"{symbol}_{strategy}_", "").replace(".pt", "")
-                model_paths[model_type] = os.path.join(MODEL_DIR, file)
+        model_paths = {
+            file.replace(f"{symbol}_{strategy}_", "").replace(".pt", ""): os.path.join(MODEL_DIR, file)
+            for file in os.listdir(MODEL_DIR)
+            if file.endswith(".pt") and file.startswith(f"{symbol}_{strategy}_")
+        }
 
         if not model_paths:
             print(f"[FAILURE] {symbol}-{strategy} 모델 없음")
@@ -114,9 +107,7 @@ def predict(symbol, strategy):
                         continue
                     signal = signal.squeeze().item()
                     confidence = confidence.squeeze().item()
-                    if not (0.0 <= signal <= 1.0):
-                        continue
-                    if 0.495 <= signal <= 0.505:
+                    if not (0.0 <= signal <= 1.0) or 0.495 <= signal <= 0.505:
                         continue
 
                     direction = "롱" if signal > 0.5 else "숏"
@@ -176,19 +167,13 @@ def predict(symbol, strategy):
 
         reason = []
         if final_direction == "롱":
-            if rsi < 30:
-                reason.append("RSI 과매도")
-            if macd > 0:
-                reason.append("MACD 상승 전환")
+            if rsi < 30: reason.append("RSI 과매도")
+            if macd > 0: reason.append("MACD 상승 전환")
         elif final_direction == "숏":
-            if rsi > 70:
-                reason.append("RSI 과매수")
-            if macd < 0:
-                reason.append("MACD 하락 전환")
-        if boll > 1:
-            reason.append("볼린저 상단 돌파")
-        elif boll < -1:
-            reason.append("볼린저 하단 이탈")
+            if rsi > 70: reason.append("RSI 과매수")
+            if macd < 0: reason.append("MACD 하락 전환")
+        if boll > 1: reason.append("볼린저 상단 돌파")
+        elif boll < -1: reason.append("볼린저 하단 이탈")
 
         return {
             "symbol": symbol,
