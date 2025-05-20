@@ -46,10 +46,10 @@ def start_scheduler():
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start(), 'cron', hour='1,7,13,19', minute=30)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start(), 'cron', hour='2,14', minute=30)
 
-    # ✅ 예측 스케줄 (절대 시간 기준)
-    scheduler.add_job(lambda: main("단기"), 'cron', hour='*', minute=0)
-    scheduler.add_job(lambda: main("중기"), 'cron', hour='0,3,6,9,12,15,18,21', minute=0)
-    scheduler.add_job(lambda: main("장기"), 'cron', hour='0,6,12,18', minute=0)
+    # ✅ 예측 스케줄 (thread로 보강)
+    scheduler.add_job(lambda: threading.Thread(target=main, args=("단기",), daemon=True).start(), 'cron', hour='*', minute=0)
+    scheduler.add_job(lambda: threading.Thread(target=main, args=("중기",), daemon=True).start(), 'cron', hour='0,3,6,9,12,15,18,21', minute=0)
+    scheduler.add_job(lambda: threading.Thread(target=main, args=("장기",), daemon=True).start(), 'cron', hour='0,6,12,18', minute=0)
 
     scheduler.add_job(test_all_predictions, 'cron', minute=10)
     scheduler.add_job(trigger_run, 'interval', minutes=30)
@@ -173,7 +173,7 @@ def health_check():
     try:
         if os.path.exists(PREDICTION_LOG):
             df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-            total, done = len(df), len(df[df["status"].isin(["success", "fail"])]);
+            total, done = len(df), len(df[df["status"].isin(["success", "fail"])])
             results.append(f"✅ 예측 기록 OK ({total}건)")
             summary.append(f"- 평가 완료율: {(done/total*100):.1f}%" if total else "- 평가 없음")
         else: results.append("❌ 예측 기록 없음")
