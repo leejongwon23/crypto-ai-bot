@@ -117,7 +117,7 @@ def evaluate_predictions(get_price_fn):
                 if df is None or df.empty or df[df["timestamp"] >= pred_time].empty:
                     row["status"], row["reason"] = "skip_eval", "평가용 데이터 없음 또는 부족"
                 else:
-                    df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Seoul")
                     eval_df = df[df["timestamp"] >= pred_time]
                     price = eval_df["high"].max() if direction == "롱" else eval_df["low"].min()
                     gain = (price - entry_price) / entry_price if direction == "롱" else (entry_price - price) / entry_price
