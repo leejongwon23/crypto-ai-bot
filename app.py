@@ -8,16 +8,14 @@ from data.utils import get_latest_price, SYMBOLS, get_kline_by_strategy
 from predict_trigger import run as trigger_run
 
 PERSIST_DIR = "/persistent"
-MODEL_DIR = os.path.join(PERSIST_DIR, "models")
-LOG_DIR = os.path.join(PERSIST_DIR, "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
-
+MODEL_DIR, LOG_DIR = os.path.join(PERSIST_DIR, "models"), os.path.join(PERSIST_DIR, "logs")
 LOG_FILE = os.path.join(LOG_DIR, "train_log.csv")
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
 MESSAGE_LOG = os.path.join(LOG_DIR, "message_log.csv")
 FAILURE_COUNT_LOG = os.path.join(LOG_DIR, "failure_count.csv")
+os.makedirs(LOG_DIR, exist_ok=True)
 
 VOLATILITY_THRESHOLD = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
 PREDICTION_INTERVALS = {"단기": 3600, "중기": 10800, "장기": 21600}
@@ -56,7 +54,7 @@ def start_scheduler():
     print(">>> start_scheduler() 호출됨")
     sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Seoul'))
-    scheduler.add_job(lambda: __import__('logger').evaluate_predictions(get_latest_price), 'cron', minute=20)
+    scheduler.add_job(lambda: logger.evaluate_predictions(get_latest_price), 'cron', minute=20)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start(), 'cron', hour='0,3,6,9,12,15,18,21', minute=30)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start(), 'cron', hour='1,7,13,19', minute=30)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start(), 'cron', hour='2,14', minute=30)
@@ -145,8 +143,7 @@ def reset_all():
     if request.args.get("key") != "3572": return "❌ 인증 실패: 잘못된 접근", 403
     try:
         def clear(path, headers):
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                csv.DictWriter(f, fieldnames=headers).writeheader()
+            with open(path, "w", newline="", encoding="utf-8-sig") as f: csv.DictWriter(f, fieldnames=headers).writeheader()
         if os.path.exists(MODEL_DIR): shutil.rmtree(MODEL_DIR)
         os.makedirs(MODEL_DIR, exist_ok=True)
         clear(PREDICTION_LOG, ["symbol", "strategy", "direction", "price", "target", "timestamp", "confidence", "model", "success", "reason", "status"])
@@ -185,24 +182,25 @@ def health_check():
             total, done = len(df), len(df[df["status"].isin(["success", "fail"])])
             results.append(f"✅ 예측 기록 OK ({total}건)")
             summary.append(f"- 평가 완료율: {(done/total*100):.1f}%" if total else "- 평가 없음")
-        else:
-            results.append("❌ 예측 기록 없음")
+        else: results.append("❌ 예측 기록 없음")
     except Exception as e:
         results.append(f"❌ 예측 확인 실패: {e}")
-
     try:
         models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
         results.append(f"✅ 모델 파일 OK ({len(models)}개)" if models else "❌ 모델 없음")
     except Exception as e:
         results.append(f"❌ 모델 확인 실패: {e}")
-
     try:
         if os.path.exists(MESSAGE_LOG):
             df = pd.read_csv(MESSAGE_LOG, encoding="utf-8-sig")
             results.append(f"✅ 메시지 로그 OK ({len(df)}건)")
     except Exception as e:
         results.append(f"❌ 메시지 확인 실패: {e}")
-
+    try:
+        for s in ["단기", "중기", "장기"]:
+            r = __import__('logger').get_actual_success_rate(s, threshold=0.0)
+            summary.append(f"- {s} 전략 성공률: {r*100:.1f}%")
+    except: summary.append("- 전략별 성공률 확인 실패")
     return f"<div style='font-family:monospace; line-height:1.6;'>" + "<br>".join(results + [""] + summary) + "</div>"
 
 if __name__ == "__main__":
