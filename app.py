@@ -21,6 +21,9 @@ VOLATILITY_THRESHOLD = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
 PREDICTION_INTERVALS = {"단기": 3600, "중기": 10800, "장기": 21600}
 last_prediction_time = {s: 0 for s in PREDICTION_INTERVALS}
 
+def now_kst():
+    return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+
 def get_symbols_by_volatility(strategy):
     if strategy not in VOLATILITY_THRESHOLD: return []
     threshold, selected = VOLATILITY_THRESHOLD[strategy], []
@@ -41,7 +44,7 @@ def start_regular_prediction_loop():
             for s in PREDICTION_INTERVALS:
                 if now - last_prediction_time[s] >= PREDICTION_INTERVALS[s]:
                     try:
-                        print(f"[정기 예측] {s} {datetime.datetime.now()} 실행")
+                        print(f"[정기 예측] {s} {now_kst()} 실행")
                         sys.stdout.flush()
                         main(s)
                         last_prediction_time[s] = time.time()
@@ -54,7 +57,7 @@ def start_scheduler():
     print(">>> start_scheduler() 호출됨")
     sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Seoul'))
-    scheduler.add_job(lambda: logger.evaluate_predictions(get_latest_price), 'cron', minute=20)
+    scheduler.add_job(lambda: __import__('logger').evaluate_predictions(get_latest_price), 'cron', minute=20)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start(), 'cron', hour='0,3,6,9,12,15,18,21', minute=30)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start(), 'cron', hour='1,7,13,19', minute=30)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start(), 'cron', hour='2,14', minute=30)
@@ -134,7 +137,7 @@ def check_stats():
         if not isinstance(result, str): return f"출력 형식 오류: {result}", 500
         for s, r in {"📊":"<b>📊</b>", "✅":"<b style='color:green'>✅</b>", "❌":"<b style='color:red'>❌</b>", "⏳":"<b>⏳</b>", "🎯":"<b>🎯</b>", "📌":"<b>📌</b>"}.items():
             result = result.replace(s, r)
-        return f"<div style='font-family:monospace; line-height:1.6;'>{result.replace(chr(10),'<br>')}</div>"
+        return f"<div style='font-family:monospace; line-height:1.6;'>" + result.replace(chr(10),"<br>") + "</div>"
     except Exception as e:
         return f"정확도 통계 출력 실패: {e}", 500
 
@@ -179,7 +182,7 @@ def health_check():
     try:
         if os.path.exists(PREDICTION_LOG):
             df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-            total, done = len(df), len(df[df["status"].isin(["success", "fail"])])
+            total, done = len(df), len(df[df["status"].isin(["success", "fail"])]);
             results.append(f"✅ 예측 기록 OK ({total}건)")
             summary.append(f"- 평가 완료율: {(done/total*100):.1f}%" if total else "- 평가 없음")
         else: results.append("❌ 예측 기록 없음")
