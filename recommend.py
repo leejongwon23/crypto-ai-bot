@@ -270,16 +270,33 @@ def main(strategy=None):
     else:
         print(">>> main() 호출됐지만 전략 미지정, 자동 루프에 의해 작동")
 
+# 수정된 부분: 전략별 예측 주기 자동화
+
 start_regular_prediction_loop = None
+
 def start_regular_prediction_loop_func():
+    last_run_times = {
+        "단기": 0,
+        "중기": 0,
+        "장기": 0
+    }
+    intervals = {
+        "단기": 2 * 3600,   # 2시간
+        "중기": 4 * 3600,   # 4시간
+        "장기": 6 * 3600    # 6시간
+    }
+
     def loop():
         while True:
+            now = time.time()
             for strategy in ["단기", "중기", "장기"]:
-                run_prediction_loop(strategy, get_symbols_by_volatility(strategy))
-            time.sleep(3600)
+                if now - last_run_times[strategy] >= intervals[strategy]:
+                    print(f"[자동예측] {strategy} 전략 예측 실행")
+                    symbol_data_list = get_symbols_by_volatility(strategy)
+                    run_prediction_loop(strategy, symbol_data_list)
+                    last_run_times[strategy] = now
+            time.sleep(30)  # 30초마다 주기 체크
+
     threading.Thread(target=loop, daemon=True).start()
 
 start_regular_prediction_loop = start_regular_prediction_loop_func
-
-# run_prediction 이름으로 바로 사용 가능
-run_prediction = run_prediction
