@@ -26,14 +26,15 @@ os.makedirs(WRONG_DIR, exist_ok=True)
 
 STRATEGY_GAP = {"단기": 7200, "중기": 21600, "장기": 43200}
 
+
 def create_dataset(features, window):
     X, y = [], []
     for i in range(len(features) - window - 1):
-        x_seq = features[i:i+window]
+        x_seq = features[i:i + window]
         if any(len(row.values()) != len(features[0].values()) for row in x_seq):
             continue
-        current_close = features[i+window-1]['close']
-        future_close = features[i+window]['close']
+        current_close = features[i + window - 1]['close']
+        future_close = features[i + window]['close']
         if current_close == 0:
             continue
         change = (future_close - current_close) / current_close
@@ -50,6 +51,7 @@ def create_dataset(features, window):
     X, y = zip(*filtered)
     return np.array(X), np.array(y)
 
+
 def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
     meta = {
         "symbol": symbol,
@@ -63,7 +65,8 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
     path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
-    print(f"🗘 체크폰트 저장됨: {path}")
+    print(f"🗘 체크포인트 저장됨: {path}")
+
 
 def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3, repeat=4, repeat_wrong=4):
     print(f"[train] {symbol}-{strategy} 전체 모델 학습 시작")
@@ -76,13 +79,13 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
     if len(df_feat) < best_window + 1:
         print(f"❌ {symbol}-{strategy} feature 부족")
         return
-
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(df_feat.values)
     feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
     X_raw, y_raw = create_dataset(feature_dicts, best_window)
+
     if len(X_raw) < 2:
-        print(f"[SKIP] {symbol}-{strategy} 유효 시컷스 부족 → {len(X_raw)}개")
+        print(f"[SKIP] {symbol}-{strategy} 유효 시퀀스 부족 → {len(X_raw)}개")
         return
 
     input_size = X_raw.shape[2]
@@ -90,6 +93,7 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
     if val_len == 0:
         print(f"[SKIP] {symbol}-{strategy} 검증셋 부족")
         return
+
     val_X_tensor = torch.tensor(X_raw[-val_len:], dtype=torch.float32)
     val_y_tensor = torch.tensor(y_raw[-val_len:], dtype=torch.float32)
 
@@ -107,7 +111,7 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
 
         for r in range(repeat):
-            print(f"[{symbol}-{strategy}] {model_type} 반복학습 {r+1}/{repeat}")
+            print(f"[{symbol}-{strategy}] {model_type} 반복학습 {r + 1}/{repeat}")
             for _ in range(repeat_wrong):
                 wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=best_window)
                 if wrong_data:
@@ -119,14 +123,16 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
                             xb_all = torch.stack([x for x, _ in filtered])
                             yb_all = torch.tensor([y for _, y in filtered], dtype=torch.float32)
                             for i in range(0, len(xb_all), batch_size):
-                                xb = xb_all[i:i+batch_size]
-                                yb = yb_all[i:i+batch_size]
+                                xb = xb_all[i:i + batch_size]
+                                yb = yb_all[i:i + batch_size]
                                 pred, _ = model(xb)
                                 if pred is not None:
                                     loss = criterion(pred, yb)
-                                    optimizer.zero_grad(); loss.backward(); optimizer.step()
+                                    optimizer.zero_grad()
+                                    loss.backward()
+                                    optimizer.step()
                     except Exception as e:
-                        print(f"[오단 학습 실패] {symbol}-{strategy} → {e}")
+                        print(f"[오답 학습 실패] {symbol}-{strategy} → {e}")
 
             for epoch in range(epochs):
                 for xb, yb in train_loader:
@@ -134,7 +140,9 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
                     if pred is None:
                         continue
                     loss = criterion(pred, yb)
-                    optimizer.zero_grad(); loss.backward(); optimizer.step()
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
 
         model.eval()
         try:
@@ -166,7 +174,8 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         importances = compute_feature_importance(best_model_obj, val_X_tensor, val_y_tensor, list(df_feat.columns))
         save_feature_importance(importances, symbol, strategy, best_model_type)
     else:
-        print(f"❗ 차원 저장 실패: {symbol}-{strategy} 모든 모델 평가 실패")
+        print(f"❗ 모델 저장 실패: {symbol}-{strategy} 모든 모델 평가 실패")
+
 
 def conditional_train_loop():
     recent_train_time = {}
@@ -184,6 +193,7 @@ def conditional_train_loop():
                     df = get_kline_by_strategy(symbol, strategy)
                     if df is None or len(df) < 20:
                         continue
+
                     vol = df["close"].pct_change().rolling(window=20).std().iloc[-1]
                     if vol is None or vol < 0.002:
                         print(f"[SKIP] {symbol}-{strategy} → 변동성 부족")
@@ -211,7 +221,6 @@ def conditional_train_loop():
     for s in ["단기", "중기", "장기"]:
         threading.Thread(target=loop, args=(s,), daemon=True).start()
 
-conditional_train_loop()
 
 def train_all_models():
     for strategy in ["단기", "중기", "장기"]:
@@ -221,4 +230,6 @@ def train_all_models():
             except Exception as e:
                 print(f"[오류] 전체 학습 실패: {symbol}-{strategy} → {e}")
 
+
 train_model = train_one_model
+conditional_train_loop()
