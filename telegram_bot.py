@@ -1,12 +1,16 @@
 import os
 import requests
 import datetime
+import pytz
 import csv
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 LOG_FILE = "/persistent/logs/message_log.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
+
+def now_kst():
+    return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def send_message(text: str):
     if not BOT_TOKEN or not CHAT_ID:
@@ -36,7 +40,7 @@ def send_message(text: str):
         log_message("전송 실패", f"예외: {e}")
 
 def log_message(status, content):
-    timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     write_header = not os.path.exists(LOG_FILE)
     with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
