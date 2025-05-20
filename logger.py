@@ -128,7 +128,7 @@ def evaluate_predictions(get_price_fn):
                 updated_rows.append(row)
                 continue
 
-            df = get_kline_by_strategy(symbol, strategy)
+df = get_kline_by_strategy(symbol, strategy)
             if df is None or df.empty:
                 row["status"] = "skip_eval"
                 row["reason"] = "평가용 데이터 없음"
@@ -145,7 +145,8 @@ def evaluate_predictions(get_price_fn):
                 log_audit(symbol, strategy, "스킵", row["reason"])
                 updated_rows.append(row)
                 continue
-if direction == "롱":
+
+            if direction == "롱":
                 max_price = eval_df["high"].max()
                 gain = (max_price - entry_price) / entry_price
                 success = gain >= rate
