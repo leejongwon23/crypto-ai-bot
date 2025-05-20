@@ -28,10 +28,8 @@ os.makedirs(WRONG_DIR, exist_ok=True)
 
 STRATEGY_GAP = {"단기": 7200, "중기": 21600, "장기": 43200}
 
-
 def now_kst():
     return datetime.now(pytz.timezone("Asia/Seoul"))
-
 
 def create_dataset(features, window):
     X, y = [], []
@@ -56,7 +54,6 @@ def create_dataset(features, window):
         return np.array([]), np.array([])
     X, y = zip(*filtered)
     return np.array(X), np.array(y)
-
 
 def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
     meta = {
@@ -182,51 +179,6 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         print(f"❗ 모델 저장 실패: {symbol}-{strategy} 모든 모델 평가 실패")
 
 
-def conditional_train_loop():
-    recent_train_time = {}
-
-    def loop(strategy):
-        while True:
-            for symbol in SYMBOLS:
-                try:
-                    key = (symbol, strategy)
-                    now = now_kst().timestamp()
-                    gap = STRATEGY_GAP.get(strategy, 3600)
-                    if now - recent_train_time.get(key, 0) < gap:
-                        continue
-
-                    df = get_kline_by_strategy(symbol, strategy)
-                    if df is None or len(df) < 20:
-                        continue
-
-                    vol = df["close"].pct_change().rolling(window=20).std().iloc[-1]
-                    if vol is None or vol < 0.002:
-                        print(f"[SKIP] {symbol}-{strategy} → 변동성 부족")
-                        continue
-
-                    fail_rate = get_strategy_fail_rate(symbol, strategy)
-                    if isinstance(fail_rate, tuple):
-                        fail_rate = fail_rate[0]
-
-                    eval_count = get_strategy_eval_count(strategy)
-                    if isinstance(eval_count, tuple):
-                        eval_count = eval_count[0]
-
-                    if fail_rate >= 0.3 or eval_count < 10 or now - recent_train_time.get(key, 0) > gap * 2:
-                        print(f"[학습조건충족] {symbol}-{strategy} → 실패율: {fail_rate:.2f}, 평가: {eval_count}")
-                        train_one_model(symbol, strategy)
-                        gc.collect()
-                        recent_train_time[key] = now_kst().timestamp()
-                    else:
-                        print(f"[SKIP] {symbol}-{strategy} → 조건 미충족")
-                except Exception as e:
-                    print(f"[오류] 학습 루프 실패: {symbol}-{strategy} → {e}")
-            time.sleep(600)
-
-    for s in ["단기", "중기", "장기"]:
-        threading.Thread(target=loop, args=(s,), daemon=True).start()
-
-
 def train_all_models():
     for strategy in ["단기", "중기", "장기"]:
         for symbol in SYMBOLS:
@@ -237,4 +189,3 @@ def train_all_models():
 
 
 train_model = train_one_model
-conditional_train_loop()
