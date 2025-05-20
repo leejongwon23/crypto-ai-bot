@@ -4,9 +4,14 @@ import pandas as pd
 from data.utils import SYMBOLS, get_kline_by_strategy
 from recommend import run_prediction
 import traceback
+import datetime
+import pytz
 
 # 예측 트리거 실행 간 최소 간격 (중복 방지용)
 last_trigger_time = {}
+
+def now_kst():
+    return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def check_pre_burst_conditions(df):
     try:
@@ -53,7 +58,7 @@ def check_pre_burst_conditions(df):
         return False
 
 def run():
-    print("[트리거 실행] 전조 패턴 감지 시작")
+    print(f"[트리거 실행] 전조 패턴 감지 시작: {now_kst().isoformat()}")
     for symbol in SYMBOLS:
         try:
             df = get_kline_by_strategy(symbol, "단기")  # 단기 캔들 기준
