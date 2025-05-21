@@ -6,6 +6,7 @@ from telegram_bot import send_message
 from predict_test import test_all_predictions
 from data.utils import get_latest_price, SYMBOLS, get_kline_by_strategy
 from predict_trigger import run as trigger_run
+from src.healthcheck_yopo import generate_health_report  # ✅ 추가된 헬스체크 모듈
 
 PERSIST_DIR = "/persistent"
 MODEL_DIR, LOG_DIR = os.path.join(PERSIST_DIR, "models"), os.path.join(PERSIST_DIR, "logs")
@@ -39,26 +40,19 @@ def start_scheduler():
     print(">>> start_scheduler() 호출됨")
     sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Seoul'))
-
-    # 평가 + 학습 스케줄
     scheduler.add_job(lambda: __import__('logger').evaluate_predictions(get_latest_price), 'cron', minute=20)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start(), 'cron', hour='0,3,6,9,12,15,18,21', minute=30)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start(), 'cron', hour='1,7,13,19', minute=30)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start(), 'cron', hour='2,14', minute=30)
-
-    # ✅ 예측 스케줄 (thread로 보강)
     scheduler.add_job(lambda: threading.Thread(target=main, args=("단기",), daemon=True).start(), 'cron', hour='*', minute=0)
     scheduler.add_job(lambda: threading.Thread(target=main, args=("중기",), daemon=True).start(), 'cron', hour='0,3,6,9,12,15,18,21', minute=0)
     scheduler.add_job(lambda: threading.Thread(target=main, args=("장기",), daemon=True).start(), 'cron', hour='0,6,12,18', minute=0)
-
     scheduler.add_job(test_all_predictions, 'cron', minute=10)
     scheduler.add_job(trigger_run, 'interval', minutes=30)
-
     scheduler.start()
 
 app = Flask(__name__)
-print(">>> Flask 앱 생성 완료")
-sys.stdout.flush()
+print(">>> Flask 앱 생성 완료"); sys.stdout.flush()
 
 @app.route("/")
 def index(): return "Yopo server is running"
@@ -76,15 +70,6 @@ def run():
     except Exception as e:
         print("[ERROR] /run 실패:"); traceback.print_exc(); sys.stdout.flush()
         return f"Error: {e}", 500
-
-@app.route("/check-log")
-def check_log():
-    try:
-        if not os.path.exists(PREDICTION_LOG): return jsonify({"error": "prediction_log.csv not found"})
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-        return jsonify(df.tail(10).to_dict(orient='records'))
-    except Exception as e:
-        return jsonify({"error": str(e)})
 
 @app.route("/train-now")
 def train_now():
@@ -111,6 +96,15 @@ def list_model_files():
         return "<pre>" + "\n".join(files) + "</pre>" if files else "models 폴더가 비어 있습니다."
     except Exception as e:
         return f"모델 파일 확인 중 오류 발생: {e}", 500
+
+@app.route("/check-log")
+def check_log():
+    try:
+        if not os.path.exists(PREDICTION_LOG): return jsonify({"error": "prediction_log.csv not found"})
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        return jsonify(df.tail(10).to_dict(orient='records'))
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 @app.route("/check-wrong")
 def check_wrong():
@@ -167,6 +161,16 @@ def audit_log_download():
     except Exception as e:
         return f"다운로드 실패: {e}", 500
 
+# ✅ 전략별 통합 진단 라우트
+@app.route("/yopo-health")
+def yopo_health():
+    try:
+        result = generate_health_report()
+        return f"<pre style='font-family:monospace; line-height:1.6'>{result}</pre>"
+    except Exception as e:
+        return f"[오류] 헬스체크 실패: {e}", 500
+
+# 기존 라우트 그대로 유지
 @app.route("/health-check")
 def health_check():
     results, summary = [], []
