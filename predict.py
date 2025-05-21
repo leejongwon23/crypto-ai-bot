@@ -70,7 +70,11 @@ def predict(symbol, strategy):
                         continue
                     signal = float(signal.squeeze().item())
                     confidence = float(confidence.squeeze().item())
-                    if not (0 <= signal <= 1) or 0.495 <= signal <= 0.505:
+
+                    if not (0 <= signal <= 1):
+                        continue
+                    # 중립 구간: 예측 무의미한 영역
+                    if 0.48 <= signal <= 0.52:
                         continue
 
                     direction = "롱" if signal > 0.5 else "숏"
@@ -78,10 +82,11 @@ def predict(symbol, strategy):
                     weight = get_model_weight(model_type, strategy)
 
                     try:
-                        loss_penalty = log_loss([1 if signal > 0.5 else 0], [signal], labels=[0, 1])
+                        loss_penalty = log_loss([1 if signal > 0.5 else 0], [np.clip(signal, 1e-6, 1 - 1e-6)], labels=[0, 1])
                         confidence_penalty = max(0.1, 1.0 - loss_penalty)
-                    except:
-                        confidence_penalty = confidence
+                    except Exception as e:
+                        confidence_penalty = confidence  # fallback
+                        print(f"[log_loss 예외] {symbol}-{strategy}-{model_type}: {e}")
 
                     final_conf = (confidence + confidence_penalty) / 2
                     rate = raw_rate * min_gain * final_conf
@@ -95,7 +100,8 @@ def predict(symbol, strategy):
                         "score": score,
                         "rate": rate
                     })
-            except Exception:
+            except Exception as e:
+                print(f"[모델 예측 실패] {symbol}-{strategy}-{model_type}: {e}")
                 continue
 
         if not results:
@@ -120,17 +126,20 @@ def predict(symbol, strategy):
         price = features["close"].iloc[-1]
 
         reason = []
-        rsi = features.get("rsi", [50])[-1]
-        macd = features.get("macd", [0])[-1]
-        boll = features.get("bollinger", [0])[-1]
-        if final_direction == "롱":
-            if rsi < 30: reason.append("RSI 과매도")
-            if macd > 0: reason.append("MACD 상승")
-        else:
-            if rsi > 70: reason.append("RSI 과매수")
-            if macd < 0: reason.append("MACD 하락")
-        if boll > 1: reason.append("볼린저 상단")
-        elif boll < -1: reason.append("볼린저 하단")
+        try:
+            rsi = float(features["rsi"].iloc[-1])
+            macd = float(features["macd"].iloc[-1])
+            boll = float(features["bollinger"].iloc[-1])
+            if final_direction == "롱":
+                if rsi < 30: reason.append("RSI 과매도")
+                if macd > 0: reason.append("MACD 상승")
+            else:
+                if rsi > 70: reason.append("RSI 과매수")
+                if macd < 0: reason.append("MACD 하락")
+            if boll > 1: reason.append("볼린저 상단")
+            elif boll < -1: reason.append("볼린저 하단")
+        except Exception as e:
+            print(f"[지표 예외] {symbol}-{strategy}: {e}")
 
         return {
             "symbol": symbol, "strategy": strategy, "model": "ensemble",
