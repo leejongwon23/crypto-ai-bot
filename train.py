@@ -26,8 +26,6 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(WRONG_DIR, exist_ok=True)
 
-STRATEGY_GAP = {"단기": 7200, "중기": 21600, "장기": 43200}
-
 def now_kst():
     return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
@@ -118,12 +116,15 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
                 wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=best_window)
                 if wrong_data:
                     try:
-                        shapes = [x[0].shape for x in wrong_data]
-                        mode_shape = max(set(shapes), key=shapes.count)
-                        filtered = [(x, y) for x, y in wrong_data if x.shape == mode_shape]
-                        if len(filtered) > 1:
-                            xb_all = torch.stack([x for x, _ in filtered])
-                            yb_all = torch.tensor([y for _, y in filtered], dtype=torch.float32)
+                        # 오답 중 대표 shape만 filtering
+                        xb_all, yb_all = [], []
+                        for xb, yb in wrong_data:
+                            if xb.shape[1:] == (best_window, input_size):
+                                xb_all.append(xb)
+                                yb_all.append(yb)
+                        if len(xb_all) >= 2:
+                            xb_all = torch.stack(xb_all)
+                            yb_all = torch.tensor(yb_all, dtype=torch.float32)
                             for i in range(0, len(xb_all), batch_size):
                                 xb = xb_all[i:i + batch_size]
                                 yb = yb_all[i:i + batch_size]
@@ -158,8 +159,10 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
                 acc = float(accuracy_score(y_true, y_pred))
                 f1 = float(f1_score(y_true, y_pred))
                 logloss = float(log_loss(y_true, y_prob, labels=[0, 1]))
+                conf_score = np.mean(np.abs(y_prob - 0.5)) * 2
+                final_score = acc * (1 + f1) * conf_score
                 logger.log_training_result(symbol, strategy, model_type, acc, f1, logloss)
-                scores[model_type] = acc + f1
+                scores[model_type] = final_score
                 models[model_type] = model
                 metrics[model_type] = (acc, f1, logloss)
         except Exception as e:
