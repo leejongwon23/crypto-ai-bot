@@ -152,11 +152,17 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df['stoch_rsi'] = (df['rsi'] - min_rsi) / (max_rsi - min_rsi)
 
     df["btc_dominance"] = get_btc_dominance()
-
     df = df.dropna()
+
     return df[[
         'close', 'volume', 'ma5', 'ma20', 'rsi', 'macd',
         'bollinger', 'volatility', 'trend_slope',
         'percent_diff', 'volume_delta',
         'obv', 'cci', 'stoch_rsi', 'btc_dominance'
     ]]
+
+def get_latest_price(symbol: str):
+    df = get_kline(symbol, interval="60", limit=1)
+    if df is not None and not df.empty:
+        return float(df["close"].iloc[-1])
+    return None
