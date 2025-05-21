@@ -47,7 +47,7 @@ def generate_health_report():
     if isinstance(df, list): return "❌ 예측 로그 없음"
 
     report_lines = ["========================= YOPO 상태 진단 (KST 기준) ========================="]
-    
+
     for strategy in STRATEGIES:
         s_df = df[df["strategy"] == strategy]
         s_df = s_df[s_df["status"].isin(["success", "fail", "pending", "failed"])]
@@ -64,10 +64,8 @@ def generate_health_report():
         conf_trend = format_trend(s_df["confidence"]) if not s_df.empty else "데이터 부족"
 
         recent_pred_time = s_df["timestamp"].max().astimezone(KST).strftime("%Y-%m-%d %H:%M") if not s_df.empty else "없음"
-
         model_count = sum(1 for s in SYMBOLS if model_exists(s, strategy))
 
-        # 학습 시각
         train_time = "-"
         if os.path.exists(LAST_TRAIN_LOG):
             try:
@@ -103,7 +101,7 @@ def generate_health_report():
 
     report_lines.append("\n============================================================================")
     report_lines.append("\n🧠 종합 진단:")
-    
+
     for strategy in STRATEGIES:
         s_df = df[(df["strategy"] == strategy) & df["status"].isin(["success", "fail", "pending", "failed"])]
         if s_df.empty:
