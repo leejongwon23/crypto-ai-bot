@@ -17,31 +17,38 @@ def now_kst():
 
 # ✅ 전략별 최소 트리거 간격 (초)
 TRIGGER_COOLDOWN = {
-    "단기": 3600,    # 1시간
-    "중기": 10800,   # 3시간
-    "장기": 21600    # 6시간
+    "단기": 3600,     # 1시간
+    "중기": 10800,    # 3시간
+    "장기": 21600     # 6시간
 }
 
-# ✅ 트리거 조건 점검 함수
+# ✅ 전략별 전조 조건 점검 함수
 def check_pre_burst_conditions(df, strategy):
     try:
         vol_increasing = df['volume'].iloc[-3] < df['volume'].iloc[-2] < df['volume'].iloc[-1]
         price_range = df['close'].iloc[-6:]
         stable_price = (price_range.max() - price_range.min()) / price_range.mean() < 0.005
+
         ema_5 = df['close'].ewm(span=5).mean().iloc[-1]
         ema_15 = df['close'].ewm(span=15).mean().iloc[-1]
         ema_60 = df['close'].ewm(span=60).mean().iloc[-1]
         ma_pack = max(ema_5, ema_15, ema_60) - min(ema_5, ema_15, ema_60)
         ema_compressed = ma_pack / df['close'].iloc[-1] < 0.003
+
         bb_std = df['close'].rolling(window=20).std()
         expanding_band = bb_std.iloc[-2] < bb_std.iloc[-1] and bb_std.iloc[-1] > 0.002
-        satisfied = sum([
-            vol_increasing,
-            stable_price,
-            ema_compressed,
-            expanding_band
-        ])
-        return satisfied >= 2
+
+        if strategy == "단기":
+            conditions = [vol_increasing, stable_price, ema_compressed, expanding_band]
+            return sum(conditions) >= 2
+        elif strategy == "중기":
+            conditions = [stable_price, ema_compressed, expanding_band]
+            return sum(conditions) >= 2
+        elif strategy == "장기":
+            conditions = [ema_compressed, expanding_band]
+            return sum(conditions) >= 1
+        else:
+            return False
     except Exception:
         traceback.print_exc()
         return False
