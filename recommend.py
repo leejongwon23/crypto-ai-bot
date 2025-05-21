@@ -33,11 +33,11 @@ FAILURE_LOG = "/persistent/logs/failure_count.csv"
 MESSAGE_LOG = "/persistent/logs/message_log.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
 
-# --- 시간 함수 (서울 기준) ---
+# --- 서울 시간 기준 함수 ---
 def now_kst():
     return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-# --- 실패 횟수 로딩 및 저장 ---
+# --- 실패 횟수 관리 ---
 def load_failure_count():
     if not os.path.exists(FAILURE_LOG): return {}
     with open(FAILURE_LOG, "r", encoding="utf-8-sig") as f:
@@ -67,11 +67,6 @@ def log_audit(symbol, strategy, result, status):
         if write_header: writer.writeheader()
         writer.writerow(row)
 
-# --- 실시간 가격 조회 ---
-def get_price_now(symbol):
-    prices = get_realtime_prices()
-    return prices.get(symbol)
-
 # --- 변동성 기준 필터링 ---
 def get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
     threshold *= 1.2
@@ -87,7 +82,7 @@ def get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
     return selected
 
-# --- 예측 실행 여부 판단 ---
+# --- 예측 여부 판단 ---
 def should_predict(symbol, strategy):
     try:
         rate = get_model_success_rate(symbol, strategy, "ensemble")
@@ -96,7 +91,7 @@ def should_predict(symbol, strategy):
     except:
         return True
 
-# --- 예측 루프 실행 ---
+# --- 예측 루프 ---
 def run_prediction_loop(strategy, symbol_data_list):
     print(f"[예측 시작 - {strategy}] {len(symbol_data_list)}개 심볼")
     sys.stdout.flush()
@@ -161,7 +156,7 @@ def run_prediction_loop(strategy, symbol_data_list):
 
     save_failure_count(failure_map)
 
-    # --- 결과 필터링 ---
+    # --- 필터링 및 점수 계산 ---
     filtered = []
     for r in all_results:
         conf = r.get("confidence", 0)
@@ -195,12 +190,12 @@ def run_prediction_loop(strategy, symbol_data_list):
         except Exception as e:
             print(f"[ERROR] 메시지 전송 실패: {e}")
 
-# --- 단일 예측 실행 ---
+# --- 단일 실행 ---
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
     run_prediction_loop(strategy, [{"symbol": symbol}])
 
-# --- 전략별 전체 실행 ---
+# --- 전략 전체 실행 ---
 def main(strategy=None):
     print(">>> [main] recommend.py 실행")
     if strategy:
