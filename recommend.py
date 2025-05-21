@@ -18,7 +18,6 @@ from src.message_formatter import format_message
 import train
 from model_weight_loader import model_exists
 
-# --- 설정 상수 ---
 MIN_CONFIDENCE = 0.70
 MIN_CONFIDENCE_OVERRIDE = 0.85
 SUCCESS_RATE_THRESHOLD = 0.70
@@ -27,17 +26,14 @@ MIN_SCORE_THRESHOLD = 0.005
 FINAL_SEND_LIMIT = 5
 VOLATILITY_THRESHOLD = 0.003
 
-# --- 경로 설정 ---
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
 FAILURE_LOG = "/persistent/logs/failure_count.csv"
 MESSAGE_LOG = "/persistent/logs/message_log.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
 
-# --- 서울 시간 기준 함수 ---
 def now_kst():
     return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-# --- 실패 횟수 관리 ---
 def load_failure_count():
     if not os.path.exists(FAILURE_LOG): return {}
     with open(FAILURE_LOG, "r", encoding="utf-8-sig") as f:
@@ -51,7 +47,6 @@ def save_failure_count(failure_map):
             symbol, strategy = key.split("-")
             writer.writerow({"symbol": symbol, "strategy": strategy, "failures": count})
 
-# --- 감사 로그 기록 ---
 def log_audit(symbol, strategy, result, status):
     now = now_kst().isoformat()
     row = {
@@ -67,7 +62,6 @@ def log_audit(symbol, strategy, result, status):
         if write_header: writer.writeheader()
         writer.writerow(row)
 
-# --- 변동성 기준 필터링 ---
 def get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
     threshold *= 1.2
     selected = []
@@ -82,7 +76,6 @@ def get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
     return selected
 
-# --- 예측 여부 판단 ---
 def should_predict(symbol, strategy):
     try:
         rate = get_model_success_rate(symbol, strategy, "ensemble")
@@ -91,7 +84,6 @@ def should_predict(symbol, strategy):
     except:
         return True
 
-# --- 예측 루프 ---
 def run_prediction_loop(strategy, symbol_data_list):
     print(f"[예측 시작 - {strategy}] {len(symbol_data_list)}개 심볼")
     sys.stdout.flush()
@@ -104,7 +96,8 @@ def run_prediction_loop(strategy, symbol_data_list):
         volatility = item.get("volatility", 0)
         try:
             if not model_exists(symbol, strategy):
-                log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(), 0.0, "unknown", False, "모델 없음", 0)
+                min_gain = get_min_gain(symbol, strategy)
+                log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(), 0.0, "ensemble", False, "모델 없음", min_gain)
                 log_audit(symbol, strategy, None, "모델 없음")
                 continue
 
@@ -117,7 +110,8 @@ def run_prediction_loop(strategy, symbol_data_list):
 
             if not isinstance(result, dict) or result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
                 reason = result.get("reason", "예측 실패") if isinstance(result, dict) else "predict() 반환 오류"
-                log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(), 0.0, "unknown", False, reason, 0)
+                min_gain = get_min_gain(symbol, strategy)
+                log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(), 0.0, "ensemble", False, reason, min_gain)
                 log_audit(symbol, strategy, result, reason)
                 continue
 
@@ -130,10 +124,10 @@ def run_prediction_loop(strategy, symbol_data_list):
                 target_price=result.get("target", 0),
                 timestamp=now_kst().isoformat(),
                 confidence=result.get("confidence", 0.0),
-                model=result.get("model", "unknown"),
+                model=result.get("model", "ensemble"),
                 success=True,
                 reason=result.get("reason", "예측 성공"),
-                rate=result.get("rate", 0.0)
+                rate=result.get("rate", get_min_gain(symbol, strategy))
             )
             log_audit(symbol, strategy, result, "예측 성공")
 
@@ -151,12 +145,12 @@ def run_prediction_loop(strategy, symbol_data_list):
 
         except Exception as e:
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
-            log_prediction(symbol, strategy, "예외", 0, 0, now_kst().isoformat(), 0.0, "unknown", False, f"예외 발생: {e}", 0)
+            min_gain = get_min_gain(symbol, strategy)
+            log_prediction(symbol, strategy, "예외", 0, 0, now_kst().isoformat(), 0.0, "ensemble", False, f"예외 발생: {e}", min_gain)
             log_audit(symbol, strategy, None, f"예외 발생: {e}")
 
     save_failure_count(failure_map)
 
-    # --- 필터링 및 점수 계산 ---
     filtered = []
     for r in all_results:
         conf = r.get("confidence", 0)
@@ -189,14 +183,17 @@ def run_prediction_loop(strategy, symbol_data_list):
             print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%} | 성공률: {res['success_rate']:.2f}")
         except Exception as e:
             print(f"[ERROR] 메시지 전송 실패: {e}")
+            with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
+                csv.writer(f).writerow([now_kst().isoformat(), res["symbol"], res["strategy"], f"전송 실패: {e}"])
 
-# --- 단일 실행 ---
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
     run_prediction_loop(strategy, [{"symbol": symbol}])
 
-# --- 전략 전체 실행 ---
 def main(strategy=None):
     print(">>> [main] recommend.py 실행")
     if strategy:
         run_prediction_loop(strategy, get_symbols_by_volatility(strategy))
+    else:
+        for strat in ["단기", "중기", "장기"]:
+            run_prediction_loop(strat, get_symbols_by_volatility(strat))
