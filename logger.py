@@ -69,7 +69,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "confidence": float(confidence),
         "model": model or "unknown",
         "rate": float(rate),
-        "status": "pending",
+        "status": "pending" if success else "failed",
         "reason": reason or ""
     }
     if not success:
@@ -97,7 +97,7 @@ def evaluate_predictions(get_price_fn):
     updated_rows = []
 
     for row in rows:
-        if row.get("status") != "pending":
+        if row.get("status") not in ["pending", "failed"]:
             updated_rows.append(row)
             continue
 
@@ -142,7 +142,6 @@ def evaluate_predictions(get_price_fn):
                                 row["timestamp"], symbol, strategy, direction,
                                 entry_price, row["target_price"], gain
                             ])
-
             log_audit(symbol, strategy, row["status"], row["reason"])
         except Exception as e:
             row["status"], row["reason"] = "skip_eval", f"예외 발생: {e}"
@@ -189,13 +188,14 @@ def print_prediction_stats():
     if not os.path.exists(PREDICTION_LOG): return "예측 기록이 없습니다."
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-        counts = {k: len(df[df["status"] == k]) for k in ["success", "fail", "pending", "skipped", "expired", "invalid_model", "skip_eval"]}
+        status_list = ["success", "fail", "pending", "failed", "skipped", "expired", "invalid_model", "skip_eval"]
+        counts = {k: len(df[df["status"] == k]) for k in status_list}
         summary = [
             f"📊 전체 예측 수: {len(df)}",
             f"✅ 성공: {counts['success']}", f"❌ 실패: {counts['fail']}",
-            f"⏳ 평가 대기중: {counts['pending']}", f"⏭️ 스킵: {counts['skipped']}",
-            f"⌛ 만료: {counts['expired']}", f"⚠️ 모델없음: {counts['invalid_model']}",
-            f"🟡 평가제외: {counts['skip_eval']}",
+            f"⏳ 평가 대기중: {counts['pending']}", f"⏱ 실패예측: {counts['failed']}",
+            f"⏭️ 스킵: {counts['skipped']}", f"⌛ 만료: {counts['expired']}",
+            f"⚠️ 모델없음: {counts['invalid_model']}", f"🟡 평가제외: {counts['skip_eval']}",
             f"🌟 성공률: {(counts['success'] / (counts['success'] + counts['fail']) * 100):.2f}%" if (counts['success'] + counts['fail']) > 0 else "🌟 성공률: 0.00%"
         ]
         for strategy in df["strategy"].unique():
