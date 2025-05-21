@@ -4,12 +4,13 @@ import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shuti
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram_bot import send_message
 from predict_test import test_all_predictions
-from data.utils import get_latest_price, SYMBOLS, get_kline_by_strategy
 from predict_trigger import run as trigger_run
-from src.healthcheck_yopo import generate_health_report  # ✅ 추가된 헬스체크 모듈
+from data.utils import SYMBOLS, get_kline_by_strategy
+from src.healthcheck_yopo import generate_health_report  # ✅ 전략별 진단 라우트용
 
 PERSIST_DIR = "/persistent"
-MODEL_DIR, LOG_DIR = os.path.join(PERSIST_DIR, "models"), os.path.join(PERSIST_DIR, "logs")
+MODEL_DIR = os.path.join(PERSIST_DIR, "models")
+LOG_DIR = os.path.join(PERSIST_DIR, "logs")
 LOG_FILE = os.path.join(LOG_DIR, "train_log.csv")
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
@@ -25,22 +26,24 @@ def now_kst():
 
 def get_symbols_by_volatility(strategy):
     if strategy not in VOLATILITY_THRESHOLD: return []
-    threshold, selected = VOLATILITY_THRESHOLD[strategy], []
+    threshold = VOLATILITY_THRESHOLD[strategy]
+    selected = []
     for symbol in SYMBOLS:
         try:
             df = get_kline_by_strategy(symbol, strategy)
             if df is None or len(df) < 20: continue
             vol = df["close"].pct_change().rolling(window=20).std().iloc[-1]
-            if vol and vol >= threshold: selected.append(symbol)
+            if vol and vol >= threshold:
+                selected.append(symbol)
         except Exception as e:
             print(f"[ERROR] {symbol}-{strategy} 변동성 계산 실패: {e}")
     return selected
 
 def start_scheduler():
-    print(">>> start_scheduler() 호출됨")
-    sys.stdout.flush()
-    scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Seoul'))
-    scheduler.add_job(lambda: __import__('logger').evaluate_predictions(get_latest_price), 'cron', minute=20)
+    print(">>> start_scheduler() 호출됨"); sys.stdout.flush()
+    scheduler = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
+
+    scheduler.add_job(lambda: __import__('logger').evaluate_predictions(None), 'cron', minute=20)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start(), 'cron', hour='0,3,6,9,12,15,18,21', minute=30)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start(), 'cron', hour='1,7,13,19', minute=30)
     scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start(), 'cron', hour='2,14', minute=30)
@@ -49,6 +52,7 @@ def start_scheduler():
     scheduler.add_job(lambda: threading.Thread(target=main, args=("장기",), daemon=True).start(), 'cron', hour='0,6,12,18', minute=0)
     scheduler.add_job(test_all_predictions, 'cron', minute=10)
     scheduler.add_job(trigger_run, 'interval', minutes=30)
+
     scheduler.start()
 
 app = Flask(__name__)
@@ -122,7 +126,7 @@ def check_stats():
         if not isinstance(result, str): return f"출력 형식 오류: {result}", 500
         for s, r in {"📊":"<b>📊</b>", "✅":"<b style='color:green'>✅</b>", "❌":"<b style='color:red'>❌</b>", "⏳":"<b>⏳</b>", "🎯":"<b>🎯</b>", "📌":"<b>📌</b>"}.items():
             result = result.replace(s, r)
-        return f"<div style='font-family:monospace; line-height:1.6;'>" + result.replace(chr(10),"<br>") + "</div>"
+        return f"<div style='font-family:monospace; line-height:1.6;'>" + result.replace(chr(10), "<br>") + "</div>"
     except Exception as e:
         return f"정확도 통계 출력 실패: {e}", 500
 
@@ -161,7 +165,6 @@ def audit_log_download():
     except Exception as e:
         return f"다운로드 실패: {e}", 500
 
-# ✅ 전략별 통합 진단 라우트
 @app.route("/yopo-health")
 def yopo_health():
     try:
@@ -170,7 +173,6 @@ def yopo_health():
     except Exception as e:
         return f"[오류] 헬스체크 실패: {e}", 500
 
-# 기존 라우트 그대로 유지
 @app.route("/health-check")
 def health_check():
     results, summary = [], []
@@ -180,7 +182,8 @@ def health_check():
             total, done = len(df), len(df[df["status"].isin(["success", "fail"])])
             results.append(f"✅ 예측 기록 OK ({total}건)")
             summary.append(f"- 평가 완료율: {(done/total*100):.1f}%" if total else "- 평가 없음")
-        else: results.append("❌ 예측 기록 없음")
+        else:
+            results.append("❌ 예측 기록 없음")
     except Exception as e:
         results.append(f"❌ 예측 확인 실패: {e}")
     try:
@@ -198,7 +201,8 @@ def health_check():
         for s in ["단기", "중기", "장기"]:
             r = __import__('logger').get_actual_success_rate(s, threshold=0.0)
             summary.append(f"- {s} 전략 성공률: {r*100:.1f}%")
-    except: summary.append("- 전략별 성공률 확인 실패")
+    except:
+        summary.append("- 전략별 성공률 확인 실패")
     return f"<div style='font-family:monospace; line-height:1.6;'>" + "<br>".join(results + [""] + summary) + "</div>"
 
 if __name__ == "__main__":
