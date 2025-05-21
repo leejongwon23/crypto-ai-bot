@@ -112,7 +112,7 @@ def get_realtime_prices():
     except:
         return {}
 
-def compute_features(df: pd.DataFrame) -> pd.DataFrame:
+def compute_features(df: pd.DataFrame, strategy: str) -> pd.DataFrame:
     df = df.copy()
     df['ma5'] = df['close'].rolling(window=5).mean()
     df['ma20'] = df['close'].rolling(window=20).mean()
@@ -151,18 +151,40 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     max_rsi = df['rsi'].rolling(14).max()
     df['stoch_rsi'] = (df['rsi'] - min_rsi) / (max_rsi - min_rsi)
 
-    df["btc_dominance"] = get_btc_dominance()
-    df = df.dropna()
+    df['btc_dominance'] = get_btc_dominance()
 
-    return df[[
-        'close', 'volume', 'ma5', 'ma20', 'rsi', 'macd',
-        'bollinger', 'volatility', 'trend_slope',
-        'percent_diff', 'volume_delta',
-        'obv', 'cci', 'stoch_rsi', 'btc_dominance'
-    ]]
+    if strategy == "중기":
+        plus_dm = df['high'].diff()
+        minus_dm = df['low'].diff()
+        tr = (df['high'] - df['low']).rolling(14).mean()
+        dx = (abs(plus_dm - minus_dm) / tr) * 100
+        df['adx'] = dx.rolling(14).mean()
 
-def get_latest_price(symbol: str):
-    df = get_kline(symbol, interval="60", limit=1)
-    if df is not None and not df.empty:
-        return float(df["close"].iloc[-1])
-    return None
+        highest = df['high'].rolling(14).max()
+        lowest = df['low'].rolling(14).min()
+        df['willr'] = (highest - df['close']) / (highest - lowest + 1e-6) * -100
+
+    if strategy == "장기":
+        mf = df["close"] * df["volume"]
+        pos_mf = mf.where(df["close"] > df["close"].shift(), 0)
+        neg_mf = mf.where(df["close"] < df["close"].shift(), 0)
+        mf_ratio = pos_mf.rolling(14).sum() / (neg_mf.rolling(14).sum() + 1e-6)
+        df["mfi"] = 100 - (100 / (1 + mf_ratio))
+
+        df["roc"] = df["close"].pct_change(periods=12)
+
+    common = ["close", "volume", "ma5", "ma20", "rsi", "macd",
+              "bollinger", "volatility", "trend_slope",
+              "percent_diff", "volume_delta"]
+
+    mid_only = ["adx", "willr"]
+    long_only = ["mfi", "roc"]
+
+    extra = []
+    if strategy == "중기":
+        extra = mid_only
+    elif strategy == "장기":
+        extra = long_only
+
+    df = df[common + ["obv", "cci", "stoch_rsi", "btc_dominance"] + extra]
+    return df.dropna()
