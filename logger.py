@@ -93,11 +93,14 @@ def evaluate_predictions(get_price_fn):
         print(f"[경고] 평가 로그 읽기 실패: {e}")
         return
 
-    now, updated_rows = now_kst(), []
+    now = now_kst()
+    updated_rows = []
+
     for row in rows:
         if row.get("status") != "pending":
             updated_rows.append(row)
             continue
+
         try:
             pred_time = datetime.datetime.fromisoformat(row["timestamp"]).astimezone(pytz.timezone("Asia/Seoul"))
             hours_passed = (now - pred_time).total_seconds() / 3600
@@ -110,18 +113,15 @@ def evaluate_predictions(get_price_fn):
 
             if hours_passed > eval_hours + EVAL_EXPIRY_BUFFER:
                 row["status"], row["reason"] = "expired", f"평가 유효시간 초과: {hours_passed:.2f}h"
-
             elif hours_passed < eval_hours:
                 row["reason"] = f"{hours_passed:.2f}h < {eval_hours}h"
-
-            elif float(entry_price) == 0 or model == "unknown" or "모델 없음" in row["reason"]:
+            elif entry_price == 0 or model == "unknown" or "모델 없음" in row["reason"]:
                 row["status"] = "invalid_model"
-                row["reason"] = f"모델 없음 또는 entry_price=0 (평가 시각 경과: {hours_passed:.2f}h)"
-
+                row["reason"] = f"모델 없음 또는 entry_price=0"
             else:
                 df = get_kline_by_strategy(symbol, strategy)
                 if df is None or df.empty or df[df["timestamp"] >= pred_time].empty:
-                    row["status"], row["reason"] = "skip_eval", "평가용 데이터 없음 또는 부족"
+                    row["status"], row["reason"] = "skip_eval", "평가용 데이터 부족"
                 else:
                     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Seoul")
                     eval_df = df[df["timestamp"] >= pred_time]
@@ -138,12 +138,16 @@ def evaluate_predictions(get_price_fn):
                                 writer = csv.writer(wf)
                                 writer.writerow(["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "gain"])
                         with open(WRONG_PREDICTIONS, "a", newline="", encoding="utf-8-sig") as wf:
-                            csv.writer(wf).writerow([row["timestamp"], symbol, strategy, direction, entry_price, row["target_price"], gain])
+                            csv.writer(wf).writerow([
+                                row["timestamp"], symbol, strategy, direction,
+                                entry_price, row["target_price"], gain
+                            ])
 
             log_audit(symbol, strategy, row["status"], row["reason"])
         except Exception as e:
             row["status"], row["reason"] = "skip_eval", f"예외 발생: {e}"
             log_audit(row.get("symbol", "?"), row.get("strategy", "?"), "스킵", row["reason"])
+
         updated_rows.append(row)
 
     if updated_rows:
