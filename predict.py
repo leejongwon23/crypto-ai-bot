@@ -20,10 +20,17 @@ def now_kst():
 
 def failed_result(symbol, strategy, reason):
     return {
-        "symbol": symbol, "strategy": strategy, "success": False,
-        "reason": reason, "direction": "롱", "model": "ensemble",
-        "confidence": 0.0, "rate": 0.0, "price": 1.0,
-        "target": 1.0, "stop": 1.0,
+        "symbol": symbol,
+        "strategy": strategy,
+        "success": False,
+        "reason": reason,
+        "direction": "롱",
+        "model": "ensemble",
+        "confidence": 0.0,
+        "rate": 0.0,
+        "price": 1.0,
+        "target": 1.0,
+        "stop": 1.0,
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
     }
 
@@ -35,6 +42,7 @@ def predict(symbol, strategy):
             return failed_result(symbol, strategy, "데이터 부족")
 
         features = compute_features(df)
+        features = features.dropna()  # ✅ NaN 제거 필수
         if features is None or len(features) < best_window + 1:
             return failed_result(symbol, strategy, "feature 부족")
 
@@ -81,7 +89,11 @@ def predict(symbol, strategy):
                     weight = get_model_weight(model_type, strategy)
 
                     try:
-                        loss_penalty = log_loss([1 if signal > 0.5 else 0], [np.clip(signal, 1e-6, 1 - 1e-6)], labels=[0, 1])
+                        loss_penalty = log_loss(
+                            [1 if signal > 0.5 else 0],
+                            [np.clip(signal, 1e-6, 1 - 1e-6)],
+                            labels=[0, 1]
+                        )
                         confidence_penalty = max(0.1, 1.0 - loss_penalty)
                     except Exception as e:
                         confidence_penalty = confidence
@@ -123,6 +135,8 @@ def predict(symbol, strategy):
         avg_conf = sum(r["confidence"] for r in valid) / len(valid)
         avg_rate = sum(r["rate"] for r in valid) / len(valid)
         price = features["close"].iloc[-1]
+        if np.isnan(price):
+            return failed_result(symbol, strategy, "price NaN 발생")
 
         reason = []
         try:
@@ -141,12 +155,17 @@ def predict(symbol, strategy):
             print(f"[지표 예외] {symbol}-{strategy}: {e}")
 
         return {
-            "symbol": symbol, "strategy": strategy, "model": "ensemble",
-            "direction": final_direction, "confidence": avg_conf,
-            "rate": avg_rate, "price": price,
+            "symbol": symbol,
+            "strategy": strategy,
+            "model": "ensemble",
+            "direction": final_direction,
+            "confidence": avg_conf,
+            "rate": avg_rate,
+            "price": price,
             "target": price * (1 + avg_rate) if final_direction == "롱" else price * (1 - avg_rate),
             "stop": price * (1 - STOP_LOSS_PCT) if final_direction == "롱" else price * (1 + STOP_LOSS_PCT),
-            "reason": ", ".join(reason), "success": True,
+            "reason": ", ".join(reason),
+            "success": True,
             "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
         }
 
