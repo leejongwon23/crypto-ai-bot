@@ -43,17 +43,23 @@ def start_scheduler():
     print(">>> start_scheduler() 호출됨"); sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
 
+    # 🎓 학습 스케줄 (예측보다 30분 앞서 실행)
+    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start(),
+                      'cron', hour='23,1,3,5,7,9', minute=30)
+    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start(),
+                      'cron', hour='3,9,15,21', minute=30)
+    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start(),
+                      'cron', hour='5', minute=30)
+
     # 📈 예측 스케줄
-    scheduler.add_job(lambda: threading.Thread(target=main, args=("단기",), daemon=True).start(), 'cron', hour='0,2,4,6,8,10,12,14,16,18,20,22', minute=0)
-    scheduler.add_job(lambda: threading.Thread(target=main, args=("중기",), daemon=True).start(), 'cron', hour='0,4,8,12,16,20', minute=0)
-    scheduler.add_job(lambda: threading.Thread(target=main, args=("장기",), daemon=True).start(), 'cron', hour='0,12', minute=0)
+    scheduler.add_job(lambda: threading.Thread(target=main, args=("단기",), daemon=True).start(),
+                      'cron', hour='0,2,4,6,8,10', minute=0)
+    scheduler.add_job(lambda: threading.Thread(target=main, args=("중기",), daemon=True).start(),
+                      'cron', hour='4,10,16,22', minute=0)
+    scheduler.add_job(lambda: threading.Thread(target=main, args=("장기",), daemon=True).start(),
+                      'cron', hour='6', minute=0)
 
-    # 🎓 학습 스케줄 (예측보다 더 자주, +10분 실행)
-    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start(), 'cron', hour='*', minute=10)
-    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start(), 'cron', hour='0,2,4,6,8,10,12,14,16,18,20,22', minute=10)
-    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start(), 'cron', hour='0,6,12,18', minute=10)
-
-    # ✅ 기타 스케줄
+    # ✅ 기타 루틴
     scheduler.add_job(lambda: __import__('logger').evaluate_predictions(None), 'cron', minute=20)
     scheduler.add_job(test_all_predictions, 'cron', minute=10)
     scheduler.add_job(trigger_run, 'interval', minutes=30)
@@ -212,7 +218,5 @@ def health_check():
 
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비"); sys.stdout.flush()
-    start_scheduler()
-    send_message("[시스템 시작] YOPO 서버가 정상적으로 실행되었습니다. 전략별 예측은 주기적으로 자동 작동합니다.")
-    print("✅ 서버 초기화 완료 (정기 예측 루프 포함)")
+    print("✅ 서버 초기화 완료 (정기 예측 루프 포함)"); sys.stdout.flush()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
