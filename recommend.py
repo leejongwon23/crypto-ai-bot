@@ -19,7 +19,8 @@ import train
 from model_weight_loader import model_exists
 
 MIN_CONFIDENCE = 0.70
-MIN_CONFIDENCE_OVERRIDE = 0.85
+REVERSAL_CONF_THRESHOLD = 0.45
+REVERSAL_SUCCESS_THRESHOLD = 0.6
 SUCCESS_RATE_THRESHOLD = 0.70
 FAILURE_TRIGGER_LIMIT = 3
 MIN_SCORE_THRESHOLD = 0.005
@@ -143,6 +144,22 @@ def run_prediction_loop(strategy, symbol_data_list):
 
             all_results.append(result)
 
+            # ✅ 반전 전략 조건 판단
+            conf = result.get("confidence", 0)
+            rate = result.get("rate", 0)
+            success_rate = get_model_success_rate(symbol, strategy, result.get("model", "ensemble"))
+            if conf < REVERSAL_CONF_THRESHOLD and rate < get_min_gain(symbol, strategy) and success_rate < REVERSAL_SUCCESS_THRESHOLD:
+                reversed_result = dict(result)
+                reversed_result["direction"] = "숏" if result["direction"] == "롱" else "롱"
+                reversed_result["confidence"] = 1 - conf
+                reversed_result["rate"] = get_min_gain(symbol, strategy) * 1.1
+                reversed_result["target"] = reversed_result["price"] * (1 + reversed_result["rate"]) if reversed_result["direction"] == "롱" else reversed_result["price"] * (1 - reversed_result["rate"])
+                reversed_result["stop"] = reversed_result["price"] * (1 - 0.02) if reversed_result["direction"] == "롱" else reversed_result["price"] * (1 + 0.02)
+                reversed_result["reason"] = "🔁 반전 전략: 낮은 신뢰도·낮은 수익률·낮은 성공률"
+                reversed_result["reversed"] = True
+                reversed_result["success_rate"] = success_rate
+                all_results.append(reversed_result)
+
         except Exception as e:
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
             min_gain = get_min_gain(symbol, strategy)
@@ -159,9 +176,8 @@ def run_prediction_loop(strategy, symbol_data_list):
         vol = r.get("volatility", 0)
         symbol = r.get("symbol")
         strategy = r.get("strategy")
-
-        success_rate = get_model_success_rate(symbol, strategy, model)
-        if conf < MIN_CONFIDENCE: continue
+        success_rate = r.get("success_rate", get_model_success_rate(symbol, strategy, model))
+        if conf < MIN_CONFIDENCE and not r.get("reversed"): continue
         if rate < get_min_gain(symbol, strategy): continue
         if success_rate < SUCCESS_RATE_THRESHOLD: continue
 
@@ -176,7 +192,7 @@ def run_prediction_loop(strategy, symbol_data_list):
 
     for res in final:
         try:
-            msg = format_message(res)
+            msg = ("[반전 추천] " if res.get("reversed") else "") + format_message(res)
             send_message(msg)
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
                 csv.writer(f).writerow([now_kst().isoformat(), res["symbol"], res["strategy"], msg])
