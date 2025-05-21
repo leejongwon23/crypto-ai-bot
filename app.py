@@ -6,7 +6,7 @@ from telegram_bot import send_message
 from predict_test import test_all_predictions
 from predict_trigger import run as trigger_run
 from data.utils import SYMBOLS, get_kline_by_strategy
-from src.healthcheck_yopo import generate_health_report  # ✅ 전략별 진단 라우트용
+from src.healthcheck_yopo import generate_health_report
 
 PERSIST_DIR = "/persistent"
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
@@ -43,13 +43,18 @@ def start_scheduler():
     print(">>> start_scheduler() 호출됨"); sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
 
+    # 📈 예측 스케줄
+    scheduler.add_job(lambda: threading.Thread(target=main, args=("단기",), daemon=True).start(), 'cron', hour='0,2,4,6,8,10,12,14,16,18,20,22', minute=0)
+    scheduler.add_job(lambda: threading.Thread(target=main, args=("중기",), daemon=True).start(), 'cron', hour='0,4,8,12,16,20', minute=0)
+    scheduler.add_job(lambda: threading.Thread(target=main, args=("장기",), daemon=True).start(), 'cron', hour='0,12', minute=0)
+
+    # 🎓 학습 스케줄 (예측보다 더 자주, +10분 실행)
+    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start(), 'cron', hour='*', minute=10)
+    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start(), 'cron', hour='0,2,4,6,8,10,12,14,16,18,20,22', minute=10)
+    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start(), 'cron', hour='0,6,12,18', minute=10)
+
+    # ✅ 기타 스케줄
     scheduler.add_job(lambda: __import__('logger').evaluate_predictions(None), 'cron', minute=20)
-    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start(), 'cron', hour='0,3,6,9,12,15,18,21', minute=30)
-    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start(), 'cron', hour='1,7,13,19', minute=30)
-    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start(), 'cron', hour='2,14', minute=30)
-    scheduler.add_job(lambda: threading.Thread(target=main, args=("단기",), daemon=True).start(), 'cron', hour='*', minute=0)
-    scheduler.add_job(lambda: threading.Thread(target=main, args=("중기",), daemon=True).start(), 'cron', hour='0,3,6,9,12,15,18,21', minute=0)
-    scheduler.add_job(lambda: threading.Thread(target=main, args=("장기",), daemon=True).start(), 'cron', hour='0,6,12,18', minute=0)
     scheduler.add_job(test_all_predictions, 'cron', minute=10)
     scheduler.add_job(trigger_run, 'interval', minutes=30)
 
