@@ -1,4 +1,3 @@
-# --- [필수 import] ---
 import datetime
 import os
 import csv
@@ -6,6 +5,7 @@ import threading
 import sys
 import time
 import pytz
+
 from telegram_bot import send_message
 from predict import predict
 from logger import (
@@ -33,7 +33,7 @@ FAILURE_LOG = "/persistent/logs/failure_count.csv"
 MESSAGE_LOG = "/persistent/logs/message_log.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
 
-# --- KST 기준 시간 함수 ---
+# --- 시간 함수 (서울 기준) ---
 def now_kst():
     return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
@@ -112,6 +112,7 @@ def run_prediction_loop(strategy, symbol_data_list):
                 log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(), 0.0, "unknown", False, "모델 없음", 0)
                 log_audit(symbol, strategy, None, "모델 없음")
                 continue
+
             if not should_predict(symbol, strategy):
                 continue
 
@@ -120,19 +121,24 @@ def run_prediction_loop(strategy, symbol_data_list):
             sys.stdout.flush()
 
             if not isinstance(result, dict) or result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
-                reason = result.get("reason", "예측 실패") if isinstance(result, dict) else "predict() 반환값 오류"
+                reason = result.get("reason", "예측 실패") if isinstance(result, dict) else "predict() 반환 오류"
                 log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(), 0.0, "unknown", False, reason, 0)
                 log_audit(symbol, strategy, result, reason)
                 continue
 
             result["volatility"] = volatility
             log_prediction(
-                symbol=result.get("symbol", symbol), strategy=result.get("strategy", strategy),
+                symbol=result.get("symbol", symbol),
+                strategy=result.get("strategy", strategy),
                 direction=result.get("direction", "예측실패"),
-                entry_price=result.get("price", 0), target_price=result.get("target", 0),
+                entry_price=result.get("price", 0),
+                target_price=result.get("target", 0),
                 timestamp=now_kst().isoformat(),
-                confidence=result.get("confidence", 0.0), model=result.get("model", "unknown"),
-                success=True, reason=result.get("reason", "예측 성공"), rate=result.get("rate", 0.0)
+                confidence=result.get("confidence", 0.0),
+                model=result.get("model", "unknown"),
+                success=True,
+                reason=result.get("reason", "예측 성공"),
+                rate=result.get("rate", 0.0)
             )
             log_audit(symbol, strategy, result, "예측 성공")
 
@@ -147,6 +153,7 @@ def run_prediction_loop(strategy, symbol_data_list):
                 failure_map[key] = 0
 
             all_results.append(result)
+
         except Exception as e:
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
             log_prediction(symbol, strategy, "예외", 0, 0, now_kst().isoformat(), 0.0, "unknown", False, f"예외 발생: {e}", 0)
@@ -154,6 +161,7 @@ def run_prediction_loop(strategy, symbol_data_list):
 
     save_failure_count(failure_map)
 
+    # --- 결과 필터링 ---
     filtered = []
     for r in all_results:
         conf = r.get("confidence", 0)
@@ -164,16 +172,19 @@ def run_prediction_loop(strategy, symbol_data_list):
         strategy = r.get("strategy")
 
         success_rate = get_model_success_rate(symbol, strategy, model)
-        if conf < 0.6 or rate < get_min_gain(symbol, strategy) or success_rate < 0.7:
-            continue
+        if conf < MIN_CONFIDENCE: continue
+        if rate < get_min_gain(symbol, strategy): continue
+        if success_rate < SUCCESS_RATE_THRESHOLD: continue
 
         score = (conf ** 1.5) * (rate ** 1.2) * (success_rate ** 1.2) * (1 + vol)
-        if score < MIN_SCORE_THRESHOLD:
-            continue
-        r["success_rate"], r["score"] = success_rate, score
+        if score < MIN_SCORE_THRESHOLD: continue
+
+        r["success_rate"] = success_rate
+        r["score"] = score
         filtered.append(r)
 
     final = sorted(filtered, key=lambda x: -x["score"])[:FINAL_SEND_LIMIT]
+
     for res in final:
         try:
             msg = format_message(res)
@@ -184,11 +195,12 @@ def run_prediction_loop(strategy, symbol_data_list):
         except Exception as e:
             print(f"[ERROR] 메시지 전송 실패: {e}")
 
-# 단일 실행 / 전체 루프
+# --- 단일 예측 실행 ---
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
     run_prediction_loop(strategy, [{"symbol": symbol}])
 
+# --- 전략별 전체 실행 ---
 def main(strategy=None):
     print(">>> [main] recommend.py 실행")
     if strategy:
