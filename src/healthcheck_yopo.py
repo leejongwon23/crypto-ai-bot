@@ -10,10 +10,7 @@ from predict import predict
 from train import LOG_DIR
 
 PRED_LOG = "/persistent/prediction_log.csv"
-FAILURE_LOG = "/persistent/logs/failure_count.csv"
-MESSAGE_LOG = "/persistent/logs/message_log.csv"
 LAST_TRAIN_LOG = os.path.join(LOG_DIR, "train_log.csv")
-
 STRATEGIES = ["단기", "중기", "장기"]
 KST = pytz.timezone("Asia/Seoul")
 
@@ -50,12 +47,16 @@ def generate_health_report():
     if isinstance(df, list): return "❌ 예측 로그 없음"
 
     report_lines = ["========================= YOPO 상태 진단 (KST 기준) ========================="]
+    
     for strategy in STRATEGIES:
         s_df = df[df["strategy"] == strategy]
+        s_df = s_df[s_df["status"].isin(["success", "fail", "pending", "failed"])]
         total = len(s_df)
         success = len(s_df[s_df["status"] == "success"])
         fail = len(s_df[s_df["status"] == "fail"])
         pending = len(s_df[s_df["status"] == "pending"])
+        failed = len(s_df[s_df["status"] == "failed"])
+
         avg_rate = round(s_df["rate"].mean() * 100, 2) if not s_df.empty else 0.0
         success_rate = round(success / total * 100, 1) if total else 0.0
         fail_rate = round(fail / total * 100, 1) if total else 0.0
@@ -65,6 +66,8 @@ def generate_health_report():
         recent_pred_time = s_df["timestamp"].max().astimezone(KST).strftime("%Y-%m-%d %H:%M") if not s_df.empty else "없음"
 
         model_count = sum(1 for s in SYMBOLS if model_exists(s, strategy))
+
+        # 학습 시각
         train_time = "-"
         if os.path.exists(LAST_TRAIN_LOG):
             try:
@@ -88,7 +91,7 @@ def generate_health_report():
             f"- 모델 수             : {model_count}개",
             f"- 최근 예측 시각       : {recent_pred_time} {'✅ 정상 작동' if '없음' not in recent_pred_time else '⚠️ 지연됨'}",
             f"- 최근 학습 시각       : {train_time} ✅ 정상 작동",
-            f"- 최근 예측 건수       : {total}건 (성공: {success} / 실패: {fail} / 대기중: {pending})",
+            f"- 최근 예측 건수       : {total}건 (성공: {success} / 실패: {fail} / 대기중: {pending} / 실패예측: {failed})",
             f"- 평균 수익률         : {avg_rate:.2f}%",
             f"- 평균 신뢰도         : {conf_trend}",
             f"- 성공률              : {success_rate:.1f}%",
@@ -100,16 +103,16 @@ def generate_health_report():
 
     report_lines.append("\n============================================================================")
     report_lines.append("\n🧠 종합 진단:")
-
+    
     for strategy in STRATEGIES:
-        if strategy not in df["strategy"].values:
+        s_df = df[(df["strategy"] == strategy) & df["status"].isin(["success", "fail", "pending", "failed"])]
+        if s_df.empty:
             report_lines.append(f"- [{strategy}] 예측 기록 없음")
-            continue
-        conf = df[df["strategy"] == strategy]["confidence"]
-        trend = format_trend(conf)
-        if "하락" in trend:
-            report_lines.append(f"- [{strategy}] 신뢰도 저하 및 예측 안정성 재점검 필요")
         else:
-            report_lines.append(f"- [{strategy}] 안정적이나 지속 관찰 필요")
+            trend = format_trend(s_df["confidence"])
+            if "하락" in trend:
+                report_lines.append(f"- [{strategy}] 신뢰도 저하 및 예측 안정성 재점검 필요")
+            else:
+                report_lines.append(f"- [{strategy}] 안정적이나 지속 관찰 필요")
 
     return "\n".join(report_lines)
