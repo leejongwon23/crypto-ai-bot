@@ -75,7 +75,7 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
     if df is None or len(df) < best_window + 10:
         print(f"❌ {symbol}-{strategy} 데이터 부족")
         return
-    df_feat = compute_features(df)
+    df_feat = compute_features(df, strategy=strategy)  # ✅ 전략별 feature 선택 반영
     if len(df_feat) < best_window + 1:
         print(f"❌ {symbol}-{strategy} feature 부족")
         return
@@ -116,7 +116,6 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
                 wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=best_window)
                 if wrong_data:
                     try:
-                        # 오답 중 대표 shape만 filtering
                         xb_all, yb_all = [], []
                         for xb, yb in wrong_data:
                             if xb.shape[1:] == (best_window, input_size):
@@ -196,5 +195,4 @@ def train_model_loop(strategy):
         except Exception as e:
             print(f"[학습 루프 실패] {symbol}-{strategy} → {e}")
 
-train_model = train_all_models  # ✅ app.py 연동을 위한 수정
-
+train_model = train_all_models  # ✅ app.py 연동용
