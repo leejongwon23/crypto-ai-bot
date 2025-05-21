@@ -73,7 +73,6 @@ def predict(symbol, strategy):
 
                     if not (0 <= signal <= 1):
                         continue
-                    # 중립 구간: 예측 무의미한 영역
                     if 0.48 <= signal <= 0.52:
                         continue
 
@@ -85,7 +84,7 @@ def predict(symbol, strategy):
                         loss_penalty = log_loss([1 if signal > 0.5 else 0], [np.clip(signal, 1e-6, 1 - 1e-6)], labels=[0, 1])
                         confidence_penalty = max(0.1, 1.0 - loss_penalty)
                     except Exception as e:
-                        confidence_penalty = confidence  # fallback
+                        confidence_penalty = confidence
                         print(f"[log_loss 예외] {symbol}-{strategy}-{model_type}: {e}")
 
                     final_conf = (confidence + confidence_penalty) / 2
