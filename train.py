@@ -196,4 +196,5 @@ def train_model_loop(strategy):
         except Exception as e:
             print(f"[학습 루프 실패] {symbol}-{strategy} → {e}")
 
-train_model = train_one_model
+train_model = train_all_models  # ✅ app.py 연동을 위한 수정
+
