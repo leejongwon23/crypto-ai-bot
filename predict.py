@@ -1,4 +1,3 @@
-# --- [필수 import] ---
 import os
 import torch
 import numpy as np
@@ -12,7 +11,6 @@ from model_weight_loader import get_model_weight
 from window_optimizer import find_best_window
 from logger import get_min_gain
 
-# --- 설정 ---
 DEVICE = torch.device("cpu")
 STOP_LOSS_PCT = 0.02
 MODEL_DIR = "/persistent/models"
@@ -21,12 +19,11 @@ def now_kst():
     return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def failed_result(symbol, strategy, reason):
-    dummy_price = 1.0
     return {
         "symbol": symbol, "strategy": strategy, "success": False,
         "reason": reason, "direction": "롱", "model": "ensemble",
-        "confidence": 0.0, "rate": 0.0, "price": dummy_price,
-        "target": dummy_price, "stop": dummy_price,
+        "confidence": 0.0, "rate": 0.0, "price": 1.0,
+        "target": 1.0, "stop": 1.0,
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
     }
 
@@ -41,15 +38,12 @@ def predict(symbol, strategy):
         if features is None or len(features) < best_window + 1:
             return failed_result(symbol, strategy, "feature 부족")
 
-        try:
-            X_raw = features.iloc[-best_window:].values
-            if X_raw.shape[0] != best_window:
-                raise ValueError("시퀀스 길이 부족")
-            X = np.expand_dims(X_raw, axis=0)
-            if len(X.shape) != 3:
-                raise ValueError("시퀀스 형상 오류")
-        except Exception as e:
-            return failed_result(symbol, strategy, f"입력 시퀀스 오류: {e}")
+        X_raw = features.iloc[-best_window:].values
+        if X_raw.shape[0] != best_window:
+            return failed_result(symbol, strategy, "시퀀스 길이 오류")
+        X = np.expand_dims(X_raw, axis=0)
+        if len(X.shape) != 3:
+            return failed_result(symbol, strategy, "시퀀스 형상 오류")
 
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
         input_size = X.shape[2]
@@ -74,21 +68,17 @@ def predict(symbol, strategy):
                     signal, confidence = model(X_tensor)
                     if signal is None or confidence is None:
                         continue
-                    signal = signal.squeeze().item()
-                    confidence = confidence.squeeze().item()
-                    if not (0.0 <= signal <= 1.0) or 0.495 <= signal <= 0.505:
+                    signal = float(signal.squeeze().item())
+                    confidence = float(confidence.squeeze().item())
+                    if not (0 <= signal <= 1) or 0.495 <= signal <= 0.505:
                         continue
 
                     direction = "롱" if signal > 0.5 else "숏"
                     raw_rate = abs(signal - 0.5) * 2
                     weight = get_model_weight(model_type, strategy)
 
-                    # --- 수익률 보정: confidence 기반 가중 적용 ---
-                    confidence_penalty = 1.0
                     try:
-                        fake_y = np.array([1 if signal > 0.5 else 0])
-                        fake_p = np.array([signal])
-                        loss_penalty = log_loss(fake_y, fake_p, labels=[0, 1])
+                        loss_penalty = log_loss([1 if signal > 0.5 else 0], [signal], labels=[0, 1])
                         confidence_penalty = max(0.1, 1.0 - loss_penalty)
                     except:
                         confidence_penalty = confidence
@@ -136,7 +126,7 @@ def predict(symbol, strategy):
         if final_direction == "롱":
             if rsi < 30: reason.append("RSI 과매도")
             if macd > 0: reason.append("MACD 상승")
-        if final_direction == "숏":
+        else:
             if rsi > 70: reason.append("RSI 과매수")
             if macd < 0: reason.append("MACD 하락")
         if boll > 1: reason.append("볼린저 상단")
