@@ -50,20 +50,23 @@ def generate_health_report():
 
     for strategy in STRATEGIES:
         s_df = df[df["strategy"] == strategy]
-        s_df = s_df[s_df["status"].isin(["success", "fail", "pending", "failed"])]
-        total = len(s_df)
-        success = len(s_df[s_df["status"] == "success"])
-        fail = len(s_df[s_df["status"] == "fail"])
-        pending = len(s_df[s_df["status"] == "pending"])
-        failed = len(s_df[s_df["status"] == "failed"])
+        pred_df = s_df[s_df["status"].isin(["success", "fail", "pending", "failed"])]
+        total = len(pred_df)
+        success = len(pred_df[pred_df["status"] == "success"])
+        fail = len(pred_df[pred_df["status"] == "fail"])
+        pending = len(pred_df[pred_df["status"] == "pending"])
+        failed = len(pred_df[pred_df["status"] == "failed"])
 
-        avg_rate = round(s_df["rate"].mean() * 100, 2) if not s_df.empty else 0.0
+        avg_rate = round(pred_df["rate"].mean() * 100, 2) if not pred_df.empty else 0.0
         success_rate = round(success / total * 100, 1) if total else 0.0
         fail_rate = round(fail / total * 100, 1) if total else 0.0
         pending_rate = round(pending / total * 100, 1) if total else 0.0
-        conf_trend = format_trend(s_df["confidence"]) if not s_df.empty else "데이터 부족"
+        conf_trend = format_trend(pred_df["confidence"]) if not pred_df.empty else "데이터 부족"
 
-        recent_pred_time = s_df["timestamp"].max().astimezone(KST).strftime("%Y-%m-%d %H:%M") if not s_df.empty else "없음"
+        recent_pred_time = (
+            s_df["timestamp"].max().astimezone(KST).strftime("%Y-%m-%d %H:%M")
+            if not s_df.empty else "없음"
+        )
         model_count = sum(1 for s in SYMBOLS if model_exists(s, strategy))
 
         train_time = "-"
@@ -76,18 +79,16 @@ def generate_health_report():
             except:
                 pass
 
-        # 상태 요약
-        if "하락" in conf_trend:
-            summary = "⚠️ 신뢰도 감소, 예측 안정성 점검 필요"
-        elif "없음" in recent_pred_time:
-            summary = "⚠️ 예측 지연 또는 없음"
-        else:
-            summary = "✅ 전반적으로 안정"
+        summary = (
+            "⚠️ 신뢰도 감소, 예측 안정성 점검 필요" if "하락" in conf_trend
+            else "⚠️ 예측 지연 또는 없음" if recent_pred_time == "없음"
+            else "✅ 전반적으로 안정"
+        )
 
         report_lines += [
             f"\n📌 {strategy} 전략",
             f"- 모델 수             : {model_count}개",
-            f"- 최근 예측 시각       : {recent_pred_time} {'✅ 정상 작동' if '없음' not in recent_pred_time else '⚠️ 지연됨'}",
+            f"- 최근 예측 시각       : {recent_pred_time} {'✅ 정상 작동' if recent_pred_time != '없음' else '⚠️ 지연됨'}",
             f"- 최근 학습 시각       : {train_time} ✅ 정상 작동",
             f"- 최근 예측 건수       : {total}건 (성공: {success} / 실패: {fail} / 대기중: {pending} / 실패예측: {failed})",
             f"- 평균 수익률         : {avg_rate:.2f}%",
