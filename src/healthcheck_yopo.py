@@ -1,16 +1,13 @@
 import os
 import datetime
 import pytz
-import csv
 import pandas as pd
-from logger import get_min_gain
-from model_weight_loader import model_exists
+
 from data.utils import SYMBOLS
-from predict import predict
-from train import LOG_DIR
+from model_weight_loader import model_exists
 
 PRED_LOG = "/persistent/prediction_log.csv"
-LAST_TRAIN_LOG = os.path.join(LOG_DIR, "train_log.csv")
+LAST_TRAIN_LOG = "/persistent/logs/train_log.csv"
 STRATEGIES = ["단기", "중기", "장기"]
 KST = pytz.timezone("Asia/Seoul")
 
@@ -115,7 +112,6 @@ def generate_health_report():
             f"- 상태 요약           : {summary}"
         ]
 
-    # ✅ 종합 진단 요약
     report_lines.append("")
     report_lines.append("📊 종합 진단 요약:")
 
