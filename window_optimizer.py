@@ -27,6 +27,10 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         return 20
 
     df_feat = compute_features(df)
+    if df_feat is None or df_feat.empty or len(df_feat) < max(window_list) + 1:
+        print(f"[경고] {symbol}-{strategy} → feature 부족으로 기본값 반환")
+        return 20
+
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(df_feat.values)
     feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
@@ -47,6 +51,8 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         y_tensor = torch.tensor(y, dtype=torch.float32)
         val_len = int(len(X_tensor) * 0.2)
         train_len = len(X_tensor) - val_len
+        if train_len <= 0 or val_len <= 0:
+            continue
         train_X = X_tensor[:train_len]
         train_y = y_tensor[:train_len]
         val_X = X_tensor[train_len:]
@@ -86,13 +92,18 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             print(f"[오류] window={window} 평가 실패 → {e}")
             continue
 
-    save_txt = f"/persistent/logs/best_window_{symbol}_{strategy}.txt"
-    save_json = f"/persistent/logs/best_window_{symbol}_{strategy}.json"
+    save_dir = "/persistent/logs"
+    os.makedirs(save_dir, exist_ok=True)
+    save_txt = os.path.join(save_dir, f"best_window_{symbol}_{strategy}.txt")
+    save_json = os.path.join(save_dir, f"best_window_{symbol}_{strategy}.json")
 
-    with open(save_txt, "w") as f:
-        f.write(str(best_window))
-    with open(save_json, "w") as f:
-        json.dump(best_result or {"window": best_window, "score": 0}, f, indent=2)
+    try:
+        with open(save_txt, "w") as f:
+            f.write(str(best_window))
+        with open(save_json, "w") as f:
+            json.dump(best_result or {"window": best_window, "score": 0}, f, indent=2)
+    except Exception as e:
+        print(f"[저장 오류] {symbol}-{strategy}: {e}")
 
     print(f"[최적 WINDOW] {symbol}-{strategy} → {best_window} (score: {best_score:.4f})")
     return best_window
