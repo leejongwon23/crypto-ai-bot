@@ -1,3 +1,5 @@
+# ✅ Render 캐시 강제 무효화용 — 디버그 추적용 주석
+
 import os, time, threading, gc, json
 import torch
 import torch.nn as nn
@@ -17,9 +19,8 @@ import logger
 from logger import get_min_gain, get_strategy_fail_rate, get_strategy_eval_count
 from window_optimizer import find_best_window
 
-print("✅ 현재 실행 중인 train.py는 최신 버전입니다.")  # ✅ 로그 확인용 추가
+print("✅ 현재 실행 중인 train.py는 최신 버전입니다.")
 print("🧪 compute_features 정의 확인:", compute_features.__code__.co_varnames)
-
 
 DEVICE = torch.device("cpu")
 PERSIST_DIR = "/persistent"
@@ -32,8 +33,6 @@ os.makedirs(WRONG_DIR, exist_ok=True)
 
 def now_kst():
     return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-
-# ... (나머지 코드는 너가 준 것과 100% 동일 — 수정 없음)
 
 def create_dataset(features, window):
     X, y = [], []
@@ -75,16 +74,24 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
     print(f"🗘 체크포인트 저장됨: {path}")
 
 def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3, repeat=4, repeat_wrong=4):
-    print(f"[train] {symbol}-{strategy} 전체 모델 학습 시작")
+    print(f"[train] 🔄 {symbol}-{strategy} 학습 시작")
     best_window = find_best_window(symbol, strategy)
+    print(f"[DEBUG] {symbol}-{strategy} best_window = {best_window}")
+
     df = get_kline_by_strategy(symbol, strategy)
-    if df is None or len(df) < best_window + 10:
-        print(f"❌ {symbol}-{strategy} 데이터 부족")
+    if df is None:
+        print(f"❌ {symbol}-{strategy} df is None → 데이터 못 받음")
         return
-    df_feat = compute_features(symbol, df, strategy)  # ✅ 오류 수정 완료
-    if len(df_feat) < best_window + 1:
-        print(f"❌ {symbol}-{strategy} feature 부족")
+    print(f"[DEBUG] {symbol}-{strategy} df length = {len(df)}")
+    if len(df) < best_window + 10:
+        print(f"❌ {symbol}-{strategy} 데이터 부족 → {len(df)} < {best_window + 10}")
         return
+
+    df_feat = compute_features(symbol, df, strategy)
+    if df_feat is None or len(df_feat) < best_window + 1:
+        print(f"❌ {symbol}-{strategy} feature 부족 → {len(df_feat)} < {best_window + 1}")
+        return
+
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(df_feat.values)
     feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
@@ -185,6 +192,7 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         save_feature_importance(importances, symbol, strategy, best_model_type)
     else:
         print(f"❗ 모델 저장 실패: {symbol}-{strategy} 모든 모델 평가 실패")
+        print(f"[DEBUG] 평가 점수 없음: scores={scores}, models={models}")
 
 def train_all_models():
     for strategy in ["단기", "중기", "장기"]:
@@ -201,4 +209,4 @@ def train_model_loop(strategy):
         except Exception as e:
             print(f"[학습 루프 실패] {symbol}-{strategy} → {e}")
 
-train_model = train_all_models  # ✅ app.py 연동용
+train_model = train_all_models
