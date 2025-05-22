@@ -75,7 +75,7 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
     if df is None or len(df) < best_window + 10:
         print(f"❌ {symbol}-{strategy} 데이터 부족")
         return
-    df_feat = compute_features(df, strategy=strategy)  # ✅ 전략별 feature 선택 반영
+    df_feat = compute_features(df, strategy)
     if len(df_feat) < best_window + 1:
         print(f"❌ {symbol}-{strategy} feature 부족")
         return
