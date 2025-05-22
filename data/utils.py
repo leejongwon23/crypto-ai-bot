@@ -112,7 +112,8 @@ def get_realtime_prices():
     except:
         return {}
 
-def compute_features(df: pd.DataFrame, strategy: str) -> pd.DataFrame:
+# ✅ 수정됨: symbol 인자 추가
+def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFrame:
     df = df.copy()
     df['ma5'] = df['close'].rolling(window=5).mean()
     df['ma20'] = df['close'].rolling(window=20).mean()
@@ -130,7 +131,7 @@ def compute_features(df: pd.DataFrame, strategy: str) -> pd.DataFrame:
     df['volatility'] = df['close'].pct_change().rolling(window=20).std()
     df['ema10'] = df['close'].ewm(span=10, adjust=False).mean()
     df['trend_slope'] = df['ema10'].diff()
-    df['percent_diff'] = (df['close'] - df['ma20']) / df['ma20']
+    df['percent_diff'] = (df['close'] - df['ma20']) / (df['ma20'] + 1e-6)
     df['volume_delta'] = df['volume'].diff()
 
     obv = [0]
@@ -149,7 +150,7 @@ def compute_features(df: pd.DataFrame, strategy: str) -> pd.DataFrame:
 
     min_rsi = df['rsi'].rolling(14).min()
     max_rsi = df['rsi'].rolling(14).max()
-    df['stoch_rsi'] = (df['rsi'] - min_rsi) / (max_rsi - min_rsi)
+    df['stoch_rsi'] = (df['rsi'] - min_rsi) / (max_rsi - min_rsi + 1e-6)
 
     df['btc_dominance'] = get_btc_dominance()
 
@@ -157,7 +158,7 @@ def compute_features(df: pd.DataFrame, strategy: str) -> pd.DataFrame:
         plus_dm = df['high'].diff()
         minus_dm = df['low'].diff()
         tr = (df['high'] - df['low']).rolling(14).mean()
-        dx = (abs(plus_dm - minus_dm) / tr) * 100
+        dx = (abs(plus_dm - minus_dm) / (tr + 1e-6)) * 100
         df['adx'] = dx.rolling(14).mean()
 
         highest = df['high'].rolling(14).max()
