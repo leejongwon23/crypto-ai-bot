@@ -33,7 +33,6 @@ def format_trend(conf_series):
     avg_conf = conf_series.tail(3).mean()
     prev_conf = conf_series.tail(6).head(3).mean()
     pre_prev_conf = conf_series.tail(9).head(3).mean()
-
     trend = f"{pre_prev_conf:.2f} → {prev_conf:.2f} → {avg_conf:.2f}"
     if avg_conf < prev_conf and prev_conf < pre_prev_conf:
         return trend + " ⚠️ 하락 추세"
@@ -41,6 +40,20 @@ def format_trend(conf_series):
         return trend + " ⚠️ 감소 조짐"
     else:
         return trend + " ✅ 안정적"
+
+def check_volatility_trigger_recent(df):
+    try:
+        recent = df[df["reason"].str.contains("반전|트리거", na=False)]
+        if recent.empty:
+            return "❌ 최근 트리거 예측 없음"
+        recent_time = recent["timestamp"].max().tz_localize(None)
+        elapsed = (now_kst() - recent_time).total_seconds() / 60
+        if elapsed <= 120:
+            return f"✅ 최근 트리거 예측 작동 (약 {int(elapsed)}분 전)"
+        else:
+            return f"⚠️ 트리거 예측 작동 이력 있지만 지연됨 (약 {int(elapsed)}분 전)"
+    except:
+        return "❌ 트리거 상태 확인 실패"
 
 def generate_health_report():
     df = parse_prediction_log()
@@ -100,6 +113,7 @@ def generate_health_report():
             f"- 상태 요약           : {summary}"
         ]
 
+    # ✅ 트리거 상태 진단
     report_lines.append("\n============================================================================")
     report_lines.append("\n🧠 종합 진단:")
 
@@ -113,5 +127,8 @@ def generate_health_report():
                 report_lines.append(f"- [{strategy}] 신뢰도 저하 및 예측 안정성 재점검 필요")
             else:
                 report_lines.append(f"- [{strategy}] 안정적이나 지속 관찰 필요")
+
+    trigger_status = check_volatility_trigger_recent(df)
+    report_lines.append(f"- [변동성 예측] {trigger_status}")
 
     return "\n".join(report_lines)
