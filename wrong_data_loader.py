@@ -28,7 +28,7 @@ def load_wrong_prediction_data(symbol, strategy, input_size, window=30):
     if df is None:
         return None
 
-    df_feat = compute_features(df)
+    df_feat = compute_features(symbol, df, strategy)  # ✅ 수정 완료
     if len(df_feat) < window + 1:
         return None
 
@@ -43,7 +43,6 @@ def load_wrong_prediction_data(symbol, strategy, input_size, window=30):
         if any(len(row.values()) != len(feature_dicts[0].values()) for row in x_seq):
             continue
 
-        # 🚩 예측 실패 row 목록에 포함되는지 확인
         for fail_row, direction in rows:
             try:
                 entry_price = float(fail_row[4])
