@@ -84,6 +84,18 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     except Exception as e:
         print(f"[오류] log_prediction 실패: {e}")
 
+def log_training_result(symbol, strategy, model_name, acc, f1, loss):
+    row = {
+        "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol": symbol, "strategy": strategy, "model": model_name,
+        "accuracy": float(acc), "f1_score": float(f1), "loss": float(loss)
+    }
+    try:
+        pd.DataFrame([row]).to_csv(LOG_FILE, mode='a', header=not os.path.exists(LOG_FILE), index=False, encoding="utf-8-sig")
+        print(f"[LOG] Training result logged for {symbol} - {strategy} - {model_name}")
+    except Exception as e:
+        print(f"[오류] 학습 로그 저장 실패: {e}")
+
 def evaluate_predictions(get_price_fn):
     if not os.path.exists(PREDICTION_LOG): return
     try:
@@ -212,15 +224,3 @@ def print_prediction_stats():
         return "\n".join(summary)
     except Exception as e:
         return f"[오류] 통계 출력 실패: {e}"
-
-def log_training_result(symbol, strategy, model_name, acc, f1, loss):
-    row = {
-        "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-        "symbol": symbol, "strategy": strategy, "model": model_name,
-        "accuracy": float(acc), "f1_score": float(f1), "loss": float(loss)
-    }
-    try:
-        pd.DataFrame([row]).to_csv(LOG_FILE, mode='a', header=not os.path.exists(LOG_FILE), index=False, encoding="utf-8-sig")
-        print(f"[LOG] Training result logged for {symbol} - {strategy} - {model_name}")
-    except Exception as e:
-        print(f"[오류] 학습 로그 저장 실패: {e}")
