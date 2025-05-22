@@ -218,5 +218,7 @@ def health_check():
 
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비"); sys.stdout.flush()
+    threading.Thread(target=start_scheduler, daemon=True).start()
+    threading.Thread(target=lambda: send_message("[시스템 시작] YOPO 서버가 정상적으로 실행되었습니다."), daemon=True).start()
     print("✅ 서버 초기화 완료 (정기 예측 루프 포함)"); sys.stdout.flush()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
