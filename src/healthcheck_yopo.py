@@ -4,7 +4,7 @@ import pytz
 import pandas as pd
 
 from data.utils import SYMBOLS
-from model_weight_loader import model_exists
+from model_weight_loader import model_exists, count_models_per_strategy
 
 PRED_LOG = "/persistent/prediction_log.csv"
 LAST_TRAIN_LOG = "/persistent/logs/train_log.csv"
@@ -57,6 +57,7 @@ def generate_health_report():
     if isinstance(df, list):
         return "❌ 예측 로그 없음"
 
+    model_counts = count_models_per_strategy()
     report_lines = ["🧠 YOPO 시스템 상태 점검 리포트", f"[업데이트: {now_kst().strftime('%Y-%m-%d %H:%M:%S')} KST]"]
 
     for strategy in STRATEGIES:
@@ -78,9 +79,9 @@ def generate_health_report():
             s_df["timestamp"].max().astimezone(KST).strftime("%Y-%m-%d %H:%M")
             if not s_df.empty else "없음"
         )
-        model_count = sum(1 for s in SYMBOLS if model_exists(s, strategy))
+        model_count = model_counts.get(strategy, 0)
 
-        train_time = "-"
+        train_time = "없음"
         if os.path.exists(LAST_TRAIN_LOG):
             try:
                 tdf = pd.read_csv(LAST_TRAIN_LOG, encoding="utf-8-sig")
@@ -101,7 +102,7 @@ def generate_health_report():
             f"📌 {strategy} 전략",
             f"- 모델 수             : {model_count}개",
             f"- 최근 예측 시각       : {recent_pred_time} {'✅ 정상 작동' if recent_pred_time != '없음' else '⚠️ 지연됨'}",
-            f"- 최근 학습 시각       : {train_time} ✅ 정상 작동",
+            f"- 최근 학습 시각       : {train_time} {'✅ 정상 작동' if train_time != '없음' else '⚠️ 없음'}",
             f"- 최근 예측 건수       : {total}건 (성공: {success} / 실패: {fail} / 대기중: {pending} / 실패예측: {failed})",
             f"- 평균 수익률         : {avg_rate:.2f}%",
             f"- 평균 신뢰도         : {conf_trend}",
