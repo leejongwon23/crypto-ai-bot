@@ -3,7 +3,10 @@ requests
 pandas
 numpy
 scikit-learn
-torch
 python-telegram-bot==13.15
 APScheduler==3.6.3
 pytz>=2023.3
+
+# ✅ torch CPU 전용 버전 명시
+torch==2.1.2+cpu
+-f https://download.pytorch.org/whl/cpu/torch_stable.html
