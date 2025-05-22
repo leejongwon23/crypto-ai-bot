@@ -1,3 +1,5 @@
+# ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
+
 import os
 import csv
 import torch
@@ -28,7 +30,7 @@ def load_wrong_prediction_data(symbol, strategy, input_size, window=30):
     if df is None:
         return None
 
-    df_feat = compute_features(symbol, df, strategy)  # ✅ 수정 완료
+    df_feat = compute_features(symbol, df, strategy)
     if len(df_feat) < window + 1:
         return None
 
