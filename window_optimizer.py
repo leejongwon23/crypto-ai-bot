@@ -1,3 +1,5 @@
+# ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
+
 import torch
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
@@ -26,7 +28,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         print(f"[경고] {symbol}-{strategy} → 데이터 부족으로 기본값 반환")
         return 20
 
-    df_feat = compute_features(df)
+    df_feat = compute_features(symbol, df, strategy)  # ✅ 수정됨
     if df_feat is None or df_feat.empty or len(df_feat) < max(window_list) + 1:
         print(f"[경고] {symbol}-{strategy} → feature 부족으로 기본값 반환")
         return 20
