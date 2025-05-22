@@ -18,6 +18,8 @@ from logger import get_min_gain, get_strategy_fail_rate, get_strategy_eval_count
 from window_optimizer import find_best_window
 
 print("✅ 현재 실행 중인 train.py는 최신 버전입니다.")  # ✅ 로그 확인용 추가
+print("🧪 compute_features 정의 확인:", compute_features.__code__.co_varnames)
+
 
 DEVICE = torch.device("cpu")
 PERSIST_DIR = "/persistent"
