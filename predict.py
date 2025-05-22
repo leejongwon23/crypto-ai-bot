@@ -43,7 +43,7 @@ def predict(symbol, strategy):
         if df is None or len(df) < best_window + 1:
             return failed_result(symbol, strategy, "데이터 부족")
 
-        features = compute_features(symbol, df, strategy)  # ✅ 수정된 부분
+        features = compute_features(symbol, df, strategy)
         features = features.dropna()
         if features is None or len(features) < best_window + 1:
             return failed_result(symbol, strategy, "feature 부족")
