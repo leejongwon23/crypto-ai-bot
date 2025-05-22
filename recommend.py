@@ -13,7 +13,7 @@ from logger import (
     get_actual_success_rate, get_strategy_eval_count,
     get_min_gain
 )
-from data.utils import SYMBOLS, get_realtime_prices, get_kline_by_strategy
+from data.utils import SYMBOLS, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
 from model_weight_loader import model_exists
@@ -25,7 +25,8 @@ SUCCESS_RATE_THRESHOLD = 0.70
 FAILURE_TRIGGER_LIMIT = 3
 MIN_SCORE_THRESHOLD = 0.005
 FINAL_SEND_LIMIT = 5
-VOLATILITY_THRESHOLD = 0.003
+
+STRATEGY_VOLATILITY = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
 
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
 FAILURE_LOG = "/persistent/logs/failure_count.csv"
@@ -63,8 +64,8 @@ def log_audit(symbol, strategy, result, status):
         if write_header: writer.writeheader()
         writer.writerow(row)
 
-def get_symbols_by_volatility(strategy, threshold=VOLATILITY_THRESHOLD):
-    threshold *= 1.2
+def get_symbols_by_volatility(strategy):
+    threshold = STRATEGY_VOLATILITY.get(strategy, 0.003) * 1.2
     selected = []
     for symbol in SYMBOLS:
         try:
