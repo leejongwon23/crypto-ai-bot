@@ -19,14 +19,12 @@ MESSAGE_LOG = os.path.join(LOG_DIR, "message_log.csv")
 FAILURE_COUNT_LOG = os.path.join(LOG_DIR, "failure_count.csv")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-VOLATILITY_THRESHOLD = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
-
 def now_kst():
     return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def get_symbols_by_volatility(strategy):
-    if strategy not in VOLATILITY_THRESHOLD: return []
-    threshold = VOLATILITY_THRESHOLD[strategy]
+    threshold_map = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
+    threshold = threshold_map.get(strategy, 0.003)
     selected = []
     for symbol in SYMBOLS:
         try:
@@ -43,21 +41,23 @@ def start_scheduler():
     print(">>> start_scheduler() 호출됨"); sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
 
-    # 🎓 학습 스케줄 (예측보다 30분 앞서 실행)
-    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("단기",), daemon=True).start(),
-                      'cron', hour='23,1,3,5,7,9', minute=30)
-    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("중기",), daemon=True).start(),
-                      'cron', hour='3,9,15,21', minute=30)
-    scheduler.add_job(lambda: threading.Thread(target=train.train_model_loop, args=("장기",), daemon=True).start(),
-                      'cron', hour='5', minute=30)
+    # 🎓 학습 스케줄 (예측보다 30~60분 앞서 실행)
+    for h, m, s in [
+        (7, 0, "단기"), (9, 30, "단기"), (12, 0, "단기"), (14, 30, "단기"), (17, 0, "단기"),
+        (7, 0, "중기"), (15, 0, "중기"), (21, 0, "중기"),
+        (6, 0, "장기")
+    ]:
+        scheduler.add_job(lambda s=s: threading.Thread(target=train.train_model_loop, args=(s,), daemon=True).start(),
+                          'cron', hour=h, minute=m)
 
     # 📈 예측 스케줄
-    scheduler.add_job(lambda: threading.Thread(target=main, args=("단기",), daemon=True).start(),
-                      'cron', hour='0,2,4,6,8,10', minute=0)
-    scheduler.add_job(lambda: threading.Thread(target=main, args=("중기",), daemon=True).start(),
-                      'cron', hour='4,10,16,22', minute=0)
-    scheduler.add_job(lambda: threading.Thread(target=main, args=("장기",), daemon=True).start(),
-                      'cron', hour='6', minute=0)
+    for h, m, s in [
+        (7, 30, "단기"), (10, 0, "단기"), (12, 30, "단기"), (15, 0, "단기"), (17, 30, "단기"),
+        (8, 0, "중기"), (16, 0, "중기"), (22, 0, "중기"),
+        (7, 0, "장기")
+    ]:
+        scheduler.add_job(lambda s=s: threading.Thread(target=main, args=(s,), daemon=True).start(),
+                          'cron', hour=h, minute=m)
 
     # ✅ 기타 루틴
     scheduler.add_job(lambda: __import__('logger').evaluate_predictions(None), 'cron', minute=20)
@@ -214,7 +214,7 @@ def health_check():
             summary.append(f"- {s} 전략 성공률: {r*100:.1f}%")
     except:
         summary.append("- 전략별 성공률 확인 실패")
-    return f"<div style='font-family:monospace; line-height:1.6;'>" + "<br>".join(results + [""] + summary) + "</div>"
+    return f"<div style='font-family:monospace; line-height:1.6;'>" + "<br> ".join(results + [""] + summary) + "</div>"
 
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비"); sys.stdout.flush()
