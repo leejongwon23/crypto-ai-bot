@@ -3,6 +3,8 @@ import torch
 import numpy as np
 import datetime
 import pytz
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import log_loss
 
 from data.utils import get_kline_by_strategy, compute_features
@@ -41,10 +43,15 @@ def predict(symbol, strategy):
         if df is None or len(df) < best_window + 1:
             return failed_result(symbol, strategy, "데이터 부족")
 
-        features = compute_features(df)
-        features = features.dropna()  # ✅ NaN 제거 필수
+        features = compute_features(df, strategy)
+        features = features.dropna()
         if features is None or len(features) < best_window + 1:
             return failed_result(symbol, strategy, "feature 부족")
+
+        # ✅ 스케일링 적용 (train.py와 일치)
+        scaler = MinMaxScaler()
+        scaled = scaler.fit_transform(features.values)
+        features = pd.DataFrame(scaled, columns=features.columns)
 
         X_raw = features.iloc[-best_window:].values
         if X_raw.shape[0] != best_window:
