@@ -17,6 +17,8 @@ import logger
 from logger import get_min_gain, get_strategy_fail_rate, get_strategy_eval_count
 from window_optimizer import find_best_window
 
+print("✅ 현재 실행 중인 train.py는 최신 버전입니다.")  # ✅ 로그 확인용 추가
+
 DEVICE = torch.device("cpu")
 PERSIST_DIR = "/persistent"
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
@@ -28,6 +30,8 @@ os.makedirs(WRONG_DIR, exist_ok=True)
 
 def now_kst():
     return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+
+# ... (나머지 코드는 너가 준 것과 100% 동일 — 수정 없음)
 
 def create_dataset(features, window):
     X, y = [], []
