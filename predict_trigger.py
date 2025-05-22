@@ -22,56 +22,53 @@ TRIGGER_COOLDOWN = {
     "장기": 21600     # 6시간
 }
 
-# ✅ 전략별 전조 조건 점검 함수
+# ✅ 전조 조건 점검 함수
 def check_pre_burst_conditions(df, strategy):
     try:
+        # 거래량 증가
         vol_increasing = df['volume'].iloc[-3] < df['volume'].iloc[-2] < df['volume'].iloc[-1]
+        # 가격 안정성
         price_range = df['close'].iloc[-6:]
         stable_price = (price_range.max() - price_range.min()) / price_range.mean() < 0.005
-
+        # EMA 압축
         ema_5 = df['close'].ewm(span=5).mean().iloc[-1]
         ema_15 = df['close'].ewm(span=15).mean().iloc[-1]
         ema_60 = df['close'].ewm(span=60).mean().iloc[-1]
-        ma_pack = max(ema_5, ema_15, ema_60) - min(ema_5, ema_15, ema_60)
-        ema_compressed = ma_pack / df['close'].iloc[-1] < 0.003
-
+        ema_pack = max(ema_5, ema_15, ema_60) - min(ema_5, ema_15, ema_60)
+        ema_compressed = ema_pack / df['close'].iloc[-1] < 0.003
+        # 볼린저 밴드 확장
         bb_std = df['close'].rolling(window=20).std()
         expanding_band = bb_std.iloc[-2] < bb_std.iloc[-1] and bb_std.iloc[-1] > 0.002
 
         if strategy == "단기":
-            conditions = [vol_increasing, stable_price, ema_compressed, expanding_band]
-            return sum(conditions) >= 2
+            return sum([vol_increasing, stable_price, ema_compressed, expanding_band]) >= 2
         elif strategy == "중기":
-            conditions = [stable_price, ema_compressed, expanding_band]
-            return sum(conditions) >= 2
+            return sum([stable_price, ema_compressed, expanding_band]) >= 2
         elif strategy == "장기":
-            conditions = [ema_compressed, expanding_band]
-            return sum(conditions) >= 1
+            return sum([ema_compressed, expanding_band]) >= 1
         else:
             return False
     except Exception:
         traceback.print_exc()
         return False
 
-# ✅ 전략별 신뢰도 조건 검사
+# ✅ 전략별 모델 신뢰도 검사
 def check_model_quality(symbol, strategy):
     try:
-        success_rate = get_model_success_rate(symbol, strategy, "ensemble")
-        return success_rate >= 0.6
+        return get_model_success_rate(symbol, strategy, "ensemble") >= 0.6
     except:
         return False
 
-# ✅ 메인 트리거 실행
+# ✅ 전조 패턴 기반 예측 트리거 실행
 def run():
     print(f"[트리거 실행] 전조 패턴 감지 시작: {now_kst().isoformat()}")
     for symbol in SYMBOLS:
-        for strategy in ['단기', '중기', '장기']:
+        for strategy in ["단기", "중기", "장기"]:
             try:
                 key = f"{symbol}_{strategy}"
                 now = time.time()
                 cooldown = TRIGGER_COOLDOWN.get(strategy, 3600)
-                last_time = last_trigger_time.get(key, 0)
-                if now - last_time < cooldown:
+                if now - last_trigger_time.get(key, 0) < cooldown:
                     continue
 
                 df = get_kline_by_strategy(symbol, strategy)
