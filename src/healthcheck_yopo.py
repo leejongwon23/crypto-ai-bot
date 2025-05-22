@@ -57,9 +57,10 @@ def check_volatility_trigger_recent(df):
 
 def generate_health_report():
     df = parse_prediction_log()
-    if isinstance(df, list): return "❌ 예측 로그 없음"
+    if isinstance(df, list):
+        return "❌ 예측 로그 없음"
 
-    report_lines = ["========================= YOPO 상태 진단 (KST 기준) ========================="]
+    report_lines = ["🧠 YOPO 시스템 상태 점검 리포트", f"[업데이트: {now_kst().strftime('%Y-%m-%d %H:%M:%S')} KST]"]
 
     for strategy in STRATEGIES:
         s_df = df[df["strategy"] == strategy]
@@ -99,7 +100,8 @@ def generate_health_report():
         )
 
         report_lines += [
-            f"\n📌 {strategy} 전략",
+            "",
+            f"📌 {strategy} 전략",
             f"- 모델 수             : {model_count}개",
             f"- 최근 예측 시각       : {recent_pred_time} {'✅ 정상 작동' if recent_pred_time != '없음' else '⚠️ 지연됨'}",
             f"- 최근 학습 시각       : {train_time} ✅ 정상 작동",
@@ -113,9 +115,9 @@ def generate_health_report():
             f"- 상태 요약           : {summary}"
         ]
 
-    # ✅ 트리거 상태 진단
-    report_lines.append("\n============================================================================")
-    report_lines.append("\n🧠 종합 진단:")
+    # ✅ 종합 진단 요약
+    report_lines.append("")
+    report_lines.append("📊 종합 진단 요약:")
 
     for strategy in STRATEGIES:
         s_df = df[(df["strategy"] == strategy) & df["status"].isin(["success", "fail", "pending", "failed"])]
@@ -124,9 +126,11 @@ def generate_health_report():
         else:
             trend = format_trend(s_df["confidence"])
             if "하락" in trend:
-                report_lines.append(f"- [{strategy}] 신뢰도 저하 및 예측 안정성 재점검 필요")
+                report_lines.append(f"- [{strategy}] 신뢰도 저하 → 예측 안정성 점검 필요")
+            elif "데이터 부족" in trend:
+                report_lines.append(f"- [{strategy}] 예측 수 부족 → 점검 필요")
             else:
-                report_lines.append(f"- [{strategy}] 안정적이나 지속 관찰 필요")
+                report_lines.append(f"- [{strategy}] 예측 상태 안정")
 
     trigger_status = check_volatility_trigger_recent(df)
     report_lines.append(f"- [변동성 예측] {trigger_status}")
