@@ -1,3 +1,4 @@
+# YOPO 서버 진입점 - 전체 통합 구조 포함
 from flask import Flask, jsonify, request, send_file
 from recommend import main
 import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, time, csv
@@ -41,7 +42,7 @@ def start_scheduler():
     print(">>> start_scheduler() 호출됨"); sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
 
-    # 🎓 학습 스케줄 (예측보다 30~60분 앞서 실행)
+    # 🎓 학습 스케줄 (예측보다 앞서 실행)
     for h, m, s in [
         (7, 0, "단기"), (9, 30, "단기"), (12, 0, "단기"), (14, 30, "단기"), (17, 0, "단기"),
         (7, 0, "중기"), (15, 0, "중기"), (21, 0, "중기"),
@@ -59,7 +60,6 @@ def start_scheduler():
         scheduler.add_job(lambda s=s: threading.Thread(target=main, args=(s,), daemon=True).start(),
                           'cron', hour=h, minute=m)
 
-    # ✅ 기타 루틴
     scheduler.add_job(lambda: __import__('logger').evaluate_predictions(None), 'cron', minute=20)
     scheduler.add_job(test_all_predictions, 'cron', minute=10)
     scheduler.add_job(trigger_run, 'interval', minutes=30)
