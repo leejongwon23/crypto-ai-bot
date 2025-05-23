@@ -138,7 +138,7 @@ def reset_all():
         clear(PREDICTION_LOG, [
             "timestamp", "symbol", "strategy", "direction",
             "entry_price", "target_price", "confidence",
-            "model", "rate", "status", "reason", "return"  # ✅ 반드시 이 구조여야 작동
+            "model", "rate", "status", "reason", "return"
         ])
         clear(WRONG_PREDICTIONS, ["symbol","strategy","reason","timestamp"])
         clear(LOG_FILE, ["timestamp","symbol","strategy","model","accuracy","f1","loss"])
@@ -148,8 +148,6 @@ def reset_all():
         return "✅ 초기화 완료"
     except Exception as e:
         return f"초기화 실패: {e}", 500
-
-
 
 @app.route("/audit-log")
 def audit_log():
@@ -174,64 +172,85 @@ def force_fix_prediction_log():
     except Exception as e:
         return f"⚠️ 오류: {e}", 500
 
-@app.route("/audit-log-download")
-def audit_log_download():
-    try:
-        if not os.path.exists(AUDIT_LOG): return "없음", 404
-        return send_file(AUDIT_LOG, mimetype="text/csv", as_attachment=True, download_name="evaluation_audit.csv")
-    except Exception as e:
-        return f"다운로드 실패: {e}", 500
-
 @app.route("/yopo-health")
 def yopo_health():
     import pandas as pd, os, datetime, pytz
-    from collections import defaultdict
-
     now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
     percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
     strat_html, warnings = [], []
-    logs = {k: pd.read_csv(p, encoding="utf-8-sig") if os.path.exists(p) else pd.DataFrame()
-            for k, p in {"pred": PREDICTION_LOG, "train": LOG_FILE, "audit": AUDIT_LOG, "msg": MESSAGE_LOG}.items()}
 
-    for strat in ["단기","중기","장기"]:
-        pred = logs["pred"].query(f"strategy == '{strat}'") if not logs["pred"].empty else pd.DataFrame()
-        train = logs["train"].query(f"strategy == '{strat}'") if not logs["train"].empty else pd.DataFrame()
-        audit = logs["audit"].query(f"strategy == '{strat}'") if not logs["audit"].empty else pd.DataFrame()
-        models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt") and strat in f]
-        r_pred = pred["timestamp"].iloc[-1] if not pred.empty else "없음"
-        r_train = train["timestamp"].iloc[-1] if not train.empty else "없음"
-        r_eval = audit["timestamp"].iloc[-1] if not audit.empty else "없음"
-        stat = lambda df, t="": len(df[df["status"] == t])
-        succ, fail, pend, failed = map(lambda s: stat(pred,s), ["success","fail","pending","failed"])
-        nvol, vol = pred[~pred["symbol"].str.contains("_v", na=False)], pred[pred["symbol"].str.contains("_v", na=False)]
+    try:
+        logs = {
+            k: pd.read_csv(p, encoding="utf-8-sig") if os.path.exists(p) else pd.DataFrame()
+            for k, p in {
+                "pred": PREDICTION_LOG, "train": LOG_FILE,
+                "audit": AUDIT_LOG, "msg": MESSAGE_LOG
+            }.items()
+        }
+    except Exception as e:
+        return f"<b>❌ 로그 로딩 실패: {e}</b>"
 
-        def perf(df):
-            s, f = stat(df,"success"), stat(df,"fail")
-            total = s + f
-            return {"succ": s, "fail": f, "succ_rate": s/total*100 if total else 0, "fail_rate": f/total*100 if total else 0, "r_avg": df.get("return", pd.Series()).mean() if not df.empty else 0}
-        pn, pv = perf(nvol), perf(vol)
+    for strat in ["단기", "중기", "장기"]:
+        try:
+            pred = logs["pred"].query(f"strategy == '{strat}'") if not logs["pred"].empty else pd.DataFrame()
+            train = logs["train"].query(f"strategy == '{strat}'") if not logs["train"].empty else pd.DataFrame()
+            audit = logs["audit"].query(f"strategy == '{strat}'") if not logs["audit"].empty else pd.DataFrame()
+            models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt") and strat in f]
+            r_pred = pred["timestamp"].iloc[-1] if not pred.empty else "없음"
+            r_train = train["timestamp"].iloc[-1] if not train.empty else "없음"
+            r_eval = audit["timestamp"].iloc[-1] if not audit.empty else "없음"
+            stat = lambda df, t="": len(df[df["status"] == t]) if not df.empty and "status" in df.columns else 0
+            succ, fail, pend, failed = map(lambda s: stat(pred,s), ["success","fail","pending","failed"])
+            if "symbol" in pred.columns:
+                nvol = pred[~pred["symbol"].astype(str).str.contains("_v", na=False)]
+                vol = pred[pred["symbol"].astype(str).str.contains("_v", na=False)]
+            else:
+                nvol, vol = pd.DataFrame(), pd.DataFrame()
 
-        if pn["fail_rate"] > 50: warnings.append(f"⚠️ {strat} 일반 실패율 {pn['fail_rate']:.1f}%")
-        if pv["fail_rate"] > 50: warnings.append(f"⚠️ {strat} 변동성 실패율 {pv['fail_rate']:.1f}%")
-        if succ+fail == 0: warnings.append(f"❌ {strat} 평가 작동 안됨")
+            def perf(df):
+                try:
+                    s, f = stat(df, "success"), stat(df, "fail")
+                    total = s + f
+                    avg = pd.to_numeric(df.get("return", pd.Series()), errors='coerce').mean()
+                    return {
+                        "succ": s, "fail": f,
+                        "succ_rate": s/total*100 if total else 0,
+                        "fail_rate": f/total*100 if total else 0,
+                        "r_avg": avg if pd.notna(avg) else 0
+                    }
+                except: return {"succ": 0, "fail": 0, "succ_rate": 0, "fail_rate": 0, "r_avg": 0}
 
-        stat_html = f"""
-        <div style='border:1px solid #aaa; margin:12px; padding:10px; font-family:monospace;'>
-        <b>📌 전략: {strat}</b><br>
-        - 모델 수: {len(models)}<br>
-        - 최근 학습: {r_train}<br>
-        - 최근 예측: {r_pred}<br>
-        - 최근 평가: {r_eval}<br>
-        - 예측 수: {succ+fail+pend+failed} (✅ {succ} / ❌ {fail} / ⏳ {pend} / 🛑 {failed})<br>
-        <br><b>🎯 일반</b>: {percent(pn['succ_rate'])} / {percent(pn['fail_rate'])} / {pn['r_avg']:.2f}%<br>
-        <b>🌪️ 변동성</b>: {percent(pv['succ_rate'])} / {percent(pv['fail_rate'])} / {pv['r_avg']:.2f}%<br>
-        - 예측: {"✅" if succ+fail+pend+failed > 0 else "❌"} / 평가: {"✅" if succ+fail > 0 else "⏳"} / 학습: {"✅" if r_train != "없음" else "❌"}
-        </div>
-        """
-        recent10 = pred.tail(10)[["timestamp","symbol","direction","return","confidence","status"]]
-        rows = [f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{r['return']:.2f}%</td><td>{r['confidence']}%</td><td>{'✅' if r['status']=='success' else '❌' if r['status']=='fail' else '⏳' if r['status']=='pending' else '🛑'}</td></tr>" for _,r in recent10.iterrows()]
-        table = "<table border='1'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>신뢰도</th><th>상태</th></tr>" + "".join(rows) + "</table>"
-        strat_html.append(stat_html + f"<b>📋 {strat} 최근 예측</b><br>{table}")
+            pn, pv = perf(nvol), perf(vol)
+            if pn["fail_rate"] > 50: warnings.append(f"⚠️ {strat} 일반 실패율 {pn['fail_rate']:.1f}%")
+            if pv["fail_rate"] > 50: warnings.append(f"⚠️ {strat} 변동성 실패율 {pv['fail_rate']:.1f}%")
+            if succ + fail == 0: warnings.append(f"❌ {strat} 평가 작동 안됨")
+
+            stat_html = f"""
+            <div style='border:1px solid #aaa; margin:12px; padding:10px; font-family:monospace;'>
+            <b>📌 전략: {strat}</b><br>
+            - 모델 수: {len(models)}<br>
+            - 최근 학습: {r_train}<br>
+            - 최근 예측: {r_pred}<br>
+            - 최근 평가: {r_eval}<br>
+            - 예측 수: {succ+fail+pend+failed} (✅ {succ} / ❌ {fail} / ⏳ {pend} / 🛑 {failed})<br>
+            <br><b>🎯 일반</b>: {percent(pn['succ_rate'])} / {percent(pn['fail_rate'])} / {pn['r_avg']:.2f}%<br>
+            <b>🌪️ 변동성</b>: {percent(pv['succ_rate'])} / {percent(pv['fail_rate'])} / {pv['r_avg']:.2f}%<br>
+            - 예측: {"✅" if succ+fail+pend+failed > 0 else "❌"} / 평가: {"✅" if succ+fail > 0 else "⏳"} / 학습: {"✅" if r_train != "없음" else "❌"}
+            </div>
+            """
+
+            if not pred.empty and all(col in pred.columns for col in ["timestamp","symbol","direction","return","confidence","status"]):
+                recent10 = pred.tail(10).copy()
+                recent10["return"] = pd.to_numeric(recent10["return"], errors='coerce').fillna(0)
+                recent10["confidence"] = pd.to_numeric(recent10["confidence"], errors='coerce').fillna(0)
+                rows = [f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{r['return']:.2f}%</td><td>{r['confidence']:.1f}%</td><td>{'✅' if r['status']=='success' else '❌' if r['status']=='fail' else '⏳' if r['status']=='pending' else '🛑'}</td></tr>" for _, r in recent10.iterrows()]
+                table = "<table border='1'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>신뢰도</th><th>상태</th></tr>" + "".join(rows) + "</table>"
+            else:
+                table = "<i>최근 예측 기록 없음</i>"
+
+            strat_html.append(stat_html + f"<b>📋 {strat} 최근 예측</b><br>{table}")
+        except Exception as e:
+            strat_html.append(f"<div style='color:red;'>❌ {strat} 처리 실패: {e}</div>")
 
     status = "🟢 정상 작동 중" if not warnings else "🔴 진단 요약:<br>" + "<br>".join(warnings)
     return f"<div style='font-family:monospace; line-height:1.6;'><b>{status}</b><hr>" + "".join(strat_html) + "</div>"
