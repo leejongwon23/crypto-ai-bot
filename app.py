@@ -134,7 +134,7 @@ def reset_all():
                 csv.DictWriter(x, fieldnames=headers).writeheader()
         if os.path.exists(MODEL_DIR): shutil.rmtree(MODEL_DIR)
         os.makedirs(MODEL_DIR, exist_ok=True)
-        clear(PREDICTION_LOG, ["symbol","strategy","direction","price","target","timestamp","confidence","model","success","reason","status"])
+        clear(PREDICTION_LOG, ["symbol","strategy","direction","price","target","timestamp","confidence","model","success","reason","status","return"])
         clear(WRONG_PREDICTIONS, ["symbol","strategy","reason","timestamp"])
         clear(LOG_FILE, ["timestamp","symbol","strategy","model","accuracy","f1","loss"])
         clear(AUDIT_LOG, ["timestamp","symbol","strategy","result","status"])
