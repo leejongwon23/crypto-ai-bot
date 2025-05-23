@@ -134,18 +134,21 @@ def reset_all():
                 csv.DictWriter(x, fieldnames=headers).writeheader()
         if os.path.exists(MODEL_DIR): shutil.rmtree(MODEL_DIR)
         os.makedirs(MODEL_DIR, exist_ok=True)
+
         clear(PREDICTION_LOG, [
-            "timestamp", "symbol", "strategy", "direction", "entry_price", "target_price",
-            "confidence", "model", "rate", "status", "reason", "return"  # ✅ 여기에 return 추가됨
+            "timestamp", "symbol", "strategy", "direction",
+            "entry_price", "target_price", "confidence",
+            "model", "rate", "status", "reason", "return"  # ✅ 반드시 이 구조여야 작동
         ])
-        clear(WRONG_PREDICTIONS, ["symbol", "strategy", "reason", "timestamp"])
-        clear(LOG_FILE, ["timestamp", "symbol", "strategy", "model", "accuracy", "f1", "loss"])
-        clear(AUDIT_LOG, ["timestamp", "symbol", "strategy", "result", "status"])
-        clear(MESSAGE_LOG, ["timestamp", "symbol", "strategy", "message"])
-        clear(FAILURE_LOG, ["symbol", "strategy", "failures"])
+        clear(WRONG_PREDICTIONS, ["symbol","strategy","reason","timestamp"])
+        clear(LOG_FILE, ["timestamp","symbol","strategy","model","accuracy","f1","loss"])
+        clear(AUDIT_LOG, ["timestamp","symbol","strategy","result","status"])
+        clear(MESSAGE_LOG, ["timestamp","symbol","strategy","message"])
+        clear(FAILURE_LOG, ["symbol","strategy","failures"])
         return "✅ 초기화 완료"
     except Exception as e:
         return f"초기화 실패: {e}", 500
+
 
 
 @app.route("/audit-log")
