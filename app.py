@@ -59,7 +59,7 @@ def yopo_health():
     import pandas as pd, os, datetime, pytz
     now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
     percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
-    strat_html, problems, system_flags = [], [], []
+    strat_html, problems = [], []
 
     logs = {}
     for name, path in {
@@ -125,7 +125,7 @@ def yopo_health():
             if pv["fail_rate"] > 50:
                 problems.append(f"{strat}: 변동성 실패율 {pv['fail_rate']:.1f}%")
 
-            block = f"""<div style='border:1px solid #aaa; margin:16px 0; padding:10px; font-family:monospace; background:#f8f8f8;'>
+            html = f"""<div style='border:1px solid #aaa; margin:16px 0; padding:10px; font-family:monospace; background:#f8f8f8;'>
 <b style='font-size:16px;'>📌 전략: {strat}</b><br>
 - 모델 수: {len(models)}<br>
 - 최근 학습: {r_train}<br>
@@ -146,12 +146,15 @@ def yopo_health():
             else:
                 table = "<i>최근 예측 기록 없음</i>"
 
-            strat_html.append(block + f"<b>📋 {strat} 최근 예측</b><br>{table}")
+            strat_html.append(html + f"<b>📋 {strat} 최근 예측</b><br>{table}")
         except Exception as e:
             strat_html.append(f"<div style='color:red;'>❌ {strat} 처리 실패: {e}</div>")
 
 status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
-    return f"<div style='font-family:monospace; line-height:1.6; font-size:15px;'><b>{status}</b><hr>" + "".join(strat_html) + "</div>"
+    return (
+        f"<div style='font-family:monospace; line-height:1.6; font-size:15px;'>"
+        f"<b>{status}</b><hr>" + "".join(strat_html) + "</div>"
+    )
 
 @app.route("/")
 def index():
@@ -182,7 +185,8 @@ def train_now():
 @app.route("/train-log")
 def train_log():
     try:
-        if not os.path.exists(LOG_FILE): return "학습 로그 없음"
+        if not os.path.exists(LOG_FILE):
+            return "학습 로그 없음"
         df = pd.read_csv(LOG_FILE, encoding="utf-8-sig")
         if df.empty or df.shape[1] == 0:
             return "학습 기록 없음"
@@ -193,7 +197,8 @@ def train_log():
 @app.route("/models")
 def list_models():
     try:
-        if not os.path.exists(MODEL_DIR): return "models 폴더 없음"
+        if not os.path.exists(MODEL_DIR):
+            return "models 폴더 없음"
         files = os.listdir(MODEL_DIR)
         return "<pre>" + "\n".join(files) + "</pre>" if files else "models 폴더 비어 있음"
     except Exception as e:
@@ -218,7 +223,8 @@ def reset_all():
             with open(f, "w", newline="", encoding="utf-8-sig") as x:
                 csv.DictWriter(x, fieldnames=headers).writeheader()
 
-        if os.path.exists(MODEL_DIR): shutil.rmtree(MODEL_DIR)
+        if os.path.exists(MODEL_DIR):
+            shutil.rmtree(MODEL_DIR)
         os.makedirs(MODEL_DIR, exist_ok=True)
 
         clear(PREDICTION_LOG, [
