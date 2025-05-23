@@ -79,17 +79,15 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
     print(f"[DEBUG] {symbol}-{strategy} best_window = {best_window}")
 
     df = get_kline_by_strategy(symbol, strategy)
-    if df is None:
-        print(f"❌ {symbol}-{strategy} df is None → 데이터 못 받음")
-        return
-    print(f"[DEBUG] {symbol}-{strategy} df length = {len(df)}")
-    if len(df) < best_window + 10:
-        print(f"❌ {symbol}-{strategy} 데이터 부족 → {len(df)} < {best_window + 10}")
+    if df is None or len(df) < best_window + 10:
+        print(f"❌ {symbol}-{strategy} 데이터 부족 → {len(df) if df is not None else 'None'}")
+        logger.log_training_result(symbol, strategy, "none", 0.0, 0.0, 0.0)
         return
 
     df_feat = compute_features(symbol, df, strategy)
     if df_feat is None or len(df_feat) < best_window + 1:
-        print(f"❌ {symbol}-{strategy} feature 부족 → {len(df_feat)} < {best_window + 1}")
+        print(f"❌ {symbol}-{strategy} feature 부족 → {len(df_feat) if df_feat is not None else 'None'}")
+        logger.log_training_result(symbol, strategy, "none", 0.0, 0.0, 0.0)
         return
 
     scaler = MinMaxScaler()
@@ -99,12 +97,14 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
 
     if len(X_raw) < 2:
         print(f"[SKIP] {symbol}-{strategy} 유효 시퀀스 부족 → {len(X_raw)}개")
+        logger.log_training_result(symbol, strategy, "none", 0.0, 0.0, 0.0)
         return
 
     input_size = X_raw.shape[2]
     val_len = int(len(X_raw) * 0.2)
     if val_len == 0:
         print(f"[SKIP] {symbol}-{strategy} 검증셋 부족")
+        logger.log_training_result(symbol, strategy, "none", 0.0, 0.0, 0.0)
         return
 
     val_X_tensor = torch.tensor(X_raw[-val_len:], dtype=torch.float32)
@@ -124,7 +124,6 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
 
         for r in range(repeat):
-            print(f"[{symbol}-{strategy}] {model_type} 반복학습 {r + 1}/{repeat}")
             for _ in range(repeat_wrong):
                 wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=best_window)
                 if wrong_data:
@@ -192,7 +191,7 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         save_feature_importance(importances, symbol, strategy, best_model_type)
     else:
         print(f"❗ 모델 저장 실패: {symbol}-{strategy} 모든 모델 평가 실패")
-        print(f"[DEBUG] 평가 점수 없음: scores={scores}, models={models}")
+        logger.log_training_result(symbol, strategy, "none", 0.0, 0.0, 0.0)
 
 def train_all_models():
     for strategy in ["단기", "중기", "장기"]:
