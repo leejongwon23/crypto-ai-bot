@@ -29,7 +29,8 @@ def get_symbols_by_volatility(strategy):
     for symbol in SYMBOLS:
         try:
             df = get_kline_by_strategy(symbol, strategy)
-            if df is None or len(df) < 20: continue
+            if df is None or len(df) < 20:
+                continue
             vol = df["close"].pct_change().rolling(window=20).std().iloc[-1]
             if vol and vol >= threshold:
                 selected.append(symbol)
@@ -45,10 +46,12 @@ def start_scheduler():
         (6, 0, "장기"),
         (7, 45, "중기"),
         (9, 30, "단기"),
-        (14, 0, "단기"),
-        (18, 0, "중기"),
-        (20, 0, "단기"),
-        (23, 0, "장기"),
+        (13, 0, "단기"),
+        (15, 0, "중기"),
+        (18, 0, "단기"),
+        (22, 45, "중기"),
+        (1, 30, "단기"),  # 야간 성장용
+        (3, 30, "장기"),  # 야간 성장용
     ]
     for h, m, s in 학습_스케줄:
         scheduler.add_job(lambda s=s: threading.Thread(target=train.train_model_loop, args=(s,), daemon=True).start(),
@@ -58,10 +61,12 @@ def start_scheduler():
         (7, 0, "장기"), (7, 0, "중기"), (7, 0, "단기"),
         (10, 30, "단기"),
         (12, 30, "장기"),
-        (15, 0, "단기"), (15, 0, "중기"),
-        (17, 30, "장기"),
-        (19, 30, "단기"),
-        (22, 0, "단기"), (22, 0, "중기"),
+        (14, 45, "단기"),
+        (16, 30, "중기"),
+        (19, 45, "장기"),
+        (21, 0, "단기"),
+        (0, 30, "단기"),
+        (4, 30, "중기"),  # 야간 예측 강화
     ]
     for h, m, s in 예측_스케줄:
         scheduler.add_job(lambda s=s: threading.Thread(target=main, args=(s,), daemon=True).start(),
@@ -76,10 +81,12 @@ app = Flask(__name__)
 print(">>> Flask 앱 생성 완료"); sys.stdout.flush()
 
 @app.route("/")
-def index(): return "Yopo server is running"
+def index():
+    return "Yopo server is running"
 
 @app.route("/ping")
-def ping(): return "pong"
+def ping():
+    return "pong"
 
 @app.route("/run")
 def run():
@@ -103,7 +110,8 @@ def train_now():
 @app.route("/train-log")
 def train_log():
     try:
-        if not os.path.exists(LOG_FILE): return "아직 학습 로그가 없습니다."
+        if not os.path.exists(LOG_FILE):
+            return "아직 학습 로그가 없습니다."
         with open(LOG_FILE, "r", encoding="utf-8-sig") as f:
             return "<pre>" + f.read() + "</pre>"
     except Exception as e:
@@ -112,7 +120,8 @@ def train_log():
 @app.route("/models")
 def list_model_files():
     try:
-        if not os.path.exists(MODEL_DIR): return "models 폴더가 존재하지 않습니다."
+        if not os.path.exists(MODEL_DIR):
+            return "models 폴더가 존재하지 않습니다."
         files = os.listdir(MODEL_DIR)
         return "<pre>" + "\n".join(files) + "</pre>" if files else "models 폴더가 비어 있습니다."
     except Exception as e:
@@ -121,7 +130,8 @@ def list_model_files():
 @app.route("/check-log")
 def check_log():
     try:
-        if not os.path.exists(PREDICTION_LOG): return jsonify({"error": "prediction_log.csv not found"})
+        if not os.path.exists(PREDICTION_LOG):
+            return jsonify({"error": "prediction_log.csv not found"})
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
         return jsonify(df.tail(10).to_dict(orient='records'))
     except Exception as e:
@@ -130,7 +140,8 @@ def check_log():
 @app.route("/check-wrong")
 def check_wrong():
     try:
-        if not os.path.exists(WRONG_PREDICTIONS): return jsonify([])
+        if not os.path.exists(WRONG_PREDICTIONS):
+            return jsonify([])
         df = pd.read_csv(WRONG_PREDICTIONS, encoding="utf-8-sig")
         return jsonify(df.tail(10).to_dict(orient='records'))
     except Exception as e:
@@ -140,8 +151,11 @@ def check_wrong():
 def check_stats():
     try:
         result = __import__('logger').print_prediction_stats()
-        if not isinstance(result, str): return f"출력 형식 오류: {result}", 500
-        for s, r in {"📊":"<b>📊</b>", "✅":"<b style='color:green'>✅</b>", "❌":"<b style='color:red'>❌</b>", "⏳":"<b>⏳</b>", "🎯":"<b>🎯</b>", "📌":"<b>📌</b>"}.items():
+        if not isinstance(result, str):
+            return f"출력 형식 오류: {result}", 500
+        for s, r in {"📊": "<b>📊</b>", "✅": "<b style='color:green'>✅</b>",
+                     "❌": "<b style='color:red'>❌</b>", "⏳": "<b>⏳</b>",
+                     "🎯": "<b>🎯</b>", "📌": "<b>📌</b>"}.items():
             result = result.replace(s, r)
         return f"<div style='font-family:monospace; line-height:1.6;'>" + result.replace(chr(10), "<br>") + "</div>"
     except Exception as e:
@@ -149,11 +163,14 @@ def check_stats():
 
 @app.route("/reset-all")
 def reset_all():
-    if request.args.get("key") != "3572": return "❌ 인증 실패: 잘못된 접근", 403
+    if request.args.get("key") != "3572":
+        return "❌ 인증 실패: 잘못된 접근", 403
     try:
         def clear(path, headers):
-            with open(path, "w", newline="", encoding="utf-8-sig") as f: csv.DictWriter(f, fieldnames=headers).writeheader()
-        if os.path.exists(MODEL_DIR): shutil.rmtree(MODEL_DIR)
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                csv.DictWriter(f, fieldnames=headers).writeheader()
+        if os.path.exists(MODEL_DIR):
+            shutil.rmtree(MODEL_DIR)
         os.makedirs(MODEL_DIR, exist_ok=True)
         clear(PREDICTION_LOG, ["symbol", "strategy", "direction", "price", "target", "timestamp", "confidence", "model", "success", "reason", "status"])
         clear(WRONG_PREDICTIONS, ["symbol", "strategy", "reason", "timestamp"])
@@ -168,7 +185,8 @@ def reset_all():
 @app.route("/audit-log")
 def audit_log():
     try:
-        if not os.path.exists(AUDIT_LOG): return jsonify({"error": "audit log not found"})
+        if not os.path.exists(AUDIT_LOG):
+            return jsonify({"error": "audit log not found"})
         df = pd.read_csv(AUDIT_LOG, encoding="utf-8-sig")
         return jsonify(df.tail(30).to_dict(orient="records"))
     except Exception as e:
@@ -177,7 +195,8 @@ def audit_log():
 @app.route("/audit-log-download")
 def audit_log_download():
     try:
-        if not os.path.exists(AUDIT_LOG): return "평가 로그가 없습니다.", 404
+        if not os.path.exists(AUDIT_LOG):
+            return "평가 로그가 없습니다.", 404
         return send_file(AUDIT_LOG, mimetype="text/csv", as_attachment=True, download_name="evaluation_audit.csv")
     except Exception as e:
         return f"다운로드 실패: {e}", 500
@@ -187,7 +206,6 @@ def yopo_health():
     try:
         results, summary = [], []
 
-        # 예측 로그 확인
         if os.path.exists(PREDICTION_LOG):
             df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
             total, done = len(df), len(df[df["status"].isin(["success", "fail"])])
@@ -196,14 +214,12 @@ def yopo_health():
         else:
             results.append("❌ 예측 기록 없음")
 
-        # 모델 파일 존재
         try:
             models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
             results.append(f"✅ 모델 파일 OK ({len(models)}개)" if models else "❌ 모델 없음")
         except Exception as e:
             results.append(f"❌ 모델 확인 실패: {e}")
 
-        # 메시지 로그 확인
         try:
             if os.path.exists(MESSAGE_LOG):
                 df = pd.read_csv(MESSAGE_LOG, encoding="utf-8-sig")
@@ -211,7 +227,6 @@ def yopo_health():
         except Exception as e:
             results.append(f"❌ 메시지 확인 실패: {e}")
 
-        # 전략별 성공률
         try:
             for s in ["단기", "중기", "장기"]:
                 r = __import__('logger').get_actual_success_rate(s, threshold=0.0)
