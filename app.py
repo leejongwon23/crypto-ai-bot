@@ -84,11 +84,11 @@ def yopo_health():
             audit = logs["audit"].query(f"strategy == '{strat}'") if not logs["audit"].empty else pd.DataFrame()
             models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt") and strat in f]
 
-            r_pred = pred["timestamp"].iloc[-1] if not pred.empty and "timestamp" in pred.columns else "없음"
-            r_train = train["timestamp"].iloc[-1] if not train.empty and "timestamp" in train.columns else "없음"
-            r_eval = audit["timestamp"].iloc[-1] if not audit.empty and "timestamp" in audit.columns else "없음"
+            r_pred = pred["timestamp"].iloc[-1] if not pred.empty and "timestamp" in pred.columns and len(pred["timestamp"]) > 0 else "없음"
+            r_train = train["timestamp"].iloc[-1] if not train.empty and "timestamp" in train.columns and len(train["timestamp"]) > 0 else "없음"
+            r_eval = audit["timestamp"].iloc[-1] if not audit.empty and "timestamp" in audit.columns and len(audit["timestamp"]) > 0 else "없음"
 
-stat = lambda df, t="": len(df[df["status"] == t]) if not df.empty and "status" in df.columns else 0
+            stat = lambda df, t="": len(df[df["status"] == t]) if not df.empty and "status" in df.columns else 0
             succ, fail, pend, failed = map(lambda s: stat(pred, s), ["success", "fail", "pending", "failed"])
 
             if "symbol" in pred.columns:
@@ -97,7 +97,7 @@ stat = lambda df, t="": len(df[df["status"] == t]) if not df.empty and "status" 
             else:
                 nvol, vol = pd.DataFrame(), pd.DataFrame()
 
-            def perf(df):
+def perf(df):
                 try:
                     s, f = stat(df, "success"), stat(df, "fail")
                     total = s + f
@@ -114,7 +114,7 @@ stat = lambda df, t="": len(df[df["status"] == t]) if not df.empty and "status" 
 
             pn, pv = perf(nvol), perf(vol)
 
-if len(models) == 0:
+            if len(models) == 0:
                 problems.append(f"{strat}: 모델 없음")
             if succ + fail + pend + failed == 0:
                 problems.append(f"{strat}: 예측 없음")
