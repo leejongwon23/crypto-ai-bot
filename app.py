@@ -203,40 +203,117 @@ def audit_log_download():
 
 @app.route("/yopo-health")
 def yopo_health():
-    try:
-        results, summary = [], []
+    import pandas as pd
+    import os, datetime, pytz
+    from collections import defaultdict
 
-        if os.path.exists(PREDICTION_LOG):
-            df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-            total, done = len(df), len(df[df["status"].isin(["success", "fail"])])
-            results.append(f"✅ 예측 기록 OK ({total}건)")
-            summary.append(f"- 평가 완료율: {(done/total*100):.1f}%" if total else "- 평가 없음")
-        else:
-            results.append("❌ 예측 기록 없음")
+    def now_kst():
+        return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-        try:
-            models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
-            results.append(f"✅ 모델 파일 OK ({len(models)}개)" if models else "❌ 모델 없음")
-        except Exception as e:
-            results.append(f"❌ 모델 확인 실패: {e}")
+    def format_percent(val):
+        return f"{val:.1f}%" if pd.notna(val) else "0.0%"
 
-        try:
-            if os.path.exists(MESSAGE_LOG):
-                df = pd.read_csv(MESSAGE_LOG, encoding="utf-8-sig")
-                results.append(f"✅ 메시지 로그 OK ({len(df)}건)")
-        except Exception as e:
-            results.append(f"❌ 메시지 확인 실패: {e}")
+    strategies = ["단기", "중기", "장기"]
+    logs = {}
+    for name, path in {
+        "pred": PREDICTION_LOG,
+        "train": LOG_FILE,
+        "audit": AUDIT_LOG,
+        "msg": MESSAGE_LOG,
+    }.items():
+        logs[name] = pd.read_csv(path, encoding="utf-8-sig") if os.path.exists(path) else pd.DataFrame()
 
-        try:
-            for s in ["단기", "중기", "장기"]:
-                r = __import__('logger').get_actual_success_rate(s, threshold=0.0)
-                summary.append(f"- {s} 전략 성공률: {r*100:.1f}%")
-        except:
-            summary.append("- 전략별 성공률 확인 실패")
+    strategy_html_blocks = []
+    abnormal_msgs = []
 
-        return f"<div style='font-family:monospace; line-height:1.6;'>" + "<br> ".join(results + [""] + summary) + "</div>"
-    except Exception as e:
-        return f"[오류] yopo-health 진단 실패: {e}", 500
+    for strategy in strategies:
+        pred = logs["pred"][logs["pred"]["strategy"] == strategy] if not logs["pred"].empty else pd.DataFrame()
+        train = logs["train"][logs["train"]["strategy"] == strategy] if not logs["train"].empty else pd.DataFrame()
+        audit = logs["audit"][logs["audit"]["strategy"] == strategy] if not logs["audit"].empty else pd.DataFrame()
+
+        # 모델 수
+        models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt") and strategy in f]
+        model_count = len(models)
+
+        # 최근 시각
+        recent_train = train["timestamp"].iloc[-1] if not train.empty else "없음"
+        recent_pred = pred["timestamp"].iloc[-1] if not pred.empty else "없음"
+        recent_eval = audit[audit["strategy"] == strategy]["timestamp"].iloc[-1] if not audit.empty else "없음"
+
+        # 상태 수
+        pred_success = len(pred[pred["status"] == "success"])
+        pred_fail = len(pred[pred["status"] == "fail"])
+        pred_pending = len(pred[pred["status"] == "pending"])
+        pred_failed = len(pred[pred["status"] == "failed"])
+        total_preds = pred_success + pred_fail + pred_pending + pred_failed
+
+        # 작동 여부 판단
+        predict_ok = "✅" if total_preds > 0 else "❌"
+        eval_ok = "✅" if pred_success + pred_fail > 0 else "⏳"
+        train_ok = "✅" if recent_train != "없음" else "❌"
+
+        # 일반/변동성 분리
+        is_vol = pred["symbol"].str.contains("_v", na=False)
+        pred_nvol = pred[~is_vol]
+        pred_vol = pred[is_vol]
+
+        def get_perf(df):
+            succ = len(df[df["status"] == "success"])
+            fail = len(df[df["status"] == "fail"])
+            r_avg = df["return"].mean() if "return" in df.columns and not df.empty else 0.0
+            total = succ + fail
+            return {
+                "succ": succ,
+                "fail": fail,
+                "succ_rate": succ / total * 100 if total else 0,
+                "fail_rate": fail / total * 100 if total else 0,
+                "r_avg": r_avg,
+            }
+
+        perf_nvol = get_perf(pred_nvol)
+        perf_vol = get_perf(pred_vol)
+                # 이상 감지
+        if perf_nvol["fail_rate"] > 50:
+            abnormal_msgs.append(f"⚠️ {strategy} 일반 예측 실패율 {perf_nvol['fail_rate']:.1f}%")
+        if perf_vol["fail_rate"] > 50:
+            abnormal_msgs.append(f"⚠️ {strategy} 변동성 예측 실패율 {perf_vol['fail_rate']:.1f}%")
+        if eval_ok != "✅":
+            abnormal_msgs.append(f"❌ {strategy} 평가 작동 안됨")
+
+        block = f"""
+        <div style='border:1px solid #aaa; margin:12px; padding:10px; font-family:monospace;'>
+        <b>📌 전략: {strategy}</b><br>
+        - 모델 수: {model_count}<br>
+        - 최근 학습: {recent_train}<br>
+        - 최근 예측: {recent_pred}<br>
+        - 최근 평가: {recent_eval}<br>
+        - 예측 수: {total_preds} (✅ {pred_success} / ❌ {pred_fail} / ⏳ {pred_pending} / 🛑 {pred_failed})<br>
+        <br><b>🎯 일반 예측 성능</b><br>
+        - 성공률: {format_percent(perf_nvol['succ_rate'])} / 실패율: {format_percent(perf_nvol['fail_rate'])} / 수익률: {perf_nvol['r_avg']:.2f}%<br>
+        <b>🌪️ 변동성 예측 성능</b><br>
+        - 성공률: {format_percent(perf_vol['succ_rate'])} / 실패율: {format_percent(perf_vol['fail_rate'])} / 수익률: {perf_vol['r_avg']:.2f}%<br>
+        <br>
+        - 예측 작동: {predict_ok} / 평가 작동: {eval_ok} / 학습 작동: {train_ok}<br>
+        </div>
+        """
+        strategy_html_blocks.append(block)
+
+        # 최근 예측 10건 테이블
+        recent10 = pred.tail(10)[["timestamp", "symbol", "direction", "return", "confidence", "status"]]
+        rows = []
+        for _, row in recent10.iterrows():
+            status_icon = {"success": "✅", "fail": "❌", "pending": "⏳", "failed": "🛑"}.get(row["status"], "")
+            rows.append(f"<tr><td>{row['timestamp']}</td><td>{row['symbol']}</td><td>{row['direction']}</td><td>{row['return']:.2f}%</td><td>{row['confidence']}%</td><td>{status_icon}</td></tr>")
+        table = "<table border='1' style='font-family:monospace; margin-bottom:20px;'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>신뢰도</th><th>상태</th></tr>" + "".join(rows) + "</table>"
+        strategy_html_blocks.append(f"<b>📋 {strategy} 최근 예측 10건</b><br>{table}")
+
+    # 종합 진단 요약
+    overall = "🟢 전체 정상 작동 중" if not abnormal_msgs else "🔴 진단 요약:<br>" + "<br>".join(abnormal_msgs)
+
+    return f"<div style='font-family:monospace; line-height:1.6;'><b>{overall}</b><hr>" + "".join(strategy_html_blocks) + "</div>"
+
+        
+
 
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비"); sys.stdout.flush()
