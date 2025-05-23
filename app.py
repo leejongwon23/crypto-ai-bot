@@ -1,4 +1,4 @@
-# YOPO 서버 진입점 - 최적화 압축 구조
+# YOPO 서버 진입점 - 예외방어 포함 완전 통합 구조
 from flask import Flask, jsonify, request, send_file
 from recommend import main
 import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv
@@ -81,8 +81,10 @@ def train_now():
 def train_log():
     try:
         if not os.path.exists(LOG_FILE): return "학습 로그 없음"
-        with open(LOG_FILE, "r", encoding="utf-8-sig") as f:
-            return "<pre>" + f.read() + "</pre>"
+        df = pd.read_csv(LOG_FILE, encoding="utf-8-sig")
+        if df.empty or df.shape[1] == 0:
+            return "학습 기록 없음"
+        return "<pre>" + df.to_csv(index=False) + "</pre>"
     except Exception as e:
         return f"읽기 오류: {e}", 500
 
@@ -103,26 +105,6 @@ def check_log():
         return jsonify(df.tail(10).to_dict(orient='records'))
     except Exception as e:
         return jsonify({"error": str(e)})
-
-@app.route("/check-wrong")
-def check_wrong():
-    try:
-        if not os.path.exists(WRONG_PREDICTIONS): return jsonify([])
-        df = pd.read_csv(WRONG_PREDICTIONS, encoding="utf-8-sig")
-        return jsonify(df.tail(10).to_dict(orient='records'))
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
-@app.route("/check-stats")
-def check_stats():
-    try:
-        result = __import__('logger').print_prediction_stats()
-        if not isinstance(result, str): return f"형식 오류: {result}", 500
-        for k,v in {"📊":"<b>📊</b>","✅":"<b style='color:green'>✅</b>","❌":"<b style='color:red'>❌</b>","⏳":"<b>⏳</b>","📌":"<b>📌</b>"}.items():
-            result = result.replace(k, v)
-        return f"<div style='font-family:monospace; line-height:1.6;'>{result.replace(chr(10),'<br>')}</div>"
-    except Exception as e:
-        return f"출력 실패: {e}", 500
 
 @app.route("/reset-all")
 def reset_all():
@@ -149,15 +131,6 @@ def reset_all():
     except Exception as e:
         return f"초기화 실패: {e}", 500
 
-@app.route("/audit-log")
-def audit_log():
-    try:
-        if not os.path.exists(AUDIT_LOG): return jsonify({"error": "없음"})
-        df = pd.read_csv(AUDIT_LOG, encoding="utf-8-sig")
-        return jsonify(df.tail(30).to_dict(orient="records"))
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
 @app.route("/force-fix-prediction-log")
 def force_fix_prediction_log():
     try:
@@ -179,16 +152,21 @@ def yopo_health():
     percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
     strat_html, warnings = [], []
 
-    try:
-        logs = {
-            k: pd.read_csv(p, encoding="utf-8-sig") if os.path.exists(p) else pd.DataFrame()
-            for k, p in {
-                "pred": PREDICTION_LOG, "train": LOG_FILE,
-                "audit": AUDIT_LOG, "msg": MESSAGE_LOG
-            }.items()
-        }
-    except Exception as e:
-        return f"<b>❌ 로그 로딩 실패: {e}</b>"
+    logs = {}
+    for name, path in {
+        "pred": PREDICTION_LOG,
+        "train": LOG_FILE,
+        "audit": AUDIT_LOG,
+        "msg": MESSAGE_LOG
+    }.items():
+        try:
+            if os.path.exists(path):
+                df = pd.read_csv(path, encoding="utf-8-sig")
+                logs[name] = df if not df.empty and df.shape[1] > 0 else pd.DataFrame()
+            else:
+                logs[name] = pd.DataFrame()
+        except:
+            logs[name] = pd.DataFrame()
 
     for strat in ["단기", "중기", "장기"]:
         try:
@@ -196,9 +174,9 @@ def yopo_health():
             train = logs["train"].query(f"strategy == '{strat}'") if not logs["train"].empty else pd.DataFrame()
             audit = logs["audit"].query(f"strategy == '{strat}'") if not logs["audit"].empty else pd.DataFrame()
             models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt") and strat in f]
-            r_pred = pred["timestamp"].iloc[-1] if not pred.empty else "없음"
-            r_train = train["timestamp"].iloc[-1] if not train.empty else "없음"
-            r_eval = audit["timestamp"].iloc[-1] if not audit.empty else "없음"
+            r_pred = pred["timestamp"].iloc[-1] if not pred.empty and "timestamp" in pred.columns else "없음"
+            r_train = train["timestamp"].iloc[-1] if not train.empty and "timestamp" in train.columns else "없음"
+            r_eval = audit["timestamp"].iloc[-1] if not audit.empty and "timestamp" in audit.columns else "없음"
             stat = lambda df, t="": len(df[df["status"] == t]) if not df.empty and "status" in df.columns else 0
             succ, fail, pend, failed = map(lambda s: stat(pred,s), ["success","fail","pending","failed"])
             if "symbol" in pred.columns:
@@ -225,7 +203,7 @@ def yopo_health():
             if pv["fail_rate"] > 50: warnings.append(f"⚠️ {strat} 변동성 실패율 {pv['fail_rate']:.1f}%")
             if succ + fail == 0: warnings.append(f"❌ {strat} 평가 작동 안됨")
 
-            stat_html = f"""
+            stat_html.append(f"""
             <div style='border:1px solid #aaa; margin:12px; padding:10px; font-family:monospace;'>
             <b>📌 전략: {strat}</b><br>
             - 모델 수: {len(models)}<br>
@@ -237,18 +215,7 @@ def yopo_health():
             <b>🌪️ 변동성</b>: {percent(pv['succ_rate'])} / {percent(pv['fail_rate'])} / {pv['r_avg']:.2f}%<br>
             - 예측: {"✅" if succ+fail+pend+failed > 0 else "❌"} / 평가: {"✅" if succ+fail > 0 else "⏳"} / 학습: {"✅" if r_train != "없음" else "❌"}
             </div>
-            """
-
-            if not pred.empty and all(col in pred.columns for col in ["timestamp","symbol","direction","return","confidence","status"]):
-                recent10 = pred.tail(10).copy()
-                recent10["return"] = pd.to_numeric(recent10["return"], errors='coerce').fillna(0)
-                recent10["confidence"] = pd.to_numeric(recent10["confidence"], errors='coerce').fillna(0)
-                rows = [f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{r['return']:.2f}%</td><td>{r['confidence']:.1f}%</td><td>{'✅' if r['status']=='success' else '❌' if r['status']=='fail' else '⏳' if r['status']=='pending' else '🛑'}</td></tr>" for _, r in recent10.iterrows()]
-                table = "<table border='1'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>신뢰도</th><th>상태</th></tr>" + "".join(rows) + "</table>"
-            else:
-                table = "<i>최근 예측 기록 없음</i>"
-
-            strat_html.append(stat_html + f"<b>📋 {strat} 최근 예측</b><br>{table}")
+            """)
         except Exception as e:
             strat_html.append(f"<div style='color:red;'>❌ {strat} 처리 실패: {e}</div>")
 
