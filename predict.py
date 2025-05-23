@@ -1,4 +1,3 @@
-# 동일한 import 구문
 import os
 import torch
 import numpy as np
@@ -21,7 +20,7 @@ MODEL_DIR = "/persistent/models"
 MIN_EXPECTED_RATES = {
     "단기": 0.007,
     "중기": 0.015,
-    "장기": 0.03
+    "장기": 0.03  # ✅ 장기 전략은 여전히 1주 예측 기준 유지
 }
 
 def now_kst():
@@ -149,7 +148,6 @@ def predict(symbol, strategy):
         avg_conf = sum(r["confidence"] for r in valid) / len(valid)
         avg_rate = sum(r["rate"] for r in valid) / len(valid)
 
-        # 전략별 수익률 기준 미달 시 예측 폐기 (단, 편차가 크면 예외)
         min_expected = MIN_EXPECTED_RATES.get(strategy, 0.01)
         if avg_rate < min_expected:
             high_rate = max(r["rate"] for r in valid)
