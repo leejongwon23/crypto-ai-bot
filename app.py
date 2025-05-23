@@ -56,8 +56,6 @@ print(">>> Flask 앱 생성 완료"); sys.stdout.flush()
 
 @app.route("/yopo-health")
 def yopo_health():
-    import pandas as pd, os, datetime, pytz
-    now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
     percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
     strat_html, problems = [], []
 
@@ -84,9 +82,9 @@ def yopo_health():
             audit = logs["audit"].query(f"strategy == '{strat}'") if not logs["audit"].empty else pd.DataFrame()
             models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt") and strat in f]
 
-            r_pred = pred["timestamp"].iloc[-1] if not pred.empty and "timestamp" in pred.columns and len(pred["timestamp"]) > 0 else "없음"
-            r_train = train["timestamp"].iloc[-1] if not train.empty and "timestamp" in train.columns and len(train["timestamp"]) > 0 else "없음"
-            r_eval = audit["timestamp"].iloc[-1] if not audit.empty and "timestamp" in audit.columns and len(audit["timestamp"]) > 0 else "없음"
+            r_pred = pred["timestamp"].iloc[-1] if not pred.empty and "timestamp" in pred.columns else "없음"
+            r_train = train["timestamp"].iloc[-1] if not train.empty and "timestamp" in train.columns else "없음"
+            r_eval = audit["timestamp"].iloc[-1] if not audit.empty and "timestamp" in audit.columns else "없음"
 
             stat = lambda df, t="": len(df[df["status"] == t]) if not df.empty and "status" in df.columns else 0
             succ, fail, pend, failed = map(lambda s: stat(pred, s), ["success", "fail", "pending", "failed"])
@@ -125,7 +123,7 @@ def yopo_health():
             if pv["fail_rate"] > 50:
                 problems.append(f"{strat}: 변동성 실패율 {pv['fail_rate']:.1f}%")
 
-html = f"""<div style='border:1px solid #aaa; margin:16px 0; padding:10px; font-family:monospace; background:#f8f8f8;'>
+            html = f"""<div style='border:1px solid #aaa; margin:16px 0; padding:10px; font-family:monospace; background:#f8f8f8;'>
 <b style='font-size:16px;'>📌 전략: {strat}</b><br>
 - 모델 수: {len(models)}<br>
 - 최근 학습: {r_train}<br>
@@ -141,10 +139,7 @@ html = f"""<div style='border:1px solid #aaa; margin:16px 0; padding:10px; font-
                 recent10 = pred.tail(10).copy()
                 recent10["return"] = pd.to_numeric(recent10["return"], errors='coerce').fillna(0)
                 recent10["confidence"] = pd.to_numeric(recent10["confidence"], errors='coerce').fillna(0)
-                rows = [
-                    f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{r['return']:.2f}%</td><td>{r['confidence']:.1f}%</td><td>{'✅' if r['status']=='success' else '❌' if r['status']=='fail' else '⏳' if r['status']=='pending' else '🛑'}</td></tr>"
-                    for _, r in recent10.iterrows()
-                ]
+                rows = [f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{r['return']:.2f}%</td><td>{r['confidence']:.1f}%</td><td>{'✅' if r['status']=='success' else '❌' if r['status']=='fail' else '⏳' if r['status']=='pending' else '🛑'}</td></tr>" for _, r in recent10.iterrows()]
                 table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>신뢰도</th><th>상태</th></tr>" + "".join(rows) + "</table>"
             else:
                 table = "<i>최근 예측 기록 없음</i>"
