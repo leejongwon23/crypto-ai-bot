@@ -42,28 +42,37 @@ def start_scheduler():
     print(">>> start_scheduler() 호출됨"); sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
 
-    # 🎓 학습 스케줄 (예측보다 앞서 실행)
-    for h, m, s in [
-        (7, 0, "단기"), (9, 30, "단기"), (12, 0, "단기"), (14, 30, "단기"), (17, 0, "단기"),
-        (7, 0, "중기"), (15, 0, "중기"), (21, 0, "중기"),
-        (6, 0, "장기")
-    ]:
+    # 🎓 학습 스케줄 (전략별 최소 1.5시간 간격 확보)
+    학습_스케줄 = [
+        (6, 0, "장기"),
+        (7, 45, "중기"),
+        (9, 30, "단기"),
+        (14, 0, "단기"),
+        (18, 0, "중기"),
+        (20, 0, "단기"),
+        (23, 0, "장기"),
+    ]
+    for h, m, s in 학습_스케줄:
         scheduler.add_job(lambda s=s: threading.Thread(target=train.train_model_loop, args=(s,), daemon=True).start(),
                           'cron', hour=h, minute=m)
 
-    # 📈 예측 스케줄
-    for h, m, s in [
-        (7, 30, "단기"), (10, 0, "단기"), (12, 30, "단기"), (15, 0, "단기"), (17, 30, "단기"),
-        (8, 0, "중기"), (16, 0, "중기"), (22, 0, "중기"),
-        (7, 0, "장기")
-    ]:
+    # 📈 예측 스케줄 (전략당 30분, 병렬 3개 가능, 예측 간 최소 30분 유지)
+    예측_스케줄 = [
+        (7, 0, "장기"), (7, 0, "중기"), (7, 0, "단기"),
+        (10, 30, "단기"),
+        (12, 30, "장기"),
+        (15, 0, "단기"), (15, 0, "중기"),
+        (17, 30, "장기"),
+        (19, 30, "단기"),
+        (22, 0, "단기"), (22, 0, "중기"),
+    ]
+    for h, m, s in 예측_스케줄:
         scheduler.add_job(lambda s=s: threading.Thread(target=main, args=(s,), daemon=True).start(),
                           'cron', hour=h, minute=m)
 
     scheduler.add_job(lambda: __import__('logger').evaluate_predictions(None), 'cron', minute=20)
     scheduler.add_job(test_all_predictions, 'cron', minute=10)
     scheduler.add_job(trigger_run, 'interval', minutes=30)
-
     scheduler.start()
 
 app = Flask(__name__)
