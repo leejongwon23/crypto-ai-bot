@@ -1,24 +1,18 @@
-import os
-import csv
-import datetime
-import pandas as pd
-import pytz
+import os, csv, datetime, pandas as pd, pytz
 from data.utils import get_kline_by_strategy
 
 PERSIST_DIR = "/persistent"
+LOG_DIR = os.path.join(PERSIST_DIR, "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
-LOG_FILE = os.path.join(PERSIST_DIR, "logs", "train_log.csv")
-AUDIT_LOG = os.path.join(PERSIST_DIR, "logs", "evaluation_audit.csv")
-os.makedirs(os.path.join(PERSIST_DIR, "logs"), exist_ok=True)
-
-EVAL_EXPIRY_BUFFER = 12
-STOP_LOSS_PCT = 0.02
+LOG_FILE = os.path.join(LOG_DIR, "train_log.csv")
+AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
+EVAL_EXPIRY_BUFFER, STOP_LOSS_PCT = 12, 0.02
 model_success_tracker = {}
 
-def now_kst():
-    return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def get_min_gain(symbol, strategy):
     df = get_kline_by_strategy(symbol, strategy)
@@ -29,8 +23,7 @@ def get_min_gain(symbol, strategy):
 
 def update_model_success(symbol, strategy, model, success):
     key = (symbol, strategy, model)
-    if key not in model_success_tracker:
-        model_success_tracker[key] = {"success": 0, "fail": 0}
+    model_success_tracker.setdefault(key, {"success": 0, "fail": 0})
     model_success_tracker[key]["success" if success else "fail"] += 1
 
 def get_model_success_rate(symbol, strategy, model, min_total=10):
@@ -39,21 +32,18 @@ def get_model_success_rate(symbol, strategy, model, min_total=10):
     return 0.5 if total < min_total else r["success"] / total
 
 def log_audit(symbol, strategy, status, reason):
-    now = now_kst().isoformat()
     row = {
-        "timestamp": now,
+        "timestamp": now_kst().isoformat(),
         "symbol": str(symbol),
         "strategy": str(strategy),
         "status": str(status),
         "reason": str(reason)
     }
-    write_header = not os.path.exists(AUDIT_LOG)
     try:
         with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=row)
-            if write_header:
-                writer.writeheader()
-            writer.writerow(row)
+            w = csv.DictWriter(f, fieldnames=row)
+            if not os.path.exists(AUDIT_LOG): w.writeheader()
+            w.writerow(row)
     except Exception as e:
         print(f"[오류] log_audit 실패: {e}")
 
@@ -74,26 +64,19 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "reason": reason or ""
     }
     log_audit(symbol, strategy, "예측성공" if success else "예측실패", reason)
-
-    write_header = not os.path.exists(PREDICTION_LOG)
     try:
         with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=row)
-            if write_header:
-                writer.writeheader()
-            writer.writerow(row)
+            w = csv.DictWriter(f, fieldnames=row)
+            if not os.path.exists(PREDICTION_LOG): w.writeheader()
+            w.writerow(row)
     except Exception as e:
         print(f"[오류] log_prediction 실패: {e}")
 
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     row = {
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-        "symbol": symbol,
-        "strategy": strategy,
-        "model": model_name,
-        "accuracy": float(acc),
-        "f1_score": float(f1),
-        "loss": float(loss)
+        "symbol": symbol, "strategy": strategy, "model": model_name,
+        "accuracy": float(acc), "f1_score": float(f1), "loss": float(loss)
     }
     try:
         pd.DataFrame([row]).to_csv(LOG_FILE, mode='a', header=not os.path.exists(LOG_FILE), index=False, encoding="utf-8-sig")
@@ -104,129 +87,105 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
 def evaluate_predictions(get_price_fn):
     if not os.path.exists(PREDICTION_LOG): return
     try:
-        with open(PREDICTION_LOG, "r", encoding="utf-8-sig") as f:
-            rows = list(csv.DictReader(f))
+        rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
     except Exception as e:
         print(f"[경고] 평가 로그 읽기 실패: {e}")
         return
-
     now = now_kst()
-    updated_rows = []
+    updated = []
 
     for row in rows:
         if row.get("status") not in ["pending", "failed"]:
-            updated_rows.append(row)
-            continue
-
+            updated.append(row); continue
         try:
             pred_time = datetime.datetime.fromisoformat(row["timestamp"]).astimezone(pytz.timezone("Asia/Seoul"))
-            hours_passed = (now - pred_time).total_seconds() / 3600
-            strategy, direction = row["strategy"], row["direction"]
-            model = row.get("model", "unknown")
-            entry_price = float(row.get("entry_price", 0))
-            rate = float(row.get("rate", 0))
-            symbol = row["symbol"]
-            eval_hours = get_dynamic_eval_wait(strategy)
-
-            if hours_passed > eval_hours + EVAL_EXPIRY_BUFFER:
-                row["status"], row["reason"] = "expired", f"평가 유효시간 초과: {hours_passed:.2f}h"
-            elif hours_passed < eval_hours:
-                row["reason"] = f"{hours_passed:.2f}h < {eval_hours}h"
-            elif entry_price == 0 or model == "unknown" or "모델 없음" in row["reason"] or "기준 미달" in row["reason"]:
-                row["status"] = "invalid_model"
-                row["reason"] = f"모델 없음 또는 entry_price=0 또는 기준 미달"
+            hours = (now - pred_time).total_seconds() / 3600
+            symbol, strategy, direction = row["symbol"], row["strategy"], row["direction"]
+            model, entry, rate = row.get("model", "unknown"), float(row.get("entry_price", 0)), float(row.get("rate", 0))
+            if hours > get_dynamic_eval_wait(strategy) + EVAL_EXPIRY_BUFFER:
+                row.update({"status": "expired", "reason": f"평가 유효시간 초과: {hours:.2f}h"})
+            elif hours < get_dynamic_eval_wait(strategy):
+                row["reason"] = f"{hours:.2f}h < {get_dynamic_eval_wait(strategy)}h"
+            elif entry == 0 or model == "unknown" or any(k in row["reason"] for k in ["모델 없음", "기준 미달"]):
+                row.update({"status": "invalid_model", "reason": "모델 없음 또는 entry_price=0 또는 기준 미달"})
             else:
                 df = get_kline_by_strategy(symbol, strategy)
                 if df is None or df.empty or df[df["timestamp"] >= pred_time].empty:
-                    row["status"], row["reason"] = "skip_eval", "평가용 데이터 부족"
+                    row.update({"status": "skip_eval", "reason": "평가용 데이터 부족"})
                 else:
                     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Seoul")
                     eval_df = df[df["timestamp"] >= pred_time]
                     price = eval_df["high"].max() if direction == "롱" else eval_df["low"].min()
-                    gain = (price - entry_price) / entry_price if direction == "롱" else (entry_price - price) / entry_price
+                    gain = (price - entry) / entry if direction == "롱" else (entry - price) / entry
                     success = gain >= rate
-                    row["status"] = "success" if success else "fail"
-                    row["reason"] = f"수익률 도달: {gain:.4f} ≥ 예측 {rate:.4f}" if success else f"미달: {gain:.4f} < 예측 {rate:.4f}"
+                    row.update({
+                        "status": "success" if success else "fail",
+                        "reason": f"수익률 도달: {gain:.4f} ≥ 예측 {rate:.4f}" if success else f"미달: {gain:.4f} < 예측 {rate:.4f}"
+                    })
                     update_model_success(symbol, strategy, model, success)
-
                     if not success:
                         if not os.path.exists(WRONG_PREDICTIONS):
                             with open(WRONG_PREDICTIONS, "w", newline="", encoding="utf-8-sig") as wf:
-                                writer = csv.writer(wf)
-                                writer.writerow(["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "gain"])
+                                csv.writer(wf).writerow(["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "gain"])
                         with open(WRONG_PREDICTIONS, "a", newline="", encoding="utf-8-sig") as wf:
-                            csv.writer(wf).writerow([
-                                row["timestamp"], symbol, strategy, direction,
-                                entry_price, row["target_price"], gain
-                            ])
+                            csv.writer(wf).writerow([row["timestamp"], symbol, strategy, direction, entry, row["target_price"], gain])
             log_audit(symbol, strategy, row["status"], row["reason"])
         except Exception as e:
-            row["status"], row["reason"] = "skip_eval", f"예외 발생: {e}"
-            log_audit(row.get("symbol", "?"), row.get("strategy", "?"), "스킵", row["reason"])
+            row.update({"status": "skip_eval", "reason": f"예외 발생: {e}"})
+            log_audit(symbol, strategy, "스킵", row["reason"])
+        updated.append(row)
 
-        updated_rows.append(row)
+    with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
+        csv.DictWriter(f, fieldnames=updated[0]).writerows([updated[0]] + updated[1:])
 
-    if updated_rows:
-        with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=updated_rows[0])
-            writer.writeheader()
-            writer.writerows(updated_rows)
-
-def get_dynamic_eval_wait(strategy):
-    return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 6)
+get_dynamic_eval_wait = lambda s: {"단기": 4, "중기": 24, "장기": 168}.get(s, 6)
 
 def get_actual_success_rate(strategy=None, threshold=0.7):
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-        df = df[df["confidence"] >= threshold]
-        df = df[df["status"].isin(["success", "fail"])]
-        if strategy and strategy != "전체":
-            df = df[df["strategy"] == strategy]
+        df = df[(df["confidence"] >= threshold) & df["status"].isin(["success", "fail"])]
+        if strategy and strategy != "전체": df = df[df["strategy"] == strategy]
         return 0.0 if df.empty else len(df[df["status"] == "success"]) / len(df)
-    except:
-        return 0.0
+    except: return 0.0
 
 def get_strategy_eval_count(strategy):
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
         return len(df[(df["strategy"] == strategy) & df["status"].isin(["success", "fail"])])
-    except:
-        return 0
+    except: return 0
 
 def get_strategy_fail_rate(symbol, strategy):
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
         df = df[(df["strategy"] == strategy) & (df["symbol"] == symbol) & df["status"].isin(["success", "fail"])]
         return 0.0 if df.empty else len(df[df["status"] == "fail"]) / len(df)
-    except:
-        return 0.0
+    except: return 0.0
 
 def print_prediction_stats():
-    if not os.path.exists(PREDICTION_LOG):
-        return "예측 기록이 없습니다."
+    if not os.path.exists(PREDICTION_LOG): return "예측 기록이 없습니다."
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-        status_list = ["success", "fail", "pending", "failed", "skipped", "expired", "invalid_model", "skip_eval"]
-        counts = {k: len(df[df["status"] == k]) for k in status_list}
+        statuses = ["success", "fail", "pending", "failed", "skipped", "expired", "invalid_model", "skip_eval"]
+        counts = {k: len(df[df["status"] == k]) for k in statuses}
         summary = [
             f"📊 전체 예측 수: {len(df)}",
             f"✅ 성공: {counts['success']}", f"❌ 실패: {counts['fail']}",
             f"⏳ 평가 대기중: {counts['pending']}", f"⏱ 실패예측: {counts['failed']}",
             f"⏭️ 스킵: {counts['skipped']}", f"⌛ 만료: {counts['expired']}",
             f"⚠️ 모델없음: {counts['invalid_model']}", f"🟡 평가제외: {counts['skip_eval']}",
-            f"🌟 성공률: {(counts['success'] / (counts['success'] + counts['fail']) * 100):.2f}%" if (counts['success'] + counts['fail']) > 0 else "🌟 성공률: 0.00%"
+            f"🌟 성공률: {(counts['success'] / (counts['success'] + counts['fail']) * 100):.2f}%" if (counts['success'] + counts['fail']) else "🌟 성공률: 0.00%"
         ]
-        for strategy in df["strategy"].unique():
-            s = df[df["strategy"] == strategy]
-            s_succ, s_fail = len(s[s["status"] == "success"]), len(s[s["status"] == "fail"])
-            s_rate = (s_succ / (s_succ + s_fail) * 100) if (s_succ + s_fail) > 0 else 0
-            summary.append(f"📌 {strategy} 성공률: {s_rate:.2f}%")
+        for s in df["strategy"].unique():
+            d = df[df["strategy"] == s]
+            s_s, s_f = len(d[d["status"] == "success"]), len(d[d["status"] == "fail"])
+            rate = (s_s / (s_s + s_f) * 100) if (s_s + s_f) else 0
+            summary.append(f"📌 {s} 성공률: {rate:.2f}%")
         summary.append("")
-        for symbol in df["symbol"].unique():
-            s = df[df["symbol"] == symbol]
-            s_succ, s_fail = len(s[s["status"] == "success"]), len(s[s["status"] == "fail"])
-            s_rate = (s_succ / (s_succ + s_fail) * 100) if (s_succ + s_fail) > 0 else 0
-            summary.append(f"📍 {symbol} 성공률: {s_rate:.2f}%")
+        for s in df["symbol"].unique():
+            d = df[df["symbol"] == s]
+            s_s, s_f = len(d[d["status"] == "success"]), len(d[d["status"] == "fail"])
+            rate = (s_s / (s_s + s_f) * 100) if (s_s + s_f) else 0
+            summary.append(f"📍 {s} 성공률: {rate:.2f}%")
         return "\n".join(summary)
     except Exception as e:
         return f"[오류] 통계 출력 실패: {e}"
