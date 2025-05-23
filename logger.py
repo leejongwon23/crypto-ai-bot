@@ -39,10 +39,11 @@ def log_audit(symbol, strategy, status, reason):
         "status": str(status),
         "reason": str(reason)
     }
+    write_header = not os.path.exists(AUDIT_LOG) or os.stat(AUDIT_LOG).st_size == 0
     try:
         with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=row)
-            if not os.path.exists(AUDIT_LOG): w.writeheader()
+            if write_header: w.writeheader()
             w.writerow(row)
     except Exception as e:
         print(f"[오류] log_audit 실패: {e}")
@@ -50,6 +51,7 @@ def log_audit(symbol, strategy, status, reason):
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, confidence=0, model="unknown", success=True, reason="", rate=0.0):
     now = timestamp or now_kst().isoformat()
+    status = "pending" if success else "failed"
     row = {
         "timestamp": now,
         "symbol": str(symbol or "UNKNOWN"),
@@ -60,14 +62,15 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "confidence": float(confidence),
         "model": model or "unknown",
         "rate": float(rate),
-        "status": "pending" if success else "failed",
+        "status": status,
         "reason": reason or ""
     }
     log_audit(symbol, strategy, "예측성공" if success else "예측실패", reason)
+    write_header = not os.path.exists(PREDICTION_LOG) or os.stat(PREDICTION_LOG).st_size == 0
     try:
         with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=row)
-            if not os.path.exists(PREDICTION_LOG): w.writeheader()
+            if write_header: w.writeheader()
             w.writerow(row)
     except Exception as e:
         print(f"[오류] log_prediction 실패: {e}")
@@ -83,6 +86,8 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
         print(f"[LOG] Training result logged for {symbol} - {strategy} - {model_name}")
     except Exception as e:
         print(f"[오류] 학습 로그 저장 실패: {e}")
+
+get_dynamic_eval_wait = lambda s: {"단기": 4, "중기": 24, "장기": 168}.get(s, 6)
 
 def evaluate_predictions(get_price_fn):
     if not os.path.exists(PREDICTION_LOG): return
@@ -137,8 +142,6 @@ def evaluate_predictions(get_price_fn):
 
     with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
         csv.DictWriter(f, fieldnames=updated[0]).writerows([updated[0]] + updated[1:])
-
-get_dynamic_eval_wait = lambda s: {"단기": 4, "중기": 24, "장기": 168}.get(s, 6)
 
 def get_actual_success_rate(strategy=None, threshold=0.7):
     try:
