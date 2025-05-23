@@ -51,7 +51,8 @@ def log_audit(symbol, strategy, status, reason):
     try:
         with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=row)
-            if write_header: writer.writeheader()
+            if write_header:
+                writer.writeheader()
             writer.writerow(row)
     except Exception as e:
         print(f"[오류] log_audit 실패: {e}")
@@ -72,14 +73,14 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "status": "pending" if success else "failed",
         "reason": reason or ""
     }
-    if not success:
-        log_audit(symbol, strategy, "예측실패", reason)
+    log_audit(symbol, strategy, "예측성공" if success else "예측실패", reason)
 
     write_header = not os.path.exists(PREDICTION_LOG)
     try:
         with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=row)
-            if write_header: writer.writeheader()
+            if write_header:
+                writer.writeheader()
             writer.writerow(row)
     except Exception as e:
         print(f"[오류] log_prediction 실패: {e}")
@@ -87,8 +88,12 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     row = {
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-        "symbol": symbol, "strategy": strategy, "model": model_name,
-        "accuracy": float(acc), "f1_score": float(f1), "loss": float(loss)
+        "symbol": symbol,
+        "strategy": strategy,
+        "model": model_name,
+        "accuracy": float(acc),
+        "f1_score": float(f1),
+        "loss": float(loss)
     }
     try:
         pd.DataFrame([row]).to_csv(LOG_FILE, mode='a', header=not os.path.exists(LOG_FILE), index=False, encoding="utf-8-sig")
@@ -127,9 +132,9 @@ def evaluate_predictions(get_price_fn):
                 row["status"], row["reason"] = "expired", f"평가 유효시간 초과: {hours_passed:.2f}h"
             elif hours_passed < eval_hours:
                 row["reason"] = f"{hours_passed:.2f}h < {eval_hours}h"
-            elif entry_price == 0 or model == "unknown" or "모델 없음" in row["reason"]:
+            elif entry_price == 0 or model == "unknown" or "모델 없음" in row["reason"] or "기준 미달" in row["reason"]:
                 row["status"] = "invalid_model"
-                row["reason"] = f"모델 없음 또는 entry_price=0"
+                row["reason"] = f"모델 없음 또는 entry_price=0 또는 기준 미달"
             else:
                 df = get_kline_by_strategy(symbol, strategy)
                 if df is None or df.empty or df[df["timestamp"] >= pred_time].empty:
@@ -197,7 +202,8 @@ def get_strategy_fail_rate(symbol, strategy):
         return 0.0
 
 def print_prediction_stats():
-    if not os.path.exists(PREDICTION_LOG): return "예측 기록이 없습니다."
+    if not os.path.exists(PREDICTION_LOG):
+        return "예측 기록이 없습니다."
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
         status_list = ["success", "fail", "pending", "failed", "skipped", "expired", "invalid_model", "skip_eval"]
