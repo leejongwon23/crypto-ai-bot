@@ -5,7 +5,7 @@ from data.utils import get_kline_by_strategy, compute_features
 from model.base_model import get_model
 from model_weight_loader import get_model_weight
 from window_optimizer import find_best_window
-from logger import get_min_gain
+from logger import get_min_gain, log_prediction
 
 DEVICE, MODEL_DIR = torch.device("cpu"), "/persistent/models"
 STOP_LOSS_PCT = 0.02
@@ -14,6 +14,8 @@ now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def failed_result(symbol, strategy, reason):
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    log_prediction(symbol, strategy, direction="롱", entry_price=0, target_price=0,
+                   confidence=0, model="ensemble", success=False, reason=reason, rate=0.0, timestamp=t)
     return {
         "symbol": symbol, "strategy": strategy, "success": False, "reason": reason,
         "direction": "롱", "model": "ensemble", "confidence": 0.0, "rate": 0.0,
@@ -102,13 +104,18 @@ def predict(symbol, strategy):
         except Exception as e:
             print(f"[지표 예외] {symbol}-{strategy}: {e}")
 
+        t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+        log_prediction(symbol, strategy, direction, entry_price=price,
+                       target_price=price * (1 + rate) if direction == "롱" else price * (1 - rate),
+                       confidence=conf, model="ensemble", success=True, reason=", ".join(reason), rate=rate, timestamp=t)
+
         return {
             "symbol": symbol, "strategy": strategy, "model": "ensemble", "direction": direction,
             "confidence": conf, "rate": rate, "price": price,
             "target": price * (1 + rate) if direction == "롱" else price * (1 - rate),
             "stop": price * (1 - STOP_LOSS_PCT) if direction == "롱" else price * (1 + STOP_LOSS_PCT),
             "reason": ", ".join([r for r in reason if r]), "success": True,
-            "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
+            "timestamp": t
         }
 
     except Exception as e:
