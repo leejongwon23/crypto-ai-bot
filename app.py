@@ -125,7 +125,7 @@ def yopo_health():
             if pv["fail_rate"] > 50:
                 problems.append(f"{strat}: 변동성 실패율 {pv['fail_rate']:.1f}%")
 
-            stat_html.append(f"""<div style='border:1px solid #aaa; margin:16px 0; padding:10px; font-family:monospace; background:#f8f8f8;'>
+            block = f"""<div style='border:1px solid #aaa; margin:16px 0; padding:10px; font-family:monospace; background:#f8f8f8;'>
 <b style='font-size:16px;'>📌 전략: {strat}</b><br>
 - 모델 수: {len(models)}<br>
 - 최근 학습: {r_train}<br>
@@ -135,7 +135,7 @@ def yopo_health():
 <b style='color:#000088'>🎯 일반 예측</b>: 총 {pn['total']}건 | 성공률: {percent(pn['succ_rate'])} / 실패율: {percent(pn['fail_rate'])} / 평균 수익률: {pn['r_avg']:.2f}%<br>
 <b style='color:#880000'>🌪️ 변동성 예측</b>: 총 {pv['total']}건 | 성공률: {percent(pv['succ_rate'])} / 실패율: {percent(pv['fail_rate'])} / 평균 수익률: {pv['r_avg']:.2f}%<br>
 - 예측: {"✅" if succ+fail+pend+failed > 0 else "❌"} / 평가: {"✅" if succ+fail > 0 else "⏳"} / 학습: {"✅" if r_train != "없음" else "❌"}
-</div>""")
+</div>"""
 
             if not pred.empty and all(c in pred.columns for c in ["timestamp", "symbol", "direction", "return", "confidence", "status"]):
                 recent10 = pred.tail(10).copy()
@@ -146,11 +146,11 @@ def yopo_health():
             else:
                 table = "<i>최근 예측 기록 없음</i>"
 
-            strat_html.append(stat_html + f"<b>📋 {strat} 최근 예측</b><br>{table}")
+            strat_html.append(block + f"<b>📋 {strat} 최근 예측</b><br>{table}")
         except Exception as e:
             strat_html.append(f"<div style='color:red;'>❌ {strat} 처리 실패: {e}</div>")
 
-    status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
+status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
     return f"<div style='font-family:monospace; line-height:1.6; font-size:15px;'><b>{status}</b><hr>" + "".join(strat_html) + "</div>"
 
 @app.route("/")
