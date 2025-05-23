@@ -7,7 +7,6 @@ from telegram_bot import send_message
 from predict_test import test_all_predictions
 from predict_trigger import run as trigger_run
 from data.utils import SYMBOLS, get_kline_by_strategy
-from src.healthcheck_yopo import generate_health_report
 
 PERSIST_DIR = "/persistent"
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
@@ -42,7 +41,6 @@ def start_scheduler():
     print(">>> start_scheduler() 호출됨"); sys.stdout.flush()
     scheduler = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
 
-    # 🎓 학습 스케줄 (전략별 최소 1.5시간 간격 확보)
     학습_스케줄 = [
         (6, 0, "장기"),
         (7, 45, "중기"),
@@ -56,7 +54,6 @@ def start_scheduler():
         scheduler.add_job(lambda s=s: threading.Thread(target=train.train_model_loop, args=(s,), daemon=True).start(),
                           'cron', hour=h, minute=m)
 
-    # 📈 예측 스케줄 (전략당 30분, 병렬 3개 가능, 예측 간 최소 30분 유지)
     예측_스케줄 = [
         (7, 0, "장기"), (7, 0, "중기"), (7, 0, "단기"),
         (10, 30, "단기"),
@@ -188,15 +185,9 @@ def audit_log_download():
 @app.route("/yopo-health")
 def yopo_health():
     try:
-        result = generate_health_report()
-        return f"<pre style='font-family:monospace; line-height:1.6'>{result}</pre>"
-    except Exception as e:
-        return f"[오류] 헬스체크 실패: {e}", 500
+        results, summary = [], []
 
-@app.route("/health-check")
-def health_check():
-    results, summary = [], []
-    try:
+        # 예측 로그 확인
         if os.path.exists(PREDICTION_LOG):
             df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
             total, done = len(df), len(df[df["status"].isin(["success", "fail"])])
@@ -204,26 +195,33 @@ def health_check():
             summary.append(f"- 평가 완료율: {(done/total*100):.1f}%" if total else "- 평가 없음")
         else:
             results.append("❌ 예측 기록 없음")
+
+        # 모델 파일 존재
+        try:
+            models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
+            results.append(f"✅ 모델 파일 OK ({len(models)}개)" if models else "❌ 모델 없음")
+        except Exception as e:
+            results.append(f"❌ 모델 확인 실패: {e}")
+
+        # 메시지 로그 확인
+        try:
+            if os.path.exists(MESSAGE_LOG):
+                df = pd.read_csv(MESSAGE_LOG, encoding="utf-8-sig")
+                results.append(f"✅ 메시지 로그 OK ({len(df)}건)")
+        except Exception as e:
+            results.append(f"❌ 메시지 확인 실패: {e}")
+
+        # 전략별 성공률
+        try:
+            for s in ["단기", "중기", "장기"]:
+                r = __import__('logger').get_actual_success_rate(s, threshold=0.0)
+                summary.append(f"- {s} 전략 성공률: {r*100:.1f}%")
+        except:
+            summary.append("- 전략별 성공률 확인 실패")
+
+        return f"<div style='font-family:monospace; line-height:1.6;'>" + "<br> ".join(results + [""] + summary) + "</div>"
     except Exception as e:
-        results.append(f"❌ 예측 확인 실패: {e}")
-    try:
-        models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
-        results.append(f"✅ 모델 파일 OK ({len(models)}개)" if models else "❌ 모델 없음")
-    except Exception as e:
-        results.append(f"❌ 모델 확인 실패: {e}")
-    try:
-        if os.path.exists(MESSAGE_LOG):
-            df = pd.read_csv(MESSAGE_LOG, encoding="utf-8-sig")
-            results.append(f"✅ 메시지 로그 OK ({len(df)}건)")
-    except Exception as e:
-        results.append(f"❌ 메시지 확인 실패: {e}")
-    try:
-        for s in ["단기", "중기", "장기"]:
-            r = __import__('logger').get_actual_success_rate(s, threshold=0.0)
-            summary.append(f"- {s} 전략 성공률: {r*100:.1f}%")
-    except:
-        summary.append("- 전략별 성공률 확인 실패")
-    return f"<div style='font-family:monospace; line-height:1.6;'>" + "<br> ".join(results + [""] + summary) + "</div>"
+        return f"[오류] yopo-health 진단 실패: {e}", 500
 
 if __name__ == "__main__":
     print(">>> __main__ 진입, 서버 실행 준비"); sys.stdout.flush()
