@@ -1,4 +1,4 @@
-# YOPO 서버 진입점 - 변동성 예측 분리 + 시각 개선 포함 app.py (1/4)
+# YOPO 서버 진입점 - 변동성 예측 분리 + 시각 개선 포함 app.py (1/3)
 from flask import Flask, jsonify, request, send_file
 from recommend import main
 import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv
@@ -55,7 +55,7 @@ def start_scheduler():
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료"); sys.stdout.flush()
 
-# /yopo-health + 진단/시각 개선 + 변동성 분리 포함 (2/4)
+# /yopo-health + 진단/시각 개선 + 변동성 분리 포함 (2/3)
 @app.route("/yopo-health")
 def yopo_health():
     import pandas as pd, os, datetime, pytz
@@ -130,7 +130,7 @@ def yopo_health():
             if pv["fail_rate"] > 50:
                 problems.append(f"{strat}: 변동성 실패율 {pv['fail_rate']:.1f}%")
 
-            stat_html = f"""<div style='border:1px solid #aaa; margin:16px 0; padding:10px; font-family:monospace; background:#f8f8f8;'>
+            stat_html.append(f"""<div style='border:1px solid #aaa; margin:16px 0; padding:10px; font-family:monospace; background:#f8f8f8;'>
 <b style='font-size:16px;'>📌 전략: {strat}</b><br>
 - 모델 수: {len(models)}<br>
 - 최근 학습: {r_train}<br>
@@ -140,7 +140,7 @@ def yopo_health():
 <b style='color:#000088'>🎯 일반 예측</b>: 총 {pn['total']}건 | 성공률: {percent(pn['succ_rate'])} / 실패율: {percent(pn['fail_rate'])} / 평균 수익률: {pn['r_avg']:.2f}%<br>
 <b style='color:#880000'>🌪️ 변동성 예측</b>: 총 {pv['total']}건 | 성공률: {percent(pv['succ_rate'])} / 실패율: {percent(pv['fail_rate'])} / 평균 수익률: {pv['r_avg']:.2f}%<br>
 - 예측: {"✅" if succ+fail+pend+failed > 0 else "❌"} / 평가: {"✅" if succ+fail > 0 else "⏳"} / 학습: {"✅" if r_train != "없음" else "❌"}
-</div>"""
+</div>""")
 
             if not pred.empty and all(c in pred.columns for c in ["timestamp", "symbol", "direction", "return", "confidence", "status"]):
                 recent10 = pred.tail(10).copy()
@@ -155,15 +155,10 @@ def yopo_health():
         except Exception as e:
             strat_html.append(f"<div style='color:red;'>❌ {strat} 처리 실패: {e}</div>")
 
-# /yopo-health 진단 요약 + 기타 라우트 연결부 (3/4)
-    # 최상단 종합진단 요약 출력
-    if not problems:
-        status = "🟢 전체 전략 정상 작동 중"
-    else:
-        status = "🔴 종합진단 요약:<br>" + "<br>".join(problems)
-
+    status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
     return f"<div style='font-family:monospace; line-height:1.6; font-size:15px;'><b>{status}</b><hr>" + "".join(strat_html) + "</div>"
 
+# 기타 라우트 + 실행부 (3/3)
 @app.route("/")
 def index(): return "Yopo server is running"
 
@@ -206,7 +201,6 @@ def list_models():
     except Exception as e:
         return f"오류: {e}", 500
 
-# YOPO 서버 진입점 마무리 실행부 (4/4)
 @app.route("/check-log")
 def check_log():
     try:
