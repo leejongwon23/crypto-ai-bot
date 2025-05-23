@@ -160,6 +160,20 @@ def audit_log():
     except Exception as e:
         return jsonify({"error": str(e)})
 
+@app.route("/force-fix-prediction-log")
+def force_fix_prediction_log():
+    try:
+        headers = [
+            "timestamp", "symbol", "strategy", "direction",
+            "entry_price", "target_price", "confidence",
+            "model", "rate", "status", "reason", "return"
+        ]
+        with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
+            csv.DictWriter(f, fieldnames=headers).writeheader()
+        return "✅ prediction_log.csv 강제 초기화 완료"
+    except Exception as e:
+        return f"⚠️ 오류: {e}", 500
+
 @app.route("/audit-log-download")
 def audit_log_download():
     try:
