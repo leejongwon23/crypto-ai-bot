@@ -97,7 +97,7 @@ def yopo_health():
             else:
                 nvol, vol = pd.DataFrame(), pd.DataFrame()
 
-def perf(df):
+            def perf(df):
                 try:
                     s, f = stat(df, "success"), stat(df, "fail")
                     total = s + f
@@ -125,7 +125,7 @@ def perf(df):
             if pv["fail_rate"] > 50:
                 problems.append(f"{strat}: 변동성 실패율 {pv['fail_rate']:.1f}%")
 
-            html = f"""<div style='border:1px solid #aaa; margin:16px 0; padding:10px; font-family:monospace; background:#f8f8f8;'>
+html = f"""<div style='border:1px solid #aaa; margin:16px 0; padding:10px; font-family:monospace; background:#f8f8f8;'>
 <b style='font-size:16px;'>📌 전략: {strat}</b><br>
 - 모델 수: {len(models)}<br>
 - 최근 학습: {r_train}<br>
@@ -137,11 +137,14 @@ def perf(df):
 - 예측: {"✅" if succ+fail+pend+failed > 0 else "❌"} / 평가: {"✅" if succ+fail > 0 else "⏳"} / 학습: {"✅" if r_train != "없음" else "❌"}
 </div>"""
 
-if not pred.empty and all(c in pred.columns for c in ["timestamp", "symbol", "direction", "return", "confidence", "status"]):
+            if not pred.empty and all(c in pred.columns for c in ["timestamp", "symbol", "direction", "return", "confidence", "status"]):
                 recent10 = pred.tail(10).copy()
                 recent10["return"] = pd.to_numeric(recent10["return"], errors='coerce').fillna(0)
                 recent10["confidence"] = pd.to_numeric(recent10["confidence"], errors='coerce').fillna(0)
-                rows = [f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{r['return']:.2f}%</td><td>{r['confidence']:.1f}%</td><td>{'✅' if r['status']=='success' else '❌' if r['status']=='fail' else '⏳' if r['status']=='pending' else '🛑'}</td></tr>" for _, r in recent10.iterrows()]
+                rows = [
+                    f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{r['return']:.2f}%</td><td>{r['confidence']:.1f}%</td><td>{'✅' if r['status']=='success' else '❌' if r['status']=='fail' else '⏳' if r['status']=='pending' else '🛑'}</td></tr>"
+                    for _, r in recent10.iterrows()
+                ]
                 table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>신뢰도</th><th>상태</th></tr>" + "".join(rows) + "</table>"
             else:
                 table = "<i>최근 예측 기록 없음</i>"
