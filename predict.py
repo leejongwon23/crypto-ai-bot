@@ -35,14 +35,19 @@ def predict(symbol, strategy):
 
         feat = pd.DataFrame(MinMaxScaler().fit_transform(feat.dropna()), columns=feat.columns)
         X = np.expand_dims(feat.iloc[-window:].values, axis=0)
-        if X.shape != (1, window, X.shape[2]):
+        if X.shape[1] != window:
             return failed_result(symbol, strategy, "시퀀스 형상 오류")
 
-        model_files = {
-            f.replace(f"{symbol}_{strategy}_", "").replace(".pt", ""): os.path.join(MODEL_DIR, f)
-            for f in os.listdir(MODEL_DIR)
-            if f.endswith(".pt") and f.startswith(f"{symbol}_{strategy}_")
-        }
+        # ✅ 모델 파일 유연하게 탐색
+        model_files = {}
+        for f in os.listdir(MODEL_DIR):
+            if not f.endswith(".pt"): continue
+            parts = f.replace(".pt", "").split("_")
+            if len(parts) < 3: continue
+            f_sym, f_strat, f_type = parts[0], parts[1], "_".join(parts[2:])
+            if f_sym == symbol and f_strat == strategy:
+                model_files[f_type] = os.path.join(MODEL_DIR, f)
+
         if not model_files:
             return failed_result(symbol, strategy, "모델 없음")
 
