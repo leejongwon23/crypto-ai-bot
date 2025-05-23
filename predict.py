@@ -1,191 +1,113 @@
-import os
-import torch
-import numpy as np
-import datetime
-import pytz
-import pandas as pd
+import os, torch, numpy as np, pandas as pd, datetime, pytz
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import log_loss
-
 from data.utils import get_kline_by_strategy, compute_features
 from model.base_model import get_model
 from model_weight_loader import get_model_weight
 from window_optimizer import find_best_window
 from logger import get_min_gain
 
-DEVICE = torch.device("cpu")
+DEVICE, MODEL_DIR = torch.device("cpu"), "/persistent/models"
 STOP_LOSS_PCT = 0.02
-MODEL_DIR = "/persistent/models"
-
-MIN_EXPECTED_RATES = {
-    "단기": 0.007,
-    "중기": 0.015,
-    "장기": 0.03  # ✅ 장기 전략은 여전히 1주 예측 기준 유지
-}
-
-def now_kst():
-    return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+MIN_EXPECTED_RATES = {"단기": 0.007, "중기": 0.015, "장기": 0.03}
+now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def failed_result(symbol, strategy, reason):
+    t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     return {
-        "symbol": symbol,
-        "strategy": strategy,
-        "success": False,
-        "reason": reason,
-        "direction": "롱",
-        "model": "ensemble",
-        "confidence": 0.0,
-        "rate": 0.0,
-        "price": 1.0,
-        "target": 1.0,
-        "stop": 1.0,
-        "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
+        "symbol": symbol, "strategy": strategy, "success": False, "reason": reason,
+        "direction": "롱", "model": "ensemble", "confidence": 0.0, "rate": 0.0,
+        "price": 1.0, "target": 1.0, "stop": 1.0, "timestamp": t
     }
 
 def predict(symbol, strategy):
     try:
-        best_window = find_best_window(symbol, strategy)
+        window = find_best_window(symbol, strategy)
         df = get_kline_by_strategy(symbol, strategy)
-        if df is None or len(df) < best_window + 1:
+        if df is None or len(df) < window + 1:
             return failed_result(symbol, strategy, "데이터 부족")
 
-        features = compute_features(symbol, df, strategy)
-        features = features.dropna()
-        if features is None or len(features) < best_window + 1:
+        feat = compute_features(symbol, df, strategy)
+        if feat is None or feat.dropna().shape[0] < window + 1:
             return failed_result(symbol, strategy, "feature 부족")
 
-        scaler = MinMaxScaler()
-        scaled = scaler.fit_transform(features.values)
-        features = pd.DataFrame(scaled, columns=features.columns)
-
-        X_raw = features.iloc[-best_window:].values
-        if X_raw.shape[0] != best_window:
-            return failed_result(symbol, strategy, "시퀀스 길이 오류")
-        X = np.expand_dims(X_raw, axis=0)
-        if len(X.shape) != 3:
+        feat = pd.DataFrame(MinMaxScaler().fit_transform(feat.dropna()), columns=feat.columns)
+        X = np.expand_dims(feat.iloc[-window:].values, axis=0)
+        if X.shape != (1, window, X.shape[2]):
             return failed_result(symbol, strategy, "시퀀스 형상 오류")
 
-        X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
-        input_size = X.shape[2]
-
-        model_paths = {
-            file.replace(f"{symbol}_{strategy}_", "").replace(".pt", ""): os.path.join(MODEL_DIR, file)
-            for file in os.listdir(MODEL_DIR)
-            if file.endswith(".pt") and file.startswith(f"{symbol}_{strategy}_")
+        model_files = {
+            f.replace(f"{symbol}_{strategy}_", "").replace(".pt", ""): os.path.join(MODEL_DIR, f)
+            for f in os.listdir(MODEL_DIR)
+            if f.endswith(".pt") and f.startswith(f"{symbol}_{strategy}_")
         }
-        if not model_paths:
+        if not model_files:
             return failed_result(symbol, strategy, "모델 없음")
 
         min_gain = get_min_gain(symbol, strategy)
-        rate_boost_factor = 1.2 if strategy in ["단기", "중기"] else 1.4
         results = []
-
-        for model_type, model_path in model_paths.items():
+        for model_type, path in model_files.items():
             try:
-                model = get_model(model_type=model_type, input_size=input_size)
-                model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+                model = get_model(model_type, X.shape[2])
+                model.load_state_dict(torch.load(path, map_location=DEVICE))
                 model.eval()
                 with torch.no_grad():
-                    signal, confidence = model(X_tensor)
-                    if signal is None or confidence is None:
-                        continue
-                    signal = float(signal.squeeze().item())
-                    confidence = float(confidence.squeeze().item())
-
-                    if not (0 <= signal <= 1):
-                        continue
-                    if 0.48 <= signal <= 0.52:
-                        continue
-
-                    direction = "롱" if signal > 0.5 else "숏"
-                    raw_rate = abs(signal - 0.5) * 2
+                    s, c = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
+                    if s is None or c is None: continue
+                    s, c = float(s.squeeze()), float(c.squeeze())
+                    if not (0 <= s <= 1) or 0.48 <= s <= 0.52: continue
+                    dir = "롱" if s > 0.5 else "숏"
+                    raw_rate = abs(s - 0.5) * 2
                     weight = get_model_weight(model_type, strategy)
-
                     try:
-                        loss_penalty = log_loss(
-                            [1 if signal > 0.5 else 0],
-                            [np.clip(signal, 1e-6, 1 - 1e-6)],
-                            labels=[0, 1]
-                        )
-                        confidence_penalty = max(0.1, 1.0 - loss_penalty)
-                    except Exception as e:
-                        confidence_penalty = confidence
-                        print(f"[log_loss 예외] {symbol}-{strategy}-{model_type}: {e}")
-
-                    final_conf = (confidence + confidence_penalty) / 2
-                    rate = raw_rate * min_gain * final_conf * rate_boost_factor
-                    score = final_conf * weight * rate
-
+                        penalty = max(0.1, 1 - log_loss([1 if s > 0.5 else 0], [np.clip(s, 1e-6, 1 - 1e-6)], labels=[0, 1]))
+                    except: penalty = c
+                    conf = (c + penalty) / 2
+                    rate = raw_rate * min_gain * conf * (1.2 if strategy in ["단기", "중기"] else 1.4)
                     results.append({
-                        "model": model_type,
-                        "direction": direction,
-                        "confidence": final_conf,
-                        "weight": weight,
-                        "score": score,
-                        "rate": rate
+                        "model": model_type, "direction": dir, "confidence": conf,
+                        "weight": weight, "score": conf * weight * rate, "rate": rate
                     })
             except Exception as e:
                 print(f"[모델 예측 실패] {symbol}-{strategy}-{model_type}: {e}")
-                continue
-
         if not results:
             return failed_result(symbol, strategy, "모든 모델 예측 실패")
 
-        dir_count = {"롱": 0, "숏": 0}
-        for r in results:
-            dir_count[r["direction"]] += 1
+        dir_counts = {"롱": 0, "숏": 0}
+        for r in results: dir_counts[r["direction"]] += 1
+        if dir_counts["롱"] >= 2: direction = "롱"
+        elif dir_counts["숏"] >= 2: direction = "숏"
+        elif len(results) == 1: direction = results[0]["direction"]
+        else: return failed_result(symbol, strategy, "모델 방향 불일치")
 
-        if dir_count["롱"] >= 2:
-            final_direction = "롱"
-        elif dir_count["숏"] >= 2:
-            final_direction = "숏"
-        elif len(results) == 1:
-            final_direction = results[0]["direction"]
-        else:
-            return failed_result(symbol, strategy, "모델 방향 불일치")
+        final = [r for r in results if r["direction"] == direction]
+        conf, rate = np.mean([r["confidence"] for r in final]), np.mean([r["rate"] for r in final])
+        if rate < MIN_EXPECTED_RATES.get(strategy, 0.01) and max(r["rate"] for r in final) < MIN_EXPECTED_RATES.get(strategy, 0.01) * 1.2:
+            return failed_result(symbol, strategy, f"예측 수익률 기준 미달 ({rate:.4f})")
 
-        valid = [r for r in results if r["direction"] == final_direction]
-        avg_conf = sum(r["confidence"] for r in valid) / len(valid)
-        avg_rate = sum(r["rate"] for r in valid) / len(valid)
-
-        min_expected = MIN_EXPECTED_RATES.get(strategy, 0.01)
-        if avg_rate < min_expected:
-            high_rate = max(r["rate"] for r in valid)
-            if high_rate < min_expected * 1.2:
-                return failed_result(symbol, strategy, f"예측 수익률 기준 미달 ({avg_rate:.4f})")
-
-        price = features["close"].iloc[-1]
+        price = feat["close"].iloc[-1]
         if np.isnan(price):
             return failed_result(symbol, strategy, "price NaN 발생")
 
         reason = []
         try:
-            rsi = float(features["rsi"].iloc[-1])
-            macd = float(features["macd"].iloc[-1])
-            boll = float(features["bollinger"].iloc[-1])
-            if final_direction == "롱":
+            rsi, macd, boll = map(float, (feat["rsi"].iloc[-1], feat["macd"].iloc[-1], feat["bollinger"].iloc[-1]))
+            if direction == "롱":
                 if rsi < 30: reason.append("RSI 과매도")
                 if macd > 0: reason.append("MACD 상승")
             else:
                 if rsi > 70: reason.append("RSI 과매수")
                 if macd < 0: reason.append("MACD 하락")
-            if boll > 1: reason.append("볼린저 상단")
-            elif boll < -1: reason.append("볼린저 하단")
+            reason.append("볼린저 상단" if boll > 1 else "볼린저 하단" if boll < -1 else "")
         except Exception as e:
             print(f"[지표 예외] {symbol}-{strategy}: {e}")
 
         return {
-            "symbol": symbol,
-            "strategy": strategy,
-            "model": "ensemble",
-            "direction": final_direction,
-            "confidence": avg_conf,
-            "rate": avg_rate,
-            "price": price,
-            "target": price * (1 + avg_rate) if final_direction == "롱" else price * (1 - avg_rate),
-            "stop": price * (1 - STOP_LOSS_PCT) if final_direction == "롱" else price * (1 + STOP_LOSS_PCT),
-            "reason": ", ".join(reason),
-            "success": True,
+            "symbol": symbol, "strategy": strategy, "model": "ensemble", "direction": direction,
+            "confidence": conf, "rate": rate, "price": price,
+            "target": price * (1 + rate) if direction == "롱" else price * (1 - rate),
+            "stop": price * (1 - STOP_LOSS_PCT) if direction == "롱" else price * (1 + STOP_LOSS_PCT),
+            "reason": ", ".join([r for r in reason if r]), "success": True,
             "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
         }
 
