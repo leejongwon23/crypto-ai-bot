@@ -17,6 +17,12 @@ DEVICE = torch.device("cpu")
 STOP_LOSS_PCT = 0.02
 MODEL_DIR = "/persistent/models"
 
+MIN_EXPECTED_RATES = {
+    "단기": 0.007,
+    "중기": 0.015,
+    "장기": 0.03
+}
+
 def now_kst():
     return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
@@ -140,6 +146,12 @@ def predict(symbol, strategy):
         valid = [r for r in results if r["direction"] == final_direction]
         avg_conf = sum(r["confidence"] for r in valid) / len(valid)
         avg_rate = sum(r["rate"] for r in valid) / len(valid)
+
+        # 전략별 수익률 기준 미달 시 예측 폐기
+        min_expected = MIN_EXPECTED_RATES.get(strategy, 0.01)
+        if avg_rate < min_expected:
+            return failed_result(symbol, strategy, f"예측 수익률 기준 미달 ({avg_rate:.4f})")
+
         price = features["close"].iloc[-1]
         if np.isnan(price):
             return failed_result(symbol, strategy, "price NaN 발생")
