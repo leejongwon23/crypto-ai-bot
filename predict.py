@@ -1,3 +1,4 @@
+# 동일한 import 구문
 import os
 import torch
 import numpy as np
@@ -77,6 +78,7 @@ def predict(symbol, strategy):
             return failed_result(symbol, strategy, "모델 없음")
 
         min_gain = get_min_gain(symbol, strategy)
+        rate_boost_factor = 1.2 if strategy in ["단기", "중기"] else 1.4
         results = []
 
         for model_type, model_path in model_paths.items():
@@ -112,7 +114,7 @@ def predict(symbol, strategy):
                         print(f"[log_loss 예외] {symbol}-{strategy}-{model_type}: {e}")
 
                     final_conf = (confidence + confidence_penalty) / 2
-                    rate = raw_rate * min_gain * final_conf
+                    rate = raw_rate * min_gain * final_conf * rate_boost_factor
                     score = final_conf * weight * rate
 
                     results.append({
@@ -147,10 +149,12 @@ def predict(symbol, strategy):
         avg_conf = sum(r["confidence"] for r in valid) / len(valid)
         avg_rate = sum(r["rate"] for r in valid) / len(valid)
 
-        # 전략별 수익률 기준 미달 시 예측 폐기
+        # 전략별 수익률 기준 미달 시 예측 폐기 (단, 편차가 크면 예외)
         min_expected = MIN_EXPECTED_RATES.get(strategy, 0.01)
         if avg_rate < min_expected:
-            return failed_result(symbol, strategy, f"예측 수익률 기준 미달 ({avg_rate:.4f})")
+            high_rate = max(r["rate"] for r in valid)
+            if high_rate < min_expected * 1.2:
+                return failed_result(symbol, strategy, f"예측 수익률 기준 미달 ({avg_rate:.4f})")
 
         price = features["close"].iloc[-1]
         if np.isnan(price):
