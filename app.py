@@ -1,4 +1,3 @@
-# YOPO 서버 진입점 - 변동성 예측 분리 + 시각 개선 포함 app.py (1/3)
 from flask import Flask, jsonify, request, send_file
 from recommend import main
 import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv
@@ -55,7 +54,6 @@ def start_scheduler():
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료"); sys.stdout.flush()
 
-# /yopo-health + 진단/시각 개선 + 변동성 분리 포함 (2/3)
 @app.route("/yopo-health")
 def yopo_health():
     import pandas as pd, os, datetime, pytz
@@ -118,13 +116,10 @@ def yopo_health():
 
             if len(models) == 0:
                 problems.append(f"{strat}: 모델 없음")
-                system_flags.append("모델없음")
             if succ + fail + pend + failed == 0:
                 problems.append(f"{strat}: 예측 없음")
-                system_flags.append("예측없음")
             if succ + fail == 0:
                 problems.append(f"{strat}: 평가 미작동")
-                system_flags.append("평가없음")
             if pn["fail_rate"] > 50:
                 problems.append(f"{strat}: 일반 실패율 {pn['fail_rate']:.1f}%")
             if pv["fail_rate"] > 50:
@@ -158,20 +153,23 @@ def yopo_health():
     status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
     return f"<div style='font-family:monospace; line-height:1.6; font-size:15px;'><b>{status}</b><hr>" + "".join(strat_html) + "</div>"
 
-# 기타 라우트 + 실행부 (3/3)
 @app.route("/")
-def index(): return "Yopo server is running"
+def index():
+    return "Yopo server is running"
 
 @app.route("/ping")
-def ping(): return "pong"
+def ping():
+    return "pong"
 
 @app.route("/run")
 def run():
     try:
         print("[RUN] main() 실행"); sys.stdout.flush()
-        main(); return "Recommendation started"
+        main()
+        return "Recommendation started"
     except Exception as e:
-        traceback.print_exc(); return f"Error: {e}", 500
+        traceback.print_exc()
+        return f"Error: {e}", 500
 
 @app.route("/train-now")
 def train_now():
@@ -219,6 +217,7 @@ def reset_all():
         def clear(f, headers):
             with open(f, "w", newline="", encoding="utf-8-sig") as x:
                 csv.DictWriter(x, fieldnames=headers).writeheader()
+
         if os.path.exists(MODEL_DIR): shutil.rmtree(MODEL_DIR)
         os.makedirs(MODEL_DIR, exist_ok=True)
 
@@ -227,11 +226,11 @@ def reset_all():
             "entry_price", "target_price", "confidence",
             "model", "rate", "status", "reason", "return"
         ])
-        clear(WRONG_PREDICTIONS, ["symbol","strategy","reason","timestamp"])
-        clear(LOG_FILE, ["timestamp","symbol","strategy","model","accuracy","f1","loss"])
-        clear(AUDIT_LOG, ["timestamp","symbol","strategy","result","status"])
-        clear(MESSAGE_LOG, ["timestamp","symbol","strategy","message"])
-        clear(FAILURE_LOG, ["symbol","strategy","failures"])
+        clear(WRONG_PREDICTIONS, ["symbol", "strategy", "reason", "timestamp"])
+        clear(LOG_FILE, ["timestamp", "symbol", "strategy", "model", "accuracy", "f1", "loss"])
+        clear(AUDIT_LOG, ["timestamp", "symbol", "strategy", "result", "status"])
+        clear(MESSAGE_LOG, ["timestamp", "symbol", "strategy", "message"])
+        clear(FAILURE_LOG, ["symbol", "strategy", "failures"])
         return "✅ 초기화 완료"
     except Exception as e:
         return f"초기화 실패: {e}", 500
