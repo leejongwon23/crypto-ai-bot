@@ -27,7 +27,7 @@ SYMBOLS = [
 STRATEGY_CONFIG = {
     "단기": {"interval": "240", "limit": 300},
     "중기": {"interval": "D", "limit": 300},
-    "장기": {"interval": "W", "limit": 300}
+    "장기": {"interval": "3D", "limit": 300}  # ✅ 수정됨: 주봉 → 3일봉
 }
 
 DEFAULT_MIN_GAIN = {
@@ -114,7 +114,7 @@ def get_realtime_prices():
     except:
         return {}
 
-# ✅ 수정됨: symbol 인자 추가
+# ✅ compute_features
 def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFrame:
     df = df.copy()
     df['ma5'] = df['close'].rolling(window=5).mean()
