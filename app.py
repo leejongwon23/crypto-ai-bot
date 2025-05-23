@@ -88,7 +88,7 @@ def yopo_health():
             r_train = train["timestamp"].iloc[-1] if not train.empty and "timestamp" in train.columns else "없음"
             r_eval = audit["timestamp"].iloc[-1] if not audit.empty and "timestamp" in audit.columns else "없음"
 
-            stat = lambda df, t="": len(df[df["status"] == t]) if not df.empty and "status" in df.columns else 0
+stat = lambda df, t="": len(df[df["status"] == t]) if not df.empty and "status" in df.columns else 0
             succ, fail, pend, failed = map(lambda s: stat(pred, s), ["success", "fail", "pending", "failed"])
 
             if "symbol" in pred.columns:
@@ -114,7 +114,7 @@ def yopo_health():
 
             pn, pv = perf(nvol), perf(vol)
 
-            if len(models) == 0:
+if len(models) == 0:
                 problems.append(f"{strat}: 모델 없음")
             if succ + fail + pend + failed == 0:
                 problems.append(f"{strat}: 예측 없음")
@@ -137,7 +137,7 @@ def yopo_health():
 - 예측: {"✅" if succ+fail+pend+failed > 0 else "❌"} / 평가: {"✅" if succ+fail > 0 else "⏳"} / 학습: {"✅" if r_train != "없음" else "❌"}
 </div>"""
 
-            if not pred.empty and all(c in pred.columns for c in ["timestamp", "symbol", "direction", "return", "confidence", "status"]):
+if not pred.empty and all(c in pred.columns for c in ["timestamp", "symbol", "direction", "return", "confidence", "status"]):
                 recent10 = pred.tail(10).copy()
                 recent10["return"] = pd.to_numeric(recent10["return"], errors='coerce').fillna(0)
                 recent10["confidence"] = pd.to_numeric(recent10["confidence"], errors='coerce').fillna(0)
