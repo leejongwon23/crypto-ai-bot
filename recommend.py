@@ -65,17 +65,24 @@ def log_audit(symbol, strategy, result, status):
         writer.writerow(row)
 
 def get_symbols_by_volatility(strategy):
-    threshold = STRATEGY_VOLATILITY.get(strategy, 0.003) * 1.2
+    threshold = STRATEGY_VOLATILITY.get(strategy, 0.003)
     selected = []
+
     for symbol in SYMBOLS:
         try:
             df = get_kline_by_strategy(symbol, strategy)
-            if df is None or len(df) < 20: continue
-            vol = df["close"].pct_change().rolling(window=20).std().iloc[-1]
-            if vol and vol >= threshold:
-                selected.append({"symbol": symbol, "volatility": vol})
+            if df is None or len(df) < 60: continue
+
+            recent_std = df["close"].pct_change().rolling(window=20).std().iloc[-1]
+            baseline_std = df["close"].pct_change().rolling(window=60).std().iloc[-1]
+            spike_ratio = recent_std / (baseline_std + 1e-8)
+
+            if recent_std >= threshold and spike_ratio >= 1.5:
+                selected.append({"symbol": symbol, "volatility": recent_std})
         except Exception as e:
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
+
+    selected = sorted(selected, key=lambda x: -x["volatility"])[:30]
     return selected
 
 def should_predict(symbol, strategy):
@@ -145,7 +152,6 @@ def run_prediction_loop(strategy, symbol_data_list):
 
             all_results.append(result)
 
-            # ✅ 반전 전략 조건 판단
             conf = result.get("confidence", 0)
             rate = result.get("rate", 0)
             success_rate = get_model_success_rate(symbol, strategy, result.get("model", "ensemble"))
