@@ -75,8 +75,9 @@ def yopo_health():
         except:
             logs[name] = pd.DataFrame()
 
-    for strat in ["단기", "중기", "장기"]:
+for strategy in ["단기", "중기", "장기"]:
         try:
+            strat = strategy  # ✅ except 블록에서도 안전하게 쓰이도록 선언
             pred = logs["pred"].query(f"strategy == '{strat}'") if not logs["pred"].empty else pd.DataFrame()
             train = logs["train"].query(f"strategy == '{strat}'") if not logs["train"].empty else pd.DataFrame()
             audit = logs["audit"].query(f"strategy == '{strat}'") if not logs["audit"].empty else pd.DataFrame()
@@ -146,7 +147,7 @@ def yopo_health():
 
             strat_html.append(html + f"<b>📋 {strat} 최근 예측</b><br>{table}")
         except Exception as e:
-            strat_html.append(f"<div style='color:red;'>❌ {strat} 처리 실패: {e}</div>")
+            strat_html.append(f"<div style='color:red;'>❌ {strategy} 처리 실패: {e}</div>")
 
     status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
     return f"<div style='font-family:monospace; line-height:1.6; font-size:15px;'><b>{status}</b><hr>" + "".join(strat_html) + "</div>"
