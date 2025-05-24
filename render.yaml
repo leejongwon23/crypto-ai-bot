@@ -4,7 +4,7 @@ services:
     env: python
     plan: standard  # ✅ 여기만 'free' → 'standard' 로 변경
     buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
+    startCommand: PYTHONUNBUFFERED=1 python ./app.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
