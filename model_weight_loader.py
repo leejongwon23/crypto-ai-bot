@@ -78,7 +78,7 @@ def count_models_per_strategy():
                 continue
             parts = file.split("_")
             if len(parts) >= 3:
-                strategy = parts[1]
+                strategy = parts[1]  # 파일명 형식: symbol_strategy_model.pt
                 if strategy in counts:
                     counts[strategy] += 1
     except Exception as e:
