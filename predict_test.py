@@ -48,8 +48,8 @@ def test_all_predictions():
     print(f"모델 없음으로 SKIP: {skipped}")
     if failed_cases:
         print("실패 목록:")
-        for sym, strat in failed_cases:
-            print(f"- {sym}-{strat}")
+        for symbol, strategy in failed_cases:
+            print(f"- {symbol}-{strategy}")
 
 if __name__ == "__main__":
     test_all_predictions()
