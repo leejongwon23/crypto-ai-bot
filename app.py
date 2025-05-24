@@ -41,10 +41,10 @@ def start_scheduler():
     예측 = [(7,30,s) for s in ["단기","중기","장기"]] + [(10,30,"단기"),(10,30,"중기"),
           (12,30,"중기"),(14,30,"장기"),(16,30,"단기"),(18,30,"중기")] + [(21,0,s) for s in ["단기","중기","장기"]] + [(0,0,"단기"),(0,0,"중기")]
 
-    for h,m,s in 학습:
-        sched.add_job(lambda s=s: threading.Thread(target=train.train_model_loop, args=(s,), daemon=True).start(), 'cron', hour=h, minute=m)
-    for h,m,s in 예측:
-        sched.add_job(lambda s=s: threading.Thread(target=main, args=(s,), daemon=True).start(), 'cron', hour=h, minute=m)
+    for h,m,strategy in 학습:
+        sched.add_job(lambda strategy=strategy: threading.Thread(target=train.train_model_loop, args=(strategy,), daemon=True).start(), 'cron', hour=h, minute=m)
+    for h,m,strategy in 예측:
+        sched.add_job(lambda strategy=strategy: threading.Thread(target=main, args=(strategy,), daemon=True).start(), 'cron', hour=h, minute=m)
 
     sched.add_job(lambda: __import__('logger').evaluate_predictions(None), 'cron', minute=20)
     sched.add_job(test_all_predictions, 'cron', minute=10)
@@ -57,7 +57,7 @@ print(">>> Flask 앱 생성 완료"); sys.stdout.flush()
 @app.route("/yopo-health")
 def yopo_health():
     percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
-    strat_html, problems = [], []
+    strategy_html, problems = [], []
 
     logs = {}
     for name, path in {
@@ -75,13 +75,12 @@ def yopo_health():
         except:
             logs[name] = pd.DataFrame()
 
-for strategy in ["단기", "중기", "장기"]:
+    for strategy in ["단기", "중기", "장기"]:
         try:
-            strat = strategy  # ✅ except 블록에서도 안전하게 쓰이도록 선언
-            pred = logs["pred"].query(f"strategy == '{strat}'") if not logs["pred"].empty else pd.DataFrame()
-            train = logs["train"].query(f"strategy == '{strat}'") if not logs["train"].empty else pd.DataFrame()
-            audit = logs["audit"].query(f"strategy == '{strat}'") if not logs["audit"].empty else pd.DataFrame()
-            models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt") and strat in f]
+            pred = logs["pred"].query(f"strategy == '{strategy}'") if not logs["pred"].empty else pd.DataFrame()
+            train = logs["train"].query(f"strategy == '{strategy}'") if not logs["train"].empty else pd.DataFrame()
+            audit = logs["audit"].query(f"strategy == '{strategy}'") if not logs["audit"].empty else pd.DataFrame()
+            models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt") and strategy in f]
 
             r_pred = pred["timestamp"].iloc[-1] if not pred.empty and "timestamp" in pred.columns else "없음"
             r_train = train["timestamp"].iloc[-1] if not train.empty and "timestamp" in train.columns else "없음"
@@ -114,18 +113,18 @@ for strategy in ["단기", "중기", "장기"]:
             pn, pv = perf(nvol), perf(vol)
 
             if len(models) == 0:
-                problems.append(f"{strat}: 모델 없음")
+                problems.append(f"{strategy}: 모델 없음")
             if succ + fail + pend + failed == 0:
-                problems.append(f"{strat}: 예측 없음")
+                problems.append(f"{strategy}: 예측 없음")
             if succ + fail == 0:
-                problems.append(f"{strat}: 평가 미작동")
+                problems.append(f"{strategy}: 평가 미작동")
             if pn["fail_rate"] > 50:
-                problems.append(f"{strat}: 일반 실패율 {pn['fail_rate']:.1f}%")
+                problems.append(f"{strategy}: 일반 실패율 {pn['fail_rate']:.1f}%")
             if pv["fail_rate"] > 50:
-                problems.append(f"{strat}: 변동성 실패율 {pv['fail_rate']:.1f}%")
+                problems.append(f"{strategy}: 변동성 실패율 {pv['fail_rate']:.1f}%")
 
             html = f"""<div style='border:1px solid #aaa; margin:16px 0; padding:10px; font-family:monospace; background:#f8f8f8;'>
-<b style='font-size:16px;'>📌 전략: {strat}</b><br>
+<b style='font-size:16px;'>📌 전략: {strategy}</b><br>
 - 모델 수: {len(models)}<br>
 - 최근 학습: {r_train}<br>
 - 최근 예측: {r_pred}<br>
@@ -145,12 +144,12 @@ for strategy in ["단기", "중기", "장기"]:
             else:
                 table = "<i>최근 예측 기록 없음</i>"
 
-            strat_html.append(html + f"<b>📋 {strat} 최근 예측</b><br>{table}")
+            strategy_html.append(html + f"<b>📋 {strategy} 최근 예측</b><br>{table}")
         except Exception as e:
-            strat_html.append(f"<div style='color:red;'>❌ {strategy} 처리 실패: {e}</div>")
+            strategy_html.append(f"<div style='color:red;'>❌ {strategy} 처리 실패: {e}</div>")
 
     status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
-    return f"<div style='font-family:monospace; line-height:1.6; font-size:15px;'><b>{status}</b><hr>" + "".join(strat_html) + "</div>"
+    return f"<div style='font-family:monospace; line-height:1.6; font-size:15px;'><b>{status}</b><hr>" + "".join(strategy_html) + "</div>"
 
 @app.route("/")
 def index():
