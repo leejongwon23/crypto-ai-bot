@@ -75,7 +75,7 @@ def yopo_health():
         except Exception as e:
             print(f"[경고] 로그 로드 실패: {name} - {e}")
             logs[name] = pd.DataFrame()
-            for strategy in ["단기", "중기", "장기"]:
+for strategy in ["단기", "중기", "장기"]:
         try:
             pred = logs["pred"].query(f"strategy == '{strategy}'") if not logs["pred"].empty else pd.DataFrame()
             train = logs["train"].query(f"strategy == '{strategy}'") if not logs["train"].empty else pd.DataFrame()
@@ -98,7 +98,7 @@ def yopo_health():
                 vol = pred[pred["symbol"].astype(str).str.contains("_v", na=False)]
             else:
                 nvol, vol = pd.DataFrame(), pd.DataFrame()
-                def perf(df):
+def perf(df):
                 try:
                     s, f = stat(df, "success"), stat(df, "fail")
                     total = s + f
@@ -150,7 +150,7 @@ def yopo_health():
             strategy_html.append(html + f"<b>📋 {strategy} 최근 예측</b><br>{table}")
         except Exception as e:
             strategy_html.append(f"<div style='color:red;'>❌ {strategy} 처리 실패: {e}</div>")
-            status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
+status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
     return f"<div style='font-family:monospace; line-height:1.6; font-size:15px;'><b>{status}</b><hr>" + "".join(strategy_html) + "</div>"
 
 @app.route("/")
@@ -257,3 +257,4 @@ if __name__ == "__main__":
     threading.Thread(target=start_scheduler, daemon=True).start()
     threading.Thread(target=lambda: send_message("[시작] YOPO 서버 실행됨"), daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
