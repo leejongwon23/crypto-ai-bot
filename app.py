@@ -20,8 +20,10 @@ def start_scheduler():
     sched = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
     학습 = [(1,30,"단기"), (3,30,"장기"), (6,0,"중기"), (9,0,"단기"), (11,0,"중기"), (13,0,"장기"), (15,0,"단기"), (17,0,"중기"), (19,0,"장기"), (22,30,"단기")]
     예측 = [(7,30,s) for s in ["단기","중기","장기"]] + [(10,30,"단기"),(10,30,"중기"),(12,30,"중기"),(14,30,"장기"),(16,30,"단기"),(18,30,"중기")] + [(21,0,s) for s in ["단기","중기","장기"]] + [(0,0,"단기"),(0,0,"중기")]
-    for h,m,strategy in 학습: sched.add_job(lambda strategy=strategy: threading.Thread(target=train.train_model_loop,args=(strategy,),daemon=True).start(),'cron',hour=h,minute=m)
-    for h,m,strategy in 예측: sched.add_job(lambda strategy=strategy: threading.Thread(target=main,args=(strategy,),daemon=True).start(),'cron',hour=h,minute=m)
+    for h,m,strategy in 학습:
+        sched.add_job(lambda strategy=strategy: threading.Thread(target=train.train_model_loop,args=(strategy,),daemon=True).start(),'cron',hour=h,minute=m)
+    for h,m,strategy in 예측:
+        sched.add_job(lambda strategy=strategy: threading.Thread(target=main,args=(strategy,),daemon=True).start(),'cron',hour=h,minute=m)
     sched.add_job(lambda: __import__('logger').evaluate_predictions(None), 'cron', minute=20)
     sched.add_job(test_all_predictions, 'cron', minute=10)
     sched.add_job(trigger_run, 'interval', minutes=30)
@@ -35,13 +37,18 @@ def yopo_health():
     percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
     logs, strategy_html, problems = {}, [], []
     for name, path in {"pred":PREDICTION_LOG,"train":LOG_FILE,"audit":AUDIT_LOG,"msg":MESSAGE_LOG}.items():
-        try: logs[name] = pd.read_csv(path, encoding="utf-8-sig") if os.path.exists(path) else pd.DataFrame()
-        except: logs[name] = pd.DataFrame()
+        try:
+            logs[name] = pd.read_csv(path, encoding="utf-8-sig") if os.path.exists(path) else pd.DataFrame()
+        except:
+            logs[name] = pd.DataFrame()
     for strat in ["단기", "중기", "장기"]:
         try:
-            pred = logs["pred"].query(f"strategy == '{strat}'") if not logs["pred"].empty else pd.DataFrame()
-            train = logs["train"].query(f"strategy == '{strat}'") if not logs["train"].empty else pd.DataFrame()
-            audit = logs["audit"].query(f"strategy == '{strat}'") if not logs["audit"].empty else pd.DataFrame()
+            pred = logs["pred"]
+            train = logs["train"]
+            audit = logs["audit"]
+            pred = pred.query(f"strategy == '{strat}'") if not pred.empty and "strategy" in pred.columns else pd.DataFrame()
+            train = train.query(f"strategy == '{strat}'") if not train.empty and "strategy" in train.columns else pd.DataFrame()
+            audit = audit.query(f"strategy == '{strat}'") if not audit.empty and "strategy" in audit.columns else pd.DataFrame()
             model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
             models = [f for f in model_files if strat in f]
             types = {"lstm":0,"cnn_lstm":0,"transformer":0}
@@ -50,15 +57,21 @@ def yopo_health():
                     if f.endswith(f"_{t}.pt"): types[t] += 1
             trained = set(f.split("_")[0] for f in models if strat in f)
             untrained = sorted(set(SYMBOLS) - trained)
-            stat = lambda df,s:len(df[df["status"]==s]) if not df.empty else 0
+            stat = lambda df,s:len(df[df["status"]==s]) if not df.empty and "status" in df.columns else 0
             succ, fail, pend, failed = map(lambda s: stat(pred,s), ["success","fail","pending","failed"])
-            nvol = pred[~pred["symbol"].astype(str).str.contains("_v", na=False)] if "symbol" in pred else pd.DataFrame()
-            vol  = pred[pred["symbol"].astype(str).str.contains("_v", na=False)] if "symbol" in pred else pd.DataFrame()
+            if "symbol" in pred.columns:
+                nvol = pred[~pred["symbol"].astype(str).str.contains("_v", na=False)]
+                vol = pred[pred["symbol"].astype(str).str.contains("_v", na=False)]
+            else:
+                nvol = vol = pd.DataFrame()
             def perf(df):
-                try: s,f = stat(df,"success"),stat(df,"fail"); t=s+f
-                except: return {"succ":0,"fail":0,"succ_rate":0,"fail_rate":0,"r_avg":0,"total":0}
-                avg = pd.to_numeric(df.get("return", pd.Series()), errors='coerce').mean()
-                return {"succ":s,"fail":f,"succ_rate":s/t*100 if t else 0,"fail_rate":f/t*100 if t else 0,"r_avg":avg if pd.notna(avg) else 0,"total":t}
+                try:
+                    s,f = stat(df,"success"),stat(df,"fail")
+                    t = s + f
+                    avg = pd.to_numeric(df.get("return", pd.Series()), errors='coerce').mean()
+                    return {"succ":s,"fail":f,"succ_rate":s/t*100 if t else 0,"fail_rate":f/t*100 if t else 0,"r_avg":avg if pd.notna(avg) else 0,"total":t}
+                except:
+                    return {"succ":0,"fail":0,"succ_rate":0,"fail_rate":0,"r_avg":0,"total":0}
             pn, pv = perf(nvol), perf(vol)
             if not models: problems.append(f"{strat}: 모델 없음")
             if succ+fail+pend+failed==0: problems.append(f"{strat}: 예측 없음")
