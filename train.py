@@ -1,4 +1,4 @@
-import os, time, json, threading, torch, torch.nn as nn, numpy as np, datetime, pytz
+import os, time, json, threading, torch, torch.nn as nn, numpy as np, datetime, pytz, sys
 import pandas as pd
 from torch.utils.data import DataLoader, TensorDataset, random_split
 from sklearn.preprocessing import MinMaxScaler
@@ -62,9 +62,11 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"🗘 체크포인트 저장됨: {path}")
+    sys.stdout.flush()
 
 def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3, repeat=4, repeat_wrong=4):
     print(f"[train] 🔄 {symbol}-{strategy} 학습 시작")
+    sys.stdout.flush()
     try:
         best_window = find_best_window(symbol, strategy)
         df = get_kline_by_strategy(symbol, strategy)
@@ -126,6 +128,7 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
                                         optimizer.step()
                         except Exception as e:
                             print(f"[오답 학습 실패] {symbol}-{strategy} → {e}")
+                            sys.stdout.flush()
 
                 for epoch in range(epochs):
                     for xb, yb in train_loader:
@@ -157,12 +160,15 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
                     metrics[model_type] = (acc, f1, logloss)
             except Exception as e:
                 print(f"[평가 오류] {symbol}-{strategy}-{model_type} → {e}")
+                sys.stdout.flush()
     except Exception as e:
         print(f"[학습 실패] {symbol}-{strategy} → {e}")
+        sys.stdout.flush()
         try:
             logger.log_training_result(symbol, strategy, "none", 0.0, 0.0, 0.0)
         except Exception as log_error:
             print(f"[로그 기록 실패] {symbol}-{strategy} → {log_error}")
+            sys.stdout.flush()
 
     if scores:
         best_model_type = max(scores, key=scores.get)
@@ -171,15 +177,18 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{best_model_type}.pt")
         torch.save(best_model_obj.state_dict(), model_path)
         print(f"✅ Best 모델 저장됨: {model_path} (score: {scores[best_model_type]:.4f})")
+        sys.stdout.flush()
         save_model_metadata(symbol, strategy, best_model_type, best_acc, best_f1, best_loss)
         importances = compute_feature_importance(best_model_obj, val_X_tensor, val_y_tensor, list(df_feat.columns))
         save_feature_importance(importances, symbol, strategy, best_model_type)
     else:
         print(f"❗ 모델 저장 실패: {symbol}-{strategy} 모든 모델 평가 실패")
+        sys.stdout.flush()
         try:
             logger.log_training_result(symbol, strategy, "none", 0.0, 0.0, 0.0)
         except Exception as e:
             print(f"[예외] log_training_result 실패 → {e}")
+            sys.stdout.flush()
 
 def train_all_models():
     for strategy in ["단기", "중기", "장기"]:
@@ -188,6 +197,7 @@ def train_all_models():
                 train_one_model(symbol, strategy)
             except Exception as e:
                 print(f"[전체 학습 루프 오류] {symbol}-{strategy} → {e}")
+                sys.stdout.flush()
 
 def train_model_loop(strategy):
     for symbol in SYMBOLS:
@@ -195,5 +205,6 @@ def train_model_loop(strategy):
             train_one_model(symbol, strategy)
         except Exception as e:
             print(f"[단일 전략 학습 실패] {symbol}-{strategy} → {e}")
+            sys.stdout.flush()
 
 train_model = train_all_models
