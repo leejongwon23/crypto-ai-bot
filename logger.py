@@ -35,13 +35,9 @@ def get_actual_success_rate(strategy):
         if df.empty or "strategy" not in df.columns or "status" not in df.columns:
             return 0.0
         df = df[df["strategy"] == strategy]
-        if df.empty:
-            return 0.0
         total = len(df[df["status"].isin(["success", "fail"])])
-        if total == 0:
-            return 0.0
         success = len(df[df["status"] == "success"])
-        return round(success / total, 4)
+        return round(success / total, 4) if total > 0 else 0.0
     except Exception as e:
         print(f"[오류] get_actual_success_rate 실패: {e}")
         return 0.0
@@ -75,8 +71,8 @@ def log_audit(symbol, strategy, status, reason):
         print(f"[오류] log_audit 실패: {e}")
 
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
-                   timestamp=None, confidence=0, model="unknown", success=True, reason="", rate=0.0,
-                   return_value=None):  # ✅ B방식: 인자 추가
+                   timestamp=None, confidence=0, model="unknown", success=True,
+                   reason="", rate=0.0, return_value=None):
     now = timestamp or now_kst().isoformat()
     row = {
         "timestamp": now,
@@ -90,13 +86,15 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "rate": float(rate),
         "status": "pending" if success else "failed",
         "reason": reason or "",
-        "return": float(return_value if return_value is not None else rate)  # ✅ B방식: return 필드 추가
+        "return": float(return_value if return_value is not None else rate)
     }
     log_audit(row["symbol"], row["strategy"], "예측성공" if success else "예측실패", row["reason"])
     write_header = not os.path.exists(PREDICTION_LOG) or os.stat(PREDICTION_LOG).st_size == 0
+    headers = ["timestamp","symbol","strategy","direction","entry_price","target_price",
+               "confidence","model","rate","status","reason","return"]
     try:
         with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=row)
+            w = csv.DictWriter(f, fieldnames=headers)
             if write_header: w.writeheader()
             w.writerow(row)
     except Exception as e:
@@ -113,8 +111,8 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
         "loss": float(loss)
     }
     try:
-        pd.DataFrame([row]).to_csv(LOG_FILE, mode='a', header=not os.path.exists(LOG_FILE), index=False, encoding="utf-8-sig")
-        print(f"[LOG] Training result logged for {symbol} - {strategy} - {model_name}")
+        pd.DataFrame([row]).to_csv(LOG_FILE, mode='a', header=not os.path.exists(LOG_FILE),
+                                   index=False, encoding="utf-8-sig")
     except Exception as e:
         print(f"[오류] 학습 로그 저장 실패: {e}")
 
@@ -131,25 +129,23 @@ def evaluate_predictions(get_price_fn):
     if not rows: return
     now = now_kst()
     updated = []
-
     for row in rows:
         if row.get("status") not in ["pending", "failed"]:
             updated.append(row)
             continue
         try:
             symbol = row.get("symbol", "UNKNOWN")
-            strategy = row.get("strategy") or "알수없음"
+            strategy = row.get("strategy", "알수없음")
             direction = row.get("direction", "롱")
             model = row.get("model", "unknown")
             entry = float(row.get("entry_price", 0))
             rate = float(row.get("rate", 0))
             pred_time = datetime.datetime.fromisoformat(row.get("timestamp")).astimezone(pytz.timezone("Asia/Seoul"))
             hours = (now - pred_time).total_seconds() / 3600
-
             if hours > get_dynamic_eval_wait(strategy) + EVAL_EXPIRY_BUFFER:
                 row.update({"status": "expired", "reason": f"평가 유효시간 초과: {hours:.2f}h"})
             elif hours < get_dynamic_eval_wait(strategy):
-                row["reason"] = f"{hours:.2f}h < {get_dynamic_eval_wait(strategy)}h"
+                row.update({"reason": f"{hours:.2f}h < {get_dynamic_eval_wait(strategy)}h"})
             elif entry == 0 or model == "unknown" or any(k in row.get("reason", "") for k in ["모델 없음", "기준 미달"]):
                 row.update({"status": "invalid_model", "reason": "모델 없음 또는 entry_price=0 또는 기준 미달"})
             else:
@@ -161,27 +157,26 @@ def evaluate_predictions(get_price_fn):
                     eval_df = df[df["timestamp"] >= pred_time]
                     price = eval_df["high"].max() if direction == "롱" else eval_df["low"].min()
                     gain = (price - entry) / entry if direction == "롱" else (entry - price) / entry
-                    success = gain >= rate
                     row.update({
-                        "status": "success" if success else "fail",
-                        "reason": f"수익률 도달: {gain:.4f} ≥ 예측 {rate:.4f}" if success else f"미달: {gain:.4f} < 예측 {rate:.4f}",
+                        "status": "success" if gain >= rate else "fail",
+                        "reason": f"수익률 도달: {gain:.4f} ≥ 예측 {rate:.4f}" if gain >= rate else f"미달: {gain:.4f} < 예측 {rate:.4f}",
                         "return": round(gain, 4)
                     })
-                    update_model_success(symbol, strategy, model, success)
-                    if not success:
+                    update_model_success(symbol, strategy, model, gain >= rate)
+                    if gain < rate:
                         if not os.path.exists(WRONG_PREDICTIONS):
                             with open(WRONG_PREDICTIONS, "w", newline="", encoding="utf-8-sig") as wf:
                                 csv.writer(wf).writerow(["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "gain"])
                         with open(WRONG_PREDICTIONS, "a", newline="", encoding="utf-8-sig") as wf:
-                            csv.writer(wf).writerow([row.get("timestamp"), symbol, strategy, direction, entry, row.get("target_price", 0), gain])
+                            csv.writer(wf).writerow([row["timestamp"], symbol, strategy, direction, entry, row.get("target_price", 0), gain])
             log_audit(symbol, strategy, row.get("status", "unknown"), row.get("reason", ""))
         except Exception as e:
             row.update({"status": "skip_eval", "reason": f"예외 발생: {e}"})
             try:
                 log_audit(row.get("symbol", "UNKNOWN"), row.get("strategy", "알수없음"), "스킵", row["reason"])
-            except Exception as log_err:
-                print(f"[오류] log_audit 실패 (보호): {log_err}")
+            except: pass
         updated.append(row)
-
+    headers = ["timestamp","symbol","strategy","direction","entry_price","target_price",
+               "confidence","model","rate","status","reason","return"]
     with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
-        csv.DictWriter(f, fieldnames=updated[0]).writerows([updated[0]] + updated[1:])
+        csv.DictWriter(f, fieldnames=headers).writerows(updated)
