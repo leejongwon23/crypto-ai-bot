@@ -4,6 +4,7 @@ from data.utils import SYMBOLS
 from model_weight_loader import model_exists
 import datetime
 import pytz
+import traceback
 
 STRATEGIES = ["단기", "중기", "장기"]
 
@@ -12,11 +13,7 @@ def now_kst():
 
 def test_all_predictions():
     print(f"\n📋 [예측 점검 시작] {now_kst().strftime('%Y-%m-%d %H:%M:%S')}")
-
-    total = 0
-    success = 0
-    failed = 0
-    skipped = 0
+    total, success, failed, skipped = 0, 0, 0, 0
     failed_cases = []
 
     for strategy in STRATEGIES:
@@ -29,20 +26,30 @@ def test_all_predictions():
             total += 1
             try:
                 result = predict(symbol, strategy)
-                if result is None:
+                if not isinstance(result, dict):
                     failed += 1
-                    failed_cases.append((symbol, strategy))
-                    print(f"❌ 실패: {symbol}-{strategy} → None 반환")
-                else:
-                    success += 1
-                    direction = result.get("direction", "?")
-                    conf = result.get("confidence", 0)
-                    rate = result.get("rate", 0)
-                    print(f"✅ 성공: {symbol}-{strategy} → {direction} | 신뢰도: {conf:.2f} / 수익률: {rate:.2%}")
+                    failed_cases.append((symbol, strategy, "None 또는 dict 아님"))
+                    print(f"❌ 실패: {symbol}-{strategy} → 반환 없음 또는 비정상")
+                    continue
+
+                if not result.get("success", False):
+                    reason = result.get("reason", "이유 없음")
+                    failed += 1
+                    failed_cases.append((symbol, strategy, reason))
+                    print(f"❌ 실패: {symbol}-{strategy} → {reason}")
+                    continue
+
+                direction = result.get("direction", "?")
+                conf = result.get("confidence", 0)
+                rate = result.get("rate", 0)
+                print(f"✅ 성공: {symbol}-{strategy} → {direction} | 신뢰도: {conf:.2f} / 수익률: {rate:.2%}")
+                success += 1
+
             except Exception as e:
                 failed += 1
-                failed_cases.append((symbol, strategy))
+                failed_cases.append((symbol, strategy, f"예외: {e}"))
                 print(f"⚠️ 예외 발생: {symbol}-{strategy} → {e}")
+                traceback.print_exc()
 
     print("\n📌 === 예측 점검 요약 ===")
     print(f"▶️ 총 시도: {total}")
@@ -50,9 +57,9 @@ def test_all_predictions():
     print(f"❌ 실패: {failed}")
     print(f"⏭️ 모델 없음 SKIP: {skipped}")
     if failed_cases:
-        print("🧨 실패 목록:")
-        for symbol, strategy in failed_cases:
-            print(f"- {symbol}-{strategy}")
+        print("\n🧨 실패 목록:")
+        for symbol, strategy, reason in failed_cases:
+            print(f"- {symbol}-{strategy} → {reason}")
 
 if __name__ == "__main__":
     test_all_predictions()
