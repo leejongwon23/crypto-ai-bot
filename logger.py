@@ -46,6 +46,17 @@ def get_actual_success_rate(strategy):
         print(f"[오류] get_actual_success_rate 실패: {e}")
         return 0.0
 
+def get_strategy_eval_count(strategy):
+    try:
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        if df.empty or "strategy" not in df.columns or "status" not in df.columns:
+            return 0
+        df = df[df["strategy"] == strategy]
+        return len(df[df["status"].isin(["success", "fail"])])
+    except Exception as e:
+        print(f"[오류] get_strategy_eval_count 실패: {e}")
+        return 0
+
 def log_audit(symbol, strategy, status, reason):
     row = {
         "timestamp": now_kst().isoformat(),
