@@ -75,7 +75,8 @@ def log_audit(symbol, strategy, status, reason):
         print(f"[오류] log_audit 실패: {e}")
 
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
-                   timestamp=None, confidence=0, model="unknown", success=True, reason="", rate=0.0):
+                   timestamp=None, confidence=0, model="unknown", success=True, reason="", rate=0.0,
+                   return_value=None):  # ✅ B방식: 인자 추가
     now = timestamp or now_kst().isoformat()
     row = {
         "timestamp": now,
@@ -88,7 +89,8 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "model": model or "unknown",
         "rate": float(rate),
         "status": "pending" if success else "failed",
-        "reason": reason or ""
+        "reason": reason or "",
+        "return": float(return_value if return_value is not None else rate)  # ✅ B방식: return 필드 추가
     }
     log_audit(row["symbol"], row["strategy"], "예측성공" if success else "예측실패", row["reason"])
     write_header = not os.path.exists(PREDICTION_LOG) or os.stat(PREDICTION_LOG).st_size == 0
@@ -116,7 +118,8 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     except Exception as e:
         print(f"[오류] 학습 로그 저장 실패: {e}")
 
-get_dynamic_eval_wait = lambda s: {"단기": 4, "중기": 24, "장기": 168}.get(s, 6)
+def get_dynamic_eval_wait(strategy):
+    return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 6)
 
 def evaluate_predictions(get_price_fn):
     if not os.path.exists(PREDICTION_LOG): return
@@ -161,7 +164,8 @@ def evaluate_predictions(get_price_fn):
                     success = gain >= rate
                     row.update({
                         "status": "success" if success else "fail",
-                        "reason": f"수익률 도달: {gain:.4f} ≥ 예측 {rate:.4f}" if success else f"미달: {gain:.4f} < 예측 {rate:.4f}"
+                        "reason": f"수익률 도달: {gain:.4f} ≥ 예측 {rate:.4f}" if success else f"미달: {gain:.4f} < 예측 {rate:.4f}",
+                        "return": round(gain, 4)
                     })
                     update_model_success(symbol, strategy, model, success)
                     if not success:
