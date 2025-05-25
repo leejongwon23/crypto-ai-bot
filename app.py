@@ -39,7 +39,9 @@ def yopo_health():
         except: logs[name] = pd.DataFrame()
     for strat in ["단기", "중기", "장기"]:
         try:
-            pred, train, audit = logs["pred"].query(f"strategy == '{strat}'") if not logs["pred"].empty else pd.DataFrame(), logs["train"].query(f"strategy == '{strat}'") if not logs["train"].empty else pd.DataFrame(), logs["audit"].query(f"strategy == '{strat}'") if not logs["audit"].empty else pd.DataFrame()
+            pred = logs["pred"].query(f"strategy == '{strat}'") if not logs["pred"].empty else pd.DataFrame()
+            train = logs["train"].query(f"strategy == '{strat}'") if not logs["train"].empty else pd.DataFrame()
+            audit = logs["audit"].query(f"strategy == '{strat}'") if not logs["audit"].empty else pd.DataFrame()
             model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
             models = [f for f in model_files if strat in f]
             types = {"lstm":0,"cnn_lstm":0,"transformer":0}
