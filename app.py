@@ -61,8 +61,9 @@ def yopo_health():
             if logs[name].empty or logs[name].shape[1]==0: logs[name] = pd.DataFrame()
         except Exception as e:
             print(f"[경고] 로그 로드 실패: {name} - {e}"); logs[name] = pd.DataFrame()
-    for strategy in ["단기", "중기", "장기"]:
+    for strat in ["단기", "중기", "장기"]:
         try:
+            strategy = strat
             pred = logs["pred"].query(f"strategy == '{strategy}'") if not logs["pred"].empty else pd.DataFrame()
             train = logs["train"].query(f"strategy == '{strategy}'") if not logs["train"].empty else pd.DataFrame()
             audit = logs["audit"].query(f"strategy == '{strategy}'") if not logs["audit"].empty else pd.DataFrame()
@@ -106,7 +107,7 @@ def yopo_health():
             else: table = "<i>최근 예측 기록 없음</i>"
             strategy_html.append(html + f"<b>📋 {strategy} 최근 예측</b><br>{table}")
         except Exception as e:
-            strategy_html.append(f"<div style='color:red;'>❌ 전략 처리 실패: {e}</div>")
+            strategy_html.append(f"<div style='color:red;'>❌ {strat} 처리 실패: {e}</div>")
     status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
     return f"<div style='font-family:monospace; line-height:1.6; font-size:15px;'><b>{status}</b><hr>" + "".join(strategy_html) + "</div>"
 
