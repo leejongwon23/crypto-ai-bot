@@ -29,6 +29,23 @@ def get_model_success_rate(symbol, strategy, model, min_total=10):
     total = r["success"] + r["fail"]
     return 0.5 if total < min_total else r["success"] / total
 
+def get_actual_success_rate(strategy):
+    try:
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        if df.empty or "strategy" not in df.columns or "status" not in df.columns:
+            return 0.0
+        df = df[df["strategy"] == strategy]
+        if df.empty:
+            return 0.0
+        total = len(df[df["status"].isin(["success", "fail"])])
+        if total == 0:
+            return 0.0
+        success = len(df[df["status"] == "success"])
+        return round(success / total, 4)
+    except Exception as e:
+        print(f"[오류] get_actual_success_rate 실패: {e}")
+        return 0.0
+
 def log_audit(symbol, strategy, status, reason):
     row = {
         "timestamp": now_kst().isoformat(),
