@@ -136,7 +136,10 @@ def evaluate_predictions(get_price_fn):
             log_audit(symbol, strategy, row["status"], row["reason"])
         except Exception as e:
             row.update({"status": "skip_eval", "reason": f"예외 발생: {e}"})
-            log_audit(symbol, strategy, "스킵", row["reason"])
+            try:
+                log_audit(row.get("symbol", "UNKNOWN"), row.get("strategy", "UNKNOWN"), "스킵", row["reason"])
+            except Exception as log_err:
+                print(f"[오류] log_audit 실패 (보호): {log_err}")
         updated.append(row)
 
     with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
