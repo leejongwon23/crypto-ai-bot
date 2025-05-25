@@ -1,4 +1,4 @@
-import os, torch, numpy as np, pandas as pd, datetime, pytz
+import os, torch, numpy as np, pandas as pd, datetime, pytz, sys
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import log_loss
 from data.utils import get_kline_by_strategy, compute_features
@@ -19,6 +19,7 @@ def failed_result(symbol, strategy, reason):
                        confidence=0, model="ensemble", success=False, reason=reason, rate=0.0, timestamp=t)
     except Exception as e:
         print(f"[경고] log_prediction 실패: {e}")
+        sys.stdout.flush()
     return {
         "symbol": symbol,
         "strategy": strategy if strategy else "알수없음",
@@ -36,6 +37,9 @@ def failed_result(symbol, strategy, reason):
 
 def predict(symbol, strategy):
     try:
+        print(f"[PREDICT] {symbol}-{strategy} 시작")
+        sys.stdout.flush()
+
         window = find_best_window(symbol, strategy)
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < window + 1:
@@ -52,11 +56,9 @@ def predict(symbol, strategy):
 
         model_files = {}
         for f in os.listdir(MODEL_DIR):
-            if not f.endswith(".pt"):
-                continue
+            if not f.endswith(".pt"): continue
             parts = f.replace(".pt", "").split("_")
-            if len(parts) < 3:
-                continue
+            if len(parts) < 3: continue
             f_sym, f_strat, f_type = parts[0], parts[1], "_".join(parts[2:])
             if f_sym == symbol and f_strat == strategy:
                 model_files[f_type] = os.path.join(MODEL_DIR, f)
@@ -66,6 +68,7 @@ def predict(symbol, strategy):
 
         min_gain = get_min_gain(symbol, strategy)
         results = []
+
         for model_type, path in model_files.items():
             try:
                 model = get_model(model_type, X.shape[2])
@@ -73,11 +76,9 @@ def predict(symbol, strategy):
                 model.eval()
                 with torch.no_grad():
                     s, c = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
-                    if s is None or c is None:
-                        continue
+                    if s is None or c is None: continue
                     s, c = float(s.squeeze()), float(c.squeeze())
-                    if not (0 <= s <= 1) or 0.48 <= s <= 0.52:
-                        continue
+                    if not (0 <= s <= 1) or 0.48 <= s <= 0.52: continue
                     dir = "롱" if s > 0.5 else "숏"
                     raw_rate = abs(s - 0.5) * 2
                     weight = get_model_weight(model_type, strategy)
@@ -97,6 +98,8 @@ def predict(symbol, strategy):
                     })
             except Exception as e:
                 print(f"[모델 예측 실패] {symbol}-{strategy}-{model_type}: {e}")
+                sys.stdout.flush()
+
         if not results:
             return failed_result(symbol, strategy, "모든 모델 예측 실패")
 
@@ -128,18 +131,15 @@ def predict(symbol, strategy):
             macd = float(feat["macd"].iloc[-1])
             boll = float(feat["bollinger"].iloc[-1])
             if direction == "롱":
-                if rsi < 30:
-                    reason.append("RSI 과매도")
-                if macd > 0:
-                    reason.append("MACD 상승")
+                if rsi < 30: reason.append("RSI 과매도")
+                if macd > 0: reason.append("MACD 상승")
             else:
-                if rsi > 70:
-                    reason.append("RSI 과매수")
-                if macd < 0:
-                    reason.append("MACD 하락")
+                if rsi > 70: reason.append("RSI 과매수")
+                if macd < 0: reason.append("MACD 하락")
             reason.append("볼린저 상단" if boll > 1 else "볼린저 하단" if boll < -1 else "")
         except Exception as e:
             print(f"[지표 예외] {symbol}-{strategy}: {e}")
+            sys.stdout.flush()
 
         t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
         log_prediction(symbol, strategy, direction, entry_price=price,
@@ -162,6 +162,8 @@ def predict(symbol, strategy):
         }
 
     except Exception as e:
+        print(f"[예외] 예측 실패: {symbol}-{strategy} → {e}")
+        sys.stdout.flush()
         try:
             return failed_result(symbol, strategy, f"예외 발생: {e}")
         except Exception as inner:
