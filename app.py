@@ -67,7 +67,7 @@ def yopo_health():
             train = logs["train"].query(f"strategy == '{strategy}'") if not logs["train"].empty else pd.DataFrame()
             audit = logs["audit"].query(f"strategy == '{strategy}'") if not logs["audit"].empty else pd.DataFrame()
             model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
-            models = [f for f in model_files if f.endswith(".pt") and f"_{strategy}_" in f]
+            models = [f for f in model_files if strategy in f]
             r_pred = pred["timestamp"].iloc[-1] if not pred.empty and "timestamp" in pred.columns else "없음"
             r_train = train["timestamp"].iloc[-1] if not train.empty and "timestamp" in train.columns else "없음"
             r_eval = audit["timestamp"].iloc[-1] if not audit.empty and "timestamp" in audit.columns else "없음"
@@ -126,7 +126,7 @@ def reset_all():
         return "✅ 초기화 완료"
     except Exception as e: return f"초기화 실패: {e}", 500
 
-@app.route("/force-fix-prediction_log")
+@app.route("/force-fix-prediction-log")
 def force_fix_prediction_log():
     try:
         headers = ["timestamp","symbol","strategy","direction","entry_price","target_price","confidence","model","rate","status","reason","return"]
