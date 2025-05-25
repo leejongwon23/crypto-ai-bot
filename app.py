@@ -1,4 +1,3 @@
-<pre>
 from flask import Flask, jsonify, request
 from recommend import main
 import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv
@@ -176,4 +175,3 @@ if __name__ == "__main__":
     threading.Thread(target=start_scheduler, daemon=True).start()
     threading.Thread(target=lambda: send_message("[시작] YOPO 서버 실행됨"), daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-</pre>
