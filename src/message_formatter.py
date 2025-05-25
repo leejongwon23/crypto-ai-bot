@@ -1,19 +1,30 @@
 import datetime
 import pytz
+import math
 
 def now_kst():
     return datetime.datetime.now(pytz.timezone("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
 
 def format_message(data):
-    price = data.get("price", 0)
+    # 안전한 값 추출
+    def safe_float(value, default=0.0):
+        try:
+            if value is None or (isinstance(value, str) and not value.strip()):
+                return default
+            val = float(value)
+            return val if not math.isnan(val) else default
+        except:
+            return default
+
+    price = safe_float(data.get("price"), 0.0)
     direction = data.get("direction", "롱")
     strategy = data.get("strategy", "전략")
     symbol = data.get("symbol", "종목")
-    confidence = data.get("confidence", 0)
-    success_rate = data.get("success_rate", 0)
-    rate = data.get("rate", 0)
-    target = data.get("target", 0)
-    reason = data.get("reason", "-")
+    confidence = safe_float(data.get("confidence"), 0.0)
+    success_rate = safe_float(data.get("success_rate"), 0.0)
+    rate = safe_float(data.get("rate"), 0.0)
+    target = safe_float(data.get("target"), 0.0)
+    reason = str(data.get("reason", "-")).strip()
     score = data.get("score", None)
     reversed_signal = data.get("reversed", False)
 
@@ -35,7 +46,7 @@ def format_message(data):
         f"성공률: {success_rate_pct:.2f}%"
     )
 
-    if score is not None:
+    if isinstance(score, (float, int)) and not math.isnan(score):
         message += f"\n스코어: {score:.5f}"
 
     message += f"\n추천 사유: {reason}\n\n(기준시각: {now_kst()} KST)"
