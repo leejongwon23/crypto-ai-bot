@@ -3,7 +3,6 @@ from data.utils import get_kline_by_strategy
 
 PERSIST_DIR = "/persistent"
 LOG_DIR = os.path.join(PERSIST_DIR, "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
@@ -11,7 +10,7 @@ LOG_FILE = os.path.join(LOG_DIR, "train_log.csv")
 AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
 EVAL_EXPIRY_BUFFER, STOP_LOSS_PCT = 12, 0.02
 model_success_tracker = {}
-
+os.makedirs(LOG_DIR, exist_ok=True)
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def get_min_gain(symbol, strategy):
@@ -165,30 +164,51 @@ def get_strategy_fail_rate(symbol, strategy):
     except: return 0.0
 
 def print_prediction_stats():
-    if not os.path.exists(PREDICTION_LOG): return "예측 기록이 없습니다."
+    if not os.path.exists(PREDICTION_LOG):
+        return "❌ 예측 기록이 없습니다."
+
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
-        statuses = ["success", "fail", "pending", "failed", "skipped", "expired", "invalid_model", "skip_eval"]
-        counts = {k: len(df[df["status"] == k]) for k in statuses}
-        summary = [
-            f"📊 전체 예측 수: {len(df)}",
-            f"✅ 성공: {counts['success']}", f"❌ 실패: {counts['fail']}",
-            f"⏳ 평가 대기중: {counts['pending']}", f"⏱ 실패예측: {counts['failed']}",
-            f"⏭️ 스킵: {counts['skipped']}", f"⌛ 만료: {counts['expired']}",
-            f"⚠️ 모델없음: {counts['invalid_model']}", f"🟡 평가제외: {counts['skip_eval']}",
-            f"🌟 성공률: {(counts['success'] / (counts['success'] + counts['fail']) * 100):.2f}%" if (counts['success'] + counts['fail']) else "🌟 성공률: 0.00%"
+        statuses = [
+            ("success", "✅ 성공"),
+            ("fail", "❌ 실패"),
+            ("pending", "⏳ 평가 대기중"),
+            ("failed", "⏱ 실패예측"),
+            ("skipped", "⏭️ 스킵"),
+            ("expired", "⌛ 만료"),
+            ("invalid_model", "⚠️ 모델없음"),
+            ("skip_eval", "🟡 평가제외")
         ]
-        for s in df["strategy"].unique():
-            d = df[df["strategy"] == s]
-            s_s, s_f = len(d[d["status"] == "success"]), len(d[d["status"] == "fail"])
-            rate = (s_s / (s_s + s_f) * 100) if (s_s + s_f) else 0
-            summary.append(f"📌 {s} 성공률: {rate:.2f}%")
-        summary.append("")
-        for s in df["symbol"].unique():
-            d = df[df["symbol"] == s]
-            s_s, s_f = len(d[d["status"] == "success"]), len(d[d["status"] == "fail"])
-            rate = (s_s / (s_s + s_f) * 100) if (s_s + s_f) else 0
-            summary.append(f"📍 {s} 성공률: {rate:.2f}%")
+        summary = [f"📊 전체 예측 수: {len(df)}"]
+
+        for code, label in statuses:
+            count = len(df[df["status"] == code])
+            summary.append(f"{label}: {count}")
+
+        total_eval = len(df[df["status"].isin(["success", "fail"])])
+        succ_count = len(df[df["status"] == "success"])
+        success_rate = (succ_count / total_eval * 100) if total_eval else 0
+        summary.append(f"🌟 전체 성공률: {success_rate:.2f}%")
+
+        summary.append("\n📌 전략별 성공률:")
+        for strat in df["strategy"].dropna().unique():
+            d = df[df["strategy"] == strat]
+            s_s = len(d[d["status"] == "success"])
+            s_f = len(d[d["status"] == "fail"])
+            total = s_s + s_f
+            rate = (s_s / total * 100) if total else 0
+            summary.append(f" - {strat}: {rate:.2f}% ({s_s} / {total})")
+
+        summary.append("\n📍 종목별 성공률:")
+        for sym in df["symbol"].dropna().unique():
+            d = df[df["symbol"] == sym]
+            s_s = len(d[d["status"] == "success"])
+            s_f = len(d[d["status"] == "fail"])
+            total = s_s + s_f
+            rate = (s_s / total * 100) if total else 0
+            summary.append(f" - {sym}: {rate:.2f}% ({s_s} / {total})")
+
         return "\n".join(summary)
+
     except Exception as e:
         return f"[오류] 통계 출력 실패: {e}"
