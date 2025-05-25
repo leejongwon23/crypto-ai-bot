@@ -63,6 +63,13 @@ def yopo_health():
             if succ+fail==0: problems.append(f"{strat}: 평가 미작동")
             if pn["fail_rate"]>50: problems.append(f"{strat}: 일반 실패율 {pn['fail_rate']:.1f}%")
             if pv["fail_rate"]>50: problems.append(f"{strat}: 변동성 실패율 {pv['fail_rate']:.1f}%")
+            table = ""
+            if not pred.empty and all(c in pred.columns for c in ["timestamp","symbol","direction","return","confidence","status"]):
+                recent10 = pred.tail(10).copy()
+                recent10["return"] = pd.to_numeric(recent10["return"], errors='coerce').fillna(0)
+                recent10["confidence"] = pd.to_numeric(recent10["confidence"], errors='coerce').fillna(0)
+                rows = [f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{r['return']:.2f}%</td><td>{r['confidence']:.1f}%</td><td>{'✅' if r['status']=='success' else '❌' if r['status']=='fail' else '⏳' if r['status']=='pending' else '🛑'}</td></tr>" for _,r in recent10.iterrows()]
+                table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>신뢰도</th><th>상태</th></tr>" + "".join(rows) + "</table>"
             html = f"""<div style='border:1px solid #aaa;margin:16px 0;padding:10px;font-family:monospace;background:#f8f8f8;'>
 <b style='font-size:16px;'>📌 전략: {strat}</b><br>
 - 모델 수: {len(models)} (lstm={types['lstm']}, cnn={types['cnn_lstm']}, trans={types['transformer']})<br>
@@ -73,37 +80,13 @@ def yopo_health():
 - 예측: {succ+fail+pend+failed} (✅{succ} ❌{fail} ⏳{pend} 🛑{failed})<br>
 <b style='color:#000088'>🎯 일반 예측</b>: {pn['total']}건 | {percent(pn['succ_rate'])} / {percent(pn['fail_rate'])} / {pn['r_avg']:.2f}%<br>
 <b style='color:#880000'>🌪️ 변동성 예측</b>: {pv['total']}건 | {percent(pv['succ_rate'])} / {percent(pv['fail_rate'])} / {pv['r_avg']:.2f}%<br>
+<b>📋 최근 예측 10건</b><br>{table}
 </div>"""
             strategy_html.append(html)
         except Exception as e:
             strategy_html.append(f"<div style='color:red;'>❌ {strat} 실패: {e}</div>")
     status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
     return f"<div style='font-family:monospace;line-height:1.6;font-size:15px;'><b>{status}</b><hr>" + "".join(strategy_html) + "</div>"
-
-@app.route("/reset-all")
-def reset_all():
-    if request.args.get("key") != "3572": return "❌ 인증 실패", 403
-    try:
-        def clear(f,h): open(f,"w",newline="",encoding="utf-8-sig").write(",".join(h)+"\n")
-        if os.path.exists(MODEL_DIR): shutil.rmtree(MODEL_DIR)
-        os.makedirs(MODEL_DIR, exist_ok=True)
-        clear(PREDICTION_LOG,["timestamp","symbol","strategy","direction","entry_price","target_price","confidence","model","rate","status","reason","return"])
-        clear(WRONG_PREDICTIONS,["symbol","strategy","reason","timestamp"])
-        clear(LOG_FILE,["timestamp","symbol","strategy","model","accuracy","f1","loss"])
-        clear(AUDIT_LOG,["timestamp","symbol","strategy","result","status"])
-        clear(MESSAGE_LOG,["timestamp","symbol","strategy","message"])
-        clear(FAILURE_LOG,["symbol","strategy","failures"])
-        return "✅ 초기화 완료"
-    except Exception as e: return f"초기화 실패: {e}", 500
-
-@app.route("/force-fix-prediction-log")
-def force_fix_prediction_log():
-    try:
-        headers = ["timestamp","symbol","strategy","direction","entry_price","target_price","confidence","model","rate","status","reason","return"]
-        with open(PREDICTION_LOG,"w",newline="",encoding="utf-8-sig") as f:
-            csv.DictWriter(f, fieldnames=headers).writeheader()
-        return "✅ prediction_log.csv 강제 초기화 완료"
-    except Exception as e: return f"⚠️ 오류: {e}", 500
 
 @app.route("/")
 def index(): return "Yopo server is running"
@@ -145,6 +128,31 @@ def check_log():
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
         return jsonify(df.tail(10).to_dict(orient='records'))
     except Exception as e: return jsonify({"error": str(e)})
+
+@app.route("/reset-all")
+def reset_all():
+    if request.args.get("key") != "3572": return "❌ 인증 실패", 403
+    try:
+        def clear(f,h): open(f,"w",newline="",encoding="utf-8-sig").write(",".join(h)+"\n")
+        if os.path.exists(MODEL_DIR): shutil.rmtree(MODEL_DIR)
+        os.makedirs(MODEL_DIR, exist_ok=True)
+        clear(PREDICTION_LOG,["timestamp","symbol","strategy","direction","entry_price","target_price","confidence","model","rate","status","reason","return"])
+        clear(WRONG_PREDICTIONS,["symbol","strategy","reason","timestamp"])
+        clear(LOG_FILE,["timestamp","symbol","strategy","model","accuracy","f1","loss"])
+        clear(AUDIT_LOG,["timestamp","symbol","strategy","result","status"])
+        clear(MESSAGE_LOG,["timestamp","symbol","strategy","message"])
+        clear(FAILURE_LOG,["symbol","strategy","failures"])
+        return "✅ 초기화 완료"
+    except Exception as e: return f"초기화 실패: {e}", 500
+
+@app.route("/force-fix-prediction-log")
+def force_fix_prediction_log():
+    try:
+        headers = ["timestamp","symbol","strategy","direction","entry_price","target_price","confidence","model","rate","status","reason","return"]
+        with open(PREDICTION_LOG,"w",newline="",encoding="utf-8-sig") as f:
+            csv.DictWriter(f, fieldnames=headers).writeheader()
+        return "✅ prediction_log.csv 강제 초기화 완료"
+    except Exception as e: return f"⚠️ 오류: {e}", 500
 
 if __name__ == "__main__":
     print(">>> 서버 실행 준비"); sys.stdout.flush()
