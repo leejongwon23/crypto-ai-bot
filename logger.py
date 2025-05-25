@@ -2,16 +2,14 @@ import os, csv, datetime, pandas as pd, pytz
 from data.utils import get_kline_by_strategy
 
 PERSIST_DIR = "/persistent"
-LOG_DIR = os.path.join(PERSIST_DIR, "logs")
-MODEL_DIR = os.path.join(PERSIST_DIR, "models")
+LOG_DIR, MODEL_DIR = os.path.join(PERSIST_DIR, "logs"), os.path.join(PERSIST_DIR, "models")
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
-WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
-LOG_FILE = os.path.join(LOG_DIR, "train_log.csv")
+WRONG_PREDICTIONS, LOG_FILE = os.path.join(PERSIST_DIR, "wrong_predictions.csv"), os.path.join(LOG_DIR, "train_log.csv")
 AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
 EVAL_EXPIRY_BUFFER, STOP_LOSS_PCT = 12, 0.02
 model_success_tracker = {}
-os.makedirs(LOG_DIR, exist_ok=True)
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+os.makedirs(LOG_DIR, exist_ok=True)
 
 def get_min_gain(symbol, strategy):
     df = get_kline_by_strategy(symbol, strategy)
@@ -21,23 +19,21 @@ def get_min_gain(symbol, strategy):
     return max(round(v * 1.2, 4), {"단기": 0.005, "중기": 0.01, "장기": 0.02}.get(strategy, 0.03))
 
 def update_model_success(symbol, strategy, model, success):
-    strategy = strategy or "알수없음"
-    key = (symbol, strategy, model)
+    key = (symbol, strategy or "알수없음", model)
     model_success_tracker.setdefault(key, {"success": 0, "fail": 0})
     model_success_tracker[key]["success" if success else "fail"] += 1
 
 def get_model_success_rate(symbol, strategy, model, min_total=10):
-    strategy = strategy or "알수없음"
-    r = model_success_tracker.get((symbol, strategy, model), {"success": 0, "fail": 0})
+    key = (symbol, strategy or "알수없음", model)
+    r = model_success_tracker.get(key, {"success": 0, "fail": 0})
     total = r["success"] + r["fail"]
     return 0.5 if total < min_total else r["success"] / total
 
 def log_audit(symbol, strategy, status, reason):
-    strategy = strategy or "알수없음"
     row = {
         "timestamp": now_kst().isoformat(),
-        "symbol": str(symbol),
-        "strategy": str(strategy),
+        "symbol": str(symbol or "UNKNOWN"),
+        "strategy": str(strategy or "알수없음"),
         "status": str(status),
         "reason": str(reason)
     }
@@ -53,22 +49,20 @@ def log_audit(symbol, strategy, status, reason):
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, confidence=0, model="unknown", success=True, reason="", rate=0.0):
     now = timestamp or now_kst().isoformat()
-    strategy = strategy or "알수없음"
-    status = "pending" if success else "failed"
     row = {
         "timestamp": now,
         "symbol": str(symbol or "UNKNOWN"),
-        "strategy": str(strategy),
+        "strategy": str(strategy or "알수없음"),
         "direction": direction or "N/A",
         "entry_price": float(entry_price),
         "target_price": float(target_price),
         "confidence": float(confidence),
         "model": model or "unknown",
         "rate": float(rate),
-        "status": status,
+        "status": "pending" if success else "failed",
         "reason": reason or ""
     }
-    log_audit(symbol, strategy, "예측성공" if success else "예측실패", reason)
+    log_audit(row["symbol"], row["strategy"], "예측성공" if success else "예측실패", row["reason"])
     write_header = not os.path.exists(PREDICTION_LOG) or os.stat(PREDICTION_LOG).st_size == 0
     try:
         with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
@@ -79,11 +73,10 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         print(f"[오류] log_prediction 실패: {e}")
 
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
-    strategy = strategy or "알수없음"
     row = {
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
         "symbol": symbol,
-        "strategy": strategy,
+        "strategy": strategy or "알수없음",
         "model": model_name,
         "accuracy": float(acc),
         "f1_score": float(f1),
@@ -104,6 +97,7 @@ def evaluate_predictions(get_price_fn):
     except Exception as e:
         print(f"[경고] 평가 로그 읽기 실패: {e}")
         return
+    if not rows: return
     now = now_kst()
     updated = []
 
