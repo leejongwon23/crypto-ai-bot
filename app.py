@@ -67,7 +67,7 @@ def yopo_health():
             train = logs["train"].query(f"strategy == '{strategy}'") if not logs["train"].empty else pd.DataFrame()
             audit = logs["audit"].query(f"strategy == '{strategy}'") if not logs["audit"].empty else pd.DataFrame()
             model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
-            models = [f for f in model_files if f.count("_") >= 2 and f.split("_")[1] == strategy]
+            models = [f for f in model_files if f.endswith(".pt") and f"_{strategy}_" in f]
             r_pred = pred["timestamp"].iloc[-1] if not pred.empty and "timestamp" in pred.columns else "없음"
             r_train = train["timestamp"].iloc[-1] if not train.empty and "timestamp" in train.columns else "없음"
             r_eval = audit["timestamp"].iloc[-1] if not audit.empty and "timestamp" in audit.columns else "없음"
@@ -126,7 +126,7 @@ def reset_all():
         return "✅ 초기화 완료"
     except Exception as e: return f"초기화 실패: {e}", 500
 
-@app.route("/force-fix-prediction-log")
+@app.route("/force-fix-prediction_log")
 def force_fix_prediction_log():
     try:
         headers = ["timestamp","symbol","strategy","direction","entry_price","target_price","confidence","model","rate","status","reason","return"]
@@ -137,16 +137,20 @@ def force_fix_prediction_log():
 
 @app.route("/")
 def index(): return "Yopo server is running"
+
 @app.route("/ping")
 def ping(): return "pong"
+
 @app.route("/run")
 def run():
     try: print("[RUN] main() 실행"); sys.stdout.flush(); main(); return "Recommendation started"
     except Exception as e: traceback.print_exc(); return f"Error: {e}", 500
+
 @app.route("/train-now")
 def train_now():
     try: threading.Thread(target=train.train_all_models, daemon=True).start(); return "✅ 모든 전략 학습 시작됨"
     except Exception as e: return f"학습 실패: {e}", 500
+
 @app.route("/train-log")
 def train_log():
     try:
@@ -155,6 +159,7 @@ def train_log():
         if df.empty or df.shape[1]==0: return "학습 기록 없음"
         return "<pre>" + df.to_csv(index=False) + "</pre>"
     except Exception as e: return f"읽기 오류: {e}", 500
+
 @app.route("/models")
 def list_models():
     try:
@@ -162,6 +167,7 @@ def list_models():
         files = os.listdir(MODEL_DIR)
         return "<pre>" + "\n".join(files) + "</pre>" if files else "models 폴더 비어 있음"
     except Exception as e: return f"오류: {e}", 500
+
 @app.route("/check-log")
 def check_log():
     try:
