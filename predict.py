@@ -13,6 +13,7 @@ MIN_EXPECTED_RATES = {"단기": 0.007, "중기": 0.015, "장기": 0.03}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def failed_result(symbol, strategy, reason):
+    strategy = strategy if strategy else "알수없음"
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     try:
         log_prediction(symbol, strategy, direction="롱", entry_price=0, target_price=0,
@@ -22,7 +23,7 @@ def failed_result(symbol, strategy, reason):
         sys.stdout.flush()
     return {
         "symbol": symbol,
-        "strategy": strategy if strategy else "알수없음",
+        "strategy": strategy,
         "success": False,
         "reason": reason,
         "direction": "롱",
@@ -170,7 +171,7 @@ def predict(symbol, strategy):
             t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
             return {
                 "symbol": symbol,
-                "strategy": "알수없음",
+                "strategy": strategy if strategy else "알수없음",
                 "success": False,
                 "reason": f"예외 발생 및 strategy 미정의: {e}",
                 "direction": "롱",
