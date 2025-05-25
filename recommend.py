@@ -20,8 +20,15 @@ def log_audit(symbol, strategy, result, status):
     try:
         with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=["timestamp", "symbol", "strategy", "result", "status"])
-            if f.tell() == 0: w.writeheader()
-            w.writerow({"timestamp": now_kst().isoformat(), "symbol": symbol or "UNKNOWN", "strategy": strategy or "알수없음", "result": str(result), "status": status})
+            if f.tell() == 0:
+                w.writeheader()
+            w.writerow({
+                "timestamp": now_kst().isoformat(),
+                "symbol": symbol or "UNKNOWN",
+                "strategy": strategy or "알수없음",
+                "result": str(result),
+                "status": status
+            })
     except Exception as e:
         print(f"[log_audit 오류] {e}")
 
@@ -61,13 +68,15 @@ def should_predict(symbol, strategy):
 def run_prediction_loop(strategy, symbols):
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼"); sys.stdout.flush()
     results, fmap = [], load_failure_count()
+
     for item in symbols:
         symbol = item["symbol"]
         vol = item.get("volatility", 0)
         try:
             if not model_exists(symbol, strategy):
                 r = get_min_gain(symbol, strategy)
-                log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(), 0.0, "ensemble", False, "모델 없음", r, return_value=r)
+                log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(),
+                               0.0, "ensemble", False, "모델 없음", r, return_value=r)
                 log_audit(symbol, strategy, None, "모델 없음")
                 continue
             if not should_predict(symbol, strategy): continue
@@ -76,9 +85,11 @@ def run_prediction_loop(strategy, symbols):
             if not isinstance(result, dict) or result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
                 reason = result.get("reason", "예측 실패") if isinstance(result, dict) else "predict() 반환 오류"
                 r = get_min_gain(symbol, strategy)
-                log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(), 0.0, "ensemble", False, reason, r, return_value=r)
+                log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(),
+                               0.0, "ensemble", False, reason, r, return_value=r)
                 log_audit(symbol, strategy, result, reason)
                 continue
+
             result["volatility"] = vol
             result["return"] = result.get("rate", 0.0)
             log_prediction(
@@ -96,6 +107,7 @@ def run_prediction_loop(strategy, symbols):
                 return_value=result.get("return", 0.0)
             )
             log_audit(symbol, strategy, result, "예측 성공")
+
             key = f"{symbol}-{strategy}"
             if not result.get("success", False):
                 fmap[key] = fmap.get(key, 0) + 1
@@ -117,16 +129,26 @@ def run_prediction_loop(strategy, symbols):
                 rev["rate"] = get_min_gain(symbol, strategy) * 1.1
                 rev["target"] = rev["price"] * (1 + rev["rate"]) if rev["direction"] == "롱" else rev["price"] * (1 - rev["rate"])
                 rev["stop"] = rev["price"] * (1 - 0.02) if rev["direction"] == "롱" else rev["price"] * (1 + 0.02)
-                rev.update({"reason": "🔁 반전 전략: 낮은 신뢰도·낮은 수익률·낮은 성공률", "reversed": True, "success_rate": success_rate, "return": rev["rate"]})
-                log_prediction(rev["symbol"], rev["strategy"], rev["direction"], rev["price"], rev["target"], now_kst().isoformat(), rev["confidence"], "ensemble", True, rev["reason"], rev["rate"], return_value=rev["return"])
+                rev.update({
+                    "reason": "🔁 반전 전략: 낮은 신뢰도·낮은 수익률·낮은 성공률",
+                    "reversed": True,
+                    "success_rate": success_rate,
+                    "return": rev["rate"]
+                })
+                log_prediction(rev["symbol"], rev["strategy"], rev["direction"], rev["price"], rev["target"],
+                               now_kst().isoformat(), rev["confidence"], "ensemble", True,
+                               rev["reason"], rev["rate"], return_value=rev["return"])
                 results.append(rev)
 
         except Exception as e:
             r = get_min_gain(symbol, strategy)
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
-            log_prediction(symbol, strategy, "예외", 0, 0, now_kst().isoformat(), 0.0, "ensemble", False, f"예외 발생: {e}", r, return_value=r)
+            log_prediction(symbol, strategy, "예외", 0, 0, now_kst().isoformat(), 0.0, "ensemble", False,
+                           f"예외 발생: {e}", r, return_value=r)
             log_audit(symbol, strategy, None, f"예외 발생: {e}")
+
     save_failure_count(fmap)
+
     filtered = []
     for r in results:
         conf, rate, vol = r.get("confidence", 0), r.get("rate", 0), r.get("volatility", 0)
@@ -139,6 +161,7 @@ def run_prediction_loop(strategy, symbols):
         if score < SCORE_MIN: continue
         r.update({"success_rate": success_rate, "score": score})
         filtered.append(r)
+
     final = sorted(filtered, key=lambda x: -x["score"])[:SEND_LIMIT]
     for res in final:
         try:
