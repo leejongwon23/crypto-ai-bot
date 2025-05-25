@@ -1,15 +1,8 @@
-# ✅ Render 캐시 강제 무효화용 — 디버그 추적용 주석
-
-import os, time, threading, gc, json
-import torch
-import torch.nn as nn
-import numpy as np
+import os, time, json, threading, torch, torch.nn as nn, numpy as np, datetime, pytz
+import pandas as pd
 from torch.utils.data import DataLoader, TensorDataset, random_split
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import accuracy_score, f1_score, log_loss
-import datetime
-import pytz
-
 from data.utils import SYMBOLS, get_kline_by_strategy, compute_features
 from model.base_model import get_model
 from model_weight_loader import get_model_weight
@@ -18,9 +11,6 @@ from feature_importance import compute_feature_importance, save_feature_importan
 import logger
 from logger import get_min_gain, get_strategy_fail_rate, get_strategy_eval_count
 from window_optimizer import find_best_window
-
-print("✅ 현재 실행 중인 train.py는 최신 버전입니다.")
-print("🧪 compute_features 정의 확인:", compute_features.__code__.co_varnames)
 
 DEVICE = torch.device("cpu")
 PERSIST_DIR = "/persistent"
