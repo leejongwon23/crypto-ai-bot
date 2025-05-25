@@ -43,15 +43,17 @@ def check_pre_burst_conditions(df, strategy):
             return sum([ema_compressed, expanding_band]) >= 1
         else:
             return False
-    except Exception:
+    except Exception as e:
+        print(f"[조건 점검 오류] {e}")
         traceback.print_exc()
         return False
 
 # ✅ 전략별 모델 신뢰도 검사
 def check_model_quality(symbol, strategy):
     try:
-        return get_model_success_rate(symbol, strategy, "ensemble") >= 0.6
-    except:
+        return get_model_success_rate(symbol, strategy or "알수없음", "ensemble") >= 0.6
+    except Exception as e:
+        print(f"[모델 신뢰도 체크 실패] {symbol}-{strategy}: {e}")
         return False
 
 # ✅ 전조 패턴 기반 예측 트리거 실행
@@ -75,9 +77,13 @@ def run():
 
                 if check_pre_burst_conditions(df, strategy):
                     print(f"[트리거 포착] {symbol} - {strategy} 예측 실행")
-                    run_prediction(symbol, strategy)
-                    last_trigger_time[key] = now
-                    log_audit(symbol, strategy, "트리거예측", "조건 만족으로 실행")
+                    try:
+                        run_prediction(symbol, strategy)
+                        last_trigger_time[key] = now
+                        log_audit(symbol, strategy, "트리거예측", "조건 만족으로 실행")
+                    except Exception as inner:
+                        print(f"[예측 실행 실패] {symbol}-{strategy}: {inner}")
+                        log_audit(symbol, strategy, "트리거예측오류", f"예측실행실패: {inner}")
             except Exception as e:
                 print(f"[트리거 오류] {symbol} {strategy}: {e}")
-                log_audit(symbol, strategy, "트리거오류", str(e))
+                log_audit(symbol, strategy or "알수없음", "트리거오류", str(e))
