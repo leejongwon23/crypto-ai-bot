@@ -21,16 +21,19 @@ def get_min_gain(symbol, strategy):
     return max(round(v * 1.2, 4), {"단기": 0.005, "중기": 0.01, "장기": 0.02}.get(strategy, 0.03))
 
 def update_model_success(symbol, strategy, model, success):
+    strategy = strategy or "알수없음"
     key = (symbol, strategy, model)
     model_success_tracker.setdefault(key, {"success": 0, "fail": 0})
     model_success_tracker[key]["success" if success else "fail"] += 1
 
 def get_model_success_rate(symbol, strategy, model, min_total=10):
+    strategy = strategy or "알수없음"
     r = model_success_tracker.get((symbol, strategy, model), {"success": 0, "fail": 0})
     total = r["success"] + r["fail"]
     return 0.5 if total < min_total else r["success"] / total
 
 def log_audit(symbol, strategy, status, reason):
+    strategy = strategy or "알수없음"
     row = {
         "timestamp": now_kst().isoformat(),
         "symbol": str(symbol),
@@ -50,11 +53,12 @@ def log_audit(symbol, strategy, status, reason):
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, confidence=0, model="unknown", success=True, reason="", rate=0.0):
     now = timestamp or now_kst().isoformat()
+    strategy = strategy or "알수없음"
     status = "pending" if success else "failed"
     row = {
         "timestamp": now,
         "symbol": str(symbol or "UNKNOWN"),
-        "strategy": str(strategy or "UNKNOWN"),
+        "strategy": str(strategy),
         "direction": direction or "N/A",
         "entry_price": float(entry_price),
         "target_price": float(target_price),
@@ -75,10 +79,15 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         print(f"[오류] log_prediction 실패: {e}")
 
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
+    strategy = strategy or "알수없음"
     row = {
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-        "symbol": symbol, "strategy": strategy, "model": model_name,
-        "accuracy": float(acc), "f1_score": float(f1), "loss": float(loss)
+        "symbol": symbol,
+        "strategy": strategy,
+        "model": model_name,
+        "accuracy": float(acc),
+        "f1_score": float(f1),
+        "loss": float(loss)
     }
     try:
         pd.DataFrame([row]).to_csv(LOG_FILE, mode='a', header=not os.path.exists(LOG_FILE), index=False, encoding="utf-8-sig")
@@ -104,7 +113,7 @@ def evaluate_predictions(get_price_fn):
             continue
         try:
             symbol = row.get("symbol", "UNKNOWN")
-            strategy = row.get("strategy", "알수없음")
+            strategy = row.get("strategy") or "알수없음"
             direction = row.get("direction", "롱")
             model = row.get("model", "unknown")
             entry = float(row.get("entry_price", 0))
