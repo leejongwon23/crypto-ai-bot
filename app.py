@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, request
 from recommend import main
-import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv
+import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv, re
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram_bot import send_message
 from predict_test import test_all_predictions
@@ -41,6 +41,13 @@ def yopo_health():
             logs[name] = pd.read_csv(path, encoding="utf-8-sig") if os.path.exists(path) else pd.DataFrame()
         except:
             logs[name] = pd.DataFrame()
+    model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
+    model_info = {}
+    for f in model_files:
+        match = re.match(r"(.+?)_(단기|중기|장기)_(lstm|cnn_lstm|transformer)\.pt", f)
+        if match:
+            symbol, strat, mtype = match.groups()
+            model_info.setdefault(strat, {}).setdefault(symbol, set()).add(mtype)
     for strat in ["단기", "중기", "장기"]:
         try:
             pred = logs["pred"]
@@ -49,14 +56,12 @@ def yopo_health():
             pred = pred.query(f"strategy == '{strat}'") if not pred.empty and "strategy" in pred.columns else pd.DataFrame()
             train = train.query(f"strategy == '{strat}'") if not train.empty and "strategy" in train.columns else pd.DataFrame()
             audit = audit.query(f"strategy == '{strat}'") if not audit.empty and "strategy" in audit.columns else pd.DataFrame()
-            model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
-            models = [f for f in model_files if strat in f]
+            strat_models = model_info.get(strat, {})
             types = {"lstm":0,"cnn_lstm":0,"transformer":0}
-            for f in models:
-                for t in types:
-                    if f.endswith(f"_{t}.pt"): types[t] += 1
-            trained = set(f.split("_")[0] for f in models if strat in f)
-            untrained = sorted(set(SYMBOLS) - trained)
+            for mtypes in strat_models.values():
+                for t in mtypes: types[t] += 1
+            trained_syms = [s for s, t in strat_models.items() if {"lstm","cnn_lstm","transformer"}.issubset(t)]
+            untrained = sorted(set(SYMBOLS) - set(trained_syms))
             stat = lambda df,s:len(df[df["status"]==s]) if not df.empty and "status" in df.columns else 0
             succ, fail, pend, failed = map(lambda s: stat(pred,s), ["success","fail","pending","failed"])
             if "symbol" in pred.columns:
@@ -73,7 +78,7 @@ def yopo_health():
                 except:
                     return {"succ":0,"fail":0,"succ_rate":0,"fail_rate":0,"r_avg":0,"total":0}
             pn, pv = perf(nvol), perf(vol)
-            if not models: problems.append(f"{strat}: 모델 없음")
+            if sum(types.values()) == 0: problems.append(f"{strat}: 모델 없음")
             if succ+fail+pend+failed==0: problems.append(f"{strat}: 예측 없음")
             if succ+fail==0: problems.append(f"{strat}: 평가 미작동")
             if pn["fail_rate"]>50: problems.append(f"{strat}: 일반 실패율 {pn['fail_rate']:.1f}%")
@@ -87,8 +92,8 @@ def yopo_health():
                 table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>신뢰도</th><th>상태</th></tr>" + "".join(rows) + "</table>"
             html = f"""<div style='border:1px solid #aaa;margin:16px 0;padding:10px;font-family:monospace;background:#f8f8f8;'>
 <b style='font-size:16px;'>📌 전략: {strat}</b><br>
-- 모델 수: {len(models)} (lstm={types['lstm']}, cnn={types['cnn_lstm']}, trans={types['transformer']})<br>
-- 심볼 수: {len(SYMBOLS)} | 학습완료: {len(trained)} | 미완성: {len(untrained)}<br>
+- 모델 수: {sum(types.values())} (lstm={types['lstm']}, cnn={types['cnn_lstm']}, trans={types['transformer']})<br>
+- 심볼 수: {len(SYMBOLS)} | 완전학습: {len(trained_syms)} | 미완성: {len(untrained)}<br>
 - 최근 학습: {train['timestamp'].iloc[-1] if not train.empty else '없음'}<br>
 - 최근 예측: {pred['timestamp'].iloc[-1] if not pred.empty else '없음'}<br>
 - 최근 평가: {audit['timestamp'].iloc[-1] if not audit.empty else '없음'}<br>
