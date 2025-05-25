@@ -2,11 +2,14 @@ import os, csv, datetime, pandas as pd, pytz
 from data.utils import get_kline_by_strategy
 
 PERSIST_DIR = "/persistent"
-LOG_DIR, MODEL_DIR = os.path.join(PERSIST_DIR, "logs"), os.path.join(PERSIST_DIR, "models")
+LOG_DIR = os.path.join(PERSIST_DIR, "logs")
+MODEL_DIR = os.path.join(PERSIST_DIR, "models")
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
-WRONG_PREDICTIONS, LOG_FILE = os.path.join(PERSIST_DIR, "wrong_predictions.csv"), os.path.join(LOG_DIR, "train_log.csv")
+WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
+LOG_FILE = os.path.join(LOG_DIR, "train_log.csv")
 AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
-EVAL_EXPIRY_BUFFER, STOP_LOSS_PCT = 12, 0.02
+EVAL_EXPIRY_BUFFER = 12
+STOP_LOSS_PCT = 0.02
 model_success_tracker = {}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -69,7 +72,7 @@ def log_audit(symbol, strategy, status, reason):
 
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, confidence=0, model="unknown", success=True,
-                   reason="", rate=0.0, return_value=None):
+                   reason="", rate=0.0, return_value=None, volatility=False):
     now = timestamp or now_kst().isoformat()
     row = {
         "timestamp": now,
@@ -83,10 +86,11 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "rate": float(rate),
         "status": "pending" if success else "failed",
         "reason": reason or "",
-        "return": float(return_value if return_value is not None else rate)
+        "return": float(return_value if return_value is not None else rate),
+        "volatility": bool(volatility)
     }
     headers = ["timestamp","symbol","strategy","direction","entry_price","target_price",
-               "confidence","model","rate","status","reason","return"]
+               "confidence","model","rate","status","reason","return","volatility"]
     write_header = not os.path.exists(PREDICTION_LOG) or os.stat(PREDICTION_LOG).st_size == 0
     log_audit(row["symbol"], row["strategy"], "예측성공" if success else "예측실패", row["reason"])
     try:
@@ -123,12 +127,14 @@ def evaluate_predictions(get_price_fn):
         print(f"[경고] 평가 로그 읽기 실패: {e}")
         return
     now = now_kst()
-    updated, headers = [], ["timestamp","symbol","strategy","direction","entry_price","target_price",
-                            "confidence","model","rate","status","reason","return"]
+    updated = []
+    headers = ["timestamp","symbol","strategy","direction","entry_price","target_price",
+               "confidence","model","rate","status","reason","return","volatility"]
     for row in rows:
         try:
             if row.get("status") not in ["pending", "failed"]:
-                updated.append(row); continue
+                updated.append(row)
+                continue
             symbol = row.get("symbol", "UNKNOWN")
             strategy = row.get("strategy", "알수없음")
             direction = row.get("direction", "롱")
@@ -173,4 +179,6 @@ def evaluate_predictions(get_price_fn):
             except: pass
         updated.append(row)
     with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
-        csv.DictWriter(f, fieldnames=headers).writerows(updated)
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(updated)
