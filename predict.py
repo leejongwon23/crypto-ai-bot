@@ -13,11 +13,12 @@ MIN_EXPECTED_RATES = {"단기": 0.007, "중기": 0.015, "장기": 0.03}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def failed_result(symbol, strategy, reason):
-    strategy = strategy if strategy else "알수없음"
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    is_volatility = "_v" in symbol
     try:
         log_prediction(symbol, strategy, direction="롱", entry_price=0, target_price=0,
-                       confidence=0, model="ensemble", success=False, reason=reason, rate=0.0, timestamp=t)
+                       confidence=0, model="ensemble", success=False, reason=reason,
+                       rate=0.0, timestamp=t, volatility=is_volatility)
     except Exception as e:
         print(f"[경고] log_prediction 실패: {e}")
         sys.stdout.flush()
@@ -40,6 +41,7 @@ def predict(symbol, strategy):
     try:
         print(f"[PREDICT] {symbol}-{strategy} 시작")
         sys.stdout.flush()
+        is_volatility = "_v" in symbol
 
         window = find_best_window(symbol, strategy)
         df = get_kline_by_strategy(symbol, strategy)
@@ -145,7 +147,9 @@ def predict(symbol, strategy):
         t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
         log_prediction(symbol, strategy, direction, entry_price=price,
                        target_price=price * (1 + rate) if direction == "롱" else price * (1 - rate),
-                       confidence=conf, model="ensemble", success=True, reason=", ".join(reason), rate=rate, timestamp=t)
+                       confidence=conf, model="ensemble", success=True,
+                       reason=", ".join([r for r in reason if r]), rate=rate,
+                       timestamp=t, volatility=is_volatility)
 
         return {
             "symbol": symbol,
@@ -165,21 +169,4 @@ def predict(symbol, strategy):
     except Exception as e:
         print(f"[예외] 예측 실패: {symbol}-{strategy} → {e}")
         sys.stdout.flush()
-        try:
-            return failed_result(symbol, strategy, f"예외 발생: {e}")
-        except Exception as inner:
-            t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
-            return {
-                "symbol": symbol,
-                "strategy": strategy if strategy else "알수없음",
-                "success": False,
-                "reason": f"예외 발생 및 strategy 미정의: {e}",
-                "direction": "롱",
-                "model": "ensemble",
-                "confidence": 0.0,
-                "rate": 0.0,
-                "price": 1.0,
-                "target": 1.0,
-                "stop": 1.0,
-                "timestamp": t
-            }
+        return failed_result(symbol, strategy, f"예외 발생: {e}")
