@@ -65,109 +65,104 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
 
 def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, lr=1e-3, repeat=4, repeat_wrong=4):
     print(f"[train] 🔄 {symbol}-{strategy} 학습 시작")
-    best_window = find_best_window(symbol, strategy)
-    print(f"[DEBUG] {symbol}-{strategy} best_window = {best_window}")
+    try:
+        best_window = find_best_window(symbol, strategy)
+        df = get_kline_by_strategy(symbol, strategy)
+        if df is None or len(df) < best_window + 10:
+            raise ValueError(f"데이터 부족 → {len(df) if df is not None else 'None'}")
+        df_feat = compute_features(symbol, df, strategy)
+        if df_feat is None or len(df_feat) < best_window + 1:
+            raise ValueError(f"feature 부족 → {len(df_feat) if df_feat is not None else 'None'}")
 
-    df = get_kline_by_strategy(symbol, strategy)
-    if df is None or len(df) < best_window + 10:
-        print(f"❌ {symbol}-{strategy} 데이터 부족 → {len(df) if df is not None else 'None'}")
-        logger.log_training_result(symbol, strategy, "none", 0.0, 0.0, 0.0)
-        return
+        scaler = MinMaxScaler()
+        scaled = scaler.fit_transform(df_feat.values)
+        feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
+        X_raw, y_raw = create_dataset(feature_dicts, best_window)
 
-    df_feat = compute_features(symbol, df, strategy)
-    if df_feat is None or len(df_feat) < best_window + 1:
-        print(f"❌ {symbol}-{strategy} feature 부족 → {len(df_feat) if df_feat is not None else 'None'}")
-        logger.log_training_result(symbol, strategy, "none", 0.0, 0.0, 0.0)
-        return
+        if len(X_raw) < 2:
+            raise ValueError(f"유효 시퀀스 부족 → {len(X_raw)}개")
 
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(df_feat.values)
-    feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
-    X_raw, y_raw = create_dataset(feature_dicts, best_window)
+        input_size = X_raw.shape[2]
+        val_len = int(len(X_raw) * 0.2)
+        if val_len == 0:
+            raise ValueError("검증셋 부족")
 
-    if len(X_raw) < 2:
-        print(f"[SKIP] {symbol}-{strategy} 유효 시퀀스 부족 → {len(X_raw)}개")
-        logger.log_training_result(symbol, strategy, "none", 0.0, 0.0, 0.0)
-        return
+        val_X_tensor = torch.tensor(X_raw[-val_len:], dtype=torch.float32)
+        val_y_tensor = torch.tensor(y_raw[-val_len:], dtype=torch.float32)
 
-    input_size = X_raw.shape[2]
-    val_len = int(len(X_raw) * 0.2)
-    if val_len == 0:
-        print(f"[SKIP] {symbol}-{strategy} 검증셋 부족")
-        logger.log_training_result(symbol, strategy, "none", 0.0, 0.0, 0.0)
-        return
+        scores, models, metrics = {}, {}, {}
 
-    val_X_tensor = torch.tensor(X_raw[-val_len:], dtype=torch.float32)
-    val_y_tensor = torch.tensor(y_raw[-val_len:], dtype=torch.float32)
+        for model_type in ["lstm", "cnn_lstm", "transformer"]:
+            model = get_model(model_type=model_type, input_size=input_size)
+            model.train()
+            criterion = nn.BCELoss()
+            optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+            dataset = TensorDataset(torch.tensor(X_raw, dtype=torch.float32), torch.tensor(y_raw, dtype=torch.float32))
+            train_len = len(dataset) - val_len
+            train_set, _ = random_split(dataset, [train_len, val_len])
+            train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
 
-    scores, models, metrics = {}, {}, {}
+            for r in range(repeat):
+                for _ in range(repeat_wrong):
+                    wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=best_window)
+                    if wrong_data:
+                        try:
+                            xb_all, yb_all = [], []
+                            for xb, yb in wrong_data:
+                                if xb.shape[1:] == (best_window, input_size):
+                                    xb_all.append(xb)
+                                    yb_all.append(yb)
+                            if len(xb_all) >= 2:
+                                xb_all = torch.stack(xb_all)
+                                yb_all = torch.tensor(yb_all, dtype=torch.float32)
+                                for i in range(0, len(xb_all), batch_size):
+                                    xb = xb_all[i:i + batch_size]
+                                    yb = yb_all[i:i + batch_size]
+                                    pred, _ = model(xb)
+                                    if pred is not None:
+                                        loss = criterion(pred, yb)
+                                        optimizer.zero_grad()
+                                        loss.backward()
+                                        optimizer.step()
+                        except Exception as e:
+                            print(f"[오답 학습 실패] {symbol}-{strategy} → {e}")
 
-    for model_type in ["lstm", "cnn_lstm", "transformer"]:
-        model = get_model(model_type=model_type, input_size=input_size)
-        model.train()
-        criterion = nn.BCELoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+                for epoch in range(epochs):
+                    for xb, yb in train_loader:
+                        pred, _ = model(xb)
+                        if pred is None:
+                            continue
+                        loss = criterion(pred, yb)
+                        optimizer.zero_grad()
+                        loss.backward()
+                        optimizer.step()
 
-        dataset = TensorDataset(torch.tensor(X_raw, dtype=torch.float32), torch.tensor(y_raw, dtype=torch.float32))
-        train_len = len(dataset) - val_len
-        train_set, _ = random_split(dataset, [train_len, val_len])
-        train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
-
-        for r in range(repeat):
-            for _ in range(repeat_wrong):
-                wrong_data = load_wrong_prediction_data(symbol, strategy, input_size, window=best_window)
-                if wrong_data:
-                    try:
-                        xb_all, yb_all = [], []
-                        for xb, yb in wrong_data:
-                            if xb.shape[1:] == (best_window, input_size):
-                                xb_all.append(xb)
-                                yb_all.append(yb)
-                        if len(xb_all) >= 2:
-                            xb_all = torch.stack(xb_all)
-                            yb_all = torch.tensor(yb_all, dtype=torch.float32)
-                            for i in range(0, len(xb_all), batch_size):
-                                xb = xb_all[i:i + batch_size]
-                                yb = yb_all[i:i + batch_size]
-                                pred, _ = model(xb)
-                                if pred is not None:
-                                    loss = criterion(pred, yb)
-                                    optimizer.zero_grad()
-                                    loss.backward()
-                                    optimizer.step()
-                    except Exception as e:
-                        print(f"[오답 학습 실패] {symbol}-{strategy} → {e}")
-
-            for epoch in range(epochs):
-                for xb, yb in train_loader:
-                    pred, _ = model(xb)
-                    if pred is None:
-                        continue
-                    loss = criterion(pred, yb)
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
-
-        model.eval()
+            model.eval()
+            try:
+                with torch.no_grad():
+                    out, _ = model(val_X_tensor)
+                    y_prob = out.squeeze().numpy()
+                    if len(y_prob.shape) == 0:
+                        y_prob = np.array([y_prob])
+                    y_pred = (y_prob > 0.5).astype(int)
+                    y_true = val_y_tensor.numpy()
+                    acc = float(accuracy_score(y_true, y_pred))
+                    f1 = float(f1_score(y_true, y_pred))
+                    logloss = float(log_loss(y_true, y_prob, labels=[0, 1]))
+                    conf_score = np.mean(np.abs(y_prob - 0.5)) * 2
+                    final_score = acc * (1 + f1) * conf_score
+                    logger.log_training_result(symbol, strategy, model_type, acc, f1, logloss)
+                    scores[model_type] = final_score
+                    models[model_type] = model
+                    metrics[model_type] = (acc, f1, logloss)
+            except Exception as e:
+                print(f"[평가 오류] {symbol}-{strategy}-{model_type} → {e}")
+    except Exception as e:
+        print(f"[학습 실패] {symbol}-{strategy} → {e}")
         try:
-            with torch.no_grad():
-                out, _ = model(val_X_tensor)
-                y_prob = out.squeeze().numpy()
-                if len(y_prob.shape) == 0:
-                    y_prob = np.array([y_prob])
-                y_pred = (y_prob > 0.5).astype(int)
-                y_true = val_y_tensor.numpy()
-                acc = float(accuracy_score(y_true, y_pred))
-                f1 = float(f1_score(y_true, y_pred))
-                logloss = float(log_loss(y_true, y_prob, labels=[0, 1]))
-                conf_score = np.mean(np.abs(y_prob - 0.5)) * 2
-                final_score = acc * (1 + f1) * conf_score
-                logger.log_training_result(symbol, strategy, model_type, acc, f1, logloss)
-                scores[model_type] = final_score
-                models[model_type] = model
-                metrics[model_type] = (acc, f1, logloss)
-        except Exception as e:
-            print(f"[평가 오류] {symbol}-{strategy}-{model_type} → {e}")
+            logger.log_training_result(symbol, strategy, "none", 0.0, 0.0, 0.0)
+        except Exception as log_error:
+            print(f"[로그 기록 실패] {symbol}-{strategy} → {log_error}")
 
     if scores:
         best_model_type = max(scores, key=scores.get)
@@ -181,7 +176,10 @@ def train_one_model(symbol, strategy, input_size=11, batch_size=32, epochs=10, l
         save_feature_importance(importances, symbol, strategy, best_model_type)
     else:
         print(f"❗ 모델 저장 실패: {symbol}-{strategy} 모든 모델 평가 실패")
-        logger.log_training_result(symbol, strategy, "none", 0.0, 0.0, 0.0)
+        try:
+            logger.log_training_result(symbol, strategy, "none", 0.0, 0.0, 0.0)
+        except Exception as e:
+            print(f"[예외] log_training_result 실패 → {e}")
 
 def train_all_models():
     for strategy in ["단기", "중기", "장기"]:
@@ -189,13 +187,13 @@ def train_all_models():
             try:
                 train_one_model(symbol, strategy)
             except Exception as e:
-                print(f"[오류] 전체 학습 실패: {symbol}-{strategy} → {e}")
+                print(f"[전체 학습 루프 오류] {symbol}-{strategy} → {e}")
 
 def train_model_loop(strategy):
     for symbol in SYMBOLS:
         try:
             train_one_model(symbol, strategy)
         except Exception as e:
-            print(f"[학습 루프 실패] {symbol}-{strategy} → {e}")
+            print(f"[단일 전략 학습 실패] {symbol}-{strategy} → {e}")
 
 train_model = train_all_models
