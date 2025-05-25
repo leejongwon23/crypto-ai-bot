@@ -16,25 +16,13 @@ MESSAGE_LOG = "/persistent/logs/message_log.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-def safe_log_prediction(*args, **kwargs):
-    try: log_prediction(*args, **kwargs)
-    except Exception as e: print(f"[log_prediction 오류] {e}")
-
-def safe_log_audit(symbol, strategy, result, status):
+def log_audit(symbol, strategy, result, status):
     try:
         with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=["timestamp", "symbol", "strategy", "result", "status"])
-            if f.tell() == 0:
-                writer.writeheader()
-            writer.writerow({
-                "timestamp": now_kst().isoformat(),
-                "symbol": symbol or "UNKNOWN",
-                "strategy": strategy or "알수없음",
-                "result": str(result),
-                "status": status
-            })
-    except Exception as e:
-        print(f"[log_audit 오류] {e}")
+            w = csv.DictWriter(f, fieldnames=["timestamp", "symbol", "strategy", "result", "status"])
+            if f.tell() == 0: w.writeheader()
+            w.writerow({"timestamp": now_kst().isoformat(), "symbol": symbol or "UNKNOWN", "strategy": strategy or "알수없음", "result": str(result), "status": status})
+    except Exception as e: print(f"[log_audit 오류] {e}")
 
 def load_failure_count():
     if not os.path.exists(FAILURE_LOG): return {}
@@ -51,7 +39,7 @@ def save_failure_count(fmap):
 
 def get_symbols_by_volatility(strategy):
     th = STRATEGY_VOL.get(strategy, 0.003)
-    selected = []
+    result = []
     for symbol in SYMBOLS:
         try:
             df = get_kline_by_strategy(symbol, strategy)
@@ -59,10 +47,9 @@ def get_symbols_by_volatility(strategy):
             r_std = df["close"].pct_change().rolling(20).std().iloc[-1]
             b_std = df["close"].pct_change().rolling(60).std().iloc[-1]
             if r_std >= th and r_std / (b_std + 1e-8) >= 1.5:
-                selected.append({"symbol": symbol, "volatility": r_std})
-        except Exception as e:
-            print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
-    return sorted(selected, key=lambda x: -x["volatility"])[:30]
+                result.append({"symbol": symbol, "volatility": r_std})
+        except Exception as e: print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
+    return sorted(result, key=lambda x: -x["volatility"])[:30]
 
 def should_predict(symbol, strategy):
     try:
@@ -70,33 +57,29 @@ def should_predict(symbol, strategy):
     except: return True
 
 def run_prediction_loop(strategy, symbols):
-    print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼")
-    sys.stdout.flush()
+    print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼"); sys.stdout.flush()
     results, fmap = [], load_failure_count()
-
     for item in symbols:
         symbol = item["symbol"]
         vol = item.get("volatility", 0)
         try:
             if not model_exists(symbol, strategy):
-                min_gain = get_min_gain(symbol, strategy)
-                safe_log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(), 0.0, "ensemble", False, "모델 없음", min_gain)
-                safe_log_audit(symbol, strategy, None, "모델 없음")
+                r = get_min_gain(symbol, strategy)
+                log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(), 0.0, "ensemble", False, "모델 없음", r, r)
+                log_audit(symbol, strategy, None, "모델 없음")
                 continue
             if not should_predict(symbol, strategy): continue
-
             result = predict(symbol, strategy)
-            print(f"[예측] {symbol}-{strategy} → {result}")
-            sys.stdout.flush()
-
+            print(f"[예측] {symbol}-{strategy} → {result}"); sys.stdout.flush()
             if not isinstance(result, dict) or result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
                 reason = result.get("reason", "예측 실패") if isinstance(result, dict) else "predict() 반환 오류"
-                safe_log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(), 0.0, "ensemble", False, reason, get_min_gain(symbol, strategy))
-                safe_log_audit(symbol, strategy, result, reason)
+                r = get_min_gain(symbol, strategy)
+                log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(), 0.0, "ensemble", False, reason, r, r)
+                log_audit(symbol, strategy, result, reason)
                 continue
-
             result["volatility"] = vol
-            safe_log_prediction(
+            result["return"] = result.get("rate", 0.0)
+            log_prediction(
                 symbol=result.get("symbol", symbol),
                 strategy=result.get("strategy", strategy),
                 direction=result.get("direction", "예측실패"),
@@ -107,10 +90,10 @@ def run_prediction_loop(strategy, symbols):
                 model=result.get("model", "ensemble"),
                 success=True,
                 reason=result.get("reason", "예측 성공"),
-                rate=result.get("rate", get_min_gain(symbol, strategy))
+                rate=result.get("rate", 0.0),
+                return=result.get("rate", 0.0)
             )
-            safe_log_audit(symbol, strategy, result, "예측 성공")
-
+            log_audit(symbol, strategy, result, "예측 성공")
             key = f"{symbol}-{strategy}"
             if not result.get("success", False):
                 fmap[key] = fmap.get(key, 0) + 1
@@ -120,8 +103,8 @@ def run_prediction_loop(strategy, symbols):
                     fmap[key] = 0
             else:
                 fmap[key] = 0
-
             results.append(result)
+
             conf = result.get("confidence", 0)
             rate = result.get("rate", 0)
             success_rate = get_model_success_rate(symbol, strategy, result.get("model", "ensemble"))
@@ -132,16 +115,16 @@ def run_prediction_loop(strategy, symbols):
                 rev["rate"] = get_min_gain(symbol, strategy) * 1.1
                 rev["target"] = rev["price"] * (1 + rev["rate"]) if rev["direction"] == "롱" else rev["price"] * (1 - rev["rate"])
                 rev["stop"] = rev["price"] * (1 - 0.02) if rev["direction"] == "롱" else rev["price"] * (1 + 0.02)
-                rev.update({"reason": "🔁 반전 전략: 낮은 신뢰도·낮은 수익률·낮은 성공률", "reversed": True, "success_rate": success_rate})
+                rev.update({"reason": "🔁 반전 전략: 낮은 신뢰도·낮은 수익률·낮은 성공률", "reversed": True, "success_rate": success_rate, "return": rev["rate"]})
+                log_prediction(rev["symbol"], rev["strategy"], rev["direction"], rev["price"], rev["target"], now_kst().isoformat(), rev["confidence"], "ensemble", True, rev["reason"], rev["rate"], rev["return"])
                 results.append(rev)
 
         except Exception as e:
+            r = get_min_gain(symbol, strategy)
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
-            safe_log_prediction(symbol, strategy, "예외", 0, 0, now_kst().isoformat(), 0.0, "ensemble", False, f"예외 발생: {e}", get_min_gain(symbol, strategy))
-            safe_log_audit(symbol, strategy, None, f"예외 발생: {e}")
-
+            log_prediction(symbol, strategy, "예외", 0, 0, now_kst().isoformat(), 0.0, "ensemble", False, f"예외 발생: {e}", r, r)
+            log_audit(symbol, strategy, None, f"예외 발생: {e}")
     save_failure_count(fmap)
-
     filtered = []
     for r in results:
         conf, rate, vol = r.get("confidence", 0), r.get("rate", 0), r.get("volatility", 0)
@@ -150,11 +133,10 @@ def run_prediction_loop(strategy, symbols):
         if conf < CONF_THRESH and not r.get("reversed"): continue
         if rate < get_min_gain(symbol, strategy): continue
         if success_rate < SUCCESS_THRESH: continue
-        score = (conf ** 1.5) * (rate ** 1.2) * (success_rate ** 1.2) * (1 + vol)
+        score = (conf**1.5) * (rate**1.2) * (success_rate**1.2) * (1 + vol)
         if score < SCORE_MIN: continue
         r.update({"success_rate": success_rate, "score": score})
         filtered.append(r)
-
     final = sorted(filtered, key=lambda x: -x["score"])[:SEND_LIMIT]
     for res in final:
         try:
