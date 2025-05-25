@@ -152,7 +152,7 @@ def reset_all():
         if os.path.exists(MODEL_DIR): shutil.rmtree(MODEL_DIR)
         os.makedirs(MODEL_DIR, exist_ok=True)
         clear(PREDICTION_LOG,["timestamp","symbol","strategy","direction","entry_price","target_price","confidence","model","rate","status","reason","return"])
-        clear(WRONG_PREDICTIONS,["symbol","strategy","reason","timestamp"])
+        clear(WRONG_PREDICTIONS,["timestamp","symbol","strategy","direction","entry_price","target_price","gain"])
         clear(LOG_FILE,["timestamp","symbol","strategy","model","accuracy","f1","loss"])
         clear(AUDIT_LOG,["timestamp","symbol","strategy","result","status"])
         clear(MESSAGE_LOG,["timestamp","symbol","strategy","message"])
