@@ -38,7 +38,6 @@ def predict(symbol, strategy):
         if X.shape[1] != window:
             return failed_result(symbol, strategy, "시퀀스 형상 오류")
 
-        # ✅ 모델 파일 유연하게 탐색
         model_files = {}
         for f in os.listdir(MODEL_DIR):
             if not f.endswith(".pt"): continue
@@ -124,4 +123,13 @@ def predict(symbol, strategy):
         }
 
     except Exception as e:
-        return failed_result(symbol, strategy, f"예외 발생: {e}")
+        try:
+            return failed_result(symbol, strategy, f"예외 발생: {e}")
+        except:
+            return {
+                "symbol": symbol, "strategy": "알수없음", "success": False,
+                "reason": f"예외 발생 및 strategy 미정의: {e}",
+                "direction": "롱", "model": "ensemble", "confidence": 0.0, "rate": 0.0,
+                "price": 1.0, "target": 1.0, "stop": 1.0,
+                "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
+            }
