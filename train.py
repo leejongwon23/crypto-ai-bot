@@ -99,7 +99,8 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                 print(f"[평가 오류] {sym}-{strat}-{model_type} → {e}"); sys.stdout.flush()
     except Exception as e:
         print(f"[실패] {sym}-{strat} → {e}"); sys.stdout.flush()
-        try: logger.log_training_result(sym, strat, "none", 0.0, 0.0, 0.0)
+        try:
+            logger.log_training_result(sym, strat, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except Exception as log_err:
             print(f"[로그 기록 실패] {sym}-{strat} → {log_err}"); sys.stdout.flush()
 
