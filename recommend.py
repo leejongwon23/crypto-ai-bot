@@ -145,7 +145,7 @@ def run_prediction_loop(strategy, symbols):
             r = get_min_gain(symbol, strategy)
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
             log_prediction(symbol, strategy, "예외", 0, 0, now_kst().isoformat(), 0.0, "ensemble", False,
-                           f"예외 발생: {e}", r, return_value=r)
+                           f"예측 예외: {e}", r, return_value=r)
             log_audit(symbol, strategy, None, f"예외 발생: {e}")
 
     save_failure_count(fmap)
