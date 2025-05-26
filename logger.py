@@ -144,3 +144,5 @@ def evaluate_predictions(get_price_fn):
     with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader(); writer.writerows(updated)
+
+strategy_stats = {}
