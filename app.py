@@ -6,6 +6,7 @@ from telegram_bot import send_message
 from predict_test import test_all_predictions
 from predict_trigger import run as trigger_run
 from data.utils import SYMBOLS, get_kline_by_strategy
+from visualization import generate_visual_report  # 전략별 시각화 통합
 
 PERSIST_DIR = "/persistent"
 LOG_DIR, MODEL_DIR = os.path.join(PERSIST_DIR, "logs"), os.path.join(PERSIST_DIR, "models")
@@ -106,7 +107,9 @@ def yopo_health():
         except Exception as e:
             strategy_html.append(f"<div style='color:red;'>❌ {strat} 실패: {e}</div>")
     status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
-    return f"<div style='font-family:monospace;line-height:1.6;font-size:15px;'><b>{status}</b><hr>" + "".join(strategy_html) + "</div>"
+    html_report = f"<div style='font-family:monospace;line-height:1.6;font-size:15px;'><b>{status}</b><hr>" + "".join(strategy_html) + "</div>"
+    visual_report = generate_visual_report()
+    return html_report + visual_report
 
 @app.route("/")
 def index(): return "Yopo server is running"
