@@ -7,8 +7,7 @@ from src.message_formatter import format_message
 import train
 from model_weight_loader import model_exists
 
-CONF_THRESH, REVERSE_CONF, REVERSE_SUCCESS, SUCCESS_THRESH = 0.70, 0.45, 0.6, 0.70
-FAIL_LIMIT, SCORE_MIN, SEND_LIMIT = 3, 0.005, 5
+FAIL_LIMIT, SEND_LIMIT = 3, 5
 STRATEGY_VOL = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
 FAILURE_LOG = "/persistent/logs/failure_count.csv"
@@ -20,8 +19,7 @@ def log_audit(symbol, strategy, result, status):
     try:
         with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=["timestamp", "symbol", "strategy", "result", "status"])
-            if f.tell() == 0:
-                w.writeheader()
+            if f.tell() == 0: w.writeheader()
             w.writerow({
                 "timestamp": now_kst().isoformat(),
                 "symbol": symbol or "UNKNOWN",
@@ -120,57 +118,25 @@ def run_prediction_loop(strategy, symbols):
                 fmap[key] = 0
             results.append(result)
 
-            conf = result.get("confidence", 0)
-            rate = result.get("rate", 0)
-            success_rate = get_model_success_rate(symbol, strategy, result.get("model", "ensemble"))
-            if conf < REVERSE_CONF and rate < get_min_gain(symbol, strategy) and success_rate < REVERSE_SUCCESS:
-                rev = dict(result)
-                rev["direction"] = "숏" if result["direction"] == "롱" else "롱"
-                rev["confidence"] = 1 - conf
-                rev["rate"] = get_min_gain(symbol, strategy) * 1.1
-                rev["target"] = rev["price"] * (1 + rev["rate"]) if rev["direction"] == "롱" else rev["price"] * (1 - rev["rate"])
-                rev["stop"] = rev["price"] * (1 - 0.02) if rev["direction"] == "롱" else rev["price"] * (1 + 0.02)
-                rev.update({
-                    "reason": "🔁 반전 전략: 낮은 신뢰도·낮은 수익률·낮은 성공률",
-                    "reversed": True,
-                    "success_rate": success_rate,
-                    "return": rev["rate"]
-                })
-                log_prediction(rev["symbol"], rev["strategy"], rev["direction"], rev["price"], rev["target"],
-                               now_kst().isoformat(), rev["confidence"], "ensemble", True,
-                               rev["reason"], rev["rate"], return_value=rev["return"])
-                results.append(rev)
-
         except Exception as e:
             r = get_min_gain(symbol, strategy)
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
             log_prediction(symbol, strategy, "예외", 0, 0, now_kst().isoformat(), 0.0, "ensemble", False,
                            f"예측 예외: {e}", r, return_value=r)
-            log_audit(symbol, strategy, None, f"예외 발생: {e}")
+            log_audit(symbol, strategy, None, f"예측 예외: {e}")
 
     save_failure_count(fmap)
 
-    filtered = []
-    for r in results:
-        conf, rate, vol = r.get("confidence", 0), r.get("rate", 0), r.get("volatility", 0)
-        model, symbol, strategy = r.get("model", ""), r.get("symbol"), r.get("strategy")
-        success_rate = r.get("success_rate", get_model_success_rate(symbol, strategy, model))
-        if conf < CONF_THRESH and not r.get("reversed"): continue
-        if rate < get_min_gain(symbol, strategy): continue
-        if success_rate < SUCCESS_THRESH: continue
-        score = (conf**1.5) * (rate**1.2) * (success_rate**1.2) * (1 + vol)
-        if score < SCORE_MIN: continue
-        r.update({"success_rate": success_rate, "score": score})
-        filtered.append(r)
+    filtered = [r for r in results if r.get("rate", 0.0) >= 0.01]
+    final = sorted(filtered, key=lambda x: -x["rate"])[:SEND_LIMIT]
 
-    final = sorted(filtered, key=lambda x: -x["score"])[:SEND_LIMIT]
     for res in final:
         try:
             msg = ("[반전 추천] " if res.get("reversed") else "") + format_message(res)
             send_message(msg)
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
                 csv.writer(f).writerow([now_kst().isoformat(), res["symbol"], res["strategy"], msg])
-            print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%} | 성공률: {res['success_rate']:.2f}")
+            print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%}")
         except Exception as e:
             print(f"[ERROR] 메시지 전송 실패: {e}")
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
