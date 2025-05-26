@@ -67,26 +67,25 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                     if len(xb_all) >= 2:
                         xb, yb = torch.stack(xb_all), torch.tensor(yb_all, dtype=torch.float32)
                         for i in range(0, len(xb), batch):
-                            pred, _ = model(xb[i:i+batch])
-                            if pred is not None:
-                                loss = lossfn(pred.squeeze(), yb[i:i+batch])
-                                optim.zero_grad(); loss.backward(); optim.step()
+                            signal, confidence = model(xb[i:i+batch])
+                            rate = signal * confidence * get_min_gain(sym, strat)
+                            loss = lossfn(rate, yb[i:i+batch])
+                            optim.zero_grad(); loss.backward(); optim.step()
 
                 for xb, yb in loader:
-                    pred, _ = model(xb)
-                    if pred is not None:
-                        loss = lossfn(pred.squeeze(), yb)
-                        optim.zero_grad(); loss.backward(); optim.step()
+                    signal, confidence = model(xb)
+                    rate = signal * confidence * get_min_gain(sym, strat)
+                    loss = lossfn(rate, yb)
+                    optim.zero_grad(); loss.backward(); optim.step()
 
             model.eval()
             try:
                 with torch.no_grad():
-                    out, _ = model(val_X)
-                    y_prob = out.squeeze().numpy()
-                    if y_prob.ndim == 0: y_prob = np.array([y_prob])
-                    acc = r2_score(val_y.numpy(), y_prob)
-                    f1 = mean_squared_error(val_y.numpy(), y_prob)
-                    logloss = np.mean(np.square(val_y.numpy() - y_prob))
+                    signal, confidence = model(val_X)
+                    rate = (signal * confidence * get_min_gain(sym, strat)).numpy()
+                    acc = r2_score(val_y.numpy(), rate)
+                    f1 = mean_squared_error(val_y.numpy(), rate)
+                    logloss = np.mean(np.square(val_y.numpy() - rate))
                     logger.log_training_result(sym, strat, model_type, acc, f1, logloss)
                     model_path = f"{MODEL_DIR}/{sym}_{strat}_{model_type}.pt"
                     torch.save(model.state_dict(), model_path)
@@ -105,7 +104,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
 
 def train_all_models():
     strategy_order = ["단기", "중기", "장기"]
-    # ✅ 전략별 성능 기반 우선순위 정렬
     def get_score(s):
         stat = strategy_stats.get(s, {"success": 0, "fail": 0, "returns": []})
         total = stat["success"] + stat["fail"]
