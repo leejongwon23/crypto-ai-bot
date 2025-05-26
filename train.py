@@ -1,120 +1,104 @@
-import os, json, torch, torch.nn as nn, numpy as np, datetime, pytz, sys
-import pandas as pd
-from torch.utils.data import DataLoader, TensorDataset, random_split
+import os, torch, numpy as np, pandas as pd, datetime, pytz, sys
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import accuracy_score, f1_score, log_loss
-from data.utils import SYMBOLS, get_kline_by_strategy, compute_features
+from data.utils import get_kline_by_strategy, compute_features
 from model.base_model import get_model
 from model_weight_loader import get_model_weight
-from wrong_data_loader import load_wrong_prediction_data
-from feature_importance import compute_feature_importance, save_feature_importance
-import logger
-from logger import get_min_gain
 from window_optimizer import find_best_window
+from logger import get_min_gain, log_prediction
 
-DEVICE = torch.device("cpu")
-DIR = "/persistent"; MODEL_DIR, LOG_DIR = f"{DIR}/models", f"{DIR}/logs"
-os.makedirs(MODEL_DIR, exist_ok=True); os.makedirs(LOG_DIR, exist_ok=True)
+DEVICE, MODEL_DIR = torch.device("cpu"), "/persistent/models"
+STOP_LOSS_PCT = 0.02
+MIN_EXPECTED_RATES = {"단기": 0.007, "중기": 0.015, "장기": 0.03}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-def create_dataset(f, w):
-    X, y = [], []
-    for i in range(len(f) - w - 1):
-        x_seq = f[i:i + w]
-        if any(len(r.values()) != len(f[0].values()) for r in x_seq): continue
-        c1, c2 = f[i + w - 1]['close'], f[i + w]['close']
-        if c1 == 0: continue
-        X.append([list(r.values()) for r in x_seq])
-        y.append(1 if (c2 - c1) / c1 > 0 else 0)
-    if not X: return np.array([]), np.array([])
-    mlen = max(set(map(len, X)), key=list(X).count)
-    filt = [(x, l) for x, l in zip(X, y) if len(x) == mlen]
-    return np.array([x for x, _ in filt]), np.array([l for _, l in filt]) if filt else (np.array([]), np.array([]))
-
-def save_model_metadata(s, t, m, a, f1, l):
-    meta = {"symbol": s, "strategy": t, "model": m, "accuracy": round(a,4), "f1_score": round(f1,4), "loss": round(l,6), "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")}
-    path = f"{MODEL_DIR}/{s}_{t}_{m}.meta.json"
-    with open(path, "w", encoding="utf-8") as f: json.dump(meta, f, indent=2, ensure_ascii=False)
-    print(f"🗘 저장됨: {path}"); sys.stdout.flush()
-
-def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep=4, rep_wrong=4):
-    print(f"[train] 🔄 {sym}-{strat} 시작"); sys.stdout.flush()
+def failed_result(symbol, strategy, reason):
+    t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    is_volatility = "_v" in symbol
     try:
-        win = find_best_window(sym, strat)
-        df = get_kline_by_strategy(sym, strat)
-        if df is None or len(df) < win + 10: raise ValueError("데이터 부족")
-        df_feat = compute_features(sym, df, strat)
-        if df_feat is None or len(df_feat) < win + 1: raise ValueError("feature 부족")
-        feat = MinMaxScaler().fit_transform(df_feat.values)
-        X_raw, y_raw = create_dataset([dict(zip(df_feat.columns, r)) for r in feat], win)
-        if len(X_raw) < 2: raise ValueError("유효 시퀀스 부족")
-        input_size, val_len = X_raw.shape[2], int(len(X_raw) * 0.2)
-        if val_len == 0: raise ValueError("검증셋 부족")
-
-        val_X, val_y = torch.tensor(X_raw[-val_len:], dtype=torch.float32), torch.tensor(y_raw[-val_len:], dtype=torch.float32)
-        dataset = TensorDataset(torch.tensor(X_raw, dtype=torch.float32), torch.tensor(y_raw, dtype=torch.float32))
-        train_set, _ = random_split(dataset, [len(dataset)-val_len, val_len])
-
-        for model_type in ["lstm", "cnn_lstm", "transformer"]:
-            model = get_model(model_type, input_size); model.train()
-            optim, lossfn = torch.optim.Adam(model.parameters(), lr=lr), nn.BCELoss()
-            loader = DataLoader(train_set, batch_size=batch, shuffle=True)
-
-            for _ in range(rep):
-                for _ in range(rep_wrong):
-                    wrong_data = load_wrong_prediction_data(sym, strat, input_size, win)
-                    if not wrong_data: continue
-                    xb_all, yb_all = zip(*[(xb, yb) for xb, yb in wrong_data if xb.shape[1:] == (win, input_size)]) if wrong_data else ([],[])
-                    if len(xb_all) >= 2:
-                        xb, yb = torch.stack(xb_all), torch.tensor(yb_all, dtype=torch.float32)
-                        for i in range(0, len(xb), batch):
-                            pred, _ = model(xb[i:i+batch])
-                            if pred is not None:
-                                loss = lossfn(pred, yb[i:i+batch])
-                                optim.zero_grad(); loss.backward(); optim.step()
-
-                for xb, yb in loader:
-                    pred, _ = model(xb)
-                    if pred is not None:
-                        loss = lossfn(pred, yb)
-                        optim.zero_grad(); loss.backward(); optim.step()
-
-            model.eval()
-            try:
-                with torch.no_grad():
-                    out, _ = model(val_X)
-                    y_prob = out.squeeze().numpy()
-                    if y_prob.ndim == 0: y_prob = np.array([y_prob])
-                    y_pred = (y_prob > 0.5).astype(int)
-                    acc, f1 = accuracy_score(val_y.numpy(), y_pred), f1_score(val_y.numpy(), y_pred)
-                    logloss = log_loss(val_y.numpy(), y_prob, labels=[0, 1])
-                    logger.log_training_result(sym, strat, model_type, acc, f1, logloss)
-                    model_path = f"{MODEL_DIR}/{sym}_{strat}_{model_type}.pt"
-                    torch.save(model.state_dict(), model_path)
-                    print(f"✅ 저장: {model_path}"); sys.stdout.flush()
-                    save_model_metadata(sym, strat, model_type, acc, f1, logloss)
-                    imps = compute_feature_importance(model, val_X, val_y, list(df_feat.columns))
-                    save_feature_importance(imps, sym, strat, model_type)
-            except Exception as e:
-                print(f"[평가 오류] {sym}-{strat}-{model_type} → {e}"); sys.stdout.flush()
+        log_prediction(symbol, strategy, direction="롱", entry_price=0, target_price=0,
+                       confidence=0, model="ensemble", success=False, reason=reason,
+                       rate=0.0, timestamp=t, volatility=is_volatility)
     except Exception as e:
-        print(f"[실패] {sym}-{strat} → {e}"); sys.stdout.flush()
-        try:
-            logger.log_training_result(sym, strat, f"실패({str(e)})", 0.0, 0.0, 0.0)
-        except Exception as log_err:
-            print(f"[로그 기록 실패] {sym}-{strat} → {log_err}"); sys.stdout.flush()
+        print(f"[경고] log_prediction 실패: {e}")
+        sys.stdout.flush()
+    return {
+        "symbol": symbol, "strategy": strategy, "success": False, "reason": reason,
+        "direction": "롱", "model": "ensemble", "confidence": 0.0, "rate": 0.0,
+        "price": 1.0, "target": 1.0, "stop": 1.0, "timestamp": t
+    }
 
-def train_all_models():
-    for strat in ["단기", "중기", "장기"]:
-        for sym in SYMBOLS:
-            try: train_one_model(sym, strat)
+def predict(symbol, strategy):
+    try:
+        print(f"[PREDICT] {symbol}-{strategy} 시작")
+        sys.stdout.flush()
+        is_volatility = "_v" in symbol
+        window = find_best_window(symbol, strategy)
+        df = get_kline_by_strategy(symbol, strategy)
+        if df is None or len(df) < window + 1:
+            return failed_result(symbol, strategy, "데이터 부족")
+        feat = compute_features(symbol, df, strategy)
+        if feat is None or feat.dropna().shape[0] < window + 1:
+            return failed_result(symbol, strategy, "feature 부족")
+        feat = pd.DataFrame(MinMaxScaler().fit_transform(feat.dropna()), columns=feat.columns)
+        X = np.expand_dims(feat.iloc[-window:].values, axis=0)
+        if X.shape[1] != window:
+            return failed_result(symbol, strategy, "시퀀스 형상 오류")
+
+        model_files = {}
+        for f in os.listdir(MODEL_DIR):
+            if not f.endswith(".pt"): continue
+            parts = f.replace(".pt", "").split("_")
+            if len(parts) < 3: continue
+            f_sym, f_strat, f_type = parts[0], parts[1], "_".join(parts[2:])
+            if f_sym == symbol and f_strat == strategy:
+                model_files[f_type] = os.path.join(MODEL_DIR, f)
+
+        if not model_files:
+            return failed_result(symbol, strategy, "모델 없음")
+
+        rates = []
+        for model_type, path in model_files.items():
+            try:
+                model = get_model(model_type, X.shape[2])
+                model.load_state_dict(torch.load(path, map_location=DEVICE))
+                model.eval()
+                with torch.no_grad():
+                    output = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
+                    if isinstance(output, tuple): output = output[0]
+                    rate = float(output.squeeze())
+                    if np.isnan(rate) or rate < 0: continue
+                    rates.append(rate)
             except Exception as e:
-                print(f"[전체 학습 오류] {sym}-{strat} → {e}"); sys.stdout.flush()
+                print(f"[모델 예측 실패] {symbol}-{strategy}-{model_type}: {e}")
+                sys.stdout.flush()
 
-def train_model_loop(strategy):
-    for sym in SYMBOLS:
-        try: train_one_model(sym, strategy)
-        except Exception as e:
-            print(f"[단일 학습 오류] {sym}-{strategy} → {e}"); sys.stdout.flush()
+        if not rates:
+            return failed_result(symbol, strategy, "모든 모델 예측 실패")
 
-train_model = train_all_models
+        avg_rate = np.mean(rates)
+        if avg_rate < MIN_EXPECTED_RATES.get(strategy, 0.01):
+            return failed_result(symbol, strategy, f"예측 수익률 기준 미달 ({avg_rate:.4f})")
+
+        price = feat["close"].iloc[-1]
+        if np.isnan(price):
+            return failed_result(symbol, strategy, "price NaN 발생")
+
+        t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+        log_prediction(symbol, strategy, "롱", entry_price=price,
+                       target_price=price * (1 + avg_rate),
+                       confidence=1.0, model="ensemble", success=True,
+                       reason="수익률 예측 성공", rate=avg_rate,
+                       timestamp=t, volatility=is_volatility)
+
+        return {
+            "symbol": symbol, "strategy": strategy, "model": "ensemble", "direction": "롱",
+            "confidence": 1.0, "rate": avg_rate, "price": price,
+            "target": price * (1 + avg_rate),
+            "stop": price * (1 - STOP_LOSS_PCT),
+            "reason": "수익률 예측 성공", "success": True, "timestamp": t
+        }
+
+    except Exception as e:
+        print(f"[예외] 예측 실패: {symbol}-{strategy} → {e}")
+        sys.stdout.flush()
+        return failed_result(symbol, strategy, f"예외 발생: {e}")
