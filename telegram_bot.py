@@ -34,10 +34,10 @@ def send_message(text: str):
             log_message("전송 성공", text)
         else:
             print(f"[TELEGRAM ERROR] 응답 오류: {resp_json}")
-            log_message("전송 실패", f"응답 오류: {resp_json}")
+            log_message("전송 실패", f"응답 오류: {resp_json} | 메시지 내용: {text}")
     except Exception as e:
         print(f"[TELEGRAM ERROR] 메시지 전송 실패: {e}")
-        log_message("전송 실패", f"예외: {e}")
+        log_message("전송 실패", f"예외: {e} | 메시지 내용: {text}")
 
 def log_message(status, content):
     timestamp = now_kst().strftime("%Y-%m-%d %H:%M:%S")
