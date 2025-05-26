@@ -1,7 +1,7 @@
 import os, csv, sys, time, threading, datetime, pytz
 from telegram_bot import send_message
 from predict import predict
-from logger import log_prediction, get_model_success_rate, get_actual_success_rate, get_strategy_eval_count, get_min_gain
+from logger import log_prediction, get_model_success_rate, get_actual_success_rate, get_strategy_eval_count, get_min_gain, strategy_stats
 from data.utils import SYMBOLS, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
@@ -127,8 +127,20 @@ def run_prediction_loop(strategy, symbols):
 
     save_failure_count(fmap)
 
-    filtered = [r for r in results if r.get("rate", 0.0) >= 0.01]
-    final = sorted(filtered, key=lambda x: -x["rate"])[:SEND_LIMIT]
+    # ✅ 전략 성능 기반 필터링
+    filtered = []
+    for r in results:
+        s = r.get("strategy")
+        stat = strategy_stats.get(s, {"success": 0, "fail": 0, "returns": []})
+        total = stat["success"] + stat["fail"]
+        if total < 5: continue
+        success_rate = stat["success"] / total if total > 0 else 0.0
+        avg_return = sum(stat["returns"]) / len(stat["returns"]) if stat["returns"] else 0.0
+        if success_rate < 0.5 or avg_return < 0.01: continue
+        r["score"] = r["rate"] * success_rate * avg_return
+        filtered.append(r)
+
+    final = sorted(filtered, key=lambda x: -x["score"])[:SEND_LIMIT]
 
     for res in final:
         try:
