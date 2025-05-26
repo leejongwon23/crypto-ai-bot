@@ -1,5 +1,3 @@
-# ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
-
 import os
 import csv
 import torch
@@ -14,21 +12,30 @@ def load_wrong_prediction_data(symbol, strategy, input_size, window=30):
         return None
 
     rows = []
-    with open(file, "r") as f:
+    with open(file, "r", encoding="utf-8-sig") as f:
         reader = csv.reader(f)
         for row in reader:
-            if len(row) < 4:
+            if len(row) < 6:
                 continue
-            _, sym, strat, direction, *_ = row
+            timestamp, sym, strat, direction, entry_price, target_price, *_ = row
             if sym == symbol and strat == strategy:
-                rows.append((row, direction))
+                try:
+                    rows.append({
+                        "timestamp": timestamp,
+                        "direction": direction,
+                        "entry_price": float(entry_price)
+                    })
+                except:
+                    continue
 
     if not rows:
         return None
 
     df = get_kline_by_strategy(symbol, strategy)
-    if df is None:
+    if df is None or len(df) < window + 1:
         return None
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
 
     df_feat = compute_features(symbol, df, strategy)
     if len(df_feat) < window + 1:
@@ -39,25 +46,34 @@ def load_wrong_prediction_data(symbol, strategy, input_size, window=30):
     feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
 
     X, y = [], []
-    for i in range(len(feature_dicts) - window - 1):
-        x_seq = feature_dicts[i:i+window]
 
-        if any(len(row.values()) != len(feature_dicts[0].values()) for row in x_seq):
-            continue
+    for row in rows:
+        try:
+            fail_time = pd.to_datetime(row["timestamp"], utc=True)
+            entry_price = row["entry_price"]
+            direction = row["direction"]
 
-        for fail_row, direction in rows:
-            try:
-                entry_price = float(fail_row[4])
-                timestamp = fail_row[0]
-                close_price = df["close"].iloc[i + window - 1]
-                ts_index = df.index[i + window - 1]
-                if abs(close_price - entry_price) / entry_price < 0.001:
-                    label = 1 if direction == "롱" else 0
-                    X.append([list(r.values()) for r in x_seq])
-                    y.append(label)
-                    break
-            except:
+            index = df[df["timestamp"] >= fail_time].index.min()
+            if index is None or index < window:
                 continue
+
+            x_seq = feature_dicts[index - window:index]
+            if any(len(r.values()) != len(feature_dicts[0].values()) for r in x_seq):
+                continue
+
+            future_df = df[df.index >= index]
+            if future_df.empty:
+                continue
+
+            high = future_df["high"].max()
+            low = future_df["low"].min()
+            price = high if direction == "롱" else low
+            gain = (price - entry_price) / entry_price if direction == "롱" else (entry_price - price) / entry_price
+
+            X.append([list(r.values()) for r in x_seq])
+            y.append(round(gain, 4))
+        except:
+            continue
 
     if not X:
         return None
