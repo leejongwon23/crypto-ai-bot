@@ -54,7 +54,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
         val_X, val_y = torch.tensor(X_raw[-val_len:], dtype=torch.float32), torch.tensor(y_raw[-val_len:], dtype=torch.float32)
         dataset = TensorDataset(torch.tensor(X_raw, dtype=torch.float32), torch.tensor(y_raw, dtype=torch.float32))
         train_set, _ = random_split(dataset, [len(dataset)-val_len, val_len])
-        scores, models, metrics = {}, {}, {}
 
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size); model.train()
@@ -89,10 +88,13 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                     y_pred = (y_prob > 0.5).astype(int)
                     acc, f1 = accuracy_score(val_y.numpy(), y_pred), f1_score(val_y.numpy(), y_pred)
                     logloss = log_loss(val_y.numpy(), y_prob, labels=[0, 1])
-                    conf = np.mean(np.abs(y_prob - 0.5)) * 2
-                    final = acc * (1 + f1) * conf
                     logger.log_training_result(sym, strat, model_type, acc, f1, logloss)
-                    scores[model_type] = final; models[model_type] = model; metrics[model_type] = (acc, f1, logloss)
+                    model_path = f"{MODEL_DIR}/{sym}_{strat}_{model_type}.pt"
+                    torch.save(model.state_dict(), model_path)
+                    print(f"✅ 저장: {model_path}"); sys.stdout.flush()
+                    save_model_metadata(sym, strat, model_type, acc, f1, logloss)
+                    imps = compute_feature_importance(model, val_X, val_y, list(df_feat.columns))
+                    save_feature_importance(imps, sym, strat, model_type)
             except Exception as e:
                 print(f"[평가 오류] {sym}-{strat}-{model_type} → {e}"); sys.stdout.flush()
     except Exception as e:
@@ -100,21 +102,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
         try: logger.log_training_result(sym, strat, "none", 0.0, 0.0, 0.0)
         except Exception as log_err:
             print(f"[로그 기록 실패] {sym}-{strat} → {log_err}"); sys.stdout.flush()
-        return
-
-    if scores:
-        best = max(scores, key=scores.get)
-        acc, f1, loss = metrics[best]
-        model_path = f"{MODEL_DIR}/{sym}_{strat}_{best}.pt"
-        torch.save(models[best].state_dict(), model_path)
-        print(f"✅ 저장: {model_path} (score={scores[best]:.4f})"); sys.stdout.flush()
-        save_model_metadata(sym, strat, best, acc, f1, loss)
-        imps = compute_feature_importance(models[best], val_X, val_y, list(df_feat.columns))
-        save_feature_importance(imps, sym, strat, best)
-    else:
-        print(f"❗ 모델 저장 실패: {sym}-{strat}"); sys.stdout.flush()
-        try: logger.log_training_result(sym, strat, "none", 0.0, 0.0, 0.0)
-        except: pass
 
 def train_all_models():
     for strat in ["단기", "중기", "장기"]:
