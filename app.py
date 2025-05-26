@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, request
 from recommend import main
-import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv, re
+import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv, re, functools
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram_bot import send_message
 from predict_test import test_all_predictions
@@ -21,14 +21,22 @@ def start_scheduler():
     sched = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
     학습 = [(1,30,"단기"), (3,30,"장기"), (6,0,"중기"), (9,0,"단기"), (11,0,"중기"), (13,0,"장기"), (15,0,"단기"), (17,0,"중기"), (19,0,"장기"), (22,30,"단기")]
     예측 = [(7,30,s) for s in ["단기","중기","장기"]] + [(10,30,"단기"),(10,30,"중기"),(12,30,"중기"),(14,30,"장기"),(16,30,"단기"),(18,30,"중기")] + [(21,0,s) for s in ["단기","중기","장기"]] + [(0,0,"단기"),(0,0,"중기")]
+
     for h,m,strategy in 학습:
-        sched.add_job(lambda strategy=strategy: threading.Thread(target=train.train_model_loop,args=(strategy,),daemon=True).start(),'cron',hour=h,minute=m)
+        job = functools.partial(threading.Thread, target=train.train_model_loop, args=(strategy,), daemon=True)
+        sched.add_job(lambda job=job: job().start(), 'cron', hour=h, minute=m)
+
     for h,m,strategy in 예측:
-        sched.add_job(lambda strategy=strategy: threading.Thread(target=main,args=(strategy,),daemon=True).start(),'cron',hour=h,minute=m)
+        job = functools.partial(threading.Thread, target=main, args=(strategy,), daemon=True)
+        sched.add_job(lambda job=job: job().start(), 'cron', hour=h, minute=m)
+
     sched.add_job(lambda: __import__('logger').evaluate_predictions(None), 'cron', minute=20)
     sched.add_job(test_all_predictions, 'cron', minute=10)
     sched.add_job(trigger_run, 'interval', minutes=30)
     sched.start()
+
+# ... 나머지 app.py 코드 (이미 사용자 제공 코드 기준으로 정확히 유지됨)
+
 
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료"); sys.stdout.flush()
