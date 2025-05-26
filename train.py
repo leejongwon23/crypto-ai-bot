@@ -9,7 +9,6 @@ from wrong_data_loader import load_wrong_prediction_data
 from feature_importance import compute_feature_importance, save_feature_importance
 import logger
 from logger import get_min_gain, strategy_stats
-from window_optimizer import find_best_window
 
 DEVICE = torch.device("cpu")
 DIR = "/persistent"; MODEL_DIR, LOG_DIR = f"{DIR}/models", f"{DIR}/logs"
@@ -59,6 +58,14 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
             optim, lossfn = torch.optim.Adam(model.parameters(), lr=lr), nn.MSELoss()
             loader = DataLoader(train_set, batch_size=batch, shuffle=True)
 
+            try:
+                # 🎯 학습 전 정확도 측정
+                with torch.no_grad():
+                    before_pred = model(val_X).squeeze(-1).numpy()
+                    acc_before = r2_score(val_y.numpy(), before_pred)
+            except:
+                acc_before = ""
+
             for _ in range(rep):
                 for _ in range(rep_wrong):
                     wrong_data = load_wrong_prediction_data(sym, strat, input_size, win)
@@ -90,6 +97,29 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                     save_model_metadata(sym, strat, model_type, acc, f1, logloss)
                     imps = compute_feature_importance(model, val_X, val_y, list(df_feat.columns))
                     save_feature_importance(imps, sym, strat, model_type)
+
+                    # 🎯 정확도 전후 기록 logger 연동
+                    audit_row = {
+                        "timestamp": now_kst().isoformat(),
+                        "symbol": sym,
+                        "strategy": strat,
+                        "model": model_type,
+                        "status": "train",
+                        "reason": "train_complete",
+                        "predicted_return": "",
+                        "actual_return": "",
+                        "accuracy_before": acc_before,
+                        "accuracy_after": acc,
+                        "predicted_volatility": "",
+                        "actual_volatility": ""
+                    }
+                    audit_log_path = os.path.join(LOG_DIR, "evaluation_audit.csv")
+                    write_header = not os.path.exists(audit_log_path) or os.stat(audit_log_path).st_size == 0
+                    with open(audit_log_path, "a", newline="", encoding="utf-8-sig") as af:
+                        writer = csv.DictWriter(af, fieldnames=list(audit_row.keys()))
+                        if write_header: writer.writeheader()
+                        writer.writerow(audit_row)
+
             except Exception as e:
                 print(f"[평가 오류] {sym}-{strat}-{model_type} → {e}"); sys.stdout.flush()
     except Exception as e:
