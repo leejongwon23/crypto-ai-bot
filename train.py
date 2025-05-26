@@ -67,22 +67,19 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                     if len(xb_all) >= 2:
                         xb, yb = torch.stack(xb_all), torch.tensor(yb_all, dtype=torch.float32)
                         for i in range(0, len(xb), batch):
-                            signal, confidence = model(xb[i:i+batch])
-                            rate = signal * confidence * get_min_gain(sym, strat)
+                            rate = model(xb[i:i+batch]).squeeze(-1)
                             loss = lossfn(rate, yb[i:i+batch])
                             optim.zero_grad(); loss.backward(); optim.step()
 
                 for xb, yb in loader:
-                    signal, confidence = model(xb)
-                    rate = signal * confidence * get_min_gain(sym, strat)
+                    rate = model(xb).squeeze(-1)
                     loss = lossfn(rate, yb)
                     optim.zero_grad(); loss.backward(); optim.step()
 
             model.eval()
             try:
                 with torch.no_grad():
-                    signal, confidence = model(val_X)
-                    rate = (signal * confidence * get_min_gain(sym, strat)).numpy()
+                    rate = model(val_X).squeeze(-1).numpy()
                     acc = r2_score(val_y.numpy(), rate)
                     f1 = mean_squared_error(val_y.numpy(), rate)
                     logloss = np.mean(np.square(val_y.numpy() - rate))
