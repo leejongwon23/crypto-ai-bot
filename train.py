@@ -8,7 +8,7 @@ from model_weight_loader import get_model_weight
 from wrong_data_loader import load_wrong_prediction_data
 from feature_importance import compute_feature_importance, save_feature_importance
 import logger
-from logger import get_min_gain
+from logger import get_min_gain, strategy_stats
 from window_optimizer import find_best_window
 
 DEVICE = torch.device("cpu")
@@ -104,7 +104,18 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
             print(f"[로그 기록 실패] {sym}-{strat} → {log_err}"); sys.stdout.flush()
 
 def train_all_models():
-    for strat in ["단기", "중기", "장기"]:
+    strategy_order = ["단기", "중기", "장기"]
+    # ✅ 전략별 성능 기반 우선순위 정렬
+    def get_score(s):
+        stat = strategy_stats.get(s, {"success": 0, "fail": 0, "returns": []})
+        total = stat["success"] + stat["fail"]
+        if total < 5: return 0
+        success_rate = stat["success"] / total if total > 0 else 0
+        avg_return = sum(stat["returns"]) / len(stat["returns"]) if stat["returns"] else 0
+        return success_rate * avg_return
+    strategy_order.sort(key=lambda s: -get_score(s))
+
+    for strat in strategy_order:
         for sym in SYMBOLS:
             try: train_one_model(sym, strat)
             except Exception as e:
