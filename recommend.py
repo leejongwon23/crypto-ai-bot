@@ -73,7 +73,8 @@ def run_prediction_loop(strategy, symbols):
         symbol = item["symbol"]
         vol = item.get("volatility", 0)
         try:
-            if not model_exists(symbol, strategy):
+            model_count = len([f for f in os.listdir("/persistent/models") if f.startswith(f"{symbol}_{strategy}_") and f.endswith(".pt")])
+            if model_count == 0:
                 r = get_min_gain(symbol, strategy)
                 log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(),
                                0.0, "ensemble", False, "모델 없음", r, return_value=r)
