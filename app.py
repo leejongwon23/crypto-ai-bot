@@ -65,6 +65,13 @@ def yopo_health():
             pred = pred.query(f"strategy == '{strat}'") if not pred.empty and "strategy" in pred.columns else pd.DataFrame()
             train = train.query(f"strategy == '{strat}'") if not train.empty and "strategy" in train.columns else pd.DataFrame()
             audit = audit.query(f"strategy == '{strat}'") if not audit.empty and "strategy" in audit.columns else pd.DataFrame()
+
+            # ✅ B방식 수정 시작
+            pred["volatility"] = pred["symbol"].astype(str).str.contains("_v", na=False)
+            pred["return"] = pd.to_numeric(pred.get("return", pd.Series()), errors="coerce").fillna(0)
+            pred["confidence"] = pd.to_numeric(pred.get("confidence", pd.Series()), errors="coerce").fillna(0)
+            # ✅ B방식 수정 끝
+
             strat_models = model_info.get(strat, {})
             types = {"lstm":0,"cnn_lstm":0,"transformer":0}
             for mtypes in strat_models.values():
@@ -73,16 +80,16 @@ def yopo_health():
             untrained = sorted(set(SYMBOLS) - set(trained_syms))
             stat = lambda df,s:len(df[df["status"]==s]) if not df.empty and "status" in df.columns else 0
             succ, fail, pend, failed = map(lambda s: stat(pred,s), ["success","fail","pending","failed"])
-            if "symbol" in pred.columns:
-                nvol = pred[~pred["symbol"].astype(str).str.contains("_v", na=False)]
-                vol = pred[pred["symbol"].astype(str).str.contains("_v", na=False)]
-            else:
-                nvol = vol = pd.DataFrame()
+
+            # ✅ B방식: 변동성 예측 구분
+            nvol = pred[~pred["volatility"]]
+            vol = pred[pred["volatility"]]
+
             def perf(df):
                 try:
                     s,f = stat(df,"success"),stat(df,"fail")
                     t = s + f
-                    avg = pd.to_numeric(df.get("return", pd.Series()), errors='coerce').mean()
+                    avg = df["return"].mean()
                     return {"succ":s,"fail":f,"succ_rate":s/t*100 if t else 0,"fail_rate":f/t*100 if t else 0,"r_avg":avg if pd.notna(avg) else 0,"total":t}
                 except:
                     return {"succ":0,"fail":0,"succ_rate":0,"fail_rate":0,"r_avg":0,"total":0}
@@ -94,9 +101,7 @@ def yopo_health():
             if pv["fail_rate"]>50: problems.append(f"{strat}: 변동성 실패율 {pv['fail_rate']:.1f}%")
             table = ""
             if not pred.empty and all(c in pred.columns for c in ["timestamp","symbol","direction","return","confidence","status"]):
-                recent10 = pred.tail(10).copy()
-                recent10["return"] = pd.to_numeric(recent10["return"], errors='coerce').fillna(0)
-                recent10["confidence"] = pd.to_numeric(recent10["confidence"], errors='coerce').fillna(0)
+                recent10 = pred.sort_values("timestamp").tail(10).copy()
                 rows = [f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{r['return']:.2f}%</td><td>{r['confidence']:.1f}%</td><td>{'✅' if r['status']=='success' else '❌' if r['status']=='fail' else '⏳' if r['status']=='pending' else '🛑'}</td></tr>" for _,r in recent10.iterrows()]
                 table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>신뢰도</th><th>상태</th></tr>" + "".join(rows) + "</table>"
             html = f"""<div style='border:1px solid #aaa;margin:16px 0;padding:10px;font-family:monospace;background:#f8f8f8;'>
@@ -117,7 +122,8 @@ def yopo_health():
     status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
     html_report = f"<div style='font-family:monospace;line-height:1.6;font-size:15px;'><b>{status}</b><hr>" + "".join(strategy_html) + "</div>"
     visual_report = generate_visual_report()
-    return html_report + visual_report
+    return html_report + visual_report()
+
 
 @app.route("/")
 def index(): return "Yopo server is running"
