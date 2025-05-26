@@ -96,6 +96,9 @@ def evaluate_predictions(get_price_fn):
     except Exception as e:
         print(f"[경고] 평가 로그 읽기 실패: {e}"); return
     now = now_kst(); updated = []
+    audit_headers = ["timestamp","symbol","strategy","model","status","reason",
+                     "predicted_return","actual_return","accuracy_before","accuracy_after",
+                     "predicted_volatility","actual_volatility"]
     headers = ["timestamp","symbol","strategy","direction","entry_price","target_price",
                "confidence","model","rate","status","reason","return","volatility"]
     for row in rows:
@@ -135,6 +138,26 @@ def evaluate_predictions(get_price_fn):
                                 csv.writer(wf).writerow(["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "gain"])
                         with open(WRONG_PREDICTIONS, "a", newline="", encoding="utf-8-sig") as wf:
                             csv.writer(wf).writerow([row["timestamp"], symbol, strategy, direction, entry, row.get("target_price", 0), gain])
+                    # 🎯 시각화용 평가 로그 추가 기록
+                    audit_row = {
+                        "timestamp": now.isoformat(),
+                        "symbol": symbol,
+                        "strategy": strategy,
+                        "model": model,
+                        "status": row.get("status", ""),
+                        "reason": row.get("reason", ""),
+                        "predicted_return": rate,
+                        "actual_return": round(gain, 4),
+                        "accuracy_before": "",  # 추후 학습 로그 연동 가능
+                        "accuracy_after": "",
+                        "predicted_volatility": float(row["confidence"]) if volatility else "",
+                        "actual_volatility": eval_df["close"].pct_change().rolling(5).std().iloc[-1] if not eval_df.empty else ""
+                    }
+                    write_header = not os.path.exists(AUDIT_LOG) or os.stat(AUDIT_LOG).st_size == 0
+                    with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as af:
+                        writer = csv.DictWriter(af, fieldnames=audit_headers)
+                        if write_header: writer.writeheader()
+                        writer.writerow(audit_row)
             log_audit(symbol, strategy, row.get("status", "unknown"), row.get("reason", ""))
         except Exception as e:
             row.update({"status": "skip_eval", "reason": f"예외 발생: {e}", "return": 0.0})
