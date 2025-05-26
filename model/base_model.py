@@ -24,8 +24,7 @@ class LSTMPricePredictor(nn.Module):
         self.attention = Attention(hidden_size)
         self.bn = nn.BatchNorm1d(hidden_size)
         self.dropout = nn.Dropout(dropout)
-        self.fc_signal = nn.Linear(hidden_size, 1)
-        self.fc_confidence = nn.Linear(hidden_size, 1)
+        self.fc_rate = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
         if self.training and x.size(0) == 1:
@@ -34,9 +33,8 @@ class LSTMPricePredictor(nn.Module):
         context, _ = self.attention(lstm_out)
         context = self.bn(context)
         context = self.dropout(context)
-        signal = torch.sigmoid(self.fc_signal(context)).squeeze(-1)
-        confidence = torch.sigmoid(self.fc_confidence(context)).squeeze(-1)
-        return signal, confidence
+        rate = self.fc_rate(context).squeeze(-1)
+        return rate
 
 class CNNLSTMPricePredictor(nn.Module):
     def __init__(self, input_size: int, cnn_channels: int = 32, lstm_hidden_size: int = 64, lstm_layers: int = 2, dropout: float = 0.3):
@@ -49,8 +47,7 @@ class CNNLSTMPricePredictor(nn.Module):
                             batch_first=True)
         self.attention = Attention(lstm_hidden_size)
         self.dropout = nn.Dropout(dropout)
-        self.fc_signal = nn.Linear(lstm_hidden_size, 1)
-        self.fc_confidence = nn.Linear(lstm_hidden_size, 1)
+        self.fc_rate = nn.Linear(lstm_hidden_size, 1)
 
     def forward(self, x):
         x = x.permute(0, 2, 1)
@@ -59,9 +56,8 @@ class CNNLSTMPricePredictor(nn.Module):
         lstm_out, _ = self.lstm(x)
         context, _ = self.attention(lstm_out)
         context = self.dropout(context)
-        signal = torch.sigmoid(self.fc_signal(context)).squeeze(-1)
-        confidence = torch.sigmoid(self.fc_confidence(context)).squeeze(-1)
-        return signal, confidence
+        rate = self.fc_rate(context).squeeze(-1)
+        return rate
 
 class TransformerEncoderLayer(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward=256, dropout=0.3):
@@ -85,8 +81,7 @@ class TransformerPricePredictor(nn.Module):
         self.encoder = nn.Sequential(*[TransformerEncoderLayer(d_model, nhead, dropout=dropout) for _ in range(num_layers)])
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
-        self.fc_signal = nn.Linear(d_model, 1)
-        self.fc_confidence = nn.Linear(d_model, 1)
+        self.fc_rate = nn.Linear(d_model, 1)
 
     def forward(self, x):
         if self.training and x.size(0) == 1:
@@ -96,9 +91,8 @@ class TransformerPricePredictor(nn.Module):
         x = x.mean(dim=1)
         x = self.norm(x)
         x = self.dropout(x)
-        signal = torch.sigmoid(self.fc_signal(x)).squeeze(-1)
-        confidence = torch.sigmoid(self.fc_confidence(x)).squeeze(-1)
-        return signal, confidence
+        rate = self.fc_rate(x).squeeze(-1)
+        return rate
 
 MODEL_CLASSES = {
     "lstm": LSTMPricePredictor,
