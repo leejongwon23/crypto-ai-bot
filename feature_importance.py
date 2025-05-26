@@ -11,19 +11,19 @@ os.makedirs(IMPORTANCE_DIR, exist_ok=True)
 def compute_feature_importance(model, X_val, y_val, feature_names):
     model.eval()
     try:
-        pred, *_ = model(X_val)
+        pred = model(X_val)
     except Exception as e:
         print(f"[ERROR] 모델 예측 실패 (기본): {e}")
         return dict(zip(feature_names, [0.0] * len(feature_names)))
 
-    baseline_loss = torch.nn.BCELoss()(pred, y_val).item()
+    baseline_loss = torch.nn.MSELoss()(pred, y_val).item()
     importances = []
     for i in range(X_val.shape[2]):
         X_permuted = X_val.clone()
         X_permuted[:, :, i] = X_permuted[:, torch.randperm(X_val.shape[1]), i]
         try:
-            perm_pred, *_ = model(X_permuted)
-            loss = torch.nn.BCELoss()(perm_pred, y_val).item()
+            perm_pred = model(X_permuted)
+            loss = torch.nn.MSELoss()(perm_pred, y_val).item()
             importances.append(loss - baseline_loss)
         except Exception as e:
             print(f"[ERROR] 중요도 계산 실패 (feature {i}): {e}")
@@ -33,20 +33,20 @@ def compute_feature_importance(model, X_val, y_val, feature_names):
 def compute_permutation_importance(model, X_val, y_val, feature_names):
     model.eval()
     try:
-        pred, *_ = model(X_val)
+        pred = model(X_val)
     except Exception as e:
         print(f"[ERROR] 모델 예측 실패 (perm): {e}")
         return dict(zip(feature_names, [0.0] * len(feature_names)))
 
-    baseline_loss = torch.nn.BCELoss()(pred, y_val).item()
+    baseline_loss = torch.nn.MSELoss()(pred, y_val).item()
     importances = []
     for i in range(X_val.shape[2]):
         X_permuted = X_val.clone()
         perm_idx = torch.randperm(X_val.shape[0])
         X_permuted[:, :, i] = X_permuted[perm_idx, :, i]
         try:
-            perm_pred, *_ = model(X_permuted)
-            loss = torch.nn.BCELoss()(perm_pred, y_val).item()
+            perm_pred = model(X_permuted)
+            loss = torch.nn.MSELoss()(perm_pred, y_val).item()
             importances.append(loss - baseline_loss)
         except Exception as e:
             print(f"[ERROR] 중요도 계산 실패 (perm feature {i}): {e}")
@@ -59,7 +59,6 @@ def save_feature_importance(importances, symbol, strategy, model_type):
     path_json = os.path.join(IMPORTANCE_DIR, fname_json)
     path_csv = os.path.join(IMPORTANCE_DIR, fname_csv)
 
-    # ✅ float32 → float 변환 처리
     importances = {k: float(v) for k, v in importances.items()}
 
     with open(path_json, "w") as f:
