@@ -115,10 +115,9 @@ def get_model(model_type: str = "cnn_lstm", input_size: int = 11):
     model_cls = MODEL_CLASSES.get(model_type, CNNLSTMPricePredictor)
     return model_cls(input_size=input_size)
 
-def format_prediction(signal: float, confidence: float, rate: float) -> dict:
+def format_prediction(signal: float, rate: float) -> dict:
     direction = "롱" if signal > 0.5 else "숏"
     return {
         "direction": direction,
-        "confidence": float(confidence),
         "rate": float(rate)
     }
