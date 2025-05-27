@@ -103,13 +103,29 @@ def yopo_health():
             if pn["fail_rate"] > 50: problems.append(f"{strat}: 일반 실패율 {pn['fail_rate']:.1f}%")
             if pv["fail_rate"] > 50: problems.append(f"{strat}: 변동성 실패율 {pv['fail_rate']:.1f}%")
 
-            # 4. 최근 예측 테이블
+                        # 4. 최근 예측 테이블
             table = "<i style='color:gray'>최근 예측 없음 또는 컬럼 부족</i>"
-            required_cols = {"timestamp", "symbol", "direction", "return", "status"}
+            required_cols = {"timestamp", "symbol", "direction", "return", "rate", "status"}
             if pred.shape[0] > 0 and required_cols.issubset(set(pred.columns)):
                 recent10 = pred.sort_values("timestamp").tail(10).copy()
-                rows = [f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{r['return']:.2f}%</td><td>{'✅' if r['status']=='success' else '❌' if r['status']=='fail' else '⏳' if r['status']=='pending' else '🛑'}</td></tr>" for _, r in recent10.iterrows()]
-                table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>상태</th></tr>" + "".join(rows) + "</table>"
+                rows = []
+                for _, r in recent10.iterrows():
+                    rtn = r.get("return", 0.0)
+                    if rtn == 0.0:
+                        rtn = r.get("rate", 0.0)
+                    try:
+                        rtn_pct = f"{float(rtn) * 100:.2f}%"
+                    except:
+                        rtn_pct = "0.00%"
+                    rows.append(
+                        f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{rtn_pct}</td><td>{'✅' if r['status']=='success' else '❌' if r['status']=='fail' else '⏳' if r['status']=='pending' else '🛑'}</td></tr>"
+                    )
+                table = (
+                    "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>상태</th></tr>"
+                    + "".join(rows)
+                    + "</table>"
+                )
+
 
             # 5. 정보 박스 출력
             info_html = f"""<div style='border:1px solid #aaa;margin:16px 0;padding:10px;font-family:monospace;background:#f8f8f8;'>
@@ -131,7 +147,7 @@ def yopo_health():
             except Exception as e:
                 visual = f"<div style='color:red'>[시각화 실패: {e}]</div>"
 
-            strategy_html.append(f"<div>{info_html}<div style='margin:20px 0'>{visual}</div></div>")
+            strategy_html.append(f"<div style='margin-bottom:30px'>{info_html}<div style='margin:20px 0'>{visual}</div><hr></div>")
 
         except Exception as e:
             strategy_html.append(f"<div style='color:red;'>❌ {strat} 실패: {type(e).__name__} → {e}</div>")
