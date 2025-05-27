@@ -36,9 +36,11 @@ def predict(symbol, strategy):
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < window + 1:
             return failed_result(symbol, strategy, "데이터 부족")
+
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.dropna().shape[0] < window + 1:
             return failed_result(symbol, strategy, "feature 부족")
+
         feat = pd.DataFrame(MinMaxScaler().fit_transform(feat.dropna()), columns=feat.columns)
         X = np.expand_dims(feat.iloc[-window:].values, axis=0)
         if X.shape[1] != window:
@@ -66,7 +68,10 @@ def predict(symbol, strategy):
                     output = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     if isinstance(output, tuple): output = output[0]
                     rate = float(output.squeeze())
-                    if np.isnan(rate) or rate < 0: continue
+                    # ✔ 보완: NaN 또는 음수면 log 기록도 함께
+                    if np.isnan(rate) or rate < 0:
+                        print(f"[무시된 예측값] {symbol}-{strategy}-{model_type}: {rate}")
+                        continue
                     rates.append(rate)
             except Exception as e:
                 print(f"[모델 예측 실패] {symbol}-{strategy}-{model_type}: {e}")
@@ -84,11 +89,15 @@ def predict(symbol, strategy):
             return failed_result(symbol, strategy, "price NaN 발생")
 
         t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
-        log_prediction(symbol, strategy, "롱", entry_price=price,
-                       target_price=price * (1 + avg_rate),
-                       model="ensemble", success=True,
-                       reason="수익률 예측 성공", rate=avg_rate,
-                       timestamp=t, volatility=is_volatility)
+        try:
+            log_prediction(symbol, strategy, "롱", entry_price=price,
+                           target_price=price * (1 + avg_rate),
+                           model="ensemble", success=True,
+                           reason="수익률 예측 성공", rate=avg_rate,
+                           timestamp=t, volatility=is_volatility)
+        except Exception as e:
+            print(f"[경고] log_prediction 실패: {e}")
+            sys.stdout.flush()
 
         return {
             "symbol": symbol, "strategy": strategy, "model": "ensemble", "direction": "롱",
