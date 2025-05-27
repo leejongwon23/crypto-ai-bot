@@ -1,25 +1,27 @@
 import os, csv, datetime, pandas as pd, pytz
 from data.utils import get_kline_by_strategy
 
-PERSIST_DIR, LOG_DIR = "/persistent", "/persistent/logs"
-PREDICTION_LOG, WRONG_PREDICTIONS = f"{PERSIST_DIR}/prediction_log.csv", f"{PERSIST_DIR}/wrong_predictions.csv"
-LOG_FILE, AUDIT_LOG = f"{LOG_DIR}/train_log.csv", f"{LOG_DIR}/evaluation_audit.csv"
-EVAL_EXPIRY_BUFFER, STOP_LOSS_PCT = 12, 0.02
-model_success_tracker, now_kst = {}, lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-os.makedirs(LOG_DIR, exist_ok=True)
+DIR, LOG = "/persistent", "/persistent/logs"
+PREDICTION_LOG, WRONG = f"{DIR}/prediction_log.csv", f"{DIR}/wrong_predictions.csv"
+TRAIN_LOG, AUDIT_LOG = f"{LOG}/train_log.csv", f"{LOG}/evaluation_audit.csv"
+EVAL_BUFFER, STOP_LOSS = 12, 0.02
+now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+model_success_tracker = {}
+os.makedirs(LOG, exist_ok=True)
 
 def get_min_gain(symbol, strategy):
     df = get_kline_by_strategy(symbol, strategy)
-    if df is None or len(df) < 20: return {"단기": 0.01, "중기": 0.03, "장기": 0.05}.get(strategy, 0.05)
+    if df is None or len(df) < 20: return {"단기":0.01,"중기":0.03,"장기":0.05}.get(strategy,0.05)
     v = df["close"].pct_change().rolling(20).std().iloc[-1] if not df.empty else 0.01
-    return max(round(v * 1.2, 4), {"단기": 0.005, "중기": 0.01, "장기": 0.02}.get(strategy, 0.03))
+    return max(round(v*1.2,4), {"단기":0.005,"중기":0.01,"장기":0.02}.get(strategy,0.03))
 
 def update_model_success(s, t, m, success):
-    k = (s, t or "알수없음", m); model_success_tracker.setdefault(k, {"success":0, "fail":0})
+    k = (s, t or "알수없음", m)
+    model_success_tracker.setdefault(k, {"success":0,"fail":0})
     model_success_tracker[k]["success" if success else "fail"] += 1
 
 def get_model_success_rate(s, t, m, min_total=10):
-    r = model_success_tracker.get((s, t or "알수없음", m), {"success":0, "fail":0})
+    r = model_success_tracker.get((s, t or "알수없음", m), {"success":0,"fail":0})
     total = r["success"] + r["fail"]
     return 0.5 if total < min_total else r["success"] / total
 
@@ -38,60 +40,86 @@ def get_strategy_eval_count(strategy):
     except: return 0
 
 def log_audit(s, t, status, reason):
-    row = {"timestamp": now_kst().isoformat(), "symbol": str(s or "UNKNOWN"),
-           "strategy": str(t or "알수없음"), "status": str(status), "reason": str(reason)}
+    row = {
+        "timestamp": now_kst().isoformat(),
+        "symbol": str(s or "UNKNOWN"),
+        "strategy": str(t or "알수없음"),
+        "status": str(status),
+        "reason": str(reason)
+    }
     header = not os.path.exists(AUDIT_LOG) or os.stat(AUDIT_LOG).st_size == 0
     try:
         with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=row.keys())
-            if header: w.writeheader(); w.writerow(row)
+            if header: w.writeheader()
+            w.writerow(row)
     except: pass
 
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
-                   timestamp=None, model="unknown", success=True,
-                   reason="", rate=0.0, return_value=None, volatility=False):
+                   timestamp=None, model=None, success=True, reason="", rate=0.0,
+                   return_value=None, volatility=False):
     now = timestamp or now_kst().isoformat()
+    mname = str(model or "unknown")
     row = {
-        "timestamp": now, "symbol": str(symbol or "UNKNOWN"), "strategy": str(strategy or "알수없음"),
-        "direction": direction or "N/A", "entry_price": float(entry_price), "target_price": float(target_price),
-        "model": model or "unknown", "rate": float(rate),
-        "status": "pending" if success else "failed", "reason": reason or "",
-        "return": float(return_value if return_value is not None else rate), "volatility": bool(volatility)
+        "timestamp": now,
+        "symbol": str(symbol or "UNKNOWN"),
+        "strategy": str(strategy or "알수없음"),
+        "direction": direction or "N/A",
+        "entry_price": float(entry_price),
+        "target_price": float(target_price),
+        "model": mname,
+        "rate": float(rate),
+        "status": "pending" if success else "failed",
+        "reason": reason or "",
+        "return": float(return_value if return_value is not None else rate),
+        "volatility": bool(volatility)
     }
-    fields = list(row.keys())
     log_audit(row["symbol"], row["strategy"], "예측성공" if success else "예측실패", row["reason"])
     try:
         with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=fields)
-            if not os.path.exists(PREDICTION_LOG) or os.stat(PREDICTION_LOG).st_size == 0: w.writeheader()
+            w = csv.DictWriter(f, fieldnames=row.keys())
+            if not os.path.exists(PREDICTION_LOG) or os.stat(PREDICTION_LOG).st_size == 0:
+                w.writeheader()
             w.writerow(row)
     except: pass
 
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
-    row = {"timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"), "symbol": symbol,
-           "strategy": strategy, "model": model_name, "accuracy": acc, "f1_score": f1, "loss": loss}
+    row = {
+        "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol": symbol,
+        "strategy": strategy,
+        "model": model_name,
+        "accuracy": acc,
+        "f1_score": f1,
+        "loss": loss
+    }
     try:
-        pd.DataFrame([row]).to_csv(LOG_FILE, mode="a", index=False,
-                                   header=not os.path.exists(LOG_FILE), encoding="utf-8-sig")
+        pd.DataFrame([row]).to_csv(TRAIN_LOG, mode="a", index=False,
+                                   header=not os.path.exists(TRAIN_LOG),
+                                   encoding="utf-8-sig")
     except: pass
 
-def get_dynamic_eval_wait(s): return {"단기": 4, "중기": 24, "장기": 168}.get(s, 6)
+def get_dynamic_eval_wait(s):
+    return {"단기":4, "중기":24, "장기":168}.get(s, 6)
 
 def evaluate_predictions(get_price_fn):
     if not os.path.exists(PREDICTION_LOG): return
-    try: rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
+    try:
+        rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
     except: return
     now, updated = now_kst(), []
     for r in rows:
         try:
-            if r.get("status") not in ["pending", "failed"]: updated.append(r); continue
-            s, strat, d, m = r["symbol"], r["strategy"], r.get("direction", "롱"), r.get("model", "unknown")
+            if r.get("status") not in ["pending", "failed"]:
+                updated.append(r); continue
+            s, strat = r["symbol"], r["strategy"]
+            d, m = r.get("direction", "롱"), r.get("model", "unknown")
             entry, rate = float(r.get("entry_price", 0)), float(r.get("rate", 0))
             pred_time = datetime.datetime.fromisoformat(r["timestamp"]).astimezone(pytz.timezone("Asia/Seoul"))
             hours = (now - pred_time).total_seconds() / 3600
             vol = str(r.get("volatility", "False")).lower() in ["1", "true", "yes"]
             df = get_kline_by_strategy(s, strat)
-            if hours > get_dynamic_eval_wait(strat) + EVAL_EXPIRY_BUFFER:
+            if hours > get_dynamic_eval_wait(strat) + EVAL_BUFFER:
                 r.update({"status": "v_expired" if vol else "expired", "reason": f"평가 유효시간 초과: {hours:.2f}h", "return": 0.0})
             elif hours < get_dynamic_eval_wait(strat):
                 r.update({"reason": f"{hours:.2f}h < {get_dynamic_eval_wait(strat)}h", "return": 0.0})
@@ -111,29 +139,21 @@ def evaluate_predictions(get_price_fn):
                     "return": round(gain, 4)
                 })
                 update_model_success(s, strat, m, success)
-                # 🎯 평가 결과 기록 (시각화용)
                 audit_row = {
-                    "timestamp": now.isoformat(),
-                    "symbol": s,
-                    "strategy": strat,
-                    "model": m,
-                    "status": r.get("status", ""),
-                    "reason": r.get("reason", ""),
-                    "predicted_return": rate,
-                    "actual_return": round(gain, 4),
-                    "accuracy_before": "",
-                    "accuracy_after": "",
+                    "timestamp": now.isoformat(), "symbol": s, "strategy": strat,
+                    "model": m, "status": r.get("status", ""), "reason": r.get("reason", ""),
+                    "predicted_return": rate, "actual_return": round(gain, 4),
+                    "accuracy_before": "", "accuracy_after": "",
                     "predicted_volatility": float(rate) if vol else "",
                     "actual_volatility": eval_df["close"].pct_change().rolling(5).std().iloc[-1] if not eval_df.empty else ""
                 }
                 write_header = not os.path.exists(AUDIT_LOG) or os.stat(AUDIT_LOG).st_size == 0
                 with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as af:
                     writer = csv.DictWriter(af, fieldnames=audit_row.keys())
-                    if write_header:
-                        writer.writeheader()
+                    if write_header: writer.writeheader()
                     writer.writerow(audit_row)
                 if not success:
-                    with open(WRONG_PREDICTIONS, "a", newline="", encoding="utf-8-sig") as wf:
+                    with open(WRONG, "a", newline="", encoding="utf-8-sig") as wf:
                         csv.writer(wf).writerow([r["timestamp"], s, strat, d, entry, r.get("target_price", 0), gain])
         except Exception as e:
             r.update({"status": "skip_eval", "reason": f"예외 발생: {e}", "return": 0.0})
