@@ -69,7 +69,6 @@ def yopo_health():
             audit = audit.query(f"strategy == '{strat}'") if not audit.empty else pd.DataFrame()
             pred["volatility"] = pred["symbol"].astype(str).str.contains("_v", na=False)
             pred["return"] = pd.to_numeric(pred.get("return", pd.Series()), errors="coerce").fillna(0)
-            pred["confidence"] = pd.to_numeric(pred.get("confidence", pd.Series()), errors="coerce").fillna(0)
 
             strat_models = model_info.get(strat, {})
             types = {"lstm": 0, "cnn_lstm": 0, "transformer": 0}
@@ -98,10 +97,10 @@ def yopo_health():
             if pv["fail_rate"] > 50: problems.append(f"{strat}: 변동성 실패율 {pv['fail_rate']:.1f}%")
 
             table = ""
-            if not pred.empty and all(c in pred.columns for c in ["timestamp", "symbol", "direction", "return", "confidence", "status"]):
+            if not pred.empty and all(c in pred.columns for c in ["timestamp", "symbol", "direction", "return", "status"]):
                 recent10 = pred.sort_values("timestamp").tail(10).copy()
-                rows = [f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{r['return']:.2f}%</td><td>{r['confidence']:.1f}%</td><td>{'✅' if r['status']=='success' else '❌' if r['status']=='fail' else '⏳' if r['status']=='pending' else '🛑'}</td></tr>" for _, r in recent10.iterrows()]
-                table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>신뢰도</th><th>상태</th></tr>" + "".join(rows) + "</table>"
+                rows = [f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{r['return']:.2f}%</td><td>{'✅' if r['status']=='success' else '❌' if r['status']=='fail' else '⏳' if r['status']=='pending' else '🛑'}</td></tr>" for _, r in recent10.iterrows()]
+                table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>상태</th></tr>" + "".join(rows) + "</table>"
 
             info_html = f"""<div style='border:1px solid #aaa;margin:16px 0;padding:10px;font-family:monospace;background:#f8f8f8;'>
 <b style='font-size:16px;'>📌 전략: {strat}</b><br>
@@ -124,6 +123,7 @@ def yopo_health():
 
     status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
     return f"<div style='font-family:monospace;line-height:1.6;font-size:15px;'><b>{status}</b><hr>" + "".join(strategy_html) + "</div>"
+
 
 
 
@@ -176,7 +176,7 @@ def reset_all():
         def clear(f,h): open(f,"w",newline="",encoding="utf-8-sig").write(",".join(h)+"\n")
         if os.path.exists(MODEL_DIR): shutil.rmtree(MODEL_DIR)
         os.makedirs(MODEL_DIR, exist_ok=True)
-        clear(PREDICTION_LOG,["timestamp","symbol","strategy","direction","entry_price","target_price","confidence","model","rate","status","reason","return"])
+        clear(PREDICTION_LOG,["timestamp","symbol","strategy","direction","entry_price","target_price","model","rate","status","reason","return","volatility"])
         clear(WRONG_PREDICTIONS,["timestamp","symbol","strategy","direction","entry_price","target_price","gain"])
         clear(LOG_FILE,["timestamp","symbol","strategy","model","accuracy","f1","loss"])
         clear(AUDIT_LOG,["timestamp","symbol","strategy","result","status"])
@@ -185,14 +185,16 @@ def reset_all():
         return "✅ 초기화 완료"
     except Exception as e: return f"초기화 실패: {e}", 500
 
+
 @app.route("/force-fix-prediction-log")
 def force_fix_prediction_log():
     try:
-        headers = ["timestamp","symbol","strategy","direction","entry_price","target_price","confidence","model","rate","status","reason","return"]
+        headers = ["timestamp","symbol","strategy","direction","entry_price","target_price","model","rate","status","reason","return","volatility"]
         with open(PREDICTION_LOG,"w",newline="",encoding="utf-8-sig") as f:
             csv.DictWriter(f, fieldnames=headers).writeheader()
         return "✅ prediction_log.csv 강제 초기화 완료"
     except Exception as e: return f"⚠️ 오류: {e}", 500
+
 
 if __name__ == "__main__":
     print(">>> 서버 실행 준비"); sys.stdout.flush()
