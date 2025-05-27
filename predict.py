@@ -11,11 +11,11 @@ STOP_LOSS_PCT = 0.02
 MIN_EXPECTED_RATES = {"단기": 0.007, "중기": 0.015, "장기": 0.03}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-def failed_result(symbol, strategy, model_type, reason):
+def failed_result(symbol, strategy, model_type, reason, direction="롱"):
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     is_volatility = "_v" in symbol
     try:
-        log_prediction(symbol, strategy, direction="롱", entry_price=0, target_price=0,
+        log_prediction(symbol, strategy, direction=direction, entry_price=0, target_price=0,
                        model=model_type, success=False, reason=reason,
                        rate=0.0, timestamp=t, volatility=is_volatility)
     except Exception as e:
@@ -23,7 +23,7 @@ def failed_result(symbol, strategy, model_type, reason):
         sys.stdout.flush()
     return {
         "symbol": symbol, "strategy": strategy, "success": False, "reason": reason,
-        "direction": "롱", "model": model_type, "rate": 0.0,
+        "direction": direction, "model": model_type, "rate": 0.0,
         "price": 1.0, "target": 1.0, "stop": 1.0, "timestamp": t
     }
 
@@ -67,10 +67,9 @@ def predict(symbol, strategy):
                 with torch.no_grad():
                     output = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     if isinstance(output, tuple): output = output[0]
-                    rate = float(output.squeeze())
-                    if np.isnan(rate) or rate < 0:
-                        print(f"[무시된 예측값] {symbol}-{strategy}-{model_type}: {rate}")
-                        predictions.append(failed_result(symbol, strategy, model_type, f"비정상 예측값: {rate}"))
+                    raw_rate = float(output.squeeze())
+                    if np.isnan(raw_rate):
+                        predictions.append(failed_result(symbol, strategy, model_type, f"NaN 예측값"))
                         continue
 
                     price = feat["close"].iloc[-1]
@@ -78,31 +77,39 @@ def predict(symbol, strategy):
                         predictions.append(failed_result(symbol, strategy, model_type, "price NaN 발생"))
                         continue
 
+                    # ✅ 롱/숏 방향 중 더 유리한 쪽 선택
+                    long_rate = raw_rate
+                    short_rate = -raw_rate
+                    abs_long = abs(long_rate)
+                    abs_short = abs(short_rate)
+
+                    if abs_long >= abs_short:
+                        direction, rate = "롱", long_rate
+                    else:
+                        direction, rate = "숏", short_rate
+
                     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
-                    success = rate >= MIN_EXPECTED_RATES.get(strategy, 0.01)
-                    log_prediction(symbol, strategy, "롱", entry_price=price,
-                                   target_price=price * (1 + rate),
-                                   model=model_type, success=success,
-                                   reason="수익률 예측 성공" if success else "예측 수익률 기준 미달",
+                    success = abs(rate) >= MIN_EXPECTED_RATES.get(strategy, 0.01)
+                    target = price * (1 + rate) if direction == "롱" else price * (1 - rate)
+                    stop = price * (1 - STOP_LOSS_PCT) if direction == "롱" else price * (1 + STOP_LOSS_PCT)
+
+                    log_prediction(symbol, strategy, direction, entry_price=price,
+                                   target_price=target, model=model_type,
+                                   success=success, reason="수익률 예측 성공" if success else "예측 수익률 기준 미달",
                                    rate=rate, timestamp=t, volatility=is_volatility)
 
                     predictions.append({
                         "symbol": symbol, "strategy": strategy, "model": model_type,
-                        "direction": "롱", "rate": rate, "price": price,
-                        "target": price * (1 + rate),
-                        "stop": price * (1 - STOP_LOSS_PCT),
+                        "direction": direction, "rate": rate, "price": price,
+                        "target": target, "stop": stop,
                         "reason": "수익률 예측 성공" if success else "예측 수익률 기준 미달",
                         "success": success, "timestamp": t
                     })
 
             except Exception as e:
-                print(f"[모델 예측 실패] {symbol}-{strategy}-{model_type}: {e}")
-                sys.stdout.flush()
                 predictions.append(failed_result(symbol, strategy, model_type, f"예측 예외: {e}"))
 
         return predictions if predictions else [failed_result(symbol, strategy, "unknown", "모든 모델 예측 실패")]
 
     except Exception as e:
-        print(f"[예외] 예측 실패: {symbol}-{strategy} → {e}")
-        sys.stdout.flush()
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}")]
