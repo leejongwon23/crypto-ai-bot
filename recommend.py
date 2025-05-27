@@ -145,7 +145,7 @@ def run_prediction_loop(strategy, symbols):
         success_rate = stat["success"] / total if total > 0 else 0.0
         avg_return = sum(stat["returns"]) / len(stat["returns"]) if stat["returns"] else 0.0
         if success_rate < 0.5 or avg_return < 0.01: continue
-        r["score"] = r["rate"] * success_rate * avg_return
+        r["score"] = abs(r["rate"]) * success_rate * avg_return  # ✅ 롱/숏 모두 공정하게 평가
         filtered.append(r)
 
     final = sorted(filtered, key=lambda x: -x["score"])[:SEND_LIMIT]
