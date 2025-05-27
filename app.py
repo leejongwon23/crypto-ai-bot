@@ -122,7 +122,7 @@ def yopo_health():
     status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
     html_report = f"<div style='font-family:monospace;line-height:1.6;font-size:15px;'><b>{status}</b><hr>" + "".join(strategy_html) + "</div>"
     visual_report = generate_visual_report()
-    return html_report + visual_report
+    return html_report + "<hr><div style='margin-top:30px'>" + visual_report + "</div>"
 
 
 @app.route("/")
