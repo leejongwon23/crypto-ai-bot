@@ -11,19 +11,19 @@ STOP_LOSS_PCT = 0.02
 MIN_EXPECTED_RATES = {"단기": 0.007, "중기": 0.015, "장기": 0.03}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-def failed_result(symbol, strategy, reason):
+def failed_result(symbol, strategy, model_type, reason):
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     is_volatility = "_v" in symbol
     try:
         log_prediction(symbol, strategy, direction="롱", entry_price=0, target_price=0,
-                       model="ensemble", success=False, reason=reason,
+                       model=model_type, success=False, reason=reason,
                        rate=0.0, timestamp=t, volatility=is_volatility)
     except Exception as e:
         print(f"[경고] log_prediction 실패: {e}")
         sys.stdout.flush()
     return {
         "symbol": symbol, "strategy": strategy, "success": False, "reason": reason,
-        "direction": "롱", "model": "ensemble", "rate": 0.0,
+        "direction": "롱", "model": model_type, "rate": 0.0,
         "price": 1.0, "target": 1.0, "stop": 1.0, "timestamp": t
     }
 
@@ -35,16 +35,16 @@ def predict(symbol, strategy):
         window = find_best_window(symbol, strategy)
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < window + 1:
-            return failed_result(symbol, strategy, "데이터 부족")
+            return [failed_result(symbol, strategy, "unknown", "데이터 부족")]
 
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.dropna().shape[0] < window + 1:
-            return failed_result(symbol, strategy, "feature 부족")
+            return [failed_result(symbol, strategy, "unknown", "feature 부족")]
 
         feat = pd.DataFrame(MinMaxScaler().fit_transform(feat.dropna()), columns=feat.columns)
         X = np.expand_dims(feat.iloc[-window:].values, axis=0)
         if X.shape[1] != window:
-            return failed_result(symbol, strategy, "시퀀스 형상 오류")
+            return [failed_result(symbol, strategy, "unknown", "시퀀스 형상 오류")]
 
         model_files = {}
         for f in os.listdir(MODEL_DIR):
@@ -56,9 +56,9 @@ def predict(symbol, strategy):
                 model_files[f_type] = os.path.join(MODEL_DIR, f)
 
         if not model_files:
-            return failed_result(symbol, strategy, "모델 없음")
+            return [failed_result(symbol, strategy, "unknown", "모델 없음")]
 
-        rates = []
+        predictions = []
         for model_type, path in model_files.items():
             try:
                 model = get_model(model_type, X.shape[2])
@@ -68,46 +68,41 @@ def predict(symbol, strategy):
                     output = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     if isinstance(output, tuple): output = output[0]
                     rate = float(output.squeeze())
-                    # ✔ 보완: NaN 또는 음수면 log 기록도 함께
                     if np.isnan(rate) or rate < 0:
                         print(f"[무시된 예측값] {symbol}-{strategy}-{model_type}: {rate}")
+                        predictions.append(failed_result(symbol, strategy, model_type, f"비정상 예측값: {rate}"))
                         continue
-                    rates.append(rate)
+
+                    price = feat["close"].iloc[-1]
+                    if np.isnan(price):
+                        predictions.append(failed_result(symbol, strategy, model_type, "price NaN 발생"))
+                        continue
+
+                    t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+                    success = rate >= MIN_EXPECTED_RATES.get(strategy, 0.01)
+                    log_prediction(symbol, strategy, "롱", entry_price=price,
+                                   target_price=price * (1 + rate),
+                                   model=model_type, success=success,
+                                   reason="수익률 예측 성공" if success else "예측 수익률 기준 미달",
+                                   rate=rate, timestamp=t, volatility=is_volatility)
+
+                    predictions.append({
+                        "symbol": symbol, "strategy": strategy, "model": model_type,
+                        "direction": "롱", "rate": rate, "price": price,
+                        "target": price * (1 + rate),
+                        "stop": price * (1 - STOP_LOSS_PCT),
+                        "reason": "수익률 예측 성공" if success else "예측 수익률 기준 미달",
+                        "success": success, "timestamp": t
+                    })
+
             except Exception as e:
                 print(f"[모델 예측 실패] {symbol}-{strategy}-{model_type}: {e}")
                 sys.stdout.flush()
+                predictions.append(failed_result(symbol, strategy, model_type, f"예측 예외: {e}"))
 
-        if not rates:
-            return failed_result(symbol, strategy, "모든 모델 예측 실패")
-
-        avg_rate = np.mean(rates)
-        if avg_rate < MIN_EXPECTED_RATES.get(strategy, 0.01):
-            return failed_result(symbol, strategy, f"예측 수익률 기준 미달 ({avg_rate:.4f})")
-
-        price = feat["close"].iloc[-1]
-        if np.isnan(price):
-            return failed_result(symbol, strategy, "price NaN 발생")
-
-        t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            log_prediction(symbol, strategy, "롱", entry_price=price,
-                           target_price=price * (1 + avg_rate),
-                           model="ensemble", success=True,
-                           reason="수익률 예측 성공", rate=avg_rate,
-                           timestamp=t, volatility=is_volatility)
-        except Exception as e:
-            print(f"[경고] log_prediction 실패: {e}")
-            sys.stdout.flush()
-
-        return {
-            "symbol": symbol, "strategy": strategy, "model": "ensemble", "direction": "롱",
-            "rate": avg_rate, "price": price,
-            "target": price * (1 + avg_rate),
-            "stop": price * (1 - STOP_LOSS_PCT),
-            "reason": "수익률 예측 성공", "success": True, "timestamp": t
-        }
+        return predictions if predictions else [failed_result(symbol, strategy, "unknown", "모든 모델 예측 실패")]
 
     except Exception as e:
         print(f"[예외] 예측 실패: {symbol}-{strategy} → {e}")
         sys.stdout.flush()
-        return failed_result(symbol, strategy, f"예외 발생: {e}")
+        return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}")]
