@@ -132,7 +132,7 @@ def evaluate_predictions(get_price_fn):
                 eval_df = df[df["timestamp"] >= pred_time]
                 price = eval_df["high"].max() if d == "롱" else eval_df["low"].min()
                 gain = (price - entry) / entry if d == "롱" else (entry - price) / entry
-                success = gain >= rate
+                success = (gain >= rate) if d == "롱" else (-gain >= -rate)
                 r.update({
                     "status": "v_success" if vol and success else "v_fail" if vol else "success" if success else "fail",
                     "reason": f"도달: {gain:.4f} ≥ {rate:.4f}" if success else f"미달: {gain:.4f} < {rate:.4f}",
