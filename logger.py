@@ -4,7 +4,7 @@ from data.utils import get_kline_by_strategy
 DIR, LOG = "/persistent", "/persistent/logs"
 PREDICTION_LOG, WRONG = f"{DIR}/prediction_log.csv", f"{DIR}/wrong_predictions.csv"
 TRAIN_LOG, AUDIT_LOG = f"{LOG}/train_log.csv", f"{LOG}/evaluation_audit.csv"
-EVAL_BUFFER, STOP_LOSS = 12, 0.02
+STOP_LOSS = 0.02
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 model_success_tracker = {}
 os.makedirs(LOG, exist_ok=True)
@@ -119,9 +119,7 @@ def evaluate_predictions(get_price_fn):
             hours = (now - pred_time).total_seconds() / 3600
             vol = str(r.get("volatility", "False")).lower() in ["1", "true", "yes"]
             df = get_kline_by_strategy(s, strat)
-            if hours > get_dynamic_eval_wait(strat) + EVAL_BUFFER:
-                r.update({"status": "v_expired" if vol else "expired", "reason": f"평가 유효시간 초과: {hours:.2f}h", "return": 0.0})
-            elif hours < get_dynamic_eval_wait(strat):
+            if hours < get_dynamic_eval_wait(strat):
                 r.update({"reason": f"{hours:.2f}h < {get_dynamic_eval_wait(strat)}h", "return": 0.0})
             elif entry == 0 or m == "unknown" or any(k in r.get("reason", "") for k in ["모델 없음", "기준 미달"]):
                 r.update({"status": "v_invalid_model" if vol else "invalid_model", "reason": "모델 없음 또는 entry=0", "return": 0.0})
@@ -132,7 +130,7 @@ def evaluate_predictions(get_price_fn):
                 eval_df = df[df["timestamp"] >= pred_time]
                 price = eval_df["high"].max() if d == "롱" else eval_df["low"].min()
                 gain = (price - entry) / entry if d == "롱" else (entry - price) / entry
-                success = (gain >= rate) if d == "롱" else (-gain >= -rate)
+                success = gain >= rate
                 r.update({
                     "status": "v_success" if vol and success else "v_fail" if vol else "success" if success else "fail",
                     "reason": f"도달: {gain:.4f} ≥ {rate:.4f}" if success else f"미달: {gain:.4f} < {rate:.4f}",
