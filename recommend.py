@@ -90,7 +90,8 @@ def run_prediction_loop(strategy, symbols):
                     reason = result.get("reason", "예측 실패") if isinstance(result, dict) else "predict() 반환 오류"
                     r = get_min_gain(symbol, strategy)
                     log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(),
-                                   model="ensemble", success=False, reason=reason,
+                                   model=result.get("model", "unknown"),
+                                   success=False, reason=reason,
                                    rate=r, return_value=r, volatility=False)
                     log_audit(symbol, strategy, result, reason)
                     continue
@@ -134,6 +135,7 @@ def run_prediction_loop(strategy, symbols):
 
     save_failure_count(fmap)
 
+    # ✅ 전략 통계 기반 필터링 (성공률 50% 이상 & 평균 수익률 1% 이상)
     filtered = []
     for r in results:
         s = r.get("strategy")
@@ -141,7 +143,7 @@ def run_prediction_loop(strategy, symbols):
         total = stat["success"] + stat["fail"]
         if total < 5: continue
         success_rate = stat["success"] / total if total > 0 else 0.0
-        avg_return = sum(stat["returns"]) / len(stat["returns"]) if stat["returns"] else 0.0
+        avg_return = sum(map(abs, stat["returns"])) / len(stat["returns"]) if stat["returns"] else 0.0
         if success_rate < 0.5 or avg_return < 0.01: continue
         r["score"] = abs(r["rate"]) * success_rate * avg_return
         filtered.append(r)
