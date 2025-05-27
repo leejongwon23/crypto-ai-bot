@@ -28,7 +28,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         print(f"[경고] {symbol}-{strategy} → 데이터 부족으로 기본값 반환")
         return 20
 
-    df_feat = compute_features(symbol, df, strategy)  # ✅ 수정됨
+    df_feat = compute_features(symbol, df, strategy)
     if df_feat is None or df_feat.empty or len(df_feat) < max(window_list) + 1:
         print(f"[경고] {symbol}-{strategy} → feature 부족으로 기본값 반환")
         return 20
@@ -77,8 +77,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 pred_prob = pred_val.squeeze().numpy()
                 pred_label = (pred_prob > 0.5).astype(int)
                 acc = accuracy_score(val_y.numpy(), pred_label)
-                conf = np.mean(np.abs(pred_prob - 0.5)) * 2
-                score = acc * conf
+                score = acc  # ✅ 신뢰도 제거 후 정확도 자체를 점수로 사용
 
                 if score > best_score:
                     best_score = score
@@ -86,7 +85,6 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                     best_result = {
                         "window": int(window),
                         "accuracy": float(round(acc, 4)),
-                        "confidence": float(round(conf, 4)),
                         "score": float(round(score, 4))
                     }
 
