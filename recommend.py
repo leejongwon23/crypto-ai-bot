@@ -75,7 +75,8 @@ def run_prediction_loop(strategy, symbols):
             if model_count == 0:
                 r = get_min_gain(symbol, strategy)
                 log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(),
-                               0.0, "ensemble", False, "모델 없음", r, return_value=r)
+                               model="ensemble", success=False, reason="모델 없음",
+                               rate=r, return_value=r, volatility=False)
                 log_audit(symbol, strategy, None, "모델 없음")
                 continue
             if not should_predict(symbol, strategy): continue
@@ -85,7 +86,8 @@ def run_prediction_loop(strategy, symbols):
                 reason = result.get("reason", "예측 실패") if isinstance(result, dict) else "predict() 반환 오류"
                 r = get_min_gain(symbol, strategy)
                 log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(),
-                               0.0, "ensemble", False, reason, r, return_value=r)
+                               model="ensemble", success=False, reason=reason,
+                               rate=r, return_value=r, volatility=False)
                 log_audit(symbol, strategy, result, reason)
                 continue
 
@@ -98,12 +100,12 @@ def run_prediction_loop(strategy, symbols):
                 entry_price=result.get("price", 0),
                 target_price=result.get("target", 0),
                 timestamp=now_kst().isoformat(),
-                confidence=result.get("confidence", 0.0),
                 model=result.get("model", "ensemble"),
                 success=True,
                 reason=result.get("reason", "예측 성공"),
                 rate=result.get("rate", 0.0),
-                return_value=result.get("return", 0.0)
+                return_value=result.get("return", 0.0),
+                volatility=vol > 0
             )
             log_audit(symbol, strategy, result, "예측 성공")
 
@@ -121,8 +123,9 @@ def run_prediction_loop(strategy, symbols):
         except Exception as e:
             r = get_min_gain(symbol, strategy)
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
-            log_prediction(symbol, strategy, "예외", 0, 0, now_kst().isoformat(), 0.0, "ensemble", False,
-                           f"예측 예외: {e}", r, return_value=r)
+            log_prediction(symbol, strategy, "예외", 0, 0, now_kst().isoformat(),
+                           model="ensemble", success=False, reason=f"예측 예외: {e}",
+                           rate=r, return_value=r, volatility=False)
             log_audit(symbol, strategy, None, f"예측 예외: {e}")
 
     save_failure_count(fmap)
