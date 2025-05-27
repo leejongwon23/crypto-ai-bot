@@ -8,20 +8,11 @@ from data.utils import SYMBOLS, get_kline_by_strategy
 from recommend import run_prediction
 from logger import get_model_success_rate, log_audit
 
-# ✅ 최근 트리거 시간 기록
 last_trigger_time = {}
+now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+TRIGGER_COOLDOWN = {"단기": 3600, "중기": 10800, "장기": 21600}
+MODEL_TYPES = ["lstm", "cnn_lstm", "transformer"]  # ✅ 명시적으로 사용하는 모델 목록
 
-def now_kst():
-    return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-
-# ✅ 전략별 최소 트리거 간격 (초)
-TRIGGER_COOLDOWN = {
-    "단기": 3600,
-    "중기": 10800,
-    "장기": 21600
-}
-
-# ✅ 전조 조건 점검 함수
 def check_pre_burst_conditions(df, strategy):
     try:
         vol_increasing = df['volume'].iloc[-3] < df['volume'].iloc[-2] < df['volume'].iloc[-1]
@@ -48,15 +39,18 @@ def check_pre_burst_conditions(df, strategy):
         traceback.print_exc()
         return False
 
-# ✅ 전략별 모델 신뢰도 검사
 def check_model_quality(symbol, strategy):
     try:
-        return get_model_success_rate(symbol, strategy or "알수없음", "ensemble") >= 0.6
+        # ✅ 각 모델의 '과거 성공률' 중 하나라도 기준 이상이면 예측 허용
+        for m in MODEL_TYPES:
+            past_success_rate = get_model_success_rate(symbol, strategy, m)
+            if past_success_rate >= 0.6:
+                return True
+        return False
     except Exception as e:
-        print(f"[모델 신뢰도 체크 실패] {symbol}-{strategy}: {e}")
+        print(f"[성공률 확인 실패] {symbol}-{strategy}: {e}")
         return False
 
-# ✅ 전조 패턴 기반 예측 트리거 실행
 def run():
     print(f"[트리거 실행] 전조 패턴 감지 시작: {now_kst().isoformat()}")
     for symbol in SYMBOLS:
