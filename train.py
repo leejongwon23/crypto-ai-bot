@@ -1,7 +1,7 @@
 import os, json, torch, torch.nn as nn, numpy as np, datetime, pytz, sys, pandas as pd
 from torch.utils.data import DataLoader, TensorDataset, random_split
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.metrics import mean_squared_error, r2_score, accuracy_score
 from data.utils import SYMBOLS, get_kline_by_strategy, compute_features
 from model.base_model import get_model
 from model_weight_loader import get_model_weight
@@ -14,6 +14,58 @@ DEVICE = torch.device("cpu")
 DIR = "/persistent"; MODEL_DIR, LOG_DIR = f"{DIR}/models", f"{DIR}/logs"
 os.makedirs(MODEL_DIR, exist_ok=True); os.makedirs(LOG_DIR, exist_ok=True)
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+
+def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
+    try:
+        df = get_kline_by_strategy(symbol, strategy)
+        if df is None or len(df) < max(window_list) + 10:
+            return 20
+        df_feat = compute_features(symbol, df, strategy)
+        if df_feat is None or df_feat.empty or len(df_feat) < max(window_list) + 1:
+            return 20
+        scaler = MinMaxScaler()
+        scaled = scaler.fit_transform(df_feat.values)
+        feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
+        best_score = -1
+        best_window = window_list[0]
+        for window in window_list:
+            X, y = create_dataset(feature_dicts, window)
+            if len(X) == 0:
+                continue
+            input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
+            model = get_model("lstm", input_size=input_size)
+            model.train()
+            X_tensor = torch.tensor(X, dtype=torch.float32)
+            y_tensor = torch.tensor(y, dtype=torch.float32)
+            val_len = int(len(X_tensor) * 0.2)
+            train_len = len(X_tensor) - val_len
+            if train_len <= 0 or val_len <= 0:
+                continue
+            train_X = X_tensor[:train_len]
+            train_y = y_tensor[:train_len]
+            val_X = X_tensor[train_len:]
+            val_y = y_tensor[train_len:]
+            optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+            criterion = torch.nn.BCELoss()
+            for _ in range(3):
+                pred = model(train_X).squeeze()
+                loss = criterion(pred, train_y)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+            with torch.no_grad():
+                pred_val = model(val_X).squeeze().numpy()
+                pred_label = (pred_val > 0.5).astype(int)
+                acc = accuracy_score(val_y.numpy(), pred_label)
+                conf = np.mean(np.abs(pred_val - 0.5)) * 2
+                score = acc * conf
+                if score > best_score:
+                    best_score = score
+                    best_window = window
+    except Exception as e:
+        print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
+        return 20
+    return best_window
 
 def create_dataset(f, w):
     X, y = [], []
@@ -59,7 +111,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
             loader = DataLoader(train_set, batch_size=batch, shuffle=True)
 
             try:
-                # 🎯 학습 전 정확도 측정
                 with torch.no_grad():
                     before_pred = model(val_X).squeeze(-1).numpy()
                     acc_before = r2_score(val_y.numpy(), before_pred)
@@ -98,7 +149,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                     imps = compute_feature_importance(model, val_X, val_y, list(df_feat.columns))
                     save_feature_importance(imps, sym, strat, model_type)
 
-                    # 🎯 정확도 전후 기록 logger 연동
                     audit_row = {
                         "timestamp": now_kst().isoformat(),
                         "symbol": sym,
