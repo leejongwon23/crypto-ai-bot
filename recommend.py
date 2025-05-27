@@ -80,45 +80,51 @@ def run_prediction_loop(strategy, symbols):
                 log_audit(symbol, strategy, None, "모델 없음")
                 continue
             if not should_predict(symbol, strategy): continue
-            result = predict(symbol, strategy)
-            print(f"[예측] {symbol}-{strategy} → {result}"); sys.stdout.flush()
-            if not isinstance(result, dict) or result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
-                reason = result.get("reason", "예측 실패") if isinstance(result, dict) else "predict() 반환 오류"
-                r = get_min_gain(symbol, strategy)
-                log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(),
-                               model="ensemble", success=False, reason=reason,
-                               rate=r, return_value=r, volatility=False)
-                log_audit(symbol, strategy, result, reason)
-                continue
 
-            result["volatility"] = vol
-            result["return"] = result.get("rate", 0.0)
-            log_prediction(
-                symbol=result.get("symbol", symbol),
-                strategy=result.get("strategy", strategy),
-                direction=result.get("direction", "예측실패"),
-                entry_price=result.get("price", 0),
-                target_price=result.get("target", 0),
-                timestamp=now_kst().isoformat(),
-                model=result.get("model", "ensemble"),
-                success=True,
-                reason=result.get("reason", "예측 성공"),
-                rate=result.get("rate", 0.0),
-                return_value=result.get("return", 0.0),
-                volatility=vol > 0
-            )
-            log_audit(symbol, strategy, result, "예측 성공")
+            pred_results = predict(symbol, strategy)
+            if not isinstance(pred_results, list):
+                pred_results = [pred_results]
 
-            key = f"{symbol}-{strategy}"
-            if not result.get("success", False):
-                fmap[key] = fmap.get(key, 0) + 1
-                if fmap[key] >= FAIL_LIMIT:
-                    print(f"[학습 트리거] {symbol}-{strategy} 실패 {fmap[key]}회 → 학습")
-                    threading.Thread(target=train.train_model, args=(symbol, strategy), daemon=True).start()
+            for result in pred_results:
+                if not isinstance(result, dict) or result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
+                    reason = result.get("reason", "예측 실패") if isinstance(result, dict) else "predict() 반환 오류"
+                    r = get_min_gain(symbol, strategy)
+                    log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(),
+                                   model="ensemble", success=False, reason=reason,
+                                   rate=r, return_value=r, volatility=False)
+                    log_audit(symbol, strategy, result, reason)
+                    continue
+
+                result["volatility"] = vol
+                result["return"] = result.get("rate", 0.0)
+
+                log_prediction(
+                    symbol=result.get("symbol", symbol),
+                    strategy=result.get("strategy", strategy),
+                    direction=result.get("direction", "예측실패"),
+                    entry_price=result.get("price", 0),
+                    target_price=result.get("target", 0),
+                    timestamp=result.get("timestamp", now_kst().isoformat()),
+                    model=result.get("model", "unknown"),
+                    success=result.get("success", True),
+                    reason=result.get("reason", "예측 성공"),
+                    rate=result.get("rate", 0.0),
+                    return_value=result.get("return", 0.0),
+                    volatility=vol > 0
+                )
+                log_audit(symbol, strategy, result, "예측 성공")
+
+                key = f"{symbol}-{strategy}"
+                if not result.get("success", False):
+                    fmap[key] = fmap.get(key, 0) + 1
+                    if fmap[key] >= FAIL_LIMIT:
+                        print(f"[학습 트리거] {symbol}-{strategy} 실패 {fmap[key]}회 → 학습")
+                        threading.Thread(target=train.train_model, args=(symbol, strategy), daemon=True).start()
+                        fmap[key] = 0
+                else:
                     fmap[key] = 0
-            else:
-                fmap[key] = 0
-            results.append(result)
+
+                results.append(result)
 
         except Exception as e:
             r = get_min_gain(symbol, strategy)
@@ -130,7 +136,6 @@ def run_prediction_loop(strategy, symbols):
 
     save_failure_count(fmap)
 
-    # ✅ 전략 성능 기반 필터링
     filtered = []
     for r in results:
         s = r.get("strategy")
