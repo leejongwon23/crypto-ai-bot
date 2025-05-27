@@ -40,9 +40,8 @@ def test_all_predictions():
                     continue
 
                 direction = result.get("direction", "?")
-                conf = result.get("confidence", 0)
                 rate = result.get("rate", 0)
-                print(f"✅ 성공: {symbol}-{strategy} → {direction} | 신뢰도: {conf:.2f} / 수익률: {rate:.2%}")
+                print(f"✅ 성공: {symbol}-{strategy} → {direction} | 수익률: {rate:.2%}")
                 success += 1
 
             except Exception as e:
