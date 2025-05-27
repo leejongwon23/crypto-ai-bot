@@ -116,11 +116,9 @@ def run_prediction_loop(strategy, symbols):
 
                 key = f"{symbol}-{strategy}"
                 if not result.get("success", False):
-                    fmap[key] = fmap.get(key, 0) + 1
-                    if fmap[key] >= FAIL_LIMIT:
-                        print(f"[학습 트리거] {symbol}-{strategy} 실패 {fmap[key]}회 → 학습")
-                        threading.Thread(target=train.train_model, args=(symbol, strategy), daemon=True).start()
-                        fmap[key] = 0
+                    print(f"[오답학습 트리거] {symbol}-{strategy} → 예측 실패 감지 → 즉시 학습 실행")
+                    threading.Thread(target=train.train_model, args=(symbol, strategy), daemon=True).start()
+                    fmap[key] = 0
                 else:
                     fmap[key] = 0
 
@@ -145,7 +143,7 @@ def run_prediction_loop(strategy, symbols):
         success_rate = stat["success"] / total if total > 0 else 0.0
         avg_return = sum(stat["returns"]) / len(stat["returns"]) if stat["returns"] else 0.0
         if success_rate < 0.5 or avg_return < 0.01: continue
-        r["score"] = abs(r["rate"]) * success_rate * avg_return  # ✅ 롱/숏 모두 공정하게 평가
+        r["score"] = abs(r["rate"]) * success_rate * avg_return
         filtered.append(r)
 
     final = sorted(filtered, key=lambda x: -x["score"])[:SEND_LIMIT]
