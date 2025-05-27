@@ -16,14 +16,14 @@ def failed_result(symbol, strategy, reason):
     is_volatility = "_v" in symbol
     try:
         log_prediction(symbol, strategy, direction="롱", entry_price=0, target_price=0,
-                       confidence=0, model="ensemble", success=False, reason=reason,
+                       model="ensemble", success=False, reason=reason,
                        rate=0.0, timestamp=t, volatility=is_volatility)
     except Exception as e:
         print(f"[경고] log_prediction 실패: {e}")
         sys.stdout.flush()
     return {
         "symbol": symbol, "strategy": strategy, "success": False, "reason": reason,
-        "direction": "롱", "model": "ensemble", "confidence": 0.0, "rate": 0.0,
+        "direction": "롱", "model": "ensemble", "rate": 0.0,
         "price": 1.0, "target": 1.0, "stop": 1.0, "timestamp": t
     }
 
@@ -86,13 +86,13 @@ def predict(symbol, strategy):
         t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
         log_prediction(symbol, strategy, "롱", entry_price=price,
                        target_price=price * (1 + avg_rate),
-                       confidence=1.0, model="ensemble", success=True,
+                       model="ensemble", success=True,
                        reason="수익률 예측 성공", rate=avg_rate,
                        timestamp=t, volatility=is_volatility)
 
         return {
             "symbol": symbol, "strategy": strategy, "model": "ensemble", "direction": "롱",
-            "confidence": 1.0, "rate": avg_rate, "price": price,
+            "rate": avg_rate, "price": price,
             "target": price * (1 + avg_rate),
             "stop": price * (1 - STOP_LOSS_PCT),
             "reason": "수익률 예측 성공", "success": True, "timestamp": t
