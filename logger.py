@@ -111,6 +111,27 @@ def evaluate_predictions(get_price_fn):
                     "return": round(gain, 4)
                 })
                 update_model_success(s, strat, m, success)
+                # 🎯 평가 결과 기록 (시각화용)
+                audit_row = {
+                    "timestamp": now.isoformat(),
+                    "symbol": s,
+                    "strategy": strat,
+                    "model": m,
+                    "status": r.get("status", ""),
+                    "reason": r.get("reason", ""),
+                    "predicted_return": rate,
+                    "actual_return": round(gain, 4),
+                    "accuracy_before": "",
+                    "accuracy_after": "",
+                    "predicted_volatility": float(rate) if vol else "",
+                    "actual_volatility": eval_df["close"].pct_change().rolling(5).std().iloc[-1] if not eval_df.empty else ""
+                }
+                write_header = not os.path.exists(AUDIT_LOG) or os.stat(AUDIT_LOG).st_size == 0
+                with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as af:
+                    writer = csv.DictWriter(af, fieldnames=audit_row.keys())
+                    if write_header:
+                        writer.writeheader()
+                    writer.writerow(audit_row)
                 if not success:
                     with open(WRONG_PREDICTIONS, "a", newline="", encoding="utf-8-sig") as wf:
                         csv.writer(wf).writerow([r["timestamp"], s, strat, d, entry, r.get("target_price", 0), gain])
