@@ -47,12 +47,14 @@ def yopo_health():
     percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
     logs, strategy_html, problems = {}, [], []
 
+    # 1. 로그 로드
     for name, path in {"pred": PREDICTION_LOG, "train": LOG_FILE, "audit": AUDIT_LOG, "msg": MESSAGE_LOG}.items():
         try:
             logs[name] = pd.read_csv(path, encoding="utf-8-sig") if os.path.exists(path) else pd.DataFrame()
         except:
             logs[name] = pd.DataFrame()
 
+    # 2. 모델 정보 수집
     model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
     model_info = {}
     for f in model_files:
@@ -61,13 +63,18 @@ def yopo_health():
             symbol, strat, mtype = match.groups()
             model_info.setdefault(strat, {}).setdefault(symbol, set()).add(mtype)
 
+    # 3. 전략별 진단
     for strat in ["단기", "중기", "장기"]:
         try:
             pred, train, audit = logs["pred"], logs["train"], logs["audit"]
             pred = pred.query(f"strategy == '{strat}'") if not pred.empty else pd.DataFrame()
             train = train.query(f"strategy == '{strat}'") if not train.empty else pd.DataFrame()
             audit = audit.query(f"strategy == '{strat}'") if not audit.empty else pd.DataFrame()
-            pred["volatility"] = pred["symbol"].astype(str).str.contains("_v", na=False)
+
+            if "symbol" in pred.columns:
+                pred["volatility"] = pred["symbol"].astype(str).str.contains("_v", na=False)
+            else:
+                pred["volatility"] = False
             pred["return"] = pd.to_numeric(pred.get("return", pd.Series()), errors="coerce").fillna(0)
 
             strat_models = model_info.get(strat, {})
@@ -76,7 +83,7 @@ def yopo_health():
                 for t in mtypes: types[t] += 1
             trained_syms = [s for s, t in strat_models.items() if {"lstm", "cnn_lstm", "transformer"}.issubset(t)]
             untrained = sorted(set(SYMBOLS) - set(trained_syms))
-            stat = lambda df, s: len(df[df["status"] == s]) if not df.empty else 0
+            stat = lambda df, s: len(df[df["status"] == s]) if not df.empty and "status" in df.columns else 0
             succ, fail, pend, failed = map(lambda s: stat(pred, s), ["success", "fail", "pending", "failed"])
             nvol, vol = pred[~pred["volatility"]], pred[pred["volatility"]]
 
@@ -85,7 +92,7 @@ def yopo_health():
                     s, f = stat(df, "success"), stat(df, "fail")
                     t = s + f
                     avg = df["return"].mean()
-                    return {"succ": s, "fail": f, "succ_rate": s/t*100 if t else 0, "fail_rate": f/t*100 if t else 0, "r_avg": avg if pd.notna(avg) else 0, "total": t}
+                    return {"succ": s, "fail": f, "succ_rate": s / t * 100 if t else 0, "fail_rate": f / t * 100 if t else 0, "r_avg": avg if pd.notna(avg) else 0, "total": t}
                 except:
                     return {"succ": 0, "fail": 0, "succ_rate": 0, "fail_rate": 0, "r_avg": 0, "total": 0}
 
@@ -96,35 +103,41 @@ def yopo_health():
             if pn["fail_rate"] > 50: problems.append(f"{strat}: 일반 실패율 {pn['fail_rate']:.1f}%")
             if pv["fail_rate"] > 50: problems.append(f"{strat}: 변동성 실패율 {pv['fail_rate']:.1f}%")
 
-            table = ""
-            if not pred.empty and all(c in pred.columns for c in ["timestamp", "symbol", "direction", "return", "status"]):
+            # 4. 최근 예측 테이블
+            table = "<i style='color:gray'>최근 예측 없음 또는 컬럼 부족</i>"
+            required_cols = {"timestamp", "symbol", "direction", "return", "status"}
+            if pred.shape[0] > 0 and required_cols.issubset(set(pred.columns)):
                 recent10 = pred.sort_values("timestamp").tail(10).copy()
                 rows = [f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{r['return']:.2f}%</td><td>{'✅' if r['status']=='success' else '❌' if r['status']=='fail' else '⏳' if r['status']=='pending' else '🛑'}</td></tr>" for _, r in recent10.iterrows()]
                 table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>상태</th></tr>" + "".join(rows) + "</table>"
 
+            # 5. 정보 박스 출력
             info_html = f"""<div style='border:1px solid #aaa;margin:16px 0;padding:10px;font-family:monospace;background:#f8f8f8;'>
 <b style='font-size:16px;'>📌 전략: {strat}</b><br>
 - 모델 수: {sum(types.values())} (lstm={types['lstm']}, cnn={types['cnn_lstm']}, trans={types['transformer']})<br>
 - 심볼 수: {len(SYMBOLS)} | 완전학습: {len(trained_syms)} | 미완성: {len(untrained)}<br>
 - 최근 학습: {train['timestamp'].iloc[-1] if not train.empty else '없음'}<br>
-- 최근 예측: {pred['timestamp'].iloc[-1] if not pred.empty else '없음'}<br>
+- 최근 예측: {pred['timestamp'].iloc[-1] if not pred.empty and 'timestamp' in pred.columns else '없음'}<br>
 - 최근 평가: {audit['timestamp'].iloc[-1] if not audit.empty else '없음'}<br>
-- 예측: {succ+fail+pend+failed} (✅{succ} ❌{fail} ⏳{pend} 🛑{failed})<br>
+- 예측: {succ + fail + pend + failed} (✅{succ} ❌{fail} ⏳{pend} 🛑{failed})<br>
 <b style='color:#000088'>🎯 일반 예측</b>: {pn['total']}건 | {percent(pn['succ_rate'])} / {percent(pn['fail_rate'])} / {pn['r_avg']:.2f}%<br>
 <b style='color:#880000'>🌪️ 변동성 예측</b>: {pv['total']}건 | {percent(pv['succ_rate'])} / {percent(pv['fail_rate'])} / {pv['r_avg']:.2f}%<br>
 <b>📋 최근 예측 10건</b><br>{table}
 </div>"""
 
-            visual = generate_visuals_for_strategy(strat, strat)
+            # 6. 시각화 (예외 방어 포함)
+            try:
+                visual = generate_visuals_for_strategy(strat, strat)
+            except Exception as e:
+                visual = f"<div style='color:red'>[시각화 실패: {e}]</div>"
+
             strategy_html.append(f"<div>{info_html}<div style='margin:20px 0'>{visual}</div></div>")
 
         except Exception as e:
-            strategy_html.append(f"<div style='color:red;'>❌ {strat} 실패: {e}</div>")
+            strategy_html.append(f"<div style='color:red;'>❌ {strat} 실패: {type(e).__name__} → {e}</div>")
 
     status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
     return f"<div style='font-family:monospace;line-height:1.6;font-size:15px;'><b>{status}</b><hr>" + "".join(strategy_html) + "</div>"
-
-
 
 
 
