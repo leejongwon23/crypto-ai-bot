@@ -2,6 +2,9 @@ import datetime
 import pytz
 import math
 
+def now_kst():
+    return datetime.datetime.now(pytz.timezone("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+
 def format_message(data):
     def safe_float(value, default=0.0):
         try:
