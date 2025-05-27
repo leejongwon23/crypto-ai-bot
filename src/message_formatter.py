@@ -19,7 +19,7 @@ def format_message(data):
     direction = data.get("direction", "롱")
     strategy = data.get("strategy", "전략")
     symbol = data.get("symbol", "종목")
-    success_rate = safe_float(data.get("success_rate"), 0.0)
+    success_rate = safe_float(data.get("success_rate"), 0.0)  # ✅ 전략 기반 과거 성공률
     rate = safe_float(data.get("rate"), 0.0)
     target = safe_float(data.get("target"), 0.0)
     reason = str(data.get("reason", "-")).strip()
@@ -39,7 +39,7 @@ def format_message(data):
         f"목표가: {target:.4f} USDT\n"
         f"손절가: {stop_loss:.4f} USDT (-2.00%)\n\n"
         f"신호 방향: {dir_str}\n"
-        f"성공률: {success_rate_pct:.2f}%"
+        f"최근 전략 성공률: {success_rate_pct:.2f}%"  # ✅ 오해 없는 명확한 표현
     )
 
     if isinstance(score, (float, int)) and not math.isnan(score):
