@@ -5,9 +5,7 @@ from logger import log_prediction, strategy_stats, get_strategy_eval_count
 from data.utils import SYMBOLS, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
-from model_weight_loader import get_model_weight
 
-FAIL_LIMIT, SEND_LIMIT = 3, 5
 STRATEGY_VOL = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
 FAILURE_LOG = "/persistent/logs/failure_count.csv"
@@ -117,39 +115,35 @@ def run_prediction_loop(strategy, symbols):
 
     save_failure_count(fmap)
 
-    # 필터 1단계: 수익률 기준 필터링
-    strat_return = {}
+    # 필터 1: 전략별 성공률 70% 이상
+    filtered_by_success = []
     for r in results:
-        strat_return.setdefault(r["strategy"], []).append(r)
+        s = r.get("strategy")
+        stat = strategy_stats.get(s, {"success": 0, "fail": 0, "returns": []})
+        total = stat["success"] + stat["fail"]
+        if total < 5: continue
+        success_rate = stat["success"] / total
+        if success_rate < 0.7: continue
+        filtered_by_success.append(r)
 
-    top_return = []
-    for strat, items in strat_return.items():
-        # 수익률 탑 5
-        top5 = sorted(items, key=lambda x: -abs(x["rate"]))[:5]
-        top_return.extend(top5)
+    # 필터 2: 전략별 수익률 탑 1
+    top_by_strategy = {}
+    for r in filtered_by_success:
+        s = r["strategy"]
+        if s not in top_by_strategy or abs(r["rate"]) > abs(top_by_strategy[s]["rate"]):
+            top_by_strategy[s] = r
 
-    # 필터 2단계: 모델 가중치 최고
-    weight_best = {}
-    for r in top_return:
-        strategy = r["strategy"]
-        model = r["model"]
-        symbol = r["symbol"]
-        weight = get_model_weight(model, strategy, symbol)
-        if strategy not in weight_best or weight > weight_best[strategy]["weight"]:
-            weight_best[strategy] = {**r, "weight": weight}
-
-    # 전송
-    for strategy, result in weight_best.items():
+    for s, res in top_by_strategy.items():
         try:
-            msg = format_message(result)
+            msg = format_message(res)
             send_message(msg)
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
-                csv.writer(f).writerow([now_kst().isoformat(), result["symbol"], result["strategy"], msg])
-            print(f"✅ 메시지 전송: {result['symbol']} - {result['strategy']} - {result['direction']} | {result['rate']:.2%}")
+                csv.writer(f).writerow([now_kst().isoformat(), res["symbol"], res["strategy"], msg])
+            print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%}")
         except Exception as e:
             print(f"[ERROR] 메시지 전송 실패: {e}")
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
-                csv.writer(f).writerow([now_kst().isoformat(), result["symbol"], result["strategy"], f"전송 실패: {e}"])
+                csv.writer(f).writerow([now_kst().isoformat(), res["symbol"], res["strategy"], f"전송 실패: {e}"])
 
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
