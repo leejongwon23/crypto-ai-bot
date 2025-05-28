@@ -25,24 +25,29 @@ def test_all_predictions():
 
             total += 1
             try:
-                result = predict(symbol, strategy)
-                if not isinstance(result, dict):
+                results = predict(symbol, strategy)
+                if not isinstance(results, list) or len(results) == 0:
                     failed += 1
-                    failed_cases.append((symbol, strategy, "None 또는 dict 아님"))
-                    print(f"❌ 실패: {symbol}-{strategy} → 반환 없음 또는 비정상")
+                    failed_cases.append((symbol, strategy, "예측 결과 없음"))
+                    print(f"❌ 실패: {symbol}-{strategy} → 예측 결과 없음")
                     continue
 
-                if not result.get("success", False):
-                    reason = result.get("reason", "이유 없음")
-                    failed += 1
-                    failed_cases.append((symbol, strategy, reason))
-                    print(f"❌ 실패: {symbol}-{strategy} → {reason}")
-                    continue
+                all_failed = True
+                for result in results:
+                    if result.get("success", False):
+                        all_failed = False
+                        direction = result.get("direction", "?")
+                        rate = result.get("rate", 0)
+                        print(f"✅ 성공: {symbol}-{strategy}-{result['model']} → {direction} | 수익률: {rate:.2%}")
+                    else:
+                        reason = result.get("reason", "이유 없음")
+                        print(f"❌ 실패: {symbol}-{strategy}-{result.get('model', '?')} → {reason}")
 
-                direction = result.get("direction", "?")
-                rate = result.get("rate", 0)
-                print(f"✅ 성공: {symbol}-{strategy} → {direction} | 수익률: {rate:.2%}")
-                success += 1
+                if all_failed:
+                    failed += 1
+                    failed_cases.append((symbol, strategy, "모든 모델 실패"))
+                else:
+                    success += 1
 
             except Exception as e:
                 failed += 1
