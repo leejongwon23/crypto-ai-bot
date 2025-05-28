@@ -56,7 +56,7 @@ def get_symbols_by_volatility(strategy):
                 result.append({"symbol": symbol, "volatility": r_std})
         except Exception as e:
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
-    return sorted(result, key=lambda x: -x["volatility"])[:30]
+    return sorted(result, key=lambda x: -x["volatility"])[:60]
 
 def should_predict(symbol, strategy):
     try:
@@ -135,7 +135,6 @@ def run_prediction_loop(strategy, symbols):
 
     save_failure_count(fmap)
 
-    # ✅ 전략별 성공률 70% 이상 필터
     filtered_by_success = []
     for r in results:
         s = r.get("strategy")
@@ -147,7 +146,6 @@ def run_prediction_loop(strategy, symbols):
         r["score"] = success_rate
         filtered_by_success.append(r)
 
-    # ✅ 그 중 전략별 예측 수익률 상위 5개
     strat_return = {}
     for r in filtered_by_success:
         key = r["strategy"]
@@ -157,7 +155,6 @@ def run_prediction_loop(strategy, symbols):
         top5 = sorted(v, key=lambda x: -abs(x["rate"]))[:5]
         top_return.extend(top5)
 
-    # ✅ 그중 모델 가중치 기준 전략별 TOP 1개씩
     weight_best = {}
     for r in top_return:
         key = r["strategy"]
