@@ -94,7 +94,7 @@ def save_model_metadata(s, t, m, a, f1, l):
     with open(path, "w", encoding="utf-8") as f: json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"🗘 저장됨: {path}"); sys.stdout.flush()
 
-def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep=4, rep_wrong=4):
+def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep=8, rep_wrong=8):
     print(f"[train] 🔄 {sym}-{strat} 시작"); sys.stdout.flush()
     try:
         win = find_best_window(sym, strat)
