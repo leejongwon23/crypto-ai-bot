@@ -56,7 +56,7 @@ def get_symbols_by_volatility(strategy):
                 result.append({"symbol": symbol, "volatility": r_std})
         except Exception as e:
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
-    return sorted(result, key=lambda x: -x["volatility"])[:60]
+    return sorted(result, key=lambda x: -x["volatility"])[:30]
 
 def should_predict(symbol, strategy):
     try:
