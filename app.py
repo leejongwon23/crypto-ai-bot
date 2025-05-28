@@ -32,7 +32,7 @@ def start_scheduler():
         job = functools.partial(threading.Thread, target=main, args=(strategy,), daemon=True)
         sched.add_job(lambda job=job: job().start(), 'cron', hour=h, minute=m)
 
-    sched.add_job(lambda: __import__('logger').evaluate_predictions(None), 'cron', minute=20)
+    sched.add_job(lambda: evaluate_predictions(get_kline_by_strategy), 'cron', minute=20)
     sched.add_job(test_all_predictions, 'cron', minute=10)
     sched.add_job(trigger_run, 'interval', minutes=30)
     sched.start()
