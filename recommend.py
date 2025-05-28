@@ -1,11 +1,11 @@
 import os, csv, sys, time, threading, datetime, pytz
 from telegram_bot import send_message
 from predict import predict
-from logger import log_prediction, get_model_success_rate, get_actual_success_rate, get_strategy_eval_count, strategy_stats
+from logger import log_prediction, strategy_stats, get_strategy_eval_count
 from data.utils import SYMBOLS, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
-from model_weight_loader import model_exists, get_model_weight
+from model_weight_loader import get_model_weight
 
 FAIL_LIMIT, SEND_LIMIT = 3, 5
 STRATEGY_VOL = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
@@ -58,11 +58,6 @@ def get_symbols_by_volatility(strategy):
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
     return sorted(result, key=lambda x: -x["volatility"])[:30]
 
-def should_predict(symbol, strategy):
-    try:
-        return get_model_success_rate(symbol, strategy, "ensemble") < 0.85 or get_strategy_eval_count(strategy) < 10
-    except: return True
-
 def run_prediction_loop(strategy, symbols):
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼"); sys.stdout.flush()
     results, fmap = [], load_failure_count()
@@ -73,12 +68,8 @@ def run_prediction_loop(strategy, symbols):
         try:
             model_count = len([f for f in os.listdir("/persistent/models") if f.startswith(f"{symbol}_{strategy}_") and f.endswith(".pt")])
             if model_count == 0:
-                log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(),
-                               model="ensemble", success=False, reason="모델 없음",
-                               rate=0.0, return_value=0.0, volatility=False)
                 log_audit(symbol, strategy, None, "모델 없음")
                 continue
-            if not should_predict(symbol, strategy): continue
 
             pred_results = predict(symbol, strategy)
             if not isinstance(pred_results, list):
@@ -117,61 +108,48 @@ def run_prediction_loop(strategy, symbols):
                 if not result.get("success", False):
                     print(f"[오답학습 트리거] {symbol}-{strategy} → 예측 실패 감지 → 즉시 학습 실행")
                     threading.Thread(target=train.train_model, args=(symbol, strategy), daemon=True).start()
-                    fmap[key] = 0
-                else:
-                    fmap[key] = 0
-
+                fmap[key] = 0
                 results.append(result)
 
         except Exception as e:
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
-            log_prediction(symbol, strategy, "예외", 0, 0, now_kst().isoformat(),
-                           model="ensemble", success=False, reason=f"예측 예외: {e}",
-                           rate=0.0, return_value=0.0, volatility=False)
             log_audit(symbol, strategy, None, f"예측 예외: {e}")
 
     save_failure_count(fmap)
 
-    filtered_by_success = []
-    for r in results:
-        s = r.get("strategy")
-        stat = strategy_stats.get(s, {"success": 0, "fail": 0, "returns": []})
-        total = stat["success"] + stat["fail"]
-        if total < 5: continue
-        success_rate = stat["success"] / total
-        if success_rate < 0.7: continue
-        r["score"] = success_rate
-        filtered_by_success.append(r)
-
+    # 필터 1단계: 수익률 기준 필터링
     strat_return = {}
-    for r in filtered_by_success:
-        key = r["strategy"]
-        strat_return.setdefault(key, []).append(r)
+    for r in results:
+        strat_return.setdefault(r["strategy"], []).append(r)
+
     top_return = []
-    for k, v in strat_return.items():
-        top5 = sorted(v, key=lambda x: -abs(x["rate"]))[:5]
+    for strat, items in strat_return.items():
+        # 수익률 탑 5
+        top5 = sorted(items, key=lambda x: -abs(x["rate"]))[:5]
         top_return.extend(top5)
 
+    # 필터 2단계: 모델 가중치 최고
     weight_best = {}
     for r in top_return:
-        key = r["strategy"]
-        sym = r["symbol"]
+        strategy = r["strategy"]
         model = r["model"]
-        weight = get_model_weight(model, key, sym)
-        if key not in weight_best or weight > weight_best[key]["weight"]:
-            weight_best[key] = {**r, "weight": weight}
+        symbol = r["symbol"]
+        weight = get_model_weight(model, strategy, symbol)
+        if strategy not in weight_best or weight > weight_best[strategy]["weight"]:
+            weight_best[strategy] = {**r, "weight": weight}
 
-    for s, res in weight_best.items():
+    # 전송
+    for strategy, result in weight_best.items():
         try:
-            msg = format_message(res)
+            msg = format_message(result)
             send_message(msg)
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
-                csv.writer(f).writerow([now_kst().isoformat(), res["symbol"], res["strategy"], msg])
-            print(f"✅ 모델 가중치 추천 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%}")
+                csv.writer(f).writerow([now_kst().isoformat(), result["symbol"], result["strategy"], msg])
+            print(f"✅ 메시지 전송: {result['symbol']} - {result['strategy']} - {result['direction']} | {result['rate']:.2%}")
         except Exception as e:
             print(f"[ERROR] 메시지 전송 실패: {e}")
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
-                csv.writer(f).writerow([now_kst().isoformat(), res["symbol"], res["strategy"], f"전송 실패: {e}"])
+                csv.writer(f).writerow([now_kst().isoformat(), result["symbol"], result["strategy"], f"전송 실패: {e}"])
 
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
