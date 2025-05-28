@@ -13,6 +13,10 @@ MESSAGE_LOG = "/persistent/logs/message_log.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
+def is_valid_predict_time():
+    now = datetime.datetime.now()
+    return now.minute in range(0, 31)  # 정시 기준 0~30분 허용
+
 def log_audit(symbol, strategy, result, status):
     try:
         with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
@@ -151,6 +155,9 @@ def run_prediction(symbol, strategy):
 
 def main(strategy=None):
     print(">>> [main] recommend.py 실행")
+    if not is_valid_predict_time():
+        print(f"[SKIP] 예측 시간 아님: 현재 시각 {datetime.datetime.now().strftime('%H:%M')}")
+        return
     targets = [strategy] if strategy else ["단기", "중기", "장기"]
     for s in targets:
         run_prediction_loop(s, get_symbols_by_volatility(s))
