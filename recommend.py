@@ -71,7 +71,7 @@ def get_symbols_by_volatility(strategy):
                 result.append({"symbol": symbol, "volatility": r_std})
         except Exception as e:
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
-    return sorted(result, key=lambda x: -x["volatility"])[:30]
+    return sorted(result, key=lambda x: -x["volatility"])
 
 def run_prediction_loop(strategy, symbols):
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼"); sys.stdout.flush()
