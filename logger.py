@@ -116,12 +116,7 @@ def evaluate_predictions(get_price_fn):
             s, strat = r["symbol"], r["strategy"]
             d, m = r.get("direction", "롱"), r.get("model", "unknown")
             entry, rate = float(r.get("entry_price", 0)), float(r.get("rate", 0))
-            ts = pd.to_datetime(r["timestamp"], utc=True, errors="coerce")
-            if ts is None or pd.isna(ts):
-                r.update({"status": "skip_eval", "reason": "timestamp 변환 실패", "return": 0.0})
-                updated.append(r)
-                continue
-            pred_time = ts.tz_convert("Asia/Seoul")
+            pred_time = datetime.datetime.fromisoformat(r["timestamp"]).astimezone(pytz.timezone("Asia/Seoul"))
             hours = (now - pred_time).total_seconds() / 3600
             vol = str(r.get("volatility", "False")).lower() in ["1", "true", "yes"]
             df = get_kline_by_strategy(s, strat)
