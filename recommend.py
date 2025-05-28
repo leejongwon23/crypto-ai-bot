@@ -115,7 +115,8 @@ def run_prediction_loop(strategy, symbols):
                     reason=result.get("reason", "예측 성공"),
                     rate=result.get("rate", 0.0),
                     return_value=result.get("return", 0.0),
-                    volatility=vol > 0
+                    volatility=vol > 0,
+                    source=result.get("source", "일반")
                 )
                 log_audit(symbol, strategy, result, "예측 성공")
 
@@ -164,7 +165,8 @@ def run_prediction_loop(strategy, symbols):
 
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
-    run_prediction_loop(strategy, [{"symbol": symbol}])
+    run_prediction_loop(strategy, [{"symbol": symbol}], source="변동성")  # ✅ 변동성 예측이라고 명시
+
 
 def main(strategy=None, force=False):
     print(">>> [main] recommend.py 실행")
@@ -174,8 +176,9 @@ def main(strategy=None, force=False):
             if not is_valid_predict_time(s):
                 print(f"[SKIP] {s} 예측 시간 아님: 현재 시각 {now_kst().strftime('%H:%M')}")
                 continue
-            run_prediction_loop(s, get_symbols_by_volatility(s))
+            run_prediction_loop(s, get_symbols_by_volatility(s), source="일반")  # ✅ 일반 예측으로 명시
     else:
         targets = [strategy] if strategy else ["단기", "중기", "장기"]
         for s in targets:
-            run_prediction_loop(s, get_symbols_by_volatility(s))
+            run_prediction_loop(s, get_symbols_by_volatility(s), source="일반")
+
