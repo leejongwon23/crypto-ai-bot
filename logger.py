@@ -53,7 +53,7 @@ def log_audit(s, t, status, reason):
 
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, model=None, success=True, reason="", rate=0.0,
-                   return_value=None, volatility=False):
+                   return_value=None, volatility=False, source="일반"):
     now = timestamp or now_kst().isoformat()
     mname = str(model or "unknown")
     row = {
@@ -68,7 +68,8 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "status": "pending" if success else "failed",
         "reason": reason or "",
         "return": float(return_value if return_value is not None else rate),
-        "volatility": bool(volatility)
+        "volatility": bool(volatility),
+        "source": source
     }
     log_audit(row["symbol"], row["strategy"], "예측성공" if success else "예측실패", row["reason"])
     try:
