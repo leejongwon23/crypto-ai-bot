@@ -10,8 +10,12 @@ AUDIT_LOG = "/persistent/logs/evaluation_audit.csv"
 def load_df(path):
     df = pd.read_csv(path)
     df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-    df['timestamp'] = df['timestamp'].dt.tz_localize('UTC').dt.tz_convert('Asia/Seoul')
+    if df['timestamp'].dt.tz is None:
+        df['timestamp'] = df['timestamp'].dt.tz_localize('UTC').dt.tz_convert('Asia/Seoul')
+    else:
+        df['timestamp'] = df['timestamp'].dt.tz_convert('Asia/Seoul')
     return df
+
 
 def plot_to_html(fig, title):
     try:
