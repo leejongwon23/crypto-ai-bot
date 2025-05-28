@@ -162,13 +162,15 @@ def ping():
 @app.route("/run")
 def run():
     try:
-        print("[RUN] main() 실행")
+        print("[RUN] 전략별 예측 실행")
         sys.stdout.flush()
-        main()
+        for strategy in ["단기", "중기", "장기"]:
+            main(strategy)  # ✅ 각 전략별로 명확히 실행
         return "Recommendation started"
     except Exception as e:
         traceback.print_exc()
         return f"Error: {e}", 500
+
 
 @app.route("/train-now")
 def train_now():
