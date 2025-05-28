@@ -62,7 +62,6 @@ def should_predict(symbol, strategy):
     try:
         return get_model_success_rate(symbol, strategy, "ensemble") < 0.85 or get_strategy_eval_count(strategy) < 10
     except: return True
-
 def run_prediction_loop(strategy, symbols):
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼"); sys.stdout.flush()
     results, fmap = [], load_failure_count()
@@ -134,7 +133,6 @@ def run_prediction_loop(strategy, symbols):
             log_audit(symbol, strategy, None, f"예측 예외: {e}")
 
     save_failure_count(fmap)
-
     # ✅ 전략 통계 기반 필터링 (성공률 50% 이상 & 평균 수익률 1% 이상)
     filtered = []
     for r in results:
