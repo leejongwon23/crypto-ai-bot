@@ -4,11 +4,10 @@ from data.utils import get_kline_by_strategy, compute_features
 from model.base_model import get_model
 from model_weight_loader import get_model_weight
 from window_optimizer import find_best_window
-from logger import get_min_gain, log_prediction
+from logger import log_prediction
 
 DEVICE, MODEL_DIR = torch.device("cpu"), "/persistent/models"
 STOP_LOSS_PCT = 0.02
-MIN_EXPECTED_RATES = {"단기": 0.007, "중기": 0.015, "장기": 0.03}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def failed_result(symbol, strategy, model_type, reason, direction="롱"):
@@ -88,20 +87,20 @@ def predict(symbol, strategy):
                         direction, rate = "숏", short_rate
 
                     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
-                    success = abs(rate) >= MIN_EXPECTED_RATES.get(strategy, 0.01)
+                    success = True  # ← 평가 시점에서만 판단하므로 예측 단계에서는 무조건 True
                     target = price * (1 + rate) if direction == "롱" else price * (1 - rate)
                     stop = price * (1 - STOP_LOSS_PCT) if direction == "롱" else price * (1 + STOP_LOSS_PCT)
 
                     log_prediction(symbol, strategy, direction, entry_price=price,
                                    target_price=target, model=model_type,
-                                   success=success, reason="수익률 예측 성공" if success else "예측 수익률 기준 미달",
+                                   success=success, reason="예측 완료",
                                    rate=rate, timestamp=t, volatility=is_volatility)
 
                     predictions.append({
                         "symbol": symbol, "strategy": strategy, "model": model_type,
                         "direction": direction, "rate": rate, "price": price,
                         "target": target, "stop": stop,
-                        "reason": "수익률 예측 성공" if success else "예측 수익률 기준 미달",
+                        "reason": "예측 완료",
                         "success": success, "timestamp": t
                     })
 
