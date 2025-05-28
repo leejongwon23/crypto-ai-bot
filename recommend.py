@@ -135,6 +135,7 @@ def run_prediction_loop(strategy, symbols):
 
     save_failure_count(fmap)
 
+    # ✅ 전략별 성공률 70% 이상 필터
     filtered_by_success = []
     for r in results:
         s = r.get("strategy")
@@ -142,20 +143,21 @@ def run_prediction_loop(strategy, symbols):
         total = stat["success"] + stat["fail"]
         if total < 5: continue
         success_rate = stat["success"] / total
+        if success_rate < 0.7: continue
         r["score"] = success_rate
         filtered_by_success.append(r)
 
-    top_success = sorted(filtered_by_success, key=lambda x: -x["score"])[:10]
+    # ✅ 그 중 전략별 예측 수익률 상위 5개
+    strat_return = {}
+    for r in filtered_by_success:
+        key = r["strategy"]
+        strat_return.setdefault(key, []).append(r)
+    top_return = []
+    for k, v in strat_return.items():
+        top5 = sorted(v, key=lambda x: -abs(x["rate"]))[:5]
+        top_return.extend(top5)
 
-    for r in top_success:
-        s = r.get("strategy")
-        stat = strategy_stats.get(s, {"success": 0, "fail": 0, "returns": []})
-        total = stat["success"] + stat["fail"]
-        avg_return = sum(stat["returns"]) / len(stat["returns"]) if stat["returns"] else 0.0
-        r["score"] = abs(r["rate"]) * avg_return
-
-    top_return = sorted(top_success, key=lambda x: -x["score"])[:10]
-
+    # ✅ 그중 모델 가중치 기준 전략별 TOP 1개씩
     weight_best = {}
     for r in top_return:
         key = r["strategy"]
