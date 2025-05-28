@@ -107,6 +107,14 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
 
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size); model.train()
+            model_path = f"{MODEL_DIR}/{sym}_{strat}_{model_type}.pt"
+            if os.path.exists(model_path):
+                try:
+                    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+                    print(f"🔁 이어 학습: {model_path}"); sys.stdout.flush()
+                except Exception as e:
+                    print(f"[로드 실패 → 새로 학습] {model_path} → {e}"); sys.stdout.flush()
+
             optim, lossfn = torch.optim.Adam(model.parameters(), lr=lr), nn.MSELoss()
             loader = DataLoader(train_set, batch_size=batch, shuffle=True)
 
@@ -142,7 +150,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                     f1 = mean_squared_error(val_y.numpy(), rate)
                     logloss = np.mean(np.square(val_y.numpy() - rate))
                     logger.log_training_result(sym, strat, model_type, acc, f1, logloss)
-                    model_path = f"{MODEL_DIR}/{sym}_{strat}_{model_type}.pt"
                     torch.save(model.state_dict(), model_path)
                     print(f"✅ 저장: {model_path}"); sys.stdout.flush()
                     save_model_metadata(sym, strat, model_type, acc, f1, logloss)
@@ -203,3 +210,5 @@ def train_model_loop(strategy):
             print(f"[단일 학습 오류] {sym}-{strategy} → {e}"); sys.stdout.flush()
 
 train_model = train_all_models
+
+
