@@ -13,9 +13,22 @@ MESSAGE_LOG = "/persistent/logs/message_log.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-def is_valid_predict_time():
-    now = datetime.datetime.now()
-    return now.minute in range(0, 31)  # 정시 기준 0~30분 허용
+ALLOWED_SCHEDULE = {
+    "단기": ["00:00", "07:30", "10:30", "16:30"],
+    "중기": ["00:00", "07:30", "10:30", "12:30", "18:30"],
+    "장기": ["07:30", "14:30", "21:00"]
+}
+
+def is_time_in_range(now, target_time, margin=9):
+    h, m = map(int, target_time.split(":"))
+    target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    delta = abs((now - target).total_seconds()) / 60
+    return delta <= margin
+
+def is_valid_predict_time(strategy):
+    now = now_kst()
+    valid_times = ALLOWED_SCHEDULE.get(strategy, [])
+    return any(is_time_in_range(now, t) for t in valid_times)
 
 def log_audit(symbol, strategy, result, status):
     try:
@@ -153,11 +166,16 @@ def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
     run_prediction_loop(strategy, [{"symbol": symbol}])
 
-def main(strategy=None):
+def main(strategy=None, force=False):
     print(">>> [main] recommend.py 실행")
-    if not is_valid_predict_time():
-        print(f"[SKIP] 예측 시간 아님: 현재 시각 {datetime.datetime.now().strftime('%H:%M')}")
-        return
-    targets = [strategy] if strategy else ["단기", "중기", "장기"]
-    for s in targets:
-        run_prediction_loop(s, get_symbols_by_volatility(s))
+    if not force:
+        targets = [strategy] if strategy else ["단기", "중기", "장기"]
+        for s in targets:
+            if not is_valid_predict_time(s):
+                print(f"[SKIP] {s} 예측 시간 아님: 현재 시각 {now_kst().strftime('%H:%M')}")
+                continue
+            run_prediction_loop(s, get_symbols_by_volatility(s))
+    else:
+        targets = [strategy] if strategy else ["단기", "중기", "장기"]
+        for s in targets:
+            run_prediction_loop(s, get_symbols_by_volatility(s))
