@@ -71,7 +71,7 @@ def run():
                 if check_pre_burst_conditions(df, strategy):
                     print(f"[트리거 포착] {symbol} - {strategy} 예측 실행")
                     try:
-                        run_prediction(symbol, strategy)
+                        run_prediction(symbol, strategy, source="변동성")  # ✅ 수정된 부분
                         last_trigger_time[key] = now
                         log_audit(symbol, strategy, "트리거예측", "조건 만족으로 실행")
                     except Exception as inner:
