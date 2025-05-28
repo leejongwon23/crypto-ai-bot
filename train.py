@@ -20,52 +20,62 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 10:
             return 20
+
         df_feat = compute_features(symbol, df, strategy)
         if df_feat is None or df_feat.empty or len(df_feat) < max(window_list) + 1:
             return 20
+
         scaler = MinMaxScaler()
         scaled = scaler.fit_transform(df_feat.values)
         feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
+
         best_score = -1
         best_window = window_list[0]
+
         for window in window_list:
             X, y = create_dataset(feature_dicts, window)
             if len(X) == 0:
                 continue
-            input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
+
+            input_size = X.shape[2]
             model = get_model("lstm", input_size=input_size)
             model.train()
+
             X_tensor = torch.tensor(X, dtype=torch.float32)
             y_tensor = torch.tensor(y, dtype=torch.float32)
+
             val_len = int(len(X_tensor) * 0.2)
-            train_len = len(X_tensor) - val_len
-            if train_len <= 0 or val_len <= 0:
-                continue
-            train_X = X_tensor[:train_len]
-            train_y = y_tensor[:train_len]
-            val_X = X_tensor[train_len:]
-            val_y = y_tensor[train_len:]
+            if val_len == 0: continue
+
+            train_X, train_y = X_tensor[:-val_len], y_tensor[:-val_len]
+            val_X, val_y = X_tensor[-val_len:], y_tensor[-val_len:]
+
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-            criterion = torch.nn.BCELoss()
+            criterion = nn.MSELoss()
+
             for _ in range(3):
                 pred = model(train_X).squeeze()
                 loss = criterion(pred, train_y)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+
             with torch.no_grad():
                 pred_val = model(val_X).squeeze().numpy()
-                pred_label = (pred_val > 0.5).astype(int)
-                acc = accuracy_score(val_y.numpy(), pred_label)
-                conf = np.mean(np.abs(pred_val - 0.5)) * 2
-                score = acc * conf
+                acc = r2_score(val_y.numpy(), pred_val)
+                conf = np.mean(np.abs(pred_val))  # 편향도 측정
+                score = acc * conf  # 정확도 × 신뢰도
+
                 if score > best_score:
                     best_score = score
                     best_window = window
+
     except Exception as e:
         print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
         return 20
+
     return best_window
+
 
 def create_dataset(f, w):
     X, y = [], []
@@ -77,17 +87,12 @@ def create_dataset(f, w):
         X.append([list(r.values()) for r in x_seq])
         y.append(round((c2 - c1) / c1, 4))
 
-    if not X:
-        return np.array([]), np.array([])
-
+    if not X: return np.array([]), np.array([])
     mlen = max(set(map(len, X)), key=list(X).count)
     filt = [(x, l) for x, l in zip(X, y) if len(x) == mlen]
-
-    # ✨ 핵심 수정: filt 없으면 둘 다 빈 배열로 반환
-    if not filt:
-        return np.array([]), np.array([])
-
+    if not filt: return np.array([]), np.array([])
     return np.array([x for x, _ in filt]), np.array([l for _, l in filt])
+
 def save_model_metadata(s, t, m, a, f1, l):
     meta = {"symbol": s, "strategy": t, "model": m, "accuracy": round(a,4), "f1_score": round(f1,4), "loss": round(l,6), "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")}
     path = f"{MODEL_DIR}/{s}_{t}_{m}.meta.json"
