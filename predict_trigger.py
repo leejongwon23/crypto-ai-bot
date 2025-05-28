@@ -11,7 +11,7 @@ from logger import get_model_success_rate, log_audit
 last_trigger_time = {}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 TRIGGER_COOLDOWN = {"단기": 3600, "중기": 10800, "장기": 21600}
-MODEL_TYPES = ["lstm", "cnn_lstm", "transformer"]  # ✅ 명시적으로 사용하는 모델 목록
+MODEL_TYPES = ["lstm", "cnn_lstm", "transformer"]
 
 def check_pre_burst_conditions(df, strategy):
     try:
@@ -41,7 +41,6 @@ def check_pre_burst_conditions(df, strategy):
 
 def check_model_quality(symbol, strategy):
     try:
-        # ✅ 각 모델의 '과거 성공률' 중 하나라도 기준 이상이면 예측 허용
         for m in MODEL_TYPES:
             past_success_rate = get_model_success_rate(symbol, strategy, m)
             if past_success_rate >= 0.6:
