@@ -195,7 +195,7 @@ def train_all_models():
         success_rate = stat["success"] / total if total > 0 else 0
         avg_return = sum(stat["returns"]) / len(stat["returns"]) if stat["returns"] else 0
         return success_rate * avg_return
-    strategy_order.sort(key=lambda s: -get_score(s))
+
 
     for strat in strategy_order:
         for sym in SYMBOLS:
