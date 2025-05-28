@@ -77,7 +77,6 @@ def predict(symbol, strategy):
                         predictions.append(failed_result(symbol, strategy, model_type, "price NaN 발생"))
                         continue
 
-                    # ✅ 롱/숏 방향 중 더 유리한 쪽 선택
                     long_rate = raw_rate
                     short_rate = -raw_rate
                     abs_long = abs(long_rate)
