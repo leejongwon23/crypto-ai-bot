@@ -10,11 +10,6 @@ now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 model_success_tracker = {}
 os.makedirs(LOG, exist_ok=True)
 
-def get_min_gain(symbol, strategy):
-    df = get_kline_by_strategy(symbol, strategy)
-    if df is None or len(df) < 20: return {"단기":0.01,"중기":0.03,"장기":0.05}.get(strategy,0.05)
-    v = df["close"].pct_change().rolling(20).std().iloc[-1] if not df.empty else 0.01
-    return max(round(v*1.2,4), {"단기":0.005,"중기":0.01,"장기":0.02}.get(strategy,0.03))
 
 def update_model_success(s, t, m, success):
     k = (s, t or "알수없음", m)
