@@ -1,7 +1,7 @@
 import os, csv, sys, time, threading, datetime, pytz
 from telegram_bot import send_message
 from predict import predict
-from logger import log_prediction, get_model_success_rate, get_actual_success_rate, get_strategy_eval_count, get_min_gain, strategy_stats
+from logger import log_prediction, get_model_success_rate, get_actual_success_rate, get_strategy_eval_count, strategy_stats
 from data.utils import SYMBOLS, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
@@ -73,10 +73,9 @@ def run_prediction_loop(strategy, symbols):
         try:
             model_count = len([f for f in os.listdir("/persistent/models") if f.startswith(f"{symbol}_{strategy}_") and f.endswith(".pt")])
             if model_count == 0:
-                r = get_min_gain(symbol, strategy)
                 log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(),
                                model="ensemble", success=False, reason="모델 없음",
-                               rate=r, return_value=r, volatility=False)
+                               rate=0.0, return_value=0.0, volatility=False)
                 log_audit(symbol, strategy, None, "모델 없음")
                 continue
             if not should_predict(symbol, strategy): continue
@@ -88,11 +87,10 @@ def run_prediction_loop(strategy, symbols):
             for result in pred_results:
                 if not isinstance(result, dict) or result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
                     reason = result.get("reason", "예측 실패") if isinstance(result, dict) else "predict() 반환 오류"
-                    r = get_min_gain(symbol, strategy)
                     log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(),
                                    model=result.get("model", "unknown"),
                                    success=False, reason=reason,
-                                   rate=r, return_value=r, volatility=False)
+                                   rate=0.0, return_value=0.0, volatility=False)
                     log_audit(symbol, strategy, result, reason)
                     continue
 
@@ -126,11 +124,10 @@ def run_prediction_loop(strategy, symbols):
                 results.append(result)
 
         except Exception as e:
-            r = get_min_gain(symbol, strategy)
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
             log_prediction(symbol, strategy, "예외", 0, 0, now_kst().isoformat(),
                            model="ensemble", success=False, reason=f"예측 예외: {e}",
-                           rate=r, return_value=r, volatility=False)
+                           rate=0.0, return_value=0.0, volatility=False)
             log_audit(symbol, strategy, None, f"예측 예외: {e}")
 
     save_failure_count(fmap)
