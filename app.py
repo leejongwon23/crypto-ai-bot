@@ -6,7 +6,7 @@ from telegram_bot import send_message
 from predict_test import test_all_predictions
 from predict_trigger import run as trigger_run
 from data.utils import SYMBOLS, get_kline_by_strategy
-from visualization import generate_visual_report  # 전략별 시각화 통합
+from visualization import generate_visual_report, generate_visuals_for_strategy
 
 PERSIST_DIR = "/persistent"
 LOG_DIR, MODEL_DIR = os.path.join(PERSIST_DIR, "logs"), os.path.join(PERSIST_DIR, "models")
@@ -19,8 +19,10 @@ now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 def start_scheduler():
     print(">>> 스케줄러 시작"); sys.stdout.flush()
     sched = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
-    학습 = [(1,30,"단기"), (3,30,"장기"), (6,0,"중기"), (9,0,"단기"), (11,0,"중기"), (13,0,"장기"), (15,0,"단기"), (17,0,"중기"), (19,0,"장기"), (22,30,"단기")]
-    예측 = [(7,30,s) for s in ["단기","중기","장기"]] + [(10,30,"단기"),(10,30,"중기"),(12,30,"중기"),(14,30,"장기"),(16,30,"단기"),(18,30,"중기")] + [(21,0,s) for s in ["단기","중기","장기"]] + [(0,0,"단기"),(0,0,"중기")]
+    학습 = [(1,30,"단기"), (3,30,"장기"), (6,0,"중기"), (9,0,"단기"), (11,0,"중기"),
+           (13,0,"장기"), (15,0,"단기"), (17,0,"중기"), (19,0,"장기"), (22,30,"단기")]
+    예측 = [(7,30,s) for s in ["단기","중기","장기"]] + [(10,30,"단기"),(10,30,"중기"),
+           (12,30,"중기"),(14,30,"장기"),(16,30,"단기"),(18,30,"중기")] + [(21,0,s) for s in ["단기","중기","장기"]] + [(0,0,"단기"),(0,0,"중기")]
 
     for h,m,strategy in 학습:
         job = functools.partial(threading.Thread, target=train.train_model_loop, args=(strategy,), daemon=True)
@@ -35,15 +37,11 @@ def start_scheduler():
     sched.add_job(trigger_run, 'interval', minutes=30)
     sched.start()
 
-# ... 나머지 app.py 코드 (이미 사용자 제공 코드 기준으로 정확히 유지됨)
-
-
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료"); sys.stdout.flush()
 
 @app.route("/yopo-health")
 def yopo_health():
-    from visualization import generate_visuals_for_strategy
     percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
     logs, strategy_html, problems = {}, [], []
 
@@ -75,14 +73,10 @@ def yopo_health():
             pred["return"] = pd.to_numeric(pred.get("return", pd.Series()), errors="coerce").fillna(0)
 
             nvol, vol = pred[~pred["volatility"]], pred[pred["volatility"]]
-
             stat = lambda df, s: len(df[df["status"] == s]) if not df.empty and "status" in df.columns else 0
-            # 🔹 일반 예측 상태별
             sn, fn, pn_, fnl = map(lambda s: stat(nvol, s), ["success", "fail", "pending", "failed"])
-            # 🔹 변동성 예측 상태별
             sv, fv, pv, fvl = map(lambda s: stat(vol, s), ["success", "fail", "pending", "failed"])
 
-            # 평가 정보
             def perf(df):
                 try:
                     s, f = stat(df, "success"), stat(df, "fail")
@@ -157,79 +151,98 @@ def yopo_health():
     status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
     return f"<div style='font-family:monospace;line-height:1.6;font-size:15px;'><b>{status}</b><hr>" + "".join(strategy_html) + "</div>"
 
-
-
-
 @app.route("/")
-def index(): return "Yopo server is running"
+def index():
+    return "Yopo server is running"
 
 @app.route("/ping")
-def ping(): return "pong"
+def ping():
+    return "pong"
 
 @app.route("/run")
 def run():
-    try: print("[RUN] main() 실행"); sys.stdout.flush(); main(); return "Recommendation started"
-    except Exception as e: traceback.print_exc(); return f"Error: {e}", 500
+    try:
+        print("[RUN] main() 실행")
+        sys.stdout.flush()
+        main()
+        return "Recommendation started"
+    except Exception as e:
+        traceback.print_exc()
+        return f"Error: {e}", 500
 
 @app.route("/train-now")
 def train_now():
-    try: threading.Thread(target=train.train_all_models, daemon=True).start(); return "✅ 모든 전략 학습 시작됨"
-    except Exception as e: return f"학습 실패: {e}", 500
+    try:
+        threading.Thread(target=train.train_all_models, daemon=True).start()
+        return "✅ 모든 전략 학습 시작됨"
+    except Exception as e:
+        return f"학습 실패: {e}", 500
 
 @app.route("/train-log")
 def train_log():
     try:
-        if not os.path.exists(LOG_FILE): return "학습 로그 없음"
+        if not os.path.exists(LOG_FILE):
+            return "학습 로그 없음"
         df = pd.read_csv(LOG_FILE, encoding="utf-8-sig")
-        if df.empty or df.shape[1]==0: return "학습 기록 없음"
+        if df.empty or df.shape[1] == 0:
+            return "학습 기록 없음"
         return "<pre>" + df.to_csv(index=False) + "</pre>"
-    except Exception as e: return f"읽기 오류: {e}", 500
+    except Exception as e:
+        return f"읽기 오류: {e}", 500
 
 @app.route("/models")
 def list_models():
     try:
-        if not os.path.exists(MODEL_DIR): return "models 폴더 없음"
+        if not os.path.exists(MODEL_DIR):
+            return "models 폴더 없음"
         files = os.listdir(MODEL_DIR)
         return "<pre>" + "\n".join(files) + "</pre>" if files else "models 폴더 비어 있음"
-    except Exception as e: return f"오류: {e}", 500
+    except Exception as e:
+        return f"오류: {e}", 500
 
 @app.route("/check-log")
 def check_log():
     try:
-        if not os.path.exists(PREDICTION_LOG): return jsonify({"error": "prediction_log.csv 없음"})
+        if not os.path.exists(PREDICTION_LOG):
+            return jsonify({"error": "prediction_log.csv 없음"})
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
         return jsonify(df.tail(10).to_dict(orient='records'))
-    except Exception as e: return jsonify({"error": str(e)})
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 @app.route("/reset-all")
 def reset_all():
-    if request.args.get("key") != "3572": return "❌ 인증 실패", 403
+    if request.args.get("key") != "3572":
+        return "❌ 인증 실패", 403
     try:
-        def clear(f,h): open(f,"w",newline="",encoding="utf-8-sig").write(",".join(h)+"\n")
-        if os.path.exists(MODEL_DIR): shutil.rmtree(MODEL_DIR)
+        def clear(f, h): open(f, "w", newline="", encoding="utf-8-sig").write(",".join(h) + "\n")
+        if os.path.exists(MODEL_DIR):
+            shutil.rmtree(MODEL_DIR)
         os.makedirs(MODEL_DIR, exist_ok=True)
-        clear(PREDICTION_LOG,["timestamp","symbol","strategy","direction","entry_price","target_price","model","rate","status","reason","return","volatility"])
-        clear(WRONG_PREDICTIONS,["timestamp","symbol","strategy","direction","entry_price","target_price","gain"])
-        clear(LOG_FILE,["timestamp","symbol","strategy","model","accuracy","f1","loss"])
-        clear(AUDIT_LOG,["timestamp","symbol","strategy","result","status"])
-        clear(MESSAGE_LOG,["timestamp","symbol","strategy","message"])
-        clear(FAILURE_LOG,["symbol","strategy","failures"])
+        clear(PREDICTION_LOG, ["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "model", "rate", "status", "reason", "return", "volatility"])
+        clear(WRONG_PREDICTIONS, ["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "gain"])
+        clear(LOG_FILE, ["timestamp", "symbol", "strategy", "model", "accuracy", "f1", "loss"])
+        clear(AUDIT_LOG, ["timestamp", "symbol", "strategy", "result", "status"])
+        clear(MESSAGE_LOG, ["timestamp", "symbol", "strategy", "message"])
+        clear(FAILURE_LOG, ["symbol", "strategy", "failures"])
         return "✅ 초기화 완료"
-    except Exception as e: return f"초기화 실패: {e}", 500
-
+    except Exception as e:
+        return f"초기화 실패: {e}", 500
 
 @app.route("/force-fix-prediction-log")
 def force_fix_prediction_log():
     try:
-        headers = ["timestamp","symbol","strategy","direction","entry_price","target_price","model","rate","status","reason","return","volatility"]
-        with open(PREDICTION_LOG,"w",newline="",encoding="utf-8-sig") as f:
+        headers = ["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "model", "rate", "status", "reason", "return", "volatility"]
+        with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
             csv.DictWriter(f, fieldnames=headers).writeheader()
         return "✅ prediction_log.csv 강제 초기화 완료"
-    except Exception as e: return f"⚠️ 오류: {e}", 500
-
+    except Exception as e:
+        return f"⚠️ 오류: {e}", 500
 
 if __name__ == "__main__":
-    print(">>> 서버 실행 준비"); sys.stdout.flush()
+    print(">>> 서버 실행 준비")
+    sys.stdout.flush()
     threading.Thread(target=start_scheduler, daemon=True).start()
     threading.Thread(target=lambda: send_message("[시작] YOPO 서버 실행됨"), daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
