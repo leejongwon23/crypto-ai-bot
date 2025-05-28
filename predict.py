@@ -10,11 +10,11 @@ DEVICE, MODEL_DIR = torch.device("cpu"), "/persistent/models"
 STOP_LOSS_PCT = 0.02
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-def failed_result(symbol, strategy, model_type, reason, direction="롱"):
+def failed_result(symbol, strategy, model_type, reason):
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     is_volatility = "_v" in symbol
     try:
-        log_prediction(symbol, strategy, direction=direction, entry_price=0, target_price=0,
+        log_prediction(symbol, strategy, direction="예측실패", entry_price=0, target_price=0,
                        model=model_type, success=False, reason=reason,
                        rate=0.0, timestamp=t, volatility=is_volatility)
     except Exception as e:
@@ -22,8 +22,8 @@ def failed_result(symbol, strategy, model_type, reason, direction="롱"):
         sys.stdout.flush()
     return {
         "symbol": symbol, "strategy": strategy, "success": False, "reason": reason,
-        "direction": direction, "model": model_type, "rate": 0.0,
-        "price": 1.0, "target": 1.0, "stop": 1.0, "timestamp": t
+        "direction": "예측실패", "model": model_type, "rate": 0.0,
+        "price": 0.0, "target": 0.0, "stop": 0.0, "timestamp": t
     }
 
 def predict(symbol, strategy):
@@ -32,6 +32,7 @@ def predict(symbol, strategy):
         sys.stdout.flush()
         is_volatility = "_v" in symbol
         window = find_best_window(symbol, strategy)
+
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < window + 1:
             return [failed_result(symbol, strategy, "unknown", "데이터 부족")]
@@ -68,7 +69,7 @@ def predict(symbol, strategy):
                     if isinstance(output, tuple): output = output[0]
                     raw_rate = float(output.squeeze())
                     if np.isnan(raw_rate):
-                        predictions.append(failed_result(symbol, strategy, model_type, f"NaN 예측값"))
+                        predictions.append(failed_result(symbol, strategy, model_type, "NaN 예측값"))
                         continue
 
                     price = feat["close"].iloc[-1]
@@ -87,7 +88,7 @@ def predict(symbol, strategy):
                         direction, rate = "숏", short_rate
 
                     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
-                    success = True  # ← 평가 시점에서만 판단하므로 예측 단계에서는 무조건 True
+                    success = True
                     target = price * (1 + rate) if direction == "롱" else price * (1 - rate)
                     stop = price * (1 - STOP_LOSS_PCT) if direction == "롱" else price * (1 + STOP_LOSS_PCT)
 
