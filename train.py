@@ -76,11 +76,18 @@ def create_dataset(f, w):
         if c1 == 0: continue
         X.append([list(r.values()) for r in x_seq])
         y.append(round((c2 - c1) / c1, 4))
-    if not X: return np.array([]), np.array([])
+
+    if not X:
+        return np.array([]), np.array([])
+
     mlen = max(set(map(len, X)), key=list(X).count)
     filt = [(x, l) for x, l in zip(X, y) if len(x) == mlen]
-    return np.array([x for x, _ in filt]), np.array([l for _, l in filt]) if filt else (np.array([]), np.array([]))
 
+    # ✨ 핵심 수정: filt 없으면 둘 다 빈 배열로 반환
+    if not filt:
+        return np.array([]), np.array([])
+
+    return np.array([x for x, _ in filt]), np.array([l for _, l in filt])
 def save_model_metadata(s, t, m, a, f1, l):
     meta = {"symbol": s, "strategy": t, "model": m, "accuracy": round(a,4), "f1_score": round(f1,4), "loss": round(l,6), "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")}
     path = f"{MODEL_DIR}/{s}_{t}_{m}.meta.json"
