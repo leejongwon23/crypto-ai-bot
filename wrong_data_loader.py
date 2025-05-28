@@ -2,6 +2,8 @@ import os
 import csv
 import torch
 import numpy as np
+import pandas as pd
+import datetime
 from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import TensorDataset
 from data.utils import get_kline_by_strategy, compute_features
@@ -11,6 +13,8 @@ def load_wrong_prediction_data(symbol, strategy, input_size, window=30):
     if not os.path.exists(file):
         return None
 
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=14)
+    seen = set()
     rows = []
     with open(file, "r", encoding="utf-8-sig") as f:
         reader = csv.reader(f)
@@ -18,15 +22,22 @@ def load_wrong_prediction_data(symbol, strategy, input_size, window=30):
             if len(row) < 6:
                 continue
             timestamp, sym, strat, direction, entry_price, target_price, *_ = row
-            if sym == symbol and strat == strategy:
-                try:
-                    rows.append({
-                        "timestamp": timestamp,
-                        "direction": direction,
-                        "entry_price": float(entry_price)
-                    })
-                except:
+            if sym != symbol or strat != strategy:
+                continue
+            try:
+                entry_price = float(entry_price)
+                dt = pd.to_datetime(timestamp, utc=True)
+                key = (symbol, strategy, direction, entry_price)
+                if key in seen or dt < cutoff:
                     continue
+                seen.add(key)
+                rows.append({
+                    "timestamp": dt,
+                    "direction": direction,
+                    "entry_price": entry_price
+                })
+            except:
+                continue
 
     if not rows:
         return None
@@ -49,7 +60,7 @@ def load_wrong_prediction_data(symbol, strategy, input_size, window=30):
 
     for row in rows:
         try:
-            fail_time = pd.to_datetime(row["timestamp"], utc=True)
+            fail_time = row["timestamp"]
             entry_price = row["entry_price"]
             direction = row["direction"]
 
