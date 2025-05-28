@@ -8,7 +8,7 @@ from model_weight_loader import get_model_weight
 from wrong_data_loader import load_wrong_prediction_data
 from feature_importance import compute_feature_importance, save_feature_importance
 import logger
-from logger import get_min_gain, strategy_stats
+from logger import strategy_stats
 
 DEVICE = torch.device("cpu")
 DIR = "/persistent"; MODEL_DIR, LOG_DIR = f"{DIR}/models", f"{DIR}/logs"
