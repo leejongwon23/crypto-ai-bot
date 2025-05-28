@@ -1,57 +1,16 @@
 import os
 import pandas as pd
-import logger
 
 LOG_FILE = "/persistent/logs/train_log.csv"
 MODEL_DIR = "/persistent/models"
 
 def get_model_weight(model_type, strategy, symbol="ALL", max_records=100):
     """
-    모델별 앙상블 가중치 계산:
-    - accuracy: 학습 정확도
-    - success_rate: 예측 성공률
-    - fail_rate: 실패율
-    - weight = 정규화된 점수 × 실패율 보정
+    모델 가중치 계산은 사용하지 않음.
+    모든 모델은 개별 예측을 하고, 점수 판단은 수익률 기준으로 이뤄짐.
+    따라서 항상 기본값 1.0을 반환함.
     """
-    acc_score = 0.5
-    success_score = 0.5
-    failure_penalty = 1.0
-    weight = 0.5
-
-    if os.path.exists(LOG_FILE):
-        try:
-            df = pd.read_csv(LOG_FILE, encoding="utf-8-sig")
-            if symbol != "ALL":
-                df = df[df["symbol"] == symbol]
-            df = df[(df["model"] == model_type) & (df["strategy"] == strategy)]
-            df = df.sort_values("timestamp", ascending=False).head(max_records)
-            if not df.empty:
-                acc_score = float(df["accuracy"].mean())
-        except Exception as e:
-            print(f"[경고] accuracy 계산 실패: {e}")
-
-    try:
-        sr = logger.get_model_success_rate(symbol, strategy, model_type)
-        if 0 <= sr <= 1:
-            success_score = sr
-    except Exception as e:
-        print(f"[경고] success_rate 계산 실패: {e}")
-
-    try:
-        fail_rate = logger.get_strategy_fail_rate(symbol, strategy)
-        failure_penalty = 1.0 - min(fail_rate, 0.5)
-        failure_penalty = round(max(failure_penalty, 0.5), 4)
-    except Exception as e:
-        print(f"[경고] 실패율 계산 실패: {e}")
-
-    try:
-        combined = (acc_score * 0.4) + (success_score * 0.6)
-        weight = round(combined * failure_penalty, 4)
-    except:
-        weight = 0.5
-
-    print(f"[가중치 계산] {symbol}-{strategy}-{model_type} → acc: {round(acc_score,4)} / sr: {round(success_score,4)} / fail_penalty: {round(failure_penalty,4)} → weight: {weight}")
-    return weight
+    return 1.0
 
 def model_exists(symbol, strategy):
     """
