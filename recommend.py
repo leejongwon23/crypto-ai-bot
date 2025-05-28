@@ -5,7 +5,7 @@ from logger import log_prediction, get_model_success_rate, get_actual_success_ra
 from data.utils import SYMBOLS, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
-from model_weight_loader import model_exists
+from model_weight_loader import model_exists, get_model_weight
 
 FAIL_LIMIT, SEND_LIMIT = 3, 5
 STRATEGY_VOL = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
@@ -62,6 +62,7 @@ def should_predict(symbol, strategy):
     try:
         return get_model_success_rate(symbol, strategy, "ensemble") < 0.85 or get_strategy_eval_count(strategy) < 10
     except: return True
+
 def run_prediction_loop(strategy, symbols):
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼"); sys.stdout.flush()
     results, fmap = [], load_failure_count()
@@ -133,28 +134,44 @@ def run_prediction_loop(strategy, symbols):
             log_audit(symbol, strategy, None, f"예측 예외: {e}")
 
     save_failure_count(fmap)
-    # ✅ 전략 통계 기반 필터링 (성공률 50% 이상 & 평균 수익률 1% 이상)
-    filtered = []
+
+    filtered_by_success = []
     for r in results:
         s = r.get("strategy")
         stat = strategy_stats.get(s, {"success": 0, "fail": 0, "returns": []})
         total = stat["success"] + stat["fail"]
         if total < 5: continue
-        success_rate = stat["success"] / total if total > 0 else 0.0
-        avg_return = sum(map(abs, stat["returns"])) / len(stat["returns"]) if stat["returns"] else 0.0
-        if success_rate < 0.5 or avg_return < 0.01: continue
-        r["score"] = abs(r["rate"]) * success_rate * avg_return
-        filtered.append(r)
+        success_rate = stat["success"] / total
+        r["score"] = success_rate
+        filtered_by_success.append(r)
 
-    final = sorted(filtered, key=lambda x: -x["score"])[:SEND_LIMIT]
+    top_success = sorted(filtered_by_success, key=lambda x: -x["score"])[:10]
 
-    for res in final:
+    for r in top_success:
+        s = r.get("strategy")
+        stat = strategy_stats.get(s, {"success": 0, "fail": 0, "returns": []})
+        total = stat["success"] + stat["fail"]
+        avg_return = sum(stat["returns"]) / len(stat["returns"]) if stat["returns"] else 0.0
+        r["score"] = abs(r["rate"]) * avg_return
+
+    top_return = sorted(top_success, key=lambda x: -x["score"])[:10]
+
+    weight_best = {}
+    for r in top_return:
+        key = r["strategy"]
+        sym = r["symbol"]
+        model = r["model"]
+        weight = get_model_weight(model, key, sym)
+        if key not in weight_best or weight > weight_best[key]["weight"]:
+            weight_best[key] = {**r, "weight": weight}
+
+    for s, res in weight_best.items():
         try:
-            msg = ("[반전 추천] " if res.get("reversed") else "") + format_message(res)
+            msg = format_message(res)
             send_message(msg)
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
                 csv.writer(f).writerow([now_kst().isoformat(), res["symbol"], res["strategy"], msg])
-            print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%}")
+            print(f"✅ 모델 가중치 추천 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%}")
         except Exception as e:
             print(f"[ERROR] 메시지 전송 실패: {e}")
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
