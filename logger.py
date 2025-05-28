@@ -3,6 +3,7 @@ from data.utils import get_kline_by_strategy
 
 DIR, LOG = "/persistent", "/persistent/logs"
 PREDICTION_LOG, WRONG = f"{DIR}/prediction_log.csv", f"{DIR}/wrong_predictions.csv"
+CORRECT = f"{DIR}/correct_predictions.csv"
 TRAIN_LOG, AUDIT_LOG = f"{LOG}/train_log.csv", f"{LOG}/evaluation_audit.csv"
 STOP_LOSS = 0.02
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
@@ -150,9 +151,12 @@ def evaluate_predictions(get_price_fn):
                     writer = csv.DictWriter(af, fieldnames=audit_row.keys())
                     if write_header: writer.writeheader()
                     writer.writerow(audit_row)
-                if not success:
-                    with open(WRONG, "a", newline="", encoding="utf-8-sig") as wf:
-                        csv.writer(wf).writerow([r["timestamp"], s, strat, d, entry, r.get("target_price", 0), gain])
+                target_csv = CORRECT if success else WRONG
+                with open(target_csv, "a", newline="", encoding="utf-8-sig") as wf:
+                    writer = csv.writer(wf)
+                    if os.stat(target_csv).st_size == 0:
+                        writer.writerow(["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "actual_return"])
+                    writer.writerow([r["timestamp"], s, strat, d, entry, r.get("target_price", 0), round(gain, 4)])
         except Exception as e:
             r.update({"status": "skip_eval", "reason": f"예외 발생: {e}", "return": 0.0})
         updated.append(r)
