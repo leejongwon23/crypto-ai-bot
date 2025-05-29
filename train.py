@@ -20,62 +20,45 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 10:
             return 20
-
         df_feat = compute_features(symbol, df, strategy)
         if df_feat is None or df_feat.empty or len(df_feat) < max(window_list) + 1:
             return 20
-
         scaler = MinMaxScaler()
         scaled = scaler.fit_transform(df_feat.values)
         feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
-
-        best_score = -1
-        best_window = window_list[0]
-
+        best_score, best_window = -1, window_list[0]
         for window in window_list:
             X, y = create_dataset(feature_dicts, window)
-            if len(X) == 0:
-                continue
-
+            if len(X) == 0: continue
             input_size = X.shape[2]
             model = get_model("lstm", input_size=input_size)
             model.train()
-
             X_tensor = torch.tensor(X, dtype=torch.float32)
             y_tensor = torch.tensor(y, dtype=torch.float32)
-
             val_len = int(len(X_tensor) * 0.2)
             if val_len == 0: continue
-
             train_X, train_y = X_tensor[:-val_len], y_tensor[:-val_len]
             val_X, val_y = X_tensor[-val_len:], y_tensor[-val_len:]
-
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             criterion = nn.MSELoss()
-
             for _ in range(3):
                 pred = model(train_X).squeeze()
                 loss = criterion(pred, train_y)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-
             with torch.no_grad():
                 pred_val = model(val_X).squeeze().numpy()
                 acc = r2_score(val_y.numpy(), pred_val)
-                conf = np.mean(np.abs(pred_val))  # 편향도 측정
-                score = acc * conf  # 정확도 × 신뢰도
-
+                conf = np.mean(np.abs(pred_val))
+                score = acc * conf
                 if score > best_score:
                     best_score = score
                     best_window = window
-
     except Exception as e:
         print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
         return 20
-
     return best_window
-
 
 def create_dataset(f, w):
     X, y = [], []
@@ -86,7 +69,6 @@ def create_dataset(f, w):
         if c1 == 0: continue
         X.append([list(r.values()) for r in x_seq])
         y.append(round((c2 - c1) / c1, 4))
-
     if not X: return np.array([]), np.array([])
     mlen = max(set(map(len, X)), key=list(X).count)
     filt = [(x, l) for x, l in zip(X, y) if len(x) == mlen]
@@ -112,7 +94,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
         if len(X_raw) < 2: raise ValueError("유효 시퀀스 부족")
         input_size, val_len = X_raw.shape[2], int(len(X_raw) * 0.2)
         if val_len == 0: raise ValueError("검증셋 부족")
-
         val_X, val_y = torch.tensor(X_raw[-val_len:], dtype=torch.float32), torch.tensor(y_raw[-val_len:], dtype=torch.float32)
         dataset = TensorDataset(torch.tensor(X_raw, dtype=torch.float32), torch.tensor(y_raw, dtype=torch.float32))
         train_set, _ = random_split(dataset, [len(dataset)-val_len, val_len])
@@ -137,11 +118,12 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
             except:
                 acc_before = ""
 
-            for _ in range(rep):
+            for _ in range(epochs):
                 for _ in range(rep_wrong):
                     wrong_data = load_wrong_prediction_data(sym, strat, input_size, win)
                     if not wrong_data: continue
-                    xb_all, yb_all = zip(*[(xb, yb) for xb, yb in wrong_data if xb.shape[1:] == (win, input_size)]) if wrong_data else ([],[])
+                    xb_all, yb_all = zip(*[(xb, yb) for xb, yb in wrong_data
+                                           if xb.shape[1:] == (win, input_size) and np.isfinite(yb) and abs(yb) < 2]) if wrong_data else ([],[])
                     if len(xb_all) >= 2:
                         xb, yb = torch.stack(xb_all), torch.tensor(yb_all, dtype=torch.float32)
                         for i in range(0, len(xb), batch):
@@ -161,6 +143,7 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                     acc = r2_score(val_y.numpy(), rate)
                     f1 = mean_squared_error(val_y.numpy(), rate)
                     logloss = np.mean(np.square(val_y.numpy() - rate))
+                    acc_dir = accuracy_score(val_y.numpy() > 0, rate > 0)
                     logger.log_training_result(sym, strat, model_type, acc, f1, logloss)
                     torch.save(model.state_dict(), model_path)
                     print(f"✅ 저장: {model_path}"); sys.stdout.flush()
@@ -199,17 +182,7 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
             print(f"[로그 기록 실패] {sym}-{strat} → {log_err}"); sys.stdout.flush()
 
 def train_all_models():
-    strategy_order = ["단기", "중기", "장기"]
-    def get_score(s):
-        stat = strategy_stats.get(s, {"success": 0, "fail": 0, "returns": []})
-        total = stat["success"] + stat["fail"]
-        if total < 5: return 0
-        success_rate = stat["success"] / total if total > 0 else 0
-        avg_return = sum(stat["returns"]) / len(stat["returns"]) if stat["returns"] else 0
-        return success_rate * avg_return
-
-
-    for strat in strategy_order:
+    for strat in ["단기", "중기", "장기"]:
         for sym in SYMBOLS:
             try: train_one_model(sym, strat)
             except Exception as e:
@@ -222,5 +195,3 @@ def train_model_loop(strategy):
             print(f"[단일 학습 오류] {sym}-{strategy} → {e}"); sys.stdout.flush()
 
 train_model = train_all_models
-
-
