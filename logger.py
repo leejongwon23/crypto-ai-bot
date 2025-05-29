@@ -4,6 +4,7 @@ from data.utils import get_kline_by_strategy
 DIR, LOG = "/persistent", "/persistent/logs"
 PREDICTION_LOG, WRONG = f"{DIR}/prediction_log.csv", f"{DIR}/wrong_predictions.csv"
 CORRECT = f"{DIR}/correct_predictions.csv"
+EVAL_RESULT = f"{DIR}/evaluation_result.csv"  # ✅ 추가
 TRAIN_LOG, AUDIT_LOG = f"{LOG}/train_log.csv", f"{LOG}/evaluation_audit.csv"
 STOP_LOSS = 0.02
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
@@ -104,7 +105,7 @@ def evaluate_predictions(get_price_fn):
     try:
         rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
     except: return
-    now, updated = now_kst(), []
+    now, updated, evaluated = now_kst(), [], []  # ✅ evaluated 추가
     for r in rows:
         try:
             if r.get("status") not in ["pending", "failed", "v_pending", "v_failed"]:
@@ -134,36 +135,19 @@ def evaluate_predictions(get_price_fn):
                     "return": float(round(gain, 4))
                 })
                 update_model_success(s, strat, m, success)
-                audit_row = {
-                    "timestamp": now.isoformat(),
-                    "symbol": s,
-                    "strategy": strat,
-                    "model": m,
-                    "status": r.get("status", ""),
-                    "reason": r.get("reason", ""),
-                    "predicted_return": float(rate),
-                    "actual_return": float(round(gain, 4)),
-                    "accuracy_before": "",
-                    "accuracy_after": "",
-                    "predicted_volatility": float(rate) if vol else "",
-                    "actual_volatility": float(eval_df["close"].pct_change().rolling(5).std().iloc[-1]) if not eval_df.empty else ""
-                }
-                write_header = not os.path.exists(AUDIT_LOG) or os.stat(AUDIT_LOG).st_size == 0
-                with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as af:
-                    writer = csv.DictWriter(af, fieldnames=audit_row.keys())
-                    if write_header: writer.writeheader()
-                    writer.writerow(audit_row)
-                target_csv = CORRECT if success else WRONG
-                with open(target_csv, "a", newline="", encoding="utf-8-sig") as wf:
-                    writer = csv.writer(wf)
-                    if os.stat(target_csv).st_size == 0:
-                        writer.writerow(["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "actual_return"])
-                    writer.writerow([r["timestamp"], s, strat, d, float(entry), float(r.get("target_price", 0)), float(round(gain, 4))])
+                evaluated.append(dict(r))  # ✅ 평가 결과 따로 저장용
         except Exception as e:
             r.update({"status": "skip_eval", "reason": f"예외 발생: {e}", "return": 0.0})
         updated.append(r)
     with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader(); w.writerows(updated)
+    # ✅ 평가 결과 별도 저장
+    if evaluated:
+        with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as ef:
+            w = csv.DictWriter(ef, fieldnames=evaluated[0].keys())
+            if not os.path.exists(EVAL_RESULT) or os.stat(EVAL_RESULT).st_size == 0:
+                w.writeheader()
+            w.writerows(evaluated)
 
 strategy_stats = {}
