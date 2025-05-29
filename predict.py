@@ -90,6 +90,9 @@ def predict(symbol, strategy):
                     else:
                         direction, rate = "숏", short_rate
 
+                    # ✅ 수익률 정합성 보정
+                    rate = abs(rate)
+
                     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
                     success = True
                     target = raw_close * (1 + rate) if direction == "롱" else raw_close * (1 - rate)
