@@ -73,7 +73,7 @@ def get_symbols_by_volatility(strategy):
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
     return sorted(result, key=lambda x: -x["volatility"])
 
-def run_prediction_loop(strategy, symbols):
+def run_prediction_loop(strategy, symbols, source="일반"):
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼"); sys.stdout.flush()
     results, fmap = [], load_failure_count()
 
@@ -86,7 +86,7 @@ def run_prediction_loop(strategy, symbols):
                 log_audit(symbol, strategy, None, "모델 없음")
                 continue
 
-            pred_results = predict(symbol, strategy)
+            pred_results = predict(symbol, strategy, source=source)
             if not isinstance(pred_results, list):
                 pred_results = [pred_results]
 
@@ -96,12 +96,14 @@ def run_prediction_loop(strategy, symbols):
                     log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(),
                                    model=result.get("model", "unknown"),
                                    success=False, reason=reason,
-                                   rate=0.0, return_value=0.0, volatility=False)
+                                   rate=0.0, return_value=0.0, volatility=False,
+                                   source=source)
                     log_audit(symbol, strategy, result, reason)
                     continue
 
                 result["volatility"] = vol
                 result["return"] = result.get("rate", 0.0)
+                result["source"] = result.get("source", source)
 
                 log_prediction(
                     symbol=result.get("symbol", symbol),
@@ -116,7 +118,7 @@ def run_prediction_loop(strategy, symbols):
                     rate=result.get("rate", 0.0),
                     return_value=result.get("return", 0.0),
                     volatility=vol > 0,
-                    source=result.get("source", "일반")
+                    source=result.get("source", source)
                 )
                 log_audit(symbol, strategy, result, "예측 성공")
 
@@ -162,6 +164,7 @@ def run_prediction_loop(strategy, symbols):
             print(f"[ERROR] 메시지 전송 실패: {e}")
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
                 csv.writer(f).writerow([now_kst().isoformat(), res["symbol"], res["strategy"], f"전송 실패: {e}"])
+
 
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
