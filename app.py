@@ -89,8 +89,56 @@ def yopo_health():
                     return {"succ": s, "fail": f, "succ_rate": s / t * 100 if t else 0, "fail_rate": f / t * 100 if t else 0, "r_avg": avg if pd.notna(avg) else 0, "total": t}
                 except:
                     return {"succ": 0, "fail": 0, "succ_rate": 0, "fail_rate": 0, "r_avg": 0, "total": 0}
+@app.route("/yopo-health")
+def yopo_health():
+    percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
+    logs, strategy_html, problems = {}, [], []
 
-            pn, pv_stats = perf(nvol), perf(vol)
+    for name, path in {"pred": PREDICTION_LOG, "train": LOG_FILE, "audit": AUDIT_LOG, "msg": MESSAGE_LOG}.items():
+        try:
+            logs[name] = pd.read_csv(path, encoding="utf-8-sig") if os.path.exists(path) else pd.DataFrame()
+        except:
+            logs[name] = pd.DataFrame()
+
+    model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
+    model_info = {}
+    for f in model_files:
+        match = re.match(r"(.+?)_(단기|중기|장기)_(lstm|cnn_lstm|transformer)\.pt", f)
+        if match:
+            symbol, strat, mtype = match.groups()
+            model_info.setdefault(strat, {}).setdefault(symbol, set()).add(mtype)
+
+    for strat in ["단기", "중기", "장기"]:
+        try:
+            pred, train, audit = logs["pred"], logs["train"], logs["audit"]
+            pred = pred.query(f"strategy == '{strat}'") if not pred.empty else pd.DataFrame()
+            train = train.query(f"strategy == '{strat}'") if not train.empty else pd.DataFrame()
+            audit = audit.query(f"strategy == '{strat}'") if not audit.empty else pd.DataFrame()
+
+            pred["volatility"] = pred.get("status", "").astype(str).str.startswith("v_")
+            pred["return"] = pd.to_numeric(pred.get("return", pd.Series()), errors="coerce").fillna(0)
+
+            nvol = pred[~pred["volatility"]] if not pred.empty else pd.DataFrame()
+            vol = pred[pred["volatility"]] if not pred.empty else pd.DataFrame()
+
+            stat = lambda df, s: len(df[df["status"] == s]) if not df.empty and "status" in df.columns else 0
+            sn, fn, pn_, fnl = map(lambda s: stat(nvol, s), ["success", "fail", "pending", "failed"])
+            sv, fv, pv, fvl = map(lambda s: stat(vol, s), ["v_success", "v_fail", "pending", "failed"])
+
+            def perf(df, kind="일반"):
+                try:
+                    if kind == "변동성":
+                        s, f = stat(df, "v_success"), stat(df, "v_fail")
+                    else:
+                        s, f = stat(df, "success"), stat(df, "fail")
+                    t = s + f
+                    avg = df["return"].mean()
+                    return {"succ": s, "fail": f, "succ_rate": s / t * 100 if t else 0,
+                            "fail_rate": f / t * 100 if t else 0, "r_avg": avg if pd.notna(avg) else 0, "total": t}
+                except:
+                    return {"succ": 0, "fail": 0, "succ_rate": 0, "fail_rate": 0, "r_avg": 0, "total": 0}
+
+            pn, pv_stats = perf(nvol, "일반"), perf(vol, "변동성")
 
             strat_models = model_info.get(strat, {})
             types = {"lstm": 0, "cnn_lstm": 0, "transformer": 0}
@@ -113,14 +161,11 @@ def yopo_health():
                 rows = []
                 for _, r in recent10.iterrows():
                     rtn = r.get("return", 0.0)
-                    if rtn == 0.0:
-                        rtn = r.get("rate", 0.0)
-                    try:
-                        rtn_pct = f"{float(rtn) * 100:.2f}%"
-                    except:
-                        rtn_pct = "0.00%"
+                    if rtn == 0.0: rtn = r.get("rate", 0.0)
+                    try: rtn_pct = f"{float(rtn) * 100:.2f}%"
+                    except: rtn_pct = "0.00%"
                     rows.append(
-                        f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{rtn_pct}</td><td>{'✅' if r['status']=='success' else '❌' if r['status']=='fail' else '⏳' if r['status']=='pending' else '🛑'}</td></tr>"
+                        f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{rtn_pct}</td><td>{'✅' if r['status'] in ['success','v_success'] else '❌' if r['status'] in ['fail','v_fail'] else '⏳' if r['status']=='pending' else '🛑'}</td></tr>"
                     )
                 table = (
                     "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>상태</th></tr>"
@@ -154,7 +199,6 @@ def yopo_health():
 
     status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
     return f"<div style='font-family:monospace;line-height:1.6;font-size:15px;'><b>{status}</b><hr>" + "".join(strategy_html) + "</div>"
-
 @app.route("/")
 def index():
     return "Yopo server is running"
