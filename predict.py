@@ -37,6 +37,7 @@ def predict(symbol, strategy):
         if df is None or len(df) < window + 1:
             return [failed_result(symbol, strategy, "unknown", "데이터 부족")]
 
+        raw_close = df['close'].iloc[-1]  # ✅ 원본 close 사용
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.dropna().shape[0] < window + 1:
             return [failed_result(symbol, strategy, "unknown", "feature 부족")]
@@ -48,10 +49,12 @@ def predict(symbol, strategy):
 
         model_files = {}
         for f in os.listdir(MODEL_DIR):
-            if not f.endswith(".pt"): continue
-            parts = f.replace(".pt", "").split("_")
-            if len(parts) < 3: continue
-            f_sym, f_strat, f_type = parts[0], parts[1], "_".join(parts[2:])
+            if not f.endswith(".pt"):
+                continue
+            parts = f.replace(".pt", "").rsplit("_", 2)  # ✅ 모델명 정확 파싱
+            if len(parts) != 3:
+                continue
+            f_sym, f_strat, f_type = parts
             if f_sym == symbol and f_strat == strategy:
                 model_files[f_type] = os.path.join(MODEL_DIR, f)
 
@@ -66,14 +69,14 @@ def predict(symbol, strategy):
                 model.eval()
                 with torch.no_grad():
                     output = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
-                    if isinstance(output, tuple): output = output[0]
+                    if isinstance(output, tuple):
+                        output = output[0]
                     raw_rate = float(output.squeeze())
                     if np.isnan(raw_rate):
                         predictions.append(failed_result(symbol, strategy, model_type, "NaN 예측값"))
                         continue
 
-                    price = feat["close"].iloc[-1]
-                    if np.isnan(price):
+                    if np.isnan(raw_close):
                         predictions.append(failed_result(symbol, strategy, model_type, "price NaN 발생"))
                         continue
 
@@ -89,17 +92,17 @@ def predict(symbol, strategy):
 
                     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
                     success = True
-                    target = price * (1 + rate) if direction == "롱" else price * (1 - rate)
-                    stop = price * (1 - STOP_LOSS_PCT) if direction == "롱" else price * (1 + STOP_LOSS_PCT)
+                    target = raw_close * (1 + rate) if direction == "롱" else raw_close * (1 - rate)
+                    stop = raw_close * (1 - STOP_LOSS_PCT) if direction == "롱" else raw_close * (1 + STOP_LOSS_PCT)
 
-                    log_prediction(symbol, strategy, direction, entry_price=price,
+                    log_prediction(symbol, strategy, direction, entry_price=raw_close,
                                    target_price=target, model=model_type,
                                    success=success, reason="예측 완료",
                                    rate=rate, timestamp=t, volatility=is_volatility)
 
                     predictions.append({
                         "symbol": symbol, "strategy": strategy, "model": model_type,
-                        "direction": direction, "rate": rate, "price": price,
+                        "direction": direction, "rate": rate, "price": raw_close,
                         "target": target, "stop": stop,
                         "reason": "예측 완료",
                         "success": success, "timestamp": t
