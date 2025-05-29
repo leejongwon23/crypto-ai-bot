@@ -8,36 +8,41 @@ from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import TensorDataset
 from data.utils import get_kline_by_strategy, compute_features
 
-def load_wrong_prediction_data(symbol, strategy, input_size, window=30):
-    file = "wrong_predictions.csv"
-    if not os.path.exists(file):
-        return None
+def load_prediction_training_data(symbol, strategy, input_size, window=30, source_type="both"):
+    files = []
+    if source_type in ["wrong", "both"]:
+        files.append("wrong_predictions.csv")
+    if source_type in ["correct", "both"]:
+        files.append("correct_predictions.csv")
 
+    rows, seen = [], set()
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=14)
-    seen = set()
-    rows = []
-    with open(file, "r", encoding="utf-8-sig") as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if len(row) < 6:
-                continue
-            timestamp, sym, strat, direction, entry_price, target_price, *_ = row
-            if sym != symbol or strat != strategy:
-                continue
-            try:
-                entry_price = float(entry_price)
-                dt = pd.to_datetime(timestamp, utc=True)
-                key = (symbol, strategy, direction, entry_price)
-                if key in seen or dt < cutoff:
+
+    for file in files:
+        if not os.path.exists(file):
+            continue
+        with open(file, "r", encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) < 6:
                     continue
-                seen.add(key)
-                rows.append({
-                    "timestamp": dt,
-                    "direction": direction,
-                    "entry_price": entry_price
-                })
-            except:
-                continue
+                timestamp, sym, strat, direction, entry_price, target_price, *_ = row
+                if sym != symbol or strat != strategy:
+                    continue
+                try:
+                    entry_price = float(entry_price)
+                    dt = pd.to_datetime(timestamp, utc=True)
+                    key = (symbol, strategy, direction, entry_price)
+                    if key in seen or dt < cutoff:
+                        continue
+                    seen.add(key)
+                    rows.append({
+                        "timestamp": dt,
+                        "direction": direction,
+                        "entry_price": entry_price
+                    })
+                except:
+                    continue
 
     if not rows:
         return None
@@ -47,7 +52,6 @@ def load_wrong_prediction_data(symbol, strategy, input_size, window=30):
         return None
 
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-
     df_feat = compute_features(symbol, df, strategy)
     if len(df_feat) < window + 1:
         return None
@@ -57,7 +61,6 @@ def load_wrong_prediction_data(symbol, strategy, input_size, window=30):
     feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
 
     X, y = [], []
-
     for row in rows:
         try:
             fail_time = row["timestamp"]
