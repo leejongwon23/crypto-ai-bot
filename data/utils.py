@@ -114,7 +114,6 @@ def get_realtime_prices():
     except:
         return {}
 
-# ✅ compute_features
 def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFrame:
     df = df.copy()
     df['ma5'] = df['close'].rolling(window=5).mean()
@@ -132,10 +131,17 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     df['bollinger'] = (df['close'] - bb_ma) / (2 * bb_std)
     df['volatility'] = df['close'].pct_change().rolling(window=20).std()
     df['ema10'] = df['close'].ewm(span=10, adjust=False).mean()
-    df['trend_slope'] = df['ema10'].diff()
-    df['percent_diff'] = (df['close'] - df['ma20']) / (df['ma20'] + 1e-6)
+
+    # ✅ 통합된 추세 지표
+    df['trend_score'] = df['ema10'].pct_change()
+
+    # ✅ 현재 가격 대비 이동 평균 기준 비율
+    df['current_vs_ma20'] = (df['close'] / (df['ma20'] + 1e-6)) - 1
+
+    # ✅ 거래량 변화
     df['volume_delta'] = df['volume'].diff()
 
+    # ✅ OBV
     obv = [0]
     for i in range(1, len(df)):
         if df['close'].iloc[i] > df['close'].iloc[i-1]:
@@ -146,16 +152,22 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
             obv.append(obv[-1])
     df['obv'] = obv
 
+    # ✅ CCI
     tp = (df['high'] + df['low'] + df['close']) / 3
     cci = (tp - tp.rolling(20).mean()) / (0.015 * tp.rolling(20).std())
     df['cci'] = cci
 
+    # ✅ Stoch RSI
     min_rsi = df['rsi'].rolling(14).min()
     max_rsi = df['rsi'].rolling(14).max()
     df['stoch_rsi'] = (df['rsi'] - min_rsi) / (max_rsi - min_rsi + 1e-6)
 
-    df['btc_dominance'] = get_btc_dominance()
+    # ✅ BTC 도미넌스
+    btc_dom = get_btc_dominance()
+    df['btc_dominance'] = btc_dom
+    df['btc_dominance_diff'] = btc_dom - df['btc_dominance'].rolling(3).mean()
 
+    # ✅ 전략별 고유 지표
     if strategy == "중기":
         plus_dm = df['high'].diff()
         minus_dm = df['low'].diff()
@@ -176,10 +188,12 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
 
         df["roc"] = df["close"].pct_change(periods=12)
 
-    common = ["close", "volume", "ma5", "ma20", "rsi", "macd",
-              "bollinger", "volatility", "trend_slope",
-              "percent_diff", "volume_delta"]
-
+    # ✅ 최종 컬럼 구성
+    base = [
+        "close", "volume", "ma5", "ma20", "rsi", "macd", "bollinger", "volatility",
+        "trend_score", "current_vs_ma20", "volume_delta", "obv", "cci", "stoch_rsi",
+        "btc_dominance", "btc_dominance_diff"
+    ]
     mid_only = ["adx", "willr"]
     long_only = ["mfi", "roc"]
 
@@ -189,5 +203,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     elif strategy == "장기":
         extra = long_only
 
-    df = df[common + ["obv", "cci", "stoch_rsi", "btc_dominance"] + extra]
+    df = df[base + extra]
     return df.dropna()
+
