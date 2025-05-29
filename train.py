@@ -76,7 +76,15 @@ def create_dataset(f, w):
     return np.array([x for x, _ in filt]), np.array([l for _, l in filt])
 
 def save_model_metadata(s, t, m, a, f1, l):
-    meta = {"symbol": s, "strategy": t, "model": m, "accuracy": round(a,4), "f1_score": round(f1,4), "loss": round(l,6), "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")}
+    meta = {
+        "symbol": s,
+        "strategy": t,
+        "model": m,
+        "accuracy": float(round(a,4)),
+        "f1_score": float(round(f1,4)),
+        "loss": float(round(l,6)),
+        "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    }
     path = f"{MODEL_DIR}/{s}_{t}_{m}.meta.json"
     with open(path, "w", encoding="utf-8") as f: json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"🗘 저장됨: {path}"); sys.stdout.flush()
@@ -92,9 +100,11 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
         feat = MinMaxScaler().fit_transform(df_feat.values)
         X_raw, y_raw = create_dataset([dict(zip(df_feat.columns, r)) for r in feat], win)
         if len(X_raw) < 2: raise ValueError("유효 시퀀스 부족")
-        input_size, val_len = X_raw.shape[2], int(len(X_raw) * 0.2)
+        input_size = X_raw.shape[2]
+        val_len = int(len(X_raw) * 0.2)
         if val_len == 0: raise ValueError("검증셋 부족")
-        val_X, val_y = torch.tensor(X_raw[-val_len:], dtype=torch.float32), torch.tensor(y_raw[-val_len:], dtype=torch.float32)
+        val_X = torch.tensor(X_raw[-val_len:], dtype=torch.float32)
+        val_y = torch.tensor(y_raw[-val_len:], dtype=torch.float32).view(-1)
         dataset = TensorDataset(torch.tensor(X_raw, dtype=torch.float32), torch.tensor(y_raw, dtype=torch.float32))
         train_set, _ = random_split(dataset, [len(dataset)-val_len, val_len])
 
@@ -125,7 +135,8 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                     xb_all, yb_all = zip(*[(xb, yb) for xb, yb in wrong_data
                                            if xb.shape[1:] == (win, input_size) and np.isfinite(yb) and abs(yb) < 2]) if wrong_data else ([],[])
                     if len(xb_all) >= 2:
-                        xb, yb = torch.stack(xb_all), torch.tensor(yb_all, dtype=torch.float32)
+                        xb = torch.stack(xb_all)
+                        yb = torch.tensor(yb_all, dtype=torch.float32).view(-1)
                         for i in range(0, len(xb), batch):
                             rate = model(xb[i:i+batch]).squeeze(-1)
                             loss = lossfn(rate, yb[i:i+batch])
