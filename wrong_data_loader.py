@@ -81,6 +81,9 @@ def load_wrong_prediction_data(symbol, strategy, input_size, window=30):
             price = high if direction == "롱" else low
             gain = (price - entry_price) / entry_price if direction == "롱" else (entry_price - price) / entry_price
 
+            if not np.isfinite(gain) or abs(gain) > 2:
+                continue
+
             X.append([list(r.values()) for r in x_seq])
             y.append(round(gain, 4))
         except:
