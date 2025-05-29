@@ -10,7 +10,6 @@ now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 model_success_tracker = {}
 os.makedirs(LOG, exist_ok=True)
 
-
 def update_model_success(s, t, m, success):
     k = (s, t or "알수없음", m)
     model_success_tracker.setdefault(k, {"success":0,"fail":0})
@@ -86,9 +85,9 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
         "symbol": symbol,
         "strategy": strategy,
         "model": model_name,
-        "accuracy": acc,
-        "f1_score": f1,
-        "loss": loss
+        "accuracy": float(acc),
+        "f1_score": float(f1),
+        "loss": float(loss)
     }
     try:
         pd.DataFrame([row]).to_csv(TRAIN_LOG, mode="a", index=False,
@@ -131,16 +130,22 @@ def evaluate_predictions(get_price_fn):
                 r.update({
                     "status": "v_success" if vol and success else "v_fail" if vol else "success" if success else "fail",
                     "reason": f"도달: {gain:.4f} ≥ {rate:.4f}" if success else f"미달: {gain:.4f} < {rate:.4f}",
-                    "return": round(gain, 4)
+                    "return": float(round(gain, 4))
                 })
                 update_model_success(s, strat, m, success)
                 audit_row = {
-                    "timestamp": now.isoformat(), "symbol": s, "strategy": strat,
-                    "model": m, "status": r.get("status", ""), "reason": r.get("reason", ""),
-                    "predicted_return": rate, "actual_return": round(gain, 4),
-                    "accuracy_before": "", "accuracy_after": "",
+                    "timestamp": now.isoformat(),
+                    "symbol": s,
+                    "strategy": strat,
+                    "model": m,
+                    "status": r.get("status", ""),
+                    "reason": r.get("reason", ""),
+                    "predicted_return": float(rate),
+                    "actual_return": float(round(gain, 4)),
+                    "accuracy_before": "",
+                    "accuracy_after": "",
                     "predicted_volatility": float(rate) if vol else "",
-                    "actual_volatility": eval_df["close"].pct_change().rolling(5).std().iloc[-1] if not eval_df.empty else ""
+                    "actual_volatility": float(eval_df["close"].pct_change().rolling(5).std().iloc[-1]) if not eval_df.empty else ""
                 }
                 write_header = not os.path.exists(AUDIT_LOG) or os.stat(AUDIT_LOG).st_size == 0
                 with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as af:
@@ -152,7 +157,7 @@ def evaluate_predictions(get_price_fn):
                     writer = csv.writer(wf)
                     if os.stat(target_csv).st_size == 0:
                         writer.writerow(["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "actual_return"])
-                    writer.writerow([r["timestamp"], s, strat, d, entry, r.get("target_price", 0), round(gain, 4)])
+                    writer.writerow([r["timestamp"], s, strat, d, float(entry), float(r.get("target_price", 0)), float(round(gain, 4))])
         except Exception as e:
             r.update({"status": "skip_eval", "reason": f"예외 발생: {e}", "return": 0.0})
         updated.append(r)
