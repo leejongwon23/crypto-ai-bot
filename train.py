@@ -5,7 +5,7 @@ from sklearn.metrics import mean_squared_error, r2_score, accuracy_score
 from data.utils import SYMBOLS, get_kline_by_strategy, compute_features
 from model.base_model import get_model
 from model_weight_loader import get_model_weight
-from wrong_data_loader import load_prediction_training_data  # ✅ 변경
+from wrong_data_loader import load_prediction_training_data  # ✅ B방식 전용 함수로 수정
 from feature_importance import compute_feature_importance, save_feature_importance
 import logger
 from logger import strategy_stats
@@ -130,7 +130,7 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
 
             for _ in range(epochs):
                 for _ in range(rep_wrong):
-                    wrong_data = load_prediction_training_data(sym, strat, input_size, win, source_type="both")  # ✅ 변경
+                    wrong_data = load_prediction_training_data(sym, strat, input_size, win, source_type="both")  # ✅ B방식 학습
                     if not wrong_data: continue
                     xb_all, yb_all = zip(*[(xb, yb) for xb, yb in wrong_data
                                            if xb.shape[1:] == (win, input_size) and np.isfinite(yb) and abs(yb) < 2]) if wrong_data else ([],[])
@@ -161,27 +161,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                     save_model_metadata(sym, strat, model_type, acc, f1, logloss)
                     imps = compute_feature_importance(model, val_X, val_y, list(df_feat.columns))
                     save_feature_importance(imps, sym, strat, model_type)
-
-                    audit_row = {
-                        "timestamp": now_kst().isoformat(),
-                        "symbol": sym,
-                        "strategy": strat,
-                        "model": model_type,
-                        "status": "train",
-                        "reason": "train_complete",
-                        "predicted_return": "",
-                        "actual_return": "",
-                        "accuracy_before": acc_before,
-                        "accuracy_after": acc,
-                        "predicted_volatility": "",
-                        "actual_volatility": ""
-                    }
-                    audit_log_path = os.path.join(LOG_DIR, "evaluation_audit.csv")
-                    write_header = not os.path.exists(audit_log_path) or os.stat(audit_log_path).st_size == 0
-                    with open(audit_log_path, "a", newline="", encoding="utf-8-sig") as af:
-                        writer = csv.DictWriter(af, fieldnames=list(audit_row.keys()))
-                        if write_header: writer.writeheader()
-                        writer.writerow(audit_row)
 
             except Exception as e:
                 print(f"[평가 오류] {sym}-{strat}-{model_type} → {e}"); sys.stdout.flush()
