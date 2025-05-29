@@ -70,51 +70,6 @@ def yopo_health():
             train = train.query(f"strategy == '{strat}'") if not train.empty else pd.DataFrame()
             audit = audit.query(f"strategy == '{strat}'") if not audit.empty else pd.DataFrame()
 
-            if "symbol" in pred.columns:
-                pred["volatility"] = pred["symbol"].astype(str).str.contains("_v", na=False)
-            else:
-                pred["volatility"] = False
-            pred["return"] = pd.to_numeric(pred.get("return", pd.Series()), errors="coerce").fillna(0)
-
-            nvol, vol = pred[~pred["volatility"]], pred[pred["volatility"]]
-            stat = lambda df, s: len(df[df["status"] == s]) if not df.empty and "status" in df.columns else 0
-            sn, fn, pn_, fnl = map(lambda s: stat(nvol, s), ["success", "fail", "pending", "failed"])
-            sv, fv, pv, fvl = map(lambda s: stat(vol, s), ["success", "fail", "pending", "failed"])
-
-            def perf(df):
-                try:
-                    s, f = stat(df, "success"), stat(df, "fail")
-                    t = s + f
-                    avg = df["return"].mean()
-                    return {"succ": s, "fail": f, "succ_rate": s / t * 100 if t else 0, "fail_rate": f / t * 100 if t else 0, "r_avg": avg if pd.notna(avg) else 0, "total": t}
-                except:
-                    return {"succ": 0, "fail": 0, "succ_rate": 0, "fail_rate": 0, "r_avg": 0, "total": 0}
-@app.route("/yopo-health")
-def yopo_health():
-    percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
-    logs, strategy_html, problems = {}, [], []
-
-    for name, path in {"pred": PREDICTION_LOG, "train": LOG_FILE, "audit": AUDIT_LOG, "msg": MESSAGE_LOG}.items():
-        try:
-            logs[name] = pd.read_csv(path, encoding="utf-8-sig") if os.path.exists(path) else pd.DataFrame()
-        except:
-            logs[name] = pd.DataFrame()
-
-    model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
-    model_info = {}
-    for f in model_files:
-        match = re.match(r"(.+?)_(단기|중기|장기)_(lstm|cnn_lstm|transformer)\.pt", f)
-        if match:
-            symbol, strat, mtype = match.groups()
-            model_info.setdefault(strat, {}).setdefault(symbol, set()).add(mtype)
-
-    for strat in ["단기", "중기", "장기"]:
-        try:
-            pred, train, audit = logs["pred"], logs["train"], logs["audit"]
-            pred = pred.query(f"strategy == '{strat}'") if not pred.empty else pd.DataFrame()
-            train = train.query(f"strategy == '{strat}'") if not train.empty else pd.DataFrame()
-            audit = audit.query(f"strategy == '{strat}'") if not audit.empty else pd.DataFrame()
-
             pred["volatility"] = pred.get("status", "").astype(str).str.startswith("v_")
             pred["return"] = pd.to_numeric(pred.get("return", pd.Series()), errors="coerce").fillna(0)
 
