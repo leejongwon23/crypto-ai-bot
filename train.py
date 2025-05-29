@@ -5,7 +5,7 @@ from sklearn.metrics import mean_squared_error, r2_score, accuracy_score
 from data.utils import SYMBOLS, get_kline_by_strategy, compute_features
 from model.base_model import get_model
 from model_weight_loader import get_model_weight
-from wrong_data_loader import load_wrong_prediction_data
+from wrong_data_loader import load_prediction_training_data  # ✅ 변경
 from feature_importance import compute_feature_importance, save_feature_importance
 import logger
 from logger import strategy_stats
@@ -130,7 +130,7 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
 
             for _ in range(epochs):
                 for _ in range(rep_wrong):
-                    wrong_data = load_wrong_prediction_data(sym, strat, input_size, win)
+                    wrong_data = load_prediction_training_data(sym, strat, input_size, win, source_type="both")  # ✅ 변경
                     if not wrong_data: continue
                     xb_all, yb_all = zip(*[(xb, yb) for xb, yb in wrong_data
                                            if xb.shape[1:] == (win, input_size) and np.isfinite(yb) and abs(yb) < 2]) if wrong_data else ([],[])
