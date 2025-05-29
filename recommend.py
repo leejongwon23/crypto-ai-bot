@@ -73,13 +73,19 @@ def get_symbols_by_volatility(strategy):
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
     return sorted(result, key=lambda x: -x["volatility"])
 
-def run_prediction_loop(strategy, symbols, source="일반"):
+def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=True):
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼"); sys.stdout.flush()
     results, fmap = [], load_failure_count()
 
     for item in symbols:
         symbol = item["symbol"]
         vol = item.get("volatility", 0)
+
+        # ✅ 예측 차단 조건
+        if not allow_prediction:
+            log_audit(symbol, strategy, "예측 생략", f"예측 차단됨 (source={source})")
+            continue
+
         try:
             model_count = len([f for f in os.listdir("/persistent/models") if f.startswith(f"{symbol}_{strategy}_") and f.endswith(".pt")])
             if model_count == 0:
@@ -165,23 +171,15 @@ def run_prediction_loop(strategy, symbols, source="일반"):
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
                 csv.writer(f).writerow([now_kst().isoformat(), res["symbol"], res["strategy"], f"전송 실패: {e}"])
 
-
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
-    run_prediction_loop(strategy, [{"symbol": symbol}], source="변동성")  # ✅ 변동성 예측이라고 명시
+    run_prediction_loop(strategy, [{"symbol": symbol}], source="변동성", allow_prediction=True)
 
-
-def main(strategy=None, force=False):
+def main(strategy=None, force=False, allow_prediction=True):  # ✅ allow_prediction 인자 추가
     print(">>> [main] recommend.py 실행")
-    if not force:
-        targets = [strategy] if strategy else ["단기", "중기", "장기"]
-        for s in targets:
-            if not is_valid_predict_time(s):
-                print(f"[SKIP] {s} 예측 시간 아님: 현재 시각 {now_kst().strftime('%H:%M')}")
-                continue
-            run_prediction_loop(s, get_symbols_by_volatility(s), source="일반")  # ✅ 일반 예측으로 명시
-    else:
-        targets = [strategy] if strategy else ["단기", "중기", "장기"]
-        for s in targets:
-            run_prediction_loop(s, get_symbols_by_volatility(s), source="일반")
-
+    targets = [strategy] if strategy else ["단기", "중기", "장기"]
+    for s in targets:
+        if not force and not is_valid_predict_time(s):
+            print(f"[SKIP] {s} 예측 시간 아님: 현재 시각 {now_kst().strftime('%H:%M')}")
+            continue
+        run_prediction_loop(s, get_symbols_by_volatility(s), source="일반", allow_prediction=allow_prediction)
