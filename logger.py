@@ -55,6 +55,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                    return_value=None, volatility=False, source="일반"):
     now = timestamp or now_kst().isoformat()
     mname = str(model or "unknown")
+    status = "v_pending" if volatility and success else "v_failed" if volatility and not success else "pending" if success else "failed"
     row = {
         "timestamp": now,
         "symbol": str(symbol or "UNKNOWN"),
@@ -64,7 +65,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "target_price": float(target_price),
         "model": mname,
         "rate": float(rate),
-        "status": "pending" if success else "failed",
+        "status": status,
         "reason": reason or "",
         "return": float(return_value if return_value is not None else rate),
         "volatility": bool(volatility),
@@ -106,7 +107,7 @@ def evaluate_predictions(get_price_fn):
     now, updated = now_kst(), []
     for r in rows:
         try:
-            if r.get("status") not in ["pending", "failed"]:
+            if r.get("status") not in ["pending", "failed", "v_pending", "v_failed"]:
                 updated.append(r); continue
             s, strat = r["symbol"], r["strategy"]
             d, m = r.get("direction", "롱"), r.get("model", "unknown")
