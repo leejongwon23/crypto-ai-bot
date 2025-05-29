@@ -8,24 +8,18 @@ from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import TensorDataset
 from data.utils import get_kline_by_strategy, compute_features
 
-def load_prediction_training_data(symbol, strategy, input_size, window=30, source_type="both"):
-    files = []
-    if source_type in ["wrong", "both"]:
-        files.append("wrong_predictions.csv")
-    if source_type in ["correct", "both"]:
-        files.append("correct_predictions.csv")
-
-    rows, seen = [], set()
+def load_training_prediction_data(symbol, strategy, input_size, window=30):
+    files = ["/persistent/correct_predictions.csv", "/persistent/wrong_predictions.csv"]
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=14)
 
+    seen, rows = set(), []
     for file in files:
         if not os.path.exists(file):
             continue
         with open(file, "r", encoding="utf-8-sig") as f:
             reader = csv.reader(f)
             for row in reader:
-                if len(row) < 6:
-                    continue
+                if len(row) < 6: continue
                 timestamp, sym, strat, direction, entry_price, target_price, *_ = row
                 if sym != symbol or strat != strategy:
                     continue
@@ -41,8 +35,7 @@ def load_prediction_training_data(symbol, strategy, input_size, window=30, sourc
                         "direction": direction,
                         "entry_price": entry_price
                     })
-                except:
-                    continue
+                except: continue
 
     if not rows:
         return None
@@ -66,7 +59,6 @@ def load_prediction_training_data(symbol, strategy, input_size, window=30, sourc
             fail_time = row["timestamp"]
             entry_price = row["entry_price"]
             direction = row["direction"]
-
             index = df[df["timestamp"] >= fail_time].index.min()
             if index is None or index < window:
                 continue
