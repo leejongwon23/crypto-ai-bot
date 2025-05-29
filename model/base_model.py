@@ -36,7 +36,7 @@ class LSTMPricePredictor(nn.Module):
         context = self.bn(context)
         context = self.dropout(context)
         hidden = self.act(self.fc1(context))
-        rate = self.fc_rate(hidden).squeeze(-1)
+        rate = self.fc_rate(hidden).view(-1)
         return rate
 
 class CNNLSTMPricePredictor(nn.Module):
@@ -62,7 +62,7 @@ class CNNLSTMPricePredictor(nn.Module):
         context, _ = self.attention(lstm_out)
         context = self.dropout(context)
         hidden = self.act(self.fc1(context))
-        rate = self.fc_rate(hidden).squeeze(-1)
+        rate = self.fc_rate(hidden).view(-1)
         return rate
 
 class TransformerEncoderLayer(nn.Module):
@@ -100,7 +100,7 @@ class TransformerPricePredictor(nn.Module):
         x = self.norm(x)
         x = self.dropout(x)
         hidden = self.act(self.fc1(x))
-        rate = self.fc_rate(hidden).squeeze(-1)
+        rate = self.fc_rate(hidden).view(-1)
         return rate
 
 MODEL_CLASSES = {
