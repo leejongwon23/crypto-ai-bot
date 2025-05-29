@@ -45,7 +45,6 @@ def start_scheduler():
 
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료"); sys.stdout.flush()
-
 @app.route("/yopo-health")
 def yopo_health():
     percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
@@ -72,7 +71,11 @@ def yopo_health():
             train = train.query(f"strategy == '{strat}'") if not train.empty else pd.DataFrame()
             audit = audit.query(f"strategy == '{strat}'") if not audit.empty else pd.DataFrame()
 
-            pred["volatility"] = pred.get("status", "").astype(str).str.startswith("v_")
+            if "status" in pred.columns:
+                pred["volatility"] = pred["status"].astype(str).str.startswith("v_")
+            else:
+                pred["volatility"] = False
+
             pred["return"] = pd.to_numeric(pred.get("return", pd.Series()), errors="coerce").fillna(0)
 
             nvol = pred[~pred["volatility"]] if not pred.empty else pd.DataFrame()
