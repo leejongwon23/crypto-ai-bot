@@ -3,7 +3,7 @@
 import torch
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import r2_score
 from data.utils import get_kline_by_strategy, compute_features
 from model.base_model import get_model
 import os, json
@@ -17,9 +17,8 @@ def create_dataset(features, window=20):
         if current_close == 0:
             continue
         change = (future_close - current_close) / current_close
-        label = 1 if change > 0 else 0
         X.append([list(row.values()) for row in x_seq])
-        y.append(label)
+        y.append(round(change, 4))
     return np.array(X), np.array(y)
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
@@ -61,31 +60,27 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         val_y = y_tensor[train_len:]
 
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-        criterion = torch.nn.BCELoss()
+        criterion = torch.nn.MSELoss()
 
         try:
             for _ in range(3):
-                pred, _ = model(train_X)
-                loss = criterion(pred.squeeze(), train_y)
+                pred = model(train_X).squeeze()
+                loss = criterion(pred, train_y)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
             model.eval()
             with torch.no_grad():
-                pred_val, _ = model(val_X)
-                pred_prob = pred_val.squeeze().numpy()
-                pred_label = (pred_prob > 0.5).astype(int)
-                acc = accuracy_score(val_y.numpy(), pred_label)
-                score = acc  # ✅ 신뢰도 제거 후 정확도 자체를 점수로 사용
+                pred_val = model(val_X).squeeze().numpy()
+                score = r2_score(val_y.numpy(), pred_val)
 
                 if score > best_score:
                     best_score = score
                     best_window = window
                     best_result = {
                         "window": int(window),
-                        "accuracy": float(round(acc, 4)),
-                        "score": float(round(score, 4))
+                        "r2_score": float(round(score, 4))
                     }
 
         except Exception as e:
@@ -101,9 +96,9 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         with open(save_txt, "w") as f:
             f.write(str(best_window))
         with open(save_json, "w") as f:
-            json.dump(best_result or {"window": best_window, "score": 0}, f, indent=2)
+            json.dump(best_result or {"window": best_window, "r2_score": 0}, f, indent=2)
     except Exception as e:
         print(f"[저장 오류] {symbol}-{strategy}: {e}")
 
-    print(f"[최적 WINDOW] {symbol}-{strategy} → {best_window} (score: {best_score:.4f})")
+    print(f"[최적 WINDOW] {symbol}-{strategy} → {best_window} (r2_score: {best_score:.4f})")
     return best_window
