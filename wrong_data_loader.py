@@ -8,8 +8,13 @@ from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import TensorDataset
 from data.utils import get_kline_by_strategy, compute_features
 
-def load_training_prediction_data(symbol, strategy, input_size, window=30):
-    files = ["/persistent/correct_predictions.csv", "/persistent/wrong_predictions.csv"]
+def load_training_prediction_data(symbol, strategy, input_size, window=30, source_type="both"):
+    files = []
+    if source_type in ["correct", "both"]:
+        files.append("/persistent/correct_predictions.csv")
+    if source_type in ["wrong", "both"]:
+        files.append("/persistent/wrong_predictions.csv")
+
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=14)
 
     seen, rows = set(), []
@@ -19,7 +24,8 @@ def load_training_prediction_data(symbol, strategy, input_size, window=30):
         with open(file, "r", encoding="utf-8-sig") as f:
             reader = csv.reader(f)
             for row in reader:
-                if len(row) < 6: continue
+                if len(row) < 6:
+                    continue
                 timestamp, sym, strat, direction, entry_price, target_price, *_ = row
                 if sym != symbol or strat != strategy:
                     continue
@@ -35,7 +41,8 @@ def load_training_prediction_data(symbol, strategy, input_size, window=30):
                         "direction": direction,
                         "entry_price": entry_price
                     })
-                except: continue
+                except:
+                    continue
 
     if not rows:
         return None
@@ -59,6 +66,11 @@ def load_training_prediction_data(symbol, strategy, input_size, window=30):
             fail_time = row["timestamp"]
             entry_price = row["entry_price"]
             direction = row["direction"]
+
+            # ✅ 누락되었던 유효성 체크 추가
+            if direction not in ["롱", "숏"]:
+                continue
+
             index = df[df["timestamp"] >= fail_time].index.min()
             if index is None or index < window:
                 continue
