@@ -6,10 +6,12 @@ import pytz
 import os
 from matplotlib import font_manager
 
-# ✅ 한글 폰트 적용 (fonts 폴더 기준)
+# ✅ 한글 + 이모지 폰트 적용
 font_path = os.path.join("fonts", "NanumGothic-Regular.ttf")
-font_manager.fontManager.addfont(font_path)
+if os.path.exists(font_path):
+    font_manager.fontManager.addfont(font_path)
 plt.rcParams['font.family'] = 'NanumGothic'
+plt.rcParams['axes.unicode_minus'] = False
 
 PREDICTION_LOG = "/persistent/prediction_log.csv"
 AUDIT_LOG = "/persistent/logs/evaluation_audit.csv"
@@ -83,7 +85,9 @@ def generate_visuals_for_strategy(strategy_label, strategy_kor):
         fig, ax = plt.subplots(figsize=(5,2))
         ax.plot(df['timestamp'], df['accuracy_before'], label="Before")
         ax.plot(df['timestamp'], df['accuracy_after'], label="After")
-        ax.legend()
+        handles, labels = ax.get_legend_handles_labels()
+        if labels:
+            ax.legend()
         ax.set_title("📚 오답학습 전후 정확도 변화")
         html += plot_to_html(fig, "📚 오답학습 전후 정확도 변화")
     except Exception as e:
@@ -96,7 +100,8 @@ def generate_visuals_for_strategy(strategy_label, strategy_kor):
         df = df.sort_values('timestamp', ascending=False).head(20)
         pivot = df.pivot(index='symbol', columns='timestamp', values='result')
         fig, ax = plt.subplots(figsize=(5,2))
-        ax.imshow(pivot.fillna(0), cmap='Greens', aspect='auto')
+        data = pivot.fillna(0).values if not pivot.empty else np.zeros((1,1))
+        ax.imshow(data, cmap='Greens', aspect='auto')
         ax.set_title("🧩 최근 예측 히트맵")
         ax.set_yticks([]); ax.set_xticks([])
         html += plot_to_html(fig, "🧩 최근 예측 히트맵")
@@ -126,7 +131,9 @@ def generate_visuals_for_strategy(strategy_label, strategy_kor):
             temp = group[group['model'] == m]
             ax.plot(temp['date'], temp['result'], label=m)
         ax.set_title("🧠 모델별 성공률 변화")
-        ax.legend()
+        handles, labels = ax.get_legend_handles_labels()
+        if labels:
+            ax.legend()
         html += plot_to_html(fig, "🧠 모델별 성공률 변화")
     except Exception as e:
         html += f"<p>6번 오류: {e}</p>"
@@ -139,8 +146,10 @@ def generate_visuals_for_strategy(strategy_label, strategy_kor):
         fig, ax = plt.subplots(figsize=(5,2))
         ax.plot(df['timestamp'], df['predicted_volatility'], label="예측 변동성")
         ax.plot(df['timestamp'], df['actual_volatility'], label="실제 변동성")
+        handles, labels = ax.get_legend_handles_labels()
+        if labels:
+            ax.legend()
         ax.set_title("🌪️ 변동성 예측 vs 실제 변동성")
-        ax.legend()
         html += plot_to_html(fig, "🌪️ 변동성 예측 vs 실제 변동성")
     except Exception as e:
         html += f"<p>7번 오류: {e}</p>"
