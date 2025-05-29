@@ -29,12 +29,14 @@ def start_scheduler():
         sched.add_job(lambda job=job: job().start(), 'cron', hour=h, minute=m)
 
     for h,m,strategy in 예측:
-        job = functools.partial(threading.Thread, target=main, args=(strategy,), daemon=True)
+        job = functools.partial(threading.Thread, target=main, kwargs={"strategy":strategy, "force":True, "allow_prediction":True}, daemon=True)
         sched.add_job(lambda job=job: job().start(), 'cron', hour=h, minute=m)
 
     sched.add_job(lambda: evaluate_predictions(get_kline_by_strategy), 'cron', minute=20)
     sched.add_job(trigger_run, 'interval', minutes=30)
     sched.start()
+
+# 이하 기존 app.route들은 그대로 유지 (생략 가능)
 
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료"); sys.stdout.flush()
