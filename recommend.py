@@ -5,6 +5,7 @@ from logger import log_prediction, strategy_stats, get_strategy_eval_count
 from data.utils import SYMBOLS, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
+from logger import evaluate_predictions
 
 STRATEGY_VOL = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
@@ -127,6 +128,13 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             log_audit(symbol, strategy, None, f"예측 예외: {e}")
 
     save_failure_count(fmap)
+
+    # ✅ 평가 실행 추가
+    try:
+        print("[평가 실행] evaluate_predictions 호출")
+        evaluate_predictions(get_kline_by_strategy)
+    except Exception as e:
+        print(f"[ERROR] 평가 실패: {e}")
 
     filtered_by_success = []
     for r in results:
