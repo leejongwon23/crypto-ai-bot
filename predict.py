@@ -52,7 +52,6 @@ def predict(symbol, strategy, source="일반"):
         for f in os.listdir(MODEL_DIR):
             if not f.endswith(".pt"):
                 continue
-            # ✅ 수정된 모델명 파싱 방식 (심볼에 _ 포함되어도 안전하게 처리)
             parts = f.replace(".pt", "").split("_")
             if len(parts) < 3:
                 continue
@@ -65,17 +64,24 @@ def predict(symbol, strategy, source="일반"):
         if not model_files:
             return [failed_result(symbol, strategy, "unknown", "모델 없음", source=source)]
 
+        # ✅ 전략별 예측 시간 설정 (단기:4시간, 중기:24시간, 장기:168시간)
+        horizon_map = {"단기": 4, "중기": 24, "장기": 168}
+        target_hours = horizon_map.get(strategy, 4)
+        period_label = f"{target_hours}h"
+
         predictions = []
         for model_type, path in model_files.items():
             try:
                 model = get_model(model_type, X.shape[2])
                 model.load_state_dict(torch.load(path, map_location=DEVICE))
                 model.eval()
+
                 with torch.no_grad():
                     output = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     if isinstance(output, tuple):
                         output = output[0]
                     raw_rate = float(output.squeeze())
+
                     if np.isnan(raw_rate):
                         predictions.append(failed_result(symbol, strategy, model_type, "NaN 예측값", source=source))
                         continue
@@ -83,33 +89,35 @@ def predict(symbol, strategy, source="일반"):
                         predictions.append(failed_result(symbol, strategy, model_type, "price NaN 발생", source=source))
                         continue
 
+                    # ✅ 방향 판단 및 수익률 적용
                     if raw_rate >= 0:
-                    direction = "롱"
-                    rate = raw_rate
-                else:
-                    direction = "숏"
-                    rate = -raw_rate
-                    
-
-                    rate = abs(rate)
+                        direction = "롱"
+                        rate = raw_rate
+                        target = raw_close * (1 + rate)
+                        stop = raw_close * (1 - STOP_LOSS_PCT)
+                    else:
+                        direction = "숏"
+                        rate = -raw_rate
+                        target = raw_close * (1 - rate)
+                        stop = raw_close * (1 + STOP_LOSS_PCT)
 
                     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
                     success = True
-                    target = raw_close * (1 + rate) if direction == "롱" else raw_close * (1 - rate)
-                    stop = raw_close * (1 - STOP_LOSS_PCT) if direction == "롱" else raw_close * (1 + STOP_LOSS_PCT)
 
-                    log_prediction(symbol, strategy, direction, entry_price=raw_close,
-                                   target_price=target, model=model_type,
-                                   success=success, reason="예측 완료",
-                                   rate=rate, timestamp=t, volatility=is_volatility,
-                                   source=source)
+                    log_prediction(
+                        symbol=symbol, strategy=strategy, direction=direction,
+                        entry_price=raw_close, target_price=target,
+                        model=model_type, success=success,
+                        reason=f"{period_label} 예측 완료",
+                        rate=rate, timestamp=t,
+                        volatility=is_volatility, source=source
+                    )
 
                     predictions.append({
                         "symbol": symbol, "strategy": strategy, "model": model_type,
                         "direction": direction, "rate": rate, "price": raw_close,
-                        "target": target, "stop": stop,
-                        "reason": "예측 완료", "success": success,
-                        "timestamp": t, "source": source
+                        "target": target, "stop": stop, "reason": f"{period_label} 예측 완료",
+                        "success": success, "timestamp": t, "source": source
                     })
 
             except Exception as e:
