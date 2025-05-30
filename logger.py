@@ -100,12 +100,19 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
 def get_dynamic_eval_wait(s):
     return {"단기":4, "중기":24, "장기":168}.get(s, 6)
 
+import hashlib
+
+def get_feature_hash(feature_row):
+    rounded = [round(float(x), 4) for x in feature_row]
+    joined = ",".join(map(str, rounded))
+    return hashlib.sha1(joined.encode()).hexdigest()
+
 def evaluate_predictions(get_price_fn):
     if not os.path.exists(PREDICTION_LOG): return
     try:
         rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
     except: return
-    now, updated, evaluated = now_kst(), [], []  # ✅ evaluated 추가
+    now, updated, evaluated = now_kst(), [], []
     for r in rows:
         try:
             if r.get("status") not in ["pending", "failed", "v_pending", "v_failed"]:
@@ -135,28 +142,68 @@ def evaluate_predictions(get_price_fn):
                     "return": float(round(gain, 4))
                 })
                 update_model_success(s, strat, m, success)
-                evaluated.append(dict(r))  # ✅ 평가 결과 따로 저장용
+                evaluated.append(dict(r))
         except Exception as e:
             r.update({"status": "skip_eval", "reason": f"예외 발생: {e}", "return": 0.0})
         updated.append(r)
+
     with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader(); w.writerows(updated)
-    # ✅ 평가 결과 별도 저장
-if evaluated:
-    with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as ef:
-        w = csv.DictWriter(ef, fieldnames=evaluated[0].keys())
-        if not os.path.exists(EVAL_RESULT) or os.stat(EVAL_RESULT).st_size == 0:
-            w.writeheader()
-        w.writerows(evaluated)
 
-    # ✅ 실패한 예측만 wrong_predictions.csv에 영구 저장
-    failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
-    if failed:
-        with open(WRONG, "a", newline="", encoding="utf-8-sig") as wf:
-            w = csv.DictWriter(wf, fieldnames=failed[0].keys())
-            if not os.path.exists(WRONG) or os.stat(WRONG).st_size == 0:
+    if evaluated:
+        with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as ef:
+            w = csv.DictWriter(ef, fieldnames=evaluated[0].keys())
+            if not os.path.exists(EVAL_RESULT) or os.stat(EVAL_RESULT).st_size == 0:
                 w.writeheader()
-            w.writerows(failed)
+            w.writerows(evaluated)
+
+        failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
+        if failed:
+            with open(WRONG, "a", newline="", encoding="utf-8-sig") as wf:
+                w = csv.DictWriter(wf, fieldnames=failed[0].keys())
+                if not os.path.exists(WRONG) or os.stat(WRONG).st_size == 0:
+                    w.writeheader()
+                w.writerows(failed)
+
+            # ✅ 실패 패턴 해시 기록
+            PATTERN_LOG = f"{LOG}/failure_pattern_index.csv"
+            try:
+                if not os.path.exists(PATTERN_LOG):
+                    open(PATTERN_LOG, "w", encoding="utf-8-sig").write("timestamp,symbol,strategy,direction,hash,rate,reason\n")
+
+                existing_hashes = set()
+                with open(PATTERN_LOG, "r", encoding="utf-8-sig") as f:
+                    next(f, None)
+                    for line in f:
+                        parts = line.strip().split(",")
+                        if len(parts) >= 5:
+                            existing_hashes.add(parts[4])
+
+                with open(PATTERN_LOG, "a", encoding="utf-8-sig") as f:
+                    for r in failed:
+                        symbol, strategy = r["symbol"], r["strategy"]
+                        df = get_kline_by_strategy(symbol, strategy)
+                        df_feat = compute_features(symbol, df, strategy)
+                        if df_feat is None or df_feat.empty:
+                            continue
+                        feature_row = df_feat.dropna().iloc[-1].values
+                        hash_value = get_feature_hash(feature_row)
+                        if hash_value in existing_hashes:
+                            continue
+                        line = ",".join([
+                            r["timestamp"],
+                            symbol,
+                            strategy,
+                            r.get("direction", "예측실패"),
+                            hash_value,
+                            str(round(float(r.get("rate", 0.0)), 4)),
+                            r.get("reason", "")
+                        ]) + "\n"
+                        f.write(line)
+                        existing_hashes.add(hash_value)
+            except Exception as e:
+                print(f"[실패패턴 기록 오류] {e}")
+                sys.stdout.flush()
 
 strategy_stats = {}
