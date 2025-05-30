@@ -32,10 +32,10 @@ def start_scheduler():
         job = functools.partial(threading.Thread, target=train.train_model_loop, args=(strategy,), daemon=True)
         sched.add_job(lambda job=job: job().start(), 'cron', hour=h, minute=m)
 
-    for h,m,strategy in 예측:
-        # ✅ 시간 조건은 recommend.py에 맡김 (중복 제거)
-        job = functools.partial(threading.Thread, target=main, kwargs={"strategy":strategy}, daemon=True)
-        sched.add_job(lambda job=job: job().start(), 'cron', hour=h, minute=m)
+    for h, m, strategy in 예측:
+    job = functools.partial(threading.Thread, target=main, kwargs={"strategy": strategy, "force": True}, daemon=True)
+    sched.add_job(lambda job=job: job().start(), 'cron', hour=h, minute=m)
+
 
     sched.add_job(lambda: evaluate_predictions(get_kline_by_strategy), 'cron', minute=20)
     sched.add_job(trigger_run, 'interval', minutes=30)
