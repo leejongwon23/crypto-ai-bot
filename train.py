@@ -70,21 +70,44 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         return 20
     return best_window
 
-def create_dataset(f, w):
+def create_dataset(f, w, strategy):
     X, y = [], []
+    
+    # 전략별 예측 목표 시간 설정
+    horizon_map = {"단기": 4, "중기": 24, "장기": 24 * 7}
+    target_hours = horizon_map.get(strategy, 4)
+
+    # timestamp 추출을 위해 datetime 변환
+    for row in f:
+        if isinstance(row["timestamp"], str):
+            row["timestamp"] = pd.to_datetime(row["timestamp"])
+
     for i in range(len(f) - w - 1):
         x_seq = f[i:i + w]
         if any(len(r.values()) != len(f[0].values()) for r in x_seq): continue
-        c1, c2 = f[i + w - 1]['close'], f[i + w]['close']
-        if c1 == 0: continue
+
+        base_row = f[i + w - 1]
+        base_time = base_row["timestamp"]
+        base_price = base_row["close"]
+        if base_price == 0: continue
+
+        # 목표 시간 이후 가장 가까운 종가 찾기
+        target_time = base_time + pd.Timedelta(hours=target_hours)
+        future_slice = f[i + w:]
+        target_row = next((r for r in future_slice if r["timestamp"] >= target_time), None)
+        if not target_row: continue
+        target_price = target_row["close"]
+        if target_price == 0: continue
+
         X.append([list(r.values()) for r in x_seq])
-        y.append(round((c2 - c1) / c1, 4))
+        y.append(round((target_price - base_price) / base_price, 4))
+
     if not X: return np.array([]), np.array([])
     mlen = max(set(map(len, X)), key=list(X).count)
     filt = [(x, l) for x, l in zip(X, y) if len(x) == mlen]
     if not filt: return np.array([]), np.array([])
     return np.array([x for x, _ in filt]), np.array([l for _, l in filt])
-
+    
 def save_model_metadata(s, t, m, a, f1, l):
     meta = {
         "symbol": s,
@@ -108,7 +131,7 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
         df_feat = compute_features(sym, df, strat)
         if df_feat is None or len(df_feat) < win + 1: raise ValueError("feature 부족")
         feat = MinMaxScaler().fit_transform(df_feat.values)
-        X_raw, y_raw = create_dataset([dict(zip(df_feat.columns, r)) for r in feat], win)
+        X_raw, y_raw = create_dataset([dict(zip(df_feat.columns, r)) for r in feat], win, strat)
         if len(X_raw) < 2: raise ValueError("유효 시퀀스 부족")
         input_size = X_raw.shape[2]
         val_len = int(len(X_raw) * 0.2)
