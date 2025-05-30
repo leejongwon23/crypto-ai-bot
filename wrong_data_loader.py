@@ -32,6 +32,11 @@ def load_training_prediction_data(symbol, strategy, input_size, window=30, sourc
                 try:
                     entry_price = float(entry_price)
                     dt = pd.to_datetime(timestamp, utc=True)
+
+                    # ✅ 학습할 가치가 있는 실패만 필터링
+                    if direction not in ["롱", "숏"] or entry_price <= 0:
+                        continue
+
                     key = (symbol, strategy, direction, entry_price)
                     if key in seen or dt < cutoff:
                         continue
@@ -66,10 +71,6 @@ def load_training_prediction_data(symbol, strategy, input_size, window=30, sourc
             fail_time = row["timestamp"]
             entry_price = row["entry_price"]
             direction = row["direction"]
-
-            # ✅ 누락되었던 유효성 체크 추가
-            if direction not in ["롱", "숏"]:
-                continue
 
             index = df[df["timestamp"] >= fail_time].index.min()
             if index is None or index < window:
