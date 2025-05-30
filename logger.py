@@ -108,10 +108,14 @@ def get_feature_hash(feature_row):
     return hashlib.sha1(joined.encode()).hexdigest()
 
 def evaluate_predictions(get_price_fn):
+    from failure_db import ensure_failure_db, insert_failure_record, load_existing_failure_hashes
+    ensure_failure_db()
+
     if not os.path.exists(PREDICTION_LOG): return
     try:
         rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
     except: return
+
     now, updated, evaluated = now_kst(), [], []
     for r in rows:
         try:
@@ -166,44 +170,24 @@ def evaluate_predictions(get_price_fn):
                     w.writeheader()
                 w.writerows(failed)
 
-            # ✅ 실패 패턴 해시 기록
-            PATTERN_LOG = f"{LOG}/failure_pattern_index.csv"
             try:
-                if not os.path.exists(PATTERN_LOG):
-                    open(PATTERN_LOG, "w", encoding="utf-8-sig").write("timestamp,symbol,strategy,direction,hash,rate,reason\n")
-
-                existing_hashes = set()
-                with open(PATTERN_LOG, "r", encoding="utf-8-sig") as f:
-                    next(f, None)
-                    for line in f:
-                        parts = line.strip().split(",")
-                        if len(parts) >= 5:
-                            existing_hashes.add(parts[4])
-
-                with open(PATTERN_LOG, "a", encoding="utf-8-sig") as f:
-                    for r in failed:
-                        symbol, strategy = r["symbol"], r["strategy"]
-                        df = get_kline_by_strategy(symbol, strategy)
-                        df_feat = compute_features(symbol, df, strategy)
-                        if df_feat is None or df_feat.empty:
-                            continue
-                        feature_row = df_feat.dropna().iloc[-1].values
-                        hash_value = get_feature_hash(feature_row)
-                        if hash_value in existing_hashes:
-                            continue
-                        line = ",".join([
-                            r["timestamp"],
-                            symbol,
-                            strategy,
-                            r.get("direction", "예측실패"),
-                            hash_value,
-                            str(round(float(r.get("rate", 0.0)), 4)),
-                            r.get("reason", "")
-                        ]) + "\n"
-                        f.write(line)
-                        existing_hashes.add(hash_value)
+                existing_hashes = load_existing_failure_hashes()
+                for r in failed:
+                    symbol, strategy = r["symbol"], r["strategy"]
+                    df = get_kline_by_strategy(symbol, strategy)
+                    df_feat = compute_features(symbol, df, strategy)
+                    if df_feat is None or df_feat.empty:
+                        continue
+                    feature_row = df_feat.dropna().iloc[-1].values
+                    hash_value = get_feature_hash(feature_row)
+                    key = (symbol, strategy, r.get("direction", "예측실패"), hash_value)
+                    if key in existing_hashes:
+                        continue
+                    insert_failure_record(r, hash_value)
+                    existing_hashes.add(key)
             except Exception as e:
                 print(f"[실패패턴 기록 오류] {e}")
                 sys.stdout.flush()
 
 strategy_stats = {}
+
