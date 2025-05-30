@@ -13,23 +13,6 @@ MESSAGE_LOG = "/persistent/logs/message_log.csv"
 os.makedirs("/persistent/logs", exist_ok=True)
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-ALLOWED_SCHEDULE = {
-    "단기": ["00:00", "07:30", "10:30", "16:30"],
-    "중기": ["00:00", "07:30", "10:30", "12:30", "18:30"],
-    "장기": ["07:30", "14:30", "21:00"]
-}
-
-def is_time_in_range(now, target_time, margin=9):
-    h, m = map(int, target_time.split(":"))
-    target = now.replace(hour=h, minute=m, second=0, microsecond=0)
-    delta = abs((now - target).total_seconds()) / 60
-    return delta <= margin
-
-def is_valid_predict_time(strategy):
-    now = now_kst()
-    valid_times = ALLOWED_SCHEDULE.get(strategy, [])
-    return any(is_time_in_range(now, t) for t in valid_times)
-
 def log_audit(symbol, strategy, result, status):
     try:
         with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
@@ -70,7 +53,6 @@ def get_symbols_by_volatility(strategy):
             r_std = df["close"].pct_change().rolling(20).std().iloc[-1]
             b_std = df["close"].pct_change().rolling(60).std().iloc[-1]
 
-            # ✅ 필터 조건 완화: r_std / b_std 비율 1.5 → 1.2
             if r_std >= th and r_std / (b_std + 1e-8) >= 1.2:
                 result.append({"symbol": symbol, "volatility": r_std})
 
@@ -78,7 +60,6 @@ def get_symbols_by_volatility(strategy):
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
 
     return sorted(result, key=lambda x: -x["volatility"])
-
 
 def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=True):
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼"); sys.stdout.flush()
@@ -88,7 +69,6 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
         symbol = item["symbol"]
         vol = item.get("volatility", 0)
 
-        # ✅ 예측 차단 조건
         if not allow_prediction:
             log_audit(symbol, strategy, "예측 생략", f"예측 차단됨 (source={source})")
             continue
@@ -148,7 +128,6 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
 
     save_failure_count(fmap)
 
-    # 필터 1: 전략별 성공률 70% 이상
     filtered_by_success = []
     for r in results:
         s = r.get("strategy")
@@ -159,7 +138,6 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
         if success_rate < 0.7: continue
         filtered_by_success.append(r)
 
-    # 필터 2: 전략별 수익률 탑 1
     top_by_strategy = {}
     for r in filtered_by_success:
         s = r["strategy"]
@@ -182,11 +160,8 @@ def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
     run_prediction_loop(strategy, [{"symbol": symbol}], source="변동성", allow_prediction=True)
 
-def main(strategy=None, force=False, allow_prediction=True):  # ✅ allow_prediction 인자 추가
+def main(strategy=None, force=False, allow_prediction=True):
     print(">>> [main] recommend.py 실행")
     targets = [strategy] if strategy else ["단기", "중기", "장기"]
     for s in targets:
-        if not force and not is_valid_predict_time(s):
-            print(f"[SKIP] {s} 예측 시간 아님: 현재 시각 {now_kst().strftime('%H:%M')}")
-            continue
         run_prediction_loop(s, get_symbols_by_volatility(s), source="일반", allow_prediction=allow_prediction)
