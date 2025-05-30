@@ -109,17 +109,16 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
         if df_feat is None or len(df_feat) < win + 1: raise ValueError("feature 부족")
         feat = MinMaxScaler().fit_transform(df_feat.values)
         X_raw, y_raw = create_dataset([dict(zip(df_feat.columns, r)) for r in feat], win)
-        if len(X_raw) < 2: raise ValueError("유효 시킹스 부족")
+        if len(X_raw) < 2: raise ValueError("유효 시퀀스 부족")
         input_size = X_raw.shape[2]
         val_len = int(len(X_raw) * 0.2)
-        if val_len == 0: raise ValueError("검지셰 부족")
+        if val_len == 0: raise ValueError("검증셋 부족")
         val_X = torch.tensor(X_raw[-val_len:], dtype=torch.float32)
         val_y = torch.tensor(y_raw[-val_len:], dtype=torch.float32).view(-1)
         dataset = TensorDataset(torch.tensor(X_raw, dtype=torch.float32), torch.tensor(y_raw, dtype=torch.float32))
         train_set, _ = random_split(dataset, [len(dataset)-val_len, val_len])
 
         failure_hashes = load_existing_failure_hashes()
-
 
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size); model.train()
@@ -136,8 +135,10 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
 
             try:
                 with torch.no_grad():
-                    before_pred = model(val_X).squeeze(-1).numpy()
-                    acc_before = r2_score(val_y.numpy(), before_pred)
+                    before_pred = model(val_X)
+                    if isinstance(before_pred, tuple): before_pred = before_pred[0]
+                    before_pred = before_pred.view_as(val_y)
+                    acc_before = r2_score(val_y.numpy(), before_pred.numpy())
             except:
                 acc_before = ""
 
@@ -160,23 +161,29 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                                 direction = "롱" if yb_j.item() >= 0 else "숏"
                                 if (sym, strat, direction, feature_hash) in failure_hashes:
                                     continue
-                                rate = model(xb_j).view(-1)
+                                rate = model(xb_j)
+                                if isinstance(rate, tuple): rate = rate[0]
+                                rate = rate.view_as(yb_j)
                                 loss = lossfn(rate, yb_j)
                                 optim.zero_grad(); loss.backward(); optim.step()
 
                 for xb, yb in loader:
-                    rate = model(xb).squeeze(-1)
+                    rate = model(xb)
+                    if isinstance(rate, tuple): rate = rate[0]
+                    rate = rate.view_as(yb)
                     loss = lossfn(rate, yb)
                     optim.zero_grad(); loss.backward(); optim.step()
 
             model.eval()
             try:
                 with torch.no_grad():
-                    rate = model(val_X).squeeze(-1).numpy()
-                    acc = r2_score(val_y.numpy(), rate)
-                    f1 = mean_squared_error(val_y.numpy(), rate)
-                    logloss = np.mean(np.square(val_y.numpy() - rate))
-                    acc_dir = accuracy_score(val_y.numpy() > 0, rate > 0)
+                    rate = model(val_X)
+                    if isinstance(rate, tuple): rate = rate[0]
+                    rate = rate.view_as(val_y)
+                    acc = r2_score(val_y.numpy(), rate.numpy())
+                    f1 = mean_squared_error(val_y.numpy(), rate.numpy())
+                    logloss = np.mean(np.square(val_y.numpy() - rate.numpy()))
+                    acc_dir = accuracy_score(val_y.numpy() > 0, rate.numpy() > 0)
                     logger.log_training_result(sym, strat, model_type, acc, f1, logloss)
                     torch.save(model.state_dict(), model_path)
                     print(f"✅ 저장: {model_path}"); sys.stdout.flush()
