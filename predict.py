@@ -83,15 +83,13 @@ def predict(symbol, strategy, source="일반"):
                         predictions.append(failed_result(symbol, strategy, model_type, "price NaN 발생", source=source))
                         continue
 
-                    long_rate = raw_rate
-                    short_rate = -raw_rate
-                    abs_long = abs(long_rate)
-                    abs_short = abs(short_rate)
-
-                    if abs_long >= abs_short:
-                        direction, rate = "롱", long_rate
-                    else:
-                        direction, rate = "숏", short_rate
+                    if raw_rate >= 0:
+                    direction = "롱"
+                    rate = raw_rate
+                else:
+                    direction = "숏"
+                    rate = -raw_rate
+                    
 
                     rate = abs(rate)
 
