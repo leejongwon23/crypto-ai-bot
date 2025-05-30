@@ -143,11 +143,20 @@ def evaluate_predictions(get_price_fn):
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader(); w.writerows(updated)
     # ✅ 평가 결과 별도 저장
-    if evaluated:
-        with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as ef:
-            w = csv.DictWriter(ef, fieldnames=evaluated[0].keys())
-            if not os.path.exists(EVAL_RESULT) or os.stat(EVAL_RESULT).st_size == 0:
+if evaluated:
+    with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as ef:
+        w = csv.DictWriter(ef, fieldnames=evaluated[0].keys())
+        if not os.path.exists(EVAL_RESULT) or os.stat(EVAL_RESULT).st_size == 0:
+            w.writeheader()
+        w.writerows(evaluated)
+
+    # ✅ 실패한 예측만 wrong_predictions.csv에 영구 저장
+    failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
+    if failed:
+        with open(WRONG, "a", newline="", encoding="utf-8-sig") as wf:
+            w = csv.DictWriter(wf, fieldnames=failed[0].keys())
+            if not os.path.exists(WRONG) or os.stat(WRONG).st_size == 0:
                 w.writeheader()
-            w.writerows(evaluated)
+            w.writerows(failed)
 
 strategy_stats = {}
