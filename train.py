@@ -8,6 +8,7 @@ from model_weight_loader import get_model_weight
 from wrong_data_loader import load_training_prediction_data
 from feature_importance import compute_feature_importance, save_feature_importance
 import logger
+from failure_db import load_existing_failure_hashes  # ✅ 새 DB 기반 실패 해시 로더
 from logger import strategy_stats
 import csv
 import hashlib
@@ -22,22 +23,7 @@ def get_feature_hash_from_tensor(x):
     rounded = [round(float(val), 4) for val in x]
     return hashlib.sha1(",".join(map(str, rounded)).encode()).hexdigest()
 
-def load_failure_hash_index():
-    path = f"{LOG_DIR}/failure_pattern_index.csv"
-    existing = set()
-    if not os.path.exists(path): return existing
-    try:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            next(f, None)
-            for row in csv.reader(f):
-                if len(row) >= 5:
-                    key = (row[1], row[2], row[3], row[4])
-                    existing.add(key)
-    except: pass
-    return existing
 
-# find_best_window, create_dataset, save_model_metadata는 이전과 동일
-# (코드 유지)
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     try:
@@ -132,7 +118,8 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
         dataset = TensorDataset(torch.tensor(X_raw, dtype=torch.float32), torch.tensor(y_raw, dtype=torch.float32))
         train_set, _ = random_split(dataset, [len(dataset)-val_len, val_len])
 
-        failure_hashes = load_failure_hash_index()
+        failure_hashes = load_existing_failure_hashes()
+
 
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size); model.train()
