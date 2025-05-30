@@ -10,7 +10,8 @@ from matplotlib import font_manager
 font_path = os.path.join("fonts", "NanumGothic-Regular.ttf")
 if os.path.exists(font_path):
     font_manager.fontManager.addfont(font_path)
-plt.rcParams['font.family'] = 'NanumGothic'
+
+plt.rcParams['font.family'] = ['NanumGothic', 'Noto Color Emoji']  # ✅ 이모지 폰트 추가
 plt.rcParams['axes.unicode_minus'] = False
 
 PREDICTION_LOG = "/persistent/prediction_log.csv"
