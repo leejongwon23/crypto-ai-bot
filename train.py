@@ -138,7 +138,7 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                         xb = torch.stack(xb_all)
                         yb = torch.tensor(yb_all, dtype=torch.float32).view(-1)
                         for i in range(0, len(xb), batch):
-                            rate = model(xb[i:i+batch]).squeeze(-1)
+                            rate = model(xb[i:i+batch]).view(-1)
                             loss = lossfn(rate, yb[i:i+batch])
                             optim.zero_grad(); loss.backward(); optim.step()
 
