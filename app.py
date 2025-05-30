@@ -173,11 +173,12 @@ def run():
         print("[RUN] 전략별 예측 실행")
         sys.stdout.flush()
         for strategy in ["단기", "중기", "장기"]:
-            main(strategy)  # ✅ 각 전략별로 명확히 실행
+            main(strategy, force=True)  # ✅ 강제 예측 실행
         return "Recommendation started"
     except Exception as e:
         traceback.print_exc()
         return f"Error: {e}", 500
+
 
 
 @app.route("/train-now")
