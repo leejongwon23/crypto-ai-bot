@@ -218,4 +218,7 @@ def train_model_loop(strategy):
         except Exception as e:
             print(f"[단일 학습 오류] {sym}-{strategy} → {e}"); sys.stdout.flush()
 
+def train_model(symbol, strategy):
+    train_one_model(symbol, strategy)
+
 train_model = train_all_models
