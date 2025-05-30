@@ -33,8 +33,8 @@ def start_scheduler():
         sched.add_job(lambda job=job: job().start(), 'cron', hour=h, minute=m)
 
     for h, m, strategy in 예측:
-    job = functools.partial(threading.Thread, target=main, kwargs={"strategy": strategy, "force": True}, daemon=True)
-    sched.add_job(lambda job=job: job().start(), 'cron', hour=h, minute=m)
+        job = functools.partial(threading.Thread, target=main, kwargs={"strategy": strategy, "force": True}, daemon=True)
+        sched.add_job(lambda job=job: job().start(), 'cron', hour=h, minute=m)
 
 
     sched.add_job(lambda: evaluate_predictions(get_kline_by_strategy), 'cron', minute=20)
