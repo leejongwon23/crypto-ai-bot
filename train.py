@@ -130,7 +130,7 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
 
             for _ in range(epochs):
                 for _ in range(rep_wrong):
-                    wrong_data = load_training_prediction_data(sym, strat, input_size, win, source_type="both")  # ✅ source_type 포함
+                    wrong_data = load_training_prediction_data(sym, strat, input_size, win, source_type="wrong")      # ✅ source_type 포함
                     if not wrong_data: continue
                     xb_all, yb_all = zip(*[(xb, yb) for xb, yb in wrong_data
                                            if xb.shape[1:] == (win, input_size) and np.isfinite(yb) and abs(yb) < 2]) if wrong_data else ([],[])
