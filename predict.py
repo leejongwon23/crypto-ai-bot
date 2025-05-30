@@ -52,10 +52,13 @@ def predict(symbol, strategy, source="일반"):
         for f in os.listdir(MODEL_DIR):
             if not f.endswith(".pt"):
                 continue
-            parts = f.replace(".pt", "").rsplit("_", 2)
-            if len(parts) != 3:
+            # ✅ 수정된 모델명 파싱 방식 (심볼에 _ 포함되어도 안전하게 처리)
+            parts = f.replace(".pt", "").split("_")
+            if len(parts) < 3:
                 continue
-            f_sym, f_strat, f_type = parts
+            f_type = parts[-1]
+            f_strat = parts[-2]
+            f_sym = "_".join(parts[:-2])
             if f_sym == symbol and f_strat == strategy:
                 model_files[f_type] = os.path.join(MODEL_DIR, f)
 
