@@ -5,15 +5,39 @@ from sklearn.metrics import mean_squared_error, r2_score, accuracy_score
 from data.utils import SYMBOLS, get_kline_by_strategy, compute_features
 from model.base_model import get_model
 from model_weight_loader import get_model_weight
-from wrong_data_loader import load_training_prediction_data  # ✅ 함수명 수정 완료
+from wrong_data_loader import load_training_prediction_data
 from feature_importance import compute_feature_importance, save_feature_importance
 import logger
 from logger import strategy_stats
+import csv
+import hashlib
 
 DEVICE = torch.device("cpu")
 DIR = "/persistent"; MODEL_DIR, LOG_DIR = f"{DIR}/models", f"{DIR}/logs"
 os.makedirs(MODEL_DIR, exist_ok=True); os.makedirs(LOG_DIR, exist_ok=True)
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+
+def get_feature_hash_from_tensor(x):
+    x = x[-1].tolist()
+    rounded = [round(float(val), 4) for val in x]
+    return hashlib.sha1(",".join(map(str, rounded)).encode()).hexdigest()
+
+def load_failure_hash_index():
+    path = f"{LOG_DIR}/failure_pattern_index.csv"
+    existing = set()
+    if not os.path.exists(path): return existing
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            next(f, None)
+            for row in csv.reader(f):
+                if len(row) >= 5:
+                    key = (row[1], row[2], row[3], row[4])
+                    existing.add(key)
+    except: pass
+    return existing
+
+# find_best_window, create_dataset, save_model_metadata는 이전과 동일
+# (코드 유지)
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     try:
@@ -87,7 +111,7 @@ def save_model_metadata(s, t, m, a, f1, l):
     }
     path = f"{MODEL_DIR}/{s}_{t}_{m}.meta.json"
     with open(path, "w", encoding="utf-8") as f: json.dump(meta, f, indent=2, ensure_ascii=False)
-    print(f"🗘 저장됨: {path}"); sys.stdout.flush()
+    print(f"🗘저장됨: {path}"); sys.stdout.flush()
 
 def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep=8, rep_wrong=8):
     print(f"[train] 🔄 {sym}-{strat} 시작"); sys.stdout.flush()
@@ -99,14 +123,16 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
         if df_feat is None or len(df_feat) < win + 1: raise ValueError("feature 부족")
         feat = MinMaxScaler().fit_transform(df_feat.values)
         X_raw, y_raw = create_dataset([dict(zip(df_feat.columns, r)) for r in feat], win)
-        if len(X_raw) < 2: raise ValueError("유효 시퀀스 부족")
+        if len(X_raw) < 2: raise ValueError("유효 시킹스 부족")
         input_size = X_raw.shape[2]
         val_len = int(len(X_raw) * 0.2)
-        if val_len == 0: raise ValueError("검증셋 부족")
+        if val_len == 0: raise ValueError("검지셰 부족")
         val_X = torch.tensor(X_raw[-val_len:], dtype=torch.float32)
         val_y = torch.tensor(y_raw[-val_len:], dtype=torch.float32).view(-1)
         dataset = TensorDataset(torch.tensor(X_raw, dtype=torch.float32), torch.tensor(y_raw, dtype=torch.float32))
         train_set, _ = random_split(dataset, [len(dataset)-val_len, val_len])
+
+        failure_hashes = load_failure_hash_index()
 
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size); model.train()
@@ -130,17 +156,26 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
 
             for _ in range(epochs):
                 for _ in range(rep_wrong):
-                    wrong_data = load_training_prediction_data(sym, strat, input_size, win, source_type="wrong")      # ✅ source_type 포함
+                    wrong_data = load_training_prediction_data(sym, strat, input_size, win, source_type="wrong")
                     if not wrong_data: continue
                     xb_all, yb_all = zip(*[(xb, yb) for xb, yb in wrong_data
                                            if xb.shape[1:] == (win, input_size) and np.isfinite(yb) and abs(yb) < 2]) if wrong_data else ([],[])
                     if len(xb_all) >= 2:
-                        xb = torch.stack(xb_all)
-                        yb = torch.tensor(yb_all, dtype=torch.float32).view(-1)
-                        for i in range(0, len(xb), batch):
-                            rate = model(xb[i:i+batch]).view(-1)
-                            loss = lossfn(rate, yb[i:i+batch])
-                            optim.zero_grad(); loss.backward(); optim.step()
+                        xb_tensor = torch.stack(xb_all)
+                        yb_tensor = torch.tensor(yb_all, dtype=torch.float32).view(-1)
+                        for i in range(0, len(xb_tensor), batch):
+                            xb = xb_tensor[i:i+batch]
+                            yb = yb_tensor[i:i+batch]
+                            for j in range(len(xb)):
+                                xb_j = xb[j].unsqueeze(0)
+                                yb_j = yb[j].unsqueeze(0)
+                                feature_hash = get_feature_hash_from_tensor(xb_j[0])
+                                direction = "롱" if yb_j.item() >= 0 else "숏"
+                                if (sym, strat, direction, feature_hash) in failure_hashes:
+                                    continue
+                                rate = model(xb_j).view(-1)
+                                loss = lossfn(rate, yb_j)
+                                optim.zero_grad(); loss.backward(); optim.step()
 
                 for xb, yb in loader:
                     rate = model(xb).squeeze(-1)
