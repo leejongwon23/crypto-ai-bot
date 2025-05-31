@@ -156,6 +156,56 @@ def evaluate_predictions(get_price_fn):
                     "reason": "평가 데이터 부족",
                     "return": 0.0
                 })
+
+def evaluate_predictions(get_price_fn):
+    from failure_db import ensure_failure_db, insert_failure_record, load_existing_failure_hashes
+    ensure_failure_db()
+
+    if not os.path.exists(PREDICTION_LOG):
+        return
+    try:
+        rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
+    except:
+        return
+
+    now = now_kst()
+    updated, evaluated = [], []
+    eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}  # 시간 단위
+
+    for r in rows:
+        try:
+            if r.get("status") not in ["pending", "failed", "v_pending", "v_failed"]:
+                updated.append(r)
+                continue
+
+            s, strat = r["symbol"], r["strategy"]
+            d = r.get("direction", "롱")
+            m = r.get("model", "unknown")
+            entry = float(r.get("entry_price", 0))
+            rate = float(r.get("rate", 0))
+            pred_time = datetime.datetime.fromisoformat(r["timestamp"]).astimezone(pytz.timezone("Asia/Seoul"))
+            eval_deadline = pred_time + datetime.timedelta(hours=eval_horizon_map.get(strat, 6))
+            vol = str(r.get("volatility", "False")).lower() in ["1", "true", "yes"]
+
+            df = get_price_fn(s, strat)
+
+            if now < eval_deadline:
+                r.update({
+                    "reason": f"⏳ 평가 대기 중 ({now.strftime('%H:%M')} < {eval_deadline.strftime('%H:%M')})",
+                    "return": 0.0
+                })
+            elif entry == 0 or m == "unknown" or any(k in r.get("reason", "") for k in ["모델 없음", "기준 미달"]):
+                r.update({
+                    "status": "v_invalid_model" if vol else "invalid_model",
+                    "reason": "모델 없음 또는 entry=0",
+                    "return": 0.0
+                })
+            elif df is None or df.empty or df[df["timestamp"] >= pred_time].empty:
+                r.update({
+                    "status": "skip_eval",
+                    "reason": "평가 데이터 부족",
+                    "return": 0.0
+                })
             else:
                 df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Seoul")
                 eval_df = df[(df["timestamp"] >= pred_time) & (df["timestamp"] <= eval_deadline)]
@@ -180,12 +230,8 @@ def evaluate_predictions(get_price_fn):
             })
         updated.append(r)
 
-    with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=updated[0].keys())
-        w.writeheader()
-        w.writerows(updated)
-
-    if evaluated:
+    # ✅ 안전하게 평가결과 기록
+    if evaluated and len(evaluated) > 0:
         with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as ef:
             w = csv.DictWriter(ef, fieldnames=evaluated[0].keys())
             if not os.path.exists(EVAL_RESULT) or os.stat(EVAL_RESULT).st_size == 0:
@@ -220,6 +266,12 @@ def evaluate_predictions(get_price_fn):
             except Exception as e:
                 print(f"[실패패턴 기록 오류] {e}")
                 sys.stdout.flush()
+
+    # ✅ 모든 항목 업데이트
+    with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=updated[0].keys())
+        w.writeheader()
+        w.writerows(updated)
                 
 strategy_stats = {}
 
