@@ -120,6 +120,7 @@ def evaluate_predictions(get_price_fn):
 
     now = now_kst()
     updated, evaluated = [], []
+    eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}  # 시간 단위
 
     for r in rows:
         try:
@@ -133,14 +134,14 @@ def evaluate_predictions(get_price_fn):
             entry = float(r.get("entry_price", 0))
             rate = float(r.get("rate", 0))
             pred_time = datetime.datetime.fromisoformat(r["timestamp"]).astimezone(pytz.timezone("Asia/Seoul"))
-            hours = (now - pred_time).total_seconds() / 3600
+            eval_deadline = pred_time + datetime.timedelta(hours=eval_horizon_map.get(strat, 6))
             vol = str(r.get("volatility", "False")).lower() in ["1", "true", "yes"]
 
             df = get_price_fn(s, strat)
 
-            if hours < get_dynamic_eval_wait(strat):
+            if now < eval_deadline:
                 r.update({
-                    "reason": f"{hours:.2f}h < {get_dynamic_eval_wait(strat)}h",
+                    "reason": f"⏳ 평가 대기 중 ({now.strftime('%H:%M')} < {eval_deadline.strftime('%H:%M')})",
                     "return": 0.0
                 })
             elif entry == 0 or m == "unknown" or any(k in r.get("reason", "") for k in ["모델 없음", "기준 미달"]):
@@ -157,7 +158,7 @@ def evaluate_predictions(get_price_fn):
                 })
             else:
                 df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Seoul")
-                eval_df = df[df["timestamp"] >= pred_time]
+                eval_df = df[(df["timestamp"] >= pred_time) & (df["timestamp"] <= eval_deadline)]
                 price = eval_df["high"].max() if d == "롱" else eval_df["low"].min()
                 gain = (price - entry) / entry if d == "롱" else (entry - price) / entry
                 success = gain >= rate
@@ -219,6 +220,6 @@ def evaluate_predictions(get_price_fn):
             except Exception as e:
                 print(f"[실패패턴 기록 오류] {e}")
                 sys.stdout.flush()
-
+                
 strategy_stats = {}
 
