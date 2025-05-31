@@ -43,9 +43,22 @@ def predict(symbol, strategy, source="일반"):
         if feat is None or feat.dropna().shape[0] < window + 1:
             return [failed_result(symbol, strategy, "unknown", "feature 부족", source=source)]
 
-        feat = pd.DataFrame(MinMaxScaler().fit_transform(feat.dropna()), columns=feat.columns)
-        X = np.expand_dims(feat.iloc[-window:].values, axis=0)
-        if X.shape[1] != window:
+        # ✅ timestamp 보존 → MinMaxScaler 적용
+        if "timestamp" not in feat.columns:
+            return [failed_result(symbol, strategy, "unknown", "timestamp 없음", source=source)]
+
+        raw_feat = feat.copy()
+        timestamps = raw_feat["timestamp"]
+        feat_scaled = MinMaxScaler().fit_transform(raw_feat.drop(columns=["timestamp"]))
+        feat = pd.DataFrame(feat_scaled, columns=raw_feat.drop(columns=["timestamp"]).columns)
+        feat["timestamp"] = timestamps.values
+
+        # ✅ 시퀀스 길이 및 차원 확인
+        if feat.shape[0] < window:
+            return [failed_result(symbol, strategy, "unknown", "시퀀스 부족", source=source)]
+
+        X = np.expand_dims(feat.iloc[-window:].drop(columns=["timestamp"]).values, axis=0)
+        if X.shape[1] != window or len(X.shape) != 3:
             return [failed_result(symbol, strategy, "unknown", "시퀀스 형상 오류", source=source)]
 
         model_files = {}
@@ -64,7 +77,6 @@ def predict(symbol, strategy, source="일반"):
         if not model_files:
             return [failed_result(symbol, strategy, "unknown", "모델 없음", source=source)]
 
-        # ✅ 전략별 예측 시간 설정 (단기:4시간, 중기:24시간, 장기:168시간)
         horizon_map = {"단기": 4, "중기": 24, "장기": 168}
         target_hours = horizon_map.get(strategy, 4)
         period_label = f"{target_hours}h"
@@ -89,7 +101,6 @@ def predict(symbol, strategy, source="일반"):
                         predictions.append(failed_result(symbol, strategy, model_type, "price NaN 발생", source=source))
                         continue
 
-                    # ✅ 방향 판단 및 수익률 적용
                     if raw_rate >= 0:
                         direction = "롱"
                         rate = raw_rate
