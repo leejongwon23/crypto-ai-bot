@@ -107,8 +107,6 @@ def get_feature_hash(feature_row):
     joined = ",".join(map(str, rounded))
     return hashlib.sha1(joined.encode()).hexdigest()
 
-
-            
 def evaluate_predictions(get_price_fn):
     from failure_db import ensure_failure_db, insert_failure_record, load_existing_failure_hashes
     ensure_failure_db()
@@ -118,10 +116,10 @@ def evaluate_predictions(get_price_fn):
     try:
         rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
 
-# ✅ 예측 로그가 비어 있는 경우 평가 건너뛰기
-if not rows:
-    print("[스킵] 예측 결과가 하나도 없어서 평가를 건너뜁니다.")
-    return
+        # ✅ 예측 로그가 비어 있는 경우 평가 건너뛰기
+        if not rows:
+            print("[스킵] 예측 결과가 하나도 없어서 평가를 건너뜁니다.")
+            return
     except:
         return
 
@@ -187,7 +185,7 @@ if not rows:
             })
         updated.append(r)
 
-    # ✅ 안전하게 평가결과 기록
+    # ✅ 평가 결과 저장
     if evaluated and len(evaluated) > 0:
         with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as ef:
             w = csv.DictWriter(ef, fieldnames=evaluated[0].keys())
@@ -224,11 +222,13 @@ if not rows:
                 print(f"[실패패턴 기록 오류] {e}")
                 sys.stdout.flush()
 
-    # ✅ 모든 항목 업데이트
+    # ✅ 예측 로그 업데이트
     with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader()
         w.writerows(updated)
+            
+
                 
 strategy_stats = {}
 
