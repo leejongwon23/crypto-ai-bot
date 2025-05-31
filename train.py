@@ -19,8 +19,10 @@ os.makedirs(MODEL_DIR, exist_ok=True); os.makedirs(LOG_DIR, exist_ok=True)
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def get_feature_hash_from_tensor(x):
-    x = x[-1].tolist()
-    rounded = [round(float(val), 4) for val in x]
+    if x.ndim != 2 or x.shape[0] == 0:
+        return "invalid"
+    last = x[-1].tolist()
+    rounded = [round(float(val), 4) for val in last]
     return hashlib.sha1(",".join(map(str, rounded)).encode()).hexdigest()
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
