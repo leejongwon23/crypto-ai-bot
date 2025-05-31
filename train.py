@@ -38,7 +38,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
         best_score, best_window = -1, window_list[0]
         for window in window_list:
-            X, y = create_dataset(feature_dicts, window)
+            X, y = create_dataset(feature_dicts, window, strategy)  # ✅ 전략 인자 추가
             if len(X) == 0: continue
             input_size = X.shape[2]
             model = get_model("lstm", input_size=input_size)
