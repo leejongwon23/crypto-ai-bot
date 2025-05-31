@@ -114,14 +114,15 @@ def evaluate_predictions(get_price_fn):
     if not os.path.exists(PREDICTION_LOG):
         return
     try:
-        rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
+    rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
 
-        # ✅ 예측 로그가 비어 있는 경우 평가 건너뛰기
-        if not rows:
-            print("[스킵] 예측 결과가 하나도 없어서 평가를 건너뜁니다.")
-            return
-    except:
+    # ✅ 예측 로그가 비어 있는 경우 평가 건너뛰기
+    if not rows:
+        print("[스킵] 예측 결과가 하나도 없어서 평가를 건너뜁니다.")
         return
+except Exception as e:
+    print(f"[예측 평가 로드 오류] {e}")
+    return
 
     now = now_kst()
     updated, evaluated = [], []
