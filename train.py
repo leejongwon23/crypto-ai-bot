@@ -34,8 +34,12 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         if df_feat is None or df_feat.empty or len(df_feat) < max(window_list) + 1:
             return 20
         scaler = MinMaxScaler()
-        scaled = scaler.fit_transform(df_feat.values)
-        feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
+        scaled = scaler.fit_transform(df_feat.drop(columns=["timestamp"]).values)  # timestamp는 스케일링 제외
+feature_dicts = []
+for i, row in enumerate(scaled):
+    d = dict(zip(df_feat.columns.drop("timestamp"), row))
+    d["timestamp"] = df_feat.iloc[i]["timestamp"]  # timestamp 복원
+    feature_dicts.append(d)
         best_score, best_window = -1, window_list[0]
         for window in window_list:
             X, y = create_dataset(feature_dicts, window, strategy)  # ✅ 전략 인자 추가
