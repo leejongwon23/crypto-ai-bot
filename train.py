@@ -23,44 +23,57 @@ def get_feature_hash_from_tensor(x):
     rounded = [round(float(val), 4) for val in x]
     return hashlib.sha1(",".join(map(str, rounded)).encode()).hexdigest()
 
-
-
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     try:
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 10:
             return 20
+
         df_feat = compute_features(symbol, df, strategy)
         if df_feat is None or df_feat.empty or len(df_feat) < max(window_list) + 1:
             return 20
+
+        # ✅ timestamp는 스케일링에서 제외
         scaler = MinMaxScaler()
-        scaled = scaler.fit_transform(df_feat.drop(columns=["timestamp"]).values)  # timestamp는 스케일링 제외
-feature_dicts = []
-for i, row in enumerate(scaled):
-    d = dict(zip(df_feat.columns.drop("timestamp"), row))
-    d["timestamp"] = df_feat.iloc[i]["timestamp"]  # timestamp 복원
-    feature_dicts.append(d)
+        scaled = scaler.fit_transform(df_feat.drop(columns=["timestamp"]).values)
+
+        # ✅ timestamp를 복원한 feature dict 리스트 생성
+        feature_dicts = []
+        for i, row in enumerate(scaled):
+            d = dict(zip(df_feat.columns.drop("timestamp"), row))
+            d["timestamp"] = df_feat.iloc[i]["timestamp"]
+            feature_dicts.append(d)
+
         best_score, best_window = -1, window_list[0]
+
         for window in window_list:
-            X, y = create_dataset(feature_dicts, window, strategy)  # ✅ 전략 인자 추가
-            if len(X) == 0: continue
+            X, y = create_dataset(feature_dicts, window, strategy)
+            if len(X) == 0:
+                continue
+
             input_size = X.shape[2]
             model = get_model("lstm", input_size=input_size)
             model.train()
+
             X_tensor = torch.tensor(X, dtype=torch.float32)
             y_tensor = torch.tensor(y, dtype=torch.float32)
             val_len = int(len(X_tensor) * 0.2)
-            if val_len == 0: continue
+            if val_len == 0:
+                continue
+
             train_X, train_y = X_tensor[:-val_len], y_tensor[:-val_len]
             val_X, val_y = X_tensor[-val_len:], y_tensor[-val_len:]
+
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             criterion = nn.MSELoss()
+
             for _ in range(3):
                 pred = model(train_X).squeeze()
                 loss = criterion(pred, train_y)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+
             with torch.no_grad():
                 pred_val = model(val_X).squeeze().numpy()
                 acc = r2_score(val_y.numpy(), pred_val)
@@ -69,10 +82,13 @@ for i, row in enumerate(scaled):
                 if score > best_score:
                     best_score = score
                     best_window = window
+
     except Exception as e:
         print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
         return 20
+
     return best_window
+
 
 def create_dataset(f, w, strategy):
     X, y = [], []
