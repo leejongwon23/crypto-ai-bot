@@ -8,18 +8,34 @@ from data.utils import get_kline_by_strategy, compute_features
 from model.base_model import get_model
 import os, json
 
-def create_dataset(features, window=20):
+def create_dataset(features, window=20, strategy="단기"):
+    # ✅ 전략별 예측 시간 설정
+    horizon_map = {"단기": 4, "중기": 24, "장기": 168}
+    target_hours = horizon_map.get(strategy, 4)
+
+    for row in features:
+        if isinstance(row.get("timestamp"), str):
+            row["timestamp"] = pd.to_datetime(row["timestamp"])
+
     X, y = [], []
     for i in range(len(features) - window - 1):
         x_seq = features[i:i+window]
-        current_close = features[i+window-1]['close']
-        future_close = features[i+window]['close']
-        if current_close == 0:
+        base = features[i+window-1]
+        base_time = base["timestamp"]
+        base_price = base["close"]
+        if base_price == 0:
             continue
-        change = (future_close - current_close) / current_close
-        X.append([list(row.values()) for row in x_seq])
-        y.append(round(change, 4))
+        target_time = base_time + pd.Timedelta(hours=target_hours)
+        future_slice = features[i+window:]
+        target_row = next((r for r in future_slice if r["timestamp"] >= target_time), None)
+        if not target_row:
+            continue
+        target_price = target_row["close"]
+        X.append([list(r.values()) for r in x_seq])
+        y.append(round((target_price - base_price) / base_price, 4))
+
     return np.array(X), np.array(y)
+
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     df = get_kline_by_strategy(symbol, strategy)
@@ -41,7 +57,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     best_result = {}
 
     for window in window_list:
-        X, y = create_dataset(feature_dicts, window)
+        X, y = create_dataset(feature_dicts, window, strategy)
         if len(X) == 0:
             continue
 
