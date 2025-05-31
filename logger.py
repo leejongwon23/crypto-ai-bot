@@ -188,6 +188,38 @@ def evaluate_predictions(get_price_fn):
             vol = str(r.get("volatility", "False")).lower() in ["1", "true", "yes"]
 
             df = get_price_fn(s, strat)
+            
+def evaluate_predictions(get_price_fn):
+    from failure_db import ensure_failure_db, insert_failure_record, load_existing_failure_hashes
+    ensure_failure_db()
+
+    if not os.path.exists(PREDICTION_LOG):
+        return
+    try:
+        rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
+    except:
+        return
+
+    now = now_kst()
+    updated, evaluated = [], []
+    eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}  # 시간 단위
+
+    for r in rows:
+        try:
+            if r.get("status") not in ["pending", "failed", "v_pending", "v_failed"]:
+                updated.append(r)
+                continue
+
+            s, strat = r["symbol"], r["strategy"]
+            d = r.get("direction", "롱")
+            m = r.get("model", "unknown")
+            entry = float(r.get("entry_price", 0))
+            rate = float(r.get("rate", 0))
+            pred_time = datetime.datetime.fromisoformat(r["timestamp"]).astimezone(pytz.timezone("Asia/Seoul"))
+            eval_deadline = pred_time + datetime.timedelta(hours=eval_horizon_map.get(strat, 6))
+            vol = str(r.get("volatility", "False")).lower() in ["1", "true", "yes"]
+
+            df = get_price_fn(s, strat)
 
             if now < eval_deadline:
                 r.update({
