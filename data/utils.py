@@ -25,9 +25,9 @@ SYMBOLS = [
 ]
 
 STRATEGY_CONFIG = {
-    "단기": {"interval": "240", "limit": 300},
-    "중기": {"interval": "D", "limit": 300},
-    "장기": {"interval": "3D", "limit": 300}  # ✅ 수정됨: 주봉 → 3일봉
+    "단기": {"interval": "60", "limit": 300},    # 1시간봉
+    "중기": {"interval": "240", "limit": 300},  # 4시간봉
+    "장기": {"interval": "D", "limit": 300}     # 1일봉
 }
 
 DEFAULT_MIN_GAIN = {
