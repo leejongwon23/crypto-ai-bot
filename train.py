@@ -279,4 +279,4 @@ def train_model_loop(strategy):
 def train_model(symbol, strategy):
     train_one_model(symbol, strategy)
 
-train_model = train_all_models
+
