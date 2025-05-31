@@ -123,6 +123,9 @@ def evaluate_predictions(get_price_fn):
 except Exception as e:
     print(f"[예측 평가 로드 오류] {e}")
     return
+except Exception as e:
+    print(f"[예측 평가 로드 오류] {e}")
+    return
 
     now = now_kst()
     updated, evaluated = [], []
