@@ -27,10 +27,12 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     try:
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 10:
+            print(f"[스킵] {symbol}-{strategy} 데이터 부족")
             return 20
 
         df_feat = compute_features(symbol, df, strategy)
         if df_feat is None or df_feat.empty or len(df_feat) < max(window_list) + 1:
+            print(f"[스킵] {symbol}-{strategy} feature 부족")
             return 20
 
         # ✅ timestamp는 스케일링에서 제외
@@ -77,8 +79,9 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             with torch.no_grad():
                 pred_val = model(val_X).squeeze().numpy()
                 acc = r2_score(val_y.numpy(), pred_val)
-                conf = np.mean(np.abs(pred_val))
+                conf = np.mean(np.abs(pred_val))  # confidence
                 score = acc * conf
+
                 if score > best_score:
                     best_score = score
                     best_window = window
@@ -150,8 +153,16 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
         if df is None or len(df) < win + 10: raise ValueError("데이터 부족")
         df_feat = compute_features(sym, df, strat)
         if df_feat is None or len(df_feat) < win + 1: raise ValueError("feature 부족")
-        feat = MinMaxScaler().fit_transform(df_feat.values)
-        X_raw, y_raw = create_dataset([dict(zip(df_feat.columns, r)) for r in feat], win, strat)
+
+        # ✅ timestamp 제외하고 스케일링 후 timestamp 복원
+        scaled = MinMaxScaler().fit_transform(df_feat.drop(columns=["timestamp"]).values)
+        feat = []
+        for i, row in enumerate(scaled):
+            d = dict(zip(df_feat.columns.drop("timestamp"), row))
+            d["timestamp"] = df_feat.iloc[i]["timestamp"]
+            feat.append(d)
+
+        X_raw, y_raw = create_dataset(feat, win, strat)
         if len(X_raw) < 2: raise ValueError("유효 시퀀스 부족")
         input_size = X_raw.shape[2]
         val_len = int(len(X_raw) * 0.2)
@@ -200,6 +211,11 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                             for j in range(len(xb)):
                                 xb_j = xb[j].unsqueeze(0)
                                 yb_j = yb[j].unsqueeze(0)
+
+                                # ✅ 여기에서 shape 확인
+                                if xb_j.shape[1] == 0:
+                                    continue
+
                                 feature_hash = get_feature_hash_from_tensor(xb_j[0])
                                 direction = "롱" if yb_j.item() >= 0 else "숏"
                                 if (sym, strat, direction, feature_hash) in failure_hashes:
