@@ -2,7 +2,7 @@ import os, torch, numpy as np, pandas as pd, datetime, pytz, sys
 from sklearn.preprocessing import MinMaxScaler
 from data.utils import get_kline_by_strategy, compute_features
 from model.base_model import get_model
-from model_weight_loader import get_model_weight
+from model_weight_loader import get_model_weight  # ✅ 가중치 로더
 from window_optimizer import find_best_window
 from logger import log_prediction
 
@@ -43,7 +43,6 @@ def predict(symbol, strategy, source="일반"):
         if feat is None or feat.dropna().shape[0] < window + 1:
             return [failed_result(symbol, strategy, "unknown", "feature 부족", source=source)]
 
-        # ✅ timestamp 보존 → MinMaxScaler 적용
         if "timestamp" not in feat.columns:
             return [failed_result(symbol, strategy, "unknown", "timestamp 없음", source=source)]
 
@@ -53,7 +52,6 @@ def predict(symbol, strategy, source="일반"):
         feat = pd.DataFrame(feat_scaled, columns=raw_feat.drop(columns=["timestamp"]).columns)
         feat["timestamp"] = timestamps.values
 
-        # ✅ 시퀀스 길이 및 차원 확인
         if feat.shape[0] < window:
             return [failed_result(symbol, strategy, "unknown", "시퀀스 부족", source=source)]
 
@@ -92,7 +90,8 @@ def predict(symbol, strategy, source="일반"):
                     output = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     if isinstance(output, tuple):
                         output = output[0]
-                    raw_rate = float(output.squeeze())
+                    weight = get_model_weight(model_type, strategy, symbol)  # ✅ 가중치 적용
+                    raw_rate = float(output.squeeze()) * weight
 
                     if np.isnan(raw_rate):
                         predictions.append(failed_result(symbol, strategy, model_type, "NaN 예측값", source=source))
