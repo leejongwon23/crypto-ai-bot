@@ -11,37 +11,69 @@ from data.utils import get_kline_by_strategy, compute_features
 from model.base_model import get_model
 
 def create_dataset(features, window=20, strategy="단기"):
-    # ✅ 전략별 예측 시간 설정
-    horizon_map = {"단기": 4, "중기": 24, "장기": 168}
-    target_hours = horizon_map.get(strategy, 4)
+    import numpy as np
+    import pandas as pd
 
-    # ✅ timestamp 문자열일 경우 datetime으로 변환
+    # ✅ 1. timestamp 문자열을 datetime으로 변환
     for row in features:
         if isinstance(row.get("timestamp"), str):
             row["timestamp"] = pd.to_datetime(row["timestamp"], errors="coerce")
 
-    # ✅ 유효하지 않은 timestamp 제거
+    # ✅ 2. timestamp가 NaT인 row 제거
     features = [r for r in features if pd.notna(r.get("timestamp"))]
 
     X, y = [], []
+
+    # ✅ 3. 전략별 예측 시간 설정
+    horizon_map = {"단기": 4, "중기": 24, "장기": 168}
+    target_hours = horizon_map.get(strategy, 4)
+
+    # ✅ 4. key 순서 고정 (timestamp 제외)
+    col_order = [k for k in features[0].keys() if k != "timestamp"]
+
     for i in range(len(features) - window - 1):
         x_seq = features[i:i + window]
-        base = features[i + window - 1]
-        base_time = base["timestamp"]
-        base_price = base["close"]
+
+        # ✅ 키 불일치 방지
+        if any(set(r.keys()) != set(features[0].keys()) for r in x_seq):
+            continue
+
+        base_row = features[i + window - 1]
+        base_time = base_row["timestamp"]
+        base_price = base_row["close"]
+
+        # ✅ 데이터 유효성 검사
+        if not isinstance(base_time, pd.Timestamp):
+            continue
         if base_price == 0 or pd.isna(base_price):
             continue
+
+        # ✅ 목표 시간 이후 시점 찾기
         target_time = base_time + pd.Timedelta(hours=target_hours)
         future_slice = features[i + window:]
         target_row = next((r for r in future_slice if r["timestamp"] >= target_time), None)
-        if not target_row or target_row["close"] == 0 or pd.isna(target_row["close"]):
+        if not target_row:
             continue
+
         target_price = target_row["close"]
-        x_data = [list(r.values())[:-1] for r in x_seq] if "timestamp" in x_seq[0] else [list(r.values()) for r in x_seq]
-        X.append(x_data)
+        if target_price == 0 or pd.isna(target_price):
+            continue
+
+        # ✅ 입력 시퀀스 생성
+        X.append([[r[col] for col in col_order] for r in x_seq])
         y.append(round((target_price - base_price) / base_price, 4))
 
-    return np.array(X), np.array(y)
+    if not X:
+        return np.array([]), np.array([])
+
+    # ✅ 시퀀스 길이 정렬 (길이가 동일한 것만)
+    mlen = max(set(map(len, X)), key=list(X).count)
+    filt = [(x, l) for x, l in zip(X, y) if len(x) == mlen]
+
+    if not filt:
+        return np.array([]), np.array([])
+
+    return np.array([x for x, _ in filt]), np.array([l for _, l in filt])
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     try:
