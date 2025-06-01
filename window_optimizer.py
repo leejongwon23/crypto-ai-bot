@@ -15,9 +15,13 @@ def create_dataset(features, window=20, strategy="단기"):
     horizon_map = {"단기": 4, "중기": 24, "장기": 168}
     target_hours = horizon_map.get(strategy, 4)
 
+    # ✅ timestamp 문자열일 경우 datetime으로 변환
     for row in features:
         if isinstance(row.get("timestamp"), str):
-            row["timestamp"] = pd.to_datetime(row["timestamp"])
+            row["timestamp"] = pd.to_datetime(row["timestamp"], errors="coerce")
+
+    # ✅ 유효하지 않은 timestamp 제거
+    features = [r for r in features if pd.notna(r.get("timestamp"))]
 
     X, y = [], []
     for i in range(len(features) - window - 1):
@@ -25,17 +29,16 @@ def create_dataset(features, window=20, strategy="단기"):
         base = features[i + window - 1]
         base_time = base["timestamp"]
         base_price = base["close"]
-        if base_price == 0:
+        if base_price == 0 or pd.isna(base_price):
             continue
         target_time = base_time + pd.Timedelta(hours=target_hours)
         future_slice = features[i + window:]
         target_row = next((r for r in future_slice if r["timestamp"] >= target_time), None)
-        if not target_row:
+        if not target_row or target_row["close"] == 0 or pd.isna(target_row["close"]):
             continue
         target_price = target_row["close"]
-        if target_price == 0:
-            continue
-        X.append([list(r.values()) for r in x_seq])
+        x_data = [list(r.values())[:-1] for r in x_seq] if "timestamp" in x_seq[0] else [list(r.values()) for r in x_seq]
+        X.append(x_data)
         y.append(round((target_price - base_price) / base_price, 4))
 
     return np.array(X), np.array(y)
@@ -116,6 +119,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 print(f"[오류] window={window} 평가 실패 → {e}")
                 continue
 
+        # ✅ 결과 저장
         save_dir = "/persistent/logs"
         os.makedirs(save_dir, exist_ok=True)
         save_txt = os.path.join(save_dir, f"best_window_{symbol}_{strategy}.txt")
