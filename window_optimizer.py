@@ -95,7 +95,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         feature_dicts = []
         for i, row in enumerate(scaled):
             d = dict(zip(df_feat.columns.drop("timestamp"), row))
-            d["timestamp"] = df_feat.iloc[i]["timestamp"]
+            d["timestamp"] = pd.to_datetime(df_feat.iloc[i]["timestamp"], errors="coerce")
             feature_dicts.append(d)
 
         best_score = -1
