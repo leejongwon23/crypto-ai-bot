@@ -5,6 +5,8 @@ from model.base_model import get_model
 from model_weight_loader import get_model_weight  # ✅ 가중치 로더
 from window_optimizer import find_best_window
 from logger import log_prediction
+from failure_db import insert_failure_record, load_existing_failure_hashes
+from logger import get_feature_hash
 
 DEVICE, MODEL_DIR = torch.device("cpu"), "/persistent/models"
 STOP_LOSS_PCT = 0.02
@@ -79,6 +81,9 @@ def predict(symbol, strategy, source="일반"):
         target_hours = horizon_map.get(strategy, 4)
         period_label = f"{target_hours}h"
 
+        # ✅ 실패 해시 불러오기
+        failure_hashes = load_existing_failure_hashes()
+
         predictions = []
         for model_type, path in model_files.items():
             try:
@@ -90,7 +95,7 @@ def predict(symbol, strategy, source="일반"):
                     output = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     if isinstance(output, tuple):
                         output = output[0]
-                    weight = get_model_weight(model_type, strategy, symbol)  # ✅ 가중치 적용
+                    weight = get_model_weight(model_type, strategy, symbol)
                     raw_rate = float(output.squeeze()) * weight
 
                     if np.isnan(raw_rate):
@@ -131,7 +136,19 @@ def predict(symbol, strategy, source="일반"):
                     })
 
             except Exception as e:
-                predictions.append(failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source=source))
+                failed = failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source=source)
+
+                # ✅ 실패 해시 저장
+                try:
+                    feature_hash = get_feature_hash(X[0])
+                    key = (symbol, strategy, "롱" if raw_rate >= 0 else "숏", feature_hash)
+                    if key not in failure_hashes:
+                        insert_failure_record(failed, feature_hash)
+                        failure_hashes.add(key)
+                except Exception as log_err:
+                    print(f"[실패 해시 기록 오류] {log_err}")
+
+                predictions.append(failed)
 
         return predictions if predictions else [failed_result(symbol, strategy, "unknown", "모든 모델 예측 실패", source=source)]
 
