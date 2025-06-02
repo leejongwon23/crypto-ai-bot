@@ -12,6 +12,7 @@ from failure_db import load_existing_failure_hashes  # ✅ 새 DB 기반 실패 
 from logger import strategy_stats
 import csv
 import hashlib
+from data.utils import create_dataset
 
 DEVICE = torch.device("cpu")
 DIR = "/persistent"; MODEL_DIR, LOG_DIR = f"{DIR}/models", f"{DIR}/logs"
@@ -93,72 +94,6 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
 
     return best_window
 
-def create_dataset(f, w, strategy):
-    import numpy as np
-    import pandas as pd
-
-    X, y = [], []
-
-    # ✅ 전략별 예측 시간 설정
-    horizon_map = {"단기": 4, "중기": 24, "장기": 24 * 7}
-    target_hours = horizon_map.get(strategy, 4)
-
-    # ✅ timestamp 문자열이면 datetime으로 변환
-    for row in f:
-        if isinstance(row.get("timestamp"), str):
-            row["timestamp"] = pd.to_datetime(row["timestamp"], errors="coerce")
-
-    # ✅ NaT 포함된 row 제거
-    f = [r for r in f if pd.notna(r.get("timestamp"))]
-
-    if not f or len(f) <= w + 1:
-        return np.array([]), np.array([])
-
-    # ✅ key 순서 고정, timestamp는 X에서 제외
-    col_order = [k for k in f[0].keys() if k != "timestamp"]
-
-    for i in range(len(f) - w - 1):
-        x_seq = f[i:i + w]
-
-        # ✅ 키 불일치 방지
-        if any(set(r.keys()) != set(f[0].keys()) for r in x_seq):
-            continue
-
-        base_row = f[i + w - 1]
-        base_time = base_row["timestamp"]
-        base_price = base_row["close"]
-
-        # ✅ 0 또는 NaN 방지
-        if base_price == 0 or np.isnan(base_price):
-            continue
-
-        # ✅ 예측 목표 시점 설정
-        target_time = base_time + pd.Timedelta(hours=target_hours)
-        future_slice = f[i + w:]
-        target_row = next((r for r in future_slice if r["timestamp"] >= target_time), None)
-
-        if not target_row:
-            continue
-
-        target_price = target_row["close"]
-        if target_price == 0 or np.isnan(target_price):
-            continue
-
-        # ✅ 입력 시퀀스 생성
-        X.append([[r[col] for col in col_order] for r in x_seq])
-        y.append(round((target_price - base_price) / base_price, 4))
-
-    # ✅ 결과 정제
-    if not X:
-        return np.array([]), np.array([])
-
-    mlen = max(set(map(len, X)), key=list(X).count)
-    filt = [(x, l) for x, l in zip(X, y) if len(x) == mlen]
-
-    if not filt:
-        return np.array([]), np.array([])
-
-    return np.array([x for x, _ in filt]), np.array([l for _, l in filt])
     
 def save_model_metadata(s, t, m, a, f1, l):
     meta = {
