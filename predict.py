@@ -95,8 +95,7 @@ def predict(symbol, strategy, source="일반"):
                     output = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     if isinstance(output, tuple):
                         output = output[0]
-                    weight = get_model_weight(model_type, strategy, symbol)
-                    raw_rate = float(output.squeeze()) * weight
+                    raw_rate = float(output.squeeze()) 
 
                     if np.isnan(raw_rate):
                         predictions.append(failed_result(symbol, strategy, model_type, "NaN 예측값", source=source))
