@@ -49,7 +49,6 @@ def save_model_metadata(s, t, m, a, f1, l):
 def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep=8):
     print(f"[train] 🔄 {sym}-{strat} 시작"); sys.stdout.flush()
     try:
-        # ✅ 실패 횟수 기반 학습 우선순위 조정
         failmap = load_failure_count()
         key = f"{sym}-{strat}"
         fail_count = failmap.get(key, 0)
@@ -59,7 +58,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
         elif fail_count >= 5:
             rep_wrong += 2
 
-        # ① 데이터 불러오기
         win = find_best_window(sym, strat)
         df = get_kline_by_strategy(sym, strat)
         if df is None or len(df) < win + 10:
@@ -69,7 +67,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
         if df_feat is None or len(df_feat) < win + 1:
             raise ValueError("feature 부족")
 
-        # ② feature scaling
         scaled = MinMaxScaler().fit_transform(df_feat.drop(columns=["timestamp"]).values)
         feat = []
         for i, row in enumerate(scaled):
@@ -77,7 +74,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
             d["timestamp"] = df_feat.iloc[i]["timestamp"]
             feat.append(d)
 
-        # ③ dataset 생성
         X_raw, y_raw = create_dataset(feat, win, strat)
         if len(X_raw) < 2:
             raise ValueError("유효 시퀀스 부족")
@@ -106,10 +102,8 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
             optim = torch.optim.Adam(model.parameters(), lr=lr)
             lossfn = nn.MSELoss()
             loader = DataLoader(train_set, batch_size=batch, shuffle=True)
-
             total_train_count = 0
 
-            # ④ 실패 샘플 반복 학습
             for _ in range(epochs):
                 for _ in range(rep_wrong):
                     wrong_data = load_training_prediction_data(sym, strat, input_size, win, source_type="wrong")
@@ -138,7 +132,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                                 optim.zero_grad(); loss.backward(); optim.step()
                                 total_train_count += 1
 
-            # ⑤ 일반 학습 반복
             for xb, yb in loader:
                 rate = model(xb)
                 if isinstance(rate, tuple): rate = rate[0]
@@ -147,7 +140,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                 optim.zero_grad(); loss.backward(); optim.step()
                 total_train_count += 1
 
-            # ⑥ 학습 평가 및 저장
             model.eval()
             with torch.no_grad():
                 rate = model(val_X)
