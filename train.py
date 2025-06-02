@@ -14,6 +14,7 @@ import csv
 import hashlib
 from data.utils import create_dataset
 from window_optimizer import find_best_window
+from logger import load_failure_count  # ✅ 실패횟수 로더 추가
 
 DEVICE = torch.device("cpu")
 DIR = "/persistent"; MODEL_DIR, LOG_DIR = f"{DIR}/models", f"{DIR}/logs"
@@ -46,6 +47,18 @@ def save_model_metadata(s, t, m, a, f1, l):
 def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep=8, rep_wrong=8):
     print(f"[train] 🔄 {sym}-{strat} 시작"); sys.stdout.flush()
     try:
+        # ✅ 실패 횟수 기반 학습 우선순위 조정
+        failmap = load_failure_count()
+        key = f"{sym}-{strat}"
+        fail_count = failmap.get(key, 0)
+        if fail_count >= 10:
+            rep_wrong += 4
+            print(f"⚠️ 학습 우선: {key} → 실패 10회 이상 → rep_wrong = {rep_wrong}")
+        elif fail_count >= 5:
+            rep_wrong += 2
+            print(f"⚠️ 학습 가중: {key} → 실패 5회 이상 → rep_wrong = {rep_wrong}")
+
+        # ① 데이터 불러오기
         # ① 데이터 불러오기
         win = find_best_window(sym, strat)
         df = get_kline_by_strategy(sym, strat)
