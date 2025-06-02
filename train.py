@@ -46,31 +46,27 @@ def save_model_metadata(s, t, m, a, f1, l):
     with open(path, "w", encoding="utf-8") as f: json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"🗘저장됨: {path}"); sys.stdout.flush()
 
-def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep=8, rep_wrong=8):
+def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep=8):
     print(f"[train] 🔄 {sym}-{strat} 시작"); sys.stdout.flush()
     try:
         # ✅ 실패 횟수 기반 학습 우선순위 조정
         failmap = load_failure_count()
         key = f"{sym}-{strat}"
         fail_count = failmap.get(key, 0)
+        rep_wrong = STRATEGY_WRONG_REP.get(strat, 4)
         if fail_count >= 10:
             rep_wrong += 4
-            print(f"⚠️ 학습 우선: {key} → 실패 10회 이상 → rep_wrong = {rep_wrong}")
         elif fail_count >= 5:
             rep_wrong += 2
-            print(f"⚠️ 학습 가중: {key} → 실패 5회 이상 → rep_wrong = {rep_wrong}")
 
-        # ① 데이터 불러오기
         # ① 데이터 불러오기
         win = find_best_window(sym, strat)
         df = get_kline_by_strategy(sym, strat)
         if df is None or len(df) < win + 10:
-            print(f"[ERROR] {sym}-{strat} → 원시 데이터 부족 (len={len(df) if df is not None else 'None'})")
             raise ValueError("데이터 부족")
 
         df_feat = compute_features(sym, df, strat)
         if df_feat is None or len(df_feat) < win + 1:
-            print(f"[ERROR] {sym}-{strat} → feature 생성 실패 또는 부족 (len={len(df_feat) if df_feat is not None else 'None'})")
             raise ValueError("feature 부족")
 
         # ② feature scaling
@@ -84,49 +80,32 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
         # ③ dataset 생성
         X_raw, y_raw = create_dataset(feat, win, strat)
         if len(X_raw) < 2:
-            print(f"[ERROR] {sym}-{strat} → dataset 시퀀스 부족 (len={len(X_raw)})")
             raise ValueError("유효 시퀀스 부족")
 
         input_size = X_raw.shape[2]
         val_len = int(len(X_raw) * 0.2)
         if val_len == 0:
-            print(f"[ERROR] {sym}-{strat} → validation 세트 생성 실패")
             raise ValueError("검증셋 부족")
 
         val_X = torch.tensor(X_raw[-val_len:], dtype=torch.float32)
         val_y = torch.tensor(y_raw[-val_len:], dtype=torch.float32).view(-1)
         dataset = TensorDataset(torch.tensor(X_raw, dtype=torch.float32), torch.tensor(y_raw, dtype=torch.float32))
         train_set, _ = random_split(dataset, [len(dataset)-val_len, val_len])
-
         failure_hashes = load_existing_failure_hashes()
 
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
-            model = get_model(model_type, input_size); model.train()
+            model = get_model(model_type, input_size).train()
             model_path = f"{MODEL_DIR}/{sym}_{strat}_{model_type}.pt"
-
-            # 기존 모델 이어 학습
             if os.path.exists(model_path):
                 try:
                     model.load_state_dict(torch.load(model_path, map_location=DEVICE))
                     print(f"🔁 이어 학습: {model_path}"); sys.stdout.flush()
-                except Exception as e:
-                    print(f"[로드 실패 → 새로 학습] {model_path} → {e}"); sys.stdout.flush()
+                except:
+                    print(f"[로드 실패] {model_path} → 새로 학습"); sys.stdout.flush()
 
             optim = torch.optim.Adam(model.parameters(), lr=lr)
             lossfn = nn.MSELoss()
             loader = DataLoader(train_set, batch_size=batch, shuffle=True)
-
-            # 평가 전 확인용
-            try:
-                with torch.no_grad():
-                    before_pred = model(val_X)
-                    if isinstance(before_pred, tuple): before_pred = before_pred[0]
-                    before_pred = before_pred.view_as(val_y)
-                    acc_before = r2_score(val_y.numpy(), before_pred.numpy())
-                    print(f"👀 [사전 정확도] {sym}-{strat}-{model_type} → r2_score={round(acc_before, 4)}")
-            except:
-                print(f"[WARNING] {sym}-{strat}-{model_type} → 사전 평가 실패")
-                acc_before = ""
 
             total_train_count = 0
 
@@ -170,24 +149,18 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
 
             # ⑥ 학습 평가 및 저장
             model.eval()
-            try:
-                with torch.no_grad():
-                    rate = model(val_X)
-                    if isinstance(rate, tuple): rate = rate[0]
-                    rate = rate.view_as(val_y)
-                    acc = r2_score(val_y.numpy(), rate.numpy())
-                    f1 = mean_squared_error(val_y.numpy(), rate.numpy())
-                    logloss = np.mean(np.square(val_y.numpy() - rate.numpy()))
-                    acc_dir = accuracy_score(val_y.numpy() > 0, rate.numpy() > 0)
-
-                    logger.log_training_result(sym, strat, model_type, acc, f1, logloss)
-                    torch.save(model.state_dict(), model_path)
-                    print(f"✅ 저장 완료: {model_path} (훈련횟수: {total_train_count})"); sys.stdout.flush()
-                    save_model_metadata(sym, strat, model_type, acc, f1, logloss)
-                    imps = compute_feature_importance(model, val_X, val_y, list(df_feat.columns))
-                    save_feature_importance(imps, sym, strat, model_type)
-            except Exception as e:
-                print(f"[평가 오류] {sym}-{strat}-{model_type} → {e}"); sys.stdout.flush()
+            with torch.no_grad():
+                rate = model(val_X)
+                if isinstance(rate, tuple): rate = rate[0]
+                rate = rate.view_as(val_y)
+                acc = r2_score(val_y.numpy(), rate.numpy())
+                f1 = mean_squared_error(val_y.numpy(), rate.numpy())
+                logloss = np.mean(np.square(val_y.numpy() - rate.numpy()))
+                logger.log_training_result(sym, strat, model_type, acc, f1, logloss)
+                torch.save(model.state_dict(), model_path)
+                save_model_metadata(sym, strat, model_type, acc, f1, logloss)
+                imps = compute_feature_importance(model, val_X, val_y, list(df_feat.columns))
+                save_feature_importance(imps, sym, strat, model_type)
 
     except Exception as e:
         print(f"[실패] {sym}-{strat} → {e}"); sys.stdout.flush()
