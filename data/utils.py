@@ -116,6 +116,11 @@ def get_realtime_prices():
 
 def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFrame:
     df = df.copy()
+
+    # ✅ timestamp 복원 (datetime → timestamp)
+    if "datetime" in df.columns:
+        df["timestamp"] = df["datetime"]
+
     df['ma5'] = df['close'].rolling(window=5).mean()
     df['ma20'] = df['close'].rolling(window=20).mean()
     delta = df['close'].diff()
