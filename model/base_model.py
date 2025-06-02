@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class Attention(nn.Module):
     def __init__(self, hidden_size):
         super(Attention, self).__init__()
@@ -13,14 +14,17 @@ class Attention(nn.Module):
         context = torch.sum(lstm_out * weights.unsqueeze(-1), dim=1)
         return context, weights
 
+
 class LSTMPricePredictor(nn.Module):
     def __init__(self, input_size: int, hidden_size: int = 128, num_layers: int = 3, dropout: float = 0.3):
         super(LSTMPricePredictor, self).__init__()
-        self.lstm = nn.LSTM(input_size=input_size,
-                            hidden_size=hidden_size,
-                            num_layers=num_layers,
-                            dropout=dropout,
-                            batch_first=True)
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+            batch_first=True
+        )
         self.attention = Attention(hidden_size)
         self.bn = nn.BatchNorm1d(hidden_size)
         self.dropout = nn.Dropout(dropout)
@@ -39,15 +43,18 @@ class LSTMPricePredictor(nn.Module):
         rate = self.fc_rate(hidden).view(-1)
         return rate
 
+
 class CNNLSTMPricePredictor(nn.Module):
     def __init__(self, input_size: int, cnn_channels: int = 32, lstm_hidden_size: int = 64, lstm_layers: int = 2, dropout: float = 0.3):
         super(CNNLSTMPricePredictor, self).__init__()
         self.conv1 = nn.Conv1d(input_size, cnn_channels, kernel_size=3, padding=1)
         self.relu = nn.ReLU()
-        self.lstm = nn.LSTM(input_size=cnn_channels,
-                            hidden_size=lstm_hidden_size,
-                            num_layers=lstm_layers,
-                            batch_first=True)
+        self.lstm = nn.LSTM(
+            input_size=cnn_channels,
+            hidden_size=lstm_hidden_size,
+            num_layers=lstm_layers,
+            batch_first=True
+        )
         self.attention = Attention(lstm_hidden_size)
         self.dropout = nn.Dropout(dropout)
         self.fc1 = nn.Linear(lstm_hidden_size, lstm_hidden_size // 2)
@@ -65,10 +72,11 @@ class CNNLSTMPricePredictor(nn.Module):
         rate = self.fc_rate(hidden).view(-1)
         return rate
 
+
 class TransformerEncoderLayer(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward=256, dropout=0.3):
         super().__init__()
-        self.transformer = nn.TransformerEncoderLayer(
+        self.layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
@@ -78,7 +86,8 @@ class TransformerEncoderLayer(nn.Module):
         )
 
     def forward(self, x):
-        return self.transformer(x)
+        return self.layer(x)
+
 
 class TransformerPricePredictor(nn.Module):
     def __init__(self, input_size: int, d_model: int = 64, nhead: int = 4, num_layers: int = 2, dropout: float = 0.3):
@@ -103,17 +112,20 @@ class TransformerPricePredictor(nn.Module):
         rate = self.fc_rate(hidden).view(-1)
         return rate
 
+
 MODEL_CLASSES = {
     "lstm": LSTMPricePredictor,
     "cnn_lstm": CNNLSTMPricePredictor,
     "transformer": TransformerPricePredictor
 }
 
+
 def get_model(model_type: str = "cnn_lstm", input_size: int = 11):
     if model_type not in MODEL_CLASSES:
         print(f"[경고] 알 수 없는 모델 타입 '{model_type}', 기본 모델 cnn_lstm 사용")
     model_cls = MODEL_CLASSES.get(model_type, CNNLSTMPricePredictor)
     return model_cls(input_size=input_size)
+
 
 def format_prediction(signal: float, rate: float) -> dict:
     direction = "롱" if signal > 0.5 else "숏"
