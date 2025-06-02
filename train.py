@@ -13,6 +13,7 @@ from logger import strategy_stats
 import csv
 import hashlib
 from data.utils import create_dataset
+from window_optimizer import find_best_window
 
 DEVICE = torch.device("cpu")
 DIR = "/persistent"; MODEL_DIR, LOG_DIR = f"{DIR}/models", f"{DIR}/logs"
@@ -25,74 +26,6 @@ def get_feature_hash_from_tensor(x):
     last = x[-1].tolist()
     rounded = [round(float(val), 4) for val in last]
     return hashlib.sha1(",".join(map(str, rounded)).encode()).hexdigest()
-
-def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
-    try:
-        df = get_kline_by_strategy(symbol, strategy)
-        if df is None or len(df) < max(window_list) + 10:
-            print(f"[스킵] {symbol}-{strategy} 데이터 부족")
-            return 20
-
-        df_feat = compute_features(symbol, df, strategy)
-        if df_feat is None or df_feat.empty or len(df_feat) < max(window_list) + 1:
-            print(f"[스킵] {symbol}-{strategy} feature 부족")
-            return 20
-
-        scaler = MinMaxScaler()
-        scaled = scaler.fit_transform(df_feat.drop(columns=["timestamp"]).values)
-
-        feature_dicts = []
-        for i, row in enumerate(scaled):
-            row_dict = dict(zip(df_feat.columns.drop("timestamp"), row))
-            row_dict["timestamp"] = df_feat.iloc[i]["timestamp"]
-            feature_dicts.append(row_dict)
-
-        best_score, best_window = -1, window_list[0]
-
-        for window in window_list:
-            X, y = create_dataset(feature_dicts, window, strategy)
-            if len(X) == 0:
-                continue
-
-            input_size = X.shape[2]
-            model = get_model("lstm", input_size=input_size)
-            model.train()
-
-            X_tensor = torch.tensor(X, dtype=torch.float32)
-            y_tensor = torch.tensor(y, dtype=torch.float32)
-            val_len = int(len(X_tensor) * 0.2)
-            if val_len == 0:
-                continue
-
-            train_X = X_tensor[:-val_len]
-            train_y = y_tensor[:-val_len]
-            val_X = X_tensor[-val_len:]
-            val_y = y_tensor[-val_len:]
-
-            optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-            criterion = nn.MSELoss()
-
-            for _ in range(3):
-                pred = model(train_X).squeeze()
-                loss = criterion(pred, train_y)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-            with torch.no_grad():
-                pred_val = model(val_X).squeeze().numpy()
-                acc = r2_score(val_y.numpy(), pred_val)
-                conf = np.mean(np.abs(pred_val))
-                score = acc * conf
-                if score > best_score:
-                    best_score = score
-                    best_window = window
-
-    except Exception as e:
-        print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
-        return 20
-
-    return best_window
 
     
 def save_model_metadata(s, t, m, a, f1, l):
