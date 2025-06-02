@@ -103,7 +103,8 @@ def get_dynamic_eval_wait(s):
 import hashlib
 
 def get_feature_hash(feature_row):
-    rounded = [round(float(x), 4) for x in feature_row]
+    # ✅ 해시 정밀도 완화 → 유사한 피처도 같은 실패로 간주
+    rounded = [round(float(x), 2) for x in feature_row]
     joined = ",".join(map(str, rounded))
     return hashlib.sha1(joined.encode()).hexdigest()
 
