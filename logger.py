@@ -21,6 +21,16 @@ def get_model_success_rate(s, t, m, min_total=10):
     total = r["success"] + r["fail"]
     return 0.5 if total < min_total else r["success"] / total
 
+def load_failure_count():
+    FAILURE_LOG = "/persistent/logs/failure_count.csv"
+    if not os.path.exists(FAILURE_LOG):
+        return {}
+    try:
+        with open(FAILURE_LOG, "r", encoding="utf-8-sig") as f:
+            return {f"{r['symbol']}-{r['strategy']}": int(r["failures"]) for r in csv.DictReader(f)}
+    except Exception:
+        return {}
+
 def get_actual_success_rate(strategy):
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
