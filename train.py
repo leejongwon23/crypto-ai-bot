@@ -16,6 +16,8 @@ from data.utils import create_dataset
 from window_optimizer import find_best_window
 from logger import load_failure_count  # ✅ 실패횟수 로더 추가
 
+STRATEGY_WRONG_REP = {"단기": 4, "중기": 6, "장기": 8}
+
 DEVICE = torch.device("cpu")
 DIR = "/persistent"; MODEL_DIR, LOG_DIR = f"{DIR}/models", f"{DIR}/logs"
 os.makedirs(MODEL_DIR, exist_ok=True); os.makedirs(LOG_DIR, exist_ok=True)
