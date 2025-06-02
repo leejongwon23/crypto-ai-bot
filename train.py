@@ -24,7 +24,8 @@ def get_feature_hash_from_tensor(x):
     if x.ndim != 2 or x.shape[0] == 0:
         return "invalid"
     last = x[-1].tolist()
-    rounded = [round(float(val), 4) for val in last]
+    # ✅ 4자리 → 2자리 반올림으로 유사 실패군까지 포착
+    rounded = [round(float(val), 2) for val in last]
     return hashlib.sha1(",".join(map(str, rounded)).encode()).hexdigest()
 
     
