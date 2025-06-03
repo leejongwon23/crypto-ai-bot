@@ -200,7 +200,97 @@ def train_model_loop(strategy):
         except Exception as e:
             print(f"[단일 학습 오류] {sym}-{strategy} → {e}"); sys.stdout.flush()
 
-def train_model(symbol, strategy):
-    train_one_model(symbol, strategy)
+def train_model(symbol, strategy, max_epochs=30):
+    import torch
+    import torch.nn as nn
+    from sklearn.metrics import accuracy_score, f1_score
+    from sklearn.model_selection import train_test_split
+    from sklearn.preprocessing import MinMaxScaler
+    from data.utils import get_kline_by_strategy, compute_features, create_dataset
+    from model.base_model import get_model
+    from logger import log_training_result, load_failure_count
+    import os, numpy as np
+
+    DEVICE = torch.device("cpu")
+    MODEL_DIR = "/persistent/models"
+    os.makedirs(MODEL_DIR, exist_ok=True)
+
+    print(f"[학습 시작] {symbol} - {strategy}")
+
+    df = get_kline_by_strategy(symbol, strategy)
+    if df is None or df.empty:
+        print("[스킵] 데이터 없음")
+        return
+
+    feat_df = compute_features(symbol, df, strategy)
+    if feat_df is None or feat_df.empty:
+        print("[스킵] 피처 생성 실패")
+        return
+
+    feat_df = feat_df.dropna()
+    if "timestamp" not in feat_df.columns:
+        print("[스킵] timestamp 없음")
+        return
+
+    features = feat_df.to_dict(orient="records")
+    window = 20
+
+    X, y = create_dataset(features, window=window, strategy=strategy)
+    if X.size == 0 or y.size == 0:
+        print("[스킵] 학습용 데이터셋 생성 실패")
+        return
+
+    X = MinMaxScaler().fit_transform(X.reshape(-1, X.shape[-1])).reshape(X.shape)
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    failure_map = load_failure_count()
+    key = f"{symbol}-{strategy}"
+    fail_count = failure_map.get(key, 0)
+
+    # ✅ 실패횟수 기반 반복 학습 횟수 조정
+    rep = 1
+    if fail_count >= 3:
+        rep = 2
+    if fail_count >= 6:
+        rep = 3
+    if strategy == "장기":
+        rep += 1  # 고위험 전략 우선 보정
+
+    print(f"[학습 반복 횟수] 실패 {fail_count}회 → rep={rep}")
+
+    for model_type in ["lstm", "cnn_lstm", "transformer"]:
+        print(f"▶ 모델 유형: {model_type}")
+        try:
+            model = get_model(model_type=model_type, input_size=X.shape[2]).to(DEVICE)
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+            criterion = nn.MSELoss()
+
+            for _ in range(rep):
+                for epoch in range(max_epochs):
+                    model.train()
+                    optimizer.zero_grad()
+                    outputs = model(torch.tensor(X_train, dtype=torch.float32).to(DEVICE))
+                    loss = criterion(outputs, torch.tensor(y_train, dtype=torch.float32).to(DEVICE))
+                    loss.backward()
+                    optimizer.step()
+
+            model.eval()
+            with torch.no_grad():
+                preds = model(torch.tensor(X_val, dtype=torch.float32).to(DEVICE)).cpu().numpy()
+                preds_bin = (preds > 0).astype(int)
+                labels_bin = (y_val > 0).astype(int)
+                acc = accuracy_score(labels_bin, preds_bin)
+                f1 = f1_score(labels_bin, preds_bin)
+                loss_val = criterion(torch.tensor(preds), torch.tensor(y_val)).item()
+
+            model_path = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.pt")
+            torch.save(model.state_dict(), model_path)
+
+            log_training_result(symbol, strategy, model_type, acc, f1, loss_val)
+            print(f"✅ {model_type} 저장 완료: acc={acc:.3f}, f1={f1:.3f}, loss={loss_val:.4f}")
+
+        except Exception as e:
+            print(f"[오류] {model_type} 학습 실패: {e}")
+
 
 
