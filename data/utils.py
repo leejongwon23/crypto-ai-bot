@@ -68,6 +68,7 @@ def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
     import pandas as pd
 
+    # ✅ 1. timestamp 전처리
     for row in features:
         if isinstance(row.get("timestamp"), str):
             row["timestamp"] = pd.to_datetime(row["timestamp"], errors="coerce")
@@ -75,9 +76,14 @@ def create_dataset(features, window=20, strategy="단기"):
 
     X, y = [], []
 
-    # ✅ 예측 타깃 구간 설정 (단기=4h, 중기=1d, 장기=7d)
+    # ✅ 2. 전략별 예측 타임 프레임 설정
     horizon_map = {"단기": 4, "중기": 24, "장기": 168}
     target_hours = horizon_map.get(strategy, 4)
+
+    # ✅ 3. 수익률 구간 정의 (폭락 ~ 폭등까지 16개 클래스)
+    bins = [-np.inf, -0.1, -0.07, -0.05, -0.03, -0.015, -0.005,
+             0.005, 0.015, 0.03, 0.05, 0.07, 0.1, 0.15, 0.2, np.inf]
+    # → 클래스 0: -10% 이하 / 클래스 15: +20% 이상
 
     col_order = [k for k in features[0].keys() if k != "timestamp"]
 
@@ -94,7 +100,7 @@ def create_dataset(features, window=20, strategy="단기"):
         if base_price == 0 or pd.isna(base_price):
             continue
 
-        # ✅ 예측 구간의 최대 수익률과 평균 수익률을 함께 고려
+        # ✅ 4. 예측 구간 미래 가격 추출
         future_slice = features[i + window:]
         future_prices = [
             r["close"] for r in future_slice
@@ -104,15 +110,17 @@ def create_dataset(features, window=20, strategy="단기"):
         if len(future_prices) < 3:
             continue
 
-        # ✅ 평균 수익률 기반 예측 타깃 설정 (노이즈 완화)
+        # ✅ 5. 평균 수익률 계산
         target_price = np.mean(future_prices)
         gain = (target_price - base_price) / base_price
         if not np.isfinite(gain):
             continue
 
-        # ✅ 스케일 안정화 (50배 제거 → 수치 왜곡 최소화)
-        y.append(round(gain, 5))  # 소수점 5자리까지만
+        # ✅ 6. 수익률 → 클래스 변환
+        class_label = np.digitize(gain, bins) - 1  # digitize는 1부터 시작하므로 -1
+        y.append(class_label)
 
+        # ✅ 7. 입력 시퀀스 구성
         X.append([[r[col] for col in col_order] for r in x_seq])
 
     if not X:
@@ -125,6 +133,7 @@ def create_dataset(features, window=20, strategy="단기"):
         return np.array([]), np.array([])
 
     return np.array([x for x, _ in filt]), np.array([l for _, l in filt])
+
 
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 200):
