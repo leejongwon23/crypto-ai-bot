@@ -104,41 +104,44 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
             loader = DataLoader(train_set, batch_size=batch, shuffle=True)
             total_train_count = 0
 
-            for _ in range(epochs):
-                for _ in range(rep_wrong):
-                    wrong_data = load_training_prediction_data(sym, strat, input_size, win, source_type="wrong")
-                    if not wrong_data: continue
-                    xb_all, yb_all = zip(*[(xb, yb) for xb, yb in wrong_data
-                                           if xb.shape[1:] == (win, input_size) and np.isfinite(yb) and abs(yb) < 2]) if wrong_data else ([], [])
-                    if len(xb_all) >= 2:
-                        xb_tensor = torch.stack(xb_all)
-                        yb_tensor = torch.tensor(yb_all, dtype=torch.float32).view(-1)
-                        for i in range(0, len(xb_tensor), batch):
-                            xb = xb_tensor[i:i+batch]
-                            yb = yb_tensor[i:i+batch]
-                            for j in range(len(xb)):
-                                xb_j = xb[j].unsqueeze(0)
-                                yb_j = yb[j].unsqueeze(0)
-                                if xb_j.shape[1] == 0:
-                                    continue
-                                feature_hash = get_feature_hash_from_tensor(xb_j[0])
-                                direction = "롱" if yb_j.item() >= 0 else "숏"
-                                if (sym, strat, direction, feature_hash) in failure_hashes:
-                                    continue
-                                rate = model(xb_j)
-                                if isinstance(rate, tuple): rate = rate[0]
-                                rate = rate.view_as(yb_j)
-                                loss = lossfn(rate, yb_j)
-                                optim.zero_grad(); loss.backward(); optim.step()
-                                total_train_count += 1
+            # ✅ 실패 학습 최소 3회 보장
+            min_wrong_repeat = max(rep_wrong, 3)
+            for _ in range(min_wrong_repeat):
+                wrong_data = load_training_prediction_data(sym, strat, input_size, win, source_type="wrong")
+                if not wrong_data: continue
+                xb_all, yb_all = zip(*[(xb, yb) for xb, yb in wrong_data
+                                       if xb.shape[1:] == (win, input_size) and np.isfinite(yb) and abs(yb) < 2]) if wrong_data else ([], [])
+                if len(xb_all) >= 2:
+                    xb_tensor = torch.stack(xb_all)
+                    yb_tensor = torch.tensor(yb_all, dtype=torch.float32).view(-1)
+                    for i in range(0, len(xb_tensor), batch):
+                        xb = xb_tensor[i:i+batch]
+                        yb = yb_tensor[i:i+batch]
+                        for j in range(len(xb)):
+                            xb_j = xb[j].unsqueeze(0)
+                            yb_j = yb[j].unsqueeze(0)
+                            if xb_j.shape[1] == 0:
+                                continue
+                            feature_hash = get_feature_hash_from_tensor(xb_j[0])
+                            direction = "롱" if yb_j.item() >= 0 else "숏"
+                            if (sym, strat, direction, feature_hash) in failure_hashes:
+                                continue
+                            rate = model(xb_j)
+                            if isinstance(rate, tuple): rate = rate[0]
+                            rate = rate.view_as(yb_j)
+                            loss = lossfn(rate, yb_j)
+                            optim.zero_grad(); loss.backward(); optim.step()
+                            total_train_count += 1
 
-            for xb, yb in loader:
-                rate = model(xb)
-                if isinstance(rate, tuple): rate = rate[0]
-                rate = rate.view_as(yb)
-                loss = lossfn(rate, yb)
-                optim.zero_grad(); loss.backward(); optim.step()
-                total_train_count += 1
+            # ✅ 전체 학습 데이터 반복 학습 (epochs만큼)
+            for _ in range(epochs):
+                for xb, yb in loader:
+                    rate = model(xb)
+                    if isinstance(rate, tuple): rate = rate[0]
+                    rate = rate.view_as(yb)
+                    loss = lossfn(rate, yb)
+                    optim.zero_grad(); loss.backward(); optim.step()
+                    total_train_count += 1
 
             model.eval()
             with torch.no_grad():
