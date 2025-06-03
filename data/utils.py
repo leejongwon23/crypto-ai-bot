@@ -182,7 +182,6 @@ def get_realtime_prices():
 def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFrame:
     df = df.copy()
 
-    # ✅ timestamp 복원 (datetime → timestamp)
     if "datetime" in df.columns:
         df["timestamp"] = df["datetime"]
 
@@ -227,6 +226,15 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     df['btc_dominance'] = btc_dom
     df['btc_dominance_diff'] = btc_dom - df['btc_dominance'].rolling(3).mean()
 
+    # ✅ 추가 고급 피처
+    df['candle_range'] = df['high'] - df['low']
+    df['candle_body'] = (df['close'] - df['open']).abs()
+    df['candle_body_ratio'] = df['candle_body'] / (df['candle_range'] + 1e-6)
+    df['candle_upper_shadow_ratio'] = (df['high'] - df[['open', 'close']].max(axis=1)) / (df['candle_range'] + 1e-6)
+    df['candle_lower_shadow_ratio'] = (df[['open', 'close']].min(axis=1) - df['low']) / (df['candle_range'] + 1e-6)
+    df['range_ratio'] = df['candle_range'] / (df['close'] + 1e-6)
+    df['volume_ratio'] = df['volume'] / (df['volume'].rolling(20).mean() + 1e-6)
+
     if strategy == "중기":
         plus_dm = df['high'].diff()
         minus_dm = df['low'].diff()
@@ -248,7 +256,9 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     base = [
         "timestamp", "close", "volume", "ma5", "ma20", "rsi", "macd", "bollinger", "volatility",
         "trend_score", "current_vs_ma20", "volume_delta", "obv", "cci", "stoch_rsi",
-        "btc_dominance", "btc_dominance_diff"
+        "btc_dominance", "btc_dominance_diff",
+        "candle_body_ratio", "candle_upper_shadow_ratio", "candle_lower_shadow_ratio",
+        "range_ratio", "volume_ratio"
     ]
     mid_only = ["adx", "willr"]
     long_only = ["mfi", "roc"]
@@ -261,3 +271,4 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
 
     df = df[base + extra]
     return df.dropna()
+
