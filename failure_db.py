@@ -47,3 +47,32 @@ def load_existing_failure_hashes():
             return set((r[0], r[1], r[2], r[3]) for r in rows)
     except:
         return set()
+
+# ✅ 4. 실패 사유 자동 분석 함수
+def analyze_failure_reason(rate, volatility=None):
+    if not isinstance(rate, float):
+        return "불명확"
+    if abs(rate) < 0.005:
+        return "미약한 움직임"
+    if rate > 0.02:
+        return "과도한 롱 추정 실패"
+    if rate < -0.02:
+        return "과도한 숏 추정 실패"
+    if volatility is not None and volatility > 0.05:
+        return "고변동성 구간 실패"
+    return "기타 실패"
+
+# ✅ 5. 사유별 실패 클러스터 집계 함수 (선택적 사용)
+def group_failures_by_reason(limit=100):
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute("""
+                SELECT reason, COUNT(*) as count
+                FROM failure_patterns
+                GROUP BY reason
+                ORDER BY count DESC
+                LIMIT ?
+            """, (limit,)).fetchall()
+            return [{"reason": r[0], "count": r[1]} for r in rows]
+    except:
+        return []
