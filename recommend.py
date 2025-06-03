@@ -1,11 +1,10 @@
 import os, csv, sys, time, threading, datetime, pytz
 from telegram_bot import send_message
 from predict import predict
-from logger import log_prediction, strategy_stats, get_strategy_eval_count
+from logger import log_prediction, strategy_stats, get_strategy_eval_count, evaluate_predictions
 from data.utils import SYMBOLS, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
-from logger import evaluate_predictions
 
 STRATEGY_VOL = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
@@ -50,16 +49,12 @@ def get_symbols_by_volatility(strategy):
             df = get_kline_by_strategy(symbol, strategy)
             if df is None or len(df) < 60:
                 continue
-
             r_std = df["close"].pct_change().rolling(20).std().iloc[-1]
             b_std = df["close"].pct_change().rolling(60).std().iloc[-1]
-
             if r_std >= th and r_std / (b_std + 1e-8) >= 1.2:
                 result.append({"symbol": symbol, "volatility": r_std})
-
         except Exception as e:
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
-
     return sorted(result, key=lambda x: -x["volatility"])
 
 def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=True):
@@ -87,32 +82,34 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             for result in pred_results:
                 if not isinstance(result, dict) or result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
                     reason = result.get("reason", "예측 실패") if isinstance(result, dict) else "predict() 반환 오류"
-                    log_prediction(symbol, strategy, "N/A", 0, 0, now_kst().isoformat(),
+                    log_prediction(symbol, strategy, "예측실패", 0, 0, now_kst().isoformat(),
                                    model=result.get("model", "unknown"),
                                    success=False, reason=reason,
                                    rate=0.0, return_value=0.0, volatility=False,
-                                   source=source)
+                                   source=source, predicted_class=-1)
                     log_audit(symbol, strategy, result, reason)
                     continue
 
                 result["volatility"] = vol
-                result["return"] = result.get("rate", 0.0)
+                result["return"] = result.get("expected_return", 0.0)
                 result["source"] = result.get("source", source)
+                result["predicted_class"] = result.get("class", -1)
 
                 log_prediction(
                     symbol=result.get("symbol", symbol),
                     strategy=result.get("strategy", strategy),
-                    direction=result.get("direction", "예측실패"),
+                    direction=f"class-{result.get('class', -1)}",
                     entry_price=result.get("price", 0),
-                    target_price=result.get("target", 0),
+                    target_price=result.get("price", 0) * (1 + result.get("expected_return", 0)),
                     timestamp=result.get("timestamp", now_kst().isoformat()),
                     model=result.get("model", "unknown"),
                     success=result.get("success", True),
                     reason=result.get("reason", "예측 성공"),
-                    rate=result.get("rate", 0.0),
-                    return_value=result.get("return", 0.0),
+                    rate=result.get("expected_return", 0.0),
+                    return_value=result.get("expected_return", 0.0),
                     volatility=vol > 0,
-                    source=result.get("source", source)
+                    source=result.get("source", source),
+                    predicted_class=result.get("class", -1)
                 )
                 log_audit(symbol, strategy, result, "예측 성공")
 
@@ -129,7 +126,6 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
 
     save_failure_count(fmap)
 
-    # ✅ 평가 실행 추가
     try:
         print("[평가 실행] evaluate_predictions 호출")
         evaluate_predictions(get_kline_by_strategy)
@@ -149,7 +145,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
     top_by_strategy = {}
     for r in filtered_by_success:
         s = r["strategy"]
-        if s not in top_by_strategy or abs(r["rate"]) > abs(top_by_strategy[s]["rate"]):
+        if s not in top_by_strategy or r["expected_return"] > top_by_strategy[s]["expected_return"]:
             top_by_strategy[s] = r
 
     for s, res in top_by_strategy.items():
@@ -158,7 +154,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             send_message(msg)
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
                 csv.writer(f).writerow([now_kst().isoformat(), res["symbol"], res["strategy"], msg])
-            print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → {res['direction']} | 수익률: {res['rate']:.2%}")
+            print(f"✅ 메시지 전송: {res['symbol']}-{res['strategy']} → 클래스: {res['class']} | 기대수익률: {res['expected_return']:.2%}")
         except Exception as e:
             print(f"[ERROR] 메시지 전송 실패: {e}")
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
@@ -166,7 +162,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
 
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
-    run_prediction_loop(strategy, [{"symbol": symbol}], source="변동성", allow_prediction=True)
+    run_prediction_loop(strategy, [{"symbol": symbol}], source="단일", allow_prediction=True)
 
 def main(strategy=None, force=False, allow_prediction=True):
     print(">>> [main] recommend.py 실행")
