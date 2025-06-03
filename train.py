@@ -104,7 +104,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
         train_set, _ = random_split(dataset, [len(dataset)-val_len, val_len])
 
         failure_hashes = load_existing_failure_hashes()
-        from failure_db import get_frequent_failures, group_failures_by_reason
         frequent_failures = get_frequent_failures(min_count=5)
         top_failure_reasons = [r["reason"] for r in group_failures_by_reason(limit=3)]
 
