@@ -81,7 +81,6 @@ def predict(symbol, strategy, source="일반"):
         target_hours = horizon_map.get(strategy, 4)
         period_label = f"{target_hours}h"
 
-        # ✅ 실패 해시 불러오기
         failure_hashes = load_existing_failure_hashes()
 
         predictions = []
@@ -95,7 +94,10 @@ def predict(symbol, strategy, source="일반"):
                     output = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     if isinstance(output, tuple):
                         output = output[0]
-                    raw_rate = float(output.squeeze()) 
+                    raw_rate = float(output.squeeze())
+
+                    # ✅ 예측값이 학습 시 50배 확대되었으므로 다시 나눠줌
+                    raw_rate /= 50.0
 
                     if np.isnan(raw_rate):
                         predictions.append(failed_result(symbol, strategy, model_type, "NaN 예측값", source=source))
@@ -137,7 +139,6 @@ def predict(symbol, strategy, source="일반"):
             except Exception as e:
                 failed = failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source=source)
 
-                # ✅ 실패 해시 저장
                 try:
                     feature_hash = get_feature_hash(X[0])
                     key = (symbol, strategy, "롱" if raw_rate >= 0 else "숏", feature_hash)
@@ -153,3 +154,4 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source=source)]
+
