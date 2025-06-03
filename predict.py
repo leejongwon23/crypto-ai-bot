@@ -82,10 +82,15 @@ def predict(symbol, strategy, source="일반"):
         period_label = f"{target_hours}h"
 
         failure_hashes = load_existing_failure_hashes()
-
         predictions = []
+
         for model_type, path in model_files.items():
             try:
+                weight = get_model_weight(model_type, strategy, symbol)
+                if weight <= 0.0:
+                    print(f"[SKIP] {symbol}-{strategy}-{model_type}: 정확도 미달 (가중치={weight})")
+                    continue
+
                 model = get_model(model_type, X.shape[2])
                 model.load_state_dict(torch.load(path, map_location=DEVICE))
                 model.eval()
@@ -94,10 +99,7 @@ def predict(symbol, strategy, source="일반"):
                     output = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     if isinstance(output, tuple):
                         output = output[0]
-                    raw_rate = float(output.squeeze())
-
-                    # ✅ 예측값이 학습 시 50배 확대되었으므로 다시 나눠줌
-                    raw_rate /= 50.0
+                    raw_rate = float(output.squeeze()) / 50.0  # ✅ 예측 시 복원
 
                     if np.isnan(raw_rate):
                         predictions.append(failed_result(symbol, strategy, model_type, "NaN 예측값", source=source))
@@ -106,24 +108,17 @@ def predict(symbol, strategy, source="일반"):
                         predictions.append(failed_result(symbol, strategy, model_type, "price NaN 발생", source=source))
                         continue
 
-                    if raw_rate >= 0:
-                        direction = "롱"
-                        rate = raw_rate
-                        target = raw_close * (1 + rate)
-                        stop = raw_close * (1 - STOP_LOSS_PCT)
-                    else:
-                        direction = "숏"
-                        rate = -raw_rate
-                        target = raw_close * (1 - rate)
-                        stop = raw_close * (1 + STOP_LOSS_PCT)
+                    direction = "롱" if raw_rate >= 0 else "숏"
+                    rate = abs(raw_rate)
+                    target = raw_close * (1 + rate) if direction == "롱" else raw_close * (1 - rate)
+                    stop = raw_close * (1 - STOP_LOSS_PCT) if direction == "롱" else raw_close * (1 + STOP_LOSS_PCT)
 
                     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
-                    success = True
 
                     log_prediction(
                         symbol=symbol, strategy=strategy, direction=direction,
                         entry_price=raw_close, target_price=target,
-                        model=model_type, success=success,
+                        model=model_type, success=True,
                         reason=f"{period_label} 예측 완료",
                         rate=rate, timestamp=t,
                         volatility=is_volatility, source=source
@@ -133,12 +128,11 @@ def predict(symbol, strategy, source="일반"):
                         "symbol": symbol, "strategy": strategy, "model": model_type,
                         "direction": direction, "rate": rate, "price": raw_close,
                         "target": target, "stop": stop, "reason": f"{period_label} 예측 완료",
-                        "success": success, "timestamp": t, "source": source
+                        "success": True, "timestamp": t, "source": source
                     })
 
             except Exception as e:
                 failed = failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source=source)
-
                 try:
                     feature_hash = get_feature_hash(X[0])
                     key = (symbol, strategy, "롱" if raw_rate >= 0 else "숏", feature_hash)
@@ -147,11 +141,11 @@ def predict(symbol, strategy, source="일반"):
                         failure_hashes.add(key)
                 except Exception as log_err:
                     print(f"[실패 해시 기록 오류] {log_err}")
-
                 predictions.append(failed)
 
         return predictions if predictions else [failed_result(symbol, strategy, "unknown", "모든 모델 예측 실패", source=source)]
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source=source)]
+
 
