@@ -104,7 +104,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
             loader = DataLoader(train_set, batch_size=batch, shuffle=True)
             total_train_count = 0
 
-            # ✅ 실패 학습 최소 3회 보장 + 실패 유형 기반 반복 학습
             from failure_db import group_failures_by_reason
             top_failure_reasons = [r["reason"] for r in group_failures_by_reason(limit=3)]
 
@@ -148,7 +147,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                             optim.zero_grad(); loss.backward(); optim.step()
                             total_train_count += 1
 
-            # ✅ 전체 학습 데이터 반복 학습 (epochs만큼)
             for _ in range(epochs):
                 for xb, yb in loader:
                     rate = model(xb)
@@ -163,12 +161,20 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                 rate = model(val_X)
                 if isinstance(rate, tuple): rate = rate[0]
                 rate = rate.view_as(val_y)
+
                 acc = r2_score(val_y.numpy(), rate.numpy())
+
+                # ✅ 방향 기준 정확도 추가 (정확도 강화 핵심)
+                actual_dir = (val_y.numpy() >= 0).astype(int)
+                pred_dir = (rate.numpy() >= 0).astype(int)
+                dir_acc = accuracy_score(actual_dir, pred_dir)
+
                 f1 = mean_squared_error(val_y.numpy(), rate.numpy())
                 logloss = np.mean(np.square(val_y.numpy() - rate.numpy()))
-                logger.log_training_result(sym, strat, model_type, acc, f1, logloss)
+
+                logger.log_training_result(sym, strat, model_type, dir_acc, f1, logloss)
                 torch.save(model.state_dict(), model_path)
-                save_model_metadata(sym, strat, model_type, acc, f1, logloss)
+                save_model_metadata(sym, strat, model_type, dir_acc, f1, logloss)
                 imps = compute_feature_importance(model, val_X, val_y, list(df_feat.columns))
                 save_feature_importance(imps, sym, strat, model_type)
 
@@ -178,6 +184,7 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
             logger.log_training_result(sym, strat, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except Exception as log_err:
             print(f"[로그 기록 실패] {sym}-{strat} → {log_err}"); sys.stdout.flush()
+
 
 
 def train_all_models():
