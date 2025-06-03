@@ -46,6 +46,21 @@ def save_model_metadata(s, t, m, a, f1, l):
     with open(path, "w", encoding="utf-8") as f: json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"🗘저장됨: {path}"); sys.stdout.flush()
 
+# ✅ 자주 실패한 해시를 찾는 함수
+def get_frequent_failures(min_count=5):
+    from collections import Counter
+    import sqlite3
+    DB_PATH = "/persistent/logs/failure_patterns.db"
+    counter = Counter()
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute("SELECT hash FROM failure_patterns").fetchall()
+            for row in rows:
+                counter[row[0]] += 1
+    except:
+        return set()
+    return {h for h, cnt in counter.items() if cnt >= min_count}
+
 def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep=8):
     print(f"[train] 🔄 {sym}-{strat} 시작"); sys.stdout.flush()
     try:
@@ -87,7 +102,13 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
         val_y = torch.tensor(y_raw[-val_len:], dtype=torch.float32).view(-1)
         dataset = TensorDataset(torch.tensor(X_raw, dtype=torch.float32), torch.tensor(y_raw, dtype=torch.float32))
         train_set, _ = random_split(dataset, [len(dataset)-val_len, val_len])
+
         failure_hashes = load_existing_failure_hashes()
+        from failure_db import get_frequent_failures, group_failures_by_reason
+        frequent_failures = get_frequent_failures(min_count=5)
+        top_failure_reasons = [r["reason"] for r in group_failures_by_reason(limit=3)]
+
+        min_wrong_repeat = max(rep_wrong, 3)
 
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size).train()
@@ -104,10 +125,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
             loader = DataLoader(train_set, batch_size=batch, shuffle=True)
             total_train_count = 0
 
-            from failure_db import group_failures_by_reason
-            top_failure_reasons = [r["reason"] for r in group_failures_by_reason(limit=3)]
-
-            min_wrong_repeat = max(rep_wrong, 3)
             for _ in range(min_wrong_repeat):
                 wrong_data = load_training_prediction_data(sym, strat, input_size, win, source_type="wrong")
                 if not wrong_data: continue
@@ -138,7 +155,7 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
                                 continue
                             feature_hash = get_feature_hash_from_tensor(xb_j[0])
                             direction = "롱" if yb_j.item() >= 0 else "숏"
-                            if (sym, strat, direction, feature_hash) in failure_hashes:
+                            if (sym, strat, direction, feature_hash) in failure_hashes or feature_hash in frequent_failures:
                                 continue
                             rate = model(xb_j)
                             if isinstance(rate, tuple): rate = rate[0]
@@ -164,7 +181,7 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
 
                 acc = r2_score(val_y.numpy(), rate.numpy())
 
-                # ✅ 방향 기준 정확도 추가 (정확도 강화 핵심)
+                # ✅ 방향 기준 정확도
                 actual_dir = (val_y.numpy() >= 0).astype(int)
                 pred_dir = (rate.numpy() >= 0).astype(int)
                 dir_acc = accuracy_score(actual_dir, pred_dir)
@@ -184,7 +201,6 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
             logger.log_training_result(sym, strat, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except Exception as log_err:
             print(f"[로그 기록 실패] {sym}-{strat} → {log_err}"); sys.stdout.flush()
-
 
 
 def train_all_models():
