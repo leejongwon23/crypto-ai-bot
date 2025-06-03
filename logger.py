@@ -119,7 +119,7 @@ def get_feature_hash(feature_row):
     return hashlib.sha1(joined.encode()).hexdigest()
 
 def evaluate_predictions(get_price_fn):
-    from failure_db import ensure_failure_db, insert_failure_record, load_existing_failure_hashes
+    from failure_db import ensure_failure_db, insert_failure_record, load_existing_failure_hashes, analyze_failure_reason
     ensure_failure_db()
 
     if not os.path.exists(PREDICTION_LOG):
@@ -127,7 +127,6 @@ def evaluate_predictions(get_price_fn):
     try:
         rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
 
-        # ✅ 예측 로그가 비어 있는 경우 평가 건너뛰기
         if not rows:
             print("[스킵] 예측 결과가 하나도 없어서 평가를 건너뜁니다.")
             return
@@ -137,7 +136,7 @@ def evaluate_predictions(get_price_fn):
 
     now = now_kst()
     updated, evaluated = [], []
-    eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}  # 시간 단위
+    eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
 
     for r in rows:
         try:
@@ -197,7 +196,6 @@ def evaluate_predictions(get_price_fn):
             })
         updated.append(r)
 
-    # ✅ 평가 결과 저장
     if evaluated and len(evaluated) > 0:
         with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as ef:
             w = csv.DictWriter(ef, fieldnames=evaluated[0].keys())
@@ -228,13 +226,18 @@ def evaluate_predictions(get_price_fn):
                     key = (symbol, strategy, r.get("direction", "예측실패"), hash_value)
                     if key in existing_hashes:
                         continue
+
+                    failure_reason = analyze_failure_reason(
+                        float(r.get("rate", 0.0)),
+                        df_feat["volatility"].iloc[-1] if "volatility" in df_feat.columns else None
+                    )
+                    r["reason"] = failure_reason
                     insert_failure_record(r, hash_value)
                     existing_hashes.add(key)
             except Exception as e:
                 print(f"[실패패턴 기록 오류] {e}")
                 sys.stdout.flush()
 
-    # ✅ 예측 로그 업데이트
     with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader()
