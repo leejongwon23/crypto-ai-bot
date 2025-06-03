@@ -2,52 +2,57 @@ import os, torch, numpy as np, pandas as pd, datetime, pytz, sys
 from sklearn.preprocessing import MinMaxScaler
 from data.utils import get_kline_by_strategy, compute_features
 from model.base_model import get_model
-from model_weight_loader import get_model_weight  # ✅ 가중치 로더
+from model_weight_loader import get_model_weight
 from window_optimizer import find_best_window
 from logger import log_prediction
 from failure_db import insert_failure_record, load_existing_failure_hashes
 from logger import get_feature_hash
 
-DEVICE, MODEL_DIR = torch.device("cpu"), "/persistent/models"
-STOP_LOSS_PCT = 0.02
+DEVICE = torch.device("cpu")
+MODEL_DIR = "/persistent/models"
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+NUM_CLASSES = 16
+
+# 클래스 → 수익률 구간 중앙값 추정 (예: 평가/로그용)
+def class_to_expected_return(cls):
+    bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
+             0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
+    return bins[cls] if 0 <= cls < len(bins) else 0.0
 
 def failed_result(symbol, strategy, model_type, reason, source="일반"):
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
-    is_volatility = "_v" in symbol
     try:
-        log_prediction(symbol, strategy, direction="예측실패", entry_price=0, target_price=0,
-                       model=model_type, success=False, reason=reason,
-                       rate=0.0, timestamp=t, volatility=is_volatility, source=source)
-    except Exception as e:
-        print(f"[경고] log_prediction 실패: {e}")
-        sys.stdout.flush()
+        log_prediction(
+            symbol=symbol, strategy=strategy,
+            direction="예측실패", entry_price=0, target_price=0,
+            model=model_type, success=False, reason=reason,
+            rate=0.0, timestamp=t, volatility=False, source=source,
+            predicted_class=-1
+        )
+    except: pass
     return {
-        "symbol": symbol, "strategy": strategy, "success": False, "reason": reason,
-        "direction": "예측실패", "model": model_type, "rate": 0.0,
-        "price": 0.0, "target": 0.0, "stop": 0.0, "timestamp": t,
-        "source": source
+        "symbol": symbol, "strategy": strategy, "success": False,
+        "reason": reason, "model": model_type, "rate": 0.0,
+        "class": -1, "timestamp": t, "source": source
     }
 
 def predict(symbol, strategy, source="일반"):
     try:
         print(f"[PREDICT] {symbol}-{strategy} 시작")
         sys.stdout.flush()
-        is_volatility = "_v" in symbol
         window = find_best_window(symbol, strategy)
-
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < window + 1:
-            return [failed_result(symbol, strategy, "unknown", "데이터 부족", source=source)]
+            return [failed_result(symbol, strategy, "unknown", "데이터 부족", source)]
 
-        raw_close = df['close'].iloc[-1]
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.dropna().shape[0] < window + 1:
-            return [failed_result(symbol, strategy, "unknown", "feature 부족", source=source)]
+            return [failed_result(symbol, strategy, "unknown", "feature 부족", source)]
 
         if "timestamp" not in feat.columns:
-            return [failed_result(symbol, strategy, "unknown", "timestamp 없음", source=source)]
+            return [failed_result(symbol, strategy, "unknown", "timestamp 없음", source)]
 
+        raw_close = df["close"].iloc[-1]
         raw_feat = feat.copy()
         timestamps = raw_feat["timestamp"]
         feat_scaled = MinMaxScaler().fit_transform(raw_feat.drop(columns=["timestamp"]))
@@ -55,40 +60,27 @@ def predict(symbol, strategy, source="일반"):
         feat["timestamp"] = timestamps.values
 
         if feat.shape[0] < window:
-            return [failed_result(symbol, strategy, "unknown", "시퀀스 부족", source=source)]
+            return [failed_result(symbol, strategy, "unknown", "시퀀스 부족", source)]
 
         X = np.expand_dims(feat.iloc[-window:].drop(columns=["timestamp"]).values, axis=0)
         if X.shape[1] != window or len(X.shape) != 3:
-            return [failed_result(symbol, strategy, "unknown", "시퀀스 형상 오류", source=source)]
+            return [failed_result(symbol, strategy, "unknown", "시퀀스 형상 오류", source)]
 
-        model_files = {}
-        for f in os.listdir(MODEL_DIR):
-            if not f.endswith(".pt"):
-                continue
-            parts = f.replace(".pt", "").split("_")
-            if len(parts) < 3:
-                continue
-            f_type = parts[-1]
-            f_strat = parts[-2]
-            f_sym = "_".join(parts[:-2])
-            if f_sym == symbol and f_strat == strategy:
-                model_files[f_type] = os.path.join(MODEL_DIR, f)
-
+        model_files = {
+            f.replace(".pt", "").split("_")[-1]: os.path.join(MODEL_DIR, f)
+            for f in os.listdir(MODEL_DIR)
+            if f.endswith(".pt") and f.startswith(symbol) and strategy in f
+        }
         if not model_files:
-            return [failed_result(symbol, strategy, "unknown", "모델 없음", source=source)]
+            return [failed_result(symbol, strategy, "unknown", "모델 없음", source)]
 
-        horizon_map = {"단기": 4, "중기": 24, "장기": 168}
-        target_hours = horizon_map.get(strategy, 4)
-        period_label = f"{target_hours}h"
-
-        failure_hashes = load_existing_failure_hashes()
         predictions = []
+        failure_hashes = load_existing_failure_hashes()
 
         for model_type, path in model_files.items():
             try:
                 weight = get_model_weight(model_type, strategy, symbol)
                 if weight <= 0.0:
-                    print(f"[SKIP] {symbol}-{strategy}-{model_type}: 정확도 미달 (가중치={weight})")
                     continue
 
                 model = get_model(model_type, X.shape[2])
@@ -96,56 +88,38 @@ def predict(symbol, strategy, source="일반"):
                 model.eval()
 
                 with torch.no_grad():
-                    output = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
-                    if isinstance(output, tuple):
-                        output = output[0]
-                    raw_rate = float(output.squeeze()) / 50.0  # ✅ 예측 시 복원
-
-                    if np.isnan(raw_rate):
-                        predictions.append(failed_result(symbol, strategy, model_type, "NaN 예측값", source=source))
-                        continue
-                    if np.isnan(raw_close):
-                        predictions.append(failed_result(symbol, strategy, model_type, "price NaN 발생", source=source))
-                        continue
-
-                    direction = "롱" if raw_rate >= 0 else "숏"
-                    rate = abs(raw_rate)
-                    target = raw_close * (1 + rate) if direction == "롱" else raw_close * (1 - rate)
-                    stop = raw_close * (1 - STOP_LOSS_PCT) if direction == "롱" else raw_close * (1 + STOP_LOSS_PCT)
+                    logits = model(torch.tensor(X, dtype=torch.float32))
+                    probs = torch.softmax(logits, dim=1).cpu().numpy()
+                    pred_class = int(np.argmax(probs))
+                    expected_return = class_to_expected_return(pred_class)
 
                     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
-
                     log_prediction(
-                        symbol=symbol, strategy=strategy, direction=direction,
-                        entry_price=raw_close, target_price=target,
-                        model=model_type, success=True,
-                        reason=f"{period_label} 예측 완료",
-                        rate=rate, timestamp=t,
-                        volatility=is_volatility, source=source
+                        symbol=symbol, strategy=strategy,
+                        direction=f"Class-{pred_class}", entry_price=raw_close,
+                        target_price=raw_close * (1 + expected_return),
+                        model=model_type, success=True, reason="예측 완료",
+                        rate=expected_return, timestamp=t,
+                        volatility=False, source=source,
+                        predicted_class=pred_class
                     )
-
                     predictions.append({
-                        "symbol": symbol, "strategy": strategy, "model": model_type,
-                        "direction": direction, "rate": rate, "price": raw_close,
-                        "target": target, "stop": stop, "reason": f"{period_label} 예측 완료",
-                        "success": True, "timestamp": t, "source": source
+                        "symbol": symbol, "strategy": strategy,
+                        "model": model_type, "class": pred_class,
+                        "expected_return": expected_return,
+                        "price": raw_close,
+                        "timestamp": t, "success": True,
+                        "source": source
                     })
-
             except Exception as e:
-                failed = failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source=source)
+                failed = failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source)
                 try:
                     feature_hash = get_feature_hash(X[0])
-                    key = (symbol, strategy, "롱" if raw_rate >= 0 else "숏", feature_hash)
-                    if key not in failure_hashes:
-                        insert_failure_record(failed, feature_hash)
-                        failure_hashes.add(key)
-                except Exception as log_err:
-                    print(f"[실패 해시 기록 오류] {log_err}")
+                    insert_failure_record(failed, feature_hash)
+                except: pass
                 predictions.append(failed)
 
-        return predictions if predictions else [failed_result(symbol, strategy, "unknown", "모든 모델 예측 실패", source=source)]
+        return predictions if predictions else [failed_result(symbol, strategy, "unknown", "모든 모델 예측 실패", source)]
 
     except Exception as e:
-        return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source=source)]
-
-
+        return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
