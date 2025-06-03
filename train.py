@@ -104,13 +104,28 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
             loader = DataLoader(train_set, batch_size=batch, shuffle=True)
             total_train_count = 0
 
-            # ✅ 실패 학습 최소 3회 보장
+            # ✅ 실패 학습 최소 3회 보장 + 실패 유형 기반 반복 학습
+            from failure_db import group_failures_by_reason
+            top_failure_reasons = [r["reason"] for r in group_failures_by_reason(limit=3)]
+
             min_wrong_repeat = max(rep_wrong, 3)
             for _ in range(min_wrong_repeat):
                 wrong_data = load_training_prediction_data(sym, strat, input_size, win, source_type="wrong")
                 if not wrong_data: continue
-                xb_all, yb_all = zip(*[(xb, yb) for xb, yb in wrong_data
-                                       if xb.shape[1:] == (win, input_size) and np.isfinite(yb) and abs(yb) < 2]) if wrong_data else ([], [])
+
+                xb_all, yb_all = [], []
+                for sample in wrong_data:
+                    if len(sample) == 3:
+                        xb, yb, reason = sample
+                        if reason not in top_failure_reasons:
+                            continue
+                    else:
+                        xb, yb = sample[:2]
+                    if xb.shape[1:] != (win, input_size) or not np.isfinite(yb) or abs(yb) >= 2:
+                        continue
+                    xb_all.append(xb)
+                    yb_all.append(yb)
+
                 if len(xb_all) >= 2:
                     xb_tensor = torch.stack(xb_all)
                     yb_tensor = torch.tensor(yb_all, dtype=torch.float32).view(-1)
@@ -163,6 +178,7 @@ def train_one_model(sym, strat, input_size=11, batch=32, epochs=10, lr=1e-3, rep
             logger.log_training_result(sym, strat, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except Exception as log_err:
             print(f"[로그 기록 실패] {sym}-{strat} → {log_err}"); sys.stdout.flush()
+
 
 def train_all_models():
     for strat in ["단기", "중기", "장기"]:
