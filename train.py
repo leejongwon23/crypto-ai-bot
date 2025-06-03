@@ -100,7 +100,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = nn.CrossEntropyLoss()
 
-            # 오답 기반 반복 학습
             for _ in range(rep_wrong):
                 wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
                 xb_all, yb_all = [], []
@@ -121,7 +120,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     loss = lossfn(logits, yb)
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            # 정상 학습
             for _ in range(max_epochs):
                 model.train()
                 xb = torch.tensor(X_train, dtype=torch.float32)
@@ -130,7 +128,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 loss = lossfn(logits, yb)
                 optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            # 검증
             model.eval()
             with torch.no_grad():
                 xb = torch.tensor(X_val, dtype=torch.float32)
@@ -157,13 +154,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
         try: log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except: print("⚠️ 로그 기록 실패")
 
-
 def train_model_loop(strategy):
     for sym in SYMBOLS:
         try: train_one_model(sym, strategy)
         except Exception as e:
             print(f"[단일 학습 오류] {sym}-{strategy} → {e}")
-
 
 def train_all_models():
     for strat in ["단기", "중기", "장기"]:
