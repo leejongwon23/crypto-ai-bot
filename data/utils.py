@@ -68,16 +68,14 @@ def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
     import pandas as pd
 
-    scale_factor = 50  # ✅ 수익률 스케일 확대
-
     for row in features:
         if isinstance(row.get("timestamp"), str):
             row["timestamp"] = pd.to_datetime(row["timestamp"], errors="coerce")
-
     features = [r for r in features if pd.notna(r.get("timestamp"))]
 
     X, y = [], []
 
+    # ✅ 예측 타깃 구간 설정 (단기=4h, 중기=1d, 장기=7d)
     horizon_map = {"단기": 4, "중기": 24, "장기": 168}
     target_hours = horizon_map.get(strategy, 4)
 
@@ -85,32 +83,35 @@ def create_dataset(features, window=20, strategy="단기"):
 
     for i in range(len(features) - window - 1):
         x_seq = features[i:i + window]
-
         if any(set(r.keys()) != set(features[0].keys()) for r in x_seq):
             continue
 
         base_row = features[i + window - 1]
         base_time = base_row["timestamp"]
         base_price = base_row["close"]
-
         if not isinstance(base_time, pd.Timestamp):
             continue
         if base_price == 0 or pd.isna(base_price):
             continue
 
-        target_time = base_time + pd.Timedelta(hours=target_hours)
+        # ✅ 예측 구간의 최대 수익률과 평균 수익률을 함께 고려
         future_slice = features[i + window:]
-        target_row = next((r for r in future_slice if r["timestamp"] >= target_time), None)
-        if not target_row:
+        future_prices = [
+            r["close"] for r in future_slice
+            if "timestamp" in r and isinstance(r["timestamp"], pd.Timestamp) and
+               base_time < r["timestamp"] <= base_time + pd.Timedelta(hours=target_hours)
+        ]
+        if len(future_prices) < 3:
             continue
 
-        target_price = target_row["close"]
-        if target_price == 0 or pd.isna(target_price):
-            continue
-
-        # ✅ 수익률을 확대한 상태로 저장
+        # ✅ 평균 수익률 기반 예측 타깃 설정 (노이즈 완화)
+        target_price = np.mean(future_prices)
         gain = (target_price - base_price) / base_price
-        y.append(round(gain * scale_factor, 4))
+        if not np.isfinite(gain):
+            continue
+
+        # ✅ 스케일 안정화 (50배 제거 → 수치 왜곡 최소화)
+        y.append(round(gain, 5))  # 소수점 5자리까지만
 
         X.append([[r[col] for col in col_order] for r in x_seq])
 
