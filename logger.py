@@ -1,15 +1,16 @@
-import os, csv, datetime, pandas as pd, pytz
+import os, csv, datetime, pandas as pd, pytz, hashlib
 from data.utils import get_kline_by_strategy
 
 DIR, LOG = "/persistent", "/persistent/logs"
-PREDICTION_LOG, WRONG = f"{DIR}/prediction_log.csv", f"{DIR}/wrong_predictions.csv"
-CORRECT = f"{DIR}/correct_predictions.csv"
-EVAL_RESULT = f"{DIR}/evaluation_result.csv"  # ✅ 추가
-TRAIN_LOG, AUDIT_LOG = f"{LOG}/train_log.csv", f"{LOG}/evaluation_audit.csv"
-STOP_LOSS = 0.02
+PREDICTION_LOG = f"{DIR}/prediction_log.csv"
+WRONG = f"{DIR}/wrong_predictions.csv"
+EVAL_RESULT = f"{DIR}/evaluation_result.csv"
+TRAIN_LOG = f"{LOG}/train_log.csv"
+AUDIT_LOG = f"{LOG}/evaluation_audit.csv"
+os.makedirs(LOG, exist_ok=True)
+
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 model_success_tracker = {}
-os.makedirs(LOG, exist_ok=True)
 
 def update_model_success(s, t, m, success):
     k = (s, t or "알수없음", m)
@@ -22,14 +23,12 @@ def get_model_success_rate(s, t, m, min_total=10):
     return 0.5 if total < min_total else r["success"] / total
 
 def load_failure_count():
-    FAILURE_LOG = "/persistent/logs/failure_count.csv"
-    if not os.path.exists(FAILURE_LOG):
-        return {}
+    path = "/persistent/logs/failure_count.csv"
+    if not os.path.exists(path): return {}
     try:
-        with open(FAILURE_LOG, "r", encoding="utf-8-sig") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             return {f"{r['symbol']}-{r['strategy']}": int(r["failures"]) for r in csv.DictReader(f)}
-    except Exception:
-        return {}
+    except: return {}
 
 def get_actual_success_rate(strategy):
     try:
@@ -53,17 +52,16 @@ def log_audit(s, t, status, reason):
         "status": str(status),
         "reason": str(reason)
     }
-    header = not os.path.exists(AUDIT_LOG) or os.stat(AUDIT_LOG).st_size == 0
     try:
         with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=row.keys())
-            if header: w.writeheader()
+            if f.tell() == 0: w.writeheader()
             w.writerow(row)
     except: pass
 
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, model=None, success=True, reason="", rate=0.0,
-                   return_value=None, volatility=False, source="일반"):
+                   return_value=None, volatility=False, source="일반", predicted_class=None):
     now = timestamp or now_kst().isoformat()
     mname = str(model or "unknown")
     status = "v_pending" if volatility and success else "v_failed" if volatility and not success else "pending" if success else "failed"
@@ -80,14 +78,14 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "reason": reason or "",
         "return": float(return_value if return_value is not None else rate),
         "volatility": bool(volatility),
-        "source": source
+        "source": source,
+        "predicted_class": int(predicted_class) if predicted_class is not None else -1
     }
     log_audit(row["symbol"], row["strategy"], "예측성공" if success else "예측실패", row["reason"])
     try:
         with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=row.keys())
-            if not os.path.exists(PREDICTION_LOG) or os.stat(PREDICTION_LOG).st_size == 0:
-                w.writeheader()
+            if f.tell() == 0: w.writeheader()
             w.writerow(row)
     except: pass
 
@@ -107,13 +105,10 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
                                    encoding="utf-8-sig")
     except: pass
 
-def get_dynamic_eval_wait(s):
-    return {"단기":4, "중기":24, "장기":168}.get(s, 6)
-
-import hashlib
+def get_dynamic_eval_wait(strategy):
+    return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
 
 def get_feature_hash(feature_row):
-    # ✅ 해시 정밀도 완화 → 유사한 피처도 같은 실패로 간주
     rounded = [round(float(x), 2) for x in feature_row]
     joined = ",".join(map(str, rounded))
     return hashlib.sha1(joined.encode()).hexdigest()
@@ -122,11 +117,9 @@ def evaluate_predictions(get_price_fn):
     from failure_db import ensure_failure_db, insert_failure_record, load_existing_failure_hashes, analyze_failure_reason
     ensure_failure_db()
 
-    if not os.path.exists(PREDICTION_LOG):
-        return
+    if not os.path.exists(PREDICTION_LOG): return
     try:
         rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
-
         if not rows:
             print("[스킵] 예측 결과가 하나도 없어서 평가를 건너뜁니다.")
             return
@@ -145,10 +138,9 @@ def evaluate_predictions(get_price_fn):
                 continue
 
             s, strat = r["symbol"], r["strategy"]
-            d = r.get("direction", "롱")
             m = r.get("model", "unknown")
             entry = float(r.get("entry_price", 0))
-            rate = float(r.get("rate", 0))
+            pred_class = int(r.get("predicted_class", -1))
             pred_time = datetime.datetime.fromisoformat(r["timestamp"]).astimezone(pytz.timezone("Asia/Seoul"))
             eval_deadline = pred_time + datetime.timedelta(hours=eval_horizon_map.get(strat, 6))
             vol = str(r.get("volatility", "False")).lower() in ["1", "true", "yes"]
@@ -160,7 +152,7 @@ def evaluate_predictions(get_price_fn):
                     "reason": f"⏳ 평가 대기 중 ({now.strftime('%H:%M')} < {eval_deadline.strftime('%H:%M')})",
                     "return": 0.0
                 })
-            elif entry == 0 or m == "unknown" or any(k in r.get("reason", "") for k in ["모델 없음", "기준 미달"]):
+            elif entry == 0 or m == "unknown":
                 r.update({
                     "status": "v_invalid_model" if vol else "invalid_model",
                     "reason": "모델 없음 또는 entry=0",
@@ -175,18 +167,29 @@ def evaluate_predictions(get_price_fn):
             else:
                 df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Seoul")
                 eval_df = df[(df["timestamp"] >= pred_time) & (df["timestamp"] <= eval_deadline)]
-                price = eval_df["high"].max() if d == "롱" else eval_df["low"].min()
-                gain = (price - entry) / entry if d == "롱" else (entry - price) / entry
-                success = gain >= rate
+                if eval_df.empty:
+                    r.update({
+                        "status": "skip_eval",
+                        "reason": "해당 구간 가격 없음",
+                        "return": 0.0
+                    })
+                else:
+                    # ✅ 평가 기준: 클래스 예측 성공 = 미리 정한 구간 도달
+                    actual_max = eval_df["high"].max()
+                    actual_gain = (actual_max - entry) / entry if entry > 0 else 0
+                    class_bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
+                                   0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
+                    actual_class = max([i for i, b in enumerate(class_bins) if actual_gain >= b], default=-1)
+                    success = (pred_class == actual_class)
 
-                r.update({
-                    "status": "v_success" if vol and success else "v_fail" if vol else "success" if success else "fail",
-                    "reason": f"도달: {gain:.4f} ≥ {rate:.4f}" if success else f"미달: {gain:.4f} < {rate:.4f}",
-                    "return": float(round(gain, 4))
-                })
+                    r.update({
+                        "status": "v_success" if vol and success else "v_fail" if vol else "success" if success else "fail",
+                        "reason": f"도달 클래스 {actual_class}, 예측 {pred_class}",
+                        "return": round(actual_gain, 5)
+                    })
 
-                update_model_success(s, strat, m, success)
-                evaluated.append(dict(r))
+                    update_model_success(s, strat, m, success)
+                    evaluated.append(dict(r))
 
         except Exception as e:
             r.update({
@@ -196,37 +199,33 @@ def evaluate_predictions(get_price_fn):
             })
         updated.append(r)
 
-    if evaluated and len(evaluated) > 0:
+    if evaluated:
         with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as ef:
             w = csv.DictWriter(ef, fieldnames=evaluated[0].keys())
-            if not os.path.exists(EVAL_RESULT) or os.stat(EVAL_RESULT).st_size == 0:
-                w.writeheader()
+            if os.stat(EVAL_RESULT).st_size == 0: w.writeheader()
             w.writerows(evaluated)
 
         failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
         if failed:
             with open(WRONG, "a", newline="", encoding="utf-8-sig") as wf:
                 w = csv.DictWriter(wf, fieldnames=failed[0].keys())
-                if not os.path.exists(WRONG) or os.stat(WRONG).st_size == 0:
-                    w.writeheader()
+                if os.stat(WRONG).st_size == 0: w.writeheader()
                 w.writerows(failed)
 
             try:
+                from data.utils import compute_features
                 existing_hashes = load_existing_failure_hashes()
                 for r in failed:
                     symbol, strategy = r["symbol"], r["strategy"]
                     df = get_price_fn(symbol, strategy)
-                    from data.utils import compute_features
                     df_feat = compute_features(symbol, df, strategy)
                     if df_feat is None or df_feat.empty:
                         continue
                     feature_row = df_feat.dropna().iloc[-1].values
-                    from logger import get_feature_hash
                     hash_value = get_feature_hash(feature_row)
                     key = (symbol, strategy, r.get("direction", "예측실패"), hash_value)
                     if key in existing_hashes:
                         continue
-
                     failure_reason = analyze_failure_reason(
                         float(r.get("rate", 0.0)),
                         df_feat["volatility"].iloc[-1] if "volatility" in df_feat.columns else None
@@ -236,13 +235,9 @@ def evaluate_predictions(get_price_fn):
                     existing_hashes.add(key)
             except Exception as e:
                 print(f"[실패패턴 기록 오류] {e}")
-                sys.stdout.flush()
 
     with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader()
         w.writerows(updated)
-
-                
-strategy_stats = {}
 
