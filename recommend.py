@@ -51,11 +51,17 @@ def get_symbols_by_volatility(strategy):
                 continue
             r_std = df["close"].pct_change().rolling(20).std().iloc[-1]
             b_std = df["close"].pct_change().rolling(60).std().iloc[-1]
-            if r_std >= th and r_std / (b_std + 1e-8) >= 1.2:
+
+            # ✅ 전략별 절대 기준 + 상대 변화율 동시 적용
+            is_volatile = r_std >= th
+            is_rising = (r_std / (b_std + 1e-8)) >= 1.2
+
+            if is_volatile and is_rising:
                 result.append({"symbol": symbol, "volatility": r_std})
         except Exception as e:
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
     return sorted(result, key=lambda x: -x["volatility"])
+
 
 def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=True):
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼"); sys.stdout.flush()
