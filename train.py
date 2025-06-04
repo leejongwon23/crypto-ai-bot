@@ -174,10 +174,27 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
 
 def train_model_loop(strategy):
+    success = []
+    failed = []
+
     for sym in SYMBOLS:
-        try: train_one_model(sym, strategy)
+        try:
+            print(f"\n=== {sym}-{strategy} 학습 시작 ===")
+            train_one_model(sym, strategy)
+            success.append(sym)
         except Exception as e:
             print(f"[단일 학습 오류] {sym}-{strategy} → {e}")
+            failed.append((sym, str(e)))
+
+    print(f"\n✅ {strategy} 학습 요약")
+    print(f" - 성공: {len(success)} / {len(SYMBOLS)}")
+    if success:
+        print("   ·", ", ".join(success))
+    if failed:
+        print(f" - 실패: {len(failed)}개")
+        for sym, reason in failed:
+            print(f"   · {sym} → {reason}")
+
 
 def train_all_models():
     for strat in ["단기", "중기", "장기"]:
