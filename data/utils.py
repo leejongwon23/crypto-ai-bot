@@ -94,7 +94,7 @@ def create_dataset(features, window=20, strategy="단기"):
             continue
 
         base_row = seq[-1]
-        base_time = base_row["timestamp"]
+        base_time = base_row.get("timestamp")
         base_price = base_row.get("close")
 
         if not isinstance(base_time, pd.Timestamp) or not np.isfinite(base_price) or base_price == 0:
@@ -102,7 +102,7 @@ def create_dataset(features, window=20, strategy="단기"):
 
         # ✅ target 구간 탐색
         future_prices = [
-            r["close"] for r in features[i + window:]
+            r.get("close") for r in features[i + window:]
             if isinstance(r.get("timestamp"), pd.Timestamp) and
                base_time < r["timestamp"] <= base_time + pd.Timedelta(hours=target_hours)
         ]
@@ -118,7 +118,7 @@ def create_dataset(features, window=20, strategy="단기"):
             continue
 
         label = np.digitize(gain, bins) - 1
-        if not 0 <= label < 16:
+        if not isinstance(label, (int, np.integer)) or not (0 <= label < 16):
             continue
 
         X.append([[r[col] for col in col_order] for r in seq])
