@@ -72,7 +72,10 @@ def create_dataset(features, window=20, strategy="단기"):
     for row in features:
         if isinstance(row.get("timestamp"), str):
             row["timestamp"] = pd.to_datetime(row["timestamp"], errors="coerce")
-    features = sorted([r for r in features if isinstance(r.get("timestamp"), pd.Timestamp)], key=lambda r: r["timestamp"])
+    features = sorted(
+        [r for r in features if isinstance(r.get("timestamp"), pd.Timestamp)],
+        key=lambda r: r["timestamp"]
+    )
 
     if len(features) < window + 10:
         return np.array([]), np.array([])
@@ -120,16 +123,15 @@ def create_dataset(features, window=20, strategy="단기"):
         X.append([[r[col] for col in col_order] for r in seq])
         y.append(label)
 
-    # ✅ shape 보정
     if not X or not y:
         return np.array([]), np.array([])
 
+    # ✅ shape 통일 보정
     common_len = max(set(map(len, X)), key=list(X).count)
     X_filtered = [x for x in X if len(x) == common_len]
     y_filtered = [l for x, l in zip(X, y) if len(x) == common_len]
 
     return np.array(X_filtered), np.array(y_filtered)
-
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 200):
     url = f"{BASE_URL}/v5/market/kline"
