@@ -115,9 +115,15 @@ def get_feature_hash(feature_row):
 
 def evaluate_predictions(get_price_fn):
     from failure_db import ensure_failure_db, insert_failure_record, load_existing_failure_hashes, analyze_failure_reason
+    from logger import update_model_success
+    from logger import get_feature_hash
+    from data.utils import compute_features
+
     ensure_failure_db()
 
-    if not os.path.exists(PREDICTION_LOG): return
+    if not os.path.exists(PREDICTION_LOG):
+        return
+
     try:
         rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
         if not rows:
@@ -184,7 +190,7 @@ def evaluate_predictions(get_price_fn):
                     actual_gain = (actual_max - entry) / entry if entry > 0 else 0.0
                     actual_class = max([i for i, b in enumerate(class_bins) if actual_gain >= b], default=-1)
 
-                    # ✅ YOPO 개선: ±1 클래스까지는 성공 인정
+                    # ✅ YOPO 철학 반영: ±1 클래스 성공 인정
                     success = abs(pred_class - actual_class) <= 1
 
                     r.update({
@@ -206,26 +212,30 @@ def evaluate_predictions(get_price_fn):
     if evaluated:
         with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as ef:
             w = csv.DictWriter(ef, fieldnames=evaluated[0].keys())
-            if os.stat(EVAL_RESULT).st_size == 0: w.writeheader()
+            if os.stat(EVAL_RESULT).st_size == 0:
+                w.writeheader()
             w.writerows(evaluated)
 
         failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
         if failed:
             with open(WRONG, "a", newline="", encoding="utf-8-sig") as wf:
                 w = csv.DictWriter(wf, fieldnames=failed[0].keys())
-                if os.stat(WRONG).st_size == 0: w.writeheader()
+                if os.stat(WRONG).st_size == 0:
+                    w.writeheader()
                 w.writerows(failed)
 
             try:
-                from data.utils import compute_features
                 existing_hashes = load_existing_failure_hashes()
                 for r in failed:
                     symbol, strategy = r["symbol"], r["strategy"]
                     df = get_price_fn(symbol, strategy)
                     df_feat = compute_features(symbol, df, strategy)
-                    if df_feat is None or df_feat.empty:
+                    if df_feat is None or df_feat.empty or "timestamp" not in df_feat.columns:
                         continue
-                    feature_row = df_feat.dropna().iloc[-1].values
+                    df_feat = df_feat.dropna()
+                    feature_row = df_feat.drop(columns=["timestamp"]).iloc[-1].values
+                    if not isinstance(feature_row, (np.ndarray, list)) or len(feature_row) == 0:
+                        continue
                     hash_value = get_feature_hash(feature_row)
                     key = (symbol, strategy, r.get("direction", "예측실패"), hash_value)
                     if key in existing_hashes:
@@ -244,6 +254,7 @@ def evaluate_predictions(get_price_fn):
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader()
         w.writerows(updated)
+
 
 
 strategy_stats = {}
