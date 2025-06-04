@@ -68,59 +68,68 @@ def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
     import pandas as pd
 
+    # ✅ timestamp 파싱 및 정렬
     for row in features:
         if isinstance(row.get("timestamp"), str):
             row["timestamp"] = pd.to_datetime(row["timestamp"], errors="coerce")
-    features = [r for r in features if pd.notna(r.get("timestamp"))]
+    features = sorted([r for r in features if isinstance(r.get("timestamp"), pd.Timestamp)], key=lambda r: r["timestamp"])
+
+    if len(features) < window + 10:
+        return np.array([]), np.array([])
 
     X, y = [], []
+    col_order = [k for k in features[0].keys() if k != "timestamp"]
 
+    # ✅ 예측 시점별 horizon
     horizon_map = {"단기": 4, "중기": 24, "장기": 168}
     target_hours = horizon_map.get(strategy, 4)
 
-    # ✅ 수익률 클래스 16단계
+    # ✅ 클래스 분류 구간
     bins = [-np.inf, -0.1, -0.07, -0.05, -0.03, -0.015, -0.005,
              0.005, 0.015, 0.03, 0.05, 0.07, 0.1, 0.15, 0.2, np.inf]
 
-    col_order = [k for k in features[0].keys() if k != "timestamp"]
-
-    for i in range(len(features) - window - 1):
-        x_seq = features[i:i + window]
-        if any(set(r.keys()) != set(features[0].keys()) for r in x_seq):
+    for i in range(len(features) - window):
+        seq = features[i:i + window]
+        if any(set(row.keys()) != set(features[0].keys()) for row in seq):
             continue
 
-        base_row = features[i + window - 1]
+        base_row = seq[-1]
         base_time = base_row["timestamp"]
-        base_price = base_row["close"]
-        if not isinstance(base_time, pd.Timestamp): continue
-        if base_price == 0 or pd.isna(base_price): continue
+        base_price = base_row.get("close")
+        if not isinstance(base_time, pd.Timestamp) or not np.isfinite(base_price):
+            continue
 
-        future_slice = features[i + window:]
+        # ✅ target 구간 탐색
         future_prices = [
-            r["close"] for r in future_slice
-            if "timestamp" in r and isinstance(r["timestamp"], pd.Timestamp) and
+            r["close"] for r in features[i + window:]
+            if isinstance(r.get("timestamp"), pd.Timestamp) and
                base_time < r["timestamp"] <= base_time + pd.Timedelta(hours=target_hours)
         ]
-        if len(future_prices) < 3: continue
+        if len(future_prices) < 3:
+            continue
 
-        target_price = np.mean(future_prices)
-        gain = (target_price - base_price) / base_price
-        if not np.isfinite(gain): continue
+        future_target = np.mean(future_prices)
+        gain = (future_target - base_price) / base_price
+        if not np.isfinite(gain):
+            continue
 
-        class_label = np.digitize(gain, bins) - 1  # ✅ 정수 클래스 인덱스 (0~15)
-        y.append(class_label)
+        label = np.digitize(gain, bins) - 1
+        if not 0 <= label < 16:
+            continue
 
-        X.append([[r[col] for col in col_order] for r in x_seq])
+        X.append([[r[col] for col in col_order] for r in seq])
+        y.append(label)
 
-    if not X:
+    # ✅ shape 보정
+    if not X or not y:
         return np.array([]), np.array([])
 
-    mlen = max(set(map(len, X)), key=list(X).count)
-    filt = [(x, l) for x, l in zip(X, y) if len(x) == mlen]
-    if not filt:
-        return np.array([]), np.array([])
+    common_len = max(set(map(len, X)), key=list(X).count)
+    X_filtered = [x for x in X if len(x) == common_len]
+    y_filtered = [l for x, l in zip(X, y) if len(x) == common_len]
 
-    return np.array([x for x, _ in filt]), np.array([l for _, l in filt])
+    return np.array(X_filtered), np.array(y_filtered)
+
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 200):
     url = f"{BASE_URL}/v5/market/kline"
