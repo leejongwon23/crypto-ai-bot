@@ -36,10 +36,13 @@ def failed_result(symbol, strategy, model_type, reason, source="일반"):
         "class": -1, "timestamp": t, "source": source
     }
 
+# (위쪽 import 동일 생략)
+
 def predict(symbol, strategy, source="일반"):
     try:
         print(f"[PREDICT] {symbol}-{strategy} 시작")
         sys.stdout.flush()
+
         window = find_best_window(symbol, strategy)
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < window + 1:
@@ -53,18 +56,21 @@ def predict(symbol, strategy, source="일반"):
             return [failed_result(symbol, strategy, "unknown", "timestamp 없음", source)]
 
         raw_close = df["close"].iloc[-1]
-        raw_feat = feat.copy()
-        timestamps = raw_feat["timestamp"]
-        feat_scaled = MinMaxScaler().fit_transform(raw_feat.drop(columns=["timestamp"]))
-        feat = pd.DataFrame(feat_scaled, columns=raw_feat.drop(columns=["timestamp"]).columns)
-        feat["timestamp"] = timestamps.values
+        raw_feat = feat.dropna().copy()
+        timestamps = raw_feat["timestamp"].reset_index(drop=True)
+        features_only = raw_feat.drop(columns=["timestamp"])
+        feat_scaled = MinMaxScaler().fit_transform(features_only)
 
-        if feat.shape[0] < window:
+        if feat_scaled.shape[0] < window:
             return [failed_result(symbol, strategy, "unknown", "시퀀스 부족", source)]
 
-        X = np.expand_dims(feat.iloc[-window:].drop(columns=["timestamp"]).values, axis=0)
-        if X.shape[1] != window or len(X.shape) != 3:
-            return [failed_result(symbol, strategy, "unknown", "시퀀스 형상 오류", source)]
+        X_input = feat_scaled[-window:]
+        if X_input.shape[0] != window:
+            return [failed_result(symbol, strategy, "unknown", "시퀀스 길이 오류", source)]
+
+        X = np.expand_dims(X_input, axis=0)
+        if len(X.shape) != 3:
+            return [failed_result(symbol, strategy, "unknown", "입력 형상 오류", source)]
 
         model_files = {
             f.replace(".pt", "").split("_")[-1]: os.path.join(MODEL_DIR, f)
@@ -114,7 +120,7 @@ def predict(symbol, strategy, source="일반"):
             except Exception as e:
                 failed = failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source)
                 try:
-                    feature_hash = get_feature_hash(X[0])
+                    feature_hash = get_feature_hash(X_input)
                     insert_failure_record(failed, feature_hash)
                 except: pass
                 predictions.append(failed)
@@ -123,3 +129,4 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+
