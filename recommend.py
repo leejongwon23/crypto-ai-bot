@@ -62,10 +62,10 @@ def get_symbols_by_volatility(strategy):
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
     return sorted(result, key=lambda x: -x["volatility"])
 
-
 def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=True):
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼"); sys.stdout.flush()
     results, fmap = [], load_failure_count()
+    triggered_trainings = set()  # ✅ 학습 요청 중복 방지
 
     for item in symbols:
         symbol = item["symbol"]
@@ -76,7 +76,10 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             continue
 
         try:
-            model_count = len([f for f in os.listdir("/persistent/models") if f.startswith(f"{symbol}_{strategy}_") and f.endswith(".pt")])
+            model_count = len([
+                f for f in os.listdir("/persistent/models")
+                if f.startswith(f"{symbol}_{strategy}_") and f.endswith(".pt")
+            ])
             if model_count == 0:
                 log_audit(symbol, strategy, None, "모델 없음")
                 continue
@@ -121,8 +124,18 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
 
                 key = f"{symbol}-{strategy}"
                 if not result.get("success", False):
-                    print(f"[오답학습 트리거] {symbol}-{strategy} → 예측 실패 감지 → 즉시 학습 실행")
-                    threading.Thread(target=train.train_model, args=(symbol, strategy), daemon=True).start()
+                    if key not in triggered_trainings:
+                        print(f"[오답학습 트리거] {symbol}-{strategy} → 예측 실패 감지 → 즉시 학습 실행")
+                        triggered_trainings.add(key)
+                        try:
+                            threading.Thread(
+                                target=train.train_model,
+                                args=(symbol, strategy),
+                                daemon=True
+                            ).start()
+                        except Exception as e:
+                            print(f"[오류] 학습 쓰레드 실행 실패: {e}")
+
                 fmap[key] = 0
                 results.append(result)
 
@@ -165,6 +178,8 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             print(f"[ERROR] 메시지 전송 실패: {e}")
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
                 csv.writer(f).writerow([now_kst().isoformat(), res["symbol"], res["strategy"], f"전송 실패: {e}"])
+
+
 
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
