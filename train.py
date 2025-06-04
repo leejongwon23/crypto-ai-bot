@@ -64,6 +64,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
         if df_feat is None or len(df_feat) < 30:
             print("⏭ 피처 부족"); return
 
+        # ✅ timestamp 보존 후 dropna 수행 (순서 중요!)
         if "timestamp" not in df_feat.columns:
             df_feat["timestamp"] = df_feat.get("datetime", pd.Timestamp.now())
         df_feat = df_feat.dropna()
@@ -116,7 +117,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = nn.CrossEntropyLoss()
 
-            # ✅ 오답 학습
+            # ✅ 오답 학습 반복
             for _ in range(rep_wrong):
                 wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
                 for xb, yb in [s[:2] for s in wrong_data if isinstance(s, (list, tuple)) and len(s) >= 2]:
@@ -170,6 +171,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
 
 def train_model_loop(strategy):
     for sym in SYMBOLS:
