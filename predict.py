@@ -19,24 +19,26 @@ def class_to_expected_return(cls):
              0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
     return bins[cls] if 0 <= cls < len(bins) else 0.0
 
-def failed_result(symbol, strategy, model_type, reason, source="일반"):
+def failed_result(symbol, strategy, model_type="unknown", reason="", source="일반"):
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     try:
         log_prediction(
             symbol=symbol, strategy=strategy,
             direction="예측실패", entry_price=0, target_price=0,
-            model=model_type, success=False, reason=reason,
+            model=str(model_type or "unknown"),  # ✅ 문자열로 명확하게 처리
+            success=False, reason=reason,
             rate=0.0, timestamp=t, volatility=False, source=source,
             predicted_class=-1
         )
-    except: pass
+    except:
+        pass
     return {
         "symbol": symbol, "strategy": strategy, "success": False,
-        "reason": reason, "model": model_type, "rate": 0.0,
-        "class": -1, "timestamp": t, "source": source
+        "reason": reason, "model": str(model_type or "unknown"),
+        "rate": 0.0, "class": -1, "timestamp": t, "source": source
     }
 
-# (위쪽 import 동일 생략)
+
 
 def predict(symbol, strategy, source="일반"):
     try:
