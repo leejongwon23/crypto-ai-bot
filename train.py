@@ -118,8 +118,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     if (feature_hash in failure_hashes) or (feature_hash in frequent_failures): continue
                     xb_all.append(torch.tensor(xb, dtype=torch.float32))
                     yb_all.append(int(yb))
-                if len(xb_all) < 2:
-                    print("⏭ 오답 샘플 부족"); continue
+                if len(xb_all) < 2: continue
                 for xb, yb in zip(xb_all, yb_all):
                     xb = xb.unsqueeze(0)
                     yb = torch.tensor([yb], dtype=torch.long)
