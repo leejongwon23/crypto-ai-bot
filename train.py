@@ -1,5 +1,5 @@
 import os, json, torch, torch.nn as nn, numpy as np, datetime, pytz, sys, pandas as pd
-from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import accuracy_score, f1_score
 from data.utils import SYMBOLS, get_kline_by_strategy, compute_features, create_dataset
 from model.base_model import get_model
@@ -67,23 +67,21 @@ def train_one_model(symbol, strategy, max_epochs=20):
         if "timestamp" not in df_feat.columns:
             df_feat["timestamp"] = df_feat.get("datetime", pd.Timestamp.now())
         df_feat = df_feat.dropna()
-        features = df_feat.to_dict(orient="records")
 
+        features = df_feat.to_dict(orient="records")
         window = find_best_window(symbol, strategy)
         X_raw, y_raw = create_dataset(features, window=window, strategy=strategy)
+
         if len(X_raw) < 5:
             print("⏭ 학습용 시퀀스 부족"); return
 
-        # ✅ 길이 불일치 보정
         min_len = min(len(X_raw), len(y_raw))
         X_raw, y_raw = X_raw[:min_len], y_raw[:min_len]
-
         input_size = X_raw.shape[2]
         val_len = int(len(X_raw) * 0.2)
         X_train, X_val = X_raw[:-val_len], X_raw[-val_len:]
         y_train, y_val = y_raw[:-val_len], y_raw[-val_len:]
 
-        # ✅ shape 검증
         if len(X_train.shape) != 3 or len(y_train.shape) != 1:
             print("⛔ shape 오류 - 학습 중단"); return
 
@@ -108,7 +106,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = nn.CrossEntropyLoss()
 
-            # ✅ 오답 기반 반복학습
+            # ✅ 오답 학습
             for _ in range(rep_wrong):
                 wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
                 xb_all, yb_all = [], []
@@ -117,26 +115,32 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     if xb.shape[1:] != (window, input_size): continue
                     if not isinstance(yb, (int, np.integer)) or yb < 0 or yb >= NUM_CLASSES: continue
                     feature_hash = get_feature_hash_from_tensor(xb[0])
-                    if (feature_hash in failure_hashes) or (feature_hash in frequent_failures):
-                        continue
+                    if (feature_hash in failure_hashes) or (feature_hash in frequent_failures): continue
                     xb_all.append(torch.tensor(xb, dtype=torch.float32))
                     yb_all.append(int(yb))
-                if len(xb_all) < 2: continue
+                if len(xb_all) < 2:
+                    print("⏭ 오답 샘플 부족"); continue
                 for xb, yb in zip(xb_all, yb_all):
                     xb = xb.unsqueeze(0)
                     yb = torch.tensor([yb], dtype=torch.long)
                     logits = model(xb)
                     loss = lossfn(logits, yb)
+                    if not torch.isfinite(loss):
+                        print("⚠️ 오답학습 손실 비정상, 스킵"); continue
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
             # ✅ 정상 학습
+            train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
+                                     torch.tensor(y_train, dtype=torch.long))
+            train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
             for _ in range(max_epochs):
                 model.train()
-                xb = torch.tensor(X_train, dtype=torch.float32)
-                yb = torch.tensor(y_train, dtype=torch.long)
-                logits = model(xb)
-                loss = lossfn(logits, yb)
-                optimizer.zero_grad(); loss.backward(); optimizer.step()
+                for xb, yb in train_loader:
+                    logits = model(xb)
+                    loss = lossfn(logits, yb)
+                    if not torch.isfinite(loss):
+                        print("⚠️ 손실 비정상, 학습 중단"); break
+                    optimizer.zero_grad(); loss.backward(); optimizer.step()
 
             # ✅ 검증
             model.eval()
@@ -166,7 +170,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
-                
 
 def train_model_loop(strategy):
     for sym in SYMBOLS:
