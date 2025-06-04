@@ -74,10 +74,18 @@ def train_one_model(symbol, strategy, max_epochs=20):
         if len(X_raw) < 5:
             print("⏭ 학습용 시퀀스 부족"); return
 
+        # ✅ 길이 일치 보정
+        min_len = min(len(X_raw), len(y_raw))
+        X_raw, y_raw = X_raw[:min_len], y_raw[:min_len]
+
         input_size = X_raw.shape[2]
         val_len = int(len(X_raw) * 0.2)
         X_train, X_val = X_raw[:-val_len], X_raw[-val_len:]
         y_train, y_val = y_raw[:-val_len], y_raw[-val_len:]
+
+        # ✅ shape 검증
+        if len(X_train.shape) != 3 or len(y_train.shape) != 1:
+            print("⛔ shape 오류 - 학습 중단"); return
 
         failure_hashes = load_existing_failure_hashes()
         frequent_failures = get_frequent_failures(min_count=5)
@@ -153,6 +161,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
         print(f"[오류] {symbol}-{strategy} → {e}")
         try: log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except: print("⚠️ 로그 기록 실패")
+
 
 def train_model_loop(strategy):
     for sym in SYMBOLS:
