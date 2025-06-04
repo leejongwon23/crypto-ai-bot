@@ -6,11 +6,9 @@ import torch
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import r2_score
-from data.utils import get_kline_by_strategy, compute_features
+from sklearn.metrics import accuracy_score
+from data.utils import get_kline_by_strategy, compute_features, create_dataset
 from model.base_model import get_model
-from data.utils import create_dataset
-
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     try:
@@ -35,21 +33,21 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             d["timestamp"] = pd.to_datetime(df_feat.iloc[i]["timestamp"], errors="coerce")
             feature_dicts.append(d)
 
-        best_score = -1
+        best_acc = -1
         best_window = window_list[0]
         best_result = {}
 
         for window in window_list:
             X, y = create_dataset(feature_dicts, window, strategy)
-            if len(X) == 0:
+            if len(X) == 0 or len(X) != len(y):
                 continue
 
-            input_size = X.shape[2] if len(X.shape) == 3 else X.shape[1]
-            model = get_model(model_type="lstm", input_size=input_size)
-            model.train()
+            input_size = X.shape[2]
+            model = get_model(model_type="lstm", input_size=input_size).train()
 
             X_tensor = torch.tensor(X, dtype=torch.float32)
-            y_tensor = torch.tensor(y, dtype=torch.float32)
+            y_tensor = torch.tensor(y, dtype=torch.long)
+
             val_len = int(len(X_tensor) * 0.2)
             train_len = len(X_tensor) - val_len
             if train_len <= 0 or val_len <= 0:
@@ -61,27 +59,29 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             val_y = y_tensor[train_len:]
 
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-            criterion = torch.nn.MSELoss()
+            criterion = torch.nn.CrossEntropyLoss()
 
             try:
                 for _ in range(3):
-                    pred = model(train_X).squeeze()
-                    loss = criterion(pred, train_y)
+                    logits = model(train_X)
+                    loss = criterion(logits, train_y)
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
 
                 model.eval()
                 with torch.no_grad():
-                    pred_val = model(val_X).squeeze().numpy()
-                    score = r2_score(val_y.numpy(), pred_val)
+                    logits_val = model(val_X)
+                    preds = torch.argmax(logits_val, dim=1).numpy()
+                    y_true = val_y.numpy()
+                    acc = accuracy_score(y_true, preds)
 
-                    if score > best_score:
-                        best_score = score
+                    if acc > best_acc:
+                        best_acc = acc
                         best_window = window
                         best_result = {
                             "window": int(window),
-                            "r2_score": float(round(score, 4))
+                            "accuracy": float(round(acc, 4))
                         }
 
             except Exception as e:
@@ -98,11 +98,11 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             with open(save_txt, "w") as f:
                 f.write(str(best_window))
             with open(save_json, "w") as f:
-                json.dump(best_result or {"window": best_window, "r2_score": 0}, f, indent=2)
+                json.dump(best_result or {"window": best_window, "accuracy": 0}, f, indent=2)
         except Exception as e:
             print(f"[저장 오류] {symbol}-{strategy}: {e}")
 
-        print(f"[최적 WINDOW] {symbol}-{strategy} → {best_window} (r2_score: {best_score:.4f})")
+        print(f"[최적 WINDOW] {symbol}-{strategy} → {best_window} (acc: {best_acc:.4f})")
         return best_window
 
     except Exception as e:
