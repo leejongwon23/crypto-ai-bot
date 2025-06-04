@@ -146,49 +146,41 @@ def evaluate_predictions(get_price_fn):
             vol = str(r.get("volatility", "False")).lower() in ["1", "true", "yes"]
 
             df = get_price_fn(s, strat)
-            if now < eval_deadline:
-                r.update({
-                    "reason": f"⏳ 평가 대기 중 ({now.strftime('%H:%M')} < {eval_deadline.strftime('%H:%M')})",
-                    "return": 0.0
-                })
-            elif entry == 0 or m == "unknown":
-                r.update({
-                    "status": "v_invalid_model" if vol else "invalid_model",
-                    "reason": "모델 없음 또는 entry=0",
-                    "return": 0.0
-                })
-            elif df is None or df.empty or df[df["timestamp"] >= pred_time].empty:
+            if df is None or df.empty:
+                r.update({"status": "skip_eval", "reason": "가격 데이터 없음", "return": 0.0})
+                updated.append(r)
+                continue
+
+            # ✅ timestamp 강제 보장
+            if "timestamp" not in df.columns and "datetime" in df.columns:
+                df["timestamp"] = df["datetime"]
+
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Seoul")
+            eval_df = df[(df["timestamp"] >= pred_time) & (df["timestamp"] <= eval_deadline)]
+
+            if eval_df.empty:
                 r.update({
                     "status": "skip_eval",
-                    "reason": "평가 데이터 부족",
+                    "reason": "해당 구간 가격 없음",
                     "return": 0.0
                 })
             else:
-                df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Seoul")
-                eval_df = df[(df["timestamp"] >= pred_time) & (df["timestamp"] <= eval_deadline)]
-                if eval_df.empty:
-                    r.update({
-                        "status": "skip_eval",
-                        "reason": "해당 구간 가격 없음",
-                        "return": 0.0
-                    })
-                else:
-                    actual_max = eval_df["high"].max()
-                    actual_gain = (actual_max - entry) / entry if entry > 0 else 0.0
+                actual_max = eval_df["high"].max()
+                actual_gain = (actual_max - entry) / entry if entry > 0 else 0.0
 
-                    class_bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
-                                   0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
-                    actual_class = max([i for i, b in enumerate(class_bins) if actual_gain >= b], default=-1)
-                    success = (pred_class == actual_class)
+                class_bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
+                               0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
+                actual_class = max([i for i, b in enumerate(class_bins) if actual_gain >= b], default=-1)
+                success = (pred_class == actual_class)
 
-                    r.update({
-                        "status": "v_success" if vol and success else "v_fail" if vol else "success" if success else "fail",
-                        "reason": f"도달 클래스 {actual_class}, 예측 {pred_class}",
-                        "return": round(actual_gain, 5)
-                    })
+                r.update({
+                    "status": "v_success" if vol and success else "v_fail" if vol else "success" if success else "fail",
+                    "reason": f"도달 클래스 {actual_class}, 예측 {pred_class}",
+                    "return": round(actual_gain, 5)
+                })
 
-                    update_model_success(s, strat, m, success)
-                    evaluated.append(dict(r))
+                update_model_success(s, strat, m, success)
+                evaluated.append(dict(r))
 
         except Exception as e:
             r.update({
@@ -218,6 +210,11 @@ def evaluate_predictions(get_price_fn):
                     symbol, strategy = r["symbol"], r["strategy"]
                     df = get_price_fn(symbol, strategy)
                     df_feat = compute_features(symbol, df, strategy)
+
+                    # ✅ timestamp 보장
+                    if "timestamp" not in df_feat.columns and "datetime" in df_feat.columns:
+                        df_feat["timestamp"] = df_feat["datetime"]
+
                     if df_feat is None or df_feat.empty:
                         continue
                     feature_row = df_feat.dropna().iloc[-1].values
@@ -239,5 +236,5 @@ def evaluate_predictions(get_price_fn):
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader()
         w.writerows(updated)
-        
+
 strategy_stats = {}
