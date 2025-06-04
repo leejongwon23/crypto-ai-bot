@@ -66,23 +66,28 @@ def get_btc_dominance():
 
 def create_dataset(features, window=20, strategy="단기"):
     X, y = [], []
+
     if not features or len(features) <= window:
+        print(f"[스킵] create_dataset: features 없음 또는 너무 짧음 (len={len(features) if features else 0})")
         return X, y
 
-    # ✅ 명시적 컬럼 순서 정의
-    columns = [c for c in features[0].keys() if c != "timestamp"]
+    try:
+        columns = [c for c in features[0].keys() if c != "timestamp"]
+    except Exception as e:
+        print(f"[오류] create_dataset: features[0] 키 오류 → {e}")
+        return X, y
 
     for i in range(window, len(features)):
         try:
             seq = features[i - window:i]
             if len(seq) != window:
+                print(f"[건너뜀] window 길이 불일치: {len(seq)}")
                 continue
+
             x = [[row.get(c, 0.0) for c in columns] for row in seq]
 
             future = features[i:]
-            direction = None
             entry_price = features[i]["close"]
-            gain = 0
 
             if strategy == "단기":
                 lookahead = min(8, len(future))
@@ -99,27 +104,28 @@ def create_dataset(features, window=20, strategy="단기"):
             max_gain = max((h - entry_price) / entry_price for h in highs)
             max_loss = max((entry_price - l) / entry_price for l in lows)
 
-            if max_gain > max_loss:
-                gain = max_gain
-                direction = "롱"
-            else:
-                gain = -max_loss
-                direction = "숏"
+            direction = "롱" if max_gain > max_loss else "숏"
+            gain = max_gain if max_gain > max_loss else -max_loss
 
-            # ✅ 수익률 → 클래스 (16개 구간)
             bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
                      0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
             cls = next((i for i, b in enumerate(bins) if gain < b), len(bins)-1)
 
             if cls < 0 or cls >= 16:
+                print(f"[스킵] 잘못된 클래스 번호: {cls}, 수익률={gain:.4f}")
                 continue
 
             X.append(x)
             y.append(cls)
-        except:
+        except Exception as e:
+            print(f"[예외] 샘플 생성 실패 (i={i}) → {e}")
             continue
 
+    if not X or not y:
+        print(f"[결과] create_dataset: 유효 샘플 없음 → X={len(X)}, y={len(y)}")
+
     return np.array(X), np.array(y)
+
 
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 200):
@@ -152,20 +158,18 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 200):
     except:
         return None
 
-def get_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
-    from_binance = __import__("data.binance").binance.get_klines
-    interval_map = {"단기": "15m", "중기": "1h", "장기": "4h"}
-    lookback_map = {"단기": 1000, "중기": 1000, "장기": 1000}
+def get_kline_by_strategy(symbol: str, strategy: str):
+    config = STRATEGY_CONFIG.get(strategy)
+    if config is None:
+        print(f"[오류] 전략 설정 없음: {strategy}")
+        return None
     
-    interval = interval_map[strategy]
-    lookback = lookback_map[strategy]
-
-    df = from_binance(symbol, interval, lookback)
-
-    if df is None or len(df) < 100:
-        print(f"[경고] {symbol}-{strategy}: get_kline_by_strategy() 데이터 수 부족 → {len(df) if df is not None else 'None'}")
+    df = get_kline(symbol, interval=config["interval"], limit=config["limit"])
+    
+    if df is None or df.empty:
+        print(f"[경고] {symbol}-{strategy}: get_kline_by_strategy() → 데이터 없음")
     else:
-        print(f"[확인] {symbol}-{strategy}: 데이터 수량 → {len(df)}")
+        print(f"[확인] {symbol}-{strategy}: 데이터 {len(df)}개 확보")
 
     return df
 
@@ -187,8 +191,12 @@ def get_realtime_prices():
 def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFrame:
     df = df.copy()
 
+    # ✅ timestamp 복원 보장
     if "datetime" in df.columns:
         df["timestamp"] = df["datetime"]
+    elif "timestamp" not in df.columns:
+        print(f"[경고] {symbol}-{strategy}: timestamp 복원 불가 — datetime 없음")
+        df["timestamp"] = pd.to_datetime("now")
 
     df['ma5'] = df['close'].rolling(window=5).mean()
     df['ma20'] = df['close'].rolling(window=20).mean()
@@ -275,5 +283,9 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
         extra = long_only
 
     df = df[base + extra]
-    return df.dropna()
+    df = df.dropna()
 
+    # ✅ 최종 결과 로그 출력
+    print(f"[완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
+
+    return df
