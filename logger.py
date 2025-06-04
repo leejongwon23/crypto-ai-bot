@@ -146,7 +146,6 @@ def evaluate_predictions(get_price_fn):
             vol = str(r.get("volatility", "False")).lower() in ["1", "true", "yes"]
 
             df = get_price_fn(s, strat)
-
             if now < eval_deadline:
                 r.update({
                     "reason": f"⏳ 평가 대기 중 ({now.strftime('%H:%M')} < {eval_deadline.strftime('%H:%M')})",
@@ -174,9 +173,9 @@ def evaluate_predictions(get_price_fn):
                         "return": 0.0
                     })
                 else:
-                    # ✅ 평가 기준: 클래스 예측 성공 = 미리 정한 구간 도달
                     actual_max = eval_df["high"].max()
-                    actual_gain = (actual_max - entry) / entry if entry > 0 else 0
+                    actual_gain = (actual_max - entry) / entry if entry > 0 else 0.0
+
                     class_bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
                                    0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
                     actual_class = max([i for i, b in enumerate(class_bins) if actual_gain >= b], default=-1)
