@@ -39,12 +39,12 @@ def insert_failure_record(row, feature_hash):
             row.get("reason", "")
         ))
 
-# ✅ 3. 실패 피처 해시 목록 불러오기 (학습 시 중복 판단용)
+# ✅ 3. 실패 피처 해시 목록 불러오기 (학습 시 중복 판단용) - 수정됨
 def load_existing_failure_hashes():
     try:
         with sqlite3.connect(DB_PATH) as conn:
-            rows = conn.execute("SELECT symbol, strategy, direction, hash FROM failure_patterns").fetchall()
-            return set((r[0], r[1], r[2], r[3]) for r in rows)
+            rows = conn.execute("SELECT hash FROM failure_patterns").fetchall()
+            return set(r[0] for r in rows)  # hash만 추출
     except:
         return set()
 
