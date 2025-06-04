@@ -72,18 +72,28 @@ def train_one_model(symbol, strategy, max_epochs=20):
         window = find_best_window(symbol, strategy)
         X_raw, y_raw = create_dataset(features, window=window, strategy=strategy)
 
-        if len(X_raw) < 5:
+        # ✅ 시퀀스 & 클래스 범위 필터링
+        X_filtered, y_filtered = [], []
+        for xi, yi in zip(X_raw, y_raw):
+            if xi.shape != (window, df_feat.shape[1] - 1): continue  # timestamp 제외 shape
+            if not isinstance(yi, (int, np.integer)): continue
+            if not (0 <= yi < NUM_CLASSES): continue
+            X_filtered.append(xi)
+            y_filtered.append(yi)
+
+        if len(X_filtered) < 5:
             print("⏭ 학습용 시퀀스 부족"); return
 
-        min_len = min(len(X_raw), len(y_raw))
-        X_raw, y_raw = X_raw[:min_len], y_raw[:min_len]
+        X_raw = np.array(X_filtered)
+        y_raw = np.array(y_filtered)
+
         input_size = X_raw.shape[2]
         val_len = int(len(X_raw) * 0.2)
+        if val_len == 0:
+            print("⏭ 검증 데이터 부족"); return
+
         X_train, X_val = X_raw[:-val_len], X_raw[-val_len:]
         y_train, y_val = y_raw[:-val_len], y_raw[-val_len:]
-
-        if len(X_train.shape) != 3 or len(y_train.shape) != 1:
-            print("⛔ shape 오류 - 학습 중단"); return
 
         failure_hashes = load_existing_failure_hashes()
         frequent_failures = get_frequent_failures(min_count=5)
@@ -109,23 +119,16 @@ def train_one_model(symbol, strategy, max_epochs=20):
             # ✅ 오답 학습
             for _ in range(rep_wrong):
                 wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
-                xb_all, yb_all = [], []
-                for sample in wrong_data:
-                    xb, yb = sample[:2]
+                for xb, yb in [s[:2] for s in wrong_data if isinstance(s, (list, tuple)) and len(s) >= 2]:
                     if xb.shape[1:] != (window, input_size): continue
-                    if not isinstance(yb, (int, np.integer)) or yb < 0 or yb >= NUM_CLASSES: continue
+                    if not isinstance(yb, (int, np.integer)) or not (0 <= yb < NUM_CLASSES): continue
                     feature_hash = get_feature_hash_from_tensor(xb[0])
-                    if (feature_hash in failure_hashes) or (feature_hash in frequent_failures): continue
-                    xb_all.append(torch.tensor(xb, dtype=torch.float32))
-                    yb_all.append(int(yb))
-                if len(xb_all) < 2: continue
-                for xb, yb in zip(xb_all, yb_all):
-                    xb = xb.unsqueeze(0)
-                    yb = torch.tensor([yb], dtype=torch.long)
+                    if feature_hash in failure_hashes or feature_hash in frequent_failures: continue
+                    xb = torch.tensor(xb).unsqueeze(0).float()
+                    yb = torch.tensor([yb]).long()
                     logits = model(xb)
                     loss = lossfn(logits, yb)
-                    if not torch.isfinite(loss):
-                        print("⚠️ 오답학습 손실 비정상, 스킵"); continue
+                    if not torch.isfinite(loss): continue
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
             # ✅ 정상 학습
@@ -137,8 +140,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 for xb, yb in train_loader:
                     logits = model(xb)
                     loss = lossfn(logits, yb)
-                    if not torch.isfinite(loss):
-                        print("⚠️ 손실 비정상, 학습 중단"); break
+                    if not torch.isfinite(loss): break
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
             # ✅ 검증
@@ -148,9 +150,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 yb = torch.tensor(y_val, dtype=torch.long)
                 logits = model(xb)
                 preds = torch.argmax(logits, dim=1).numpy()
-                y_true = y_val
-                acc = accuracy_score(y_true, preds)
-                f1 = f1_score(y_true, preds, average="macro")
+                acc = accuracy_score(y_val, preds)
+                f1 = f1_score(y_val, preds, average="macro")
                 val_loss = lossfn(logits, yb).item()
 
             torch.save(model.state_dict(), model_path)
