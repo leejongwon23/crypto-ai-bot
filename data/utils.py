@@ -72,10 +72,7 @@ def create_dataset(features, window=20, strategy="단기"):
     for row in features:
         if isinstance(row.get("timestamp"), str):
             row["timestamp"] = pd.to_datetime(row["timestamp"], errors="coerce")
-    features = sorted(
-        [r for r in features if isinstance(r.get("timestamp"), pd.Timestamp)],
-        key=lambda r: r["timestamp"]
-    )
+    features = sorted([r for r in features if isinstance(r.get("timestamp"), pd.Timestamp)], key=lambda r: r["timestamp"])
 
     if len(features) < window + 10:
         return np.array([]), np.array([])
@@ -97,9 +94,11 @@ def create_dataset(features, window=20, strategy="단기"):
             continue
 
         base_row = seq[-1]
-        base_time = base_row["timestamp"]
+        base_time = base_row.get("timestamp")
         base_price = base_row.get("close")
-        if not isinstance(base_time, pd.Timestamp) or not np.isfinite(base_price):
+
+        # ✅ 예외 필터: base_price가 0 또는 비정상 수치인 경우 제거
+        if not isinstance(base_time, pd.Timestamp) or not np.isfinite(base_price) or base_price == 0:
             continue
 
         # ✅ target 구간 탐색
@@ -113,6 +112,8 @@ def create_dataset(features, window=20, strategy="단기"):
 
         future_target = np.mean(future_prices)
         gain = (future_target - base_price) / base_price
+
+        # ✅ 예외 필터: 수익률 계산 오류 방지
         if not np.isfinite(gain):
             continue
 
@@ -123,10 +124,10 @@ def create_dataset(features, window=20, strategy="단기"):
         X.append([[r[col] for col in col_order] for r in seq])
         y.append(label)
 
+    # ✅ shape 보정
     if not X or not y:
         return np.array([]), np.array([])
 
-    # ✅ shape 통일 보정
     common_len = max(set(map(len, X)), key=list(X).count)
     X_filtered = [x for x in X if len(x) == common_len]
     y_filtered = [l for x, l in zip(X, y) if len(x) == common_len]
