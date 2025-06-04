@@ -81,7 +81,7 @@ def create_dataset(features, window=20, strategy="단기"):
         try:
             seq = features[i - window:i]
             if len(seq) != window:
-                print(f"[건너뜀] window 길이 불일치: {len(seq)}")
+                print(f"[건너뜀] window 길이 불일치: {len(seq)} (i={i})")
                 continue
 
             x = [[row.get(c, 0.0) for c in columns] for row in seq]
@@ -107,22 +107,26 @@ def create_dataset(features, window=20, strategy="단기"):
             direction = "롱" if max_gain > max_loss else "숏"
             gain = max_gain if max_gain > max_loss else -max_loss
 
+            # ✅ 클래스 구간 명확히 지정 (16개)
             bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
                      0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
-            cls = next((i for i, b in enumerate(bins) if gain < b), len(bins)-1)
+            cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
 
-            if cls < 0 or cls >= 16:
-                print(f"[스킵] 잘못된 클래스 번호: {cls}, 수익률={gain:.4f}")
+            if not (0 <= cls < 16):
+                print(f"[스킵] 잘못된 클래스 번호: {cls} (수익률={gain:.4f}, i={i})")
                 continue
 
             X.append(x)
             y.append(cls)
+
         except Exception as e:
-            print(f"[예외] 샘플 생성 실패 (i={i}) → {e}")
+            print(f"[예외] 샘플 생성 실패 (i={i}) → {type(e).__name__}: {e}")
             continue
 
     if not X or not y:
         print(f"[결과] create_dataset: 유효 샘플 없음 → X={len(X)}, y={len(y)}")
+    else:
+        print(f"[완료] create_dataset: 샘플 생성 완료 → X={len(X)}, y={len(y)}")
 
     return np.array(X), np.array(y)
 
