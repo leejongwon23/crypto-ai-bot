@@ -94,10 +94,9 @@ def create_dataset(features, window=20, strategy="단기"):
             continue
 
         base_row = seq[-1]
-        base_time = base_row.get("timestamp")
+        base_time = base_row["timestamp"]
         base_price = base_row.get("close")
 
-        # ✅ 예외 필터: base_price가 0 또는 비정상 수치인 경우 제거
         if not isinstance(base_time, pd.Timestamp) or not np.isfinite(base_price) or base_price == 0:
             continue
 
@@ -111,9 +110,10 @@ def create_dataset(features, window=20, strategy="단기"):
             continue
 
         future_target = np.mean(future_prices)
-        gain = (future_target - base_price) / base_price
+        if not np.isfinite(future_target) or future_target == 0:
+            continue
 
-        # ✅ 예외 필터: 수익률 계산 오류 방지
+        gain = (future_target - base_price) / base_price
         if not np.isfinite(gain):
             continue
 
