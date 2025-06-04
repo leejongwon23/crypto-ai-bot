@@ -152,11 +152,23 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 200):
     except:
         return None
 
-def get_kline_by_strategy(symbol: str, strategy: str):
-    config = STRATEGY_CONFIG.get(strategy)
-    if config is None:
-        return None
-    return get_kline(symbol, interval=config["interval"], limit=config["limit"])
+def get_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
+    from_binance = __import__("data.binance").binance.get_klines
+    interval_map = {"단기": "15m", "중기": "1h", "장기": "4h"}
+    lookback_map = {"단기": 1000, "중기": 1000, "장기": 1000}
+    
+    interval = interval_map[strategy]
+    lookback = lookback_map[strategy]
+
+    df = from_binance(symbol, interval, lookback)
+
+    if df is None or len(df) < 100:
+        print(f"[경고] {symbol}-{strategy}: get_kline_by_strategy() 데이터 수 부족 → {len(df) if df is not None else 'None'}")
+    else:
+        print(f"[확인] {symbol}-{strategy}: 데이터 수량 → {len(df)}")
+
+    return df
+
 
 def get_realtime_prices():
     url = f"{BASE_URL}/v5/market/tickers"
