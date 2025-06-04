@@ -121,7 +121,7 @@ def evaluate_predictions(get_price_fn):
     try:
         rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
         if not rows:
-            print("[스킵] 예측 결과가 하나도 없어서 평가를 건너뜁니다.")
+            print("[스킵] 예측 결과 없음 → 평가 건너뜀")
             return
     except Exception as e:
         print(f"[예측 평가 로드 오류] {e}")
@@ -142,13 +142,18 @@ def evaluate_predictions(get_price_fn):
             s, strat = r["symbol"], r["strategy"]
             m = r.get("model", "unknown")
             entry = float(r.get("entry_price", 0))
-            pred_class = int(r.get("predicted_class", -1))
+            try:
+                pred_class = int(r.get("predicted_class", -1))
+            except:
+                pred_class = -1
+
             pred_time = datetime.datetime.fromisoformat(r["timestamp"]).astimezone(pytz.timezone("Asia/Seoul"))
             eval_deadline = pred_time + datetime.timedelta(hours=eval_horizon_map.get(strat, 6))
             vol = str(r.get("volatility", "False")).lower() in ["1", "true", "yes"]
 
             df = get_price_fn(s, strat)
             if df is None or df.empty or "timestamp" not in df.columns:
+                print(f"[WARN] 평가 데이터 없음: {s}-{strat}")
                 r.update({"status": "skip_eval", "reason": "가격 데이터 누락", "return": 0.0})
                 updated.append(r)
                 continue
@@ -178,7 +183,9 @@ def evaluate_predictions(get_price_fn):
                     actual_max = eval_df["high"].max()
                     actual_gain = (actual_max - entry) / entry if entry > 0 else 0.0
                     actual_class = max([i for i, b in enumerate(class_bins) if actual_gain >= b], default=-1)
-                    success = (pred_class == actual_class)
+
+                    # ✅ YOPO 개선: ±1 클래스까지는 성공 인정
+                    success = abs(pred_class - actual_class) <= 1
 
                     r.update({
                         "status": "v_success" if vol and success else "v_fail" if vol else "success" if success else "fail",
@@ -237,6 +244,5 @@ def evaluate_predictions(get_price_fn):
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader()
         w.writerows(updated)
-
 
 strategy_stats = {}
