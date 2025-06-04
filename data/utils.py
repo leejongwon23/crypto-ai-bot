@@ -65,74 +65,62 @@ def get_btc_dominance():
         return BTC_DOMINANCE_CACHE["value"]
 
 def create_dataset(features, window=20, strategy="단기"):
-    import numpy as np
-    import pandas as pd
-
-    # ✅ timestamp 파싱 및 정렬
-    for row in features:
-        if isinstance(row.get("timestamp"), str):
-            row["timestamp"] = pd.to_datetime(row["timestamp"], errors="coerce")
-    features = sorted([r for r in features if isinstance(r.get("timestamp"), pd.Timestamp)], key=lambda r: r["timestamp"])
-
-    if len(features) < window + 10:
-        return np.array([]), np.array([])
-
     X, y = [], []
-    col_order = [k for k in features[0].keys() if k != "timestamp"]
+    if not features or len(features) <= window:
+        return X, y
 
-    # ✅ 예측 시점별 horizon
-    horizon_map = {"단기": 4, "중기": 24, "장기": 168}
-    target_hours = horizon_map.get(strategy, 4)
+    # ✅ 명시적 컬럼 순서 정의
+    columns = [c for c in features[0].keys() if c != "timestamp"]
 
-    # ✅ 클래스 분류 구간
-    bins = [-np.inf, -0.1, -0.07, -0.05, -0.03, -0.015, -0.005,
-             0.005, 0.015, 0.03, 0.05, 0.07, 0.1, 0.15, 0.2, np.inf]
+    for i in range(window, len(features)):
+        try:
+            seq = features[i - window:i]
+            if len(seq) != window:
+                continue
+            x = [[row.get(c, 0.0) for c in columns] for row in seq]
 
-    for i in range(len(features) - window):
-        seq = features[i:i + window]
-        if any(set(row.keys()) != set(features[0].keys()) for row in seq):
+            future = features[i:]
+            direction = None
+            entry_price = features[i]["close"]
+            gain = 0
+
+            if strategy == "단기":
+                lookahead = min(8, len(future))
+            elif strategy == "중기":
+                lookahead = min(24, len(future))
+            elif strategy == "장기":
+                lookahead = min(48, len(future))
+            else:
+                lookahead = min(12, len(future))
+
+            highs = [f.get("high", entry_price) for f in future[:lookahead]]
+            lows = [f.get("low", entry_price) for f in future[:lookahead]]
+
+            max_gain = max((h - entry_price) / entry_price for h in highs)
+            max_loss = max((entry_price - l) / entry_price for l in lows)
+
+            if max_gain > max_loss:
+                gain = max_gain
+                direction = "롱"
+            else:
+                gain = -max_loss
+                direction = "숏"
+
+            # ✅ 수익률 → 클래스 (16개 구간)
+            bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
+                     0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
+            cls = next((i for i, b in enumerate(bins) if gain < b), len(bins)-1)
+
+            if cls < 0 or cls >= 16:
+                continue
+
+            X.append(x)
+            y.append(cls)
+        except:
             continue
 
-        base_row = seq[-1]
-        base_time = base_row.get("timestamp")
-        base_price = base_row.get("close")
+    return np.array(X), np.array(y)
 
-        if not isinstance(base_time, pd.Timestamp) or not np.isfinite(base_price) or base_price == 0:
-            continue
-
-        # ✅ target 구간 탐색
-        future_prices = [
-            r.get("close") for r in features[i + window:]
-            if isinstance(r.get("timestamp"), pd.Timestamp) and
-               base_time < r["timestamp"] <= base_time + pd.Timedelta(hours=target_hours)
-        ]
-        if len(future_prices) < 3:
-            continue
-
-        future_target = np.mean(future_prices)
-        if not np.isfinite(future_target) or future_target == 0:
-            continue
-
-        gain = (future_target - base_price) / base_price
-        if not np.isfinite(gain):
-            continue
-
-        label = np.digitize(gain, bins) - 1
-        if not isinstance(label, (int, np.integer)) or not (0 <= label < 16):
-            continue
-
-        X.append([[r[col] for col in col_order] for r in seq])
-        y.append(label)
-
-    # ✅ shape 보정
-    if not X or not y:
-        return np.array([]), np.array([])
-
-    common_len = max(set(map(len, X)), key=list(X).count)
-    X_filtered = [x for x in X if len(x) == common_len]
-    y_filtered = [l for x, l in zip(X, y) if len(x) == common_len]
-
-    return np.array(X_filtered), np.array(y_filtered)
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 200):
     url = f"{BASE_URL}/v5/market/kline"
