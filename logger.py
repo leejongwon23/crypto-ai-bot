@@ -245,4 +245,5 @@ def evaluate_predictions(get_price_fn):
         w.writeheader()
         w.writerows(updated)
 
+
 strategy_stats = {}
