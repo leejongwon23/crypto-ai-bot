@@ -65,33 +65,31 @@ def get_btc_dominance():
         return BTC_DOMINANCE_CACHE["value"]
 
 def create_dataset(features, window=20, strategy="단기"):
-    X, y = [], []
+    X, y = []
 
     if not features or len(features) <= window:
-        print(f"[스킵] create_dataset: features 없음 또는 너무 짧음 (len={len(features) if features else 0})")
+        print(f"[스킵] create_dataset: features 부족 (len={len(features) if features else 0})")
         return X, y
 
     try:
         columns = [c for c in features[0].keys() if c != "timestamp"]
     except Exception as e:
-        print(f"[오류] create_dataset: features[0] 키 오류 → {e}")
+        print(f"[오류] features[0] 키 오류 → {e}")
         return X, y
 
     for i in range(window, len(features)):
         try:
             seq = features[i - window:i]
             if len(seq) != window:
-                print(f"[건너뜀] window 길이 불일치: {len(seq)} (i={i})")
                 continue
 
-            x = [[row.get(c, 0.0) for c in columns] for row in seq]
+            x = [[float(row.get(c, 0.0)) for c in columns] for row in seq]
 
             future = features[i:]
-            entry_price = features[i].get("close", 0)
+            entry_price = float(features[i].get("close", 0.0))
 
-            # ✅ entry_price가 0 또는 비정상일 경우 스킵
-            if entry_price is None or entry_price == 0:
-                print(f"[건너뜀] entry_price=0 또는 없음 (i={i})")
+            if entry_price <= 0:
+                print(f"[스킵] entry_price=0 또는 없음 (i={i})")
                 continue
 
             if strategy == "단기":
@@ -103,27 +101,36 @@ def create_dataset(features, window=20, strategy="단기"):
             else:
                 lookahead = min(12, len(future))
 
-            highs = [f.get("high", entry_price) for f in future[:lookahead]]
-            lows = [f.get("low", entry_price) for f in future[:lookahead]]
+            highs = [float(f.get("high", entry_price)) for f in future[:lookahead]]
+            lows = [float(f.get("low", entry_price)) for f in future[:lookahead]]
 
-            # ✅ high/low가 None이거나 entry_price==0인 경우 NaN 방지
-            if not highs or not lows or any(h is None for h in highs) or any(l is None for l in lows):
-                print(f"[건너뜀] 고가/저가 데이터 이상 (i={i})")
+            if not highs or not lows or any(h is None or h != h for h in highs) or any(l is None or l != l for l in lows):
+                print(f"[스킵] 고가/저가 NaN 또는 누락 (i={i})")
                 continue
 
             max_gain = max((h - entry_price) / (entry_price + 1e-6) for h in highs)
             max_loss = max((entry_price - l) / (entry_price + 1e-6) for l in lows)
 
-            direction = "롱" if max_gain > max_loss else "숏"
-            gain = max_gain if max_gain > max_loss else -max_loss
+            if not np.isfinite(max_gain) or not np.isfinite(max_loss):
+                continue
 
-            # ✅ 클래스 구간 정의 (16개)
+            # ✅ 수익률 및 방향성 판단
+            direction = "롱" if max_gain > max_loss else "숏"
+            gain = max_gain if direction == "롱" else -max_loss
+
+            # ✅ 강화된 클래스 구간 (롱/숏 양쪽에 동일 적용)
             bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
                      0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
+
+            # ✅ 롱/숏 각각 다른 클래스 번호로 구분 (숏은 0~7, 롱은 8~15)
             cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
+            if direction == "숏":
+                cls = 7 - cls if cls <= 7 else 0  # 숏은 반대 정렬
+            elif direction == "롱":
+                cls = 8 + cls if cls + 8 < 16 else 15
 
             if not (0 <= cls < 16):
-                print(f"[스킵] 잘못된 클래스 번호: {cls} (수익률={gain:.4f}, i={i})")
+                print(f"[스킵] 클래스 범위 오류: {cls} (gain={gain:.4f}, i={i})")
                 continue
 
             X.append(x)
@@ -139,6 +146,7 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[완료] create_dataset: 샘플 생성 완료 → X={len(X)}, y={len(y)}")
 
     return np.array(X), np.array(y)
+
 
 
 
