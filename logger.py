@@ -115,8 +115,7 @@ def get_feature_hash(feature_row):
 
 def evaluate_predictions(get_price_fn):
     from failure_db import ensure_failure_db, insert_failure_record, load_existing_failure_hashes, analyze_failure_reason
-    from logger import update_model_success
-    from logger import get_feature_hash
+    from logger import update_model_success, get_feature_hash
     from data.utils import compute_features
 
     ensure_failure_db()
@@ -145,7 +144,8 @@ def evaluate_predictions(get_price_fn):
                 updated.append(r)
                 continue
 
-            s, strat = r["symbol"], r["strategy"]
+            s = r.get("symbol")
+            strat = r.get("strategy")
             m = r.get("model", "unknown")
             entry = float(r.get("entry_price", 0))
             try:
@@ -159,7 +159,6 @@ def evaluate_predictions(get_price_fn):
 
             df = get_price_fn(s, strat)
             if df is None or df.empty or "timestamp" not in df.columns:
-                print(f"[WARN] 평가 데이터 없음: {s}-{strat}")
                 r.update({"status": "skip_eval", "reason": "가격 데이터 누락", "return": 0.0})
                 updated.append(r)
                 continue
@@ -189,8 +188,6 @@ def evaluate_predictions(get_price_fn):
                     actual_max = eval_df["high"].max()
                     actual_gain = (actual_max - entry) / entry if entry > 0 else 0.0
                     actual_class = max([i for i, b in enumerate(class_bins) if actual_gain >= b], default=-1)
-
-                    # ✅ YOPO 철학 반영: ±1 클래스 성공 인정
                     success = abs(pred_class - actual_class) <= 1
 
                     r.update({
@@ -201,6 +198,7 @@ def evaluate_predictions(get_price_fn):
 
                     update_model_success(s, strat, m, success)
                     evaluated.append(dict(r))
+
         except Exception as e:
             r.update({
                 "status": "skip_eval",
@@ -228,22 +226,29 @@ def evaluate_predictions(get_price_fn):
                 existing_hashes = load_existing_failure_hashes()
                 for r in failed:
                     symbol, strategy = r["symbol"], r["strategy"]
+                    if not symbol or not strategy:
+                        continue
+
                     df = get_price_fn(symbol, strategy)
                     df_feat = compute_features(symbol, df, strategy)
                     if df_feat is None or df_feat.empty or "timestamp" not in df_feat.columns:
                         continue
+
                     df_feat = df_feat.dropna()
                     feature_row = df_feat.drop(columns=["timestamp"]).iloc[-1].values
                     if not isinstance(feature_row, (np.ndarray, list)) or len(feature_row) == 0:
                         continue
+
                     hash_value = get_feature_hash(feature_row)
                     key = (symbol, strategy, r.get("direction", "예측실패"), hash_value)
                     if key in existing_hashes:
                         continue
+
                     failure_reason = analyze_failure_reason(
                         float(r.get("rate", 0.0)),
                         df_feat["volatility"].iloc[-1] if "volatility" in df_feat.columns else None
                     )
+
                     r["reason"] = failure_reason
                     insert_failure_record(r, hash_value)
                     existing_hashes.add(key)
@@ -254,7 +259,6 @@ def evaluate_predictions(get_price_fn):
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader()
         w.writerows(updated)
-
 
 
 strategy_stats = {}
