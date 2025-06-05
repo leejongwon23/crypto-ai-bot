@@ -150,7 +150,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     if not torch.isfinite(loss): break
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            # ✅ 평가 및 오버핏 검사
+            # ✅ 평가
             model.eval()
             with torch.no_grad():
                 xb = torch.tensor(X_val, dtype=torch.float32)
@@ -161,12 +161,13 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 f1 = f1_score(y_val, preds, average="macro")
                 val_loss = lossfn(logits, yb).item()
 
-            # ✅ 정확도 100% + 클래스 1~2개 → 오버핏 판단
+            # ✅ 정확도 100% + 클래스 2개 이하면 오버핏 → 저장 X
             if acc >= 1.0 and len(set(y_val)) <= 2:
-                print(f"⚠️ 비정상 정확도 감지 → {symbol}-{strategy}-{model_type} 정확도 100% (클래스 다양성 부족)")
+                print(f"⚠️ 오버핏 감지 → 정확도 100% & 클래스 다양성 부족 → 학습 무효 처리")
                 log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
                 continue
 
+            # ✅ 정상 저장 및 중요도 저장
             torch.save(model.state_dict(), model_path)
             save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss)
             log_training_result(symbol, strategy, model_type, acc, f1, val_loss)
