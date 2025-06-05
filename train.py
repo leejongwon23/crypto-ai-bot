@@ -97,12 +97,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
         total = sum(class_counts.values())
         dominant_ratio = max(class_counts.values()) / total if total > 0 else 1.0
 
-        # ✅ 단일 클래스 방지
         if len(class_counts) <= 1:
             print(f"⛔ 학습 중단: 단일 클래스만 존재 → 의미 없는 학습 방지")
             return
 
-        # ✅ oversampling: 소수 클래스 증강 (랜덤 반복)
         if len(class_counts) < 5 and dominant_ratio > 0.85:
             print(f"⚠️ 편향 데이터 감지 → oversampling 적용")
             threshold = 10
@@ -118,7 +116,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             y_raw = np.array(y_bal)
             print(f"  └ oversampling 완료 → 총 샘플 수: {len(X_raw)}")
 
-        # ✅ 학습/검증 분리
         input_size = X_raw.shape[2]
         val_len = int(len(X_raw) * 0.2)
         if val_len == 0:
@@ -135,6 +132,13 @@ def train_one_model(symbol, strategy, max_epochs=20):
         if fail_count >= 10: rep_wrong += 4
         elif fail_count >= 5: rep_wrong += 2
 
+        # ✅ [6단계] 전략별 성공률 기반 보상 강화
+        success_rate = get_actual_success_rate(strategy)
+        if success_rate <= 0.2:
+            rep_wrong += 6
+        elif success_rate <= 0.35:
+            rep_wrong += 4
+
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size).train()
             model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt"
@@ -148,45 +152,38 @@ def train_one_model(symbol, strategy, max_epochs=20):
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = nn.CrossEntropyLoss()
 
-            # ✅ 실패 학습 강화 (중복 제거 + 전략별 반복 개선)
-        wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
-        if not wrong_data:
-            print(f"[스킵] {symbol}-{strategy} → 실패 데이터 없음 → 강화학습 생략")
-        else:
-            used_hashes = set()
-            wrong_data_filtered = []
-
-            for s in wrong_data:
-                if isinstance(s, (list, tuple)) and len(s) >= 2:
-                    xb, yb = s[:2]
-                    if not isinstance(xb, np.ndarray) or xb.shape != (window, input_size):
-                        continue
-                    if not isinstance(yb, (int, np.integer)) or not (0 <= yb < NUM_CLASSES):
-                        continue
-                    feature_hash = get_feature_hash_from_tensor(torch.tensor(xb).squeeze(0))
-                    if feature_hash in used_hashes or feature_hash in failure_hashes or feature_hash in frequent_failures:
-                        continue
-                    used_hashes.add(feature_hash)
-                    wrong_data_filtered.append((xb, yb))
-
-            if not wrong_data_filtered:
-                print(f"[강화학습 무시] {symbol}-{strategy} → 중복 제거 후 학습 가능 샘플 없음")
+            # ✅ 실패 학습 강화
+            wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
+            if not wrong_data:
+                print(f"[스킵] {symbol}-{strategy} → 실패 데이터 없음 → 강화학습 생략")
             else:
-                print(f"[강화학습 시작] {symbol}-{strategy} → 총 {len(wrong_data_filtered)}개")
-                for _ in range(rep_wrong):
-                    batch = random.sample(wrong_data_filtered, min(5, len(wrong_data_filtered)))  # ✅ 랜덤 소규모 배치
-                    for xb, yb in batch:
-                        xb_tensor = torch.tensor(xb).unsqueeze(0).float()
-                        yb_tensor = torch.tensor([yb]).long()
-                        logits = model(xb_tensor)
-                        loss = lossfn(logits, yb_tensor)
-                        if not torch.isfinite(loss):
+                used_hashes = set()
+                wrong_data_filtered = []
+                for s in wrong_data:
+                    if isinstance(s, (list, tuple)) and len(s) >= 2:
+                        xb, yb = s[:2]
+                        if not isinstance(xb, np.ndarray) or xb.shape != (window, input_size): continue
+                        if not isinstance(yb, (int, np.integer)) or not (0 <= yb < NUM_CLASSES): continue
+                        feature_hash = get_feature_hash_from_tensor(torch.tensor(xb).squeeze(0))
+                        if feature_hash in used_hashes or feature_hash in failure_hashes or feature_hash in frequent_failures:
                             continue
-                        optimizer.zero_grad()
-                        loss.backward()
-                        optimizer.step()
-                        
-            # ✅ 정상 학습
+                        used_hashes.add(feature_hash)
+                        wrong_data_filtered.append((xb, yb))
+
+                if not wrong_data_filtered:
+                    print(f"[강화학습 무시] {symbol}-{strategy} → 학습 가능 샘플 없음")
+                else:
+                    print(f"[강화학습 시작] {symbol}-{strategy} → 총 {len(wrong_data_filtered)}개")
+                    for _ in range(rep_wrong):
+                        batch = random.sample(wrong_data_filtered, min(5, len(wrong_data_filtered)))
+                        for xb, yb in batch:
+                            xb_tensor = torch.tensor(xb).unsqueeze(0).float()
+                            yb_tensor = torch.tensor([yb]).long()
+                            logits = model(xb_tensor)
+                            loss = lossfn(logits, yb_tensor)
+                            if not torch.isfinite(loss): continue
+                            optimizer.zero_grad(); loss.backward(); optimizer.step()
+
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
             train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
@@ -198,7 +195,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     if not torch.isfinite(loss): break
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            # ✅ 검증
             model.eval()
             with torch.no_grad():
                 xb = torch.tensor(X_val, dtype=torch.float32)
@@ -209,7 +205,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 f1 = f1_score(y_val, preds, average="macro")
                 val_loss = lossfn(logits, yb).item()
 
-            # ⛔ 오버핏 방지
             if acc >= 1.0 and len(set(y_val)) <= 2:
                 print(f"⚠️ 오버핏 감지 → 저장 중단")
                 log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
@@ -231,29 +226,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
-
-
-def train_model_loop(strategy):
-    success = []
-    failed = []
-    for sym in SYMBOLS:
-        try:
-            print(f"\n=== {sym}-{strategy} 학습 시작 ===")
-            train_one_model(sym, strategy)
-            success.append(sym)
-        except Exception as e:
-            print(f"[단일 학습 오류] {sym}-{strategy} → {e}")
-            failed.append((sym, str(e)))
-
-    print(f"\n✅ {strategy} 학습 요약")
-    print(f" - 성공: {len(success)} / {len(SYMBOLS)}")
-    if success:
-        print("   ·", ", ".join(success))
-    if failed:
-        print(f" - 실패: {len(failed)}개")
-        for sym, reason in failed:
-            print(f"   · {sym} → {reason}")
-
+            
 def train_all_models():
     for strat in ["단기", "중기", "장기"]:
         for sym in SYMBOLS:
