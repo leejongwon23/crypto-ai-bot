@@ -148,25 +148,44 @@ def train_one_model(symbol, strategy, max_epochs=20):
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = nn.CrossEntropyLoss()
 
-            # ✅ 실패 학습 강화 (해시로 중복 제거)
+            # ✅ 실패 학습 강화 (중복 제거 + 전략별 반복 개선)
+        wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
+        if not wrong_data:
+            print(f"[스킵] {symbol}-{strategy} → 실패 데이터 없음 → 강화학습 생략")
+        else:
             used_hashes = set()
-            for _ in range(rep_wrong):
-                wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
-                if not wrong_data: break
-                for xb, yb in [s[:2] for s in wrong_data if isinstance(s, (list, tuple)) and len(s) >= 2]:
-                    if not isinstance(xb, np.ndarray) or xb.shape != (window, input_size): continue
-                    if not isinstance(yb, (int, np.integer)) or not (0 <= yb < NUM_CLASSES): continue
+            wrong_data_filtered = []
+
+            for s in wrong_data:
+                if isinstance(s, (list, tuple)) and len(s) >= 2:
+                    xb, yb = s[:2]
+                    if not isinstance(xb, np.ndarray) or xb.shape != (window, input_size):
+                        continue
+                    if not isinstance(yb, (int, np.integer)) or not (0 <= yb < NUM_CLASSES):
+                        continue
                     feature_hash = get_feature_hash_from_tensor(torch.tensor(xb).squeeze(0))
                     if feature_hash in used_hashes or feature_hash in failure_hashes or feature_hash in frequent_failures:
                         continue
                     used_hashes.add(feature_hash)
-                    xb_tensor = torch.tensor(xb).unsqueeze(0).float()
-                    yb_tensor = torch.tensor([yb]).long()
-                    logits = model(xb_tensor)
-                    loss = lossfn(logits, yb_tensor)
-                    if not torch.isfinite(loss): continue
-                    optimizer.zero_grad(); loss.backward(); optimizer.step()
+                    wrong_data_filtered.append((xb, yb))
 
+            if not wrong_data_filtered:
+                print(f"[강화학습 무시] {symbol}-{strategy} → 중복 제거 후 학습 가능 샘플 없음")
+            else:
+                print(f"[강화학습 시작] {symbol}-{strategy} → 총 {len(wrong_data_filtered)}개")
+                for _ in range(rep_wrong):
+                    batch = random.sample(wrong_data_filtered, min(5, len(wrong_data_filtered)))  # ✅ 랜덤 소규모 배치
+                    for xb, yb in batch:
+                        xb_tensor = torch.tensor(xb).unsqueeze(0).float()
+                        yb_tensor = torch.tensor([yb]).long()
+                        logits = model(xb_tensor)
+                        loss = lossfn(logits, yb_tensor)
+                        if not torch.isfinite(loss):
+                            continue
+                        optimizer.zero_grad()
+                        loss.backward()
+                        optimizer.step()
+                        
             # ✅ 정상 학습
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
