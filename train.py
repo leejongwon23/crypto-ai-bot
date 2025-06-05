@@ -58,6 +58,7 @@ from collections import Counter
 
 from collections import Counter
 
+
 def train_one_model(symbol, strategy, max_epochs=20):
     print(f"▶ 학습 시작: {symbol}-{strategy}")
     try:
@@ -92,8 +93,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             y_filtered.append(yi)
 
         if len(X_filtered) < 5:
-           print("복습이 부족합니다."); return
-
+            print("복습이 부족합니다."); return
 
         X_raw = np.array(X_filtered)
         y_raw = np.array(y_filtered)
@@ -101,6 +101,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
         class_counts = Counter(y_raw)
         total = sum(class_counts.values())
         dominant_ratio = max(class_counts.values()) / total if total > 0 else 1.0
+
+        # ⚠️ 편향 클래스 단일일 경우 학습 중단
+        if len(class_counts) <= 1:
+            print(f"⛔ 학습 중단: 단일 클래스만 존재 → 의미 없는 학습 방지")
+            return
 
         if len(class_counts) < 5 and dominant_ratio > 0.85:
             print(f"⚠️ 편향 데이터 감지 → oversampling 적용")
@@ -187,8 +192,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 f1 = f1_score(y_val, preds, average="macro")
                 val_loss = lossfn(logits, yb).item()
 
+            # ⛔ 오버핏 시 저장 중단
             if acc >= 1.0 and len(set(y_val)) <= 2:
-                print(f"⚠️ 오버핏 감지 → 정확도 100% & 클래스 단일")
+                print(f"⚠️ 오버핏 감지 → 정확도 100% & 클래스 단일 → 저장 중단")
                 log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
                 continue
 
@@ -208,8 +214,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
-
-
 
 
 def train_model_loop(strategy):
