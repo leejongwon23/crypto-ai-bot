@@ -87,7 +87,12 @@ def create_dataset(features, window=20, strategy="단기"):
             x = [[row.get(c, 0.0) for c in columns] for row in seq]
 
             future = features[i:]
-            entry_price = features[i]["close"]
+            entry_price = features[i].get("close", 0)
+
+            # ✅ entry_price가 0 또는 비정상일 경우 스킵
+            if entry_price is None or entry_price == 0:
+                print(f"[건너뜀] entry_price=0 또는 없음 (i={i})")
+                continue
 
             if strategy == "단기":
                 lookahead = min(8, len(future))
@@ -101,13 +106,18 @@ def create_dataset(features, window=20, strategy="단기"):
             highs = [f.get("high", entry_price) for f in future[:lookahead]]
             lows = [f.get("low", entry_price) for f in future[:lookahead]]
 
-            max_gain = max((h - entry_price) / entry_price for h in highs)
-            max_loss = max((entry_price - l) / entry_price for l in lows)
+            # ✅ high/low가 None이거나 entry_price==0인 경우 NaN 방지
+            if not highs or not lows or any(h is None for h in highs) or any(l is None for l in lows):
+                print(f"[건너뜀] 고가/저가 데이터 이상 (i={i})")
+                continue
+
+            max_gain = max((h - entry_price) / (entry_price + 1e-6) for h in highs)
+            max_loss = max((entry_price - l) / (entry_price + 1e-6) for l in lows)
 
             direction = "롱" if max_gain > max_loss else "숏"
             gain = max_gain if max_gain > max_loss else -max_loss
 
-            # ✅ 클래스 구간 명확히 지정 (16개)
+            # ✅ 클래스 구간 정의 (16개)
             bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
                      0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
             cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
