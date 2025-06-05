@@ -1,5 +1,3 @@
-# ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
-
 import os
 import json
 import torch
@@ -22,9 +20,11 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             print(f"[경고] {symbol}-{strategy} → feature 부족으로 기본값 반환")
             return 20
 
+        # ✅ timestamp 제외하고 스케일링
         scaler = MinMaxScaler()
         scaled = scaler.fit_transform(df_feat.drop(columns=["timestamp"]).values)
 
+        # ✅ timestamp 복원
         feature_dicts = []
         for i, row in enumerate(scaled):
             d = dict(zip(df_feat.columns.drop("timestamp"), row))
@@ -36,38 +36,36 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         best_result = {}
 
         for window in window_list:
+            X, y = create_dataset(feature_dicts, window, strategy)
+            if X is None or y is None or len(X) == 0 or len(X) != len(y):
+                continue
+
+            input_size = X.shape[2]
+            model = get_model("lstm", input_size).train()
+
+            X_tensor = torch.tensor(X, dtype=torch.float32)
+            y_tensor = torch.tensor(y, dtype=torch.long)
+
+            val_len = int(len(X_tensor) * 0.2)
+            train_len = len(X_tensor) - val_len
+            if train_len <= 0 or val_len <= 0:
+                continue
+
+            train_X = X_tensor[:train_len]
+            train_y = y_tensor[:train_len]
+            val_X = X_tensor[train_len:]
+            val_y = y_tensor[train_len:]
+
+            optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+            criterion = torch.nn.CrossEntropyLoss()
+
             try:
-                X, y = create_dataset(feature_dicts, window, strategy)
-                if not isinstance(X, np.ndarray) or len(X) == 0 or len(X) != len(y):
-                    print(f"[건너뜀] window={window}: X/y 길이 불일치 또는 데이터 없음")
-                    continue
-                if len(X.shape) != 3:
-                    print(f"[건너뜀] window={window}: X 차원 오류 {X.shape}")
-                    continue
-
-                input_size = X.shape[2]
-                model = get_model(model_type="lstm", input_size=input_size).train()
-
-                X_tensor = torch.tensor(X, dtype=torch.float32)
-                y_tensor = torch.tensor(y, dtype=torch.long)
-
-                val_len = int(len(X_tensor) * 0.2)
-                train_len = len(X_tensor) - val_len
-                if train_len <= 0 or val_len <= 0:
-                    print(f"[건너뜀] window={window}: 훈련/검증 데이터 부족")
-                    continue
-
-                train_X = X_tensor[:train_len]
-                train_y = y_tensor[:train_len]
-                val_X = X_tensor[train_len:]
-                val_y = y_tensor[train_len:]
-
-                optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-                criterion = torch.nn.CrossEntropyLoss()
-
-                for _ in range(3):
+                for _ in range(5):  # ✅ 반복 횟수 증가로 안정성 강화
                     logits = model(train_X)
                     loss = criterion(logits, train_y)
+                    if not torch.isfinite(loss):
+                        print(f"[SKIP] 손실값 NaN 감지 → window={window}")
+                        break
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
@@ -88,10 +86,9 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                         }
 
             except Exception as e:
-                print(f"[예외] window={window} 평가 실패 → {e}")
+                print(f"[오류] window={window} 평가 실패 → {e}")
                 continue
 
-        # ✅ 저장
         save_dir = "/persistent/logs"
         os.makedirs(save_dir, exist_ok=True)
         save_txt = os.path.join(save_dir, f"best_window_{symbol}_{strategy}.txt")
@@ -106,11 +103,8 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             print(f"[저장 오류] {symbol}-{strategy}: {e}")
 
         print(f"[최적 WINDOW] {symbol}-{strategy} → {best_window} (acc: {best_acc:.4f})")
-
-        # ✅ 음수/비정상 방지
-        return best_window if best_window > 0 else 20
+        return best_window
 
     except Exception as e:
         print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
         return 20
-
