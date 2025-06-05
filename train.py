@@ -120,7 +120,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = nn.CrossEntropyLoss()
 
-            # ✅ 오답 학습 반복 — 안정화된 구조
+            # ✅ 오답 학습 반복
             for _ in range(rep_wrong):
                 wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
                 if not wrong_data:
@@ -138,6 +138,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     if not torch.isfinite(loss): continue
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
+            # ✅ 본 학습
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
             train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
@@ -149,6 +150,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     if not torch.isfinite(loss): break
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
+            # ✅ 평가 및 오버핏 검사
             model.eval()
             with torch.no_grad():
                 xb = torch.tensor(X_val, dtype=torch.float32)
@@ -158,6 +160,12 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 acc = accuracy_score(y_val, preds)
                 f1 = f1_score(y_val, preds, average="macro")
                 val_loss = lossfn(logits, yb).item()
+
+            # ✅ 정확도 100% + 클래스 1~2개 → 오버핏 판단
+            if acc >= 1.0 and len(set(y_val)) <= 2:
+                print(f"⚠️ 비정상 정확도 감지 → {symbol}-{strategy}-{model_type} 정확도 100% (클래스 다양성 부족)")
+                log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
+                continue
 
             torch.save(model.state_dict(), model_path)
             save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss)
