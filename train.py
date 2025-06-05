@@ -92,7 +92,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
             y_filtered.append(yi)
 
         if len(X_filtered) < 5:
-            print("⏭ 학습용 시\uud2b8 부족"); return
+           print("복습이 부족합니다."); return
+
 
         X_raw = np.array(X_filtered)
         y_raw = np.array(y_filtered)
