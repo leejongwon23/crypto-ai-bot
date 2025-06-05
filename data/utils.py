@@ -67,6 +67,7 @@ def get_btc_dominance():
 import numpy as np
 
 def create_dataset(features, window=20, strategy="단기"):
+    from collections import Counter
     X, y = [], []
 
     if not features or len(features) <= window:
@@ -123,11 +124,11 @@ def create_dataset(features, window=20, strategy="단기"):
             base_cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
 
             if direction == "숏":
-                cls = 7 - base_cls if base_cls <= 7 else 0  # 거꾸로 정렬
+                cls = 7 - base_cls if base_cls <= 7 else 0
             elif direction == "롱":
                 cls = 8 + base_cls if 8 + base_cls < 16 else 15
             else:
-                cls = base_cls  # 예외 대응
+                cls = base_cls
 
             if not (0 <= cls < 16):
                 print(f"[스킵] 클래스 범위 오류: {cls} (gain={gain:.4f}, i={i})")
@@ -142,9 +143,22 @@ def create_dataset(features, window=20, strategy="단기"):
 
     if not X or not y:
         print(f"[결과] create_dataset: 유효 샘플 없음 → X={len(X)}, y={len(y)}")
-    else:
-        print(f"[완료] create_dataset: 샘플 생성 완료 → X={len(X)}, y={len(y)}")
+        return np.array(X), np.array(y)
 
+    # ✅ 클래스 분포 로그
+    class_dist = Counter(y)
+    total = len(y)
+    print(f"[분포] 클래스 개수: {len(class_dist)} / 총 샘플: {total}")
+    for cls_id, cnt in sorted(class_dist.items()):
+        print(f" · 클래스 {cls_id:2d}: {cnt}개 ({cnt/total:.2%})")
+
+    # ✅ 편향 클래스 구조 경고
+    if len(class_dist) <= 3:
+        dominant_cls = class_dist.most_common(1)[0]
+        if dominant_cls[1] / total >= 0.85:
+            print(f"⚠️ 편향 경고: 클래스 {dominant_cls[0]}이 전체의 {dominant_cls[1]/total:.2%} 차지")
+
+    print(f"[완료] create_dataset: 샘플 생성 완료 → X={len(X)}, y={len(y)}")
     return np.array(X), np.array(y)
 
 
