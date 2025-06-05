@@ -33,7 +33,6 @@ def load_training_prediction_data(symbol, strategy, input_size, window=30, sourc
                     entry_price = float(entry_price)
                     dt = pd.to_datetime(timestamp, utc=True)
 
-                    # ✅ 학습할 가치가 있는 실패만 필터링
                     if direction not in ["롱", "숏"] or entry_price <= 0:
                         continue
 
@@ -65,7 +64,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window=30, sourc
     scaled = scaler.fit_transform(df_feat.values)
     feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
 
-    X, y = [], []
+    samples = []
     for row in rows:
         try:
             fail_time = row["timestamp"]
@@ -92,21 +91,16 @@ def load_training_prediction_data(symbol, strategy, input_size, window=30, sourc
             if not np.isfinite(gain) or abs(gain) > 2:
                 continue
 
-            X.append([list(r.values()) for r in x_seq])
-            y.append(round(gain, 4))
+            x = [list(r.values()) for r in x_seq]
+            y = round(gain, 4)
+            samples.append((np.array(x), y))
         except:
             continue
 
-    if not X:
+    if not samples:
         return None
 
-    seq_lens = [len(x) for x in X]
-    mode_len = max(set(seq_lens), key=seq_lens.count)
-    filtered = [(x, l) for x, l in zip(X, y) if len(x) == mode_len]
-    if not filtered:
-        return None
+    mode_len = max(set(len(s[0]) for s in samples), key=[s[0] for s in samples].count)
+    filtered = [(x, y) for x, y in samples if len(x) == mode_len]
+    return filtered if filtered else None
 
-    X, y = zip(*filtered)
-    X_tensor = torch.tensor(np.array(X), dtype=torch.float32)
-    y_tensor = torch.tensor(np.array(y), dtype=torch.float32)
-    return TensorDataset(X_tensor, y_tensor)
