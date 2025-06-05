@@ -66,7 +66,6 @@ def get_btc_dominance():
 
 import numpy as np
 
-
 def create_dataset(features, window=20, strategy="단기"):
     from collections import Counter
     X, y = [], []
@@ -95,7 +94,6 @@ def create_dataset(features, window=20, strategy="단기"):
                 print(f"[스킵] entry_price=0 또는 없음 (i={i})")
                 continue
 
-            # ✅ 전략별 lookahead 설정
             if strategy == "단기":
                 lookahead = min(8, len(future))
             elif strategy == "중기":
@@ -118,24 +116,22 @@ def create_dataset(features, window=20, strategy="단기"):
             if not np.isfinite(max_gain) or not np.isfinite(max_loss):
                 continue
 
-            # ✅ 방향 판단 및 수익률 계산
             direction = "롱" if max_gain > max_loss else "숏"
             gain = max_gain if direction == "롱" else -max_loss
 
-            # ✅ 극단 수익률 컷
             if abs(gain) > 0.35:
                 print(f"[컷] 수익률 과도함 (gain={gain:.4f}, i={i}) → 제외")
                 continue
 
-            # ✅ 수익률 → 클래스 매핑
             bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
                      0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
             base_cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
 
+            # ✅ 숏/롱 변환 보정
             if direction == "숏":
-                cls = 7 - base_cls if base_cls <= 7 else 0
+                cls = max(0, 7 - base_cls if base_cls <= 7 else 0)
             elif direction == "롱":
-                cls = 8 + base_cls if 8 + base_cls < 16 else 15
+                cls = min(15, 8 + base_cls)
             else:
                 cls = base_cls
 
@@ -154,14 +150,12 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[결과] create_dataset: 유효 샘플 없음 → X={len(X)}, y={len(y)}")
         return np.array(X), np.array(y)
 
-    # ✅ 클래스 분포 진단
     class_dist = Counter(y)
     total = len(y)
     print(f"[분포] 클래스 개수: {len(class_dist)} / 총 샘플: {total}")
     for cls_id, cnt in sorted(class_dist.items()):
         print(f" · 클래스 {cls_id:2d}: {cnt}개 ({cnt/total:.2%})")
 
-    # ✅ 편향 경고
     if len(class_dist) <= 3:
         dominant_cls = class_dist.most_common(1)[0]
         if dominant_cls[1] / total >= 0.85:
@@ -170,36 +164,6 @@ def create_dataset(features, window=20, strategy="단기"):
     print(f"[완료] create_dataset: 샘플 생성 완료 → X={len(X)}, y={len(y)}")
     return np.array(X), np.array(y)
 
-
-def get_kline(symbol: str, interval: str = "60", limit: int = 200):
-    url = f"{BASE_URL}/v5/market/kline"
-    params = {
-        "symbol": symbol,
-        "interval": interval,
-        "limit": limit,
-        "category": "linear"
-    }
-    try:
-        res = requests.get(url, params=params, timeout=10)
-        res.raise_for_status()
-        data = res.json()
-        if "result" not in data or "list" not in data["result"]:
-            return None
-        rows = data["result"]["list"]
-        if not rows:
-            return None
-        df = pd.DataFrame(rows)
-        df = df.iloc[:, :6]
-        df.columns = ["timestamp", "open", "high", "low", "close", "volume"]
-        df = df.astype({
-            "timestamp": "int64", "open": "float", "high": "float",
-            "low": "float", "close": "float", "volume": "float"
-        })
-        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms").dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
-        df = df.sort_values("datetime").reset_index(drop=True)
-        return df
-    except:
-        return None
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     config = STRATEGY_CONFIG.get(strategy)
