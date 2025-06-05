@@ -16,8 +16,8 @@ def load_training_prediction_data(symbol, strategy, input_size, window=30, sourc
         files.append("/persistent/wrong_predictions.csv")
 
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=14)
-
     seen, rows = set(), []
+
     for file in files:
         if not os.path.exists(file):
             continue
@@ -32,10 +32,8 @@ def load_training_prediction_data(symbol, strategy, input_size, window=30, sourc
                 try:
                     entry_price = float(entry_price)
                     dt = pd.to_datetime(timestamp, utc=True)
-
                     if direction not in ["롱", "숏"] or entry_price <= 0:
                         continue
-
                     key = (symbol, strategy, direction, entry_price)
                     if key in seen or dt < cutoff:
                         continue
@@ -49,20 +47,27 @@ def load_training_prediction_data(symbol, strategy, input_size, window=30, sourc
                     continue
 
     if not rows:
-        return None
+        print(f"[스킵] {symbol}-{strategy} → 실패 데이터 없음")
+        return []
 
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or len(df) < window + 1:
-        return None
+        print(f"[스킵] {symbol}-{strategy} → 가격 데이터 부족")
+        return []
 
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df_feat = compute_features(symbol, df, strategy)
-    if len(df_feat) < window + 1:
-        return None
+    if df_feat is None or len(df_feat) < window + 1:
+        print(f"[스킵] {symbol}-{strategy} → 피처 부족")
+        return []
 
     scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(df_feat.values)
-    feature_dicts = [dict(zip(df_feat.columns, row)) for row in scaled]
+    try:
+        scaled = scaler.fit_transform(df_feat.drop(columns=["timestamp"]).values)
+        feature_dicts = [dict(zip(df_feat.drop(columns=["timestamp"]).columns, row)) for row in scaled]
+    except:
+        print(f"[오류] {symbol}-{strategy} → 스케일링 실패")
+        return []
 
     samples = []
     for row in rows:
@@ -70,37 +75,34 @@ def load_training_prediction_data(symbol, strategy, input_size, window=30, sourc
             fail_time = row["timestamp"]
             entry_price = row["entry_price"]
             direction = row["direction"]
-
             index = df[df["timestamp"] >= fail_time].index.min()
             if index is None or index < window:
                 continue
-
             x_seq = feature_dicts[index - window:index]
-            if any(len(r.values()) != len(feature_dicts[0].values()) for r in x_seq):
+            if len(x_seq) != window:
                 continue
-
             future_df = df[df.index >= index]
             if future_df.empty:
                 continue
-
             high = future_df["high"].max()
             low = future_df["low"].min()
             price = high if direction == "롱" else low
             gain = (price - entry_price) / entry_price if direction == "롱" else (entry_price - price) / entry_price
-
             if not np.isfinite(gain) or abs(gain) > 2:
                 continue
-
             x = [list(r.values()) for r in x_seq]
             y = round(gain, 4)
             samples.append((np.array(x), y))
-        except:
+        except Exception as e:
+            print(f"[스킵] 실패 샘플 처리 오류 → {type(e).__name__}: {e}")
             continue
 
     if not samples:
-        return None
+        print(f"[스킵] {symbol}-{strategy} → 유효 샘플 없음")
+        return []
 
     mode_len = max(set(len(s[0]) for s in samples), key=[s[0] for s in samples].count)
     filtered = [(x, y) for x, y in samples if len(x) == mode_len]
-    return filtered if filtered else None
+    return filtered if filtered else []
+
 
