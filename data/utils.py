@@ -97,6 +97,7 @@ def create_dataset(features, window=20, strategy="단기"):
             if entry_price <= 0:
                 continue
 
+            # 전략별 lookahead 설정
             if strategy == "단기":
                 lookahead = min(8, len(future))
             elif strategy == "중기":
@@ -121,7 +122,8 @@ def create_dataset(features, window=20, strategy="단기"):
             direction = "롱" if max_gain > max_loss else "숏"
             gain = max_gain if direction == "롱" else -max_loss
 
-            if abs(gain) > 0.4:
+            # ✅ 수익률 한계 완화 (기존 0.4 → 0.6)
+            if abs(gain) > 0.6:
                 continue
 
             base_cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
