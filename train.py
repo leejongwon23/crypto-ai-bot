@@ -64,21 +64,29 @@ def train_one_model(symbol, strategy, max_epochs=20):
         if df_feat is None or len(df_feat) < 30:
             print("⏭ 피처 부족"); return
 
-        # ✅ timestamp 보존 후 dropna 수행 (순서 중요!)
         if "timestamp" not in df_feat.columns:
             df_feat["timestamp"] = df_feat.get("datetime", pd.Timestamp.now())
         df_feat = df_feat.dropna()
 
         features = df_feat.to_dict(orient="records")
+
+        # ✅ window 실패 방지
         window = find_best_window(symbol, strategy)
+        if not isinstance(window, int) or window <= 0:
+            print(f"[스킵] {symbol}-{strategy} → find_best_window 실패 또는 무효값")
+            return
+
+        # ✅ dataset 생성 실패 방지
         X_raw, y_raw = create_dataset(features, window=window, strategy=strategy)
+        if X_raw is None or y_raw is None or len(X_raw) == 0:
+            print(f"[스킵] {symbol}-{strategy} → create_dataset 결과 없음")
+            return
 
         # ✅ 시퀀스 & 클래스 범위 필터링
         X_filtered, y_filtered = [], []
         for xi, yi in zip(X_raw, y_raw):
-            if xi.shape != (window, df_feat.shape[1] - 1): continue  # timestamp 제외 shape
-            if not isinstance(yi, (int, np.integer)): continue
-            if not (0 <= yi < NUM_CLASSES): continue
+            if not isinstance(xi, np.ndarray) or xi.shape != (window, df_feat.shape[1] - 1): continue
+            if not isinstance(yi, (int, np.integer)) or not (0 <= yi < NUM_CLASSES): continue
             X_filtered.append(xi)
             y_filtered.append(yi)
 
@@ -117,7 +125,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = nn.CrossEntropyLoss()
 
-            # ✅ 오답 학습 반복
             for _ in range(rep_wrong):
                 wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
                 for xb, yb in [s[:2] for s in wrong_data if isinstance(s, (list, tuple)) and len(s) >= 2]:
@@ -132,7 +139,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     if not torch.isfinite(loss): continue
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            # ✅ 정상 학습
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
             train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
@@ -144,7 +150,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     if not torch.isfinite(loss): break
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            # ✅ 검증
             model.eval()
             with torch.no_grad():
                 xb = torch.tensor(X_val, dtype=torch.float32)
@@ -171,6 +176,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
 
 
 def train_model_loop(strategy):
