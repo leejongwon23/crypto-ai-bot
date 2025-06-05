@@ -64,8 +64,10 @@ def get_btc_dominance():
     except:
         return BTC_DOMINANCE_CACHE["value"]
 
+import numpy as np
+
 def create_dataset(features, window=20, strategy="단기"):
-    X, y = []
+    X, y = [], []
 
     if not features or len(features) <= window:
         print(f"[스킵] create_dataset: features 부족 (len={len(features) if features else 0})")
@@ -84,7 +86,6 @@ def create_dataset(features, window=20, strategy="단기"):
                 continue
 
             x = [[float(row.get(c, 0.0)) for c in columns] for row in seq]
-
             future = features[i:]
             entry_price = float(features[i].get("close", 0.0))
 
@@ -114,20 +115,19 @@ def create_dataset(features, window=20, strategy="단기"):
             if not np.isfinite(max_gain) or not np.isfinite(max_loss):
                 continue
 
-            # ✅ 수익률 및 방향성 판단
             direction = "롱" if max_gain > max_loss else "숏"
             gain = max_gain if direction == "롱" else -max_loss
 
-            # ✅ 강화된 클래스 구간 (롱/숏 양쪽에 동일 적용)
             bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
                      0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
+            base_cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
 
-            # ✅ 롱/숏 각각 다른 클래스 번호로 구분 (숏은 0~7, 롱은 8~15)
-            cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
             if direction == "숏":
-                cls = 7 - cls if cls <= 7 else 0  # 숏은 반대 정렬
+                cls = 7 - base_cls if base_cls <= 7 else 0  # 거꾸로 정렬
             elif direction == "롱":
-                cls = 8 + cls if cls + 8 < 16 else 15
+                cls = 8 + base_cls if 8 + base_cls < 16 else 15
+            else:
+                cls = base_cls  # 예외 대응
 
             if not (0 <= cls < 16):
                 print(f"[스킵] 클래스 범위 오류: {cls} (gain={gain:.4f}, i={i})")
@@ -146,7 +146,6 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[완료] create_dataset: 샘플 생성 완료 → X={len(X)}, y={len(y)}")
 
     return np.array(X), np.array(y)
-
 
 
 
