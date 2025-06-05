@@ -67,31 +67,34 @@ def get_btc_dominance():
 import numpy as np
 
 def create_dataset(features, window=20, strategy="단기"):
+    import numpy as np
     from collections import Counter
     X, y = [], []
 
     if not features or len(features) <= window:
-        print(f"[스킵] create_dataset: features 부족 (len={len(features) if features else 0})")
-        return X, y
+        print(f"[스킵] features 부족 → len={len(features)}")
+        return np.array([]), np.array([])
 
     try:
         columns = [c for c in features[0].keys() if c != "timestamp"]
     except Exception as e:
-        print(f"[오류] features[0] 키 오류 → {e}")
-        return X, y
+        print(f"[오류] features[0] 키 확인 실패 → {e}")
+        return np.array([]), np.array([])
+
+    bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
+             0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
 
     for i in range(window, len(features)):
         try:
             seq = features[i - window:i]
-            if len(seq) != window:
+            future = features[i:]
+
+            if len(seq) != window or len(future) < 5:
                 continue
 
-            x = [[float(row.get(c, 0.0)) for c in columns] for row in seq]
-            future = features[i:]
-            entry_price = float(features[i].get("close", 0.0))
-
+            base = features[i]
+            entry_price = float(base.get("close", 0.0))
             if entry_price <= 0:
-                print(f"[스킵] entry_price=0 또는 없음 (i={i})")
                 continue
 
             if strategy == "단기":
@@ -106,8 +109,7 @@ def create_dataset(features, window=20, strategy="단기"):
             highs = [float(f.get("high", entry_price)) for f in future[:lookahead]]
             lows = [float(f.get("low", entry_price)) for f in future[:lookahead]]
 
-            if not highs or not lows or any(h is None or h != h for h in highs) or any(l is None or l != l for l in lows):
-                print(f"[스킵] 고가/저가 NaN 또는 누락 (i={i})")
+            if not highs or not lows or any(pd.isna(h) for h in highs) or any(pd.isna(l) for l in lows):
                 continue
 
             max_gain = max((h - entry_price) / (entry_price + 1e-6) for h in highs)
@@ -119,27 +121,23 @@ def create_dataset(features, window=20, strategy="단기"):
             direction = "롱" if max_gain > max_loss else "숏"
             gain = max_gain if direction == "롱" else -max_loss
 
-            if abs(gain) > 0.35:
-                print(f"[컷] 수익률 과도함 (gain={gain:.4f}, i={i}) → 제외")
+            if abs(gain) > 0.4:
                 continue
 
-            bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
-                     0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
             base_cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
-
-            # ✅ 숏/롱 변환 보정
             if direction == "숏":
                 cls = max(0, 7 - base_cls if base_cls <= 7 else 0)
-            elif direction == "롱":
-                cls = min(15, 8 + base_cls)
             else:
-                cls = base_cls
+                cls = min(15, 8 + base_cls)
 
             if not (0 <= cls < 16):
-                print(f"[스킵] 클래스 범위 오류: {cls} (gain={gain:.4f}, i={i})")
                 continue
 
-            X.append(x)
+            sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
+            if any(len(row) != len(columns) for row in sample):
+                continue
+
+            X.append(sample)
             y.append(cls)
 
         except Exception as e:
@@ -147,23 +145,19 @@ def create_dataset(features, window=20, strategy="단기"):
             continue
 
     if not X or not y:
-        print(f"[결과] create_dataset: 유효 샘플 없음 → X={len(X)}, y={len(y)}")
-        return np.array(X), np.array(y)
+        print(f"[결과 없음] 샘플 부족 → X={len(X)}, y={len(y)}")
+        return np.array([]), np.array([])
 
-    class_dist = Counter(y)
+    dist = Counter(y)
     total = len(y)
-    print(f"[분포] 클래스 개수: {len(class_dist)} / 총 샘플: {total}")
-    for cls_id, cnt in sorted(class_dist.items()):
-        print(f" · 클래스 {cls_id:2d}: {cnt}개 ({cnt/total:.2%})")
+    print(f"[분포] 클래스 수: {len(dist)} / 총 샘플: {total}")
+    for k in sorted(dist):
+        print(f" · 클래스 {k:2d}: {dist[k]}개 ({dist[k]/total:.2%})")
 
-    if len(class_dist) <= 3:
-        dominant_cls = class_dist.most_common(1)[0]
-        if dominant_cls[1] / total >= 0.85:
-            print(f"⚠️ 편향 경고: 클래스 {dominant_cls[0]}이 전체의 {dominant_cls[1]/total:.2%} 차지")
+    if len(dist) <= 2 or dist.most_common(1)[0][1] > total * 0.9:
+        print(f"⚠️ 편향 경고: 과도한 특정 클래스 집중 (클래스={dist.most_common(1)[0][0]})")
 
-    print(f"[완료] create_dataset: 샘플 생성 완료 → X={len(X)}, y={len(y)}")
     return np.array(X), np.array(y)
-
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     config = STRATEGY_CONFIG.get(strategy)
