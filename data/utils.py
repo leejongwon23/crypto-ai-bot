@@ -180,6 +180,38 @@ def get_kline_by_strategy(symbol: str, strategy: str):
 
     return df
 
+def get_kline(symbol: str, interval: str = "60", limit: int = 300) -> pd.DataFrame:
+    """
+    Bybit Kline 데이터를 불러오는 함수
+    :param symbol: 종목명 (예: BTCUSDT)
+    :param interval: 시간 간격 ("60"=1시간, "240"=4시간, "D"=1일)
+    :param limit: 캔들 개수 (기본 300개)
+    :return: DataFrame (timestamp, open, high, low, close, volume)
+    """
+    try:
+        url = f"{BASE_URL}/v5/market/kline"
+        params = {"category": "linear", "symbol": symbol, "interval": interval, "limit": limit}
+        res = requests.get(url, params=params, timeout=10)
+        res.raise_for_status()
+        data = res.json()
+        if "result" not in data or "list" not in data["result"]:
+            print(f"[경고] get_kline() → 데이터 응답 구조 이상")
+            return None
+
+        raw = data["result"]["list"]
+        df = pd.DataFrame(raw, columns=[
+            "timestamp", "open", "high", "low", "close", "volume", "turnover"
+        ])
+        df = df[["timestamp", "open", "high", "low", "close", "volume"]].astype(float)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms").dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        df["datetime"] = df["timestamp"]
+        return df
+
+    except Exception as e:
+        print(f"[에러] get_kline({symbol}) 실패 → {e}")
+        return None
+
 
 def get_realtime_prices():
     url = f"{BASE_URL}/v5/market/tickers"
