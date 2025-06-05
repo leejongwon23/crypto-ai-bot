@@ -91,6 +91,15 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
         X_raw = np.array(X_filtered)
         y_raw = np.array(y_filtered)
+
+        # ✅ 클래스 분포 편향 검사
+        class_counts = pd.Series(y_raw).value_counts(normalize=True)
+        dominant_ratio = class_counts.iloc[0] if not class_counts.empty else 0
+        if len(class_counts) < 5 and dominant_ratio > 0.85:
+            print(f"⚠️ 학습 클래스 분포 편향 감지 → 클래스 {len(class_counts)}개, 주력 비중 {dominant_ratio:.2%}")
+            log_training_result(symbol, strategy, "편향데이터", 0.0, 0.0, 0.0)
+            return
+
         input_size = X_raw.shape[2]
         val_len = int(len(X_raw) * 0.2)
         if val_len == 0:
@@ -184,6 +193,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
 
 
 def train_model_loop(strategy):
