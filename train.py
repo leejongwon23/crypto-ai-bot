@@ -69,20 +69,16 @@ def train_one_model(symbol, strategy, max_epochs=20):
         df_feat = df_feat.dropna()
 
         features = df_feat.to_dict(orient="records")
-
-        # ✅ window 실패 방지
         window = find_best_window(symbol, strategy)
         if not isinstance(window, int) or window <= 0:
             print(f"[스킵] {symbol}-{strategy} → find_best_window 실패 또는 무효값")
             return
 
-        # ✅ dataset 생성 실패 방지
         X_raw, y_raw = create_dataset(features, window=window, strategy=strategy)
         if X_raw is None or y_raw is None or len(X_raw) == 0:
             print(f"[스킵] {symbol}-{strategy} → create_dataset 결과 없음")
             return
 
-        # ✅ 시퀀스 & 클래스 범위 필터링
         X_filtered, y_filtered = [], []
         for xi, yi in zip(X_raw, y_raw):
             if not isinstance(xi, np.ndarray) or xi.shape != (window, df_feat.shape[1] - 1): continue
@@ -95,7 +91,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
         X_raw = np.array(X_filtered)
         y_raw = np.array(y_filtered)
-
         input_size = X_raw.shape[2]
         val_len = int(len(X_raw) * 0.2)
         if val_len == 0:
@@ -125,8 +120,12 @@ def train_one_model(symbol, strategy, max_epochs=20):
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = nn.CrossEntropyLoss()
 
+            # ✅ 오답 학습 반복 — 안전성 보완
             for _ in range(rep_wrong):
                 wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
+                if not wrong_data:
+                    print(f"[스킵] {symbol}-{strategy} → 실패 데이터 없음 → 강화학습 건너뜀")
+                    break
                 for xb, yb in [s[:2] for s in wrong_data if isinstance(s, (list, tuple)) and len(s) >= 2]:
                     if xb.shape[1:] != (window, input_size): continue
                     if not isinstance(yb, (int, np.integer)) or not (0 <= yb < NUM_CLASSES): continue
@@ -177,12 +176,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
         except:
             print("⚠️ 로그 기록 실패")
 
-
-
 def train_model_loop(strategy):
     success = []
     failed = []
-
     for sym in SYMBOLS:
         try:
             print(f"\n=== {sym}-{strategy} 학습 시작 ===")
@@ -200,7 +196,6 @@ def train_model_loop(strategy):
         print(f" - 실패: {len(failed)}개")
         for sym, reason in failed:
             print(f"   · {sym} → {reason}")
-
 
 def train_all_models():
     for strat in ["단기", "중기", "장기"]:
