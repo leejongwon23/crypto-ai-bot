@@ -188,11 +188,13 @@ def evaluate_predictions(get_price_fn):
                     actual_max = eval_df["high"].max()
                     actual_gain = (actual_max - entry) / entry if entry > 0 else 0.0
                     actual_class = max([i for i, b in enumerate(class_bins) if actual_gain >= b], default=-1)
-                    success = abs(pred_class - actual_class) <= 1
+
+                    # ✅ 정확한 구간 수익률 평가 방식 적용
+                    success = pred_class == actual_class
 
                     r.update({
                         "status": "v_success" if vol and success else "v_fail" if vol else "success" if success else "fail",
-                        "reason": f"도달 클래스 {actual_class}, 예측 {pred_class}",
+                        "reason": f"실제클래스={actual_class} / 예측클래스={pred_class} / 수익률={actual_gain:.4f}",
                         "return": round(actual_gain, 5)
                     })
 
@@ -259,6 +261,5 @@ def evaluate_predictions(get_price_fn):
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader()
         w.writerows(updated)
-
 
 strategy_stats = {}
