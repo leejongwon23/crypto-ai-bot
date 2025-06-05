@@ -120,21 +120,21 @@ def train_one_model(symbol, strategy, max_epochs=20):
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = nn.CrossEntropyLoss()
 
-            # ✅ 오답 학습 반복 — 안전성 보완
+            # ✅ 오답 학습 반복 — 안정화된 구조
             for _ in range(rep_wrong):
                 wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
                 if not wrong_data:
                     print(f"[스킵] {symbol}-{strategy} → 실패 데이터 없음 → 강화학습 건너뜀")
                     break
                 for xb, yb in [s[:2] for s in wrong_data if isinstance(s, (list, tuple)) and len(s) >= 2]:
-                    if xb.shape[1:] != (window, input_size): continue
+                    if not isinstance(xb, np.ndarray) or xb.shape != (window, input_size): continue
                     if not isinstance(yb, (int, np.integer)) or not (0 <= yb < NUM_CLASSES): continue
-                    feature_hash = get_feature_hash_from_tensor(xb[0])
+                    feature_hash = get_feature_hash_from_tensor(torch.tensor(xb).squeeze(0))
                     if feature_hash in failure_hashes or feature_hash in frequent_failures: continue
-                    xb = torch.tensor(xb).unsqueeze(0).float()
-                    yb = torch.tensor([yb]).long()
-                    logits = model(xb)
-                    loss = lossfn(logits, yb)
+                    xb_tensor = torch.tensor(xb).unsqueeze(0).float()
+                    yb_tensor = torch.tensor([yb]).long()
+                    logits = model(xb_tensor)
+                    loss = lossfn(logits, yb_tensor)
                     if not torch.isfinite(loss): continue
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
@@ -175,6 +175,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
 
 def train_model_loop(strategy):
     success = []
