@@ -36,31 +36,38 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         best_result = {}
 
         for window in window_list:
-            X, y = create_dataset(feature_dicts, window, strategy)
-            if X is None or y is None or len(X) == 0 or len(X) != len(y):
-                continue
-
-            input_size = X.shape[2]
-            model = get_model("lstm", input_size).train()
-
-            X_tensor = torch.tensor(X, dtype=torch.float32)
-            y_tensor = torch.tensor(y, dtype=torch.long)
-
-            val_len = int(len(X_tensor) * 0.2)
-            train_len = len(X_tensor) - val_len
-            if train_len <= 0 or val_len <= 0:
-                continue
-
-            train_X = X_tensor[:train_len]
-            train_y = y_tensor[:train_len]
-            val_X = X_tensor[train_len:]
-            val_y = y_tensor[train_len:]
-
-            optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-            criterion = torch.nn.CrossEntropyLoss()
-
             try:
-                for _ in range(5):  # ✅ 반복 횟수 증가로 안정성 강화
+                result = create_dataset(feature_dicts, window, strategy)
+                if not isinstance(result, (list, tuple)) or len(result) != 2:
+                    print(f"[스킵] create_dataset 결과 비정상 (type={type(result)}, window={window})")
+                    continue
+
+                X, y = result
+                if X is None or y is None or len(X) == 0 or len(X) != len(y):
+                    print(f"[스킵] 데이터셋 없음 또는 길이 불일치 (window={window})")
+                    continue
+
+                input_size = X.shape[2]
+                model = get_model("lstm", input_size).train()
+
+                X_tensor = torch.tensor(X, dtype=torch.float32)
+                y_tensor = torch.tensor(y, dtype=torch.long)
+
+                val_len = int(len(X_tensor) * 0.2)
+                train_len = len(X_tensor) - val_len
+                if train_len <= 0 or val_len <= 0:
+                    print(f"[스킵] 학습/검증 데이터 부족 (window={window})")
+                    continue
+
+                train_X = X_tensor[:train_len]
+                train_y = y_tensor[:train_len]
+                val_X = X_tensor[train_len:]
+                val_y = y_tensor[train_len:]
+
+                optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+                criterion = torch.nn.CrossEntropyLoss()
+
+                for _ in range(5):
                     logits = model(train_X)
                     loss = criterion(logits, train_y)
                     if not torch.isfinite(loss):
