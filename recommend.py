@@ -65,7 +65,7 @@ def get_symbols_by_volatility(strategy):
 def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=True):
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼"); sys.stdout.flush()
     results, fmap = [], load_failure_count()
-    triggered_trainings = set()  # ✅ 학습 요청 중복 방지
+    triggered_trainings = set()
 
     for item in symbols:
         symbol = item["symbol"]
@@ -164,6 +164,9 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
     top_by_strategy = {}
     for r in filtered_by_success:
         s = r["strategy"]
+        # ✅ 수익률 필터 조건 추가
+        if r.get("expected_return", 0.0) < STRATEGY_VOL.get(s, 0.0):
+            continue
         if s not in top_by_strategy or r["expected_return"] > top_by_strategy[s]["expected_return"]:
             top_by_strategy[s] = r
 
