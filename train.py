@@ -55,6 +55,9 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
 
 from collections import Counter
 
+
+from collections import Counter
+
 def train_one_model(symbol, strategy, max_epochs=20):
     print(f"▶ 학습 시작: {symbol}-{strategy}")
     try:
@@ -81,7 +84,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"[스킵] {symbol}-{strategy} → create_dataset 결과 없음")
             return
 
-        # ✅ 샘플 shape 정제
         X_filtered, y_filtered = [], []
         for xi, yi in zip(X_raw, y_raw):
             if not isinstance(xi, np.ndarray) or xi.shape != (window, df_feat.shape[1] - 1): continue
@@ -90,18 +92,17 @@ def train_one_model(symbol, strategy, max_epochs=20):
             y_filtered.append(yi)
 
         if len(X_filtered) < 5:
-            print("⏭ 학습용 시퀀스 부족"); return
+            print("⏭ 학습용 시\uud2b8 부족"); return
 
         X_raw = np.array(X_filtered)
         y_raw = np.array(y_filtered)
 
-        # ✅ 클래스 분포 확인 후 편향 보정
         class_counts = Counter(y_raw)
         total = sum(class_counts.values())
-        dominant_class_ratio = max(class_counts.values()) / total if total > 0 else 1.0
+        dominant_ratio = max(class_counts.values()) / total if total > 0 else 1.0
 
-        if len(class_counts) < 5 and dominant_class_ratio > 0.85:
-            print(f"⚠️ 편향 데이터 감지 → oversampling으로 보정 중")
+        if len(class_counts) < 5 and dominant_ratio > 0.85:
+            print(f"⚠️ 편향 데이터 감지 → oversampling 적용")
             X_bal, y_bal = list(X_raw), list(y_raw)
             threshold = 10
             minor_classes = [cls for cls, cnt in class_counts.items() if cnt < threshold]
@@ -116,6 +117,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
             X_raw = np.array(X_bal)
             y_raw = np.array(y_bal)
+            print(f"  └ oversampling 수행 → 사용 학습데이터: {len(X_raw)} 개")
 
         input_size = X_raw.shape[2]
         val_len = int(len(X_raw) * 0.2)
@@ -146,11 +148,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = nn.CrossEntropyLoss()
 
-            # ✅ 오답 학습 반복
             for _ in range(rep_wrong):
                 wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
                 if not wrong_data:
-                    print(f"[스킵] {symbol}-{strategy} → 실패 데이터 없음 → 강화학습 건너뜀")
+                    print(f"[스킵] {symbol}-{strategy} → 실패 데이터 없음 → 강화학습 거론")
                     break
                 for xb, yb in [s[:2] for s in wrong_data if isinstance(s, (list, tuple)) and len(s) >= 2]:
                     if not isinstance(xb, np.ndarray) or xb.shape != (window, input_size): continue
@@ -175,7 +176,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     if not torch.isfinite(loss): break
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            # ✅ 평가
             model.eval()
             with torch.no_grad():
                 xb = torch.tensor(X_val, dtype=torch.float32)
@@ -186,9 +186,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 f1 = f1_score(y_val, preds, average="macro")
                 val_loss = lossfn(logits, yb).item()
 
-            # ✅ 오버핏 방지
             if acc >= 1.0 and len(set(y_val)) <= 2:
-                print(f"⚠️ 오버핏 감지 → 정확도 100% & 클래스 다양성 부족 → 학습 무효 처리")
+                print(f"⚠️ 오버핏 감지 → 정확도 100% & 클래스 단일")
                 log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
                 continue
 
