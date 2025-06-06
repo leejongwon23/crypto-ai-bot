@@ -81,10 +81,17 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[오류] features[0] 키 확인 실패 → {e}")
         return np.array([]), np.array([])
 
-    gains = []
-    samples = []
+    bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
+             0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
 
-    # 수익률 계산 + 미리 샘플 구조 준비
+    # ✅ 전략별 lookahead 재정의: 전략 시간 전체 포함
+    strategy_lookahead = {
+        "단기": 24,   # 24시간 (1일)
+        "중기": 72,   # 3일 (4시간봉 18개)
+        "장기": 168   # 7일 (1일봉 7개)
+    }
+    default_lookahead = 24
+
     for i in range(window, len(features)):
         try:
             seq = features[i - window:i]
@@ -98,56 +105,57 @@ def create_dataset(features, window=20, strategy="단기"):
             if entry_price <= 0:
                 continue
 
-            lookahead = {"단기": 8, "중기": 24, "장기": 48}.get(strategy, 12)
+            lookahead = strategy_lookahead.get(strategy, default_lookahead)
+            lookahead = min(lookahead, len(future))  # 초과 방지
+
             highs = [float(f.get("high", entry_price)) for f in future[:lookahead]]
             lows = [float(f.get("low", entry_price)) for f in future[:lookahead]]
+
             if not highs or not lows or any(pd.isna(h) for h in highs) or any(pd.isna(l) for l in lows):
                 continue
 
             max_gain = max((h - entry_price) / (entry_price + 1e-6) for h in highs)
             max_loss = max((entry_price - l) / (entry_price + 1e-6) for l in lows)
+
             if not np.isfinite(max_gain) or not np.isfinite(max_loss):
                 continue
 
             direction = "롱" if max_gain > max_loss else "숏"
             gain = max_gain if direction == "롱" else -max_loss
+
             if abs(gain) > 0.6:
+                continue
+
+            base_cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
+            cls = (
+                max(0, 7 - base_cls) if direction == "숏"
+                else min(15, 8 + base_cls)
+            )
+
+            if not (0 <= cls < 16):
                 continue
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
             if any(len(row) != len(columns) for row in sample):
                 continue
 
-            samples.append((sample, gain))
-            gains.append(gain)
-        except Exception as e:
-            continue
-
-    if not samples:
-        print(f"[결과 없음] 샘플 없음 → X=0")
-        return np.array([]), np.array([])
-
-    # ✅ 자동 구간 분할 (16개 클래스)
-    try:
-        percentiles = np.percentile(gains, np.linspace(0, 100, 17)[1:-1])  # 15개 기준점
-    except Exception as e:
-        print(f"[분할 실패] → {e}")
-        return np.array([]), np.array([])
-
-    for i, (sample, gain) in enumerate(samples):
-        try:
-            cls = sum(gain > p for p in percentiles)
             X.append(sample)
             y.append(cls)
-        except:
+
+        except Exception as e:
+            print(f"[예외] 샘플 생성 실패 (i={i}) → {type(e).__name__}: {e}")
             continue
 
-    # ✅ 분포 확인 로그
+    if not X or not y:
+        print(f"[결과 없음] 샘플 부족 → X={len(X)}, y={len(y)}")
+        return np.array([]), np.array([])
+
     dist = Counter(y)
     total = len(y)
     print(f"[분포] 클래스 수: {len(dist)} / 총 샘플: {total}")
     for k in sorted(dist):
         print(f" · 클래스 {k:2d}: {dist[k]}개 ({dist[k]/total:.2%})")
+
     if len(dist) <= 2 or dist.most_common(1)[0][1] > total * 0.9:
         print(f"⚠️ 편향 경고: 과도한 특정 클래스 집중 (클래스={dist.most_common(1)[0][0]})")
 
