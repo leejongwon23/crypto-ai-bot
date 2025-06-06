@@ -79,10 +79,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"[스킵] {symbol}-{strategy} → create_dataset 결과 없음")
             return
 
-        # ✅ 유효성 체크 및 정제
+        # ✅ 유효성 체크 및 input_size 기준을 X_raw로 정확하게
         X_filtered, y_filtered = [], []
         for xi, yi in zip(X_raw, y_raw):
-            if not isinstance(xi, np.ndarray) or xi.shape != (window, df_feat.shape[1] - 1): continue
+            if not isinstance(xi, np.ndarray) or xi.ndim != 2: continue
             if not isinstance(yi, (int, np.integer)) or not (0 <= yi < NUM_CLASSES): continue
             X_filtered.append(xi)
             y_filtered.append(yi)
@@ -92,6 +92,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
         X_raw = np.array(X_filtered)
         y_raw = np.array(y_filtered)
+        input_size = X_raw.shape[2]
 
         class_counts = Counter(y_raw)
         total = sum(class_counts.values())
@@ -106,17 +107,15 @@ def train_one_model(symbol, strategy, max_epochs=20):
             threshold = 10
             X_bal, y_bal = list(X_raw), list(y_raw)
             for cls in class_counts:
-                if class_counts[cls] < threshold:
-                    samples = [x for x, y in zip(X_raw, y_raw) if y == cls]
-                    need = threshold - len(samples)
-                    for _ in range(need):
-                        X_bal.append(random.choice(samples))
-                        y_bal.append(cls)
+                samples = [x for x, y in zip(X_raw, y_raw) if y == cls]
+                need = threshold - len(samples)
+                for _ in range(need):
+                    X_bal.append(random.choice(samples))
+                    y_bal.append(cls)
             X_raw = np.array(X_bal)
             y_raw = np.array(y_bal)
             print(f"  └ oversampling 완료 → 총 샘플 수: {len(X_raw)}")
 
-        input_size = X_raw.shape[2]
         val_len = int(len(X_raw) * 0.2)
         if val_len == 0:
             print("⏭ 검증 데이터 부족"); return
@@ -132,7 +131,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
         if fail_count >= 10: rep_wrong += 4
         elif fail_count >= 5: rep_wrong += 2
 
-        # ✅ [6단계] 전략별 성공률 기반 보상 강화
+        # ✅ 전략별 성공률 기반 보상 강화
         success_rate = get_actual_success_rate(strategy)
         if success_rate <= 0.2:
             rep_wrong += 6
@@ -154,9 +153,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
             # ✅ 실패 학습 강화
             wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
-            if not wrong_data:
-                print(f"[스킵] {symbol}-{strategy} → 실패 데이터 없음 → 강화학습 생략")
-            else:
+            if wrong_data:
                 used_hashes = set()
                 wrong_data_filtered = []
                 for s in wrong_data:
@@ -170,9 +167,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         used_hashes.add(feature_hash)
                         wrong_data_filtered.append((xb, yb))
 
-                if not wrong_data_filtered:
-                    print(f"[강화학습 무시] {symbol}-{strategy} → 학습 가능 샘플 없음")
-                else:
+                if wrong_data_filtered:
                     print(f"[강화학습 시작] {symbol}-{strategy} → 총 {len(wrong_data_filtered)}개")
                     for _ in range(rep_wrong):
                         batch = random.sample(wrong_data_filtered, min(5, len(wrong_data_filtered)))
