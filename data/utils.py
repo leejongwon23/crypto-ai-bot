@@ -66,107 +66,104 @@ def get_btc_dominance():
 
 import numpy as np
 
-def create_dataset(features, window=20, strategy="단기"): import numpy as np from collections import Counter import random X, y = [], []
+def create_dataset(features, window=20, strategy="단기"):
+    import numpy as np
+    from collections import Counter
+    import random
+    X, y = [], []
 
-if not features or len(features) <= window:
-    print(f"[스킵] features 부족 → len={len(features)}")
-    return np.array([]), np.array([])
+    if not features or len(features) <= window:
+        print(f"[스킵] features 부족 → len={len(features)}")
+        return np.array([], dtype=float), np.array([], dtype=float)
 
-try:
-    columns = [c for c in features[0].keys() if c != "timestamp"]
-except Exception as e:
-    print(f"[오류] features[0] 키 확인 실패 → {e}")
-    return np.array([]), np.array([])
-
-bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
-         0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
-
-strategy_lookahead = {
-    "단기": 24,
-    "중기": 72,
-    "장기": 168
-}
-default_lookahead = 24
-
-for i in range(window, len(features)):
     try:
-        seq = features[i - window:i]
-        future = features[i:]
-
-        if len(seq) != window or len(future) < 3:
-            continue
-
-        base = features[i]
-        entry_price = float(base.get("close", 0.0))
-        if entry_price <= 0:
-            continue
-
-        lookahead = strategy_lookahead.get(strategy, default_lookahead)
-        lookahead = min(lookahead, len(future))
-
-        highs = [float(f.get("high", entry_price)) for f in future[:lookahead]]
-        lows = [float(f.get("low", entry_price)) for f in future[:lookahead]]
-
-        if not highs or not lows or any(pd.isna(h) for h in highs) or any(pd.isna(l) for l in lows):
-            continue
-
-        max_gain = max((h - entry_price) / (entry_price + 1e-6) for h in highs)
-        max_loss = max((entry_price - l) / (entry_price + 1e-6) for l in lows)
-
-        if not np.isfinite(max_gain) or not np.isfinite(max_loss):
-            continue
-
-        direction = "롱" if max_gain > max_loss else "숏"
-        gain = max_gain if direction == "롱" else -max_loss
-
-        # ✅ 최대 수익/손실 조건 완화 (기존 0.6)
-        if abs(gain) > 1.0:
-            continue
-
-        base_cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
-        cls = max(0, 7 - base_cls) if direction == "숏" else min(15, 8 + base_cls)
-
-        if not (0 <= cls < 16):
-            continue
-
-        sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
-        if any(len(row) != len(columns) for row in sample):
-            continue
-
-        X.append(sample)
-        y.append(cls)
-
+        columns = [c for c in features[0].keys() if c != "timestamp"]
     except Exception as e:
-        print(f"[예외] 샘플 생성 실패 (i={i}) → {type(e).__name__}: {e}")
-        continue
+        print(f"[오류] features[0] 키 확인 실패 → {e}")
+        return np.array([], dtype=float), np.array([], dtype=float)
 
-if not X or not y:
-    print(f"[결과 없음] 샘플 부족 → X={len(X)}, y={len(y)}")
-    return np.array([]), np.array([])
+    bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
+             0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
 
-# ✅ 2단계 유지: 클래스별 최소 수 보장
-dist = Counter(y)
-total = len(y)
-print(f"[분포] 클래스 수: {len(dist)} / 총 샘플: {total}")
-for k in sorted(dist):
-    print(f" · 클래스 {k:2d}: {dist[k]}개 ({dist[k]/total:.2%})")
+    strategy_lookahead = {
+        "단기": 24,
+        "중기": 72,
+        "장기": 168
+    }
+    default_lookahead = 24
 
-if len(dist) <= 2 or dist.most_common(1)[0][1] > total * 0.9:
-    print(f"⚠️ 편향 경고: 과도한 특정 클래스 집중 (클래스={dist.most_common(1)[0][0]})")
+    for i in range(window, len(features)):
+        try:
+            seq = features[i - window:i]
+            future = features[i:]
+            if len(seq) != window or len(future) < 5:
+                continue
 
-min_samples_per_class = 20
-for cls in range(16):
-    count = dist.get(cls, 0)
-    if count == 0:
-        continue
-    samples = [(x, y_val) for x, y_val in zip(X, y) if y_val == cls]
-    while count < min_samples_per_class:
-        x_dup, y_dup = random.choice(samples)
-        X.append(x_dup)
-        y.append(y_dup)
-        count += 1
+            base = features[i]
+            entry_price = float(base.get("close", 0.0))
+            if entry_price <= 0:
+                continue
 
-return np.array(X), np.array(y)
+            lookahead = strategy_lookahead.get(strategy, default_lookahead)
+            lookahead = min(lookahead, len(future))
+
+            highs = [float(f.get("high", entry_price)) for f in future[:lookahead]]
+            lows = [float(f.get("low", entry_price)) for f in future[:lookahead]]
+            if not highs or not lows or any(pd.isna(h) for h in highs) or any(pd.isna(l) for l in lows):
+                continue
+
+            max_gain = max((h - entry_price) / (entry_price + 1e-6) for h in highs)
+            max_loss = max((entry_price - l) / (entry_price + 1e-6) for l in lows)
+            if not np.isfinite(max_gain) or not np.isfinite(max_loss):
+                continue
+
+            direction = "롱" if max_gain > max_loss else "숏"
+            gain = max_gain if direction == "롱" else -max_loss
+
+            if abs(gain) > 1.0:  # ✅ 수익률 ±1.0까지 허용
+                continue
+
+            base_cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
+            cls = max(0, 7 - base_cls) if direction == "숏" else min(15, 8 + base_cls)
+            if not (0 <= cls < 16):
+                continue
+
+            sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
+            if any(len(row) != len(columns) for row in sample):
+                continue
+
+            X.append(sample)
+            y.append(cls)
+
+        except Exception as e:
+            print(f"[예외] 샘플 생성 실패 (i={i}) → {type(e).__name__}: {e}")
+            continue
+
+    if not X or not y:
+        print(f"[결과 없음] 샘플 부족 → X={len(X)}, y={len(y)}")
+        return np.array([], dtype=float), np.array([], dtype=float)
+
+    dist = Counter(y)
+    total = len(y)
+    print(f"[분포] 클래스 수: {len(dist)} / 총 샘플: {total}")
+    for k in sorted(dist):
+        print(f" · 클래스 {k:2d}: {dist[k]}개 ({dist[k]/total:.2%})")
+
+    if len(dist) <= 2 or dist.most_common(1)[0][1] > total * 0.9:
+        print(f"⚠️ 편향 경고: 과도한 특정 클래스 집중 (클래스={dist.most_common(1)[0][0]})")
+
+    # ✅ 클래스별 최소 20개 보장 (2단계 기능 유지)
+    min_samples_per_class = 20
+    for cls in range(16):
+        samples = [(x, y_val) for x, y_val in zip(X, y) if y_val == cls]
+        count = len(samples)
+        while count < min_samples_per_class and samples:
+            x_dup, y_dup = random.choice(samples)
+            X.append(x_dup)
+            y.append(y_dup)
+            count += 1
+
+    return np.array(X), np.array(y)
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     config = STRATEGY_CONFIG.get(strategy)
