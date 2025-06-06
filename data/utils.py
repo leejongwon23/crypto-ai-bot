@@ -68,49 +68,46 @@ import numpy as np
 
 def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
-    from collections import Counter, defaultdict
-    import random
+    import pandas as pd
+    from collections import Counter
 
     X, y = [], []
 
     if not features or len(features) <= window:
         print(f"[스킵] features 부족 → len={len(features)}")
-        return np.array([], dtype=float), np.array([], dtype=int)
+        return np.array([]), np.array([])
 
     try:
         columns = [c for c in features[0].keys() if c != "timestamp"]
     except Exception as e:
         print(f"[오류] features[0] 키 확인 실패 → {e}")
-        return np.array([], dtype=float), np.array([], dtype=int)
+        return np.array([]), np.array([])
 
-    bins = [-1.0, -0.4, -0.2, -0.1, -0.05, -0.02, -0.01,
-             0.0,
-             0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0]
+    bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
+             0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
 
-    strategy_lookahead = {"단기": 24, "중기": 72, "장기": 168}
-    default_lookahead = 24
-
-    class_groups = defaultdict(list)
+    # ✅ 전략별 실제 기간에 맞는 lookahead (단기=4시간, 중기=1일, 장기=7일)
+    strategy_hours = {"단기": 4, "중기": 24, "장기": 168}
+    lookahead_minutes = strategy_hours.get(strategy, 24) * 60  # 분 단위로 변환
 
     for i in range(window, len(features)):
         try:
             seq = features[i - window:i]
-            future = features[i:]
-            if len(seq) != window or len(future) < 5:
-                continue
-
             base = features[i]
+            entry_time = base.get("timestamp")
             entry_price = float(base.get("close", 0.0))
-            if entry_price <= 0:
+
+            if entry_price <= 0 or not entry_time:
                 continue
 
-            lookahead = strategy_lookahead.get(strategy, default_lookahead)
-            lookahead = min(lookahead, len(future))
+            # 미래 데이터 필터링
+            future = [f for f in features[i+1:] if f.get("timestamp") and (f["timestamp"] - entry_time).total_seconds() / 60 <= lookahead_minutes]
+            if len(seq) != window or len(future) < 2:
+                continue
 
-            highs = [float(f.get("high", entry_price)) for f in future[:lookahead]]
-            lows = [float(f.get("low", entry_price)) for f in future[:lookahead]]
-
-            if not highs or not lows or any(pd.isna(h) for h in highs + lows):
+            highs = [float(f.get("high", entry_price)) for f in future]
+            lows = [float(f.get("low", entry_price)) for f in future]
+            if not highs or not lows or any(pd.isna(h) for h in highs) or any(pd.isna(l) for l in lows):
                 continue
 
             max_gain = max((h - entry_price) / (entry_price + 1e-6) for h in highs)
@@ -120,56 +117,41 @@ def create_dataset(features, window=20, strategy="단기"):
 
             direction = "롱" if max_gain > max_loss else "숏"
             gain = max_gain if direction == "롱" else -max_loss
-            if abs(gain) > 1.0:
+            if abs(gain) > 0.6:
                 continue
 
             base_cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
-            cls = max(0, base_cls - 1)
+            cls = max(0, 7 - base_cls) if direction == "숏" else min(15, 8 + base_cls)
+            if not (0 <= cls < 16):
+                continue
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
             if any(len(row) != len(columns) for row in sample):
                 continue
 
-            class_groups[cls].append((sample, cls))
+            X.append(sample)
+            y.append(cls)
 
         except Exception as e:
             print(f"[예외] 샘플 생성 실패 (i={i}) → {type(e).__name__}: {e}")
             continue
 
-    # ✅ 수집된 클래스별 샘플 병합
-    for cls, samples in class_groups.items():
-        for x, y_val in samples:
-            X.append(x)
-            y.append(y_val)
-
     if not X or not y:
         print(f"[결과 없음] 샘플 부족 → X={len(X)}, y={len(y)}")
-        return np.array([], dtype=float), np.array([], dtype=int)
+        return np.array([]), np.array([])
 
-    # ✅ 분포 로그 출력
     dist = Counter(y)
     total = len(y)
     print(f"[분포] 클래스 수: {len(dist)} / 총 샘플: {total}")
     for k in sorted(dist):
         print(f" · 클래스 {k:2d}: {dist[k]}개 ({dist[k]/total:.2%})")
 
+    # ✅ 극단적 편향 시 학습 제외
     if len(dist) <= 2 or dist.most_common(1)[0][1] > total * 0.9:
-        print(f"⚠️ 편향 경고: 과도한 특정 클래스 집중 (클래스={dist.most_common(1)[0][0]})")
+        print(f"⚠️ 학습 제외: 과도한 편향 발생 → dominant class = {dist.most_common(1)[0][0]}")
+        return np.array([]), np.array([])
 
-    # ✅ 최소 샘플 수 보장 (2단계 로직 유지)
-    min_samples_per_class = 20
-    for cls in range(16):
-        count = dist.get(cls, 0)
-        if count == 0 or count >= min_samples_per_class:
-            continue
-        samples = [x for x, y_val in zip(X, y) if y_val == cls]
-        while count < min_samples_per_class and samples:
-            x_dup = random.choice(samples)
-            X.append(x_dup)
-            y.append(cls)
-            count += 1
-
-    return np.array(X, dtype=float), np.array(y, dtype=int)
+    return np.array(X), np.array(y)
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     config = STRATEGY_CONFIG.get(strategy)
