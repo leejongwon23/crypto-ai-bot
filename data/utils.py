@@ -70,6 +70,7 @@ def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
     import pandas as pd
     from collections import Counter
+    import random
 
     X, y = [], []
 
@@ -86,9 +87,8 @@ def create_dataset(features, window=20, strategy="단기"):
     bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
              0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
 
-    # ✅ 전략별 실제 기간에 맞는 lookahead (단기=4시간, 중기=1일, 장기=7일)
     strategy_hours = {"단기": 4, "중기": 24, "장기": 168}
-    lookahead_minutes = strategy_hours.get(strategy, 24) * 60  # 분 단위로 변환
+    lookahead_minutes = strategy_hours.get(strategy, 24) * 60
 
     for i in range(window, len(features)):
         try:
@@ -100,7 +100,6 @@ def create_dataset(features, window=20, strategy="단기"):
             if entry_price <= 0 or not entry_time:
                 continue
 
-            # 미래 데이터 필터링
             future = [f for f in features[i+1:] if f.get("timestamp") and (f["timestamp"] - entry_time).total_seconds() / 60 <= lookahead_minutes]
             if len(seq) != window or len(future) < 2:
                 continue
@@ -146,10 +145,21 @@ def create_dataset(features, window=20, strategy="단기"):
     for k in sorted(dist):
         print(f" · 클래스 {k:2d}: {dist[k]}개 ({dist[k]/total:.2%})")
 
-    # ✅ 극단적 편향 시 학습 제외
-    if len(dist) <= 2 or dist.most_common(1)[0][1] > total * 0.9:
-        print(f"⚠️ 학습 제외: 과도한 편향 발생 → dominant class = {dist.most_common(1)[0][0]}")
-        return np.array([]), np.array([])
+    dominant_class, dominant_count = dist.most_common(1)[0]
+    if len(dist) <= 2 or dominant_count > total * 0.9:
+        print(f"⚠️ 심각한 편향 감지 → 자동 보정 시작")
+        min_count = max(10, int(total * 0.02))
+        for cls in range(16):
+            count = dist.get(cls, 0)
+            if count == 0:
+                continue
+            samples = [(x, y_val) for x, y_val in zip(X, y) if y_val == cls]
+            while count < min_count:
+                x_dup, y_dup = random.choice(samples)
+                X.append(x_dup)
+                y.append(y_dup)
+                count += 1
+        print(f"  └ 보정 완료: 클래스 다양성 확보")
 
     return np.array(X), np.array(y)
 
