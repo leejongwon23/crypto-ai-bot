@@ -69,6 +69,7 @@ import numpy as np
 def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
     from collections import Counter
+    import random
     X, y = [], []
 
     if not features or len(features) <= window:
@@ -84,11 +85,10 @@ def create_dataset(features, window=20, strategy="단기"):
     bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
              0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
 
-    # ✅ 전략별 lookahead 재정의: 전략 시간 전체 포함
     strategy_lookahead = {
-        "단기": 24,   # 24시간 (1일)
-        "중기": 72,   # 3일 (4시간봉 18개)
-        "장기": 168   # 7일 (1일봉 7개)
+        "단기": 24,
+        "중기": 72,
+        "장기": 168
     }
     default_lookahead = 24
 
@@ -106,7 +106,7 @@ def create_dataset(features, window=20, strategy="단기"):
                 continue
 
             lookahead = strategy_lookahead.get(strategy, default_lookahead)
-            lookahead = min(lookahead, len(future))  # 초과 방지
+            lookahead = min(lookahead, len(future))
 
             highs = [float(f.get("high", entry_price)) for f in future[:lookahead]]
             lows = [float(f.get("low", entry_price)) for f in future[:lookahead]]
@@ -127,10 +127,7 @@ def create_dataset(features, window=20, strategy="단기"):
                 continue
 
             base_cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
-            cls = (
-                max(0, 7 - base_cls) if direction == "숏"
-                else min(15, 8 + base_cls)
-            )
+            cls = max(0, 7 - base_cls) if direction == "숏" else min(15, 8 + base_cls)
 
             if not (0 <= cls < 16):
                 continue
@@ -150,6 +147,7 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[결과 없음] 샘플 부족 → X={len(X)}, y={len(y)}")
         return np.array([]), np.array([])
 
+    # ✅ 클래스 분포 확인 및 소수 클래스 Oversampling 적용
     dist = Counter(y)
     total = len(y)
     print(f"[분포] 클래스 수: {len(dist)} / 총 샘플: {total}")
@@ -158,6 +156,19 @@ def create_dataset(features, window=20, strategy="단기"):
 
     if len(dist) <= 2 or dist.most_common(1)[0][1] > total * 0.9:
         print(f"⚠️ 편향 경고: 과도한 특정 클래스 집중 (클래스={dist.most_common(1)[0][0]})")
+
+    # ✅ 2단계: 클래스 다양성 강화를 위한 최소 샘플 기준 보장
+    min_samples_per_class = 20
+    for cls in range(16):
+        count = dist.get(cls, 0)
+        if count == 0:
+            continue
+        samples = [(x, y_val) for x, y_val in zip(X, y) if y_val == cls]
+        while count < min_samples_per_class:
+            x_dup, y_dup = random.choice(samples)
+            X.append(x_dup)
+            y.append(y_dup)
+            count += 1
 
     return np.array(X), np.array(y)
 
