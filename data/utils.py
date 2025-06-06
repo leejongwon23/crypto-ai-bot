@@ -120,6 +120,10 @@ def create_dataset(features, window=20, strategy="단기"):
             if not np.isfinite(max_gain) or not np.isfinite(max_loss):
                 continue
 
+            # ✅ 3단계: 극저변동 샘플 제거 (0.002 이하 변동)
+            if max_gain < 0.002 and max_loss < 0.002:
+                continue
+
             direction = "롱" if max_gain > max_loss else "숏"
             gain = max_gain if direction == "롱" else -max_loss
 
@@ -147,7 +151,6 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[결과 없음] 샘플 부족 → X={len(X)}, y={len(y)}")
         return np.array([]), np.array([])
 
-    # ✅ 클래스 분포 확인 및 소수 클래스 Oversampling 적용
     dist = Counter(y)
     total = len(y)
     print(f"[분포] 클래스 수: {len(dist)} / 총 샘플: {total}")
@@ -157,7 +160,7 @@ def create_dataset(features, window=20, strategy="단기"):
     if len(dist) <= 2 or dist.most_common(1)[0][1] > total * 0.9:
         print(f"⚠️ 편향 경고: 과도한 특정 클래스 집중 (클래스={dist.most_common(1)[0][0]})")
 
-    # ✅ 2단계: 클래스 다양성 강화를 위한 최소 샘플 기준 보장
+    # ✅ 클래스 다양성 확보용 최소 샘플 수 보완 (2단계 유지)
     min_samples_per_class = 20
     for cls in range(16):
         count = dist.get(cls, 0)
