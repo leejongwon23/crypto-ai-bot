@@ -9,22 +9,28 @@ from data.utils import get_kline_by_strategy, compute_features, create_dataset
 from model.base_model import get_model
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
+    import os, json, torch
+    import numpy as np
+    import pandas as pd
+    from sklearn.preprocessing import MinMaxScaler
+    from sklearn.metrics import accuracy_score
+    from data.utils import get_kline_by_strategy, compute_features, create_dataset
+    from model.base_model import get_model
+
     try:
         df = get_kline_by_strategy(symbol, strategy)
-        if df is None or len(df) < max(window_list) + 10:
+        if df is None or len(df) < max(window_list) + 20:
             print(f"[경고] {symbol}-{strategy} → 데이터 부족으로 기본값 반환")
             return 20
 
         df_feat = compute_features(symbol, df, strategy)
-        if df_feat is None or df_feat.empty or len(df_feat) < max(window_list) + 1:
+        if df_feat is None or df_feat.empty or len(df_feat) < max(window_list) + 10:
             print(f"[경고] {symbol}-{strategy} → feature 부족으로 기본값 반환")
             return 20
 
-        # ✅ timestamp 제외하고 스케일링
         scaler = MinMaxScaler()
         scaled = scaler.fit_transform(df_feat.drop(columns=["timestamp"]).values)
 
-        # ✅ timestamp 복원
         feature_dicts = []
         for i, row in enumerate(scaled):
             d = dict(zip(df_feat.columns.drop("timestamp"), row))
@@ -39,12 +45,10 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             try:
                 result = create_dataset(feature_dicts, window, strategy)
                 if not isinstance(result, (list, tuple)) or len(result) != 2:
-                    print(f"[스킵] create_dataset 결과 비정상 (type={type(result)}, window={window})")
                     continue
 
                 X, y = result
                 if X is None or y is None or len(X) == 0 or len(X) != len(y):
-                    print(f"[스킵] 데이터셋 없음 또는 길이 불일치 (window={window})")
                     continue
 
                 input_size = X.shape[2]
@@ -56,7 +60,6 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 val_len = int(len(X_tensor) * 0.2)
                 train_len = len(X_tensor) - val_len
                 if train_len <= 0 or val_len <= 0:
-                    print(f"[스킵] 학습/검증 데이터 부족 (window={window})")
                     continue
 
                 train_X = X_tensor[:train_len]
@@ -70,12 +73,8 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 for _ in range(5):
                     logits = model(train_X)
                     loss = criterion(logits, train_y)
-                    if not torch.isfinite(loss):
-                        print(f"[SKIP] 손실값 NaN 감지 → window={window}")
-                        break
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
+                    if not torch.isfinite(loss): break
+                    optimizer.zero_grad(); loss.backward(); optimizer.step()
 
                 model.eval()
                 with torch.no_grad():
@@ -96,6 +95,12 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 print(f"[오류] window={window} 평가 실패 → {e}")
                 continue
 
+        # ✅ Fallback: 모든 평가 실패시 20으로 고정
+        if best_acc < 0.0 or best_window not in window_list:
+            print(f"[경고] {symbol}-{strategy}: 모든 창 평가 실패 → fallback=20")
+            best_window = 20
+            best_result = {"window": 20, "accuracy": 0.0}
+
         save_dir = "/persistent/logs"
         os.makedirs(save_dir, exist_ok=True)
         save_txt = os.path.join(save_dir, f"best_window_{symbol}_{strategy}.txt")
@@ -105,7 +110,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             with open(save_txt, "w") as f:
                 f.write(str(best_window))
             with open(save_json, "w") as f:
-                json.dump(best_result or {"window": best_window, "accuracy": 0}, f, indent=2)
+                json.dump(best_result, f, indent=2)
         except Exception as e:
             print(f"[저장 오류] {symbol}-{strategy}: {e}")
 
