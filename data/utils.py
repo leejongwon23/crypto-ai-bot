@@ -164,7 +164,21 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"  └ 보정 완료: 클래스 다양성 확보")
 
     return np.array(X), np.array(y)
+    
+def get_kline_by_strategy(symbol: str, strategy: str):
+    config = STRATEGY_CONFIG.get(strategy)
+    if config is None:
+        print(f"[오류] 전략 설정 없음: {strategy}")
+        return None
 
+    df = get_kline(symbol, interval=config["interval"], limit=config["limit"])
+    
+    if df is None or df.empty:
+        print(f"[경고] {symbol}-{strategy}: get_kline_by_strategy() → 데이터 없음")
+    else:
+        print(f"[확인] {symbol}-{strategy}: 데이터 {len(df)}개 확보")
+
+    return df
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 300) -> pd.DataFrame:
     """
