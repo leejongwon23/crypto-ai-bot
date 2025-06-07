@@ -84,13 +84,39 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[오류] features[0] 키 확인 실패 → {e}")
         return np.array([]), np.array([])
 
-    # ✅ 구간 재설계 (더 넓은 클래스 다양성 유도)
-    bins = [-0.15, -0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
-             0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30]
-
     # ✅ 전략별 기대 수익 기간 → 미래 검색 범위 (분 단위)
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
+
+    # ✅ 수익률 수집 → 유효 분포 파악용
+    recent_gains = []
+
+    for i in range(window, len(features)):
+        try:
+            base = features[i]
+            entry_time = base.get("timestamp")
+            entry_price = float(base.get("close", 0.0))
+            future = [f for f in features[i + 1:] if f.get("timestamp") and (f["timestamp"] - entry_time).total_seconds() / 60 <= lookahead_minutes]
+            if not entry_time or entry_price <= 0 or len(future) < 2:
+                continue
+            highs = [float(f.get("high", entry_price)) for f in future]
+            lows = [float(f.get("low", entry_price)) for f in future]
+            max_gain = max((h - entry_price) / (entry_price + 1e-6) for h in highs)
+            max_loss = max((entry_price - l) / (entry_price + 1e-6) for l in lows)
+            gain = max(max_gain, max_loss)
+            if np.isfinite(gain) and abs(gain) < 0.6:
+                recent_gains.append(gain)
+        except:
+            continue
+
+    # ✅ 자동 구간 설정: 유효 범위 기반
+    if not recent_gains:
+        bins = [-0.15, -0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
+                 0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30]
+    else:
+        q_low = np.percentile(recent_gains, 2)
+        q_high = np.percentile(recent_gains, 98)
+        bins = np.linspace(-q_high, q_high, 16).tolist()
 
     for i in range(window, len(features)):
         try:
@@ -116,18 +142,13 @@ def create_dataset(features, window=20, strategy="단기"):
             if not np.isfinite(max_gain) or not np.isfinite(max_loss):
                 continue
 
-            # ✅ 방향 판단: 수익률이 더 큰 쪽
             direction = "롱" if max_gain >= max_loss else "숏"
             gain = max_gain if direction == "롱" else -max_loss
-
-            # ✅ 비정상 수익률 제외 (60% 이상은 이상치로 처리)
             if abs(gain) > 0.6:
                 continue
 
-            # ✅ 클래스 라벨 결정
             base_cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
             cls = max(0, 7 - base_cls) if direction == "숏" else min(15, 8 + base_cls)
-
             if not (0 <= cls < 16):
                 continue
 
@@ -146,14 +167,12 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[결과 없음] 샘플 부족 → X={len(X)}, y={len(y)}")
         return np.array([]), np.array([])
 
-    # ✅ 클래스 편향 확인
     dist = Counter(y)
     total = len(y)
     print(f"[분포] 클래스 수: {len(dist)} / 총 샘플: {total}")
     for k in sorted(dist):
         print(f" · 클래스 {k:2d}: {dist[k]}개 ({dist[k]/total:.2%})")
 
-    # ✅ 자동 보정: 한 클래스가 90% 이상 차지하면 복제 보정
     dominant_class, dominant_count = dist.most_common(1)[0]
     if len(dist) <= 2 or dominant_count > total * 0.9:
         print(f"⚠️ 심각한 편향 감지 → 자동 보정 시작")
@@ -171,6 +190,7 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"  └ 보정 완료: 클래스 다양성 확보")
 
     return np.array(X), np.array(y)
+        
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     config = STRATEGY_CONFIG.get(strategy)
