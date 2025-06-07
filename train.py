@@ -79,7 +79,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"[스킵] {symbol}-{strategy} → create_dataset 결과 없음")
             return
 
-        # ✅ 유효성 체크 및 input_size 기준을 X_raw로 정확하게
         X_filtered, y_filtered = [], []
         for xi, yi in zip(X_raw, y_raw):
             if not isinstance(xi, np.ndarray) or xi.ndim != 2: continue
@@ -128,10 +127,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
         failmap = load_failure_count()
         fail_count = failmap.get(f"{symbol}-{strategy}", 0)
         rep_wrong = STRATEGY_WRONG_REP.get(strategy, 4)
+
+        # ✅ 3번 강화: 전략별 실패 기반 보상 가중치 조정
         if fail_count >= 10: rep_wrong += 4
         elif fail_count >= 5: rep_wrong += 2
 
-        # ✅ 전략별 성공률 기반 보상 강화
         success_rate = get_actual_success_rate(strategy)
         if success_rate <= 0.2:
             rep_wrong += 6
@@ -151,7 +151,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = nn.CrossEntropyLoss()
 
-            # ✅ 실패 학습 강화
+            # ✅ 실패 샘플 기반 보강 학습
             wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
             if wrong_data:
                 used_hashes = set()
@@ -221,7 +221,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
-            
+
 def train_all_models():
     for strat in ["단기", "중기", "장기"]:
         for sym in SYMBOLS:
