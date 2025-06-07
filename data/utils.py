@@ -72,7 +72,7 @@ def create_dataset(features, window=20, strategy="단기"):
     from collections import Counter
     import random
 
-    X, y = [], []
+    X, y = []
 
     if not features or len(features) <= window:
         print(f"[스킵] features 부족 → len={len(features)}")
@@ -84,11 +84,9 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[오류] features[0] 키 확인 실패 → {e}")
         return np.array([]), np.array([])
 
-    # ✅ 구간 정의: 실제 수익률 기반 예측을 위한 fine-grained 클래스
     bins = [-0.15, -0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
              0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30]
-
-    # ✅ 전략별 기대 수익 기간 (분 단위)
+    
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
 
@@ -116,14 +114,14 @@ def create_dataset(features, window=20, strategy="단기"):
             if not np.isfinite(max_gain) or not np.isfinite(max_loss):
                 continue
 
-            # ✅ 전체 수익률 구간을 그대로 사용: 방향 판단 제거
-            gain = max_gain  # 무조건 양수로 수익률 최대치만 추출
+            if abs(max_gain) > 0.6 or abs(max_loss) > 0.6:
+                continue
 
-            if gain > 0.6:
-                continue  # 이상치 제거
+            direction = "롱" if max_gain >= max_loss else "숏"
+            gain = max_gain if direction == "롱" else -max_loss
 
             base_cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
-            cls = min(base_cls, 15)  # 클래스 범위 강제 제한
+            cls = max(0, 7 - base_cls) if direction == "숏" else min(15, 8 + base_cls)
 
             if not (0 <= cls < 16):
                 continue
@@ -143,18 +141,16 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[결과 없음] 샘플 부족 → X={len(X)}, y={len(y)}")
         return np.array([]), np.array([])
 
-    # ✅ 클래스 분포 확인 로그
     dist = Counter(y)
     total = len(y)
     print(f"[분포] 클래스 수: {len(dist)} / 총 샘플: {total}")
     for k in sorted(dist):
         print(f" · 클래스 {k:2d}: {dist[k]}개 ({dist[k]/total:.2%})")
 
-    # ✅ 심각한 편향 자동 보정
     dominant_class, dominant_count = dist.most_common(1)[0]
-    if len(dist) <= 2 or dominant_count > total * 0.9:
-        print(f"⚠️ 편향 감지 → 자동 복제 보정 시작")
-        min_count = max(10, int(total * 0.03))
+    if len(dist) <= 3 or dominant_count > total * 0.85:
+        print(f"⚠️ 클래스 심각 편향 감지 → 보정 시작")
+        min_count = max(10, int(total * 0.04))
         for cls in range(16):
             count = dist.get(cls, 0)
             if count == 0:
@@ -169,20 +165,6 @@ def create_dataset(features, window=20, strategy="단기"):
 
     return np.array(X), np.array(y)
 
-def get_kline_by_strategy(symbol: str, strategy: str):
-    config = STRATEGY_CONFIG.get(strategy)
-    if config is None:
-        print(f"[오류] 전략 설정 없음: {strategy}")
-        return None
-    
-    df = get_kline(symbol, interval=config["interval"], limit=config["limit"])
-    
-    if df is None or df.empty:
-        print(f"[경고] {symbol}-{strategy}: get_kline_by_strategy() → 데이터 없음")
-    else:
-        print(f"[확인] {symbol}-{strategy}: 데이터 {len(df)}개 확보")
-
-    return df
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 300) -> pd.DataFrame:
     """
