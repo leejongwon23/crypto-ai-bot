@@ -13,11 +13,12 @@ MODEL_DIR = "/persistent/models"
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 NUM_CLASSES = 16
 
-# 클래스 → 수익률 구간 중앙값 추정 (예: 평가/로그용)
+
 def class_to_expected_return(cls):
-    bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
-             0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
-    return bins[cls] if 0 <= cls < len(bins) else 0.0
+    # 전체 16개 클래스 기준: 0~7 = 숏(음수 수익률), 8~15 = 롱(양수 수익률)
+    centers = [-0.125, -0.085, -0.06, -0.04, -0.02, -0.01, -0.0025, -0.0005,
+                0.0005, 0.0025, 0.01, 0.02, 0.04, 0.06, 0.09, 0.15]
+    return centers[cls] if 0 <= cls < len(centers) else 0.0
 
 def failed_result(symbol, strategy, model_type="unknown", reason="", source="일반"):
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
