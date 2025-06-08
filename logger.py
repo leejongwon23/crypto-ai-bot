@@ -1,5 +1,6 @@
 import os, csv, datetime, pandas as pd, pytz, hashlib
 from data.utils import get_kline_by_strategy
+import pandas as pd
 
 DIR, LOG = "/persistent", "/persistent/logs"
 PREDICTION_LOG = f"{DIR}/prediction_log.csv"
@@ -311,6 +312,17 @@ def analyze_class_success():
     except Exception as e:
         print(f"[오류] 클래스 성공률 분석 실패 → {e}")
         return pd.DataFrame([])
+
+def get_recent_predicted_classes(strategy: str, recent_days: int = 3):
+    try:
+        df = pd.read_csv("/persistent/prediction_log.csv")
+        df = df[df["strategy"] == strategy]
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        cutoff = pd.Timestamp.now() - pd.Timedelta(days=recent_days)
+        df = df[df["timestamp"] >= cutoff]
+        return set(df["predicted_class"].dropna().astype(int).tolist())
+    except:
+        return set()
         
 def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
     try:
