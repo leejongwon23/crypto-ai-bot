@@ -66,6 +66,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼"); sys.stdout.flush()
     results, fmap = [], load_failure_count()
     triggered_trainings = set()
+    class_distribution = {}
 
     for item in symbols:
         symbol = item["symbol"]
@@ -122,6 +123,11 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                 )
                 log_audit(symbol, strategy, result, "예측 성공")
 
+                # 클래스 분포 저장
+                pred_class = result.get("class", -1)
+                if pred_class != -1:
+                    class_distribution.setdefault(f"{symbol}-{strategy}", []).append(pred_class)
+
                 key = f"{symbol}-{strategy}"
                 if not result.get("success", False):
                     if key not in triggered_trainings:
@@ -143,6 +149,21 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
             log_audit(symbol, strategy, None, f"예측 예외: {e}")
 
+    # ✅ 예측 편향 감지 후 fine-tune 트리거
+    for key, classes in class_distribution.items():
+        symbol, strat = key.split("-")
+        class_counts = Counter(classes)
+        if len(class_counts) <= 2:
+            print(f"[편향 감지] {key} → 예측 클래스 다양성 부족 → fine-tune 트리거")
+            try:
+                threading.Thread(
+                    target=train.train_model,
+                    args=(symbol, strat),
+                    daemon=True
+                ).start()
+            except Exception as e:
+                print(f"[오류] fine-tune 실패: {e}")
+
     save_failure_count(fmap)
 
     try:
@@ -151,22 +172,20 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
     except Exception as e:
         print(f"[ERROR] 평가 실패: {e}")
 
-    filtered = []
+    filtered_by_success = []
     for r in results:
         s = r.get("strategy")
         stat = strategy_stats.get(s, {"success": 0, "fail": 0, "returns": []})
         total = stat["success"] + stat["fail"]
-        if total < 3:
-            continue
+        if total < 3: continue
         success_rate = stat["success"] / total
-        if success_rate < 0.7:
-            continue
-        filtered.append(r)
+        if success_rate < 0.7: continue
+        filtered_by_success.append(r)
 
     top_by_strategy = {}
-    for r in filtered:
+    for r in filtered_by_success:
         s = r["strategy"]
-        if s not in top_by_strategy or r.get("expected_return", 0.0) > top_by_strategy[s].get("expected_return", 0.0):
+        if s not in top_by_strategy or r["expected_return"] > top_by_strategy[s]["expected_return"]:
             top_by_strategy[s] = r
 
     for s, res in top_by_strategy.items():
