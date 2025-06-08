@@ -92,6 +92,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
         X_raw = np.array(X_filtered)
         y_raw = np.array(y_filtered)
+        X_raw, y_raw = balance_classes(X_raw, y_raw)
         input_size = X_raw.shape[2]
 
         val_len = int(len(X_raw) * 0.2)
@@ -215,3 +216,29 @@ def train_all_models():
             try: train_one_model(sym, strat)
             except Exception as e:
                 print(f"[전체 학습 오류] {sym}-{strat} → {e}")
+
+def balance_classes(X, y, min_samples=20, target_classes=range(18)):
+    from collections import Counter
+    import random
+    import numpy as np
+
+    class_counts = Counter(y)
+    X_balanced, y_balanced = list(X), list(y)
+
+    for cls in target_classes:
+        count = class_counts.get(cls, 0)
+        if count == 0:
+            continue  # 아예 없는 클래스는 건너뜀
+        if count >= min_samples:
+            continue  # 충분히 많으면 건너뜀
+
+        existing = [(x, y_val) for x, y_val in zip(X, y) if y_val == cls]
+        while class_counts[cls] < min_samples:
+            x_dup, y_dup = random.choice(existing)
+            X_balanced.append(x_dup)
+            y_balanced.append(y_dup)
+            class_counts[cls] += 1
+
+    return np.array(X_balanced), np.array(y_balanced)
+
+
