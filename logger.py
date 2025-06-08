@@ -311,3 +311,35 @@ def analyze_class_success():
     except Exception as e:
         print(f"[오류] 클래스 성공률 분석 실패 → {e}")
         return pd.DataFrame([])
+        
+def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
+    try:
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        df = df[df["status"].isin(["success", "fail"])]
+        df = df[df["predicted_class"] >= 0]
+
+        result = defaultdict(lambda: {"success": 0, "fail": 0})
+
+        for _, row in df.iterrows():
+            strategy = row["strategy"]
+            cls = int(row["predicted_class"])
+            key = (strategy, cls)
+            result[key]["success" if row["status"] == "success" else "fail"] += 1
+
+        fine_tune_targets = []
+        for (strategy, cls), counts in result.items():
+            total = counts["success"] + counts["fail"]
+            rate = counts["success"] / total if total > 0 else 0
+            if total < min_samples or rate < max_success_rate:
+                fine_tune_targets.append({
+                    "strategy": strategy,
+                    "class": cls,
+                    "samples": total,
+                    "success_rate": round(rate, 4)
+                })
+
+        return pd.DataFrame(fine_tune_targets).sort_values(by=["strategy", "class"])
+
+    except Exception as e:
+        print(f"[오류] fine-tune 대상 분석 실패 → {e}")
+        return pd.DataFrame([])
