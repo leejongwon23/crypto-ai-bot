@@ -134,21 +134,33 @@ def train_one_model(symbol, strategy, max_epochs=20):
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = nn.CrossEntropyLoss()
 
-            # ✅ 실패 데이터 학습 (배치 학습 방식 적용)
+            # ✅ 실패 데이터 학습 (고수익 클래스 강화)
             if wrong_filtered:
                 print(f"[실패 학습 시작] 총 {len(wrong_filtered)} 샘플")
-                wrong_X = torch.tensor([x for x, _ in wrong_filtered], dtype=torch.float32)
-                wrong_y = torch.tensor([y for _, y in wrong_filtered], dtype=torch.long)
-                wrong_ds = TensorDataset(wrong_X, wrong_y)
-                wrong_loader = DataLoader(wrong_ds, batch_size=16, shuffle=True)
+                high_class_samples = [(x, y) for x, y in wrong_filtered if y >= 10]
+                regular_samples = [(x, y) for x, y in wrong_filtered if y < 10]
 
-                for _ in range(6):  # 반복 횟수는 조정 가능
-                    for xb, yb in wrong_loader:
-                        model.train()
-                        logits = model(xb)
-                        loss = lossfn(logits, yb)
-                        if not torch.isfinite(loss): continue
-                        optimizer.zero_grad(); loss.backward(); optimizer.step()
+                def train_failures(batch_data, repeat=6):
+                    ds = TensorDataset(torch.tensor([x for x, _ in batch_data], dtype=torch.float32),
+                                       torch.tensor([y for _, y in batch_data], dtype=torch.long))
+                    loader = DataLoader(ds, batch_size=16, shuffle=True)
+                    for _ in range(repeat):
+                        for xb, yb in loader:
+                            model.train()
+                            logits = model(xb)
+                            loss = lossfn(logits, yb)
+                            if not torch.isfinite(loss): continue
+                            optimizer.zero_grad(); loss.backward(); optimizer.step()
+
+                # 🔁 고수익 클래스 우선 반복 학습
+                if high_class_samples:
+                    print(f"🔁 고수익 실패 샘플 학습 ({len(high_class_samples)}개)")
+                    train_failures(high_class_samples, repeat=6)
+
+                # ⏱ 일반 실패도 학습 (필요시)
+                if regular_samples:
+                    print(f"⏱ 일반 실패 샘플 학습 ({len(regular_samples)}개)")
+                    train_failures(regular_samples, repeat=2)
 
             # ✅ 일반 데이터 학습
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
