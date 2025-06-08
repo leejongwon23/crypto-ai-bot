@@ -269,3 +269,45 @@ def evaluate_predictions(get_price_fn):
         w.writerows(updated)
 
 strategy_stats = {}
+
+# 📁 logger.py 파일 하단에 추가하세요
+
+import pandas as pd
+from collections import defaultdict
+
+PREDICTION_LOG = "/persistent/prediction_log.csv"
+
+def analyze_class_success():
+    try:
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        df = df[df["status"].isin(["success", "fail"])]
+        df = df[df["predicted_class"] >= 0]
+
+        result = defaultdict(lambda: {"success": 0, "fail": 0})
+
+        for _, row in df.iterrows():
+            strategy = row["strategy"]
+            cls = int(row["predicted_class"])
+            key = (strategy, cls)
+            result[key]["success" if row["status"] == "success" else "fail"] += 1
+
+        summary = []
+        for (strategy, cls), counts in result.items():
+            total = counts["success"] + counts["fail"]
+            rate = counts["success"] / total if total > 0 else 0
+            summary.append({
+                "strategy": strategy,
+                "class": cls,
+                "total": total,
+                "success": counts["success"],
+                "fail": counts["fail"],
+                "success_rate": round(rate, 4)
+            })
+
+        summary_df = pd.DataFrame(summary)
+        summary_df = summary_df.sort_values(by=["strategy", "class"])
+        return summary_df
+
+    except Exception as e:
+        print(f"[오류] 클래스 성공률 분석 실패 → {e}")
+        return pd.DataFrame([])
