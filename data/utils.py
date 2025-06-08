@@ -71,9 +71,8 @@ def create_dataset(features, window=20, strategy="단기"):
     import pandas as pd
     from collections import Counter
     import random
-
-    # ✅ 반드시 이렇게 수정해야 정상 작동합니다
-X, y = [], []
+    
+    X, y = [], []
 
     if not features or len(features) <= window:
         print(f"[스킵] features 부족 → len={len(features)}")
