@@ -119,6 +119,7 @@ def predict(symbol, strategy, source="일반"):
                         "price": raw_close,
                         "timestamp": t, "success": True,
                         "source": source
+                        "predicted_class": pred_class  # ✅ 이 한 줄 추가!
                     })
             except Exception as e:
                 failed = failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source)
