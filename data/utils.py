@@ -71,7 +71,7 @@ def create_dataset(features, window=20, strategy="단기"):
     import pandas as pd
     from collections import Counter
     import random
-    
+
     X, y = [], []
 
     if not features or len(features) <= window:
@@ -84,9 +84,10 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[오류] features[0] 키 확인 실패 → {e}")
         return np.array([]), np.array([])
 
-    bins = [-0.15, -0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
-             0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.30]
-    
+    # ✅ 새 클래스 구간: 중앙값 기준 아님, 실제 수익률 매핑 기준
+    bins = [-0.15, -0.12, -0.09, -0.06, -0.03, -0.01,
+             0.01, 0.03, 0.05, 0.07, 0.10, 0.13, 0.16, 0.20, 0.25]
+
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
 
@@ -100,7 +101,11 @@ def create_dataset(features, window=20, strategy="단기"):
             if not entry_time or entry_price <= 0:
                 continue
 
-            future = [f for f in features[i + 1:] if f.get("timestamp") and (f["timestamp"] - entry_time).total_seconds() / 60 <= lookahead_minutes]
+            # 미래 구간 확인 (예측 타겟)
+            future = [
+                f for f in features[i + 1:]
+                if f.get("timestamp") and (f["timestamp"] - entry_time).total_seconds() / 60 <= lookahead_minutes
+            ]
             if len(seq) != window or len(future) < 2:
                 continue
 
@@ -120,10 +125,9 @@ def create_dataset(features, window=20, strategy="단기"):
             direction = "롱" if max_gain >= max_loss else "숏"
             gain = max_gain if direction == "롱" else -max_loss
 
-            base_cls = next((i for i, b in enumerate(bins) if gain < b), len(bins) - 1)
-            cls = max(0, 7 - base_cls) if direction == "숏" else min(15, 8 + base_cls)
-
-            if not (0 <= cls < 16):
+            # ✅ 클래스 매핑: gain이 속하는 구간을 찾아 클래스 할당
+            cls = next((i for i, b in enumerate(bins) if gain < b), len(bins))
+            if not (0 <= cls < 15):
                 continue
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
@@ -151,7 +155,7 @@ def create_dataset(features, window=20, strategy="단기"):
     if len(dist) <= 3 or dominant_count > total * 0.85:
         print(f"⚠️ 클래스 심각 편향 감지 → 보정 시작")
         min_count = max(10, int(total * 0.04))
-        for cls in range(16):
+        for cls in range(15):
             count = dist.get(cls, 0)
             if count == 0:
                 continue
