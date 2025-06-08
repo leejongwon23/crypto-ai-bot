@@ -17,7 +17,7 @@ DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 os.makedirs(MODEL_DIR, exist_ok=True)
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-NUM_CLASSES = 16
+NUM_CLASSES = 18
 STRATEGY_WRONG_REP = {"단기": 4, "중기": 6, "장기": 8}
 
 def get_feature_hash_from_tensor(x):
@@ -187,7 +187,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 f1 = f1_score(y_val, preds, average="macro")
                 val_loss = lossfn(logits, yb).item()
 
-            if acc >= 1.0 and len(set(y_val)) <= 2:
+            if acc >= 1.0 and len(set(y_val)) <= 3:
                 print(f"⚠️ 오버핏 감지 → 저장 중단")
                 log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
                 continue
