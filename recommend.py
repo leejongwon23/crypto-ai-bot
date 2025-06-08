@@ -151,23 +151,22 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
     except Exception as e:
         print(f"[ERROR] 평가 실패: {e}")
 
-    filtered_by_success = []
+    filtered = []
     for r in results:
         s = r.get("strategy")
         stat = strategy_stats.get(s, {"success": 0, "fail": 0, "returns": []})
         total = stat["success"] + stat["fail"]
-        if total < 5: continue
+        if total < 3:
+            continue
         success_rate = stat["success"] / total
-        if success_rate < 0.7: continue
-        filtered_by_success.append(r)
+        if success_rate < 0.7:
+            continue
+        filtered.append(r)
 
     top_by_strategy = {}
-    for r in filtered_by_success:
+    for r in filtered:
         s = r["strategy"]
-        # ✅ 수익률 필터 조건 추가
-        if r.get("expected_return", 0.0) < STRATEGY_VOL.get(s, 0.0):
-            continue
-        if s not in top_by_strategy or r["expected_return"] > top_by_strategy[s]["expected_return"]:
+        if s not in top_by_strategy or r.get("expected_return", 0.0) > top_by_strategy[s].get("expected_return", 0.0):
             top_by_strategy[s] = r
 
     for s, res in top_by_strategy.items():
@@ -181,8 +180,6 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             print(f"[ERROR] 메시지 전송 실패: {e}")
             with open(MESSAGE_LOG, "a", newline="", encoding="utf-8-sig") as f:
                 csv.writer(f).writerow([now_kst().isoformat(), res["symbol"], res["strategy"], f"전송 실패: {e}"])
-
-
 
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
