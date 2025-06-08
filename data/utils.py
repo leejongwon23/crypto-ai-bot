@@ -70,24 +70,22 @@ def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
     import pandas as pd
     from collections import Counter
-    import random
 
     X, y = [], []
 
     if not features or len(features) <= window:
-        print(f"[스킵] features 부족 → len={len(features)}")
         return np.array([]), np.array([])
 
     try:
         columns = [c for c in features[0].keys() if c != "timestamp"]
-    except Exception as e:
-        print(f"[오류] features[0] 키 확인 실패 → {e}")
+    except:
         return np.array([]), np.array([])
 
-    # ✅ 새 클래스 구간: 중앙값 기준 아님, 실제 수익률 매핑 기준
-    bins = [-0.15, -0.12, -0.09, -0.06, -0.03, -0.01,
-             0.01, 0.03, 0.05, 0.07, 0.10, 0.13, 0.16, 0.20, 0.25]
+    # ✅ 예측할 수익률 구간 나누기 (총 17개)
+    bins = [-0.20, -0.15, -0.12, -0.09, -0.06, -0.03, -0.01,
+             0.01, 0.03, 0.05, 0.07, 0.10, 0.13, 0.16, 0.20, 0.25, 0.30]
 
+    # 전략별 예측 기간 설정
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
 
@@ -95,13 +93,13 @@ def create_dataset(features, window=20, strategy="단기"):
         try:
             seq = features[i - window:i]
             base = features[i]
+
             entry_time = base.get("timestamp")
             entry_price = float(base.get("close", 0.0))
-
             if not entry_time or entry_price <= 0:
                 continue
 
-            # 미래 구간 확인 (예측 타겟)
+            # ✅ 미래 데이터를 일정 시간만큼 가져옴
             future = [
                 f for f in features[i + 1:]
                 if f.get("timestamp") and (f["timestamp"] - entry_time).total_seconds() / 60 <= lookahead_minutes
@@ -109,25 +107,15 @@ def create_dataset(features, window=20, strategy="단기"):
             if len(seq) != window or len(future) < 2:
                 continue
 
-            highs = [float(f.get("high", entry_price)) for f in future]
-            lows = [float(f.get("low", entry_price)) for f in future]
-            if not highs or not lows or any(pd.isna(highs)) or any(pd.isna(lows)):
+            # ✅ 마지막 close 가격으로 수익률 계산
+            final_price = float(future[-1].get("close", entry_price))
+            gain = (final_price - entry_price) / (entry_price + 1e-6)
+            if not np.isfinite(gain) or abs(gain) > 2:
                 continue
 
-            max_gain = max((h - entry_price) / (entry_price + 1e-6) for h in highs)
-            max_loss = max((entry_price - l) / (entry_price + 1e-6) for l in lows)
-            if not np.isfinite(max_gain) or not np.isfinite(max_loss):
-                continue
-
-            if abs(max_gain) > 0.6 or abs(max_loss) > 0.6:
-                continue
-
-            direction = "롱" if max_gain >= max_loss else "숏"
-            gain = max_gain if direction == "롱" else -max_loss
-
-            # ✅ 클래스 매핑: gain이 속하는 구간을 찾아 클래스 할당
+            # ✅ 수익률이 어느 구간에 들어가는지 클래스로 변환
             cls = next((i for i, b in enumerate(bins) if gain < b), len(bins))
-            if not (0 <= cls < 15):
+            if not (0 <= cls < len(bins) + 1):
                 continue
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
@@ -137,37 +125,14 @@ def create_dataset(features, window=20, strategy="단기"):
             X.append(sample)
             y.append(cls)
 
-        except Exception as e:
-            print(f"[예외] 샘플 생성 실패 (i={i}) → {type(e).__name__}: {e}")
+        except:
             continue
 
     if not X or not y:
-        print(f"[결과 없음] 샘플 부족 → X={len(X)}, y={len(y)}")
         return np.array([]), np.array([])
 
-    dist = Counter(y)
-    total = len(y)
-    print(f"[분포] 클래스 수: {len(dist)} / 총 샘플: {total}")
-    for k in sorted(dist):
-        print(f" · 클래스 {k:2d}: {dist[k]}개 ({dist[k]/total:.2%})")
-
-    dominant_class, dominant_count = dist.most_common(1)[0]
-    if len(dist) <= 3 or dominant_count > total * 0.85:
-        print(f"⚠️ 클래스 심각 편향 감지 → 보정 시작")
-        min_count = max(10, int(total * 0.04))
-        for cls in range(15):
-            count = dist.get(cls, 0)
-            if count == 0:
-                continue
-            samples = [(x, y_val) for x, y_val in zip(X, y) if y_val == cls]
-            while count < min_count:
-                x_dup, y_dup = random.choice(samples)
-                X.append(x_dup)
-                y.append(y_dup)
-                count += 1
-        print(f"  └ 보정 완료: 클래스 다양성 확보")
-
     return np.array(X), np.array(y)
+
     
 def get_kline_by_strategy(symbol: str, strategy: str):
     config = STRATEGY_CONFIG.get(strategy)
