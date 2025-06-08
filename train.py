@@ -94,28 +94,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
         y_raw = np.array(y_filtered)
         input_size = X_raw.shape[2]
 
-        class_counts = Counter(y_raw)
-        total = sum(class_counts.values())
-        dominant_ratio = max(class_counts.values()) / total if total > 0 else 1.0
-
-        if len(class_counts) <= 1:
-            print(f"⛔ 학습 중단: 단일 클래스만 존재 → 의미 없는 학습 방지")
-            return
-
-        if len(class_counts) < 5 and dominant_ratio > 0.85:
-            print(f"⚠️ 편향 데이터 감지 → oversampling 적용")
-            threshold = 10
-            X_bal, y_bal = list(X_raw), list(y_raw)
-            for cls in class_counts:
-                samples = [x for x, y in zip(X_raw, y_raw) if y == cls]
-                need = threshold - len(samples)
-                for _ in range(need):
-                    X_bal.append(random.choice(samples))
-                    y_bal.append(cls)
-            X_raw = np.array(X_bal)
-            y_raw = np.array(y_bal)
-            print(f"  └ oversampling 완료 → 총 샘플 수: {len(X_raw)}")
-
         val_len = int(len(X_raw) * 0.2)
         if val_len == 0:
             print("⏭ 검증 데이터 부족"); return
@@ -123,21 +101,25 @@ def train_one_model(symbol, strategy, max_epochs=20):
         X_train, X_val = X_raw[:-val_len], X_raw[-val_len:]
         y_train, y_val = y_raw[:-val_len], y_raw[-val_len:]
 
+        # ✅ 실패 피처 해시 준비
         failure_hashes = load_existing_failure_hashes()
         frequent_failures = get_frequent_failures(min_count=5)
-        failmap = load_failure_count()
-        fail_count = failmap.get(f"{symbol}-{strategy}", 0)
-        rep_wrong = STRATEGY_WRONG_REP.get(strategy, 4)
 
-        # ✅ 3단계 강화 로직: 전략별 실패 카운트 및 성공률 기반 보상 가중치
-        if fail_count >= 10: rep_wrong += 4
-        elif fail_count >= 5: rep_wrong += 2
+        # ✅ 실패 데이터 로드
+        wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
+        wrong_filtered = []
+        used_hashes = set()
 
-        success_rate = get_actual_success_rate(strategy)
-        if success_rate <= 0.2:
-            rep_wrong += 6
-        elif success_rate <= 0.35:
-            rep_wrong += 4
+        for s in wrong_data:
+            if isinstance(s, (list, tuple)) and len(s) >= 2:
+                xb, yb = s[:2]
+                if not isinstance(xb, np.ndarray) or xb.shape != (window, input_size): continue
+                if not isinstance(yb, (int, np.integer)) or not (0 <= yb < NUM_CLASSES): continue
+                feature_hash = get_feature_hash_from_tensor(torch.tensor(xb))
+                if feature_hash in used_hashes or feature_hash in failure_hashes or feature_hash in frequent_failures:
+                    continue
+                used_hashes.add(feature_hash)
+                wrong_filtered.append((xb, yb))
 
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size).train()
@@ -145,41 +127,30 @@ def train_one_model(symbol, strategy, max_epochs=20):
             if os.path.exists(model_path):
                 try:
                     model.load_state_dict(torch.load(model_path, map_location=DEVICE))
-                    print(f"🔁 이어 학습: {model_path}"); sys.stdout.flush()
+                    print(f"🔁 이어 학습: {model_path}")
                 except:
                     print(f"[로드 실패] {model_path} → 새로 학습")
 
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = nn.CrossEntropyLoss()
 
-            # ✅ 실패 데이터 기반 강화학습
-            wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
-            if wrong_data:
-                used_hashes = set()
-                wrong_data_filtered = []
-                for s in wrong_data:
-                    if isinstance(s, (list, tuple)) and len(s) >= 2:
-                        xb, yb = s[:2]
-                        if not isinstance(xb, np.ndarray) or xb.shape != (window, input_size): continue
-                        if not isinstance(yb, (int, np.integer)) or not (0 <= yb < NUM_CLASSES): continue
-                        feature_hash = get_feature_hash_from_tensor(torch.tensor(xb).squeeze(0))
-                        if feature_hash in used_hashes or feature_hash in failure_hashes or feature_hash in frequent_failures:
-                            continue
-                        used_hashes.add(feature_hash)
-                        wrong_data_filtered.append((xb, yb))
+            # ✅ 실패 데이터 학습 (배치 학습 방식 적용)
+            if wrong_filtered:
+                print(f"[실패 학습 시작] 총 {len(wrong_filtered)} 샘플")
+                wrong_X = torch.tensor([x for x, _ in wrong_filtered], dtype=torch.float32)
+                wrong_y = torch.tensor([y for _, y in wrong_filtered], dtype=torch.long)
+                wrong_ds = TensorDataset(wrong_X, wrong_y)
+                wrong_loader = DataLoader(wrong_ds, batch_size=16, shuffle=True)
 
-                if wrong_data_filtered:
-                    print(f"[강화학습 시작] {symbol}-{strategy} → 총 {len(wrong_data_filtered)}개")
-                    for _ in range(rep_wrong):
-                        batch = random.sample(wrong_data_filtered, min(5, len(wrong_data_filtered)))
-                        for xb, yb in batch:
-                            xb_tensor = torch.tensor(xb).unsqueeze(0).float()
-                            yb_tensor = torch.tensor([yb]).long()
-                            logits = model(xb_tensor)
-                            loss = lossfn(logits, yb_tensor)
-                            if not torch.isfinite(loss): continue
-                            optimizer.zero_grad(); loss.backward(); optimizer.step()
+                for _ in range(6):  # 반복 횟수는 조정 가능
+                    for xb, yb in wrong_loader:
+                        model.train()
+                        logits = model(xb)
+                        loss = lossfn(logits, yb)
+                        if not torch.isfinite(loss): continue
+                        optimizer.zero_grad(); loss.backward(); optimizer.step()
 
+            # ✅ 일반 데이터 학습
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
             train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
@@ -191,6 +162,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     if not torch.isfinite(loss): break
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
 
+            # ✅ 검증 및 저장
             model.eval()
             with torch.no_grad():
                 xb = torch.tensor(X_val, dtype=torch.float32)
@@ -222,7 +194,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
-    
 
 def train_all_models():
     for strat in ["단기", "중기", "장기"]:
