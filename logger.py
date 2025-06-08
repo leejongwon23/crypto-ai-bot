@@ -134,9 +134,11 @@ def evaluate_predictions(get_price_fn):
 
     now = now_kst()
     updated, evaluated = [], []
+
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
-    class_bins = [-0.10, -0.07, -0.05, -0.03, -0.015, -0.005,
-                   0.005, 0.015, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
+
+    # ✅ 중앙값 기준 제거, 하한 도달 이상이면 성공
+    class_bins = [0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
 
     for r in rows:
         try:
@@ -148,6 +150,7 @@ def evaluate_predictions(get_price_fn):
             strat = r.get("strategy")
             m = r.get("model", "unknown")
             entry = float(r.get("entry_price", 0))
+
             try:
                 pred_class = int(r.get("predicted_class", -1))
             except:
@@ -187,14 +190,17 @@ def evaluate_predictions(get_price_fn):
                 else:
                     actual_max = eval_df["high"].max()
                     actual_gain = (actual_max - entry) / entry if entry > 0 else 0.0
-                    actual_class = max([i for i, b in enumerate(class_bins) if actual_gain >= b], default=-1)
 
-                    # ✅ 정확한 구간 수익률 평가 방식 적용
-                    success = pred_class == actual_class
+                    # ✅ 예측 클래스 구간 하한 이상 도달하면 성공
+                    if 0 <= pred_class < len(class_bins):
+                        threshold = class_bins[pred_class]
+                        success = actual_gain >= threshold
+                    else:
+                        success = False
 
                     r.update({
                         "status": "v_success" if vol and success else "v_fail" if vol else "success" if success else "fail",
-                        "reason": f"실제클래스={actual_class} / 예측클래스={pred_class} / 수익률={actual_gain:.4f}",
+                        "reason": f"예측클래스={pred_class} / 하한={threshold:.3f} / 수익률={actual_gain:.4f}",
                         "return": round(actual_gain, 5)
                     })
 
