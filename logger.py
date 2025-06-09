@@ -118,6 +118,7 @@ def evaluate_predictions(get_price_fn):
     from failure_db import ensure_failure_db, insert_failure_record, load_existing_failure_hashes, analyze_failure_reason
     from logger import update_model_success, get_feature_hash
     from data.utils import compute_features
+    import numpy as np
 
     ensure_failure_db()
 
@@ -137,8 +138,6 @@ def evaluate_predictions(get_price_fn):
     updated, evaluated = [], []
 
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
-
-    # ✅ 중앙값 기준 제거, 하한 도달 이상이면 성공
     class_bins = [0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30]
 
     for r in rows:
@@ -151,7 +150,6 @@ def evaluate_predictions(get_price_fn):
             strat = r.get("strategy")
             m = r.get("model", "unknown")
             entry = float(r.get("entry_price", 0))
-
             try:
                 pred_class = int(r.get("predicted_class", -1))
             except:
@@ -192,11 +190,11 @@ def evaluate_predictions(get_price_fn):
                     actual_max = eval_df["high"].max()
                     actual_gain = (actual_max - entry) / entry if entry > 0 else 0.0
 
-                    # ✅ 예측 클래스 구간 하한 이상 도달하면 성공
                     if 0 <= pred_class < len(class_bins):
                         threshold = class_bins[pred_class]
                         success = actual_gain >= threshold
                     else:
+                        threshold = 0.0
                         success = False
 
                     r.update({
@@ -209,6 +207,7 @@ def evaluate_predictions(get_price_fn):
                     evaluated.append(dict(r))
 
         except Exception as e:
+            print(f"[평가 예외] {e}")
             r.update({
                 "status": "skip_eval",
                 "reason": f"예외 발생: {e}",
@@ -218,7 +217,7 @@ def evaluate_predictions(get_price_fn):
 
     if evaluated:
         with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as ef:
-            w = csv.DictWriter(ef, fieldnames=evaluated[0].keys())
+            w = csv.DictWriter(ef, fieldnames=evaluated[0].keys(), quotechar='"')
             if os.stat(EVAL_RESULT).st_size == 0:
                 w.writeheader()
             w.writerows(evaluated)
@@ -226,48 +225,16 @@ def evaluate_predictions(get_price_fn):
         failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
         if failed:
             with open(WRONG, "a", newline="", encoding="utf-8-sig") as wf:
-                w = csv.DictWriter(wf, fieldnames=failed[0].keys())
+                w = csv.DictWriter(wf, fieldnames=failed[0].keys(), quotechar='"')
                 if os.stat(WRONG).st_size == 0:
                     w.writeheader()
                 w.writerows(failed)
 
-            try:
-                existing_hashes = load_existing_failure_hashes()
-                for r in failed:
-                    symbol, strategy = r["symbol"], r["strategy"]
-                    if not symbol or not strategy:
-                        continue
-
-                    df = get_price_fn(symbol, strategy)
-                    df_feat = compute_features(symbol, df, strategy)
-                    if df_feat is None or df_feat.empty or "timestamp" not in df_feat.columns:
-                        continue
-
-                    df_feat = df_feat.dropna()
-                    feature_row = df_feat.drop(columns=["timestamp"]).iloc[-1].values
-                    if not isinstance(feature_row, (np.ndarray, list)) or len(feature_row) == 0:
-                        continue
-
-                    hash_value = get_feature_hash(feature_row)
-                    key = (symbol, strategy, r.get("direction", "예측실패"), hash_value)
-                    if key in existing_hashes:
-                        continue
-
-                    failure_reason = analyze_failure_reason(
-                        float(r.get("rate", 0.0)),
-                        df_feat["volatility"].iloc[-1] if "volatility" in df_feat.columns else None
-                    )
-
-                    r["reason"] = failure_reason
-                    insert_failure_record(r, hash_value)
-                    existing_hashes.add(key)
-            except Exception as e:
-                print(f"[실패패턴 기록 오류] {e}")
-
     with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=updated[0].keys())
+        w = csv.DictWriter(f, fieldnames=updated[0].keys(), quotechar='"')
         w.writeheader()
         w.writerows(updated)
+
 
 strategy_stats = {}
 
