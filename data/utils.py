@@ -108,11 +108,13 @@ def create_dataset(features, window=20, strategy="단기"):
 
             final_price = float(future[-1].get("close", entry_price))
             gain = (final_price - entry_price) / (entry_price + 1e-6)
-            if not np.isfinite(gain) or abs(gain) > 5:  # 완화: 최대 500%까지 허용
+            if not np.isfinite(gain) or abs(gain) > 5:
                 continue
 
-            # ✅ 마지막 구간까지 포함 (클래스 0~17)
+            # ✅ 클래스 인덱스 안전 보정 (최대 클래스: len(bins))
             cls = next((i for i, b in enumerate(bins) if gain < b), len(bins))
+            if not (0 <= cls <= len(bins)):  # 🔒 오류 방지
+                continue
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
             if any(len(row) != len(columns) for row in sample):
@@ -129,12 +131,10 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[결과 없음] 샘플 부족 → X={len(X)}, y={len(y)}")
         return np.array([]), np.array([])
 
-    # ✅ 클래스 분포가 하나뿐이면 학습 불가 → 최소 2개 이상 필요
     if len(set(y)) < 2:
         print(f"[스킵] 클래스 다양성 부족 → 클래스 수={len(set(y))}")
         return np.array([]), np.array([])
 
-    # ✅ 클래스 분포 출력
     dist = Counter(y)
     total = len(y)
     print(f"[분포] 클래스 수: {len(dist)} / 총 샘플: {total}")
