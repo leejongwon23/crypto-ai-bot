@@ -29,18 +29,33 @@ def start_scheduler():
            (12,30,"중기"),(14,30,"장기"),(16,30,"단기"),(18,30,"중기")] + [(21,0,s) for s in ["단기","중기","장기"]] + [(0,0,"단기"),(0,0,"중기")]
 
     for h, m, strategy in 학습:
-        def job(strategy=strategy):
-            threading.Thread(target=train.train_model_loop, args=(strategy,), daemon=True).start()
-        sched.add_job(job, 'cron', hour=h, minute=m)
+        sched.add_job(
+            functools.partial(
+                threading.Thread, 
+                target=train.train_model_loop, 
+                args=(strategy,), 
+                daemon=True
+            ),
+            'cron', hour=h, minute=m,
+            id=f"train_{strategy}_{h}_{m}"
+        )
 
     for h, m, strategy in 예측:
-        def job(strategy=strategy):
-            threading.Thread(target=main, kwargs={"strategy": strategy, "force": True}, daemon=True).start()
-        sched.add_job(job, 'cron', hour=h, minute=m)
+        sched.add_job(
+            functools.partial(
+                threading.Thread, 
+                target=main, 
+                kwargs={"strategy": strategy, "force": True}, 
+                daemon=True
+            ),
+            'cron', hour=h, minute=m,
+            id=f"predict_{strategy}_{h}_{m}"
+        )
 
     sched.add_job(lambda: evaluate_predictions(get_kline_by_strategy), 'cron', minute=20)
     sched.add_job(trigger_run, 'interval', minutes=30)
     sched.start()
+
 
 # 이하 기존 app.route들은 그대로 유지 (생략 가능)
 
