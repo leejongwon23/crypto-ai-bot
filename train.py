@@ -224,6 +224,14 @@ def train_all_models():
             except Exception as e:
                 print(f"[전체 학습 오류] {sym}-{strat} → {e}")
 
+def train_model_loop(strategy):
+    for symbol in SYMBOLS:
+        try:
+            train_one_model(symbol, strategy)
+        except Exception as e:
+            print(f"[학습 실패] {symbol}-{strategy} → {e}")
+
+
 def balance_classes(X, y, min_samples=20, target_classes=range(18)):
     from collections import Counter
     import random
