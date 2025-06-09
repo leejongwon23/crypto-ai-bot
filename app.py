@@ -23,29 +23,43 @@ def start_scheduler():
     print(">>> 스케줄러 시작"); sys.stdout.flush()
     sched = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
 
+    # 전략별 학습 시간표 (정책 유지)
     학습 = [(1,30,"단기"), (3,30,"장기"), (6,0,"중기"), (9,0,"단기"), (11,0,"중기"),
            (13,0,"장기"), (15,0,"단기"), (17,0,"중기"), (19,0,"장기"), (22,30,"단기")]
 
+    # 전략별 예측 시간표 (정책 유지)
     예측 = [(7,30,s) for s in ["단기","중기","장기"]] + [(10,30,"단기"),(10,30,"중기"),
            (12,30,"중기"),(14,30,"장기"),(16,30,"단기"),(18,30,"중기")] + [(21,0,s) for s in ["단기","중기","장기"]] + [(0,0,"단기"),(0,0,"중기")]
 
-    # 학습 스케줄러
+    # ✅ 학습 스케줄 등록
     for h, m, strategy in 학습:
         sched.add_job(
             lambda s=strategy: threading.Thread(target=train.train_model_loop, args=(s,), daemon=True).start(),
             trigger='cron', hour=h, minute=m
         )
 
-    # 예측 스케줄러
+    # ✅ 예측 스케줄 등록
     for h, m, strategy in 예측:
         sched.add_job(
             lambda s=strategy: threading.Thread(target=main, kwargs={"strategy": s, "force": True}, daemon=True).start(),
             trigger='cron', hour=h, minute=m
         )
 
-    sched.add_job(lambda: evaluate_predictions(get_kline_by_strategy), 'cron', minute=20)
+    # ✅ 평가 스케줄: 전략별로 30분마다 반복 실행
+    for s in ["단기", "중기", "장기"]:
+        sched.add_job(
+            lambda strat=s: threading.Thread(
+                target=lambda: evaluate_predictions(lambda sym, _: get_kline_by_strategy(sym, strat)),
+                daemon=True
+            ).start(),
+            trigger='interval', minutes=30
+        )
+
+    # ✅ 기타 트리거 (기존 유지)
     sched.add_job(trigger_run, 'interval', minutes=30)
+
     sched.start()
+
 
 
 # 이하 기존 app.route들은 그대로 유지 (생략 가능)
