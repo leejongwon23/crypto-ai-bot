@@ -80,7 +80,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"[스킵] {symbol}-{strategy} → create_dataset 결과 없음")
             return
 
-        # ✅ 감쇠 적용: 최근 예측된 클래스 + 실패율 높은 클래스 유지
+        # ✅ 감쇠 클래스 필터링
         recent_pred_classes = get_recent_predicted_classes(strategy, recent_days=3)
         fine_tune_targets = get_fine_tune_targets()
         target_class_set = set()
@@ -158,20 +158,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         if not torch.isfinite(loss): continue
                         optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            high_class_samples = [(x, y) for x, y in wrong_filtered if y >= 10]
-            if high_class_samples:
-                print(f"🔁 고수익 실패 샘플 학습 ({len(high_class_samples)}개)")
-                train_failures(high_class_samples, repeat=6)
-
-            regular_samples = [(x, y) for x, y in wrong_filtered if y < 10]
-            if regular_samples:
-                print(f"⏱ 일반 실패 샘플 학습 ({len(regular_samples)}개)")
-                train_failures(regular_samples, repeat=2)
-
-            fine_filtered = [(x, y) for x, y in wrong_filtered if (strategy, y) in target_class_set]
-            if fine_filtered:
-                print(f"🔁 실패율 낮은 클래스 반복 학습 ({len(fine_filtered)}개)")
-                train_failures(fine_filtered, repeat=6)
+            train_failures([(x, y) for x, y in wrong_filtered if y >= 10], repeat=6)
+            train_failures([(x, y) for x, y in wrong_filtered if y < 10], repeat=2)
+            train_failures([(x, y) for x, y in wrong_filtered if (strategy, y) in target_class_set], repeat=6)
 
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
@@ -194,9 +183,14 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 f1 = f1_score(y_val, preds, average="macro")
                 val_loss = lossfn(logits, yb).item()
 
+            # ✅ 비정상 조건 필터링
             if acc >= 1.0 and len(set(y_val)) <= 2:
                 print(f"⚠️ 오버핏 감지 → 저장 중단")
                 log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
+                continue
+            if f1 > 1.0 or val_loss > 1.5 or acc < 0.3:
+                print(f"⚠️ 비정상 결과 감지 → 저장 중단 (acc={acc:.2f}, f1={f1:.2f}, loss={val_loss:.2f})")
+                log_training_result(symbol, strategy, f"비정상({model_type})", acc, f1, val_loss)
                 continue
 
             torch.save(model.state_dict(), model_path)
@@ -215,6 +209,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
 
 
 def train_all_models():
