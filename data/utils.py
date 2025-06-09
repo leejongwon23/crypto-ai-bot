@@ -83,7 +83,6 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[오류] features[0] 키 확인 실패 → {e}")
         return np.array([]), np.array([])
 
-    # ✅ 수익률 구간 클래스 정의 (보합 포함, 총 17개 구간)
     bins = [-0.20, -0.15, -0.12, -0.09, -0.06, -0.03, -0.01,
              0.01, 0.03, 0.05, 0.07, 0.10, 0.13, 0.16, 0.20, 0.25, 0.30]
 
@@ -100,24 +99,20 @@ def create_dataset(features, window=20, strategy="단기"):
             if not entry_time or entry_price <= 0:
                 continue
 
-            # ✅ 예측 대상 미래 시점 구간 수집
             future = [
                 f for f in features[i + 1:]
                 if f.get("timestamp") and (f["timestamp"] - entry_time).total_seconds() / 60 <= lookahead_minutes
             ]
-            if len(seq) != window or len(future) < 2:
+            if len(seq) != window or len(future) == 0:
                 continue
 
-            # ✅ 마지막 종가 기준 수익률 계산
             final_price = float(future[-1].get("close", entry_price))
             gain = (final_price - entry_price) / (entry_price + 1e-6)
-            if not np.isfinite(gain) or abs(gain) > 2:
+            if not np.isfinite(gain) or abs(gain) > 5:  # 완화: 최대 500%까지 허용
                 continue
 
-            # ✅ 수익률을 클래스 구간에 매핑
+            # ✅ 마지막 구간까지 포함 (클래스 0~17)
             cls = next((i for i, b in enumerate(bins) if gain < b), len(bins))
-            if not (0 <= cls < len(bins) + 1):
-                continue
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
             if any(len(row) != len(columns) for row in sample):
@@ -134,7 +129,12 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[결과 없음] 샘플 부족 → X={len(X)}, y={len(y)}")
         return np.array([]), np.array([])
 
-    # ✅ 클래스 분포 출력 (확인용)
+    # ✅ 클래스 분포가 하나뿐이면 학습 불가 → 최소 2개 이상 필요
+    if len(set(y)) < 2:
+        print(f"[스킵] 클래스 다양성 부족 → 클래스 수={len(set(y))}")
+        return np.array([]), np.array([])
+
+    # ✅ 클래스 분포 출력
     dist = Counter(y)
     total = len(y)
     print(f"[분포] 클래스 수: {len(dist)} / 총 샘플: {total}")
