@@ -56,20 +56,20 @@ def start_scheduler():
     for h, m, s in 예측:
         sched.add_job(lambda s=s: 예측작업(s), trigger="cron", hour=h, minute=m)
 
-    # ✅ 전략별 평가 루프 (30분마다 반복)
+    # ✅ 전략별 평가 등록 (30분마다 반복)
     def 평가작업(strategy):
-        evaluate_predictions(lambda sym, _: get_kline_by_strategy(sym, strategy))
+        def wrapped():
+            evaluate_predictions(lambda sym, _: get_kline_by_strategy(sym, strategy))
+        threading.Thread(target=wrapped, daemon=True).start()
 
-    for s in ["단기", "중기", "장기"]:
-        sched.add_job(
-            lambda s=s: threading.Thread(target=평가작업, args=(s,), daemon=True).start(),
-            trigger="interval", minutes=30
-        )
+    for strat in ["단기", "중기", "장기"]:
+        sched.add_job(lambda s=strat: 평가작업(s), trigger="interval", minutes=30)
 
     # ✅ 기타 트리거 유지
     sched.add_job(trigger_run, "interval", minutes=30)
 
     sched.start()
+
 
 
 # 이하 기존 app.route들은 그대로 유지 (생략 가능)
