@@ -18,19 +18,18 @@ MESSAGE_LOG, FAILURE_LOG = os.path.join(LOG_DIR, "message_log.csv"), os.path.joi
 os.makedirs(LOG_DIR, exist_ok=True)
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-
 def start_scheduler():
     print(">>> 스케줄러 시작"); sys.stdout.flush()
     sched = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
 
-    # ✅ 학습 스케줄
+    # ✅ 전략별 학습 스케줄
     학습 = [
         (1, 30, "단기"), (3, 30, "장기"), (6, 0, "중기"), (9, 0, "단기"),
         (11, 0, "중기"), (13, 0, "장기"), (15, 0, "단기"),
         (17, 0, "중기"), (19, 0, "장기"), (22, 30, "단기")
     ]
 
-    # ✅ 예측 스케줄
+    # ✅ 전략별 예측 스케줄
     예측 = [
         (7, 30, s) for s in ["단기", "중기", "장기"]
     ] + [
@@ -43,29 +42,31 @@ def start_scheduler():
         (0, 0, "단기"), (0, 0, "중기")
     ]
 
-    # ✅ 학습 작업 등록
+    # ✅ 학습 등록
     def 학습작업(s):
         threading.Thread(target=train.train_model_loop, args=(s,), daemon=True).start()
 
     for h, m, s in 학습:
         sched.add_job(lambda s=s: 학습작업(s), trigger="cron", hour=h, minute=m)
 
-    # ✅ 예측 작업 등록
+    # ✅ 예측 등록
     def 예측작업(s):
         threading.Thread(target=main, kwargs={"strategy": s, "force": True}, daemon=True).start()
 
     for h, m, s in 예측:
         sched.add_job(lambda s=s: 예측작업(s), trigger="cron", hour=h, minute=m)
 
-    # ✅ 전략별 평가 (30분마다 반복)
+    # ✅ 전략별 평가 루프 (30분마다 반복)
     def 평가작업(strategy):
         evaluate_predictions(lambda sym, _: get_kline_by_strategy(sym, strategy))
 
     for s in ["단기", "중기", "장기"]:
-        sched.add_job(lambda s=s: threading.Thread(target=평가작업, args=(s,), daemon=True).start(),
-                      trigger="interval", minutes=30)
+        sched.add_job(
+            lambda s=s: threading.Thread(target=평가작업, args=(s,), daemon=True).start(),
+            trigger="interval", minutes=30
+        )
 
-    # ✅ 기타 루프 유지
+    # ✅ 기타 트리거 유지
     sched.add_job(trigger_run, "interval", minutes=30)
 
     sched.start()
