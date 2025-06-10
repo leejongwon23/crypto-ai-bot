@@ -103,12 +103,16 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                 result["volatility"] = vol
                 result["return"] = result.get("expected_return", 0.0)
                 result["source"] = result.get("source", source)
-                result["predicted_class"] = result.get("class", -1)
+                result["predicted_class"] = (
+                    result["class"]
+                    if isinstance(result, dict) and "class" in result and isinstance(result["class"], int)
+                    else -1
+                )
 
                 log_prediction(
                     symbol=result.get("symbol", symbol),
                     strategy=result.get("strategy", strategy),
-                    direction=f"class-{result.get('class', -1)}",
+                    direction=f"class-{result['predicted_class']}",
                     entry_price=result.get("price", 0),
                     target_price=result.get("price", 0) * (1 + result.get("expected_return", 0)),
                     timestamp=result.get("timestamp", now_kst().isoformat()),
@@ -119,12 +123,12 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                     return_value=result.get("expected_return", 0.0),
                     volatility=vol > 0,
                     source=result.get("source", source),
-                    predicted_class=result.get("class", -1)
+                    predicted_class=result["predicted_class"]
                 )
                 log_audit(symbol, strategy, result, "예측 성공")
 
                 # 클래스 분포 저장
-                pred_class = result.get("class", -1)
+                pred_class = result["predicted_class"]
                 if pred_class != -1:
                     class_distribution.setdefault(f"{symbol}-{strategy}", []).append(pred_class)
 
