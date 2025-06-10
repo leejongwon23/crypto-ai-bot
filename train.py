@@ -55,7 +55,9 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
 
 def train_one_model(symbol, strategy, max_epochs=20):
     from logger import get_fine_tune_targets, get_recent_predicted_classes
+    from focal_loss import FocalLoss  # ✅ focal_loss.py 필요
     print(f"▶ 학습 시작: {symbol}-{strategy}")
+
     try:
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
@@ -85,13 +87,15 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print("⏭ 학습용 시퀀스 부족"); return
 
         input_size = X_raw.shape[2]
-        num_classes = int(np.max(y_raw)) + 1  # ✅ 자동 클래스 수 설정
+        num_classes = int(np.max(y_raw)) + 1
         val_len = int(len(X_raw) * 0.2)
         if val_len == 0:
             print("⏭ 검증 데이터 부족"); return
 
-        X_train, X_val = X_raw[:-val_len], X_raw[-val_len:]
-        y_train, y_val = y_raw[:-val_len], y_raw[-val_len:]
+        # ✅ 클래스 균형 보정
+        X_bal, y_bal = balance_classes(X_raw[:-val_len], y_raw[:-val_len], min_samples=20, target_classes=range(num_classes))
+        X_train, y_train = X_bal, y_bal
+        X_val, y_val = X_raw[-val_len:], y_raw[-val_len:]
 
         failure_hashes = load_existing_failure_hashes()
         frequent_failures = get_frequent_failures(min_count=5)
@@ -111,7 +115,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 used_hashes.add(feature_hash)
                 wrong_filtered.append((xb, yb))
 
-        from model.base_model import get_model
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size=input_size, output_size=num_classes).train()
             model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt"
@@ -123,7 +126,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     print(f"[로드 실패] {model_path} → 새로 학습")
 
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-            lossfn = nn.CrossEntropyLoss()
+            lossfn = FocalLoss(gamma=2, weight=None, reduction="mean")
 
             def train_failures(batch_data, repeat=6):
                 ds = TensorDataset(torch.tensor([x for x, _ in batch_data], dtype=torch.float32),
@@ -137,8 +140,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         if not torch.isfinite(loss): continue
                         optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            train_failures([(x, y) for x, y in wrong_filtered if y >= num_classes // 2], repeat=6)
-            train_failures([(x, y) for x, y in wrong_filtered if y < num_classes // 2], repeat=2)
+            train_failures([(x, y) for x, y in wrong_filtered if y >= 10], repeat=6)
+            train_failures([(x, y) for x, y in wrong_filtered if y < 10], repeat=2)
 
             try:
                 target_class_set = set()
@@ -148,7 +151,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     target_class_set.update([(strategy, c) for c in recent_pred_classes])
                 for _, row in fine_tune_targets.iterrows():
                     target_class_set.add((row["strategy"], row["class"]))
-
                 train_failures([(x, y) for x, y in wrong_filtered if (strategy, y) in target_class_set], repeat=6)
             except:
                 print("⚠️ fine-tune 대상 분석 실패 → 전체 학습 유지")
@@ -156,6 +158,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
             train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
+
             for _ in range(max_epochs):
                 model.train()
                 for xb, yb in train_loader:
