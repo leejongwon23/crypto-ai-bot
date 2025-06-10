@@ -17,8 +17,6 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     from data.utils import get_kline_by_strategy, compute_features, create_dataset
     from model.base_model import get_model
 
-    NUM_CLASSES = 18
-
     try:
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 20:
@@ -54,7 +52,10 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                     continue
 
                 input_size = X.shape[2]
-                model = get_model("lstm", input_size, output_size=NUM_CLASSES).train()
+                if input_size <= 0:
+                    continue
+
+                model = get_model("lstm", input_size).train()  # ✅ output_size 제거됨
 
                 X_tensor = torch.tensor(X, dtype=torch.float32)
                 y_tensor = torch.tensor(y, dtype=torch.long)
@@ -121,3 +122,4 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     except Exception as e:
         print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
         return 20
+
