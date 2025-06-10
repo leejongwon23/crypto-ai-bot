@@ -2,6 +2,8 @@
 
 import sqlite3
 import os
+import json
+from collections import defaultdict
 
 # ✅ DB 파일 경로
 DB_PATH = "/persistent/logs/failure_patterns.db"
@@ -19,16 +21,20 @@ def ensure_failure_db():
             direction TEXT,
             hash TEXT UNIQUE,
             rate REAL,
-            reason TEXT
+            reason TEXT,
+            feature TEXT,
+            label INTEGER
         )
         """)
 
-# ✅ 2. 실패 기록 저장 함수 (중복되면 자동 무시)
-def insert_failure_record(row, feature_hash):
+# ✅ 2. 실패 기록 저장 함수 (중복되면 자동 무시 + feature 저장 추가)
+def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
-            INSERT OR IGNORE INTO failure_patterns (timestamp, symbol, strategy, direction, hash, rate, reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO failure_patterns (
+                timestamp, symbol, strategy, direction, hash, rate, reason, feature, label
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             row["timestamp"],
             row["symbol"],
@@ -36,15 +42,17 @@ def insert_failure_record(row, feature_hash):
             row.get("direction", "예측실패"),
             feature_hash,
             float(row.get("rate", 0.0)),
-            row.get("reason", "")
+            row.get("reason", ""),
+            json.dumps(feature_vector) if feature_vector else None,
+            int(label) if label is not None else None
         ))
 
-# ✅ 3. 실패 피처 해시 목록 불러오기 (학습 시 중복 판단용) - 수정됨
+# ✅ 3. 실패 피처 해시 목록 불러오기 (학습 시 중복 판단용)
 def load_existing_failure_hashes():
     try:
         with sqlite3.connect(DB_PATH) as conn:
             rows = conn.execute("SELECT hash FROM failure_patterns").fetchall()
-            return set(r[0] for r in rows)  # hash만 추출
+            return set(r[0] for r in rows)
     except:
         return set()
 
@@ -62,7 +70,7 @@ def analyze_failure_reason(rate, volatility=None):
         return "고변동성 구간 실패"
     return "기타 실패"
 
-# ✅ 5. 사유별 실패 클러스터 집계 함수 (선택적 사용)
+# ✅ 5. 사유별 실패 클러스터 집계 함수
 def group_failures_by_reason(limit=100):
     try:
         with sqlite3.connect(DB_PATH) as conn:
@@ -77,7 +85,7 @@ def group_failures_by_reason(limit=100):
     except:
         return []
 
-# ✅ 6. 전략별 / 시간제한 해시 조회 추가 함수
+# ✅ 6. 전략별 / 시간제한 해시 조회 함수
 def load_failure_hashes_filtered(strategy=None, recent_hours=None):
     try:
         query = "SELECT hash, timestamp, strategy FROM failure_patterns"
@@ -99,3 +107,31 @@ def load_failure_hashes_filtered(strategy=None, recent_hours=None):
             return set(r[0] for r in rows)
     except:
         return set()
+
+# ✅ 7. 실패 피처 로드 함수 (학습 재사용용)
+def load_failed_feature_data(strategy=None, max_per_class=20):
+    result = []
+    class_counter = defaultdict(int)
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            query = "SELECT feature, label FROM failure_patterns WHERE feature IS NOT NULL AND label IS NOT NULL"
+            if strategy:
+                query += " AND strategy = ? ORDER BY id DESC"
+                rows = conn.execute(query, (strategy,)).fetchall()
+            else:
+                query += " ORDER BY id DESC"
+                rows = conn.execute(query).fetchall()
+
+            for row in rows:
+                feat_json, label = row
+                if not feat_json: continue
+                try:
+                    feat = json.loads(feat_json)
+                    label = int(label)
+                    if class_counter[label] < max_per_class:
+                        result.append((feat, label))
+                        class_counter[label] += 1
+                except: continue
+    except Exception as e:
+        print(f"[ERROR] 실패 피처 로딩 실패: {e}")
+    return result
