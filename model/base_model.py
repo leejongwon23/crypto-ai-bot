@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-NUM_CLASSES = 16  # ✅ 클래스 개수 고정
+NUM_CLASSES = 16  # ✅ 기본 클래스 수
 
 class Attention(nn.Module):
     def __init__(self, hidden_size):
@@ -17,7 +17,7 @@ class Attention(nn.Module):
 
 
 class LSTMPricePredictor(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int = 128, num_layers: int = 3, dropout: float = 0.3):
+    def __init__(self, input_size: int, hidden_size: int = 128, num_layers: int = 3, dropout: float = 0.3, output_size: int = NUM_CLASSES):
         super(LSTMPricePredictor, self).__init__()
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, dropout=dropout, batch_first=True)
         self.attention = Attention(hidden_size)
@@ -25,7 +25,7 @@ class LSTMPricePredictor(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.fc1 = nn.Linear(hidden_size, hidden_size // 2)
         self.act = nn.GELU()
-        self.fc_logits = nn.Linear(hidden_size // 2, NUM_CLASSES)
+        self.fc_logits = nn.Linear(hidden_size // 2, output_size)
 
     def forward(self, x):
         lstm_out, _ = self.lstm(x)
@@ -38,7 +38,7 @@ class LSTMPricePredictor(nn.Module):
 
 
 class CNNLSTMPricePredictor(nn.Module):
-    def __init__(self, input_size: int, cnn_channels: int = 32, lstm_hidden_size: int = 64, lstm_layers: int = 2, dropout: float = 0.3):
+    def __init__(self, input_size: int, cnn_channels: int = 32, lstm_hidden_size: int = 64, lstm_layers: int = 2, dropout: float = 0.3, output_size: int = NUM_CLASSES):
         super(CNNLSTMPricePredictor, self).__init__()
         self.conv1 = nn.Conv1d(input_size, cnn_channels, kernel_size=3, padding=1)
         self.relu = nn.ReLU()
@@ -47,7 +47,7 @@ class CNNLSTMPricePredictor(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.fc1 = nn.Linear(lstm_hidden_size, lstm_hidden_size // 2)
         self.act = nn.GELU()
-        self.fc_logits = nn.Linear(lstm_hidden_size // 2, NUM_CLASSES)
+        self.fc_logits = nn.Linear(lstm_hidden_size // 2, output_size)
 
     def forward(self, x):
         x = x.permute(0, 2, 1)
@@ -78,7 +78,7 @@ class TransformerEncoderLayer(nn.Module):
 
 
 class TransformerPricePredictor(nn.Module):
-    def __init__(self, input_size: int, d_model: int = 64, nhead: int = 4, num_layers: int = 2, dropout: float = 0.3):
+    def __init__(self, input_size: int, d_model: int = 64, nhead: int = 4, num_layers: int = 2, dropout: float = 0.3, output_size: int = NUM_CLASSES):
         super().__init__()
         self.input_proj = nn.Linear(input_size, d_model)
         self.encoder = nn.Sequential(*[TransformerEncoderLayer(d_model, nhead, dropout=dropout) for _ in range(num_layers)])
@@ -86,7 +86,7 @@ class TransformerPricePredictor(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.fc1 = nn.Linear(d_model, d_model // 2)
         self.act = nn.GELU()
-        self.fc_logits = nn.Linear(d_model // 2, NUM_CLASSES)
+        self.fc_logits = nn.Linear(d_model // 2, output_size)
 
     def forward(self, x):
         x = self.input_proj(x)
@@ -106,8 +106,8 @@ MODEL_CLASSES = {
 }
 
 
-def get_model(model_type: str = "cnn_lstm", input_size: int = 11):
+def get_model(model_type: str = "cnn_lstm", input_size: int = 11, output_size: int = NUM_CLASSES):
     if model_type not in MODEL_CLASSES:
         print(f"[경고] 알 수 없는 모델 타입 '{model_type}', 기본 모델 cnn_lstm 사용")
     model_cls = MODEL_CLASSES.get(model_type, CNNLSTMPricePredictor)
-    return model_cls(input_size=input_size)
+    return model_cls(input_size=input_size, output_size=output_size)
