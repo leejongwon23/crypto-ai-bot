@@ -83,8 +83,13 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[오류] features[0] 키 확인 실패 → {e}")
         return np.array([]), np.array([])
 
-    bins = [-0.20, -0.15, -0.12, -0.09, -0.06, -0.03, -0.01,
-             0.01, 0.03, 0.05, 0.07, 0.10, 0.13, 0.16, 0.20, 0.25, 0.30]
+    # ✅ 실용적 구간 기준: 0% 수익률 구간 제외, ±1% 미만도 제외
+    class_ranges = [
+        (-0.30, -0.15), (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05),
+        (-0.05, -0.03), (-0.03, -0.015), (-0.015, -0.01),
+        ( 0.01,  0.015), ( 0.015, 0.03), ( 0.03, 0.05), ( 0.05, 0.07),
+        ( 0.07, 0.10), ( 0.10, 0.15), ( 0.15, 0.30)
+    ]
 
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
@@ -111,10 +116,14 @@ def create_dataset(features, window=20, strategy="단기"):
             if not np.isfinite(gain) or abs(gain) > 5:
                 continue
 
-            # ✅ 클래스 인덱스 안전 보정 (최대 클래스: len(bins))
-            cls = next((i for i, b in enumerate(bins) if gain < b), len(bins))
-            if not (0 <= cls <= len(bins)):  # 🔒 오류 방지
-                continue
+            # ✅ 수익률이 클래스 범위 안에 속할 때만 라벨 부여
+            cls = -1
+            for j, (low, high) in enumerate(class_ranges):
+                if low <= gain < high:
+                    cls = j
+                    break
+            if cls == -1:
+                continue  # 클래스 범위 밖이면 제외
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
             if any(len(row) != len(columns) for row in sample):
@@ -142,6 +151,7 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f" · 클래스 {k:2d}: {dist[k]}개 ({dist[k]/total:.2%})")
 
     return np.array(X), np.array(y)
+
 
     
 def get_kline_by_strategy(symbol: str, strategy: str):
