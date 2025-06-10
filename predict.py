@@ -11,13 +11,12 @@ from logger import get_feature_hash
 DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-NUM_CLASSES = 16
+NUM_CLASSES = 17  # ✅ 17개 클래스 기준
 
-
+# ✅ 클래스 → 기대수익률 중앙값 매핑
 def class_to_expected_return(cls):
-    # 전체 16개 클래스 기준: 0~7 = 숏(음수 수익률), 8~15 = 롱(양수 수익률)
-    centers = [-0.125, -0.085, -0.06, -0.04, -0.02, -0.01, -0.0025, -0.0005,
-                0.0005, 0.0025, 0.01, 0.02, 0.04, 0.06, 0.09, 0.15]
+    centers = [-0.175, -0.135, -0.105, -0.075, -0.045, -0.025, -0.015, -0.005,
+                0.015, 0.04, 0.06, 0.085, 0.115, 0.145, 0.175, 0.225, 0.275]
     return centers[cls] if 0 <= cls < len(centers) else 0.0
 
 def failed_result(symbol, strategy, model_type="unknown", reason="", source="일반"):
@@ -26,7 +25,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         log_prediction(
             symbol=symbol, strategy=strategy,
             direction="예측실패", entry_price=0, target_price=0,
-            model=str(model_type or "unknown"),  # ✅ 문자열로 명확하게 처리
+            model=str(model_type or "unknown"),
             success=False, reason=reason,
             rate=0.0, timestamp=t, volatility=False, source=source,
             predicted_class=-1
@@ -38,8 +37,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         "reason": reason, "model": str(model_type or "unknown"),
         "rate": 0.0, "class": -1, "timestamp": t, "source": source
     }
-
-
 
 def predict(symbol, strategy, source="일반"):
     try:
@@ -92,7 +89,7 @@ def predict(symbol, strategy, source="일반"):
                 if weight <= 0.0:
                     continue
 
-                model = get_model(model_type, X.shape[2])
+                model = get_model(model_type, X.shape[2], output_size=NUM_CLASSES)
                 model.load_state_dict(torch.load(path, map_location=DEVICE))
                 model.eval()
 
@@ -119,7 +116,7 @@ def predict(symbol, strategy, source="일반"):
                         "price": raw_close,
                         "timestamp": t, "success": True,
                         "source": source,
-                        "predicted_class": pred_class  # 여덟류 클래스 번호 저장
+                        "predicted_class": pred_class
                     })
             except Exception as e:
                 failed = failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source)
@@ -133,4 +130,3 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
-
