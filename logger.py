@@ -322,3 +322,17 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
     except Exception as e:
         print(f"[오류] fine-tune 대상 분석 실패 → {e}")
         return pd.DataFrame([])
+
+def get_feature_hash_from_tensor(tensor):
+    """
+    텐서 데이터를 받아 해시값 생성 (학습 피처 중복 방지용)
+    """
+    try:
+        flat = tensor.detach().cpu().numpy().flatten()
+        rounded = [round(float(x), 2) for x in flat]
+        joined = ",".join(map(str, rounded))
+        return hashlib.sha1(joined.encode()).hexdigest()
+    except Exception as e:
+        print(f"[오류] get_feature_hash_from_tensor 실패 → {e}")
+        return "unknown"
+
