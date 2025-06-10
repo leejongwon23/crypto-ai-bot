@@ -11,15 +11,15 @@ from logger import get_feature_hash
 DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-NUM_CLASSES = 17  # ✅ 17개 클래스 기준
+NUM_CLASSES = 14  # ✅ 14개 클래스 기준
 
 # ✅ 클래스 → 기대수익률 중앙값 매핑
 def class_to_expected_return(cls):
-    centers = [-0.175, -0.135, -0.105, -0.075, -0.045, -0.025, -0.015, -0.005,
-                0.015, 0.04, 0.06, 0.085, 0.115, 0.145, 0.175, 0.225, 0.275]
+    centers = [-0.225, -0.125, -0.085, -0.06, -0.04, -0.0225, -0.0125,
+                0.0125, 0.0225, 0.04, 0.06, 0.085, 0.125, 0.225]
     return centers[cls] if 0 <= cls < len(centers) else 0.0
 
-def failed_result(symbol, strategy, model_type="unknown", reason="", source="일반"):
+def failed_result(symbol, strategy, model_type="unknown", reason="", source="일반", X_input=None):
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     try:
         log_prediction(
@@ -30,13 +30,22 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             rate=0.0, timestamp=t, volatility=False, source=source,
             predicted_class=-1
         )
-    except:
-        pass
-    return {
+    except: pass
+
+    result = {
         "symbol": symbol, "strategy": strategy, "success": False,
         "reason": reason, "model": str(model_type or "unknown"),
-        "rate": 0.0, "class": -1, "timestamp": t, "source": source
+        "rate": 0.0, "class": -1, "timestamp": t, "source": source,
+        "predicted_class": -1
     }
+
+    if X_input is not None:
+        try:
+            feature_hash = get_feature_hash(X_input)
+            insert_failure_record(result, feature_hash)
+        except: pass
+
+    return result
 
 def predict(symbol, strategy, source="일반"):
     try:
@@ -78,10 +87,9 @@ def predict(symbol, strategy, source="일반"):
             if f.endswith(".pt") and f.startswith(symbol) and strategy in f
         }
         if not model_files:
-            return [failed_result(symbol, strategy, "unknown", "모델 없음", source)]
+            return [failed_result(symbol, strategy, "unknown", "모델 없음", source, X_input)]
 
         predictions = []
-        failure_hashes = load_existing_failure_hashes()
 
         for model_type, path in model_files.items():
             try:
@@ -109,24 +117,27 @@ def predict(symbol, strategy, source="일반"):
                         volatility=False, source=source,
                         predicted_class=pred_class
                     )
-                    predictions.append({
+
+                    result = {
                         "symbol": symbol, "strategy": strategy,
                         "model": model_type, "class": pred_class,
                         "expected_return": expected_return,
-                        "price": raw_close,
-                        "timestamp": t, "success": True,
-                        "source": source,
+                        "price": raw_close, "timestamp": t,
+                        "success": True, "source": source,
                         "predicted_class": pred_class
-                    })
-            except Exception as e:
-                failed = failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source)
-                try:
-                    feature_hash = get_feature_hash(X_input)
-                    insert_failure_record(failed, feature_hash)
-                except: pass
-                predictions.append(failed)
+                    }
 
-        return predictions if predictions else [failed_result(symbol, strategy, "unknown", "모든 모델 예측 실패", source)]
+                    try:
+                        feature_hash = get_feature_hash(X_input)
+                        insert_failure_record(result, feature_hash)
+                    except: pass
+
+                    predictions.append(result)
+
+            except Exception as e:
+                predictions.append(failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source, X_input))
+
+        return predictions if predictions else [failed_result(symbol, strategy, "unknown", "모든 모델 예측 실패", source, X_input)]
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
