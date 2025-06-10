@@ -140,9 +140,13 @@ def evaluate_predictions(get_price_fn):
     updated, evaluated = [], []
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
 
-    # ✅ 새로운 수익률 구간 클래스 (총 16개, 0% 제외)
-    class_bins = [-0.20, -0.15, -0.12, -0.09, -0.06, -0.03, -0.01,
-                   0.01, 0.03, 0.05, 0.07, 0.10, 0.13, 0.16, 0.20, 0.25, 0.30]
+    # ✅ 클래스 구간 정의 (14개)
+    class_ranges = [
+        (-0.30, -0.15), (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05),
+        (-0.05, -0.03), (-0.03, -0.015), (-0.015, -0.01),
+        ( 0.01,  0.015), ( 0.015, 0.03), ( 0.03, 0.05), ( 0.05, 0.07),
+        ( 0.07, 0.10), ( 0.10, 0.15), ( 0.15, 0.30)
+    ]
 
     for r in rows:
         try:
@@ -154,6 +158,7 @@ def evaluate_predictions(get_price_fn):
             strategy = r.get("strategy")
             model = r.get("model", "unknown")
             entry_price = float(r.get("entry_price", 0))
+
             try:
                 pred_class = int(r.get("predicted_class", -1))
             except:
@@ -186,19 +191,19 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            if 0 <= pred_class < len(class_bins):
-                threshold = class_bins[pred_class]
-                success = gain >= threshold
+            if 0 <= pred_class < len(class_ranges):
+                low, high = class_ranges[pred_class]
+                success = gain >= low  # ✅ 범위 안이거나 초과도 성공 처리
             else:
-                threshold = 0.0
                 success = False
+                low, high = 0.0, 0.0
 
             vol = str(r.get("volatility", "False")).lower() in ["1", "true", "yes"]
             status = "v_success" if vol and success else "v_fail" if vol else "success" if success else "fail"
 
             r.update({
                 "status": status,
-                "reason": f"예측={pred_class} / 목표={threshold:.3f} / 실현={gain:.4f}",
+                "reason": f"예측={pred_class} / 구간=({low:.3f}~{high:.3f}) / 실현={gain:.4f}",
                 "return": round(gain, 5)
             })
             update_model_success(symbol, strategy, model, success)
@@ -228,7 +233,6 @@ def evaluate_predictions(get_price_fn):
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader()
         w.writerows(updated)
-
 
 strategy_stats = {}
 
