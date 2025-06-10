@@ -84,8 +84,14 @@ def train_one_model(symbol, strategy, max_epochs=20):
         if X_raw is None or y_raw is None or len(X_raw) < 5:
             print("⏭ 학습용 시퀀스 부족"); return
 
+        # ✅ y_raw 값 보정 및 num_classes 계산
+        y_raw = np.array(y_raw)
+        y_min = y_raw.min()
+        if y_min > 0:
+            y_raw -= y_min
+        num_classes = int(y_raw.max()) + 1
+
         input_size = X_raw.shape[2]
-        num_classes = int(np.max(y_raw)) + 1  # ✅ 자동 클래스 수 설정
         val_len = int(len(X_raw) * 0.2)
         if val_len == 0:
             print("⏭ 검증 데이터 부족"); return
@@ -93,28 +99,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
         X_train, X_val = X_raw[:-val_len], X_raw[-val_len:]
         y_train, y_val = y_raw[:-val_len], y_raw[-val_len:]
 
-        failure_hashes = load_existing_failure_hashes()
-        frequent_failures = get_frequent_failures(min_count=5)
-        wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
-
-        from logger import get_feature_hash_from_tensor
-        wrong_filtered = []
-        used_hashes = set()
-        for s in wrong_data:
-            if isinstance(s, (list, tuple)) and len(s) >= 2:
-                xb, yb = s[:2]
-                if not isinstance(xb, np.ndarray) or xb.shape != (window, input_size): continue
-                if not isinstance(yb, (int, np.integer)) or not (0 <= yb < num_classes): continue
-                feature_hash = get_feature_hash_from_tensor(torch.tensor(xb))
-                if feature_hash in used_hashes or feature_hash in failure_hashes or feature_hash in frequent_failures:
-                    continue
-                used_hashes.add(feature_hash)
-                wrong_filtered.append((xb, yb))
-
         from model.base_model import get_model
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
-            model = get_model(model_type, input_size).train()  # ✅ output_size 제거됨
+            model = get_model(model_type, input_size=input_size, output_size=num_classes).train()
             model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt"
+
             if os.path.exists(model_path):
                 try:
                     model.load_state_dict(torch.load(model_path, map_location=DEVICE))
@@ -125,37 +114,15 @@ def train_one_model(symbol, strategy, max_epochs=20):
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = nn.CrossEntropyLoss()
 
-            def train_failures(batch_data, repeat=6):
-                ds = TensorDataset(torch.tensor([x for x, _ in batch_data], dtype=torch.float32),
-                                   torch.tensor([y for _, y in batch_data], dtype=torch.long))
-                loader = DataLoader(ds, batch_size=16, shuffle=True)
-                for _ in range(repeat):
-                    for xb, yb in loader:
-                        model.train()
-                        logits = model(xb)
-                        loss = lossfn(logits, yb)
-                        if not torch.isfinite(loss): continue
-                        optimizer.zero_grad(); loss.backward(); optimizer.step()
-
-            train_failures([(x, y) for x, y in wrong_filtered if y >= 10], repeat=6)
-            train_failures([(x, y) for x, y in wrong_filtered if y < 10], repeat=2)
-
-            try:
-                target_class_set = set()
-                recent_pred_classes = get_recent_predicted_classes(strategy, recent_days=3)
-                fine_tune_targets = get_fine_tune_targets()
-                if recent_pred_classes:
-                    target_class_set.update([(strategy, c) for c in recent_pred_classes])
-                for _, row in fine_tune_targets.iterrows():
-                    target_class_set.add((row["strategy"], row["class"]))
-
-                train_failures([(x, y) for x, y in wrong_filtered if (strategy, y) in target_class_set], repeat=6)
-            except:
-                print("⚠️ fine-tune 대상 분석 실패 → 전체 학습 유지")
-
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
             train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
+
+            # ✅ 학습 불가능 예외 방지
+            if len(train_loader.dataset) == 0:
+                print("⏭ 학습 데이터 없음 (train_loader empty)")
+                continue
+
             for _ in range(max_epochs):
                 model.train()
                 for xb, yb in train_loader:
@@ -187,18 +154,13 @@ def train_one_model(symbol, strategy, max_epochs=20):
             save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss)
             log_training_result(symbol, strategy, model_type, acc, f1, val_loss)
 
-            try:
-                imps = compute_feature_importance(model, xb, yb, list(df_feat.drop(columns=["timestamp"]).columns))
-                save_feature_importance(imps, symbol, strategy, model_type)
-            except:
-                print("⚠️ 중요도 저장 실패 (무시됨)")
-
     except Exception as e:
         print(f"[오류] {symbol}-{strategy} → {e}")
         try:
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
 
 
 def train_all_models():
