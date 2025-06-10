@@ -53,6 +53,7 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"🗘 저장됨: {path}"); sys.stdout.flush()
 
+
 def train_one_model(symbol, strategy, max_epochs=20):
     from logger import get_fine_tune_targets, get_recent_predicted_classes
     print(f"▶ 학습 시작: {symbol}-{strategy}")
@@ -75,14 +76,30 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"[스킵] {symbol}-{strategy} → find_best_window 실패 또는 무효값")
             return
 
-        X_raw, y_raw = create_dataset(features, window=window, strategy=strategy)
-        if X_raw is None or y_raw is None or len(X_raw) == 0:
-            print(f"[스킵] {symbol}-{strategy} → create_dataset 결과 없음")
+        result = create_dataset(features, window=window, strategy=strategy)
+        if not isinstance(result, (list, tuple)) or len(result) != 2:
+            print(f"[스킵] {symbol}-{strategy} → create_dataset 실패")
             return
 
+        X_raw, y_raw = result
+        if X_raw is None or y_raw is None or len(X_raw) == 0 or len(X_raw) != len(y_raw):
+            print(f"[스킵] {symbol}-{strategy} → 데이터셋 부족")
+            return
+
+        X_raw = np.array(X_raw)
+        y_raw = np.array(y_raw)
+
         # ✅ 감쇠 클래스 필터링
-        recent_pred_classes = get_recent_predicted_classes(strategy, recent_days=3)
-        fine_tune_targets = get_fine_tune_targets()
+        try:
+            recent_pred_classes = get_recent_predicted_classes(strategy, recent_days=3)
+        except:
+            recent_pred_classes = []
+
+        try:
+            fine_tune_targets = get_fine_tune_targets()
+        except:
+            fine_tune_targets = pd.DataFrame(columns=["strategy", "class"])
+
         target_class_set = set()
         if recent_pred_classes:
             target_class_set.update([(strategy, c) for c in recent_pred_classes])
@@ -92,11 +109,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
         if target_class_set:
             X_filtered, y_filtered = [], []
             for xi, yi in zip(X_raw, y_raw):
-                if not isinstance(xi, np.ndarray) or xi.ndim != 2: continue
-                if not isinstance(yi, (int, np.integer)) or not (0 <= yi < NUM_CLASSES): continue
-                if (strategy, yi) in target_class_set:
-                    X_filtered.append(xi)
-                    y_filtered.append(yi)
+                if isinstance(xi, np.ndarray) and xi.ndim == 2 and isinstance(yi, int):
+                    if (strategy, yi) in target_class_set:
+                        X_filtered.append(xi)
+                        y_filtered.append(yi)
             if len(X_filtered) >= 5:
                 X_raw, y_raw = np.array(X_filtered), np.array(y_filtered)
                 print(f"[감쇠 적용] 학습 클래스 수: {len(set(y_raw))}개")
@@ -125,13 +141,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
         for s in wrong_data:
             if isinstance(s, (list, tuple)) and len(s) >= 2:
                 xb, yb = s[:2]
-                if not isinstance(xb, np.ndarray) or xb.shape != (window, input_size): continue
-                if not isinstance(yb, (int, np.integer)) or not (0 <= yb < NUM_CLASSES): continue
-                feature_hash = get_feature_hash_from_tensor(torch.tensor(xb))
-                if feature_hash in used_hashes or feature_hash in failure_hashes or feature_hash in frequent_failures:
-                    continue
-                used_hashes.add(feature_hash)
-                wrong_filtered.append((xb, yb))
+                if isinstance(xb, np.ndarray) and xb.shape == (window, input_size) and isinstance(yb, int):
+                    feature_hash = get_feature_hash_from_tensor(torch.tensor(xb))
+                    if feature_hash not in used_hashes and feature_hash not in failure_hashes and feature_hash not in frequent_failures:
+                        used_hashes.add(feature_hash)
+                        wrong_filtered.append((xb, yb))
 
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size).train()
@@ -183,7 +197,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 f1 = f1_score(y_val, preds, average="macro")
                 val_loss = lossfn(logits, yb).item()
 
-            # ✅ 비정상 조건 필터링
             if acc >= 1.0 and len(set(y_val)) <= 2:
                 print(f"⚠️ 오버핏 감지 → 저장 중단")
                 log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
