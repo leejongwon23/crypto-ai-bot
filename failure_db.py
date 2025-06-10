@@ -76,3 +76,26 @@ def group_failures_by_reason(limit=100):
             return [{"reason": r[0], "count": r[1]} for r in rows]
     except:
         return []
+
+# ✅ 6. 전략별 / 시간제한 해시 조회 추가 함수
+def load_failure_hashes_filtered(strategy=None, recent_hours=None):
+    try:
+        query = "SELECT hash, timestamp, strategy FROM failure_patterns"
+        filters, args = [], []
+
+        if strategy:
+            filters.append("strategy = ?")
+            args.append(strategy)
+
+        if recent_hours:
+            filters.append("timestamp >= datetime('now', ?)")
+            args.append(f"-{int(recent_hours)} hours")
+
+        if filters:
+            query += " WHERE " + " AND ".join(filters)
+
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(query, args).fetchall()
+            return set(r[0] for r in rows)
+    except:
+        return set()
