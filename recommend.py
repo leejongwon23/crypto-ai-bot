@@ -103,16 +103,12 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                 result["volatility"] = vol
                 result["return"] = result.get("expected_return", 0.0)
                 result["source"] = result.get("source", source)
-                result["predicted_class"] = (
-                    result["class"]
-                    if isinstance(result, dict) and "class" in result and isinstance(result["class"], int)
-                    else -1
-                )
+                result["predicted_class"] = result.get("class", -1)
 
                 log_prediction(
                     symbol=result.get("symbol", symbol),
                     strategy=result.get("strategy", strategy),
-                    direction=f"class-{result['predicted_class']}",
+                    direction=f"class-{result.get('class', -1)}",
                     entry_price=result.get("price", 0),
                     target_price=result.get("price", 0) * (1 + result.get("expected_return", 0)),
                     timestamp=result.get("timestamp", now_kst().isoformat()),
@@ -123,12 +119,11 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                     return_value=result.get("expected_return", 0.0),
                     volatility=vol > 0,
                     source=result.get("source", source),
-                    predicted_class=result["predicted_class"]
+                    predicted_class=result.get("class", -1)
                 )
                 log_audit(symbol, strategy, result, "예측 성공")
 
-                # 클래스 분포 저장
-                pred_class = result["predicted_class"]
+                pred_class = result.get("class", -1)
                 if pred_class != -1:
                     class_distribution.setdefault(f"{symbol}-{strategy}", []).append(pred_class)
 
@@ -153,7 +148,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
             log_audit(symbol, strategy, None, f"예측 예외: {e}")
 
-    # ✅ 예측 편향 감지 후 fine-tune 트리거
+    # ✅ 예측 클래스 편향 감지 → fine-tune
     for key, classes in class_distribution.items():
         symbol, strat = key.split("-")
         class_counts = Counter(classes)
@@ -167,6 +162,23 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                 ).start()
             except Exception as e:
                 print(f"[오류] fine-tune 실패: {e}")
+
+    # ✅ 전략별 실패율 기반 fine-tune 트리거
+    for strat in ["단기", "중기", "장기"]:
+        stat = strategy_stats.get(strat, {"success": 0, "fail": 0})
+        total = stat["success"] + stat["fail"]
+        if total < 5: continue
+        fail_ratio = stat["fail"] / total
+        if fail_ratio >= 0.6:
+            print(f"[fine-tune 트리거] {strat} → 실패율 {fail_ratio:.2%} → fine-tune 실행")
+            try:
+                threading.Thread(
+                    target=train.train_model_loop,
+                    args=(strat,),
+                    daemon=True
+                ).start()
+            except Exception as e:
+                print(f"[오류] {strat} fine-tune 실패: {e}")
 
     save_failure_count(fmap)
 
