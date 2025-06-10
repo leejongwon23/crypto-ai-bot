@@ -17,6 +17,8 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     from data.utils import get_kline_by_strategy, compute_features, create_dataset
     from model.base_model import get_model
 
+    NUM_CLASSES = 18
+
     try:
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 20:
@@ -52,7 +54,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                     continue
 
                 input_size = X.shape[2]
-                model = get_model("lstm", input_size).train()
+                model = get_model("lstm", input_size, output_size=NUM_CLASSES).train()
 
                 X_tensor = torch.tensor(X, dtype=torch.float32)
                 y_tensor = torch.tensor(y, dtype=torch.long)
@@ -95,7 +97,6 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 print(f"[오류] window={window} 평가 실패 → {e}")
                 continue
 
-        # ✅ Fallback: 모든 평가 실패시 20으로 고정
         if best_acc < 0.0 or best_window not in window_list:
             print(f"[경고] {symbol}-{strategy}: 모든 창 평가 실패 → fallback=20")
             best_window = 20
