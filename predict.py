@@ -28,22 +28,24 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             model=str(model_type or "unknown"),
             success=False, reason=reason,
             rate=0.0, timestamp=t, volatility=False, source=source,
-            predicted_class=-1
+            predicted_class=-1  # ✅ 무조건 명시
         )
-    except: pass
+    except:
+        pass
 
     result = {
         "symbol": symbol, "strategy": strategy, "success": False,
         "reason": reason, "model": str(model_type or "unknown"),
         "rate": 0.0, "class": -1, "timestamp": t, "source": source,
-        "predicted_class": -1
+        "predicted_class": -1  # ✅ 무조건 포함
     }
 
     if X_input is not None:
         try:
             feature_hash = get_feature_hash(X_input)
             insert_failure_record(result, feature_hash)
-        except: pass
+        except:
+            pass
 
     return result
 
