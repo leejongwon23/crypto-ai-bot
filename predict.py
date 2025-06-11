@@ -38,21 +38,35 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     try:
         log_prediction(
-            symbol=symbol, strategy=strategy,
-            direction="예측실패", entry_price=0, target_price=0,
+            symbol=symbol,
+            strategy=strategy,
+            direction="예측실패",
+            entry_price=0,
+            target_price=0,
             model=str(model_type or "unknown"),
-            success=False, reason=reason,
-            rate=0.0, timestamp=t, volatility=False, source=source,
-            predicted_class=-1  # ✅ 무조건 명시
+            success=False,
+            reason=reason,
+            rate=0.0,
+            timestamp=t,
+            return_value=0.0,
+            volatility=False,
+            source=source,
+            predicted_class=-1  # ✅ 반드시 포함됨
         )
     except:
         pass
 
     result = {
-        "symbol": symbol, "strategy": strategy, "success": False,
-        "reason": reason, "model": str(model_type or "unknown"),
-        "rate": 0.0, "class": -1, "timestamp": t, "source": source,
-        "predicted_class": -1  # ✅ 무조건 포함
+        "symbol": symbol,
+        "strategy": strategy,
+        "success": False,
+        "reason": reason,
+        "model": str(model_type or "unknown"),
+        "rate": 0.0,
+        "class": -1,
+        "timestamp": t,
+        "source": source,
+        "predicted_class": -1  # ✅ 반드시 포함됨
     }
 
     if X_input is not None:
