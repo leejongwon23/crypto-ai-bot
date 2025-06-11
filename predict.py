@@ -64,6 +64,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
+
 def predict(symbol, strategy, source="일반"):
     try:
         print(f"[PREDICT] {symbol}-{strategy} 시작")
@@ -157,22 +158,17 @@ def predict(symbol, strategy, source="일반"):
                     predictions.append(result)
 
             except Exception as e:
-                fail_result = failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source, X_input)
-                fail_result["predicted_class"] = -1  # ✅ 보완: 실패 결과에도 predicted_class 포함
-                predictions.append(fail_result)
+                predictions.append(
+                    failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source, X_input)
+                )
 
         if not predictions:
-            fail_result = failed_result(symbol, strategy, "unknown", "모든 모델 예측 실패", source, X_input)
-            fail_result["predicted_class"] = -1  # ✅ 보완
-            return [fail_result]
+            return [failed_result(symbol, strategy, "unknown", "모든 모델 예측 실패", source, X_input)]
 
         return predictions
 
     except Exception as e:
-        fail_result = failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)
-        fail_result["predicted_class"] = -1  # ✅ 보완
-        return [fail_result]
-
+        return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
 
 
 def adjust_probs_with_diversity(probs, recent_freq: Counter, alpha=0.1):
