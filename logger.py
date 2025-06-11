@@ -159,10 +159,20 @@ def evaluate_predictions(get_price_fn):
             model = r.get("model", "unknown")
             entry_price = float(r.get("entry_price", 0))
 
+            # ✅ predicted_class 유효성 확인
             try:
                 pred_class = int(r.get("predicted_class", -1))
             except:
                 pred_class = -1
+
+            if pred_class == -1:
+                r.update({
+                    "status": "skip_eval",
+                    "reason": "유효하지 않은 클래스",
+                    "return": 0.0
+                })
+                updated.append(r)
+                continue
 
             timestamp = pd.to_datetime(r["timestamp"], utc=True).tz_convert("Asia/Seoul")
             horizon = eval_horizon_map.get(strategy, 6)
@@ -193,7 +203,7 @@ def evaluate_predictions(get_price_fn):
 
             if 0 <= pred_class < len(class_ranges):
                 low, high = class_ranges[pred_class]
-                success = gain >= low  # ✅ 범위 안이거나 초과도 성공 처리
+                success = gain >= low
             else:
                 success = False
                 low, high = 0.0, 0.0
@@ -211,8 +221,7 @@ def evaluate_predictions(get_price_fn):
 
         except Exception as e:
             r.update({"status": "skip_eval", "reason": f"예외 발생: {e}", "return": 0.0})
-
-        updated.append(r)
+            updated.append(r)
 
     if evaluated:
         with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as f:
@@ -233,6 +242,7 @@ def evaluate_predictions(get_price_fn):
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader()
         w.writerows(updated)
+
 
 strategy_stats = {}
 
