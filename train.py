@@ -71,23 +71,21 @@ def train_one_model(symbol, strategy, max_epochs=20):
         if "timestamp" not in df_feat.columns:
             df_feat["timestamp"] = df_feat.get("datetime", pd.Timestamp.now())
         df_feat = df_feat.dropna()
-
         features = df_feat.to_dict(orient="records")
+
         window = find_best_window(symbol, strategy)
         if not isinstance(window, int) or window <= 0:
-            print(f"[스킵] {symbol}-{strategy} → find_best_window 실패 또는 무효값")
-            return
+            print(f"[스킵] {symbol}-{strategy} → find_best_window 실패 또는 무효값"); return
 
         result = create_dataset(features, window=window, strategy=strategy)
         if not result or not isinstance(result, (list, tuple)) or len(result) != 2:
-            print(f"[스킵] {symbol}-{strategy} → create_dataset 결과 없음")
-            return
+            print(f"[스킵] {symbol}-{strategy} → create_dataset 결과 없음"); return
 
         X_raw, y_raw = result
         if X_raw is None or y_raw is None or len(X_raw) < 5:
             print("⏭ 학습용 시퀀스 부족"); return
 
-        # ✅ 클래스 다양성 직접 판단
+        # ✅ 클래스 다양성 체크
         from collections import Counter
         observed = Counter(int(c) for c in y_raw)
         if len(observed) < 2:
@@ -100,8 +98,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
         input_size = X_raw.shape[2]
         num_classes = int(np.max(y_raw)) + 1
         val_len = int(len(X_raw) * 0.2)
-        if val_len < 5:
-            val_len = 5
+        if val_len < 5: val_len = 5
 
         X_bal, y_bal = balance_classes(X_raw[:-val_len], y_raw[:-val_len], min_samples=20, target_classes=range(num_classes))
         X_train, y_train = X_bal, y_bal
@@ -112,8 +109,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
         wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
 
         from logger import get_feature_hash_from_tensor
-        wrong_filtered = []
-        used_hashes = set()
+        wrong_filtered, used_hashes = [], set()
         for s in wrong_data:
             if isinstance(s, (list, tuple)) and len(s) >= 2:
                 xb, yb = s[:2]
@@ -213,6 +209,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
 
 
 def train_all_models():
