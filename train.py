@@ -56,6 +56,7 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
 def train_one_model(symbol, strategy, max_epochs=20):
     from logger import get_fine_tune_targets, get_recent_predicted_classes
     from focal_loss import FocalLoss
+
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
     try:
@@ -91,12 +92,20 @@ def train_one_model(symbol, strategy, max_epochs=20):
         val_len = int(len(X_raw) * 0.2)
         if val_len == 0:
             print("⏭ 검증 데이터 부족"); return
-        # ✅ 클래스 균형 보정 + 미등장 클래스 강제 포함
+
+        from collections import Counter
+        observed = Counter(int(c) for c in y_raw)
+        print(f"[분포] 클래스 수: {len(observed)} / 총 샘플: {len(y_raw)}")
+        for cls in sorted(observed):
+            print(f" · 클래스 {cls:2}: {observed[cls]}개 ({(observed[cls]/len(y_raw))*100:.2f}%)")
+
+        # ✅ 클래스 균형 보정 + 빠진 클래스 강제 삽입
         target_classes = set(range(NUM_CLASSES))
         observed_classes = set(int(c) for c in np.unique(y_raw))
         missing_classes = list(target_classes - observed_classes)
 
         X_bal, y_bal = balance_classes(X_raw[:-val_len], y_raw[:-val_len], min_samples=20, target_classes=range(num_classes))
+
         for cls in missing_classes:
             x_dummy = X_bal[0].copy()
             X_bal = np.vstack([X_bal, [x_dummy]])
@@ -122,6 +131,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     continue
                 used_hashes.add(feature_hash)
                 wrong_filtered.append((xb, yb))
+
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size=input_size, output_size=NUM_CLASSES).train()
             model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt"
@@ -209,6 +219,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
+
 def train_all_models():
     for strat in ["단기", "중기", "장기"]:
         for sym in SYMBOLS:
