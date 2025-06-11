@@ -85,7 +85,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
         if X_raw is None or y_raw is None or len(X_raw) < 5:
             print("⏭ 학습용 시퀀스 부족"); return
 
-        # ✅ 클래스 다양성 체크
         from collections import Counter
         observed = Counter(int(c) for c in y_raw)
         if len(observed) < 2:
@@ -132,7 +131,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     print(f"[로드 실패] {model_path} → 새로 학습")
 
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-            lossfn = FocalLoss(gamma=2, weight=None, reduction="mean")
+            lossfn = FocalLoss(gamma=2)
 
             def train_failures(batch_data, repeat=6):
                 ds = TensorDataset(torch.tensor([x for x, _ in batch_data], dtype=torch.float32),
@@ -157,82 +156,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     target_class_set.update([(strategy, c) for c in recent_pred_classes])
                 for _, row in fine_tune_targets.iterrows():
                     target_class_set.add((row["strategy"], row["class"]))
-                train_failures([(x, y) for x, y in wrong_filtered if (strategy, y) in target_class_set], repeat=6)
-            except:
-                print("⚠️ fine-tune 대상 분석 실패 → 전체 학습 유지")
-
-            train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
-                                     torch.tensor(y_train, dtype=torch.long))
-            train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
-
-            for _ in range(max_epochs):
-                model.train()
-                for xb, yb in train_loader:
-                    logits = model(xb)
-                    loss = lossfn(logits, yb)
-                    if not torch.isfinite(loss): break
-                    optimizer.zero_grad(); loss.backward(); optimizer.step()
-
-            model.eval()
-            with torch.no_grad():
-                xb = torch.tensor(X_val, dtype=torch.float32)
-                yb = torch.tensor(y_val, dtype=torch.long)
-                logits = model(xb)
-                preds = torch.argmax(logits, dim=1).numpy()
-                acc = accuracy_score(y_val, preds)
-                f1 = f1_score(y_val, preds, average="macro")
-                val_loss = lossfn(logits, yb).item()
-
-            if acc >= 1.0 and len(set(y_val)) <= 2:
-                print(f"⚠️ 오버핏 감지 → 저장 중단")
-                log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
-                continue
-            if val_loss > 2.0 or acc < 0.2:
-                print(f"⚠️ 비정상 결과 감지 → 저장 중단 (acc={acc:.2f}, f1={f1:.2f}, loss={val_loss:.2f})")
-                log_training_result(symbol, strategy, f"비정상({model_type})", acc, f1, val_loss)
-                continue
-
-            torch.save(model.state_dict(), model_path)
-            save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss)
-            log_training_result(symbol, strategy, model_type, acc, f1, val_loss)
-
-            try:
-                imps = compute_feature_importance(model, xb, yb, list(df_feat.drop(columns=["timestamp"]).columns))
-                save_feature_importance(imps, symbol, strategy, model_type)
-            except:
-                print("⚠️ 중요도 저장 실패 (무시됨)")
-
-    except Exception as e:
-        print(f"[오류] {symbol}-{strategy} → {e}")
-        try:
-            log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
-        except:
-            print("⚠️ 로그 기록 실패")
-
-            def train_failures(batch_data, repeat=6):
-                ds = TensorDataset(torch.tensor([x for x, _ in batch_data], dtype=torch.float32),
-                                   torch.tensor([y for _, y in batch_data], dtype=torch.long))
-                loader = DataLoader(ds, batch_size=16, shuffle=True)
-                for _ in range(repeat):
-                    for xb, yb in loader:
-                        model.train()
-                        logits = model(xb)
-                        loss = lossfn(logits, yb)
-                        if not torch.isfinite(loss): continue
-                        optimizer.zero_grad(); loss.backward(); optimizer.step()
-
-            train_failures([(x, y) for x, y in wrong_filtered if y >= 10], repeat=6)
-            train_failures([(x, y) for x, y in wrong_filtered if y < 10], repeat=2)
-
-            try:
-                target_class_set = set()
-                recent_pred_classes = get_recent_predicted_classes(strategy, recent_days=3)
-                fine_tune_targets = get_fine_tune_targets()
-                if recent_pred_classes:
-                    target_class_set.update([(strategy, c) for c in recent_pred_classes])
-                for _, row in fine_tune_targets.iterrows():
-                    target_class_set.add((row["strategy"], row["class"]))
-
                 train_failures([(x, y) for x, y in wrong_filtered if (strategy, y) in target_class_set], repeat=6)
             except:
                 print("⚠️ fine-tune 대상 분석 실패 → 전체 학습 유지")
@@ -284,8 +207,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
-
-
 
 def train_all_models():
     for strat in ["단기", "중기", "장기"]:
