@@ -7,6 +7,21 @@ from window_optimizer import find_best_window
 from logger import log_prediction
 from failure_db import insert_failure_record, load_existing_failure_hashes
 from logger import get_feature_hash
+from collections import Counter
+import pandas as pd
+
+def get_recent_class_frequencies(strategy: str, recent_days: int = 3):
+    try:
+        path = "/persistent/prediction_log.csv"
+        df = pd.read_csv(path, encoding="utf-8-sig")
+        df = df[df["strategy"] == strategy]
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        cutoff = pd.Timestamp.now() - pd.Timedelta(days=recent_days)
+        df = df[df["timestamp"] >= cutoff]
+        return Counter(df["predicted_class"].dropna().astype(int))
+    except:
+        return Counter()
+
 
 DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
@@ -106,6 +121,11 @@ def predict(symbol, strategy, source="일반"):
                 with torch.no_grad():
                     logits = model(torch.tensor(X, dtype=torch.float32))
                     probs = torch.softmax(logits, dim=1).cpu().numpy()
+
+                    # ✅ 클래스 반복 방지 조정
+                    recent_freq = get_recent_class_frequencies(strategy)
+                    probs[0] = adjust_probs_with_diversity(probs, recent_freq)
+
                     pred_class = int(np.argmax(probs))
                     expected_return = class_to_expected_return(pred_class)
 
@@ -132,7 +152,8 @@ def predict(symbol, strategy, source="일반"):
                     try:
                         feature_hash = get_feature_hash(X_input)
                         insert_failure_record(result, feature_hash)
-                    except: pass
+                    except:
+                        pass
 
                     predictions.append(result)
 
@@ -143,3 +164,20 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+
+
+def adjust_probs_with_diversity(probs, recent_freq: Counter, alpha=0.1):
+    """
+    probs: (1, NUM_CLASSES) softmax 결과
+    recent_freq: 최근 예측 클래스 빈도 Counter
+    alpha: 조절 강도 (0.1 = ±10% 정도 조정)
+    """
+    probs = probs.copy()
+    if probs.ndim == 2:
+        probs = probs[0]
+    total = sum(recent_freq.values()) + 1e-6
+    weights = np.array([1.0 - alpha * (recent_freq.get(i, 0) / total) for i in range(len(probs))])
+    weights = np.clip(weights, 0.7, 1.3)
+    adjusted = probs * weights
+    return adjusted / adjusted.sum()
+
