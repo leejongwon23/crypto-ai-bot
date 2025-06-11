@@ -87,30 +87,23 @@ def train_one_model(symbol, strategy, max_epochs=20):
         if X_raw is None or y_raw is None or len(X_raw) < 5:
             print("⏭ 학습용 시퀀스 부족"); return
 
-        input_size = X_raw.shape[2]
-        num_classes = int(np.max(y_raw)) + 1
-        val_len = int(len(X_raw) * 0.2)
-        if val_len == 0:
-            print("⏭ 검증 데이터 부족"); return
-
+        # ✅ 클래스 다양성 직접 판단
         from collections import Counter
         observed = Counter(int(c) for c in y_raw)
+        if len(observed) < 2:
+            print(f"⏭ 클래스 부족: {symbol}-{strategy} → {len(observed)}개"); return
+
         print(f"[분포] 클래스 수: {len(observed)} / 총 샘플: {len(y_raw)}")
         for cls in sorted(observed):
             print(f" · 클래스 {cls:2}: {observed[cls]}개 ({(observed[cls]/len(y_raw))*100:.2f}%)")
 
-        # ✅ 클래스 균형 보정 + 빠진 클래스 강제 삽입
-        target_classes = set(range(NUM_CLASSES))
-        observed_classes = set(int(c) for c in np.unique(y_raw))
-        missing_classes = list(target_classes - observed_classes)
+        input_size = X_raw.shape[2]
+        num_classes = int(np.max(y_raw)) + 1
+        val_len = int(len(X_raw) * 0.2)
+        if val_len < 5:
+            val_len = 5
 
         X_bal, y_bal = balance_classes(X_raw[:-val_len], y_raw[:-val_len], min_samples=20, target_classes=range(num_classes))
-
-        for cls in missing_classes:
-            x_dummy = X_bal[0].copy()
-            X_bal = np.vstack([X_bal, [x_dummy]])
-            y_bal = np.append(y_bal, cls)
-
         X_train, y_train = X_bal, y_bal
         X_val, y_val = X_raw[-val_len:], y_raw[-val_len:]
 
@@ -125,7 +118,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             if isinstance(s, (list, tuple)) and len(s) >= 2:
                 xb, yb = s[:2]
                 if not isinstance(xb, np.ndarray) or xb.shape != (window, input_size): continue
-                if not isinstance(yb, (int, np.integer)) or not (0 <= yb < NUM_CLASSES): continue
+                if not isinstance(yb, (int, np.integer)) or not (0 <= yb < num_classes): continue
                 feature_hash = get_feature_hash_from_tensor(torch.tensor(xb))
                 if feature_hash in used_hashes or feature_hash in failure_hashes or feature_hash in frequent_failures:
                     continue
@@ -168,6 +161,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     target_class_set.update([(strategy, c) for c in recent_pred_classes])
                 for _, row in fine_tune_targets.iterrows():
                     target_class_set.add((row["strategy"], row["class"]))
+
                 train_failures([(x, y) for x, y in wrong_filtered if (strategy, y) in target_class_set], repeat=6)
             except:
                 print("⚠️ fine-tune 대상 분석 실패 → 전체 학습 유지")
