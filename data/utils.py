@@ -30,24 +30,6 @@ STRATEGY_CONFIG = {
     "장기": {"interval": "D", "limit": 1000}     # 1일봉, 최대 1000개
 }
 
-DEFAULT_MIN_GAIN = {
-    "단기": 0.01,
-    "중기": 0.03,
-    "장기": 0.05
-}
-
-def get_min_gain(symbol: str, strategy: str):
-    try:
-        df = get_kline_by_strategy(symbol, strategy)
-        if df is None or len(df) < 10:
-            return DEFAULT_MIN_GAIN[strategy]
-        df = df.tail(7)
-        pct_changes = df["close"].pct_change().abs()
-        avg_volatility = pct_changes.mean()
-        return max(round(avg_volatility, 4), DEFAULT_MIN_GAIN[strategy])
-    except:
-        return DEFAULT_MIN_GAIN[strategy]
-
 def get_btc_dominance():
     global BTC_DOMINANCE_CACHE
     now = time.time()
