@@ -20,14 +20,16 @@ def format_message(data):
     strategy = data.get("strategy", "전략")
     symbol = data.get("symbol", "종목")
     success_rate = safe_float(data.get("success_rate"), 0.0)
-    rate = safe_float(data.get("rate"), 0.0)
-    target = safe_float(data.get("target"), 0.0)
+    rate = safe_float(data.get("rate"), 0.0)  # ✅ expected return (0.125 등)
     reason = str(data.get("reason", "-")).strip()
     score = data.get("score", None)
     reversed_signal = data.get("reversed", False)
     volatility = str(data.get("volatility", "False")).lower() in ["1", "true", "yes"]
 
+    # ✅ 정확한 목표가 재계산
+    target = price * (1 + rate) if direction == "롱" else price * (1 - rate)
     stop_loss = price * (1 - 0.02) if direction == "롱" else price * (1 + 0.02)
+
     rate_pct = abs(rate) * 100
     success_rate_pct = success_rate * 100
     dir_str = "상승" if direction == "롱" else "하락"
@@ -43,6 +45,12 @@ def format_message(data):
         f"신호 방향: {dir_str}\n"
         f"최근 전략 성공률: {success_rate_pct:.2f}%"
     )
+
+    if isinstance(score, (float, int)) and not math.isnan(score):
+        message += f"\n스코어: {score:.5f}"
+
+    message += f"\n추천 사유: {reason}\n\n(기준시각: {now_kst()} KST)"
+    return message
 
     if isinstance(score, (float, int)) and not math.isnan(score):
         message += f"\n스코어: {score:.5f}"
