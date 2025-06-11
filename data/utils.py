@@ -83,7 +83,6 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[오류] features[0] 키 확인 실패 → {e}")
         return np.array([]), np.array([])
 
-    # ✅ 실용적 구간 기준: 0% 수익률 구간 제외, ±1% 미만도 제외
     class_ranges = [
         (-0.30, -0.15), (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05),
         (-0.05, -0.03), (-0.03, -0.015), (-0.015, -0.01),
@@ -108,7 +107,7 @@ def create_dataset(features, window=20, strategy="단기"):
                 f for f in features[i + 1:]
                 if f.get("timestamp") and (f["timestamp"] - entry_time).total_seconds() / 60 <= lookahead_minutes
             ]
-            if len(seq) != window or len(future) == 0:
+            if len(seq) != window or len(future) < 3:  # 완화
                 continue
 
             final_price = float(future[-1].get("close", entry_price))
@@ -116,14 +115,13 @@ def create_dataset(features, window=20, strategy="단기"):
             if not np.isfinite(gain) or abs(gain) > 5:
                 continue
 
-            # ✅ 수익률이 클래스 범위 안에 속할 때만 라벨 부여
             cls = -1
             for j, (low, high) in enumerate(class_ranges):
                 if low <= gain < high:
                     cls = j
                     break
             if cls == -1:
-                continue  # 클래스 범위 밖이면 제외
+                continue
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
             if any(len(row) != len(columns) for row in sample):
@@ -133,25 +131,9 @@ def create_dataset(features, window=20, strategy="단기"):
             y.append(cls)
 
         except Exception as e:
-            print(f"[예외] 샘플 생성 실패 (i={i}) → {type(e).__name__}: {e}")
             continue
 
-    if not X or not y:
-        print(f"[결과 없음] 샘플 부족 → X={len(X)}, y={len(y)}")
-        return np.array([]), np.array([])
-
-    if len(set(y)) < 2:
-        print(f"[스킵] 클래스 다양성 부족 → 클래스 수={len(set(y))}")
-        return np.array([]), np.array([])
-
-    dist = Counter(y)
-    total = len(y)
-    print(f"[분포] 클래스 수: {len(dist)} / 총 샘플: {total}")
-    for k in sorted(dist):
-        print(f" · 클래스 {k:2d}: {dist[k]}개 ({dist[k]/total:.2%})")
-
     return np.array(X), np.array(y)
-
 
     
 def get_kline_by_strategy(symbol: str, strategy: str):
