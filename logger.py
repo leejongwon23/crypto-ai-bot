@@ -214,7 +214,7 @@ def evaluate_predictions(get_price_fn):
 
             if 0 <= pred_class < len(class_ranges):
                 low, high = class_ranges[pred_class]
-                success = gain >= low
+                success = gain >= low and abs(gain) >= 0.01
             else:
                 success = False
                 low, high = 0.0, 0.0
