@@ -66,6 +66,12 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     now = timestamp or now_kst().isoformat()
     mname = str(model or "unknown")
     status = "v_pending" if volatility and success else "v_failed" if volatility and not success else "pending" if success else "failed"
+
+    try:
+        pred_class_val = int(predicted_class) if isinstance(predicted_class, (int, float)) else -1
+    except:
+        pred_class_val = -1
+
     row = {
         "timestamp": now,
         "symbol": str(symbol or "UNKNOWN"),
@@ -80,15 +86,20 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "return": float(return_value if return_value is not None else rate),
         "volatility": bool(volatility),
         "source": source,
-        "predicted_class": int(predicted_class) if predicted_class is not None else -1
+        "predicted_class": pred_class_val
     }
+
     log_audit(row["symbol"], row["strategy"], "예측성공" if success else "예측실패", row["reason"])
+
     try:
         with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=row.keys())
-            if f.tell() == 0: w.writeheader()
+            if f.tell() == 0:
+                w.writeheader()
             w.writerow(row)
-    except: pass
+    except:
+        pass
+
 
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     row = {
