@@ -63,41 +63,55 @@ def train_one_model(symbol, strategy, max_epochs=20):
     try:
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
-            print("⏭ 데이터 없음"); return
+            print("⛔ 중단: get_kline_by_strategy() → 데이터 없음")
+            return
 
         df_feat = compute_features(symbol, df, strategy)
         if df_feat is None or len(df_feat) < 30:
-            print("⏭ 피처 부족"); return
+            print(f"⛔ 중단: compute_features 결과 부족 → {len(df_feat)}개")
+            return
 
         if "timestamp" not in df_feat.columns:
+            print("⚠️ timestamp 없음 → datetime으로 대체")
             df_feat["timestamp"] = df_feat.get("datetime", pd.Timestamp.now())
         df_feat = df_feat.dropna()
         features = df_feat.to_dict(orient="records")
 
         window = find_best_window(symbol, strategy)
         if not isinstance(window, int) or window <= 0:
-            print(f"[스킵] {symbol}-{strategy} → find_best_window 실패 또는 무효값"); return
+            print(f"⛔ 중단: find_best_window 실패 → {window}")
+            return
 
         result = create_dataset(features, window=window, strategy=strategy)
         if not result or not isinstance(result, (list, tuple)) or len(result) != 2:
-            print(f"[스킵] {symbol}-{strategy} → create_dataset 결과 없음"); return
+            print("⛔ 중단: create_dataset() 결과 형식 오류")
+            return
 
         X_raw, y_raw = result
-        if X_raw is None or y_raw is None or len(X_raw) < 5:
-            print("⏭ 학습용 시퀀스 부족"); return
+        if X_raw is None or y_raw is None:
+            print("⛔ 중단: create_dataset() → None 반환")
+            return
+        if len(X_raw) < 5:
+            print(f"⛔ 중단: 학습 샘플 부족 → X_raw 개수: {len(X_raw)}")
+            return
 
         observed = Counter(int(c) for c in y_raw if c >= 0)
         if len(observed) < 2:
-            print(f"⏭ 클래스 부족: {symbol}-{strategy} → {len(observed)}개"); return
+            print(f"⛔ 중단: 클래스 부족 → {len(observed)}개")
+            return
 
-        print(f"[분포] 클래스 수: {len(observed)} / 총 샘플: {len(y_raw)}")
-        for cls in sorted(observed):
-            print(f" · 클래스 {cls:2}: {observed[cls]}개 ({(observed[cls]/len(y_raw))*100:.2f}%)")
+        # ✅ 사전 진단 로그 출력
+        print(f"[진단] 피처 수: {len(df_feat)}")
+        print(f"[진단] 학습 샘플 수: {len(X_raw)}")
+        print(f"[진단] 클래스 수: {len(set(y_raw))}")
+        print(f"[진단] 시퀀스 크기: {X_raw.shape}")
+        print(f"[진단] 입력 피처 수: {X_raw.shape[2]} / 클래스 수: 17")
 
         input_size = X_raw.shape[2]
-        num_classes = 17  # ✅ 클래스 개수 고정
+        num_classes = 17
         val_len = int(len(X_raw) * 0.2)
-        if val_len < 5: val_len = 5
+        if val_len < 5:
+            val_len = 5
 
         X_bal, y_bal = balance_classes(X_raw[:-val_len], y_raw[:-val_len], min_samples=20, target_classes=range(num_classes))
         X_train, y_train = X_bal, y_bal
@@ -112,8 +126,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
         for s in wrong_data:
             if isinstance(s, (list, tuple)) and len(s) >= 2:
                 xb, yb = s[:2]
-                if not isinstance(xb, np.ndarray) or xb.shape != (window, input_size): continue
-                if not isinstance(yb, (int, np.integer)) or not (0 <= yb < num_classes): continue
+                if not isinstance(xb, np.ndarray) or xb.shape != (window, input_size):
+                    print("[스킵] wrong_data → 시퀀스 크기 불일치"); continue
+                if not isinstance(yb, (int, np.integer)) or not (0 <= yb < num_classes):
+                    print("[스킵] wrong_data → 잘못된 클래스 값"); continue
                 feature_hash = get_feature_hash_from_tensor(torch.tensor(xb))
                 if feature_hash in used_hashes or feature_hash in failure_hashes or feature_hash in frequent_failures:
                     continue
