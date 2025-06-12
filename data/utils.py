@@ -51,7 +51,6 @@ import numpy as np
 def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
     import pandas as pd
-    from collections import Counter
 
     X, y = [], []
 
@@ -75,7 +74,7 @@ def create_dataset(features, window=20, strategy="단기"):
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
 
-    for i in range(window, len(features)):
+    for i in range(window, len(features) - 3):
         try:
             seq = features[i - window:i]
             base = features[i]
@@ -89,19 +88,15 @@ def create_dataset(features, window=20, strategy="단기"):
                 f for f in features[i + 1:]
                 if f.get("timestamp") and (f["timestamp"] - entry_time).total_seconds() / 60 <= lookahead_minutes
             ]
-            if len(seq) != window or len(future) < 3:  # 완화
+            if len(seq) != window or len(future) < 1:
                 continue
 
-            final_price = float(future[-1].get("close", entry_price))
-            gain = (final_price - entry_price) / (entry_price + 1e-6)
+            max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
+            gain = (max_future_price - entry_price) / (entry_price + 1e-6)
             if not np.isfinite(gain) or abs(gain) > 5:
                 continue
 
-            cls = -1
-            for j, (low, high) in enumerate(class_ranges):
-                if low <= gain < high:
-                    cls = j
-                    break
+            cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), -1)
             if cls == -1:
                 continue
 
@@ -112,8 +107,13 @@ def create_dataset(features, window=20, strategy="단기"):
             X.append(sample)
             y.append(cls)
 
-        except Exception as e:
+        except Exception:
             continue
+
+    if len(X) < 5:
+        print(f"[경고] 생성된 학습 샘플 부족 → {len(X)}개")
+    else:
+        print(f"[확인] 학습 샘플 생성 완료 → {len(X)}개")
 
     return np.array(X), np.array(y)
 
