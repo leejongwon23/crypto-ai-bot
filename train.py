@@ -183,17 +183,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 f1 = f1_score(y_val, preds, average="macro")
                 val_loss = lossfn(logits, yb).item()
 
-                # ✅ 평가 전 predicted_class를 로그에 반드시 남김
-                predicted_class = int(preds[0]) if len(preds) > 0 else -1
-                log_prediction(
-                    symbol=symbol,
-                    strategy=strategy,
-                    model=model_type,
-                    predicted_class=predicted_class,
-                    success=True,
-                    rate=0.0  # 평가용 예시
-                )
-
             if acc >= 1.0 and len(set(y_val)) <= 2:
                 print(f"⚠️ 오버핏 감지 → 저장 중단")
                 log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
@@ -202,6 +191,16 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 print(f"⚠️ 비정상 결과 감지 → 저장 중단 (acc={acc:.2f}, f1={f1:.2f}, loss={val_loss:.2f})")
                 log_training_result(symbol, strategy, f"비정상({model_type})", acc, f1, val_loss)
                 continue
+
+            predicted_class = int(preds[0]) if len(preds) > 0 else -1
+            log_prediction(
+                symbol=symbol,
+                strategy=strategy,
+                model=model_type,
+                predicted_class=predicted_class,
+                success=True,
+                rate=0.0
+            )
 
             torch.save(model.state_dict(), model_path)
             save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss)
@@ -223,6 +222,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
 
 
 def train_all_models():
