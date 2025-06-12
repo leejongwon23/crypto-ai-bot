@@ -25,9 +25,9 @@ SYMBOLS = [
 ]
 
 STRATEGY_CONFIG = {
-    "단기": {"interval": "240", "limit": 1000},  # 4시간봉, 최대 1000개
-    "중기": {"interval": "D", "limit": 1000},    # 1일봉, 최대 1000개
-    "장기": {"interval": "D", "limit": 1000}     # 1일봉, 최대 1000개
+    "단기": {"interval": "240", "limit": 600},  # 4시간봉, 최대 1000개
+    "중기": {"interval": "D", "limit": 600},    # 1일봉, 최대 1000개
+    "장기": {"interval": "D", "limit": 600}     # 1일봉, 최대 1000개
 }
 
 def get_btc_dominance():
@@ -115,7 +115,7 @@ def create_dataset(features, window=20, strategy="단기"):
     else:
         print(f"[확인] 학습 샘플 생성 완료 → {len(X)}개")
 
-    return np.array(X), np.array(y)
+    return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
 
     
 def get_kline_by_strategy(symbol: str, strategy: str):
