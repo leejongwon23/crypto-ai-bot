@@ -54,6 +54,7 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
     print(f"🗘 저장됨: {path}"); sys.stdout.flush()
 
 def train_one_model(symbol, strategy, max_epochs=20):
+    import gc
     from logger import get_fine_tune_targets, get_recent_predicted_classes
     from focal_loss import FocalLoss
 
@@ -201,12 +202,18 @@ def train_one_model(symbol, strategy, max_epochs=20):
             except:
                 print("⚠️ 중요도 저장 실패 (무시됨)")
 
+            # ✅ 메모리 해제
+            del model, xb, yb, logits
+            torch.cuda.empty_cache()
+            gc.collect()
+
     except Exception as e:
         print(f"[오류] {symbol}-{strategy} → {e}")
         try:
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
 
 def train_all_models():
     for strat in ["단기", "중기", "장기"]:
