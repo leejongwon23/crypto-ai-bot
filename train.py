@@ -55,7 +55,7 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
 
 def train_one_model(symbol, strategy, max_epochs=20):
     import gc
-    from logger import get_fine_tune_targets, get_recent_predicted_classes
+    from logger import get_fine_tune_targets, get_recent_predicted_classes, log_prediction
     from focal_loss import FocalLoss
 
     print(f"▶ 학습 시작: {symbol}-{strategy}")
@@ -183,6 +183,17 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 f1 = f1_score(y_val, preds, average="macro")
                 val_loss = lossfn(logits, yb).item()
 
+                # ✅ 평가 전 predicted_class를 로그에 반드시 남김
+                predicted_class = int(preds[0]) if len(preds) > 0 else -1
+                log_prediction(
+                    symbol=symbol,
+                    strategy=strategy,
+                    model=model_type,
+                    predicted_class=predicted_class,
+                    success=True,
+                    rate=0.0  # 평가용 예시
+                )
+
             if acc >= 1.0 and len(set(y_val)) <= 2:
                 print(f"⚠️ 오버핏 감지 → 저장 중단")
                 log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
@@ -202,7 +213,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             except:
                 print("⚠️ 중요도 저장 실패 (무시됨)")
 
-            # ✅ 메모리 해제
             del model, xb, yb, logits
             torch.cuda.empty_cache()
             gc.collect()
