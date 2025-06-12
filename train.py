@@ -86,8 +86,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
         if X_raw is None or y_raw is None or len(X_raw) < 5:
             print("⏭ 학습용 시퀀스 부족"); return
 
-        from collections import Counter
-        observed = Counter(int(c) for c in y_raw)
+        observed = Counter(int(c) for c in y_raw if c >= 0)
         if len(observed) < 2:
             print(f"⏭ 클래스 부족: {symbol}-{strategy} → {len(observed)}개"); return
 
@@ -96,7 +95,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f" · 클래스 {cls:2}: {observed[cls]}개 ({(observed[cls]/len(y_raw))*100:.2f}%)")
 
         input_size = X_raw.shape[2]
-        num_classes = int(np.max(y_raw)) + 1
+        num_classes = 17  # ✅ 클래스 개수 고정
         val_len = int(len(X_raw) * 0.2)
         if val_len < 5: val_len = 5
 
@@ -146,8 +145,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         if not torch.isfinite(loss): continue
                         optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            train_failures([(x, y) for x, y in wrong_filtered if y >= 10], repeat=6)
-            train_failures([(x, y) for x, y in wrong_filtered if y < 10], repeat=2)
+            train_failures([(x, y) for x, y in wrong_filtered if y >= 8], repeat=6)
+            train_failures([(x, y) for x, y in wrong_filtered if y < 8], repeat=2)
 
             try:
                 target_class_set = set()
@@ -222,7 +221,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
-
 
 
 def train_all_models():
