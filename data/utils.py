@@ -63,14 +63,14 @@ def create_dataset(features, window=20, strategy="단기"):
         return np.array([]), np.array([])
 
     class_ranges = [
-    (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
-    (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
-    (-0.03, -0.01), (-0.01,  0.01),  # 중립 구간 포함
-    ( 0.01,  0.03), ( 0.03,  0.05), ( 0.05,  0.07), ( 0.07,  0.10),
-    ( 0.10,  0.15), ( 0.15,  0.20), ( 0.20,  0.30), ( 0.30,  0.50),
-    ( 0.50,  1.00), ( 1.00,  2.00), ( 2.00,  5.00)  # 초과수익 구간
-]
-
+        (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
+        (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
+        (-0.03, -0.01), (-0.01,  0.01),  # 중립 구간 포함
+        ( 0.01,  0.03), ( 0.03,  0.05), ( 0.05,  0.07), ( 0.07,  0.10),
+        ( 0.10,  0.15), ( 0.15,  0.20), ( 0.20,  0.30), ( 0.30,  0.50),
+        ( 0.50,  1.00), ( 1.00,  2.00), ( 2.00,  5.00)
+    ]
+    max_cls = len(class_ranges)  # ✅ NUM_CLASSES 기준 = 21
 
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
@@ -83,50 +83,33 @@ def create_dataset(features, window=20, strategy="단기"):
             entry_price = float(base.get("close", 0.0))
 
             if not entry_time or entry_price <= 0:
-                print(f"[스킵] ❗ timestamp 또는 가격 문제 → time={entry_time}, price={entry_price}, i={i}")
                 continue
 
             future = [f for f in features[i + 1:]
                       if f.get("timestamp") and (f["timestamp"] - entry_time).total_seconds() / 60 <= lookahead_minutes]
 
             if len(seq) != window or len(future) < 1:
-                print(f"[스킵] ⛔ 시퀀스 또는 future 부족 → len(seq)={len(seq)}, len(future)={len(future)}, i={i}")
                 continue
 
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
             gain = (max_future_price - entry_price) / (entry_price + 1e-6)
 
             if not np.isfinite(gain) or abs(gain) > 5:
-                print(f"[스킵] ⚠️ gain 비정상: {gain:.3f} → i={i}")
                 continue
 
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), -1)
-            if cls == -1:
-                print(f"[스킵] 🔻 gain={gain:.4f} → 클래스 없음 → i={i}")
-                continue
+            if cls == -1 or cls >= max_cls:
+                continue  # ✅ 21개 넘는 클래스 제거
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
             if any(len(row) != len(columns) for row in sample):
-                print(f"[스킵] 🧩 feature row 불일치 → i={i}")
                 continue
 
             X.append(sample)
             y.append(cls)
 
-        except Exception as e:
-            print(f"[예외 발생] ❌ {e} → i={i}")
+        except Exception:
             continue
-
-    # ✅ 요약 로그 출력
-    print(f"[진단] 피처 수: {len(features)}")
-    print(f"[진단] 샘플 수: {len(X)} / 클래스 수: {len(set(y))}")
-    if X:
-        print(f"[진단] 시퀀스 크기: {np.array(X).shape}")
-
-    if len(X) < 1:
-        print(f"[⚠️ 경고] 생성된 학습 샘플 없음")
-    else:
-        print(f"[✅ 완료] 학습 샘플 생성 완료 → {len(X)}개")
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
 
