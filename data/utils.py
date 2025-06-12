@@ -56,7 +56,12 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[스킵] features 부족 → len={len(features)}")
         return np.array([]), np.array([])
 
-    columns = [c for c in features[0].keys() if c != "timestamp"]
+    try:
+        columns = [c for c in features[0].keys() if c != "timestamp"]
+    except Exception as e:
+        print(f"[오류] features[0] 키 확인 실패 → {e}")
+        return np.array([]), np.array([])
+
     class_ranges = [
         (-0.30, -0.15), (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05),
         (-0.05, -0.03), (-0.03, -0.015), (-0.015, -0.01),
@@ -73,29 +78,44 @@ def create_dataset(features, window=20, strategy="단기"):
             base = features[i]
             entry_time = base.get("timestamp")
             entry_price = float(base.get("close", 0.0))
-            if not entry_time or entry_price <= 0: continue
+            if not entry_time or entry_price <= 0:
+                print(f"[스킵] timestamp 없음 또는 가격 0 이하 → i={i}")
+                continue
 
             future = [f for f in features[i + 1:]
                       if f.get("timestamp") and (f["timestamp"] - entry_time).total_seconds() / 60 <= lookahead_minutes]
-            if len(seq) != window or len(future) < 1: continue
+            if len(seq) != window or len(future) < 1:
+                print(f"[스킵] 시퀀스 또는 future 부족 → i={i}")
+                continue
 
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
             gain = (max_future_price - entry_price) / (entry_price + 1e-6)
-            if not np.isfinite(gain) or abs(gain) > 5: continue
+            if not np.isfinite(gain) or abs(gain) > 5:
+                print(f"[스킵] gain 비정상: {gain:.3f} → i={i}")
+                continue
 
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), -1)
-            if cls == -1: continue
+            if cls == -1:
+                print(f"[스킵] gain {gain:.4f} → 클래스 없음 → i={i}")
+                continue
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
-            if any(len(row) != len(columns) for row in sample): continue
+            if any(len(row) != len(columns) for row in sample):
+                print(f"[스킵] feature row 불일치 → i={i}")
+                continue
 
             X.append(sample)
             y.append(cls)
 
         except Exception as e:
+            print(f"[예외 발생] {e} → i={i}")
             continue
 
-    print(f"[확인] 학습 샘플 생성 완료 → {len(X)}개")
+    if len(X) < 1:
+        print(f"[경고] 생성된 학습 샘플 없음")
+    else:
+        print(f"[확인] 학습 샘플 생성 완료 → {len(X)}개")
+
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
 
 
