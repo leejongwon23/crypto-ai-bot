@@ -172,8 +172,12 @@ def evaluate_predictions(get_price_fn):
             model = r.get("model", "unknown")
             entry_price = float(r.get("entry_price", 0))
 
+            # ✅ predicted_class 유효성 검증 강화
             try:
-                pred_class = int(r.get("predicted_class", -1))
+                raw_val = r.get("predicted_class", "")
+                if raw_val == "" or str(raw_val).lower() in ["nan", "none"]:
+                    raise ValueError("빈 predicted_class")
+                pred_class = int(float(raw_val))
             except:
                 pred_class = -1
 
