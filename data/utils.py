@@ -184,32 +184,36 @@ def get_realtime_prices():
 def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFrame:
     df = df.copy()
 
-    # ✅ timestamp 복원 보장
+    # ✅ timestamp 보장
     if "datetime" in df.columns:
         df["timestamp"] = df["datetime"]
     elif "timestamp" not in df.columns:
-        print(f"[경고] {symbol}-{strategy}: timestamp 복원 불가 — datetime 없음")
         df["timestamp"] = pd.to_datetime("now")
 
-    # ✅ 공통 기본 feature
-    df['ma5'] = df['close'].rolling(window=5).mean()
+    # ✅ 신뢰성 높은 기본 지표
     df['ma20'] = df['close'].rolling(window=20).mean()
     delta = df['close'].diff()
     gain = delta.clip(lower=0).rolling(window=14).mean()
     loss = -delta.clip(upper=0).rolling(window=14).mean()
     rs = gain / (loss + 1e-6)
     df['rsi'] = 100 - (100 / (1 + rs))
+
     ema_fast = df['close'].ewm(span=12, adjust=False).mean()
     ema_slow = df['close'].ewm(span=26, adjust=False).mean()
     df['macd'] = ema_fast - ema_slow
-    bb_ma = df['close'].rolling(window=20).mean()
-    bb_std = df['close'].rolling(window=20).std()
-    df['bollinger'] = (df['close'] - bb_ma) / (2 * bb_std)
+
     df['volatility'] = df['close'].pct_change().rolling(window=20).std()
-    df['ema10'] = df['close'].ewm(span=10, adjust=False).mean()
-    df['trend_score'] = df['ema10'].pct_change()
-    df['current_vs_ma20'] = (df['close'] / (df['ma20'] + 1e-6)) - 1
-    df['volume_delta'] = df['volume'].diff()
+    df['trend_score'] = df['close'].pct_change(periods=3)
+
+    # ✅ Stochastic RSI
+    min_rsi = df['rsi'].rolling(14).min()
+    max_rsi = df['rsi'].rolling(14).max()
+    df['stoch_rsi'] = (df['rsi'] - min_rsi) / (max_rsi - min_rsi + 1e-6)
+
+    # ✅ CCI
+    tp = (df['high'] + df['low'] + df['close']) / 3
+    cci = (tp - tp.rolling(20).mean()) / (0.015 * tp.rolling(20).std())
+    df['cci'] = cci
 
     # ✅ OBV
     obv = [0]
@@ -222,75 +226,39 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
             obv.append(obv[-1])
     df['obv'] = obv
 
-    # ✅ CCI, Stoch RSI
-    tp = (df['high'] + df['low'] + df['close']) / 3
-    cci = (tp - tp.rolling(20).mean()) / (0.015 * tp.rolling(20).std())
-    df['cci'] = cci
-    min_rsi = df['rsi'].rolling(14).min()
-    max_rsi = df['rsi'].rolling(14).max()
-    df['stoch_rsi'] = (df['rsi'] - min_rsi) / (max_rsi - min_rsi + 1e-6)
+    # ✅ 볼린저 밴드
+    bb_ma = df['close'].rolling(window=20).mean()
+    bb_std = df['close'].rolling(window=20).std()
+    df['bollinger'] = (df['close'] - bb_ma) / (2 * bb_std + 1e-6)
 
-    # ✅ BTC 도미넌스
-    btc_dom = get_btc_dominance()
-    df['btc_dominance'] = btc_dom
-    df['btc_dominance_diff'] = btc_dom - df['btc_dominance'].rolling(3).mean()
-
-    # ✅ 캔들 및 거래량 특성
-    df['candle_range'] = df['high'] - df['low']
-    df['candle_body'] = (df['close'] - df['open']).abs()
-    df['candle_body_ratio'] = df['candle_body'] / (df['candle_range'] + 1e-6)
-    df['candle_upper_shadow_ratio'] = (df['high'] - df[['open', 'close']].max(axis=1)) / (df['candle_range'] + 1e-6)
-    df['candle_lower_shadow_ratio'] = (df[['open', 'close']].min(axis=1) - df['low']) / (df['candle_range'] + 1e-6)
-    df['range_ratio'] = df['candle_range'] / (df['close'] + 1e-6)
-    df['volume_ratio'] = df['volume'] / (df['volume'].rolling(20).mean() + 1e-6)
-
-    # ✅ 중기: 추세 지표 (EMA cross)
+    # ✅ 전략별 특화 피처
     if strategy == "중기":
         df['ema5'] = df['close'].ewm(span=5, adjust=False).mean()
         df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
         df['ema_cross'] = df['ema5'] - df['ema20']
 
-        plus_dm = df['high'].diff()
-        minus_dm = df['low'].diff()
-        tr = (df['high'] - df['low']).rolling(14).mean()
-        dx = (abs(plus_dm - minus_dm) / (tr + 1e-6)) * 100
-        df['adx'] = dx.rolling(14).mean()
-        highest = df['high'].rolling(14).max()
-        lowest = df['low'].rolling(14).min()
-        df['willr'] = (highest - df['close']) / (highest - lowest + 1e-6) * -100
-
-    # ✅ 장기: 거래량 기반 특성
-    if strategy == "장기":
+    elif strategy == "장기":
         df['volume_cumsum'] = df['volume'].cumsum()
-        df['volume_cumsum_delta'] = df['volume_cumsum'].diff()
-        df['volume_increase_ratio'] = df['volume'] / (df['volume'].shift(1) + 1e-6)
-
+        df['roc'] = df['close'].pct_change(periods=12)
         mf = df["close"] * df["volume"]
         pos_mf = mf.where(df["close"] > df["close"].shift(), 0)
         neg_mf = mf.where(df["close"] < df["close"].shift(), 0)
         mf_ratio = pos_mf.rolling(14).sum() / (neg_mf.rolling(14).sum() + 1e-6)
         df["mfi"] = 100 - (100 / (1 + mf_ratio))
-        df["roc"] = df["close"].pct_change(periods=12)
 
-    # ✅ 구성
+    # ✅ 피처 선택
     base = [
-        "timestamp", "close", "volume", "ma5", "ma20", "rsi", "macd", "bollinger", "volatility",
-        "trend_score", "current_vs_ma20", "volume_delta", "obv", "cci", "stoch_rsi",
-        "btc_dominance", "btc_dominance_diff",
-        "candle_body_ratio", "candle_upper_shadow_ratio", "candle_lower_shadow_ratio",
-        "range_ratio", "volume_ratio"
+        "timestamp", "close", "volume", "ma20", "rsi", "macd", "bollinger",
+        "volatility", "trend_score", "stoch_rsi", "cci", "obv"
     ]
-    mid_extra = ["ema_cross", "adx", "willr"]
-    long_extra = ["volume_cumsum", "volume_cumsum_delta", "volume_increase_ratio", "mfi", "roc"]
+    mid_extra = ["ema_cross"]
+    long_extra = ["volume_cumsum", "roc", "mfi"]
 
-    extra = []
     if strategy == "중기":
-        extra = mid_extra
+        base += mid_extra
     elif strategy == "장기":
-        extra = long_extra
+        base += long_extra
 
-    df = df[base + extra]
-    df = df.dropna()
-
+    df = df[base].dropna()
     print(f"[완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     return df
