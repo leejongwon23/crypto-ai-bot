@@ -17,7 +17,7 @@ DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 os.makedirs(MODEL_DIR, exist_ok=True)
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-NUM_CLASSES = 18
+NUM_CLASSES = 21  # 🔄 수정됨
 STRATEGY_WRONG_REP = {"단기": 4, "중기": 6, "장기": 8}
 
 def get_feature_hash_from_tensor(x):
@@ -91,6 +91,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
         if X_raw is None or y_raw is None:
             print("⛔ 중단: create_dataset() → None 반환")
             return
+
+        # ✅ 클래스 범위 초과 제거
+        y_raw = np.array([y for y in y_raw if 0 <= y < NUM_CLASSES])
+        X_raw = X_raw[:len(y_raw)]
+
         if len(X_raw) < 5:
             print(f"⛔ 중단: 학습 샘플 부족 → X_raw 개수: {len(X_raw)}")
             return
@@ -100,20 +105,19 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"⛔ 중단: 클래스 부족 → {len(observed)}개")
             return
 
-        # ✅ 사전 진단 로그 출력
         print(f"[진단] 피처 수: {len(df_feat)}")
         print(f"[진단] 학습 샘플 수: {len(X_raw)}")
         print(f"[진단] 클래스 수: {len(set(y_raw))}")
         print(f"[진단] 시퀀스 크기: {X_raw.shape}")
-        print(f"[진단] 입력 피처 수: {X_raw.shape[2]} / 클래스 수: 17")
+        print(f"[진단] 입력 피처 수: {X_raw.shape[2]} / 클래스 수: {NUM_CLASSES}")
 
         input_size = X_raw.shape[2]
-        num_classes = 17
+        num_classes = NUM_CLASSES
         val_len = int(len(X_raw) * 0.2)
         if val_len < 5:
             val_len = 5
 
-        X_bal, y_bal = balance_classes(X_raw[:-val_len], y_raw[:-val_len], min_samples=20, target_classes=range(num_classes))
+        X_bal, y_bal = balance_classes(X_raw[:-val_len], y_raw[:-val_len], min_samples=20, target_classes=range(NUM_CLASSES))
         X_train, y_train = X_bal, y_bal
         X_val, y_val = X_raw[-val_len:], y_raw[-val_len:]
 
@@ -127,9 +131,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
             if isinstance(s, (list, tuple)) and len(s) >= 2:
                 xb, yb = s[:2]
                 if not isinstance(xb, np.ndarray) or xb.shape != (window, input_size):
-                    print("[스킵] wrong_data → 시퀀스 크기 불일치"); continue
-                if not isinstance(yb, (int, np.integer)) or not (0 <= yb < num_classes):
-                    print("[스킵] wrong_data → 잘못된 클래스 값"); continue
+                    continue
+                if not isinstance(yb, (int, np.integer)) or not (0 <= yb < NUM_CLASSES):
+                    continue
                 feature_hash = get_feature_hash_from_tensor(torch.tensor(xb))
                 if feature_hash in used_hashes or feature_hash in failure_hashes or feature_hash in frequent_failures:
                     continue
@@ -137,7 +141,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 wrong_filtered.append((xb, yb))
 
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
-            model = get_model(model_type, input_size=input_size, output_size=num_classes).train()
+            model = get_model(model_type, input_size=input_size, output_size=NUM_CLASSES).train()
             model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt"
             if os.path.exists(model_path):
                 try:
@@ -263,10 +267,14 @@ def train_model_loop(strategy):
                 print(f"[학습 실패] {symbol}-{strategy} → {e}")
     finally:
         training_in_progress[strategy] = False
-def balance_classes(X, y, min_samples=20, target_classes=range(18)):
+        
+def balance_classes(X, y, min_samples=20, target_classes=None):
     from collections import Counter
     import random
     import numpy as np
+
+    if target_classes is None:
+        target_classes = range(NUM_CLASSES)  # ✅ NUM_CLASSES = 21 기준으로 적용
 
     class_counts = Counter(y)
     X_balanced, y_balanced = list(X), list(y)
@@ -279,7 +287,7 @@ def balance_classes(X, y, min_samples=20, target_classes=range(18)):
             continue  # 충분히 많으면 건너뜀
 
         existing = [(x, y_val) for x, y_val in zip(X, y) if y_val == cls]
-        while class_counts[cls] < min_samples:
+        while class_counts[cls] < min_samples and existing:
             x_dup, y_dup = random.choice(existing)
             X_balanced.append(x_dup)
             y_balanced.append(y_dup)
