@@ -26,7 +26,7 @@ def get_recent_class_frequencies(strategy: str, recent_days: int = 3):
 DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-NUM_CLASSES = 14  # ✅ 14개 클래스 기준
+NUM_CLASSES = 21  # 🔄 반드시 전체 구조와 통일
 
 # ✅ 클래스 → 기대수익률 중앙값 매핑
 def class_to_expected_return(cls):
