@@ -28,11 +28,16 @@ MODEL_DIR = "/persistent/models"
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 NUM_CLASSES = 21  # 🔄 반드시 전체 구조와 통일
 
-# ✅ 클래스 → 기대수익률 중앙값 매핑
+# ✅ 클래스 → 기대수익률 중앙값 매핑 (21개 class_ranges 기준)
 def class_to_expected_return(cls):
-    centers = [-0.225, -0.125, -0.085, -0.06, -0.04, -0.0225, -0.0125,
-                0.0125, 0.0225, 0.04, 0.06, 0.085, 0.125, 0.225]
+    centers = [
+        -0.80, -0.45, -0.25, -0.175, -0.125, -0.085, -0.06, -0.04,
+        -0.02, 0.0,  # 중립
+         0.02, 0.04, 0.06, 0.085, 0.125, 0.175, 0.25, 0.40,
+         0.75, 1.50, 3.50
+    ]
     return centers[cls] if 0 <= cls < len(centers) else 0.0
+
 
 def failed_result(symbol, strategy, model_type="unknown", reason="", source="일반", X_input=None):
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
