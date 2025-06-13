@@ -9,6 +9,8 @@ from failure_db import insert_failure_record, load_existing_failure_hashes
 from logger import get_feature_hash
 from collections import Counter
 import pandas as pd
+from config import NUM_CLASSES
+
 
 def get_recent_class_frequencies(strategy: str, recent_days: int = 3):
     try:
@@ -26,7 +28,7 @@ def get_recent_class_frequencies(strategy: str, recent_days: int = 3):
 DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-NUM_CLASSES = 21  # 🔄 반드시 전체 구조와 통일
+
 
 # ✅ 클래스 → 기대수익률 중앙값 매핑 (21개 class_ranges 기준)
 def class_to_expected_return(cls):
