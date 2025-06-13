@@ -132,8 +132,6 @@ strategy_stats = {}
 import pandas as pd
 from collections import defaultdict
 
-PREDICTION_LOG = "/persistent/prediction_log.csv"
-
 def analyze_class_success():
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
