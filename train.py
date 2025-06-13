@@ -67,7 +67,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from model.base_model import get_model
     from feature_importance import compute_feature_importance, save_feature_importance
     from failure_db import load_existing_failure_hashes
-    from training_memory import get_frequent_failures, load_training_prediction_data
     from focal_loss import FocalLoss
     from sklearn.metrics import accuracy_score, f1_score
     from torch.utils.data import TensorDataset, DataLoader
