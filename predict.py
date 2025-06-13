@@ -254,6 +254,15 @@ def evaluate_predictions(get_price_fn):
                 updated.append(r)
                 continue
 
+            if r.get("source", "").strip() == "훈련":
+                r.update({
+                    "status": "skip_eval",
+                    "reason": "학습 로그 → 평가 제외",
+                    "return": 0.0
+                })
+                updated.append(r)
+                continue
+
             symbol = r.get("symbol")
             strategy = r.get("strategy")
             model = r.get("model", "unknown")
@@ -352,5 +361,3 @@ def evaluate_predictions(get_price_fn):
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader()
         w.writerows(updated)
-
-
