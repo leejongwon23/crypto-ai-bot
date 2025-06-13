@@ -151,15 +151,17 @@ def evaluate_predictions(get_price_fn):
     updated, evaluated = [], []
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
 
-    # ✅ 클래스 구간 정의 (총 21개)
     class_ranges = [
         (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
         (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
-        (-0.03, -0.01), (-0.01,  0.01),  # ✅ 중립 구간 포함
-        ( 0.01,  0.03), ( 0.03,  0.05), ( 0.05,  0.07), ( 0.07,  0.10),
-        ( 0.10,  0.15), ( 0.15,  0.20), ( 0.20,  0.30), ( 0.30,  0.50),
-        ( 0.50,  1.00), ( 1.00,  2.00), ( 2.00,  5.00)
+        (-0.03, -0.01), (-0.01,  0.01), ( 0.01,  0.03), ( 0.03,  0.05),
+        ( 0.05,  0.07), ( 0.07,  0.10), ( 0.10,  0.15), ( 0.15,  0.20),
+        ( 0.20,  0.30), ( 0.30,  0.50), ( 0.50,  1.00), ( 1.00,  2.00),
+        ( 2.00,  5.00)
     ]
+
+    NUM_CLASSES = 21
+    assert len(class_ranges) == NUM_CLASSES, "class_ranges 수가 NUM_CLASSES와 일치하지 않음"
 
     for r in rows:
         try:
@@ -172,7 +174,6 @@ def evaluate_predictions(get_price_fn):
             model = r.get("model", "unknown")
             entry_price = float(r.get("entry_price", 0))
 
-            # ✅ predicted_class 유효성 검증 강화
             try:
                 raw_val = r.get("predicted_class", "")
                 if raw_val == "" or str(raw_val).lower() in ["nan", "none"]:
@@ -217,14 +218,15 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            if 0 <= pred_class < len(class_ranges):
+            if 0 <= pred_class < NUM_CLASSES:
                 low, high = class_ranges[pred_class]
                 success = gain >= low and abs(gain) >= 0.01
             else:
                 success = False
                 low, high = 0.0, 0.0
 
-            vol = str(r.get("volatility", "False")).lower() in ["1", "true", "yes"]
+            vol_raw = str(r.get("volatility", "")).strip().lower()
+            vol = vol_raw in ["1", "true", "yes"]
             status = "v_success" if vol and success else "v_fail" if vol else "success" if success else "fail"
 
             r.update({
@@ -260,6 +262,7 @@ def evaluate_predictions(get_price_fn):
         w.writerows(updated)
 
     return
+
 
 strategy_stats = {}
 
