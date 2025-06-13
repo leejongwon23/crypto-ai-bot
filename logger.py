@@ -247,4 +247,51 @@ def get_feature_hash_from_tensor(tensor):
     except Exception as e:
         print(f"[오류] get_feature_hash_from_tensor 실패 → {e}")
         return "unknown"
+        
+def export_recent_model_stats(recent_days=3):
+    """
+    최근 N일간 모델별 성공률 집계 → CSV 저장
+    """
+    try:
+        path = "/persistent/prediction_log.csv"
+        df = pd.read_csv(path, encoding="utf-8-sig")
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+
+        # 최근 기간 필터링
+        cutoff = pd.Timestamp.now() - pd.Timedelta(days=recent_days)
+        df = df[df["timestamp"] >= cutoff]
+        df = df[df["status"].isin(["success", "fail"])]
+
+        if df.empty:
+            print("❗ 최근 예측 데이터 없음")
+            return
+
+        from collections import defaultdict
+        stats = defaultdict(lambda: {"success": 0, "fail": 0})
+
+        for _, row in df.iterrows():
+            key = (row["symbol"], row["strategy"], row["model"])
+            stats[key]["success" if row["status"] == "success" else "fail"] += 1
+
+        summary = []
+        for (symbol, strategy, model), count in stats.items():
+            total = count["success"] + count["fail"]
+            rate = count["success"] / total if total > 0 else 0
+            summary.append({
+                "symbol": symbol,
+                "strategy": strategy,
+                "model": model,
+                "total": total,
+                "success": count["success"],
+                "fail": count["fail"],
+                "recent_success_rate": round(rate, 4)
+            })
+
+        summary_df = pd.DataFrame(summary)
+        save_path = "/persistent/logs/recent_model_stats.csv"
+        summary_df.to_csv(save_path, index=False, encoding="utf-8-sig")
+        print(f"📈 최근 모델 성능 저장 완료 → {save_path}")
+
+    except Exception as e:
+        print(f"[오류] 최근 모델 성능 집계 실패 → {e}")
 
