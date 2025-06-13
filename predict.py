@@ -221,6 +221,11 @@ from failure_db import ensure_failure_db, insert_failure_record
 from logger import update_model_success
 
 def evaluate_predictions(get_price_fn):
+    import csv, os, datetime, pytz
+    import pandas as pd
+    from failure_db import ensure_failure_db, insert_failure_record
+    from logger import update_model_success
+
     ensure_failure_db()
 
     PREDICTION_LOG = "/persistent/prediction_log.csv"
@@ -242,12 +247,12 @@ def evaluate_predictions(get_price_fn):
     class_ranges = [
         (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
         (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
-        (-0.03, -0.01), (-0.01,  0.01), ( 0.01,  0.03), ( 0.03,  0.05),
-        ( 0.05,  0.07), ( 0.07,  0.10), ( 0.10,  0.15), ( 0.15,  0.20),
-        ( 0.20,  0.30), ( 0.30,  0.50), ( 0.50,  1.00), ( 1.00,  2.00),
-        ( 2.00,  5.00)
+        (-0.03, -0.01), (-0.01, 0.01), (0.01, 0.03), (0.03, 0.05),
+        (0.05, 0.07), (0.07, 0.10), (0.10, 0.15), (0.15, 0.20),
+        (0.20, 0.30), (0.30, 0.50), (0.50, 1.00), (1.00, 2.00),
+        (2.00, 5.00)
     ]
-    assert len(class_ranges) == NUM_CLASSES
+    assert len(class_ranges) == 21
 
     for r in rows:
         try:
@@ -270,7 +275,8 @@ def evaluate_predictions(get_price_fn):
             entry_price = float(r.get("entry_price", 0))
 
             raw_val = r.get("predicted_class", "")
-            if raw_val in ["", None] or str(raw_val).lower() in ["nan", "none"]:
+            # ✅ 핵심 수정: 예외 문자열 포함 여부 추가
+            if not str(raw_val).strip() or str(raw_val).strip().lower() in ["nan", "none"]:
                 r.update({
                     "status": "skip_eval",
                     "reason": "예측 클래스 없음",
@@ -307,7 +313,10 @@ def evaluate_predictions(get_price_fn):
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Seoul")
 
             if now < deadline:
-                r.update({"reason": f"⏳ 평가 대기 중 ({now.strftime('%H:%M')} < {deadline.strftime('%H:%M')})", "return": 0.0})
+                r.update({
+                    "reason": f"⏳ 평가 대기 중 ({now.strftime('%H:%M')} < {deadline.strftime('%H:%M')})",
+                    "return": 0.0
+                })
                 updated.append(r)
                 continue
 
@@ -320,7 +329,7 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            if 0 <= pred_class < NUM_CLASSES:
+            if 0 <= pred_class < 21:
                 low, high = class_ranges[pred_class]
                 success = gain >= low and abs(gain) >= 0.01
             else:
