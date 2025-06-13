@@ -106,7 +106,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print("⛔ 중단: create_dataset() → None 반환")
             return
 
-        # ✅ 클래스 범위 초과 제거
         y_raw = np.array(y_raw)
         X_raw = np.array(X_raw)
         mask = (y_raw >= 0) & (y_raw < NUM_CLASSES)
@@ -189,6 +188,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     target_class_set.update([(strategy, c) for c in recent_pred_classes])
                 for _, row in fine_tune_targets.iterrows():
                     target_class_set.add((row["strategy"], row["class"]))
+
                 train_failures([(x, y) for x, y in wrong_filtered if (strategy, y) in target_class_set], repeat=6)
             except:
                 print("⚠️ fine-tune 대상 분석 실패 → 전체 학습 유지")
@@ -224,15 +224,22 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 log_training_result(symbol, strategy, f"비정상({model_type})", acc, f1, val_loss)
                 continue
 
-            predicted_class = int(preds[0]) if len(preds) > 0 else -1
-            log_prediction(
-                symbol=symbol,
-                strategy=strategy,
-                model=model_type,
-                predicted_class=predicted_class,
-                success=True,
-                rate=0.0
-            )
+            try:
+                predicted_class = int(preds[0]) if len(preds) > 0 else -1
+            except:
+                predicted_class = -1
+
+            if predicted_class == -1:
+                print(f"⚠️ 예측 클래스 없음 → log_prediction 생략")
+            else:
+                log_prediction(
+                    symbol=symbol,
+                    strategy=strategy,
+                    model=model_type,
+                    predicted_class=predicted_class,
+                    success=True,
+                    rate=0.0
+                )
 
             torch.save(model.state_dict(), model_path)
             save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss)
@@ -254,6 +261,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
 
 
 def train_all_models():
