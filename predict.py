@@ -163,7 +163,8 @@ def predict(symbol, strategy, source="일반"):
                         target_price=raw_close * (1 + expected_return),
                         model=model_type, success=True, reason="예측 완료",
                         rate=expected_return, timestamp=t,
-                        volatility=False, source=source,
+                        volatility=True, 
+                        source=source,
                         predicted_class=pred_class
                     )
 
