@@ -54,9 +54,24 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
     print(f"🗘 저장됨: {path}"); sys.stdout.flush()
 
 def train_one_model(symbol, strategy, max_epochs=20):
-    import gc
-    from logger import get_fine_tune_targets, get_recent_predicted_classes, log_prediction
+    import os, gc
+    import numpy as np
+    import pandas as pd
+    import torch
+    from collections import Counter
+    from logger import (
+        get_fine_tune_targets, get_recent_predicted_classes, log_prediction,
+        get_feature_hash_from_tensor, log_training_result
+    )
+    from model.base_model import get_model
+    from model_weight_loader import save_model_metadata
+    from feature_importance import compute_feature_importance, save_feature_importance
+    from failure_db import load_existing_failure_hashes
+    from training_memory import get_frequent_failures, load_training_prediction_data
     from focal_loss import FocalLoss
+    from sklearn.metrics import accuracy_score, f1_score
+    from torch.utils.data import TensorDataset, DataLoader
+    from config import NUM_CLASSES
 
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
@@ -92,7 +107,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print("⛔ 중단: create_dataset() → None 반환")
             return
 
-        # ✅ 클래스 범위 초과 제거 - 강제 필터링
+        # ✅ 클래스 범위 초과 제거
         y_raw = np.array(y_raw)
         X_raw = np.array(X_raw)
         mask = (y_raw >= 0) & (y_raw < NUM_CLASSES)
@@ -115,10 +130,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
         print(f"[진단] 입력 피처 수: {X_raw.shape[2]} / 클래스 수: {NUM_CLASSES}")
 
         input_size = X_raw.shape[2]
-        num_classes = NUM_CLASSES
-        val_len = int(len(X_raw) * 0.2)
-        if val_len < 5:
-            val_len = 5
+        val_len = max(5, int(len(X_raw) * 0.2))
 
         X_bal, y_bal = balance_classes(X_raw[:-val_len], y_raw[:-val_len], min_samples=20, target_classes=range(NUM_CLASSES))
         X_train, y_train = X_bal, y_bal
@@ -128,7 +140,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
         frequent_failures = get_frequent_failures(min_count=5)
         wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
 
-        from logger import get_feature_hash_from_tensor
         wrong_filtered, used_hashes = [], set()
         for s in wrong_data:
             if isinstance(s, (list, tuple)) and len(s) >= 2:
