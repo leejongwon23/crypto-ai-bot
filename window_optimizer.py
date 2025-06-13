@@ -134,3 +134,4 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
         return 20
 
+
