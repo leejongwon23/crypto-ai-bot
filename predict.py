@@ -56,7 +56,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             rate=0.0,
             timestamp=t,
             return_value=0.0,
-            volatility=False,
+            volatility=True,
             source=source,
             predicted_class=-1  # ✅ 반드시 포함됨
         )
