@@ -68,7 +68,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     status = "v_pending" if volatility and success else "v_failed" if volatility and not success else "pending" if success else "failed"
 
     try:
-        pred_class_val = int(predicted_class) if isinstance(predicted_class, (int, float)) else -1
+        pred_class_val = int(float(predicted_class)) if str(predicted_class).lower() not in ["", "nan", "none"] else -1
     except:
         pred_class_val = -1
 
@@ -99,6 +99,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
             w.writerow(row)
     except:
         pass
+
 
 
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
