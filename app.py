@@ -8,7 +8,7 @@ from predict_trigger import run as trigger_run
 from data.utils import SYMBOLS, get_kline_by_strategy
 from visualization import generate_visual_report, generate_visuals_for_strategy
 from wrong_data_loader import load_training_prediction_data
-from logger import evaluate_predictions
+from predict import evaluate_predictions
 
 PERSIST_DIR = "/persistent"
 LOG_DIR, MODEL_DIR = os.path.join(PERSIST_DIR, "logs"), os.path.join(PERSIST_DIR, "models")
