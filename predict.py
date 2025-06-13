@@ -259,10 +259,17 @@ def evaluate_predictions(get_price_fn):
             model = r.get("model", "unknown")
             entry_price = float(r.get("entry_price", 0))
 
+            raw_val = r.get("predicted_class", "")
+            if raw_val in ["", None] or str(raw_val).lower() in ["nan", "none"]:
+                r.update({
+                    "status": "skip_eval",
+                    "reason": "예측 클래스 없음",
+                    "return": 0.0
+                })
+                updated.append(r)
+                continue
+
             try:
-                raw_val = r.get("predicted_class", "")
-                if raw_val == "" or str(raw_val).lower() in ["nan", "none"]:
-                    raise ValueError("빈 predicted_class")
                 pred_class = int(float(raw_val))
             except:
                 pred_class = -1
@@ -345,4 +352,5 @@ def evaluate_predictions(get_price_fn):
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader()
         w.writerows(updated)
+
 
