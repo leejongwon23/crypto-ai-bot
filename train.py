@@ -238,7 +238,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     model=model_type,
                     predicted_class=predicted_class,
                     success=True,
-                    rate=0.0
+                    rate=0.0,
+                    source="훈련"
                 )
 
             torch.save(model.state_dict(), model_path)
