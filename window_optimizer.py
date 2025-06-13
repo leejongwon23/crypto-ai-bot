@@ -51,11 +51,22 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 if X is None or y is None or len(X) == 0 or len(X) != len(y):
                     continue
 
+                # ✅ 클래스 범위 초과 제거
+                y = np.array(y)
+                X = np.array(X)
+                mask = (y >= 0) & (y < NUM_CLASSES)
+                y = y[mask]
+                X = X[mask]
+
+                if len(X) == 0 or len(X) != len(y):
+                    print(f"[스킵] window={window} → 유효한 샘플 없음")
+                    continue
+
                 input_size = X.shape[2]
                 if input_size <= 0:
                     continue
 
-                model = get_model("lstm", input_size).train()  # ✅ output_size 제거됨
+                model = get_model("lstm", input_size, output_size=NUM_CLASSES).train()
 
                 X_tensor = torch.tensor(X, dtype=torch.float32)
                 y_tensor = torch.tensor(y, dtype=torch.long)
