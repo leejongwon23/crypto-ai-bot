@@ -89,7 +89,6 @@ def predict(symbol, strategy, source="일반"):
     # ✅ 통일된 설정
     DEVICE = torch.device("cpu")
     MODEL_DIR = "/persistent/models"
-    NUM_CLASSES = 21
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 
     try:
@@ -226,7 +225,6 @@ def evaluate_predictions(get_price_fn):
     PREDICTION_LOG = "/persistent/prediction_log.csv"
     EVAL_RESULT = "/persistent/evaluation_result.csv"
     WRONG = "/persistent/wrong_predictions.csv"
-    NUM_CLASSES = 21
     now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
     try:
