@@ -84,22 +84,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     return result
 
 def predict(symbol, strategy, source="일반"):
-    import torch
-    import numpy as np
-    import pandas as pd
-    import os, sys
-    from sklearn.preprocessing import MinMaxScaler
-    from logger import log_prediction, get_recent_class_frequencies
-    from failure_db import insert_failure_record
-    from model_weight_loader import get_model_weight
-    from model.base_model import get_model
-    from window_optimizer import find_best_window
-    from data.utils import get_kline_by_strategy, compute_features
-    from logger import get_feature_hash
-    from predict_test import adjust_probs_with_diversity
-    from datetime import datetime
-    import pytz
-
     # ✅ 통일된 설정
     DEVICE = torch.device("cpu")
     MODEL_DIR = "/persistent/models"
