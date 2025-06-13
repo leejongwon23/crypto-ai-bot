@@ -12,12 +12,13 @@ from window_optimizer import find_best_window
 import hashlib
 from collections import Counter
 import sqlite3
+from config import NUM_CLASSES
+
 
 DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 os.makedirs(MODEL_DIR, exist_ok=True)
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-NUM_CLASSES = 21  # 🔄 수정됨
 STRATEGY_WRONG_REP = {"단기": 4, "중기": 6, "장기": 8}
 
 def get_feature_hash_from_tensor(x):
