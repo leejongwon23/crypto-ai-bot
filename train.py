@@ -92,9 +92,12 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print("⛔ 중단: create_dataset() → None 반환")
             return
 
-        # ✅ 클래스 범위 초과 제거
-        y_raw = np.array([y for y in y_raw if 0 <= y < NUM_CLASSES])
-        X_raw = X_raw[:len(y_raw)]
+        # ✅ 클래스 범위 초과 제거 - 강제 필터링
+        y_raw = np.array(y_raw)
+        X_raw = np.array(X_raw)
+        mask = (y_raw >= 0) & (y_raw < NUM_CLASSES)
+        y_raw = y_raw[mask]
+        X_raw = X_raw[mask]
 
         if len(X_raw) < 5:
             print(f"⛔ 중단: 학습 샘플 부족 → X_raw 개수: {len(X_raw)}")
