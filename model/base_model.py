@@ -2,7 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-NUM_CLASSES = 16
+# ✅ 수정 코드 (통일된 설정 사용)
+from config import NUM_CLASSES
+
 
 class Attention(nn.Module):
     def __init__(self, hidden_size):
