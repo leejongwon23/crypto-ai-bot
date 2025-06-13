@@ -9,13 +9,7 @@ from data.utils import get_kline_by_strategy, compute_features, create_dataset
 from model.base_model import get_model
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
-    import os, json, torch
-    import numpy as np
-    import pandas as pd
-    from sklearn.preprocessing import MinMaxScaler
-    from sklearn.metrics import accuracy_score
-    from data.utils import get_kline_by_strategy, compute_features, create_dataset
-    from model.base_model import get_model
+    NUM_CLASSES = 21  # ✅ 클래스 개수 고정 선언
 
     try:
         df = get_kline_by_strategy(symbol, strategy)
@@ -133,5 +127,3 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     except Exception as e:
         print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
         return 20
-
-
