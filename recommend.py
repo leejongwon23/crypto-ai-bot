@@ -1,7 +1,8 @@
 import os, csv, sys, time, threading, datetime, pytz
 from telegram_bot import send_message
 from predict import predict
-from logger import log_prediction, strategy_stats, get_strategy_eval_count, evaluate_predictions
+from logger import log_prediction, strategy_stats, get_strategy_eval_count
+from predict import evaluate_predictions
 from data.utils import SYMBOLS, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
