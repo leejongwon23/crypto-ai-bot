@@ -115,9 +115,15 @@ MODEL_CLASSES = {
     "transformer": TransformerPricePredictor
 }
 
-
-def get_model(model_type="cnn_lstm", input_size=11, output_size=NUM_CLASSES):
+def get_model(model_type="cnn_lstm", input_size=11, output_size=None):
     if model_type not in MODEL_CLASSES:
         print(f"[경고] 알 수 없는 모델 타입 '{model_type}', 기본 모델 cnn_lstm 사용")
     model_cls = MODEL_CLASSES.get(model_type, CNNLSTMPricePredictor)
+
+    # ✅ 출력 클래스 수 명시되지 않으면, 전역 NUM_CLASSES 강제 적용
+    if output_size is None:
+        from train import NUM_CLASSES  # 또는 config.py 등에서 import
+        output_size = NUM_CLASSES
+
     return model_cls(input_size=input_size, output_size=output_size)
+
