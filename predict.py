@@ -100,6 +100,7 @@ def predict(symbol, strategy, source="일반"):
     from datetime import datetime
     import pytz
 
+    # ✅ 통일된 설정
     DEVICE = torch.device("cpu")
     MODEL_DIR = "/persistent/models"
     NUM_CLASSES = 21
@@ -123,7 +124,6 @@ def predict(symbol, strategy, source="일반"):
 
         raw_close = df["close"].iloc[-1]
         raw_feat = feat.dropna().copy()
-        timestamps = raw_feat["timestamp"].reset_index(drop=True)
         features_only = raw_feat.drop(columns=["timestamp"])
         feat_scaled = MinMaxScaler().fit_transform(features_only)
 
@@ -166,6 +166,9 @@ def predict(symbol, strategy, source="일반"):
                     probs[0] = adjust_probs_with_diversity(probs, recent_freq)
 
                     pred_class = int(np.argmax(probs))
+
+                    # ✅ 예외 방지: class_to_expected_return 통일 import 필요
+                    from model.base_model import class_to_expected_return
                     expected_return = class_to_expected_return(pred_class)
 
                     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
@@ -208,6 +211,7 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+
 
 
 def adjust_probs_with_diversity(probs, recent_freq: Counter, alpha=0.1):
