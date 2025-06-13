@@ -65,12 +65,12 @@ def create_dataset(features, window=20, strategy="단기"):
     class_ranges = [
         (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
         (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
-        (-0.03, -0.01), (-0.01,  0.01),  # 중립 구간 포함
+        (-0.03, -0.01), (-0.01,  0.01),
         ( 0.01,  0.03), ( 0.03,  0.05), ( 0.05,  0.07), ( 0.07,  0.10),
         ( 0.10,  0.15), ( 0.15,  0.20), ( 0.20,  0.30), ( 0.30,  0.50),
         ( 0.50,  1.00), ( 1.00,  2.00), ( 2.00,  5.00)
     ]
-    max_cls = len(class_ranges)  # ✅ NUM_CLASSES 기준 = 21
+    max_cls = len(class_ranges)
 
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
@@ -98,8 +98,12 @@ def create_dataset(features, window=20, strategy="단기"):
                 continue
 
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), -1)
-            if cls == -1 or cls >= max_cls:
-                continue  # ✅ 21개 넘는 클래스 제거
+            if cls == -1:
+                print(f"[스킵] 🔻 gain={gain:.4f} → 클래스 없음 → i={i}")
+                continue
+            if cls >= max_cls:
+                print(f"[경고] 🔥 잘못된 클래스 번호: cls={cls} (max={max_cls - 1}) → i={i}")
+                continue
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
             if any(len(row) != len(columns) for row in sample):
@@ -108,8 +112,16 @@ def create_dataset(features, window=20, strategy="단기"):
             X.append(sample)
             y.append(cls)
 
-        except Exception:
+        except Exception as e:
+            print(f"[예외 발생] ❌ {e} → i={i}")
             continue
+
+    # ✅ 라벨 분포 요약 출력
+    if y:
+        labels, counts = np.unique(y, return_counts=True)
+        print(f"[📊 클래스 분포] → {dict(zip(labels, counts))}")
+    else:
+        print("[⚠️ 경고] 생성된 라벨 없음")
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
 
