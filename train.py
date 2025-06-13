@@ -65,7 +65,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
         get_feature_hash_from_tensor, log_training_result
     )
     from model.base_model import get_model
-    from model_weight_loader import save_model_metadata
     from feature_importance import compute_feature_importance, save_feature_importance
     from failure_db import load_existing_failure_hashes
     from training_memory import get_frequent_failures, load_training_prediction_data
