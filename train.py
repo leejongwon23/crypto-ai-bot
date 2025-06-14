@@ -60,10 +60,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
     import pandas as pd
     import torch
     from collections import Counter
-    from logger import (
-        get_fine_tune_targets, get_recent_predicted_classes, log_prediction,
-        get_feature_hash_from_tensor, log_training_result
-    )
     from model.base_model import get_model
     from feature_importance import compute_feature_importance, save_feature_importance
     from failure_db import load_existing_failure_hashes
@@ -71,6 +67,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from sklearn.metrics import accuracy_score, f1_score
     from torch.utils.data import TensorDataset, DataLoader
     from config import NUM_CLASSES
+    from wrong_data_loader import load_training_prediction_data
+    from logger import log_training_result, get_feature_hash_from_tensor
+    from window_optimizer import find_best_window
+    from data.utils import get_kline_by_strategy, compute_features, create_dataset
 
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
@@ -121,12 +121,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"⛔ 중단: 클래스 부족 → {len(observed)}개")
             return
 
-        print(f"[진단] 피처 수: {len(df_feat)}")
-        print(f"[진단] 학습 샘플 수: {len(X_raw)}")
-        print(f"[진단] 클래스 수: {len(set(y_raw))}")
-        print(f"[진단] 시퀀스 크기: {X_raw.shape}")
-        print(f"[진단] 입력 피처 수: {X_raw.shape[2]} / 클래스 수: {NUM_CLASSES}")
-
         input_size = X_raw.shape[2]
         val_len = max(5, int(len(X_raw) * 0.2))
 
@@ -135,7 +129,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
         X_val, y_val = X_raw[-val_len:], y_raw[-val_len:]
 
         failure_hashes = load_existing_failure_hashes()
-        frequent_failures = get_frequent_failures(min_count=5)
         wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
 
         wrong_filtered, used_hashes = [], set()
@@ -147,7 +140,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 if not isinstance(yb, (int, np.integer)) or not (0 <= yb < NUM_CLASSES):
                     continue
                 feature_hash = get_feature_hash_from_tensor(torch.tensor(xb))
-                if feature_hash in used_hashes or feature_hash in failure_hashes or feature_hash in frequent_failures:
+                if feature_hash in used_hashes or feature_hash in failure_hashes:
                     continue
                 used_hashes.add(feature_hash)
                 wrong_filtered.append((xb, yb))
@@ -177,21 +170,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         if not torch.isfinite(loss): continue
                         optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            train_failures([(x, y) for x, y in wrong_filtered if y >= 8], repeat=6)
-            train_failures([(x, y) for x, y in wrong_filtered if y < 8], repeat=2)
-
-            try:
-                target_class_set = set()
-                recent_pred_classes = get_recent_predicted_classes(strategy, recent_days=3)
-                fine_tune_targets = get_fine_tune_targets()
-                if recent_pred_classes:
-                    target_class_set.update([(strategy, c) for c in recent_pred_classes])
-                for _, row in fine_tune_targets.iterrows():
-                    target_class_set.add((row["strategy"], row["class"]))
-
-                train_failures([(x, y) for x, y in wrong_filtered if (strategy, y) in target_class_set], repeat=6)
-            except:
-                print("⚠️ fine-tune 대상 분석 실패 → 전체 학습 유지")
+            train_failures(wrong_filtered, repeat=4)
 
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
@@ -216,11 +195,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 val_loss = lossfn(logits, yb).item()
 
             if acc >= 1.0 and len(set(y_val)) <= 2:
-                print(f"⚠️ 오버핏 감지 → 저장 중단")
                 log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
                 continue
             if f1 > 1.0 or val_loss > 1.5 or acc < 0.3:
-                print(f"⚠️ 비정상 결과 감지 → 저장 중단 (acc={acc:.2f}, f1={f1:.2f}, loss={val_loss:.2f})")
                 log_training_result(symbol, strategy, f"비정상({model_type})", acc, f1, val_loss)
                 continue
 
@@ -232,7 +209,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 imps = compute_feature_importance(model, xb, yb, list(df_feat.drop(columns=["timestamp"]).columns))
                 save_feature_importance(imps, symbol, strategy, model_type)
             except:
-                print("⚠️ 중요도 저장 실패 (무시됨)")
+                pass
 
             del model, xb, yb, logits
             torch.cuda.empty_cache()
