@@ -124,7 +124,7 @@ def get_model(model_type="cnn_lstm", input_size=11, output_size=None):
 
     # ✅ 출력 클래스 수 명시되지 않으면, 전역 NUM_CLASSES 강제 적용
     if output_size is None:
-        from train import NUM_CLASSES  # 또는 config.py 등에서 import
+        from config import NUM_CLASSES  # 또는 config.py 등에서 import
         output_size = NUM_CLASSES
 
     return model_cls(input_size=input_size, output_size=output_size)
