@@ -86,7 +86,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     return result
 
 def predict(symbol, strategy, source="일반"):
-    # ✅ 통일된 설정
     DEVICE = torch.device("cpu")
     MODEL_DIR = "/persistent/models"
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
@@ -150,9 +149,11 @@ def predict(symbol, strategy, source="일반"):
                     recent_freq = get_recent_class_frequencies(strategy)
                     probs[0] = adjust_probs_with_diversity(probs, recent_freq)
 
-                    pred_class = int(np.argmax(probs))
+                    try:
+                        pred_class = int(np.argmax(probs))
+                    except:
+                        pred_class = -1
 
-                    # ✅ 예외 방지: class_to_expected_return 통일 import 필요
                     from model.base_model import class_to_expected_return
                     expected_return = class_to_expected_return(pred_class)
 
@@ -163,8 +164,7 @@ def predict(symbol, strategy, source="일반"):
                         target_price=raw_close * (1 + expected_return),
                         model=model_type, success=True, reason="예측 완료",
                         rate=expected_return, timestamp=t,
-                        volatility=True, 
-                        source=source,
+                        volatility=True, source=source,
                         predicted_class=pred_class
                     )
 
@@ -197,8 +197,6 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
-
-
 
 def adjust_probs_with_diversity(probs, recent_freq: Counter, alpha=0.1):
     """
