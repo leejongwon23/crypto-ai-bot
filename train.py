@@ -154,10 +154,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size=input_size, output_size=NUM_CLASSES).train()
-            model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt"
+            model_path = f"/persistent/models/{symbol}_{strategy}_{model_type}.pt"
             if os.path.exists(model_path):
                 try:
-                    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+                    model.load_state_dict(torch.load(model_path, map_location=torch.device("cpu")))
                     print(f"🔁 이어 학습: {model_path}")
                 except:
                     print(f"[로드 실패] {model_path} → 새로 학습")
@@ -224,13 +224,14 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 log_training_result(symbol, strategy, f"비정상({model_type})", acc, f1, val_loss)
                 continue
 
+            # ✅ 예측 클래스 유효성 검사 포함한 안전 처리
             try:
                 predicted_class = int(preds[0]) if len(preds) > 0 else -1
             except:
                 predicted_class = -1
 
-            if predicted_class == -1:
-                print(f"⚠️ 예측 클래스 없음 → log_prediction 생략")
+            if predicted_class == -1 or not isinstance(predicted_class, int):
+                print(f"⚠️ 예측 클래스 없음 또는 무효 → log_prediction 생략")
             else:
                 log_prediction(
                     symbol=symbol,
@@ -262,8 +263,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
-
-
 
 def train_all_models():
     for strat in ["단기", "중기", "장기"]:
