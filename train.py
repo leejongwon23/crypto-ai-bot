@@ -224,25 +224,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 log_training_result(symbol, strategy, f"비정상({model_type})", acc, f1, val_loss)
                 continue
 
-            # ✅ 예측 클래스 유효성 검사 포함한 안전 처리
-            try:
-                predicted_class = int(preds[0]) if len(preds) > 0 else -1
-            except:
-                predicted_class = -1
-
-            if predicted_class == -1 or not isinstance(predicted_class, int):
-                print(f"⚠️ 예측 클래스 없음 또는 무효 → log_prediction 생략")
-            else:
-                log_prediction(
-                    symbol=symbol,
-                    strategy=strategy,
-                    model=model_type,
-                    predicted_class=predicted_class,
-                    success=True,
-                    rate=0.0,
-                    source="훈련"
-                )
-
             torch.save(model.state_dict(), model_path)
             save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss)
             log_training_result(symbol, strategy, model_type, acc, f1, val_loss)
