@@ -100,8 +100,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     except:
         pass
 
-
-
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     row = {
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
