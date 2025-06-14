@@ -129,7 +129,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
         X_val, y_val = X_raw[-val_len:], y_raw[-val_len:]
 
         failure_hashes = load_existing_failure_hashes()
-        wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, source_type="wrong")
+        wrong_data = load_training_prediction_data(symbol, strategy, input_size, window)
 
         wrong_filtered, used_hashes = [], set()
         for s in wrong_data:
