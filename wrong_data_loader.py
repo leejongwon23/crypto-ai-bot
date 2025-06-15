@@ -38,7 +38,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
     for _, row in df.iterrows():
         try:
             entry_time = row["timestamp"]
-            predicted_class = int(row["predicted_class"])
+            predicted_class = int(float(row["predicted_class"]))  # ✅ 안전하게 숫자로 변환
             past_window = df_feat[df_feat["timestamp"] < entry_time].tail(window)
             if len(past_window) < window:
                 continue
