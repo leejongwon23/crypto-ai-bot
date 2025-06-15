@@ -7,7 +7,7 @@ from data.utils import get_kline_by_strategy, compute_features
 WRONG_CSV = "/persistent/wrong_predictions.csv"
 
 def load_training_prediction_data(symbol, strategy, input_size, window):
-    path = "/persistent/wrong_predictions.csv"
+    path = WRONG_CSV
     if not os.path.exists(path):
         return []
 
@@ -19,7 +19,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
 
     df = df[(df["symbol"] == symbol) & (df["strategy"] == strategy)]
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    df = df.dropna(subset=["timestamp", "predicted_class"])
+    df = df.dropna(subset=["timestamp", "label"])  # ✅ label만 필수
 
     df_price = get_kline_by_strategy(symbol, strategy)
     if df_price is None or df_price.empty:
@@ -38,15 +38,16 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
     for _, row in df.iterrows():
         try:
             entry_time = row["timestamp"]
-            predicted_class = int(float(row["predicted_class"]))  # ✅ 안전하게 숫자로 변환
+            label = int(float(row["label"]))  # ✅ predicted_class 대신 label 사용
             past_window = df_feat[df_feat["timestamp"] < entry_time].tail(window)
             if len(past_window) < window:
                 continue
             xb = past_window.drop(columns=["timestamp"]).to_numpy()
             if xb.shape != (window, input_size):
                 continue
-            sequences.append((xb, predicted_class))
-        except:
+            sequences.append((xb, label))
+        except Exception as e:
+            print(f"[예외] 실패샘플 로딩 중 오류: {e}")
             continue
 
     return sequences
