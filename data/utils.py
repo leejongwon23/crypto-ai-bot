@@ -144,6 +144,13 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     return df
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 300) -> pd.DataFrame:
+    """
+    Bybit Kline 데이터를 불러오는 함수
+    :param symbol: 종목명 (예: BTCUSDT)
+    :param interval: 시간 간격 ("60"=1시간, "240"=4시간, "D"=1일)
+    :param limit: 캔들 개수 (기본 300개)
+    :return: DataFrame (timestamp, open, high, low, close, volume)
+    """
     try:
         url = f"{BASE_URL}/v5/market/kline"
         params = {"category": "linear", "symbol": symbol, "interval": interval, "limit": limit}
@@ -152,32 +159,28 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300) -> pd.DataFra
         data = res.json()
 
         if "result" not in data or "list" not in data["result"]:
-            print(f"[경고] get_kline() → 응답 구조 오류")
+            print(f"[경고] get_kline() → 데이터 응답 구조 이상: {symbol}")
             return None
 
         raw = data["result"]["list"]
-        if not raw or len(raw) == 0:
-            print(f"[경고] get_kline() → 데이터 없음: {symbol}")
+        if not raw or len(raw[0]) < 6:
+            print(f"[경고] get_kline() → 필수 필드 누락: {symbol}")
             return None
 
         df = pd.DataFrame(raw, columns=[
             "timestamp", "open", "high", "low", "close", "volume", "turnover"
         ])
+        df = df[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
 
-        for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        # ✅ timestamp은 int로 먼저 변환 → ms 처리
-        df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
-
-        df = df[["timestamp", "open", "high", "low", "close", "volume"]]
-        df = df.dropna(subset=["timestamp", "open", "high", "low", "close", "volume"])
-
-        if df.empty or df.isnull().any().any():
-            print(f"[경고] get_kline() → NaN 포함 또는 컬럼 누락: {symbol}")
+        # ✅ 필수 컬럼 null 제거 (근본조치)
+        essential = ["open", "high", "low", "close", "volume"]
+        df.dropna(subset=essential, inplace=True)
+        if df.empty:
+            print(f"[경고] get_kline() → 필수값 결측: {symbol}")
             return None
 
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
+        df = df.dropna(subset=["timestamp"])
         df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
         df = df.sort_values("timestamp").reset_index(drop=True)
         df["datetime"] = df["timestamp"]
@@ -187,7 +190,6 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300) -> pd.DataFra
     except Exception as e:
         print(f"[에러] get_kline({symbol}) 실패 → {e}")
         return None
-
 
 
 def get_realtime_prices():
