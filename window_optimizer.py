@@ -9,16 +9,12 @@ from data.utils import get_kline_by_strategy, compute_features, create_dataset
 from model.base_model import get_model
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
-    import os, json
-    import torch
-    import numpy as np
-    import pandas as pd
+    import os, json, torch, numpy as np, pandas as pd
     from sklearn.preprocessing import MinMaxScaler
     from sklearn.metrics import accuracy_score
     from data.utils import get_kline_by_strategy, compute_features, create_dataset
     from model.base_model import get_model
-
-    NUM_CLASSES = 21
+    from config import NUM_CLASSES
 
     try:
         df = get_kline_by_strategy(symbol, strategy)
@@ -31,8 +27,13 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             print(f"[경고] {symbol}-{strategy} → feature 부족 또는 NaN 포함으로 기본값 반환")
             return 20
 
-        # ✅ 구조 통일: 기존 방식과 동일하게 dict 리스트로 변환
-        feature_dicts = df_feat.to_dict(orient="records")
+        # ✅ 스케일링 추가 (기존 학습 흐름과 통일)
+        features_scaled = MinMaxScaler().fit_transform(df_feat.drop(columns=["timestamp"]))
+        feature_dicts = []
+        for i, row in enumerate(features_scaled):
+            d = dict(zip(df_feat.columns.drop("timestamp"), row))
+            d["timestamp"] = df_feat.iloc[i]["timestamp"]
+            feature_dicts.append(d)
 
         best_acc = -1
         best_window = window_list[0]
@@ -49,7 +50,6 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 mask = (y >= 0) & (y < NUM_CLASSES)
                 y = y[mask]
                 X = X[mask]
-
                 if len(X) == 0 or len(X) != len(y):
                     continue
 
@@ -102,5 +102,3 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     except Exception as e:
         print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
         return 20
-
-    
