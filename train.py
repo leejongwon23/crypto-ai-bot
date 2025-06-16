@@ -54,7 +54,7 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"🗘 저장됨: {path}"); sys.stdout.flush()
 
-def train_one_model(symbol, strategy, max_epochs=20):
+ def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     import numpy as np
     import pandas as pd
@@ -121,6 +121,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
         X_train, y_train = X_bal, y_bal
         X_val, y_val = X_raw[-val_len:], y_raw[-val_len:]
 
+        # ✅ 실패학습 로딩 (평가된 실패예측만 사용)
         failure_hashes = load_existing_failure_hashes()
         wrong_data = load_training_prediction_data(symbol, strategy, input_size, window)
         wrong_filtered, used_hashes = [], set()
@@ -148,6 +149,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = FocalLoss(gamma=2)
 
+            # ✅ 실패샘플 우선학습
             if wrong_filtered:
                 ds = TensorDataset(torch.tensor([x for x, _ in wrong_filtered], dtype=torch.float32),
                                    torch.tensor([y for _, y in wrong_filtered], dtype=torch.long))
@@ -160,10 +162,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         if torch.isfinite(loss):
                             optimizer.zero_grad(); loss.backward(); optimizer.step()
 
+            # ✅ 정규 학습
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
             train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
-
             for _ in range(max_epochs):
                 model.train()
                 for xb, yb in train_loader:
@@ -172,6 +174,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     if torch.isfinite(loss):
                         optimizer.zero_grad(); loss.backward(); optimizer.step()
 
+            # ✅ 검증
             model.eval()
             with torch.no_grad():
                 xb = torch.tensor(X_val, dtype=torch.float32)
@@ -203,12 +206,13 @@ def train_one_model(symbol, strategy, max_epochs=20):
             del model, xb, yb, logits
             torch.cuda.empty_cache()
             gc.collect()
+
     except Exception as e:
         print(f"[오류] {symbol}-{strategy} → {e}")
         try:
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
-            print("⚠️ 로그 기록 실패")
+            print("⚠️ 로그 기록 실패")   
 
 
 training_in_progress = {
