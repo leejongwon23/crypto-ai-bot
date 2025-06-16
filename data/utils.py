@@ -51,6 +51,7 @@ import numpy as np
 def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
     import pandas as pd
+    from sklearn.preprocessing import MinMaxScaler
 
     X, y = [], []
 
@@ -69,6 +70,18 @@ def create_dataset(features, window=20, strategy="단기"):
         print("[❌ 스킵] 필수 키 누락된 feature 존재")
         return np.array([]), np.array([])
 
+    df = pd.DataFrame(features)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df = df.dropna().sort_values("timestamp").reset_index(drop=True)
+
+    # ✅ 스케일링 추가
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(df.drop(columns=["timestamp"]))
+    df_scaled = pd.DataFrame(scaled, columns=columns)
+    df_scaled["timestamp"] = df["timestamp"]
+
+    features = df_scaled.to_dict(orient="records")
+
     class_ranges = [
         (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
         (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
@@ -85,7 +98,7 @@ def create_dataset(features, window=20, strategy="단기"):
         try:
             seq = features[i - window:i]
             base = features[i]
-            entry_time = pd.to_datetime(base.get("timestamp"), errors="coerce")  # ✅ 타입 보정 추가
+            entry_time = pd.to_datetime(base.get("timestamp"), errors="coerce")
             entry_price = float(base.get("close", 0.0))
 
             if pd.isnull(entry_time) or entry_price <= 0:
