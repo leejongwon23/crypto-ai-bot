@@ -18,9 +18,14 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             return 20
 
         df_feat = compute_features(symbol, df, strategy)
-        # ✅ NaN 포함 여부까지 사전 검증
-        if df_feat is None or df_feat.empty or df_feat.isnull().any().any() or len(df_feat) < max(window_list) + 10:
-            print(f"[경고] {symbol}-{strategy} → feature 부족 또는 NaN 포함으로 기본값 반환")
+        # ✅ NaN 포함 여부까지 사전 검증 및 제거
+        if df_feat is None or df_feat.empty:
+            print(f"[경고] {symbol}-{strategy} → feature 부족으로 기본값 반환")
+            return 20
+
+        df_feat = df_feat.dropna().reset_index(drop=True)  # ✅ 핵심 보완
+        if df_feat.empty or len(df_feat) < max(window_list) + 10:
+            print(f"[경고] {symbol}-{strategy} → feature 부족으로 기본값 반환")
             return 20
 
         scaler = MinMaxScaler()
