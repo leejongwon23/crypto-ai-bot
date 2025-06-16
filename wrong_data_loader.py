@@ -2,6 +2,8 @@ import os
 import pandas as pd
 import numpy as np
 from data.utils import get_kline_by_strategy, compute_features
+from logger import get_feature_hash  # ✅ 중복 체크 위한 해시 필요
+from failure_db import load_existing_failure_hashes
 
 WRONG_CSV = "/persistent/wrong_predictions.csv"
 
@@ -13,6 +15,10 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
         df = pd.read_csv(WRONG_CSV, encoding="utf-8-sig")
         df = df[(df["symbol"] == symbol) & (df["strategy"] == strategy)]
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+
+        # ✅ label 문자열 오류 처리 보완
+        df = df[df["label"].apply(lambda x: str(x).strip().isdigit())]
+        df["label"] = df["label"].astype(int)
         df = df.dropna(subset=["timestamp", "label"])
     except Exception as e:
         print(f"[불러오기 오류] {symbol}-{strategy} → {e}")
@@ -36,11 +42,18 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
         df_feat["timestamp"] = df_feat.get("datetime")
     df_feat = df_feat.dropna().reset_index(drop=True)
 
+    # ✅ 중복 제거용 해시 불러오기
+    existing_hashes = load_existing_failure_hashes()
+    used_hashes = set()
+
     sequences = []
     for _, row in df.iterrows():
         try:
             entry_time = row["timestamp"]
-            label = int(float(row["label"]))
+            label = row["label"]
+
+            # ✅ timezone 통일
+            entry_time = pd.to_datetime(entry_time).tz_localize("Asia/Seoul") if entry_time.tzinfo is None else entry_time
 
             past_window = df_feat[df_feat["timestamp"] < entry_time].tail(window)
             if len(past_window) < window:
@@ -49,6 +62,12 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
             xb = past_window.drop(columns=["timestamp"]).to_numpy(dtype=np.float32)
             if xb.shape != (window, input_size):
                 continue
+
+            # ✅ 중복 학습 방지
+            h = get_feature_hash(xb[-1])
+            if h in used_hashes or h in existing_hashes:
+                continue
+            used_hashes.add(h)
 
             sequences.append((xb, label))
 
