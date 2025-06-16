@@ -215,17 +215,29 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print("⚠️ 로그 기록 실패")
 
 
+training_in_progress = {
+    "단기": False,
+    "중기": False,
+    "장기": False
+}
+
 def train_all_models():
-    for strat in ["단기", "중기", "장기"]:
-        for sym in SYMBOLS:
-            try:
-                train_one_model(sym, strat)
-            except Exception as e:
-                print(f"[전체 학습 오류] {sym}-{strat} → {e}")
-training_in_progress = {}
+    for strategy in ["단기", "중기", "장기"]:
+        if training_in_progress[strategy]:
+            print(f"⚠️ 이미 실행 중: {strategy} 학습 중복 방지")
+            continue
+        training_in_progress[strategy] = True
+
+        try:
+            for symbol in SYMBOLS:
+                try:
+                    train_one_model(symbol, strategy)
+                except Exception as e:
+                    print(f"[전체 학습 오류] {symbol}-{strategy} → {e}")
+        finally:
+            training_in_progress[strategy] = False
 
 def train_model_loop(strategy):
-    global training_in_progress
     if training_in_progress.get(strategy, False):
         print(f"⚠️ 이미 실행 중: {strategy} 학습 중복 방지")
         return
@@ -239,6 +251,7 @@ def train_model_loop(strategy):
                 print(f"[학습 실패] {symbol}-{strategy} → {e}")
     finally:
         training_in_progress[strategy] = False
+
         
 def balance_classes(X, y, min_samples=20, target_classes=None):
     from collections import Counter
