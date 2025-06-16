@@ -89,7 +89,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print("⚠️ timestamp 없음 → datetime으로 대체")
             df_feat["timestamp"] = df_feat.get("datetime", pd.Timestamp.now())
         df_feat = df_feat.dropna()
-        features = df_feat.to_dict(orient="records")
+        features = df_feat.to_dict(orient="records")  # ✅ 구조 오류 해결
 
         window = find_best_window(symbol, strategy)
         if not isinstance(window, int) or window <= 0:
@@ -193,8 +193,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 acc = accuracy_score(y_val, preds)
                 f1 = f1_score(y_val, preds, average="macro")
                 val_loss = lossfn(logits, yb).item()
-
-                print(f"[검증 성능] acc={acc:.4f}, f1={f1:.4f}, loss={val_loss:.4f}")  # ✅ 여기 추가됨
+                print(f"[검증 성능] acc={acc:.4f}, f1={f1:.4f}, loss={val_loss:.4f}")
 
             if acc >= 1.0 and len(set(y_val)) <= 2:
                 log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
