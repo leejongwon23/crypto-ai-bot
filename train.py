@@ -81,7 +81,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             return
 
         df_feat = compute_features(symbol, df, strategy)
-        if df_feat is None or len(df_feat) < 30 or df_feat.isnull().any().any():
+        if df_feat is None or df_feat.empty or df_feat.isnull().any().any():
             print("⛔ 중단: compute_features 결과 부족 또는 NaN")
             return
 
@@ -105,6 +105,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
         mask = (y_raw >= 0) & (y_raw < NUM_CLASSES)
         y_raw = y_raw[mask]
         X_raw = X_raw[mask]
+
         if len(X_raw) < 5:
             print(f"⛔ 중단: 유효 학습 샘플 부족 ({len(X_raw)})")
             return
@@ -120,7 +121,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
         X_train, y_train = X_bal, y_bal
         X_val, y_val = X_raw[-val_len:], y_raw[-val_len:]
 
-        # 실패 학습 데이터 반영
         failure_hashes = load_existing_failure_hashes()
         wrong_data = load_training_prediction_data(symbol, strategy, input_size, window)
         wrong_filtered, used_hashes = [], set()
@@ -148,20 +148,17 @@ def train_one_model(symbol, strategy, max_epochs=20):
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = FocalLoss(gamma=2)
 
-            def train_failures(data, repeat=4):
-                ds = TensorDataset(torch.tensor([x for x, _ in data], dtype=torch.float32),
-                                   torch.tensor([y for _, y in data], dtype=torch.long))
+            if wrong_filtered:
+                ds = TensorDataset(torch.tensor([x for x, _ in wrong_filtered], dtype=torch.float32),
+                                   torch.tensor([y for _, y in wrong_filtered], dtype=torch.long))
                 loader = DataLoader(ds, batch_size=16, shuffle=True)
-                for _ in range(repeat):
+                for _ in range(4):
                     for xb, yb in loader:
                         model.train()
                         logits = model(xb)
                         loss = lossfn(logits, yb)
                         if torch.isfinite(loss):
                             optimizer.zero_grad(); loss.backward(); optimizer.step()
-
-            if wrong_filtered:
-                train_failures(wrong_filtered)
 
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
@@ -206,7 +203,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             del model, xb, yb, logits
             torch.cuda.empty_cache()
             gc.collect()
-
     except Exception as e:
         print(f"[오류] {symbol}-{strategy} → {e}")
         try:
