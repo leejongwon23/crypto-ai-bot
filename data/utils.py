@@ -151,15 +151,7 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     print(f"[확인] {symbol}-{strategy}: 데이터 {len(df)}개 확보")
     return df
 
-
 def get_kline(symbol: str, interval: str = "60", limit: int = 300) -> pd.DataFrame:
-    """
-    Bybit Kline 데이터를 불러오는 함수
-    :param symbol: 종목명 (예: BTCUSDT)
-    :param interval: 시간 간격 ("60"=1시간, "240"=4시간, "D"=1일)
-    :param limit: 캔들 개수 (기본 300개)
-    :return: DataFrame (timestamp, open, high, low, close, volume)
-    """
     try:
         url = f"{BASE_URL}/v5/market/kline"
         params = {"category": "linear", "symbol": symbol, "interval": interval, "limit": limit}
@@ -181,11 +173,15 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300) -> pd.DataFra
         ])
         df = df[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
 
-        # ✅ 필수 컬럼 null 제거 (근본조치)
+        # ✅ 필수 컬럼 누락 or 전부 NaN or 전부 0인 경우 제거
         essential = ["open", "high", "low", "close", "volume"]
         df.dropna(subset=essential, inplace=True)
         if df.empty:
             print(f"[경고] get_kline() → 필수값 결측: {symbol}")
+            return None
+
+        if "high" not in df.columns or df["high"].isnull().all() or (df["high"] == 0).all():
+            print(f"[치명] get_kline() → 'high' 값 전부 비정상: {symbol}")
             return None
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
