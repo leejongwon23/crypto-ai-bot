@@ -85,11 +85,16 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"⛔ 중단: compute_features 결과 부족 → {len(df_feat)}개")
             return
 
+        # ✅ 추가된 NaN 체크 보완
+        if df_feat.isnull().any().any():
+            print("⛔ 중단: compute_features 결과에 NaN 존재 → 학습 중단")
+            return
+
         if "timestamp" not in df_feat.columns:
             print("⚠️ timestamp 없음 → datetime으로 대체")
             df_feat["timestamp"] = df_feat.get("datetime", pd.Timestamp.now())
         df_feat = df_feat.dropna()
-        features = df_feat.to_dict(orient="records")  # ✅ 구조 오류 해결
+        features = df_feat.to_dict(orient="records")
 
         window = find_best_window(symbol, strategy)
         if not isinstance(window, int) or window <= 0:
