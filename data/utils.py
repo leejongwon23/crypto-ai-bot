@@ -229,6 +229,12 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
         print(f"[⚠️ 대체] {symbol}-{strategy} → 'high' 컬럼 누락 → 'close'로 대체")
         df["high"] = df["close"]
 
+    # ✅ low/open 누락 방지
+    if "low" not in df.columns or df["low"].isnull().all():
+        df["low"] = df["close"]
+    if "open" not in df.columns or df["open"].isnull().all():
+        df["open"] = df["close"]
+
     # ✅ 신뢰성 높은 기본 지표
     df['ma20'] = df['close'].rolling(window=20).mean()
     delta = df['close'].diff()
@@ -257,9 +263,9 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     # ✅ OBV
     obv = [0]
     for i in range(1, len(df)):
-        if df['close'].iloc[i] > df['close'].iloc[i-1]:
+        if df['close'].iloc[i] > df['close'].iloc[i - 1]:
             obv.append(obv[-1] + df['volume'].iloc[i])
-        elif df['close'].iloc[i] < df['close'].iloc[i-1]:
+        elif df['close'].iloc[i] < df['close'].iloc[i - 1]:
             obv.append(obv[-1] - df['volume'].iloc[i])
         else:
             obv.append(obv[-1])
@@ -286,8 +292,9 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
 
     # ✅ 피처 선택
     base = [
-        "timestamp", "close", "volume", "ma20", "rsi", "macd", "bollinger",
-        "volatility", "trend_score", "stoch_rsi", "cci", "obv"
+        "timestamp", "open", "high", "low", "close", "volume",
+        "ma20", "rsi", "macd", "bollinger", "volatility",
+        "trend_score", "stoch_rsi", "cci", "obv"
     ]
     mid_extra = ["ema_cross"]
     long_extra = ["volume_cumsum", "roc", "mfi"]
@@ -299,7 +306,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
 
     df = df[base].dropna().reset_index(drop=True)
 
-    # ✅ 필수 컬럼에 NaN 여부 확인
+    # ✅ 필수 컬럼 존재 여부 및 NaN 검사
     required_cols = ["timestamp", "close", "high"]
     missing_cols = [col for col in required_cols if col not in df.columns or df[col].isnull().any()]
     if missing_cols or df.empty:
@@ -308,5 +315,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
 
     print(f"[완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     return df
+
 
 
