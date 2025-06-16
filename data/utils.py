@@ -157,19 +157,41 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300) -> pd.DataFra
         res = requests.get(url, params=params, timeout=10)
         res.raise_for_status()
         data = res.json()
+
         if "result" not in data or "list" not in data["result"]:
             print(f"[경고] get_kline() → 데이터 응답 구조 이상")
             return None
 
         raw = data["result"]["list"]
+        if not raw or len(raw) == 0:
+            print(f"[경고] get_kline() → 데이터 비어 있음: {symbol}")
+            return None
+
         df = pd.DataFrame(raw, columns=[
             "timestamp", "open", "high", "low", "close", "volume", "turnover"
         ])
-        df = df[["timestamp", "open", "high", "low", "close", "volume"]].astype(float)
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms").dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+
+        # ✅ 안전 변환: float 실패 시 NaN 처리
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
+        df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+        df = df.dropna(subset=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
         df = df.sort_values("timestamp").reset_index(drop=True)
         df["datetime"] = df["timestamp"]
+
+        if df.empty or df.isnull().any().any():
+            print(f"[경고] get_kline() → 유효 데이터 부족 또는 NaN 포함: {symbol}")
+            return None
+
         return df
+
+    except Exception as e:
+        print(f"[에러] get_kline({symbol}) 실패 → {e}")
+        return None
+
 
     except Exception as e:
         print(f"[에러] get_kline({symbol}) 실패 → {e}")
