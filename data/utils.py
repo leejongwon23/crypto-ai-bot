@@ -199,6 +199,11 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     elif "timestamp" not in df.columns:
         df["timestamp"] = pd.to_datetime("now")
 
+    # ✅ high 컬럼 자동 대체
+    if "high" not in df.columns or df["high"].isnull().all():
+        print(f"[⚠️ 대체] {symbol}-{strategy} → 'high' 컬럼 누락 → 'close'로 대체")
+        df["high"] = df["close"]
+
     # ✅ 신뢰성 높은 기본 지표
     df['ma20'] = df['close'].rolling(window=20).mean()
     delta = df['close'].diff()
@@ -245,7 +250,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
         df['ema5'] = df['close'].ewm(span=5, adjust=False).mean()
         df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
         df['ema_cross'] = df['ema5'] - df['ema20']
-
     elif strategy == "장기":
         df['volume_cumsum'] = df['volume'].cumsum()
         df['roc'] = df['close'].pct_change(periods=12)
@@ -268,15 +272,16 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     elif strategy == "장기":
         base += long_extra
 
-    df = df[base].dropna()
+    df = df[base].dropna().reset_index(drop=True)
 
-    # ✅ 필수 컬럼에 NaN 여부 확인 (학습 실패 방지용)
+    # ✅ 필수 컬럼에 NaN 여부 확인
     required_cols = ["timestamp", "close", "high"]
     missing_cols = [col for col in required_cols if col not in df.columns or df[col].isnull().any()]
-    if missing_cols:
+    if missing_cols or df.empty:
         print(f"[❌ compute_features 실패] 필수 컬럼 누락 또는 NaN 존재: {missing_cols}")
         return None
 
     print(f"[완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     return df
+
 
