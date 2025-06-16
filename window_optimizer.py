@@ -18,8 +18,9 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             return 20
 
         df_feat = compute_features(symbol, df, strategy)
-        if df_feat is None or df_feat.empty or len(df_feat) < max(window_list) + 10:
-            print(f"[경고] {symbol}-{strategy} → feature 부족으로 기본값 반환")
+        # ✅ NaN 포함 여부까지 사전 검증
+        if df_feat is None or df_feat.empty or df_feat.isnull().any().any() or len(df_feat) < max(window_list) + 10:
+            print(f"[경고] {symbol}-{strategy} → feature 부족 또는 NaN 포함으로 기본값 반환")
             return 20
 
         scaler = MinMaxScaler()
@@ -45,7 +46,6 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 if X is None or y is None or len(X) == 0 or len(X) != len(y):
                     continue
 
-                # ✅ 클래스 범위 초과 제거
                 y = np.array(y)
                 X = np.array(X)
                 mask = (y >= 0) & (y < NUM_CLASSES)
