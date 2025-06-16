@@ -127,7 +127,6 @@ def create_dataset(features, window=20, strategy="단기"):
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
 
-
 def get_kline_by_strategy(symbol: str, strategy: str):
     config = STRATEGY_CONFIG.get(strategy)
     if config is None:
@@ -136,12 +135,22 @@ def get_kline_by_strategy(symbol: str, strategy: str):
 
     df = get_kline(symbol, interval=config["interval"], limit=config["limit"])
     
-    if df is None or df.empty:
-        print(f"[경고] {symbol}-{strategy}: get_kline_by_strategy() → 데이터 없음")
-    else:
-        print(f"[확인] {symbol}-{strategy}: 데이터 {len(df)}개 확보")
+    # ✅ 응답 자체가 None이거나 DataFrame 아닌 경우
+    if df is None or not isinstance(df, pd.DataFrame):
+        print(f"[❌ 실패] {symbol}-{strategy}: get_kline() → None 또는 형식 오류")
+        return None
 
+    # ✅ 필수 컬럼 누락 또는 NaN 확인
+    required_cols = ["open", "high", "low", "close", "volume", "timestamp"]
+    missing_or_nan = [col for col in required_cols if col not in df.columns or df[col].isnull().any()]
+    if missing_or_nan:
+        print(f"[❌ 실패] {symbol}-{strategy}: 필수 컬럼 누락 또는 NaN 존재: {missing_or_nan}")
+        return None
+
+    # ✅ 정상 데이터 확보 시
+    print(f"[확인] {symbol}-{strategy}: 데이터 {len(df)}개 확보")
     return df
+
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 300) -> pd.DataFrame:
     """
