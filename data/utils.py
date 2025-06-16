@@ -50,10 +50,10 @@ import numpy as np
 
 def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
+    import pandas as pd
 
     X, y = [], []
 
-    # ✅ 기본 유효성 검사
     if not features or len(features) <= window:
         print(f"[❌ 스킵] features 부족 → len={len(features) if features else 0}")
         return np.array([]), np.array([])
@@ -64,7 +64,6 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[오류] features[0] 키 확인 실패 → {e}")
         return np.array([]), np.array([])
 
-    # ✅ 필수 키 존재 여부 사전 검사
     required_keys = {"timestamp", "close", "high"}
     if not all(all(k in f for k in required_keys) for f in features):
         print("[❌ 스킵] 필수 키 누락된 feature 존재")
@@ -86,16 +85,17 @@ def create_dataset(features, window=20, strategy="단기"):
         try:
             seq = features[i - window:i]
             base = features[i]
-            entry_time = base.get("timestamp")
+            entry_time = pd.to_datetime(base.get("timestamp"), errors="coerce")  # ✅ 타입 보정 추가
             entry_price = float(base.get("close", 0.0))
 
-            if not entry_time or entry_price <= 0:
+            if pd.isnull(entry_time) or entry_price <= 0:
                 continue
 
             future = [
                 f for f in features[i + 1:]
-                if f.get("timestamp") and (f["timestamp"] - entry_time).total_seconds() / 60 <= lookahead_minutes
+                if "timestamp" in f and pd.to_datetime(f["timestamp"], errors="coerce") - entry_time <= pd.Timedelta(minutes=lookahead_minutes)
             ]
+
             if len(seq) != window or len(future) < 1:
                 continue
 
