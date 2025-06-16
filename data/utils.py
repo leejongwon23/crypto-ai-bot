@@ -52,14 +52,22 @@ def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
 
     X, y = [], []
+
+    # ✅ 기본 유효성 검사
     if not features or len(features) <= window:
-        print(f"[❌ 스킵] features 부족 → len={len(features)}")
+        print(f"[❌ 스킵] features 부족 → len={len(features) if features else 0}")
         return np.array([]), np.array([])
 
     try:
         columns = [c for c in features[0].keys() if c != "timestamp"]
     except Exception as e:
         print(f"[오류] features[0] 키 확인 실패 → {e}")
+        return np.array([]), np.array([])
+
+    # ✅ 필수 키 존재 여부 사전 검사
+    required_keys = {"timestamp", "close", "high"}
+    if not all(all(k in f for k in required_keys) for f in features):
+        print("[❌ 스킵] 필수 키 누락된 feature 존재")
         return np.array([]), np.array([])
 
     class_ranges = [
@@ -71,7 +79,6 @@ def create_dataset(features, window=20, strategy="단기"):
         ( 0.50,  1.00), ( 1.00,  2.00), ( 2.00,  5.00)
     ]
     max_cls = len(class_ranges)
-
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
 
@@ -85,24 +92,20 @@ def create_dataset(features, window=20, strategy="단기"):
             if not entry_time or entry_price <= 0:
                 continue
 
-            future = [f for f in features[i + 1:]
-                      if f.get("timestamp") and (f["timestamp"] - entry_time).total_seconds() / 60 <= lookahead_minutes]
-
+            future = [
+                f for f in features[i + 1:]
+                if f.get("timestamp") and (f["timestamp"] - entry_time).total_seconds() / 60 <= lookahead_minutes
+            ]
             if len(seq) != window or len(future) < 1:
                 continue
 
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
             gain = (max_future_price - entry_price) / (entry_price + 1e-6)
-
             if not np.isfinite(gain) or abs(gain) > 5:
                 continue
 
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), -1)
-            if cls == -1:
-                print(f"[스킵] 🔻 gain={gain:.4f} → 클래스 없음 → i={i}")
-                continue
-            if cls >= max_cls:
-                print(f"[경고] 🔥 잘못된 클래스 번호: cls={cls} (max={max_cls - 1}) → i={i}")
+            if cls == -1 or cls >= max_cls:
                 continue
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
@@ -116,7 +119,6 @@ def create_dataset(features, window=20, strategy="단기"):
             print(f"[예외 발생] ❌ {e} → i={i}")
             continue
 
-    # ✅ 라벨 분포 요약 출력
     if y:
         labels, counts = np.unique(y, return_counts=True)
         print(f"[📊 클래스 분포] → {dict(zip(labels, counts))}")
