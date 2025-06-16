@@ -29,6 +29,11 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
     if df_feat is None or df_feat.empty:
         return []
 
+    # ✅ NaN 포함 여부 추가 확인
+    if df_feat.isnull().any().any():
+        print("[스킵] compute_features 결과에 NaN 포함 → 실패샘플 무시")
+        return []
+
     if "timestamp" not in df_feat.columns:
         df_feat["timestamp"] = df_feat.get("datetime")
 
