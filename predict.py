@@ -221,7 +221,7 @@ from logger import update_model_success
 def evaluate_predictions(get_price_fn):
     import csv, os, datetime, pytz
     import pandas as pd
-    from failure_db import ensure_failure_db, insert_failure_record
+    from failure_db import ensure_failure_db
     from logger import update_model_success
 
     ensure_failure_db()
@@ -247,23 +247,12 @@ def evaluate_predictions(get_price_fn):
         (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
         (-0.03, -0.01), (-0.01, 0.01), (0.01, 0.03), (0.03, 0.05),
         (0.05, 0.07), (0.07, 0.10), (0.10, 0.15), (0.15, 0.20),
-        (0.20, 0.30), (0.30, 0.50), (0.50, 1.00), (1.00, 2.00),
-        (2.00, 5.00)
+        (0.20, 0.30), (0.30, 0.50), (0.50, 1.00), (1.00, 2.00), (2.00, 5.00)
     ]
-    assert len(class_ranges) == 21
 
     for r in rows:
         try:
-            if r.get("status") not in ["pending", "failed", "v_pending", "v_failed"]:
-                updated.append(r)
-                continue
-
-            if r.get("source", "").strip() == "훈련":
-                r.update({
-                    "status": "skip_eval",
-                    "reason": "학습 로그 → 평가 제외",
-                    "return": 0.0
-                })
+            if r.get("status") not in ["pending", "v_pending"]:
                 updated.append(r)
                 continue
 
@@ -272,35 +261,23 @@ def evaluate_predictions(get_price_fn):
             model = r.get("model", "unknown")
             entry_price = float(r.get("entry_price", 0))
 
-            raw_val = r.get("predicted_class", "")
-            # ✅ 핵심 수정: 예외 문자열 포함 여부 추가
-            if not str(raw_val).strip() or str(raw_val).strip().lower() in ["nan", "none"]:
-                r.update({
-                    "status": "skip_eval",
-                    "reason": "예측 클래스 없음",
-                    "return": 0.0
-                })
+            raw_val = str(r.get("predicted_class", "")).strip().lower()
+            if raw_val in ["", "none", "nan", "['label']"]:
+                r.update({"status": "skip_eval", "reason": "예측 클래스 없음", "return": 0.0})
                 updated.append(r)
                 continue
 
             try:
                 pred_class = int(float(raw_val))
             except:
-                pred_class = -1
-
-            if pred_class == -1:
-                r.update({
-                    "status": "skip_eval",
-                    "reason": "유효하지 않은 클래스",
-                    "return": 0.0
-                })
+                r.update({"status": "skip_eval", "reason": "예측 클래스 파싱 실패", "return": 0.0})
                 updated.append(r)
                 continue
 
             timestamp = pd.to_datetime(r["timestamp"], utc=True).tz_convert("Asia/Seoul")
+            now = now_kst()
             horizon = eval_horizon_map.get(strategy, 6)
             deadline = timestamp + pd.Timedelta(hours=horizon)
-            now = now_kst()
 
             df = get_price_fn(symbol, strategy)
             if df is None or df.empty or "timestamp" not in df.columns:
@@ -309,33 +286,29 @@ def evaluate_predictions(get_price_fn):
                 continue
 
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Seoul")
+            future_df = df[(df["timestamp"] >= timestamp) & (df["timestamp"] <= deadline)]
 
             if now < deadline:
-                r.update({
-                    "reason": f"⏳ 평가 대기 중 ({now.strftime('%H:%M')} < {deadline.strftime('%H:%M')})",
-                    "return": 0.0
-                })
+                r.update({"reason": f"⏳ 평가 대기 중 ({now.strftime('%H:%M')} < {deadline.strftime('%H:%M')})", "return": 0.0})
                 updated.append(r)
                 continue
 
-            future_df = df[(df["timestamp"] >= timestamp) & (df["timestamp"] <= deadline)]
             if future_df.empty:
-                r.update({"status": "skip_eval", "reason": "미래 구간 데이터 없음", "return": 0.0})
+                r.update({"status": "skip_eval", "reason": "미래 구간 없음", "return": 0.0})
                 updated.append(r)
                 continue
 
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            if 0 <= pred_class < 21:
+            if 0 <= pred_class < len(class_ranges):
                 low, high = class_ranges[pred_class]
                 success = gain >= low and abs(gain) >= 0.01
             else:
-                success = False
                 low, high = 0.0, 0.0
+                success = False
 
-            vol_raw = str(r.get("volatility", "")).strip().lower()
-            vol = vol_raw in ["1", "true", "yes"]
+            vol = str(r.get("volatility", "")).lower() in ["1", "true", "yes"]
             status = "v_success" if vol and success else "v_fail" if vol else "success" if success else "fail"
 
             r.update({
