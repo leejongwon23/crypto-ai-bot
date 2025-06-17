@@ -245,16 +245,21 @@ def train_model_loop(strategy):
     if training_in_progress.get(strategy, False):
         print(f"⚠️ 이미 실행 중: {strategy} 학습 중복 방지")
         return
+
     training_in_progress[strategy] = True
+    print(f"📌 상태 진입 → {training_in_progress}")  # ✅ 상태 확인용
 
     try:
         for symbol in SYMBOLS:
             try:
+                print(f"▶ 학습 시작: {symbol}-{strategy}")
                 train_one_model(symbol, strategy)
             except Exception as e:
                 print(f"[학습 실패] {symbol}-{strategy} → {e}")
     finally:
         training_in_progress[strategy] = False
+        print(f"📌 상태 종료 → {training_in_progress}")  # ✅ 상태 해제 확인용
+
 
         
 def balance_classes(X, y, min_samples=20, target_classes=None):
