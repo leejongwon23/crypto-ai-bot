@@ -220,25 +220,26 @@ training_in_progress = {
 
 def train_all_models():
     strategies = ["단기", "중기", "장기"]
-    
+
     for strategy in strategies:
         if training_in_progress.get(strategy, False):
-            print(f"⚠️ 이미 실행 중: {strategy} 학습 중복 방지")
-            continue
+            print(f"⚠️ 이미 실행 중: {strategy} 학습 중복 방지"); continue
 
-        print(f"🚀 전략 학습 시작: {strategy}")
+        print(f"\n🚀 전략 학습 시작: {strategy}")
         training_in_progress[strategy] = True
 
         try:
             for symbol in SYMBOLS:
                 try:
+                    print(f"▶ 학습 시작: {symbol}-{strategy}")
                     train_one_model(symbol, strategy)
                 except Exception as e:
                     print(f"[오류] {symbol}-{strategy} 학습 실패 → {e}")
+        except Exception as e:
+            print(f"[치명 오류] {strategy} 전체 학습 중단 → {type(e).__name__}: {e}")
         finally:
             training_in_progress[strategy] = False
-            print(f"✅ 전략 학습 완료: {strategy}")
-
+            print(f"✅ 전략 학습 완료: {strategy}\n")
 
 def train_model_loop(strategy):
     if training_in_progress.get(strategy, False):
