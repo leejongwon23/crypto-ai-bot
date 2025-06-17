@@ -6,12 +6,19 @@ import pytz
 import os
 from matplotlib import font_manager
 
-# ✅ 한글 + 이모지 폰트 적용
-font_path = os.path.join("fonts", "NanumGothic-Regular.ttf")
-if os.path.exists(font_path):
-    font_manager.fontManager.addfont(font_path)
+# ✅ 한글 + 이모지 폰트 적용 (안전하게)
+font_paths = [
+    os.path.join("fonts", "NanumGothic-Regular.ttf"),
+    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"  # 시스템 기본 위치
+]
 
-plt.rcParams['font.family'] = ['NanumGothic', 'Noto Color Emoji']  # ✅ 이모지 폰트 추가
+valid_fonts = []
+for fp in font_paths:
+    if os.path.exists(fp):
+        font_manager.fontManager.addfont(fp)
+        valid_fonts.append(font_manager.FontProperties(fname=fp).get_name())
+
+plt.rcParams['font.family'] = valid_fonts or ['sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
 
 PREDICTION_LOG = "/persistent/prediction_log.csv"
@@ -86,8 +93,7 @@ def generate_visuals_for_strategy(strategy_label, strategy_kor):
         fig, ax = plt.subplots(figsize=(5,2))
         ax.plot(df['timestamp'], df['accuracy_before'], label="Before")
         ax.plot(df['timestamp'], df['accuracy_after'], label="After")
-        handles, labels = ax.get_legend_handles_labels()
-        if labels:
+        if ax.get_legend_handles_labels()[1]:
             ax.legend()
         ax.set_title("📚 오답학습 전후 정확도 변화")
         html += plot_to_html(fig, "📚 오답학습 전후 정확도 변화")
@@ -132,8 +138,7 @@ def generate_visuals_for_strategy(strategy_label, strategy_kor):
             temp = group[group['model'] == m]
             ax.plot(temp['date'], temp['result'], label=m)
         ax.set_title("🧠 모델별 성공률 변화")
-        handles, labels = ax.get_legend_handles_labels()
-        if labels:
+        if ax.get_legend_handles_labels()[1]:
             ax.legend()
         html += plot_to_html(fig, "🧠 모델별 성공률 변화")
     except Exception as e:
@@ -147,8 +152,7 @@ def generate_visuals_for_strategy(strategy_label, strategy_kor):
         fig, ax = plt.subplots(figsize=(5,2))
         ax.plot(df['timestamp'], df['predicted_volatility'], label="예측 변동성")
         ax.plot(df['timestamp'], df['actual_volatility'], label="실제 변동성")
-        handles, labels = ax.get_legend_handles_labels()
-        if labels:
+        if ax.get_legend_handles_labels()[1]:
             ax.legend()
         ax.set_title("🌪️ 변동성 예측 vs 실제 변동성")
         html += plot_to_html(fig, "🌪️ 변동성 예측 vs 실제 변동성")
@@ -164,3 +168,4 @@ def generate_visual_report():
         generate_visuals_for_strategy("중기", "중기") +
         generate_visuals_for_strategy("장기", "장기")
     )
+
