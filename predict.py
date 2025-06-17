@@ -40,7 +40,6 @@ def class_to_expected_return(cls):
     ]
     return centers[cls] if 0 <= cls < len(centers) else 0.0
 
-
 def failed_result(symbol, strategy, model_type="unknown", reason="", source="일반", X_input=None):
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -73,7 +72,8 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         "class": -1,
         "timestamp": t,
         "source": source,
-        "predicted_class": -1  # ✅ 반드시 포함됨
+        "predicted_class": -1,  # ✅ 반드시 포함됨
+        "label": -1             # ✅ 학습을 위한 실패 클래스 라벨 명시
     }
 
     if X_input is not None:
@@ -84,6 +84,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             pass
 
     return result
+
 
 def predict(symbol, strategy, source="일반"):
     DEVICE = torch.device("cpu")
