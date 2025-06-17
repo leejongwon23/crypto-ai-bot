@@ -174,7 +174,8 @@ def predict(symbol, strategy, source="일반"):
                         "expected_return": expected_return,
                         "price": raw_close, "timestamp": t,
                         "success": True, "source": source,
-                        "predicted_class": pred_class
+                        "predicted_class": pred_class,
+                        "label": pred_class  # ✅ 실패학습용 label 필드 추가
                     }
 
                     try:
@@ -197,6 +198,7 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+
 
 def adjust_probs_with_diversity(probs, recent_freq: Counter, alpha=0.1):
     """
