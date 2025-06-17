@@ -48,7 +48,8 @@ def plot_to_html(fig, title):
     except Exception as e:
         return f"<p>{title} 시각화 실패: {e}</p>"
 
-def generate_visuals_for_strategy(strategy_label, strategy_kor):
+def generate_visuals_for_strategy(strategy):
+    strategy_kor = strategy  # ✅ 한글 전략명 자동 처리
     html = f"<h2>📊 {strategy_kor} 전략 분석</h2><div style='display:flex;flex-wrap:wrap;'>"
 
     try:
@@ -63,7 +64,7 @@ def generate_visuals_for_strategy(strategy_label, strategy_kor):
         html += f"<p>audit_log.csv 로드 실패: {e}</p>"
 
     try:
-        df = df_pred[df_pred['strategy'] == strategy_label]
+        df = df_pred[df_pred['strategy'] == strategy]
         df['date'] = df['timestamp'].dt.date
         df['result'] = df['status'].map({'success': 1, 'fail': 0})
         sr = df[df['status'].isin(['success', 'fail'])].groupby('date')['result'].mean().reset_index()
@@ -75,7 +76,7 @@ def generate_visuals_for_strategy(strategy_label, strategy_kor):
         html += f"<p>1번 오류: {e}</p>"
 
     try:
-        df = df_audit[df_audit['strategy'] == strategy_label]
+        df = df_audit[df_audit['strategy'] == strategy]
         fig, ax = plt.subplots(figsize=(5,2))
         ax.scatter(df['predicted_return'], df['actual_return'], alpha=0.5)
         ax.set_xlabel("예측 수익률")
@@ -87,7 +88,7 @@ def generate_visuals_for_strategy(strategy_label, strategy_kor):
 
     try:
         df = df_audit.dropna(subset=['accuracy_before', 'accuracy_after'])
-        df = df[df['strategy'] == strategy_label]
+        df = df[df['strategy'] == strategy]
         df['accuracy_before'] = pd.to_numeric(df['accuracy_before'], errors='coerce')
         df['accuracy_after'] = pd.to_numeric(df['accuracy_after'], errors='coerce')
         fig, ax = plt.subplots(figsize=(5,2))
@@ -101,7 +102,7 @@ def generate_visuals_for_strategy(strategy_label, strategy_kor):
         html += f"<p>3번 오류: {e}</p>"
 
     try:
-        df = df_pred[df_pred['strategy'] == strategy_label]
+        df = df_pred[df_pred['strategy'] == strategy]
         df = df[df['status'].isin(['success', 'fail'])]
         df['result'] = df['status'].map({'success': 1, 'fail': 0})
         df = df.sort_values('timestamp', ascending=False).head(20)
@@ -116,7 +117,7 @@ def generate_visuals_for_strategy(strategy_label, strategy_kor):
         html += f"<p>4번 오류: {e}</p>"
 
     try:
-        df = df_audit[df_audit['strategy'] == strategy_label]
+        df = df_audit[df_audit['strategy'] == strategy]
         df = df.dropna(subset=['actual_return']).sort_values('timestamp')
         df['date'] = df['timestamp'].dt.date
         df['cum_return'] = df['actual_return'].cumsum()
@@ -128,7 +129,7 @@ def generate_visuals_for_strategy(strategy_label, strategy_kor):
         html += f"<p>5번 오류: {e}</p>"
 
     try:
-        df = df_pred[df_pred['strategy'] == strategy_label]
+        df = df_pred[df_pred['strategy'] == strategy]
         df = df[df['status'].isin(['success', 'fail']) & df['model'].notna()]
         df['result'] = df['status'].map({'success': 1, 'fail': 0})
         df['date'] = df['timestamp'].dt.date
@@ -145,7 +146,7 @@ def generate_visuals_for_strategy(strategy_label, strategy_kor):
         html += f"<p>6번 오류: {e}</p>"
 
     try:
-        df = df_audit[df_audit['strategy'] == strategy_label]
+        df = df_audit[df_audit['strategy'] == strategy]
         df = df.dropna(subset=['predicted_volatility', 'actual_volatility'])
         df['predicted_volatility'] = pd.to_numeric(df['predicted_volatility'], errors='coerce')
         df['actual_volatility'] = pd.to_numeric(df['actual_volatility'], errors='coerce')
@@ -164,7 +165,7 @@ def generate_visuals_for_strategy(strategy_label, strategy_kor):
 
 def generate_visual_report():
     return (
-        generate_visuals_for_strategy("단기", "단기") +
-        generate_visuals_for_strategy("중기", "중기") +
-        generate_visuals_for_strategy("장기", "장기")
+        generate_visuals_for_strategy("단기") +
+        generate_visuals_for_strategy("중기") +
+        generate_visuals_for_strategy("장기")
     )
