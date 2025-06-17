@@ -53,8 +53,8 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"🗘 저장됨: {path}"); sys.stdout.flush()
-
- def train_one_model(symbol, strategy, max_epochs=20):
+    
+def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     import numpy as np
     import pandas as pd
@@ -212,8 +212,8 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
         try:
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
-            print("⚠️ 로그 기록 실패")   
-
+            print("⚠️ 로그 기록 실패")
+    
 
 training_in_progress = {
     "단기": False,
