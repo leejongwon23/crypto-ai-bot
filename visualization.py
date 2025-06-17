@@ -9,7 +9,7 @@ from matplotlib import font_manager
 # ✅ 한글 + 이모지 폰트 적용 (안전하게)
 font_paths = [
     os.path.join("fonts", "NanumGothic-Regular.ttf"),
-    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"  # 시스템 기본 위치
+    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"
 ]
 
 valid_fonts = []
@@ -168,4 +168,3 @@ def generate_visual_report():
         generate_visuals_for_strategy("중기", "중기") +
         generate_visuals_for_strategy("장기", "장기")
     )
-
