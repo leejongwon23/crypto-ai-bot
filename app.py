@@ -179,7 +179,6 @@ def yopo_health():
 </div>"""
 
             try:
-                # ✅ 수정된 부분: strategy → strat
                 visual = generate_visuals_for_strategy(strat, strat)
             except Exception as e:
                 visual = f"<div style='color:red'>[시각화 실패: {e}]</div>"
@@ -191,6 +190,7 @@ def yopo_health():
 
     status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
     return f"<div style='font-family:monospace;line-height:1.6;font-size:15px;'><b>{status}</b><hr>" + "".join(strategy_html) + "</div>"
+
 
 
 @app.route("/")
