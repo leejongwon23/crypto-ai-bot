@@ -77,7 +77,6 @@ def start_scheduler():
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료"); sys.stdout.flush()
 @app.route("/yopo-health")
-@app.route("/yopo-health")
 def yopo_health():
     percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
     logs, strategy_html, problems = {}, [], []
@@ -237,7 +236,7 @@ def train_log():
     try:
         if not os.path.exists(LOG_FILE):
             return "학습 로그 없음"
-        df = pd.read_csv(LOG_FILE, encoding="utf-8-sig")
+        df = pd.read_csv(LOG_FILE, encoding="utf-8-sig", on_bad_lines="skip")
         if df.empty or df.shape[1] == 0:
             return "학습 기록 없음"
         return "<pre>" + df.to_csv(index=False) + "</pre>"
