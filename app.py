@@ -267,6 +267,34 @@ def check_log():
     except Exception as e:
         return jsonify({"error": str(e)})
 
+@app.route("/check-eval-log")
+def check_eval_log():
+    try:
+        path = "/persistent/prediction_log.csv"
+        if not os.path.exists(path):
+            return "예측 로그 없음"
+
+        df = pd.read_csv(path, encoding="utf-8-sig")
+        df = df[df["status"].isin(["success", "fail", "v_success", "v_fail"])]
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        latest = df.sort_values(by="timestamp", ascending=False).head(100)
+
+        def status_icon(s):
+            return {
+                "success": "✅", "fail": "❌",
+                "v_success": "✅", "v_fail": "❌"
+            }.get(s, "❓")
+
+        html = "<table border='1'><tr><th>시각</th><th>심볼</th><th>전략</th><th>모델</th><th>예측</th><th>수익률</th><th>상태</th><th>사유</th></tr>"
+        for _, r in latest.iterrows():
+            icon = status_icon(r["status"])
+            html += f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['strategy']}</td><td>{r['model']}</td><td>{r.get('direction','')}</td><td>{r.get('return',0):.4f}</td><td>{icon}</td><td>{r.get('reason','')}</td></tr>"
+        html += "</table>"
+
+        return html
+    except Exception as e:
+        return f"❌ 오류: {e}", 500
+
 
 @app.route("/reset-all")
 def reset_all():
