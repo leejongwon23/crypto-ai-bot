@@ -117,6 +117,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                 result["source"] = result.get("source", source)
                 result["predicted_class"] = result.get("class", -1)
 
+                # ✅ 예측 직후엔 평가 전이므로 항상 pending 상태 → success=True 임시로 기록
                 log_prediction(
                     symbol=result.get("symbol", symbol),
                     strategy=result.get("strategy", strategy),
@@ -125,7 +126,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                     target_price=result.get("price", 0) * (1 + result.get("expected_return", 0)),
                     timestamp=result.get("timestamp", now_kst().isoformat()),
                     model=result.get("model", "unknown"),
-                    success=result.get("success", True),
+                    success=True,  # ✅ pending 상태를 위한 임시 처리
                     reason=result.get("reason", "예측 성공"),
                     rate=result.get("expected_return", 0.0),
                     return_value=result.get("expected_return", 0.0),
@@ -133,35 +134,23 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                     source=result.get("source", source),
                     predicted_class=result.get("class", -1)
                 )
-                log_audit(symbol, strategy, result, "예측 성공")
+                log_audit(symbol, strategy, result, "예측 기록 완료")
 
                 pred_class = result.get("class", -1)
                 if pred_class != -1:
                     class_distribution.setdefault(f"{symbol}-{strategy}", []).append(pred_class)
 
-                key = f"{symbol}-{strategy}"
-                if not result.get("success", False):
-                    if key not in triggered_trainings:
-                        print(f"[오답학습 트리거] {symbol}-{strategy} → 예측 실패 감지 → 즉시 학습 실행")
-                        triggered_trainings.add(key)
-                        try:
-                            threading.Thread(
-                                target=train.train_model,
-                                args=(symbol, strategy),
-                                daemon=True
-                            ).start()
-                        except Exception as e:
-                            print(f"[오류] 학습 쓰레드 실행 실패: {e}")
-
-                fmap[key] = 0
+                fmap[f"{symbol}-{strategy}"] = 0
                 results.append(result)
 
         except Exception as e:
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
             log_audit(symbol, strategy, None, f"예측 예외: {e}")
 
+    # ✅ 예측 클래스 다양성 감지 → fine-tune
     for key, classes in class_distribution.items():
         symbol, strat = key.split("-")
+        from collections import Counter
         class_counts = Counter(classes)
         if len(class_counts) <= 2:
             print(f"[편향 감지] {key} → 예측 클래스 다양성 부족 → fine-tune 트리거")
@@ -174,6 +163,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             except Exception as e:
                 print(f"[오류] fine-tune 실패: {e}")
 
+    # ✅ 전략별 실패율 기반 fine-tune
     for strat in ["단기", "중기", "장기"]:
         stat = strategy_stats.get(strat, {"success": 0, "fail": 0})
         total = stat["success"] + stat["fail"]
