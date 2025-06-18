@@ -6,7 +6,7 @@ import pytz
 
 from data.utils import SYMBOLS, get_kline_by_strategy
 from recommend import run_prediction
-from logger import get_model_success_rate, log_audit
+from logger import get_model_success_rate, log_audit_prediction
 
 last_trigger_time = {}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
