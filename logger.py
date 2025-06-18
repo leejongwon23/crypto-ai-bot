@@ -299,3 +299,20 @@ def export_recent_model_stats(recent_days=3):
     except Exception as e:
         print(f"[오류] 최근 모델 성능 집계 실패 → {e}")
 
+def log_training_result(symbol, strategy, model_name, acc, f1, loss):
+    row = {
+        "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol": symbol,
+        "strategy": strategy,
+        "model": model_name,
+        "accuracy": float(acc),
+        "f1_score": float(f1),
+        "loss": float(loss)
+    }
+    try:
+        pd.DataFrame([row]).to_csv(TRAIN_LOG, mode="a", index=False,
+                                   header=not os.path.exists(TRAIN_LOG),
+                                   encoding="utf-8-sig")
+    except:
+        pass
+
