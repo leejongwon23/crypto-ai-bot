@@ -54,7 +54,6 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"🗘 저장됨: {path}"); sys.stdout.flush()
     
-
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     import numpy as np
@@ -74,6 +73,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from data.utils import get_kline_by_strategy, compute_features, create_dataset
 
     print(f"▶ 학습 시작: {symbol}-{strategy}")
+    MODEL_DIR = "/persistent/models"
+    now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
     try:
         df = get_kline_by_strategy(symbol, strategy)
@@ -194,6 +195,18 @@ def train_one_model(symbol, strategy, max_epochs=20):
             save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss)
             log_training_result(symbol, strategy, model_type, acc, f1, val_loss)
 
+            # ✅ 모델 저장 후 오래된 모델 정리
+            try:
+                models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
+                models_with_time = [(f, os.path.getmtime(os.path.join(MODEL_DIR, f))) for f in models]
+                models_sorted = sorted(models_with_time, key=lambda x: x[1])
+                while len(models_sorted) > 30:
+                    old_file = models_sorted.pop(0)[0]
+                    os.remove(os.path.join(MODEL_DIR, old_file))
+                    print(f"🧹 오래된 모델 삭제됨: {old_file}")
+            except Exception as e:
+                print(f"[모델 정리 오류] {e}")
+
             try:
                 imps = compute_feature_importance(model, xb, yb, list(df_feat.drop(columns=["timestamp"]).columns))
                 save_feature_importance(imps, symbol, strategy, model_type)
@@ -210,6 +223,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
     
 
 training_in_progress = {
