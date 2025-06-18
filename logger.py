@@ -66,18 +66,16 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     now = timestamp or now_kst().isoformat()
     mname = str(model or "unknown")
 
-    # 예측 성공/실패 상태 구분
-    status = (
-        "v_pending" if volatility and success else
-        "v_failed" if volatility and not success else
-        "pending" if success else
-        "failed"
-    )
-
     try:
         pred_class_val = int(float(predicted_class)) if str(predicted_class).lower() not in ["", "nan", "none"] else -1
     except:
         pred_class_val = -1
+
+    # ✅ 평가 전에는 모두 pending으로 기록 (오답학습 방지 목적)
+    status = (
+        "v_pending" if volatility else
+        "pending"
+    )
 
     row = {
         "timestamp": now,
@@ -96,11 +94,11 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "predicted_class": pred_class_val
     }
 
-    # ✅ 예측 성공/실패 기록
-    log_audit_prediction(row["symbol"], row["strategy"], "예측성공" if success else "예측실패", row["reason"])
+    # ✅ 성공/실패는 평가 이후에만 기록
+    log_audit_prediction(row["symbol"], row["strategy"], "예측기록", row["reason"])
 
-    # ✅ 파일 이름을 날짜 기준으로 나눔
-    date_str = now.split("T")[0]  # 예: "2025-06-18"
+    # ✅ 날짜별 분리 저장
+    date_str = now.split("T")[0]
     file_path = f"/persistent/logs/prediction_{date_str}.csv"
 
     try:
@@ -111,7 +109,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
             w.writerow(row)
     except:
         pass
-
 
 
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
