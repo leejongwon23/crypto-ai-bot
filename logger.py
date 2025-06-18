@@ -120,32 +120,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     except:
         pass
 
-
-def save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss):
-    """
-    학습된 모델의 성능 메타데이터를 저장
-    """
-    try:
-        save_dir = "/persistent/logs"
-        os.makedirs(save_dir, exist_ok=True)
-        path = os.path.join(save_dir, f"model_metadata_{symbol}_{strategy}_{model_type}.csv")
-
-        row = {
-            "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-            "symbol": symbol,
-            "strategy": strategy,
-            "model": model_type,
-            "accuracy": round(float(acc), 4),
-            "f1_score": round(float(f1), 4),
-            "loss": round(float(val_loss), 4)
-        }
-
-        pd.DataFrame([row]).to_csv(path, index=False, encoding="utf-8-sig")
-        print(f"📦 모델 메타데이터 저장 완료 → {path}")
-    except Exception as e:
-        print(f"[오류] 모델 메타데이터 저장 실패 → {e}")
-
-
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
 
