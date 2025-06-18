@@ -80,7 +80,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
         try:
             model_count = len([
                 f for f in os.listdir("/persistent/models")
-                if f.startswith(f"{symbol}_{strategy}_") and f.endswith(".pt")
+                if f.startswith(f"{symbol}_{strategy}_") and (f.endswith(".pt") or f.endswith(".meta.json"))
             ])
             if model_count == 0:
                 log_audit(symbol, strategy, None, "모델 없음")
