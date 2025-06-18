@@ -96,17 +96,22 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "predicted_class": pred_class_val
     }
 
-    # ✅ 함수 이름 충돌 방지를 위해 이름 변경된 함수 호출
+    # ✅ 예측 성공/실패 기록
     log_audit_prediction(row["symbol"], row["strategy"], "예측성공" if success else "예측실패", row["reason"])
 
+    # ✅ 파일 이름을 날짜 기준으로 나눔
+    date_str = now.split("T")[0]  # 예: "2025-06-18"
+    file_path = f"/persistent/logs/prediction_{date_str}.csv"
+
     try:
-        with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
+        with open(file_path, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=row.keys())
             if f.tell() == 0:
                 w.writeheader()
             w.writerow(row)
     except:
         pass
+
 
 
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
