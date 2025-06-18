@@ -275,14 +275,15 @@ def check_eval_log():
             return "예측 로그 없음"
 
         df = pd.read_csv(path, encoding="utf-8-sig")
-        df = df[df["status"].isin(["success", "fail", "v_success", "v_fail"])]
+        df = df[df["status"].isin(["success", "fail", "v_success", "v_fail", "pending", "v_pending"])]
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         latest = df.sort_values(by="timestamp", ascending=False).head(100)
 
         def status_icon(s):
             return {
                 "success": "✅", "fail": "❌",
-                "v_success": "✅", "v_fail": "❌"
+                "v_success": "✅", "v_fail": "❌",
+                "pending": "⏳", "v_pending": "⏳"
             }.get(s, "❓")
 
         html = "<table border='1'><tr><th>시각</th><th>심볼</th><th>전략</th><th>모델</th><th>예측</th><th>수익률</th><th>상태</th><th>사유</th></tr>"
@@ -294,6 +295,7 @@ def check_eval_log():
         return html
     except Exception as e:
         return f"❌ 오류: {e}", 500
+
 
 
 @app.route("/reset-all")
