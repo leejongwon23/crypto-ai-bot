@@ -121,7 +121,9 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                     volatility=vol > 0,
                     source=result.get("source", source),
                     predicted_class=result.get("class", -1)
+                    status="pending",  # ✅ 이 줄 추가!
                 )
+                
                 log_audit(symbol, strategy, result, "예측 성공")
 
                 pred_class = result.get("class", -1)
