@@ -245,6 +245,18 @@ def list_models():
     except Exception as e:
         return f"오류: {e}", 500
 
+@app.route("/check-log-full")
+def check_log_full():
+    try:
+        import pandas as pd
+        path = "/persistent/logs/prediction_{}.csv".format(datetime.datetime.now().strftime("%Y-%m-%d"))
+        df = pd.read_csv(path, encoding="utf-8-sig")
+        latest = df.sort_values(by="timestamp", ascending=False).head(100)
+        return jsonify(latest.to_dict(orient="records"))
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
 @app.route("/check-log")
 def check_log():
     try:
