@@ -71,6 +71,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from logger import log_training_result, get_feature_hash_from_tensor
     from window_optimizer import find_best_window
     from data.utils import get_kline_by_strategy, compute_features, create_dataset
+    from logger import save_model_metadata
 
     print(f"▶ 학습 시작: {symbol}-{strategy}")
     MODEL_DIR = "/persistent/models"
@@ -139,7 +140,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size=input_size, output_size=NUM_CLASSES).train()
-            model_path = f"/persistent/models/{symbol}_{strategy}_{model_type}.pt"
+            model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt"
             if os.path.exists(model_path):
                 try:
                     model.load_state_dict(torch.load(model_path, map_location="cpu"))
@@ -184,18 +185,22 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 val_loss = lossfn(logits, yb).item()
                 print(f"[검증 성능] acc={acc:.4f}, f1={f1:.4f}, loss={val_loss:.4f}")
 
+            # ✅ 여기 수정됨 — 오버핏, 비정상 모델도 저장
             if acc >= 1.0 and len(set(y_val)) <= 2:
                 log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
+                torch.save(model.state_dict(), model_path)
+                save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss)
                 continue
             if f1 > 2.0 or val_loss > 2.0 or acc < 0.01:
                 log_training_result(symbol, strategy, f"비정상({model_type})", acc, f1, val_loss)
+                torch.save(model.state_dict(), model_path)
+                save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss)
                 continue
 
             torch.save(model.state_dict(), model_path)
             save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss)
             log_training_result(symbol, strategy, model_type, acc, f1, val_loss)
 
-            # ✅ 모델 저장 후 오래된 모델 정리
             try:
                 models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
                 models_with_time = [(f, os.path.getmtime(os.path.join(MODEL_DIR, f))) for f in models]
