@@ -341,8 +341,17 @@ def evaluate_predictions(get_price_fn):
                     w.writeheader()
                 w.writerows(failed)
 
+        # ✅ 추가된 부분 → 통합 평가 결과 CSV로도 반영
+        EVAL_ALL = "/persistent/evaluation_result.csv"
+        try:
+            df_all = pd.read_csv(EVAL_ALL, encoding="utf-8-sig") if os.path.exists(EVAL_ALL) else pd.DataFrame()
+            df_new = pd.DataFrame(evaluated)
+            df_all = pd.concat([df_all, df_new], ignore_index=True)
+            df_all.to_csv(EVAL_ALL, index=False, encoding="utf-8-sig")
+        except Exception as e:
+            print(f"[평가 통합 저장 실패] {e}")
+
     with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader()
         w.writerows(updated)
-
