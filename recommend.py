@@ -93,12 +93,22 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             for result in pred_results:
                 if not isinstance(result, dict) or result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
                     reason = result.get("reason", "예측 실패") if isinstance(result, dict) else "predict() 반환 오류"
-                    log_prediction(symbol, strategy, "예측실패", 0, 0, now_kst().isoformat(),
-                                   model=result.get("model", "unknown"),
-                                   success=False, reason=reason,
-                                   rate=0.0, return_value=0.0, volatility=False,
-                                   source=source, predicted_class=-1,
-                                   status="pending")
+                    log_prediction(
+                        symbol=symbol,
+                        strategy=strategy,
+                        direction="예측실패",
+                        entry_price=0,
+                        target_price=0,
+                        timestamp=now_kst().isoformat(),
+                        model=result.get("model", "unknown"),
+                        success=False,
+                        reason=reason,
+                        rate=0.0,
+                        return_value=0.0,
+                        volatility=False,
+                        source=source,
+                        predicted_class=-1
+                    )
                     log_audit(symbol, strategy, result, reason)
                     continue
 
@@ -121,8 +131,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                     return_value=result.get("expected_return", 0.0),
                     volatility=vol > 0,
                     source=result.get("source", source),
-                    predicted_class=result.get("class", -1),
-                    status="pending"  # ✅ 반드시 포함
+                    predicted_class=result.get("class", -1)
                 )
                 log_audit(symbol, strategy, result, "예측 성공")
 
@@ -151,7 +160,6 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
             log_audit(symbol, strategy, None, f"예측 예외: {e}")
 
-    # ✅ 예측 클래스 편향 감지 → fine-tune
     for key, classes in class_distribution.items():
         symbol, strat = key.split("-")
         class_counts = Counter(classes)
@@ -166,7 +174,6 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             except Exception as e:
                 print(f"[오류] fine-tune 실패: {e}")
 
-    # ✅ 전략별 실패율 기반 fine-tune 트리거
     for strat in ["단기", "중기", "장기"]:
         stat = strategy_stats.get(strat, {"success": 0, "fail": 0})
         total = stat["success"] + stat["fail"]
