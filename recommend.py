@@ -213,3 +213,16 @@ def main(strategy=None, force=False, allow_prediction=True):
     for s in targets:
         run_prediction_loop(s, get_symbols_by_volatility(s), source="일반", allow_prediction=allow_prediction)
 
+import shutil
+
+def check_disk_usage(threshold_percent=90):
+    try:
+        total, used, free = shutil.disk_usage("/persistent")
+        used_percent = (used / total) * 100
+        if used_percent >= threshold_percent:
+            print(f"🚨 경고: 디스크 사용량 {used_percent:.2f}% (한도 {threshold_percent}%) 초과")
+        else:
+            print(f"✅ 디스크 사용량 정상: {used_percent:.2f}%")
+    except Exception as e:
+        print(f"[디스크 사용량 확인 실패] {e}")
+
