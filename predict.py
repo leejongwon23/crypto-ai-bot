@@ -88,7 +88,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 def predict(symbol, strategy, source="일반"):
     DEVICE = torch.device("cpu")
     MODEL_DIR = "/persistent/models"
-    now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
+    now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
     try:
         print(f"[PREDICT] {symbol}-{strategy} 시작")
@@ -139,7 +139,13 @@ def predict(symbol, strategy, source="일반"):
                     continue
 
                 model = get_model(model_type, X.shape[2], output_size=NUM_CLASSES)
-                model.load_state_dict(torch.load(path, map_location=DEVICE))
+                try:
+                    state = torch.load(path, map_location=DEVICE)
+                    model.load_state_dict(state)
+                except Exception as e:
+                    print(f"[로드 실패] {path} → {e}")
+                    continue  # ✅ 모델 로드 실패 시 예측 생략
+
                 model.eval()
 
                 with torch.no_grad():
@@ -193,7 +199,6 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
-
 
 def adjust_probs_with_diversity(probs, recent_freq: Counter, alpha=0.1):
     """
