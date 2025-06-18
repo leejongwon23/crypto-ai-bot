@@ -45,7 +45,7 @@ def get_strategy_eval_count(strategy):
         return len(df[(df["strategy"] == strategy) & df["status"].isin(["success", "fail"])])
     except: return 0
 
-def log_audit(s, t, status, reason):
+def log_audit_prediction(s, t, status, reason):
     row = {
         "timestamp": now_kst().isoformat(),
         "symbol": str(s or "UNKNOWN"),
@@ -65,7 +65,14 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                    return_value=None, volatility=False, source="일반", predicted_class=None):
     now = timestamp or now_kst().isoformat()
     mname = str(model or "unknown")
-    status = "v_pending" if volatility and success else "v_failed" if volatility and not success else "pending" if success else "failed"
+
+    # 예측 성공/실패 상태 구분
+    status = (
+        "v_pending" if volatility and success else
+        "v_failed" if volatility and not success else
+        "pending" if success else
+        "failed"
+    )
 
     try:
         pred_class_val = int(float(predicted_class)) if str(predicted_class).lower() not in ["", "nan", "none"] else -1
@@ -89,7 +96,8 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "predicted_class": pred_class_val
     }
 
-    log_audit(row["symbol"], row["strategy"], "예측성공" if success else "예측실패", row["reason"])
+    # ✅ 함수 이름 충돌 방지를 위해 이름 변경된 함수 호출
+    log_audit_prediction(row["symbol"], row["strategy"], "예측성공" if success else "예측실패", row["reason"])
 
     try:
         with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
@@ -99,6 +107,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
             w.writerow(row)
     except:
         pass
+
 
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     row = {
