@@ -77,11 +77,20 @@ def start_scheduler():
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료"); sys.stdout.flush()
 @app.route("/yopo-health")
+@app.route("/yopo-health")
 def yopo_health():
     percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
     logs, strategy_html, problems = {}, [], []
 
-    for name, path in {"pred": PREDICTION_LOG, "train": LOG_FILE, "audit": AUDIT_LOG, "msg": MESSAGE_LOG}.items():
+    # ✅ prediction_log.csv도 포함해서 가져옴
+    file_map = {
+        "pred": "/persistent/prediction_log.csv",
+        "train": LOG_FILE,
+        "audit": AUDIT_LOG,
+        "msg": MESSAGE_LOG
+    }
+
+    for name, path in file_map.items():
         try:
             logs[name] = pd.read_csv(path, encoding="utf-8-sig") if os.path.exists(path) else pd.DataFrame()
         except:
@@ -108,7 +117,6 @@ def yopo_health():
                 pred["volatility"] = False
 
             pred["return"] = pd.to_numeric(pred.get("return", pd.Series()), errors="coerce").fillna(0)
-
             nvol = pred[~pred["volatility"]] if not pred.empty else pd.DataFrame()
             vol = pred[pred["volatility"]] if not pred.empty else pd.DataFrame()
 
@@ -179,7 +187,8 @@ def yopo_health():
 </div>"""
 
             try:
-                visual = generate_visuals_for_strategy(strat, strat)
+                # ✅ 인자 1개로 호출 (strat만 전달)
+                visual = generate_visuals_for_strategy(strat)
             except Exception as e:
                 visual = f"<div style='color:red'>[시각화 실패: {e}]</div>"
 
