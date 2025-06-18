@@ -236,6 +236,7 @@ training_in_progress = {
     "중기": False,
     "장기": False
 }
+import time
 
 def train_all_models():
     strategies = ["단기", "중기", "장기"]
@@ -259,6 +260,10 @@ def train_all_models():
         finally:
             training_in_progress[strategy] = False
             print(f"✅ 전략 학습 완료: {strategy}\n")
+
+        time.sleep(5)  # ✅ 다음 전략 학습 전 5초 대기 → 병렬 진입 방지
+
+
 
 def train_model_loop(strategy):
     if training_in_progress.get(strategy, False):
