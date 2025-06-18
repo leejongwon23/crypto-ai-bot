@@ -144,7 +144,7 @@ def predict(symbol, strategy, source="일반"):
                     model.load_state_dict(state)
                 except Exception as e:
                     print(f"[로드 실패] {path} → {e}")
-                    continue  # ✅ 모델 로드 실패 시 예측 생략
+                    continue
 
                 model.eval()
 
@@ -187,6 +187,8 @@ def predict(symbol, strategy, source="일반"):
 
                     predictions.append(result)
 
+                del model  # ✅ 예측 후 메모리에서 모델 제거
+
             except Exception as e:
                 predictions.append(
                     failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source, X_input)
@@ -199,6 +201,7 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+
 
 def adjust_probs_with_diversity(probs, recent_freq: Counter, alpha=0.1):
     """
