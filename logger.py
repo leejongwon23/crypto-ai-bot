@@ -71,7 +71,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     except:
         pred_class_val = -1
 
-    # ✅ 평가 전에는 모두 pending으로 기록 (오답학습 방지 목적)
+    # ✅ 평가 전에는 모두 pending으로 기록
     status = (
         "v_pending" if volatility else
         "pending"
@@ -97,12 +97,11 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     # ✅ 성공/실패는 평가 이후에만 기록
     log_audit_prediction(row["symbol"], row["strategy"], "예측기록", row["reason"])
 
-    # ✅ 날짜별 분리 저장
+    # ✅ 1) 날짜별 파일에도 저장
     date_str = now.split("T")[0]
-    file_path = f"/persistent/logs/prediction_{date_str}.csv"
-
+    dated_path = f"/persistent/logs/prediction_{date_str}.csv"
     try:
-        with open(file_path, "a", newline="", encoding="utf-8-sig") as f:
+        with open(dated_path, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=row.keys())
             if f.tell() == 0:
                 w.writeheader()
@@ -110,22 +109,17 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     except:
         pass
 
-
-def log_training_result(symbol, strategy, model_name, acc, f1, loss):
-    row = {
-        "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-        "symbol": symbol,
-        "strategy": strategy,
-        "model": model_name,
-        "accuracy": float(acc),
-        "f1_score": float(f1),
-        "loss": float(loss)
-    }
+    # ✅ 2) 최신 예측 기록 파일에도 동시에 저장 → 여포헬스, /check-log 용
+    full_path = "/persistent/prediction_log.csv"
     try:
-        pd.DataFrame([row]).to_csv(TRAIN_LOG, mode="a", index=False,
-                                   header=not os.path.exists(TRAIN_LOG),
-                                   encoding="utf-8-sig")
-    except: pass
+        with open(full_path, "a", newline="", encoding="utf-8-sig") as f:
+            w = csv.DictWriter(f, fieldnames=row.keys())
+            if f.tell() == 0:
+                w.writeheader()
+            w.writerow(row)
+    except:
+        pass
+
 
 def save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss):
     """
