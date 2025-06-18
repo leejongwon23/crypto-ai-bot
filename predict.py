@@ -85,7 +85,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
-
 def predict(symbol, strategy, source="일반"):
     DEVICE = torch.device("cpu")
     MODEL_DIR = "/persistent/models"
@@ -146,15 +145,10 @@ def predict(symbol, strategy, source="일반"):
                 with torch.no_grad():
                     logits = model(torch.tensor(X, dtype=torch.float32))
                     probs = torch.softmax(logits, dim=1).cpu().numpy()
-
                     recent_freq = get_recent_class_frequencies(strategy)
                     probs[0] = adjust_probs_with_diversity(probs, recent_freq)
 
-                    try:
-                        pred_class = int(np.argmax(probs))
-                    except:
-                        pred_class = -1
-
+                    pred_class = int(np.argmax(probs))
                     from model.base_model import class_to_expected_return
                     expected_return = class_to_expected_return(pred_class)
 
@@ -176,7 +170,7 @@ def predict(symbol, strategy, source="일반"):
                         "price": raw_close, "timestamp": t,
                         "success": True, "source": source,
                         "predicted_class": pred_class,
-                        "label": pred_class  # ✅ 실패학습용 label 필드 추가
+                        "label": pred_class
                     }
 
                     try:
