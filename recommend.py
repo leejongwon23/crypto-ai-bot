@@ -205,6 +205,11 @@ def run_prediction(symbol, strategy):
 
 def main(strategy=None, force=False, allow_prediction=True):
     print(">>> [main] recommend.py 실행")
+
+    # ✅ 디스크 사용량 체크
+    check_disk_usage(threshold_percent=90)
+
     targets = [strategy] if strategy else ["단기", "중기", "장기"]
     for s in targets:
         run_prediction_loop(s, get_symbols_by_volatility(s), source="일반", allow_prediction=allow_prediction)
+
