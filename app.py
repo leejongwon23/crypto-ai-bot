@@ -81,8 +81,11 @@ def yopo_health():
     percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
     logs, strategy_html, problems = {}, [], []
 
+    now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+    today = now_kst().strftime("%Y-%m-%d")
+
     file_map = {
-        "pred": "/persistent/prediction_log.csv",
+        "pred": f"/persistent/logs/prediction_{today}.csv",  # ✅ 날짜별 파일로 수정
         "train": LOG_FILE,
         "audit": AUDIT_LOG,
         "msg": MESSAGE_LOG
@@ -189,8 +192,6 @@ def yopo_health():
 
     status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
     return f"<div style='font-family:monospace;line-height:1.6;font-size:15px;'><b>{status}</b><hr>" + "".join(strategy_html) + "</div>"
-
-
 
 @app.route("/")
 def index():
