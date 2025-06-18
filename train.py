@@ -71,7 +71,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from logger import log_training_result, get_feature_hash_from_tensor
     from window_optimizer import find_best_window
     from data.utils import get_kline_by_strategy, compute_features, create_dataset
-    from logger import save_model_metadata
+    
 
     print(f"▶ 학습 시작: {symbol}-{strategy}")
     MODEL_DIR = "/persistent/models"
