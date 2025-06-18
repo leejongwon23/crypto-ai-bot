@@ -230,9 +230,10 @@ def evaluate_predictions(get_price_fn):
     ensure_failure_db()
 
     PREDICTION_LOG = "/persistent/prediction_log.csv"
-    EVAL_RESULT = "/persistent/evaluation_result.csv"
-    WRONG = "/persistent/wrong_predictions.csv"
     now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+    date_str = now_kst().strftime("%Y-%m-%d")
+    EVAL_RESULT = f"/persistent/logs/evaluation_{date_str}.csv"
+    WRONG = f"/persistent/logs/wrong_{date_str}.csv"
 
     try:
         rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
@@ -329,7 +330,7 @@ def evaluate_predictions(get_price_fn):
     if evaluated:
         with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=evaluated[0].keys())
-            if os.stat(EVAL_RESULT).st_size == 0:
+            if f.tell() == 0:
                 w.writeheader()
             w.writerows(evaluated)
 
@@ -337,7 +338,7 @@ def evaluate_predictions(get_price_fn):
         if failed:
             with open(WRONG, "a", newline="", encoding="utf-8-sig") as f:
                 w = csv.DictWriter(f, fieldnames=failed[0].keys())
-                if os.stat(WRONG).st_size == 0:
+                if f.tell() == 0:
                     w.writeheader()
                 w.writerows(failed)
 
@@ -345,3 +346,4 @@ def evaluate_predictions(get_price_fn):
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader()
         w.writerows(updated)
+
