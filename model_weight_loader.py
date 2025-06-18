@@ -7,24 +7,34 @@ MODEL_DIR = "/persistent/models"
 
 def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
     """
-    예측 성공률 기반 가중치 반환 (0.0 ~ 1.0 사이)
-
-    - 65% 이상 성공률: 1.0
-    - 40~65% 사이: 선형 스케일링
-    - 40% 미만: 0.0
+    평가 로그를 날짜별로 읽고 모델 성능 기반 가중치 반환 (0.0 ~ 1.0)
     """
-    if not os.path.exists(EVAL_RESULT):
-        return 1.0
+    import glob
 
     try:
-        df = pd.read_csv(EVAL_RESULT, encoding="utf-8-sig")
+        eval_files = sorted(glob.glob("/persistent/logs/evaluation_*.csv"))
+        if not eval_files:
+            return 1.0
+
+        df_list = []
+        for file in eval_files:
+            try:
+                df = pd.read_csv(file, encoding="utf-8-sig")
+                df_list.append(df)
+            except:
+                continue
+
+        if not df_list:
+            return 1.0
+
+        df = pd.concat(df_list, ignore_index=True)
         df = df[(df["model"] == model_type) &
                 (df["strategy"] == strategy) &
                 (df["symbol"] == symbol) &
                 (df["status"].isin(["success", "fail"]))]
 
         if len(df) < min_samples:
-            return 1.0  # 샘플 부족 시 기본값
+            return 1.0
 
         success_rate = len(df[df["status"] == "success"]) / len(df)
 
@@ -33,7 +43,6 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
         elif success_rate < 0.4:
             return 0.0
         else:
-            # 40~65% 사이: 0.0~1.0 선형 스케일
             return round((success_rate - 0.4) / (0.65 - 0.4), 4)
 
     except Exception as e:
