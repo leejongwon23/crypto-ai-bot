@@ -81,7 +81,6 @@ def yopo_health():
     percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
     logs, strategy_html, problems = {}, [], []
 
-    # ✅ prediction_log.csv도 포함해서 가져옴
     file_map = {
         "pred": "/persistent/prediction_log.csv",
         "train": LOG_FILE,
@@ -91,7 +90,8 @@ def yopo_health():
 
     for name, path in file_map.items():
         try:
-            logs[name] = pd.read_csv(path, encoding="utf-8-sig") if os.path.exists(path) else pd.DataFrame()
+            logs[name] = pd.read_csv(path, encoding="utf-8-sig", on_bad_lines="skip")
+            logs[name] = logs[name][logs[name]["timestamp"].notna()] if "timestamp" in logs[name] else logs[name]
         except:
             logs[name] = pd.DataFrame()
 
@@ -125,10 +125,8 @@ def yopo_health():
 
             def perf(df, kind="일반"):
                 try:
-                    if kind == "변동성":
-                        s, f = stat(df, "v_success"), stat(df, "v_fail")
-                    else:
-                        s, f = stat(df, "success"), stat(df, "fail")
+                    s = stat(df, "v_success" if kind == "변동성" else "success")
+                    f = stat(df, "v_fail" if kind == "변동성" else "fail")
                     t = s + f
                     avg = df["return"].mean()
                     return {"succ": s, "fail": f, "succ_rate": s / t * 100 if t else 0,
@@ -158,25 +156,19 @@ def yopo_health():
                 recent10 = pred.sort_values("timestamp").tail(10).copy()
                 rows = []
                 for _, r in recent10.iterrows():
-                    rtn = r.get("return", 0.0)
-                    if rtn == 0.0: rtn = r.get("rate", 0.0)
+                    rtn = r.get("return", 0.0) or r.get("rate", 0.0)
                     try: rtn_pct = f"{float(rtn) * 100:.2f}%"
                     except: rtn_pct = "0.00%"
-                    rows.append(
-                        f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{rtn_pct}</td><td>{'✅' if r['status'] in ['success','v_success'] else '❌' if r['status'] in ['fail','v_fail'] else '⏳' if r['status']=='pending' else '🛑'}</td></tr>"
-                    )
-                table = (
-                    "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>상태</th></tr>"
-                    + "".join(rows)
-                    + "</table>"
-                )
+                    status_icon = '✅' if r['status'] in ['success','v_success'] else '❌' if r['status'] in ['fail','v_fail'] else '⏳' if r['status']=='pending' else '🛑'
+                    rows.append(f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{rtn_pct}</td><td>{status_icon}</td></tr>")
+                table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>상태</th></tr>" + "".join(rows) + "</table>"
 
             info_html = f"""<div style='border:1px solid #aaa;margin:16px 0;padding:10px;font-family:monospace;background:#f8f8f8;'>
 <b style='font-size:16px;'>📌 전략: {strat}</b><br>
 - 모델 수: {sum(types.values())} (lstm={types['lstm']}, cnn={types['cnn_lstm']}, trans={types['transformer']})<br>
 - 심볼 수: {len(SYMBOLS)} | 완전학습: {len(trained_syms)} | 미완성: {len(untrained)}<br>
 - 최근 학습: {train['timestamp'].iloc[-1] if not train.empty else '없음'}<br>
-- 최근 예측: {pred['timestamp'].iloc[-1] if not pred.empty and 'timestamp' in pred.columns else '없음'}<br>
+- 최근 예측: {pred['timestamp'].iloc[-1] if not pred.empty else '없음'}<br>
 - 최근 평가: {audit['timestamp'].iloc[-1] if not audit.empty else '없음'}<br>
 - 예측 (일반): {sn + fn + pn_ + fnl}건 (✅{sn} ❌{fn} ⏳{pn_} 🛑{fnl})<br>
 - 예측 (변동성): {sv + fv + pv + fvl}건 (✅{sv} ❌{fv} ⏳{pv} 🛑{fvl})<br>
@@ -186,7 +178,6 @@ def yopo_health():
 </div>"""
 
             try:
-                # ✅ 인자 1개로 호출 (strat만 전달)
                 visual = generate_visuals_for_strategy(strat)
             except Exception as e:
                 visual = f"<div style='color:red'>[시각화 실패: {e}]</div>"
@@ -270,10 +261,12 @@ def check_log():
     try:
         if not os.path.exists(PREDICTION_LOG):
             return jsonify({"error": "prediction_log.csv 없음"})
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
+        df = df[df["timestamp"].notna()]  # ✅ 빈 timestamp 제거
         return jsonify(df.tail(10).to_dict(orient='records'))
     except Exception as e:
         return jsonify({"error": str(e)})
+
 
 @app.route("/reset-all")
 def reset_all():
