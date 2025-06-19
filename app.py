@@ -214,14 +214,14 @@ def run():
         return f"Error: {e}", 500
 
 
-
 @app.route("/train-now")
 def train_now():
     try:
-        threading.Thread(target=train.train_all_models, daemon=True).start()
+        train.train_all_models()  # ✅ 병렬 아님 → 순차 실행
         return "✅ 모든 전략 학습 시작됨"
     except Exception as e:
         return f"학습 실패: {e}", 500
+
 
 @app.route("/train-log")
 def train_log():
