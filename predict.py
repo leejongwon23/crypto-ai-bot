@@ -176,11 +176,24 @@ def predict(symbol, strategy, source="일반"):
                     probs = torch.softmax(logits, dim=1).cpu().numpy()
 
                     recent_freq = get_recent_class_frequencies(strategy)
-                    class_counts = meta.get("class_distribution", {}) or {}
+                    class_counts = meta.get("class_counts", {}) or {}
 
+                    # ✅ 보정 적용
                     probs[0] = adjust_probs_with_diversity(probs, recent_freq, class_counts)
 
-                    pred_class = int(np.argmax(probs))
+                    # ✅ 상위 3개 후보 추출 + 점수 계산
+                    top3_idx = probs[0].argsort()[-3:][::-1]
+                    final_idx = top3_idx[0]
+                    best_score = 0
+                    for idx in top3_idx:
+                        diversity_bonus = 1.0 - (recent_freq.get(idx, 0) / (sum(recent_freq.values()) + 1e-6))
+                        class_weight = 1.0 + (1.0 - class_counts.get(str(idx), 0) / max(class_counts.values()) if class_counts else 0)
+                        score = probs[0][idx] * diversity_bonus * class_weight
+                        if score > best_score:
+                            final_idx = idx
+                            best_score = score
+
+                    pred_class = int(final_idx)
                     expected_return = class_to_expected_return(pred_class)
 
                     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
