@@ -290,3 +290,45 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     except:
         pass
 
+def get_class_success_rate(strategy, recent_days=3):
+    """
+    최근 prediction_log.csv 기반으로
+    클래스별 성공률을 계산해 딕셔너리로 반환
+    """
+    from collections import defaultdict
+    import pandas as pd
+    import os
+
+    path = "/persistent/prediction_log.csv"
+    if not os.path.exists(path):
+        return {}
+
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig")
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        cutoff = pd.Timestamp.now() - pd.Timedelta(days=recent_days)
+
+        df = df[(df["strategy"] == strategy) &
+                (df["timestamp"] >= cutoff) &
+                (df["predicted_class"] >= 0) &
+                (df["status"].isin(["success", "fail"]))]
+
+        stats = defaultdict(lambda: {"success": 0, "fail": 0})
+        for _, row in df.iterrows():
+            cls = int(row["predicted_class"])
+            if row["status"] == "success":
+                stats[cls]["success"] += 1
+            else:
+                stats[cls]["fail"] += 1
+
+        result = {}
+        for cls, val in stats.items():
+            total = val["success"] + val["fail"]
+            if total > 0:
+                result[cls] = round(val["success"] / total, 4)
+
+        return result
+
+    except Exception as e:
+        print(f"[⚠️ 클래스 성공률 계산 오류] {e}")
+        return {}
