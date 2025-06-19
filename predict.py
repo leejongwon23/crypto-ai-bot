@@ -141,7 +141,6 @@ def predict(symbol, strategy, source="일반"):
 
         for model_type, path in model_files.items():
             try:
-                # ✅ 메타 정보 검증
                 meta_path = path.replace(".pt", ".meta.json")
                 if not os.path.exists(meta_path):
                     print(f"[⚠️ 스킵] {path} → 메타정보 없음")
@@ -175,8 +174,11 @@ def predict(symbol, strategy, source="일반"):
                 with torch.no_grad():
                     logits = model(torch.tensor(X, dtype=torch.float32))
                     probs = torch.softmax(logits, dim=1).cpu().numpy()
+
                     recent_freq = get_recent_class_frequencies(strategy)
-                    probs[0] = adjust_probs_with_diversity(probs, recent_freq)
+                    class_counts = meta.get("class_distribution", {}) or {}
+
+                    probs[0] = adjust_probs_with_diversity(probs, recent_freq, class_counts)
 
                     pred_class = int(np.argmax(probs))
                     expected_return = class_to_expected_return(pred_class)
@@ -224,6 +226,7 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+
 
 
 from collections import Counter
