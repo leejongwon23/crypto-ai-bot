@@ -318,22 +318,26 @@ def balance_classes(X, y, min_samples=20, target_classes=None):
     class_counts = Counter(y)
     max_count = max(class_counts.values()) if class_counts else 0
     X_balanced, y_balanced = list(X), list(y)
+    original_counts = dict(class_counts)  # 🔍 복제 전 기록
 
     for cls in target_classes:
         count = class_counts.get(cls, 0)
         if count == 0:
             continue
 
-        # ✅ 기존 방식보다 희귀 클래스는 더 많이 복제 (최대 클래스 수까지)
         existing = [(x, y_val) for x, y_val in zip(X, y) if y_val == cls]
-        target_count = max(count, min_samples)
-
-        # 🆕 희귀 클래스일수록 많이 복제
         while class_counts[cls] < max(min_samples, int(max_count * 0.8)) and existing:
             x_dup, y_dup = random.choice(existing)
             X_balanced.append(x_dup)
             y_balanced.append(y_dup)
             class_counts[cls] += 1
 
+    # ✅ 복제 로그 출력
+    print("📊 클래스 복제 현황:")
+    for cls in target_classes:
+        before = original_counts.get(cls, 0)
+        after = class_counts.get(cls, 0)
+        if after > before:
+            print(f"  - 클래스 {cls}: {before}개 → {after}개 (복제됨)")
+
     return np.array(X_balanced), np.array(y_balanced)
-    
