@@ -140,29 +140,35 @@ def create_dataset(features, window=20, strategy="단기"):
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
 
+_kline_cache = {}
+
 def get_kline_by_strategy(symbol: str, strategy: str):
+    global _kline_cache
+    cache_key = f"{symbol}-{strategy}"
+    if cache_key in _kline_cache:
+        print(f"[캐시 사용] {cache_key}")
+        return _kline_cache[cache_key]
+
     config = STRATEGY_CONFIG.get(strategy)
     if config is None:
         print(f"[오류] 전략 설정 없음: {strategy}")
         return None
 
     df = get_kline(symbol, interval=config["interval"], limit=config["limit"])
-    
-    # ✅ 응답 자체가 None이거나 DataFrame 아닌 경우
     if df is None or not isinstance(df, pd.DataFrame):
         print(f"[❌ 실패] {symbol}-{strategy}: get_kline() → None 또는 형식 오류")
         return None
 
-    # ✅ 필수 컬럼 누락 또는 NaN 확인
     required_cols = ["open", "high", "low", "close", "volume", "timestamp"]
     missing_or_nan = [col for col in required_cols if col not in df.columns or df[col].isnull().any()]
     if missing_or_nan:
         print(f"[❌ 실패] {symbol}-{strategy}: 필수 컬럼 누락 또는 NaN 존재: {missing_or_nan}")
         return None
 
-    # ✅ 정상 데이터 확보 시
     print(f"[확인] {symbol}-{strategy}: 데이터 {len(df)}개 확보")
+    _kline_cache[cache_key] = df
     return df
+
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 300) -> pd.DataFrame:
     try:
@@ -224,27 +230,31 @@ def get_realtime_prices():
     except:
         return {}
 
+_feature_cache = {}
+
 def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFrame:
+    global _feature_cache
+    cache_key = f"{symbol}-{strategy}"
+    if cache_key in _feature_cache:
+        print(f"[캐시 사용] {cache_key} 피처")
+        return _feature_cache[cache_key]
+
     df = df.copy()
 
-    # ✅ timestamp 보장
     if "datetime" in df.columns:
         df["timestamp"] = df["datetime"]
     elif "timestamp" not in df.columns:
         df["timestamp"] = pd.to_datetime("now")
 
-    # ✅ high 컬럼 자동 대체
     if "high" not in df.columns or df["high"].isnull().all():
         print(f"[⚠️ 대체] {symbol}-{strategy} → 'high' 컬럼 누락 → 'close'로 대체")
         df["high"] = df["close"]
 
-    # ✅ low/open 누락 방지
     if "low" not in df.columns or df["low"].isnull().all():
         df["low"] = df["close"]
     if "open" not in df.columns or df["open"].isnull().all():
         df["open"] = df["close"]
 
-    # ✅ 신뢰성 높은 기본 지표
     df['ma20'] = df['close'].rolling(window=20).mean()
     delta = df['close'].diff()
     gain = delta.clip(lower=0).rolling(window=14).mean()
@@ -259,17 +269,14 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     df['volatility'] = df['close'].pct_change().rolling(window=20).std()
     df['trend_score'] = df['close'].pct_change(periods=3)
 
-    # ✅ Stochastic RSI
     min_rsi = df['rsi'].rolling(14).min()
     max_rsi = df['rsi'].rolling(14).max()
     df['stoch_rsi'] = (df['rsi'] - min_rsi) / (max_rsi - min_rsi + 1e-6)
 
-    # ✅ CCI
     tp = (df['high'] + df['low'] + df['close']) / 3
     cci = (tp - tp.rolling(20).mean()) / (0.015 * tp.rolling(20).std())
     df['cci'] = cci
 
-    # ✅ OBV
     obv = [0]
     for i in range(1, len(df)):
         if df['close'].iloc[i] > df['close'].iloc[i - 1]:
@@ -280,12 +287,10 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
             obv.append(obv[-1])
     df['obv'] = obv
 
-    # ✅ 볼린저 밴드
     bb_ma = df['close'].rolling(window=20).mean()
     bb_std = df['close'].rolling(window=20).std()
     df['bollinger'] = (df['close'] - bb_ma) / (2 * bb_std + 1e-6)
 
-    # ✅ 전략별 특화 피처
     if strategy == "중기":
         df['ema5'] = df['close'].ewm(span=5, adjust=False).mean()
         df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
@@ -299,7 +304,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
         mf_ratio = pos_mf.rolling(14).sum() / (neg_mf.rolling(14).sum() + 1e-6)
         df["mfi"] = 100 - (100 / (1 + mf_ratio))
 
-    # ✅ 피처 선택
     base = [
         "timestamp", "open", "high", "low", "close", "volume",
         "ma20", "rsi", "macd", "bollinger", "volatility",
@@ -315,7 +319,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
 
     df = df[base].dropna().reset_index(drop=True)
 
-    # ✅ 필수 컬럼 존재 여부 및 NaN 검사
     required_cols = ["timestamp", "close", "high"]
     missing_cols = [col for col in required_cols if col not in df.columns or df[col].isnull().any()]
     if missing_cols or df.empty:
@@ -323,4 +326,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
         return None
 
     print(f"[완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
+    _feature_cache[cache_key] = df
     return df
+
