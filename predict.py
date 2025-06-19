@@ -226,20 +226,42 @@ def predict(symbol, strategy, source="일반"):
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
 
 
-def adjust_probs_with_diversity(probs, recent_freq: Counter, alpha=0.1):
+from collections import Counter
+import numpy as np
+
+def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: Counter = None, alpha=0.1, beta=0.1):
     """
     probs: (1, NUM_CLASSES) softmax 결과
     recent_freq: 최근 예측 클래스 빈도 Counter
-    alpha: 조절 강도 (0.1 = ±10% 정도 조정)
+    class_counts: 학습된 클래스 분포 Counter (옵션)
+    alpha: 최근 예측 편향 조절 강도
+    beta: 희귀 클래스 강조 강도
     """
     probs = probs.copy()
     if probs.ndim == 2:
         probs = probs[0]
-    total = sum(recent_freq.values()) + 1e-6
-    weights = np.array([1.0 - alpha * (recent_freq.get(i, 0) / total) for i in range(len(probs))])
-    weights = np.clip(weights, 0.7, 1.3)
-    adjusted = probs * weights
+    
+    total_recent = sum(recent_freq.values()) + 1e-6
+    recent_weights = np.array([
+        1.0 - alpha * (recent_freq.get(i, 0) / total_recent)
+        for i in range(len(probs))
+    ])
+
+    if class_counts:
+        total_class = sum(class_counts.values()) + 1e-6
+        class_weights = np.array([
+            1.0 + beta * (1.0 - class_counts.get(i, 0) / total_class)
+            for i in range(len(probs))
+        ])
+    else:
+        class_weights = np.ones_like(recent_weights)
+
+    combined_weights = recent_weights * class_weights
+    combined_weights = np.clip(combined_weights, 0.5, 1.5)
+
+    adjusted = probs * combined_weights
     return adjusted / adjusted.sum()
+
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
 import pandas as pd
