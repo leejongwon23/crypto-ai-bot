@@ -59,7 +59,6 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"🗘 저장됨: {path}"); sys.stdout.flush()
 
-    
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     import numpy as np
@@ -133,6 +132,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
         X_train, y_train = X_bal, y_bal
         X_val, y_val = X_raw[-val_len:], y_raw[-val_len:]
 
+        class_counts = Counter(y_train)  # ✅ 추가된 부분
+
         failure_hashes = load_existing_failure_hashes()
         wrong_data = load_training_prediction_data(symbol, strategy, input_size, window)
         wrong_filtered, used_hashes = [], set()
@@ -197,16 +198,16 @@ def train_one_model(symbol, strategy, max_epochs=20):
             if acc >= 1.0 and len(set(y_val)) <= 2:
                 log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
                 torch.save(model.state_dict(), model_path)
-                save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss, input_size=input_size)
+                save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss, input_size=input_size, class_counts=class_counts)
                 continue
             if f1 > 2.0 or val_loss > 2.0 or acc < 0.01:
                 log_training_result(symbol, strategy, f"비정상({model_type})", acc, f1, val_loss)
                 torch.save(model.state_dict(), model_path)
-                save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss, input_size=input_size)
+                save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss, input_size=input_size, class_counts=class_counts)
                 continue
 
             torch.save(model.state_dict(), model_path)
-            save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss, input_size=input_size)
+            save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss, input_size=input_size, class_counts=class_counts)
             log_training_result(symbol, strategy, model_type, acc, f1, val_loss)
 
             try:
@@ -236,6 +237,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+    
 
 
 training_in_progress = {
