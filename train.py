@@ -39,21 +39,26 @@ def get_frequent_failures(min_count=5):
         return set()
     return {h for h, cnt in counter.items() if cnt >= min_count}
 
-def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=None):
+def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=None, class_counts=None):
     meta = {
         "symbol": symbol,
         "strategy": strategy,
         "model": model_type,
-        "input_size": input_size,  # ✅ 추가됨
+        "input_size": input_size,
         "accuracy": float(round(acc, 4)),
         "f1_score": float(round(f1, 4)),
         "loss": float(round(loss, 6)),
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
     }
+
+    if class_counts:
+        meta["class_counts"] = dict(class_counts)  # ✅ 클래스 분포 포함
+
     path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.meta.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"🗘 저장됨: {path}"); sys.stdout.flush()
+
     
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
