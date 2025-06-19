@@ -59,6 +59,8 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"🗘 저장됨: {path}"); sys.stdout.flush()
 
+from logger import get_fine_tune_targets  # 🔁 반드시 포함
+
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     import numpy as np
@@ -132,7 +134,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
         X_train, y_train = X_bal, y_bal
         X_val, y_val = X_raw[-val_len:], y_raw[-val_len:]
 
-        class_counts = Counter(y_train)  # ✅ 추가된 부분
+        class_counts = Counter(y_train)
 
         failure_hashes = load_existing_failure_hashes()
         wrong_data = load_training_prediction_data(symbol, strategy, input_size, window)
@@ -183,6 +185,19 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     loss = lossfn(logits, yb)
                     if torch.isfinite(loss):
                         optimizer.zero_grad(); loss.backward(); optimizer.step()
+
+            # ✅ Fine-Tune 타겟 클래스일 경우 추가 학습
+            fine_tune_targets = get_fine_tune_targets()
+            if not fine_tune_targets.empty:
+                targets = fine_tune_targets[fine_tune_targets["strategy"] == strategy]["class"].tolist()
+                if any(cls in targets for cls in y_train):
+                    print(f"🔁 Fine-Tune 반복 학습 시작")
+                    for _ in range(3):
+                        for xb, yb in train_loader:
+                            logits = model(xb)
+                            loss = lossfn(logits, yb)
+                            if torch.isfinite(loss):
+                                optimizer.zero_grad(); loss.backward(); optimizer.step()
 
             model.eval()
             with torch.no_grad():
@@ -237,7 +252,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
-    
 
 
 training_in_progress = {
