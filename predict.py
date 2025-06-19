@@ -406,3 +406,16 @@ def evaluate_predictions(get_price_fn):
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader()
         w.writerows(updated)
+
+def get_class_distribution(symbol, strategy, model_type):
+    import os, json
+    meta_path = f"/persistent/models/{symbol}_{strategy}_{model_type}.meta.json"
+    try:
+        if os.path.exists(meta_path):
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            return meta.get("class_counts", {})
+    except Exception as e:
+        print(f"[⚠️ 클래스 분포 로드 실패] {meta_path} → {e}")
+    return {}
+
