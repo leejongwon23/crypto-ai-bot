@@ -86,6 +86,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     return result
 
 def predict(symbol, strategy, source="일반"):
+    import json
     DEVICE = torch.device("cpu")
     MODEL_DIR = "/persistent/models"
     now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
@@ -103,11 +104,9 @@ def predict(symbol, strategy, source="일반"):
         if feat is None or feat.dropna().shape[0] < window + 1:
             return [failed_result(symbol, strategy, "unknown", "feature 부족", source)]
 
-        # ✅ 필터 조건1: volatility가 0 또는 너무 낮으면 예측 스킵
         if "volatility" in feat.columns and feat["volatility"].iloc[-1] < 0.00001:
             return [failed_result(symbol, strategy, "unknown", "변화량 없음", source)]
 
-        # ✅ 필터 조건2: 클래스 분포가 예측 이전에 무의미할 수 있음 (단기 노이즈 대비)
         if feat["close"].nunique() < 3:
             return [failed_result(symbol, strategy, "unknown", "가격 변화 부족", source)]
 
@@ -142,6 +141,23 @@ def predict(symbol, strategy, source="일반"):
 
         for model_type, path in model_files.items():
             try:
+                # ✅ 메타 정보 검증
+                meta_path = path.replace(".pt", ".meta.json")
+                if not os.path.exists(meta_path):
+                    print(f"[⚠️ 스킵] {path} → 메타정보 없음")
+                    continue
+
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+
+                if meta.get("model") != model_type:
+                    print(f"[❌ 불일치] {path} → 구조 불일치: 저장={meta.get('model')}, 요청={model_type}")
+                    continue
+
+                if meta.get("input_size") != X.shape[2]:
+                    print(f"[❌ 불일치] {path} → input_size 불일치: 저장={meta.get('input_size')}, 현재={X.shape[2]}")
+                    continue
+
                 weight = get_model_weight(model_type, strategy, symbol)
                 if weight <= 0.0:
                     continue
@@ -163,7 +179,6 @@ def predict(symbol, strategy, source="일반"):
                     probs[0] = adjust_probs_with_diversity(probs, recent_freq)
 
                     pred_class = int(np.argmax(probs))
-                    from model.base_model import class_to_expected_return
                     expected_return = class_to_expected_return(pred_class)
 
                     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
@@ -209,7 +224,6 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
-
 
 
 def adjust_probs_with_diversity(probs, recent_freq: Counter, alpha=0.1):
