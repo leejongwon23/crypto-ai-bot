@@ -103,6 +103,14 @@ def predict(symbol, strategy, source="일반"):
         if feat is None or feat.dropna().shape[0] < window + 1:
             return [failed_result(symbol, strategy, "unknown", "feature 부족", source)]
 
+        # ✅ 필터 조건1: volatility가 0 또는 너무 낮으면 예측 스킵
+        if "volatility" in feat.columns and feat["volatility"].iloc[-1] < 0.00001:
+            return [failed_result(symbol, strategy, "unknown", "변화량 없음", source)]
+
+        # ✅ 필터 조건2: 클래스 분포가 예측 이전에 무의미할 수 있음 (단기 노이즈 대비)
+        if feat["close"].nunique() < 3:
+            return [failed_result(symbol, strategy, "unknown", "가격 변화 부족", source)]
+
         if "timestamp" not in feat.columns:
             return [failed_result(symbol, strategy, "unknown", "timestamp 없음", source)]
 
@@ -187,7 +195,7 @@ def predict(symbol, strategy, source="일반"):
 
                     predictions.append(result)
 
-                del model  # ✅ 예측 후 메모리에서 모델 제거
+                del model
 
             except Exception as e:
                 predictions.append(
@@ -201,6 +209,7 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+
 
 
 def adjust_probs_with_diversity(probs, recent_freq: Counter, alpha=0.1):
