@@ -286,31 +286,33 @@ def train_model_loop(strategy):
         training_in_progress[strategy] = False
         print(f"📌 상태 종료 → {training_in_progress}")  # ✅ 상태 해제 확인용
 
-
-        
 def balance_classes(X, y, min_samples=20, target_classes=None):
     from collections import Counter
     import random
     import numpy as np
 
     if target_classes is None:
-        target_classes = range(NUM_CLASSES)  # ✅ NUM_CLASSES = 21 기준으로 적용
+        target_classes = range(NUM_CLASSES)
 
     class_counts = Counter(y)
+    max_count = max(class_counts.values()) if class_counts else 0
     X_balanced, y_balanced = list(X), list(y)
 
     for cls in target_classes:
         count = class_counts.get(cls, 0)
         if count == 0:
-            continue  # 아예 없는 클래스는 건너뜀
-        if count >= min_samples:
-            continue  # 충분히 많으면 건너뜀
+            continue
 
+        # ✅ 기존 방식보다 희귀 클래스는 더 많이 복제 (최대 클래스 수까지)
         existing = [(x, y_val) for x, y_val in zip(X, y) if y_val == cls]
-        while class_counts[cls] < min_samples and existing:
+        target_count = max(count, min_samples)
+
+        # 🆕 희귀 클래스일수록 많이 복제
+        while class_counts[cls] < max(min_samples, int(max_count * 0.8)) and existing:
             x_dup, y_dup = random.choice(existing)
             X_balanced.append(x_dup)
             y_balanced.append(y_dup)
             class_counts[cls] += 1
 
     return np.array(X_balanced), np.array(y_balanced)
+    
