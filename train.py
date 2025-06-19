@@ -39,11 +39,12 @@ def get_frequent_failures(min_count=5):
         return set()
     return {h for h, cnt in counter.items() if cnt >= min_count}
 
-def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
+def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=None):
     meta = {
         "symbol": symbol,
         "strategy": strategy,
         "model": model_type,
+        "input_size": input_size,  # ✅ 추가됨
         "accuracy": float(round(acc, 4)),
         "f1_score": float(round(f1, 4)),
         "loss": float(round(loss, 6)),
@@ -54,7 +55,6 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"🗘 저장됨: {path}"); sys.stdout.flush()
     
-
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     import numpy as np
@@ -99,7 +99,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"⛔ 중단: find_best_window 실패 → {window}")
             return
 
-        # ✅ 선제 필터링: feature 수 부족
         if df_feat.shape[0] < window + 1:
             print(f"⛔ 중단: feature 수 부족 → 필요 {window + 1}, 현재 {df_feat.shape[0]}")
             return
@@ -119,7 +118,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"⛔ 중단: 유효 학습 샘플 부족 ({len(X_raw)})")
             return
 
-        # ✅ 선제 필터링: 클래스 다양성 부족
         if len(set(y_raw)) < 2:
             print(f"⛔ 중단: 클래스 다양성 부족 ({len(set(y_raw))}종)")
             return
@@ -194,16 +192,16 @@ def train_one_model(symbol, strategy, max_epochs=20):
             if acc >= 1.0 and len(set(y_val)) <= 2:
                 log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
                 torch.save(model.state_dict(), model_path)
-                save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss)
+                save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss, input_size=input_size)
                 continue
             if f1 > 2.0 or val_loss > 2.0 or acc < 0.01:
                 log_training_result(symbol, strategy, f"비정상({model_type})", acc, f1, val_loss)
                 torch.save(model.state_dict(), model_path)
-                save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss)
+                save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss, input_size=input_size)
                 continue
 
             torch.save(model.state_dict(), model_path)
-            save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss)
+            save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss, input_size=input_size)
             log_training_result(symbol, strategy, model_type, acc, f1, val_loss)
 
             try:
@@ -233,7 +231,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
-    
+
 
 training_in_progress = {
     "단기": False,
