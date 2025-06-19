@@ -54,11 +54,13 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss):
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"🗘 저장됨: {path}"); sys.stdout.flush()
     
+
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     import numpy as np
     import pandas as pd
     import torch
+    import datetime, pytz
     from collections import Counter
     from model.base_model import get_model
     from feature_importance import compute_feature_importance, save_feature_importance
@@ -71,7 +73,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from logger import log_training_result, get_feature_hash_from_tensor
     from window_optimizer import find_best_window
     from data.utils import get_kline_by_strategy, compute_features, create_dataset
-    
 
     print(f"▶ 학습 시작: {symbol}-{strategy}")
     MODEL_DIR = "/persistent/models"
@@ -98,6 +99,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"⛔ 중단: find_best_window 실패 → {window}")
             return
 
+        # ✅ 선제 필터링: feature 수 부족
+        if df_feat.shape[0] < window + 1:
+            print(f"⛔ 중단: feature 수 부족 → 필요 {window + 1}, 현재 {df_feat.shape[0]}")
+            return
+
         X_raw, y_raw = create_dataset(features, window=window, strategy=strategy)
         if X_raw is None or y_raw is None or len(X_raw) < 5:
             print("⛔ 중단: 학습 데이터 생성 실패")
@@ -113,9 +119,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"⛔ 중단: 유효 학습 샘플 부족 ({len(X_raw)})")
             return
 
-        observed = Counter(int(c) for c in y_raw if c >= 0)
-        if len(observed) < 2:
-            print(f"⛔ 중단: 클래스 다양성 부족 ({len(observed)}종)")
+        # ✅ 선제 필터링: 클래스 다양성 부족
+        if len(set(y_raw)) < 2:
+            print(f"⛔ 중단: 클래스 다양성 부족 ({len(set(y_raw))}종)")
             return
 
         input_size = X_raw.shape[2]
@@ -185,7 +191,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 val_loss = lossfn(logits, yb).item()
                 print(f"[검증 성능] acc={acc:.4f}, f1={f1:.4f}, loss={val_loss:.4f}")
 
-            # ✅ 여기 수정됨 — 오버핏, 비정상 모델도 저장
             if acc >= 1.0 and len(set(y_val)) <= 2:
                 log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
                 torch.save(model.state_dict(), model_path)
@@ -228,7 +233,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
-
     
 
 training_in_progress = {
