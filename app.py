@@ -22,14 +22,23 @@ def start_scheduler():
     print(">>> 스케줄러 시작"); sys.stdout.flush()
     sched = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
 
-    # ✅ 전략별 학습 스케줄
+    # ✅ 전략별 학습 스케줄 (현재 주석 처리됨)
+    """
     학습 = [
         (1, 30, "단기"), (3, 30, "장기"), (6, 0, "중기"), (9, 0, "단기"),
         (11, 0, "중기"), (13, 0, "장기"), (15, 0, "단기"),
         (17, 0, "중기"), (19, 0, "장기"), (22, 30, "단기")
     ]
 
-    # ✅ 전략별 예측 스케줄
+    def 학습작업(s):
+        threading.Thread(target=train.train_model_loop, args=(s,), daemon=True).start()
+
+    for h, m, s in 학습:
+        sched.add_job(lambda s=s: 학습작업(s), trigger="cron", hour=h, minute=m)
+    """
+
+    # ✅ 전략별 예측 스케줄 (현재 주석 처리됨)
+    """
     예측 = [
         (7, 30, s) for s in ["단기", "중기", "장기"]
     ] + [
@@ -42,19 +51,12 @@ def start_scheduler():
         (0, 0, "단기"), (0, 0, "중기")
     ]
 
-    # ✅ 학습 등록
-    def 학습작업(s):
-        threading.Thread(target=train.train_model_loop, args=(s,), daemon=True).start()
-
-    for h, m, s in 학습:
-        sched.add_job(lambda s=s: 학습작업(s), trigger="cron", hour=h, minute=m)
-
-    # ✅ 예측 등록
     def 예측작업(s):
         threading.Thread(target=main, kwargs={"strategy": s, "force": True}, daemon=True).start()
 
     for h, m, s in 예측:
         sched.add_job(lambda s=s: 예측작업(s), trigger="cron", hour=h, minute=m)
+    """
 
     # ✅ 전략별 평가 등록 (30분마다 반복)
     def 평가작업(strategy):
@@ -69,6 +71,7 @@ def start_scheduler():
     sched.add_job(trigger_run, "interval", minutes=30)
 
     sched.start()
+
 
 
 
@@ -361,9 +364,8 @@ if __name__ == "__main__":
     print(">>> 서버 실행 준비")
     sys.stdout.flush()
 
-    # ✅ 스케줄러 임시 중지 — 필요 시 주석 해제하면 복구 가능
-    # threading.Thread(target=start_scheduler, daemon=True).start()
-
+    
+    threading.Thread(target=start_scheduler, daemon=True).start()
     threading.Thread(target=lambda: send_message("[시작] YOPO 서버 실행됨"), daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
