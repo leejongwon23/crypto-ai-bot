@@ -307,7 +307,7 @@ def evaluate_predictions(get_price_fn):
         print(f"[예측 평가 로드 오류] {e}")
         return
 
-    updated, evaluated = [], []
+    updated, evaluated = []
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
     class_ranges = [
         (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
@@ -320,7 +320,7 @@ def evaluate_predictions(get_price_fn):
     for r in rows:
         try:
             if r.get("status") not in ["pending", "v_pending"]:
-                updated.append(r)
+                updated.append({str(k): ("" if v is None else v) for k, v in r.items()})
                 continue
 
             symbol = r.get("symbol")
@@ -331,14 +331,14 @@ def evaluate_predictions(get_price_fn):
             raw_val = str(r.get("predicted_class", "")).strip().lower()
             if raw_val in ["", "none", "nan", "['label']"]:
                 r.update({"status": "skip_eval", "reason": "예측 클래스 없음", "return": 0.0})
-                updated.append(r)
+                updated.append({str(k): ("" if v is None else v) for k, v in r.items()})
                 continue
 
             try:
                 pred_class = int(float(raw_val))
             except:
-                r.update({"status": "skip_eval", "reason": "예측 클래스 파싱 실패", "return": 0.0})
-                updated.append(r)
+                r.update({"status": "skip_eval", "reason": "예측 클래스 파싱 실패", "return": 0.0, "predicted_class": -1})
+                updated.append({str(k): ("" if v is None else v) for k, v in r.items()})
                 continue
 
             timestamp = pd.to_datetime(r["timestamp"], utc=True).tz_convert("Asia/Seoul")
@@ -349,7 +349,7 @@ def evaluate_predictions(get_price_fn):
             df = get_price_fn(symbol, strategy)
             if df is None or df.empty or "timestamp" not in df.columns:
                 r.update({"status": "skip_eval", "reason": "가격 데이터 없음", "return": 0.0})
-                updated.append(r)
+                updated.append({str(k): ("" if v is None else v) for k, v in r.items()})
                 continue
 
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Seoul")
@@ -357,12 +357,12 @@ def evaluate_predictions(get_price_fn):
 
             if now < deadline:
                 r.update({"reason": f"⏳ 평가 대기 중 ({now.strftime('%H:%M')} < {deadline.strftime('%H:%M')})", "return": 0.0})
-                updated.append(r)
+                updated.append({str(k): ("" if v is None else v) for k, v in r.items()})
                 continue
 
             if future_df.empty:
                 r.update({"status": "skip_eval", "reason": "미래 구간 없음", "return": 0.0})
-                updated.append(r)
+                updated.append({str(k): ("" if v is None else v) for k, v in r.items()})
                 continue
 
             actual_max = future_df["high"].max()
@@ -384,11 +384,13 @@ def evaluate_predictions(get_price_fn):
                 "return": round(gain, 5)
             })
             update_model_success(symbol, strategy, model, success)
-            evaluated.append(dict(r))
+
+            safe_row = {str(k): ("" if v is None else v) for k, v in r.items()}
+            evaluated.append(safe_row)
 
         except Exception as e:
             r.update({"status": "skip_eval", "reason": f"예외 발생: {e}", "return": 0.0})
-            updated.append(r)
+            updated.append({str(k): ("" if v is None else v) for k, v in r.items()})
 
     if evaluated:
         with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as f:
@@ -405,7 +407,6 @@ def evaluate_predictions(get_price_fn):
                     w.writeheader()
                 w.writerows(failed)
 
-        # ✅ 추가된 부분 → 통합 평가 결과 CSV로도 반영
         EVAL_ALL = "/persistent/evaluation_result.csv"
         try:
             df_all = pd.read_csv(EVAL_ALL, encoding="utf-8-sig") if os.path.exists(EVAL_ALL) else pd.DataFrame()
@@ -419,6 +420,7 @@ def evaluate_predictions(get_price_fn):
         w = csv.DictWriter(f, fieldnames=updated[0].keys())
         w.writeheader()
         w.writerows(updated)
+
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
