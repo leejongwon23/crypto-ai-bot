@@ -339,3 +339,29 @@ def get_class_success_rate(strategy, recent_days=3):
     except Exception as e:
         print(f"[⚠️ 클래스 성공률 계산 오류] {e}")
         return {}
+
+import os
+
+MODEL_DIR = "/persistent/models"
+
+def get_available_models():
+    """
+    모델 폴더 내에서 .pt + .meta.json 쌍이 모두 존재하는 경우만 필터링해 리스트로 반환.
+    """
+    models = []
+    pt_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
+
+    for pt in pt_files:
+        base = pt.replace(".pt", "")
+        meta = f"{base}.meta.json"
+        if meta in os.listdir(MODEL_DIR):
+            symbol, strategy, model_type = base.split("_", 2)
+            models.append({
+                "symbol": symbol,
+                "strategy": strategy,
+                "model": model_type,
+                "pt_file": pt,
+                "meta_file": meta
+            })
+
+    return models
