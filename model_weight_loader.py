@@ -8,20 +8,14 @@ MODEL_DIR = "/persistent/models"
 def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
     """
     평가 로그를 날짜별로 읽고 모델 성능 기반 가중치 반환 (0.0 ~ 1.0)
-    ※ 단, 모델이 실제 존재하면 최소 weight=1.0 반환
     """
-    import glob, os
+    import glob
     import pandas as pd
-
-    MODEL_DIR = "/persistent/models"
-    model_base = f"{symbol}_{strategy}_{model_type}"
-    model_path = os.path.join(MODEL_DIR, f"{model_base}.pt")
-    meta_path = os.path.join(MODEL_DIR, f"{model_base}.meta.json")
 
     try:
         eval_files = sorted(glob.glob("/persistent/logs/evaluation_*.csv"))
         if not eval_files:
-            return 1.0  # 평가 로그 없으면 기본값 허용
+            return 1.0
 
         df_list = []
         for file in eval_files:
@@ -35,10 +29,12 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
             return 1.0
 
         df = pd.concat(df_list, ignore_index=True)
-        df = df[(df["model"] == model_type) &
-                (df["strategy"] == strategy) &
-                (df["symbol"] == symbol) &
-                (df["status"].isin(["success", "fail"]))]
+        df = df[
+            (df["model"] == model_type) &
+            (df["strategy"] == strategy) &
+            (df["symbol"] == symbol) &
+            (df["status"].isin(["success", "fail"]))
+        ]
 
         if len(df) < min_samples:
             return 1.0
@@ -54,10 +50,8 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
 
     except Exception as e:
         print(f"[오류] get_model_weight 실패: {e}")
-        # ✅ 예외 발생 시라도 모델 파일이 존재하면 weight=1.0 반환
-        if os.path.exists(model_path) and os.path.exists(meta_path):
-            return 1.0
-        return 0.0
+        return 1.0
+
 
 
 def model_exists(symbol, strategy):
