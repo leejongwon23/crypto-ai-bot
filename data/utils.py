@@ -72,13 +72,13 @@ def create_dataset(features, window=20, strategy="단기"):
 
     df = pd.DataFrame(features)
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    df = df.dropna().sort_values("timestamp").reset_index(drop=True)
+    df = df.dropna(subset=["timestamp", "close", "high"]).sort_values("timestamp").reset_index(drop=True)
 
     # ✅ 스케일링 추가
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(df.drop(columns=["timestamp"]))
     df_scaled = pd.DataFrame(scaled, columns=columns)
-    df_scaled["timestamp"] = df["timestamp"]
+    df_scaled["timestamp"] = df["timestamp"].values
 
     features = df_scaled.to_dict(orient="records")
 
@@ -141,6 +141,7 @@ def create_dataset(features, window=20, strategy="단기"):
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
 
 _kline_cache = {}
+
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     global _kline_cache
