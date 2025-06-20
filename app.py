@@ -318,6 +318,35 @@ def train_symbols():
         traceback.print_exc()
         return f"❌ 오류: {e}", 500
 
+from data.utils import SYMBOL_GROUPS  # 반드시 있어야 함
+
+def train_symbol_group_loop(delay_minutes=5):
+    import time
+    group_count = len(SYMBOL_GROUPS)
+    print(f"[자동 루프] 전체 {group_count}개 그룹 학습 루프 시작됨")
+
+    while True:
+        for idx, group in enumerate(SYMBOL_GROUPS):
+            try:
+                print(f"\n🚀 [그룹 {idx}] 학습 시작 → {group}")
+                train.train_models(group)
+
+                print(f"✅ [그룹 {idx}] 학습 완료 → 예측 시작")
+                for symbol in group:
+                    for strategy in ["단기", "중기", "장기"]:
+                        try:
+                            main(symbol=symbol, strategy=strategy, force=True)
+                        except Exception as e:
+                            print(f"❌ 예측 실패: {symbol}-{strategy} → {e}")
+
+                print(f"🕒 [그룹 {idx}] 다음 그룹까지 {delay_minutes}분 대기")
+                time.sleep(delay_minutes * 60)
+
+            except Exception as e:
+                print(f"❌ 그룹 {idx} 루프 중 오류 발생: {e}")
+                continue
+
+
 @app.route("/train-symbols", methods=["POST"])
 def train_selected_symbols():
     try:
@@ -364,8 +393,11 @@ if __name__ == "__main__":
     print(">>> 서버 실행 준비")
     sys.stdout.flush()
 
-    
-    threading.Thread(target=start_scheduler, daemon=True).start()
+    # ✅ 우리가 만든 5개 단위 자동 루프 실행
+    from train import train_symbol_group_loop
+    threading.Thread(target=train_symbol_group_loop, daemon=True).start()
+
     threading.Thread(target=lambda: send_message("[시작] YOPO 서버 실행됨"), daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
