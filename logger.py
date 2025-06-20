@@ -71,7 +71,9 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     except:
         pred_class_val = -1
 
-    status = "v_pending" if volatility else "pending"
+    status = "v_success" if success and volatility else \
+             "v_fail" if not success and volatility else \
+             "success" if success else "fail"
 
     row = {
         "timestamp": now,
