@@ -74,7 +74,6 @@ def create_dataset(features, window=20, strategy="단기"):
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["timestamp", "close", "high"]).sort_values("timestamp").reset_index(drop=True)
 
-    # ✅ 스케일링 추가
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(df.drop(columns=["timestamp"]))
     df_scaled = pd.DataFrame(scaled, columns=columns)
@@ -101,7 +100,7 @@ def create_dataset(features, window=20, strategy="단기"):
             entry_time = pd.to_datetime(base.get("timestamp"), errors="coerce")
             entry_price = float(base.get("close", 0.0))
 
-            if pd.isnull(entry_time) or entry_price <= 0:
+            if pd.isnull(entry_time):
                 continue
 
             future = [
@@ -114,11 +113,9 @@ def create_dataset(features, window=20, strategy="단기"):
 
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
             gain = (max_future_price - entry_price) / (entry_price + 1e-6)
-            if not np.isfinite(gain) or abs(gain) > 5:
-                continue
 
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), -1)
-            if cls == -1 or cls >= max_cls:
+            if cls == -1:
                 continue
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
@@ -140,7 +137,6 @@ def create_dataset(features, window=20, strategy="단기"):
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
 
-_kline_cache = {}
 
 
 def get_kline_by_strategy(symbol: str, strategy: str):
