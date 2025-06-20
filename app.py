@@ -297,6 +297,23 @@ def check_eval_log():
     except Exception as e:
         return f"❌ 오류: {e}", 500
 
+from data.utils import SYMBOL_GROUPS  # ✅ 반드시 import 필요
+
+@app.route("/train-symbols")
+def train_symbols():
+    try:
+        group_idx = int(request.args.get("group", -1))
+        if group_idx < 0 or group_idx >= len(SYMBOL_GROUPS):
+            return f"❌ 잘못된 그룹 번호: {group_idx}", 400
+
+        group_symbols = SYMBOL_GROUPS[group_idx]
+        print(f"🚀 그룹 학습 요청됨 → 그룹 #{group_idx} | 심볼: {group_symbols}")
+        threading.Thread(target=lambda: train.train_models(group_symbols), daemon=True).start()
+
+        return f"✅ 그룹 #{group_idx} 학습 및 예측 시작됨"
+    except Exception as e:
+        traceback.print_exc()
+        return f"❌ 오류: {e}", 500
 
 
 @app.route("/reset-all")
