@@ -62,6 +62,7 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
 
 from logger import get_fine_tune_targets  # 🔁 반드시 포함
 
+
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     import numpy as np
@@ -187,7 +188,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     if torch.isfinite(loss):
                         optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            # ✅ Fine-Tune 타겟 클래스일 경우 추가 학습
+            from logger import get_fine_tune_targets
             fine_tune_targets = get_fine_tune_targets()
             if not fine_tune_targets.empty:
                 targets = fine_tune_targets[fine_tune_targets["strategy"] == strategy]["class"].tolist()
@@ -211,31 +212,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 val_loss = lossfn(logits, yb).item()
                 print(f"[검증 성능] acc={acc:.4f}, f1={f1:.4f}, loss={val_loss:.4f}")
 
-            if acc >= 1.0 and len(set(y_val)) <= 2:
-                log_training_result(symbol, strategy, f"오버핏({model_type})", acc, f1, val_loss)
-                torch.save(model.state_dict(), model_path)
-                save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss, input_size=input_size, class_counts=class_counts)
-                continue
-            if f1 > 2.0 or val_loss > 2.0 or acc < 0.01:
-                log_training_result(symbol, strategy, f"비정상({model_type})", acc, f1, val_loss)
-                torch.save(model.state_dict(), model_path)
-                save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss, input_size=input_size, class_counts=class_counts)
-                continue
-
+            log_training_result(symbol, strategy, model_type, acc, f1, val_loss)
             torch.save(model.state_dict(), model_path)
             save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss, input_size=input_size, class_counts=class_counts)
-            log_training_result(symbol, strategy, model_type, acc, f1, val_loss)
-
-            try:
-                models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
-                models_with_time = [(f, os.path.getmtime(os.path.join(MODEL_DIR, f))) for f in models]
-                models_sorted = sorted(models_with_time, key=lambda x: x[1])
-                while len(models_sorted) > 30:
-                    old_file = models_sorted.pop(0)[0]
-                    os.remove(os.path.join(MODEL_DIR, old_file))
-                    print(f"🧹 오래된 모델 삭제됨: {old_file}")
-            except Exception as e:
-                print(f"[모델 정리 오류] {e}")
 
             try:
                 imps = compute_feature_importance(model, xb, yb, list(df_feat.drop(columns=["timestamp"]).columns))
