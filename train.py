@@ -52,7 +52,8 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
     }
 
     if class_counts:
-        meta["class_counts"] = dict(class_counts)  # ✅ 클래스 분포 포함
+       meta["class_counts"] = {str(k): int(v) for k, v in class_counts.items()}
+
 
     path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.meta.json"
     with open(path, "w", encoding="utf-8") as f:
