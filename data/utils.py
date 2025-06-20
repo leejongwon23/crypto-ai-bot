@@ -1,4 +1,5 @@
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
+_kline_cache = {}
 
 import requests
 import pandas as pd
