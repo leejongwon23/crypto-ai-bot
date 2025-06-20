@@ -84,6 +84,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     print(f"▶ 학습 시작: {symbol}-{strategy}")
     MODEL_DIR = "/persistent/models"
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
     try:
@@ -117,7 +118,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             return
 
         y_raw = np.array(y_raw)
-        X_raw = np.array(X_raw)
+        X_raw = np.array(X_raw, dtype=np.float32)
         mask = (y_raw >= 0) & (y_raw < NUM_CLASSES)
         y_raw = y_raw[mask]
         X_raw = X_raw[mask]
@@ -153,11 +154,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
             wrong_filtered.append((xb, yb))
 
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
-            model = get_model(model_type, input_size=input_size, output_size=NUM_CLASSES).train()
+            model = get_model(model_type, input_size=input_size, output_size=NUM_CLASSES).to(DEVICE).train()
             model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt"
             if os.path.exists(model_path):
                 try:
-                    model.load_state_dict(torch.load(model_path, map_location="cpu"))
+                    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
                     print(f"🔁 이어 학습: {model_path}")
                 except:
                     print(f"[로드 실패] {model_path} → 새로 학습")
@@ -168,9 +169,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
             if wrong_filtered:
                 ds = TensorDataset(torch.tensor([x for x, _ in wrong_filtered], dtype=torch.float32),
                                    torch.tensor([y for _, y in wrong_filtered], dtype=torch.long))
-                loader = DataLoader(ds, batch_size=16, shuffle=True)
+                loader = DataLoader(ds, batch_size=16, shuffle=True, num_workers=2)
                 for _ in range(4):
                     for xb, yb in loader:
+                        xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                         model.train()
                         logits = model(xb)
                         loss = lossfn(logits, yb)
@@ -179,10 +181,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
-            train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
+            train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
             for _ in range(max_epochs):
                 model.train()
                 for xb, yb in train_loader:
+                    xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                     logits = model(xb)
                     loss = lossfn(logits, yb)
                     if torch.isfinite(loss):
@@ -196,6 +199,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     print(f"🔁 Fine-Tune 반복 학습 시작")
                     for _ in range(3):
                         for xb, yb in train_loader:
+                            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                             logits = model(xb)
                             loss = lossfn(logits, yb)
                             if torch.isfinite(loss):
@@ -203,10 +207,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
             model.eval()
             with torch.no_grad():
-                xb = torch.tensor(X_val, dtype=torch.float32)
-                yb = torch.tensor(y_val, dtype=torch.long)
+                xb = torch.tensor(X_val, dtype=torch.float32).to(DEVICE)
+                yb = torch.tensor(y_val, dtype=torch.long).to(DEVICE)
                 logits = model(xb)
-                preds = torch.argmax(logits, dim=1).numpy()
+                preds = torch.argmax(logits, dim=1).cpu().numpy()
                 acc = accuracy_score(y_val, preds)
                 f1 = f1_score(y_val, preds, average="macro")
                 val_loss = lossfn(logits, yb).item()
@@ -232,6 +236,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
 
 
 training_in_progress = {
