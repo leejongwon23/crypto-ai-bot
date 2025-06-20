@@ -95,8 +95,11 @@ def predict(symbol, strategy, source="일반"):
     from failure_db import insert_failure_record
     from data.utils import get_kline_by_strategy, compute_features
     from window_optimizer import find_best_window
+    from config import NUM_CLASSES
+    from predict_trigger import class_to_expected_return, get_recent_class_frequencies, adjust_probs_with_diversity
+    from failure_result import failed_result
 
-    DEVICE = torch.device("cpu")
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     MODEL_DIR = "/persistent/models"
     now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
@@ -140,7 +143,6 @@ def predict(symbol, strategy, source="일반"):
 
         predictions = []
 
-        # ✅ 정확히 .pt + .meta.json 쌍으로 존재하는 모델만 필터링
         model_files = {
             m["model"]: os.path.join(MODEL_DIR, m["pt_file"])
             for m in get_available_models()
@@ -156,19 +158,14 @@ def predict(symbol, strategy, source="일반"):
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
 
-                if meta.get("model") != model_type:
-                    print(f"[불일치] {path} → 저장={meta.get('model')}, 요청={model_type}")
-                    continue
-
-                if meta.get("input_size") != X.shape[2]:
-                    print(f"[불일치] {path} → input_size 저장={meta.get('input_size')}, 현재={X.shape[2]}")
+                if meta.get("model") != model_type or meta.get("input_size") != X.shape[2]:
                     continue
 
                 weight = get_model_weight(model_type, strategy, symbol)
                 if weight <= 0.0:
                     continue
 
-                model = get_model(model_type, X.shape[2], output_size=NUM_CLASSES)
+                model = get_model(model_type, X.shape[2], output_size=NUM_CLASSES).to(DEVICE)
                 try:
                     state = torch.load(path, map_location=DEVICE)
                     model.load_state_dict(state)
@@ -179,7 +176,7 @@ def predict(symbol, strategy, source="일반"):
                 model.eval()
 
                 with torch.no_grad():
-                    logits = model(torch.tensor(X, dtype=torch.float32))
+                    logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     probs = torch.softmax(logits, dim=1).cpu().numpy()
 
                     recent_freq = get_recent_class_frequencies(strategy)
@@ -244,6 +241,7 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+
 
 
 
