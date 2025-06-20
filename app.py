@@ -331,7 +331,10 @@ def force_fix_prediction_log():
 if __name__ == "__main__":
     print(">>> 서버 실행 준비")
     sys.stdout.flush()
-    threading.Thread(target=start_scheduler, daemon=True).start()
+
+    # ✅ 스케줄러 임시 중지 — 필요 시 주석 해제하면 복구 가능
+    # threading.Thread(target=start_scheduler, daemon=True).start()
+
     threading.Thread(target=lambda: send_message("[시작] YOPO 서버 실행됨"), daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
