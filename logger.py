@@ -71,11 +71,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     except:
         pred_class_val = -1
 
-    # ✅ 평가 전에는 모두 pending으로 기록
-    status = (
-        "v_pending" if volatility else
-        "pending"
-    )
+    status = "v_pending" if volatility else "pending"
 
     row = {
         "timestamp": now,
@@ -91,13 +87,11 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "return": float(return_value if return_value is not None else rate),
         "volatility": bool(volatility),
         "source": source,
-        "predicted_class": pred_class_val
+        "predicted_class": str(pred_class_val)  # ✅ 명시적 str 변환으로 오류 방지
     }
 
-    # ✅ 성공/실패는 평가 이후에만 기록
     log_audit_prediction(row["symbol"], row["strategy"], "예측기록", row["reason"])
 
-    # ✅ 1) 날짜별 파일에도 저장
     date_str = now.split("T")[0]
     dated_path = f"/persistent/logs/prediction_{date_str}.csv"
     try:
@@ -109,7 +103,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     except:
         pass
 
-    # ✅ 2) 최신 예측 기록 파일에도 동시에 저장 → 여포헬스, /check-log 용
     full_path = "/persistent/prediction_log.csv"
     try:
         with open(full_path, "a", newline="", encoding="utf-8-sig") as f:
@@ -119,6 +112,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
             w.writerow(row)
     except:
         pass
+
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
