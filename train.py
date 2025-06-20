@@ -247,6 +247,7 @@ training_in_progress = {
 import time
 
 def train_all_models():
+    from telegram_bot import send_message  # ✅ 메시지 전송 함수 가져오기
     strategies = ["단기", "중기", "장기"]
 
     for strategy in strategies:
@@ -270,6 +271,10 @@ def train_all_models():
             print(f"✅ 전략 학습 완료: {strategy}\n")
 
         time.sleep(5)  # ✅ 다음 전략 학습 전 5초 대기 → 병렬 진입 방지
+
+    # ✅ 전체 전략 학습이 모두 끝난 후 텔레그램 메시지 전송
+    send_message("✅ 전체 학습이 완료되었습니다. 예측을 실행해주세요.")
+
 
 
 def train_model_loop(strategy):
