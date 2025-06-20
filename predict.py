@@ -91,7 +91,7 @@ def predict(symbol, strategy, source="일반"):
     from sklearn.preprocessing import MinMaxScaler
     from model.base_model import get_model
     from model_weight_loader import get_model_weight
-    from logger import log_prediction, get_feature_hash
+    from logger import log_prediction, get_feature_hash, get_available_models
     from failure_db import insert_failure_record
     from data.utils import get_kline_by_strategy, compute_features
     from window_optimizer import find_best_window
@@ -140,23 +140,12 @@ def predict(symbol, strategy, source="일반"):
 
         predictions = []
 
-        # ✅ 정확히 .pt와 .meta.json이 쌍으로 모두 존재하는 파일만 대상으로 처리
-        all_files = os.listdir(MODEL_DIR)
-        model_files = {}
-        for f in all_files:
-            if not f.endswith(".pt"):
-                continue
-            name = f.replace(".pt", "")
-            parts = name.split("_")
-            if len(parts) < 3:
-                continue
-            sym, strat, model_type = parts[0], parts[1], "_".join(parts[2:])
-            if sym != symbol or strat != strategy:
-                continue
-            meta_path = os.path.join(MODEL_DIR, name + ".meta.json")
-            if not os.path.exists(meta_path):
-                continue
-            model_files[model_type] = os.path.join(MODEL_DIR, f)
+        # ✅ 정확히 .pt + .meta.json 쌍으로 존재하는 모델만 필터링
+        model_files = {
+            m["model"]: os.path.join(MODEL_DIR, m["pt_file"])
+            for m in get_available_models()
+            if m["symbol"] == symbol and m["strategy"] == strategy
+        }
 
         if not model_files:
             return [failed_result(symbol, strategy, "unknown", "모델 없음", source, X_input)]
@@ -255,6 +244,7 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+
 
 
 from collections import Counter
