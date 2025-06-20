@@ -281,21 +281,34 @@ def export_recent_model_stats(recent_days=3):
         print(f"[오류] 최근 모델 성능 집계 실패 → {e}")
 
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
-    row = {
-        "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-        "symbol": symbol,
-        "strategy": strategy,
-        "model": model_name,
-        "accuracy": float(acc),
-        "f1_score": float(f1),
-        "loss": float(loss)
-    }
+    """
+    모델 학습 결과를 로그로 저장
+    - 이어 학습 여부가 있는 경우 로그로 명확히 남김
+    """
     try:
+        import os
+        timestamp = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+        model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
+        mode = "이어학습" if os.path.exists(model_path) else "신규학습"
+
+        row = {
+            "timestamp": timestamp,
+            "symbol": symbol,
+            "strategy": strategy,
+            "model": model_name,
+            "mode": mode,
+            "accuracy": float(acc),
+            "f1_score": float(f1),
+            "loss": float(loss)
+        }
+
+        headers = list(row.keys())
         pd.DataFrame([row]).to_csv(TRAIN_LOG, mode="a", index=False,
                                    header=not os.path.exists(TRAIN_LOG),
                                    encoding="utf-8-sig")
-    except:
-        pass
+    except Exception as e:
+        print(f"[학습 로그 저장 오류] {e}")
+
 
 def get_class_success_rate(strategy, recent_days=3):
     """
