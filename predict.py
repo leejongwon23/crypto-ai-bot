@@ -86,7 +86,16 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     return result
 
 def predict(symbol, strategy, source="일반"):
-    import json
+    import json, os, torch, datetime, pytz, sys
+    import numpy as np
+    from sklearn.preprocessing import MinMaxScaler
+    from model.base_model import get_model
+    from model_weight_loader import get_model_weight
+    from logger import log_prediction, get_feature_hash
+    from failure_db import insert_failure_record
+    from data.utils import get_kline_by_strategy, compute_features
+    from window_optimizer import find_best_window
+
     DEVICE = torch.device("cpu")
     MODEL_DIR = "/persistent/models"
     now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
@@ -129,32 +138,41 @@ def predict(symbol, strategy, source="일반"):
         if len(X.shape) != 3:
             return [failed_result(symbol, strategy, "unknown", "입력 형상 오류", source)]
 
-        model_files = {
-            f.replace(".pt", "").split("_")[-1]: os.path.join(MODEL_DIR, f)
-            for f in os.listdir(MODEL_DIR)
-            if f.endswith(".pt") and f.startswith(symbol) and strategy in f
-        }
+        predictions = []
+
+        # ✅ 정확히 .pt와 .meta.json이 쌍으로 모두 존재하는 파일만 대상으로 처리
+        all_files = os.listdir(MODEL_DIR)
+        model_files = {}
+        for f in all_files:
+            if not f.endswith(".pt"):
+                continue
+            name = f.replace(".pt", "")
+            parts = name.split("_")
+            if len(parts) < 3:
+                continue
+            sym, strat, model_type = parts[0], parts[1], "_".join(parts[2:])
+            if sym != symbol or strat != strategy:
+                continue
+            meta_path = os.path.join(MODEL_DIR, name + ".meta.json")
+            if not os.path.exists(meta_path):
+                continue
+            model_files[model_type] = os.path.join(MODEL_DIR, f)
+
         if not model_files:
             return [failed_result(symbol, strategy, "unknown", "모델 없음", source, X_input)]
-
-        predictions = []
 
         for model_type, path in model_files.items():
             try:
                 meta_path = path.replace(".pt", ".meta.json")
-                if not os.path.exists(meta_path):
-                    print(f"[⚠️ 스킵] {path} → 메타정보 없음")
-                    continue
-
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
 
                 if meta.get("model") != model_type:
-                    print(f"[❌ 불일치] {path} → 구조 불일치: 저장={meta.get('model')}, 요청={model_type}")
+                    print(f"[불일치] {path} → 저장={meta.get('model')}, 요청={model_type}")
                     continue
 
                 if meta.get("input_size") != X.shape[2]:
-                    print(f"[❌ 불일치] {path} → input_size 불일치: 저장={meta.get('input_size')}, 현재={X.shape[2]}")
+                    print(f"[불일치] {path} → input_size 저장={meta.get('input_size')}, 현재={X.shape[2]}")
                     continue
 
                 weight = get_model_weight(model_type, strategy, symbol)
@@ -178,10 +196,8 @@ def predict(symbol, strategy, source="일반"):
                     recent_freq = get_recent_class_frequencies(strategy)
                     class_counts = meta.get("class_counts", {}) or {}
 
-                    # ✅ 보정 적용
                     probs[0] = adjust_probs_with_diversity(probs, recent_freq, class_counts)
 
-                    # ✅ 상위 3개 후보 추출 + 점수 계산
                     top3_idx = probs[0].argsort()[-3:][::-1]
                     final_idx = top3_idx[0]
                     best_score = 0
@@ -195,8 +211,8 @@ def predict(symbol, strategy, source="일반"):
 
                     pred_class = int(final_idx)
                     expected_return = class_to_expected_return(pred_class)
-
                     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+
                     log_prediction(
                         symbol=symbol, strategy=strategy,
                         direction=f"Class-{pred_class}", entry_price=raw_close,
@@ -239,7 +255,6 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
-
 
 
 from collections import Counter
