@@ -275,6 +275,41 @@ def train_all_models():
     # ✅ 전체 전략 학습이 모두 끝난 후 텔레그램 메시지 전송
     send_message("✅ 전체 학습이 완료되었습니다. 예측을 실행해주세요.")
 
+def train_models(symbol_list):
+    from telegram_bot import send_message
+    from predict_test import main as run_prediction
+
+    strategies = ["단기", "중기", "장기"]
+
+    for strategy in strategies:
+        if training_in_progress.get(strategy, False):
+            print(f"⚠️ 이미 실행 중: {strategy} 학습 중복 방지"); continue
+
+        print(f"\n🚀 전략 학습 시작: {strategy}")
+        training_in_progress[strategy] = True
+
+        try:
+            for symbol in symbol_list:
+                try:
+                    print(f"▶ 학습 시작: {symbol}-{strategy}")
+                    train_one_model(symbol, strategy)
+                except Exception as e:
+                    print(f"[오류] {symbol}-{strategy} 학습 실패 → {e}")
+        except Exception as e:
+            print(f"[치명 오류] {strategy} 전체 학습 중단 → {type(e).__name__}: {e}")
+        finally:
+            training_in_progress[strategy] = False
+            print(f"✅ 전략 학습 완료: {strategy}\n")
+
+        time.sleep(5)  # ✅ 다음 전략 학습 전 5초 대기
+
+        try:
+            run_prediction(strategy, symbols=symbol_list)  # ✅ 학습 완료된 심볼만 예측
+        except Exception as e:
+            print(f"❌ 예측 실패: {strategy} → {e}")
+
+    send_message("✅ 학습 및 예측 루틴 완료 (해당 심볼 그룹)")
+
 
 
 def train_model_loop(strategy):
