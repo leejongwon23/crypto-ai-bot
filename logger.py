@@ -181,6 +181,12 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
         df = df[df["status"].isin(["success", "fail"])]
 
         # ✅ NaN 또는 파싱 불가능한 값 제거
+        if "predicted_class" not in df.columns:
+            print("[경고] predicted_class 컬럼 없음")
+            return pd.DataFrame([])
+
+        df = df[df["predicted_class"].notna()]
+        df["predicted_class"] = pd.to_numeric(df["predicted_class"], errors="coerce")
         df = df[df["predicted_class"].notna()]
         df["predicted_class"] = df["predicted_class"].astype(int)
 
@@ -209,6 +215,7 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
     except Exception as e:
         print(f"[오류] fine-tune 대상 분석 실패 → {e}")
         return pd.DataFrame([])
+
 
 
 def get_feature_hash_from_tensor(tensor):
