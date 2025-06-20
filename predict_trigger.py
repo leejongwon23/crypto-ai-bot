@@ -10,6 +10,22 @@ from logger import get_model_success_rate, log_audit_prediction
 from logger import log_audit_prediction as log_audit
 
 
+# ✅ 반드시 필요 (predict.py에서 import함)
+def class_to_expected_return(cls):
+    centers = [-0.125, -0.085, -0.06, -0.04, -0.02, -0.01, -0.0025, -0.0005,
+               0.0005, 0.0025, 0.01, 0.02, 0.04, 0.06, 0.085, 0.125]
+    return centers[cls] if 0 <= cls < len(centers) else 0.0
+
+def get_recent_class_frequencies():
+    return {}
+
+def adjust_class_frequencies(pred_probs, recent_freqs):
+    return pred_probs  # 임시 정의
+
+def adjust_probs_with_diversity(pred_probs):
+    return pred_probs  # 임시 정의
+
+
 last_trigger_time = {}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 TRIGGER_COOLDOWN = {"단기": 3600, "중기": 10800, "장기": 21600}
@@ -73,7 +89,7 @@ def run():
                 if check_pre_burst_conditions(df, strategy):
                     print(f"[트리거 포착] {symbol} - {strategy} 예측 실행")
                     try:
-                        run_prediction(symbol, strategy, source="변동성")  # ✅ 수정된 부분
+                        run_prediction(symbol, strategy, source="변동성")
                         last_trigger_time[key] = now
                         log_audit(symbol, strategy, "트리거예측", "조건 만족으로 실행")
                     except Exception as inner:
