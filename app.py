@@ -315,6 +315,18 @@ def train_symbols():
         traceback.print_exc()
         return f"❌ 오류: {e}", 500
 
+@app.route("/train-symbols", methods=["POST"])
+def train_selected_symbols():
+    try:
+        symbols = request.json.get("symbols", [])
+        if not isinstance(symbols, list) or not symbols:
+            return "❌ 유효하지 않은 symbols 리스트", 400
+
+        train.train_models(symbols)  # ⬅️ 선택 심볼 학습 함수
+        return f"✅ {len(symbols)}개 심볼 학습 시작됨"
+    except Exception as e:
+        return f"❌ 학습 실패: {e}", 500
+
 
 @app.route("/reset-all")
 def reset_all():
