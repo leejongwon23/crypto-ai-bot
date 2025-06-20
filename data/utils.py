@@ -327,3 +327,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     _feature_cache[cache_key] = df
     return df
 
+# data/utils.py 맨 아래에 추가
+
+SYMBOL_GROUPS = [SYMBOLS[i:i+5] for i in range(0, len(SYMBOLS), 5)]
