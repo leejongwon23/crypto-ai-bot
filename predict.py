@@ -334,14 +334,14 @@ def evaluate_predictions(get_price_fn):
             raw_val = str(r.get("predicted_class", "")).strip().lower()
             if raw_val in ["", "none", "nan", "['label']"]:
                 r.update({"status": "skip_eval", "reason": "예측 클래스 없음", "return": 0.0})
-                updated.append({str(k): ("" if v is None else v) for k, v in r.items()})
+                updated.append(r)
                 continue
 
             try:
                 pred_class = int(float(raw_val))
             except:
                 r.update({"status": "skip_eval", "reason": "예측 클래스 파싱 실패", "return": 0.0, "predicted_class": -1})
-                updated.append({str(k): ("" if v is None else v) for k, v in r.items()})
+                updated.append(r)
                 continue
 
             timestamp = pd.to_datetime(r["timestamp"], utc=True).tz_convert("Asia/Seoul")
@@ -352,7 +352,7 @@ def evaluate_predictions(get_price_fn):
             df = get_price_fn(symbol, strategy)
             if df is None or df.empty or "timestamp" not in df.columns:
                 r.update({"status": "skip_eval", "reason": "가격 데이터 없음", "return": 0.0})
-                updated.append({str(k): ("" if v is None else v) for k, v in r.items()})
+                updated.append(r)
                 continue
 
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Seoul")
@@ -360,12 +360,12 @@ def evaluate_predictions(get_price_fn):
 
             if now < deadline:
                 r.update({"reason": f"⏳ 평가 대기 중 ({now.strftime('%H:%M')} < {deadline.strftime('%H:%M')})", "return": 0.0})
-                updated.append({str(k): ("" if v is None else v) for k, v in r.items()})
+                updated.append(r)
                 continue
 
             if future_df.empty:
                 r.update({"status": "skip_eval", "reason": "미래 구간 없음", "return": 0.0})
-                updated.append({str(k): ("" if v is None else v) for k, v in r.items()})
+                updated.append(r)
                 continue
 
             actual_max = future_df["high"].max()
@@ -373,8 +373,8 @@ def evaluate_predictions(get_price_fn):
 
             if 0 <= pred_class < len(class_ranges):
                 low, high = class_ranges[pred_class]
-                # ✅ 성공 조건 완화: 범위 포함이 아니더라도 수익률 1% 이상이면 성공
-                success = (gain >= low) or (abs(gain) >= 0.01)
+                # ✅ 여포 원칙대로: 예측 구간에 실제 수익률이 포함되어야 성공
+                success = (gain >= low and gain <= high)
             else:
                 low, high = 0.0, 0.0
                 success = False
@@ -388,13 +388,12 @@ def evaluate_predictions(get_price_fn):
                 "return": round(gain, 5)
             })
             update_model_success(symbol, strategy, model, success)
-
-            safe_row = {str(k): ("" if v is None else v) for k, v in r.items()}
-            evaluated.append(safe_row)
+            updated.append(r)
+            evaluated.append(r)
 
         except Exception as e:
             r.update({"status": "skip_eval", "reason": f"예외 발생: {e}", "return": 0.0})
-            updated.append({str(k): ("" if v is None else v) for k, v in r.items()})
+            updated.append(r)
 
     if evaluated:
         with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as f:
@@ -411,20 +410,11 @@ def evaluate_predictions(get_price_fn):
                     w.writeheader()
                 w.writerows(failed)
 
-        EVAL_ALL = "/persistent/evaluation_result.csv"
-        try:
-            df_all = pd.read_csv(EVAL_ALL, encoding="utf-8-sig") if os.path.exists(EVAL_ALL) else pd.DataFrame()
-            df_new = pd.DataFrame(evaluated)
-            df_all = pd.concat([df_all, df_new], ignore_index=True)
-            df_all.to_csv(EVAL_ALL, index=False, encoding="utf-8-sig")
-        except Exception as e:
-            print(f"[평가 통합 저장 실패] {e}")
-
-    with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=updated[0].keys())
-        w.writeheader()
-        w.writerows(updated)
-
+        full_path = PREDICTION_LOG
+        with open(full_path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.DictWriter(f, fieldnames=updated[0].keys())
+            w.writeheader()
+            w.writerows(updated)
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
