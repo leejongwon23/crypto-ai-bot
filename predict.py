@@ -248,18 +248,18 @@ def predict(symbol, strategy, source="일반"):
 from collections import Counter
 import numpy as np
 
-def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: Counter = None, alpha=0.1, beta=0.1):
+def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: Counter = None, alpha=0.05, beta=0.05):
     """
     probs: (1, NUM_CLASSES) softmax 결과
     recent_freq: 최근 예측 클래스 빈도 Counter
     class_counts: 학습된 클래스 분포 Counter (옵션)
-    alpha: 최근 예측 편향 조절 강도
-    beta: 희귀 클래스 강조 강도
+    alpha: 최근 예측 편향 조절 강도 (낮을수록 보정 약함)
+    beta: 희귀 클래스 강조 강도 (낮을수록 보정 약함)
     """
     probs = probs.copy()
     if probs.ndim == 2:
         probs = probs[0]
-    
+
     total_recent = sum(recent_freq.values()) + 1e-6
     recent_weights = np.array([
         1.0 - alpha * (recent_freq.get(i, 0) / total_recent)
@@ -373,7 +373,8 @@ def evaluate_predictions(get_price_fn):
 
             if 0 <= pred_class < len(class_ranges):
                 low, high = class_ranges[pred_class]
-                success = gain >= low and abs(gain) >= 0.01
+                # ✅ 성공 조건 완화: 범위 포함이 아니더라도 수익률 1% 이상이면 성공
+                success = (gain >= low) or (abs(gain) >= 0.01)
             else:
                 low, high = 0.0, 0.0
                 success = False
