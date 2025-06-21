@@ -249,13 +249,6 @@ from collections import Counter
 import numpy as np
 
 def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: Counter = None, alpha=0.05, beta=0.05):
-    """
-    probs: (1, NUM_CLASSES) softmax 결과
-    recent_freq: 최근 예측 클래스 빈도 Counter
-    class_counts: 학습된 클래스 분포 Counter (옵션)
-    alpha: 최근 예측 편향 조절 강도 (낮을수록 보정 약함)
-    beta: 희귀 클래스 강조 강도 (낮을수록 보정 약함)
-    """
     probs = probs.copy()
     if probs.ndim == 2:
         probs = probs[0]
@@ -276,7 +269,7 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: Count
         class_weights = np.ones_like(recent_weights)
 
     combined_weights = recent_weights * class_weights
-    combined_weights = np.clip(combined_weights, 0.5, 1.5)
+    combined_weights = np.clip(combined_weights, 0.85, 1.15)
 
     adjusted = probs * combined_weights
     return adjusted / adjusted.sum()
@@ -301,17 +294,6 @@ def evaluate_predictions(get_price_fn):
     EVAL_RESULT = f"/persistent/logs/evaluation_{date_str}.csv"
     WRONG = f"/persistent/logs/wrong_{date_str}.csv"
 
-    try:
-        rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
-        if not rows:
-            print("[스킵] 예측 결과 없음 → 평가 건너뜀")
-            return
-    except Exception as e:
-        print(f"[예측 평가 로드 오류] {e}")
-        return
-
-    updated, evaluated = []
-    eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
     class_ranges = [
         (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
         (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
@@ -319,102 +301,95 @@ def evaluate_predictions(get_price_fn):
         (0.05, 0.07), (0.07, 0.10), (0.10, 0.15), (0.15, 0.20),
         (0.20, 0.30), (0.30, 0.50), (0.50, 1.00), (1.00, 2.00), (2.00, 5.00)
     ]
+    eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
+
+    try:
+        rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
+        if not rows:
+            return
+    except:
+        return
+
+    updated, evaluated = [], []
 
     for r in rows:
         try:
             if r.get("status") not in ["pending", "v_pending"]:
-                updated.append({str(k): ("" if v is None else v) for k, v in r.items()})
-                continue
-
-            symbol = r.get("symbol")
-            strategy = r.get("strategy")
-            model = r.get("model", "unknown")
-            entry_price = float(r.get("entry_price", 0))
-
-            raw_val = str(r.get("predicted_class", "")).strip().lower()
-            if raw_val in ["", "none", "nan", "['label']"]:
-                r.update({"status": "skip_eval", "reason": "예측 클래스 없음", "return": 0.0})
                 updated.append(r)
                 continue
 
+            symbol = r["symbol"]
+            strategy = r["strategy"]
+            model = r.get("model", "unknown")
+            entry_price = float(r.get("entry_price", 0))
+
             try:
-                pred_class = int(float(raw_val))
+                pred_class = int(float(r.get("predicted_class", -1)))
             except:
-                r.update({"status": "skip_eval", "reason": "예측 클래스 파싱 실패", "return": 0.0, "predicted_class": -1})
+                r.update({"status": "skip_eval", "reason": "예측 클래스 파싱 실패", "return": 0.0})
                 updated.append(r)
                 continue
 
             timestamp = pd.to_datetime(r["timestamp"], utc=True).tz_convert("Asia/Seoul")
             now = now_kst()
-            horizon = eval_horizon_map.get(strategy, 6)
-            deadline = timestamp + pd.Timedelta(hours=horizon)
+            deadline = timestamp + pd.Timedelta(hours=eval_horizon_map.get(strategy, 6))
+
+            if now < deadline:
+                r.update({"reason": "⏳ 평가 대기 중", "return": 0.0})
+                updated.append(r)
+                continue
 
             df = get_price_fn(symbol, strategy)
-            if df is None or df.empty or "timestamp" not in df.columns:
+            if df is None or "timestamp" not in df.columns:
                 r.update({"status": "skip_eval", "reason": "가격 데이터 없음", "return": 0.0})
                 updated.append(r)
                 continue
 
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Seoul")
             future_df = df[(df["timestamp"] >= timestamp) & (df["timestamp"] <= deadline)]
-
-            if now < deadline:
-                r.update({"reason": f"⏳ 평가 대기 중 ({now.strftime('%H:%M')} < {deadline.strftime('%H:%M')})", "return": 0.0})
-                updated.append(r)
-                continue
-
             if future_df.empty:
-                r.update({"status": "skip_eval", "reason": "미래 구간 없음", "return": 0.0})
+                r.update({"status": "skip_eval", "reason": "미래 데이터 없음", "return": 0.0})
                 updated.append(r)
                 continue
 
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
+            # ✅ 클래스 구간 포함만 성공으로 간주
             if 0 <= pred_class < len(class_ranges):
                 low, high = class_ranges[pred_class]
-                # ✅ 여포 원칙대로: 예측 구간에 실제 수익률이 포함되어야 성공
-                success = (gain >= low and gain <= high)
+                success = low <= gain <= high
             else:
-                low, high = 0.0, 0.0
                 success = False
 
-            vol = str(r.get("volatility", "")).lower() in ["1", "true", "yes"]
+            vol = str(r.get("volatility", "")).lower() in ["1", "true"]
             status = "v_success" if vol and success else "v_fail" if vol else "success" if success else "fail"
 
             r.update({
                 "status": status,
-                "reason": f"예측={pred_class} / 구간=({low:.3f}~{high:.3f}) / 실현={gain:.4f}",
+                "reason": f"[클래스={pred_class}] 기대=({low:.3f}~{high:.3f}) / 실현={gain:.4f}",
                 "return": round(gain, 5)
             })
             update_model_success(symbol, strategy, model, success)
-            updated.append(r)
             evaluated.append(r)
 
         except Exception as e:
-            r.update({"status": "skip_eval", "reason": f"예외 발생: {e}", "return": 0.0})
+            r.update({"status": "skip_eval", "reason": f"예외: {e}", "return": 0.0})
             updated.append(r)
+
+    updated += evaluated
+
+    with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
+        csv.DictWriter(f, fieldnames=updated[0].keys()).writerows([updated[0]] + updated[1:])
 
     if evaluated:
         with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=evaluated[0].keys())
-            if f.tell() == 0:
-                w.writeheader()
-            w.writerows(evaluated)
+            csv.DictWriter(f, fieldnames=evaluated[0].keys()).writerows([evaluated[0]] + evaluated[1:])
 
         failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
         if failed:
             with open(WRONG, "a", newline="", encoding="utf-8-sig") as f:
-                w = csv.DictWriter(f, fieldnames=failed[0].keys())
-                if f.tell() == 0:
-                    w.writeheader()
-                w.writerows(failed)
-
-        full_path = PREDICTION_LOG
-        with open(full_path, "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=updated[0].keys())
-            w.writeheader()
-            w.writerows(updated)
+                csv.DictWriter(f, fieldnames=failed[0].keys()).writerows([failed[0]] + failed[1:])
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
