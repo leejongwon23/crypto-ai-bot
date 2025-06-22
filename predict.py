@@ -312,6 +312,9 @@ def evaluate_predictions(get_price_fn):
 
     for r in rows:
         try:
+            if "status" not in r or r["status"] in ["", None]:
+                r.update({"status": "pending", "reason": "상태 없음 초기화", "return": 0.0})
+
             if r.get("status") not in ["pending", "v_pending"]:
                 updated.append(r)
                 continue
@@ -353,7 +356,6 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            # ✅ 클래스 구간 포함만 성공으로 간주
             if 0 <= pred_class < len(class_ranges):
                 low, high = class_ranges[pred_class]
                 success = low <= gain <= high
