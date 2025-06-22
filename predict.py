@@ -163,6 +163,7 @@ def predict(symbol, strategy, source="일반"):
 
                 weight = get_model_weight(model_type, strategy, symbol)
                 if weight <= 0.0:
+                    predictions.append(failed_result(symbol, strategy, model_type, "모델 가중치 부족", source, X_input))
                     continue
 
                 model = get_model(model_type, X.shape[2], output_size=NUM_CLASSES).to(DEVICE)
@@ -171,6 +172,7 @@ def predict(symbol, strategy, source="일반"):
                     model.load_state_dict(state)
                 except Exception as e:
                     print(f"[로드 실패] {path} → {e}")
+                    predictions.append(failed_result(symbol, strategy, model_type, f"로드 실패: {e}", source, X_input))
                     continue
 
                 model.eval()
@@ -181,7 +183,6 @@ def predict(symbol, strategy, source="일반"):
 
                     recent_freq = get_recent_class_frequencies(strategy)
                     class_counts = meta.get("class_counts", {}) or {}
-
                     probs[0] = adjust_probs_with_diversity(probs, recent_freq, class_counts)
 
                     top3_idx = probs[0].argsort()[-3:][::-1]
@@ -241,9 +242,6 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
-
-
-
 
 from collections import Counter
 import numpy as np
