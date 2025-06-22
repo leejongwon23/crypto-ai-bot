@@ -6,27 +6,47 @@ EVAL_RESULT = "/persistent/evaluation_result.csv"  # ✅ 평가 결과 로그
 MODEL_DIR = "/persistent/models"
 
 def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
-    import os, json, glob, pandas as pd
-
-    model_dir = "/persistent/models"
-    meta_path = f"{model_dir}/{symbol}_{strategy}_{model_type}.meta.json"
-    pt_path = f"{model_dir}/{symbol}_{strategy}_{model_type}.pt"
+    import glob, os, json
+    MODEL_DIR = "/persistent/models"
+    meta_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.meta.json"
+    pt_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt"
 
     if not os.path.exists(meta_path) or not os.path.exists(pt_path):
+        print(f"[스킵] {symbol}-{strategy}-{model_type}: 모델 파일 또는 메타 없음")
         return 0.0
 
     try:
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
         if meta.get("model") != model_type or meta.get("symbol") != symbol or meta.get("strategy") != strategy:
+            print(f"[스킵] 메타 구조 불일치: {meta_path}")
             return 0.0
-    except:
+    except Exception as e:
+        print(f"[스킵] 메타 로드 실패: {meta_path} → {e}")
         return 0.0
 
     try:
-        df = pd.read_csv("/persistent/evaluation_result.csv", encoding="utf-8-sig")
-        df = df[(df["model"] == model_type) & (df["strategy"] == strategy) & (df["symbol"] == symbol)]
-        df = df[df["status"].isin(["success", "fail"])]
+        eval_files = sorted(glob.glob("/persistent/logs/evaluation_*.csv"))
+        if not eval_files:
+            return 1.0
+
+        import pandas as pd
+        df_list = []
+        for file in eval_files:
+            try:
+                df = pd.read_csv(file, encoding="utf-8-sig")
+                df_list.append(df)
+            except:
+                continue
+
+        if not df_list:
+            return 1.0
+
+        df = pd.concat(df_list, ignore_index=True)
+        df = df[(df["model"] == model_type) &
+                (df["strategy"] == strategy) &
+                (df["symbol"] == symbol) &
+                (df["status"].isin(["success", "fail"]))]
 
         if len(df) < min_samples:
             return 1.0
@@ -38,8 +58,10 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
         elif success_rate < 0.4:
             return 0.0
         else:
-            return round((success_rate - 0.4) / 0.25, 4)
-    except:
+            return round((success_rate - 0.4) / (0.65 - 0.4), 4)
+
+    except Exception as e:
+        print(f"[오류] get_model_weight 실패: {e}")
         return 1.0
 
 def model_exists(symbol, strategy):
