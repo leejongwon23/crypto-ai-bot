@@ -60,11 +60,17 @@ def log_audit_prediction(s, t, status, reason):
             w.writerow(row)
     except: pass
 
+
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, model=None, success=True, reason="", rate=0.0,
                    return_value=None, volatility=False, source="일반", predicted_class=None):
+    import csv, os, datetime, pytz
+    now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
     now = timestamp or now_kst().isoformat()
     mname = str(model or "unknown")
+    full_path = "/persistent/prediction_log.csv"
+    date_str = now.split("T")[0]
+    dated_path = f"/persistent/logs/prediction_{date_str}.csv"
 
     try:
         pred_class_val = int(float(predicted_class)) if str(predicted_class).lower() not in ["", "nan", "none"] else -1
@@ -89,32 +95,26 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "return": float(return_value if return_value is not None else rate),
         "volatility": bool(volatility),
         "source": source,
-        "predicted_class": str(pred_class_val)  # ✅ 명시적 str 변환으로 오류 방지
+        "predicted_class": str(pred_class_val)
     }
 
-    log_audit_prediction(row["symbol"], row["strategy"], "예측기록", row["reason"])
-
-    date_str = now.split("T")[0]
-    dated_path = f"/persistent/logs/prediction_{date_str}.csv"
     try:
         with open(dated_path, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=row.keys())
             if f.tell() == 0:
                 w.writeheader()
             w.writerow(row)
-    except:
-        pass
+    except Exception as e:
+        print(f"[오류] 날짜별 로그 기록 실패 → {e}")
 
-    full_path = "/persistent/prediction_log.csv"
     try:
         with open(full_path, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=row.keys())
             if f.tell() == 0:
                 w.writeheader()
             w.writerow(row)
-    except:
-        pass
-
+    except Exception as e:
+        print(f"[오류] 통합 로그 기록 실패 → {e}")
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
