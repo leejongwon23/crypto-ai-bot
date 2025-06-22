@@ -97,7 +97,7 @@ def predict(symbol, strategy, source="일반"):
     from window_optimizer import find_best_window
     from config import NUM_CLASSES
     from predict_trigger import class_to_expected_return, get_recent_class_frequencies, adjust_probs_with_diversity
-    from failure_result import failed_result
+    
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     MODEL_DIR = "/persistent/models"
