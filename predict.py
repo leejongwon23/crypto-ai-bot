@@ -180,10 +180,12 @@ def predict(symbol, strategy, source="일반"):
                     logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     probs = torch.softmax(logits, dim=1).cpu().numpy()
 
-                    # ✅ 수정된 부분: 명시적 키워드 인자 전달
+                    # ✅ 복제된 class_counts를 예측 점수 보정에 사용
                     recent_freq = get_recent_class_frequencies(strategy=strategy)
-
                     class_counts = meta.get("class_counts", {}) or {}
+
+                    print(f"[예측] 복제 포함 클래스 분포 class_counts: {class_counts}")  # 디버깅용
+
                     probs[0] = adjust_probs_with_diversity(probs, recent_freq, class_counts)
 
                     top3_idx = probs[0].argsort()[-3:][::-1]
