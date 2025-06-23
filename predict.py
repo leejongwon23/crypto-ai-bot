@@ -97,7 +97,6 @@ def predict(symbol, strategy, source="일반"):
     from window_optimizer import find_best_window
     from config import NUM_CLASSES
     from predict_trigger import class_to_expected_return, get_recent_class_frequencies, adjust_probs_with_diversity
-    
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     MODEL_DIR = "/persistent/models"
@@ -181,7 +180,9 @@ def predict(symbol, strategy, source="일반"):
                     logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     probs = torch.softmax(logits, dim=1).cpu().numpy()
 
-                    recent_freq = get_recent_class_frequencies(strategy)
+                    # ✅ 수정된 부분: 명시적 키워드 인자 전달
+                    recent_freq = get_recent_class_frequencies(strategy=strategy)
+
                     class_counts = meta.get("class_counts", {}) or {}
                     probs[0] = adjust_probs_with_diversity(probs, recent_freq, class_counts)
 
