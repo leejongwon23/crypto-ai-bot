@@ -51,9 +51,9 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
     }
 
+    # ✅ 클래스 카운트를 문자열 키로 저장
     if class_counts:
-       meta["class_counts"] = {str(k): int(v) for k, v in class_counts.items()}
-
+        meta["class_counts"] = {str(k): int(v) for k, v in class_counts.items()}
 
     path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.meta.json"
     with open(path, "w", encoding="utf-8") as f:
