@@ -24,7 +24,6 @@ def get_recent_class_frequencies(strategy: str, recent_days: int = 3):
     except:
         return Counter()
 
-
 DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
