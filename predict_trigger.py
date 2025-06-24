@@ -16,15 +16,10 @@ def class_to_expected_return(cls):
                0.0005, 0.0025, 0.01, 0.02, 0.04, 0.06, 0.085, 0.125]
     return centers[cls] if 0 <= cls < len(centers) else 0.0
 
-def get_recent_class_frequencies():
-    return {}
 
-def adjust_class_frequencies(pred_probs, recent_freqs):
-    return pred_probs  # 임시 정의
-
-def adjust_probs_with_diversity(pred_probs):
-    return pred_probs  # 임시 정의
-
+# ❌ 아래 두 함수는 삭제해야 predict.py의 실제 기능이 작동됨
+# def get_recent_class_frequencies(): return {}
+# def adjust_probs_with_diversity(pred_probs): return pred_probs
 
 last_trigger_time = {}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
