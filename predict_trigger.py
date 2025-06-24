@@ -8,7 +8,7 @@ from data.utils import SYMBOLS, get_kline_by_strategy
 from recommend import run_prediction
 from logger import get_model_success_rate, log_audit_prediction
 from logger import log_audit_prediction as log_audit
-from predict import get_recent_class_frequencies
+
 
 # ✅ 반드시 필요 (predict.py에서 import함)
 def class_to_expected_return(cls):
