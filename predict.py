@@ -12,13 +12,16 @@ import pandas as pd
 from config import NUM_CLASSES
 
 
-def get_recent_class_frequencies(strategy, recent_days=3):
+def get_recent_class_frequencies(strategy=None, recent_days=3):
     try:
         path = "/persistent/prediction_log.csv"
         if not os.path.exists(path):
             return Counter()
         df = pd.read_csv(path, encoding="utf-8-sig")
-        df = df[df["strategy"] == strategy]
+
+        if strategy is not None:
+            df = df[df["strategy"] == strategy]
+
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         cutoff = pd.Timestamp.now() - pd.Timedelta(days=recent_days)
         df = df[df["timestamp"] >= cutoff]
