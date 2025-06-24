@@ -7,28 +7,8 @@ from window_optimizer import find_best_window
 from logger import log_prediction
 from failure_db import insert_failure_record, load_existing_failure_hashes
 from logger import get_feature_hash
-from collections import Counter
-import pandas as pd
 from config import NUM_CLASSES
 
-
-def get_recent_class_frequencies(strategy=None, recent_days=3):
-    try:
-        path = "/persistent/prediction_log.csv"
-        if not os.path.exists(path):
-            return Counter()
-        df = pd.read_csv(path, encoding="utf-8-sig")
-
-        if strategy is not None:
-            df = df[df["strategy"] == strategy]
-
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        cutoff = pd.Timestamp.now() - pd.Timedelta(days=recent_days)
-        df = df[df["timestamp"] >= cutoff]
-        return Counter(df["predicted_class"].dropna().astype(int))
-    except Exception as e:
-        print(f"[⚠️ recent_class_frequencies 예외] {e}")
-        return Counter()
 
 DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
@@ -251,34 +231,6 @@ def predict(symbol, strategy, source="일반"):
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
 
-from collections import Counter
-import numpy as np
-
-def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict = None, alpha=0.05, beta=0.05):
-    probs = probs.copy()
-    if probs.ndim == 2:
-        probs = probs[0]
-
-    total_recent = sum(recent_freq.values()) + 1e-6
-    recent_weights = np.array([
-        1.0 - alpha * (recent_freq.get(i, 0) / total_recent)
-        for i in range(len(probs))
-    ])
-
-    if class_counts:
-        total_class = sum(class_counts.values()) + 1e-6
-        class_weights = np.array([
-            1.0 + beta * (1.0 - class_counts.get(str(i), 0) / total_class)
-            for i in range(len(probs))
-        ])
-    else:
-        class_weights = np.ones_like(recent_weights)
-
-    combined_weights = recent_weights * class_weights
-    combined_weights = np.clip(combined_weights, 0.85, 1.15)
-
-    adjusted = probs * combined_weights
-    return adjusted / adjusted.sum()
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
