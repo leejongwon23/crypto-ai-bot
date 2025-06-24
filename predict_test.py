@@ -18,7 +18,8 @@ def main(strategy, symbols=None):
     total, success, failed, skipped = 0, 0, 0, 0
     failed_cases = []
 
-    target_symbols = symbols if symbols else SYMBOLS
+    # ✅ 심볼 인자가 없을 경우 기본 SYMBOLS 사용
+    target_symbols = symbols if symbols is not None else SYMBOLS
 
     for symbol in target_symbols:
         if not model_exists(symbol, strategy):
