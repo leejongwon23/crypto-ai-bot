@@ -18,13 +18,20 @@ now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 # ✅ 클래스 → 기대수익률 중앙값 매핑 (21개 class_ranges 기준)
 def class_to_expected_return(cls):
+    # ✅ 21개 클래스 수익률 중심값 리스트 (복제 클래스 포함 기준)
     centers = [
         -0.80, -0.45, -0.25, -0.175, -0.125, -0.085, -0.06, -0.04,
-        -0.02, 0.0,  # 중립
+        -0.02, 0.0,  # 중립 (9번 = 0.0)
          0.02, 0.04, 0.06, 0.085, 0.125, 0.175, 0.25, 0.40,
          0.75, 1.50, 3.50
     ]
-    return centers[cls] if 0 <= cls < len(centers) else 0.0
+
+    if isinstance(cls, int) and 0 <= cls < len(centers):
+        return centers[cls]
+    
+    # ✅ 예외 상황 로그로 확인하기 위함
+    print(f"[⚠️ 예상 수익률 계산 오류] 잘못된 클래스: {cls}")
+    return 0.0
 
 def failed_result(symbol, strategy, model_type="unknown", reason="", source="일반", X_input=None):
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
