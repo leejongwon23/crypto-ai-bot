@@ -63,6 +63,8 @@ def check_model_quality(symbol, strategy):
         return False
 
 def run():
+    from recommend import run_prediction  # ✅ 순환참조 방지 위해 함수 안에 import
+
     print(f"[트리거 실행] 전조 패턴 감지 시작: {now_kst().isoformat()}")
     for symbol in SYMBOLS:
         for strategy in ["단기", "중기", "장기"]:
@@ -92,8 +94,7 @@ def run():
             except Exception as e:
                 print(f"[트리거 오류] {symbol} {strategy}: {e}")
                 log_audit(symbol, strategy or "알수없음", "트리거오류", str(e))
-                
-from recommend import run_prediction
+
 from collections import Counter
 import pandas as pd
 import os
