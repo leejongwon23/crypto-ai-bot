@@ -60,7 +60,6 @@ def log_audit_prediction(s, t, status, reason):
             w.writerow(row)
     except: pass
 
-
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, model=None, success=True, reason="", rate=0.0,
                    return_value=None, volatility=False, source="일반", predicted_class=None):
@@ -72,11 +71,15 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     date_str = now.split("T")[0]
     dated_path = f"/persistent/logs/prediction_{date_str}.csv"
 
+    # ✅ predicted_class 잘못된 값 방지
     try:
-        pred_class_val = int(float(predicted_class)) if str(predicted_class).lower() not in ["", "nan", "none"] else -1
+        pred_class_val = int(float(predicted_class))
+        if pred_class_val < 0 or pred_class_val >= 100:  # 너무 큰 숫자 방지
+            pred_class_val = -1
     except:
         pred_class_val = -1
 
+    # ✅ 예측 성공 여부 + 변동성 여부 기준 status 결정
     status = "v_success" if success and volatility else \
              "v_fail" if not success and volatility else \
              "success" if success else "fail"
