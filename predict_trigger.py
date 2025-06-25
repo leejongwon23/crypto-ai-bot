@@ -101,18 +101,23 @@ import os
 from datetime import datetime as dt
 
 def get_recent_class_frequencies(strategy=None, recent_days=3):
+    from collections import Counter
+    import os
+    import pandas as pd
+
     try:
         path = "/persistent/prediction_log.csv"
         if not os.path.exists(path):
             return Counter()
-        df = pd.read_csv(path, encoding="utf-8-sig")
 
-        if strategy is not None:
+        df = pd.read_csv(path, encoding="utf-8-sig")
+        if strategy:
             df = df[df["strategy"] == strategy]
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         cutoff = pd.Timestamp.now() - pd.Timedelta(days=recent_days)
         df = df[df["timestamp"] >= cutoff]
+
         return Counter(df["predicted_class"].dropna().astype(int))
     except Exception as e:
         print(f"[⚠️ recent_class_frequencies 예외] {e}")
@@ -122,6 +127,8 @@ import numpy as np
 from collections import Counter
 
 def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict = None, alpha=0.05, beta=0.05):
+    import numpy as np
+
     probs = probs.copy()
     if probs.ndim == 2:
         probs = probs[0]
