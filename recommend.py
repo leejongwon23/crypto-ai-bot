@@ -2,7 +2,6 @@ import os, csv, sys, time, threading, datetime, pytz
 from telegram_bot import send_message
 from predict import predict
 from logger import log_prediction, strategy_stats, get_strategy_eval_count
-from predict import evaluate_predictions
 from data.utils import SYMBOLS, get_kline_by_strategy
 from src.message_formatter import format_message
 import train
@@ -117,7 +116,6 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                 result["source"] = result.get("source", source)
                 result["predicted_class"] = result.get("class", -1)
 
-                # ✅ 예측 직후엔 평가 전이므로 항상 pending 상태 → success=True 임시로 기록
                 log_prediction(
                     symbol=result.get("symbol", symbol),
                     strategy=result.get("strategy", strategy),
@@ -126,7 +124,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                     target_price=result.get("price", 0) * (1 + result.get("expected_return", 0)),
                     timestamp=result.get("timestamp", now_kst().isoformat()),
                     model=result.get("model", "unknown"),
-                    success=True,  # ✅ pending 상태를 위한 임시 처리
+                    success=True,
                     reason=result.get("reason", "예측 성공"),
                     rate=result.get("expected_return", 0.0),
                     return_value=result.get("expected_return", 0.0),
@@ -147,7 +145,6 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
             log_audit(symbol, strategy, None, f"예측 예외: {e}")
 
-    # ✅ 예측 클래스 다양성 감지 → fine-tune
     for key, classes in class_distribution.items():
         symbol, strat = key.split("-")
         from collections import Counter
@@ -163,7 +160,6 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             except Exception as e:
                 print(f"[오류] fine-tune 실패: {e}")
 
-    # ✅ 전략별 실패율 기반 fine-tune
     for strat in ["단기", "중기", "장기"]:
         stat = strategy_stats.get(strat, {"success": 0, "fail": 0})
         total = stat["success"] + stat["fail"]
@@ -184,10 +180,10 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
 
     try:
         print("[평가 실행] evaluate_predictions 호출")
+        from predict import evaluate_predictions  # ✅ 함수 내부로 이동
         evaluate_predictions(get_kline_by_strategy)
     except Exception as e:
         print(f"[ERROR] 평가 실패: {e}")
-
 
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
