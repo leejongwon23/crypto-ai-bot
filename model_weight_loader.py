@@ -19,14 +19,18 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
-        # ✅ 누락 대비 Key 체크
-        if any(k not in meta for k in ["model", "symbol", "strategy"]):
-            print(f"[스킵] 메타 누락 키 확인: {meta_path}")
+        m = meta.get("model")
+        s = meta.get("strategy")
+        sy = meta.get("symbol")
+
+        if not all([m, s, sy]):
+            print(f"[스킵] 메타 누락 키 존재: {meta_path}")
             return 0.0
 
-        if meta["model"] != model_type or meta["symbol"] != symbol or meta["strategy"] != strategy:
+        if m != model_type or s != strategy or sy != symbol:
             print(f"[스킵] 메타 구조 불일치: {meta_path}")
             return 0.0
+
     except Exception as e:
         print(f"[스킵] 메타 로드 실패: {meta_path} → {e}")
         return 0.0
