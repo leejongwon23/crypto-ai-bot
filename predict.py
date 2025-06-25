@@ -89,11 +89,12 @@ def predict(symbol, strategy, source="일반"):
     from data.utils import get_kline_by_strategy, compute_features
     from window_optimizer import find_best_window
     from config import NUM_CLASSES
-    
+    from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
+    from predict import class_to_expected_return, failed_result
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    MODEL_DIR = "/persistent/models"
     now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+    MODEL_DIR = "/persistent/models"
 
     try:
         print(f"[PREDICT] {symbol}-{strategy} 시작")
@@ -137,7 +138,6 @@ def predict(symbol, strategy, source="일반"):
             return [failed_result(symbol, strategy, "unknown", "입력 형상 오류", source)]
 
         predictions = []
-
         model_files = {
             m["model"]: os.path.join(MODEL_DIR, m["pt_file"])
             for m in get_available_models()
@@ -162,14 +162,8 @@ def predict(symbol, strategy, source="일반"):
                     continue
 
                 model = get_model(model_type, X.shape[2], output_size=NUM_CLASSES).to(DEVICE)
-                try:
-                    state = torch.load(path, map_location=DEVICE)
-                    model.load_state_dict(state)
-                except Exception as e:
-                    print(f"[로드 실패] {path} → {e}")
-                    predictions.append(failed_result(symbol, strategy, model_type, f"로드 실패: {e}", source, X_input))
-                    continue
-
+                state = torch.load(path, map_location=DEVICE)
+                model.load_state_dict(state)
                 model.eval()
 
                 with torch.no_grad():
@@ -179,15 +173,14 @@ def predict(symbol, strategy, source="일반"):
                     recent_freq = get_recent_class_frequencies(strategy=strategy)
                     class_counts = meta.get("class_counts", {}) or {}
 
-                    probs[0] = adjust_probs_with_diversity(probs, recent_freq, class_counts)
+                    adjusted_probs = adjust_probs_with_diversity(probs, recent_freq, class_counts)
+                    top3_idx = adjusted_probs.argsort()[-3:][::-1]
 
-                    top3_idx = probs[0].argsort()[-3:][::-1]
-                    final_idx = top3_idx[0]
-                    best_score = 0
+                    final_idx, best_score = top3_idx[0], 0
                     for idx in top3_idx:
                         diversity_bonus = 1.0 - (recent_freq.get(idx, 0) / (sum(recent_freq.values()) + 1e-6))
                         class_weight = 1.0 + (1.0 - class_counts.get(str(idx), 0) / max(class_counts.values()) if class_counts else 0)
-                        score = probs[0][idx] * diversity_bonus * class_weight
+                        score = adjusted_probs[idx] * diversity_bonus * class_weight
                         if score > best_score:
                             final_idx = idx
                             best_score = score
@@ -227,9 +220,7 @@ def predict(symbol, strategy, source="일반"):
                 del model
 
             except Exception as e:
-                predictions.append(
-                    failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source, X_input)
-                )
+                predictions.append(failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source, X_input))
 
         if not predictions:
             return [failed_result(symbol, strategy, "unknown", "모든 모델 예측 실패", source, X_input)]
@@ -238,7 +229,6 @@ def predict(symbol, strategy, source="일반"):
 
     except Exception as e:
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
-
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
