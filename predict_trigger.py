@@ -5,7 +5,6 @@ import datetime
 import pytz
 
 from data.utils import SYMBOLS, get_kline_by_strategy
-from recommend import run_prediction
 from logger import get_model_success_rate, log_audit_prediction
 from logger import log_audit_prediction as log_audit
 
@@ -93,7 +92,8 @@ def run():
             except Exception as e:
                 print(f"[트리거 오류] {symbol} {strategy}: {e}")
                 log_audit(symbol, strategy or "알수없음", "트리거오류", str(e))
-
+                
+from recommend import run_prediction
 from collections import Counter
 import pandas as pd
 import os
