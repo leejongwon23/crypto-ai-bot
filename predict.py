@@ -250,13 +250,14 @@ def evaluate_predictions(get_price_fn):
     EVAL_RESULT = f"/persistent/logs/evaluation_{date_str}.csv"
     WRONG = f"/persistent/logs/wrong_{date_str}.csv"
 
-    class_ranges = [
+    class_ranges = [  # 클래스에 따라 기대 수익률 범위 설정
         (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
         (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
         (-0.03, -0.01), (-0.01, 0.01), (0.01, 0.03), (0.03, 0.05),
         (0.05, 0.07), (0.07, 0.10), (0.10, 0.15), (0.15, 0.20),
         (0.20, 0.30), (0.30, 0.50), (0.50, 1.00), (1.00, 2.00), (2.00, 5.00)
     ]
+
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
 
     try:
@@ -270,10 +271,7 @@ def evaluate_predictions(get_price_fn):
 
     for r in rows:
         try:
-            if "status" not in r or r["status"] in ["", None]:
-                r.update({"status": "pending", "reason": "상태 없음 초기화", "return": 0.0})
-
-            if r.get("status") not in ["pending", "v_pending"]:
+            if r.get("status") not in [None, "", "pending", "v_pending"]:
                 updated.append(r)
                 continue
 
@@ -285,7 +283,7 @@ def evaluate_predictions(get_price_fn):
             try:
                 pred_class = int(float(r.get("predicted_class", -1)))
             except:
-                r.update({"status": "skip_eval", "reason": "예측 클래스 파싱 실패", "return": 0.0})
+                r.update({"status": "skip_eval", "reason": "예측 클래스 오류", "return": 0.0})
                 updated.append(r)
                 continue
 
@@ -328,15 +326,17 @@ def evaluate_predictions(get_price_fn):
                 "reason": f"[클래스={pred_class}] 기대=({low:.3f}~{high:.3f}) / 실현={gain:.4f}",
                 "return": round(gain, 5)
             })
+
             update_model_success(symbol, strategy, model, success)
             evaluated.append(r)
 
         except Exception as e:
-            r.update({"status": "skip_eval", "reason": f"예외: {e}", "return": 0.0})
+            r.update({"status": "skip_eval", "reason": f"예외 발생: {e}", "return": 0.0})
             updated.append(r)
 
     updated += evaluated
 
+    # 평가 결과 저장
     with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
         csv.DictWriter(f, fieldnames=updated[0].keys()).writerows([updated[0]] + updated[1:])
 
