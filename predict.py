@@ -258,13 +258,19 @@ def evaluate_predictions(get_price_fn):
             except:
                 pred_class = -1
 
+            # ✅ 예측된 entry/target/rate 값을 먼저 보존
             try:
                 entry_price = float(r.get("entry_price", 0))
                 target_price = float(r.get("target_price", 0))
-                if entry_price <= 0 or target_price <= 0:
-                    raise ValueError
+                expected_return = float(r.get("rate", 0.0))
             except:
-                r.update({"status": "fail", "reason": "가격 오류", "return": 0.0})
+                r.update({"status": "fail", "reason": "예측 수익률 불러오기 오류", "return": 0.0})
+                updated.append(r)
+                continue
+
+            # ✅ entry_price가 0이면 평가 불가
+            if entry_price <= 0 or target_price <= 0:
+                r.update({"status": "fail", "reason": "기록된 가격 오류", "return": 0.0})
                 updated.append(r)
                 continue
 
@@ -292,14 +298,16 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            expected_return = (target_price - entry_price) / (entry_price + 1e-6)
-            tolerance = 0.10  # 허용 오차 ±10%
+            # ✅ 허용 오차 ±10%로 기대 수익률 비교
+            tolerance = 0.10
             low = expected_return * (1 - tolerance)
             high = expected_return * (1 + tolerance)
             success = low <= gain <= high if pred_class >= 0 else False
 
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
-            status = "v_success" if vol and success else "v_fail" if not success and vol else "success" if success else "fail"
+            status = "v_success" if vol and success else \
+                     "v_fail" if not success and vol else \
+                     "success" if success else "fail"
 
             r.update({
                 "status": status,
