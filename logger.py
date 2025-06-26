@@ -71,15 +71,15 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     date_str = now.split("T")[0]
     dated_path = f"/persistent/logs/prediction_{date_str}.csv"
 
-    # ✅ predicted_class 잘못된 값 방지
+    # ✅ predicted_class 오류 방지 및 보정
     try:
         pred_class_val = int(float(predicted_class))
-        if pred_class_val < 0 or pred_class_val >= 100:  # 너무 큰 숫자 방지
+        if pred_class_val < 0 or pred_class_val >= 100:
             pred_class_val = -1
     except:
         pred_class_val = -1
 
-    # ✅ 예측 성공 여부 + 변동성 여부 기준 status 결정
+    # ✅ 예측 성공 여부 + 변동성 기준
     status = "v_success" if success and volatility else \
              "v_fail" if not success and volatility else \
              "success" if success else "fail"
@@ -94,10 +94,10 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "model": mname,
         "rate": float(rate),
         "status": status,
-        "reason": reason or "",
+        "reason": str(reason or ""),
         "return": float(return_value if return_value is not None else rate),
         "volatility": bool(volatility),
-        "source": source,
+        "source": str(source or "일반"),
         "predicted_class": str(pred_class_val)
     }
 
