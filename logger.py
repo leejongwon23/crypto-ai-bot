@@ -362,22 +362,19 @@ MODEL_DIR = "/persistent/models"
 
 def get_available_models():
     """
-    모델 폴더 내에서 .pt + .meta.json 쌍이 모두 존재하는 경우만 필터링해 리스트로 반환.
+    models 폴더에서 .pt와 .meta.json 파일이 둘 다 있는 모델만 리스트로 반환
     """
     models = []
+    if not os.path.exists(MODEL_DIR):
+        return []
+
     pt_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
 
-    for pt in pt_files:
-        base = pt.replace(".pt", "")
-        meta = f"{base}.meta.json"
-        if meta in os.listdir(MODEL_DIR):
-            symbol, strategy, model_type = base.split("_", 2)
-            models.append({
-                "symbol": symbol,
-                "strategy": strategy,
-                "model": model_type,
-                "pt_file": pt,
-                "meta_file": meta
-            })
+    for pt_file in pt_files:
+        base_name = pt_file[:-3]  # .pt 제거
+        meta_file = f"{base_name}.meta.json"
+        meta_path = os.path.join(MODEL_DIR, meta_file)
+        if os.path.exists(os.path.join(MODEL_DIR, pt_file)) and os.path.exists(meta_path):
+            models.append(base_name)
 
     return models
