@@ -126,38 +126,48 @@ def get_recent_class_frequencies(strategy=None, recent_days=3):
 import numpy as np
 from collections import Counter
 
-def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict = None, alpha=0.05, beta=0.05):
-    import numpy as np
-
+def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict = None, alpha=0.10, beta=0.10):
+    """
+    최근 예측된 클래스 분포와 학습 클래스 분포(class_counts)를 기반으로 확률을 보정함.
+    - alpha: 최근 예측 편향 보정 강도
+    - beta: 학습 편향 보정 강도
+    """
     probs = probs.copy()
     if probs.ndim == 2:
         probs = probs[0]
 
-    # 최근 예측된 클래스 분포에 따른 가중치
+    num_classes = len(probs)
+
+    # ✅ 최근 예측된 클래스 분포 기반 보정
     total_recent = sum(recent_freq.values()) + 1e-6
     recent_weights = np.array([
         1.0 - alpha * (recent_freq.get(i, 0) / total_recent)
-        for i in range(len(probs))
+        for i in range(num_classes)
     ])
+    # ✅ 최소 가중치 제한 (희소 클래스 보정 강제 적용)
+    recent_weights = np.clip(recent_weights, 0.85, 1.15)
 
-    # 학습 데이터 내 클래스 분포에 따른 가중치
+    # ✅ 학습 클래스 분포 기반 보정
     if class_counts:
         total_class = sum(class_counts.values()) + 1e-6
         class_weights = np.array([
             1.0 + beta * (1.0 - class_counts.get(str(i), 0) / total_class)
-            for i in range(len(probs))
+            for i in range(num_classes)
         ])
     else:
-        class_weights = np.ones_like(recent_weights)
+        # ✅ class_counts가 없을 경우에도 최소 보정 적용
+        class_weights = np.ones(num_classes) + beta
 
-    # 두 가중치를 결합
+    class_weights = np.clip(class_weights, 0.85, 1.15)
+
+    # ✅ 최종 결합 가중치 계산
     combined_weights = recent_weights * class_weights
     combined_weights = np.clip(combined_weights, 0.85, 1.15)
 
     adjusted = probs * combined_weights
     adjusted /= adjusted.sum()
 
-    # ✅ 디버깅 로그로 모든 가중치 출력
+    # ✅ 디버깅 로그
     print("[🔍 raw_probs]", probs)
     print("[🔍 class_weights]", class_weights)
     print("[🔍 recent_weights]", recent_weights)
