@@ -173,6 +173,10 @@ def predict(symbol, strategy, source="일반"):
                     recent_freq = get_recent_class_frequencies(strategy=strategy)
                     class_counts = meta.get("class_counts", {}) or {}
 
+                    # ✅ 복제된 클래스 확인 로그
+                    print(f"[🔍 class_counts] {class_counts}")
+                    sys.stdout.flush()
+
                     adjusted_probs = adjust_probs_with_diversity(probs, recent_freq, class_counts)
                     top3_idx = adjusted_probs.argsort()[-3:][::-1]
 
