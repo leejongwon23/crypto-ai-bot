@@ -79,47 +79,30 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     return result
 
 def predict(symbol, strategy, source="일반"):
-    import json, os, torch, datetime, pytz, sys
-    import numpy as np
-    from sklearn.preprocessing import MinMaxScaler
-    from model.base_model import get_model
-    from model_weight_loader import get_model_weight
-    from logger import log_prediction, get_feature_hash, get_available_models
-    from failure_db import insert_failure_record
-    from data.utils import get_kline_by_strategy, compute_features
-    from window_optimizer import find_best_window
-    from config import NUM_CLASSES
-    from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
-    from predict import class_to_expected_return, failed_result
-
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-    MODEL_DIR = "/persistent/models"
-
     try:
         print(f"[PREDICT] {symbol}-{strategy} 시작")
         sys.stdout.flush()
 
         window = find_best_window(symbol, strategy)
         if not isinstance(window, int) or window <= 0:
-            return [failed_result(symbol, strategy, "unknown", "윈도우 결정 실패", source)]
+            return [failed_result(symbol, strategy, model_type="unknown", reason="윈도우 결정 실패", source=source)]
 
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < window + 1:
-            return [failed_result(symbol, strategy, "unknown", "데이터 부족", source)]
+            return [failed_result(symbol, strategy, model_type="unknown", reason="데이터 부족", source=source)]
 
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.dropna().shape[0] < window + 1:
-            return [failed_result(symbol, strategy, "unknown", "feature 부족", source)]
+            return [failed_result(symbol, strategy, model_type="unknown", reason="feature 부족", source=source)]
 
         if "volatility" in feat.columns and feat["volatility"].iloc[-1] < 0.00001:
-            return [failed_result(symbol, strategy, "unknown", "변화량 없음", source)]
+            return [failed_result(symbol, strategy, model_type="unknown", reason="변화량 없음", source=source)]
 
         if feat["close"].nunique() < 3:
-            return [failed_result(symbol, strategy, "unknown", "가격 변화 부족", source)]
+            return [failed_result(symbol, strategy, model_type="unknown", reason="가격 변화 부족", source=source)]
 
         if "timestamp" not in feat.columns:
-            return [failed_result(symbol, strategy, "unknown", "timestamp 없음", source)]
+            return [failed_result(symbol, strategy, model_type="unknown", reason="timestamp 없음", source=source)]
 
         raw_close = df["close"].iloc[-1]
         raw_feat = feat.dropna().copy()
@@ -127,15 +110,15 @@ def predict(symbol, strategy, source="일반"):
         feat_scaled = MinMaxScaler().fit_transform(features_only)
 
         if feat_scaled.shape[0] < window:
-            return [failed_result(symbol, strategy, "unknown", "시퀀스 부족", source)]
+            return [failed_result(symbol, strategy, model_type="unknown", reason="시퀀스 부족", source=source)]
 
         X_input = feat_scaled[-window:]
         if X_input.shape[0] != window:
-            return [failed_result(symbol, strategy, "unknown", "시퀀스 길이 오류", source)]
+            return [failed_result(symbol, strategy, model_type="unknown", reason="시퀀스 길이 오류", source=source)]
 
         X = np.expand_dims(X_input, axis=0)
         if len(X.shape) != 3:
-            return [failed_result(symbol, strategy, "unknown", "입력 형상 오류", source)]
+            return [failed_result(symbol, strategy, model_type="unknown", reason="입력 형상 오류", source=source)]
 
         predictions = []
         model_files = {
@@ -145,7 +128,7 @@ def predict(symbol, strategy, source="일반"):
         }
 
         if not model_files:
-            return [failed_result(symbol, strategy, "unknown", "모델 없음", source, X_input)]
+            return [failed_result(symbol, strategy, model_type="unknown", reason="모델 없음", source=source, X_input=X_input)]
 
         for model_type, path in model_files.items():
             try:
@@ -168,21 +151,15 @@ def predict(symbol, strategy, source="일반"):
 
                 with torch.no_grad():
                     logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
-                    probs = torch.softmax(logits, dim=1).cpu().numpy()
+                    probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
 
                     recent_freq = get_recent_class_frequencies(strategy=strategy)
                     class_counts = meta.get("class_counts", {}) or {}
 
-                    print(f"[🔍 class_counts] {class_counts}")
-                    sys.stdout.flush()
-
                     adjusted_probs = adjust_probs_with_diversity(probs, recent_freq, class_counts)
-
-                    print("[🔍 class_weights]", adjusted_probs)  # ✅ 조정된 확률 출력
-                    print("[🔍 최종 조정 확률]", adjusted_probs / adjusted_probs.sum())
-
                     top3_idx = adjusted_probs.argsort()[-3:][::-1]
-                    final_idx, best_score = top3_idx[0], 0
+                    
+                    final_idx, best_score = top3_idx[0], -1
                     for idx in top3_idx:
                         diversity_bonus = 1.0 - (recent_freq.get(idx, 0) / (sum(recent_freq.values()) + 1e-6))
                         class_weight = 1.0 + (1.0 - class_counts.get(str(idx), 0) / max(class_counts.values()) if class_counts else 0)
@@ -197,15 +174,20 @@ def predict(symbol, strategy, source="일반"):
 
                     log_prediction(
                         symbol=symbol, strategy=strategy,
-                        direction=f"Class-{pred_class}", entry_price=raw_close,
+                        direction=f"Class-{pred_class}",
+                        entry_price=raw_close,
                         target_price=raw_close * (1 + expected_return),
-                        model=model_type, success=True, reason="예측 완료",
-                        rate=expected_return, timestamp=t,
-                        volatility=True, source=source,
+                        model=model_type,
+                        success=True,
+                        reason="예측 완료",
+                        rate=expected_return,
+                        timestamp=t,
+                        volatility=True,
+                        source=source,
                         predicted_class=pred_class
                     )
 
-                    result = {
+                    predictions.append({
                         "symbol": symbol, "strategy": strategy,
                         "model": model_type, "class": pred_class,
                         "expected_return": expected_return,
@@ -213,15 +195,7 @@ def predict(symbol, strategy, source="일반"):
                         "success": True, "source": source,
                         "predicted_class": pred_class,
                         "label": pred_class
-                    }
-
-                    try:
-                        feature_hash = get_feature_hash(X_input)
-                        insert_failure_record(result, feature_hash)
-                    except:
-                        pass
-
-                    predictions.append(result)
+                    })
 
                 del model
 
