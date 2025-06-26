@@ -158,11 +158,18 @@ def predict(symbol, strategy, source="일반"):
 
                     adjusted_probs = adjust_probs_with_diversity(probs, recent_freq, class_counts)
 
-                    top3_idx = adjusted_probs.argsort()[-3:][::-1]
+                    # ✅ 오류 방지용 보완된 Top3 처리
+                    top3_idx = [int(i) for i in adjusted_probs.argsort()[-3:][::-1]]
                     final_idx, best_score = top3_idx[0], -1
+
+                    max_count = max(class_counts.values()) if class_counts else 1
+
                     for idx in top3_idx:
+                        idx = int(idx)
                         diversity_bonus = 1.0 - (recent_freq.get(idx, 0) / (sum(recent_freq.values()) + 1e-6))
-                        class_weight = 1.0 + (1.0 - class_counts.get(str(idx), 0) / max(class_counts.values()) if class_counts else 0)
+                        class_weight = 1.0 + (
+                            1.0 - (class_counts.get(str(idx), 0) / max_count)
+                        )
                         score = adjusted_probs[idx] * diversity_bonus * class_weight
                         if score > best_score:
                             final_idx = idx
