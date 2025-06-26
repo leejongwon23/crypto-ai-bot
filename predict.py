@@ -315,15 +315,14 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            # ✅ 평가 기준: target_price 도달 여부 ± 허용 오차
             expected_return = (target_price - entry_price) / (entry_price + 1e-6)
-            tolerance = 0.10  # 허용 오차 10%
+            tolerance = 0.10  # 허용 오차 ±10%
             low = expected_return * (1 - tolerance)
             high = expected_return * (1 + tolerance)
             success = low <= gain <= high if pred_class >= 0 else False
 
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
-            status = "v_success" if vol and success else "v_fail" if vol else "success" if success else "fail"
+            status = "v_success" if vol and success else "v_fail" if not success and vol else "success" if success else "fail"
 
             r.update({
                 "status": status,
