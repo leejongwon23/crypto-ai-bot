@@ -256,15 +256,8 @@ def evaluate_predictions(get_price_fn):
     EVAL_RESULT = f"/persistent/logs/evaluation_{date_str}.csv"
     WRONG = f"/persistent/logs/wrong_{date_str}.csv"
 
-    class_ranges = [  # 클래스에 따라 기대 수익률 범위 설정
-        (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
-        (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
-        (-0.03, -0.01), (-0.01, 0.01), (0.01, 0.03), (0.03, 0.05),
-        (0.05, 0.07), (0.07, 0.10), (0.10, 0.15), (0.15, 0.20),
-        (0.20, 0.30), (0.30, 0.50), (0.50, 1.00), (1.00, 2.00), (2.00, 5.00)
-    ]
-
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
+    updated, evaluated = [], []
 
     try:
         rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
@@ -272,8 +265,6 @@ def evaluate_predictions(get_price_fn):
             return
     except:
         return
-
-    updated, evaluated = [], []
 
     for r in rows:
         try:
@@ -284,19 +275,25 @@ def evaluate_predictions(get_price_fn):
             symbol = r["symbol"]
             strategy = r["strategy"]
             model = r.get("model", "unknown")
-            entry_price = float(r.get("entry_price", 0))
 
             try:
                 pred_class = int(float(r.get("predicted_class", -1)))
             except:
-                r.update({"status": "skip_eval", "reason": "예측 클래스 오류", "return": 0.0})
+                pred_class = -1
+
+            try:
+                entry_price = float(r.get("entry_price", 0))
+                target_price = float(r.get("target_price", 0))
+                if entry_price <= 0 or target_price <= 0:
+                    raise ValueError
+            except:
+                r.update({"status": "fail", "reason": "가격 오류", "return": 0.0})
                 updated.append(r)
                 continue
 
             timestamp = pd.to_datetime(r["timestamp"], utc=True).tz_convert("Asia/Seoul")
-            now = now_kst()
             deadline = timestamp + pd.Timedelta(hours=eval_horizon_map.get(strategy, 6))
-
+            now = now_kst()
             if now < deadline:
                 r.update({"reason": "⏳ 평가 대기 중", "return": 0.0})
                 updated.append(r)
@@ -304,32 +301,33 @@ def evaluate_predictions(get_price_fn):
 
             df = get_price_fn(symbol, strategy)
             if df is None or "timestamp" not in df.columns:
-                r.update({"status": "skip_eval", "reason": "가격 데이터 없음", "return": 0.0})
+                r.update({"status": "fail", "reason": "가격 데이터 없음", "return": 0.0})
                 updated.append(r)
                 continue
 
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Seoul")
             future_df = df[(df["timestamp"] >= timestamp) & (df["timestamp"] <= deadline)]
             if future_df.empty:
-                r.update({"status": "skip_eval", "reason": "미래 데이터 없음", "return": 0.0})
+                r.update({"status": "fail", "reason": "미래 데이터 없음", "return": 0.0})
                 updated.append(r)
                 continue
 
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            if 0 <= pred_class < len(class_ranges):
-                low, high = class_ranges[pred_class]
-                success = low <= gain <= high
-            else:
-                success = False
+            # ✅ 평가 기준: target_price 도달 여부 ± 허용 오차
+            expected_return = (target_price - entry_price) / (entry_price + 1e-6)
+            tolerance = 0.10  # 허용 오차 10%
+            low = expected_return * (1 - tolerance)
+            high = expected_return * (1 + tolerance)
+            success = low <= gain <= high if pred_class >= 0 else False
 
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
             status = "v_success" if vol and success else "v_fail" if vol else "success" if success else "fail"
 
             r.update({
                 "status": status,
-                "reason": f"[클래스={pred_class}] 기대=({low:.3f}~{high:.3f}) / 실현={gain:.4f}",
+                "reason": f"[cls={pred_class}] 기대={expected_return:.3f}, 실현={gain:.3f}, 허용=({low:.3f}~{high:.3f})",
                 "return": round(gain, 5)
             })
 
@@ -337,12 +335,11 @@ def evaluate_predictions(get_price_fn):
             evaluated.append(r)
 
         except Exception as e:
-            r.update({"status": "skip_eval", "reason": f"예외 발생: {e}", "return": 0.0})
+            r.update({"status": "fail", "reason": f"예외: {e}", "return": 0.0})
             updated.append(r)
 
     updated += evaluated
 
-    # 평가 결과 저장
     with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
         csv.DictWriter(f, fieldnames=updated[0].keys()).writerows([updated[0]] + updated[1:])
 
