@@ -6,33 +6,36 @@ EVAL_RESULT = "/persistent/evaluation_result.csv"  # ✅ 평가 결과 로그
 MODEL_DIR = "/persistent/models"
 
 def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
-    import glob, os, json
+    import glob, json
+
     MODEL_DIR = "/persistent/models"
     meta_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.meta.json"
     pt_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt"
 
+    # ✅ 모델 파일 존재 확인
     if not os.path.exists(meta_path) or not os.path.exists(pt_path):
-        print(f"[스킵] {symbol}-{strategy}-{model_type}: 모델 파일 또는 메타 없음")
+        print(f"[❌ 누락] 모델 또는 메타 파일 없음 → {symbol}-{strategy}-{model_type}")
         return 0.0
 
     try:
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
+        
+        # ✅ 메타 키 유효성 체크 (설계상 핵심 3개 키)
+        m = meta.get("model", "").strip()
+        s = meta.get("strategy", "").strip()
+        sy = meta.get("symbol", "").strip()
 
-        m = meta.get("model")
-        s = meta.get("strategy")
-        sy = meta.get("symbol")
-
-        if not all([m, s, sy]):
-            print(f"[스킵] 메타 누락 키 존재: {meta_path}")
+        if not m or not s or not sy:
+            print(f"[❌ 메타 누락] 'model', 'strategy', 'symbol' 중 일부 없음 → {meta_path}")
             return 0.0
 
         if m != model_type or s != strategy or sy != symbol:
-            print(f"[스킵] 메타 구조 불일치: {meta_path}")
+            print(f"[⚠️ 불일치] 메타 정보 불일치 → {meta_path}")
             return 0.0
 
     except Exception as e:
-        print(f"[스킵] 메타 로드 실패: {meta_path} → {e}")
+        print(f"[❌ 메타 로딩 실패] {meta_path} → {e}")
         return 0.0
 
     try:
@@ -71,7 +74,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
             return round((success_rate - 0.4) / (0.65 - 0.4), 4)
 
     except Exception as e:
-        print(f"[오류] get_model_weight 실패: {e}")
+        print(f"[❌ 평가기반 가중치 계산 실패] → {e}")
         return 1.0
 
 def model_exists(symbol, strategy):
