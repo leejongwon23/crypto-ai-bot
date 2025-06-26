@@ -173,13 +173,15 @@ def predict(symbol, strategy, source="일반"):
                     recent_freq = get_recent_class_frequencies(strategy=strategy)
                     class_counts = meta.get("class_counts", {}) or {}
 
-                    # ✅ 복제된 클래스 확인 로그
                     print(f"[🔍 class_counts] {class_counts}")
                     sys.stdout.flush()
 
                     adjusted_probs = adjust_probs_with_diversity(probs, recent_freq, class_counts)
-                    top3_idx = adjusted_probs.argsort()[-3:][::-1]
 
+                    print("[🔍 class_weights]", adjusted_probs)  # ✅ 조정된 확률 출력
+                    print("[🔍 최종 조정 확률]", adjusted_probs / adjusted_probs.sum())
+
+                    top3_idx = adjusted_probs.argsort()[-3:][::-1]
                     final_idx, best_score = top3_idx[0], 0
                     for idx in top3_idx:
                         diversity_bonus = 1.0 - (recent_freq.get(idx, 0) / (sum(recent_freq.values()) + 1e-6))
