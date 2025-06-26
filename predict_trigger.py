@@ -152,4 +152,10 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
     combined_weights = np.clip(combined_weights, 0.85, 1.15)
 
     adjusted = probs * combined_weights
+
+    # ✅ 디버깅용 로그 출력
+    print("[🔍 class_weights]", class_weights)
+    print("[🔍 recent_weights]", recent_weights)
+    print("[🔍 최종 조정 확률]", adjusted / adjusted.sum())
+
     return adjusted / adjusted.sum()
