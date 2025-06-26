@@ -64,14 +64,15 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                    timestamp=None, model=None, success=True, reason="", rate=0.0,
                    return_value=None, volatility=False, source="일반", predicted_class=None):
     import csv, os, datetime, pytz
+
     now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
     now = timestamp or now_kst().isoformat()
-    mname = str(model or "unknown")
+    mname = str(model or "unknown").strip()
     full_path = "/persistent/prediction_log.csv"
     date_str = now.split("T")[0]
     dated_path = f"/persistent/logs/prediction_{date_str}.csv"
 
-    # ✅ predicted_class 오류 방지 및 보정
+    # ✅ predicted_class 값 정수화 및 범위 제한
     try:
         pred_class_val = int(float(predicted_class))
         if pred_class_val < 0 or pred_class_val >= 100:
@@ -79,7 +80,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     except:
         pred_class_val = -1
 
-    # ✅ 예측 성공 여부 + 변동성 기준
+    # ✅ status 분기: 예측 성공 여부 + 변동성 동시 고려
     status = "v_success" if success and volatility else \
              "v_fail" if not success and volatility else \
              "success" if success else "fail"
@@ -101,23 +102,15 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "predicted_class": str(pred_class_val)
     }
 
-    try:
-        with open(dated_path, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=row.keys())
-            if f.tell() == 0:
-                w.writeheader()
-            w.writerow(row)
-    except Exception as e:
-        print(f"[오류] 날짜별 로그 기록 실패 → {e}")
-
-    try:
-        with open(full_path, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=row.keys())
-            if f.tell() == 0:
-                w.writeheader()
-            w.writerow(row)
-    except Exception as e:
-        print(f"[오류] 통합 로그 기록 실패 → {e}")
+    for path in [dated_path, full_path]:
+        try:
+            with open(path, "a", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=row.keys())
+                if f.tell() == 0:
+                    writer.writeheader()
+                writer.writerow(row)
+        except Exception as e:
+            print(f"[❌ 로그 기록 실패] {path} → {e}")
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
