@@ -133,12 +133,14 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
     if probs.ndim == 2:
         probs = probs[0]
 
+    # 최근 예측된 클래스 분포에 따른 가중치
     total_recent = sum(recent_freq.values()) + 1e-6
     recent_weights = np.array([
         1.0 - alpha * (recent_freq.get(i, 0) / total_recent)
         for i in range(len(probs))
     ])
 
+    # 학습 데이터 내 클래스 분포에 따른 가중치
     if class_counts:
         total_class = sum(class_counts.values()) + 1e-6
         class_weights = np.array([
@@ -148,14 +150,18 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
     else:
         class_weights = np.ones_like(recent_weights)
 
+    # 두 가중치를 결합
     combined_weights = recent_weights * class_weights
     combined_weights = np.clip(combined_weights, 0.85, 1.15)
 
     adjusted = probs * combined_weights
+    adjusted /= adjusted.sum()
 
-    # ✅ 디버깅용 로그 출력
+    # ✅ 디버깅 로그로 모든 가중치 출력
+    print("[🔍 raw_probs]", probs)
     print("[🔍 class_weights]", class_weights)
     print("[🔍 recent_weights]", recent_weights)
-    print("[🔍 최종 조정 확률]", adjusted / adjusted.sum())
+    print("[🔍 combined_weights]", combined_weights)
+    print("[🔍 최종 조정 확률]", adjusted)
 
-    return adjusted / adjusted.sum()
+    return adjusted
