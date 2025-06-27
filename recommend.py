@@ -187,6 +187,39 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
 
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
+
+    # ✅ 모델 타입 자동 탐지: transformer, cnn_lstm, lstm 중 가능한 모델 찾기
+    MODEL_DIR = "/persistent/models"
+    model_type = None
+    for mt in ["transformer", "cnn_lstm", "lstm"]:
+        pt_file = f"{symbol}_{strategy}_{mt}.pt"
+        meta_file = f"{symbol}_{strategy}_{mt}.meta.json"
+        if os.path.exists(os.path.join(MODEL_DIR, pt_file)) and os.path.exists(os.path.join(MODEL_DIR, meta_file)):
+            model_type = mt
+            break
+
+    if model_type is None:
+        print(f"[run_prediction 오류] {symbol}-{strategy} 가능한 모델 없음")
+        from logger import log_prediction
+        log_prediction(
+            symbol=symbol,
+            strategy=strategy,
+            direction="예측실패",
+            entry_price=0,
+            target_price=0,
+            timestamp=now_kst().isoformat(),
+            model="unknown",
+            success=False,
+            reason="모델 없음",
+            rate=0.0,
+            return_value=0.0,
+            volatility=False,
+            source="단일",
+            predicted_class=-1
+        )
+        return
+
+    # ✅ model_type 지정 → predict 함수에 정확히 반영되도록 전달
     run_prediction_loop(strategy, [{"symbol": symbol}], source="단일", allow_prediction=True)
 
 def main(strategy=None, force=False, allow_prediction=True):
