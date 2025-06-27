@@ -121,10 +121,12 @@ def predict(symbol, strategy, source="일반"):
             return [failed_result(symbol, strategy, "unknown", "입력 형상 오류", source)]
 
         predictions = []
+
+        # ✅ 수정된 model_files dict comprehension
         model_files = {
             m["model"]: os.path.join(MODEL_DIR, m["pt_file"])
             for m in get_available_models()
-            if m["symbol"] == symbol and m["strategy"] == strategy
+            if m["symbol"] == symbol and m["strategy"] == strategy and m["model"] in ["lstm", "cnn_lstm", "transformer"]
         }
 
         if not model_files:
@@ -158,7 +160,6 @@ def predict(symbol, strategy, source="일반"):
 
                     adjusted_probs = adjust_probs_with_diversity(probs, recent_freq, class_counts)
 
-                    # ✅ 오류 방지용 보완된 Top3 처리
                     top3_idx = [int(i) for i in adjusted_probs.argsort()[-3:][::-1]]
                     final_idx, best_score = top3_idx[0], -1
 
@@ -167,9 +168,7 @@ def predict(symbol, strategy, source="일반"):
                     for idx in top3_idx:
                         idx = int(idx)
                         diversity_bonus = 1.0 - (recent_freq.get(idx, 0) / (sum(recent_freq.values()) + 1e-6))
-                        class_weight = 1.0 + (
-                            1.0 - (class_counts.get(str(idx), 0) / max_count)
-                        )
+                        class_weight = 1.0 + (1.0 - (class_counts.get(str(idx), 0) / max_count))
                         score = adjusted_probs[idx] * diversity_bonus * class_weight
                         if score > best_score:
                             final_idx = idx
