@@ -362,7 +362,8 @@ MODEL_DIR = "/persistent/models"
 
 def get_available_models():
     """
-    models 폴더에서 .pt와 .meta.json 파일이 둘 다 있는 모델만 리스트로 반환
+    models 폴더에서 .pt와 .meta.json 파일이 둘 다 있는 경우만,
+    symbol, strategy, model 정보를 분리하여 dict 리스트로 반환
     """
     models = []
     if not os.path.exists(MODEL_DIR):
@@ -371,10 +372,24 @@ def get_available_models():
     pt_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
 
     for pt_file in pt_files:
-        base_name = pt_file[:-3]  # .pt 제거
+        base_name = pt_file[:-3]
         meta_file = f"{base_name}.meta.json"
         meta_path = os.path.join(MODEL_DIR, meta_file)
+
         if os.path.exists(os.path.join(MODEL_DIR, pt_file)) and os.path.exists(meta_path):
-            models.append(base_name)
+            try:
+                # 예: BTCUSDT-단기-lstm → symbol, strategy, model 분리
+                parts = base_name.split("-")
+                if len(parts) != 3:
+                    continue
+                symbol, strategy, model = parts
+                models.append({
+                    "symbol": symbol,
+                    "strategy": strategy,
+                    "model": model,
+                    "pt_file": pt_file
+                })
+            except:
+                continue
 
     return models
