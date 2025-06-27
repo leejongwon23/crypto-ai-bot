@@ -6,10 +6,13 @@ EVAL_RESULT = "/persistent/evaluation_result.csv"  # ✅ 평가 결과 로그
 MODEL_DIR = "/persistent/models"
 
 def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
-    import glob, json
+    import glob, json, os
+    import pandas as pd
 
     MODEL_DIR = "/persistent/models"
-    pattern = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_*.meta.json")
+
+    pattern = os.path.join(MODEL_DIR, f"*_{strategy}_*.meta.json") if symbol == "ALL" \
+              else os.path.join(MODEL_DIR, f"{symbol}_{strategy}_*.meta.json")
     meta_files = glob.glob(pattern)
 
     # ✅ 조건에 맞는 파일 탐색
@@ -22,8 +25,10 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
             s = meta.get("strategy", "").strip()
             sy = meta.get("symbol", "").strip()
 
-            if m != model_type or s != strategy or sy != symbol:
-                continue  # ✅ 메타 일치하는 모델만 처리
+            if m != model_type or s != strategy:
+                continue
+            if symbol != "ALL" and sy != symbol:
+                continue
 
             pt_path = meta_path.replace(".meta.json", ".pt")
             if not os.path.exists(pt_path):
@@ -35,7 +40,6 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
             if not eval_files:
                 return 1.0
 
-            import pandas as pd
             df_list = []
             for file in eval_files:
                 try:
@@ -50,7 +54,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
             df = pd.concat(df_list, ignore_index=True)
             df = df[(df["model"] == model_type) &
                     (df["strategy"] == strategy) &
-                    (df["symbol"] == symbol) &
+                    ((df["symbol"] == sy) if symbol != "ALL" else True) &
                     (df["status"].isin(["success", "fail"]))]
 
             if len(df) < min_samples:
