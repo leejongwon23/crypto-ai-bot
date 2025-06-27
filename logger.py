@@ -365,31 +365,41 @@ def get_available_models():
     models 폴더에서 .pt와 .meta.json 파일이 둘 다 있는 경우만,
     symbol, strategy, model 정보를 분리하여 dict 리스트로 반환
     """
+    import os, glob, json
+
     models = []
     if not os.path.exists(MODEL_DIR):
         return []
 
-    pt_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
+    pt_files = glob.glob(os.path.join(MODEL_DIR, "*.pt"))
 
-    for pt_file in pt_files:
-        base_name = pt_file[:-3]
-        meta_file = f"{base_name}.meta.json"
-        meta_path = os.path.join(MODEL_DIR, meta_file)
+    for pt_path in pt_files:
+        base_name = os.path.basename(pt_path)[:-3]  # .pt 제거
+        meta_path = os.path.join(MODEL_DIR, f"{base_name}.meta.json")
 
-        if os.path.exists(os.path.join(MODEL_DIR, pt_file)) and os.path.exists(meta_path):
-            try:
-                # 예: BTCUSDT-단기-lstm → symbol, strategy, model 분리
-                parts = base_name.split("-")
-                if len(parts) != 3:
-                    continue
-                symbol, strategy, model = parts
-                models.append({
-                    "symbol": symbol,
-                    "strategy": strategy,
-                    "model": model,
-                    "pt_file": pt_file
-                })
-            except:
-                continue
+        if not os.path.exists(meta_path):
+            continue
+
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+
+            m = meta.get("model", "").strip()
+            s = meta.get("strategy", "").strip()
+            sy = meta.get("symbol", "").strip()
+
+            if not m or not s or not sy:
+                continue  # ✅ 필수값 없으면 제외
+
+            models.append({
+                "symbol": sy,
+                "strategy": s,
+                "model": m,
+                "pt_file": os.path.basename(pt_path)
+            })
+
+        except Exception as e:
+            print(f"[⚠️ meta read 실패] {meta_path} → {e}")
+            continue
 
     return models
