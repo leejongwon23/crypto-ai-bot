@@ -26,10 +26,11 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
             s = meta.get("strategy", "").strip()
             sy = meta.get("symbol", "").strip()
 
-            if m != model_type or s != strategy:
-                continue
-            if symbol != "ALL" and sy != symbol:
-                continue
+            # 🛑 비교 조건 임시 주석 처리 (테스트용)
+            # if m != model_type or s != strategy:
+            #     continue
+            # if symbol != "ALL" and sy != symbol:
+            #     continue
 
             pt_path = meta_path.replace(".meta.json", ".pt")
             if not os.path.exists(pt_path):
@@ -101,4 +102,3 @@ def count_models_per_strategy():
     except Exception as e:
         print(f"[오류] 모델 수 계산 실패: {e}")
     return counts
-
