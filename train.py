@@ -374,8 +374,10 @@ def balance_classes(X, y, min_samples=20, target_classes=None):
 
     return np.array(X_balanced), np.array(y_balanced)
 # ✅ train.py 맨 아래에 반드시 포함해야 함
+
 def train_symbol_group_loop(delay_minutes=5):
     import time
+    import maintenance_fix_meta  # ✅ meta 보정 import
     from data.utils import SYMBOL_GROUPS
     group_count = len(SYMBOL_GROUPS)
     print(f"[자동 루프] 전체 {group_count}개 그룹 학습 루프 시작됨")
@@ -384,9 +386,19 @@ def train_symbol_group_loop(delay_minutes=5):
         for idx, group in enumerate(SYMBOL_GROUPS):
             try:
                 print(f"\n🚀 [그룹 {idx}] 학습 시작 → {group}")
+                
+                # ✅ 1. 그룹 학습 먼저 실행
                 train_models(group)
 
-                print(f"✅ [그룹 {idx}] 학습 완료 → 예측 시작")
+                # ✅ 2. meta 보정 (학습 후 예측 전)
+                try:
+                    maintenance_fix_meta.fix_all_meta_json()
+                    print(f"✅ meta 보정 완료 (그룹 {idx})")
+                except Exception as e:
+                    print(f"[⚠️ meta 보정 실패] {e}")
+
+                # ✅ 3. 예측 실행
+                print(f"✅ [그룹 {idx}] 학습 + 보정 완료 → 예측 시작")
                 for symbol in group:
                     for strategy in ["단기", "중기", "장기"]:
                         try:
