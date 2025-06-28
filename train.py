@@ -278,6 +278,7 @@ def train_all_models():
 def train_models(symbol_list):
     from telegram_bot import send_message
     from predict_test import main as run_prediction
+    import maintenance_fix_meta  # ✅ meta 보정 모듈 import
 
     strategies = ["단기", "중기", "장기"]
 
@@ -303,13 +304,19 @@ def train_models(symbol_list):
 
         time.sleep(5)  # ✅ 다음 전략 학습 전 5초 대기
 
+        # ✅ 각 전략 학습 후 meta 보정 실행
+        try:
+            maintenance_fix_meta.fix_all_meta_json()
+        except Exception as e:
+            print(f"[⚠️ meta 보정 실패] {e}")
+
+        # ✅ meta 보정 후 예측 실행
         try:
             run_prediction(strategy, symbols=symbol_list)  # ✅ 학습 완료된 심볼만 예측
         except Exception as e:
             print(f"❌ 예측 실패: {strategy} → {e}")
 
     send_message("✅ 학습 및 예측 루틴 완료 (해당 심볼 그룹)")
-
 
 
 def train_model_loop(strategy):
