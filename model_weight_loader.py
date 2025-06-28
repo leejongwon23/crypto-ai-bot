@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+import json
 
 LOG_FILE = "/persistent/logs/train_log.csv"
 EVAL_RESULT = "/persistent/evaluation_result.csv"  # ✅ 평가 결과 로그
