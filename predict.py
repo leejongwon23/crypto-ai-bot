@@ -79,9 +79,9 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
-def predict(symbol, strategy, source="일반"):
+def predict(symbol, strategy, source="일반", model_type=None):
     try:
-        print(f"[PREDICT] {symbol}-{strategy} 시작")
+        print(f"[PREDICT] {symbol}-{strategy} 시작 (model_type={model_type})")
         sys.stdout.flush()
 
         window = find_best_window(symbol, strategy)
@@ -123,31 +123,31 @@ def predict(symbol, strategy, source="일반"):
 
         predictions = []
 
-        # ✅ 수정된 model_files dict comprehension
         model_files = {
             m["model"]: os.path.join(MODEL_DIR, m["pt_file"])
             for m in get_available_models()
-            if m["symbol"] == symbol and m["strategy"] == strategy and m["model"] in ["lstm", "cnn_lstm", "transformer"]
+            if m["symbol"] == symbol and m["strategy"] == strategy and
+               (model_type is None or m["model"] == model_type)
         }
 
         if not model_files:
             return [failed_result(symbol, strategy, "unknown", "모델 없음", source, X_input)]
 
-        for model_type, path in model_files.items():
+        for mt, path in model_files.items():
             try:
                 meta_path = path.replace(".pt", ".meta.json")
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
 
-                if meta.get("model") != model_type or meta.get("input_size") != X.shape[2]:
+                if meta.get("model") != mt or meta.get("input_size") != X.shape[2]:
                     continue
 
-                weight = get_model_weight(model_type, strategy, symbol)
+                weight = get_model_weight(mt, strategy, symbol)
                 if weight <= 0.0:
-                    predictions.append(failed_result(symbol, strategy, model_type, "모델 가중치 부족", source, X_input))
+                    predictions.append(failed_result(symbol, strategy, mt, "모델 가중치 부족", source, X_input))
                     continue
 
-                model = get_model(model_type, X.shape[2], output_size=NUM_CLASSES).to(DEVICE)
+                model = get_model(mt, X.shape[2], output_size=NUM_CLASSES).to(DEVICE)
                 state = torch.load(path, map_location=DEVICE)
                 model.load_state_dict(state)
                 model.eval()
@@ -183,7 +183,7 @@ def predict(symbol, strategy, source="일반"):
                         symbol=symbol, strategy=strategy,
                         direction=f"Class-{pred_class}", entry_price=raw_close,
                         target_price=raw_close * (1 + expected_return),
-                        model=model_type, success=True, reason="예측 완료",
+                        model=mt, success=True, reason="예측 완료",
                         rate=expected_return, timestamp=t,
                         volatility=True, source=source,
                         predicted_class=pred_class
@@ -191,7 +191,7 @@ def predict(symbol, strategy, source="일반"):
 
                     result = {
                         "symbol": symbol, "strategy": strategy,
-                        "model": model_type, "class": pred_class,
+                        "model": mt, "class": pred_class,
                         "expected_return": expected_return,
                         "price": raw_close, "timestamp": t,
                         "success": True, "source": source,
@@ -210,7 +210,7 @@ def predict(symbol, strategy, source="일반"):
                 del model
 
             except Exception as e:
-                predictions.append(failed_result(symbol, strategy, model_type, f"예측 예외: {e}", source, X_input))
+                predictions.append(failed_result(symbol, strategy, mt, f"예측 예외: {e}", source, X_input))
 
         if not predictions:
             return [failed_result(symbol, strategy, "unknown", "모든 모델 예측 실패", source, X_input)]
