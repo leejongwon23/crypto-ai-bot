@@ -43,7 +43,7 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
     meta = {
         "symbol": symbol,
         "strategy": strategy,
-        "model": model_type,
+        "model": model_type,  # ✅ model_type 필드 강제 기록
         "input_size": input_size,
         "accuracy": float(round(acc, 4)),
         "f1_score": float(round(f1, 4)),
@@ -56,9 +56,12 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
         meta["class_counts"] = {str(k): int(v) for k, v in class_counts.items()}
 
     path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.meta.json"
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2, ensure_ascii=False)
-    print(f"🗘 저장됨: {path}"); sys.stdout.flush()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
+        print(f"🗘 저장됨: {path} (model={model_type})"); sys.stdout.flush()
+    except Exception as e:
+        print(f"[ERROR] meta 저장 실패: {e}")
 
 from logger import get_fine_tune_targets  # 🔁 반드시 포함
 
