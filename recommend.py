@@ -220,7 +220,7 @@ def run_prediction(symbol, strategy):
     # ✅ model_type 지정 → predict 함수에 정확히 반영되도록 전달
     run_prediction_loop(strategy, [{"symbol": symbol}], source="단일", allow_prediction=True)
 
-def main(strategy=None, force=False, allow_prediction=True):
+def main(strategy=None, symbol=None, force=False, allow_prediction=True):
     print(">>> [main] recommend.py 실행")
 
     # ✅ 디스크 사용량 체크
@@ -231,12 +231,18 @@ def main(strategy=None, force=False, allow_prediction=True):
 
     for s in targets:
         symbols_list = []
-        for sym in SYMBOLS:
+        if symbol:
+            # ✅ 단일 심볼만 예측
             symbols_list.append({
-                "symbol": sym,
-                # ✅ 필요한 필드만 dict에 포함
+                "symbol": symbol,
                 "volatility": 0.0
             })
+        else:
+            for sym in SYMBOLS:
+                symbols_list.append({
+                    "symbol": sym,
+                    "volatility": 0.0
+                })
 
         run_prediction_loop(s, symbols_list, source="일반", allow_prediction=allow_prediction)
 
