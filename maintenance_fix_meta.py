@@ -1,0 +1,44 @@
+import os
+import json
+
+MODEL_DIR = "/persistent/models"
+
+def fix_all_meta_json():
+    files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".meta.json")]
+    
+    for file in files:
+        path = os.path.join(MODEL_DIR, file)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception as e:
+            print(f"[ERROR] {file} 읽기 실패: {e}")
+            continue
+
+        base = file.replace(".meta.json", "")
+        parts = base.split("_")
+        if len(parts) < 3:
+            print(f"[SKIP] 잘못된 파일명 형식: {file}")
+            continue
+
+        symbol, strategy, model = parts[0], parts[1], parts[2]
+
+        updated = False
+        if "symbol" not in meta or not meta["symbol"]:
+            meta["symbol"] = symbol
+            updated = True
+        if "strategy" not in meta or not meta["strategy"]:
+            meta["strategy"] = strategy
+            updated = True
+        if "model" not in meta or not meta["model"]:
+            meta["model"] = model
+            updated = True
+
+        if updated:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+            print(f"[FIXED] {file} → 필드 보정 완료")
+        else:
+            print(f"[OK] {file} → 수정 불필요")
+
+fix_all_meta_json()
