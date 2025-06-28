@@ -1,11 +1,12 @@
 import os
 import json
+from model.base_model import get_model  # ✅ 추가
 
 MODEL_DIR = "/persistent/models"
 
 def fix_all_meta_json():
     files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".meta.json")]
-    
+
     for file in files:
         path = os.path.join(MODEL_DIR, file)
         try:
@@ -21,10 +22,9 @@ def fix_all_meta_json():
             print(f"[SKIP] 잘못된 파일명 형식: {file}")
             continue
 
-        symbol, strategy, model = parts[0], parts[1], parts[2]
+        symbol, strategy, model_type = parts[0], parts[1], parts[2]
 
         updated = False
-        # ✅ 공백("")일 경우에도 파일명 기반으로 보정
         if not meta.get("symbol"):
             meta["symbol"] = symbol
             updated = True
@@ -32,12 +32,19 @@ def fix_all_meta_json():
             meta["strategy"] = strategy
             updated = True
         if not meta.get("model"):
-            meta["model"] = model
+            meta["model"] = model_type
             updated = True
 
-        # ✅ 이 아래에 input_size 보정 코드 추가
-        if not meta.get("input_size"):
-            meta["input_size"] = 11   # ⚠️ 11은 현재 모델 input_size 기본값
+        # ✅ input_size: 실제 모델 구조에서 불러오기
+        try:
+            model = get_model(model_type)
+            input_size = model.fc_logits.in_features if hasattr(model, "fc_logits") else 11
+        except Exception as e:
+            print(f"[ERROR] input_size 가져오기 실패: {e}")
+            input_size = 11
+
+        if meta.get("input_size") != input_size:
+            meta["input_size"] = input_size
             updated = True
 
         if updated:
@@ -46,11 +53,6 @@ def fix_all_meta_json():
             print(f"[FIXED] {file} → 필드 보정 완료")
         else:
             print(f"[OK] {file} → 수정 불필요")
-
-import os
-import json
-
-MODEL_DIR = "/persistent/models"
 
 def check_meta_input_size():
     files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".meta.json")]
