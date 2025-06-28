@@ -1,6 +1,8 @@
 import os
 import json
-from model.base_model import get_model  # ✅ 추가
+import torch
+from model.base_model import get_model  # ✅ 현재 모델 구조 반영 위해 import
+from config import NUM_CLASSES
 
 MODEL_DIR = "/persistent/models"
 
@@ -25,6 +27,8 @@ def fix_all_meta_json():
         symbol, strategy, model_type = parts[0], parts[1], parts[2]
 
         updated = False
+
+        # ✅ 공백("")일 경우에도 파일명 기반으로 보정
         if not meta.get("symbol"):
             meta["symbol"] = symbol
             updated = True
@@ -35,17 +39,19 @@ def fix_all_meta_json():
             meta["model"] = model_type
             updated = True
 
-        # ✅ input_size: 실제 모델 구조에서 불러오기
+        # ✅ input_size 확인 및 보정
+        current_input_size = meta.get("input_size")
         try:
-            model = get_model(model_type)
-            input_size = model.fc_logits.in_features if hasattr(model, "fc_logits") else 11
-        except Exception as e:
-            print(f"[ERROR] input_size 가져오기 실패: {e}")
-            input_size = 11
+            model = get_model(model_type, input_size=11, output_size=NUM_CLASSES)
+            sample_input = torch.randn(1, 20, 11)
+            output = model(sample_input)
+            expected_input_size = sample_input.shape[2]
 
-        if meta.get("input_size") != input_size:
-            meta["input_size"] = input_size
-            updated = True
+            if current_input_size != expected_input_size:
+                meta["input_size"] = expected_input_size
+                updated = True
+        except Exception as e:
+            print(f"[⚠️ 모델 로드 실패] {file} → {e}")
 
         if updated:
             with open(path, "w", encoding="utf-8") as f:
@@ -53,6 +59,7 @@ def fix_all_meta_json():
             print(f"[FIXED] {file} → 필드 보정 완료")
         else:
             print(f"[OK] {file} → 수정 불필요")
+
 
 def check_meta_input_size():
     files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".meta.json")]
