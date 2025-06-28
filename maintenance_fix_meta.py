@@ -24,13 +24,14 @@ def fix_all_meta_json():
         symbol, strategy, model = parts[0], parts[1], parts[2]
 
         updated = False
-        if "symbol" not in meta or not meta["symbol"]:
+        # ✅ 공백("")일 경우에도 파일명 기반으로 보정
+        if not meta.get("symbol"):
             meta["symbol"] = symbol
             updated = True
-        if "strategy" not in meta or not meta["strategy"]:
+        if not meta.get("strategy"):
             meta["strategy"] = strategy
             updated = True
-        if "model" not in meta or not meta["model"]:
+        if not meta.get("model"):
             meta["model"] = model
             updated = True
 
