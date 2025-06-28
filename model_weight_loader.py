@@ -16,7 +16,6 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
               else os.path.join(MODEL_DIR, f"{symbol}_{strategy}_*.meta.json")
     meta_files = glob.glob(pattern)
 
-    # ✅ 조건에 맞는 파일 탐색
     for meta_path in meta_files:
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
@@ -26,20 +25,25 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
             s = meta.get("strategy", "").strip()
             sy = meta.get("symbol", "").strip()
 
-            # 🛑 비교 조건 임시 주석 처리 (테스트용)
-            # if m != model_type or s != strategy:
-            #     continue
-            # if symbol != "ALL" and sy != symbol:
-            #     continue
+            # ✅ 비교 조건을 유연하게 유지하되, 불일치 시 로그 출력
+            if m != model_type:
+                print(f"[⚠️ 모델 불일치] meta={m}, 요청={model_type}")
+                continue
+            if s != strategy:
+                print(f"[⚠️ 전략 불일치] meta={s}, 요청={strategy}")
+                continue
+            if symbol != "ALL" and sy != symbol:
+                print(f"[⚠️ 심볼 불일치] meta={sy}, 요청={symbol}")
+                continue
 
             pt_path = meta_path.replace(".meta.json", ".pt")
             if not os.path.exists(pt_path):
                 print(f"[❌ PT 없음] {pt_path}")
                 return 0.0
 
-            # ✅ 평가 기반 가중치 계산
             eval_files = sorted(glob.glob("/persistent/logs/evaluation_*.csv"))
             if not eval_files:
+                print("[⚠️ 평가 로그 없음] 기본 가중치 1.0 반환")
                 return 1.0
 
             df_list = []
@@ -51,6 +55,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
                     continue
 
             if not df_list:
+                print("[⚠️ 평가 데이터 없음] 기본 가중치 1.0 반환")
                 return 1.0
 
             df = pd.concat(df_list, ignore_index=True)
@@ -60,9 +65,11 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
                     (df["status"].isin(["success", "fail"]))]
 
             if len(df) < min_samples:
+                print(f"[⚠️ 샘플 부족] {len(df)}개 → 기본 가중치 1.0 반환")
                 return 1.0
 
             success_rate = len(df[df["status"] == "success"]) / len(df)
+            print(f"[✅ SUCCESS RATE] {symbol}-{strategy}-{model_type}: {success_rate:.2%}")
 
             if success_rate >= 0.65:
                 return 1.0
