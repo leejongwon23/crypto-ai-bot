@@ -374,7 +374,9 @@ if __name__ == "__main__":
     from train import train_symbol_group_loop
     threading.Thread(target=train_symbol_group_loop, daemon=True).start()
 
+    # ✅ 여기 추가: meta 보정 스크립트 실행
+    threading.Thread(target=maintenance_fix_meta.fix_all_meta_json, daemon=True).start()
+
     threading.Thread(target=lambda: send_message("[시작] YOPO 서버 실행됨"), daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
 
