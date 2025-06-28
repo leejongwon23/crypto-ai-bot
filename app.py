@@ -10,6 +10,7 @@ from visualization import generate_visual_report, generate_visuals_for_strategy
 from wrong_data_loader import load_training_prediction_data
 from predict import evaluate_predictions
 from train import train_symbol_group_loop
+import maintenance_fix_meta
 
 PERSIST_DIR = "/persistent"
 LOG_DIR, MODEL_DIR = os.path.join(PERSIST_DIR, "logs"), os.path.join(PERSIST_DIR, "models")
