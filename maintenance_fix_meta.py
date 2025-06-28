@@ -42,7 +42,6 @@ def fix_all_meta_json():
         else:
             print(f"[OK] {file} → 수정 불필요")
 
-fix_all_meta_json()
 
 if __name__ == "__main__":
     fix_all_meta_json()
