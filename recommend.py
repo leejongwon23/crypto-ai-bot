@@ -230,8 +230,17 @@ def main(strategy=None, force=False, allow_prediction=True):
 
     targets = [strategy] if strategy else ["단기", "중기", "장기"]
     from data.utils import SYMBOLS  # ✅ SYMBOLS 전체 사용
+
     for s in targets:
-        run_prediction_loop(s, [{"symbol": sym} for sym in SYMBOLS], source="일반", allow_prediction=allow_prediction)
+        symbols_list = []
+        for sym in SYMBOLS:
+            symbols_list.append({
+                "symbol": sym,
+                # ✅ 필요한 필드만 dict에 포함
+                "volatility": 0.0
+            })
+
+        run_prediction_loop(s, symbols_list, source="일반", allow_prediction=allow_prediction)
 
 import shutil
 
