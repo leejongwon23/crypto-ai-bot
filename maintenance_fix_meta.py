@@ -47,5 +47,24 @@ def fix_all_meta_json():
         else:
             print(f"[OK] {file} → 수정 불필요")
 
+import os
+import json
+
+MODEL_DIR = "/persistent/models"
+
+def check_meta_input_size():
+    files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".meta.json")]
+    for file in files:
+        path = os.path.join(MODEL_DIR, file)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            if "input_size" not in meta:
+                print(f"[❌ 누락] {file} → input_size 없음")
+            else:
+                print(f"[✅ 확인됨] {file} → input_size = {meta['input_size']}")
+        except Exception as e:
+            print(f"[ERROR] {file} 읽기 실패: {e}")
+
 if __name__ == "__main__":
     fix_all_meta_json()
