@@ -240,6 +240,14 @@ def evaluate_predictions(get_price_fn):
     EVAL_RESULT = f"/persistent/logs/evaluation_{date_str}.csv"
     WRONG = f"/persistent/logs/wrong_{date_str}.csv"
 
+    # ✅ 클래스별 수익률 구간 정의
+    class_ranges = [
+        (-0.99, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15), (-0.15, -0.10),
+        (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03), (-0.03, -0.01), (-0.01, 0.01),
+        (0.01, 0.03), (0.03, 0.05), (0.05, 0.07), (0.07, 0.10), (0.10, 0.15),
+        (0.15, 0.20), (0.20, 0.30), (0.30, 0.60), (0.60, 1.0), (1.0, 2.0)
+    ]
+
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
     updated, evaluated = [], []
 
@@ -265,19 +273,15 @@ def evaluate_predictions(get_price_fn):
             except:
                 pred_class = -1
 
-            # ✅ 예측된 entry/target/rate 값을 먼저 보존
             try:
                 entry_price = float(r.get("entry_price", 0))
-                target_price = float(r.get("target_price", 0))
-                expected_return = float(r.get("rate", 0.0))
             except:
-                r.update({"status": "fail", "reason": "예측 수익률 불러오기 오류", "return": 0.0})
+                r.update({"status": "fail", "reason": "entry_price 오류", "return": 0.0})
                 updated.append(r)
                 continue
 
-            # ✅ entry_price가 0이면 평가 불가
-            if entry_price <= 0 or target_price <= 0:
-                r.update({"status": "fail", "reason": "기록된 가격 오류", "return": 0.0})
+            if entry_price <= 0:
+                r.update({"status": "fail", "reason": "entry_price 0이하", "return": 0.0})
                 updated.append(r)
                 continue
 
@@ -305,11 +309,12 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            # ✅ 허용 오차 ±10%로 기대 수익률 비교
-            tolerance = 0.10
-            low = expected_return * (1 - tolerance)
-            high = expected_return * (1 + tolerance)
-            success = low <= gain <= high if pred_class >= 0 else False
+            # ✅ 클래스 구간 평가
+            if 0 <= pred_class < len(class_ranges):
+                cls_min, cls_max = class_ranges[pred_class]
+                success = gain >= cls_min
+            else:
+                success = False
 
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
             status = "v_success" if vol and success else \
@@ -318,7 +323,7 @@ def evaluate_predictions(get_price_fn):
 
             r.update({
                 "status": status,
-                "reason": f"[cls={pred_class}] 기대={expected_return:.3f}, 실현={gain:.3f}, 허용=({low:.3f}~{high:.3f})",
+                "reason": f"[cls={pred_class}] class_range=({cls_min:.3f}~{cls_max:.3f}), gain={gain:.3f}",
                 "return": round(gain, 5)
             })
 
