@@ -10,6 +10,7 @@ from logger import get_feature_hash
 from config import NUM_CLASSES
 from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
 from logger import get_available_models
+import json
 
 DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
