@@ -35,13 +35,17 @@ def fix_all_meta_json():
             meta["model"] = model
             updated = True
 
+        # ✅ 이 아래에 input_size 보정 코드 추가
+        if not meta.get("input_size"):
+            meta["input_size"] = 11   # ⚠️ 11은 현재 모델 input_size 기본값
+            updated = True
+
         if updated:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
             print(f"[FIXED] {file} → 필드 보정 완료")
         else:
             print(f"[OK] {file} → 수정 불필요")
-
 
 if __name__ == "__main__":
     fix_all_meta_json()
