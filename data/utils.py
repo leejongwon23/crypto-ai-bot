@@ -49,6 +49,7 @@ def get_btc_dominance():
 
 import numpy as np
 
+
 def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
     import pandas as pd
@@ -82,15 +83,15 @@ def create_dataset(features, window=20, strategy="단기"):
 
     features = df_scaled.to_dict(orient="records")
 
+    # ✅ 수정된 class_ranges – 구간을 넓혀서 라벨 생성률 증가
     class_ranges = [
-        (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
-        (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
-        (-0.03, -0.01), (-0.01,  0.01),
-        ( 0.01,  0.03), ( 0.03,  0.05), ( 0.05,  0.07), ( 0.07,  0.10),
-        ( 0.10,  0.15), ( 0.15,  0.20), ( 0.20,  0.30), ( 0.30,  0.50),
-        ( 0.50,  1.00), ( 1.00,  2.00), ( 2.00,  5.00)
+        (-1.00, -0.50), (-0.50, -0.30), (-0.30, -0.10),
+        (-0.10, -0.05), (-0.05, -0.01), (-0.01, 0.01),
+        (0.01, 0.05), (0.05, 0.10), (0.10, 0.20),
+        (0.20, 0.40), (0.40, 0.70), (0.70, 1.00),
+        (1.00, 1.50), (1.50, 2.00), (2.00, 5.00)
     ]
-    max_cls = len(class_ranges)
+
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
 
@@ -115,6 +116,9 @@ def create_dataset(features, window=20, strategy="단기"):
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
             gain = (max_future_price - entry_price) / (entry_price + 1e-6)
 
+            # ✅ gain debug print 추가
+            print(f"[gain debug] entry_price: {entry_price}, max_future_price: {max_future_price}, gain: {gain}")
+
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), -1)
             if cls == -1:
                 continue
@@ -137,8 +141,6 @@ def create_dataset(features, window=20, strategy="단기"):
         print("[⚠️ 경고] 생성된 라벨 없음")
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
-
-
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     global _kline_cache
