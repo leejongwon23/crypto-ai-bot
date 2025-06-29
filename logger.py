@@ -62,16 +62,9 @@ def log_audit_prediction(s, t, status, reason):
 
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, model=None, success=True, reason="", rate=0.0,
-                   return_value=None, volatility=False, source="일반", predicted_class=None):
-    import csv, os, datetime, pytz
+                   return_value=None, volatility=False, source="일반", predicted_class=None, label=None):
 
-    now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-    now = timestamp or now_kst().isoformat()
-    full_path = "/persistent/prediction_log.csv"
-    date_str = now.split("T")[0]
-    dated_path = f"/persistent/logs/prediction_{date_str}.csv"
-
-    # ✅ predicted_class 보정: 음수/비정상 값 → -1
+    # 기존 predicted_class 보정
     try:
         pred_class_val = int(float(predicted_class))
         if pred_class_val < 0 or pred_class_val >= 100:
@@ -79,45 +72,17 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     except:
         pred_class_val = -1
 
-    # ✅ 예측 성공 여부 + 변동성 기준
-    status = "v_success" if success and volatility else \
-             "v_fail" if not success and volatility else \
-             "success" if success else "fail"
+    # ✅ label도 predicted_class로 기본 대입
+    if label is None:
+        label = pred_class_val
 
+    # row 딕셔너리 내에 label 추가
     row = {
-        "timestamp": now,
-        "symbol": str(symbol or "UNKNOWN"),
-        "strategy": str(strategy or "알수없음"),
-        "direction": direction or "N/A",
-        "entry_price": float(entry_price or 0.0),
-        "target_price": float(target_price or 0.0),
-        "model": str(model or "unknown"),
-        "rate": float(rate or 0.0),
-        "status": status,
-        "reason": reason or "",
-        "return": float(return_value if return_value is not None else rate or 0.0),
-        "volatility": bool(volatility),
-        "source": str(source or "일반"),
-        "predicted_class": str(pred_class_val)
+        ...
+        "predicted_class": str(pred_class_val),
+        "label": str(label)  # ✅ label 필드 추가
     }
-
-    try:
-        with open(dated_path, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=row.keys())
-            if f.tell() == 0:
-                w.writeheader()
-            w.writerow(row)
-    except Exception as e:
-        print(f"[오류] 날짜별 로그 기록 실패 → {e}")
-
-    try:
-        with open(full_path, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=row.keys())
-            if f.tell() == 0:
-                w.writeheader()
-            w.writerow(row)
-    except Exception as e:
-        print(f"[오류] 통합 로그 기록 실패 → {e}")
+    ...
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
