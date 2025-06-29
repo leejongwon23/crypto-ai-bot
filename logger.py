@@ -360,56 +360,24 @@ import os
 
 MODEL_DIR = "/persistent/models"
 
+
 def get_available_models():
-    """
-    models 폴더에서 .pt와 .meta.json 파일이 둘 다 있는 경우만,
-    symbol, strategy, model 정보를 분리하여 dict 리스트로 반환
-    """
-    import os, glob, json
+    import os, json, glob
+    MODEL_DIR = "/persistent/models"
 
     models = []
-    if not os.path.exists(MODEL_DIR):
-        return []
-
     pt_files = glob.glob(os.path.join(MODEL_DIR, "*.pt"))
-
     for pt_path in pt_files:
-        base_name = os.path.basename(pt_path)[:-3]  # .pt 제거
-        meta_path = os.path.join(MODEL_DIR, f"{base_name}.meta.json")
-
+        meta_path = pt_path.replace(".pt", ".meta.json")
         if not os.path.exists(meta_path):
             continue
-
-        try:
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-
-            # ✅ model 필드 없으면 파일명에서 추출해 강제 보정
-            if not meta.get("model"):
-                parts = base_name.split("_")
-                if len(parts) >= 3:
-                    meta["model"] = parts[2]
-                    # 저장
-                    with open(meta_path, "w", encoding="utf-8") as fw:
-                        json.dump(meta, fw, indent=2, ensure_ascii=False)
-                    print(f"[FIXED] {meta_path} → model 필드 보정 완료")
-
-            m = meta.get("model", "").strip()
-            s = meta.get("strategy", "").strip()
-            sy = meta.get("symbol", "").strip()
-
-            if not m or not s or not sy:
-                continue  # ✅ 필수값 없으면 제외
-
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        if all(k in meta for k in ["symbol", "strategy", "model", "input_size"]):
             models.append({
-                "symbol": sy,
-                "strategy": s,
-                "model": m,
+                "symbol": meta["symbol"],
+                "strategy": meta["strategy"],
+                "model": meta["model"],
                 "pt_file": os.path.basename(pt_path)
             })
-
-        except Exception as e:
-            print(f"[⚠️ meta read 실패] {meta_path} → {e}")
-            continue
-
     return models
