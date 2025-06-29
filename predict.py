@@ -96,19 +96,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
         if feat is None or feat.dropna().shape[0] < window + 1:
             return [failed_result(symbol, strategy, "unknown", "feature 부족", source)]
 
-        if "volatility" in feat.columns and feat["volatility"].iloc[-1] < 0.00001:
-            return [failed_result(symbol, strategy, "unknown", "변화량 없음", source)]
-
-        if feat["close"].nunique() < 3:
-            return [failed_result(symbol, strategy, "unknown", "가격 변화 부족", source)]
-
         if "timestamp" not in feat.columns:
             return [failed_result(symbol, strategy, "unknown", "timestamp 없음", source)]
 
         raw_close = df["close"].iloc[-1]
-        raw_feat = feat.dropna().copy()
-        features_only = raw_feat.drop(columns=["timestamp"])
-        feat_scaled = MinMaxScaler().fit_transform(features_only)
+        feat_scaled = MinMaxScaler().fit_transform(feat.drop(columns=["timestamp"]))
 
         if feat_scaled.shape[0] < window:
             return [failed_result(symbol, strategy, "unknown", "시퀀스 부족", source)]
@@ -122,7 +114,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             return [failed_result(symbol, strategy, "unknown", "입력 형상 오류", source)]
 
         predictions = []
-
         model_files = {
             m["model"]: os.path.join(MODEL_DIR, m["pt_file"])
             for m in get_available_models()
@@ -139,7 +130,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
 
-                if meta.get("model") != mt or meta.get("input_size") != X.shape[2]:
+                if meta.get("input_size") != X.shape[2]:
+                    print(f"[⚠️ input_size 불일치] {meta.get('input_size')} vs {X.shape[2]}")
                     continue
 
                 weight = get_model_weight(mt, strategy, symbol)
@@ -161,21 +153,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
                     adjusted_probs = adjust_probs_with_diversity(probs, recent_freq, class_counts)
 
-                    top3_idx = [int(i) for i in adjusted_probs.argsort()[-3:][::-1]]
-                    final_idx, best_score = top3_idx[0], -1
-
-                    max_count = max(class_counts.values()) if class_counts else 1
-
-                    for idx in top3_idx:
-                        idx = int(idx)
-                        diversity_bonus = 1.0 - (recent_freq.get(idx, 0) / (sum(recent_freq.values()) + 1e-6))
-                        class_weight = 1.0 + (1.0 - (class_counts.get(str(idx), 0) / max_count))
-                        score = adjusted_probs[idx] * diversity_bonus * class_weight
-                        if score > best_score:
-                            final_idx = idx
-                            best_score = score
-
-                    pred_class = int(final_idx)
+                    pred_class = int(adjusted_probs.argmax())
                     expected_return = class_to_expected_return(pred_class)
                     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -199,12 +177,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         "label": pred_class
                     }
 
-                    try:
-                        feature_hash = get_feature_hash(X_input)
-                        insert_failure_record(result, feature_hash)
-                    except:
-                        pass
-
+                    feature_hash = get_feature_hash(X_input)
+                    insert_failure_record(result, feature_hash)
                     predictions.append(result)
 
                 del model
