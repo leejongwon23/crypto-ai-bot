@@ -83,11 +83,10 @@ def create_dataset(features, window=20, strategy="단기"):
 
     features = df_scaled.to_dict(orient="records")
 
-    # ✅ 수정된 class_ranges – 하락 구간을 더 넓게 추가
+    # ✅ class_ranges 조정 – 현실적 구간 확대
     class_ranges = [
-        (-1.00, -0.50), (-0.50, -0.30), (-0.30, -0.20),
-        (-0.20, -0.10), (-0.10, -0.05), (-0.05, -0.01),
-        (-0.01, 0.00), (0.00, 0.01), (0.01, 0.05),
+        (-1.00, -0.30), (-0.30, -0.10), (-0.10, -0.05),
+        (-0.05, -0.01), (-0.01, 0.01), (0.01, 0.05),
         (0.05, 0.10), (0.10, 0.20), (0.20, 0.40),
         (0.40, 0.70), (0.70, 1.00), (1.00, 1.50),
         (1.50, 2.00), (2.00, 5.00)
@@ -103,7 +102,7 @@ def create_dataset(features, window=20, strategy="단기"):
             entry_time = pd.to_datetime(base.get("timestamp"), errors="coerce")
             entry_price = float(base.get("close", 0.0))
 
-            if pd.isnull(entry_time):
+            if pd.isnull(entry_time) or entry_price <= 0:
                 continue
 
             future = [
@@ -117,13 +116,14 @@ def create_dataset(features, window=20, strategy="단기"):
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
             gain = (max_future_price - entry_price) / (entry_price + 1e-6)
 
-            # ✅ 디버그 로그를 50번째마다 한 번만 출력
+            # ✅ 디버그 로그 간소화
             if i % 50 == 0:
-                print(f"[gain debug] i={i}, entry_price={entry_price:.4f}, max_future_price={max_future_price:.4f}, gain={gain:.4f}")
+                print(f"[gain debug] i={i}, gain={gain:.4f}")
 
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), -1)
             if cls == -1:
-                continue
+                # ✅ gain이 구간 밖이면 가장 가까운 구간으로 매핑
+                cls = 0 if gain < class_ranges[0][0] else len(class_ranges) - 1
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
             if any(len(row) != len(columns) for row in sample):
