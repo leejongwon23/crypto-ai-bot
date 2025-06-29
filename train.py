@@ -43,15 +43,14 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
     meta = {
         "symbol": symbol,
         "strategy": strategy,
-        "model": model_type or "unknown",  # ✅ 반드시 저장
-        "input_size": input_size or 11,    # ✅ 없으면 11로 기본 저장
+        "model": model_type or "unknown",
+        "input_size": int(input_size) if input_size else 11,  # ✅ None이면 11로 기본 저장
         "accuracy": float(round(acc, 4)),
         "f1_score": float(round(f1, 4)),
         "loss": float(round(loss, 6)),
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
     }
 
-    # ✅ class_counts도 저장
     if class_counts:
         meta["class_counts"] = {str(k): int(v) for k, v in class_counts.items()}
 
@@ -59,7 +58,7 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2, ensure_ascii=False)
-        print(f"🗘 저장됨: {path} (model={model_type}, input_size={input_size})")
+        print(f"🗘 저장됨: {path} (model={model_type}, input_size={meta['input_size']})")
     except Exception as e:
         print(f"[ERROR] meta 저장 실패: {e}")
 
