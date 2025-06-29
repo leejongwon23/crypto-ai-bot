@@ -31,7 +31,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
             pt_path = meta_path.replace(".meta.json", ".pt")
             if not os.path.exists(pt_path):
                 print(f"[❌ PT 없음] {pt_path}")
-                return 1.0  # ✅ PT 없으면도 기본 가중치 1.0 반환으로 변경
+                return 1.0  # ✅ PT 없으면도 기본 가중치 1.0 반환
 
             eval_files = sorted(glob.glob("/persistent/logs/evaluation_*.csv"))
             if not eval_files:
@@ -63,13 +63,8 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
             success_rate = len(df[df["status"] == "success"]) / len(df)
             print(f"[✅ SUCCESS RATE] {symbol}-{strategy}-{model_type}: {success_rate:.2%}")
 
-            if success_rate >= 0.65:
-                return 1.0
-            elif success_rate < 0.4:
-                print(f"[⚠️ 낮은 성공률] {success_rate:.2%} → 기본 가중치 1.0 반환")
-                return 1.0  # ✅ 0.0 차단 대신 1.0 반환으로 수정
-            else:
-                return round((success_rate - 0.4) / (0.65 - 0.4), 4)
+            # ✅ 어떤 성공률이든 기본 1.0 반환
+            return 1.0
 
         except Exception as e:
             print(f"[❌ 처리 실패] {meta_path} → {e}")
