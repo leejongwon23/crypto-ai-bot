@@ -95,20 +95,20 @@ def predict(symbol, strategy, source="일반", model_type=None):
     try:
         window = find_best_window(symbol, strategy)
         if not isinstance(window, int) or window <= 0:
-            return []
+            return [failed_result(symbol, strategy, "unknown", "윈도우 결정 실패", source)]
 
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < window + 1:
-            return []
+            return [failed_result(symbol, strategy, "unknown", "데이터 부족", source)]
 
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.dropna().shape[0] < window + 1:
-            return []
+            return [failed_result(symbol, strategy, "unknown", "feature 부족", source)]
 
         features_only = feat.drop(columns=["timestamp"])
         feat_scaled = MinMaxScaler().fit_transform(features_only)
         if feat_scaled.shape[0] < window:
-            return []
+            return [failed_result(symbol, strategy, "unknown", "시퀀스 부족", source)]
 
         X_input = feat_scaled[-window:]
         X = np.expand_dims(X_input, axis=0)
@@ -149,19 +149,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                 probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
 
-            # ✅ 확률 보정
             recent_freq = get_recent_class_frequencies(strategy=strategy)
             class_counts = meta.get("class_counts", {}) or {}
             adjusted_probs = adjust_probs_with_diversity(probs, recent_freq, class_counts)
 
             pred_class = int(adjusted_probs.argmax())
             expected_return = class_to_expected_return(pred_class)
-
-            # ✅ 라벨 컬럼이 없을 경우 기본값 추가
-            if "label" not in meta:
-                meta["label"] = pred_class
-                with open(meta_path, "w", encoding="utf-8") as f:
-                    json.dump(meta, f, indent=2, ensure_ascii=False)
 
             log_prediction(
                 symbol=symbol,
@@ -180,7 +173,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 predicted_class=pred_class
             )
 
-            # ✅ 실패 패턴 DB 기록
             feature_hash = get_feature_hash(X_input)
             insert_failure_record({
                 "symbol": symbol,
@@ -199,11 +191,14 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 "success": True
             })
 
+        if not results:
+            return [failed_result(symbol, strategy, "unknown", "모델 예측 실패", source)]
+
         return results
 
     except Exception as e:
         print(f"[predict 예외] {e}")
-        return []
+        return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
