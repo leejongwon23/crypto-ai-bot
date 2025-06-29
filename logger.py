@@ -182,10 +182,14 @@ def get_recent_predicted_classes(strategy: str, recent_days: int = 3):
 
 def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
     try:
-        # ✅ error_bad_lines=False → bad lines 무시, on_bad_lines="skip"은 pandas>=1.3.0
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", engine="python", error_bad_lines=False)
+        # ✅ pandas 최신버전 호환: on_bad_lines="skip" 사용
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
 
         df = df[df["status"].isin(["success", "fail"])]
+
+        # ✅ label 컬럼 없으면 predicted_class로 대체
+        if "label" not in df.columns and "predicted_class" in df.columns:
+            df["label"] = df["predicted_class"]
 
         if "predicted_class" not in df.columns:
             print("[경고] predicted_class 컬럼 없음")
@@ -221,7 +225,6 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
     except Exception as e:
         print(f"[오류] fine-tune 대상 분석 실패 → {e}")
         return pd.DataFrame([])
-
 
 def get_feature_hash_from_tensor(tensor):
     """
