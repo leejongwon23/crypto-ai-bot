@@ -342,3 +342,9 @@ def get_class_distribution(symbol, strategy, model_type):
         print(f"[⚠️ 클래스 분포 로드 실패] {meta_path} → {e}")
     return {}
 
+try:
+    import pandas as pd
+    df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
+    print(df.head(20))
+except Exception as e:
+    print(f"[오류] prediction_log.csv 로드 실패 → {e}")
