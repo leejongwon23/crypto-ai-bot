@@ -179,13 +179,14 @@ def get_recent_predicted_classes(strategy: str, recent_days: int = 3):
         return set(df["predicted_class"].dropna().astype(int).tolist())
     except:
         return set()
-        
+
 def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
     try:
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        # ✅ error_bad_lines=False → bad lines 무시, on_bad_lines="skip"은 pandas>=1.3.0
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", engine="python", error_bad_lines=False)
+
         df = df[df["status"].isin(["success", "fail"])]
 
-        # ✅ NaN 또는 파싱 불가능한 값 제거
         if "predicted_class" not in df.columns:
             print("[경고] predicted_class 컬럼 없음")
             return pd.DataFrame([])
@@ -220,7 +221,6 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
     except Exception as e:
         print(f"[오류] fine-tune 대상 분석 실패 → {e}")
         return pd.DataFrame([])
-
 
 
 def get_feature_hash_from_tensor(tensor):
