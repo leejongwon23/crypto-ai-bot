@@ -49,6 +49,7 @@ def get_btc_dominance():
 
 import numpy as np
 
+
 def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
     import pandas as pd
@@ -82,13 +83,14 @@ def create_dataset(features, window=20, strategy="단기"):
 
     features = df_scaled.to_dict(orient="records")
 
-    # ✅ 수정된 class_ranges – 하락 구간 포함
+    # ✅ 수정된 class_ranges – 하락 구간을 더 넓게 추가
     class_ranges = [
-        (-1.00, -0.50), (-0.50, -0.30), (-0.30, -0.10),
-        (-0.10, -0.05), (-0.05, -0.01), (-0.01, 0.00),
-        (0.00, 0.01), (0.01, 0.05), (0.05, 0.10),
-        (0.10, 0.20), (0.20, 0.40), (0.40, 0.70),
-        (0.70, 1.00), (1.00, 1.50), (1.50, 2.00), (2.00, 5.00)
+        (-1.00, -0.50), (-0.50, -0.30), (-0.30, -0.20),
+        (-0.20, -0.10), (-0.10, -0.05), (-0.05, -0.01),
+        (-0.01, 0.00), (0.00, 0.01), (0.01, 0.05),
+        (0.05, 0.10), (0.10, 0.20), (0.20, 0.40),
+        (0.40, 0.70), (0.70, 1.00), (1.00, 1.50),
+        (1.50, 2.00), (2.00, 5.00)
     ]
 
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
@@ -115,8 +117,9 @@ def create_dataset(features, window=20, strategy="단기"):
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
             gain = (max_future_price - entry_price) / (entry_price + 1e-6)
 
-            # ✅ gain debug print 추가
-            print(f"[gain debug] entry_price: {entry_price}, max_future_price: {max_future_price}, gain: {gain}")
+            # ✅ 디버그 로그를 50번째마다 한 번만 출력
+            if i % 50 == 0:
+                print(f"[gain debug] i={i}, entry_price={entry_price:.4f}, max_future_price={max_future_price:.4f}, gain={gain:.4f}")
 
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), -1)
             if cls == -1:
