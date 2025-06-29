@@ -49,7 +49,6 @@ def get_btc_dominance():
 
 import numpy as np
 
-
 def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
     import pandas as pd
@@ -83,13 +82,13 @@ def create_dataset(features, window=20, strategy="단기"):
 
     features = df_scaled.to_dict(orient="records")
 
-    # ✅ 수정된 class_ranges – 구간을 넓혀서 라벨 생성률 증가
+    # ✅ 수정된 class_ranges – 하락 구간 포함
     class_ranges = [
         (-1.00, -0.50), (-0.50, -0.30), (-0.30, -0.10),
-        (-0.10, -0.05), (-0.05, -0.01), (-0.01, 0.01),
-        (0.01, 0.05), (0.05, 0.10), (0.10, 0.20),
-        (0.20, 0.40), (0.40, 0.70), (0.70, 1.00),
-        (1.00, 1.50), (1.50, 2.00), (2.00, 5.00)
+        (-0.10, -0.05), (-0.05, -0.01), (-0.01, 0.00),
+        (0.00, 0.01), (0.01, 0.05), (0.05, 0.10),
+        (0.10, 0.20), (0.20, 0.40), (0.40, 0.70),
+        (0.70, 1.00), (1.00, 1.50), (1.50, 2.00), (2.00, 5.00)
     ]
 
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
