@@ -370,11 +370,12 @@ if __name__ == "__main__":
     print(">>> 서버 실행 준비")
     sys.stdout.flush()
 
-    # ✅ 우리가 만든 5개 단위 자동 루프 실행
     from train import train_symbol_group_loop
     threading.Thread(target=train_symbol_group_loop, daemon=True).start()
 
-    # ❌ meta 보정 스크립트 실행 제거됨
+    # ✅ meta 보정 스크립트 자동 실행 추가
+    import maintenance_fix_meta
+    threading.Thread(target=maintenance_fix_meta.fix_all_meta_json, daemon=True).start()
 
     threading.Thread(target=lambda: send_message("[시작] YOPO 서버 실행됨"), daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
