@@ -80,119 +80,127 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     return result
 
 def predict(symbol, strategy, source="일반", model_type=None):
-    try:
-        print(f"[PREDICT] {symbol}-{strategy} 시작 (model_type={model_type})")
-        sys.stdout.flush()
+    import os, json, torch, numpy as np, pandas as pd
+    from sklearn.preprocessing import MinMaxScaler
+    from data.utils import get_kline_by_strategy, compute_features
+    from model.base_model import get_model
+    from model_weight_loader import get_model_weight
+    from window_optimizer import find_best_window
+    from logger import log_prediction, get_feature_hash
+    from failure_db import insert_failure_record
+    from config import NUM_CLASSES
+    from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
+    from logger import get_available_models
+    DEVICE = torch.device("cpu")
+    MODEL_DIR = "/persistent/models"
+    now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
+    try:
         window = find_best_window(symbol, strategy)
         if not isinstance(window, int) or window <= 0:
-            return [failed_result(symbol, strategy, "unknown", "윈도우 결정 실패", source)]
+            return []
 
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < window + 1:
-            return [failed_result(symbol, strategy, "unknown", "데이터 부족", source)]
+            return []
 
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.dropna().shape[0] < window + 1:
-            return [failed_result(symbol, strategy, "unknown", "feature 부족", source)]
+            return []
 
-        if "timestamp" not in feat.columns:
-            return [failed_result(symbol, strategy, "unknown", "timestamp 없음", source)]
-
-        raw_close = df["close"].iloc[-1]
-        feat_scaled = MinMaxScaler().fit_transform(feat.drop(columns=["timestamp"]))
-
+        features_only = feat.drop(columns=["timestamp"])
+        feat_scaled = MinMaxScaler().fit_transform(features_only)
         if feat_scaled.shape[0] < window:
-            return [failed_result(symbol, strategy, "unknown", "시퀀스 부족", source)]
+            return []
 
         X_input = feat_scaled[-window:]
-        if X_input.shape[0] != window:
-            return [failed_result(symbol, strategy, "unknown", "시퀀스 길이 오류", source)]
-
         X = np.expand_dims(X_input, axis=0)
-        if len(X.shape) != 3:
-            return [failed_result(symbol, strategy, "unknown", "입력 형상 오류", source)]
+        input_size = X.shape[2]
 
-        predictions = []
-        model_files = {
-            m["model"]: os.path.join(MODEL_DIR, m["pt_file"])
-            for m in get_available_models()
-            if m["symbol"] == symbol and m["strategy"] == strategy and
-               (model_type is None or m["model"] == model_type)
-        }
+        models = get_available_models()
+        results = []
 
-        if not model_files:
-            return [failed_result(symbol, strategy, "unknown", "모델 없음", source, X_input)]
+        for m in models:
+            if m["symbol"] != symbol or m["strategy"] != strategy:
+                continue
 
-        for mt, path in model_files.items():
-            try:
-                meta_path = path.replace(".pt", ".meta.json")
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
+            mt = m["model"]
+            if model_type and mt != model_type:
+                continue
 
-                if meta.get("input_size") != X.shape[2]:
-                    print(f"[⚠️ input_size 불일치] {meta.get('input_size')} vs {X.shape[2]}")
-                    continue
+            model_path = os.path.join(MODEL_DIR, m["pt_file"])
+            meta_path = model_path.replace(".pt", ".meta.json")
 
-                weight = get_model_weight(mt, strategy, symbol)
-                if weight <= 0.0:
-                    predictions.append(failed_result(symbol, strategy, mt, "모델 가중치 부족", source, X_input))
-                    continue
+            if not os.path.exists(model_path) or not os.path.exists(meta_path):
+                continue
 
-                model = get_model(mt, X.shape[2], output_size=NUM_CLASSES).to(DEVICE)
-                state = torch.load(path, map_location=DEVICE)
-                model.load_state_dict(state)
-                model.eval()
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            if meta.get("input_size") != input_size:
+                continue
 
-                with torch.no_grad():
-                    logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
-                    probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
+            weight = get_model_weight(mt, strategy, symbol)
+            if weight <= 0.0:
+                continue
 
-                    recent_freq = get_recent_class_frequencies(strategy=strategy)
-                    class_counts = meta.get("class_counts", {}) or {}
+            model = get_model(mt, input_size, NUM_CLASSES).to(DEVICE)
+            state = torch.load(model_path, map_location=DEVICE)
+            model.load_state_dict(state)
+            model.eval()
 
-                    adjusted_probs = adjust_probs_with_diversity(probs, recent_freq, class_counts)
+            with torch.no_grad():
+                logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
+                probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
 
-                    pred_class = int(adjusted_probs.argmax())
-                    expected_return = class_to_expected_return(pred_class)
-                    t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+            # ✅ 확률 보정
+            recent_freq = get_recent_class_frequencies(strategy=strategy)
+            class_counts = meta.get("class_counts", {}) or {}
+            adjusted_probs = adjust_probs_with_diversity(probs, recent_freq, class_counts)
 
-                    log_prediction(
-                        symbol=symbol, strategy=strategy,
-                        direction=f"Class-{pred_class}", entry_price=raw_close,
-                        target_price=raw_close * (1 + expected_return),
-                        model=mt, success=True, reason="예측 완료",
-                        rate=expected_return, timestamp=t,
-                        volatility=True, source=source,
-                        predicted_class=pred_class
-                    )
+            pred_class = int(adjusted_probs.argmax())
+            expected_return = class_to_expected_return(pred_class)
 
-                    result = {
-                        "symbol": symbol, "strategy": strategy,
-                        "model": mt, "class": pred_class,
-                        "expected_return": expected_return,
-                        "price": raw_close, "timestamp": t,
-                        "success": True, "source": source,
-                        "predicted_class": pred_class,
-                        "label": pred_class
-                    }
+            log_prediction(
+                symbol=symbol,
+                strategy=strategy,
+                direction=f"Class-{pred_class}",
+                entry_price=df["close"].iloc[-1],
+                target_price=df["close"].iloc[-1] * (1 + expected_return),
+                model=mt,
+                success=True,
+                reason="예측 완료",
+                rate=expected_return,
+                timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+                return_value=expected_return,
+                volatility=True,
+                source=source,
+                predicted_class=pred_class
+            )
 
-                    feature_hash = get_feature_hash(X_input)
-                    insert_failure_record(result, feature_hash)
-                    predictions.append(result)
+            # ✅ 실패 패턴 DB 기록
+            feature_hash = get_feature_hash(X_input)
+            insert_failure_record({
+                "symbol": symbol,
+                "strategy": strategy,
+                "model": mt,
+                "class": pred_class,
+                "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
+            }, feature_hash)
 
-                del model
+            results.append({
+                "symbol": symbol,
+                "strategy": strategy,
+                "model": mt,
+                "class": pred_class,
+                "expected_return": expected_return,
+                "success": True
+            })
 
-            except Exception as e:
-                predictions.append(failed_result(symbol, strategy, mt, f"예측 예외: {e}", source, X_input))
-
-        if not predictions:
-            return [failed_result(symbol, strategy, "unknown", "모든 모델 예측 실패", source, X_input)]
-
-        return predictions
+        return results
 
     except Exception as e:
-        return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+        print(f"[predict 예외] {e}")
+        return []
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
