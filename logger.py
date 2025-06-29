@@ -384,6 +384,16 @@ def get_available_models():
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
 
+            # ✅ model 필드 없으면 파일명에서 추출해 강제 보정
+            if not meta.get("model"):
+                parts = base_name.split("_")
+                if len(parts) >= 3:
+                    meta["model"] = parts[2]
+                    # 저장
+                    with open(meta_path, "w", encoding="utf-8") as fw:
+                        json.dump(meta, fw, indent=2, ensure_ascii=False)
+                    print(f"[FIXED] {meta_path} → model 필드 보정 완료")
+
             m = meta.get("model", "").strip()
             s = meta.get("strategy", "").strip()
             sy = meta.get("symbol", "").strip()
