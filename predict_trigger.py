@@ -126,6 +126,7 @@ def get_recent_class_frequencies(strategy=None, recent_days=3):
 import numpy as np
 from collections import Counter
 
+
 def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict = None, alpha=0.10, beta=0.10):
     """
     최근 예측된 클래스 분포와 학습 클래스 분포(class_counts)를 기반으로 확률을 보정함.
@@ -145,7 +146,7 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
         for i in range(num_classes)
     ])
     # ✅ 최소 가중치 제한 (희소 클래스 보정 강제 적용)
-    recent_weights = np.clip(recent_weights, 0.85, 1.15)
+    recent_weights = np.clip(recent_weights, 0.90, 1.10)
 
     # ✅ 학습 클래스 분포 기반 보정
     if class_counts:
@@ -158,11 +159,11 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
         # ✅ class_counts가 없을 경우에도 최소 보정 적용
         class_weights = np.ones(num_classes) + beta
 
-    class_weights = np.clip(class_weights, 0.85, 1.15)
+    class_weights = np.clip(class_weights, 0.90, 1.10)
 
     # ✅ 최종 결합 가중치 계산
     combined_weights = recent_weights * class_weights
-    combined_weights = np.clip(combined_weights, 0.85, 1.15)
+    combined_weights = np.clip(combined_weights, 0.90, 1.10)
 
     adjusted = probs * combined_weights
     adjusted /= adjusted.sum()
