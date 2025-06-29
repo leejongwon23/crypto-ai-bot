@@ -28,8 +28,12 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
         if "label" not in df.columns and "predicted_class" in df.columns:
             df["label"] = df["predicted_class"]
 
-        df = df[df["label"].apply(lambda x: str(x).strip().isdigit())]
+        # ✅ isnan 체크 추가, 음수 포함 int 변환 허용
+        df = df[df["label"].notna()]
+        df["label"] = pd.to_numeric(df["label"], errors="coerce")
+        df = df[df["label"].notna()]
         df["label"] = df["label"].astype(int)
+
         df = df.dropna(subset=["timestamp", "label"])
     except Exception as e:
         print(f"[불러오기 오류] {symbol}-{strategy} → {e}")
