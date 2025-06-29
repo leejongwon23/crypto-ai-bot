@@ -157,6 +157,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
             pred_class = int(adjusted_probs.argmax())
             expected_return = class_to_expected_return(pred_class)
 
+            # ✅ 라벨 컬럼이 없을 경우 기본값 추가
+            if "label" not in meta:
+                meta["label"] = pred_class
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2, ensure_ascii=False)
+
             log_prediction(
                 symbol=symbol,
                 strategy=strategy,
