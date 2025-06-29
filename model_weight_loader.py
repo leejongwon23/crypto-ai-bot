@@ -25,21 +25,13 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
             s = meta.get("strategy", "").strip()
             sy = meta.get("symbol", "").strip()
 
-            # ✅ 비교 조건을 유연하게 유지하되, 불일치 시 로그 출력
-            if m != model_type:
-                print(f"[⚠️ 모델 불일치] meta={m}, 요청={model_type}")
-                continue
-            if s != strategy:
-                print(f"[⚠️ 전략 불일치] meta={s}, 요청={strategy}")
-                continue
-            if symbol != "ALL" and sy != symbol:
-                print(f"[⚠️ 심볼 불일치] meta={sy}, 요청={symbol}")
+            if m != model_type or s != strategy or (symbol != "ALL" and sy != symbol):
                 continue
 
             pt_path = meta_path.replace(".meta.json", ".pt")
             if not os.path.exists(pt_path):
                 print(f"[❌ PT 없음] {pt_path}")
-                return 0.0
+                return 1.0  # ✅ PT 없으면도 기본 가중치 1.0 반환으로 변경
 
             eval_files = sorted(glob.glob("/persistent/logs/evaluation_*.csv"))
             if not eval_files:
@@ -74,7 +66,8 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
             if success_rate >= 0.65:
                 return 1.0
             elif success_rate < 0.4:
-                return 0.0
+                print(f"[⚠️ 낮은 성공률] {success_rate:.2%} → 기본 가중치 1.0 반환")
+                return 1.0  # ✅ 0.0 차단 대신 1.0 반환으로 수정
             else:
                 return round((success_rate - 0.4) / (0.65 - 0.4), 4)
 
@@ -82,8 +75,8 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
             print(f"[❌ 처리 실패] {meta_path} → {e}")
             continue
 
-    print(f"[❌ 매칭 실패] {symbol}-{strategy}-{model_type} 해당 모델 없음")
-    return 0.0
+    print(f"[❌ 매칭 실패] {symbol}-{strategy}-{model_type} 해당 모델 없음 → 기본 가중치 1.0 반환")
+    return 1.0
 
 def model_exists(symbol, strategy):
     try:
