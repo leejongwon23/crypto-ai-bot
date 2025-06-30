@@ -94,6 +94,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from config import NUM_CLASSES
     from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
     from logger import get_available_models
+
     DEVICE = torch.device("cpu")
     MODEL_DIR = "/persistent/models"
     now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
@@ -142,7 +143,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
             if meta.get("input_size") != input_size:
                 continue
 
-            weight = get_model_weight(mt, strategy, symbol)
+            # ✅ input_size 전달
+            weight = get_model_weight(mt, strategy, symbol, input_size=input_size)
             if weight <= 0.0:
                 continue
 
@@ -177,7 +179,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 volatility=True,
                 source=source,
                 predicted_class=pred_class,
-                label=pred_class
+                label=pred_class  # ✅ label 명시적 전달
             )
 
             feature_hash = get_feature_hash(X_input)
@@ -187,7 +189,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 "model": mt,
                 "class": pred_class,
                 "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
-            }, feature_hash)
+            }, feature_hash, feature_vector=X_input, label=pred_class)  # ✅ label, feature_vector 전달
 
             results.append({
                 "symbol": symbol,
@@ -200,6 +202,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
         if not results:
             return [failed_result(symbol, strategy, "unknown", "모델 예측 실패", source)]
+
+        return results
+
+    except Exception as e:
+        print(f"[predict 예외] {e}")
+        return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
 
         return results
 
