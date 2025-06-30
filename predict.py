@@ -81,25 +81,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
-# ✅ predict() 함수 내 log_prediction() 호출 예시
-log_prediction(
-    symbol=symbol,
-    strategy=strategy,
-    direction=f"Class-{pred_class}",
-    entry_price=df["close"].iloc[-1],
-    target_price=df["close"].iloc[-1] * (1 + expected_return),
-    model=mt,
-    success=True,
-    reason="예측 완료",
-    rate=expected_return,
-    timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-    return_value=expected_return,
-    volatility=True,
-    source=source,
-    predicted_class=pred_class,
-    label=pred_class   # ✅ label 추가
-)
-
 
 def predict(symbol, strategy, source="일반", model_type=None):
     import os, json, torch, numpy as np, pandas as pd
