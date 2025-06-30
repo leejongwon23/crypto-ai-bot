@@ -64,7 +64,6 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
 
 from logger import get_fine_tune_targets  # 🔁 반드시 포함
 
-
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     import numpy as np
@@ -139,7 +138,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
         X_train, y_train = X_bal, y_bal
         X_val, y_val = X_raw[-val_len:], y_raw[-val_len:]
 
-        class_counts = Counter(y_train)  # ✅ 복제 반영된 클래스 정보 저장용
+        class_counts = Counter(y_train)
 
         failure_hashes = load_existing_failure_hashes()
         wrong_data = load_training_prediction_data(symbol, strategy, input_size, window)
@@ -222,7 +221,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
             torch.save(model.state_dict(), model_path)
             save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss,
-                                input_size=input_size, class_counts=class_counts)  # ✅ 복제 클래스 저장
+                                input_size=input_size, class_counts=class_counts)
 
             try:
                 imps = compute_feature_importance(model, xb, yb, list(df_feat.drop(columns=["timestamp"]).columns))
@@ -240,6 +239,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
 
 training_in_progress = {
     "단기": False,
