@@ -254,7 +254,8 @@ def train_all_models():
 
     for strategy in strategies:
         if training_in_progress.get(strategy, False):
-            print(f"⚠️ 이미 실행 중: {strategy} 학습 중복 방지"); continue
+            print(f"⚠️ 이미 실행 중: {strategy} 학습 중복 방지")
+            continue
 
         print(f"\n🚀 전략 학습 시작: {strategy}")
         training_in_progress[strategy] = True
@@ -271,6 +272,15 @@ def train_all_models():
         finally:
             training_in_progress[strategy] = False
             print(f"✅ 전략 학습 완료: {strategy}\n")
+
+        # ✅ 각 전략 학습 후 prediction_log.csv 상위 20줄 자동 출력
+        try:
+            import pandas as pd
+            df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
+            print("[✅ prediction_log.csv 상위 20줄 출력]")
+            print(df.head(20))
+        except Exception as e:
+            print(f"[오류] prediction_log.csv 로드 실패 → {e}")
 
         time.sleep(5)  # ✅ 다음 전략 학습 전 5초 대기 → 병렬 진입 방지
 
