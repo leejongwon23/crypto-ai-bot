@@ -93,6 +93,8 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             for result in pred_results:
                 if not isinstance(result, dict) or result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
                     reason = result.get("reason", "예측 실패") if isinstance(result, dict) else "predict() 반환 오류"
+                    pred_class_val = -1
+
                     log_prediction(
                         symbol=symbol,
                         strategy=strategy,
@@ -100,14 +102,15 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                         entry_price=0,
                         target_price=0,
                         timestamp=now_kst().isoformat(),
-                        model=result.get("model", "unknown"),
+                        model=result.get("model", "unknown") if isinstance(result, dict) else "unknown",
                         success=False,
                         reason=reason,
                         rate=0.0,
                         return_value=0.0,
                         volatility=False,
                         source=source,
-                        predicted_class=-1
+                        predicted_class=pred_class_val,
+                        label=pred_class_val   # ✅ label=-1 추가
                     )
                     log_audit(symbol, strategy, result, reason)
                     continue
@@ -117,10 +120,12 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                 result["source"] = result.get("source", source)
                 result["predicted_class"] = result.get("class", -1)
 
+                pred_class_val = result.get("class", -1)
+
                 log_prediction(
                     symbol=result.get("symbol", symbol),
                     strategy=result.get("strategy", strategy),
-                    direction=f"class-{result.get('class', -1)}",
+                    direction=f"class-{pred_class_val}",
                     entry_price=result.get("price", 0),
                     target_price=result.get("price", 0) * (1 + result.get("expected_return", 0)),
                     timestamp=result.get("timestamp", now_kst().isoformat()),
@@ -131,13 +136,13 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                     return_value=result.get("expected_return", 0.0),
                     volatility=vol > 0,
                     source=result.get("source", source),
-                    predicted_class=result.get("class", -1)
+                    predicted_class=pred_class_val,
+                    label=pred_class_val   # ✅ 성공도 label 추가
                 )
                 log_audit(symbol, strategy, result, "예측 기록 완료")
 
-                pred_class = result.get("class", -1)
-                if pred_class != -1:
-                    class_distribution.setdefault(f"{symbol}-{strategy}", []).append(pred_class)
+                if pred_class_val != -1:
+                    class_distribution.setdefault(f"{symbol}-{strategy}", []).append(pred_class_val)
 
                 fmap[f"{symbol}-{strategy}"] = 0
                 results.append(result)
@@ -181,7 +186,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
 
     try:
         print("[평가 실행] evaluate_predictions 호출")
-        from predict import evaluate_predictions  # ✅ 함수 내부로 이동
+        from predict import evaluate_predictions
         evaluate_predictions(get_kline_by_strategy)
     except Exception as e:
         print(f"[ERROR] 평가 실패: {e}")
