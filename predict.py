@@ -30,9 +30,13 @@ def class_to_expected_return(cls):
     print(f"[⚠️ 예상 수익률 계산 오류] 잘못된 클래스: {cls}")
     return 0.0
 
+# ✅ 수정 요약:
+# - failed_result(): label=-1 기본 포함
+# - predict(): log_prediction() 호출 시 label 추가
 
 def failed_result(symbol, strategy, model_type="unknown", reason="", source="일반", X_input=None):
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    pred_class_val = -1
     try:
         log_prediction(
             symbol=symbol,
@@ -48,7 +52,8 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             return_value=0.0,
             volatility=True,
             source=source,
-            predicted_class=-1  # ✅ 반드시 포함됨
+            predicted_class=pred_class_val,
+            label=pred_class_val   # ✅ label 기본 대입
         )
     except:
         pass
@@ -60,11 +65,11 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         "reason": reason,
         "model": str(model_type or "unknown"),
         "rate": 0.0,
-        "class": -1,
+        "class": pred_class_val,
         "timestamp": t,
         "source": source,
-        "predicted_class": -1,  # ✅ 반드시 포함됨
-        "label": -1             # ✅ 학습을 위한 실패 클래스 라벨 명시
+        "predicted_class": pred_class_val,
+        "label": pred_class_val
     }
 
     if X_input is not None:
@@ -75,6 +80,26 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             pass
 
     return result
+
+# ✅ predict() 함수 내 log_prediction() 호출 예시
+log_prediction(
+    symbol=symbol,
+    strategy=strategy,
+    direction=f"Class-{pred_class}",
+    entry_price=df["close"].iloc[-1],
+    target_price=df["close"].iloc[-1] * (1 + expected_return),
+    model=mt,
+    success=True,
+    reason="예측 완료",
+    rate=expected_return,
+    timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+    return_value=expected_return,
+    volatility=True,
+    source=source,
+    predicted_class=pred_class,
+    label=pred_class   # ✅ label 추가
+)
+
 
 def predict(symbol, strategy, source="일반", model_type=None):
     import os, json, torch, numpy as np, pandas as pd
