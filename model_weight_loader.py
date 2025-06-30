@@ -1,15 +1,12 @@
 import os
 import pandas as pd
 import json
+import glob
 
-LOG_FILE = "/persistent/logs/train_log.csv"
-EVAL_RESULT = "/persistent/evaluation_result.csv"  # ✅ 평가 결과 로그
 MODEL_DIR = "/persistent/models"
+EVAL_RESULT = "/persistent/evaluation_result.csv"
 
-def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
-    import os, glob, json, pandas as pd
-    MODEL_DIR = "/persistent/models"
-
+def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_size=None):
     pattern = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json") if symbol != "ALL" \
               else os.path.join(MODEL_DIR, f"*_{strategy}_{model_type}.meta.json")
     meta_files = glob.glob(pattern)
@@ -18,6 +15,10 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
+
+            # ✅ input_size 체크 추가
+            if input_size is not None and meta.get("input_size") != input_size:
+                continue
 
             pt_path = meta_path.replace(".meta.json", ".pt")
             if not os.path.exists(pt_path):
@@ -54,6 +55,30 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10):
             continue
 
     return 0.0
+
+def model_exists(symbol, strategy):
+    try:
+        for file in os.listdir(MODEL_DIR):
+            if file.startswith(f"{symbol}_{strategy}_") and file.endswith(".pt"):
+                return True
+    except Exception as e:
+        print(f"[오류] 모델 존재 확인 실패: {e}")
+    return False
+
+def count_models_per_strategy():
+    counts = {"단기": 0, "중기": 0, "장기": 0}
+    try:
+        for file in os.listdir(MODEL_DIR):
+            if not file.endswith(".pt"):
+                continue
+            parts = file.split("_")
+            if len(parts) >= 3:
+                strategy = parts[1]
+                if strategy in counts:
+                    counts[strategy] += 1
+    except Exception as e:
+        print(f"[오류] 모델 수 계산 실패: {e}")
+    return counts
 
 def model_exists(symbol, strategy):
     try:
