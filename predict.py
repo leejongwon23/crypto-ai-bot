@@ -343,8 +343,13 @@ def get_class_distribution(symbol, strategy, model_type):
     return {}
 
 
+
 if __name__ == "__main__":
-    # ✅ 직접 실행된 경우에만 로그 출력
+    # ✅ 예측 테스트 예시
+    results = predict("BTCUSDT", "단기")
+    print(results)
+
+    # ✅ prediction_log.csv 출력
     try:
         import pandas as pd
         df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
