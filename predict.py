@@ -201,14 +201,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         if not results:
             return [failed_result(symbol, strategy, "unknown", "모델 예측 실패", source)]
 
-        # ✅ prediction_log.csv 상위 20줄 출력
-        try:
-            df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
-            print("[✅ prediction_log.csv 상위 20줄 출력]")
-            print(df.head(20))
-        except Exception as e:
-            print(f"[오류] prediction_log.csv 로드 실패 → {e}")
-
         return results
 
     except Exception as e:
@@ -357,5 +349,14 @@ def get_class_distribution(symbol, strategy, model_type):
         print(f"[⚠️ 클래스 분포 로드 실패] {meta_path} → {e}")
     return {}
 
+if __name__ == "__main__":
+    results = predict("BTCUSDT", "단기")
+    print(results)
 
+    try:
+        df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
+        print("[✅ prediction_log.csv 상위 20줄 출력]")
+        print(df.head(20))
+    except Exception as e:
+        print(f"[오류] prediction_log.csv 로드 실패 → {e}")
 
