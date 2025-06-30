@@ -8,14 +8,6 @@ from failure_db import load_existing_failure_hashes
 WRONG_CSV = "/persistent/wrong_predictions.csv"
 
 def load_training_prediction_data(symbol, strategy, input_size, window):
-    import os
-    import pandas as pd
-    import numpy as np
-    from data.utils import get_kline_by_strategy, compute_features
-    from logger import get_feature_hash
-    from failure_db import load_existing_failure_hashes
-
-    WRONG_CSV = "/persistent/wrong_predictions.csv"
     if not os.path.exists(WRONG_CSV):
         return []
 
@@ -24,17 +16,17 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
         df = df[(df["symbol"] == symbol) & (df["strategy"] == strategy)]
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
 
-        # ✅ label이 없으면 predicted_class로 대체
+        # ✅ label 컬럼 처리: 없으면 predicted_class로 대체 후 int 변환
         if "label" not in df.columns and "predicted_class" in df.columns:
             df["label"] = df["predicted_class"]
 
-        # ✅ isnan 체크 추가, 음수 포함 int 변환 허용
         df = df[df["label"].notna()]
         df["label"] = pd.to_numeric(df["label"], errors="coerce")
         df = df[df["label"].notna()]
         df["label"] = df["label"].astype(int)
 
         df = df.dropna(subset=["timestamp", "label"])
+
     except Exception as e:
         print(f"[불러오기 오류] {symbol}-{strategy} → {e}")
         return []
@@ -45,12 +37,8 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
         return []
 
     df_feat = compute_features(symbol, df_price, strategy)
-    if df_feat is None or df_feat.empty:
-        print(f"[스킵] {symbol}-{strategy} → 피처 생성 실패")
-        return []
-
-    if df_feat.isnull().any().any():
-        print(f"[스킵] {symbol}-{strategy} → NaN 포함 피처 제거")
+    if df_feat is None or df_feat.empty or df_feat.isnull().any().any():
+        print(f"[스킵] {symbol}-{strategy} → 피처 생성 실패 또는 NaN 존재")
         return []
 
     if "timestamp" not in df_feat.columns:
