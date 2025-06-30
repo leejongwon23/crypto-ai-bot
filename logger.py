@@ -188,18 +188,17 @@ def get_recent_predicted_classes(strategy: str, recent_days: int = 3):
 
 def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
     try:
-        # ✅ pandas 최신버전 호환: on_bad_lines="skip" 사용
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
-
         df = df[df["status"].isin(["success", "fail"])]
 
-        # ✅ label 컬럼 없으면 predicted_class로 대체
-        if "label" not in df.columns and "predicted_class" in df.columns:
-            df["label"] = df["predicted_class"]
-
+        # ✅ predicted_class 컬럼 없으면 경고 후 종료
         if "predicted_class" not in df.columns:
-            print("[경고] predicted_class 컬럼 없음")
+            print("[경고] predicted_class 컬럼 없음 → fine-tune 분석 중단")
             return pd.DataFrame([])
+
+        # ✅ label 컬럼 없으면 predicted_class로 대체
+        if "label" not in df.columns:
+            df["label"] = df["predicted_class"]
 
         df = df[df["predicted_class"].notna()]
         df["predicted_class"] = pd.to_numeric(df["predicted_class"], errors="coerce")
@@ -207,7 +206,6 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
         df["predicted_class"] = df["predicted_class"].astype(int)
 
         result = defaultdict(lambda: {"success": 0, "fail": 0})
-
         for _, row in df.iterrows():
             strategy = row["strategy"]
             cls = int(row["predicted_class"])
