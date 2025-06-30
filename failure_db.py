@@ -36,6 +36,9 @@ def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
             label = int(label)
         except:
             label = None
+    else:
+        label = -1  # ✅ None인 경우 -1로 기본 대입
+
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute("""
@@ -52,25 +55,19 @@ def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
                 float(row.get("rate", 0.0)),
                 row.get("reason", ""),
                 json.dumps(feature_vector) if feature_vector else None,
-                int(label) if label is not None else None
+                int(label) if label is not None else -1
             ))
     except Exception as e:
         print(f"[오류] insert_failure_record 실패 → {e}")
 
 def load_existing_failure_hashes():
-    """
-    기존 학습 실패 해시값을 불러와 재학습에 재사용 가능하게 함.
-    모델 삭제 여부와 무관하게 실패 누적 유지.
-    """
     try:
-        import sqlite3
-        with sqlite3.connect("/persistent/logs/failure_patterns.db") as conn:
+        with sqlite3.connect(DB_PATH) as conn:
             rows = conn.execute("SELECT hash FROM failure_patterns").fetchall()
             return set(r[0] for r in rows if r and r[0])
     except Exception as e:
         print(f"[오류] 실패 해시 로드 실패 → {e}")
         return set()
-
 
 def analyze_failure_reason(rate, volatility=None):
     if not isinstance(rate, float):
