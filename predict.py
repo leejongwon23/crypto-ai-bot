@@ -342,9 +342,13 @@ def get_class_distribution(symbol, strategy, model_type):
         print(f"[⚠️ 클래스 분포 로드 실패] {meta_path} → {e}")
     return {}
 
-try:
-    import pandas as pd
-    df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
-    print(df.head(20))
-except Exception as e:
-    print(f"[오류] prediction_log.csv 로드 실패 → {e}")
+
+if __name__ == "__main__":
+    # ✅ 직접 실행된 경우에만 로그 출력
+    try:
+        import pandas as pd
+        df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
+        print("[✅ prediction_log.csv 상위 20줄 출력]")
+        print(df.head(20))
+    except Exception as e:
+        print(f"[오류] prediction_log.csv 로드 실패 → {e}")
