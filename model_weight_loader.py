@@ -7,6 +7,9 @@ MODEL_DIR = "/persistent/models"
 EVAL_RESULT = "/persistent/evaluation_result.csv"
 
 def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_size=None):
+    import os, glob, json, pandas as pd
+    MODEL_DIR = "/persistent/models"
+
     pattern = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json") if symbol != "ALL" \
               else os.path.join(MODEL_DIR, f"*_{strategy}_{model_type}.meta.json")
     meta_files = glob.glob(pattern)
@@ -16,7 +19,6 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
 
-            # ✅ input_size 체크 추가
             if input_size is not None and meta.get("input_size") != input_size:
                 continue
 
@@ -26,21 +28,23 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
 
             eval_files = sorted(glob.glob("/persistent/logs/evaluation_*.csv"))
             if not eval_files:
+                # ✅ 평가 기록 없으면 → weight=1.0 으로 반환 (최초 예측 허용)
                 return 1.0
 
             df_list = []
             for file in eval_files:
                 df = pd.read_csv(file, encoding="utf-8-sig")
                 df_list.append(df)
+
             if not df_list:
-                return 1.0
+                return 1.0  # ✅ 평가 데이터 없으면 weight=1.0
 
             df = pd.concat(df_list, ignore_index=True)
             df = df[(df["model"] == model_type) & (df["strategy"] == strategy) &
                     (df["symbol"] == meta.get("symbol")) & (df["status"].isin(["success", "fail"]))]
 
             if len(df) < min_samples:
-                return 1.0
+                return 1.0  # ✅ 샘플 부족해도 weight=1.0
 
             success_rate = len(df[df["status"] == "success"]) / len(df)
             if success_rate >= 0.65:
