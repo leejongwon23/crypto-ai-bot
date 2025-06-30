@@ -81,7 +81,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
-
 def predict(symbol, strategy, source="일반", model_type=None):
     import os, json, torch, numpy as np, pandas as pd
     from sklearn.preprocessing import MinMaxScaler
@@ -176,7 +175,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 return_value=expected_return,
                 volatility=True,
                 source=source,
-                predicted_class=pred_class
+                predicted_class=pred_class,
+                label=pred_class
             )
 
             feature_hash = get_feature_hash(X_input)
@@ -200,15 +200,14 @@ def predict(symbol, strategy, source="일반", model_type=None):
         if not results:
             return [failed_result(symbol, strategy, "unknown", "모델 예측 실패", source)]
 
+        # ✅ prediction_log.csv 상위 20줄 출력
         try:
-    import pandas as pd
-    df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
-    print("[✅ prediction_log.csv 상위 20줄 출력]")
-    print(df.head(20))
-except Exception as e:
-    print(f"[오류] prediction_log.csv 로드 실패 → {e}")
+            df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
+            print("[✅ prediction_log.csv 상위 20줄 출력]")
+            print(df.head(20))
+        except Exception as e:
+            print(f"[오류] prediction_log.csv 로드 실패 → {e}")
 
-        
         return results
 
     except Exception as e:
