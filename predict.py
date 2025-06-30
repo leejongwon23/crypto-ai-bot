@@ -205,6 +205,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
     except Exception as e:
         print(f"[predict 예외] {e}")
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+try:
+    import pandas as pd
+    df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
+    print("[✅ prediction_log.csv 상위 20줄 출력]")
+    print(df.head(20))
+except Exception as e:
+    print(f"[오류] prediction_log.csv 로드 실패 → {e}")
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
@@ -350,16 +357,3 @@ def get_class_distribution(symbol, strategy, model_type):
 
 
 
-if __name__ == "__main__":
-    # ✅ 예측 테스트 예시
-    results = predict("BTCUSDT", "단기")
-    print(results)
-
-    # ✅ prediction_log.csv 출력
-    try:
-        import pandas as pd
-        df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
-        print("[✅ prediction_log.csv 상위 20줄 출력]")
-        print(df.head(20))
-    except Exception as e:
-        print(f"[오류] prediction_log.csv 로드 실패 → {e}")
