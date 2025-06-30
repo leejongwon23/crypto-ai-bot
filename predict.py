@@ -37,6 +37,7 @@ def class_to_expected_return(cls):
 def failed_result(symbol, strategy, model_type="unknown", reason="", source="일반", X_input=None):
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     pred_class_val = -1
+
     try:
         log_prediction(
             symbol=symbol,
@@ -53,7 +54,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             volatility=True,
             source=source,
             predicted_class=pred_class_val,
-            label=pred_class_val   # ✅ label 기본 대입
+            label=pred_class_val
         )
     except:
         pass
@@ -75,7 +76,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     if X_input is not None:
         try:
             feature_hash = get_feature_hash(X_input)
-            insert_failure_record(result, feature_hash)
+            insert_failure_record(result, feature_hash, label=pred_class_val)
         except:
             pass
 
