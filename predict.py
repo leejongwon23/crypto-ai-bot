@@ -54,7 +54,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             volatility=True,
             source=source,
             predicted_class=pred_class_val,
-            label=pred_class_val
+            label=pred_class_val  # ✅ label 기본 대입
         )
     except:
         pass
@@ -76,7 +76,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     if X_input is not None:
         try:
             feature_hash = get_feature_hash(X_input)
-            insert_failure_record(result, feature_hash, label=pred_class_val)
+            insert_failure_record(result, feature_hash, feature_vector=X_input, label=pred_class_val)  # ✅ feature_vector 추가
         except:
             pass
 
