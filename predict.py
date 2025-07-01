@@ -16,6 +16,7 @@ DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
+
 def class_to_expected_return(cls, recent_days=3):
     import pandas as pd
     import numpy as np
@@ -38,9 +39,12 @@ def class_to_expected_return(cls, recent_days=3):
             0.75, 1.50, 3.50
         ]
 
+        # ✅ cls 범위 안전 체크 및 반환 로직 강화
         if isinstance(cls, int) and 0 <= cls < len(centers_default):
-            # ✅ 최근 평균 수익률이 존재하면 동적 값 반환, 없으면 기본값
-            return centers_dynamic.get(cls, centers_default[cls])
+            if cls in centers_dynamic and np.isfinite(centers_dynamic[cls]):
+                return centers_dynamic[cls]
+            else:
+                return centers_default[cls]
 
         print(f"[⚠️ 예상 수익률 계산 오류] 잘못된 클래스: {cls}")
         return 0.0
@@ -56,6 +60,7 @@ def class_to_expected_return(cls, recent_days=3):
         if isinstance(cls, int) and 0 <= cls < len(centers_default):
             return centers_default[cls]
         return 0.0
+
 
 
 # ✅ 수정 요약:
