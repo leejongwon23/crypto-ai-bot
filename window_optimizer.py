@@ -20,7 +20,6 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 20:
             print(f"[경고] {symbol}-{strategy} → 데이터 부족으로 최소 window fallback")
-            # ✅ fallback window를 최소 window로 설정
             return min(window_list)
 
         df_feat = compute_features(symbol, df, strategy)
@@ -28,12 +27,13 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             print(f"[경고] {symbol}-{strategy} → feature 부족 또는 NaN 포함으로 최소 window fallback")
             return min(window_list)
 
-        # ✅ 스케일링 추가 (기존 학습 흐름과 통일)
-        features_scaled = MinMaxScaler().fit_transform(df_feat.drop(columns=["timestamp"]))
+        # ✅ 'strategy' 컬럼 제거 후 스케일링
+        features_scaled = MinMaxScaler().fit_transform(df_feat.drop(columns=["timestamp", "strategy"]))
         feature_dicts = []
         for i, row in enumerate(features_scaled):
-            d = dict(zip(df_feat.columns.drop("timestamp"), row))
+            d = dict(zip(df_feat.columns.drop(["timestamp", "strategy"]), row))
             d["timestamp"] = df_feat.iloc[i]["timestamp"]
+            d["strategy"] = df_feat.iloc[i]["strategy"]
             feature_dicts.append(d)
 
         best_acc = -1
