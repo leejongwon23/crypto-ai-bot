@@ -342,21 +342,28 @@ def train_model_loop(strategy):
         print(f"✅ {strategy} 루프 종료")
 
 
-
 def train_symbol_group_loop(delay_minutes=5):
     """
     ✅ [설명] SYMBOL_GROUPS 단위로 전체 그룹 학습 루프 실행
+    - 각 그룹 학습 전 cache clear
     - 각 그룹 학습 후 meta 보정, 예측 실행 포함
     """
     import time
     import maintenance_fix_meta
-    from data.utils import SYMBOL_GROUPS
+    from data.utils import SYMBOL_GROUPS, _kline_cache, _feature_cache
+
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작")
 
     while True:
         for idx, group in enumerate(SYMBOL_GROUPS):
             print(f"\n🚀 [그룹 {idx}] 학습 시작 → {group}")
+
+            # ✅ 캐시 clear 추가
+            _kline_cache.clear()
+            _feature_cache.clear()
+            print("[✅ cache cleared] _kline_cache, _feature_cache")
+
             try:
                 train_models(group)
 
@@ -379,6 +386,4 @@ def train_symbol_group_loop(delay_minutes=5):
             except Exception as e:
                 print(f"❌ 그룹 {idx} 루프 중 오류: {e}")
                 continue
-
-
 
