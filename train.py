@@ -376,8 +376,16 @@ def balance_classes(X, y, min_samples=20, target_classes=None):
 
     for cls in target_classes:
         count = class_counts.get(cls, 0)
+
+        # ✅ zero sample 클래스에도 최소 샘플 생성 (random noise augmentation)
         if count == 0:
-            continue
+            if len(X) > 0:
+                sample_shape = X[0].shape
+                noise_sample = np.random.normal(loc=0.0, scale=1.0, size=sample_shape).astype(np.float32)
+                X_balanced.append(noise_sample)
+                y_balanced.append(cls)
+                class_counts[cls] = 1
+                print(f"⚠️ zero sample 클래스 {cls}: random noise 샘플 1개 생성")
 
         existing = [(x, y_val) for x, y_val in zip(X, y) if y_val == cls]
         while class_counts[cls] < max(min_samples, int(max_count * 0.8)) and existing:
@@ -395,6 +403,7 @@ def balance_classes(X, y, min_samples=20, target_classes=None):
             print(f"  - 클래스 {cls}: {before}개 → {after}개 (복제됨)")
 
     return np.array(X_balanced), np.array(y_balanced)
+
 # ✅ train.py 맨 아래에 반드시 포함해야 함
 
 def train_symbol_group_loop(delay_minutes=5):
