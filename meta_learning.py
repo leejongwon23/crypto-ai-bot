@@ -3,7 +3,6 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import copy
 
 class MAML:
     def __init__(self, model, inner_lr=0.01, outer_lr=0.001, inner_steps=1):
@@ -15,25 +14,32 @@ class MAML:
         self.loss_fn = nn.CrossEntropyLoss()
 
     def adapt(self, X, y):
-        # Clone model for inner loop adaptation
-        adapted_model = copy.deepcopy(self.model)
-        adapted_model.train()
-
+        """
+        ✅ [수정]
+        - deepcopy 제거 → 메모리 최적화
+        - functional API 기반 가중치 업데이트로 변경
+        """
+        adapted_params = {name: param for name, param in self.model.named_parameters()}
         for _ in range(self.inner_steps):
-            logits = adapted_model(X)
+            logits = self.model.forward(X, params=adapted_params) if hasattr(self.model, 'forward') else self.model(X)
             loss = self.loss_fn(logits, y)
-            grads = torch.autograd.grad(loss, adapted_model.parameters(), create_graph=True)
-            for p, g in zip(adapted_model.parameters(), grads):
-                p.data = p.data - self.inner_lr * g
+            grads = torch.autograd.grad(loss, adapted_params.values(), create_graph=True)
 
-        return adapted_model
+            # ✅ inplace gradient step
+            adapted_params = {
+                name: param - self.inner_lr * grad
+                for (name, param), grad in zip(adapted_params.items(), grads)
+            }
+
+        # ✅ adapted_params 반환 → 외부에서 functional forward 호출 가능
+        return adapted_params
 
     def meta_update(self, tasks):
         meta_loss = 0.0
         for X_train, y_train, X_val, y_val in tasks:
-            adapted_model = self.adapt(X_train, y_train)
-            adapted_model.eval()
-            logits = adapted_model(X_val)
+            adapted_params = self.adapt(X_train, y_train)
+            # functional forward with adapted_params
+            logits = self.model.forward(X_val, params=adapted_params) if hasattr(self.model, 'forward') else self.model(X_val)
             loss = self.loss_fn(logits, y_val)
             meta_loss += loss
 
@@ -44,3 +50,15 @@ class MAML:
         self.optimizer.step()
 
         return meta_loss.item()
+
+# ✅ [추가] train.py에서 호출 가능 구조 예시
+def maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1):
+    maml = MAML(model, inner_lr=inner_lr, outer_lr=outer_lr, inner_steps=inner_steps)
+    tasks = []
+
+    for (X_train, y_train), (X_val, y_val) in zip(train_loader, val_loader):
+        tasks.append((X_train, y_train, X_val, y_val))
+
+    loss = maml.meta_update(tasks)
+    print(f"[MAML meta-update 완료] loss={loss:.4f}")
+    return loss
