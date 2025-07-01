@@ -93,7 +93,7 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
     except Exception as e:
         print(f"[ERROR] meta 저장 실패: {e}")
 
-def train_one_model(symbol, strategy, max_epochs=30):
+def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     import numpy as np
     import pandas as pd
@@ -108,7 +108,7 @@ def train_one_model(symbol, strategy, max_epochs=30):
     from torch.utils.data import TensorDataset, DataLoader
     from config import NUM_CLASSES
     from wrong_data_loader import load_training_prediction_data
-    from logger import log_training_result, get_feature_hash_from_tensor
+    from logger import log_training_result, get_feature_hash_from_tensor, get_fine_tune_targets
     from window_optimizer import find_best_window
     from data.utils import get_kline_by_strategy, compute_features, create_dataset
 
@@ -176,16 +176,16 @@ def train_one_model(symbol, strategy, max_epochs=30):
         # ✅ 모델 학습 루프
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size=input_size, output_size=NUM_CLASSES).to(DEVICE).train()
-            optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)  # ✅ learning rate 수정
+            optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = FocalLoss(gamma=2)
 
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
-            train_loader = DataLoader(train_ds, batch_size=64, shuffle=True, num_workers=2)  # ✅ batch size 수정
+            train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
 
             # 🔁 실패 집중 학습 (먼저 수행)
             if wrong_ds:
-                wrong_loader = DataLoader(wrong_ds, batch_size=32, shuffle=True, num_workers=2)
+                wrong_loader = DataLoader(wrong_ds, batch_size=16, shuffle=True, num_workers=2)
                 for _ in range(3):
                     for xb, yb in wrong_loader:
                         xb, yb = xb.to(DEVICE), yb.to(DEVICE)
@@ -194,7 +194,8 @@ def train_one_model(symbol, strategy, max_epochs=30):
                         if torch.isfinite(loss):
                             optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            for _ in range(max_epochs):  # ✅ epoch 수정
+            # 🔁 기본 학습
+            for _ in range(max_epochs):
                 model.train()
                 for xb, yb in train_loader:
                     xb, yb = xb.to(DEVICE), yb.to(DEVICE)
@@ -202,6 +203,29 @@ def train_one_model(symbol, strategy, max_epochs=30):
                     loss = lossfn(logits, yb)
                     if torch.isfinite(loss):
                         optimizer.zero_grad(); loss.backward(); optimizer.step()
+
+            # 🔁 Fine-Tune 루프
+            fine_tune_targets = get_fine_tune_targets()
+            if not fine_tune_targets.empty:
+                targets = fine_tune_targets[fine_tune_targets["strategy"] == strategy]["class"].tolist()
+                fine_tune_ds = [(x, y_val) for x, y_val in zip(X_train, y_train) if y_val in targets]
+
+                if fine_tune_ds:
+                    print(f"🔁 Fine-Tune 대상 {len(fine_tune_ds)}개 클래스 학습 시작")
+                    ds = TensorDataset(torch.tensor([x for x, _ in fine_tune_ds], dtype=torch.float32),
+                                       torch.tensor([y for _, y in fine_tune_ds], dtype=torch.long))
+                    loader = DataLoader(ds, batch_size=16, shuffle=True, num_workers=2)
+                    for _ in range(3):
+                        for xb, yb in loader:
+                            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                            logits = model(xb)
+                            loss = lossfn(logits, yb)
+                            if torch.isfinite(loss):
+                                optimizer.zero_grad(); loss.backward(); optimizer.step()
+                else:
+                    print("[INFO] fine-tune 대상 클래스가 학습 데이터에 없음 → fallback fine-tune skipped")
+            else:
+                print("[INFO] fine-tune 대상이 없어 fallback으로 기존 학습 데이터 일부 사용")
 
             # ✅ 검증
             model.eval()
