@@ -26,11 +26,24 @@ def ensure_failure_db():
 def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
     if not isinstance(feature_hash, str) or feature_hash.strip() == "":
         return
+
+    # ✅ feature_vector 저장 전 타입 변환 및 fallback 안전화
     if feature_vector is not None:
         try:
+            # numpy array인 경우 list로 변환
+            if hasattr(feature_vector, "tolist"):
+                feature_vector = feature_vector.tolist()
+            # 리스트가 아닌 경우 None으로 처리
+            if not isinstance(feature_vector, list):
+                feature_vector = None
+            else:
+                # nested list 보장
+                if not all(isinstance(x, list) for x in feature_vector):
+                    feature_vector = None
             json.dumps(feature_vector)
         except:
             feature_vector = None
+
     if label is not None:
         try:
             label = int(label)
@@ -59,6 +72,7 @@ def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
             ))
     except Exception as e:
         print(f"[오류] insert_failure_record 실패 → {e}")
+
 
 def load_existing_failure_hashes():
     try:
