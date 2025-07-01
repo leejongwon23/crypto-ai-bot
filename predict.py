@@ -230,14 +230,13 @@ def evaluate_predictions(get_price_fn):
     EVAL_RESULT = f"/persistent/logs/evaluation_{date_str}.csv"
     WRONG = f"/persistent/logs/wrong_{date_str}.csv"
 
-    # ✅ 클래스별 수익률 구간 정의
     class_ranges = [
-    (-0.99, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
-    (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
-    (-0.03, -0.01), (-0.01, 0.01),
-    ( 0.01, 0.03), ( 0.03, 0.05), ( 0.05, 0.07), ( 0.07, 0.10),
-    ( 0.10, 0.15), ( 0.15, 0.20), ( 0.20, 0.30), ( 0.30, 0.60),
-    ( 0.60, 1.00), ( 1.00, 2.00), ( 2.00, 5.00)
+        (-0.99, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
+        (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
+        (-0.03, -0.01), (-0.01, 0.01),
+        (0.01, 0.03), (0.03, 0.05), (0.05, 0.07), (0.07, 0.10),
+        (0.10, 0.15), (0.15, 0.20), (0.20, 0.30), (0.30, 0.60),
+        (0.60, 1.00), (1.00, 2.00), (2.00, 5.00)
     ]
 
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
@@ -301,11 +300,11 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            # ✅ 클래스 구간 평가
             if 0 <= pred_class < len(class_ranges):
                 cls_min, cls_max = class_ranges[pred_class]
                 success = gain >= cls_min
             else:
+                cls_min, cls_max = -999, 999
                 success = False
 
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
@@ -319,6 +318,9 @@ def evaluate_predictions(get_price_fn):
                 "return": round(gain, 5)
             })
 
+            # ✅ None key 제거
+            r = {k: v for k, v in r.items() if k is not None}
+
             update_model_success(symbol, strategy, model, success)
             evaluated.append(r)
 
@@ -328,17 +330,28 @@ def evaluate_predictions(get_price_fn):
 
     updated += evaluated
 
-    with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
-        csv.DictWriter(f, fieldnames=updated[0].keys()).writerows([updated[0]] + updated[1:])
+    if updated:
+        fieldnames = [k for k in updated[0].keys() if k is not None]
+        with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(updated)
 
     if evaluated:
+        fieldnames = [k for k in evaluated[0].keys() if k is not None]
         with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as f:
-            csv.DictWriter(f, fieldnames=evaluated[0].keys()).writerows([evaluated[0]] + evaluated[1:])
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(evaluated)
 
         failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
         if failed:
+            fieldnames = [k for k in failed[0].keys() if k is not None]
             with open(WRONG, "a", newline="", encoding="utf-8-sig") as f:
-                csv.DictWriter(f, fieldnames=failed[0].keys()).writerows([failed[0]] + failed[1:])
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(failed)
+
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
