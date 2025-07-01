@@ -60,7 +60,6 @@ def log_audit_prediction(s, t, status, reason):
             w.writerow(row)
     except: pass
 
-
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, model=None, success=True, reason="", rate=0.0,
                    return_value=None, volatility=False, source="일반", predicted_class=None, label=None):
@@ -103,8 +102,8 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "return": float(return_value if return_value is not None else rate or 0.0),
         "volatility": bool(volatility),
         "source": str(source or "일반"),
-        "predicted_class": str(pred_class_val),
-        "label": str(label)  # ✅ label 필드 추가
+        "predicted_class": str(int(pred_class_val)),  # ✅ int 변환 후 str 기록
+        "label": str(label)
     }
 
     try:
@@ -124,6 +123,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
             w.writerow(row)
     except Exception as e:
         print(f"[오류] 통합 로그 기록 실패 → {e}")
+
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
