@@ -191,10 +191,10 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
         df = df[df["status"].isin(["success", "fail"])]
 
-        # ✅ predicted_class 컬럼 없으면 경고 후 종료
+        # ✅ predicted_class 컬럼 없으면 -1로 생성 후 경고
         if "predicted_class" not in df.columns:
-            print("[경고] predicted_class 컬럼 없음 → fine-tune 분석 중단")
-            return pd.DataFrame([])
+            print("[경고] predicted_class 컬럼 없음 → -1로 생성 후 처리")
+            df["predicted_class"] = -1
 
         # ✅ label 컬럼 없으면 predicted_class로 대체
         if "label" not in df.columns:
@@ -229,6 +229,7 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
     except Exception as e:
         print(f"[오류] fine-tune 대상 분석 실패 → {e}")
         return pd.DataFrame([])
+
 
 def get_feature_hash_from_tensor(tensor):
     """
