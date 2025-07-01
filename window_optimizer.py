@@ -7,15 +7,9 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import accuracy_score
 from data.utils import get_kline_by_strategy, compute_features, create_dataset
 from model.base_model import get_model
+from config import NUM_CLASSES
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
-    import os, json, torch, numpy as np, pandas as pd
-    from sklearn.preprocessing import MinMaxScaler
-    from sklearn.metrics import accuracy_score
-    from data.utils import get_kline_by_strategy, compute_features, create_dataset
-    from model.base_model import get_model
-    from config import NUM_CLASSES
-
     try:
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 20:
@@ -42,7 +36,8 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
 
         for window in window_list:
             try:
-                X, y = create_dataset(feature_dicts, window, strategy)
+                # 🔧 strategy 인자를 str로 전달하도록 수정
+                X, y = create_dataset(feature_dicts, window, strategy=str(strategy))
                 if X is None or y is None or len(X) == 0 or len(X) != len(y):
                     continue
 
