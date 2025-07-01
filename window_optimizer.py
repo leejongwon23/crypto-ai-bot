@@ -17,13 +17,13 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             print(f"[경고] {symbol}-{strategy} → feature 부족 또는 NaN 포함으로 최소 window fallback")
             return min(window_list)
 
+        # ✅ 'strategy' 컬럼 제거 후 스케일링
         features_scaled = MinMaxScaler().fit_transform(df_feat.drop(columns=["timestamp", "strategy"]))
         feature_dicts = []
         for i, row in enumerate(features_scaled):
             d = dict(zip(df_feat.columns.drop(["timestamp", "strategy"]), row))
             d["timestamp"] = df_feat.iloc[i]["timestamp"]
-            # ✅ strategy 컬럼 삽입 제거
-            # d["strategy"] = df_feat.iloc[i]["strategy"]
+            # ✅ strategy 컬럼 제거 (float 변환 오류 방지)
             feature_dicts.append(d)
 
         best_acc = -1
@@ -76,6 +76,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 print(f"[오류] window={window} 평가 실패 → {e}")
                 continue
 
+        # ✅ acc < 0.1이면 fallback 강제 적용
         if best_acc < 0.1:
             print(f"[경고] {symbol}-{strategy}: best_acc={best_acc:.4f} < 0.1 → fallback 최소 window 적용")
             best_window = min(window_list)
