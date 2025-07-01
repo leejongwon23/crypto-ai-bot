@@ -93,7 +93,7 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
     except Exception as e:
         print(f"[ERROR] meta 저장 실패: {e}")
 
-def train_one_model(symbol, strategy, max_epochs=20):
+def train_one_model(symbol, strategy, max_epochs=30):
     import os, gc
     import numpy as np
     import pandas as pd
@@ -176,16 +176,16 @@ def train_one_model(symbol, strategy, max_epochs=20):
         # ✅ 모델 학습 루프
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size=input_size, output_size=NUM_CLASSES).to(DEVICE).train()
-            optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+            optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)  # ✅ learning rate 수정
             lossfn = FocalLoss(gamma=2)
 
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
-            train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
+            train_loader = DataLoader(train_ds, batch_size=64, shuffle=True, num_workers=2)  # ✅ batch size 수정
 
             # 🔁 실패 집중 학습 (먼저 수행)
             if wrong_ds:
-                wrong_loader = DataLoader(wrong_ds, batch_size=16, shuffle=True, num_workers=2)
+                wrong_loader = DataLoader(wrong_ds, batch_size=32, shuffle=True, num_workers=2)
                 for _ in range(3):
                     for xb, yb in wrong_loader:
                         xb, yb = xb.to(DEVICE), yb.to(DEVICE)
@@ -194,7 +194,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         if torch.isfinite(loss):
                             optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            for _ in range(max_epochs):
+            for _ in range(max_epochs):  # ✅ epoch 수정
                 model.train()
                 for xb, yb in train_loader:
                     xb, yb = xb.to(DEVICE), yb.to(DEVICE)
@@ -237,6 +237,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
 
 def balance_classes(X, y, min_samples=20, target_classes=None):
     """
