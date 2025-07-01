@@ -70,6 +70,7 @@ def class_to_expected_return(cls, recent_days=3):
 def failed_result(symbol, strategy, model_type="unknown", reason="", source="일반", X_input=None):
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     pred_class_val = -1
+    label_val = -1  # ✅ 실패시 label=-1 통일
 
     try:
         log_prediction(
@@ -87,7 +88,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             volatility=True,
             source=source,
             predicted_class=pred_class_val,
-            label=pred_class_val  # ✅ label 기본 대입
+            label=label_val  # ✅ 통일된 label=-1
         )
     except:
         pass
@@ -103,13 +104,13 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         "timestamp": t,
         "source": source,
         "predicted_class": pred_class_val,
-        "label": pred_class_val
+        "label": label_val
     }
 
     if X_input is not None:
         try:
             feature_hash = get_feature_hash(X_input)
-            insert_failure_record(result, feature_hash, feature_vector=X_input, label=pred_class_val)  # ✅ feature_vector 추가
+            insert_failure_record(result, feature_hash, feature_vector=X_input, label=label_val)
         except:
             pass
 
@@ -203,6 +204,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
             pred_class = int(adjusted_probs.argmax())
             expected_return = class_to_expected_return(pred_class)
+            label_val = pred_class  # ✅ 성공 예측 시 label=predicted_class
 
             conf_score = 1 - entropy(probs) / np.log(len(probs))  # ✅ confidence score (normalized entropy)
 
@@ -221,7 +223,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 volatility=True,
                 source=source,
                 predicted_class=pred_class,
-                label=pred_class
+                label=label_val
             )
 
             feature_hash = get_feature_hash(X_input)
@@ -231,7 +233,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 "model": mt,
                 "class": pred_class,
                 "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
-            }, feature_hash, feature_vector=X_input, label=pred_class)
+            }, feature_hash, feature_vector=X_input, label=label_val)
 
             results.append({
                 "symbol": symbol,
@@ -241,7 +243,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 "expected_return": expected_return,
                 "success": True,
                 "predicted_class": pred_class,
-                "label": pred_class,
+                "label": label_val,
                 "confidence": round(conf_score, 4)
             })
 
@@ -271,6 +273,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     except Exception as e:
         print(f"[predict 예외] {e}")
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+
 
 
 # 📄 predict.py 내부에 추가
