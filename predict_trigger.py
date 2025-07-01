@@ -27,16 +27,23 @@ MODEL_TYPES = ["lstm", "cnn_lstm", "transformer"]
 
 def check_pre_burst_conditions(df, strategy):
     try:
+        if df is None or len(df) < 10:
+            print("[경고] 데이터 너무 적음 → fallback 조건 평가")
+            # ✅ fallback: 데이터가 10 미만이면 기본 True 반환 (트리거 최소 기회 보장)
+            return True
+
         vol_increasing = df['volume'].iloc[-3] < df['volume'].iloc[-2] < df['volume'].iloc[-1]
         price_range = df['close'].iloc[-6:]
         stable_price = (price_range.max() - price_range.min()) / price_range.mean() < 0.005
-        ema_5 = df['close'].ewm(span=5).mean().iloc[-1]
-        ema_15 = df['close'].ewm(span=15).mean().iloc[-1]
-        ema_60 = df['close'].ewm(span=60).mean().iloc[-1]
+
+        ema_5 = df['close'].ewm(span=5).mean().iloc[-1] if len(df) >= 5 else df['close'].mean()
+        ema_15 = df['close'].ewm(span=15).mean().iloc[-1] if len(df) >= 15 else df['close'].mean()
+        ema_60 = df['close'].ewm(span=60).mean().iloc[-1] if len(df) >= 60 else df['close'].mean()
         ema_pack = max(ema_5, ema_15, ema_60) - min(ema_5, ema_15, ema_60)
         ema_compressed = ema_pack / df['close'].iloc[-1] < 0.003
-        bb_std = df['close'].rolling(window=20).std()
-        expanding_band = bb_std.iloc[-2] < bb_std.iloc[-1] and bb_std.iloc[-1] > 0.002
+
+        bb_std = df['close'].rolling(window=20).std() if len(df) >= 20 else pd.Series([0.0])
+        expanding_band = bb_std.iloc[-2] < bb_std.iloc[-1] and bb_std.iloc[-1] > 0.002 if len(bb_std) >= 2 else True
 
         if strategy == "단기":
             return sum([vol_increasing, stable_price, ema_compressed, expanding_band]) >= 2
@@ -50,6 +57,7 @@ def check_pre_burst_conditions(df, strategy):
         print(f"[조건 점검 오류] {e}")
         traceback.print_exc()
         return False
+
 
 def check_model_quality(symbol, strategy):
     try:
