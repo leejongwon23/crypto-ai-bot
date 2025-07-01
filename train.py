@@ -320,12 +320,12 @@ def balance_classes(X, y, min_samples=20, target_classes=None):
     return np.array(X_balanced), np.array(y_balanced)
 
 
-
 def train_all_models():
     """
     ✅ [설명] SYMBOLS 전체에 대해 단기, 중기, 장기 학습 수행
     - Telegram 완료 메시지 전송 포함
     """
+    global training_in_progress  # ✅ 추가
     from telegram_bot import send_message
     strategies = ["단기", "중기", "장기"]
 
@@ -362,11 +362,14 @@ def train_all_models():
 
     send_message("✅ 전체 학습이 완료되었습니다. 예측을 실행해주세요.")
 
+
+
 def train_models(symbol_list):
     """
     ✅ [설명] 특정 symbol_list에 대해 단기, 중기, 장기 학습 수행
     - meta 보정 후 예측까지 자동 실행
     """
+    global training_in_progress  # ✅ 추가
     from telegram_bot import send_message
     from predict_test import main as run_prediction
     import maintenance_fix_meta
@@ -407,11 +410,13 @@ def train_models(symbol_list):
 
     send_message("✅ 학습 및 예측 루틴 완료 (해당 심볼 그룹)")
 
+
 def train_model_loop(strategy):
     """
     ✅ [설명] 특정 strategy 학습을 무한 루프로 실행
     - training_in_progress 상태 관리 포함
     """
+    global training_in_progress  # ✅ 추가
     if training_in_progress.get(strategy, False):
         print(f"⚠️ 이미 실행 중: {strategy} 학습 중복 방지")
         return
@@ -429,6 +434,7 @@ def train_model_loop(strategy):
     finally:
         training_in_progress[strategy] = False
         print(f"📌 상태 종료 → {training_in_progress}")
+
 
 def train_symbol_group_loop(delay_minutes=5):
     """
