@@ -44,10 +44,11 @@ def fix_all_meta_json():
         try:
             model = get_model(model_type, input_size=11, output_size=NUM_CLASSES)
             sample_input = torch.randn(1, 20, 11)
-            output = model(sample_input)
+            output = model(sample_input) if not hasattr(model, "predict") else None
             expected_input_size = sample_input.shape[2]
 
-            if current_input_size != expected_input_size:
+            # ✅ input_size 없거나 불일치 시 보정
+            if current_input_size is None or current_input_size != expected_input_size:
                 meta["input_size"] = expected_input_size
                 updated = True
         except Exception as e:
