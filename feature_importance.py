@@ -86,11 +86,10 @@ def compute_permutation_importance(model, X_val, y_val, feature_names):
     """
     return compute_feature_importance(model, X_val, y_val, feature_names, method="permutation")
 
-
-
-def save_feature_importance(importances, symbol, strategy, model_type):
-    fname_json = f"{symbol}_{strategy}_{model_type}_importance.json"
-    fname_csv = f"{symbol}_{strategy}_{model_type}_importance.csv"
+def save_feature_importance(importances, symbol, strategy, model_type, method="baseline"):
+    suffix = f"_importance_{method}"
+    fname_json = f"{symbol}_{strategy}_{model_type}{suffix}.json"
+    fname_csv = f"{symbol}_{strategy}_{model_type}{suffix}.csv"
     path_json = os.path.join(IMPORTANCE_DIR, fname_json)
     path_csv = os.path.join(IMPORTANCE_DIR, fname_csv)
 
@@ -103,6 +102,7 @@ def save_feature_importance(importances, symbol, strategy, model_type):
     df.to_csv(path_csv, index=False, encoding="utf-8-sig")
 
     print(f"✅ 중요도 저장 완료: {path_json}, {path_csv}")
+
 
 
 def drop_low_importance_features(df: pd.DataFrame, importances: dict, threshold: float = 0.05) -> pd.DataFrame:
