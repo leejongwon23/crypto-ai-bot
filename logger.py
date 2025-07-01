@@ -223,7 +223,8 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
         for (strategy, cls), counts in result.items():
             total = counts["success"] + counts["fail"]
             rate = counts["success"] / total if total > 0 else 0
-            if total < min_samples or rate < max_success_rate:
+            # ✅ 실패 수가 많거나 성공률이 낮으면 우선 fine-tune
+            if counts["fail"] >= 1 or rate < max_success_rate:
                 fine_tune_targets.append({
                     "strategy": strategy,
                     "class": cls,
@@ -231,17 +232,19 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
                     "success_rate": round(rate, 4)
                 })
 
-        # ✅ Fallback: fine-tune 대상 없으면 최근 샘플 무작위 추출
+        # ✅ fallback: 대상 없으면 최근 실패 샘플에서 우선 추출
         if not fine_tune_targets:
-            print("[INFO] fine-tune 대상 없음 → fallback 샘플링 실행")
-            fallback_df = df.sample(n=min_samples, replace=True) if len(df) >= min_samples else df
+            print("[INFO] fine-tune 대상 없음 → fallback 최근 실패 샘플 사용")
+            fail_df = df[df["status"] == "fail"]
+            fallback_df = fail_df.sample(n=min_samples, replace=True) if len(fail_df) >= min_samples else fail_df
+
             fallback = []
             for _, row in fallback_df.iterrows():
                 fallback.append({
                     "strategy": row["strategy"],
                     "class": int(row["predicted_class"]),
                     "samples": 10,
-                    "success_rate": 0.5
+                    "success_rate": 0.0
                 })
             return pd.DataFrame(fallback).sort_values(by=["strategy", "class"])
 
