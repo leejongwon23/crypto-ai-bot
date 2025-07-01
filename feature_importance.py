@@ -32,13 +32,13 @@ def compute_feature_importance(model, X_val, y_val, feature_names):
             print(f"[ERROR] 중요도 계산 실패 (feature {i}): {e}")
             importances.append(0.0)
 
-    # ✅ threshold를 dynamic percentile 기준으로 조정 (예: 상위 50%)
+    # ✅ threshold: 상위 30%로 강화
     importance_array = np.array(importances)
-    threshold = np.percentile(importance_array, 50)
+    threshold = np.percentile(importance_array, 70)
 
-    # ✅ 최소 N개 feature 유지 (예: 최소 3개)
-    min_features = 3
-    sorted_indices = np.argsort(-importance_array)  # 내림차순 정렬
+    # ✅ 최소 5개 feature 유지
+    min_features = 5
+    sorted_indices = np.argsort(-importance_array)
     selected_indices = [i for i, imp in enumerate(importances) if imp >= threshold]
 
     if len(selected_indices) < min_features:
@@ -48,7 +48,6 @@ def compute_feature_importance(model, X_val, y_val, feature_names):
     final_importances = {feature_names[i]: importances[i] for i in selected_indices}
 
     return final_importances
-
 
 
 def compute_permutation_importance(model, X_val, y_val, feature_names):
