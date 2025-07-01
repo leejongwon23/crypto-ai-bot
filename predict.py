@@ -11,6 +11,8 @@ from config import NUM_CLASSES
 from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
 from logger import get_available_models
 import json
+from model.base_model import get_model, XGBoostWrapper
+
 
 DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
@@ -120,7 +122,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     import os, json, torch, numpy as np, pandas as pd, datetime, pytz, sys
     from sklearn.preprocessing import MinMaxScaler
     from data.utils import get_kline_by_strategy, compute_features
-    from model.base_model import get_model
+    from model.base_model import get_model, XGBoostWrapper
     from model_weight_loader import get_model_weight
     from window_optimizer import find_best_window
     from logger import log_prediction, get_feature_hash
@@ -182,6 +184,45 @@ def predict(symbol, strategy, source="일반", model_type=None):
             if weight <= 0.0:
                 continue
 
+            # ✅ XGBoostWrapper 처리
+            if mt == "xgboost":
+                model = get_model(mt, input_size=input_size, model_path=model_path)
+                pred_class = int(model.predict(X)[0])
+                expected_return = class_to_expected_return(pred_class)
+                label_val = pred_class
+
+                log_prediction(
+                    symbol=symbol,
+                    strategy=strategy,
+                    direction=f"Class-{pred_class}",
+                    entry_price=df["close"].iloc[-1],
+                    target_price=df["close"].iloc[-1] * (1 + expected_return),
+                    model=mt,
+                    success=True,
+                    reason="XGBoost 예측 완료",
+                    rate=expected_return,
+                    timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+                    return_value=expected_return,
+                    volatility=True,
+                    source=source,
+                    predicted_class=pred_class,
+                    label=label_val
+                )
+
+                results.append({
+                    "symbol": symbol,
+                    "strategy": strategy,
+                    "model": mt,
+                    "class": pred_class,
+                    "expected_return": expected_return,
+                    "success": True,
+                    "predicted_class": pred_class,
+                    "label": label_val,
+                    "confidence": 1.0  # XGBoost confidence dummy
+                })
+                continue
+
+            # ✅ 기존 torch 모델 처리
             model = get_model(mt, input_size, NUM_CLASSES).to(DEVICE)
             state = torch.load(model_path, map_location=DEVICE)
             model.load_state_dict(state)
@@ -204,9 +245,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
             pred_class = int(adjusted_probs.argmax())
             expected_return = class_to_expected_return(pred_class)
-            label_val = pred_class  # ✅ 성공 예측 시 label=predicted_class
+            label_val = pred_class
 
-            conf_score = 1 - entropy(probs) / np.log(len(probs))  # ✅ confidence score (normalized entropy)
+            conf_score = 1 - entropy(probs) / np.log(len(probs))  # ✅ confidence score
 
             log_prediction(
                 symbol=symbol,
