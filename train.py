@@ -76,10 +76,6 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
         print(f"[ERROR] meta 저장 실패: {e}")
 
 def train_one_model(symbol, strategy, max_epochs=20):
-    """
-    ✅ [설명] YOPO의 핵심 학습 함수
-    - feature 생성 → dataset 생성 → 모델 학습 → 메타저장까지 수행
-    """
     import os, gc
     import numpy as np
     import pandas as pd
@@ -87,7 +83,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     import datetime, pytz
     from collections import Counter
     from model.base_model import get_model
-    from feature_importance import compute_feature_importance, save_feature_importance
+    from feature_importance import compute_feature_importance, save_feature_importance, drop_low_importance_features
     from failure_db import load_existing_failure_hashes
     from focal_loss import FocalLoss
     from sklearn.metrics import accuracy_score, f1_score
@@ -118,7 +114,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
             df_feat["timestamp"] = df_feat.get("datetime", pd.Timestamp.now())
         df_feat = df_feat.dropna().reset_index(drop=True)
         features = df_feat.to_dict(orient="records")
-                window = find_best_window(symbol, strategy)
+
+        window = find_best_window(symbol, strategy)
         if not isinstance(window, int) or window <= 0:
             print(f"⛔ 중단: find_best_window 실패 → {window}")
             return
@@ -173,31 +170,34 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     if torch.isfinite(loss):
                         optimizer.zero_grad(); loss.backward(); optimizer.step()
 
+            # ✅ feature importance 계산 및 중요도 기반 feature 제거
+            model.eval()
+            with torch.no_grad():
+                xb_val = torch.tensor(X_val, dtype=torch.float32).to(DEVICE)
+                yb_val = torch.tensor(y_val, dtype=torch.long).to(DEVICE)
+                imps = compute_feature_importance(model, xb_val, yb_val, list(df_feat.drop(columns=["timestamp"]).columns))
+                save_feature_importance(imps, symbol, strategy, model_type)
+
+            df_feat_reduced = drop_low_importance_features(df_feat, imps, threshold=0.05)
+            features_reduced = df_feat_reduced.to_dict(orient="records")
+            X_raw_reduced, y_raw_reduced = create_dataset(features_reduced, window=window, strategy=strategy)
+
             # ✅ 검증
             model.eval()
             with torch.no_grad():
-                xb = torch.tensor(X_val, dtype=torch.float32).to(DEVICE)
-                yb = torch.tensor(y_val, dtype=torch.long).to(DEVICE)
-                logits = model(xb)
+                logits = model(xb_val)
                 preds = torch.argmax(logits, dim=1).cpu().numpy()
                 acc = accuracy_score(y_val, preds)
                 f1 = f1_score(y_val, preds, average="macro")
-                val_loss = lossfn(logits, yb).item()
+                val_loss = lossfn(logits, yb_val).item()
                 print(f"[검증 성능] {model_type} acc={acc:.4f}, f1={f1:.4f}, loss={val_loss:.4f}")
 
-            # ✅ 메타 저장 및 feature importance 저장
             log_training_result(symbol, strategy, model_type, acc, f1, val_loss)
             torch.save(model.state_dict(), f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt")
             save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss,
                                 input_size=input_size, class_counts=class_counts)
 
-            try:
-                imps = compute_feature_importance(model, xb, yb, list(df_feat.drop(columns=["timestamp"]).columns))
-                save_feature_importance(imps, symbol, strategy, model_type)
-            except:
-                pass
-
-            del model, xb, yb, logits
+            del model, xb_val, yb_val, logits
             torch.cuda.empty_cache()
             gc.collect()
 
@@ -207,6 +207,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
 
 def balance_classes(X, y, min_samples=20, target_classes=None):
     """
