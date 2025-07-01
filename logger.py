@@ -195,20 +195,16 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
         df = df[df["status"].isin(["success", "fail"])]
 
-        # ✅ predicted_class 컬럼 없으면 -1로 생성 후 경고
         if "predicted_class" not in df.columns:
             print("[경고] predicted_class 컬럼 없음 → -1로 생성 후 처리")
             df["predicted_class"] = -1
 
-        # ✅ label 컬럼 없으면 predicted_class로 대체
         if "label" not in df.columns:
             df["label"] = df["predicted_class"]
 
-        # ✅ strategy 컬럼 누락 시 '알수없음' 기본 대입
         if "strategy" not in df.columns:
             df["strategy"] = "알수없음"
 
-        # ✅ NaN 제거 및 타입 보정
         df = df[df["predicted_class"].notna()]
         df["predicted_class"] = pd.to_numeric(df["predicted_class"], errors="coerce").fillna(-1).astype(int)
         df["label"] = pd.to_numeric(df["label"], errors="coerce").fillna(-1).astype(int)
@@ -232,11 +228,21 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
                     "success_rate": round(rate, 4)
                 })
 
+        # ✅ Fallback: fine-tune 대상이 없으면 최근 성공/실패 상관없이 샘플링해서 반환
+        if not fine_tune_targets:
+            print("[INFO] fine-tune 대상이 없어 fallback 실행")
+            fallback = df[["strategy", "predicted_class"]].drop_duplicates().head(min_samples)
+            fallback = fallback.rename(columns={"predicted_class": "class"})
+            fallback["samples"] = min_samples
+            fallback["success_rate"] = 0.5
+            return fallback.sort_values(by=["strategy", "class"])
+
         return pd.DataFrame(fine_tune_targets).sort_values(by=["strategy", "class"])
 
     except Exception as e:
         print(f"[오류] fine-tune 대상 분석 실패 → {e}")
         return pd.DataFrame([])
+
 
 
 def get_feature_hash_from_tensor(tensor):
