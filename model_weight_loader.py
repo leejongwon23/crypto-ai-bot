@@ -20,6 +20,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
                 meta = json.load(f)
 
             if input_size is not None and meta.get("input_size") != input_size:
+                print(f"[⚠️ input_size 불일치] {meta.get('input_size')} vs {input_size}")
                 continue
 
             pt_path = meta_path.replace(".meta.json", ".pt")
@@ -28,8 +29,8 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
 
             eval_files = sorted(glob.glob("/persistent/logs/evaluation_*.csv"))
             if not eval_files:
-                # ✅ 평가 기록 없으면 → weight=1.0 으로 반환 (최초 예측 허용)
-                return 1.0
+                print("[INFO] 평가 파일 없음 → weight=0.1")
+                return 0.1  # ✅ cold-start 최소 weight
 
             df_list = []
             for file in eval_files:
@@ -37,22 +38,25 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
                 df_list.append(df)
 
             if not df_list:
-                return 1.0  # ✅ 평가 데이터 없으면 weight=1.0
+                return 0.1
 
             df = pd.concat(df_list, ignore_index=True)
             df = df[(df["model"] == model_type) & (df["strategy"] == strategy) &
                     (df["symbol"] == meta.get("symbol")) & (df["status"].isin(["success", "fail"]))]
 
             if len(df) < min_samples:
-                return 1.0  # ✅ 샘플 부족해도 weight=1.0
+                print("[INFO] 평가 샘플 부족 → weight=0.2")
+                return 0.2
 
             success_rate = len(df[df["status"] == "success"]) / len(df)
-            if success_rate >= 0.65:
+            if success_rate >= 0.7:
                 return 1.0
-            elif success_rate < 0.4:
+            elif success_rate < 0.3:
                 return 0.0
             else:
-                return round((success_rate - 0.4) / (0.65 - 0.4), 4)
+                w = round((success_rate - 0.3) / (0.7 - 0.3), 4)
+                print(f"[INFO] success_rate={success_rate:.4f}, weight={w}")
+                return w
 
         except Exception as e:
             print(f"[get_model_weight 예외] {e}")
@@ -68,31 +72,6 @@ def model_exists(symbol, strategy):
     except Exception as e:
         print(f"[오류] 모델 존재 확인 실패: {e}")
     return False
-
-def count_models_per_strategy():
-    counts = {"단기": 0, "중기": 0, "장기": 0}
-    try:
-        for file in os.listdir(MODEL_DIR):
-            if not file.endswith(".pt"):
-                continue
-            parts = file.split("_")
-            if len(parts) >= 3:
-                strategy = parts[1]
-                if strategy in counts:
-                    counts[strategy] += 1
-    except Exception as e:
-        print(f"[오류] 모델 수 계산 실패: {e}")
-    return counts
-
-def model_exists(symbol, strategy):
-    try:
-        for file in os.listdir(MODEL_DIR):
-            if file.startswith(f"{symbol}_{strategy}_") and file.endswith(".pt"):
-                return True
-    except Exception as e:
-        print(f"[오류] 모델 존재 확인 실패: {e}")
-    return False
-
 
 def count_models_per_strategy():
     counts = {"단기": 0, "중기": 0, "장기": 0}
