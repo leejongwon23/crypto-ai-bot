@@ -49,7 +49,6 @@ def get_btc_dominance():
 
 import numpy as np
 
-
 def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
     import pandas as pd
@@ -62,7 +61,7 @@ def create_dataset(features, window=20, strategy="단기"):
         return np.array([]), np.array([-1])
 
     try:
-        columns = [c for c in features[0].keys() if c not in ["timestamp", "strategy"]]
+        columns = [c for c in features[0].keys() if c != "timestamp"]
     except Exception as e:
         print(f"[오류] features[0] 키 확인 실패 → {e}")
         return np.array([]), np.array([-1])
@@ -77,16 +76,12 @@ def create_dataset(features, window=20, strategy="단기"):
     df = df.dropna(subset=["timestamp", "close", "high"]).sort_values("timestamp").reset_index(drop=True)
 
     scaler = MinMaxScaler()
-    # ✅ strategy 컬럼 제외 후 scaling
-    scaled = scaler.fit_transform(df.drop(columns=["timestamp", "strategy"]))
-    df_scaled = pd.DataFrame(scaled, columns=columns)
+    scaled = scaler.fit_transform(df.drop(columns=["timestamp"]))
+    df_scaled = pd.DataFrame(scaled, columns=[c for c in df.columns if c != "timestamp"])
     df_scaled["timestamp"] = df["timestamp"].values
-    # ✅ strategy 컬럼 유지
-    df_scaled["strategy"] = df["strategy"].values
 
     features = df_scaled.to_dict(orient="records")
 
-    # ✅ 21개 class_ranges 정의
     class_ranges = [
         (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
         (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
@@ -120,14 +115,18 @@ def create_dataset(features, window=20, strategy="단기"):
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
             gain = (max_future_price - entry_price) / (entry_price + 1e-6)
 
-            if i % 50 == 0:
-                print(f"[gain debug] i={i}, gain={gain:.4f}")
+            # ✅ 수정: gain 값 NaN 방지
+            if pd.isnull(gain) or not np.isfinite(gain):
+                gain = 0.0
 
-            cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), -1)
-            if cls == -1:
-                cls = 0 if gain < class_ranges[0][0] else len(class_ranges) - 1
+            # ✅ 수정: 클래스 매핑 안정화
+            cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), None)
+            if cls is None:
+                if gain < class_ranges[0][0]:
+                    cls = 0
+                else:
+                    cls = len(class_ranges) - 1
 
-            # ✅ strategy 컬럼 제외하고 sample 생성
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
             if any(len(row) != len(columns) for row in sample):
                 continue
@@ -142,7 +141,6 @@ def create_dataset(features, window=20, strategy="단기"):
     if not y:
         print("[⚠️ 경고] 생성된 라벨 없음")
         y = [-1]
-
     else:
         labels, counts = np.unique(y, return_counts=True)
         print(f"[📊 클래스 분포] → {dict(zip(labels, counts))}")
