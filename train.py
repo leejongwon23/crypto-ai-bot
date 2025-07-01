@@ -83,7 +83,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     import datetime, pytz
     from collections import Counter
     from model.base_model import get_model
-    from feature_importance import compute_feature_importance, save_feature_importance, drop_low_importance_features
+    from feature_importance import compute_feature_importance, save_feature_importance
     from failure_db import load_existing_failure_hashes
     from focal_loss import FocalLoss
     from sklearn.metrics import accuracy_score, f1_score
@@ -129,7 +129,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print("⛔ 중단: 학습 데이터 생성 실패")
             return
 
-        # ✅ 라벨 필터링
         y_raw = np.array(y_raw)
         X_raw = np.array(X_raw, dtype=np.float32)
         mask = (y_raw >= 0) & (y_raw < NUM_CLASSES)
@@ -151,6 +150,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
         class_counts = Counter(y_train)
 
+        # ✅ 실패 집중 학습 샘플 로드
+        wrong_data = load_training_prediction_data(symbol, strategy, input_size, window)
+        wrong_ds = TensorDataset(torch.tensor([x for x, _ in wrong_data], dtype=torch.float32),
+                                 torch.tensor([y for _, y in wrong_data], dtype=torch.long)) if wrong_data else None
+
         # ✅ 모델 학습 루프
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size=input_size, output_size=NUM_CLASSES).to(DEVICE).train()
@@ -161,6 +165,17 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                      torch.tensor(y_train, dtype=torch.long))
             train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
 
+            # 🔁 실패 집중 학습 (먼저 수행)
+            if wrong_ds:
+                wrong_loader = DataLoader(wrong_ds, batch_size=16, shuffle=True, num_workers=2)
+                for _ in range(3):
+                    for xb, yb in wrong_loader:
+                        xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                        logits = model(xb)
+                        loss = lossfn(logits, yb)
+                        if torch.isfinite(loss):
+                            optimizer.zero_grad(); loss.backward(); optimizer.step()
+
             for _ in range(max_epochs):
                 model.train()
                 for xb, yb in train_loader:
@@ -170,34 +185,31 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     if torch.isfinite(loss):
                         optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            # ✅ feature importance 계산 및 중요도 기반 feature 제거
-            model.eval()
-            with torch.no_grad():
-                xb_val = torch.tensor(X_val, dtype=torch.float32).to(DEVICE)
-                yb_val = torch.tensor(y_val, dtype=torch.long).to(DEVICE)
-                imps = compute_feature_importance(model, xb_val, yb_val, list(df_feat.drop(columns=["timestamp"]).columns))
-                save_feature_importance(imps, symbol, strategy, model_type)
-
-            df_feat_reduced = drop_low_importance_features(df_feat, imps, threshold=0.05)
-            features_reduced = df_feat_reduced.to_dict(orient="records")
-            X_raw_reduced, y_raw_reduced = create_dataset(features_reduced, window=window, strategy=strategy)
-
             # ✅ 검증
             model.eval()
             with torch.no_grad():
-                logits = model(xb_val)
+                xb = torch.tensor(X_val, dtype=torch.float32).to(DEVICE)
+                yb = torch.tensor(y_val, dtype=torch.long).to(DEVICE)
+                logits = model(xb)
                 preds = torch.argmax(logits, dim=1).cpu().numpy()
                 acc = accuracy_score(y_val, preds)
                 f1 = f1_score(y_val, preds, average="macro")
-                val_loss = lossfn(logits, yb_val).item()
+                val_loss = lossfn(logits, yb).item()
                 print(f"[검증 성능] {model_type} acc={acc:.4f}, f1={f1:.4f}, loss={val_loss:.4f}")
 
+            # ✅ 메타 저장 및 feature importance 저장
             log_training_result(symbol, strategy, model_type, acc, f1, val_loss)
             torch.save(model.state_dict(), f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt")
             save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss,
                                 input_size=input_size, class_counts=class_counts)
 
-            del model, xb_val, yb_val, logits
+            try:
+                imps = compute_feature_importance(model, xb, yb, list(df_feat.drop(columns=["timestamp"]).columns))
+                save_feature_importance(imps, symbol, strategy, model_type)
+            except:
+                pass
+
+            del model, xb, yb, logits
             torch.cuda.empty_cache()
             gc.collect()
 
