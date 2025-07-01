@@ -7,9 +7,6 @@ MODEL_DIR = "/persistent/models"
 EVAL_RESULT = "/persistent/evaluation_result.csv"
 
 def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_size=None):
-    import os, glob, json, pandas as pd
-    MODEL_DIR = "/persistent/models"
-
     pattern = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json") if symbol != "ALL" \
               else os.path.join(MODEL_DIR, f"*_{strategy}_{model_type}.meta.json")
     meta_files = glob.glob(pattern)
@@ -20,17 +17,18 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
                 meta = json.load(f)
 
             if input_size is not None and meta.get("input_size") != input_size:
-                print(f"[⚠️ input_size 불일치] {meta.get('input_size')} vs {input_size}")
-                continue
+                print(f"[⚠️ input_size 불일치] {meta.get('input_size')} vs {input_size} → weight=0")
+                return 0.0
 
             pt_path = meta_path.replace(".meta.json", ".pt")
             if not os.path.exists(pt_path):
-                continue
+                print(f"[⚠️ 모델 파일 없음] {pt_path} → weight=0")
+                return 0.0
 
             eval_files = sorted(glob.glob("/persistent/logs/evaluation_*.csv"))
             if not eval_files:
-                print("[INFO] 평가 파일 없음 → weight=0.1")
-                return 0.1  # ✅ cold-start 최소 weight
+                print("[INFO] 평가 파일 없음 → cold-start weight=0.2")
+                return 0.2
 
             df_list = []
             for file in eval_files:
@@ -38,7 +36,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
                 df_list.append(df)
 
             if not df_list:
-                return 0.1
+                return 0.2
 
             df = pd.concat(df_list, ignore_index=True)
             df = df[(df["model"] == model_type) & (df["strategy"] == strategy) &
@@ -54,7 +52,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
             elif success_rate < 0.3:
                 return 0.0
             else:
-                w = round((success_rate - 0.3) / (0.7 - 0.3), 4)
+                w = max(0.0, round((success_rate - 0.3) / (0.7 - 0.3), 4))
                 print(f"[INFO] success_rate={success_rate:.4f}, weight={w}")
                 return w
 
