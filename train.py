@@ -21,7 +21,12 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 STRATEGY_WRONG_REP = {"단기": 4, "중기": 6, "장기": 8}
 
+
 def get_feature_hash_from_tensor(x):
+    """
+    ✅ [설명] 마지막 timestep feature를 반올림 후 sha1 해시값으로 변환
+    - 중복된 feature 학습을 방지하기 위해 사용
+    """
     if x.ndim != 2 or x.shape[0] == 0:
         return "invalid"
     last = x[-1].tolist()
@@ -29,6 +34,10 @@ def get_feature_hash_from_tensor(x):
     return hashlib.sha1(",".join(map(str, rounded)).encode()).hexdigest()
 
 def get_frequent_failures(min_count=5):
+    """
+    ✅ [설명] failure_patterns.db에서 동일 실패가 min_count 이상이면 반환
+    - 실패 집중 학습(targeted fine-tuning)에 사용
+    """
     counter = Counter()
     try:
         with sqlite3.connect("/persistent/logs/failure_patterns.db") as conn:
@@ -40,11 +49,15 @@ def get_frequent_failures(min_count=5):
     return {h for h, cnt in counter.items() if cnt >= min_count}
 
 def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=None, class_counts=None):
+    """
+    ✅ [설명] 모델 메타정보를 json으로 저장
+    - acc, f1, loss, input_size, 클래스분포 등 기록
+    """
     meta = {
         "symbol": symbol,
         "strategy": strategy,
         "model": model_type or "unknown",
-        "input_size": int(input_size) if input_size else 11,  # ✅ None이면 11로 기본 저장
+        "input_size": int(input_size) if input_size else 11,
         "accuracy": float(round(acc, 4)),
         "f1_score": float(round(f1, 4)),
         "loss": float(round(loss, 6)),
@@ -62,10 +75,11 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
     except Exception as e:
         print(f"[ERROR] meta 저장 실패: {e}")
 
-from logger import get_fine_tune_targets  # 🔁 반드시 포함
-
-
 def train_one_model(symbol, strategy, max_epochs=20):
+    """
+    ✅ [설명] YOPO의 핵심 학습 함수
+    - feature 생성 → dataset 생성 → 모델 학습 → 메타저장까지 수행
+    """
     import os, gc
     import numpy as np
     import pandas as pd
@@ -104,8 +118,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             df_feat["timestamp"] = df_feat.get("datetime", pd.Timestamp.now())
         df_feat = df_feat.dropna().reset_index(drop=True)
         features = df_feat.to_dict(orient="records")
-
-        window = find_best_window(symbol, strategy)
+                window = find_best_window(symbol, strategy)
         if not isinstance(window, int) or window <= 0:
             print(f"⛔ 중단: find_best_window 실패 → {window}")
             return
@@ -119,6 +132,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print("⛔ 중단: 학습 데이터 생성 실패")
             return
 
+        # ✅ 라벨 필터링
         y_raw = np.array(y_raw)
         X_raw = np.array(X_raw, dtype=np.float32)
         mask = (y_raw >= 0) & (y_raw < NUM_CLASSES)
@@ -135,55 +149,21 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
         input_size = X_raw.shape[2]
         val_len = max(5, int(len(X_raw) * 0.2))
-        X_bal, y_bal = balance_classes(X_raw[:-val_len], y_raw[:-val_len], min_samples=20, target_classes=range(NUM_CLASSES))
-        X_train, y_train = X_bal, y_bal
+        X_train, y_train = X_raw[:-val_len], y_raw[:-val_len]
         X_val, y_val = X_raw[-val_len:], y_raw[-val_len:]
 
         class_counts = Counter(y_train)
 
-        failure_hashes = load_existing_failure_hashes()
-        wrong_data = load_training_prediction_data(symbol, strategy, input_size, window)
-        wrong_filtered, used_hashes = [], set()
-        for xb, yb in wrong_data:
-            if not isinstance(xb, np.ndarray) or xb.shape != (window, input_size):
-                continue
-            if not isinstance(yb, int) or not (0 <= yb < NUM_CLASSES):
-                continue
-            feature_hash = get_feature_hash_from_tensor(torch.tensor(xb))
-            if feature_hash in used_hashes or feature_hash in failure_hashes:
-                continue
-            used_hashes.add(feature_hash)
-            wrong_filtered.append((xb, yb))
-
+        # ✅ 모델 학습 루프
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size=input_size, output_size=NUM_CLASSES).to(DEVICE).train()
-            model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt"
-            if os.path.exists(model_path):
-                try:
-                    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
-                    print(f"🔁 이어 학습: {model_path}")
-                except:
-                    print(f"[로드 실패] {model_path} → 새로 학습")
-
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             lossfn = FocalLoss(gamma=2)
-
-            if wrong_filtered:
-                ds = TensorDataset(torch.tensor([x for x, _ in wrong_filtered], dtype=torch.float32),
-                                   torch.tensor([y for _, y in wrong_filtered], dtype=torch.long))
-                loader = DataLoader(ds, batch_size=16, shuffle=True, num_workers=2)
-                for _ in range(4):
-                    for xb, yb in loader:
-                        xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                        model.train()
-                        logits = model(xb)
-                        loss = lossfn(logits, yb)
-                        if torch.isfinite(loss):
-                            optimizer.zero_grad(); loss.backward(); optimizer.step()
 
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
             train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
+
             for _ in range(max_epochs):
                 model.train()
                 for xb, yb in train_loader:
@@ -193,36 +173,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     if torch.isfinite(loss):
                         optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            from logger import get_fine_tune_targets
-            fine_tune_targets = get_fine_tune_targets()
-            if fine_tune_targets.empty:
-                print("[INFO] fine-tune 대상이 없어 fallback으로 기존 학습 데이터 일부 사용")
-                fine_tune_targets = pd.DataFrame({
-                    "strategy": [strategy] * 3,
-                    "class": np.random.choice(y_train, size=3),
-                    "samples": [10] * 3,
-                    "success_rate": [0.5] * 3
-                })
-
-            if not fine_tune_targets.empty:
-                targets = fine_tune_targets[fine_tune_targets["strategy"] == strategy]["class"].tolist()
-                fine_tune_ds = [(x, y_val) for x, y_val in zip(X_train, y_train) if y_val in targets]
-
-                if fine_tune_ds:
-                    print(f"🔁 Fine-Tune 대상 {len(fine_tune_ds)}개 클래스 학습 시작")
-                    ds = TensorDataset(torch.tensor([x for x, _ in fine_tune_ds], dtype=torch.float32),
-                                       torch.tensor([y for _, y in fine_tune_ds], dtype=torch.long))
-                    loader = DataLoader(ds, batch_size=16, shuffle=True, num_workers=2)
-                    for _ in range(3):
-                        for xb, yb in loader:
-                            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                            logits = model(xb)
-                            loss = lossfn(logits, yb)
-                            if torch.isfinite(loss):
-                                optimizer.zero_grad(); loss.backward(); optimizer.step()
-                else:
-                    print("[INFO] fine-tune 대상 클래스가 학습 데이터에 없음 → fallback fine-tune skipped")
-
+            # ✅ 검증
             model.eval()
             with torch.no_grad():
                 xb = torch.tensor(X_val, dtype=torch.float32).to(DEVICE)
@@ -232,11 +183,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 acc = accuracy_score(y_val, preds)
                 f1 = f1_score(y_val, preds, average="macro")
                 val_loss = lossfn(logits, yb).item()
-                print(f"[검증 성능] acc={acc:.4f}, f1={f1:.4f}, loss={val_loss:.4f}")
+                print(f"[검증 성능] {model_type} acc={acc:.4f}, f1={f1:.4f}, loss={val_loss:.4f}")
 
+            # ✅ 메타 저장 및 feature importance 저장
             log_training_result(symbol, strategy, model_type, acc, f1, val_loss)
-
-            torch.save(model.state_dict(), model_path)
+            torch.save(model.state_dict(), f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt")
             save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss,
                                 input_size=input_size, class_counts=class_counts)
 
@@ -257,17 +208,57 @@ def train_one_model(symbol, strategy, max_epochs=20):
         except:
             print("⚠️ 로그 기록 실패")
 
+def balance_classes(X, y, min_samples=20, target_classes=None):
+    """
+    ✅ [설명] 클래스 불균형을 보완하기 위해 각 클래스별 최소 샘플수를 맞춤
+    - 없는 클래스는 noise augmentation 으로 1개 생성
+    """
+    from collections import Counter
+    import random
+    import numpy as np
 
+    if target_classes is None:
+        target_classes = range(NUM_CLASSES)
 
-training_in_progress = {
-    "단기": False,
-    "중기": False,
-    "장기": False
-}
-import time
+    class_counts = Counter(y)
+    max_count = max(class_counts.values()) if class_counts else 0
+    X_balanced, y_balanced = list(X), list(y)
+    original_counts = dict(class_counts)
+
+    for cls in target_classes:
+        count = class_counts.get(cls, 0)
+
+        if count == 0:
+            if len(X) > 0:
+                sample_shape = X[0].shape
+                noise_sample = np.random.normal(loc=0.0, scale=1.0, size=sample_shape).astype(np.float32)
+                X_balanced.append(noise_sample)
+                y_balanced.append(cls)
+                class_counts[cls] = 1
+                print(f"⚠️ zero sample 클래스 {cls}: random noise 샘플 1개 생성")
+
+        existing = [(x, y_val) for x, y_val in zip(X, y) if y_val == cls]
+        while class_counts[cls] < max(min_samples, int(max_count * 0.8)) and existing:
+            x_dup, y_dup = random.choice(existing)
+            X_balanced.append(x_dup)
+            y_balanced.append(y_dup)
+            class_counts[cls] += 1
+
+    print("📊 클래스 복제 현황:")
+    for cls in target_classes:
+        before = original_counts.get(cls, 0)
+        after = class_counts.get(cls, 0)
+        if after > before:
+            print(f"  - 클래스 {cls}: {before}개 → {after}개 (복제됨)")
+
+    return np.array(X_balanced), np.array(y_balanced)
 
 def train_all_models():
-    from telegram_bot import send_message  # ✅ 메시지 전송 함수 가져오기
+    """
+    ✅ [설명] SYMBOLS 전체에 대해 단기, 중기, 장기 학습 수행
+    - Telegram 완료 메시지 전송 포함
+    """
+    from telegram_bot import send_message
     strategies = ["단기", "중기", "장기"]
 
     for strategy in strategies:
@@ -291,24 +282,26 @@ def train_all_models():
             training_in_progress[strategy] = False
             print(f"✅ 전략 학습 완료: {strategy}\n")
 
-        # ✅ 각 전략 학습 후 prediction_log.csv 상위 20줄 자동 출력
+        # ✅ 학습 후 prediction_log.csv 출력
         try:
-            import pandas as pd
             df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
             print("[✅ prediction_log.csv 상위 20줄 출력]")
             print(df.head(20))
         except Exception as e:
             print(f"[오류] prediction_log.csv 로드 실패 → {e}")
 
-        time.sleep(5)  # ✅ 다음 전략 학습 전 5초 대기 → 병렬 진입 방지
+        time.sleep(5)  # 병렬 방지
 
-    # ✅ 전체 전략 학습이 모두 끝난 후 텔레그램 메시지 전송
     send_message("✅ 전체 학습이 완료되었습니다. 예측을 실행해주세요.")
 
 def train_models(symbol_list):
+    """
+    ✅ [설명] 특정 symbol_list에 대해 단기, 중기, 장기 학습 수행
+    - meta 보정 후 예측까지 자동 실행
+    """
     from telegram_bot import send_message
     from predict_test import main as run_prediction
-    import maintenance_fix_meta  # ✅ meta 보정 모듈 import
+    import maintenance_fix_meta
 
     strategies = ["단기", "중기", "장기"]
 
@@ -332,91 +325,50 @@ def train_models(symbol_list):
             training_in_progress[strategy] = False
             print(f"✅ 전략 학습 완료: {strategy}\n")
 
-        time.sleep(5)  # ✅ 다음 전략 학습 전 5초 대기
+        time.sleep(5)  # 병렬 방지
 
-        # ✅ 각 전략 학습 후 meta 보정 실행
         try:
             maintenance_fix_meta.fix_all_meta_json()
         except Exception as e:
             print(f"[⚠️ meta 보정 실패] {e}")
 
-        # ✅ meta 보정 후 예측 실행
         try:
-            run_prediction(strategy, symbols=symbol_list)  # ✅ 학습 완료된 심볼만 예측
+            run_prediction(strategy, symbols=symbol_list)
         except Exception as e:
             print(f"❌ 예측 실패: {strategy} → {e}")
 
     send_message("✅ 학습 및 예측 루틴 완료 (해당 심볼 그룹)")
 
-
 def train_model_loop(strategy):
+    """
+    ✅ [설명] 특정 strategy 학습을 무한 루프로 실행
+    - training_in_progress 상태 관리 포함
+    """
     if training_in_progress.get(strategy, False):
         print(f"⚠️ 이미 실행 중: {strategy} 학습 중복 방지")
         return
 
     training_in_progress[strategy] = True
-    print(f"📌 상태 진입 → {training_in_progress}")  # ✅ 상태 확인용
+    print(f"📌 상태 진입 → {training_in_progress}")
 
     try:
         for symbol in SYMBOLS:
             try:
                 print(f"▶ 학습 시작: {symbol}-{strategy}")
-                train_one_model(symbol, strategy)  # ✅ 내부에서 이어 학습 구조 반영됨
+                train_one_model(symbol, strategy)
             except Exception as e:
                 print(f"[학습 실패] {symbol}-{strategy} → {e}")
     finally:
         training_in_progress[strategy] = False
-        print(f"📌 상태 종료 → {training_in_progress}")  # ✅ 상태 해제 확인용
-
-
-def balance_classes(X, y, min_samples=20, target_classes=None):
-    from collections import Counter
-    import random
-    import numpy as np
-
-    if target_classes is None:
-        target_classes = range(NUM_CLASSES)
-
-    class_counts = Counter(y)
-    max_count = max(class_counts.values()) if class_counts else 0
-    X_balanced, y_balanced = list(X), list(y)
-    original_counts = dict(class_counts)  # 🔍 복제 전 기록
-
-    for cls in target_classes:
-        count = class_counts.get(cls, 0)
-
-        # ✅ zero sample 클래스에도 최소 샘플 생성 (random noise augmentation)
-        if count == 0:
-            if len(X) > 0:
-                sample_shape = X[0].shape
-                noise_sample = np.random.normal(loc=0.0, scale=1.0, size=sample_shape).astype(np.float32)
-                X_balanced.append(noise_sample)
-                y_balanced.append(cls)
-                class_counts[cls] = 1
-                print(f"⚠️ zero sample 클래스 {cls}: random noise 샘플 1개 생성")
-
-        existing = [(x, y_val) for x, y_val in zip(X, y) if y_val == cls]
-        while class_counts[cls] < max(min_samples, int(max_count * 0.8)) and existing:
-            x_dup, y_dup = random.choice(existing)
-            X_balanced.append(x_dup)
-            y_balanced.append(y_dup)
-            class_counts[cls] += 1
-
-    # ✅ 복제 로그 출력
-    print("📊 클래스 복제 현황:")
-    for cls in target_classes:
-        before = original_counts.get(cls, 0)
-        after = class_counts.get(cls, 0)
-        if after > before:
-            print(f"  - 클래스 {cls}: {before}개 → {after}개 (복제됨)")
-
-    return np.array(X_balanced), np.array(y_balanced)
-
-# ✅ train.py 맨 아래에 반드시 포함해야 함
+        print(f"📌 상태 종료 → {training_in_progress}")
 
 def train_symbol_group_loop(delay_minutes=5):
+    """
+    ✅ [설명] SYMBOL_GROUPS 단위로 전체 그룹 학습 루프 실행
+    - 각 그룹 학습 후 meta 보정, 예측 실행 포함
+    """
     import time
-    import maintenance_fix_meta  # ✅ meta 보정 import
+    import maintenance_fix_meta
     from data.utils import SYMBOL_GROUPS
     group_count = len(SYMBOL_GROUPS)
     print(f"[자동 루프] 전체 {group_count}개 그룹 학습 루프 시작됨")
@@ -425,18 +377,15 @@ def train_symbol_group_loop(delay_minutes=5):
         for idx, group in enumerate(SYMBOL_GROUPS):
             try:
                 print(f"\n🚀 [그룹 {idx}] 학습 시작 → {group}")
-                
-                # ✅ 1. 그룹 학습 먼저 실행
+
                 train_models(group)
 
-                # ✅ 2. meta 보정 (학습 후 예측 전)
                 try:
                     maintenance_fix_meta.fix_all_meta_json()
                     print(f"✅ meta 보정 완료 (그룹 {idx})")
                 except Exception as e:
                     print(f"[⚠️ meta 보정 실패] {e}")
 
-                # ✅ 3. 예측 실행
                 print(f"✅ [그룹 {idx}] 학습 + 보정 완료 → 예측 시작")
                 for symbol in group:
                     for strategy in ["단기", "중기", "장기"]:
@@ -452,3 +401,5 @@ def train_symbol_group_loop(delay_minutes=5):
             except Exception as e:
                 print(f"❌ 그룹 {idx} 루프 중 오류 발생: {e}")
                 continue
+
+
