@@ -1,8 +1,4 @@
-import os
-import json
-import torch
-import numpy as np
-import pandas as pd
+import os, json, torch, numpy as np, pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import accuracy_score
 from data.utils import get_kline_by_strategy, compute_features, create_dataset
@@ -21,13 +17,13 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             print(f"[경고] {symbol}-{strategy} → feature 부족 또는 NaN 포함으로 최소 window fallback")
             return min(window_list)
 
-        # ✅ 'strategy' 컬럼 제거 후 스케일링
         features_scaled = MinMaxScaler().fit_transform(df_feat.drop(columns=["timestamp", "strategy"]))
         feature_dicts = []
         for i, row in enumerate(features_scaled):
             d = dict(zip(df_feat.columns.drop(["timestamp", "strategy"]), row))
             d["timestamp"] = df_feat.iloc[i]["timestamp"]
-            d["strategy"] = df_feat.iloc[i]["strategy"]
+            # ✅ strategy 컬럼 삽입 제거
+            # d["strategy"] = df_feat.iloc[i]["strategy"]
             feature_dicts.append(d)
 
         best_acc = -1
@@ -36,8 +32,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
 
         for window in window_list:
             try:
-                # 🔧 strategy 인자를 str로 전달하도록 수정
-                X, y = create_dataset(feature_dicts, window, strategy=str(strategy))
+                X, y = create_dataset(feature_dicts, window, strategy)
                 if X is None or y is None or len(X) == 0 or len(X) != len(y):
                     continue
 
@@ -81,7 +76,6 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 print(f"[오류] window={window} 평가 실패 → {e}")
                 continue
 
-        # ✅ acc < 0.1이면 fallback 강제 적용
         if best_acc < 0.1:
             print(f"[경고] {symbol}-{strategy}: best_acc={best_acc:.4f} < 0.1 → fallback 최소 window 적용")
             best_window = min(window_list)
