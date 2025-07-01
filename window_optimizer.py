@@ -6,6 +6,13 @@ from model.base_model import get_model
 from config import NUM_CLASSES
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
+    import os, json, torch, numpy as np, pandas as pd
+    from sklearn.preprocessing import MinMaxScaler
+    from sklearn.metrics import accuracy_score
+    from data.utils import get_kline_by_strategy, compute_features, create_dataset
+    from model.base_model import get_model
+    from config import NUM_CLASSES
+
     try:
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 20:
@@ -17,13 +24,19 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             print(f"[경고] {symbol}-{strategy} → feature 부족 또는 NaN 포함으로 최소 window fallback")
             return min(window_list)
 
-        # ✅ 'strategy' 컬럼 제거 후 스케일링
-        features_scaled = MinMaxScaler().fit_transform(df_feat.drop(columns=["timestamp", "strategy"]))
+        # ✅ 수정: strategy 컬럼 drop 오류 방지
+        drop_cols = ["timestamp"]
+        if "strategy" in df_feat.columns:
+            drop_cols.append("strategy")
+
+        features_scaled = MinMaxScaler().fit_transform(df_feat.drop(columns=drop_cols))
         feature_dicts = []
         for i, row in enumerate(features_scaled):
-            d = dict(zip(df_feat.columns.drop(["timestamp", "strategy"]), row))
+            cols = df_feat.columns.drop(drop_cols)
+            d = dict(zip(cols, row))
             d["timestamp"] = df_feat.iloc[i]["timestamp"]
-            # ✅ strategy 컬럼 제거 (float 변환 오류 방지)
+            if "strategy" in df_feat.columns:
+                d["strategy"] = df_feat.iloc[i]["strategy"]
             feature_dicts.append(d)
 
         best_acc = -1
@@ -76,7 +89,6 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 print(f"[오류] window={window} 평가 실패 → {e}")
                 continue
 
-        # ✅ acc < 0.1이면 fallback 강제 적용
         if best_acc < 0.1:
             print(f"[경고] {symbol}-{strategy}: best_acc={best_acc:.4f} < 0.1 → fallback 최소 window 적용")
             best_window = min(window_list)
