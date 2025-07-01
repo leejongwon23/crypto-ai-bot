@@ -84,6 +84,25 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             ])
             if model_count == 0:
                 log_audit(symbol, strategy, None, "모델 없음")
+                
+                # ✅ log_prediction 실패 기록 추가
+                log_prediction(
+                    symbol=symbol,
+                    strategy=strategy,
+                    direction="예측실패",
+                    entry_price=0,
+                    target_price=0,
+                    timestamp=now_kst().isoformat(),
+                    model="unknown",
+                    success=False,
+                    reason="모델 없음",
+                    rate=0.0,
+                    return_value=0.0,
+                    volatility=False,
+                    source=source,
+                    predicted_class=-1,
+                    label=-1
+                )
                 continue
 
             pred_results = predict(symbol, strategy, source=source)
@@ -190,6 +209,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
         evaluate_predictions(get_kline_by_strategy)
     except Exception as e:
         print(f"[ERROR] 평가 실패: {e}")
+
 
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
