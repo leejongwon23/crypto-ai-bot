@@ -59,18 +59,18 @@ def create_dataset(features, window=20, strategy="단기"):
 
     if not features or len(features) <= window:
         print(f"[❌ 스킵] features 부족 → len={len(features) if features else 0}")
-        return np.array([]), np.array([{"label": -1, "strategy": strategy}])  # ✅ label 오류 방지 + strategy 포함
+        return np.array([]), np.array([-1])
 
     try:
         columns = [c for c in features[0].keys() if c != "timestamp"]
     except Exception as e:
         print(f"[오류] features[0] 키 확인 실패 → {e}")
-        return np.array([]), np.array([{"label": -1, "strategy": strategy}])
+        return np.array([]), np.array([-1])
 
     required_keys = {"timestamp", "close", "high"}
     if not all(all(k in f for k in required_keys) for f in features):
         print("[❌ 스킵] 필수 키 누락된 feature 존재")
-        return np.array([]), np.array([{"label": -1, "strategy": strategy}])
+        return np.array([]), np.array([-1])
 
     df = pd.DataFrame(features)
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
@@ -83,12 +83,14 @@ def create_dataset(features, window=20, strategy="단기"):
 
     features = df_scaled.to_dict(orient="records")
 
+    # ✅ 21개 class_ranges 정의 (class_to_expected_return와 1:1 일치)
     class_ranges = [
-        (-1.00, -0.30), (-0.30, -0.10), (-0.10, -0.05),
-        (-0.05, -0.01), (-0.01, 0.01), (0.01, 0.05),
-        (0.05, 0.10), (0.10, 0.20), (0.20, 0.40),
-        (0.40, 0.70), (0.70, 1.00), (1.00, 1.50),
-        (1.50, 2.00), (2.00, 5.00)
+        (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
+        (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
+        (-0.03, -0.01), (-0.01, 0.01),
+        ( 0.01, 0.03), ( 0.03, 0.05), ( 0.05, 0.07), ( 0.07, 0.10),
+        ( 0.10, 0.15), ( 0.15, 0.20), ( 0.20, 0.30), ( 0.30, 0.60),
+        ( 0.60, 1.00), ( 1.00, 2.00), ( 2.00, 5.00)
     ]
 
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
@@ -127,7 +129,7 @@ def create_dataset(features, window=20, strategy="단기"):
                 continue
 
             X.append(sample)
-            y.append({"label": cls, "strategy": strategy})  # ✅ label과 strategy 함께 저장
+            y.append(cls)
 
         except Exception as e:
             print(f"[예외 발생] ❌ {e} → i={i}")
@@ -135,14 +137,13 @@ def create_dataset(features, window=20, strategy="단기"):
 
     if not y:
         print("[⚠️ 경고] 생성된 라벨 없음")
-        y = [{"label": -1, "strategy": strategy}]
+        y = [-1]
 
     else:
-        labels, counts = np.unique([item["label"] for item in y], return_counts=True)
+        labels, counts = np.unique(y, return_counts=True)
         print(f"[📊 클래스 분포] → {dict(zip(labels, counts))}")
 
-    return np.array(X, dtype=np.float32), np.array(y)
-
+    return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
 
 
 def get_kline_by_strategy(symbol: str, strategy: str):
