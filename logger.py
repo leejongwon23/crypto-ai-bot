@@ -190,9 +190,11 @@ def get_recent_predicted_classes(strategy: str, recent_days: int = 3):
     except:
         return set()
 
+
 def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
     import pandas as pd
     from collections import defaultdict
+    import numpy as np
 
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
@@ -223,7 +225,7 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
         for (strategy, cls), counts in result.items():
             total = counts["success"] + counts["fail"]
             rate = counts["success"] / total if total > 0 else 0
-            # ✅ 실패 수가 많거나 성공률이 낮으면 우선 fine-tune
+            # ✅ 실패가 있거나 성공률이 낮으면 fine-tune
             if counts["fail"] >= 1 or rate < max_success_rate:
                 fine_tune_targets.append({
                     "strategy": strategy,
@@ -232,9 +234,9 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
                     "success_rate": round(rate, 4)
                 })
 
-        # ✅ fallback: 대상 없으면 최근 실패 샘플에서 우선 추출
+        # ✅ fallback: fine-tune 대상 없으면 최근 실패 + noise sample 추가
         if not fine_tune_targets:
-            print("[INFO] fine-tune 대상 없음 → fallback 최근 실패 샘플 사용")
+            print("[INFO] fine-tune 대상 없음 → fallback 최근 실패 + noise sample 사용")
             fail_df = df[df["status"] == "fail"]
             fallback_df = fail_df.sample(n=min_samples, replace=True) if len(fail_df) >= min_samples else fail_df
 
@@ -246,6 +248,17 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
                     "samples": 10,
                     "success_rate": 0.0
                 })
+
+            # ✅ noise sample 추가 보장
+            noise_needed = min_samples - len(fallback)
+            for i in range(noise_needed):
+                fallback.append({
+                    "strategy": "noise_aug",
+                    "class": np.random.randint(0, 21),
+                    "samples": 1,
+                    "success_rate": 0.0
+                })
+
             return pd.DataFrame(fallback).sort_values(by=["strategy", "class"])
 
         return pd.DataFrame(fine_tune_targets).sort_values(by=["strategy", "class"])
