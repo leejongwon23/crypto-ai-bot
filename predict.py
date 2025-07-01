@@ -122,6 +122,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from config import NUM_CLASSES
     from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
     from logger import get_available_models
+    from scipy.stats import entropy
 
     DEVICE = torch.device("cpu")
     MODEL_DIR = "/persistent/models"
@@ -150,7 +151,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         input_size = X.shape[2]
 
         models = get_available_models()
-        results = []
+        results, ensemble_probs, total_weight = [], None, 0.0
 
         for m in models:
             if m["symbol"] != symbol or m["strategy"] != strategy:
@@ -184,12 +185,21 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                 probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
 
+            # ✅ ensemble weighted sum
+            if ensemble_probs is None:
+                ensemble_probs = probs * weight
+            else:
+                ensemble_probs += probs * weight
+            total_weight += weight
+
             recent_freq = get_recent_class_frequencies(strategy=strategy)
             class_counts = meta.get("class_counts", {}) or {}
             adjusted_probs = adjust_probs_with_diversity(probs, recent_freq, class_counts)
 
             pred_class = int(adjusted_probs.argmax())
             expected_return = class_to_expected_return(pred_class)
+
+            conf_score = 1 - entropy(probs) / np.log(len(probs))  # ✅ confidence score (normalized entropy)
 
             log_prediction(
                 symbol=symbol,
@@ -199,14 +209,14 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 target_price=df["close"].iloc[-1] * (1 + expected_return),
                 model=mt,
                 success=True,
-                reason="예측 완료",
+                reason=f"예측 완료 | confidence={conf_score:.4f}",
                 rate=expected_return,
                 timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
                 return_value=expected_return,
                 volatility=True,
                 source=source,
                 predicted_class=pred_class,
-                label=pred_class  # ✅ label 필드 기록 강화
+                label=pred_class
             )
 
             feature_hash = get_feature_hash(X_input)
@@ -226,7 +236,26 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 "expected_return": expected_return,
                 "success": True,
                 "predicted_class": pred_class,
-                "label": pred_class  # ✅ result dict에도 포함
+                "label": pred_class,
+                "confidence": round(conf_score, 4)
+            })
+
+        # ✅ ensemble 최종 결과 추가
+        if ensemble_probs is not None and total_weight > 0:
+            ensemble_probs /= total_weight
+            ensemble_class = int(ensemble_probs.argmax())
+            ensemble_return = class_to_expected_return(ensemble_class)
+            conf_score = 1 - entropy(ensemble_probs) / np.log(len(ensemble_probs))
+            results.append({
+                "symbol": symbol,
+                "strategy": strategy,
+                "model": "ensemble",
+                "class": ensemble_class,
+                "expected_return": ensemble_return,
+                "success": True,
+                "predicted_class": ensemble_class,
+                "label": ensemble_class,
+                "confidence": round(conf_score, 4)
             })
 
         if not results:
@@ -237,7 +266,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
     except Exception as e:
         print(f"[predict 예외] {e}")
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
-
 
 
 # 📄 predict.py 내부에 추가
