@@ -83,7 +83,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     return result
 
 def predict(symbol, strategy, source="일반", model_type=None):
-    import os, json, torch, numpy as np, pandas as pd
+    import os, json, torch, numpy as np, pandas as pd, datetime, pytz, sys
     from sklearn.preprocessing import MinMaxScaler
     from data.utils import get_kline_by_strategy, compute_features
     from model.base_model import get_model
@@ -143,7 +143,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             if meta.get("input_size") != input_size:
                 continue
 
-            # ✅ input_size 전달
             weight = get_model_weight(mt, strategy, symbol, input_size=input_size)
             if weight <= 0.0:
                 continue
@@ -179,7 +178,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 volatility=True,
                 source=source,
                 predicted_class=pred_class,
-                label=pred_class  # ✅ label 명시적 전달
+                label=pred_class
             )
 
             feature_hash = get_feature_hash(X_input)
@@ -189,7 +188,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 "model": mt,
                 "class": pred_class,
                 "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
-            }, feature_hash, feature_vector=X_input, label=pred_class)  # ✅ label, feature_vector 전달
+            }, feature_hash, feature_vector=X_input, label=pred_class)
 
             results.append({
                 "symbol": symbol,
@@ -197,7 +196,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 "model": mt,
                 "class": pred_class,
                 "expected_return": expected_return,
-                "success": True
+                "success": True,
+                "predicted_class": pred_class
             })
 
         if not results:
@@ -209,11 +209,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         print(f"[predict 예외] {e}")
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
 
-        return results
-
-    except Exception as e:
-        print(f"[predict 예외] {e}")
-        return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
