@@ -64,7 +64,9 @@ def load_existing_failure_hashes():
     try:
         with sqlite3.connect(DB_PATH) as conn:
             rows = conn.execute("SELECT hash FROM failure_patterns").fetchall()
-            return set(r[0] for r in rows if r and r[0])
+            # ✅ 무결성 검증 추가
+            valid_hashes = set(r[0] for r in rows if r and isinstance(r[0], str) and r[0].strip() != "")
+            return valid_hashes
     except Exception as e:
         print(f"[오류] 실패 해시 로드 실패 → {e}")
         return set()
@@ -139,9 +141,11 @@ def load_failed_feature_data(strategy=None, max_per_class=20):
                     if class_counter[label] >= max_per_class:
                         continue
                     feat = json.loads(feat_json)
-                    if isinstance(feat, list) and all(isinstance(x, (float, int)) for x in feat):
-                        result.append((feat, label))
-                        class_counter[label] += 1
+                    if isinstance(feat, list):
+                        # ✅ Tensor 변환을 위한 nested list 보장
+                        if all(isinstance(x, list) for x in feat):
+                            result.append((feat, label))
+                            class_counter[label] += 1
                 except:
                     continue
     except Exception as e:
