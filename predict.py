@@ -112,7 +112,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         if feat is None or feat.dropna().shape[0] < window + 1:
             return [failed_result(symbol, strategy, "unknown", "feature 부족", source)]
 
-        features_only = feat.drop(columns=["timestamp"])
+        features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         feat_scaled = MinMaxScaler().fit_transform(features_only)
         if feat_scaled.shape[0] < window:
             return [failed_result(symbol, strategy, "unknown", "시퀀스 부족", source)]
@@ -178,7 +178,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 volatility=True,
                 source=source,
                 predicted_class=pred_class,
-                label=pred_class
+                label=pred_class  # ✅ label 필드 기록 강화
             )
 
             feature_hash = get_feature_hash(X_input)
@@ -197,7 +197,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 "class": pred_class,
                 "expected_return": expected_return,
                 "success": True,
-                "predicted_class": pred_class
+                "predicted_class": pred_class,
+                "label": pred_class  # ✅ result dict에도 포함
             })
 
         if not results:
@@ -208,6 +209,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     except Exception as e:
         print(f"[predict 예외] {e}")
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+
 
 
 # 📄 predict.py 내부에 추가
