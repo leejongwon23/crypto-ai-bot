@@ -220,11 +220,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
         except:
             print("⚠️ 로그 기록 실패")
 
-
 def balance_classes(X, y, min_samples=20, target_classes=None):
     """
     ✅ [설명] 클래스 불균형을 보완하기 위해 각 클래스별 최소 샘플수를 맞춤
-    - 없는 클래스는 noise augmentation 으로 1개 생성
+    - 없는 클래스는 noise augmentation (mean,std 기반)으로 1개 생성
     """
     from collections import Counter
     import random
@@ -238,22 +237,33 @@ def balance_classes(X, y, min_samples=20, target_classes=None):
     X_balanced, y_balanced = list(X), list(y)
     original_counts = dict(class_counts)
 
+    # ✅ 전체 데이터 평균, 표준편차 계산 (noise 생성시 활용)
+    if len(X) > 0:
+        all_data = np.concatenate(X, axis=0)
+        data_mean = np.mean(all_data, axis=0)
+        data_std = np.std(all_data, axis=0) + 1e-6
+    else:
+        data_mean = 0.0
+        data_std = 1.0
+
     for cls in target_classes:
         count = class_counts.get(cls, 0)
 
+        # ✅ 없는 클래스는 noise sample 생성
         if count == 0:
-            if len(X) > 0:
-                sample_shape = X[0].shape
-                noise_sample = np.random.normal(loc=0.0, scale=1.0, size=sample_shape).astype(np.float32)
-                X_balanced.append(noise_sample)
-                y_balanced.append(cls)
-                class_counts[cls] = 1
-                print(f"⚠️ zero sample 클래스 {cls}: random noise 샘플 1개 생성")
+            sample_shape = X[0].shape if len(X) > 0 else (10, 10)
+            noise_sample = np.random.normal(loc=data_mean, scale=data_std, size=sample_shape).astype(np.float32)
+            X_balanced.append(noise_sample)
+            y_balanced.append(cls)
+            class_counts[cls] = 1
+            print(f"⚠️ zero sample 클래스 {cls}: noise 샘플 1개 생성 (mean/std 기반)")
 
         existing = [(x, y_val) for x, y_val in zip(X, y) if y_val == cls]
         while class_counts[cls] < max(min_samples, int(max_count * 0.8)) and existing:
             x_dup, y_dup = random.choice(existing)
-            X_balanced.append(x_dup)
+            # ✅ duplication 시 Gaussian noise 추가 (data augmentation)
+            x_aug = x_dup + np.random.normal(loc=0.0, scale=0.01, size=x_dup.shape).astype(np.float32)
+            X_balanced.append(x_aug)
             y_balanced.append(y_dup)
             class_counts[cls] += 1
 
@@ -265,6 +275,8 @@ def balance_classes(X, y, min_samples=20, target_classes=None):
             print(f"  - 클래스 {cls}: {before}개 → {after}개 (복제됨)")
 
     return np.array(X_balanced), np.array(y_balanced)
+
+
 
 def train_all_models():
     """
