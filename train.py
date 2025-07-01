@@ -185,57 +185,40 @@ def train_one_model(symbol, strategy, max_epochs=20):
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
 
-
-def balance_classes(X, y, min_samples=20, target_classes=None):
-    """
-    ✅ [설명] 클래스 불균형 보완
-    - 없는 클래스는 noise 샘플 생성
-    """
-    from collections import Counter
-    import random
+def balance_classes(X, y, min_count=20):
     import numpy as np
+    from collections import Counter
 
-    if target_classes is None:
-        target_classes = range(NUM_CLASSES)
+    if X is None or y is None or len(X) == 0 or len(y) == 0:
+        print("[❌ balance_classes 실패] X 또는 y 비어있음")
+        return X, y
+
+    # ✅ 수정: 라벨 -1 제거
+    mask = y != -1
+    X, y = X[mask], y[mask]
 
     class_counts = Counter(y)
-    max_count = max(class_counts.values()) if class_counts else 0
+    print(f"[🔢 클래스 분포] {dict(class_counts)}")
+
     X_balanced, y_balanced = list(X), list(y)
 
-    # ✅ 데이터 평균, 표준편차 계산
-    if len(X) > 0:
-        all_data = np.concatenate(X, axis=0)
-        data_mean = np.mean(all_data, axis=0)
-        data_std = np.std(all_data, axis=0) + 1e-6
-    else:
-        data_mean = 0.0
-        data_std = 1.0
+    for cls, count in class_counts.items():
+        if count < min_count:
+            needed = min_count - count
+            indices = [i for i, label in enumerate(y) if label == cls]
+            if indices:
+                reps = np.random.choice(indices, needed, replace=True)
+                X_balanced.extend(X[reps])
+                y_balanced.extend(y[reps])
+                print(f"[복제] 클래스 {cls} → {needed}개 추가")
 
-    for cls in target_classes:
-        count = class_counts.get(cls, 0)
+    # ✅ 셔플
+    combined = list(zip(X_balanced, y_balanced))
+    np.random.shuffle(combined)
+    X_shuffled, y_shuffled = zip(*combined)
 
-        # ✅ 없는 클래스는 noise 생성
-        if count == 0:
-            sample_shape = X[0].shape if len(X) > 0 else (10, 10)
-            noise_sample = np.random.normal(loc=data_mean, scale=data_std, size=sample_shape).astype(np.float32)
-            X_balanced.append(noise_sample)
-            y_balanced.append(cls)
-            class_counts[cls] = 1
-            print(f"[생성] zero 클래스 {cls} noise 샘플 추가")
-
-        existing = [(x, y_val) for x, y_val in zip(X, y) if y_val == cls]
-        while class_counts[cls] < max(min_samples, int(max_count * 0.8)) and existing:
-            x_dup, y_dup = random.choice(existing)
-            x_aug = x_dup + np.random.normal(loc=0.0, scale=0.01, size=x_dup.shape).astype(np.float32)
-            X_balanced.append(x_aug)
-            y_balanced.append(y_dup)
-            class_counts[cls] += 1
-
-    # ✅ 최종 클래스 분포 간략 출력
-    summary = {cls: class_counts.get(cls, 0) for cls in target_classes}
-    print(f"[클래스 복제 완료] 분포: {summary}")
-
-    return np.array(X_balanced), np.array(y_balanced)
+    print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
+    return np.array(X_shuffled), np.array(y_shuffled)
 
 def train_all_models():
     """
