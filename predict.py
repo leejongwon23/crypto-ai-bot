@@ -370,10 +370,14 @@ def evaluate_predictions(get_price_fn):
                      "v_fail" if not success and vol else \
                      "success" if success else "fail"
 
+            # ✅ confidence score 추가 (예: probs_max 필드)
+            confidence = float(r.get("confidence", 0.0)) if "confidence" in r else 0.0
+
             r.update({
                 "status": status,
                 "reason": f"[cls={pred_class}] class_range=({cls_min:.3f}~{cls_max:.3f}), gain={gain:.3f}",
-                "return": round(gain, 5)
+                "return": round(gain, 5),
+                "confidence": confidence
             })
 
             # ✅ None key 제거
