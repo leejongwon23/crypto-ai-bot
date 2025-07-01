@@ -78,7 +78,6 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
     except Exception as e:
         print(f"[ERROR] meta 저장 실패: {e}")
 
-
 def train_one_model(symbol, strategy, max_epochs=20):
     """
     ✅ [설명] 한 심볼-전략 모델 학습 수행
@@ -142,6 +141,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         loss = lossfn(logits, yb)
                         if torch.isfinite(loss):
                             optimizer.zero_grad(); loss.backward(); optimizer.step()
+                # ✅ wrong_ds 메모리 해제 추가
+                del wrong_loader, wrong_ds
+                torch.cuda.empty_cache()
+                gc.collect()
 
             # 🔁 기본 학습
             for _ in range(max_epochs):
@@ -184,6 +187,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
+
+
 
 def balance_classes(X, y, min_count=20):
     import numpy as np
