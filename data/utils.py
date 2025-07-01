@@ -49,7 +49,6 @@ def get_btc_dominance():
 
 import numpy as np
 
-
 def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
     import pandas as pd
@@ -59,18 +58,18 @@ def create_dataset(features, window=20, strategy="단기"):
 
     if not features or len(features) <= window:
         print(f"[❌ 스킵] features 부족 → len={len(features) if features else 0}")
-        return np.array([]), np.array([])
+        return np.array([]), np.array([-1])  # ✅ label 오류 방지 위해 -1 반환
 
     try:
         columns = [c for c in features[0].keys() if c != "timestamp"]
     except Exception as e:
         print(f"[오류] features[0] 키 확인 실패 → {e}")
-        return np.array([]), np.array([])
+        return np.array([]), np.array([-1])
 
     required_keys = {"timestamp", "close", "high"}
     if not all(all(k in f for k in required_keys) for f in features):
         print("[❌ 스킵] 필수 키 누락된 feature 존재")
-        return np.array([]), np.array([])
+        return np.array([]), np.array([-1])
 
     df = pd.DataFrame(features)
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
@@ -83,7 +82,6 @@ def create_dataset(features, window=20, strategy="단기"):
 
     features = df_scaled.to_dict(orient="records")
 
-    # ✅ class_ranges 조정 – 현실적 구간 확대
     class_ranges = [
         (-1.00, -0.30), (-0.30, -0.10), (-0.10, -0.05),
         (-0.05, -0.01), (-0.01, 0.01), (0.01, 0.05),
@@ -116,13 +114,11 @@ def create_dataset(features, window=20, strategy="단기"):
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
             gain = (max_future_price - entry_price) / (entry_price + 1e-6)
 
-            # ✅ 디버그 로그 간소화
             if i % 50 == 0:
                 print(f"[gain debug] i={i}, gain={gain:.4f}")
 
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), -1)
             if cls == -1:
-                # ✅ gain이 구간 밖이면 가장 가까운 구간으로 매핑
                 cls = 0 if gain < class_ranges[0][0] else len(class_ranges) - 1
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
@@ -136,13 +132,17 @@ def create_dataset(features, window=20, strategy="단기"):
             print(f"[예외 발생] ❌ {e} → i={i}")
             continue
 
-    if y:
+    if not y:
+        print("[⚠️ 경고] 생성된 라벨 없음")
+        y = [-1]  # ✅ label 오류 방지 위해 -1 채움
+
+    else:
         labels, counts = np.unique(y, return_counts=True)
         print(f"[📊 클래스 분포] → {dict(zip(labels, counts))}")
-    else:
-        print("[⚠️ 경고] 생성된 라벨 없음")
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
+
+
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     global _kline_cache
