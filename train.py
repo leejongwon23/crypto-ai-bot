@@ -21,17 +21,35 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 STRATEGY_WRONG_REP = {"단기": 4, "중기": 6, "장기": 8}
 
-
-def get_feature_hash_from_tensor(x):
+def get_feature_hash_from_tensor(x, use_full=False, precision=3):
     """
-    ✅ [설명] 마지막 timestep feature를 반올림 후 sha1 해시값으로 변환
+    ✅ [설명]
+    - 마지막 timestep 또는 전체 feature를 반올림 후 sha1 해시값으로 변환
     - 중복된 feature 학습을 방지하기 위해 사용
+    - use_full=True: 전체 feature flatten 후 해시
+    - precision: 소수점 자릿수 (default=3)
     """
+    import hashlib
+    import numpy as np
+
     if x.ndim != 2 or x.shape[0] == 0:
         return "invalid"
-    last = x[-1].tolist()
-    rounded = [round(float(val), 2) for val in last]
-    return hashlib.sha1(",".join(map(str, rounded)).encode()).hexdigest()
+
+    try:
+        if use_full:
+            flat = x.flatten()
+        else:
+            flat = x[-1]
+
+        rounded = [round(float(val), precision) for val in flat]
+        joined = ",".join(map(str, rounded))
+        return hashlib.sha1(joined.encode()).hexdigest()
+
+    except Exception as e:
+        print(f"[⚠️ get_feature_hash_from_tensor 오류] {e}")
+        return "invalid"
+
+
 
 def get_frequent_failures(min_count=5):
     """
