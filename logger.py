@@ -21,7 +21,15 @@ def update_model_success(s, t, m, success):
 def get_model_success_rate(s, t, m, min_total=10):
     r = model_success_tracker.get((s, t or "알수없음", m), {"success":0,"fail":0})
     total = r["success"] + r["fail"]
-    return 0.5 if total < min_total else r["success"] / total
+
+    # ✅ 평가 샘플 부족 시 보수적 weight 반환 (cold-start와 일관)
+    if total < min_total:
+        print(f"[INFO] {s}-{t}-{m}: 평가 샘플 부족(total={total}) → weight=0.2")
+        return 0.2
+
+    rate = r["success"] / total
+    return max(0.0, min(rate, 1.0))
+
 
 def load_failure_count():
     path = "/persistent/logs/failure_count.csv"
