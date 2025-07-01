@@ -22,10 +22,14 @@ def get_model_success_rate(s, t, m, min_total=10):
     r = model_success_tracker.get((s, t or "알수없음", m), {"success":0,"fail":0})
     total = r["success"] + r["fail"]
 
-    # ✅ 평가 샘플 부족 시 보수적 weight 반환 (cold-start와 일관)
     if total < min_total:
-        print(f"[INFO] {s}-{t}-{m}: 평가 샘플 부족(total={total}) → weight=0.2")
-        return 0.2
+        # ✅ 평가 샘플 부족 시 실패율 반영 weight 계산
+        fail_ratio = r["fail"] / total if total > 0 else 1.0
+        weight = max(0.0, 1.0 - fail_ratio)  # 성공률 기반 weight
+        cold_start_weight = 0.2
+        final_weight = min(weight, cold_start_weight)
+        print(f"[INFO] {s}-{t}-{m}: 평가 샘플 부족(total={total}) → weight={final_weight:.2f} (fail_ratio={fail_ratio:.2f})")
+        return final_weight
 
     rate = r["success"] / total
     return max(0.0, min(rate, 1.0))
