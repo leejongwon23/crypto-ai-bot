@@ -13,3 +13,6 @@ torch==2.1.2+cpu
 
 # ✅ 시각화용 matplotlib (visualization.py 필수)
 matplotlib
+
+# ✅ xgboost 추가
+xgboost
