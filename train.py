@@ -64,6 +64,7 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
 
 from logger import get_fine_tune_targets  # 🔁 반드시 포함
 
+
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     import numpy as np
@@ -194,6 +195,15 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
             from logger import get_fine_tune_targets
             fine_tune_targets = get_fine_tune_targets()
+            if fine_tune_targets.empty:
+                print("[INFO] fine-tune 대상이 없어 fallback 으로 기존 학습 데이터 일부 사용")
+                fine_tune_targets = pd.DataFrame({
+                    "strategy": [strategy] * 3,
+                    "class": np.random.choice(y_train, size=3),
+                    "samples": [10] * 3,
+                    "success_rate": [0.5] * 3
+                })
+
             if not fine_tune_targets.empty:
                 targets = fine_tune_targets[fine_tune_targets["strategy"] == strategy]["class"].tolist()
                 if any(cls in targets for cls in y_train):
