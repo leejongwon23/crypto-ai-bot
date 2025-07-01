@@ -75,4 +75,11 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
             print(f"[예외] {symbol}-{strategy} 실패샘플 처리 오류 → {e}")
             continue
 
+    # ✅ fallback: 실패 데이터 없으면 빈 샘플 추가
+    if not sequences:
+        print(f"[INFO] {symbol}-{strategy} 실패 데이터 없음 → fallback zero sample 추가")
+        zero_sample = np.zeros((window, input_size), dtype=np.float32)
+        sequences.append((zero_sample, -1))
+
     return sequences
+
