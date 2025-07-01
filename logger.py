@@ -191,6 +191,9 @@ def get_recent_predicted_classes(strategy: str, recent_days: int = 3):
         return set()
 
 def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
+    import pandas as pd
+    from collections import defaultdict
+
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
         df = df[df["status"].isin(["success", "fail"])]
@@ -228,21 +231,25 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
                     "success_rate": round(rate, 4)
                 })
 
-        # ✅ Fallback: fine-tune 대상이 없으면 최근 성공/실패 상관없이 샘플링해서 반환
+        # ✅ Fallback: fine-tune 대상 없으면 최근 샘플 무작위 추출
         if not fine_tune_targets:
-            print("[INFO] fine-tune 대상이 없어 fallback 실행")
-            fallback = df[["strategy", "predicted_class"]].drop_duplicates().head(min_samples)
-            fallback = fallback.rename(columns={"predicted_class": "class"})
-            fallback["samples"] = min_samples
-            fallback["success_rate"] = 0.5
-            return fallback.sort_values(by=["strategy", "class"])
+            print("[INFO] fine-tune 대상 없음 → fallback 샘플링 실행")
+            fallback_df = df.sample(n=min_samples, replace=True) if len(df) >= min_samples else df
+            fallback = []
+            for _, row in fallback_df.iterrows():
+                fallback.append({
+                    "strategy": row["strategy"],
+                    "class": int(row["predicted_class"]),
+                    "samples": 10,
+                    "success_rate": 0.5
+                })
+            return pd.DataFrame(fallback).sort_values(by=["strategy", "class"])
 
         return pd.DataFrame(fine_tune_targets).sort_values(by=["strategy", "class"])
 
     except Exception as e:
         print(f"[오류] fine-tune 대상 분석 실패 → {e}")
         return pd.DataFrame([])
-
 
 
 def get_feature_hash_from_tensor(tensor):
