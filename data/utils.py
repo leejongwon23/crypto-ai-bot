@@ -62,7 +62,7 @@ def create_dataset(features, window=20, strategy="단기"):
         return np.array([]), np.array([-1])
 
     try:
-        columns = [c for c in features[0].keys() if c != "timestamp"]
+        columns = [c for c in features[0].keys() if c not in ["timestamp", "strategy"]]
     except Exception as e:
         print(f"[오류] features[0] 키 확인 실패 → {e}")
         return np.array([]), np.array([-1])
@@ -77,13 +77,16 @@ def create_dataset(features, window=20, strategy="단기"):
     df = df.dropna(subset=["timestamp", "close", "high"]).sort_values("timestamp").reset_index(drop=True)
 
     scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(df.drop(columns=["timestamp"]))
+    # ✅ strategy 컬럼 제외 후 scaling
+    scaled = scaler.fit_transform(df.drop(columns=["timestamp", "strategy"]))
     df_scaled = pd.DataFrame(scaled, columns=columns)
     df_scaled["timestamp"] = df["timestamp"].values
+    # ✅ strategy 컬럼 유지
+    df_scaled["strategy"] = df["strategy"].values
 
     features = df_scaled.to_dict(orient="records")
 
-    # ✅ 21개 class_ranges 정의 (class_to_expected_return와 1:1 일치)
+    # ✅ 21개 class_ranges 정의
     class_ranges = [
         (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
         (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
@@ -124,6 +127,7 @@ def create_dataset(features, window=20, strategy="단기"):
             if cls == -1:
                 cls = 0 if gain < class_ranges[0][0] else len(class_ranges) - 1
 
+            # ✅ strategy 컬럼 제외하고 sample 생성
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
             if any(len(row) != len(columns) for row in sample):
                 continue
@@ -144,7 +148,6 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[📊 클래스 분포] → {dict(zip(labels, counts))}")
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
-
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     global _kline_cache
