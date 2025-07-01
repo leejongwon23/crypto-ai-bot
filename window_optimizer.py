@@ -86,10 +86,11 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 print(f"[오류] window={window} 평가 실패 → {e}")
                 continue
 
-        if best_acc < 0.0 or best_window not in window_list:
-            print(f"[경고] {symbol}-{strategy}: 모든 창 평가 실패 → fallback 최소 window")
+        # ✅ acc < 0.1이면 fallback 강제 적용
+        if best_acc < 0.1:
+            print(f"[경고] {symbol}-{strategy}: best_acc={best_acc:.4f} < 0.1 → fallback 최소 window 적용")
             best_window = min(window_list)
-            best_result = {"window": best_window, "accuracy": 0.0}
+            best_result = {"window": best_window, "accuracy": float(round(best_acc, 4))}
 
         os.makedirs("/persistent/logs", exist_ok=True)
         with open(f"/persistent/logs/best_window_{symbol}_{strategy}.txt", "w") as f:
