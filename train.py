@@ -13,6 +13,8 @@ import hashlib
 from collections import Counter
 import sqlite3
 from config import NUM_CLASSES
+import time
+
 training_in_progress = {"단기": False, "중기": False, "장기": False}
 
 
