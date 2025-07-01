@@ -80,7 +80,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         pred_class_val = -1
 
     # ✅ label도 predicted_class로 기본 대입
-    if label is None:
+    if label is None or str(label).strip() == "":
         label = pred_class_val
 
     # ✅ 예측 성공 여부 + 변동성 기준
@@ -102,9 +102,12 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "return": float(return_value if return_value is not None else rate or 0.0),
         "volatility": bool(volatility),
         "source": str(source or "일반"),
-        "predicted_class": str(int(pred_class_val)),  # ✅ int 변환 후 str 기록
+        "predicted_class": str(int(pred_class_val)),
         "label": str(label)
     }
+
+    # ✅ None key 제거
+    row = {k: v for k, v in row.items() if k is not None}
 
     try:
         with open(dated_path, "a", newline="", encoding="utf-8-sig") as f:
@@ -123,6 +126,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
             w.writerow(row)
     except Exception as e:
         print(f"[오류] 통합 로그 기록 실패 → {e}")
+
 
 
 def get_dynamic_eval_wait(strategy):
@@ -200,10 +204,14 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
         if "label" not in df.columns:
             df["label"] = df["predicted_class"]
 
+        # ✅ strategy 컬럼 누락 시 '알수없음' 기본 대입
+        if "strategy" not in df.columns:
+            df["strategy"] = "알수없음"
+
+        # ✅ NaN 제거 및 타입 보정
         df = df[df["predicted_class"].notna()]
-        df["predicted_class"] = pd.to_numeric(df["predicted_class"], errors="coerce")
-        df = df[df["predicted_class"].notna()]
-        df["predicted_class"] = df["predicted_class"].astype(int)
+        df["predicted_class"] = pd.to_numeric(df["predicted_class"], errors="coerce").fillna(-1).astype(int)
+        df["label"] = pd.to_numeric(df["label"], errors="coerce").fillna(-1).astype(int)
 
         result = defaultdict(lambda: {"success": 0, "fail": 0})
         for _, row in df.iterrows():
