@@ -17,14 +17,25 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 20:
             print(f"[경고] {symbol}-{strategy} → 데이터 부족으로 최소 window fallback")
-            return min(window_list)
+            best_window = min(window_list)
+            best_result = {"window": best_window, "accuracy": 0.0}
+            # ✅ fallback 시에도 json 파일 기록
+            os.makedirs("/persistent/logs", exist_ok=True)
+            with open(f"/persistent/logs/best_window_{symbol}_{strategy}.json", "w") as f:
+                json.dump(best_result, f, indent=2)
+            return best_window
 
         df_feat = compute_features(symbol, df, strategy)
         if df_feat is None or df_feat.empty or df_feat.isnull().any().any() or len(df_feat) < max(window_list) + 10:
             print(f"[경고] {symbol}-{strategy} → feature 부족 또는 NaN 포함으로 최소 window fallback")
-            return min(window_list)
+            best_window = min(window_list)
+            best_result = {"window": best_window, "accuracy": 0.0}
+            # ✅ fallback 시에도 json 파일 기록
+            os.makedirs("/persistent/logs", exist_ok=True)
+            with open(f"/persistent/logs/best_window_{symbol}_{strategy}.json", "w") as f:
+                json.dump(best_result, f, indent=2)
+            return best_window
 
-        # ✅ 수정: strategy 컬럼 drop 오류 방지
         drop_cols = ["timestamp"]
         if "strategy" in df_feat.columns:
             drop_cols.append("strategy")
@@ -105,4 +116,10 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
 
     except Exception as e:
         print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
-        return min(window_list)
+        best_window = min(window_list)
+        best_result = {"window": best_window, "accuracy": 0.0}
+        # ✅ 예외 fallback 시에도 json 파일 기록
+        os.makedirs("/persistent/logs", exist_ok=True)
+        with open(f"/persistent/logs/best_window_{symbol}_{strategy}.json", "w") as f:
+            json.dump(best_result, f, indent=2)
+        return best_window
