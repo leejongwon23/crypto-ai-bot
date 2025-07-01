@@ -196,7 +196,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             from logger import get_fine_tune_targets
             fine_tune_targets = get_fine_tune_targets()
             if fine_tune_targets.empty:
-                print("[INFO] fine-tune 대상이 없어 fallback 으로 기존 학습 데이터 일부 사용")
+                print("[INFO] fine-tune 대상이 없어 fallback으로 기존 학습 데이터 일부 사용")
                 fine_tune_targets = pd.DataFrame({
                     "strategy": [strategy] * 3,
                     "class": np.random.choice(y_train, size=3),
@@ -206,15 +206,22 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
             if not fine_tune_targets.empty:
                 targets = fine_tune_targets[fine_tune_targets["strategy"] == strategy]["class"].tolist()
-                if any(cls in targets for cls in y_train):
-                    print(f"🔁 Fine-Tune 반복 학습 시작")
+                fine_tune_ds = [(x, y_val) for x, y_val in zip(X_train, y_train) if y_val in targets]
+
+                if fine_tune_ds:
+                    print(f"🔁 Fine-Tune 대상 {len(fine_tune_ds)}개 클래스 학습 시작")
+                    ds = TensorDataset(torch.tensor([x for x, _ in fine_tune_ds], dtype=torch.float32),
+                                       torch.tensor([y for _, y in fine_tune_ds], dtype=torch.long))
+                    loader = DataLoader(ds, batch_size=16, shuffle=True, num_workers=2)
                     for _ in range(3):
-                        for xb, yb in train_loader:
+                        for xb, yb in loader:
                             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                             logits = model(xb)
                             loss = lossfn(logits, yb)
                             if torch.isfinite(loss):
                                 optimizer.zero_grad(); loss.backward(); optimizer.step()
+                else:
+                    print("[INFO] fine-tune 대상 클래스가 학습 데이터에 없음 → fallback fine-tune skipped")
 
             model.eval()
             with torch.no_grad():
@@ -249,6 +256,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
             log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
         except:
             print("⚠️ 로그 기록 실패")
+
 
 
 training_in_progress = {
