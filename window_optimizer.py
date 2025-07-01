@@ -19,13 +19,14 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     try:
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 20:
-            print(f"[경고] {symbol}-{strategy} → 데이터 부족으로 기본값 반환")
-            return 20
+            print(f"[경고] {symbol}-{strategy} → 데이터 부족으로 최소 window fallback")
+            # ✅ fallback window를 최소 window로 설정
+            return min(window_list)
 
         df_feat = compute_features(symbol, df, strategy)
         if df_feat is None or df_feat.empty or df_feat.isnull().any().any() or len(df_feat) < max(window_list) + 10:
-            print(f"[경고] {symbol}-{strategy} → feature 부족 또는 NaN 포함으로 기본값 반환")
-            return 20
+            print(f"[경고] {symbol}-{strategy} → feature 부족 또는 NaN 포함으로 최소 window fallback")
+            return min(window_list)
 
         # ✅ 스케일링 추가 (기존 학습 흐름과 통일)
         features_scaled = MinMaxScaler().fit_transform(df_feat.drop(columns=["timestamp"]))
@@ -86,9 +87,9 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 continue
 
         if best_acc < 0.0 or best_window not in window_list:
-            print(f"[경고] {symbol}-{strategy}: 모든 창 평가 실패 → fallback=20")
-            best_window = 20
-            best_result = {"window": 20, "accuracy": 0.0}
+            print(f"[경고] {symbol}-{strategy}: 모든 창 평가 실패 → fallback 최소 window")
+            best_window = min(window_list)
+            best_result = {"window": best_window, "accuracy": 0.0}
 
         os.makedirs("/persistent/logs", exist_ok=True)
         with open(f"/persistent/logs/best_window_{symbol}_{strategy}.txt", "w") as f:
@@ -101,4 +102,4 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
 
     except Exception as e:
         print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
-        return 20
+        return min(window_list)
