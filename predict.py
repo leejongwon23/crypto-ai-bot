@@ -15,20 +15,48 @@ import json
 DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-def class_to_expected_return(cls):
-    # ✅ class_ranges와 1:1 매핑된 21개 클래스 중심값
-    centers = [
-        -0.80, -0.45, -0.25, -0.175, -0.125, -0.085, -0.06, -0.04,
-        -0.02, 0.0,   # 중립
-         0.02, 0.04, 0.06, 0.085, 0.125, 0.175, 0.25, 0.40,
-         0.75, 1.50, 3.50
-    ]
 
-    if isinstance(cls, int) and 0 <= cls < len(centers):
-        return centers[cls]
+def class_to_expected_return(cls, recent_days=3):
+    import pandas as pd
+    import numpy as np
 
-    print(f"[⚠️ 예상 수익률 계산 오류] 잘못된 클래스: {cls}")
-    return 0.0
+    try:
+        df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        cutoff = pd.Timestamp.now() - pd.Timedelta(days=recent_days)
+        df = df[df["timestamp"] >= cutoff]
+        df = df[df["predicted_class"].notna() & df["return"].notna()]
+        df["predicted_class"] = df["predicted_class"].astype(int)
+
+        # ✅ 최근 n일간 클래스별 평균 수익률 계산
+        centers_dynamic = df.groupby("predicted_class")["return"].mean().to_dict()
+
+        # ✅ 기본 centers (fallback)
+        centers_default = [
+            -0.80, -0.45, -0.25, -0.175, -0.125, -0.085, -0.06, -0.04,
+            -0.02, 0.0, 0.02, 0.04, 0.06, 0.085, 0.125, 0.175, 0.25, 0.40,
+            0.75, 1.50, 3.50
+        ]
+
+        if isinstance(cls, int) and 0 <= cls < len(centers_default):
+            # ✅ 최근 평균 수익률이 존재하면 동적 값 반환, 없으면 기본값
+            return centers_dynamic.get(cls, centers_default[cls])
+
+        print(f"[⚠️ 예상 수익률 계산 오류] 잘못된 클래스: {cls}")
+        return 0.0
+
+    except Exception as e:
+        print(f"[오류] class_to_expected_return 동적 매핑 실패 → {e}")
+        # ✅ 실패 시 기본 centers 반환
+        centers_default = [
+            -0.80, -0.45, -0.25, -0.175, -0.125, -0.085, -0.06, -0.04,
+            -0.02, 0.0, 0.02, 0.04, 0.06, 0.085, 0.125, 0.175, 0.25, 0.40,
+            0.75, 1.50, 3.50
+        ]
+        if isinstance(cls, int) and 0 <= cls < len(centers_default):
+            return centers_default[cls]
+        return 0.0
+
 
 # ✅ 수정 요약:
 # - failed_result(): label=-1 기본 포함
