@@ -5,6 +5,9 @@ import torch.nn.functional as F
 # ✅ 수정 코드 (통일된 설정 사용)
 from config import NUM_CLASSES
 
+# ✅ 추가
+import xgboost as xgb
+import numpy as np
 
 class Attention(nn.Module):
     def __init__(self, hidden_size):
@@ -111,21 +114,37 @@ class TransformerPricePredictor(nn.Module):
         return self.fc_logits(hidden)
 
 
+# ✅ xgboost wrapper class
+class XGBoostWrapper:
+    def __init__(self, model_path):
+        self.model = xgb.Booster()
+        self.model.load_model(model_path)
+
+    def predict(self, X):
+        dmatrix = xgb.DMatrix(X.reshape(X.shape[0], -1))
+        probs = self.model.predict(dmatrix)
+        return np.argmax(probs, axis=1)
+
+
 MODEL_CLASSES = {
     "lstm": LSTMPricePredictor,
     "cnn_lstm": CNNLSTMPricePredictor,
-    "transformer": TransformerPricePredictor
+    "transformer": TransformerPricePredictor,
+    "xgboost": XGBoostWrapper
 }
 
-def get_model(model_type="cnn_lstm", input_size=11, output_size=None):
+def get_model(model_type="cnn_lstm", input_size=11, output_size=None, model_path=None):
+    if model_type == "xgboost":
+        if model_path is None:
+            raise ValueError("XGBoost model_path must be provided.")
+        return XGBoostWrapper(model_path)
+
     if model_type not in MODEL_CLASSES:
         print(f"[경고] 알 수 없는 모델 타입 '{model_type}', 기본 모델 cnn_lstm 사용")
     model_cls = MODEL_CLASSES.get(model_type, CNNLSTMPricePredictor)
 
-    # ✅ 출력 클래스 수 명시되지 않으면, 전역 NUM_CLASSES 강제 적용
     if output_size is None:
-        from config import NUM_CLASSES  # 또는 config.py 등에서 import
+        from config import NUM_CLASSES
         output_size = NUM_CLASSES
 
     return model_cls(input_size=input_size, output_size=output_size)
-
