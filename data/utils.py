@@ -283,6 +283,10 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
         df["roc"] = df["close"].pct_change(periods=10)
         df["mfi"] = df["volume"] / (df["high"] - df["low"] + 1e-6)
 
+    # ✅ NaN, inf 방지
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    df.fillna(0, inplace=True)
+
     # ✅ 필요한 컬럼만 선택
     base = [
         "timestamp", "strategy", "open", "high", "low", "close", "volume",
@@ -294,7 +298,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     elif strategy == "장기":
         base += ["volume_cumsum", "roc", "mfi"]
 
-    df = df[base].dropna().reset_index(drop=True)
+    df = df[base].reset_index(drop=True)
 
     required_cols = ["timestamp", "close", "high"]
     missing_cols = [col for col in required_cols if col not in df.columns or df[col].isnull().any()]
