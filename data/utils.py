@@ -253,8 +253,46 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     # ✅ strategy 컬럼 추가
     df["strategy"] = strategy
 
-    # ... (나머지 기존 로직 동일)
+    # ✅ Feature 계산 추가
+    # 이동평균선 (ma20)
+    df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
 
+    # RSI
+    delta = df["close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=1).mean()
+    rs = gain / (loss + 1e-6)
+    df["rsi"] = 100 - (100 / (1 + rs))
+
+    # MACD
+    ema12 = df["close"].ewm(span=12, adjust=False).mean()
+    ema26 = df["close"].ewm(span=26, adjust=False).mean()
+    df["macd"] = ema12 - ema26
+
+    # Bollinger Bands (표준편차만)
+    df["bollinger"] = df["close"].rolling(window=20, min_periods=1).std()
+
+    # Volatility
+    df["volatility"] = df["high"] - df["low"]
+
+    # Trend Score (ma20 기준)
+    df["trend_score"] = (df["close"] > df["ma20"]).astype(int)
+
+    # Stochastic RSI
+    min14 = df["close"].rolling(window=14, min_periods=1).min()
+    max14 = df["close"].rolling(window=14, min_periods=1).max()
+    df["stoch_rsi"] = (df["close"] - min14) / (max14 - min14 + 1e-6)
+
+    # CCI
+    typical = (df["high"] + df["low"] + df["close"]) / 3
+    ma_typical = typical.rolling(window=20, min_periods=1).mean()
+    md = (typical - ma_typical).abs().rolling(window=20, min_periods=1).mean()
+    df["cci"] = (typical - ma_typical) / (0.015 * md + 1e-6)
+
+    # OBV
+    df["obv"] = (np.sign(df["close"].diff()) * df["volume"]).fillna(0).cumsum()
+
+    # ✅ 필요한 컬럼만 선택
     base = [
         "timestamp", "strategy", "open", "high", "low", "close", "volume",
         "ma20", "rsi", "macd", "bollinger", "volatility",
@@ -279,6 +317,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     print(f"[완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     _feature_cache[cache_key] = df
     return df
+
 
 
 # data/utils.py 맨 아래에 추가
