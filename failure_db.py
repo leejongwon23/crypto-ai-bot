@@ -5,6 +5,27 @@ from collections import defaultdict
 
 DB_PATH = "/persistent/logs/failure_patterns.db"
 
+def ensure_failure_db():
+    try:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS failure_patterns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    symbol TEXT,
+                    strategy TEXT,
+                    direction TEXT,
+                    hash TEXT UNIQUE,
+                    rate REAL,
+                    reason TEXT,
+                    feature TEXT,
+                    label INTEGER
+                )
+            """)
+    except Exception as e:
+        print(f"[오류] ensure_failure_db 실패 → {e}")
+
 def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
     if not isinstance(feature_hash, str) or feature_hash.strip() == "":
         return
