@@ -6,7 +6,7 @@ import glob
 MODEL_DIR = "/persistent/models"
 EVAL_RESULT = "/persistent/evaluation_result.csv"
 
-def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_size=None):
+def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_size=None):  # ✅ min_samples 기본값 3으로 완화
     pattern = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json") if symbol != "ALL" \
               else os.path.join(MODEL_DIR, f"*_{strategy}_{model_type}.meta.json")
     meta_files = glob.glob(pattern)
@@ -52,13 +52,8 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
                     (df["symbol"] == meta.get("symbol")) & (df["status"].isin(["success", "fail"]))]
 
             if len(df) < min_samples:
-                # ✅ min_samples < 10 이면 weight=0.5 반환 (학습 초기 가중치 부여)
-                if min_samples < 10:
-                    print(f"[INFO] 평가 샘플 부족(len={len(df)} < {min_samples}) → weight=0.5")
-                    return 0.5
-                else:
-                    print(f"[INFO] 평가 샘플 부족(len={len(df)}) → cold-start weight=0.2")
-                    return 0.2
+                print(f"[INFO] 평가 샘플 부족(len={len(df)} < {min_samples}) → cold-start weight=0.2")
+                return 0.2
 
             success_rate = len(df[df["status"] == "success"]) / len(df)
             if success_rate >= 0.7:
@@ -76,6 +71,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
 
     print("[INFO] 조건 충족 모델 없음 → cold-start weight=0.2")
     return 0.2
+
 
 
 def model_exists(symbol, strategy):
