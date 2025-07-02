@@ -14,27 +14,30 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     from config import NUM_CLASSES
 
     try:
+        # ✅ strategy를 int window 값으로 변환 시도 불가하도록 사전 검증
+        if not isinstance(window_list, list) or not all(isinstance(w, (int, float)) for w in window_list):
+            print(f"[오류] window_list 타입 오류 → 기본값으로 대체")
+            window_list = [10, 20, 30, 40]
+
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 20:
             print(f"[경고] {symbol}-{strategy} → 데이터 부족으로 최소 window fallback")
             best_window = min(window_list)
-            best_result = {"window": best_window, "accuracy": 0.0}
-            # ✅ fallback 시에도 json 파일 기록
+            best_result = {"window": float(best_window), "accuracy": 0.0}
             os.makedirs("/persistent/logs", exist_ok=True)
             with open(f"/persistent/logs/best_window_{symbol}_{strategy}.json", "w") as f:
                 json.dump(best_result, f, indent=2)
-            return best_window
+            return float(best_window)
 
         df_feat = compute_features(symbol, df, strategy)
         if df_feat is None or df_feat.empty or df_feat.isnull().any().any() or len(df_feat) < max(window_list) + 10:
             print(f"[경고] {symbol}-{strategy} → feature 부족 또는 NaN 포함으로 최소 window fallback")
             best_window = min(window_list)
-            best_result = {"window": best_window, "accuracy": 0.0}
-            # ✅ fallback 시에도 json 파일 기록
+            best_result = {"window": float(best_window), "accuracy": 0.0}
             os.makedirs("/persistent/logs", exist_ok=True)
             with open(f"/persistent/logs/best_window_{symbol}_{strategy}.json", "w") as f:
                 json.dump(best_result, f, indent=2)
-            return best_window
+            return float(best_window)
 
         drop_cols = ["timestamp"]
         if "strategy" in df_feat.columns:
@@ -51,11 +54,12 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             feature_dicts.append(d)
 
         best_acc = -1
-        best_window = window_list[0]
+        best_window = float(window_list[0])
         best_result = {}
 
         for window in window_list:
             try:
+                window = float(window)  # ✅ window 값을 float으로 안전 변환
                 X, y = create_dataset(feature_dicts, window, strategy)
                 if X is None or y is None or len(X) == 0 or len(X) != len(y):
                     continue
@@ -94,7 +98,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                     if acc > best_acc:
                         best_acc = acc
                         best_window = window
-                        best_result = {"window": int(window), "accuracy": float(round(acc, 4))}
+                        best_result = {"window": float(window), "accuracy": float(round(acc, 4))}
 
             except Exception as e:
                 print(f"[오류] window={window} 평가 실패 → {e}")
@@ -102,7 +106,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
 
         if best_acc < 0.1:
             print(f"[경고] {symbol}-{strategy}: best_acc={best_acc:.4f} < 0.1 → fallback 최소 window 적용")
-            best_window = min(window_list)
+            best_window = float(min(window_list))
             best_result = {"window": best_window, "accuracy": float(round(best_acc, 4))}
 
         os.makedirs("/persistent/logs", exist_ok=True)
@@ -116,10 +120,10 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
 
     except Exception as e:
         print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
-        best_window = min(window_list)
+        best_window = float(min(window_list))
         best_result = {"window": best_window, "accuracy": 0.0}
-        # ✅ 예외 fallback 시에도 json 파일 기록
         os.makedirs("/persistent/logs", exist_ok=True)
         with open(f"/persistent/logs/best_window_{symbol}_{strategy}.json", "w") as f:
             json.dump(best_result, f, indent=2)
         return best_window
+
