@@ -306,6 +306,7 @@ import pandas as pd
 from failure_db import ensure_failure_db, insert_failure_record
 from logger import update_model_success
 
+
 def evaluate_predictions(get_price_fn):
     import csv, os, datetime, pytz
     import pandas as pd
@@ -355,6 +356,13 @@ def evaluate_predictions(get_price_fn):
             except:
                 pred_class = -1
 
+            # ✅ label 처리: None, NaN, int 변환 실패 시 -1
+            try:
+                label = int(float(r.get("label", -1)))
+            except:
+                label = -1
+            r["label"] = label
+
             # ✅ pred_class == -1 은 실패 기록 후 평가 제외
             if pred_class == -1:
                 log_prediction(
@@ -372,7 +380,7 @@ def evaluate_predictions(get_price_fn):
                     volatility=False,
                     source="평가",
                     predicted_class=-1,
-                    label=-1
+                    label=label
                 )
                 updated.append(r)
                 continue
@@ -431,10 +439,10 @@ def evaluate_predictions(get_price_fn):
                 "status": status,
                 "reason": f"[cls={pred_class}] class_range=({cls_min:.3f}~{cls_max:.3f}), gain={gain:.3f}",
                 "return": round(gain, 5),
-                "confidence": confidence
+                "confidence": confidence,
+                "label": label  # ✅ 평가 결과에도 label 유지
             })
 
-            # ✅ None key 제거 및 default value 처리
             r_clean = {str(k): v if v is not None else "" for k, v in r.items() if k is not None}
 
             update_model_success(symbol, strategy, model, success)
@@ -467,7 +475,6 @@ def evaluate_predictions(get_price_fn):
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(failed)
-
 
 
 def get_class_distribution(symbol, strategy, model_type):
