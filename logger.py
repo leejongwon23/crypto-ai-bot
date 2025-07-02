@@ -114,13 +114,14 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "return": float(return_value if return_value is not None else rate or 0.0),
         "volatility": bool(volatility),
         "source": str(source or "일반"),
-        "predicted_class": str(int(pred_class_val)),
+        "predicted_class": str(pred_class_val),
         "label": str(label)
     }
 
     # ✅ None key 제거
     row = {k: v for k, v in row.items() if k is not None}
 
+    # ✅ 로깅: 날짜별 로그 + 통합 로그
     try:
         with open(dated_path, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=row.keys())
@@ -138,7 +139,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
             w.writerow(row)
     except Exception as e:
         print(f"[오류] 통합 로그 기록 실패 → {e}")
-
 
 
 def get_dynamic_eval_wait(strategy):
