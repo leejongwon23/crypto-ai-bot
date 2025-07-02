@@ -186,8 +186,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
 
-
-
 def balance_classes(X, y, min_count=20):
     import numpy as np
     from collections import Counter
@@ -200,19 +198,30 @@ def balance_classes(X, y, min_count=20):
     X, y = X[mask], y[mask]
 
     class_counts = Counter(y)
-    print(f"[🔢 클래스 분포] {dict(class_counts)}")
+    print(f"[🔢 기존 클래스 분포] {dict(class_counts)}")
 
     X_balanced, y_balanced = list(X), list(y)
 
-    for cls, count in class_counts.items():
-        if count < min_count:
-            needed = min_count - count
+    # ✅ 모든 클래스가 min_count 이상 되도록 복제
+    all_classes = range(21)  # NUM_CLASSES = 21
+    for cls in all_classes:
+        count = class_counts.get(cls, 0)
+        needed = max(0, min_count - count)
+
+        if needed > 0:
             indices = [i for i, label in enumerate(y) if label == cls]
             if indices:
                 reps = np.random.choice(indices, needed, replace=True)
                 X_balanced.extend(X[reps])
                 y_balanced.extend(y[reps])
                 print(f"[복제] 클래스 {cls} → {needed}개 추가")
+            else:
+                # ✅ 없는 클래스도 noise sample 추가 (zero array)
+                sample_shape = X[0].shape
+                noise_samples = np.zeros((needed,) + sample_shape, dtype=np.float32)
+                X_balanced.extend(noise_samples)
+                y_balanced.extend([cls] * needed)
+                print(f"[추가] 클래스 {cls} → {needed}개 noise sample 생성")
 
     combined = list(zip(X_balanced, y_balanced))
     np.random.shuffle(combined)
@@ -220,6 +229,7 @@ def balance_classes(X, y, min_count=20):
 
     print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
     return np.array(X_shuffled), np.array(y_shuffled)
+
 
 
 def train_all_models():
