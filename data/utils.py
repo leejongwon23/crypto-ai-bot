@@ -49,6 +49,7 @@ def get_btc_dominance():
 
 import numpy as np
 
+
 def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
     import pandas as pd
@@ -122,12 +123,13 @@ def create_dataset(features, window=20, strategy="단기"):
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
             gain = (max_future_price - entry_price) / (entry_price + 1e-6)
 
+            # ✅ 라벨 None, NaN, inf 검증 후 기본값 처리
             if pd.isnull(gain) or not np.isfinite(gain):
                 gain = 0.0
 
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), None)
-            if cls is None:
-                cls = 0 if gain < class_ranges[0][0] else len(class_ranges) - 1
+            if cls is None or not np.isfinite(cls):
+                cls = -1  # ✅ 기본값 -1
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
             if any(len(row) != len(columns) for row in sample):
@@ -149,7 +151,6 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[📊 클래스 분포] → {dict(zip(labels, counts))}")
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
-
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     global _kline_cache
