@@ -178,10 +178,22 @@ def predict(symbol, strategy, source="일반", model_type=None):
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
 
-            # ✅ input_size 불일치 fallback
+            # ✅ input_size 불일치 시 feature 재생성 시도
             if meta.get("input_size") != input_size:
-                print(f"[⚠️ input_size 불일치] 모델 {mt} → skip")
-                continue
+                print(f"[⚠️ input_size 불일치] 모델 {mt} → feature 재생성 시도")
+                df = get_kline_by_strategy(symbol, strategy)
+                feat = compute_features(symbol, df, strategy)
+                features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
+                feat_scaled = MinMaxScaler().fit_transform(features_only)
+                if feat_scaled.shape[0] < window:
+                    print(f"[⚠️ 재생성 실패] window 부족 → skip")
+                    continue
+                X_input = feat_scaled[-window:]
+                X = np.expand_dims(X_input, axis=0)
+                input_size = X.shape[2]
+                if meta.get("input_size") != input_size:
+                    print(f"[⚠️ 재생성 후 input_size 불일치 지속] 모델 {mt} → skip")
+                    continue
 
             weight = get_model_weight(mt, strategy, symbol, input_size=input_size)
             if weight <= 0.0:
@@ -322,6 +334,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     except Exception as e:
         print(f"[predict 예외] {e}")
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+
 
 
 # 📄 predict.py 내부에 추가
