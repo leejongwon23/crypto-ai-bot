@@ -202,11 +202,15 @@ def balance_classes(X, y, min_count=20):
 
     X_balanced, y_balanced = list(X), list(y)
 
-    # ✅ 모든 클래스가 min_count 이상 되도록 복제
+    # ✅ max_class_count 계산
+    max_count = max(class_counts.values()) if class_counts else 0
+    target_count = max(min_count, int(max_count * 0.8))
+
+    # ✅ 모든 클래스가 target_count 이상 되도록 복제
     all_classes = range(21)  # NUM_CLASSES = 21
     for cls in all_classes:
         count = class_counts.get(cls, 0)
-        needed = max(0, min_count - count)
+        needed = max(0, target_count - count)
 
         if needed > 0:
             indices = [i for i, label in enumerate(y) if label == cls]
@@ -229,6 +233,7 @@ def balance_classes(X, y, min_count=20):
 
     print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
     return np.array(X_shuffled), np.array(y_shuffled)
+
 
 
 
