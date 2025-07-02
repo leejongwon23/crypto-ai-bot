@@ -309,11 +309,13 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     missing_cols = [col for col in required_cols if col not in df.columns or df[col].isnull().any()]
     if missing_cols or df.empty:
         print(f"[❌ compute_features 실패] 필수 컬럼 누락 또는 NaN 존재: {missing_cols}")
-        return None
+        # ✅ fallback: 최소 컬럼만 가진 빈 DataFrame 반환
+        return pd.DataFrame(columns=required_cols + ["strategy"])
 
     print(f"[완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     _feature_cache[cache_key] = df
     return df
+
 
 # data/utils.py 맨 아래에 추가
 
