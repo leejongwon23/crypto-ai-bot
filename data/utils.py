@@ -57,19 +57,22 @@ def create_dataset(features, window=20, strategy="단기"):
     X, y = [], []
 
     if not features or len(features) <= window:
-        print(f"[❌ 스킵] features 부족 → len={len(features) if features else 0}")
-        return np.array([]), np.array([-1])
+        msg = f"[❌ 스킵] features 부족 → len={len(features) if features else 0}"
+        print(msg)
+        raise Exception(msg)
 
     try:
         columns = [c for c in features[0].keys() if c != "timestamp"]
     except Exception as e:
-        print(f"[오류] features[0] 키 확인 실패 → {e}")
-        return np.array([]), np.array([-1])
+        msg = f"[오류] features[0] 키 확인 실패 → {e}"
+        print(msg)
+        raise Exception(msg)
 
     required_keys = {"timestamp", "close", "high"}
     if not all(all(k in f for k in required_keys) for f in features):
-        print("[❌ 스킵] 필수 키 누락된 feature 존재")
-        return np.array([]), np.array([-1])
+        msg = "[❌ 스킵] 필수 키 누락된 feature 존재"
+        print(msg)
+        raise Exception(msg)
 
     df = pd.DataFrame(features)
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
@@ -139,13 +142,15 @@ def create_dataset(features, window=20, strategy="단기"):
             continue
 
     if not y:
-        print("[⚠️ 경고] 생성된 라벨 없음")
-        y = [-1]
+        msg = "[⚠️ 경고] 생성된 라벨 없음"
+        print(msg)
+        raise Exception(msg)
     else:
         labels, counts = np.unique(y, return_counts=True)
         print(f"[📊 클래스 분포] → {dict(zip(labels, counts))}")
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
+
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     global _kline_cache
