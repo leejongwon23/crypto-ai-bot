@@ -449,7 +449,6 @@ def evaluate_predictions(get_price_fn):
     updated += evaluated
 
     if updated:
-        # ✅ fieldnames 동적 생성 후 None 제거
         fieldnames = sorted({k for row in updated for k in row.keys() if k is not None})
         with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -470,7 +469,6 @@ def evaluate_predictions(get_price_fn):
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(failed)
-
 
 
 def get_class_distribution(symbol, strategy, model_type):
