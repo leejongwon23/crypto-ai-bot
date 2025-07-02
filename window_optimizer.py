@@ -23,6 +23,11 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             print(f"[경고] {symbol}-{strategy} → feature 부족 또는 NaN 포함으로 fallback window={min_window}")
             return min_window
 
+        # ✅ feature quality 검사 추가
+        if df_feat.isnull().any().any() or not np.isfinite(df_feat.select_dtypes(include=[np.number])).all().all():
+            print(f"[❌ 오류] {symbol}-{strategy} → feature NaN or inf 포함 → fallback window={min_window}")
+            return min_window
+
         drop_cols = ["timestamp"]
         if "strategy" in df_feat.columns:
             drop_cols.append("strategy")
@@ -43,7 +48,6 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             try:
                 window = int(window)
 
-                # ✅ create_dataset 재시도 로직 추가
                 try:
                     X, y = create_dataset(feature_dicts, window, strategy)
                 except Exception as e:
