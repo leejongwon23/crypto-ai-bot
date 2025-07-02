@@ -125,13 +125,14 @@ class XGBoostWrapper:
         probs = self.model.predict(dmatrix)
         return np.argmax(probs, axis=1)
 
-
 MODEL_CLASSES = {
     "lstm": LSTMPricePredictor,
     "cnn_lstm": CNNLSTMPricePredictor,
+    "cnn": CNNLSTMPricePredictor,  # ✅ 'cnn' 매핑 추가
     "transformer": TransformerPricePredictor,
     "xgboost": XGBoostWrapper
 }
+
 
 def get_model(model_type="cnn_lstm", input_size=11, output_size=None, model_path=None):
     if model_type == "xgboost":
