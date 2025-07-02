@@ -137,176 +137,145 @@ def predict(symbol, strategy, source="일반", model_type=None):
     now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
     try:
-        window = find_best_window(symbol, strategy)
-        if not isinstance(window, int) or window <= 0:
-            return [failed_result(symbol, strategy, "unknown", "윈도우 결정 실패", source)]
+        max_retry = 2
+        retry = 0
 
-        df = get_kline_by_strategy(symbol, strategy)
-        if df is None or len(df) < window + 1:
-            return [failed_result(symbol, strategy, "unknown", "데이터 부족", source)]
-
-        feat = compute_features(symbol, df, strategy)
-        if feat is None or feat.dropna().shape[0] < window + 1:
-            return [failed_result(symbol, strategy, "unknown", "feature 부족", source)]
-
-        features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
-        feat_scaled = MinMaxScaler().fit_transform(features_only)
-        if feat_scaled.shape[0] < window:
-            return [failed_result(symbol, strategy, "unknown", "시퀀스 부족", source)]
-
-        X_input = feat_scaled[-window:]
-        X = np.expand_dims(X_input, axis=0)
-        input_size = X.shape[2]
-
-        models = get_available_models()
-        results, ensemble_probs, total_weight = [], None, 0.0
-
-        for m in models:
-            if m["symbol"] != symbol or m["strategy"] != strategy:
+        while retry < max_retry:
+            window = find_best_window(symbol, strategy)
+            if not isinstance(window, int) or window <= 0:
+                retry += 1
                 continue
 
-            mt = m["model"]
-            if model_type and mt != model_type:
+            df = get_kline_by_strategy(symbol, strategy)
+            if df is None or len(df) < window + 1:
+                retry += 1
                 continue
 
-            model_path = os.path.join(MODEL_DIR, m["pt_file"])
-            meta_path = model_path.replace(".pt", ".meta.json")
-
-            if not os.path.exists(model_path) or not os.path.exists(meta_path):
+            feat = compute_features(symbol, df, strategy)
+            if feat is None or feat.dropna().shape[0] < window + 1:
+                retry += 1
                 continue
 
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
+            features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
+            feat_scaled = MinMaxScaler().fit_transform(features_only)
+            if feat_scaled.shape[0] < window:
+                retry += 1
+                continue
 
-            # ✅ input_size 불일치 시 feature 재생성 시도
-            if meta.get("input_size") != input_size:
-                print(f"[⚠️ input_size 불일치] 모델 {mt} → feature 재생성 시도")
-                df = get_kline_by_strategy(symbol, strategy)
-                feat = compute_features(symbol, df, strategy)
-                features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
-                feat_scaled = MinMaxScaler().fit_transform(features_only)
-                if feat_scaled.shape[0] < window:
-                    print(f"[⚠️ 재생성 실패] window 부족 → skip")
+            X_input = feat_scaled[-window:]
+            X = np.expand_dims(X_input, axis=0)
+            input_size = X.shape[2]
+
+            models = get_available_models()
+            results, ensemble_probs, total_weight = [], None, 0.0
+
+            for m in models:
+                if m["symbol"] != symbol or m["strategy"] != strategy:
                     continue
-                X_input = feat_scaled[-window:]
-                X = np.expand_dims(X_input, axis=0)
-                input_size = X.shape[2]
+
+                mt = m["model"]
+                if model_type and mt != model_type:
+                    continue
+
+                model_path = os.path.join(MODEL_DIR, m["pt_file"])
+                meta_path = model_path.replace(".pt", ".meta.json")
+
+                if not os.path.exists(model_path) or not os.path.exists(meta_path):
+                    continue
+
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+
+                # ✅ input_size mismatch → window fallback 재시도
                 if meta.get("input_size") != input_size:
-                    print(f"[⚠️ 재생성 후 input_size 불일치 지속] 모델 {mt} → skip")
+                    print(f"[⚠️ input_size mismatch] {meta.get('input_size')} vs {input_size} → window fallback 재시도")
+                    retry += 1
+                    break  # while 재시도
+
+                weight = get_model_weight(mt, strategy, symbol, input_size=input_size)
+                if weight <= 0.0:
                     continue
 
-            weight = get_model_weight(mt, strategy, symbol, input_size=input_size)
-            if weight <= 0.0:
-                continue
+                if mt == "xgboost":
+                    try:
+                        model = get_model(mt, input_size=input_size, model_path=model_path)
+                        pred_class = int(model.predict(X)[0])
+                    except Exception as e:
+                        print(f"[XGBoost 예측 오류] {e}")
+                        continue
 
-            # ✅ XGBoostWrapper 처리
-            if mt == "xgboost":
-                try:
-                    model = get_model(mt, input_size=input_size, model_path=model_path)
-                    pred_class = int(model.predict(X)[0])
-                except Exception as e:
-                    print(f"[XGBoost 예측 오류] {e}")
+                    expected_return = class_to_expected_return(pred_class)
+                    label_val = pred_class
+
+                    log_prediction(
+                        symbol=symbol, strategy=strategy, direction=f"Class-{pred_class}",
+                        entry_price=df["close"].iloc[-1],
+                        target_price=df["close"].iloc[-1] * (1 + expected_return),
+                        model=mt, success=True, reason="XGBoost 예측 완료",
+                        rate=expected_return, timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+                        return_value=expected_return, volatility=True, source=source,
+                        predicted_class=pred_class, label=label_val
+                    )
+
+                    results.append({
+                        "symbol": symbol, "strategy": strategy, "model": mt,
+                        "class": pred_class, "expected_return": expected_return,
+                        "success": True, "predicted_class": pred_class,
+                        "label": label_val, "confidence": 1.0
+                    })
                     continue
 
+                # ✅ torch 모델 predict
+                model = get_model(mt, input_size, NUM_CLASSES).to(DEVICE)
+                state = torch.load(model_path, map_location=DEVICE)
+                model.load_state_dict(state)
+                model.eval()
+
+                with torch.no_grad():
+                    logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
+                    probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
+
+                if ensemble_probs is None:
+                    ensemble_probs = probs * weight
+                else:
+                    ensemble_probs += probs * weight
+                total_weight += weight
+
+                recent_freq = get_recent_class_frequencies(strategy=strategy)
+                class_counts = meta.get("class_counts", {}) or {}
+                adjusted_probs = adjust_probs_with_diversity(probs, recent_freq, class_counts)
+
+                pred_class = int(adjusted_probs.argmax())
                 expected_return = class_to_expected_return(pred_class)
                 label_val = pred_class
 
+                conf_score = 1 - entropy(probs) / np.log(len(probs))
+
                 log_prediction(
-                    symbol=symbol,
-                    strategy=strategy,
-                    direction=f"Class-{pred_class}",
+                    symbol=symbol, strategy=strategy, direction=f"Class-{pred_class}",
                     entry_price=df["close"].iloc[-1],
                     target_price=df["close"].iloc[-1] * (1 + expected_return),
-                    model=mt,
-                    success=True,
-                    reason="XGBoost 예측 완료",
-                    rate=expected_return,
-                    timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-                    return_value=expected_return,
-                    volatility=True,
-                    source=source,
-                    predicted_class=pred_class,
-                    label=label_val
+                    model=mt, success=True, reason=f"예측 완료 | confidence={conf_score:.4f}",
+                    rate=expected_return, timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+                    return_value=expected_return, volatility=True, source=source,
+                    predicted_class=pred_class, label=label_val
                 )
 
+                feature_hash = get_feature_hash(X_input)
+                insert_failure_record({
+                    "symbol": symbol, "strategy": strategy, "model": mt,
+                    "class": pred_class, "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
+                }, feature_hash, feature_vector=X_input, label=label_val)
+
                 results.append({
-                    "symbol": symbol,
-                    "strategy": strategy,
-                    "model": mt,
-                    "class": pred_class,
-                    "expected_return": expected_return,
-                    "success": True,
-                    "predicted_class": pred_class,
-                    "label": label_val,
-                    "confidence": 1.0  # XGBoost confidence dummy
+                    "symbol": symbol, "strategy": strategy, "model": mt,
+                    "class": pred_class, "expected_return": expected_return,
+                    "success": True, "predicted_class": pred_class,
+                    "label": label_val, "confidence": round(conf_score, 4)
                 })
-                continue
-
-            # ✅ 기존 torch 모델 처리
-            model = get_model(mt, input_size, NUM_CLASSES).to(DEVICE)
-            state = torch.load(model_path, map_location=DEVICE)
-            model.load_state_dict(state)
-            model.eval()
-
-            with torch.no_grad():
-                logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
-                probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
-
-            # ✅ ensemble weighted sum
-            if ensemble_probs is None:
-                ensemble_probs = probs * weight
             else:
-                ensemble_probs += probs * weight
-            total_weight += weight
-
-            recent_freq = get_recent_class_frequencies(strategy=strategy)
-            class_counts = meta.get("class_counts", {}) or {}
-            adjusted_probs = adjust_probs_with_diversity(probs, recent_freq, class_counts)
-
-            pred_class = int(adjusted_probs.argmax())
-            expected_return = class_to_expected_return(pred_class)
-            label_val = pred_class
-
-            conf_score = 1 - entropy(probs) / np.log(len(probs))  # ✅ confidence score
-
-            log_prediction(
-                symbol=symbol,
-                strategy=strategy,
-                direction=f"Class-{pred_class}",
-                entry_price=df["close"].iloc[-1],
-                target_price=df["close"].iloc[-1] * (1 + expected_return),
-                model=mt,
-                success=True,
-                reason=f"예측 완료 | confidence={conf_score:.4f}",
-                rate=expected_return,
-                timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-                return_value=expected_return,
-                volatility=True,
-                source=source,
-                predicted_class=pred_class,
-                label=label_val
-            )
-
-            feature_hash = get_feature_hash(X_input)
-            insert_failure_record({
-                "symbol": symbol,
-                "strategy": strategy,
-                "model": mt,
-                "class": pred_class,
-                "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
-            }, feature_hash, feature_vector=X_input, label=label_val)
-
-            results.append({
-                "symbol": symbol,
-                "strategy": strategy,
-                "model": mt,
-                "class": pred_class,
-                "expected_return": expected_return,
-                "success": True,
-                "predicted_class": pred_class,
-                "label": label_val,
-                "confidence": round(conf_score, 4)
-            })
+                # ✅ break 없이 끝났다면 while 루프 종료
+                break
 
         # ✅ ensemble 최종 결과 추가
         if ensemble_probs is not None and total_weight > 0:
@@ -315,20 +284,14 @@ def predict(symbol, strategy, source="일반", model_type=None):
             ensemble_return = class_to_expected_return(ensemble_class)
             conf_score = 1 - entropy(ensemble_probs) / np.log(len(ensemble_probs))
             results.append({
-                "symbol": symbol,
-                "strategy": strategy,
-                "model": "ensemble",
-                "class": ensemble_class,
-                "expected_return": ensemble_return,
-                "success": True,
-                "predicted_class": ensemble_class,
-                "label": ensemble_class,
-                "confidence": round(conf_score, 4)
+                "symbol": symbol, "strategy": strategy, "model": "ensemble",
+                "class": ensemble_class, "expected_return": ensemble_return,
+                "success": True, "predicted_class": ensemble_class,
+                "label": ensemble_class, "confidence": round(conf_score, 4)
             })
 
         if not results:
             return [failed_result(symbol, strategy, "unknown", "모델 예측 실패", source)]
-
         return results
 
     except Exception as e:
