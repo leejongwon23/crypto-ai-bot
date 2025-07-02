@@ -62,6 +62,7 @@ def create_dataset(features, window=20, strategy="단기"):
         raise Exception(msg)
 
     try:
+        # ✅ strategy 컬럼 drop 반영
         columns = [c for c in features[0].keys() if c != "timestamp" and c != "strategy"]
     except Exception as e:
         msg = f"[오류] features[0] 키 확인 실패 → {e}"
@@ -78,7 +79,7 @@ def create_dataset(features, window=20, strategy="단기"):
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["timestamp", "close", "high"]).sort_values("timestamp").reset_index(drop=True)
 
-    # ✅ strategy key drop 추가
+    # ✅ strategy 컬럼 drop
     df = df.drop(columns=["strategy"], errors="ignore")
 
     scaler = MinMaxScaler()
