@@ -3,6 +3,8 @@ import os
 import json
 from collections import defaultdict
 
+DB_PATH = "/persistent/logs/failure_patterns.db"
+
 def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
     if not isinstance(feature_hash, str) or feature_hash.strip() == "":
         return
