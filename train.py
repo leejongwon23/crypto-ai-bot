@@ -194,9 +194,16 @@ def balance_classes(X, y, min_count=20):
         print("[❌ balance_classes 실패] X 또는 y 비어있음")
         return X, y
 
-    # ✅ -1 라벨 제거
-    mask = y != -1
+    # ✅ y를 int64로 변환하여 타입 안정화
+    y = y.astype(np.int64)
+
+    # ✅ -1, NaN, inf 라벨 제거
+    mask = (y != -1) & np.isfinite(y)
     X, y = X[mask], y[mask]
+
+    # ✅ 제거 후 empty check
+    if len(y) == 0:
+        raise Exception("[❌ balance_classes 실패] 라벨 제거 후 샘플 없음")
 
     class_counts = Counter(y)
     print(f"[🔢 기존 클래스 분포] {dict(class_counts)}")
@@ -234,7 +241,7 @@ def balance_classes(X, y, min_count=20):
     X_shuffled, y_shuffled = zip(*combined)
 
     print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
-    return np.array(X_shuffled), np.array(y_shuffled)
+    return np.array(X_shuffled), np.array(y_shuffled, dtype=np.int64)
 
 
 def train_all_models():
