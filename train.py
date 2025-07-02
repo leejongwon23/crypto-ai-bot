@@ -78,10 +78,8 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
     except Exception as e:
         print(f"[ERROR] meta 저장 실패: {e}")
 
+
 def train_one_model(symbol, strategy, max_epochs=20):
-    """
-    ✅ [설명] 한 심볼-전략 모델 학습 수행
-    """
     import os, gc
     from focal_loss import FocalLoss
     print(f"▶ 학습 시작: {symbol}-{strategy}")
@@ -106,6 +104,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
         if X_raw is None or y_raw is None or len(X_raw) < 5:
             print("⛔ 중단: 학습 데이터 부족")
             return
+
+        # ✅ 희소 클래스 복제
+        X_raw, y_raw = balance_classes(X_raw, y_raw, min_count=20)
 
         y_raw, X_raw = np.array(y_raw), np.array(X_raw, dtype=np.float32)
         mask = (y_raw >= 0) & (y_raw < NUM_CLASSES)
@@ -141,7 +142,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         loss = lossfn(logits, yb)
                         if torch.isfinite(loss):
                             optimizer.zero_grad(); loss.backward(); optimizer.step()
-                # ✅ wrong_ds 메모리 해제 추가
                 del wrong_loader, wrong_ds
                 torch.cuda.empty_cache()
                 gc.collect()
@@ -167,13 +167,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 val_loss = lossfn(logits, yb).item()
                 print(f"[검증] {model_type} acc={acc:.4f}, f1={f1:.4f}")
 
-            # ✅ 메타 저장
             log_training_result(symbol, strategy, model_type, acc, f1, val_loss)
             torch.save(model.state_dict(), f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt")
             save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss,
                                 input_size=input_size, class_counts=Counter(y_train))
 
-            # ✅ feature importance 저장 (오류 무시)
             try:
                 imps = compute_feature_importance(model, xb, yb, list(df_feat.drop(columns=["timestamp"]).columns))
                 save_feature_importance(imps, symbol, strategy, model_type)
@@ -198,7 +196,6 @@ def balance_classes(X, y, min_count=20):
         print("[❌ balance_classes 실패] X 또는 y 비어있음")
         return X, y
 
-    # ✅ 수정: 라벨 -1 제거
     mask = y != -1
     X, y = X[mask], y[mask]
 
@@ -217,13 +214,13 @@ def balance_classes(X, y, min_count=20):
                 y_balanced.extend(y[reps])
                 print(f"[복제] 클래스 {cls} → {needed}개 추가")
 
-    # ✅ 셔플
     combined = list(zip(X_balanced, y_balanced))
     np.random.shuffle(combined)
     X_shuffled, y_shuffled = zip(*combined)
 
     print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
     return np.array(X_shuffled), np.array(y_shuffled)
+
 
 def train_all_models():
     """
