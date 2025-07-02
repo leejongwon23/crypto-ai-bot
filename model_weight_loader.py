@@ -11,6 +11,10 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
               else os.path.join(MODEL_DIR, f"*_{strategy}_{model_type}.meta.json")
     meta_files = glob.glob(pattern)
 
+    if not meta_files:
+        print(f"[⚠️ meta 파일 없음] {pattern} → weight=0")
+        return 0.0
+
     for meta_path in meta_files:
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
@@ -18,12 +22,12 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
 
             if input_size is not None and meta.get("input_size") != input_size:
                 print(f"[⚠️ input_size 불일치] {meta.get('input_size')} vs {input_size} → weight=0")
-                return 0.0
+                continue  # ✅ continue로 수정하여 다른 파일 탐색
 
             pt_path = meta_path.replace(".meta.json", ".pt")
             if not os.path.exists(pt_path):
                 print(f"[⚠️ 모델 파일 없음] {pt_path} → weight=0")
-                return 0.0
+                continue  # ✅ continue로 수정하여 다른 파일 탐색
 
             eval_files = sorted(glob.glob("/persistent/logs/evaluation_*.csv"))
             if not eval_files:
@@ -32,10 +36,15 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
 
             df_list = []
             for file in eval_files:
-                df = pd.read_csv(file, encoding="utf-8-sig")
-                df_list.append(df)
+                try:
+                    df = pd.read_csv(file, encoding="utf-8-sig")
+                    df_list.append(df)
+                except Exception as e:
+                    print(f"[⚠️ 평가 파일 읽기 실패] {file} → {e}")
+                    continue
 
             if not df_list:
+                print("[INFO] 평가 데이터 없음 → cold-start weight=0.2")
                 return 0.2
 
             df = pd.concat(df_list, ignore_index=True)
@@ -43,7 +52,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
                     (df["symbol"] == meta.get("symbol")) & (df["status"].isin(["success", "fail"]))]
 
             if len(df) < min_samples:
-                print("[INFO] 평가 샘플 부족 → weight=0.2")
+                print(f"[INFO] 평가 샘플 부족(len={len(df)}) → cold-start weight=0.2")
                 return 0.2
 
             success_rate = len(df[df["status"] == "success"]) / len(df)
@@ -60,7 +69,10 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
             print(f"[get_model_weight 예외] {e}")
             continue
 
-    return 0.0
+    # ✅ 모든 meta 파일 검사 후 조건 충족 weight 없으면 cold-start 반환
+    print("[INFO] 조건 충족 모델 없음 → cold-start weight=0.2")
+    return 0.2
+
 
 def model_exists(symbol, strategy):
     try:
