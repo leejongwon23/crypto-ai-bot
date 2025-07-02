@@ -62,7 +62,7 @@ def create_dataset(features, window=20, strategy="단기"):
         raise Exception(msg)
 
     try:
-        columns = [c for c in features[0].keys() if c != "timestamp"]
+        columns = [c for c in features[0].keys() if c != "timestamp" and c != "strategy"]
     except Exception as e:
         msg = f"[오류] features[0] 키 확인 실패 → {e}"
         print(msg)
@@ -78,6 +78,9 @@ def create_dataset(features, window=20, strategy="단기"):
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["timestamp", "close", "high"]).sort_values("timestamp").reset_index(drop=True)
 
+    # ✅ strategy key drop 추가
+    df = df.drop(columns=["strategy"], errors="ignore")
+
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(df.drop(columns=["timestamp"]))
     df_scaled = pd.DataFrame(scaled, columns=[c for c in df.columns if c != "timestamp"])
@@ -89,9 +92,9 @@ def create_dataset(features, window=20, strategy="단기"):
         (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
         (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
         (-0.03, -0.01), (-0.01, 0.01),
-        ( 0.01, 0.03), ( 0.03, 0.05), ( 0.05, 0.07), ( 0.07, 0.10),
-        ( 0.10, 0.15), ( 0.15, 0.20), ( 0.20, 0.30), ( 0.30, 0.60),
-        ( 0.60, 1.00), ( 1.00, 2.00), ( 2.00, 5.00)
+        (0.01, 0.03), (0.03, 0.05), (0.05, 0.07), (0.07, 0.10),
+        (0.10, 0.15), (0.15, 0.20), (0.20, 0.30), (0.30, 0.60),
+        (0.60, 1.00), (1.00, 2.00), (2.00, 5.00)
     ]
 
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
@@ -118,17 +121,12 @@ def create_dataset(features, window=20, strategy="단기"):
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
             gain = (max_future_price - entry_price) / (entry_price + 1e-6)
 
-            # ✅ 수정: gain 값 NaN 방지
             if pd.isnull(gain) or not np.isfinite(gain):
                 gain = 0.0
 
-            # ✅ 수정: 클래스 매핑 안정화
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), None)
             if cls is None:
-                if gain < class_ranges[0][0]:
-                    cls = 0
-                else:
-                    cls = len(class_ranges) - 1
+                cls = 0 if gain < class_ranges[0][0] else len(class_ranges) - 1
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
             if any(len(row) != len(columns) for row in sample):
