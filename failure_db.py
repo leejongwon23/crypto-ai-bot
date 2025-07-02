@@ -45,3 +45,17 @@ def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
             ))
     except Exception as e:
         print(f"[오류] insert_failure_record 실패 → {e}")
+
+def load_existing_failure_hashes():
+    import sqlite3
+    DB_PATH = "/persistent/logs/failure_patterns.db"
+
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute("SELECT hash FROM failure_patterns").fetchall()
+            # ✅ 무결성 검증 추가
+            valid_hashes = set(r[0] for r in rows if r and isinstance(r[0], str) and r[0].strip() != "")
+            return valid_hashes
+    except Exception as e:
+        print(f"[오류] 실패 해시 로드 실패 → {e}")
+        return set()
