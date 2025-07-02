@@ -129,7 +129,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                         volatility=False,
                         source=source,
                         predicted_class=pred_class_val,
-                        label=pred_class_val   # ✅ label=-1 추가
+                        label=pred_class_val
                     )
                     log_audit(symbol, strategy, result, reason)
                     continue
@@ -156,7 +156,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                     volatility=vol > 0,
                     source=result.get("source", source),
                     predicted_class=pred_class_val,
-                    label=pred_class_val   # ✅ 성공도 label 추가
+                    label=pred_class_val
                 )
                 log_audit(symbol, strategy, result, "예측 기록 완료")
 
@@ -209,6 +209,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
         evaluate_predictions(get_kline_by_strategy)
     except Exception as e:
         print(f"[ERROR] 평가 실패: {e}")
+
 
 
 def run_prediction(symbol, strategy):
