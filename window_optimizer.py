@@ -12,25 +12,26 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             print(f"[오류] window_list 타입 오류 → 기본값으로 대체")
             window_list = [10, 20, 30, 40]
 
+        # ✅ 최소 fallback window를 10으로 강제
+        min_window = max(min(window_list), 10)
+
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 20:
-            print(f"[경고] {symbol}-{strategy} → 데이터 부족으로 최소 window fallback")
-            best_window = min(window_list)
-            best_result = {"window": int(best_window), "accuracy": 0.0}
+            print(f"[경고] {symbol}-{strategy} → 데이터 부족으로 fallback window={min_window}")
+            best_result = {"window": int(min_window), "accuracy": 0.0}
             os.makedirs("/persistent/logs", exist_ok=True)
             with open(f"/persistent/logs/best_window_{symbol}_{strategy}.json", "w") as f:
                 json.dump(best_result, f, indent=2)
-            return int(best_window)
+            return int(min_window)
 
         df_feat = compute_features(symbol, df, strategy)
         if df_feat is None or df_feat.empty or df_feat.isnull().any().any() or len(df_feat) < max(window_list) + 10:
-            print(f"[경고] {symbol}-{strategy} → feature 부족 또는 NaN 포함으로 최소 window fallback")
-            best_window = min(window_list)
-            best_result = {"window": int(best_window), "accuracy": 0.0}
+            print(f"[경고] {symbol}-{strategy} → feature 부족 또는 NaN 포함으로 fallback window={min_window}")
+            best_result = {"window": int(min_window), "accuracy": 0.0}
             os.makedirs("/persistent/logs", exist_ok=True)
             with open(f"/persistent/logs/best_window_{symbol}_{strategy}.json", "w") as f:
                 json.dump(best_result, f, indent=2)
-            return int(best_window)
+            return int(min_window)
 
         drop_cols = ["timestamp"]
         if "strategy" in df_feat.columns:
@@ -42,7 +43,6 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             cols = df_feat.columns.drop(drop_cols)
             d = dict(zip(cols, row))
             d["timestamp"] = df_feat.iloc[i]["timestamp"]
-            # ✅ strategy key 제거 (모델 input feature에 불필요)
             feature_dicts.append(d)
 
         best_acc = -1
@@ -51,9 +51,14 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
 
         for window in window_list:
             try:
-                window = int(window)  # ✅ window를 int로 변환
+                window = int(window)
                 X, y = create_dataset(feature_dicts, window, strategy)
                 if X is None or y is None or len(X) == 0 or len(X) != len(y):
+                    continue
+
+                # ✅ 최소 5개 샘플 이상인지 확인
+                if len(X) < 5:
+                    print(f"[경고] window={window} 샘플수 부족(len={len(X)}) → skip")
                     continue
 
                 y = np.array(y)
@@ -97,8 +102,8 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 continue
 
         if best_acc < 0.1:
-            print(f"[경고] {symbol}-{strategy}: best_acc={best_acc:.4f} < 0.1 → fallback 최소 window 적용")
-            best_window = int(min(window_list))
+            print(f"[경고] {symbol}-{strategy}: best_acc={best_acc:.4f} < 0.1 → fallback window={min_window}")
+            best_window = int(min_window)
             best_result = {"window": best_window, "accuracy": float(round(best_acc, 4))}
 
         os.makedirs("/persistent/logs", exist_ok=True)
@@ -112,9 +117,10 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
 
     except Exception as e:
         print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
-        best_window = int(min(window_list))
+        best_window = int(min_window)
         best_result = {"window": best_window, "accuracy": 0.0}
         os.makedirs("/persistent/logs", exist_ok=True)
         with open(f"/persistent/logs/best_window_{symbol}_{strategy}.json", "w") as f:
             json.dump(best_result, f, indent=2)
         return best_window
+
