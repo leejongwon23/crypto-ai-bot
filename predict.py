@@ -353,7 +353,8 @@ def evaluate_predictions(get_price_fn):
         rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
         if not rows:
             return
-    except:
+    except Exception as e:
+        print(f"[오류] prediction_log.csv 읽기 실패 → {e}")
         return
 
     for r in rows:
@@ -362,8 +363,8 @@ def evaluate_predictions(get_price_fn):
                 updated.append(r)
                 continue
 
-            symbol = r["symbol"]
-            strategy = r["strategy"]
+            symbol = r.get("symbol", "UNKNOWN")
+            strategy = r.get("strategy", "알수없음")
             model = r.get("model", "unknown")
 
             try:
@@ -383,7 +384,7 @@ def evaluate_predictions(get_price_fn):
                 updated.append(r)
                 continue
 
-            timestamp = pd.to_datetime(r["timestamp"], utc=True).tz_convert("Asia/Seoul")
+            timestamp = pd.to_datetime(r.get("timestamp"), utc=True).tz_convert("Asia/Seoul")
             deadline = timestamp + pd.Timedelta(hours=eval_horizon_map.get(strategy, 6))
             now = now_kst()
             if now < deadline:
@@ -419,7 +420,6 @@ def evaluate_predictions(get_price_fn):
                      "v_fail" if not success and vol else \
                      "success" if success else "fail"
 
-            # ✅ confidence score 추가 (예: probs_max 필드)
             confidence = float(r.get("confidence", 0.0)) if "confidence" in r else 0.0
 
             r.update({
@@ -429,11 +429,11 @@ def evaluate_predictions(get_price_fn):
                 "confidence": confidence
             })
 
-            # ✅ None key 제거
-            r = {k: v for k, v in r.items() if k is not None}
+            # ✅ None key 제거 및 default value 처리
+            r_clean = {str(k): v if v is not None else "" for k, v in r.items() if k is not None}
 
             update_model_success(symbol, strategy, model, success)
-            evaluated.append(r)
+            evaluated.append(r_clean)
 
         except Exception as e:
             r.update({"status": "fail", "reason": f"예외: {e}", "return": 0.0})
@@ -442,14 +442,15 @@ def evaluate_predictions(get_price_fn):
     updated += evaluated
 
     if updated:
-        fieldnames = [k for k in updated[0].keys() if k is not None]
+        # ✅ fieldnames 동적 생성 후 None 제거
+        fieldnames = sorted({k for row in updated for k in row.keys() if k is not None})
         with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(updated)
 
     if evaluated:
-        fieldnames = [k for k in evaluated[0].keys() if k is not None]
+        fieldnames = sorted({k for row in evaluated for k in row.keys() if k is not None})
         with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
@@ -457,11 +458,12 @@ def evaluate_predictions(get_price_fn):
 
         failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
         if failed:
-            fieldnames = [k for k in failed[0].keys() if k is not None]
+            fieldnames = sorted({k for row in failed for k in row.keys() if k is not None})
             with open(WRONG, "a", newline="", encoding="utf-8-sig") as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(failed)
+
 
 
 def get_class_distribution(symbol, strategy, model_type):
