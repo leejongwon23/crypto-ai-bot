@@ -194,6 +194,7 @@ def balance_classes(X, y, min_count=20):
         print("[❌ balance_classes 실패] X 또는 y 비어있음")
         return X, y
 
+    # ✅ -1 라벨 제거
     mask = y != -1
     X, y = X[mask], y[mask]
 
@@ -202,7 +203,7 @@ def balance_classes(X, y, min_count=20):
 
     X_balanced, y_balanced = list(X), list(y)
 
-    # ✅ max_class_count 계산
+    # ✅ max_class_count 계산 후 target_count = max(min_count, max_count * 0.8)
     max_count = max(class_counts.values()) if class_counts else 0
     target_count = max(min_count, int(max_count * 0.8))
 
@@ -220,19 +221,21 @@ def balance_classes(X, y, min_count=20):
                 y_balanced.extend(y[reps])
                 print(f"[복제] 클래스 {cls} → {needed}개 추가")
             else:
-                # ✅ 없는 클래스도 noise sample 추가 (zero array)
+                # ✅ 없는 클래스는 zero noise sample 추가
                 sample_shape = X[0].shape
                 noise_samples = np.zeros((needed,) + sample_shape, dtype=np.float32)
                 X_balanced.extend(noise_samples)
                 y_balanced.extend([cls] * needed)
                 print(f"[추가] 클래스 {cls} → {needed}개 noise sample 생성")
 
+    # ✅ 최종 셔플
     combined = list(zip(X_balanced, y_balanced))
     np.random.shuffle(combined)
     X_shuffled, y_shuffled = zip(*combined)
 
     print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
     return np.array(X_shuffled), np.array(y_shuffled)
+
 
 
 def train_all_models():
