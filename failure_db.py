@@ -1,3 +1,8 @@
+import sqlite3
+import os
+import json
+from collections import defaultdict
+
 def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
     if not isinstance(feature_hash, str) or feature_hash.strip() == "":
         return
