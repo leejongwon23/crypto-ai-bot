@@ -6,7 +6,7 @@ import glob
 MODEL_DIR = "/persistent/models"
 EVAL_RESULT = "/persistent/evaluation_result.csv"
 
-def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_size=None):  # ✅ min_samples 기본값 3으로 완화
+def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_size=None):  # ✅ min_samples=3 완화
     pattern = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json") if symbol != "ALL" \
               else os.path.join(MODEL_DIR, f"*_{strategy}_{model_type}.meta.json")
     meta_files = glob.glob(pattern)
@@ -71,8 +71,6 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
 
     print("[INFO] 조건 충족 모델 없음 → cold-start weight=0.2")
     return 0.2
-
-
 
 def model_exists(symbol, strategy):
     try:
