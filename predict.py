@@ -177,7 +177,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
+
+            # ✅ input_size 불일치 fallback
             if meta.get("input_size") != input_size:
+                print(f"[⚠️ input_size 불일치] 모델 {mt} → skip")
                 continue
 
             weight = get_model_weight(mt, strategy, symbol, input_size=input_size)
@@ -186,8 +189,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
             # ✅ XGBoostWrapper 처리
             if mt == "xgboost":
-                model = get_model(mt, input_size=input_size, model_path=model_path)
-                pred_class = int(model.predict(X)[0])
+                try:
+                    model = get_model(mt, input_size=input_size, model_path=model_path)
+                    pred_class = int(model.predict(X)[0])
+                except Exception as e:
+                    print(f"[XGBoost 예측 오류] {e}")
+                    continue
+
                 expected_return = class_to_expected_return(pred_class)
                 label_val = pred_class
 
@@ -314,7 +322,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
     except Exception as e:
         print(f"[predict 예외] {e}")
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
-
 
 
 # 📄 predict.py 내부에 추가
