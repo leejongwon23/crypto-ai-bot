@@ -141,6 +141,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         print(f"[오류] 통합 로그 기록 실패 → {e}")
 
 
+
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
 
