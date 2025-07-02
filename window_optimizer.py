@@ -6,13 +6,6 @@ from model.base_model import get_model
 from config import NUM_CLASSES
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
-    import os, json, torch, numpy as np, pandas as pd
-    from sklearn.preprocessing import MinMaxScaler
-    from sklearn.metrics import accuracy_score
-    from data.utils import get_kline_by_strategy, compute_features, create_dataset
-    from model.base_model import get_model
-    from config import NUM_CLASSES
-
     try:
         if not isinstance(window_list, list) or not all(isinstance(w, (int, float)) for w in window_list):
             print(f"[오류] window_list 타입 오류 → 기본값으로 대체")
@@ -121,5 +114,3 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     except Exception as e:
         print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
         return min_window
-
-
