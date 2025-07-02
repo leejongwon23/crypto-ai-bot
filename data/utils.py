@@ -157,22 +157,26 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     config = STRATEGY_CONFIG.get(strategy)
     if config is None:
         print(f"[오류] 전략 설정 없음: {strategy}")
-        return None
+        # ✅ fallback: 빈 DataFrame 반환
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
     df = get_kline(symbol, interval=config["interval"], limit=config["limit"])
     if df is None or not isinstance(df, pd.DataFrame):
         print(f"[❌ 실패] {symbol}-{strategy}: get_kline() → None 또는 형식 오류")
-        return None
+        # ✅ fallback: 빈 DataFrame 반환
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
     required_cols = ["open", "high", "low", "close", "volume", "timestamp"]
     missing_or_nan = [col for col in required_cols if col not in df.columns or df[col].isnull().any()]
     if missing_or_nan:
         print(f"[❌ 실패] {symbol}-{strategy}: 필수 컬럼 누락 또는 NaN 존재: {missing_or_nan}")
-        return None
+        # ✅ fallback: 빈 DataFrame 반환
+        return pd.DataFrame(columns=required_cols)
 
     print(f"[확인] {symbol}-{strategy}: 데이터 {len(df)}개 확보")
     _kline_cache[cache_key] = df
     return df
+
 
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 300) -> pd.DataFrame:
