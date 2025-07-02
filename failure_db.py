@@ -9,7 +9,6 @@ def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
     if not isinstance(feature_hash, str) or feature_hash.strip() == "":
         return
 
-    # ✅ feature_vector 저장 전 타입 변환 및 fallback 안전화
     if feature_vector is not None:
         try:
             if hasattr(feature_vector, "tolist"):
@@ -23,7 +22,6 @@ def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
         except:
             feature_vector = None
 
-    # ✅ label None 처리 → default -1
     if label is not None:
         try:
             label = int(label)
@@ -54,13 +52,9 @@ def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
         print(f"[오류] insert_failure_record 실패 → {e}")
 
 def load_existing_failure_hashes():
-    import sqlite3
-    DB_PATH = "/persistent/logs/failure_patterns.db"
-
     try:
         with sqlite3.connect(DB_PATH) as conn:
             rows = conn.execute("SELECT hash FROM failure_patterns").fetchall()
-            # ✅ 무결성 검증 추가
             valid_hashes = set(r[0] for r in rows if r and isinstance(r[0], str) and r[0].strip() != "")
             return valid_hashes
     except Exception as e:
