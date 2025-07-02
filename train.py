@@ -228,7 +228,7 @@ def balance_classes(X, y, min_count=20):
                 y_balanced.extend(y[reps])
                 print(f"[복제] 클래스 {cls} → {needed}개 추가")
             else:
-                # ✅ 없는 클래스는 zero noise sample 추가
+                # ✅ 없는 클래스는 zero noise sample 추가 (label 안정화)
                 sample_shape = X[0].shape
                 noise_samples = np.zeros((needed,) + sample_shape, dtype=np.float32)
                 X_balanced.extend(noise_samples)
@@ -242,7 +242,6 @@ def balance_classes(X, y, min_count=20):
 
     print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
     return np.array(X_shuffled), np.array(y_shuffled, dtype=np.int64)
-
 
 def train_all_models():
     """
