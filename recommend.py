@@ -52,11 +52,8 @@ def get_symbols_by_volatility(strategy):
                 continue
             r_std = df["close"].pct_change().rolling(20).std().iloc[-1]
             b_std = df["close"].pct_change().rolling(60).std().iloc[-1]
-
-            # ✅ 전략별 절대 기준 + 상대 변화율 동시 적용
             is_volatile = r_std >= th
             is_rising = (r_std / (b_std + 1e-8)) >= 1.2
-
             if is_volatile and is_rising:
                 result.append({"symbol": symbol, "volatility": r_std})
         except Exception as e:
@@ -84,8 +81,6 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             ])
             if model_count == 0:
                 log_audit(symbol, strategy, None, "모델 없음")
-                
-                # ✅ log_prediction 실패 기록 추가
                 log_prediction(
                     symbol=symbol,
                     strategy=strategy,
@@ -113,7 +108,6 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                 if not isinstance(result, dict) or result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
                     reason = result.get("reason", "예측 실패") if isinstance(result, dict) else "predict() 반환 오류"
                     pred_class_val = -1
-
                     log_prediction(
                         symbol=symbol,
                         strategy=strategy,
@@ -138,7 +132,6 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                 result["return"] = result.get("expected_return", 0.0)
                 result["source"] = result.get("source", source)
                 result["predicted_class"] = result.get("class", -1)
-
                 pred_class_val = result.get("class", -1)
 
                 log_prediction(
@@ -170,37 +163,6 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
             log_audit(symbol, strategy, None, f"예측 예외: {e}")
 
-    for key, classes in class_distribution.items():
-        symbol, strat = key.split("-")
-        from collections import Counter
-        class_counts = Counter(classes)
-        if len(class_counts) <= 2:
-            print(f"[편향 감지] {key} → 예측 클래스 다양성 부족 → fine-tune 트리거")
-            try:
-                threading.Thread(
-                    target=train.train_model,
-                    args=(symbol, strat),
-                    daemon=True
-                ).start()
-            except Exception as e:
-                print(f"[오류] fine-tune 실패: {e}")
-
-    for strat in ["단기", "중기", "장기"]:
-        stat = strategy_stats.get(strat, {"success": 0, "fail": 0})
-        total = stat["success"] + stat["fail"]
-        if total < 5: continue
-        fail_ratio = stat["fail"] / total
-        if fail_ratio >= 0.6:
-            print(f"[fine-tune 트리거] {strat} → 실패율 {fail_ratio:.2%} → fine-tune 실행")
-            try:
-                threading.Thread(
-                    target=train.train_model_loop,
-                    args=(strat,),
-                    daemon=True
-                ).start()
-            except Exception as e:
-                print(f"[오류] {strat} fine-tune 실패: {e}")
-
     save_failure_count(fmap)
 
     try:
@@ -210,8 +172,6 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
     except Exception as e:
         print(f"[ERROR] 평가 실패: {e}")
 
-
-
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
 
@@ -220,12 +180,10 @@ def run_prediction(symbol, strategy):
         pt_file = f"{symbol}_{strategy}_{mt}.pt"
         meta_file = f"{symbol}_{strategy}_{mt}.meta.json"
         if os.path.exists(os.path.join(MODEL_DIR, pt_file)) and os.path.exists(os.path.join(MODEL_DIR, meta_file)):
-            # ✅ model_type을 predict()에 전달
             run_prediction_loop(strategy, [{"symbol": symbol, "model_type": mt}], source="단일", allow_prediction=True)
             return
 
     print(f"[run_prediction 오류] {symbol}-{strategy} 가능한 모델 없음")
-    from logger import log_prediction
     log_prediction(
         symbol=symbol,
         strategy=strategy,
@@ -243,38 +201,22 @@ def run_prediction(symbol, strategy):
         predicted_class=-1
     )
 
-    # ✅ model_type 지정 → predict 함수에 정확히 반영되도록 전달
-    run_prediction_loop(strategy, [{"symbol": symbol}], source="단일", allow_prediction=True)
-
 def main(strategy=None, symbol=None, force=False, allow_prediction=True):
     print(">>> [main] recommend.py 실행")
-
-    # ✅ 디스크 사용량 체크
     check_disk_usage(threshold_percent=90)
-
     targets = [strategy] if strategy else ["단기", "중기", "장기"]
-    from data.utils import SYMBOLS  # ✅ SYMBOLS 전체 사용
+    from data.utils import SYMBOLS
 
     for s in targets:
         symbols_list = []
         if symbol:
-            # ✅ 단일 심볼만 예측
-            symbols_list.append({
-                "symbol": symbol,
-                "volatility": 0.0
-            })
+            symbols_list.append({"symbol": symbol, "volatility": 0.0})
         else:
             for sym in SYMBOLS:
-                symbols_list.append({
-                    "symbol": sym,
-                    "volatility": 0.0
-                })
-
+                symbols_list.append({"symbol": sym, "volatility": 0.0})
         run_prediction_loop(s, symbols_list, source="일반", allow_prediction=allow_prediction)
 
 import shutil
-
-
 def check_disk_usage(threshold_percent=90):
     try:
         total, used, free = shutil.disk_usage("/persistent")
