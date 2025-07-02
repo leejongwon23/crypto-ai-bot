@@ -22,12 +22,12 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
 
             if input_size is not None and meta.get("input_size") != input_size:
                 print(f"[⚠️ input_size 불일치] {meta.get('input_size')} vs {input_size} → weight=0")
-                continue  # ✅ continue로 수정하여 다른 파일 탐색
+                continue
 
             pt_path = meta_path.replace(".meta.json", ".pt")
             if not os.path.exists(pt_path):
                 print(f"[⚠️ 모델 파일 없음] {pt_path} → weight=0")
-                continue  # ✅ continue로 수정하여 다른 파일 탐색
+                continue
 
             eval_files = sorted(glob.glob("/persistent/logs/evaluation_*.csv"))
             if not eval_files:
@@ -52,8 +52,13 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
                     (df["symbol"] == meta.get("symbol")) & (df["status"].isin(["success", "fail"]))]
 
             if len(df) < min_samples:
-                print(f"[INFO] 평가 샘플 부족(len={len(df)}) → cold-start weight=0.2")
-                return 0.2
+                # ✅ min_samples < 10 이면 weight=0.5 반환 (학습 초기 가중치 부여)
+                if min_samples < 10:
+                    print(f"[INFO] 평가 샘플 부족(len={len(df)} < {min_samples}) → weight=0.5")
+                    return 0.5
+                else:
+                    print(f"[INFO] 평가 샘플 부족(len={len(df)}) → cold-start weight=0.2")
+                    return 0.2
 
             success_rate = len(df[df["status"] == "success"]) / len(df)
             if success_rate >= 0.7:
@@ -69,7 +74,6 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=10, input_s
             print(f"[get_model_weight 예외] {e}")
             continue
 
-    # ✅ 모든 meta 파일 검사 후 조건 충족 weight 없으면 cold-start 반환
     print("[INFO] 조건 충족 모델 없음 → cold-start weight=0.2")
     return 0.2
 
