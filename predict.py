@@ -347,7 +347,7 @@ def evaluate_predictions(get_price_fn):
     import csv, os, datetime, pytz
     import pandas as pd
     from failure_db import ensure_failure_db
-    from logger import update_model_success
+    from logger import update_model_success, log_prediction
 
     ensure_failure_db()
 
@@ -391,6 +391,28 @@ def evaluate_predictions(get_price_fn):
                 pred_class = int(float(r.get("predicted_class", -1)))
             except:
                 pred_class = -1
+
+            # ✅ pred_class == -1 은 실패 기록 후 평가 제외
+            if pred_class == -1:
+                log_prediction(
+                    symbol=symbol,
+                    strategy=strategy,
+                    direction="예측실패",
+                    entry_price=0,
+                    target_price=0,
+                    timestamp=now_kst().isoformat(),
+                    model=model,
+                    success=False,
+                    reason="pred_class=-1",
+                    rate=0.0,
+                    return_value=0.0,
+                    volatility=False,
+                    source="평가",
+                    predicted_class=-1,
+                    label=-1
+                )
+                updated.append(r)
+                continue
 
             try:
                 entry_price = float(r.get("entry_price", 0))
@@ -482,6 +504,7 @@ def evaluate_predictions(get_price_fn):
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(failed)
+
 
 
 def get_class_distribution(symbol, strategy, model_type):
