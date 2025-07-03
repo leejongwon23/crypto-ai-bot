@@ -383,7 +383,6 @@ def evaluate_predictions(get_price_fn):
             except:
                 pred_class = -1
 
-            # ✅ label 처리: 없는 경우 -1 fallback
             label_raw = r.get("label", -1)
             try:
                 label = int(float(label_raw)) if pd.notnull(label_raw) else -1
@@ -391,7 +390,6 @@ def evaluate_predictions(get_price_fn):
                 label = -1
             r["label"] = label
 
-            # ✅ pred_class == -1 은 실패 기록 후 평가 제외
             if pred_class == -1:
                 log_prediction(
                     symbol=symbol,
@@ -452,7 +450,8 @@ def evaluate_predictions(get_price_fn):
             if 0 <= pred_class < len(class_ranges):
                 cls_min, cls_max = class_ranges[pred_class]
             else:
-                cls_min, cls_max = class_ranges[0]  # ✅ fallback to cls=0
+                cls_min, cls_max = -999, 999
+                pred_class = -1  # ✅ fallback 처리
                 success = False
 
             success = gain >= cls_min
