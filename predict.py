@@ -306,7 +306,6 @@ import pandas as pd
 from failure_db import ensure_failure_db, insert_failure_record
 from logger import update_model_success
 
-
 def evaluate_predictions(get_price_fn):
     import csv, os, datetime, pytz
     import pandas as pd
@@ -356,9 +355,10 @@ def evaluate_predictions(get_price_fn):
             except:
                 pred_class = -1
 
-            # ✅ label 처리: None, NaN, int 변환 실패 시 -1
+            # ✅ label 처리: 없는 경우 -1 fallback
+            label_raw = r.get("label", -1)
             try:
-                label = int(float(r.get("label", -1)))
+                label = int(float(label_raw)) if pd.notnull(label_raw) else -1
             except:
                 label = -1
             r["label"] = label
@@ -475,7 +475,6 @@ def evaluate_predictions(get_price_fn):
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(failed)
-
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
