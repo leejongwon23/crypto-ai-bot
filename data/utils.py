@@ -261,6 +261,10 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
         print(f"[캐시 사용] {cache_key} 피처")
         return _feature_cache[cache_key]
 
+    if df is None or df.empty:
+        print(f"[❌ compute_features 실패] 입력 DataFrame empty")
+        return pd.DataFrame(columns=["timestamp", "strategy", "close", "high"])
+
     df = df.copy()
 
     if "datetime" in df.columns:
@@ -268,44 +272,44 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     elif "timestamp" not in df.columns:
         df["timestamp"] = pd.to_datetime("now")
 
-    # ✅ strategy 컬럼 추가
     df["strategy"] = strategy
 
-    # ✅ Feature 계산 추가
-    df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
-    delta = df["close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=1).mean()
-    rs = gain / (loss + 1e-6)
-    df["rsi"] = 100 - (100 / (1 + rs))
-    ema12 = df["close"].ewm(span=12, adjust=False).mean()
-    ema26 = df["close"].ewm(span=26, adjust=False).mean()
-    df["macd"] = ema12 - ema26
-    df["bollinger"] = df["close"].rolling(window=20, min_periods=1).std()
-    df["volatility"] = df["high"] - df["low"]
-    df["trend_score"] = (df["close"] > df["ma20"]).astype(int)
-    min14 = df["close"].rolling(window=14, min_periods=1).min()
-    max14 = df["close"].rolling(window=14, min_periods=1).max()
-    df["stoch_rsi"] = (df["close"] - min14) / (max14 - min14 + 1e-6)
-    typical = (df["high"] + df["low"] + df["close"]) / 3
-    ma_typical = typical.rolling(window=20, min_periods=1).mean()
-    md = (typical - ma_typical).abs().rolling(window=20, min_periods=1).mean()
-    df["cci"] = (typical - ma_typical) / (0.015 * md + 1e-6)
-    df["obv"] = (np.sign(df["close"].diff()) * df["volume"]).fillna(0).cumsum()
+    try:
+        df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
+        delta = df["close"].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=1).mean()
+        rs = gain / (loss + 1e-6)
+        df["rsi"] = 100 - (100 / (1 + rs))
+        ema12 = df["close"].ewm(span=12, adjust=False).mean()
+        ema26 = df["close"].ewm(span=26, adjust=False).mean()
+        df["macd"] = ema12 - ema26
+        df["bollinger"] = df["close"].rolling(window=20, min_periods=1).std()
+        df["volatility"] = df["high"] - df["low"]
+        df["trend_score"] = (df["close"] > df["ma20"]).astype(int)
+        min14 = df["close"].rolling(window=14, min_periods=1).min()
+        max14 = df["close"].rolling(window=14, min_periods=1).max()
+        df["stoch_rsi"] = (df["close"] - min14) / (max14 - min14 + 1e-6)
+        typical = (df["high"] + df["low"] + df["close"]) / 3
+        ma_typical = typical.rolling(window=20, min_periods=1).mean()
+        md = (typical - ma_typical).abs().rolling(window=20, min_periods=1).mean()
+        df["cci"] = (typical - ma_typical) / (0.015 * md + 1e-6)
+        df["obv"] = (np.sign(df["close"].diff()) * df["volume"]).fillna(0).cumsum()
 
-    # ✅ 중기, 장기 추가 feature 계산
-    if strategy == "중기":
-        df["ema_cross"] = ema12 > ema26
-    elif strategy == "장기":
-        df["volume_cumsum"] = df["volume"].cumsum()
-        df["roc"] = df["close"].pct_change(periods=10)
-        df["mfi"] = df["volume"] / (df["high"] - df["low"] + 1e-6)
+        if strategy == "중기":
+            df["ema_cross"] = ema12 > ema26
+        elif strategy == "장기":
+            df["volume_cumsum"] = df["volume"].cumsum()
+            df["roc"] = df["close"].pct_change(periods=10)
+            df["mfi"] = df["volume"] / (df["high"] - df["low"] + 1e-6)
 
-    # ✅ NaN, inf 방지
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    df.fillna(0, inplace=True)
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df.fillna(0, inplace=True)
 
-    # ✅ 필요한 컬럼만 선택
+    except Exception as e:
+        print(f"[❌ compute_features 예외] feature 계산 실패 → {e}")
+        return pd.DataFrame(columns=["timestamp", "strategy", "close", "high"])
+
     base = [
         "timestamp", "strategy", "open", "high", "low", "close", "volume",
         "ma20", "rsi", "macd", "bollinger", "volatility",
@@ -321,13 +325,17 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     required_cols = ["timestamp", "close", "high"]
     missing_cols = [col for col in required_cols if col not in df.columns or df[col].isnull().any()]
     if missing_cols or df.empty:
-        print(f"[❌ compute_features 실패] 필수 컬럼 누락 또는 NaN 존재: {missing_cols}")
-        # ✅ fallback: 최소 컬럼만 가진 빈 DataFrame 반환
+        print(f"[❌ compute_features 실패] 필수 컬럼 누락 또는 NaN 존재: {missing_cols}, rows={len(df)}")
         return pd.DataFrame(columns=required_cols + ["strategy"])
 
-    print(f"[완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
+    if len(df) < 5:
+        print(f"[❌ compute_features 실패] 데이터 row 부족 ({len(df)} rows)")
+        return pd.DataFrame(columns=required_cols + ["strategy"])
+
+    print(f"[✅ 완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     _feature_cache[cache_key] = df
     return df
+
 
 
 
