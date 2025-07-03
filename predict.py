@@ -74,6 +74,12 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     pred_class_val = -1
     label_val = -1  # ✅ 실패시 label=-1 통일
 
+    # ✅ 타입 강제 고정
+    if not isinstance(pred_class_val, int):
+        pred_class_val = -1
+    if not isinstance(label_val, int):
+        label_val = -1
+
     try:
         log_prediction(
             symbol=symbol,
@@ -90,7 +96,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             volatility=True,
             source=source,
             predicted_class=pred_class_val,
-            label=label_val  # ✅ 통일된 label=-1
+            label=label_val
         )
     except:
         pass
@@ -117,6 +123,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             pass
 
     return result
+
 
 def predict(symbol, strategy, source="일반", model_type=None):
     import os, json, torch, numpy as np, pandas as pd, datetime, pytz, sys
