@@ -269,6 +269,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
 
     if df is None or df.empty:
         print(f"[❌ compute_features 실패] 입력 DataFrame empty")
+        failed_result(symbol, strategy, reason="입력DataFrame empty")
         return pd.DataFrame(columns=["timestamp", "strategy", "close", "high"])
 
     df = df.copy()
@@ -314,6 +315,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
 
     except Exception as e:
         print(f"[❌ compute_features 예외] feature 계산 실패 → {e}")
+        failed_result(symbol, strategy, reason=f"feature 계산 실패: {e}")
         return pd.DataFrame(columns=["timestamp", "strategy", "close", "high"])
 
     base = [
@@ -332,17 +334,17 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     missing_cols = [col for col in required_cols if col not in df.columns or df[col].isnull().any()]
     if missing_cols or df.empty:
         print(f"[❌ compute_features 실패] 필수 컬럼 누락 또는 NaN 존재: {missing_cols}, rows={len(df)}")
+        failed_result(symbol, strategy, reason=f"필수컬럼누락 또는 NaN: {missing_cols}")
         return pd.DataFrame(columns=required_cols + ["strategy"])
 
     if len(df) < 5:
         print(f"[❌ compute_features 실패] 데이터 row 부족 ({len(df)} rows)")
+        failed_result(symbol, strategy, reason="row 부족")
         return pd.DataFrame(columns=required_cols + ["strategy"])
 
     print(f"[✅ 완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     _feature_cache[cache_key] = df
     return df
-
-
 
 
 # data/utils.py 맨 아래에 추가
