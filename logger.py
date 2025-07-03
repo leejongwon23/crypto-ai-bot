@@ -123,27 +123,22 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "label": str(label)
     }
 
-    # ✅ None key 제거
-    row = {k: v for k, v in row.items() if k is not None}
+    # ✅ dict key None 제거 + str 변환
+    row = {str(k): (v if v is not None else "") for k, v in row.items() if k is not None}
+
+    # ✅ fieldnames 일관화
+    fieldnames = sorted(row.keys())
 
     # ✅ 로깅: 날짜별 로그 + 통합 로그
-    try:
-        with open(dated_path, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=row.keys())
-            if f.tell() == 0:
-                w.writeheader()
-            w.writerow(row)
-    except Exception as e:
-        print(f"[오류] 날짜별 로그 기록 실패 → {e}")
-
-    try:
-        with open(full_path, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=row.keys())
-            if f.tell() == 0:
-                w.writeheader()
-            w.writerow(row)
-    except Exception as e:
-        print(f"[오류] 통합 로그 기록 실패 → {e}")
+    for path in [dated_path, full_path]:
+        try:
+            with open(path, "a", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                if f.tell() == 0:
+                    writer.writeheader()
+                writer.writerow(row)
+        except Exception as e:
+            print(f"[오류] 로그 기록 실패 ({path}) → {e}")
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
