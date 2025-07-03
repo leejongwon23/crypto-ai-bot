@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 import time
 import pytz
-from predict import failed_result
+
 
 BASE_URL = "https://api.bybit.com"
 BTC_DOMINANCE_CACHE = {"value": 0.5, "timestamp": 0}
@@ -156,6 +156,8 @@ def create_dataset(features, window=20, strategy="단기"):
  
 
 def get_kline_by_strategy(symbol: str, strategy: str):
+    from predict import failed_result
+
     global _kline_cache
     cache_key = f"{symbol}-{strategy}"
     if cache_key in _kline_cache:
