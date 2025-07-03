@@ -23,6 +23,12 @@ def class_to_expected_return(cls, recent_days=3):
     import pandas as pd
     import numpy as np
 
+    # ✅ cls 타입 강제 변환
+    try:
+        cls = int(cls)
+    except:
+        cls = -1
+
     try:
         df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
@@ -31,38 +37,33 @@ def class_to_expected_return(cls, recent_days=3):
         df = df[df["predicted_class"].notna() & df["return"].notna()]
         df["predicted_class"] = df["predicted_class"].astype(int)
 
-        # ✅ 최근 n일간 클래스별 평균 수익률 계산
         centers_dynamic = df.groupby("predicted_class")["return"].mean().to_dict()
 
-        # ✅ 기본 centers (fallback)
         centers_default = [
             -0.80, -0.45, -0.25, -0.175, -0.125, -0.085, -0.06, -0.04,
             -0.02, 0.0, 0.02, 0.04, 0.06, 0.085, 0.125, 0.175, 0.25, 0.40,
             0.75, 1.50, 3.50
         ]
 
-        # ✅ cls 범위 안전 체크 및 반환 로직 강화
-        if isinstance(cls, int) and 0 <= cls < len(centers_default):
+        if 0 <= cls < len(centers_default):
             if cls in centers_dynamic and np.isfinite(centers_dynamic[cls]):
                 return centers_dynamic[cls]
             else:
                 return centers_default[cls]
 
         print(f"[⚠️ 예상 수익률 계산 오류] 잘못된 클래스: {cls}")
-        return 0.0
+        return centers_default[0]  # ✅ fallback 첫 번째 값으로 강제
 
     except Exception as e:
         print(f"[오류] class_to_expected_return 동적 매핑 실패 → {e}")
-        # ✅ 실패 시 기본 centers 반환
         centers_default = [
             -0.80, -0.45, -0.25, -0.175, -0.125, -0.085, -0.06, -0.04,
             -0.02, 0.0, 0.02, 0.04, 0.06, 0.085, 0.125, 0.175, 0.25, 0.40,
             0.75, 1.50, 3.50
         ]
-        if isinstance(cls, int) and 0 <= cls < len(centers_default):
+        if 0 <= cls < len(centers_default):
             return centers_default[cls]
-        return 0.0
-
+        return centers_default[0]
 
 
 # ✅ 수정 요약:
