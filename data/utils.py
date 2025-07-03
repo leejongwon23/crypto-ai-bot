@@ -263,6 +263,7 @@ def get_realtime_prices():
 _feature_cache = {}
 
 def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFrame:
+    from predict import failed_result
     global _feature_cache
     cache_key = f"{symbol}-{strategy}"
     if cache_key in _feature_cache:
