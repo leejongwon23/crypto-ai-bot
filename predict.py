@@ -431,10 +431,11 @@ def evaluate_predictions(get_price_fn):
 
             if 0 <= pred_class < len(class_ranges):
                 cls_min, cls_max = class_ranges[pred_class]
-                success = gain >= cls_min
             else:
-                cls_min, cls_max = -999, 999
+                cls_min, cls_max = class_ranges[0]  # ✅ fallback to cls=0
                 success = False
+
+            success = gain >= cls_min
 
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
             status = "v_success" if vol and success else \
@@ -448,7 +449,7 @@ def evaluate_predictions(get_price_fn):
                 "reason": f"[cls={pred_class}] class_range=({cls_min:.3f}~{cls_max:.3f}), gain={gain:.3f}",
                 "return": round(gain, 5),
                 "confidence": confidence,
-                "label": label  # ✅ 평가 결과에도 label 유지
+                "label": label
             })
 
             r_clean = {str(k): v if v is not None else "" for k, v in r.items() if k is not None}
@@ -483,6 +484,7 @@ def evaluate_predictions(get_price_fn):
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(failed)
+
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
