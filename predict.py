@@ -349,55 +349,26 @@ def evaluate_predictions(get_price_fn):
             strategy = r.get("strategy", "알수없음")
             model = r.get("model", "unknown")
 
-            try:
-                pred_class = int(float(r.get("predicted_class", -1)))
-            except:
-                pred_class = -1
-
-            label_raw = r.get("label", -1)
-            try:
-                label = int(float(label_raw)) if pd.notnull(label_raw) else -1
-            except:
-                label = -1
+            pred_class = int(float(r.get("predicted_class", -1))) if pd.notnull(r.get("predicted_class")) else -1
+            label = int(float(r.get("label", -1))) if pd.notnull(r.get("label")) else -1
             r["label"] = label
 
             if pred_class == -1:
-                log_prediction(
-                    symbol=symbol,
-                    strategy=strategy,
-                    direction="예측실패",
-                    entry_price=0,
-                    target_price=0,
-                    timestamp=now_kst().isoformat(),
-                    model=model,
-                    success=False,
-                    reason="pred_class=-1",
-                    rate=0.0,
-                    return_value=0.0,
-                    volatility=False,
-                    source="평가",
-                    predicted_class=-1,
-                    label=label
-                )
+                log_prediction(symbol, strategy, "예측실패", 0, 0, now_kst().isoformat(),
+                               model, False, "pred_class=-1", 0.0, 0.0, False, "평가",
+                               predicted_class=-1, label=label)
                 updated.append(r)
                 continue
 
-            try:
-                entry_price = float(r.get("entry_price", 0))
-            except:
-                r.update({"status": "fail", "reason": "entry_price 오류", "return": 0.0})
-                updated.append(r)
-                continue
-
+            entry_price = float(r.get("entry_price", 0))
             if entry_price <= 0:
-                r.update({"status": "fail", "reason": "entry_price 0이하", "return": 0.0})
+                r.update({"status": "fail", "reason": "entry_price 오류", "return": 0.0})
                 updated.append(r)
                 continue
 
             timestamp = pd.to_datetime(r.get("timestamp"), utc=True).tz_convert("Asia/Seoul")
             deadline = timestamp + pd.Timedelta(hours=eval_horizon_map.get(strategy, 6))
-            now = now_kst()
-            if now < deadline:
+            if now_kst() < deadline:
                 r.update({"reason": "⏳ 평가 대기 중", "return": 0.0})
                 updated.append(r)
                 continue
@@ -418,13 +389,7 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            if 0 <= pred_class < len(class_ranges):
-                cls_min, cls_max = class_ranges[pred_class]
-            else:
-                cls_min, cls_max = -999, 999
-                pred_class = -1  # ✅ fallback 처리
-                success = False
-
+            cls_min, cls_max = class_ranges[pred_class] if 0 <= pred_class < len(class_ranges) else (-999, 999)
             success = gain >= cls_min
 
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
@@ -442,7 +407,8 @@ def evaluate_predictions(get_price_fn):
                 "label": label
             })
 
-            r_clean = {str(k): v if v is not None else "" for k, v in r.items() if k is not None}
+            # ✅ dict key None 제거 + str 변환
+            r_clean = {str(k): (v if v is not None else "") for k, v in r.items() if k is not None}
 
             update_model_success(symbol, strategy, model, success)
             evaluated.append(r_clean)
@@ -453,28 +419,19 @@ def evaluate_predictions(get_price_fn):
 
     updated += evaluated
 
-    if updated:
-        fieldnames = sorted({k for row in updated for k in row.keys() if k is not None})
-        with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
+    def safe_write_csv(path, rows):
+        if not rows:
+            return
+        fieldnames = sorted({str(k) for row in rows for k in row.keys() if k is not None})
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-            writer.writerows(updated)
+            writer.writerows(rows)
 
-    if evaluated:
-        fieldnames = sorted({k for row in evaluated for k in row.keys() if k is not None})
-        with open(EVAL_RESULT, "a", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(evaluated)
-
-        failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
-        if failed:
-            fieldnames = sorted({k for row in failed for k in row.keys() if k is not None})
-            with open(WRONG, "a", newline="", encoding="utf-8-sig") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(failed)
-
+    safe_write_csv(PREDICTION_LOG, updated)
+    safe_write_csv(EVAL_RESULT, evaluated)
+    failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
+    safe_write_csv(WRONG, failed)
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
