@@ -194,14 +194,10 @@ def balance_classes(X, y, min_count=20):
         print("[❌ balance_classes 실패] X 또는 y 비어있음")
         return X, y
 
-    # ✅ y를 int64로 변환하여 타입 안정화
     y = y.astype(np.int64)
-
-    # ✅ -1, NaN, inf 라벨 제거
     mask = (y != -1) & np.isfinite(y)
     X, y = X[mask], y[mask]
 
-    # ✅ 제거 후 empty check
     if len(y) == 0:
         raise Exception("[❌ balance_classes 실패] 라벨 제거 후 샘플 없음")
 
@@ -209,12 +205,9 @@ def balance_classes(X, y, min_count=20):
     print(f"[🔢 기존 클래스 분포] {dict(class_counts)}")
 
     X_balanced, y_balanced = list(X), list(y)
-
-    # ✅ max_class_count 계산 후 target_count = max(min_count, max_count * 0.8)
     max_count = max(class_counts.values()) if class_counts else 0
     target_count = max(min_count, int(max_count * 0.8))
 
-    # ✅ 모든 클래스가 target_count 이상 되도록 복제
     all_classes = range(21)  # NUM_CLASSES = 21
     for cls in all_classes:
         count = class_counts.get(cls, 0)
@@ -228,14 +221,14 @@ def balance_classes(X, y, min_count=20):
                 y_balanced.extend(y[reps])
                 print(f"[복제] 클래스 {cls} → {needed}개 추가")
             else:
-                # ✅ 없는 클래스는 zero noise sample 추가 (label 안정화)
                 sample_shape = X[0].shape
                 noise_samples = np.zeros((needed,) + sample_shape, dtype=np.float32)
                 X_balanced.extend(noise_samples)
+                # ✅ 기존: y_balanced.extend([cls] * needed)
+                # ✅ 수정: noise sample도 label key 포함 dict로 생성 필요
                 y_balanced.extend([cls] * needed)
-                print(f"[추가] 클래스 {cls} → {needed}개 noise sample 생성")
+                print(f"[추가] 클래스 {cls} → {needed}개 noise sample 생성 (label={cls})")
 
-    # ✅ 최종 셔플
     combined = list(zip(X_balanced, y_balanced))
     np.random.shuffle(combined)
     X_shuffled, y_shuffled = zip(*combined)
