@@ -152,6 +152,9 @@ def create_dataset(features, window=20, strategy="단기"):
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
 
+
+from predict import failed_result  # ✅ 필요시 상단 import 추가
+
 def get_kline_by_strategy(symbol: str, strategy: str):
     global _kline_cache
     cache_key = f"{symbol}-{strategy}"
@@ -162,12 +165,13 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     config = STRATEGY_CONFIG.get(strategy)
     if config is None:
         print(f"[❌ 실패] {symbol}-{strategy}: 전략 설정 없음")
-        # ✅ fallback: 빈 DataFrame 반환
+        failed_result(symbol, strategy, reason="전략 설정 없음")
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
     df = get_kline(symbol, interval=config["interval"], limit=config["limit"])
     if df is None or not isinstance(df, pd.DataFrame):
         print(f"[❌ 실패] {symbol}-{strategy}: get_kline() → None 반환 또는 형식 오류")
+        failed_result(symbol, strategy, reason="get_kline 반환 오류")
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
     required_cols = ["open", "high", "low", "close", "volume", "timestamp"]
@@ -176,15 +180,17 @@ def get_kline_by_strategy(symbol: str, strategy: str):
 
     if missing:
         print(f"[❌ 실패] {symbol}-{strategy}: 필수 컬럼 누락 → {missing}")
+        failed_result(symbol, strategy, reason=f"필수컬럼누락:{missing}")
         return pd.DataFrame(columns=required_cols)
 
     if nan_cols:
         print(f"[❌ 실패] {symbol}-{strategy}: NaN 존재 → {nan_cols}")
+        failed_result(symbol, strategy, reason=f"NaN존재:{nan_cols}")
         return pd.DataFrame(columns=required_cols)
 
     if len(df) < 5:
         print(f"[❌ 실패] {symbol}-{strategy}: 데이터 row 부족 ({len(df)} rows)")
-        # ✅ fallback: 빈 DataFrame 반환
+        failed_result(symbol, strategy, reason="row 부족")
         return pd.DataFrame(columns=required_cols)
 
     print(f"[✅ 성공] {symbol}-{strategy}: 데이터 {len(df)}개 확보")
