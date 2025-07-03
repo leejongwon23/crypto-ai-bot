@@ -145,7 +145,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
-
 def predict(symbol, strategy, source="일반", model_type=None):
     import os, json, torch, numpy as np, pandas as pd, datetime, pytz, sys
     from sklearn.preprocessing import MinMaxScaler
@@ -214,11 +213,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
 
-                # ✅ input_size mismatch → window fallback 재시도
+                # ✅ input_size mismatch → window fallback 재시도 + failed_result 기록 후 종료
                 if meta.get("input_size") != input_size:
                     print(f"[⚠️ input_size mismatch] {meta.get('input_size')} vs {input_size} → window fallback 재시도")
                     retry += 1
-                    break  # while 재시도
+
+                    # 🔴 mismatch 발생 시 실패 기록
+                    return [failed_result(symbol, strategy, mt, "input_size mismatch fallback", source, X_input)]
 
                 weight = get_model_weight(mt, strategy, symbol, input_size=input_size)
                 if weight <= 0.0:
@@ -302,10 +303,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     "label": label_val, "confidence": round(conf_score, 4)
                 })
             else:
-                # ✅ break 없이 끝났다면 while 루프 종료
                 break
 
-        # ✅ ensemble 최종 결과 추가
         if ensemble_probs is not None and total_weight > 0:
             ensemble_probs /= total_weight
             ensemble_class = int(ensemble_probs.argmax())
@@ -319,12 +318,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
             })
 
         if not results:
-            return [failed_result(symbol, strategy, "unknown", "모델 예측 실패", source)]
+            return [failed_result(symbol, strategy, "unknown", "모델 예측 실패", source, X_input)]
         return results
 
     except Exception as e:
         print(f"[predict 예외] {e}")
-        return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+        return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source, X_input)]
 
 
 
