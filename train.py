@@ -56,9 +56,9 @@ def get_frequent_failures(min_count=5):
     return {h for h, cnt in counter.items() if cnt >= min_count}
 
 
-def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=None, class_counts=None):
+def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=None, class_counts=None, used_feature_columns=None):
     """
-    ✅ [설명] 모델 메타정보를 json으로 저장
+    ✅ [설명] 모델 메타정보를 json으로 저장 (used_feature_columns 포함)
     """
     meta = {
         "symbol": symbol, "strategy": strategy, "model": model_type or "unknown",
@@ -69,15 +69,18 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
     }
     if class_counts:
         meta["class_counts"] = {str(k): int(v) for k, v in class_counts.items()}
+
+    # ✅ 사용된 feature 컬럼 저장
+    if used_feature_columns:
+        meta["used_feature_columns"] = used_feature_columns
+
     path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.meta.json"
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2, ensure_ascii=False)
-        # ✅ 로그 간소화
         print(f"[메타저장] {model_type} ({symbol}-{strategy}) acc={acc:.4f}")
     except Exception as e:
         print(f"[ERROR] meta 저장 실패: {e}")
-
 
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
