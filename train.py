@@ -170,10 +170,16 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 val_loss = lossfn(logits, yb).item()
                 print(f"[검증] {model_type} acc={acc:.4f}, f1={f1:.4f}")
 
+            # ✅ used_feature_columns 저장 추가
+            save_model_metadata(
+                symbol, strategy, model_type, acc, f1, val_loss,
+                input_size=input_size,
+                class_counts=Counter(y_train),
+                used_feature_columns=list(df_feat.drop(columns=["timestamp"]).columns)
+            )
+
             log_training_result(symbol, strategy, model_type, acc, f1, val_loss)
             torch.save(model.state_dict(), f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt")
-            save_model_metadata(symbol, strategy, model_type, acc, f1, val_loss,
-                                input_size=input_size, class_counts=Counter(y_train))
 
             try:
                 imps = compute_feature_importance(model, xb, yb, list(df_feat.drop(columns=["timestamp"]).columns))
