@@ -16,6 +16,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
     WRONG_CSV = "/persistent/wrong_predictions.csv"
 
     if not os.path.exists(WRONG_CSV):
+        print(f"[INFO] {symbol}-{strategy} 실패학습 파일 없음 → 스킵")
         return []
 
     try:
@@ -23,8 +24,12 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
         df = df[(df["symbol"] == symbol) & (df["strategy"] == strategy)]
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
 
-        if "label" not in df.columns and "predicted_class" in df.columns:
-            df["label"] = df["predicted_class"]
+        # ✅ label 컬럼이 없으면 predicted_class를 복사, 둘 다 없으면 -1 생성
+        if "label" not in df.columns:
+            if "predicted_class" in df.columns:
+                df["label"] = df["predicted_class"]
+            else:
+                df["label"] = -1
 
         df = df[df["label"].notna()]
         df["label"] = pd.to_numeric(df["label"], errors="coerce").fillna(-1).astype(int)
@@ -75,7 +80,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
             print(f"[예외] {symbol}-{strategy} 실패샘플 처리 오류 → {e}")
             continue
 
-    # ✅ fallback: 실패 데이터 없으면 zero sample 대신 noise sample 추가
+    # ✅ fallback: 실패 데이터 없으면 noise sample 추가
     if not sequences:
         print(f"[INFO] {symbol}-{strategy} 실패 데이터 없음 → fallback noise sample 추가")
         noise_sample = np.random.normal(loc=0.0, scale=1.0, size=(window, input_size)).astype(np.float32)
