@@ -260,9 +260,10 @@ def get_realtime_prices():
     except:
         return {}
 
+
 _feature_cache = {}
 
-def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFrame:
+def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_features: list = None) -> pd.DataFrame:
     from predict import failed_result
     global _feature_cache
     cache_key = f"{symbol}-{strategy}"
@@ -333,6 +334,13 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
 
     df = df[base].reset_index(drop=True)
 
+    # ✅ 예측시 필수 feature 강제 추가 (input_size mismatch 방지)
+    if required_features:
+        for col in required_features:
+            if col not in df.columns:
+                df[col] = 0.0
+        df = df[required_features]
+
     required_cols = ["timestamp", "close", "high"]
     missing_cols = [col for col in required_cols if col not in df.columns or df[col].isnull().any()]
     if missing_cols or df.empty:
@@ -348,7 +356,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str) -> pd.DataFra
     print(f"[✅ 완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     _feature_cache[cache_key] = df
     return df
-
 
 # data/utils.py 맨 아래에 추가
 
