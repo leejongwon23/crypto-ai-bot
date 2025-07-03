@@ -13,7 +13,13 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
         return []
 
     try:
-        df = pd.read_csv(WRONG_CSV, encoding="utf-8-sig")
+        # ✅ CSV 읽기 방어 + Step 1 상세 Exception 로그 출력
+        try:
+            df = pd.read_csv(WRONG_CSV, encoding="utf-8-sig")
+        except Exception as e:
+            print(f"[불러오기 오류] CSV read 실패 → {type(e).__name__}: {e}")
+            return []
+
         df = df[(df["symbol"] == symbol) & (df["strategy"] == strategy)]
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
 
@@ -30,7 +36,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
         df = df.dropna(subset=["timestamp", "label"])
 
     except Exception as e:
-        print(f"[불러오기 오류] {symbol}-{strategy} → {e}")
+        print(f"[불러오기 오류] {symbol}-{strategy} → {type(e).__name__}: {e}")
         return []
 
     df_price = get_kline_by_strategy(symbol, strategy)
@@ -71,7 +77,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
             sequences.append((xb, label))
 
         except Exception as e:
-            print(f"[예외] {symbol}-{strategy} 실패샘플 처리 오류 → {e}")
+            print(f"[예외] {symbol}-{strategy} 실패샘플 처리 오류 → {type(e).__name__}: {e}")
             continue
 
     # ✅ fallback: 실패 데이터 없으면 noise sample 추가
