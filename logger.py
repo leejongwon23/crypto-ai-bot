@@ -72,7 +72,6 @@ def log_audit_prediction(s, t, status, reason):
             w.writerow(row)
     except: pass
 
-
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, model=None, success=True, reason="", rate=0.0,
                    return_value=None, volatility=False, source="일반", predicted_class=None, label=None):
@@ -374,12 +373,7 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     except Exception as e:
         print(f"[학습 로그 저장 오류] {e}")
 
-
 def get_class_success_rate(strategy, recent_days=3):
-    """
-    최근 prediction_log.csv 기반으로
-    클래스별 성공률을 계산해 딕셔너리로 반환
-    """
     from collections import defaultdict
     import pandas as pd
     import os
@@ -417,6 +411,8 @@ def get_class_success_rate(strategy, recent_days=3):
     except Exception as e:
         print(f"[⚠️ 클래스 성공률 계산 오류] {e}")
         return {}
+
+
 
 import os
 
