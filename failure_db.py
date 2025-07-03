@@ -26,23 +26,38 @@ def ensure_failure_db():
     except Exception as e:
         print(f"[오류] ensure_failure_db 실패 → {e}")
 
+# ✅ failure_db.py - insert_failure_record (최종 수정본)
 def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
     if not isinstance(feature_hash, str) or feature_hash.strip() == "":
         return
 
+    # ✅ feature_vector 변환 및 검증
     if feature_vector is not None:
         try:
+            import numpy as np
+            if hasattr(feature_vector, "detach"):
+                feature_vector = feature_vector.detach().cpu().numpy()
+            if hasattr(feature_vector, "numpy"):
+                feature_vector = feature_vector.numpy()
             if hasattr(feature_vector, "tolist"):
                 feature_vector = feature_vector.tolist()
-            if not isinstance(feature_vector, list):
-                feature_vector = None
-            else:
-                if not all(isinstance(x, list) for x in feature_vector):
+
+            # ✅ list of list 보장
+            if isinstance(feature_vector, list):
+                if all(isinstance(x, (float, int)) for x in feature_vector):
+                    feature_vector = [feature_vector]  # 1D array → 2D
+                elif not all(isinstance(x, list) for x in feature_vector):
                     feature_vector = None
+            else:
+                feature_vector = None
+
+            # ✅ json 직렬화 가능 여부
             json.dumps(feature_vector)
-        except:
+        except Exception as e:
+            print(f"[경고] feature_vector 변환 실패 → {e}")
             feature_vector = None
 
+    # ✅ label 변환
     if label is not None:
         try:
             label = int(label)
@@ -51,6 +66,7 @@ def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
     else:
         label = -1
 
+    # ✅ DB insert
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute("""
@@ -66,12 +82,12 @@ def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
                 feature_hash,
                 float(row.get("rate", 0.0)),
                 row.get("reason", ""),
-                json.dumps(feature_vector) if feature_vector else None,
+                json.dumps(feature_vector) if feature_vector is not None else None,
                 label
             ))
     except Exception as e:
         print(f"[오류] insert_failure_record 실패 → {e}")
-
+        
 def load_existing_failure_hashes():
     try:
         with sqlite3.connect(DB_PATH) as conn:
