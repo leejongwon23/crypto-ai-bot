@@ -145,13 +145,11 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
+
 def predict(symbol, strategy, source="일반", model_type=None):
     import os, json, torch, numpy as np, pandas as pd, datetime, pytz, sys
     from sklearn.preprocessing import MinMaxScaler
-    from data.utils import get_kline_by_strategy, compute_features
-    from model.base_model import get_model, XGBoostWrapper
     from model_weight_loader import get_model_weight
-    from window_optimizer import find_best_window
     from logger import log_prediction, get_feature_hash
     from failure_db import insert_failure_record
     from config import NUM_CLASSES
@@ -213,45 +211,22 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
 
-                # ✅ input_size mismatch → window fallback 재시도 + failed_result 기록 후 종료
+                # ✅ input_size mismatch 체크
                 if meta.get("input_size") != input_size:
                     print(f"[⚠️ input_size mismatch] {meta.get('input_size')} vs {input_size} → window fallback 재시도")
                     retry += 1
-
-                    # 🔴 mismatch 발생 시 실패 기록
                     return [failed_result(symbol, strategy, mt, "input_size mismatch fallback", source, X_input)]
+
+                # ✅ used_feature_columns 일치 여부 체크
+                used_cols = meta.get("used_feature_columns")
+                current_cols = list(features_only.columns)
+                if used_cols and sorted(used_cols) != sorted(current_cols):
+                    print(f"[⚠️ used_feature_columns mismatch] saved={used_cols} vs current={current_cols}")
+                    retry += 1
+                    return [failed_result(symbol, strategy, mt, "used_feature_columns mismatch", source, X_input)]
 
                 weight = get_model_weight(mt, strategy, symbol, input_size=input_size)
                 if weight <= 0.0:
-                    continue
-
-                if mt == "xgboost":
-                    try:
-                        model = get_model(mt, input_size=input_size, model_path=model_path)
-                        pred_class = int(model.predict(X)[0])
-                    except Exception as e:
-                        print(f"[XGBoost 예측 오류] {e}")
-                        continue
-
-                    expected_return = class_to_expected_return(pred_class)
-                    label_val = pred_class
-
-                    log_prediction(
-                        symbol=symbol, strategy=strategy, direction=f"Class-{pred_class}",
-                        entry_price=df["close"].iloc[-1],
-                        target_price=df["close"].iloc[-1] * (1 + expected_return),
-                        model=mt, success=True, reason="XGBoost 예측 완료",
-                        rate=expected_return, timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-                        return_value=expected_return, volatility=True, source=source,
-                        predicted_class=pred_class, label=label_val
-                    )
-
-                    results.append({
-                        "symbol": symbol, "strategy": strategy, "model": mt,
-                        "class": pred_class, "expected_return": expected_return,
-                        "success": True, "predicted_class": pred_class,
-                        "label": label_val, "confidence": 1.0
-                    })
                     continue
 
                 # ✅ torch 모델 predict
@@ -277,7 +252,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 pred_class = int(adjusted_probs.argmax())
                 expected_return = class_to_expected_return(pred_class)
                 label_val = pred_class
-
                 conf_score = 1 - entropy(probs) / np.log(len(probs))
 
                 log_prediction(
@@ -324,7 +298,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
     except Exception as e:
         print(f"[predict 예외] {e}")
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source, X_input)]
-
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
