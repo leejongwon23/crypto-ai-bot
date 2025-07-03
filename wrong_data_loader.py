@@ -8,13 +8,6 @@ from failure_db import load_existing_failure_hashes
 WRONG_CSV = "/persistent/wrong_predictions.csv"
 
 def load_training_prediction_data(symbol, strategy, input_size, window):
-    import os, pandas as pd, numpy as np
-    from data.utils import get_kline_by_strategy, compute_features
-    from logger import get_feature_hash
-    from failure_db import load_existing_failure_hashes
-
-    WRONG_CSV = "/persistent/wrong_predictions.csv"
-
     if not os.path.exists(WRONG_CSV):
         print(f"[INFO] {symbol}-{strategy} 실패학습 파일 없음 → 스킵")
         return []
@@ -24,12 +17,13 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
         df = df[(df["symbol"] == symbol) & (df["strategy"] == strategy)]
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
 
-        # ✅ label 컬럼이 없으면 predicted_class를 복사, 둘 다 없으면 -1 생성
+        # ✅ label 컬럼 없으면 predicted_class 복사, 둘 다 없으면 스킵
         if "label" not in df.columns:
             if "predicted_class" in df.columns:
                 df["label"] = df["predicted_class"]
             else:
-                df["label"] = -1
+                print(f"[INFO] {symbol}-{strategy} 실패학습 파일에 label/predicted_class 없음 → 스킵")
+                return []
 
         df = df[df["label"].notna()]
         df["label"] = pd.to_numeric(df["label"], errors="coerce").fillna(-1).astype(int)
@@ -87,6 +81,3 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
         sequences.append((noise_sample, -1))
 
     return sequences
-
-
-
