@@ -81,6 +81,21 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     if not isinstance(label_val, int):
         label_val = -1
 
+    result = {
+        "symbol": symbol,
+        "strategy": strategy,
+        "success": False,
+        "reason": reason,
+        "model": str(model_type or "unknown"),
+        "rate": 0.0,
+        "class": pred_class_val,
+        "timestamp": t,
+        "source": source,
+        "predicted_class": pred_class_val,
+        "label": label_val
+    }
+
+    # ✅ log_prediction 호출
     try:
         log_prediction(
             symbol=symbol,
@@ -99,29 +114,34 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             predicted_class=pred_class_val,
             label=label_val
         )
-    except:
-        pass
+    except Exception as e:
+        print(f"[failed_result log_prediction 오류] {e}")
 
-    result = {
-        "symbol": symbol,
-        "strategy": strategy,
-        "success": False,
-        "reason": reason,
-        "model": str(model_type or "unknown"),
-        "rate": 0.0,
-        "class": pred_class_val,
-        "timestamp": t,
-        "source": source,
-        "predicted_class": pred_class_val,
-        "label": label_val
-    }
-
+    # ✅ 실패 DB 기록 추가
     if X_input is not None:
         try:
             feature_hash = get_feature_hash(X_input)
             insert_failure_record(result, feature_hash, feature_vector=X_input, label=label_val)
-        except:
-            pass
+        except Exception as e:
+            print(f"[failed_result insert_failure_record 오류] {e}")
+
+    # ✅ prediction_log.csv 직접 기록 보강
+    try:
+        import csv
+        PREDICTION_LOG = "/persistent/prediction_log.csv"
+        fieldnames = list(result.keys())
+        # 파일 없으면 헤더 작성
+        if not os.path.exists(PREDICTION_LOG):
+            with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerow(result)
+        else:
+            with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writerow(result)
+    except Exception as e:
+        print(f"[failed_result prediction_log 기록 실패] {e}")
 
     return result
 
