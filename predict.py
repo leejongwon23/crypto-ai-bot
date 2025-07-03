@@ -326,7 +326,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source, X_input)]
 
 
-
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
 import pandas as pd
