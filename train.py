@@ -230,7 +230,11 @@ def balance_classes(X, y, min_count=20):
 
         # 🔧 클래스 최소 샘플수 기반 k_neighbors 설정
         min_class_count = min(class_counts.values())
-        k_neighbors = max(1, min(min_class_count - 1, 5))
+        if min_class_count >= 2:
+            k_neighbors = max(1, min(min_class_count - 1, 5))
+        else:
+            # 샘플이 1개뿐이면 SMOTE 불가 → fallback으로 넘어가도록 Exception 발생
+            raise Exception("SMOTE 적용 불가: 최소 클래스 샘플 1개")
 
         smote = SMOTE(random_state=42, sampling_strategy='not majority', k_neighbors=k_neighbors)
         X_resampled, y_resampled = smote.fit_resample(X_reshaped, y)
@@ -270,6 +274,7 @@ def balance_classes(X, y, min_count=20):
 
     # ✅ SMOTE 성공시 반환
     return np.array(X), np.array(y, dtype=np.int64)
+
 
 
 def train_all_models():
