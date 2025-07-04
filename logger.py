@@ -130,9 +130,9 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                 if f.tell() == 0:
                     writer.writeheader()
                 writer.writerow(row)
+            print(f"[✅ log_prediction 기록 완료] {path}")
         except Exception as e:
             print(f"[오류] log_prediction 기록 실패 ({path}) → {e}")
-
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
