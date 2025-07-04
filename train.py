@@ -457,4 +457,48 @@ def train_symbol_group_loop(delay_minutes=5):
             except Exception as e:
                 print(f"❌ 그룹 {idx} 루프 중 오류: {e}")
                 continue
+def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
+    """
+    ✅ [설명] Self-Supervised Learning pretraining
+    - feature reconstruction 기반 사전학습
+    """
+    from model.base_model import get_model
 
+    print(f"▶ SSL Pretraining 시작: {symbol}-{strategy}")
+
+    df = get_kline_by_strategy(symbol, strategy)
+    if df is None or df.empty:
+        print("⛔ 중단: 시세 데이터 없음")
+        return
+
+    df_feat = compute_features(symbol, df, strategy)
+    if df_feat is None or df_feat.empty or df_feat.isnull().any().any():
+        print("⛔ 중단: 피처 생성 실패 또는 NaN")
+        return
+
+    features_only = df_feat.drop(columns=["timestamp"], errors="ignore")
+    feat_scaled = MinMaxScaler().fit_transform(features_only)
+    X = np.expand_dims(feat_scaled, axis=1)  # (samples, 1, features)
+
+    input_size = X.shape[2]
+    model = get_model("autoencoder", input_size=input_size, output_size=input_size).to(DEVICE).train()
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    lossfn = nn.MSELoss()
+
+    dataset = TensorDataset(torch.tensor(X, dtype=torch.float32), torch.tensor(X, dtype=torch.float32))
+    loader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=2)
+
+    for epoch in range(pretrain_epochs):
+        total_loss = 0.0
+        for xb, yb in loader:
+            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+            out = model(xb)
+            loss = lossfn(out, yb)
+            optimizer.zero_grad(); loss.backward(); optimizer.step()
+            total_loss += loss.item()
+        avg_loss = total_loss / len(loader)
+        print(f"[SSL Pretrain {epoch+1}/{pretrain_epochs}] loss={avg_loss:.6f}")
+
+    torch.save(model.state_dict(), f"{MODEL_DIR}/{symbol}_{strategy}_ssl_pretrain.pt")
+    print(f"✅ SSL Pretraining 완료: {symbol}-{strategy}")
