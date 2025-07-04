@@ -82,7 +82,6 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
     except Exception as e:
         print(f"[ERROR] meta 저장 실패: {e}")
 
-
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     from focal_loss import FocalLoss
@@ -109,8 +108,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print("⛔ 중단: 학습 데이터 부족")
             return
 
-        # ✅ balance_classes 함수로 클래스별 SMOTE+fallback 복제
-        X_raw, y_raw = balance_classes(X_raw, y_raw, min_count=20)
+        # ✅ balance_classes 함수 호출 시 min_count=30 로 변경
+        print("[INFO] balance_classes(min_count=30) 호출")
+        X_raw, y_raw = balance_classes(X_raw, y_raw, min_count=30)
 
         y_raw, X_raw = np.array(y_raw), np.array(X_raw, dtype=np.float32)
         mask = (y_raw >= 0) & (y_raw < NUM_CLASSES)
@@ -204,6 +204,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
+
 
 def balance_classes(X, y, min_count=20):
     import numpy as np
