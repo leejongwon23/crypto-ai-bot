@@ -172,6 +172,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
     except Exception as e:
         print(f"[ERROR] 평가 실패: {e}")
 
+
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
 
@@ -180,7 +181,9 @@ def run_prediction(symbol, strategy):
         pt_file = f"{symbol}_{strategy}_{mt}.pt"
         meta_file = f"{symbol}_{strategy}_{mt}.meta.json"
         if os.path.exists(os.path.join(MODEL_DIR, pt_file)) and os.path.exists(os.path.join(MODEL_DIR, meta_file)):
-            run_prediction_loop(strategy, [{"symbol": symbol, "model_type": mt}], source="단일", allow_prediction=True)
+            # 🔧 [Diversity Regularization 추가]
+            # run_prediction_loop 호출 전 diversity_penalty 파라미터 전달 (호출 구조 수정 필요)
+            run_prediction_loop(strategy, [{"symbol": symbol, "model_type": mt}], source="단일", allow_prediction=True, diversity_penalty=True)
             return
 
     print(f"[run_prediction 오류] {symbol}-{strategy} 가능한 모델 없음")
