@@ -207,6 +207,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 def balance_classes(X, y, min_count=20):
     import numpy as np
     from collections import Counter
+    from imblearn.over_sampling import SMOTE
 
     if X is None or y is None or len(X) == 0 or len(y) == 0:
         print("[❌ balance_classes 실패] X 또는 y 비어있음")
@@ -222,59 +223,51 @@ def balance_classes(X, y, min_count=20):
     class_counts = Counter(y)
     print(f"[🔢 기존 클래스 분포] {dict(class_counts)}")
 
-    try:
-        # ✅ SMOTE 적용
-        from imblearn.over_sampling import SMOTE
-        nsamples, nx, ny = X.shape
-        X_reshaped = X.reshape((nsamples, nx * ny))
+    nsamples, nx, ny = X.shape
+    X_balanced, y_balanced = list(X), list(y)
 
-        # 🔧 클래스 최소 샘플수 기반 k_neighbors 설정
-        min_class_count = min(class_counts.values())
-        if min_class_count >= 2:
-            k_neighbors = max(1, min(min_class_count - 1, 5))
-        else:
-            # 샘플이 1개뿐이면 SMOTE 불가 → fallback으로 넘어가도록 Exception 발생
-            raise Exception("SMOTE 적용 불가: 최소 클래스 샘플 1개")
+    # ✅ 클래스별 SMOTE+fallback 혼용
+    for cls in range(21):  # NUM_CLASSES = 21
+        indices = [i for i, label in enumerate(y) if label == cls]
+        count = len(indices)
+        needed = max(0, min_count - count)
 
-        smote = SMOTE(random_state=42, sampling_strategy='not majority', k_neighbors=k_neighbors)
-        X_resampled, y_resampled = smote.fit_resample(X_reshaped, y)
-        X = X_resampled.reshape((-1, nx, ny))
-        y = y_resampled
-        print(f"[✅ SMOTE 완료] 샘플수: {len(y)}")
-
-    except Exception as e:
-        print(f"[⚠️ SMOTE 실패] → fallback 기존 방식 사용: {e}")
-
-        X_balanced, y_balanced = list(X), list(y)
-        max_count = max(class_counts.values()) if class_counts else 0
-        target_count = max(min_count, int(max_count * 0.8))
-
-        all_classes = range(21)  # NUM_CLASSES = 21
-        for cls in all_classes:
-            count = class_counts.get(cls, 0)
-            needed = max(0, target_count - count)
-
-            if needed > 0:
-                indices = [i for i, label in enumerate(y) if label == cls]
-                if indices:
-                    # ✅ 실제 샘플 기반 + Gaussian noise 추가
+        if needed > 0:
+            if count >= 2:
+                try:
+                    # ✅ 클래스별 SMOTE 적용
+                    X_cls = X[indices].reshape((count, nx * ny))
+                    k_neighbors = min(count - 1, 5)
+                    smote = SMOTE(random_state=42, sampling_strategy={cls: count + needed}, k_neighbors=k_neighbors)
+                    X_res, y_res = smote.fit_resample(X_cls, np.array([cls]*count))
+                    X_new = X_res[count:].reshape((-1, nx, ny))
+                    X_balanced.extend(X_new)
+                    y_balanced.extend([cls]*len(X_new))
+                    print(f"[SMOTE] 클래스 {cls} → {len(X_new)}개 추가")
+                except Exception as e:
+                    print(f"[⚠️ SMOTE 실패] 클래스 {cls} → fallback: {e}")
+                    # ✅ fallback: 기존 샘플 복제 + noise
                     reps = np.random.choice(indices, needed, replace=True)
                     noisy_samples = X[reps] + np.random.normal(0, 0.01, X[reps].shape).astype(np.float32)
                     X_balanced.extend(noisy_samples)
-                    y_balanced.extend(y[reps])
+                    y_balanced.extend([cls]*needed)
                     print(f"[복제+Noise] 클래스 {cls} → {needed}개 추가")
-                else:
-                    # ✅ noise sample 제거 (생성하지 않음)
-                    print(f"[스킵] 클래스 {cls} → 샘플 없음, noise sample 생성 생략")
+            elif count == 1:
+                # ✅ fallback: 1개 샘플 복제 + noise
+                reps = np.repeat(indices[0], needed)
+                noisy_samples = X[reps] + np.random.normal(0, 0.01, X[reps].shape).astype(np.float32)
+                X_balanced.extend(noisy_samples)
+                y_balanced.extend([cls]*needed)
+                print(f"[복제+Noise] 클래스 {cls} → {needed}개 추가 (1개 복제)")
+            else:
+                print(f"[스킵] 클래스 {cls} → 샘플 없음, noise sample 생성 생략")
 
-        combined = list(zip(X_balanced, y_balanced))
-        np.random.shuffle(combined)
-        X_shuffled, y_shuffled = zip(*combined)
-        return np.array(X_shuffled), np.array(y_shuffled, dtype=np.int64)
-
-    # ✅ SMOTE 성공시 반환
-    return np.array(X), np.array(y, dtype=np.int64)
-
+    # ✅ 최종 shuffle
+    combined = list(zip(X_balanced, y_balanced))
+    np.random.shuffle(combined)
+    X_shuffled, y_shuffled = zip(*combined)
+    print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
+    return np.array(X_shuffled), np.array(y_shuffled, dtype=np.int64)
 
 
 def train_all_models():
