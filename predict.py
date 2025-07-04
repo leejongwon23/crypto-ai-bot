@@ -330,19 +330,23 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            cls_min, cls_max = class_ranges[pred_class] if 0 <= pred_class < len(class_ranges) else (-999, 999)
-            success = gain >= cls_min
+            if 0 <= pred_class < len(class_ranges):
+                cls_min, cls_max = class_ranges[pred_class]
+            else:
+                cls_min, cls_max = -999, 999
+
+            success = cls_min <= gain <= cls_max
 
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
             status = "v_success" if vol and success else \
-                     "v_fail" if not success and vol else \
+                     "v_fail" if vol and not success else \
                      "success" if success else "fail"
 
             confidence = float(r.get("confidence", 0.0)) if "confidence" in r else 0.0
 
             r.update({
                 "status": status,
-                "reason": f"[cls={pred_class}] class_range=({cls_min:.3f}~{cls_max:.3f}), gain={gain:.3f}",
+                "reason": f"[cls={pred_class}] range=({cls_min:.3f}~{cls_max:.3f}), gain={gain:.3f}",
                 "return": round(gain, 5),
                 "confidence": confidence,
                 "label": label
@@ -371,7 +375,7 @@ def evaluate_predictions(get_price_fn):
     safe_write_csv(EVAL_RESULT, evaluated)
     failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
     safe_write_csv(WRONG, failed)
-
+    print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
