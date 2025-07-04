@@ -50,7 +50,6 @@ def get_btc_dominance():
 
 import numpy as np
 
-
 def create_dataset(features, window=20, strategy="단기"):
     import numpy as np
     import pandas as pd
@@ -64,8 +63,7 @@ def create_dataset(features, window=20, strategy="단기"):
         raise Exception(msg)
 
     try:
-        # ✅ strategy 컬럼 drop 반영
-        columns = [c for c in features[0].keys() if c != "timestamp" and c != "strategy"]
+        columns = [c for c in features[0].keys() if c not in ["timestamp", "strategy"]]
     except Exception as e:
         msg = f"[오류] features[0] 키 확인 실패 → {e}"
         print(msg)
@@ -81,9 +79,9 @@ def create_dataset(features, window=20, strategy="단기"):
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["timestamp", "close", "high"]).sort_values("timestamp").reset_index(drop=True)
 
-    # ✅ strategy 컬럼 drop
     df = df.drop(columns=["strategy"], errors="ignore")
 
+    # ✅ MinMaxScaler fit_transform 적용 후 컬럼명 일관성 유지
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(df.drop(columns=["timestamp"]))
     df_scaled = pd.DataFrame(scaled, columns=[c for c in df.columns if c != "timestamp"])
@@ -123,14 +121,10 @@ def create_dataset(features, window=20, strategy="단기"):
 
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
             gain = (max_future_price - entry_price) / (entry_price + 1e-6)
-
-            # ✅ 라벨 None, NaN, inf 검증 후 기본값 처리
             if pd.isnull(gain) or not np.isfinite(gain):
                 gain = 0.0
 
-            cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), None)
-            if cls is None or not np.isfinite(cls):
-                cls = -1  # ✅ 기본값 -1
+            cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), -1)
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
             if any(len(row) != len(columns) for row in sample):
@@ -153,7 +147,7 @@ def create_dataset(features, window=20, strategy="단기"):
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
 
- 
+
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
@@ -286,6 +280,13 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     df["strategy"] = strategy
 
     try:
+        # ✅ feature column list 고정
+        base_cols = [
+            "open", "high", "low", "close", "volume"
+        ]
+        df = df[["timestamp", "strategy"] + base_cols]
+
+        # ✅ feature engineering
         df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
         delta = df["close"].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
@@ -317,29 +318,22 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.fillna(0, inplace=True)
 
+        # ✅ MinMaxScaler fit_transform 순서 통일
+        scaler = MinMaxScaler()
+        feature_cols = [c for c in df.columns if c not in ["timestamp", "strategy"]]
+        df[feature_cols] = scaler.fit_transform(df[feature_cols])
+
     except Exception as e:
         print(f"[❌ compute_features 예외] feature 계산 실패 → {e}")
         failed_result(symbol, strategy, reason=f"feature 계산 실패: {e}")
         return pd.DataFrame(columns=["timestamp", "strategy", "close", "high"])
 
-    base = [
-        "timestamp", "strategy", "open", "high", "low", "close", "volume",
-        "ma20", "rsi", "macd", "bollinger", "volatility",
-        "trend_score", "stoch_rsi", "cci", "obv"
-    ]
-    if strategy == "중기":
-        base.append("ema_cross")
-    elif strategy == "장기":
-        base += ["volume_cumsum", "roc", "mfi"]
-
-    df = df[base].reset_index(drop=True)
-
-    # ✅ 예측시 필수 feature 강제 추가 (input_size mismatch 방지)
+    # ✅ required_features 적용 시 컬럼 순서 통일
     if required_features:
         for col in required_features:
             if col not in df.columns:
                 df[col] = 0.0
-        df = df[required_features]
+        df = df[["timestamp", "strategy"] + required_features]
 
     required_cols = ["timestamp", "close", "high"]
     missing_cols = [col for col in required_cols if col not in df.columns or df[col].isnull().any()]
@@ -356,6 +350,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     print(f"[✅ 완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     _feature_cache[cache_key] = df
     return df
+
 
 # data/utils.py 맨 아래에 추가
 
