@@ -204,7 +204,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
 
-
 def balance_classes(X, y, min_count=20):
     import numpy as np
     from collections import Counter
@@ -248,16 +247,15 @@ def balance_classes(X, y, min_count=20):
             if needed > 0:
                 indices = [i for i, label in enumerate(y) if label == cls]
                 if indices:
+                    # ✅ 실제 샘플 기반 + Gaussian noise 추가
                     reps = np.random.choice(indices, needed, replace=True)
-                    X_balanced.extend(X[reps])
+                    noisy_samples = X[reps] + np.random.normal(0, 0.01, X[reps].shape).astype(np.float32)
+                    X_balanced.extend(noisy_samples)
                     y_balanced.extend(y[reps])
-                    print(f"[복제] 클래스 {cls} → {needed}개 추가")
+                    print(f"[복제+Noise] 클래스 {cls} → {needed}개 추가")
                 else:
-                    sample_shape = X[0].shape
-                    noise_samples = np.random.normal(0, 1, (needed,) + sample_shape).astype(np.float32)
-                    X_balanced.extend(noise_samples)
-                    y_balanced.extend([cls] * needed)
-                    print(f"[노이즈 생성] 클래스 {cls} → {needed}개 noise sample 생성 (label={cls})")
+                    # ✅ noise sample 제거 (생성하지 않음)
+                    print(f"[스킵] 클래스 {cls} → 샘플 없음, noise sample 생성 생략")
 
         combined = list(zip(X_balanced, y_balanced))
         np.random.shuffle(combined)
