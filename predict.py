@@ -120,7 +120,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
-
 def predict(symbol, strategy, source="일반", model_type=None):
     try:
         max_retry = 3
@@ -171,14 +170,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
 
-                # input_size mismatch 체크
                 model_input_size = meta.get("input_size")
                 if model_input_size != input_size:
                     print(f"[⚠️ input_size mismatch] {model_input_size} vs {input_size} → fallback 재시도")
                     retry += 1
                     return [failed_result(symbol, strategy, mt, "input_size mismatch fallback", source, X_input)]
 
-                # used_feature_columns mismatch 체크
                 used_cols = meta.get("used_feature_columns")
                 current_cols = list(features_only.columns)
                 if used_cols and sorted(used_cols) != sorted(current_cols):
@@ -190,7 +187,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 if weight <= 0.0:
                     continue
 
-                # 예측
                 model = get_model(mt, input_size, NUM_CLASSES).to(DEVICE)
                 state = torch.load(model_path, map_location=DEVICE)
                 model.load_state_dict(state)
@@ -199,6 +195,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 with torch.no_grad():
                     logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
+
+                # 🔧 [Diversity Regularization 추가]
+                # 각 클래스 확률에 diversity penalty를 곱해 편중 완화
+                diversity_penalty = np.exp(-probs)  # 확률이 높을수록 패널티 감소
+                probs = probs * diversity_penalty
+                probs = probs / probs.sum()  # 정규화
 
                 if ensemble_probs is None:
                     ensemble_probs = probs * weight
