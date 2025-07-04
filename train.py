@@ -126,10 +126,19 @@ def train_one_model(symbol, strategy, max_epochs=20):
         wrong_ds = TensorDataset(torch.tensor([x for x, _ in wrong_data], dtype=torch.float32),
                                  torch.tensor([y for _, y in wrong_data], dtype=torch.long)) if wrong_data else None
 
+        # ✅ class_weight 계산 추가
+        from collections import Counter
+        counts = Counter(y_train)
+        total = sum(counts.values())
+        class_weight = [total / counts.get(i, 1) for i in range(NUM_CLASSES)]
+        class_weight_tensor = torch.tensor(class_weight, dtype=torch.float32).to(DEVICE)
+
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size=input_size, output_size=NUM_CLASSES).to(DEVICE).train()
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-            lossfn = FocalLoss(gamma=2)
+
+            # ✅ CrossEntropyLoss with class_weight
+            lossfn = nn.CrossEntropyLoss(weight=class_weight_tensor)
 
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
@@ -194,6 +203,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
+
 
 def balance_classes(X, y, min_count=20):
     import numpy as np
