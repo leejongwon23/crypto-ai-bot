@@ -248,7 +248,7 @@ def balance_classes(X, y, min_count=20):
                         X_new = X_new[:needed]
                     X_balanced.extend(X_new)
                     y_balanced.extend([cls]*len(X_new))
-                    print(f"[✅ SMOTE] 클래스 {cls} → {len(X_new)}개 추가")
+                    print(f"[✅ SMOTE 성공] 클래스 {cls} → {len(X_new)}개 추가")
 
                     # ✅ SMOTE 성공 로그 기록
                     log_prediction(
@@ -280,9 +280,13 @@ def balance_classes(X, y, min_count=20):
     combined = list(zip(X_balanced, y_balanced))
     np.random.shuffle(combined)
     X_shuffled, y_shuffled = zip(*combined)
+
+    # ✅ 최종 클래스 분포 출력 추가
+    final_counts = Counter(y_shuffled)
+    print(f"[📊 최종 클래스 분포] {dict(final_counts)}")
+
     print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
     return np.array(X_shuffled), np.array(y_shuffled, dtype=np.int64)
-
 
 def train_all_models():
     """
