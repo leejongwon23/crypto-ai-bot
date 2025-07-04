@@ -85,9 +85,13 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     from focal_loss import FocalLoss
+    from ssl_pretrain import masked_reconstruction  # ✅ SSL pretrain import 추가
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
     try:
+        # ✅ SSL pretraining 먼저 실행
+        masked_reconstruction(symbol, strategy, input_size=11, mask_ratio=0.2, epochs=5)
+
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
             print("⛔ 중단: 시세 데이터 없음")
@@ -122,7 +126,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
         val_len = max(5, int(len(X_raw) * 0.2))
 
         # ✅ Curriculum Learning: 손쉬운 샘플부터 학습
-        # 여기서는 예시로 label 순서대로 sorting (실제 구현시 난이도 스코어 필요)
         sorted_idx = np.argsort(y_raw)
         X_raw, y_raw = X_raw[sorted_idx], y_raw[sorted_idx]
 
@@ -147,8 +150,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                      torch.tensor(y_train, dtype=torch.long))
             train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
 
-            # ✅ Active Sampling: 각 epoch마다 샘플링 비율을 조정
-            # 여기서는 샘플 80%만 랜덤 선택하는 간단 예시
+            # ✅ Active Sampling
             for epoch in range(max_epochs):
                 indices = np.random.choice(len(X_train), int(len(X_train)*0.8), replace=False)
                 sampled_X = X_train[indices]
