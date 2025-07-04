@@ -205,7 +205,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
 
-
 def balance_classes(X, y, min_count=20):
     import numpy as np
     from collections import Counter
@@ -253,14 +252,14 @@ def balance_classes(X, y, min_count=20):
                     print(f"[⚠️ SMOTE 실패] 클래스 {cls} → fallback: {e}")
                     # ✅ fallback: 기존 샘플 복제 + noise
                     reps = np.random.choice(indices, needed, replace=True)
-                    noisy_samples = X[reps] + np.random.normal(0, 0.01, X[reps].shape).astype(np.float32)
+                    noisy_samples = X[reps] + np.random.normal(0, 0.05, X[reps].shape).astype(np.float32)  # 🔧 noise 강도 수정 (0.01 → 0.05)
                     X_balanced.extend(noisy_samples)
                     y_balanced.extend([cls]*needed)
                     print(f"[복제+Noise] 클래스 {cls} → {needed}개 추가")
             elif count == 1:
                 # ✅ fallback: 1개 샘플 복제 + noise
                 reps = np.repeat(indices[0], needed)
-                noisy_samples = X[reps] + np.random.normal(0, 0.01, X[reps].shape).astype(np.float32)
+                noisy_samples = X[reps] + np.random.normal(0, 0.05, X[reps].shape).astype(np.float32)  # 🔧 noise 강도 수정 (0.01 → 0.05)
                 X_balanced.extend(noisy_samples)
                 y_balanced.extend([cls]*needed)
                 print(f"[복제+Noise] 클래스 {cls} → {needed}개 추가 (1개 복제)")
