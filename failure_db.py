@@ -31,7 +31,7 @@ def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
     if not isinstance(feature_hash, str) or feature_hash.strip() == "":
         return
 
-    # ✅ feature_vector 변환 및 검증
+    # ✅ feature_vector 변환 및 flatten 1D 리스트로 변환 후 저장
     if feature_vector is not None:
         try:
             import numpy as np
@@ -42,16 +42,13 @@ def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
             if hasattr(feature_vector, "tolist"):
                 feature_vector = feature_vector.tolist()
 
-            # ✅ list of list 보장
+            # ✅ flatten 처리 (중첩 list → 1D list)
             if isinstance(feature_vector, list):
-                if all(isinstance(x, (float, int)) for x in feature_vector):
-                    feature_vector = [feature_vector]  # 1D array → 2D
-                elif not all(isinstance(x, list) for x in feature_vector):
-                    feature_vector = None
+                feature_vector = np.array(feature_vector).flatten().tolist()
             else:
                 feature_vector = None
 
-            # ✅ json 직렬화 가능 여부
+            # ✅ json 직렬화 가능 여부 검증
             json.dumps(feature_vector)
         except Exception as e:
             print(f"[경고] feature_vector 변환 실패 → {e}")
@@ -87,6 +84,7 @@ def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
             ))
     except Exception as e:
         print(f"[오류] insert_failure_record 실패 → {e}")
+
         
 def load_existing_failure_hashes():
     try:
