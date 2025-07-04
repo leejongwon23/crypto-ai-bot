@@ -205,11 +205,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
 
-
 def balance_classes(X, y, min_count=20):
     import numpy as np
     from collections import Counter
     from imblearn.over_sampling import SMOTE
+    from logger import log_prediction  # ✅ logger import 추가
 
     if X is None or y is None or len(X) == 0 or len(y) == 0:
         print("[❌ balance_classes 실패] X 또는 y 비어있음")
@@ -228,46 +228,55 @@ def balance_classes(X, y, min_count=20):
     nsamples, nx, ny = X.shape
     X_balanced, y_balanced = list(X), list(y)
 
-    # ✅ 클래스별 SMOTE+fallback 혼용
+    max_count = max(class_counts.values()) if class_counts else min_count
+    target_count = max(min_count, int(max_count * 0.8))
+
     for cls in range(21):  # NUM_CLASSES = 21
         indices = [i for i, label in enumerate(y) if label == cls]
         count = len(indices)
-        needed = max(0, min_count - count)
+        needed = max(0, target_count - count)
 
         if needed > 0:
             if count >= 2:
                 try:
-                    # ✅ 클래스별 SMOTE 적용
                     X_cls = X[indices].reshape((count, nx * ny))
                     k_neighbors = min(count - 1, 5)
-                    smote = SMOTE(random_state=42, sampling_strategy='auto', k_neighbors=k_neighbors)
+                    smote = SMOTE(random_state=42, sampling_strategy={cls: count + needed}, k_neighbors=k_neighbors)
                     X_res, y_res = smote.fit_resample(X_cls, np.array([cls]*count))
                     X_new = X_res[count:].reshape((-1, nx, ny))
-                    # 필요한 수만큼만 추가
                     if len(X_new) > needed:
                         X_new = X_new[:needed]
                     X_balanced.extend(X_new)
                     y_balanced.extend([cls]*len(X_new))
-                    print(f"[SMOTE] 클래스 {cls} → {len(X_new)}개 추가")
+                    print(f"[✅ SMOTE] 클래스 {cls} → {len(X_new)}개 추가")
+
+                    # ✅ SMOTE 성공 로그 기록
+                    log_prediction(
+                        symbol="augmentation", strategy="augmentation",
+                        direction=f"SMOTE-{cls}", entry_price=0, target_price=0,
+                        model="augmentation", success=True,
+                        reason=f"SMOTE {cls} {len(X_new)}개 추가",
+                        rate=0.0, timestamp=None, return_value=0.0,
+                        volatility=False, source="augmentation",
+                        predicted_class=cls, label=cls, augmentation="smote"
+                    )
+
                 except Exception as e:
                     print(f"[⚠️ SMOTE 실패] 클래스 {cls} → fallback: {e}")
-                    # ✅ fallback: 기존 샘플 복제 + noise
                     reps = np.random.choice(indices, needed, replace=True)
-                    noisy_samples = X[reps] + np.random.normal(0, 0.05, X[reps].shape).astype(np.float32)  # 🔧 noise 강도 수정 (0.01 → 0.05)
+                    noisy_samples = X[reps] + np.random.normal(0, 0.05, X[reps].shape).astype(np.float32)
                     X_balanced.extend(noisy_samples)
                     y_balanced.extend([cls]*needed)
                     print(f"[복제+Noise] 클래스 {cls} → {needed}개 추가")
             elif count == 1:
-                # ✅ fallback: 1개 샘플 복제 + noise
                 reps = np.repeat(indices[0], needed)
-                noisy_samples = X[reps] + np.random.normal(0, 0.05, X[reps].shape).astype(np.float32)  # 🔧 noise 강도 수정 (0.01 → 0.05)
+                noisy_samples = X[reps] + np.random.normal(0, 0.05, X[reps].shape).astype(np.float32)
                 X_balanced.extend(noisy_samples)
                 y_balanced.extend([cls]*needed)
                 print(f"[복제+Noise] 클래스 {cls} → {needed}개 추가 (1개 복제)")
             else:
                 print(f"[스킵] 클래스 {cls} → 샘플 없음, noise sample 생성 생략")
 
-    # ✅ 최종 shuffle
     combined = list(zip(X_balanced, y_balanced))
     np.random.shuffle(combined)
     X_shuffled, y_shuffled = zip(*combined)
