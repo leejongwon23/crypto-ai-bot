@@ -16,3 +16,6 @@ matplotlib
 
 # ✅ xgboost 추가
 xgboost
+
+# ✅ imbalanced-learn (SMOTE용)
+imblearn
