@@ -74,7 +74,8 @@ def log_audit_prediction(s, t, status, reason):
 
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, model=None, success=True, reason="", rate=0.0,
-                   return_value=None, volatility=False, source="일반", predicted_class=None, label=None):
+                   return_value=None, volatility=False, source="일반", predicted_class=None, label=None,
+                   augmentation=None):
 
     import csv, os, datetime, pytz
 
@@ -97,9 +98,12 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         except:
             label = -1
 
-    status = "v_success" if success and volatility else \
-             "v_fail" if not success and volatility else \
-             "success" if success else "fail"
+    if augmentation == "smote":
+        status = "smote_aug"
+    else:
+        status = "v_success" if success and volatility else \
+                 "v_fail" if not success and volatility else \
+                 "success" if success else "fail"
 
     row = {
         "timestamp": now,
