@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import time
 import pytz
+from sklearn.preprocessing import MinMaxScaler
 
 
 BASE_URL = "https://api.bybit.com"
