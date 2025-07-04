@@ -108,7 +108,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print("⛔ 중단: 학습 데이터 부족")
             return
 
-        # ✅ balance_classes 함수 호출 시 min_count=30 로 변경
         print("[INFO] balance_classes(min_count=30) 호출")
         X_raw, y_raw = balance_classes(X_raw, y_raw, min_count=30)
 
@@ -121,13 +120,18 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
         input_size = X_raw.shape[2]
         val_len = max(5, int(len(X_raw) * 0.2))
+
+        # ✅ Curriculum Learning: 손쉬운 샘플부터 학습
+        # 여기서는 예시로 label 순서대로 sorting (실제 구현시 난이도 스코어 필요)
+        sorted_idx = np.argsort(y_raw)
+        X_raw, y_raw = X_raw[sorted_idx], y_raw[sorted_idx]
+
         X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
 
         wrong_data = load_training_prediction_data(symbol, strategy, input_size, window)
         wrong_ds = TensorDataset(torch.tensor([x for x, _ in wrong_data], dtype=torch.float32),
                                  torch.tensor([y for _, y in wrong_data], dtype=torch.long)) if wrong_data else None
 
-        # ✅ class_weight 계산 추가
         from collections import Counter
         counts = Counter(y_train)
         total = sum(counts.values())
@@ -137,15 +141,31 @@ def train_one_model(symbol, strategy, max_epochs=20):
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size=input_size, output_size=NUM_CLASSES).to(DEVICE).train()
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-            # ✅ CrossEntropyLoss with class_weight
             lossfn = nn.CrossEntropyLoss(weight=class_weight_tensor)
 
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
             train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
 
-            # 🔁 실패 집중 학습
+            # ✅ Active Sampling: 각 epoch마다 샘플링 비율을 조정
+            # 여기서는 샘플 80%만 랜덤 선택하는 간단 예시
+            for epoch in range(max_epochs):
+                indices = np.random.choice(len(X_train), int(len(X_train)*0.8), replace=False)
+                sampled_X = X_train[indices]
+                sampled_y = y_train[indices]
+
+                sampled_ds = TensorDataset(torch.tensor(sampled_X, dtype=torch.float32),
+                                           torch.tensor(sampled_y, dtype=torch.long))
+                sampled_loader = DataLoader(sampled_ds, batch_size=32, shuffle=True, num_workers=2)
+
+                for xb, yb in sampled_loader:
+                    xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                    logits = model(xb)
+                    loss = lossfn(logits, yb)
+                    if torch.isfinite(loss):
+                        optimizer.zero_grad(); loss.backward(); optimizer.step()
+
+            # ✅ 실패 집중 학습
             if wrong_ds:
                 wrong_loader = DataLoader(wrong_ds, batch_size=16, shuffle=True, num_workers=2)
                 for _ in range(3):
@@ -159,15 +179,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 torch.cuda.empty_cache()
                 gc.collect()
 
-            # 🔁 기본 학습
-            for _ in range(max_epochs):
-                for xb, yb in train_loader:
-                    xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                    logits = model(xb)
-                    loss = lossfn(logits, yb)
-                    if torch.isfinite(loss):
-                        optimizer.zero_grad(); loss.backward(); optimizer.step()
-
             # ✅ 검증
             model.eval()
             with torch.no_grad():
@@ -180,7 +191,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 val_loss = lossfn(logits, yb).item()
                 print(f"[검증] {model_type} acc={acc:.4f}, f1={f1:.4f}")
 
-            # ✅ used_feature_columns 저장 추가
             save_model_metadata(
                 symbol, strategy, model_type, acc, f1, val_loss,
                 input_size=input_size,
@@ -250,7 +260,6 @@ def balance_classes(X, y, min_count=20):
                     y_balanced.extend([cls]*len(X_new))
                     print(f"[✅ SMOTE 성공] 클래스 {cls} → {len(X_new)}개 추가")
 
-                    # ✅ SMOTE 성공 로그 기록
                     log_prediction(
                         symbol="augmentation", strategy="augmentation",
                         direction=f"SMOTE-{cls}", entry_price=0, target_price=0,
@@ -265,9 +274,21 @@ def balance_classes(X, y, min_count=20):
                     print(f"[⚠️ SMOTE 실패] 클래스 {cls} → fallback: {e}")
                     reps = np.random.choice(indices, needed, replace=True)
                     noisy_samples = X[reps] + np.random.normal(0, 0.05, X[reps].shape).astype(np.float32)
-                    X_balanced.extend(noisy_samples)
+                    
+                    # ✅ 추가: Noise + Mixup + Time Masking
+                    mixup_samples = noisy_samples.copy()
+                    for i in range(len(mixup_samples)):
+                        j = np.random.randint(len(X))
+                        lam = np.random.beta(0.2, 0.2)
+                        mixup_samples[i] = lam * mixup_samples[i] + (1 - lam) * X[j]
+
+                        # Time Masking
+                        t = np.random.randint(0, nx)
+                        mixup_samples[i][t] = 0.0
+
+                    X_balanced.extend(mixup_samples)
                     y_balanced.extend([cls]*needed)
-                    print(f"[복제+Noise] 클래스 {cls} → {needed}개 추가")
+                    print(f"[복제+Noise+Mixup+Masking] 클래스 {cls} → {needed}개 추가")
             elif count == 1:
                 reps = np.repeat(indices[0], needed)
                 noisy_samples = X[reps] + np.random.normal(0, 0.05, X[reps].shape).astype(np.float32)
@@ -281,11 +302,10 @@ def balance_classes(X, y, min_count=20):
     np.random.shuffle(combined)
     X_shuffled, y_shuffled = zip(*combined)
 
-    # ✅ 최종 클래스 분포 출력 추가
     final_counts = Counter(y_shuffled)
     print(f"[📊 최종 클래스 분포] {dict(final_counts)}")
-
     print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
+
     return np.array(X_shuffled), np.array(y_shuffled, dtype=np.int64)
 
 def train_all_models():
