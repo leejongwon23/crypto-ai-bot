@@ -227,11 +227,17 @@ def balance_classes(X, y, min_count=20):
         from imblearn.over_sampling import SMOTE
         nsamples, nx, ny = X.shape
         X_reshaped = X.reshape((nsamples, nx * ny))
-        smote = SMOTE(random_state=42, sampling_strategy='not majority')
+
+        # 🔧 클래스 최소 샘플수 기반 k_neighbors 설정
+        min_class_count = min(class_counts.values())
+        k_neighbors = max(1, min(min_class_count - 1, 5))
+
+        smote = SMOTE(random_state=42, sampling_strategy='not majority', k_neighbors=k_neighbors)
         X_resampled, y_resampled = smote.fit_resample(X_reshaped, y)
         X = X_resampled.reshape((-1, nx, ny))
         y = y_resampled
         print(f"[✅ SMOTE 완료] 샘플수: {len(y)}")
+
     except Exception as e:
         print(f"[⚠️ SMOTE 실패] → fallback 기존 방식 사용: {e}")
 
