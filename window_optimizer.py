@@ -95,7 +95,13 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                     if acc > best_acc:
                         best_acc = acc
                         best_window = window
-                        best_result = {"window": int(window), "accuracy": float(round(acc, 4))}
+                        # ✅ used_feature_columns 추가 저장
+                        used_feature_columns = df_feat.columns.drop(drop_cols).tolist()
+                        best_result = {
+                            "window": int(window),
+                            "accuracy": float(round(acc, 4)),
+                            "used_feature_columns": used_feature_columns
+                        }
 
             except Exception as e:
                 print(f"[오류] window={window} 평가 실패 → {e}")
