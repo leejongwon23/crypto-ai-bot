@@ -1,13 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-# ✅ 수정 코드 (통일된 설정 사용)
-from config import NUM_CLASSES
-
-# ✅ 추가
 import xgboost as xgb
 import numpy as np
+from config import NUM_CLASSES
 
 class Attention(nn.Module):
     def __init__(self, hidden_size):
@@ -114,7 +110,6 @@ class TransformerPricePredictor(nn.Module):
         return self.fc_logits(hidden)
 
 
-# ✅ xgboost wrapper class
 class XGBoostWrapper:
     def __init__(self, model_path):
         self.model = xgb.Booster()
@@ -125,12 +120,37 @@ class XGBoostWrapper:
         probs = self.model.predict(dmatrix)
         return np.argmax(probs, axis=1)
 
+
+class AutoEncoder(nn.Module):
+    def __init__(self, input_size, hidden_size=64):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size//2),
+            nn.ReLU()
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(hidden_size//2, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, input_size)
+        )
+
+    def forward(self, x):
+        x = x.squeeze(1)
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        decoded = decoded.unsqueeze(1)
+        return decoded
+
+
 MODEL_CLASSES = {
     "lstm": LSTMPricePredictor,
     "cnn_lstm": CNNLSTMPricePredictor,
-    "cnn": CNNLSTMPricePredictor,  # ✅ 'cnn' 매핑 추가
+    "cnn": CNNLSTMPricePredictor,
     "transformer": TransformerPricePredictor,
-    "xgboost": XGBoostWrapper
+    "xgboost": XGBoostWrapper,
+    "autoencoder": AutoEncoder
 }
 
 
