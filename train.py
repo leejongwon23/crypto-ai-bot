@@ -231,12 +231,10 @@ def balance_classes(X, y, min_count=20):
                 print(f"[복제] 클래스 {cls} → {needed}개 추가")
             else:
                 sample_shape = X[0].shape
-                noise_samples = np.zeros((needed,) + sample_shape, dtype=np.float32)
+                noise_samples = np.random.normal(0, 1, (needed,) + sample_shape).astype(np.float32)
                 X_balanced.extend(noise_samples)
-                # ✅ 기존: y_balanced.extend([cls] * needed)
-                # ✅ 수정: noise sample도 label key 포함 dict로 생성 필요
                 y_balanced.extend([cls] * needed)
-                print(f"[추가] 클래스 {cls} → {needed}개 noise sample 생성 (label={cls})")
+                print(f"[노이즈 생성] 클래스 {cls} → {needed}개 noise sample 생성 (label={cls})")
 
     combined = list(zip(X_balanced, y_balanced))
     np.random.shuffle(combined)
@@ -244,6 +242,7 @@ def balance_classes(X, y, min_count=20):
 
     print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
     return np.array(X_shuffled), np.array(y_shuffled, dtype=np.int64)
+
 
 def train_all_models():
     """
