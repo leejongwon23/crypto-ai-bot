@@ -204,6 +204,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
 
+
 def balance_classes(X, y, min_count=20):
     import numpy as np
     from collections import Counter
@@ -238,9 +239,12 @@ def balance_classes(X, y, min_count=20):
                     # ✅ 클래스별 SMOTE 적용
                     X_cls = X[indices].reshape((count, nx * ny))
                     k_neighbors = min(count - 1, 5)
-                    smote = SMOTE(random_state=42, sampling_strategy={cls: count + needed}, k_neighbors=k_neighbors)
+                    smote = SMOTE(random_state=42, sampling_strategy='auto', k_neighbors=k_neighbors)
                     X_res, y_res = smote.fit_resample(X_cls, np.array([cls]*count))
                     X_new = X_res[count:].reshape((-1, nx, ny))
+                    # 필요한 수만큼만 추가
+                    if len(X_new) > needed:
+                        X_new = X_new[:needed]
                     X_balanced.extend(X_new)
                     y_balanced.extend([cls]*len(X_new))
                     print(f"[SMOTE] 클래스 {cls} → {len(X_new)}개 추가")
