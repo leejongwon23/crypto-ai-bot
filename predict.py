@@ -73,13 +73,7 @@ def class_to_expected_return(cls, recent_days=3):
 def failed_result(symbol, strategy, model_type="unknown", reason="", source="일반", X_input=None):
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     pred_class_val = -1
-    label_val = -1  # ✅ 실패시 label=-1 통일
-
-    # ✅ 타입 강제 고정
-    if not isinstance(pred_class_val, int):
-        pred_class_val = -1
-    if not isinstance(label_val, int):
-        label_val = -1
+    label_val = -1
 
     result = {
         "symbol": symbol,
@@ -95,7 +89,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         "label": label_val
     }
 
-    # ✅ log_prediction 호출
     try:
         log_prediction(
             symbol=symbol,
@@ -117,52 +110,20 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     except Exception as e:
         print(f"[failed_result log_prediction 오류] {e}")
 
-    # ✅ 실패 DB 기록 추가
-    if X_input is not None:
+    # 실패 DB 기록 추가 (feature_hash 검증 후)
+    if X_input is not None and isinstance(X_input, np.ndarray):
         try:
             feature_hash = get_feature_hash(X_input)
-            insert_failure_record(result, feature_hash, feature_vector=X_input, label=label_val)
+            insert_failure_record(result, feature_hash, feature_vector=X_input.tolist(), label=label_val)
         except Exception as e:
             print(f"[failed_result insert_failure_record 오류] {e}")
-
-    # ✅ prediction_log.csv 직접 기록 보강
-    try:
-        import csv
-        PREDICTION_LOG = "/persistent/prediction_log.csv"
-        fieldnames = list(result.keys())
-        # 파일 없으면 헤더 작성
-        if not os.path.exists(PREDICTION_LOG):
-            with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerow(result)
-        else:
-            with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writerow(result)
-    except Exception as e:
-        print(f"[failed_result prediction_log 기록 실패] {e}")
 
     return result
 
 
 def predict(symbol, strategy, source="일반", model_type=None):
-    import os, json, torch, numpy as np, pandas as pd, datetime, pytz, sys
-    from sklearn.preprocessing import MinMaxScaler
-    from model_weight_loader import get_model_weight
-    from logger import log_prediction, get_feature_hash
-    from failure_db import insert_failure_record
-    from config import NUM_CLASSES
-    from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
-    from logger import get_available_models
-    from scipy.stats import entropy
-
-    DEVICE = torch.device("cpu")
-    MODEL_DIR = "/persistent/models"
-    now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-
     try:
-        max_retry = 2
+        max_retry = 3
         retry = 0
 
         while retry < max_retry:
@@ -204,20 +165,20 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
                 model_path = os.path.join(MODEL_DIR, m["pt_file"])
                 meta_path = model_path.replace(".pt", ".meta.json")
-
                 if not os.path.exists(model_path) or not os.path.exists(meta_path):
                     continue
 
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
 
-                # ✅ input_size mismatch 체크
-                if meta.get("input_size") != input_size:
-                    print(f"[⚠️ input_size mismatch] {meta.get('input_size')} vs {input_size} → window fallback 재시도")
+                # input_size mismatch 체크
+                model_input_size = meta.get("input_size")
+                if model_input_size != input_size:
+                    print(f"[⚠️ input_size mismatch] {model_input_size} vs {input_size} → fallback 재시도")
                     retry += 1
                     return [failed_result(symbol, strategy, mt, "input_size mismatch fallback", source, X_input)]
 
-                # ✅ used_feature_columns 일치 여부 체크
+                # used_feature_columns mismatch 체크
                 used_cols = meta.get("used_feature_columns")
                 current_cols = list(features_only.columns)
                 if used_cols and sorted(used_cols) != sorted(current_cols):
@@ -229,7 +190,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 if weight <= 0.0:
                     continue
 
-                # ✅ torch 모델 predict
+                # 예측
                 model = get_model(mt, input_size, NUM_CLASSES).to(DEVICE)
                 state = torch.load(model_path, map_location=DEVICE)
                 model.load_state_dict(state)
@@ -251,7 +212,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
                 pred_class = int(adjusted_probs.argmax())
                 expected_return = class_to_expected_return(pred_class)
-                label_val = pred_class
                 conf_score = 1 - entropy(probs) / np.log(len(probs))
 
                 log_prediction(
@@ -261,35 +221,18 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     model=mt, success=True, reason=f"예측 완료 | confidence={conf_score:.4f}",
                     rate=expected_return, timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
                     return_value=expected_return, volatility=True, source=source,
-                    predicted_class=pred_class, label=label_val
+                    predicted_class=pred_class, label=pred_class
                 )
-
-                feature_hash = get_feature_hash(X_input)
-                insert_failure_record({
-                    "symbol": symbol, "strategy": strategy, "model": mt,
-                    "class": pred_class, "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
-                }, feature_hash, feature_vector=X_input, label=label_val)
 
                 results.append({
                     "symbol": symbol, "strategy": strategy, "model": mt,
                     "class": pred_class, "expected_return": expected_return,
                     "success": True, "predicted_class": pred_class,
-                    "label": label_val, "confidence": round(conf_score, 4)
+                    "label": pred_class, "confidence": round(conf_score, 4)
                 })
+
             else:
                 break
-
-        if ensemble_probs is not None and total_weight > 0:
-            ensemble_probs /= total_weight
-            ensemble_class = int(ensemble_probs.argmax())
-            ensemble_return = class_to_expected_return(ensemble_class)
-            conf_score = 1 - entropy(ensemble_probs) / np.log(len(ensemble_probs))
-            results.append({
-                "symbol": symbol, "strategy": strategy, "model": "ensemble",
-                "class": ensemble_class, "expected_return": ensemble_return,
-                "success": True, "predicted_class": ensemble_class,
-                "label": ensemble_class, "confidence": round(conf_score, 4)
-            })
 
         if not results:
             return [failed_result(symbol, strategy, "unknown", "모델 예측 실패", source, X_input)]
@@ -298,6 +241,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     except Exception as e:
         print(f"[predict 예외] {e}")
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source, X_input)]
+
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
