@@ -75,23 +75,20 @@ def log_audit_prediction(s, t, status, reason):
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, model=None, success=True, reason="", rate=0.0,
                    return_value=None, volatility=False, source="일반", predicted_class=None, label=None):
+
     import csv, os, datetime, pytz
 
     now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
     now = timestamp or now_kst().isoformat()
-    full_path = "/persistent/prediction_log.csv"
     date_str = now.split("T")[0]
     dated_path = f"/persistent/logs/prediction_{date_str}.csv"
+    full_path = "/persistent/prediction_log.csv"
 
-    # ✅ predicted_class 보정
     try:
-        pred_class_val = int(float(predicted_class))
-        if pred_class_val < 0 or pred_class_val >= 100:
-            pred_class_val = -1
+        pred_class_val = int(float(predicted_class)) if predicted_class not in [None, ""] else -1
     except:
         pred_class_val = -1
 
-    # ✅ label도 predicted_class로 기본 대입, int 변환 실패 시 -1
     if label is None or str(label).strip() == "":
         label = pred_class_val
     else:
@@ -100,7 +97,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         except:
             label = -1
 
-    # ✅ 예측 성공 여부 + 변동성 기준
     status = "v_success" if success and volatility else \
              "v_fail" if not success and volatility else \
              "success" if success else "fail"
@@ -125,11 +121,8 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
 
     # ✅ dict key None 제거 + str 변환
     row = {str(k): (v if v is not None else "") for k, v in row.items() if k is not None}
-
-    # ✅ fieldnames 일관화
     fieldnames = sorted(row.keys())
 
-    # ✅ 로깅: 날짜별 로그 + 통합 로그
     for path in [dated_path, full_path]:
         try:
             with open(path, "a", newline="", encoding="utf-8-sig") as f:
@@ -138,7 +131,8 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                     writer.writeheader()
                 writer.writerow(row)
         except Exception as e:
-            print(f"[오류] 로그 기록 실패 ({path}) → {e}")
+            print(f"[오류] log_prediction 기록 실패 ({path}) → {e}")
+
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
