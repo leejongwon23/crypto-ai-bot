@@ -319,14 +319,11 @@ def evaluate_predictions(get_price_fn):
     EVAL_RESULT = f"/persistent/logs/evaluation_{date_str}.csv"
     WRONG = f"/persistent/logs/wrong_{date_str}.csv"
 
-    class_ranges = [
-        (-0.99, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
-        (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
-        (-0.03, -0.01), (-0.01, 0.01),
-        (0.01, 0.03), (0.03, 0.05), (0.05, 0.07), (0.07, 0.10),
-        (0.10, 0.15), (0.15, 0.20), (0.20, 0.30), (0.30, 0.60),
-        (0.60, 1.00), (1.00, 2.00), (2.00, 5.00)
-    ]
+    class_ranges = [(-0.99, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
+                    (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
+                    (-0.03, -0.01), (-0.01, 0.01), (0.01, 0.03), (0.03, 0.05),
+                    (0.05, 0.07), (0.07, 0.10), (0.10, 0.15), (0.15, 0.20),
+                    (0.20, 0.30), (0.30, 0.60), (0.60, 1.00), (1.00, 2.00), (2.00, 5.00)]
 
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
     updated, evaluated = [], []
@@ -407,9 +404,7 @@ def evaluate_predictions(get_price_fn):
                 "label": label
             })
 
-            # ✅ dict key None 제거 + str 변환
             r_clean = {str(k): (v if v is not None else "") for k, v in r.items() if k is not None}
-
             update_model_success(symbol, strategy, model, success)
             evaluated.append(r_clean)
 
@@ -432,6 +427,7 @@ def evaluate_predictions(get_price_fn):
     safe_write_csv(EVAL_RESULT, evaluated)
     failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
     safe_write_csv(WRONG, failed)
+
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
