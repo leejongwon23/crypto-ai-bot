@@ -85,12 +85,12 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     from focal_loss import FocalLoss
-    from ssl_pretrain import masked_reconstruction  # ✅ SSL pretrain import 추가
+    from ssl_pretrain import masked_reconstruction
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
     try:
-        # ✅ SSL pretraining 먼저 실행
-        masked_reconstruction(symbol, strategy, input_size=11, mask_ratio=0.2, epochs=5)
+        # ✅ SSL pretraining 실행 (input_size=14 고정)
+        masked_reconstruction(symbol, strategy, input_size=14, mask_ratio=0.2, epochs=5)
 
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
@@ -107,7 +107,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"⛔ 중단: find_best_window 실패")
             return
 
-        X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy)
+        # ✅ input_size=14 강제 적용
+        X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=14)
         if X_raw is None or y_raw is None or len(X_raw) < 5:
             print("⛔ 중단: 학습 데이터 부족")
             return
@@ -122,10 +123,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print("⛔ 중단: 유효 샘플 부족")
             return
 
-        input_size = X_raw.shape[2]
+        input_size = 14  # ✅ input_size 고정
         val_len = max(5, int(len(X_raw) * 0.2))
 
-        # ✅ Curriculum Learning: 손쉬운 샘플부터 학습
+        # ✅ Curriculum Learning
         sorted_idx = np.argsort(y_raw)
         X_raw, y_raw = X_raw[sorted_idx], y_raw[sorted_idx]
 
