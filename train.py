@@ -415,12 +415,11 @@ def train_model_loop(strategy):
         training_in_progress[strategy] = False
         print(f"✅ {strategy} 루프 종료")
 
-
 def train_symbol_group_loop(delay_minutes=5):
     """
     ✅ [설명] SYMBOL_GROUPS 단위로 전체 그룹 학습 루프 실행
     - 각 그룹 학습 전 cache clear
-    - 각 그룹 학습 후 meta 보정, 예측 실행 포함
+    - 각 그룹 학습 후 meta 보정, 해당 그룹 심볼만 예측 실행
     """
     import time
     import maintenance_fix_meta
@@ -444,12 +443,12 @@ def train_symbol_group_loop(delay_minutes=5):
                 maintenance_fix_meta.fix_all_meta_json()
                 print(f"✅ meta 보정 완료: 그룹 {idx}")
 
-                # ✅ 예측 실행
+                # ✅ 예측 실행: 해당 그룹 심볼만 예측하도록 수정
                 for symbol in group:
                     for strategy in ["단기", "중기", "장기"]:
                         try:
                             from recommend import main
-                            main(symbol=symbol, strategy=strategy, force=True)
+                            main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
                             print(f"✅ 예측 완료: {symbol}-{strategy}")
                         except Exception as e:
                             print(f"❌ 예측 실패: {symbol}-{strategy} → {e}")
@@ -460,6 +459,7 @@ def train_symbol_group_loop(delay_minutes=5):
             except Exception as e:
                 print(f"❌ 그룹 {idx} 루프 중 오류: {e}")
                 continue
+
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
     """
     ✅ [설명] Self-Supervised Learning pretraining
