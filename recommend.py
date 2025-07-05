@@ -61,117 +61,51 @@ def get_symbols_by_volatility(strategy):
     return sorted(result, key=lambda x: -x["volatility"])
 
 def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=True):
+    import sys
+    from predict import predict
+    from logger import log_prediction
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼"); sys.stdout.flush()
-    results, fmap = [], load_failure_count()
-    triggered_trainings = set()
-    class_distribution = {}
+    results = []
 
     for item in symbols:
         symbol = item["symbol"]
-        vol = item.get("volatility", 0)
 
         if not allow_prediction:
-            log_audit(symbol, strategy, "예측 생략", f"예측 차단됨 (source={source})")
             continue
 
         try:
-            model_count = len([
-                f for f in os.listdir("/persistent/models")
-                if f.startswith(f"{symbol}_{strategy}_") and (f.endswith(".pt") or f.endswith(".meta.json"))
-            ])
-            if model_count == 0:
-                log_audit(symbol, strategy, None, "모델 없음")
-                log_prediction(
-                    symbol=symbol,
-                    strategy=strategy,
-                    direction="예측실패",
-                    entry_price=0,
-                    target_price=0,
-                    timestamp=now_kst().isoformat(),
-                    model="unknown",
-                    success=False,
-                    reason="모델 없음",
-                    rate=0.0,
-                    return_value=0.0,
-                    volatility=False,
-                    source=source,
-                    predicted_class=-1,
-                    label=-1
-                )
-                continue
-
             pred_results = predict(symbol, strategy, source=source)
             if not isinstance(pred_results, list):
                 pred_results = [pred_results]
 
             for result in pred_results:
-                if not isinstance(result, dict) or result.get("reason") in ["모델 없음", "데이터 부족", "feature 부족"]:
-                    reason = result.get("reason", "예측 실패") if isinstance(result, dict) else "predict() 반환 오류"
-                    pred_class_val = -1
-                    log_prediction(
-                        symbol=symbol,
-                        strategy=strategy,
-                        direction="예측실패",
-                        entry_price=0,
-                        target_price=0,
-                        timestamp=now_kst().isoformat(),
-                        model=result.get("model", "unknown") if isinstance(result, dict) else "unknown",
-                        success=False,
-                        reason=reason,
-                        rate=0.0,
-                        return_value=0.0,
-                        volatility=False,
-                        source=source,
-                        predicted_class=pred_class_val,
-                        label=pred_class_val
-                    )
-                    log_audit(symbol, strategy, result, reason)
-                    continue
-
-                result["volatility"] = vol
-                result["return"] = result.get("expected_return", 0.0)
-                result["source"] = result.get("source", source)
-                result["predicted_class"] = result.get("class", -1)
-                pred_class_val = result.get("class", -1)
+                pred_class_val = result.get("class", -1) if isinstance(result, dict) else -1
 
                 log_prediction(
-                    symbol=result.get("symbol", symbol),
-                    strategy=result.get("strategy", strategy),
+                    symbol=result.get("symbol", symbol) if isinstance(result, dict) else symbol,
+                    strategy=strategy,
                     direction=f"class-{pred_class_val}",
-                    entry_price=result.get("price", 0),
-                    target_price=result.get("price", 0) * (1 + result.get("expected_return", 0)),
-                    timestamp=result.get("timestamp", now_kst().isoformat()),
-                    model=result.get("model", "unknown"),
+                    entry_price=result.get("price", 0) if isinstance(result, dict) else 0,
+                    target_price=result.get("price", 0) * (1 + result.get("expected_return", 0)) if isinstance(result, dict) else 0,
+                    timestamp=result.get("timestamp") if isinstance(result, dict) else None,
+                    model=result.get("model", "unknown") if isinstance(result, dict) else "unknown",
                     success=True,
-                    reason=result.get("reason", "예측 성공"),
-                    rate=result.get("expected_return", 0.0),
-                    return_value=result.get("expected_return", 0.0),
-                    volatility=vol > 0,
-                    source=result.get("source", source),
+                    reason=result.get("reason", "예측 성공") if isinstance(result, dict) else "예측 실패",
+                    rate=result.get("expected_return", 0.0) if isinstance(result, dict) else 0.0,
+                    return_value=result.get("expected_return", 0.0) if isinstance(result, dict) else 0.0,
+                    volatility=False,
+                    source=source,
                     predicted_class=pred_class_val,
                     label=pred_class_val
                 )
-                log_audit(symbol, strategy, result, "예측 기록 완료")
-
-                if pred_class_val != -1:
-                    class_distribution.setdefault(f"{symbol}-{strategy}", []).append(pred_class_val)
-
-                fmap[f"{symbol}-{strategy}"] = 0
                 results.append(result)
 
         except Exception as e:
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
-            log_audit(symbol, strategy, None, f"예측 예외: {e}")
 
-    save_failure_count(fmap)
+    # ✅ 평가 호출 부분 완전 삭제 완료
 
-    try:
-        print("[평가 실행] evaluate_predictions 호출")
-        from predict import evaluate_predictions
-        evaluate_predictions(get_kline_by_strategy)
-    except Exception as e:
-        print(f"[ERROR] 평가 실패: {e}")
-
+    return results
 
 def run_prediction(symbol, strategy):
     print(f">>> [run_prediction] {symbol} - {strategy} 예측 시작")
