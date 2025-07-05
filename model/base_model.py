@@ -162,10 +162,23 @@ def get_model(model_type="cnn_lstm", input_size=11, output_size=None, model_path
 
     if model_type not in MODEL_CLASSES:
         print(f"[경고] 알 수 없는 모델 타입 '{model_type}', 기본 모델 cnn_lstm 사용")
-    model_cls = MODEL_CLASSES.get(model_type, CNNLSTMPricePredictor)
+        model_cls = CNNLSTMPricePredictor
+    else:
+        model_cls = MODEL_CLASSES[model_type]
 
     if output_size is None:
         from config import NUM_CLASSES
         output_size = NUM_CLASSES
 
-    return model_cls(input_size=input_size, output_size=output_size)
+    try:
+        model = model_cls(input_size=input_size, output_size=output_size)
+    except Exception as e:
+        print(f"[⚠️ get_model 예외] {e}")
+        print(f"[Fallback] input_size=14로 재시도")
+        try:
+            model = model_cls(input_size=14, output_size=output_size)
+        except Exception as e2:
+            print(f"[❌ get_model 실패] {e2}")
+            raise e2
+
+    return model
