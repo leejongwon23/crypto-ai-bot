@@ -90,6 +90,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     except:
         pred_class_val = -1
 
+    # ✅ label 없으면 predicted_class fallback (-1 허용)
     if label is None or str(label).strip() == "":
         label = pred_class_val
     else:
@@ -105,6 +106,10 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                  "v_fail" if not success and volatility else \
                  "success" if success else "fail"
 
+    # ✅ 실패시에도 rate와 return_value를 동일하게 기록
+    effective_rate = rate if rate is not None else 0.0
+    effective_return = return_value if return_value is not None else effective_rate
+
     row = {
         "timestamp": now,
         "symbol": str(symbol or "UNKNOWN"),
@@ -113,10 +118,10 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "entry_price": float(entry_price or 0.0),
         "target_price": float(target_price or 0.0),
         "model": str(model or "unknown"),
-        "rate": float(rate or 0.0),
+        "rate": float(effective_rate),
         "status": status,
         "reason": reason or "",
-        "return": float(return_value if return_value is not None else rate or 0.0),
+        "return": float(effective_return),
         "volatility": bool(volatility),
         "source": str(source or "일반"),
         "predicted_class": str(pred_class_val),
