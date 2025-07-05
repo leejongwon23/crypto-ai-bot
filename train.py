@@ -221,7 +221,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 def balance_classes(X, y, min_count=20):
     import numpy as np
     from collections import Counter
-    from imblearn.over_sampling import SMOTE
     from logger import log_prediction  # ✅ logger import 추가
 
     if X is None or y is None or len(X) == 0 or len(y) == 0:
@@ -250,54 +249,24 @@ def balance_classes(X, y, min_count=20):
         needed = max(0, target_count - count)
 
         if needed > 0:
-            if count >= 2:
-                try:
-                    X_cls = X[indices].reshape((count, nx * ny))
-                    k_neighbors = min(count - 1, 5)
-                    smote = SMOTE(random_state=42, sampling_strategy={cls: count + needed}, k_neighbors=k_neighbors)
-                    X_res, y_res = smote.fit_resample(X_cls, np.array([cls]*count))
-                    X_new = X_res[count:].reshape((-1, nx, ny))
-                    if len(X_new) > needed:
-                        X_new = X_new[:needed]
-                    X_balanced.extend(X_new)
-                    y_balanced.extend([cls]*len(X_new))
-                    print(f"[✅ SMOTE 성공] 클래스 {cls} → {len(X_new)}개 추가")
-
-                    log_prediction(
-                        symbol="augmentation", strategy="augmentation",
-                        direction=f"SMOTE-{cls}", entry_price=0, target_price=0,
-                        model="augmentation", success=True,
-                        reason=f"SMOTE {cls} {len(X_new)}개 추가",
-                        rate=0.0, timestamp=None, return_value=0.0,
-                        volatility=False, source="augmentation",
-                        predicted_class=cls, label=cls, augmentation="smote"
-                    )
-
-                except Exception as e:
-                    print(f"[⚠️ SMOTE 실패] 클래스 {cls} → fallback: {e}")
-                    reps = np.random.choice(indices, needed, replace=True)
-                    noisy_samples = X[reps] + np.random.normal(0, 0.05, X[reps].shape).astype(np.float32)
-                    
-                    # ✅ 추가: Noise + Mixup + Time Masking
-                    mixup_samples = noisy_samples.copy()
-                    for i in range(len(mixup_samples)):
-                        j = np.random.randint(len(X))
-                        lam = np.random.beta(0.2, 0.2)
-                        mixup_samples[i] = lam * mixup_samples[i] + (1 - lam) * X[j]
-
-                        # Time Masking
-                        t = np.random.randint(0, nx)
-                        mixup_samples[i][t] = 0.0
-
-                    X_balanced.extend(mixup_samples)
-                    y_balanced.extend([cls]*needed)
-                    print(f"[복제+Noise+Mixup+Masking] 클래스 {cls} → {needed}개 추가")
-            elif count == 1:
-                reps = np.repeat(indices[0], needed)
+            if count >= 1:
+                reps = np.random.choice(indices, needed, replace=True)
                 noisy_samples = X[reps] + np.random.normal(0, 0.05, X[reps].shape).astype(np.float32)
-                X_balanced.extend(noisy_samples)
+
+                # ✅ Noise + Mixup + Time Masking
+                mixup_samples = noisy_samples.copy()
+                for i in range(len(mixup_samples)):
+                    j = np.random.randint(len(X))
+                    lam = np.random.beta(0.2, 0.2)
+                    mixup_samples[i] = lam * mixup_samples[i] + (1 - lam) * X[j]
+
+                    # Time Masking
+                    t = np.random.randint(0, nx)
+                    mixup_samples[i][t] = 0.0
+
+                X_balanced.extend(mixup_samples)
                 y_balanced.extend([cls]*needed)
-                print(f"[복제+Noise] 클래스 {cls} → {needed}개 추가 (1개 복제)")
+                print(f"[복제+Noise+Mixup+Masking] 클래스 {cls} → {needed}개 추가")
             else:
                 print(f"[스킵] 클래스 {cls} → 샘플 없음, noise sample 생성 생략")
 
