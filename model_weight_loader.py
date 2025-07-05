@@ -6,7 +6,7 @@ import glob
 MODEL_DIR = "/persistent/models"
 EVAL_RESULT = "/persistent/evaluation_result.csv"
 
-def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_size=None):  # ✅ min_samples=3 완화
+def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_size=None):
     pattern = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json") if symbol != "ALL" \
               else os.path.join(MODEL_DIR, f"*_{strategy}_{model_type}.meta.json")
     meta_files = glob.glob(pattern)
@@ -21,7 +21,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
                 meta = json.load(f)
 
             if input_size is not None and meta.get("input_size") != input_size:
-                print(f"[⚠️ input_size 불일치] {meta.get('input_size')} vs {input_size} → weight=0")
+                print(f"[⚠️ input_size 불일치] meta={meta.get('input_size')} vs input={input_size} → weight=0")
                 continue
 
             pt_path = meta_path.replace(".meta.json", ".pt")
@@ -51,14 +51,17 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
             df = df[(df["model"] == model_type) & (df["strategy"] == strategy) &
                     (df["symbol"] == meta.get("symbol")) & (df["status"].isin(["success", "fail"]))]
 
-            if len(df) < min_samples:
-                print(f"[INFO] 평가 샘플 부족(len={len(df)} < {min_samples}) → cold-start weight=0.2")
+            sample_len = len(df)
+            if sample_len < min_samples:
+                print(f"[INFO] 평가 샘플 부족 (len={sample_len} < {min_samples}) → cold-start weight=0.2")
                 return 0.2
 
-            success_rate = len(df[df["status"] == "success"]) / len(df)
+            success_rate = len(df[df["status"] == "success"]) / sample_len
             if success_rate >= 0.7:
+                print(f"[INFO] success_rate={success_rate:.4f} → weight=1.0")
                 return 1.0
             elif success_rate < 0.3:
+                print(f"[INFO] success_rate={success_rate:.4f} → weight=0.0")
                 return 0.0
             else:
                 w = max(0.0, round((success_rate - 0.3) / (0.7 - 0.3), 4))
@@ -71,7 +74,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
 
     print("[INFO] 조건 충족 모델 없음 → cold-start weight=0.2")
     return 0.2
-
+    
 def model_exists(symbol, strategy):
     try:
         for file in os.listdir(MODEL_DIR):
