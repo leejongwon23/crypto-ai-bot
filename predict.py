@@ -120,6 +120,8 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
 
 def predict(symbol, strategy, source="일반", model_type=None):
+    from scipy.stats import entropy
+
     try:
         max_retry = 3
         retry = 0
@@ -182,10 +184,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     retry += 1
                     return [failed_result(symbol, strategy, mt, "used_feature_columns mismatch", source, X_input)]
 
-                weight = get_model_weight(mt, strategy, symbol, input_size=input_size)
-                if weight <= 0.0:
-                    continue
-
                 model = get_model(mt, input_size, NUM_CLASSES).to(DEVICE)
                 state = torch.load(model_path, map_location=DEVICE)
                 model.load_state_dict(state)
@@ -195,23 +193,21 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
 
-                diversity_penalty = np.exp(-probs)
-                probs = probs * diversity_penalty
+                model_entropy = entropy(probs)
+                bayesian_weight = 1 / (model_entropy + 1e-6)  # ✅ entropy 기반 weight
+
+                probs = probs * bayesian_weight
                 probs = probs / probs.sum()
 
                 if ensemble_probs is None:
-                    ensemble_probs = probs * weight
+                    ensemble_probs = probs
                 else:
-                    ensemble_probs += probs * weight
-                total_weight += weight
+                    ensemble_probs += probs
+                total_weight += bayesian_weight
 
-                recent_freq = get_recent_class_frequencies(strategy=strategy)
-                class_counts = meta.get("class_counts", {}) or {}
-                adjusted_probs = adjust_probs_with_diversity(probs, recent_freq, class_counts)
-
-                pred_class = int(adjusted_probs.argmax())
+                pred_class = int(probs.argmax())
                 expected_return = class_to_expected_return(pred_class)
-                conf_score = 1 - entropy(probs) / np.log(len(probs))
+                conf_score = 1 - model_entropy / np.log(len(probs))
 
                 log_prediction(
                     symbol=symbol, strategy=strategy, direction=f"Class-{pred_class}",
@@ -220,7 +216,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     model=mt, success=True, reason=f"예측 완료 | confidence={conf_score:.4f}",
                     rate=expected_return, timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
                     return_value=expected_return, volatility=True, source=source,
-                    predicted_class=pred_class, label=pred_class  # ✅ label 추가
+                    predicted_class=pred_class, label=pred_class
                 )
 
                 results.append({
