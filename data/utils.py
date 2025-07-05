@@ -51,6 +51,7 @@ def get_btc_dominance():
 
 import numpy as np
 
+
 def create_dataset(features, window=20, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
@@ -79,10 +80,8 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     df = pd.DataFrame(features)
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["timestamp", "close", "high"]).sort_values("timestamp").reset_index(drop=True)
-
     df = df.drop(columns=["strategy"], errors="ignore")
 
-    # ✅ MinMaxScaler fit_transform 적용 후 컬럼명 일관성 유지
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(df.drop(columns=["timestamp"]))
     df_scaled = pd.DataFrame(scaled, columns=[c for c in df.columns if c != "timestamp"])
@@ -93,10 +92,9 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     class_ranges = [
         (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
         (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
-        (-0.03, -0.01), (-0.01, 0.01),
-        (0.01, 0.03), (0.03, 0.05), (0.05, 0.07), (0.07, 0.10),
-        (0.10, 0.15), (0.15, 0.20), (0.20, 0.30), (0.30, 0.60),
-        (0.60, 1.00), (1.00, 2.00), (2.00, 5.00)
+        (-0.03, -0.01), (-0.01, 0.01), (0.01, 0.03), (0.03, 0.05),
+        (0.05, 0.07), (0.07, 0.10), (0.10, 0.15), (0.15, 0.20),
+        (0.20, 0.30), (0.30, 0.60), (0.60, 1.00), (1.00, 2.00), (2.00, 5.00)
     ]
 
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
@@ -129,13 +127,14 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
 
-            # ✅ input_size 고정 및 zero-padding
+            # ✅ input_size 고정 및 zero-padding (샘플 전체)
             if input_size:
-                for row in sample:
+                for j in range(len(sample)):
+                    row = sample[j]
                     if len(row) < input_size:
                         row.extend([0.0] * (input_size - len(row)))
                     elif len(row) > input_size:
-                        row = row[:input_size]
+                        sample[j] = row[:input_size]
 
             X.append(sample)
             y.append(cls)
@@ -153,7 +152,6 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         print(f"[📊 클래스 분포] → {dict(zip(labels, counts))}")
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
-
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
@@ -263,6 +261,7 @@ def get_realtime_prices():
 
 _feature_cache = {}
 
+
 def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_features: list = None, fallback_input_size: int = None) -> pd.DataFrame:
     from predict import failed_result
     global _feature_cache
@@ -289,7 +288,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         base_cols = ["open", "high", "low", "close", "volume"]
         df = df[["timestamp", "strategy"] + base_cols]
 
-        # ✅ feature engineering (기존 동일)
+        # ✅ feature engineering
         df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
         delta = df["close"].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
@@ -321,7 +320,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.fillna(0, inplace=True)
 
-        # ✅ feature 개수 고정: required_features 없으면 fallback_input_size 기반 생성
         scaler = MinMaxScaler()
         feature_cols = [c for c in df.columns if c not in ["timestamp", "strategy"]]
         df[feature_cols] = scaler.fit_transform(df[feature_cols])
@@ -335,9 +333,11 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         elif fallback_input_size:
             current_features = [c for c in df.columns if c not in ["timestamp", "strategy"]]
             if len(current_features) < fallback_input_size:
-                # 부족한 feature zero-padding 추가
                 for i in range(len(current_features), fallback_input_size):
                     df[f"pad_{i}"] = 0.0
+                # ✅ 컬럼 순서 재정렬
+                new_cols = current_features + [f"pad_{i}" for i in range(len(current_features), fallback_input_size)]
+                df = df[["timestamp", "strategy"] + new_cols]
 
     except Exception as e:
         print(f"[❌ compute_features 예외] feature 계산 실패 → {e}")
