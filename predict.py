@@ -296,16 +296,13 @@ def evaluate_predictions(get_price_fn):
             label = int(float(r.get("label", -1))) if pd.notnull(r.get("label")) else -1
             r["label"] = label
 
-            if pred_class == -1:
-                log_prediction(symbol, strategy, "예측실패", 0, 0, now_kst().isoformat(),
-                               model, False, "pred_class=-1", 0.0, 0.0, False, "평가",
-                               predicted_class=-1, label=label)
-                updated.append(r)
-                continue
-
             entry_price = float(r.get("entry_price", 0))
-            if entry_price <= 0:
-                r.update({"status": "fail", "reason": "entry_price 오류", "return": 0.0})
+            if entry_price <= 0 or pred_class == -1:
+                # ✅ 예측실패 로그 추가
+                log_prediction(symbol, strategy, "예측실패", entry_price, entry_price, now_kst().isoformat(),
+                               model, False, "entry_price 오류 또는 pred_class=-1", 0.0, 0.0, False, "평가",
+                               predicted_class=pred_class, label=label)
+                r.update({"status": "fail", "reason": "entry_price 오류 또는 pred_class=-1", "return": 0.0})
                 updated.append(r)
                 continue
 
@@ -338,7 +335,6 @@ def evaluate_predictions(get_price_fn):
                 cls_min, cls_max = -999, 999
 
             success = cls_min <= gain <= cls_max
-
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
             status = "v_success" if vol and success else \
                      "v_fail" if vol and not success else \
@@ -353,6 +349,12 @@ def evaluate_predictions(get_price_fn):
                 "confidence": confidence,
                 "label": label
             })
+
+            # ✅ 평가결과를 log_prediction() 으로 DB, 루프 전달
+            log_prediction(symbol, strategy, f"평가:{status}", entry_price,
+                           entry_price * (1 + gain), now_kst().isoformat(), model,
+                           success, r["reason"], gain, gain, vol, "평가",
+                           predicted_class=pred_class, label=label)
 
             r_clean = {str(k): (v if v is not None else "") for k, v in r.items() if k is not None}
             update_model_success(symbol, strategy, model, success)
@@ -378,6 +380,7 @@ def evaluate_predictions(get_price_fn):
     failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
     safe_write_csv(WRONG, failed)
     print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
+
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
