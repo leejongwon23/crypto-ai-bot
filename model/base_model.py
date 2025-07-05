@@ -15,9 +15,8 @@ class Attention(nn.Module):
         context = torch.sum(lstm_out * weights.unsqueeze(-1), dim=1)
         return context, weights
 
-
 class LSTMPricePredictor(nn.Module):
-    def __init__(self, input_size, hidden_size=128, num_layers=3, dropout=0.3, output_size=NUM_CLASSES):
+    def __init__(self, input_size, hidden_size=256, num_layers=4, dropout=0.4, output_size=NUM_CLASSES):
         super().__init__()
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, dropout=dropout, batch_first=True, bidirectional=True)
         self.attention = Attention(hidden_size * 2)
@@ -25,7 +24,8 @@ class LSTMPricePredictor(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.fc1 = nn.Linear(hidden_size * 2, hidden_size)
         self.act = nn.GELU()
-        self.fc_logits = nn.Linear(hidden_size, output_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size//2)
+        self.fc_logits = nn.Linear(hidden_size//2, output_size)
 
     def forward(self, x):
         lstm_out, _ = self.lstm(x)
@@ -33,21 +33,23 @@ class LSTMPricePredictor(nn.Module):
         context = self.norm(context)
         context = self.dropout(context)
         hidden = self.act(self.fc1(context))
+        hidden = self.act(self.fc2(hidden))
         return self.fc_logits(hidden)
 
-
 class CNNLSTMPricePredictor(nn.Module):
-    def __init__(self, input_size, cnn_channels=64, lstm_hidden_size=128, lstm_layers=2, dropout=0.3, output_size=NUM_CLASSES):
+    def __init__(self, input_size, cnn_channels=128, lstm_hidden_size=256, lstm_layers=3, dropout=0.4, output_size=NUM_CLASSES):
         super().__init__()
         self.conv1 = nn.Conv1d(input_size, cnn_channels, kernel_size=3, padding=1)
         self.conv2 = nn.Conv1d(cnn_channels, cnn_channels, kernel_size=3, padding=1)
         self.relu = nn.ReLU()
         self.lstm = nn.LSTM(cnn_channels, lstm_hidden_size, lstm_layers, batch_first=True, bidirectional=True)
         self.attention = Attention(lstm_hidden_size * 2)
+        self.norm = nn.LayerNorm(lstm_hidden_size * 2)
         self.dropout = nn.Dropout(dropout)
         self.fc1 = nn.Linear(lstm_hidden_size * 2, lstm_hidden_size)
         self.act = nn.GELU()
-        self.fc_logits = nn.Linear(lstm_hidden_size, output_size)
+        self.fc2 = nn.Linear(lstm_hidden_size, lstm_hidden_size//2)
+        self.fc_logits = nn.Linear(lstm_hidden_size//2, output_size)
 
     def forward(self, x):
         x = x.permute(0, 2, 1)
@@ -56,10 +58,11 @@ class CNNLSTMPricePredictor(nn.Module):
         x = x.permute(0, 2, 1)
         lstm_out, _ = self.lstm(x)
         context, _ = self.attention(lstm_out)
+        context = self.norm(context)
         context = self.dropout(context)
         hidden = self.act(self.fc1(context))
+        hidden = self.act(self.fc2(hidden))
         return self.fc_logits(hidden)
-
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
@@ -74,9 +77,8 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         return x + self.pe[:, :x.size(1)].to(x.device)
 
-
 class TransformerEncoderLayer(nn.Module):
-    def __init__(self, d_model, nhead, dim_feedforward=256, dropout=0.3):
+    def __init__(self, d_model, nhead, dim_feedforward=512, dropout=0.4):
         super().__init__()
         self.layer = nn.TransformerEncoderLayer(
             d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
@@ -86,9 +88,8 @@ class TransformerEncoderLayer(nn.Module):
     def forward(self, x):
         return self.layer(x)
 
-
 class TransformerPricePredictor(nn.Module):
-    def __init__(self, input_size, d_model=64, nhead=4, num_layers=2, dropout=0.3, output_size=NUM_CLASSES):
+    def __init__(self, input_size, d_model=128, nhead=8, num_layers=3, dropout=0.4, output_size=NUM_CLASSES):
         super().__init__()
         self.input_proj = nn.Linear(input_size, d_model)
         self.pos_encoder = PositionalEncoding(d_model)
@@ -108,7 +109,6 @@ class TransformerPricePredictor(nn.Module):
         x = self.dropout(x)
         hidden = self.act(self.fc1(x))
         return self.fc_logits(hidden)
-
 
 class XGBoostWrapper:
     def __init__(self, model_path):
