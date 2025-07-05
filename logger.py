@@ -199,7 +199,6 @@ def get_recent_predicted_classes(strategy: str, recent_days: int = 3):
     except:
         return set()
 
-
 def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
     import pandas as pd
     from collections import defaultdict
@@ -209,19 +208,11 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
         df = df[df["status"].isin(["success", "fail"])]
 
-        if "predicted_class" not in df.columns:
-            print("[경고] predicted_class 컬럼 없음 → -1로 생성 후 처리")
-            df["predicted_class"] = -1
-
-        if "label" not in df.columns:
-            df["label"] = df["predicted_class"]
+        # ✅ 라벨 오류 제거
+        df = df[(df["predicted_class"] >= 0) & (df["label"] >= 0)]
 
         if "strategy" not in df.columns:
             df["strategy"] = "알수없음"
-
-        df = df[df["predicted_class"].notna()]
-        df["predicted_class"] = pd.to_numeric(df["predicted_class"], errors="coerce").fillna(-1).astype(int)
-        df["label"] = pd.to_numeric(df["label"], errors="coerce").fillna(-1).astype(int)
 
         result = defaultdict(lambda: {"success": 0, "fail": 0})
         for _, row in df.iterrows():
@@ -243,9 +234,9 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
                     "success_rate": round(rate, 4)
                 })
 
-        # ✅ fallback: fine-tune 대상 없으면 최근 실패 + noise sample 추가
-        if not fine_tune_targets:
-            print("[INFO] fine-tune 대상 없음 → fallback 최근 실패 + noise sample 사용")
+        # ✅ 최소 min_samples 보장 + 클래스 다양성 확보
+        if len(fine_tune_targets) < min_samples:
+            print("[INFO] fine-tune 대상 부족 → fallback 최근 실패 + noise sample 사용")
             fail_df = df[df["status"] == "fail"]
             fallback_df = fail_df.sample(n=min_samples, replace=True) if len(fail_df) >= min_samples else fail_df
 
@@ -258,7 +249,7 @@ def get_fine_tune_targets(min_samples=30, max_success_rate=0.4):
                     "success_rate": 0.0
                 })
 
-            # ✅ noise sample 추가 보장
+            # ✅ noise sample 추가
             noise_needed = min_samples - len(fallback)
             for i in range(noise_needed):
                 fallback.append({
