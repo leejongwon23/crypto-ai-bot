@@ -261,10 +261,9 @@ def get_realtime_prices():
 
 _feature_cache = {}
 
-
-
 def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_features: list = None, fallback_input_size: int = None) -> pd.DataFrame:
     from predict import failed_result
+    import ta  # ✅ ta 라이브러리 추가 필요 (pip install ta)
     global _feature_cache
     cache_key = f"{symbol}-{strategy}"
     if cache_key in _feature_cache:
@@ -289,7 +288,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         base_cols = ["open", "high", "low", "close", "volume"]
         df = df[["timestamp", "strategy"] + base_cols]
 
-        # ✅ feature engineering
+        # ✅ 기존 feature engineering 유지
         df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
         delta = df["close"].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
@@ -302,21 +301,16 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df["bollinger"] = df["close"].rolling(window=20, min_periods=1).std()
         df["volatility"] = df["high"] - df["low"]
         df["trend_score"] = (df["close"] > df["ma20"]).astype(int)
-        min14 = df["close"].rolling(window=14, min_periods=1).min()
-        max14 = df["close"].rolling(window=14, min_periods=1).max()
-        df["stoch_rsi"] = (df["close"] - min14) / (max14 - min14 + 1e-6)
-        typical = (df["high"] + df["low"] + df["close"]) / 3
-        ma_typical = typical.rolling(window=20, min_periods=1).mean()
-        md = (typical - ma_typical).abs().rolling(window=20, min_periods=1).mean()
-        df["cci"] = (typical - ma_typical) / (0.015 * md + 1e-6)
-        df["obv"] = (np.sign(df["close"].diff()) * df["volume"]).fillna(0).cumsum()
 
-        if strategy == "중기":
-            df["ema_cross"] = ema12 > ema26
-        elif strategy == "장기":
-            df["volume_cumsum"] = df["volume"].cumsum()
-            df["roc"] = df["close"].pct_change(periods=10)
-            df["mfi"] = df["volume"] / (df["high"] - df["low"] + 1e-6)
+        # ✅ 고급 기술적 지표 추가 (ta-lib 없이 ta 패키지 사용)
+        df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
+        df["ema100"] = df["close"].ewm(span=100, adjust=False).mean()
+        df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
+        df["roc"] = df["close"].pct_change(periods=10)
+        df["adx"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14, fillna=True)
+        df["cci"] = ta.trend.cci(df["high"], df["low"], df["close"], window=20, fillna=True)
+        df["mfi"] = ta.volume.money_flow_index(df["high"], df["low"], df["close"], df["volume"], window=14, fillna=True)
+        df["obv"] = ta.volume.on_balance_volume(df["close"], df["volume"], fillna=True)
 
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.fillna(0, inplace=True)
@@ -333,13 +327,9 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
 
         elif fallback_input_size:
             current_features = [c for c in df.columns if c not in ["timestamp", "strategy"]]
-            
-            # ✅ 초과시 잘라내기
             if len(current_features) > fallback_input_size:
                 current_features = current_features[:fallback_input_size]
                 df = df[["timestamp", "strategy"] + current_features]
-            
-            # ✅ 부족시 pad 추가
             if len(current_features) < fallback_input_size:
                 for i in range(len(current_features), fallback_input_size):
                     df[f"pad_{i}"] = 0.0
