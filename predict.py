@@ -18,7 +18,6 @@ DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-
 def class_to_expected_return(cls, recent_days=3):
     import pandas as pd
     import numpy as np
@@ -64,7 +63,6 @@ def class_to_expected_return(cls, recent_days=3):
         if 0 <= cls < len(centers_default):
             return centers_default[cls]
         return centers_default[0]
-
 
 # ✅ 수정 요약:
 # - failed_result(): label=-1 기본 포함
@@ -119,6 +117,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             print(f"[failed_result insert_failure_record 오류] {e}")
 
     return result
+
 
 def predict(symbol, strategy, source="일반", model_type=None):
     try:
@@ -196,11 +195,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
 
-                # 🔧 [Diversity Regularization 추가]
-                # 각 클래스 확률에 diversity penalty를 곱해 편중 완화
-                diversity_penalty = np.exp(-probs)  # 확률이 높을수록 패널티 감소
+                diversity_penalty = np.exp(-probs)
                 probs = probs * diversity_penalty
-                probs = probs / probs.sum()  # 정규화
+                probs = probs / probs.sum()
 
                 if ensemble_probs is None:
                     ensemble_probs = probs * weight
@@ -223,7 +220,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     model=mt, success=True, reason=f"예측 완료 | confidence={conf_score:.4f}",
                     rate=expected_return, timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
                     return_value=expected_return, volatility=True, source=source,
-                    predicted_class=pred_class, label=pred_class
+                    predicted_class=pred_class, label=pred_class  # ✅ label 추가
                 )
 
                 results.append({
@@ -243,7 +240,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
     except Exception as e:
         print(f"[predict 예외] {e}")
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source, X_input)]
-
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
