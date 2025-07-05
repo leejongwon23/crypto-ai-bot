@@ -258,7 +258,7 @@ def get_realtime_prices():
 
 _feature_cache = {}
 
-def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_features: list = None) -> pd.DataFrame:
+def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_features: list = None, fallback_input_size: int = None) -> pd.DataFrame:
     from predict import failed_result
     global _feature_cache
     cache_key = f"{symbol}-{strategy}"
@@ -281,13 +281,10 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     df["strategy"] = strategy
 
     try:
-        # ✅ feature column list 고정
-        base_cols = [
-            "open", "high", "low", "close", "volume"
-        ]
+        base_cols = ["open", "high", "low", "close", "volume"]
         df = df[["timestamp", "strategy"] + base_cols]
 
-        # ✅ feature engineering
+        # ✅ feature engineering (기존 동일)
         df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
         delta = df["close"].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
@@ -319,22 +316,28 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.fillna(0, inplace=True)
 
-        # ✅ MinMaxScaler fit_transform 순서 통일
+        # ✅ feature 개수 고정: required_features 없으면 fallback_input_size 기반 생성
         scaler = MinMaxScaler()
         feature_cols = [c for c in df.columns if c not in ["timestamp", "strategy"]]
         df[feature_cols] = scaler.fit_transform(df[feature_cols])
+
+        if required_features:
+            for col in required_features:
+                if col not in df.columns:
+                    df[col] = 0.0
+            df = df[["timestamp", "strategy"] + required_features]
+
+        elif fallback_input_size:
+            current_features = [c for c in df.columns if c not in ["timestamp", "strategy"]]
+            if len(current_features) < fallback_input_size:
+                # 부족한 feature zero-padding 추가
+                for i in range(len(current_features), fallback_input_size):
+                    df[f"pad_{i}"] = 0.0
 
     except Exception as e:
         print(f"[❌ compute_features 예외] feature 계산 실패 → {e}")
         failed_result(symbol, strategy, reason=f"feature 계산 실패: {e}")
         return pd.DataFrame(columns=["timestamp", "strategy", "close", "high"])
-
-    # ✅ required_features 적용 시 컬럼 순서 통일
-    if required_features:
-        for col in required_features:
-            if col not in df.columns:
-                df[col] = 0.0
-        df = df[["timestamp", "strategy"] + required_features]
 
     required_cols = ["timestamp", "close", "high"]
     missing_cols = [col for col in required_cols if col not in df.columns or df[col].isnull().any()]
@@ -351,7 +354,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     print(f"[✅ 완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     _feature_cache[cache_key] = df
     return df
-
 
 # data/utils.py 맨 아래에 추가
 
