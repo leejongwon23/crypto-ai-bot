@@ -243,6 +243,7 @@ import pandas as pd
 from failure_db import ensure_failure_db, insert_failure_record
 from logger import update_model_success
 
+
 def evaluate_predictions(get_price_fn):
     import csv, os, datetime, pytz
     import pandas as pd
