@@ -262,6 +262,7 @@ def get_realtime_prices():
 _feature_cache = {}
 
 
+
 def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_features: list = None, fallback_input_size: int = None) -> pd.DataFrame:
     from predict import failed_result
     global _feature_cache
@@ -332,10 +333,16 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
 
         elif fallback_input_size:
             current_features = [c for c in df.columns if c not in ["timestamp", "strategy"]]
+            
+            # ✅ 초과시 잘라내기
+            if len(current_features) > fallback_input_size:
+                current_features = current_features[:fallback_input_size]
+                df = df[["timestamp", "strategy"] + current_features]
+            
+            # ✅ 부족시 pad 추가
             if len(current_features) < fallback_input_size:
                 for i in range(len(current_features), fallback_input_size):
                     df[f"pad_{i}"] = 0.0
-                # ✅ 컬럼 순서 재정렬
                 new_cols = current_features + [f"pad_{i}" for i in range(len(current_features), fallback_input_size)]
                 df = df[["timestamp", "strategy"] + new_cols]
 
