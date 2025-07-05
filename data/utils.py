@@ -51,7 +51,7 @@ def get_btc_dominance():
 
 import numpy as np
 
-def create_dataset(features, window=20, strategy="단기"):
+def create_dataset(features, window=20, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
     from sklearn.preprocessing import MinMaxScaler
@@ -128,8 +128,14 @@ def create_dataset(features, window=20, strategy="단기"):
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), -1)
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
-            if any(len(row) != len(columns) for row in sample):
-                continue
+
+            # ✅ input_size 고정 및 zero-padding
+            if input_size:
+                for row in sample:
+                    if len(row) < input_size:
+                        row.extend([0.0] * (input_size - len(row)))
+                    elif len(row) > input_size:
+                        row = row[:input_size]
 
             X.append(sample)
             y.append(cls)
@@ -147,7 +153,6 @@ def create_dataset(features, window=20, strategy="단기"):
         print(f"[📊 클래스 분포] → {dict(zip(labels, counts))}")
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
-
 
 
 def get_kline_by_strategy(symbol: str, strategy: str):
