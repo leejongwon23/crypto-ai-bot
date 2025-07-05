@@ -89,7 +89,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
     try:
-        # ✅ SSL pretraining 실행 (input_size=14 고정)
         masked_reconstruction(symbol, strategy, input_size=14, mask_ratio=0.2, epochs=5)
 
         df = get_kline_by_strategy(symbol, strategy)
@@ -107,7 +106,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"⛔ 중단: find_best_window 실패")
             return
 
-        # ✅ input_size=14 강제 적용
         X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=14)
         if X_raw is None or y_raw is None or len(X_raw) < 5:
             print("⛔ 중단: 학습 데이터 부족")
@@ -123,10 +121,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print("⛔ 중단: 유효 샘플 부족")
             return
 
-        input_size = 14  # ✅ input_size 고정
+        input_size = 14
         val_len = max(5, int(len(X_raw) * 0.2))
 
-        # ✅ Curriculum Learning
+        # ✅ Curriculum Learning: 라벨 오름차순 → 난이도 가중치 샘플링
         sorted_idx = np.argsort(y_raw)
         X_raw, y_raw = X_raw[sorted_idx], y_raw[sorted_idx]
 
@@ -145,13 +143,12 @@ def train_one_model(symbol, strategy, max_epochs=20):
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size=input_size, output_size=NUM_CLASSES).to(DEVICE).train()
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-            lossfn = nn.CrossEntropyLoss(weight=class_weight_tensor)
+            lossfn = FocalLoss(gamma=2, weight=class_weight_tensor)  # ✅ FocalLoss + Class Weight
 
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
             train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
 
-            # ✅ Active Sampling
             for epoch in range(max_epochs):
                 indices = np.random.choice(len(X_train), int(len(X_train)*0.8), replace=False)
                 sampled_X = X_train[indices]
@@ -168,7 +165,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     if torch.isfinite(loss):
                         optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-            # ✅ 실패 집중 학습
             if wrong_ds:
                 wrong_loader = DataLoader(wrong_ds, batch_size=16, shuffle=True, num_workers=2)
                 for _ in range(3):
@@ -182,7 +178,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 torch.cuda.empty_cache()
                 gc.collect()
 
-            # ✅ 검증
             model.eval()
             with torch.no_grad():
                 xb = torch.tensor(X_val, dtype=torch.float32).to(DEVICE)
