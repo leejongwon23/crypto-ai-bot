@@ -124,3 +124,23 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     except Exception as e:
         print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
         return min_window
+
+def find_best_windows(symbol, strategy, window_list=[10, 20, 30, 40]):
+    """
+    ✅ 다중 윈도우 앙상블용
+    - window_list 중 데이터 개수로 학습 가능한 window만 필터링
+    - 반환: 유효한 window 리스트
+    """
+    df = get_kline_by_strategy(symbol, strategy)
+    if df is None or df.empty:
+        print(f"[⚠️ find_best_windows] 데이터 없음 → 기본 window_list 반환")
+        return window_list
+
+    valid_windows = []
+    for w in window_list:
+        if len(df) >= w + 10:
+            valid_windows.append(w)
+    if not valid_windows:
+        valid_windows = [min(window_list)]
+    print(f"[✅ find_best_windows] {symbol}-{strategy} → {valid_windows}")
+    return valid_windows
