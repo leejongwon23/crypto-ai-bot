@@ -276,7 +276,7 @@ def evaluate_predictions(get_price_fn):
             symbol = r.get("symbol", "UNKNOWN")
             strategy = r.get("strategy", "알수없음")
             model = r.get("model", "unknown")
-            group_id = r.get("group_id", "")  # ✅ group_id 로드
+            group_id = r.get("group_id", "")
 
             pred_class = int(float(r.get("predicted_class", -1))) if pd.notnull(r.get("predicted_class")) else -1
             label = int(float(r.get("label", -1))) if pd.notnull(r.get("label")) else -1
@@ -314,15 +314,12 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            # ✅ ±1 클래스 오차 허용
+            # ✅ 수정된 평가 로직: 예측 클래스 구간 도달 또는 초과만 성공
             success = False
-            for delta in [-1, 0, 1]:
-                check_class = pred_class + delta
-                if 0 <= check_class < len(class_ranges):
-                    cls_min, cls_max = class_ranges[check_class]
-                    if cls_min <= gain <= cls_max:
-                        success = True
-                        break
+            if 0 <= pred_class < len(class_ranges):
+                cls_min, cls_max = class_ranges[pred_class]
+                if gain >= cls_min:
+                    success = True
 
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
             status = "v_success" if vol and success else \
@@ -337,7 +334,7 @@ def evaluate_predictions(get_price_fn):
                 "return": round(gain, 5),
                 "confidence": confidence,
                 "label": label,
-                "group_id": group_id  # ✅ group_id 추가
+                "group_id": group_id
             })
 
             log_prediction(symbol, strategy, f"평가:{status}", entry_price,
