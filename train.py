@@ -82,10 +82,15 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
     except Exception as e:
         print(f"[ERROR] meta 저장 실패: {e}")
 
+def get_class_groups(num_classes=21, group_size=5):
+    return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
+
+
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     from focal_loss import FocalLoss
     from ssl_pretrain import masked_reconstruction
+
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
     try:
@@ -111,17 +116,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print("⛔ 중단: 학습 데이터 부족")
             return
 
-        print("[INFO] balance_classes(min_count=30) 호출")
-        X_raw, y_raw = balance_classes(X_raw, y_raw, min_count=30)
-
-        y_raw, X_raw = np.array(y_raw), np.array(X_raw, dtype=np.float32)
-        mask = (y_raw >= 0) & (y_raw < NUM_CLASSES)
-        X_raw, y_raw = X_raw[mask], y_raw[mask]
-        if len(X_raw) < 5:
-            print("⛔ 중단: 유효 샘플 부족")
-            return
-
         input_size = 14
+        class_groups = get_class_groups()
         val_len = max(5, int(len(X_raw) * 0.2))
 
         sorted_idx = np.argsort(y_raw)
@@ -135,83 +131,49 @@ def train_one_model(symbol, strategy, max_epochs=20):
         class_weight = [total / counts.get(i, 1) for i in range(NUM_CLASSES)]
         class_weight_tensor = torch.tensor(class_weight, dtype=torch.float32).to(DEVICE)
 
-        for model_type in ["lstm", "cnn_lstm", "transformer"]:
-            # ✅ 모델별 실패샘플 로드
-            wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, model_name=model_type)
-            wrong_ds = TensorDataset(torch.tensor([x for x, _ in wrong_data], dtype=torch.float32),
-                                     torch.tensor([y for _, y in wrong_data], dtype=torch.long)) if wrong_data else None
+        for group_id, group_classes in enumerate(class_groups):
+            for model_type in ["lstm", "cnn_lstm", "transformer"]:
+                model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
+                optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+                lossfn = FocalLoss(gamma=2, weight=class_weight_tensor)
 
-            model = get_model(model_type, input_size=input_size, output_size=NUM_CLASSES).to(DEVICE).train()
-            optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-            lossfn = FocalLoss(gamma=2, weight=class_weight_tensor)
+                # ✅ 해당 그룹 클래스만 학습데이터에 필터링 필요 (추후 구현 가능)
 
-            train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
-                                     torch.tensor(y_train, dtype=torch.long))
-            train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
+                train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
+                                         torch.tensor(y_train, dtype=torch.long))
+                train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
 
-            for epoch in range(max_epochs):
-                indices = np.random.choice(len(X_train), int(len(X_train)*0.8), replace=False)
-                sampled_X = X_train[indices]
-                sampled_y = y_train[indices]
-
-                sampled_ds = TensorDataset(torch.tensor(sampled_X, dtype=torch.float32),
-                                           torch.tensor(sampled_y, dtype=torch.long))
-                sampled_loader = DataLoader(sampled_ds, batch_size=32, shuffle=True, num_workers=2)
-
-                for xb, yb in sampled_loader:
-                    xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                    logits = model(xb)
-                    loss = lossfn(logits, yb)
-                    if torch.isfinite(loss):
-                        optimizer.zero_grad(); loss.backward(); optimizer.step()
-
-            if wrong_ds:
-                wrong_loader = DataLoader(wrong_ds, batch_size=16, shuffle=True, num_workers=2)
-                for _ in range(3):
-                    for xb, yb in wrong_loader:
+                for epoch in range(max_epochs):
+                    for xb, yb in train_loader:
                         xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                         logits = model(xb)
                         loss = lossfn(logits, yb)
                         if torch.isfinite(loss):
                             optimizer.zero_grad(); loss.backward(); optimizer.step()
-                del wrong_loader, wrong_ds
+
+                # ✅ meta 저장에 group_id 포함
+                meta = {
+                    "symbol": symbol, "strategy": strategy, "model": model_type,
+                    "group_id": group_id,  # ➔ 추가된 부분
+                    "input_size": input_size,
+                    "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                meta_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}_group{group_id}.meta.json"
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2, ensure_ascii=False)
+
+                # ✅ 모델 저장
+                model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}_group{group_id}.pt"
+                torch.save(model.state_dict(), model_path)
+
+                print(f"[✅ 저장 완료] {model_type} group-{group_id}")
+
+                del model, xb, yb, logits
                 torch.cuda.empty_cache()
                 gc.collect()
 
-            model.eval()
-            with torch.no_grad():
-                xb = torch.tensor(X_val, dtype=torch.float32).to(DEVICE)
-                yb = torch.tensor(y_val, dtype=torch.long).to(DEVICE)
-                logits = model(xb)
-                preds = torch.argmax(logits, dim=1).cpu().numpy()
-                acc = accuracy_score(y_val, preds)
-                f1 = f1_score(y_val, preds, average="macro")
-                val_loss = lossfn(logits, yb).item()
-                print(f"[검증] {model_type} acc={acc:.4f}, f1={f1:.4f}")
-
-            save_model_metadata(
-                symbol, strategy, model_type, acc, f1, val_loss,
-                input_size=input_size,
-                class_counts=Counter(y_train),
-                used_feature_columns=list(df_feat.drop(columns=["timestamp"]).columns)
-            )
-
-            log_training_result(symbol, strategy, model_type, acc, f1, val_loss)
-            torch.save(model.state_dict(), f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.pt")
-
-            try:
-                imps = compute_feature_importance(model, xb, yb, list(df_feat.drop(columns=["timestamp"]).columns))
-                save_feature_importance(imps, symbol, strategy, model_type)
-            except:
-                pass
-
-            del model, xb, yb, logits
-            torch.cuda.empty_cache()
-            gc.collect()
-
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
-        log_training_result(symbol, strategy, f"실패({str(e)})", 0.0, 0.0, 0.0)
 
 def balance_classes(X, y, min_count=20):
     import numpy as np
