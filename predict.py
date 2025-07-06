@@ -370,7 +370,6 @@ def evaluate_predictions(get_price_fn):
     safe_write_csv(WRONG, failed)
     print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
 
-
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
     meta_path = f"/persistent/models/{symbol}_{strategy}_{model_type}.meta.json"
