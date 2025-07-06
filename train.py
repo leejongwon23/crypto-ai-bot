@@ -124,15 +124,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
         input_size = 14
         val_len = max(5, int(len(X_raw) * 0.2))
 
-        # ✅ Curriculum Learning: 라벨 오름차순 → 난이도 가중치 샘플링
         sorted_idx = np.argsort(y_raw)
         X_raw, y_raw = X_raw[sorted_idx], y_raw[sorted_idx]
 
         X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
-
-        wrong_data = load_training_prediction_data(symbol, strategy, input_size, window)
-        wrong_ds = TensorDataset(torch.tensor([x for x, _ in wrong_data], dtype=torch.float32),
-                                 torch.tensor([y for _, y in wrong_data], dtype=torch.long)) if wrong_data else None
 
         from collections import Counter
         counts = Counter(y_train)
@@ -141,9 +136,14 @@ def train_one_model(symbol, strategy, max_epochs=20):
         class_weight_tensor = torch.tensor(class_weight, dtype=torch.float32).to(DEVICE)
 
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
+            # ✅ 모델별 실패샘플 로드
+            wrong_data = load_training_prediction_data(symbol, strategy, input_size, window, model_name=model_type)
+            wrong_ds = TensorDataset(torch.tensor([x for x, _ in wrong_data], dtype=torch.float32),
+                                     torch.tensor([y for _, y in wrong_data], dtype=torch.long)) if wrong_data else None
+
             model = get_model(model_type, input_size=input_size, output_size=NUM_CLASSES).to(DEVICE).train()
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-            lossfn = FocalLoss(gamma=2, weight=class_weight_tensor)  # ✅ FocalLoss + Class Weight
+            lossfn = FocalLoss(gamma=2, weight=class_weight_tensor)
 
             train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                      torch.tensor(y_train, dtype=torch.long))
