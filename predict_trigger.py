@@ -135,33 +135,36 @@ import numpy as np
 from collections import Counter
 
 
-import numpy as np
-from collections import Counter
-
 def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict = None, alpha=0.10, beta=0.10):
+    import numpy as np
+
     probs = probs.copy()
     if probs.ndim == 2:
         probs = probs[0]
 
     num_classes = len(probs)
     total_recent = sum(recent_freq.values()) + 1e-6
+
+    # ✅ 최근 빈도 기반 weight (log-scale penalty)
     recent_weights = np.array([
-        1.0 - alpha * (recent_freq.get(i, 0) / total_recent)
+        np.exp(-alpha * (recent_freq.get(i, 0) / total_recent))
         for i in range(num_classes)
     ])
-    recent_weights = np.clip(recent_weights, 0.90, 1.10)
+    recent_weights = np.clip(recent_weights, 0.85, 1.15)
 
     if class_counts:
         total_class = sum(class_counts.values()) + 1e-6
         class_weights = np.array([
-            1.0 + beta * (1.0 - class_counts.get(str(i), 0) / total_class)
+            np.exp(beta * (1.0 - class_counts.get(str(i), 0) / total_class))
             for i in range(num_classes)
         ])
     else:
-        class_weights = np.ones(num_classes) + beta
+        class_weights = np.exp(np.ones(num_classes) * beta)
 
-    class_weights = np.clip(class_weights, 0.90, 1.10)
-    combined_weights = np.clip(recent_weights * class_weights, 0.90, 1.10)
+    class_weights = np.clip(class_weights, 0.85, 1.15)
+
+    combined_weights = recent_weights * class_weights
+    combined_weights = np.clip(combined_weights, 0.85, 1.15)
 
     adjusted = probs * combined_weights
     adjusted /= adjusted.sum()
