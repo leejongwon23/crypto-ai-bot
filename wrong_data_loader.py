@@ -8,27 +8,20 @@ from failure_db import load_existing_failure_hashes
 WRONG_CSV = "/persistent/wrong_predictions.csv"
 
 def load_training_prediction_data(symbol, strategy, input_size, window):
+    import random
     if not os.path.exists(WRONG_CSV):
         print(f"[INFO] {symbol}-{strategy} 실패학습 파일 없음 → 스킵")
         return []
 
     try:
-        # ✅ CSV 읽기 방어 + Step 1 상세 Exception 로그 출력
-        try:
-            df = pd.read_csv(WRONG_CSV, encoding="utf-8-sig")
-        except Exception as e:
-            print(f"[불러오기 오류] CSV read 실패 → {type(e).__name__}: {e}")
-            return []
-
+        df = pd.read_csv(WRONG_CSV, encoding="utf-8-sig")
         df = df[(df["symbol"] == symbol) & (df["strategy"] == strategy)]
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
 
-        # ✅ label 컬럼 없으면 predicted_class 복사, 둘 다 없으면 스킵
         if "label" not in df.columns:
             if "predicted_class" in df.columns:
                 df["label"] = df["predicted_class"]
             else:
-                print(f"[INFO] {symbol}-{strategy} 실패학습 파일에 label/predicted_class 없음 → 스킵")
                 return []
 
         df = df[df["label"].notna()]
@@ -74,13 +67,20 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
                 continue
             used_hashes.add(h)
 
-            sequences.append((xb, label))
+            # ✅ 실패 데이터 oversampling (3배 추가)
+            for _ in range(3):
+                sequences.append((xb, label))
+
+            # ✅ 예측실패(-1) 라벨 augmentation
+            if label == -1:
+                random_label = random.randint(0, 20)
+                noise_xb = xb + np.random.normal(0, 0.05, xb.shape).astype(np.float32)
+                sequences.append((noise_xb, random_label))
 
         except Exception as e:
             print(f"[예외] {symbol}-{strategy} 실패샘플 처리 오류 → {type(e).__name__}: {e}")
             continue
 
-    # ✅ fallback: 실패 데이터 없으면 noise sample 추가
     if not sequences:
         print(f"[INFO] {symbol}-{strategy} 실패 데이터 없음 → fallback noise sample 추가")
         noise_sample = np.random.normal(loc=0.0, scale=1.0, size=(window, input_size)).astype(np.float32)
