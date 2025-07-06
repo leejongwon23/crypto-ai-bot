@@ -85,6 +85,7 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
 def get_class_groups(num_classes=21, group_size=5):
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
+
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     from focal_loss import FocalLoss
@@ -108,8 +109,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
             return
 
         window_list = find_best_windows(symbol, strategy)
-        # ✅ input_size 자동 설정: feature dimension 기반
-        input_size = df_feat.shape[1] - (1 if 'timestamp' in df_feat.columns else 0)
+        # ✅ input_size 정확 설정: timestamp 제외 후 column 개수
+        features_only = df_feat.drop(columns=["timestamp"], errors="ignore")
+        input_size = features_only.shape[1]
+
         class_groups = get_class_groups()
 
         for window in window_list:
