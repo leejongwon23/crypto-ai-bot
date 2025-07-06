@@ -89,6 +89,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     from focal_loss import FocalLoss
     from ssl_pretrain import masked_reconstruction
+    from window_optimizer import find_best_windows
 
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
@@ -105,82 +106,73 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print("⛔ 중단: 피처 생성 실패 또는 NaN")
             return
 
-        window = find_best_window(symbol, strategy)
-        if not isinstance(window, int) or window <= 0:
-            print(f"⛔ 중단: find_best_window 실패")
-            return
-
-        X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=14)
-        if X_raw is None or y_raw is None or len(X_raw) < 5:
-            print("⛔ 중단: 학습 데이터 부족")
-            return
-
+        window_list = find_best_windows(symbol, strategy)
         input_size = 14
         class_groups = get_class_groups()
-        val_len = max(5, int(len(X_raw) * 0.2))
 
-        sorted_idx = np.argsort(y_raw)
-        X_raw, y_raw = X_raw[sorted_idx], y_raw[sorted_idx]
+        for window in window_list:
+            X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
+            if X_raw is None or y_raw is None or len(X_raw) < 5:
+                print(f"⛔ 중단: window={window} 학습 데이터 부족")
+                continue
 
-        X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
+            val_len = max(5, int(len(X_raw) * 0.2))
+            sorted_idx = np.argsort(y_raw)
+            X_raw, y_raw = X_raw[sorted_idx], y_raw[sorted_idx]
+            X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
 
-        from collections import Counter
-        counts = Counter(y_train)
-        total = sum(counts.values())
-        class_weight = [total / counts.get(i, 1) for i in range(NUM_CLASSES)]
-        class_weight_tensor = torch.tensor(class_weight, dtype=torch.float32).to(DEVICE)
+            from collections import Counter
+            counts = Counter(y_train)
+            total = sum(counts.values())
+            class_weight = [total / counts.get(i, 1) for i in range(NUM_CLASSES)]
+            class_weight_tensor = torch.tensor(class_weight, dtype=torch.float32).to(DEVICE)
 
-        for group_id, group_classes in enumerate(class_groups):
-            for model_type in ["lstm", "cnn_lstm", "transformer"]:
-                
-                # ✅ 그룹별 데이터 filtering 추가
-                group_mask = np.isin(y_train, group_classes)
-                X_train_group = X_train[group_mask]
-                y_train_group = y_train[group_mask]
+            for group_id, group_classes in enumerate(class_groups):
+                for model_type in ["lstm", "cnn_lstm", "transformer"]:
+                    group_mask = np.isin(y_train, group_classes)
+                    X_train_group = X_train[group_mask]
+                    y_train_group = y_train[group_mask]
 
-                if len(y_train_group) < 2:
-                    print(f"[⚠️ 스킵] group-{group_id} {model_type}: 학습 데이터 부족 ({len(y_train_group)})")
-                    continue
+                    if len(y_train_group) < 2:
+                        print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 학습 데이터 부족 ({len(y_train_group)})")
+                        continue
 
-                # ✅ 그룹 클래스 내 상대 index로 변환
-                y_train_group = np.array([group_classes.index(y) for y in y_train_group])
+                    y_train_group = np.array([group_classes.index(y) for y in y_train_group])
+                    model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
+                    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+                    lossfn = FocalLoss(gamma=2, weight=class_weight_tensor)
 
-                model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
-                optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-                lossfn = FocalLoss(gamma=2, weight=class_weight_tensor)
+                    train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32),
+                                             torch.tensor(y_train_group, dtype=torch.long))
+                    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
 
-                train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32),
-                                         torch.tensor(y_train_group, dtype=torch.long))
-                train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
+                    for epoch in range(max_epochs):
+                        for xb, yb in train_loader:
+                            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                            logits = model(xb)
+                            loss = lossfn(logits, yb)
+                            if torch.isfinite(loss):
+                                optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-                for epoch in range(max_epochs):
-                    for xb, yb in train_loader:
-                        xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                        logits = model(xb)
-                        loss = lossfn(logits, yb)
-                        if torch.isfinite(loss):
-                            optimizer.zero_grad(); loss.backward(); optimizer.step()
+                    # ✅ meta 저장에 window 포함
+                    meta = {
+                        "symbol": symbol, "strategy": strategy, "model": model_type,
+                        "group_id": group_id, "window": window,
+                        "input_size": input_size,
+                        "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                    meta_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.meta.json"
+                    with open(meta_path, "w", encoding="utf-8") as f:
+                        json.dump(meta, f, indent=2, ensure_ascii=False)
 
-                # ✅ meta 저장에 group_id 포함
-                meta = {
-                    "symbol": symbol, "strategy": strategy, "model": model_type,
-                    "group_id": group_id,  # ➔ 추가된 부분
-                    "input_size": input_size,
-                    "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
-                }
-                meta_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}_group{group_id}.meta.json"
-                with open(meta_path, "w", encoding="utf-8") as f:
-                    json.dump(meta, f, indent=2, ensure_ascii=False)
+                    model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.pt"
+                    torch.save(model.state_dict(), model_path)
 
-                # ✅ 모델 저장
-                model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}_group{group_id}.pt"
-                torch.save(model.state_dict(), model_path)
+                    print(f"[✅ 저장 완료] {model_type} group-{group_id} window-{window}")
 
-                print(f"[✅ 저장 완료] {model_type} group-{group_id}")
-
-                del model, xb, yb, logits
-                torch.cuda.empty_cache()
-                gc.collect()
+                    del model, xb, yb, logits
+                    torch.cuda.empty_cache()
+                    gc.collect()
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
