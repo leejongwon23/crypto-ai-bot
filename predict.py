@@ -121,9 +121,13 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 def predict(symbol, strategy, source="일반", model_type=None):
     from scipy.stats import entropy
 
+    def get_class_groups(num_classes=21, group_size=5):
+        return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
+
     try:
         max_retry = 3
         retry = 0
+        class_groups = get_class_groups()
 
         while retry < max_retry:
             window = find_best_window(symbol, strategy)
@@ -152,8 +156,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             input_size = X.shape[2]
 
             models = get_available_models()
-            ensemble_probs, total_weight = None, 0.0
-            model_preds = []
+            ensemble_probs = np.zeros(21, dtype=np.float32)  # 전체 클래스 앙상블
 
             for m in models:
                 if m["symbol"] != symbol or m["strategy"] != strategy:
@@ -162,6 +165,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 mt = m["model"]
                 if model_type and mt != model_type:
                     continue
+
+                group_id = m.get("group_id")
+                if group_id is None:
+                    continue
+
+                group_classes = class_groups[group_id]
 
                 model_path = os.path.join(MODEL_DIR, m["pt_file"])
                 meta_path = model_path.replace(".pt", ".meta.json")
@@ -176,7 +185,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     retry += 1
                     continue
 
-                model = get_model(mt, input_size, NUM_CLASSES).to(DEVICE)
+                model = get_model(mt, input_size, len(group_classes)).to(DEVICE)
                 state = torch.load(model_path, map_location=DEVICE)
                 model.load_state_dict(state)
                 model.eval()
@@ -185,68 +194,37 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
 
-                model_entropy = entropy(probs)
-                confidence_weight = (1 - model_entropy / np.log(len(probs))) + 1e-6
-
-                weighted_probs = probs * confidence_weight
-                if ensemble_probs is None:
-                    ensemble_probs = weighted_probs
-                else:
-                    ensemble_probs += weighted_probs
-
-                total_weight += confidence_weight
-
-                pred_class_model = int(probs.argmax())
-                model_preds.append({
-                    "model": mt,
-                    "pred_class": pred_class_model,
-                    "probs": probs,
-                    "confidence": confidence_weight
-                })
+                # ➔ 그룹 클래스별 앙상블 벡터에 반영
+                for i, cls in enumerate(group_classes):
+                    ensemble_probs[cls] += probs[i]
 
             # ✅ 최종 ensemble 결과
-            if ensemble_probs is not None and total_weight > 0:
-                ensemble_probs /= total_weight
-                pred_class = int(ensemble_probs.argmax())
-                expected_return = class_to_expected_return(pred_class)
-                conf_score = 1 - entropy(ensemble_probs) / np.log(len(ensemble_probs))
+            pred_class = int(ensemble_probs.argmax())
+            expected_return = class_to_expected_return(pred_class)
+            conf_score = 1 - entropy(ensemble_probs + 1e-6) / np.log(len(ensemble_probs))
 
-                # ✅ 모델별 실패 로그 기록
-                for mp in model_preds:
-                    model_success = (mp["pred_class"] == pred_class)
-                    log_prediction(
-                        symbol=symbol, strategy=strategy, direction=f"Model-{mp['pred_class']}",
-                        entry_price=df["close"].iloc[-1],
-                        target_price=df["close"].iloc[-1] * (1 + expected_return),
-                        model=mp["model"], success=model_success,
-                        reason="예측一致" if model_success else "예측불일치",
-                        rate=expected_return, timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-                        return_value=expected_return, volatility=True, source=source,
-                        predicted_class=mp["pred_class"], label=pred_class
-                    )
+            # ✅ 로그 기록
+            log_prediction(
+                symbol=symbol, strategy=strategy, direction=f"Ensemble-Class-{pred_class}",
+                entry_price=df["close"].iloc[-1],
+                target_price=df["close"].iloc[-1] * (1 + expected_return),
+                model="ensemble", success=True, reason=f"그룹 앙상블 예측 | confidence={conf_score:.4f}",
+                rate=expected_return, timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+                return_value=expected_return, volatility=True, source=source,
+                predicted_class=pred_class, label=pred_class
+            )
 
-                # ✅ 앙상블 결과 로그
-                log_prediction(
-                    symbol=symbol, strategy=strategy, direction=f"Ensemble-Class-{pred_class}",
-                    entry_price=df["close"].iloc[-1],
-                    target_price=df["close"].iloc[-1] * (1 + expected_return),
-                    model="ensemble", success=True, reason=f"앙상블 예측 완료 | confidence={conf_score:.4f}",
-                    rate=expected_return, timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-                    return_value=expected_return, volatility=True, source=source,
-                    predicted_class=pred_class, label=pred_class
-                )
+            return [{
+                "symbol": symbol, "strategy": strategy, "model": "ensemble",
+                "class": pred_class, "expected_return": expected_return,
+                "success": True, "predicted_class": pred_class,
+                "label": pred_class, "confidence": round(conf_score, 4)
+            }]
 
-                return [{
-                    "symbol": symbol, "strategy": strategy, "model": "ensemble",
-                    "class": pred_class, "expected_return": expected_return,
-                    "success": True, "predicted_class": pred_class,
-                    "label": pred_class, "confidence": round(conf_score, 4)
-                }]
-
-            retry += 1
+        retry += 1
 
         # ✅ 실패 fallback
-        return [failed_result(symbol, strategy, "unknown", "앙상블 모델 예측 실패", source, X_input)]
+        return [failed_result(symbol, strategy, "unknown", "그룹 앙상블 예측 실패", source, X_input)]
 
     except Exception as e:
         print(f"[predict 예외] {e}")
