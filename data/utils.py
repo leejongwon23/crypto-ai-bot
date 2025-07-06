@@ -208,51 +208,59 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     _kline_cache[cache_key] = df
     return df
 
+def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 3) -> pd.DataFrame:
+    import time
 
-def get_kline(symbol: str, interval: str = "60", limit: int = 300) -> pd.DataFrame:
-    try:
-        url = f"{BASE_URL}/v5/market/kline"
-        params = {"category": "linear", "symbol": symbol, "interval": interval, "limit": limit}
-        res = requests.get(url, params=params, timeout=10)
-        res.raise_for_status()
-        data = res.json()
+    for attempt in range(max_retry):
+        try:
+            url = f"{BASE_URL}/v5/market/kline"
+            params = {"category": "linear", "symbol": symbol, "interval": interval, "limit": limit}
+            res = requests.get(url, params=params, timeout=10)
+            res.raise_for_status()
+            data = res.json()
 
-        if "result" not in data or "list" not in data["result"]:
-            print(f"[경고] get_kline() → 데이터 응답 구조 이상: {symbol}")
-            return None
+            if "result" not in data or "list" not in data["result"]:
+                print(f"[경고] get_kline() → 데이터 응답 구조 이상: {symbol}, 재시도 {attempt+1}/{max_retry}")
+                time.sleep(1)
+                continue
 
-        raw = data["result"]["list"]
-        if not raw or len(raw[0]) < 6:
-            print(f"[경고] get_kline() → 필수 필드 누락: {symbol}")
-            return None
+            raw = data["result"]["list"]
+            if not raw or len(raw[0]) < 6:
+                print(f"[경고] get_kline() → 필수 필드 누락: {symbol}, 재시도 {attempt+1}/{max_retry}")
+                time.sleep(1)
+                continue
 
-        df = pd.DataFrame(raw, columns=[
-            "timestamp", "open", "high", "low", "close", "volume", "turnover"
-        ])
-        df = df[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
+            df = pd.DataFrame(raw, columns=[
+                "timestamp", "open", "high", "low", "close", "volume", "turnover"
+            ])
+            df = df[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
 
-        # ✅ 필수 컬럼 누락 or 전부 NaN or 전부 0인 경우 제거
-        essential = ["open", "high", "low", "close", "volume"]
-        df.dropna(subset=essential, inplace=True)
-        if df.empty:
-            print(f"[경고] get_kline() → 필수값 결측: {symbol}")
-            return None
+            essential = ["open", "high", "low", "close", "volume"]
+            df.dropna(subset=essential, inplace=True)
+            if df.empty:
+                print(f"[경고] get_kline() → 필수값 결측: {symbol}, 재시도 {attempt+1}/{max_retry}")
+                time.sleep(1)
+                continue
 
-        if "high" not in df.columns or df["high"].isnull().all() or (df["high"] == 0).all():
-            print(f"[치명] get_kline() → 'high' 값 전부 비정상: {symbol}")
-            return None
+            if "high" not in df.columns or df["high"].isnull().all() or (df["high"] == 0).all():
+                print(f"[치명] get_kline() → 'high' 값 전부 비정상: {symbol}, 재시도 {attempt+1}/{max_retry}")
+                time.sleep(1)
+                continue
 
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
-        df = df.dropna(subset=["timestamp"])
-        df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
-        df = df.sort_values("timestamp").reset_index(drop=True)
-        df["datetime"] = df["timestamp"]
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
+            df = df.dropna(subset=["timestamp"])
+            df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+            df = df.sort_values("timestamp").reset_index(drop=True)
+            df["datetime"] = df["timestamp"]
 
-        return df
+            return df
 
-    except Exception as e:
-        print(f"[에러] get_kline({symbol}) 실패 → {e}")
-        return None
+        except Exception as e:
+            print(f"[에러] get_kline({symbol}) 실패 → {e}, 재시도 {attempt+1}/{max_retry}")
+            time.sleep(1)
+
+    print(f"[❌ 실패] get_kline() 최종 실패: {symbol}")
+    return None
 
 
 def get_realtime_prices():
