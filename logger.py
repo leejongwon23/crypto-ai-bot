@@ -75,7 +75,7 @@ def log_audit_prediction(s, t, status, reason):
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, model=None, success=True, reason="", rate=0.0,
                    return_value=None, volatility=False, source="일반", predicted_class=None, label=None,
-                   augmentation=None):
+                   augmentation=None, group_id=None):  # ✅ group_id 파라미터 추가
 
     import csv, os, datetime, pytz
 
@@ -90,7 +90,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     except:
         pred_class_val = -1
 
-    # ✅ label 없으면 predicted_class fallback (-1 허용)
     if label is None or str(label).strip() == "":
         label = pred_class_val
     else:
@@ -106,7 +105,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                  "v_fail" if not success and volatility else \
                  "success" if success else "fail"
 
-    # ✅ 실패시에도 rate와 return_value를 동일하게 기록
     effective_rate = rate if rate is not None else 0.0
     effective_return = return_value if return_value is not None else effective_rate
 
@@ -125,10 +123,10 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "volatility": bool(volatility),
         "source": str(source or "일반"),
         "predicted_class": str(pred_class_val),
-        "label": str(label)
+        "label": str(label),
+        "group_id": str(group_id) if group_id is not None else ""  # ✅ group_id 추가
     }
 
-    # ✅ dict key None 제거 + str 변환
     row = {str(k): (v if v is not None else "") for k, v in row.items() if k is not None}
     fieldnames = sorted(row.keys())
 
