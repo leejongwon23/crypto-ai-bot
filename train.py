@@ -85,7 +85,6 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
 def get_class_groups(num_classes=21, group_size=5):
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
-
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     from focal_loss import FocalLoss
@@ -133,14 +132,25 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
         for group_id, group_classes in enumerate(class_groups):
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
+                
+                # ✅ 그룹별 데이터 filtering 추가
+                group_mask = np.isin(y_train, group_classes)
+                X_train_group = X_train[group_mask]
+                y_train_group = y_train[group_mask]
+
+                if len(y_train_group) < 2:
+                    print(f"[⚠️ 스킵] group-{group_id} {model_type}: 학습 데이터 부족 ({len(y_train_group)})")
+                    continue
+
+                # ✅ 그룹 클래스 내 상대 index로 변환
+                y_train_group = np.array([group_classes.index(y) for y in y_train_group])
+
                 model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
                 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
                 lossfn = FocalLoss(gamma=2, weight=class_weight_tensor)
 
-                # ✅ 해당 그룹 클래스만 학습데이터에 필터링 필요 (추후 구현 가능)
-
-                train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32),
-                                         torch.tensor(y_train, dtype=torch.long))
+                train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32),
+                                         torch.tensor(y_train_group, dtype=torch.long))
                 train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
 
                 for epoch in range(max_epochs):
