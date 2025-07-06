@@ -94,7 +94,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
     try:
-        masked_reconstruction(symbol, strategy, input_size=14, mask_ratio=0.2, epochs=5)
+        # ✅ SSL 사전학습 (input_size=None → 자동)
+        masked_reconstruction(symbol, strategy, input_size=None, mask_ratio=0.2, epochs=5)
 
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
@@ -107,7 +108,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
             return
 
         window_list = find_best_windows(symbol, strategy)
-        input_size = 14
+        # ✅ input_size 자동 설정: feature dimension 기반
+        input_size = df_feat.shape[1] - (1 if 'timestamp' in df_feat.columns else 0)
         class_groups = get_class_groups()
 
         for window in window_list:
@@ -141,7 +143,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
                     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-                    # ✅ Cross Entropy Loss + Consistency Loss 정의
                     lossfn_ce = torch.nn.CrossEntropyLoss(weight=class_weight_tensor)
                     def consistency_loss_fn(p1, p2):
                         return torch.mean((p1 - p2) ** 2)
@@ -157,7 +158,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                             logits1 = model(xb)
                             loss_ce = lossfn_ce(logits1, yb)
 
-                            # ✅ Consistency Loss 계산
                             noise = torch.randn_like(xb) * 0.01
                             xb_noisy = xb + noise
                             logits2 = model(xb_noisy)
@@ -165,7 +165,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                             probs2 = torch.softmax(logits2, dim=1)
                             loss_consistency = consistency_loss_fn(probs1, probs2)
 
-                            # ✅ 최종 Loss: CrossEntropy + Consistency Loss
                             loss = loss_ce + 0.1 * loss_consistency
 
                             if torch.isfinite(loss):
@@ -173,7 +172,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                 loss.backward()
                                 optimizer.step()
 
-                    # ✅ meta 저장에 window 포함
+                    # ✅ meta 저장 (window, input_size 포함)
                     meta = {
                         "symbol": symbol, "strategy": strategy, "model": model_type,
                         "group_id": group_id, "window": window,
@@ -195,6 +194,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
+
 
 def balance_classes(X, y, min_count=20):
     import numpy as np
