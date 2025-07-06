@@ -153,8 +153,7 @@ MODEL_CLASSES = {
     "autoencoder": AutoEncoder
 }
 
-
-def get_model(model_type="cnn_lstm", input_size=11, output_size=None, model_path=None):
+def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_path=None, features=None):
     if model_type == "xgboost":
         if model_path is None:
             raise ValueError("XGBoost model_path must be provided.")
@@ -170,6 +169,15 @@ def get_model(model_type="cnn_lstm", input_size=11, output_size=None, model_path
         from config import NUM_CLASSES
         output_size = NUM_CLASSES
 
+    # ✅ features가 제공되면 input_size를 features.shape[2]로 자동 지정
+    if input_size is None:
+        if features is not None:
+            input_size = features.shape[2]
+            print(f"[info] input_size 자동설정: {input_size}")
+        else:
+            input_size = 11  # fallback 기본값
+            print(f"[info] input_size 기본값 사용: {input_size}")
+
     try:
         model = model_cls(input_size=input_size, output_size=output_size)
     except Exception as e:
@@ -182,3 +190,5 @@ def get_model(model_type="cnn_lstm", input_size=11, output_size=None, model_path
             raise e2
 
     return model
+
+
