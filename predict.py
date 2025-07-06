@@ -194,7 +194,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                     probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
 
-                # ➔ 그룹 클래스별 앙상블 벡터에 반영
+                # ✅ 그룹 클래스별 앙상블 벡터에 반영
                 for i, cls in enumerate(group_classes):
                     ensemble_probs[cls] += probs[i]
 
