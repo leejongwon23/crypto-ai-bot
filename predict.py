@@ -152,12 +152,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
             models = get_available_models()
 
-            # ✅ [추가] 모델이 없으면 실패 처리
+            # ✅ [수정] 모델 없으면 실패 기록 후 SKIP (fallback 학습 트리거 유지)
             if not models:
-                print("[❌ 모델 없음] 예측 불가")
-                return [failed_result(symbol, strategy, "unknown", "모델 없음", source)]
+                print("[⚠️ 모델 없음] fallback 학습 트리거")
+                return [failed_result(symbol, strategy, "unknown", "모델 없음 → 학습 필요", source)]
 
-            # ✅ Self-Consistency Ensemble: 동일 input에 대해 3회 예측
             pred_classes = []
             for _ in range(3):
                 ensemble_probs = np.zeros(21, dtype=np.float32)
@@ -190,11 +189,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
                             meta = json.load(f)
 
                         model_input_size = meta.get("input_size")
-
-                        # ✅ [변경] input_size 불일치 시 실패 처리
                         if model_input_size != input_size:
-                            print(f"[❌ input_size 불일치] 모델:{model_input_size}, feature:{input_size}")
-                            return [failed_result(symbol, strategy, mt, f"input_size 불일치 모델:{model_input_size}, feature:{input_size}", source)]
+                            # ✅ input_size mismatch도 fallback 학습 트리거
+                            print(f"[⚠️ input_size 불일치] 모델:{model_input_size}, feature:{input_size}")
+                            return [failed_result(symbol, strategy, mt, f"input_size 불일치 → 학습 필요 (모델:{model_input_size}, feature:{input_size})", source)]
 
                         model = get_model(mt, input_size, len(group_classes)).to(DEVICE)
                         state = torch.load(model_path, map_location=DEVICE)
@@ -211,7 +209,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 pred_class = int(ensemble_probs.argmax())
                 pred_classes.append(pred_class)
 
-            # ✅ Self-Consistency 조건 확인
             if len(set(pred_classes)) == 1:
                 final_pred_class = pred_classes[0]
                 expected_return = class_to_expected_return(final_pred_class)
@@ -243,6 +240,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     except Exception as e:
         print(f"[predict 예외] {e}")
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+
 
 
 # 📄 predict.py 내부에 추가
