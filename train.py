@@ -140,7 +140,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     y_train_group = np.array([group_classes.index(y) for y in y_train_group])
                     model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
                     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-                    lossfn = FocalLoss(gamma=2, weight=class_weight_tensor)
+
+                    # ✅ Cross Entropy Loss + Consistency Loss 정의
+                    lossfn_ce = torch.nn.CrossEntropyLoss(weight=class_weight_tensor)
+                    def consistency_loss_fn(p1, p2):
+                        return torch.mean((p1 - p2) ** 2)
 
                     train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32),
                                              torch.tensor(y_train_group, dtype=torch.long))
@@ -149,10 +153,25 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     for epoch in range(max_epochs):
                         for xb, yb in train_loader:
                             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                            logits = model(xb)
-                            loss = lossfn(logits, yb)
+
+                            logits1 = model(xb)
+                            loss_ce = lossfn_ce(logits1, yb)
+
+                            # ✅ Consistency Loss 계산
+                            noise = torch.randn_like(xb) * 0.01
+                            xb_noisy = xb + noise
+                            logits2 = model(xb_noisy)
+                            probs1 = torch.softmax(logits1, dim=1)
+                            probs2 = torch.softmax(logits2, dim=1)
+                            loss_consistency = consistency_loss_fn(probs1, probs2)
+
+                            # ✅ 최종 Loss: CrossEntropy + Consistency Loss
+                            loss = loss_ce + 0.1 * loss_consistency
+
                             if torch.isfinite(loss):
-                                optimizer.zero_grad(); loss.backward(); optimizer.step()
+                                optimizer.zero_grad()
+                                loss.backward()
+                                optimizer.step()
 
                     # ✅ meta 저장에 window 포함
                     meta = {
@@ -170,7 +189,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                     print(f"[✅ 저장 완료] {model_type} group-{group_id} window-{window}")
 
-                    del model, xb, yb, logits
+                    del model, xb, yb, logits1, logits2
                     torch.cuda.empty_cache()
                     gc.collect()
 
