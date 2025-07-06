@@ -153,6 +153,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
             models = get_available_models()
             ensemble_probs, total_weight = None, 0.0
+            model_preds = []
 
             for m in models:
                 if m["symbol"] != symbol or m["strategy"] != strategy:
@@ -185,7 +186,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
 
                 model_entropy = entropy(probs)
-                confidence_weight = (1 - model_entropy / np.log(len(probs))) + 1e-6  # ✅ confidence 기반 weight 강화
+                confidence_weight = (1 - model_entropy / np.log(len(probs))) + 1e-6
 
                 weighted_probs = probs * confidence_weight
                 if ensemble_probs is None:
@@ -195,6 +196,14 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
                 total_weight += confidence_weight
 
+                pred_class_model = int(probs.argmax())
+                model_preds.append({
+                    "model": mt,
+                    "pred_class": pred_class_model,
+                    "probs": probs,
+                    "confidence": confidence_weight
+                })
+
             # ✅ 최종 ensemble 결과
             if ensemble_probs is not None and total_weight > 0:
                 ensemble_probs /= total_weight
@@ -202,6 +211,21 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 expected_return = class_to_expected_return(pred_class)
                 conf_score = 1 - entropy(ensemble_probs) / np.log(len(ensemble_probs))
 
+                # ✅ 모델별 실패 로그 기록
+                for mp in model_preds:
+                    model_success = (mp["pred_class"] == pred_class)
+                    log_prediction(
+                        symbol=symbol, strategy=strategy, direction=f"Model-{mp['pred_class']}",
+                        entry_price=df["close"].iloc[-1],
+                        target_price=df["close"].iloc[-1] * (1 + expected_return),
+                        model=mp["model"], success=model_success,
+                        reason="예측一致" if model_success else "예측불일치",
+                        rate=expected_return, timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+                        return_value=expected_return, volatility=True, source=source,
+                        predicted_class=mp["pred_class"], label=pred_class
+                    )
+
+                # ✅ 앙상블 결과 로그
                 log_prediction(
                     symbol=symbol, strategy=strategy, direction=f"Ensemble-Class-{pred_class}",
                     entry_price=df["close"].iloc[-1],
