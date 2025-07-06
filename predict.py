@@ -153,7 +153,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
             models = get_available_models()
             ensemble_probs, total_weight = None, 0.0
-            model_results = []
 
             for m in models:
                 if m["symbol"] != symbol or m["strategy"] != strategy:
@@ -186,21 +185,15 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
 
                 model_entropy = entropy(probs)
-                bayesian_weight = 1 / (model_entropy + 1e-6)
+                confidence_weight = (1 - model_entropy / np.log(len(probs))) + 1e-6  # ✅ confidence 기반 weight 강화
 
-                weighted_probs = probs * bayesian_weight
+                weighted_probs = probs * confidence_weight
                 if ensemble_probs is None:
                     ensemble_probs = weighted_probs
                 else:
                     ensemble_probs += weighted_probs
 
-                total_weight += bayesian_weight
-
-                model_results.append({
-                    "model": mt,
-                    "probs": probs,
-                    "weight": bayesian_weight
-                })
+                total_weight += confidence_weight
 
             # ✅ 최종 ensemble 결과
             if ensemble_probs is not None and total_weight > 0:
