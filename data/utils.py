@@ -51,7 +51,6 @@ def get_btc_dominance():
 
 import numpy as np
 
-
 def create_dataset(features, window=20, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
@@ -89,13 +88,23 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     features = df_scaled.to_dict(orient="records")
 
-    class_ranges = [
-        (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
-        (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
-        (-0.03, -0.01), (-0.01, 0.01), (0.01, 0.03), (0.03, 0.05),
-        (0.05, 0.07), (0.07, 0.10), (0.10, 0.15), (0.15, 0.20),
-        (0.20, 0.30), (0.30, 0.60), (0.60, 1.00), (1.00, 2.00), (2.00, 5.00)
-    ]
+    # ✅ [수정] 동적 class_ranges 계산
+    try:
+        import pandas as pd
+        log_df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
+        gains = log_df["return"].dropna().values
+        gains = gains[np.isfinite(gains)]
+        percentiles = np.percentile(gains, np.linspace(0, 100, 22))
+        class_ranges = list(zip(percentiles[:-1], percentiles[1:]))
+    except Exception as e:
+        print(f"[⚠️ class_ranges 동적 계산 실패 → 기본값 사용] {e}")
+        class_ranges = [
+            (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
+            (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
+            (-0.03, -0.01), (-0.01, 0.01), (0.01, 0.03), (0.03, 0.05),
+            (0.05, 0.07), (0.07, 0.10), (0.10, 0.15), (0.15, 0.20),
+            (0.20, 0.30), (0.30, 0.60), (0.60, 1.00), (1.00, 2.00), (2.00, 5.00)
+        ]
 
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
@@ -127,7 +136,6 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
 
-            # ✅ input_size 고정 및 zero-padding (샘플 전체)
             if input_size:
                 for j in range(len(sample)):
                     row = sample[j]
@@ -152,6 +160,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         print(f"[📊 클래스 분포] → {dict(zip(labels, counts))}")
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
+
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
