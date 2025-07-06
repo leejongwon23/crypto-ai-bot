@@ -118,7 +118,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
-
 def predict(symbol, strategy, source="일반", model_type=None):
     from scipy.stats import entropy
 
@@ -153,7 +152,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
             input_size = X.shape[2]
 
             models = get_available_models()
-            results, ensemble_probs, total_weight = [], None, 0.0
+            ensemble_probs, total_weight = None, 0.0
+            model_results = []
 
             for m in models:
                 if m["symbol"] != symbol or m["strategy"] != strategy:
@@ -173,16 +173,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
                 model_input_size = meta.get("input_size")
                 if model_input_size != input_size:
-                    print(f"[⚠️ input_size mismatch] {model_input_size} vs {input_size} → fallback 재시도")
                     retry += 1
-                    return [failed_result(symbol, strategy, mt, "input_size mismatch fallback", source, X_input)]
-
-                used_cols = meta.get("used_feature_columns")
-                current_cols = list(features_only.columns)
-                if used_cols and sorted(used_cols) != sorted(current_cols):
-                    print(f"[⚠️ used_feature_columns mismatch] saved={used_cols} vs current={current_cols}")
-                    retry += 1
-                    return [failed_result(symbol, strategy, mt, "used_feature_columns mismatch", source, X_input)]
+                    continue
 
                 model = get_model(mt, input_size, NUM_CLASSES).to(DEVICE)
                 state = torch.load(model_path, map_location=DEVICE)
@@ -194,44 +186,50 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
 
                 model_entropy = entropy(probs)
-                bayesian_weight = 1 / (model_entropy + 1e-6)  # ✅ entropy 기반 weight
+                bayesian_weight = 1 / (model_entropy + 1e-6)
 
-                probs = probs * bayesian_weight
-                probs = probs / probs.sum()
-
+                weighted_probs = probs * bayesian_weight
                 if ensemble_probs is None:
-                    ensemble_probs = probs
+                    ensemble_probs = weighted_probs
                 else:
-                    ensemble_probs += probs
+                    ensemble_probs += weighted_probs
+
                 total_weight += bayesian_weight
 
-                pred_class = int(probs.argmax())
+                model_results.append({
+                    "model": mt,
+                    "probs": probs,
+                    "weight": bayesian_weight
+                })
+
+            # ✅ 최종 ensemble 결과
+            if ensemble_probs is not None and total_weight > 0:
+                ensemble_probs /= total_weight
+                pred_class = int(ensemble_probs.argmax())
                 expected_return = class_to_expected_return(pred_class)
-                conf_score = 1 - model_entropy / np.log(len(probs))
+                conf_score = 1 - entropy(ensemble_probs) / np.log(len(ensemble_probs))
 
                 log_prediction(
-                    symbol=symbol, strategy=strategy, direction=f"Class-{pred_class}",
+                    symbol=symbol, strategy=strategy, direction=f"Ensemble-Class-{pred_class}",
                     entry_price=df["close"].iloc[-1],
                     target_price=df["close"].iloc[-1] * (1 + expected_return),
-                    model=mt, success=True, reason=f"예측 완료 | confidence={conf_score:.4f}",
+                    model="ensemble", success=True, reason=f"앙상블 예측 완료 | confidence={conf_score:.4f}",
                     rate=expected_return, timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
                     return_value=expected_return, volatility=True, source=source,
                     predicted_class=pred_class, label=pred_class
                 )
 
-                results.append({
-                    "symbol": symbol, "strategy": strategy, "model": mt,
+                return [{
+                    "symbol": symbol, "strategy": strategy, "model": "ensemble",
                     "class": pred_class, "expected_return": expected_return,
                     "success": True, "predicted_class": pred_class,
                     "label": pred_class, "confidence": round(conf_score, 4)
-                })
+                }]
 
-            else:
-                break
+            retry += 1
 
-        if not results:
-            return [failed_result(symbol, strategy, "unknown", "모델 예측 실패", source, X_input)]
-        return results
+        # ✅ 실패 fallback
+        return [failed_result(symbol, strategy, "unknown", "앙상블 모델 예측 실패", source, X_input)]
 
     except Exception as e:
         print(f"[predict 예외] {e}")
