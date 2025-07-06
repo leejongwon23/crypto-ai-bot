@@ -118,6 +118,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
+
 def predict(symbol, strategy, source="일반", model_type=None):
     from scipy.stats import entropy
     from window_optimizer import find_best_windows
@@ -152,7 +153,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
             models = get_available_models()
 
-            # ✅ [수정] 모델 없으면 실패 기록 후 SKIP (fallback 학습 트리거 유지)
             if not models:
                 print("[⚠️ 모델 없음] fallback 학습 트리거")
                 return [failed_result(symbol, strategy, "unknown", "모델 없음 → 학습 필요", source)]
@@ -190,7 +190,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
                         model_input_size = meta.get("input_size")
                         if model_input_size != input_size:
-                            # ✅ input_size mismatch도 fallback 학습 트리거
                             print(f"[⚠️ input_size 불일치] 모델:{model_input_size}, feature:{input_size}")
                             return [failed_result(symbol, strategy, mt, f"input_size 불일치 → 학습 필요 (모델:{model_input_size}, feature:{input_size})", source)]
 
@@ -240,7 +239,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
     except Exception as e:
         print(f"[predict 예외] {e}")
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
-
 
 
 # 📄 predict.py 내부에 추가
