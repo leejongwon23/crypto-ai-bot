@@ -152,6 +152,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
             models = get_available_models()
 
+            # ✅ [추가] 모델이 없으면 실패 처리
+            if not models:
+                print("[❌ 모델 없음] 예측 불가")
+                return [failed_result(symbol, strategy, "unknown", "모델 없음", source)]
+
             # ✅ Self-Consistency Ensemble: 동일 input에 대해 3회 예측
             pred_classes = []
             for _ in range(3):
@@ -185,8 +190,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
                             meta = json.load(f)
 
                         model_input_size = meta.get("input_size")
+
+                        # ✅ [변경] input_size 불일치 시 실패 처리
                         if model_input_size != input_size:
-                            continue
+                            print(f"[❌ input_size 불일치] 모델:{model_input_size}, feature:{input_size}")
+                            return [failed_result(symbol, strategy, mt, f"input_size 불일치 모델:{model_input_size}, feature:{input_size}", source)]
 
                         model = get_model(mt, input_size, len(group_classes)).to(DEVICE)
                         state = torch.load(model_path, map_location=DEVICE)
@@ -227,7 +235,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 }]
             else:
                 print("[⚠️ Self-Consistency 실패] 3회 예측 불일치")
-                return [failed_result(symbol, strategy, "unknown", "Self-Consistency 불일치", source)]
+                return [failed_result(symbol, strategy, "unknown", "Self-Consistency 실패 (3회 예측 불일치)", source)]
 
         retry += 1
         return [failed_result(symbol, strategy, "unknown", "다중윈도우 Self-Consistency 실패", source)]
@@ -235,6 +243,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     except Exception as e:
         print(f"[predict 예외] {e}")
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
