@@ -148,90 +148,93 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
             features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
             feat_scaled = MinMaxScaler().fit_transform(features_only)
-
             input_size = feat_scaled.shape[1]
-            ensemble_probs = np.zeros(21, dtype=np.float32)  # 전체 클래스 앙상블
 
             models = get_available_models()
 
-            for window in window_list:
-                if feat_scaled.shape[0] < window:
-                    continue
-
-                X_input = feat_scaled[-window:]
-                X = np.expand_dims(X_input, axis=0)
-
-                for m in models:
-                    if m["symbol"] != symbol or m["strategy"] != strategy:
+            # ✅ Self-Consistency Ensemble: 동일 input에 대해 3회 예측
+            pred_classes = []
+            for _ in range(3):
+                ensemble_probs = np.zeros(21, dtype=np.float32)
+                for window in window_list:
+                    if feat_scaled.shape[0] < window:
                         continue
+                    X_input = feat_scaled[-window:]
+                    X = np.expand_dims(X_input, axis=0)
 
-                    mt = m["model"]
-                    if model_type and mt != model_type:
-                        continue
+                    for m in models:
+                        if m["symbol"] != symbol or m["strategy"] != strategy:
+                            continue
+                        mt = m["model"]
+                        if model_type and mt != model_type:
+                            continue
+                        if f"_window{window}" not in m["pt_file"]:
+                            continue
 
-                    if f"_window{window}" not in m["pt_file"]:
-                        continue  # ✅ window 미일치 모델 skip
+                        group_id = m.get("group_id")
+                        if group_id is None:
+                            continue
+                        group_classes = class_groups[group_id]
 
-                    group_id = m.get("group_id")
-                    if group_id is None:
-                        continue
+                        model_path = os.path.join(MODEL_DIR, m["pt_file"])
+                        meta_path = model_path.replace(".pt", ".meta.json")
+                        if not os.path.exists(model_path) or not os.path.exists(meta_path):
+                            continue
 
-                    group_classes = class_groups[group_id]
+                        with open(meta_path, "r", encoding="utf-8") as f:
+                            meta = json.load(f)
 
-                    model_path = os.path.join(MODEL_DIR, m["pt_file"])
-                    meta_path = model_path.replace(".pt", ".meta.json")
-                    if not os.path.exists(model_path) or not os.path.exists(meta_path):
-                        continue
+                        model_input_size = meta.get("input_size")
+                        if model_input_size != input_size:
+                            continue
 
-                    with open(meta_path, "r", encoding="utf-8") as f:
-                        meta = json.load(f)
+                        model = get_model(mt, input_size, len(group_classes)).to(DEVICE)
+                        state = torch.load(model_path, map_location=DEVICE)
+                        model.load_state_dict(state)
+                        model.eval()
 
-                    model_input_size = meta.get("input_size")
-                    if model_input_size != input_size:
-                        continue
+                        with torch.no_grad():
+                            logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
+                            probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
 
-                    model = get_model(mt, input_size, len(group_classes)).to(DEVICE)
-                    state = torch.load(model_path, map_location=DEVICE)
-                    model.load_state_dict(state)
-                    model.eval()
+                        for i, cls in enumerate(group_classes):
+                            ensemble_probs[cls] += probs[i]
 
-                    with torch.no_grad():
-                        logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
-                        probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
+                pred_class = int(ensemble_probs.argmax())
+                pred_classes.append(pred_class)
 
-                    # ✅ 그룹 클래스별 앙상블 벡터에 반영
-                    for i, cls in enumerate(group_classes):
-                        ensemble_probs[cls] += probs[i]
+            # ✅ Self-Consistency 조건 확인
+            if len(set(pred_classes)) == 1:
+                final_pred_class = pred_classes[0]
+                expected_return = class_to_expected_return(final_pred_class)
+                conf_score = 1 - entropy(ensemble_probs + 1e-6) / np.log(len(ensemble_probs))
 
-            # ✅ 최종 ensemble 결과
-            pred_class = int(ensemble_probs.argmax())
-            expected_return = class_to_expected_return(pred_class)
-            conf_score = 1 - entropy(ensemble_probs + 1e-6) / np.log(len(ensemble_probs))
+                log_prediction(
+                    symbol=symbol, strategy=strategy, direction=f"Ensemble-Class-{final_pred_class}",
+                    entry_price=df["close"].iloc[-1],
+                    target_price=df["close"].iloc[-1] * (1 + expected_return),
+                    model="ensemble", success=True, reason=f"Self-Consistency Ensemble | confidence={conf_score:.4f}",
+                    rate=expected_return, timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+                    return_value=expected_return, volatility=True, source=source,
+                    predicted_class=final_pred_class, label=final_pred_class
+                )
 
-            log_prediction(
-                symbol=symbol, strategy=strategy, direction=f"Ensemble-Class-{pred_class}",
-                entry_price=df["close"].iloc[-1],
-                target_price=df["close"].iloc[-1] * (1 + expected_return),
-                model="ensemble", success=True, reason=f"다중윈도우 앙상블 예측 | confidence={conf_score:.4f}",
-                rate=expected_return, timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-                return_value=expected_return, volatility=True, source=source,
-                predicted_class=pred_class, label=pred_class
-            )
-
-            return [{
-                "symbol": symbol, "strategy": strategy, "model": "ensemble",
-                "class": pred_class, "expected_return": expected_return,
-                "success": True, "predicted_class": pred_class,
-                "label": pred_class, "confidence": round(conf_score, 4)
-            }]
+                return [{
+                    "symbol": symbol, "strategy": strategy, "model": "ensemble",
+                    "class": final_pred_class, "expected_return": expected_return,
+                    "success": True, "predicted_class": final_pred_class,
+                    "label": final_pred_class, "confidence": round(conf_score, 4)
+                }]
+            else:
+                print("[⚠️ Self-Consistency 실패] 3회 예측 불일치")
+                return [failed_result(symbol, strategy, "unknown", "Self-Consistency 불일치", source)]
 
         retry += 1
-
-        return [failed_result(symbol, strategy, "unknown", "다중윈도우 앙상블 예측 실패", source, X_input)]
+        return [failed_result(symbol, strategy, "unknown", "다중윈도우 Self-Consistency 실패", source)]
 
     except Exception as e:
         print(f"[predict 예외] {e}")
-        return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source, X_input)]
+        return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
