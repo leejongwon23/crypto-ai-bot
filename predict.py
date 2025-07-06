@@ -120,6 +120,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
 def predict(symbol, strategy, source="일반", model_type=None):
     from scipy.stats import entropy
+    from window_optimizer import find_best_windows
 
     def get_class_groups(num_classes=21, group_size=5):
         return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
@@ -130,85 +131,88 @@ def predict(symbol, strategy, source="일반", model_type=None):
         class_groups = get_class_groups()
 
         while retry < max_retry:
-            window = find_best_window(symbol, strategy)
-            if not isinstance(window, int) or window <= 0:
+            window_list = find_best_windows(symbol, strategy)
+            if not window_list:
                 retry += 1
                 continue
 
             df = get_kline_by_strategy(symbol, strategy)
-            if df is None or len(df) < window + 1:
+            if df is None or len(df) < max(window_list) + 1:
                 retry += 1
                 continue
 
             feat = compute_features(symbol, df, strategy)
-            if feat is None or feat.dropna().shape[0] < window + 1:
+            if feat is None or feat.dropna().shape[0] < max(window_list) + 1:
                 retry += 1
                 continue
 
             features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
             feat_scaled = MinMaxScaler().fit_transform(features_only)
-            if feat_scaled.shape[0] < window:
-                retry += 1
-                continue
 
-            X_input = feat_scaled[-window:]
-            X = np.expand_dims(X_input, axis=0)
-            input_size = X.shape[2]
-
-            models = get_available_models()
+            input_size = feat_scaled.shape[1]
             ensemble_probs = np.zeros(21, dtype=np.float32)  # 전체 클래스 앙상블
 
-            for m in models:
-                if m["symbol"] != symbol or m["strategy"] != strategy:
+            models = get_available_models()
+
+            for window in window_list:
+                if feat_scaled.shape[0] < window:
                     continue
 
-                mt = m["model"]
-                if model_type and mt != model_type:
-                    continue
+                X_input = feat_scaled[-window:]
+                X = np.expand_dims(X_input, axis=0)
 
-                group_id = m.get("group_id")
-                if group_id is None:
-                    continue
+                for m in models:
+                    if m["symbol"] != symbol or m["strategy"] != strategy:
+                        continue
 
-                group_classes = class_groups[group_id]
+                    mt = m["model"]
+                    if model_type and mt != model_type:
+                        continue
 
-                model_path = os.path.join(MODEL_DIR, m["pt_file"])
-                meta_path = model_path.replace(".pt", ".meta.json")
-                if not os.path.exists(model_path) or not os.path.exists(meta_path):
-                    continue
+                    if f"_window{window}" not in m["pt_file"]:
+                        continue  # ✅ window 미일치 모델 skip
 
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
+                    group_id = m.get("group_id")
+                    if group_id is None:
+                        continue
 
-                model_input_size = meta.get("input_size")
-                if model_input_size != input_size:
-                    retry += 1
-                    continue
+                    group_classes = class_groups[group_id]
 
-                model = get_model(mt, input_size, len(group_classes)).to(DEVICE)
-                state = torch.load(model_path, map_location=DEVICE)
-                model.load_state_dict(state)
-                model.eval()
+                    model_path = os.path.join(MODEL_DIR, m["pt_file"])
+                    meta_path = model_path.replace(".pt", ".meta.json")
+                    if not os.path.exists(model_path) or not os.path.exists(meta_path):
+                        continue
 
-                with torch.no_grad():
-                    logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
-                    probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
 
-                # ✅ 그룹 클래스별 앙상블 벡터에 반영
-                for i, cls in enumerate(group_classes):
-                    ensemble_probs[cls] += probs[i]
+                    model_input_size = meta.get("input_size")
+                    if model_input_size != input_size:
+                        continue
+
+                    model = get_model(mt, input_size, len(group_classes)).to(DEVICE)
+                    state = torch.load(model_path, map_location=DEVICE)
+                    model.load_state_dict(state)
+                    model.eval()
+
+                    with torch.no_grad():
+                        logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
+                        probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
+
+                    # ✅ 그룹 클래스별 앙상블 벡터에 반영
+                    for i, cls in enumerate(group_classes):
+                        ensemble_probs[cls] += probs[i]
 
             # ✅ 최종 ensemble 결과
             pred_class = int(ensemble_probs.argmax())
             expected_return = class_to_expected_return(pred_class)
             conf_score = 1 - entropy(ensemble_probs + 1e-6) / np.log(len(ensemble_probs))
 
-            # ✅ 로그 기록
             log_prediction(
                 symbol=symbol, strategy=strategy, direction=f"Ensemble-Class-{pred_class}",
                 entry_price=df["close"].iloc[-1],
                 target_price=df["close"].iloc[-1] * (1 + expected_return),
-                model="ensemble", success=True, reason=f"그룹 앙상블 예측 | confidence={conf_score:.4f}",
+                model="ensemble", success=True, reason=f"다중윈도우 앙상블 예측 | confidence={conf_score:.4f}",
                 rate=expected_return, timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
                 return_value=expected_return, volatility=True, source=source,
                 predicted_class=pred_class, label=pred_class
@@ -223,8 +227,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
         retry += 1
 
-        # ✅ 실패 fallback
-        return [failed_result(symbol, strategy, "unknown", "그룹 앙상블 예측 실패", source, X_input)]
+        return [failed_result(symbol, strategy, "unknown", "다중윈도우 앙상블 예측 실패", source, X_input)]
 
     except Exception as e:
         print(f"[predict 예외] {e}")
