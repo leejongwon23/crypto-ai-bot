@@ -161,7 +161,6 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
 
-
 def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
 
@@ -188,18 +187,21 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     nan_cols = [col for col in required_cols if col in df.columns and df[col].isnull().any()]
 
     if missing:
-        print(f"[❌ 실패] {symbol}-{strategy}: 필수 컬럼 누락 → {missing}")
+        print(f"[⚠️ 경고] {symbol}-{strategy}: 필수 컬럼 누락 → {missing}")
         failed_result(symbol, strategy, reason=f"필수컬럼누락:{missing}")
+        # ✅ 수정: 중단하지 않고 빈 DataFrame 반환
         return pd.DataFrame(columns=required_cols)
 
     if nan_cols:
-        print(f"[❌ 실패] {symbol}-{strategy}: NaN 존재 → {nan_cols}")
+        print(f"[⚠️ 경고] {symbol}-{strategy}: NaN 존재 → {nan_cols}")
         failed_result(symbol, strategy, reason=f"NaN존재:{nan_cols}")
+        # ✅ 수정: 중단하지 않고 빈 DataFrame 반환
         return pd.DataFrame(columns=required_cols)
 
     if len(df) < 5:
-        print(f"[❌ 실패] {symbol}-{strategy}: 데이터 row 부족 ({len(df)} rows)")
+        print(f"[⚠️ 경고] {symbol}-{strategy}: 데이터 row 부족 ({len(df)} rows)")
         failed_result(symbol, strategy, reason="row 부족")
+        # ✅ 수정: 중단하지 않고 빈 DataFrame 반환
         return pd.DataFrame(columns=required_cols)
 
     print(f"[✅ 성공] {symbol}-{strategy}: 데이터 {len(df)}개 확보")
