@@ -138,10 +138,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
 
             from collections import Counter
-            counts = Counter(y_train)
-            total = sum(counts.values())
-            class_weight = [total / counts.get(i, 1) for i in range(NUM_CLASSES)]
-            class_weight_tensor = torch.tensor(class_weight, dtype=torch.float32).to(DEVICE)
 
             for group_id, group_classes in enumerate(class_groups):
                 for model_type in ["lstm", "cnn_lstm", "transformer"]:
@@ -154,6 +150,12 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         continue
 
                     y_train_group = np.array([group_classes.index(y) for y in y_train_group])
+
+                    # ✅ group별 weight tensor 계산 수정
+                    counts_group = Counter(y_train_group)
+                    total_group = sum(counts_group.values())
+                    class_weight_group = [total_group / counts_group.get(i, 1) for i in range(len(group_classes))]
+                    class_weight_tensor = torch.tensor(class_weight_group, dtype=torch.float32).to(DEVICE)
 
                     model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
                     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -217,6 +219,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
+
 
 
 def balance_classes(X, y, min_count=20, num_classes=21):
