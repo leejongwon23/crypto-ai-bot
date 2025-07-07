@@ -147,16 +147,16 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
 
                 for group_id, group_classes in enumerate(class_groups):
+                    # ✅ Step3: 학습 데이터 없는 그룹 전체 스킵
+                    group_mask = np.isin(y_train, group_classes)
+                    X_train_group = X_train[group_mask]
+                    y_train_group = y_train[group_mask]
+
+                    if len(y_train_group) < 2:
+                        print(f"[⚠️ 스킵] window={window} group-{group_id}: 학습 데이터 부족 ({len(y_train_group)}) → 전체 모델 스킵")
+                        continue
+
                     for model_type in ["lstm", "cnn_lstm", "transformer"]:
-                        group_mask = np.isin(y_train, group_classes)
-                        X_train_group = X_train[group_mask]
-                        y_train_group = y_train[group_mask]
-
-                        if len(y_train_group) < 2:
-                            print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 학습 데이터 부족 ({len(y_train_group)})")
-                            continue
-
-                        # ✅ augmentation 반복수 검증
                         target_count = 50
                         repeat_factor = max(1, int(np.ceil(target_count / len(y_train_group))))
                         X_aug = []
@@ -181,7 +181,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         y_train_group = np.tile(y_train_group, repeat_factor*3)[:target_count]
                         print(f"[info] Augmentations applied: {len(y_train_group)} samples after multi-augment {repeat_factor}x")
 
-                        # ✅ 라벨 인코딩 보정
                         y_encoded = []
                         for y in y_train_group:
                             if y in group_classes:
@@ -209,7 +208,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                         train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32),
                                                  torch.tensor(y_train_group, dtype=torch.long))
-                        train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=0)  # ✅ CPU환경 num_workers=0
+                        train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=0)
 
                         for epoch in range(max_epochs):
                             for xb, yb in train_loader:
