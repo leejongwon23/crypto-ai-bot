@@ -56,6 +56,8 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     import pandas as pd
     from sklearn.preprocessing import MinMaxScaler
     from config import NUM_CLASSES
+    from collections import Counter
+    import random
 
     X, y = [], []
 
@@ -89,7 +91,6 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     features = df_scaled.to_dict(orient="records")
 
-    # ✅ STEP1: class_ranges features 기반 계산만 사용
     gains = []
     for i in range(window, len(features) - 3):
         base = features[i]
@@ -144,10 +145,6 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), NUM_CLASSES-1)
             cls = int(cls)
 
-            if cls >= NUM_CLASSES:
-                print(f"[⚠️ 라벨 보정] cls {cls} → NUM_CLASSES-1 {NUM_CLASSES-1}")
-                cls = NUM_CLASSES - 1
-
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
 
             if input_size:
@@ -173,7 +170,21 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         labels, counts = np.unique(y, return_counts=True)
         print(f"[📊 클래스 분포] → {dict(zip(labels, counts))}")
 
+    # ✅ [리밸런싱 추가] 부족 클래스 oversample
+    min_samples_per_class = 10
+    data = list(zip(X, y))
+    class_counter = Counter(y)
+    for cls in range(NUM_CLASSES):
+        cls_items = [d for d in data if d[1] == cls]
+        if len(cls_items) < min_samples_per_class and cls_items:
+            needed = min_samples_per_class - len(cls_items)
+            replicated = random.choices(cls_items, k=needed)
+            data.extend(replicated)
+
+    # 다시 분리
+    X, y = zip(*data)
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
+
 
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
