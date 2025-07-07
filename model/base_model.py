@@ -139,14 +139,6 @@ class AutoEncoder(nn.Module):
         decoded = decoded.unsqueeze(1)
         return decoded
 
-MODEL_CLASSES = {
-    "lstm": LSTMPricePredictor,
-    "cnn_lstm": CNNLSTMPricePredictor,
-    "transformer": TransformerPricePredictor,
-    "xgboost": XGBoostWrapper,
-    "autoencoder": AutoEncoder
-}
-
 
 MODEL_CLASSES = {
     "lstm": LSTMPricePredictor,
