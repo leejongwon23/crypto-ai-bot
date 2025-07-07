@@ -90,11 +90,12 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from focal_loss import FocalLoss
     from ssl_pretrain import masked_reconstruction
     from window_optimizer import find_best_windows
+    from config import FEATURE_INPUT_SIZE  # ✅ FEATURE_INPUT_SIZE 상수 import
 
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
     try:
-        masked_reconstruction(symbol, strategy, input_size=None, mask_ratio=0.2, epochs=5)
+        masked_reconstruction(symbol, strategy, input_size=FEATURE_INPUT_SIZE, mask_ratio=0.2, epochs=5)
 
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
@@ -109,6 +110,13 @@ def train_one_model(symbol, strategy, max_epochs=20):
         window_list = find_best_windows(symbol, strategy)
         features_only = df_feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         input_size = features_only.shape[1]
+
+        # ✅ input_size padding to FEATURE_INPUT_SIZE
+        if input_size < FEATURE_INPUT_SIZE:
+            for pad_col in range(input_size, FEATURE_INPUT_SIZE):
+                df_feat[f"pad_{pad_col}"] = 0.0
+            input_size = FEATURE_INPUT_SIZE
+            print(f"[info] input_size padded to FEATURE_INPUT_SIZE={FEATURE_INPUT_SIZE}")
 
         print(f"[info] train_one_model input_size: {input_size}")
 
