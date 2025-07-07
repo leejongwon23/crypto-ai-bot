@@ -67,15 +67,16 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
         "loss": float(round(loss, 6)),
         "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
     }
+
     if class_counts:
         meta["class_counts"] = {str(k): int(v) for k, v in class_counts.items()}
 
-    # ✅ 사용된 feature 컬럼 저장
     if used_feature_columns:
         meta["used_feature_columns"] = used_feature_columns
 
     path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}.meta.json"
     try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)  # ✅ 경로 없을 시 자동생성
         with open(path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2, ensure_ascii=False)
         print(f"[메타저장] {model_type} ({symbol}-{strategy}) acc={acc:.4f}")
