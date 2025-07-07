@@ -38,6 +38,14 @@ def masked_reconstruction(symbol, strategy, input_size, mask_ratio=0.2, epochs=1
         X_masked[:, mask_idx, :] = 0
 
         pred = model(X_masked)
+
+        # 🔧 출력 크기 검사 및 reshape
+        if pred.shape != X_tensor.shape:
+            if pred.dim() == 3 and pred.shape[1] == 1:
+                pred = pred.repeat(1, X_tensor.shape[1], 1)
+            else:
+                pred = pred.unsqueeze(1).repeat(1, X_tensor.shape[1], 1)
+
         loss = lossfn(pred, X_tensor)
 
         if torch.isfinite(loss):
