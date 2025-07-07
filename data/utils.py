@@ -334,26 +334,12 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.fillna(0, inplace=True)
 
-        scaler = MinMaxScaler()
+        # ✅ 수정: feature 개수 log 출력
         feature_cols = [c for c in df.columns if c not in ["timestamp", "strategy"]]
+        print(f"[info] compute_features 생성 feature 개수: {len(feature_cols)} → {feature_cols}")
+
+        scaler = MinMaxScaler()
         df[feature_cols] = scaler.fit_transform(df[feature_cols])
-
-        if required_features:
-            for col in required_features:
-                if col not in df.columns:
-                    df[col] = 0.0
-            df = df[["timestamp", "strategy"] + required_features]
-
-        elif fallback_input_size:
-            current_features = [c for c in df.columns if c not in ["timestamp", "strategy"]]
-            if len(current_features) > fallback_input_size:
-                current_features = current_features[:fallback_input_size]
-                df = df[["timestamp", "strategy"] + current_features]
-            if len(current_features) < fallback_input_size:
-                for i in range(len(current_features), fallback_input_size):
-                    df[f"pad_{i}"] = 0.0
-                new_cols = current_features + [f"pad_{i}" for i in range(len(current_features), fallback_input_size)]
-                df = df[["timestamp", "strategy"] + new_cols]
 
     except Exception as e:
         print(f"[❌ compute_features 예외] feature 계산 실패 → {e}")
@@ -375,6 +361,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     print(f"[✅ 완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     _feature_cache[cache_key] = df
     return df
+
 
 # data/utils.py 맨 아래에 추가
 
