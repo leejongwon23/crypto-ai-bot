@@ -203,11 +203,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
 
-
-def balance_classes(X, y, min_count=20):
+def balance_classes(X, y, min_count=20, num_classes=21):
     import numpy as np
     from collections import Counter
-    from logger import log_prediction  # ✅ logger import 추가
 
     if X is None or y is None or len(X) == 0 or len(y) == 0:
         print("[❌ balance_classes 실패] X 또는 y 비어있음")
@@ -229,7 +227,7 @@ def balance_classes(X, y, min_count=20):
     max_count = max(class_counts.values()) if class_counts else min_count
     target_count = max(min_count, int(max_count * 0.8))
 
-    for cls in range(21):  # NUM_CLASSES = 21
+    for cls in range(num_classes):
         indices = [i for i, label in enumerate(y) if label == cls]
         count = len(indices)
         needed = max(0, target_count - count)
@@ -253,6 +251,10 @@ def balance_classes(X, y, min_count=20):
                 X_balanced.extend(mixup_samples)
                 y_balanced.extend([cls]*needed)
                 print(f"[복제+Noise+Mixup+Masking] 클래스 {cls} → {needed}개 추가")
+
+                # ✅ 값 범위 이상치 검증 로그 추가
+                if np.any(np.isnan(mixup_samples)) or np.any(np.isinf(mixup_samples)):
+                    print(f"[⚠️ 경고] 클래스 {cls} 복제 중 NaN 또는 Inf 발생")
             else:
                 print(f"[스킵] 클래스 {cls} → 샘플 없음, noise sample 생성 생략")
 
@@ -265,6 +267,7 @@ def balance_classes(X, y, min_count=20):
     print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
 
     return np.array(X_shuffled), np.array(y_shuffled, dtype=np.int64)
+
 
 def train_all_models():
     """
