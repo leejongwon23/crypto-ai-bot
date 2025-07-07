@@ -184,14 +184,22 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
 
+# ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
+_kline_cache = {}
+_kline_cache_ttl = {}  # ✅ TTL 추가
+
+import time
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
     import os
 
-    global _kline_cache
+    global _kline_cache, _kline_cache_ttl
     cache_key = f"{symbol}-{strategy}"
-    if cache_key in _kline_cache:
+    now = time.time()
+    ttl_valid = cache_key in _kline_cache_ttl and now - _kline_cache_ttl[cache_key] < 600  # 10분 TTL
+
+    if cache_key in _kline_cache and ttl_valid:
         print(f"[캐시 사용] {cache_key}")
         return _kline_cache[cache_key]
 
@@ -205,31 +213,12 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     if df is None or not isinstance(df, pd.DataFrame):
         print(f"[❌ 실패] {symbol}-{strategy}: get_kline() → None 반환 또는 형식 오류")
         failed_result(symbol, strategy, reason="get_kline 반환 오류")
-
-        # ✅ 수정 추가: API 미수신 심볼 목록 로깅
-        try:
-            log_path = "/persistent/logs/api_missing_symbols.txt"
-            os.makedirs(os.path.dirname(log_path), exist_ok=True)
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(f"{symbol}-{strategy}\n")
-            print(f"[📄 기록] API 미수신 심볼 → {symbol}-{strategy} 기록됨")
-        except Exception as e:
-            print(f"[⚠️ 로깅 실패] API 미수신 심볼 기록 실패: {e}")
-
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
     required_cols = ["open", "high", "low", "close", "volume", "timestamp"]
-    missing = [col for col in required_cols if col not in df.columns]
-    nan_cols = [col for col in required_cols if col in df.columns and df[col].isnull().any()]
-
-    if missing:
-        print(f"[⚠️ 경고] {symbol}-{strategy}: 필수 컬럼 누락 → {missing}")
-        failed_result(symbol, strategy, reason=f"필수컬럼누락:{missing}")
-        return pd.DataFrame(columns=required_cols)
-
-    if nan_cols:
-        print(f"[⚠️ 경고] {symbol}-{strategy}: NaN 존재 → {nan_cols}")
-        failed_result(symbol, strategy, reason=f"NaN존재:{nan_cols}")
+    if any(col not in df.columns for col in required_cols):
+        print(f"[⚠️ 경고] {symbol}-{strategy}: 필수 컬럼 누락")
+        failed_result(symbol, strategy, reason="필수컬럼누락")
         return pd.DataFrame(columns=required_cols)
 
     if len(df) < 5:
@@ -239,8 +228,19 @@ def get_kline_by_strategy(symbol: str, strategy: str):
 
     print(f"[✅ 성공] {symbol}-{strategy}: 데이터 {len(df)}개 확보")
     _kline_cache[cache_key] = df
+    _kline_cache_ttl[cache_key] = now  # ✅ TTL timestamp 저장
     return df
 
+
+# ✅ SYMBOL_GROUPS batch prefetch 함수 추가
+
+def prefetch_symbol_groups(strategy: str):
+    for group in SYMBOL_GROUPS:
+        for symbol in group:
+            try:
+                get_kline_by_strategy(symbol, strategy)
+            except Exception as e:
+                print(f"[⚠️ prefetch 실패] {symbol}-{strategy}: {e}")
 
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 3) -> pd.DataFrame:
