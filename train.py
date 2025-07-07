@@ -85,7 +85,6 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
 def get_class_groups(num_classes=21, group_size=5):
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
-
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     from focal_loss import FocalLoss
@@ -95,7 +94,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
     try:
-        # ✅ SSL 사전학습 (input_size=None → 자동)
         masked_reconstruction(symbol, strategy, input_size=None, mask_ratio=0.2, epochs=5)
 
         df = get_kline_by_strategy(symbol, strategy)
@@ -109,7 +107,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             return
 
         window_list = find_best_windows(symbol, strategy)
-
         features_only = df_feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         input_size = features_only.shape[1]
 
@@ -121,6 +118,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
             X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
             if X_raw is None or y_raw is None or len(X_raw) < 5:
                 print(f"⛔ 중단: window={window} 학습 데이터 부족")
+                continue
+
+            # ✅ feature shape ↔ input_size 검증 추가
+            if X_raw.shape[2] != input_size:
+                print(f"[❌ 오류] feature input_size 불일치: X_raw.shape[2]={X_raw.shape[2]} vs input_size={input_size}")
                 continue
 
             val_len = max(5, int(len(X_raw) * 0.2))
@@ -146,7 +148,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                     y_train_group = np.array([group_classes.index(y) for y in y_train_group])
 
-                    # ✅ get_model 호출 시 input_size 지정 일관화
                     model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
                     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
@@ -179,7 +180,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                 loss.backward()
                                 optimizer.step()
 
-                    # ✅ meta 저장 (window, input_size 포함)
                     meta = {
                         "symbol": symbol, "strategy": strategy, "model": model_type,
                         "group_id": group_id, "window": window,
@@ -201,7 +201,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
-
 
 
 def balance_classes(X, y, min_count=20):
