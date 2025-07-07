@@ -4,7 +4,6 @@ import torch.nn.functional as F
 import xgboost as xgb
 import numpy as np
 from config import NUM_CLASSES
-from data.utils import compute_features  # ✅ compute_features import 추가
 
 class Attention(nn.Module):
     def __init__(self, hidden_size):
@@ -25,15 +24,13 @@ class LSTMPricePredictor(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.fc1 = nn.Linear(hidden_size * 2, hidden_size)
         self.act = nn.GELU()
-        self.fc2 = nn.Linear(hidden_size, hidden_size//2)
-        self.fc_logits = nn.Linear(hidden_size//2, output_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size // 2)
+        self.fc_logits = nn.Linear(hidden_size // 2, output_size)
 
     def forward(self, x):
-        lstm_out, _ = self.lstm(x)
-        context, _ = self.attention(lstm_out)
-        context = self.norm(context)
-        context = self.dropout(context)
-        hidden = self.act(self.fc1(context))
+        if x.ndim == 3:
+            x = x[:, -1, :]  # ✅ 마지막 timestep만 사용
+        hidden = self.act(self.fc1(x))
         hidden = self.act(self.fc2(hidden))
         return self.fc_logits(hidden)
 
@@ -49,10 +46,13 @@ class CNNLSTMPricePredictor(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.fc1 = nn.Linear(lstm_hidden_size * 2, lstm_hidden_size)
         self.act = nn.GELU()
-        self.fc2 = nn.Linear(lstm_hidden_size, lstm_hidden_size//2)
-        self.fc_logits = nn.Linear(lstm_hidden_size//2, output_size)
+        self.fc2 = nn.Linear(lstm_hidden_size, lstm_hidden_size // 2)
+        self.fc_logits = nn.Linear(lstm_hidden_size // 2, output_size)
 
     def forward(self, x):
+        if x.ndim == 3:
+            x = x[:, -1, :]  # ✅ 마지막 timestep만 사용
+        x = x.unsqueeze(2) if x.ndim == 2 else x
         x = x.permute(0, 2, 1)
         x = self.relu(self.conv1(x))
         x = self.relu(self.conv2(x))
@@ -65,36 +65,15 @@ class CNNLSTMPricePredictor(nn.Module):
         hidden = self.act(self.fc2(hidden))
         return self.fc_logits(hidden)
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
-        super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        pos = torch.arange(0, max_len).unsqueeze(1)
-        div = torch.exp(torch.arange(0, d_model, 2) * (-torch.log(torch.tensor(10000.0)) / d_model))
-        pe[:, 0::2] = torch.sin(pos * div)
-        pe[:, 1::2] = torch.cos(pos * div)
-        self.pe = pe.unsqueeze(0)
-
-    def forward(self, x):
-        return x + self.pe[:, :x.size(1)].to(x.device)
-
-class TransformerEncoderLayer(nn.Module):
-    def __init__(self, d_model, nhead, dim_feedforward=512, dropout=0.4):
-        super().__init__()
-        self.layer = nn.TransformerEncoderLayer(
-            d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
-            dropout=dropout, activation='gelu', batch_first=True
-        )
-
-    def forward(self, x):
-        return self.layer(x)
-
 class TransformerPricePredictor(nn.Module):
     def __init__(self, input_size, d_model=128, nhead=8, num_layers=3, dropout=0.4, output_size=NUM_CLASSES):
         super().__init__()
         self.input_proj = nn.Linear(input_size, d_model)
         self.pos_encoder = PositionalEncoding(d_model)
-        self.encoder = nn.Sequential(*[TransformerEncoderLayer(d_model, nhead, dropout=dropout) for _ in range(num_layers)])
+        self.encoder_layers = nn.ModuleList([
+            nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=512, dropout=dropout, activation='gelu', batch_first=True)
+            for _ in range(num_layers)
+        ])
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
         self.fc1 = nn.Linear(d_model, d_model // 2)
@@ -102,14 +81,31 @@ class TransformerPricePredictor(nn.Module):
         self.fc_logits = nn.Linear(d_model // 2, output_size)
 
     def forward(self, x):
+        if x.ndim == 3:
+            x = x[:, -1, :]  # ✅ 마지막 timestep만 사용
         x = self.input_proj(x)
         x = self.pos_encoder(x)
-        x = self.encoder(x)
-        x = x.mean(dim=1)
+        for layer in self.encoder_layers:
+            x = layer(x)
+        x = x.mean(dim=1) if x.ndim == 3 else x
         x = self.norm(x)
         x = self.dropout(x)
         hidden = self.act(self.fc1(x))
         return self.fc_logits(hidden)
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-np.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe.unsqueeze(0))
+
+    def forward(self, x):
+        x = x + self.pe[:, :x.size(1)].to(x.device)
+        return x
 
 class XGBoostWrapper:
     def __init__(self, model_path):
@@ -121,18 +117,17 @@ class XGBoostWrapper:
         probs = self.model.predict(dmatrix)
         return np.argmax(probs, axis=1)
 
-
 class AutoEncoder(nn.Module):
     def __init__(self, input_size, hidden_size=64):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Linear(input_size, hidden_size),
             nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size//2),
+            nn.Linear(hidden_size, hidden_size // 2),
             nn.ReLU()
         )
         self.decoder = nn.Sequential(
-            nn.Linear(hidden_size//2, hidden_size),
+            nn.Linear(hidden_size // 2, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, input_size)
         )
@@ -143,6 +138,14 @@ class AutoEncoder(nn.Module):
         decoded = self.decoder(encoded)
         decoded = decoded.unsqueeze(1)
         return decoded
+
+MODEL_CLASSES = {
+    "lstm": LSTMPricePredictor,
+    "cnn_lstm": CNNLSTMPricePredictor,
+    "transformer": TransformerPricePredictor,
+    "xgboost": XGBoostWrapper,
+    "autoencoder": AutoEncoder
+}
 
 
 MODEL_CLASSES = {
