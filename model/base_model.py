@@ -178,7 +178,7 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
             input_size = features.shape[2]
             print(f"[info] input_size 자동설정(features): {input_size}")
         else:
-            # ✅ 수정: compute_features() 호출 시 df 포함하도록 변경
+            # ✅ compute_features() 호출 시 df 포함하도록 변경
             try:
                 sample_df_df = get_kline_by_strategy("BTCUSDT", "단기")
                 if sample_df_df is not None and not sample_df_df.empty:
@@ -187,10 +187,10 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
                     print(f"[info] input_size auto-calculated from compute_features: {input_size}")
                 else:
                     input_size = 11  # fallback 기본값
-                    print(f"[⚠️ input_size 기본값 사용: {input_size}] get_kline_by_strategy 반환 None 또는 empty")
+                    print(f"[⚠️ input_size fallback=11] get_kline_by_strategy 반환 None 또는 empty")
             except Exception as e:
                 input_size = 11  # fallback 기본값
-                print(f"[⚠️ input_size 기본값 사용: {input_size}] {e}")
+                print(f"[⚠️ input_size fallback=11] compute_features 예외 발생: {e}")
 
     try:
         model = model_cls(input_size=input_size, output_size=output_size)
@@ -204,6 +204,7 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
             raise e2
 
     return model
+
 
 
 
