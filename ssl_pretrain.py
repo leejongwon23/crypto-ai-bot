@@ -24,7 +24,7 @@ def masked_reconstruction(symbol, strategy, input_size, mask_ratio=0.2, epochs=1
     X = np.expand_dims(X, axis=0)  # (1, T, F)
     X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
 
-    # ✅ transformer 모델로 reconstruction pretrain
+    # ✅ transformer reconstruction model: input=F, output=F 동일
     model = get_model("transformer", input_size=input_size, output_size=input_size).to(DEVICE)
     model.train()
 
@@ -39,14 +39,19 @@ def masked_reconstruction(symbol, strategy, input_size, mask_ratio=0.2, epochs=1
 
         pred = model(X_masked)
 
-        # 🔧 출력 크기 검사 및 reshape
+        # ✅ [수정] pred shape, X_tensor shape 통일 확인
         if pred.shape != X_tensor.shape:
-            if pred.dim() == 3 and pred.shape[1] == 1:
-                pred = pred.repeat(1, X_tensor.shape[1], 1)
+            print(f"[⚠️ shape mismatch] pred.shape={pred.shape}, target.shape={X_tensor.shape}")
+            if pred.shape[1] != X_tensor.shape[1]:
+                min_len = min(pred.shape[1], X_tensor.shape[1])
+                pred = pred[:, :min_len, :]
+                X_target = X_tensor[:, :min_len, :]
             else:
-                pred = pred.unsqueeze(1).repeat(1, X_tensor.shape[1], 1)
+                X_target = X_tensor
+        else:
+            X_target = X_tensor
 
-        loss = lossfn(pred, X_tensor)
+        loss = lossfn(pred, X_target)
 
         if torch.isfinite(loss):
             optimizer.zero_grad()
@@ -55,6 +60,5 @@ def masked_reconstruction(symbol, strategy, input_size, mask_ratio=0.2, epochs=1
 
         print(f"[SSL] epoch {epoch+1}/{epochs}, loss={loss.item():.6f}")
 
-    # ✅ pretraining weight 저장
     torch.save(model.state_dict(), f"/persistent/models/{symbol}_{strategy}_ssl.pt")
     print(f"[SSL] {symbol}-{strategy} pretraining 완료")
