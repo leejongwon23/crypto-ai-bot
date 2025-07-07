@@ -51,7 +51,6 @@ def get_btc_dominance():
 
 import numpy as np
 
-
 def create_dataset(features, window=20, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
@@ -90,22 +89,40 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     features = df_scaled.to_dict(orient="records")
 
-    # ✅ STEP3: 동적 class_ranges 계산 + float 변환 안전 처리
+    # ✅ STEP1: class_ranges 동적 계산 → prediction_log.csv → 실패 시 features 기반
     try:
         log_df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
         gains = pd.to_numeric(log_df["return"], errors="coerce").dropna().values
         gains = gains[np.isfinite(gains)]
+        if len(gains) < NUM_CLASSES:
+            raise Exception("prediction_log.csv 데이터 부족")
         percentiles = np.percentile(gains, np.linspace(0, 100, NUM_CLASSES+1))
         class_ranges = list(zip(percentiles[:-1], percentiles[1:]))
     except Exception as e:
-        print(f"[⚠️ class_ranges 동적 계산 실패 → 기본값 사용] {e}")
-        class_ranges = [
-            (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
-            (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
-            (-0.03, -0.01), (-0.01, 0.01), (0.01, 0.03), (0.03, 0.05),
-            (0.05, 0.07), (0.07, 0.10), (0.10, 0.15), (0.15, 0.20),
-            (0.20, 0.30), (0.30, 0.60), (0.60, 1.00), (1.00, 2.00), (2.00, 5.00)
-        ]
+        print(f"[⚠️ prediction_log.csv 실패 → features 기반 계산 시도] {e}")
+        gains = []
+        for i in range(window, len(features) - 3):
+            base = features[i]
+            entry_price = float(base.get("close", 0.0))
+            future = features[i+1:]
+            if entry_price <= 0 or len(future) < 1:
+                continue
+            max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
+            gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
+            if np.isfinite(gain):
+                gains.append(gain)
+        if len(gains) < NUM_CLASSES:
+            print(f"[⚠️ features gain 계산도 부족 → 기본값 사용]")
+            class_ranges = [
+                (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
+                (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
+                (-0.03, -0.01), (-0.01, 0.01), (0.01, 0.03), (0.03, 0.05),
+                (0.05, 0.07), (0.07, 0.10), (0.10, 0.15), (0.15, 0.20),
+                (0.20, 0.30), (0.30, 0.60), (0.60, 1.00), (1.00, 2.00), (2.00, 5.00)
+            ]
+        else:
+            percentiles = np.percentile(gains, np.linspace(0, 100, NUM_CLASSES+1))
+            class_ranges = list(zip(percentiles[:-1], percentiles[1:]))
 
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
@@ -136,9 +153,8 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), NUM_CLASSES-1)
             cls = int(cls)
 
-            # ✅ STEP2: 라벨 보정
             if cls >= NUM_CLASSES:
-                print(f"[⚠️ STEP2 라벨 보정] cls {cls} → NUM_CLASSES-1 {NUM_CLASSES-1}")
+                print(f"[⚠️ 라벨 보정] cls {cls} → NUM_CLASSES-1 {NUM_CLASSES-1}")
                 cls = NUM_CLASSES - 1
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
