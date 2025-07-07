@@ -183,9 +183,10 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     # 다시 분리
     X, y = zip(*data)
-    return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
 
-
+    # ✅ 마지막 timestep class만 target으로 변환
+    y = np.array(y, dtype=np.int64)
+    return np.array(X, dtype=np.float32), y
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
 _kline_cache = {}
