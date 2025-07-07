@@ -89,40 +89,31 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     features = df_scaled.to_dict(orient="records")
 
-    # ✅ STEP1: class_ranges 동적 계산 → prediction_log.csv → 실패 시 features 기반
-    try:
-        log_df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
-        gains = pd.to_numeric(log_df["return"], errors="coerce").dropna().values
-        gains = gains[np.isfinite(gains)]
-        if len(gains) < NUM_CLASSES:
-            raise Exception("prediction_log.csv 데이터 부족")
+    # ✅ STEP1: class_ranges features 기반 계산만 사용
+    gains = []
+    for i in range(window, len(features) - 3):
+        base = features[i]
+        entry_price = float(base.get("close", 0.0))
+        future = features[i+1:]
+        if entry_price <= 0 or len(future) < 1:
+            continue
+        max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
+        gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
+        if np.isfinite(gain):
+            gains.append(gain)
+
+    if len(gains) < NUM_CLASSES:
+        print(f"[⚠️ features gain 계산도 부족 → 기본값 사용]")
+        class_ranges = [
+            (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
+            (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
+            (-0.03, -0.01), (-0.01, 0.01), (0.01, 0.03), (0.03, 0.05),
+            (0.05, 0.07), (0.07, 0.10), (0.10, 0.15), (0.15, 0.20),
+            (0.20, 0.30), (0.30, 0.60), (0.60, 1.00), (1.00, 2.00), (2.00, 5.00)
+        ]
+    else:
         percentiles = np.percentile(gains, np.linspace(0, 100, NUM_CLASSES+1))
         class_ranges = list(zip(percentiles[:-1], percentiles[1:]))
-    except Exception as e:
-        print(f"[⚠️ prediction_log.csv 실패 → features 기반 계산 시도] {e}")
-        gains = []
-        for i in range(window, len(features) - 3):
-            base = features[i]
-            entry_price = float(base.get("close", 0.0))
-            future = features[i+1:]
-            if entry_price <= 0 or len(future) < 1:
-                continue
-            max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
-            gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
-            if np.isfinite(gain):
-                gains.append(gain)
-        if len(gains) < NUM_CLASSES:
-            print(f"[⚠️ features gain 계산도 부족 → 기본값 사용]")
-            class_ranges = [
-                (-1.00, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
-                (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
-                (-0.03, -0.01), (-0.01, 0.01), (0.01, 0.03), (0.03, 0.05),
-                (0.05, 0.07), (0.07, 0.10), (0.10, 0.15), (0.15, 0.20),
-                (0.20, 0.30), (0.30, 0.60), (0.60, 1.00), (1.00, 2.00), (2.00, 5.00)
-            ]
-        else:
-            percentiles = np.percentile(gains, np.linspace(0, 100, NUM_CLASSES+1))
-            class_ranges = list(zip(percentiles[:-1], percentiles[1:]))
 
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
@@ -183,6 +174,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         print(f"[📊 클래스 분포] → {dict(zip(labels, counts))}")
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
+
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
 _kline_cache = {}
