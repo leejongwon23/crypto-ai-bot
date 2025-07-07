@@ -325,11 +325,11 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            # ✅ 수정된 평가 로직: 예측 클래스 구간 도달 또는 초과만 성공
+            # ✅ 수정된 평가 로직: 예측 클래스 구간(min~max) 내에 들어가야 성공으로 판정
             success = False
             if 0 <= pred_class < len(class_ranges):
                 cls_min, cls_max = class_ranges[pred_class]
-                if gain >= cls_min:
+                if cls_min <= gain < cls_max:
                     success = True
 
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
@@ -377,6 +377,7 @@ def evaluate_predictions(get_price_fn):
     failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
     safe_write_csv(WRONG, failed)
     print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
+
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
