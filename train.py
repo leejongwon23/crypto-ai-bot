@@ -90,7 +90,6 @@ def get_class_groups(num_classes=21, group_size=7):
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
 
-
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     from focal_loss import FocalLoss
@@ -155,7 +154,14 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 학습 데이터 부족 ({len(y_train_group)})")
                         continue
 
-                    # ✅ 라벨 인코딩 보정 (없는 경우 스킵)
+                    # ✅ 희소 클래스 복제 로직 추가
+                    if len(y_train_group) < 10:
+                        repeat_factor = int(np.ceil(10 / len(y_train_group)))
+                        X_train_group = np.tile(X_train_group, (repeat_factor, 1, 1))
+                        y_train_group = np.tile(y_train_group, repeat_factor)
+                        print(f"[info] 희소 클래스 복제: {len(y_train_group)} samples after repeat {repeat_factor}x")
+
+                    # ✅ 라벨 인코딩 보정
                     y_encoded = []
                     for y in y_train_group:
                         if y in group_classes:
@@ -245,8 +251,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
-
-
 
 
 def balance_classes(X, y, min_count=20, num_classes=21):
