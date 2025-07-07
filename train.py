@@ -146,8 +146,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 X_raw, y_raw = X_raw[sorted_idx], y_raw[sorted_idx]
                 X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
 
-                # ✅ validation input shape 수정
-                X_val_last = X_val[:, -1, :]  # 마지막 timestep만 선택
+                # ✅ validation input shape 수정 → 마지막 timestep만 선택
+                X_val_last = X_val[:, -1, :]
 
                 for group_id, group_classes in enumerate(class_groups):
                     group_mask = np.isin(y_train, group_classes)
