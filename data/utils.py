@@ -51,6 +51,7 @@ def get_btc_dominance():
 
 import numpy as np
 
+
 def create_dataset(features, window=20, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
@@ -89,11 +90,11 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     features = df_scaled.to_dict(orient="records")
 
-    # ✅ STEP3: 동적 class_ranges 계산 + float 변환
+    # ✅ STEP3: 동적 class_ranges 계산 + float 변환 안전 처리
     try:
         log_df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
-        gains = log_df["return"].dropna().values
-        gains = gains[np.isfinite(gains)].astype(float)
+        gains = pd.to_numeric(log_df["return"], errors="coerce").dropna().values
+        gains = gains[np.isfinite(gains)]
         percentiles = np.percentile(gains, np.linspace(0, 100, NUM_CLASSES+1))
         class_ranges = list(zip(percentiles[:-1], percentiles[1:]))
     except Exception as e:
