@@ -155,7 +155,8 @@ MODEL_CLASSES = {
 }
 
 def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_path=None, features=None):
-    from data.utils import compute_features, get_kline_by_strategy  # ✅ df 확보 위해 추가 import
+    from data.utils import compute_features, get_kline_by_strategy
+    from config import FEATURE_INPUT_SIZE  # ✅ FEATURE_INPUT_SIZE 상수 import
 
     if model_type == "xgboost":
         if model_path is None:
@@ -172,13 +173,12 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
         from config import NUM_CLASSES
         output_size = NUM_CLASSES
 
-    # ✅ input_size 동적 지정 (features → input_size) 우선
+    # ✅ input_size 동적 지정
     if input_size is None:
         if features is not None:
             input_size = features.shape[2]
             print(f"[info] input_size 자동설정(features): {input_size}")
         else:
-            # ✅ sample_df 로 fallback input_size 지정
             try:
                 sample_df_df = get_kline_by_strategy("BTCUSDT", "단기")
                 if sample_df_df is not None and not sample_df_df.empty:
@@ -187,11 +187,11 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
                     input_size = len(feature_cols)
                     print(f"[info] input_size auto-calculated from compute_features: {input_size}")
                 else:
-                    input_size = 21  # ✅ 수정: fallback 기본값을 모델 NUM_CLASSES=21로 통일
-                    print(f"[⚠️ input_size fallback=21] get_kline_by_strategy 반환 None 또는 empty")
+                    input_size = FEATURE_INPUT_SIZE  # ✅ 수정: FEATURE_INPUT_SIZE 상수 사용
+                    print(f"[⚠️ input_size fallback={FEATURE_INPUT_SIZE}] get_kline_by_strategy 반환 None 또는 empty")
             except Exception as e:
-                input_size = 21  # ✅ 수정: fallback 기본값을 모델 NUM_CLASSES=21로 통일
-                print(f"[⚠️ input_size fallback=21] compute_features 예외 발생: {e}")
+                input_size = FEATURE_INPUT_SIZE  # ✅ 수정: FEATURE_INPUT_SIZE 상수 사용
+                print(f"[⚠️ input_size fallback={FEATURE_INPUT_SIZE}] compute_features 예외 발생: {e}")
 
     try:
         model = model_cls(input_size=input_size, output_size=output_size)
@@ -205,6 +205,7 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
             raise e2
 
     return model
+
 
 
 
