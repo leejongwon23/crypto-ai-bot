@@ -299,7 +299,7 @@ def get_realtime_prices():
 
 _feature_cache = {}
 
-def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_features: list = None, fallback_input_size: int = None) -> pd.DataFrame:
+def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_features: list = None, fallback_input_size: int = 21) -> pd.DataFrame:
     from predict import failed_result
     import ta  # ✅ ta 라이브러리 추가 필요 (pip install ta)
     global _feature_cache
@@ -356,6 +356,16 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         # ✅ 수정: feature 개수 log 출력
         feature_cols = [c for c in df.columns if c not in ["timestamp", "strategy"]]
         print(f"[info] compute_features 생성 feature 개수: {len(feature_cols)} → {feature_cols}")
+
+        # ✅ feature padding 추가 (input_size 대비 부족한 경우 0-padding 컬럼 추가)
+        if fallback_input_size is not None and len(feature_cols) < fallback_input_size:
+            pad_cols = []
+            for i in range(len(feature_cols), fallback_input_size):
+                pad_col = f"pad_{i}"
+                df[pad_col] = 0.0
+                pad_cols.append(pad_col)
+            feature_cols += pad_cols
+            print(f"[info] feature padding 적용: {pad_cols}")
 
         scaler = MinMaxScaler()
         df[feature_cols] = scaler.fit_transform(df[feature_cols])
