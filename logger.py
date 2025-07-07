@@ -1,6 +1,7 @@
 import os, csv, datetime, pandas as pd, pytz, hashlib
 from data.utils import get_kline_by_strategy
 import pandas as pd
+import sqlite3
 
 DIR, LOG = "/persistent", "/persistent/logs"
 PREDICTION_LOG = f"{DIR}/prediction_log.csv"
@@ -12,6 +13,15 @@ os.makedirs(LOG, exist_ok=True)
 
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 model_success_tracker = {}
+
+
+def get_db_connection():
+    try:
+        conn = sqlite3.connect("/persistent/logs/failure_patterns.db", check_same_thread=False)  # ✅ Lock-safe
+        return conn
+    except Exception as e:
+        print(f"[오류] DB 연결 실패 → {e}")
+        return None
 
 def update_model_success(s, t, m, success):
     k = (s, t or "알수없음", m)
@@ -72,10 +82,13 @@ def log_audit_prediction(s, t, status, reason):
             w.writerow(row)
     except: pass
 
+import threading
+db_lock = threading.Lock()  # ✅ Lock 전역 선언
+
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, model=None, success=True, reason="", rate=0.0,
                    return_value=None, volatility=False, source="일반", predicted_class=None, label=None,
-                   augmentation=None, group_id=None):  # ✅ group_id 파라미터 추가
+                   augmentation=None, group_id=None):
 
     import csv, os, datetime, pytz
 
@@ -98,13 +111,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         except:
             label = -1
 
-    if augmentation == "smote":
-        status = "smote_aug"
-    else:
-        status = "v_success" if success and volatility else \
-                 "v_fail" if not success and volatility else \
-                 "success" if success else "fail"
-
+    status = "success" if success else "fail"
     effective_rate = rate if rate is not None else 0.0
     effective_return = return_value if return_value is not None else effective_rate
 
@@ -124,22 +131,22 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "source": str(source or "일반"),
         "predicted_class": str(pred_class_val),
         "label": str(label),
-        "group_id": str(group_id) if group_id is not None else ""  # ✅ group_id 추가
+        "group_id": str(group_id) if group_id is not None else ""
     }
 
-    row = {str(k): (v if v is not None else "") for k, v in row.items() if k is not None}
     fieldnames = sorted(row.keys())
 
-    for path in [dated_path, full_path]:
-        try:
-            with open(path, "a", newline="", encoding="utf-8-sig") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                if f.tell() == 0:
-                    writer.writeheader()
-                writer.writerow(row)
-            print(f"[✅ log_prediction 기록 완료] {path}")
-        except Exception as e:
-            print(f"[오류] log_prediction 기록 실패 ({path}) → {e}")
+    with db_lock:  # ✅ Lock 적용
+        for path in [dated_path, full_path]:
+            try:
+                with open(path, "a", newline="", encoding="utf-8-sig") as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    if f.tell() == 0:
+                        writer.writeheader()
+                    writer.writerow(row)
+                print(f"[✅ log_prediction 기록 완료] {path}")
+            except Exception as e:
+                print(f"[오류] log_prediction 기록 실패 ({path}) → {e}")
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
@@ -334,31 +341,36 @@ def export_recent_model_stats(recent_days=3):
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     """
     모델 학습 결과를 로그로 저장
-    - 이어 학습 여부가 있는 경우 로그로 명확히 남김
     """
-    try:
-        import os
-        timestamp = now_kst().strftime("%Y-%m-%d %H:%M:%S")
-        model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
-        mode = "이어학습" if os.path.exists(model_path) else "신규학습"
+    import os
+    import pandas as pd
+    import datetime, pytz
 
-        row = {
-            "timestamp": timestamp,
-            "symbol": symbol,
-            "strategy": strategy,
-            "model": model_name,
-            "mode": mode,
-            "accuracy": float(acc),
-            "f1_score": float(f1),
-            "loss": float(loss)
-        }
+    now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+    timestamp = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
+    mode = "이어학습" if os.path.exists(model_path) else "신규학습"
 
-        headers = list(row.keys())
-        pd.DataFrame([row]).to_csv(TRAIN_LOG, mode="a", index=False,
-                                   header=not os.path.exists(TRAIN_LOG),
-                                   encoding="utf-8-sig")
-    except Exception as e:
-        print(f"[학습 로그 저장 오류] {e}")
+    row = {
+        "timestamp": timestamp,
+        "symbol": symbol,
+        "strategy": strategy,
+        "model": model_name,
+        "mode": mode,
+        "accuracy": float(acc),
+        "f1_score": float(f1),
+        "loss": float(loss)
+    }
+
+    with db_lock:  # ✅ Lock 적용
+        try:
+            TRAIN_LOG = "/persistent/logs/train_log.csv"
+            pd.DataFrame([row]).to_csv(TRAIN_LOG, mode="a", index=False,
+                                       header=not os.path.exists(TRAIN_LOG),
+                                       encoding="utf-8-sig")
+            print(f"[✅ log_training_result 저장 완료] {TRAIN_LOG}")
+        except Exception as e:
+            print(f"[학습 로그 저장 오류] {e}")
 
 def get_class_success_rate(strategy, recent_days=3):
     from collections import defaultdict
