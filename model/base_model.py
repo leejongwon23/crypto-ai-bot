@@ -173,10 +173,16 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
     if input_size is None:
         if features is not None:
             input_size = features.shape[2]
-            print(f"[info] input_size 자동설정: {input_size}")
+            print(f"[info] input_size 자동설정(features): {input_size}")
         else:
-            input_size = 11  # fallback 기본값
-            print(f"[info] input_size 기본값 사용: {input_size}")
+            # ✅ 수정: compute_features()로부터 feature count 가져오기
+            try:
+                sample_df = compute_features("BTCUSDT", "단기")
+                input_size = sample_df.drop(columns=["timestamp", "strategy"], errors="ignore").shape[1]
+                print(f"[info] input_size auto-calculated from compute_features: {input_size}")
+            except Exception as e:
+                input_size = 11  # fallback 기본값
+                print(f"[⚠️ input_size 기본값 사용: {input_size}] {e}")
 
     try:
         model = model_cls(input_size=input_size, output_size=output_size)
