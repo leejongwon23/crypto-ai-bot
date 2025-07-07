@@ -156,7 +156,7 @@ MODEL_CLASSES = {
 
 def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_path=None, features=None):
     from data.utils import compute_features, get_kline_by_strategy
-    from config import FEATURE_INPUT_SIZE  # ✅ FEATURE_INPUT_SIZE 상수 import
+    from config import FEATURE_INPUT_SIZE, NUM_CLASSES  # ✅ FEATURE_INPUT_SIZE, NUM_CLASSES 상수 import
 
     if model_type == "xgboost":
         if model_path is None:
@@ -170,7 +170,6 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
         model_cls = MODEL_CLASSES[model_type]
 
     if output_size is None:
-        from config import NUM_CLASSES
         output_size = NUM_CLASSES
 
     # ✅ input_size 동적 지정
@@ -187,10 +186,10 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
                     input_size = len(feature_cols)
                     print(f"[info] input_size auto-calculated from compute_features: {input_size}")
                 else:
-                    input_size = FEATURE_INPUT_SIZE  # ✅ 수정: FEATURE_INPUT_SIZE 상수 사용
+                    input_size = FEATURE_INPUT_SIZE
                     print(f"[⚠️ input_size fallback={FEATURE_INPUT_SIZE}] get_kline_by_strategy 반환 None 또는 empty")
             except Exception as e:
-                input_size = FEATURE_INPUT_SIZE  # ✅ 수정: FEATURE_INPUT_SIZE 상수 사용
+                input_size = FEATURE_INPUT_SIZE
                 print(f"[⚠️ input_size fallback={FEATURE_INPUT_SIZE}] compute_features 예외 발생: {e}")
 
     try:
