@@ -299,11 +299,13 @@ def get_realtime_prices():
 
 _feature_cache = {}
 
-def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_features: list = None, fallback_input_size: int = 21) -> pd.DataFrame:
+def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_features: list = None, fallback_input_size: int = None) -> pd.DataFrame:
     from predict import failed_result
-    import ta  # ✅ ta 라이브러리 추가 필요 (pip install ta)
+    from config import FEATURE_INPUT_SIZE  # ✅ FEATURE_INPUT_SIZE 상수 import
+    import ta
     global _feature_cache
     cache_key = f"{symbol}-{strategy}"
+
     if cache_key in _feature_cache:
         print(f"[캐시 사용] {cache_key} 피처")
         return _feature_cache[cache_key]
@@ -340,7 +342,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df["volatility"] = df["high"] - df["low"]
         df["trend_score"] = (df["close"] > df["ma20"]).astype(int)
 
-        # ✅ 고급 기술적 지표 추가 (ta-lib 없이 ta 패키지 사용)
+        # ✅ 고급 기술적 지표 추가
         df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
         df["ema100"] = df["close"].ewm(span=100, adjust=False).mean()
         df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
@@ -353,14 +355,13 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.fillna(0, inplace=True)
 
-        # ✅ 수정: feature 개수 log 출력
         feature_cols = [c for c in df.columns if c not in ["timestamp", "strategy"]]
         print(f"[info] compute_features 생성 feature 개수: {len(feature_cols)} → {feature_cols}")
 
-        # ✅ feature padding 추가 (input_size 대비 부족한 경우 0-padding 컬럼 추가)
-        if fallback_input_size is not None and len(feature_cols) < fallback_input_size:
+        # ✅ 수정: FEATURE_INPUT_SIZE 기반 padding 적용
+        if len(feature_cols) < FEATURE_INPUT_SIZE:
             pad_cols = []
-            for i in range(len(feature_cols), fallback_input_size):
+            for i in range(len(feature_cols), FEATURE_INPUT_SIZE):
                 pad_col = f"pad_{i}"
                 df[pad_col] = 0.0
                 pad_cols.append(pad_col)
@@ -390,6 +391,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     print(f"[✅ 완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     _feature_cache[cache_key] = df
     return df
+
 
 
 # data/utils.py 맨 아래에 추가
