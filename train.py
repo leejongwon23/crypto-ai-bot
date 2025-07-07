@@ -148,6 +148,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                     y_train_group = np.array([group_classes.index(y) for y in y_train_group])
 
+                    # ✅ get_model 호출 시 input_size 필수 지정
                     model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
                     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
