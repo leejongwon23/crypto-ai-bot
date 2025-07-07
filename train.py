@@ -146,8 +146,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 X_raw, y_raw = X_raw[sorted_idx], y_raw[sorted_idx]
                 X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
 
+                # ✅ validation input shape 수정
+                X_val_last = X_val[:, -1, :]  # 마지막 timestep만 선택
+
                 for group_id, group_classes in enumerate(class_groups):
-                    # ✅ Step3: 학습 데이터 없는 그룹 전체 스킵
                     group_mask = np.isin(y_train, group_classes)
                     X_train_group = X_train[group_mask]
                     y_train_group = y_train[group_mask]
@@ -206,7 +208,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
                         lossfn_ce = torch.nn.CrossEntropyLoss(weight=class_weight_tensor)
 
-                        train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32),
+                        train_ds = TensorDataset(torch.tensor(X_train_group[:, -1, :], dtype=torch.float32),  # ✅ 마지막 timestep만 사용
                                                  torch.tensor(y_train_group, dtype=torch.long))
                         train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=0)
 
@@ -223,7 +225,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                         model.eval()
                         with torch.no_grad():
-                            val_logits = model(torch.tensor(X_val, dtype=torch.float32).to(DEVICE))
+                            val_logits = model(torch.tensor(X_val_last, dtype=torch.float32).to(DEVICE))  # ✅ 수정된 X_val_last 사용
                             val_preds = torch.argmax(val_logits, dim=1).cpu().numpy()
                             val_acc = (val_preds == y_val).mean()
                             print(f"[📈 validation accuracy] {symbol}-{strategy}-{model_type} acc={val_acc:.4f}")
@@ -253,7 +255,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
-
 
 def balance_classes(X, y, min_count=20, num_classes=21):
     import numpy as np
