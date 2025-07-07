@@ -89,11 +89,11 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     features = df_scaled.to_dict(orient="records")
 
-    # ✅ 동적 class_ranges 계산
+    # ✅ STEP1: 동적 class_ranges 계산
     try:
         log_df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
         gains = log_df["return"].dropna().values
-        gains = gains[np.isfinite(gains)]
+        gains = gains[np.isfinite(gains)].astype(float)  # ⬅️ float 변환 추가
         percentiles = np.percentile(gains, np.linspace(0, 100, NUM_CLASSES+1))
         class_ranges = list(zip(percentiles[:-1], percentiles[1:]))
     except Exception as e:
@@ -128,11 +128,12 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
                 continue
 
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
-            gain = (max_future_price - entry_price) / (entry_price + 1e-6)
+            gain = float((max_future_price - entry_price) / (entry_price + 1e-6))  # ⬅️ float 변환 추가
             if pd.isnull(gain) or not np.isfinite(gain):
                 gain = 0.0
 
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), NUM_CLASSES-1)
+            cls = int(cls)  # ⬅️ 라벨 int 변환 추가
 
             # ✅ STEP2: 라벨 보정
             if cls >= NUM_CLASSES:
@@ -141,7 +142,6 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
 
-            # ✅ STEP1: input_size 호환 패딩/트렁케이트
             if input_size:
                 for j in range(len(sample)):
                     row = sample[j]
