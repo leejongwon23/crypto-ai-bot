@@ -95,7 +95,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from focal_loss import FocalLoss
     from ssl_pretrain import masked_reconstruction
     from window_optimizer import find_best_windows
-    from config import FEATURE_INPUT_SIZE  # ✅ FEATURE_INPUT_SIZE 상수 import
+    from config import FEATURE_INPUT_SIZE
+    from collections import Counter
+    import torch
+    from torch.utils.data import TensorDataset, DataLoader
 
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
@@ -116,7 +119,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
         features_only = df_feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         input_size = features_only.shape[1]
 
-        # ✅ input_size padding to FEATURE_INPUT_SIZE
         if input_size < FEATURE_INPUT_SIZE:
             for pad_col in range(input_size, FEATURE_INPUT_SIZE):
                 df_feat[f"pad_{pad_col}"] = 0.0
@@ -142,8 +144,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             X_raw, y_raw = X_raw[sorted_idx], y_raw[sorted_idx]
             X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
 
-            from collections import Counter
-
             for group_id, group_classes in enumerate(class_groups):
                 for model_type in ["lstm", "cnn_lstm", "transformer"]:
                     group_mask = np.isin(y_train, group_classes)
@@ -154,7 +154,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 학습 데이터 부족 ({len(y_train_group)})")
                         continue
 
-                    # ✅ 희소 클래스 복제 로직 추가
+                    # ✅ 희소 클래스 복제
                     if len(y_train_group) < 10:
                         repeat_factor = int(np.ceil(10 / len(y_train_group)))
                         X_train_group = np.tile(X_train_group, (repeat_factor, 1, 1))
@@ -178,7 +178,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     class_weight_group = [total_group / counts_group.get(i, 1) for i in range(len(group_classes))]
                     class_weight_tensor = torch.tensor(class_weight_group, dtype=torch.float32).to(DEVICE)
 
-                    # ✅ shape 보정 검증
+                    # ✅ shape 검증
                     output_size = len(group_classes)
                     if class_weight_tensor.shape[0] != output_size:
                         print(f"[❌ 오류] class_weight_tensor shape {class_weight_tensor.shape} != output_size {output_size}")
