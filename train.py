@@ -150,19 +150,34 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 학습 데이터 부족 ({len(y_train_group)})")
                         continue
 
-                    y_train_group = np.array([group_classes.index(y) for y in y_train_group])
+                    # ✅ 라벨 인코딩 보정 (없는 경우 스킵)
+                    y_encoded = []
+                    for y in y_train_group:
+                        if y in group_classes:
+                            y_encoded.append(group_classes.index(y))
+                        else:
+                            print(f"[⚠️ 경고] 라벨 {y} 이 group_classes에 없음 → 스킵")
+                    if not y_encoded:
+                        print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 유효 라벨 없음")
+                        continue
+                    y_train_group = np.array(y_encoded)
 
                     counts_group = Counter(y_train_group)
                     total_group = sum(counts_group.values())
                     class_weight_group = [total_group / counts_group.get(i, 1) for i in range(len(group_classes))]
                     class_weight_tensor = torch.tensor(class_weight_group, dtype=torch.float32).to(DEVICE)
 
-                    model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
+                    # ✅ shape 보정 검증
+                    output_size = len(group_classes)
+                    if class_weight_tensor.shape[0] != output_size:
+                        print(f"[❌ 오류] class_weight_tensor shape {class_weight_tensor.shape} != output_size {output_size}")
+                        continue
+
+                    model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
                     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
                     lossfn_ce = torch.nn.CrossEntropyLoss(weight=class_weight_tensor)
 
-                    # ✅ STEP4: consistency_loss_fn shape 검증 추가
                     def consistency_loss_fn(p1, p2):
                         if p1.shape != p2.shape:
                             min_dim = min(p1.shape[1], p2.shape[1])
@@ -225,6 +240,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
+
 
 
 
