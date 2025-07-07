@@ -28,9 +28,11 @@ class LSTMPricePredictor(nn.Module):
         self.fc_logits = nn.Linear(hidden_size // 2, output_size)
 
     def forward(self, x):
-        if x.ndim == 3:
-            x = x[:, -1, :]  # ✅ 마지막 timestep만 사용
-        hidden = self.act(self.fc1(x))
+        lstm_out, _ = self.lstm(x)  # ✅ 시퀀스 전체를 LSTM에 통과
+        context, _ = self.attention(lstm_out)  # ✅ Attention 적용
+        context = self.norm(context)
+        context = self.dropout(context)
+        hidden = self.act(self.fc1(context))
         hidden = self.act(self.fc2(hidden))
         return self.fc_logits(hidden)
 
@@ -50,13 +52,10 @@ class CNNLSTMPricePredictor(nn.Module):
         self.fc_logits = nn.Linear(lstm_hidden_size // 2, output_size)
 
     def forward(self, x):
-        if x.ndim == 3:
-            x = x[:, -1, :]  # ✅ 마지막 timestep만 사용
-        x = x.unsqueeze(2) if x.ndim == 2 else x
-        x = x.permute(0, 2, 1)
+        x = x.permute(0, 2, 1)  # (batch, features, seq)
         x = self.relu(self.conv1(x))
         x = self.relu(self.conv2(x))
-        x = x.permute(0, 2, 1)
+        x = x.permute(0, 2, 1)  # (batch, seq, channels)
         lstm_out, _ = self.lstm(x)
         context, _ = self.attention(lstm_out)
         context = self.norm(context)
@@ -81,13 +80,11 @@ class TransformerPricePredictor(nn.Module):
         self.fc_logits = nn.Linear(d_model // 2, output_size)
 
     def forward(self, x):
-        if x.ndim == 3:
-            x = x[:, -1, :]  # ✅ 마지막 timestep만 사용
         x = self.input_proj(x)
         x = self.pos_encoder(x)
         for layer in self.encoder_layers:
             x = layer(x)
-        x = x.mean(dim=1) if x.ndim == 3 else x
+        x = x.mean(dim=1)  # ✅ 시퀀스 전체 pooling
         x = self.norm(x)
         x = self.dropout(x)
         hidden = self.act(self.fc1(x))
