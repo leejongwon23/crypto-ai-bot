@@ -89,7 +89,6 @@ def get_class_groups(num_classes=21, group_size=7):
     """
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
-
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     from focal_loss import FocalLoss
@@ -99,6 +98,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from collections import Counter
     import torch
     from torch.utils.data import TensorDataset, DataLoader
+    from imblearn.over_sampling import SMOTE
+    import numpy as np
 
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
@@ -154,103 +155,26 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 학습 데이터 부족 ({len(y_train_group)})")
                         continue
 
-                    # ✅ 희소 클래스 복제
-                    if len(y_train_group) < 10:
-                        repeat_factor = int(np.ceil(10 / len(y_train_group)))
-                        X_train_group = np.tile(X_train_group, (repeat_factor, 1, 1))
-                        y_train_group = np.tile(y_train_group, repeat_factor)
-                        print(f"[info] 희소 클래스 복제: {len(y_train_group)} samples after repeat {repeat_factor}x")
+                    # ✅ 희소 클래스 복제 (GAN-simulated augmentation + SMOTE-like oversampling)
+                    target_count = 50
+                    if len(y_train_group) < target_count:
+                        repeat_factor = int(np.ceil(target_count / len(y_train_group)))
+                        X_aug = []
+                        for _ in range(repeat_factor):
+                            noise = np.random.normal(0, 0.01, X_train_group.shape)
+                            X_aug.append(X_train_group + noise)
+                        X_train_group = np.vstack(X_aug)[:target_count]
+                        y_train_group = np.tile(y_train_group, repeat_factor)[:target_count]
+                        print(f"[info] GAN-sim augmentation + repeat: {len(y_train_group)} samples after repeat {repeat_factor}x")
 
-                    # ✅ 라벨 인코딩 보정
-                    y_encoded = []
-                    for y in y_train_group:
-                        if y in group_classes:
-                            y_encoded.append(group_classes.index(y))
-                        else:
-                            print(f"[⚠️ 경고] 라벨 {y} 이 group_classes에 없음 → 스킵")
-                    if not y_encoded:
-                        print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 유효 라벨 없음")
-                        continue
-                    y_train_group = np.array(y_encoded)
-
-                    counts_group = Counter(y_train_group)
-                    total_group = sum(counts_group.values())
-                    class_weight_group = [total_group / counts_group.get(i, 1) for i in range(len(group_classes))]
-                    class_weight_tensor = torch.tensor(class_weight_group, dtype=torch.float32).to(DEVICE)
-
-                    # ✅ shape 검증
-                    output_size = len(group_classes)
-                    if class_weight_tensor.shape[0] != output_size:
-                        print(f"[❌ 오류] class_weight_tensor shape {class_weight_tensor.shape} != output_size {output_size}")
-                        continue
-
-                    model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
-                    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-                    lossfn_ce = torch.nn.CrossEntropyLoss(weight=class_weight_tensor)
-
-                    def consistency_loss_fn(p1, p2):
-                        if p1.shape != p2.shape:
-                            min_dim = min(p1.shape[1], p2.shape[1])
-                            p1 = p1[:, :min_dim]
-                            p2 = p2[:, :min_dim]
-                        return torch.mean((p1 - p2) ** 2)
-
-                    train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32),
-                                             torch.tensor(y_train_group, dtype=torch.long))
-                    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
-
-                    for epoch in range(max_epochs):
-                        for xb, yb in train_loader:
-                            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-
-                            logits1 = model(xb)
-                            loss_ce = lossfn_ce(logits1, yb)
-
-                            noise = torch.randn_like(xb) * 0.01
-                            xb_noisy = xb + noise
-                            logits2 = model(xb_noisy)
-                            probs1 = torch.softmax(logits1, dim=1)
-                            probs2 = torch.softmax(logits2, dim=1)
-                            loss_consistency = consistency_loss_fn(probs1, probs2)
-
-                            loss = loss_ce + 0.1 * loss_consistency
-
-                            if torch.isfinite(loss):
-                                optimizer.zero_grad()
-                                loss.backward()
-                                optimizer.step()
-
-                    # ✅ validation accuracy 평가 및 meta 저장
-                    model.eval()
-                    with torch.no_grad():
-                        val_logits = model(torch.tensor(X_val, dtype=torch.float32).to(DEVICE))
-                        val_preds = torch.argmax(val_logits, dim=1).cpu().numpy()
-                        val_acc = (val_preds == y_val).mean()
-                        print(f"[📈 validation accuracy] {symbol}-{strategy}-{model_type} acc={val_acc:.4f}")
-
-                    meta = {
-                        "symbol": symbol, "strategy": strategy, "model": model_type,
-                        "group_id": group_id, "window": window,
-                        "input_size": input_size,
-                        "val_accuracy": float(round(val_acc, 4)),
-                        "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
-                    }
-                    meta_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.meta.json"
-                    with open(meta_path, "w", encoding="utf-8") as f:
-                        json.dump(meta, f, indent=2, ensure_ascii=False)
-
-                    model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.pt"
-                    torch.save(model.state_dict(), model_path)
-
-                    print(f"[✅ 저장 완료] {model_type} group-{group_id} window-{window}")
-
-                    del model, xb, yb, logits1, logits2
-                    torch.cuda.empty_cache()
-                    gc.collect()
-
-    except Exception as e:
-        print(f"[ERROR] {symbol}-{strategy}: {e}")
+                    # ✅ SMOTE-like oversampling (flatten + synthesize + reshape)
+                    try:
+                        flat_X = X_train_group.reshape(X_train_group.shape[0], -1)
+                        sm = SMOTE()
+                        flat_X_res, y_res = sm.fit_resample(flat_X, y_train_group)
+                        X_train_group = flat_X_res.reshape(flat_X_res.shape[0], X_train_group.shape[1], X_train_group.shape[2])
+                        y_train_group = y_res
+                        print(f"[info] SMOTE o
 
 
 def balance_classes(X, y, min_count=20, num_classes=21):
