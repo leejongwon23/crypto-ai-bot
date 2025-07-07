@@ -172,25 +172,26 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
         from config import NUM_CLASSES
         output_size = NUM_CLASSES
 
-    # ✅ features가 제공되면 input_size를 features.shape[2]로 자동 지정
+    # ✅ input_size 동적 지정 (features → input_size) 우선
     if input_size is None:
         if features is not None:
             input_size = features.shape[2]
             print(f"[info] input_size 자동설정(features): {input_size}")
         else:
-            # ✅ compute_features() 호출 시 df 포함하도록 변경
+            # ✅ sample_df 로 fallback input_size 지정
             try:
                 sample_df_df = get_kline_by_strategy("BTCUSDT", "단기")
                 if sample_df_df is not None and not sample_df_df.empty:
                     sample_df = compute_features("BTCUSDT", sample_df_df, "단기")
-                    input_size = sample_df.drop(columns=["timestamp", "strategy"], errors="ignore").shape[1]
+                    feature_cols = [c for c in sample_df.columns if c not in ["timestamp", "strategy"]]
+                    input_size = len(feature_cols)
                     print(f"[info] input_size auto-calculated from compute_features: {input_size}")
                 else:
-                    input_size = 11  # fallback 기본값
-                    print(f"[⚠️ input_size fallback=11] get_kline_by_strategy 반환 None 또는 empty")
+                    input_size = 21  # ✅ 수정: fallback 기본값을 모델 NUM_CLASSES=21로 통일
+                    print(f"[⚠️ input_size fallback=21] get_kline_by_strategy 반환 None 또는 empty")
             except Exception as e:
-                input_size = 11  # fallback 기본값
-                print(f"[⚠️ input_size fallback=11] compute_features 예외 발생: {e}")
+                input_size = 21  # ✅ 수정: fallback 기본값을 모델 NUM_CLASSES=21로 통일
+                print(f"[⚠️ input_size fallback=21] compute_features 예외 발생: {e}")
 
     try:
         model = model_cls(input_size=input_size, output_size=output_size)
@@ -204,6 +205,7 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
             raise e2
 
     return model
+
 
 
 
