@@ -220,21 +220,22 @@ def get_kline_by_strategy(symbol: str, strategy: str):
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
     required_cols = ["open", "high", "low", "close", "volume", "timestamp"]
-    if any(col not in df.columns for col in required_cols):
-        print(f"[⚠️ 경고] {symbol}-{strategy}: 필수 컬럼 누락")
-        failed_result(symbol, strategy, reason="필수컬럼누락")
-        return pd.DataFrame(columns=required_cols)
+    for col in required_cols:
+        if col not in df.columns:
+            print(f"[⚠️ 경고] {symbol}-{strategy}: 필수 컬럼 '{col}' 누락 → 0.0으로 채움")
+            df[col] = 0.0 if col != "timestamp" else pd.Timestamp.now()
+
+    df = df[required_cols]
 
     if len(df) < 5:
         print(f"[⚠️ 경고] {symbol}-{strategy}: 데이터 row 부족 ({len(df)} rows)")
         failed_result(symbol, strategy, reason="row 부족")
-        return pd.DataFrame(columns=required_cols)
+        return df  # ✅ 부족해도 기본값 포함된 df 반환
 
     print(f"[✅ 성공] {symbol}-{strategy}: 데이터 {len(df)}개 확보")
     _kline_cache[cache_key] = df
     _kline_cache_ttl[cache_key] = now  # ✅ TTL timestamp 저장
     return df
-
 
 # ✅ SYMBOL_GROUPS batch prefetch 함수 추가
 
