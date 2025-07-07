@@ -61,7 +61,6 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     X, y = [], []
 
-    # ✅ 데이터 부족 시 기본 패딩 샘플 반환
     if not features or len(features) <= window:
         print(f"[⚠️ 부족] features length={len(features) if features else 0}, window={window}")
         dummy_X = np.zeros((1, window, input_size if input_size else 11), dtype=np.float32)
@@ -113,7 +112,6 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
             gain = gain if np.isfinite(gain) else 0.0
 
-            # ✅ 클래스 범위 계산 간소화
             class_ranges = [(-1.0 + 0.1*i, -0.9 + 0.1*i) for i in range(NUM_CLASSES)]
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), NUM_CLASSES-1)
 
@@ -134,22 +132,22 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             print(f"[예외] {e} → i={i}")
             continue
 
-    # ✅ 샘플 없으면 더미 반환
     if not y:
         print("[⚠️ 생성된 샘플 없음 → 더미 반환]")
         dummy_X = np.zeros((1, window, input_size if input_size else 11), dtype=np.float32)
         dummy_y = np.array([0], dtype=np.int64)
         return dummy_X, dummy_y
 
-    # ✅ 최소 샘플 확보
     min_samples = 10
     while len(y) < min_samples:
         idx = random.randint(0, len(y)-1)
         X.append(X[idx])
         y.append(y[idx])
 
+    X = np.array(X, dtype=np.float32)
     y = np.array(y, dtype=np.int64)
-    return np.array(X, dtype=np.float32), y
+
+    return X, y
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
 _kline_cache = {}
