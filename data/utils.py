@@ -89,11 +89,11 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     features = df_scaled.to_dict(orient="records")
 
-    # ✅ STEP1: 동적 class_ranges 계산
+    # ✅ STEP3: 동적 class_ranges 계산 + float 변환
     try:
         log_df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
         gains = log_df["return"].dropna().values
-        gains = gains[np.isfinite(gains)].astype(float)  # ⬅️ float 변환 추가
+        gains = gains[np.isfinite(gains)].astype(float)
         percentiles = np.percentile(gains, np.linspace(0, 100, NUM_CLASSES+1))
         class_ranges = list(zip(percentiles[:-1], percentiles[1:]))
     except Exception as e:
@@ -128,12 +128,12 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
                 continue
 
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
-            gain = float((max_future_price - entry_price) / (entry_price + 1e-6))  # ⬅️ float 변환 추가
+            gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
             if pd.isnull(gain) or not np.isfinite(gain):
                 gain = 0.0
 
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), NUM_CLASSES-1)
-            cls = int(cls)  # ⬅️ 라벨 int 변환 추가
+            cls = int(cls)
 
             # ✅ STEP2: 라벨 보정
             if cls >= NUM_CLASSES:
@@ -166,7 +166,6 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         print(f"[📊 클래스 분포] → {dict(zip(labels, counts))}")
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
-
 
 
 def get_kline_by_strategy(symbol: str, strategy: str):
