@@ -55,6 +55,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
     from sklearn.preprocessing import MinMaxScaler
+    from config import NUM_CLASSES
 
     X, y = [], []
 
@@ -88,17 +89,12 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     features = df_scaled.to_dict(orient="records")
 
-    # ✅ [추가] NUM_CLASSES 범위 점검 print
-    from config import NUM_CLASSES
-    print(f"[DEBUG] NUM_CLASSES: {NUM_CLASSES}")
-
-    # ✅ [수정] 동적 class_ranges 계산
+    # ✅ 동적 class_ranges 계산
     try:
-        import pandas as pd
         log_df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
         gains = log_df["return"].dropna().values
         gains = gains[np.isfinite(gains)]
-        percentiles = np.percentile(gains, np.linspace(0, 100, 22))
+        percentiles = np.percentile(gains, np.linspace(0, 100, NUM_CLASSES+1))
         class_ranges = list(zip(percentiles[:-1], percentiles[1:]))
     except Exception as e:
         print(f"[⚠️ class_ranges 동적 계산 실패 → 기본값 사용] {e}")
@@ -136,10 +132,16 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             if pd.isnull(gain) or not np.isfinite(gain):
                 gain = 0.0
 
-            cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), -1)
+            cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), NUM_CLASSES-1)
+
+            # ✅ STEP2: 라벨 보정
+            if cls >= NUM_CLASSES:
+                print(f"[⚠️ STEP2 라벨 보정] cls {cls} → NUM_CLASSES-1 {NUM_CLASSES-1}")
+                cls = NUM_CLASSES - 1
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
 
+            # ✅ STEP1: input_size 호환 패딩/트렁케이트
             if input_size:
                 for j in range(len(sample)):
                     row = sample[j]
@@ -163,11 +165,8 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         labels, counts = np.unique(y, return_counts=True)
         print(f"[📊 클래스 분포] → {dict(zip(labels, counts))}")
 
-        # ✅ [추가] 클래스 범위 점검 print
-        if max(labels) >= NUM_CLASSES:
-            print(f"[❌ 경고] 라벨 최대값 {max(labels)} >= NUM_CLASSES {NUM_CLASSES}")
-
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
+
 
 
 def get_kline_by_strategy(symbol: str, strategy: str):
