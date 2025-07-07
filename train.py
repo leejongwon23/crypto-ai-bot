@@ -109,9 +109,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
             return
 
         window_list = find_best_windows(symbol, strategy)
-        # ✅ input_size 정확 설정: timestamp 제외 후 column 개수
-        features_only = df_feat.drop(columns=["timestamp"], errors="ignore")
+
+        features_only = df_feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         input_size = features_only.shape[1]
+
+        print(f"[info] train_one_model input_size: {input_size}")
 
         class_groups = get_class_groups()
 
@@ -143,6 +145,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         continue
 
                     y_train_group = np.array([group_classes.index(y) for y in y_train_group])
+
+                    # ✅ get_model 호출 시 input_size 지정 일관화
                     model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
                     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
@@ -197,6 +201,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
+
 
 
 def balance_classes(X, y, min_count=20):
