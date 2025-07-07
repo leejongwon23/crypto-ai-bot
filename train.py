@@ -91,16 +91,21 @@ def get_class_groups(num_classes=21, group_size=7):
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
 def train_one_model(symbol, strategy, max_epochs=20):
-    import os, gc
+    import os, gc, torch, random, numpy as np
+    from torch.utils.data import TensorDataset, DataLoader
+    from collections import Counter
     from focal_loss import FocalLoss
     from ssl_pretrain import masked_reconstruction
     from window_optimizer import find_best_windows
     from config import FEATURE_INPUT_SIZE
-    from collections import Counter
-    import torch
-    from torch.utils.data import TensorDataset, DataLoader
-    import numpy as np
-    import random
+    from data.utils import get_kline_by_strategy, compute_features
+    from model.base_model import get_model
+    from failure_db import insert_failure_record
+    from logger import now_kst
+    import json
+
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    MODEL_DIR = "/persistent/models"
 
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
@@ -156,7 +161,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         print(f"[⚠️ 스킵] window={window} group-{group_id}: 학습 데이터 부족 ({len(y_train_group)}) → 전체 모델 스킵")
                         continue
 
-                    for model_type in ["lstm", "cnn_lstm", "transformer"]:
+                    for model_type in ["lstm"]:
                         target_count = 50
                         repeat_factor = max(1, int(np.ceil(target_count / len(y_train_group))))
                         X_aug = []
@@ -164,32 +169,23 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         for _ in range(repeat_factor):
                             noise = np.random.normal(0, 0.01, X_train_group.shape)
                             X_noise = X_train_group + noise
-
                             indices = np.random.permutation(len(X_train_group))
                             lam = np.random.beta(0.2, 0.2)
                             X_mix = lam * X_train_group + (1 - lam) * X_train_group[indices]
-
                             X_mask = X_train_group.copy()
                             time_dim = X_mask.shape[1]
                             for xm in X_mask:
                                 t = random.randint(0, time_dim - 1)
                                 xm[t] = 0
-
                             X_aug.extend([X_noise, X_mix, X_mask])
 
                         X_train_group = np.vstack(X_aug)[:target_count]
                         y_train_group = np.tile(y_train_group, repeat_factor*3)[:target_count]
-                        print(f"[info] Augmentations applied: {len(y_train_group)} samples after multi-augment {repeat_factor}x")
 
                         y_encoded = []
                         for y in y_train_group:
                             if y in group_classes:
                                 y_encoded.append(group_classes.index(y))
-                            else:
-                                print(f"[⚠️ 경고] 라벨 {y} 이 group_classes에 없음 → 스킵")
-                        if not y_encoded:
-                            print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 유효 라벨 없음")
-                            continue
                         y_train_group = np.array(y_encoded)
 
                         counts_group = Counter(y_train_group)
@@ -198,10 +194,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         class_weight_tensor = torch.tensor(class_weight_group, dtype=torch.float32).to(DEVICE)
 
                         output_size = len(group_classes)
-                        if class_weight_tensor.shape[0] != output_size:
-                            print(f"[❌ 오류] class_weight_tensor shape {class_weight_tensor.shape} != output_size {output_size}")
-                            continue
-
                         model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
                         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
                         lossfn_ce = torch.nn.CrossEntropyLoss(weight=class_weight_tensor)
@@ -226,7 +218,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                         model.eval()
                         with torch.no_grad():
-                            # ✅ 수정: 시퀀스 전체 입력 사용
                             val_logits = model(torch.tensor(X_val, dtype=torch.float32).to(DEVICE))
                             val_preds = torch.argmax(val_logits, dim=1).cpu().numpy()
                             val_acc = (val_preds == y_val).mean()
