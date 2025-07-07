@@ -101,6 +101,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from imblearn.over_sampling import SMOTE
     import numpy as np
     import random
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
@@ -131,139 +132,144 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
         class_groups = get_class_groups()
 
-        for window in window_list:
-            X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
-            if X_raw is None or y_raw is None or len(X_raw) < 5:
-                print(f"⛔ 중단: window={window} 학습 데이터 부족")
-                continue
+        # ✅ 다중윈도우 병렬 실행 함수 정의
+        def train_window(window):
+            try:
+                X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
+                if X_raw is None or y_raw is None or len(X_raw) < 5:
+                    print(f"⛔ 중단: window={window} 학습 데이터 부족")
+                    return
 
-            if X_raw.shape[2] != input_size:
-                print(f"[❌ 오류] feature input_size 불일치: X_raw.shape[2]={X_raw.shape[2]} vs input_size={input_size}")
-                continue
+                if X_raw.shape[2] != input_size:
+                    print(f"[❌ 오류] feature input_size 불일치: X_raw.shape[2]={X_raw.shape[2]} vs input_size={input_size}")
+                    return
 
-            val_len = max(5, int(len(X_raw) * 0.2))
-            sorted_idx = np.argsort(y_raw)
-            X_raw, y_raw = X_raw[sorted_idx], y_raw[sorted_idx]
-            X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
+                val_len = max(5, int(len(X_raw) * 0.2))
+                sorted_idx = np.argsort(y_raw)
+                X_raw, y_raw = X_raw[sorted_idx], y_raw[sorted_idx]
+                X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
 
-            for group_id, group_classes in enumerate(class_groups):
-                for model_type in ["lstm", "cnn_lstm", "transformer"]:
-                    group_mask = np.isin(y_train, group_classes)
-                    X_train_group = X_train[group_mask]
-                    y_train_group = y_train[group_mask]
+                for group_id, group_classes in enumerate(class_groups):
+                    for model_type in ["lstm", "cnn_lstm", "transformer"]:
+                        group_mask = np.isin(y_train, group_classes)
+                        X_train_group = X_train[group_mask]
+                        y_train_group = y_train[group_mask]
 
-                    if len(y_train_group) < 2:
-                        print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 학습 데이터 부족 ({len(y_train_group)})")
-                        continue
+                        if len(y_train_group) < 2:
+                            print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 학습 데이터 부족 ({len(y_train_group)})")
+                            continue
 
-                    # ✅ 희소 클래스 복제 강화 (Noise + Mixup + Time Masking + GAN-sim + SMOTE)
-                    target_count = 50
-                    repeat_factor = int(np.ceil(target_count / len(y_train_group)))
-                    X_aug = []
+                        # ✅ 기존 augmentation 루프 (Noise + Mixup + Time Masking + GAN-sim + SMOTE) 그대로 유지
+                        target_count = 50
+                        repeat_factor = int(np.ceil(target_count / len(y_train_group)))
+                        X_aug = []
 
-                    for _ in range(repeat_factor):
-                        # Noise
-                        noise = np.random.normal(0, 0.01, X_train_group.shape)
-                        X_noise = X_train_group + noise
+                        for _ in range(repeat_factor):
+                            noise = np.random.normal(0, 0.01, X_train_group.shape)
+                            X_noise = X_train_group + noise
 
-                        # Mixup
-                        indices = np.random.permutation(len(X_train_group))
-                        lam = np.random.beta(0.2, 0.2)
-                        X_mix = lam * X_train_group + (1 - lam) * X_train_group[indices]
+                            indices = np.random.permutation(len(X_train_group))
+                            lam = np.random.beta(0.2, 0.2)
+                            X_mix = lam * X_train_group + (1 - lam) * X_train_group[indices]
 
-                        # Time Masking
-                        X_mask = X_train_group.copy()
-                        time_dim = X_mask.shape[1]
-                        for xm in X_mask:
-                            t = random.randint(0, time_dim - 1)
-                            xm[t] = 0
+                            X_mask = X_train_group.copy()
+                            time_dim = X_mask.shape[1]
+                            for xm in X_mask:
+                                t = random.randint(0, time_dim - 1)
+                                xm[t] = 0
 
-                        # Combine augmentations
-                        X_aug.extend([X_noise, X_mix, X_mask])
+                            X_aug.extend([X_noise, X_mix, X_mask])
 
-                    X_train_group = np.vstack(X_aug)[:target_count]
-                    y_train_group = np.tile(y_train_group, repeat_factor*3)[:target_count]
-                    print(f"[info] Augmentations applied: {len(y_train_group)} samples after multi-augment {repeat_factor}x")
+                        X_train_group = np.vstack(X_aug)[:target_count]
+                        y_train_group = np.tile(y_train_group, repeat_factor*3)[:target_count]
+                        print(f"[info] Augmentations applied: {len(y_train_group)} samples after multi-augment {repeat_factor}x")
 
-                    # ✅ SMOTE-like oversampling
-                    try:
-                        flat_X = X_train_group.reshape(X_train_group.shape[0], -1)
-                        sm = SMOTE()
-                        flat_X_res, y_res = sm.fit_resample(flat_X, y_train_group)
-                        X_train_group = flat_X_res.reshape(flat_X_res.shape[0], X_train_group.shape[1], X_train_group.shape[2])
-                        y_train_group = y_res
-                        print(f"[info] SMOTE oversampling applied: {X_train_group.shape[0]} samples")
-                    except Exception as e:
-                        print(f"[⚠️ SMOTE 실패] {e}")
+                        try:
+                            flat_X = X_train_group.reshape(X_train_group.shape[0], -1)
+                            sm = SMOTE()
+                            flat_X_res, y_res = sm.fit_resample(flat_X, y_train_group)
+                            X_train_group = flat_X_res.reshape(flat_X_res.shape[0], X_train_group.shape[1], X_train_group.shape[2])
+                            y_train_group = y_res
+                            print(f"[info] SMOTE oversampling applied: {X_train_group.shape[0]} samples")
+                        except Exception as e:
+                            print(f"[⚠️ SMOTE 실패] {e}")
 
-                    # ✅ 라벨 인코딩 보정
-                    y_encoded = []
-                    for y in y_train_group:
-                        if y in group_classes:
-                            y_encoded.append(group_classes.index(y))
-                        else:
-                            print(f"[⚠️ 경고] 라벨 {y} 이 group_classes에 없음 → 스킵")
-                    if not y_encoded:
-                        print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 유효 라벨 없음")
-                        continue
-                    y_train_group = np.array(y_encoded)
+                        # ✅ 라벨 인코딩 보정
+                        y_encoded = []
+                        for y in y_train_group:
+                            if y in group_classes:
+                                y_encoded.append(group_classes.index(y))
+                            else:
+                                print(f"[⚠️ 경고] 라벨 {y} 이 group_classes에 없음 → 스킵")
+                        if not y_encoded:
+                            print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 유효 라벨 없음")
+                            continue
+                        y_train_group = np.array(y_encoded)
 
-                    counts_group = Counter(y_train_group)
-                    total_group = sum(counts_group.values())
-                    class_weight_group = [total_group / counts_group.get(i, 1) for i in range(len(group_classes))]
-                    class_weight_tensor = torch.tensor(class_weight_group, dtype=torch.float32).to(DEVICE)
+                        counts_group = Counter(y_train_group)
+                        total_group = sum(counts_group.values())
+                        class_weight_group = [total_group / counts_group.get(i, 1) for i in range(len(group_classes))]
+                        class_weight_tensor = torch.tensor(class_weight_group, dtype=torch.float32).to(DEVICE)
 
-                    output_size = len(group_classes)
-                    if class_weight_tensor.shape[0] != output_size:
-                        print(f"[❌ 오류] class_weight_tensor shape {class_weight_tensor.shape} != output_size {output_size}")
-                        continue
+                        output_size = len(group_classes)
+                        if class_weight_tensor.shape[0] != output_size:
+                            print(f"[❌ 오류] class_weight_tensor shape {class_weight_tensor.shape} != output_size {output_size}")
+                            continue
 
-                    model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
-                    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-                    lossfn_ce = torch.nn.CrossEntropyLoss(weight=class_weight_tensor)
+                        model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
+                        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+                        lossfn_ce = torch.nn.CrossEntropyLoss(weight=class_weight_tensor)
 
-                    train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32),
-                                             torch.tensor(y_train_group, dtype=torch.long))
-                    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
+                        train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32),
+                                                 torch.tensor(y_train_group, dtype=torch.long))
+                        train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
 
-                    for epoch in range(max_epochs):
-                        for xb, yb in train_loader:
-                            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                            logits = model(xb)
-                            loss = lossfn_ce(logits, yb)
+                        for epoch in range(max_epochs):
+                            for xb, yb in train_loader:
+                                xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                                logits = model(xb)
+                                loss = lossfn_ce(logits, yb)
 
-                            if torch.isfinite(loss):
-                                optimizer.zero_grad()
-                                loss.backward()
-                                optimizer.step()
+                                if torch.isfinite(loss):
+                                    optimizer.zero_grad()
+                                    loss.backward()
+                                    optimizer.step()
 
-                    # ✅ validation accuracy 평가 및 meta 저장
-                    model.eval()
-                    with torch.no_grad():
-                        val_logits = model(torch.tensor(X_val, dtype=torch.float32).to(DEVICE))
-                        val_preds = torch.argmax(val_logits, dim=1).cpu().numpy()
-                        val_acc = (val_preds == y_val).mean()
-                        print(f"[📈 validation accuracy] {symbol}-{strategy}-{model_type} acc={val_acc:.4f}")
+                        model.eval()
+                        with torch.no_grad():
+                            val_logits = model(torch.tensor(X_val, dtype=torch.float32).to(DEVICE))
+                            val_preds = torch.argmax(val_logits, dim=1).cpu().numpy()
+                            val_acc = (val_preds == y_val).mean()
+                            print(f"[📈 validation accuracy] {symbol}-{strategy}-{model_type} acc={val_acc:.4f}")
 
-                    meta = {
-                        "symbol": symbol, "strategy": strategy, "model": model_type,
-                        "group_id": group_id, "window": window,
-                        "input_size": input_size,
-                        "val_accuracy": float(round(val_acc, 4)),
-                        "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
-                    }
-                    meta_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.meta.json"
-                    with open(meta_path, "w", encoding="utf-8") as f:
-                        json.dump(meta, f, indent=2, ensure_ascii=False)
+                        meta = {
+                            "symbol": symbol, "strategy": strategy, "model": model_type,
+                            "group_id": group_id, "window": window,
+                            "input_size": input_size,
+                            "val_accuracy": float(round(val_acc, 4)),
+                            "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        meta_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.meta.json"
+                        with open(meta_path, "w", encoding="utf-8") as f:
+                            json.dump(meta, f, indent=2, ensure_ascii=False)
 
-                    model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.pt"
-                    torch.save(model.state_dict(), model_path)
+                        model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.pt"
+                        torch.save(model.state_dict(), model_path)
 
-                    print(f"[✅ 저장 완료] {model_type} group-{group_id} window-{window}")
+                        print(f"[✅ 저장 완료] {model_type} group-{group_id} window-{window}")
 
-                    del model, xb, yb, logits
-                    torch.cuda.empty_cache()
-                    gc.collect()
+                        del model, xb, yb, logits
+                        torch.cuda.empty_cache()
+                        gc.collect()
+
+            except Exception as e:
+                print(f"[ERROR] window={window}: {e}")
+
+        # ✅ ThreadPoolExecutor 병렬 실행
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(train_window, window) for window in window_list]
+            for future in as_completed(futures):
+                future.result()
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
