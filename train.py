@@ -98,7 +98,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from collections import Counter
     import torch
     from torch.utils.data import TensorDataset, DataLoader
-    from imblearn.over_sampling import SMOTE
     import numpy as np
     import random
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -132,7 +131,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
         class_groups = get_class_groups()
 
-        # ✅ 다중윈도우 병렬 실행 함수 정의
         def train_window(window):
             try:
                 X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
@@ -159,7 +157,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                             print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 학습 데이터 부족 ({len(y_train_group)})")
                             continue
 
-                        # ✅ 기존 augmentation 루프 (Noise + Mixup + Time Masking + GAN-sim + SMOTE) 그대로 유지
+                        # ✅ 기존 augmentation 루프 (Noise + Mixup + Time Masking + GAN-sim)
                         target_count = 50
                         repeat_factor = int(np.ceil(target_count / len(y_train_group)))
                         X_aug = []
@@ -183,16 +181,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         X_train_group = np.vstack(X_aug)[:target_count]
                         y_train_group = np.tile(y_train_group, repeat_factor*3)[:target_count]
                         print(f"[info] Augmentations applied: {len(y_train_group)} samples after multi-augment {repeat_factor}x")
-
-                        try:
-                            flat_X = X_train_group.reshape(X_train_group.shape[0], -1)
-                            sm = SMOTE()
-                            flat_X_res, y_res = sm.fit_resample(flat_X, y_train_group)
-                            X_train_group = flat_X_res.reshape(flat_X_res.shape[0], X_train_group.shape[1], X_train_group.shape[2])
-                            y_train_group = y_res
-                            print(f"[info] SMOTE oversampling applied: {X_train_group.shape[0]} samples")
-                        except Exception as e:
-                            print(f"[⚠️ SMOTE 실패] {e}")
 
                         # ✅ 라벨 인코딩 보정
                         y_encoded = []
@@ -265,7 +253,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             except Exception as e:
                 print(f"[ERROR] window={window}: {e}")
 
-        # ✅ ThreadPoolExecutor 병렬 실행
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = [executor.submit(train_window, window) for window in window_list]
             for future in as_completed(futures):
@@ -273,7 +260,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
-
 
 
 def balance_classes(X, y, min_count=20, num_classes=21):
