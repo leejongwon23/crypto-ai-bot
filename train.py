@@ -152,7 +152,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                     y_train_group = np.array([group_classes.index(y) for y in y_train_group])
 
-                    # ✅ STEP2: class_weight_tensor 보정 (group_classes 길이에 맞게)
                     counts_group = Counter(y_train_group)
                     total_group = sum(counts_group.values())
                     class_weight_group = [total_group / counts_group.get(i, 1) for i in range(len(group_classes))]
@@ -162,7 +161,13 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
                     lossfn_ce = torch.nn.CrossEntropyLoss(weight=class_weight_tensor)
+
+                    # ✅ STEP4: consistency_loss_fn shape 검증 추가
                     def consistency_loss_fn(p1, p2):
+                        if p1.shape != p2.shape:
+                            min_dim = min(p1.shape[1], p2.shape[1])
+                            p1 = p1[:, :min_dim]
+                            p2 = p2[:, :min_dim]
                         return torch.mean((p1 - p2) ** 2)
 
                     train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32),
