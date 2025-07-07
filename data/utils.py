@@ -88,6 +88,10 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     features = df_scaled.to_dict(orient="records")
 
+    # ✅ [추가] NUM_CLASSES 범위 점검 print
+    from config import NUM_CLASSES
+    print(f"[DEBUG] NUM_CLASSES: {NUM_CLASSES}")
+
     # ✅ [수정] 동적 class_ranges 계산
     try:
         import pandas as pd
@@ -159,7 +163,12 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         labels, counts = np.unique(y, return_counts=True)
         print(f"[📊 클래스 분포] → {dict(zip(labels, counts))}")
 
+        # ✅ [추가] 클래스 범위 점검 print
+        if max(labels) >= NUM_CLASSES:
+            print(f"[❌ 경고] 라벨 최대값 {max(labels)} >= NUM_CLASSES {NUM_CLASSES}")
+
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
+
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
