@@ -206,9 +206,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
                         lossfn_ce = torch.nn.CrossEntropyLoss(weight=class_weight_tensor)
 
-                        # ✅ train_ds 입력 (시퀀스 전체 사용)
                         train_ds = TensorDataset(
-                            torch.tensor(X_train_group, dtype=torch.float32),
+                            torch.tensor(X_train_group[:, -1, :], dtype=torch.float32),  # ✅ 마지막 timestep만 사용
                             torch.tensor(y_train_group, dtype=torch.long)
                         )
                         train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=0)
@@ -226,8 +225,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                         model.eval()
                         with torch.no_grad():
-                            # ✅ 검증 입력 (시퀀스 전체 사용)
-                            val_logits = model(torch.tensor(X_val, dtype=torch.float32).to(DEVICE))
+                            val_logits = model(torch.tensor(X_val[:, -1, :], dtype=torch.float32).to(DEVICE))  # ✅ 마지막 timestep만 사용
                             val_preds = torch.argmax(val_logits, dim=1).cpu().numpy()
                             val_acc = (val_preds == y_val).mean()
                             print(f"[📈 validation accuracy] {symbol}-{strategy}-{model_type} acc={val_acc:.4f}")
