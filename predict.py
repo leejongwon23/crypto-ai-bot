@@ -30,6 +30,12 @@ def class_to_expected_return(cls, recent_days=3):
 
     try:
         df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
+
+        # ✅ predicted_class 컬럼 존재 여부 확인
+        if "predicted_class" not in df.columns:
+            print("[❌ 오류] prediction_log.csv에 predicted_class 컬럼이 없습니다.")
+            return -0.01  # ✅ 컬럼 없으면 fallback 기본값 반환
+
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         cutoff = pd.Timestamp.now() - pd.Timedelta(days=recent_days)
         df = df[df["timestamp"] >= cutoff]
@@ -63,6 +69,7 @@ def class_to_expected_return(cls, recent_days=3):
         if 0 <= cls < len(centers_default):
             return centers_default[cls]
         return centers_default[0]
+
 
 # ✅ 수정 요약:
 # - failed_result(): label=-1 기본 포함
