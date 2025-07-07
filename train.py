@@ -100,7 +100,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from torch.utils.data import TensorDataset, DataLoader
     import numpy as np
     import random
-    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
@@ -131,16 +130,16 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
         class_groups = get_class_groups()
 
-        def train_window(window):
+        for window in window_list:
             try:
                 X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
                 if X_raw is None or y_raw is None or len(X_raw) < 5:
                     print(f"⛔ 중단: window={window} 학습 데이터 부족")
-                    return
+                    continue
 
                 if X_raw.shape[2] != input_size:
                     print(f"[❌ 오류] feature input_size 불일치: X_raw.shape[2]={X_raw.shape[2]} vs input_size={input_size}")
-                    return
+                    continue
 
                 val_len = max(5, int(len(X_raw) * 0.2))
                 sorted_idx = np.argsort(y_raw)
@@ -157,9 +156,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
                             print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 학습 데이터 부족 ({len(y_train_group)})")
                             continue
 
-                        # ✅ 기존 augmentation 루프 (Noise + Mixup + Time Masking + GAN-sim)
+                        # ✅ augmentation 반복수 검증
                         target_count = 50
-                        repeat_factor = int(np.ceil(target_count / len(y_train_group)))
+                        repeat_factor = max(1, int(np.ceil(target_count / len(y_train_group))))
                         X_aug = []
 
                         for _ in range(repeat_factor):
@@ -210,7 +209,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                         train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32),
                                                  torch.tensor(y_train_group, dtype=torch.long))
-                        train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
+                        train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=0)  # ✅ CPU환경 num_workers=0
 
                         for epoch in range(max_epochs):
                             for xb, yb in train_loader:
@@ -252,11 +251,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
             except Exception as e:
                 print(f"[ERROR] window={window}: {e}")
-
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [executor.submit(train_window, window) for window in window_list]
-            for future in as_completed(futures):
-                future.result()
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
