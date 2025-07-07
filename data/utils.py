@@ -163,6 +163,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
+    import os
 
     global _kline_cache
     cache_key = f"{symbol}-{strategy}"
@@ -180,6 +181,17 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     if df is None or not isinstance(df, pd.DataFrame):
         print(f"[❌ 실패] {symbol}-{strategy}: get_kline() → None 반환 또는 형식 오류")
         failed_result(symbol, strategy, reason="get_kline 반환 오류")
+
+        # ✅ 수정 추가: API 미수신 심볼 목록 로깅
+        try:
+            log_path = "/persistent/logs/api_missing_symbols.txt"
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"{symbol}-{strategy}\n")
+            print(f"[📄 기록] API 미수신 심볼 → {symbol}-{strategy} 기록됨")
+        except Exception as e:
+            print(f"[⚠️ 로깅 실패] API 미수신 심볼 기록 실패: {e}")
+
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
     required_cols = ["open", "high", "low", "close", "volume", "timestamp"]
@@ -189,24 +201,23 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     if missing:
         print(f"[⚠️ 경고] {symbol}-{strategy}: 필수 컬럼 누락 → {missing}")
         failed_result(symbol, strategy, reason=f"필수컬럼누락:{missing}")
-        # ✅ 수정: 중단하지 않고 빈 DataFrame 반환
         return pd.DataFrame(columns=required_cols)
 
     if nan_cols:
         print(f"[⚠️ 경고] {symbol}-{strategy}: NaN 존재 → {nan_cols}")
         failed_result(symbol, strategy, reason=f"NaN존재:{nan_cols}")
-        # ✅ 수정: 중단하지 않고 빈 DataFrame 반환
         return pd.DataFrame(columns=required_cols)
 
     if len(df) < 5:
         print(f"[⚠️ 경고] {symbol}-{strategy}: 데이터 row 부족 ({len(df)} rows)")
         failed_result(symbol, strategy, reason="row 부족")
-        # ✅ 수정: 중단하지 않고 빈 DataFrame 반환
         return pd.DataFrame(columns=required_cols)
 
     print(f"[✅ 성공] {symbol}-{strategy}: 데이터 {len(df)}개 확보")
     _kline_cache[cache_key] = df
     return df
+
+
 
 def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 3) -> pd.DataFrame:
     import time
