@@ -102,6 +102,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
     import numpy as np
     import random
 
+    DEVICE = torch.device("cpu")
+    MODEL_DIR = "/persistent/models"
+    now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
     try:
@@ -179,17 +183,17 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                         X_train_group = np.vstack(X_aug)[:target_count]
                         y_train_group = np.tile(y_train_group, repeat_factor*3)[:target_count]
-                        print(f"[info] Augmentations applied: {len(y_train_group)} samples after multi-augment {repeat_factor}x")
 
-                        y_encoded = []
-                        for y in y_train_group:
-                            if y in group_classes:
-                                y_encoded.append(group_classes.index(y))
-                            else:
-                                print(f"[⚠️ 경고] 라벨 {y} 이 group_classes에 없음 → 스킵")
-                        if not y_encoded:
-                            print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 유효 라벨 없음")
+                        # ✅ tile 후 유효 라벨만 유지 (핵심 수정)
+                        valid_mask = np.isin(y_train_group, group_classes)
+                        X_train_group = X_train_group[valid_mask]
+                        y_train_group = y_train_group[valid_mask]
+
+                        if len(y_train_group) < 2:
+                            print(f"[⚠️ 스킵] window={window} group-{group_id}: tile 후 유효 학습 데이터 부족 ({len(y_train_group)})")
                             continue
+
+                        y_encoded = [group_classes.index(y) for y in y_train_group]
                         y_train_group = np.array(y_encoded)
 
                         counts_group = Counter(y_train_group)
@@ -206,7 +210,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
                         lossfn_ce = torch.nn.CrossEntropyLoss(weight=class_weight_tensor)
 
-                        # ✅ train_ds 입력 수정: 마지막 timestep만 사용
                         train_ds = TensorDataset(
                             torch.tensor(X_train_group[:, -1, :], dtype=torch.float32),
                             torch.tensor(y_train_group, dtype=torch.long)
@@ -226,7 +229,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                         model.eval()
                         with torch.no_grad():
-                            # ✅ 검증 입력 수정: 마지막 timestep만 사용
                             val_logits = model(torch.tensor(X_val[:, -1, :], dtype=torch.float32).to(DEVICE))
                             val_preds = torch.argmax(val_logits, dim=1).cpu().numpy()
                             val_acc = (val_preds == y_val).mean()
