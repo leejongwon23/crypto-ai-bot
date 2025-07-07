@@ -85,6 +85,7 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
 def get_class_groups(num_classes=21, group_size=5):
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
+
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     from focal_loss import FocalLoss
@@ -151,7 +152,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                     y_train_group = np.array([group_classes.index(y) for y in y_train_group])
 
-                    # ✅ group별 weight tensor 계산 수정
+                    # ✅ STEP2: class_weight_tensor 보정 (group_classes 길이에 맞게)
                     counts_group = Counter(y_train_group)
                     total_group = sum(counts_group.values())
                     class_weight_group = [total_group / counts_group.get(i, 1) for i in range(len(group_classes))]
