@@ -28,8 +28,8 @@ class LSTMPricePredictor(nn.Module):
         self.fc_logits = nn.Linear(hidden_size // 2, output_size)
 
     def forward(self, x):
-        lstm_out, _ = self.lstm(x)  # ✅ 시퀀스 전체를 LSTM에 통과
-        context, _ = self.attention(lstm_out)  # ✅ Attention 적용
+        lstm_out, _ = self.lstm(x)  # ✅ 시퀀스 전체 입력
+        context, _ = self.attention(lstm_out)
         context = self.norm(context)
         context = self.dropout(context)
         hidden = self.act(self.fc1(context))
@@ -136,7 +136,6 @@ class AutoEncoder(nn.Module):
         decoded = decoded.unsqueeze(1)
         return decoded
 
-
 MODEL_CLASSES = {
     "lstm": LSTMPricePredictor,
     "cnn_lstm": CNNLSTMPricePredictor,
@@ -148,7 +147,7 @@ MODEL_CLASSES = {
 
 def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_path=None, features=None):
     from data.utils import compute_features, get_kline_by_strategy
-    from config import FEATURE_INPUT_SIZE, NUM_CLASSES  # ✅ FEATURE_INPUT_SIZE, NUM_CLASSES 상수 import
+    from config import FEATURE_INPUT_SIZE, NUM_CLASSES
 
     if model_type == "xgboost":
         if model_path is None:
@@ -164,41 +163,14 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
     if output_size is None:
         output_size = NUM_CLASSES
 
-    # ✅ input_size 동적 지정
     if input_size is None:
         if features is not None:
             input_size = features.shape[2]
-            print(f"[info] input_size 자동설정(features): {input_size}")
         else:
-            try:
-                sample_df_df = get_kline_by_strategy("BTCUSDT", "단기")
-                if sample_df_df is not None and not sample_df_df.empty:
-                    sample_df = compute_features("BTCUSDT", sample_df_df, "단기")
-                    feature_cols = [c for c in sample_df.columns if c not in ["timestamp", "strategy"]]
-                    input_size = len(feature_cols)
-                    print(f"[info] input_size auto-calculated from compute_features: {input_size}")
-                else:
-                    input_size = FEATURE_INPUT_SIZE
-                    print(f"[⚠️ input_size fallback={FEATURE_INPUT_SIZE}] get_kline_by_strategy 반환 None 또는 empty")
-            except Exception as e:
-                input_size = FEATURE_INPUT_SIZE
-                print(f"[⚠️ input_size fallback={FEATURE_INPUT_SIZE}] compute_features 예외 발생: {e}")
+            sample_df_df = get_kline_by_strategy("BTCUSDT", "단기")
+            sample_df = compute_features("BTCUSDT", sample_df_df, "단기")
+            feature_cols = [c for c in sample_df.columns if c not in ["timestamp", "strategy"]]
+            input_size = len(feature_cols) if sample_df is not None else FEATURE_INPUT_SIZE
 
-    try:
-        model = model_cls(input_size=input_size, output_size=output_size)
-    except Exception as e:
-        print(f"[⚠️ get_model 예외] {e}")
-        print(f"[Fallback] input_size=14로 재시도")
-        try:
-            model = model_cls(input_size=14, output_size=output_size)
-        except Exception as e2:
-            print(f"[❌ get_model 실패] {e2}")
-            raise e2
-
+    model = model_cls(input_size=input_size, output_size=output_size)
     return model
-
-
-
-
-
-
