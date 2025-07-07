@@ -100,6 +100,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from torch.utils.data import TensorDataset, DataLoader
     from imblearn.over_sampling import SMOTE
     import numpy as np
+    import random
 
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
@@ -155,19 +156,36 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 학습 데이터 부족 ({len(y_train_group)})")
                         continue
 
-                    # ✅ 희소 클래스 복제 (GAN-simulated augmentation + SMOTE-like oversampling)
+                    # ✅ 희소 클래스 복제 강화 (Noise + Mixup + Time Masking + GAN-sim + SMOTE)
                     target_count = 50
-                    if len(y_train_group) < target_count:
-                        repeat_factor = int(np.ceil(target_count / len(y_train_group)))
-                        X_aug = []
-                        for _ in range(repeat_factor):
-                            noise = np.random.normal(0, 0.01, X_train_group.shape)
-                            X_aug.append(X_train_group + noise)
-                        X_train_group = np.vstack(X_aug)[:target_count]
-                        y_train_group = np.tile(y_train_group, repeat_factor)[:target_count]
-                        print(f"[info] GAN-sim augmentation + repeat: {len(y_train_group)} samples after repeat {repeat_factor}x")
+                    repeat_factor = int(np.ceil(target_count / len(y_train_group)))
+                    X_aug = []
 
-                    # ✅ SMOTE-like oversampling (flatten + synthesize + reshape)
+                    for _ in range(repeat_factor):
+                        # Noise
+                        noise = np.random.normal(0, 0.01, X_train_group.shape)
+                        X_noise = X_train_group + noise
+
+                        # Mixup
+                        indices = np.random.permutation(len(X_train_group))
+                        lam = np.random.beta(0.2, 0.2)
+                        X_mix = lam * X_train_group + (1 - lam) * X_train_group[indices]
+
+                        # Time Masking
+                        X_mask = X_train_group.copy()
+                        time_dim = X_mask.shape[1]
+                        for xm in X_mask:
+                            t = random.randint(0, time_dim - 1)
+                            xm[t] = 0
+
+                        # Combine augmentations
+                        X_aug.extend([X_noise, X_mix, X_mask])
+
+                    X_train_group = np.vstack(X_aug)[:target_count]
+                    y_train_group = np.tile(y_train_group, repeat_factor*3)[:target_count]
+                    print(f"[info] Augmentations applied: {len(y_train_group)} samples after multi-augment {repeat_factor}x")
+
+                    # ✅ SMOTE-like oversampling
                     try:
                         flat_X = X_train_group.reshape(X_train_group.shape[0], -1)
                         sm = SMOTE()
@@ -249,6 +267,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
+
 
 
 def balance_classes(X, y, min_count=20, num_classes=21):
