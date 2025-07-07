@@ -174,7 +174,81 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         flat_X_res, y_res = sm.fit_resample(flat_X, y_train_group)
                         X_train_group = flat_X_res.reshape(flat_X_res.shape[0], X_train_group.shape[1], X_train_group.shape[2])
                         y_train_group = y_res
-                        print(f"[info] SMOTE o
+                        print(f"[info] SMOTE oversampling applied: {X_train_group.shape[0]} samples")
+                    except Exception as e:
+                        print(f"[⚠️ SMOTE 실패] {e}")
+
+                    # ✅ 라벨 인코딩 보정
+                    y_encoded = []
+                    for y in y_train_group:
+                        if y in group_classes:
+                            y_encoded.append(group_classes.index(y))
+                        else:
+                            print(f"[⚠️ 경고] 라벨 {y} 이 group_classes에 없음 → 스킵")
+                    if not y_encoded:
+                        print(f"[⚠️ 스킵] window={window} group-{group_id} {model_type}: 유효 라벨 없음")
+                        continue
+                    y_train_group = np.array(y_encoded)
+
+                    counts_group = Counter(y_train_group)
+                    total_group = sum(counts_group.values())
+                    class_weight_group = [total_group / counts_group.get(i, 1) for i in range(len(group_classes))]
+                    class_weight_tensor = torch.tensor(class_weight_group, dtype=torch.float32).to(DEVICE)
+
+                    output_size = len(group_classes)
+                    if class_weight_tensor.shape[0] != output_size:
+                        print(f"[❌ 오류] class_weight_tensor shape {class_weight_tensor.shape} != output_size {output_size}")
+                        continue
+
+                    model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
+                    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+                    lossfn_ce = torch.nn.CrossEntropyLoss(weight=class_weight_tensor)
+
+                    train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32),
+                                             torch.tensor(y_train_group, dtype=torch.long))
+                    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
+
+                    for epoch in range(max_epochs):
+                        for xb, yb in train_loader:
+                            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                            logits = model(xb)
+                            loss = lossfn_ce(logits, yb)
+
+                            if torch.isfinite(loss):
+                                optimizer.zero_grad()
+                                loss.backward()
+                                optimizer.step()
+
+                    # ✅ validation accuracy 평가 및 meta 저장
+                    model.eval()
+                    with torch.no_grad():
+                        val_logits = model(torch.tensor(X_val, dtype=torch.float32).to(DEVICE))
+                        val_preds = torch.argmax(val_logits, dim=1).cpu().numpy()
+                        val_acc = (val_preds == y_val).mean()
+                        print(f"[📈 validation accuracy] {symbol}-{strategy}-{model_type} acc={val_acc:.4f}")
+
+                    meta = {
+                        "symbol": symbol, "strategy": strategy, "model": model_type,
+                        "group_id": group_id, "window": window,
+                        "input_size": input_size,
+                        "val_accuracy": float(round(val_acc, 4)),
+                        "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                    meta_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.meta.json"
+                    with open(meta_path, "w", encoding="utf-8") as f:
+                        json.dump(meta, f, indent=2, ensure_ascii=False)
+
+                    model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.pt"
+                    torch.save(model.state_dict(), model_path)
+
+                    print(f"[✅ 저장 완료] {model_type} group-{group_id} window-{window}")
+
+                    del model, xb, yb, logits
+                    torch.cuda.empty_cache()
+                    gc.collect()
+
+    except Exception as e:
+        print(f"[ERROR] {symbol}-{strategy}: {e}")
 
 
 def balance_classes(X, y, min_count=20, num_classes=21):
