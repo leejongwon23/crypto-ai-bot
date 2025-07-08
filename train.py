@@ -96,7 +96,6 @@ def get_class_groups(num_classes=21, group_size=7):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
-
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     from focal_loss import FocalLoss
@@ -112,6 +111,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from meta_learning import maml_train_entry
     from model.base_model import get_model
 
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
     try:
@@ -171,6 +171,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         print(f"[⚠️ 스킵] window={window} group-{group_id}: 학습 데이터 부족 ({len(y_train_group)}) → 전체 모델 스킵")
                         continue
 
+                    output_size = len(group_classes)
+                    if output_size == 0:
+                        print(f"[⚠️ 스킵] group-{group_id} output_size=0 → 모델 학습 스킵")
+                        continue
+
                     for model_type in ["lstm", "cnn_lstm", "transformer"]:
                         target_count = 50
                         repeat_factor = max(1, int(np.ceil(target_count / len(y_train_group))))
@@ -179,13 +184,13 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                         counts_group = Counter(y_train_group)
                         total_group = sum(counts_group.values())
-                        class_weight_group = [total_group / counts_group.get(i, 1) for i in range(len(group_classes))]
-                        class_weight_tensor = torch.tensor(class_weight_group, dtype=torch.float32).to(DEVICE)
+                        class_weight_group = [total_group / counts_group.get(i, 1) for i in range(output_size)]
 
-                        output_size = len(group_classes)
-                        if class_weight_tensor.shape[0] != output_size:
-                            print(f"[❌ 오류] class_weight_tensor shape {class_weight_tensor.shape} != output_size {output_size}")
-                            continue
+                        if len(class_weight_group) != output_size:
+                            print(f"[❌ 오류] class_weight_group 길이 불일치: {len(class_weight_group)} != output_size {output_size}")
+                            class_weight_group = [1.0 for _ in range(output_size)]
+
+                        class_weight_tensor = torch.tensor(class_weight_group, dtype=torch.float32).to(DEVICE)
 
                         model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
                         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -239,7 +244,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 val_loader = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long)), batch_size=32)
                 train_loader = DataLoader(train_ds, batch_size=32)
 
-                # ✅ model fallback check
                 if 'model' in locals():
                     maml_train_entry(model, train_loader, val_loader)
                 else:
