@@ -87,10 +87,15 @@ def save_model_metadata(symbol, strategy, model_type, acc, f1, loss, input_size=
 
 def get_class_groups(num_classes=21, group_size=7):
     """
-    ✅ 그룹 크기를 기존보다 크게 (5 → 7) 조정
-    → 각 그룹 당 충분한 샘플 확보 가능
+    ✅ 클래스 그룹화 함수 (YOPO v4.1)
+    - num_classes를 group_size 크기로 나누어 그룹화
+    - num_classes ≤ group_size 시 단일 그룹 반환
+    - ex) num_classes=21, group_size=7 → [[0-6], [7-13], [14-20]]
     """
+    if num_classes <= group_size:
+        return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
+
 
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
