@@ -251,35 +251,54 @@ def train_one_model(symbol, strategy, max_epochs=20):
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
     import numpy as np
     import random
+    from data_augmentation import add_gaussian_noise, apply_scaling, apply_shift, apply_dropout_mask
 
-    X_aug = []
-    for _ in range(repeat_factor):
-        noise = np.random.normal(0, 0.01, X_train_group.shape)
-        X_noise = X_train_group + noise
+    X_aug, y_aug = [], []
 
-        indices = np.random.permutation(len(X_train_group))
-        lam = np.random.beta(0.2, 0.2)
-        X_mix = lam * X_train_group + (1 - lam) * X_train_group[indices]
+    # 🔁 클래스별 균등 oversampling
+    unique_classes = np.unique(y_train_group)
+    class_counts = {cls: np.sum(y_train_group == cls) for cls in unique_classes}
+    max_count = max(class_counts.values())
 
-        X_mask = X_train_group.copy()
-        time_dim = X_mask.shape[1]
-        for xm in X_mask:
-            t = random.randint(0, time_dim - 1)
-            xm[t] = 0
+    for cls in group_classes:
+        cls_indices = np.where(y_train_group == cls)[0]
+        if len(cls_indices) == 0:
+            continue
 
-        X_aug.extend([X_noise, X_mix, X_mask])
+        X_cls = X_train_group[cls_indices]
+        y_cls = y_train_group[cls_indices]
 
-    X_train_group = np.vstack(X_aug)[:target_count]
-    y_train_group = np.tile(y_train_group, repeat_factor*3)[:target_count]
+        # oversample to match max_count
+        n_repeat = int(np.ceil(max_count / len(cls_indices)))
+        X_cls_oversampled = np.tile(X_cls, (n_repeat, 1, 1))[:max_count]
+        y_cls_oversampled = np.tile(y_cls, n_repeat)[:max_count]
 
-    # ✅ 라벨 인덱스 재인코딩
-    y_encoded = []
-    for y in y_train_group:
-        if y in group_classes:
-            y_encoded.append(group_classes.index(y))
-        else:
-            y_encoded.append(0)  # fallback
-    return X_train_group, np.array(y_encoded)
+        # augmentation
+        for x in X_cls_oversampled:
+            x1 = add_gaussian_noise(x)
+            x2 = apply_scaling(x1)
+            x3 = apply_shift(x2)
+            x4 = apply_dropout_mask(x3)
+            X_aug.append(x4)
+        y_aug.extend(y_cls_oversampled.tolist())
+
+    # 🔁 최종 target_count 조정
+    X_aug = np.array(X_aug, dtype=np.float32)
+    y_aug = np.array(y_aug, dtype=np.int64)
+
+    if len(X_aug) < target_count:
+        idx = np.random.choice(len(X_aug), target_count - len(X_aug))
+        X_aug = np.concatenate([X_aug, X_aug[idx]], axis=0)
+        y_aug = np.concatenate([y_aug, y_aug[idx]], axis=0)
+    else:
+        X_aug = X_aug[:target_count]
+        y_aug = y_aug[:target_count]
+
+    # ✅ 라벨 재인코딩
+    y_encoded = [group_classes.index(y) if y in group_classes else 0 for y in y_aug]
+
+    return X_aug, np.array(y_encoded)
+
 
 def balance_classes(X, y, min_count=20, num_classes=21):
     import numpy as np
