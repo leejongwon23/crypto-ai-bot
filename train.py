@@ -257,6 +257,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
 
 # ✅ augmentation 함수 추가
+
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
     import numpy as np
     import random
@@ -264,35 +265,45 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
 
     X_aug, y_aug = [], []
 
-    # 🔁 클래스별 균등 oversampling to target_count // num_classes
+    # 🔁 클래스별 최소 per_class_target 계산
     per_class_target = max(1, target_count // len(group_classes))
 
     for cls in group_classes:
         cls_indices = np.where(y_train_group == cls)[0]
+
         if len(cls_indices) == 0:
-            continue
+            # ✅ 해당 클래스 샘플이 없으면 더미 샘플 생성 (zero tensor)
+            dummy = np.zeros((1, X_train_group.shape[1], X_train_group.shape[2]), dtype=np.float32)
+            X_cls_aug = np.tile(dummy, (per_class_target, 1, 1))
+            y_cls_aug = np.array([cls] * per_class_target, dtype=np.int64)
+        else:
+            X_cls = X_train_group[cls_indices]
+            y_cls = y_train_group[cls_indices]
 
-        X_cls = X_train_group[cls_indices]
-        y_cls = y_train_group[cls_indices]
+            # oversample to match per_class_target
+            n_repeat = int(np.ceil(per_class_target / len(cls_indices)))
+            X_cls_oversampled = np.tile(X_cls, (n_repeat, 1, 1))[:per_class_target]
+            y_cls_oversampled = np.tile(y_cls, n_repeat)[:per_class_target]
 
-        # oversample to match per_class_target
-        n_repeat = int(np.ceil(per_class_target / len(cls_indices)))
-        X_cls_oversampled = np.tile(X_cls, (n_repeat, 1, 1))[:per_class_target]
-        y_cls_oversampled = np.tile(y_cls, n_repeat)[:per_class_target]
+            # augmentation
+            X_cls_aug = []
+            for x in X_cls_oversampled:
+                x1 = add_gaussian_noise(x)
+                x2 = apply_scaling(x1)
+                x3 = apply_shift(x2)
+                x4 = apply_dropout_mask(x3)
+                X_cls_aug.append(x4)
+            X_cls_aug = np.array(X_cls_aug, dtype=np.float32)
+            y_cls_aug = y_cls_oversampled
 
-        # augmentation
-        for x in X_cls_oversampled:
-            x1 = add_gaussian_noise(x)
-            x2 = apply_scaling(x1)
-            x3 = apply_shift(x2)
-            x4 = apply_dropout_mask(x3)
-            X_aug.append(x4)
-        y_aug.extend(y_cls_oversampled.tolist())
+        X_aug.append(X_cls_aug)
+        y_aug.append(y_cls_aug)
+
+    # 🔁 클래스별 데이터 합치기
+    X_aug = np.concatenate(X_aug, axis=0)
+    y_aug = np.concatenate(y_aug, axis=0)
 
     # 🔁 최종 target_count 조정
-    X_aug = np.array(X_aug, dtype=np.float32)
-    y_aug = np.array(y_aug, dtype=np.int64)
-
     if len(X_aug) < target_count:
         idx = np.random.choice(len(X_aug), target_count - len(X_aug))
         X_aug = np.concatenate([X_aug, X_aug[idx]], axis=0)
