@@ -110,8 +110,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from regime_change_detection import detect_regime_change
     from meta_learning import maml_train_entry
     from model.base_model import get_model
-    from logger import log_training_result  # ✅ 추가
+    from logger import log_training_result
+    from datetime import datetime
+    import pytz
 
+    now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
@@ -143,8 +146,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             input_size = FEATURE_INPUT_SIZE
             print(f"[info] input_size padded to FEATURE_INPUT_SIZE={FEATURE_INPUT_SIZE}")
 
-        print(f"[info] train_one_model input_size: {input_size}")
-
         class_groups = get_class_groups()
 
         for window in window_list:
@@ -169,7 +170,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     y_train_group = y_train[group_mask]
 
                     if len(y_train_group) < 2:
-                        print(f"[⚠️ 스킵] window={window} group-{group_id}: 학습 데이터 부족 ({len(y_train_group)}) → 전체 모델 스킵")
+                        print(f"[⚠️ 스킵] window={window} group-{group_id}: 학습 데이터 부족 ({len(y_train_group)})")
                         continue
 
                     output_size = len(group_classes)
@@ -177,24 +178,26 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         print(f"[⚠️ 스킵] group-{group_id} output_size=0 → 모델 학습 스킵")
                         continue
 
-                    # ✅ [Step 4-1] validation 라벨 재인코딩 추가
                     val_mask = np.isin(y_val, group_classes)
                     X_val_group = X_val[val_mask]
-                    y_val_group = np.array([group_classes.index(y) for y in y_val[val_mask]])
+                    y_val_group = np.array([group_classes.index(y) for y in y_val[val_mask]]) if len(y_val[val_mask]) > 0 else None
+
+                    if y_val_group is None or len(y_val_group) == 0:
+                        print(f"[⚠️ validation skip] group-{group_id}: validation 데이터 없음")
+                        continue
 
                     for model_type in ["lstm", "cnn_lstm", "transformer"]:
                         target_count = 50
                         repeat_factor = max(1, int(np.ceil(target_count / len(y_train_group))))
 
                         X_train_group, y_train_group = augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count)
+                        if X_train_group is None or y_train_group is None or len(y_train_group) < 2:
+                            print(f"[⚠️ augment 실패] {model_type} group-{group_id}")
+                            continue
 
                         counts_group = Counter(y_train_group)
                         total_group = sum(counts_group.values())
                         class_weight_group = [total_group / counts_group.get(i, 1) for i in range(output_size)]
-
-                        if len(class_weight_group) != output_size:
-                            print(f"[❌ 오류] class_weight_group 길이 불일치: {len(class_weight_group)} != output_size {output_size}")
-                            class_weight_group = [1.0 for _ in range(output_size)]
 
                         class_weight_tensor = torch.tensor(class_weight_group, dtype=torch.float32).to(DEVICE)
 
@@ -213,7 +216,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                 xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                                 logits = model(xb)
                                 loss = lossfn_ce(logits, yb)
-
                                 if torch.isfinite(loss):
                                     optimizer.zero_grad()
                                     loss.backward()
@@ -225,12 +227,12 @@ def train_one_model(symbol, strategy, max_epochs=20):
                             val_labels = torch.tensor(y_val_group, dtype=torch.long).to(DEVICE)
                             val_logits = model(val_inputs)
                             val_preds = torch.argmax(val_logits, dim=1)
-                            val_acc = (val_preds == val_labels).float().mean().item()
+                            val_acc = (val_preds == val_labels).float().mean().item() if len(val_labels) > 0 else 0.0
                             print(f"[📈 validation accuracy] {symbol}-{strategy}-{model_type} acc={val_acc:.4f}")
 
-                        # ✅ 학습 로그 기록 추가
                         log_training_result(symbol, strategy, model_type, acc=val_acc, f1=0.0, loss=float(loss.item()))
 
+                        # ✅ meta save
                         meta = {
                             "symbol": symbol, "strategy": strategy, "model": model_type,
                             "group_id": group_id, "window": window,
@@ -251,9 +253,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         torch.cuda.empty_cache()
                         gc.collect()
 
-                val_loader = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long)), batch_size=32)
-                train_loader = DataLoader(train_ds, batch_size=32)
-
                 if 'model' in locals():
                     maml_train_entry(model, train_loader, val_loader)
                 else:
@@ -264,7 +263,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
-
 
 
 # ✅ augmentation 함수 추가
@@ -281,6 +279,7 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
         cls_indices = np.where(y_train_group == cls)[0]
 
         if len(cls_indices) == 0:
+            # ✅ 해당 클래스 샘플 없으면 random noise + 안전 라벨 부여
             dummy = np.random.normal(0, 1, (per_class_target, X_train_group.shape[1], X_train_group.shape[2])).astype(np.float32)
             X_cls_aug = dummy
             y_cls_aug = np.array([cls] * per_class_target, dtype=np.int64)
@@ -316,25 +315,27 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
         X_aug = X_aug[:target_count]
         y_aug = y_aug[:target_count]
 
-    # ✅ 라벨 재인코딩 with debug
+    # ✅ 라벨 재인코딩 with 안전처리
     y_encoded = []
-    for y in y_aug:
+    X_encoded = []
+    for i, y in enumerate(y_aug):
         try:
             encoded = group_classes.index(y)
             y_encoded.append(encoded)
+            X_encoded.append(X_aug[i])
         except ValueError:
             print(f"[❌ 라벨 재인코딩 오류] {y} not in group_classes → 제거")
-            y_encoded.append(-1)
+            continue
 
-    # -1 라벨 제거
-    X_encoded = X_aug[np.array(y_encoded) != -1]
-    y_encoded = np.array([y for y in y_encoded if y != -1])
+    X_encoded = np.array(X_encoded, dtype=np.float32)
+    y_encoded = np.array(y_encoded, dtype=np.int64)
 
     # ✅ 디버그 출력
     from collections import Counter
     print(f"[✅ augment_and_expand] 최종 샘플 수: {len(y_encoded)}, 라벨 분포: {Counter(y_encoded)}")
 
     return X_encoded, y_encoded
+
 
 
 
