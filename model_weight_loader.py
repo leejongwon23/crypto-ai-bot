@@ -6,6 +6,7 @@ import glob
 MODEL_DIR = "/persistent/models"
 EVAL_RESULT = "/persistent/evaluation_result.csv"
 
+
 def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_size=None):
     pattern = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json") if symbol != "ALL" \
               else os.path.join(MODEL_DIR, f"*_{strategy}_{model_type}.meta.json")
@@ -20,9 +21,10 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
 
+            # ✅ input_size mismatch fallback weight=0.2
             if input_size is not None and meta.get("input_size") != input_size:
-                print(f"[⚠️ input_size 불일치] meta={meta.get('input_size')} vs input={input_size} → weight=0")
-                continue
+                print(f"[⚠️ input_size 불일치] meta={meta.get('input_size')} vs input={input_size} → fallback weight=0.2")
+                return 0.2
 
             pt_path = meta_path.replace(".meta.json", ".pt")
             if not os.path.exists(pt_path):
