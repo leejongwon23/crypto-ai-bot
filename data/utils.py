@@ -51,6 +51,7 @@ def get_btc_dominance():
 
 import numpy as np
 
+
 def create_dataset(features, window=20, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
@@ -118,8 +119,9 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             # ✅ 클래스 매핑
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), NUM_CLASSES-1)
 
-            # ✅ [DEBUG] gain과 class 확인
-            print(f"[DEBUG] gain={gain:.4f}, class={cls}")
+            # ✅ [DEBUG] gain과 class 확인 (출력 제한)
+            if abs(gain) > 0.1:
+                print(f"[DEBUG] gain={gain:.4f}, class={cls}")
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
 
