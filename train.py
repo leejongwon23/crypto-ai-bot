@@ -110,6 +110,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from regime_change_detection import detect_regime_change
     from meta_learning import maml_train_entry
     from model.base_model import get_model
+    from logger import log_training_result  # ✅ 추가
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"▶ 학습 시작: {symbol}-{strategy}")
@@ -220,6 +221,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
                             val_preds = torch.argmax(val_logits, dim=1).cpu().numpy()
                             val_acc = (val_preds == y_val).mean()
                             print(f"[📈 validation accuracy] {symbol}-{strategy}-{model_type} acc={val_acc:.4f}")
+
+                        # ✅ 학습 로그 기록 추가
+                        log_training_result(symbol, strategy, model_type, acc=val_acc, f1=0.0, loss=float(loss.item()))
 
                         meta = {
                             "symbol": symbol, "strategy": strategy, "model": model_type,
