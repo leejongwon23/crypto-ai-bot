@@ -169,6 +169,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     X_train_group = X_train[group_mask]
                     y_train_group = y_train[group_mask]
 
+                    # ✅ 디버그 출력 추가
+                    print(f"[DEBUG] train_one_model: window={window}, group_id={group_id}, train_samples={len(y_train_group)}, val_samples={len(y_val)}")
+
                     if len(y_train_group) < 2:
                         print(f"[⚠️ 스킵] window={window} group-{group_id}: 학습 데이터 부족 ({len(y_train_group)})")
                         continue
@@ -232,7 +235,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                         log_training_result(symbol, strategy, model_type, acc=val_acc, f1=0.0, loss=float(loss.item()))
 
-                        # ✅ meta save
                         meta = {
                             "symbol": symbol, "strategy": strategy, "model": model_type,
                             "group_id": group_id, "window": window,
