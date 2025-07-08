@@ -6,7 +6,9 @@ from config import NUM_CLASSES
 
 MODEL_DIR = "/persistent/models"
 
+
 def fix_all_meta_json():
+    from config import FEATURE_INPUT_SIZE
     files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".meta.json")]
 
     for file in files:
@@ -42,12 +44,12 @@ def fix_all_meta_json():
         # ✅ input_size 확인 및 보정
         current_input_size = meta.get("input_size")
         try:
-            model = get_model(model_type, input_size=11, output_size=NUM_CLASSES)
-            sample_input = torch.randn(1, 20, 11)
+            model = get_model(model_type, input_size=FEATURE_INPUT_SIZE, output_size=NUM_CLASSES)
+            sample_input = torch.randn(1, 20, FEATURE_INPUT_SIZE)
             output = model(sample_input) if not hasattr(model, "predict") else None
-            expected_input_size = sample_input.shape[2]
+            expected_input_size = FEATURE_INPUT_SIZE
 
-            # ✅ input_size 없거나 불일치 시 보정
+            # ✅ input_size 없거나 불일치 시 FEATURE_INPUT_SIZE 로 보정
             if current_input_size is None or current_input_size != expected_input_size:
                 meta["input_size"] = expected_input_size
                 updated = True
@@ -60,7 +62,6 @@ def fix_all_meta_json():
             print(f"[FIXED] {file} → 필드 보정 완료")
         else:
             print(f"[OK] {file} → 수정 불필요")
-
 
 def check_meta_input_size():
     files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".meta.json")]
