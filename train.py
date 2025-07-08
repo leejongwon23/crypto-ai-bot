@@ -90,7 +90,6 @@ def get_class_groups(num_classes=21, group_size=7):
     """
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
-
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     from focal_loss import FocalLoss
@@ -210,7 +209,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         with torch.no_grad():
                             val_logits = model(torch.tensor(X_val[:, -1, :], dtype=torch.float32).to(DEVICE))
                             val_preds = torch.argmax(val_logits, dim=1).cpu().numpy()
-                            val_acc = (val_preds == y_val[:, -1]).mean()
+                            val_acc = (val_preds == y_val).mean()  # ✅ 수정: y_val[:, -1] → y_val
                             print(f"[📈 validation accuracy] {symbol}-{strategy}-{model_type} acc={val_acc:.4f}")
 
                         meta = {
