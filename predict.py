@@ -12,6 +12,7 @@ from predict_trigger import get_recent_class_frequencies, adjust_probs_with_dive
 from logger import get_available_models
 import json
 from model.base_model import get_model, XGBoostWrapper
+from config import FEATURE_INPUT_SIZE
 
 
 DEVICE = torch.device("cpu")
