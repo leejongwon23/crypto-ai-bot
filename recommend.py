@@ -223,8 +223,9 @@ def main(strategy=None, symbol=None, force=False, allow_prediction=True):
 
 if __name__ == "__main__":
     main()
-    from train import train_all_models
-    train_all_models()
+    from train import train_models
+    train_models(["BTCUSDT", "ETHUSDT"])  # ✅ 학습할 심볼 리스트
+
     
 import shutil
 def check_disk_usage(threshold_percent=90):
