@@ -465,11 +465,13 @@ def train_model_loop(strategy):
         training_in_progress[strategy] = False
         print(f"✅ {strategy} 루프 종료")
 
+
 def train_symbol_group_loop(delay_minutes=5):
     """
-    ✅ [설명] SYMBOL_GROUPS 단위로 전체 그룹 학습 루프 실행
-    - 각 그룹 학습 전 cache clear
-    - 각 그룹 학습 후 meta 보정, 해당 그룹 심볼만 예측 실행
+    ✅ [개선 설명]
+    - SYMBOL_GROUPS 순서 명확 출력
+    - 각 그룹 학습 시작과 종료 로그 개선
+    - 그룹 루프 순서 강제 보장
     """
     import time
     import maintenance_fix_meta
@@ -478,36 +480,42 @@ def train_symbol_group_loop(delay_minutes=5):
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작")
 
+    loop_count = 0
     while True:
-        for idx, group in enumerate(SYMBOL_GROUPS):
-            print(f"\n🚀 [그룹 {idx}] 학습 시작 → {group}")
+        loop_count += 1
+        print(f"\n🔄 그룹 학습 루프 #{loop_count} 시작")
 
-            # ✅ 캐시 clear 추가
+        for idx, group in enumerate(SYMBOL_GROUPS):
+            print(f"\n🚀 [그룹 {idx}/{group_count}] 학습 시작 | 심볼: {group}")
+
+            # ✅ 캐시 clear
             _kline_cache.clear()
             _feature_cache.clear()
             print("[✅ cache cleared] _kline_cache, _feature_cache")
 
             try:
                 train_models(group)
+                print(f"[✅ 그룹 {idx}] 학습 완료")
 
+                # ✅ meta 보정
                 maintenance_fix_meta.fix_all_meta_json()
-                print(f"✅ meta 보정 완료: 그룹 {idx}")
+                print(f"[✅ meta 보정 완료] 그룹 {idx}")
 
-                # ✅ 예측 실행: 해당 그룹 심볼만 예측하도록 수정
+                # ✅ 예측 실행
                 for symbol in group:
                     for strategy in ["단기", "중기", "장기"]:
                         try:
                             from recommend import main
                             main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
-                            print(f"✅ 예측 완료: {symbol}-{strategy}")
+                            print(f"[✅ 예측 완료] {symbol}-{strategy}")
                         except Exception as e:
-                            print(f"❌ 예측 실패: {symbol}-{strategy} → {e}")
+                            print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
 
-                print(f"🕒 그룹 {idx} 완료 → {delay_minutes}분 대기")
+                print(f"🕒 그룹 {idx} 루프 완료 → {delay_minutes}분 대기")
                 time.sleep(delay_minutes * 60)
 
             except Exception as e:
-                print(f"❌ 그룹 {idx} 루프 중 오류: {e}")
+                print(f"[❌ 그룹 {idx} 루프 중 오류] {e}")
                 continue
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
