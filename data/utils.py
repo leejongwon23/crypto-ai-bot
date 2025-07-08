@@ -138,8 +138,9 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             print(f"[예외] {e} → i={i}")
             continue
 
-    if not y:
-        print("[⚠️ 생성된 샘플 없음 → 더미 반환]")
+    # ✅ 최소 샘플 수 검증 추가
+    if len(y) < 2:
+        print(f"[⚠️ validation 데이터 너무 적음: {len(y)}개 → window 크기나 데이터량을 확인하세요]")
         dummy_X = np.zeros((1, window, input_size if input_size else 11), dtype=np.float32)
         dummy_y = np.array([0], dtype=np.int64)
         return dummy_X, dummy_y
@@ -163,7 +164,6 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     print(f"[✅ create_dataset] 최종 샘플 수: {len(y)}, 클래스 분포: {Counter(y)}")
 
     return X, y
-
 
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
