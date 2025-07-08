@@ -96,6 +96,7 @@ def get_class_groups(num_classes=21, group_size=7):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
+
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     from focal_loss import FocalLoss
@@ -242,18 +243,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                         log_training_result(symbol, strategy, model_type, acc=val_acc, f1=0.0, loss=float(loss.item()))
 
-                        meta = {
-                            "symbol": symbol, "strategy": strategy, "model": model_type,
-                            "group_id": group_id, "window": window,
-                            "input_size": input_size,
-                            "val_accuracy": float(round(val_acc, 4)),
-                            "timestamp": now_kst().strftime("%Y-%m-%d %H:%M:%S")
-                        }
-                        meta_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.meta.json"
-                        with open(meta_path, "w", encoding="utf-8") as f:
-                            json.dump(meta, f, indent=2, ensure_ascii=False)
-
-                        model_path = f"{MODEL_DIR}/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.pt"
+                        model_path = f"/persistent/models/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.pt"
                         torch.save(model.state_dict(), model_path)
 
                         print(f"[✅ 저장 완료] {model_type} group-{group_id} window-{window}")
@@ -272,8 +262,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
-
-
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
