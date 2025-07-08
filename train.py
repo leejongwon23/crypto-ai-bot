@@ -261,7 +261,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
 
 # ✅ augmentation 함수 추가
-
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
     import numpy as np
     import random
@@ -269,27 +268,24 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
 
     X_aug, y_aug = [], []
 
-    # 🔁 클래스별 최소 per_class_target 계산
     per_class_target = max(1, target_count // len(group_classes))
 
     for cls in group_classes:
         cls_indices = np.where(y_train_group == cls)[0]
 
         if len(cls_indices) == 0:
-            # ✅ 해당 클래스 샘플이 없으면 더미 샘플 생성 (zero tensor)
-            dummy = np.zeros((1, X_train_group.shape[1], X_train_group.shape[2]), dtype=np.float32)
-            X_cls_aug = np.tile(dummy, (per_class_target, 1, 1))
+            # ✅ 해당 클래스 샘플 없으면 random noise 생성
+            dummy = np.random.normal(0, 1, (per_class_target, X_train_group.shape[1], X_train_group.shape[2])).astype(np.float32)
+            X_cls_aug = dummy
             y_cls_aug = np.array([cls] * per_class_target, dtype=np.int64)
         else:
             X_cls = X_train_group[cls_indices]
             y_cls = y_train_group[cls_indices]
 
-            # oversample to match per_class_target
             n_repeat = int(np.ceil(per_class_target / len(cls_indices)))
             X_cls_oversampled = np.tile(X_cls, (n_repeat, 1, 1))[:per_class_target]
             y_cls_oversampled = np.tile(y_cls, n_repeat)[:per_class_target]
 
-            # augmentation
             X_cls_aug = []
             for x in X_cls_oversampled:
                 x1 = add_gaussian_noise(x)
@@ -303,11 +299,9 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
         X_aug.append(X_cls_aug)
         y_aug.append(y_cls_aug)
 
-    # 🔁 클래스별 데이터 합치기
     X_aug = np.concatenate(X_aug, axis=0)
     y_aug = np.concatenate(y_aug, axis=0)
 
-    # 🔁 최종 target_count 조정
     if len(X_aug) < target_count:
         idx = np.random.choice(len(X_aug), target_count - len(X_aug))
         X_aug = np.concatenate([X_aug, X_aug[idx]], axis=0)
@@ -316,10 +310,16 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
         X_aug = X_aug[:target_count]
         y_aug = y_aug[:target_count]
 
-    # ✅ 라벨 재인코딩
-    y_encoded = [group_classes.index(y) if y in group_classes else 0 for y in y_aug]
+    # ✅ 라벨 재인코딩 (group_classes 내에 없는 라벨은 예외 처리)
+    try:
+        y_encoded = [group_classes.index(y) for y in y_aug]
+    except ValueError as e:
+        print(f"[❌ 라벨 재인코딩 오류] {e}")
+        return None, None
 
     return X_aug, np.array(y_encoded)
+
+
 
 
 def balance_classes(X, y, min_count=20, num_classes=21):
