@@ -96,7 +96,6 @@ def get_class_groups(num_classes=21, group_size=7):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
-
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc
     from focal_loss import FocalLoss
@@ -149,20 +148,26 @@ def train_one_model(symbol, strategy, max_epochs=20):
             X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
 
             for group_id, group_classes in enumerate(class_groups):
-                group_mask = np.isin(y_train, group_classes)
-                X_train_group = X_train[group_mask]
-                y_train_group = y_train[group_mask]
+                # ✅ 수정: group_classes 범위 밖 클래스 제거
+                train_mask = np.isin(y_train, group_classes)
+                X_train_group = X_train[train_mask]
+                y_train_group = y_train[train_mask]
 
                 if len(y_train_group) < 2:
                     continue
 
                 output_size = len(group_classes)
+                
                 val_mask = np.isin(y_val, group_classes)
                 X_val_group = X_val[val_mask]
-                y_val_group = np.array([group_classes.index(y) for y in y_val[val_mask]]) if len(y_val[val_mask]) > 0 else None
+                y_val_group = y_val[val_mask]
 
-                if y_val_group is None or len(y_val_group) == 0:
+                if len(y_val_group) == 0:
                     continue
+
+                # ✅ 수정: group_classes index 변환 안전하게
+                y_train_group = np.array([group_classes.index(y) for y in y_train_group if y in group_classes])
+                y_val_group = np.array([group_classes.index(y) for y in y_val_group if y in group_classes])
 
                 for model_type in ["lstm", "cnn_lstm", "transformer"]:
                     model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
