@@ -112,8 +112,12 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
             gain = gain if np.isfinite(gain) else 0.0
 
+            # ✅ 라벨 범위 정의
             class_ranges = [(-1.0 + 0.1*i, -0.9 + 0.1*i) for i in range(NUM_CLASSES)]
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), NUM_CLASSES-1)
+
+            # ✅ [DEBUG] gain과 class 확인
+            print(f"[DEBUG] gain={gain:.4f}, class={cls}")
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
 
@@ -148,6 +152,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     y = np.array(y, dtype=np.int64)
 
     return X, y
+
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
 _kline_cache = {}
