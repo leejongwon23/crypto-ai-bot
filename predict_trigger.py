@@ -107,7 +107,6 @@ from collections import Counter
 import pandas as pd
 import os
 from datetime import datetime as dt
-
 def get_recent_class_frequencies(strategy=None, recent_days=3):
     from collections import Counter
     import os
@@ -119,6 +118,10 @@ def get_recent_class_frequencies(strategy=None, recent_days=3):
             return Counter()
 
         df = pd.read_csv(path, encoding="utf-8-sig")
+        if "predicted_class" not in df.columns:
+            print("[⚠️ get_recent_class_frequencies] 'predicted_class' 컬럼 없음 → 빈 Counter 반환")
+            return Counter()
+
         if strategy:
             df = df[df["strategy"] == strategy]
 
@@ -127,8 +130,9 @@ def get_recent_class_frequencies(strategy=None, recent_days=3):
         df = df[df["timestamp"] >= cutoff]
 
         return Counter(df["predicted_class"].dropna().astype(int))
+
     except Exception as e:
-        print(f"[⚠️ recent_class_frequencies 예외] {e}")
+        print(f"[⚠️ get_recent_class_frequencies 예외] {e}")
         return Counter()
 
 import numpy as np
