@@ -269,10 +269,11 @@ import pandas as pd
 from failure_db import ensure_failure_db, insert_failure_record
 from logger import update_model_success
 
+
 def evaluate_predictions(get_price_fn):
     import csv, os, datetime, pytz
     import pandas as pd
-    from failure_db import ensure_failure_db
+    from failure_db import ensure_failure_db, insert_failure_record
     from logger import update_model_success, log_prediction
 
     ensure_failure_db()
@@ -321,6 +322,10 @@ def evaluate_predictions(get_price_fn):
                                model, False, "entry_price 오류 또는 pred_class=-1", 0.0, 0.0, False, "평가",
                                predicted_class=pred_class, label=label, group_id=group_id)
                 r.update({"status": "fail", "reason": "entry_price 오류 또는 pred_class=-1", "return": 0.0})
+
+                # ✅ 실패 샘플 DB insert 추가
+                insert_failure_record(r, f"{symbol}-{strategy}-{now_kst().isoformat()}", feature_vector=None, label=label)
+
                 updated.append(r)
                 continue
 
@@ -375,6 +380,10 @@ def evaluate_predictions(get_price_fn):
                            success, r["reason"], gain, gain, vol, "평가",
                            predicted_class=pred_class, label=label, group_id=group_id)
 
+            # ✅ 실패 샘플 DB insert 추가
+            if not success:
+                insert_failure_record(r, f"{symbol}-{strategy}-{now_kst().isoformat()}", feature_vector=None, label=label)
+
             r_clean = {str(k): (v if v is not None else "") for k, v in r.items() if k is not None}
             update_model_success(symbol, strategy, model, success)
             evaluated.append(r_clean)
@@ -399,7 +408,6 @@ def evaluate_predictions(get_price_fn):
     failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
     safe_write_csv(WRONG, failed)
     print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
-
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
