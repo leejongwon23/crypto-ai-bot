@@ -141,33 +141,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
-def get_recent_class_frequencies(strategy=None, recent_days=3):
-    from collections import Counter
-    import pandas as pd
-    import os
-
-    try:
-        path = "/persistent/prediction_log.csv"
-        if not os.path.exists(path):
-            return Counter()
-
-        df = pd.read_csv(path, encoding="utf-8-sig")
-        if "predicted_class" not in df.columns:
-            print("[⚠️ get_recent_class_frequencies] 'predicted_class' 컬럼 없음 → 빈 Counter 반환")
-            return Counter()
-
-        if strategy:
-            df = df[df["strategy"] == strategy]
-
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        cutoff = pd.Timestamp.now() - pd.Timedelta(days=recent_days)
-        df = df[df["timestamp"] >= cutoff]
-
-        return Counter(df["predicted_class"].dropna().astype(int))
-
-    except Exception as e:
-        print(f"[⚠️ get_recent_class_frequencies 예외] {e}")
-        return Counter()
 
 def predict(symbol, strategy, source="일반", model_type=None):
     from scipy.stats import entropy
