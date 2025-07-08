@@ -117,7 +117,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             gain = gain if np.isfinite(gain) else 0.0
 
             # ✅ 클래스 매핑
-            cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), NUM_CLASSES-1)
+            cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain <= high), NUM_CLASSES-1)
 
             # ✅ [DEBUG] gain과 class 확인 (출력 제한)
             if abs(gain) > 0.1:
