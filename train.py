@@ -225,10 +225,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                         model.eval()
                         with torch.no_grad():
-                            # ✅ 마지막 timestep slice 추가 → shape mismatch 해결
+                            # ✅ 수정: 마지막 timestep 라벨 slice 추가
                             val_logits = model(torch.tensor(X_val[:, -1, :], dtype=torch.float32).to(DEVICE))
                             val_preds = torch.argmax(val_logits, dim=1).cpu().numpy()
-                            val_acc = (val_preds == y_val).mean()
+                            val_acc = (val_preds == y_val[:, -1]).mean()
                             print(f"[📈 validation accuracy] {symbol}-{strategy}-{model_type} acc={val_acc:.4f}")
 
                         meta = {
