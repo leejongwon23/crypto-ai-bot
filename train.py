@@ -97,7 +97,7 @@ def get_class_groups(num_classes=21, group_size=7):
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
 def train_one_model(symbol, strategy, max_epochs=20):
-    import os, gc
+    import os, gc, traceback
     from focal_loss import FocalLoss
     from ssl_pretrain import masked_reconstruction
     from window_optimizer import find_best_windows
@@ -113,19 +113,19 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"▶ 학습 시작: {symbol}-{strategy}", flush=True)
-    
+    print(f"▶ 학습 시작: {symbol}-{strategy}")
+
     try:
         masked_reconstruction(symbol, strategy, input_size=FEATURE_INPUT_SIZE, mask_ratio=0.2, epochs=5)
 
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
-            print("⛔ 중단: 시세 데이터 없음")
+            print(f"⛔ {symbol}-{strategy}: 시세 데이터 없음")
             return
 
         df_feat = compute_features(symbol, df, strategy)
         if df_feat is None or df_feat.empty or df_feat.isnull().any().any():
-            print("⛔ 중단: 피처 생성 실패 또는 NaN")
+            print(f"⛔ {symbol}-{strategy}: 피처 생성 실패 또는 NaN")
             return
 
         window_list = find_best_windows(symbol, strategy)
@@ -148,7 +148,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
 
             for group_id, group_classes in enumerate(class_groups):
-                # ✅ 수정: group_classes 범위 밖 클래스 제거
                 train_mask = np.isin(y_train, group_classes)
                 X_train_group = X_train[train_mask]
                 y_train_group = y_train[train_mask]
@@ -157,7 +156,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     continue
 
                 output_size = len(group_classes)
-                
                 val_mask = np.isin(y_val, group_classes)
                 X_val_group = X_val[val_mask]
                 y_val_group = y_val[val_mask]
@@ -165,7 +163,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 if len(y_val_group) == 0:
                     continue
 
-                # ✅ 수정: group_classes index 변환 안전하게
                 y_train_group = np.array([group_classes.index(y) for y in y_train_group if y in group_classes])
                 y_val_group = np.array([group_classes.index(y) for y in y_val_group if y in group_classes])
 
@@ -197,13 +194,13 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         val_logits = model(val_inputs)
                         val_preds = torch.argmax(val_logits, dim=1)
                         val_acc = (val_preds == val_labels).float().mean().item() if len(val_labels) > 0 else 0.0
-                        print(f"[validation] {symbol}-{strategy}-{model_type} acc={val_acc:.4f}")
 
                     log_training_result(symbol, strategy, model_type, acc=val_acc, f1=0.0, loss=float(loss.item()))
 
                     model_path = f"/persistent/models/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.pt"
                     torch.save(model.state_dict(), model_path)
-                    print(f"[저장 완료] {model_type} group-{group_id} window-{window}")
+
+                    print(f"[✅ 학습완료] {symbol}-{strategy} | {model_type} | group:{group_id} | window:{window} | acc:{val_acc:.4f}")
 
                     del model, xb, yb, logits
                     torch.cuda.empty_cache()
@@ -211,6 +208,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
+        traceback.print_exc()
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
