@@ -148,6 +148,7 @@ MODEL_CLASSES = {
     "autoencoder": AutoEncoder
 }
 
+
 def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_path=None, features=None):
     if model_type == "xgboost":
         if model_path is None:
@@ -182,11 +183,16 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
                 input_size = FEATURE_INPUT_SIZE
                 print(f"[⚠️ input_size fallback={FEATURE_INPUT_SIZE}] compute_features 예외 발생: {e}")
 
+    # ✅ input_size fallback pad 처리 로직 추가
+    if input_size < FEATURE_INPUT_SIZE:
+        print(f"[info] input_size pad 적용: {input_size} → {FEATURE_INPUT_SIZE}")
+        input_size = FEATURE_INPUT_SIZE
+
     try:
         model = model_cls(input_size=input_size, output_size=output_size)
     except Exception as e:
         print(f"[⚠️ get_model 예외] {e}")
-        print(f"[Fallback] input_size=14로 재시도")
-        model = model_cls(input_size=14, output_size=output_size)
+        print(f"[Fallback] input_size={FEATURE_INPUT_SIZE}로 재시도")
+        model = model_cls(input_size=FEATURE_INPUT_SIZE, output_size=output_size)
 
     return model
