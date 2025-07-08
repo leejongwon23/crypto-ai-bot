@@ -275,7 +275,10 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
 
     X_aug, y_aug = [], []
 
-    per_class_target = max(1, target_count // len(group_classes))
+    # ✅ 클래스별 개수 계산
+    class_counts = {cls: np.sum(y_train_group == cls) for cls in group_classes}
+    max_count = max(class_counts.values()) if class_counts else 1
+    per_class_target = int(max_count * 0.8)  # 🔥 최대 클래스의 80%로 통일
 
     for cls in group_classes:
         cls_indices = np.where(y_train_group == cls)[0]
@@ -289,6 +292,7 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
             X_cls = X_train_group[cls_indices]
             y_cls = y_train_group[cls_indices]
 
+            # 🔁 부족분 복제 + augmentation (noise + scaling + shift + dropout)
             n_repeat = int(np.ceil(per_class_target / len(cls_indices)))
             X_cls_oversampled = np.tile(X_cls, (n_repeat, 1, 1))[:per_class_target]
             y_cls_oversampled = np.tile(y_cls, n_repeat)[:per_class_target]
@@ -299,7 +303,11 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
                 x2 = apply_scaling(x1)
                 x3 = apply_shift(x2)
                 x4 = apply_dropout_mask(x3)
+                # ✅ mixup 추가 (간단 믹스업 – 자기 자신 + noise)
+                mixup_factor = np.random.uniform(0.7, 1.0)
+                x4 = x4 * mixup_factor + np.random.normal(0, 0.05, x4.shape).astype(np.float32) * (1 - mixup_factor)
                 X_cls_aug.append(x4)
+
             X_cls_aug = np.array(X_cls_aug, dtype=np.float32)
             y_cls_aug = y_cls_oversampled
 
@@ -309,6 +317,7 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
     X_aug = np.concatenate(X_aug, axis=0)
     y_aug = np.concatenate(y_aug, axis=0)
 
+    # ✅ 최종 target_count 도달 보장
     if len(X_aug) < target_count:
         idx = np.random.choice(len(X_aug), target_count - len(X_aug))
         X_aug = np.concatenate([X_aug, X_aug[idx]], axis=0)
@@ -317,7 +326,7 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
         X_aug = X_aug[:target_count]
         y_aug = y_aug[:target_count]
 
-    # ✅ 라벨 재인코딩 with 안전처리
+    # ✅ 라벨 재인코딩
     y_encoded = []
     X_encoded = []
     for i, y in enumerate(y_aug):
@@ -337,6 +346,7 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
     print(f"[✅ augment_and_expand] 최종 샘플 수: {len(y_encoded)}, 라벨 분포: {Counter(y_encoded)}")
 
     return X_encoded, y_encoded
+
 
 
 
