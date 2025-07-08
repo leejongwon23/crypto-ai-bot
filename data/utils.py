@@ -90,7 +90,8 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
 
-    class_ranges = [(-1.0 + 0.1*i, -0.9 + 0.1*i) for i in range(NUM_CLASSES)]
+    # ✅ 클래스 범위 재설계: gain 분포를 균등하게 나눔 (-1.0 ~ +1.0)
+    class_ranges = [(-1.0 + 2.0 * i / NUM_CLASSES, -1.0 + 2.0 * (i + 1) / NUM_CLASSES) for i in range(NUM_CLASSES)]
 
     for i in range(window, len(features) - 3):
         try:
@@ -114,6 +115,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
             gain = gain if np.isfinite(gain) else 0.0
 
+            # ✅ 클래스 매핑
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), NUM_CLASSES-1)
 
             # ✅ [DEBUG] gain과 class 확인
