@@ -59,6 +59,13 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
                 continue
 
             xb = past_window.drop(columns=["timestamp"]).to_numpy(dtype=np.float32)
+
+            # ✅ input_size fallback pad 처리
+            if xb.shape[1] < input_size:
+                pad_cols = input_size - xb.shape[1]
+                xb = np.pad(xb, ((0,0),(0,pad_cols)), mode="constant", constant_values=0)
+                print(f"[info] load_training_prediction_data pad 적용: {xb.shape}")
+
             if xb.shape != (window, input_size):
                 continue
 
