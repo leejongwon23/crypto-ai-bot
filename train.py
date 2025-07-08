@@ -281,7 +281,6 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
         cls_indices = np.where(y_train_group == cls)[0]
 
         if len(cls_indices) == 0:
-            # ✅ 해당 클래스 샘플 없으면 random noise 생성
             dummy = np.random.normal(0, 1, (per_class_target, X_train_group.shape[1], X_train_group.shape[2])).astype(np.float32)
             X_cls_aug = dummy
             y_cls_aug = np.array([cls] * per_class_target, dtype=np.int64)
@@ -317,14 +316,25 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
         X_aug = X_aug[:target_count]
         y_aug = y_aug[:target_count]
 
-    # ✅ 라벨 재인코딩 (group_classes 내에 없는 라벨은 예외 처리)
-    try:
-        y_encoded = [group_classes.index(y) for y in y_aug]
-    except ValueError as e:
-        print(f"[❌ 라벨 재인코딩 오류] {e}")
-        return None, None
+    # ✅ 라벨 재인코딩 with debug
+    y_encoded = []
+    for y in y_aug:
+        try:
+            encoded = group_classes.index(y)
+            y_encoded.append(encoded)
+        except ValueError:
+            print(f"[❌ 라벨 재인코딩 오류] {y} not in group_classes → 제거")
+            y_encoded.append(-1)
 
-    return X_aug, np.array(y_encoded)
+    # -1 라벨 제거
+    X_encoded = X_aug[np.array(y_encoded) != -1]
+    y_encoded = np.array([y for y in y_encoded if y != -1])
+
+    # ✅ 디버그 출력
+    from collections import Counter
+    print(f"[✅ augment_and_expand] 최종 샘플 수: {len(y_encoded)}, 라벨 분포: {Counter(y_encoded)}")
+
+    return X_encoded, y_encoded
 
 
 
