@@ -114,8 +114,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"▶ 학습 시작: {symbol}-{strategy}")
-
+    print(f"▶ 학습 시작: {symbol}-{strategy}", flush=True)
+    
     try:
         masked_reconstruction(symbol, strategy, input_size=FEATURE_INPUT_SIZE, mask_ratio=0.2, epochs=5)
 
