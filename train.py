@@ -97,17 +97,18 @@ def get_class_groups(num_classes=21, group_size=7):
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
 def train_one_model(symbol, strategy, max_epochs=20):
-    import os, gc, traceback
+    import os, gc, traceback, torch
     from focal_loss import FocalLoss
     from ssl_pretrain import masked_reconstruction
     from window_optimizer import find_best_windows
     from config import FEATURE_INPUT_SIZE
     from collections import Counter
-    import torch
     from torch.utils.data import TensorDataset, DataLoader
     import numpy as np
     from model.base_model import get_model
     from logger import log_training_result
+    from data_augmentation import balance_classes
+    from wrong_data_loader import load_training_prediction_data  # ✅ 실패학습 DB 로드
     from datetime import datetime
     import pytz
 
@@ -134,7 +135,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
         if input_size < FEATURE_INPUT_SIZE:
             for pad_col in range(input_size, FEATURE_INPUT_SIZE):
-                df_feat[f"pad_{pad_col}"] = 0.0
+                df_feat[f"pad_{pad_col}"] = np.random.normal(0, 0.001)
             input_size = FEATURE_INPUT_SIZE
 
         class_groups = get_class_groups()
@@ -143,6 +144,13 @@ def train_one_model(symbol, strategy, max_epochs=20):
             X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
             if X_raw is None or y_raw is None or len(X_raw) < 5:
                 continue
+
+            # ✅ 실패학습 DB 로드 & concat
+            fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size=input_size)
+            if fail_X is not None and fail_y is not None and len(fail_X) > 0:
+                X_raw = np.concatenate([X_raw, fail_X], axis=0)
+                y_raw = np.concatenate([y_raw, fail_y], axis=0)
+                print(f"[🔁 실패재학습 추가] {len(fail_X)}개 실패샘플 합산 완료")
 
             val_len = max(1, int(len(X_raw) * 0.2))
             X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
@@ -154,6 +162,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                 if len(y_train_group) < 2:
                     continue
+
+                X_train_group, y_train_group = balance_classes(
+                    X_train_group, y_train_group, min_count=20, num_classes=len(group_classes)
+                )
+                print(f"[📊 학습 데이터 클래스 분포] {Counter(y_train_group)}")
 
                 output_size = len(group_classes)
                 val_mask = np.isin(y_val, group_classes)
@@ -169,6 +182,19 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 for model_type in ["lstm", "cnn_lstm", "transformer"]:
                     model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
                     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+                    # ✅ [누적학습 추가] 기존 모델 + optimizer 로드
+                    model_path = f"/persistent/models/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.pt"
+                    opt_path = model_path.replace(".pt", ".opt.pt")
+                    if os.path.exists(model_path):
+                        model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+                        print(f"[🔄 누적학습] 기존 모델 로드 완료: {model_path}")
+                        if os.path.exists(opt_path):
+                            optimizer.load_state_dict(torch.load(opt_path, map_location=DEVICE))
+                            print(f"[🔄 누적학습] optimizer 로드 완료: {opt_path}")
+                    else:
+                        print(f"[🆕 신규학습] 기존 모델 없음: {model_path}")
+
                     lossfn = torch.nn.CrossEntropyLoss()
 
                     train_ds = TensorDataset(
@@ -196,11 +222,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         val_acc = (val_preds == val_labels).float().mean().item() if len(val_labels) > 0 else 0.0
 
                     log_training_result(symbol, strategy, model_type, acc=val_acc, f1=0.0, loss=float(loss.item()))
-
-                    model_path = f"/persistent/models/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.pt"
-                    torch.save(model.state_dict(), model_path)
-
                     print(f"[✅ 학습완료] {symbol}-{strategy} | {model_type} | group:{group_id} | window:{window} | acc:{val_acc:.4f}")
+
+                    torch.save(model.state_dict(), model_path)
+                    torch.save(optimizer.state_dict(), opt_path)  # ✅ optimizer 상태도 저장
 
                     del model, xb, yb, logits
                     torch.cuda.empty_cache()
