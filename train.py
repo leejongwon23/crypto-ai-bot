@@ -205,7 +205,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                         model.eval()
                         with torch.no_grad():
-                            # ✅ input shape fix: 전체 시퀀스 입력
                             val_inputs = torch.tensor(X_val, dtype=torch.float32).to(DEVICE)
                             val_logits = model(val_inputs)
                             val_preds = torch.argmax(val_logits, dim=1).cpu().numpy()
@@ -234,13 +233,19 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                 val_loader = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long)), batch_size=32)
                 train_loader = DataLoader(train_ds, batch_size=32)
-                maml_train_entry(model, train_loader, val_loader)
+
+                # ✅ 3단계 수정: model 있을 때만 호출
+                if 'model' in locals():
+                    maml_train_entry(model, train_loader, val_loader)
+                else:
+                    print("[⚠️ model 없음 → maml_train_entry 스킵]")
 
             except Exception as e:
                 print(f"[ERROR] window={window}: {e}")
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
+
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
