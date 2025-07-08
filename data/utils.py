@@ -144,13 +144,13 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         dummy_y = np.array([0], dtype=np.int64)
         return dummy_X, dummy_y
 
-    # ✅ 희소 클래스 복제 및 클래스 분포 균등화
+    # ✅ 희소 클래스 복제: 최대 클래스의 80%로 맞춤
     counts = Counter(y)
     max_count = max(counts.values())
     for cls_id in range(NUM_CLASSES):
         cls_samples = [i for i, label in enumerate(y) if label == cls_id]
-        if cls_samples:
-            needed = max_count - len(cls_samples)
+        needed = int(max_count * 0.8) - len(cls_samples)
+        if cls_samples and needed > 0:
             for _ in range(needed):
                 idx = random.choice(cls_samples)
                 X.append(X[idx])
@@ -159,7 +159,11 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     X = np.array(X, dtype=np.float32)
     y = np.array(y, dtype=np.int64)
 
+    # ✅ 디버그 출력
+    print(f"[✅ create_dataset] 최종 샘플 수: {len(y)}, 클래스 분포: {Counter(y)}")
+
     return X, y
+
 
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
