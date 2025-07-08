@@ -290,7 +290,6 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
 
     return X_encoded, y_encoded
 
-
 def balance_classes(X, y, min_count=20, num_classes=21):
     import numpy as np
     from collections import Counter
@@ -338,9 +337,10 @@ def balance_classes(X, y, min_count=20, num_classes=21):
 
                 X_balanced.extend(mixup_samples)
                 y_balanced.extend([cls]*needed)
-                print(f"[복제+Noise+Mixup+Masking] 클래스 {cls} → {needed}개 추가")
 
-                # ✅ 값 범위 이상치 검증 로그 추가
+                print(f"[복제] 클래스 {cls} → {needed}개 추가")
+
+                # ✅ 값 검증
                 if np.any(np.isnan(mixup_samples)) or np.any(np.isinf(mixup_samples)):
                     print(f"[⚠️ 경고] 클래스 {cls} 복제 중 NaN 또는 Inf 발생")
             else:
@@ -355,7 +355,6 @@ def balance_classes(X, y, min_count=20, num_classes=21):
     print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
 
     return np.array(X_shuffled), np.array(y_shuffled, dtype=np.int64)
-
 
 def train_all_models():
     """
