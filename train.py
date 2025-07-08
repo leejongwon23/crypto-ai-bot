@@ -142,10 +142,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
         for window in window_list:
             try:
                 X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
-
-                # ✅ 추가 로그
-                print(f"[debug] create_dataset X_raw.shape={X_raw.shape}, y_raw.shape={y_raw.shape}")
-
                 if X_raw is None or y_raw is None or len(X_raw) < 5:
                     print(f"⛔ 중단: window={window} 학습 데이터 부족")
                     continue
@@ -158,9 +154,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 sorted_idx = np.argsort(y_raw)
                 X_raw, y_raw = X_raw[sorted_idx], y_raw[sorted_idx]
                 X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
-
-                # ✅ validation 데이터 shape 로그
-                print(f"[debug] X_val.shape={X_val.shape}, y_val.shape={y_val.shape}")
 
                 for group_id, group_classes in enumerate(class_groups):
                     group_mask = np.isin(y_train, group_classes)
@@ -210,7 +203,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                         model.eval()
                         with torch.no_grad():
-                            val_logits = model(torch.tensor(X_val[:, -1, :], dtype=torch.float32).to(DEVICE))
+                            # ✅ input shape fix: 전체 시퀀스 입력
+                            val_inputs = torch.tensor(X_val, dtype=torch.float32).to(DEVICE)
+                            val_logits = model(val_inputs)
                             val_preds = torch.argmax(val_logits, dim=1).cpu().numpy()
                             val_acc = (val_preds == y_val).mean()
                             print(f"[📈 validation accuracy] {symbol}-{strategy}-{model_type} acc={val_acc:.4f}")
