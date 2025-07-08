@@ -19,6 +19,21 @@ DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
+# predict.py 상단에 추가해줘야 할 부분
+MODEL_CACHE = {}
+
+def load_model_cached(model_path, model_type, input_size, output_size):
+    key = (model_path, model_type)
+    if key in MODEL_CACHE:
+        return MODEL_CACHE[key]
+
+    model = get_model(model_type, input_size, output_size).to(DEVICE)
+    state = torch.load(model_path, map_location=DEVICE)
+    model.load_state_dict(state)
+    model.eval()
+    MODEL_CACHE[key] = model
+    return model
+    
 def class_to_expected_return(cls, recent_days=3):
     import pandas as pd
     import numpy as np
@@ -201,10 +216,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         if model_input_size != input_size:
                             continue
 
-                        model = get_model(m["model"], input_size, len(group_classes)).to(DEVICE)
-                        state = torch.load(model_path, map_location=DEVICE)
-                        model.load_state_dict(state)
-                        model.eval()
+                        # ✅ 캐싱된 모델 로드 적용
+                        model = load_model_cached(model_path, m["model"], input_size, len(group_classes))
 
                         with torch.no_grad():
                             logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
