@@ -129,6 +129,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 def predict(symbol, strategy, source="일반", model_type=None):
     from scipy.stats import entropy
     from window_optimizer import find_best_windows
+    from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
 
     def get_class_groups(num_classes=21, group_size=5):
         return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
@@ -158,21 +159,19 @@ def predict(symbol, strategy, source="일반", model_type=None):
             feat_scaled = MinMaxScaler().fit_transform(features_only)
             input_size = feat_scaled.shape[1]
 
-            # ✅ input_size fallback pad 처리
             if input_size < FEATURE_INPUT_SIZE:
                 pad_cols = FEATURE_INPUT_SIZE - input_size
                 feat_scaled = np.pad(feat_scaled, ((0,0),(0,pad_cols)), mode="constant", constant_values=0)
                 input_size = FEATURE_INPUT_SIZE
-                print(f"[info] predict input_size pad 적용: {input_size}")
 
             models = get_available_models()
             if not models:
-                print("[⚠️ 모델 없음] fallback 학습 트리거")
                 return [failed_result(symbol, strategy, "unknown", "모델 없음 → 학습 필요", source)]
 
             pred_classes = []
-            for _ in range(3):
-                ensemble_probs = np.zeros(21, dtype=np.float32)
+            recent_freq = get_recent_class_frequencies(strategy)
+            for trial in range(3):
+                ensemble_probs = np.zeros(NUM_CLASSES, dtype=np.float32)
                 for window in window_list:
                     if feat_scaled.shape[0] < window:
                         continue
@@ -181,9 +180,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
                     for m in models:
                         if m["symbol"] != symbol or m["strategy"] != strategy:
-                            continue
-                        mt = m["model"]
-                        if model_type and mt != model_type:
                             continue
                         if f"_window{window}" not in m["pt_file"]:
                             continue
@@ -203,17 +199,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
                         model_input_size = meta.get("input_size")
                         if model_input_size != input_size:
-                            print(f"[⚠️ input_size 불일치] 모델:{model_input_size}, feature:{input_size}")
-                            # ✅ fallback pad 적용
-                            if input_size < model_input_size:
-                                pad_cols = model_input_size - input_size
-                                X = np.pad(X, ((0,0),(0,0),(0,pad_cols)), mode="constant", constant_values=0)
-                                input_size = model_input_size
-                                print(f"[info] predict input_size fallback pad 적용: {input_size}")
-                            else:
-                                return [failed_result(symbol, strategy, mt, f"input_size 불일치 → 학습 필요 (모델:{model_input_size}, feature:{input_size})", source)]
+                            continue
 
-                        model = get_model(mt, input_size, len(group_classes)).to(DEVICE)
+                        model = get_model(m["model"], input_size, len(group_classes)).to(DEVICE)
                         state = torch.load(model_path, map_location=DEVICE)
                         model.load_state_dict(state)
                         model.eval()
@@ -222,16 +210,17 @@ def predict(symbol, strategy, source="일반", model_type=None):
                             logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
                             probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
 
+                        adjusted_probs = adjust_probs_with_diversity(probs, recent_freq)
                         for i, cls in enumerate(group_classes):
-                            ensemble_probs[cls] += probs[i]
+                            ensemble_probs[cls] += adjusted_probs[i]
 
-                if ensemble_probs.sum() == 0:
-                    pred_class = -1
-                else:
-                    pred_class = int(ensemble_probs.argmax())
+                pred_class = int(ensemble_probs.argmax()) if ensemble_probs.sum() > 0 else -1
                 pred_classes.append(pred_class)
 
-            if len(set(pred_classes)) == 1 and pred_class != -1:
+            # ✅ 핵심 요약 로그만 출력
+            print(f"[predict] {symbol}-{strategy} 결과: {pred_classes}, 최종={pred_classes[0]}")
+
+            if len(set(pred_classes)) == 1 and pred_classes[0] != -1:
                 final_pred_class = pred_classes[0]
                 expected_return = class_to_expected_return(final_pred_class)
                 conf_score = 1 - entropy(ensemble_probs + 1e-6) / np.log(len(ensemble_probs))
@@ -253,16 +242,15 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     "label": final_pred_class, "confidence": round(conf_score, 4)
                 }]
             else:
-                print("[⚠️ Self-Consistency 실패] 3회 예측 불일치")
+                print(f"[predict] {symbol}-{strategy} Self-Consistency 실패")
                 return [failed_result(symbol, strategy, "unknown", "Self-Consistency 실패 (3회 예측 불일치)", source)]
 
         retry += 1
         return [failed_result(symbol, strategy, "unknown", "다중윈도우 Self-Consistency 실패", source)]
 
     except Exception as e:
-        print(f"[predict 예외] {e}")
+        print(f"[predict 예외] {symbol}-{strategy} → {e}")
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
-
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
