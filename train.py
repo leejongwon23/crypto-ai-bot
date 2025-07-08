@@ -177,6 +177,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         print(f"[⚠️ 스킵] group-{group_id} output_size=0 → 모델 학습 스킵")
                         continue
 
+                    # ✅ [Step 4-1] validation 라벨 재인코딩 추가
+                    val_mask = np.isin(y_val, group_classes)
+                    X_val_group = X_val[val_mask]
+                    y_val_group = np.array([group_classes.index(y) for y in y_val[val_mask]])
+
                     for model_type in ["lstm", "cnn_lstm", "transformer"]:
                         target_count = 50
                         repeat_factor = max(1, int(np.ceil(target_count / len(y_train_group))))
@@ -216,10 +221,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                         model.eval()
                         with torch.no_grad():
-                            val_inputs = torch.tensor(X_val, dtype=torch.float32).to(DEVICE)
+                            val_inputs = torch.tensor(X_val_group, dtype=torch.float32).to(DEVICE)
+                            val_labels = torch.tensor(y_val_group, dtype=torch.long).to(DEVICE)
                             val_logits = model(val_inputs)
-                            val_preds = torch.argmax(val_logits, dim=1).cpu().numpy()
-                            val_acc = (val_preds == y_val).mean()
+                            val_preds = torch.argmax(val_logits, dim=1)
+                            val_acc = (val_preds == val_labels).float().mean().item()
                             print(f"[📈 validation accuracy] {symbol}-{strategy}-{model_type} acc={val_acc:.4f}")
 
                         # ✅ 학습 로그 기록 추가
@@ -258,6 +264,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
+
 
 
 # ✅ augmentation 함수 추가
