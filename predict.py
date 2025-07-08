@@ -125,7 +125,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
-
 def predict(symbol, strategy, source="일반", model_type=None):
     from scipy.stats import entropy
     from window_optimizer import find_best_windows
@@ -158,8 +157,14 @@ def predict(symbol, strategy, source="일반", model_type=None):
             feat_scaled = MinMaxScaler().fit_transform(features_only)
             input_size = feat_scaled.shape[1]
 
-            models = get_available_models()
+            # ✅ input_size fallback pad 처리
+            if input_size < FEATURE_INPUT_SIZE:
+                pad_cols = FEATURE_INPUT_SIZE - input_size
+                feat_scaled = np.pad(feat_scaled, ((0,0),(0,pad_cols)), mode="constant", constant_values=0)
+                input_size = FEATURE_INPUT_SIZE
+                print(f"[info] predict input_size pad 적용: {input_size}")
 
+            models = get_available_models()
             if not models:
                 print("[⚠️ 모델 없음] fallback 학습 트리거")
                 return [failed_result(symbol, strategy, "unknown", "모델 없음 → 학습 필요", source)]
@@ -198,7 +203,14 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         model_input_size = meta.get("input_size")
                         if model_input_size != input_size:
                             print(f"[⚠️ input_size 불일치] 모델:{model_input_size}, feature:{input_size}")
-                            return [failed_result(symbol, strategy, mt, f"input_size 불일치 → 학습 필요 (모델:{model_input_size}, feature:{input_size})", source)]
+                            # ✅ fallback pad 적용
+                            if input_size < model_input_size:
+                                pad_cols = model_input_size - input_size
+                                X = np.pad(X, ((0,0),(0,0),(0,pad_cols)), mode="constant", constant_values=0)
+                                input_size = model_input_size
+                                print(f"[info] predict input_size fallback pad 적용: {input_size}")
+                            else:
+                                return [failed_result(symbol, strategy, mt, f"input_size 불일치 → 학습 필요 (모델:{model_input_size}, feature:{input_size})", source)]
 
                         model = get_model(mt, input_size, len(group_classes)).to(DEVICE)
                         state = torch.load(model_path, map_location=DEVICE)
@@ -212,10 +224,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         for i, cls in enumerate(group_classes):
                             ensemble_probs[cls] += probs[i]
 
-                pred_class = int(ensemble_probs.argmax())
+                if ensemble_probs.sum() == 0:
+                    pred_class = -1
+                else:
+                    pred_class = int(ensemble_probs.argmax())
                 pred_classes.append(pred_class)
 
-            if len(set(pred_classes)) == 1:
+            if len(set(pred_classes)) == 1 and pred_class != -1:
                 final_pred_class = pred_classes[0]
                 expected_return = class_to_expected_return(final_pred_class)
                 conf_score = 1 - entropy(ensemble_probs + 1e-6) / np.log(len(ensemble_probs))
