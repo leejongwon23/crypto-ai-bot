@@ -108,13 +108,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
     try:
-        # ✅ regime change detection 먼저 실행
         df_regime = get_kline_by_strategy(symbol, strategy)
         if df_regime is not None and not df_regime.empty:
             if detect_regime_change(df_regime):
                 print(f"[info] {symbol}-{strategy} regime change detected → meta-learning 권장")
 
-        # ✅ SSL pretraining
         masked_reconstruction(symbol, strategy, input_size=FEATURE_INPUT_SIZE, mask_ratio=0.2, epochs=5)
 
         df = get_kline_by_strategy(symbol, strategy)
@@ -131,7 +129,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
         features_only = df_feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         input_size = features_only.shape[1]
 
-        # ✅ input_size fallback pad 처리
         if input_size < FEATURE_INPUT_SIZE:
             for pad_col in range(input_size, FEATURE_INPUT_SIZE):
                 df_feat[f"pad_{pad_col}"] = 0.0
@@ -145,6 +142,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
         for window in window_list:
             try:
                 X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
+
+                # ✅ 추가 로그
+                print(f"[debug] create_dataset X_raw.shape={X_raw.shape}, y_raw.shape={y_raw.shape}")
+
                 if X_raw is None or y_raw is None or len(X_raw) < 5:
                     print(f"⛔ 중단: window={window} 학습 데이터 부족")
                     continue
@@ -157,6 +158,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 sorted_idx = np.argsort(y_raw)
                 X_raw, y_raw = X_raw[sorted_idx], y_raw[sorted_idx]
                 X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
+
+                # ✅ validation 데이터 shape 로그
+                print(f"[debug] X_val.shape={X_val.shape}, y_val.shape={y_val.shape}")
 
                 for group_id, group_classes in enumerate(class_groups):
                     group_mask = np.isin(y_train, group_classes)
@@ -171,7 +175,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         target_count = 50
                         repeat_factor = max(1, int(np.ceil(target_count / len(y_train_group))))
 
-                        # ✅ augmentation 함수화
                         X_train_group, y_train_group = augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count)
 
                         counts_group = Counter(y_train_group)
@@ -209,7 +212,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         with torch.no_grad():
                             val_logits = model(torch.tensor(X_val[:, -1, :], dtype=torch.float32).to(DEVICE))
                             val_preds = torch.argmax(val_logits, dim=1).cpu().numpy()
-                            val_acc = (val_preds == y_val).mean()  # ✅ 수정: y_val[:, -1] → y_val
+                            val_acc = (val_preds == y_val).mean()
                             print(f"[📈 validation accuracy] {symbol}-{strategy}-{model_type} acc={val_acc:.4f}")
 
                         meta = {
@@ -232,7 +235,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         torch.cuda.empty_cache()
                         gc.collect()
 
-                # ✅ meta-learning 추가 호출
                 val_loader = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long)), batch_size=32)
                 train_loader = DataLoader(train_ds, batch_size=32)
                 maml_train_entry(model, train_loader, val_loader)
