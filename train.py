@@ -291,10 +291,6 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
     return X_encoded, y_encoded
 
 
-
-
-
-
 def balance_classes(X, y, min_count=20, num_classes=21):
     import numpy as np
     from collections import Counter
@@ -396,19 +392,17 @@ def train_all_models():
 def train_models(symbol_list):
     """
     ✅ [개선 설명]
-    - 그룹 심볼 전체 학습 완료 후 meta 보정 + 예측 실행
+    - train_models: 학습만 수행 (예측 실행 제거)
+    - 예측 실행은 train_symbol_group_loop에서 그룹별로 호출
     """
     global training_in_progress
     from telegram_bot import send_message
-    from predict_test import main as run_prediction
     import maintenance_fix_meta
 
     strategies = ["단기", "중기", "장기"]
 
-    # ✅ 전체 전략 학습 시작 로그
     print(f"🚀 [train_models] 심볼 그룹 학습 시작: {symbol_list}")
 
-    # ✅ 모든 전략 학습
     for strategy in strategies:
         if training_in_progress.get(strategy, False):
             print(f"⚠️ 중복 실행 방지: {strategy}")
@@ -431,22 +425,14 @@ def train_models(symbol_list):
 
         time.sleep(2)
 
-    # ✅ meta 보정: 그룹 학습 전체 종료 후
+    # ✅ meta 보정만 실행
     try:
         maintenance_fix_meta.fix_all_meta_json()
         print(f"✅ meta 보정 완료: 그룹 {symbol_list}")
     except Exception as e:
         print(f"[⚠️ meta 보정 실패] {e}")
 
-    # ✅ 예측 실행: 그룹 심볼 전체에 대해
-    try:
-        for strategy in strategies:
-            run_prediction(strategy, symbols=symbol_list)
-            print(f"✅ 예측 완료: {strategy} | 심볼: {symbol_list}")
-    except Exception as e:
-        print(f"❌ 예측 실패: {strategy} → {e}")
-
-    send_message(f"✅ 그룹 학습 및 예측 완료: {symbol_list}")
+    send_message(f"✅ 그룹 학습 완료: {symbol_list}")
 
 def train_model_loop(strategy):
     """
@@ -474,10 +460,7 @@ def train_model_loop(strategy):
 
 def train_symbol_group_loop(delay_minutes=5):
     """
-    ✅ [개선 설명]
-    - SYMBOL_GROUPS 순서 명확 출력
-    - 각 그룹 학습 시작과 종료 로그 개선
-    - 그룹 루프 순서 강제 보장
+    ✅ [개선] 루프 순서 강제 초기화 + 로그 개선
     """
     import time
     import maintenance_fix_meta
@@ -491,10 +474,10 @@ def train_symbol_group_loop(delay_minutes=5):
         loop_count += 1
         print(f"\n🔄 그룹 학습 루프 #{loop_count} 시작")
 
+        # ✅ 순서 강제 초기화
         for idx, group in enumerate(SYMBOL_GROUPS):
             print(f"\n🚀 [그룹 {idx}/{group_count}] 학습 시작 | 심볼: {group}")
 
-            # ✅ 캐시 clear
             _kline_cache.clear()
             _feature_cache.clear()
             print("[✅ cache cleared] _kline_cache, _feature_cache")
@@ -503,11 +486,10 @@ def train_symbol_group_loop(delay_minutes=5):
                 train_models(group)
                 print(f"[✅ 그룹 {idx}] 학습 완료")
 
-                # ✅ meta 보정
                 maintenance_fix_meta.fix_all_meta_json()
                 print(f"[✅ meta 보정 완료] 그룹 {idx}")
 
-                # ✅ 예측 실행
+                # ✅ 예측 실행: 각 그룹 학습 후 예측만 실행
                 for symbol in group:
                     for strategy in ["단기", "중기", "장기"]:
                         try:
