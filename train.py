@@ -107,9 +107,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
     import torch
     from torch.utils.data import TensorDataset, DataLoader
     import numpy as np
-    import random
-    from regime_change_detection import detect_regime_change
-    from meta_learning import maml_train_entry
     from model.base_model import get_model
     from logger import log_training_result
     from datetime import datetime
@@ -120,11 +117,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
     try:
-        df_regime = get_kline_by_strategy(symbol, strategy)
-        if df_regime is not None and not df_regime.empty:
-            if detect_regime_change(df_regime):
-                print(f"[info] {symbol}-{strategy} regime change detected → meta-learning 권장")
-
         masked_reconstruction(symbol, strategy, input_size=FEATURE_INPUT_SIZE, mask_ratio=0.2, epochs=5)
 
         df = get_kline_by_strategy(symbol, strategy)
@@ -145,120 +137,72 @@ def train_one_model(symbol, strategy, max_epochs=20):
             for pad_col in range(input_size, FEATURE_INPUT_SIZE):
                 df_feat[f"pad_{pad_col}"] = 0.0
             input_size = FEATURE_INPUT_SIZE
-            print(f"[info] input_size padded to FEATURE_INPUT_SIZE={FEATURE_INPUT_SIZE}")
 
         class_groups = get_class_groups()
 
         for window in window_list:
-            try:
-                X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
-                if X_raw is None or y_raw is None or len(X_raw) < 5:
-                    print(f"⛔ 중단: window={window} 학습 데이터 부족")
+            X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
+            if X_raw is None or y_raw is None or len(X_raw) < 5:
+                continue
+
+            val_len = max(1, int(len(X_raw) * 0.2))
+            X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
+
+            for group_id, group_classes in enumerate(class_groups):
+                group_mask = np.isin(y_train, group_classes)
+                X_train_group = X_train[group_mask]
+                y_train_group = y_train[group_mask]
+
+                if len(y_train_group) < 2:
                     continue
 
-                if X_raw.shape[2] != input_size:
-                    print(f"[❌ 오류] feature input_size 불일치: X_raw.shape[2]={X_raw.shape[2]} vs input_size={input_size}")
+                output_size = len(group_classes)
+                val_mask = np.isin(y_val, group_classes)
+                X_val_group = X_val[val_mask]
+                y_val_group = np.array([group_classes.index(y) for y in y_val[val_mask]]) if len(y_val[val_mask]) > 0 else None
+
+                if y_val_group is None or len(y_val_group) == 0:
                     continue
 
-                sorted_idx = np.argsort(y_raw)
-                X_raw, y_raw = X_raw[sorted_idx], y_raw[sorted_idx]
+                for model_type in ["lstm", "cnn_lstm", "transformer"]:
+                    model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
+                    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+                    lossfn = torch.nn.CrossEntropyLoss()
 
-                if len(X_raw) < 3:
-                    print(f"[⚠️ 데이터 부족] 총 샘플 {len(X_raw)}개 → 학습/검증 불가, 스킵")
-                    continue
+                    train_ds = TensorDataset(
+                        torch.tensor(X_train_group, dtype=torch.float32),
+                        torch.tensor(y_train_group, dtype=torch.long)
+                    )
+                    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=0)
 
-                val_len = max(1, int(len(X_raw) * 0.2))
-                if len(X_raw) - val_len < 1:
-                    val_len = len(X_raw) - 1
+                    for epoch in range(max_epochs):
+                        for xb, yb in train_loader:
+                            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                            logits = model(xb)
+                            loss = lossfn(logits, yb)
+                            if torch.isfinite(loss):
+                                optimizer.zero_grad()
+                                loss.backward()
+                                optimizer.step()
 
-                X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
+                    model.eval()
+                    with torch.no_grad():
+                        val_inputs = torch.tensor(X_val_group, dtype=torch.float32).to(DEVICE)
+                        val_labels = torch.tensor(y_val_group, dtype=torch.long).to(DEVICE)
+                        val_logits = model(val_inputs)
+                        val_preds = torch.argmax(val_logits, dim=1)
+                        val_acc = (val_preds == val_labels).float().mean().item() if len(val_labels) > 0 else 0.0
+                        print(f"[validation] {symbol}-{strategy}-{model_type} acc={val_acc:.4f}")
 
-                for group_id, group_classes in enumerate(class_groups):
-                    group_mask = np.isin(y_train, group_classes)
-                    X_train_group = X_train[group_mask]
-                    y_train_group = y_train[group_mask]
+                    log_training_result(symbol, strategy, model_type, acc=val_acc, f1=0.0, loss=float(loss.item()))
 
-                    print(f"[DEBUG] train_one_model: window={window}, group_id={group_id}, train_samples={len(y_train_group)}, val_samples={len(y_val)}")
+                    model_path = f"/persistent/models/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.pt"
+                    torch.save(model.state_dict(), model_path)
+                    print(f"[저장 완료] {model_type} group-{group_id} window-{window}")
 
-                    if len(y_train_group) < 2:
-                        print(f"[⚠️ 스킵] window={window} group-{group_id}: 학습 데이터 부족 ({len(y_train_group)})")
-                        continue
-
-                    output_size = len(group_classes)
-                    if output_size == 0:
-                        print(f"[⚠️ 스킵] group-{group_id} output_size=0 → 모델 학습 스킵")
-                        continue
-
-                    val_mask = np.isin(y_val, group_classes)
-                    X_val_group = X_val[val_mask]
-                    y_val_group = np.array([group_classes.index(y) for y in y_val[val_mask]]) if len(y_val[val_mask]) > 0 else None
-
-                    if y_val_group is None or len(y_val_group) == 0:
-                        print(f"[⚠️ validation skip] group-{group_id}: validation 데이터 없음")
-                        continue
-
-                    for model_type in ["lstm", "cnn_lstm", "transformer"]:
-                        target_count = 50
-                        repeat_factor = max(1, int(np.ceil(target_count / len(y_train_group))))
-
-                        X_train_group, y_train_group = augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count)
-                        if X_train_group is None or y_train_group is None or len(y_train_group) < 2:
-                            print(f"[⚠️ augment 실패] {model_type} group-{group_id}")
-                            continue
-
-                        counts_group = Counter(y_train_group)
-                        total_group = sum(counts_group.values())
-                        class_weight_group = [total_group / counts_group.get(i, 1) for i in range(output_size)]
-
-                        class_weight_tensor = torch.tensor(class_weight_group, dtype=torch.float32).to(DEVICE)
-
-                        model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
-                        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-                        lossfn_ce = torch.nn.CrossEntropyLoss(weight=class_weight_tensor)
-
-                        train_ds = TensorDataset(
-                            torch.tensor(X_train_group, dtype=torch.float32),
-                            torch.tensor(y_train_group, dtype=torch.long)
-                        )
-                        train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=0)
-
-                        for epoch in range(max_epochs):
-                            for xb, yb in train_loader:
-                                xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                                logits = model(xb)
-                                loss = lossfn_ce(logits, yb)
-                                if torch.isfinite(loss):
-                                    optimizer.zero_grad()
-                                    loss.backward()
-                                    optimizer.step()
-
-                        model.eval()
-                        with torch.no_grad():
-                            val_inputs = torch.tensor(X_val_group, dtype=torch.float32).to(DEVICE)
-                            val_labels = torch.tensor(y_val_group, dtype=torch.long).to(DEVICE)
-                            val_logits = model(val_inputs)
-                            val_preds = torch.argmax(val_logits, dim=1)
-                            val_acc = (val_preds == val_labels).float().mean().item() if len(val_labels) > 0 else 0.0
-                            print(f"[📈 validation accuracy] {symbol}-{strategy}-{model_type} acc={val_acc:.4f}")
-
-                        log_training_result(symbol, strategy, model_type, acc=val_acc, f1=0.0, loss=float(loss.item()))
-
-                        model_path = f"/persistent/models/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.pt"
-                        torch.save(model.state_dict(), model_path)
-
-                        print(f"[✅ 저장 완료] {model_type} group-{group_id} window-{window}")
-
-                        del model, xb, yb, logits
-                        torch.cuda.empty_cache()
-                        gc.collect()
-
-                if 'model' in locals():
-                    maml_train_entry(model, train_loader, val_loader)
-                else:
-                    print("[⚠️ model 없음 → maml_train_entry 스킵]")
-
-            except Exception as e:
-                print(f"[ERROR] window={window}: {e}")
+                    del model, xb, yb, logits
+                    torch.cuda.empty_cache()
+                    gc.collect()
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
