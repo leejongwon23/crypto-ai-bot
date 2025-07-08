@@ -67,9 +67,11 @@ class CNNLSTMPricePredictor(nn.Module):
         hidden = self.act(self.fc2(hidden))
         return self.fc_logits(hidden)
 
+
 class TransformerPricePredictor(nn.Module):
-    def __init__(self, input_size, d_model=128, nhead=8, num_layers=3, dropout=0.4, output_size=NUM_CLASSES):
+    def __init__(self, input_size, d_model=128, nhead=8, num_layers=3, dropout=0.4, output_size=None, mode="classification"):
         super().__init__()
+        self.mode = mode
         self.input_proj = nn.Linear(input_size, d_model)
         self.pos_encoder = PositionalEncoding(d_model)
         self.encoder_layers = nn.ModuleList([
@@ -78,20 +80,28 @@ class TransformerPricePredictor(nn.Module):
         ])
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
-        self.fc1 = nn.Linear(d_model, d_model // 2)
-        self.act = nn.GELU()
-        self.fc_logits = nn.Linear(d_model // 2, output_size)
+
+        if self.mode == "classification":
+            self.fc1 = nn.Linear(d_model, d_model // 2)
+            self.act = nn.GELU()
+            self.fc_logits = nn.Linear(d_model // 2, output_size)
+        elif self.mode == "reconstruction":
+            self.decoder = nn.Linear(d_model, output_size)
 
     def forward(self, x):
         x = self.input_proj(x)
         x = self.pos_encoder(x)
         for layer in self.encoder_layers:
             x = layer(x)
-        x = x.mean(dim=1)
         x = self.norm(x)
         x = self.dropout(x)
-        hidden = self.act(self.fc1(x))
-        return self.fc_logits(hidden)
+
+        if self.mode == "classification":
+            x = x.mean(dim=1)
+            x = self.act(self.fc1(x))
+            return self.fc_logits(x)
+        elif self.mode == "reconstruction":
+            return self.decoder(x)
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
