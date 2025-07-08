@@ -159,9 +159,17 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     print(f"[❌ 오류] feature input_size 불일치: X_raw.shape[2]={X_raw.shape[2]} vs input_size={input_size}")
                     continue
 
-                val_len = max(5, int(len(X_raw) * 0.2))
                 sorted_idx = np.argsort(y_raw)
                 X_raw, y_raw = X_raw[sorted_idx], y_raw[sorted_idx]
+
+                if len(X_raw) < 3:
+                    print(f"[⚠️ 데이터 부족] 총 샘플 {len(X_raw)}개 → 학습/검증 불가, 스킵")
+                    continue
+
+                val_len = max(1, int(len(X_raw) * 0.2))
+                if len(X_raw) - val_len < 1:
+                    val_len = len(X_raw) - 1
+
                 X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
 
                 for group_id, group_classes in enumerate(class_groups):
@@ -169,7 +177,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     X_train_group = X_train[group_mask]
                     y_train_group = y_train[group_mask]
 
-                    # ✅ 디버그 출력 추가
                     print(f"[DEBUG] train_one_model: window={window}, group_id={group_id}, train_samples={len(y_train_group)}, val_samples={len(y_val)}")
 
                     if len(y_train_group) < 2:
@@ -265,6 +272,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
+
 
 
 # ✅ augmentation 함수 추가
