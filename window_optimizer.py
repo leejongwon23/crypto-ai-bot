@@ -11,15 +11,15 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             print(f"[오류] window_list 타입 오류 → 기본값으로 대체")
             window_list = [10, 20, 30, 40]
 
-        min_window = max(min(window_list), 10)
+        min_window = max(min(window_list), 5)
 
         df = get_kline_by_strategy(symbol, strategy)
-        if df is None or len(df) < max(window_list) + 20:
+        if df is None or len(df) < min(window_list) + 10:
             print(f"[경고] {symbol}-{strategy} → 데이터 부족으로 fallback window={min_window}")
             return min_window
 
         df_feat = compute_features(symbol, df, strategy)
-        if df_feat is None or df_feat.empty or df_feat.isnull().any().any() or len(df_feat) < max(window_list) + 10:
+        if df_feat is None or df_feat.empty or df_feat.isnull().any().any() or len(df_feat) < min(window_list) + 5:
             print(f"[경고] {symbol}-{strategy} → feature 부족 또는 NaN 포함으로 fallback window={min_window}")
             return min_window
 
@@ -38,10 +38,15 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         best_acc = -1
         best_window = int(window_list[0])
 
-        for window in window_list:
+        for window in sorted(window_list):
+            # ✅ window 크기를 데이터 길이에 맞게 조절
             if len(feature_dicts) <= window + 3:
-                print(f"[⚠️ skip] window={window} (데이터 부족)")
-                continue
+                adjusted_window = max(5, len(feature_dicts) - 3)
+                if adjusted_window < 5:
+                    print(f"[⚠️ skip] window={window} (데이터 부족)")
+                    continue
+                print(f"[info] window={window} → 데이터 부족으로 adjusted_window={adjusted_window}")
+                window = adjusted_window
 
             X, y = create_dataset(feature_dicts, window, strategy)
             if X is None or y is None or len(X) < 5:
@@ -62,11 +67,18 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             loss_fn = torch.nn.CrossEntropyLoss()
 
-            val_len = max(5, int(len(X) * 0.2))
+            val_len = max(1, int(len(X) * 0.2))
+            if len(X) - val_len < 1:
+                val_len = len(X) - 1
+
             train_X, val_X = X[:-val_len], X[-val_len:]
             train_y, val_y = y[:-val_len], y[-val_len:]
 
-            for _ in range(5):
+            if len(train_X) < 1 or len(val_X) < 1:
+                print(f"[⚠️ skip] window={window} (train/val 샘플 부족)")
+                continue
+
+            for _ in range(3):
                 model.train()
                 logits = model(torch.tensor(train_X, dtype=torch.float32))
                 loss = loss_fn(logits, torch.tensor(train_y, dtype=torch.long))
