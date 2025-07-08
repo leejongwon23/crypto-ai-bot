@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from model.base_model import get_model
+from model.base_model import TransformerPricePredictor  # ✅ 직접 import
 from data.utils import get_kline_by_strategy, compute_features
 import numpy as np
 
@@ -24,8 +24,13 @@ def masked_reconstruction(symbol, strategy, input_size, mask_ratio=0.2, epochs=1
     X = np.expand_dims(X, axis=0)  # (1, T, F)
     X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
 
-    # ✅ transformer reconstruction model: input=F, output=F 동일
-    model = get_model("transformer", input_size=input_size, output_size=input_size).to(DEVICE)
+    # ✅ transformer reconstruction model: mode="reconstruction" 적용
+    model = TransformerPricePredictor(
+        input_size=input_size,
+        output_size=input_size,
+        mode="reconstruction"
+    ).to(DEVICE)
+
     model.train()
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
