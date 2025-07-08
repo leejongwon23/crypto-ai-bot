@@ -234,7 +234,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 val_loader = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long)), batch_size=32)
                 train_loader = DataLoader(train_ds, batch_size=32)
 
-                # ✅ 3단계 수정: model 있을 때만 호출
+                # ✅ model fallback check
                 if 'model' in locals():
                     maml_train_entry(model, train_loader, val_loader)
                 else:
