@@ -173,7 +173,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         torch.tensor(X_train_group, dtype=torch.float32),
                         torch.tensor(y_train_group, dtype=torch.long)
                     )
-                    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=0)
+                    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
 
                     for epoch in range(max_epochs):
                         for xb, yb in train_loader:
