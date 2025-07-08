@@ -393,11 +393,10 @@ def train_all_models():
 
     send_message("✅ 전체 학습 완료. 예측을 실행해주세요.")
 
-
 def train_models(symbol_list):
     """
-    ✅ [설명] 특정 symbol_list에 대해 단기, 중기, 장기 학습 수행
-    - meta 보정 후 예측까지 자동 실행
+    ✅ [개선 설명]
+    - 그룹 심볼 전체 학습 완료 후 meta 보정 + 예측 실행
     """
     global training_in_progress
     from telegram_bot import send_message
@@ -406,6 +405,10 @@ def train_models(symbol_list):
 
     strategies = ["단기", "중기", "장기"]
 
+    # ✅ 전체 전략 학습 시작 로그
+    print(f"🚀 [train_models] 심볼 그룹 학습 시작: {symbol_list}")
+
+    # ✅ 모든 전략 학습
     for strategy in strategies:
         if training_in_progress.get(strategy, False):
             print(f"⚠️ 중복 실행 방지: {strategy}")
@@ -426,21 +429,24 @@ def train_models(symbol_list):
             training_in_progress[strategy] = False
             print(f"✅ {strategy} 학습 완료")
 
-        time.sleep(5)
+        time.sleep(2)
 
-        try:
-            maintenance_fix_meta.fix_all_meta_json()
-            print(f"✅ meta 보정 완료: {strategy}")
-        except Exception as e:
-            print(f"[⚠️ meta 보정 실패] {e}")
+    # ✅ meta 보정: 그룹 학습 전체 종료 후
+    try:
+        maintenance_fix_meta.fix_all_meta_json()
+        print(f"✅ meta 보정 완료: 그룹 {symbol_list}")
+    except Exception as e:
+        print(f"[⚠️ meta 보정 실패] {e}")
 
-        try:
+    # ✅ 예측 실행: 그룹 심볼 전체에 대해
+    try:
+        for strategy in strategies:
             run_prediction(strategy, symbols=symbol_list)
-            print(f"✅ 예측 완료: {strategy}")
-        except Exception as e:
-            print(f"❌ 예측 실패: {strategy} → {e}")
+            print(f"✅ 예측 완료: {strategy} | 심볼: {symbol_list}")
+    except Exception as e:
+        print(f"❌ 예측 실패: {strategy} → {e}")
 
-    send_message("✅ 학습 및 예측 완료")
+    send_message(f"✅ 그룹 학습 및 예측 완료: {symbol_list}")
 
 def train_model_loop(strategy):
     """
