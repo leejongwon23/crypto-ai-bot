@@ -4,6 +4,8 @@ import torch.optim as optim
 from model.base_model import TransformerPricePredictor  # ✅ 직접 import
 from data.utils import get_kline_by_strategy, compute_features
 import numpy as np
+from config import FEATURE_INPUT_SIZE
+
 
 DEVICE = torch.device("cpu")
 
