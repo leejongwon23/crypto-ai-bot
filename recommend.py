@@ -221,6 +221,11 @@ def main(strategy=None, symbol=None, force=False, allow_prediction=True):
                 symbols_list.append({"symbol": sym, "volatility": 0.0})
         run_prediction_loop(s, symbols_list, source="일반", allow_prediction=allow_prediction)
 
+if __name__ == "__main__":
+    main()
+    from train import train_all_models
+    train_all_models()
+    
 import shutil
 def check_disk_usage(threshold_percent=90):
     try:
