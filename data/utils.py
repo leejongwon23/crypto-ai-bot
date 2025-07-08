@@ -90,6 +90,8 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
 
+    class_ranges = [(-1.0 + 0.1*i, -0.9 + 0.1*i) for i in range(NUM_CLASSES)]
+
     for i in range(window, len(features) - 3):
         try:
             seq = features[i - window:i]
@@ -112,8 +114,6 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
             gain = gain if np.isfinite(gain) else 0.0
 
-            # ✅ 라벨 범위 정의
-            class_ranges = [(-1.0 + 0.1*i, -0.9 + 0.1*i) for i in range(NUM_CLASSES)]
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain < high), NUM_CLASSES-1)
 
             # ✅ [DEBUG] gain과 class 확인
@@ -142,11 +142,17 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         dummy_y = np.array([0], dtype=np.int64)
         return dummy_X, dummy_y
 
-    min_samples = 10
-    while len(y) < min_samples:
-        idx = random.randint(0, len(y)-1)
-        X.append(X[idx])
-        y.append(y[idx])
+    # ✅ 희소 클래스 복제 및 클래스 분포 균등화
+    counts = Counter(y)
+    max_count = max(counts.values())
+    for cls_id in range(NUM_CLASSES):
+        cls_samples = [i for i, label in enumerate(y) if label == cls_id]
+        if cls_samples:
+            needed = max_count - len(cls_samples)
+            for _ in range(needed):
+                idx = random.choice(cls_samples)
+                X.append(X[idx])
+                y.append(cls_id)
 
     X = np.array(X, dtype=np.float32)
     y = np.array(y, dtype=np.int64)
