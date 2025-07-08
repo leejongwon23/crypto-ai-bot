@@ -255,10 +255,8 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
 
     X_aug, y_aug = [], []
 
-    # 🔁 클래스별 균등 oversampling
-    unique_classes = np.unique(y_train_group)
-    class_counts = {cls: np.sum(y_train_group == cls) for cls in unique_classes}
-    max_count = max(class_counts.values())
+    # 🔁 클래스별 균등 oversampling to target_count // num_classes
+    per_class_target = max(1, target_count // len(group_classes))
 
     for cls in group_classes:
         cls_indices = np.where(y_train_group == cls)[0]
@@ -268,10 +266,10 @@ def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classe
         X_cls = X_train_group[cls_indices]
         y_cls = y_train_group[cls_indices]
 
-        # oversample to match max_count
-        n_repeat = int(np.ceil(max_count / len(cls_indices)))
-        X_cls_oversampled = np.tile(X_cls, (n_repeat, 1, 1))[:max_count]
-        y_cls_oversampled = np.tile(y_cls, n_repeat)[:max_count]
+        # oversample to match per_class_target
+        n_repeat = int(np.ceil(per_class_target / len(cls_indices)))
+        X_cls_oversampled = np.tile(X_cls, (n_repeat, 1, 1))[:per_class_target]
+        y_cls_oversampled = np.tile(y_cls, n_repeat)[:per_class_target]
 
         # augmentation
         for x in X_cls_oversampled:
