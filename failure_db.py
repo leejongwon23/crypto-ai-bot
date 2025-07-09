@@ -31,8 +31,10 @@ def ensure_failure_db():
 
 def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
     if not isinstance(feature_hash, str) or feature_hash.strip() == "":
+        print("[❌ insert_failure_record] feature_hash 없음 → 저장 스킵")
         return
 
+    # ✅ feature_vector 처리 강화
     if feature_vector is not None:
         try:
             import numpy as np
@@ -46,18 +48,24 @@ def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
                 feature_vector = np.array(feature_vector).flatten().tolist()
             json.dumps(feature_vector)
         except Exception as e:
-            print(f"[경고] feature_vector 변환 실패 → {e}")
-            feature_vector = None
+            print(f"[경고] feature_vector 변환 실패 → zero-vector 대체: {e}")
+            feature_vector = [0.0] * 10  # ✅ 최소 10차원 zero-vector fallback
 
+    else:
+        print("[경고] feature_vector 없음 → zero-vector 대체")
+        feature_vector = [0.0] * 10
+
+    # ✅ label 처리 강화
     if label is not None:
         try:
             label = int(label)
         except:
+            print("[경고] label 변환 실패 → -1 대체")
             label = -1
     else:
+        print("[경고] label None → -1 대체")
         label = -1
 
-    # ✅ 모델명, predicted_class 추출
     model_name = row.get("model", "unknown")
     predicted_class = row.get("predicted_class", -1)
     try:
@@ -82,11 +90,13 @@ def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
                 predicted_class,
                 float(row.get("rate", 0.0)),
                 row.get("reason", ""),
-                json.dumps(feature_vector) if feature_vector is not None else None,
+                json.dumps(feature_vector),
                 label
             ))
+            print(f"[✅ insert_failure_record] {row.get('symbol')} 저장 완료")
     except Exception as e:
         print(f"[오류] insert_failure_record 실패 → {e}")
+
 
 def load_existing_failure_hashes():
     try:
