@@ -3,7 +3,8 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import accuracy_score
 from data.utils import get_kline_by_strategy, compute_features, create_dataset
 from model.base_model import get_model
-from config import NUM_CLASSES
+from config import get_NUM_CLASSES
+NUM_CLASSES = get_NUM_CLASSES()
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     from config import FEATURE_INPUT_SIZE, NUM_CLASSES  # ✅ config import 통일
