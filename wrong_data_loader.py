@@ -7,13 +7,13 @@ from failure_db import load_existing_failure_hashes
 
 WRONG_CSV = "/persistent/wrong_predictions.csv"
 
-def load_training_prediction_data(symbol, strategy, input_size, window):
+def load_training_prediction_data(symbol, strategy, window, input_size):
     import random
     from config import FAIL_AUGMENT_RATIO  # ✅ 실패 복사 비율 파라미터 import
 
     if not os.path.exists(WRONG_CSV):
         print(f"[INFO] {symbol}-{strategy} 실패학습 파일 없음 → 스킵")
-        return []
+        return None, None
 
     try:
         df = pd.read_csv(WRONG_CSV, encoding="utf-8-sig")
@@ -24,7 +24,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
             if "predicted_class" in df.columns:
                 df["label"] = df["predicted_class"]
             else:
-                return []
+                return None, None
 
         df = df[df["label"].notna()]
         df["label"] = pd.to_numeric(df["label"], errors="coerce").fillna(-1).astype(int)
@@ -32,15 +32,15 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
 
     except Exception as e:
         print(f"[불러오기 오류] {symbol}-{strategy} → {type(e).__name__}: {e}")
-        return []
+        return None, None
 
     df_price = get_kline_by_strategy(symbol, strategy)
     if df_price is None or df_price.empty:
-        return []
+        return None, None
 
     df_feat = compute_features(symbol, df_price, strategy)
     if df_feat is None or df_feat.empty or df_feat.isnull().any().any():
-        return []
+        return None, None
 
     if "timestamp" not in df_feat.columns:
         df_feat["timestamp"] = df_feat.get("datetime")
@@ -95,4 +95,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
         noise_sample = np.random.normal(loc=0.0, scale=1.0, size=(window, input_size)).astype(np.float32)
         sequences.append((noise_sample, -1))
 
-    return sequences
+    # ✅ return X, y 형태로 수정
+    X = np.array([s[0] for s in sequences], dtype=np.float32)
+    y = np.array([s[1] for s in sequences], dtype=np.int64)
+    return X, y
