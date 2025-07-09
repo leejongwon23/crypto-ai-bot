@@ -6,6 +6,7 @@ from model.base_model import get_model
 from config import NUM_CLASSES
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
+    from config import FEATURE_INPUT_SIZE, NUM_CLASSES  # ✅ config import 통일
     try:
         if not isinstance(window_list, list) or not all(isinstance(w, (int, float)) for w in window_list):
             print(f"[오류] window_list 타입 오류 → 기본값으로 대체")
@@ -39,7 +40,6 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         best_window = int(window_list[0])
 
         for window in sorted(window_list):
-            # ✅ window 크기를 데이터 길이에 맞게 조절
             if len(feature_dicts) <= window + 3:
                 adjusted_window = max(5, len(feature_dicts) - 3)
                 if adjusted_window < 5:
@@ -48,7 +48,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 print(f"[info] window={window} → 데이터 부족으로 adjusted_window={adjusted_window}")
                 window = adjusted_window
 
-            X, y = create_dataset(feature_dicts, window, strategy)
+            X, y = create_dataset(feature_dicts, window, strategy, input_size=FEATURE_INPUT_SIZE)
             if X is None or y is None or len(X) < 5:
                 print(f"[⚠️ skip] window={window} (샘플 부족)")
                 continue
@@ -63,6 +63,12 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
                 continue
 
             input_size = X.shape[2]
+            if input_size != FEATURE_INPUT_SIZE:
+                print(f"[⚠️ input_size 불일치] expected={FEATURE_INPUT_SIZE}, got={input_size} → 패딩 적용")
+                pad_cols = FEATURE_INPUT_SIZE - input_size
+                X = np.pad(X, ((0,0),(0,0),(0,pad_cols)), mode="constant", constant_values=0)
+                input_size = FEATURE_INPUT_SIZE
+
             model = get_model("lstm", input_size, output_size=NUM_CLASSES).train()
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
             loss_fn = torch.nn.CrossEntropyLoss()
@@ -105,6 +111,7 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     except Exception as e:
         print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
         return min_window
+
 
 
 def find_best_windows(symbol, strategy, window_list=[10, 20, 30, 40]):
