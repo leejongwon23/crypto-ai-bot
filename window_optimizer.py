@@ -3,11 +3,11 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import accuracy_score
 from data.utils import get_kline_by_strategy, compute_features, create_dataset
 from model.base_model import get_model
-from config import get_NUM_CLASSES
+from config import get_NUM_CLASSES, FEATURE_INPUT_SIZE
+
 NUM_CLASSES = get_NUM_CLASSES()
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
-    from config import FEATURE_INPUT_SIZE, NUM_CLASSES  # ✅ config import 통일
     try:
         if not isinstance(window_list, list) or not all(isinstance(w, (int, float)) for w in window_list):
             print(f"[오류] window_list 타입 오류 → 기본값으로 대체")
@@ -119,8 +119,6 @@ def find_best_windows(symbol, strategy, window_list=[10, 20, 30, 40]):
     - feature 생성 후 유효성 체크
     - window_list 중 학습 가능한 window만 반환
     """
-    from data.utils import compute_features, get_kline_by_strategy
-
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or df.empty:
         print(f"[⚠️ find_best_windows] 데이터 없음 → 기본 window_list 반환")
@@ -133,7 +131,7 @@ def find_best_windows(symbol, strategy, window_list=[10, 20, 30, 40]):
 
     valid_windows = []
     for w in window_list:
-        if len(df_feat) >= w + 5:  # ✅ feature 기준으로 판단
+        if len(df_feat) >= w + 5:
             valid_windows.append(w)
 
     if not valid_windows:
@@ -141,5 +139,3 @@ def find_best_windows(symbol, strategy, window_list=[10, 20, 30, 40]):
 
     print(f"[✅ find_best_windows] {symbol}-{strategy} → {valid_windows}")
     return valid_windows
-
-
