@@ -13,6 +13,8 @@ from logger import get_available_models
 import json
 from model.base_model import get_model, XGBoostWrapper
 from config import FEATURE_INPUT_SIZE
+from config import get_class_groups
+
 
 
 DEVICE = torch.device("cpu")
@@ -146,8 +148,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from window_optimizer import find_best_windows
     from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
 
-    def get_class_groups(num_classes=21, group_size=5):
-        return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
     try:
         max_retry = 3
