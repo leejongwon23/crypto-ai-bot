@@ -7,7 +7,6 @@ from window_optimizer import find_best_window
 from logger import log_prediction
 from failure_db import insert_failure_record, load_existing_failure_hashes
 from logger import get_feature_hash
-from config import NUM_CLASSES
 from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
 from logger import get_available_models
 import json
