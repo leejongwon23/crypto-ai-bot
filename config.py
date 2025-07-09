@@ -3,7 +3,8 @@ NUM_CLASSES = 21
 # ✅ FEATURE_INPUT_SIZE 별도 선언 (예: 모델 입력 feature dimension)
 FEATURE_INPUT_SIZE = 21
 
-# config.py
+# ✅ 실패 데이터 복사 비율 파라미터
+FAIL_AUGMENT_RATIO = 3  # 기본값: 실패 데이터 3배 복사
 
 def get_class_groups(num_classes=21, group_size=7):
     """
