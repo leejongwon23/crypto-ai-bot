@@ -168,7 +168,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
-
 def predict(symbol, strategy, source="일반", model_type=None):
     from scipy.stats import entropy
     from window_optimizer import find_best_windows
@@ -247,6 +246,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
                         # ✅ 캐싱된 모델 로드 적용
                         model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, len(group_classes))
+
+                        # ✅ [추가] 모델 None 체크
+                        if model is None:
+                            print(f"[⚠️ skip] {model_path} input/output 크기 불일치로 스킵")
+                            continue
 
                         with torch.no_grad():
                             logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
