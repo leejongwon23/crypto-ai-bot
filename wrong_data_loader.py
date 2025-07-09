@@ -9,6 +9,8 @@ WRONG_CSV = "/persistent/wrong_predictions.csv"
 
 def load_training_prediction_data(symbol, strategy, input_size, window):
     import random
+    from config import FAIL_AUGMENT_RATIO  # ✅ 실패 복사 비율 파라미터 import
+
     if not os.path.exists(WRONG_CSV):
         print(f"[INFO] {symbol}-{strategy} 실패학습 파일 없음 → 스킵")
         return []
@@ -74,8 +76,8 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
                 continue
             used_hashes.add(h)
 
-            # ✅ 실패 데이터 oversampling (3배 추가)
-            for _ in range(3):
+            # ✅ 실패 데이터 oversampling (FAIL_AUGMENT_RATIO배 추가)
+            for _ in range(FAIL_AUGMENT_RATIO):
                 sequences.append((xb, label))
 
             # ✅ 예측실패(-1) 라벨 augmentation
