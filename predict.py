@@ -15,6 +15,9 @@ from model.base_model import get_model, XGBoostWrapper
 from config import FEATURE_INPUT_SIZE
 from config import get_class_groups
 from collections import OrderedDict
+# 변경
+from config import get_class_ranges
+
 
 
 DEVICE = torch.device("cpu")
@@ -324,6 +327,7 @@ def evaluate_predictions(get_price_fn):
     import pandas as pd
     from failure_db import ensure_failure_db, insert_failure_record
     from logger import update_model_success, log_prediction
+    class_ranges = get_class_ranges()
 
     ensure_failure_db()
 
@@ -333,11 +337,6 @@ def evaluate_predictions(get_price_fn):
     EVAL_RESULT = f"/persistent/logs/evaluation_{date_str}.csv"
     WRONG = f"/persistent/logs/wrong_{date_str}.csv"
 
-    class_ranges = [(-0.99, -0.60), (-0.60, -0.30), (-0.30, -0.20), (-0.20, -0.15),
-                    (-0.15, -0.10), (-0.10, -0.07), (-0.07, -0.05), (-0.05, -0.03),
-                    (-0.03, -0.01), (-0.01, 0.01), (0.01, 0.03), (0.03, 0.05),
-                    (0.05, 0.07), (0.07, 0.10), (0.10, 0.15), (0.15, 0.20),
-                    (0.20, 0.30), (0.30, 0.60), (0.60, 1.00), (1.00, 2.00), (2.00, 5.00)]
 
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
     updated, evaluated = [], []
