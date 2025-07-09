@@ -62,6 +62,27 @@ def load_model_cached(model_path, model_type, input_size, output_size):
 
     return model
 
+def ensemble_stacking(model_outputs, meta_model=None):
+    """
+    ✅ stacking ensemble 함수
+    - model_outputs: (n_models, n_classes) ndarray
+    - meta_model: 사전 학습된 meta-learner (LogisticRegression)
+    - 반환: 최종 클래스 index
+    """
+    import numpy as np
+
+    X_stack = np.array(model_outputs)
+    X_stack = X_stack.reshape(1, -1)  # (1, n_models * n_classes)
+
+    if meta_model is not None:
+        pred = meta_model.predict(X_stack)
+        return int(pred[0])
+    else:
+        # fallback: 평균 soft voting
+        avg_probs = np.mean(model_outputs, axis=0)
+        return int(np.argmax(avg_probs))
+
+
 def class_to_expected_return(cls, recent_days=3):
     import pandas as pd
     import numpy as np
@@ -221,8 +242,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
             pred_classes = []
             recent_freq = get_recent_class_frequencies(strategy)
+            model_outputs = []  # ✅ stacking ensemble용 output 저장 리스트
+
             for trial in range(3):
-                ensemble_probs = np.zeros(NUM_CLASSES, dtype=np.float32)
                 for window in window_list:
                     if feat_scaled.shape[0] < window:
                         continue
@@ -265,46 +287,46 @@ def predict(symbol, strategy, source="일반", model_type=None):
                             probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
 
                         adjusted_probs = adjust_probs_with_diversity(probs, recent_freq)
-                        for i, cls in enumerate(group_classes):
-                            ensemble_probs[cls] += adjusted_probs[i]
+                        model_outputs.append(adjusted_probs)  # ✅ stacking ensemble에 추가
 
-                pred_class = int(ensemble_probs.argmax()) if ensemble_probs.sum() > 0 else -1
-                pred_classes.append(pred_class)
+            # ✅ stacking ensemble 적용
+            if len(model_outputs) == 0:
+                final_pred_class = -1
+            else:
+                final_pred_class = ensemble_stacking(model_outputs)
 
             # ✅ 핵심 요약 로그만 출력
-            print(f"[predict] {symbol}-{strategy} 결과: {pred_classes}, 최종={pred_classes[0]}")
+            print(f"[predict] {symbol}-{strategy} 최종 예측 클래스: {final_pred_class}")
 
-            if len(set(pred_classes)) == 1 and pred_classes[0] != -1:
-                final_pred_class = pred_classes[0]
+            if final_pred_class != -1:
                 expected_return = class_to_expected_return(final_pred_class)
 
-                # ✅ conf_score 안전 처리
-                conf_score = 1 - entropy(ensemble_probs + 1e-6) / np.log(len(ensemble_probs))
+                conf_score = 1 - entropy(np.mean(model_outputs, axis=0) + 1e-6) / np.log(len(model_outputs[0]))
                 if not np.isfinite(conf_score):
                     conf_score = 0.0
 
                 log_prediction(
-                    symbol=symbol, strategy=strategy, direction=f"Ensemble-Class-{final_pred_class}",
+                    symbol=symbol, strategy=strategy, direction=f"Stacking-Class-{final_pred_class}",
                     entry_price=df["close"].iloc[-1],
                     target_price=df["close"].iloc[-1] * (1 + expected_return),
-                    model="ensemble", success=True, reason=f"Self-Consistency Ensemble | confidence={conf_score:.4f}",
+                    model="stacking_ensemble", success=True, reason=f"Stacking Ensemble | confidence={conf_score:.4f}",
                     rate=expected_return, timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
                     return_value=expected_return, volatility=True, source=source,
                     predicted_class=final_pred_class, label=final_pred_class
                 )
 
                 return [{
-                    "symbol": symbol, "strategy": strategy, "model": "ensemble",
+                    "symbol": symbol, "strategy": strategy, "model": "stacking_ensemble",
                     "class": final_pred_class, "expected_return": expected_return,
                     "success": True, "predicted_class": final_pred_class,
                     "label": final_pred_class, "confidence": round(conf_score, 4)
                 }]
             else:
-                print(f"[predict] {symbol}-{strategy} Self-Consistency 실패")
-                return [failed_result(symbol, strategy, "unknown", "Self-Consistency 실패 (3회 예측 불일치)", source)]
+                print(f"[predict] {symbol}-{strategy} Stacking Ensemble 실패")
+                return [failed_result(symbol, strategy, "unknown", "Stacking Ensemble 실패", source)]
 
         retry += 1
-        return [failed_result(symbol, strategy, "unknown", "다중윈도우 Self-Consistency 실패", source)]
+        return [failed_result(symbol, strategy, "unknown", "다중윈도우 Stacking 실패", source)]
 
     except Exception as e:
         print(f"[predict 예외] {symbol}-{strategy} → {e}")
