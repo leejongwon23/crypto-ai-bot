@@ -148,7 +148,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from window_optimizer import find_best_windows
     from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
 
-
     try:
         max_retry = 3
         retry = 0
@@ -240,7 +239,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
             if len(set(pred_classes)) == 1 and pred_classes[0] != -1:
                 final_pred_class = pred_classes[0]
                 expected_return = class_to_expected_return(final_pred_class)
+
+                # ✅ conf_score 안전 처리
                 conf_score = 1 - entropy(ensemble_probs + 1e-6) / np.log(len(ensemble_probs))
+                if not np.isfinite(conf_score):
+                    conf_score = 0.0
 
                 log_prediction(
                     symbol=symbol, strategy=strategy, direction=f"Ensemble-Class-{final_pred_class}",
@@ -268,7 +271,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
     except Exception as e:
         print(f"[predict 예외] {symbol}-{strategy} → {e}")
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
-
 
 
 # 📄 predict.py 내부에 추가
