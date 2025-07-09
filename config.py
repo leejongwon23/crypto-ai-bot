@@ -67,9 +67,39 @@ def get_class_groups(num_classes=None, group_size=7):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
-def get_class_ranges():
+def get_class_ranges(method="equal", data_path="/persistent/prediction_log.csv"):
+    """
+    ✅ 클래스 범위 생성 함수
+    - method="equal": 균등 등분 (-1.0~+1.0)
+    - method="quantile": prediction_log.csv 수익률 분포 기반 quantile binning
+    """
+    import pandas as pd
+    import numpy as np
+
     num_classes = get_NUM_CLASSES()
-    # ✅ 균등 분할 예시 (-1.0 ~ +1.0 범위)
-    step = 2.0 / num_classes
-    ranges = [(-1.0 + i*step, -1.0 + (i+1)*step) for i in range(num_classes)]
-    return ranges
+
+    if method == "equal":
+        step = 2.0 / num_classes
+        ranges = [(-1.0 + i*step, -1.0 + (i+1)*step) for i in range(num_classes)]
+        return ranges
+
+    elif method == "quantile":
+        try:
+            df = pd.read_csv(data_path, encoding="utf-8-sig")
+            returns = df["return"].dropna().values
+            if len(returns) < num_classes:
+                print(f"[⚠️ get_class_ranges] 데이터 부족 → equal binning 사용")
+                return get_class_ranges(method="equal")
+
+            quantiles = np.quantile(returns, np.linspace(0, 1, num_classes + 1))
+            ranges = [(quantiles[i], quantiles[i+1]) for i in range(num_classes)]
+            return ranges
+
+        except Exception as e:
+            print(f"[❌ get_class_ranges] quantile binning 실패 → {e}")
+            return get_class_ranges(method="equal")
+
+    else:
+        print(f"[⚠️ get_class_ranges] 알 수 없는 method={method} → equal 사용")
+        return get_class_ranges(method="equal")
+
