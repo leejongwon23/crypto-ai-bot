@@ -3,7 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import xgboost as xgb
 import numpy as np
-from config import NUM_CLASSES, FEATURE_INPUT_SIZE
+from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE
+
+NUM_CLASSES = get_NUM_CLASSES()
+FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 from data.utils import compute_features, get_kline_by_strategy
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
