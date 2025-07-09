@@ -108,7 +108,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from model.base_model import get_model
     from logger import log_training_result
     from data_augmentation import balance_classes
-    from wrong_data_loader import load_training_prediction_data  # ✅ 실패학습 DB 로드
+    from wrong_data_loader import load_training_prediction_data
     from datetime import datetime
     import pytz
 
@@ -130,13 +130,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
             return
 
         window_list = find_best_windows(symbol, strategy)
-        features_only = df_feat.drop(columns=["timestamp", "strategy"], errors="ignore")
-        input_size = features_only.shape[1]
 
-        if input_size < FEATURE_INPUT_SIZE:
-            for pad_col in range(input_size, FEATURE_INPUT_SIZE):
-                df_feat[f"pad_{pad_col}"] = np.random.normal(0, 0.001)
-            input_size = FEATURE_INPUT_SIZE
+        # ✅ input_size를 FEATURE_INPUT_SIZE로 강제 통일
+        input_size = FEATURE_INPUT_SIZE
+        for pad_col in range(df_feat.shape[1], FEATURE_INPUT_SIZE):
+            df_feat[f"pad_{pad_col}"] = np.random.normal(0, 0.001)
 
         class_groups = get_class_groups()
 
@@ -145,7 +143,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             if X_raw is None or y_raw is None or len(X_raw) < 5:
                 continue
 
-            # ✅ 실패학습 DB 로드 & concat → window 추가
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, window, input_size=input_size)
             if fail_X is not None and fail_y is not None and len(fail_X) > 0:
                 X_raw = np.concatenate([X_raw, fail_X], axis=0)
@@ -183,7 +180,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
                     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-                    # ✅ [누적학습 추가] 기존 모델 + optimizer 로드
                     model_path = f"/persistent/models/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.pt"
                     opt_path = model_path.replace(".pt", ".opt.pt")
                     if os.path.exists(model_path):
@@ -225,7 +221,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     print(f"[✅ 학습완료] {symbol}-{strategy} | {model_type} | group:{group_id} | window:{window} | acc:{val_acc:.4f}")
 
                     torch.save(model.state_dict(), model_path)
-                    torch.save(optimizer.state_dict(), opt_path)  # ✅ optimizer 상태도 저장
+                    torch.save(optimizer.state_dict(), opt_path)
 
                     del model, xb, yb, logits
                     torch.cuda.empty_cache()
@@ -234,6 +230,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         traceback.print_exc()
+
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
