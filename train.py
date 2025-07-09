@@ -101,7 +101,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from focal_loss import FocalLoss
     from ssl_pretrain import masked_reconstruction
     from window_optimizer import find_best_windows
-    from config import FEATURE_INPUT_SIZE
+    from config import get_FEATURE_INPUT_SIZE
     from collections import Counter
     from torch.utils.data import TensorDataset, DataLoader
     import numpy as np
@@ -111,13 +111,15 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from wrong_data_loader import load_training_prediction_data
     from datetime import datetime
     import pytz
+    from meta_learning import maml_train_entry  # ✅ MAML import
 
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    input_size = get_FEATURE_INPUT_SIZE()
     print(f"▶ 학습 시작: {symbol}-{strategy}")
 
     try:
-        masked_reconstruction(symbol, strategy, input_size=FEATURE_INPUT_SIZE, mask_ratio=0.2, epochs=5)
+        masked_reconstruction(symbol, strategy, input_size=input_size, mask_ratio=0.2, epochs=5)
 
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
@@ -130,12 +132,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             return
 
         window_list = find_best_windows(symbol, strategy)
-
-        # ✅ input_size를 FEATURE_INPUT_SIZE로 강제 통일
-        input_size = FEATURE_INPUT_SIZE
-        for pad_col in range(df_feat.shape[1], FEATURE_INPUT_SIZE):
-            df_feat[f"pad_{pad_col}"] = np.random.normal(0, 0.001)
-
         class_groups = get_class_groups()
 
         for window in window_list:
@@ -143,7 +139,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             if X_raw is None or y_raw is None or len(X_raw) < 5:
                 continue
 
-            # ✅ 인자 순서 수정
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size=input_size, window=window)
             if fail_X is not None and fail_y is not None and len(fail_X) > 0:
                 X_raw = np.concatenate([X_raw, fail_X], axis=0)
@@ -181,24 +176,18 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
                     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-                    model_path = f"/persistent/models/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.pt"
-                    opt_path = model_path.replace(".pt", ".opt.pt")
-                    if os.path.exists(model_path):
-                        model.load_state_dict(torch.load(model_path, map_location=DEVICE))
-                        print(f"[🔄 누적학습] 기존 모델 로드 완료: {model_path}")
-                        if os.path.exists(opt_path):
-                            optimizer.load_state_dict(torch.load(opt_path, map_location=DEVICE))
-                            print(f"[🔄 누적학습] optimizer 로드 완료: {opt_path}")
-                    else:
-                        print(f"[🆕 신규학습] 기존 모델 없음: {model_path}")
-
                     lossfn = torch.nn.CrossEntropyLoss()
 
                     train_ds = TensorDataset(
                         torch.tensor(X_train_group, dtype=torch.float32),
                         torch.tensor(y_train_group, dtype=torch.long)
                     )
+                    val_ds = TensorDataset(
+                        torch.tensor(X_val_group, dtype=torch.float32),
+                        torch.tensor(y_val_group, dtype=torch.long)
+                    )
                     train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
+                    val_loader = DataLoader(val_ds, batch_size=32, shuffle=False, num_workers=2)
 
                     for epoch in range(max_epochs):
                         for xb, yb in train_loader:
@@ -209,6 +198,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                 optimizer.zero_grad()
                                 loss.backward()
                                 optimizer.step()
+
+                    # ✅ MAML meta-learning 추가 학습
+                    maml_loss = maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1)
+                    print(f"[MAML meta-update 완료] loss={maml_loss:.4f}")
 
                     model.eval()
                     with torch.no_grad():
@@ -221,8 +214,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     log_training_result(symbol, strategy, model_type, acc=val_acc, f1=0.0, loss=float(loss.item()))
                     print(f"[✅ 학습완료] {symbol}-{strategy} | {model_type} | group:{group_id} | window:{window} | acc:{val_acc:.4f}")
 
-                    torch.save(model.state_dict(), model_path)
-                    torch.save(optimizer.state_dict(), opt_path)
+                    torch.save(model.state_dict(), f"/persistent/models/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.pt")
 
                     del model, xb, yb, logits
                     torch.cuda.empty_cache()
@@ -231,6 +223,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         traceback.print_exc()
+
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
