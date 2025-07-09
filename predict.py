@@ -14,19 +14,22 @@ import json
 from model.base_model import get_model, XGBoostWrapper
 from config import FEATURE_INPUT_SIZE
 from config import get_class_groups
-
+from collections import OrderedDict
 
 
 DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-# predict.py 상단에 추가해줘야 할 부분
-MODEL_CACHE = {}
+# ✅ MODEL_CACHE 수정
+MODEL_CACHE = OrderedDict()
+MODEL_CACHE_MAX_SIZE = 10  # 최대 10개만 캐싱
 
 def load_model_cached(model_path, model_type, input_size, output_size):
     key = (model_path, model_type)
     if key in MODEL_CACHE:
+        # ✅ 사용된 모델은 맨 뒤로 이동 (LRU)
+        MODEL_CACHE.move_to_end(key)
         model = MODEL_CACHE[key]
     else:
         model = get_model(model_type, input_size, output_size).to(DEVICE)
@@ -35,7 +38,12 @@ def load_model_cached(model_path, model_type, input_size, output_size):
         model.eval()
         MODEL_CACHE[key] = model
 
-    # ✅ [추가] input_size, output_size 검증
+        # ✅ 캐시 크기 초과 시 가장 오래된 항목 제거
+        if len(MODEL_CACHE) > MODEL_CACHE_MAX_SIZE:
+            removed_key, removed_model = MODEL_CACHE.popitem(last=False)
+            print(f"[🗑️ MODEL_CACHE 제거] {removed_key}")
+
+    # ✅ input_size, output_size 검증 (기존 로직 유지)
     meta_path = model_path.replace(".pt", ".meta.json")
     if os.path.exists(meta_path):
         try:
@@ -45,11 +53,12 @@ def load_model_cached(model_path, model_type, input_size, output_size):
             expected_output = meta.get("output_size")
             if expected_input != input_size or expected_output != output_size:
                 print(f"[❌ 모델 크기 불일치] expected input:{expected_input}, output:{expected_output} | got input:{input_size}, output:{output_size}")
-                return None  # 크기 다르면 None 반환
+                return None
         except Exception as e:
             print(f"[⚠️ meta.json 로드 오류] {meta_path} → {e}")
 
     return model
+
 
     
 def class_to_expected_return(cls, recent_days=3):
