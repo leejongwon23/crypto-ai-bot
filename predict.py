@@ -141,7 +141,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
-
 def predict(symbol, strategy, source="일반", model_type=None):
     from scipy.stats import entropy
     from window_optimizer import find_best_windows
@@ -175,9 +174,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
             feat_scaled = MinMaxScaler().fit_transform(features_only)
             input_size = feat_scaled.shape[1]
 
+            # ✅ FEATURE_INPUT_SIZE로 강제 통일
             if input_size < FEATURE_INPUT_SIZE:
                 pad_cols = FEATURE_INPUT_SIZE - input_size
                 feat_scaled = np.pad(feat_scaled, ((0,0),(0,pad_cols)), mode="constant", constant_values=0)
+                input_size = FEATURE_INPUT_SIZE
+            elif input_size > FEATURE_INPUT_SIZE:
+                feat_scaled = feat_scaled[:, :FEATURE_INPUT_SIZE]
                 input_size = FEATURE_INPUT_SIZE
 
             models = get_available_models()
@@ -214,11 +217,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
                             meta = json.load(f)
 
                         model_input_size = meta.get("input_size")
-                        if model_input_size != input_size:
+                        if model_input_size != FEATURE_INPUT_SIZE:
                             continue
 
                         # ✅ 캐싱된 모델 로드 적용
-                        model = load_model_cached(model_path, m["model"], input_size, len(group_classes))
+                        model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, len(group_classes))
 
                         with torch.no_grad():
                             logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
@@ -265,6 +268,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
     except Exception as e:
         print(f"[predict 예외] {symbol}-{strategy} → {e}")
         return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+
+
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
