@@ -62,11 +62,10 @@ def load_model_cached(model_path, model_type, input_size, output_size):
 
     return model
 
-
-    
 def class_to_expected_return(cls, recent_days=3):
     import pandas as pd
     import numpy as np
+    from config import get_class_ranges
 
     # ✅ cls 타입 강제 변환
     try:
@@ -80,7 +79,7 @@ def class_to_expected_return(cls, recent_days=3):
         # ✅ predicted_class 컬럼 존재 여부 확인
         if "predicted_class" not in df.columns:
             print("[❌ 오류] prediction_log.csv에 predicted_class 컬럼이 없습니다.")
-            return -0.01  # ✅ 컬럼 없으면 fallback 기본값 반환
+            return -0.01
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         cutoff = pd.Timestamp.now() - pd.Timedelta(days=recent_days)
@@ -90,11 +89,9 @@ def class_to_expected_return(cls, recent_days=3):
 
         centers_dynamic = df.groupby("predicted_class")["return"].mean().to_dict()
 
-        centers_default = [
-            -0.80, -0.45, -0.25, -0.175, -0.125, -0.085, -0.06, -0.04,
-            -0.02, 0.0, 0.02, 0.04, 0.06, 0.085, 0.125, 0.175, 0.25, 0.40,
-            0.75, 1.50, 3.50
-        ]
+        # ✅ get_class_ranges 연동
+        class_ranges = get_class_ranges()
+        centers_default = [np.mean([low, high]) for (low, high) in class_ranges]
 
         if 0 <= cls < len(centers_default):
             if cls in centers_dynamic and np.isfinite(centers_dynamic[cls]):
@@ -103,15 +100,14 @@ def class_to_expected_return(cls, recent_days=3):
                 return centers_default[cls]
 
         print(f"[⚠️ 예상 수익률 계산 오류] 잘못된 클래스: {cls}")
-        return centers_default[0]  # ✅ fallback 첫 번째 값으로 강제
+        return centers_default[0]
 
     except Exception as e:
         print(f"[오류] class_to_expected_return 동적 매핑 실패 → {e}")
-        centers_default = [
-            -0.80, -0.45, -0.25, -0.175, -0.125, -0.085, -0.06, -0.04,
-            -0.02, 0.0, 0.02, 0.04, 0.06, 0.085, 0.125, 0.175, 0.25, 0.40,
-            0.75, 1.50, 3.50
-        ]
+
+        # ✅ fallback
+        class_ranges = get_class_ranges()
+        centers_default = [np.mean([low, high]) for (low, high) in class_ranges]
         if 0 <= cls < len(centers_default):
             return centers_default[cls]
         return centers_default[0]
