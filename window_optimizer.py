@@ -3,9 +3,9 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import accuracy_score
 from data.utils import get_kline_by_strategy, compute_features, create_dataset
 from model.base_model import get_model
-from config import get_NUM_CLASSES, FEATURE_INPUT_SIZE
-
+from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE
 NUM_CLASSES = get_NUM_CLASSES()
+FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 
 def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
     try:
@@ -131,7 +131,7 @@ def find_best_windows(symbol, strategy, window_list=[10, 20, 30, 40]):
 
     valid_windows = []
     for w in window_list:
-        if len(df_feat) >= w + 5:
+        if len(df_feat) >= w + 5:  # ✅ feature 기준으로 판단
             valid_windows.append(w)
 
     if not valid_windows:
