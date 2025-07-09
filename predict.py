@@ -27,14 +27,30 @@ MODEL_CACHE = {}
 def load_model_cached(model_path, model_type, input_size, output_size):
     key = (model_path, model_type)
     if key in MODEL_CACHE:
-        return MODEL_CACHE[key]
+        model = MODEL_CACHE[key]
+    else:
+        model = get_model(model_type, input_size, output_size).to(DEVICE)
+        state = torch.load(model_path, map_location=DEVICE)
+        model.load_state_dict(state)
+        model.eval()
+        MODEL_CACHE[key] = model
 
-    model = get_model(model_type, input_size, output_size).to(DEVICE)
-    state = torch.load(model_path, map_location=DEVICE)
-    model.load_state_dict(state)
-    model.eval()
-    MODEL_CACHE[key] = model
+    # ✅ [추가] input_size, output_size 검증
+    meta_path = model_path.replace(".pt", ".meta.json")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            expected_input = meta.get("input_size")
+            expected_output = meta.get("output_size")
+            if expected_input != input_size or expected_output != output_size:
+                print(f"[❌ 모델 크기 불일치] expected input:{expected_input}, output:{expected_output} | got input:{input_size}, output:{output_size}")
+                return None  # 크기 다르면 None 반환
+        except Exception as e:
+            print(f"[⚠️ meta.json 로드 오류] {meta_path} → {e}")
+
     return model
+
     
 def class_to_expected_return(cls, recent_days=3):
     import pandas as pd
