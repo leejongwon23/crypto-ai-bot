@@ -111,7 +111,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from wrong_data_loader import load_training_prediction_data
     from datetime import datetime
     import pytz
-    from meta_learning import maml_train_entry  # ✅ MAML import
+    from meta_learning import maml_train_entry
 
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -173,56 +173,57 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 y_val_group = np.array([group_classes.index(y) for y in y_val_group if y in group_classes])
 
                 for model_type in ["lstm", "cnn_lstm", "transformer"]:
-                    model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
-                    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+                    for lr in [1e-4, 5e-4, 1e-3]:  # ✅ grid-search learning rates
+                        model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
+                        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-                    lossfn = torch.nn.CrossEntropyLoss()
+                        lossfn = torch.nn.CrossEntropyLoss()
 
-                    train_ds = TensorDataset(
-                        torch.tensor(X_train_group, dtype=torch.float32),
-                        torch.tensor(y_train_group, dtype=torch.long)
-                    )
-                    val_ds = TensorDataset(
-                        torch.tensor(X_val_group, dtype=torch.float32),
-                        torch.tensor(y_val_group, dtype=torch.long)
-                    )
-                    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
-                    val_loader = DataLoader(val_ds, batch_size=32, shuffle=False, num_workers=2)
+                        train_ds = TensorDataset(
+                            torch.tensor(X_train_group, dtype=torch.float32),
+                            torch.tensor(y_train_group, dtype=torch.long)
+                        )
+                        val_ds = TensorDataset(
+                            torch.tensor(X_val_group, dtype=torch.float32),
+                            torch.tensor(y_val_group, dtype=torch.long)
+                        )
+                        train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=2)
+                        val_loader = DataLoader(val_ds, batch_size=32, shuffle=False, num_workers=2)
 
-                    for epoch in range(max_epochs):
-                        for xb, yb in train_loader:
-                            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                            logits = model(xb)
-                            loss = lossfn(logits, yb)
-                            if torch.isfinite(loss):
-                                optimizer.zero_grad()
-                                loss.backward()
-                                optimizer.step()
+                        for epoch in range(max_epochs):
+                            for xb, yb in train_loader:
+                                xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                                logits = model(xb)
+                                loss = lossfn(logits, yb)
+                                if torch.isfinite(loss):
+                                    optimizer.zero_grad()
+                                    loss.backward()
+                                    optimizer.step()
 
-                    # ✅ MAML meta-learning 추가 학습
-                    maml_loss = maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1)
-                    print(f"[MAML meta-update 완료] loss={maml_loss:.4f}")
+                        maml_loss = maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1)
+                        print(f"[MAML meta-update 완료] {model_type} | lr={lr} | loss={maml_loss:.4f}")
 
-                    model.eval()
-                    with torch.no_grad():
-                        val_inputs = torch.tensor(X_val_group, dtype=torch.float32).to(DEVICE)
-                        val_labels = torch.tensor(y_val_group, dtype=torch.long).to(DEVICE)
-                        val_logits = model(val_inputs)
-                        val_preds = torch.argmax(val_logits, dim=1)
-                        val_acc = (val_preds == val_labels).float().mean().item() if len(val_labels) > 0 else 0.0
+                        model.eval()
+                        with torch.no_grad():
+                            val_inputs = torch.tensor(X_val_group, dtype=torch.float32).to(DEVICE)
+                            val_labels = torch.tensor(y_val_group, dtype=torch.long).to(DEVICE)
+                            val_logits = model(val_inputs)
+                            val_preds = torch.argmax(val_logits, dim=1)
+                            val_acc = (val_preds == val_labels).float().mean().item() if len(val_labels) > 0 else 0.0
 
-                    log_training_result(symbol, strategy, model_type, acc=val_acc, f1=0.0, loss=float(loss.item()))
-                    print(f"[✅ 학습완료] {symbol}-{strategy} | {model_type} | group:{group_id} | window:{window} | acc:{val_acc:.4f}")
+                        log_training_result(symbol, strategy, f"{model_type}_lr{lr}", acc=val_acc, f1=0.0, loss=float(loss.item()))
+                        print(f"[✅ 학습완료] {symbol}-{strategy} | {model_type} | lr={lr} | group:{group_id} | window:{window} | acc:{val_acc:.4f}")
 
-                    torch.save(model.state_dict(), f"/persistent/models/{symbol}_{strategy}_{model_type}_group{group_id}_window{window}.pt")
+                        torch.save(model.state_dict(), f"/persistent/models/{symbol}_{strategy}_{model_type}_lr{lr}_group{group_id}_window{window}.pt")
 
-                    del model, xb, yb, logits
-                    torch.cuda.empty_cache()
-                    gc.collect()
+                        del model, xb, yb, logits
+                        torch.cuda.empty_cache()
+                        gc.collect()
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         traceback.print_exc()
+
 
 
 # ✅ augmentation 함수 추가
