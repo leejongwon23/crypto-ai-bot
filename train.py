@@ -96,14 +96,12 @@ def get_class_groups(num_classes=21, group_size=7):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
-
-
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc, traceback, torch
     from focal_loss import FocalLoss
     from ssl_pretrain import masked_reconstruction
     from window_optimizer import find_best_windows
-    from config import get_FEATURE_INPUT_SIZE
+    from config import get_FEATURE_INPUT_SIZE, get_class_groups
     from collections import Counter
     from torch.utils.data import TensorDataset, DataLoader
     import numpy as np
@@ -225,9 +223,17 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                                         xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                                                         logits = model(xb)
                                                         loss = lossfn(logits, yb)
-                                                        if torch.isfinite(loss):
+
+                                                        # ✅ 실패샘플 weight 적용
+                                                        sample_weights = torch.ones_like(yb, dtype=torch.float32).to(DEVICE)
+                                                        fail_indices = (yb == -1)  # 실패샘플 라벨 조건
+                                                        sample_weights[fail_indices] = 3.0
+
+                                                        weighted_loss = (loss * sample_weights).mean()
+
+                                                        if torch.isfinite(weighted_loss):
                                                             optimizer.zero_grad()
-                                                            loss.backward()
+                                                            weighted_loss.backward()
                                                             optimizer.step()
 
                                                 maml_loss = maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1)
@@ -241,7 +247,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                                     val_preds = torch.argmax(val_logits, dim=1)
                                                     val_acc = (val_preds == val_labels).float().mean().item() if len(val_labels) > 0 else 0.0
 
-                                                log_training_result(symbol, strategy, f"{model_type}_{opt_type}_{loss_type}_lr{lr}_bs{batch_size}_hs{hidden_size}_dr{dropout}", acc=val_acc, f1=0.0, loss=float(loss.item()))
+                                                log_training_result(symbol, strategy, f"{model_type}_{opt_type}_{loss_type}_lr{lr}_bs{batch_size}_hs{hidden_size}_dr{dropout}", acc=val_acc, f1=0.0, loss=float(weighted_loss.item()))
                                                 print(f"[✅ 학습완료] {symbol}-{strategy} | {model_type} | opt={opt_type} | lossfn={loss_type} | lr={lr} | bs={batch_size} | hs={hidden_size} | dr={dropout} | group:{group_id} | window:{window} | acc:{val_acc:.4f}")
 
                                                 torch.save(model.state_dict(), f"/persistent/models/{symbol}_{strategy}_{model_type}_{opt_type}_{loss_type}_lr{lr}_bs{batch_size}_hs{hidden_size}_dr{dropout}_group{group_id}_window{window}.pt")
