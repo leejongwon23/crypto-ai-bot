@@ -9,13 +9,6 @@ from logger import get_model_success_rate, log_audit_prediction
 from logger import log_audit_prediction as log_audit
 
 
-# ✅ 반드시 필요 (predict.py에서 import함)
-def class_to_expected_return(cls):
-    centers = [-0.125, -0.085, -0.06, -0.04, -0.02, -0.01, -0.0025, -0.0005,
-               0.0005, 0.0025, 0.01, 0.02, 0.04, 0.06, 0.085, 0.125]
-    return centers[cls] if 0 <= cls < len(centers) else 0.0
-
-
 # ❌ 아래 두 함수는 삭제해야 predict.py의 실제 기능이 작동됨
 # def get_recent_class_frequencies(): return {}
 # def adjust_probs_with_diversity(pred_probs): return pred_probs
