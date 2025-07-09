@@ -1,7 +1,6 @@
 import os, torch, numpy as np, pandas as pd, datetime, pytz, sys
 from sklearn.preprocessing import MinMaxScaler
 from data.utils import get_kline_by_strategy, compute_features
-from model.base_model import get_model
 from model_weight_loader import get_model_weight
 from window_optimizer import find_best_window
 from logger import log_prediction
