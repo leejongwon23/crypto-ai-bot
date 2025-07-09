@@ -163,8 +163,11 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         except:
             label_val = -1
 
-    # ✅ group_id 필수 체크 및 기본값 대입
-    group_id_val = str(group_id) if group_id not in [None, ""] else "unknown"
+    # ✅ group_id 필수 체크 및 기본값 개선
+    if group_id in [None, "", "unknown"]:
+        group_id_val = f"group_{pred_class_val}" if pred_class_val >= 0 else "unknown"
+    else:
+        group_id_val = str(group_id)
 
     status = "success" if success else "fail"
     effective_rate = rate if rate is not None else 0.0
