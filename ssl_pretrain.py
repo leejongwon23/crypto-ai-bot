@@ -10,6 +10,7 @@ from config import FEATURE_INPUT_SIZE
 DEVICE = torch.device("cpu")
 
 def masked_reconstruction(symbol, strategy, input_size, mask_ratio=0.2, epochs=10):
+    from config import FEATURE_INPUT_SIZE  # ✅ config import 통일
     print(f"[SSL] {symbol}-{strategy} pretraining 시작")
 
     df = get_kline_by_strategy(symbol, strategy)
@@ -26,10 +27,10 @@ def masked_reconstruction(symbol, strategy, input_size, mask_ratio=0.2, epochs=1
     X = np.expand_dims(X, axis=0)  # (1, T, F)
     X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
 
-    # ✅ transformer reconstruction model: mode="reconstruction" 적용
+    # ✅ transformer reconstruction model: mode="reconstruction" 고정 (설계 통일 목적)
     model = TransformerPricePredictor(
-        input_size=input_size,
-        output_size=input_size,
+        input_size=FEATURE_INPUT_SIZE,
+        output_size=FEATURE_INPUT_SIZE,
         mode="reconstruction"
     ).to(DEVICE)
 
@@ -46,7 +47,6 @@ def masked_reconstruction(symbol, strategy, input_size, mask_ratio=0.2, epochs=1
 
         pred = model(X_masked)
 
-        # ✅ [수정] pred shape, X_tensor shape 통일 확인
         if pred.shape != X_tensor.shape:
             print(f"[⚠️ shape mismatch] pred.shape={pred.shape}, target.shape={X_tensor.shape}")
             if pred.shape[1] != X_tensor.shape[1]:
@@ -69,3 +69,4 @@ def masked_reconstruction(symbol, strategy, input_size, mask_ratio=0.2, epochs=1
 
     torch.save(model.state_dict(), f"/persistent/models/{symbol}_{strategy}_ssl.pt")
     print(f"[SSL] {symbol}-{strategy} pretraining 완료")
+
