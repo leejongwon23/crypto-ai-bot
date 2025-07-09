@@ -27,11 +27,11 @@ def masked_reconstruction(symbol, strategy, input_size, mask_ratio=0.2, epochs=1
     X = np.expand_dims(X, axis=0)  # (1, T, F)
     X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
 
-    # ✅ transformer reconstruction model: mode="reconstruction" 고정 (설계 통일 목적)
+    # ✅ TransformerPricePredictor mode="reconstruction" 고정
     model = TransformerPricePredictor(
         input_size=FEATURE_INPUT_SIZE,
         output_size=FEATURE_INPUT_SIZE,
-        mode="reconstruction"
+        mode="reconstruction"  # ✅ reconstruction 모드 고정
     ).to(DEVICE)
 
     model.train()
