@@ -4,6 +4,9 @@ import numpy as np
 from data.utils import get_kline_by_strategy, compute_features
 from logger import get_feature_hash  # ✅ 중복 체크 위한 해시 필요
 from failure_db import load_existing_failure_hashes
+from config import get_NUM_CLASSES  # ✅ 함수 import 추가
+
+NUM_CLASSES = get_NUM_CLASSES()  # ✅ 함수 호출 후 변수 할당
 
 WRONG_CSV = "/persistent/wrong_predictions.csv"
 
@@ -82,7 +85,7 @@ def load_training_prediction_data(symbol, strategy, window, input_size):
 
             # ✅ 예측실패(-1) 라벨 augmentation
             if label == -1:
-                random_label = random.randint(0, 20)
+                random_label = random.randint(0, NUM_CLASSES - 1)  # ✅ NUM_CLASSES 반영
                 noise_xb = xb + np.random.normal(0, 0.05, xb.shape).astype(np.float32)
                 sequences.append((noise_xb, random_label))
 
