@@ -121,7 +121,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
             # ✅ [DEBUG] gain과 class 확인 (출력 제한)
             if abs(gain) > 0.1:
-                print(f"[DEBUG] gain={gain:.4f}, class={cls}")
+                #print(f"[DEBUG] gain={gain:.4f}, class={cls}")
 
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
 
