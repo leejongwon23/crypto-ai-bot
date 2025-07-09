@@ -112,24 +112,33 @@ def find_best_window(symbol, strategy, window_list=[10, 20, 30, 40]):
         print(f"[find_best_window 오류] {symbol}-{strategy} → {e}")
         return min_window
 
-
-
 def find_best_windows(symbol, strategy, window_list=[10, 20, 30, 40]):
     """
-    ✅ 다중 윈도우 앙상블용
-    - window_list 중 데이터 개수로 학습 가능한 window만 필터링
-    - 반환: 유효한 window 리스트
+    ✅ 다중 윈도우 앙상블용 (개선)
+    - feature 생성 후 유효성 체크
+    - window_list 중 학습 가능한 window만 반환
     """
+    from data.utils import compute_features, get_kline_by_strategy
+
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or df.empty:
         print(f"[⚠️ find_best_windows] 데이터 없음 → 기본 window_list 반환")
         return window_list
 
+    df_feat = compute_features(symbol, df, strategy)
+    if df_feat is None or df_feat.empty or df_feat.isnull().any().any():
+        print(f"[⚠️ find_best_windows] feature 생성 실패 또는 NaN → 기본 window_list 반환")
+        return window_list
+
     valid_windows = []
     for w in window_list:
-        if len(df) >= w + 10:
+        if len(df_feat) >= w + 5:  # ✅ feature 기준으로 판단
             valid_windows.append(w)
+
     if not valid_windows:
         valid_windows = [min(window_list)]
+
     print(f"[✅ find_best_windows] {symbol}-{strategy} → {valid_windows}")
     return valid_windows
+
+
