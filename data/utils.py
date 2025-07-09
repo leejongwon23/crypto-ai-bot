@@ -303,7 +303,7 @@ _feature_cache = {}
 
 def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_features: list = None, fallback_input_size: int = None) -> pd.DataFrame:
     from predict import failed_result
-    from config import FEATURE_INPUT_SIZE  # ✅ FEATURE_INPUT_SIZE 상수 import
+    from config import FEATURE_INPUT_SIZE
     import ta
     global _feature_cache
     cache_key = f"{symbol}-{strategy}"
@@ -354,13 +354,19 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df["mfi"] = ta.volume.money_flow_index(df["high"], df["low"], df["close"], df["volume"], window=14, fillna=True)
         df["obv"] = ta.volume.on_balance_volume(df["close"], df["volume"], fillna=True)
 
+        # ✅ 새로운 feature 추가
+        df["atr"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14, fillna=True)
+        df["williams_r"] = ta.momentum.williams_r(df["high"], df["low"], df["close"], lbp=14, fillna=True)
+        df["stoch_k"] = ta.momentum.stoch(df["high"], df["low"], df["close"], fillna=True)
+        df["stoch_d"] = ta.momentum.stoch_signal(df["high"], df["low"], df["close"], fillna=True)
+        df["vwap"] = (df["volume"] * df["close"]).cumsum() / df["volume"].cumsum()
+
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.fillna(0, inplace=True)
 
         feature_cols = [c for c in df.columns if c not in ["timestamp", "strategy"]]
         print(f"[info] compute_features 생성 feature 개수: {len(feature_cols)} → {feature_cols}")
 
-        # ✅ 수정: FEATURE_INPUT_SIZE 기반 padding 적용
         if len(feature_cols) < FEATURE_INPUT_SIZE:
             pad_cols = []
             for i in range(len(feature_cols), FEATURE_INPUT_SIZE):
@@ -393,6 +399,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     print(f"[✅ 완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     _feature_cache[cache_key] = df
     return df
+
 
 
 
