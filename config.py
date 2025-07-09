@@ -55,7 +55,7 @@ def set_FAIL_AUGMENT_RATIO(value):
     save_config()
 
 # ✅ 클래스 그룹화 함수 (기존 유지)
-def get_class_groups(num_classes=None, group_size=7):
+def get_class_groups(num_classes=None, group_size=5):
     """
     ✅ 클래스 그룹화 함수 (YOPO v4.1)
     - num_classes를 group_size 크기로 나누어 그룹화
