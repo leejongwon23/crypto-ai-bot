@@ -66,3 +66,10 @@ def get_class_groups(num_classes=None, group_size=7):
     if num_classes <= group_size:
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
+
+def get_class_ranges():
+    num_classes = get_NUM_CLASSES()
+    # ✅ 균등 분할 예시 (-1.0 ~ +1.0 범위)
+    step = 2.0 / num_classes
+    ranges = [(-1.0 + i*step, -1.0 + (i+1)*step) for i in range(num_classes)]
+    return ranges
