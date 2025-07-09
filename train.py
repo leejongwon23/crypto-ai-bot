@@ -17,6 +17,7 @@ from data_augmentation import balance_classes
 from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE
 NUM_CLASSES = get_NUM_CLASSES()
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
+from config import get_class_groups
 
 
 training_in_progress = {"단기": False, "중기": False, "장기": False}
