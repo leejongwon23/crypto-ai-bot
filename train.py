@@ -143,7 +143,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
             if X_raw is None or y_raw is None or len(X_raw) < 5:
                 continue
 
-            fail_X, fail_y = load_training_prediction_data(symbol, strategy, window, input_size=input_size)
+            # ✅ 인자 순서 수정
+            fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size=input_size, window=window)
             if fail_X is not None and fail_y is not None and len(fail_X) > 0:
                 X_raw = np.concatenate([X_raw, fail_X], axis=0)
                 y_raw = np.concatenate([y_raw, fail_y], axis=0)
@@ -230,7 +231,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         traceback.print_exc()
-
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
