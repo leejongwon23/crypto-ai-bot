@@ -8,46 +8,36 @@ PERSIST_DIR = "/persistent"
 IMPORTANCE_DIR = os.path.join(PERSIST_DIR, "importances")
 os.makedirs(IMPORTANCE_DIR, exist_ok=True)
 
-def compute_feature_importance(model, X_val, y_val, feature_names):
+def compute_feature_importance(model, X_val, y_val, feature_names, method="baseline"):
+    """
+    ✅ feature importance 계산 (baseline permutation 방식)
+    """
     model.eval()
 
     try:
         logits = model(X_val)
-        if logits.shape[1] != len(torch.unique(y_val)):
-            y_val = y_val.view(-1).long()
+        y_val = y_val.view(-1).long()
         baseline_loss = torch.nn.CrossEntropyLoss()(logits, y_val).item()
     except Exception as e:
-        print(f"[ERROR] 모델 예측 실패: {e}")
+        print(f"[ERROR] 모델 예측 실패 ({method}): {e}")
         return dict(zip(feature_names, [0.0] * len(feature_names)))
 
     importances = []
     for i in range(X_val.shape[2]):
         try:
             X_permuted = X_val.clone()
-            X_permuted[:, :, i] = X_permuted[:, torch.randperm(X_val.shape[1]), i]
+            # ✅ permutation 방식 일관화
+            perm_idx = torch.randperm(X_val.shape[0])
+            X_permuted[:, :, i] = X_permuted[perm_idx, :, i]
             logits_perm = model(X_permuted)
             loss = torch.nn.CrossEntropyLoss()(logits_perm, y_val).item()
             importances.append(loss - baseline_loss)
         except Exception as e:
-            print(f"[ERROR] 중요도 계산 실패 (feature {i}): {e}")
+            print(f"[ERROR] 중요도 계산 실패 ({method} feature {i}): {e}")
             importances.append(0.0)
 
-    # ✅ threshold: 상위 30%로 강화
-    importance_array = np.array(importances)
-    threshold = np.percentile(importance_array, 70)
+    return dict(zip(feature_names, importances))
 
-    # ✅ 최소 5개 feature 유지
-    min_features = 5
-    sorted_indices = np.argsort(-importance_array)
-    selected_indices = [i for i, imp in enumerate(importances) if imp >= threshold]
-
-    if len(selected_indices) < min_features:
-        selected_indices = sorted_indices[:min_features].tolist()
-        print(f"[INFO] 중요도 기준으로 최소 {min_features}개 feature 유지")
-
-    final_importances = {feature_names[i]: importances[i] for i in selected_indices}
-
-    return final_importances
 
 def compute_feature_importance(model, X_val, y_val, feature_names, method="baseline"):
     """
