@@ -23,26 +23,77 @@ def get_db_connection():
         print(f"[오류] DB 연결 실패 → {e}")
         return None
 
+import sqlite3
+
+DB_PATH = "/persistent/logs/failure_patterns.db"
+
+def ensure_success_db():
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS model_success (
+                    symbol TEXT,
+                    strategy TEXT,
+                    model TEXT,
+                    success INTEGER,
+                    fail INTEGER,
+                    PRIMARY KEY(symbol, strategy, model)
+                )
+            """)
+        print("[✅ ensure_success_db] model_success 테이블 확인 완료")
+    except Exception as e:
+        print(f"[오류] ensure_success_db 실패 → {e}")
+
 def update_model_success(s, t, m, success):
-    k = (s, t or "알수없음", m)
-    model_success_tracker.setdefault(k, {"success":0,"fail":0})
-    model_success_tracker[k]["success" if success else "fail"] += 1
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO model_success (symbol, strategy, model, success, fail)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(symbol, strategy, model) DO UPDATE SET
+                    success = success + excluded.success,
+                    fail = fail + excluded.fail
+            """, (s, t or "알수없음", m, int(success), int(not success)))
+            conn.commit()
+        print(f"[✅ update_model_success] {s}-{t}-{m} 기록 ({'성공' if success else '실패'})")
+    except Exception as e:
+        print(f"[오류] update_model_success 실패 → {e}")
 
 def get_model_success_rate(s, t, m, min_total=10):
-    r = model_success_tracker.get((s, t or "알수없음", m), {"success":0,"fail":0})
-    total = r["success"] + r["fail"]
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT success, fail FROM model_success
+                WHERE symbol=? AND strategy=? AND model=?
+            """, (s, t or "알수없음", m))
+            row = cur.fetchone()
 
-    if total < min_total:
-        # ✅ 평가 샘플 부족 시 실패율 반영 weight 계산
-        fail_ratio = r["fail"] / total if total > 0 else 1.0
-        weight = max(0.0, 1.0 - fail_ratio)  # 성공률 기반 weight
-        cold_start_weight = 0.2
-        final_weight = min(weight, cold_start_weight)
-        print(f"[INFO] {s}-{t}-{m}: 평가 샘플 부족(total={total}) → weight={final_weight:.2f} (fail_ratio={fail_ratio:.2f})")
-        return final_weight
+        if row is None:
+            print(f"[INFO] {s}-{t}-{m}: 기록 없음 → cold-start 0.2 반환")
+            return 0.2
 
-    rate = r["success"] / total
-    return max(0.0, min(rate, 1.0))
+        success_cnt, fail_cnt = row
+        total = success_cnt + fail_cnt
+
+        if total < min_total:
+            fail_ratio = fail_cnt / total if total > 0 else 1.0
+            weight = max(0.0, 1.0 - fail_ratio)
+            final_weight = min(weight, 0.2)
+            print(f"[INFO] {s}-{t}-{m}: 평가 샘플 부족(total={total}) → weight={final_weight:.2f}")
+            return final_weight
+
+        rate = success_cnt / total
+        return max(0.0, min(rate, 1.0))
+
+    except Exception as e:
+        print(f"[오류] get_model_success_rate 실패 → {e}")
+        return 0.2
+
+# ✅ 서버 시작 시 호출
+ensure_success_db()
+
 
 
 def load_failure_count():
