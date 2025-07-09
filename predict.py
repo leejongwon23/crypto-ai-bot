@@ -113,23 +113,32 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     }
 
     try:
-        log_prediction(
-            symbol=symbol,
-            strategy=strategy,
-            direction="예측실패",
-            entry_price=0,
-            target_price=0,
-            model=str(model_type or "unknown"),
-            success=False,
-            reason=reason,
-            rate=0.0,
-            timestamp=t,
-            return_value=0.0,
-            volatility=True,
-            source=source,
-            predicted_class=pred_class_val,
-            label=label_val
-        )
+        # ✅ entry_price, predicted_class, label 유효성 검사
+        valid_entry_price = isinstance(result.get("rate", 0.0), (int, float))
+        valid_pred_class = isinstance(pred_class_val, int) and pred_class_val >= -1
+        valid_label = isinstance(label_val, int) and label_val >= -1
+
+        if valid_entry_price and valid_pred_class and valid_label:
+            log_prediction(
+                symbol=symbol,
+                strategy=strategy,
+                direction="예측실패",
+                entry_price=0,
+                target_price=0,
+                model=str(model_type or "unknown"),
+                success=False,
+                reason=reason,
+                rate=0.0,
+                timestamp=t,
+                return_value=0.0,
+                volatility=True,
+                source=source,
+                predicted_class=pred_class_val,
+                label=label_val
+            )
+        else:
+            print(f"[failed_result 검증 실패] entry_price:{valid_entry_price}, pred_class:{valid_pred_class}, label:{valid_label}")
+
     except Exception as e:
         print(f"[failed_result log_prediction 오류] {e}")
 
@@ -142,6 +151,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             print(f"[failed_result insert_failure_record 오류] {e}")
 
     return result
+
 
 def predict(symbol, strategy, source="일반", model_type=None):
     from scipy.stats import entropy
