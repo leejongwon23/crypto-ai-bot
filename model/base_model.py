@@ -54,6 +54,11 @@ class CNNLSTMPricePredictor(nn.Module):
         self.fc2 = nn.Linear(lstm_hidden_size, lstm_hidden_size // 2)
         self.fc_logits = nn.Linear(lstm_hidden_size // 2, output_size)
 
+    def set_hyperparams(self, hidden_size=None, dropout=None):
+        if dropout is not None:
+            self.dropout.p = dropout
+    
+
     def forward(self, x):
         x = x.permute(0, 2, 1)
         x = self.relu(self.conv1(x))
