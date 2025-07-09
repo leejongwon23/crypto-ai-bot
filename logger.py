@@ -103,13 +103,17 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     except:
         pred_class_val = -1
 
+    # ✅ label 필수 체크 및 기본값 대입
     if label is None or str(label).strip() == "":
-        label = pred_class_val
+        label_val = pred_class_val
     else:
         try:
-            label = int(label)
+            label_val = int(label)
         except:
-            label = -1
+            label_val = -1
+
+    # ✅ group_id 필수 체크 및 기본값 대입
+    group_id_val = str(group_id) if group_id not in [None, ""] else "unknown"
 
     status = "success" if success else "fail"
     effective_rate = rate if rate is not None else 0.0
@@ -130,8 +134,8 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "volatility": bool(volatility),
         "source": str(source or "일반"),
         "predicted_class": str(pred_class_val),
-        "label": str(label),
-        "group_id": str(group_id) if group_id is not None else ""
+        "label": str(label_val),
+        "group_id": group_id_val
     }
 
     fieldnames = sorted(row.keys())
@@ -147,6 +151,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                 print(f"[✅ log_prediction 기록 완료] {path}")
             except Exception as e:
                 print(f"[오류] log_prediction 기록 실패 ({path}) → {e}")
+
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
