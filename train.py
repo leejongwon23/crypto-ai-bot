@@ -116,32 +116,40 @@ def train_one_model(symbol, strategy, max_epochs=20):
     import pytz
     from meta_learning import maml_train_entry
     from ranger_adabelief import RangerAdaBelief as Ranger
-    print("✅ train_one_model called")
+
+    print("✅ [train_one_model 호출됨]")
 
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = get_FEATURE_INPUT_SIZE()
-    print(f"▶ 학습 시작: {symbol}-{strategy}")
+    print(f"▶ [학습시작] {symbol}-{strategy}")
 
     try:
         masked_reconstruction(symbol, strategy, input_size=input_size, mask_ratio=0.2, epochs=5)
 
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
-            print(f"⛔ {symbol}-{strategy}: 시세 데이터 없음")
+            print(f"⛔ [중단] {symbol}-{strategy}: 시세 데이터 없음")
             return
 
         df_feat = compute_features(symbol, df, strategy)
         if df_feat is None or df_feat.empty or df_feat.isnull().any().any():
-            print(f"⛔ {symbol}-{strategy}: 피처 생성 실패 또는 NaN")
+            print(f"⛔ [중단] {symbol}-{strategy}: 피처 생성 실패 또는 NaN")
             return
 
         window_list = find_best_windows(symbol, strategy)
+        if not window_list:
+            print(f"⛔ [중단] {symbol}-{strategy}: window_list 없음")
+            return
+
+        print(f"✅ [진행] {symbol}-{strategy}: window_list={window_list}")
+
         class_groups = get_class_groups()
 
         for window in window_list:
             X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
             if X_raw is None or y_raw is None or len(X_raw) < 5:
+                print(f"⛔ [중단] {symbol}-{strategy}: 데이터셋 생성 실패 또는 샘플 부족 (len={len(X_raw) if X_raw is not None else 0})")
                 continue
 
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size=input_size, window=window)
@@ -159,6 +167,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 y_train_group = y_train[train_mask]
 
                 if len(y_train_group) < 2:
+                    print(f"⛔ [중단] {symbol}-{strategy}: group_id={group_id} 학습데이터 부족")
                     continue
 
                 X_train_group, y_train_group = balance_classes(X_train_group, y_train_group, min_count=20, num_classes=len(group_classes))
@@ -170,6 +179,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 y_val_group = y_val[val_mask]
 
                 if len(y_val_group) == 0:
+                    print(f"⛔ [중단] {symbol}-{strategy}: group_id={group_id} 검증데이터 없음")
                     continue
 
                 y_train_group = np.array([group_classes.index(y) for y in y_train_group if y in group_classes])
@@ -239,12 +249,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                                     val_preds = torch.argmax(val_logits, dim=1)
                                                     val_acc = (val_preds == val_labels).float().mean().item() if len(val_labels) > 0 else 0.0
 
-                                                log_training_result(symbol, strategy, f"{model_type}_{opt_type}_{loss_type}_lr{lr}_bs{batch_size}_hs{hidden_size}_dr{dropout}", acc=val_acc, f1=0.0, loss=float(weighted_loss.item()))
+                                                log_training_result(symbol, strategy, f"{model_type}_{opt_type}_{loss_type}_lr{lr}_bs{batch_size}_hs{hidden_size}_dr={dropout}", acc=val_acc, f1=0.0, loss=float(weighted_loss.item()))
                                                 print(f"[✅ 학습완료] {symbol}-{strategy} | {model_type} | opt={opt_type} | lossfn={loss_type} | lr={lr} | bs={batch_size} | hs={hidden_size} | dr={dropout} | group:{group_id} | window:{window} | acc:{val_acc:.4f}")
 
-                                                torch.save(model.state_dict(), f"/persistent/models/{symbol}_{strategy}_{model_type}_{opt_type}_{loss_type}_lr{lr}_bs{batch_size}_hs{hidden_size}_dr{dropout}_group{group_id}_window{window}.pt")
+                                                torch.save(model.state_dict(), f"/persistent/models/{symbol}_{strategy}_{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}_group{group_id}_window{window}.pt")
 
-                                                # ✅ 메모리 해제
                                                 del model, optimizer, lossfn, train_loader, val_loader, train_ds, val_ds, xb, yb, logits
                                                 torch.cuda.empty_cache()
                                                 gc.collect()
