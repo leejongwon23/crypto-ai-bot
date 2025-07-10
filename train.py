@@ -116,7 +116,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     import pytz
     from meta_learning import maml_train_entry
     from ranger_adabelief import RangerAdaBelief as Ranger
-    from feature_importance import compute_feature_importance, drop_low_importance_features  # ✅ 추가
+    from feature_importance import compute_feature_importance, drop_low_importance_features
 
     print("✅ [train_one_model 호출됨]")
 
@@ -137,10 +137,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"⛔ [중단] {symbol}-{strategy}: 피처 생성 실패 또는 NaN")
             return
 
-        # ✅ feature importance 계산 및 drop 추가
+        # ✅ feature importance drop
         try:
             feature_names = [col for col in df_feat.columns if col not in ["timestamp", "strategy"]]
-            # dummy model for initial importance calc (could be improved with pretrained)
             dummy_X = torch.tensor(np.random.rand(10, 20, input_size), dtype=torch.float32).to(DEVICE)
             dummy_y = torch.randint(0, 2, (10,), dtype=torch.long).to(DEVICE)
             dummy_model = get_model("lstm", input_size=input_size, output_size=2).to(DEVICE)
@@ -195,66 +194,67 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 y_train_group = np.array([group_classes.index(y) for y in y_train_group if y in group_classes])
                 y_val_group = np.array([group_classes.index(y) for y in y_val_group if y in group_classes])
 
-                for model_type in ["lstm", "cnn_lstm", "transformer"]:
-                    for lr in [1e-4, 5e-4, 1e-3]:
-                        for batch_size in [16, 32, 64]:
-                            for hidden_size in [32, 64, 128]:
-                                for dropout in [0.1, 0.3, 0.5]:
-                                    for epoch_factor in [1, 1.5]:
-                                        for opt_type in ["Adam", "AdamW", "Ranger"]:
-                                            for loss_type in ["CrossEntropy", "FocalLoss"]:
-                                                actual_epochs = int(max_epochs * epoch_factor)
-                                                model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
+                # ✅ grid search 제거, fixed hyperparameters
+                model_type = "cnn_lstm"
+                lr = 1e-4
+                batch_size = 32
+                hidden_size = 64
+                dropout = 0.3
+                opt_type = "AdamW"
+                loss_type = "FocalLoss"
+                actual_epochs = max_epochs
 
-                                                if hasattr(model, "set_hyperparams"):
-                                                    model.set_hyperparams(hidden_size=hidden_size, dropout=dropout)
+                model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
 
-                                                optimizer = {
-                                                    "Adam": torch.optim.Adam(model.parameters(), lr=lr),
-                                                    "AdamW": torch.optim.AdamW(model.parameters(), lr=lr),
-                                                    "Ranger": Ranger(model.parameters(), lr=lr)
-                                                }.get(opt_type, torch.optim.Adam(model.parameters(), lr=lr))
+                if hasattr(model, "set_hyperparams"):
+                    model.set_hyperparams(hidden_size=hidden_size, dropout=dropout)
 
-                                                lossfn = FocalLoss() if loss_type == "FocalLoss" else torch.nn.CrossEntropyLoss()
+                optimizer = {
+                    "Adam": torch.optim.Adam(model.parameters(), lr=lr),
+                    "AdamW": torch.optim.AdamW(model.parameters(), lr=lr),
+                    "Ranger": Ranger(model.parameters(), lr=lr)
+                }.get(opt_type, torch.optim.Adam(model.parameters(), lr=lr))
 
-                                                train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32), torch.tensor(y_train_group, dtype=torch.long))
-                                                val_ds = TensorDataset(torch.tensor(X_val_group, dtype=torch.float32), torch.tensor(y_val_group, dtype=torch.long))
-                                                train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, num_workers=0)
-                                                val_loader = DataLoader(val_ds, batch_size=16, shuffle=False, num_workers=0)
+                lossfn = FocalLoss() if loss_type == "FocalLoss" else torch.nn.CrossEntropyLoss()
 
-                                                for epoch in range(actual_epochs):
-                                                    for xb, yb in train_loader:
-                                                        xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                                                        logits = model(xb)
-                                                        loss = lossfn(logits, yb)
-                                                        sample_weights = torch.ones_like(yb, dtype=torch.float32).to(DEVICE)
-                                                        sample_weights[(yb == -1)] = 3.0
-                                                        weighted_loss = (loss * sample_weights).mean()
+                train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32), torch.tensor(y_train_group, dtype=torch.long))
+                val_ds = TensorDataset(torch.tensor(X_val_group, dtype=torch.float32), torch.tensor(y_val_group, dtype=torch.long))
+                train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+                val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
 
-                                                        if torch.isfinite(weighted_loss):
-                                                            optimizer.zero_grad()
-                                                            weighted_loss.backward()
-                                                            optimizer.step()
+                for epoch in range(actual_epochs):
+                    for xb, yb in train_loader:
+                        xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                        logits = model(xb)
+                        loss = lossfn(logits, yb)
+                        sample_weights = torch.ones_like(yb, dtype=torch.float32).to(DEVICE)
+                        sample_weights[(yb == -1)] = 3.0
+                        weighted_loss = (loss * sample_weights).mean()
 
-                                                maml_loss = maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1)
-                                                print(f"[MAML meta-update 완료] {model_type} | opt={opt_type} | lossfn={loss_type} | lr={lr} | bs={batch_size} | hs={hidden_size} | dr={dropout} | epochs={actual_epochs} | loss={maml_loss:.4f}")
+                        if torch.isfinite(weighted_loss):
+                            optimizer.zero_grad()
+                            weighted_loss.backward()
+                            optimizer.step()
 
-                                                model.eval()
-                                                with torch.no_grad():
-                                                    val_inputs = torch.tensor(X_val_group, dtype=torch.float32).to(DEVICE)
-                                                    val_labels = torch.tensor(y_val_group, dtype=torch.long).to(DEVICE)
-                                                    val_logits = model(val_inputs)
-                                                    val_preds = torch.argmax(val_logits, dim=1)
-                                                    val_acc = (val_preds == val_labels).float().mean().item() if len(val_labels) > 0 else 0.0
+                maml_loss = maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1)
+                print(f"[MAML meta-update 완료] {model_type} | opt={opt_type} | lossfn={loss_type} | lr={lr} | bs={batch_size} | hs={hidden_size} | dr={dropout} | epochs={actual_epochs} | loss={maml_loss:.4f}")
 
-                                                log_training_result(symbol, strategy, f"{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}", acc=val_acc, f1=0.0, loss=float(weighted_loss.item()))
-                                                print(f"[✅ 학습완료] {symbol}-{strategy} | {model_type} | opt={opt_type} | lossfn={loss_type} | lr={lr} | bs={batch_size} | hs={hidden_size} | dr={dropout} | group:{group_id} | window:{window} | acc:{val_acc:.4f}")
+                model.eval()
+                with torch.no_grad():
+                    val_inputs = torch.tensor(X_val_group, dtype=torch.float32).to(DEVICE)
+                    val_labels = torch.tensor(y_val_group, dtype=torch.long).to(DEVICE)
+                    val_logits = model(val_inputs)
+                    val_preds = torch.argmax(val_logits, dim=1)
+                    val_acc = (val_preds == val_labels).float().mean().item() if len(val_labels) > 0 else 0.0
 
-                                                torch.save(model.state_dict(), f"/persistent/models/{symbol}_{strategy}_{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}_group{group_id}_window{window}.pt")
+                log_training_result(symbol, strategy, f"{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}", acc=val_acc, f1=0.0, loss=float(weighted_loss.item()))
+                print(f"[✅ 학습완료] {symbol}-{strategy} | {model_type} | opt={opt_type} | lossfn={loss_type} | lr={lr} | bs={batch_size} | hs={hidden_size} | dr={dropout} | group:{group_id} | window:{window} | acc:{val_acc:.4f}")
 
-                                                del model, optimizer, lossfn, train_loader, val_loader, train_ds, val_ds, xb, yb, logits
-                                                torch.cuda.empty_cache()
-                                                gc.collect()
+                torch.save(model.state_dict(), f"/persistent/models/{symbol}_{strategy}_{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}_group{group_id}_window{window}.pt")
+
+                del model, optimizer, lossfn, train_loader, val_loader, train_ds, val_ds, xb, yb, logits
+                torch.cuda.empty_cache()
+                gc.collect()
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
