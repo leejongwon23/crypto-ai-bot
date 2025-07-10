@@ -54,13 +54,8 @@ def set_FAIL_AUGMENT_RATIO(value):
     _config["FAIL_AUGMENT_RATIO"] = int(value)
     save_config()
 
-# ✅ 클래스 그룹화 함수 (기존 유지)
+# ✅ 클래스 그룹화 함수
 def get_class_groups(num_classes=None, group_size=5):
-    """
-    ✅ 클래스 그룹화 함수 (YOPO v4.1)
-    - num_classes를 group_size 크기로 나누어 그룹화
-    - num_classes ≤ group_size 시 단일 그룹 반환
-    """
     if num_classes is None:
         num_classes = get_NUM_CLASSES()
     if num_classes <= group_size:
@@ -68,11 +63,6 @@ def get_class_groups(num_classes=None, group_size=5):
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
 def get_class_ranges(method="equal", data_path="/persistent/prediction_log.csv"):
-    """
-    ✅ 클래스 범위 생성 함수
-    - method="equal": 균등 등분 (-1.0~+1.0)
-    - method="quantile": prediction_log.csv 수익률 분포 기반 quantile binning
-    """
     import pandas as pd
     import numpy as np
 
@@ -103,3 +93,7 @@ def get_class_ranges(method="equal", data_path="/persistent/prediction_log.csv")
         print(f"[⚠️ get_class_ranges] 알 수 없는 method={method} → equal 사용")
         return get_class_ranges(method="equal")
 
+# ✅ 즉시 변수 선언 (함수 import 호환 + 변수 import 호환)
+FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
+NUM_CLASSES = get_NUM_CLASSES()
+FAIL_AUGMENT_RATIO = get_FAIL_AUGMENT_RATIO()
