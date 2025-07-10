@@ -4,11 +4,10 @@ import torch.nn.functional as F
 import xgboost as xgb
 import numpy as np
 from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE
+from data.utils import compute_features, get_kline_by_strategy
 
 NUM_CLASSES = get_NUM_CLASSES()
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
-from data.utils import compute_features, get_kline_by_strategy
-
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class Attention(nn.Module):
@@ -20,8 +19,6 @@ class Attention(nn.Module):
         weights = F.softmax(self.attn(lstm_out).squeeze(-1), dim=1)
         context = torch.sum(lstm_out * weights.unsqueeze(-1), dim=1)
         return context, weights
-
-import torch.nn as nn
 
 class LSTMPricePredictor(nn.Module):
     def __init__(self, input_size, hidden_size=256, num_layers=4, dropout=0.4, output_size=NUM_CLASSES):
@@ -47,13 +44,9 @@ class LSTMPricePredictor(nn.Module):
             hidden = self.act(self.fc2(hidden))
             logits = self.fc_logits(hidden)
         else:
-            hidden = nn.functional.gelu(nn.functional.linear(
-                context, params['fc1.weight'], params['fc1.bias']))
-            hidden = nn.functional.gelu(nn.functional.linear(
-                hidden, params['fc2.weight'], params['fc2.bias']))
-            logits = nn.functional.linear(
-                hidden, params['fc_logits.weight'], params['fc_logits.bias'])
-
+            hidden = F.gelu(F.linear(context, params['fc1.weight'], params['fc1.bias']))
+            hidden = F.gelu(F.linear(hidden, params['fc2.weight'], params['fc2.bias']))
+            logits = F.linear(hidden, params['fc_logits.weight'], params['fc_logits.bias'])
         return logits
 
 class CNNLSTMPricePredictor(nn.Module):
@@ -71,12 +64,7 @@ class CNNLSTMPricePredictor(nn.Module):
         self.fc2 = nn.Linear(lstm_hidden_size, lstm_hidden_size // 2)
         self.fc_logits = nn.Linear(lstm_hidden_size // 2, output_size)
 
-    def set_hyperparams(self, hidden_size=None, dropout=None):
-        if dropout is not None:
-            self.dropout.p = dropout
-    
-
-    def forward(self, x):
+    def forward(self, x, params=None):
         x = x.permute(0, 2, 1)
         x = self.relu(self.conv1(x))
         x = self.relu(self.conv2(x))
@@ -85,10 +73,16 @@ class CNNLSTMPricePredictor(nn.Module):
         context, _ = self.attention(lstm_out)
         context = self.norm(context)
         context = self.dropout(context)
-        hidden = self.act(self.fc1(context))
-        hidden = self.act(self.fc2(hidden))
-        return self.fc_logits(hidden)
 
+        if params is None:
+            hidden = self.act(self.fc1(context))
+            hidden = self.act(self.fc2(hidden))
+            logits = self.fc_logits(hidden)
+        else:
+            hidden = F.gelu(F.linear(context, params['fc1.weight'], params['fc1.bias']))
+            hidden = F.gelu(F.linear(hidden, params['fc2.weight'], params['fc2.bias']))
+            logits = F.linear(hidden, params['fc_logits.weight'], params['fc_logits.bias'])
+        return logits
 
 class TransformerPricePredictor(nn.Module):
     def __init__(self, input_size, d_model=128, nhead=8, num_layers=3, dropout=0.4, output_size=None, mode="classification"):
@@ -110,7 +104,7 @@ class TransformerPricePredictor(nn.Module):
         elif self.mode == "reconstruction":
             self.decoder = nn.Linear(d_model, output_size)
 
-    def forward(self, x):
+    def forward(self, x, params=None):
         x = self.input_proj(x)
         x = self.pos_encoder(x)
         for layer in self.encoder_layers:
@@ -120,10 +114,17 @@ class TransformerPricePredictor(nn.Module):
 
         if self.mode == "classification":
             x = x.mean(dim=1)
-            x = self.act(self.fc1(x))
-            return self.fc_logits(x)
+            if params is None:
+                x = self.act(self.fc1(x))
+                logits = self.fc_logits(x)
+            else:
+                x = F.gelu(F.linear(x, params['fc1.weight'], params['fc1.bias']))
+                logits = F.linear(x, params['fc_logits.weight'], params['fc_logits.bias'])
+            return logits
         elif self.mode == "reconstruction":
             return self.decoder(x)
+
+# PositionalEncoding, XGBoostWrapper, AutoEncoder, get_model 함수는 기존과 동일
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
