@@ -7,7 +7,8 @@ CONFIG_PATH = "/persistent/config.json"
 _default_config = {
     "NUM_CLASSES": 21,
     "FEATURE_INPUT_SIZE": 24,
-    "FAIL_AUGMENT_RATIO": 3
+    "FAIL_AUGMENT_RATIO": 3,
+    "MIN_FEATURES": 5  # ✅ 최소 feature 개수 기본값 추가
 }
 
 # ✅ config.json 로드
@@ -41,6 +42,9 @@ def get_FEATURE_INPUT_SIZE():
 def get_FAIL_AUGMENT_RATIO():
     return _config.get("FAIL_AUGMENT_RATIO", _default_config["FAIL_AUGMENT_RATIO"])
 
+def get_MIN_FEATURES():
+    return _config.get("MIN_FEATURES", _default_config["MIN_FEATURES"])
+
 # ✅ set 함수들
 def set_NUM_CLASSES(value):
     _config["NUM_CLASSES"] = int(value)
@@ -52,6 +56,10 @@ def set_FEATURE_INPUT_SIZE(value):
 
 def set_FAIL_AUGMENT_RATIO(value):
     _config["FAIL_AUGMENT_RATIO"] = int(value)
+    save_config()
+
+def set_MIN_FEATURES(value):
+    _config["MIN_FEATURES"] = int(value)
     save_config()
 
 # ✅ 클래스 그룹화 함수
@@ -97,3 +105,4 @@ def get_class_ranges(method="equal", data_path="/persistent/prediction_log.csv")
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 NUM_CLASSES = get_NUM_CLASSES()
 FAIL_AUGMENT_RATIO = get_FAIL_AUGMENT_RATIO()
+MIN_FEATURES = get_MIN_FEATURES()  # ✅ 추가
