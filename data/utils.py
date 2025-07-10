@@ -90,12 +90,13 @@ def get_btc_dominance():
 
 import numpy as np
 
+
 def create_dataset(features, window=20, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
     from sklearn.preprocessing import MinMaxScaler
     from config import get_NUM_CLASSES, MIN_FEATURES
-    from logger import log_prediction  # ✅ 추가
+    from logger import log_prediction
     NUM_CLASSES = get_NUM_CLASSES()
     from collections import Counter
     import random
@@ -111,7 +112,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     if not features or len(features) <= window:
         print(f"[⚠️ 부족] features length={len(features) if features else 0}, window={window} → dummy 반환")
         dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([0], dtype=np.int64)
+        dummy_y = np.array([-1], dtype=np.int64)  # ✅ dummy class -1 로 지정
 
         log_prediction(
             symbol=get_symbol_safe(),
@@ -149,7 +150,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     if not feature_cols:
         print("[⚠️ 부족] feature drop 결과 컬럼 없음 → dummy 반환")
         dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([0], dtype=np.int64)
+        dummy_y = np.array([-1], dtype=np.int64)
 
         log_prediction(
             symbol=get_symbol_safe(),
@@ -180,7 +181,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     if df.empty or len(feature_cols) == 0:
         print("[⚠️ 부족] DataFrame empty 또는 feature_cols 없음 → dummy 반환")
         dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([0], dtype=np.int64)
+        dummy_y = np.array([-1], dtype=np.int64)
 
         log_prediction(
             symbol=get_symbol_safe(),
@@ -268,7 +269,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     if len(y) < 2:
         print(f"[⚠️ 부족] validation 데이터 너무 적음: {len(y)}개 → dummy 반환")
         dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([0], dtype=np.int64)
+        dummy_y = np.array([-1], dtype=np.int64)
 
         log_prediction(
             symbol=get_symbol_safe(),
