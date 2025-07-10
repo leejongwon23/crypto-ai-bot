@@ -389,11 +389,17 @@ if __name__ == "__main__":
     sys.stdout.flush()
 
     from train import train_symbol_group_loop
+
+    print("✅ [DEBUG] train_symbol_group_loop 쓰레드 시작 직전")
     threading.Thread(target=train_symbol_group_loop, daemon=True).start()
+    print("✅ [DEBUG] train_symbol_group_loop 쓰레드 시작 완료")
 
     # ✅ meta 보정 스크립트 자동 실행 추가
     import maintenance_fix_meta
     threading.Thread(target=maintenance_fix_meta.fix_all_meta_json, daemon=True).start()
+    print("✅ [DEBUG] maintenance_fix_meta.fix_all_meta_json 쓰레드 시작 완료")
 
     threading.Thread(target=lambda: send_message("[시작] YOPO 서버 실행됨"), daemon=True).start()
+    print("✅ [DEBUG] telegram_bot send_message 쓰레드 시작 완료")
+
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
