@@ -249,7 +249,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                                     val_preds = torch.argmax(val_logits, dim=1)
                                                     val_acc = (val_preds == val_labels).float().mean().item() if len(val_labels) > 0 else 0.0
 
-                                                log_training_result(symbol, strategy, f"{model_type}_{opt_type}_{loss_type}_lr{lr}_bs{batch_size}_hs{hidden_size}_dr={dropout}", acc=val_acc, f1=0.0, loss=float(weighted_loss.item()))
+                                                log_training_result(symbol, strategy, f"{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}", acc=val_acc, f1=0.0, loss=float(weighted_loss.item()))
                                                 print(f"[✅ 학습완료] {symbol}-{strategy} | {model_type} | opt={opt_type} | lossfn={loss_type} | lr={lr} | bs={batch_size} | hs={hidden_size} | dr={dropout} | group:{group_id} | window:{window} | acc:{val_acc:.4f}")
 
                                                 torch.save(model.state_dict(), f"/persistent/models/{symbol}_{strategy}_{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}_group{group_id}_window{window}.pt")
