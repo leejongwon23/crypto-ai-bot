@@ -102,6 +102,11 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     X, y = [], []
 
+    def get_symbol_safe():
+        if features and isinstance(features[0], dict) and "symbol" in features[0]:
+            return features[0]["symbol"]
+        return "UNKNOWN"
+
     # ✅ features 부족 시 dummy 반환 + log_prediction 기록
     if not features or len(features) <= window:
         print(f"[⚠️ 부족] features length={len(features) if features else 0}, window={window} → dummy 반환")
@@ -109,7 +114,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         dummy_y = np.array([0], dtype=np.int64)
 
         log_prediction(
-            symbol="UNKNOWN",
+            symbol=get_symbol_safe(),
             strategy=strategy,
             direction="dummy",
             entry_price=0,
@@ -147,7 +152,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         dummy_y = np.array([0], dtype=np.int64)
 
         log_prediction(
-            symbol="UNKNOWN",
+            symbol=get_symbol_safe(),
             strategy=strategy,
             direction="dummy",
             entry_price=0,
@@ -178,7 +183,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         dummy_y = np.array([0], dtype=np.int64)
 
         log_prediction(
-            symbol="UNKNOWN",
+            symbol=get_symbol_safe(),
             strategy=strategy,
             direction="dummy",
             entry_price=0,
@@ -266,7 +271,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         dummy_y = np.array([0], dtype=np.int64)
 
         log_prediction(
-            symbol="UNKNOWN",
+            symbol=get_symbol_safe(),
             strategy=strategy,
             direction="dummy",
             entry_price=0,
@@ -300,7 +305,6 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     print(f"[✅ create_dataset 완료] 샘플 수: {len(y)}, 클래스 분포: {Counter(y)}")
     return X, y
-
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
 _kline_cache = {}
