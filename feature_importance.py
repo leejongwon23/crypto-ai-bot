@@ -73,9 +73,10 @@ def drop_low_importance_features(df: pd.DataFrame, importances: dict, threshold:
         df["pad_0"] = 0.0
         remaining_cols = ["pad_0"]
 
-    # ✅ 수정: input_size 설정시 부족분 pad 채우기
-    if input_size and len(remaining_cols) < input_size:
-        for i in range(len(remaining_cols), input_size):
+    # ✅ 수정: 최소 3개 컬럼 유지 (input_size 없을 때)
+    min_cols = input_size if input_size else 3
+    if len(remaining_cols) < min_cols:
+        for i in range(len(remaining_cols), min_cols):
             pad_col = f"pad_{i}"
             df[pad_col] = 0.0
             remaining_cols.append(pad_col)
@@ -83,8 +84,6 @@ def drop_low_importance_features(df: pd.DataFrame, importances: dict, threshold:
     print(f"🧹 제거된 feature 수: {len(drop_cols)} → {drop_cols}")
 
     return df[remaining_cols + ["timestamp", "strategy"]]
-
-
 
 def get_top_features(importances: dict, top_n: int = 10) -> pd.DataFrame:
     if not importances:
