@@ -115,7 +115,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from datetime import datetime
     import pytz
     from meta_learning import maml_train_entry
-    from ranger_adabelief import RangerAdaBelief as Ranger  # ✅ 수정: Ranger import
+    from ranger_adabelief import RangerAdaBelief as Ranger
 
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -160,9 +160,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 if len(y_train_group) < 2:
                     continue
 
-                X_train_group, y_train_group = balance_classes(
-                    X_train_group, y_train_group, min_count=20, num_classes=len(group_classes)
-                )
+                X_train_group, y_train_group = balance_classes(X_train_group, y_train_group, min_count=20, num_classes=len(group_classes))
                 print(f"[📊 학습 데이터 클래스 분포] {Counter(y_train_group)}")
 
                 output_size = len(group_classes)
@@ -191,7 +189,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                                 if hasattr(model, "set_hyperparams"):
                                                     model.set_hyperparams(hidden_size=hidden_size, dropout=dropout)
 
-                                                # ✅ optimizer 선택
                                                 if opt_type == "Adam":
                                                     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
                                                 elif opt_type == "AdamW":
@@ -201,7 +198,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                                 else:
                                                     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-                                                # ✅ loss function 선택
                                                 if loss_type == "CrossEntropy":
                                                     lossfn = torch.nn.CrossEntropyLoss()
                                                 elif loss_type == "FocalLoss":
@@ -209,14 +205,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                                 else:
                                                     lossfn = torch.nn.CrossEntropyLoss()
 
-                                                train_ds = TensorDataset(
-                                                    torch.tensor(X_train_group, dtype=torch.float32),
-                                                    torch.tensor(y_train_group, dtype=torch.long)
-                                                )
-                                                val_ds = TensorDataset(
-                                                    torch.tensor(X_val_group, dtype=torch.float32),
-                                                    torch.tensor(y_val_group, dtype=torch.long)
-                                                )
+                                                train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32),
+                                                                         torch.tensor(y_train_group, dtype=torch.long))
+                                                val_ds = TensorDataset(torch.tensor(X_val_group, dtype=torch.float32),
+                                                                       torch.tensor(y_val_group, dtype=torch.long))
                                                 train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, num_workers=0)
                                                 val_loader = DataLoader(val_ds, batch_size=16, shuffle=False, num_workers=0)
 
@@ -225,11 +217,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                                         xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                                                         logits = model(xb)
                                                         loss = lossfn(logits, yb)
-
                                                         sample_weights = torch.ones_like(yb, dtype=torch.float32).to(DEVICE)
                                                         fail_indices = (yb == -1)
                                                         sample_weights[fail_indices] = 3.0
-
                                                         weighted_loss = (loss * sample_weights).mean()
 
                                                         if torch.isfinite(weighted_loss):
@@ -253,7 +243,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                                                 torch.save(model.state_dict(), f"/persistent/models/{symbol}_{strategy}_{model_type}_{opt_type}_{loss_type}_lr{lr}_bs{batch_size}_hs{hidden_size}_dr{dropout}_group{group_id}_window{window}.pt")
 
-                                                del model, xb, yb, logits
+                                                # ✅ 메모리 해제
+                                                del model, optimizer, lossfn, train_loader, val_loader, train_ds, val_ds, xb, yb, logits
                                                 torch.cuda.empty_cache()
                                                 gc.collect()
 
