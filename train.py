@@ -116,6 +116,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     import pytz
     from meta_learning import maml_train_entry
     from ranger_adabelief import RangerAdaBelief as Ranger
+    from feature_importance import compute_feature_importance, drop_low_importance_features  # ✅ 추가
 
     print("✅ [train_one_model 호출됨]")
 
@@ -135,6 +136,19 @@ def train_one_model(symbol, strategy, max_epochs=20):
         if df_feat is None or df_feat.empty or df_feat.isnull().any().any():
             print(f"⛔ [중단] {symbol}-{strategy}: 피처 생성 실패 또는 NaN")
             return
+
+        # ✅ feature importance 계산 및 drop 추가
+        try:
+            feature_names = [col for col in df_feat.columns if col not in ["timestamp", "strategy"]]
+            # dummy model for initial importance calc (could be improved with pretrained)
+            dummy_X = torch.tensor(np.random.rand(10, 20, input_size), dtype=torch.float32).to(DEVICE)
+            dummy_y = torch.randint(0, 2, (10,), dtype=torch.long).to(DEVICE)
+            dummy_model = get_model("lstm", input_size=input_size, output_size=2).to(DEVICE)
+            importances = compute_feature_importance(dummy_model, dummy_X, dummy_y, feature_names, method="baseline")
+            df_feat = drop_low_importance_features(df_feat, importances, threshold=0.05)
+            print("[✅ feature drop 완료] 중요도가 낮은 feature 제거됨")
+        except Exception as e:
+            print(f"[⚠️ feature drop 실패] {e}")
 
         window_list = find_best_windows(symbol, strategy)
         if not window_list:
@@ -245,6 +259,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         traceback.print_exc()
+
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
