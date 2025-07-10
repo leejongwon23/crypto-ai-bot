@@ -70,18 +70,15 @@ from sklearn.linear_model import LogisticRegression
 META_MODEL_PATH = "/persistent/models/meta_learner.pkl"
 
 def train_meta_learner(model_outputs_list, true_labels):
-    """
-    ✅ meta learner 학습 함수
-    - model_outputs_list: [(n_models, n_classes), ...] 리스트
-    - true_labels: 실제 라벨 리스트
-    """
+    import numpy as np, pickle
+    from sklearn.linear_model import LogisticRegression
+
     X = [np.array(mo).flatten() for mo in model_outputs_list]
     y = np.array(true_labels)
 
     clf = LogisticRegression(max_iter=500)
     clf.fit(X, y)
 
-    # ✅ pickle 저장
     with open(META_MODEL_PATH, "wb") as f:
         pickle.dump(clf, f)
     print(f"[✅ meta learner 학습 완료 및 저장] {META_MODEL_PATH}")
@@ -89,9 +86,7 @@ def train_meta_learner(model_outputs_list, true_labels):
     return clf
 
 def load_meta_learner():
-    """
-    ✅ meta learner 로드 함수
-    """
+    import os, pickle
     if os.path.exists(META_MODEL_PATH):
         with open(META_MODEL_PATH, "rb") as f:
             clf = pickle.load(f)
@@ -102,24 +97,17 @@ def load_meta_learner():
         return None
 
 def ensemble_stacking(model_outputs, meta_model=None):
-    """
-    ✅ stacking ensemble 함수
-    - model_outputs: (n_models, n_classes) ndarray
-    - meta_model: 사전 학습된 meta-learner (LogisticRegression)
-    - 반환: 최종 클래스 index
-    """
+    import numpy as np
+
     X_stack = np.array(model_outputs)
-    X_stack = X_stack.reshape(1, -1)  # (1, n_models * n_classes)
+    X_stack = X_stack.reshape(1, -1)
 
     if meta_model is not None:
         pred = meta_model.predict(X_stack)
         return int(pred[0])
     else:
-        # fallback: 평균 soft voting
         avg_probs = np.mean(model_outputs, axis=0)
         return int(np.argmax(avg_probs))
-
-
 
 def class_to_expected_return(cls, recent_days=3):
     import pandas as pd
@@ -236,14 +224,30 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     return result
 
 def predict(symbol, strategy, source="일반", model_type=None):
+    import numpy as np, pandas as pd, os, torch
     from scipy.stats import entropy
+    from sklearn.preprocessing import MinMaxScaler
     from window_optimizer import find_best_windows
     from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
+    from logger import log_prediction, get_available_models
+    from config import get_class_groups, FEATURE_INPUT_SIZE
+    from model_weight_loader import load_model_cached
+    from failure_db import insert_failure_record
+    from logger import get_feature_hash
+    from datetime import datetime
+    import pytz
+
+    DEVICE = torch.device("cpu")
+    MODEL_DIR = "/persistent/models"
+    now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 
     try:
         max_retry = 3
         retry = 0
         class_groups = get_class_groups()
+
+        model_outputs_list = []
+        true_labels = []
 
         while retry < max_retry:
             window_list = find_best_windows(symbol, strategy)
@@ -265,7 +269,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             feat_scaled = MinMaxScaler().fit_transform(features_only)
             input_size = feat_scaled.shape[1]
 
-            # ✅ FEATURE_INPUT_SIZE로 강제 통일
             if input_size < FEATURE_INPUT_SIZE:
                 pad_cols = FEATURE_INPUT_SIZE - input_size
                 feat_scaled = np.pad(feat_scaled, ((0,0),(0,pad_cols)), mode="constant", constant_values=0)
@@ -278,97 +281,66 @@ def predict(symbol, strategy, source="일반", model_type=None):
             if not models:
                 return [failed_result(symbol, strategy, "unknown", "모델 없음 → 학습 필요", source)]
 
-            pred_classes = []
             recent_freq = get_recent_class_frequencies(strategy)
-            model_outputs = []  # ✅ stacking ensemble용 output 저장 리스트
+            model_outputs = []
 
-            for trial in range(3):
-                for window in window_list:
-                    if feat_scaled.shape[0] < window:
+            for window in window_list:
+                if feat_scaled.shape[0] < window:
+                    continue
+                X_input = feat_scaled[-window:]
+                X = np.expand_dims(X_input, axis=0)
+
+                for m in models:
+                    if m["symbol"] != symbol or m["strategy"] != strategy:
                         continue
-                    X_input = feat_scaled[-window:]
-                    X = np.expand_dims(X_input, axis=0)
+                    if f"_window{window}" not in m["pt_file"]:
+                        continue
 
-                    for m in models:
-                        if m["symbol"] != symbol or m["strategy"] != strategy:
-                            continue
-                        if f"_window{window}" not in m["pt_file"]:
-                            continue
+                    group_id = m.get("group_id")
+                    if group_id is None:
+                        continue
+                    group_classes = class_groups[group_id]
 
-                        group_id = m.get("group_id")
-                        if group_id is None:
-                            continue
-                        group_classes = class_groups[group_id]
+                    model_path = os.path.join(MODEL_DIR, m["pt_file"])
+                    meta_path = model_path.replace(".pt", ".meta.json")
+                    if not os.path.exists(model_path) or not os.path.exists(meta_path):
+                        continue
 
-                        model_path = os.path.join(MODEL_DIR, m["pt_file"])
-                        meta_path = model_path.replace(".pt", ".meta.json")
-                        if not os.path.exists(model_path) or not os.path.exists(meta_path):
-                            continue
+                    model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, len(group_classes))
+                    if model is None:
+                        continue
 
-                        with open(meta_path, "r", encoding="utf-8") as f:
-                            meta = json.load(f)
+                    with torch.no_grad():
+                        logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
+                        probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
 
-                        model_input_size = meta.get("input_size")
-                        if model_input_size != FEATURE_INPUT_SIZE:
-                            continue
+                    adjusted_probs = adjust_probs_with_diversity(probs, recent_freq)
+                    model_outputs.append(adjusted_probs)
 
-                        # ✅ 캐싱된 모델 로드 적용
-                        model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, len(group_classes))
-
-                        # ✅ [추가] 모델 None 체크
-                        if model is None:
-                            print(f"[⚠️ skip] {model_path} input/output 크기 불일치로 스킵")
-                            continue
-
-                        with torch.no_grad():
-                            logits = model(torch.tensor(X, dtype=torch.float32).to(DEVICE))
-                            probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
-
-                        adjusted_probs = adjust_probs_with_diversity(probs, recent_freq)
-                        model_outputs.append(adjusted_probs)  # ✅ stacking ensemble에 추가
-
-            # ✅ stacking ensemble 적용
             if len(model_outputs) == 0:
                 final_pred_class = -1
             else:
-                final_pred_class = ensemble_stacking(model_outputs)
+                meta_model = load_meta_learner()
+                final_pred_class = ensemble_stacking(model_outputs, meta_model)
 
-            # ✅ 핵심 요약 로그만 출력
+                # ✅ meta learner 학습 데이터 저장
+                model_outputs_list.append(model_outputs)
+                true_labels.append(final_pred_class)
+
             print(f"[predict] {symbol}-{strategy} 최종 예측 클래스: {final_pred_class}")
 
-            if final_pred_class != -1:
-                expected_return = class_to_expected_return(final_pred_class)
+            retry += 1
 
-                conf_score = 1 - entropy(np.mean(model_outputs, axis=0) + 1e-6) / np.log(len(model_outputs[0]))
-                if not np.isfinite(conf_score):
-                    conf_score = 0.0
+        # ✅ meta learner 학습 호출
+        if len(model_outputs_list) >= 10:
+            train_meta_learner(model_outputs_list, true_labels)
+            print("[✅ meta learner 재학습 완료]")
 
-                log_prediction(
-                    symbol=symbol, strategy=strategy, direction=f"Stacking-Class-{final_pred_class}",
-                    entry_price=df["close"].iloc[-1],
-                    target_price=df["close"].iloc[-1] * (1 + expected_return),
-                    model="stacking_ensemble", success=True, reason=f"Stacking Ensemble | confidence={conf_score:.4f}",
-                    rate=expected_return, timestamp=now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-                    return_value=expected_return, volatility=True, source=source,
-                    predicted_class=final_pred_class, label=final_pred_class
-                )
-
-                return [{
-                    "symbol": symbol, "strategy": strategy, "model": "stacking_ensemble",
-                    "class": final_pred_class, "expected_return": expected_return,
-                    "success": True, "predicted_class": final_pred_class,
-                    "label": final_pred_class, "confidence": round(conf_score, 4)
-                }]
-            else:
-                print(f"[predict] {symbol}-{strategy} Stacking Ensemble 실패")
-                return [failed_result(symbol, strategy, "unknown", "Stacking Ensemble 실패", source)]
-
-        retry += 1
-        return [failed_result(symbol, strategy, "unknown", "다중윈도우 Stacking 실패", source)]
+        return final_pred_class
 
     except Exception as e:
         print(f"[predict 예외] {symbol}-{strategy} → {e}")
-        return [failed_result(symbol, strategy, "unknown", f"예외 발생: {e}", source)]
+        return -1
 
 
 # 📄 predict.py 내부에 추가
