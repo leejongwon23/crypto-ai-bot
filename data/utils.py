@@ -90,6 +90,7 @@ def get_btc_dominance():
 
 import numpy as np
 
+
 def create_dataset(features, window=20, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
@@ -102,31 +103,26 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     X, y = [], []
 
     if not features or len(features) <= window:
-        print(f"[⚠️ 부족] features length={len(features) if features else 0}, window={window}")
-        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([0], dtype=np.int64)
-        return dummy_X, dummy_y
+        print(f"[❌ create_dataset 실패] features 부족: length={len(features) if features else 0}, window={window}")
+        return None, None
 
     try:
         columns = [c for c in features[0].keys() if c not in ["timestamp", "strategy"]]
     except Exception as e:
-        print(f"[오류] features[0] 키 확인 실패 → {e}")
-        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([0], dtype=np.int64)
-        return dummy_X, dummy_y
+        print(f"[❌ create_dataset 실패] features[0] 키 확인 실패 → {e}")
+        return None, None
 
     df = pd.DataFrame(features)
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
     df = df.drop(columns=["strategy"], errors="ignore")
 
-    # ✅ 수정: drop 후 컬럼 없으면 pad_0 추가
+    # ✅ feature 컬럼 없으면 실패 반환
     drop_cols = ["timestamp"]
     feature_cols = [c for c in df.columns if c not in drop_cols]
     if not feature_cols:
-        print("[⚠️ 경고] feature drop 결과 컬럼 없음 → pad_0 추가")
-        df["pad_0"] = 0.0
-        feature_cols = ["pad_0"]
+        print("[❌ create_dataset 실패] feature drop 결과 컬럼 없음")
+        return None, None
 
     # ✅ 최소 feature 개수 유지
     if len(feature_cols) < MIN_FEATURES:
@@ -135,26 +131,21 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             df[pad_col] = 0.0
             feature_cols.append(pad_col)
 
-    # ✅ 추가권장보완: 빈 DataFrame 방지
     if df.empty or len(feature_cols) == 0:
         print("[❌ create_dataset 실패] DataFrame empty 또는 feature_cols 없음")
-        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([0], dtype=np.int64)
-        return dummy_X, dummy_y
+        return None, None
 
     scaler = MinMaxScaler()
     try:
         scaled = scaler.fit_transform(df[feature_cols])
     except Exception as e:
-        print(f"[❌ scaler fit_transform 실패] {e}")
-        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([0], dtype=np.int64)
-        return dummy_X, dummy_y
+        print(f"[❌ create_dataset 실패] scaler fit_transform 실패 → {e}")
+        return None, None
 
     df_scaled = pd.DataFrame(scaled, columns=feature_cols)
     df_scaled["timestamp"] = df["timestamp"].values
 
-    # ✅ input_size 미달 시 padding 컬럼 추가 (규칙적 pad 컬럼명)
+    # ✅ input_size 미달 시 padding 컬럼 추가
     if input_size and len(feature_cols) < input_size:
         for i in range(len(feature_cols), input_size):
             pad_col = f"pad_{i}"
@@ -209,10 +200,8 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             continue
 
     if len(y) < 2:
-        print(f"[⚠️ validation 데이터 너무 적음: {len(y)}개 → window 크기나 데이터량을 확인하세요]")
-        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([0], dtype=np.int64)
-        return dummy_X, dummy_y
+        print(f"[❌ create_dataset 실패] validation 데이터 부족: {len(y)}개")
+        return None, None
 
     counts = Counter(y)
     max_count = max(counts.values())
@@ -228,8 +217,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     X = np.array(X, dtype=np.float32)
     y = np.array(y, dtype=np.int64)
 
-    print(f"[✅ create_dataset] 최종 샘플 수: {len(y)}, 클래스 분포: {Counter(y)}")
-
+    print(f"[✅ create_dataset 완료] 샘플 수: {len(y)}, 클래스 분포: {Counter(y)}")
     return X, y
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
@@ -374,7 +362,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     if df is None or df.empty:
         print(f"[❌ compute_features 실패] 입력 DataFrame empty")
         failed_result(symbol, strategy, reason="입력DataFrame empty")
-        return pd.DataFrame(columns=["timestamp", "strategy", "close", "high"])
+        return None
 
     df = df.copy()
 
@@ -438,27 +426,25 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df[feature_cols] = scaler.fit_transform(df[feature_cols])
 
     except Exception as e:
-        print(f"[❌ compute_features 예외] feature 계산 실패 → {e}")
+        print(f"[❌ compute_features 실패] feature 계산 예외 → {e}")
         failed_result(symbol, strategy, reason=f"feature 계산 실패: {e}")
-        return pd.DataFrame(columns=["timestamp", "strategy", "close", "high"])
+        return None
 
     required_cols = ["timestamp", "close", "high"]
     missing_cols = [col for col in required_cols if col not in df.columns or df[col].isnull().any()]
     if missing_cols or df.empty:
         print(f"[❌ compute_features 실패] 필수 컬럼 누락 또는 NaN 존재: {missing_cols}, rows={len(df)}")
         failed_result(symbol, strategy, reason=f"필수컬럼누락 또는 NaN: {missing_cols}")
-        return pd.DataFrame(columns=required_cols + ["strategy"])
+        return None
 
     if len(df) < 5:
         print(f"[❌ compute_features 실패] 데이터 row 부족 ({len(df)} rows)")
         failed_result(symbol, strategy, reason="row 부족")
-        return pd.DataFrame(columns=required_cols + ["strategy"])
+        return None
 
     print(f"[✅ 완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     CacheManager.set(cache_key, df)
     return df
-
-
 
 
 # data/utils.py 맨 아래에 추가
