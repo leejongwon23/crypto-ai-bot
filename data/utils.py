@@ -94,7 +94,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
     from sklearn.preprocessing import MinMaxScaler
-    from config import get_NUM_CLASSES
+    from config import get_NUM_CLASSES, MIN_FEATURES
     NUM_CLASSES = get_NUM_CLASSES()
     from collections import Counter
     import random
@@ -103,7 +103,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     if not features or len(features) <= window:
         print(f"[⚠️ 부족] features length={len(features) if features else 0}, window={window}")
-        dummy_X = np.zeros((1, window, input_size if input_size else 11), dtype=np.float32)
+        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
         dummy_y = np.array([0], dtype=np.int64)
         return dummy_X, dummy_y
 
@@ -111,7 +111,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         columns = [c for c in features[0].keys() if c not in ["timestamp", "strategy"]]
     except Exception as e:
         print(f"[오류] features[0] 키 확인 실패 → {e}")
-        dummy_X = np.zeros((1, window, input_size if input_size else 11), dtype=np.float32)
+        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
         dummy_y = np.array([0], dtype=np.int64)
         return dummy_X, dummy_y
 
@@ -128,10 +128,17 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         df["pad_0"] = 0.0
         feature_cols = ["pad_0"]
 
+    # ✅ 최소 feature 개수 유지
+    if len(feature_cols) < MIN_FEATURES:
+        for i in range(len(feature_cols), MIN_FEATURES):
+            pad_col = f"pad_{i}"
+            df[pad_col] = 0.0
+            feature_cols.append(pad_col)
+
     # ✅ 추가권장보완: 빈 DataFrame 방지
     if df.empty or len(feature_cols) == 0:
         print("[❌ create_dataset 실패] DataFrame empty 또는 feature_cols 없음")
-        dummy_X = np.zeros((1, window, input_size if input_size else 11), dtype=np.float32)
+        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
         dummy_y = np.array([0], dtype=np.int64)
         return dummy_X, dummy_y
 
@@ -140,14 +147,14 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         scaled = scaler.fit_transform(df[feature_cols])
     except Exception as e:
         print(f"[❌ scaler fit_transform 실패] {e}")
-        dummy_X = np.zeros((1, window, input_size if input_size else 11), dtype=np.float32)
+        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
         dummy_y = np.array([0], dtype=np.int64)
         return dummy_X, dummy_y
 
     df_scaled = pd.DataFrame(scaled, columns=feature_cols)
     df_scaled["timestamp"] = df["timestamp"].values
 
-    # ✅ 수정: input_size 미달 시 padding 컬럼 추가
+    # ✅ input_size 미달 시 padding 컬럼 추가 (규칙적 pad 컬럼명)
     if input_size and len(feature_cols) < input_size:
         for i in range(len(feature_cols), input_size):
             pad_col = f"pad_{i}"
@@ -203,7 +210,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     if len(y) < 2:
         print(f"[⚠️ validation 데이터 너무 적음: {len(y)}개 → window 크기나 데이터량을 확인하세요]")
-        dummy_X = np.zeros((1, window, input_size if input_size else 11), dtype=np.float32)
+        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
         dummy_y = np.array([0], dtype=np.int64)
         return dummy_X, dummy_y
 
@@ -224,8 +231,6 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     print(f"[✅ create_dataset] 최종 샘플 수: {len(y)}, 클래스 분포: {Counter(y)}")
 
     return X, y
-
-
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
 _kline_cache = {}
