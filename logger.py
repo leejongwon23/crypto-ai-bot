@@ -16,12 +16,17 @@ model_success_tracker = {}
 
 
 def get_db_connection():
-    try:
-        conn = sqlite3.connect("/persistent/logs/failure_patterns.db", check_same_thread=False)  # ✅ Lock-safe
-        return conn
-    except Exception as e:
-        print(f"[오류] DB 연결 실패 → {e}")
-        return None
+    import sqlite3
+    global _db_conn
+    if '_db_conn' not in globals() or _db_conn is None:
+        try:
+            _db_conn = sqlite3.connect("/persistent/logs/failure_patterns.db", check_same_thread=False)
+            print("[✅ logger.py DB connection 생성 완료]")
+        except Exception as e:
+            print(f"[오류] logger.py DB connection 생성 실패 → {e}")
+            _db_conn = None
+    return _db_conn
+
 
 import sqlite3
 
@@ -29,46 +34,47 @@ DB_PATH = "/persistent/logs/failure_patterns.db"
 
 def ensure_success_db():
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS model_success (
-                    symbol TEXT,
-                    strategy TEXT,
-                    model TEXT,
-                    success INTEGER,
-                    fail INTEGER,
-                    PRIMARY KEY(symbol, strategy, model)
-                )
-            """)
+        conn = get_db_connection()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS model_success (
+                symbol TEXT,
+                strategy TEXT,
+                model TEXT,
+                success INTEGER,
+                fail INTEGER,
+                PRIMARY KEY(symbol, strategy, model)
+            )
+        """)
+        conn.commit()
         print("[✅ ensure_success_db] model_success 테이블 확인 완료")
     except Exception as e:
         print(f"[오류] ensure_success_db 실패 → {e}")
 
 def update_model_success(s, t, m, success):
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO model_success (symbol, strategy, model, success, fail)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(symbol, strategy, model) DO UPDATE SET
-                    success = success + excluded.success,
-                    fail = fail + excluded.fail
-            """, (s, t or "알수없음", m, int(success), int(not success)))
-            conn.commit()
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO model_success (symbol, strategy, model, success, fail)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(symbol, strategy, model) DO UPDATE SET
+                success = success + excluded.success,
+                fail = fail + excluded.fail
+        """, (s, t or "알수없음", m, int(success), int(not success)))
+        conn.commit()
         print(f"[✅ update_model_success] {s}-{t}-{m} 기록 ({'성공' if success else '실패'})")
     except Exception as e:
         print(f"[오류] update_model_success 실패 → {e}")
 
 def get_model_success_rate(s, t, m, min_total=10):
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT success, fail FROM model_success
-                WHERE symbol=? AND strategy=? AND model=?
-            """, (s, t or "알수없음", m))
-            row = cur.fetchone()
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT success, fail FROM model_success
+            WHERE symbol=? AND strategy=? AND model=?
+        """, (s, t or "알수없음", m))
+        row = cur.fetchone()
 
         if row is None:
             print(f"[INFO] {s}-{t}-{m}: 기록 없음 → cold-start 0.2 반환")
@@ -90,6 +96,7 @@ def get_model_success_rate(s, t, m, min_total=10):
     except Exception as e:
         print(f"[오류] get_model_success_rate 실패 → {e}")
         return 0.2
+
 
 # ✅ 서버 시작 시 호출
 ensure_success_db()
