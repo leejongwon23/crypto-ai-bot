@@ -38,6 +38,7 @@ from collections import Counter
 def balance_classes(X, y, min_count=20, num_classes=21):
     import numpy as np
     from collections import Counter
+    from data_augmentation import augment_batch  # ✅ augment_batch 함수 호출 추가
 
     if X is None or y is None or len(X) == 0 or len(y) == 0:
         print("[❌ balance_classes 실패] X 또는 y 비어있음")
@@ -64,39 +65,18 @@ def balance_classes(X, y, min_count=20, num_classes=21):
         count = len(indices)
         needed = max(0, target_count - count)
 
-        if needed > 0:
-            if count >= 1:
-                reps = np.random.choice(indices, needed, replace=True)
-                base_samples = X[reps]
+        if needed > 0 and count >= 1:
+            reps = np.random.choice(indices, needed, replace=True)
+            base_samples = X[reps]
 
-                # ✅ Gaussian noise
-                noisy_samples = base_samples + np.random.normal(0, 0.05, base_samples.shape).astype(np.float32)
+            # ✅ 다양한 augmentation 적용
+            aug_samples = augment_batch(base_samples)
 
-                # ✅ Scaling augmentation
-                scale = np.random.uniform(0.9, 1.1, size=(needed, 1, 1)).astype(np.float32)
-                scaled_samples = noisy_samples * scale
-
-                # ✅ Mixup + Time masking
-                mixup_samples = scaled_samples.copy()
-                for i in range(len(mixup_samples)):
-                    j = np.random.randint(len(X))
-                    lam = np.random.beta(0.2, 0.2)
-                    mixup_samples[i] = lam * mixup_samples[i] + (1 - lam) * X[j]
-
-                    t = np.random.randint(0, nx)
-                    mixup_samples[i][t] = 0.0
-
-                # ✅ NaN, Inf check
-                if np.any(np.isnan(mixup_samples)) or np.any(np.isinf(mixup_samples)):
-                    print(f"[⚠️ 경고] 클래스 {cls} augmentation 중 NaN 또는 Inf 발생 → 제거")
-                    mixup_samples = np.nan_to_num(mixup_samples, nan=0.0, posinf=1e6, neginf=-1e6)
-
-                X_balanced.extend(mixup_samples)
-                y_balanced.extend([cls]*needed)
-                print(f"[✅ 클래스 {cls}] {needed}개 추가 완료")
-
-            else:
-                print(f"[스킵] 클래스 {cls} → 샘플 없음, noise sample 생성 생략")
+            X_balanced.extend(aug_samples)
+            y_balanced.extend([cls] * needed)
+            print(f"[✅ 클래스 {cls}] {needed}개 augment 추가 완료")
+        elif needed > 0:
+            print(f"[스킵] 클래스 {cls} → 샘플 없음, noise sample 생성 생략")
 
     combined = list(zip(X_balanced, y_balanced))
     np.random.shuffle(combined)
@@ -107,4 +87,5 @@ def balance_classes(X, y, min_count=20, num_classes=21):
     print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
 
     return np.array(X_shuffled), np.array(y_shuffled, dtype=np.int64)
+
 
