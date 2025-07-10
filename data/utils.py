@@ -33,6 +33,45 @@ STRATEGY_CONFIG = {
     "장기": {"interval": "D", "limit": 600}     # 1일봉, 최대 1000개
 }
 
+# ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
+import time
+
+class CacheManager:
+    _cache = {}
+    _ttl = {}
+
+    @classmethod
+    def get(cls, key, ttl_sec=None):
+        now = time.time()
+        if key in cls._cache:
+            if ttl_sec is None or now - cls._ttl.get(key, 0) < ttl_sec:
+                print(f"[캐시 HIT] {key}")
+                return cls._cache[key]
+            else:
+                print(f"[캐시 EXPIRED] {key}")
+                cls.delete(key)
+        return None
+
+    @classmethod
+    def set(cls, key, value):
+        cls._cache[key] = value
+        cls._ttl[key] = time.time()
+        print(f"[캐시 SET] {key}")
+
+    @classmethod
+    def delete(cls, key):
+        if key in cls._cache:
+            del cls._cache[key]
+            del cls._ttl[key]
+            print(f"[캐시 DELETE] {key}")
+
+    @classmethod
+    def clear(cls):
+        cls._cache.clear()
+        cls._ttl.clear()
+        print("[캐시 CLEAR ALL]")
+
+
 def get_btc_dominance():
     global BTC_DOMINANCE_CACHE
     now = time.time()
@@ -172,14 +211,10 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
     import os
 
-    global _kline_cache, _kline_cache_ttl
     cache_key = f"{symbol}-{strategy}"
-    now = time.time()
-    ttl_valid = cache_key in _kline_cache_ttl and now - _kline_cache_ttl[cache_key] < 600  # 10분 TTL
-
-    if cache_key in _kline_cache and ttl_valid:
-        print(f"[캐시 사용] {cache_key}")
-        return _kline_cache[cache_key]
+    cached_df = CacheManager.get(cache_key, ttl_sec=600)
+    if cached_df is not None:
+        return cached_df
 
     config = STRATEGY_CONFIG.get(strategy)
     if config is None:
@@ -196,20 +231,17 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     required_cols = ["open", "high", "low", "close", "volume", "timestamp"]
     for col in required_cols:
         if col not in df.columns:
-            print(f"[⚠️ 경고] {symbol}-{strategy}: 필수 컬럼 '{col}' 누락 → 0.0으로 채움")
             df[col] = 0.0 if col != "timestamp" else pd.Timestamp.now()
 
     df = df[required_cols]
 
     if len(df) < 5:
-        print(f"[⚠️ 경고] {symbol}-{strategy}: 데이터 row 부족 ({len(df)} rows)")
         failed_result(symbol, strategy, reason="row 부족")
-        return df  # ✅ 부족해도 기본값 포함된 df 반환
+        return df
 
-    print(f"[✅ 성공] {symbol}-{strategy}: 데이터 {len(df)}개 확보")
-    _kline_cache[cache_key] = df
-    _kline_cache_ttl[cache_key] = now  # ✅ TTL timestamp 저장
+    CacheManager.set(cache_key, df)
     return df
+
 
 # ✅ SYMBOL_GROUPS batch prefetch 함수 추가
 
@@ -298,12 +330,15 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     from predict import failed_result
     from config import FEATURE_INPUT_SIZE
     import ta
-    global _feature_cache
-    cache_key = f"{symbol}-{strategy}"
+    import numpy as np
+    import pandas as pd
+    from sklearn.preprocessing import MinMaxScaler
 
-    if cache_key in _feature_cache:
-        print(f"[캐시 사용] {cache_key} 피처")
-        return _feature_cache[cache_key]
+    cache_key = f"{symbol}-{strategy}-features"
+    cached_feat = CacheManager.get(cache_key, ttl_sec=600)
+    if cached_feat is not None:
+        print(f"[캐시 HIT] {cache_key}")
+        return cached_feat
 
     if df is None or df.empty:
         print(f"[❌ compute_features 실패] 입력 DataFrame empty")
@@ -347,7 +382,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df["mfi"] = ta.volume.money_flow_index(df["high"], df["low"], df["close"], df["volume"], window=14, fillna=True)
         df["obv"] = ta.volume.on_balance_volume(df["close"], df["volume"], fillna=True)
 
-        # ✅ 새로운 feature 추가
         df["atr"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14, fillna=True)
         df["williams_r"] = ta.momentum.williams_r(df["high"], df["low"], df["close"], lbp=14, fillna=True)
         df["stoch_k"] = ta.momentum.stoch(df["high"], df["low"], df["close"], fillna=True)
@@ -390,7 +424,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         return pd.DataFrame(columns=required_cols + ["strategy"])
 
     print(f"[✅ 완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
-    _feature_cache[cache_key] = df
+    CacheManager.set(cache_key, df)
     return df
 
 
