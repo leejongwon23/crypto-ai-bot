@@ -165,7 +165,13 @@ def class_to_expected_return(cls, recent_days=3):
 # - predict(): log_prediction() 호출 시 label 추가
 
 def failed_result(symbol, strategy, model_type="unknown", reason="", source="일반", X_input=None):
+    import numpy as np
+    from datetime import datetime
+    import pytz
+
+    now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+
     pred_class_val = -1
     label_val = -1
 
@@ -184,36 +190,28 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     }
 
     try:
-        # ✅ entry_price, predicted_class, label 유효성 검사
-        valid_entry_price = isinstance(result.get("rate", 0.0), (int, float))
-        valid_pred_class = isinstance(pred_class_val, int) and pred_class_val >= -1
-        valid_label = isinstance(label_val, int) and label_val >= -1
-
-        if valid_entry_price and valid_pred_class and valid_label:
-            log_prediction(
-                symbol=symbol,
-                strategy=strategy,
-                direction="예측실패",
-                entry_price=0,
-                target_price=0,
-                model=str(model_type or "unknown"),
-                success=False,
-                reason=reason,
-                rate=0.0,
-                timestamp=t,
-                return_value=0.0,
-                volatility=True,
-                source=source,
-                predicted_class=pred_class_val,
-                label=label_val
-            )
-        else:
-            print(f"[failed_result 검증 실패] entry_price:{valid_entry_price}, pred_class:{valid_pred_class}, label:{valid_label}")
-
+        # ✅ 실패 예측도 log_prediction 기록
+        log_prediction(
+            symbol=symbol,
+            strategy=strategy,
+            direction="예측실패",
+            entry_price=0,
+            target_price=0,
+            model=str(model_type or "unknown"),
+            success=False,
+            reason=reason,
+            rate=0.0,
+            timestamp=t,
+            return_value=0.0,
+            volatility=True,
+            source=source,
+            predicted_class=pred_class_val,
+            label=label_val
+        )
     except Exception as e:
         print(f"[failed_result log_prediction 오류] {e}")
 
-    # 실패 DB 기록 추가 (feature_hash 검증 후)
+    # ✅ 실패 DB 기록 추가 (feature_hash 포함)
     if X_input is not None and isinstance(X_input, np.ndarray):
         try:
             feature_hash = get_feature_hash(X_input)
