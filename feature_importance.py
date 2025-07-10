@@ -63,15 +63,27 @@ def save_feature_importance(importances, symbol, strategy, model_type, method="b
     print(f"✅ 중요도 저장 완료: {path_json}, {path_csv}")
 
 
-
-def drop_low_importance_features(df: pd.DataFrame, importances: dict, threshold: float = 0.05) -> pd.DataFrame:
+def drop_low_importance_features(df: pd.DataFrame, importances: dict, threshold: float = 0.05, input_size: int = None) -> pd.DataFrame:
     drop_cols = [col for col, imp in importances.items() if imp < threshold]
-    remaining_cols = [col for col in df.columns if col not in drop_cols]
+    remaining_cols = [col for col in df.columns if col not in drop_cols and col not in ["timestamp", "strategy"]]
+
+    # ✅ 수정: 모든 컬럼 제거 방지용 pad_0 추가
     if not remaining_cols:
-        print("[경고] 모든 feature가 제거되었음. 최소 1개 이상 유지 필요.")
-        return df
+        print("[경고] 모든 feature가 제거되었음. pad_0 컬럼 추가")
+        df["pad_0"] = 0.0
+        remaining_cols = ["pad_0"]
+
+    # ✅ 수정: input_size 설정시 부족분 pad 채우기
+    if input_size and len(remaining_cols) < input_size:
+        for i in range(len(remaining_cols), input_size):
+            pad_col = f"pad_{i}"
+            df[pad_col] = 0.0
+            remaining_cols.append(pad_col)
+
     print(f"🧹 제거된 feature 수: {len(drop_cols)} → {drop_cols}")
-    return df[remaining_cols]
+
+    return df[remaining_cols + ["timestamp", "strategy"]]
+
 
 
 def get_top_features(importances: dict, top_n: int = 10) -> pd.DataFrame:
