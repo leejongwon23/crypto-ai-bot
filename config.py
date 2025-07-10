@@ -6,7 +6,7 @@ CONFIG_PATH = "/persistent/config.json"
 # ✅ 기본 설정값
 _default_config = {
     "NUM_CLASSES": 21,
-    "FEATURE_INPUT_SIZE": 21,
+    "FEATURE_INPUT_SIZE": 24,
     "FAIL_AUGMENT_RATIO": 3
 }
 
