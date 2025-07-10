@@ -126,7 +126,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     try:
         masked_reconstruction(symbol, strategy, input_size=input_size, mask_ratio=0.2, epochs=5)
-
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
             print(f"⛔ [중단] {symbol}-{strategy}: 시세 데이터 없음")
@@ -143,7 +142,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             return
 
         print(f"✅ [진행] {symbol}-{strategy}: window_list={window_list}")
-
         class_groups = get_class_groups()
 
         for window in window_list:
@@ -165,7 +163,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 train_mask = np.isin(y_train, group_classes)
                 X_train_group = X_train[train_mask]
                 y_train_group = y_train[train_mask]
-
                 if len(y_train_group) < 2:
                     print(f"⛔ [중단] {symbol}-{strategy}: group_id={group_id} 학습데이터 부족")
                     continue
@@ -177,7 +174,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 val_mask = np.isin(y_val, group_classes)
                 X_val_group = X_val[val_mask]
                 y_val_group = y_val[val_mask]
-
                 if len(y_val_group) == 0:
                     print(f"⛔ [중단] {symbol}-{strategy}: group_id={group_id} 검증데이터 없음")
                     continue
@@ -194,32 +190,21 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                         for opt_type in ["Adam", "AdamW", "Ranger"]:
                                             for loss_type in ["CrossEntropy", "FocalLoss"]:
                                                 actual_epochs = int(max_epochs * epoch_factor)
-
                                                 model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
 
                                                 if hasattr(model, "set_hyperparams"):
                                                     model.set_hyperparams(hidden_size=hidden_size, dropout=dropout)
 
-                                                if opt_type == "Adam":
-                                                    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-                                                elif opt_type == "AdamW":
-                                                    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-                                                elif opt_type == "Ranger":
-                                                    optimizer = Ranger(model.parameters(), lr=lr)
-                                                else:
-                                                    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+                                                optimizer = {
+                                                    "Adam": torch.optim.Adam(model.parameters(), lr=lr),
+                                                    "AdamW": torch.optim.AdamW(model.parameters(), lr=lr),
+                                                    "Ranger": Ranger(model.parameters(), lr=lr)
+                                                }.get(opt_type, torch.optim.Adam(model.parameters(), lr=lr))
 
-                                                if loss_type == "CrossEntropy":
-                                                    lossfn = torch.nn.CrossEntropyLoss()
-                                                elif loss_type == "FocalLoss":
-                                                    lossfn = FocalLoss()
-                                                else:
-                                                    lossfn = torch.nn.CrossEntropyLoss()
+                                                lossfn = FocalLoss() if loss_type == "FocalLoss" else torch.nn.CrossEntropyLoss()
 
-                                                train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32),
-                                                                         torch.tensor(y_train_group, dtype=torch.long))
-                                                val_ds = TensorDataset(torch.tensor(X_val_group, dtype=torch.float32),
-                                                                       torch.tensor(y_val_group, dtype=torch.long))
+                                                train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32), torch.tensor(y_train_group, dtype=torch.long))
+                                                val_ds = TensorDataset(torch.tensor(X_val_group, dtype=torch.float32), torch.tensor(y_val_group, dtype=torch.long))
                                                 train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, num_workers=0)
                                                 val_loader = DataLoader(val_ds, batch_size=16, shuffle=False, num_workers=0)
 
@@ -229,8 +214,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                                         logits = model(xb)
                                                         loss = lossfn(logits, yb)
                                                         sample_weights = torch.ones_like(yb, dtype=torch.float32).to(DEVICE)
-                                                        fail_indices = (yb == -1)
-                                                        sample_weights[fail_indices] = 3.0
+                                                        sample_weights[(yb == -1)] = 3.0
                                                         weighted_loss = (loss * sample_weights).mean()
 
                                                         if torch.isfinite(weighted_loss):
