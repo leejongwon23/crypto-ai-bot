@@ -115,6 +115,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from datetime import datetime
     import pytz
     from meta_learning import maml_train_entry
+    from ranger_adabelief import RangerAdaBelief as Ranger  # ✅ 수정: Ranger import
 
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -175,7 +176,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 y_train_group = np.array([group_classes.index(y) for y in y_train_group if y in group_classes])
                 y_val_group = np.array([group_classes.index(y) for y in y_val_group if y in group_classes])
 
-                # ✅ 전체 하이퍼파라미터 grid-search 통합
                 for model_type in ["lstm", "cnn_lstm", "transformer"]:
                     for lr in [1e-4, 5e-4, 1e-3]:
                         for batch_size in [16, 32, 64]:
@@ -197,7 +197,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                                 elif opt_type == "AdamW":
                                                     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
                                                 elif opt_type == "Ranger":
-                                                    from ranger import Ranger
                                                     optimizer = Ranger(model.parameters(), lr=lr)
                                                 else:
                                                     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -227,9 +226,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
                                                         logits = model(xb)
                                                         loss = lossfn(logits, yb)
 
-                                                        # ✅ 실패샘플 weight 적용
                                                         sample_weights = torch.ones_like(yb, dtype=torch.float32).to(DEVICE)
-                                                        fail_indices = (yb == -1)  # 실패샘플 라벨 조건
+                                                        fail_indices = (yb == -1)
                                                         sample_weights[fail_indices] = 3.0
 
                                                         weighted_loss = (loss * sample_weights).mean()
@@ -262,7 +260,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         traceback.print_exc()
-
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
