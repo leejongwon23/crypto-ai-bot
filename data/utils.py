@@ -120,17 +120,30 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
     df = df.drop(columns=["strategy"], errors="ignore")
 
+    # ✅ 수정: drop 후 컬럼 없으면 pad_0 추가
+    drop_cols = ["timestamp"]
+    feature_cols = [c for c in df.columns if c not in drop_cols]
+    if not feature_cols:
+        print("[⚠️ 경고] feature drop 결과 컬럼 없음 → pad_0 추가")
+        df["pad_0"] = 0.0
+        feature_cols = ["pad_0"]
+
     scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(df.drop(columns=["timestamp"]))
-    df_scaled = pd.DataFrame(scaled, columns=[c for c in df.columns if c != "timestamp"])
+    scaled = scaler.fit_transform(df[feature_cols])
+    df_scaled = pd.DataFrame(scaled, columns=feature_cols)
     df_scaled["timestamp"] = df["timestamp"].values
+
+    # ✅ 수정: input_size 미달 시 padding 컬럼 추가
+    if input_size and len(feature_cols) < input_size:
+        for i in range(len(feature_cols), input_size):
+            pad_col = f"pad_{i}"
+            df_scaled[pad_col] = 0.0
 
     features = df_scaled.to_dict(orient="records")
 
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
 
-    # ✅ 클래스 범위 재설계: gain 분포를 균등하게 나눔 (-1.0 ~ +1.0)
     class_ranges = [(-1.0 + 2.0 * i / NUM_CLASSES, -1.0 + 2.0 * (i + 1) / NUM_CLASSES) for i in range(NUM_CLASSES)]
 
     for i in range(window, len(features) - 3):
@@ -155,11 +168,9 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
             gain = gain if np.isfinite(gain) else 0.0
 
-            # ✅ 클래스 매핑
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain <= high), NUM_CLASSES-1)
 
-            # ✅ sample 생성 (항상)
-            sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
+            sample = [[float(r.get(c, 0.0)) for c in feature_cols] for r in seq]
 
             if input_size:
                 for j in range(len(sample)):
