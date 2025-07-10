@@ -62,6 +62,45 @@ def load_model_cached(model_path, model_type, input_size, output_size):
 
     return model
 
+import numpy as np
+import os
+import pickle
+from sklearn.linear_model import LogisticRegression
+
+META_MODEL_PATH = "/persistent/models/meta_learner.pkl"
+
+def train_meta_learner(model_outputs_list, true_labels):
+    """
+    ✅ meta learner 학습 함수
+    - model_outputs_list: [(n_models, n_classes), ...] 리스트
+    - true_labels: 실제 라벨 리스트
+    """
+    X = [np.array(mo).flatten() for mo in model_outputs_list]
+    y = np.array(true_labels)
+
+    clf = LogisticRegression(max_iter=500)
+    clf.fit(X, y)
+
+    # ✅ pickle 저장
+    with open(META_MODEL_PATH, "wb") as f:
+        pickle.dump(clf, f)
+    print(f"[✅ meta learner 학습 완료 및 저장] {META_MODEL_PATH}")
+
+    return clf
+
+def load_meta_learner():
+    """
+    ✅ meta learner 로드 함수
+    """
+    if os.path.exists(META_MODEL_PATH):
+        with open(META_MODEL_PATH, "rb") as f:
+            clf = pickle.load(f)
+        print("[✅ meta learner 로드 완료]")
+        return clf
+    else:
+        print("[⚠️ meta learner 파일 없음 → None 반환]")
+        return None
+
 def ensemble_stacking(model_outputs, meta_model=None):
     """
     ✅ stacking ensemble 함수
@@ -69,8 +108,6 @@ def ensemble_stacking(model_outputs, meta_model=None):
     - meta_model: 사전 학습된 meta-learner (LogisticRegression)
     - 반환: 최종 클래스 index
     """
-    import numpy as np
-
     X_stack = np.array(model_outputs)
     X_stack = X_stack.reshape(1, -1)  # (1, n_models * n_classes)
 
@@ -81,6 +118,7 @@ def ensemble_stacking(model_outputs, meta_model=None):
         # fallback: 평균 soft voting
         avg_probs = np.mean(model_outputs, axis=0)
         return int(np.argmax(avg_probs))
+
 
 
 def class_to_expected_return(cls, recent_days=3):
