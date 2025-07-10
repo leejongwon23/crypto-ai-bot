@@ -55,7 +55,8 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
     from sklearn.preprocessing import MinMaxScaler
-    from config import NUM_CLASSES
+    from config import get_NUM_CLASSES
+    NUM_CLASSES = get_NUM_CLASSES()
     from collections import Counter
     import random
 
@@ -121,11 +122,6 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             # ✅ sample 생성 (항상)
             sample = [[float(r.get(c, 0.0)) for c in columns] for r in seq]
 
-            # ✅ [DEBUG] gain과 class 확인 (출력 제한)
-            if abs(gain) > 0.1:
-                # print(f"[DEBUG] gain={gain:.4f}, class={cls}")
-                pass
-
             if input_size:
                 for j in range(len(sample)):
                     row = sample[j]
@@ -141,14 +137,12 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             print(f"[예외] {e} → i={i}")
             continue
 
-    # ✅ 최소 샘플 수 검증 추가
     if len(y) < 2:
         print(f"[⚠️ validation 데이터 너무 적음: {len(y)}개 → window 크기나 데이터량을 확인하세요]")
         dummy_X = np.zeros((1, window, input_size if input_size else 11), dtype=np.float32)
         dummy_y = np.array([0], dtype=np.int64)
         return dummy_X, dummy_y
 
-    # ✅ 희소 클래스 복제: 최대 클래스의 80%로 맞춤
     counts = Counter(y)
     max_count = max(counts.values())
     for cls_id in range(NUM_CLASSES):
@@ -163,7 +157,6 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     X = np.array(X, dtype=np.float32)
     y = np.array(y, dtype=np.int64)
 
-    # ✅ 디버그 출력
     print(f"[✅ create_dataset] 최종 샘플 수: {len(y)}, 클래스 분포: {Counter(y)}")
 
     return X, y
