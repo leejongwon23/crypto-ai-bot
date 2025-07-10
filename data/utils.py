@@ -128,8 +128,22 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
         df["pad_0"] = 0.0
         feature_cols = ["pad_0"]
 
+    # ✅ 추가권장보완: 빈 DataFrame 방지
+    if df.empty or len(feature_cols) == 0:
+        print("[❌ create_dataset 실패] DataFrame empty 또는 feature_cols 없음")
+        dummy_X = np.zeros((1, window, input_size if input_size else 11), dtype=np.float32)
+        dummy_y = np.array([0], dtype=np.int64)
+        return dummy_X, dummy_y
+
     scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(df[feature_cols])
+    try:
+        scaled = scaler.fit_transform(df[feature_cols])
+    except Exception as e:
+        print(f"[❌ scaler fit_transform 실패] {e}")
+        dummy_X = np.zeros((1, window, input_size if input_size else 11), dtype=np.float32)
+        dummy_y = np.array([0], dtype=np.int64)
+        return dummy_X, dummy_y
+
     df_scaled = pd.DataFrame(scaled, columns=feature_cols)
     df_scaled["timestamp"] = df["timestamp"].values
 
@@ -210,6 +224,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     print(f"[✅ create_dataset] 최종 샘플 수: {len(y)}, 클래스 분포: {Counter(y)}")
 
     return X, y
+
 
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
