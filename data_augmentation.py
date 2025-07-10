@@ -38,7 +38,7 @@ from collections import Counter
 def balance_classes(X, y, min_count=20, num_classes=21):
     import numpy as np
     from collections import Counter
-    from data_augmentation import augment_batch  # ✅ augment_batch 함수 호출 추가
+    from data_augmentation import augment_batch
 
     if X is None or y is None or len(X) == 0 or len(y) == 0:
         print("[❌ balance_classes 실패] X 또는 y 비어있음")
@@ -54,7 +54,7 @@ def balance_classes(X, y, min_count=20, num_classes=21):
     class_counts = Counter(y)
     print(f"[🔢 기존 클래스 분포] {dict(class_counts)}")
 
-    nsamples, nx, ny = X.shape
+    nsamples, nx, ny_dim = X.shape
     X_balanced, y_balanced = list(X), list(y)
 
     max_count = max(class_counts.values()) if class_counts else min_count
@@ -68,15 +68,16 @@ def balance_classes(X, y, min_count=20, num_classes=21):
         if needed > 0 and count >= 1:
             reps = np.random.choice(indices, needed, replace=True)
             base_samples = X[reps]
-
-            # ✅ 다양한 augmentation 적용
             aug_samples = augment_batch(base_samples)
-
             X_balanced.extend(aug_samples)
             y_balanced.extend([cls] * needed)
             print(f"[✅ 클래스 {cls}] {needed}개 augment 추가 완료")
         elif needed > 0:
-            print(f"[스킵] 클래스 {cls} → 샘플 없음, noise sample 생성 생략")
+            # ✅ 없는 클래스는 noise dummy sample 생성
+            dummy = np.random.uniform(0, 1, (needed, nx, ny_dim)).astype(np.float32)
+            X_balanced.extend(dummy)
+            y_balanced.extend([cls] * needed)
+            print(f"[➕ 클래스 {cls}] {needed}개 noise dummy sample 생성 완료")
 
     combined = list(zip(X_balanced, y_balanced))
     np.random.shuffle(combined)
@@ -87,5 +88,3 @@ def balance_classes(X, y, min_count=20, num_classes=21):
     print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
 
     return np.array(X_shuffled), np.array(y_shuffled, dtype=np.int64)
-
-
