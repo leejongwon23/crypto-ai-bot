@@ -21,10 +21,13 @@ class Attention(nn.Module):
         context = torch.sum(lstm_out * weights.unsqueeze(-1), dim=1)
         return context, weights
 
+import torch.nn as nn
+
 class LSTMPricePredictor(nn.Module):
     def __init__(self, input_size, hidden_size=256, num_layers=4, dropout=0.4, output_size=NUM_CLASSES):
         super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, dropout=dropout, batch_first=True, bidirectional=True)
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, dropout=dropout,
+                            batch_first=True, bidirectional=True)
         self.attention = Attention(hidden_size * 2)
         self.norm = nn.LayerNorm(hidden_size * 2)
         self.dropout = nn.Dropout(dropout)
@@ -33,14 +36,25 @@ class LSTMPricePredictor(nn.Module):
         self.fc2 = nn.Linear(hidden_size, hidden_size // 2)
         self.fc_logits = nn.Linear(hidden_size // 2, output_size)
 
-    def forward(self, x):
+    def forward(self, x, params=None):
         lstm_out, _ = self.lstm(x)
         context, _ = self.attention(lstm_out)
         context = self.norm(context)
         context = self.dropout(context)
-        hidden = self.act(self.fc1(context))
-        hidden = self.act(self.fc2(hidden))
-        return self.fc_logits(hidden)
+
+        if params is None:
+            hidden = self.act(self.fc1(context))
+            hidden = self.act(self.fc2(hidden))
+            logits = self.fc_logits(hidden)
+        else:
+            hidden = nn.functional.gelu(nn.functional.linear(
+                context, params['fc1.weight'], params['fc1.bias']))
+            hidden = nn.functional.gelu(nn.functional.linear(
+                hidden, params['fc2.weight'], params['fc2.bias']))
+            logits = nn.functional.linear(
+                hidden, params['fc_logits.weight'], params['fc_logits.bias'])
+
+        return logits
 
 class CNNLSTMPricePredictor(nn.Module):
     def __init__(self, input_size, cnn_channels=128, lstm_hidden_size=256, lstm_layers=3, dropout=0.4, output_size=NUM_CLASSES):
