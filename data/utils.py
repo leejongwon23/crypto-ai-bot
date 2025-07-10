@@ -90,21 +90,42 @@ def get_btc_dominance():
 
 import numpy as np
 
-
 def create_dataset(features, window=20, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
     from sklearn.preprocessing import MinMaxScaler
     from config import get_NUM_CLASSES, MIN_FEATURES
+    from logger import log_prediction  # ✅ 추가
     NUM_CLASSES = get_NUM_CLASSES()
     from collections import Counter
     import random
 
     X, y = [], []
 
+    # ✅ features 부족 시 dummy 반환 + log_prediction 기록
     if not features or len(features) <= window:
-        print(f"[❌ create_dataset 실패] features 부족: length={len(features) if features else 0}, window={window}")
-        return None, None
+        print(f"[⚠️ 부족] features length={len(features) if features else 0}, window={window} → dummy 반환")
+        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
+        dummy_y = np.array([0], dtype=np.int64)
+
+        log_prediction(
+            symbol="UNKNOWN",
+            strategy=strategy,
+            direction="dummy",
+            entry_price=0,
+            target_price=0,
+            model="dummy_model",
+            success=False,
+            reason=f"window 부족 dummy (len={len(features) if features else 0}, window={window})",
+            rate=0.0,
+            return_value=0.0,
+            volatility=False,
+            source="create_dataset",
+            predicted_class=-1,
+            label=-1
+        )
+
+        return dummy_X, dummy_y
 
     try:
         columns = [c for c in features[0].keys() if c not in ["timestamp", "strategy"]]
@@ -117,12 +138,32 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
     df = df.drop(columns=["strategy"], errors="ignore")
 
-    # ✅ feature 컬럼 없으면 실패 반환
+    # ✅ feature 컬럼 없으면 dummy 반환
     drop_cols = ["timestamp"]
     feature_cols = [c for c in df.columns if c not in drop_cols]
     if not feature_cols:
-        print("[❌ create_dataset 실패] feature drop 결과 컬럼 없음")
-        return None, None
+        print("[⚠️ 부족] feature drop 결과 컬럼 없음 → dummy 반환")
+        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
+        dummy_y = np.array([0], dtype=np.int64)
+
+        log_prediction(
+            symbol="UNKNOWN",
+            strategy=strategy,
+            direction="dummy",
+            entry_price=0,
+            target_price=0,
+            model="dummy_model",
+            success=False,
+            reason="feature_cols 없음 dummy",
+            rate=0.0,
+            return_value=0.0,
+            volatility=False,
+            source="create_dataset",
+            predicted_class=-1,
+            label=-1
+        )
+
+        return dummy_X, dummy_y
 
     # ✅ 최소 feature 개수 유지
     if len(feature_cols) < MIN_FEATURES:
@@ -132,8 +173,28 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             feature_cols.append(pad_col)
 
     if df.empty or len(feature_cols) == 0:
-        print("[❌ create_dataset 실패] DataFrame empty 또는 feature_cols 없음")
-        return None, None
+        print("[⚠️ 부족] DataFrame empty 또는 feature_cols 없음 → dummy 반환")
+        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
+        dummy_y = np.array([0], dtype=np.int64)
+
+        log_prediction(
+            symbol="UNKNOWN",
+            strategy=strategy,
+            direction="dummy",
+            entry_price=0,
+            target_price=0,
+            model="dummy_model",
+            success=False,
+            reason="DataFrame empty dummy",
+            rate=0.0,
+            return_value=0.0,
+            volatility=False,
+            source="create_dataset",
+            predicted_class=-1,
+            label=-1
+        )
+
+        return dummy_X, dummy_y
 
     scaler = MinMaxScaler()
     try:
@@ -200,8 +261,28 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             continue
 
     if len(y) < 2:
-        print(f"[❌ create_dataset 실패] validation 데이터 부족: {len(y)}개")
-        return None, None
+        print(f"[⚠️ 부족] validation 데이터 너무 적음: {len(y)}개 → dummy 반환")
+        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
+        dummy_y = np.array([0], dtype=np.int64)
+
+        log_prediction(
+            symbol="UNKNOWN",
+            strategy=strategy,
+            direction="dummy",
+            entry_price=0,
+            target_price=0,
+            model="dummy_model",
+            success=False,
+            reason="validation 데이터 부족 dummy",
+            rate=0.0,
+            return_value=0.0,
+            volatility=False,
+            source="create_dataset",
+            predicted_class=-1,
+            label=-1
+        )
+
+        return dummy_X, dummy_y
 
     counts = Counter(y)
     max_count = max(counts.values())
@@ -219,6 +300,7 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     print(f"[✅ create_dataset 완료] 샘플 수: {len(y)}, 클래스 분포: {Counter(y)}")
     return X, y
+
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
 _kline_cache = {}
