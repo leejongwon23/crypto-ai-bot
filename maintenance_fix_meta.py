@@ -2,13 +2,15 @@ import os
 import json
 import torch
 from model.base_model import get_model  # ✅ 현재 모델 구조 반영 위해 import
-from config import NUM_CLASSES
+from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE
+
+NUM_CLASSES = get_NUM_CLASSES()
+FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 
 MODEL_DIR = "/persistent/models"
 
 
 def fix_all_meta_json():
-    from config import FEATURE_INPUT_SIZE
     files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".meta.json")]
 
     for file in files:
