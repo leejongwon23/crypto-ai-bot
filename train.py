@@ -116,6 +116,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     import pytz
     from meta_learning import maml_train_entry
     from ranger_adabelief import RangerAdaBelief as Ranger
+    print("✅ train_one_model called")
 
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
