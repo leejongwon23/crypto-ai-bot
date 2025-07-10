@@ -2,9 +2,45 @@ import os
 import pandas as pd
 import json
 import glob
+import torch
+import time
 
 MODEL_DIR = "/persistent/models"
 EVAL_RESULT = "/persistent/evaluation_result.csv"
+
+# ✅ 모델 캐시 (메모리 TTL 캐싱)
+_model_cache = {}
+_model_cache_ttl = {}
+
+def load_model_cached(pt_path, ttl_sec=600):
+    """
+    ✅ 모델을 캐싱하여 로드 (TTL 적용)
+    :param pt_path: 모델 파일 경로
+    :param ttl_sec: 캐시 유지 시간 (초)
+    :return: torch 모델 or None
+    """
+    now = time.time()
+
+    # 캐시 HIT + 유효 TTL
+    if pt_path in _model_cache and now - _model_cache_ttl.get(pt_path, 0) < ttl_sec:
+        print(f"[캐시 HIT] {pt_path}")
+        return _model_cache[pt_path]
+
+    # 파일 존재 여부
+    if not os.path.exists(pt_path):
+        print(f"[❌ load_model_cached] 파일 없음: {pt_path}")
+        return None
+
+    try:
+        model = torch.load(pt_path, map_location=torch.device("cpu"))
+        model.eval()
+        _model_cache[pt_path] = model
+        _model_cache_ttl[pt_path] = now
+        print(f"[✅ 모델 로드 완료] {pt_path}")
+        return model
+    except Exception as e:
+        print(f"[❌ load_model_cached 오류] {pt_path} → {e}")
+        return None
 
 
 def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_size=None):
@@ -76,7 +112,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
 
     print("[INFO] 조건 충족 모델 없음 → cold-start weight=0.2")
     return 0.2
-    
+
 def model_exists(symbol, strategy):
     try:
         for file in os.listdir(MODEL_DIR):
