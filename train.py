@@ -137,14 +137,14 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"⛔ [중단] {symbol}-{strategy}: 피처 생성 실패 또는 NaN")
             return
 
-        # ✅ feature importance drop
+        # ✅ feature importance drop 개선
         try:
             feature_names = [col for col in df_feat.columns if col not in ["timestamp", "strategy"]]
             dummy_X = torch.tensor(np.random.rand(10, 20, input_size), dtype=torch.float32).to(DEVICE)
             dummy_y = torch.randint(0, 2, (10,), dtype=torch.long).to(DEVICE)
             dummy_model = get_model("lstm", input_size=input_size, output_size=2).to(DEVICE)
             importances = compute_feature_importance(dummy_model, dummy_X, dummy_y, feature_names, method="baseline")
-            df_feat = drop_low_importance_features(df_feat, importances, threshold=0.05)
+            df_feat = drop_low_importance_features(df_feat, importances, threshold=0.01, min_features=5)
             print("[✅ feature drop 완료] 중요도가 낮은 feature 제거됨")
         except Exception as e:
             print(f"[⚠️ feature drop 실패] {e}")
@@ -169,7 +169,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 y_raw = np.concatenate([y_raw, fail_y], axis=0)
                 print(f"[🔁 실패재학습 추가] {len(fail_X)}개 실패샘플 합산 완료")
 
-            val_len = max(1, int(len(X_raw) * 0.2))
+            # ✅ validation split 로직 수정
+            val_len = max(5, int(len(X_raw) * 0.2))
+            if len(X_raw) <= val_len:
+                print(f"[⚠️ 조정] validation 데이터 부족: {len(X_raw)} → train에서 일부 복사")
+                val_len = min(5, len(X_raw)//2)
             X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
 
             for group_id, group_classes in enumerate(class_groups):
@@ -194,7 +198,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 y_train_group = np.array([group_classes.index(y) for y in y_train_group if y in group_classes])
                 y_val_group = np.array([group_classes.index(y) for y in y_val_group if y in group_classes])
 
-                # ✅ grid search 제거, fixed hyperparameters
                 model_type = "cnn_lstm"
                 lr = 1e-4
                 batch_size = 32
@@ -259,7 +262,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         traceback.print_exc()
-
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
