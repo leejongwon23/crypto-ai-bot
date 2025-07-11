@@ -11,8 +11,15 @@ NUM_CLASSES = get_NUM_CLASSES()  # ✅ 함수 호출 후 변수 할당
 WRONG_CSV = "/persistent/wrong_predictions.csv"
 
 def load_training_prediction_data(symbol, strategy, window, input_size):
-    import random
-    from config import FAIL_AUGMENT_RATIO  # ✅ 실패 복사 비율 파라미터 import
+    import random, os
+    import numpy as np
+    import pandas as pd
+    from config import FAIL_AUGMENT_RATIO, NUM_CLASSES
+    from data.utils import get_kline_by_strategy, compute_features
+    from logger import get_feature_hash
+    from failure_db import load_existing_failure_hashes
+
+    WRONG_CSV = "/persistent/wrong_predictions.csv"
 
     if not os.path.exists(WRONG_CSV):
         print(f"[INFO] {symbol}-{strategy} 실패학습 파일 없음 → 스킵")
@@ -65,7 +72,6 @@ def load_training_prediction_data(symbol, strategy, window, input_size):
 
             xb = past_window.drop(columns=["timestamp"]).to_numpy(dtype=np.float32)
 
-            # ✅ input_size fallback pad 처리
             if xb.shape[1] < input_size:
                 pad_cols = input_size - xb.shape[1]
                 xb = np.pad(xb, ((0,0),(0,pad_cols)), mode="constant", constant_values=0)
@@ -80,12 +86,12 @@ def load_training_prediction_data(symbol, strategy, window, input_size):
             used_hashes.add(h)
 
             # ✅ 실패 데이터 oversampling (FAIL_AUGMENT_RATIO배 추가)
-            for _ in range(FAIL_AUGMENT_RATIO):
+            for _ in range(FAIL_AUGMENT_RATIO * 2):  # ✅ 기존 대비 2배 증강
                 sequences.append((xb, label))
 
             # ✅ 예측실패(-1) 라벨 augmentation
             if label == -1:
-                random_label = random.randint(0, NUM_CLASSES - 1)  # ✅ NUM_CLASSES 반영
+                random_label = random.randint(0, NUM_CLASSES - 1)
                 noise_xb = xb + np.random.normal(0, 0.05, xb.shape).astype(np.float32)
                 sequences.append((noise_xb, random_label))
 
@@ -96,9 +102,12 @@ def load_training_prediction_data(symbol, strategy, window, input_size):
     if not sequences:
         print(f"[INFO] {symbol}-{strategy} 실패 데이터 없음 → fallback noise sample 추가")
         noise_sample = np.random.normal(loc=0.0, scale=1.0, size=(window, input_size)).astype(np.float32)
-        sequences.append((noise_sample, -1))
+        for _ in range(FAIL_AUGMENT_RATIO * 2):  # ✅ fallback도 증강
+            random_label = random.randint(0, NUM_CLASSES - 1)
+            sequences.append((noise_sample, random_label))
 
-    # ✅ return X, y 형태로 수정
     X = np.array([s[0] for s in sequences], dtype=np.float32)
     y = np.array([s[1] for s in sequences], dtype=np.int64)
+
+    print(f"[✅ load_training_prediction_data 완료] 총 샘플 수: {len(y)}")
     return X, y
