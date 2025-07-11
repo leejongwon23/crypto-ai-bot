@@ -169,12 +169,15 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 y_raw = np.concatenate([y_raw, fail_y], axis=0)
                 print(f"[🔁 실패재학습 추가] {len(fail_X)}개 실패샘플 합산 완료")
 
-            # ✅ validation split 로직 수정
+            # ✅ validation split 로직 수정 (방법2)
             val_len = max(5, int(len(X_raw) * 0.2))
             if len(X_raw) <= val_len:
-                print(f"[⚠️ 조정] validation 데이터 부족: {len(X_raw)} → train에서 일부 복사")
-                val_len = min(5, len(X_raw)//2)
-            X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
+                print(f"[⚠️ 조정] validation 데이터 부족: train 데이터 일부 복사하여 validation set 생성")
+                val_indices = np.random.choice(len(X_raw), val_len, replace=True)
+                X_val, y_val = X_raw[val_indices], y_raw[val_indices]
+                X_train, y_train = X_raw, y_raw
+            else:
+                X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
 
             for group_id, group_classes in enumerate(class_groups):
                 train_mask = np.isin(y_train, group_classes)
@@ -220,7 +223,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                 lossfn = FocalLoss() if loss_type == "FocalLoss" else torch.nn.CrossEntropyLoss()
 
-                # ✅ 수정된 input shape 반영
                 X_train_group_tensor = torch.tensor(X_train_group[:, -1, :], dtype=torch.float32)
                 X_val_group_tensor = torch.tensor(X_val_group[:, -1, :], dtype=torch.float32)
 
