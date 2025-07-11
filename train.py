@@ -220,8 +220,12 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                 lossfn = FocalLoss() if loss_type == "FocalLoss" else torch.nn.CrossEntropyLoss()
 
-                train_ds = TensorDataset(torch.tensor(X_train_group, dtype=torch.float32), torch.tensor(y_train_group, dtype=torch.long))
-                val_ds = TensorDataset(torch.tensor(X_val_group, dtype=torch.float32), torch.tensor(y_val_group, dtype=torch.long))
+                # ✅ 수정된 input shape 반영
+                X_train_group_tensor = torch.tensor(X_train_group[:, -1, :], dtype=torch.float32)
+                X_val_group_tensor = torch.tensor(X_val_group[:, -1, :], dtype=torch.float32)
+
+                train_ds = TensorDataset(X_train_group_tensor, torch.tensor(y_train_group, dtype=torch.long))
+                val_ds = TensorDataset(X_val_group_tensor, torch.tensor(y_val_group, dtype=torch.long))
                 train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
                 val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
 
@@ -244,7 +248,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                 model.eval()
                 with torch.no_grad():
-                    val_inputs = torch.tensor(X_val_group, dtype=torch.float32).to(DEVICE)
+                    val_inputs = X_val_group_tensor.to(DEVICE)
                     val_labels = torch.tensor(y_val_group, dtype=torch.long).to(DEVICE)
                     val_logits = model(val_inputs)
                     val_preds = torch.argmax(val_logits, dim=1)
