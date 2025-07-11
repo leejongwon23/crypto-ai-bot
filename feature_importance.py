@@ -63,23 +63,28 @@ def save_feature_importance(importances, symbol, strategy, model_type, method="b
     print(f"✅ 중요도 저장 완료: {path_json}, {path_csv}")
 
 
-def drop_low_importance_features(df: pd.DataFrame, importances: dict, threshold: float = 0.05, input_size: int = None) -> pd.DataFrame:
+def drop_low_importance_features(df: pd.DataFrame, importances: dict, threshold: float = 0.05, input_size: int = None, min_features: int = 5) -> pd.DataFrame:
+    """
+    ✅ feature importance 기반 low-importance feature drop 함수
+    - threshold 이하 feature 제거
+    - 최소 min_features 개수 유지 (부족 시 pad 컬럼 추가)
+    """
+
     drop_cols = [col for col, imp in importances.items() if imp < threshold]
     remaining_cols = [col for col in df.columns if col not in drop_cols and col not in ["timestamp", "strategy"]]
 
-    # ✅ 수정: 모든 컬럼 제거 방지용 pad_0 추가
+    # ✅ 수정: 최소 min_features 개수 유지
+    if len(remaining_cols) < min_features:
+        for i in range(len(remaining_cols), min_features):
+            pad_col = f"pad_{i}"
+            df[pad_col] = 0.0
+            remaining_cols.append(pad_col)
+
+    # ✅ 모든 컬럼 제거 방지용 pad_0 추가 (추가 안전장치)
     if not remaining_cols:
         print("[경고] 모든 feature가 제거되었음. pad_0 컬럼 추가")
         df["pad_0"] = 0.0
         remaining_cols = ["pad_0"]
-
-    # ✅ 수정: 최소 3개 컬럼 유지 (input_size 없을 때)
-    min_cols = input_size if input_size else 3
-    if len(remaining_cols) < min_cols:
-        for i in range(len(remaining_cols), min_cols):
-            pad_col = f"pad_{i}"
-            df[pad_col] = 0.0
-            remaining_cols.append(pad_col)
 
     print(f"🧹 제거된 feature 수: {len(drop_cols)} → {drop_cols}")
 
