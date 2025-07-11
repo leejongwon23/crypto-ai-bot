@@ -91,7 +91,7 @@ def get_btc_dominance():
 import numpy as np
 
 
-def create_dataset(features, window=20, strategy="단기", input_size=None):
+def create_dataset(features, window=10, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
     from sklearn.preprocessing import MinMaxScaler
@@ -108,11 +108,10 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             return features[0]["symbol"]
         return "UNKNOWN"
 
-    # ✅ features 부족 시 dummy 반환 + log_prediction 기록
     if not features or len(features) <= window:
         print(f"[⚠️ 부족] features length={len(features) if features else 0}, window={window} → dummy 반환")
         dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([-1], dtype=np.int64)  # ✅ dummy class -1 로 지정
+        dummy_y = np.array([-1], dtype=np.int64)
 
         log_prediction(
             symbol=get_symbol_safe(),
@@ -130,77 +129,26 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
             predicted_class=-1,
             label=-1
         )
-
         return dummy_X, dummy_y
-
-    try:
-        columns = [c for c in features[0].keys() if c not in ["timestamp", "strategy"]]
-    except Exception as e:
-        print(f"[❌ create_dataset 실패] features[0] 키 확인 실패 → {e}")
-        return None, None
 
     df = pd.DataFrame(features)
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
     df = df.drop(columns=["strategy"], errors="ignore")
 
-    # ✅ feature 컬럼 없으면 dummy 반환
-    drop_cols = ["timestamp"]
-    feature_cols = [c for c in df.columns if c not in drop_cols]
+    feature_cols = [c for c in df.columns if c not in ["timestamp"]]
     if not feature_cols:
         print("[⚠️ 부족] feature drop 결과 컬럼 없음 → dummy 반환")
         dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
         dummy_y = np.array([-1], dtype=np.int64)
-
-        log_prediction(
-            symbol=get_symbol_safe(),
-            strategy=strategy,
-            direction="dummy",
-            entry_price=0,
-            target_price=0,
-            model="dummy_model",
-            success=False,
-            reason="feature_cols 없음 dummy",
-            rate=0.0,
-            return_value=0.0,
-            volatility=False,
-            source="create_dataset",
-            predicted_class=-1,
-            label=-1
-        )
-
+        log_prediction(symbol=get_symbol_safe(), strategy=strategy, direction="dummy", entry_price=0, target_price=0, model="dummy_model", success=False, reason="feature_cols 없음 dummy", rate=0.0, return_value=0.0, volatility=False, source="create_dataset", predicted_class=-1, label=-1)
         return dummy_X, dummy_y
 
-    # ✅ 최소 feature 개수 유지
     if len(feature_cols) < MIN_FEATURES:
         for i in range(len(feature_cols), MIN_FEATURES):
             pad_col = f"pad_{i}"
             df[pad_col] = 0.0
             feature_cols.append(pad_col)
-
-    if df.empty or len(feature_cols) == 0:
-        print("[⚠️ 부족] DataFrame empty 또는 feature_cols 없음 → dummy 반환")
-        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([-1], dtype=np.int64)
-
-        log_prediction(
-            symbol=get_symbol_safe(),
-            strategy=strategy,
-            direction="dummy",
-            entry_price=0,
-            target_price=0,
-            model="dummy_model",
-            success=False,
-            reason="DataFrame empty dummy",
-            rate=0.0,
-            return_value=0.0,
-            volatility=False,
-            source="create_dataset",
-            predicted_class=-1,
-            label=-1
-        )
-
-        return dummy_X, dummy_y
 
     scaler = MinMaxScaler()
     try:
@@ -212,7 +160,6 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
     df_scaled = pd.DataFrame(scaled, columns=feature_cols)
     df_scaled["timestamp"] = df["timestamp"].values
 
-    # ✅ input_size 미달 시 padding 컬럼 추가
     if input_size and len(feature_cols) < input_size:
         for i in range(len(feature_cols), input_size):
             pad_col = f"pad_{i}"
@@ -222,35 +169,27 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
 
     strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
     lookahead_minutes = strategy_minutes.get(strategy, 1440)
-
     class_ranges = [(-1.0 + 2.0 * i / NUM_CLASSES, -1.0 + 2.0 * (i + 1) / NUM_CLASSES) for i in range(NUM_CLASSES)]
 
-    for i in range(window, len(features) - 3):
+    for i in range(window, len(features)):
         try:
             seq = features[i - window:i]
             base = features[i]
             entry_time = pd.to_datetime(base.get("timestamp"), errors="coerce")
             entry_price = float(base.get("close", 0.0))
-
             if pd.isnull(entry_time) or entry_price <= 0:
                 continue
 
-            future = [
-                f for f in features[i + 1:]
-                if "timestamp" in f and pd.to_datetime(f["timestamp"], errors="coerce") - entry_time <= pd.Timedelta(minutes=lookahead_minutes)
-            ]
-
+            future = [f for f in features[i + 1:] if "timestamp" in f and pd.to_datetime(f["timestamp"], errors="coerce") - entry_time <= pd.Timedelta(minutes=lookahead_minutes)]
             if len(seq) != window or len(future) < 1:
                 continue
 
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
             gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
-            gain = gain if np.isfinite(gain) else 0.0
+            gain = max(-1.0, min(1.0, gain))  # ✅ gain 범위 제한
 
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain <= high), NUM_CLASSES-1)
-
             sample = [[float(r.get(c, 0.0)) for c in feature_cols] for r in seq]
-
             if input_size:
                 for j in range(len(sample)):
                     row = sample[j]
@@ -258,37 +197,18 @@ def create_dataset(features, window=20, strategy="단기", input_size=None):
                         row.extend([0.0] * (input_size - len(row)))
                     elif len(row) > input_size:
                         sample[j] = row[:input_size]
-
             X.append(sample)
             y.append(cls)
-
         except Exception as e:
             print(f"[예외] {e} → i={i}")
             continue
 
-    if len(y) < 2:
-        print(f"[⚠️ 부족] validation 데이터 너무 적음: {len(y)}개 → dummy 반환")
-        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([-1], dtype=np.int64)
-
-        log_prediction(
-            symbol=get_symbol_safe(),
-            strategy=strategy,
-            direction="dummy",
-            entry_price=0,
-            target_price=0,
-            model="dummy_model",
-            success=False,
-            reason="validation 데이터 부족 dummy",
-            rate=0.0,
-            return_value=0.0,
-            volatility=False,
-            source="create_dataset",
-            predicted_class=-1,
-            label=-1
-        )
-
-        return dummy_X, dummy_y
+    # ✅ 최소 샘플수 10개 이상 보장
+    if len(y) < 10:
+        print(f"[⚠️ 부족] 샘플 수 {len(y)}개 → 최소 10개로 복제 보장")
+        while len(y) < 10 and len(y) > 0:
+            X.append(X[0])
+            y.append(y[0])
 
     counts = Counter(y)
     max_count = max(counts.values())
