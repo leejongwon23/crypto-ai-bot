@@ -73,11 +73,12 @@ def balance_classes(X, y, min_count=20, num_classes=21):
             y_balanced.extend([cls] * needed)
             print(f"[✅ 클래스 {cls}] {needed}개 augment 추가 완료")
         elif needed > 0:
-            # ✅ 없는 클래스는 noise dummy sample 생성
-            dummy = np.random.uniform(0, 1, (needed, nx, ny_dim)).astype(np.float32)
+            # ✅ 없는 클래스는 noise dummy sample 생성 (정규분포 기반 + clipping)
+            dummy = np.random.normal(0, 1, (needed, nx, ny_dim)).astype(np.float32)
+            dummy = np.clip(dummy, -3, 3)  # extreme outlier clipping
             X_balanced.extend(dummy)
             y_balanced.extend([cls] * needed)
-            print(f"[➕ 클래스 {cls}] {needed}개 noise dummy sample 생성 완료")
+            print(f"[➕ 클래스 {cls}] {needed}개 noise dummy sample 생성 완료 (정규분포)")
 
     combined = list(zip(X_balanced, y_balanced))
     np.random.shuffle(combined)
@@ -86,5 +87,9 @@ def balance_classes(X, y, min_count=20, num_classes=21):
     final_counts = Counter(y_shuffled)
     print(f"[📊 최종 클래스 분포] {dict(final_counts)}")
     print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
+
+    # ✅ 클래스별 dummy sample 수 균형 검증
+    dummy_counts = {cls: final_counts.get(cls, 0) for cls in range(num_classes)}
+    print(f"[🔎 dummy sample 클래스별 최종 분포] {dummy_counts}")
 
     return np.array(X_shuffled), np.array(y_shuffled, dtype=np.int64)
