@@ -60,7 +60,6 @@ def get_symbols_by_volatility(strategy):
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
     return sorted(result, key=lambda x: -x["volatility"])
 
-
 def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=True):
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼"); sys.stdout.flush()
     results, fmap = [], load_failure_count()
@@ -201,7 +200,8 @@ def run_prediction(symbol, strategy):
         return_value=0.0,
         volatility=False,
         source="단일",
-        predicted_class=-1
+        predicted_class=-1,
+        label=-1
     )
 
 def main(strategy=None, symbol=None, force=False, allow_prediction=True):
