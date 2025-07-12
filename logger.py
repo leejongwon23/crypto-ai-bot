@@ -408,7 +408,6 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     """
     모델 학습 결과를 로그로 저장
     """
-    import os
     import pandas as pd
     import datetime, pytz
 
@@ -430,13 +429,14 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
 
     with db_lock:  # ✅ Lock 적용
         try:
-            TRAIN_LOG = "/persistent/logs/train_log.csv"
-            pd.DataFrame([row]).to_csv(TRAIN_LOG, mode="a", index=False,
-                                       header=not os.path.exists(TRAIN_LOG),
+            path = TRAIN_LOG  # 전역 변수 사용 (중복 정의 제거)
+            pd.DataFrame([row]).to_csv(path, mode="a", index=False,
+                                       header=not os.path.exists(path),
                                        encoding="utf-8-sig")
-            print(f"[✅ log_training_result 저장 완료] {TRAIN_LOG}")
+            print(f"[✅ log_training_result 저장 완료] {path}")
         except Exception as e:
-            print(f"[학습 로그 저장 오류] {e}")
+            print(f"[❌ 학습 로그 저장 오류] {e}")
+            print(f"[🔍 row 내용] {row}")
 
 def get_class_success_rate(strategy, recent_days=3):
     from collections import defaultdict
