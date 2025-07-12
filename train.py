@@ -100,7 +100,7 @@ def get_class_groups(num_classes=21, group_size=7):
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
 def train_one_model(symbol, strategy, max_epochs=20):
-    import os, gc, traceback, torch
+    import os, gc, traceback, torch, json
     from focal_loss import FocalLoss
     from ssl_pretrain import masked_reconstruction
     from window_optimizer import find_best_windows
@@ -137,7 +137,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
             print(f"⛔ [중단] {symbol}-{strategy}: 피처 생성 실패 또는 NaN")
             return
 
-        # ✅ feature importance drop 개선
         try:
             feature_names = [col for col in df_feat.columns if col not in ["timestamp", "strategy"]]
             dummy_X = torch.tensor(np.random.rand(10, 20, input_size), dtype=torch.float32).to(DEVICE)
@@ -169,10 +168,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 y_raw = np.concatenate([y_raw, fail_y], axis=0)
                 print(f"[🔁 실패재학습 추가] {len(fail_X)}개 실패샘플 합산 완료")
 
-            # ✅ validation split 로직 수정 (방법2)
             val_len = max(5, int(len(X_raw) * 0.2))
             if len(X_raw) <= val_len:
-                print(f"[⚠️ 조정] validation 데이터 부족: train 데이터 일부 복사하여 validation set 생성")
                 val_indices = np.random.choice(len(X_raw), val_len, replace=True)
                 X_val, y_val = X_raw[val_indices], y_raw[val_indices]
                 X_train, y_train = X_raw, y_raw
@@ -211,7 +208,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 actual_epochs = max_epochs
 
                 model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
-
                 if hasattr(model, "set_hyperparams"):
                     model.set_hyperparams(hidden_size=hidden_size, dropout=dropout)
 
@@ -256,10 +252,30 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     val_preds = torch.argmax(val_logits, dim=1)
                     val_acc = (val_preds == val_labels).float().mean().item() if len(val_labels) > 0 else 0.0
 
+                model_path = f"/persistent/models/{symbol}_{strategy}_{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}_group{group_id}_window{window}.pt"
+                torch.save(model.state_dict(), model_path)
+
+                # ✅ .meta.json 저장
+                meta_info = {
+                    "symbol": symbol,
+                    "strategy": strategy,
+                    "model": model_type,
+                    "input_size": input_size,
+                    "window": window,
+                    "group_id": group_id,
+                    "optimizer": opt_type,
+                    "loss_fn": loss_type,
+                    "lr": lr,
+                    "batch_size": batch_size,
+                    "hidden_size": hidden_size,
+                    "dropout": dropout
+                }
+                with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
+                    json.dump(meta_info, f, ensure_ascii=False, indent=2)
+                print(f"[✅ 메타 저장 완료] {model_path.replace('.pt', '.meta.json')}")
+
                 log_training_result(symbol, strategy, f"{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}", acc=val_acc, f1=0.0, loss=float(weighted_loss.item()))
                 print(f"[✅ 학습완료] {symbol}-{strategy} | {model_type} | opt={opt_type} | lossfn={loss_type} | lr={lr} | bs={batch_size} | hs={hidden_size} | dr={dropout} | group:{group_id} | window:{window} | acc:{val_acc:.4f}")
-
-                torch.save(model.state_dict(), f"/persistent/models/{symbol}_{strategy}_{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}_group{group_id}_window{window}.pt")
 
                 del model, optimizer, lossfn, train_loader, val_loader, train_ds, val_ds, xb, yb, logits
                 torch.cuda.empty_cache()
