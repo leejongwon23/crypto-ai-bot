@@ -243,7 +243,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         max_retry = 3
         retry = 0
         class_groups = get_class_groups()
-
         model_outputs_list = []
         true_labels = []
 
@@ -275,7 +274,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 feat_scaled = feat_scaled[:, :FEATURE_INPUT_SIZE]
                 input_size = FEATURE_INPUT_SIZE
 
-            models = get_available_models()
+            # ✅ 유사심볼 모델 포함하여 가져오기
+            models = get_available_models(symbol, strategy)
             if not models:
                 log_prediction(symbol, strategy, "unknown", -1, reason="모델 없음", source=source)
                 return -1
@@ -290,8 +290,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 X = np.expand_dims(X_input, axis=0)
 
                 for m in models:
-                    if m["symbol"] != symbol or m["strategy"] != strategy:
-                        continue
+                    # ✅ 유사심볼 허용 구조이므로 정확히 일치 안해도 됨
                     if f"_window{window}" not in m["pt_file"]:
                         continue
 
@@ -304,7 +303,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     meta_path = model_path.replace(".pt", ".meta.json")
                     if not os.path.exists(model_path) or not os.path.exists(meta_path):
                         log_prediction(symbol, strategy, f"group{group_id}", -1, reason="모델 없음", source=source)
-                        continue  # ✅ 이 그룹은 건너뜀
+                        continue
 
                     model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, len(group_classes))
                     if model is None:
