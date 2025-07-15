@@ -100,7 +100,7 @@ def get_class_groups(num_classes=21, group_size=7):
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
 def train_one_model(symbol, strategy, max_epochs=20):
-    import os, gc, traceback, torch, json, random
+    import os, gc, traceback, torch, json
     from focal_loss import FocalLoss
     from ssl_pretrain import masked_reconstruction
     from window_optimizer import find_best_windows
@@ -115,7 +115,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from datetime import datetime
     import pytz
     from meta_learning import maml_train_entry
-    from ranger_adabelief import RangerAdaBelief as Ranger
     from feature_importance import compute_feature_importance, drop_low_importance_features
     from data.utils import get_kline_by_strategy, compute_features, create_dataset
 
@@ -156,11 +155,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
         print(f"✅ [진행] {symbol}-{strategy}: window_list={window_list}")
         class_groups = get_class_groups()
+
         trained_any = False
 
         for window in window_list:
             X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
-
             if X_raw is None or y_raw is None or len(X_raw) == 0:
                 print(f"⛔ [중단] {symbol}-{strategy}: create_dataset 실패 또는 빈 배열")
                 continue
@@ -184,27 +183,17 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 X_train_group = X_train[train_mask]
                 y_train_group = y_train[train_mask]
 
-                if len(y_train_group) < 1:
-                    print(f"⛔ [중단] {symbol}-{strategy}: group_id={group_id} 학습데이터 없음")
+                # ✅ 희소 클래스 최소 샘플 수 보장
+                if len(y_train_group) < 5 and len(y_train_group) > 0:
+                    while len(y_train_group) < 5:
+                        X_train_group = np.concatenate([X_train_group, X_train_group[:1]], axis=0)
+                        y_train_group = np.concatenate([y_train_group, y_train_group[:1]], axis=0)
+
+                if len(y_train_group) < 2:
+                    print(f"⛔ [중단] {symbol}-{strategy}: group_id={group_id} 학습데이터 부족")
                     continue
 
-                # ✅ 클래스 복제 보강
-                label_counts = Counter(y_train_group)
-                target_count = max(20, max(label_counts.values()))
-                X_aug, y_aug = [], []
-                for cls in group_classes:
-                    cls_samples = [(x, y) for x, y in zip(X_train_group, y_train_group) if y == cls]
-                    if not cls_samples:
-                        continue
-                    needed = target_count - len(cls_samples)
-                    for _ in range(max(0, needed)):
-                        x, y = random.choice(cls_samples)
-                        X_aug.append(x)
-                        y_aug.append(y)
-                if X_aug:
-                    X_train_group = np.concatenate([X_train_group] + [np.array(X_aug)], axis=0)
-                    y_train_group = np.concatenate([y_train_group] + [np.array(y_aug)], axis=0)
-
+                X_train_group, y_train_group = balance_classes(X_train_group, y_train_group, min_count=20, num_classes=len(group_classes))
                 print(f"[📊 학습 데이터 클래스 분포] {Counter(y_train_group)}")
 
                 output_size = len(group_classes)
@@ -231,11 +220,16 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 if hasattr(model, "set_hyperparams"):
                     model.set_hyperparams(hidden_size=hidden_size, dropout=dropout)
 
-                optimizer = {
-                    "Adam": torch.optim.Adam(model.parameters(), lr=lr),
-                    "AdamW": torch.optim.AdamW(model.parameters(), lr=lr),
-                    "Ranger": Ranger(model.parameters(), lr=lr)
-                }.get(opt_type, torch.optim.Adam(model.parameters(), lr=lr))
+                try:
+                    from ranger_adabelief import RangerAdaBelief as Ranger
+                    optimizer = {
+                        "Adam": torch.optim.Adam(model.parameters(), lr=lr),
+                        "AdamW": torch.optim.AdamW(model.parameters(), lr=lr),
+                        "Ranger": Ranger(model.parameters(), lr=lr)
+                    }.get(opt_type, torch.optim.AdamW(model.parameters(), lr=lr))
+                except ImportError:
+                    print("[⚠️ Ranger 미설치] AdamW로 대체")
+                    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
                 lossfn = FocalLoss() if loss_type == "FocalLoss" else torch.nn.CrossEntropyLoss()
 
@@ -255,6 +249,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         sample_weights = torch.ones_like(yb, dtype=torch.float32).to(DEVICE)
                         sample_weights[(yb == -1)] = 3.0
                         weighted_loss = (loss * sample_weights).mean()
+
                         if torch.isfinite(weighted_loss):
                             optimizer.zero_grad()
                             weighted_loss.backward()
@@ -273,6 +268,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
                 model_path = f"/persistent/models/{symbol}_{strategy}_{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}_group{group_id}_window{window}.pt"
                 torch.save(model.state_dict(), model_path)
+
                 meta_info = {
                     "symbol": symbol,
                     "strategy": strategy,
