@@ -218,6 +218,21 @@ def get_similar_symbol(symbol, topn=3):
     }
     return SIMILAR_SYMBOLS_MAP.get(symbol, [])
 
+def get_similar_symbol(symbol, topn=3):
+    """
+    유사한 시세 흐름을 가진 심볼들을 반환
+    ※ 우선 수동 룩업 테이블 방식으로 구현
+    """
+    SIMILAR_SYMBOLS_MAP = {
+        "BTCUSDT": ["ETHUSDT", "BNBUSDT", "LTCUSDT"],
+        "ETHUSDT": ["BTCUSDT", "BNBUSDT", "SOLUSDT"],
+        "BNBUSDT": ["BTCUSDT", "ETHUSDT", "ADAUSDT"],
+        "XRPUSDT": ["ADAUSDT", "TRXUSDT", "DOGEUSDT"],
+        "SOLUSDT": ["ETHUSDT", "BNBUSDT", "AVAXUSDT"],
+        "ADAUSDT": ["XRPUSDT", "TRXUSDT", "DOGEUSDT"],
+    }
+    return SIMILAR_SYMBOLS_MAP.get(symbol, [])[:topn]
+
 
 def main(strategy=None, symbol=None, force=False, allow_prediction=True):
     print(">>> [main] recommend.py 실행")
