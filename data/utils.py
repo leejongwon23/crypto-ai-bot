@@ -90,7 +90,6 @@ def get_btc_dominance():
 
 import numpy as np
 
-
 def create_dataset(features, window=10, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
@@ -203,10 +202,33 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             print(f"[예외] {e} → i={i}")
             continue
 
+    # ✅ y가 비어있으면 바로 dummy 반환
+    if len(y) == 0:
+        print(f"[❌ create_dataset 실패] 샘플 생성 실패 → 유효 샘플 없음")
+        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
+        dummy_y = np.array([-1], dtype=np.int64)
+        log_prediction(
+            symbol=get_symbol_safe(),
+            strategy=strategy,
+            direction="dummy",
+            entry_price=0,
+            target_price=0,
+            model="dummy_model",
+            success=False,
+            reason="샘플 생성 실패 (유효 라벨 없음)",
+            rate=0.0,
+            return_value=0.0,
+            volatility=False,
+            source="create_dataset",
+            predicted_class=-1,
+            label=-1
+        )
+        return dummy_X, dummy_y
+
     # ✅ 최소 샘플수 10개 이상 보장
     if len(y) < 10:
         print(f"[⚠️ 부족] 샘플 수 {len(y)}개 → 최소 10개로 복제 보장")
-        while len(y) < 10 and len(y) > 0:
+        while len(y) < 10:
             X.append(X[0])
             y.append(y[0])
 
@@ -226,6 +248,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
     print(f"[✅ create_dataset 완료] 샘플 수: {len(y)}, 클래스 분포: {Counter(y)}")
     return X, y
+
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
 _kline_cache = {}
