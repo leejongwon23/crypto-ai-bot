@@ -519,11 +519,19 @@ import os
 MODEL_DIR = "/persistent/models"
 
 
-def get_available_models():
+def get_available_models(target_symbol=None):
     import os, json, glob
-    MODEL_DIR = "/persistent/models"
+    from model_weight_loader import get_similar_symbol  # ✅ 유사심볼 로더
 
+    MODEL_DIR = "/persistent/models"
     models = []
+
+    # ✅ 유사한 symbol 리스트 생성
+    similar_symbols = []
+    if target_symbol:
+        similar_symbols = get_similar_symbol(target_symbol)
+        similar_symbols.append(target_symbol)
+
     pt_files = glob.glob(os.path.join(MODEL_DIR, "*.pt"))
     for pt_path in pt_files:
         meta_path = pt_path.replace(".pt", ".meta.json")
@@ -532,6 +540,10 @@ def get_available_models():
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
         if all(k in meta for k in ["symbol", "strategy", "model", "input_size"]):
+            # ✅ symbol 매칭 조건
+            if target_symbol:
+                if meta["symbol"] not in similar_symbols:
+                    continue
             models.append({
                 "symbol": meta["symbol"],
                 "strategy": meta["strategy"],
@@ -539,3 +551,4 @@ def get_available_models():
                 "pt_file": os.path.basename(pt_path)
             })
     return models
+
