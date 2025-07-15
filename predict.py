@@ -277,7 +277,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
             models = get_available_models()
             if not models:
-                return [failed_result(symbol, strategy, "unknown", "모델 없음 → 학습 필요", source)]
+                log_prediction(symbol, strategy, "unknown", -1, reason="모델 없음", source=source)
+                return -1
 
             recent_freq = get_recent_class_frequencies(strategy)
             model_outputs = []
@@ -302,10 +303,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     model_path = os.path.join(MODEL_DIR, m["pt_file"])
                     meta_path = model_path.replace(".pt", ".meta.json")
                     if not os.path.exists(model_path) or not os.path.exists(meta_path):
-                        continue
+                        log_prediction(symbol, strategy, f"group{group_id}", -1, reason="모델 없음", source=source)
+                        continue  # ✅ 이 그룹은 건너뜀
 
                     model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, len(group_classes))
                     if model is None:
+                        log_prediction(symbol, strategy, f"group{group_id}", -1, reason="모델 로드 실패", source=source)
                         continue
 
                     with torch.no_grad():
@@ -320,16 +323,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
             else:
                 meta_model = load_meta_learner()
                 final_pred_class = ensemble_stacking(model_outputs, meta_model)
-
-                # ✅ meta learner 학습 데이터 저장
                 model_outputs_list.append(model_outputs)
                 true_labels.append(final_pred_class)
 
             print(f"[predict] {symbol}-{strategy} 최종 예측 클래스: {final_pred_class}")
-
             retry += 1
 
-        # ✅ meta learner 학습 호출
         if len(model_outputs_list) >= 10:
             train_meta_learner(model_outputs_list, true_labels)
             print("[✅ meta learner 재학습 완료]")
