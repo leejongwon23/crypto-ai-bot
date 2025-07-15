@@ -204,6 +204,21 @@ def run_prediction(symbol, strategy):
         label=-1
     )
 
+# 📄 recommend.py 또는 predict_trigger.py 안에 새로 생성해도 됨
+
+def get_similar_symbol(symbol, topn=3):
+    """
+    유사한 시세 흐름을 가진 다른 심볼 리스트를 반환
+    """
+    SIMILAR_SYMBOLS_MAP = {
+        "BTCUSDT": ["ETHUSDT", "BNBUSDT", "LTCUSDT"],
+        "ETHUSDT": ["BTCUSDT", "BNBUSDT", "SOLUSDT"],
+        "BNBUSDT": ["BTCUSDT", "ETHUSDT", "ADAUSDT"],
+        # 여기에 주요 상위 코인 추가
+    }
+    return SIMILAR_SYMBOLS_MAP.get(symbol, [])
+
+
 def main(strategy=None, symbol=None, force=False, allow_prediction=True):
     print(">>> [main] recommend.py 실행")
     check_disk_usage(threshold_percent=90)
