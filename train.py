@@ -120,7 +120,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
     from data.utils import get_kline_by_strategy, compute_features, create_dataset
 
     print("✅ [train_one_model 호출됨]")
-
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = get_FEATURE_INPUT_SIZE()
@@ -161,7 +160,6 @@ def train_one_model(symbol, strategy, max_epochs=20):
         for window in window_list:
             X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
 
-            # ✅ 데이터셋 실패 방지용 보강
             if X_raw is None or y_raw is None or len(X_raw) == 0:
                 print(f"[⚠️ create_dataset 실패 또는 없음 → dummy 생성] {symbol}-{strategy}, window={window}")
                 dummy_shape = (10, window, input_size)
@@ -183,109 +181,112 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
 
             for group_id, group_classes in enumerate(class_groups):
-                train_mask = np.isin(y_train, group_classes)
-                X_train_group = X_train[train_mask]
-                y_train_group = y_train[train_mask]
-                if len(y_train_group) < 2:
-                    print(f"⛔ [중단] {symbol}-{strategy}: group_id={group_id} 학습데이터 부족")
+                try:
+                    train_mask = np.isin(y_train, group_classes)
+                    X_train_group = X_train[train_mask]
+                    y_train_group = y_train[train_mask]
+                    if len(y_train_group) < 2:
+                        print(f"⛔ [중단] {symbol}-{strategy}: group_id={group_id} 학습데이터 부족")
+                        continue
+
+                    X_train_group, y_train_group = balance_classes(X_train_group, y_train_group, min_count=20, num_classes=len(group_classes))
+                    print(f"[📊 학습 데이터 클래스 분포] {Counter(y_train_group)}")
+
+                    output_size = len(group_classes)
+                    val_mask = np.isin(y_val, group_classes)
+                    X_val_group = X_val[val_mask]
+                    y_val_group = y_val[val_mask]
+                    if len(y_val_group) == 0:
+                        print(f"⛔ [중단] {symbol}-{strategy}: group_id={group_id} 검증데이터 없음")
+                        continue
+
+                    y_train_group = np.array([group_classes.index(y) for y in y_train_group if y in group_classes])
+                    y_val_group = np.array([group_classes.index(y) for y in y_val_group if y in group_classes])
+
+                    model_type = "cnn_lstm"
+                    lr = 1e-4
+                    batch_size = 32
+                    hidden_size = 64
+                    dropout = 0.3
+                    opt_type = "AdamW"
+                    loss_type = "FocalLoss"
+                    actual_epochs = max_epochs
+
+                    model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
+                    if hasattr(model, "set_hyperparams"):
+                        model.set_hyperparams(hidden_size=hidden_size, dropout=dropout)
+
+                    optimizer = {
+                        "Adam": torch.optim.Adam(model.parameters(), lr=lr),
+                        "AdamW": torch.optim.AdamW(model.parameters(), lr=lr),
+                        "Ranger": Ranger(model.parameters(), lr=lr)
+                    }.get(opt_type, torch.optim.Adam(model.parameters(), lr=lr))
+
+                    lossfn = FocalLoss() if loss_type == "FocalLoss" else torch.nn.CrossEntropyLoss()
+
+                    X_train_group_tensor = torch.tensor(X_train_group[:, -1, :], dtype=torch.float32)
+                    X_val_group_tensor = torch.tensor(X_val_group[:, -1, :], dtype=torch.float32)
+
+                    train_ds = TensorDataset(X_train_group_tensor, torch.tensor(y_train_group, dtype=torch.long))
+                    val_ds = TensorDataset(X_val_group_tensor, torch.tensor(y_val_group, dtype=torch.long))
+                    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+                    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+
+                    for epoch in range(actual_epochs):
+                        for xb, yb in train_loader:
+                            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                            logits = model(xb)
+                            loss = lossfn(logits, yb)
+                            sample_weights = torch.ones_like(yb, dtype=torch.float32).to(DEVICE)
+                            sample_weights[(yb == -1)] = 3.0
+                            weighted_loss = (loss * sample_weights).mean()
+                            if torch.isfinite(weighted_loss):
+                                optimizer.zero_grad()
+                                weighted_loss.backward()
+                                optimizer.step()
+
+                    maml_loss = maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1)
+                    print(f"[MAML meta-update 완료] {model_type} | group:{group_id} | window:{window} | loss={maml_loss:.4f}")
+
+                    model.eval()
+                    with torch.no_grad():
+                        val_inputs = X_val_group_tensor.to(DEVICE)
+                        val_labels = torch.tensor(y_val_group, dtype=torch.long).to(DEVICE)
+                        val_logits = model(val_inputs)
+                        val_preds = torch.argmax(val_logits, dim=1)
+                        val_acc = (val_preds == val_labels).float().mean().item() if len(val_labels) > 0 else 0.0
+
+                    model_path = f"/persistent/models/{symbol}_{strategy}_{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}_group{group_id}_window{window}.pt"
+                    torch.save(model.state_dict(), model_path)
+
+                    meta_info = {
+                        "symbol": symbol,
+                        "strategy": strategy,
+                        "model": model_type,
+                        "input_size": input_size,
+                        "window": window,
+                        "group_id": group_id,
+                        "optimizer": opt_type,
+                        "loss_fn": loss_type,
+                        "lr": lr,
+                        "batch_size": batch_size,
+                        "hidden_size": hidden_size,
+                        "dropout": dropout
+                    }
+                    with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
+                        json.dump(meta_info, f, ensure_ascii=False, indent=2)
+
+                    print(f"[✅ 메타 저장 완료] {model_path.replace('.pt', '.meta.json')}")
+                    log_training_result(symbol, strategy, f"{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}", acc=val_acc, f1=0.0, loss=float(weighted_loss.item()))
+                    print(f"[✅ 학습완료] {symbol}-{strategy} | {model_type} | acc:{val_acc:.4f}")
+                    trained_any = True
+
+                    del model, optimizer, lossfn, train_loader, val_loader, train_ds, val_ds, xb, yb, logits
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                except Exception as e:
+                    print(f"[⚠️ group_id={group_id} 예외 발생] {e}")
                     continue
-
-                X_train_group, y_train_group = balance_classes(X_train_group, y_train_group, min_count=20, num_classes=len(group_classes))
-                print(f"[📊 학습 데이터 클래스 분포] {Counter(y_train_group)}")
-
-                output_size = len(group_classes)
-                val_mask = np.isin(y_val, group_classes)
-                X_val_group = X_val[val_mask]
-                y_val_group = y_val[val_mask]
-                if len(y_val_group) == 0:
-                    print(f"⛔ [중단] {symbol}-{strategy}: group_id={group_id} 검증데이터 없음")
-                    continue
-
-                y_train_group = np.array([group_classes.index(y) for y in y_train_group if y in group_classes])
-                y_val_group = np.array([group_classes.index(y) for y in y_val_group if y in group_classes])
-
-                model_type = "cnn_lstm"
-                lr = 1e-4
-                batch_size = 32
-                hidden_size = 64
-                dropout = 0.3
-                opt_type = "AdamW"
-                loss_type = "FocalLoss"
-                actual_epochs = max_epochs
-
-                model = get_model(model_type, input_size=input_size, output_size=output_size).to(DEVICE).train()
-                if hasattr(model, "set_hyperparams"):
-                    model.set_hyperparams(hidden_size=hidden_size, dropout=dropout)
-
-                optimizer = {
-                    "Adam": torch.optim.Adam(model.parameters(), lr=lr),
-                    "AdamW": torch.optim.AdamW(model.parameters(), lr=lr),
-                    "Ranger": Ranger(model.parameters(), lr=lr)
-                }.get(opt_type, torch.optim.Adam(model.parameters(), lr=lr))
-
-                lossfn = FocalLoss() if loss_type == "FocalLoss" else torch.nn.CrossEntropyLoss()
-
-                X_train_group_tensor = torch.tensor(X_train_group[:, -1, :], dtype=torch.float32)
-                X_val_group_tensor = torch.tensor(X_val_group[:, -1, :], dtype=torch.float32)
-
-                train_ds = TensorDataset(X_train_group_tensor, torch.tensor(y_train_group, dtype=torch.long))
-                val_ds = TensorDataset(X_val_group_tensor, torch.tensor(y_val_group, dtype=torch.long))
-                train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
-                val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
-
-                for epoch in range(actual_epochs):
-                    for xb, yb in train_loader:
-                        xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                        logits = model(xb)
-                        loss = lossfn(logits, yb)
-                        sample_weights = torch.ones_like(yb, dtype=torch.float32).to(DEVICE)
-                        sample_weights[(yb == -1)] = 3.0
-                        weighted_loss = (loss * sample_weights).mean()
-
-                        if torch.isfinite(weighted_loss):
-                            optimizer.zero_grad()
-                            weighted_loss.backward()
-                            optimizer.step()
-
-                maml_loss = maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1)
-                print(f"[MAML meta-update 완료] {model_type} | group:{group_id} | window:{window} | loss={maml_loss:.4f}")
-
-                model.eval()
-                with torch.no_grad():
-                    val_inputs = X_val_group_tensor.to(DEVICE)
-                    val_labels = torch.tensor(y_val_group, dtype=torch.long).to(DEVICE)
-                    val_logits = model(val_inputs)
-                    val_preds = torch.argmax(val_logits, dim=1)
-                    val_acc = (val_preds == val_labels).float().mean().item() if len(val_labels) > 0 else 0.0
-
-                model_path = f"/persistent/models/{symbol}_{strategy}_{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}_group{group_id}_window{window}.pt"
-                torch.save(model.state_dict(), model_path)
-
-                meta_info = {
-                    "symbol": symbol,
-                    "strategy": strategy,
-                    "model": model_type,
-                    "input_size": input_size,
-                    "window": window,
-                    "group_id": group_id,
-                    "optimizer": opt_type,
-                    "loss_fn": loss_type,
-                    "lr": lr,
-                    "batch_size": batch_size,
-                    "hidden_size": hidden_size,
-                    "dropout": dropout
-                }
-                with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
-                    json.dump(meta_info, f, ensure_ascii=False, indent=2)
-                print(f"[✅ 메타 저장 완료] {model_path.replace('.pt', '.meta.json')}")
-
-                log_training_result(symbol, strategy, f"{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}", acc=val_acc, f1=0.0, loss=float(weighted_loss.item()))
-                print(f"[✅ 학습완료] {symbol}-{strategy} | {model_type} | acc:{val_acc:.4f}")
-                trained_any = True
-
-                del model, optimizer, lossfn, train_loader, val_loader, train_ds, val_ds, xb, yb, logits
-                torch.cuda.empty_cache()
-                gc.collect()
 
         if not trained_any:
             log_training_result(symbol, strategy, "학습실패", acc=0.0, f1=0.0, loss=0.0)
