@@ -184,7 +184,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     row = {
         "timestamp": now,
         "symbol": str(symbol or "UNKNOWN"),
-        "model_symbol": str(model_symbol or symbol),  # ✅ 실제 모델 심볼 기록
+        "model_symbol": str(model_symbol or symbol),  # ✅ 유사모델명까지 반영
         "strategy": str(strategy or "알수없음"),
         "direction": direction or "N/A",
         "entry_price": float(entry_price or 0.0),
@@ -238,7 +238,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
             print(f"[✅ log_prediction JSON 저장 완료] {json_path}")
         except Exception as e:
             print(f"[❌ log_prediction JSON 저장 실패] {e}")
-
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
@@ -444,6 +443,7 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
 
     mode = "이어학습" if os.path.exists(model_path) else "신규학습"
+    
     # ✅ 정확한 실패 이유 명시 가능하게 유지
     if isinstance(model_name, str) and model_name.startswith("학습실패:"):
         mode = "실패"
@@ -452,7 +452,7 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
         "timestamp": timestamp,
         "symbol": symbol,
         "strategy": strategy,
-        "model": model_name,  # 학습실패: 사유 or 정상모델명
+        "model": model_name,  # 예: "학습실패: 데이터 없음" or 모델 이름
         "mode": mode,
         "accuracy": float(acc),
         "f1_score": float(f1),
@@ -469,7 +469,6 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
         except Exception as e:
             print(f"[❌ 학습 로그 저장 오류] {e}")
             print(f"[🔍 row 내용] {row}")
-
 
 def get_class_success_rate(strategy, recent_days=3):
     from collections import defaultdict
