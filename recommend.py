@@ -206,20 +206,44 @@ def run_prediction(symbol, strategy):
 
 # 📄 recommend.py 또는 predict_trigger.py 안에 새로 생성해도 됨
 
-def get_similar_symbol(symbol, topn=3):
-    """
-    유사한 시세 흐름을 가진 심볼들을 반환
-    ※ 우선 수동 룩업 테이블 방식으로 구현
-    """
-    SIMILAR_SYMBOLS_MAP = {
-        "BTCUSDT": ["ETHUSDT", "BNBUSDT", "LTCUSDT"],
-        "ETHUSDT": ["BTCUSDT", "BNBUSDT", "SOLUSDT"],
-        "BNBUSDT": ["BTCUSDT", "ETHUSDT", "ADAUSDT"],
-        "XRPUSDT": ["ADAUSDT", "TRXUSDT", "DOGEUSDT"],
-        "SOLUSDT": ["ETHUSDT", "BNBUSDT", "AVAXUSDT"],
-        "ADAUSDT": ["XRPUSDT", "TRXUSDT", "DOGEUSDT"],
-    }
-    return SIMILAR_SYMBOLS_MAP.get(symbol, [])[:topn]
+def get_similar_symbol(symbol, top_k=1):
+    import os, json
+    import numpy as np
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    MODEL_DIR = "/persistent/models"
+    meta_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".meta.json")]
+
+    # 현재 symbol의 feature 평균 불러오기
+    def load_feature_vector(sym):
+        path = os.path.join(MODEL_DIR, f"{sym}_feature_vector.json")
+        if not os.path.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            return np.array(json.load(f))
+
+    target_vec = load_feature_vector(symbol)
+    if target_vec is None:
+        return []
+
+    similarities = []
+    for meta_file in meta_files:
+        try:
+            with open(os.path.join(MODEL_DIR, meta_file), "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            other_symbol = meta.get("symbol")
+            if other_symbol == symbol:
+                continue
+            vec = load_feature_vector(other_symbol)
+            if vec is None or len(vec) != len(target_vec):
+                continue
+            score = cosine_similarity([target_vec], [vec])[0][0]
+            similarities.append((other_symbol, score))
+        except:
+            continue
+
+    similarities.sort(key=lambda x: x[1], reverse=True)
+    return [s[0] for s in similarities[:top_k]]
 
 
 def main(strategy=None, symbol=None, force=False, allow_prediction=True):
