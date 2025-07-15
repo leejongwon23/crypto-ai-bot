@@ -96,10 +96,10 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
     from sklearn.preprocessing import MinMaxScaler
     from config import get_NUM_CLASSES, MIN_FEATURES
     from logger import log_prediction
+    NUM_CLASSES = get_NUM_CLASSES()
     from collections import Counter
     import random
 
-    NUM_CLASSES = get_NUM_CLASSES()
     X, y = [], []
 
     def get_symbol_safe():
@@ -109,10 +109,24 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
     if not features or len(features) <= window:
         print(f"[⚠️ 부족] features length={len(features) if features else 0}, window={window} → dummy 반환")
-        dummy_X = np.zeros((10, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([-1]*10, dtype=np.int64)
-        for _ in range(10):
-            log_prediction(symbol=get_symbol_safe(), strategy=strategy, direction="dummy", entry_price=0, target_price=0, model="dummy_model", success=False, reason="features 부족(dummy)", rate=0.0, return_value=0.0, volatility=False, source="create_dataset", predicted_class=-1, label=-1)
+        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
+        dummy_y = np.array([-1], dtype=np.int64)
+        log_prediction(
+            symbol=get_symbol_safe(),
+            strategy=strategy,
+            direction="dummy",
+            entry_price=0,
+            target_price=0,
+            model="dummy_model",
+            success=False,
+            reason=f"window 부족 dummy (len={len(features) if features else 0}, window={window})",
+            rate=0.0,
+            return_value=0.0,
+            volatility=False,
+            source="create_dataset",
+            predicted_class=-1,
+            label=-1
+        )
         return dummy_X, dummy_y
 
     df = pd.DataFrame(features)
@@ -123,10 +137,9 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
     feature_cols = [c for c in df.columns if c not in ["timestamp"]]
     if not feature_cols:
         print("[⚠️ 부족] feature drop 결과 컬럼 없음 → dummy 반환")
-        dummy_X = np.zeros((10, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([-1]*10, dtype=np.int64)
-        for _ in range(10):
-            log_prediction(symbol=get_symbol_safe(), strategy=strategy, direction="dummy", entry_price=0, target_price=0, model="dummy_model", success=False, reason="feature_cols 없음(dummy)", rate=0.0, return_value=0.0, volatility=False, source="create_dataset", predicted_class=-1, label=-1)
+        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
+        dummy_y = np.array([-1], dtype=np.int64)
+        log_prediction(symbol=get_symbol_safe(), strategy=strategy, direction="dummy", entry_price=0, target_price=0, model="dummy_model", success=False, reason="feature_cols 없음 dummy", rate=0.0, return_value=0.0, volatility=False, source="create_dataset", predicted_class=-1, label=-1)
         return dummy_X, dummy_y
 
     if len(feature_cols) < MIN_FEATURES:
@@ -140,11 +153,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         scaled = scaler.fit_transform(df[feature_cols])
     except Exception as e:
         print(f"[❌ create_dataset 실패] scaler fit_transform 실패 → {e}")
-        dummy_X = np.zeros((10, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([-1]*10, dtype=np.int64)
-        for _ in range(10):
-            log_prediction(symbol=get_symbol_safe(), strategy=strategy, direction="dummy", entry_price=0, target_price=0, model="dummy_model", success=False, reason="스케일링 실패(dummy)", rate=0.0, return_value=0.0, volatility=False, source="create_dataset", predicted_class=-1, label=-1)
-        return dummy_X, dummy_y
+        return None, None
 
     df_scaled = pd.DataFrame(scaled, columns=feature_cols)
     df_scaled["timestamp"] = df["timestamp"].values
@@ -175,9 +184,9 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
             gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
-            gain = max(-1.0, min(1.0, gain))
-            cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain <= high), NUM_CLASSES-1)
+            gain = max(-1.0, min(1.0, gain))  # ✅ gain 범위 제한
 
+            cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain <= high), NUM_CLASSES-1)
             sample = [[float(r.get(c, 0.0)) for c in feature_cols] for r in seq]
             if input_size:
                 for j in range(len(sample)):
@@ -186,21 +195,40 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                         row.extend([0.0] * (input_size - len(row)))
                     elif len(row) > input_size:
                         sample[j] = row[:input_size]
-
             X.append(sample)
             y.append(cls)
         except Exception as e:
             print(f"[예외] {e} → i={i}")
             continue
 
+    # ✅ 샘플은 있으나 라벨이 생성되지 않은 경우 → 중립 라벨 부여
     if len(y) == 0:
-        print(f"[❌ create_dataset 실패] 샘플 생성 실패 → 유효 샘플 없음")
-        dummy_X = np.zeros((10, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([-1]*10, dtype=np.int64)
-        for _ in range(10):
-            log_prediction(symbol=get_symbol_safe(), strategy=strategy, direction="dummy", entry_price=0, target_price=0, model="dummy_model", success=False, reason="샘플 생성 실패(dummy)", rate=0.0, return_value=0.0, volatility=False, source="create_dataset", predicted_class=-1, label=-1)
-        return dummy_X, dummy_y
+        if len(X) > 0:
+            print(f"[⚠️ 라벨 없음] → 중립 라벨 부여 후 진행 (샘플 수: {len(X)})")
+            y = [NUM_CLASSES // 2] * len(X)
+        else:
+            print(f"[❌ create_dataset 실패] 샘플 생성 실패 → 유효 샘플 없음")
+            dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
+            dummy_y = np.array([-1], dtype=np.int64)
+            log_prediction(
+                symbol=get_symbol_safe(),
+                strategy=strategy,
+                direction="dummy",
+                entry_price=0,
+                target_price=0,
+                model="dummy_model",
+                success=False,
+                reason="샘플 생성 실패 (유효 라벨 없음)",
+                rate=0.0,
+                return_value=0.0,
+                volatility=False,
+                source="create_dataset",
+                predicted_class=-1,
+                label=-1
+            )
+            return dummy_X, dummy_y
 
+    # ✅ 최소 샘플수 10개 이상 보장
     if len(y) < 10:
         print(f"[⚠️ 부족] 샘플 수 {len(y)}개 → 최소 10개로 복제 보장")
         while len(y) < 10:
@@ -220,9 +248,9 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
     X = np.array(X, dtype=np.float32)
     y = np.array(y, dtype=np.int64)
+
     print(f"[✅ create_dataset 완료] 샘플 수: {len(y)}, 클래스 분포: {Counter(y)}")
     return X, y
-
 
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
