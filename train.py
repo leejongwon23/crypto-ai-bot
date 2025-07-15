@@ -99,7 +99,6 @@ def get_class_groups(num_classes=21, group_size=7):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
-
 def train_one_model(symbol, strategy, max_epochs=20):
     import os, gc, traceback, torch, json
     from focal_loss import FocalLoss
@@ -158,15 +157,14 @@ def train_one_model(symbol, strategy, max_epochs=20):
         print(f"✅ [진행] {symbol}-{strategy}: window_list={window_list}")
         class_groups = get_class_groups()
 
+        trained_any = False  # ✅ 학습 성공 여부 플래그
+
         for window in window_list:
             X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
 
-            # ✅ max() 오류 방지 - 샘플 최소 보장
             if X_raw is None or y_raw is None or len(X_raw) == 0:
-                print(f"⛔ [중단] {symbol}-{strategy}: 데이터셋 없음 (window={window}) → 최소 10개 dummy 생성")
-                dummy_shape = (10, window, input_size)
-                X_raw = np.random.normal(0, 1, size=dummy_shape).astype(np.float32)
-                y_raw = np.random.randint(0, len(class_groups[0]), size=(10,))
+                print(f"⛔ [중단] {symbol}-{strategy}: create_dataset 실패 또는 빈 배열")
+                continue
 
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size=input_size, window=window)
             if fail_X is not None and fail_y is not None and len(fail_X) > 0:
@@ -280,15 +278,21 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 print(f"[✅ 메타 저장 완료] {model_path.replace('.pt', '.meta.json')}")
 
                 log_training_result(symbol, strategy, f"{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}", acc=val_acc, f1=0.0, loss=float(weighted_loss.item()))
-                print(f"[✅ 학습완료] {symbol}-{strategy} | {model_type} | opt={opt_type} | lossfn={loss_type} | lr={lr} | bs={batch_size} | hs={hidden_size} | dr={dropout} | group:{group_id} | window:{window} | acc:{val_acc:.4f}")
+                print(f"[✅ 학습완료] {symbol}-{strategy} | {model_type} | acc:{val_acc:.4f}")
+                trained_any = True
 
                 del model, optimizer, lossfn, train_loader, val_loader, train_ds, val_ds, xb, yb, logits
                 torch.cuda.empty_cache()
                 gc.collect()
 
+        if not trained_any:
+            log_training_result(symbol, strategy, "학습실패", acc=0.0, f1=0.0, loss=0.0)
+            print(f"[❌ 학습실패 기록] {symbol}-{strategy}")
+
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         traceback.print_exc()
+
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
