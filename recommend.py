@@ -245,42 +245,30 @@ def get_similar_symbol(symbol, top_k=1):
     similarities.sort(key=lambda x: x[1], reverse=True)
     return [s[0] for s in similarities[:top_k]]
 
+
 def get_available_models(symbol=None, strategy=None):
     import os, json, glob
-    from recommend import get_similar_symbol  # ✅ 유사심볼 가져오기
-
     MODEL_DIR = "/persistent/models"
     models = []
     pt_files = glob.glob(os.path.join(MODEL_DIR, "*.pt"))
-
-    # 유사 심볼들 구하기
-    similar_symbols = [symbol] if symbol is None else [symbol] + get_similar_symbol(symbol)
-
     for pt_path in pt_files:
         meta_path = pt_path.replace(".pt", ".meta.json")
         if not os.path.exists(meta_path):
             continue
-
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
-
         if all(k in meta for k in ["symbol", "strategy", "model", "input_size"]):
-            sym = meta["symbol"]
-            strat = meta["strategy"]
-
-            # ✅ 심볼 또는 유사심볼 + 전략 일치 시 포함
-            if (symbol is None or sym in similar_symbols) and (strategy is None or strat == strategy):
-                models.append({
-                    "symbol": sym,
-                    "strategy": strat,
-                    "model": meta["model"],
-                    "input_size": meta["input_size"],
-                    "pt_file": os.path.basename(pt_path),
-                    "group_id": meta.get("group_id", "unknown")
-                })
+            if symbol and strategy:
+                if meta["symbol"] != symbol or meta["strategy"] != strategy:
+                    continue  # ✅ 이 부분이 중요
+            models.append({
+                "symbol": meta["symbol"],
+                "strategy": meta["strategy"],
+                "model": meta["model"],
+                "pt_file": os.path.basename(pt_path),
+                "group_id": meta.get("group_id", "unknown")
+            })
     return models
-
-
 
 def main(strategy=None, symbol=None, force=False, allow_prediction=True):
     print(">>> [main] recommend.py 실행")
