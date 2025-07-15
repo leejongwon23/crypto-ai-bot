@@ -434,30 +434,36 @@ def export_recent_model_stats(recent_days=3):
 
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     """
-    모델 학습 결과를 로그로 저장
+    모델 학습 결과를 로그로 저장합니다.
+    실패 사유가 있을 경우 model_name 필드에 기록됩니다.
     """
     import pandas as pd
-    import datetime, pytz
+    import datetime, pytz, os
+    from logger import db_lock, TRAIN_LOG  # ✅ 전역 락, 경로
 
     now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
     timestamp = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
+
     mode = "이어학습" if os.path.exists(model_path) else "신규학습"
+    # ✅ 정확한 실패 이유 명시 가능하게 유지
+    if isinstance(model_name, str) and model_name.startswith("학습실패:"):
+        mode = "실패"
 
     row = {
         "timestamp": timestamp,
         "symbol": symbol,
         "strategy": strategy,
-        "model": model_name,
+        "model": model_name,  # 학습실패: 사유 or 정상모델명
         "mode": mode,
         "accuracy": float(acc),
         "f1_score": float(f1),
         "loss": float(loss)
     }
 
-    with db_lock:  # ✅ Lock 적용
+    with db_lock:
         try:
-            path = TRAIN_LOG  # 전역 변수 사용 (중복 정의 제거)
+            path = TRAIN_LOG
             pd.DataFrame([row]).to_csv(path, mode="a", index=False,
                                        header=not os.path.exists(path),
                                        encoding="utf-8-sig")
@@ -465,6 +471,7 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
         except Exception as e:
             print(f"[❌ 학습 로그 저장 오류] {e}")
             print(f"[🔍 row 내용] {row}")
+
 
 def get_class_success_rate(strategy, recent_days=3):
     from collections import defaultdict
