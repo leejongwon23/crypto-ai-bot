@@ -146,7 +146,7 @@ db_lock = threading.Lock()  # ✅ Lock 전역 선언
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, model=None, success=True, reason="", rate=0.0,
                    return_value=None, volatility=False, source="일반", predicted_class=None, label=None,
-                   augmentation=None, group_id=None):
+                   augmentation=None, group_id=None, model_symbol=None):  # ✅ 추가됨
 
     import csv, os, datetime, pytz, json
     import numpy as np
@@ -184,6 +184,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     row = {
         "timestamp": now,
         "symbol": str(symbol or "UNKNOWN"),
+        "model_symbol": str(model_symbol or symbol),  # ✅ 실제 모델 심볼 기록
         "strategy": str(strategy or "알수없음"),
         "direction": direction or "N/A",
         "entry_price": float(entry_price or 0.0),
@@ -200,7 +201,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "group_id": group_id_val
     }
 
-    # ✅ numpy 직렬화 에러 방지
     def convert(o):
         if isinstance(o, (np.integer,)):
             return int(o)
@@ -211,8 +211,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         return str(o)
 
     fieldnames = sorted(row.keys())
-
-    db_lock = Lock()  # ✅ 전역에서 선언되어 있다면 이 라인 제거
+    db_lock = Lock()
 
     with db_lock:
         for path in [dated_path, full_path]:
@@ -226,7 +225,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
             except Exception as e:
                 print(f"[오류] log_prediction 기록 실패 ({path}) → {e}")
 
-        # ✅ JSON도 별도로 저장 (오류 방지 포함)
         try:
             if os.path.exists(json_path):
                 with open(json_path, "r", encoding="utf-8") as f:
