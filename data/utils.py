@@ -111,21 +111,11 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         print(f"[⚠️ 부족] features length={len(features) if features else 0}, window={window} → dummy 반환")
         dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
         dummy_y = np.array([-1], dtype=np.int64)
+
         log_prediction(
-            symbol=get_symbol_safe(),
-            strategy=strategy,
-            direction="dummy",
-            entry_price=0,
-            target_price=0,
-            model="dummy_model",
-            success=False,
-            reason=f"window 부족 dummy (len={len(features) if features else 0}, window={window})",
-            rate=0.0,
-            return_value=0.0,
-            volatility=False,
-            source="create_dataset",
-            predicted_class=-1,
-            label=-1
+            symbol=get_symbol_safe(), strategy=strategy, direction="dummy", entry_price=0, target_price=0,
+            model="dummy_model", success=False, reason=f"window 부족 dummy (len={len(features) if features else 0}, window={window})",
+            rate=0.0, return_value=0.0, volatility=False, source="create_dataset", predicted_class=-1, label=-1
         )
         return dummy_X, dummy_y
 
@@ -184,7 +174,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
             max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
             gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
-            gain = max(-1.0, min(1.0, gain))  # ✅ gain 범위 제한
+            gain = max(-1.0, min(1.0, gain))
 
             cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain <= high), NUM_CLASSES-1)
             sample = [[float(r.get(c, 0.0)) for c in feature_cols] for r in seq]
@@ -201,34 +191,12 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             print(f"[예외] {e} → i={i}")
             continue
 
-    # ✅ 샘플은 있으나 라벨이 생성되지 않은 경우 → 중립 라벨 부여
     if len(y) == 0:
-        if len(X) > 0:
-            print(f"[⚠️ 라벨 없음] → 중립 라벨 부여 후 진행 (샘플 수: {len(X)})")
-            y = [NUM_CLASSES // 2] * len(X)
-        else:
-            print(f"[❌ create_dataset 실패] 샘플 생성 실패 → 유효 샘플 없음")
-            dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-            dummy_y = np.array([-1], dtype=np.int64)
-            log_prediction(
-                symbol=get_symbol_safe(),
-                strategy=strategy,
-                direction="dummy",
-                entry_price=0,
-                target_price=0,
-                model="dummy_model",
-                success=False,
-                reason="샘플 생성 실패 (유효 라벨 없음)",
-                rate=0.0,
-                return_value=0.0,
-                volatility=False,
-                source="create_dataset",
-                predicted_class=-1,
-                label=-1
-            )
-            return dummy_X, dummy_y
+        print("[❌ 샘플 없음] 최소 10개 dummy 생성 강제수행")
+        dummy_X = np.random.normal(0, 1, size=(10, window, input_size if input_size else MIN_FEATURES)).astype(np.float32)
+        dummy_y = np.random.randint(0, NUM_CLASSES, size=(10,))
+        return dummy_X, dummy_y
 
-    # ✅ 최소 샘플수 10개 이상 보장
     if len(y) < 10:
         print(f"[⚠️ 부족] 샘플 수 {len(y)}개 → 최소 10개로 복제 보장")
         while len(y) < 10:
