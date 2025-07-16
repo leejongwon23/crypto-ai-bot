@@ -146,7 +146,7 @@ db_lock = threading.Lock()  # ✅ Lock 전역 선언
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, model=None, success=True, reason="", rate=0.0,
                    return_value=None, volatility=False, source="일반", predicted_class=None, label=None,
-                   augmentation=None, group_id=None, model_symbol=None):  # ✅ 추가됨
+                   augmentation=None, group_id=None, model_symbol=None):  # ✅ 유사모델 기록용
 
     import csv, os, datetime, pytz, json
     import numpy as np
@@ -177,6 +177,12 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     else:
         group_id_val = str(group_id)
 
+    # ✅ fallback 모델일 경우 model_symbol 보완
+    final_model_symbol = model_symbol if model_symbol else symbol
+    if isinstance(model, str) and model != "unknown" and "_" in model:
+        # 예: "BTCUSDT_단기_lstm_..." → symbol 추출
+        final_model_symbol = model.split("_")[0]
+
     status = "success" if success else "fail"
     effective_rate = rate if rate is not None else 0.0
     effective_return = return_value if return_value is not None else effective_rate
@@ -184,7 +190,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     row = {
         "timestamp": now,
         "symbol": str(symbol or "UNKNOWN"),
-        "model_symbol": str(model_symbol or symbol),  # ✅ 유사모델명까지 반영
+        "model_symbol": str(final_model_symbol),  # ✅ 유사모델명 정확히 반영
         "strategy": str(strategy or "알수없음"),
         "direction": direction or "N/A",
         "entry_price": float(entry_price or 0.0),
