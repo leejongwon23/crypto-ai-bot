@@ -274,7 +274,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 feat_scaled = feat_scaled[:, :FEATURE_INPUT_SIZE]
                 input_size = FEATURE_INPUT_SIZE
 
-            # ✅ 유사심볼 모델 포함하여 가져오기
             models = get_available_models(symbol, strategy)
             if not models:
                 log_prediction(symbol, strategy, "unknown", -1, reason="모델 없음", source=source)
@@ -290,7 +289,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 X = np.expand_dims(X_input, axis=0)
 
                 for m in models:
-                    # ✅ 유사심볼 허용 구조이므로 정확히 일치 안해도 됨
                     if f"_window{window}" not in m["pt_file"]:
                         continue
 
@@ -302,12 +300,30 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     model_path = os.path.join(MODEL_DIR, m["pt_file"])
                     meta_path = model_path.replace(".pt", ".meta.json")
                     if not os.path.exists(model_path) or not os.path.exists(meta_path):
-                        log_prediction(symbol, strategy, f"group{group_id}", -1, reason="모델 없음", source=source)
+                        log_prediction(
+                            symbol=symbol,
+                            strategy=strategy,
+                            model=f"group{group_id}",
+                            predicted_class=-1,
+                            reason="모델 없음",
+                            source=source,
+                            model_symbol=m["symbol"],
+                            model_name=m["model"]
+                        )
                         continue
 
                     model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, len(group_classes))
                     if model is None:
-                        log_prediction(symbol, strategy, f"group{group_id}", -1, reason="모델 로드 실패", source=source)
+                        log_prediction(
+                            symbol=symbol,
+                            strategy=strategy,
+                            model=f"group{group_id}",
+                            predicted_class=-1,
+                            reason="모델 로드 실패",
+                            source=source,
+                            model_symbol=m["symbol"],
+                            model_name=m["model"]
+                        )
                         continue
 
                     with torch.no_grad():
@@ -316,6 +332,20 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
                     adjusted_probs = adjust_probs_with_diversity(probs, recent_freq)
                     model_outputs.append(adjusted_probs)
+
+                    final_class = np.argmax(adjusted_probs)
+                    reason = "유사모델 사용" if symbol != m["symbol"] else "정상예측"
+
+                    log_prediction(
+                        symbol=symbol,
+                        strategy=strategy,
+                        model=f"group{group_id}",
+                        predicted_class=final_class,
+                        reason=reason,
+                        source=source,
+                        model_symbol=m["symbol"],
+                        model_name=m["model"]
+                    )
 
             if len(model_outputs) == 0:
                 final_pred_class = -1
@@ -337,7 +367,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
     except Exception as e:
         print(f"[predict 예외] {symbol}-{strategy} → {e}")
         return -1
-
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
