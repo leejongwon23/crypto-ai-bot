@@ -540,18 +540,36 @@ def get_available_models(target_symbol=None):
         meta_path = pt_path.replace(".pt", ".meta.json")
         if not os.path.exists(meta_path):
             continue
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        if all(k in meta for k in ["symbol", "strategy", "model", "input_size"]):
-            # ✅ symbol 매칭 조건
-            if target_symbol:
-                if meta["symbol"] not in similar_symbols:
-                    continue
+
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+
+            # 필수 정보 존재 여부 확인
+            if not all(k in meta for k in ["symbol", "strategy", "model", "input_size", "model_name"]):
+                continue
+
+            # ✅ symbol 필터링
+            if target_symbol and meta["symbol"] not in similar_symbols:
+                continue
+
+            # ✅ 정확한 모델 파일명 추출
+            model_file = os.path.basename(pt_path)
+
+            # ✅ 유형별로 구분 가능한 구조 반영
             models.append({
                 "symbol": meta["symbol"],
                 "strategy": meta["strategy"],
                 "model": meta["model"],
-                "pt_file": os.path.basename(pt_path)
+                "pt_file": model_file,
+                "group_id": meta.get("group_id"),
+                "window": meta.get("window"),
+                "input_size": meta["input_size"],
+                "model_name": meta.get("model_name", model_file)
             })
-    return models
 
+        except Exception as e:
+            print(f"[⚠️ 메타 로드 실패] {meta_path} → {e}")
+            continue
+
+    return models
