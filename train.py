@@ -103,7 +103,7 @@ def get_class_groups(num_classes=21, group_size=7):
 # 여포 프로젝트 - 1단계 최종 수정본
 # 목적: 학습 실패 원인 제거 + 정상 모델 저장 + 학습 로그 완전 기록
 
-def train_one_model(symbol, strategy, max_epochs=20):
+def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     import os, gc, traceback, torch, json
     from focal_loss import FocalLoss
     from ssl_pretrain import masked_reconstruction
@@ -127,7 +127,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = get_FEATURE_INPUT_SIZE()
-    print(f"▶ [학습시작] {symbol}-{strategy}")
+    print(f"▶ [학습시작] {symbol}-{strategy}-group{group_id}")
 
     try:
         masked_reconstruction(symbol, strategy, input_size=input_size, mask_ratio=0.2, epochs=5)
@@ -155,6 +155,11 @@ def train_one_model(symbol, strategy, max_epochs=20):
         class_groups = get_class_groups()
         trained_any = False
 
+        if group_id is None:
+            group_ids = list(range(len(class_groups)))
+        else:
+            group_ids = [group_id]
+
         for window in window_list:
             X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
             if X_raw is None or y_raw is None or len(X_raw) == 0:
@@ -174,19 +179,14 @@ def train_one_model(symbol, strategy, max_epochs=20):
             else:
                 X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
 
-            for group_id, group_classes in enumerate(class_groups):
+            for gid in group_ids:
+                group_classes = class_groups[gid]
                 train_mask = np.isin(y_train, group_classes)
                 X_train_group = X_train[train_mask]
                 y_train_group = y_train[train_mask]
 
                 if len(y_train_group) < 2:
-                    dummy_x = np.random.normal(0, 1, size=(10, window, input_size)).astype(np.float32)
-                    dummy_y = np.random.randint(0, len(group_classes), size=(10,))
-                    X_train_group = np.concatenate([X_train_group, dummy_x], axis=0)
-                    y_train_group = np.concatenate([y_train_group, dummy_y], axis=0)
-
-                if len(X_train_group) < 2:
-                    log_training_result(symbol, strategy, f"학습실패:데이터부족_group{group_id}", 0.0, 0.0, 0.0)
+                    log_training_result(symbol, strategy, f"학습실패:데이터부족_group{gid}", 0.0, 0.0, 0.0)
                     continue
 
                 X_train_group, y_train_group = balance_classes(X_train_group, y_train_group, min_count=20, num_classes=len(group_classes))
@@ -242,7 +242,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         val_preds = torch.argmax(val_logits, dim=1)
                         val_acc = (val_preds == y_val_tensor.to(DEVICE)).float().mean().item()
 
-                    model_name = f"{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}_group{group_id}_window{window}"
+                    model_name = f"{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}_group{gid}_window{window}"
                     model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
                     torch.save(model.state_dict(), model_path)
 
@@ -251,7 +251,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                         "symbol": symbol,
                         "strategy": strategy,
                         "model": model_type,
-                        "group_id": group_id,
+                        "group_id": gid,
                         "window": window,
                         "input_size": input_size,
                         "model_name": model_name,
@@ -268,11 +268,12 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     gc.collect()
 
         if not trained_any:
-            log_training_result(symbol, strategy, "학습실패:전그룹학습불가", 0.0, 0.0, 0.0)
+            log_training_result(symbol, strategy, f"학습실패:전그룹학습불가", 0.0, 0.0, 0.0)
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         traceback.print_exc()
+        log_training_result(symbol, strategy, f"학습실패:예외", 0.0, 0.0, 0.0)
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
@@ -390,38 +391,42 @@ def train_all_models():
 def train_models(symbol_list):
     """
     ✅ [개선 설명]
-    - train_models: 학습만 수행 (예측 실행 제거)
-    - 예측 실행은 train_symbol_group_loop에서 그룹별로 호출
+    - 각 심볼에 대해 단기→중기→장기 전략 순으로
+      클래스 그룹 0~4까지 모두 학습한 후 → 다음 심볼로 넘어감.
+    - 예측 실행은 외부에서 수행하므로 여기선 학습만 함.
     """
     global training_in_progress
     from telegram_bot import send_message
     import maintenance_fix_meta
+    from config import get_class_groups
+    import time
 
     strategies = ["단기", "중기", "장기"]
+    class_groups = get_class_groups()
+    group_ids = list(range(len(class_groups)))
 
     print(f"🚀 [train_models] 심볼 그룹 학습 시작: {symbol_list}")
 
-    for strategy in strategies:
-        if training_in_progress.get(strategy, False):
-            print(f"⚠️ 중복 실행 방지: {strategy}")
-            continue
+    for symbol in symbol_list:
+        print(f"\n🔁 [심볼 시작] {symbol}")
+        for strategy in strategies:
+            if training_in_progress.get(strategy, False):
+                print(f"⚠️ 중복 실행 방지: {strategy}")
+                continue
 
-        print(f"🚀 {strategy} 학습 시작")
-        training_in_progress[strategy] = True
-
-        try:
-            for symbol in symbol_list:
-                try:
-                    train_one_model(symbol, strategy)
-                except Exception as e:
-                    print(f"[오류] {symbol}-{strategy} 학습 실패: {e}")
-        except Exception as e:
-            print(f"[치명 오류] {strategy} 전체 학습 중단: {e}")
-        finally:
-            training_in_progress[strategy] = False
-            print(f"✅ {strategy} 학습 완료")
-
-        time.sleep(2)
+            training_in_progress[strategy] = True
+            try:
+                for group_id in group_ids:
+                    try:
+                        train_one_model(symbol, strategy, group_id=group_id)
+                    except Exception as e:
+                        print(f"[오류] {symbol}-{strategy}-group{group_id} 학습 실패: {e}")
+            except Exception as e:
+                print(f"[치명 오류] {symbol}-{strategy} 전체 학습 실패: {e}")
+            finally:
+                training_in_progress[strategy] = False
+                print(f"✅ {symbol}-{strategy} 학습 완료")
+                time.sleep(2)
 
     # ✅ meta 보정만 실행
     try:
