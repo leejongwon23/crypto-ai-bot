@@ -227,13 +227,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from window_optimizer import find_best_windows
     from logger import log_prediction, get_available_models
     from config import get_class_groups, FEATURE_INPUT_SIZE
-    from model_weight_loader import load_model_cached
+    from model_weight_loader import load_model_cached, class_to_expected_return
     from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
-    from datetime import datetime
-    import pytz
-    from model_weight_loader import class_to_expected_return
     from meta_learning import train_meta_learner, load_meta_learner, ensemble_stacking
     from data.utils import get_kline_by_strategy, compute_features
+    from datetime import datetime
+    import pytz
 
     DEVICE = torch.device("cpu")
     MODEL_DIR = "/persistent/models"
@@ -266,7 +265,14 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
             models = get_available_models(symbol, strategy)
             if not models:
-                log_prediction(symbol, strategy, model="unknown", predicted_class=-1, reason="모델 없음", source=source)
+                log_prediction(
+                    symbol=symbol,
+                    strategy=strategy,
+                    model=f"{symbol}_{strategy}_모델없음",
+                    predicted_class=-1,
+                    reason="모델 없음",
+                    source=source
+                )
                 return -1
 
             recent_freq = get_recent_class_frequencies(strategy)
@@ -290,14 +296,30 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     model_path = os.path.join(MODEL_DIR, m["pt_file"])
                     meta_path = model_path.replace(".pt", ".meta.json")
                     if not os.path.exists(model_path) or not os.path.exists(meta_path):
-                        log_prediction(symbol, strategy, model=f"group{group_id}", predicted_class=-1,
-                                       reason="모델 없음", source=source, model_symbol=m["symbol"])
+                        model_name = os.path.splitext(m["pt_file"])[0]
+                        log_prediction(
+                            symbol=symbol,
+                            strategy=strategy,
+                            model=model_name,
+                            predicted_class=-1,
+                            reason="모델 또는 메타 없음",
+                            source=source,
+                            model_symbol=m["symbol"]
+                        )
                         continue
 
                     model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, len(group_classes))
                     if model is None:
-                        log_prediction(symbol, strategy, model=f"group{group_id}", predicted_class=-1,
-                                       reason="모델 로드 실패", source=source, model_symbol=m["symbol"])
+                        model_name = os.path.splitext(m["pt_file"])[0]
+                        log_prediction(
+                            symbol=symbol,
+                            strategy=strategy,
+                            model=model_name,
+                            predicted_class=-1,
+                            reason="모델 로드 실패",
+                            source=source,
+                            model_symbol=m["symbol"]
+                        )
                         continue
 
                     with torch.no_grad():
@@ -314,8 +336,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     expected_return = class_to_expected_return(final_class)
                     target_price = entry_price * (1 + expected_return)
 
-                    # ✅ 모델 이름에서 prefix 제거한 순수 모델명 추출
-                    model_name_full = os.path.splitext(m["pt_file"])[0].replace(f"{symbol}_{strategy}_", "")
+                    model_name = os.path.splitext(m["pt_file"])[0].replace(f"{symbol}_{strategy}_", "")
 
                     log_prediction(
                         symbol=symbol,
@@ -323,17 +344,17 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         direction="예측",
                         entry_price=entry_price,
                         target_price=target_price,
-                        model=model_name_full,               # ✅ 정확한 모델 이름 기록
+                        model=model_name,
                         success=True,
                         reason=reason,
                         rate=expected_return,
                         return_value=expected_return,
                         source=source,
                         predicted_class=final_class,
-                        label=final_class,                   # ✅ 라벨 = 예측된 클래스
+                        label=final_class,
                         group_id=group_id,
                         model_symbol=m["symbol"],
-                        model_name=model_name_full          # ✅ 평가 대비 정확한 이름
+                        model_name=model_name
                     )
 
             if model_outputs:
@@ -343,8 +364,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 true_labels.append(final_pred_class)
                 print(f"[predict] {symbol}-{strategy} 최종 예측 클래스: {final_pred_class}")
                 break
-            else:
-                continue
 
         if len(model_outputs_list) >= 10:
             train_meta_learner(model_outputs_list, true_labels)
