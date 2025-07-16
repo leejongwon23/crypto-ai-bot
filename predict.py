@@ -221,7 +221,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
-
 def predict(symbol, strategy, source="일반", model_type=None):
     import numpy as np, pandas as pd, os, torch
     from sklearn.preprocessing import MinMaxScaler
@@ -234,7 +233,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from data.utils import get_kline_by_strategy, compute_features
     from datetime import datetime
     import pytz
-    from model_weight_loader import class_to_expected_return  # ✅ 수정: model_weight_loader 내부 함수 import
+    from model_weight_loader import class_to_expected_return
+    from failure_db import insert_failure_record
+    from logger import get_feature_hash
+    from model.base_model import get_model
 
     DEVICE = torch.device("cpu")
     MODEL_DIR = "/persistent/models"
@@ -335,7 +337,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     reason = "유사모델 사용" if symbol != m["symbol"] else "정상예측"
 
                     entry_price = float(df.iloc[-1]["close"])
-                    expected_return = class_to_expected_return(final_class)  # ✅ 정상 호출
+                    expected_return = class_to_expected_return(final_class)
                     target_price = entry_price * (1 + expected_return)
 
                     model_name = os.path.splitext(m["pt_file"])[0].replace(f"{symbol}_{strategy}_", "")
@@ -371,11 +373,48 @@ def predict(symbol, strategy, source="일반", model_type=None):
             train_meta_learner(model_outputs_list, true_labels)
             print("[✅ meta learner 재학습 완료]")
 
-        return final_pred_class if model_outputs_list else -1
+        # ✅ 예측 결과가 없는 경우 실패 기록
+        if not model_outputs_list:
+            log_prediction(
+                symbol=symbol,
+                strategy=strategy,
+                direction="예측실패",
+                entry_price=0,
+                target_price=0,
+                model="예측불가",
+                success=False,
+                reason="모델 예측 없음",
+                rate=0.0,
+                return_value=0.0,
+                source=source,
+                predicted_class=-1,
+                label=-1,
+                volatility=True
+            )
+            return -1
+
+        return final_pred_class
 
     except Exception as e:
         print(f"[predict 예외] {symbol}-{strategy} → {e}")
+        log_prediction(
+            symbol=symbol,
+            strategy=strategy,
+            direction="예외",
+            entry_price=0,
+            target_price=0,
+            model="예외발생",
+            success=False,
+            reason=f"예외 발생: {e}",
+            rate=0.0,
+            return_value=0.0,
+            source=source,
+            predicted_class=-1,
+            label=-1,
+            volatility=True
+        )
         return -1
+
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
