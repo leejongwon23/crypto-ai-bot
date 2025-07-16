@@ -130,11 +130,13 @@ def train_one_model(symbol, strategy, max_epochs=20):
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
             print(f"⛔ [중단] {symbol}-{strategy}: 시세 데이터 없음")
+            log_training_result(symbol, strategy, "학습실패:시세데이터없음", acc=0.0, f1=0.0, loss=0.0)
             return
 
         df_feat = compute_features(symbol, df, strategy)
         if df_feat is None or df_feat.empty or df_feat.isnull().any().any():
             print(f"⛔ [중단] {symbol}-{strategy}: 피처 생성 실패 또는 NaN")
+            log_training_result(symbol, strategy, "학습실패:피처생성실패", acc=0.0, f1=0.0, loss=0.0)
             return
 
         try:
@@ -151,6 +153,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
         window_list = find_best_windows(symbol, strategy)
         if not window_list:
             print(f"⛔ [중단] {symbol}-{strategy}: window_list 없음")
+            log_training_result(symbol, strategy, "학습실패:윈도우없음", acc=0.0, f1=0.0, loss=0.0)
             return
 
         print(f"✅ [진행] {symbol}-{strategy}: window_list={window_list}")
@@ -192,6 +195,10 @@ def train_one_model(symbol, strategy, max_epochs=20):
                     dummy_y = np.random.randint(0, len(group_classes), size=(dummy_count,))
                     X_train_group = np.concatenate([X_train_group, dummy_x], axis=0)
                     y_train_group = np.concatenate([y_train_group, dummy_y], axis=0)
+
+                if len(X_train_group) < 2:
+                    log_training_result(symbol, strategy, f"학습실패:데이터부족_group{group_id}", acc=0.0, f1=0.0, loss=0.0)
+                    continue
 
                 X_train_group, y_train_group = balance_classes(X_train_group, y_train_group, min_count=20, num_classes=len(group_classes))
                 print(f"[📊 학습 데이터 클래스 분포] {Counter(y_train_group)}")
@@ -263,14 +270,12 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 gc.collect()
 
         if not trained_any:
-            log_training_result(symbol, strategy, "학습실패", acc=0.0, f1=0.0, loss=0.0)
+            log_training_result(symbol, strategy, "학습실패:전그룹학습불가", acc=0.0, f1=0.0, loss=0.0)
             print(f"[❌ 학습실패 기록] {symbol}-{strategy}")
 
     except Exception as e:
         print(f"[ERROR] {symbol}-{strategy}: {e}")
         traceback.print_exc()
-
-
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
