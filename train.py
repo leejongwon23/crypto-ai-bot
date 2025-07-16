@@ -458,11 +458,12 @@ def train_model_loop(strategy):
 
 def train_symbol_group_loop(delay_minutes=5):
     """
-    ✅ [개선] 루프 순서 강제 초기화 + 로그 개선
+    ✅ 심볼 → 전략 순서로 순차 학습되도록 개선
     """
     import time
     import maintenance_fix_meta
     from data.utils import SYMBOL_GROUPS, _kline_cache, _feature_cache
+    from train import train_one_model
 
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작")
@@ -472,7 +473,6 @@ def train_symbol_group_loop(delay_minutes=5):
         loop_count += 1
         print(f"\n🔄 그룹 학습 루프 #{loop_count} 시작")
 
-        # ✅ 순서 강제 초기화
         for idx, group in enumerate(SYMBOL_GROUPS):
             print(f"\n🚀 [그룹 {idx}/{group_count}] 학습 시작 | 심볼: {group}")
 
@@ -481,17 +481,23 @@ def train_symbol_group_loop(delay_minutes=5):
             print("[✅ cache cleared] _kline_cache, _feature_cache")
 
             try:
-                train_models(group)
-                print(f"[✅ 그룹 {idx}] 학습 완료")
+                # ✅ 각 심볼에 대해 전략 순차 학습
+                for symbol in group:
+                    for strategy in ["단기", "중기", "장기"]:
+                        try:
+                            train_one_model(symbol, strategy)
+                            print(f"[✅ 학습 완료] {symbol}-{strategy}")
+                        except Exception as e:
+                            print(f"[❌ 학습 실패] {symbol}-{strategy} → {e}")
 
                 maintenance_fix_meta.fix_all_meta_json()
                 print(f"[✅ meta 보정 완료] 그룹 {idx}")
 
-                # ✅ 예측 실행: 각 그룹 학습 후 예측만 실행
+                # ✅ 각 심볼 학습 완료 후 예측도 바로 실행
+                from recommend import main
                 for symbol in group:
                     for strategy in ["단기", "중기", "장기"]:
                         try:
-                            from recommend import main
                             main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
                             print(f"[✅ 예측 완료] {symbol}-{strategy}")
                         except Exception as e:
