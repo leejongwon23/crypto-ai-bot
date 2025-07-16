@@ -245,10 +245,10 @@ def get_similar_symbol(symbol, top_k=1):
     similarities.sort(key=lambda x: x[1], reverse=True)
     return [s[0] for s in similarities[:top_k]]
 
-
 def get_available_models(symbol=None, strategy=None):
     import os, json, glob
     MODEL_DIR = "/persistent/models"
+
     models = []
     pt_files = glob.glob(os.path.join(MODEL_DIR, "*.pt"))
     for pt_path in pt_files:
@@ -258,15 +258,16 @@ def get_available_models(symbol=None, strategy=None):
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
         if all(k in meta for k in ["symbol", "strategy", "model", "input_size"]):
-            if symbol and strategy:
-                if meta["symbol"] != symbol or meta["strategy"] != strategy:
-                    continue  # ✅ 이 부분이 중요
+            if symbol and meta["symbol"] != symbol:
+                continue
+            if strategy and meta["strategy"] != strategy:
+                continue
             models.append({
                 "symbol": meta["symbol"],
                 "strategy": meta["strategy"],
                 "model": meta["model"],
-                "pt_file": os.path.basename(pt_path),
-                "group_id": meta.get("group_id", "unknown")
+                "group_id": meta.get("group_id"),
+                "pt_file": os.path.basename(pt_path)
             })
     return models
 
