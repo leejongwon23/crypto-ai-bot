@@ -390,10 +390,11 @@ def train_all_models():
 
 def train_models(symbol_list):
     """
-    ✅ [개선 설명]
-    - 각 심볼에 대해 단기→중기→장기 전략 순으로
-      클래스 그룹 0~4까지 모두 학습한 후 → 다음 심볼로 넘어감.
-    - 예측 실행은 외부에서 수행하므로 여기선 학습만 함.
+    ✅ [YOPO 구조 반영]
+    - 심볼 하나당: 전략 → 클래스그룹 전체 순서 학습
+    - 모든 전략/클래스그룹 학습 완료 후 다음 심볼로 넘어감
+    - 예측 실행은 하지 않음 (외부 recommend에서 호출)
+    - meta.json 일괄 보정 수행
     """
     global training_in_progress
     from telegram_bot import send_message
@@ -405,7 +406,7 @@ def train_models(symbol_list):
     class_groups = get_class_groups()
     group_ids = list(range(len(class_groups)))
 
-    print(f"🚀 [train_models] 심볼 그룹 학습 시작: {symbol_list}")
+    print(f"🚀 [train_models] 심볼 학습 시작: {symbol_list}")
 
     for symbol in symbol_list:
         print(f"\n🔁 [심볼 시작] {symbol}")
@@ -420,22 +421,22 @@ def train_models(symbol_list):
                     try:
                         train_one_model(symbol, strategy, group_id=group_id)
                     except Exception as e:
-                        print(f"[오류] {symbol}-{strategy}-group{group_id} 학습 실패: {e}")
+                        print(f"[❌ 학습 실패] {symbol}-{strategy}-group{group_id} → {e}")
             except Exception as e:
-                print(f"[치명 오류] {symbol}-{strategy} 전체 학습 실패: {e}")
+                print(f"[❌ 전체 실패] {symbol}-{strategy} 전략 학습 중단 → {e}")
             finally:
                 training_in_progress[strategy] = False
-                print(f"✅ {symbol}-{strategy} 학습 완료")
+                print(f"✅ {symbol}-{strategy} 전략 학습 완료")
                 time.sleep(2)
 
-    # ✅ meta 보정만 실행
+    # ✅ 모든 학습 후 메타 보정
     try:
         maintenance_fix_meta.fix_all_meta_json()
-        print(f"✅ meta 보정 완료: 그룹 {symbol_list}")
+        print(f"✅ meta 보정 완료: {symbol_list}")
     except Exception as e:
         print(f"[⚠️ meta 보정 실패] {e}")
 
-    send_message(f"✅ 그룹 학습 완료: {symbol_list}")
+    send_message(f"✅ 전체 심볼 학습 완료: {symbol_list}")
 
 def train_model_loop(strategy):
     """
