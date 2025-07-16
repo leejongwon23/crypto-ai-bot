@@ -233,6 +233,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     import pytz
     from model_weight_loader import class_to_expected_return
     from meta_learning import train_meta_learner, load_meta_learner, ensemble_stacking
+    from data.utils import get_kline_by_strategy, compute_features
 
     DEVICE = torch.device("cpu")
     MODEL_DIR = "/persistent/models"
@@ -246,7 +247,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             if not window_list:
                 continue
 
-            from data.utils import get_kline_by_strategy, compute_features
             df = get_kline_by_strategy(symbol, strategy)
             if df is None or len(df) < max(window_list) + 1:
                 continue
@@ -257,9 +257,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
             features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
             feat_scaled = MinMaxScaler().fit_transform(features_only)
+            input_size = feat_scaled.shape[1]
 
-            if feat_scaled.shape[1] < FEATURE_INPUT_SIZE:
-                feat_scaled = np.pad(feat_scaled, ((0, 0), (0, FEATURE_INPUT_SIZE - feat_scaled.shape[1])), mode="constant")
+            if input_size < FEATURE_INPUT_SIZE:
+                feat_scaled = np.pad(feat_scaled, ((0, 0), (0, FEATURE_INPUT_SIZE - input_size)), mode="constant")
             else:
                 feat_scaled = feat_scaled[:, :FEATURE_INPUT_SIZE]
 
@@ -285,6 +286,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     if group_id is None:
                         continue
                     group_classes = class_groups[group_id]
+
                     model_path = os.path.join(MODEL_DIR, m["pt_file"])
                     meta_path = model_path.replace(".pt", ".meta.json")
                     if not os.path.exists(model_path) or not os.path.exists(meta_path):
@@ -310,6 +312,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     expected_return = class_to_expected_return(final_class)
                     target_price = entry_price * (1 + expected_return)
 
+                    # ✅ 수익률, 라벨 함께 기록
                     log_prediction(
                         symbol=symbol,
                         strategy=strategy,
@@ -323,7 +326,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         return_value=expected_return,
                         source=source,
                         predicted_class=final_class,
-                        label=None,
+                        label=final_class,  # ✅ 라벨 = 예측 클래스 기준
                         group_id=group_id,
                         model_symbol=m["symbol"]
                     )
