@@ -221,18 +221,20 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
+
 def predict(symbol, strategy, source="일반", model_type=None):
     import numpy as np, pandas as pd, os, torch
     from sklearn.preprocessing import MinMaxScaler
     from window_optimizer import find_best_windows
     from logger import log_prediction, get_available_models
     from config import get_class_groups, FEATURE_INPUT_SIZE
-    from model_weight_loader import load_model_cached, class_to_expected_return
+    from model_weight_loader import load_model_cached
     from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
     from meta_learning import train_meta_learner, load_meta_learner, ensemble_stacking
     from data.utils import get_kline_by_strategy, compute_features
     from datetime import datetime
     import pytz
+    from model_weight_loader import class_to_expected_return  # ✅ 수정: model_weight_loader 내부 함수 import
 
     DEVICE = torch.device("cpu")
     MODEL_DIR = "/persistent/models"
@@ -333,7 +335,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     reason = "유사모델 사용" if symbol != m["symbol"] else "정상예측"
 
                     entry_price = float(df.iloc[-1]["close"])
-                    expected_return = class_to_expected_return(final_class)
+                    expected_return = class_to_expected_return(final_class)  # ✅ 정상 호출
                     target_price = entry_price * (1 + expected_return)
 
                     model_name = os.path.splitext(m["pt_file"])[0].replace(f"{symbol}_{strategy}_", "")
