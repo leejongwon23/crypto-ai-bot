@@ -521,7 +521,6 @@ import os
 
 MODEL_DIR = "/persistent/models"
 
-
 def get_available_models(target_symbol=None):
     import os, json, glob
     from model_weight_loader import get_similar_symbol  # ✅ 유사심볼 로더
@@ -573,3 +572,4 @@ def get_available_models(target_symbol=None):
             continue
 
     return models
+
