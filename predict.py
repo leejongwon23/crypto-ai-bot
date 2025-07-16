@@ -223,60 +223,49 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
 def predict(symbol, strategy, source="일반", model_type=None):
     import numpy as np, pandas as pd, os, torch
-    from scipy.stats import entropy
     from sklearn.preprocessing import MinMaxScaler
     from window_optimizer import find_best_windows
-    from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
     from logger import log_prediction, get_available_models
     from config import get_class_groups, FEATURE_INPUT_SIZE
     from model_weight_loader import load_model_cached
-    from failure_db import insert_failure_record
-    from logger import get_feature_hash
+    from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
     from datetime import datetime
     import pytz
+    from model_weight_loader import class_to_expected_return
+    from meta_learning import train_meta_learner, load_meta_learner, ensemble_stacking
 
     DEVICE = torch.device("cpu")
     MODEL_DIR = "/persistent/models"
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
+    class_groups = get_class_groups()
+    model_outputs_list, true_labels = [], []
 
     try:
-        max_retry = 3
-        retry = 0
-        class_groups = get_class_groups()
-        model_outputs_list = []
-        true_labels = []
-
-        while retry < max_retry:
+        for _ in range(3):
             window_list = find_best_windows(symbol, strategy)
             if not window_list:
-                retry += 1
                 continue
 
+            from data.utils import get_kline_by_strategy, compute_features
             df = get_kline_by_strategy(symbol, strategy)
             if df is None or len(df) < max(window_list) + 1:
-                retry += 1
                 continue
 
             feat = compute_features(symbol, df, strategy)
             if feat is None or feat.dropna().shape[0] < max(window_list) + 1:
-                retry += 1
                 continue
 
             features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
             feat_scaled = MinMaxScaler().fit_transform(features_only)
-            input_size = feat_scaled.shape[1]
 
-            if input_size < FEATURE_INPUT_SIZE:
-                pad_cols = FEATURE_INPUT_SIZE - input_size
-                feat_scaled = np.pad(feat_scaled, ((0,0),(0,pad_cols)), mode="constant", constant_values=0)
-                input_size = FEATURE_INPUT_SIZE
-            elif input_size > FEATURE_INPUT_SIZE:
+            if feat_scaled.shape[1] < FEATURE_INPUT_SIZE:
+                feat_scaled = np.pad(feat_scaled, ((0, 0), (0, FEATURE_INPUT_SIZE - feat_scaled.shape[1])), mode="constant")
+            else:
                 feat_scaled = feat_scaled[:, :FEATURE_INPUT_SIZE]
-                input_size = FEATURE_INPUT_SIZE
 
             models = get_available_models(symbol, strategy)
             if not models:
-                log_prediction(symbol, strategy, "unknown", -1, reason="모델 없음", source=source)
+                log_prediction(symbol, strategy, model="unknown", predicted_class=-1, reason="모델 없음", source=source)
                 return -1
 
             recent_freq = get_recent_class_frequencies(strategy)
@@ -296,34 +285,15 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     if group_id is None:
                         continue
                     group_classes = class_groups[group_id]
-
                     model_path = os.path.join(MODEL_DIR, m["pt_file"])
                     meta_path = model_path.replace(".pt", ".meta.json")
                     if not os.path.exists(model_path) or not os.path.exists(meta_path):
-                        log_prediction(
-                            symbol=symbol,
-                            strategy=strategy,
-                            model=f"group{group_id}",
-                            predicted_class=-1,
-                            reason="모델 없음",
-                            source=source,
-                            model_symbol=m["symbol"],
-                            model_name=m["model"]
-                        )
+                        log_prediction(symbol, strategy, model=f"group{group_id}", predicted_class=-1, reason="모델 없음", source=source, model_symbol=m["symbol"])
                         continue
 
                     model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, len(group_classes))
                     if model is None:
-                        log_prediction(
-                            symbol=symbol,
-                            strategy=strategy,
-                            model=f"group{group_id}",
-                            predicted_class=-1,
-                            reason="모델 로드 실패",
-                            source=source,
-                            model_symbol=m["symbol"],
-                            model_name=m["model"]
-                        )
+                        log_prediction(symbol, strategy, model=f"group{group_id}", predicted_class=-1, reason="모델 로드 실패", source=source, model_symbol=m["symbol"])
                         continue
 
                     with torch.no_grad():
@@ -333,36 +303,46 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     adjusted_probs = adjust_probs_with_diversity(probs, recent_freq)
                     model_outputs.append(adjusted_probs)
 
-                    final_class = np.argmax(adjusted_probs)
+                    final_class = int(np.argmax(adjusted_probs))
                     reason = "유사모델 사용" if symbol != m["symbol"] else "정상예측"
+
+                    entry_price = float(df.iloc[-1]["close"])
+                    expected_return = class_to_expected_return(final_class)
+                    target_price = entry_price * (1 + expected_return)
 
                     log_prediction(
                         symbol=symbol,
                         strategy=strategy,
+                        direction="예측",
+                        entry_price=entry_price,
+                        target_price=target_price,
                         model=f"group{group_id}",
-                        predicted_class=final_class,
+                        success=True,
                         reason=reason,
+                        rate=expected_return,
+                        return_value=expected_return,
                         source=source,
-                        model_symbol=m["symbol"],
-                        model_name=m["model"]
+                        predicted_class=final_class,
+                        label=None,
+                        group_id=group_id,
+                        model_symbol=m["symbol"]
                     )
 
-            if len(model_outputs) == 0:
-                final_pred_class = -1
-            else:
+            if model_outputs:
                 meta_model = load_meta_learner()
                 final_pred_class = ensemble_stacking(model_outputs, meta_model)
                 model_outputs_list.append(model_outputs)
                 true_labels.append(final_pred_class)
-
-            print(f"[predict] {symbol}-{strategy} 최종 예측 클래스: {final_pred_class}")
-            retry += 1
+                print(f"[predict] {symbol}-{strategy} 최종 예측 클래스: {final_pred_class}")
+                break
+            else:
+                continue
 
         if len(model_outputs_list) >= 10:
             train_meta_learner(model_outputs_list, true_labels)
             print("[✅ meta learner 재학습 완료]")
 
-        return final_pred_class
+        return final_pred_class if model_outputs_list else -1
 
     except Exception as e:
         print(f"[predict 예외] {symbol}-{strategy} → {e}")
