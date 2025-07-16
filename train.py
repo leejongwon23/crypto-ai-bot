@@ -131,17 +131,14 @@ def train_one_model(symbol, strategy, max_epochs=20):
 
     try:
         masked_reconstruction(symbol, strategy, input_size=input_size, mask_ratio=0.2, epochs=5)
-
-        # ✅ 시세데이터 확보 실패 → 더미 생성 후 강행
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
-            print(f"⚠️ [시세 없음] → 더미 df로 강행")
+            print(f"⚠️ [시세 없음] → 더미 생성")
             df = pd.DataFrame([{"timestamp": i, "close": 100+i} for i in range(100)])
 
-        # ✅ 피처 생성 실패 보완
         df_feat = compute_features(symbol, df, strategy)
         if df_feat is None or df_feat.empty or df_feat.isnull().any().any():
-            print(f"⚠️ [피처 실패] → 더미 df_feat 생성")
+            print(f"⚠️ [피처 실패] → 더미 생성")
             df_feat = pd.DataFrame(np.random.normal(0, 1, size=(100, input_size)),
                                    columns=[f"f{i}" for i in range(input_size)])
 
@@ -152,14 +149,9 @@ def train_one_model(symbol, strategy, max_epochs=20):
             dummy_model = get_model("lstm", input_size=input_size, output_size=2).to(DEVICE)
             importances = compute_feature_importance(dummy_model, dummy_X, dummy_y, feature_names, method="baseline")
             df_feat = drop_low_importance_features(df_feat, importances, threshold=0.01, min_features=5)
-        except Exception as e:
-            print(f"[⚠️ feature drop 실패] {e}")
+        except: pass
 
-        window_list = find_best_windows(symbol, strategy)
-        if not window_list:
-            print(f"⚠️ [윈도우 없음] → 기본 window=20 강제 적용")
-            window_list = [20]
-
+        window_list = find_best_windows(symbol, strategy) or [20]
         class_groups = get_class_groups()
         trained_any = False
 
@@ -170,7 +162,7 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 y_raw = np.random.randint(0, len(class_groups[0]), size=(10,))
 
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size=input_size, window=window)
-            if fail_X is not None and fail_y is not None and len(fail_X) > 0:
+            if fail_X is not None and len(fail_X) > 0:
                 X_raw = np.concatenate([X_raw, fail_X], axis=0)
                 y_raw = np.concatenate([y_raw, fail_y], axis=0)
 
@@ -188,9 +180,8 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 y_train_group = y_train[train_mask]
 
                 if len(y_train_group) < 2:
-                    dummy_count = 10
-                    dummy_x = np.random.normal(0, 1, size=(dummy_count, window, input_size)).astype(np.float32)
-                    dummy_y = np.random.randint(0, len(group_classes), size=(dummy_count,))
+                    dummy_x = np.random.normal(0, 1, size=(10, window, input_size)).astype(np.float32)
+                    dummy_y = np.random.randint(0, len(group_classes), size=(10,))
                     X_train_group = np.concatenate([X_train_group, dummy_x], axis=0)
                     y_train_group = np.concatenate([y_train_group, dummy_y], axis=0)
 
@@ -210,61 +201,71 @@ def train_one_model(symbol, strategy, max_epochs=20):
                 y_train_group = np.array([group_classes.index(y) for y in y_train_group])
                 y_val_group = np.array([group_classes.index(y) for y in y_val_group])
 
-                model_type = "cnn_lstm"
-                lr = 1e-4
-                batch_size = 32
-                hidden_size = 64
-                dropout = 0.3
-                opt_type = "AdamW"
-                loss_type = "FocalLoss"
+                for model_type in ["lstm", "cnn_lstm", "transformer"]:
+                    lr, batch_size, hidden_size, dropout = 1e-4, 32, 64, 0.3
+                    opt_type, loss_type = "AdamW", "FocalLoss"
 
-                model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
-                if hasattr(model, "set_hyperparams"):
-                    model.set_hyperparams(hidden_size=hidden_size, dropout=dropout)
+                    model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
+                    if hasattr(model, "set_hyperparams"):
+                        model.set_hyperparams(hidden_size=hidden_size, dropout=dropout)
 
-                optimizer = {
-                    "Adam": torch.optim.Adam(model.parameters(), lr=lr),
-                    "AdamW": torch.optim.AdamW(model.parameters(), lr=lr),
-                    "Ranger": Ranger(model.parameters(), lr=lr)
-                }.get(opt_type, torch.optim.Adam(model.parameters(), lr=lr))
+                    optimizer = {
+                        "Adam": torch.optim.Adam(model.parameters(), lr=lr),
+                        "AdamW": torch.optim.AdamW(model.parameters(), lr=lr),
+                        "Ranger": Ranger(model.parameters(), lr=lr)
+                    }.get(opt_type, torch.optim.Adam(model.parameters(), lr=lr))
 
-                lossfn = FocalLoss() if loss_type == "FocalLoss" else torch.nn.CrossEntropyLoss()
+                    lossfn = FocalLoss() if loss_type == "FocalLoss" else torch.nn.CrossEntropyLoss()
 
-                X_train_tensor = torch.tensor(X_train_group[:, -1, :], dtype=torch.float32)
-                y_train_tensor = torch.tensor(y_train_group, dtype=torch.long)
-                X_val_tensor = torch.tensor(X_val_group[:, -1, :], dtype=torch.float32)
-                y_val_tensor = torch.tensor(y_val_group, dtype=torch.long)
+                    X_train_tensor = torch.tensor(X_train_group[:, -1, :], dtype=torch.float32)
+                    y_train_tensor = torch.tensor(y_train_group, dtype=torch.long)
+                    X_val_tensor = torch.tensor(X_val_group[:, -1, :], dtype=torch.float32)
+                    y_val_tensor = torch.tensor(y_val_group, dtype=torch.long)
 
-                train_loader = DataLoader(TensorDataset(X_train_tensor, y_train_tensor), batch_size=batch_size, shuffle=True)
-                val_loader = DataLoader(TensorDataset(X_val_tensor, y_val_tensor), batch_size=batch_size)
+                    train_loader = DataLoader(TensorDataset(X_train_tensor, y_train_tensor), batch_size=batch_size, shuffle=True)
+                    val_loader = DataLoader(TensorDataset(X_val_tensor, y_val_tensor), batch_size=batch_size)
 
-                for epoch in range(max_epochs):
-                    for xb, yb in train_loader:
-                        xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                        logits = model(xb)
-                        loss = lossfn(logits, yb)
-                        if torch.isfinite(loss):
-                            optimizer.zero_grad()
-                            loss.backward()
-                            optimizer.step()
+                    for epoch in range(max_epochs):
+                        for xb, yb in train_loader:
+                            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                            logits = model(xb)
+                            loss = lossfn(logits, yb)
+                            if torch.isfinite(loss):
+                                optimizer.zero_grad()
+                                loss.backward()
+                                optimizer.step()
 
-                maml_loss = maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1)
-                model.eval()
-                with torch.no_grad():
-                    val_logits = model(X_val_tensor.to(DEVICE))
-                    val_preds = torch.argmax(val_logits, dim=1)
-                    val_acc = (val_preds == y_val_tensor.to(DEVICE)).float().mean().item()
+                    maml_loss = maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1)
+                    model.eval()
+                    with torch.no_grad():
+                        val_logits = model(X_val_tensor.to(DEVICE))
+                        val_preds = torch.argmax(val_logits, dim=1)
+                        val_acc = (val_preds == y_val_tensor.to(DEVICE)).float().mean().item()
 
-                model_name = f"{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}_group{group_id}_window{window}"
-                model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
-                torch.save(model.state_dict(), model_path)
+                    model_name = f"{model_type}_{opt_type}_{loss_type}_lr{lr}_bs={batch_size}_hs={hidden_size}_dr={dropout}_group{group_id}_window{window}"
+                    model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
+                    torch.save(model.state_dict(), model_path)
 
-                log_training_result(symbol, strategy, model_name, acc=val_acc, f1=0.0, loss=loss.item())
-                trained_any = True
+                    meta_path = model_path.replace(".pt", ".meta.json")
+                    meta = {
+                        "symbol": symbol,
+                        "strategy": strategy,
+                        "model": model_type,
+                        "group_id": group_id,
+                        "window": window,
+                        "input_size": input_size,
+                        "model_name": model_name,
+                        "timestamp": now_kst().isoformat()
+                    }
+                    with open(meta_path, "w", encoding="utf-8") as f:
+                        json.dump(meta, f, ensure_ascii=False, indent=2)
 
-                del model, optimizer, lossfn, train_loader, val_loader
-                torch.cuda.empty_cache()
-                gc.collect()
+                    log_training_result(symbol, strategy, model_name, acc=val_acc, f1=0.0, loss=loss.item())
+                    trained_any = True
+
+                    del model, optimizer, lossfn, train_loader, val_loader
+                    torch.cuda.empty_cache()
+                    gc.collect()
 
         if not trained_any:
             log_training_result(symbol, strategy, "학습실패:전그룹학습불가", 0.0, 0.0, 0.0)
