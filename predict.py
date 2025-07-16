@@ -290,12 +290,14 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     model_path = os.path.join(MODEL_DIR, m["pt_file"])
                     meta_path = model_path.replace(".pt", ".meta.json")
                     if not os.path.exists(model_path) or not os.path.exists(meta_path):
-                        log_prediction(symbol, strategy, model=f"group{group_id}", predicted_class=-1, reason="모델 없음", source=source, model_symbol=m["symbol"])
+                        log_prediction(symbol, strategy, model=f"group{group_id}", predicted_class=-1,
+                                       reason="모델 없음", source=source, model_symbol=m["symbol"])
                         continue
 
                     model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, len(group_classes))
                     if model is None:
-                        log_prediction(symbol, strategy, model=f"group{group_id}", predicted_class=-1, reason="모델 로드 실패", source=source, model_symbol=m["symbol"])
+                        log_prediction(symbol, strategy, model=f"group{group_id}", predicted_class=-1,
+                                       reason="모델 로드 실패", source=source, model_symbol=m["symbol"])
                         continue
 
                     with torch.no_grad():
@@ -312,23 +314,26 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     expected_return = class_to_expected_return(final_class)
                     target_price = entry_price * (1 + expected_return)
 
-                    # ✅ 수익률, 라벨 함께 기록
+                    # ✅ 모델 이름에서 prefix 제거한 순수 모델명 추출
+                    model_name_full = os.path.splitext(m["pt_file"])[0].replace(f"{symbol}_{strategy}_", "")
+
                     log_prediction(
                         symbol=symbol,
                         strategy=strategy,
                         direction="예측",
                         entry_price=entry_price,
                         target_price=target_price,
-                        model=f"group{group_id}",
+                        model=model_name_full,               # ✅ 정확한 모델 이름 기록
                         success=True,
                         reason=reason,
                         rate=expected_return,
                         return_value=expected_return,
                         source=source,
                         predicted_class=final_class,
-                        label=final_class,  # ✅ 라벨 = 예측 클래스 기준
+                        label=final_class,                   # ✅ 라벨 = 예측된 클래스
                         group_id=group_id,
-                        model_symbol=m["symbol"]
+                        model_symbol=m["symbol"],
+                        model_name=model_name_full          # ✅ 평가 대비 정확한 이름
                     )
 
             if model_outputs:
