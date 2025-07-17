@@ -99,6 +99,7 @@ def get_class_groups(num_classes=21, group_size=7):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
+
 def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     import os, gc, traceback, torch, json, numpy as np, pandas as pd
     from datetime import datetime; from collections import Counter
@@ -120,6 +121,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = get_FEATURE_INPUT_SIZE()
+    class_groups_list = get_class_groups()
+
     print(f"✅ [train_one_model 호출됨] ▶ [학습시작] {symbol}-{strategy}-group{group_id}")
     trained_any = False
 
@@ -139,11 +142,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         for window in find_best_windows(symbol, strategy) or [20]:
             X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
             if X_raw is None or y_raw is None or len(X_raw) == 0:
-                X_raw = np.random.normal(0, 1, size=(10, window, input_size)).astype(np.float32)
-                y_raw = np.random.randint(0, len(get_class_groups()[0]), size=(10,))
+                log_training_result(symbol, strategy, f"학습실패:dataset없음_window{window}", 0.0, 0.0, 0.0)
+                continue
+
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size=input_size, window=window)
             if fail_X is not None and len(fail_X) > 0:
-                X_raw = np.concatenate([X_raw, fail_X], axis=0); y_raw = np.concatenate([y_raw, fail_y], axis=0)
+                X_raw = np.concatenate([X_raw, fail_X], axis=0)
+                y_raw = np.concatenate([y_raw, fail_y], axis=0)
 
             val_len = max(5, int(len(X_raw) * 0.2))
             if len(X_raw) <= val_len:
@@ -152,25 +157,36 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             else:
                 X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
 
-            for gid in [group_id] if group_id is not None else range(len(get_class_groups())):
-                group_classes = get_class_groups()[gid]
+            for gid in [group_id] if group_id is not None else range(len(class_groups_list)):
+                group_classes = class_groups_list[gid]
+                if not group_classes:
+                    log_training_result(symbol, strategy, f"학습실패:빈그룹_group{gid}_window{window}", 0.0, 0.0, 0.0)
+                    continue
+
                 tm = np.isin(y_train, group_classes); vm = np.isin(y_val, group_classes)
                 X_train_group, y_train_group = X_train[tm], y_train[tm]
                 X_val_group, y_val_group = X_val[vm], y_val[vm]
+
                 if len(y_train_group) < 2:
-                    log_training_result(symbol, strategy, f"학습실패:데이터부족_group{gid}_window{window}", 0.0, 0.0, 0.0); continue
+                    log_training_result(symbol, strategy, f"학습실패:데이터부족_group{gid}_window{window}", 0.0, 0.0, 0.0)
+                    continue
                 if len(y_val_group) == 0:
-                    log_training_result(symbol, strategy, f"학습실패:val없음_group{gid}_window{window}", 0.0, 0.0, 0.0); continue
-                y_train_group = np.array([group_classes.index(y) for y in y_train_group])
-                y_val_group = np.array([group_classes.index(y) for y in y_val_group])
-                X_train_group, y_train_group = balance_classes(X_train_group, y_train_group, min_count=20, num_classes=len(group_classes))
+                    log_training_result(symbol, strategy, f"학습실패:val없음_group{gid}_window{window}", 0.0, 0.0, 0.0)
+                    continue
 
                 try:
-                    for model_type in ["lstm", "cnn_lstm", "transformer"]:
+                    y_train_group = np.array([group_classes.index(y) for y in y_train_group])
+                    y_val_group = np.array([group_classes.index(y) for y in y_val_group])
+                except Exception as e:
+                    log_training_result(symbol, strategy, f"학습실패:label불일치_group{gid}_window{window}", 0.0, 0.0, 0.0)
+                    continue
+
+                X_train_group, y_train_group = balance_classes(X_train_group, y_train_group, min_count=20, num_classes=len(group_classes))
+
+                for model_type in ["lstm", "cnn_lstm", "transformer"]:
+                    try:
                         model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
-                        if hasattr(model, "set_hyperparams"):
-                            model.set_hyperparams(hidden_size=64, dropout=0.3)
-                        optimizer = {"Adam": torch.optim.Adam, "AdamW": torch.optim.AdamW, "Ranger": Ranger}.get("AdamW")(model.parameters(), lr=1e-4)
+                        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
                         lossfn = FocalLoss()
                         to_tensor = lambda x: torch.tensor(x[:, -1, :], dtype=torch.float32)
                         Xtt, ytt = to_tensor(X_train_group), torch.tensor(y_train_group, dtype=torch.long)
@@ -193,30 +209,28 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         model_name = f"{model_type}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window{window}"
                         model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
                         torch.save(model.state_dict(), model_path)
-                        meta = {"symbol": symbol, "strategy": strategy, "model": model_type, "group_id": gid,
-                                "window": window, "input_size": input_size, "model_name": model_name,
-                                "timestamp": now_kst().isoformat()}
-                        try:
-                            with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
-                                json.dump(meta, f, ensure_ascii=False, indent=2)
-                        except Exception as e:
-                            log_training_result(symbol, strategy, f"학습실패:meta저장실패_group{gid}_window{window}", 0.0, 0.0, 0.0)
-                            print(f"[❌ meta 저장 실패] {e}"); continue
+                        meta = {
+                            "symbol": symbol, "strategy": strategy, "model": model_type, "group_id": gid,
+                            "window": window, "input_size": input_size, "model_name": model_name,
+                            "timestamp": now_kst().isoformat()
+                        }
+                        with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
+                            json.dump(meta, f, ensure_ascii=False, indent=2)
 
                         log_training_result(symbol, strategy, model_name, acc=val_acc, f1=0.0, loss=loss.item())
                         trained_any = True
                         del model, optimizer, lossfn, train_loader, val_loader
                         torch.cuda.empty_cache(); gc.collect()
-                except Exception as inner_e:
-                    log_training_result(symbol, strategy, f"학습실패:모델학습예외_group{gid}_window{window}", 0.0, 0.0, 0.0)
-                    print(f"[❌ 내부 학습 예외] {symbol}-{strategy} group{gid} window{window}: {type(inner_e).__name__}: {inner_e}")
+                    except Exception as inner_e:
+                        log_training_result(symbol, strategy, f"학습실패:모델학습예외_{model_type}_group{gid}_window{window}", 0.0, 0.0, 0.0)
+                        print(f"[❌ 내부 학습 예외] {symbol}-{strategy} group{gid} window{window}: {type(inner_e).__name__}: {inner_e}")
 
         if not trained_any:
             log_training_result(symbol, strategy, f"학습실패:전그룹학습불가", 0.0, 0.0, 0.0)
+
     except Exception as e:
         log_training_result(symbol, strategy, f"학습실패:전체예외", 0.0, 0.0, 0.0)
         print(f"[❌ 전체 예외] {symbol}-{strategy}: {type(e).__name__}: {e}")
-
      
 
 # ✅ augmentation 함수 추가
