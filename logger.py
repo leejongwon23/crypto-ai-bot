@@ -158,6 +158,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     dated_path = f"/persistent/logs/prediction_{date_str}.csv"
     full_path = "/persistent/prediction_log.csv"
     json_path = "/persistent/prediction_log.json"
+    wrong_path = "/persistent/wrong_predictions.csv"  # ✅ 실패 학습용 추가 경로
 
     try:
         pred_class_val = int(float(predicted_class)) if predicted_class not in [None, ""] else -1
@@ -177,10 +178,8 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     else:
         group_id_val = str(group_id)
 
-    # ✅ fallback 모델일 경우 model_symbol 보완
     final_model_symbol = model_symbol if model_symbol else symbol
     if isinstance(model, str) and model != "unknown" and "_" in model:
-        # 예: "BTCUSDT_단기_lstm_..." → symbol 추출
         final_model_symbol = model.split("_")[0]
 
     status = "success" if success else "fail"
@@ -190,7 +189,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     row = {
         "timestamp": now,
         "symbol": str(symbol or "UNKNOWN"),
-        "model_symbol": str(final_model_symbol),  # ✅ 유사모델명 정확히 반영
+        "model_symbol": str(final_model_symbol),
         "strategy": str(strategy or "알수없음"),
         "direction": direction or "N/A",
         "entry_price": float(entry_price or 0.0),
@@ -244,6 +243,19 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
             print(f"[✅ log_prediction JSON 저장 완료] {json_path}")
         except Exception as e:
             print(f"[❌ log_prediction JSON 저장 실패] {e}")
+
+        # ✅ 실패한 예측은 wrong_predictions.csv 에도 기록
+        if not success:
+            try:
+                with open(wrong_path, "a", newline="", encoding="utf-8-sig") as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    if f.tell() == 0:
+                        writer.writeheader()
+                    writer.writerow(row)
+                print(f"[⚠️ 실패 기록 저장 완료] {wrong_path}")
+            except Exception as e:
+                print(f"[❌ 실패 기록 저장 실패] {e}")
+
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
