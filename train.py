@@ -405,10 +405,10 @@ def train_model_loop(strategy):
         training_in_progress[strategy] = False
         print(f"✅ {strategy} 루프 종료")
 
-
 def train_symbol_group_loop(delay_minutes=5):
     """
     ✅ 심볼 → 전략 순서로 순차 학습되도록 개선
+    ✅ 심볼별 전략별 클래스 전체 그룹 학습 완료 후 다음 심볼로 이동
     """
     import time
     import maintenance_fix_meta
@@ -431,19 +431,20 @@ def train_symbol_group_loop(delay_minutes=5):
             print("[✅ cache cleared] _kline_cache, _feature_cache")
 
             try:
-                # ✅ 각 심볼에 대해 전략 순차 학습
+                # ✅ 각 심볼에 대해 전략 순차 학습 (→ 클래스 그룹 전체 학습)
                 for symbol in group:
                     for strategy in ["단기", "중기", "장기"]:
                         try:
-                            train_one_model(symbol, strategy)
+                            train_one_model(symbol, strategy, group_id=None)  # ✅ 핵심 수정
                             print(f"[✅ 학습 완료] {symbol}-{strategy}")
                         except Exception as e:
                             print(f"[❌ 학습 실패] {symbol}-{strategy} → {e}")
 
+                # ✅ 메타 정보 보정
                 maintenance_fix_meta.fix_all_meta_json()
                 print(f"[✅ meta 보정 완료] 그룹 {idx}")
 
-                # ✅ 각 심볼 학습 완료 후 예측도 바로 실행
+                # ✅ 학습 후 예측까지 자동 수행
                 from recommend import main
                 for symbol in group:
                     for strategy in ["단기", "중기", "장기"]:
@@ -459,6 +460,7 @@ def train_symbol_group_loop(delay_minutes=5):
             except Exception as e:
                 print(f"[❌ 그룹 {idx} 루프 중 오류] {e}")
                 continue
+
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
     """
