@@ -90,6 +90,7 @@ def get_btc_dominance():
 
 import numpy as np
 
+
 def create_dataset(features, window=10, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
@@ -100,21 +101,21 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
     from collections import Counter
     import random
 
-    X, y = [], []
+    X, y = []
 
     def get_symbol_safe():
-        if features and isinstance(features[0], dict) and "symbol" in features[0]:
+        if isinstance(features, list) and features and isinstance(features[0], dict) and "symbol" in features[0]:
             return features[0]["symbol"]
         return "UNKNOWN"
 
-    if not features or len(features) <= window:
-        print(f"[⚠️ 부족] features length={len(features) if features else 0}, window={window} → dummy 반환")
+    if not isinstance(features, list) or len(features) <= window:
+        print(f"[⚠️ 부족] features length={len(features) if isinstance(features, list) else 'Invalid'}, window={window} → dummy 반환")
         dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
         dummy_y = np.array([-1], dtype=np.int64)
 
         log_prediction(
             symbol=get_symbol_safe(), strategy=strategy, direction="dummy", entry_price=0, target_price=0,
-            model="dummy_model", success=False, reason=f"window 부족 dummy (len={len(features) if features else 0}, window={window})",
+            model="dummy_model", success=False, reason=f"window 부족 dummy (len={len(features) if isinstance(features, list) else 0}, window={window})",
             rate=0.0, return_value=0.0, volatility=False, source="create_dataset", predicted_class=-1, label=-1
         )
         return dummy_X, dummy_y
