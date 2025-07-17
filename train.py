@@ -99,7 +99,6 @@ def get_class_groups(num_classes=21, group_size=7):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
-
 def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     import os, gc, traceback, torch, json, numpy as np, pandas as pd
     from datetime import datetime; from collections import Counter
@@ -130,7 +129,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         masked_reconstruction(symbol, strategy, input_size=input_size, mask_ratio=0.2, epochs=5)
         df = get_kline_by_strategy(symbol, strategy) or pd.DataFrame([{"timestamp": i, "close": 100+i} for i in range(100)])
         df_feat = compute_features(symbol, df, strategy)
-        if df_feat is None or df_feat.empty or df_feat.isnull().any().any():
+        if df_feat is None or df_feat.empty or df_feat.isnull().values.any():  # ← ✅ 이 부분만 수정됨
             df_feat = pd.DataFrame(np.random.normal(0, 1, size=(100, input_size)), columns=[f"f{i}" for i in range(input_size)])
         try:
             dummy_X = torch.tensor(np.random.rand(10, 20, input_size), dtype=torch.float32).to(DEVICE)
@@ -231,7 +230,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     except Exception as e:
         log_training_result(symbol, strategy, f"학습실패:전체예외", 0.0, 0.0, 0.0)
         print(f"[❌ 전체 예외] {symbol}-{strategy}: {type(e).__name__}: {e}")
-     
+
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
