@@ -523,12 +523,16 @@ MODEL_DIR = "/persistent/models"
 
 def get_available_models(target_symbol=None):
     import os, json, glob
-    from model_weight_loader import get_similar_symbol  # ✅ 유사심볼 로더
+    from model_weight_loader import get_similar_symbol
+    from config import get_SYMBOLS
 
     MODEL_DIR = "/persistent/models"
     models = []
 
-    # ✅ 유사한 symbol 리스트 생성
+    # ✅ 전역 SYMBOLS 기준으로 강제 제한
+    allowed_symbols = set(get_SYMBOLS())
+
+    # ✅ 유사 symbol 리스트 생성
     similar_symbols = []
     if target_symbol:
         similar_symbols = get_similar_symbol(target_symbol)
@@ -544,18 +548,19 @@ def get_available_models(target_symbol=None):
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
 
-            # 필수 정보 존재 여부 확인
+            # 필수 정보 확인
             if not all(k in meta for k in ["symbol", "strategy", "model", "input_size", "model_name"]):
                 continue
 
-            # ✅ symbol 필터링
+            # ✅ 심볼이 허용된 목록 안에 있는지 확인
+            if meta["symbol"] not in allowed_symbols:
+                continue
+
+            # ✅ target_symbol이 있는 경우, 유사 symbol에도 포함돼야 함
             if target_symbol and meta["symbol"] not in similar_symbols:
                 continue
 
-            # ✅ 정확한 모델 파일명 추출
             model_file = os.path.basename(pt_path)
-
-            # ✅ 유형별로 구분 가능한 구조 반영
             models.append({
                 "symbol": meta["symbol"],
                 "strategy": meta["strategy"],
