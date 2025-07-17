@@ -42,34 +42,37 @@ def load_model_cached(pt_path, ttl_sec=600):
         print(f"[❌ load_model_cached 오류] {pt_path} → {e}")
         return None
 
-
 def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_size=None):
+    import os, glob, json
+    import pandas as pd
+
+    MODEL_DIR = "/persistent/models"
     pattern = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json") if symbol != "ALL" \
               else os.path.join(MODEL_DIR, f"*_{strategy}_{model_type}.meta.json")
     meta_files = glob.glob(pattern)
 
     if not meta_files:
-        print(f"[⚠️ meta 파일 없음] {pattern} → weight=0")
-        return 0.0
+        print(f"[⚠️ meta 파일 없음] {pattern} → fallback weight=0.2 (모델 없음)")
+        return 0.2  # ✅ 모델 자체가 없을 경우 fallback weight 허용
 
     for meta_path in meta_files:
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
 
-            # ✅ input_size mismatch fallback weight=0.2
+            # ✅ input_size mismatch fallback weight
             if input_size is not None and meta.get("input_size") != input_size:
                 print(f"[⚠️ input_size 불일치] meta={meta.get('input_size')} vs input={input_size} → fallback weight=0.2")
                 return 0.2
 
             pt_path = meta_path.replace(".meta.json", ".pt")
             if not os.path.exists(pt_path):
-                print(f"[⚠️ 모델 파일 없음] {pt_path} → weight=0")
-                continue
+                print(f"[⚠️ 모델 파일 없음] {pt_path} → fallback weight=0.2")
+                return 0.2
 
             eval_files = sorted(glob.glob("/persistent/logs/evaluation_*.csv"))
             if not eval_files:
-                print("[INFO] 평가 파일 없음 → cold-start weight=0.2")
+                print("[INFO] 평가 파일 없음 → cold-start fallback weight=0.2")
                 return 0.2
 
             df_list = []
@@ -82,7 +85,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
                     continue
 
             if not df_list:
-                print("[INFO] 평가 데이터 없음 → cold-start weight=0.2")
+                print("[INFO] 평가 데이터 없음 → cold-start fallback weight=0.2")
                 return 0.2
 
             df = pd.concat(df_list, ignore_index=True)
@@ -91,7 +94,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
 
             sample_len = len(df)
             if sample_len < min_samples:
-                print(f"[INFO] 평가 샘플 부족 (len={sample_len} < {min_samples}) → cold-start weight=0.2")
+                print(f"[INFO] 평가 샘플 부족 (len={sample_len} < {min_samples}) → fallback weight=0.2")
                 return 0.2
 
             success_rate = len(df[df["status"] == "success"]) / sample_len
@@ -99,7 +102,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
                 print(f"[INFO] success_rate={success_rate:.4f} → weight=1.0")
                 return 1.0
             elif success_rate < 0.3:
-                print(f"[INFO] success_rate={success_rate:.4f} → weight=0.0")
+                print(f"[INFO] success_rate={success_rate:.4f} → weight=0.0 (fallback 구조로만 사용)")
                 return 0.0
             else:
                 w = max(0.0, round((success_rate - 0.3) / (0.7 - 0.3), 4))
@@ -110,8 +113,9 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
             print(f"[get_model_weight 예외] {e}")
             continue
 
-    print("[INFO] 조건 충족 모델 없음 → cold-start weight=0.2")
+    print("[INFO] 조건 충족 모델 없음 → fallback weight=0.2")
     return 0.2
+
 
 def model_exists(symbol, strategy):
     try:
