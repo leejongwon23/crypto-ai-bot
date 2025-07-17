@@ -99,10 +99,6 @@ def get_class_groups(num_classes=21, group_size=7):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
-
-# 여포 프로젝트 - 1단계 최종 수정본
-# 목적: 학습 실패 원인 제거 + 정상 모델 저장 + 학습 로그 완전 기록
-
 def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     import os, gc, traceback, torch, json
     from focal_loss import FocalLoss
@@ -260,8 +256,14 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                             "model_name": model_name,
                             "timestamp": now_kst().isoformat()
                         }
-                        with open(meta_path, "w", encoding="utf-8") as f:
-                            json.dump(meta, f, ensure_ascii=False, indent=2)
+
+                        try:
+                            with open(meta_path, "w", encoding="utf-8") as f:
+                                json.dump(meta, f, ensure_ascii=False, indent=2)
+                        except Exception as e:
+                            log_training_result(symbol, strategy, f"학습실패:meta저장실패_group{gid}_window{window}", 0.0, 0.0, 0.0)
+                            print(f"[❌ meta 저장 실패] {meta_path} → {e}")
+                            continue
 
                         log_training_result(symbol, strategy, model_name, acc=val_acc, f1=0.0, loss=loss.item())
                         trained_any = True
