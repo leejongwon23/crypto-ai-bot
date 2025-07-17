@@ -42,14 +42,15 @@ def balance_classes(X, y, min_count=5, num_classes=21):
 
     if X is None or y is None or len(X) == 0 or len(y) == 0:
         print("[❌ balance_classes 실패] X 또는 y 비어있음")
-        return X, y
+        raise Exception("⛔ balance_classes 중단: X 또는 y 비어있음")
 
     y = y.astype(np.int64)
     mask = (y != -1) & np.isfinite(y)
     X, y = X[mask], y[mask]
 
     if len(y) == 0:
-        raise Exception("[❌ balance_classes 실패] 라벨 제거 후 샘플 없음")
+        print("[❌ balance_classes 실패] 라벨 제거 후 샘플 없음")
+        raise Exception("⛔ balance_classes 중단: 유효 라벨 없음")
 
     class_counts = Counter(y)
     print(f"[🔢 기존 클래스 분포] {dict(class_counts)}")
@@ -66,12 +67,16 @@ def balance_classes(X, y, min_count=5, num_classes=21):
         needed = max(0, target_count - count)
 
         if needed > 0 and count >= 1:
-            reps = np.random.choice(indices, needed, replace=True)
-            base_samples = X[reps]
-            aug_samples = augment_batch(base_samples)
-            X_balanced.extend(aug_samples)
-            y_balanced.extend([cls] * needed)
-            print(f"[✅ 클래스 {cls}] {needed}개 augment 추가 완료")
+            try:
+                reps = np.random.choice(indices, needed, replace=True)
+                base_samples = X[reps]
+                aug_samples = augment_batch(base_samples)
+                X_balanced.extend(aug_samples)
+                y_balanced.extend([cls] * needed)
+                print(f"[✅ 클래스 {cls}] {needed}개 augment 추가 완료")
+            except Exception as e:
+                print(f"[⚠️ 클래스 {cls} 증강 실패] → {e}")
+                raise Exception(f"⛔ balance_classes 증강 실패: 클래스 {cls}")
         elif needed > 0:
             dummy = np.random.normal(0, 1, (needed, nx, ny_dim)).astype(np.float32)
             dummy = np.clip(dummy, -3, 3)
@@ -91,3 +96,4 @@ def balance_classes(X, y, min_count=5, num_classes=21):
     print(f"[🔎 dummy sample 클래스별 최종 분포] {dummy_counts}")
 
     return np.array(X_shuffled), np.array(y_shuffled, dtype=np.int64)
+
