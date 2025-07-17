@@ -8,7 +8,9 @@ _default_config = {
     "NUM_CLASSES": 21,
     "FEATURE_INPUT_SIZE": 24,
     "FAIL_AUGMENT_RATIO": 3,
-    "MIN_FEATURES": 5  # ✅ 최소 feature 개수 기본값 추가
+    "MIN_FEATURES": 5,
+    "SYMBOLS": ["BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "ADAUSDT"],
+    "SYMBOL_GROUP_SIZE": 3
 }
 
 # ✅ config.json 로드
@@ -45,22 +47,13 @@ def get_FAIL_AUGMENT_RATIO():
 def get_MIN_FEATURES():
     return _config.get("MIN_FEATURES", _default_config["MIN_FEATURES"])
 
-# ✅ set 함수들
-def set_NUM_CLASSES(value):
-    _config["NUM_CLASSES"] = int(value)
-    save_config()
+def get_SYMBOLS():
+    return _config.get("SYMBOLS", _default_config["SYMBOLS"])
 
-def set_FEATURE_INPUT_SIZE(value):
-    _config["FEATURE_INPUT_SIZE"] = int(value)
-    save_config()
-
-def set_FAIL_AUGMENT_RATIO(value):
-    _config["FAIL_AUGMENT_RATIO"] = int(value)
-    save_config()
-
-def set_MIN_FEATURES(value):
-    _config["MIN_FEATURES"] = int(value)
-    save_config()
+def get_SYMBOL_GROUPS():
+    symbols = get_SYMBOLS()
+    group_size = _config.get("SYMBOL_GROUP_SIZE", _default_config["SYMBOL_GROUP_SIZE"])
+    return [symbols[i:i+group_size] for i in range(0, len(symbols), group_size)]
 
 # ✅ 클래스 그룹화 함수
 def get_class_groups(num_classes=None, group_size=5):
@@ -101,8 +94,8 @@ def get_class_ranges(method="equal", data_path="/persistent/prediction_log.csv")
         print(f"[⚠️ get_class_ranges] 알 수 없는 method={method} → equal 사용")
         return get_class_ranges(method="equal")
 
-# ✅ 즉시 변수 선언 (함수 import 호환 + 변수 import 호환)
+# ✅ 즉시 변수 선언
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 NUM_CLASSES = get_NUM_CLASSES()
 FAIL_AUGMENT_RATIO = get_FAIL_AUGMENT_RATIO()
-MIN_FEATURES = get_MIN_FEATURES()  # ✅ 추가
+MIN_FEATURES = get_MIN_FEATURES()
