@@ -115,7 +115,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     from window_optimizer import find_best_windows
     from data.utils import get_kline_by_strategy, compute_features, create_dataset
     from focal_loss import FocalLoss
-    from config import get_class_groups
     from meta_learning import maml_train_entry
     import pytz
 
