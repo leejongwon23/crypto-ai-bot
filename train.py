@@ -126,7 +126,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     trained_any = False
 
     try:
-        # ✅ SSL은 별도 저장 → 정상 학습과 분리
         masked_reconstruction(symbol, strategy, input_size=input_size, mask_ratio=0.2, epochs=5)
 
         df = get_kline_by_strategy(symbol, strategy)
@@ -203,7 +202,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
                         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
                         lossfn = FocalLoss()
-                        to_tensor = lambda x: torch.tensor(x[:, -1, :], dtype=torch.float32)
+
+                        # ✅ 수정 핵심: 전체 시퀀스를 전달해 오류 제거
+                        to_tensor = lambda x: torch.tensor(x, dtype=torch.float32)
+
                         Xtt = to_tensor(X_train_group)
                         Xvt = to_tensor(X_val_group)
                         ytt = torch.tensor(y_train_group, dtype=torch.long)
