@@ -210,15 +210,23 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         model_name = f"{model_type}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window{window}"
                         model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
                         torch.save(model.state_dict(), model_path)
+
+                        # ✅ 수정: output_size 포함
                         meta = {
-                            "symbol": symbol, "strategy": strategy, "model": model_type, "group_id": gid,
-                            "window": window, "input_size": input_size, "model_name": model_name,
+                            "symbol": symbol,
+                            "strategy": strategy,
+                            "model": model_type,
+                            "group_id": gid,
+                            "window": window,
+                            "input_size": input_size,
+                            "output_size": len(group_classes),  # ✅ 필수로 추가된 부분
+                            "model_name": model_name,
                             "timestamp": now_kst().isoformat()
                         }
+
                         with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
                             json.dump(meta, f, ensure_ascii=False, indent=2)
 
-                        # ✅ 성공한 모델은 무조건 로그 기록
                         log_training_result(symbol, strategy, model_name, acc=val_acc, f1=0.0, loss=loss.item())
                         trained_any = True
 
