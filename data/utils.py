@@ -90,7 +90,6 @@ def get_btc_dominance():
 
 import numpy as np
 
-
 def create_dataset(features, window=10, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
@@ -108,7 +107,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             return features[0]["symbol"]
         return "UNKNOWN"
 
-    # ✅ 입력 유효성 체크 강화
+    # ✅ 입력 유효성 체크
     if not isinstance(features, list) or len(features) <= window:
         print(f"[⚠️ 부족] features length={len(features) if isinstance(features, list) else 'Invalid'}, window={window} → dummy 반환")
         dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
@@ -168,7 +167,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                 max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
                 gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
                 gain = max(-1.0, min(1.0, gain))
-                cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain <= high), NUM_CLASSES-1)
+                cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain <= high), NUM_CLASSES - 1)
 
                 sample = [[float(r.get(c, 0.0)) for c in feature_cols] for r in seq]
                 if input_size:
@@ -185,7 +184,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                 print(f"[❌ inner 예외] {e} → i={i}")
                 continue
 
-        # ✅ 샘플 부족 보완
         if len(y) == 0:
             print("[❌ 샘플 없음] 최소 10개 dummy 생성")
             dummy_X = np.random.normal(0, 1, size=(10, window, input_size if input_size else MIN_FEATURES)).astype(np.float32)
@@ -211,7 +209,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         X = np.array(X, dtype=np.float32)
         y = np.array(y, dtype=np.int64)
 
-        print(f"[✅ create_dataset 완료] 샘플 수: {len(y)}, 클래스 분포: {Counter(y)}")
+        print(f"[✅ create_dataset 완료] 샘플 수: {len(y)}, X.shape={X.shape}, y.shape={y.shape}, 클래스 분포: {Counter(y)}")
         return X, y
 
     except Exception as e:
