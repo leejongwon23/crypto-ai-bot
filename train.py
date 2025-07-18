@@ -128,8 +128,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     try:
         masked_reconstruction(symbol, strategy, input_size=input_size, mask_ratio=0.2, epochs=5)
         df = get_kline_by_strategy(symbol, strategy) or pd.DataFrame([{"timestamp": i, "close": 100+i} for i in range(100)])
+        print(f"[DEBUG] 📊 get_kline_by_strategy 반환: {len(df)}행")
+
         df_feat = compute_features(symbol, df, strategy)
-        if df_feat is None or df_feat.empty or df_feat.isnull().values.any():  # ← ✅ 이 부분만 수정됨
+        print(f"[DEBUG] 🧮 compute_features 결과: None? {df_feat is None}, 비어있음? {df_feat.empty if df_feat is not None else 'N/A'}")
+
+        if df_feat is None or df_feat.empty or df_feat.isnull().values.any():
             df_feat = pd.DataFrame(np.random.normal(0, 1, size=(100, input_size)), columns=[f"f{i}" for i in range(input_size)])
         try:
             dummy_X = torch.tensor(np.random.rand(10, 20, input_size), dtype=torch.float32).to(DEVICE)
@@ -140,6 +144,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
         for window in find_best_windows(symbol, strategy) or [20]:
             X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
+            print(f"[DEBUG] 🧾 create_dataset 반환: X={None if X_raw is None else X_raw.shape}, y={None if y_raw is None else len(y_raw)}")
+
             if X_raw is None or y_raw is None or len(X_raw) == 0:
                 log_training_result(symbol, strategy, f"학습실패:dataset없음_window{window}", 0.0, 0.0, 0.0)
                 continue
