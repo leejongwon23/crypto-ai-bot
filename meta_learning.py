@@ -62,3 +62,33 @@ def maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.
     loss = maml.meta_update(tasks)
     print(f"[MAML meta-update 완료] loss={loss:.4f}")
     return loss
+
+
+import os, pickle
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+
+META_MODEL_PATH = "/persistent/models/meta_learner.pkl"
+
+def train_meta_learner(model_outputs_list, true_labels):
+    X = [np.array(mo).flatten() for mo in model_outputs_list]
+    y = np.array(true_labels)
+
+    clf = LogisticRegression(max_iter=500)
+    clf.fit(X, y)
+
+    with open(META_MODEL_PATH, "wb") as f:
+        pickle.dump(clf, f)
+    print(f"[✅ meta learner 학습 완료 및 저장] {META_MODEL_PATH}")
+
+    return clf
+
+def load_meta_learner():
+    if os.path.exists(META_MODEL_PATH):
+        with open(META_MODEL_PATH, "rb") as f:
+            clf = pickle.load(f)
+        print("[✅ meta learner 로드 완료]")
+        return clf
+    else:
+        print("[⚠️ meta learner 파일 없음 → None 반환]")
+        return None
