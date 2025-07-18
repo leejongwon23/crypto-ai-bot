@@ -127,7 +127,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
     try:
         masked_reconstruction(symbol, strategy, input_size=input_size, mask_ratio=0.2, epochs=5)
-        df = get_kline_by_strategy(symbol, strategy) or pd.DataFrame([{"timestamp": i, "close": 100+i} for i in range(100)])
+
+        # ✅ 수정된 부분 (ValueError 방지)
+        df = get_kline_by_strategy(symbol, strategy)
+        if df is None or df.empty:
+            df = pd.DataFrame([{"timestamp": i, "close": 100 + i} for i in range(100)])
+
         df_feat = compute_features(symbol, df, strategy)
 
         if df_feat is None or df_feat.empty or df_feat.isnull().values.any():
@@ -211,7 +216,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
                         torch.save(model.state_dict(), model_path)
 
-                        # ✅ 수정: output_size 포함
                         meta = {
                             "symbol": symbol,
                             "strategy": strategy,
@@ -219,7 +223,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                             "group_id": gid,
                             "window": window,
                             "input_size": input_size,
-                            "output_size": len(group_classes),  # ✅ 필수로 추가된 부분
+                            "output_size": len(group_classes),
                             "model_name": model_name,
                             "timestamp": now_kst().isoformat()
                         }
