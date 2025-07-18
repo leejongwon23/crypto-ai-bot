@@ -401,7 +401,15 @@ def train_models(symbol_list):
     except Exception as e:
         print(f"[⚠️ meta 보정 실패] {e}")
 
+    # ✅ 실패학습 자동 실행 추가
+    try:
+        import failure_trainer
+        failure_trainer.run_failure_training()
+    except Exception as e:
+        print(f"[❌ 실패학습 루프 예외] {e}")
+
     send_message(f"✅ 전체 심볼 학습 완료: {symbol_list}")
+
 
 def train_model_loop(strategy):
     """
