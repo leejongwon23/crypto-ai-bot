@@ -126,6 +126,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     trained_any = False
 
     try:
+        # ✅ SSL은 별도 저장 → 정상 학습과 분리
         masked_reconstruction(symbol, strategy, input_size=input_size, mask_ratio=0.2, epochs=5)
 
         df = get_kline_by_strategy(symbol, strategy)
@@ -154,13 +155,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             print(f"▶️ window={window} → dataset 생성 시작")
             X_y = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
             if not X_y or not isinstance(X_y, tuple) or len(X_y) != 2:
-                print(f"[❌ create_dataset unpack 실패] → window={window}")
                 log_training_result(symbol, strategy, f"학습실패:dataset_unpack실패_window{window}", 0.0, 0.0, 0.0)
                 continue
 
             X_raw, y_raw = X_y
             if X_raw is None or y_raw is None or len(X_raw) == 0:
-                print(f"[❌ dataset 생성 실패] → window={window}")
                 log_training_result(symbol, strategy, f"학습실패:dataset없음_window{window}", 0.0, 0.0, 0.0)
                 continue
 
@@ -178,8 +177,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
             for gid in [group_id] if group_id is not None else range(len(class_groups_list)):
                 group_classes = class_groups_list[gid]
-                print(f"▶️ 학습 group{gid}: 클래스 수 {len(group_classes)}")
-
                 if not group_classes:
                     log_training_result(symbol, strategy, f"학습실패:빈그룹_group{gid}_window{window}", 0.0, 0.0, 0.0)
                     continue
@@ -188,28 +185,18 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 X_train_group, y_train_group = X_train[tm], y_train[tm]
                 X_val_group, y_val_group = X_val[vm], y_val[vm]
 
-                print(f"▶️ group{gid} → train:{len(y_train_group)}, val:{len(y_val_group)}")
-
-                if len(y_train_group) < 2:
-                    print(f"[❌ train 부족] group{gid}")
+                if len(y_train_group) < 2 or len(y_val_group) == 0:
                     log_training_result(symbol, strategy, f"학습실패:데이터부족_group{gid}_window{window}", 0.0, 0.0, 0.0)
-                    continue
-                if len(y_val_group) == 0:
-                    print(f"[❌ val 없음] group{gid}")
-                    log_training_result(symbol, strategy, f"학습실패:val없음_group{gid}_window{window}", 0.0, 0.0, 0.0)
                     continue
 
                 try:
                     y_train_group = np.array([group_classes.index(y) for y in y_train_group])
                     y_val_group = np.array([group_classes.index(y) for y in y_val_group])
-                except Exception as e:
+                except:
                     log_training_result(symbol, strategy, f"학습실패:label불일치_group{gid}_window{window}", 0.0, 0.0, 0.0)
                     continue
 
                 X_train_group, y_train_group = balance_classes(X_train_group, y_train_group, min_count=20, num_classes=len(group_classes))
-
-                print(f"[🔎 shape 확인] X_train_group: {X_train_group.shape}, y_train_group: {y_train_group.shape}")
-                print(f"[🔎 shape 확인] X_val_group: {X_val_group.shape}, y_val_group: {y_val_group.shape}")
 
                 for model_type in ["lstm", "cnn_lstm", "transformer"]:
                     try:
@@ -217,12 +204,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
                         lossfn = FocalLoss()
                         to_tensor = lambda x: torch.tensor(x[:, -1, :], dtype=torch.float32)
-
                         Xtt = to_tensor(X_train_group)
                         Xvt = to_tensor(X_val_group)
-
-                        print(f"[✅ 변환 완료] Xtt.shape={Xtt.shape}, Xvt.shape={Xvt.shape}")
-
                         ytt = torch.tensor(y_train_group, dtype=torch.long)
                         yvt = torch.tensor(y_val_group, dtype=torch.long)
 
@@ -233,43 +216,44 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                             for xb, yb in train_loader:
                                 xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                                 loss = lossfn(model(xb), yb)
-                                if torch.isfinite(loss): optimizer.zero_grad(); loss.backward(); optimizer.step()
+                                if torch.isfinite(loss):
+                                    optimizer.zero_grad(); loss.backward(); optimizer.step()
 
                         maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1)
+
                         model.eval()
                         with torch.no_grad():
                             val_preds = torch.argmax(model(Xvt.to(DEVICE)), dim=1)
                             val_acc = (val_preds == yvt.to(DEVICE)).float().mean().item()
 
-                        model_name = f"{model_type}_AdamW_FocalLoss_lr=1e-4_bs=32_hs=64_dr=0.3_group{gid}_window{window}"
+                        model_name = f"{model_type}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window{window}"
                         model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
                         torch.save(model.state_dict(), model_path)
-                        print(f"[✅ 저장됨] {model_path}")
-
-                        meta = {
-                            "symbol": symbol,
-                            "strategy": strategy,
-                            "model": model_type,
-                            "group_id": gid,
-                            "window": window,
-                            "input_size": input_size,
-                            "output_size": len(group_classes),
-                            "model_name": model_name,
-                            "timestamp": now_kst().isoformat()
-                        }
 
                         with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
-                            json.dump(meta, f, ensure_ascii=False, indent=2)
+                            json.dump({
+                                "symbol": symbol,
+                                "strategy": strategy,
+                                "model": model_type,
+                                "group_id": gid,
+                                "window": window,
+                                "input_size": input_size,
+                                "output_size": len(group_classes),
+                                "model_name": model_name,
+                                "timestamp": now_kst().isoformat()
+                            }, f, ensure_ascii=False, indent=2)
 
                         log_training_result(symbol, strategy, model_name, acc=val_acc, f1=0.0, loss=loss.item())
                         trained_any = True
+                        print(f"[✅ 저장 완료] {model_path}")
 
                         del model, optimizer, lossfn, train_loader, val_loader
                         torch.cuda.empty_cache(); gc.collect()
+
                     except Exception as inner_e:
                         reason = f"{type(inner_e).__name__}: {inner_e}"
                         log_training_result(symbol, strategy, f"학습실패:{reason}", 0.0, 0.0, 0.0)
-                        print(f"[❌ 내부 예외] group{gid} window{window} → {reason}")
+                        print(f"[❌ 내부 예외] group{gid} → {reason}")
 
         if not trained_any:
             print(f"[❌ 모델 전부 실패] 저장된 모델 없음 → {symbol}-{strategy}")
