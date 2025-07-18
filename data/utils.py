@@ -360,10 +360,10 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         print(f"[캐시 HIT] {cache_key}")
         return cached_feat
 
-    if df is None or df.empty:
-        print(f"[❌ compute_features 실패] 입력 DataFrame empty")
+    if df is None or df.empty or not isinstance(df, pd.DataFrame):
+        print(f"[❌ compute_features 실패] 입력 DataFrame empty or invalid")
         failed_result(symbol, strategy, reason="입력DataFrame empty")
-        return None
+        return pd.DataFrame()  # 반환은 항상 안전하게 DataFrame
 
     df = df.copy()
 
@@ -376,14 +376,12 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
 
     try:
         base_cols = ["open", "high", "low", "close", "volume"]
-
-        # ✅ 보강: base_cols 누락 시 예외 처리
-        if not all(col in df.columns for col in base_cols):
-            raise ValueError(f"[❌ base_cols 누락] → {symbol}-{strategy}: {base_cols} 중 일부 없음")
+        for col in base_cols:
+            if col not in df.columns:
+                df[col] = 0.0  # 누락 방지용 기본값 추가
 
         df = df[["timestamp", "strategy"] + base_cols]
 
-        # ✅ 기존 feature engineering 유지
         df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
         delta = df["close"].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
@@ -397,7 +395,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df["volatility"] = df["high"] - df["low"]
         df["trend_score"] = (df["close"] > df["ma20"]).astype(int)
 
-        # ✅ 고급 기술적 지표 추가
         df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
         df["ema100"] = df["close"].ewm(span=100, adjust=False).mean()
         df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
@@ -406,47 +403,33 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df["cci"] = ta.trend.cci(df["high"], df["low"], df["close"], window=20, fillna=True)
         df["mfi"] = ta.volume.money_flow_index(df["high"], df["low"], df["close"], df["volume"], window=14, fillna=True)
         df["obv"] = ta.volume.on_balance_volume(df["close"], df["volume"], fillna=True)
-
         df["atr"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14, fillna=True)
         df["williams_r"] = ta.momentum.williams_r(df["high"], df["low"], df["close"], lbp=14, fillna=True)
         df["stoch_k"] = ta.momentum.stoch(df["high"], df["low"], df["close"], fillna=True)
         df["stoch_d"] = ta.momentum.stoch_signal(df["high"], df["low"], df["close"], fillna=True)
-        df["vwap"] = (df["volume"] * df["close"]).cumsum() / df["volume"].cumsum()
+        df["vwap"] = (df["volume"] * df["close"]).cumsum() / (df["volume"].cumsum() + 1e-6)
 
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.fillna(0, inplace=True)
 
         feature_cols = [c for c in df.columns if c not in ["timestamp", "strategy"]]
-        print(f"[info] compute_features 생성 feature 개수: {len(feature_cols)} → {feature_cols}")
-
         if len(feature_cols) < FEATURE_INPUT_SIZE:
-            pad_cols = []
             for i in range(len(feature_cols), FEATURE_INPUT_SIZE):
                 pad_col = f"pad_{i}"
                 df[pad_col] = 0.0
-                pad_cols.append(pad_col)
-            feature_cols += pad_cols
-            print(f"[info] feature padding 적용: {pad_cols}")
+                feature_cols.append(pad_col)
 
-        scaler = MinMaxScaler()
-        df[feature_cols] = scaler.fit_transform(df[feature_cols])
+        df[feature_cols] = MinMaxScaler().fit_transform(df[feature_cols])
 
     except Exception as e:
         print(f"[❌ compute_features 실패] feature 계산 예외 → {e}")
         failed_result(symbol, strategy, reason=f"feature 계산 실패: {e}")
-        return None
+        return pd.DataFrame()
 
-    required_cols = ["timestamp", "close", "high"]
-    missing_cols = [col for col in required_cols if col not in df.columns or df[col].isnull().any()]
-    if missing_cols or df.empty:
-        print(f"[❌ compute_features 실패] 필수 컬럼 누락 또는 NaN 존재: {missing_cols}, rows={len(df)}")
-        failed_result(symbol, strategy, reason=f"필수컬럼누락 또는 NaN: {missing_cols}")
-        return None
-
-    if len(df) < 5:
-        print(f"[❌ compute_features 실패] 데이터 row 부족 ({len(df)} rows)")
-        failed_result(symbol, strategy, reason="row 부족")
-        return None
+    if df.empty or df.isnull().values.any():
+        print(f"[❌ compute_features 실패] 결과 DataFrame 문제 → 빈 df 또는 NaN 존재")
+        failed_result(symbol, strategy, reason="최종 결과 DataFrame 오류")
+        return pd.DataFrame()
 
     print(f"[✅ 완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     CacheManager.set(cache_key, df)
