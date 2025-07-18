@@ -17,6 +17,8 @@ from config import get_class_groups
 from collections import OrderedDict
 # 변경
 from config import get_class_ranges
+# ✅ 기존 predict.py 맨 위 import 구역에 추가
+from meta_learning import train_meta_learner, load_meta_learner
 
 
 
