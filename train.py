@@ -366,8 +366,8 @@ def train_all_models():
 def train_models(symbol_list):
     """
     ✅ [YOPO 구조 반영]
-    - 심볼 하나당: 전략 → 클래스그룹 전체 순서 학습
-    - 모든 전략/클래스그룹 학습 완료 후 다음 심볼로 넘어감
+    - 심볼 하나당: 클래스그룹 전체 → 전략 순서로 학습
+    - 모든 그룹/전략 학습 완료 후 다음 심볼로 넘어감
     - 예측 실행은 하지 않음 (외부 recommend에서 호출)
     - meta.json 일괄 보정 수행
     """
@@ -385,24 +385,24 @@ def train_models(symbol_list):
 
     for symbol in symbol_list:
         print(f"\n🔁 [심볼 시작] {symbol}")
-        for strategy in strategies:
-            if training_in_progress.get(strategy, False):
-                print(f"⚠️ 중복 실행 방지: {strategy}")
-                continue
 
-            training_in_progress[strategy] = True
-            try:
-                for group_id in group_ids:
-                    try:
-                        train_one_model(symbol, strategy, group_id=group_id)
-                    except Exception as e:
-                        print(f"[❌ 학습 실패] {symbol}-{strategy}-group{group_id} → {e}")
-            except Exception as e:
-                print(f"[❌ 전체 실패] {symbol}-{strategy} 전략 학습 중단 → {e}")
-            finally:
-                training_in_progress[strategy] = False
-                print(f"✅ {symbol}-{strategy} 전략 학습 완료")
-                time.sleep(2)
+        for group_id in group_ids:
+            print(f"▶ 그룹 {group_id} 학습 시작")
+
+            for strategy in strategies:
+                if training_in_progress.get(strategy, False):
+                    print(f"⚠️ 중복 실행 방지: {strategy}")
+                    continue
+
+                training_in_progress[strategy] = True
+                try:
+                    train_one_model(symbol, strategy, group_id=group_id)
+                except Exception as e:
+                    print(f"[❌ 학습 실패] {symbol}-{strategy}-group{group_id} → {e}")
+                finally:
+                    training_in_progress[strategy] = False
+                    print(f"✅ {symbol}-{strategy}-group{group_id} 학습 완료")
+                    time.sleep(2)
 
     # ✅ 모든 학습 후 메타 보정
     try:
