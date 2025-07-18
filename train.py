@@ -141,7 +141,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         try:
             dummy_X = torch.tensor(np.random.rand(10, 20, input_size), dtype=torch.float32).to(DEVICE)
             dummy_y = torch.randint(0, 2, (10,), dtype=torch.long).to(DEVICE)
-            importances = compute_feature_importance(get_model("lstm", input_size=input_size, output_size=2).to(DEVICE), dummy_X, dummy_y, [c for c in df_feat.columns if c not in ["timestamp", "strategy"]], method="baseline")
+            importances = compute_feature_importance(
+                get_model("lstm", input_size=input_size, output_size=2).to(DEVICE),
+                dummy_X, dummy_y,
+                [c for c in df_feat.columns if c not in ["timestamp", "strategy"]],
+                method="baseline"
+            )
             df_feat = drop_low_importance_features(df_feat, importances, threshold=0.01, min_features=5)
         except: pass
 
@@ -203,14 +208,24 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
                 X_train_group, y_train_group = balance_classes(X_train_group, y_train_group, min_count=20, num_classes=len(group_classes))
 
+                print(f"[🔎 shape 확인] X_train_group: {X_train_group.shape}, y_train_group: {y_train_group.shape}")
+                print(f"[🔎 shape 확인] X_val_group: {X_val_group.shape}, y_val_group: {y_val_group.shape}")
+
                 for model_type in ["lstm", "cnn_lstm", "transformer"]:
                     try:
                         model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
                         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
                         lossfn = FocalLoss()
                         to_tensor = lambda x: torch.tensor(x[:, -1, :], dtype=torch.float32)
-                        Xtt, ytt = to_tensor(X_train_group), torch.tensor(y_train_group, dtype=torch.long)
-                        Xvt, yvt = to_tensor(X_val_group), torch.tensor(y_val_group, dtype=torch.long)
+
+                        Xtt = to_tensor(X_train_group)
+                        Xvt = to_tensor(X_val_group)
+
+                        print(f"[✅ 변환 완료] Xtt.shape={Xtt.shape}, Xvt.shape={Xvt.shape}")
+
+                        ytt = torch.tensor(y_train_group, dtype=torch.long)
+                        yvt = torch.tensor(y_val_group, dtype=torch.long)
+
                         train_loader = DataLoader(TensorDataset(Xtt, ytt), batch_size=32, shuffle=True)
                         val_loader = DataLoader(TensorDataset(Xvt, yvt), batch_size=32)
 
@@ -226,7 +241,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                             val_preds = torch.argmax(model(Xvt.to(DEVICE)), dim=1)
                             val_acc = (val_preds == yvt.to(DEVICE)).float().mean().item()
 
-                        model_name = f"{model_type}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window{window}"
+                        model_name = f"{model_type}_AdamW_FocalLoss_lr=1e-4_bs=32_hs=64_dr=0.3_group{gid}_window{window}"
                         model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
                         torch.save(model.state_dict(), model_path)
                         print(f"[✅ 저장됨] {model_path}")
@@ -264,7 +279,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         reason = f"{type(e).__name__}: {e}"
         log_training_result(symbol, strategy, f"학습실패:전체예외:{reason}", 0.0, 0.0, 0.0)
         print(f"[❌ 전체 예외] {symbol}-{strategy}: {reason}")
-
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
