@@ -147,7 +147,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
         for window in find_best_windows(symbol, strategy) or [20]:
             print(f"▶️ window={window} → dataset 생성 시작")
-            X_raw, y_raw = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
+            X_y = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
+            if not X_y or len(X_y) != 2:
+                print(f"[❌ create_dataset unpack 실패] → window={window}")
+                log_training_result(symbol, strategy, f"학습실패:dataset_unpack실패_window{window}", 0.0, 0.0, 0.0)
+                continue
+            X_raw, y_raw = X_y
 
             if X_raw is None or y_raw is None or len(X_raw) == 0:
                 print(f"[❌ dataset 생성 실패] → window={window}")
