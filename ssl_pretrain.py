@@ -10,7 +10,16 @@ from config import FEATURE_INPUT_SIZE
 DEVICE = torch.device("cpu")
 
 def masked_reconstruction(symbol, strategy, input_size, mask_ratio=0.2, epochs=10):
-    from config import FEATURE_INPUT_SIZE  # ✅ config import 통일
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    import numpy as np
+    from config import FEATURE_INPUT_SIZE
+    from model.base_model import TransformerPricePredictor
+    from data.utils import get_kline_by_strategy, compute_features
+
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     print(f"[SSL] {symbol}-{strategy} pretraining 시작")
 
     df = get_kline_by_strategy(symbol, strategy)
@@ -24,14 +33,13 @@ def masked_reconstruction(symbol, strategy, input_size, mask_ratio=0.2, epochs=1
         return
 
     X = feat.drop(columns=["timestamp", "strategy"], errors="ignore").values
-    X = np.expand_dims(X, axis=0)  # (1, T, F)
+    X = np.expand_dims(X, axis=0)
     X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
 
-    # ✅ TransformerPricePredictor mode="reconstruction" 고정
     model = TransformerPricePredictor(
         input_size=FEATURE_INPUT_SIZE,
         output_size=FEATURE_INPUT_SIZE,
-        mode="reconstruction"  # ✅ reconstruction 모드 고정
+        mode="reconstruction"
     ).to(DEVICE)
 
     model.train()
@@ -67,6 +75,11 @@ def masked_reconstruction(symbol, strategy, input_size, mask_ratio=0.2, epochs=1
 
         print(f"[SSL] epoch {epoch+1}/{epochs}, loss={loss.item():.6f}")
 
-    torch.save(model.state_dict(), f"/persistent/models/{symbol}_{strategy}_ssl.pt")
-    print(f"[SSL] {symbol}-{strategy} pretraining 완료")
+    # ✅ 저장 경로 분리
+    ssl_dir = "/persistent/ssl_models"
+    os.makedirs(ssl_dir, exist_ok=True)
+    model_path = f"{ssl_dir}/{symbol}_{strategy}_ssl.pt"
+    torch.save(model.state_dict(), model_path)
+    print(f"[SSL] {symbol}-{strategy} pretraining 완료 → 저장: {model_path}")
+
 
