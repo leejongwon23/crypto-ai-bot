@@ -377,6 +377,11 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
 
     try:
         base_cols = ["open", "high", "low", "close", "volume"]
+
+        # ✅ 보강: base_cols 누락 시 예외 처리
+        if not all(col in df.columns for col in base_cols):
+            raise ValueError(f"[❌ base_cols 누락] → {symbol}-{strategy}: {base_cols} 중 일부 없음")
+
         df = df[["timestamp", "strategy"] + base_cols]
 
         # ✅ 기존 feature engineering 유지
