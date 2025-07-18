@@ -90,10 +90,9 @@ def balance_classes(X, y, min_count=5, num_classes=21):
 
     final_counts = Counter(y_shuffled)
     print(f"[📊 최종 클래스 분포] {dict(final_counts)}")
-    print(f"[✅ balance_classes 완료] 최종 샘플수: {len(y_shuffled)}")
 
-    dummy_counts = {cls: final_counts.get(cls, 0) for cls in range(num_classes)}
-    print(f"[🔎 dummy sample 클래스별 최종 분포] {dummy_counts}")
+    X_final = np.array(X_shuffled, dtype=np.float32)
+    y_final = np.array(y_shuffled, dtype=np.int64)
 
-    return np.array(X_shuffled), np.array(y_shuffled, dtype=np.int64)
-
+    print(f"[✅ balance_classes 완료] X.shape={X_final.shape}, y.shape={y_final.shape}, 총 샘플수: {len(y_final)}")
+    return X_final, y_final
