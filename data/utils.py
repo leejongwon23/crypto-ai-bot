@@ -230,6 +230,7 @@ import time
 def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
     import os
+    import pandas as pd
 
     cache_key = f"{symbol}-{strategy}"
     cached_df = CacheManager.get(cache_key, ttl_sec=600)
@@ -240,15 +241,21 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     if config is None:
         print(f"[❌ 실패] {symbol}-{strategy}: 전략 설정 없음")
         failed_result(symbol, strategy, reason="전략 설정 없음")
-        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+        return pd.DataFrame()
 
-    df = get_kline(symbol, interval=config["interval"], limit=config["limit"])
+    try:
+        df = get_kline(symbol, interval=config["interval"], limit=config["limit"])
+    except Exception as e:
+        print(f"[❌ 실패] get_kline 예외 → {e}")
+        failed_result(symbol, strategy, reason=f"get_kline 예외: {e}")
+        return pd.DataFrame()
+
     if df is None or not isinstance(df, pd.DataFrame):
-        print(f"[❌ 실패] {symbol}-{strategy}: get_kline() → None 반환 또는 형식 오류")
+        print(f"[❌ 실패] {symbol}-{strategy}: get_kline() → None or Invalid")
         failed_result(symbol, strategy, reason="get_kline 반환 오류")
-        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+        return pd.DataFrame()
 
-    required_cols = ["open", "high", "low", "close", "volume", "timestamp"]
+    required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
     for col in required_cols:
         if col not in df.columns:
             df[col] = 0.0 if col != "timestamp" else pd.Timestamp.now()
@@ -256,11 +263,13 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     df = df[required_cols]
 
     if len(df) < 5:
+        print(f"[❌ 실패] {symbol}-{strategy}: row 수 부족 ({len(df)} rows)")
         failed_result(symbol, strategy, reason="row 부족")
-        return df
+        return pd.DataFrame()
 
     CacheManager.set(cache_key, df)
     return df
+
 
 
 # ✅ SYMBOL_GROUPS batch prefetch 함수 추가
