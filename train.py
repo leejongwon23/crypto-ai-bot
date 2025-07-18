@@ -227,15 +227,17 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         del model, optimizer, lossfn, train_loader, val_loader
                         torch.cuda.empty_cache(); gc.collect()
                     except Exception as inner_e:
-                        log_training_result(symbol, strategy, f"학습실패:모델학습예외_{model_type}_group{gid}_window{window}", 0.0, 0.0, 0.0)
-                        print(f"[❌ 내부 학습 예외] {symbol}-{strategy} group{gid} window{window}: {type(inner_e).__name__}: {inner_e}")
+                        reason = f"{type(inner_e).__name__}: {inner_e}"
+                        log_training_result(symbol, strategy, f"학습실패:{reason}", 0.0, 0.0, 0.0)
+                        print(f"[❌ 내부 학습 예외] {symbol}-{strategy} group{gid} window{window}: {reason}")
 
         if not trained_any:
             log_training_result(symbol, strategy, f"학습실패:전그룹학습불가", 0.0, 0.0, 0.0)
 
     except Exception as e:
-        log_training_result(symbol, strategy, f"학습실패:전체예외", 0.0, 0.0, 0.0)
-        print(f"[❌ 전체 예외] {symbol}-{strategy}: {type(e).__name__}: {e}")
+        reason = f"{type(e).__name__}: {e}"
+        log_training_result(symbol, strategy, f"학습실패:전체예외:{reason}", 0.0, 0.0, 0.0)
+        print(f"[❌ 전체 예외] {symbol}-{strategy}: {reason}")
 
 
 # ✅ augmentation 함수 추가
