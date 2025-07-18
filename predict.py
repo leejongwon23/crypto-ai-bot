@@ -62,39 +62,6 @@ def load_model_cached(model_path, model_type, input_size, output_size):
 
     return model
 
-import numpy as np
-import os
-import pickle
-from sklearn.linear_model import LogisticRegression
-
-META_MODEL_PATH = "/persistent/models/meta_learner.pkl"
-
-def train_meta_learner(model_outputs_list, true_labels):
-    import numpy as np, pickle
-    from sklearn.linear_model import LogisticRegression
-
-    X = [np.array(mo).flatten() for mo in model_outputs_list]
-    y = np.array(true_labels)
-
-    clf = LogisticRegression(max_iter=500)
-    clf.fit(X, y)
-
-    with open(META_MODEL_PATH, "wb") as f:
-        pickle.dump(clf, f)
-    print(f"[✅ meta learner 학습 완료 및 저장] {META_MODEL_PATH}")
-
-    return clf
-
-def load_meta_learner():
-    import os, pickle
-    if os.path.exists(META_MODEL_PATH):
-        with open(META_MODEL_PATH, "rb") as f:
-            clf = pickle.load(f)
-        print("[✅ meta learner 로드 완료]")
-        return clf
-    else:
-        print("[⚠️ meta learner 파일 없음 → None 반환]")
-        return None
 
 def ensemble_stacking(model_outputs, meta_model=None):
     import numpy as np
