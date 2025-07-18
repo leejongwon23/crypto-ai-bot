@@ -143,8 +143,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             dummy_y = torch.randint(0, 2, (10,), dtype=torch.long).to(DEVICE)
             importances = compute_feature_importance(get_model("lstm", input_size=input_size, output_size=2).to(DEVICE), dummy_X, dummy_y, [c for c in df_feat.columns if c not in ["timestamp", "strategy"]], method="baseline")
             df_feat = drop_low_importance_features(df_feat, importances, threshold=0.01, min_features=5)
-        except:
-            pass
+        except: pass
 
         for window in find_best_windows(symbol, strategy) or [20]:
             print(f"▶️ window={window} → dataset 생성 시작")
