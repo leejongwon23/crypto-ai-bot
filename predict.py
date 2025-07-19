@@ -207,6 +207,17 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from logger import get_feature_hash
     from model.base_model import get_model
 
+    def get_latest_model_path(symbol, strategy):
+        folder = "/persistent/models"
+        candidates = [
+            f for f in os.listdir(folder)
+            if f.startswith(f"{symbol}_{strategy}") and f.endswith(".pt")
+        ]
+        if not candidates:
+            return None
+        candidates.sort(reverse=True)
+        return os.path.join(folder, candidates[0])
+
     DEVICE = torch.device("cpu")
     MODEL_DIR = "/persistent/models"
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
@@ -268,18 +279,22 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
                     model_path = os.path.join(MODEL_DIR, m["pt_file"])
                     meta_path = model_path.replace(".pt", ".meta.json")
+
                     if not os.path.exists(model_path) or not os.path.exists(meta_path):
-                        model_name = os.path.splitext(m["pt_file"])[0]
-                        log_prediction(
-                            symbol=symbol,
-                            strategy=strategy,
-                            model=model_name,
-                            predicted_class=-1,
-                            reason="모델 또는 메타 없음",
-                            source=source,
-                            model_symbol=m["symbol"]
-                        )
-                        continue
+                        model_path = get_latest_model_path(symbol, strategy)
+                        if not model_path or not os.path.exists(model_path):
+                            model_name = os.path.splitext(m["pt_file"])[0]
+                            log_prediction(
+                                symbol=symbol,
+                                strategy=strategy,
+                                model=model_name,
+                                predicted_class=-1,
+                                reason="모델 또는 메타 없음",
+                                source=source,
+                                model_symbol=m["symbol"]
+                            )
+                            continue
+                        meta_path = model_path.replace(".pt", ".meta.json")
 
                     model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, len(group_classes))
                     if model is None:
@@ -342,7 +357,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             train_meta_learner(model_outputs_list, true_labels)
             print("[✅ meta learner 재학습 완료]")
 
-        # ✅ 예측 결과가 없는 경우 실패 기록
         if not model_outputs_list:
             log_prediction(
                 symbol=symbol,
@@ -383,7 +397,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             volatility=True
         )
         return -1
-
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
