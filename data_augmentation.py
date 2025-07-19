@@ -66,23 +66,28 @@ def balance_classes(X, y, min_count=5, num_classes=21):
         count = len(indices)
         needed = max(0, target_count - count)
 
-        if needed > 0 and count >= 1:
-            try:
-                reps = np.random.choice(indices, needed, replace=True)
-                base_samples = X[reps]
-                aug_samples = augment_batch(base_samples)
-                X_balanced.extend(aug_samples)
+        if needed > 0:
+            if count >= 1:
+                try:
+                    reps = np.random.choice(indices, needed, replace=True)
+                    base_samples = X[reps]
+                    aug_samples = augment_batch(base_samples)
+                    X_balanced.extend(aug_samples)
+                    y_balanced.extend([cls] * needed)
+                    print(f"[✅ 클래스 {cls}] {needed}개 augment 추가 완료")
+                except Exception as e:
+                    print(f"[⚠️ 클래스 {cls} 증강 실패 → dummy로 대체] {e}")
+                    dummy = np.random.normal(0, 1, (needed, nx, ny_dim)).astype(np.float32)
+                    dummy = np.clip(dummy, -3, 3)
+                    X_balanced.extend(dummy)
+                    y_balanced.extend([cls] * needed)
+                    print(f"[➕ 클래스 {cls}] {needed}개 noise dummy sample 생성 완료 (보완)")
+            else:
+                dummy = np.random.normal(0, 1, (needed, nx, ny_dim)).astype(np.float32)
+                dummy = np.clip(dummy, -3, 3)
+                X_balanced.extend(dummy)
                 y_balanced.extend([cls] * needed)
-                print(f"[✅ 클래스 {cls}] {needed}개 augment 추가 완료")
-            except Exception as e:
-                print(f"[⚠️ 클래스 {cls} 증강 실패] → {e}")
-                raise Exception(f"⛔ balance_classes 증강 실패: 클래스 {cls}")
-        elif needed > 0:
-            dummy = np.random.normal(0, 1, (needed, nx, ny_dim)).astype(np.float32)
-            dummy = np.clip(dummy, -3, 3)
-            X_balanced.extend(dummy)
-            y_balanced.extend([cls] * needed)
-            print(f"[➕ 클래스 {cls}] {needed}개 noise dummy sample 생성 완료 (정규분포)")
+                print(f"[🆕 클래스 {cls}] {needed}개 new dummy 생성 완료 (클래스 미존재)")
 
     combined = list(zip(X_balanced, y_balanced))
     np.random.shuffle(combined)
