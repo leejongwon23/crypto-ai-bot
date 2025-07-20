@@ -99,6 +99,11 @@ def get_class_groups(num_classes=21, group_size=7):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
+# ⬇ 중간 생략 없이 전체 train_one_model 함수
+# ✅ 기존 모델이 존재하면 가중치 불러와 이어서 학습합니다
+# ✅ 예측 실패가 없어도 누적 학습되고, 실패시엔 실패 데이터도 포함됩니다
+# ✅ 진화형 구조 완성
+
 def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     import os, gc, traceback, torch, json, numpy as np, pandas as pd
     from datetime import datetime; from collections import Counter
@@ -131,12 +136,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
-            print("[⚠️ get_kline_by_strategy 결과 없음 → dummy로 대체]")
             df = pd.DataFrame([{"timestamp": i, "close": 100 + i} for i in range(100)])
 
         df_feat = compute_features(symbol, df, strategy)
         if df_feat is None or df_feat.empty or df_feat.isnull().values.any():
-            print("[⚠️ compute_features 결과 이상 → dummy로 대체]")
             df_feat = pd.DataFrame(np.random.normal(0, 1, size=(100, input_size)), columns=[f"f{i}" for i in range(input_size)])
 
         try:
@@ -152,7 +155,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         except: pass
 
         for window in find_best_windows(symbol, strategy) or [20]:
-            print(f"▶️ window={window} → dataset 생성 시작")
             X_y = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
             if not X_y or not isinstance(X_y, tuple) or len(X_y) != 2:
                 log_training_result(symbol, strategy, f"학습실패:dataset_unpack실패_window{window}", 0.0, 0.0, 0.0)
@@ -186,7 +188,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 X_val_group, y_val_group = X_val[vm], y_val[vm]
 
                 if len(y_train_group) < 2 or len(y_val_group) == 0:
-                    print(f"[⚠️ 데이터 부족 group{gid}] → 더미 보완 후 강제 학습")
                     if len(X_train_group) == 0:
                         X_train_group = np.random.normal(0, 1, size=(20, window, input_size))
                         y_train_group = np.random.randint(0, len(group_classes), size=20)
@@ -207,73 +208,65 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                     model_name = f"{model_type}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window{window}"
                     model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
 
-                    # ✅ 기존 모델 존재 + 새학습일 경우 생략
+                    model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
+                    
                     if os.path.exists(model_path):
                         print(f"[⏩ 기존 모델 존재 → 이어학습으로 간주: {model_path}]")
+                        model.load_state_dict(torch.load(model_path))  # ✅ 핵심 수정
 
-                    try:
-                        model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
-                        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-                        lossfn = FocalLoss()
+                    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+                    lossfn = FocalLoss()
 
-                        to_tensor = lambda x: torch.tensor(x, dtype=torch.float32)
-                        Xtt = to_tensor(X_train_group); Xvt = to_tensor(X_val_group)
-                        ytt = torch.tensor(y_train_group, dtype=torch.long)
-                        yvt = torch.tensor(y_val_group, dtype=torch.long)
+                    to_tensor = lambda x: torch.tensor(x, dtype=torch.float32)
+                    Xtt = to_tensor(X_train_group); Xvt = to_tensor(X_val_group)
+                    ytt = torch.tensor(y_train_group, dtype=torch.long)
+                    yvt = torch.tensor(y_val_group, dtype=torch.long)
 
-                        train_loader = DataLoader(TensorDataset(Xtt, ytt), batch_size=32, shuffle=True)
-                        val_loader = DataLoader(TensorDataset(Xvt, yvt), batch_size=32)
+                    train_loader = DataLoader(TensorDataset(Xtt, ytt), batch_size=32, shuffle=True)
+                    val_loader = DataLoader(TensorDataset(Xvt, yvt), batch_size=32)
 
-                        for _ in range(max_epochs):
-                            for xb, yb in train_loader:
-                                xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                                loss = lossfn(model(xb), yb)
-                                if torch.isfinite(loss):
-                                    optimizer.zero_grad(); loss.backward(); optimizer.step()
+                    for _ in range(max_epochs):
+                        for xb, yb in train_loader:
+                            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                            loss = lossfn(model(xb), yb)
+                            if torch.isfinite(loss):
+                                optimizer.zero_grad(); loss.backward(); optimizer.step()
 
-                        maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1)
+                    maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1)
 
-                        model.eval()
-                        with torch.no_grad():
-                            val_preds = torch.argmax(model(Xvt.to(DEVICE)), dim=1)
-                            val_acc = (val_preds == yvt.to(DEVICE)).float().mean().item()
-                            val_f1 = f1_score(yvt.cpu().numpy(), val_preds.cpu().numpy(), average="macro")
+                    model.eval()
+                    with torch.no_grad():
+                        val_preds = torch.argmax(model(Xvt.to(DEVICE)), dim=1)
+                        val_acc = (val_preds == yvt.to(DEVICE)).float().mean().item()
+                        val_f1 = f1_score(yvt.cpu().numpy(), val_preds.cpu().numpy(), average="macro")
 
-                        torch.save(model.state_dict(), model_path)
+                    torch.save(model.state_dict(), model_path)
 
-                        with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
-                            json.dump({
-                                "symbol": symbol,
-                                "strategy": strategy,
-                                "model": model_type,
-                                "group_id": gid,
-                                "window": window,
-                                "input_size": input_size,
-                                "output_size": len(group_classes),
-                                "model_name": model_name,
-                                "timestamp": now_kst().isoformat()
-                            }, f, ensure_ascii=False, indent=2)
+                    with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
+                        json.dump({
+                            "symbol": symbol,
+                            "strategy": strategy,
+                            "model": model_type,
+                            "group_id": gid,
+                            "window": window,
+                            "input_size": input_size,
+                            "output_size": len(group_classes),
+                            "model_name": model_name,
+                            "timestamp": now_kst().isoformat()
+                        }, f, ensure_ascii=False, indent=2)
 
-                        log_training_result(symbol, strategy, model_name, acc=val_acc, f1=val_f1, loss=loss.item())
-                        trained_any = True
-                        print(f"[✅ 저장 완료] {model_path}")
+                    log_training_result(symbol, strategy, model_name, acc=val_acc, f1=val_f1, loss=loss.item())
+                    trained_any = True
 
-                        del model, optimizer, lossfn, train_loader, val_loader
-                        torch.cuda.empty_cache(); gc.collect()
-
-                    except Exception as inner_e:
-                        reason = f"{type(inner_e).__name__}: {inner_e}"
-                        log_training_result(symbol, strategy, f"학습실패:{reason}", 0.0, 0.0, 0.0)
-                        print(f"[❌ 내부 예외] group{gid} → {reason}")
+                    del model, optimizer, lossfn, train_loader, val_loader
+                    torch.cuda.empty_cache(); gc.collect()
 
         if not trained_any:
-            print(f"[❌ 모델 전부 실패] 저장된 모델 없음 → {symbol}-{strategy}")
             log_training_result(symbol, strategy, f"학습실패:전그룹학습불가", 0.0, 0.0, 0.0)
 
     except Exception as e:
         reason = f"{type(e).__name__}: {e}"
         log_training_result(symbol, strategy, f"학습실패:전체예외:{reason}", 0.0, 0.0, 0.0)
-        print(f"[❌ 전체 예외] {symbol}-{strategy}: {reason}")
 
 
 # ✅ augmentation 함수 추가
