@@ -115,6 +115,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     from data.utils import get_kline_by_strategy, compute_features, create_dataset
     from focal_loss import FocalLoss
     from meta_learning import maml_train_entry
+    from sklearn.metrics import f1_score
     import pytz
 
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
@@ -184,14 +185,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 X_train_group, y_train_group = X_train[tm], y_train[tm]
                 X_val_group, y_val_group = X_val[vm], y_val[vm]
 
-                # ✅ 핵심 수정: 데이터 부족 시에도 강제 학습
                 if len(y_train_group) < 2 or len(y_val_group) == 0:
                     print(f"[⚠️ 데이터 부족 group{gid}] → 더미 보완 후 강제 학습")
-
                     if len(X_train_group) == 0:
                         X_train_group = np.random.normal(0, 1, size=(20, window, input_size))
                         y_train_group = np.random.randint(0, len(group_classes), size=20)
-
                     if len(X_val_group) == 0:
                         X_val_group = np.copy(X_train_group[:5])
                         y_val_group = np.copy(y_train_group[:5])
@@ -206,6 +204,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 X_train_group, y_train_group = balance_classes(X_train_group, y_train_group, min_count=20, num_classes=len(group_classes))
 
                 for model_type in ["lstm", "cnn_lstm", "transformer"]:
+                    model_name = f"{model_type}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window{window}"
+                    model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
+
+                    # ✅ 기존 모델 존재 + 새학습일 경우 생략
+                    if os.path.exists(model_path):
+                        print(f"[⏩ 기존 모델 존재 → 이어학습으로 간주: {model_path}]")
+
                     try:
                         model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
                         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
@@ -232,9 +237,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         with torch.no_grad():
                             val_preds = torch.argmax(model(Xvt.to(DEVICE)), dim=1)
                             val_acc = (val_preds == yvt.to(DEVICE)).float().mean().item()
+                            val_f1 = f1_score(yvt.cpu().numpy(), val_preds.cpu().numpy(), average="macro")
 
-                        model_name = f"{model_type}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window{window}"
-                        model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
                         torch.save(model.state_dict(), model_path)
 
                         with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
@@ -250,7 +254,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                                 "timestamp": now_kst().isoformat()
                             }, f, ensure_ascii=False, indent=2)
 
-                        log_training_result(symbol, strategy, model_name, acc=val_acc, f1=0.0, loss=loss.item())
+                        log_training_result(symbol, strategy, model_name, acc=val_acc, f1=val_f1, loss=loss.item())
                         trained_any = True
                         print(f"[✅ 저장 완료] {model_path}")
 
@@ -270,6 +274,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         reason = f"{type(e).__name__}: {e}"
         log_training_result(symbol, strategy, f"학습실패:전체예외:{reason}", 0.0, 0.0, 0.0)
         print(f"[❌ 전체 예외] {symbol}-{strategy}: {reason}")
+
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
