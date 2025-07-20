@@ -148,7 +148,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                    return_value=None, volatility=False, source="일반", predicted_class=None, label=None,
                    augmentation=None, group_id=None, model_symbol=None):  # ✅ 유사모델 기록용
 
-    import csv, os, datetime, pytz, json
+    import csv, os, datetime, pytz, json, hashlib
     import numpy as np
     from threading import Lock
 
@@ -206,10 +206,17 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "group_id": group_id_val
     }
 
-    # ✅ CSV 기록 추가
+    # ✅ 항상 고정된 field 순서 유지
+    fieldnames = [
+        "timestamp", "symbol", "model_symbol", "strategy", "direction", "entry_price", "target_price",
+        "model", "rate", "status", "reason", "return", "volatility", "source",
+        "predicted_class", "label", "group_id"
+    ]
+
     try:
-        fieldnames = list(row.keys())
         write_header = not os.path.exists(full_path) or os.path.getsize(full_path) == 0
+
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
 
         with Lock():
             with open(full_path, "a", newline="", encoding="utf-8-sig") as f:
@@ -219,7 +226,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                 writer.writerow(row)
 
     except Exception as e:
-        print(f"[log_prediction CSV 기록 오류] {e}")
+        print(f"[❌ log_prediction CSV 기록 오류] → {e}")
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
