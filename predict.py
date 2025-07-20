@@ -257,7 +257,16 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     reason="모델 없음",
                     source=source
                 )
-                return -1
+                return {
+                    "symbol": symbol,
+                    "strategy": strategy,
+                    "model": "없음",
+                    "class": -1,
+                    "expected_return": 0.0,
+                    "timestamp": now_kst().isoformat(),
+                    "reason": "모델 없음",
+                    "source": source
+                }
 
             recent_freq = get_recent_class_frequencies(strategy)
             model_outputs = []
@@ -351,32 +360,49 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 model_outputs_list.append(model_outputs)
                 true_labels.append(final_pred_class)
                 print(f"[predict] {symbol}-{strategy} 최종 예측 클래스: {final_pred_class}")
-                break
+
+                return {
+                    "symbol": symbol,
+                    "strategy": strategy,
+                    "model": model_name,
+                    "class": final_pred_class,
+                    "expected_return": expected_return,
+                    "timestamp": now_kst().isoformat(),
+                    "reason": reason,
+                    "source": source
+                }
 
         if len(model_outputs_list) >= 10:
             train_meta_learner(model_outputs_list, true_labels)
             print("[✅ meta learner 재학습 완료]")
 
-        if not model_outputs_list:
-            log_prediction(
-                symbol=symbol,
-                strategy=strategy,
-                direction="예측실패",
-                entry_price=0,
-                target_price=0,
-                model="예측불가",
-                success=False,
-                reason="모델 예측 없음",
-                rate=0.0,
-                return_value=0.0,
-                source=source,
-                predicted_class=-1,
-                label=-1,
-                volatility=True
-            )
-            return -1
-
-        return final_pred_class
+        # 예측 결과가 없는 경우
+        log_prediction(
+            symbol=symbol,
+            strategy=strategy,
+            direction="예측실패",
+            entry_price=0,
+            target_price=0,
+            model="예측불가",
+            success=False,
+            reason="모델 예측 없음",
+            rate=0.0,
+            return_value=0.0,
+            source=source,
+            predicted_class=-1,
+            label=-1,
+            volatility=True
+        )
+        return {
+            "symbol": symbol,
+            "strategy": strategy,
+            "model": "예측불가",
+            "class": -1,
+            "expected_return": 0.0,
+            "timestamp": now_kst().isoformat(),
+            "reason": "모델 예측 없음",
+            "source": source
+        }
 
     except Exception as e:
         print(f"[predict 예외] {symbol}-{strategy} → {e}")
@@ -396,7 +422,16 @@ def predict(symbol, strategy, source="일반", model_type=None):
             label=-1,
             volatility=True
         )
-        return -1
+        return {
+            "symbol": symbol,
+            "strategy": strategy,
+            "model": "예외발생",
+            "class": -1,
+            "expected_return": 0.0,
+            "timestamp": now_kst().isoformat(),
+            "reason": f"예외 발생: {e}",
+            "source": source
+        }
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
