@@ -361,6 +361,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 true_labels.append(final_pred_class)
                 print(f"[predict] {symbol}-{strategy} 최종 예측 클래스: {final_pred_class}")
 
+                if len(model_outputs_list) >= 10:
+                    train_meta_learner(model_outputs_list, true_labels)
+                    print("[✅ meta learner 재학습 완료]")
+
                 return {
                     "symbol": symbol,
                     "strategy": strategy,
@@ -372,11 +376,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     "source": source
                 }
 
-        if len(model_outputs_list) >= 10:
-            train_meta_learner(model_outputs_list, true_labels)
-            print("[✅ meta learner 재학습 완료]")
-
-        # 예측 결과가 없는 경우
+        # 예측 결과가 하나도 없을 때 반드시 로그 남김
         log_prediction(
             symbol=symbol,
             strategy=strategy,
@@ -385,7 +385,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             target_price=0,
             model="예측불가",
             success=False,
-            reason="모델 예측 없음",
+            reason="예측모델 모두 실패 또는 조건미달",
             rate=0.0,
             return_value=0.0,
             source=source,
@@ -400,7 +400,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "class": -1,
             "expected_return": 0.0,
             "timestamp": now_kst().isoformat(),
-            "reason": "모델 예측 없음",
+            "reason": "예측모델 모두 실패 또는 조건미달",
             "source": source
         }
 
@@ -432,6 +432,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "reason": f"예외 발생: {e}",
             "source": source
         }
+
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
