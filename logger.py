@@ -206,56 +206,20 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "group_id": group_id_val
     }
 
-    def convert(o):
-        if isinstance(o, (np.integer,)):
-            return int(o)
-        if isinstance(o, (np.floating,)):
-            return float(o)
-        if isinstance(o, (np.ndarray,)):
-            return o.tolist()
-        return str(o)
+    # ✅ CSV 기록 추가
+    try:
+        fieldnames = list(row.keys())
+        write_header = not os.path.exists(full_path) or os.path.getsize(full_path) == 0
 
-    fieldnames = sorted(row.keys())
-    db_lock = Lock()
+        with Lock():
+            with open(full_path, "a", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                if write_header:
+                    writer.writeheader()
+                writer.writerow(row)
 
-    with db_lock:
-        for path in [dated_path, full_path]:
-            try:
-                with open(path, "a", newline="", encoding="utf-8-sig") as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    if f.tell() == 0:
-                        writer.writeheader()
-                    writer.writerow(row)
-                print(f"[✅ log_prediction 기록 완료] {path}")
-            except Exception as e:
-                print(f"[오류] log_prediction 기록 실패 ({path}) → {e}")
-
-        try:
-            if os.path.exists(json_path):
-                with open(json_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            else:
-                data = []
-
-            data.append(row)
-            with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2, default=convert)
-            print(f"[✅ log_prediction JSON 저장 완료] {json_path}")
-        except Exception as e:
-            print(f"[❌ log_prediction JSON 저장 실패] {e}")
-
-        # ✅ 실패한 예측은 wrong_predictions.csv 에도 기록
-        if not success:
-            try:
-                with open(wrong_path, "a", newline="", encoding="utf-8-sig") as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    if f.tell() == 0:
-                        writer.writeheader()
-                    writer.writerow(row)
-                print(f"[⚠️ 실패 기록 저장 완료] {wrong_path}")
-            except Exception as e:
-                print(f"[❌ 실패 기록 저장 실패] {e}")
-
+    except Exception as e:
+        print(f"[log_prediction CSV 기록 오류] {e}")
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
