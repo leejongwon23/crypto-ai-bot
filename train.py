@@ -387,43 +387,38 @@ def train_all_models():
 def train_models(symbol_list):
     """
     ✅ [YOPO 구조 반영]
-    - 심볼 하나당: 클래스그룹 전체 → 전략 순서로 학습
-    - 모든 그룹/전략 학습 완료 후 다음 심볼로 넘어감
-    - 예측 실행은 하지 않음 (외부 recommend에서 호출)
+    - 심볼 하나당: 전략별 전체 그룹 학습 실행
+    - group_id=None으로 설정하여 전체 그룹 자동 학습
+    - 모든 전략 완료 후 다음 심볼로 이동
     - meta.json 일괄 보정 수행
     """
     global training_in_progress
     from telegram_bot import send_message
     import maintenance_fix_meta
-    from config import get_class_groups
     import time
 
     strategies = ["단기", "중기", "장기"]
-    class_groups = get_class_groups()
-    group_ids = list(range(len(class_groups)))
 
     print(f"🚀 [train_models] 심볼 학습 시작: {symbol_list}")
 
     for symbol in symbol_list:
         print(f"\n🔁 [심볼 시작] {symbol}")
 
-        for group_id in group_ids:
-            print(f"▶ 그룹 {group_id} 학습 시작")
+        for strategy in strategies:
+            if training_in_progress.get(strategy, False):
+                print(f"⚠️ 중복 실행 방지: {strategy}")
+                continue
 
-            for strategy in strategies:
-                if training_in_progress.get(strategy, False):
-                    print(f"⚠️ 중복 실행 방지: {strategy}")
-                    continue
-
-                training_in_progress[strategy] = True
-                try:
-                    train_one_model(symbol, strategy, group_id=group_id)
-                except Exception as e:
-                    print(f"[❌ 학습 실패] {symbol}-{strategy}-group{group_id} → {e}")
-                finally:
-                    training_in_progress[strategy] = False
-                    print(f"✅ {symbol}-{strategy}-group{group_id} 학습 완료")
-                    time.sleep(2)
+            training_in_progress[strategy] = True
+            try:
+                # ✅ 핵심: group_id=None → 내부에서 전체 그룹 자동 반복
+                train_one_model(symbol, strategy, group_id=None)
+            except Exception as e:
+                print(f"[❌ 학습 실패] {symbol}-{strategy} → {e}")
+            finally:
+                training_in_progress[strategy] = False
+                print(f"✅ {symbol}-{strategy} 전체 그룹 학습 완료")
+                time.sleep(2)
 
     # ✅ 모든 학습 후 메타 보정
     try:
@@ -440,7 +435,6 @@ def train_models(symbol_list):
         print(f"[❌ 실패학습 루프 예외] {e}")
 
     send_message(f"✅ 전체 심볼 학습 완료: {symbol_list}")
-
 
 def train_model_loop(strategy):
     """
