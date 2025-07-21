@@ -103,7 +103,6 @@ def get_class_groups(num_classes=21, group_size=7):
 # ✅ 기존 모델이 존재하면 가중치 불러와 이어서 학습합니다
 # ✅ 예측 실패가 없어도 누적 학습되고, 실패시엔 실패 데이터도 포함됩니다
 # ✅ 진화형 구조 완성
-
 def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     import os, gc, traceback, torch, json, numpy as np, pandas as pd
     from datetime import datetime; from collections import Counter
@@ -209,10 +208,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                     model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
 
                     model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
-                    
-                    if os.path.exists(model_path):
+
+                    # ✅ 기존 모델 여부로 새학습/이어학습 구분
+                    is_resume = os.path.exists(model_path)
+                    if is_resume:
                         print(f"[⏩ 기존 모델 존재 → 이어학습으로 간주: {model_path}]")
-                        model.load_state_dict(torch.load(model_path))  # ✅ 핵심 수정
+                        model.load_state_dict(torch.load(model_path))
 
                     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
                     lossfn = FocalLoss()
@@ -255,7 +256,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                             "timestamp": now_kst().isoformat()
                         }, f, ensure_ascii=False, indent=2)
 
-                    log_training_result(symbol, strategy, model_name, acc=val_acc, f1=val_f1, loss=loss.item())
+                    # ✅ 이어학습/새학습 여부 구분하여 기록
+                    training_type = "이어학습" if is_resume else "새학습"
+                    log_training_result(symbol, strategy, training_type, acc=val_acc, f1=val_f1, loss=loss.item())
                     trained_any = True
 
                     del model, optimizer, lossfn, train_loader, val_loader
