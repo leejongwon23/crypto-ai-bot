@@ -103,7 +103,7 @@ def get_class_groups(num_classes=21, group_size=7):
 # ✅ 기존 모델이 존재하면 가중치 불러와 이어서 학습합니다
 # ✅ 예측 실패가 없어도 누적 학습되고, 실패시엔 실패 데이터도 포함됩니다
 # ✅ 진화형 구조 완성
-def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
+def train_one_model(symbol, strategy, group_id=None, max_epochs=5):
     import os, gc, traceback, torch, json, numpy as np, pandas as pd
     from datetime import datetime; from collections import Counter
     from ssl_pretrain import masked_reconstruction
