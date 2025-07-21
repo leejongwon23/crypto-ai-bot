@@ -453,9 +453,12 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     with db_lock:
         try:
             path = TRAIN_LOG
-            pd.DataFrame([row]).to_csv(path, mode="a", index=False,
-                                       header=not os.path.exists(path),
-                                       encoding="utf-8-sig")
+            file_exists = os.path.exists(path)
+            with open(path, mode="a", encoding="utf-8-sig", newline="") as f:
+                df = pd.DataFrame([row])
+                df.to_csv(f, index=False, header=not file_exists)
+                f.flush()  # ✅ 디스크 기록 강제
+                os.fsync(f.fileno())  # ✅ OS 단위에서 완전 flush
             print(f"[✅ log_training_result 저장 완료] {path}")
         except Exception as e:
             print(f"[❌ 학습 로그 저장 오류] {e}")
