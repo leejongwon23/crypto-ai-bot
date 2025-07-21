@@ -466,6 +466,19 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
             print(f"[❌ 학습 로그 저장 오류] {e}")
             print(f"[🔍 row 내용] {row}")
 
+
+# ✅ 로그 읽기 시 utf-8-sig + 오류 무시
+def read_training_log():
+    import pandas as pd
+    from logger import TRAIN_LOG
+
+    try:
+        df = pd.read_csv(TRAIN_LOG, encoding="utf-8-sig", errors="ignore")
+        return df
+    except Exception as e:
+        print(f"[❌ 학습 로그 읽기 오류] {e}")
+        return pd.DataFrame()
+
 def get_class_success_rate(strategy, recent_days=3):
     from collections import defaultdict
     import pandas as pd
