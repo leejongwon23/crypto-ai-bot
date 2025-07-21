@@ -207,7 +207,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from logger import get_feature_hash
     from model.base_model import get_model
 
-    # ✅ 로그 디렉터리 보장
     os.makedirs("/persistent/logs", exist_ok=True)
 
     def get_latest_model_path(symbol, strategy):
@@ -251,6 +250,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 feat_scaled = feat_scaled[:, :FEATURE_INPUT_SIZE]
 
             models = get_available_models(symbol, strategy)
+            models = sorted(models, key=lambda x: x.get("timestamp", ""), reverse=True)  # 최신순 정렬
+
             if not models:
                 log_prediction(
                     symbol=symbol,
@@ -305,6 +306,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                                 source=source,
                                 model_symbol=m["symbol"]
                             )
+                            # 실패기록 DB에도 저장
+                            insert_failure_record(symbol, strategy, group_id, reason="모델 또는 메타 없음")
                             continue
                         meta_path = model_path.replace(".pt", ".meta.json")
 
@@ -320,6 +323,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                             source=source,
                             model_symbol=m["symbol"]
                         )
+                        insert_failure_record(symbol, strategy, group_id, reason="모델 로드 실패")
                         continue
 
                     with torch.no_grad():
@@ -379,7 +383,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     "source": source
                 }
 
-        # 예측 결과가 하나도 없을 때 반드시 로그 남김
+        # 예측 실패 처리
         log_prediction(
             symbol=symbol,
             strategy=strategy,
@@ -396,6 +400,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             label=-1,
             volatility=True
         )
+        insert_failure_record(symbol, strategy, -1, reason="예측모델 모두 실패 또는 조건미달")
         return {
             "symbol": symbol,
             "strategy": strategy,
@@ -425,6 +430,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             label=-1,
             volatility=True
         )
+        insert_failure_record(symbol, strategy, -1, reason=f"예외 발생: {e}")
         return {
             "symbol": symbol,
             "strategy": strategy,
