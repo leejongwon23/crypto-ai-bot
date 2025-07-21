@@ -19,7 +19,7 @@ from collections import OrderedDict
 from config import get_class_ranges
 # ✅ 기존 predict.py 맨 위 import 구역에 추가
 from meta_learning import train_meta_learner, load_meta_learner
-
+import safe_cleanup  # ✅ 오래된 로그 자동 정리
 
 
 DEVICE = torch.device("cpu")
