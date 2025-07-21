@@ -6,8 +6,8 @@ import csv
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")    
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")    
-LOG_FILE = "./logs/message_log.csv"  # 상대 경로로 변경    
-os.makedirs("./logs", exist_ok=True)  # 상대 경로로 변경    
+LOG_FILE = "/persistent/logs/message_log.csv"    
+os.makedirs("/persistent/logs", exist_ok=True)    
 
 def now_kst():    
     return datetime.datetime.now(pytz.timezone("Asia/Seoul"))    
