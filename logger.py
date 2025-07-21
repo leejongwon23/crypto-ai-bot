@@ -213,22 +213,23 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     ]
 
     try:
-        write_header = not os.path.exists(full_path) or os.path.getsize(full_path) == 0
-
-        # ✅ 모든 로그 경로에 대해 디렉토리 생성 보장
+        # ✅ 디렉토리 자동 생성 (prediction YYYY-MM-DD.csv 포함)
         for path in [full_path, dated_path, wrong_path]:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
+            log_dir = os.path.dirname(path)
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir, exist_ok=True)
 
         with Lock():
-            with open(full_path, "a", newline="", encoding="utf-8-sig") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                if write_header:
-                    writer.writeheader()
-                writer.writerow(row)
+            for path in [full_path, dated_path]:
+                write_header = not os.path.exists(path) or os.path.getsize(path) == 0
+                with open(path, "a", newline="", encoding="utf-8-sig") as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    if write_header:
+                        writer.writeheader()
+                    writer.writerow(row)
 
     except Exception as e:
         print(f"[❌ log_prediction CSV 기록 오류] → {e}")
-
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
