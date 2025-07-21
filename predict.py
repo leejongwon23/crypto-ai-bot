@@ -207,6 +207,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from logger import get_feature_hash
     from model.base_model import get_model
 
+    # ✅ 로그 디렉터리 보장
+    os.makedirs("/persistent/logs", exist_ok=True)
+
     def get_latest_model_path(symbol, strategy):
         folder = "/persistent/models"
         candidates = [
