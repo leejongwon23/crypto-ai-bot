@@ -1,24 +1,16 @@
-# safe_cleanup.py
-
 import os
+import shutil
 import time
 from datetime import datetime, timedelta
 
-# ✅ 삭제 대상 경로
+# ✅ 설정
 LOG_DIR = "/persistent/logs"
 DELETED_LOG_PATH = os.path.join(LOG_DIR, "deleted_log.txt")
+DISK_LIMIT_GB = 10  # 전체 용량
+TRIGGER_GB = 7      # 정리 트리거: 7GB 이상
 
-# ✅ 보존 기간 (최근 3일치 로그는 유지)
 KEEP_DAYS = 3
-
-# ✅ 삭제 대상 접두어
-DELETE_PREFIXES = [
-    "prediction_",
-    "evaluation_",
-    "wrong_"
-]
-
-# ✅ 삭제 제외 파일명
+DELETE_PREFIXES = ["prediction_", "evaluation_", "wrong_"]
 EXCLUDE_FILES = set([
     "prediction_log.csv",
     "train_log.csv",
@@ -28,11 +20,27 @@ EXCLUDE_FILES = set([
     "fine_tune_target.csv",
 ])
 
-# ✅ 실행 함수
+def get_directory_size_gb(path):
+    total = 0
+    for dirpath, _, filenames in os.walk(path):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            if os.path.isfile(fp):
+                total += os.path.getsize(fp)
+    return total / (1024 ** 3)
+
 def auto_delete_old_logs():
     now = datetime.now()
     cutoff = now - timedelta(days=KEEP_DAYS)
     deleted = []
+
+    # ✅ 현재 디스크 사용량 계산
+    current_size_gb = get_directory_size_gb("/persistent")
+    if current_size_gb < TRIGGER_GB:
+        print(f"[✅ 용량정상] 현재 사용량: {current_size_gb:.2f}GB → 정리 불필요")
+        return
+
+    print(f"[⚠️ 디스크 경고] 사용량: {current_size_gb:.2f}GB → 자동 정리 시작")
 
     if not os.path.exists(LOG_DIR):
         print(f"[❌ 로그 디렉토리 없음] → {LOG_DIR}")
@@ -49,7 +57,6 @@ def auto_delete_old_logs():
             continue
 
         try:
-            # ✅ 날짜가 포함된 로그 파일만 타겟팅
             date_str = fname.split("_")[-1].replace(".csv", "").strip()
             file_date = datetime.strptime(date_str, "%Y-%m-%d")
             if file_date < cutoff:
@@ -63,9 +70,8 @@ def auto_delete_old_logs():
             f.write(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 삭제된 파일 목록:\n")
             for name in deleted:
                 f.write(f"  - {name}\n")
-        print(f"[🧹 삭제 완료] 총 {len(deleted)}개 파일 삭제됨.")
+        print(f"[🧹 삭제 완료] {len(deleted)}개 파일 삭제됨.")
     else:
         print("[✅ 삭제 대상 없음] 최근 로그만 존재합니다.")
 
-# ✅ main.py에서 import 시 자동 실행
 auto_delete_old_logs()
