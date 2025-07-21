@@ -447,11 +447,11 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     with db_lock:
         try:
             path = TRAIN_LOG
-
-            # ✅ 디렉토리 존재 여부만 확인, 생성은 시도하지 않음
             log_dir = os.path.dirname(path)
+
+            # ✅ 로그 디렉토리 자동 생성
             if not os.path.exists(log_dir):
-                print(f"[⚠️ 로그 디렉토리 없음] {log_dir} → Render에서는 수동 생성 필요")
+                os.makedirs(log_dir, exist_ok=True)
 
             file_exists = os.path.exists(path)
             with open(path, mode="a", encoding="utf-8-sig", newline="") as f:
