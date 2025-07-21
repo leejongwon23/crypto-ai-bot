@@ -146,7 +146,7 @@ db_lock = threading.Lock()  # ✅ Lock 전역 선언
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, model=None, success=True, reason="", rate=0.0,
                    return_value=None, volatility=False, source="일반", predicted_class=None, label=None,
-                   augmentation=None, group_id=None, model_symbol=None):  # ✅ 유사모델 기록용
+                   augmentation=None, group_id=None, model_symbol=None):
 
     import csv, os, datetime, pytz, json, hashlib
     import numpy as np
@@ -158,7 +158,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     dated_path = f"/persistent/logs/prediction_{date_str}.csv"
     full_path = "/persistent/prediction_log.csv"
     json_path = "/persistent/prediction_log.json"
-    wrong_path = "/persistent/wrong_predictions.csv"  # ✅ 실패 학습용 추가 경로
+    wrong_path = "/persistent/wrong_predictions.csv"
 
     try:
         pred_class_val = int(float(predicted_class)) if predicted_class not in [None, ""] else -1
@@ -206,7 +206,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         "group_id": group_id_val
     }
 
-    # ✅ 항상 고정된 field 순서 유지
     fieldnames = [
         "timestamp", "symbol", "model_symbol", "strategy", "direction", "entry_price", "target_price",
         "model", "rate", "status", "reason", "return", "volatility", "source",
@@ -216,7 +215,9 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     try:
         write_header = not os.path.exists(full_path) or os.path.getsize(full_path) == 0
 
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        # ✅ 모든 로그 경로에 대해 디렉토리 생성 보장
+        for path in [full_path, dated_path, wrong_path]:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
 
         with Lock():
             with open(full_path, "a", newline="", encoding="utf-8-sig") as f:
@@ -227,6 +228,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
 
     except Exception as e:
         print(f"[❌ log_prediction CSV 기록 오류] → {e}")
+
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
