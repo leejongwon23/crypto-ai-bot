@@ -211,6 +211,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=5):
                     meta_path = model_path.replace(".pt", ".meta.json")
 
                     model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
+
                     is_resume = os.path.exists(model_path) and os.path.exists(meta_path)
                     if is_resume:
                         print(f"[⏩ 기존 모델 + 메타 존재 → 이어학습: {model_path}]")
@@ -276,6 +277,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=5):
     except Exception as e:
         reason = f"{type(e).__name__}: {e}"
         log_training_result(symbol, strategy, f"학습실패:전체예외:{reason}", 0.0, 0.0, 0.0)
+
 
 
 # ✅ augmentation 함수 추가
