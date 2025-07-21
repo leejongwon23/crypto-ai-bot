@@ -201,6 +201,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=5):
                     log_training_result(symbol, strategy, f"학습실패:label불일치_group{gid}_window{window}", 0.0, 0.0, 0.0)
                     continue
 
+                # ✅ 분포 확인
+                print(f"[👁 클래스 분포 확인] {symbol}-{strategy}-group{gid}-window{window} → {Counter(y_train_group)}")
+
+                if len(set(y_train_group)) < 2:
+                    log_training_result(symbol, strategy, f"학습스킵:클래스1종_group{gid}_window{window}", 0.0, 0.0, 0.0)
+                    continue
+
                 X_train_group, y_train_group = balance_classes(X_train_group, y_train_group, min_count=20, num_classes=len(group_classes))
 
                 for model_type in ["lstm", "cnn_lstm", "transformer"]:
@@ -209,8 +216,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=5):
                     meta_path = model_path.replace(".pt", ".meta.json")
 
                     model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
-
-                    # ✅ 이어학습 판단 개선: 모델 + 메타파일 모두 존재해야 이어학습
                     is_resume = os.path.exists(model_path) and os.path.exists(meta_path)
                     if is_resume:
                         print(f"[⏩ 기존 모델 + 메타 존재 → 이어학습: {model_path}]")
@@ -240,8 +245,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=5):
                     with torch.no_grad():
                         val_outputs = model(Xvt.to(DEVICE))
                         val_preds = torch.argmax(val_outputs, dim=1)
-
-                        # ✅ 클래스 불균형 방지: 평가불가 상황 시 정확도 0 처리
                         if yvt.numel() == 0 or len(torch.unique(yvt)) < 2:
                             val_acc, val_f1 = 0.0, 0.0
                         else:
@@ -249,7 +252,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=5):
                             val_f1 = f1_score(yvt.cpu().numpy(), val_preds.cpu().numpy(), average="macro")
 
                     torch.save(model.state_dict(), model_path)
-
                     with open(meta_path, "w", encoding="utf-8") as f:
                         json.dump({
                             "symbol": symbol,
@@ -276,6 +278,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=5):
     except Exception as e:
         reason = f"{type(e).__name__}: {e}"
         log_training_result(symbol, strategy, f"학습실패:전체예외:{reason}", 0.0, 0.0, 0.0)
+
 
 
 # ✅ augmentation 함수 추가
