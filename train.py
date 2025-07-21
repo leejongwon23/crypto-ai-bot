@@ -206,13 +206,14 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 for model_type in ["lstm", "cnn_lstm", "transformer"]:
                     model_name = f"{model_type}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window{window}"
                     model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
+                    meta_path = model_path.replace(".pt", ".meta.json")
 
                     model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
 
-                    # ✅ 기존 모델 여부로 새학습/이어학습 구분
-                    is_resume = os.path.exists(model_path)
+                    # ✅ 이어학습 판단 개선: 모델 + 메타파일 모두 존재해야 이어학습
+                    is_resume = os.path.exists(model_path) and os.path.exists(meta_path)
                     if is_resume:
-                        print(f"[⏩ 기존 모델 존재 → 이어학습으로 간주: {model_path}]")
+                        print(f"[⏩ 기존 모델 + 메타 존재 → 이어학습: {model_path}]")
                         model.load_state_dict(torch.load(model_path))
 
                     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
@@ -237,13 +238,19 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
                     model.eval()
                     with torch.no_grad():
-                        val_preds = torch.argmax(model(Xvt.to(DEVICE)), dim=1)
-                        val_acc = (val_preds == yvt.to(DEVICE)).float().mean().item()
-                        val_f1 = f1_score(yvt.cpu().numpy(), val_preds.cpu().numpy(), average="macro")
+                        val_outputs = model(Xvt.to(DEVICE))
+                        val_preds = torch.argmax(val_outputs, dim=1)
+
+                        # ✅ 클래스 불균형 방지: 평가불가 상황 시 정확도 0 처리
+                        if yvt.numel() == 0 or len(torch.unique(yvt)) < 2:
+                            val_acc, val_f1 = 0.0, 0.0
+                        else:
+                            val_acc = (val_preds == yvt.to(DEVICE)).float().mean().item()
+                            val_f1 = f1_score(yvt.cpu().numpy(), val_preds.cpu().numpy(), average="macro")
 
                     torch.save(model.state_dict(), model_path)
 
-                    with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
+                    with open(meta_path, "w", encoding="utf-8") as f:
                         json.dump({
                             "symbol": symbol,
                             "strategy": strategy,
@@ -256,7 +263,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                             "timestamp": now_kst().isoformat()
                         }, f, ensure_ascii=False, indent=2)
 
-                    # ✅ 이어학습/새학습 여부 구분하여 기록
                     training_type = "이어학습" if is_resume else "새학습"
                     log_training_result(symbol, strategy, training_type, acc=val_acc, f1=val_f1, loss=loss.item())
                     trained_any = True
