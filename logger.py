@@ -421,21 +421,15 @@ def export_recent_model_stats(recent_days=3):
         print(f"[오류] 최근 모델 성능 집계 실패 → {e}")
 
 def log_training_result(symbol, strategy, model_name, acc, f1, loss):
-    """
-    모델 학습 결과를 로그로 저장합니다.
-    실패 사유가 있을 경우 model_name 필드에 기록됩니다.
-    """
     import pandas as pd
     import datetime, pytz, os
-    from logger import db_lock, TRAIN_LOG  # ✅ 전역 락, 경로
+    from logger import db_lock, TRAIN_LOG
 
     now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
     timestamp = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
 
     mode = "이어학습" if os.path.exists(model_path) else "신규학습"
-    
-    # ✅ 정확한 실패 이유 명시 가능하게 유지
     if isinstance(model_name, str) and model_name.startswith("학습실패:"):
         mode = "실패"
 
@@ -443,7 +437,7 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
         "timestamp": timestamp,
         "symbol": symbol,
         "strategy": strategy,
-        "model": model_name,  # 예: "학습실패: 데이터 없음" or 모델 이름
+        "model": model_name,
         "mode": mode,
         "accuracy": float(acc),
         "f1_score": float(f1),
@@ -453,13 +447,21 @@ def log_training_result(symbol, strategy, model_name, acc, f1, loss):
     with db_lock:
         try:
             path = TRAIN_LOG
+
+            # ✅ 디렉토리 존재 여부만 확인, 생성은 시도하지 않음
+            log_dir = os.path.dirname(path)
+            if not os.path.exists(log_dir):
+                print(f"[⚠️ 로그 디렉토리 없음] {log_dir} → Render에서는 수동 생성 필요")
+
             file_exists = os.path.exists(path)
             with open(path, mode="a", encoding="utf-8-sig", newline="") as f:
                 df = pd.DataFrame([row])
                 df.to_csv(f, index=False, header=not file_exists)
-                f.flush()  # ✅ 디스크 기록 강제
-                os.fsync(f.fileno())  # ✅ OS 단위에서 완전 flush
+                f.flush()
+                os.fsync(f.fileno())
+
             print(f"[✅ log_training_result 저장 완료] {path}")
+
         except Exception as e:
             print(f"[❌ 학습 로그 저장 오류] {e}")
             print(f"[🔍 row 내용] {row}")
