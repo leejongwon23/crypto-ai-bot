@@ -46,72 +46,52 @@ def ensure_failure_db():
         print(f"[오류] ensure_failure_db 실패 → {e}")
 
 def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
+    import os
+    import pandas as pd
+    from datetime import datetime
+
+    CSV_PATH = "/persistent/wrong_predictions.csv"
+
+    # ✅ feature_hash 유효성 검사
     if not isinstance(feature_hash, str) or feature_hash.strip() == "":
         print("[❌ insert_failure_record] feature_hash 없음 → 저장 스킵")
         return
 
-    # ✅ feature_vector 처리 강화
-    if feature_vector is not None:
+    # ✅ 기존 중복 데이터 로딩
+    if os.path.exists(CSV_PATH):
         try:
-            import numpy as np
-            if hasattr(feature_vector, "detach"):
-                feature_vector = feature_vector.detach().cpu().numpy()
-            if hasattr(feature_vector, "numpy"):
-                feature_vector = feature_vector.numpy()
-            if hasattr(feature_vector, "tolist"):
-                feature_vector = feature_vector.tolist()
-            if isinstance(feature_vector, list):
-                feature_vector = np.array(feature_vector).flatten().tolist()
-            json.dumps(feature_vector)
+            df = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
+            if "feature_hash" in df.columns and feature_hash in df["feature_hash"].values:
+                print(f"[⛔ 중복 예측 실패] feature_hash 중복 → 저장 스킵")
+                return
         except Exception as e:
-            print(f"[경고] feature_vector 변환 실패 → zero-vector 대체: {e}")
-            feature_vector = [0.0] * 10
+            print(f"[⚠️ CSV 로드 실패] {e}")
+            df = pd.DataFrame()
     else:
-        print("[경고] feature_vector 없음 → zero-vector 대체")
-        feature_vector = [0.0] * 10
+        df = pd.DataFrame()
 
-    # ✅ label 처리 강화
-    if label is not None:
-        try:
-            label = int(label)
-        except:
-            print("[경고] label 변환 실패 → -1 대체")
-            label = -1
-    else:
-        print("[경고] label None → -1 대체")
-        label = -1
-
-    model_name = row.get("model", "unknown")
-    predicted_class = row.get("predicted_class", -1)
+    # ✅ 새 기록 구성
     try:
-        predicted_class = int(predicted_class)
-    except:
-        predicted_class = -1
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "symbol": row.get("symbol"),
+            "strategy": row.get("strategy"),
+            "model": row.get("model"),
+            "predicted_class": row.get("predicted_class"),
+            "label": row.get("label") if label is None else label,
+            "feature_hash": feature_hash
+        }
 
-    try:
-        conn = get_db_connection()
-        conn.execute("""
-            INSERT OR IGNORE INTO failure_patterns (
-                timestamp, symbol, strategy, direction, hash, model_name, predicted_class, rate, reason, feature, label
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            row.get("timestamp", ""),
-            row.get("symbol", ""),
-            row.get("strategy", ""),
-            row.get("direction", "예측실패"),
-            feature_hash,
-            model_name,
-            predicted_class,
-            float(row.get("rate", 0.0)),
-            row.get("reason", ""),
-            json.dumps(feature_vector),
-            label
-        ))
-        conn.commit()
-        print(f"[✅ insert_failure_record] {row.get('symbol')} 저장 완료")
+        if feature_vector is not None:
+            for i, v in enumerate(feature_vector.flatten()):
+                record[f"f{i}"] = float(v)
+
+        df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
+        df.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
+        print(f"[✅ 실패 예측 저장 완료] {record['symbol']} {record['strategy']} {record['model']} → class={record['predicted_class']} ≠ label={record['label']}")
+
     except Exception as e:
-        print(f"[오류] insert_failure_record 실패 → {e}")
+        print(f"[❌ insert_failure_record 예외] {type(e).__name__}: {e}")
 
 def load_existing_failure_hashes():
     try:
