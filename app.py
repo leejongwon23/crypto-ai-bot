@@ -342,18 +342,29 @@ def reset_all():
         return "❌ 인증 실패", 403
     try:
         def clear(f, h): open(f, "w", newline="", encoding="utf-8-sig").write(",".join(h) + "\n")
+
+        # ✅ 모델 폴더 초기화 (.pt 포함 전체 삭제)
         if os.path.exists(MODEL_DIR):
             shutil.rmtree(MODEL_DIR)
         os.makedirs(MODEL_DIR, exist_ok=True)
+
+        # ✅ 혹시 남아있을 수 있는 .meta.json도 정리
+        for f in os.listdir("/persistent/models"):
+            if f.endswith(".meta.json"):
+                os.remove(os.path.join("/persistent/models", f))
+
+        # ✅ 예측, 학습, 실패, 메시지 로그 초기화
         clear(PREDICTION_LOG, ["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "model", "rate", "status", "reason", "return", "volatility"])
         clear(WRONG_PREDICTIONS, ["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "gain"])
         clear(LOG_FILE, ["timestamp", "symbol", "strategy", "model", "accuracy", "f1", "loss"])
         clear(AUDIT_LOG, ["timestamp", "symbol", "strategy", "result", "status"])
         clear(MESSAGE_LOG, ["timestamp", "symbol", "strategy", "message"])
         clear(FAILURE_LOG, ["symbol", "strategy", "failures"])
+
         return "✅ 초기화 완료"
     except Exception as e:
         return f"초기화 실패: {e}", 500
+
 
 @app.route("/force-fix-prediction-log")
 def force_fix_prediction_log():
