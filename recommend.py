@@ -246,22 +246,21 @@ def get_similar_symbol(symbol, top_k=1):
     return [s[0] for s in similarities[:top_k]]
 
 def main(symbol=None, strategy=None, force=False, allow_prediction=True):
-    import os, json
-    from config import get_class_groups
+    import os, json, torch
+    from config import get_class_groups, get_FEATURE_INPUT_SIZE
     from predict import predict
     from logger import log_prediction
     from model.base_model import get_model
-    import torch
 
-    input_size = get_FEATURE_INPUT_SIZE()
     class_groups = get_class_groups()
+    input_size = get_FEATURE_INPUT_SIZE()
 
     for sym in [symbol] if symbol else SYMBOLS:
         for strat in [strategy] if strategy else ["단기", "중기", "장기"]:
             for gid, group in enumerate(class_groups):
                 for mtype in ["lstm", "cnn_lstm", "transformer"]:
-                    mname = f"{mtype}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window20"
-                    model_path = f"/persistent/models/{sym}_{strat}_{mname}.pt"
+                    model_name = f"{mtype}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window20"
+                    model_path = f"/persistent/models/{sym}_{strat}_{model_name}.pt"
                     meta_path = model_path.replace(".pt", ".meta.json")
 
                     if not os.path.exists(model_path):
@@ -272,14 +271,20 @@ def main(symbol=None, strategy=None, force=False, allow_prediction=True):
                         model = get_model(mtype, input_size, len(group)).eval()
                         model.load_state_dict(torch.load(model_path, map_location="cpu"))
 
-                        predict(symbol=sym, strategy=strat, model=model,
-                                group_id=gid, model_name=mname,
-                                model_symbol=sym, allow_prediction=allow_prediction)
+                        predict(
+                            symbol=sym,
+                            strategy=strat,
+                            model=model,
+                            group_id=gid,
+                            model_name=model_name,
+                            model_symbol=sym,
+                            allow_prediction=allow_prediction
+                        )
                         print(f"[✅ 예측 완료] {sym}-{strat}-group{gid}")
                     except Exception as e:
                         print(f"[❌ 예측 실패] {sym}-{strat}-group{gid}: {e}")
                         continue
-    
+
 import shutil
 def check_disk_usage(threshold_percent=90):
     try:
