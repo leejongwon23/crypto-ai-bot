@@ -143,94 +143,34 @@ def log_audit_prediction(s, t, status, reason):
 import threading
 db_lock = threading.Lock()  # ✅ Lock 전역 선언
 
-def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
-                   timestamp=None, model=None, success=True, reason="", rate=0.0,
-                   return_value=None, volatility=False, source="일반", predicted_class=None, label=None,
-                   augmentation=None, group_id=None, model_symbol=None):
 
-    import csv, os, datetime, pytz, json, hashlib
-    import numpy as np
-    from threading import Lock
+def log_prediction(**kwargs):
+    import os, csv
+    from datetime import datetime
+    import pytz
 
-    now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-    now = timestamp or now_kst().isoformat()
-    date_str = now.split("T")[0]
-    dated_path = f"/persistent/logs/prediction_{date_str}.csv"
-    full_path = "/persistent/prediction_log.csv"
-    json_path = "/persistent/prediction_log.json"
-    wrong_path = "/persistent/wrong_predictions.csv"
-
-    try:
-        pred_class_val = int(float(predicted_class)) if predicted_class not in [None, ""] else -1
-    except:
-        pred_class_val = -1
-
-    if label is None or str(label).strip() == "":
-        label_val = pred_class_val
-    else:
-        try:
-            label_val = int(label)
-        except:
-            label_val = -1
-
-    if group_id in [None, "", "unknown"]:
-        group_id_val = f"group_{pred_class_val}" if pred_class_val >= 0 else "unknown"
-    else:
-        group_id_val = str(group_id)
-
-    final_model_symbol = model_symbol if model_symbol else symbol
-    if isinstance(model, str) and model != "unknown" and "_" in model:
-        final_model_symbol = model.split("_")[0]
-
-    status = "success" if success else "fail"
-    effective_rate = rate if rate is not None else 0.0
-    effective_return = return_value if return_value is not None else effective_rate
-
+    path = "/persistent/prediction_log.csv"
+    now_kst = datetime.now(pytz.timezone("Asia/Seoul"))
     row = {
-        "timestamp": now,
-        "symbol": str(symbol or "UNKNOWN"),
-        "model_symbol": str(final_model_symbol),
-        "strategy": str(strategy or "알수없음"),
-        "direction": direction or "N/A",
-        "entry_price": float(entry_price or 0.0),
-        "target_price": float(target_price or 0.0),
-        "model": str(model or "unknown"),
-        "rate": float(effective_rate),
-        "status": status,
-        "reason": reason or "",
-        "return": float(effective_return),
-        "volatility": bool(volatility),
-        "source": str(source or "일반"),
-        "predicted_class": int(pred_class_val),
-        "label": int(label_val),
-        "group_id": group_id_val
+        **kwargs,
+        "timestamp": now_kst.isoformat()
     }
 
-    fieldnames = [
-        "timestamp", "symbol", "model_symbol", "strategy", "direction", "entry_price", "target_price",
-        "model", "rate", "status", "reason", "return", "volatility", "source",
-        "predicted_class", "label", "group_id"
+    headers = [
+        "timestamp", "symbol", "strategy", "direction", "entry_price", "target_price",
+        "model", "rate", "status", "reason", "return", "predicted_class", "label",
+        "group_id", "model_symbol", "model_name", "volatility"
     ]
 
     try:
-        # ✅ 디렉토리 자동 생성 (prediction YYYY-MM-DD.csv 포함)
-        for path in [full_path, dated_path, wrong_path]:
-            log_dir = os.path.dirname(path)
-            if not os.path.exists(log_dir):
-                os.makedirs(log_dir, exist_ok=True)
-
-        with Lock():
-            for path in [full_path, dated_path]:
-                write_header = not os.path.exists(path) or os.path.getsize(path) == 0
-                with open(path, "a", newline="", encoding="utf-8-sig") as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    if write_header:
-                        writer.writeheader()
-                    writer.writerow(row)
-
+        exists = os.path.exists(path)
+        with open(path, "a", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            if not exists:
+                writer.writeheader()
+            writer.writerow(row)
     except Exception as e:
-        print(f"[❌ log_prediction CSV 기록 오류] → {e}")
-
+        print(f"[⚠️ 예측 로그 기록 실패] {path}: {e}")
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
 
@@ -421,52 +361,24 @@ def export_recent_model_stats(recent_days=3):
     except Exception as e:
         print(f"[오류] 최근 모델 성능 집계 실패 → {e}")
 
-def log_training_result(symbol, strategy, model_name, acc, f1, loss):
-    import pandas as pd
-    import datetime, pytz, os
-    from logger import db_lock, TRAIN_LOG
+def log_training_result(symbol, strategy, status, acc, f1, loss):
+    import os, csv
+    from datetime import datetime
+    import pytz
 
-    now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-    timestamp = now_kst().strftime("%Y-%m-%d %H:%M:%S")
-    model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
+    path = "/persistent/logs/train_log.csv"
+    now_kst = datetime.now(pytz.timezone("Asia/Seoul"))
+    row = [now_kst.isoformat(), symbol, strategy, status, acc, f1, loss]
 
-    mode = "이어학습" if os.path.exists(model_path) else "신규학습"
-    if isinstance(model_name, str) and model_name.startswith("학습실패:"):
-        mode = "실패"
-
-    row = {
-        "timestamp": timestamp,
-        "symbol": symbol,
-        "strategy": strategy,
-        "model": model_name,
-        "mode": mode,
-        "accuracy": float(acc),
-        "f1_score": float(f1),
-        "loss": float(loss)
-    }
-
-    with db_lock:
-        try:
-            path = TRAIN_LOG
-            log_dir = os.path.dirname(path)
-
-            # ✅ 로그 디렉토리 자동 생성
-            if not os.path.exists(log_dir):
-                os.makedirs(log_dir, exist_ok=True)
-
-            file_exists = os.path.exists(path)
-            with open(path, mode="a", encoding="utf-8-sig", newline="") as f:
-                df = pd.DataFrame([row])
-                df.to_csv(f, index=False, header=not file_exists)
-                f.flush()
-                os.fsync(f.fileno())
-
-            print(f"[✅ log_training_result 저장 완료] {path}")
-
-        except Exception as e:
-            print(f"[❌ 학습 로그 저장 오류] {e}")
-            print(f"[🔍 row 내용] {row}")
-
+    try:
+        exists = os.path.exists(path)
+        with open(path, "a", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            if not exists:
+                writer.writerow(["timestamp", "symbol", "strategy", "model", "accuracy", "f1", "loss"])
+            writer.writerow(row)
+    except Exception as e:
+        print(f"[⚠️ 학습 로그 기록 실패] {path}: {e}")
 
 # ✅ 로그 읽기 시 utf-8-sig + 오류 무시
 def read_training_log():
