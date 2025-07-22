@@ -398,6 +398,8 @@ def ensure_prediction_log_exists():
 ensure_prediction_log_exists()
 
 if __name__ == "__main__":
+    import os  # ✅ PORT 환경변수 읽기용 (반드시 필요)
+
     print(">>> 서버 실행 준비")
     sys.stdout.flush()
 
@@ -415,4 +417,6 @@ if __name__ == "__main__":
     threading.Thread(target=lambda: send_message("[시작] YOPO 서버 실행됨"), daemon=True).start()
     print("✅ [DEBUG] telegram_bot send_message 쓰레드 시작 완료")
 
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    # ✅ Render가 요구하는 PORT 환경변수 기반 실행
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
