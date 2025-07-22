@@ -447,13 +447,14 @@ def train_symbol_group_loop(delay_minutes=5):
     """
     ✅ 심볼 → 전략 순서로 순차 학습되도록 개선
     ✅ 중복 학습 방지: 이미 학습된 (symbol, strategy)는 스킵
-    ✅ 전체 그룹 학습 후 예측 수행
+    ✅ 전체 그룹 학습 후 예측 수행 + 디스크 자동정리 포함
     """
     import time, os, json
     import maintenance_fix_meta
     from data.utils import SYMBOL_GROUPS, _kline_cache, _feature_cache
     from train import train_one_model
     from recommend import main
+    import safe_cleanup  # ✅ 자동정리 모듈 추가
 
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작")
@@ -510,6 +511,9 @@ def train_symbol_group_loop(delay_minutes=5):
                             print(f"[✅ 예측 완료] {symbol}-{strategy}")
                         except Exception as e:
                             print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
+
+                # ✅ 예측 후 → 안전하게 디스크 정리 실행
+                safe_cleanup.auto_delete_old_logs()
 
                 print(f"🕒 그룹 {idx} 완료 → {delay_minutes}분 대기")
                 time.sleep(delay_minutes * 60)
