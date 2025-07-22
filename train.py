@@ -464,7 +464,7 @@ def train_symbol_group_loop(delay_minutes=5):
         print(f"\n🔄 전체 그룹 순회 루프 #{loop_count} 시작")
 
         for idx, group in enumerate(SYMBOL_GROUPS):
-            print(f"\n🚀 [그룹 {idx}/{group_count}] 학습 시작 | 심볼: {group}")
+            print(f"\n🚀 [그룹 {idx}/{group_count}] 학습 시작 | 심볼 수: {len(group)} → {group}")
             _kline_cache.clear()
             _feature_cache.clear()
             print("[✅ cache cleared] _kline_cache, _feature_cache")
@@ -473,6 +473,8 @@ def train_symbol_group_loop(delay_minutes=5):
                 for symbol in group:
                     for strategy in ["단기", "중기", "장기"]:
                         for gid in range(5):  # ✅ 최대 그룹 수는 5로 고정
+                            print(f"▶ [학습 시도] {symbol}-{strategy}-group{gid}")
+
                             if train_done.get(symbol, {}).get(strategy, {}).get(str(gid), False):
                                 print(f"[⏭️ 스킵] {symbol}-{strategy}-group{gid} (이미 학습됨)")
                                 continue
@@ -495,6 +497,7 @@ def train_symbol_group_loop(delay_minutes=5):
                 for symbol in group:
                     for strategy in ["단기", "중기", "장기"]:
                         try:
+                            print(f"▶ [예측 시도] {symbol}-{strategy}")
                             main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
                             print(f"[✅ 예측 완료] {symbol}-{strategy}")
                         except Exception as e:
