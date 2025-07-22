@@ -498,7 +498,16 @@ def train_symbol_group_loop(delay_minutes=5):
                     for strategy in ["단기", "중기", "장기"]:
                         for gid in range(5):
                             print(f"▶ [학습 시도] {symbol}-{strategy}-group{gid}")
-                            if train_done.get(symbol, {}).get(strategy, {}).get(str(gid), False):
+
+                            # ✅ 구조적으로 명확하게 학습 여부 확인
+                            is_done = (
+                                symbol in train_done and
+                                strategy in train_done[symbol] and
+                                str(gid) in train_done[symbol][strategy] and
+                                train_done[symbol][strategy][str(gid)] is True
+                            )
+
+                            if is_done:
                                 print(f"[⏭️ 스킵] {symbol}-{strategy}-group{gid} (이미 학습됨)")
                                 continue
 
