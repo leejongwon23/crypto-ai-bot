@@ -34,6 +34,7 @@ def augment_batch(X_batch):
 
 import numpy as np
 from collections import Counter
+
 def balance_classes(X, y, min_count=5, num_classes=21):
     import numpy as np
     from collections import Counter
@@ -52,7 +53,7 @@ def balance_classes(X, y, min_count=5, num_classes=21):
         raise Exception("⛔ balance_classes 중단: 유효 라벨 없음")
 
     class_counts = Counter(y)
-    print(f"[🔢 기존 클래스 분포] {dict(class_counts)}")
+    print(f"[📊 클래스 분포] {dict(class_counts)}")  # ✅ 수정된 부분
 
     nsamples, nx, ny_dim = X.shape
     X_balanced, y_balanced = list(X), list(y)
@@ -99,4 +100,5 @@ def balance_classes(X, y, min_count=5, num_classes=21):
 
     print(f"[✅ balance_classes 완료] X.shape={X_final.shape}, y.shape={y_final.shape}, 총 샘플수: {len(y_final)}")
     return X_final, y_final
+
 
