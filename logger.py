@@ -101,8 +101,6 @@ def get_model_success_rate(s, t, m, min_total=10):
 # ✅ 서버 시작 시 호출
 ensure_success_db()
 
-
-
 def load_failure_count():
     path = "/persistent/logs/failure_count.csv"
     if not os.path.exists(path): return {}
@@ -361,24 +359,28 @@ def export_recent_model_stats(recent_days=3):
     except Exception as e:
         print(f"[오류] 최근 모델 성능 집계 실패 → {e}")
 
-def log_training_result(symbol, strategy, status, acc, f1, loss):
-    import os, csv
+def log_training_result(symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0.0, note=""):
+    import csv
     from datetime import datetime
     import pytz
+    import os
 
-    path = "/persistent/logs/train_log.csv"
-    now_kst = datetime.now(pytz.timezone("Asia/Seoul"))
-    row = [now_kst.isoformat(), symbol, strategy, status, acc, f1, loss]
+    LOG_FILE = "/persistent/logs/training_log.csv"
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
+    now = datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
+    row = [now, symbol, strategy, model, accuracy, f1, loss, note]
 
     try:
-        exists = os.path.exists(path)
-        with open(path, "a", newline="", encoding="utf-8-sig") as f:
+        write_header = not os.path.exists(LOG_FILE)
+        with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
-            if not exists:
-                writer.writerow(["timestamp", "symbol", "strategy", "model", "accuracy", "f1", "loss"])
+            if write_header:
+                writer.writerow(["timestamp", "symbol", "strategy", "model", "accuracy", "f1", "loss", "note"])
             writer.writerow(row)
+        print(f"[✅ 학습 로그 기록됨] {symbol}-{strategy} acc={accuracy:.3f} f1={f1:.3f}")
     except Exception as e:
-        print(f"[⚠️ 학습 로그 기록 실패] {path}: {e}")
+        print(f"[⚠️ 학습 로그 기록 실패] {e}")
 
 # ✅ 로그 읽기 시 utf-8-sig + 오류 무시
 def read_training_log():
