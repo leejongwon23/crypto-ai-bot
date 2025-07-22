@@ -10,27 +10,26 @@ NUM_CLASSES = get_NUM_CLASSES()  # ✅ 함수 호출 후 변수 할당
 
 WRONG_CSV = "/persistent/wrong_predictions.csv"
 
-def load_training_prediction_data(symbol, strategy, window, input_size):
+def load_training_prediction_data(symbol, strategy, input_size, window):
     import random, os
     import numpy as np
     import pandas as pd
     from collections import Counter
-    from config import FAIL_AUGMENT_RATIO, NUM_CLASSES
+    from config import FAIL_AUGMENT_RATIO, get_NUM_CLASSES
     from data.utils import get_kline_by_strategy, compute_features
     from logger import get_feature_hash
     from failure_db import load_existing_failure_hashes
 
     WRONG_CSV = "/persistent/wrong_predictions.csv"
+    NUM_CLASSES = get_NUM_CLASSES()
     sequences = []
 
     df_price = get_kline_by_strategy(symbol, strategy)
     if df_price is None or df_price.empty:
-        print(f"[❌ price 데이터 없음] {symbol}-{strategy}")
         return None, None
 
     df_feat = compute_features(symbol, df_price, strategy)
     if df_feat is None or df_feat.empty or df_feat.isnull().any().any():
-        print(f"[❌ feature 계산 실패] {symbol}-{strategy}")
         return None, None
 
     if "timestamp" not in df_feat.columns:
@@ -45,26 +44,28 @@ def load_training_prediction_data(symbol, strategy, window, input_size):
             df = pd.read_csv(WRONG_CSV, encoding="utf-8-sig")
             df = df[(df["symbol"] == symbol) & (df["strategy"] == strategy)]
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+            df = df[df["timestamp"].notna()]
 
-            if "label" not in df.columns and "predicted_class" in df.columns:
-                df["label"] = df["predicted_class"]
-            df = df[df["label"].notna()]
-            df["label"] = pd.to_numeric(df["label"], errors="coerce").fillna(-1).astype(int)
-            df = df.dropna(subset=["timestamp", "label"])
+            if "label" not in df.columns:
+                if "predicted_class" in df.columns:
+                    df["label"] = pd.to_numeric(df["predicted_class"], errors="coerce").fillna(-1).astype(int)
+                else:
+                    df["label"] = -1
+
+            df = df[df["label"] >= 0]
 
             for _, row in df.iterrows():
                 try:
                     entry_time = row["timestamp"]
-                    label = row["label"]
-
-                    entry_time = pd.to_datetime(entry_time).tz_localize("Asia/Seoul") if entry_time.tzinfo is None else entry_time
+                    label = int(row["label"])
                     past_window = df_feat[df_feat["timestamp"] < entry_time].tail(window)
+
                     if len(past_window) < window:
                         continue
 
                     xb = past_window.drop(columns=["timestamp"]).to_numpy(dtype=np.float32)
                     if xb.shape[1] < input_size:
-                        xb = np.pad(xb, ((0, 0), (0, input_size - xb.shape[1])), mode="constant")
+                        xb = np.pad(xb, ((0, 0), (0, input_size - xb.shape[1])), mode="constant", constant_values=0)
 
                     if xb.shape != (window, input_size):
                         continue
@@ -76,13 +77,8 @@ def load_training_prediction_data(symbol, strategy, window, input_size):
 
                     for _ in range(FAIL_AUGMENT_RATIO * 2):
                         sequences.append((xb, label))
-
-                    if label == -1:
-                        random_label = random.randint(0, NUM_CLASSES - 1)
-                        noise_xb = xb + np.random.normal(0, 0.05, xb.shape).astype(np.float32)
-                        sequences.append((noise_xb, random_label))
-                except Exception as e:
-                    print(f"[⚠️ row 처리 실패] {e}")
+                except:
+                    continue
         except Exception as e:
             print(f"[⚠️ 실패기록 파싱 오류] {symbol}-{strategy} → {e}")
 
@@ -95,7 +91,7 @@ def load_training_prediction_data(symbol, strategy, window, input_size):
                 sequences.append((dummy, cls))
 
     if not sequences:
-        print(f"[⚠️ 데이터 없음 → fallback 샘플 생성] {symbol}-{strategy}")
+        print(f"[⚠️ 데이터 없음] {symbol}-{strategy} → fallback 샘플 생성")
         for _ in range(FAIL_AUGMENT_RATIO * 2):
             dummy = np.random.normal(0, 1, (window, input_size)).astype(np.float32)
             random_label = random.randint(0, NUM_CLASSES - 1)
@@ -103,5 +99,5 @@ def load_training_prediction_data(symbol, strategy, window, input_size):
 
     X = np.array([s[0] for s in sequences], dtype=np.float32)
     y = np.array([s[1] for s in sequences], dtype=np.int64)
-    print(f"[✅ load_training_prediction_data 완료] 총 {len(y)}개 / 클래스: {sorted(set(y))}")
+    print(f"[✅ load_training_prediction_data 완료] {symbol}-{strategy} → 샘플 수: {len(y)} / 클래스 수: {len(set(y))}")
     return X, y
