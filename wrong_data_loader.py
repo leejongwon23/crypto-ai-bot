@@ -21,10 +21,8 @@ def load_training_prediction_data(symbol, strategy, window, input_size):
     from failure_db import load_existing_failure_hashes
 
     WRONG_CSV = "/persistent/wrong_predictions.csv"
-
     sequences = []
 
-    # ✅ 가격 데이터 기반으로 기본 피처 준비
     df_price = get_kline_by_strategy(symbol, strategy)
     if df_price is None or df_price.empty:
         return None, None
@@ -40,19 +38,14 @@ def load_training_prediction_data(symbol, strategy, window, input_size):
     used_hashes = set()
     existing_hashes = load_existing_failure_hashes()
 
-    # ✅ 실패기록 기반 학습 샘플 수집
     if os.path.exists(WRONG_CSV):
         try:
             df = pd.read_csv(WRONG_CSV, encoding="utf-8-sig")
             df = df[(df["symbol"] == symbol) & (df["strategy"] == strategy)]
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
 
-            if "label" not in df.columns:
-                if "predicted_class" in df.columns:
-                    df["label"] = df["predicted_class"]
-                else:
-                    df = pd.DataFrame()
-
+            if "label" not in df.columns and "predicted_class" in df.columns:
+                df["label"] = df["predicted_class"]
             df = df[df["label"].notna()]
             df["label"] = pd.to_numeric(df["label"], errors="coerce").fillna(-1).astype(int)
             df = df.dropna(subset=["timestamp", "label"])
@@ -69,7 +62,7 @@ def load_training_prediction_data(symbol, strategy, window, input_size):
 
                     xb = past_window.drop(columns=["timestamp"]).to_numpy(dtype=np.float32)
                     if xb.shape[1] < input_size:
-                        xb = np.pad(xb, ((0,0),(0,input_size - xb.shape[1])), mode="constant", constant_values=0)
+                        xb = np.pad(xb, ((0, 0), (0, input_size - xb.shape[1])), mode="constant", constant_values=0)
 
                     if xb.shape != (window, input_size):
                         continue
@@ -86,14 +79,12 @@ def load_training_prediction_data(symbol, strategy, window, input_size):
                         random_label = random.randint(0, NUM_CLASSES - 1)
                         noise_xb = xb + np.random.normal(0, 0.05, xb.shape).astype(np.float32)
                         sequences.append((noise_xb, random_label))
-
                 except:
                     continue
-
         except:
             print(f"[⚠️ 실패기록 파싱 오류] {symbol}-{strategy}")
 
-    # ✅ 클래스별 부족 샘플 보강 (dummy)
+    # ✅ 클래스 편향 보정 (누락 클래스에 대해 dummy 생성)
     label_counts = Counter([s[1] for s in sequences])
     for cls in range(NUM_CLASSES):
         if label_counts[cls] == 0:
