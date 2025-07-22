@@ -34,7 +34,6 @@ def augment_batch(X_batch):
 
 import numpy as np
 from collections import Counter
-
 def balance_classes(X, y, min_count=5, num_classes=21):
     import numpy as np
     from collections import Counter
@@ -49,7 +48,7 @@ def balance_classes(X, y, min_count=5, num_classes=21):
     X, y = X[mask], y[mask]
 
     if len(y) == 0:
-        print("[❌ balance_classes 실패] 라벨 제거 후 샘플 없음")
+        print("[❌ balance_classes 실패] 유효 라벨 없음")
         raise Exception("⛔ balance_classes 중단: 유효 라벨 없음")
 
     class_counts = Counter(y)
@@ -74,20 +73,19 @@ def balance_classes(X, y, min_count=5, num_classes=21):
                     aug_samples = augment_batch(base_samples)
                     X_balanced.extend(aug_samples)
                     y_balanced.extend([cls] * needed)
-                    print(f"[✅ 클래스 {cls}] {needed}개 augment 추가 완료")
+                    print(f"[✅ 클래스 {cls}] {needed}개 증강 완료")
                 except Exception as e:
-                    print(f"[⚠️ 클래스 {cls} 증강 실패 → dummy로 대체] {e}")
+                    print(f"[⚠️ 클래스 {cls} 증강 실패 → noise dummy 대체] {e}")
                     dummy = np.random.normal(0, 1, (needed, nx, ny_dim)).astype(np.float32)
                     dummy = np.clip(dummy, -3, 3)
                     X_balanced.extend(dummy)
                     y_balanced.extend([cls] * needed)
-                    print(f"[➕ 클래스 {cls}] {needed}개 noise dummy sample 생성 완료 (보완)")
             else:
                 dummy = np.random.normal(0, 1, (needed, nx, ny_dim)).astype(np.float32)
                 dummy = np.clip(dummy, -3, 3)
                 X_balanced.extend(dummy)
                 y_balanced.extend([cls] * needed)
-                print(f"[🆕 클래스 {cls}] {needed}개 new dummy 생성 완료 (클래스 미존재)")
+                print(f"[🆕 클래스 {cls}] {needed}개 dummy 생성")
 
     combined = list(zip(X_balanced, y_balanced))
     np.random.shuffle(combined)
@@ -101,3 +99,4 @@ def balance_classes(X, y, min_count=5, num_classes=21):
 
     print(f"[✅ balance_classes 완료] X.shape={X_final.shape}, y.shape={y_final.shape}, 총 샘플수: {len(y_final)}")
     return X_final, y_final
+
