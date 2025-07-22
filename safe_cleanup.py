@@ -7,9 +7,9 @@ LOG_DIR = "/persistent/logs"
 MODEL_DIR = "/persistent/models"
 DELETED_LOG_PATH = os.path.join(LOG_DIR, "deleted_log.txt")
 
-KEEP_DAYS = 1           # ✅ 최근 1일만 유지
-DISK_LIMIT_GB = 10      # 전체 허용 용량
-TRIGGER_GB = 7          # 정리 시작 트리거
+KEEP_DAYS = 1
+DISK_LIMIT_GB = 10
+TRIGGER_GB = 7
 
 DELETE_PREFIXES = ["prediction_", "evaluation_", "wrong_"]
 EXCLUDE_FILES = set([
@@ -38,8 +38,9 @@ def get_sorted_old_files(dir_path):
             try:
                 ctime = os.path.getctime(full_path)
                 files.append((full_path, ctime))
-            except: continue
-    files.sort(key=lambda x: x[1])  # 오래된 순
+            except:
+                continue
+    files.sort(key=lambda x: x[1])
     return files
 
 def auto_delete_old_logs():
@@ -47,7 +48,6 @@ def auto_delete_old_logs():
     cutoff = now - timedelta(days=KEEP_DAYS)
     deleted = []
 
-    # ✅ 디스크 용량 확인
     current_gb = get_directory_size_gb("/persistent")
     if current_gb < TRIGGER_GB:
         print(f"[✅ 용량정상] 현재 사용량: {current_gb:.2f}GB → 정리 안함")
@@ -59,7 +59,7 @@ def auto_delete_old_logs():
         print(f"[❌ 로그 디렉토리 없음] {LOG_DIR}")
         return
 
-    # ✅ 오래된 파일 삭제 우선
+    # ✅ 오래된 파일 삭제
     for fname in os.listdir(LOG_DIR):
         fpath = os.path.join(LOG_DIR, fname)
         if not os.path.isfile(fpath): continue
@@ -67,14 +67,25 @@ def auto_delete_old_logs():
         if not any(fname.startswith(p) for p in DELETE_PREFIXES): continue
 
         try:
+            # ✅ 1차 시도: 파일명에서 날짜 추출
             date_str = fname.split("_")[-1].replace(".csv", "").strip()
             file_date = datetime.strptime(date_str, "%Y-%m-%d")
-            if file_date < cutoff:
+        except:
+            try:
+                # ✅ 실패 시 수정일 기준으로 처리
+                file_date = datetime.fromtimestamp(os.path.getmtime(fpath))
+                print(f"[ℹ️ 날짜 파싱 실패 → 수정시간 사용] {fname} → {file_date.strftime('%Y-%m-%d')}")
+            except:
+                continue
+
+        if file_date < cutoff:
+            try:
                 os.remove(fpath)
                 deleted.append(fname)
-        except: continue
+            except:
+                continue
 
-    # ✅ 여전히 7GB 이상이면 오래된 파일 추가 삭제
+    # ✅ 2차 정리: 여전히 7GB 초과 → 오래된 순 정리
     while get_directory_size_gb("/persistent") > TRIGGER_GB:
         old_files = get_sorted_old_files(LOG_DIR)
         if not old_files: break
@@ -82,7 +93,8 @@ def auto_delete_old_logs():
         try:
             os.remove(fpath)
             deleted.append(os.path.basename(fpath))
-        except: break
+        except:
+            break
 
     if deleted:
         with open(DELETED_LOG_PATH, "a", encoding="utf-8") as f:
