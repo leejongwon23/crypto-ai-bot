@@ -470,8 +470,15 @@ def train_symbol_group_loop(delay_minutes=5):
 
     done_path = "/persistent/train_done.json"
     if os.path.exists(done_path):
-        with open(done_path, "r", encoding="utf-8") as f:
-            train_done = json.load(f)
+        try:
+            with open(done_path, "r", encoding="utf-8") as f:
+                train_done = json.load(f)
+            if not isinstance(train_done, dict):
+                print("⚠️ train_done.json 내용이 dict 아님 → 초기화 수행")
+                train_done = {}
+        except Exception as e:
+            print(f"⚠️ train_done.json 로드 실패 → 초기화: {e}")
+            train_done = {}
     else:
         train_done = {}
 
@@ -489,7 +496,7 @@ def train_symbol_group_loop(delay_minutes=5):
             try:
                 for symbol in group:
                     for strategy in ["단기", "중기", "장기"]:
-                        for gid in range(5):  # ✅ 최대 그룹 수는 5로 고정
+                        for gid in range(5):
                             print(f"▶ [학습 시도] {symbol}-{strategy}-group{gid}")
 
                             if train_done.get(symbol, {}).get(strategy, {}).get(str(gid), False):
@@ -527,7 +534,6 @@ def train_symbol_group_loop(delay_minutes=5):
             except Exception as e:
                 print(f"[❌ 그룹 {idx} 루프 오류] {e}")
                 continue
-
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
     """
