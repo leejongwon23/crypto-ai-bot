@@ -103,7 +103,7 @@ def get_class_groups(num_classes=21, group_size=7):
 # ✅ 기존 모델이 존재하면 가중치 불러와 이어서 학습합니다
 # ✅ 예측 실패가 없어도 누적 학습되고, 실패시엔 실패 데이터도 포함됩니다
 # ✅ 진화형 구조 완성
-def train_one_model(symbol, strategy, group_id=None, max_epochs=5):
+def train_one_model(symbol, strategy, group_id, max_epochs=5):
     import os, gc, torch, json, numpy as np, pandas as pd
     from datetime import datetime; from collections import Counter
     from ssl_pretrain import masked_reconstruction
@@ -162,88 +162,87 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=5):
             X_train, y_train = X_raw[:-val_len], y_raw[:-val_len]
             X_val, y_val = X_raw[-val_len:], y_raw[-val_len:]
 
-            for gid in [group_id] if group_id is not None else range(len(class_groups_list)):
-                group = class_groups_list[gid]
-                tm, vm = np.isin(y_train, group), np.isin(y_val, group)
-                Xg, yg = X_train[tm], y_train[tm]
-                Xgv, ygv = X_val[vm], y_val[vm]
+            group = class_groups_list[group_id]
+            tm, vm = np.isin(y_train, group), np.isin(y_val, group)
+            Xg, yg = X_train[tm], y_train[tm]
+            Xgv, ygv = X_val[vm], y_val[vm]
 
-                if len(yg) < 2 or len(ygv) == 0:
-                    if len(Xg) == 0:
-                        Xg = np.random.normal(0, 1, (20, window, input_size))
-                        yg = np.random.randint(0, len(group), 20)
-                    if len(Xgv) == 0:
-                        Xgv, ygv = np.copy(Xg[:5]), np.copy(yg[:5])
+            if len(yg) < 2 or len(ygv) == 0:
+                if len(Xg) == 0:
+                    Xg = np.random.normal(0, 1, (20, window, input_size))
+                    yg = np.random.randint(0, len(group), 20)
+                if len(Xgv) == 0:
+                    Xgv, ygv = np.copy(Xg[:5]), np.copy(yg[:5])
 
-                try:
-                    yg = np.array([group.index(y) if y in group else 0 for y in yg])
-                    ygv = np.array([group.index(y) if y in group else 0 for y in ygv])
-                except:
-                    log_training_result(symbol, strategy, f"학습실패:label불일치_group{gid}_window{window}", 0, 0, 0); continue
+            try:
+                yg = np.array([group.index(y) if y in group else 0 for y in yg])
+                ygv = np.array([group.index(y) if y in group else 0 for y in ygv])
+            except:
+                log_training_result(symbol, strategy, f"학습실패:label불일치_group{group_id}_window{window}", 0, 0, 0); continue
 
-                Xg, yg = balance_classes(Xg, yg, min_count=20, num_classes=len(group))
+            Xg, yg = balance_classes(Xg, yg, min_count=20, num_classes=len(group))
 
-                for mtype in ["lstm", "cnn_lstm", "transformer"]:
-                    mname = f"{mtype}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window{window}"
-                    mpath = f"/persistent/models/{symbol}_{strategy}_{mname}.pt"
-                    meta = mpath.replace(".pt", ".meta.json")
+            for mtype in ["lstm", "cnn_lstm", "transformer"]:
+                mname = f"{mtype}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{group_id}_window{window}"
+                mpath = f"/persistent/models/{symbol}_{strategy}_{mname}.pt"
+                meta = mpath.replace(".pt", ".meta.json")
 
-                    model = get_model(mtype, input_size, len(group)).to(DEVICE).train()
-                    is_resume = False
-                    if os.path.exists(mpath) and os.path.exists(meta):
-                        try:
-                            model.load_state_dict(torch.load(mpath))
-                            is_resume = True
-                            print(f"[⏩ 이어학습: {mpath}]")
-                        except: pass
-
-                    opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
-                    lossfn = FocalLoss()
-                    Xtt = torch.tensor(Xg, dtype=torch.float32); ytt = torch.tensor(yg, dtype=torch.long)
-                    Xvt = torch.tensor(Xgv, dtype=torch.float32); yvt = torch.tensor(ygv, dtype=torch.long)
-
-                    train_loader = DataLoader(TensorDataset(Xtt, ytt), batch_size=32, shuffle=True)
-                    val_loader = DataLoader(TensorDataset(Xvt, yvt), batch_size=32)
-
-                    for _ in range(max_epochs):
-                        for xb, yb in train_loader:
-                            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                            loss = lossfn(model(xb), yb)
-                            if torch.isfinite(loss): opt.zero_grad(); loss.backward(); opt.step()
-
-                    maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1)
-
-                    model.eval()
-                    with torch.no_grad():
-                        if yvt.numel() == 0 or len(torch.unique(yvt)) < 2:
-                            dummy_label = (yvt[0].item() + 1) % len(group)
-                            dummy_sample = Xvt[0].cpu().numpy() + np.random.normal(0, 0.01, Xvt[0].shape)
-                            Xvt = torch.cat([Xvt, torch.tensor([dummy_sample], dtype=torch.float32)], dim=0)
-                            yvt = torch.cat([yvt, torch.tensor([dummy_label], dtype=torch.long)], dim=0)
-
-                        val_outputs = model(Xvt.to(DEVICE))
-                        val_preds = torch.argmax(val_outputs, dim=1)
-                        val_acc = (val_preds == yvt.to(DEVICE)).float().mean().item()
-                        val_f1 = f1_score(yvt.cpu().numpy(), val_preds.cpu().numpy(), average="macro")
-
-                    torch.save(model.state_dict(), mpath)
+                model = get_model(mtype, input_size, len(group)).to(DEVICE).train()
+                is_resume = False
+                if os.path.exists(mpath) and os.path.exists(meta):
                     try:
-                        with open(meta, "w", encoding="utf-8") as f:
-                            json.dump({
-                                "symbol": symbol, "strategy": strategy, "model": mtype,
-                                "group_id": gid, "window": window,
-                                "input_size": input_size, "output_size": len(group),
-                                "model_name": mname, "timestamp": now_kst().isoformat()
-                            }, f, ensure_ascii=False, indent=2)
-                    except Exception as e:
-                        print(f"[⚠️ 메타 저장 실패] {meta} → {e}")
+                        model.load_state_dict(torch.load(mpath))
+                        is_resume = True
+                        print(f"[⏩ 이어학습: {mpath}]")
+                    except: pass
 
-                    ttype = "이어학습" if is_resume else "새학습"
-                    log_training_result(symbol, strategy, ttype, acc=val_acc, f1=val_f1, loss=loss.item())
-                    trained_any = True
+                opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
+                lossfn = FocalLoss()
+                Xtt = torch.tensor(Xg, dtype=torch.float32); ytt = torch.tensor(yg, dtype=torch.long)
+                Xvt = torch.tensor(Xgv, dtype=torch.float32); yvt = torch.tensor(ygv, dtype=torch.long)
 
-                    del model, opt, lossfn, train_loader, val_loader
-                    torch.cuda.empty_cache(); gc.collect()
+                train_loader = DataLoader(TensorDataset(Xtt, ytt), batch_size=32, shuffle=True)
+                val_loader = DataLoader(TensorDataset(Xvt, yvt), batch_size=32)
+
+                for _ in range(max_epochs):
+                    for xb, yb in train_loader:
+                        xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                        loss = lossfn(model(xb), yb)
+                        if torch.isfinite(loss): opt.zero_grad(); loss.backward(); opt.step()
+
+                maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1)
+
+                model.eval()
+                with torch.no_grad():
+                    if yvt.numel() == 0 or len(torch.unique(yvt)) < 2:
+                        dummy_label = (yvt[0].item() + 1) % len(group)
+                        dummy_sample = Xvt[0].cpu().numpy() + np.random.normal(0, 0.01, Xvt[0].shape)
+                        Xvt = torch.cat([Xvt, torch.tensor([dummy_sample], dtype=torch.float32)], dim=0)
+                        yvt = torch.cat([yvt, torch.tensor([dummy_label], dtype=torch.long)], dim=0)
+
+                    val_outputs = model(Xvt.to(DEVICE))
+                    val_preds = torch.argmax(val_outputs, dim=1)
+                    val_acc = (val_preds == yvt.to(DEVICE)).float().mean().item()
+                    val_f1 = f1_score(yvt.cpu().numpy(), val_preds.cpu().numpy(), average="macro")
+
+                torch.save(model.state_dict(), mpath)
+                try:
+                    with open(meta, "w", encoding="utf-8") as f:
+                        json.dump({
+                            "symbol": symbol, "strategy": strategy, "model": mtype,
+                            "group_id": group_id, "window": window,
+                            "input_size": input_size, "output_size": len(group),
+                            "model_name": mname, "timestamp": now_kst().isoformat()
+                        }, f, ensure_ascii=False, indent=2)
+                except Exception as e:
+                    print(f"[⚠️ 메타 저장 실패] {meta} → {e}")
+
+                ttype = "이어학습" if is_resume else "새학습"
+                log_training_result(symbol, strategy, ttype, acc=val_acc, f1=val_f1, loss=loss.item())
+                trained_any = True
+
+                del model, opt, lossfn, train_loader, val_loader
+                torch.cuda.empty_cache(); gc.collect()
 
         if not trained_any:
             log_training_result(symbol, strategy, "학습실패:전그룹학습불가", 0, 0, 0)
@@ -251,8 +250,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=5):
     except Exception as e:
         reason = f"{type(e).__name__}: {e}"
         log_training_result(symbol, strategy, f"학습실패:전체예외:{reason}", 0, 0, 0)
-
-
 
 
 # ✅ augmentation 함수 추가
@@ -445,21 +442,21 @@ def train_model_loop(strategy):
 
 def train_symbol_group_loop(delay_minutes=5):
     """
-    ✅ 심볼 → 전략 순서로 순차 학습되도록 개선
-    ✅ 중복 학습 방지: 이미 학습된 (symbol, strategy)는 스킵
+    ✅ 심볼 → 전략 → 그룹 순서로 전체 학습 루프 구성
+    ✅ 중복 학습 방지: (symbol, strategy, group_id) 기준
     ✅ 전체 그룹 학습 후 예측 수행 + 디스크 자동정리 포함
     """
     import time, os, json
     import maintenance_fix_meta
     from data.utils import SYMBOL_GROUPS, _kline_cache, _feature_cache
+    from config import get_class_groups
     from train import train_one_model
     from recommend import main
-    import safe_cleanup  # ✅ 자동정리 모듈 추가
+    import safe_cleanup
 
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작")
 
-    # ✅ 학습 완료된 조합 기록 파일
     done_path = "/persistent/train_done.json"
     if os.path.exists(done_path):
         with open(done_path, "r", encoding="utf-8") as f:
@@ -485,21 +482,26 @@ def train_symbol_group_loop(delay_minutes=5):
                         train_done[symbol] = {}
 
                     for strategy in ["단기", "중기", "장기"]:
-                        if train_done[symbol].get(strategy, False):
-                            print(f"[⏭️ 학습 스킵] {symbol}-{strategy} (이미 학습됨)")
-                            continue
+                        if strategy not in train_done[symbol]:
+                            train_done[symbol][strategy] = {}
 
-                        try:
-                            train_one_model(symbol, strategy, group_id=None)
-                            train_done[symbol][strategy] = True
-                            print(f"[✅ 학습 완료] {symbol}-{strategy}")
+                        class_groups = get_class_groups()
+                        for gid in range(len(class_groups)):
+                            if train_done[symbol][strategy].get(str(gid), False):
+                                print(f"[⏭️ 스킵] {symbol}-{strategy}-group{gid} (이미 학습됨)")
+                                continue
 
-                            # ✅ 실시간 저장
-                            with open(done_path, "w", encoding="utf-8") as f:
-                                json.dump(train_done, f, ensure_ascii=False, indent=2)
+                            try:
+                                train_one_model(symbol, strategy, group_id=gid)
+                                train_done[symbol][strategy][str(gid)] = True
+                                print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid}")
 
-                        except Exception as e:
-                            print(f"[❌ 학습 실패] {symbol}-{strategy} → {e}")
+                                # 실시간 저장
+                                with open(done_path, "w", encoding="utf-8") as f:
+                                    json.dump(train_done, f, ensure_ascii=False, indent=2)
+
+                            except Exception as e:
+                                print(f"[❌ 학습 실패] {symbol}-{strategy}-group{gid} → {e}")
 
                 maintenance_fix_meta.fix_all_meta_json()
                 print(f"[✅ meta 보정 완료] 그룹 {idx}")
@@ -512,9 +514,7 @@ def train_symbol_group_loop(delay_minutes=5):
                         except Exception as e:
                             print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
 
-                # ✅ 예측 후 → 안전하게 디스크 정리 실행
                 safe_cleanup.auto_delete_old_logs()
-
                 print(f"🕒 그룹 {idx} 완료 → {delay_minutes}분 대기")
                 time.sleep(delay_minutes * 60)
 
