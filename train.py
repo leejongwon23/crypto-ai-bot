@@ -384,7 +384,7 @@ def train_model_loop(strategy):
         print(f"✅ {strategy} 루프 종료")
 
 def train_symbol_group_loop(delay_minutes=5):
-    import time, os, json
+    import time, os, json, traceback
     import maintenance_fix_meta
     from data.utils import SYMBOL_GROUPS, _kline_cache, _feature_cache
     from train import train_one_model
@@ -424,26 +424,15 @@ def train_symbol_group_loop(delay_minutes=5):
                     for strategy in ["단기", "중기", "장기"]:
                         for gid in range(5):
                             print(f"▶ [학습 시도] {symbol}-{strategy}-group{gid}")
-
-                            # ✅ 구조적으로 명확하게 학습 여부 확인
-                            is_done = (
-                                symbol in train_done and
-                                strategy in train_done[symbol] and
-                                str(gid) in train_done[symbol][strategy] and
-                                train_done[symbol][strategy][str(gid)] is True
-                            )
-
-                            if is_done:
+                            if train_done.get(symbol, {}).get(strategy, {}).get(str(gid), False):
                                 print(f"[⏭️ 스킵] {symbol}-{strategy}-group{gid} (이미 학습됨)")
                                 continue
 
                             try:
                                 train_one_model(symbol, strategy, group_id=gid)
                                 train_done.setdefault(symbol, {}).setdefault(strategy, {})[str(gid)] = True
-
                                 with open(done_path, "w", encoding="utf-8") as f:
                                     json.dump(train_done, f, ensure_ascii=False, indent=2)
-
                                 print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid}")
                             except Exception as e:
                                 print(f"[❌ 학습 실패] {symbol}-{strategy}-group{gid} → {e}")
@@ -454,6 +443,10 @@ def train_symbol_group_loop(delay_minutes=5):
                 for symbol in group:
                     for strategy in ["단기", "중기", "장기"]:
                         try:
+                            if train_done.get(symbol, {}).get(strategy, {}) == {str(i): True for i in range(5)}:
+                                print(f"[⏩ 스킵] {symbol}-{strategy} 예측 (이미 학습 완료)")
+                                continue
+
                             print(f"▶ [예측 시도] {symbol}-{strategy}")
                             main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
                             print(f"[✅ 예측 완료] {symbol}-{strategy}")
@@ -466,6 +459,7 @@ def train_symbol_group_loop(delay_minutes=5):
 
             except Exception as e:
                 print(f"[❌ 그룹 {idx} 루프 오류] {e}")
+                traceback.print_exc()
                 continue
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
