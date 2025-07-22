@@ -441,15 +441,9 @@ def train_model_loop(strategy):
         print(f"✅ {strategy} 루프 종료")
 
 def train_symbol_group_loop(delay_minutes=5):
-    """
-    ✅ 심볼 → 전략 → 그룹 순서로 전체 학습 루프 구성
-    ✅ 중복 학습 방지: (symbol, strategy, group_id) 기준
-    ✅ 전체 그룹 학습 후 예측 수행 + 디스크 자동정리 포함
-    """
     import time, os, json
     import maintenance_fix_meta
     from data.utils import SYMBOL_GROUPS, _kline_cache, _feature_cache
-    from config import get_class_groups
     from train import train_one_model
     from recommend import main
     import safe_cleanup
@@ -471,34 +465,26 @@ def train_symbol_group_loop(delay_minutes=5):
 
         for idx, group in enumerate(SYMBOL_GROUPS):
             print(f"\n🚀 [그룹 {idx}/{group_count}] 학습 시작 | 심볼: {group}")
-
             _kline_cache.clear()
             _feature_cache.clear()
             print("[✅ cache cleared] _kline_cache, _feature_cache")
 
             try:
                 for symbol in group:
-                    if symbol not in train_done:
-                        train_done[symbol] = {}
-
                     for strategy in ["단기", "중기", "장기"]:
-                        if strategy not in train_done[symbol]:
-                            train_done[symbol][strategy] = {}
-
-                        class_groups = get_class_groups()
-                        for gid in range(len(class_groups)):
-                            if train_done[symbol][strategy].get(str(gid), False):
+                        for gid in range(5):  # ✅ 최대 그룹 수는 5로 고정
+                            if train_done.get(symbol, {}).get(strategy, {}).get(str(gid), False):
                                 print(f"[⏭️ 스킵] {symbol}-{strategy}-group{gid} (이미 학습됨)")
                                 continue
 
                             try:
                                 train_one_model(symbol, strategy, group_id=gid)
-                                train_done[symbol][strategy][str(gid)] = True
-                                print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid}")
+                                train_done.setdefault(symbol, {}).setdefault(strategy, {})[str(gid)] = True
 
-                                # 실시간 저장
                                 with open(done_path, "w", encoding="utf-8") as f:
                                     json.dump(train_done, f, ensure_ascii=False, indent=2)
+
+                                print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid}")
 
                             except Exception as e:
                                 print(f"[❌ 학습 실패] {symbol}-{strategy}-group{gid} → {e}")
