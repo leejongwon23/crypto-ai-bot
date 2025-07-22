@@ -474,10 +474,10 @@ def train_symbol_group_loop(delay_minutes=5):
             with open(done_path, "r", encoding="utf-8") as f:
                 train_done = json.load(f)
             if not isinstance(train_done, dict):
-                print("⚠️ train_done.json 내용이 dict 아님 → 초기화 수행")
+                print("⚠️ train_done 타입 오류 → 초기화")
                 train_done = {}
         except Exception as e:
-            print(f"⚠️ train_done.json 로드 실패 → 초기화: {e}")
+            print(f"⚠️ train_done 파싱 실패 → 초기화: {e}")
             train_done = {}
     else:
         train_done = {}
@@ -488,7 +488,7 @@ def train_symbol_group_loop(delay_minutes=5):
         print(f"\n🔄 전체 그룹 순회 루프 #{loop_count} 시작")
 
         for idx, group in enumerate(SYMBOL_GROUPS):
-            print(f"\n🚀 [그룹 {idx}/{group_count}] 학습 시작 | 심볼 수: {len(group)} → {group}")
+            print(f"\n🚀 [그룹 {idx}/{group_count}] 학습 시작 | 심볼 수: {len(group)}")
             _kline_cache.clear()
             _feature_cache.clear()
             print("[✅ cache cleared] _kline_cache, _feature_cache")
@@ -498,7 +498,6 @@ def train_symbol_group_loop(delay_minutes=5):
                     for strategy in ["단기", "중기", "장기"]:
                         for gid in range(5):
                             print(f"▶ [학습 시도] {symbol}-{strategy}-group{gid}")
-
                             if train_done.get(symbol, {}).get(strategy, {}).get(str(gid), False):
                                 print(f"[⏭️ 스킵] {symbol}-{strategy}-group{gid} (이미 학습됨)")
                                 continue
@@ -511,7 +510,6 @@ def train_symbol_group_loop(delay_minutes=5):
                                     json.dump(train_done, f, ensure_ascii=False, indent=2)
 
                                 print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid}")
-
                             except Exception as e:
                                 print(f"[❌ 학습 실패] {symbol}-{strategy}-group{gid} → {e}")
 
