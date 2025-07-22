@@ -127,13 +127,14 @@ def train_one_model(symbol, strategy, group_id, max_epochs=5):
     input_size = get_FEATURE_INPUT_SIZE()
     class_groups_list = get_class_groups()
 
-    print(f"[✅ train_one_model 호출] ▶ {symbol}-{strategy}-group{group_id}")
+    print(f"[✅ train_one_model 호출됨] ▶ {symbol}-{strategy}-group{group_id}")
     trained_any = False
 
     try:
         masked_reconstruction(symbol, strategy, input_size=input_size, mask_ratio=0.2, epochs=5)
         df = compute_features(symbol, get_kline_by_strategy(symbol, strategy) or pd.DataFrame(), strategy)
         if df is None or df.empty:
+            print(f"[⛔ feature 생성 실패] {symbol}-{strategy} → dummy 사용")
             df = pd.DataFrame(np.random.normal(0, 1, (100, input_size)), columns=[f"f{i}" for i in range(input_size)])
 
         try:
@@ -142,16 +143,22 @@ def train_one_model(symbol, strategy, group_id, max_epochs=5):
             imp = compute_feature_importance(get_model("lstm", input_size, 2).to(DEVICE), dummy_X, dummy_y,
                                              [c for c in df.columns if c not in ["timestamp", "strategy"]], "baseline")
             df = drop_low_importance_features(df, imp, 0.01, 5)
-        except: pass
+        except:
+            print(f"[⚠️ feature 중요도 분석 실패 → 통과]")
 
         for window in find_best_windows(symbol, strategy) or [20]:
+            print(f"▶ [윈도우 시도] {symbol}-{strategy}-group{group_id}-window{window}")
             dataset = create_dataset(df.to_dict("records"), window, strategy, input_size)
             if not dataset or not isinstance(dataset, tuple) or len(dataset) != 2:
-                log_training_result(symbol, strategy, f"학습실패:dataset_unpack실패_window{window}", 0, 0, 0); continue
+                print(f"[⛔ dataset 생성 실패] {symbol}-{strategy}-window{window}")
+                log_training_result(symbol, strategy, f"학습실패:dataset_unpack실패_window{window}", 0, 0, 0)
+                continue
 
             X_raw, y_raw = dataset
             if X_raw is None or y_raw is None or len(X_raw) == 0:
-                log_training_result(symbol, strategy, f"학습실패:dataset없음_window{window}", 0, 0, 0); continue
+                print(f"[⛔ 데이터 없음] {symbol}-{strategy}-window{window}")
+                log_training_result(symbol, strategy, f"학습실패:dataset없음_window{window}", 0, 0, 0)
+                continue
 
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size, window)
             if fail_X is not None and len(fail_X) > 0:
@@ -168,6 +175,7 @@ def train_one_model(symbol, strategy, group_id, max_epochs=5):
             Xgv, ygv = X_val[vm], y_val[vm]
 
             if len(yg) < 2 or len(ygv) == 0:
+                print(f"[⛔ 학습/검증 샘플 부족] {symbol}-{strategy}-group{group_id}-window{window}")
                 if len(Xg) == 0:
                     Xg = np.random.normal(0, 1, (20, window, input_size))
                     yg = np.random.randint(0, len(group), 20)
@@ -178,7 +186,9 @@ def train_one_model(symbol, strategy, group_id, max_epochs=5):
                 yg = np.array([group.index(y) if y in group else 0 for y in yg])
                 ygv = np.array([group.index(y) if y in group else 0 for y in ygv])
             except:
-                log_training_result(symbol, strategy, f"학습실패:label불일치_group{group_id}_window{window}", 0, 0, 0); continue
+                print(f"[❌ 라벨 불일치] {symbol}-{strategy}-group{group_id}-window{window}")
+                log_training_result(symbol, strategy, f"학습실패:label불일치_group{group_id}_window{window}", 0, 0, 0)
+                continue
 
             Xg, yg = balance_classes(Xg, yg, min_count=20, num_classes=len(group))
 
@@ -194,7 +204,8 @@ def train_one_model(symbol, strategy, group_id, max_epochs=5):
                         model.load_state_dict(torch.load(mpath))
                         is_resume = True
                         print(f"[⏩ 이어학습: {mpath}]")
-                    except: pass
+                    except:
+                        print(f"[⚠️ 이어학습 실패 → 새로 시작] {mpath}")
 
                 opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
                 lossfn = FocalLoss()
@@ -204,6 +215,7 @@ def train_one_model(symbol, strategy, group_id, max_epochs=5):
                 train_loader = DataLoader(TensorDataset(Xtt, ytt), batch_size=32, shuffle=True)
                 val_loader = DataLoader(TensorDataset(Xvt, yvt), batch_size=32)
 
+                print(f"[⚙️ 학습 시작] {symbol}-{strategy}-{mtype}-group{group_id}-window{window}")
                 for _ in range(max_epochs):
                     for xb, yb in train_loader:
                         xb, yb = xb.to(DEVICE), yb.to(DEVICE)
@@ -226,6 +238,7 @@ def train_one_model(symbol, strategy, group_id, max_epochs=5):
                     val_f1 = f1_score(yvt.cpu().numpy(), val_preds.cpu().numpy(), average="macro")
 
                 torch.save(model.state_dict(), mpath)
+                print(f"[💾 모델 저장됨] {mpath}")
                 try:
                     with open(meta, "w", encoding="utf-8") as f:
                         json.dump({
@@ -240,16 +253,20 @@ def train_one_model(symbol, strategy, group_id, max_epochs=5):
                 ttype = "이어학습" if is_resume else "새학습"
                 log_training_result(symbol, strategy, ttype, acc=val_acc, f1=val_f1, loss=loss.item())
                 trained_any = True
+                print(f"[📊 성능] ACC={val_acc:.4f}, F1={val_f1:.4f}")
 
                 del model, opt, lossfn, train_loader, val_loader
                 torch.cuda.empty_cache(); gc.collect()
 
         if not trained_any:
+            print(f"[❌ 학습 불가] {symbol}-{strategy} 전 그룹 학습 실패")
             log_training_result(symbol, strategy, "학습실패:전그룹학습불가", 0, 0, 0)
 
     except Exception as e:
         reason = f"{type(e).__name__}: {e}"
+        print(f"[❌ 전체 예외] {symbol}-{strategy} → {reason}")
         log_training_result(symbol, strategy, f"학습실패:전체예외:{reason}", 0, 0, 0)
+
 
 
 # ✅ augmentation 함수 추가
