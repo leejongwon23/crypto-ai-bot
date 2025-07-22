@@ -446,16 +446,25 @@ def train_model_loop(strategy):
 def train_symbol_group_loop(delay_minutes=5):
     """
     ✅ 심볼 → 전략 순서로 순차 학습되도록 개선
-    ✅ 심볼별 전략별 클래스 전체 그룹 학습 완료 후 다음 심볼로 이동
-    ✅ 전 그룹 순회 후 다시 처음부터 반복
+    ✅ 중복 학습 방지: 이미 학습된 (symbol, strategy)는 스킵
+    ✅ 전체 그룹 학습 후 예측 수행
     """
-    import time
+    import time, os, json
     import maintenance_fix_meta
     from data.utils import SYMBOL_GROUPS, _kline_cache, _feature_cache
     from train import train_one_model
+    from recommend import main
 
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작")
+
+    # ✅ 학습 완료된 조합 기록 파일
+    done_path = "/persistent/train_done.json"
+    if os.path.exists(done_path):
+        with open(done_path, "r", encoding="utf-8") as f:
+            train_done = json.load(f)
+    else:
+        train_done = {}
 
     loop_count = 0
     while True:
@@ -471,17 +480,29 @@ def train_symbol_group_loop(delay_minutes=5):
 
             try:
                 for symbol in group:
+                    if symbol not in train_done:
+                        train_done[symbol] = {}
+
                     for strategy in ["단기", "중기", "장기"]:
+                        if train_done[symbol].get(strategy, False):
+                            print(f"[⏭️ 학습 스킵] {symbol}-{strategy} (이미 학습됨)")
+                            continue
+
                         try:
                             train_one_model(symbol, strategy, group_id=None)
+                            train_done[symbol][strategy] = True
                             print(f"[✅ 학습 완료] {symbol}-{strategy}")
+
+                            # ✅ 실시간 저장
+                            with open(done_path, "w", encoding="utf-8") as f:
+                                json.dump(train_done, f, ensure_ascii=False, indent=2)
+
                         except Exception as e:
                             print(f"[❌ 학습 실패] {symbol}-{strategy} → {e}")
 
                 maintenance_fix_meta.fix_all_meta_json()
                 print(f"[✅ meta 보정 완료] 그룹 {idx}")
 
-                from recommend import main
                 for symbol in group:
                     for strategy in ["단기", "중기", "장기"]:
                         try:
@@ -496,6 +517,7 @@ def train_symbol_group_loop(delay_minutes=5):
             except Exception as e:
                 print(f"[❌ 그룹 {idx} 루프 오류] {e}")
                 continue
+
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
     """
