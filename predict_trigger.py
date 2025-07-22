@@ -67,34 +67,49 @@ def run():
     from recommend import run_prediction  # ✅ 순환참조 방지 위해 함수 안에 import
 
     print(f"[트리거 실행] 전조 패턴 감지 시작: {now_kst().isoformat()}")
+    triggered = 0  # ✅ 실행 횟수 기록용
+
     for symbol in SYMBOLS:
         for strategy in ["단기", "중기", "장기"]:
             try:
                 key = f"{symbol}_{strategy}"
                 now = time.time()
                 cooldown = TRIGGER_COOLDOWN.get(strategy, 3600)
+
                 if now - last_trigger_time.get(key, 0) < cooldown:
+                    print(f"[쿨다운] {key} 최근 실행됨 → 스킵")
                     continue
 
                 df = get_kline_by_strategy(symbol, strategy)
                 if df is None or len(df) < 60:
+                    print(f"[⛔ 데이터 부족] {symbol}-{strategy} → {len(df) if df is not None else 0}개")
                     continue
 
                 if not check_model_quality(symbol, strategy):
+                    print(f"[⛔ 모델 품질 미달] {symbol}-{strategy}")
                     continue
 
                 if check_pre_burst_conditions(df, strategy):
-                    print(f"[트리거 포착] {symbol} - {strategy} 예측 실행")
+                    print(f"[✅ 트리거 포착] {symbol} - {strategy} → 예측 실행")
+
                     try:
                         run_prediction(symbol, strategy, source="변동성")
                         last_trigger_time[key] = now
                         log_audit(symbol, strategy, "트리거예측", "조건 만족으로 실행")
+                        triggered += 1
+
                     except Exception as inner:
-                        print(f"[예측 실행 실패] {symbol}-{strategy}: {inner}")
+                        print(f"[❌ 예측 실행 실패] {symbol}-{strategy}: {inner}")
                         log_audit(symbol, strategy, "트리거예측오류", f"예측실행실패: {inner}")
+                else:
+                    print(f"[조건 미충족] {symbol}-{strategy}")
+
             except Exception as e:
                 print(f"[트리거 오류] {symbol} {strategy}: {e}")
                 log_audit(symbol, strategy or "알수없음", "트리거오류", str(e))
+
+    print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
+
 
 from collections import Counter
 import pandas as pd
