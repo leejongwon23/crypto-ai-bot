@@ -141,34 +141,34 @@ def log_audit_prediction(s, t, status, reason):
 import threading
 db_lock = threading.Lock()  # ✅ Lock 전역 선언
 
-
-def log_prediction(**kwargs):
-    import os, csv
+def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
+                   timestamp=None, model=None, predicted_class=None, top_k=None, note=""):
+    import csv
+    import os
     from datetime import datetime
     import pytz
 
-    path = "/persistent/prediction_log.csv"
-    now_kst = datetime.now(pytz.timezone("Asia/Seoul"))
-    row = {
-        **kwargs,
-        "timestamp": now_kst.isoformat()
-    }
+    LOG_FILE = "/persistent/logs/prediction_log.csv"
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
-    headers = [
-        "timestamp", "symbol", "strategy", "direction", "entry_price", "target_price",
-        "model", "rate", "status", "reason", "return", "predicted_class", "label",
-        "group_id", "model_symbol", "model_name", "volatility"
-    ]
+    now = datetime.now(pytz.timezone("Asia/Seoul")).isoformat() if timestamp is None else timestamp
+    top_k_str = ",".join(map(str, top_k)) if top_k else ""
+
+    row = [now, symbol, strategy, direction, entry_price, target_price,
+           model or "", predicted_class if predicted_class is not None else "", top_k_str, note]
 
     try:
-        exists = os.path.exists(path)
-        with open(path, "a", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=headers)
-            if not exists:
-                writer.writeheader()
+        write_header = not os.path.exists(LOG_FILE)
+        with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            if write_header:
+                writer.writerow(["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price",
+                                 "model", "predicted_class", "top_k", "note"])
             writer.writerow(row)
+        print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} → class={predicted_class} | top_k={top_k_str}")
     except Exception as e:
-        print(f"[⚠️ 예측 로그 기록 실패] {path}: {e}")
+        print(f"[⚠️ 예측 로그 기록 실패] {e}")
+
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
 
