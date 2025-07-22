@@ -245,27 +245,40 @@ def get_similar_symbol(symbol, top_k=1):
     similarities.sort(key=lambda x: x[1], reverse=True)
     return [s[0] for s in similarities[:top_k]]
 
+def main(symbol=None, strategy=None, force=False, allow_prediction=True):
+    import os, json
+    from config import get_class_groups
+    from predict import predict
+    from logger import log_prediction
+    from model.base_model import get_model
+    import torch
 
-def main(strategy=None, symbol=None, force=False, allow_prediction=True):
-    print(">>> [main] recommend.py 실행")
-    check_disk_usage(threshold_percent=90)
-    targets = [strategy] if strategy else ["단기", "중기", "장기"]
-    from data.utils import SYMBOLS
+    input_size = get_FEATURE_INPUT_SIZE()
+    class_groups = get_class_groups()
 
-    for s in targets:
-        symbols_list = []
-        if symbol:
-            symbols_list.append({"symbol": symbol, "volatility": 0.0})
-        else:
-            for sym in SYMBOLS:
-                symbols_list.append({"symbol": sym, "volatility": 0.0})
-        run_prediction_loop(s, symbols_list, source="일반", allow_prediction=allow_prediction)
+    for sym in [symbol] if symbol else SYMBOLS:
+        for strat in [strategy] if strategy else ["단기", "중기", "장기"]:
+            for gid, group in enumerate(class_groups):
+                for mtype in ["lstm", "cnn_lstm", "transformer"]:
+                    mname = f"{mtype}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window20"
+                    model_path = f"/persistent/models/{sym}_{strat}_{mname}.pt"
+                    meta_path = model_path.replace(".pt", ".meta.json")
 
-if __name__ == "__main__":
-    main()
-    from train import train_models
-    train_models(["BTCUSDT", "ETHUSDT"])  # ✅ 학습할 심볼 리스트
+                    if not os.path.exists(model_path):
+                        print(f"[⛔ 모델 없음] {model_path} → 예측 생략")
+                        continue
 
+                    try:
+                        model = get_model(mtype, input_size, len(group)).eval()
+                        model.load_state_dict(torch.load(model_path, map_location="cpu"))
+
+                        predict(symbol=sym, strategy=strat, model=model,
+                                group_id=gid, model_name=mname,
+                                model_symbol=sym, allow_prediction=allow_prediction)
+                        print(f"[✅ 예측 완료] {sym}-{strat}-group{gid}")
+                    except Exception as e:
+                        print(f"[❌ 예측 실패] {sym}-{strat}-group{gid}: {e}")
+                        continue
     
 import shutil
 def check_disk_usage(threshold_percent=90):
