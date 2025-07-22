@@ -104,7 +104,7 @@ def get_class_groups(num_classes=21, group_size=7):
 # ✅ 예측 실패가 없어도 누적 학습되고, 실패시엔 실패 데이터도 포함됩니다
 # ✅ 진화형 구조 완성
 def train_one_model(symbol, strategy, group_id=None, max_epochs=5):
-    import os, gc, traceback, torch, json, numpy as np, pandas as pd
+    import os, gc, torch, json, numpy as np, pandas as pd
     from datetime import datetime; from collections import Counter
     from ssl_pretrain import masked_reconstruction
     from config import get_FEATURE_INPUT_SIZE, get_class_groups
@@ -127,103 +127,80 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=5):
     input_size = get_FEATURE_INPUT_SIZE()
     class_groups_list = get_class_groups()
 
-    print(f"✅ [train_one_model 호출됨] ▶ [학습시작] {symbol}-{strategy}-group{group_id}")
+    print(f"[✅ train_one_model 호출] ▶ {symbol}-{strategy}-group{group_id}")
     trained_any = False
 
     try:
         masked_reconstruction(symbol, strategy, input_size=input_size, mask_ratio=0.2, epochs=5)
-
-        df = get_kline_by_strategy(symbol, strategy)
+        df = compute_features(symbol, get_kline_by_strategy(symbol, strategy) or pd.DataFrame(), strategy)
         if df is None or df.empty:
-            df = pd.DataFrame([{"timestamp": i, "close": 100 + i} for i in range(100)])
-
-        df_feat = compute_features(symbol, df, strategy)
-        if df_feat is None or df_feat.empty or df_feat.isnull().values.any():
-            df_feat = pd.DataFrame(np.random.normal(0, 1, size=(100, input_size)), columns=[f"f{i}" for i in range(input_size)])
+            df = pd.DataFrame(np.random.normal(0, 1, (100, input_size)), columns=[f"f{i}" for i in range(input_size)])
 
         try:
-            dummy_X = torch.tensor(np.random.rand(10, 20, input_size), dtype=torch.float32).to(DEVICE)
+            dummy_X = torch.rand(10, 20, input_size).to(DEVICE)
             dummy_y = torch.randint(0, 2, (10,), dtype=torch.long).to(DEVICE)
-            importances = compute_feature_importance(
-                get_model("lstm", input_size=input_size, output_size=2).to(DEVICE),
-                dummy_X, dummy_y,
-                [c for c in df_feat.columns if c not in ["timestamp", "strategy"]],
-                method="baseline"
-            )
-            df_feat = drop_low_importance_features(df_feat, importances, threshold=0.01, min_features=5)
+            imp = compute_feature_importance(get_model("lstm", input_size, 2).to(DEVICE), dummy_X, dummy_y,
+                                             [c for c in df.columns if c not in ["timestamp", "strategy"]], "baseline")
+            df = drop_low_importance_features(df, imp, 0.01, 5)
         except: pass
 
         for window in find_best_windows(symbol, strategy) or [20]:
-            X_y = create_dataset(df_feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=input_size)
-            if not X_y or not isinstance(X_y, tuple) or len(X_y) != 2:
-                log_training_result(symbol, strategy, f"학습실패:dataset_unpack실패_window{window}", 0.0, 0.0, 0.0)
-                continue
+            dataset = create_dataset(df.to_dict("records"), window, strategy, input_size)
+            if not dataset or not isinstance(dataset, tuple) or len(dataset) != 2:
+                log_training_result(symbol, strategy, f"학습실패:dataset_unpack실패_window{window}", 0, 0, 0); continue
 
-            X_raw, y_raw = X_y
+            X_raw, y_raw = dataset
             if X_raw is None or y_raw is None or len(X_raw) == 0:
-                log_training_result(symbol, strategy, f"학습실패:dataset없음_window{window}", 0.0, 0.0, 0.0)
-                continue
+                log_training_result(symbol, strategy, f"학습실패:dataset없음_window{window}", 0, 0, 0); continue
 
-            fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size=input_size, window=window)
+            fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size, window)
             if fail_X is not None and len(fail_X) > 0:
                 X_raw = np.concatenate([X_raw, fail_X], axis=0)
                 y_raw = np.concatenate([y_raw, fail_y], axis=0)
 
             val_len = max(5, int(len(X_raw) * 0.2))
-            if len(X_raw) <= val_len:
-                val_indices = np.random.choice(len(X_raw), val_len, replace=True)
-                X_val, y_val, X_train, y_train = X_raw[val_indices], y_raw[val_indices], X_raw, y_raw
-            else:
-                X_train, y_train, X_val, y_val = X_raw[:-val_len], y_raw[:-val_len], X_raw[-val_len:], y_raw[-val_len:]
+            X_train, y_train = X_raw[:-val_len], y_raw[:-val_len]
+            X_val, y_val = X_raw[-val_len:], y_raw[-val_len:]
 
             for gid in [group_id] if group_id is not None else range(len(class_groups_list)):
-                group_classes = class_groups_list[gid]
-                if not group_classes:
-                    log_training_result(symbol, strategy, f"학습실패:빈그룹_group{gid}_window{window}", 0.0, 0.0, 0.0)
-                    continue
+                group = class_groups_list[gid]
+                tm, vm = np.isin(y_train, group), np.isin(y_val, group)
+                Xg, yg = X_train[tm], y_train[tm]
+                Xgv, ygv = X_val[vm], y_val[vm]
 
-                tm = np.isin(y_train, group_classes); vm = np.isin(y_val, group_classes)
-                X_train_group, y_train_group = X_train[tm], y_train[tm]
-                X_val_group, y_val_group = X_val[vm], y_val[vm]
-
-                if len(y_train_group) < 2 or len(y_val_group) == 0:
-                    if len(X_train_group) == 0:
-                        X_train_group = np.random.normal(0, 1, size=(20, window, input_size))
-                        y_train_group = np.random.randint(0, len(group_classes), size=20)
-                    if len(X_val_group) == 0:
-                        X_val_group = np.copy(X_train_group[:5])
-                        y_val_group = np.copy(y_train_group[:5])
+                if len(yg) < 2 or len(ygv) == 0:
+                    if len(Xg) == 0:
+                        Xg = np.random.normal(0, 1, (20, window, input_size))
+                        yg = np.random.randint(0, len(group), 20)
+                    if len(Xgv) == 0:
+                        Xgv, ygv = np.copy(Xg[:5]), np.copy(yg[:5])
 
                 try:
-                    y_train_group = np.array([group_classes.index(y) if y in group_classes else 0 for y in y_train_group])
-                    y_val_group = np.array([group_classes.index(y) if y in group_classes else 0 for y in y_val_group])
+                    yg = np.array([group.index(y) if y in group else 0 for y in yg])
+                    ygv = np.array([group.index(y) if y in group else 0 for y in ygv])
                 except:
-                    log_training_result(symbol, strategy, f"학습실패:label불일치_group{gid}_window{window}", 0.0, 0.0, 0.0)
-                    continue
+                    log_training_result(symbol, strategy, f"학습실패:label불일치_group{gid}_window{window}", 0, 0, 0); continue
 
-                print(f"[👁 클래스 분포 확인] {symbol}-{strategy}-group{gid}-window{window} → {Counter(y_train_group)}")
+                Xg, yg = balance_classes(Xg, yg, min_count=20, num_classes=len(group))
 
-                X_train_group, y_train_group = balance_classes(X_train_group, y_train_group, min_count=20, num_classes=len(group_classes))
+                for mtype in ["lstm", "cnn_lstm", "transformer"]:
+                    mname = f"{mtype}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window{window}"
+                    mpath = f"/persistent/models/{symbol}_{strategy}_{mname}.pt"
+                    meta = mpath.replace(".pt", ".meta.json")
 
-                for model_type in ["lstm", "cnn_lstm", "transformer"]:
-                    model_name = f"{model_type}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window{window}"
-                    model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
-                    meta_path = model_path.replace(".pt", ".meta.json")
+                    model = get_model(mtype, input_size, len(group)).to(DEVICE).train()
+                    is_resume = False
+                    if os.path.exists(mpath) and os.path.exists(meta):
+                        try:
+                            model.load_state_dict(torch.load(mpath))
+                            is_resume = True
+                            print(f"[⏩ 이어학습: {mpath}]")
+                        except: pass
 
-                    model = get_model(model_type, input_size=input_size, output_size=len(group_classes)).to(DEVICE).train()
-
-                    is_resume = os.path.exists(model_path) and os.path.exists(meta_path)
-                    if is_resume:
-                        print(f"[⏩ 기존 모델 + 메타 존재 → 이어학습: {model_path}]")
-                        model.load_state_dict(torch.load(model_path))
-
-                    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+                    opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
                     lossfn = FocalLoss()
-
-                    to_tensor = lambda x: torch.tensor(x, dtype=torch.float32)
-                    Xtt = to_tensor(X_train_group); Xvt = to_tensor(X_val_group)
-                    ytt = torch.tensor(y_train_group, dtype=torch.long)
-                    yvt = torch.tensor(y_val_group, dtype=torch.long)
+                    Xtt = torch.tensor(Xg, dtype=torch.float32); ytt = torch.tensor(yg, dtype=torch.long)
+                    Xvt = torch.tensor(Xgv, dtype=torch.float32); yvt = torch.tensor(ygv, dtype=torch.long)
 
                     train_loader = DataLoader(TensorDataset(Xtt, ytt), batch_size=32, shuffle=True)
                     val_loader = DataLoader(TensorDataset(Xvt, yvt), batch_size=32)
@@ -232,15 +209,14 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=5):
                         for xb, yb in train_loader:
                             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                             loss = lossfn(model(xb), yb)
-                            if torch.isfinite(loss):
-                                optimizer.zero_grad(); loss.backward(); optimizer.step()
+                            if torch.isfinite(loss): opt.zero_grad(); loss.backward(); opt.step()
 
                     maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1)
 
                     model.eval()
                     with torch.no_grad():
                         if yvt.numel() == 0 or len(torch.unique(yvt)) < 2:
-                            dummy_label = (yvt[0].item() + 1) % len(group_classes)
+                            dummy_label = (yvt[0].item() + 1) % len(group)
                             dummy_sample = Xvt[0].cpu().numpy() + np.random.normal(0, 0.01, Xvt[0].shape)
                             Xvt = torch.cat([Xvt, torch.tensor([dummy_sample], dtype=torch.float32)], dim=0)
                             yvt = torch.cat([yvt, torch.tensor([dummy_label], dtype=torch.long)], dim=0)
@@ -250,33 +226,32 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=5):
                         val_acc = (val_preds == yvt.to(DEVICE)).float().mean().item()
                         val_f1 = f1_score(yvt.cpu().numpy(), val_preds.cpu().numpy(), average="macro")
 
-                    torch.save(model.state_dict(), model_path)
-                    with open(meta_path, "w", encoding="utf-8") as f:
-                        json.dump({
-                            "symbol": symbol,
-                            "strategy": strategy,
-                            "model": model_type,
-                            "group_id": gid,
-                            "window": window,
-                            "input_size": input_size,
-                            "output_size": len(group_classes),
-                            "model_name": model_name,
-                            "timestamp": now_kst().isoformat()
-                        }, f, ensure_ascii=False, indent=2)
+                    torch.save(model.state_dict(), mpath)
+                    try:
+                        with open(meta, "w", encoding="utf-8") as f:
+                            json.dump({
+                                "symbol": symbol, "strategy": strategy, "model": mtype,
+                                "group_id": gid, "window": window,
+                                "input_size": input_size, "output_size": len(group),
+                                "model_name": mname, "timestamp": now_kst().isoformat()
+                            }, f, ensure_ascii=False, indent=2)
+                    except Exception as e:
+                        print(f"[⚠️ 메타 저장 실패] {meta} → {e}")
 
-                    training_type = "이어학습" if is_resume else "새학습"
-                    log_training_result(symbol, strategy, training_type, acc=val_acc, f1=val_f1, loss=loss.item())
+                    ttype = "이어학습" if is_resume else "새학습"
+                    log_training_result(symbol, strategy, ttype, acc=val_acc, f1=val_f1, loss=loss.item())
                     trained_any = True
 
-                    del model, optimizer, lossfn, train_loader, val_loader
+                    del model, opt, lossfn, train_loader, val_loader
                     torch.cuda.empty_cache(); gc.collect()
 
         if not trained_any:
-            log_training_result(symbol, strategy, f"학습실패:전그룹학습불가", 0.0, 0.0, 0.0)
+            log_training_result(symbol, strategy, "학습실패:전그룹학습불가", 0, 0, 0)
 
     except Exception as e:
         reason = f"{type(e).__name__}: {e}"
-        log_training_result(symbol, strategy, f"학습실패:전체예외:{reason}", 0.0, 0.0, 0.0)
+        log_training_result(symbol, strategy, f"학습실패:전체예외:{reason}", 0, 0, 0)
+
 
 
 
