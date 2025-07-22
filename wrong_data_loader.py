@@ -25,10 +25,12 @@ def load_training_prediction_data(symbol, strategy, window, input_size):
 
     df_price = get_kline_by_strategy(symbol, strategy)
     if df_price is None or df_price.empty:
+        print(f"[❌ price 데이터 없음] {symbol}-{strategy}")
         return None, None
 
     df_feat = compute_features(symbol, df_price, strategy)
     if df_feat is None or df_feat.empty or df_feat.isnull().any().any():
+        print(f"[❌ feature 계산 실패] {symbol}-{strategy}")
         return None, None
 
     if "timestamp" not in df_feat.columns:
@@ -62,7 +64,7 @@ def load_training_prediction_data(symbol, strategy, window, input_size):
 
                     xb = past_window.drop(columns=["timestamp"]).to_numpy(dtype=np.float32)
                     if xb.shape[1] < input_size:
-                        xb = np.pad(xb, ((0, 0), (0, input_size - xb.shape[1])), mode="constant", constant_values=0)
+                        xb = np.pad(xb, ((0, 0), (0, input_size - xb.shape[1])), mode="constant")
 
                     if xb.shape != (window, input_size):
                         continue
@@ -79,22 +81,21 @@ def load_training_prediction_data(symbol, strategy, window, input_size):
                         random_label = random.randint(0, NUM_CLASSES - 1)
                         noise_xb = xb + np.random.normal(0, 0.05, xb.shape).astype(np.float32)
                         sequences.append((noise_xb, random_label))
-                except:
-                    continue
-        except:
-            print(f"[⚠️ 실패기록 파싱 오류] {symbol}-{strategy}")
+                except Exception as e:
+                    print(f"[⚠️ row 처리 실패] {e}")
+        except Exception as e:
+            print(f"[⚠️ 실패기록 파싱 오류] {symbol}-{strategy} → {e}")
 
-    # ✅ 클래스 편향 보정 (누락 클래스에 대해 dummy 생성)
     label_counts = Counter([s[1] for s in sequences])
     for cls in range(NUM_CLASSES):
         if label_counts[cls] == 0:
-            print(f"[📌 클래스 {cls} 누락 → dummy 5개 생성]")
+            print(f"[📌 클래스 {cls} 누락 → dummy 생성]")
             for _ in range(5):
                 dummy = np.random.normal(0, 1, (window, input_size)).astype(np.float32)
                 sequences.append((dummy, cls))
 
     if not sequences:
-        print(f"[⚠️ 데이터 없음] → fallback noise 샘플")
+        print(f"[⚠️ 데이터 없음 → fallback 샘플 생성] {symbol}-{strategy}")
         for _ in range(FAIL_AUGMENT_RATIO * 2):
             dummy = np.random.normal(0, 1, (window, input_size)).astype(np.float32)
             random_label = random.randint(0, NUM_CLASSES - 1)
@@ -102,5 +103,5 @@ def load_training_prediction_data(symbol, strategy, window, input_size):
 
     X = np.array([s[0] for s in sequences], dtype=np.float32)
     y = np.array([s[1] for s in sequences], dtype=np.int64)
-    print(f"[✅ load_training_prediction_data 완료] 총 샘플 수: {len(y)} / 클래스 종류 수: {len(set(y))}")
+    print(f"[✅ load_training_prediction_data 완료] 총 {len(y)}개 / 클래스: {sorted(set(y))}")
     return X, y
