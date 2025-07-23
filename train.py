@@ -424,7 +424,15 @@ def train_symbol_group_loop(delay_minutes=5):
                     for strategy in ["단기", "중기", "장기"]:
                         for gid in range(5):
                             print(f"▶ [학습 시도] {symbol}-{strategy}-group{gid}")
-                            if train_done.get(symbol, {}).get(strategy, {}).get(str(gid), False):
+
+                            # ✅ 오류 방지: train_done 내부 구조 타입 확인
+                            s_obj = train_done.get(symbol, {})
+                            s_obj = s_obj if isinstance(s_obj, dict) else {}
+
+                            st_obj = s_obj.get(strategy, {})
+                            st_obj = st_obj if isinstance(st_obj, dict) else {}
+
+                            if st_obj.get(str(gid), False):
                                 print(f"[⏭️ 스킵] {symbol}-{strategy}-group{gid} (이미 학습됨)")
                                 continue
 
@@ -443,7 +451,8 @@ def train_symbol_group_loop(delay_minutes=5):
                 for symbol in group:
                     for strategy in ["단기", "중기", "장기"]:
                         try:
-                            if train_done.get(symbol, {}).get(strategy, {}) == {str(i): True for i in range(5)}:
+                            entry = train_done.get(symbol, {}).get(strategy, {})
+                            if isinstance(entry, dict) and entry == {str(i): True for i in range(5)}:
                                 print(f"[⏩ 스킵] {symbol}-{strategy} 예측 (이미 학습 완료)")
                                 continue
 
