@@ -261,7 +261,19 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
                 model_path = os.path.join("/persistent/models", m["pt_file"])
                 meta_path = model_path.replace(".pt", ".meta.json")
-                if not os.path.exists(model_path) or not os.path.exists(meta_path):
+
+                # ✅ 모델 없으면 학습 시도
+                if not os.path.exists(model_path):
+                    try:
+                        from train import train_one_model
+                        train_one_model(symbol, strategy, group_id=group_id)
+                    except Exception as e:
+                        print(f"[자동 학습 실패] {model_path} → {e}")
+                    if not os.path.exists(model_path):
+                        print(f"[예측 스킵] 학습 후에도 모델 없음: {model_path}")
+                        continue
+
+                if not os.path.exists(meta_path):
                     continue
 
                 model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, len(group_classes))
@@ -344,7 +356,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
     except Exception as e:
         print(f"[predict 예외] {e}")
         return None
-
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
