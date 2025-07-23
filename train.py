@@ -118,81 +118,77 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     from ranger_adabelief import RangerAdaBelief as Ranger
 
     print("✅ [train_one_model 호출됨]")
-
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = get_FEATURE_INPUT_SIZE()
     class_groups = get_class_groups()
-    print(f"▶ [학습시작] {symbol}-{strategy}-group{group_id}")
 
-    try:
-        # ✅ SSL 선학습 - 인자 누락 보완
-        masked_reconstruction(symbol, strategy, input_size)
+    # ✅ 전체 그룹 반복 지원
+    group_ids = [group_id] if group_id is not None else list(range(len(class_groups)))
 
-        # ✅ 학습 데이터 로드
-        X1, y1 = load_training_prediction_data(symbol, strategy, window=60, input_size=input_size)
-        if X1 is None or y1 is None:
-            raise Exception("⛔ 학습 데이터 없음")
+    for gid in group_ids:
+        print(f"▶ [학습시작] {symbol}-{strategy}-group{gid}")
+        try:
+            masked_reconstruction(symbol, strategy, input_size)
+            X1, y1 = load_training_prediction_data(symbol, strategy, window=60, input_size=input_size)
+            if X1 is None or y1 is None:
+                raise Exception("⛔ 학습 데이터 없음")
 
-        # ✅ 클래스 밸런싱 및 증강
-        X, y = balance_classes(X1, y1, num_classes=len(class_groups))
-        if len(X) < 10:
-            raise Exception(f"⛔ 학습 샘플 부족 ({len(X)}개)")
+            X, y = balance_classes(X1, y1, num_classes=len(class_groups))
+            if len(X) < 10:
+                raise Exception(f"⛔ 학습 샘플 부족 ({len(X)}개)")
 
-        for model_type in ["lstm", "cnn_lstm", "transformer"]:
-            model = get_model(model_type, input_size=input_size, output_size=len(class_groups[group_id]))
-            model.to(DEVICE)
-            optimizer = Ranger(model.parameters(), lr=0.001)
-            criterion = torch.nn.CrossEntropyLoss()
-            model.train()
+            for model_type in ["lstm", "cnn_lstm", "transformer"]:
+                model = get_model(model_type, input_size=input_size, output_size=len(class_groups[gid]))
+                model.to(DEVICE)
+                optimizer = Ranger(model.parameters(), lr=0.001)
+                criterion = torch.nn.CrossEntropyLoss()
+                model.train()
 
-            ratio = int(len(X) * 0.8)
-            X_train, y_train = torch.tensor(X[:ratio]), torch.tensor(y[:ratio])
-            X_val, y_val = torch.tensor(X[ratio:]), torch.tensor(y[ratio:])
+                ratio = int(len(X) * 0.8)
+                X_train, y_train = torch.tensor(X[:ratio]), torch.tensor(y[:ratio])
+                X_val, y_val = torch.tensor(X[ratio:]), torch.tensor(y[ratio:])
 
-            train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=64, shuffle=True)
-            val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=64)
+                train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=64, shuffle=True)
+                val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=64)
 
-            for epoch in range(max_epochs):
-                total_loss = 0
-                for xb, yb in train_loader:
-                    xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                    optimizer.zero_grad()
-                    out = model(xb)
-                    loss = criterion(out, yb)
-                    loss.backward()
-                    optimizer.step()
-                    total_loss += loss.item()
-                print(f"[{model_type}][Epoch {epoch+1}/{max_epochs}] Loss: {total_loss:.4f}")
+                for epoch in range(max_epochs):
+                    total_loss = 0
+                    for xb, yb in train_loader:
+                        xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                        optimizer.zero_grad()
+                        out = model(xb)
+                        loss = criterion(out, yb)
+                        loss.backward()
+                        optimizer.step()
+                        total_loss += loss.item()
+                    print(f"[{model_type}][Epoch {epoch+1}/{max_epochs}] Loss: {total_loss:.4f}")
 
-            # ✅ 평가
-            model.eval()
-            all_preds, all_labels = [], []
-            with torch.no_grad():
-                for xb, yb in val_loader:
-                    xb = xb.to(DEVICE)
-                    out = model(xb)
-                    preds = torch.argmax(out, dim=1).cpu().numpy()
-                    all_preds.extend(preds)
-                    all_labels.extend(yb.numpy())
+                model.eval()
+                all_preds, all_labels = [], []
+                with torch.no_grad():
+                    for xb, yb in val_loader:
+                        xb = xb.to(DEVICE)
+                        out = model(xb)
+                        preds = torch.argmax(out, dim=1).cpu().numpy()
+                        all_preds.extend(preds)
+                        all_labels.extend(yb.numpy())
 
-            from sklearn.metrics import accuracy_score, f1_score
-            acc = accuracy_score(all_labels, all_preds)
-            f1 = f1_score(all_labels, all_preds, average='macro')
-            print(f"[🎯 {model_type}] acc={acc:.4f}, f1={f1:.4f}")
+                from sklearn.metrics import accuracy_score, f1_score
+                acc = accuracy_score(all_labels, all_preds)
+                f1 = f1_score(all_labels, all_preds, average='macro')
+                print(f"[🎯 {model_type}] acc={acc:.4f}, f1={f1:.4f}")
 
-            # ✅ 저장
-            os.makedirs("/persistent/models", exist_ok=True)
-            model_name = f"{model_type}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{group_id}_window20"
-            model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
-            torch.save(model.state_dict(), model_path)
+                os.makedirs("/persistent/models", exist_ok=True)
+                model_name = f"{model_type}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window20"
+                model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
+                torch.save(model.state_dict(), model_path)
 
-            # ✅ 로그 저장
-            log_training_result(symbol=symbol, strategy=strategy, model=model_path, accuracy=acc, f1=f1, loss=total_loss)
+                log_training_result(symbol=symbol, strategy=strategy, model=model_path, accuracy=acc, f1=f1, loss=total_loss)
 
-    except Exception as e:
-        print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{group_id} → {e}")
-        traceback.print_exc()
+        except Exception as e:
+            print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{gid} → {e}")
+            traceback.print_exc()
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
