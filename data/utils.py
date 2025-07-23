@@ -107,7 +107,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             return features[0]["symbol"]
         return "UNKNOWN"
 
-    # ✅ 입력 유효성 체크
     if not isinstance(features, list) or len(features) <= window:
         print(f"[⚠️ 부족] features length={len(features) if isinstance(features, list) else 'Invalid'}, window={window} → dummy 반환")
         dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
@@ -139,6 +138,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         scaled = scaler.fit_transform(df[feature_cols])
         df_scaled = pd.DataFrame(scaled, columns=feature_cols)
         df_scaled["timestamp"] = df["timestamp"].values
+        df_scaled["high"] = df["high"] if "high" in df.columns else df["close"]
 
         if input_size and len(feature_cols) < input_size:
             for i in range(len(feature_cols), input_size):
@@ -147,8 +147,9 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
         features = df_scaled.to_dict(orient="records")
 
-        strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
+        strategy_minutes = {"단기": 240, "중기": 1440, "장기": 2880}
         lookahead_minutes = strategy_minutes.get(strategy, 1440)
+
         class_ranges = [(-1.0 + 2.0 * i / NUM_CLASSES, -1.0 + 2.0 * (i + 1) / NUM_CLASSES) for i in range(NUM_CLASSES)]
 
         for i in range(window, len(features)):
@@ -160,11 +161,15 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                 if pd.isnull(entry_time) or entry_price <= 0:
                     continue
 
-                future = [f for f in features[i + 1:] if "timestamp" in f and pd.to_datetime(f["timestamp"], errors="coerce") - entry_time <= pd.Timedelta(minutes=lookahead_minutes)]
+                future = [f for f in features[i + 1:] if "timestamp" in f and pd.to_datetime(f["timestamp"]) - entry_time <= pd.Timedelta(minutes=lookahead_minutes)]
                 if len(seq) != window or len(future) < 1:
                     continue
 
-                max_future_price = max(f.get("high", f.get("close", entry_price)) for f in future)
+                valid_prices = [f.get("high", f.get("close", entry_price)) for f in future if f.get("high", 0) > 0]
+                if not valid_prices:
+                    continue
+
+                max_future_price = max(valid_prices)
                 gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
                 gain = max(-1.0, min(1.0, gain))
                 cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain <= high), NUM_CLASSES - 1)
@@ -180,6 +185,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
                 X.append(sample)
                 y.append(cls)
+
             except Exception as e:
                 print(f"[❌ inner 예외] {e} → i={i}")
                 continue
@@ -280,7 +286,6 @@ def prefetch_symbol_groups(strategy: str):
             except Exception as e:
                 print(f"[⚠️ prefetch 실패] {symbol}-{strategy}: {e}")
 
-
 def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 3) -> pd.DataFrame:
     import time
 
@@ -299,7 +304,7 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
 
             raw = data["result"]["list"]
             if not raw or len(raw[0]) < 6:
-                print(f"[경고] get_kline() → 필수 필드 누락: {symbol}, 재시도 {attempt+1}/{max_retry}")
+                print(f"[경고] get_kline() → 필수 필드 누락 또는 빈 응답: {symbol}, 재시도 {attempt+1}/{max_retry}")
                 time.sleep(1)
                 continue
 
@@ -315,8 +320,8 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                 time.sleep(1)
                 continue
 
-            if "high" not in df.columns or df["high"].isnull().all() or (df["high"] == 0).all():
-                print(f"[치명] get_kline() → 'high' 값 전부 비정상: {symbol}, 재시도 {attempt+1}/{max_retry}")
+            if df["high"].isnull().all() or (df["high"] == 0).all():
+                print(f"[치명] get_kline() → 'high' 값 이상치만 존재: {symbol}, 재시도 {attempt+1}/{max_retry}")
                 time.sleep(1)
                 continue
 
@@ -326,6 +331,10 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
             df = df.sort_values("timestamp").reset_index(drop=True)
             df["datetime"] = df["timestamp"]
 
+            # ✅ 너무 적은 row 수는 경고 (기존 실패 원인 대응)
+            if len(df) < 10:
+                print(f"[⚠️ 경고] {symbol}-{interval} → 캔들 수 부족 ({len(df)} rows)")
+
             return df
 
         except Exception as e:
@@ -333,7 +342,7 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
             time.sleep(1)
 
     print(f"[❌ 실패] get_kline() 최종 실패: {symbol}")
-    return None
+    return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
 
 
 def get_realtime_prices():
@@ -370,25 +379,30 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     if df is None or df.empty or not isinstance(df, pd.DataFrame):
         print(f"[❌ compute_features 실패] 입력 DataFrame empty or invalid")
         failed_result(symbol, strategy, reason="입력DataFrame empty")
-        return pd.DataFrame()  # 반환은 항상 안전하게 DataFrame
+        return pd.DataFrame()
 
     df = df.copy()
-
     if "datetime" in df.columns:
         df["timestamp"] = df["datetime"]
     elif "timestamp" not in df.columns:
         df["timestamp"] = pd.to_datetime("now")
-
     df["strategy"] = strategy
 
     try:
         base_cols = ["open", "high", "low", "close", "volume"]
         for col in base_cols:
             if col not in df.columns:
-                df[col] = 0.0  # 누락 방지용 기본값 추가
+                df[col] = 0.0
 
         df = df[["timestamp", "strategy"] + base_cols]
 
+        # ✅ 캔들 수 부족한 경우 → 최소 길이 체크
+        if len(df) < 20:
+            print(f"[⚠️ 피처 실패] {symbol}-{strategy} → row 수 부족: {len(df)}")
+            failed_result(symbol, strategy, reason=f"row 부족 {len(df)}")
+            return pd.DataFrame()
+
+        # ✅ Feature 생성
         df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
         delta = df["close"].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
@@ -441,6 +455,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     print(f"[✅ 완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     CacheManager.set(cache_key, df)
     return df
+
 
 
 # data/utils.py 맨 아래에 추가
