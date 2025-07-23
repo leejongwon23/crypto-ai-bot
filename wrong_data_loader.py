@@ -34,24 +34,20 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     if df_feat is None or df_feat.empty or df_feat.isnull().any().any():
         return None, None
 
-    if "timestamp" not in df_feat.columns:
-        df_feat["timestamp"] = df_feat.get("datetime")
+    df_feat["timestamp"] = df_feat.get("timestamp") or df_feat.get("datetime")
     df_feat = df_feat.dropna().reset_index(drop=True)
 
     used_hashes = set()
     existing_hashes = load_existing_failure_hashes()
 
-    # ✅ 실패 기록 기반 샘플
+    # ✅ 실패 샘플
     if os.path.exists(WRONG_CSV):
         try:
             df = pd.read_csv(WRONG_CSV, encoding="utf-8-sig")
             df = df[(df["symbol"] == symbol) & (df["strategy"] == strategy)]
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
             df = df[df["timestamp"].notna()]
-
-            if "label" not in df.columns:
-                df["label"] = df.get("predicted_class", -1).astype(int)
-
+            df["label"] = df.get("predicted_class", -1).astype(int)
             df = df[df["label"] >= 0]
 
             for _, row in df.iterrows():
@@ -61,20 +57,16 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
                     continue
 
                 past_window = df_feat[df_feat["timestamp"] < entry_time].tail(window)
-                if len(past_window) < window:
+                if past_window.empty:
                     continue
-
                 xb = past_window.drop(columns=["timestamp"]).to_numpy(dtype=np.float32)
-                if xb.shape[1] < input_size:
-                    xb = np.pad(xb, ((0, 0), (0, input_size - xb.shape[1])), mode="constant")
+                xb = np.pad(xb, ((window - len(xb), 0), (0, input_size - xb.shape[1])), mode="constant")
                 if xb.shape != (window, input_size):
                     continue
-
                 h = get_feature_hash(xb[-1])
                 if h in used_hashes or h in existing_hashes:
                     continue
                 used_hashes.add(h)
-
                 for _ in range(FAIL_AUGMENT_RATIO * 2):
                     sequences.append((xb, label))
         except:
@@ -87,23 +79,21 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
             label = int(df_feat.iloc[i].get("class", -1))
             if label not in group_classes:
                 continue
-
             xb = window_df.drop(columns=["timestamp"]).to_numpy(dtype=np.float32)
-            if xb.shape[1] < input_size:
-                xb = np.pad(xb, ((0, 0), (0, input_size - xb.shape[1])), mode="constant")
+            xb = np.pad(xb, ((0, 0), (0, input_size - xb.shape[1])), mode="constant")
+            if xb.shape[0] < window:
+                xb = np.pad(xb, ((window - xb.shape[0], 0), (0, 0)), mode="constant")
             if xb.shape != (window, input_size):
                 continue
-
             h = get_feature_hash(xb[-1])
             if h in used_hashes:
                 continue
             used_hashes.add(h)
-
             sequences.append((xb, label))
         except:
             continue
 
-    # ✅ 부족 클래스는 인접 클래스에서 유사 샘플을 복제해 채움
+    # ✅ 클래스 누락 보완: 인접 복제
     label_counts = Counter([s[1] for s in sequences])
     all_by_label = {cls: [] for cls in group_classes}
     for xb, y in sequences:
@@ -112,11 +102,8 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     for cls in group_classes:
         if label_counts[cls] == 0:
             print(f"[📌 클래스 {cls} 누락 → 인접 샘플 복제]")
-            neighbors = [cls - 1, cls + 1]
-            candidates = []
-            for n in neighbors:
-                if n in all_by_label:
-                    candidates += all_by_label[n]
+            neighbors = [c for c in [cls-1, cls+1] if c in all_by_label and all_by_label[c]]
+            candidates = sum([all_by_label[c] for c in neighbors], [])
             if not candidates:
                 continue
             for _ in range(5):
@@ -134,6 +121,6 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
 
     X = np.array([s[0] for s in sequences], dtype=np.float32)
     y = np.array([s[1] for s in sequences], dtype=np.int64)
-    counts = dict(Counter(y))
-    print(f"[✅ 데이터 로드 완료] {symbol}-{strategy}-g{group_id} → 총: {len(y)}개 / 분포: {counts}")
+    print(f"[✅ load_training_prediction_data 완료] {symbol}-{strategy}-g{group_id} → 샘플 수: {len(y)} / 클래스 분포: {dict(Counter(y))}")
     return X, y
+
