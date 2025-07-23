@@ -53,7 +53,7 @@ def balance_classes(X, y, min_count=5, num_classes=21):
         raise Exception("⛔ balance_classes 중단: 유효 라벨 없음")
 
     class_counts = Counter(y)
-    print(f"[📊 클래스 분포] {dict(class_counts)}")  # ✅ 수정된 부분
+    print(f"[📊 클래스 분포] {dict(class_counts)}")
 
     nsamples, nx, ny_dim = X.shape
     X_balanced, y_balanced = list(X), list(y)
@@ -61,20 +61,33 @@ def balance_classes(X, y, min_count=5, num_classes=21):
     max_count = max(class_counts.values()) if class_counts else min_count
     target_count = max(min_count, int(max_count * 0.8))
 
+    # ✅ 클래스별 원본 샘플 저장
+    all_by_label = {cls: [] for cls in range(num_classes)}
+    for xb, yb in zip(X, y):
+        all_by_label[yb].append(xb)
+
     for cls in range(num_classes):
-        indices = [i for i, label in enumerate(y) if label == cls]
-        count = len(indices)
+        existing = all_by_label.get(cls, [])
+        count = len(existing)
         needed = max(0, target_count - count)
 
         if needed > 0:
-            if count >= 1:
+            candidates = existing.copy()
+            # ✅ 인접 클래스 샘플 활용
+            if count == 0:
+                neighbors = [cls - 1, cls + 1]
+                for n in neighbors:
+                    if 0 <= n < num_classes:
+                        candidates += all_by_label.get(n, [])
+
+            if candidates:
                 try:
-                    reps = np.random.choice(indices, needed, replace=True)
-                    base_samples = X[reps]
+                    reps = np.random.choice(len(candidates), needed, replace=True)
+                    base_samples = np.array([candidates[i] for i in reps])
                     aug_samples = augment_batch(base_samples)
                     X_balanced.extend(aug_samples)
                     y_balanced.extend([cls] * needed)
-                    print(f"[✅ 클래스 {cls}] {needed}개 증강 완료")
+                    print(f"[✅ 클래스 {cls}] {needed}개 증강 완료 (인접 포함)")
                 except Exception as e:
                     print(f"[⚠️ 클래스 {cls} 증강 실패 → noise dummy 대체] {e}")
                     dummy = np.random.normal(0, 1, (needed, nx, ny_dim)).astype(np.float32)
@@ -86,7 +99,7 @@ def balance_classes(X, y, min_count=5, num_classes=21):
                 dummy = np.clip(dummy, -3, 3)
                 X_balanced.extend(dummy)
                 y_balanced.extend([cls] * needed)
-                print(f"[🆕 클래스 {cls}] {needed}개 dummy 생성")
+                print(f"[🆕 클래스 {cls}] {needed}개 dummy 생성 (fallback)")
 
     combined = list(zip(X_balanced, y_balanced))
     np.random.shuffle(combined)
@@ -100,5 +113,3 @@ def balance_classes(X, y, min_count=5, num_classes=21):
 
     print(f"[✅ balance_classes 완료] X.shape={X_final.shape}, y.shape={y_final.shape}, 총 샘플수: {len(y_final)}")
     return X_final, y_final
-
-
