@@ -205,6 +205,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from model_weight_loader import class_to_expected_return
     from failure_db import insert_failure_record
     from logger import get_feature_hash
+    from train import train_one_model
 
     os.makedirs("/persistent/logs", exist_ok=True)
 
@@ -219,22 +220,24 @@ def predict(symbol, strategy, source="일반", model_type=None):
         window_list = find_best_windows(symbol, strategy)
         if not window_list:
             insert_failure_record(symbol, strategy, -1, -1, now_kst())
+            print("[예측 중단] 유효한 윈도우 없음")
             return None
 
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 1:
             insert_failure_record(symbol, strategy, -1, -1, now_kst())
+            print("[예측 중단] K라인 부족")
             return None
 
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.dropna().shape[0] < max(window_list) + 1:
             insert_failure_record(symbol, strategy, -1, -1, now_kst())
+            print("[예측 중단] Feature 불충분")
             return None
 
         features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         feat_scaled = MinMaxScaler().fit_transform(features_only)
         input_size = feat_scaled.shape[1]
-
         if input_size < FEATURE_INPUT_SIZE:
             feat_scaled = np.pad(feat_scaled, ((0, 0), (0, FEATURE_INPUT_SIZE - input_size)), mode="constant")
         else:
@@ -243,6 +246,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         models = get_available_models(symbol, strategy)
         if not models:
             insert_failure_record(symbol, strategy, -1, -1, now_kst())
+            print("[예측 실패] 사용 가능한 모델 없음")
             return None
 
         recent_freq = get_recent_class_frequencies(strategy)
@@ -250,7 +254,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         for window in window_list:
             if feat_scaled.shape[0] < window:
                 continue
-
             X_input = feat_scaled[-window:]
             X = np.expand_dims(X_input, axis=0)
 
@@ -266,9 +269,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 model_path = os.path.join("/persistent/models", m["pt_file"])
                 meta_path = model_path.replace(".pt", ".meta.json")
 
+                # ✅ 모델 존재 확인 및 자동 학습 fallback
                 if not os.path.exists(model_path):
+                    print(f"[⛔ 모델 없음] → 학습 시도: {model_path}")
                     try:
-                        from train import train_one_model
                         train_one_model(symbol, strategy, group_id=group_id)
                     except Exception as e:
                         print(f"[자동 학습 실패] {model_path} → {e}")
@@ -278,11 +282,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         continue
 
                 if not os.path.exists(meta_path):
+                    print(f"[메타정보 없음] {meta_path}")
                     insert_failure_record(symbol, strategy, -1, -1, now_kst())
                     continue
 
                 model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, len(group_classes))
                 if model is None:
+                    print(f"[모델 로드 실패] {model_path}")
                     insert_failure_record(symbol, strategy, -1, -1, now_kst())
                     continue
 
@@ -307,7 +313,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     "entry_price": float(df.iloc[-1]["close"])
                 })
 
+        # ✅ 모델은 존재했으나 예측 결과 없음 (로그 명확화)
         if not model_outputs_list:
+            print("[❌ 예측 결과 없음] 모델 존재하나 출력 없음")
             insert_failure_record(symbol, strategy, -1, -1, now_kst())
             return None
 
@@ -319,8 +327,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
             entry_price = pred["entry_price"]
             expected_return = class_to_expected_return(predicted_class)
             target_price = entry_price * (1 + expected_return)
-
             is_main = (predicted_class == final_pred_class)
+
             log_prediction(
                 symbol=pred["symbol"],
                 strategy=pred["strategy"],
@@ -364,6 +372,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         print(f"[predict 예외] {e}")
         insert_failure_record(symbol, strategy, -1, -1, now_kst())
         return None
+
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
