@@ -447,14 +447,14 @@ def get_available_models(target_symbol=None):
     MODEL_DIR = "/persistent/models"
     models = []
 
-    # ✅ 전역 SYMBOLS 기준으로 강제 제한
+    # ✅ 전역 SYMBOLS 기준으로 제한
     allowed_symbols = set(get_SYMBOLS())
 
-    # ✅ 유사 symbol 리스트 생성
+    # ✅ 유사 symbol 목록
     similar_symbols = []
     if target_symbol:
         similar_symbols = get_similar_symbol(target_symbol)
-        similar_symbols.append(target_symbol)
+        similar_symbols.append(target_symbol)  # 자기자신 포함 보장
 
     pt_files = glob.glob(os.path.join(MODEL_DIR, "*.pt"))
     for pt_path in pt_files:
@@ -466,16 +466,15 @@ def get_available_models(target_symbol=None):
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
 
-            # 필수 정보 확인
             if not all(k in meta for k in ["symbol", "strategy", "model", "input_size", "model_name"]):
                 continue
 
-            # ✅ 심볼이 허용된 목록 안에 있는지 확인
+            # ✅ 허용된 심볼인지
             if meta["symbol"] not in allowed_symbols:
                 continue
 
-            # ✅ target_symbol이 있는 경우, 유사 symbol에도 포함돼야 함
-            if target_symbol and meta["symbol"] not in similar_symbols:
+            # ✅ 유사 심볼이 지정되었을 경우, 자기 자신은 무조건 허용
+            if target_symbol and meta["symbol"] != target_symbol and meta["symbol"] not in similar_symbols:
                 continue
 
             model_file = os.path.basename(pt_path)
@@ -495,4 +494,3 @@ def get_available_models(target_symbol=None):
             continue
 
     return models
-
