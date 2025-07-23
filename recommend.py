@@ -299,6 +299,10 @@ def check_disk_usage(threshold_percent=90):
 
 if __name__ == "__main__":
     import argparse
+    from train import train_models
+    from data.utils import SYMBOLS
+    from predict import evaluate_predictions
+    import traceback
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", type=str, default=None)
@@ -308,9 +312,28 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    main(
-        symbol=args.symbol,
-        strategy=args.strategy,
-        force=args.force,
-        allow_prediction=args.allow_prediction
-    )
+    # ✅ 1. 서버 초기 실행 시 학습 → 모델 없을 때를 대비
+    try:
+        train_models(SYMBOLS)
+    except Exception as e:
+        print(f"[❌ 초기 학습 실패] {e}")
+        traceback.print_exc()
+
+    # ✅ 2. 예측 실행
+    try:
+        main(
+            symbol=args.symbol,
+            strategy=args.strategy,
+            force=args.force,
+            allow_prediction=args.allow_prediction
+        )
+    except Exception as e:
+        print(f"[❌ 예측 실패] {e}")
+        traceback.print_exc()
+
+    # ✅ 3. 예측 후 평가 루프 1회 실행
+    try:
+        evaluate_predictions()
+        print("[✅ 평가 실행 완료]")
+    except Exception as e:
+        print(f"[❌ 평가 실행 실패] {e}")
