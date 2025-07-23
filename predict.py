@@ -218,14 +218,17 @@ def predict(symbol, strategy, source="일반", model_type=None):
     try:
         window_list = find_best_windows(symbol, strategy)
         if not window_list:
+            insert_failure_record(symbol, strategy, -1, -1, now_kst())
             return None
 
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 1:
+            insert_failure_record(symbol, strategy, -1, -1, now_kst())
             return None
 
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.dropna().shape[0] < max(window_list) + 1:
+            insert_failure_record(symbol, strategy, -1, -1, now_kst())
             return None
 
         features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
@@ -239,6 +242,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
         models = get_available_models(symbol, strategy)
         if not models:
+            insert_failure_record(symbol, strategy, -1, -1, now_kst())
             return None
 
         recent_freq = get_recent_class_frequencies(strategy)
@@ -262,7 +266,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 model_path = os.path.join("/persistent/models", m["pt_file"])
                 meta_path = model_path.replace(".pt", ".meta.json")
 
-                # ✅ 모델 없으면 학습 시도
                 if not os.path.exists(model_path):
                     try:
                         from train import train_one_model
@@ -271,13 +274,16 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         print(f"[자동 학습 실패] {model_path} → {e}")
                     if not os.path.exists(model_path):
                         print(f"[예측 스킵] 학습 후에도 모델 없음: {model_path}")
+                        insert_failure_record(symbol, strategy, -1, -1, now_kst())
                         continue
 
                 if not os.path.exists(meta_path):
+                    insert_failure_record(symbol, strategy, -1, -1, now_kst())
                     continue
 
                 model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, len(group_classes))
                 if model is None:
+                    insert_failure_record(symbol, strategy, -1, -1, now_kst())
                     continue
 
                 with torch.no_grad():
@@ -302,6 +308,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 })
 
         if not model_outputs_list:
+            insert_failure_record(symbol, strategy, -1, -1, now_kst())
             return None
 
         meta_model = load_meta_learner()
@@ -355,6 +362,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
     except Exception as e:
         print(f"[predict 예외] {e}")
+        insert_failure_record(symbol, strategy, -1, -1, now_kst())
         return None
 
 # 📄 predict.py 내부에 추가
