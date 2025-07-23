@@ -391,17 +391,17 @@ def train_symbol_group_loop(delay_minutes=5):
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작")
 
     done_path = "/persistent/train_done.json"
-    if os.path.exists(done_path):
-        try:
+    train_done = {}
+
+    try:
+        if os.path.exists(done_path):
             with open(done_path, "r", encoding="utf-8") as f:
                 train_done = json.load(f)
             if not isinstance(train_done, dict):
-                print("⚠️ train_done 타입 오류 → 초기화")
+                print("⚠️ train_done 구조 오류 → 초기화")
                 train_done = {}
-        except Exception as e:
-            print(f"⚠️ train_done 파싱 실패 → 초기화: {e}")
-            train_done = {}
-    else:
+    except Exception as e:
+        print(f"⚠️ train_done 파싱 실패 → 초기화: {e}")
         train_done = {}
 
     loop_count = 0
@@ -415,57 +415,60 @@ def train_symbol_group_loop(delay_minutes=5):
             _feature_cache.clear()
             print("[✅ cache cleared] _kline_cache, _feature_cache")
 
+            for symbol in group:
+                for strategy in ["단기", "중기", "장기"]:
+                    for gid in range(5):
+                        print(f"▶ [학습 시도] {symbol}-{strategy}-group{gid}")
+
+                        s_obj = train_done.get(symbol, {})
+                        s_obj = s_obj if isinstance(s_obj, dict) else {}
+
+                        st_obj = s_obj.get(strategy, {})
+                        st_obj = st_obj if isinstance(st_obj, dict) else {}
+
+                        if st_obj.get(str(gid), False):
+                            print(f"[⏭️ 스킵] {symbol}-{strategy}-group{gid} (이미 학습됨)")
+                            continue
+
+                        try:
+                            train_one_model(symbol, strategy, group_id=gid)
+                            train_done.setdefault(symbol, {}).setdefault(strategy, {})[str(gid)] = True
+                            with open(done_path, "w", encoding="utf-8") as f:
+                                json.dump(train_done, f, ensure_ascii=False, indent=2)
+                            print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid}")
+                        except Exception as e:
+                            print(f"[❌ 학습 실패] {symbol}-{strategy}-group{gid} → {e}")
+                            traceback.print_exc()
+
             try:
-                for symbol in group:
-                    for strategy in ["단기", "중기", "장기"]:
-                        for gid in range(5):
-                            print(f"▶ [학습 시도] {symbol}-{strategy}-group{gid}")
-
-                            # ✅ 오류 방지: train_done 내부 구조 타입 확인
-                            s_obj = train_done.get(symbol, {})
-                            s_obj = s_obj if isinstance(s_obj, dict) else {}
-
-                            st_obj = s_obj.get(strategy, {})
-                            st_obj = st_obj if isinstance(st_obj, dict) else {}
-
-                            if st_obj.get(str(gid), False):
-                                print(f"[⏭️ 스킵] {symbol}-{strategy}-group{gid} (이미 학습됨)")
-                                continue
-
-                            try:
-                                train_one_model(symbol, strategy, group_id=gid)
-                                train_done.setdefault(symbol, {}).setdefault(strategy, {})[str(gid)] = True
-                                with open(done_path, "w", encoding="utf-8") as f:
-                                    json.dump(train_done, f, ensure_ascii=False, indent=2)
-                                print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid}")
-                            except Exception as e:
-                                print(f"[❌ 학습 실패] {symbol}-{strategy}-group{gid} → {e}")
-
                 maintenance_fix_meta.fix_all_meta_json()
                 print(f"[✅ meta 보정 완료] 그룹 {idx}")
-
-                for symbol in group:
-                    for strategy in ["단기", "중기", "장기"]:
-                        try:
-                            entry = train_done.get(symbol, {}).get(strategy, {})
-                            if isinstance(entry, dict) and entry == {str(i): True for i in range(5)}:
-                                print(f"[⏩ 스킵] {symbol}-{strategy} 예측 (이미 학습 완료)")
-                                continue
-
-                            print(f"▶ [예측 시도] {symbol}-{strategy}")
-                            main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
-                            print(f"[✅ 예측 완료] {symbol}-{strategy}")
-                        except Exception as e:
-                            print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
-
-                safe_cleanup.auto_delete_old_logs()
-                print(f"🕒 그룹 {idx} 완료 → {delay_minutes}분 대기")
-                time.sleep(delay_minutes * 60)
-
             except Exception as e:
-                print(f"[❌ 그룹 {idx} 루프 오류] {e}")
-                traceback.print_exc()
-                continue
+                print(f"[⚠️ meta 보정 실패] 그룹 {idx} → {e}")
+
+            for symbol in group:
+                for strategy in ["단기", "중기", "장기"]:
+                    try:
+                        entry = train_done.get(symbol, {}).get(strategy, {})
+                        if isinstance(entry, dict) and entry == {str(i): True for i in range(5)}:
+                            print(f"[⏩ 스킵] {symbol}-{strategy} 예측 (이미 학습 완료)")
+                            continue
+
+                        print(f"▶ [예측 시도] {symbol}-{strategy}")
+                        main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
+                        print(f"[✅ 예측 완료] {symbol}-{strategy}")
+                    except Exception as e:
+                        print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
+                        traceback.print_exc()
+
+            try:
+                safe_cleanup.auto_delete_old_logs()
+            except Exception as e:
+                print(f"[⚠️ 로그 정리 실패] → {e}")
+
+            print(f"🕒 그룹 {idx} 완료 → {delay_minutes}분 대기")
+            time.sleep(delay_minutes * 60)
+
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
     """
