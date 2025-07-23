@@ -53,15 +53,27 @@ class MAML:
 
 # ✅ [추가] train.py에서 호출 가능 구조 예시
 def maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.001, inner_steps=1):
-    maml = MAML(model, inner_lr=inner_lr, outer_lr=outer_lr, inner_steps=inner_steps)
-    tasks = []
+    from meta_learning import MAML  # 내부 정의된 클래스라면 이 임포트 필요
 
-    for (X_train, y_train), (X_val, y_val) in zip(train_loader, val_loader):
-        tasks.append((X_train, y_train, X_val, y_val))
+    try:
+        maml = MAML(model, inner_lr=inner_lr, outer_lr=outer_lr, inner_steps=inner_steps)
+        tasks = []
 
-    loss = maml.meta_update(tasks)
-    print(f"[MAML meta-update 완료] loss={loss:.4f}")
-    return loss
+        for (X_train, y_train), (X_val, y_val) in zip(train_loader, val_loader):
+            tasks.append((X_train, y_train, X_val, y_val))
+
+        if not tasks:
+            print("[MAML skip] 유효한 meta task 없음 → meta update 생략")
+            return None
+
+        loss = maml.meta_update(tasks)
+        print(f"[✅ MAML meta-update 완료] task={len(tasks)}, loss={loss:.4f}")
+        return loss
+
+    except Exception as e:
+        print(f"[❌ MAML 예외 발생] {e}")
+        return None
+
 
 
 import os, pickle
