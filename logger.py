@@ -142,7 +142,10 @@ import threading
 db_lock = threading.Lock()  # ✅ Lock 전역 선언
 
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
-                   timestamp=None, model=None, predicted_class=None, top_k=None, note=""):
+                   timestamp=None, model=None, predicted_class=None, top_k=None,
+                   note="", success=False, reason="", rate=None, return_value=None,
+                   label=None, group_id=None, model_symbol=None, model_name=None, source="일반"):
+
     import csv
     import os
     from datetime import datetime
@@ -154,20 +157,28 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     now = datetime.now(pytz.timezone("Asia/Seoul")).isoformat() if timestamp is None else timestamp
     top_k_str = ",".join(map(str, top_k)) if top_k else ""
 
-    row = [now, symbol, strategy, direction, entry_price, target_price,
-           model or "", predicted_class if predicted_class is not None else "", top_k_str, note]
+    row = [
+        now, symbol, strategy, direction, entry_price, target_price,
+        model or "", predicted_class if predicted_class is not None else "",
+        top_k_str, note, str(success), reason, rate, return_value, label,
+        group_id, model_symbol, model_name, source
+    ]
 
     try:
         write_header = not os.path.exists(LOG_FILE)
         with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             if write_header:
-                writer.writerow(["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price",
-                                 "model", "predicted_class", "top_k", "note"])
+                writer.writerow([
+                    "timestamp", "symbol", "strategy", "direction", "entry_price", "target_price",
+                    "model", "predicted_class", "top_k", "note", "success", "reason",
+                    "rate", "return_value", "label", "group_id", "model_symbol", "model_name", "source"
+                ])
             writer.writerow(row)
-        print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} → class={predicted_class} | top_k={top_k_str}")
+        print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} → class={predicted_class} | success={success} | reason={reason}")
     except Exception as e:
         print(f"[⚠️ 예측 로그 기록 실패] {e}")
+
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
