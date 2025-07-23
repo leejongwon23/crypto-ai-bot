@@ -116,13 +116,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     import pytz
     from meta_learning import maml_train_entry
     from ranger_adabelief import RangerAdaBelief as Ranger
+    from sklearn.metrics import accuracy_score, f1_score
 
     print("✅ [train_one_model 호출됨]")
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = get_FEATURE_INPUT_SIZE()
     class_groups = get_class_groups()
-
     group_ids = [group_id] if group_id is not None else list(range(len(class_groups)))
 
     for gid in group_ids:
@@ -130,7 +130,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         try:
             masked_reconstruction(symbol, strategy, input_size)
 
-            # ✅ group_id 명확히 전달
             X1, y1 = load_training_prediction_data(symbol, strategy, window=60, input_size=input_size, group_id=gid)
             if X1 is None or y1 is None:
                 raise Exception("⛔ 학습 데이터 없음")
@@ -175,14 +174,14 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         all_preds.extend(preds)
                         all_labels.extend(yb.numpy())
 
-                from sklearn.metrics import accuracy_score, f1_score
                 acc = accuracy_score(all_labels, all_preds)
                 f1 = f1_score(all_labels, all_preds, average='macro')
                 print(f"[🎯 {model_type}] acc={acc:.4f}, f1={f1:.4f}")
 
+                # ✅ 예측 가능한 모델로 정확하게 저장
                 os.makedirs("/persistent/models", exist_ok=True)
-                model_name = f"{model_type}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window20"
-                model_path = f"/persistent/models/{symbol}_{strategy}_{model_name}.pt"
+                model_name = f"{symbol}_{strategy}_{model_type}_group{gid}.pt"
+                model_path = os.path.join("/persistent/models", model_name)
                 torch.save(model.state_dict(), model_path)
 
                 log_training_result(symbol=symbol, strategy=strategy, model=model_path, accuracy=acc, f1=f1, loss=total_loss)
@@ -190,6 +189,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         except Exception as e:
             print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{gid} → {e}")
             traceback.print_exc()
+
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
