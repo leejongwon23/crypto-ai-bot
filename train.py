@@ -123,18 +123,19 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     input_size = get_FEATURE_INPUT_SIZE()
     class_groups = get_class_groups()
 
-    # ✅ 전체 그룹 반복 지원
     group_ids = [group_id] if group_id is not None else list(range(len(class_groups)))
 
     for gid in group_ids:
         print(f"▶ [학습시작] {symbol}-{strategy}-group{gid}")
         try:
             masked_reconstruction(symbol, strategy, input_size)
-            X1, y1 = load_training_prediction_data(symbol, strategy, window=60, input_size=input_size)
+
+            # ✅ group_id 명확히 전달
+            X1, y1 = load_training_prediction_data(symbol, strategy, window=60, input_size=input_size, group_id=gid)
             if X1 is None or y1 is None:
                 raise Exception("⛔ 학습 데이터 없음")
 
-            X, y = balance_classes(X1, y1, num_classes=len(class_groups))
+            X, y = balance_classes(X1, y1, num_classes=len(class_groups[gid]))
             if len(X) < 10:
                 raise Exception(f"⛔ 학습 샘플 부족 ({len(X)}개)")
 
