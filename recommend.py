@@ -297,3 +297,20 @@ def check_disk_usage(threshold_percent=90):
     except Exception as e:
         print(f"[디스크 사용량 확인 실패] {e}")
 
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--symbol", type=str, default=None)
+    parser.add_argument("--strategy", type=str, default=None)
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--allow_prediction", action="store_true", default=True)
+
+    args = parser.parse_args()
+
+    main(
+        symbol=args.symbol,
+        strategy=args.strategy,
+        force=args.force,
+        allow_prediction=args.allow_prediction
+    )
