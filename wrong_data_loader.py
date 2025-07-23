@@ -42,6 +42,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     used_hashes = set()
     existing_hashes = load_existing_failure_hashes()
 
+    # ✅ 1. 실패 샘플 우선 수집
     if os.path.exists(WRONG_CSV):
         try:
             df = pd.read_csv(WRONG_CSV, encoding="utf-8-sig")
@@ -70,7 +71,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
 
                     xb = past_window.drop(columns=["timestamp"]).to_numpy(dtype=np.float32)
                     if xb.shape[1] < input_size:
-                        xb = np.pad(xb, ((0, 0), (0, input_size - xb.shape[1])), mode="constant", constant_values=0)
+                        xb = np.pad(xb, ((0, 0), (0, input_size - xb.shape[1])), mode="constant")
                     if xb.shape != (window, input_size):
                         continue
 
@@ -86,6 +87,30 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
         except Exception as e:
             print(f"[⚠️ 실패기록 파싱 오류] {symbol}-{strategy} → {e}")
 
+    # ✅ 2. 정규 시세 기반 샘플 생성 (label = class index)
+    for i in range(window, len(df_feat)):
+        try:
+            window_df = df_feat.iloc[i - window:i]
+            label = int(df_feat.iloc[i].get("class", -1))
+            if label not in group_classes:
+                continue
+
+            xb = window_df.drop(columns=["timestamp"]).to_numpy(dtype=np.float32)
+            if xb.shape[1] < input_size:
+                xb = np.pad(xb, ((0, 0), (0, input_size - xb.shape[1])), mode="constant")
+            if xb.shape != (window, input_size):
+                continue
+
+            h = get_feature_hash(xb[-1])
+            if h in used_hashes:
+                continue
+            used_hashes.add(h)
+
+            sequences.append((xb, label))
+        except:
+            continue
+
+    # ✅ 3. 클래스 누락 시 dummy 채우기
     label_counts = Counter([s[1] for s in sequences])
     for cls in group_classes:
         if label_counts[cls] == 0:
@@ -94,11 +119,12 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
                 dummy = np.random.normal(0, 1, (window, input_size)).astype(np.float32)
                 sequences.append((dummy, cls))
 
+    # ✅ 4. 전체 샘플 없을 경우 fallback
     if not sequences:
         print(f"[⚠️ 데이터 없음] {symbol}-{strategy} → fallback 샘플 생성")
         for _ in range(FAIL_AUGMENT_RATIO * 2):
             dummy = np.random.normal(0, 1, (window, input_size)).astype(np.float32)
-            random_label = np.random.choice(group_classes)
+            random_label = random.choice(group_classes)
             sequences.append((dummy, random_label))
 
     X = np.array([s[0] for s in sequences], dtype=np.float32)
