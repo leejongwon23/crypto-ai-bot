@@ -190,23 +190,20 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
-
 def predict(symbol, strategy, source="일반", model_type=None):
     import numpy as np, pandas as pd, os, torch, json
     from sklearn.preprocessing import MinMaxScaler
     from window_optimizer import find_best_windows
     from logger import log_prediction, get_available_models
     from config import FEATURE_INPUT_SIZE
-    from model_weight_loader import load_model_cached
+    from model_weight_loader import load_model_cached, get_class_return_range, class_to_expected_return
     from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
     from meta_learning import train_meta_learner, load_meta_learner, ensemble_stacking
     from data.utils import get_kline_by_strategy, compute_features
     from datetime import datetime
     import pytz
-    from model_weight_loader import class_to_expected_return
     from failure_db import insert_failure_record
     from logger import get_feature_hash
-    from train import train_one_model
 
     os.makedirs("/persistent/logs", exist_ok=True)
     def now_kst(): return datetime.now(pytz.timezone("Asia/Seoul"))
@@ -263,7 +260,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     insert_failure_record(symbol, strategy, -1, -1, now_kst())
                     continue
 
-                # ✅ meta에서 동적 클래스 수 읽기
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta_info = json.load(f)
                 num_classes = meta_info.get("num_classes", 21)
@@ -302,6 +298,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
         meta_model = load_meta_learner()
         final_pred_class = ensemble_stacking(model_outputs_list, meta_model)
 
+        # ✅ 클래스 수익률 범위(min, max) 조회
+        cls_min, cls_max = get_class_return_range(final_pred_class)
+
         for pred in all_model_predictions:
             predicted_class = pred["class"]
             entry_price = pred["entry_price"]
@@ -310,6 +309,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
             target_price = entry_price * (1 + expected_return)
             is_main = (predicted_class == final_pred_class)
 
+            # ✅ 실제 수익률이 클래스 범위 도달했는지로 성공 여부 판단
+            success = cls_min <= expected_return <= cls_max if is_main else False
+
             log_prediction(
                 symbol=pred["symbol"],
                 strategy=pred["strategy"],
@@ -317,7 +319,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 entry_price=entry_price,
                 target_price=target_price,
                 model=pred["model_name"],
-                success=is_main,
+                success=success,
                 reason="메타선택" if is_main else "미선택",
                 rate=expected_return,
                 return_value=expected_return,
@@ -329,7 +331,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 model_name=pred["model_name"]
             )
 
-            if not is_main and predicted_class != final_pred_class:
+            if not success:
                 insert_failure_record(
                     symbol=pred["symbol"],
                     strategy=pred["strategy"],
