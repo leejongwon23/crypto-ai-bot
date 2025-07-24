@@ -62,7 +62,7 @@ def get_SYMBOL_GROUPS():
     group_size = _config.get("SYMBOL_GROUP_SIZE", _default_config["SYMBOL_GROUP_SIZE"])
     return [symbols[i:i+group_size] for i in range(0, len(symbols), group_size)]
 
-# ✅ 클래스 그룹화 함수
+# ✅ 클래스 그룹화 함수 (클래스 번호 나누기)
 def get_class_groups(num_classes=None, group_size=5):
     if num_classes is None:
         num_classes = get_NUM_CLASSES()
@@ -70,37 +70,38 @@ def get_class_groups(num_classes=None, group_size=5):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
-# ✅ 클래스 구간 계산 함수
-def get_class_ranges(method="equal", data_path="/persistent/prediction_log.csv"):
+# ✅ 클래스 구간 계산 함수 (수익률 분포 기반)
+def get_class_ranges(method="equal", group_id=None, group_size=5, data_path="/persistent/prediction_log.csv"):
     import pandas as pd
     import numpy as np
 
     num_classes = get_NUM_CLASSES()
 
-    if method == "equal":
+    def compute_equal_ranges():
         step = 2.0 / num_classes
-        ranges = [(-1.0 + i*step, -1.0 + (i+1)*step) for i in range(num_classes)]
-        return ranges
+        return [(-1.0 + i*step, -1.0 + (i+1)*step) for i in range(num_classes)]
 
-    elif method == "quantile":
+    def compute_quantile_ranges():
         try:
             df = pd.read_csv(data_path, encoding="utf-8-sig")
             returns = df["return"].dropna().values
             if len(returns) < num_classes:
                 print(f"[⚠️ get_class_ranges] 데이터 부족 → equal binning 사용")
-                return get_class_ranges(method="equal")
-
+                return compute_equal_ranges()
             quantiles = np.quantile(returns, np.linspace(0, 1, num_classes + 1))
-            ranges = [(quantiles[i], quantiles[i+1]) for i in range(num_classes)]
-            return ranges
-
+            return [(quantiles[i], quantiles[i+1]) for i in range(num_classes)]
         except Exception as e:
             print(f"[❌ get_class_ranges] quantile binning 실패 → {e}")
-            return get_class_ranges(method="equal")
+            return compute_equal_ranges()
 
-    else:
-        print(f"[⚠️ get_class_ranges] 알 수 없는 method={method} → equal 사용")
-        return get_class_ranges(method="equal")
+    all_ranges = compute_equal_ranges() if method == "equal" else compute_quantile_ranges()
+
+    if group_id is None:
+        return all_ranges
+
+    start = group_id * group_size
+    end = start + group_size
+    return all_ranges[start:end]
 
 # ✅ 즉시 변수 선언
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
