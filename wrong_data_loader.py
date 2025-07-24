@@ -10,12 +10,12 @@ NUM_CLASSES = get_NUM_CLASSES()  # ✅ 함수 호출 후 변수 할당
 
 WRONG_CSV = "/persistent/wrong_predictions.csv"
 
-def load_training_prediction_data(symbol, strategy, input_size, window, group_id=None):
+def load_training_prediction_data(symbol, strategy, input_size, window):
     import random, os
     import numpy as np
     import pandas as pd
     from collections import Counter
-    from config import FAIL_AUGMENT_RATIO, get_class_groups
+    from config import FAIL_AUGMENT_RATIO, get_NUM_CLASSES
     from data.utils import get_kline_by_strategy, compute_features
     from logger import get_feature_hash
     from failure_db import load_existing_failure_hashes
@@ -23,8 +23,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     WRONG_CSV = "/persistent/wrong_predictions.csv"
     sequences = []
 
-    class_groups = get_class_groups()
-    group_classes = class_groups[group_id] if group_id is not None else list(range(sum(len(g) for g in class_groups)))
+    num_classes = get_NUM_CLASSES()
 
     df_price = get_kline_by_strategy(symbol, strategy)
     if df_price is None or df_price.empty:
@@ -50,13 +49,11 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
             df = df[df["timestamp"].notna()]
             df["label"] = df.get("predicted_class", -1).astype(int)
-            df = df[df["label"] >= 0]
+            df = df[(df["label"] >= 0) & (df["label"] < num_classes)]
 
             for _, row in df.iterrows():
                 entry_time = row["timestamp"]
                 label = int(row["label"])
-                if label not in group_classes:
-                    continue
 
                 past_window = df_feat[df_feat["timestamp"] < entry_time].tail(window)
                 if past_window.empty:
@@ -80,7 +77,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
         try:
             window_df = df_feat.iloc[i - window:i]
             label = int(df_feat.iloc[i].get("class", -1))
-            if label not in group_classes:
+            if not (0 <= label < num_classes):
                 label_missing.append(label)
                 continue
             xb = window_df.drop(columns=["timestamp"]).to_numpy(dtype=np.float32)
@@ -100,14 +97,14 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
 
     ### 3. 클래스 누락시 인접 복제
     label_counts = Counter([s[1] for s in sequences])
-    all_by_label = {cls: [] for cls in group_classes}
+    all_by_label = {cls: [] for cls in range(num_classes)}
     for xb, y in sequences:
         all_by_label[y].append(xb)
 
-    for cls in group_classes:
+    for cls in range(num_classes):
         if label_counts[cls] == 0:
             print(f"[📌 클래스 {cls} 누락 → 인접 샘플 복제]")
-            neighbors = [c for c in [cls-1, cls+1] if c in all_by_label and all_by_label[c]]
+            neighbors = [c for c in [cls-1, cls+1] if 0 <= c < num_classes and all_by_label[c]]
             candidates = sum([all_by_label[c] for c in neighbors], [])
             if not candidates:
                 continue
@@ -121,13 +118,12 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
         print(f"[⚠️ 전체 데이터 없음] {symbol}-{strategy} → fallback 샘플 생성")
         for _ in range(FAIL_AUGMENT_RATIO * 2):
             dummy = np.random.normal(0, 1, (window, input_size)).astype(np.float32)
-            random_label = random.choice(group_classes)
+            random_label = random.randint(0, num_classes - 1)
             sequences.append((dummy, random_label))
 
     ### 최종 결과
     X = np.array([s[0] for s in sequences], dtype=np.float32)
     y = np.array([s[1] for s in sequences], dtype=np.int64)
-    print(f"[✅ load_training_prediction_data 완료] {symbol}-{strategy}-g{group_id} → 샘플 수: {len(y)} / 클래스 분포: {dict(Counter(y))} / 누락된 라벨 수: {len(label_missing)}")
+    print(f"[✅ load_training_prediction_data 완료] {symbol}-{strategy} → 샘플 수: {len(y)} / 클래스 분포: {dict(Counter(y))} / 누락된 라벨 수: {len(label_missing)}")
 
     return X, y
-
