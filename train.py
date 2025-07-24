@@ -99,10 +99,6 @@ def get_class_groups(num_classes=21, group_size=7):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
-# ⬇ 중간 생략 없이 전체 train_one_model 함수
-# ✅ 기존 모델이 존재하면 가중치 불러와 이어서 학습합니다
-# ✅ 예측 실패가 없어도 누적 학습되고, 실패시엔 실패 데이터도 포함됩니다
-# ✅ 진화형 구조 완성
 def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     import os, gc, traceback, torch, json, numpy as np, pandas as pd
     from datetime import datetime; from collections import Counter
@@ -111,31 +107,56 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     from torch.utils.data import TensorDataset, DataLoader
     from model.base_model import get_model
     from logger import log_training_result
-    from create_dataset import create_dataset  # ✅ 동적 클래스 적용 함수
+    from data.utils import get_kline_by_strategy, compute_features
     import pytz
     from meta_learning import maml_train_entry
     from ranger_adabelief import RangerAdaBelief as Ranger
     from sklearn.metrics import accuracy_score, f1_score
+    from sklearn.preprocessing import MinMaxScaler
 
     print("✅ [train_one_model 호출됨]")
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = get_FEATURE_INPUT_SIZE()
-    group_ids = [group_id] if group_id is not None else list(range(1))  # ✅ group 무의미해졌을 경우 단일 루프
+    group_ids = [group_id] if group_id is not None else list(range(1))
 
     for gid in group_ids:
         print(f"▶ [학습시작] {symbol}-{strategy}-group{gid}")
         try:
             masked_reconstruction(symbol, strategy, input_size)
 
-            X, y, num_classes = create_dataset(
-                features=get_price_feature_data(symbol, strategy),  # ✅ 가격+특징 조합 함수 따로 사용시 수정
-                window=60,
-                strategy=strategy,
-                input_size=input_size
-            )
-            if X is None or y is None or len(X) < 10:
+            df = get_kline_by_strategy(symbol, strategy)
+            feat = compute_features(symbol, df, strategy)
+
+            if feat is None or len(feat) < 100:
                 raise Exception("⛔ 학습 데이터 부족")
+
+            features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
+            feat_scaled = MinMaxScaler().fit_transform(features_only)
+
+            returns = df["close"].pct_change().fillna(0).values
+            class_ranges = get_class_groups()
+            labels = []
+
+            for r in returns:
+                for i, (low, high) in enumerate(class_ranges[gid]):
+                    if low <= r <= high:
+                        labels.append(i)
+                        break
+                else:
+                    labels.append(0)
+
+            window = 60
+            X, y = [], []
+            for i in range(len(feat_scaled) - window):
+                X.append(feat_scaled[i:i+window])
+                y.append(labels[i + window])
+
+            X, y = np.array(X), np.array(y)
+            num_classes = len(class_ranges[gid])
+
+            if len(X) < 10:
+                raise Exception("⛔ 유효한 학습 샘플 부족")
 
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
                 model = get_model(model_type, input_size=input_size, output_size=num_classes)
@@ -188,6 +209,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         except Exception as e:
             print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{gid} → {e}")
             traceback.print_exc()
+
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
