@@ -149,8 +149,10 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
         strategy_minutes = {"단기": 240, "중기": 1440, "장기": 2880}
         lookahead_minutes = strategy_minutes.get(strategy, 1440)
-
         class_ranges = [(-1.0 + 2.0 * i / NUM_CLASSES, -1.0 + 2.0 * (i + 1) / NUM_CLASSES) for i in range(NUM_CLASSES)]
+
+        valid_gains = []
+        skipped_due_to_gain = 0
 
         for i in range(window, len(features)):
             try:
@@ -167,11 +169,14 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
                 valid_prices = [f.get("high", f.get("close", entry_price)) for f in future if f.get("high", 0) > 0]
                 if not valid_prices:
+                    skipped_due_to_gain += 1
                     continue
 
                 max_future_price = max(valid_prices)
                 gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
                 gain = max(-1.0, min(1.0, gain))
+                valid_gains.append(gain)
+
                 cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain <= high), NUM_CLASSES - 1)
 
                 sample = [[float(r.get(c, 0.0)) for c in feature_cols] for r in seq]
@@ -189,6 +194,8 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             except Exception as e:
                 print(f"[❌ inner 예외] {e} → i={i}")
                 continue
+
+        print(f"[📊 수익률 샘플] 총={len(valid_gains)}개, 평균수익률={np.mean(valid_gains):.4f}, 무시된건수={skipped_due_to_gain}")
 
         if len(y) == 0:
             print("[❌ 샘플 없음] 최소 10개 dummy 생성")
@@ -331,10 +338,10 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
             df = df.sort_values("timestamp").reset_index(drop=True)
             df["datetime"] = df["timestamp"]
 
-            # ✅ 너무 적은 row 수는 경고 (기존 실패 원인 대응)
             if len(df) < 10:
                 print(f"[⚠️ 경고] {symbol}-{interval} → 캔들 수 부족 ({len(df)} rows)")
 
+            print(f"[✅ get_kline 완료] {symbol}-{interval} → {len(df)}개 캔들 로드됨")  # 🔍 추가된 로그
             return df
 
         except Exception as e:
@@ -453,9 +460,9 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         return pd.DataFrame()
 
     print(f"[✅ 완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
+    print(f"[🔍 feature 상태] {symbol}-{strategy} → shape: {df.shape}, NaN: {df.isnull().values.any()}, 컬럼수: {len(df.columns)}")  # ✅ 추가
     CacheManager.set(cache_key, df)
     return df
-
 
 
 # data/utils.py 맨 아래에 추가
