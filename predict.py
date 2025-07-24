@@ -362,14 +362,14 @@ import pandas as pd
 from failure_db import ensure_failure_db, insert_failure_record
 from logger import update_model_success
 
-
 def evaluate_predictions(get_price_fn):
     import csv, os, datetime, pytz
     import pandas as pd
     from failure_db import ensure_failure_db, insert_failure_record
     from logger import update_model_success, log_prediction
-    class_ranges = get_class_ranges()
+    from config import get_class_ranges
 
+    class_ranges = get_class_ranges()
     ensure_failure_db()
 
     PREDICTION_LOG = "/persistent/prediction_log.csv"
@@ -377,9 +377,8 @@ def evaluate_predictions(get_price_fn):
     date_str = now_kst().strftime("%Y-%m-%d")
     EVAL_RESULT = f"/persistent/logs/evaluation_{date_str}.csv"
     WRONG = f"/persistent/logs/wrong_{date_str}.csv"
-
-
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
+
     updated, evaluated = [], []
 
     try:
@@ -411,10 +410,7 @@ def evaluate_predictions(get_price_fn):
                                model, False, "entry_price 오류 또는 pred_class=-1", 0.0, 0.0, False, "평가",
                                predicted_class=pred_class, label=label, group_id=group_id)
                 r.update({"status": "fail", "reason": "entry_price 오류 또는 pred_class=-1", "return": 0.0})
-
-                # ✅ 실패 샘플 DB insert 추가
                 insert_failure_record(r, f"{symbol}-{strategy}-{now_kst().isoformat()}", feature_vector=None, label=label)
-
                 updated.append(r)
                 continue
 
@@ -441,11 +437,11 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            # ✅ 수정된 평가 로직: 예측 클래스 구간(min~max) 내에 들어가야 성공으로 판정
+            # ✅ 성공 기준 수정: 예측 클래스 하한 이상이면 성공
             success = False
             if 0 <= pred_class < len(class_ranges):
-                cls_min, cls_max = class_ranges[pred_class]
-                if cls_min <= gain < cls_max:
+                cls_min, _ = class_ranges[pred_class]
+                if gain >= cls_min:
                     success = True
 
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
@@ -469,7 +465,6 @@ def evaluate_predictions(get_price_fn):
                            success, r["reason"], gain, gain, vol, "평가",
                            predicted_class=pred_class, label=label, group_id=group_id)
 
-            # ✅ 실패 샘플 DB insert 추가
             if not success:
                 insert_failure_record(r, f"{symbol}-{strategy}-{now_kst().isoformat()}", feature_vector=None, label=label)
 
