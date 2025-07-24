@@ -94,12 +94,11 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
     import numpy as np
     import pandas as pd
     from sklearn.preprocessing import MinMaxScaler
-    from config import get_NUM_CLASSES, MIN_FEATURES
+    from config import MIN_FEATURES
     from logger import log_prediction
     from collections import Counter
     import random
 
-    NUM_CLASSES = get_NUM_CLASSES()
     X, y = [], []
 
     def get_symbol_safe():
@@ -180,53 +179,41 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                             sample[j] = row[:input_size]
 
                 samples.append((sample, gain))
-            except Exception as e:
+            except Exception:
                 continue
 
         if not samples or not valid_gains:
             print("[❌ 수익률 없음] dummy 반환")
             dummy_X = np.random.normal(0, 1, size=(10, window, input_size if input_size else MIN_FEATURES)).astype(np.float32)
-            dummy_y = np.random.randint(0, NUM_CLASSES, size=(10,))
+            dummy_y = np.random.randint(0, 5, size=(10,))  # 최소 클래스 수 가정
             return dummy_X, dummy_y
 
-        # ✅ gain 기반 동적 클래스 나누기
+        # ✅ 클래스 수 동적 계산 (최대 21개, 최소 3개)
         min_gain, max_gain = min(valid_gains), max(valid_gains)
-        step = (max_gain - min_gain) / NUM_CLASSES
+        spread = max_gain - min_gain
+        est_class = int(spread / 0.01)  # 1% 단위로 나눈 것 기준
+        num_classes = max(3, min(21, est_class))
+
+        step = spread / num_classes if num_classes > 0 else 1e-6
         if step == 0:
-            step = 1e-6  # fallback 방지
+            step = 1e-6
 
         for sample, gain in samples:
-            cls = min(int((gain - min_gain) / step), NUM_CLASSES - 1)
+            cls = min(int((gain - min_gain) / step), num_classes - 1)
             X.append(sample)
             y.append(cls)
-
-        if len(y) < 10:
-            while len(y) < 10:
-                X.append(X[0])
-                y.append(y[0])
-
-        counts = Counter(y)
-        max_count = max(counts.values())
-        for cls_id in range(NUM_CLASSES):
-            cls_samples = [i for i, label in enumerate(y) if label == cls_id]
-            needed = int(max_count * 0.8) - len(cls_samples)
-            if cls_samples and needed > 0:
-                for _ in range(needed):
-                    idx = random.choice(cls_samples)
-                    X.append(X[idx])
-                    y.append(cls_id)
 
         X = np.array(X, dtype=np.float32)
         y = np.array(y, dtype=np.int64)
 
-        print(f"[✅ create_dataset 완료] 샘플 수: {len(y)}, X.shape={X.shape}, 클래스 분포: {Counter(y)}")
-        return X, y
+        print(f"[✅ create_dataset 완료] 샘플 수: {len(y)}, X.shape={X.shape}, 동적 클래스 수: {num_classes}, 분포: {Counter(y)}")
+        return X, y, num_classes  # ✅ 클래스 수 함께 반환
 
     except Exception as e:
         print(f"[❌ 최상위 예외] create_dataset 실패 → {e}")
         dummy_X = np.random.normal(0, 1, size=(10, window, input_size if input_size else MIN_FEATURES)).astype(np.float32)
-        dummy_y = np.random.randint(0, NUM_CLASSES, size=(10,))
-        return dummy_X, dummy_y
+        dummy_y = np.random.randint(0, 5, size=(10,))
+        return dummy_X, dummy_y, 5
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
 _kline_cache = {}
