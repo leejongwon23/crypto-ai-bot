@@ -10,12 +10,12 @@ NUM_CLASSES = get_NUM_CLASSES()  # ✅ 함수 호출 후 변수 할당
 
 WRONG_CSV = "/persistent/wrong_predictions.csv"
 
-def load_training_prediction_data(symbol, strategy, input_size, window):
+def load_training_prediction_data(symbol, strategy, input_size, window, group_id=None):
     import random, os
     import numpy as np
     import pandas as pd
     from collections import Counter
-    from config import FAIL_AUGMENT_RATIO, get_NUM_CLASSES
+    from config import FAIL_AUGMENT_RATIO, get_class_groups
     from data.utils import get_kline_by_strategy, compute_features
     from logger import get_feature_hash
     from failure_db import load_existing_failure_hashes
@@ -23,7 +23,9 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
     WRONG_CSV = "/persistent/wrong_predictions.csv"
     sequences = []
 
-    num_classes = get_NUM_CLASSES()
+    class_groups = get_class_groups()
+    group_classes = class_groups[group_id] if group_id is not None else list(range(sum(len(g) for g in class_groups)))
+    num_classes = len(group_classes)
 
     df_price = get_kline_by_strategy(symbol, strategy)
     if df_price is None or df_price.empty:
@@ -37,6 +39,17 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
 
     df_feat["timestamp"] = df_feat.get("timestamp") or df_feat.get("datetime")
     df_feat = df_feat.dropna().reset_index(drop=True)
+
+    returns = df_price["close"].pct_change().fillna(0).values
+    labels = []
+    for r in returns:
+        for i, (low, high) in enumerate(group_classes):
+            if low <= r <= high:
+                labels.append(i)
+                break
+        else:
+            labels.append(0)
+    df_feat["label"] = labels[:len(df_feat)]
 
     used_hashes = set()
     existing_hashes = load_existing_failure_hashes()
@@ -54,11 +67,10 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
             for _, row in df.iterrows():
                 entry_time = row["timestamp"]
                 label = int(row["label"])
-
                 past_window = df_feat[df_feat["timestamp"] < entry_time].tail(window)
                 if past_window.empty:
                     continue
-                xb = past_window.drop(columns=["timestamp"]).to_numpy(dtype=np.float32)
+                xb = past_window.drop(columns=["timestamp", "label"]).to_numpy(dtype=np.float32)
                 xb = np.pad(xb, ((window - len(xb), 0), (0, input_size - xb.shape[1])), mode="constant")
                 if xb.shape != (window, input_size):
                     continue
@@ -76,11 +88,11 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
     for i in range(window, len(df_feat)):
         try:
             window_df = df_feat.iloc[i - window:i]
-            label = int(df_feat.iloc[i].get("class", -1))
+            label = int(df_feat.iloc[i].get("label", -1))
             if not (0 <= label < num_classes):
                 label_missing.append(label)
                 continue
-            xb = window_df.drop(columns=["timestamp"]).to_numpy(dtype=np.float32)
+            xb = window_df.drop(columns=["timestamp", "label"]).to_numpy(dtype=np.float32)
             xb = np.pad(xb, ((0, 0), (0, input_size - xb.shape[1])), mode="constant")
             if xb.shape[0] < window:
                 xb = np.pad(xb, ((window - xb.shape[0], 0), (0, 0)), mode="constant")
@@ -127,3 +139,5 @@ def load_training_prediction_data(symbol, strategy, input_size, window):
     print(f"[✅ load_training_prediction_data 완료] {symbol}-{strategy} → 샘플 수: {len(y)} / 클래스 분포: {dict(Counter(y))} / 누락된 라벨 수: {len(label_missing)}")
 
     return X, y
+
+
