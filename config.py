@@ -13,6 +13,10 @@ _default_config = {
     "SYMBOL_GROUP_SIZE": 3
 }
 
+# ✅ 내부 동적 캐시 변수
+_config = _default_config.copy()
+_dynamic_num_classes = None  # ✅ 동적 클래스 저장
+
 # ✅ config.json 로드
 if os.path.exists(CONFIG_PATH):
     try:
@@ -21,9 +25,6 @@ if os.path.exists(CONFIG_PATH):
         print("[✅ config.py] config.json 로드 완료")
     except Exception as e:
         print(f"[⚠️ config.py] config.json 로드 실패 → 기본값 사용: {e}")
-        _config = _default_config.copy()
-else:
-    _config = _default_config.copy()
 
 # ✅ 저장 함수
 def save_config():
@@ -34,9 +35,15 @@ def save_config():
     except Exception as e:
         print(f"[⚠️ config.py] config.json 저장 실패 → {e}")
 
+# ✅ 동적 클래스 수 설정 함수
+def set_NUM_CLASSES(n):
+    global _dynamic_num_classes
+    _dynamic_num_classes = n
+
 # ✅ get 함수들
 def get_NUM_CLASSES():
-    return _config.get("NUM_CLASSES", _default_config["NUM_CLASSES"])
+    global _dynamic_num_classes
+    return _dynamic_num_classes if _dynamic_num_classes is not None else _config.get("NUM_CLASSES", _default_config["NUM_CLASSES"])
 
 def get_FEATURE_INPUT_SIZE():
     return _config.get("FEATURE_INPUT_SIZE", _default_config["FEATURE_INPUT_SIZE"])
@@ -63,6 +70,7 @@ def get_class_groups(num_classes=None, group_size=5):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
+# ✅ 클래스 구간 계산 함수
 def get_class_ranges(method="equal", data_path="/persistent/prediction_log.csv"):
     import pandas as pd
     import numpy as np
