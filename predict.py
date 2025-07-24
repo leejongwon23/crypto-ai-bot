@@ -190,12 +190,13 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
+
 def predict(symbol, strategy, source="일반", model_type=None):
-    import numpy as np, pandas as pd, os, torch
+    import numpy as np, pandas as pd, os, torch, json
     from sklearn.preprocessing import MinMaxScaler
     from window_optimizer import find_best_windows
     from logger import log_prediction, get_available_models
-    from config import get_class_groups, FEATURE_INPUT_SIZE
+    from config import FEATURE_INPUT_SIZE
     from model_weight_loader import load_model_cached
     from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
     from meta_learning import train_meta_learner, load_meta_learner, ensemble_stacking
@@ -208,11 +209,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from train import train_one_model
 
     os.makedirs("/persistent/logs", exist_ok=True)
+    def now_kst(): return datetime.now(pytz.timezone("Asia/Seoul"))
 
-    def now_kst():
-        return datetime.now(pytz.timezone("Asia/Seoul"))
-
-    class_groups = get_class_groups()
     model_outputs_list, true_labels = [], []
     all_model_predictions = []
 
@@ -220,19 +218,16 @@ def predict(symbol, strategy, source="일반", model_type=None):
         window_list = find_best_windows(symbol, strategy)
         if not window_list:
             insert_failure_record(symbol, strategy, -1, -1, now_kst())
-            print("[예측 중단] 유효한 윈도우 없음")
             return None
 
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 1:
             insert_failure_record(symbol, strategy, -1, -1, now_kst())
-            print("[예측 중단] K라인 부족")
             return None
 
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.dropna().shape[0] < max(window_list) + 1:
             insert_failure_record(symbol, strategy, -1, -1, now_kst())
-            print("[예측 중단] Feature 불충분")
             return None
 
         features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
@@ -246,7 +241,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         models = get_available_models(symbol, strategy)
         if not models:
             insert_failure_record(symbol, strategy, -1, -1, now_kst())
-            print("[예측 실패] 사용 가능한 모델 없음")
             return None
 
         recent_freq = get_recent_class_frequencies(strategy)
@@ -261,34 +255,21 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 if f"_window{window}" not in m["pt_file"]:
                     continue
 
-                group_id = m.get("group_id")
-                if group_id is None:
-                    continue
-                group_classes = class_groups[group_id]
-
                 model_path = os.path.join("/persistent/models", m["pt_file"])
                 meta_path = model_path.replace(".pt", ".meta.json")
 
-                # ✅ 모델 존재 확인 및 자동 학습 fallback
-                if not os.path.exists(model_path):
-                    print(f"[⛔ 모델 없음] → 학습 시도: {model_path}")
-                    try:
-                        train_one_model(symbol, strategy, group_id=group_id)
-                    except Exception as e:
-                        print(f"[자동 학습 실패] {model_path} → {e}")
-                    if not os.path.exists(model_path):
-                        print(f"[예측 스킵] 학습 후에도 모델 없음: {model_path}")
-                        insert_failure_record(symbol, strategy, -1, -1, now_kst())
-                        continue
-
-                if not os.path.exists(meta_path):
-                    print(f"[메타정보 없음] {meta_path}")
+                group_id = m.get("group_id")
+                if group_id is None or not os.path.exists(meta_path):
                     insert_failure_record(symbol, strategy, -1, -1, now_kst())
                     continue
 
-                model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, len(group_classes))
+                # ✅ meta에서 동적 클래스 수 읽기
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta_info = json.load(f)
+                num_classes = meta_info.get("num_classes", 21)
+
+                model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, num_classes)
                 if model is None:
-                    print(f"[모델 로드 실패] {model_path}")
                     insert_failure_record(symbol, strategy, -1, -1, now_kst())
                     continue
 
@@ -310,12 +291,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     "class": final_class,
                     "probs": adjusted_probs.tolist(),
                     "model_symbol": m["symbol"],
-                    "entry_price": float(df.iloc[-1]["close"])
+                    "entry_price": float(df.iloc[-1]["close"]),
+                    "num_classes": num_classes
                 })
 
-        # ✅ 모델은 존재했으나 예측 결과 없음 (로그 명확화)
         if not model_outputs_list:
-            print("[❌ 예측 결과 없음] 모델 존재하나 출력 없음")
             insert_failure_record(symbol, strategy, -1, -1, now_kst())
             return None
 
@@ -325,7 +305,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
         for pred in all_model_predictions:
             predicted_class = pred["class"]
             entry_price = pred["entry_price"]
-            expected_return = class_to_expected_return(predicted_class)
+            num_classes = pred["num_classes"]
+            expected_return = class_to_expected_return(predicted_class, num_classes)
             target_price = entry_price * (1 + expected_return)
             is_main = (predicted_class == final_pred_class)
 
@@ -362,7 +343,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "strategy": strategy,
             "model": "meta",
             "class": final_pred_class,
-            "expected_return": class_to_expected_return(final_pred_class),
+            "expected_return": class_to_expected_return(final_pred_class, len(model_outputs_list[0])),
             "timestamp": now_kst().isoformat(),
             "reason": "메타 최종 선택",
             "source": source
@@ -372,7 +353,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         print(f"[predict 예외] {e}")
         insert_failure_record(symbol, strategy, -1, -1, now_kst())
         return None
-
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
