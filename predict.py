@@ -437,11 +437,11 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            # ✅ 성공 기준 수정: 예측 클래스 하한 이상이면 성공
+            # ✅ 예측 클래스 수익률 구간 [min, max] 내 도달 또는 초과 시 성공
             success = False
             if 0 <= pred_class < len(class_ranges):
-                cls_min, _ = class_ranges[pred_class]
-                if gain >= cls_min:
+                cls_min, cls_max = class_ranges[pred_class]
+                if cls_min <= gain <= cls_max:
                     success = True
 
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
