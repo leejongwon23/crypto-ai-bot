@@ -111,11 +111,10 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         print(f"[⚠️ 부족] features length={len(features) if isinstance(features, list) else 'Invalid'}, window={window} → dummy 반환")
         dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
         dummy_y = np.array([-1], dtype=np.int64)
-        log_prediction(
-            symbol=get_symbol_safe(), strategy=strategy, direction="dummy", entry_price=0, target_price=0,
-            model="dummy_model", success=False, reason="입력 feature 부족", rate=0.0,
-            return_value=0.0, volatility=False, source="create_dataset", predicted_class=-1, label=-1
-        )
+        log_prediction(symbol=get_symbol_safe(), strategy=strategy, direction="dummy", entry_price=0,
+                       target_price=0, model="dummy_model", success=False, reason="입력 feature 부족",
+                       rate=0.0, return_value=0.0, volatility=False, source="create_dataset",
+                       predicted_class=-1, label=-1)
         return dummy_X, dummy_y
 
     try:
@@ -149,10 +148,9 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
         strategy_minutes = {"단기": 240, "중기": 1440, "장기": 2880}
         lookahead_minutes = strategy_minutes.get(strategy, 1440)
-        class_ranges = [(-1.0 + 2.0 * i / NUM_CLASSES, -1.0 + 2.0 * (i + 1) / NUM_CLASSES) for i in range(NUM_CLASSES)]
 
         valid_gains = []
-        skipped_due_to_gain = 0
+        samples = []
 
         for i in range(window, len(features)):
             try:
@@ -163,21 +161,14 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                 if pd.isnull(entry_time) or entry_price <= 0:
                     continue
 
-                future = [f for f in features[i + 1:] if "timestamp" in f and pd.to_datetime(f["timestamp"]) - entry_time <= pd.Timedelta(minutes=lookahead_minutes)]
-                if len(seq) != window or len(future) < 1:
-                    continue
-
+                future = [f for f in features[i + 1:] if pd.to_datetime(f.get("timestamp", None)) - entry_time <= pd.Timedelta(minutes=lookahead_minutes)]
                 valid_prices = [f.get("high", f.get("close", entry_price)) for f in future if f.get("high", 0) > 0]
-                if not valid_prices:
-                    skipped_due_to_gain += 1
+                if len(seq) != window or not valid_prices:
                     continue
 
                 max_future_price = max(valid_prices)
                 gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
-                gain = max(-1.0, min(1.0, gain))
                 valid_gains.append(gain)
-
-                cls = next((j for j, (low, high) in enumerate(class_ranges) if low <= gain <= high), NUM_CLASSES - 1)
 
                 sample = [[float(r.get(c, 0.0)) for c in feature_cols] for r in seq]
                 if input_size:
@@ -188,20 +179,26 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                         elif len(row) > input_size:
                             sample[j] = row[:input_size]
 
-                X.append(sample)
-                y.append(cls)
-
+                samples.append((sample, gain))
             except Exception as e:
-                print(f"[❌ inner 예외] {e} → i={i}")
                 continue
 
-        print(f"[📊 수익률 샘플] 총={len(valid_gains)}개, 평균수익률={np.mean(valid_gains):.4f}, 무시된건수={skipped_due_to_gain}")
-
-        if len(y) == 0:
-            print("[❌ 샘플 없음] 최소 10개 dummy 생성")
+        if not samples or not valid_gains:
+            print("[❌ 수익률 없음] dummy 반환")
             dummy_X = np.random.normal(0, 1, size=(10, window, input_size if input_size else MIN_FEATURES)).astype(np.float32)
             dummy_y = np.random.randint(0, NUM_CLASSES, size=(10,))
             return dummy_X, dummy_y
+
+        # ✅ gain 기반 동적 클래스 나누기
+        min_gain, max_gain = min(valid_gains), max(valid_gains)
+        step = (max_gain - min_gain) / NUM_CLASSES
+        if step == 0:
+            step = 1e-6  # fallback 방지
+
+        for sample, gain in samples:
+            cls = min(int((gain - min_gain) / step), NUM_CLASSES - 1)
+            X.append(sample)
+            y.append(cls)
 
         if len(y) < 10:
             while len(y) < 10:
@@ -222,7 +219,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         X = np.array(X, dtype=np.float32)
         y = np.array(y, dtype=np.int64)
 
-        print(f"[✅ create_dataset 완료] 샘플 수: {len(y)}, X.shape={X.shape}, y.shape={y.shape}, 클래스 분포: {Counter(y)}")
+        print(f"[✅ create_dataset 완료] 샘플 수: {len(y)}, X.shape={X.shape}, 클래스 분포: {Counter(y)}")
         return X, y
 
     except Exception as e:
@@ -230,7 +227,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         dummy_X = np.random.normal(0, 1, size=(10, window, input_size if input_size else MIN_FEATURES)).astype(np.float32)
         dummy_y = np.random.randint(0, NUM_CLASSES, size=(10,))
         return dummy_X, dummy_y
-
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
 _kline_cache = {}
