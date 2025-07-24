@@ -140,3 +140,40 @@ def count_models_per_strategy():
     except Exception as e:
         print(f"[오류] 모델 수 계산 실패: {e}")
     return counts
+
+def get_class_return_range(class_id, method="quantile", data_path="/persistent/prediction_log.csv"):
+    """
+    ✅ 주어진 클래스 ID의 수익률 범위를 반환
+    :param class_id: 예측된 클래스 번호
+    :param method: 분포 방식 ("equal" or "quantile")
+    :param data_path: 예측 로그 CSV 경로
+    :return: (min_return, max_return)
+    """
+    import numpy as np
+    import pandas as pd
+    from config import get_NUM_CLASSES
+
+    num_classes = get_NUM_CLASSES()
+
+    try:
+        if method == "equal":
+            step = 2.0 / num_classes  # -1.0 ~ +1.0 기준
+            lower = -1.0 + class_id * step
+            upper = lower + step
+            return (lower, upper)
+
+        elif method == "quantile":
+            df = pd.read_csv(data_path, encoding="utf-8-sig")
+            returns = df["return"].dropna().values
+            if len(returns) < num_classes:
+                return get_class_return_range(class_id, method="equal")
+
+            quantiles = np.quantile(returns, np.linspace(0, 1, num_classes + 1))
+            return (quantiles[class_id], quantiles[class_id + 1])
+
+        else:
+            return get_class_return_range(class_id, method="equal")
+
+    except Exception as e:
+        print(f"[❌ get_class_return_range 오류] class_id={class_id} → {e}")
+        return (-1.0, 1.0)
