@@ -111,8 +111,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     from torch.utils.data import TensorDataset, DataLoader
     from model.base_model import get_model
     from logger import log_training_result
-    from data_augmentation import balance_classes
-    from wrong_data_loader import load_training_prediction_data
+    from create_dataset import create_dataset  # ✅ 동적 클래스 적용 함수
     import pytz
     from meta_learning import maml_train_entry
     from ranger_adabelief import RangerAdaBelief as Ranger
@@ -122,24 +121,24 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = get_FEATURE_INPUT_SIZE()
-    class_groups = get_class_groups()
-    group_ids = [group_id] if group_id is not None else list(range(len(class_groups)))
+    group_ids = [group_id] if group_id is not None else list(range(1))  # ✅ group 무의미해졌을 경우 단일 루프
 
     for gid in group_ids:
         print(f"▶ [학습시작] {symbol}-{strategy}-group{gid}")
         try:
             masked_reconstruction(symbol, strategy, input_size)
 
-            X1, y1 = load_training_prediction_data(symbol, strategy, window=60, input_size=input_size, group_id=gid)
-            if X1 is None or y1 is None:
-                raise Exception("⛔ 학습 데이터 없음")
-
-            X, y = balance_classes(X1, y1, num_classes=len(class_groups[gid]))
-            if len(X) < 10:
-                raise Exception(f"⛔ 학습 샘플 부족 ({len(X)}개)")
+            X, y, num_classes = create_dataset(
+                features=get_price_feature_data(symbol, strategy),  # ✅ 가격+특징 조합 함수 따로 사용시 수정
+                window=60,
+                strategy=strategy,
+                input_size=input_size
+            )
+            if X is None or y is None or len(X) < 10:
+                raise Exception("⛔ 학습 데이터 부족")
 
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
-                model = get_model(model_type, input_size=input_size, output_size=len(class_groups[gid]))
+                model = get_model(model_type, input_size=input_size, output_size=num_classes)
                 model.to(DEVICE)
                 optimizer = Ranger(model.parameters(), lr=0.001)
                 criterion = torch.nn.CrossEntropyLoss()
@@ -178,18 +177,17 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 f1 = f1_score(all_labels, all_preds, average='macro')
                 print(f"[🎯 {model_type}] acc={acc:.4f}, f1={f1:.4f}")
 
-                # ✅ 예측 가능한 모델로 정확하게 저장
                 os.makedirs("/persistent/models", exist_ok=True)
-                model_name = f"{symbol}_{strategy}_{model_type}_group{gid}.pt"
+                model_name = f"{symbol}_{strategy}_{model_type}_group{gid}_cls{num_classes}.pt"
                 model_path = os.path.join("/persistent/models", model_name)
                 torch.save(model.state_dict(), model_path)
 
-                log_training_result(symbol=symbol, strategy=strategy, model=model_path, accuracy=acc, f1=f1, loss=total_loss)
+                log_training_result(symbol=symbol, strategy=strategy, model=model_path,
+                                    accuracy=acc, f1=f1, loss=total_loss)
 
         except Exception as e:
             print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{gid} → {e}")
             traceback.print_exc()
-
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
