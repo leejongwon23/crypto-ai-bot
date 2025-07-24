@@ -369,7 +369,6 @@ def evaluate_predictions(get_price_fn):
     from logger import update_model_success, log_prediction
     from config import get_class_ranges
 
-    class_ranges = get_class_ranges()
     ensure_failure_db()
 
     PREDICTION_LOG = "/persistent/prediction_log.csv"
@@ -398,7 +397,7 @@ def evaluate_predictions(get_price_fn):
             symbol = r.get("symbol", "UNKNOWN")
             strategy = r.get("strategy", "알수없음")
             model = r.get("model", "unknown")
-            group_id = r.get("group_id", "")
+            group_id = int(r.get("group_id", 0)) if str(r.get("group_id")).isdigit() else 0
 
             pred_class = int(float(r.get("predicted_class", -1))) if pd.notnull(r.get("predicted_class")) else -1
             label = int(float(r.get("label", -1))) if pd.notnull(r.get("label")) else -1
@@ -437,10 +436,11 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            # ✅ 예측 클래스 수익률 구간 [min, max] 내 도달 또는 초과 시 성공
+            # ✅ 그룹별 클래스 수익률 구간 반영
+            class_ranges_for_group = get_class_ranges(group_id=group_id)
             success = False
-            if 0 <= pred_class < len(class_ranges):
-                cls_min, cls_max = class_ranges[pred_class]
+            if 0 <= pred_class < len(class_ranges_for_group):
+                cls_min, cls_max = class_ranges_for_group[pred_class]
                 if cls_min <= gain <= cls_max:
                     success = True
 
@@ -492,6 +492,7 @@ def evaluate_predictions(get_price_fn):
     failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
     safe_write_csv(WRONG, failed)
     print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
+
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
