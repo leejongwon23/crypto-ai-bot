@@ -45,19 +45,27 @@ def ensure_failure_db():
     except Exception as e:
         print(f"[오류] ensure_failure_db 실패 → {e}")
 
-def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
-    import os
+def insert_failure_record(row, feature_hash=None, feature_vector=None, label=None):
+    import os, hashlib
     import pandas as pd
     from datetime import datetime
 
     CSV_PATH = "/persistent/wrong_predictions.csv"
 
-    # ✅ feature_hash 유효성 검사
+    if not isinstance(row, dict):
+        print("[❌ insert_failure_record] row 형식 오류")
+        return
+
+    # ✅ feature_hash 자동 생성 (예: symbol+strategy+timestamp+predicted_class)
+    if not feature_hash:
+        raw_str = f"{row.get('symbol','')}_{row.get('strategy','')}_{row.get('timestamp','')}_{row.get('predicted_class','')}"
+        feature_hash = hashlib.sha256(raw_str.encode()).hexdigest()
+
     if not isinstance(feature_hash, str) or feature_hash.strip() == "":
         print("[❌ insert_failure_record] feature_hash 없음 → 저장 스킵")
         return
 
-    # ✅ 기존 중복 데이터 로딩
+    # ✅ 중복방지
     if os.path.exists(CSV_PATH):
         try:
             df = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
@@ -70,16 +78,19 @@ def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
     else:
         df = pd.DataFrame()
 
-    # ✅ 새 기록 구성
+    # ✅ 실패 기록
     try:
         record = {
             "timestamp": datetime.now().isoformat(),
             "symbol": row.get("symbol"),
             "strategy": row.get("strategy"),
-            "model": row.get("model"),
-            "predicted_class": row.get("predicted_class"),
+            "model": row.get("model", ""),
+            "predicted_class": row.get("predicted_class", -1),
             "label": row.get("label") if label is None else label,
-            "feature_hash": feature_hash
+            "feature_hash": feature_hash,
+            "rate": row.get("rate", ""),
+            "return_value": row.get("return", ""),
+            "reason": row.get("reason", "")
         }
 
         if feature_vector is not None:
@@ -88,7 +99,7 @@ def insert_failure_record(row, feature_hash, feature_vector=None, label=None):
 
         df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
         df.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
-        print(f"[✅ 실패 예측 저장 완료] {record['symbol']} {record['strategy']} {record['model']} → class={record['predicted_class']} ≠ label={record['label']}")
+        print(f"[✅ 실패 예측 저장 완료] {record['symbol']} {record['strategy']} → class={record['predicted_class']} ≠ label={record['label']}")
 
     except Exception as e:
         print(f"[❌ insert_failure_record 예외] {type(e).__name__}: {e}")
