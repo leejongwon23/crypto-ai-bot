@@ -220,7 +220,6 @@ _kline_cache = {}
 _kline_cache_ttl = {}  # ✅ TTL 추가
 
 import time
-
 def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
     import os, time
@@ -237,19 +236,24 @@ def get_kline_by_strategy(symbol: str, strategy: str):
         failed_result(symbol, strategy, reason="전략 설정 없음")
         return pd.DataFrame()
 
+    min_required_rows = config.get("limit", 100)  # ✅ limit 기준 최소 row 보장
+
     df = None
     for attempt in range(3):
         try:
             df = get_kline(symbol, interval=config["interval"], limit=config["limit"])
             if df is not None and isinstance(df, pd.DataFrame):
-                break
+                if len(df) >= min_required_rows:
+                    break
+                else:
+                    print(f"[⚠️ get_kline 시도 {attempt+1}/3] row 부족: {len(df)} / 필요: {min_required_rows}")
         except Exception as e:
             print(f"[⚠️ get_kline 예외 - 시도 {attempt+1}/3] {symbol}-{strategy} → {e}")
-            time.sleep(1)
+        time.sleep(1)
 
-    if df is None or not isinstance(df, pd.DataFrame):
-        print(f"[❌ 실패] {symbol}-{strategy}: get_kline() → None or Invalid")
-        failed_result(symbol, strategy, reason="get_kline 반환 오류")
+    if df is None or not isinstance(df, pd.DataFrame) or len(df) < min_required_rows:
+        print(f"[❌ 실패] {symbol}-{strategy}: 유효한 row 부족 ({len(df) if df is not None else 0} rows)")
+        failed_result(symbol, strategy, reason=f"캔들 row 부족 ({len(df) if df is not None else 0})")
         return pd.DataFrame()
 
     required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
@@ -258,11 +262,6 @@ def get_kline_by_strategy(symbol: str, strategy: str):
             df[col] = 0.0 if col != "timestamp" else pd.Timestamp.now()
 
     df = df[required_cols]
-
-    if len(df) < 5:
-        print(f"[❌ 실패] {symbol}-{strategy}: row 수 부족 ({len(df)} rows)")
-        failed_result(symbol, strategy, reason=f"row 부족: {len(df)}개")
-        return pd.DataFrame()
 
     CacheManager.set(cache_key, df)
     return df
