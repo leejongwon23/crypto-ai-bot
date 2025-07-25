@@ -304,7 +304,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
             target_price = entry_price * (1 + expected_return)
             is_main = (predicted_class == final_pred_class)
 
-            success = is_main and expected_return >= cls_min
+            # ✅ 수정된 성공 판단 기준 (설계 철학 기준 적용)
+            success = is_main and (cls_min <= expected_return <= cls_max)
 
             log_prediction(
                 symbol=pred["symbol"],
@@ -351,6 +352,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         print(f"[predict 예외] {e}")
         insert_failure_record({"symbol": symbol, "strategy": strategy}, "exception", label=-1)
         return None
+
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
