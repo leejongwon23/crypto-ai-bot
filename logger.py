@@ -198,6 +198,10 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     rate = rate if rate is not None else 0.0
     return_value = return_value if return_value is not None else 0.0
 
+    # ✅ source 예외 처리
+    if source not in ["일반", "evo_meta", "baseline_meta"]:
+        source = "일반"
+
     row = [
         now, symbol, strategy, direction, entry_price, target_price,
         model or "", predicted_class, top_k_str, note,
@@ -218,11 +222,10 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                 ])
             writer.writerow(row)
 
-        print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} → class={predicted_class} | success={success} | reason={reason}")
+        print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} → class={predicted_class} | success={success} | reason={reason} | source={source}")
 
     except Exception as e:
         print(f"[⚠️ 예측 로그 기록 실패] {e}")
-
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
