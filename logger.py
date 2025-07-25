@@ -66,6 +66,39 @@ def update_model_success(s, t, m, success):
     except Exception as e:
         print(f"[오류] update_model_success 실패 → {e}")
 
+def get_model_success_stats(model_name: str):
+    import sqlite3
+    from collections import defaultdict
+
+    DB_PATH = "/persistent/logs/success.db"
+    result = {"total": 0, "success": 0, "success_rate": 0.0}
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+
+        # 전체 예측 수와 성공 수 조회
+        cur.execute("""
+            SELECT COUNT(*) FROM model_success WHERE model=?;
+        """, (model_name,))
+        total = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COUNT(*) FROM model_success WHERE model=? AND success=1;
+        """, (model_name,))
+        success = cur.fetchone()[0]
+
+        result["total"] = total
+        result["success"] = success
+        result["success_rate"] = (success / total) if total > 0 else 0.0
+
+        conn.close()
+    except Exception as e:
+        print(f"[❌ get_model_success_stats 오류] {e}")
+
+    return result
+
+
 def get_model_success_rate(s, t, m, min_total=10):
     try:
         conn = get_db_connection()
