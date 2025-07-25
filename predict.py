@@ -197,17 +197,16 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from logger import log_prediction, get_available_models
     from config import FEATURE_INPUT_SIZE, get_class_return_range, class_to_expected_return
     from model_weight_loader import load_model_cached
-    from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
-    from meta_learning import get_meta_prediction  # ✅ 핵심 함수
+    from predict_trigger import get_recent_class_frequencies
+    from meta_learning import get_meta_prediction
     from data.utils import get_kline_by_strategy, compute_features
     from datetime import datetime
     import pytz
     from failure_db import insert_failure_record
+    from predict import get_model_predictions  # ✅ 외부 함수 연동
 
     os.makedirs("/persistent/logs", exist_ok=True)
     def now_kst(): return datetime.now(pytz.timezone("Asia/Seoul"))
-
-    model_outputs_list, all_model_predictions = [], []
 
     try:
         window_list = find_best_windows(symbol, strategy)
@@ -239,68 +238,18 @@ def predict(symbol, strategy, source="일반", model_type=None):
             return None
 
         recent_freq = get_recent_class_frequencies(strategy)
+        feature_tensor = torch.tensor(feat_scaled[-1], dtype=torch.float32)
 
-        for window in window_list:
-            if feat_scaled.shape[0] < window:
-                continue
-            X_input = feat_scaled[-window:]
-            X = np.expand_dims(X_input, axis=0)
-
-            for m in models:
-                if f"_window{window}" not in m["pt_file"]:
-                    continue
-
-                model_path = os.path.join("/persistent/models", m["pt_file"])
-                meta_path = model_path.replace(".pt", ".meta.json")
-
-                if not os.path.exists(model_path) or not os.path.exists(meta_path):
-                    continue
-
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta_info = json.load(f)
-
-                num_classes = meta_info.get("num_classes", 21)
-                group_id = meta_info.get("group_id", m.get("group_id", 0))
-
-                model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, num_classes)
-                if model is None:
-                    continue
-
-                with torch.no_grad():
-                    logits = model(torch.tensor(X, dtype=torch.float32))
-                    probs = torch.softmax(logits, dim=1).cpu().numpy().flatten()
-
-                adjusted_probs = adjust_probs_with_diversity(probs, recent_freq)
-                final_class = int(np.argmax(adjusted_probs))
-                model_outputs_list.append({
-                    "class": final_class,
-                    "probs": adjusted_probs,
-                    "success_stats": m.get("success_stats", {}),  # 과거 성공률
-                    "meta_info": meta_info
-                })
-
-                all_model_predictions.append({
-                    "symbol": symbol,
-                    "strategy": strategy,
-                    "model_name": os.path.splitext(m["pt_file"])[0],
-                    "model_type": m["model"],
-                    "group_id": group_id,
-                    "window": window,
-                    "class": final_class,
-                    "probs": adjusted_probs.tolist(),
-                    "model_symbol": m["symbol"],
-                    "entry_price": float(df.iloc[-1]["close"]),
-                    "num_classes": num_classes
-                })
+        # ✅ 모델 예측 결과 수집 (원래 반복문 -> 함수로 대체)
+        model_outputs_list, all_model_predictions = get_model_predictions(
+            symbol, strategy, models, df, feat_scaled, window_list, recent_freq
+        )
 
         if not model_outputs_list:
             insert_failure_record({"symbol": symbol, "strategy": strategy}, "no_valid_model", label=-1)
             return None
 
-        # ✅ 메타러너 기반 예측 클래스 선택
-        feature_tensor = torch.tensor(feat_scaled[-1], dtype=torch.float32)
         final_pred_class = get_meta_prediction(model_outputs_list, feature_tensor)
-
         cls_min, cls_max = get_class_return_range(final_pred_class)
 
         for pred in all_model_predictions:
@@ -526,3 +475,17 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[오류] prediction_log.csv 로드 실패 → {e}")
 
+import torch
+import torch.nn.functional as F
+
+def get_model_predictions(model, input_tensor):
+    """
+    모델의 softmax 확률, 예측 클래스, 확률 벡터를 반환
+    """
+    model.eval()
+    with torch.no_grad():
+        outputs = model(input_tensor)
+        softmax_probs = F.softmax(outputs, dim=1)
+        predicted_class = torch.argmax(softmax_probs, dim=1).item()
+        probs = softmax_probs.squeeze().cpu().numpy()
+    return predicted_class, probs, softmax_probs
