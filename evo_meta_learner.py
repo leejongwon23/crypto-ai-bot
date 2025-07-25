@@ -126,9 +126,14 @@ from evo_meta_learner import train_evo_meta, EvoMetaModel
 from evo_meta_dataset import prepare_evo_meta_dataset  # 경로에 따라 조정
 import os
 
-def train_evo_meta_loop(min_samples=50, input_size=9):
+def train_evo_meta_loop(min_samples=50):
+    from evo_meta_learner import prepare_evo_meta_dataset, train_evo_meta
+
     X, y = prepare_evo_meta_dataset(min_samples=min_samples)
     if X is None or y is None:
-        print("[ℹ️ train_evo_meta_loop] 학습 데이터 부족으로 학습 건너뜀")
+        print("[⏭️ train_evo_meta_loop] 학습 데이터 부족, 스킵")
         return
-    train_evo_meta(X, y, input_size=input_size)
+
+    input_size = X.shape[1]
+    train_evo_meta(X, y, input_size)
+
