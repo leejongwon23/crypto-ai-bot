@@ -414,6 +414,31 @@ def export_recent_model_stats(recent_days=3):
     except Exception as e:
         print(f"[오류] 최근 모델 성능 집계 실패 → {e}")
 
+def record_model_success(model: str, success: bool):
+    import sqlite3, os
+    from datetime import datetime
+
+    DB_PATH = "/persistent/logs/success.db"
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS model_success (
+            model TEXT,
+            success INTEGER,
+            timestamp TEXT
+        )
+    """)
+    conn.commit()
+
+    timestamp = datetime.now().isoformat()
+    cur.execute("INSERT INTO model_success (model, success, timestamp) VALUES (?, ?, ?)",
+                (model, int(success), timestamp))
+    conn.commit()
+    conn.close()
+
+
 def log_training_result(symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0.0, note=""):
     import csv
     from datetime import datetime
