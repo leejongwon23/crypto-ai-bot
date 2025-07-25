@@ -442,19 +442,19 @@ def train_symbol_group_loop(delay_minutes=5):
                     for gid in range(5):
                         print(f"▶ [학습 시도] {symbol}-{strategy}-group{gid}")
 
-                        s_obj = train_done.get(symbol, {})
-                        s_obj = s_obj if isinstance(s_obj, dict) else {}
+                        # ✅ 구조 강제화
+                        train_done.setdefault(symbol, {})
+                        train_done[symbol].setdefault(strategy, {})
+                        if not isinstance(train_done[symbol][strategy], dict):
+                            train_done[symbol][strategy] = {}
 
-                        st_obj = s_obj.get(strategy, {})
-                        st_obj = st_obj if isinstance(st_obj, dict) else {}
-
-                        if st_obj.get(str(gid), False):
+                        if train_done[symbol][strategy].get(str(gid), False):
                             print(f"[⏭️ 스킵] {symbol}-{strategy}-group{gid} (이미 학습됨)")
                             continue
 
                         try:
                             train_one_model(symbol, strategy, group_id=gid)
-                            train_done.setdefault(symbol, {}).setdefault(strategy, {})[str(gid)] = True
+                            train_done[symbol][strategy][str(gid)] = True
                             with open(done_path, "w", encoding="utf-8") as f:
                                 json.dump(train_done, f, ensure_ascii=False, indent=2)
                             print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid}")
@@ -473,12 +473,11 @@ def train_symbol_group_loop(delay_minutes=5):
                     try:
                         entry = train_done.get(symbol, {}).get(strategy, {})
                         if isinstance(entry, dict) and entry == {str(i): True for i in range(5)}:
-                            print(f"[⏩ 스킵] {symbol}-{strategy} 예측 (이미 학습 완료)")
-                            continue
-
-                        print(f"▶ [예측 시도] {symbol}-{strategy}")
-                        main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
-                        print(f"[✅ 예측 완료] {symbol}-{strategy}")
+                            print(f"[▶ 예측 시도] {symbol}-{strategy}")
+                            main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
+                            print(f"[✅ 예측 완료] {symbol}-{strategy}")
+                        else:
+                            print(f"[⏭️ 예측 건너뜀] {symbol}-{strategy} → 일부 그룹 미학습")
                     except Exception as e:
                         print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
                         traceback.print_exc()
