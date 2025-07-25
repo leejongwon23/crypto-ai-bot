@@ -198,7 +198,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from config import FEATURE_INPUT_SIZE, get_class_return_range, class_to_expected_return
     from model_weight_loader import load_model_cached
     from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
-    from meta_learning import load_meta_learner, ensemble_stacking
+    from meta_learning import get_meta_prediction  # ✅ 핵심 함수
     from data.utils import get_kline_by_strategy, compute_features
     from datetime import datetime
     import pytz
@@ -272,7 +272,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
                 adjusted_probs = adjust_probs_with_diversity(probs, recent_freq)
                 final_class = int(np.argmax(adjusted_probs))
-                model_outputs_list.append(adjusted_probs)
+                model_outputs_list.append({
+                    "class": final_class,
+                    "probs": adjusted_probs,
+                    "success_stats": m.get("success_stats", {}),  # 과거 성공률
+                    "meta_info": meta_info
+                })
 
                 all_model_predictions.append({
                     "symbol": symbol,
@@ -292,8 +297,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
             insert_failure_record({"symbol": symbol, "strategy": strategy}, "no_valid_model", label=-1)
             return None
 
-        meta_model = load_meta_learner()
-        final_pred_class = ensemble_stacking(model_outputs_list, meta_model)
+        # ✅ 메타러너 기반 예측 클래스 선택
+        feature_tensor = torch.tensor(feat_scaled[-1], dtype=torch.float32)
+        final_pred_class = get_meta_prediction(model_outputs_list, feature_tensor)
+
         cls_min, cls_max = get_class_return_range(final_pred_class)
 
         for pred in all_model_predictions:
@@ -304,7 +311,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             target_price = entry_price * (1 + expected_return)
             is_main = (predicted_class == final_pred_class)
 
-            # ✅ 수정된 성공 판단 기준 (설계 철학 기준 적용)
             success = is_main and (cls_min <= expected_return <= cls_max)
 
             log_prediction(
@@ -342,7 +348,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "strategy": strategy,
             "model": "meta",
             "class": final_pred_class,
-            "expected_return": class_to_expected_return(final_pred_class, len(model_outputs_list[0])),
+            "expected_return": class_to_expected_return(final_pred_class, len(model_outputs_list[0]["probs"])),
             "timestamp": now_kst().isoformat(),
             "reason": "메타 최종 선택",
             "source": source
