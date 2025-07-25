@@ -144,8 +144,8 @@ db_lock = threading.Lock()  # ✅ Lock 전역 선언
 def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price=0,
                    timestamp=None, model=None, predicted_class=None, top_k=None,
                    note="", success=False, reason="", rate=None, return_value=None,
-                   label=None, group_id=None, model_symbol=None, model_name=None, source="일반",
-                   volatility=False):  # ✅ volatility 인자 추가
+                   label=None, group_id=None, model_symbol=None, model_name=None,
+                   source="일반", volatility=False):
 
     import csv
     import os
@@ -158,11 +158,18 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     now = datetime.now(pytz.timezone("Asia/Seoul")).isoformat() if timestamp is None else timestamp
     top_k_str = ",".join(map(str, top_k)) if top_k else ""
 
+    # ✅ 보호 로직: 필수 필드 보완
+    predicted_class = predicted_class if predicted_class is not None else -1
+    label = label if label is not None else -1
+    reason = reason if reason else "사유없음"
+    rate = rate if rate is not None else 0.0
+    return_value = return_value if return_value is not None else 0.0
+
     row = [
         now, symbol, strategy, direction, entry_price, target_price,
-        model or "", predicted_class if predicted_class is not None else "",
-        top_k_str, note, str(success), reason, rate, return_value, label,
-        group_id, model_symbol, model_name, source, volatility  # ✅ volatility 컬럼 추가
+        model or "", predicted_class, top_k_str, note,
+        str(success), reason, rate, return_value, label,
+        group_id, model_symbol, model_name, source, volatility
     ]
 
     try:
@@ -173,10 +180,13 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                 writer.writerow([
                     "timestamp", "symbol", "strategy", "direction", "entry_price", "target_price",
                     "model", "predicted_class", "top_k", "note", "success", "reason",
-                    "rate", "return_value", "label", "group_id", "model_symbol", "model_name", "source", "volatility"  # ✅ 컬럼 추가
+                    "rate", "return_value", "label", "group_id", "model_symbol", "model_name",
+                    "source", "volatility"
                 ])
             writer.writerow(row)
+
         print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} → class={predicted_class} | success={success} | reason={reason}")
+
     except Exception as e:
         print(f"[⚠️ 예측 로그 기록 실패] {e}")
 
