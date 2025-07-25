@@ -100,7 +100,7 @@ def get_class_groups(num_classes=21, group_size=7):
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
 def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
-    import os, gc, traceback, torch, numpy as np, pandas as pd
+    import os, gc, traceback, torch, numpy as np, pandas as pd, json
     from datetime import datetime; from collections import Counter
     from ssl_pretrain import masked_reconstruction
     from config import get_FEATURE_INPUT_SIZE, get_class_ranges
@@ -137,9 +137,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             feat_scaled = MinMaxScaler().fit_transform(features_only)
 
             returns = df["close"].pct_change().fillna(0).values
-            class_ranges = get_class_ranges(group_id=gid)
-            labels = []
+            class_ranges = get_class_ranges()
 
+            labels = []
             for r in returns:
                 for i, (low, high) in enumerate(class_ranges):
                     if low <= r <= high:
@@ -201,9 +201,22 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 print(f"[🎯 {model_type}] acc={acc:.4f}, f1={f1:.4f}")
 
                 os.makedirs("/persistent/models", exist_ok=True)
-                model_name = f"{symbol}_{strategy}_{model_type}_group{gid}_cls{num_classes}.pt"
-                model_path = os.path.join("/persistent/models", model_name)
+                model_base = f"{symbol}_{strategy}_{model_type}_group{gid}_cls{num_classes}"
+                model_path = os.path.join("/persistent/models", f"{model_base}.pt")
                 torch.save(model.state_dict(), model_path)
+
+                # ✅ 메타 정보 저장
+                meta_info = {
+                    "symbol": symbol,
+                    "strategy": strategy,
+                    "model": model_type,
+                    "group_id": gid,
+                    "num_classes": num_classes,
+                    "input_size": input_size,
+                    "timestamp": now_kst().isoformat()
+                }
+                with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
+                    json.dump(meta_info, f, ensure_ascii=False, indent=2)
 
                 log_training_result(symbol=symbol, strategy=strategy, model=model_path,
                                     accuracy=acc, f1=f1, loss=total_loss)
