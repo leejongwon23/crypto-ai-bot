@@ -109,7 +109,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     from logger import log_training_result
     from data.utils import get_kline_by_strategy, compute_features
     import pytz
-    from meta_learning import maml_train_entry
     from ranger_adabelief import RangerAdaBelief as Ranger
     from sklearn.metrics import accuracy_score, f1_score
     from sklearn.preprocessing import MinMaxScaler
@@ -137,15 +136,19 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             feat_scaled = MinMaxScaler().fit_transform(features_only)
 
             returns = df["close"].pct_change().fillna(0).values
-            class_ranges = get_class_ranges()
+            class_ranges = get_class_ranges(group_id=gid)
 
             labels = []
             for r in returns:
-                for i, (low, high) in enumerate(class_ranges):
-                    if low <= r <= high:
-                        labels.append(i)
-                        break
-                else:
+                matched = False
+                for i, rng in enumerate(class_ranges):
+                    if isinstance(rng, tuple) and len(rng) == 2:
+                        low, high = rng
+                        if low <= r <= high:
+                            labels.append(i)
+                            matched = True
+                            break
+                if not matched:
                     labels.append(0)
 
             window = 60
@@ -205,7 +208,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 model_path = os.path.join("/persistent/models", f"{model_base}.pt")
                 torch.save(model.state_dict(), model_path)
 
-                # ✅ 메타 정보 저장
                 meta_info = {
                     "symbol": symbol,
                     "strategy": strategy,
@@ -224,7 +226,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         except Exception as e:
             print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{gid} → {e}")
             traceback.print_exc()
-
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
