@@ -198,12 +198,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from config import FEATURE_INPUT_SIZE, get_class_return_range, class_to_expected_return
     from model_weight_loader import load_model_cached
     from predict_trigger import get_recent_class_frequencies
-    from meta_learning import get_meta_prediction
+    from evo_meta_learner import get_evo_meta_prediction  # ✅ 진화형 메타러너
     from data.utils import get_kline_by_strategy, compute_features
     from datetime import datetime
     import pytz
     from failure_db import insert_failure_record
-    from predict import get_model_predictions  # ✅ 외부 함수 연동
+    from predict import get_model_predictions
 
     os.makedirs("/persistent/logs", exist_ok=True)
     def now_kst(): return datetime.now(pytz.timezone("Asia/Seoul"))
@@ -240,16 +240,16 @@ def predict(symbol, strategy, source="일반", model_type=None):
         recent_freq = get_recent_class_frequencies(strategy)
         feature_tensor = torch.tensor(feat_scaled[-1], dtype=torch.float32)
 
-        # ✅ 모델 예측 결과 수집 (원래 반복문 -> 함수로 대체)
         model_outputs_list, all_model_predictions = get_model_predictions(
             symbol, strategy, models, df, feat_scaled, window_list, recent_freq
         )
-
         if not model_outputs_list:
             insert_failure_record({"symbol": symbol, "strategy": strategy}, "no_valid_model", label=-1)
             return None
 
-        final_pred_class = get_meta_prediction(model_outputs_list, feature_tensor)
+        # ✅ 진화형 메타러너로 최종 클래스 선택
+        final_pred_class = get_evo_meta_prediction(model_outputs_list, feature_tensor, recent_freq)
+
         cls_min, cls_max = get_class_return_range(final_pred_class)
 
         for pred in all_model_predictions:
@@ -299,7 +299,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "class": final_pred_class,
             "expected_return": class_to_expected_return(final_pred_class, len(model_outputs_list[0]["probs"])),
             "timestamp": now_kst().isoformat(),
-            "reason": "메타 최종 선택",
+            "reason": "진화형 메타 최종 선택",
             "source": source
         }
 
@@ -307,7 +307,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         print(f"[predict 예외] {e}")
         insert_failure_record({"symbol": symbol, "strategy": strategy}, "exception", label=-1)
         return None
-
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
