@@ -161,7 +161,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             X, y = np.array(X), np.array(y)
             num_classes = len(class_ranges)
 
-            # ✅ 실패기반 학습 샘플 자동 병합
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size, window, group_id=gid)
             if fail_X is not None and len(fail_X) > 0:
                 print(f"📌 실패 샘플 {len(fail_X)}건 추가 병합")
@@ -174,6 +173,16 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
                 model = get_model(model_type, input_size=input_size, output_size=num_classes)
                 model.to(DEVICE)
+
+                # ✅ 이어학습 로직 추가
+                model_base = f"{symbol}_{strategy}_{model_type}_group{gid}_cls{num_classes}"
+                model_path = os.path.join("/persistent/models", f"{model_base}.pt")
+                if os.path.exists(model_path):
+                    model.load_state_dict(torch.load(model_path))
+                    print(f"🔁 기존 모델 불러와 이어학습 시작: {model_path}")
+                else:
+                    print(f"🆕 신규 모델 학습 시작: {model_path}")
+
                 optimizer = Ranger(model.parameters(), lr=0.001)
                 criterion = torch.nn.CrossEntropyLoss()
                 model.train()
@@ -212,8 +221,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 print(f"[🎯 {model_type}] acc={acc:.4f}, f1={f1:.4f}")
 
                 os.makedirs("/persistent/models", exist_ok=True)
-                model_base = f"{symbol}_{strategy}_{model_type}_group{gid}_cls{num_classes}"
-                model_path = os.path.join("/persistent/models", f"{model_base}.pt")
                 torch.save(model.state_dict(), model_path)
 
                 meta_info = {
