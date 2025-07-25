@@ -223,7 +223,7 @@ import time
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
-    import os
+    import os, time
     import pandas as pd
 
     cache_key = f"{symbol}-{strategy}"
@@ -237,12 +237,15 @@ def get_kline_by_strategy(symbol: str, strategy: str):
         failed_result(symbol, strategy, reason="전략 설정 없음")
         return pd.DataFrame()
 
-    try:
-        df = get_kline(symbol, interval=config["interval"], limit=config["limit"])
-    except Exception as e:
-        print(f"[❌ 실패] get_kline 예외 → {e}")
-        failed_result(symbol, strategy, reason=f"get_kline 예외: {e}")
-        return pd.DataFrame()
+    df = None
+    for attempt in range(3):
+        try:
+            df = get_kline(symbol, interval=config["interval"], limit=config["limit"])
+            if df is not None and isinstance(df, pd.DataFrame):
+                break
+        except Exception as e:
+            print(f"[⚠️ get_kline 예외 - 시도 {attempt+1}/3] {symbol}-{strategy} → {e}")
+            time.sleep(1)
 
     if df is None or not isinstance(df, pd.DataFrame):
         print(f"[❌ 실패] {symbol}-{strategy}: get_kline() → None or Invalid")
@@ -258,12 +261,11 @@ def get_kline_by_strategy(symbol: str, strategy: str):
 
     if len(df) < 5:
         print(f"[❌ 실패] {symbol}-{strategy}: row 수 부족 ({len(df)} rows)")
-        failed_result(symbol, strategy, reason="row 부족")
+        failed_result(symbol, strategy, reason=f"row 부족: {len(df)}개")
         return pd.DataFrame()
 
     CacheManager.set(cache_key, df)
     return df
-
 
 
 # ✅ SYMBOL_GROUPS batch prefetch 함수 추가
