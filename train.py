@@ -108,6 +108,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     from model.base_model import get_model
     from logger import log_training_result
     from data.utils import get_kline_by_strategy, compute_features
+    from wrong_data_loader import load_training_prediction_data
     import pytz
     from ranger_adabelief import RangerAdaBelief as Ranger
     from sklearn.metrics import accuracy_score, f1_score
@@ -159,6 +160,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
             X, y = np.array(X), np.array(y)
             num_classes = len(class_ranges)
+
+            # ✅ 실패기반 학습 샘플 자동 병합
+            fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size, window, group_id=gid)
+            if fail_X is not None and len(fail_X) > 0:
+                print(f"📌 실패 샘플 {len(fail_X)}건 추가 병합")
+                X = np.concatenate([X, fail_X], axis=0)
+                y = np.concatenate([y, fail_y], axis=0)
 
             if len(X) < 10:
                 raise Exception("⛔ 유효한 학습 샘플 부족")
@@ -226,6 +234,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         except Exception as e:
             print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{gid} → {e}")
             traceback.print_exc()
+
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
