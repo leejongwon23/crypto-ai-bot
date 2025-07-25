@@ -189,6 +189,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             print(f"[failed_result insert_failure_record 오류] {e}")
 
     return result
+
 def predict(symbol, strategy, source="일반", model_type=None):
     import numpy as np, pandas as pd, os, torch, json
     from sklearn.preprocessing import MinMaxScaler
@@ -202,7 +203,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from datetime import datetime
     import pytz
     from failure_db import insert_failure_record
-    from logger import get_feature_hash
 
     os.makedirs("/persistent/logs", exist_ok=True)
     def now_kst(): return datetime.now(pytz.timezone("Asia/Seoul"))
@@ -262,7 +262,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta_info = json.load(f)
                 num_classes = meta_info.get("num_classes", 21)
-                group_id = m.get("group_id", 0)
+                group_id = meta_info.get("group_id", m.get("group_id", 0))
 
                 model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, num_classes)
                 if model is None:
@@ -309,7 +309,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
             target_price = entry_price * (1 + expected_return)
             is_main = (predicted_class == final_pred_class)
 
-            success = cls_min <= expected_return <= cls_max if is_main else False
+            # ✅ 오직 메타 선택된 클래스만 성공 판정
+            success = False
+            if is_main:
+                success = cls_min <= expected_return <= cls_max
 
             log_prediction(
                 symbol=pred["symbol"],
