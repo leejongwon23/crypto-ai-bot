@@ -456,7 +456,6 @@ def train_symbol_group_loop(delay_minutes=5):
                     for gid in range(5):
                         print(f"▶ [학습 시도] {symbol}-{strategy}-group{gid}")
 
-                        # ✅ 구조 강제화
                         train_done.setdefault(symbol, {})
                         train_done[symbol].setdefault(strategy, {})
                         if not isinstance(train_done[symbol][strategy], dict):
@@ -472,6 +471,17 @@ def train_symbol_group_loop(delay_minutes=5):
                             with open(done_path, "w", encoding="utf-8") as f:
                                 json.dump(train_done, f, ensure_ascii=False, indent=2)
                             print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid}")
+
+                            # ✅ 그룹0 학습 직후에만 예측 수행
+                            if gid == 0:
+                                print(f"[▶ 예측 시도] {symbol}-{strategy} (group0 학습 완료)")
+                                try:
+                                    main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
+                                    print(f"[✅ 예측 완료] {symbol}-{strategy}")
+                                except Exception as e:
+                                    print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
+                                    traceback.print_exc()
+
                         except Exception as e:
                             print(f"[❌ 학습 실패] {symbol}-{strategy}-group{gid} → {e}")
                             traceback.print_exc()
@@ -482,20 +492,6 @@ def train_symbol_group_loop(delay_minutes=5):
             except Exception as e:
                 print(f"[⚠️ meta 보정 실패] 그룹 {idx} → {e}")
 
-            for symbol in group:
-                for strategy in ["단기", "중기", "장기"]:
-                    try:
-                        entry = train_done.get(symbol, {}).get(strategy, {})
-                        if isinstance(entry, dict) and entry == {str(i): True for i in range(5)}:
-                            print(f"[▶ 예측 시도] {symbol}-{strategy}")
-                            main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
-                            print(f"[✅ 예측 완료] {symbol}-{strategy}")
-                        else:
-                            print(f"[⏭️ 예측 건너뜀] {symbol}-{strategy} → 일부 그룹 미학습")
-                    except Exception as e:
-                        print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
-                        traceback.print_exc()
-
             try:
                 safe_cleanup.auto_delete_old_logs()
             except Exception as e:
@@ -503,7 +499,6 @@ def train_symbol_group_loop(delay_minutes=5):
 
             print(f"🕒 그룹 {idx} 완료 → {delay_minutes}분 대기")
             time.sleep(delay_minutes * 60)
-
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
     """
