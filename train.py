@@ -442,6 +442,7 @@ def train_symbol_group_loop(delay_minutes=5):
     from train import train_one_model
     from recommend import main
     import safe_cleanup
+    from evo_meta_learner import train_evo_meta_loop  # ✅ 진화형 메타러너 자동 학습 추가
 
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작")
@@ -522,6 +523,11 @@ def train_symbol_group_loop(delay_minutes=5):
             print(f"🕒 그룹 {idx} 완료 → {delay_minutes}분 대기")
             time.sleep(delay_minutes * 60)
 
+        # ✅ 루프 끝날 때마다 진화형 메타러너 학습 시도
+        try:
+            train_evo_meta_loop()
+        except Exception as e:
+            print(f"[⚠️ 진화형 메타러너 학습 실패] → {e}")
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
     """
