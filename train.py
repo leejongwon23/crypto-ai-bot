@@ -106,7 +106,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     from config import get_FEATURE_INPUT_SIZE, get_class_ranges
     from torch.utils.data import TensorDataset, DataLoader
     from model.base_model import get_model
-    from logger import log_training_result
+    from logger import log_training_result, record_model_success
     from data.utils import get_kline_by_strategy, compute_features
     from wrong_data_loader import load_training_prediction_data
     import pytz
@@ -174,9 +174,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 model = get_model(model_type, input_size=input_size, output_size=num_classes)
                 model.to(DEVICE)
 
-                # ✅ 이어학습 로직 추가
                 model_base = f"{symbol}_{strategy}_{model_type}_group{gid}_cls{num_classes}"
                 model_path = os.path.join("/persistent/models", f"{model_base}.pt")
+
                 if os.path.exists(model_path):
                     model.load_state_dict(torch.load(model_path))
                     print(f"🔁 기존 모델 불러와 이어학습 시작: {model_path}")
@@ -237,6 +237,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
                 log_training_result(symbol=symbol, strategy=strategy, model=model_path,
                                     accuracy=acc, f1=f1, loss=total_loss)
+
+                # ✅ 성공 기록 추가
+                success_flag = acc > 0.6 and f1 > 0.55
+                record_model_success(model_base, success_flag)
 
         except Exception as e:
             print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{gid} → {e}")
