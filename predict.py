@@ -430,13 +430,12 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            # ✅ 평가 시점 도달 여부 + 즉시 성공 처리
             class_ranges_for_group = get_class_ranges(group_id=group_id)
             success = False
             cls_min, cls_max = 0, 0
             if 0 <= label < len(class_ranges_for_group):
                 cls_min, cls_max = class_ranges_for_group[label]
-                # 도달 전이라도 수익률이 클래스 하한 이상 도달 시 조기 성공
+                # ✅ 조기 성공 판단 기준
                 if gain >= cls_min:
                     success = True
             else:
@@ -444,13 +443,12 @@ def evaluate_predictions(get_price_fn):
                 updated.append(r)
                 continue
 
-            # 평가 시점 도달 여부
+            # ✅ 평가 시점 도달 전인데 아직 성공 조건 미충족이면 pending 처리
             if now_kst() < deadline and not success:
-                r.update({"reason": "⏳ 평가 대기 중", "return": 0.0})
+                r.update({"status": "pending", "reason": "⏳ 평가 대기 중", "return": 0.0})
                 updated.append(r)
                 continue
 
-            # ✅ 성공 여부 기록
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
             status = "v_success" if vol and success else \
                      "v_fail" if vol and not success else \
@@ -497,6 +495,7 @@ def evaluate_predictions(get_price_fn):
     failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
     safe_write_csv(WRONG, failed)
     print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
+
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
