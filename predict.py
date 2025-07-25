@@ -189,7 +189,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             print(f"[failed_result insert_failure_record 오류] {e}")
 
     return result
-
 def predict(symbol, strategy, source="일반", model_type=None):
     import numpy as np, pandas as pd, os, torch, json
     from sklearn.preprocessing import MinMaxScaler
@@ -237,6 +236,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
         models = get_available_models(symbol, strategy)
         if not models:
+            print(f"[❌ 예측 실패] 모델 없음: {symbol}-{strategy}")
             insert_failure_record(symbol, strategy, -1, -1, now_kst())
             return None
 
@@ -255,18 +255,18 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 model_path = os.path.join("/persistent/models", m["pt_file"])
                 meta_path = model_path.replace(".pt", ".meta.json")
 
-                group_id = m.get("group_id")
-                if group_id is None or not os.path.exists(meta_path):
-                    insert_failure_record(symbol, strategy, -1, -1, now_kst())
+                if not os.path.exists(model_path) or not os.path.exists(meta_path):
+                    print(f"[⚠️ 모델/메타 없음] {model_path}")
                     continue
 
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta_info = json.load(f)
                 num_classes = meta_info.get("num_classes", 21)
+                group_id = m.get("group_id", 0)
 
                 model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, num_classes)
                 if model is None:
-                    insert_failure_record(symbol, strategy, -1, -1, now_kst())
+                    print(f"[❌ 모델 로딩 실패] {model_path}")
                     continue
 
                 with torch.no_grad():
@@ -292,13 +292,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 })
 
         if not model_outputs_list:
+            print(f"[❌ 예측 실패] 유효한 모델 없음")
             insert_failure_record(symbol, strategy, -1, -1, now_kst())
             return None
 
         meta_model = load_meta_learner()
         final_pred_class = ensemble_stacking(model_outputs_list, meta_model)
 
-        # ✅ 클래스 수익률 범위(min, max) 조회
         cls_min, cls_max = get_class_return_range(final_pred_class)
 
         for pred in all_model_predictions:
@@ -309,7 +309,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             target_price = entry_price * (1 + expected_return)
             is_main = (predicted_class == final_pred_class)
 
-            # ✅ 실제 수익률이 클래스 범위 도달했는지로 성공 여부 판단
             success = cls_min <= expected_return <= cls_max if is_main else False
 
             log_prediction(
@@ -355,6 +354,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         print(f"[predict 예외] {e}")
         insert_failure_record(symbol, strategy, -1, -1, now_kst())
         return None
+
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
