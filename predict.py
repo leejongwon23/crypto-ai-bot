@@ -212,17 +212,17 @@ def predict(symbol, strategy, source="일반", model_type=None):
     try:
         window_list = find_best_windows(symbol, strategy)
         if not window_list:
-            insert_failure_record(symbol, strategy, -1, -1, now_kst())
+            insert_failure_record({"symbol": symbol, "strategy": strategy}, "window_list_none", label=-1)
             return None
 
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 1:
-            insert_failure_record(symbol, strategy, -1, -1, now_kst())
+            insert_failure_record({"symbol": symbol, "strategy": strategy}, "df_short", label=-1)
             return None
 
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.dropna().shape[0] < max(window_list) + 1:
-            insert_failure_record(symbol, strategy, -1, -1, now_kst())
+            insert_failure_record({"symbol": symbol, "strategy": strategy}, "feature_short", label=-1)
             return None
 
         features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
@@ -235,8 +235,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
         models = get_available_models(symbol, strategy)
         if not models:
-            print(f"[❌ 예측 실패] 모델 없음: {symbol}-{strategy}")
-            insert_failure_record(symbol, strategy, -1, -1, now_kst())
+            insert_failure_record({"symbol": symbol, "strategy": strategy}, "no_models", label=-1)
             return None
 
         recent_freq = get_recent_class_frequencies(strategy)
@@ -255,7 +254,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 meta_path = model_path.replace(".pt", ".meta.json")
 
                 if not os.path.exists(model_path) or not os.path.exists(meta_path):
-                    print(f"[⚠️ 모델/메타 없음] {model_path}")
                     continue
 
                 with open(meta_path, "r", encoding="utf-8") as f:
@@ -266,7 +264,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
                 model = load_model_cached(model_path, m["model"], FEATURE_INPUT_SIZE, num_classes)
                 if model is None:
-                    print(f"[❌ 모델 로딩 실패] {model_path}")
                     continue
 
                 with torch.no_grad():
@@ -292,8 +289,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 })
 
         if not model_outputs_list:
-            print(f"[❌ 예측 실패] 유효한 모델 없음")
-            insert_failure_record(symbol, strategy, -1, -1, now_kst())
+            insert_failure_record({"symbol": symbol, "strategy": strategy}, "no_valid_model", label=-1)
             return None
 
         meta_model = load_meta_learner()
@@ -308,8 +304,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             target_price = entry_price * (1 + expected_return)
             is_main = (predicted_class == final_pred_class)
 
-            # ✅ 오직 메타 선택 클래스만 성공 판정
-            success = cls_min <= expected_return <= cls_max if is_main else False
+            success = is_main and expected_return >= cls_min
 
             log_prediction(
                 symbol=pred["symbol"],
@@ -332,11 +327,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
             if not success:
                 insert_failure_record(
-                    symbol=pred["symbol"],
-                    strategy=pred["strategy"],
-                    predicted_class=predicted_class,
-                    label=final_pred_class,
-                    timestamp=now_kst()
+                    {
+                        "symbol": pred["symbol"],
+                        "strategy": pred["strategy"],
+                        "model": pred["model_name"]
+                    },
+                    feature_hash=f"{symbol}-{strategy}-{now_kst().isoformat()}",
+                    label=final_pred_class
                 )
 
         return {
@@ -352,7 +349,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
     except Exception as e:
         print(f"[predict 예외] {e}")
-        insert_failure_record(symbol, strategy, -1, -1, now_kst())
+        insert_failure_record({"symbol": symbol, "strategy": strategy}, "exception", label=-1)
         return None
 
 # 📄 predict.py 내부에 추가
