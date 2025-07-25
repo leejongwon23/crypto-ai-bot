@@ -198,12 +198,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from config import FEATURE_INPUT_SIZE, get_class_return_range, class_to_expected_return
     from model_weight_loader import load_model_cached
     from predict_trigger import get_recent_class_frequencies
-    from evo_meta_learner import get_evo_meta_prediction  # ✅ 진화형 메타러너
+    from meta_learning import get_meta_prediction
     from data.utils import get_kline_by_strategy, compute_features
     from datetime import datetime
     import pytz
     from failure_db import insert_failure_record
-    from predict import get_model_predictions
+    from predict import get_model_predictions  # ✅ 외부 함수 연동
 
     os.makedirs("/persistent/logs", exist_ok=True)
     def now_kst(): return datetime.now(pytz.timezone("Asia/Seoul"))
@@ -240,16 +240,16 @@ def predict(symbol, strategy, source="일반", model_type=None):
         recent_freq = get_recent_class_frequencies(strategy)
         feature_tensor = torch.tensor(feat_scaled[-1], dtype=torch.float32)
 
+        # ✅ 모델 예측 결과 수집
         model_outputs_list, all_model_predictions = get_model_predictions(
             symbol, strategy, models, df, feat_scaled, window_list, recent_freq
         )
+
         if not model_outputs_list:
             insert_failure_record({"symbol": symbol, "strategy": strategy}, "no_valid_model", label=-1)
             return None
 
-        # ✅ 진화형 메타러너로 최종 클래스 선택
-        final_pred_class = get_evo_meta_prediction(model_outputs_list, feature_tensor, recent_freq)
-
+        final_pred_class = get_meta_prediction(model_outputs_list, feature_tensor)
         cls_min, cls_max = get_class_return_range(final_pred_class)
 
         for pred in all_model_predictions:
@@ -259,7 +259,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             expected_return = class_to_expected_return(predicted_class, num_classes)
             target_price = entry_price * (1 + expected_return)
             is_main = (predicted_class == final_pred_class)
-
             success = is_main and (cls_min <= expected_return <= cls_max)
 
             log_prediction(
@@ -286,20 +285,59 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     {
                         "symbol": pred["symbol"],
                         "strategy": pred["strategy"],
-                        "model": pred["model_name"]
+                        "model": pred["model_name"],
+                        "predicted_class": predicted_class,
+                        "label": final_pred_class,
+                        "reason": "예측실패"
                     },
                     feature_hash=f"{symbol}-{strategy}-{now_kst().isoformat()}",
                     label=final_pred_class
                 )
+
+        # ✅ 진화형 메타러너 기록 추가
+        evo_expected_return = class_to_expected_return(final_pred_class, len(model_outputs_list[0]["probs"]))
+        entry_price = all_model_predictions[0]["entry_price"]
+
+        log_prediction(
+            symbol=symbol,
+            strategy=strategy,
+            direction="예측",
+            entry_price=entry_price,
+            target_price=entry_price * (1 + evo_expected_return),
+            model="meta",
+            model_name="evo_meta_learner",  # ✅ 진화형
+            predicted_class=final_pred_class,
+            label=final_pred_class,
+            note="진화형 메타 선택",
+            success=True,
+            reason="진화형 메타 선택",
+            rate=evo_expected_return,
+            return_value=evo_expected_return,
+            source="진화형"
+        )
+
+        insert_failure_record(
+            {
+                "symbol": symbol,
+                "strategy": strategy,
+                "model": "evo_meta_learner",
+                "predicted_class": final_pred_class,
+                "label": final_pred_class,
+                "reason": "진화형 메타 선택"
+            },
+            feature_hash=f"{symbol}-{strategy}-{now_kst().isoformat()}",
+            label=final_pred_class,
+            feature_vector=feature_tensor.numpy()
+        )
 
         return {
             "symbol": symbol,
             "strategy": strategy,
             "model": "meta",
             "class": final_pred_class,
-            "expected_return": class_to_expected_return(final_pred_class, len(model_outputs_list[0]["probs"])),
+            "expected_return": evo_expected_return,
             "timestamp": now_kst().isoformat(),
-            "reason": "진화형 메타 최종 선택",
+            "reason": "메타 최종 선택",
             "source": source
         }
 
