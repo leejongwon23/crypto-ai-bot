@@ -100,10 +100,10 @@ def get_class_groups(num_classes=21, group_size=7):
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
 def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
-    import os, gc, traceback, torch, json, numpy as np, pandas as pd
+    import os, gc, traceback, torch, numpy as np, pandas as pd
     from datetime import datetime; from collections import Counter
     from ssl_pretrain import masked_reconstruction
-    from config import get_FEATURE_INPUT_SIZE, get_class_groups
+    from config import get_FEATURE_INPUT_SIZE, get_class_ranges
     from torch.utils.data import TensorDataset, DataLoader
     from model.base_model import get_model
     from logger import log_training_result
@@ -126,20 +126,22 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             masked_reconstruction(symbol, strategy, input_size)
 
             df = get_kline_by_strategy(symbol, strategy)
-            feat = compute_features(symbol, df, strategy)
+            if df is None or len(df) < 100:
+                raise Exception("⛔ get_kline 데이터 부족")
 
+            feat = compute_features(symbol, df, strategy)
             if feat is None or len(feat) < 100:
-                raise Exception("⛔ 학습 데이터 부족")
+                raise Exception("⛔ feature 데이터 부족")
 
             features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
             feat_scaled = MinMaxScaler().fit_transform(features_only)
 
             returns = df["close"].pct_change().fillna(0).values
-            class_ranges = get_class_groups()
+            class_ranges = get_class_ranges(group_id=gid)
             labels = []
 
             for r in returns:
-                for i, (low, high) in enumerate(class_ranges[gid]):
+                for i, (low, high) in enumerate(class_ranges):
                     if low <= r <= high:
                         labels.append(i)
                         break
@@ -150,10 +152,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             X, y = [], []
             for i in range(len(feat_scaled) - window):
                 X.append(feat_scaled[i:i+window])
-                y.append(labels[i + window])
+                y.append(labels[i + window] if i + window < len(labels) else 0)
 
             X, y = np.array(X), np.array(y)
-            num_classes = len(class_ranges[gid])
+            num_classes = len(class_ranges)
 
             if len(X) < 10:
                 raise Exception("⛔ 유효한 학습 샘플 부족")
