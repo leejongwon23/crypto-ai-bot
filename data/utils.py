@@ -388,7 +388,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
 
         df = df[["timestamp", "strategy"] + base_cols]
 
-        # ✅ 캔들 수 부족한 경우 → 최소 길이 체크
         if len(df) < 20:
             print(f"[⚠️ 피처 실패] {symbol}-{strategy} → row 수 부족: {len(df)}")
             failed_result(symbol, strategy, reason=f"row 부족 {len(df)}")
@@ -445,9 +444,10 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         return pd.DataFrame()
 
     print(f"[✅ 완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
-    print(f"[🔍 feature 상태] {symbol}-{strategy} → shape: {df.shape}, NaN: {df.isnull().values.any()}, 컬럼수: {len(df.columns)}")  # ✅ 추가
+    print(f"[🔍 feature 상태] {symbol}-{strategy} → shape: {df.shape}, NaN: {df.isnull().values.any()}, 컬럼수: {len(df.columns)}")
     CacheManager.set(cache_key, df)
     return df
+
 
 
 # data/utils.py 맨 아래에 추가
