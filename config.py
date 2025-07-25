@@ -35,6 +35,21 @@ def save_config():
     except Exception as e:
         print(f"[⚠️ config.py] config.json 저장 실패 → {e}")
 
+# ✅ 클래스별 수익률 범위 반환 (예: 21 클래스 기준)
+def get_class_return_range(class_id):
+    num_classes = get_NUM_CLASSES()
+    assert 0 <= class_id < num_classes, f"class_id {class_id} 잘못됨"
+    ranges = get_class_ranges()
+    return ranges[class_id]
+
+# ✅ 클래스별 기대 수익률 계산 (중간값 사용)
+def class_to_expected_return(class_id, num_classes=None):
+    if num_classes is None:
+        num_classes = get_NUM_CLASSES()
+    r_min, r_max = get_class_return_range(class_id)
+    return (r_min + r_max) / 2
+
+
 # ✅ 동적 클래스 수 설정 함수
 def set_NUM_CLASSES(n):
     global _dynamic_num_classes
