@@ -77,6 +77,8 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         df = pd.DataFrame()
 
     try:
+        is_evo = row.get("source") == "evo_meta"
+
         record = {
             "timestamp": datetime.now().isoformat(),
             "symbol": row.get("symbol"),
@@ -87,7 +89,8 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
             "feature_hash": feature_hash,
             "rate": row.get("rate", ""),
             "return_value": row.get("return", ""),
-            "reason": row.get("reason") or "미기록"
+            "reason": row.get("reason") or "미기록",
+            "evo_meta_strategy": row.get("strategy") if is_evo else ""
         }
 
         if feature_vector is not None:
@@ -100,7 +103,6 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
 
     except Exception as e:
         print(f"[❌ insert_failure_record 예외] {type(e).__name__}: {e}")
-
 
 def load_existing_failure_hashes():
     try:
