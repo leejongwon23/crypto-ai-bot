@@ -195,10 +195,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from sklearn.preprocessing import MinMaxScaler
     from window_optimizer import find_best_windows
     from logger import log_prediction, get_available_models
-    from config import FEATURE_INPUT_SIZE
-    from model_weight_loader import load_model_cached, get_class_return_range, class_to_expected_return
+    from config import FEATURE_INPUT_SIZE, get_class_return_range, class_to_expected_return
+    from model_weight_loader import load_model_cached
     from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
-    from meta_learning import train_meta_learner, load_meta_learner, ensemble_stacking
+    from meta_learning import load_meta_learner, ensemble_stacking
     from data.utils import get_kline_by_strategy, compute_features
     from datetime import datetime
     import pytz
@@ -207,8 +207,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     os.makedirs("/persistent/logs", exist_ok=True)
     def now_kst(): return datetime.now(pytz.timezone("Asia/Seoul"))
 
-    model_outputs_list, true_labels = [], []
-    all_model_predictions = []
+    model_outputs_list, all_model_predictions = [], []
 
     try:
         window_list = find_best_windows(symbol, strategy)
@@ -261,6 +260,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta_info = json.load(f)
+
                 num_classes = meta_info.get("num_classes", 21)
                 group_id = meta_info.get("group_id", m.get("group_id", 0))
 
@@ -298,7 +298,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
         meta_model = load_meta_learner()
         final_pred_class = ensemble_stacking(model_outputs_list, meta_model)
-
         cls_min, cls_max = get_class_return_range(final_pred_class)
 
         for pred in all_model_predictions:
@@ -309,10 +308,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
             target_price = entry_price * (1 + expected_return)
             is_main = (predicted_class == final_pred_class)
 
-            # ✅ 오직 메타 선택된 클래스만 성공 판정
-            success = False
-            if is_main:
-                success = cls_min <= expected_return <= cls_max
+            # ✅ 오직 메타 선택 클래스만 성공 판정
+            success = cls_min <= expected_return <= cls_max if is_main else False
 
             log_prediction(
                 symbol=pred["symbol"],
@@ -357,7 +354,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         print(f"[predict 예외] {e}")
         insert_failure_record(symbol, strategy, -1, -1, now_kst())
         return None
-
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
@@ -407,11 +403,11 @@ def evaluate_predictions(get_price_fn):
             r["label"] = label
 
             entry_price = float(r.get("entry_price", 0))
-            if entry_price <= 0 or pred_class == -1:
+            if entry_price <= 0 or label == -1:
                 log_prediction(symbol, strategy, "예측실패", entry_price, entry_price, now_kst().isoformat(),
-                               model, False, "entry_price 오류 또는 pred_class=-1", 0.0, 0.0, False, "평가",
+                               model, False, "entry_price 오류 또는 label=-1", 0.0, 0.0, False, "평가",
                                predicted_class=pred_class, label=label, group_id=group_id)
-                r.update({"status": "fail", "reason": "entry_price 오류 또는 pred_class=-1", "return": 0.0})
+                r.update({"status": "fail", "reason": "entry_price 오류 또는 label=-1", "return": 0.0})
                 insert_failure_record(r, f"{symbol}-{strategy}-{now_kst().isoformat()}", feature_vector=None, label=label)
                 updated.append(r)
                 continue
@@ -439,11 +435,10 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            # ✅ 그룹별 클래스 수익률 구간 반영
             class_ranges_for_group = get_class_ranges(group_id=group_id)
             success = False
-            if 0 <= pred_class < len(class_ranges_for_group):
-                cls_min, cls_max = class_ranges_for_group[pred_class]
+            if 0 <= label < len(class_ranges_for_group):
+                cls_min, cls_max = class_ranges_for_group[label]
                 if cls_min <= gain <= cls_max:
                     success = True
 
@@ -456,10 +451,9 @@ def evaluate_predictions(get_price_fn):
 
             r.update({
                 "status": status,
-                "reason": f"[cls={pred_class}] gain={gain:.3f}",
+                "reason": f"[label={label}] gain={gain:.3f}",
                 "return": round(gain, 5),
                 "confidence": confidence,
-                "label": label,
                 "group_id": group_id
             })
 
@@ -495,7 +489,6 @@ def evaluate_predictions(get_price_fn):
     failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
     safe_write_csv(WRONG, failed)
     print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
-
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
