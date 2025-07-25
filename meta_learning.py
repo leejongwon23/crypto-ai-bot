@@ -104,3 +104,39 @@ def load_meta_learner():
     else:
         print("[⚠️ meta learner 파일 없음 → None 반환]")
         return None
+
+import numpy as np
+
+def get_meta_prediction(models_outputs, feature_tensor=None, meta_info=None):
+    """
+    가장 성공 가능성이 높은 클래스를 선택
+
+    Args:
+        models_outputs (list of np.ndarray): 각 모델의 softmax 확률 벡터
+        feature_tensor (np.ndarray or torch.Tensor, optional): 현재 입력 feature
+        meta_info (dict, optional): 클래스별 과거 성공률 또는 도달률 정보
+            - 형태 예시: {'success_rate': {0: 0.7, 1: 0.4, ..., N: 0.6}}
+
+    Returns:
+        int: 선택된 최종 클래스 인덱스
+    """
+    num_models = len(models_outputs)
+    if num_models == 0:
+        raise ValueError("모델 softmax 출력 없음")
+
+    num_classes = len(models_outputs[0])
+
+    # ✅ 평균 softmax 계산
+    avg_softmax = np.mean(models_outputs, axis=0)
+
+    # ✅ 메타 정보 기반 보정 (성공률, 도달률)
+    scores = np.copy(avg_softmax)
+    if meta_info and "success_rate" in meta_info:
+        for cls in range(num_classes):
+            success = meta_info["success_rate"].get(cls, 0.5)  # 기본값 0.5
+            scores[cls] *= success
+
+    # ✅ 최종 클래스 선택
+    selected_class = int(np.argmax(scores))
+    return selected_class
+
