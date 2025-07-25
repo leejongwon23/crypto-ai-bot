@@ -56,7 +56,6 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         print("[❌ insert_failure_record] row 형식 오류")
         return
 
-    # ✅ feature_hash 자동 생성 (예: symbol+strategy+timestamp+predicted_class)
     if not feature_hash:
         raw_str = f"{row.get('symbol','')}_{row.get('strategy','')}_{row.get('timestamp','')}_{row.get('predicted_class','')}"
         feature_hash = hashlib.sha256(raw_str.encode()).hexdigest()
@@ -65,7 +64,6 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         print("[❌ insert_failure_record] feature_hash 없음 → 저장 스킵")
         return
 
-    # ✅ 중복방지
     if os.path.exists(CSV_PATH):
         try:
             df = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
@@ -78,7 +76,6 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
     else:
         df = pd.DataFrame()
 
-    # ✅ 실패 기록
     try:
         record = {
             "timestamp": datetime.now().isoformat(),
@@ -90,7 +87,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
             "feature_hash": feature_hash,
             "rate": row.get("rate", ""),
             "return_value": row.get("return", ""),
-            "reason": row.get("reason", "")
+            "reason": row.get("reason") or "미기록"
         }
 
         if feature_vector is not None:
@@ -103,6 +100,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
 
     except Exception as e:
         print(f"[❌ insert_failure_record 예외] {type(e).__name__}: {e}")
+
 
 def load_existing_failure_hashes():
     try:
