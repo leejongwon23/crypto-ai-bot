@@ -121,3 +121,14 @@ def prepare_evo_meta_dataset(path="/persistent/wrong_predictions.csv", min_sampl
     y = np.array(y_list, dtype=np.int64)
     print(f"[✅ prepare_evo_meta_dataset] X:{X.shape}, y:{y.shape}")
     return X, y
+
+from evo_meta_learner import train_evo_meta, EvoMetaModel
+from evo_meta_dataset import prepare_evo_meta_dataset  # 경로에 따라 조정
+import os
+
+def train_evo_meta_loop(min_samples=50, input_size=9):
+    X, y = prepare_evo_meta_dataset(min_samples=min_samples)
+    if X is None or y is None:
+        print("[ℹ️ train_evo_meta_loop] 학습 데이터 부족으로 학습 건너뜀")
+        return
+    train_evo_meta(X, y, input_size=input_size)
