@@ -442,7 +442,7 @@ def train_symbol_group_loop(delay_minutes=5):
     from train import train_one_model
     from recommend import main
     import safe_cleanup
-    from evo_meta_learner import train_evo_meta_loop  # ✅ 진화형 메타러너 자동 학습 추가
+    from evo_meta_learner import train_evo_meta_loop, train_evo_meta  # ✅ 추가
 
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작")
@@ -505,6 +505,14 @@ def train_symbol_group_loop(delay_minutes=5):
                             print(f"[▶ 예측 시도] {symbol}-{strategy} (모든 그룹 학습 완료)")
                             main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
                             print(f"[✅ 예측 완료] {symbol}-{strategy}")
+
+                            # ✅ 예측 후 진화형 메타러너 학습
+                            try:
+                                train_evo_meta()
+                                print(f"[✅ 진화형 메타러너 학습 완료] {symbol}-{strategy}")
+                            except Exception as e:
+                                print(f"[⚠️ 진화형 메타러너 학습 실패] {symbol}-{strategy} → {e}")
+
                         except Exception as e:
                             print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
                             traceback.print_exc()
@@ -523,11 +531,11 @@ def train_symbol_group_loop(delay_minutes=5):
             print(f"🕒 그룹 {idx} 완료 → {delay_minutes}분 대기")
             time.sleep(delay_minutes * 60)
 
-        # ✅ 루프 끝날 때마다 진화형 메타러너 학습 시도
+        # ✅ 루프 끝날 때마다 전체 진화형 메타러너도 반복학습
         try:
             train_evo_meta_loop()
         except Exception as e:
-            print(f"[⚠️ 진화형 메타러너 학습 실패] → {e}")
+            print(f"[⚠️ 진화형 메타러너 루프 학습 실패] → {e}")
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
     """
