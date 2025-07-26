@@ -203,7 +203,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from datetime import datetime
     import pytz
     from failure_db import insert_failure_record
-    from predict import get_model_predictions  # ✅ 외부 함수 연동
+    from predict import get_model_predictions
+    from evo_meta_learner import get_best_strategy_by_failure_probability  # ✅ 추가
 
     os.makedirs("/persistent/logs", exist_ok=True)
     def now_kst(): return datetime.now(pytz.timezone("Asia/Seoul"))
@@ -240,7 +241,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         recent_freq = get_recent_class_frequencies(strategy)
         feature_tensor = torch.tensor(feat_scaled[-1], dtype=torch.float32)
 
-        # ✅ 모델 예측 결과 수집
         model_outputs_list, all_model_predictions = get_model_predictions(
             symbol, strategy, models, df, feat_scaled, window_list, recent_freq
         )
@@ -251,6 +251,17 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
         final_pred_class = get_meta_prediction(model_outputs_list, feature_tensor)
         cls_min, cls_max = get_class_return_range(final_pred_class)
+
+        # ✅ 진화형 메타러너로 대체 전략 추천
+        recommended_strategy = get_best_strategy_by_failure_probability(
+            symbol=symbol,
+            current_strategy=strategy,
+            feature_tensor=feature_tensor,
+            model_outputs=model_outputs_list
+        )
+        if recommended_strategy and recommended_strategy != strategy:
+            print(f"[🔁 전략 교체됨] {strategy} → {recommended_strategy}")
+            strategy = recommended_strategy
 
         for pred in all_model_predictions:
             predicted_class = pred["class"]
@@ -294,7 +305,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     label=final_pred_class
                 )
 
-        # ✅ 진화형 메타러너 기록 추가
         evo_expected_return = class_to_expected_return(final_pred_class, len(model_outputs_list[0]["probs"]))
         entry_price = all_model_predictions[0]["entry_price"]
 
@@ -305,7 +315,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             entry_price=entry_price,
             target_price=entry_price * (1 + evo_expected_return),
             model="meta",
-            model_name="evo_meta_learner",  # ✅ 진화형
+            model_name="evo_meta_learner",
             predicted_class=final_pred_class,
             label=final_pred_class,
             note="진화형 메타 선택",
