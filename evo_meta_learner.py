@@ -8,6 +8,8 @@ import pandas as pd
 import numpy as np
 from torch.utils.data import DataLoader, TensorDataset
 from datetime import datetime
+# 상단에 추가
+from evo_meta_dataset import prepare_evo_meta_dataset
 
 MODEL_PATH = "/persistent/models/evo_meta_learner.pt"
 
