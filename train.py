@@ -452,6 +452,9 @@ def train_symbol_group_loop(delay_minutes=5):
     import safe_cleanup
     from evo_meta_learner import train_evo_meta_loop, train_evo_meta  # ✅ 추가
 
+    # ✅ 강제 학습 여부 설정 (True = 항상 학습함)
+    FORCE_TRAINING = True
+
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작")
 
@@ -492,7 +495,8 @@ def train_symbol_group_loop(delay_minutes=5):
                     for gid in range(5):
                         print(f"▶ [학습 시도] {symbol}-{strategy}-group{gid}")
 
-                        if train_done[symbol][strategy].get(str(gid), False):
+                        # ✅ 수정: 강제 학습 조건 추가
+                        if not FORCE_TRAINING and train_done[symbol][strategy].get(str(gid), False):
                             print(f"[⏭️ 스킵] {symbol}-{strategy}-group{gid} (이미 학습됨)")
                             continue
 
@@ -544,6 +548,7 @@ def train_symbol_group_loop(delay_minutes=5):
             train_evo_meta_loop()
         except Exception as e:
             print(f"[⚠️ 진화형 메타러너 루프 학습 실패] → {e}")
+
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
     """
