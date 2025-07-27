@@ -17,8 +17,8 @@ from config import get_class_groups
 from collections import OrderedDict
 # 변경
 from config import get_class_ranges
-# ✅ 기존 predict.py 맨 위 import 구역에 추가
-from meta_learning import train_meta_learner, load_meta_learner
+# 🔒 (예전 메타러너, 현재는 get_meta_prediction으로 대체됨)
+# from meta_learning import train_meta_learner, load_meta_learner
 import safe_cleanup  # ✅ 오래된 로그 자동 정리
 
 
