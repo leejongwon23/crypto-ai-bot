@@ -367,6 +367,7 @@ def train_models(symbol_list):
     - group_id=None으로 설정하여 전체 그룹 자동 학습
     - 모든 전략 완료 후 다음 심볼로 이동
     - meta.json 일괄 보정 수행
+    - 실패학습 + 진화형 메타러너 자동 실행 포함
     """
     global training_in_progress
     from telegram_bot import send_message
@@ -403,12 +404,19 @@ def train_models(symbol_list):
     except Exception as e:
         print(f"[⚠️ meta 보정 실패] {e}")
 
-    # ✅ 실패학습 자동 실행 추가
+    # ✅ 실패학습 자동 실행
     try:
         import failure_trainer
         failure_trainer.run_failure_training()
     except Exception as e:
         print(f"[❌ 실패학습 루프 예외] {e}")
+
+    # ✅ 진화형 메타러너 학습 추가
+    try:
+        from evo_meta_learner import train_evo_meta
+        train_evo_meta()
+    except Exception as e:
+        print(f"[❌ 진화형 메타러너 학습 실패] {e}")
 
     send_message(f"✅ 전체 심볼 학습 완료: {symbol_list}")
 
