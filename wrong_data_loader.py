@@ -15,7 +15,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     import numpy as np
     import pandas as pd
     from collections import Counter
-    from config import FAIL_AUGMENT_RATIO, get_class_groups
+    from config import FAIL_AUGMENT_RATIO, get_class_ranges
     from data.utils import get_kline_by_strategy, compute_features
     from logger import get_feature_hash
     from failure_db import load_existing_failure_hashes
@@ -23,16 +23,8 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     WRONG_CSV = "/persistent/wrong_predictions.csv"
     sequences = []
 
-    class_groups = get_class_groups()
-    if group_id is not None:
-        if group_id >= len(class_groups):
-            print(f"[❌ group_id 오류] {symbol}-{strategy}: group_id={group_id} 범위 초과")
-            return None, None
-        group_classes = class_groups[group_id]
-    else:
-        group_classes = list(range(sum(len(g) for g in class_groups)))
-
-    num_classes = len(group_classes)
+    class_ranges = get_class_ranges(group_id=group_id)
+    num_classes = len(class_ranges)
 
     df_price = get_kline_by_strategy(symbol, strategy)
     if df_price is None or df_price.empty:
@@ -56,11 +48,15 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     returns = df_price["close"].pct_change().fillna(0).values
     labels = []
     for r in returns:
-        for i, (low, high) in enumerate(group_classes):
-            if low <= r <= high:
-                labels.append(i)
-                break
-        else:
+        matched = False
+        for i, rng in enumerate(class_ranges):
+            if isinstance(rng, tuple) and len(rng) == 2:
+                low, high = rng
+                if low <= r <= high:
+                    labels.append(i)
+                    matched = True
+                    break
+        if not matched:
             labels.append(0)
     df_feat["label"] = labels[:len(df_feat)]
 
@@ -152,3 +148,4 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     print(f"[✅ load_training_prediction_data 완료] {symbol}-{strategy} → 샘플 수: {len(y)} / 클래스 분포: {dict(Counter(y))} / 누락된 라벨 수: {len(label_missing)}")
 
     return X, y
+
