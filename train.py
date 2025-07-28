@@ -370,11 +370,8 @@ def train_all_models():
 def train_models(symbol_list):
     """
     ✅ [YOPO 구조 반영]
-    - 심볼 하나당: 전략별 전체 그룹 학습 실행
-    - group_id=None으로 설정하여 전체 그룹 자동 학습
-    - 모든 전략 완료 후 다음 심볼로 이동
-    - meta.json 일괄 보정 수행
-    - 실패학습 + 진화형 메타러너 자동 실행 포함
+    - 각 심볼에 대해 전략별 전체 그룹 학습 실행 (group_id=None)
+    - 학습 완료 후 meta 보정, 실패학습, 진화형 메타러너 학습까지 자동 수행
     """
     global training_in_progress
     from telegram_bot import send_message
@@ -395,7 +392,7 @@ def train_models(symbol_list):
 
             training_in_progress[strategy] = True
             try:
-                # ✅ 핵심: group_id=None → 내부에서 전체 그룹 자동 반복
+                # ✅ 핵심: group_id=None → 전체 그룹 자동 반복 학습
                 train_one_model(symbol, strategy, group_id=None)
             except Exception as e:
                 print(f"[❌ 학습 실패] {symbol}-{strategy} → {e}")
@@ -404,28 +401,32 @@ def train_models(symbol_list):
                 print(f"✅ {symbol}-{strategy} 전체 그룹 학습 완료")
                 time.sleep(2)
 
-    # ✅ 모든 학습 후 메타 보정
+    # ✅ 메타정보 보정
     try:
         maintenance_fix_meta.fix_all_meta_json()
         print(f"✅ meta 보정 완료: {symbol_list}")
     except Exception as e:
         print(f"[⚠️ meta 보정 실패] {e}")
 
-    # ✅ 실패학습 자동 실행
+    # ✅ 실패 학습 루프 실행
     try:
         import failure_trainer
         failure_trainer.run_failure_training()
+        print(f"✅ 실패학습 루프 완료")
     except Exception as e:
         print(f"[❌ 실패학습 루프 예외] {e}")
 
-    # ✅ 진화형 메타러너 학습 추가
+    # ✅ 진화형 메타러너 학습 실행
     try:
         from evo_meta_learner import train_evo_meta
         train_evo_meta()
+        print(f"✅ 진화형 메타러너 학습 완료")
     except Exception as e:
         print(f"[❌ 진화형 메타러너 학습 실패] {e}")
 
+    # ✅ 알림 전송
     send_message(f"✅ 전체 심볼 학습 완료: {symbol_list}")
+
 
 def train_model_loop(strategy):
     """
