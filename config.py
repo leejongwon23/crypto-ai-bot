@@ -85,46 +85,55 @@ def get_class_groups(num_classes=None, group_size=5):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
-def get_class_ranges(method="equal", group_id=None, group_size=5, data_path="/persistent/prediction_log.csv"):
-    import pandas as pd
+def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=None, group_size=5):
     import numpy as np
+    from data.utils import get_kline_by_strategy
 
     num_classes = get_NUM_CLASSES()
     assert num_classes % 2 == 0, "클래스 수는 짝수여야 양/음 분할 가능"
 
-    def compute_split_ranges():
+    def compute_split_ranges_from_kline():
         try:
-            df = pd.read_csv(data_path, encoding="utf-8-sig")
-            returns = df["return"].dropna().values
+            df_price = get_kline_by_strategy(symbol, strategy)
+            if df_price is None or len(df_price) < num_classes:
+                print(f"[⚠️ get_class_ranges] 가격 데이터 부족 → fallback equal 사용")
+                return compute_equal_ranges()
+
+            returns = df_price["close"].pct_change().dropna().values
             if len(returns) < num_classes:
-                print(f"[⚠️ get_class_ranges] 데이터 부족 → fallback equal 사용")
+                print(f"[⚠️ get_class_ranges] 수익률 부족 → fallback equal 사용")
                 return compute_equal_ranges()
 
             half = num_classes // 2
             neg = returns[returns < 0]
             pos = returns[returns >= 0]
 
+            if len(neg) < half or len(pos) < half:
+                print(f"[⚠️ get_class_ranges] 양/음 수익률 분포 불충분 → fallback equal 사용")
+                return compute_equal_ranges()
+
             if method == "quantile":
-                q_neg = np.quantile(neg, np.linspace(0, 1, half + 1)) if len(neg) >= half else np.linspace(neg.min(), neg.max(), half + 1)
-                q_pos = np.quantile(pos, np.linspace(0, 1, half + 1)) if len(pos) >= half else np.linspace(pos.min(), pos.max(), half + 1)
+                q_neg = np.quantile(neg, np.linspace(0, 1, half + 1))
+                q_pos = np.quantile(pos, np.linspace(0, 1, half + 1))
             else:
                 q_neg = np.linspace(neg.min(), neg.max(), half + 1)
                 q_pos = np.linspace(pos.min(), pos.max(), half + 1)
 
-            neg_ranges = [(q_neg[i], q_neg[i+1]) for i in range(len(q_neg)-1)]
-            pos_ranges = [(q_pos[i], q_pos[i+1]) for i in range(len(q_pos)-1)]
+            neg_ranges = [(q_neg[i], q_neg[i+1]) for i in range(half)]
+            pos_ranges = [(q_pos[i], q_pos[i+1]) for i in range(half)]
 
             return neg_ranges + pos_ranges
 
         except Exception as e:
-            print(f"[❌ get_class_ranges] split-range 실패 → {e}")
+            print(f"[❌ get_class_ranges] 수익률 분포 계산 실패 → fallback equal 사용: {e}")
             return compute_equal_ranges()
 
     def compute_equal_ranges():
         step = 2.0 / num_classes
         return [(-1.0 + i * step, -1.0 + (i + 1) * step) for i in range(num_classes)]
 
-    all_ranges = compute_split_ranges()
+    # ✅ 실제 수익률 기반으로 계산
+    all_ranges = compute_split_ranges_from_kline()
 
     if group_id is None:
         return all_ranges
@@ -132,7 +141,6 @@ def get_class_ranges(method="equal", group_id=None, group_size=5, data_path="/pe
     start = group_id * group_size
     end = start + group_size
     return all_ranges[start:end]
-
 
 # ✅ 즉시 변수 선언
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
