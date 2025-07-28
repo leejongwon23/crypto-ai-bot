@@ -525,14 +525,86 @@ if __name__ == "__main__":
 import torch
 import torch.nn.functional as F
 
-def get_model_predictions(model, input_tensor):
+import torch
+import torch.nn.functional as F
+import json
+import os
+from model.base_model import get_model
+from model_weight_loader import load_model_cached
+
+def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list, recent_freq):
     """
-    모델의 softmax 확률, 예측 클래스, 확률 벡터를 반환
+    ✅ [YOPO 전용]
+    - 주어진 모델 리스트(models)로 예측 수행
+    - 각 모델은 meta.json을 통해 정보 추출
+    - 결과: model_outputs_list, all_model_predictions 반환
     """
-    model.eval()
-    with torch.no_grad():
-        outputs = model(input_tensor)
-        softmax_probs = F.softmax(outputs, dim=1)
-        predicted_class = torch.argmax(softmax_probs, dim=1).item()
-        probs = softmax_probs.squeeze().cpu().numpy()
-    return predicted_class, probs, softmax_probs
+    model_outputs_list = []
+    all_model_predictions = []
+
+    for model_info in models:
+        model_path = model_info.get("model_path")
+        meta_path = model_path.replace(".pt", ".meta.json")
+        if not os.path.exists(meta_path):
+            print(f"[⚠️ 메타파일 없음] {meta_path}")
+            continue
+
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            model_type = meta.get("model", "lstm")
+            group_id = meta.get("group_id", 0)
+            input_size = meta.get("input_size", 11)
+            num_classes = meta.get("num_classes", 21)
+        except Exception as e:
+            print(f"[⚠️ 메타파일 로딩 실패] {meta_path} → {e}")
+            continue
+
+        try:
+            window = window_list[group_id]
+            input_seq = feat_scaled[-window:]
+            if input_seq.shape[0] < window:
+                print(f"[⚠️ 데이터 부족] {symbol}-{strategy}-group{group_id}")
+                continue
+
+            input_tensor = torch.tensor(input_seq, dtype=torch.float32).unsqueeze(0)  # (1, window, input_size)
+
+            model = get_model(model_type, input_size=input_size, output_size=num_classes)
+            model = load_model_cached(model_path, model)
+            model.eval()
+
+            with torch.no_grad():
+                out = model(input_tensor)
+                softmax_probs = F.softmax(out, dim=1)
+                predicted_class = torch.argmax(softmax_probs, dim=1).item()
+                probs = softmax_probs.squeeze().cpu().numpy()
+
+            model_outputs_list.append({
+                "probs": probs,
+                "predicted_class": predicted_class,
+                "group_id": group_id,
+                "model_type": model_type,
+                "model_path": model_path,
+                "symbol": symbol,
+                "strategy": strategy
+            })
+
+            entry_price = df["close"].iloc[-1]
+            all_model_predictions.append({
+                "class": predicted_class,
+                "probs": probs,
+                "entry_price": entry_price,
+                "num_classes": num_classes,
+                "group_id": group_id,
+                "model_name": model_type,
+                "model_symbol": symbol,
+                "symbol": symbol,
+                "strategy": strategy
+            })
+
+        except Exception as e:
+            print(f"[❌ 모델 예측 실패] {model_path} → {e}")
+            continue
+
+    return model_outputs_list, all_model_predictions
+
