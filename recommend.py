@@ -257,6 +257,11 @@ def main(symbol=None, strategy=None, force=False, allow_prediction=True):
 
     for sym in [symbol] if symbol else SYMBOLS:
         for strat in [strategy] if strategy else ["단기", "중기", "장기"]:
+            # ✅ strategy None 또는 문자열 "None" 예외 처리
+            if strat is None or str(strat).lower() == "none":
+                print(f"[⚠️ 전략 없음: 스킵] {sym} → strategy=None")
+                continue
+
             for gid, group in enumerate(class_groups):
                 for mtype in ["lstm", "cnn_lstm", "transformer"]:
                     model_name = f"{mtype}_AdamW_FocalLoss_lr1e-4_bs=32_hs=64_dr=0.3_group{gid}_window20"
@@ -286,6 +291,8 @@ def main(symbol=None, strategy=None, force=False, allow_prediction=True):
                         continue
 
 import shutil
+
+
 def check_disk_usage(threshold_percent=90):
     try:
         total, used, free = shutil.disk_usage("/persistent")
