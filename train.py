@@ -254,7 +254,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{gid} → {e}")
             traceback.print_exc()
 
-
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
     import numpy as np
@@ -460,10 +459,12 @@ def train_symbol_group_loop(delay_minutes=5):
     import safe_cleanup
     from evo_meta_learner import train_evo_meta_loop, train_evo_meta
     from wrong_data_loader import load_training_prediction_data
-    from config import get_FEATURE_INPUT_SIZE
+    from config import get_FEATURE_INPUT_SIZE, get_class_groups
 
     FORCE_TRAINING = True
     FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
+    CLASS_GROUPS = get_class_groups()
+    MAX_GROUP_ID = len(CLASS_GROUPS) - 1
 
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작")
@@ -503,6 +504,10 @@ def train_symbol_group_loop(delay_minutes=5):
                     all_success = True
 
                     for gid in range(5):
+                        if gid > MAX_GROUP_ID:
+                            print(f"[⛔ group_id={gid} 초과로 스킵] 현재 최대 group_id={MAX_GROUP_ID}")
+                            continue
+
                         print(f"▶ [학습 시도] {symbol}-{strategy}-group{gid}")
 
                         if not FORCE_TRAINING and train_done[symbol][strategy].get(str(gid), False):
@@ -526,7 +531,6 @@ def train_symbol_group_loop(delay_minutes=5):
                             main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
                             print(f"[✅ 예측 완료] {symbol}-{strategy}")
 
-                            # ✅ 진화형 메타러너 학습
                             try:
                                 X, y = load_training_prediction_data(
                                     symbol, strategy,
@@ -564,7 +568,6 @@ def train_symbol_group_loop(delay_minutes=5):
             train_evo_meta_loop()
         except Exception as e:
             print(f"[⚠️ 진화형 메타러너 루프 학습 실패] → {e}")
-
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
     """
