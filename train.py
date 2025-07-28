@@ -532,6 +532,7 @@ def train_symbol_group_loop(delay_minutes=5):
                             main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
                             print(f"[✅ 예측 완료] {symbol}-{strategy}")
 
+                            # ✅ 실패기반 진화형 메타러너 학습 자동화
                             try:
                                 X, y = load_training_prediction_data(
                                     symbol, strategy,
@@ -569,6 +570,7 @@ def train_symbol_group_loop(delay_minutes=5):
             train_evo_meta_loop()
         except Exception as e:
             print(f"[⚠️ 진화형 메타러너 루프 학습 실패] → {e}")
+
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
     """
