@@ -24,7 +24,14 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     sequences = []
 
     class_groups = get_class_groups()
-    group_classes = class_groups[group_id] if group_id is not None else list(range(sum(len(g) for g in class_groups)))
+    if group_id is not None:
+        if group_id >= len(class_groups):
+            print(f"[❌ group_id 오류] {symbol}-{strategy}: group_id={group_id} 범위 초과")
+            return None, None
+        group_classes = class_groups[group_id]
+    else:
+        group_classes = list(range(sum(len(g) for g in class_groups)))
+
     num_classes = len(group_classes)
 
     df_price = get_kline_by_strategy(symbol, strategy)
@@ -37,7 +44,13 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
         print(f"[❌ 실패] {symbol}-{strategy}: compute_features → 데이터 없음")
         return None, None
 
-    df_feat["timestamp"] = df_feat.get("timestamp") or df_feat.get("datetime")
+    if "timestamp" in df_feat.columns:
+        df_feat["timestamp"] = df_feat["timestamp"]
+    elif "datetime" in df_feat.columns:
+        df_feat["timestamp"] = df_feat["datetime"]
+    else:
+        raise Exception("timestamp 또는 datetime 컬럼 없음")
+
     df_feat = df_feat.dropna().reset_index(drop=True)
 
     returns = df_price["close"].pct_change().fillna(0).values
@@ -139,5 +152,3 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     print(f"[✅ load_training_prediction_data 완료] {symbol}-{strategy} → 샘플 수: {len(y)} / 클래스 분포: {dict(Counter(y))} / 누락된 라벨 수: {len(label_missing)}")
 
     return X, y
-
-
