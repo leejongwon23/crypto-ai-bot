@@ -458,10 +458,12 @@ def train_symbol_group_loop(delay_minutes=5):
     from train import train_one_model
     from recommend import main
     import safe_cleanup
-    from evo_meta_learner import train_evo_meta_loop, train_evo_meta  # ✅ 추가
+    from evo_meta_learner import train_evo_meta_loop, train_evo_meta
+    from wrong_data_loader import load_training_prediction_data
+    from config import get_FEATURE_INPUT_SIZE
 
-    # ✅ 강제 학습 여부 설정 (True = 항상 학습함)
     FORCE_TRAINING = True
+    FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작")
@@ -503,7 +505,6 @@ def train_symbol_group_loop(delay_minutes=5):
                     for gid in range(5):
                         print(f"▶ [학습 시도] {symbol}-{strategy}-group{gid}")
 
-                        # ✅ 수정: 강제 학습 조건 추가
                         if not FORCE_TRAINING and train_done[symbol][strategy].get(str(gid), False):
                             print(f"[⏭️ 스킵] {symbol}-{strategy}-group{gid} (이미 학습됨)")
                             continue
@@ -519,17 +520,25 @@ def train_symbol_group_loop(delay_minutes=5):
                             traceback.print_exc()
                             all_success = False
 
-                    # ✅ 모든 group 학습이 완료된 경우에만 예측 수행
                     if all_success and all(str(gid) in train_done[symbol][strategy] for gid in range(5)):
                         try:
                             print(f"[▶ 예측 시도] {symbol}-{strategy} (모든 그룹 학습 완료)")
                             main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
                             print(f"[✅ 예측 완료] {symbol}-{strategy}")
 
-                            # ✅ 예측 후 진화형 메타러너 학습
+                            # ✅ 진화형 메타러너 학습
                             try:
-                                train_evo_meta()
-                                print(f"[✅ 진화형 메타러너 학습 완료] {symbol}-{strategy}")
+                                X, y = load_training_prediction_data(
+                                    symbol, strategy,
+                                    input_size=FEATURE_INPUT_SIZE,
+                                    window=20,
+                                    group_id=None
+                                )
+                                if X is not None and y is not None and len(X) > 0:
+                                    train_evo_meta(X, y, FEATURE_INPUT_SIZE)
+                                    print(f"[✅ 진화형 메타러너 학습 완료] {symbol}-{strategy}")
+                                else:
+                                    print(f"[⚠️ 진화형 메타러너 스킵] 데이터 부족: {symbol}-{strategy}")
                             except Exception as e:
                                 print(f"[⚠️ 진화형 메타러너 학습 실패] {symbol}-{strategy} → {e}")
 
@@ -551,7 +560,6 @@ def train_symbol_group_loop(delay_minutes=5):
             print(f"🕒 그룹 {idx} 완료 → {delay_minutes}분 대기")
             time.sleep(delay_minutes * 60)
 
-        # ✅ 루프 끝날 때마다 전체 진화형 메타러너도 반복학습
         try:
             train_evo_meta_loop()
         except Exception as e:
