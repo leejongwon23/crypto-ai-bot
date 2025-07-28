@@ -172,6 +172,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
                 model = get_model(model_type, input_size=input_size, output_size=num_classes)
+                if model is None:
+                    raise Exception(f"⛔ get_model({model_type}) → None 반환됨")
+
                 model.to(DEVICE)
 
                 model_base = f"{symbol}_{strategy}_{model_type}_group{gid}_cls{num_classes}"
@@ -188,8 +191,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 model.train()
 
                 ratio = int(len(X) * 0.8)
-                X_train, y_train = torch.tensor(X[:ratio]), torch.tensor(y[:ratio])
-                X_val, y_val = torch.tensor(X[ratio:]), torch.tensor(y[ratio:])
+                X_train = torch.tensor(X[:ratio], dtype=torch.float32)
+                y_train = torch.tensor(y[:ratio], dtype=torch.long)
+                X_val = torch.tensor(X[ratio:], dtype=torch.float32)
+                y_val = torch.tensor(y[ratio:], dtype=torch.long)
 
                 train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=64, shuffle=True)
                 val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=64)
@@ -220,6 +225,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 f1 = f1_score(all_labels, all_preds, average='macro')
                 print(f"[🎯 {model_type}] acc={acc:.4f}, f1={f1:.4f}")
 
+                if acc == 0.0 and f1 == 0.0:
+                    print(f"⛔ {model_type} 평가 실패 → 저장/로깅 생략")
+                    continue
+
                 os.makedirs("/persistent/models", exist_ok=True)
                 torch.save(model.state_dict(), model_path)
 
@@ -238,7 +247,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 log_training_result(symbol=symbol, strategy=strategy, model=model_path,
                                     accuracy=acc, f1=f1, loss=total_loss)
 
-                # ✅ 성공 기록 추가
                 success_flag = acc > 0.6 and f1 > 0.55
                 record_model_success(model_base, success_flag)
 
