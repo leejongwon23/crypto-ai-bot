@@ -377,22 +377,22 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df["timestamp"] = df["datetime"]
     elif "timestamp" not in df.columns:
         df["timestamp"] = pd.to_datetime("now")
-    df["strategy"] = strategy
+
+    df["strategy"] = strategy  # 로그용으로만 사용
+    base_cols = ["open", "high", "low", "close", "volume"]
+    for col in base_cols:
+        if col not in df.columns:
+            df[col] = 0.0
+
+    # ✅ 전략명 제거 (숫자 벡터 오류 방지)
+    df = df[["timestamp"] + base_cols]
+
+    if len(df) < 20:
+        print(f"[⚠️ 피처 실패] {symbol}-{strategy} → row 수 부족: {len(df)}")
+        failed_result(symbol, strategy, reason=f"row 부족 {len(df)}")
+        return pd.DataFrame()
 
     try:
-        base_cols = ["open", "high", "low", "close", "volume"]
-        for col in base_cols:
-            if col not in df.columns:
-                df[col] = 0.0
-
-        df = df[["timestamp", "strategy"] + base_cols]
-
-        if len(df) < 20:
-            print(f"[⚠️ 피처 실패] {symbol}-{strategy} → row 수 부족: {len(df)}")
-            failed_result(symbol, strategy, reason=f"row 부족 {len(df)}")
-            return pd.DataFrame()
-
-        # ✅ Feature 생성
         df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
         delta = df["close"].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
@@ -423,7 +423,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.fillna(0, inplace=True)
 
-        feature_cols = [c for c in df.columns if c not in ["timestamp", "strategy"]]
+        feature_cols = [c for c in df.columns if c != "timestamp"]
         if len(feature_cols) < FEATURE_INPUT_SIZE:
             for i in range(len(feature_cols), FEATURE_INPUT_SIZE):
                 pad_col = f"pad_{i}"
@@ -446,7 +446,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     print(f"[🔍 feature 상태] {symbol}-{strategy} → shape: {df.shape}, NaN: {df.isnull().values.any()}, 컬럼수: {len(df.columns)}")
     CacheManager.set(cache_key, df)
     return df
-
 
 
 # data/utils.py 맨 아래에 추가
