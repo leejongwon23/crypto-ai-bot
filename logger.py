@@ -193,7 +193,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     now = datetime.now(pytz.timezone("Asia/Seoul")).isoformat() if timestamp is None else timestamp
     top_k_str = ",".join(map(str, top_k)) if top_k else ""
 
-    # ✅ 필수 필드 보완
+    # ✅ 필수 필드 기본값 처리
     predicted_class = predicted_class if predicted_class is not None else -1
     label = label if label is not None else -1
     reason = reason if reason else "사유없음"
@@ -207,11 +207,11 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     if source not in allowed_sources:
         source = "일반"
 
-    # ✅ 성공/실패 판정 (클래스 수익률 범위 도달 여부)
+    # ✅ 성공/실패 판정 (목표 도달 또는 초과 시 성공)
     if predicted_class >= 0:
         try:
             cls_min, cls_max = get_class_return_range(predicted_class)
-            success = cls_min <= return_value <= cls_max
+            success = return_value >= cls_min
         except Exception as e:
             print(f"[⚠️ get_class_return_range 오류] {e}")
             success = False
