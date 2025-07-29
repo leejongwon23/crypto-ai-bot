@@ -222,7 +222,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                               "invalid_symbol_strategy", label=-1)
         return None
 
-    # 원본 전략 보관
+    # 원본 전략 보관 (로깅/평가 시 유지)
     log_strategy = strategy
 
     try:
@@ -273,7 +273,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         final_pred_class = get_meta_prediction(model_outputs_list, feature_tensor)
         cls_min, cls_max = get_class_return_range(final_pred_class)
 
-        # ✅ 8. 전략 변경 로직
+        # ✅ 8. 전략 변경 로직 (실행 전략만 변경, 기록은 log_strategy 유지)
         recommended_strategy = get_best_strategy_by_failure_probability(
             symbol=symbol,
             current_strategy=strategy,
@@ -282,7 +282,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         )
         if recommended_strategy and recommended_strategy != strategy:
             print(f"[🔁 전략 교체됨] {strategy} → {recommended_strategy}")
-            strategy = recommended_strategy  # 실행 전략 변경, 로깅은 log_strategy 유지
+            strategy = recommended_strategy
 
         # ✅ 9. 개별 모델 로깅 — final_pred_class 일관 적용
         for pred in all_model_predictions:
@@ -309,7 +309,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 return_value=expected_return,
                 source=source,
                 predicted_class=predicted_class,
-                label=final_pred_class,  # ✅ 항상 최종 클래스
+                label=final_pred_class,
                 group_id=pred["group_id"],
                 model_symbol=pred["model_symbol"],
                 model_name=pred["model_name"]
@@ -322,14 +322,15 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         "strategy": pred["strategy"] or log_strategy,
                         "model": pred["model_name"],
                         "predicted_class": predicted_class,
-                        "label": final_pred_class,  # ✅ 항상 최종 클래스
+                        "label": final_pred_class,
                         "reason": "예측실패"
                     },
-                    feature_hash=f"{symbol}-{log_strategy}-{now_kst().isoformat()}",
+                    # ✅ final_pred_class 포함 → 해시 고유성 보장
+                    feature_hash=f"{symbol}-{log_strategy}-{final_pred_class}-{now_kst().isoformat()}",
                     label=final_pred_class
                 )
 
-        # ✅ 10. 메타 로깅
+        # ✅ 10. 메타 로깅 (항상 log_strategy 사용)
         evo_expected_return = class_to_expected_return(final_pred_class, len(model_outputs_list[0]["probs"]))
         entry_price = all_model_predictions[0]["entry_price"]
 
@@ -360,7 +361,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 "label": final_pred_class,
                 "reason": "진화형 메타 선택"
             },
-            feature_hash=f"{symbol}-{log_strategy}-{now_kst().isoformat()}",
+            # ✅ final_pred_class 포함
+            feature_hash=f"{symbol}-{log_strategy}-{final_pred_class}-{now_kst().isoformat()}",
             label=final_pred_class,
             feature_vector=feature_tensor.numpy()
         )
