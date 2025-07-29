@@ -403,6 +403,11 @@ if __name__ == "__main__":
     print(">>> 서버 실행 준비")
     sys.stdout.flush()
 
+    # ✅ 실패 학습 DB 초기화
+    from failure_db import ensure_failure_db
+    ensure_failure_db()  # 서버 시작 시 failure_patterns 테이블 생성 보장
+    print("✅ [DEBUG] failure_patterns DB 초기화 완료")
+
     from train import train_symbol_group_loop
 
     print("✅ [DEBUG] train_symbol_group_loop 쓰레드 시작 직전")
@@ -420,3 +425,11 @@ if __name__ == "__main__":
     # ✅ Render가 요구하는 PORT 환경변수 기반 실행
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
+
+    
+    
+
+
+
+
