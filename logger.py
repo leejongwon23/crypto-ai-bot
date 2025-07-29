@@ -189,22 +189,20 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     LOG_FILE = "/persistent/logs/prediction_log.csv"
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
-    # ✅ 현재 시각
     now = datetime.now(pytz.timezone("Asia/Seoul")).isoformat() if timestamp is None else timestamp
     top_k_str = ",".join(map(str, top_k)) if top_k else ""
 
-    # ✅ 보호 로직: 필수 값 채우기
+    # ✅ 보호 로직: 필수 필드 보완
     predicted_class = predicted_class if predicted_class is not None else -1
-    label = label if label is not None else predicted_class  # 기본적으로 predicted_class와 동일하게
-    reason = reason or "사유없음"
+    label = label if label is not None else -1
+    reason = reason if reason else "사유없음"
     rate = rate if rate is not None else 0.0
     return_value = return_value if return_value is not None else 0.0
 
-    # ✅ source 값 보정
+    # ✅ source 예외 처리
     if source not in ["일반", "evo_meta", "baseline_meta"]:
         source = "일반"
 
-    # ✅ CSV 기록 데이터
     row = [
         now, symbol, strategy, direction, entry_price, target_price,
         model or "", predicted_class, top_k_str, note,
@@ -213,7 +211,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     ]
 
     try:
-        # ✅ prediction_log.csv 기록
         write_header = not os.path.exists(LOG_FILE)
         with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
@@ -228,7 +225,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
 
         print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} → class={predicted_class} | success={success} | reason={reason} | source={source}")
 
-        # ✅ 실패 시 DB에도 저장
+        # ✅ 실패인 경우 failure_db.py에도 저장 (final_pred_class 기준)
         if not success:
             insert_failure_record(
                 {
@@ -239,10 +236,11 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                     "predicted_class": predicted_class,
                     "rate": rate,
                     "reason": reason,
-                    "label": label,  # 항상 최종 label 유지
+                    "label": label,
                     "source": source
                 },
-                feature_hash=f"{symbol}-{strategy}-{now}",
+                # 해시에 final_pred_class(label) 포함
+                feature_hash=f"{symbol}-{strategy}-{label}-{now}",
                 label=label
             )
 
