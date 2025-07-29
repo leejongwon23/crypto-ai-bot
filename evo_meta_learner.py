@@ -1,5 +1,4 @@
 # evo_meta_learner.py
-
 import os
 import torch
 import torch.nn as nn
@@ -7,9 +6,6 @@ import torch.nn.functional as F
 import pandas as pd
 import numpy as np
 from torch.utils.data import DataLoader, TensorDataset
-from datetime import datetime
-# 상단에 추가
-from evo_meta_dataset import prepare_evo_meta_dataset
 
 MODEL_PATH = "/persistent/models/evo_meta_learner.pt"
 
@@ -23,13 +19,63 @@ class EvoMetaModel(nn.Module):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
+
+# ✅ 데이터셋 준비 (실패 로그 기반)
+def prepare_evo_meta_dataset(path="/persistent/wrong_predictions.csv", min_samples=50):
+    """
+    실패 로그 기반으로 전략별 softmax, expected return 등을 학습용 X로 만들고,
+    가장 적게 실패한 전략 인덱스를 y로 지정
+    """
+    if not os.path.exists(path):
+        print(f"[❌ prepare_evo_meta_dataset] 파일 없음: {path}")
+        return None, None
+
+    df = pd.read_csv(path)
+    if len(df) < min_samples:
+        print(f"[❌ prepare_evo_meta_dataset] 샘플 부족: {len(df)}개")
+        return None, None
+
+    X_list = []
+    y_list = []
+
+    for _, row in df.iterrows():
+        try:
+            sm = eval(row.get("softmax") or "[]")
+            if not sm or len(sm) != 3:
+                continue
+
+            expected_returns = eval(row.get("expected_returns") or "[0,0,0]")
+            predicted_classes = eval(row.get("model_predictions") or "[0,0,0]")
+
+            features = []
+            for i in range(3):
+                f = [
+                    sm[i],                     # softmax
+                    expected_returns[i],       # 기대 수익률
+                    1 if predicted_classes[i] == row["label"] else 0,  # 예측 적중 여부
+                ]
+                features.extend(f)
+
+            X_list.append(features)
+            best_strategy = int(row.get("best_strategy", 0))
+            y_list.append(best_strategy)
+
+        except Exception as e:
+            print(f"[⚠️ prepare_evo_meta_dataset] 예외 발생: {e}")
+            continue
+
+    if not X_list or not y_list:
+        print("[❌ prepare_evo_meta_dataset] 유효 샘플 부족")
+        return None, None
+
+    X = np.array(X_list, dtype=np.float32)
+    y = np.array(y_list, dtype=np.int64)
+    print(f"[✅ prepare_evo_meta_dataset] X:{X.shape}, y:{y.shape}")
+    return X, y
+
+
 # ✅ 학습 함수
 def train_evo_meta(X, y, input_size, epochs=10, batch_size=32, lr=1e-3):
-    import torch
-    import torch.nn as nn
-    from torch.utils.data import TensorDataset, DataLoader
-    import os
-
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = EvoMetaModel(input_size).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -53,6 +99,24 @@ def train_evo_meta(X, y, input_size, epochs=10, batch_size=32, lr=1e-3):
     return model
 
 
+# ✅ 자동 학습 루프 (그룹 학습 완료 후 호출 가능)
+def train_evo_meta_loop(min_samples=50, auto_trigger=False):
+    """
+    진화형 메타러너 자동 학습 루프
+    auto_trigger=True → 그룹 학습 완료 후 자동 호출 모드
+    """
+    X, y = prepare_evo_meta_dataset(min_samples=min_samples)
+    if X is None or y is None:
+        if auto_trigger:
+            print("[⏭️ evo_meta_learner] 실패 데이터 부족 → 자동 학습 스킵")
+        return
+
+    input_size = X.shape[1]
+    print(f"[🚀 evo_meta_learner] 학습 시작 → 입력크기:{input_size}, 샘플:{len(X)}")
+    train_evo_meta(X, y, input_size)
+    print("[✅ evo_meta_learner] 학습 완료 및 모델 저장됨")
+
+
 # ✅ 예측 함수 (예측 실패 가능성 최소 전략 선택)
 def predict_evo_meta(X_new, input_size):
     if not os.path.exists(MODEL_PATH):
@@ -68,82 +132,4 @@ def predict_evo_meta(X_new, input_size):
         logits = model(x)
         probs = F.softmax(logits, dim=1)
         best = torch.argmax(probs, dim=1).item()
-        return best  # 선택된 전략 인덱스
-
-import pandas as pd
-import numpy as np
-import os
-
-def prepare_evo_meta_dataset(path="/persistent/wrong_predictions.csv", min_samples=50):
-    """
-    실패 로그 기반으로 전략별 softmax, expected return 등을 학습용 X로 만들고,
-    가장 적게 실패한 전략 인덱스를 y로 지정
-    """
-    if not os.path.exists(path):
-        print(f"[❌ prepare_evo_meta_dataset] 파일 없음: {path}")
-        return None, None
-
-    df = pd.read_csv(path)
-    if len(df) < min_samples:
-        print(f"[❌ prepare_evo_meta_dataset] 샘플 부족: {len(df)}개")
-        return None, None
-
-    X_list = []
-    y_list = []
-
-    for _, row in df.iterrows():
-        try:
-            # ✅ softmax 값 파싱
-            sm = eval(row.get("softmax") or "[]")
-            if not sm or len(sm) != 3:
-                continue
-
-            # ✅ 전략별 softmax, expected return, 예측 클래스, 실제 수익률 등 구성
-            expected_returns = eval(row.get("expected_returns") or "[0,0,0]")
-            predicted_classes = eval(row.get("model_predictions") or "[0,0,0]")
-            actual_return = float(row.get("return") or 0)
-
-            # ✅ 각 전략별 특성 벡터 구성
-            features = []
-            for i in range(3):
-                f = [
-                    sm[i],                     # softmax
-                    expected_returns[i],       # 기대 수익률
-                    1 if predicted_classes[i] == row["label"] else 0,  # 예측 적중 여부
-                ]
-                features.extend(f)
-
-            X_list.append(features)
-
-            # ✅ 실패율이 가장 낮은 전략을 정답으로 설정
-            best_strategy = int(row.get("best_strategy", 0))
-            y_list.append(best_strategy)
-
-        except Exception as e:
-            print(f"[⚠️ prepare_evo_meta_dataset] 예외 발생: {e}")
-            continue
-
-    if not X_list or not y_list:
-        print("[❌ prepare_evo_meta_dataset] 유효 샘플 부족")
-        return None, None
-
-    X = np.array(X_list, dtype=np.float32)
-    y = np.array(y_list, dtype=np.int64)
-    print(f"[✅ prepare_evo_meta_dataset] X:{X.shape}, y:{y.shape}")
-    return X, y
-
-from evo_meta_learner import train_evo_meta, EvoMetaModel
-from evo_meta_dataset import prepare_evo_meta_dataset  # 경로에 따라 조정
-import os
-
-def train_evo_meta_loop(min_samples=50):
-    from evo_meta_learner import prepare_evo_meta_dataset, train_evo_meta
-
-    X, y = prepare_evo_meta_dataset(min_samples=min_samples)
-    if X is None or y is None:
-        print("[⏭️ train_evo_meta_loop] 학습 데이터 부족, 스킵")
-        return
-
-    input_size = X.shape[1]
-    train_evo_meta(X, y, input_size)
-
+        return best
