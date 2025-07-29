@@ -223,25 +223,25 @@ def predict(symbol, strategy, source="일반", model_type=None):
     log_strategy = strategy
 
     try:
-        # ✅ 최적 윈도우 탐색
+        # ✅ 1. 최적 윈도우 탐색
         window_list = find_best_windows(symbol, strategy)
         if not window_list:
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "window_list_none", label=-1)
             return None
 
-        # ✅ 데이터 로드
+        # ✅ 2. 데이터 로드
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 1:
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "df_short", label=-1)
             return None
 
-        # ✅ 피처 계산
+        # ✅ 3. 피처 계산
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.dropna().shape[0] < max(window_list) + 1:
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "feature_short", label=-1)
             return None
 
-        # ✅ 스케일링
+        # ✅ 4. 스케일링
         features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         feat_scaled = MinMaxScaler().fit_transform(features_only)
         input_size = feat_scaled.shape[1]
@@ -250,17 +250,17 @@ def predict(symbol, strategy, source="일반", model_type=None):
         else:
             feat_scaled = feat_scaled[:, :FEATURE_INPUT_SIZE]
 
-        # ✅ 모델 불러오기
+        # ✅ 5. 모델 불러오기
         models = get_available_models(symbol, strategy)
         if not models:
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "no_models", label=-1)
             return None
 
-        # ✅ 최근 클래스 분포
+        # ✅ 6. 최근 클래스 분포
         recent_freq = get_recent_class_frequencies(strategy)
         feature_tensor = torch.tensor(feat_scaled[-1], dtype=torch.float32)
 
-        # ✅ 개별 모델 예측
+        # ✅ 7. 개별 모델 예측
         model_outputs_list, all_model_predictions = get_model_predictions(
             symbol, strategy, models, df, feat_scaled, window_list, recent_freq
         )
@@ -268,7 +268,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "no_valid_model", label=-1)
             return None
 
-        # ✅ 진화형 메타 전략 추천
+        # ✅ 8. 진화형 메타 전략 추천
         recommended_strategy = get_best_strategy_by_failure_probability(
             symbol=symbol,
             current_strategy=strategy,
@@ -279,18 +279,26 @@ def predict(symbol, strategy, source="일반", model_type=None):
             print(f"[🔁 전략 교체됨] {strategy} → {recommended_strategy}")
             strategy = recommended_strategy
 
-        # ✅ 메타 예측 클래스 (성공률 + 도달 확률 반영)
+        # ✅ 9. 메타 예측 클래스
         final_pred_class = get_meta_prediction(
-            model_outputs_list=model_outputs_list,
-            feature_tensor=feature_tensor,
-            use_past_success_rate=True,   # 과거 성공률 반영
-            use_reach_probability=True    # 수익률 도달 확률 반영
+            [m["probs"] for m in model_outputs_list],
+            feature_tensor,
+            meta_info={"success_rate": {c: 0.5 for c in range(len(model_outputs_list[0]["probs"]))}}
         )
 
         cls_min, cls_max = get_class_return_range(final_pred_class)
         current_price = df.iloc[-1]["close"]
 
-        # ✅ 개별 모델 로깅
+        # ✅ 10. 실패 예측 즉시 기록 (수익률 도달 못한 경우)
+        if not (cls_min <= 0 <= cls_max):
+            insert_failure_record(
+                {"symbol": symbol, "strategy": log_strategy},
+                "meta_predicted_class_fail",
+                label=final_pred_class,
+                feature_vector=feature_tensor.numpy()
+            )
+
+        # ✅ 11. 개별 모델 로깅
         for pred in all_model_predictions:
             entry_price = pred["entry_price"]
             expected_return = class_to_expected_return(pred["class"], pred["num_classes"])
@@ -305,7 +313,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 entry_price=entry_price,
                 target_price=target_price,
                 model=pred["model_name"],
-                success=is_main,  # 최종 성공 판정은 log_prediction 내부에서 수행
+                success=is_main,
                 reason="메타선택" if is_main else "미선택",
                 rate=expected_return,
                 return_value=actual_return,
@@ -318,7 +326,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 feature_vector=feature_tensor.numpy()
             )
 
-        # ✅ 메타(진화형) 로깅
+        # ✅ 12. 메타(진화형) 로깅
         evo_expected_return = class_to_expected_return(final_pred_class, len(model_outputs_list[0]["probs"]))
         entry_price_meta = all_model_predictions[0]["entry_price"]
         actual_return_meta = (current_price / entry_price_meta) - 1
@@ -334,7 +342,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             predicted_class=final_pred_class,
             label=final_pred_class,
             note="진화형 메타 선택",
-            success=True,  # 내부에서 실제 성공 여부 판정
+            success=True,
             reason="진화형 메타 선택",
             rate=evo_expected_return,
             return_value=actual_return_meta,
