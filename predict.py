@@ -205,7 +205,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from data.utils import get_kline_by_strategy, compute_features
     from datetime import datetime
     import pytz
-    from failure_db import insert_failure_record, ensure_failure_db  # ✅ DB 초기화 추가
+    from failure_db import insert_failure_record, ensure_failure_db
     from predict import get_model_predictions
     from evo_meta_learner import get_best_strategy_by_failure_probability
 
@@ -222,7 +222,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                               "invalid_symbol_strategy", label=-1)
         return None
 
-    # 원본 전략 보관 (로깅 일관성 유지용)
+    # 원본 전략 보관
     log_strategy = strategy
 
     try:
@@ -269,11 +269,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "no_valid_model", label=-1)
             return None
 
-        # ✅ 7. 메타 예측
+        # ✅ 7. 메타 예측 (최종 클래스)
         final_pred_class = get_meta_prediction(model_outputs_list, feature_tensor)
         cls_min, cls_max = get_class_return_range(final_pred_class)
 
-        # ✅ 8. 진화형 메타러너 추천 전략
+        # ✅ 8. 전략 변경 로직
         recommended_strategy = get_best_strategy_by_failure_probability(
             symbol=symbol,
             current_strategy=strategy,
@@ -282,15 +282,17 @@ def predict(symbol, strategy, source="일반", model_type=None):
         )
         if recommended_strategy and recommended_strategy != strategy:
             print(f"[🔁 전략 교체됨] {strategy} → {recommended_strategy}")
-            strategy = recommended_strategy
+            strategy = recommended_strategy  # 실행 전략 변경, 로깅은 log_strategy 유지
 
-        # ✅ 9. 개별 모델 로깅
+        # ✅ 9. 개별 모델 로깅 — final_pred_class 일관 적용
         for pred in all_model_predictions:
             predicted_class = pred["class"]
             entry_price = pred["entry_price"]
             num_classes = pred["num_classes"]
             expected_return = class_to_expected_return(predicted_class, num_classes)
             target_price = entry_price * (1 + expected_return)
+
+            # ✅ 성공 판정: 메타 선택 + 범위 도달
             is_main = (predicted_class == final_pred_class)
             success = is_main and (cls_min <= expected_return <= cls_max)
 
@@ -307,7 +309,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 return_value=expected_return,
                 source=source,
                 predicted_class=predicted_class,
-                label=final_pred_class,
+                label=final_pred_class,  # ✅ 항상 최종 클래스
                 group_id=pred["group_id"],
                 model_symbol=pred["model_symbol"],
                 model_name=pred["model_name"]
@@ -320,7 +322,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         "strategy": pred["strategy"] or log_strategy,
                         "model": pred["model_name"],
                         "predicted_class": predicted_class,
-                        "label": final_pred_class,
+                        "label": final_pred_class,  # ✅ 항상 최종 클래스
                         "reason": "예측실패"
                     },
                     feature_hash=f"{symbol}-{log_strategy}-{now_kst().isoformat()}",
@@ -378,7 +380,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         print(f"[predict 예외] {e}")
         insert_failure_record({"symbol": symbol or "None", "strategy": strategy or "None"}, "exception", label=-1)
         return None
-
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
