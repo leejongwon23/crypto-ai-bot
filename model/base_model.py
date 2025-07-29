@@ -182,26 +182,28 @@ MODEL_CLASSES = {
 }
 
 def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_path=None, features=None):
-    from model.model_classes import MODEL_CLASSES, CNNLSTMPricePredictor
+    from config import FEATURE_INPUT_SIZE, NUM_CLASSES
     from data.utils import get_kline_by_strategy, compute_features
-    from config import FEATURE_INPUT_SIZE
     from xgboost_wrapper import XGBoostWrapper
 
+    # ✅ XGBoost 모델 로드
     if model_type == "xgboost":
         if model_path is None:
             raise ValueError("XGBoost model_path must be provided.")
         return XGBoostWrapper(model_path)
 
+    # ✅ MODEL_CLASSES 직접 사용 (외부 import 제거)
     if model_type not in MODEL_CLASSES:
         print(f"[경고] 알 수 없는 모델 타입 '{model_type}', 기본 모델 cnn_lstm 사용")
         model_cls = CNNLSTMPricePredictor
     else:
         model_cls = MODEL_CLASSES[model_type]
 
+    # ✅ 출력 클래스 수 설정
     if output_size is None:
-        from config import NUM_CLASSES
         output_size = NUM_CLASSES
 
+    # ✅ 입력 크기 설정
     if input_size is None:
         if features is not None:
             input_size = features.shape[2]
@@ -221,6 +223,7 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
                 input_size = FEATURE_INPUT_SIZE
                 print(f"[⚠️ input_size fallback={FEATURE_INPUT_SIZE}] compute_features 예외 발생: {e}")
 
+    # ✅ 입력 크기 검증
     if input_size is None:
         raise ValueError("❌ get_model: input_size 계산 실패 → None 반환됨")
 
@@ -228,6 +231,7 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
         print(f"[info] input_size pad 적용: {input_size} → {FEATURE_INPUT_SIZE}")
         input_size = FEATURE_INPUT_SIZE
 
+    # ✅ 모델 생성
     try:
         model = model_cls(input_size=input_size, output_size=output_size)
     except Exception as e:
@@ -236,5 +240,3 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
         model = model_cls(input_size=FEATURE_INPUT_SIZE, output_size=output_size)
 
     return model
-
-
