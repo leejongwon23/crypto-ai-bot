@@ -181,6 +181,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                    source="일반", volatility=False, feature_vector=None):
 
     import csv, os, json
+    import numpy as np
     from datetime import datetime
     import pytz
     from config import get_class_return_range
@@ -206,7 +207,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     if source not in allowed_sources:
         source = "일반"
 
-    # ✅ 성공/실패 판정 통일 (클래스 범위 도달 여부)
+    # ✅ 성공/실패 판정 (클래스 수익률 범위 도달 여부)
     if predicted_class >= 0:
         try:
             cls_min, cls_max = get_class_return_range(predicted_class)
@@ -238,10 +239,23 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
 
         print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} → class={predicted_class} | success={success} | reason={reason} | source={source}")
 
-        # ✅ 실패일 경우 실패 DB 저장
+        # ✅ 실패 시 실패 DB 저장
         if not success:
-            # feature_hash 고유성 강화 → symbol+strategy+model+predicted_class+label+rate
+            # feature_hash 고유성 강화
             feature_hash = f"{symbol}-{strategy}-{model or ''}-{predicted_class}-{label}-{rate}"
+
+            # feature_vector 타입 안전화
+            if feature_vector is None:
+                safe_vector = []
+            elif isinstance(feature_vector, np.ndarray):
+                safe_vector = feature_vector.flatten().tolist()
+            elif not isinstance(feature_vector, list):
+                try:
+                    safe_vector = list(feature_vector)
+                except:
+                    safe_vector = []
+            else:
+                safe_vector = feature_vector
 
             insert_failure_record(
                 {
@@ -260,7 +274,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                 },
                 feature_hash=feature_hash,
                 label=label,
-                feature_vector=(feature_vector.tolist() if hasattr(feature_vector, "tolist") else feature_vector)
+                feature_vector=safe_vector
             )
 
     except Exception as e:
