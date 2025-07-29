@@ -193,7 +193,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     now = datetime.now(pytz.timezone("Asia/Seoul")).isoformat() if timestamp is None else timestamp
     top_k_str = ",".join(map(str, top_k)) if top_k else ""
 
-    # ✅ 보호 로직: 필수 필드 보완
+    # ✅ 필수 필드 보완
     predicted_class = predicted_class if predicted_class is not None else -1
     label = label if label is not None else -1
     reason = reason if reason else "사유없음"
@@ -241,7 +241,6 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
 
         # ✅ 실패 시 실패 DB 저장
         if not success:
-            # feature_hash 고유성 강화
             feature_hash = f"{symbol}-{strategy}-{model or ''}-{predicted_class}-{label}-{rate}"
 
             # feature_vector 타입 안전화
