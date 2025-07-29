@@ -289,10 +289,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         cls_min, cls_max = get_class_return_range(final_pred_class)
         current_price = df.iloc[-1]["close"]
 
-        # ⚠️ [중요 변경] 즉시 실패 기록 제거 → 평가 시점에서만 성공/실패 판정
-        # → 여기서는 단순 로깅만 수행
-
-        # ✅ 10. 개별 모델 로깅
+        # ✅ 10. 개별 모델 로깅 + 즉시 성공/실패 판정
         for pred in all_model_predictions:
             entry_price = pred["entry_price"]
             expected_return = class_to_expected_return(pred["class"], pred["num_classes"])
@@ -300,6 +297,20 @@ def predict(symbol, strategy, source="일반", model_type=None):
             actual_return = (current_price / entry_price) - 1
             is_main = (pred["class"] == final_pred_class)
 
+            # ✅ 수익률 도달 기준 성공 판정
+            cls_min_model, cls_max_model = get_class_return_range(pred["class"])
+            success_flag = actual_return >= cls_min_model
+
+            # 실패 시 즉시 실패 데이터 저장
+            if not success_flag:
+                insert_failure_record(
+                    {"symbol": pred.get("symbol", symbol), "strategy": pred.get("strategy", log_strategy)},
+                    "predicted_fail",
+                    label=pred["class"],
+                    feature_vector=feature_tensor.numpy()
+                )
+
+            # 예측 로그 기록
             log_prediction(
                 symbol=pred.get("symbol", symbol),
                 strategy=pred.get("strategy", log_strategy),
@@ -307,23 +318,33 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 entry_price=entry_price,
                 target_price=target_price,
                 model=pred["model_name"],
-                success=False,  # ⚠️ 예측 시점에서는 성공여부 미판정
+                success=success_flag,
                 reason="메타선택" if is_main else "미선택",
                 rate=expected_return,
                 return_value=actual_return,
                 source=source,
                 predicted_class=pred["class"],
                 label=final_pred_class,
-                group_id=pred.get("group_id"),  # ✅ group_id 누락 방지
+                group_id=pred.get("group_id"),
                 model_symbol=pred.get("model_symbol"),
                 model_name=pred.get("model_name"),
                 feature_vector=feature_tensor.numpy()
             )
 
-        # ✅ 11. 메타(진화형) 로깅
+        # ✅ 11. 메타(진화형) 로깅 + 즉시 성공/실패 판정
         evo_expected_return = class_to_expected_return(final_pred_class, len(model_outputs_list[0]["probs"]))
         entry_price_meta = all_model_predictions[0]["entry_price"]
         actual_return_meta = (current_price / entry_price_meta) - 1
+
+        meta_success_flag = actual_return_meta >= cls_min
+
+        if not meta_success_flag:
+            insert_failure_record(
+                {"symbol": symbol, "strategy": log_strategy},
+                "meta_predicted_fail",
+                label=final_pred_class,
+                feature_vector=feature_tensor.numpy()
+            )
 
         log_prediction(
             symbol=symbol,
@@ -336,12 +357,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
             predicted_class=final_pred_class,
             label=final_pred_class,
             note="진화형 메타 선택",
-            success=False,  # ⚠️ 평가 시점에서 판정
+            success=meta_success_flag,
             reason="진화형 메타 선택",
             rate=evo_expected_return,
             return_value=actual_return_meta,
             source="진화형",
-            group_id=all_model_predictions[0].get("group_id"),  # ✅ group_id 포함
+            group_id=all_model_predictions[0].get("group_id"),
             feature_vector=feature_tensor.numpy()
         )
 
