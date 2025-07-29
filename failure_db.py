@@ -48,6 +48,7 @@ def ensure_failure_db():
 def insert_failure_record(row, feature_hash=None, feature_vector=None, label=None):
     import hashlib, os, json
     import pandas as pd
+    import numpy as np
     from datetime import datetime
 
     ensure_failure_db()  # ✅ 테이블 생성 보장
@@ -70,11 +71,18 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         print("[❌ insert_failure_record] feature_hash 없음 → 저장 스킵")
         return
 
-    # ✅ feature_vector 항상 확보 (없으면 최소 빈 배열 대신)
+    # ✅ feature_vector 타입 안전화
     if feature_vector is None:
         feature_vector = []
+    elif isinstance(feature_vector, np.ndarray):
+        feature_vector = feature_vector.flatten().tolist()
+    elif not isinstance(feature_vector, list):
+        try:
+            feature_vector = list(feature_vector)
+        except:
+            feature_vector = []
 
-    # ✅ DB/CSV 중복 체크 통합
+    # ✅ DB/CSV 중복 체크
     try:
         # DB 중복 체크
         conn = get_db_connection()
@@ -113,7 +121,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         "predicted_class": row.get("predicted_class", -1),
         "rate": row.get("rate", ""),
         "reason": row.get("reason") or "미기록",
-        "feature": json.dumps(feature_vector.tolist()) if hasattr(feature_vector, "tolist") else json.dumps(feature_vector),
+        "feature": json.dumps(feature_vector, ensure_ascii=False),
         "label": row.get("label") if label is None else label
     }
 
@@ -132,12 +140,14 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
     # ✅ CSV 저장
     try:
         csv_record = record.copy()
-        csv_record.pop("feature")  # feature 값은 CSV에 json 대신 개별 컬럼
+        csv_record.pop("feature")  # feature는 JSON 대신 개별 컬럼
         csv_record["feature_hash"] = feature_hash
 
-        if hasattr(feature_vector, "flatten"):
-            for i, v in enumerate(feature_vector.flatten()):
+        for i, v in enumerate(feature_vector):
+            try:
                 csv_record[f"f{i}"] = float(v)
+            except:
+                csv_record[f"f{i}"] = v
 
         if os.path.exists(CSV_PATH):
             df_csv = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
