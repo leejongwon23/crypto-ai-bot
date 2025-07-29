@@ -515,6 +515,16 @@ def train_symbol_group_loop(delay_minutes=5):
         print(f"⚠️ train_done 파싱 실패 → 초기화: {e}")
         train_done = {}
 
+    # ✅ 로깅 강화: 심볼 그룹 정보 출력
+    print(f"[DEBUG] SYMBOL_GROUPS 개수: {len(SYMBOL_GROUPS)}")
+    for g_idx, g in enumerate(SYMBOL_GROUPS):
+        print(f"[DEBUG] 그룹 {g_idx+1} 심볼 목록: {g}")
+
+    # ✅ SYMBOL_GROUPS가 비어있으면 기본 테스트 심볼 추가 (조건 완화)
+    if not SYMBOL_GROUPS or all(len(g) == 0 for g in SYMBOL_GROUPS):
+        print("[⚠️ 경고] SYMBOL_GROUPS가 비어있음 → 테스트 심볼 강제 추가")
+        SYMBOL_GROUPS[:] = [["BTCUSDT"]]
+
     loop_count = 0
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작")
@@ -525,6 +535,10 @@ def train_symbol_group_loop(delay_minutes=5):
 
         for idx, group in enumerate(SYMBOL_GROUPS):
             print(f"\n📊 [그룹 {idx+1}/{group_count}] 학습 시작 | 심볼 수: {len(group)}")
+            if not group:
+                print(f"[⚠️ 경고] 그룹 {idx+1} 심볼 없음 → 스킵")
+                continue
+
             _kline_cache.clear()
             _feature_cache.clear()
 
@@ -542,7 +556,6 @@ def train_symbol_group_loop(delay_minutes=5):
 
                     all_success = True
                     for gid in range(MAX_GROUP_ID + 1):
-                        # ✅ 이미 학습된 경우 스킵
                         if not FORCE_TRAINING and train_done[symbol][strategy].get(str(gid), False):
                             print(f"[⏭️ 스킵] {symbol}-{strategy}-group{gid} (이미 학습됨)")
                             continue
@@ -559,20 +572,17 @@ def train_symbol_group_loop(delay_minutes=5):
                             traceback.print_exc()
                             all_success = False
 
-                    # ✅ 모든 그룹 학습 완료 여부 확인
                     group_all_trained = all(
                         train_done[symbol][strategy].get(str(gid), False)
                         for gid in range(MAX_GROUP_ID + 1)
                     )
 
-                    # ✅ 모든 그룹 학습이 끝나고, 실패 없이 종료된 경우 예측 수행
                     if group_all_trained and all_success:
                         try:
                             print(f"[▶ 예측 시작] {symbol}-{strategy}")
                             main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
                             print(f"[✅ 예측 완료] {symbol}-{strategy}")
 
-                            # ✅ 실패 데이터 로드 후 이어학습 + 메타러너 학습
                             try:
                                 X, y = load_training_prediction_data(
                                     symbol, strategy,
@@ -599,7 +609,6 @@ def train_symbol_group_loop(delay_minutes=5):
                     else:
                         print(f"[⏭️ 예측 스킵] {symbol}-{strategy} → 모든 그룹 학습 완료 전 또는 학습 실패 발생")
 
-            # ✅ 그룹 후처리
             try:
                 maintenance_fix_meta.fix_all_meta_json()
                 safe_cleanup.auto_delete_old_logs()
@@ -610,7 +619,6 @@ def train_symbol_group_loop(delay_minutes=5):
             print(f"🕒 그룹 {idx+1} 완료 → {delay_minutes}분 대기")
             time.sleep(delay_minutes * 60)
 
-        # ✅ 전체 루프 종료 후 진화형 메타러너 전체 학습
         try:
             print("[▶ 진화형 메타러너 전체 루프 학습 시작]")
             train_evo_meta_loop()
