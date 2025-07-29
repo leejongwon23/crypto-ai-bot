@@ -184,13 +184,13 @@ MODEL_CLASSES = {
 def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_path=None, features=None):
     from config import FEATURE_INPUT_SIZE, NUM_CLASSES
     from data.utils import get_kline_by_strategy, compute_features
-    from xgboost_wrapper import XGBoostWrapper
+    # ❌ XGBoost import 제거 (비활성화)
+    # from xgboost_wrapper import XGBoostWrapper
 
-    # ✅ XGBoost 모델 로드
+    # ✅ XGBoost 모델 임시 비활성화
     if model_type == "xgboost":
-        if model_path is None:
-            raise ValueError("XGBoost model_path must be provided.")
-        return XGBoostWrapper(model_path)
+        print("[⚠️ get_model] 현재 XGBoost 모델은 비활성화 상태입니다. LSTM/CNN-LSTM/Transformer만 사용 가능합니다.")
+        raise ValueError("XGBoost model is currently disabled. Please enable or implement xgboost_wrapper before use.")
 
     # ✅ MODEL_CLASSES 직접 사용 (외부 import 제거)
     if model_type not in MODEL_CLASSES:
