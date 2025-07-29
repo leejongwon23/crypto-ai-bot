@@ -205,9 +205,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from data.utils import get_kline_by_strategy, compute_features
     from datetime import datetime
     import pytz
-    from failure_db import insert_failure_record
+    from failure_db import insert_failure_record, ensure_failure_db  # ✅ DB 초기화 추가
     from predict import get_model_predictions
     from evo_meta_learner import get_best_strategy_by_failure_probability
+
+    # ✅ DB 준비
+    ensure_failure_db()
 
     os.makedirs("/persistent/logs", exist_ok=True)
     def now_kst(): return datetime.now(pytz.timezone("Asia/Seoul"))
