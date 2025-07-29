@@ -46,96 +46,111 @@ def ensure_failure_db():
         print(f"[오류] ensure_failure_db 실패 → {e}")
 
 def insert_failure_record(row, feature_hash=None, feature_vector=None, label=None):
-    import hashlib
+    import hashlib, os, json
     import pandas as pd
     from datetime import datetime
 
     ensure_failure_db()  # ✅ 테이블 생성 보장
-
     CSV_PATH = "/persistent/wrong_predictions.csv"
 
     if not isinstance(row, dict):
-        print("[❌ insert_failure_record] row 형식 오류")
+        print("[❌ insert_failure_record] row 형식 오류 → 저장 스킵")
         return
 
-    # ✅ feature_hash 생성
+    # ✅ feature_hash 생성 (고유성 강화)
     if not feature_hash:
-        raw_str = f"{row.get('symbol','')}_{row.get('strategy','')}_{row.get('timestamp','')}_{row.get('predicted_class','')}"
+        raw_str = (
+            f"{row.get('symbol','')}_{row.get('strategy','')}_"
+            f"{row.get('model','')}_{row.get('predicted_class','')}_"
+            f"{row.get('label','')}_{row.get('rate','')}"
+        )
         feature_hash = hashlib.sha256(raw_str.encode()).hexdigest()
 
-    if not isinstance(feature_hash, str) or feature_hash.strip() == "":
+    if not isinstance(feature_hash, str) or not feature_hash.strip():
         print("[❌ insert_failure_record] feature_hash 없음 → 저장 스킵")
         return
 
-    # ✅ DB 중복 체크
-    conn = get_db_connection()
+    # ✅ feature_vector 항상 확보 (없으면 최소 빈 배열 대신)
+    if feature_vector is None:
+        feature_vector = []
+
+    # ✅ DB/CSV 중복 체크 통합
     try:
-        exists = conn.execute(
+        # DB 중복 체크
+        conn = get_db_connection()
+        exists_db = conn.execute(
             "SELECT 1 FROM failure_patterns WHERE hash=? AND model_name=? AND predicted_class=?",
             (feature_hash, row.get("model", ""), row.get("predicted_class", -1))
         ).fetchone()
-        if exists:
-            print(f"[⛔ DB 중복 예측 실패] feature_hash={feature_hash} → 저장 스킵")
+
+        # CSV 중복 체크
+        exists_csv = False
+        if os.path.exists(CSV_PATH):
+            try:
+                df_csv = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
+                if "feature_hash" in df_csv.columns and feature_hash in df_csv["feature_hash"].values:
+                    exists_csv = True
+            except Exception as e:
+                print(f"[⚠️ CSV 로드 실패] {e}")
+
+        # ✅ 둘 중 하나라도 중복이면 스킵
+        if exists_db or exists_csv:
+            print(f"[⛔ SKIP-중복] feature_hash={feature_hash}")
             return
+
     except Exception as e:
-        print(f"[⚠️ DB 중복 체크 실패] {e}")
+        print(f"[⚠️ 중복 체크 실패] {e}")
 
-    # ✅ CSV 중복 체크
-    if os.path.exists(CSV_PATH):
-        try:
-            df = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
-            if "feature_hash" in df.columns and feature_hash in df["feature_hash"].values:
-                print(f"[⛔ CSV 중복 예측 실패] feature_hash={feature_hash} → 저장 스킵")
-                return
-        except Exception as e:
-            print(f"[⚠️ CSV 로드 실패] {e}")
-            df = pd.DataFrame()
-    else:
-        df = pd.DataFrame()
+    # ✅ 기록 데이터 준비
+    record_time = datetime.now().isoformat()
+    record = {
+        "timestamp": record_time,
+        "symbol": row.get("symbol"),
+        "strategy": row.get("strategy"),
+        "direction": row.get("direction", ""),
+        "hash": feature_hash,
+        "model_name": row.get("model", ""),
+        "predicted_class": row.get("predicted_class", -1),
+        "rate": row.get("rate", ""),
+        "reason": row.get("reason") or "미기록",
+        "feature": json.dumps(feature_vector.tolist()) if hasattr(feature_vector, "tolist") else json.dumps(feature_vector),
+        "label": row.get("label") if label is None else label
+    }
 
+    # ✅ DB 저장
     try:
-        record_time = datetime.now().isoformat()
-        record = {
-            "timestamp": record_time,
-            "symbol": row.get("symbol"),
-            "strategy": row.get("strategy"),
-            "direction": row.get("direction", ""),
-            "hash": feature_hash,
-            "model_name": row.get("model", ""),
-            "predicted_class": row.get("predicted_class", -1),
-            "rate": row.get("rate", ""),
-            "reason": row.get("reason") or "미기록",
-            "feature": json.dumps(feature_vector.tolist()) if feature_vector is not None else "",
-            "label": row.get("label") if label is None else label
-        }
+        conn.execute("""
+            INSERT OR IGNORE INTO failure_patterns
+            (timestamp, symbol, strategy, direction, hash, model_name, predicted_class, rate, reason, feature, label)
+            VALUES (:timestamp, :symbol, :strategy, :direction, :hash, :model_name, :predicted_class, :rate, :reason, :feature, :label)
+        """, record)
+        conn.commit()
+        print(f"[✅ SAVE-DB] {record['symbol']} {record['strategy']} class={record['predicted_class']}")
+    except Exception as e:
+        print(f"[⚠️ DB 저장 실패] {e}")
 
-        # ✅ DB 저장
-        try:
-            conn.execute("""
-                INSERT OR IGNORE INTO failure_patterns
-                (timestamp, symbol, strategy, direction, hash, model_name, predicted_class, rate, reason, feature, label)
-                VALUES (:timestamp, :symbol, :strategy, :direction, :hash, :model_name, :predicted_class, :rate, :reason, :feature, :label)
-            """, record)
-            conn.commit()
-            print(f"[✅ DB 실패 예측 저장] {record['symbol']} {record['strategy']} class={record['predicted_class']}")
-        except Exception as e:
-            print(f"[⚠️ DB 저장 실패] {e}")
-
-        # ✅ CSV 저장
+    # ✅ CSV 저장
+    try:
         csv_record = record.copy()
-        csv_record.pop("feature")
+        csv_record.pop("feature")  # feature 값은 CSV에 json 대신 개별 컬럼
         csv_record["feature_hash"] = feature_hash
 
-        if feature_vector is not None:
+        if hasattr(feature_vector, "flatten"):
             for i, v in enumerate(feature_vector.flatten()):
                 csv_record[f"f{i}"] = float(v)
 
-        df = pd.concat([df, pd.DataFrame([csv_record])], ignore_index=True)
-        df.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
-        print(f"[✅ CSV 실패 예측 저장] {csv_record['symbol']} {csv_record['strategy']} class={csv_record['predicted_class']}")
+        if os.path.exists(CSV_PATH):
+            df_csv = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
+        else:
+            df_csv = pd.DataFrame()
+
+        df_csv = pd.concat([df_csv, pd.DataFrame([csv_record])], ignore_index=True)
+        df_csv.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
+        print(f"[✅ SAVE-CSV] {csv_record['symbol']} {csv_record['strategy']} class={csv_record['predicted_class']}")
 
     except Exception as e:
-        print(f"[❌ insert_failure_record 예외] {type(e).__name__}: {e}")
+        print(f"[❌ CSV 저장 실패] {type(e).__name__}: {e}")
+
 
 def load_existing_failure_hashes():
     try:
