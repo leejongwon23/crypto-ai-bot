@@ -377,8 +377,7 @@ def evaluate_predictions(get_price_fn):
     import pandas as pd
     from failure_db import ensure_failure_db, insert_failure_record
     from logger import update_model_success, log_prediction
-    from config import get_class_ranges
-
+    from config import get_class_return_range  # ✅ 수정: 범위 불러올 함수
     ensure_failure_db()
 
     PREDICTION_LOG = "/persistent/prediction_log.csv"
@@ -400,6 +399,7 @@ def evaluate_predictions(get_price_fn):
 
     for r in rows:
         try:
+            # 이미 평가된 건 스킵
             if r.get("status") not in [None, "", "pending", "v_pending"]:
                 updated.append(r)
                 continue
@@ -444,18 +444,11 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            class_ranges_for_group = get_class_ranges(group_id=group_id)
-            if not (0 <= label < len(class_ranges_for_group)):
-                r.update({"status": "fail", "reason": f"label({label}) 클래스 범위 오류", "return": 0.0})
-                updated.append(r)
-                continue
-
-            cls_min, cls_max = class_ranges_for_group[label]
-
-            # ✅ 성공 판정: 범위 내 도달 시 성공
+            # ✅ 수익률 클래스 범위 가져오기 (최소값 이상이면 성공)
+            cls_min, cls_max = get_class_return_range(label)
             success = gain >= cls_min
 
-            # ✅ 조기 평가
+            # ✅ 평가 시점 전이라도 수익률 도달 시 조기 성공
             if now_kst() < deadline:
                 if not success:
                     r.update({"status": "pending", "reason": "⏳ 평가 대기 중", "return": round(gain, 5)})
@@ -465,6 +458,7 @@ def evaluate_predictions(get_price_fn):
             else:
                 status = "success" if success else "fail"
 
+            # 변동성 전략 구분
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
             if vol:
                 status = "v_success" if success else "v_fail"
@@ -494,6 +488,7 @@ def evaluate_predictions(get_price_fn):
             r.update({"status": "fail", "reason": f"예외: {e}", "return": 0.0})
             updated.append(r)
 
+    # 안전 저장
     def safe_write_csv(path, rows):
         if not rows:
             return
@@ -510,7 +505,6 @@ def evaluate_predictions(get_price_fn):
     safe_write_csv(WRONG, failed)
 
     print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
-
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
