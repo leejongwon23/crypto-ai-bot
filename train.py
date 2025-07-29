@@ -537,14 +537,14 @@ def train_symbol_group_loop(delay_minutes=5):
                         for gid in range(MAX_GROUP_ID + 1)
                     )
 
-                    # ✅ 모든 그룹 학습 완료 시 예측 & 이어학습 & 메타러너
+                    # ✅ 모든 그룹 학습 완료 시 예측 & 실패학습 & 메타러너
                     if all_success and group_all_trained:
                         try:
                             print(f"[▶ 예측 시도] {symbol}-{strategy} (모든 그룹 학습 완료)")
                             main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
                             print(f"[✅ 예측 완료] {symbol}-{strategy}")
 
-                            # 실패 데이터 로딩 후 이어학습
+                            # ✅ 실패 데이터 로딩 후 이어학습
                             try:
                                 X, y = load_training_prediction_data(
                                     symbol, strategy,
@@ -553,17 +553,17 @@ def train_symbol_group_loop(delay_minutes=5):
                                     group_id=None
                                 )
                                 if X is not None and y is not None and len(X) > 0:
-                                    print(f"[▶ 이어학습 시작] {symbol}-{strategy}")
-                                    train_one_model(symbol, strategy, group_id=None)
-                                    print(f"[✅ 이어학습 완료] {symbol}-{strategy}")
+                                    print(f"[▶ 실패학습(이어학습) 시작] {symbol}-{strategy}")
+                                    train_one_model(symbol, strategy, group_id=None)  # 이어학습
+                                    print(f"[✅ 실패학습 완료] {symbol}-{strategy}")
 
-                                    # 진화형 메타러너 학습
+                                    # ✅ 진화형 메타러너 학습
                                     train_evo_meta(X, y, FEATURE_INPUT_SIZE)
                                     print(f"[✅ 진화형 메타러너 학습 완료] {symbol}-{strategy}")
                                 else:
-                                    print(f"[⚠️ 이어학습/메타러너 스킵] 데이터 부족: {symbol}-{strategy}")
+                                    print(f"[⚠️ 실패학습/메타러너 스킵] 데이터 부족: {symbol}-{strategy}")
                             except Exception as e:
-                                print(f"[⚠️ 이어학습/메타러너 실패] {symbol}-{strategy} → {e}")
+                                print(f"[⚠️ 실패학습/메타러너 실패] {symbol}-{strategy} → {e}")
 
                         except Exception as e:
                             print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
