@@ -20,6 +20,9 @@ from config import get_class_ranges
 # 🔒 (예전 메타러너, 현재는 get_meta_prediction으로 대체됨)
 # from meta_learning import train_meta_learner, load_meta_learner
 import safe_cleanup  # ✅ 오래된 로그 자동 정리
+import json
+import torch.nn.functional as F
+
 
 
 DEVICE = torch.device("cpu")
