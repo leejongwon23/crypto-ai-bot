@@ -35,7 +35,7 @@ def save_config():
     except Exception as e:
         print(f"[⚠️ config.py] config.json 저장 실패 → {e}")
 
-# ✅ 클래스별 수익률 범위 반환 (예: 21 클래스 기준)
+# ✅ 클래스별 수익률 범위 반환
 def get_class_return_range(class_id):
     num_classes = get_NUM_CLASSES()
     assert 0 <= class_id < num_classes, f"class_id {class_id} 잘못됨"
@@ -48,7 +48,6 @@ def class_to_expected_return(class_id, num_classes=None):
         num_classes = get_NUM_CLASSES()
     r_min, r_max = get_class_return_range(class_id)
     return (r_min + r_max) / 2
-
 
 # ✅ 동적 클래스 수 설정 함수
 def set_NUM_CLASSES(n):
@@ -77,13 +76,11 @@ def get_SYMBOL_GROUPS():
     group_size = _config.get("SYMBOL_GROUP_SIZE", _default_config["SYMBOL_GROUP_SIZE"])
     return [symbols[i:i+group_size] for i in range(0, len(symbols), group_size)]
 
-# ✅ 클래스 그룹화 함수 (클래스 번호 나누기)
+# ✅ 클래스 그룹화 함수
 def get_class_groups(num_classes=None, group_size=5):
     """
-    ✅ 클래스 그룹화 함수 (YOPO v4.1)
     - num_classes를 group_size 크기로 나누어 그룹화
     - num_classes ≤ group_size 시 단일 그룹 반환
-    - 예: num_classes=20, group_size=5 → [[0-4], [5-9], [10-14], [15-19]]
     """
     if num_classes is None or num_classes < 2:
         num_classes = get_NUM_CLASSES()
@@ -91,42 +88,43 @@ def get_class_groups(num_classes=None, group_size=5):
         return [list(range(num_classes))]
     return [list(range(i, min(i + group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
+# ✅ ±영역 완전 분리된 클래스 범위 계산
 def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=None, group_size=5):
     import numpy as np
     from data.utils import get_kline_by_strategy
     from config import set_NUM_CLASSES
 
-    # ✅ 기본 최소/최대 클래스 개수
     MAX_CLASSES = 20
-    MIN_HALF = 2  # 양/음 각각 최소 클래스 수
+    MIN_HALF = 2  # 양/음 최소 클래스 수
 
     def compute_split_ranges_from_kline():
         try:
             df_price = get_kline_by_strategy(symbol, strategy)
             if df_price is None or len(df_price) < 30:
-                print(f"[⚠️ get_class_ranges] 가격 데이터 부족 → fallback equal 사용")
-                return compute_equal_ranges(10)  # 기본 10클래스(5음/5양)
+                print("[⚠️ get_class_ranges] 가격 데이터 부족 → fallback equal 사용")
+                return compute_equal_ranges(10)  # 기본 10클래스
 
             returns = df_price["close"].pct_change().dropna().values
             if len(returns) < 10:
-                print(f"[⚠️ get_class_ranges] 수익률 부족 → fallback equal 사용")
+                print("[⚠️ get_class_ranges] 수익률 부족 → fallback equal 사용")
                 return compute_equal_ranges(10)
 
-            # ✅ 양수/음수 분리
+            # ✅ 음수 / 양수 분리
             neg = returns[returns < 0]
             pos = returns[returns >= 0]
 
-            # ✅ 양/음 각각 최소 클래스 수 보장
+            # ✅ 최소 클래스 수 보장
             half_neg = max(MIN_HALF, min(10, len(neg) // 5))
             half_pos = max(MIN_HALF, min(10, len(pos) // 5))
 
-            # ✅ 총 클래스 수 계산 (짝수 유지, 최대 20)
+            # ✅ 총 클래스 수 계산 (짝수 유지)
             num_classes = min(MAX_CLASSES, half_neg + half_pos)
             if num_classes % 2 != 0:
                 num_classes -= 1
-            set_NUM_CLASSES(num_classes)  # 동적 클래스 저장
+            num_classes = max(num_classes, 4)  # 최소 4클래스 보장
+            set_NUM_CLASSES(num_classes)
 
-            # ✅ 클래스 경계 계산
+            # ✅ 경계 계산
             if method == "quantile":
                 q_neg = np.quantile(neg, np.linspace(0, 1, num_classes // 2 + 1))
                 q_pos = np.quantile(pos, np.linspace(0, 1, num_classes // 2 + 1))
@@ -134,9 +132,10 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
                 q_neg = np.linspace(neg.min(), neg.max(), num_classes // 2 + 1)
                 q_pos = np.linspace(pos.min(), pos.max(), num_classes // 2 + 1)
 
-            neg_ranges = [(q_neg[i], q_neg[i + 1]) for i in range(num_classes // 2)]
-            pos_ranges = [(q_pos[i], q_pos[i + 1]) for i in range(num_classes // 2)]
+            neg_ranges = [(float(q_neg[i]), float(q_neg[i + 1])) for i in range(num_classes // 2)]
+            pos_ranges = [(float(q_pos[i]), float(q_pos[i + 1])) for i in range(num_classes // 2)]
 
+            # ✅ ±영역이 섞이지 않도록 완전 분리된 리스트 반환
             return neg_ranges + pos_ranges
 
         except Exception as e:
@@ -147,7 +146,6 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
         step = 2.0 / n_cls
         return [(-1.0 + i * step, -1.0 + (i + 1) * step) for i in range(n_cls)]
 
-    # ✅ 실제 수익률 기반으로 계산
     all_ranges = compute_split_ranges_from_kline()
 
     if group_id is None:
@@ -156,7 +154,6 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
     start = group_id * group_size
     end = start + group_size
     return all_ranges[start:end]
-
 
 # ✅ 즉시 변수 선언
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
