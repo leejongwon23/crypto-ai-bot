@@ -178,13 +178,13 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                    timestamp=None, model=None, predicted_class=None, top_k=None,
                    note="", success=False, reason="", rate=None, return_value=None,
                    label=None, group_id=None, model_symbol=None, model_name=None,
-                   source="일반", volatility=False):
+                   source="일반", volatility=False, feature_vector=None):
 
-    import csv
-    import os
+    import csv, os
     from datetime import datetime
     import pytz
-    from failure_db import insert_failure_record  # ✅ 실패 DB 기록용
+    from config import get_class_return_range
+    from failure_db import insert_failure_record  # 실패 DB 기록용
 
     LOG_FILE = "/persistent/logs/prediction_log.csv"
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -198,11 +198,21 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     reason = reason if reason else "사유없음"
     rate = rate if rate is not None else 0.0
     return_value = return_value if return_value is not None else 0.0
+    entry_price = entry_price or 0.0
+    target_price = target_price or 0.0
 
     # ✅ source 예외 처리
-    if source not in ["일반", "evo_meta", "baseline_meta"]:
+    allowed_sources = ["일반", "meta", "evo_meta", "baseline_meta", "진화형"]
+    if source not in allowed_sources:
         source = "일반"
 
+    # ✅ 성공/실패 판정 통일 (클래스 범위 도달 여부로 판단)
+    if predicted_class >= 0:
+        cls_min, cls_max = get_class_return_range(predicted_class)
+        actual_return = return_value
+        success = (cls_min <= actual_return <= cls_max)
+
+    # ✅ 로그 레코드
     row = [
         now, symbol, strategy, direction, entry_price, target_price,
         model or "", predicted_class, top_k_str, note,
@@ -225,7 +235,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
 
         print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} → class={predicted_class} | success={success} | reason={reason} | source={source}")
 
-        # ✅ 실패인 경우 failure_db.py에도 저장 (final_pred_class 기준)
+        # ✅ 실패일 경우 실패 DB 저장
         if not success:
             insert_failure_record(
                 {
@@ -237,15 +247,19 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                     "rate": rate,
                     "reason": reason,
                     "label": label,
-                    "source": source
+                    "source": source,
+                    "entry_price": entry_price,
+                    "target_price": target_price,
+                    "return_value": return_value
                 },
-                # 해시에 final_pred_class(label) 포함
-                feature_hash=f"{symbol}-{strategy}-{label}-{now}",
-                label=label
+                feature_hash=f"{symbol}-{strategy}-{label}-{predicted_class}-{model_name}-{now}",
+                label=label,
+                feature_vector=(feature_vector.tolist() if feature_vector is not None else None)
             )
 
     except Exception as e:
         print(f"[⚠️ 예측 로그 기록 실패] {e}")
+
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
