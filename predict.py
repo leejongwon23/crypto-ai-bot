@@ -293,7 +293,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
             actual_return = (current_price / entry_price) - 1
             is_main = (predicted_class == final_pred_class)
-            success = is_main and (cls_min <= actual_return <= cls_max)
+            # ✅ 성공 판정 기준 수정 → cls_min 이상이면 성공
+            success = is_main and (actual_return >= cls_min)
 
             log_prediction(
                 symbol=pred["symbol"] or symbol,
@@ -332,7 +333,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
         evo_expected_return = class_to_expected_return(final_pred_class, len(model_outputs_list[0]["probs"]))
         entry_price = all_model_predictions[0]["entry_price"]
         actual_return_meta = (current_price / entry_price) - 1
-        meta_success = (cls_min <= actual_return_meta <= cls_max)
+        # ✅ 메타 성공 판정 기준 수정
+        meta_success = (actual_return_meta >= cls_min)
 
         log_prediction(
             symbol=symbol,
