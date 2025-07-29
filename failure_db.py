@@ -46,9 +46,11 @@ def ensure_failure_db():
         print(f"[오류] ensure_failure_db 실패 → {e}")
 
 def insert_failure_record(row, feature_hash=None, feature_vector=None, label=None):
-    import os, hashlib
+    import hashlib
     import pandas as pd
     from datetime import datetime
+
+    ensure_failure_db()  # ✅ 테이블 생성 보장
 
     CSV_PATH = "/persistent/wrong_predictions.csv"
 
@@ -56,6 +58,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         print("[❌ insert_failure_record] row 형식 오류")
         return
 
+    # ✅ feature_hash 생성
     if not feature_hash:
         raw_str = f"{row.get('symbol','')}_{row.get('strategy','')}_{row.get('timestamp','')}_{row.get('predicted_class','')}"
         feature_hash = hashlib.sha256(raw_str.encode()).hexdigest()
@@ -64,11 +67,25 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         print("[❌ insert_failure_record] feature_hash 없음 → 저장 스킵")
         return
 
+    # ✅ DB 중복 체크
+    conn = get_db_connection()
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM failure_patterns WHERE hash=? AND model_name=? AND predicted_class=?",
+            (feature_hash, row.get("model", ""), row.get("predicted_class", -1))
+        ).fetchone()
+        if exists:
+            print(f"[⛔ DB 중복 예측 실패] feature_hash={feature_hash} → 저장 스킵")
+            return
+    except Exception as e:
+        print(f"[⚠️ DB 중복 체크 실패] {e}")
+
+    # ✅ CSV 중복 체크
     if os.path.exists(CSV_PATH):
         try:
             df = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
             if "feature_hash" in df.columns and feature_hash in df["feature_hash"].values:
-                print(f"[⛔ 중복 예측 실패] feature_hash 중복 → 저장 스킵")
+                print(f"[⛔ CSV 중복 예측 실패] feature_hash={feature_hash} → 저장 스킵")
                 return
         except Exception as e:
             print(f"[⚠️ CSV 로드 실패] {e}")
@@ -77,29 +94,45 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         df = pd.DataFrame()
 
     try:
-        is_evo = row.get("source") == "evo_meta"
-
+        record_time = datetime.now().isoformat()
         record = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": record_time,
             "symbol": row.get("symbol"),
             "strategy": row.get("strategy"),
-            "model": row.get("model", ""),
+            "direction": row.get("direction", ""),
+            "hash": feature_hash,
+            "model_name": row.get("model", ""),
             "predicted_class": row.get("predicted_class", -1),
-            "label": row.get("label") if label is None else label,
-            "feature_hash": feature_hash,
             "rate": row.get("rate", ""),
-            "return_value": row.get("return", ""),
             "reason": row.get("reason") or "미기록",
-            "evo_meta_strategy": row.get("strategy") if is_evo else ""
+            "feature": json.dumps(feature_vector.tolist()) if feature_vector is not None else "",
+            "label": row.get("label") if label is None else label
         }
+
+        # ✅ DB 저장
+        try:
+            conn.execute("""
+                INSERT OR IGNORE INTO failure_patterns
+                (timestamp, symbol, strategy, direction, hash, model_name, predicted_class, rate, reason, feature, label)
+                VALUES (:timestamp, :symbol, :strategy, :direction, :hash, :model_name, :predicted_class, :rate, :reason, :feature, :label)
+            """, record)
+            conn.commit()
+            print(f"[✅ DB 실패 예측 저장] {record['symbol']} {record['strategy']} class={record['predicted_class']}")
+        except Exception as e:
+            print(f"[⚠️ DB 저장 실패] {e}")
+
+        # ✅ CSV 저장
+        csv_record = record.copy()
+        csv_record.pop("feature")
+        csv_record["feature_hash"] = feature_hash
 
         if feature_vector is not None:
             for i, v in enumerate(feature_vector.flatten()):
-                record[f"f{i}"] = float(v)
+                csv_record[f"f{i}"] = float(v)
 
-        df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
+        df = pd.concat([df, pd.DataFrame([csv_record])], ignore_index=True)
         df.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
-        print(f"[✅ 실패 예측 저장 완료] {record['symbol']} {record['strategy']} → class={record['predicted_class']} ≠ label={record['label']}")
+        print(f"[✅ CSV 실패 예측 저장] {csv_record['symbol']} {csv_record['strategy']} class={csv_record['predicted_class']}")
 
     except Exception as e:
         print(f"[❌ insert_failure_record 예외] {type(e).__name__}: {e}")
