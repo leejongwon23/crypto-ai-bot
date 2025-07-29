@@ -15,7 +15,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     import numpy as np
     import pandas as pd
     from collections import Counter
-    from config import FAIL_AUGMENT_RATIO, get_class_ranges
+    from config import FAIL_AUGMENT_RATIO, get_class_ranges, set_NUM_CLASSES
     from data.utils import get_kline_by_strategy, compute_features
     from logger import get_feature_hash
     from failure_db import load_existing_failure_hashes
@@ -23,8 +23,10 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     WRONG_CSV = "/persistent/wrong_predictions.csv"
     sequences = []
 
-    class_ranges = get_class_ranges(group_id=group_id)
+    # ✅ 실제 수익률 분포 기반 클래스 범위 계산 (동적 클래스)
+    class_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=group_id)
     num_classes = len(class_ranges)
+    set_NUM_CLASSES(num_classes)  # ✅ 전역 NUM_CLASSES 갱신
 
     df_price = get_kline_by_strategy(symbol, strategy)
     if df_price is None or df_price.empty:
@@ -45,6 +47,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
 
     df_feat = df_feat.dropna().reset_index(drop=True)
 
+    # ✅ 라벨링 (동적 클래스 기반)
     returns = df_price["close"].pct_change().fillna(0).values
     labels = []
     for r in returns:
@@ -148,3 +151,4 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     print(f"[✅ load_training_prediction_data 완료] {symbol}-{strategy} → 샘플 수: {len(y)} / 클래스 분포: {dict(Counter(y))} / 누락된 라벨 수: {len(label_missing)}")
 
     return X, y
+
