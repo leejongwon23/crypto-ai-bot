@@ -209,6 +209,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from predict import get_model_predictions
     from evo_meta_learner import get_best_strategy_by_failure_probability
 
+    # ✅ DB 준비
     ensure_failure_db()
     os.makedirs("/persistent/logs", exist_ok=True)
     def now_kst(): return datetime.now(pytz.timezone("Asia/Seoul"))
@@ -278,8 +279,14 @@ def predict(symbol, strategy, source="일반", model_type=None):
             print(f"[🔁 전략 교체됨] {strategy} → {recommended_strategy}")
             strategy = recommended_strategy
 
-        # ✅ 메타 예측 클래스
-        final_pred_class = get_meta_prediction(model_outputs_list, feature_tensor)
+        # ✅ 메타 예측 클래스 (성공률 + 도달 확률 반영)
+        final_pred_class = get_meta_prediction(
+            model_outputs_list=model_outputs_list,
+            feature_tensor=feature_tensor,
+            use_past_success_rate=True,   # 과거 성공률 반영
+            use_reach_probability=True    # 수익률 도달 확률 반영
+        )
+
         cls_min, cls_max = get_class_return_range(final_pred_class)
         current_price = df.iloc[-1]["close"]
 
