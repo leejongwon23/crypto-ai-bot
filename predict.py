@@ -207,25 +207,38 @@ def predict(symbol, strategy, source="일반", model_type=None):
     import pytz
     from failure_db import insert_failure_record
     from predict import get_model_predictions
-    from evo_meta_learner import get_best_strategy_by_failure_probability  # ✅ 추가
+    from evo_meta_learner import get_best_strategy_by_failure_probability
 
     os.makedirs("/persistent/logs", exist_ok=True)
     def now_kst(): return datetime.now(pytz.timezone("Asia/Seoul"))
 
+    # ✅ 1. symbol / strategy 검증
+    if not symbol or not strategy:
+        print(f"[❌ predict] 잘못된 symbol/strategy 전달됨 → {symbol}-{strategy}")
+        insert_failure_record({"symbol": symbol or "None", "strategy": strategy or "None"},
+                              "invalid_symbol_strategy", label=-1)
+        return None
+
+    # 원본 전략 보관 (로깅 일관성 유지용)
+    log_strategy = strategy
+
     try:
+        # ✅ 2. 윈도우 탐색
         window_list = find_best_windows(symbol, strategy)
         if not window_list:
-            insert_failure_record({"symbol": symbol, "strategy": strategy}, "window_list_none", label=-1)
+            insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "window_list_none", label=-1)
             return None
 
+        # ✅ 3. 데이터 수집
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 1:
-            insert_failure_record({"symbol": symbol, "strategy": strategy}, "df_short", label=-1)
+            insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "df_short", label=-1)
             return None
 
+        # ✅ 4. 피처 생성
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.dropna().shape[0] < max(window_list) + 1:
-            insert_failure_record({"symbol": symbol, "strategy": strategy}, "feature_short", label=-1)
+            insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "feature_short", label=-1)
             return None
 
         features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
@@ -236,26 +249,28 @@ def predict(symbol, strategy, source="일반", model_type=None):
         else:
             feat_scaled = feat_scaled[:, :FEATURE_INPUT_SIZE]
 
+        # ✅ 5. 모델 확인
         models = get_available_models(symbol, strategy)
         if not models:
-            insert_failure_record({"symbol": symbol, "strategy": strategy}, "no_models", label=-1)
+            insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "no_models", label=-1)
             return None
 
         recent_freq = get_recent_class_frequencies(strategy)
         feature_tensor = torch.tensor(feat_scaled[-1], dtype=torch.float32)
 
+        # ✅ 6. 모델 예측
         model_outputs_list, all_model_predictions = get_model_predictions(
             symbol, strategy, models, df, feat_scaled, window_list, recent_freq
         )
-
         if not model_outputs_list:
-            insert_failure_record({"symbol": symbol, "strategy": strategy}, "no_valid_model", label=-1)
+            insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "no_valid_model", label=-1)
             return None
 
+        # ✅ 7. 메타 예측
         final_pred_class = get_meta_prediction(model_outputs_list, feature_tensor)
         cls_min, cls_max = get_class_return_range(final_pred_class)
 
-        # ✅ 진화형 메타러너로 대체 전략 추천
+        # ✅ 8. 진화형 메타러너 추천 전략
         recommended_strategy = get_best_strategy_by_failure_probability(
             symbol=symbol,
             current_strategy=strategy,
@@ -266,6 +281,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             print(f"[🔁 전략 교체됨] {strategy} → {recommended_strategy}")
             strategy = recommended_strategy
 
+        # ✅ 9. 개별 모델 로깅
         for pred in all_model_predictions:
             predicted_class = pred["class"]
             entry_price = pred["entry_price"]
@@ -276,8 +292,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
             success = is_main and (cls_min <= expected_return <= cls_max)
 
             log_prediction(
-                symbol=pred["symbol"],
-                strategy=pred["strategy"],
+                symbol=pred["symbol"] or symbol,
+                strategy=pred["strategy"] or log_strategy,
                 direction="예측",
                 entry_price=entry_price,
                 target_price=target_price,
@@ -297,23 +313,24 @@ def predict(symbol, strategy, source="일반", model_type=None):
             if not success:
                 insert_failure_record(
                     {
-                        "symbol": pred["symbol"],
-                        "strategy": pred["strategy"],
+                        "symbol": pred["symbol"] or symbol,
+                        "strategy": pred["strategy"] or log_strategy,
                         "model": pred["model_name"],
                         "predicted_class": predicted_class,
                         "label": final_pred_class,
                         "reason": "예측실패"
                     },
-                    feature_hash=f"{symbol}-{strategy}-{now_kst().isoformat()}",
+                    feature_hash=f"{symbol}-{log_strategy}-{now_kst().isoformat()}",
                     label=final_pred_class
                 )
 
+        # ✅ 10. 메타 로깅
         evo_expected_return = class_to_expected_return(final_pred_class, len(model_outputs_list[0]["probs"]))
         entry_price = all_model_predictions[0]["entry_price"]
 
         log_prediction(
             symbol=symbol,
-            strategy=strategy,
+            strategy=log_strategy,
             direction="예측",
             entry_price=entry_price,
             target_price=entry_price * (1 + evo_expected_return),
@@ -332,20 +349,20 @@ def predict(symbol, strategy, source="일반", model_type=None):
         insert_failure_record(
             {
                 "symbol": symbol,
-                "strategy": strategy,
+                "strategy": log_strategy,
                 "model": "evo_meta_learner",
                 "predicted_class": final_pred_class,
                 "label": final_pred_class,
                 "reason": "진화형 메타 선택"
             },
-            feature_hash=f"{symbol}-{strategy}-{now_kst().isoformat()}",
+            feature_hash=f"{symbol}-{log_strategy}-{now_kst().isoformat()}",
             label=final_pred_class,
             feature_vector=feature_tensor.numpy()
         )
 
         return {
             "symbol": symbol,
-            "strategy": strategy,
+            "strategy": log_strategy,
             "model": "meta",
             "class": final_pred_class,
             "expected_return": evo_expected_return,
@@ -356,8 +373,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
     except Exception as e:
         print(f"[predict 예외] {e}")
-        insert_failure_record({"symbol": symbol, "strategy": strategy}, "exception", label=-1)
+        insert_failure_record({"symbol": symbol or "None", "strategy": strategy or "None"}, "exception", label=-1)
         return None
+
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
