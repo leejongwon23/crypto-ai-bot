@@ -476,7 +476,9 @@ def evaluate_predictions(get_price_fn):
                 continue
 
             cls_min, cls_max = class_ranges_for_group[label]
-            success = cls_min <= gain <= cls_max  # ✅ 설계 기준 반영
+
+            # ✅ 설계 기준 수정: cls_min 이상이면 성공 (cls_max 초과도 성공)
+            success = gain >= cls_min
 
             # 조기평가: 시점 전이라도 성공 시 즉시 success
             if now_kst() < deadline:
@@ -542,6 +544,7 @@ def evaluate_predictions(get_price_fn):
     safe_write_csv(WRONG, failed)
 
     print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
+
 
 
 def get_class_distribution(symbol, strategy, model_type):
