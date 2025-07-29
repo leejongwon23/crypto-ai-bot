@@ -417,6 +417,7 @@ def evaluate_predictions(get_price_fn):
 
     for r in rows:
         try:
+            # 이미 평가된 항목은 건너뜀
             if r.get("status") not in [None, "", "pending", "v_pending"]:
                 updated.append(r)
                 continue
@@ -468,8 +469,8 @@ def evaluate_predictions(get_price_fn):
 
             cls_min, cls_max = class_ranges_for_group[label]
 
-            # ✅ 성공 조건: cls_min <= gain <= cls_max
-            success = cls_min <= gain <= cls_max
+            # ✅ 성공 조건: 최소 수익률 이상이면 성공 (상한선 무시)
+            success = gain >= cls_min
 
             # ✅ 평가 시점 전
             if now_kst() < deadline:
@@ -516,7 +517,6 @@ def evaluate_predictions(get_price_fn):
             updated.append(r)
 
     updated += evaluated
-
 
     def safe_write_csv(path, rows):
         if not rows:
