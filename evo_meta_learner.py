@@ -25,7 +25,13 @@ class EvoMetaModel(nn.Module):
 
 # ✅ 학습 함수
 def train_evo_meta(X, y, input_size, epochs=10, batch_size=32, lr=1e-3):
-    model = EvoMetaModel(input_size)
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import TensorDataset, DataLoader
+    import os
+
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = EvoMetaModel(input_size).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
 
@@ -34,6 +40,7 @@ def train_evo_meta(X, y, input_size, epochs=10, batch_size=32, lr=1e-3):
 
     for epoch in range(epochs):
         for xb, yb in loader:
+            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
             preds = model(xb)
             loss = criterion(preds, yb)
             optimizer.zero_grad()
@@ -44,6 +51,7 @@ def train_evo_meta(X, y, input_size, epochs=10, batch_size=32, lr=1e-3):
     torch.save(model.state_dict(), MODEL_PATH)
     print(f"[✅ evo_meta_learner] 학습 완료 → {MODEL_PATH}")
     return model
+
 
 # ✅ 예측 함수 (예측 실패 가능성 최소 전략 선택)
 def predict_evo_meta(X_new, input_size):
