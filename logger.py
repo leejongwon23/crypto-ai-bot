@@ -184,6 +184,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     import os
     from datetime import datetime
     import pytz
+    from failure_db import insert_failure_record  # ✅ 실패 DB 기록용 추가
 
     LOG_FILE = "/persistent/logs/prediction_log.csv"
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -224,8 +225,27 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
 
         print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} → class={predicted_class} | success={success} | reason={reason} | source={source}")
 
+        # ✅ 실패인 경우 failure_db.py에도 저장
+        if not success:
+            insert_failure_record(
+                {
+                    "symbol": symbol,
+                    "strategy": strategy,
+                    "direction": direction,
+                    "model": model or "",
+                    "predicted_class": predicted_class,
+                    "rate": rate,
+                    "reason": reason,
+                    "label": label,
+                    "source": source
+                },
+                feature_hash=f"{symbol}-{strategy}-{now}",
+                label=label
+            )
+
     except Exception as e:
         print(f"[⚠️ 예측 로그 기록 실패] {e}")
+
 
 def get_dynamic_eval_wait(strategy):
     return {"단기":4, "중기":24, "장기":168}.get(strategy, 6)
