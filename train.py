@@ -467,6 +467,10 @@ def train_symbol_group_loop(delay_minutes=5):
     from evo_meta_learner import train_evo_meta_loop, train_evo_meta
     from wrong_data_loader import load_training_prediction_data
     from config import get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges
+    from failure_db import ensure_failure_db  # ✅ DB 준비 함수 불러오기
+
+    # ✅ 실패 학습 DB 초기화
+    ensure_failure_db()
 
     FORCE_TRAINING = True
     FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
