@@ -462,12 +462,10 @@ def train_symbol_group_loop(delay_minutes=5):
     import safe_cleanup
     from evo_meta_learner import train_evo_meta_loop, train_evo_meta
     from wrong_data_loader import load_training_prediction_data
-    from config import get_FEATURE_INPUT_SIZE, get_class_groups
+    from config import get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges
 
     FORCE_TRAINING = True
     FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
-    CLASS_GROUPS = get_class_groups()
-    MAX_GROUP_ID = len(CLASS_GROUPS) - 1
 
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작")
@@ -504,13 +502,19 @@ def train_symbol_group_loop(delay_minutes=5):
                     if not isinstance(train_done[symbol][strategy], dict):
                         train_done[symbol][strategy] = {}
 
+                    # ✅ 동적 클래스 기반 그룹 계산
+                    try:
+                        num_classes = len(get_class_ranges(symbol=symbol, strategy=strategy))
+                        class_groups = get_class_groups(num_classes=num_classes)
+                        MAX_GROUP_ID = len(class_groups) - 1
+                    except Exception as e:
+                        print(f"[⚠️ 동적 클래스 계산 실패] {symbol}-{strategy} → {e}")
+                        continue
+
                     all_success = True
 
-                    for gid in range(5):
-                        if gid > MAX_GROUP_ID:
-                            print(f"[⛔ group_id={gid} 초과로 스킵] 현재 최대 group_id={MAX_GROUP_ID}")
-                            continue
-
+                    # ✅ gid 반복을 실제 그룹 수에 맞게 수정
+                    for gid in range(MAX_GROUP_ID + 1):
                         print(f"▶ [학습 시도] {symbol}-{strategy}-group{gid}")
 
                         if not FORCE_TRAINING and train_done[symbol][strategy].get(str(gid), False):
@@ -528,7 +532,7 @@ def train_symbol_group_loop(delay_minutes=5):
                             traceback.print_exc()
                             all_success = False
 
-                    if all_success and all(str(gid) in train_done[symbol][strategy] for gid in range(5)):
+                    if all_success and all(str(gid) in train_done[symbol][strategy] for gid in range(MAX_GROUP_ID + 1)):
                         try:
                             print(f"[▶ 예측 시도] {symbol}-{strategy} (모든 그룹 학습 완료)")
                             main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
