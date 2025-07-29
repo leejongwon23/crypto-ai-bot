@@ -51,14 +51,14 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
     import numpy as np
     from datetime import datetime
 
-    ensure_failure_db()  # ✅ 테이블 생성 보장
+    ensure_failure_db()
     CSV_PATH = "/persistent/wrong_predictions.csv"
 
     if not isinstance(row, dict):
         print("[❌ insert_failure_record] row 형식 오류 → 저장 스킵")
         return
 
-    # ✅ feature_hash 생성 (고유성 강화)
+    # ✅ feature_hash 생성
     if not feature_hash:
         raw_str = (
             f"{row.get('symbol','')}_{row.get('strategy','')}_"
@@ -71,27 +71,31 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         print("[❌ insert_failure_record] feature_hash 없음 → 저장 스킵")
         return
 
-    # ✅ feature_vector 타입 안전화
-    if feature_vector is None:
-        feature_vector = []
-    elif isinstance(feature_vector, np.ndarray):
-        feature_vector = feature_vector.flatten().tolist()
-    elif not isinstance(feature_vector, list):
+    # ✅ 타입 안전 변환
+    def to_list_safe(x):
+        if x is None:
+            return []
+        if isinstance(x, np.ndarray):
+            return x.flatten().astype(float).tolist()
+        if isinstance(x, (list, tuple)):
+            return [float(v) if isinstance(v, (int, float, np.integer, np.floating)) else v for v in x]
+        if isinstance(x, (int, float, np.integer, np.floating)):
+            return [float(x)]
         try:
-            feature_vector = list(feature_vector)
+            return list(x)
         except:
-            feature_vector = []
+            return []
+
+    feature_vector = to_list_safe(feature_vector)
 
     # ✅ DB/CSV 중복 체크
     try:
-        # DB 중복 체크
         conn = get_db_connection()
         exists_db = conn.execute(
             "SELECT 1 FROM failure_patterns WHERE hash=? AND model_name=? AND predicted_class=?",
             (feature_hash, row.get("model", ""), row.get("predicted_class", -1))
         ).fetchone()
 
-        # CSV 중복 체크
         exists_csv = False
         if os.path.exists(CSV_PATH):
             try:
@@ -101,7 +105,6 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
             except Exception as e:
                 print(f"[⚠️ CSV 로드 실패] {e}")
 
-        # ✅ 둘 중 하나라도 중복이면 스킵
         if exists_db or exists_csv:
             print(f"[⛔ SKIP-중복] feature_hash={feature_hash}")
             return
@@ -109,7 +112,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
     except Exception as e:
         print(f"[⚠️ 중복 체크 실패] {e}")
 
-    # ✅ 기록 데이터 준비
+    # ✅ 기록 데이터
     record_time = datetime.now().isoformat()
     record = {
         "timestamp": record_time,
@@ -140,14 +143,14 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
     # ✅ CSV 저장
     try:
         csv_record = record.copy()
-        csv_record.pop("feature")  # feature는 JSON 대신 개별 컬럼
+        csv_record.pop("feature")
         csv_record["feature_hash"] = feature_hash
 
         for i, v in enumerate(feature_vector):
             try:
                 csv_record[f"f{i}"] = float(v)
             except:
-                csv_record[f"f{i}"] = v
+                csv_record[f"f{i}"] = np.nan
 
         if os.path.exists(CSV_PATH):
             df_csv = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
@@ -160,6 +163,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
 
     except Exception as e:
         print(f"[❌ CSV 저장 실패] {type(e).__name__}: {e}")
+
 
 
 def load_existing_failure_hashes():
