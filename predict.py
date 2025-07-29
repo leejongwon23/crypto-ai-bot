@@ -356,7 +356,6 @@ import csv, datetime, pytz, os
 import pandas as pd
 from failure_db import ensure_failure_db, insert_failure_record
 from logger import update_model_success
-
 def evaluate_predictions(get_price_fn):
     import csv, os, datetime, pytz
     import pandas as pd
@@ -445,20 +444,17 @@ def evaluate_predictions(get_price_fn):
 
             cls_min, cls_max = class_ranges_for_group[label]
 
-            # ✅ 설계 기준 수정: cls_min 이상이면 성공 (cls_max 초과도 성공)
+            # ✅ 설계 기준: cls_min 이상이면 성공
             success = gain >= cls_min
 
-            # 조기평가: 시점 전이라도 성공 시 즉시 success
+            # 조기평가
             if now_kst() < deadline:
-                if success:
-                    status = "success"
-                else:
-                    # 아직 미충족이면 pending 유지
+                if not success:
                     r.update({"status": "pending", "reason": "⏳ 평가 대기 중", "return": 0.0})
                     updated.append(r)
                     continue
+                status = "success"
             else:
-                # 최종평가
                 status = "success" if success else "fail"
 
             # 변동성 여부
