@@ -54,8 +54,12 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
     ensure_failure_db()
     CSV_PATH = "/persistent/wrong_predictions.csv"
 
+    # ✅ 기본 검증
     if not isinstance(row, dict):
         print("[❌ insert_failure_record] row 형식 오류 → 저장 스킵")
+        return
+    if row.get("success") is True:
+        print("[⛔ SKIP] 성공 예측 → 실패 기록 안 함")
         return
 
     # ✅ feature_hash 생성
@@ -78,7 +82,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         if isinstance(x, np.ndarray):
             return x.flatten().astype(float).tolist()
         if isinstance(x, (list, tuple)):
-            return [float(v) if isinstance(v, (int, float, np.integer, np.floating)) else v for v in x]
+            return [float(v) if isinstance(v, (int, float, np.integer, np.floating)) else np.nan for v in x]
         if isinstance(x, (int, float, np.integer, np.floating)):
             return [float(x)]
         try:
@@ -88,7 +92,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
 
     feature_vector = to_list_safe(feature_vector)
 
-    # ✅ DB/CSV 중복 체크
+    # ✅ DB & CSV 중복 체크
     try:
         conn = get_db_connection()
         exists_db = conn.execute(
@@ -100,8 +104,12 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         if os.path.exists(CSV_PATH):
             try:
                 df_csv = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
-                if "feature_hash" in df_csv.columns and feature_hash in df_csv["feature_hash"].values:
-                    exists_csv = True
+                if all(col in df_csv.columns for col in ["feature_hash", "model_name", "predicted_class"]):
+                    exists_csv = not df_csv[
+                        (df_csv["feature_hash"] == feature_hash) &
+                        (df_csv["model_name"] == row.get("model", "")) &
+                        (df_csv["predicted_class"] == row.get("predicted_class", -1))
+                    ].empty
             except Exception as e:
                 print(f"[⚠️ CSV 로드 실패] {e}")
 
@@ -147,10 +155,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         csv_record["feature_hash"] = feature_hash
 
         for i, v in enumerate(feature_vector):
-            try:
-                csv_record[f"f{i}"] = float(v)
-            except:
-                csv_record[f"f{i}"] = np.nan
+            csv_record[f"f{i}"] = np.nan if v is None else float(v)
 
         if os.path.exists(CSV_PATH):
             df_csv = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
@@ -160,11 +165,8 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         df_csv = pd.concat([df_csv, pd.DataFrame([csv_record])], ignore_index=True)
         df_csv.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
         print(f"[✅ SAVE-CSV] {csv_record['symbol']} {csv_record['strategy']} class={csv_record['predicted_class']}")
-
     except Exception as e:
         print(f"[❌ CSV 저장 실패] {type(e).__name__}: {e}")
-
-
 
 def load_existing_failure_hashes():
     try:
