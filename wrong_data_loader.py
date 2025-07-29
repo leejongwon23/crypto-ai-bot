@@ -148,5 +148,3 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     print(f"[✅ load_training_prediction_data 완료] {symbol}-{strategy} → 샘플 수: {len(y)} / 클래스 분포: {dict(Counter(y))} / 누락된 라벨 수: {len(label_missing)}")
 
     return X, y
-
-
