@@ -211,18 +211,16 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
     # ✅ DB 준비
     ensure_failure_db()
-
     os.makedirs("/persistent/logs", exist_ok=True)
     def now_kst(): return datetime.now(pytz.timezone("Asia/Seoul"))
 
     # ✅ 1. symbol / strategy 검증
     if not symbol or not strategy:
-        print(f"[❌ predict] 잘못된 symbol/strategy 전달됨 → {symbol}-{strategy}")
         insert_failure_record({"symbol": symbol or "None", "strategy": strategy or "None"},
                               "invalid_symbol_strategy", label=-1)
         return None
 
-    # 원본 전략 보관 (로깅/평가 시 유지)
+    # 원본 전략 보관
     log_strategy = strategy
 
     try:
@@ -269,11 +267,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "no_valid_model", label=-1)
             return None
 
-        # ✅ 7. 메타 예측 (최종 클래스)
-        final_pred_class = get_meta_prediction(model_outputs_list, feature_tensor)
-        cls_min, cls_max = get_class_return_range(final_pred_class)
-
-        # ✅ 8. 전략 변경 로직 (실행 전략만 변경, 기록은 log_strategy 유지)
+        # ✅ 7. 실패확률 기반 전략 교체 → 메타 판단
         recommended_strategy = get_best_strategy_by_failure_probability(
             symbol=symbol,
             current_strategy=strategy,
@@ -284,7 +278,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
             print(f"[🔁 전략 교체됨] {strategy} → {recommended_strategy}")
             strategy = recommended_strategy
 
-        # ✅ 9. 개별 모델 로깅 — final_pred_class 일관 적용
+        # ✅ 8. 메타 예측 (최종 클래스)
+        final_pred_class = get_meta_prediction(model_outputs_list, feature_tensor)
+        cls_min, cls_max = get_class_return_range(final_pred_class)
+
+        # ✅ 9. 개별 모델 로깅 — 실제 수익률 기반 성공 판정
+        current_price = df.iloc[-1]["close"]  # 실제 현재가
         for pred in all_model_predictions:
             predicted_class = pred["class"]
             entry_price = pred["entry_price"]
@@ -292,9 +291,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
             expected_return = class_to_expected_return(predicted_class, num_classes)
             target_price = entry_price * (1 + expected_return)
 
-            # ✅ 성공 판정: 메타 선택 + 범위 도달
+            actual_return = (current_price / entry_price) - 1
             is_main = (predicted_class == final_pred_class)
-            success = is_main and (cls_min <= expected_return <= cls_max)
+            success = is_main and (cls_min <= actual_return <= cls_max)
 
             log_prediction(
                 symbol=pred["symbol"] or symbol,
@@ -306,7 +305,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 success=success,
                 reason="메타선택" if is_main else "미선택",
                 rate=expected_return,
-                return_value=expected_return,
+                return_value=actual_return,
                 source=source,
                 predicted_class=predicted_class,
                 label=final_pred_class,
@@ -325,14 +324,15 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         "label": final_pred_class,
                         "reason": "예측실패"
                     },
-                    # ✅ final_pred_class 포함 → 해시 고유성 보장
                     feature_hash=f"{symbol}-{log_strategy}-{final_pred_class}-{now_kst().isoformat()}",
                     label=final_pred_class
                 )
 
-        # ✅ 10. 메타 로깅 (항상 log_strategy 사용)
+        # ✅ 10. 메타 로깅
         evo_expected_return = class_to_expected_return(final_pred_class, len(model_outputs_list[0]["probs"]))
         entry_price = all_model_predictions[0]["entry_price"]
+        actual_return_meta = (current_price / entry_price) - 1
+        meta_success = (cls_min <= actual_return_meta <= cls_max)
 
         log_prediction(
             symbol=symbol,
@@ -345,27 +345,27 @@ def predict(symbol, strategy, source="일반", model_type=None):
             predicted_class=final_pred_class,
             label=final_pred_class,
             note="진화형 메타 선택",
-            success=True,
+            success=meta_success,
             reason="진화형 메타 선택",
             rate=evo_expected_return,
-            return_value=evo_expected_return,
+            return_value=actual_return_meta,
             source="진화형"
         )
 
-        insert_failure_record(
-            {
-                "symbol": symbol,
-                "strategy": log_strategy,
-                "model": "evo_meta_learner",
-                "predicted_class": final_pred_class,
-                "label": final_pred_class,
-                "reason": "진화형 메타 선택"
-            },
-            # ✅ final_pred_class 포함
-            feature_hash=f"{symbol}-{log_strategy}-{final_pred_class}-{now_kst().isoformat()}",
-            label=final_pred_class,
-            feature_vector=feature_tensor.numpy()
-        )
+        if not meta_success:
+            insert_failure_record(
+                {
+                    "symbol": symbol,
+                    "strategy": log_strategy,
+                    "model": "evo_meta_learner",
+                    "predicted_class": final_pred_class,
+                    "label": final_pred_class,
+                    "reason": "메타 예측실패"
+                },
+                feature_hash=f"{symbol}-{log_strategy}-{final_pred_class}-{now_kst().isoformat()}",
+                label=final_pred_class,
+                feature_vector=feature_tensor.numpy()
+            )
 
         return {
             "symbol": symbol,
@@ -379,9 +379,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
         }
 
     except Exception as e:
-        print(f"[predict 예외] {e}")
         insert_failure_record({"symbol": symbol or "None", "strategy": strategy or "None"}, "exception", label=-1)
         return None
+
 
 # 📄 predict.py 내부에 추가
 import csv, datetime, pytz, os
