@@ -79,11 +79,17 @@ def get_SYMBOL_GROUPS():
 
 # ✅ 클래스 그룹화 함수 (클래스 번호 나누기)
 def get_class_groups(num_classes=None, group_size=5):
-    if num_classes is None:
+    """
+    ✅ 클래스 그룹화 함수 (YOPO v4.1)
+    - num_classes를 group_size 크기로 나누어 그룹화
+    - num_classes ≤ group_size 시 단일 그룹 반환
+    - 예: num_classes=20, group_size=5 → [[0-4], [5-9], [10-14], [15-19]]
+    """
+    if num_classes is None or num_classes < 2:
         num_classes = get_NUM_CLASSES()
     if num_classes <= group_size:
         return [list(range(num_classes))]
-    return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
+    return [list(range(i, min(i + group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
 def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=None, group_size=5):
     import numpy as np
