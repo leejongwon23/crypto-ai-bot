@@ -103,7 +103,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     import os, gc, traceback, torch, numpy as np, pandas as pd, json
     from datetime import datetime; from collections import Counter
     from ssl_pretrain import masked_reconstruction
-    from config import get_FEATURE_INPUT_SIZE, get_class_ranges, get_class_groups  # ✅ get_class_groups 추가
+    from config import get_FEATURE_INPUT_SIZE, get_class_ranges, get_class_groups, set_NUM_CLASSES  # ✅ set_NUM_CLASSES 추가
     from torch.utils.data import TensorDataset, DataLoader
     from model.base_model import get_model
     from logger import log_training_result, record_model_success
@@ -139,6 +139,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             returns = df["close"].pct_change().fillna(0).values
             class_ranges = get_class_ranges(group_id=gid)
             num_classes = len(class_ranges)  # ✅ 실제 클래스 수
+
+            # ✅ 전역 NUM_CLASSES 업데이트
+            set_NUM_CLASSES(num_classes)
+
             group_classes = get_class_groups(num_classes=num_classes)  # ✅ 동적 클래스 그룹 계산
 
             labels = []
