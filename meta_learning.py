@@ -109,15 +109,16 @@ import numpy as np
 
 def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None):
     """
-    메타 러너: 여러 모델 예측 결과(softmax 확률 벡터)와 과거 성능 정보를 이용해
+    메타 러너: 여러 모델 예측 결과(softmax 확률 벡터)와 과거 성능·예상 수익률 정보를 이용해
     최종 예측 클래스(final_pred_class)를 결정.
 
     Args:
         model_outputs_list (list[dict]): 각 모델의 예측 정보 딕셔너리
             - 필수 키: 'probs' (softmax 확률 벡터, np.ndarray 또는 list)
         feature_tensor (np.ndarray or torch.Tensor, optional): 현재 입력 feature
-        meta_info (dict, optional): 클래스별 과거 성공률/도달률 정보
-            - {'success_rate': {0: 0.7, 1: 0.4, ..., N: 0.6}}
+        meta_info (dict, optional):
+            - 'success_rate': {cls: float}  # 과거 성공률
+            - 'expected_return': {cls: float}  # 예상 수익률
 
     Returns:
         int: 최종 선택된 클래스 인덱스 (final_pred_class)
@@ -141,19 +142,34 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
     # ✅ 3. 평균 softmax 계산
     avg_softmax = np.mean(softmax_list, axis=0)
 
-    # ✅ 4. meta_info 기반 가중치 보정 (성공률/도달률)
+    # ✅ 4. meta_info 기반 가중치 보정
     scores = np.copy(avg_softmax)
-    if meta_info and "success_rate" in meta_info:
-        for cls in range(num_classes):
-            success_rate = meta_info["success_rate"].get(cls, 0.5)  # 기본값 0.5
-            scores[cls] *= success_rate
+    success_rate_dict = meta_info.get("success_rate", {}) if meta_info else {}
+    expected_return_dict = meta_info.get("expected_return", {}) if meta_info else {}
+
+    for cls in range(num_classes):
+        success_rate = success_rate_dict.get(cls, 0.5)   # 기본값 0.5
+        exp_return = expected_return_dict.get(cls, 1.0)  # 기본값 1.0
+
+        # 너무 낮은 성공률은 배제
+        if success_rate < 0.3:
+            scores[cls] = -1.0
+        else:
+            # softmax × 성공률 × 예상수익률
+            scores[cls] *= success_rate * abs(exp_return)
 
     # ✅ 5. 최종 클래스 선택
     final_pred_class = int(np.argmax(scores))
 
-    # ✅ 6. 로그 확인용 출력
-    print(f"[META] 최종 클래스 선택 → {final_pred_class} (점수: {scores[final_pred_class]:.4f})")
+    # ✅ 6. 상세 로그 출력
+    print("[META] 클래스별 점수 계산:")
+    for cls in range(num_classes):
+        sr = success_rate_dict.get(cls, 0.5)
+        er = expected_return_dict.get(cls, 1.0)
+        print(f"  cls {cls}: softmax={avg_softmax[cls]:.4f}, "
+              f"성공률={sr:.2f}, 예상수익률={er:.2f}, 점수={scores[cls]:.4f}")
+
+    print(f"[META] 최종 클래스 선택 → {final_pred_class} "
+          f"(점수: {scores[final_pred_class]:.4f})")
 
     return final_pred_class
-
-
