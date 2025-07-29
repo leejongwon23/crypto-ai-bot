@@ -501,6 +501,10 @@ def train_symbol_group_loop(delay_minutes=5):
             _kline_cache.clear()
             _feature_cache.clear()
 
+            # 그룹 전체 성공 여부
+            group_all_success = True
+
+            # 1. 그룹 내 모든 심볼/전략 학습
             for symbol in group:
                 for strategy in ["단기", "중기", "장기"]:
                     train_done.setdefault(symbol, {}).setdefault(strategy, {})
@@ -511,10 +515,9 @@ def train_symbol_group_loop(delay_minutes=5):
                         MAX_GROUP_ID = len(class_groups) - 1
                     except Exception as e:
                         print(f"[⚠️ 동적 클래스 계산 실패] {symbol}-{strategy} → {e}")
+                        group_all_success = False
                         continue
 
-                    # ✅ 각 그룹별 학습
-                    all_success = True
                     for gid in range(MAX_GROUP_ID + 1):
                         if not FORCE_TRAINING and train_done[symbol][strategy].get(str(gid), False):
                             print(f"[⏭️ 스킵] {symbol}-{strategy}-group{gid} (이미 학습됨)")
@@ -529,22 +532,19 @@ def train_symbol_group_loop(delay_minutes=5):
                         except Exception as e:
                             print(f"[❌ 학습 실패] {symbol}-{strategy}-group{gid} → {e}")
                             traceback.print_exc()
-                            all_success = False
+                            group_all_success = False
 
-                    # ✅ 모든 그룹 학습 완료 여부 확인
-                    group_all_trained = all(
-                        train_done[symbol][strategy].get(str(gid), False)
-                        for gid in range(MAX_GROUP_ID + 1)
-                    )
+            # 2. 그룹 전체 학습 완료 시 예측 & 실패학습 & 메타러너 실행
+            if group_all_success:
+                print(f"[▶ 그룹 {idx} 전체 학습 완료 → 예측/실패학습/메타러너 실행]")
 
-                    # ✅ 모든 그룹 학습 완료 시 예측 & 실패학습 & 메타러너
-                    if all_success and group_all_trained:
+                for symbol in group:
+                    for strategy in ["단기", "중기", "장기"]:
                         try:
-                            print(f"[▶ 예측 시도] {symbol}-{strategy} (모든 그룹 학습 완료)")
                             main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
                             print(f"[✅ 예측 완료] {symbol}-{strategy}")
 
-                            # ✅ 실패 데이터 로딩 후 이어학습
+                            # 실패 데이터 로딩 후 이어학습
                             try:
                                 X, y = load_training_prediction_data(
                                     symbol, strategy,
@@ -557,7 +557,7 @@ def train_symbol_group_loop(delay_minutes=5):
                                     train_one_model(symbol, strategy, group_id=None)  # 이어학습
                                     print(f"[✅ 실패학습 완료] {symbol}-{strategy}")
 
-                                    # ✅ 진화형 메타러너 학습
+                                    # 진화형 메타러너 학습
                                     train_evo_meta(X, y, FEATURE_INPUT_SIZE)
                                     print(f"[✅ 진화형 메타러너 학습 완료] {symbol}-{strategy}")
                                 else:
@@ -569,7 +569,7 @@ def train_symbol_group_loop(delay_minutes=5):
                             print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
                             traceback.print_exc()
 
-            # ✅ 그룹 후처리
+            # 3. 그룹 후처리
             try:
                 maintenance_fix_meta.fix_all_meta_json()
                 safe_cleanup.auto_delete_old_logs()
@@ -579,12 +579,11 @@ def train_symbol_group_loop(delay_minutes=5):
             print(f"🕒 그룹 {idx} 완료 → {delay_minutes}분 대기")
             time.sleep(delay_minutes * 60)
 
-        # ✅ 진화형 메타러너 전체 루프 학습
+        # 4. 진화형 메타러너 전체 루프 학습
         try:
             train_evo_meta_loop()
         except Exception as e:
             print(f"[⚠️ 진화형 메타러너 루프 학습 실패] → {e}")
-
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
     """
