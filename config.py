@@ -16,6 +16,7 @@ _default_config = {
 # ✅ 내부 동적 캐시 변수
 _config = _default_config.copy()
 _dynamic_num_classes = None  # ✅ 동적 클래스 저장
+_dynamic_ranges = None       # ✅ 최근 계산된 클래스 범위 저장
 
 # ✅ config.json 로드
 if os.path.exists(CONFIG_PATH):
@@ -35,12 +36,14 @@ def save_config():
     except Exception as e:
         print(f"[⚠️ config.py] config.json 저장 실패 → {e}")
 
-# ✅ 클래스별 수익률 범위 반환
+# ✅ 클래스별 수익률 범위 반환 (동적 반영)
 def get_class_return_range(class_id):
+    global _dynamic_ranges
     num_classes = get_NUM_CLASSES()
+    if _dynamic_ranges is None or len(_dynamic_ranges) != num_classes:
+        _dynamic_ranges = get_class_ranges()
     assert 0 <= class_id < num_classes, f"class_id {class_id} 잘못됨"
-    ranges = get_class_ranges()
-    return ranges[class_id]
+    return _dynamic_ranges[class_id]
 
 # ✅ 클래스별 기대 수익률 계산 (중간값 사용)
 def class_to_expected_return(class_id, num_classes=None):
@@ -78,10 +81,6 @@ def get_SYMBOL_GROUPS():
 
 # ✅ 클래스 그룹화 함수
 def get_class_groups(num_classes=None, group_size=5):
-    """
-    - num_classes를 group_size 크기로 나누어 그룹화
-    - num_classes ≤ group_size 시 단일 그룹 반환
-    """
     if num_classes is None or num_classes < 2:
         num_classes = get_NUM_CLASSES()
     if num_classes <= group_size:
@@ -102,7 +101,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             df_price = get_kline_by_strategy(symbol, strategy)
             if df_price is None or len(df_price) < 30:
                 print("[⚠️ get_class_ranges] 가격 데이터 부족 → fallback equal 사용")
-                return compute_equal_ranges(10)  # 기본 10클래스
+                return compute_equal_ranges(10)
 
             returns = df_price["close"].pct_change().dropna().values
             if len(returns) < 10:
@@ -146,7 +145,10 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
         step = 2.0 / n_cls
         return [(-1.0 + i * step, -1.0 + (i + 1) * step) for i in range(n_cls)]
 
+    # ✅ 계산 및 저장
     all_ranges = compute_split_ranges_from_kline()
+    global _dynamic_ranges
+    _dynamic_ranges = all_ranges
 
     if group_id is None:
         return all_ranges
