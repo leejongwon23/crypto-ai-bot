@@ -99,11 +99,12 @@ def get_class_groups(num_classes=21, group_size=7):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
+
 def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     import os, gc, traceback, torch, numpy as np, pandas as pd, json
     from datetime import datetime; from collections import Counter
     from ssl_pretrain import masked_reconstruction
-    from config import get_FEATURE_INPUT_SIZE, get_class_ranges, get_class_groups, set_NUM_CLASSES  # ✅ set_NUM_CLASSES 추가
+    from config import get_FEATURE_INPUT_SIZE, get_class_ranges, get_class_groups, set_NUM_CLASSES
     from torch.utils.data import TensorDataset, DataLoader
     from model.base_model import get_model
     from logger import log_training_result, record_model_success
@@ -123,8 +124,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     for gid in group_ids:
         print(f"▶ [학습시작] {symbol}-{strategy}-group{gid}")
         try:
+            # 1. SSL 사전학습
             masked_reconstruction(symbol, strategy, input_size)
 
+            # 2. 원본 데이터 로드
             df = get_kline_by_strategy(symbol, strategy)
             if df is None or len(df) < 100:
                 raise Exception("⛔ get_kline 데이터 부족")
@@ -136,14 +139,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
             feat_scaled = MinMaxScaler().fit_transform(features_only)
 
+            # 3. 수익률 → 클래스 변환
             returns = df["close"].pct_change().fillna(0).values
             class_ranges = get_class_ranges(group_id=gid)
-            num_classes = len(class_ranges)  # ✅ 실제 클래스 수
-
-            # ✅ 전역 NUM_CLASSES 업데이트
+            num_classes = len(class_ranges)
             set_NUM_CLASSES(num_classes)
-
-            group_classes = get_class_groups(num_classes=num_classes)  # ✅ 동적 클래스 그룹 계산
+            group_classes = get_class_groups(num_classes=num_classes)
 
             labels = []
             for r in returns:
@@ -158,6 +159,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 if not matched:
                     labels.append(0)
 
+            # 4. 시퀀스 생성
             window = 60
             X, y = [], []
             for i in range(len(feat_scaled) - window):
@@ -166,25 +168,27 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
             X, y = np.array(X), np.array(y)
 
+            # 5. 실패 데이터 자동 병합
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size, window, group_id=gid)
             if fail_X is not None and len(fail_X) > 0:
-                print(f"📌 실패 샘플 {len(fail_X)}건 추가 병합")
+                print(f"📌 실패 샘플 {len(fail_X)}건 자동 병합")
                 X = np.concatenate([X, fail_X], axis=0)
                 y = np.concatenate([y, fail_y], axis=0)
 
             if len(X) < 10:
                 raise Exception("⛔ 유효한 학습 샘플 부족")
 
+            # 6. 모델별 학습 루프
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
                 model = get_model(model_type, input_size=input_size, output_size=num_classes)
                 if model is None:
                     raise Exception(f"⛔ get_model({model_type}) → None 반환됨")
-
                 model.to(DEVICE)
 
                 model_base = f"{symbol}_{strategy}_{model_type}_group{gid}_cls{num_classes}"
                 model_path = os.path.join("/persistent/models", f"{model_base}.pt")
 
+                # 기존 모델 → 이어학습
                 if os.path.exists(model_path):
                     model.load_state_dict(torch.load(model_path))
                     print(f"🔁 기존 모델 불러와 이어학습 시작: {model_path}")
@@ -195,6 +199,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 criterion = torch.nn.CrossEntropyLoss()
                 model.train()
 
+                # 8:2 데이터 분리
                 ratio = int(len(X) * 0.8)
                 X_train = torch.tensor(X[:ratio], dtype=torch.float32)
                 y_train = torch.tensor(y[:ratio], dtype=torch.long)
@@ -204,6 +209,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=64, shuffle=True)
                 val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=64)
 
+                # 학습
                 for epoch in range(max_epochs):
                     total_loss = 0
                     for xb, yb in train_loader:
@@ -216,6 +222,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         total_loss += loss.item()
                     print(f"[{model_type}][Epoch {epoch+1}/{max_epochs}] Loss: {total_loss:.4f}")
 
+                # 평가
                 model.eval()
                 all_preds, all_labels = [], []
                 with torch.no_grad():
@@ -234,9 +241,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                     print(f"⛔ {model_type} 평가 실패 → 저장/로깅 생략")
                     continue
 
+                # 저장
                 os.makedirs("/persistent/models", exist_ok=True)
                 torch.save(model.state_dict(), model_path)
 
+                # 메타정보 저장
                 meta_info = {
                     "symbol": symbol,
                     "strategy": strategy,
@@ -249,6 +258,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
                     json.dump(meta_info, f, ensure_ascii=False, indent=2)
 
+                # 로그 기록
                 log_training_result(symbol=symbol, strategy=strategy, model=model_path,
                                     accuracy=acc, f1=f1, loss=total_loss)
 
@@ -258,7 +268,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         except Exception as e:
             print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{gid} → {e}")
             traceback.print_exc()
-
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
