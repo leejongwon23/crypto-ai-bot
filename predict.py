@@ -459,34 +459,41 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
+            # ✅ 클래스 범위 가져오기
             class_ranges_for_group = get_class_ranges(group_id=group_id)
-            success = False
-            cls_min, cls_max = 0, 0
-            if 0 <= label < len(class_ranges_for_group):
-                cls_min, cls_max = class_ranges_for_group[label]
-                # ✅ 조기 성공 판단 기준
-                if gain >= cls_min:
-                    success = True
-            else:
+            if not (0 <= label < len(class_ranges_for_group)):
                 r.update({"status": "fail", "reason": f"label({label}) 클래스 범위 오류", "return": 0.0})
                 updated.append(r)
                 continue
 
-            # ✅ 평가 시점 도달 전인데 아직 성공 조건 미충족이면 pending 처리
-            if now_kst() < deadline and not success:
-                r.update({"status": "pending", "reason": "⏳ 평가 대기 중", "return": 0.0})
-                updated.append(r)
-                continue
+            cls_min, cls_max = class_ranges_for_group[label]
 
+            # ✅ 성공 조건: cls_min <= gain <= cls_max
+            success = cls_min <= gain <= cls_max
+
+            # ✅ 평가 시점 전
+            if now_kst() < deadline:
+                if success:
+                    # 조기 성공
+                    status = "success"
+                else:
+                    # 아직 미충족 → 대기
+                    r.update({"status": "pending", "reason": "⏳ 평가 대기 중", "return": 0.0})
+                    updated.append(r)
+                    continue
+            else:
+                # 평가 시점 도달 후 최종 성공 여부
+                status = "success" if success else "fail"
+
+            # 변동성 여부
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
-            status = "v_success" if vol and success else \
-                     "v_fail" if vol and not success else \
-                     "success" if success else "fail"
+            if vol:
+                status = "v_success" if success else "v_fail"
 
             confidence = float(r.get("confidence", 0.0)) if "confidence" in r else 0.0
             r.update({
                 "status": status,
-                "reason": f"[label={label}] gain={gain:.3f} (cls_min={cls_min})",
+                "reason": f"[label={label}] gain={gain:.3f} (cls_min={cls_min}, cls_max={cls_max})",
                 "return": round(gain, 5),
                 "confidence": confidence,
                 "group_id": group_id
@@ -509,6 +516,7 @@ def evaluate_predictions(get_price_fn):
             updated.append(r)
 
     updated += evaluated
+
 
     def safe_write_csv(path, rows):
         if not rows:
