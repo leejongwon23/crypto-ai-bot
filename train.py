@@ -99,7 +99,6 @@ def get_class_groups(num_classes=21, group_size=7):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
-
 def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     import os, gc, traceback, torch, numpy as np, pandas as pd, json
     from datetime import datetime; from collections import Counter
@@ -107,7 +106,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     from config import get_FEATURE_INPUT_SIZE, get_class_ranges, get_class_groups, set_NUM_CLASSES
     from torch.utils.data import TensorDataset, DataLoader
     from model.base_model import get_model
-    from logger import log_training_result, record_model_success
+    from logger import log_training_result, record_model_success, get_feature_hash_from_tensor
     from data.utils import get_kline_by_strategy, compute_features
     from wrong_data_loader import load_training_prediction_data
     import pytz
@@ -168,12 +167,27 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
             X, y = np.array(X), np.array(y)
 
-            # 5. 실패 데이터 자동 병합
+            # 5. 실패 데이터 자동 병합 + 중복제거
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size, window, group_id=gid)
             if fail_X is not None and len(fail_X) > 0:
-                print(f"📌 실패 샘플 {len(fail_X)}건 자동 병합")
-                X = np.concatenate([X, fail_X], axis=0)
-                y = np.concatenate([y, fail_y], axis=0)
+                print(f"📌 실패 샘플 {len(fail_X)}건 자동 병합 시도")
+
+                # 중복 feature 제거
+                all_X = np.concatenate([X, fail_X], axis=0)
+                all_y = np.concatenate([y, fail_y], axis=0)
+
+                # feature_hash 기반 중복 제거
+                unique_hashes = {}
+                filtered_X, filtered_y = [], []
+                for i in range(len(all_X)):
+                    h = get_feature_hash_from_tensor(torch.tensor(all_X[i:i+1], dtype=torch.float32))
+                    if h not in unique_hashes:
+                        unique_hashes[h] = True
+                        filtered_X.append(all_X[i])
+                        filtered_y.append(all_y[i])
+                X, y = np.array(filtered_X), np.array(filtered_y)
+
+                print(f"📌 병합 후 최종 샘플 수: {len(X)} (중복 제거 완료)")
 
             if len(X) < 10:
                 raise Exception("⛔ 유효한 학습 샘플 부족")
@@ -253,7 +267,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                     "group_id": gid,
                     "num_classes": num_classes,
                     "input_size": input_size,
-                    "timestamp": now_kst().isoformat()
+                    "timestamp": now_kst().isoformat(),
+                    "fail_data_merged": True if fail_X is not None and len(fail_X) > 0 else False
                 }
                 with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
                     json.dump(meta_info, f, ensure_ascii=False, indent=2)
@@ -268,6 +283,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         except Exception as e:
             print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{gid} → {e}")
             traceback.print_exc()
+
 
 # ✅ augmentation 함수 추가
 def augment_and_expand(X_train_group, y_train_group, repeat_factor, group_classes, target_count):
@@ -478,14 +494,16 @@ def train_symbol_group_loop(delay_minutes=5):
     from config import get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges
     from failure_db import ensure_failure_db
 
+    # ✅ 실패 DB 준비
     ensure_failure_db()
-    FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 
+    FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
     FORCE_TRAINING = True
+
     done_path = "/persistent/train_done.json"
     train_done = {}
 
-    # 학습 완료 기록 불러오기
+    # ✅ 학습 완료 기록 로드
     try:
         if os.path.exists(done_path):
             with open(done_path, "r", encoding="utf-8") as f:
@@ -524,7 +542,7 @@ def train_symbol_group_loop(delay_minutes=5):
 
                     all_success = True
                     for gid in range(MAX_GROUP_ID + 1):
-                        # 이미 학습된 경우 스킵 (강제 학습 모드가 아닐 때)
+                        # ✅ 이미 학습된 경우 스킵
                         if not FORCE_TRAINING and train_done[symbol][strategy].get(str(gid), False):
                             print(f"[⏭️ 스킵] {symbol}-{strategy}-group{gid} (이미 학습됨)")
                             continue
@@ -541,20 +559,20 @@ def train_symbol_group_loop(delay_minutes=5):
                             traceback.print_exc()
                             all_success = False
 
-                    # 모든 그룹 학습 완료 여부 확인
+                    # ✅ 모든 그룹 학습 완료 여부 확인
                     group_all_trained = all(
                         train_done[symbol][strategy].get(str(gid), False)
                         for gid in range(MAX_GROUP_ID + 1)
                     )
 
-                    # ✅ 모든 그룹 학습이 끝나고, 학습 실패가 한 번도 없을 때만 예측 실행
+                    # ✅ 모든 그룹 학습이 끝나고, 실패 없이 종료된 경우 예측 수행
                     if group_all_trained and all_success:
                         try:
                             print(f"[▶ 예측 시작] {symbol}-{strategy}")
                             main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
                             print(f"[✅ 예측 완료] {symbol}-{strategy}")
 
-                            # 실패 데이터 로딩 후 이어학습
+                            # ✅ 실패 데이터 로드 후 이어학습 + 메타러너 학습
                             try:
                                 X, y = load_training_prediction_data(
                                     symbol, strategy,
@@ -564,10 +582,9 @@ def train_symbol_group_loop(delay_minutes=5):
                                 )
                                 if X is not None and y is not None and len(X) > 0:
                                     print(f"[▶ 실패학습 시작] {symbol}-{strategy}")
-                                    train_one_model(symbol, strategy, group_id=None)  # 이어학습
+                                    train_one_model(symbol, strategy, group_id=None)
                                     print(f"[✅ 실패학습 완료] {symbol}-{strategy}")
 
-                                    # 진화형 메타러너 학습
                                     print(f"[▶ 진화형 메타러너 학습 시작] {symbol}-{strategy}")
                                     train_evo_meta(X, y, FEATURE_INPUT_SIZE)
                                     print(f"[✅ 진화형 메타러너 학습 완료] {symbol}-{strategy}")
@@ -582,7 +599,7 @@ def train_symbol_group_loop(delay_minutes=5):
                     else:
                         print(f"[⏭️ 예측 스킵] {symbol}-{strategy} → 모든 그룹 학습 완료 전 또는 학습 실패 발생")
 
-            # 그룹 후처리
+            # ✅ 그룹 후처리
             try:
                 maintenance_fix_meta.fix_all_meta_json()
                 safe_cleanup.auto_delete_old_logs()
@@ -593,7 +610,7 @@ def train_symbol_group_loop(delay_minutes=5):
             print(f"🕒 그룹 {idx+1} 완료 → {delay_minutes}분 대기")
             time.sleep(delay_minutes * 60)
 
-        # 진화형 메타러너 전체 루프 학습
+        # ✅ 전체 루프 종료 후 진화형 메타러너 전체 학습
         try:
             print("[▶ 진화형 메타러너 전체 루프 학습 시작]")
             train_evo_meta_loop()
