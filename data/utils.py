@@ -234,9 +234,9 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     if config is None:
         print(f"[❌ 실패] {symbol}-{strategy}: 전략 설정 없음")
         failed_result(symbol, strategy, reason="전략 설정 없음")
-        return pd.DataFrame()
+        return None  # ← ✅ 빈 DataFrame 말고 None 반환
 
-    min_required_rows = config.get("limit", 100)  # ✅ limit 기준 최소 row 보장
+    min_required_rows = config.get("limit", 100)
 
     df = None
     for attempt in range(3):
@@ -251,10 +251,12 @@ def get_kline_by_strategy(symbol: str, strategy: str):
             print(f"[⚠️ get_kline 예외 - 시도 {attempt+1}/3] {symbol}-{strategy} → {e}")
         time.sleep(1)
 
+    # ✅ 실패 조건 명확히 처리
     if df is None or not isinstance(df, pd.DataFrame) or len(df) < min_required_rows:
-        print(f"[❌ 실패] {symbol}-{strategy}: 유효한 row 부족 ({len(df) if df is not None else 0} rows)")
-        failed_result(symbol, strategy, reason=f"캔들 row 부족 ({len(df) if df is not None else 0})")
-        return pd.DataFrame()
+        row_count = len(df) if df is not None else 0
+        print(f"[❌ 실패] get_kline() 최종 실패: {symbol}-{strategy}, row 수: {row_count}")
+        failed_result(symbol, strategy, reason=f"캔들 row 부족 ({row_count})")
+        return None  # ← ✅ 명확하게 실패 처리
 
     required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
     for col in required_cols:
@@ -265,6 +267,7 @@ def get_kline_by_strategy(symbol: str, strategy: str):
 
     CacheManager.set(cache_key, df)
     return df
+
 
 
 # ✅ SYMBOL_GROUPS batch prefetch 함수 추가
