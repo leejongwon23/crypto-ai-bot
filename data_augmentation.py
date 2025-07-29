@@ -35,14 +35,18 @@ def augment_batch(X_batch):
 import numpy as np
 from collections import Counter
 
-def balance_classes(X, y, min_count=5, num_classes=21):
+def balance_classes(X, y, min_count=5, num_classes=None):
     import numpy as np
     from collections import Counter
     from data_augmentation import augment_batch
+    import random
 
     if X is None or y is None or len(X) == 0 or len(y) == 0:
         print("[❌ balance_classes 실패] X 또는 y 비어있음")
         raise Exception("⛔ balance_classes 중단: X 또는 y 비어있음")
+
+    if num_classes is None:
+        num_classes = int(np.max(y)) + 1
 
     y = y.astype(np.int64)
     mask = (y != -1) & np.isfinite(y)
@@ -122,4 +126,5 @@ def balance_classes(X, y, min_count=5, num_classes=21):
 
     print(f"[✅ balance_classes 완료] X.shape={X_final.shape}, y.shape={y_final.shape}, 총 샘플수: {len(y_final)}")
     return X_final, y_final
+
 
