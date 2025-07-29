@@ -180,7 +180,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                    label=None, group_id=None, model_symbol=None, model_name=None,
                    source="일반", volatility=False, feature_vector=None):
 
-    import csv, os
+    import csv, os, json
     from datetime import datetime
     import pytz
     from config import get_class_return_range
@@ -206,13 +206,16 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
     if source not in allowed_sources:
         source = "일반"
 
-    # ✅ 성공/실패 판정 통일 (클래스 범위 도달 여부로 판단)
+    # ✅ 성공/실패 판정 통일 (클래스 범위 도달 여부)
     if predicted_class >= 0:
-        cls_min, cls_max = get_class_return_range(predicted_class)
-        actual_return = return_value
-        success = (cls_min <= actual_return <= cls_max)
+        try:
+            cls_min, cls_max = get_class_return_range(predicted_class)
+            success = cls_min <= return_value <= cls_max
+        except Exception as e:
+            print(f"[⚠️ get_class_return_range 오류] {e}")
+            success = False
 
-    # ✅ 로그 레코드
+    # ✅ 로그 레코드 작성
     row = [
         now, symbol, strategy, direction, entry_price, target_price,
         model or "", predicted_class, top_k_str, note,
@@ -237,6 +240,9 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
 
         # ✅ 실패일 경우 실패 DB 저장
         if not success:
+            # feature_hash 고유성 강화 → symbol+strategy+model+predicted_class+label+rate
+            feature_hash = f"{symbol}-{strategy}-{model or ''}-{predicted_class}-{label}-{rate}"
+
             insert_failure_record(
                 {
                     "symbol": symbol,
@@ -252,9 +258,9 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                     "target_price": target_price,
                     "return_value": return_value
                 },
-                feature_hash=f"{symbol}-{strategy}-{label}-{predicted_class}-{model_name}-{now}",
+                feature_hash=feature_hash,
                 label=label,
-                feature_vector=(feature_vector.tolist() if feature_vector is not None else None)
+                feature_vector=(feature_vector.tolist() if hasattr(feature_vector, "tolist") else feature_vector)
             )
 
     except Exception as e:
