@@ -393,7 +393,7 @@ def evaluate_predictions(get_price_fn):
     import pandas as pd
     from failure_db import ensure_failure_db, insert_failure_record
     from logger import update_model_success, log_prediction
-    from config import get_class_return_range  # ✅ 수정: 범위 불러올 함수
+    from config import get_class_return_range
     ensure_failure_db()
 
     PREDICTION_LOG = "/persistent/prediction_log.csv"
@@ -442,7 +442,8 @@ def evaluate_predictions(get_price_fn):
                 continue
 
             timestamp = pd.to_datetime(r.get("timestamp"), utc=True).tz_convert("Asia/Seoul")
-            deadline = timestamp + pd.Timedelta(hours=eval_horizon_map.get(strategy, 6))
+            eval_hours = eval_horizon_map.get(strategy, 6)
+            deadline = timestamp + pd.Timedelta(hours=eval_hours)
 
             df = get_price_fn(symbol, strategy)
             if df is None or "timestamp" not in df.columns:
@@ -460,24 +461,26 @@ def evaluate_predictions(get_price_fn):
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            # ✅ 수익률 클래스 범위 가져오기 (최소값 이상이면 성공)
+            # 클래스 수익률 범위
             cls_min, cls_max = get_class_return_range(label)
-            success = gain >= cls_min
+            reached_target = gain >= cls_min
 
-            # ✅ 평가 시점 전이라도 수익률 도달 시 조기 성공
+            # ✅ 조기평가 방지: 평가 주기 도달 전
             if now_kst() < deadline:
-                if not success:
+                if reached_target:
+                    status = "success"  # 조기 성공 허용
+                else:
                     r.update({"status": "pending", "reason": "⏳ 평가 대기 중", "return": round(gain, 5)})
                     updated.append(r)
                     continue
-                status = "success"
             else:
-                status = "success" if success else "fail"
+                # 평가 주기 도달 후
+                status = "success" if reached_target else "fail"
 
-            # 변동성 전략 구분
+            # 변동성 전략 여부
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
             if vol:
-                status = "v_success" if success else "v_fail"
+                status = "v_success" if status == "success" else "v_fail"
 
             confidence = float(r.get("confidence", 0.0)) if "confidence" in r else 0.0
             r.update({
@@ -490,14 +493,14 @@ def evaluate_predictions(get_price_fn):
 
             log_prediction(symbol, strategy, f"평가:{status}", entry_price,
                            entry_price * (1 + gain), now_kst().isoformat(), model,
-                           success, r["reason"], gain, gain, vol, "평가",
+                           status in ["success", "v_success"], r["reason"], gain, gain, vol, "평가",
                            predicted_class=pred_class, label=label, group_id=group_id)
 
-            if not success:
+            if status in ["fail", "v_fail"]:
                 insert_failure_record(r, f"{symbol}-{strategy}-{now_kst().isoformat()}",
                                       feature_vector=None, label=label)
 
-            update_model_success(symbol, strategy, model, success)
+            update_model_success(symbol, strategy, model, status in ["success", "v_success"])
             evaluated.append({str(k): (v if v is not None else "") for k, v in r.items() if k is not None})
 
         except Exception as e:
@@ -521,6 +524,7 @@ def evaluate_predictions(get_price_fn):
     safe_write_csv(WRONG, failed)
 
     print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
+
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
