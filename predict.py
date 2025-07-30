@@ -193,12 +193,11 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
-
 def predict(symbol, strategy, source="일반", model_type=None):
     import numpy as np, pandas as pd, os, torch, json
     from sklearn.preprocessing import MinMaxScaler
     from window_optimizer import find_best_windows
-    from logger import log_prediction, get_available_models
+    from logger import log_prediction, get_available_models, get_model_success_rate
     from config import FEATURE_INPUT_SIZE, get_class_return_range, class_to_expected_return
     from model_weight_loader import load_model_cached
     from predict_trigger import get_recent_class_frequencies
@@ -208,7 +207,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
     import pytz
     from failure_db import insert_failure_record, ensure_failure_db
     from predict import get_model_predictions
-    from evo_meta_learner import get_best_strategy_by_failure_probability
+    from evo_meta_learner import (
+        get_best_strategy_by_failure_probability,
+        predict_evo_meta
+    )
 
     ensure_failure_db()
     os.makedirs("/persistent/logs", exist_ok=True)
@@ -278,17 +280,39 @@ def predict(symbol, strategy, source="일반", model_type=None):
             print(f"[🔁 전략 교체됨] {strategy} → {recommended_strategy}")
             strategy = recommended_strategy
 
-        # 9. 메타 예측 클래스
+        # 9. 기본 메타러너 결과
         final_pred_class = get_meta_prediction(
             [m["probs"] for m in model_outputs_list],
             feature_tensor,
             meta_info={"success_rate": {c: 0.5 for c in range(len(model_outputs_list[0]["probs"]))}}
         )
 
+        # 9-1. 진화형 메타러너 조건부 전환
+        evo_model_path = "/persistent/models/evo_meta_learner.pt"
+        use_evo = False
+        success_stats = get_model_success_rate(strategy)
+        recent_count = sum(s["count"] for s in success_stats.values()) if success_stats else 0
+
+        if os.path.exists(evo_model_path) and recent_count >= 50:
+            try:
+                evo_pred = predict_evo_meta(feature_tensor.unsqueeze(0), input_size=FEATURE_INPUT_SIZE)
+                if evo_pred is not None and evo_pred != final_pred_class:
+                    print(f"[🔁 진화형 메타러너 전환] {final_pred_class} → {evo_pred}")
+                    final_pred_class = evo_pred
+                    use_evo = True
+            except Exception as e:
+                print(f"[⚠️ 진화형 메타러너 예외] {e}")
+
+        if use_evo:
+            print(f"[META] 진화형 메타러너 적용됨: 클래스 {final_pred_class}")
+        else:
+            print(f"[META] 기본 메타러너 유지: 클래스 {final_pred_class}")
+
+        # 10. 클래스 범위 및 현재 가격
         cls_min, cls_max = get_class_return_range(final_pred_class)
         current_price = df.iloc[-1]["close"]
 
-        # 10. 개별 모델 로깅 (수익률 도달 기준 성공 판정)
+        # 11. 개별 모델 로깅 (수익률 도달 기준 성공 판정)
         for pred in all_model_predictions:
             entry_price = pred["entry_price"]
             expected_return = class_to_expected_return(pred["class"], pred["num_classes"])
@@ -327,7 +351,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 feature_vector=feature_tensor.numpy()
             )
 
-        # 11. 메타(진화형) 로깅 (수익률 도달 기준 성공 판정)
+        # 12. 메타(진화형) 로깅
         evo_expected_return = class_to_expected_return(final_pred_class, len(model_outputs_list[0]["probs"]))
         entry_price_meta = all_model_predictions[0]["entry_price"]
         actual_return_meta = (current_price / entry_price_meta) - 1
@@ -351,12 +375,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
             model_name="evo_meta_learner",
             predicted_class=final_pred_class,
             label=final_pred_class,
-            note="진화형 메타 선택",
+            note="진화형 메타 선택" if use_evo else "기본 메타 선택",
             success=meta_success_flag,
             reason=f"수익률도달:{meta_success_flag}",
             rate=evo_expected_return,
             return_value=actual_return_meta,
-            source="진화형",
+            source="진화형" if use_evo else "기본",
             group_id=all_model_predictions[0].get("group_id"),
             feature_vector=feature_tensor.numpy()
         )
@@ -368,7 +392,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "class": final_pred_class,
             "expected_return": evo_expected_return,
             "timestamp": now_kst().isoformat(),
-            "reason": "메타 최종 선택",
+            "reason": "진화형 메타 최종 선택" if use_evo else "기본 메타 최종 선택",
             "source": source
         }
 
