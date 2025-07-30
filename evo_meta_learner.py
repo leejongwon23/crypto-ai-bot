@@ -73,18 +73,23 @@ def prepare_evo_meta_dataset(path="/persistent/wrong_predictions.csv", min_sampl
     print(f"[✅ prepare_evo_meta_dataset] X:{X.shape}, y:{y.shape}")
     return X, y
 
+def train_evo_meta(X, y, input_size, num_strategies, epochs=10, batch_size=32, lr=1e-3):
+    import os, torch, torch.nn as nn
+    from torch.utils.data import TensorDataset, DataLoader
 
-# ✅ 학습 함수
-def train_evo_meta(X, y, input_size, epochs=10, batch_size=32, lr=1e-3):
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = EvoMetaModel(input_size).to(DEVICE)
+    
+    # ✅ 출력 크기를 전략 개수(num_strategies)에 맞게 설정
+    model = EvoMetaModel(input_size, output_size=num_strategies).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
 
     dataset = TensorDataset(torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.long))
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
+    print(f"[evo_meta_learner] 학습 시작 → 샘플 수: {len(dataset)}, 전략 개수: {num_strategies}, 입력 크기: {input_size}")
     for epoch in range(epochs):
+        epoch_loss = 0.0
         for xb, yb in loader:
             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
             preds = model(xb)
@@ -92,10 +97,21 @@ def train_evo_meta(X, y, input_size, epochs=10, batch_size=32, lr=1e-3):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            epoch_loss += loss.item()
+        print(f"[evo_meta_learner] Epoch {epoch+1}/{epochs} → Loss: {epoch_loss:.4f}")
 
     os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
     torch.save(model.state_dict(), MODEL_PATH)
-    print(f"[✅ evo_meta_learner] 학습 완료 → {MODEL_PATH}")
+
+    # ✅ 메타 정보 저장 → 예측 시 전략 개수 불일치 방지
+    meta_info = {
+        "input_size": input_size,
+        "num_strategies": num_strategies
+    }
+    with open(MODEL_PATH.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta_info, f, ensure_ascii=False, indent=2)
+
+    print(f"[✅ evo_meta_learner] 학습 완료 → {MODEL_PATH} (전략 개수={num_strategies})")
     return model
 
 
