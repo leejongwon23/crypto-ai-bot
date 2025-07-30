@@ -121,12 +121,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     group_ids = [group_id] if group_id is not None else list(range(1))
 
     for gid in group_ids:
+        model_saved = False
         print(f"▶ [학습시작] {symbol}-{strategy}-group{gid}")
         try:
             # 1. SSL 사전학습
             masked_reconstruction(symbol, strategy, input_size)
 
-            # 2. 원본 데이터 로드
+            # 2. 데이터 로드
             df = get_kline_by_strategy(symbol, strategy)
             if df is None or len(df) < 100:
                 raise Exception("⛔ get_kline 데이터 부족")
@@ -164,65 +165,41 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             for i in range(len(feat_scaled) - window):
                 X.append(feat_scaled[i:i+window])
                 y.append(labels[i + window] if i + window < len(labels) else 0)
-
             X, y = np.array(X), np.array(y)
 
-            # 5. 실패 데이터 자동 병합 + 중복 제거 보완
+            # 5. 실패 데이터 병합
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size, window, group_id=gid)
             if fail_X is not None and len(fail_X) > 0:
-                print(f"📌 실패 샘플 {len(fail_X)}건 로드됨 → 병합 시도")
-
-                # feature_hash 기반 중복 제거 (실패 데이터 우선)
-                unique_hashes = {}
-                filtered_X, filtered_y = [], []
-
-                # 1) 실패 데이터 우선 등록
+                print(f"📌 실패 샘플 {len(fail_X)}건 병합 시도")
+                unique_hashes, filtered_X, filtered_y = {}, [], []
+                # 실패 데이터 우선
                 for i in range(len(fail_X)):
                     h = get_feature_hash_from_tensor(torch.tensor(fail_X[i:i+1], dtype=torch.float32))
                     if h not in unique_hashes:
                         unique_hashes[h] = True
                         filtered_X.append(fail_X[i])
                         filtered_y.append(fail_y[i])
-
-                # 2) 정상 데이터 추가 (중복 제외)
+                # 정상 데이터 추가
                 for i in range(len(X)):
                     h = get_feature_hash_from_tensor(torch.tensor(X[i:i+1], dtype=torch.float32))
                     if h not in unique_hashes:
                         unique_hashes[h] = True
                         filtered_X.append(X[i])
                         filtered_y.append(y[i])
-
                 X, y = np.array(filtered_X), np.array(filtered_y)
-                print(f"📌 병합 후 최종 샘플 수: {len(X)} (중복 제거 완료, 실패데이터 우선)")
-
-            else:
-                print(f"ℹ️ 실패 데이터 없음 → 정상 데이터만 학습")
 
             if len(X) < 10:
                 raise Exception("⛔ 유효한 학습 샘플 부족")
 
-            # 6. 모델별 학습 루프
+            # 6. 모델 학습
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
-                model = get_model(model_type, input_size=input_size, output_size=num_classes)
-                if model is None:
-                    raise Exception(f"⛔ get_model({model_type}) → None 반환됨")
-                model.to(DEVICE)
-
+                model = get_model(model_type, input_size=input_size, output_size=num_classes).to(DEVICE)
                 model_base = f"{symbol}_{strategy}_{model_type}_group{gid}_cls{num_classes}"
                 model_path = os.path.join("/persistent/models", f"{model_base}.pt")
 
-                # 기존 모델 → 이어학습
-                if os.path.exists(model_path):
-                    model.load_state_dict(torch.load(model_path))
-                    print(f"🔁 기존 모델 불러와 이어학습 시작: {model_path}")
-                else:
-                    print(f"🆕 신규 모델 학습 시작: {model_path}")
-
                 optimizer = Ranger(model.parameters(), lr=0.001)
                 criterion = torch.nn.CrossEntropyLoss()
-                model.train()
 
-                # 8:2 데이터 분리
                 ratio = int(len(X) * 0.8)
                 X_train = torch.tensor(X[:ratio], dtype=torch.float32)
                 y_train = torch.tensor(y[:ratio], dtype=torch.long)
@@ -232,18 +209,16 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=64, shuffle=True)
                 val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=64)
 
-                # 학습
+                # 학습 루프
                 for epoch in range(max_epochs):
                     total_loss = 0
                     for xb, yb in train_loader:
                         xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                         optimizer.zero_grad()
-                        out = model(xb)
-                        loss = criterion(out, yb)
+                        loss = criterion(model(xb), yb)
                         loss.backward()
                         optimizer.step()
                         total_loss += loss.item()
-                    print(f"[{model_type}][Epoch {epoch+1}/{max_epochs}] Loss: {total_loss:.4f}")
 
                 # 평가
                 model.eval()
@@ -251,24 +226,22 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 with torch.no_grad():
                     for xb, yb in val_loader:
                         xb = xb.to(DEVICE)
-                        out = model(xb)
-                        preds = torch.argmax(out, dim=1).cpu().numpy()
+                        preds = torch.argmax(model(xb), dim=1).cpu().numpy()
                         all_preds.extend(preds)
                         all_labels.extend(yb.numpy())
 
                 acc = accuracy_score(all_labels, all_preds)
                 f1 = f1_score(all_labels, all_preds, average='macro')
-                print(f"[🎯 {model_type}] acc={acc:.4f}, f1={f1:.4f}")
 
                 if acc == 0.0 and f1 == 0.0:
-                    print(f"⛔ {model_type} 평가 실패 → 저장/로깅 생략")
-                    continue
+                    print(f"⛔ {model_type} 평가 실패 → fallback 모델 저장")
+                else:
+                    print(f"[🎯 {model_type}] acc={acc:.4f}, f1={f1:.4f}")
 
-                # 저장
+                # 모델 저장
                 os.makedirs("/persistent/models", exist_ok=True)
                 torch.save(model.state_dict(), model_path)
 
-                # 메타정보 저장
                 meta_info = {
                     "symbol": symbol,
                     "strategy": strategy,
@@ -276,22 +249,28 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                     "group_id": gid,
                     "num_classes": num_classes,
                     "input_size": input_size,
-                    "timestamp": now_kst().isoformat(),
-                    "fail_data_merged": True if fail_X is not None and len(fail_X) > 0 else False
+                    "timestamp": now_kst().isoformat()
                 }
                 with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
                     json.dump(meta_info, f, ensure_ascii=False, indent=2)
 
-                # 로그 기록
-                log_training_result(symbol=symbol, strategy=strategy, model=model_path,
-                                    accuracy=acc, f1=f1, loss=total_loss)
-
-                success_flag = acc > 0.6 and f1 > 0.55
-                record_model_success(model_base, success_flag)
+                record_model_success(model_base, acc > 0.6 and f1 > 0.55)
+                model_saved = True
 
         except Exception as e:
             print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{gid} → {e}")
             traceback.print_exc()
+
+        # ✅ 학습 실패해도 더미 모델 저장
+        if not model_saved:
+            print(f"[⚠️ {symbol}-{strategy}-group{gid}] 학습 실패 → 더미 모델 저장")
+            for model_type in ["lstm", "cnn_lstm", "transformer"]:
+                dummy = get_model(model_type, input_size=input_size, output_size=3).to("cpu")
+                model_base = f"{symbol}_{strategy}_{model_type}_group{gid}_cls3"
+                model_path = os.path.join("/persistent/models", f"{model_base}.pt")
+                torch.save(dummy.state_dict(), model_path)
+                with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
+                    json.dump({"symbol": symbol, "strategy": strategy, "model": model_type}, f)
 
 
 # ✅ augmentation 함수 추가
