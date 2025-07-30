@@ -484,16 +484,19 @@ def train_symbol_group_loop(delay_minutes=5):
     from config import get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges
     from failure_db import ensure_failure_db
 
-    def now_kst(): 
+    def now_kst():
         return datetime.now(pytz.timezone("Asia/Seoul"))
 
     ensure_failure_db()
     FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
-    FORCE_TRAINING = True
+
+    # ✅ 필요 시 강제 재학습 켜기/끄기
+    FORCE_TRAINING = False  
 
     done_path = "/persistent/train_done.json"
     train_done = {}
 
+    # ✅ 이전 학습 완료 상태 로드
     try:
         if os.path.exists(done_path):
             with open(done_path, "r", encoding="utf-8") as f:
@@ -509,19 +512,21 @@ def train_symbol_group_loop(delay_minutes=5):
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작 ({now_kst().isoformat()})")
 
-    first_loop = True  # 첫 루프 여부
+    first_loop = True
 
     while True:
         loop_start_time = time.time()
         loop_count += 1
         print(f"\n🔄 전체 그룹 순회 루프 #{loop_count} 시작 ({now_kst().isoformat()})")
 
-        all_groups_success = True  # 전체 그룹 학습 성공 여부 추적
+        all_groups_success = True  # 모든 그룹 학습 성공 여부
 
         for idx, group in enumerate(SYMBOL_GROUPS):
+            group_success = True  # 개별 그룹 학습 성공 여부
             print(f"\n📊 [그룹 {idx+1}/{group_count}] 학습 시작 | 심볼 수: {len(group)}")
             if not group:
                 print(f"[⚠️ 그룹 {idx+1} 심볼 없음 → 스킵]")
+                all_groups_success = False
                 continue
 
             _kline_cache.clear()
@@ -537,10 +542,11 @@ def train_symbol_group_loop(delay_minutes=5):
                         MAX_GROUP_ID = len(class_groups) - 1
                     except Exception as e:
                         print(f"[⚠️ 동적 클래스 계산 실패] {symbol}-{strategy} → {e}")
-                        all_groups_success = False
+                        group_success = False
                         continue
 
                     for gid in range(MAX_GROUP_ID + 1):
+                        # ✅ 이전 학습 완료 여부 체크
                         if not FORCE_TRAINING and train_done[symbol][strategy].get(str(gid), False):
                             print(f"[⏭️ 스킵] {symbol}-{strategy}-group{gid} (이미 학습됨)")
                             continue
@@ -555,11 +561,15 @@ def train_symbol_group_loop(delay_minutes=5):
                         except Exception as e:
                             print(f"[❌ 학습 실패] {symbol}-{strategy}-group{gid} → {e}")
                             traceback.print_exc()
-                            all_groups_success = False
+                            group_success = False
 
-        # ✅ 모든 그룹 학습 완료 후에만 예측 실행
+            # 그룹 내 하나라도 실패하면 전체 성공 플래그 해제
+            if not group_success:
+                all_groups_success = False
+
+        # ✅ 모든 그룹이 학습 성공한 경우만 예측 실행
         if all_groups_success:
-            print(f"\n[🚀 모든 그룹 학습 완료 → 예측/실패학습/메타러너 실행 시작] ({now_kst().isoformat()})")
+            print(f"\n[🚀 모든 그룹 학습 완료 → 예측/실패학습/메타러너 실행] ({now_kst().isoformat()})")
             try:
                 for group in SYMBOL_GROUPS:
                     for symbol in group:
@@ -589,6 +599,8 @@ def train_symbol_group_loop(delay_minutes=5):
                                 print(f"[⚠️ 실패학습/메타러너 실패] {symbol}-{strategy} → {e}")
             except Exception as e:
                 print(f"[❌ 예측 단계 실패] → {e}")
+        else:
+            print(f"[⏭️ 예측 스킵] 모든 그룹 학습 완료 전 → 다음 루프에서 재시도")
 
         # 그룹 후처리
         try:
@@ -601,7 +613,6 @@ def train_symbol_group_loop(delay_minutes=5):
         loop_elapsed = time.time() - loop_start_time
         print(f"⏱️ 이번 루프 소요 시간: {loop_elapsed:.2f}초")
 
-        # ⏳ 첫 루프에서는 delay_minutes 대기 없이 바로 다음 루프 진행
         if first_loop:
             print("[⏩ 첫 루프 완료 → delay 대기 없이 다음 루프 진행]")
             first_loop = False
