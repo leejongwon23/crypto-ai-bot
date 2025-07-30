@@ -54,7 +54,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
     ensure_failure_db()
     CSV_PATH = "/persistent/wrong_predictions.csv"
 
-    # ✅ 기본 검증
+    # ✅ 1. 기본 검증
     if not isinstance(row, dict):
         print("[❌ insert_failure_record] row 형식 오류 → 저장 스킵")
         return
@@ -62,7 +62,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         print("[⛔ SKIP] 성공 예측 → 실패 기록 안 함")
         return
 
-    # ✅ feature_hash 생성
+    # ✅ 2. feature_hash 생성
     if not feature_hash:
         raw_str = (
             f"{row.get('symbol','')}_{row.get('strategy','')}_"
@@ -75,7 +75,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         print("[❌ insert_failure_record] feature_hash 없음 → 저장 스킵")
         return
 
-    # ✅ 타입 안전 변환
+    # ✅ 3. feature_vector 안전 변환
     def to_list_safe(x):
         if x is None:
             return []
@@ -92,7 +92,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
 
     feature_vector = to_list_safe(feature_vector)
 
-    # ✅ DB & CSV 중복 체크
+    # ✅ 4. 중복 체크 (DB + CSV)
     try:
         conn = get_db_connection()
         exists_db = conn.execute(
@@ -116,11 +116,10 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         if exists_db or exists_csv:
             print(f"[⛔ SKIP-중복] feature_hash={feature_hash}")
             return
-
     except Exception as e:
         print(f"[⚠️ 중복 체크 실패] {e}")
 
-    # ✅ 기록 데이터
+    # ✅ 5. 기록 데이터 구성
     record_time = datetime.now().isoformat()
     record = {
         "timestamp": record_time,
@@ -136,7 +135,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         "label": row.get("label") if label is None else label
     }
 
-    # ✅ DB 저장
+    # ✅ 6. DB 저장
     try:
         conn.execute("""
             INSERT OR IGNORE INTO failure_patterns
@@ -148,12 +147,11 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
     except Exception as e:
         print(f"[⚠️ DB 저장 실패] {e}")
 
-    # ✅ CSV 저장
+    # ✅ 7. CSV 저장
     try:
         csv_record = record.copy()
-        csv_record.pop("feature")
+        csv_record.pop("feature")  # CSV에는 feature_vector를 컬럼 확장으로 저장
         csv_record["feature_hash"] = feature_hash
-
         for i, v in enumerate(feature_vector):
             csv_record[f"f{i}"] = np.nan if v is None else float(v)
 
@@ -167,6 +165,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         print(f"[✅ SAVE-CSV] {csv_record['symbol']} {csv_record['strategy']} class={csv_record['predicted_class']}")
     except Exception as e:
         print(f"[❌ CSV 저장 실패] {type(e).__name__}: {e}")
+
 
 def load_existing_failure_hashes():
     try:
