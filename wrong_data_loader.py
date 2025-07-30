@@ -23,10 +23,10 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     WRONG_CSV = "/persistent/wrong_predictions.csv"
     sequences = []
 
-    # ✅ 실제 수익률 분포 기반 클래스 범위 계산 (동적 클래스)
+    # ✅ 클래스 범위 계산
     class_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=group_id)
     num_classes = len(class_ranges)
-    set_NUM_CLASSES(num_classes)  # ✅ 전역 NUM_CLASSES 갱신
+    set_NUM_CLASSES(num_classes)
 
     df_price = get_kline_by_strategy(symbol, strategy)
     if df_price is None or df_price.empty:
@@ -47,7 +47,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
 
     df_feat = df_feat.dropna().reset_index(drop=True)
 
-    # ✅ 라벨링 (동적 클래스 기반)
+    # ✅ 라벨링
     returns = df_price["close"].pct_change().fillna(0).values
     labels = []
     for r in returns:
@@ -66,7 +66,9 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     used_hashes = set()
     existing_hashes = load_existing_failure_hashes()
 
-    ### 1. 실패 샘플 수집
+    fail_count, normal_count = 0, 0
+
+    # === 1. 실패 샘플 우선 수집 ===
     if os.path.exists(WRONG_CSV):
         try:
             df = pd.read_csv(WRONG_CSV, encoding="utf-8-sig")
@@ -92,22 +94,19 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
                 used_hashes.add(h)
                 for _ in range(FAIL_AUGMENT_RATIO * 2):
                     sequences.append((xb, label))
+                    fail_count += 1
         except Exception as e:
             print(f"[⚠️ 실패 로드 예외] {symbol}-{strategy}: {e}")
 
-    ### 2. 정규 학습 샘플 수집
-    label_missing = []
+    # === 2. 정규 학습 샘플 수집 (실패 데이터 중복 제외) ===
     for i in range(window, len(df_feat)):
         try:
             window_df = df_feat.iloc[i - window:i]
             label = int(df_feat.iloc[i].get("label", -1))
             if not (0 <= label < num_classes):
-                label_missing.append(label)
                 continue
             xb = window_df.drop(columns=["timestamp", "label"]).to_numpy(dtype=np.float32)
             xb = np.pad(xb, ((0, 0), (0, input_size - xb.shape[1])), mode="constant")
-            if xb.shape[0] < window:
-                xb = np.pad(xb, ((window - xb.shape[0], 0), (0, 0)), mode="constant")
             if xb.shape != (window, input_size):
                 continue
             h = get_feature_hash(xb[-1])
@@ -115,11 +114,11 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
                 continue
             used_hashes.add(h)
             sequences.append((xb, label))
-        except Exception as e:
-            print(f"[❌ 정규 샘플 예외] {symbol}-{strategy}: {e}")
+            normal_count += 1
+        except Exception:
             continue
 
-    ### 3. 클래스 누락시 인접 복제
+    # === 3. 클래스 누락 보완 ===
     label_counts = Counter([s[1] for s in sequences])
     all_by_label = {cls: [] for cls in range(num_classes)}
     for xb, y in sequences:
@@ -127,28 +126,28 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
 
     for cls in range(num_classes):
         if label_counts[cls] == 0:
-            print(f"[📌 클래스 {cls} 누락 → 인접 샘플 복제]")
-            neighbors = [c for c in [cls-1, cls+1] if 0 <= c < num_classes and all_by_label[c]]
+            neighbors = [c for c in [cls - 1, cls + 1] if 0 <= c < num_classes and all_by_label[c]]
             candidates = sum([all_by_label[c] for c in neighbors], [])
-            if not candidates:
-                continue
             for _ in range(5):
+                if not candidates:
+                    continue
                 xb = random.choice(candidates)
                 noise = np.random.normal(0, 0.01, xb.shape).astype(np.float32)
                 sequences.append((xb + noise, cls))
 
-    ### 4. 전체 부족할 경우 fallback
+    # === 4. 부족시 fallback ===
     if not sequences:
-        print(f"[⚠️ 전체 데이터 없음] {symbol}-{strategy} → fallback 샘플 생성")
         for _ in range(FAIL_AUGMENT_RATIO * 2):
             dummy = np.random.normal(0, 1, (window, input_size)).astype(np.float32)
             random_label = random.randint(0, num_classes - 1)
             sequences.append((dummy, random_label))
 
-    ### 최종 결과
+    # === 최종 결과 ===
     X = np.array([s[0] for s in sequences], dtype=np.float32)
     y = np.array([s[1] for s in sequences], dtype=np.int64)
-    print(f"[✅ load_training_prediction_data 완료] {symbol}-{strategy} → 샘플 수: {len(y)} / 클래스 분포: {dict(Counter(y))} / 누락된 라벨 수: {len(label_missing)}")
+
+    print(f"[✅ load_training_prediction_data 완료] {symbol}-{strategy} → 실패데이터 {fail_count}건 / 정상데이터 {normal_count}건 / 최종 {len(y)}건")
 
     return X, y
+
 
