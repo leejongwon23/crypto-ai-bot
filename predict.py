@@ -192,7 +192,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             print(f"[failed_result insert_failure_record 오류] {e}")
 
     return result
-
 def predict(symbol, strategy, source="일반", model_type=None):
     import numpy as np, pandas as pd, os, torch
     from sklearn.preprocessing import MinMaxScaler
@@ -264,7 +263,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "no_valid_model", label=-1)
             return None
 
-        # 8. 전략 교체 판단
+        # 8. 전략 교체 판단 (진화형 실패확률 기반)
         recommended_strategy = get_best_strategy_by_failure_probability(
             symbol=symbol, current_strategy=strategy,
             feature_tensor=feature_tensor, model_outputs=model_outputs_list
@@ -298,11 +297,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
         print(f"[META] {'진화형' if use_evo else '기본'} 메타 선택: 클래스 {final_pred_class}")
 
-        # 10. 클래스 범위
+        # 10. 클래스 범위 및 현재 가격
         cls_min, _ = get_class_return_range(final_pred_class)
         current_price = df.iloc[-1]["close"]
 
-        # 11. 개별 모델 로깅
+        # 11. 개별 모델 로깅 (수익률 도달 여부 기반)
         for pred in all_model_predictions:
             entry_price = pred["entry_price"]
             expected_return = class_to_expected_return(pred["class"], pred["num_classes"])
@@ -335,7 +334,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 feature_vector=feature_tensor.numpy()
             )
 
-        # 12. 메타 로깅
+        # 12. 메타 로깅 (진화형/기본 구분)
         evo_expected_return = class_to_expected_return(final_pred_class, len(model_outputs_list[0]["probs"]))
         actual_return_meta = (current_price / all_model_predictions[0]["entry_price"]) - 1
         meta_success_flag = actual_return_meta >= cls_min
