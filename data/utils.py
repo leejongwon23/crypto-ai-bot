@@ -220,6 +220,7 @@ _kline_cache = {}
 _kline_cache_ttl = {}  # ✅ TTL 추가
 
 import time
+
 def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
     import os, time
@@ -234,30 +235,43 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     if config is None:
         print(f"[❌ 실패] {symbol}-{strategy}: 전략 설정 없음")
         failed_result(symbol, strategy, reason="전략 설정 없음")
-        return None  # ← ✅ 빈 DataFrame 말고 None 반환
+        return None
 
     min_required_rows = config.get("limit", 100)
-
     df = None
+    last_valid_df = None
+
     for attempt in range(3):
         try:
             df = get_kline(symbol, interval=config["interval"], limit=config["limit"])
-            if df is not None and isinstance(df, pd.DataFrame):
+            if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
                 if len(df) >= min_required_rows:
+                    last_valid_df = df.copy()
                     break
                 else:
                     print(f"[⚠️ get_kline 시도 {attempt+1}/3] row 부족: {len(df)} / 필요: {min_required_rows}")
+                    last_valid_df = df.copy()
+            else:
+                print(f"[⚠️ get_kline 시도 {attempt+1}/3] 빈 데이터 또는 DataFrame 아님")
         except Exception as e:
             print(f"[⚠️ get_kline 예외 - 시도 {attempt+1}/3] {symbol}-{strategy} → {e}")
-        time.sleep(1)
 
-    # ✅ 실패 조건 명확히 처리
+        time.sleep(1 + attempt)  # 재시도 간 대기 시간 점진 증가
+
+    # 실패 처리
     if df is None or not isinstance(df, pd.DataFrame) or len(df) < min_required_rows:
-        row_count = len(df) if df is not None else 0
+        row_count = len(df) if df is not None and isinstance(df, pd.DataFrame) else 0
         print(f"[❌ 실패] get_kline() 최종 실패: {symbol}-{strategy}, row 수: {row_count}")
-        failed_result(symbol, strategy, reason=f"캔들 row 부족 ({row_count})")
-        return None  # ← ✅ 명확하게 실패 처리
 
+        # 마지막 유효 데이터라도 있으면 반환
+        if last_valid_df is not None and not last_valid_df.empty:
+            print(f"[📌 백업 데이터 사용] {symbol}-{strategy} → 실시간 데이터 부족, 캐시 데이터 반환")
+            df = last_valid_df
+        else:
+            failed_result(symbol, strategy, reason=f"캔들 row 부족 ({row_count})")
+            return None
+
+    # 필수 컬럼 보정
     required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
     for col in required_cols:
         if col not in df.columns:
@@ -265,9 +279,9 @@ def get_kline_by_strategy(symbol: str, strategy: str):
 
     df = df[required_cols]
 
+    # 캐시에 저장
     CacheManager.set(cache_key, df)
     return df
-
 
 
 # ✅ SYMBOL_GROUPS batch prefetch 함수 추가
