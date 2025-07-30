@@ -10,7 +10,7 @@ NUM_CLASSES = get_NUM_CLASSES()  # ✅ 함수 호출 후 변수 할당
 
 WRONG_CSV = "/persistent/wrong_predictions.csv"
 
-def load_training_prediction_data(symbol, strategy, input_size, window, group_id=None):
+def load_training_prediction_data(symbol, strategy, input_size, window, group_id=None, min_per_class=10):
     import random, os
     import numpy as np
     import pandas as pd
@@ -38,12 +38,12 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
         print(f"[❌ 실패] {symbol}-{strategy}: compute_features → 데이터 없음")
         return None, None
 
-    if "timestamp" in df_feat.columns:
-        df_feat["timestamp"] = df_feat["timestamp"]
-    elif "datetime" in df_feat.columns:
-        df_feat["timestamp"] = df_feat["datetime"]
-    else:
-        raise Exception("timestamp 또는 datetime 컬럼 없음")
+    # ✅ 타임스탬프 컬럼 통일
+    if "timestamp" not in df_feat.columns:
+        if "datetime" in df_feat.columns:
+            df_feat.rename(columns={"datetime": "timestamp"}, inplace=True)
+        else:
+            raise Exception("timestamp 또는 datetime 컬럼 없음")
 
     df_feat = df_feat.dropna().reset_index(drop=True)
 
@@ -93,12 +93,12 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
                     continue
                 used_hashes.add(h)
                 for _ in range(FAIL_AUGMENT_RATIO * 2):
-                    sequences.append((xb, label))
+                    sequences.append((xb.copy(), label))
                     fail_count += 1
         except Exception as e:
             print(f"[⚠️ 실패 로드 예외] {symbol}-{strategy}: {e}")
 
-    # === 2. 정규 학습 샘플 수집 (실패 데이터 중복 제외) ===
+    # === 2. 정규 학습 샘플 수집 ===
     for i in range(window, len(df_feat)):
         try:
             window_df = df_feat.iloc[i - window:i]
@@ -113,29 +113,38 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
             if h in used_hashes:
                 continue
             used_hashes.add(h)
-            sequences.append((xb, label))
+            sequences.append((xb.copy(), label))
             normal_count += 1
         except Exception:
             continue
 
-    # === 3. 클래스 누락 보완 ===
+    # === 3. 클래스별 최소 샘플 보장 ===
     label_counts = Counter([s[1] for s in sequences])
     all_by_label = {cls: [] for cls in range(num_classes)}
     for xb, y in sequences:
         all_by_label[y].append(xb)
 
     for cls in range(num_classes):
-        if label_counts[cls] == 0:
+        while len(all_by_label[cls]) < min_per_class:
+            # 인접 클래스에서 샘플 가져오기
             neighbors = [c for c in [cls - 1, cls + 1] if 0 <= c < num_classes and all_by_label[c]]
             candidates = sum([all_by_label[c] for c in neighbors], [])
-            for _ in range(5):
-                if not candidates:
-                    continue
+            if not candidates:
+                # fallback: 랜덤 더미
+                dummy = np.random.normal(0, 1, (window, input_size)).astype(np.float32)
+                all_by_label[cls].append(dummy)
+            else:
                 xb = random.choice(candidates)
                 noise = np.random.normal(0, 0.01, xb.shape).astype(np.float32)
-                sequences.append((xb + noise, cls))
+                all_by_label[cls].append(xb + noise)
 
-    # === 4. 부족시 fallback ===
+    # === 4. 최종 시퀀스 구성 ===
+    sequences = []
+    for cls, xb_list in all_by_label.items():
+        for xb in xb_list:
+            sequences.append((xb, cls))
+
+    # === 5. 데이터 부족시 fallback ===
     if not sequences:
         for _ in range(FAIL_AUGMENT_RATIO * 2):
             dummy = np.random.normal(0, 1, (window, input_size)).astype(np.float32)
@@ -146,8 +155,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     X = np.array([s[0] for s in sequences], dtype=np.float32)
     y = np.array([s[1] for s in sequences], dtype=np.int64)
 
-    print(f"[✅ load_training_prediction_data 완료] {symbol}-{strategy} → 실패데이터 {fail_count}건 / 정상데이터 {normal_count}건 / 최종 {len(y)}건")
-
+    print(f"[✅ load_training_prediction_data 완료] {symbol}-{strategy} → 실패데이터 {fail_count} / 정상데이터 {normal_count} / 최종 {len(y)} (클래스별 최소 {min_per_class} 보장)")
     return X, y
 
 
