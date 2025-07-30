@@ -101,7 +101,7 @@ def get_class_groups(num_classes=21, group_size=7):
 
 def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     import os, gc, traceback, torch, numpy as np, pandas as pd, json
-    from datetime import datetime; from collections import Counter
+    from datetime import datetime
     from ssl_pretrain import masked_reconstruction
     from config import get_FEATURE_INPUT_SIZE, get_class_ranges, get_class_groups, set_NUM_CLASSES
     from torch.utils.data import TensorDataset, DataLoader
@@ -167,27 +167,36 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
             X, y = np.array(X), np.array(y)
 
-            # 5. 실패 데이터 자동 병합 + 중복제거
+            # 5. 실패 데이터 자동 병합 + 중복 제거 보완
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size, window, group_id=gid)
             if fail_X is not None and len(fail_X) > 0:
-                print(f"📌 실패 샘플 {len(fail_X)}건 자동 병합 시도")
+                print(f"📌 실패 샘플 {len(fail_X)}건 로드됨 → 병합 시도")
 
-                # 중복 feature 제거
-                all_X = np.concatenate([X, fail_X], axis=0)
-                all_y = np.concatenate([y, fail_y], axis=0)
-
-                # feature_hash 기반 중복 제거
+                # feature_hash 기반 중복 제거 (실패 데이터 우선)
                 unique_hashes = {}
                 filtered_X, filtered_y = [], []
-                for i in range(len(all_X)):
-                    h = get_feature_hash_from_tensor(torch.tensor(all_X[i:i+1], dtype=torch.float32))
+
+                # 1) 실패 데이터 우선 등록
+                for i in range(len(fail_X)):
+                    h = get_feature_hash_from_tensor(torch.tensor(fail_X[i:i+1], dtype=torch.float32))
                     if h not in unique_hashes:
                         unique_hashes[h] = True
-                        filtered_X.append(all_X[i])
-                        filtered_y.append(all_y[i])
-                X, y = np.array(filtered_X), np.array(filtered_y)
+                        filtered_X.append(fail_X[i])
+                        filtered_y.append(fail_y[i])
 
-                print(f"📌 병합 후 최종 샘플 수: {len(X)} (중복 제거 완료)")
+                # 2) 정상 데이터 추가 (중복 제외)
+                for i in range(len(X)):
+                    h = get_feature_hash_from_tensor(torch.tensor(X[i:i+1], dtype=torch.float32))
+                    if h not in unique_hashes:
+                        unique_hashes[h] = True
+                        filtered_X.append(X[i])
+                        filtered_y.append(y[i])
+
+                X, y = np.array(filtered_X), np.array(filtered_y)
+                print(f"📌 병합 후 최종 샘플 수: {len(X)} (중복 제거 완료, 실패데이터 우선)")
+
+            else:
+                print(f"ℹ️ 실패 데이터 없음 → 정상 데이터만 학습")
 
             if len(X) < 10:
                 raise Exception("⛔ 유효한 학습 샘플 부족")
