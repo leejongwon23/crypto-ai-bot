@@ -493,6 +493,8 @@ def train_model_loop(strategy):
 
 def train_symbol_group_loop(delay_minutes=5):
     import time, os, json, traceback
+    from datetime import datetime
+    import pytz
     import maintenance_fix_meta
     from data.utils import SYMBOL_GROUPS, _kline_cache, _feature_cache
     from train import train_one_model
@@ -502,6 +504,9 @@ def train_symbol_group_loop(delay_minutes=5):
     from wrong_data_loader import load_training_prediction_data
     from config import get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges
     from failure_db import ensure_failure_db
+
+    def now_kst(): 
+        return datetime.now(pytz.timezone("Asia/Seoul"))
 
     ensure_failure_db()
     FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
@@ -523,11 +528,14 @@ def train_symbol_group_loop(delay_minutes=5):
 
     loop_count = 0
     group_count = len(SYMBOL_GROUPS)
-    print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작")
+    print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작 ({now_kst().isoformat()})")
+
+    first_loop = True  # 첫 루프 여부
 
     while True:
+        loop_start_time = time.time()
         loop_count += 1
-        print(f"\n🔄 전체 그룹 순회 루프 #{loop_count} 시작")
+        print(f"\n🔄 전체 그룹 순회 루프 #{loop_count} 시작 ({now_kst().isoformat()})")
 
         all_groups_success = True  # 전체 그룹 학습 성공 여부 추적
 
@@ -559,12 +567,12 @@ def train_symbol_group_loop(delay_minutes=5):
                             continue
 
                         try:
-                            print(f"[▶ 학습 시작] {symbol}-{strategy}-group{gid}")
+                            print(f"[▶ 학습 시작] {symbol}-{strategy}-group{gid} ({now_kst().isoformat()})")
                             train_one_model(symbol, strategy, group_id=gid)
                             train_done[symbol][strategy][str(gid)] = True
                             with open(done_path, "w", encoding="utf-8") as f:
                                 json.dump(train_done, f, ensure_ascii=False, indent=2)
-                            print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid}")
+                            print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid} ({now_kst().isoformat()})")
                         except Exception as e:
                             print(f"[❌ 학습 실패] {symbol}-{strategy}-group{gid} → {e}")
                             traceback.print_exc()
@@ -572,14 +580,14 @@ def train_symbol_group_loop(delay_minutes=5):
 
         # ✅ 모든 그룹 학습 완료 후에만 예측 실행
         if all_groups_success:
-            print("\n[🚀 모든 그룹 학습 완료 → 예측/실패학습/메타러너 실행 시작]")
+            print(f"\n[🚀 모든 그룹 학습 완료 → 예측/실패학습/메타러너 실행 시작] ({now_kst().isoformat()})")
             try:
                 for group in SYMBOL_GROUPS:
                     for symbol in group:
                         for strategy in ["단기", "중기", "장기"]:
-                            print(f"[▶ 예측 시작] {symbol}-{strategy}")
+                            print(f"[▶ 예측 시작] {symbol}-{strategy} ({now_kst().isoformat()})")
                             main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
-                            print(f"[✅ 예측 완료] {symbol}-{strategy}")
+                            print(f"[✅ 예측 완료] {symbol}-{strategy} ({now_kst().isoformat()})")
 
                             try:
                                 X, y = load_training_prediction_data(
@@ -607,13 +615,23 @@ def train_symbol_group_loop(delay_minutes=5):
         try:
             maintenance_fix_meta.fix_all_meta_json()
             safe_cleanup.auto_delete_old_logs()
-            print("[🧹 그룹 후처리 완료]")
+            print(f"[🧹 그룹 후처리 완료] ({now_kst().isoformat()})")
         except Exception as e:
             print(f"[⚠️ 그룹 후처리 실패] → {e}")
 
-        print(f"🕒 전체 그룹 완료 → {delay_minutes}분 대기")
+        loop_elapsed = time.time() - loop_start_time
+        print(f"⏱️ 이번 루프 소요 시간: {loop_elapsed:.2f}초")
+
+        # ⏳ 첫 루프에서는 delay_minutes 대기 없이 바로 다음 루프 진행
+        if first_loop:
+            print("[⏩ 첫 루프 완료 → delay 대기 없이 다음 루프 진행]")
+            first_loop = False
+            continue
+
+        print(f"🕒 전체 그룹 완료 → {delay_minutes}분 대기 ({now_kst().isoformat()})")
         time.sleep(delay_minutes * 60)
 
+        # 진화형 메타러너 전체 학습 루프
         try:
             print("[▶ 진화형 메타러너 전체 루프 학습 시작]")
             train_evo_meta_loop()
