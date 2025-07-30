@@ -100,7 +100,7 @@ def get_class_groups(num_classes=21, group_size=7):
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
 def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
-    import os, gc, traceback, torch, numpy as np, pandas as pd, json
+    import os, traceback, torch, numpy as np, pandas as pd, json
     from datetime import datetime
     from ssl_pretrain import masked_reconstruction
     from config import get_FEATURE_INPUT_SIZE, get_class_ranges, get_class_groups, set_NUM_CLASSES
@@ -114,7 +114,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     from sklearn.metrics import accuracy_score, f1_score
     from sklearn.preprocessing import MinMaxScaler
 
-    print("✅ [train_one_model 호출됨]")
+    print(f"✅ [train_one_model 호출됨] {symbol}-{strategy} group_id={group_id}")
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = get_FEATURE_INPUT_SIZE()
@@ -122,10 +122,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
     for gid in group_ids:
         model_saved = False
-        print(f"▶ [학습시작] {symbol}-{strategy}-group{gid}")
         try:
             # 1. SSL 사전학습
-            masked_reconstruction(symbol, strategy, input_size)
+            try:
+                masked_reconstruction(symbol, strategy, input_size)
+            except Exception as e:
+                print(f"[⚠️ SSL 사전학습 실패] {e}")
 
             # 2. 데이터 로드
             df = get_kline_by_strategy(symbol, strategy)
@@ -144,18 +146,15 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             class_ranges = get_class_ranges(group_id=gid)
             num_classes = len(class_ranges)
             set_NUM_CLASSES(num_classes)
-            group_classes = get_class_groups(num_classes=num_classes)
 
             labels = []
             for r in returns:
                 matched = False
                 for i, rng in enumerate(class_ranges):
-                    if isinstance(rng, tuple) and len(rng) == 2:
-                        low, high = rng
-                        if low <= r <= high:
-                            labels.append(i)
-                            matched = True
-                            break
+                    if rng[0] <= r <= rng[1]:
+                        labels.append(i)
+                        matched = True
+                        break
                 if not matched:
                     labels.append(0)
 
@@ -167,11 +166,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 y.append(labels[i + window] if i + window < len(labels) else 0)
             X, y = np.array(X), np.array(y)
 
-            # 5. 실패 데이터 병합
+            # 5. 실패 데이터 병합 + 중복 제거
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size, window, group_id=gid)
             if fail_X is not None and len(fail_X) > 0:
                 print(f"📌 실패 샘플 {len(fail_X)}건 병합 시도")
                 unique_hashes, filtered_X, filtered_y = {}, [], []
+
                 # 실패 데이터 우선
                 for i in range(len(fail_X)):
                     h = get_feature_hash_from_tensor(torch.tensor(fail_X[i:i+1], dtype=torch.float32))
@@ -179,6 +179,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         unique_hashes[h] = True
                         filtered_X.append(fail_X[i])
                         filtered_y.append(fail_y[i])
+
                 # 정상 데이터 추가
                 for i in range(len(X)):
                     h = get_feature_hash_from_tensor(torch.tensor(X[i:i+1], dtype=torch.float32))
@@ -186,12 +187,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         unique_hashes[h] = True
                         filtered_X.append(X[i])
                         filtered_y.append(y[i])
+
                 X, y = np.array(filtered_X), np.array(filtered_y)
 
             if len(X) < 10:
                 raise Exception("⛔ 유효한 학습 샘플 부족")
 
-            # 6. 모델 학습
+            # 6. 모델 학습 루프
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
                 model = get_model(model_type, input_size=input_size, output_size=num_classes).to(DEVICE)
                 model_base = f"{symbol}_{strategy}_{model_type}_group{gid}_cls{num_classes}"
@@ -209,7 +211,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=64, shuffle=True)
                 val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=64)
 
-                # 학습 루프
+                # 학습
                 for epoch in range(max_epochs):
                     total_loss = 0
                     for xb, yb in train_loader:
@@ -225,20 +227,15 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 all_preds, all_labels = [], []
                 with torch.no_grad():
                     for xb, yb in val_loader:
-                        xb = xb.to(DEVICE)
-                        preds = torch.argmax(model(xb), dim=1).cpu().numpy()
+                        preds = torch.argmax(model(xb.to(DEVICE)), dim=1).cpu().numpy()
                         all_preds.extend(preds)
                         all_labels.extend(yb.numpy())
 
                 acc = accuracy_score(all_labels, all_preds)
                 f1 = f1_score(all_labels, all_preds, average='macro')
+                print(f"[🎯 {model_type}] acc={acc:.4f}, f1={f1:.4f}")
 
-                if acc == 0.0 and f1 == 0.0:
-                    print(f"⛔ {model_type} 평가 실패 → fallback 모델 저장")
-                else:
-                    print(f"[🎯 {model_type}] acc={acc:.4f}, f1={f1:.4f}")
-
-                # 모델 저장
+                # 저장
                 os.makedirs("/persistent/models", exist_ok=True)
                 torch.save(model.state_dict(), model_path)
 
@@ -249,11 +246,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                     "group_id": gid,
                     "num_classes": num_classes,
                     "input_size": input_size,
-                    "timestamp": now_kst().isoformat()
+                    "timestamp": now_kst().isoformat(),
+                    "fail_data_merged": bool(fail_X is not None and len(fail_X) > 0)
                 }
                 with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
                     json.dump(meta_info, f, ensure_ascii=False, indent=2)
 
+                log_training_result(symbol, strategy, model_path, acc, f1, total_loss)
                 record_model_success(model_base, acc > 0.6 and f1 > 0.55)
                 model_saved = True
 
@@ -261,7 +260,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{gid} → {e}")
             traceback.print_exc()
 
-        # ✅ 학습 실패해도 더미 모델 저장
+        # 7. 학습 실패 시 Dummy 모델 저장
         if not model_saved:
             print(f"[⚠️ {symbol}-{strategy}-group{gid}] 학습 실패 → 더미 모델 저장")
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
