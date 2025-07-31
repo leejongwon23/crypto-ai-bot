@@ -124,13 +124,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         model_saved = False
         fail_reason = None
         try:
-            # 1. SSL 사전학습 (예외 무시하고 진행)
+            # 1. SSL 사전학습
             try:
                 masked_reconstruction(symbol, strategy, input_size)
             except Exception as e:
                 print(f"[⚠️ SSL 사전학습 실패] {e}")
 
-            # 2. 데이터 로드 및 검증
+            # 2. 데이터 로드 및 사전 검증
             df = get_kline_by_strategy(symbol, strategy)
             if df is None or len(df) < 100:
                 fail_reason = "get_kline 데이터 부족"
@@ -192,7 +192,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         filtered_y.append(y[i])
                 X, y = np.array(filtered_X), np.array(filtered_y)
 
-            # 데이터 충분성 체크
+            # 학습 샘플 수 체크
             if len(X) < 10:
                 fail_reason = "유효한 학습 샘플 부족"
                 print(f"[⚠️ {fail_reason} → 학습 스킵] {symbol}-{strategy}-group{gid}")
@@ -201,8 +201,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             # 6. 모델 학습
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
                 model = get_model(model_type, input_size=input_size, output_size=num_classes).to(DEVICE)
-                model_base = f"{symbol}_{strategy}_{model_type}_group{gid}_cls{num_classes}"
-                model_path = os.path.join("/persistent/models", f"{model_base}.pt")
+                model_name = f"{symbol}_{strategy}_{model_type}_group{gid}_cls{num_classes}.pt"
+                model_path = os.path.join("/persistent/models", model_name)
 
                 optimizer = Ranger(model.parameters(), lr=0.001)
                 criterion = torch.nn.CrossEntropyLoss()
@@ -243,11 +243,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 os.makedirs("/persistent/models", exist_ok=True)
                 torch.save(model.state_dict(), model_path)
 
+                # 저장 실패 시 더미 저장
                 if not os.path.exists(model_path):
                     print(f"[❌ 저장 실패] {model_path} → 더미 모델로 대체 저장")
                     dummy = get_model(model_type, input_size=input_size, output_size=3).to("cpu")
                     torch.save(dummy.state_dict(), model_path)
 
+                # 메타 정보 저장 (model_name 필드 포함)
                 meta_info = {
                     "symbol": symbol,
                     "strategy": strategy,
@@ -256,29 +258,30 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                     "num_classes": num_classes,
                     "input_size": input_size,
                     "timestamp": now_kst().isoformat(),
-                    "fail_data_merged": bool(fail_X is not None and len(fail_X) > 0)
+                    "fail_data_merged": bool(fail_X is not None and len(fail_X) > 0),
+                    "model_name": model_name
                 }
                 with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
                     json.dump(meta_info, f, ensure_ascii=False, indent=2)
 
                 log_training_result(symbol, strategy, model_path, acc, f1, total_loss)
-                record_model_success(model_base, acc > 0.6 and f1 > 0.55)
+                record_model_success(model_name, acc > 0.6 and f1 > 0.55)
                 model_saved = True
 
         except Exception as e:
             print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{gid} → {e}")
             traceback.print_exc()
 
-        # 실패 시 더미 저장 보장
+        # 학습 실패 시 더미 저장
         if not model_saved:
             print(f"[⚠️ {symbol}-{strategy}-group{gid}] 학습 실패 → 더미 모델 강제 저장")
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
-                model_base = f"{symbol}_{strategy}_{model_type}_group{gid}_cls3"
-                model_path = os.path.join("/persistent/models", f"{model_base}.pt")
+                model_name = f"{symbol}_{strategy}_{model_type}_group{gid}_cls3.pt"
+                model_path = os.path.join("/persistent/models", model_name)
                 dummy = get_model(model_type, input_size=input_size, output_size=3).to("cpu")
                 torch.save(dummy.state_dict(), model_path)
                 with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
-                    json.dump({"symbol": symbol, "strategy": strategy, "model": model_type}, f)
+                    json.dump({"symbol": symbol, "strategy": strategy, "model": model_type, "model_name": model_name}, f)
             log_training_result(symbol, strategy, "dummy", 0.0, 0.0, 0.0)
 
 
