@@ -99,7 +99,6 @@ def get_class_groups(num_classes=21, group_size=7):
         return [list(range(num_classes))]
     return [list(range(i, min(i+group_size, num_classes))) for i in range(0, num_classes, group_size)]
 
-
 def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     import os, traceback, torch, numpy as np, pandas as pd, json
     from datetime import datetime
@@ -125,22 +124,24 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         model_saved = False
         fail_reason = None
         try:
-            # 1. SSL 사전학습
+            # 1. SSL 사전학습 (예외 무시하고 진행)
             try:
                 masked_reconstruction(symbol, strategy, input_size)
             except Exception as e:
                 print(f"[⚠️ SSL 사전학습 실패] {e}")
 
-            # 2. 데이터 로드
+            # 2. 데이터 로드 및 검증
             df = get_kline_by_strategy(symbol, strategy)
             if df is None or len(df) < 100:
                 fail_reason = "get_kline 데이터 부족"
-                raise Exception(f"⛔ {fail_reason}")
+                print(f"[⚠️ 데이터 부족 → 학습 스킵] {symbol}-{strategy}-group{gid}")
+                raise Exception(fail_reason)
 
             feat = compute_features(symbol, df, strategy)
             if feat is None or len(feat) < 100:
                 fail_reason = "feature 데이터 부족"
-                raise Exception(f"⛔ {fail_reason}")
+                print(f"[⚠️ 피처 부족 → 학습 스킵] {symbol}-{strategy}-group{gid}")
+                raise Exception(fail_reason)
 
             features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
             feat_scaled = MinMaxScaler().fit_transform(features_only)
@@ -191,9 +192,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         filtered_y.append(y[i])
                 X, y = np.array(filtered_X), np.array(filtered_y)
 
+            # 데이터 충분성 체크
             if len(X) < 10:
                 fail_reason = "유효한 학습 샘플 부족"
-                raise Exception(f"⛔ {fail_reason}")
+                print(f"[⚠️ {fail_reason} → 학습 스킵] {symbol}-{strategy}-group{gid}")
+                raise Exception(fail_reason)
 
             # 6. 모델 학습
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
@@ -213,8 +216,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=64, shuffle=True)
                 val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=64)
 
+                total_loss = 0
                 for epoch in range(max_epochs):
-                    total_loss = 0
                     for xb, yb in train_loader:
                         xb, yb = xb.to(DEVICE), yb.to(DEVICE)
                         optimizer.zero_grad()
@@ -240,13 +243,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 os.makedirs("/persistent/models", exist_ok=True)
                 torch.save(model.state_dict(), model_path)
 
-                # 저장 검증
                 if not os.path.exists(model_path):
                     print(f"[❌ 저장 실패] {model_path} → 더미 모델로 대체 저장")
                     dummy = get_model(model_type, input_size=input_size, output_size=3).to("cpu")
                     torch.save(dummy.state_dict(), model_path)
 
-                # 메타 정보 저장
                 meta_info = {
                     "symbol": symbol,
                     "strategy": strategy,
@@ -260,7 +261,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
                     json.dump(meta_info, f, ensure_ascii=False, indent=2)
 
-                # 로그 기록 강제
                 log_training_result(symbol, strategy, model_path, acc, f1, total_loss)
                 record_model_success(model_base, acc > 0.6 and f1 > 0.55)
                 model_saved = True
@@ -492,15 +492,13 @@ def train_symbol_group_loop(delay_minutes=5):
     from wrong_data_loader import load_training_prediction_data
     from config import get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges
     from failure_db import ensure_failure_db
+    from data.utils import get_kline_by_strategy, compute_features
 
     def now_kst():
         return datetime.now(pytz.timezone("Asia/Seoul"))
 
     ensure_failure_db()
     FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
-
-    # ✅ 무조건 학습/예측 강제 실행
-    FORCE_TRAINING = True  
 
     done_path = "/persistent/train_done.json"
     train_done = {}
@@ -528,6 +526,9 @@ def train_symbol_group_loop(delay_minutes=5):
         loop_count += 1
         print(f"\n🔄 전체 그룹 순회 루프 #{loop_count} 시작 ({now_kst().isoformat()})")
 
+        # 예측 대상을 모아서 마지막에 실행
+        prediction_queue = []
+
         for idx, group in enumerate(SYMBOL_GROUPS):
             print(f"\n📊 [그룹 {idx+1}/{group_count}] 학습 시작 | 심볼 수: {len(group)}")
             if not group:
@@ -539,6 +540,7 @@ def train_symbol_group_loop(delay_minutes=5):
 
             for symbol in group:
                 for strategy in ["단기", "중기", "장기"]:
+                    # 완료 여부 확인
                     train_done.setdefault(symbol, {}).setdefault(strategy, {})
 
                     try:
@@ -550,7 +552,25 @@ def train_symbol_group_loop(delay_minutes=5):
                         continue
 
                     for gid in range(MAX_GROUP_ID + 1):
-                        # ✅ FORCE_TRAINING = True → 무조건 학습
+                        already_done = train_done[symbol][strategy].get(str(gid), False)
+                        if already_done:
+                            print(f"[⏩ 스킵] 이미 완료: {symbol}-{strategy}-group{gid}")
+                            continue
+
+                        # 사전 데이터 검증
+                        try:
+                            df = get_kline_by_strategy(symbol, strategy)
+                            if df is None or len(df) < 100:
+                                print(f"[⚠️ 데이터 부족 → 스킵] {symbol}-{strategy}-group{gid}")
+                                continue
+                            feat = compute_features(symbol, df, strategy)
+                            if feat is None or len(feat) < 100:
+                                print(f"[⚠️ 피처 부족 → 스킵] {symbol}-{strategy}-group{gid}")
+                                continue
+                        except Exception as e:
+                            print(f"[⚠️ 데이터 로드 실패] {symbol}-{strategy}-group{gid} → {e}")
+                            continue
+
                         try:
                             print(f"[▶ 학습 시작] {symbol}-{strategy}-group{gid} ({now_kst().isoformat()})")
                             train_one_model(symbol, strategy, group_id=gid)
@@ -562,37 +582,20 @@ def train_symbol_group_loop(delay_minutes=5):
                             print(f"[❌ 학습 실패] {symbol}-{strategy}-group{gid} → {e}")
                             traceback.print_exc()
 
-            # ✅ 학습 후 예측·실패학습·메타러너 무조건 실행
-            for symbol in group:
-                for strategy in ["단기", "중기", "장기"]:
-                    try:
-                        print(f"[▶ 예측 시작] {symbol}-{strategy} ({now_kst().isoformat()})")
-                        main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
-                        print(f"[✅ 예측 완료] {symbol}-{strategy} ({now_kst().isoformat()})")
+                    # 예측은 마지막에 일괄 실행하기 위해 큐에 저장
+                    prediction_queue.append((symbol, strategy))
 
-                        try:
-                            X, y = load_training_prediction_data(
-                                symbol, strategy,
-                                input_size=FEATURE_INPUT_SIZE,
-                                window=20,
-                                group_id=None
-                            )
-                            if X is not None and y is not None and len(X) > 0:
-                                print(f"[▶ 실패학습 시작] {symbol}-{strategy}")
-                                train_one_model(symbol, strategy, group_id=None)
-                                print(f"[✅ 실패학습 완료] {symbol}-{strategy}")
+        # ✅ 모든 그룹 학습 완료 후 예측 실행
+        print(f"\n📡 모든 그룹 학습 완료 → 예측 일괄 실행")
+        for symbol, strategy in prediction_queue:
+            try:
+                print(f"[▶ 예측 시작] {symbol}-{strategy} ({now_kst().isoformat()})")
+                main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
+                print(f"[✅ 예측 완료] {symbol}-{strategy} ({now_kst().isoformat()})")
+            except Exception as e:
+                print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
 
-                                print(f"[▶ 진화형 메타러너 학습 시작] {symbol}-{strategy}")
-                                train_evo_meta(X, y, FEATURE_INPUT_SIZE)
-                                print(f"[✅ 진화형 메타러너 학습 완료] {symbol}-{strategy}")
-                            else:
-                                print(f"[⚠️ 실패학습/메타러너 스킵] 데이터 부족: {symbol}-{strategy}")
-                        except Exception as e:
-                            print(f"[⚠️ 실패학습/메타러너 실패] {symbol}-{strategy} → {e}")
-                    except Exception as e:
-                        print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
-
-        # 그룹 후처리
+        # ✅ 그룹 후처리
         try:
             maintenance_fix_meta.fix_all_meta_json()
             safe_cleanup.auto_delete_old_logs()
