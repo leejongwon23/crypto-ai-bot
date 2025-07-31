@@ -45,7 +45,11 @@ def ensure_failure_db():
     except Exception as e:
         print(f"[오류] ensure_failure_db 실패 → {e}")
 
-def insert_failure_record(row, feature_hash=None, feature_vector=None, label=None):
+def insert_failure_record(row, feature_hash=None, feature_vector=None, label=None, context="evaluation"):
+    """
+    실패 예측을 기록한다.
+    context: "evaluation" → 평가 시점 기록, "prediction" → 예측 시점 기록
+    """
     import hashlib, os, json
     import pandas as pd
     import numpy as np
@@ -62,12 +66,12 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         print("[⛔ SKIP] 성공 예측 → 실패 기록 안 함")
         return
 
-    # ✅ 2. feature_hash 생성
+    # ✅ 2. feature_hash 생성 (항상 동일 규칙 적용)
     if not feature_hash:
         raw_str = (
             f"{row.get('symbol','')}_{row.get('strategy','')}_"
             f"{row.get('model','')}_{row.get('predicted_class','')}_"
-            f"{row.get('label','')}_{row.get('rate','')}"
+            f"{label if label is not None else row.get('label','')}_{row.get('rate','')}"
         )
         feature_hash = hashlib.sha256(raw_str.encode()).hexdigest()
 
@@ -132,25 +136,26 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         "rate": row.get("rate", ""),
         "reason": row.get("reason") or "미기록",
         "feature": json.dumps(feature_vector, ensure_ascii=False),
-        "label": row.get("label") if label is None else label
+        "label": row.get("label") if label is None else label,
+        "context": context
     }
 
     # ✅ 6. DB 저장
     try:
         conn.execute("""
             INSERT OR IGNORE INTO failure_patterns
-            (timestamp, symbol, strategy, direction, hash, model_name, predicted_class, rate, reason, feature, label)
-            VALUES (:timestamp, :symbol, :strategy, :direction, :hash, :model_name, :predicted_class, :rate, :reason, :feature, :label)
+            (timestamp, symbol, strategy, direction, hash, model_name, predicted_class, rate, reason, feature, label, context)
+            VALUES (:timestamp, :symbol, :strategy, :direction, :hash, :model_name, :predicted_class, :rate, :reason, :feature, :label, :context)
         """, record)
         conn.commit()
-        print(f"[✅ SAVE-DB] {record['symbol']} {record['strategy']} class={record['predicted_class']}")
+        print(f"[✅ SAVE-DB] {record['symbol']} {record['strategy']} class={record['predicted_class']} ctx={context}")
     except Exception as e:
         print(f"[⚠️ DB 저장 실패] {e}")
 
     # ✅ 7. CSV 저장
     try:
         csv_record = record.copy()
-        csv_record.pop("feature")  # CSV에는 feature_vector를 컬럼 확장으로 저장
+        csv_record.pop("feature")  # CSV에서는 feature_vector를 컬럼 확장으로 저장
         csv_record["feature_hash"] = feature_hash
         for i, v in enumerate(feature_vector):
             csv_record[f"f{i}"] = np.nan if v is None else float(v)
@@ -162,7 +167,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
 
         df_csv = pd.concat([df_csv, pd.DataFrame([csv_record])], ignore_index=True)
         df_csv.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
-        print(f"[✅ SAVE-CSV] {csv_record['symbol']} {csv_record['strategy']} class={csv_record['predicted_class']}")
+        print(f"[✅ SAVE-CSV] {csv_record['symbol']} {csv_record['strategy']} class={csv_record['predicted_class']} ctx={context}")
     except Exception as e:
         print(f"[❌ CSV 저장 실패] {type(e).__name__}: {e}")
 
