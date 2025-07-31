@@ -576,21 +576,18 @@ import os
 MODEL_DIR = "/persistent/models"
 
 def get_available_models(target_symbol=None):
-    import os, json, glob
+    import os, json, glob, re
     from model_weight_loader import get_similar_symbol
     from config import get_SYMBOLS
 
     MODEL_DIR = "/persistent/models"
     models = []
-
-    # ✅ 전역 SYMBOLS 기준으로 제한
     allowed_symbols = set(get_SYMBOLS())
 
-    # ✅ 유사 symbol 목록
     similar_symbols = []
     if target_symbol:
         similar_symbols = get_similar_symbol(target_symbol)
-        similar_symbols.append(target_symbol)  # 자기자신 포함 보장
+        similar_symbols.append(target_symbol)
 
     pt_files = glob.glob(os.path.join(MODEL_DIR, "*.pt"))
     for pt_path in pt_files:
@@ -602,27 +599,37 @@ def get_available_models(target_symbol=None):
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
 
-            if not all(k in meta for k in ["symbol", "strategy", "model", "input_size", "model_name"]):
+            # 필수 필드 체크
+            if not all(k in meta for k in ["symbol", "strategy", "model", "input_size"]):
                 continue
 
-            # ✅ 허용된 심볼인지
+            # 허용된 심볼만 로드
             if meta["symbol"] not in allowed_symbols:
                 continue
 
-            # ✅ 유사 심볼이 지정되었을 경우, 자기 자신은 무조건 허용
+            # target_symbol 지정 시 유사심볼만 허용
             if target_symbol and meta["symbol"] != target_symbol and meta["symbol"] not in similar_symbols:
                 continue
 
-            model_file = os.path.basename(pt_path)
+            # model_name 없으면 파일명에서 추출
+            if "model_name" not in meta:
+                meta["model_name"] = os.path.basename(pt_path)
+
+            # group_id, num_classes 추출 시도
+            match = re.search(r"group(\d+)_cls(\d+)", meta["model_name"])
+            if match:
+                meta["group_id"] = int(match.group(1))
+                meta["num_classes"] = int(match.group(2))
+
             models.append({
                 "symbol": meta["symbol"],
                 "strategy": meta["strategy"],
                 "model": meta["model"],
-                "pt_file": model_file,
+                "pt_file": os.path.basename(pt_path),
                 "group_id": meta.get("group_id"),
-                "window": meta.get("window"),
+                "num_classes": meta.get("num_classes"),
                 "input_size": meta["input_size"],
-                "model_name": meta.get("model_name", model_file)
+                "model_name": meta["model_name"]
             })
 
         except Exception as e:
@@ -630,3 +637,4 @@ def get_available_models(target_symbol=None):
             continue
 
     return models
+
