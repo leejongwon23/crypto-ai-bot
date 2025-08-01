@@ -237,47 +237,52 @@ def get_kline_by_strategy(symbol: str, strategy: str):
         failed_result(symbol, strategy, reason="전략 설정 없음")
         return None
 
-    min_required_rows = config.get("limit", 100)
+    required_rows = config.get("limit", 100)
     df = None
     last_valid_df = None
 
-    for attempt in range(3):
+    # ✅ 재시도 횟수 확장 (3 → 5)
+    for attempt in range(5):
         try:
             df = get_kline(symbol, interval=config["interval"], limit=config["limit"])
             if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
-                if len(df) >= min_required_rows:
+                row_count = len(df)
+                if row_count >= required_rows:
                     last_valid_df = df.copy()
+                    print(f"[✅ get_kline 성공] {symbol}-{strategy} row={row_count}")
                     break
                 else:
-                    print(f"[⚠️ get_kline 시도 {attempt+1}/3] row 부족: {len(df)} / 필요: {min_required_rows}")
+                    print(f"[⚠️ get_kline 시도 {attempt+1}/5] row 부족: {row_count} / 필요: {required_rows}")
                     last_valid_df = df.copy()
             else:
-                print(f"[⚠️ get_kline 시도 {attempt+1}/3] 빈 데이터 또는 DataFrame 아님")
+                print(f"[⚠️ get_kline 시도 {attempt+1}/5] 빈 데이터 또는 DataFrame 아님")
         except Exception as e:
-            print(f"[⚠️ get_kline 예외 - 시도 {attempt+1}/3] {symbol}-{strategy} → {e}")
+            print(f"[⚠️ get_kline 예외 - 시도 {attempt+1}/5] {symbol}-{strategy} → {e}")
 
         time.sleep(1 + attempt)  # 재시도 간 대기 시간 점진 증가
 
-    # 실패 처리
-    if df is None or not isinstance(df, pd.DataFrame) or len(df) < min_required_rows:
-        row_count = len(df) if df is not None and isinstance(df, pd.DataFrame) else 0
-        print(f"[❌ 실패] get_kline() 최종 실패: {symbol}-{strategy}, row 수: {row_count}")
+    # ✅ 최종 데이터 확보 여부 판단
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        print(f"[❌ 실패] get_kline() 최종 실패: {symbol}-{strategy}, 데이터 없음")
+        failed_result(symbol, strategy, reason="캔들 데이터 없음")
+        return None
 
-        # 마지막 유효 데이터라도 있으면 반환
+    # 마지막 유효 데이터라도 있으면 사용
+    if len(df) < required_rows:
         if last_valid_df is not None and not last_valid_df.empty:
-            print(f"[📌 백업 데이터 사용] {symbol}-{strategy} → 실시간 데이터 부족, 캐시 데이터 반환")
             df = last_valid_df
-        else:
-            failed_result(symbol, strategy, reason=f"캔들 row 부족 ({row_count})")
-            return None
+        print(f"[⚠️ 데이터 부족 → 증강 예정] {symbol}-{strategy} row={len(df)} / 필요: {required_rows}")
 
-    # 필수 컬럼 보정
+    # ✅ 필수 컬럼 보정
     required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
     for col in required_cols:
         if col not in df.columns:
             df[col] = 0.0 if col != "timestamp" else pd.Timestamp.now()
 
     df = df[required_cols]
+
+    # ✅ 증강 필요 플래그 추가
+    df.attrs["augment_needed"] = len(df) < required_rows
 
     # 캐시에 저장
     CacheManager.set(cache_key, df)
