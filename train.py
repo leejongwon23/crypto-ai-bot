@@ -504,19 +504,17 @@ def train_symbol_group_loop(delay_minutes=5):
     FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 
     done_path = "/persistent/train_done.json"
-    train_done = {}
 
-    # ✅ 이전 학습 완료 상태 로드
-    try:
-        if os.path.exists(done_path):
-            with open(done_path, "r", encoding="utf-8") as f:
-                train_done = json.load(f)
-            if not isinstance(train_done, dict):
-                print("⚠️ train_done 구조 오류 → 초기화")
-                train_done = {}
-    except Exception as e:
-        print(f"⚠️ train_done 파싱 실패 → 초기화: {e}")
-        train_done = {}
+    # ✅ 1. 학습 조건 강제 초기화
+    if os.path.exists(done_path):
+        try:
+            os.remove(done_path)
+            print(f"[🚀 강제 초기화] {done_path} 삭제 완료")
+        except Exception as e:
+            print(f"[⚠️ train_done.json 삭제 실패] {e}")
+
+    train_done = {}
+    FORCE_TRAINING = True  # ✅ 첫 루프 강제 학습 모드
 
     loop_count = 0
     group_count = len(SYMBOL_GROUPS)
@@ -529,7 +527,6 @@ def train_symbol_group_loop(delay_minutes=5):
         loop_count += 1
         print(f"\n🔄 전체 그룹 순회 루프 #{loop_count} 시작 ({now_kst().isoformat()})")
 
-        # 예측 대상을 모아서 마지막에 실행
         prediction_queue = []
 
         for idx, group in enumerate(SYMBOL_GROUPS):
@@ -543,7 +540,6 @@ def train_symbol_group_loop(delay_minutes=5):
 
             for symbol in group:
                 for strategy in ["단기", "중기", "장기"]:
-                    # 완료 여부 확인
                     train_done.setdefault(symbol, {}).setdefault(strategy, {})
 
                     try:
@@ -556,11 +552,15 @@ def train_symbol_group_loop(delay_minutes=5):
 
                     for gid in range(MAX_GROUP_ID + 1):
                         already_done = train_done[symbol][strategy].get(str(gid), False)
-                        if already_done:
+
+                        # ✅ 강제 학습 모드에서는 무조건 진행
+                        if not FORCE_TRAINING and already_done:
                             print(f"[⏩ 스킵] 이미 완료: {symbol}-{strategy}-group{gid}")
                             continue
+                        elif FORCE_TRAINING:
+                            print(f"[🚀 강제 학습 모드] {symbol}-{strategy}-group{gid}")
 
-                        # 사전 데이터 검증
+                        # 데이터 검증
                         try:
                             df = get_kline_by_strategy(symbol, strategy)
                             if df is None or len(df) < 100:
@@ -585,7 +585,6 @@ def train_symbol_group_loop(delay_minutes=5):
                             print(f"[❌ 학습 실패] {symbol}-{strategy}-group{gid} → {e}")
                             traceback.print_exc()
 
-                    # 예측은 마지막에 일괄 실행하기 위해 큐에 저장
                     prediction_queue.append((symbol, strategy))
 
         # ✅ 모든 그룹 학습 완료 후 예측 실행
@@ -612,6 +611,7 @@ def train_symbol_group_loop(delay_minutes=5):
         if first_loop:
             print("[⏩ 첫 루프 완료 → delay 대기 없이 다음 루프 진행]")
             first_loop = False
+            FORCE_TRAINING = False  # ✅ 이후 루프는 기존 로직 적용
             continue
 
         print(f"🕒 전체 그룹 완료 → {delay_minutes}분 대기 ({now_kst().isoformat()})")
