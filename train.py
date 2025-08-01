@@ -109,6 +109,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     from logger import log_training_result, record_model_success, get_feature_hash_from_tensor
     from data.utils import get_kline_by_strategy, compute_features
     from wrong_data_loader import load_training_prediction_data
+    from data_augmentation import balance_classes
     import pytz
     from ranger_adabelief import RangerAdaBelief as Ranger
     from sklearn.metrics import accuracy_score, f1_score
@@ -122,7 +123,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
     for gid in group_ids:
         model_saved = False
-        fail_reason = None
         try:
             # 1. SSL 사전학습
             try:
@@ -130,18 +130,16 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             except Exception as e:
                 print(f"[⚠️ SSL 사전학습 실패] {e}")
 
-            # 2. 데이터 로드 및 사전 검증
+            # 2. 데이터 로드
             df = get_kline_by_strategy(symbol, strategy)
-            if df is None or len(df) < 100:
-                fail_reason = "get_kline 데이터 부족"
-                print(f"[⚠️ 데이터 부족 → 학습 스킵] {symbol}-{strategy}-group{gid}")
-                raise Exception(fail_reason)
+            if df is None or len(df) < 100:  # 최소 100개 미만이면 학습 불가
+                print(f"[❌ 데이터 부족 심각 → 학습 스킵] {symbol}-{strategy}-group{gid}")
+                raise Exception("get_kline 데이터 부족")
 
             feat = compute_features(symbol, df, strategy)
             if feat is None or len(feat) < 100:
-                fail_reason = "feature 데이터 부족"
-                print(f"[⚠️ 피처 부족 → 학습 스킵] {symbol}-{strategy}-group{gid}")
-                raise Exception(fail_reason)
+                print(f"[❌ 피처 부족 → 학습 스킵] {symbol}-{strategy}-group{gid}")
+                raise Exception("feature 데이터 부족")
 
             features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
             feat_scaled = MinMaxScaler().fit_transform(features_only)
@@ -171,19 +169,23 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 y.append(labels[i + window] if i + window < len(labels) else 0)
             X, y = np.array(X), np.array(y)
 
-            # 5. 실패 데이터 병합
+            # 5. 데이터 부족 시 증강
+            if getattr(df.attrs, "augment_needed", False):
+                print(f"[⚠️ 데이터 부족 → 증강 진행] {symbol}-{strategy}")
+                X, y = balance_classes(X, y, num_classes=num_classes)
+                print(f"[✅ 증강 완료] 최종 샘플 수: {len(X)}")
+
+            # 6. 실패 데이터 병합
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size, window, group_id=gid)
             if fail_X is not None and len(fail_X) > 0:
                 print(f"📌 실패 샘플 {len(fail_X)}건 병합 시도")
                 unique_hashes, filtered_X, filtered_y = {}, [], []
-                # 실패 데이터 우선
                 for i in range(len(fail_X)):
                     h = get_feature_hash_from_tensor(torch.tensor(fail_X[i:i+1], dtype=torch.float32))
                     if h not in unique_hashes:
                         unique_hashes[h] = True
                         filtered_X.append(fail_X[i])
                         filtered_y.append(fail_y[i])
-                # 정상 데이터 추가
                 for i in range(len(X)):
                     h = get_feature_hash_from_tensor(torch.tensor(X[i:i+1], dtype=torch.float32))
                     if h not in unique_hashes:
@@ -192,13 +194,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         filtered_y.append(y[i])
                 X, y = np.array(filtered_X), np.array(filtered_y)
 
-            # 학습 샘플 수 체크
             if len(X) < 10:
-                fail_reason = "유효한 학습 샘플 부족"
-                print(f"[⚠️ {fail_reason} → 학습 스킵] {symbol}-{strategy}-group{gid}")
-                raise Exception(fail_reason)
+                raise Exception("유효한 학습 샘플 부족")
 
-            # 6. 모델 학습
+            # 7. 모델 학습
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
                 model = get_model(model_type, input_size=input_size, output_size=num_classes).to(DEVICE)
                 model_name = f"{symbol}_{strategy}_{model_type}_group{gid}_cls{num_classes}.pt"
@@ -243,13 +242,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 os.makedirs("/persistent/models", exist_ok=True)
                 torch.save(model.state_dict(), model_path)
 
-                # 저장 실패 시 더미 저장
                 if not os.path.exists(model_path):
                     print(f"[❌ 저장 실패] {model_path} → 더미 모델로 대체 저장")
                     dummy = get_model(model_type, input_size=input_size, output_size=3).to("cpu")
                     torch.save(dummy.state_dict(), model_path)
 
-                # 메타 정보 저장 (model_name 필드 포함)
                 meta_info = {
                     "symbol": symbol,
                     "strategy": strategy,
@@ -272,7 +269,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{gid} → {e}")
             traceback.print_exc()
 
-        # 학습 실패 시 더미 저장
         if not model_saved:
             print(f"[⚠️ {symbol}-{strategy}-group{gid}] 학습 실패 → 더미 모델 강제 저장")
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
