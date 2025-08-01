@@ -487,8 +487,7 @@ def train_symbol_group_loop(delay_minutes=5):
     from train import train_one_model
     from recommend import main
     import safe_cleanup
-    from evo_meta_learner import train_evo_meta_loop, train_evo_meta
-    from wrong_data_loader import load_training_prediction_data
+    from evo_meta_learner import train_evo_meta_loop
     from config import get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges
     from failure_db import ensure_failure_db
     from data.utils import get_kline_by_strategy, compute_features
@@ -510,7 +509,7 @@ def train_symbol_group_loop(delay_minutes=5):
             print(f"[⚠️ train_done.json 삭제 실패] {e}")
 
     train_done = {}
-    FORCE_TRAINING = True  # ✅ 첫 루프 강제 학습 모드
+    FORCE_TRAINING = True  # ✅ 첫 루프 전체 강제 학습 모드
 
     loop_count = 0
     group_count = len(SYMBOL_GROUPS)
@@ -536,6 +535,7 @@ def train_symbol_group_loop(delay_minutes=5):
 
             for symbol in group:
                 for strategy in ["단기", "중기", "장기"]:
+                    print(f"[DEBUG] 심볼={symbol}, 전략={strategy} 학습 루프 진입")
                     train_done.setdefault(symbol, {}).setdefault(strategy, {})
 
                     try:
@@ -549,27 +549,25 @@ def train_symbol_group_loop(delay_minutes=5):
                     for gid in range(MAX_GROUP_ID + 1):
                         already_done = train_done[symbol][strategy].get(str(gid), False)
 
-                        # ✅ 강제 학습 모드에서는 무조건 진행
+                        # ✅ 첫 루프는 무조건 강제 학습
                         if not FORCE_TRAINING and already_done:
                             print(f"[⏩ 스킵] 이미 완료: {symbol}-{strategy}-group{gid}")
                             continue
                         elif FORCE_TRAINING:
                             print(f"[🚀 강제 학습 모드] {symbol}-{strategy}-group{gid}")
 
-                        # 데이터 검증
+                        # ✅ 데이터 로드 (부족해도 학습 강행)
                         try:
                             df = get_kline_by_strategy(symbol, strategy)
                             if df is None or len(df) < 100:
-                                print(f"[⚠️ 데이터 부족 → 스킵] {symbol}-{strategy}-group{gid}")
-                                continue
+                                print(f"[⚠️ 데이터 부족 {len(df) if df is not None else 0}봉 → 증강 학습 시도] {symbol}-{strategy}-group{gid}")
                             feat = compute_features(symbol, df, strategy)
-                            if feat is None or len(feat) < 100:
-                                print(f"[⚠️ 피처 부족 → 스킵] {symbol}-{strategy}-group{gid}")
-                                continue
+                            if feat is None or len(feat) < 10:
+                                print(f"[⚠️ 피처 심각 부족 {len(feat) if feat is not None else 0} → 학습 시도] {symbol}-{strategy}-group{gid}")
                         except Exception as e:
                             print(f"[⚠️ 데이터 로드 실패] {symbol}-{strategy}-group{gid} → {e}")
-                            continue
 
+                        # ✅ 학습 실행
                         try:
                             print(f"[▶ 학습 시작] {symbol}-{strategy}-group{gid} ({now_kst().isoformat()})")
                             train_one_model(symbol, strategy, group_id=gid)
@@ -607,7 +605,7 @@ def train_symbol_group_loop(delay_minutes=5):
         if first_loop:
             print("[⏩ 첫 루프 완료 → delay 대기 없이 다음 루프 진행]")
             first_loop = False
-            FORCE_TRAINING = False  # ✅ 이후 루프는 기존 로직 적용
+            FORCE_TRAINING = False
             continue
 
         print(f"🕒 전체 그룹 완료 → {delay_minutes}분 대기 ({now_kst().isoformat()})")
