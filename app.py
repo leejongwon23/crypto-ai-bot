@@ -422,7 +422,6 @@ def ensure_prediction_log_exists():
             writer.writerow({h: "" for h in headers})
         print("✅ prediction_log.csv dummy row 생성 완료")
 
-
 # ✅ 실행
 ensure_prediction_log_exists()
 
@@ -439,15 +438,28 @@ if __name__ == "__main__":
 
     from train import train_symbol_group_loop
 
+    # ✅ 학습 루프 스레드 시작
     print("✅ [DEBUG] train_symbol_group_loop 쓰레드 시작 직전")
     threading.Thread(target=train_symbol_group_loop, daemon=True).start()
     print("✅ [DEBUG] train_symbol_group_loop 쓰레드 시작 완료")
+
+    # 🚀 서버 시작 즉시 1회 학습 강제 실행 (대기 없이)
+    print("🚀 [DEBUG] 서버 시작 직후 첫 학습 강제 실행")
+    threading.Thread(target=lambda: train_symbol_group_loop(), daemon=True).start()
+
+    # ✅ 스케줄러 실행 (주기적 학습/예측/평가 동작 보장)
+    try:
+        start_scheduler()
+        print("✅ [DEBUG] 스케줄러 시작 완료")
+    except Exception as e:
+        print(f"⚠️ [DEBUG] 스케줄러 시작 실패 → {e}")
 
     # ✅ meta 보정 스크립트 자동 실행 추가
     import maintenance_fix_meta
     threading.Thread(target=maintenance_fix_meta.fix_all_meta_json, daemon=True).start()
     print("✅ [DEBUG] maintenance_fix_meta.fix_all_meta_json 쓰레드 시작 완료")
 
+    # ✅ Telegram 알림
     threading.Thread(target=lambda: send_message("[시작] YOPO 서버 실행됨"), daemon=True).start()
     print("✅ [DEBUG] telegram_bot send_message 쓰레드 시작 완료")
 
