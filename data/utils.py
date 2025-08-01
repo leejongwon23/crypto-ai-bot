@@ -30,7 +30,7 @@ SYMBOLS = [
 STRATEGY_CONFIG = {
     "단기": {"interval": "240", "limit": 1000},   # 4시간봉 (240분)
     "중기": {"interval": "D",   "limit": 500},    # 1일봉
-    "장기": {"interval": "2D",  "limit": 300}     # 2일봉
+    "장기": {"interval": "D",  "limit": 500}     # 2일봉
 }
 
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
