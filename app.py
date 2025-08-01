@@ -335,33 +335,62 @@ def train_selected_symbols():
     except Exception as e:
         return f"❌ 학습 실패: {e}", 500
 
-
 @app.route("/reset-all")
 def reset_all():
     if request.args.get("key") != "3572":
         return "❌ 인증 실패", 403
-    try:
-        def clear(f, h): open(f, "w", newline="", encoding="utf-8-sig").write(",".join(h) + "\n")
 
-        # ✅ 모델 폴더 초기화 (.pt 포함 전체 삭제)
+    try:
+        import shutil, os
+        from data.utils import _kline_cache, _feature_cache
+
+        def clear_csv(f, h):
+            os.makedirs(os.path.dirname(f), exist_ok=True)
+            with open(f, "w", newline="", encoding="utf-8-sig") as wf:
+                wf.write(",".join(h) + "\n")
+
+        # ✅ 1. train_done.json 삭제
+        done_path = "/persistent/train_done.json"
+        if os.path.exists(done_path):
+            os.remove(done_path)
+            print("[✅ 초기화] train_done.json 삭제 완료")
+
+        # ✅ 2. 모델 폴더 전체 삭제 후 재생성
+        MODEL_DIR = "/persistent/models"
         if os.path.exists(MODEL_DIR):
             shutil.rmtree(MODEL_DIR)
         os.makedirs(MODEL_DIR, exist_ok=True)
+        print("[✅ 초기화] 모델 폴더 삭제 및 재생성 완료")
 
-        # ✅ 혹시 남아있을 수 있는 .meta.json도 정리
-        for f in os.listdir("/persistent/models"):
-            if f.endswith(".meta.json"):
-                os.remove(os.path.join("/persistent/models", f))
+        # ✅ 3. 로그 폴더 전체 삭제
+        LOG_DIR = "/persistent/logs"
+        if os.path.exists(LOG_DIR):
+            shutil.rmtree(LOG_DIR)
+        os.makedirs(LOG_DIR, exist_ok=True)
+        print("[✅ 초기화] 로그 폴더 삭제 완료")
 
-        # ✅ 예측, 학습, 실패, 메시지 로그 초기화
-        clear(PREDICTION_LOG, ["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "model", "rate", "status", "reason", "return", "volatility"])
-        clear(WRONG_PREDICTIONS, ["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "gain"])
-        clear(LOG_FILE, ["timestamp", "symbol", "strategy", "model", "accuracy", "f1", "loss"])
-        clear(AUDIT_LOG, ["timestamp", "symbol", "strategy", "result", "status"])
-        clear(MESSAGE_LOG, ["timestamp", "symbol", "strategy", "message"])
-        clear(FAILURE_LOG, ["symbol", "strategy", "failures"])
+        # ✅ 4. 캐시 초기화
+        _kline_cache.clear()
+        _feature_cache.clear()
+        print("[✅ 초기화] 메모리 캐시 초기화 완료")
 
-        return "✅ 초기화 완료"
+        # ✅ 5. 주요 로그 CSV 초기화
+        clear_csv(PREDICTION_LOG, [
+            "timestamp", "symbol", "strategy", "direction",
+            "entry_price", "target_price", "model", "rate",
+            "status", "reason", "return", "volatility"
+        ])
+        clear_csv(WRONG_PREDICTIONS, [
+            "timestamp", "symbol", "strategy", "direction",
+            "entry_price", "target_price", "gain"
+        ])
+        clear_csv(LOG_FILE, ["timestamp", "symbol", "strategy", "model", "accuracy", "f1", "loss"])
+        clear_csv(AUDIT_LOG, ["timestamp", "symbol", "strategy", "result", "status"])
+        clear_csv(MESSAGE_LOG, ["timestamp", "symbol", "strategy", "message"])
+        clear_csv(FAILURE_LOG, ["symbol", "strategy", "failures"])
+        print("[✅ 초기화] 주요 CSV 로그 초기화 완료")
+
+        return "✅ 완전 초기화 완료"
     except Exception as e:
         return f"초기화 실패: {e}", 500
 
