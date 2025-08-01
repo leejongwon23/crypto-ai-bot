@@ -500,16 +500,14 @@ def train_symbol_group_loop(delay_minutes=5):
 
     done_path = "/persistent/train_done.json"
 
-    # ✅ 1. 학습 조건 강제 초기화
-    if os.path.exists(done_path):
-        try:
-            os.remove(done_path)
-            print(f"[🚀 강제 초기화] {done_path} 삭제 완료")
-        except Exception as e:
-            print(f"[⚠️ train_done.json 삭제 실패] {e}")
+    # ✅ 재배포 시 자동 초기화 제거
+    if not os.path.exists(done_path):
+        print("[ℹ️ 유지 모드] 이전 학습 이력 없음 → 새로 생성")
+    else:
+        print("[ℹ️ 유지 모드] 이전 학습 이력 보존 (train_done.json 유지)")
 
     train_done = {}
-    FORCE_TRAINING = True  # ✅ 첫 루프 전체 강제 학습 모드
+    FORCE_TRAINING = True  # 첫 루프 전체 강제 학습 모드
 
     loop_count = 0
     group_count = len(SYMBOL_GROUPS)
@@ -549,14 +547,12 @@ def train_symbol_group_loop(delay_minutes=5):
                     for gid in range(MAX_GROUP_ID + 1):
                         already_done = train_done[symbol][strategy].get(str(gid), False)
 
-                        # ✅ 첫 루프는 무조건 강제 학습
                         if not FORCE_TRAINING and already_done:
                             print(f"[⏩ 스킵] 이미 완료: {symbol}-{strategy}-group{gid}")
                             continue
                         elif FORCE_TRAINING:
                             print(f"[🚀 강제 학습 모드] {symbol}-{strategy}-group{gid}")
 
-                        # ✅ 데이터 로드 (부족해도 학습 강행)
                         try:
                             df = get_kline_by_strategy(symbol, strategy)
                             if df is None or len(df) < 100:
@@ -567,7 +563,6 @@ def train_symbol_group_loop(delay_minutes=5):
                         except Exception as e:
                             print(f"[⚠️ 데이터 로드 실패] {symbol}-{strategy}-group{gid} → {e}")
 
-                        # ✅ 학습 실행
                         try:
                             print(f"[▶ 학습 시작] {symbol}-{strategy}-group{gid} ({now_kst().isoformat()})")
                             train_one_model(symbol, strategy, group_id=gid)
@@ -611,7 +606,6 @@ def train_symbol_group_loop(delay_minutes=5):
         print(f"🕒 전체 그룹 완료 → {delay_minutes}분 대기 ({now_kst().isoformat()})")
         time.sleep(delay_minutes * 60)
 
-        # 진화형 메타러너 전체 학습 루프
         try:
             print("[▶ 진화형 메타러너 전체 루프 학습 시작]")
             train_evo_meta_loop()
