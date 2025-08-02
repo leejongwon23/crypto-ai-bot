@@ -221,9 +221,82 @@ _kline_cache_ttl = {}  # ✅ TTL 추가
 
 import time
 
+
+import requests
+import pandas as pd
+
+BINANCE_BASE_URL = "https://fapi.binance.com"  # Binance Futures (USDT-M)
+BYBIT_BASE_URL = BASE_URL  # 기존 상수 재사용
+
+# 1. Binance 선물시장 데이터 호출
+def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300) -> pd.DataFrame:
+    try:
+        # Binance interval 매핑
+        interval_map = {"240": "4h", "D": "1d", "2D": "2d", "60": "1h"}
+        binance_interval = interval_map.get(interval, "1h")
+        url = f"{BINANCE_BASE_URL}/fapi/v1/klines"
+        params = {"symbol": symbol, "interval": binance_interval, "limit": limit}
+        res = requests.get(url, params=params, timeout=10)
+        res.raise_for_status()
+        raw = res.json()
+
+        if not raw:
+            print(f"[⚠️ Binance] 데이터 없음: {symbol}-{interval}")
+            return pd.DataFrame()
+
+        # Binance 응답 → Bybit 구조로 변환
+        df = pd.DataFrame(raw, columns=[
+            "timestamp", "open", "high", "low", "close", "volume",
+            "close_time", "quote_asset_volume", "trades", "taker_base_vol", "taker_quote_vol", "ignore"
+        ])
+        df = df[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce").dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+        df = df.dropna(subset=["timestamp"])
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        df["datetime"] = df["timestamp"]
+        print(f"[✅ Binance] {symbol}-{interval} → {len(df)}개 캔들 로드됨")
+        return df
+    except Exception as e:
+        print(f"[❌ Binance 오류] {symbol}-{interval} → {e}")
+        return pd.DataFrame()
+
+
+# 2. Bybit + Binance 데이터 병합
+def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
+    config = STRATEGY_CONFIG.get(strategy)
+    if not config:
+        print(f"[❌ 실패] 전략 설정 없음: {strategy}")
+        return pd.DataFrame()
+
+    interval = config["interval"]
+    limit = config["limit"]
+
+    # Bybit 데이터
+    df_bybit = get_kline(symbol, interval=interval, limit=limit)
+    # Binance 데이터
+    df_binance = get_kline_binance(symbol, interval=interval, limit=limit)
+
+    # 병합
+    df_all = pd.concat([df_bybit, df_binance], ignore_index=True)
+    df_all = df_all.drop_duplicates(subset=["timestamp"], keep="first")
+    df_all = df_all.sort_values("timestamp").reset_index(drop=True)
+
+    # 필수 컬럼 확인
+    required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
+    for col in required_cols:
+        if col not in df_all.columns:
+            df_all[col] = 0.0 if col != "timestamp" else pd.Timestamp.now()
+
+    # 증강 필요 플래그 설정
+    df_all.attrs["augment_needed"] = len(df_all) < limit
+
+    print(f"[🔄 병합완료] {symbol}-{strategy} → {len(df_all)}개 캔들 (목표 {limit})")
+    return df_all
+
+
+# 3. 기존 get_kline_by_strategy 수정 → 병합 함수 사용
 def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
-    import os, time
     import pandas as pd
 
     cache_key = f"{symbol}-{strategy}"
@@ -231,63 +304,20 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     if cached_df is not None:
         return cached_df
 
-    config = STRATEGY_CONFIG.get(strategy)
-    if config is None:
-        print(f"[❌ 실패] {symbol}-{strategy}: 전략 설정 없음")
-        failed_result(symbol, strategy, reason="전략 설정 없음")
+    try:
+        df = get_merged_kline_by_strategy(symbol, strategy)
+
+        if df.empty:
+            failed_result(symbol, strategy, reason="캔들 데이터 없음")
+            return None
+
+        # 캐시에 저장
+        CacheManager.set(cache_key, df)
+        return df
+    except Exception as e:
+        print(f"[❌ 병합 호출 실패] {symbol}-{strategy} → {e}")
+        failed_result(symbol, strategy, reason=str(e))
         return None
-
-    required_rows = config.get("limit", 100)
-    df = None
-    last_valid_df = None
-
-    # ✅ 재시도 횟수 확장 (3 → 5)
-    for attempt in range(5):
-        try:
-            df = get_kline(symbol, interval=config["interval"], limit=config["limit"])
-            if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
-                row_count = len(df)
-                if row_count >= required_rows:
-                    last_valid_df = df.copy()
-                    print(f"[✅ get_kline 성공] {symbol}-{strategy} row={row_count}")
-                    break
-                else:
-                    print(f"[⚠️ get_kline 시도 {attempt+1}/5] row 부족: {row_count} / 필요: {required_rows}")
-                    last_valid_df = df.copy()
-            else:
-                print(f"[⚠️ get_kline 시도 {attempt+1}/5] 빈 데이터 또는 DataFrame 아님")
-        except Exception as e:
-            print(f"[⚠️ get_kline 예외 - 시도 {attempt+1}/5] {symbol}-{strategy} → {e}")
-
-        time.sleep(1 + attempt)  # 재시도 간 대기 시간 점진 증가
-
-    # ✅ 최종 데이터 확보 여부 판단
-    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        print(f"[❌ 실패] get_kline() 최종 실패: {symbol}-{strategy}, 데이터 없음")
-        failed_result(symbol, strategy, reason="캔들 데이터 없음")
-        return None
-
-    # 마지막 유효 데이터라도 있으면 사용
-    if len(df) < required_rows:
-        if last_valid_df is not None and not last_valid_df.empty:
-            df = last_valid_df
-        print(f"[⚠️ 데이터 부족 → 증강 예정] {symbol}-{strategy} row={len(df)} / 필요: {required_rows}")
-
-    # ✅ 필수 컬럼 보정
-    required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
-    for col in required_cols:
-        if col not in df.columns:
-            df[col] = 0.0 if col != "timestamp" else pd.Timestamp.now()
-
-    df = df[required_cols]
-
-    # ✅ 증강 필요 플래그 추가
-    df.attrs["augment_needed"] = len(df) < required_rows
-
-    # 캐시에 저장
-    CacheManager.set(cache_key, df)
-    return df
-
 
 # ✅ SYMBOL_GROUPS batch prefetch 함수 추가
 
