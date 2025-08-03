@@ -178,8 +178,12 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                    timestamp=None, model=None, predicted_class=None, top_k=None,
                    note="", success=False, reason="", rate=None, return_value=None,
                    label=None, group_id=None, model_symbol=None, model_name=None,
-                   source="일반", volatility=False, feature_vector=None):
-
+                   source="일반", volatility=False, feature_vector=None,
+                   source_exchange="BYBIT"):
+    """
+    예측 로그 기록 함수
+    source_exchange: BYBIT / BINANCE / MIXED (병합 시 MIXED)
+    """
     import csv, os, json
     import numpy as np
     from datetime import datetime
@@ -221,7 +225,7 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
         now, symbol, strategy, direction, entry_price, target_price,
         model or "", predicted_class, top_k_str, note,
         str(success), reason, rate, return_value, label,
-        group_id, model_symbol, model_name, source, volatility
+        group_id, model_symbol, model_name, source, volatility, source_exchange
     ]
 
     try:
@@ -233,11 +237,12 @@ def log_prediction(symbol, strategy, direction=None, entry_price=0, target_price
                     "timestamp", "symbol", "strategy", "direction", "entry_price", "target_price",
                     "model", "predicted_class", "top_k", "note", "success", "reason",
                     "rate", "return_value", "label", "group_id", "model_symbol", "model_name",
-                    "source", "volatility"
+                    "source", "volatility", "source_exchange"
                 ])
             writer.writerow(row)
 
-        print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} → class={predicted_class} | success={success} | reason={reason} | source={source}")
+        print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} "
+              f"class={predicted_class} | success={success} | src={source_exchange} | reason={reason}")
 
         # ✅ 실패 시 실패 DB 저장
         if not success:
@@ -495,7 +500,8 @@ def record_model_success(model: str, success: bool):
     conn.close()
 
 
-def log_training_result(symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0.0, note=""):
+def log_training_result(symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0.0,
+                        note="", source_exchange="BYBIT"):
     import csv
     from datetime import datetime
     import pytz
@@ -505,18 +511,23 @@ def log_training_result(symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
     now = datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
-    row = [now, symbol, strategy, model, accuracy, f1, loss, note]
+    row = [now, symbol, strategy, model, accuracy, f1, loss, note, source_exchange]
 
     try:
         write_header = not os.path.exists(LOG_FILE)
         with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             if write_header:
-                writer.writerow(["timestamp", "symbol", "strategy", "model", "accuracy", "f1", "loss", "note"])
+                writer.writerow([
+                    "timestamp", "symbol", "strategy", "model",
+                    "accuracy", "f1", "loss", "note", "source_exchange"
+                ])
             writer.writerow(row)
-        print(f"[✅ 학습 로그 기록됨] {symbol}-{strategy} acc={accuracy:.3f} f1={f1:.3f}")
+        print(f"[✅ 학습 로그 기록됨] {symbol}-{strategy} "
+              f"acc={accuracy:.3f} f1={f1:.3f} src={source_exchange}")
     except Exception as e:
         print(f"[⚠️ 학습 로그 기록 실패] {e}")
+
 
 # ✅ 로그 읽기 시 utf-8-sig + 오류 무시
 def read_training_log():
