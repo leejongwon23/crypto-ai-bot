@@ -130,21 +130,20 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             except Exception as e:
                 print(f"[⚠️ SSL 사전학습 실패] {e}")
 
-            # 2. 데이터 로드
+            # 2. 데이터 로드 (병합된 Bybit+Binance)
             df = get_kline_by_strategy(symbol, strategy)
-            if df is None or len(df) < 100:  # 최소 100개 미만이면 학습 불가
-                print(f"[❌ 데이터 부족 심각 → 학습 스킵] {symbol}-{strategy}-group{gid}")
-                raise Exception("get_kline 데이터 부족")
+            if df is None or df.empty:
+                raise Exception("get_kline 데이터 없음")
 
+            # 3. 피처 생성
             feat = compute_features(symbol, df, strategy)
-            if feat is None or len(feat) < 100:
-                print(f"[❌ 피처 부족 → 학습 스킵] {symbol}-{strategy}-group{gid}")
-                raise Exception("feature 데이터 부족")
+            if feat is None or feat.empty:
+                raise Exception("feature 데이터 없음")
 
             features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
             feat_scaled = MinMaxScaler().fit_transform(features_only)
 
-            # 3. 수익률 → 클래스 변환
+            # 4. 수익률 → 클래스 변환
             returns = df["close"].pct_change().fillna(0).values
             class_ranges = get_class_ranges(group_id=gid)
             num_classes = len(class_ranges)
@@ -152,16 +151,16 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
             labels = []
             for r in returns:
-                matched = False
+                cls_found = False
                 for i, rng in enumerate(class_ranges):
                     if rng[0] <= r <= rng[1]:
                         labels.append(i)
-                        matched = True
+                        cls_found = True
                         break
-                if not matched:
+                if not cls_found:
                     labels.append(0)
 
-            # 4. 시퀀스 생성
+            # 5. 시퀀스 생성
             window = 60
             X, y = [], []
             for i in range(len(feat_scaled) - window):
@@ -169,35 +168,37 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 y.append(labels[i + window] if i + window < len(labels) else 0)
             X, y = np.array(X), np.array(y)
 
-            # 5. 데이터 부족 시 증강
-            if getattr(df.attrs, "augment_needed", False):
+            # 6. 데이터 부족 시 증강
+            if getattr(df.attrs, "augment_needed", False) or len(X) < 50:
                 print(f"[⚠️ 데이터 부족 → 증강 진행] {symbol}-{strategy}")
                 X, y = balance_classes(X, y, num_classes=num_classes)
                 print(f"[✅ 증강 완료] 최종 샘플 수: {len(X)}")
 
-            # 6. 실패 데이터 병합
+            # 7. 실패 데이터 병합
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size, window, group_id=gid)
             if fail_X is not None and len(fail_X) > 0:
                 print(f"📌 실패 샘플 {len(fail_X)}건 병합 시도")
-                unique_hashes, filtered_X, filtered_y = {}, [], []
+                unique_hashes, merged_X, merged_y = {}, [], []
+                # 실패 데이터 우선
                 for i in range(len(fail_X)):
                     h = get_feature_hash_from_tensor(torch.tensor(fail_X[i:i+1], dtype=torch.float32))
                     if h not in unique_hashes:
                         unique_hashes[h] = True
-                        filtered_X.append(fail_X[i])
-                        filtered_y.append(fail_y[i])
+                        merged_X.append(fail_X[i])
+                        merged_y.append(fail_y[i])
+                # 정상 데이터 추가
                 for i in range(len(X)):
                     h = get_feature_hash_from_tensor(torch.tensor(X[i:i+1], dtype=torch.float32))
                     if h not in unique_hashes:
                         unique_hashes[h] = True
-                        filtered_X.append(X[i])
-                        filtered_y.append(y[i])
-                X, y = np.array(filtered_X), np.array(filtered_y)
+                        merged_X.append(X[i])
+                        merged_y.append(y[i])
+                X, y = np.array(merged_X), np.array(merged_y)
 
             if len(X) < 10:
                 raise Exception("유효한 학습 샘플 부족")
 
-            # 7. 모델 학습
+            # 8. 모델 학습
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
                 model = get_model(model_type, input_size=input_size, output_size=num_classes).to(DEVICE)
                 model_name = f"{symbol}_{strategy}_{model_type}_group{gid}_cls{num_classes}.pt"
@@ -242,11 +243,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 os.makedirs("/persistent/models", exist_ok=True)
                 torch.save(model.state_dict(), model_path)
 
-                if not os.path.exists(model_path):
-                    print(f"[❌ 저장 실패] {model_path} → 더미 모델로 대체 저장")
-                    dummy = get_model(model_type, input_size=input_size, output_size=3).to("cpu")
-                    torch.save(dummy.state_dict(), model_path)
-
+                # 메타 정보 저장
                 meta_info = {
                     "symbol": symbol,
                     "strategy": strategy,
@@ -269,6 +266,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{gid} → {e}")
             traceback.print_exc()
 
+        # 실패 시 더미 저장
         if not model_saved:
             print(f"[⚠️ {symbol}-{strategy}-group{gid}] 학습 실패 → 더미 모델 강제 저장")
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
