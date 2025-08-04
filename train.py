@@ -505,7 +505,7 @@ def train_symbol_group_loop(delay_minutes=5):
     from config import get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges
     from failure_db import ensure_failure_db
     from data.utils import get_kline_by_strategy, compute_features
-    from data_preprocessing import balance_classes
+    from data_augmentation import balance_classes
     from logger import log_training_result  # ✅ 스킵 로그 기록용 추가
 
     def now_kst():
