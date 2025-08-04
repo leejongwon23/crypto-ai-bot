@@ -494,8 +494,8 @@ def train_symbol_group_loop(delay_minutes=5):
     from config import get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges
     from failure_db import ensure_failure_db
     from data.utils import get_kline_by_strategy, compute_features
-    from data_augmentation import balance_classes
     from logger import log_training_result
+    from wrong_data_loader import load_training_prediction_data  # 실패 데이터 로드
 
     def now_kst():
         return datetime.now(pytz.timezone("Asia/Seoul"))
@@ -522,7 +522,6 @@ def train_symbol_group_loop(delay_minutes=5):
             print(f"\n📊 [그룹 {idx+1}/{group_count}] 첫 학습 시작 | 심볼 수: {len(group)}")
             _kline_cache.clear()
             _feature_cache.clear()
-
             for symbol in group:
                 for strategy in ["단기", "중기", "장기"]:
                     try:
@@ -575,7 +574,17 @@ def train_symbol_group_loop(delay_minutes=5):
                                     retry_count += 1
                                     continue
 
-                                if len(df) < 100:
+                                # 📌 실패 데이터 로드
+                                fail_X, fail_y = load_training_prediction_data(
+                                    symbol, strategy, FEATURE_INPUT_SIZE, 60, group_id=gid
+                                )
+                                if fail_X is not None and len(fail_X) > 0:
+                                    print(f"[📌 실패 데이터 병합 예정] {len(fail_X)}건")
+                                else:
+                                    print(f"[📌 실패 데이터 없음]")
+
+                                # 📌 데이터 부족 판단
+                                if len(df) < 100 and (fail_X is None or len(fail_X) == 0):
                                     reason = f"데이터 부족({len(df)}봉)"
                                     print(f"[⏩ 학습 스킵] {symbol}-{strategy}-group{gid} → {reason}")
                                     log_training_result(symbol, strategy, group_id=gid, status="skipped", reason=reason)
