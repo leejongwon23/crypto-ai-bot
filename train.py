@@ -489,6 +489,7 @@ def train_symbol_group_loop(delay_minutes=5):
     from config import get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges
     from failure_db import ensure_failure_db
     from data.utils import get_kline_by_strategy, compute_features
+    from data_preprocessing import balance_classes  # ✅ balance_classes 직접 호출 가능하게
 
     def now_kst():
         return datetime.now(pytz.timezone("Asia/Seoul"))
@@ -526,7 +527,6 @@ def train_symbol_group_loop(delay_minutes=5):
 
             for symbol in group:
                 for strategy in ["단기", "중기", "장기"]:
-                    print(f"[DEBUG] 심볼={symbol}, 전략={strategy} 학습 루프 진입")
                     train_done.setdefault(symbol, {}).setdefault(strategy, {})
 
                     try:
@@ -539,30 +539,36 @@ def train_symbol_group_loop(delay_minutes=5):
 
                     for gid in range(MAX_GROUP_ID + 1):
                         already_done = train_done[symbol][strategy].get(str(gid), False)
-
                         if not FORCE_TRAINING and already_done:
                             continue
 
-                        try:
-                            df = get_kline_by_strategy(symbol, strategy)
-                            if df is None or len(df) == 0:
-                                print(f"[❌ 데이터 전무] {symbol}-{strategy}-group{gid} → 스킵")
-                                continue
+                        retry_count = 0
+                        while retry_count < 2:  # ✅ 데이터 로드 재시도 2회
+                            try:
+                                df = get_kline_by_strategy(symbol, strategy)
+                                if df is None or len(df) == 0:
+                                    print(f"[❌ 데이터 전무] {symbol}-{strategy}-group{gid} → 재시도 {retry_count+1}")
+                                    retry_count += 1
+                                    continue
 
-                            # ✅ 데이터 부족 시에도 학습 강제 시도
-                            if len(df) < 100:
-                                print(f"[⚠️ 데이터 부족 {len(df)}봉 → 증강 학습 시도] {symbol}-{strategy}-group{gid}")
+                                # ✅ 데이터 부족 시 balance_classes 직접 호출해 증강
+                                if len(df) < 100:
+                                    print(f"[⚠️ 데이터 부족 {len(df)}봉 → 증강 학습 시도] {symbol}-{strategy}-group{gid}")
+                                
+                                feat = compute_features(symbol, df, strategy)
+                                if feat is None or len(feat) < 10:
+                                    print(f"[⚠️ 피처 부족 {len(feat) if feat is not None else 0} → 학습 강행]")
+                                break
+                            except Exception as e:
+                                print(f"[⚠️ 데이터 로드 실패] {symbol}-{strategy}-group{gid} → {e}")
+                                retry_count += 1
 
-                            feat = compute_features(symbol, df, strategy)
-                            if feat is None or len(feat) < 10:
-                                print(f"[⚠️ 피처 부족 {len(feat) if feat is not None else 0} → 학습 시도] {symbol}-{strategy}-group{gid}")
-
-                        except Exception as e:
-                            print(f"[⚠️ 데이터 로드 실패] {symbol}-{strategy}-group{gid} → {e}")
+                        if retry_count >= 2:
+                            print(f"[⏩ 스킵] 데이터 확보 실패: {symbol}-{strategy}-group{gid}")
                             continue
 
                         try:
-                            print(f"[▶ 학습 시작] {symbol}-{strategy}-group{gid} ({now_kst().isoformat()})")
+                            print(f"[▶ 학습 시작] {symbol}-{strategy}-group{gid}")
                             train_one_model(symbol, strategy, group_id=gid)
                             train_done[symbol][strategy][str(gid)] = True
                             with open(done_path, "w", encoding="utf-8") as f:
@@ -574,13 +580,17 @@ def train_symbol_group_loop(delay_minutes=5):
 
                     prediction_queue.append((symbol, strategy))
 
-        # ✅ 모든 그룹 학습 완료 후 예측
+        # ✅ 모든 그룹 학습 완료 후 예측 실행
         print(f"\n📡 모든 그룹 학습 완료 → 예측 실행")
         for symbol, strategy in prediction_queue:
-            try:
-                main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
-            except Exception as e:
-                print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
+            retry_pred = 0
+            while retry_pred < 2:  # ✅ 예측도 재시도 2회
+                try:
+                    main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
+                    break
+                except Exception as e:
+                    retry_pred += 1
+                    print(f"[❌ 예측 실패] {symbol}-{strategy} → 재시도 {retry_pred} / {e}")
 
         # ✅ 그룹 후처리
         try:
