@@ -235,10 +235,10 @@ SYMBOL_MAP = {
 
 def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300) -> pd.DataFrame:
     try:
-        # 심볼 매핑 적용
+        # ✅ 심볼 매핑 적용 (불일치 방지)
         real_symbol = SYMBOL_MAP["binance"].get(symbol, symbol)
 
-        # Binance interval 매핑
+        # ✅ Binance interval 매핑
         interval_map = {"240": "4h", "D": "1d", "2D": "2d", "60": "1h"}
         binance_interval = interval_map.get(interval, "1h")
 
@@ -248,11 +248,12 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300) -> p
         res.raise_for_status()
         raw = res.json()
 
+        # ✅ 데이터 확인
         if not raw:
             print(f"[⚠️ Binance] 데이터 없음: {real_symbol}-{interval}")
             return pd.DataFrame()
 
-        # Binance 응답 → Bybit 구조와 유사하게 변환
+        # ✅ 변환 처리
         df = pd.DataFrame(raw, columns=[
             "timestamp", "open", "high", "low", "close", "volume",
             "close_time", "quote_asset_volume", "trades", "taker_base_vol", "taker_quote_vol", "ignore"
@@ -264,7 +265,10 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300) -> p
         df = df.sort_values("timestamp").reset_index(drop=True)
         df["datetime"] = df["timestamp"]
 
-        print(f"[✅ Binance] {real_symbol}-{interval} → {len(df)}개 캔들 로드됨")
+        if len(df) < 10:
+            print(f"[⚠️ 경고] Binance {real_symbol}-{interval} → 캔들 수 부족 ({len(df)} rows)")
+
+        print(f"[✅ Binance 완료] {real_symbol}-{interval} → {len(df)}개 캔들 로드됨")
         return df
 
     except Exception as e:
@@ -272,7 +276,6 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300) -> p
         return pd.DataFrame()
 
 
-# 2. Bybit + Binance 데이터 병합
 # 2. Bybit + Binance 데이터 병합 (설계 기준 수정본)
 def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
     config = STRATEGY_CONFIG.get(strategy)
@@ -283,17 +286,13 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
     interval = config["interval"]
     limit = config["limit"]
 
-    # -------------------------
-    # 1차: Bybit 데이터 수집
-    # -------------------------
+    # 1차 Bybit
     df_bybit = get_kline(symbol, interval=interval, limit=limit)
     if df_bybit is None or df_bybit.empty:
         print(f"[⚠️ 1차 실패] Bybit 데이터 없음: {symbol}-{strategy}")
         df_bybit = pd.DataFrame()
 
-    # -------------------------
-    # 2차: Binance (1차 부족 시만)
-    # -------------------------
+    # 2차 Binance
     if df_bybit.empty or len(df_bybit) < limit:
         df_binance = get_kline_binance(symbol, interval=interval, limit=limit)
         if df_binance is None or df_binance.empty:
@@ -302,25 +301,19 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
         else:
             print(f"[✅ 2차 성공] Binance 데이터 확보: {len(df_binance)}개")
 
-        # 병합
         df_all = pd.concat([df_bybit, df_binance], ignore_index=True)
     else:
-        # Bybit만으로 충분
         df_all = df_bybit.copy()
 
-    # -------------------------
     # 병합 후 처리
-    # -------------------------
     df_all = df_all.drop_duplicates(subset=["timestamp"], keep="first")
     df_all = df_all.sort_values("timestamp").reset_index(drop=True)
 
-    # 필수 컬럼 채움
     required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
     for col in required_cols:
         if col not in df_all.columns:
             df_all[col] = 0.0 if col != "timestamp" else pd.Timestamp.now()
 
-    # 데이터 부족 여부 플래그
     df_all.attrs["augment_needed"] = len(df_all) < limit
 
     print(f"[🔄 병합완료] {symbol}-{strategy} → {len(df_all)}개 캔들 (목표 {limit})")
@@ -370,7 +363,7 @@ SYMBOL_MAP = {
 def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 3) -> pd.DataFrame:
     import time
 
-    # 심볼 매핑 적용
+    # ✅ 심볼 매핑 적용 (불일치 방지)
     real_symbol = SYMBOL_MAP["bybit"].get(symbol, symbol)
 
     for attempt in range(max_retry):
@@ -381,14 +374,15 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
             res.raise_for_status()
             data = res.json()
 
+            # ✅ 데이터 구조 확인
             if "result" not in data or "list" not in data["result"]:
-                print(f"[경고] get_kline() → 데이터 응답 구조 이상: {real_symbol}, 재시도 {attempt+1}/{max_retry}")
+                print(f"[경고] get_kline() 구조 이상: {real_symbol}, 재시도 {attempt+1}/{max_retry}")
                 time.sleep(1)
                 continue
 
             raw = data["result"]["list"]
             if not raw or len(raw[0]) < 6:
-                print(f"[경고] get_kline() → 필수 필드 누락 또는 빈 응답: {real_symbol}, 재시도 {attempt+1}/{max_retry}")
+                print(f"[경고] get_kline() 응답 비정상/빈 데이터: {real_symbol}, 재시도 {attempt+1}/{max_retry}")
                 time.sleep(1)
                 continue
 
@@ -397,18 +391,21 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
             ])
             df = df[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
 
+            # ✅ 필수값 체크
             essential = ["open", "high", "low", "close", "volume"]
             df.dropna(subset=essential, inplace=True)
             if df.empty:
-                print(f"[경고] get_kline() → 필수값 결측: {real_symbol}, 재시도 {attempt+1}/{max_retry}")
+                print(f"[경고] get_kline() 필수값 결측: {real_symbol}, 재시도 {attempt+1}/{max_retry}")
                 time.sleep(1)
                 continue
 
+            # ✅ 이상치 제거
             if df["high"].isnull().all() or (df["high"] == 0).all():
-                print(f"[치명] get_kline() → 'high' 값 이상치만 존재: {real_symbol}, 재시도 {attempt+1}/{max_retry}")
+                print(f"[치명] get_kline() 고가 이상치만 존재: {real_symbol}, 재시도 {attempt+1}/{max_retry}")
                 time.sleep(1)
                 continue
 
+            # ✅ 타임존 변환
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
             df = df.dropna(subset=["timestamp"])
             df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
@@ -418,7 +415,7 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
             if len(df) < 10:
                 print(f"[⚠️ 경고] {real_symbol}-{interval} → 캔들 수 부족 ({len(df)} rows)")
 
-            print(f"[✅ get_kline 완료] {real_symbol}-{interval} → {len(df)}개 캔들 로드됨")
+            print(f"[✅ Bybit 완료] {real_symbol}-{interval} → {len(df)}개 캔들 로드됨")
             return df
 
         except Exception as e:
