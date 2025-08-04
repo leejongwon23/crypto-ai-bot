@@ -133,12 +133,18 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             # 2. 데이터 로드 (병합된 Bybit+Binance)
             df = get_kline_by_strategy(symbol, strategy)
             if df is None or df.empty:
-                raise Exception("get_kline 데이터 없음")
+                reason = "get_kline 데이터 없음"
+                print(f"[⏩ 학습 스킵] {symbol}-{strategy}-group{gid} → {reason}")
+                log_training_result(symbol, strategy, status="skipped", reason=reason, group_id=gid)
+                return  # 데이터 없으면 바로 종료
 
             # 3. 피처 생성
             feat = compute_features(symbol, df, strategy)
             if feat is None or feat.empty:
-                raise Exception("feature 데이터 없음")
+                reason = "feature 데이터 없음"
+                print(f"[⏩ 학습 스킵] {symbol}-{strategy}-group{gid} → {reason}")
+                log_training_result(symbol, strategy, status="skipped", reason=reason, group_id=gid)
+                return
 
             features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
             feat_scaled = MinMaxScaler().fit_transform(features_only)
@@ -168,6 +174,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 y.append(labels[i + window] if i + window < len(labels) else 0)
             X, y = np.array(X), np.array(y)
 
+            # ✅ 데이터 부족 체크 → 스킵 처리
+            if len(X) < 10:
+                reason = f"유효한 학습 샘플 부족 ({len(X)}개)"
+                print(f"[⏩ 학습 스킵] {symbol}-{strategy}-group{gid} → {reason}")
+                log_training_result(symbol, strategy, status="skipped", reason=reason, group_id=gid)
+                return
+
             # 6. 데이터 부족 시 증강
             if getattr(df.attrs, "augment_needed", False) or len(X) < 50:
                 print(f"[⚠️ 데이터 부족 → 증강 진행] {symbol}-{strategy}")
@@ -179,14 +192,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             if fail_X is not None and len(fail_X) > 0:
                 print(f"📌 실패 샘플 {len(fail_X)}건 병합 시도")
                 unique_hashes, merged_X, merged_y = {}, [], []
-                # 실패 데이터 우선
                 for i in range(len(fail_X)):
                     h = get_feature_hash_from_tensor(torch.tensor(fail_X[i:i+1], dtype=torch.float32))
                     if h not in unique_hashes:
                         unique_hashes[h] = True
                         merged_X.append(fail_X[i])
                         merged_y.append(fail_y[i])
-                # 정상 데이터 추가
                 for i in range(len(X)):
                     h = get_feature_hash_from_tensor(torch.tensor(X[i:i+1], dtype=torch.float32))
                     if h not in unique_hashes:
@@ -195,8 +206,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         merged_y.append(y[i])
                 X, y = np.array(merged_X), np.array(merged_y)
 
+            # 다시 데이터 부족 체크
             if len(X) < 10:
-                raise Exception("유효한 학습 샘플 부족")
+                reason = f"유효한 학습 샘플 부족 ({len(X)}개, 실패데이터 병합 후)"
+                print(f"[⏩ 학습 스킵] {symbol}-{strategy}-group{gid} → {reason}")
+                log_training_result(symbol, strategy, status="skipped", reason=reason, group_id=gid)
+                return
 
             # 8. 모델 학습
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
