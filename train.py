@@ -103,7 +103,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     import os, traceback, torch, numpy as np, pandas as pd, json
     from datetime import datetime
     from ssl_pretrain import masked_reconstruction
-    from config import get_FEATURE_INPUT_SIZE, get_class_ranges, get_class_groups, set_NUM_CLASSES
+    from config import get_FEATURE_INPUT_SIZE, get_class_ranges, set_NUM_CLASSES
     from torch.utils.data import TensorDataset, DataLoader
     from model.base_model import get_model
     from logger import log_training_result, record_model_success, get_feature_hash_from_tensor
@@ -115,35 +115,34 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     from sklearn.metrics import accuracy_score, f1_score
     from sklearn.preprocessing import MinMaxScaler
 
-    print(f"✅ [train_one_model 호출됨] {symbol}-{strategy} group_id={group_id}")
     now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = get_FEATURE_INPUT_SIZE()
-    group_ids = [group_id] if group_id is not None else list(range(1))
+    group_ids = [group_id] if group_id is not None else [0]
 
     for gid in group_ids:
         model_saved = False
         try:
+            print(f"✅ [train_one_model 시작] {symbol}-{strategy}-group{gid}")
+
             # 1. SSL 사전학습
             try:
                 masked_reconstruction(symbol, strategy, input_size)
             except Exception as e:
                 print(f"[⚠️ SSL 사전학습 실패] {e}")
 
-            # 2. 데이터 로드 (병합된 Bybit+Binance)
+            # 2. 데이터 로드
             df = get_kline_by_strategy(symbol, strategy)
             if df is None or df.empty:
-                reason = "get_kline 데이터 없음"
-                print(f"[⏩ 학습 스킵] {symbol}-{strategy}-group{gid} → {reason}")
-                log_training_result(symbol, strategy, status="skipped", reason=reason, group_id=gid)
-                return  # 데이터 없으면 바로 종료
+                print(f"[⏩ 스킵] {symbol}-{strategy}-group{gid} → 데이터 없음")
+                log_training_result(symbol, strategy, status="skipped", reason="데이터 없음", group_id=gid)
+                return
 
             # 3. 피처 생성
             feat = compute_features(symbol, df, strategy)
             if feat is None or feat.empty:
-                reason = "feature 데이터 없음"
-                print(f"[⏩ 학습 스킵] {symbol}-{strategy}-group{gid} → {reason}")
-                log_training_result(symbol, strategy, status="skipped", reason=reason, group_id=gid)
+                print(f"[⏩ 스킵] {symbol}-{strategy}-group{gid} → 피처 없음")
+                log_training_result(symbol, strategy, status="skipped", reason="피처 없음", group_id=gid)
                 return
 
             features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
@@ -157,13 +156,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
             labels = []
             for r in returns:
-                cls_found = False
                 for i, rng in enumerate(class_ranges):
                     if rng[0] <= r <= rng[1]:
                         labels.append(i)
-                        cls_found = True
                         break
-                if not cls_found:
+                else:
                     labels.append(0)
 
             # 5. 시퀀스 생성
@@ -174,23 +171,16 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 y.append(labels[i + window] if i + window < len(labels) else 0)
             X, y = np.array(X), np.array(y)
 
-            # ✅ 데이터 부족 체크 → 스킵 처리
-            if len(X) < 10:
-                reason = f"유효한 학습 샘플 부족 ({len(X)}개)"
-                print(f"[⏩ 학습 스킵] {symbol}-{strategy}-group{gid} → {reason}")
-                log_training_result(symbol, strategy, status="skipped", reason=reason, group_id=gid)
-                return
-
-            # 6. 데이터 부족 시 증강
-            if getattr(df.attrs, "augment_needed", False) or len(X) < 50:
-                print(f"[⚠️ 데이터 부족 → 증강 진행] {symbol}-{strategy}")
+            # 6. 데이터 부족 시 무조건 증강
+            if len(X) < 50:
+                print(f"[⚠️ 데이터 부족 → 증강] {symbol}-{strategy}")
                 X, y = balance_classes(X, y, num_classes=num_classes)
-                print(f"[✅ 증강 완료] 최종 샘플 수: {len(X)}")
+                print(f"[✅ 증강 완료] 최종 {len(X)} 샘플")
 
             # 7. 실패 데이터 병합
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size, window, group_id=gid)
             if fail_X is not None and len(fail_X) > 0:
-                print(f"📌 실패 샘플 {len(fail_X)}건 병합 시도")
+                print(f"[📌 실패 샘플 병합] {len(fail_X)}건")
                 unique_hashes, merged_X, merged_y = {}, [], []
                 for i in range(len(fail_X)):
                     h = get_feature_hash_from_tensor(torch.tensor(fail_X[i:i+1], dtype=torch.float32))
@@ -206,11 +196,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         merged_y.append(y[i])
                 X, y = np.array(merged_X), np.array(merged_y)
 
-            # 다시 데이터 부족 체크
+            # 최종 데이터 체크
             if len(X) < 10:
-                reason = f"유효한 학습 샘플 부족 ({len(X)}개, 실패데이터 병합 후)"
-                print(f"[⏩ 학습 스킵] {symbol}-{strategy}-group{gid} → {reason}")
-                log_training_result(symbol, strategy, status="skipped", reason=reason, group_id=gid)
+                print(f"[⏩ 스킵] {symbol}-{strategy}-group{gid} → 최종 샘플 부족 ({len(X)})")
+                log_training_result(symbol, strategy, status="skipped", reason="최종 샘플 부족", group_id=gid)
                 return
 
             # 8. 모델 학습
@@ -257,21 +246,18 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 # 저장
                 os.makedirs("/persistent/models", exist_ok=True)
                 torch.save(model.state_dict(), model_path)
-
-                # 메타 정보 저장
-                meta_info = {
-                    "symbol": symbol,
-                    "strategy": strategy,
-                    "model": model_type,
-                    "group_id": gid,
-                    "num_classes": num_classes,
-                    "input_size": input_size,
-                    "timestamp": now_kst().isoformat(),
-                    "fail_data_merged": bool(fail_X is not None and len(fail_X) > 0),
-                    "model_name": model_name
-                }
                 with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
-                    json.dump(meta_info, f, ensure_ascii=False, indent=2)
+                    json.dump({
+                        "symbol": symbol,
+                        "strategy": strategy,
+                        "model": model_type,
+                        "group_id": gid,
+                        "num_classes": num_classes,
+                        "input_size": input_size,
+                        "timestamp": now_kst().isoformat(),
+                        "fail_data_merged": bool(fail_X is not None and len(fail_X) > 0),
+                        "model_name": model_name
+                    }, f)
 
                 log_training_result(symbol, strategy, model_path, acc, f1, total_loss)
                 record_model_success(model_name, acc > 0.6 and f1 > 0.55)
@@ -281,16 +267,20 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{gid} → {e}")
             traceback.print_exc()
 
-        # 실패 시 더미 저장
         if not model_saved:
-            print(f"[⚠️ {symbol}-{strategy}-group{gid}] 학습 실패 → 더미 모델 강제 저장")
+            print(f"[⚠️ {symbol}-{strategy}-group{gid}] 학습 실패 → 더미 저장")
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
                 model_name = f"{symbol}_{strategy}_{model_type}_group{gid}_cls3.pt"
                 model_path = os.path.join("/persistent/models", model_name)
                 dummy = get_model(model_type, input_size=input_size, output_size=3).to("cpu")
                 torch.save(dummy.state_dict(), model_path)
                 with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
-                    json.dump({"symbol": symbol, "strategy": strategy, "model": model_type, "model_name": model_name}, f)
+                    json.dump({
+                        "symbol": symbol,
+                        "strategy": strategy,
+                        "model": model_type,
+                        "model_name": model_name
+                    }, f)
             log_training_result(symbol, strategy, "dummy", 0.0, 0.0, 0.0)
 
 
