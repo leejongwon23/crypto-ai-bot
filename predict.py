@@ -197,7 +197,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     import numpy as np, pandas as pd, os, torch
     from sklearn.preprocessing import MinMaxScaler
     from window_optimizer import find_best_windows
-    from logger import log_prediction, get_available_models, get_model_success_rate
+    from logger import log_prediction, get_available_models  # ✅ success_rate 기반 필터링 제거
     from config import FEATURE_INPUT_SIZE, get_class_return_range, class_to_expected_return
     from predict_trigger import get_recent_class_frequencies
     from meta_learning import get_meta_prediction
@@ -247,7 +247,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         else:
             feat_scaled = feat_scaled[:, :FEATURE_INPUT_SIZE]
 
-        # ✅ 6. 모델 로드 (모델명 패턴 일치)
+        # ✅ 6. 모델 로드 (필터 없이 전부 사용)
         models = get_available_models(symbol)
         if not models:
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "no_models", label=-1)
@@ -257,7 +257,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         recent_freq = get_recent_class_frequencies(strategy)
         feature_tensor = torch.tensor(feat_scaled[-1], dtype=torch.float32)
 
-        # ✅ 8. 개별 모델 예측
+        # ✅ 8. 개별 모델 예측 (전 모델 참여)
         model_outputs_list, all_model_predictions = get_model_predictions(
             symbol, strategy, models, df, feat_scaled, window_list, recent_freq
         )
@@ -274,9 +274,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
             print(f"[🔁 전략 교체됨] {strategy} → {recommended_strategy}")
             strategy = recommended_strategy
 
-        # ✅ 10. 메타러너 최종 선택 (성공률+수익률 기반)
-        success_stats = get_model_success_rate(strategy)
-        meta_success_rate = {c: (success_stats.get(c, {}).get("success_rate", 0.5)) for c in range(len(model_outputs_list[0]["probs"]))}
+        # ✅ 10. 메타러너 최종 선택 (전 모델 기반)
+        # success_stats는 참고용으로만 유지 (필터링 사용 안 함)
+        success_stats = {}  # 품질 필터 제거
+        meta_success_rate = {c: 0.5 for c in range(len(model_outputs_list[0]["probs"]))}
 
         final_pred_class = get_meta_prediction(
             [m["probs"] for m in model_outputs_list],
@@ -287,9 +288,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         # ✅ 11. 진화형 메타러너 조건부 적용
         evo_model_path = "/persistent/models/evo_meta_learner.pt"
         use_evo = False
-        recent_count = sum(s["count"] for s in success_stats.values()) if success_stats else 0
-
-        if os.path.exists(evo_model_path) and recent_count >= 50:
+        if os.path.exists(evo_model_path):
             try:
                 evo_pred = predict_evo_meta(feature_tensor.unsqueeze(0), input_size=FEATURE_INPUT_SIZE)
                 if evo_pred is not None and evo_pred != final_pred_class:
