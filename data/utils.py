@@ -228,36 +228,47 @@ import pandas as pd
 BINANCE_BASE_URL = "https://fapi.binance.com"  # Binance Futures (USDT-M)
 BYBIT_BASE_URL = BASE_URL  # 기존 상수 재사용
 
-# 1. Binance 선물시장 데이터 호출
+# 거래소별 심볼 매핑 (필요시 개별 수정)
+SYMBOL_MAP = {
+    "binance": {s: s for s in SYMBOLS}   # 예: "BCCUSDT": "BCHUSDT" 로 수정 가능
+}
+
 def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300) -> pd.DataFrame:
     try:
+        # 심볼 매핑 적용
+        real_symbol = SYMBOL_MAP["binance"].get(symbol, symbol)
+
         # Binance interval 매핑
         interval_map = {"240": "4h", "D": "1d", "2D": "2d", "60": "1h"}
         binance_interval = interval_map.get(interval, "1h")
+
         url = f"{BINANCE_BASE_URL}/fapi/v1/klines"
-        params = {"symbol": symbol, "interval": binance_interval, "limit": limit}
+        params = {"symbol": real_symbol, "interval": binance_interval, "limit": limit}
         res = requests.get(url, params=params, timeout=10)
         res.raise_for_status()
         raw = res.json()
 
         if not raw:
-            print(f"[⚠️ Binance] 데이터 없음: {symbol}-{interval}")
+            print(f"[⚠️ Binance] 데이터 없음: {real_symbol}-{interval}")
             return pd.DataFrame()
 
-        # Binance 응답 → Bybit 구조로 변환
+        # Binance 응답 → Bybit 구조와 유사하게 변환
         df = pd.DataFrame(raw, columns=[
             "timestamp", "open", "high", "low", "close", "volume",
             "close_time", "quote_asset_volume", "trades", "taker_base_vol", "taker_quote_vol", "ignore"
         ])
         df = df[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce").dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce") \
+                            .dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
         df = df.dropna(subset=["timestamp"])
         df = df.sort_values("timestamp").reset_index(drop=True)
         df["datetime"] = df["timestamp"]
-        print(f"[✅ Binance] {symbol}-{interval} → {len(df)}개 캔들 로드됨")
+
+        print(f"[✅ Binance] {real_symbol}-{interval} → {len(df)}개 캔들 로드됨")
         return df
+
     except Exception as e:
-        print(f"[❌ Binance 오류] {symbol}-{interval} → {e}")
+        print(f"[❌ Binance 오류] {real_symbol}-{interval} → {e}")
         return pd.DataFrame()
 
 
@@ -351,25 +362,33 @@ def prefetch_symbol_groups(strategy: str):
             except Exception as e:
                 print(f"[⚠️ prefetch 실패] {symbol}-{strategy}: {e}")
 
+# 거래소별 심볼 매핑 (필요시 개별 수정)
+SYMBOL_MAP = {
+    "bybit": {s: s for s in SYMBOLS}    # 예: "1000SHIBUSDT": "SHIBUSDT" 로 수정 가능
+}
+
 def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 3) -> pd.DataFrame:
     import time
+
+    # 심볼 매핑 적용
+    real_symbol = SYMBOL_MAP["bybit"].get(symbol, symbol)
 
     for attempt in range(max_retry):
         try:
             url = f"{BASE_URL}/v5/market/kline"
-            params = {"category": "linear", "symbol": symbol, "interval": interval, "limit": limit}
+            params = {"category": "linear", "symbol": real_symbol, "interval": interval, "limit": limit}
             res = requests.get(url, params=params, timeout=10)
             res.raise_for_status()
             data = res.json()
 
             if "result" not in data or "list" not in data["result"]:
-                print(f"[경고] get_kline() → 데이터 응답 구조 이상: {symbol}, 재시도 {attempt+1}/{max_retry}")
+                print(f"[경고] get_kline() → 데이터 응답 구조 이상: {real_symbol}, 재시도 {attempt+1}/{max_retry}")
                 time.sleep(1)
                 continue
 
             raw = data["result"]["list"]
             if not raw or len(raw[0]) < 6:
-                print(f"[경고] get_kline() → 필수 필드 누락 또는 빈 응답: {symbol}, 재시도 {attempt+1}/{max_retry}")
+                print(f"[경고] get_kline() → 필수 필드 누락 또는 빈 응답: {real_symbol}, 재시도 {attempt+1}/{max_retry}")
                 time.sleep(1)
                 continue
 
@@ -381,12 +400,12 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
             essential = ["open", "high", "low", "close", "volume"]
             df.dropna(subset=essential, inplace=True)
             if df.empty:
-                print(f"[경고] get_kline() → 필수값 결측: {symbol}, 재시도 {attempt+1}/{max_retry}")
+                print(f"[경고] get_kline() → 필수값 결측: {real_symbol}, 재시도 {attempt+1}/{max_retry}")
                 time.sleep(1)
                 continue
 
             if df["high"].isnull().all() or (df["high"] == 0).all():
-                print(f"[치명] get_kline() → 'high' 값 이상치만 존재: {symbol}, 재시도 {attempt+1}/{max_retry}")
+                print(f"[치명] get_kline() → 'high' 값 이상치만 존재: {real_symbol}, 재시도 {attempt+1}/{max_retry}")
                 time.sleep(1)
                 continue
 
@@ -397,16 +416,16 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
             df["datetime"] = df["timestamp"]
 
             if len(df) < 10:
-                print(f"[⚠️ 경고] {symbol}-{interval} → 캔들 수 부족 ({len(df)} rows)")
+                print(f"[⚠️ 경고] {real_symbol}-{interval} → 캔들 수 부족 ({len(df)} rows)")
 
-            print(f"[✅ get_kline 완료] {symbol}-{interval} → {len(df)}개 캔들 로드됨")  # 🔍 추가된 로그
+            print(f"[✅ get_kline 완료] {real_symbol}-{interval} → {len(df)}개 캔들 로드됨")
             return df
 
         except Exception as e:
-            print(f"[에러] get_kline({symbol}) 실패 → {e}, 재시도 {attempt+1}/{max_retry}")
+            print(f"[에러] get_kline({real_symbol}) 실패 → {e}, 재시도 {attempt+1}/{max_retry}")
             time.sleep(1)
 
-    print(f"[❌ 실패] get_kline() 최종 실패: {symbol}")
+    print(f"[❌ 실패] get_kline() 최종 실패: {real_symbol}")
     return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
 
 
