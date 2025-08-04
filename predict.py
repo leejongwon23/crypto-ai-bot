@@ -370,6 +370,8 @@ def evaluate_predictions(get_price_fn):
     date_str = now_kst().strftime("%Y-%m-%d")
     EVAL_RESULT = f"/persistent/logs/evaluation_{date_str}.csv"
     WRONG = f"/persistent/logs/wrong_{date_str}.csv"
+
+    # 전략별 평가 마감시간 (시간 단위)
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
 
     updated, evaluated = [], []
@@ -431,25 +433,29 @@ def evaluate_predictions(get_price_fn):
                 updated.append(r)
                 continue
 
+            # 실제 최대 상승률 계산
             actual_max = future_df["high"].max()
             gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-            # 클래스 수익률 범위 기반 성공 여부
+            # 클래스 수익률 범위 조회
             cls_min, cls_max = get_class_return_range(label)
-            reached_target = gain >= cls_min
+            reached_target = gain >= cls_min  # 범위 이상 도달 시 성공
 
-            # 조기평가 로직
+            # --- 평가 로직 ---
+            # 1) 평가 시점 전: 30분마다 체크 → 도달 시 조기 성공
             if now_kst() < deadline:
                 if reached_target:
-                    status = "success"  # 조기 성공 허용
+                    status = "success"  # 조기 성공
                 else:
+                    # 아직 목표 도달 전 → 평가 대기
                     r.update({"status": "pending", "reason": "⏳ 평가 대기 중", "return": round(gain, 5)})
                     updated.append(r)
                     continue
             else:
+                # 2) 평가 시점 이후: 무조건 성공/실패 판정
                 status = "success" if reached_target else "fail"
 
-            # 변동성 전략 여부 반영
+            # 변동성 전략 반영
             vol = str(r.get("volatility", "")).lower() in ["1", "true"]
             if vol:
                 status = "v_success" if status == "success" else "v_fail"
@@ -467,7 +473,7 @@ def evaluate_predictions(get_price_fn):
                            status in ["success", "v_success"], r["reason"], gain, gain, vol, "평가",
                            predicted_class=pred_class, label=label, group_id=group_id)
 
-            # 실패 기록: 평가 시점에서만 + 중복 방지
+            # 실패 기록 저장
             if status in ["fail", "v_fail"] and not check_failure_exists(r):
                 insert_failure_record(r, f"{symbol}-{strategy}-{now_kst().isoformat()}",
                                       feature_vector=None, label=label)
