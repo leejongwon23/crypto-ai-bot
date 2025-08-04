@@ -262,6 +262,7 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300) -> p
 
 
 # 2. Bybit + Binance 데이터 병합
+# 2. Bybit + Binance 데이터 병합 (설계 기준 수정본)
 def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
     config = STRATEGY_CONFIG.get(strategy)
     if not config:
@@ -271,23 +272,44 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
     interval = config["interval"]
     limit = config["limit"]
 
-    # Bybit 데이터
+    # -------------------------
+    # 1차: Bybit 데이터 수집
+    # -------------------------
     df_bybit = get_kline(symbol, interval=interval, limit=limit)
-    # Binance 데이터
-    df_binance = get_kline_binance(symbol, interval=interval, limit=limit)
+    if df_bybit is None or df_bybit.empty:
+        print(f"[⚠️ 1차 실패] Bybit 데이터 없음: {symbol}-{strategy}")
+        df_bybit = pd.DataFrame()
 
-    # 병합
-    df_all = pd.concat([df_bybit, df_binance], ignore_index=True)
+    # -------------------------
+    # 2차: Binance (1차 부족 시만)
+    # -------------------------
+    if df_bybit.empty or len(df_bybit) < limit:
+        df_binance = get_kline_binance(symbol, interval=interval, limit=limit)
+        if df_binance is None or df_binance.empty:
+            print(f"[⚠️ 2차 실패] Binance 데이터 없음: {symbol}-{strategy}")
+            df_binance = pd.DataFrame()
+        else:
+            print(f"[✅ 2차 성공] Binance 데이터 확보: {len(df_binance)}개")
+
+        # 병합
+        df_all = pd.concat([df_bybit, df_binance], ignore_index=True)
+    else:
+        # Bybit만으로 충분
+        df_all = df_bybit.copy()
+
+    # -------------------------
+    # 병합 후 처리
+    # -------------------------
     df_all = df_all.drop_duplicates(subset=["timestamp"], keep="first")
     df_all = df_all.sort_values("timestamp").reset_index(drop=True)
 
-    # 필수 컬럼 확인
+    # 필수 컬럼 채움
     required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
     for col in required_cols:
         if col not in df_all.columns:
             df_all[col] = 0.0 if col != "timestamp" else pd.Timestamp.now()
 
-    # 증강 필요 플래그 설정
+    # 데이터 부족 여부 플래그
     df_all.attrs["augment_needed"] = len(df_all) < limit
 
     print(f"[🔄 병합완료] {symbol}-{strategy} → {len(df_all)}개 캔들 (목표 {limit})")
