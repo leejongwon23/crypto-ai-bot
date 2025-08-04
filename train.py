@@ -495,18 +495,15 @@ def train_symbol_group_loop(delay_minutes=5):
 
     ensure_failure_db()
     FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
-
     done_path = "/persistent/train_done.json"
 
-    # ✅ 재배포 시 자동 초기화 제거
     if not os.path.exists(done_path):
         print("[ℹ️ 유지 모드] 이전 학습 이력 없음 → 새로 생성")
     else:
-        print("[ℹ️ 유지 모드] 이전 학습 이력 보존 (train_done.json 유지)")
+        print("[ℹ️ 유지 모드] 이전 학습 이력 보존")
 
     train_done = {}
-    FORCE_TRAINING = True  # 첫 루프 전체 강제 학습 모드
-
+    FORCE_TRAINING = True
     loop_count = 0
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작 ({now_kst().isoformat()})")
@@ -517,13 +514,11 @@ def train_symbol_group_loop(delay_minutes=5):
         loop_start_time = time.time()
         loop_count += 1
         print(f"\n🔄 전체 그룹 순회 루프 #{loop_count} 시작 ({now_kst().isoformat()})")
-
         prediction_queue = []
 
         for idx, group in enumerate(SYMBOL_GROUPS):
             print(f"\n📊 [그룹 {idx+1}/{group_count}] 학습 시작 | 심볼 수: {len(group)}")
             if not group:
-                print(f"[⚠️ 그룹 {idx+1} 심볼 없음 → 스킵]")
                 continue
 
             _kline_cache.clear()
@@ -546,20 +541,25 @@ def train_symbol_group_loop(delay_minutes=5):
                         already_done = train_done[symbol][strategy].get(str(gid), False)
 
                         if not FORCE_TRAINING and already_done:
-                            print(f"[⏩ 스킵] 이미 완료: {symbol}-{strategy}-group{gid}")
                             continue
-                        elif FORCE_TRAINING:
-                            print(f"[🚀 강제 학습 모드] {symbol}-{strategy}-group{gid}")
 
                         try:
                             df = get_kline_by_strategy(symbol, strategy)
-                            if df is None or len(df) < 100:
-                                print(f"[⚠️ 데이터 부족 {len(df) if df is not None else 0}봉 → 증강 학습 시도] {symbol}-{strategy}-group{gid}")
+                            if df is None or len(df) == 0:
+                                print(f"[❌ 데이터 전무] {symbol}-{strategy}-group{gid} → 스킵")
+                                continue
+
+                            # ✅ 데이터 부족 시에도 학습 강제 시도
+                            if len(df) < 100:
+                                print(f"[⚠️ 데이터 부족 {len(df)}봉 → 증강 학습 시도] {symbol}-{strategy}-group{gid}")
+
                             feat = compute_features(symbol, df, strategy)
                             if feat is None or len(feat) < 10:
-                                print(f"[⚠️ 피처 심각 부족 {len(feat) if feat is not None else 0} → 학습 시도] {symbol}-{strategy}-group{gid}")
+                                print(f"[⚠️ 피처 부족 {len(feat) if feat is not None else 0} → 학습 시도] {symbol}-{strategy}-group{gid}")
+
                         except Exception as e:
                             print(f"[⚠️ 데이터 로드 실패] {symbol}-{strategy}-group{gid} → {e}")
+                            continue
 
                         try:
                             print(f"[▶ 학습 시작] {symbol}-{strategy}-group{gid} ({now_kst().isoformat()})")
@@ -567,20 +567,18 @@ def train_symbol_group_loop(delay_minutes=5):
                             train_done[symbol][strategy][str(gid)] = True
                             with open(done_path, "w", encoding="utf-8") as f:
                                 json.dump(train_done, f, ensure_ascii=False, indent=2)
-                            print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid} ({now_kst().isoformat()})")
+                            print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid}")
                         except Exception as e:
                             print(f"[❌ 학습 실패] {symbol}-{strategy}-group{gid} → {e}")
                             traceback.print_exc()
 
                     prediction_queue.append((symbol, strategy))
 
-        # ✅ 모든 그룹 학습 완료 후 예측 실행
-        print(f"\n📡 모든 그룹 학습 완료 → 예측 일괄 실행")
+        # ✅ 모든 그룹 학습 완료 후 예측
+        print(f"\n📡 모든 그룹 학습 완료 → 예측 실행")
         for symbol, strategy in prediction_queue:
             try:
-                print(f"[▶ 예측 시작] {symbol}-{strategy} ({now_kst().isoformat()})")
                 main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
-                print(f"[✅ 예측 완료] {symbol}-{strategy} ({now_kst().isoformat()})")
             except Exception as e:
                 print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
 
@@ -588,28 +586,20 @@ def train_symbol_group_loop(delay_minutes=5):
         try:
             maintenance_fix_meta.fix_all_meta_json()
             safe_cleanup.auto_delete_old_logs()
-            print(f"[🧹 그룹 후처리 완료] ({now_kst().isoformat()})")
         except Exception as e:
             print(f"[⚠️ 그룹 후처리 실패] → {e}")
 
-        loop_elapsed = time.time() - loop_start_time
-        print(f"⏱️ 이번 루프 소요 시간: {loop_elapsed:.2f}초")
-
         if first_loop:
-            print("[⏩ 첫 루프 완료 → delay 대기 없이 다음 루프 진행]")
             first_loop = False
             FORCE_TRAINING = False
             continue
 
-        print(f"🕒 전체 그룹 완료 → {delay_minutes}분 대기 ({now_kst().isoformat()})")
         time.sleep(delay_minutes * 60)
 
         try:
-            print("[▶ 진화형 메타러너 전체 루프 학습 시작]")
             train_evo_meta_loop()
-            print("[✅ 진화형 메타러너 전체 루프 학습 완료]")
         except Exception as e:
-            print(f"[⚠️ 진화형 메타러너 루프 학습 실패] → {e}")
+            print(f"[⚠️ 진화형 메타러너 학습 실패] → {e}")
 
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
