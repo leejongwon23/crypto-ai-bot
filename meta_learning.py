@@ -111,63 +111,68 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
     """
     메타 러너: 여러 모델 예측 결과(softmax 확률 벡터)와 과거 성능·예상 수익률 정보를 이용해
     최종 예측 클래스(final_pred_class)를 결정.
-
-    Args:
-        model_outputs_list (list[dict]): 각 모델의 예측 정보 딕셔너리
-            - 필수 키: 'probs' (softmax 확률 벡터, np.ndarray 또는 list)
-        feature_tensor (np.ndarray or torch.Tensor, optional): 현재 입력 feature
-        meta_info (dict, optional):
-            - 'success_rate': {cls: float}  # 과거 성공률
-            - 'expected_return': {cls: float}  # 예상 수익률
-
-    Returns:
-        int: 최종 선택된 클래스 인덱스 (final_pred_class)
+    - 성공률 데이터가 없으면: softmax 확률 + 패턴 적합도 기반
+    - 성공률 데이터가 있으면: 성공률 + 실패율 + softmax + 수익률 종합 평가
     """
+
     import numpy as np
 
     # ✅ 1. 유효성 검사
     if not model_outputs_list or len(model_outputs_list) == 0:
         raise ValueError("❌ get_meta_prediction: 모델 출력 없음")
 
-    # ✅ 2. softmax 확률 벡터만 추출
+    # ✅ 2. softmax 확률 벡터 추출
     softmax_list = []
     for m in model_outputs_list:
         if "probs" not in m:
             raise KeyError(f"❌ get_meta_prediction: 'probs' 키 누락 → {m}")
         softmax_list.append(np.array(m["probs"], dtype=np.float32))
 
-    num_models = len(softmax_list)
     num_classes = len(softmax_list[0])
-
-    # ✅ 3. 평균 softmax 계산
     avg_softmax = np.mean(softmax_list, axis=0)
 
-    # ✅ 4. meta_info 기반 가중치 보정
-    scores = np.copy(avg_softmax)
+    # ✅ 3. meta_info
     success_rate_dict = meta_info.get("success_rate", {}) if meta_info else {}
     expected_return_dict = meta_info.get("expected_return", {}) if meta_info else {}
+    failure_rate_dict = {
+        cls: (1.0 - success_rate_dict.get(cls, 0.5))
+        for cls in range(num_classes)
+    }
 
-    for cls in range(num_classes):
-        success_rate = success_rate_dict.get(cls, 0.5)   # 기본값 0.5
-        exp_return = expected_return_dict.get(cls, 1.0)  # 기본값 1.0
+    # ✅ 4. 점수 계산
+    scores = np.zeros(num_classes, dtype=np.float32)
 
-        # 너무 낮은 성공률은 배제
-        if success_rate < 0.3:
-            scores[cls] = -1.0
-        else:
-            # softmax × 성공률 × 예상수익률
-            scores[cls] *= success_rate * abs(exp_return)
+    if not success_rate_dict:  
+        # 📌 성공률 데이터 없을 때 → softmax + 기본 패턴 적합도 기반
+        # (패턴 적합도: softmax 안정성, 표준편차 낮을수록 안정)
+        stability_weight = 1.0 - np.std(softmax_list, axis=0)
+        for cls in range(num_classes):
+            scores[cls] = avg_softmax[cls] * stability_weight[cls]
+
+        mode = "기본 메타 (성공률 無)"
+    else:
+        # 📌 성공률 데이터 있을 때 → 성공률 + 실패율 + softmax + 예상수익률 종합
+        for cls in range(num_classes):
+            sr = success_rate_dict.get(cls, 0.5)
+            fr = failure_rate_dict.get(cls, 0.5)
+            er = expected_return_dict.get(cls, 1.0)
+            # 성공률 높을수록, 실패율 낮을수록, softmax 높을수록, 수익률 높을수록 가점
+            scores[cls] = avg_softmax[cls] * (sr - fr) * abs(er)
+
+        mode = "성공률 기반 메타"
 
     # ✅ 5. 최종 클래스 선택
     final_pred_class = int(np.argmax(scores))
 
-    # ✅ 6. 상세 로그 출력
-    print("[META] 클래스별 점수 계산:")
+    # ✅ 6. 상세 로그
+    print(f"[META] {mode} → 클래스별 점수 계산:")
     for cls in range(num_classes):
-        sr = success_rate_dict.get(cls, 0.5)
-        er = expected_return_dict.get(cls, 1.0)
+        sr = success_rate_dict.get(cls, 0.0) if success_rate_dict else None
+        er = expected_return_dict.get(cls, None)
         print(f"  cls {cls}: softmax={avg_softmax[cls]:.4f}, "
-              f"성공률={sr:.2f}, 예상수익률={er:.2f}, 점수={scores[cls]:.4f}")
+              f"{'성공률='+str(round(sr,2)) if sr is not None else ''} "
+              f"{'예상수익률='+str(round(er,2)) if er is not None else ''} "
+              f"점수={scores[cls]:.4f}")
 
     print(f"[META] 최종 클래스 선택 → {final_pred_class} "
           f"(점수: {scores[final_pred_class]:.4f})")
