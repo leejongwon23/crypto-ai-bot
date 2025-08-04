@@ -42,7 +42,6 @@ def balance_classes(X, y, min_count=5, num_classes=None):
     import random
 
     if X is None or y is None or len(X) == 0 or len(y) == 0:
-        print("[❌ balance_classes 실패] X 또는 y 비어있음")
         raise Exception("⛔ balance_classes 중단: X 또는 y 비어있음")
 
     if num_classes is None:
@@ -73,35 +72,39 @@ def balance_classes(X, y, min_count=5, num_classes=None):
         count = len(existing)
         needed = max(0, target_count - count)
 
-        # ✅ 기존 데이터가 조금이라도 있으면 무조건 증강
-        if count > 0 and needed > 0:
-            reps = np.random.choice(count, needed, replace=True)
-            base = np.array([existing[i] for i in reps])
-            aug = augment_batch(base)
-            X_balanced.extend(aug)
-            y_balanced.extend([cls] * needed)
+        if needed == 0:
             continue
 
-        # 인접 클래스 복제
-        if needed > 0:
-            candidates = []
-            for neighbor in [cls - 1, cls + 1]:
-                if 0 <= neighbor < num_classes:
-                    candidates += all_by_label.get(neighbor, [])
-            if candidates:
-                for _ in range(needed):
-                    xb = random.choice(candidates)
-                    noise = np.random.normal(0, 0.01, xb.shape).astype(np.float32)
-                    X_balanced.append(xb + noise)
-                    y_balanced.append(cls)
+        # ✅ 1순위: 증강 시도
+        if count > 0:
+            try:
+                reps = np.random.choice(count, needed, replace=True)
+                base = np.array([existing[i] for i in reps])
+                aug = augment_batch(base)
+                X_balanced.extend(aug)
+                y_balanced.extend([cls] * needed)
                 continue
+            except Exception as e:
+                print(f"[⚠️ 증강 실패] 클래스 {cls} → {e}")
 
-        # ✅ 완전 0개일 때만 더미 생성
-        if count == 0 and needed > 0:
-            dummy = np.random.normal(0, 1, (needed, nx, ny_dim)).astype(np.float32)
-            dummy = np.clip(dummy, -3, 3)
-            X_balanced.extend(dummy)
-            y_balanced.extend([cls] * needed)
+        # ✅ 2순위: 인접 클래스 복제 + 노이즈
+        candidates = []
+        for neighbor in [cls - 1, cls + 1]:
+            if 0 <= neighbor < num_classes:
+                candidates += all_by_label.get(neighbor, [])
+        if candidates:
+            for _ in range(needed):
+                xb = random.choice(candidates)
+                noise = np.random.normal(0, 0.01, xb.shape).astype(np.float32)
+                X_balanced.append(xb + noise)
+                y_balanced.append(cls)
+            continue
+
+        # ✅ 3순위: 완전 0개 시 더미 생성
+        dummy = np.random.normal(0, 1, (needed, nx, ny_dim)).astype(np.float32)
+        dummy = np.clip(dummy, -3, 3)
+        X_balanced.extend(dummy)
+        y_balanced.extend([cls] * needed)
 
     combined = list(zip(X_balanced, y_balanced))
     np.random.shuffle(combined)
@@ -115,6 +118,5 @@ def balance_classes(X, y, min_count=5, num_classes=None):
 
     print(f"[✅ balance_classes 완료] 총 샘플수: {len(y_final)}")
     return X_final, y_final
-
 
 
