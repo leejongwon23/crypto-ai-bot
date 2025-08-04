@@ -491,7 +491,6 @@ def train_model_loop(strategy):
         training_in_progress[strategy] = False
         print(f"✅ {strategy} 루프 종료")
 
-
 def train_symbol_group_loop(delay_minutes=5):
     import time, os, json, traceback
     from datetime import datetime
@@ -506,7 +505,7 @@ def train_symbol_group_loop(delay_minutes=5):
     from failure_db import ensure_failure_db
     from data.utils import get_kline_by_strategy, compute_features
     from data_augmentation import balance_classes
-    from logger import log_training_result  # ✅ 스킵 로그 기록용 추가
+    from logger import log_training_result
 
     def now_kst():
         return datetime.now(pytz.timezone("Asia/Seoul"))
@@ -526,8 +525,26 @@ def train_symbol_group_loop(delay_minutes=5):
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작 ({now_kst().isoformat()})")
 
-    first_loop = True
+    # 🚀 서버 시작 직후 강제 첫 학습 실행
+    print("\n[🚀 서버 시작 직후 첫 학습 강제 실행]")
+    try:
+        for idx, group in enumerate(SYMBOL_GROUPS):
+            print(f"\n📊 [그룹 {idx+1}/{group_count}] 첫 학습 시작 | 심볼 수: {len(group)}")
+            _kline_cache.clear()
+            _feature_cache.clear()
 
+            for symbol in group:
+                for strategy in ["단기", "중기", "장기"]:
+                    try:
+                        train_one_model(symbol, strategy)
+                        print(f"[✅ 첫 학습 완료] {symbol}-{strategy}")
+                    except Exception as e:
+                        print(f"[❌ 첫 학습 실패] {symbol}-{strategy} → {e}")
+    except Exception as e:
+        print(f"[❌ 첫 학습 전체 실패] → {e}")
+
+    # ✅ 메인 루프 시작
+    first_loop = True
     while True:
         loop_start_time = time.time()
         loop_count += 1
@@ -568,18 +585,10 @@ def train_symbol_group_loop(delay_minutes=5):
                                     retry_count += 1
                                     continue
 
-                                # ✅ 데이터 부족 시 스킵 처리 + 로그 기록
                                 if len(df) < 100:
                                     reason = f"데이터 부족({len(df)}봉)"
                                     print(f"[⏩ 학습 스킵] {symbol}-{strategy}-group{gid} → {reason}")
-                                    log_training_result(
-                                        symbol=symbol,
-                                        strategy=strategy,
-                                        group_id=gid,
-                                        status="skipped",
-                                        reason=reason
-                                    )
-                                    # 다음 심볼/그룹으로 이동
+                                    log_training_result(symbol, strategy, group_id=gid, status="skipped", reason=reason)
                                     break
 
                                 feat = compute_features(symbol, df, strategy)
@@ -593,13 +602,7 @@ def train_symbol_group_loop(delay_minutes=5):
                         if retry_count >= 2:
                             reason = "데이터 확보 실패"
                             print(f"[⏩ 스킵] {symbol}-{strategy}-group{gid} → {reason}")
-                            log_training_result(
-                                symbol=symbol,
-                                strategy=strategy,
-                                group_id=gid,
-                                status="skipped",
-                                reason=reason
-                            )
+                            log_training_result(symbol, strategy, group_id=gid, status="skipped", reason=reason)
                             continue
 
                         try:
@@ -634,6 +637,7 @@ def train_symbol_group_loop(delay_minutes=5):
         except Exception as e:
             print(f"[⚠️ 그룹 후처리 실패] → {e}")
 
+        # 🔄 첫 루프 후에도 지연 없이 다음 루프 바로 실행
         if first_loop:
             first_loop = False
             FORCE_TRAINING = False
