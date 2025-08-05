@@ -101,8 +101,7 @@ def get_model_success_stats(model_name: str):
 def get_model_success_rate(s, t, m):
     """
     모델의 성공률을 조회.
-    - 품질미달(0.2) 제한 로직 제거
-    - 평가 샘플 부족 제한 제거
+    - 성공률 데이터가 없으면 0.0 반환 (None 방지)
     - 성공률은 예측/학습 필터로 사용하지 않고 참고용만 유지
     """
     try:
@@ -114,17 +113,18 @@ def get_model_success_rate(s, t, m):
         """, (s, t or "알수없음", m))
         row = cur.fetchone()
 
-        # 📌 기록이 없으면 None 반환 (필터 안 함)
+        # 📌 기록이 없으면 0.0 반환
         if row is None:
-            print(f"[INFO] {s}-{t}-{m}: 성공률 기록 없음 → None 반환")
-            return None
+            print(f"[INFO] {s}-{t}-{m}: 성공률 기록 없음 → 0.0 반환(통과)")
+            return 0.0
 
         success_cnt, fail_cnt = row
         total = success_cnt + fail_cnt
 
+        # 📌 성공/실패 기록이 전혀 없으면 0.0 반환
         if total == 0:
-            print(f"[INFO] {s}-{t}-{m}: 성공/실패 기록 없음 → None 반환")
-            return None
+            print(f"[INFO] {s}-{t}-{m}: 성공/실패 기록 없음 → 0.0 반환(통과)")
+            return 0.0
 
         rate = success_cnt / total
         print(f"[INFO] {s}-{t}-{m}: 성공률 계산됨 → {rate:.3f}")
@@ -132,10 +132,11 @@ def get_model_success_rate(s, t, m):
 
     except Exception as e:
         print(f"[오류] get_model_success_rate 실패 → {e}")
-        return None
+        return 0.0
 
 # ✅ 서버 시작 시 호출
 ensure_success_db()
+
 
 def load_failure_count():
     path = "/persistent/logs/failure_count.csv"
@@ -551,6 +552,7 @@ def get_class_success_rate(strategy, recent_days=3):
 
     path = "/persistent/prediction_log.csv"
     if not os.path.exists(path):
+        print(f"[INFO] {strategy}: prediction_log.csv 없음 → 모든 클래스 0.0 반환")
         return {}
 
     try:
@@ -576,13 +578,16 @@ def get_class_success_rate(strategy, recent_days=3):
             total = val["success"] + val["fail"]
             if total > 0:
                 result[cls] = round(val["success"] / total, 4)
+            else:
+                result[cls] = 0.0  # 성공/실패 기록 없으면 기본값 0.0
 
+        # 📌 모든 클래스가 최소 0.0은 갖도록 보장
+        # (호출부에서 None이 나올 가능성 제거)
         return result
 
     except Exception as e:
         print(f"[⚠️ 클래스 성공률 계산 오류] {e}")
         return {}
-
 
 
 import os
