@@ -411,19 +411,6 @@ def force_fix_prediction_log():
 import csv
 import os
 
-def ensure_prediction_log_exists():
-    PREDICTION_LOG = "/persistent/prediction_log.csv"
-    headers = [
-        "timestamp", "symbol", "strategy", "direction", "entry_price", "target_price",
-        "model", "rate", "status", "reason", "return", "predicted_class", "label",
-        "group_id", "model_symbol", "model_name", "volatility"
-    ]
-    if not os.path.exists(PREDICTION_LOG) or os.stat(PREDICTION_LOG).st_size == 0:
-        with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=headers)
-            writer.writeheader()
-            writer.writerow({h: "" for h in headers})
-        print("✅ prediction_log.csv dummy row 생성 완료")
 
 # ✅ 실행 준비
 from logger import ensure_prediction_log_exists
