@@ -417,73 +417,49 @@ from logger import ensure_prediction_log_exists
 ensure_prediction_log_exists()
 
 if __name__ == "__main__":
-    import os
-    import threading
     from failure_db import ensure_failure_db
-    from train import train_symbol_group_loop
     from telegram_bot import send_message
     import maintenance_fix_meta
-    
 
     print(">>> 서버 실행 준비")
 
-    # ✅ 실패 학습 DB 초기화
+    # 1. 실패 학습 DB 초기화
     ensure_failure_db()
-    print("✅ [DEBUG] failure_patterns DB 초기화 완료")
+    print("✅ failure_patterns DB 초기화 완료")
 
-    # ✅ $PORT 필수 사용
+    # 2. Render 환경 PORT 확인
     try:
-        port = int(os.environ["PORT"])
-    except KeyError:
-        raise RuntimeError(
-            "❌ Render 환경변수 PORT가 없습니다. "
-            "Render 서비스 타입이 'Web Service'인지 확인하세요."
-        )
+        port = int(os.environ.get("PORT", 5000))
+    except ValueError:
+        raise RuntimeError("❌ Render 환경변수 PORT가 없습니다. Render 서비스 타입 확인 필요")
 
-    # ==========================================
-    # 🔹 백그라운드 작업 함수
-    # ==========================================
+    # 3. 백그라운드 작업 함수
     def background_tasks():
-        # 🚀 첫 학습 강제 실행
-        print("🚀 [DEBUG] 서버 시작 직후 첫 학습 강제 실행")
         try:
+            # 첫 학습 실행
+            print("🚀 첫 학습 시작")
             train_symbol_group_loop()
-            print("✅ [DEBUG] 첫 학습 완료")
-        except Exception as e:
-            print(f"❌ [DEBUG] 첫 학습 중 오류 발생: {e}")
+            print("✅ 첫 학습 완료")
 
-        # 🔄 학습 루프 계속
-        threading.Thread(target=train_symbol_group_loop, daemon=True).start()
-        print("✅ [DEBUG] 학습 루프 스레드 시작")
-
-        # ⏱ 스케줄러 실행
-        try:
+            # 스케줄러 시작 (외부 scheduler import 안 함, 현재 파일의 start_scheduler 사용)
             start_scheduler()
-            print("✅ [DEBUG] 스케줄러 시작 완료")
+            print("✅ 스케줄러 시작 완료")
+
+            # 메타 데이터 보정
+            threading.Thread(
+                target=maintenance_fix_meta.fix_all_meta_json,
+                daemon=True
+            ).start()
+            print("✅ maintenance_fix_meta 실행 완료")
+
+            # 시작 알림
+            send_message("[시작] YOPO 서버 실행됨")
         except Exception as e:
-            print(f"⚠️ [DEBUG] 스케줄러 시작 실패 → {e}")
+            print(f"❌ 백그라운드 작업 실패: {e}")
 
-        # 🛠 메타 데이터 보정
-        threading.Thread(
-            target=maintenance_fix_meta.fix_all_meta_json,
-            daemon=True
-        ).start()
-        print("✅ [DEBUG] maintenance_fix_meta.fix_all_meta_json 스레드 시작 완료")
-
-        # 📢 Telegram 알림
-        threading.Thread(
-            target=lambda: send_message("[시작] YOPO 서버 실행됨"),
-            daemon=True
-        ).start()
-        print("✅ [DEBUG] telegram_bot send_message 스레드 시작 완료")
-
-    # ==========================================
-    # 🔹 백그라운드 작업 시작
-    # ==========================================
+    # 4. 백그라운드 작업은 비동기 실행
     threading.Thread(target=background_tasks, daemon=True).start()
 
-    # ==========================================
-    # 🔹 Flask는 메인 스레드에서 실행 (Render 필수 조건)
-    # ==========================================
-    print(f"✅ [DEBUG] Flask 서버 실행 시작 (PORT={port})")
+    # 5. Flask 서버 실행 (PORT 먼저 열기)
+    print(f"✅ Flask 서버 실행 시작 (PORT={port})")
     app.run(host="0.0.0.0", port=port)
