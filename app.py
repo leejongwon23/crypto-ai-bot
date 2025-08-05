@@ -432,38 +432,50 @@ if __name__ == "__main__":
     except ValueError:
         raise RuntimeError("❌ Render 환경변수 PORT가 없습니다. Render 서비스 타입 확인 필요")
 
-    # 3. 백그라운드 작업 함수 (안정형)
-    def background_tasks():
-        try:
-            # 🚀 첫 학습은 메인 스레드에서 즉시 실행
-            print("🚀 첫 학습 강제 실행 시작")
-            train_symbol_group_loop()
-            print("✅ 첫 학습 완료")
+    # 🚀 첫 학습은 메인 스레드에서 즉시 실행 (서버 띄우기 전)
+    try:
+        print("🚀 첫 학습 강제 실행 시작")
+        train_symbol_group_loop()   # 동기 실행 → 첫 학습이 끝나야 다음 단계 진행
+        print("✅ 첫 학습 완료")
+    except Exception as e:
+        print(f"❌ 첫 학습 중 오류: {e}")
+        # 첫 학습 실패 시 2회 재시도
+        import time
+        for attempt in range(1, 3):
+            try:
+                print(f"🔄 첫 학습 재시도 {attempt}회차")
+                time.sleep(5)
+                train_symbol_group_loop()
+                print("✅ 재시도 성공")
+                break
+            except Exception as e2:
+                print(f"❌ 재시도 {attempt} 실패: {e2}")
 
-            # 🔄 이후 자동 학습 루프는 백그라운드 스레드로 계속 실행
-            threading.Thread(target=train_symbol_group_loop, daemon=True).start()
-            print("✅ 학습 루프 스레드 시작")
+    # 🔄 이후 자동 학습 루프는 백그라운드 스레드로 계속 실행
+    threading.Thread(target=train_symbol_group_loop, daemon=True).start()
+    print("✅ 학습 루프 스레드 시작")
 
-            # ⏱ 스케줄러 시작
-            start_scheduler()
-            print("✅ 스케줄러 시작 완료")
+    # ⏱ 스케줄러 시작 (백그라운드)
+    try:
+        threading.Thread(target=start_scheduler, daemon=True).start()
+        print("✅ 스케줄러 시작 완료")
+    except Exception as e:
+        print(f"⚠️ 스케줄러 시작 실패: {e}")
 
-            # 🛠 메타 데이터 보정
-            threading.Thread(
-                target=maintenance_fix_meta.fix_all_meta_json,
-                daemon=True
-            ).start()
-            print("✅ maintenance_fix_meta 실행 완료")
+    # 🛠 메타 데이터 보정 (백그라운드)
+    threading.Thread(
+        target=maintenance_fix_meta.fix_all_meta_json,
+        daemon=True
+    ).start()
+    print("✅ maintenance_fix_meta 실행 완료")
 
-            # 📢 시작 알림
-            send_message("[시작] YOPO 서버 실행됨")
-        except Exception as e:
-            print(f"❌ 백그라운드 작업 실패: {e}")
-
-    # 4. 백그라운드 작업 실행
-    threading.Thread(target=background_tasks, daemon=True).start()
+    # 📢 시작 알림
+    threading.Thread(
+        target=lambda: send_message("[시작] YOPO 서버 실행됨"),
+        daemon=True
+    ).start()
+    print("✅ Telegram 알림 발송 완료")
 
     # 5. Flask 서버 실행 (PORT 먼저 열기)
     print(f"✅ Flask 서버 실행 시작 (PORT={port})")
     app.run(host="0.0.0.0", port=port)
-
