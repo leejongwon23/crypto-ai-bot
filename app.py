@@ -439,7 +439,7 @@ if __name__ == "__main__":
     ensure_failure_db()
     print("✅ [DEBUG] failure_patterns DB 초기화 완료")
 
-    # ✅ $PORT 강제 사용 (없으면 즉시 에러)
+    # ✅ Render 환경에서 제공하는 $PORT 강제 사용 (없으면 에러)
     try:
         port = int(os.environ["PORT"])
     except KeyError:
@@ -448,15 +448,16 @@ if __name__ == "__main__":
             "Render 서비스 타입이 'Web Service'인지 확인하세요."
         )
 
-    # ✅ Flask 먼저 실행 (메인 스레드에서)
+    # ✅ Flask 먼저 실행 (메인 스레드에서 즉시)
     print(f"✅ [DEBUG] Flask 서버 실행 시작 (PORT={port})")
     threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=port),
         daemon=True
     ).start()
 
-    # ✅ 백그라운드 작업 (기존 로직 유지)
+    # ✅ 백그라운드 작업 (YOPO 기존 흐름 유지)
     def background_tasks():
+        # 🚀 첫 학습 (조건 무시)
         print("🚀 [DEBUG] 서버 시작 직후 첫 학습 강제 실행")
         try:
             train_symbol_group_loop()
@@ -464,7 +465,7 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"❌ [DEBUG] 첫 학습 중 오류 발생: {e}")
 
-        # 🔄 이후 학습 루프
+        # 🔄 이후 그룹 학습 루프
         threading.Thread(target=train_symbol_group_loop, daemon=True).start()
         print("✅ [DEBUG] 학습 루프 스레드 시작")
 
@@ -489,5 +490,6 @@ if __name__ == "__main__":
         ).start()
         print("✅ [DEBUG] telegram_bot send_message 쓰레드 시작 완료")
 
+    # ✅ 백그라운드 태스크 실행
     threading.Thread(target=background_tasks, daemon=True).start()
 
