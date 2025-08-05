@@ -441,13 +441,17 @@ if __name__ == "__main__":
     ensure_failure_db()
     print("✅ [DEBUG] failure_patterns DB 초기화 완료")
 
-    # ✅ Render가 요구하는 $PORT 기반 Flask 실행 (메인 스레드에서 즉시 실행)
-    port = int(os.environ.get("PORT", 5000))  # 하드코딩 X, Render 제공 포트 사용
+    # ✅ Flask 먼저 실행 (Render가 포트 즉시 감지하도록)
+    port = int(os.environ.get("PORT", 5000))  # Render 환경변수 사용
+    threading.Thread(
+        target=lambda: app.run(host="0.0.0.0", port=port),
+        daemon=True
+    ).start()
     print(f"✅ [DEBUG] Flask 서버 실행 시작 (PORT={port})")
 
-    # 🚀 Flask 먼저 띄우고, 학습은 백그라운드에서
+    # ✅ 백그라운드 작업 정의
     def background_tasks():
-        # 첫 학습 (조건 무시, 동기 호출)
+        # 🚀 첫 학습 강제 실행
         print("🚀 [DEBUG] 서버 시작 직후 첫 학습 강제 실행")
         try:
             train_symbol_group_loop()
@@ -455,28 +459,28 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"❌ [DEBUG] 첫 학습 중 오류 발생: {e}")
 
-        # 이후 학습 루프
-        print("✅ [DEBUG] 학습 루프 스레드 시작")
+        # 🔄 이후 학습 루프
         threading.Thread(target=train_symbol_group_loop, daemon=True).start()
+        print("✅ [DEBUG] 학습 루프 스레드 시작")
 
-        # 스케줄러 실행
+        # ⏱ 스케줄러 실행
         try:
             start_scheduler()
             print("✅ [DEBUG] 스케줄러 시작 완료")
         except Exception as e:
             print(f"⚠️ [DEBUG] 스케줄러 시작 실패 → {e}")
 
-        # meta 보정 스크립트
+        # 🛠 메타 데이터 보정
         threading.Thread(target=maintenance_fix_meta.fix_all_meta_json, daemon=True).start()
         print("✅ [DEBUG] maintenance_fix_meta.fix_all_meta_json 쓰레드 시작 완료")
 
-        # Telegram 알림
-        threading.Thread(target=lambda: send_message("[시작] YOPO 서버 실행됨"), daemon=True).start()
+        # 📢 Telegram 알림
+        threading.Thread(
+            target=lambda: send_message("[시작] YOPO 서버 실행됨"),
+            daemon=True
+        ).start()
         print("✅ [DEBUG] telegram_bot send_message 쓰레드 시작 완료")
 
-    # 백그라운드 태스크 시작
+    # ✅ 백그라운드에서 학습/스케줄러 실행
     threading.Thread(target=background_tasks, daemon=True).start()
-
-    # Flask 실행 (Render가 인식)
-    app.run(host="0.0.0.0", port=port)
 
