@@ -423,7 +423,6 @@ if __name__ == "__main__":
     from train import train_symbol_group_loop
     from telegram_bot import send_message
     import maintenance_fix_meta
-    from main_flask import app  # ← Flask 앱 임포트 (네 프로젝트에서 Flask 생성하는 부분)
     from scheduler import start_scheduler
 
     print(">>> 서버 실행 준비")
