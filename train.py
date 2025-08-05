@@ -495,7 +495,7 @@ def train_symbol_group_loop(delay_minutes=5):
     from failure_db import ensure_failure_db
     from data.utils import get_kline_by_strategy, compute_features
     from logger import log_training_result
-    from wrong_data_loader import load_training_prediction_data  # 실패 데이터 로드
+    from wrong_data_loader import load_training_prediction_data
 
     def now_kst():
         return datetime.now(pytz.timezone("Asia/Seoul"))
@@ -504,6 +504,7 @@ def train_symbol_group_loop(delay_minutes=5):
     FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
     done_path = "/persistent/train_done.json"
 
+    # 초기 학습 이력 상태 확인
     if not os.path.exists(done_path):
         print("[ℹ️ 유지 모드] 이전 학습 이력 없음 → 새로 생성")
     else:
@@ -515,8 +516,8 @@ def train_symbol_group_loop(delay_minutes=5):
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작 ({now_kst().isoformat()})")
 
-    # 🚀 서버 시작 직후 강제 첫 학습 실행
-    print("\n[🚀 서버 시작 직후 첫 학습 강제 실행]")
+    # 🚀 서버 시작 직후 강제 학습 실행
+    print("\n[🚀 서버 시작 직후 강제 전체 학습 실행]")
     try:
         for idx, group in enumerate(SYMBOL_GROUPS):
             print(f"\n📊 [그룹 {idx+1}/{group_count}] 첫 학습 시작 | 심볼 수: {len(group)}")
@@ -532,12 +533,12 @@ def train_symbol_group_loop(delay_minutes=5):
     except Exception as e:
         print(f"[❌ 첫 학습 전체 실패] → {e}")
 
-    # ✅ 메인 루프 시작
+    # ✅ 메인 루프
     first_loop = True
     while True:
         loop_start_time = time.time()
         loop_count += 1
-        print(f"\n🔄 전체 그룹 순회 루프 #{loop_count} 시작 ({now_kst().isoformat()})")
+        print(f"\n🔄 그룹 순회 루프 #{loop_count} 시작 ({now_kst().isoformat()})")
         prediction_queue = []
 
         for idx, group in enumerate(SYMBOL_GROUPS):
@@ -574,16 +575,14 @@ def train_symbol_group_loop(delay_minutes=5):
                                     retry_count += 1
                                     continue
 
-                                # 📌 실패 데이터 로드
+                                # 실패 데이터 로드
                                 fail_X, fail_y = load_training_prediction_data(
                                     symbol, strategy, FEATURE_INPUT_SIZE, 60, group_id=gid
                                 )
                                 if fail_X is not None and len(fail_X) > 0:
                                     print(f"[📌 실패 데이터 병합 예정] {len(fail_X)}건")
-                                else:
-                                    print(f"[📌 실패 데이터 없음]")
 
-                                # 📌 데이터 부족 판단
+                                # 데이터 부족 판단
                                 if len(df) < 100 and (fail_X is None or len(fail_X) == 0):
                                     reason = f"데이터 부족({len(df)}봉)"
                                     print(f"[⏩ 학습 스킵] {symbol}-{strategy}-group{gid} → {reason}")
@@ -617,26 +616,22 @@ def train_symbol_group_loop(delay_minutes=5):
 
                     prediction_queue.append((symbol, strategy))
 
-        # ✅ 모든 그룹 학습 완료 후 예측 실행
+        # ✅ 모든 그룹 학습 완료 → 즉시 예측
         print(f"\n📡 모든 그룹 학습 완료 → 예측 실행")
         for symbol, strategy in prediction_queue:
-            retry_pred = 0
-            while retry_pred < 2:
-                try:
-                    main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
-                    break
-                except Exception as e:
-                    retry_pred += 1
-                    print(f"[❌ 예측 실패] {symbol}-{strategy} → 재시도 {retry_pred} / {e}")
+            try:
+                main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
+            except Exception as e:
+                print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
 
-        # ✅ 그룹 후처리
+        # ✅ 후처리
         try:
             maintenance_fix_meta.fix_all_meta_json()
             safe_cleanup.auto_delete_old_logs()
         except Exception as e:
-            print(f"[⚠️ 그룹 후처리 실패] → {e}")
+            print(f"[⚠️ 후처리 실패] → {e}")
 
-        # 🔄 첫 루프 후에도 지연 없이 다음 루프 바로 실행
+        # ✅ 첫 루프 후에도 지연 없이 바로 다음 루프
         if first_loop:
             first_loop = False
             FORCE_TRAINING = False
