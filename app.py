@@ -423,7 +423,7 @@ if __name__ == "__main__":
     from train import train_symbol_group_loop
     from telegram_bot import send_message
     import maintenance_fix_meta
-    from scheduler import start_scheduler
+    
 
     print(">>> 서버 실행 준비")
 
