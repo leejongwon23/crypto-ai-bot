@@ -422,37 +422,40 @@ def ensure_prediction_log_exists():
             writer.writerow({h: "" for h in headers})
         print("✅ prediction_log.csv dummy row 생성 완료")
 
-
 # ✅ 실행
 ensure_prediction_log_exists()
 
 if __name__ == "__main__":
     import os
-    import sys
     import threading
     from failure_db import ensure_failure_db
     from train import train_symbol_group_loop
     from telegram_bot import send_message
     import maintenance_fix_meta
 
+    print(">>> 서버 실행 준비")
+
     # ✅ 실패 학습 DB 초기화
     ensure_failure_db()
     print("✅ [DEBUG] failure_patterns DB 초기화 완료")
 
-    # ✅ $PORT 강제 사용
+    # ✅ $PORT 강제 사용 (없으면 즉시 에러)
     try:
         port = int(os.environ["PORT"])
     except KeyError:
-        raise RuntimeError("❌ 환경변수 PORT가 없습니다. Render 서비스 타입이 'Web Service'인지 확인하세요.")
+        raise RuntimeError(
+            "❌ Render 환경변수 PORT가 없습니다. "
+            "Render 서비스 타입이 'Web Service'인지 확인하세요."
+        )
 
-    # ✅ Flask 먼저 실행
+    # ✅ Flask 먼저 실행 (메인 스레드에서)
     print(f"✅ [DEBUG] Flask 서버 실행 시작 (PORT={port})")
     threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=port),
         daemon=True
     ).start()
 
-    # ✅ 백그라운드 작업
+    # ✅ 백그라운드 작업 (기존 로직 유지)
     def background_tasks():
         print("🚀 [DEBUG] 서버 시작 직후 첫 학습 강제 실행")
         try:
@@ -461,18 +464,25 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"❌ [DEBUG] 첫 학습 중 오류 발생: {e}")
 
+        # 🔄 이후 학습 루프
         threading.Thread(target=train_symbol_group_loop, daemon=True).start()
         print("✅ [DEBUG] 학습 루프 스레드 시작")
 
+        # ⏱ 스케줄러 실행
         try:
             start_scheduler()
             print("✅ [DEBUG] 스케줄러 시작 완료")
         except Exception as e:
             print(f"⚠️ [DEBUG] 스케줄러 시작 실패 → {e}")
 
-        threading.Thread(target=maintenance_fix_meta.fix_all_meta_json, daemon=True).start()
+        # 🛠 메타 데이터 보정
+        threading.Thread(
+            target=maintenance_fix_meta.fix_all_meta_json,
+            daemon=True
+        ).start()
         print("✅ [DEBUG] maintenance_fix_meta.fix_all_meta_json 쓰레드 시작 완료")
 
+        # 📢 Telegram 알림
         threading.Thread(
             target=lambda: send_message("[시작] YOPO 서버 실행됨"),
             daemon=True
