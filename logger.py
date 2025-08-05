@@ -98,8 +98,13 @@ def get_model_success_stats(model_name: str):
 
     return result
 
-
-def get_model_success_rate(s, t, m, min_total=10):
+def get_model_success_rate(s, t, m):
+    """
+    모델의 성공률을 조회.
+    - 품질미달(0.2) 제한 로직 제거
+    - 평가 샘플 부족 제한 제거
+    - 성공률은 예측/학습 필터로 사용하지 않고 참고용만 유지
+    """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -109,27 +114,25 @@ def get_model_success_rate(s, t, m, min_total=10):
         """, (s, t or "알수없음", m))
         row = cur.fetchone()
 
+        # 📌 기록이 없으면 None 반환 (필터 안 함)
         if row is None:
-            print(f"[INFO] {s}-{t}-{m}: 기록 없음 → cold-start 0.2 반환")
-            return 0.2
+            print(f"[INFO] {s}-{t}-{m}: 성공률 기록 없음 → None 반환")
+            return None
 
         success_cnt, fail_cnt = row
         total = success_cnt + fail_cnt
 
-        if total < min_total:
-            fail_ratio = fail_cnt / total if total > 0 else 1.0
-            weight = max(0.0, 1.0 - fail_ratio)
-            final_weight = min(weight, 0.2)
-            print(f"[INFO] {s}-{t}-{m}: 평가 샘플 부족(total={total}) → weight={final_weight:.2f}")
-            return final_weight
+        if total == 0:
+            print(f"[INFO] {s}-{t}-{m}: 성공/실패 기록 없음 → None 반환")
+            return None
 
         rate = success_cnt / total
-        return max(0.0, min(rate, 1.0))
+        print(f"[INFO] {s}-{t}-{m}: 성공률 계산됨 → {rate:.3f}")
+        return rate
 
     except Exception as e:
         print(f"[오류] get_model_success_rate 실패 → {e}")
-        return 0.2
-
+        return None
 
 # ✅ 서버 시작 시 호출
 ensure_success_db()
