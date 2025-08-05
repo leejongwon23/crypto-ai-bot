@@ -422,7 +422,8 @@ def ensure_prediction_log_exists():
             writer.writerow({h: "" for h in headers})
         print("✅ prediction_log.csv dummy row 생성 완료")
 
-# ✅ 실행
+# ✅ 실행 준비
+from logger import ensure_prediction_log_exists
 ensure_prediction_log_exists()
 
 if __name__ == "__main__":
@@ -432,6 +433,8 @@ if __name__ == "__main__":
     from train import train_symbol_group_loop
     from telegram_bot import send_message
     import maintenance_fix_meta
+    from main_flask import app  # ← Flask 앱 임포트 (네 프로젝트에서 Flask 생성하는 부분)
+    from scheduler import start_scheduler
 
     print(">>> 서버 실행 준비")
 
@@ -439,7 +442,7 @@ if __name__ == "__main__":
     ensure_failure_db()
     print("✅ [DEBUG] failure_patterns DB 초기화 완료")
 
-    # ✅ Render 환경에서 제공하는 $PORT 강제 사용 (없으면 에러)
+    # ✅ $PORT 필수 사용
     try:
         port = int(os.environ["PORT"])
     except KeyError:
@@ -448,16 +451,11 @@ if __name__ == "__main__":
             "Render 서비스 타입이 'Web Service'인지 확인하세요."
         )
 
-    # ✅ Flask 먼저 실행 (메인 스레드에서 즉시)
-    print(f"✅ [DEBUG] Flask 서버 실행 시작 (PORT={port})")
-    threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=port),
-        daemon=True
-    ).start()
-
-    # ✅ 백그라운드 작업 (YOPO 기존 흐름 유지)
+    # ==========================================
+    # 🔹 백그라운드 작업 함수
+    # ==========================================
     def background_tasks():
-        # 🚀 첫 학습 (조건 무시)
+        # 🚀 첫 학습 강제 실행
         print("🚀 [DEBUG] 서버 시작 직후 첫 학습 강제 실행")
         try:
             train_symbol_group_loop()
@@ -465,7 +463,7 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"❌ [DEBUG] 첫 학습 중 오류 발생: {e}")
 
-        # 🔄 이후 그룹 학습 루프
+        # 🔄 학습 루프 계속
         threading.Thread(target=train_symbol_group_loop, daemon=True).start()
         print("✅ [DEBUG] 학습 루프 스레드 시작")
 
@@ -481,15 +479,22 @@ if __name__ == "__main__":
             target=maintenance_fix_meta.fix_all_meta_json,
             daemon=True
         ).start()
-        print("✅ [DEBUG] maintenance_fix_meta.fix_all_meta_json 쓰레드 시작 완료")
+        print("✅ [DEBUG] maintenance_fix_meta.fix_all_meta_json 스레드 시작 완료")
 
         # 📢 Telegram 알림
         threading.Thread(
             target=lambda: send_message("[시작] YOPO 서버 실행됨"),
             daemon=True
         ).start()
-        print("✅ [DEBUG] telegram_bot send_message 쓰레드 시작 완료")
+        print("✅ [DEBUG] telegram_bot send_message 스레드 시작 완료")
 
-    # ✅ 백그라운드 태스크 실행
+    # ==========================================
+    # 🔹 백그라운드 작업 시작
+    # ==========================================
     threading.Thread(target=background_tasks, daemon=True).start()
 
+    # ==========================================
+    # 🔹 Flask는 메인 스레드에서 실행 (Render 필수 조건)
+    # ==========================================
+    print(f"✅ [DEBUG] Flask 서버 실행 시작 (PORT={port})")
+    app.run(host="0.0.0.0", port=port)
