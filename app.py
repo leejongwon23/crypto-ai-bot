@@ -426,35 +426,40 @@ def ensure_prediction_log_exists():
 ensure_prediction_log_exists()
 
 if __name__ == "__main__":
-    import os  # ✅ PORT 환경변수 읽기용 (반드시 필요)
+    import os
+    import sys
+    import threading
+    from failure_db import ensure_failure_db
+    from train import train_symbol_group_loop
+    from telegram_bot import send_message
 
     print(">>> 서버 실행 준비")
     sys.stdout.flush()
 
     # ✅ 실패 학습 DB 초기화
-    from failure_db import ensure_failure_db
-    ensure_failure_db()  # 서버 시작 시 failure_patterns 테이블 생성 보장
+    ensure_failure_db()
     print("✅ [DEBUG] failure_patterns DB 초기화 완료")
 
-    from train import train_symbol_group_loop
+    # 🚀 서버 시작 직후 첫 학습 강제 실행 (동기)
+    print("🚀 [DEBUG] 서버 시작 직후 첫 학습 강제 실행 (동기 모드)")
+    try:
+        train_symbol_group_loop(force_first_run=True)  # 첫 실행은 조건 무시
+        print("✅ [DEBUG] 첫 학습 완료")
+    except Exception as e:
+        print(f"❌ [DEBUG] 첫 학습 중 오류 발생: {e}")
 
-    # ✅ 학습 루프 스레드 시작
-    print("✅ [DEBUG] train_symbol_group_loop 쓰레드 시작 직전")
+    # ✅ 학습 루프 스레드 시작 (주기적 학습)
+    print("✅ [DEBUG] train_symbol_group_loop 주기 스레드 시작")
     threading.Thread(target=train_symbol_group_loop, daemon=True).start()
-    print("✅ [DEBUG] train_symbol_group_loop 쓰레드 시작 완료")
 
-    # 🚀 서버 시작 즉시 1회 학습 강제 실행 (대기 없이)
-    print("🚀 [DEBUG] 서버 시작 직후 첫 학습 강제 실행")
-    threading.Thread(target=lambda: train_symbol_group_loop(), daemon=True).start()
-
-    # ✅ 스케줄러 실행 (주기적 학습/예측/평가 동작 보장)
+    # ✅ 스케줄러 실행 (예측/평가 주기 수행)
     try:
         start_scheduler()
         print("✅ [DEBUG] 스케줄러 시작 완료")
     except Exception as e:
         print(f"⚠️ [DEBUG] 스케줄러 시작 실패 → {e}")
 
-    # ✅ meta 보정 스크립트 자동 실행 추가
+    # ✅ meta 보정 스크립트 자동 실행
     import maintenance_fix_meta
     threading.Thread(target=maintenance_fix_meta.fix_all_meta_json, daemon=True).start()
     print("✅ [DEBUG] maintenance_fix_meta.fix_all_meta_json 쓰레드 시작 완료")
@@ -466,6 +471,7 @@ if __name__ == "__main__":
     # ✅ Render가 요구하는 PORT 환경변수 기반 실행
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
 
 
     
