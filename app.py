@@ -411,7 +411,6 @@ def force_fix_prediction_log():
 import csv
 import os
 
-
 # ✅ 실행 준비
 from logger import ensure_prediction_log_exists
 ensure_prediction_log_exists()
@@ -433,33 +432,38 @@ if __name__ == "__main__":
     except ValueError:
         raise RuntimeError("❌ Render 환경변수 PORT가 없습니다. Render 서비스 타입 확인 필요")
 
-    # 3. 백그라운드 작업 함수
+    # 3. 백그라운드 작업 함수 (안정형)
     def background_tasks():
         try:
-            # 첫 학습 실행
-            print("🚀 첫 학습 시작")
+            # 🚀 첫 학습은 메인 스레드에서 즉시 실행
+            print("🚀 첫 학습 강제 실행 시작")
             train_symbol_group_loop()
             print("✅ 첫 학습 완료")
 
-            # 스케줄러 시작 (외부 scheduler import 안 함, 현재 파일의 start_scheduler 사용)
+            # 🔄 이후 자동 학습 루프는 백그라운드 스레드로 계속 실행
+            threading.Thread(target=train_symbol_group_loop, daemon=True).start()
+            print("✅ 학습 루프 스레드 시작")
+
+            # ⏱ 스케줄러 시작
             start_scheduler()
             print("✅ 스케줄러 시작 완료")
 
-            # 메타 데이터 보정
+            # 🛠 메타 데이터 보정
             threading.Thread(
                 target=maintenance_fix_meta.fix_all_meta_json,
                 daemon=True
             ).start()
             print("✅ maintenance_fix_meta 실행 완료")
 
-            # 시작 알림
+            # 📢 시작 알림
             send_message("[시작] YOPO 서버 실행됨")
         except Exception as e:
             print(f"❌ 백그라운드 작업 실패: {e}")
 
-    # 4. 백그라운드 작업은 비동기 실행
+    # 4. 백그라운드 작업 실행
     threading.Thread(target=background_tasks, daemon=True).start()
 
     # 5. Flask 서버 실행 (PORT 먼저 열기)
     print(f"✅ Flask 서버 실행 시작 (PORT={port})")
     app.run(host="0.0.0.0", port=port)
+
