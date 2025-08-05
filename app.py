@@ -441,15 +441,19 @@ if __name__ == "__main__":
     ensure_failure_db()
     print("✅ [DEBUG] failure_patterns DB 초기화 완료")
 
-    # ✅ Flask 먼저 실행 (Render가 포트 즉시 감지하도록)
-    port = int(os.environ.get("PORT", 5000))  # Render 환경변수 사용
+    # ✅ Flask를 가장 먼저 실행 (Render 포트 감지)
+    try:
+        port = int(os.environ["PORT"])  # 기본값 없이 강제 사용
+    except KeyError:
+        raise RuntimeError("❌ 환경변수 PORT가 설정되지 않았습니다. Render Web Service 모드인지 확인하세요.")
+
+    print(f"✅ [DEBUG] Flask 서버 실행 시작 (PORT={port})")
     threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=port),
         daemon=True
     ).start()
-    print(f"✅ [DEBUG] Flask 서버 실행 시작 (PORT={port})")
 
-    # ✅ 백그라운드 작업 정의
+    # ✅ 백그라운드에서 학습/스케줄러 실행
     def background_tasks():
         # 🚀 첫 학습 강제 실행
         print("🚀 [DEBUG] 서버 시작 직후 첫 학습 강제 실행")
@@ -481,6 +485,4 @@ if __name__ == "__main__":
         ).start()
         print("✅ [DEBUG] telegram_bot send_message 쓰레드 시작 완료")
 
-    # ✅ 백그라운드에서 학습/스케줄러 실행
     threading.Thread(target=background_tasks, daemon=True).start()
-
