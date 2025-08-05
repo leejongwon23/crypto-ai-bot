@@ -5,13 +5,7 @@ import datetime
 import pytz
 
 from data.utils import SYMBOLS, get_kline_by_strategy
-from logger import get_model_success_rate, log_audit_prediction
 from logger import log_audit_prediction as log_audit
-
-
-# ❌ 아래 두 함수는 삭제해야 predict.py의 실제 기능이 작동됨
-# def get_recent_class_frequencies(): return {}
-# def adjust_probs_with_diversity(pred_probs): return pred_probs
 
 last_trigger_time = {}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
@@ -22,7 +16,7 @@ def check_pre_burst_conditions(df, strategy):
     try:
         if df is None or len(df) < 10:
             print("[경고] 데이터 너무 적음 → fallback 조건 평가")
-            # ✅ fallback: 데이터가 10 미만이면 기본 True 반환 (트리거 최소 기회 보장)
+            # ✅ 데이터가 부족해도 기회를 주기 위해 True 반환
             return True
 
         vol_increasing = df['volume'].iloc[-3] < df['volume'].iloc[-2] < df['volume'].iloc[-1]
@@ -51,23 +45,20 @@ def check_pre_burst_conditions(df, strategy):
         traceback.print_exc()
         return False
 
-
+# ✅ 품질 필터 제거 버전
 def check_model_quality(symbol, strategy):
-    try:
-        for m in MODEL_TYPES:
-            past_success_rate = get_model_success_rate(symbol, strategy, m)
-            if past_success_rate >= 0.6:
-                return True
-        return False
-    except Exception as e:
-        print(f"[성공률 확인 실패] {symbol}-{strategy}: {e}")
-        return False
+    """
+    모델 품질 필터 제거
+    성공률은 메타러너 참고용만 유지하며,
+    예측 차단에는 사용하지 않음.
+    """
+    return True
 
 def run():
-    from recommend import run_prediction  # ✅ 순환참조 방지 위해 함수 안에 import
+    from recommend import run_prediction  # ✅ 순환참조 방지
 
     print(f"[트리거 실행] 전조 패턴 감지 시작: {now_kst().isoformat()}")
-    triggered = 0  # ✅ 실행 횟수 기록용
+    triggered = 0  # ✅ 실행 횟수 기록
 
     for symbol in SYMBOLS:
         for strategy in ["단기", "중기", "장기"]:
@@ -85,10 +76,7 @@ def run():
                     print(f"[⛔ 데이터 부족] {symbol}-{strategy} → {len(df) if df is not None else 0}개")
                     continue
 
-                if not check_model_quality(symbol, strategy):
-                    print(f"[⛔ 모델 품질 미달] {symbol}-{strategy}")
-                    continue
-
+                # ✅ 품질 필터 제거됨 → 모든 경우 예측 시도
                 if check_pre_burst_conditions(df, strategy):
                     print(f"[✅ 트리거 포착] {symbol} - {strategy} → 예측 실행")
 
@@ -110,11 +98,11 @@ def run():
 
     print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
 
-
+# ✅ 최근 클래스 빈도 계산
 from collections import Counter
-import pandas as pd
 import os
 from datetime import datetime as dt
+
 def get_recent_class_frequencies(strategy=None, recent_days=3):
     from collections import Counter
     import os
@@ -143,9 +131,9 @@ def get_recent_class_frequencies(strategy=None, recent_days=3):
         print(f"[⚠️ get_recent_class_frequencies 예외] {e}")
         return Counter()
 
+# ✅ 확률 보정 함수
 import numpy as np
 from collections import Counter
-
 
 def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict = None, alpha=0.10, beta=0.10):
     import numpy as np
@@ -157,7 +145,7 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
     num_classes = len(probs)
     total_recent = sum(recent_freq.values()) + 1e-6
 
-    # ✅ 최근 빈도 기반 weight (log-scale penalty)
+    # ✅ 최근 빈도 기반 weight
     recent_weights = np.array([
         np.exp(-alpha * (recent_freq.get(i, 0) / total_recent))
         for i in range(num_classes)
