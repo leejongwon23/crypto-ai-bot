@@ -422,6 +422,7 @@ def ensure_prediction_log_exists():
             writer.writerow({h: "" for h in headers})
         print("✅ prediction_log.csv dummy row 생성 완료")
 
+
 # ✅ 실행
 ensure_prediction_log_exists()
 
