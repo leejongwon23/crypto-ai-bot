@@ -479,3 +479,4 @@ if __name__ == "__main__":
         print("✅ [DEBUG] telegram_bot send_message 쓰레드 시작 완료")
 
     threading.Thread(target=background_tasks, daemon=True).start()
+
