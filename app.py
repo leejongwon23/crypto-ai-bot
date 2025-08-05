@@ -428,11 +428,11 @@ ensure_prediction_log_exists()
 if __name__ == "__main__":
     import os
     import sys
+    import threading
     from failure_db import ensure_failure_db
     from train import train_symbol_group_loop
     from telegram_bot import send_message
     import maintenance_fix_meta
-    import threading
 
     print(">>> 서버 실행 준비")
     sys.stdout.flush()
@@ -454,7 +454,7 @@ if __name__ == "__main__":
     print("✅ [DEBUG] 학습 루프 스레드 시작")
     threading.Thread(target=train_symbol_group_loop, daemon=True).start()
 
-    # ✅ 스케줄러 실행
+    # ✅ 스케줄러 실행 (주기적 학습/예측/평가)
     try:
         start_scheduler()
         print("✅ [DEBUG] 스케줄러 시작 완료")
@@ -469,9 +469,7 @@ if __name__ == "__main__":
     threading.Thread(target=lambda: send_message("[시작] YOPO 서버 실행됨"), daemon=True).start()
     print("✅ [DEBUG] telegram_bot send_message 쓰레드 시작 완료")
 
-    # ✅ Flask 실행
+    # ✅ Render가 요구하는 $PORT 기반 Flask 실행 (메인 스레드)
     port = int(os.environ.get("PORT", 10000))
+    print(f"✅ [DEBUG] Flask 서버 실행 시작 (PORT={port})")
     app.run(host="0.0.0.0", port=port)
-
-
-
