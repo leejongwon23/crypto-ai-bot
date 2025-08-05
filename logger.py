@@ -657,3 +657,17 @@ def get_available_models(target_symbol=None):
 
     return models
 
+# logger.py 맨 아래 추가
+import os, pandas as pd
+PREDICTION_LOG_PATH = "/persistent/logs/prediction_log.csv"
+
+def ensure_prediction_log_exists():
+    os.makedirs(os.path.dirname(PREDICTION_LOG_PATH), exist_ok=True)
+    if not os.path.exists(PREDICTION_LOG_PATH):
+        pd.DataFrame(columns=["timestamp","symbol","strategy","predicted_class",
+                              "confidence","actual_result","success"]
+                    ).to_csv(PREDICTION_LOG_PATH, index=False, encoding="utf-8-sig")
+        print("✅ prediction_log.csv 생성 완료")
+    else:
+        print("✅ prediction_log.csv 이미 존재")
+
