@@ -11,6 +11,9 @@ from wrong_data_loader import load_training_prediction_data
 from predict import evaluate_predictions
 from train import train_symbol_group_loop
 import maintenance_fix_meta
+from logger import ensure_prediction_log_exists
+ensure_prediction_log_exists()
+
 
 PERSIST_DIR = "/persistent"
 LOG_DIR, MODEL_DIR = os.path.join(PERSIST_DIR, "logs"), os.path.join(PERSIST_DIR, "models")
