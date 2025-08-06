@@ -339,11 +339,11 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
     print(f"[🔄 병합완료] {symbol}-{strategy} → {len(df_all)}개 캔들 (목표 {limit})")
     return df_all
 
-
-# 3. 기존 get_kline_by_strategy 수정 → 병합 함수 사용
 def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
     import pandas as pd
+    from data.source import get_bybit_kline, get_binance_kline  # 예시: 실제 모듈에 맞춰 변경
+    import traceback
 
     cache_key = f"{symbol}-{strategy}"
     cached_df = CacheManager.get(cache_key, ttl_sec=600)
@@ -351,19 +351,51 @@ def get_kline_by_strategy(symbol: str, strategy: str):
         return cached_df
 
     try:
-        df = get_merged_kline_by_strategy(symbol, strategy)
+        # 1️⃣ Bybit 1차 최대치 요청 (전략별 제한 해제)
+        print(f"[📡 Bybit 1차 수집 시작] {symbol}-{strategy}")
+        df_bybit = get_bybit_kline(symbol, strategy, limit=None)  # limit=None → API 최대 허용치
 
-        if df.empty:
-            failed_result(symbol, strategy, reason="캔들 데이터 없음")
+        if df_bybit is None or df_bybit.empty:
+            print(f"[⚠️ Bybit 데이터 없음] {symbol}-{strategy}")
+            df_bybit = pd.DataFrame()
+
+        # 2️⃣ Binance 2차 수집 조건: Bybit 데이터 부족 시 무조건 실행
+        if len(df_bybit) < 1000:  # 1000은 예시, 전략 무관하게 넉넉하게 조건 설정
+            print(f"[📡 Binance 2차 수집 시작] {symbol}-{strategy}")
+            try:
+                df_binance = get_binance_kline(symbol, strategy, limit=None)
+                if df_binance is None or df_binance.empty:
+                    print(f"[⚠️ Binance 데이터 없음] {symbol}-{strategy}")
+                    df_binance = pd.DataFrame()
+            except Exception as be:
+                print(f"[❌ Binance 수집 실패] {symbol}-{strategy} → {be}")
+                traceback.print_exc()
+                df_binance = pd.DataFrame()
+        else:
+            df_binance = pd.DataFrame()
+
+        # 3️⃣ 데이터 병합 & 중복 제거
+        df_list = [df for df in [df_bybit, df_binance] if not df.empty]
+        if not df_list:
+            failed_result(symbol, strategy, reason="캔들 데이터 없음 (Bybit/Binance 모두 실패)")
             return None
 
-        # 캐시에 저장
+        df = pd.concat(df_list).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
+        # 4️⃣ 데이터 상태 로그
+        print(f"[📊 데이터 병합 완료] {symbol}-{strategy} → 총 {len(df)}개 봉 "
+              f"(Bybit: {len(df_bybit)}, Binance: {len(df_binance)})")
+
+        # 5️⃣ 최종 캐싱
         CacheManager.set(cache_key, df)
         return df
+
     except Exception as e:
-        print(f"[❌ 병합 호출 실패] {symbol}-{strategy} → {e}")
+        print(f"[❌ 데이터 수집/병합 실패] {symbol}-{strategy} → {e}")
+        traceback.print_exc()
         failed_result(symbol, strategy, reason=str(e))
         return None
+
 
 # ✅ SYMBOL_GROUPS batch prefetch 함수 추가
 
