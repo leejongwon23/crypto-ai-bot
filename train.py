@@ -488,7 +488,7 @@ def train_symbol_group_loop(delay_minutes=5):
     import maintenance_fix_meta
     from data.utils import SYMBOL_GROUPS, _kline_cache, _feature_cache
     from train import train_one_model
-    from recommend import main
+    from predict import predict  # ✅ 직접 예측 호출
     import safe_cleanup
     from evo_meta_learner import train_evo_meta_loop
     from config import get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges
@@ -526,7 +526,6 @@ def train_symbol_group_loop(delay_minutes=5):
             print(f"\n📊 [그룹 {idx+1}/{group_count}] 학습 시작 | 심볼 수: {len(group)}")
             _kline_cache.clear()
             _feature_cache.clear()
-            group_prediction_queue = []
 
             for symbol in group:
                 for strategy in ["단기", "중기", "장기"]:
@@ -555,24 +554,15 @@ def train_symbol_group_loop(delay_minutes=5):
                                 json.dump(train_done, f, ensure_ascii=False, indent=2)
                             print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid}")
                             log_training_result(symbol, strategy, model=f"group{gid}", note="학습 완료", status="success")
+
+                            # ✅ 학습 직후 예측 수행
+                            print(f"[🔮 예측 시작] {symbol}-{strategy}")
+                            predict(symbol=symbol, strategy=strategy, source="train_loop")
+
                         except Exception as e:
-                            print(f"[❌ 학습 실패] {symbol}-{strategy}-group{gid} → {e}")
+                            print(f"[❌ 학습 또는 예측 실패] {symbol}-{strategy}-group{gid} → {e}")
                             traceback.print_exc()
                             log_training_result(symbol, strategy, model=f"group{gid}", note=str(e), status="failed")
-
-                group_prediction_queue.append(symbol)  # ✅ 그룹 학습이 전부 끝난 후에 추가
-
-            # ✅ 해당 그룹 전체 학습 후에 예측 수행
-            if group_prediction_queue:
-                print(f"\n📡 그룹 {idx+1} 예측 실행 | 심볼 수: {len(group_prediction_queue)}")
-                for symbol in group_prediction_queue:
-                    for strategy in ["단기", "중기", "장기"]:
-                        try:
-                            main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
-                        except Exception as e:
-                            print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
-            else:
-                print(f"\n[ℹ️ 그룹 {idx+1} → 학습된 심볼 없음 → 예측 건너뜀]")
 
         try:
             maintenance_fix_meta.fix_all_meta_json()
@@ -587,7 +577,6 @@ def train_symbol_group_loop(delay_minutes=5):
             train_evo_meta_loop()
         except Exception as e:
             print(f"[⚠️ 진화형 메타러너 학습 실패] → {e}")
-
 
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
