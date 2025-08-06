@@ -241,10 +241,19 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
     interval_map = {"240": "4h", "D": "1d", "2D": "2d", "60": "1h"}
     binance_interval = interval_map.get(interval, "1h")
 
+    # ✅ limit 전달 보장
+    req_limit = int(limit)
+
     for attempt in range(max_retry):
         try:
             url = f"{BINANCE_BASE_URL}/fapi/v1/klines"
-            params = {"symbol": real_symbol, "interval": binance_interval, "limit": limit}
+            params = {
+                "symbol": real_symbol,
+                "interval": binance_interval,
+                "limit": req_limit  # 요청 시 고정값 전달
+            }
+
+            print(f"[📡 Binance 요청] {real_symbol}-{interval} | 요청 limit={req_limit} | 시도 {attempt+1}/{max_retry}")
             res = requests.get(url, params=params, timeout=10)
             res.raise_for_status()
             raw = res.json()
@@ -260,16 +269,20 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
                 "close_time", "quote_asset_volume", "trades", "taker_base_vol", "taker_quote_vol", "ignore"
             ])
             df = df[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
+
+            # ✅ 타임존 변환
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce") \
                                 .dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
             df = df.dropna(subset=["timestamp"])
             df = df.sort_values("timestamp").reset_index(drop=True)
             df["datetime"] = df["timestamp"]
 
-            if len(df) < 10:
-                print(f"[⚠️ 경고] Binance {real_symbol}-{interval} → 캔들 수 부족 ({len(df)} rows)")
+            # ✅ 요청/응답 개수 로그
+            if len(df) < req_limit:
+                print(f"[⚠️ Binance 데이터 부족] {real_symbol}-{interval} | 요청={req_limit} → 응답={len(df)}개 (부족 {req_limit - len(df)})")
+            else:
+                print(f"[✅ Binance 데이터 확보] {real_symbol}-{interval} | 요청={req_limit} → 응답={len(df)}개")
 
-            print(f"[✅ Binance 완료] {real_symbol}-{interval} → {len(df)}개 캔들 로드됨")
             return df
 
         except Exception as e:
@@ -282,7 +295,6 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
 
 def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
     import pandas as pd
-    from datetime import datetime, timedelta
 
     config = STRATEGY_CONFIG.get(strategy)
     if not config:
@@ -290,13 +302,13 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     interval = config["interval"]
-    base_limit = config["limit"]  # 1회 요청 제한
+    base_limit = int(config["limit"])  # 전략별 최대 요청 개수
     total_data = []
 
     # -------------------------
     # 1차: Bybit 반복 수집
     # -------------------------
-    print(f"[⏳ Bybit 데이터 반복 수집 시작] {symbol}-{strategy}")
+    print(f"[⏳ Bybit 데이터 수집 시작] {symbol}-{strategy} | 목표 {base_limit}개")
     end_time = None
     while True:
         df_chunk = get_kline(symbol, interval=interval, limit=base_limit, end_time=end_time)
@@ -309,17 +321,17 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
 
         # 다음 요청을 위해 end_time 조정 (가장 오래된 timestamp 이전)
         oldest_ts = df_chunk["timestamp"].min()
-        end_time = oldest_ts - 1  # 1ms/1s 이전 시점부터 요청
+        end_time = oldest_ts - pd.Timedelta(milliseconds=1)
 
     df_bybit = pd.concat(total_data, ignore_index=True) if total_data else pd.DataFrame()
-    print(f"[✅ Bybit 수집완료] {symbol}-{strategy} → {len(df_bybit)}개")
+    print(f"[✅ Bybit 수집 완료] {symbol}-{strategy} → {len(df_bybit)}개")
 
     # -------------------------
-    # 2차: Binance 반복 수집 (부족 시만)
+    # 2차: Binance 보충 수집 (부족 시만)
     # -------------------------
     df_binance = pd.DataFrame()
-    if df_bybit.empty or len(df_bybit) < base_limit:
-        print(f"[⏳ Binance 데이터 반복 수집 시작] {symbol}-{strategy}")
+    if len(df_bybit) < base_limit:
+        print(f"[⏳ Binance 데이터 보충 시작] {symbol}-{strategy} (부족 {base_limit - len(df_bybit)}개)")
         total_data = []
         end_time = None
         while True:
@@ -332,10 +344,10 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
                 break
 
             oldest_ts = df_chunk["timestamp"].min()
-            end_time = oldest_ts - 1
+            end_time = oldest_ts - pd.Timedelta(milliseconds=1)
 
         df_binance = pd.concat(total_data, ignore_index=True) if total_data else pd.DataFrame()
-        print(f"[✅ Binance 수집완료] {symbol}-{strategy} → {len(df_binance)}개")
+        print(f"[✅ Binance 수집 완료] {symbol}-{strategy} → {len(df_binance)}개")
 
     # -------------------------
     # 병합
@@ -358,9 +370,12 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
             df_all[col] = 0.0 if col != "timestamp" else pd.Timestamp.now()
 
     # 데이터 부족 여부 플래그
-    df_all.attrs["augment_needed"] = len(df_all) < (base_limit * 2)
+    df_all.attrs["augment_needed"] = len(df_all) < base_limit
 
-    print(f"[🔄 병합완료] {symbol}-{strategy} → {len(df_all)}개 캔들 (목표: 가능한 최대)")
+    print(f"[🔄 병합 완료] {symbol}-{strategy} → 최종 {len(df_all)}개 (목표 {base_limit}개)")
+    if len(df_all) < base_limit:
+        print(f"[⚠️ 경고] {symbol}-{strategy} 데이터 부족 ({len(df_all)}/{base_limit})")
+
     return df_all
 
 
@@ -443,10 +458,20 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
     # ✅ 심볼 매핑 적용 (불일치 방지)
     real_symbol = SYMBOL_MAP["bybit"].get(symbol, symbol)
 
+    # ✅ limit 전달 보장 (호출 시 설정된 값 그대로)
+    req_limit = int(limit)
+
     for attempt in range(max_retry):
         try:
             url = f"{BASE_URL}/v5/market/kline"
-            params = {"category": "linear", "symbol": real_symbol, "interval": interval, "limit": limit}
+            params = {
+                "category": "linear",
+                "symbol": real_symbol,
+                "interval": interval,
+                "limit": req_limit  # 요청 시 고정값 전달
+            }
+
+            print(f"[📡 Bybit 요청] {real_symbol}-{interval} | 요청 limit={req_limit} | 시도 {attempt+1}/{max_retry}")
             res = requests.get(url, params=params, timeout=10)
             res.raise_for_status()
             data = res.json()
@@ -454,7 +479,6 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
             # ✅ 데이터 구조 확인
             if "result" not in data or "list" not in data["result"] or not data["result"]["list"]:
                 print(f"[❌ Bybit 데이터 없음] {real_symbol} (시도 {attempt+1}/{max_retry})")
-                # 데이터 전무 시 바로 실패 반환
                 return pd.DataFrame()
 
             raw = data["result"]["list"]
@@ -486,15 +510,16 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
             df = df.sort_values("timestamp").reset_index(drop=True)
             df["datetime"] = df["timestamp"]
 
-            if len(df) < 10:
-                print(f"[⚠️ 경고] {real_symbol}-{interval} → 캔들 수 부족 ({len(df)} rows)")
+            # ✅ 요청/응답 개수 로그
+            if len(df) < req_limit:
+                print(f"[⚠️ Bybit 데이터 부족] {real_symbol}-{interval} | 요청={req_limit} → 응답={len(df)}개 (부족 {req_limit - len(df)})")
+            else:
+                print(f"[✅ Bybit 데이터 확보] {real_symbol}-{interval} | 요청={req_limit} → 응답={len(df)}개")
 
-            print(f"[✅ Bybit 완료] {real_symbol}-{interval} → {len(df)}개 캔들 로드됨")
             return df
 
         except Exception as e:
             print(f"[에러] get_kline({real_symbol}) 실패 → {e}")
-            # 네트워크/예외 시 다음 재시도로
             continue
 
     # 모든 시도 실패 시
