@@ -280,49 +280,73 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
     print(f"[❌ Binance 최종 실패] {real_symbol}-{interval}")
     return pd.DataFrame()
 
-
 def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
+    import pandas as pd
+    from datetime import datetime, timedelta
+
     config = STRATEGY_CONFIG.get(strategy)
     if not config:
         print(f"[❌ 실패] 전략 설정 없음: {strategy}")
         return pd.DataFrame()
 
     interval = config["interval"]
-    limit = config["limit"]
+    base_limit = config["limit"]  # 1회 요청 제한
+    total_data = []
 
     # -------------------------
-    # 1차: Bybit 데이터 수집
+    # 1차: Bybit 반복 수집
     # -------------------------
-    df_bybit = get_kline(symbol, interval=interval, limit=limit)
-    if df_bybit is None or df_bybit.empty:
-        print(f"[⚠️ 1차 실패] Bybit 데이터 없음: {symbol}-{strategy}")
-        df_bybit = pd.DataFrame()
+    print(f"[⏳ Bybit 데이터 반복 수집 시작] {symbol}-{strategy}")
+    end_time = None
+    while True:
+        df_chunk = get_kline(symbol, interval=interval, limit=base_limit, end_time=end_time)
+        if df_chunk is None or df_chunk.empty:
+            break
+
+        total_data.append(df_chunk)
+        if len(df_chunk) < base_limit:
+            break  # 더 이상 과거 데이터 없음
+
+        # 다음 요청을 위해 end_time 조정 (가장 오래된 timestamp 이전)
+        oldest_ts = df_chunk["timestamp"].min()
+        end_time = oldest_ts - 1  # 1ms/1s 이전 시점부터 요청
+
+    df_bybit = pd.concat(total_data, ignore_index=True) if total_data else pd.DataFrame()
+    print(f"[✅ Bybit 수집완료] {symbol}-{strategy} → {len(df_bybit)}개")
 
     # -------------------------
-    # 2차: Binance (1차 부족 시만)
+    # 2차: Binance 반복 수집 (부족 시만)
     # -------------------------
     df_binance = pd.DataFrame()
-    if df_bybit.empty or len(df_bybit) < limit:
-        df_binance = get_kline_binance(symbol, interval=interval, limit=limit)
-        if df_binance is None or df_binance.empty:
-            print(f"[⚠️ 2차 실패] Binance 데이터 없음: {symbol}-{strategy}")
-        else:
-            print(f"[✅ 2차 성공] Binance 데이터 확보: {len(df_binance)}개")
+    if df_bybit.empty or len(df_bybit) < base_limit:
+        print(f"[⏳ Binance 데이터 반복 수집 시작] {symbol}-{strategy}")
+        total_data = []
+        end_time = None
+        while True:
+            df_chunk = get_kline_binance(symbol, interval=interval, limit=base_limit, end_time=end_time)
+            if df_chunk is None or df_chunk.empty:
+                break
+
+            total_data.append(df_chunk)
+            if len(df_chunk) < base_limit:
+                break
+
+            oldest_ts = df_chunk["timestamp"].min()
+            end_time = oldest_ts - 1
+
+        df_binance = pd.concat(total_data, ignore_index=True) if total_data else pd.DataFrame()
+        print(f"[✅ Binance 수집완료] {symbol}-{strategy} → {len(df_binance)}개")
 
     # -------------------------
     # 병합
     # -------------------------
     df_all = pd.concat([df_bybit, df_binance], ignore_index=True)
-
-    # -------------------------
-    # 데이터 최종 체크: 완전 실패 시 학습 스킵
-    # -------------------------
     if df_all.empty:
         print(f"[⏩ 학습 스킵] {symbol}-{strategy} → 거래소 데이터 전무")
         return pd.DataFrame()
 
     # -------------------------
-    # 병합 후 처리
+    # 정리
     # -------------------------
     df_all = df_all.drop_duplicates(subset=["timestamp"], keep="first")
     df_all = df_all.sort_values("timestamp").reset_index(drop=True)
@@ -334,10 +358,11 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
             df_all[col] = 0.0 if col != "timestamp" else pd.Timestamp.now()
 
     # 데이터 부족 여부 플래그
-    df_all.attrs["augment_needed"] = len(df_all) < limit
+    df_all.attrs["augment_needed"] = len(df_all) < (base_limit * 2)
 
-    print(f"[🔄 병합완료] {symbol}-{strategy} → {len(df_all)}개 캔들 (목표 {limit})")
+    print(f"[🔄 병합완료] {symbol}-{strategy} → {len(df_all)}개 캔들 (목표: 가능한 최대)")
     return df_all
+
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
