@@ -233,65 +233,90 @@ SYMBOL_MAP = {
     "binance": {s: s for s in SYMBOLS}   # 예: "BCCUSDT": "BCHUSDT" 로 수정 가능
 }
 
-def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_retry: int = 2) -> pd.DataFrame:
-    # ✅ 심볼 매핑 적용 (불일치 방지)
+def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
+    import pandas as pd
+    import time
+
+    # ✅ 심볼 매핑 적용
     real_symbol = SYMBOL_MAP["binance"].get(symbol, symbol)
 
     # ✅ Binance interval 매핑
     interval_map = {"240": "4h", "D": "1d", "2D": "2d", "60": "1h"}
     binance_interval = interval_map.get(interval, "1h")
 
-    # ✅ limit 전달 보장
+    # ✅ 목표 limit
     req_limit = int(limit)
+    collected_data = []
 
-    for attempt in range(max_retry):
-        try:
-            url = f"{BINANCE_BASE_URL}/fapi/v1/klines"
-            params = {
-                "symbol": real_symbol,
-                "interval": binance_interval,
-                "limit": req_limit  # 요청 시 고정값 전달
-            }
+    # ✅ 반복 수집
+    while True:
+        success = False
+        for attempt in range(max_retry):
+            try:
+                params = {
+                    "symbol": real_symbol,
+                    "interval": binance_interval,
+                    "limit": req_limit
+                }
+                if end_time is not None:
+                    params["endTime"] = int(end_time.timestamp() * 1000)  # Binance ms 단위
 
-            print(f"[📡 Binance 요청] {real_symbol}-{interval} | 요청 limit={req_limit} | 시도 {attempt+1}/{max_retry}")
-            res = requests.get(url, params=params, timeout=10)
-            res.raise_for_status()
-            raw = res.json()
+                print(f"[📡 Binance 요청] {real_symbol}-{interval} | 요청 limit={req_limit} | 시도 {attempt+1}/{max_retry} | end_time={end_time}")
+                res = requests.get(f"{BINANCE_BASE_URL}/fapi/v1/klines", params=params, timeout=10)
+                res.raise_for_status()
+                raw = res.json()
 
-            # ✅ 데이터 확인
-            if not raw:
-                print(f"[❌ Binance 데이터 없음] {real_symbol}-{interval} (시도 {attempt+1}/{max_retry})")
-                return pd.DataFrame()
+                if not raw:
+                    print(f"[❌ Binance 데이터 없음] {real_symbol}-{interval} (시도 {attempt+1}/{max_retry})")
+                    break
 
-            # ✅ 변환 처리
-            df = pd.DataFrame(raw, columns=[
-                "timestamp", "open", "high", "low", "close", "volume",
-                "close_time", "quote_asset_volume", "trades", "taker_base_vol", "taker_quote_vol", "ignore"
-            ])
-            df = df[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
+                df_chunk = pd.DataFrame(raw, columns=[
+                    "timestamp", "open", "high", "low", "close", "volume",
+                    "close_time", "quote_asset_volume", "trades", "taker_base_vol", "taker_quote_vol", "ignore"
+                ])
+                df_chunk = df_chunk[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
 
-            # ✅ 타임존 변환
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce") \
-                                .dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
-            df = df.dropna(subset=["timestamp"])
-            df = df.sort_values("timestamp").reset_index(drop=True)
-            df["datetime"] = df["timestamp"]
+                # ✅ 타임존 변환
+                df_chunk["timestamp"] = pd.to_datetime(df_chunk["timestamp"], unit="ms", errors="coerce") \
+                    .dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+                df_chunk = df_chunk.dropna(subset=["timestamp"])
+                df_chunk = df_chunk.sort_values("timestamp").reset_index(drop=True)
+                df_chunk["datetime"] = df_chunk["timestamp"]
 
-            # ✅ 요청/응답 개수 로그
-            if len(df) < req_limit:
-                print(f"[⚠️ Binance 데이터 부족] {real_symbol}-{interval} | 요청={req_limit} → 응답={len(df)}개 (부족 {req_limit - len(df)})")
-            else:
-                print(f"[✅ Binance 데이터 확보] {real_symbol}-{interval} | 요청={req_limit} → 응답={len(df)}개")
+                collected_data.append(df_chunk)
+                success = True
 
-            return df
+                # ✅ 수집 완료 조건: 목표 채우거나 더 이상 데이터 없음
+                total_rows = sum(len(chunk) for chunk in collected_data)
+                if len(df_chunk) < req_limit or total_rows >= req_limit:
+                    return pd.concat(collected_data, ignore_index=True) \
+                        .drop_duplicates(subset=["timestamp"]) \
+                        .sort_values("timestamp") \
+                        .reset_index(drop=True)
 
-        except Exception as e:
-            print(f"[에러] Binance({real_symbol}) 실패 → {e}")
-            continue
+                # 다음 요청 end_time 갱신
+                oldest_ts = df_chunk["timestamp"].min()
+                end_time = oldest_ts - pd.Timedelta(milliseconds=1)
 
-    # 모든 시도 실패 시
-    print(f"[❌ Binance 최종 실패] {real_symbol}-{interval}")
-    return pd.DataFrame()
+                break  # retry loop 탈출
+
+            except Exception as e:
+                print(f"[에러] Binance({real_symbol}) 실패 → {e}")
+                time.sleep(1)
+                continue
+
+        if not success:
+            break
+
+    # ✅ 실패 시 반환
+    if collected_data:
+        return pd.concat(collected_data, ignore_index=True) \
+            .drop_duplicates(subset=["timestamp"]) \
+            .sort_values("timestamp") \
+            .reset_index(drop=True)
+    else:
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
+
 
 def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
     import pandas as pd
@@ -452,79 +477,90 @@ SYMBOL_MAP = {
     "bybit": {s: s for s in SYMBOLS}    # 예: "1000SHIBUSDT": "SHIBUSDT" 로 수정 가능
 }
 
-def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 2) -> pd.DataFrame:
+def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
     import time
+    import pandas as pd
 
     # ✅ 심볼 매핑 적용 (불일치 방지)
     real_symbol = SYMBOL_MAP["bybit"].get(symbol, symbol)
-
-    # ✅ limit 전달 보장 (호출 시 설정된 값 그대로)
     req_limit = int(limit)
+    collected_data = []
 
-    for attempt in range(max_retry):
-        try:
-            url = f"{BASE_URL}/v5/market/kline"
-            params = {
-                "category": "linear",
-                "symbol": real_symbol,
-                "interval": interval,
-                "limit": req_limit  # 요청 시 고정값 전달
-            }
+    # ✅ 반복 수집 (목표 limit까지)
+    while True:
+        success = False
+        for attempt in range(max_retry):
+            try:
+                params = {
+                    "category": "linear",
+                    "symbol": real_symbol,
+                    "interval": interval,
+                    "limit": req_limit,
+                }
+                if end_time is not None:
+                    # Bybit v5 kline은 ms 단위 timestamp 사용
+                    params["end"] = int(end_time.timestamp() * 1000)
 
-            print(f"[📡 Bybit 요청] {real_symbol}-{interval} | 요청 limit={req_limit} | 시도 {attempt+1}/{max_retry}")
-            res = requests.get(url, params=params, timeout=10)
-            res.raise_for_status()
-            data = res.json()
+                print(f"[📡 Bybit 요청] {real_symbol}-{interval} | 요청 limit={req_limit} | 시도 {attempt+1}/{max_retry} | end_time={end_time}")
+                res = requests.get(f"{BASE_URL}/v5/market/kline", params=params, timeout=10)
+                res.raise_for_status()
+                data = res.json()
 
-            # ✅ 데이터 구조 확인
-            if "result" not in data or "list" not in data["result"] or not data["result"]["list"]:
-                print(f"[❌ Bybit 데이터 없음] {real_symbol} (시도 {attempt+1}/{max_retry})")
-                return pd.DataFrame()
+                # ✅ 데이터 구조 확인
+                if "result" not in data or "list" not in data["result"] or not data["result"]["list"]:
+                    print(f"[❌ Bybit 데이터 없음] {real_symbol} (시도 {attempt+1}/{max_retry})")
+                    break
 
-            raw = data["result"]["list"]
-            if not raw or len(raw[0]) < 6:
-                print(f"[❌ Bybit 데이터 필드 부족] {real_symbol}")
-                return pd.DataFrame()
+                raw = data["result"]["list"]
+                if not raw or len(raw[0]) < 6:
+                    print(f"[❌ Bybit 데이터 필드 부족] {real_symbol}")
+                    break
 
-            df = pd.DataFrame(raw, columns=[
-                "timestamp", "open", "high", "low", "close", "volume", "turnover"
-            ])
-            df = df[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
+                df_chunk = pd.DataFrame(raw, columns=[
+                    "timestamp", "open", "high", "low", "close", "volume", "turnover"
+                ])
+                df_chunk = df_chunk[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
 
-            # ✅ 필수값 체크
-            essential = ["open", "high", "low", "close", "volume"]
-            df.dropna(subset=essential, inplace=True)
-            if df.empty:
-                print(f"[❌ Bybit 데이터 결측] {real_symbol}")
-                return pd.DataFrame()
+                # ✅ 필수값 체크
+                essential = ["open", "high", "low", "close", "volume"]
+                df_chunk.dropna(subset=essential, inplace=True)
+                if df_chunk.empty:
+                    break
 
-            # ✅ 이상치 제거
-            if df["high"].isnull().all() or (df["high"] == 0).all():
-                print(f"[❌ Bybit 고가 이상치만 존재] {real_symbol}")
-                return pd.DataFrame()
+                # ✅ 타임존 변환
+                df_chunk["timestamp"] = pd.to_datetime(df_chunk["timestamp"], unit="ms", errors="coerce")
+                df_chunk = df_chunk.dropna(subset=["timestamp"])
+                df_chunk["timestamp"] = df_chunk["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+                df_chunk = df_chunk.sort_values("timestamp").reset_index(drop=True)
+                df_chunk["datetime"] = df_chunk["timestamp"]
 
-            # ✅ 타임존 변환
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
-            df = df.dropna(subset=["timestamp"])
-            df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
-            df = df.sort_values("timestamp").reset_index(drop=True)
-            df["datetime"] = df["timestamp"]
+                collected_data.append(df_chunk)
+                success = True
 
-            # ✅ 요청/응답 개수 로그
-            if len(df) < req_limit:
-                print(f"[⚠️ Bybit 데이터 부족] {real_symbol}-{interval} | 요청={req_limit} → 응답={len(df)}개 (부족 {req_limit - len(df)})")
-            else:
-                print(f"[✅ Bybit 데이터 확보] {real_symbol}-{interval} | 요청={req_limit} → 응답={len(df)}개")
+                # ✅ 수집 완료 조건: 받은 데이터가 요청 개수보다 적거나, 총합이 목표 이상이면 중단
+                total_rows = sum(len(chunk) for chunk in collected_data)
+                if len(df_chunk) < req_limit or total_rows >= req_limit:
+                    return pd.concat(collected_data, ignore_index=True).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
-            return df
+                # ✅ 다음 요청을 위해 end_time 갱신 (가장 오래된 timestamp 이전)
+                oldest_ts = df_chunk["timestamp"].min()
+                end_time = oldest_ts - pd.Timedelta(milliseconds=1)
 
-        except Exception as e:
-            print(f"[에러] get_kline({real_symbol}) 실패 → {e}")
-            continue
+                break  # retry 루프 탈출
 
-    # 모든 시도 실패 시
-    print(f"[❌ Bybit 최종 실패] {real_symbol}")
-    return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
+            except Exception as e:
+                print(f"[에러] get_kline({real_symbol}) 실패 → {e}")
+                time.sleep(1)
+                continue
+
+        if not success:
+            break
+
+    # 모든 시도 실패 또는 데이터 없음
+    if collected_data:
+        return pd.concat(collected_data, ignore_index=True).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    else:
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
 
 
 def get_realtime_prices():
