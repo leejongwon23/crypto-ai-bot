@@ -504,8 +504,8 @@ def record_model_success(model: str, success: bool):
     conn.close()
 
 
-def log_training_result(symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0.0,
-                        note="", source_exchange="BYBIT"):
+ def log_training_result(symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0.0,
+                        note="", source_exchange="BYBIT", status="success"):
     import csv
     from datetime import datetime
     import pytz
@@ -515,7 +515,7 @@ def log_training_result(symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
     now = datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
-    row = [now, symbol, strategy, model, accuracy, f1, loss, note, source_exchange]
+    row = [now, symbol, strategy, model, accuracy, f1, loss, note, source_exchange, status]
 
     try:
         write_header = not os.path.exists(LOG_FILE)
@@ -524,11 +524,11 @@ def log_training_result(symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0
             if write_header:
                 writer.writerow([
                     "timestamp", "symbol", "strategy", "model",
-                    "accuracy", "f1", "loss", "note", "source_exchange"
+                    "accuracy", "f1", "loss", "note", "source_exchange", "status"
                 ])
             writer.writerow(row)
         print(f"[✅ 학습 로그 기록됨] {symbol}-{strategy} "
-              f"acc={accuracy:.3f} f1={f1:.3f} src={source_exchange}")
+              f"status={status} acc={accuracy:.3f} f1={f1:.3f} src={source_exchange}")
     except Exception as e:
         print(f"[⚠️ 학습 로그 기록 실패] {e}")
 
