@@ -326,81 +326,63 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     interval = config["interval"]
-    base_limit = int(config["limit"])  # 전략별 최대 요청 개수
-    total_data = []
+    base_limit = int(config["limit"])
+    max_total = base_limit  # 목표 수집 수
 
-    # -------------------------
-    # 1차: Bybit 반복 수집
-    # -------------------------
-    print(f"[⏳ Bybit 데이터 수집 시작] {symbol}-{strategy} | 목표 {base_limit}개")
-    end_time = None
-    while len(total_data) * base_limit < base_limit * 3:  # 최대 3배 범위까지만 탐색
-        df_chunk = get_kline(symbol, interval=interval, limit=base_limit, end_time=end_time)
-        if df_chunk is None or df_chunk.empty:
-            break
-
-        total_data.append(df_chunk)
-        if len(df_chunk) < base_limit:
-            break  # 더 이상 과거 데이터 없음
-
-        # 다음 요청을 위해 end_time 조정 (가장 오래된 timestamp 이전)
-        oldest_ts = df_chunk["timestamp"].min()
-        end_time = oldest_ts - pd.Timedelta(milliseconds=1)
-
-    df_bybit = pd.concat(total_data, ignore_index=True) if total_data else pd.DataFrame()
-    print(f"[✅ Bybit 수집 완료] {symbol}-{strategy} → {len(df_bybit)}개")
-
-    # -------------------------
-    # 2차: Binance 보충 수집 (부족 시만)
-    # -------------------------
-    df_binance = pd.DataFrame()
-    if len(df_bybit) < base_limit:
-        print(f"[⏳ Binance 데이터 보충 시작] {symbol}-{strategy} (부족 {base_limit - len(df_bybit)}개)")
+    def fetch_until_target(fetch_func, source_name):
         total_data = []
         end_time = None
-        while len(total_data) * base_limit < base_limit * 3:
-            df_chunk = get_kline_binance(symbol, interval=interval, limit=base_limit, end_time=end_time)
+        total_count = 0
+        max_repeat = 10  # 예외 방지
+
+        print(f"[⏳ {source_name} 데이터 수집 시작] {symbol}-{strategy} | 목표 {base_limit}개")
+        while total_count < max_total and len(total_data) < max_repeat:
+            df_chunk = fetch_func(symbol, interval=interval, limit=base_limit, end_time=end_time)
             if df_chunk is None or df_chunk.empty:
                 break
 
             total_data.append(df_chunk)
+            total_count += len(df_chunk)
+
             if len(df_chunk) < base_limit:
                 break
 
             oldest_ts = df_chunk["timestamp"].min()
             end_time = oldest_ts - pd.Timedelta(milliseconds=1)
 
-        df_binance = pd.concat(total_data, ignore_index=True) if total_data else pd.DataFrame()
-        print(f"[✅ Binance 수집 완료] {symbol}-{strategy} → {len(df_binance)}개")
+        df_final = pd.concat(total_data, ignore_index=True) if total_data else pd.DataFrame()
+        print(f"[✅ {source_name} 수집 완료] {symbol}-{strategy} → {len(df_final)}개")
+        return df_final
 
-    # -------------------------
-    # 병합
-    # -------------------------
+    # 1차 Bybit 수집
+    df_bybit = fetch_until_target(get_kline, "Bybit")
+
+    # 2차 Binance 수집 (보충)
+    df_binance = pd.DataFrame()
+    if len(df_bybit) < base_limit:
+        print(f"[⏳ Binance 보충 시작] 부족 {base_limit - len(df_bybit)}개")
+        df_binance = fetch_until_target(get_kline_binance, "Binance")
+
+    # 병합 및 정리
     df_all = pd.concat([df_bybit, df_binance], ignore_index=True)
     if df_all.empty:
         print(f"[⏩ 학습 스킵] {symbol}-{strategy} → 거래소 데이터 전무")
         return pd.DataFrame()
 
-    # -------------------------
-    # 정리
-    # -------------------------
-    df_all = df_all.drop_duplicates(subset=["timestamp"], keep="first")
-    df_all = df_all.sort_values("timestamp").reset_index(drop=True)
+    df_all = df_all.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
-    # 필수 컬럼 채움
     required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
     for col in required_cols:
         if col not in df_all.columns:
             df_all[col] = 0.0 if col != "timestamp" else pd.Timestamp.now()
 
-    # 데이터 부족 여부 플래그
     df_all.attrs["augment_needed"] = len(df_all) < base_limit
-
     print(f"[🔄 병합 완료] {symbol}-{strategy} → 최종 {len(df_all)}개 (목표 {base_limit}개)")
     if len(df_all) < base_limit:
         print(f"[⚠️ 경고] {symbol}-{strategy} 데이터 부족 ({len(df_all)}/{base_limit})")
 
     return df_all
+
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
