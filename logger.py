@@ -503,9 +503,17 @@ def record_model_success(model: str, success: bool):
     conn.commit()
     conn.close()
 
-
- def log_training_result(symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0.0,
-                        note="", source_exchange="BYBIT", status="success"):
+def log_training_result(
+    symbol,
+    strategy,
+    model="",
+    accuracy=0.0,
+    f1=0.0,
+    loss=0.0,
+    note="",
+    source_exchange="BYBIT",
+    status="success"
+):
     import csv
     from datetime import datetime
     import pytz
@@ -515,7 +523,18 @@ def record_model_success(model: str, success: bool):
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
     now = datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
-    row = [now, symbol, strategy, model, accuracy, f1, loss, note, source_exchange, status]
+    row = [
+        now,
+        symbol,
+        strategy,
+        model,
+        accuracy,
+        f1,
+        loss,
+        note,
+        source_exchange,
+        status
+    ]
 
     try:
         write_header = not os.path.exists(LOG_FILE)
@@ -523,12 +542,22 @@ def record_model_success(model: str, success: bool):
             writer = csv.writer(f)
             if write_header:
                 writer.writerow([
-                    "timestamp", "symbol", "strategy", "model",
-                    "accuracy", "f1", "loss", "note", "source_exchange", "status"
+                    "timestamp",
+                    "symbol",
+                    "strategy",
+                    "model",
+                    "accuracy",
+                    "f1",
+                    "loss",
+                    "note",
+                    "source_exchange",
+                    "status"
                 ])
             writer.writerow(row)
-        print(f"[✅ 학습 로그 기록됨] {symbol}-{strategy} "
-              f"status={status} acc={accuracy:.3f} f1={f1:.3f} src={source_exchange}")
+        print(
+            f"[✅ 학습 로그 기록됨] {symbol}-{strategy} "
+            f"status={status} acc={accuracy:.3f} f1={f1:.3f} src={source_exchange}"
+        )
     except Exception as e:
         print(f"[⚠️ 학습 로그 기록 실패] {e}")
 
