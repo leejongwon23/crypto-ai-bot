@@ -504,7 +504,6 @@ def train_symbol_group_loop(delay_minutes=5):
     FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
     done_path = "/persistent/train_done.json"
 
-    # 초기 학습 상태 확인
     if not os.path.exists(done_path):
         print("[ℹ️ 유지 모드] 이전 학습 이력 없음 → 새로 생성")
     else:
@@ -516,22 +515,23 @@ def train_symbol_group_loop(delay_minutes=5):
     group_count = len(SYMBOL_GROUPS)
     print(f"🚀 전체 {group_count}개 그룹 학습 루프 시작 ({now_kst().isoformat()})")
 
-    # 🚀 서버 시작 직후 강제 전체 학습 실행
-    print("\n[🚀 서버 시작 직후 강제 전체 학습 실행]")
+    # 🚀 서버 시작 직후 전체 그룹 순차 학습
+    print("\n[🚀 서버 시작 직후 전체 그룹 순차 학습 시작]")
     try:
         for idx, group in enumerate(SYMBOL_GROUPS):
-            print(f"\n📊 [그룹 {idx+1}/{group_count}] 첫 학습 시작 | 심볼 수: {len(group)}")
+            print(f"\n=== [그룹 {idx+1}/{group_count}] 첫 학습 시작 | 심볼 수: {len(group)} ===")
             _kline_cache.clear()
             _feature_cache.clear()
+
             for symbol in group:
                 for strategy in ["단기", "중기", "장기"]:
                     try:
                         train_one_model(symbol, strategy)
-                        print(f"[✅ 첫 학습 완료] {symbol}-{strategy}")
                         log_training_result(symbol, strategy, model="initial", note="첫 학습 완료", status="success")
+                        print(f"[✅ 첫 학습 완료] {symbol}-{strategy}")
                     except Exception as e:
-                        print(f"[❌ 첫 학습 실패] {symbol}-{strategy} → {e}")
                         log_training_result(symbol, strategy, model="initial", note=str(e), status="failed")
+                        print(f"[❌ 첫 학습 실패] {symbol}-{strategy} → {e}")
     except Exception as e:
         print(f"[❌ 첫 학습 전체 실패] → {e}")
 
@@ -542,11 +542,12 @@ def train_symbol_group_loop(delay_minutes=5):
         print(f"\n🔄 그룹 순회 루프 #{loop_count} 시작 ({now_kst().isoformat()})")
         prediction_queue = []
 
+        # 그룹 순차 학습
         for idx, group in enumerate(SYMBOL_GROUPS):
             if not group:
                 continue
 
-            print(f"\n📊 [그룹 {idx+1}/{group_count}] 학습 시작 | 심볼 수: {len(group)}")
+            print(f"\n=== [그룹 {idx+1}/{group_count}] 학습 시작 | 심볼 수: {len(group)} ===")
             _kline_cache.clear()
             _feature_cache.clear()
 
@@ -559,14 +560,15 @@ def train_symbol_group_loop(delay_minutes=5):
                         class_groups = get_class_groups(num_classes=num_classes)
                         MAX_GROUP_ID = len(class_groups) - 1
                     except Exception as e:
-                        print(f"[⚠️ 동적 클래스 계산 실패] {symbol}-{strategy} → {e}")
                         log_training_result(symbol, strategy, note=f"클래스 계산 실패: {e}", status="failed")
+                        print(f"[⚠️ 동적 클래스 계산 실패] {symbol}-{strategy} → {e}")
                         continue
 
                     for gid in range(MAX_GROUP_ID + 1):
                         already_done = train_done[symbol][strategy].get(str(gid), False)
                         if not FORCE_TRAINING and already_done:
-                            print(f"[ℹ️ 이전 학습 이력 있음 → 재학습 진행] {symbol}-{strategy}-group{gid}")
+                            print(f"[ℹ️ 이전 학습 이력 있음 → 건너뜀] {symbol}-{strategy}-group{gid}")
+                            continue
 
                         retry_count = 0
                         while retry_count < 2:
@@ -585,8 +587,8 @@ def train_symbol_group_loop(delay_minutes=5):
 
                                 if len(df) < 60 and (fail_X is None or len(fail_X) == 0):
                                     reason = f"데이터 부족({len(df)}봉)"
-                                    print(f"[⏩ 학습 스킵] {symbol}-{strategy}-group{gid} → {reason}")
                                     log_training_result(symbol, strategy, model=f"group{gid}", note=reason, status="skipped")
+                                    print(f"[⏩ 학습 스킵] {symbol}-{strategy}-group{gid} → {reason}")
                                     break
 
                                 feat = compute_features(symbol, df, strategy)
@@ -600,8 +602,8 @@ def train_symbol_group_loop(delay_minutes=5):
 
                         if retry_count >= 2:
                             reason = "데이터 확보 실패"
-                            print(f"[⏩ 학습 스킵] {symbol}-{strategy}-group{gid} → {reason}")
                             log_training_result(symbol, strategy, model=f"group{gid}", note=reason, status="skipped")
+                            print(f"[⏩ 학습 스킵] {symbol}-{strategy}-group{gid} → {reason}")
                             continue
 
                         try:
@@ -610,17 +612,21 @@ def train_symbol_group_loop(delay_minutes=5):
                             train_done[symbol][strategy][str(gid)] = True
                             with open(done_path, "w", encoding="utf-8") as f:
                                 json.dump(train_done, f, ensure_ascii=False, indent=2)
-                            print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid}")
                             log_training_result(symbol, strategy, model=f"group{gid}", note="학습 완료", status="success")
+                            print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid}")
                         except Exception as e:
+                            log_training_result(symbol, strategy, model=f"group{gid}", note=str(e), status="failed")
                             print(f"[❌ 학습 실패] {symbol}-{strategy}-group{gid} → {e}")
                             traceback.print_exc()
-                            log_training_result(symbol, strategy, model=f"group{gid}", note=str(e), status="failed")
 
+            # 그룹 학습이 끝난 후에만 예측 대기열 추가
+            for symbol in group:
+                for strategy in ["단기", "중기", "장기"]:
                     prediction_queue.append((symbol, strategy))
 
+        # 모든 그룹 학습 끝난 후 일괄 예측
         if prediction_queue:
-            print(f"\n📡 {len(prediction_queue)}개 심볼 예측 실행")
+            print(f"\n📡 모든 그룹 학습 완료 → {len(prediction_queue)}개 심볼 예측 실행")
             for symbol, strategy in prediction_queue:
                 try:
                     main(symbol=symbol, strategy=strategy, force=True, allow_prediction=True)
@@ -637,7 +643,6 @@ def train_symbol_group_loop(delay_minutes=5):
 
         first_loop = False
         FORCE_TRAINING = False
-
         time.sleep(delay_minutes * 60)
 
         try:
