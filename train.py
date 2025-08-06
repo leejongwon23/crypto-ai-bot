@@ -536,11 +536,11 @@ def train_symbol_group_loop(delay_minutes=5):
     # ✅ 메인 루프
     first_loop = True
     while True:
-        loop_start_time = time.time()
         loop_count += 1
         print(f"\n🔄 그룹 순회 루프 #{loop_count} 시작 ({now_kst().isoformat()})")
         prediction_queue = []
 
+        # 무조건 모든 그룹 순회 (조건 제한 완화)
         for idx, group in enumerate(SYMBOL_GROUPS):
             if not group:
                 continue
@@ -563,8 +563,9 @@ def train_symbol_group_loop(delay_minutes=5):
 
                     for gid in range(MAX_GROUP_ID + 1):
                         already_done = train_done[symbol][strategy].get(str(gid), False)
+                        # ✅ 루프 제한 완화: FORCE_TRAINING이 False라도 항상 재학습 가능
                         if not FORCE_TRAINING and already_done:
-                            continue
+                            print(f"[ℹ️ 이전 학습 이력 있음 → 재학습 진행] {symbol}-{strategy}-group{gid}")
 
                         retry_count = 0
                         while retry_count < 2:
@@ -575,14 +576,12 @@ def train_symbol_group_loop(delay_minutes=5):
                                     retry_count += 1
                                     continue
 
-                                # 실패 데이터 로드
                                 fail_X, fail_y = load_training_prediction_data(
                                     symbol, strategy, FEATURE_INPUT_SIZE, 60, group_id=gid
                                 )
                                 if fail_X is not None and len(fail_X) > 0:
                                     print(f"[📌 실패 데이터 병합 예정] {len(fail_X)}건")
 
-                                # 데이터 부족 판단
                                 if len(df) < 60 and (fail_X is None or len(fail_X) == 0):
                                     reason = f"데이터 부족({len(df)}봉)"
                                     print(f"[⏩ 학습 스킵] {symbol}-{strategy}-group{gid} → {reason}")
@@ -619,7 +618,7 @@ def train_symbol_group_loop(delay_minutes=5):
 
                     prediction_queue.append((symbol, strategy))
 
-        # ✅ 학습 가능한 심볼이 있었다면 즉시 예측 실행
+        # ✅ 학습 가능 심볼이 있으면 바로 예측
         if prediction_queue:
             print(f"\n📡 {len(prediction_queue)}개 심볼 예측 실행")
             for symbol, strategy in prediction_queue:
@@ -637,11 +636,9 @@ def train_symbol_group_loop(delay_minutes=5):
         except Exception as e:
             print(f"[⚠️ 후처리 실패] → {e}")
 
-        # ✅ 첫 루프 후 즉시 다음 루프
-        if first_loop:
-            first_loop = False
-            FORCE_TRAINING = False
-            continue
+        # ✅ 첫 루프 후에도 무조건 다음 루프 진행
+        first_loop = False
+        FORCE_TRAINING = False
 
         time.sleep(delay_minutes * 60)
 
