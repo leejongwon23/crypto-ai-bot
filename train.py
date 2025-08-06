@@ -153,6 +153,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             class_ranges = get_class_ranges(group_id=gid)
             num_classes = len(class_ranges)
             set_NUM_CLASSES(num_classes)
+            print(f"[📐 클래스 경계] {class_ranges}")
 
             labels = []
             for r in returns:
@@ -170,12 +171,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 X.append(feat_scaled[i:i+window])
                 y.append(labels[i + window] if i + window < len(labels) else 0)
             X, y = np.array(X), np.array(y)
+            print(f"[📊 초기 샘플 수] {len(X)}건")
 
             # 6. 데이터 부족 시 무조건 증강
             if len(X) < 50:
                 print(f"[⚠️ 데이터 부족 → 증강] {symbol}-{strategy}")
                 X, y = balance_classes(X, y, num_classes=num_classes)
-                print(f"[✅ 증강 완료] 최종 {len(X)} 샘플")
+                print(f"[✅ 증강 완료] 총 샘플 수: {len(X)}")
 
             # 7. 실패 데이터 병합
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size, window, group_id=gid)
@@ -195,8 +197,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         merged_X.append(X[i])
                         merged_y.append(y[i])
                 X, y = np.array(merged_X), np.array(merged_y)
+                print(f"[📊 병합 후 샘플 수] {len(X)}건")
 
-            # 최종 데이터 체크
             if len(X) < 10:
                 print(f"[⏩ 스킵] {symbol}-{strategy}-group{gid} → 최종 샘플 부족 ({len(X)})")
                 log_training_result(symbol, strategy, status="skipped", reason="최종 샘플 부족", group_id=gid)
@@ -204,6 +206,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
             # 8. 모델 학습
             for model_type in ["lstm", "cnn_lstm", "transformer"]:
+                print(f"[🧠 학습 시작] {model_type} 모델")
                 model = get_model(model_type, input_size=input_size, output_size=num_classes).to(DEVICE)
                 model_name = f"{symbol}_{strategy}_{model_type}_group{gid}_cls{num_classes}.pt"
                 model_path = os.path.join("/persistent/models", model_name)
@@ -229,8 +232,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                         loss.backward()
                         optimizer.step()
                         total_loss += loss.item()
+                    if (epoch + 1) % 5 == 0 or epoch == max_epochs - 1:
+                        print(f"[📈 Epoch {epoch+1}/{max_epochs}] Loss: {loss.item():.4f}")
 
-                # 평가
                 model.eval()
                 all_preds, all_labels = [], []
                 with torch.no_grad():
@@ -243,9 +247,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 f1 = f1_score(all_labels, all_preds, average='macro')
                 print(f"[🎯 {model_type}] acc={acc:.4f}, f1={f1:.4f}")
 
-                # 저장
                 os.makedirs("/persistent/models", exist_ok=True)
                 torch.save(model.state_dict(), model_path)
+                print(f"[💾 저장 완료] {model_path}")
+
                 with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
                     json.dump({
                         "symbol": symbol,
@@ -261,6 +266,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
                 log_training_result(symbol, strategy, model_path, acc, f1, total_loss)
                 record_model_success(model_name, acc > 0.6 and f1 > 0.55)
+                print(f"[✅ {model_type} 모델 학습 완료] acc={acc:.4f}, f1={f1:.4f}")
                 model_saved = True
 
         except Exception as e:
