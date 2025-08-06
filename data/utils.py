@@ -317,7 +317,6 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
     else:
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
 
-
 def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
     import pandas as pd
 
@@ -335,7 +334,7 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
     # -------------------------
     print(f"[⏳ Bybit 데이터 수집 시작] {symbol}-{strategy} | 목표 {base_limit}개")
     end_time = None
-    while True:
+    while len(total_data) * base_limit < base_limit * 3:  # 최대 3배 범위까지만 탐색
         df_chunk = get_kline(symbol, interval=interval, limit=base_limit, end_time=end_time)
         if df_chunk is None or df_chunk.empty:
             break
@@ -359,7 +358,7 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
         print(f"[⏳ Binance 데이터 보충 시작] {symbol}-{strategy} (부족 {base_limit - len(df_bybit)}개)")
         total_data = []
         end_time = None
-        while True:
+        while len(total_data) * base_limit < base_limit * 3:
             df_chunk = get_kline_binance(symbol, interval=interval, limit=base_limit, end_time=end_time)
             if df_chunk is None or df_chunk.empty:
                 break
@@ -402,7 +401,6 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
         print(f"[⚠️ 경고] {symbol}-{strategy} 데이터 부족 ({len(df_all)}/{base_limit})")
 
     return df_all
-
 
 def get_kline_by_strategy(symbol: str, strategy: str):
     from predict import failed_result
