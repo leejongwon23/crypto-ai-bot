@@ -91,8 +91,17 @@ def get_class_groups(num_classes=None, group_size=5):
     if num_classes is None or num_classes < 2:
         num_classes = get_NUM_CLASSES()
     if num_classes <= group_size:
-        return [list(range(num_classes))]
-    return [list(range(i, min(i + group_size, num_classes))) for i in range(0, num_classes, group_size)]
+        groups = [list(range(num_classes))]
+    else:
+        groups = [list(range(i, min(i + group_size, num_classes))) for i in range(0, num_classes, group_size)]
+
+    # 📊 로깅
+    print(f"[📊 클래스 그룹화] 총 클래스 수: {num_classes}, 그룹 크기: {group_size}, 그룹 개수: {len(groups)}")
+    for gi, g in enumerate(groups):
+        print(f"  - 그룹 {gi}: 클래스 {g}")
+
+    return groups
+
 
 # ✅ ±영역 완전 분리된 클래스 범위 계산
 def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=None, group_size=5):
@@ -107,13 +116,13 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
         try:
             df_price = get_kline_by_strategy(symbol, strategy)
             if df_price is None or len(df_price) < 30:
-                print("[⚠️ get_class_ranges] 가격 데이터 부족 → fallback equal 사용")
-                return compute_equal_ranges(10)
+                print(f"[⚠️ get_class_ranges] 가격 데이터 부족({len(df_price) if df_price is not None else 0}봉) → fallback equal 사용")
+                return compute_equal_ranges(10, reason="가격 데이터 부족")
 
             returns = df_price["close"].pct_change().dropna().values
             if len(returns) < 10:
-                print("[⚠️ get_class_ranges] 수익률 부족 → fallback equal 사용")
-                return compute_equal_ranges(10)
+                print(f"[⚠️ get_class_ranges] 수익률 데이터 부족({len(returns)}) → fallback equal 사용")
+                return compute_equal_ranges(10, reason="수익률 데이터 부족")
 
             neg = returns[returns < 0]
             pos = returns[returns >= 0]
@@ -127,6 +136,12 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             num_classes = max(num_classes, 4)
             set_NUM_CLASSES(num_classes)
 
+            # 📊 수익률 분포 로그
+            print(f"[📊 수익률 분포 계산] {symbol}-{strategy}")
+            print(f"  - 음수 수익률 개수: {len(neg)}, 양수 수익률 개수: {len(pos)}")
+            print(f"  - 음수 클래스 수: {num_classes // 2}, 양수 클래스 수: {num_classes // 2}")
+            print(f"  - 총 클래스 수: {num_classes} (MAX={MAX_CLASSES})")
+
             if method == "quantile":
                 q_neg = np.quantile(neg, np.linspace(0, 1, num_classes // 2 + 1))
                 q_pos = np.quantile(pos, np.linspace(0, 1, num_classes // 2 + 1))
@@ -137,15 +152,23 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             neg_ranges = [(float(q_neg[i]), float(q_neg[i + 1])) for i in range(num_classes // 2)]
             pos_ranges = [(float(q_pos[i]), float(q_pos[i + 1])) for i in range(num_classes // 2)]
 
+            # 📊 클래스 범위 로그
+            for i, r in enumerate(neg_ranges):
+                print(f"  - 손실 클래스 {i}: {r[0]*100:.2f}% ~ {r[1]*100:.2f}%")
+            for i, r in enumerate(pos_ranges):
+                print(f"  - 수익 클래스 {i}: {r[0]*100:.2f}% ~ {r[1]*100:.2f}%")
+
             return neg_ranges + pos_ranges
 
         except Exception as e:
             print(f"[❌ get_class_ranges] 수익률 분포 계산 실패 → fallback equal 사용: {e}")
-            return compute_equal_ranges(10)
+            return compute_equal_ranges(10, reason="예외 발생")
 
-    def compute_equal_ranges(n_cls):
+    def compute_equal_ranges(n_cls, reason=""):
         step = 2.0 / n_cls
-        return [(-1.0 + i * step, -1.0 + (i + 1) * step) for i in range(n_cls)]
+        ranges = [(-1.0 + i * step, -1.0 + (i + 1) * step) for i in range(n_cls)]
+        print(f"[⚠️ 균등 클래스 분할 사용] 사유: {reason} → {n_cls}개 클래스, 범위: {ranges}")
+        return ranges
 
     all_ranges = compute_split_ranges_from_kline()
     global _dynamic_ranges
@@ -157,6 +180,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
     start = group_id * group_size
     end = start + group_size
     return all_ranges[start:end]
+
 
 # ✅ 즉시 변수 선언
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
