@@ -255,9 +255,16 @@ def main(symbol=None, strategy=None, force=False, allow_prediction=True):
     class_groups = get_class_groups()
     input_size = get_FEATURE_INPUT_SIZE()
 
+    # ✅ 학습 완료 이력 로드
+    done_path = "/persistent/train_done.json"
+    if os.path.exists(done_path):
+        with open(done_path, "r", encoding="utf-8") as f:
+            train_done = json.load(f)
+    else:
+        train_done = {}
+
     for sym in [symbol] if symbol else SYMBOLS:
         for strat in [strategy] if strategy else ["단기", "중기", "장기"]:
-            # ✅ strategy None 또는 문자열 "None" 예외 처리
             if strat is None or str(strat).lower() == "none":
                 print(f"[⚠️ 전략 없음: 스킵] {sym} → strategy=None")
                 continue
@@ -268,8 +275,20 @@ def main(symbol=None, strategy=None, force=False, allow_prediction=True):
                     model_path = f"/persistent/models/{sym}_{strat}_{model_name}.pt"
                     meta_path = model_path.replace(".pt", ".meta.json")
 
-                    if not os.path.exists(model_path):
-                        print(f"[⛔ 모델 없음] {model_path} → 예측 생략")
+                    # ✅ 모델/메타파일 존재 확인
+                    if not os.path.exists(model_path) or not os.path.exists(meta_path):
+                        print(f"[⛔ 모델 또는 메타 없음] {model_path} → 예측 생략")
+                        continue
+
+                    # ✅ 학습 완료 여부 확인
+                    is_trained = (
+                        sym in train_done
+                        and strat in train_done[sym]
+                        and str(gid) in train_done[sym][strat]
+                        and train_done[sym][strat][str(gid)] is True
+                    )
+                    if not is_trained:
+                        print(f"[⏩ 학습 미완료] {sym}-{strat}-group{gid} → 예측 생략")
                         continue
 
                     try:
@@ -289,6 +308,7 @@ def main(symbol=None, strategy=None, force=False, allow_prediction=True):
                     except Exception as e:
                         print(f"[❌ 예측 실패] {sym}-{strat}-group{gid}: {e}")
                         continue
+
 
 import shutil
 
