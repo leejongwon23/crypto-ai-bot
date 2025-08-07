@@ -416,8 +416,8 @@ def get_kline_by_strategy(symbol: str, strategy: str):
         else:
             print(f"[📥 Bybit 수집 완료] {symbol}-{strategy} → {len(df_bybit)}개")
 
-        # 2️⃣ Binance 보완 수집 (limit 기준 미달 시)
-        if len(df_bybit) < limit:
+        # 2️⃣ Binance 보완 수집 (Bybit 수량이 목표의 90% 미만일 때만 시도)
+        if len(df_bybit) < int(limit * 0.9):
             print(f"[📡 Binance 2차 수집 시작] {symbol}-{strategy} (limit={limit})")
             try:
                 df_binance = get_binance_kline(symbol, strategy, limit=limit)
@@ -451,7 +451,7 @@ def get_kline_by_strategy(symbol: str, strategy: str):
         print(f"[❌ 데이터 수집 실패] {symbol}-{strategy} → {e}")
         traceback.print_exc()
         failed_result(symbol, strategy, reason=str(e))
-        return pd.DataFrame()  # ✅ None 대신 빈 DataFrame 반환
+        return pd.DataFrame()
 
 
 # ✅ SYMBOL_GROUPS batch prefetch 함수 추가
@@ -486,7 +486,7 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                     "category": "linear",
                     "symbol": real_symbol,
                     "interval": interval,
-                    "limit": 1000  # ✅ 항상 최대치로 요청
+                    "limit": 1000  # ✅ 항상 최대 요청
                 }
                 if end_time is not None:
                     params["end"] = int(end_time.timestamp() * 1000)
@@ -526,8 +526,10 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                 if total_rows >= target_rows:
                     break
 
+                # ✅ 다음 반복을 위한 시간 이동
                 oldest_ts = df_chunk["timestamp"].min()
                 end_time = oldest_ts - pd.Timedelta(milliseconds=1)
+                time.sleep(0.2)  # 요청 속도 제어
                 break
 
             except Exception as e:
@@ -539,8 +541,12 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
             break
 
     if collected_data:
-        return pd.concat(collected_data, ignore_index=True).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+        df = pd.concat(collected_data, ignore_index=True)
+        df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+        print(f"[📊 수집 완료] {symbol}-{interval} → 총 {len(df)}개 봉 확보")
+        return df
     else:
+        print(f"[❌ 최종 실패] {symbol}-{interval} → 수집된 봉 없음")
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
 
 
