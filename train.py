@@ -587,33 +587,20 @@ def train_symbol_group_loop(delay_minutes=5):
                             traceback.print_exc()
                             log_training_result(symbol, strategy, model=f"group{gid}", note=str(e), status="failed")
 
-        # ✅ 모든 그룹 학습 완료 시 예측
+        # ✅ 모든 그룹 학습 여부와 관계없이 예측 실행
         try:
-            all_trained = True
+            print("✅ 그룹 학습 후 예측 수행 시작")
             for group in SYMBOL_GROUPS:
-                for symbol in group:
+                for symbol in sorted(group):
                     for strategy in ["단기", "중기", "장기"]:
-                        num_classes = len(get_class_ranges(symbol=symbol, strategy=strategy))
-                        class_groups = get_class_groups(num_classes=num_classes)
-                        MAX_GROUP_ID = len(class_groups) - 1
-                        for gid in range(MAX_GROUP_ID + 1):
-                            if not train_done.get(symbol, {}).get(strategy, {}).get(str(gid), False):
-                                all_trained = False
-            if all_trained:
-                print("✅ 모든 그룹 학습 완료 → 예측 수행 시작")
-                for group in SYMBOL_GROUPS:
-                    for symbol in sorted(group):  # ✅ 예측도 정렬된 순서로
-                        for strategy in ["단기", "중기", "장기"]:
-                            try:
-                                print(f"[🔮 예측 시작] {symbol}-{strategy}")
-                                predict(symbol=symbol, strategy=strategy, source="train_loop")
-                            except Exception as e:
-                                print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
-                                traceback.print_exc()
-            else:
-                print("⏭️ 일부 그룹 학습 누락 → 예측 생략")
+                        try:
+                            print(f"[🔮 예측 시작] {symbol}-{strategy}")
+                            predict(symbol=symbol, strategy=strategy, source="train_loop")
+                        except Exception as e:
+                            print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
+                            traceback.print_exc()
         except Exception as e:
-            print(f"[⚠️ 예측 조건 확인 실패] {e}")
+            print(f"[⚠️ 예측 수행 중 오류 발생] → {e}")
 
         try:
             maintenance_fix_meta.fix_all_meta_json()
@@ -628,7 +615,6 @@ def train_symbol_group_loop(delay_minutes=5):
             train_evo_meta_loop()
         except Exception as e:
             print(f"[⚠️ 진화형 메타러너 학습 실패] → {e}")
-
 
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
