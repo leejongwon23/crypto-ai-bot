@@ -135,19 +135,37 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             if df is None or df.empty:
                 print(f"[⏩ 스킵] {symbol}-{strategy}-group{gid} → 데이터 없음")
                 log_training_result(symbol, strategy, status="skipped", reason="데이터 없음", group_id=gid)
+                insert_failure_record({
+                    "symbol": symbol, "strategy": strategy, "model": "all",
+                    "predicted_class": -1, "success": False, "rate": "", "reason": "데이터 없음"
+                }, feature_vector=[])
                 return
 
             feat = compute_features(symbol, df, strategy)
             if feat is None or feat.empty:
                 print(f"[⏩ 스킵] {symbol}-{strategy}-group{gid} → 피처 없음")
                 log_training_result(symbol, strategy, status="skipped", reason="피처 없음", group_id=gid)
+                insert_failure_record({
+                    "symbol": symbol, "strategy": strategy, "model": "all",
+                    "predicted_class": -1, "success": False, "rate": "", "reason": "피처 없음"
+                }, feature_vector=[])
                 return
 
             features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
             feat_scaled = MinMaxScaler().fit_transform(features_only)
 
             returns = df["close"].pct_change().fillna(0).values
-            class_ranges = get_class_ranges(group_id=gid)
+            try:
+                class_ranges = get_class_ranges(group_id=gid)
+            except Exception as e:
+                print(f"[❌ 클래스 범위 계산 실패] {e}")
+                log_training_result(symbol, strategy, status="failed", reason="클래스 계산 실패", group_id=gid)
+                insert_failure_record({
+                    "symbol": symbol, "strategy": strategy, "model": "all",
+                    "predicted_class": -1, "success": False, "rate": "", "reason": "클래스 계산 실패"
+                }, feature_vector=[])
+                return
+
             num_classes = len(class_ranges)
             set_NUM_CLASSES(num_classes)
 
@@ -170,8 +188,16 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
             if len(X) < 50:
                 print(f"[⚠️ 데이터 부족 → 증강] {symbol}-{strategy}")
-                X, y = balance_classes(X, y, num_classes=num_classes)
-                print(f"[✅ 증강 완료] 총 샘플 수: {len(X)}")
+                try:
+                    X, y = balance_classes(X, y, num_classes=num_classes)
+                    print(f"[✅ 증강 완료] 총 샘플 수: {len(X)}")
+                except Exception as e:
+                    print(f"[❌ 증강 실패] {e}")
+                    insert_failure_record({
+                        "symbol": symbol, "strategy": strategy, "model": "all",
+                        "predicted_class": -1, "success": False, "rate": "", "reason": "증강 실패"
+                    }, feature_vector=[])
+                    return
 
             fail_X, fail_y = load_training_prediction_data(symbol, strategy, input_size, window, group_id=gid)
             if fail_X is not None and len(fail_X) > 0:
@@ -196,8 +222,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 print(f"[⏩ 스킵] {symbol}-{strategy}-group{gid} → 최종 샘플 부족 ({len(X)})")
                 log_training_result(symbol, strategy, status="skipped", reason="최종 샘플 부족", group_id=gid)
                 insert_failure_record({
-                    "symbol": symbol, "strategy": strategy, "model": "all", "predicted_class": -1,
-                    "success": False, "rate": "", "reason": "최종 샘플 부족"
+                    "symbol": symbol, "strategy": strategy, "model": "all",
+                    "predicted_class": -1, "success": False, "rate": "", "reason": "최종 샘플 부족"
                 }, feature_vector=[])
                 return
 
@@ -509,7 +535,6 @@ def train_symbol_group_loop(delay_minutes=5):
     else:
         print("[ℹ️ 유지 모드] 이전 학습 이력 보존")
 
-    train_done = {}
     FORCE_TRAINING = True
     loop_count = 0
     group_count = len(SYMBOL_GROUPS)
@@ -518,18 +543,18 @@ def train_symbol_group_loop(delay_minutes=5):
     while True:
         loop_count += 1
         print(f"\n🔄 그룹 순회 루프 #{loop_count} 시작 ({now_kst().isoformat()})")
-
-        train_done = {}  # ✅ 루프마다 초기화 → 전체 그룹 학습 완료 조건 판별용
+        train_done = {}
 
         for idx, group in enumerate(SYMBOL_GROUPS):
             if not group:
                 continue
 
-            print(f"\n📊 [그룹 {idx+1}/{group_count}] 학습 시작 | 심볼 수: {len(group)}")
+            group_sorted = sorted(group)  # ✅ 그룹 내 심볼 정렬하여 순서 고정
+            print(f"\n📊 [그룹 {idx+1}/{group_count}] 학습 시작 | 심볼 수: {len(group_sorted)}")
             _kline_cache.clear()
             _feature_cache.clear()
 
-            for symbol in group:
+            for symbol in group_sorted:
                 for strategy in ["단기", "중기", "장기"]:
                     train_done.setdefault(symbol, {}).setdefault(strategy, {})
 
@@ -562,7 +587,7 @@ def train_symbol_group_loop(delay_minutes=5):
                             traceback.print_exc()
                             log_training_result(symbol, strategy, model=f"group{gid}", note=str(e), status="failed")
 
-        # ✅ 모든 그룹 학습이 완료된 경우에만 예측 수행
+        # ✅ 모든 그룹 학습 완료 시 예측
         try:
             all_trained = True
             for group in SYMBOL_GROUPS:
@@ -577,7 +602,7 @@ def train_symbol_group_loop(delay_minutes=5):
             if all_trained:
                 print("✅ 모든 그룹 학습 완료 → 예측 수행 시작")
                 for group in SYMBOL_GROUPS:
-                    for symbol in group:
+                    for symbol in sorted(group):  # ✅ 예측도 정렬된 순서로
                         for strategy in ["단기", "중기", "장기"]:
                             try:
                                 print(f"[🔮 예측 시작] {symbol}-{strategy}")
@@ -587,7 +612,6 @@ def train_symbol_group_loop(delay_minutes=5):
                                 traceback.print_exc()
             else:
                 print("⏭️ 일부 그룹 학습 누락 → 예측 생략")
-
         except Exception as e:
             print(f"[⚠️ 예측 조건 확인 실패] {e}")
 
@@ -604,6 +628,7 @@ def train_symbol_group_loop(delay_minutes=5):
             train_evo_meta_loop()
         except Exception as e:
             print(f"[⚠️ 진화형 메타러너 학습 실패] → {e}")
+
 
 
 def pretrain_ssl_features(symbol, strategy, pretrain_epochs=5):
