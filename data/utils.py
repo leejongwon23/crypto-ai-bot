@@ -394,6 +394,7 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     import pandas as pd
     from data.source import get_bybit_kline, get_binance_kline
     from data.cache import CacheManager
+    from config import STRATEGY_CONFIG
     import traceback
 
     cache_key = f"{symbol}-{strategy}"
@@ -403,20 +404,23 @@ def get_kline_by_strategy(symbol: str, strategy: str):
         return cached_df
 
     try:
+        config = STRATEGY_CONFIG.get(strategy, {"limit": 300})
+        limit = config.get("limit", 300)
+
         # 1️⃣ Bybit 수집
-        print(f"[📡 Bybit 1차 수집 시작] {symbol}-{strategy}")
-        df_bybit = get_bybit_kline(symbol, strategy, limit=None)
+        print(f"[📡 Bybit 1차 수집 시작] {symbol}-{strategy} (limit={limit})")
+        df_bybit = get_bybit_kline(symbol, strategy, limit=limit)
         if df_bybit is None or df_bybit.empty:
             print(f"[⚠️ Bybit 데이터 없음] {symbol}-{strategy}")
             df_bybit = pd.DataFrame()
         else:
             print(f"[📥 Bybit 수집 완료] {symbol}-{strategy} → {len(df_bybit)}개")
 
-        # 2️⃣ Binance 수집 조건
+        # 2️⃣ Binance 보완 수집 (1000개 미만 시)
         if len(df_bybit) < 1000:
-            print(f"[📡 Binance 2차 수집 시작] {symbol}-{strategy}")
+            print(f"[📡 Binance 2차 수집 시작] {symbol}-{strategy} (limit={limit})")
             try:
-                df_binance = get_binance_kline(symbol, strategy, limit=None)
+                df_binance = get_binance_kline(symbol, strategy, limit=limit)
                 if df_binance is None or df_binance.empty:
                     print(f"[⚠️ Binance 데이터 없음] {symbol}-{strategy}")
                     df_binance = pd.DataFrame()
@@ -429,16 +433,15 @@ def get_kline_by_strategy(symbol: str, strategy: str):
         else:
             df_binance = pd.DataFrame()
 
-        # 3️⃣ 데이터 병합
+        # 3️⃣ 병합
         df_list = [df for df in [df_bybit, df_binance] if not df.empty]
         if not df_list:
             print(f"[❌ 수집 실패] {symbol}-{strategy} → Bybit/Binance 모두 실패")
-            failed_result(symbol, strategy, reason="캔들 데이터 없음 (Bybit/Binance 모두 실패)")
+            failed_result(symbol, strategy, reason="캔들 데이터 없음")
             return None
 
         df = pd.concat(df_list).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-        print(f"[📊 병합 완료] {symbol}-{strategy} → 총 {len(df)}개 봉 "
-              f"(Bybit: {len(df_bybit)}, Binance: {len(df_binance)})")
+        print(f"[📊 병합 완료] {symbol}-{strategy} → 총 {len(df)}개 봉")
 
         # 4️⃣ 캐싱
         CacheManager.set(cache_key, df)
@@ -449,7 +452,6 @@ def get_kline_by_strategy(symbol: str, strategy: str):
         traceback.print_exc()
         failed_result(symbol, strategy, reason=str(e))
         return None
-
 
 
 # ✅ SYMBOL_GROUPS batch prefetch 함수 추가
