@@ -473,13 +473,12 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
     import time
     import pandas as pd
 
-    # ✅ 심볼 매핑 적용 (불일치 방지)
     real_symbol = SYMBOL_MAP["bybit"].get(symbol, symbol)
-    req_limit = int(limit)
+    target_rows = int(limit)
     collected_data = []
+    total_rows = 0
 
-    # ✅ 반복 수집 (목표 limit까지)
-    while True:
+    while total_rows < target_rows:
         success = False
         for attempt in range(max_retry):
             try:
@@ -487,58 +486,49 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                     "category": "linear",
                     "symbol": real_symbol,
                     "interval": interval,
-                    "limit": req_limit,
+                    "limit": 1000  # ✅ 항상 최대치로 요청
                 }
                 if end_time is not None:
-                    # Bybit v5 kline은 ms 단위 timestamp 사용
                     params["end"] = int(end_time.timestamp() * 1000)
 
-                print(f"[📡 Bybit 요청] {real_symbol}-{interval} | 요청 limit={req_limit} | 시도 {attempt+1}/{max_retry} | end_time={end_time}")
+                print(f"[📡 Bybit 요청] {real_symbol}-{interval} | 시도 {attempt+1}/{max_retry} | end_time={end_time}")
                 res = requests.get(f"{BASE_URL}/v5/market/kline", params=params, timeout=10)
                 res.raise_for_status()
                 data = res.json()
 
-                # ✅ 데이터 구조 확인
                 if "result" not in data or "list" not in data["result"] or not data["result"]["list"]:
-                    print(f"[❌ Bybit 데이터 없음] {real_symbol} (시도 {attempt+1}/{max_retry})")
+                    print(f"[❌ 데이터 없음] {real_symbol} (시도 {attempt+1})")
                     break
 
                 raw = data["result"]["list"]
                 if not raw or len(raw[0]) < 6:
-                    print(f"[❌ Bybit 데이터 필드 부족] {real_symbol}")
+                    print(f"[❌ 필드 부족] {real_symbol}")
                     break
 
                 df_chunk = pd.DataFrame(raw, columns=[
                     "timestamp", "open", "high", "low", "close", "volume", "turnover"
                 ])
                 df_chunk = df_chunk[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
-
-                # ✅ 필수값 체크
-                essential = ["open", "high", "low", "close", "volume"]
-                df_chunk.dropna(subset=essential, inplace=True)
+                df_chunk.dropna(subset=["open", "high", "low", "close", "volume"], inplace=True)
                 if df_chunk.empty:
                     break
 
-                # ✅ 타임존 변환
                 df_chunk["timestamp"] = pd.to_datetime(df_chunk["timestamp"], unit="ms", errors="coerce")
-                df_chunk = df_chunk.dropna(subset=["timestamp"])
+                df_chunk.dropna(subset=["timestamp"], inplace=True)
                 df_chunk["timestamp"] = df_chunk["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
                 df_chunk = df_chunk.sort_values("timestamp").reset_index(drop=True)
                 df_chunk["datetime"] = df_chunk["timestamp"]
 
                 collected_data.append(df_chunk)
+                total_rows += len(df_chunk)
                 success = True
 
-                # ✅ 수집 완료 조건: 받은 데이터가 요청 개수보다 적거나, 총합이 목표 이상이면 중단
-                total_rows = sum(len(chunk) for chunk in collected_data)
-                if len(df_chunk) < req_limit or total_rows >= req_limit:
-                    return pd.concat(collected_data, ignore_index=True).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+                if total_rows >= target_rows:
+                    break
 
-                # ✅ 다음 요청을 위해 end_time 갱신 (가장 오래된 timestamp 이전)
                 oldest_ts = df_chunk["timestamp"].min()
                 end_time = oldest_ts - pd.Timedelta(milliseconds=1)
-
-                break  # retry 루프 탈출
+                break
 
             except Exception as e:
                 print(f"[에러] get_kline({real_symbol}) 실패 → {e}")
@@ -548,7 +538,6 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
         if not success:
             break
 
-    # 모든 시도 실패 또는 데이터 없음
     if collected_data:
         return pd.concat(collected_data, ignore_index=True).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
     else:
