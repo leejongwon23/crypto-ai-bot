@@ -62,7 +62,6 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
     if not isinstance(row, dict):
         print("[❌ insert_failure_record] row 형식 오류 → 저장 스킵")
         return
-    # 평가 시점이 아니고(success=True) 성공이면 스킵
     if row.get("success") is True and context != "evaluation":
         print("[⛔ SKIP] 성공 예측 → 실패 기록 안 함")
         return
@@ -97,7 +96,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
 
     feature_vector = to_list_safe(feature_vector)
 
-    # ✅ 4. 중복 체크
+    # ✅ 4. 중복 체크 (DB + CSV 모두)
     try:
         conn = get_db_connection()
         exists_db = conn.execute(
@@ -143,8 +142,7 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
 
     # ✅ 6. DB 저장
     try:
-        conn.execute("""
-            INSERT OR IGNORE INTO failure_patterns
+        conn.execute("""INSERT OR IGNORE INTO failure_patterns
             (timestamp, symbol, strategy, direction, hash, model_name, predicted_class, rate, reason, feature, label, context)
             VALUES (:timestamp, :symbol, :strategy, :direction, :hash, :model_name, :predicted_class, :rate, :reason, :feature, :label, :context)
         """, record)
