@@ -564,6 +564,7 @@ _feature_cache = {}
 def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_features: list = None, fallback_input_size: int = None) -> pd.DataFrame:
     from predict import failed_result
     from config import FEATURE_INPUT_SIZE
+    from data.cache import CacheManager
     import ta
     import numpy as np
     import pandas as pd
@@ -592,19 +593,19 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         if col not in df.columns:
             df[col] = 0.0
 
-    # ✅ 전략명 제거 (숫자 벡터 오류 방지)
     df = df[["timestamp"] + base_cols]
 
     if len(df) < 20:
         print(f"[⚠️ 피처 실패] {symbol}-{strategy} → row 수 부족: {len(df)}")
         failed_result(symbol, strategy, reason=f"row 부족 {len(df)}")
-        return pd.DataFrame()
+        return df  # ⛔ 빈 DataFrame 반환 금지 → 최소 반환
 
     try:
+        # ✅ 기본 기술지표 계산
         df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
         delta = df["close"].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=1).mean()
+        gain = delta.where(delta > 0, 0).rolling(window=14, min_periods=1).mean()
+        loss = -delta.where(delta < 0, 0).rolling(window=14, min_periods=1).mean()
         rs = gain / (loss + 1e-6)
         df["rsi"] = 100 - (100 / (1 + rs))
         ema12 = df["close"].ewm(span=12, adjust=False).mean()
@@ -613,7 +614,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df["bollinger"] = df["close"].rolling(window=20, min_periods=1).std()
         df["volatility"] = df["high"] - df["low"]
         df["trend_score"] = (df["close"] > df["ma20"]).astype(int)
-
         df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
         df["ema100"] = df["close"].ewm(span=100, adjust=False).mean()
         df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
@@ -628,6 +628,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df["stoch_d"] = ta.momentum.stoch_signal(df["high"], df["low"], df["close"], fillna=True)
         df["vwap"] = (df["volume"] * df["close"]).cumsum() / (df["volume"].cumsum() + 1e-6)
 
+        # ✅ 스케일링 및 패딩 처리
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.fillna(0, inplace=True)
 
@@ -643,12 +644,12 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     except Exception as e:
         print(f"[❌ compute_features 실패] feature 계산 예외 → {e}")
         failed_result(symbol, strategy, reason=f"feature 계산 실패: {e}")
-        return pd.DataFrame()
+        return df  # 빈 df 아님 → 최소 구조라도 반환
 
     if df.empty or df.isnull().values.any():
         print(f"[❌ compute_features 실패] 결과 DataFrame 문제 → 빈 df 또는 NaN 존재")
         failed_result(symbol, strategy, reason="최종 결과 DataFrame 오류")
-        return pd.DataFrame()
+        return df
 
     print(f"[✅ 완료] {symbol}-{strategy}: 피처 {df.shape[0]}개 생성")
     print(f"[🔍 feature 상태] {symbol}-{strategy} → shape: {df.shape}, NaN: {df.isnull().values.any()}, 컬럼수: {len(df.columns)}")
