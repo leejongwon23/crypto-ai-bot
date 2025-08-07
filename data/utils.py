@@ -12,6 +12,8 @@ from sklearn.preprocessing import MinMaxScaler
 BASE_URL = "https://api.bybit.com"
 BTC_DOMINANCE_CACHE = {"value": 0.5, "timestamp": 0}
 
+# data/utils.py
+
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT",
     "AVAXUSDT", "DOGEUSDT", "MATICUSDT", "DOTUSDT", "TRXUSDT",
@@ -26,6 +28,10 @@ SYMBOLS = [
     "KAVAUSDT", "BATUSDT", "ZILUSDT", "WAVESUSDT", "OCEANUSDT",
     "1INCHUSDT", "YFIUSDT", "STGUSDT", "GALAUSDT", "IMXUSDT"
 ]
+
+# ✅ 고정 순서 유지하며 5개씩 묶어 SYMBOL_GROUPS 구성
+SYMBOL_GROUPS = [SYMBOLS[i:i + 5] for i in range(0, len(SYMBOLS), 5)]
+
 
 STRATEGY_CONFIG = {
     "단기": {"interval": "240", "limit": 1000},   # 4시간봉 (240분)
