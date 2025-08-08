@@ -14,7 +14,9 @@ import maintenance_fix_meta
 from logger import ensure_prediction_log_exists
 ensure_prediction_log_exists()
 import safe_cleanup; safe_cleanup.auto_delete_old_logs()
-
+# ✅ 서버 시작 직전 용량 정리
+import safe_cleanup
+safe_cleanup.cleanup_logs_and_models()  # 로그/모델 정리 실행
 
 
 PERSIST_DIR = "/persistent"
