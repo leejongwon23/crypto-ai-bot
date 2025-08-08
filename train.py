@@ -545,13 +545,13 @@ def train_symbol_group_loop(delay_minutes=5):
         print(f"\n🔄 그룹 순회 루프 #{loop_count} 시작 ({now_kst().isoformat()})")
         train_done = {}
 
-        for idx, group in enumerate(SYMBOL_GROUPS):
+        for group_id, group in enumerate(SYMBOL_GROUPS):
             if not group:
-                print(f"[⚠️ 그룹 {idx+1}] 비어있음 → 건너뜀")
+                print(f"[⚠️ 그룹 {group_id+1}] 비어있음 → 건너뜀")
                 continue
 
             group_sorted = sorted(group)
-            print(f"\n📊 [그룹 {idx+1}/{group_count}] 학습 시작 | 심볼 수: {len(group_sorted)}")
+            print(f"\n📊 [그룹 {group_id+1}/{group_count}] 학습 시작 | 심볼 수: {len(group_sorted)}")
             _kline_cache.clear()
             _feature_cache.clear()
 
