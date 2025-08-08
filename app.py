@@ -13,11 +13,13 @@ from train import train_symbol_group_loop
 import maintenance_fix_meta
 from logger import ensure_prediction_log_exists
 ensure_prediction_log_exists()
-import safe_cleanup; safe_cleanup.auto_delete_old_logs()
-# ✅ 서버 시작 직전 용량 정리
-import safe_cleanup
-safe_cleanup.cleanup_logs_and_models()  # 로그/모델 정리 실행
 
+# ✅ 서버 시작 직전 용량 정리 (예외 가드)
+import safe_cleanup
+try:
+    safe_cleanup.cleanup_logs_and_models()  # 로그/모델 정리
+except Exception as e:
+    print(f"[경고] startup cleanup 실패: {e}")
 
 PERSIST_DIR = "/persistent"
 LOG_DIR, MODEL_DIR = os.path.join(PERSIST_DIR, "logs"), os.path.join(PERSIST_DIR, "models")
@@ -81,13 +83,11 @@ def start_scheduler():
 
     sched.start()
 
-
-
-
-# 이하 기존 app.route들은 그대로 유지 (생략 가능)
+# 이하 기존 app.route들은 그대로 유지
 
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료"); sys.stdout.flush()
+
 @app.route("/yopo-health")
 def yopo_health():
     percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
@@ -225,7 +225,6 @@ def run():
         traceback.print_exc()
         return f"Error: {e}", 500
 
-
 @app.route("/train-now")
 def train_now():
     try:
@@ -233,7 +232,6 @@ def train_now():
         return "✅ 모든 전략 학습 시작됨"
     except Exception as e:
         return f"학습 실패: {e}", 500
-
 
 @app.route("/train-log")
 def train_log():
@@ -267,7 +265,6 @@ def check_log_full():
         return jsonify(latest.to_dict(orient="records"))
     except Exception as e:
         return jsonify({"error": str(e)})
-
 
 @app.route("/check-log")
 def check_log():
@@ -328,7 +325,6 @@ def train_symbols():
         return f"❌ 오류: {e}", 500
 
 from data.utils import SYMBOL_GROUPS  # 반드시 있어야 함
-
 
 @app.route("/train-symbols", methods=["POST"])
 def train_selected_symbols():
@@ -401,7 +397,6 @@ def reset_all():
     except Exception as e:
         return f"초기화 실패: {e}", 500
 
-
 @app.route("/force-fix-prediction-log")
 def force_fix_prediction_log():
     try:
@@ -412,12 +407,8 @@ def force_fix_prediction_log():
     except Exception as e:
         return f"⚠️ 오류: {e}", 500
 
-import csv
-import os
-
-# ✅ 실행 준비
-from logger import ensure_prediction_log_exists
-ensure_prediction_log_exists()
+# ✅ 실행 준비 (중복 호출 제거)
+# from logger import ensure_prediction_log_exists  # 이미 상단에서 호출 완료
 
 if __name__ == "__main__":
     import os, threading, time
@@ -425,7 +416,8 @@ if __name__ == "__main__":
     from telegram_bot import send_message
     import maintenance_fix_meta
     from train import train_symbol_group_loop
-    
+    # ⛔ 외부 모듈 없음 → 내부 함수 사용
+    # from scheduler import start_scheduler  # 삭제
 
     print(">>> 서버 실행 준비")
 
@@ -461,7 +453,7 @@ if __name__ == "__main__":
             threading.Thread(target=train_symbol_group_loop, daemon=True).start()
             print("✅ 학습 루프 스레드 시작")
 
-            # ⏱ 스케줄러 시작
+            # ⏱ 스케줄러 시작 (내부 정의 사용)
             try:
                 start_scheduler()
                 print("✅ 스케줄러 시작 완료")
