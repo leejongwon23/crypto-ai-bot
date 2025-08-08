@@ -13,6 +13,8 @@ from train import train_symbol_group_loop
 import maintenance_fix_meta
 from logger import ensure_prediction_log_exists
 ensure_prediction_log_exists()
+import safe_cleanup; safe_cleanup.auto_delete_old_logs()
+
 
 
 PERSIST_DIR = "/persistent"
