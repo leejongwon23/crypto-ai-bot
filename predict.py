@@ -371,12 +371,9 @@ def evaluate_predictions(get_price_fn):
     EVAL_RESULT = f"/persistent/logs/evaluation_{date_str}.csv"
     WRONG = f"/persistent/logs/wrong_{date_str}.csv"
 
-    # 전략별 평가 마감시간
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
-
     updated, evaluated = [], []
 
-    # CSV 읽기
     try:
         rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
         if not rows:
@@ -385,7 +382,6 @@ def evaluate_predictions(get_price_fn):
         print(f"[오류] prediction_log.csv 읽기 실패 → {e}")
         return
 
-    # 심볼+전략+타임스탬프별 그룹화
     grouped_preds = defaultdict(list)
     for r in rows:
         key = (r.get("symbol"), r.get("strategy"), r.get("timestamp"))
@@ -394,7 +390,6 @@ def evaluate_predictions(get_price_fn):
     for key, preds in grouped_preds.items():
         for r in preds:
             try:
-                # 이미 평가된 건 스킵
                 if r.get("status") not in [None, "", "pending", "v_pending"]:
                     updated.append(r)
                     continue
@@ -421,12 +416,10 @@ def evaluate_predictions(get_price_fn):
                     updated.append(r)
                     continue
 
-                # 평가 마감 시간
                 timestamp = pd.to_datetime(r.get("timestamp"), utc=True).tz_convert("Asia/Seoul")
                 eval_hours = eval_horizon_map.get(strategy, 6)
                 deadline = timestamp + pd.Timedelta(hours=eval_hours)
 
-                # 가격 데이터 로드
                 df = get_price_fn(symbol, strategy)
                 if df is None or "timestamp" not in df.columns:
                     r.update({"status": "fail", "reason": "가격 데이터 없음", "return": 0.0})
@@ -440,15 +433,13 @@ def evaluate_predictions(get_price_fn):
                     updated.append(r)
                     continue
 
-                # 실제 최대 상승률
                 actual_max = future_df["high"].max()
                 gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-                # 클래스 수익률 범위
-                cls_min, cls_max = get_class_return_range(label)
+                # ✅ 수정된 핵심 로직: 예측 클래스 기준 평가
+                cls_min, cls_max = get_class_return_range(pred_class)
                 reached_target = gain >= cls_min
 
-                # 평가 시점 전 → 조기 성공 가능
                 if now_kst() < deadline:
                     if reached_target:
                         status = "success"
@@ -457,33 +448,28 @@ def evaluate_predictions(get_price_fn):
                         updated.append(r)
                         continue
                 else:
-                    # 평가 시점 도달 후 최종 판정
                     status = "success" if reached_target else "fail"
 
-                # 변동성 전략 반영
                 vol = str(r.get("volatility", "")).lower() in ["1", "true"]
                 if vol:
                     status = "v_success" if status == "success" else "v_fail"
 
                 r.update({
                     "status": status,
-                    "reason": f"[label={label}] gain={gain:.3f} (cls_min={cls_min}, cls_max={cls_max})",
+                    "reason": f"[pred_class={pred_class}] gain={gain:.3f} (cls_min={cls_min}, cls_max={cls_max})",
                     "return": round(gain, 5),
                     "group_id": group_id
                 })
 
-                # 로그 기록
                 log_prediction(symbol, strategy, f"평가:{status}", entry_price,
                                entry_price * (1 + gain), now_kst().isoformat(), model,
                                status in ["success", "v_success"], r["reason"], gain, gain, vol, "평가",
                                predicted_class=pred_class, label=label, group_id=group_id)
 
-                # 실패 시 모든 모델 실패 DB 기록
                 if status in ["fail", "v_fail"] and not check_failure_exists(r):
                     insert_failure_record(r, f"{symbol}-{strategy}-{now_kst().isoformat()}",
                                           feature_vector=None, label=label)
 
-                # 성공률 업데이트 (메타 모델은 성공률 기록)
                 if model == "meta":
                     update_model_success(symbol, strategy, model, status in ["success", "v_success"])
 
@@ -493,7 +479,6 @@ def evaluate_predictions(get_price_fn):
                 r.update({"status": "fail", "reason": f"예외: {e}", "return": 0.0})
                 updated.append(r)
 
-    # CSV 저장
     def safe_write_csv(path, rows):
         if not rows:
             return
@@ -509,7 +494,8 @@ def evaluate_predictions(get_price_fn):
     failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
     safe_write_csv(WRONG, failed)
 
-    print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건") 
+    print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
+
 
 def get_class_distribution(symbol, strategy, model_type):
     import os, json
