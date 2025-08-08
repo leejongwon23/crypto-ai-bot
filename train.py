@@ -547,9 +547,10 @@ def train_symbol_group_loop(delay_minutes=5):
 
         for idx, group in enumerate(SYMBOL_GROUPS):
             if not group:
+                print(f"[⚠️ 그룹 {idx+1}] 비어있음 → 건너뜀")
                 continue
 
-            group_sorted = sorted(group)  # ✅ 그룹 내 심볼 정렬하여 순서 고정
+            group_sorted = sorted(group)
             print(f"\n📊 [그룹 {idx+1}/{group_count}] 학습 시작 | 심볼 수: {len(group_sorted)}")
             _kline_cache.clear()
             _feature_cache.clear()
@@ -559,11 +560,14 @@ def train_symbol_group_loop(delay_minutes=5):
                     train_done.setdefault(symbol, {}).setdefault(strategy, {})
 
                     try:
-                        num_classes = len(get_class_ranges(symbol=symbol, strategy=strategy))
+                        class_ranges = get_class_ranges(symbol=symbol, strategy=strategy)
+                        if not class_ranges:
+                            raise ValueError("⛔ 클래스 경계 없음 (빈 class_ranges)")
+                        num_classes = len(class_ranges)
                         class_groups = get_class_groups(num_classes=num_classes)
                         MAX_GROUP_ID = len(class_groups) - 1
                     except Exception as e:
-                        print(f"[⚠️ 동적 클래스 계산 실패] {symbol}-{strategy} → {e}")
+                        print(f"[⚠️ 클래스 계산 실패] {symbol}-{strategy} → {e}")
                         log_training_result(symbol, strategy, note=f"클래스 계산 실패: {e}", status="failed")
                         continue
 
@@ -587,7 +591,7 @@ def train_symbol_group_loop(delay_minutes=5):
                             traceback.print_exc()
                             log_training_result(symbol, strategy, model=f"group{gid}", note=str(e), status="failed")
 
-        # ✅ 모든 그룹 학습 여부와 관계없이 예측 실행
+        # ✅ 예측 수행
         try:
             print("✅ 그룹 학습 후 예측 수행 시작")
             for group in SYMBOL_GROUPS:
@@ -602,6 +606,7 @@ def train_symbol_group_loop(delay_minutes=5):
         except Exception as e:
             print(f"[⚠️ 예측 수행 중 오류 발생] → {e}")
 
+        # ✅ 후처리
         try:
             maintenance_fix_meta.fix_all_meta_json()
             safe_cleanup.auto_delete_old_logs()
