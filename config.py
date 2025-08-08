@@ -102,6 +102,27 @@ def get_class_groups(num_classes=None, group_size=5):
 
     return groups
 
+# ✅ config.py 하단에 추가
+
+def get_class_return_range(class_index: int, num_classes: int = 20, min_return: float = -0.1, max_return: float = 0.1):
+    """
+    주어진 클래스 인덱스에 대한 수익률 범위를 반환합니다.
+    예: class 0 → -10% ~ -9%, class 19 → 9% ~ 10%
+    """
+    interval = (max_return - min_return) / num_classes
+    cls_min = min_return + class_index * interval
+    cls_max = cls_min + interval
+    return cls_min, cls_max
+
+
+def class_to_expected_return(class_index: int, num_classes: int = 20, min_return: float = -0.1, max_return: float = 0.1):
+    """
+    주어진 클래스 인덱스에 해당하는 대표 수익률 (중앙값)을 반환합니다.
+    """
+    cls_min, cls_max = get_class_return_range(class_index, num_classes, min_return, max_return)
+    return (cls_min + cls_max) / 2
+
+
 def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=None, group_size=5):
     import numpy as np
     from data.utils import get_kline_by_strategy
