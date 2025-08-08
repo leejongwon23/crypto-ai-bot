@@ -422,6 +422,8 @@ if __name__ == "__main__":
     from failure_db import ensure_failure_db
     from telegram_bot import send_message
     import maintenance_fix_meta
+    from train_loop import train_symbol_group_loop  # ✅ 필요
+    from scheduler import start_scheduler  # ✅ 필요
 
     print(">>> 서버 실행 준비")
 
@@ -435,38 +437,24 @@ if __name__ == "__main__":
     except ValueError:
         raise RuntimeError("❌ Render 환경변수 PORT가 없습니다. Render 서비스 타입 확인 필요")
 
-    # ------------------------------------------------
-    # 🚀 Flask 서버 먼저 실행 → Render 포트 감지 방지
-    # ------------------------------------------------
+    # ✅ 첫 학습 동기 실행 (이게 핵심)
+    print("🚀 첫 학습 강제 실행 시작")
+    try:
+        train_symbol_group_loop()
+        print("✅ 첫 학습 완료")
+    except Exception as e:
+        print(f"❌ 첫 학습 오류: {e}")
+
+    # ✅ Flask 서버 백그라운드 실행
     def run_flask():
         print(f"✅ Flask 서버 실행 시작 (PORT={port})")
         app.run(host="0.0.0.0", port=port)
 
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # ------------------------------------------------
-    # 📌 백그라운드 초기 작업
-    # ------------------------------------------------
+    # ✅ 나머지 백그라운드 작업 (학습 루프, 스케줄러, 메타보정 등)
     def background_tasks():
         try:
-            # 🚀 첫 학습 강제 실행
-            print("🚀 첫 학습 강제 실행 시작")
-            try:
-                train_symbol_group_loop()
-                print("✅ 첫 학습 완료")
-            except Exception as e:
-                print(f"❌ 첫 학습 오류: {e}")
-                # 첫 학습 실패 시 2회 재시도
-                for attempt in range(1, 3):
-                    try:
-                        print(f"🔄 첫 학습 재시도 {attempt}회차")
-                        time.sleep(5)
-                        train_symbol_group_loop()
-                        print("✅ 재시도 성공")
-                        break
-                    except Exception as e2:
-                        print(f"❌ 재시도 {attempt} 실패: {e2}")
-
             # 🔄 자동 학습 루프
             threading.Thread(target=train_symbol_group_loop, daemon=True).start()
             print("✅ 학습 루프 스레드 시작")
@@ -492,11 +480,8 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"❌ 백그라운드 작업 실패: {e}")
 
-    # 백그라운드 작업 실행
     threading.Thread(target=background_tasks, daemon=True).start()
 
-    # ------------------------------------------------
-    # 메인 스레드는 유지 (서버가 종료되지 않도록)
-    # ------------------------------------------------
+    # ✅ 메인 스레드 유지
     while True:
         time.sleep(3600)
