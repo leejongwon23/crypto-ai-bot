@@ -23,7 +23,10 @@ def get_directory_size_gb(path):
         for f in filenames:
             fp = os.path.join(dirpath, f)
             if os.path.isfile(fp):
-                total += os.path.getsize(fp)
+                try:
+                    total += os.path.getsize(fp)
+                except Exception:
+                    pass
     return total / (1024 ** 3)
 
 def get_sorted_old_files(paths):
@@ -41,10 +44,27 @@ def get_sorted_old_files(paths):
                 try:
                     ctime = os.path.getctime(full_path)
                     files.append((full_path, ctime))
-                except:
+                except Exception:
                     continue
     files.sort(key=lambda x: x[1])  # 오래된 순
     return files
+
+def cleanup_old_models(max_keep=3):
+    model_dir = MODEL_DIR
+    if not os.path.exists(model_dir):
+        return
+    files = [
+        os.path.join(model_dir, f)
+        for f in os.listdir(model_dir)
+        if os.path.isfile(os.path.join(model_dir, f))
+    ]
+    files.sort(key=os.path.getmtime, reverse=True)  # 최신 우선
+    for old_file in files[max_keep:]:
+        try:
+            os.remove(old_file)
+            print(f"[🗑 모델 삭제] {old_file}")
+        except Exception as e:
+            print(f"[경고] 모델 삭제 실패: {old_file} | {e}")
 
 def auto_delete_old_logs():
     now = datetime.now()
@@ -54,34 +74,40 @@ def auto_delete_old_logs():
     current_gb = get_directory_size_gb(ROOT_DIR)
     if current_gb < TRIGGER_GB:
         print(f"[✅ 용량정상] 현재 사용량: {current_gb:.2f}GB → 정리 안함")
+        # 모델 개수 제한은 용량정상이어도 항상 1회 적용
+        cleanup_old_models(max_keep=3)
         return
 
     print(f"[⚠️ 용량초과] {current_gb:.2f}GB → 로그/모델 정리 시작")
 
     # ✅ 오래된 파일 우선 삭제
     for dir_path in [LOG_DIR, MODEL_DIR]:
-        if not os.path.exists(dir_path): continue
+        if not os.path.exists(dir_path):
+            continue
         for fname in os.listdir(dir_path):
             fpath = os.path.join(dir_path, fname)
-            if not os.path.isfile(fpath): continue
-            if fname in EXCLUDE_FILES: continue
-            if not any(fname.startswith(p) for p in DELETE_PREFIXES): continue
+            if not os.path.isfile(fpath):
+                continue
+            if fname in EXCLUDE_FILES:
+                continue
+            if not any(fname.startswith(p) for p in DELETE_PREFIXES):
+                continue
 
             try:
-                # 날짜 포맷이 있을 경우
+                # 날짜포맷 끝부분(예: *_YYYY-MM-DD.csv) 우선
                 date_str = fname.split("_")[-1].replace(".csv", "").strip()
                 file_date = datetime.strptime(date_str, "%Y-%m-%d")
-            except:
+            except Exception:
                 try:
                     file_date = datetime.fromtimestamp(os.path.getmtime(fpath))
-                except:
+                except Exception:
                     continue
 
             if file_date < cutoff:
                 try:
                     os.remove(fpath)
                     deleted.append(fpath)
-                except:
+                except Exception:
                     continue
 
     # ✅ 여전히 초과 시 → 가장 오래된 파일부터 삭제
@@ -93,7 +119,7 @@ def auto_delete_old_logs():
         try:
             os.remove(fpath)
             deleted.append(fpath)
-        except:
+        except Exception:
             break
 
     # ✅ 삭제 로그 기록
@@ -111,20 +137,9 @@ def auto_delete_old_logs():
     else:
         print("[📁 삭제 없음] 최근 파일만 존재")
 
-# ✅ 실행
-auto_delete_old_logs()
+    # ✅ 항상 모델 보관 개수 제한 적용
+    cleanup_old_models(max_keep=3)
 
-import os
-
-def cleanup_old_models(max_keep=3):
-    model_dir = "/persistent/models"
-    if not os.path.exists(model_dir):
-        return
-    files = sorted(
-        [os.path.join(model_dir, f) for f in os.listdir(model_dir)],
-        key=os.path.getmtime,
-        reverse=True
-    )
-    for old_file in files[max_keep:]:
-        os.remove(old_file)
-        print(f"[🗑 모델 삭제] {old_file}")
+# ✅ app.py 호환용 랩퍼 (시작 전 호출 대상)
+def cleanup_logs_and_models():
+    auto_delete_old_logs()
