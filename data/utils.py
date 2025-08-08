@@ -406,51 +406,54 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     try:
         config = STRATEGY_CONFIG.get(strategy, {"limit": 300})
         limit = config.get("limit", 300)
+        interval = config.get("interval", "D")  # 기본값 보완
 
-        df_bybit = pd.DataFrame()
-        df_binance = pd.DataFrame()
+        # ✅ 1차: Bybit 반복 수집
+        df_bybit = []
+        end_time = None
+        print(f"[📡 Bybit 1차 반복 수집 시작] {symbol}-{strategy} (limit={limit})")
+        while len(pd.concat(df_bybit)) < limit:
+            df_chunk = get_bybit_kline(symbol, strategy, limit=limit, end_time=end_time)
+            if df_chunk is None or df_chunk.empty:
+                break
+            df_bybit.append(df_chunk)
+            end_time = df_chunk["timestamp"].min()
+            if len(df_chunk) < limit:
+                break  # 더 이상 과거 없음
+        df_bybit = pd.concat(df_bybit).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
-        # 1️⃣ Bybit 수집
-        print(f"[📡 Bybit 1차 수집 시작] {symbol}-{strategy} (limit={limit})")
-        try:
-            df_bybit = get_bybit_kline(symbol, strategy, limit=limit)
-            if df_bybit is None or df_bybit.empty:
-                print(f"[⚠️ Bybit 데이터 없음] {symbol}-{strategy}")
-                df_bybit = pd.DataFrame()
-            else:
-                print(f"[📥 Bybit 수집 완료] {symbol}-{strategy} → {len(df_bybit)}개")
-        except Exception as be:
-            print(f"[❌ Bybit 수집 실패] {symbol}-{strategy} → {be}")
-            traceback.print_exc()
-
-        # 2️⃣ Binance 수집 (Bybit 수량이 부족하면)
+        # ✅ 2차: Binance 보완 수집 (Bybit가 부족할 경우)
+        df_binance = []
         if len(df_bybit) < int(limit * 0.9):
-            print(f"[📡 Binance 2차 수집 시작] {symbol}-{strategy} (limit={limit})")
-            try:
-                df_binance = get_binance_kline(symbol, strategy, limit=limit)
-                if df_binance is None or df_binance.empty:
-                    print(f"[⚠️ Binance 데이터 없음] {symbol}-{strategy}")
-                    df_binance = pd.DataFrame()
-                else:
-                    print(f"[📥 Binance 수집 완료] {symbol}-{strategy} → {len(df_binance)}개")
-            except Exception as be:
-                print(f"[❌ Binance 수집 실패] {symbol}-{strategy} → {be}")
-                traceback.print_exc()
+            print(f"[📡 Binance 2차 반복 수집 시작] {symbol}-{strategy} (limit={limit})")
+            end_time = None
+            while len(pd.concat(df_binance)) < limit:
+                try:
+                    df_chunk = get_binance_kline(symbol, strategy, limit=limit, end_time=end_time)
+                    if df_chunk is None or df_chunk.empty:
+                        break
+                    df_binance.append(df_chunk)
+                    end_time = df_chunk["timestamp"].min()
+                    if len(df_chunk) < limit:
+                        break
+                except Exception as be:
+                    print(f"[❌ Binance 수집 실패] {symbol}-{strategy} → {be}")
+                    traceback.print_exc()
+                    break
+        df_binance = pd.concat(df_binance).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True) if df_binance else pd.DataFrame()
 
-        # 3️⃣ 병합 및 정리 (한쪽이라도 있으면 진행)
+        # ✅ 병합
         df_list = [df for df in [df_bybit, df_binance] if not df.empty]
-        if df_list:
-            df = pd.concat(df_list).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-        else:
-            df = pd.DataFrame()  # 완전 실패 시에도 빈 DataFrame 반환
+        df = pd.concat(df_list).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True) if df_list else pd.DataFrame()
 
+        # ✅ 결과
         total_count = len(df)
         if total_count < limit:
             print(f"[⚠️ 수집 수량 부족] {symbol}-{strategy} → 총 {total_count}개 (목표: {limit})")
         else:
             print(f"[✅ 수집 성공] {symbol}-{strategy} → 총 {total_count}개")
 
-        # 4️⃣ 캐싱 및 반환 (무조건 반환 보장)
+        # ✅ 캐싱 및 반환
         CacheManager.set(cache_key, df)
         return df
 
@@ -479,9 +482,11 @@ SYMBOL_MAP = {
 def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
     import time
     import pandas as pd
+    import requests
+    from data.source import SYMBOL_MAP, BASE_URL
 
     real_symbol = SYMBOL_MAP["bybit"].get(symbol, symbol)
-    target_rows = int(limit)
+    target_rows = int(limit)  # 전략별로 상위에서 정확히 전달됨
     collected_data = []
     total_rows = 0
 
@@ -489,11 +494,14 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
         success = False
         for attempt in range(max_retry):
             try:
+                rows_needed = target_rows - total_rows
+                request_limit = min(1000, rows_needed)  # ✅ 최대 1000, 남은 수량만큼
+
                 params = {
                     "category": "linear",
                     "symbol": real_symbol,
                     "interval": interval,
-                    "limit": 1000  # ✅ 항상 최대 요청
+                    "limit": request_limit
                 }
                 if end_time is not None:
                     params["end"] = int(end_time.timestamp() * 1000)
@@ -533,10 +541,10 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                 if total_rows >= target_rows:
                     break
 
-                # ✅ 다음 반복을 위한 시간 이동
+                # ✅ 다음 반복 요청을 위해 end_time 이동
                 oldest_ts = df_chunk["timestamp"].min()
                 end_time = oldest_ts - pd.Timedelta(milliseconds=1)
-                time.sleep(0.2)  # 요청 속도 제어
+                time.sleep(0.2)
                 break
 
             except Exception as e:
