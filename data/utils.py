@@ -407,16 +407,23 @@ def get_kline_by_strategy(symbol: str, strategy: str):
         config = STRATEGY_CONFIG.get(strategy, {"limit": 300})
         limit = config.get("limit", 300)
 
+        df_bybit = pd.DataFrame()
+        df_binance = pd.DataFrame()
+
         # 1️⃣ Bybit 수집
         print(f"[📡 Bybit 1차 수집 시작] {symbol}-{strategy} (limit={limit})")
-        df_bybit = get_bybit_kline(symbol, strategy, limit=limit)
-        if df_bybit is None or df_bybit.empty:
-            print(f"[⚠️ Bybit 데이터 없음] {symbol}-{strategy}")
-            df_bybit = pd.DataFrame()
-        else:
-            print(f"[📥 Bybit 수집 완료] {symbol}-{strategy} → {len(df_bybit)}개")
+        try:
+            df_bybit = get_bybit_kline(symbol, strategy, limit=limit)
+            if df_bybit is None or df_bybit.empty:
+                print(f"[⚠️ Bybit 데이터 없음] {symbol}-{strategy}")
+                df_bybit = pd.DataFrame()
+            else:
+                print(f"[📥 Bybit 수집 완료] {symbol}-{strategy} → {len(df_bybit)}개")
+        except Exception as be:
+            print(f"[❌ Bybit 수집 실패] {symbol}-{strategy} → {be}")
+            traceback.print_exc()
 
-        # 2️⃣ Binance 보완 수집 (Bybit 수량이 목표의 90% 미만일 때만 시도)
+        # 2️⃣ Binance 수집 (Bybit 수량이 부족하면)
         if len(df_bybit) < int(limit * 0.9):
             print(f"[📡 Binance 2차 수집 시작] {symbol}-{strategy} (limit={limit})")
             try:
@@ -429,21 +436,21 @@ def get_kline_by_strategy(symbol: str, strategy: str):
             except Exception as be:
                 print(f"[❌ Binance 수집 실패] {symbol}-{strategy} → {be}")
                 traceback.print_exc()
-                df_binance = pd.DataFrame()
-        else:
-            df_binance = pd.DataFrame()
 
-        # 3️⃣ 병합
+        # 3️⃣ 병합 및 정리 (한쪽이라도 있으면 진행)
         df_list = [df for df in [df_bybit, df_binance] if not df.empty]
-        df = pd.concat(df_list).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-        total_count = len(df)
+        if df_list:
+            df = pd.concat(df_list).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+        else:
+            df = pd.DataFrame()  # 완전 실패 시에도 빈 DataFrame 반환
 
+        total_count = len(df)
         if total_count < limit:
             print(f"[⚠️ 수집 수량 부족] {symbol}-{strategy} → 총 {total_count}개 (목표: {limit})")
         else:
             print(f"[✅ 수집 성공] {symbol}-{strategy} → 총 {total_count}개")
 
-        # 4️⃣ 캐싱 및 반환 (수량 부족해도 반환)
+        # 4️⃣ 캐싱 및 반환 (무조건 반환 보장)
         CacheManager.set(cache_key, df)
         return df
 
