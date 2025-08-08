@@ -16,14 +16,16 @@ _default_config = {
 # ✅ 거래 전략별 interval + limit 설정 (Bybit/Binance 호환)
 STRATEGY_CONFIG = {
     "단기": {"interval": "240", "limit": 1000, "binance_interval": "4h"},
-    "중기": {"interval": "D", "limit": 500, "binance_interval": "1d"},
-    "장기": {"interval": "D", "limit": 500, "binance_interval": "1d"},
+    "중기": {"interval": "D",   "limit": 500,  "binance_interval": "1d"},
+    "장기": {"interval": "D",   "limit": 500,  "binance_interval": "1d"},
 }
 
 # ✅ 내부 동적 캐시 변수
 _config = _default_config.copy()
 _dynamic_num_classes = None
-_dynamic_ranges = None
+
+# (symbol, strategy) → ranges(list[(min,max)])
+_ranges_cache = {}   # 예: {("BTCUSDT","단기"): [(-0.05,-0.04), ..., (0.04,0.05)]}
 
 # ✅ config.json 로드
 if os.path.exists(CONFIG_PATH):
@@ -43,28 +45,14 @@ def save_config():
     except Exception as e:
         print(f"[⚠️ config.py] config.json 저장 실패 → {e}")
 
-# ✅ 클래스별 수익률 범위 반환
-def get_class_return_range(class_id):
-    global _dynamic_ranges
-    num_classes = get_NUM_CLASSES()
-    if _dynamic_ranges is None or len(_dynamic_ranges) != num_classes:
-        _dynamic_ranges = get_class_ranges()
-    assert 0 <= class_id < num_classes, f"class_id {class_id} 잘못됨"
-    return _dynamic_ranges[class_id]
-
-# ✅ 클래스별 기대 수익률
-def class_to_expected_return(class_id, num_classes=None):
-    if num_classes is None:
-        num_classes = get_NUM_CLASSES()
-    r_min, r_max = get_class_return_range(class_id)
-    return (r_min + r_max) / 2
-
-# ✅ 동적 클래스 수 설정
+# =========================
+# 기본 Getter/Setter
+# =========================
 def set_NUM_CLASSES(n):
+    """동적으로 결정된 클래스 수를 설정 (전역)"""
     global _dynamic_num_classes
     _dynamic_num_classes = n
 
-# ✅ getter
 def get_NUM_CLASSES():
     global _dynamic_num_classes
     return _dynamic_num_classes if _dynamic_num_classes is not None else _config.get("NUM_CLASSES", _default_config["NUM_CLASSES"])
@@ -102,28 +90,41 @@ def get_class_groups(num_classes=None, group_size=5):
 
     return groups
 
-# ✅ config.py 하단에 추가
-
-def get_class_return_range(class_index: int, num_classes: int = 20, min_return: float = -0.1, max_return: float = 0.1):
+# =========================
+# 클래스 경계 계산/조회 (심볼·전략별 일관성 보장)
+# =========================
+def get_class_return_range(class_id: int, symbol: str, strategy: str):
     """
-    주어진 클래스 인덱스에 대한 수익률 범위를 반환합니다.
-    예: class 0 → -10% ~ -9%, class 19 → 9% ~ 10%
+    심볼/전략별로 계산된 동적 클래스 경계를 사용해 (cls_min, cls_max)를 반환.
+    - 학습에서 사용한 경계(get_class_ranges(symbol,strategy))와 동일한 소스 사용
     """
-    interval = (max_return - min_return) / num_classes
-    cls_min = min_return + class_index * interval
-    cls_max = cls_min + interval
-    return cls_min, cls_max
+    assert isinstance(symbol, str) and isinstance(strategy, str), "symbol/strategy는 문자열이어야 함"
+    num_classes = get_NUM_CLASSES()
+    key = (symbol, strategy)
 
+    ranges = _ranges_cache.get(key)
+    if ranges is None or len(ranges) != num_classes:
+        # 캐시에 없거나 클래스 수가 달라졌으면 재계산
+        ranges = get_class_ranges(symbol=symbol, strategy=strategy)
+        _ranges_cache[key] = ranges
 
-def class_to_expected_return(class_index: int, num_classes: int = 20, min_return: float = -0.1, max_return: float = 0.1):
+    assert 0 <= class_id < len(ranges), f"class_id {class_id} 범위 오류 (0~{len(ranges)-1})"
+    return ranges[class_id]
+
+def class_to_expected_return(class_id: int, symbol: str, strategy: str):
     """
-    주어진 클래스 인덱스에 해당하는 대표 수익률 (중앙값)을 반환합니다.
+    해당 클래스의 대표 기대 수익률(중앙값)을 반환.
     """
-    cls_min, cls_max = get_class_return_range(class_index, num_classes, min_return, max_return)
-    return (cls_min + cls_max) / 2
-
+    r_min, r_max = get_class_return_range(class_id, symbol, strategy)
+    return (r_min + r_max) / 2
 
 def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=None, group_size=5):
+    """
+    심볼/전략별 수익률 분포 기반 동적 클래스 경계 계산.
+    - 음수/양수 구간을 분리한 상태로 클래스 경계를 산출
+    - 실패/부족 시 균등 분할 fallback
+    - 계산 결과는 (symbol,strategy) 캐시에 저장되어 예측/평가 시 동일하게 사용
+    """
     import numpy as np
     from data.utils import get_kline_by_strategy
     from config import set_NUM_CLASSES
@@ -188,14 +189,17 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             return compute_equal_ranges(10, reason="예외 발생")
 
     def compute_equal_ranges(n_cls, reason=""):
+        # 양/음 구분 없이 균등 분할 (설계 유지)
         step = 2.0 / n_cls
         ranges = [(-1.0 + i * step, -1.0 + (i + 1) * step) for i in range(n_cls)]
         print(f"[⚠️ 균등 분할 클래스 사용] 사유: {reason} → {n_cls}개 클래스, 범위 예시: {ranges[:2]}...")
         return ranges
 
     all_ranges = compute_split_ranges_from_kline()
-    global _dynamic_ranges
-    _dynamic_ranges = all_ranges
+
+    # ✅ 심볼·전략별 캐시에 저장
+    if symbol is not None and strategy is not None:
+        _ranges_cache[(symbol, strategy)] = all_ranges
 
     if group_id is None:
         return all_ranges
@@ -204,8 +208,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
     end = start + group_size
     return all_ranges[start:end]
 
-
-# ✅ 즉시 변수 선언
+# ✅ 즉시 변수 선언 (외부 모듈 호환)
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 NUM_CLASSES = get_NUM_CLASSES()
 FAIL_AUGMENT_RATIO = get_FAIL_AUGMENT_RATIO()
