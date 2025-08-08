@@ -240,40 +240,39 @@ SYMBOL_MAP = {
 }
 
 def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
-    import pandas as pd
-    import time
+    import pandas as pd, time, requests
+    from data.source import SYMBOL_MAP, BINANCE_BASE_URL
 
-    # ✅ 심볼 매핑 적용
     real_symbol = SYMBOL_MAP["binance"].get(symbol, symbol)
-
-    # ✅ Binance interval 매핑
     interval_map = {"240": "4h", "D": "1d", "2D": "2d", "60": "1h"}
     binance_interval = interval_map.get(interval, "1h")
 
-    # ✅ 목표 limit
-    req_limit = int(limit)
+    target_rows = int(limit)
     collected_data = []
+    total_rows = 0
 
-    # ✅ 반복 수집
-    while True:
+    while total_rows < target_rows:
         success = False
         for attempt in range(max_retry):
             try:
+                rows_needed = target_rows - total_rows
+                request_limit = min(1000, rows_needed)
+
                 params = {
                     "symbol": real_symbol,
                     "interval": binance_interval,
-                    "limit": req_limit
+                    "limit": request_limit
                 }
                 if end_time is not None:
-                    params["endTime"] = int(end_time.timestamp() * 1000)  # Binance ms 단위
+                    params["endTime"] = int(end_time.timestamp() * 1000)
 
-                print(f"[📡 Binance 요청] {real_symbol}-{interval} | 요청 limit={req_limit} | 시도 {attempt+1}/{max_retry} | end_time={end_time}")
+                print(f"[📡 Binance 요청] {real_symbol}-{interval} | 요청 {request_limit}개 | 시도 {attempt+1}/{max_retry} | end_time={end_time}")
                 res = requests.get(f"{BINANCE_BASE_URL}/fapi/v1/klines", params=params, timeout=10)
                 res.raise_for_status()
                 raw = res.json()
 
                 if not raw:
-                    print(f"[❌ Binance 데이터 없음] {real_symbol}-{interval} (시도 {attempt+1}/{max_retry})")
+                    print(f"[❌ Binance 데이터 없음] {real_symbol}-{interval} (시도 {attempt+1})")
                     break
 
                 df_chunk = pd.DataFrame(raw, columns=[
@@ -282,46 +281,46 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
                 ])
                 df_chunk = df_chunk[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
 
-                # ✅ 타임존 변환
                 df_chunk["timestamp"] = pd.to_datetime(df_chunk["timestamp"], unit="ms", errors="coerce") \
                     .dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
-                df_chunk = df_chunk.dropna(subset=["timestamp"])
-                df_chunk = df_chunk.sort_values("timestamp").reset_index(drop=True)
+                df_chunk = df_chunk.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
                 df_chunk["datetime"] = df_chunk["timestamp"]
 
+                if df_chunk.empty:
+                    break
+
                 collected_data.append(df_chunk)
+                total_rows += len(df_chunk)
                 success = True
 
-                # ✅ 수집 완료 조건: 목표 채우거나 더 이상 데이터 없음
-                total_rows = sum(len(chunk) for chunk in collected_data)
-                if len(df_chunk) < req_limit or total_rows >= req_limit:
-                    return pd.concat(collected_data, ignore_index=True) \
-                        .drop_duplicates(subset=["timestamp"]) \
-                        .sort_values("timestamp") \
-                        .reset_index(drop=True)
+                if total_rows >= target_rows:
+                    break
 
-                # 다음 요청 end_time 갱신
+                # 다음 요청을 위한 end_time 이동
                 oldest_ts = df_chunk["timestamp"].min()
                 end_time = oldest_ts - pd.Timedelta(milliseconds=1)
-
-                break  # retry loop 탈출
+                time.sleep(0.2)
+                break
 
             except Exception as e:
-                print(f"[에러] Binance({real_symbol}) 실패 → {e}")
+                print(f"[에러] get_kline_binance({real_symbol}) 실패 → {e}")
                 time.sleep(1)
                 continue
 
         if not success:
             break
 
-    # ✅ 실패 시 반환
     if collected_data:
-        return pd.concat(collected_data, ignore_index=True) \
+        df = pd.concat(collected_data, ignore_index=True) \
             .drop_duplicates(subset=["timestamp"]) \
             .sort_values("timestamp") \
             .reset_index(drop=True)
+        print(f"[📊 Binance 수집 완료] {symbol}-{interval} → 총 {len(df)}개 봉 확보")
+        return df
     else:
+        print(f"[❌ 최종 실패] {symbol}-{interval} → 수집된 봉 없음")
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
+
 
 def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
     import pandas as pd
@@ -406,54 +405,67 @@ def get_kline_by_strategy(symbol: str, strategy: str):
     try:
         config = STRATEGY_CONFIG.get(strategy, {"limit": 300})
         limit = config.get("limit", 300)
-        interval = config.get("interval", "D")  # 기본값 보완
+        interval = config.get("interval", "D")
 
         # ✅ 1차: Bybit 반복 수집
         df_bybit = []
+        total_bybit = 0
         end_time = None
         print(f"[📡 Bybit 1차 반복 수집 시작] {symbol}-{strategy} (limit={limit})")
-        while len(pd.concat(df_bybit)) < limit:
+        while total_bybit < limit:
             df_chunk = get_bybit_kline(symbol, strategy, limit=limit, end_time=end_time)
             if df_chunk is None or df_chunk.empty:
                 break
             df_bybit.append(df_chunk)
-            end_time = df_chunk["timestamp"].min()
+            total_bybit += len(df_chunk)
+            end_time = df_chunk["timestamp"].min() - pd.Timedelta(milliseconds=1)
             if len(df_chunk) < limit:
-                break  # 더 이상 과거 없음
-        df_bybit = pd.concat(df_bybit).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+                break
 
-        # ✅ 2차: Binance 보완 수집 (Bybit가 부족할 경우)
+        df_bybit = pd.concat(df_bybit, ignore_index=True) \
+            .drop_duplicates(subset=["timestamp"]) \
+            .sort_values("timestamp") \
+            .reset_index(drop=True) if df_bybit else pd.DataFrame()
+
+        # ✅ 2차: Binance 보완 수집
         df_binance = []
+        total_binance = 0
         if len(df_bybit) < int(limit * 0.9):
             print(f"[📡 Binance 2차 반복 수집 시작] {symbol}-{strategy} (limit={limit})")
             end_time = None
-            while len(pd.concat(df_binance)) < limit:
+            while total_binance < limit:
                 try:
                     df_chunk = get_binance_kline(symbol, strategy, limit=limit, end_time=end_time)
                     if df_chunk is None or df_chunk.empty:
                         break
                     df_binance.append(df_chunk)
-                    end_time = df_chunk["timestamp"].min()
+                    total_binance += len(df_chunk)
+                    end_time = df_chunk["timestamp"].min() - pd.Timedelta(milliseconds=1)
                     if len(df_chunk) < limit:
                         break
                 except Exception as be:
                     print(f"[❌ Binance 수집 실패] {symbol}-{strategy} → {be}")
                     traceback.print_exc()
                     break
-        df_binance = pd.concat(df_binance).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True) if df_binance else pd.DataFrame()
+
+        df_binance = pd.concat(df_binance, ignore_index=True) \
+            .drop_duplicates(subset=["timestamp"]) \
+            .sort_values("timestamp") \
+            .reset_index(drop=True) if df_binance else pd.DataFrame()
 
         # ✅ 병합
         df_list = [df for df in [df_bybit, df_binance] if not df.empty]
-        df = pd.concat(df_list).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True) if df_list else pd.DataFrame()
+        df = pd.concat(df_list, ignore_index=True) \
+            .drop_duplicates(subset=["timestamp"]) \
+            .sort_values("timestamp") \
+            .reset_index(drop=True) if df_list else pd.DataFrame()
 
-        # ✅ 결과
         total_count = len(df)
         if total_count < limit:
             print(f"[⚠️ 수집 수량 부족] {symbol}-{strategy} → 총 {total_count}개 (목표: {limit})")
         else:
             print(f"[✅ 수집 성공] {symbol}-{strategy} → 총 {total_count}개")
 
-        # ✅ 캐싱 및 반환
         CacheManager.set(cache_key, df)
         return df
 
