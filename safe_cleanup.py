@@ -96,12 +96,17 @@ def auto_delete_old_logs():
         except:
             break
 
+    # ✅ 삭제 로그 기록 (실패해도 전체 중단되지 않게 보호)
     if deleted:
-        with open(DELETED_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 삭제된 파일 목록:\n")
-            for name in deleted:
-                f.write(f"  - {name}\n")
-        print(f"[🧹 삭제 완료] 총 {len(deleted)}개 파일 삭제")
+        try:
+            with open(DELETED_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 삭제된 파일 목록:\n")
+                for name in deleted:
+                    f.write(f"  - {name}\n")
+            print(f"[🧹 삭제 완료] 총 {len(deleted)}개 파일 삭제")
+        except Exception as e:
+            print(f"[⚠️ 삭제 로그 기록 실패] → {e}")
+            print(f"[🧹 삭제 완료] 총 {len(deleted)}개 파일 삭제 (로그 기록 생략)")
     else:
         print("[📁 삭제 없음] 최근 로그만 존재")
 
