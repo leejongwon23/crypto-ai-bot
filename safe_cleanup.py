@@ -2,21 +2,20 @@ import os
 import shutil
 from datetime import datetime, timedelta
 
-# ✅ 설정
 ROOT_DIR = "/persistent"
 LOG_DIR = os.path.join(ROOT_DIR, "logs")
 MODEL_DIR = os.path.join(ROOT_DIR, "models")
 DELETED_LOG_PATH = os.path.join(LOG_DIR, "deleted_log.txt")
 
 KEEP_DAYS = 1
-DISK_LIMIT_GB = 9.8     # ✅ Render 최대치 고려
-TRIGGER_GB = 7.0        # ✅ 트리거를 더 일찍 발생
+DISK_LIMIT_GB = 9.8
+TRIGGER_GB = 7.0
 
 DELETE_PREFIXES = ["prediction_", "evaluation_", "wrong_", "model_", "ssl_", "meta_", "evo_"]
-EXCLUDE_FILES = set([
+EXCLUDE_FILES = {
     "prediction_log.csv", "train_log.csv", "evaluation_result.csv",
     "deleted_log.txt", "wrong_predictions.csv", "fine_tune_target.csv"
-])
+}
 
 def get_directory_size_gb(path):
     total = 0
@@ -59,7 +58,7 @@ def auto_delete_old_logs():
 
     print(f"[⚠️ 용량초과] {current_gb:.2f}GB → 로그/모델 정리 시작")
 
-    # ✅ 오래된 파일 우선 삭제 (logs + models)
+    # ✅ 오래된 파일 우선 삭제
     for dir_path in [LOG_DIR, MODEL_DIR]:
         if not os.path.exists(dir_path): continue
         for fname in os.listdir(dir_path):
@@ -69,6 +68,7 @@ def auto_delete_old_logs():
             if not any(fname.startswith(p) for p in DELETE_PREFIXES): continue
 
             try:
+                # 날짜 포맷이 있을 경우
                 date_str = fname.split("_")[-1].replace(".csv", "").strip()
                 file_date = datetime.strptime(date_str, "%Y-%m-%d")
             except:
