@@ -530,11 +530,6 @@ def train_symbol_group_loop(delay_minutes=5):
     FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
     done_path = "/persistent/train_done.json"
 
-    if not os.path.exists(done_path):
-        print("[ℹ️ 유지 모드] 이전 학습 이력 없음 → 새로 생성")
-    else:
-        print("[ℹ️ 유지 모드] 이전 학습 이력 보존")
-
     FORCE_TRAINING = True
     loop_count = 0
     group_count = len(SYMBOL_GROUPS)
@@ -546,12 +541,14 @@ def train_symbol_group_loop(delay_minutes=5):
         train_done = {}
 
         for group_id, group in enumerate(SYMBOL_GROUPS):
+            print(f"\n📂 [그룹 {group_id+1}/{group_count}] 진입")
+
             if not group:
-                print(f"[⚠️ 그룹 {group_id+1}] 비어있음 → 건너뜀")
+                print(f"[⚠️ 그룹 {group_id+1}] 심볼 없음 → 건너뜀")
                 continue
 
             group_sorted = sorted(group)
-            print(f"\n📊 [그룹 {group_id+1}/{group_count}] 학습 시작 | 심볼 수: {len(group_sorted)}")
+            print(f"📊 [그룹 {group_id+1}] 학습 시작 | 심볼 수: {len(group_sorted)}")
             _kline_cache.clear()
             _feature_cache.clear()
 
@@ -561,20 +558,19 @@ def train_symbol_group_loop(delay_minutes=5):
 
                     try:
                         class_ranges = get_class_ranges(symbol=symbol, strategy=strategy)
-                        if not class_ranges:
-                            raise ValueError("⛔ 클래스 경계 없음 (빈 class_ranges)")
+                        if not class_ranges or len(class_ranges) == 0:
+                            raise ValueError("빈 클래스 경계 반환됨")
                         num_classes = len(class_ranges)
                         class_groups = get_class_groups(num_classes=num_classes)
                         MAX_GROUP_ID = len(class_groups) - 1
                     except Exception as e:
-                        print(f"[⚠️ 클래스 계산 실패] {symbol}-{strategy} → {e}")
+                        print(f"[❌ 클래스 경계 계산 실패] {symbol}-{strategy} → {e}")
                         log_training_result(symbol, strategy, note=f"클래스 계산 실패: {e}", status="failed")
                         continue
 
                     for gid in range(MAX_GROUP_ID + 1):
-                        already_done = train_done[symbol][strategy].get(str(gid), False)
-                        if not FORCE_TRAINING and already_done:
-                            print(f"[ℹ️ 이전 학습 이력 있음 → 재학습 생략] {symbol}-{strategy}-group{gid}")
+                        if not FORCE_TRAINING and train_done[symbol][strategy].get(str(gid), False):
+                            print(f"[ℹ️ 재학습 생략] {symbol}-{strategy}-group{gid}")
                             continue
 
                         try:
@@ -585,28 +581,26 @@ def train_symbol_group_loop(delay_minutes=5):
                                 json.dump(train_done, f, ensure_ascii=False, indent=2)
                             print(f"[✅ 학습 완료] {symbol}-{strategy}-group{gid}")
                             log_training_result(symbol, strategy, model=f"group{gid}", note="학습 완료", status="success")
-
                         except Exception as e:
                             print(f"[❌ 학습 실패] {symbol}-{strategy}-group{gid} → {e}")
                             traceback.print_exc()
                             log_training_result(symbol, strategy, model=f"group{gid}", note=str(e), status="failed")
 
-        # ✅ 예측 수행
-        try:
-            print("✅ 그룹 학습 후 예측 수행 시작")
-            for group in SYMBOL_GROUPS:
-                for symbol in sorted(group):
+            # ✅ 그룹 학습 후 → 그룹 예측
+            try:
+                print(f"🔮 [그룹 {group_id+1}] 예측 시작")
+                for symbol in group_sorted:
                     for strategy in ["단기", "중기", "장기"]:
                         try:
-                            print(f"[🔮 예측 시작] {symbol}-{strategy}")
+                            print(f"[🔮 예측] {symbol}-{strategy}")
                             predict(symbol=symbol, strategy=strategy, source="train_loop")
                         except Exception as e:
                             print(f"[❌ 예측 실패] {symbol}-{strategy} → {e}")
                             traceback.print_exc()
-        except Exception as e:
-            print(f"[⚠️ 예측 수행 중 오류 발생] → {e}")
+            except Exception as e:
+                print(f"[⚠️ 예측 수행 오류] 그룹 {group_id+1} → {e}")
 
-        # ✅ 후처리
+        # ✅ 후처리 (루프 단위로)
         try:
             maintenance_fix_meta.fix_all_meta_json()
             safe_cleanup.auto_delete_old_logs()
@@ -616,6 +610,7 @@ def train_symbol_group_loop(delay_minutes=5):
         FORCE_TRAINING = False
         time.sleep(delay_minutes * 60)
 
+        # ✅ 진화형 메타러너 학습
         try:
             train_evo_meta_loop()
         except Exception as e:
