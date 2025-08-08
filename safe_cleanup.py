@@ -113,3 +113,18 @@ def auto_delete_old_logs():
 
 # ✅ 실행
 auto_delete_old_logs()
+
+import os
+
+def cleanup_old_models(max_keep=3):
+    model_dir = "/persistent/models"
+    if not os.path.exists(model_dir):
+        return
+    files = sorted(
+        [os.path.join(model_dir, f) for f in os.listdir(model_dir)],
+        key=os.path.getmtime,
+        reverse=True
+    )
+    for old_file in files[max_keep:]:
+        os.remove(old_file)
+        print(f"[🗑 모델 삭제] {old_file}")
