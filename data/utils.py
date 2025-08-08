@@ -498,7 +498,7 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
     from data.source import SYMBOL_MAP, BASE_URL
 
     real_symbol = SYMBOL_MAP["bybit"].get(symbol, symbol)
-    target_rows = int(limit)  # 전략별로 상위에서 정확히 전달됨
+    target_rows = int(limit)
     collected_data = []
     total_rows = 0
 
@@ -507,7 +507,7 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
         for attempt in range(max_retry):
             try:
                 rows_needed = target_rows - total_rows
-                request_limit = min(1000, rows_needed)  # ✅ 최대 1000, 남은 수량만큼
+                request_limit = min(1000, rows_needed)
 
                 params = {
                     "category": "linear",
@@ -518,7 +518,7 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                 if end_time is not None:
                     params["end"] = int(end_time.timestamp() * 1000)
 
-                print(f"[📡 Bybit 요청] {real_symbol}-{interval} | 시도 {attempt+1}/{max_retry} | end_time={end_time}")
+                print(f"[📡 Bybit 요청] {real_symbol}-{interval} | 시도 {attempt+1}/{max_retry} | 요청 수량 = {request_limit}")
                 res = requests.get(f"{BASE_URL}/v5/market/kline", params=params, timeout=10)
                 res.raise_for_status()
                 data = res.json()
@@ -553,9 +553,7 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                 if total_rows >= target_rows:
                     break
 
-                # ✅ 다음 반복 요청을 위해 end_time 이동
-                oldest_ts = df_chunk["timestamp"].min()
-                end_time = oldest_ts - pd.Timedelta(milliseconds=1)
+                end_time = df_chunk["timestamp"].min() - pd.Timedelta(milliseconds=1)
                 time.sleep(0.2)
                 break
 
