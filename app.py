@@ -422,7 +422,7 @@ if __name__ == "__main__":
     from failure_db import ensure_failure_db
     from telegram_bot import send_message
     import maintenance_fix_meta
-    from train_loop import train_symbol_group_loop  # ✅ 필요
+    from train import train_symbol_group_loop
     from scheduler import start_scheduler  # ✅ 필요
 
     print(">>> 서버 실행 준비")
