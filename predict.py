@@ -1,4 +1,10 @@
-import os, sys, json, datetime, pytz
+# === predict.py 최종본 ===
+import os
+import json
+import datetime
+import pytz
+from collections import defaultdict
+
 import numpy as np
 import pandas as pd
 import torch
@@ -7,30 +13,36 @@ from sklearn.preprocessing import MinMaxScaler
 
 from data.utils import get_kline_by_strategy, compute_features
 from window_optimizer import find_best_windows
-from logger import log_prediction, get_feature_hash, get_available_models, update_model_success
-from failure_db import insert_failure_record, load_existing_failure_hashes, ensure_failure_db
-from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
+from logger import (
+    log_prediction,
+    get_feature_hash,
+    get_available_models,  # ✅ logger에 구현
+    update_model_success,
+)
+from failure_db import insert_failure_record, ensure_failure_db, check_failure_exists
 from model.base_model import get_model
-from model_weight_loader import load_model_cached  # ✅ 표준 캐시 로더 사용
+from model_weight_loader import load_model_cached  # ✅ 표준 캐시 로더
 from config import (
-    get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups,
-    get_class_return_range, class_to_expected_return
+    get_NUM_CLASSES,
+    get_FEATURE_INPUT_SIZE,
+    get_class_return_range,
+    class_to_expected_return,
 )
 
-# =========================
-# 기본 상수/헬퍼
-# =========================
+# ──────────────────────────────────────────────────────────────
+# 기본 상수
+# ──────────────────────────────────────────────────────────────
 DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 LOG_DIR = "/persistent/logs"
-PREDICTION_LOG_PATH = os.path.join(LOG_DIR, "prediction_log.csv")  # ✅ 경로 통일
+PREDICTION_LOG_PATH = "/persistent/prediction_log.csv"  # ✅ 루트 경로로 통일
 NUM_CLASSES = get_NUM_CLASSES()
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-# =========================
-# 앙상블 (단순 평균/스태킹)
-# =========================
+# ──────────────────────────────────────────────────────────────
+# 앙상블 유틸 (필요 시 사용)
+# ──────────────────────────────────────────────────────────────
 def ensemble_stacking(model_outputs, meta_model=None):
     X_stack = np.array(model_outputs).reshape(1, -1)
     if meta_model is not None:
@@ -40,14 +52,11 @@ def ensemble_stacking(model_outputs, meta_model=None):
         avg_probs = np.mean(model_outputs, axis=0)
         return int(np.argmax(avg_probs))
 
-# =========================
+# ──────────────────────────────────────────────────────────────
 # 실패 결과 공통 포맷
-# =========================
+# ──────────────────────────────────────────────────────────────
 def failed_result(symbol, strategy, model_type="unknown", reason="", source="일반", X_input=None):
-    from datetime import datetime as _dt
-    import numpy as _np
-    t = _dt.now(pytz.timezone("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
-
+    t = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     pred_class_val = -1
     label_val = -1
     result = {
@@ -61,7 +70,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         "timestamp": t,
         "source": source,
         "predicted_class": pred_class_val,
-        "label": label_val
+        "label": label_val,
     }
 
     try:
@@ -80,7 +89,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
             volatility=True,
             source=source,
             predicted_class=pred_class_val,
-            label=label_val
+            label=label_val,
         )
     except Exception as e:
         print(f"[failed_result log_prediction 오류] {e}")
@@ -94,29 +103,27 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 
     return result
 
-# =========================
+# ──────────────────────────────────────────────────────────────
 # 메인 예측
-# =========================
+# ──────────────────────────────────────────────────────────────
 def predict(symbol, strategy, source="일반", model_type=None):
     """
-    - 전 모델 참여(품질 필터 제거)
-    - 메타러너 + (있으면) 진화형 메타러너 적용
+    - 사용 가능한 모델 전부 참여
+    - 메타러너(기본/진화형) 결과로 최종 클래스 선택
     - 성공 판정/목표가 심볼·전략별 클래스 경계와 일관
     """
-    from evo_meta_learner import get_best_strategy_by_failure_probability, predict_evo_meta
-
     ensure_failure_db()
     os.makedirs(LOG_DIR, exist_ok=True)
 
     # 1) 입력 검증
     if not symbol or not strategy:
-        insert_failure_record({"symbol": symbol or "None", "strategy": strategy or "None"},
-                              "invalid_symbol_strategy", label=-1)
+        insert_failure_record({"symbol": symbol or "None", "strategy": strategy or "None"}, "invalid_symbol_strategy", label=-1)
         return None
 
-    log_strategy = strategy  # 로깅상 원 전략 유지
+    log_strategy = strategy  # 로깅은 원본 전략명 유지
+
     try:
-        # 2) 최적 윈도우 탐색
+        # 2) 최적 윈도우 후보
         window_list = find_best_windows(symbol, strategy)
         if not window_list:
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "window_list_none", label=-1)
@@ -148,52 +155,42 @@ def predict(symbol, strategy, source="일반", model_type=None):
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "no_models", label=-1)
             return None
 
-        # 7) 최근 클래스 분포(다양성 보정 등에 사용 가능)
-        recent_freq = get_recent_class_frequencies(strategy)
         feature_tensor = torch.tensor(feat_scaled[-1], dtype=torch.float32)
 
-        # 8) 개별 모델 추론
+        # 7) 개별 모델 추론
         model_outputs_list, all_model_predictions = get_model_predictions(
-            symbol, strategy, models, df, feat_scaled, window_list, recent_freq
+            symbol, strategy, models, df, feat_scaled, window_list
         )
         if not model_outputs_list:
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "no_valid_model", label=-1)
             return None
 
-        # 9) 진화형 실패확률 기반 전략 교체
-        recommended_strategy = get_best_strategy_by_failure_probability(
-            symbol=symbol, current_strategy=strategy,
-            feature_tensor=feature_tensor, model_outputs=model_outputs_list
-        )
-        if recommended_strategy and recommended_strategy != strategy:
-            print(f"[🔁 전략 교체됨] {strategy} → {recommended_strategy}")
-            strategy = recommended_strategy
-
-        # 10) 메타러너 최종 선택
-        from meta_learning import get_meta_prediction  # 로컬 임포트(순환 최소화)
-        meta_success_rate = {c: 0.5 for c in range(len(model_outputs_list[0]["probs"]))}  # 필터링 제거
+        # 8) 기본 메타러너(soft voting + 성공률 가중은 내부에서 고려 가능)
+        from meta_learning import get_meta_prediction  # 로컬 임포트
+        meta_success_rate = {c: 0.5 for c in range(len(model_outputs_list[0]["probs"]))}
         final_pred_class = get_meta_prediction(
             [m["probs"] for m in model_outputs_list],
             feature_tensor,
-            meta_info={"success_rate": meta_success_rate}
+            meta_info={"success_rate": meta_success_rate},
         )
 
-        # 11) 진화형 메타 적용(있을 때만)
-        evo_model_path = os.path.join(MODEL_DIR, "evo_meta_learner.pt")
+        # 9) 진화형 메타(있으면 사용)
         use_evo = False
-        if os.path.exists(evo_model_path):
-            try:
+        try:
+            from evo_meta_learner import predict_evo_meta
+            evo_model_path = os.path.join(MODEL_DIR, "evo_meta_learner.pt")
+            if os.path.exists(evo_model_path):
                 evo_pred = predict_evo_meta(feature_tensor.unsqueeze(0), input_size=FEATURE_INPUT_SIZE)
                 if evo_pred is not None and evo_pred != final_pred_class:
                     print(f"[🔁 진화형 메타러너 전환] {final_pred_class} → {evo_pred}")
                     final_pred_class = evo_pred
                     use_evo = True
-            except Exception as e:
-                print(f"[⚠️ 진화형 메타러너 예외] {e}")
+        except Exception as e:
+            print(f"[⚠️ 진화형 메타러너 예외] {e}")
 
         print(f"[META] {'진화형' if use_evo else '기본'} 메타 선택: 클래스 {final_pred_class}")
 
-        # 12) 메타 결과 로깅 + 성공 가능성 판단(동일 경계)
+        # 10) 메타 결과 로깅 + 성공 가능성 판단(경계 일관)
         cls_min, _ = get_class_return_range(final_pred_class, symbol, strategy)
         current_price = df.iloc[-1]["close"]
         expected_ret = class_to_expected_return(final_pred_class, symbol, strategy)
@@ -204,7 +201,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
         if not meta_success_flag:
             insert_failure_record(
                 {"symbol": symbol, "strategy": log_strategy},
-                "meta_predicted_fail", label=final_pred_class, feature_vector=feature_tensor.numpy()
+                "meta_predicted_fail",
+                label=final_pred_class,
+                feature_vector=feature_tensor.numpy(),
             )
 
         log_prediction(
@@ -224,7 +223,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             return_value=actual_return_meta,
             source="진화형" if use_evo else "기본",
             group_id=all_model_predictions[0].get("group_id"),
-            feature_vector=feature_tensor.numpy()
+            feature_vector=feature_tensor.numpy(),
         )
 
         return {
@@ -235,26 +234,23 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "expected_return": expected_ret,
             "timestamp": now_kst().isoformat(),
             "reason": "진화형 메타 최종 선택" if use_evo else "기본 메타 최종 선택",
-            "source": source
+            "source": source,
         }
 
     except Exception as e:
         insert_failure_record({"symbol": symbol or "None", "strategy": strategy or "None"}, "exception", label=-1)
+        print(f"[predict 예외] {e}")
         return None
 
-
-# =========================
+# ──────────────────────────────────────────────────────────────
 # 평가 로직 (심볼·전략별 경계 사용)
-# =========================
+# ──────────────────────────────────────────────────────────────
 def evaluate_predictions(get_price_fn):
-    import csv, os
-    import pandas as pd
-    from collections import defaultdict
-    from failure_db import check_failure_exists
+    import csv
 
     ensure_failure_db()
 
-    PREDICTION_LOG = PREDICTION_LOG_PATH  # ✅ 통일 경로 사용
+    PREDICTION_LOG = PREDICTION_LOG_PATH  # ✅ 통일 경로
     now_local = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
     date_str = now_local().strftime("%Y-%m-%d")
     EVAL_RESULT = os.path.join(LOG_DIR, f"evaluation_{date_str}.csv")
@@ -312,7 +308,7 @@ def evaluate_predictions(get_price_fn):
                         volatility=False,
                         source="평가",
                         label=label,
-                        group_id=group_id
+                        group_id=group_id,
                     )
                     if not check_failure_exists(r):
                         insert_failure_record(r, f"{symbol}-{strategy}-{now_local().isoformat()}",
@@ -351,7 +347,7 @@ def evaluate_predictions(get_price_fn):
                 actual_max = future_df["high"].max()
                 gain = (actual_max - entry_price) / (entry_price + 1e-6)
 
-                # ✅ 심볼·전략별 경계로 평가
+                # ✅ 심볼·전략별 경계
                 if pred_class >= 0:
                     cls_min, cls_max = get_class_return_range(pred_class, symbol, strategy)
                 else:
@@ -377,7 +373,7 @@ def evaluate_predictions(get_price_fn):
                     "status": status,
                     "reason": f"[pred_class={pred_class}] gain={gain:.3f} (cls_min={cls_min}, cls_max={cls_max})",
                     "return": round(gain, 5),
-                    "group_id": group_id
+                    "group_id": group_id,
                 })
 
                 log_prediction(
@@ -396,7 +392,7 @@ def evaluate_predictions(get_price_fn):
                     volatility=vol,
                     source="평가",
                     label=label,
-                    group_id=group_id
+                    group_id=group_id,
                 )
 
                 if status in ["fail", "v_fail"] and not check_failure_exists(r):
@@ -429,24 +425,20 @@ def evaluate_predictions(get_price_fn):
 
     print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
 
-# =========================
+# ──────────────────────────────────────────────────────────────
 # 개별 모델 예측 실행
-# =========================
-def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list, recent_freq):
+# ──────────────────────────────────────────────────────────────
+def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list):
     """
-    ✅ [YOPO 전용]
     - 주어진 모델 리스트(models)로 예측 수행
     - 각 모델은 meta.json을 통해 정보 추출
     - 결과: model_outputs_list, all_model_predictions 반환
     """
-    import json
-
     model_outputs_list = []
     all_model_predictions = []
 
     for model_info in models:
         try:
-            # logger.get_available_models() 스펙 기준
             pt_file = model_info.get("pt_file")
             if not pt_file:
                 print(f"[⚠️ pt_file 누락] {model_info}")
@@ -465,7 +457,7 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             num_classes = meta.get("num_classes", NUM_CLASSES)
 
             # 윈도우 추출
-            window = window_list[group_id]
+            window = window_list[group_id] if group_id < len(window_list) else window_list[0]
             input_seq = feat_scaled[-window:]
             if input_seq.shape[0] < window:
                 print(f"[⚠️ 데이터 부족] {symbol}-{strategy}-group{group_id}")
@@ -473,7 +465,7 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
 
             input_tensor = torch.tensor(input_seq, dtype=torch.float32).unsqueeze(0)  # (1, window, input_size)
 
-            # ✅ 표준 캐시 로더 사용 (state_dict)
+            # ✅ 캐시 로더
             model = get_model(model_type, input_size=input_size, output_size=num_classes)
             model = load_model_cached(model_path, model, ttl_sec=600)
             if model is None:
@@ -494,7 +486,7 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
                 "model_type": model_type,
                 "model_path": model_path,
                 "symbol": symbol,
-                "strategy": strategy
+                "strategy": strategy,
             })
 
             entry_price = df["close"].iloc[-1]
@@ -507,7 +499,7 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
                 "model_name": model_type,
                 "model_symbol": symbol,
                 "symbol": symbol,
-                "strategy": strategy
+                "strategy": strategy,
             })
 
         except Exception as e:
@@ -516,9 +508,9 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
 
     return model_outputs_list, all_model_predictions
 
-# =========================
+# ──────────────────────────────────────────────────────────────
 # 직접 실행 테스트
-# =========================
+# ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     res = predict("BTCUSDT", "단기")
     print(res)
