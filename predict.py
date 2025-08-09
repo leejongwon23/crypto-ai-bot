@@ -3,7 +3,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from collections import OrderedDict
 from sklearn.preprocessing import MinMaxScaler
 
 from data.utils import get_kline_by_strategy, compute_features
@@ -12,6 +11,7 @@ from logger import log_prediction, get_feature_hash, get_available_models, updat
 from failure_db import insert_failure_record, load_existing_failure_hashes, ensure_failure_db
 from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
 from model.base_model import get_model
+from model_weight_loader import load_model_cached  # ✅ 표준 캐시 로더 사용
 from config import (
     get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups,
     get_class_return_range, class_to_expected_return
@@ -22,51 +22,11 @@ from config import (
 # =========================
 DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
+LOG_DIR = "/persistent/logs"
+PREDICTION_LOG_PATH = os.path.join(LOG_DIR, "prediction_log.csv")  # ✅ 경로 통일
 NUM_CLASSES = get_NUM_CLASSES()
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-
-# =========================
-# 모델 LRU 캐시 로더
-# =========================
-MODEL_CACHE = OrderedDict()
-MODEL_CACHE_MAX_SIZE = 10  # 최대 10개만 캐싱
-
-def load_model_cached(model_path, model_type, input_size, output_size):
-    """
-    LRU 캐시 기반 모델 로더
-    - meta.json과 input/output 크기 검증 포함
-    """
-    key = (model_path, model_type)
-    if key in MODEL_CACHE:
-        MODEL_CACHE.move_to_end(key)
-        model = MODEL_CACHE[key]
-    else:
-        model = get_model(model_type, input_size, output_size).to(DEVICE)
-        state = torch.load(model_path, map_location=DEVICE)
-        model.load_state_dict(state)
-        model.eval()
-        MODEL_CACHE[key] = model
-
-        if len(MODEL_CACHE) > MODEL_CACHE_MAX_SIZE:
-            removed_key, _ = MODEL_CACHE.popitem(last=False)
-            print(f"[🗑️ MODEL_CACHE 제거] {removed_key}")
-
-    # meta 검증
-    meta_path = model_path.replace(".pt", ".meta.json")
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            expected_input = meta.get("input_size")
-            expected_output = meta.get("output_size")
-            if expected_input != input_size or expected_output != output_size:
-                print(f"[❌ 모델 크기 불일치] expected input:{expected_input}, output:{expected_output} | got input:{input_size}, output:{output_size}")
-                return None
-        except Exception as e:
-            print(f"[⚠️ meta.json 로드 오류] {meta_path} → {e}")
-
-    return model
 
 # =========================
 # 앙상블 (단순 평균/스태킹)
@@ -146,7 +106,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     from evo_meta_learner import get_best_strategy_by_failure_probability, predict_evo_meta
 
     ensure_failure_db()
-    os.makedirs("/persistent/logs", exist_ok=True)
+    os.makedirs(LOG_DIR, exist_ok=True)
 
     # 1) 입력 검증
     if not symbol or not strategy:
@@ -219,7 +179,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         )
 
         # 11) 진화형 메타 적용(있을 때만)
-        evo_model_path = "/persistent/models/evo_meta_learner.pt"
+        evo_model_path = os.path.join(MODEL_DIR, "evo_meta_learner.pt")
         use_evo = False
         if os.path.exists(evo_model_path):
             try:
@@ -294,11 +254,11 @@ def evaluate_predictions(get_price_fn):
 
     ensure_failure_db()
 
-    PREDICTION_LOG = "/persistent/prediction_log.csv"
-    now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-    date_str = now_kst().strftime("%Y-%m-%d")
-    EVAL_RESULT = f"/persistent/logs/evaluation_{date_str}.csv"
-    WRONG = f"/persistent/logs/wrong_{date_str}.csv"
+    PREDICTION_LOG = PREDICTION_LOG_PATH  # ✅ 통일 경로 사용
+    now_local = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+    date_str = now_local().strftime("%Y-%m-%d")
+    EVAL_RESULT = os.path.join(LOG_DIR, f"evaluation_{date_str}.csv")
+    WRONG = os.path.join(LOG_DIR, f"wrong_{date_str}.csv")
 
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
     updated, evaluated = [], []
@@ -336,11 +296,11 @@ def evaluate_predictions(get_price_fn):
                 if entry_price <= 0 or label == -1:
                     reason = "entry_price 오류 또는 label=-1"
                     r.update({"status": "fail", "reason": reason, "return": 0.0})
-                    log_prediction(symbol, strategy, "예측실패", entry_price, entry_price, now_kst().isoformat(),
+                    log_prediction(symbol, strategy, "예측실패", entry_price, entry_price, now_local().isoformat(),
                                    model, False, reason, 0.0, 0.0, False, "평가",
                                    predicted_class=pred_class, label=label, group_id=group_id)
                     if not check_failure_exists(r):
-                        insert_failure_record(r, f"{symbol}-{strategy}-{now_kst().isoformat()}",
+                        insert_failure_record(r, f"{symbol}-{strategy}-{now_local().isoformat()}",
                                               feature_vector=None, label=label)
                     updated.append(r)
                     continue
@@ -350,7 +310,7 @@ def evaluate_predictions(get_price_fn):
                     r.update({"status": "fail", "reason": "timestamp 파싱 실패", "return": 0.0})
                     updated.append(r)
                     continue
-                # 타임존 가정: KST 문자열 또는 naive → KST 처리
+                # 타임존 처리
                 if timestamp.tzinfo is None:
                     timestamp = timestamp.tz_localize("Asia/Seoul")
                 else:
@@ -384,7 +344,7 @@ def evaluate_predictions(get_price_fn):
 
                 reached_target = gain >= cls_min
 
-                if now_kst() < deadline:
+                if now_local() < deadline:
                     if reached_target:
                         status = "success"
                     else:
@@ -407,13 +367,13 @@ def evaluate_predictions(get_price_fn):
 
                 log_prediction(
                     symbol, strategy, f"평가:{status}", entry_price,
-                    entry_price * (1 + gain), now_kst().isoformat(), model,
+                    entry_price * (1 + gain), now_local().isoformat(), model,
                     status in ["success", "v_success"], r["reason"], gain, gain, vol, "평가",
                     predicted_class=pred_class, label=label, group_id=group_id
                 )
 
                 if status in ["fail", "v_fail"] and not check_failure_exists(r):
-                    insert_failure_record(r, f"{symbol}-{strategy}-{now_kst().isoformat()}",
+                    insert_failure_record(r, f"{symbol}-{strategy}-{now_local().isoformat()}",
                                           feature_vector=None, label=label)
 
                 if model == "meta":
@@ -442,7 +402,6 @@ def evaluate_predictions(get_price_fn):
 
     print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
 
-
 # =========================
 # 개별 모델 예측 실행
 # =========================
@@ -453,28 +412,32 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
     - 각 모델은 meta.json을 통해 정보 추출
     - 결과: model_outputs_list, all_model_predictions 반환
     """
+    import json
+
     model_outputs_list = []
     all_model_predictions = []
 
     for model_info in models:
-        model_path = model_info.get("model_path")
-        meta_path = model_path.replace(".pt", ".meta.json")
-        if not os.path.exists(meta_path):
-            print(f"[⚠️ 메타파일 없음] {meta_path}")
-            continue
-
         try:
+            # logger.get_available_models() 스펙 기준
+            pt_file = model_info.get("pt_file")
+            if not pt_file:
+                print(f"[⚠️ pt_file 누락] {model_info}")
+                continue
+            model_path = os.path.join(MODEL_DIR, pt_file)
+            meta_path = model_path.replace(".pt", ".meta.json")
+            if not os.path.exists(meta_path):
+                print(f"[⚠️ 메타파일 없음] {meta_path}")
+                continue
+
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
             model_type = meta.get("model", "lstm")
             group_id = meta.get("group_id", 0)
             input_size = meta.get("input_size", FEATURE_INPUT_SIZE)
             num_classes = meta.get("num_classes", NUM_CLASSES)
-        except Exception as e:
-            print(f"[⚠️ 메타파일 로딩 실패] {meta_path} → {e}")
-            continue
 
-        try:
+            # 윈도우 추출
             window = window_list[group_id]
             input_seq = feat_scaled[-window:]
             if input_seq.shape[0] < window:
@@ -483,8 +446,9 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
 
             input_tensor = torch.tensor(input_seq, dtype=torch.float32).unsqueeze(0)  # (1, window, input_size)
 
-            # ✅ 캐시 로더 사용
-            model = load_model_cached(model_path, model_type, input_size=input_size, output_size=num_classes)
+            # ✅ 표준 캐시 로더 사용 (state_dict)
+            model = get_model(model_type, input_size=input_size, output_size=num_classes)
+            model = load_model_cached(model_path, model, ttl_sec=600)
             if model is None:
                 print(f"[⚠️ 모델 로딩 실패] {model_path}")
                 continue
@@ -520,11 +484,10 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             })
 
         except Exception as e:
-            print(f"[❌ 모델 예측 실패] {model_path} → {e}")
+            print(f"[❌ 모델 예측 실패] {model_info} → {e}")
             continue
 
     return model_outputs_list, all_model_predictions
-
 
 # =========================
 # 직접 실행 테스트
@@ -534,7 +497,7 @@ if __name__ == "__main__":
     print(res)
 
     try:
-        df = pd.read_csv("/persistent/prediction_log.csv", encoding="utf-8-sig")
+        df = pd.read_csv(PREDICTION_LOG_PATH, encoding="utf-8-sig")
         print("[✅ prediction_log.csv 상위 20줄 출력]")
         print(df.head(20))
     except Exception as e:
