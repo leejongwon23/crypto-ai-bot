@@ -5,7 +5,7 @@ CONFIG_PATH = "/persistent/config.json"
 
 # ✅ 기본 설정값
 _default_config = {
-    "NUM_CLASSES": 20,
+    "NUM_CLASSES": 20,               # 전역 기본값(최소 보정용). 심볼/전략별 실제 클래스 수는 ranges 길이로 판단
     "FEATURE_INPUT_SIZE": 24,
     "FAIL_AUGMENT_RATIO": 3,
     "MIN_FEATURES": 5,
@@ -22,7 +22,7 @@ STRATEGY_CONFIG = {
 
 # ✅ 내부 동적 캐시 변수
 _config = _default_config.copy()
-_dynamic_num_classes = None
+_dynamic_num_classes = None  # 전역 기본값(필요시), 심볼/전략별은 ranges 길이를 사용
 
 # (symbol, strategy) → ranges(list[(min,max)])
 _ranges_cache = {}   # 예: {("BTCUSDT","단기"): [(-0.05,-0.04), ..., (0.04,0.05)]}
@@ -49,7 +49,7 @@ def save_config():
 # 기본 Getter/Setter
 # =========================
 def set_NUM_CLASSES(n):
-    """동적으로 결정된 클래스 수를 설정 (전역)"""
+    """전역 기본 클래스 수를 설정(필요한 곳에서만 사용). 심볼/전략별 동작은 ranges 길이로 판단."""
     global _dynamic_num_classes
     _dynamic_num_classes = n
 
@@ -96,15 +96,14 @@ def get_class_groups(num_classes=None, group_size=5):
 def get_class_return_range(class_id: int, symbol: str, strategy: str):
     """
     심볼/전략별로 계산된 동적 클래스 경계를 사용해 (cls_min, cls_max)를 반환.
-    - 학습에서 사용한 경계(get_class_ranges(symbol,strategy))와 동일한 소스 사용
+    ※ 전역 NUM_CLASSES에 의존하지 않고, 캐시된 ranges 길이를 기준으로 검증.
     """
     assert isinstance(symbol, str) and isinstance(strategy, str), "symbol/strategy는 문자열이어야 함"
-    num_classes = get_NUM_CLASSES()
     key = (symbol, strategy)
 
     ranges = _ranges_cache.get(key)
-    if ranges is None or len(ranges) != num_classes:
-        # 캐시에 없거나 클래스 수가 달라졌으면 재계산
+    if ranges is None:
+        # 캐시에 없으면 계산
         ranges = get_class_ranges(symbol=symbol, strategy=strategy)
         _ranges_cache[key] = ranges
 
@@ -112,9 +111,7 @@ def get_class_return_range(class_id: int, symbol: str, strategy: str):
     return ranges[class_id]
 
 def class_to_expected_return(class_id: int, symbol: str, strategy: str):
-    """
-    해당 클래스의 대표 기대 수익률(중앙값)을 반환.
-    """
+    """해당 클래스의 대표 기대 수익률(중앙값)을 반환."""
     r_min, r_max = get_class_return_range(class_id, symbol, strategy)
     return (r_min + r_max) / 2
 
@@ -124,10 +121,10 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
     - 음수/양수 구간을 분리한 상태로 클래스 경계를 산출
     - 실패/부족 시 균등 분할 fallback
     - 계산 결과는 (symbol,strategy) 캐시에 저장되어 예측/평가 시 동일하게 사용
+    - ⚠️ 전역 NUM_CLASSES는 바꾸지 않음(교차 간섭 방지). 필요시 set_NUM_CLASSES를 별도 사용.
     """
     import numpy as np
     from data.utils import get_kline_by_strategy
-    from config import set_NUM_CLASSES
 
     MAX_CLASSES = 20
     MIN_HALF = 2
@@ -155,8 +152,6 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             if num_classes % 2 != 0:
                 num_classes -= 1
             num_classes = max(num_classes, 4)
-
-            set_NUM_CLASSES(num_classes)
 
             print(f"[📊 수익률 분포 계산] {symbol}-{strategy}")
             print(f"  - 음수 수익률: {len(neg)}개, 양수 수익률: {len(pos)}개")
