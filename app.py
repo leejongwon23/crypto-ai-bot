@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, request
 from recommend import main
-import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv, re, functools
+import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv, re
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram_bot import send_message
 from predict_test import test_all_predictions
@@ -12,7 +12,6 @@ from predict import evaluate_predictions
 from train import train_symbol_group_loop
 import maintenance_fix_meta
 from logger import ensure_prediction_log_exists
-ensure_prediction_log_exists()
 
 # ✅ 서버 시작 직전 용량 정리 (예외 가드)
 import safe_cleanup
@@ -21,53 +20,30 @@ try:
 except Exception as e:
     print(f"[경고] startup cleanup 실패: {e}")
 
+# ===================== 경로 통일 =====================
 PERSIST_DIR = "/persistent"
-LOG_DIR, MODEL_DIR = os.path.join(PERSIST_DIR, "logs"), os.path.join(PERSIST_DIR, "models")
-LOG_FILE, PREDICTION_LOG = os.path.join(LOG_DIR, "train_log.csv"), os.path.join(PERSIST_DIR, "prediction_log.csv")
-WRONG_PREDICTIONS, AUDIT_LOG = os.path.join(PERSIST_DIR, "wrong_predictions.csv"), os.path.join(LOG_DIR, "evaluation_audit.csv")
-MESSAGE_LOG, FAILURE_LOG = os.path.join(LOG_DIR, "message_log.csv"), os.path.join(LOG_DIR, "failure_count.csv")
+LOG_DIR = os.path.join(PERSIST_DIR, "logs")
+MODEL_DIR = os.path.join(PERSIST_DIR, "models")
+
 os.makedirs(LOG_DIR, exist_ok=True)
+
+# ✅ prediction_log 경로를 'logs' 폴더로 통일
+PREDICTION_LOG = os.path.join(LOG_DIR, "prediction_log.csv")
+
+LOG_FILE       = os.path.join(LOG_DIR, "train_log.csv")
+WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
+AUDIT_LOG         = os.path.join(LOG_DIR, "evaluation_audit.csv")
+MESSAGE_LOG       = os.path.join(LOG_DIR, "message_log.csv")
+FAILURE_LOG       = os.path.join(LOG_DIR, "failure_count.csv")
+
+# ✅ 실제 쓰는 헤더로 안전 생성
+ensure_prediction_log_exists()
+
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def start_scheduler():
     print(">>> 스케줄러 시작"); sys.stdout.flush()
     sched = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
-
-    # ✅ 전략별 학습 스케줄 (현재 주석 처리됨)
-    """
-    학습 = [
-        (1, 30, "단기"), (3, 30, "장기"), (6, 0, "중기"), (9, 0, "단기"),
-        (11, 0, "중기"), (13, 0, "장기"), (15, 0, "단기"),
-        (17, 0, "중기"), (19, 0, "장기"), (22, 30, "단기")
-    ]
-
-    def 학습작업(s):
-        threading.Thread(target=train.train_model_loop, args=(s,), daemon=True).start()
-
-    for h, m, s in 학습:
-        sched.add_job(lambda s=s: 학습작업(s), trigger="cron", hour=h, minute=m)
-    """
-
-    # ✅ 전략별 예측 스케줄 (현재 주석 처리됨)
-    """
-    예측 = [
-        (7, 30, s) for s in ["단기", "중기", "장기"]
-    ] + [
-        (10, 30, "단기"), (10, 30, "중기"),
-        (12, 30, "중기"), (14, 30, "장기"),
-        (16, 30, "단기"), (18, 30, "중기")
-    ] + [
-        (21, 0, s) for s in ["단기", "중기", "장기"]
-    ] + [
-        (0, 0, "단기"), (0, 0, "중기")
-    ]
-
-    def 예측작업(s):
-        threading.Thread(target=main, kwargs={"strategy": s, "force": True}, daemon=True).start()
-
-    for h, m, s in 예측:
-        sched.add_job(lambda s=s: 예측작업(s), trigger="cron", hour=h, minute=m)
-    """
 
     # ✅ 전략별 평가 등록 (30분마다 반복)
     def 평가작업(strategy):
@@ -83,8 +59,7 @@ def start_scheduler():
 
     sched.start()
 
-# 이하 기존 app.route들은 그대로 유지
-
+# ===================== Flask =====================
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료"); sys.stdout.flush()
 
@@ -93,11 +68,9 @@ def yopo_health():
     percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
     logs, strategy_html, problems = {}, [], []
 
-    now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-    today = now_kst().strftime("%Y-%m-%d")
-
+    # ✅ 날짜별 파일 대신, 통합 prediction_log 사용
     file_map = {
-        "pred": f"/persistent/logs/prediction_{today}.csv",  # ✅ 날짜별 파일로 수정
+        "pred": PREDICTION_LOG,
         "train": LOG_FILE,
         "audit": AUDIT_LOG,
         "msg": MESSAGE_LOG
@@ -216,10 +189,9 @@ def ping():
 @app.route("/run")
 def run():
     try:
-        print("[RUN] 전략별 예측 실행")
-        sys.stdout.flush()
+        print("[RUN] 전략별 예측 실행"); sys.stdout.flush()
         for strategy in ["단기", "중기", "장기"]:
-            main(strategy, force=True)  # ✅ 강제 예측 실행
+            main(strategy, force=True)
         return "Recommendation started"
     except Exception as e:
         traceback.print_exc()
@@ -228,7 +200,7 @@ def run():
 @app.route("/train-now")
 def train_now():
     try:
-        train.train_all_models()  # ✅ 병렬 아님 → 순차 실행
+        train.train_all_models()  # 순차 실행
         return "✅ 모든 전략 학습 시작됨"
     except Exception as e:
         return f"학습 실패: {e}", 500
@@ -258,9 +230,7 @@ def list_models():
 @app.route("/check-log-full")
 def check_log_full():
     try:
-        import pandas as pd
-        path = "/persistent/logs/prediction_{}.csv".format(datetime.datetime.now().strftime("%Y-%m-%d"))
-        df = pd.read_csv(path, encoding="utf-8-sig")
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
         latest = df.sort_values(by="timestamp", ascending=False).head(100)
         return jsonify(latest.to_dict(orient="records"))
     except Exception as e:
@@ -272,7 +242,7 @@ def check_log():
         if not os.path.exists(PREDICTION_LOG):
             return jsonify({"error": "prediction_log.csv 없음"})
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
-        df = df[df["timestamp"].notna()]  # ✅ 빈 timestamp 제거
+        df = df[df["timestamp"].notna()]
         return jsonify(df.tail(10).to_dict(orient='records'))
     except Exception as e:
         return jsonify({"error": str(e)})
@@ -280,12 +250,14 @@ def check_log():
 @app.route("/check-eval-log")
 def check_eval_log():
     try:
-        path = "/persistent/prediction_log.csv"
+        path = PREDICTION_LOG  # ✅ 통일
         if not os.path.exists(path):
             return "예측 로그 없음"
 
         df = pd.read_csv(path, encoding="utf-8-sig")
-        df = df[df["status"].isin(["success", "fail", "v_success", "v_fail", "pending", "v_pending"])]
+        if "status" not in df.columns:
+            return "상태 컬럼 없음"
+
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         latest = df.sort_values(by="timestamp", ascending=False).head(100)
 
@@ -298,10 +270,9 @@ def check_eval_log():
 
         html = "<table border='1'><tr><th>시각</th><th>심볼</th><th>전략</th><th>모델</th><th>예측</th><th>수익률</th><th>상태</th><th>사유</th></tr>"
         for _, r in latest.iterrows():
-            icon = status_icon(r["status"])
-            html += f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['strategy']}</td><td>{r['model']}</td><td>{r.get('direction','')}</td><td>{r.get('return',0):.4f}</td><td>{icon}</td><td>{r.get('reason','')}</td></tr>"
+            icon = status_icon(r.get("status", ""))
+            html += f"<tr><td>{r.get('timestamp','')}</td><td>{r.get('symbol','')}</td><td>{r.get('strategy','')}</td><td>{r.get('model','')}</td><td>{r.get('direction','')}</td><td>{float(r.get('return',0) or 0):.4f}</td><td>{icon}</td><td>{r.get('reason','')}</td></tr>"
         html += "</table>"
-
         return html
     except Exception as e:
         return f"❌ 오류: {e}", 500
@@ -318,13 +289,10 @@ def train_symbols():
         group_symbols = SYMBOL_GROUPS[group_idx]
         print(f"🚀 그룹 학습 요청됨 → 그룹 #{group_idx} | 심볼: {group_symbols}")
         threading.Thread(target=lambda: train.train_models(group_symbols), daemon=True).start()
-
         return f"✅ 그룹 #{group_idx} 학습 및 예측 시작됨"
     except Exception as e:
         traceback.print_exc()
         return f"❌ 오류: {e}", 500
-
-from data.utils import SYMBOL_GROUPS  # 반드시 있어야 함
 
 @app.route("/train-symbols", methods=["POST"])
 def train_selected_symbols():
@@ -332,8 +300,7 @@ def train_selected_symbols():
         symbols = request.json.get("symbols", [])
         if not isinstance(symbols, list) or not symbols:
             return "❌ 유효하지 않은 symbols 리스트", 400
-
-        train.train_models(symbols)  # ⬅️ 선택 심볼 학습 함수
+        train.train_models(symbols)
         return f"✅ {len(symbols)}개 심볼 학습 시작됨"
     except Exception as e:
         return f"❌ 학습 실패: {e}", 500
@@ -344,7 +311,6 @@ def reset_all():
         return "❌ 인증 실패", 403
 
     try:
-        import shutil, os
         from data.utils import _kline_cache, _feature_cache
 
         def clear_csv(f, h):
@@ -352,45 +318,36 @@ def reset_all():
             with open(f, "w", newline="", encoding="utf-8-sig") as wf:
                 wf.write(",".join(h) + "\n")
 
-        # ✅ 1. train_done.json 삭제
-        done_path = "/persistent/train_done.json"
+        # 1) 상태 파일
+        done_path = os.path.join(PERSIST_DIR, "train_done.json")
         if os.path.exists(done_path):
             os.remove(done_path)
             print("[✅ 초기화] train_done.json 삭제 완료")
 
-        # ✅ 2. 모델 폴더 전체 삭제 후 재생성
-        MODEL_DIR = "/persistent/models"
+        # 2) 모델 폴더 초기화
         if os.path.exists(MODEL_DIR):
             shutil.rmtree(MODEL_DIR)
         os.makedirs(MODEL_DIR, exist_ok=True)
         print("[✅ 초기화] 모델 폴더 삭제 및 재생성 완료")
 
-        # ✅ 3. 로그 폴더 전체 삭제
-        LOG_DIR = "/persistent/logs"
+        # 3) 로그 폴더 초기화
         if os.path.exists(LOG_DIR):
             shutil.rmtree(LOG_DIR)
         os.makedirs(LOG_DIR, exist_ok=True)
         print("[✅ 초기화] 로그 폴더 삭제 완료")
 
-        # ✅ 4. 캐시 초기화
+        # 4) 캐시 초기화
         _kline_cache.clear()
         _feature_cache.clear()
         print("[✅ 초기화] 메모리 캐시 초기화 완료")
 
-        # ✅ 5. 주요 로그 CSV 초기화
-        clear_csv(PREDICTION_LOG, [
-            "timestamp", "symbol", "strategy", "direction",
-            "entry_price", "target_price", "model", "rate",
-            "status", "reason", "return", "volatility"
-        ])
-        clear_csv(WRONG_PREDICTIONS, [
-            "timestamp", "symbol", "strategy", "direction",
-            "entry_price", "target_price", "gain"
-        ])
-        clear_csv(LOG_FILE, ["timestamp", "symbol", "strategy", "model", "accuracy", "f1", "loss"])
-        clear_csv(AUDIT_LOG, ["timestamp", "symbol", "strategy", "result", "status"])
-        clear_csv(MESSAGE_LOG, ["timestamp", "symbol", "strategy", "message"])
-        clear_csv(FAILURE_LOG, ["symbol", "strategy", "failures"])
+        # 5) 주요 CSV 재생성
+        ensure_prediction_log_exists()  # ✅ 헤더 안전 재생성
+        clear_csv(WRONG_PREDICTIONS, ["timestamp","symbol","strategy","direction","entry_price","target_price","gain"])
+        clear_csv(LOG_FILE, ["timestamp","symbol","strategy","model","accuracy","f1","loss"])
+        clear_csv(AUDIT_LOG, ["timestamp","symbol","strategy","result","status"])
+        clear_csv(MESSAGE_LOG, ["timestamp","symbol","strategy","message"])
+        clear_csv(FAILURE_LOG, ["symbol","strategy","failures"])
         print("[✅ 초기화] 주요 CSV 로그 초기화 완료")
 
         return "✅ 완전 초기화 완료"
@@ -400,24 +357,18 @@ def reset_all():
 @app.route("/force-fix-prediction-log")
 def force_fix_prediction_log():
     try:
-        headers = ["timestamp", "symbol", "strategy", "direction", "entry_price", "target_price", "model", "rate", "status", "reason", "return", "volatility"]
-        with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
-            csv.DictWriter(f, fieldnames=headers).writeheader()
+        # ✅ logger.ensure_prediction_log_exists()와 동일 헤더로 강제 초기화
+        from logger import ensure_prediction_log_exists
+        if os.path.exists(PREDICTION_LOG):
+            os.remove(PREDICTION_LOG)
+        ensure_prediction_log_exists()
         return "✅ prediction_log.csv 강제 초기화 완료"
     except Exception as e:
         return f"⚠️ 오류: {e}", 500
 
-# ✅ 실행 준비 (중복 호출 제거)
-# from logger import ensure_prediction_log_exists  # 이미 상단에서 호출 완료
-
+# ===================== main =====================
 if __name__ == "__main__":
-    import os, threading, time
     from failure_db import ensure_failure_db
-    from telegram_bot import send_message
-    import maintenance_fix_meta
-    from train import train_symbol_group_loop
-    # ⛔ 외부 모듈 없음 → 내부 함수 사용
-    # from scheduler import start_scheduler  # 삭제
 
     print(">>> 서버 실행 준비")
 
@@ -431,7 +382,7 @@ if __name__ == "__main__":
     except ValueError:
         raise RuntimeError("❌ Render 환경변수 PORT가 없습니다. Render 서비스 타입 확인 필요")
 
-    # ✅ 첫 학습 동기 실행 (이게 핵심)
+    # ✅ 첫 학습 동기 실행
     print("🚀 첫 학습 강제 실행 시작")
     try:
         train_symbol_group_loop()
@@ -446,14 +397,14 @@ if __name__ == "__main__":
 
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # ✅ 나머지 백그라운드 작업 (학습 루프, 스케줄러, 메타보정 등)
+    # ✅ 나머지 백그라운드 작업
     def background_tasks():
         try:
             # 🔄 자동 학습 루프
             threading.Thread(target=train_symbol_group_loop, daemon=True).start()
             print("✅ 학습 루프 스레드 시작")
 
-            # ⏱ 스케줄러 시작 (내부 정의 사용)
+            # ⏱ 스케줄러 시작
             try:
                 start_scheduler()
                 print("✅ 스케줄러 시작 완료")
@@ -461,10 +412,7 @@ if __name__ == "__main__":
                 print(f"⚠️ 스케줄러 시작 실패: {e}")
 
             # 🛠 메타 데이터 보정
-            threading.Thread(
-                target=maintenance_fix_meta.fix_all_meta_json,
-                daemon=True
-            ).start()
+            threading.Thread(target=maintenance_fix_meta.fix_all_meta_json, daemon=True).start()
             print("✅ maintenance_fix_meta 실행 완료")
 
             # 📢 시작 알림
@@ -477,5 +425,6 @@ if __name__ == "__main__":
     threading.Thread(target=background_tasks, daemon=True).start()
 
     # ✅ 메인 스레드 유지
+    import time
     while True:
         time.sleep(3600)
