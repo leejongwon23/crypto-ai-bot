@@ -296,9 +296,24 @@ def evaluate_predictions(get_price_fn):
                 if entry_price <= 0 or label == -1:
                     reason = "entry_price 오류 또는 label=-1"
                     r.update({"status": "fail", "reason": reason, "return": 0.0})
-                    log_prediction(symbol, strategy, "예측실패", entry_price, entry_price, now_local().isoformat(),
-                                   model, False, reason, 0.0, 0.0, False, "평가",
-                                   predicted_class=pred_class, label=label, group_id=group_id)
+                    log_prediction(
+                        symbol=symbol,
+                        strategy=strategy,
+                        direction="예측실패",
+                        entry_price=entry_price,
+                        target_price=entry_price,
+                        timestamp=now_local().isoformat(),
+                        model=model,
+                        predicted_class=pred_class,
+                        success=False,
+                        reason=reason,
+                        rate=0.0,
+                        return_value=0.0,
+                        volatility=False,
+                        source="평가",
+                        label=label,
+                        group_id=group_id
+                    )
                     if not check_failure_exists(r):
                         insert_failure_record(r, f"{symbol}-{strategy}-{now_local().isoformat()}",
                                               feature_vector=None, label=label)
@@ -366,10 +381,22 @@ def evaluate_predictions(get_price_fn):
                 })
 
                 log_prediction(
-                    symbol, strategy, f"평가:{status}", entry_price,
-                    entry_price * (1 + gain), now_local().isoformat(), model,
-                    status in ["success", "v_success"], r["reason"], gain, gain, vol, "평가",
-                    predicted_class=pred_class, label=label, group_id=group_id
+                    symbol=symbol,
+                    strategy=strategy,
+                    direction=f"평가:{status}",
+                    entry_price=entry_price,
+                    target_price=entry_price * (1 + gain),
+                    timestamp=now_local().isoformat(),
+                    model=model,
+                    predicted_class=pred_class,
+                    success=(status in ["success", "v_success"]),
+                    reason=r["reason"],
+                    rate=gain,
+                    return_value=gain,
+                    volatility=vol,
+                    source="평가",
+                    label=label,
+                    group_id=group_id
                 )
 
                 if status in ["fail", "v_fail"] and not check_failure_exists(r):
