@@ -1,182 +1,171 @@
-import sqlite3
+# === failure_db.py 최종본 ===
 import os
 import json
-from collections import defaultdict
+import sqlite3
+import datetime
+import pytz
+from typing import Dict, Any, Iterable, Set, Optional
 
 DB_PATH = "/persistent/logs/failure_patterns.db"
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
-# ✅ 전역 DB connection singleton
-_db_conn = None
+def now_kst() -> str:
+    return datetime.datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
 
-def get_db_connection():
-    global _db_conn
-    if _db_conn is None:
-        try:
-            os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-            _db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)  # ✅ multi-thread safe
-            print("[✅ DB connection 생성 완료]")
-        except Exception as e:
-            print(f"[오류] DB connection 생성 실패 → {e}")
-            _db_conn = None
-    return _db_conn
+# --------------------------------
+# DB 초기화 / 커넥션
+# --------------------------------
+def get_db_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    return conn
 
-def ensure_failure_db():
-    try:
-        conn = get_db_connection()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS failure_patterns (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
-                symbol TEXT,
-                strategy TEXT,
-                direction TEXT,
-                hash TEXT,
-                model_name TEXT,
-                predicted_class INTEGER,
-                rate REAL,
-                reason TEXT,
-                feature TEXT,
-                label INTEGER,
-                UNIQUE(hash, model_name, predicted_class)
-            )
-        """)
-        conn.commit()
-        print("[✅ ensure_failure_db 완료]")
-    except Exception as e:
-        print(f"[오류] ensure_failure_db 실패 → {e}")
-
-def insert_failure_record(row, feature_hash=None, feature_vector=None, label=None, context="evaluation"):
+def ensure_failure_db() -> None:
     """
-    실패 예측을 기록한다.
-    context: "evaluation" → 평가 시점 기록, "prediction" → 예측 시점 기록
+    실패 패턴 저장용 DB/테이블 보장
     """
-    import hashlib, os, json
-    import pandas as pd
-    import numpy as np
-    from datetime import datetime
-
-    ensure_failure_db()
-    CSV_PATH = "/persistent/wrong_predictions.csv"
-
-    # ✅ 1. 기본 검증
-    if not isinstance(row, dict):
-        print("[❌ insert_failure_record] row 형식 오류 → 저장 스킵")
-        return
-    if row.get("success") is True and context != "evaluation":
-        print("[⛔ SKIP] 성공 예측 → 실패 기록 안 함")
-        return
-
-    # ✅ 2. feature_hash 생성
-    if not feature_hash:
-        raw_str = (
-            f"{row.get('symbol','')}_{row.get('strategy','')}_"
-            f"{row.get('model','')}_{row.get('predicted_class','')}_"
-            f"{label if label is not None else row.get('label','')}_{row.get('rate','')}"
+    conn = get_db_connection()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS failure_patterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            symbol TEXT,
+            strategy TEXT,
+            model_name TEXT,
+            predicted_class INTEGER,
+            label INTEGER,
+            reason TEXT,
+            rate REAL,
+            return REAL,
+            entry_price REAL,
+            target_price REAL,
+            source TEXT,
+            group_id INTEGER,
+            hash TEXT UNIQUE,
+            feature_vector TEXT
         )
-        feature_hash = hashlib.sha256(raw_str.encode()).hexdigest()
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_failure_hash ON failure_patterns(hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_failure_model ON failure_patterns(model_name)")
+    conn.commit()
+    conn.close()
 
-    if not isinstance(feature_hash, str) or not feature_hash.strip():
-        print("[❌ insert_failure_record] feature_hash 없음 → 저장 스킵")
+# --------------------------------
+# 중복 확인
+# --------------------------------
+def check_failure_exists(row: Dict[str, Any]) -> bool:
+    """
+    동일 (hash, model_name, predicted_class) 가 이미 존재하는지 보수적으로 확인.
+    row에는 최소한 hash 또는 (model, predicted_class) 정보가 있어야 함.
+    """
+    try:
+        h = row.get("hash")
+        m = row.get("model") or row.get("model_name") or ""
+        pc = int(row.get("predicted_class", -1)) if str(row.get("predicted_class", -1)).isdigit() else -1
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+        if h:  # 해시가 있으면 해시로 1차 확인
+            cur.execute("SELECT 1 FROM failure_patterns WHERE hash=? LIMIT 1", (h,))
+            if cur.fetchone():
+                conn.close()
+                return True
+
+        # 해시가 없거나 새로 들어오는 포맷일 수 있으니 보조 조건 확인
+        cur.execute(
+            "SELECT 1 FROM failure_patterns WHERE model_name=? AND predicted_class=? LIMIT 1",
+            (m, pc),
+        )
+        exists = cur.fetchone() is not None
+        conn.close()
+        return exists
+    except Exception:
+        return False
+
+# --------------------------------
+# 실패 기록/조회
+# --------------------------------
+def insert_failure_record(
+    row: Dict[str, Any],
+    feature_hash: Optional[str] = None,
+    label: Optional[int] = None,
+    feature_vector: Optional[Iterable[float]] = None,
+) -> None:
+    """
+    실패 케이스를 DB에 저장(중복 방지).
+    - row: symbol/strategy/model/predicted_class/rate/return_value/entry_price/target_price/reason/source/group_id 등 자유
+    - feature_hash: 동일 샘플 중복 방지용 키(가능하면 전달 권장)
+    - feature_vector: 리스트/ndarray 등 → JSON 문자열로 저장
+    """
+    ensure_failure_db()
+
+    # 입력 정규화
+    symbol   = str(row.get("symbol", "UNKNOWN"))
+    strategy = str(row.get("strategy", "알수없음"))
+    model    = str(row.get("model") or row.get("model_name") or "")
+    pc       = int(row.get("predicted_class", -1)) if str(row.get("predicted_class", -1)).isdigit() else -1
+    reason   = str(row.get("reason", "사유없음"))
+    rate     = float(row.get("rate", 0.0) if row.get("rate") not in (None, "") else 0.0)
+    ret_val  = float(row.get("return_value", row.get("return", 0.0)) or 0.0)
+    entry    = float(row.get("entry_price", 0.0) or 0.0)
+    target   = float(row.get("target_price", 0.0) or 0.0)
+    source   = str(row.get("source", "일반"))
+    gid      = int(row.get("group_id", 0)) if str(row.get("group_id", 0)).isdigit() else 0
+    lbl      = int(label if label is not None else row.get("label", -1)) if str(label if label is not None else row.get("label", -1)).isdigit() else -1
+
+    h = feature_hash or row.get("hash")
+    if not h:
+        # 가능한 최소 키로 간이 해시 생성
+        base = f"{symbol}|{strategy}|{model}|{pc}|{entry}|{target}"
+        import hashlib
+        h = hashlib.sha1(base.encode()).hexdigest()
+
+    # 이미 있으면 스킵
+    if check_failure_exists({"hash": h, "model": model, "predicted_class": pc}):
         return
 
-    # ✅ 3. feature_vector 안전 변환
-    def to_list_safe(x):
-        if x is None:
-            return []
-        if isinstance(x, np.ndarray):
-            return x.flatten().astype(float).tolist()
-        if isinstance(x, (list, tuple)):
-            return [float(v) if isinstance(v, (int, float, np.integer, np.floating)) else np.nan for v in x]
-        if isinstance(x, (int, float, np.integer, np.floating)):
-            return [float(x)]
+    fv_json = None
+    if feature_vector is not None:
         try:
-            return list(x)
-        except:
-            return []
+            # list 변환 후 JSON 직렬화
+            if hasattr(feature_vector, "tolist"):
+                feature_vector = feature_vector.tolist()
+            fv_json = json.dumps(feature_vector)
+        except Exception:
+            fv_json = None
 
-    feature_vector = to_list_safe(feature_vector)
-
-    # ✅ 4. 중복 체크 (DB + CSV 모두)
     try:
         conn = get_db_connection()
-        exists_db = conn.execute(
-            "SELECT 1 FROM failure_patterns WHERE hash=? AND model_name=? AND predicted_class=?",
-            (feature_hash, row.get("model", ""), row.get("predicted_class", -1))
-        ).fetchone()
-
-        exists_csv = False
-        if os.path.exists(CSV_PATH):
-            try:
-                df_csv = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
-                if all(col in df_csv.columns for col in ["feature_hash", "model_name", "predicted_class"]):
-                    exists_csv = not df_csv[
-                        (df_csv["feature_hash"] == feature_hash) &
-                        (df_csv["model_name"] == row.get("model", "")) &
-                        (df_csv["predicted_class"] == row.get("predicted_class", -1))
-                    ].empty
-            except Exception as e:
-                print(f"[⚠️ CSV 로드 실패] {e}")
-
-        if exists_db or exists_csv:
-            print(f"[⛔ SKIP-중복] feature_hash={feature_hash}")
-            return
-    except Exception as e:
-        print(f"[⚠️ 중복 체크 실패] {e}")
-
-    # ✅ 5. 기록 데이터 구성
-    record_time = datetime.now().isoformat()
-    record = {
-        "timestamp": record_time,
-        "symbol": row.get("symbol"),
-        "strategy": row.get("strategy"),
-        "direction": row.get("direction", ""),
-        "hash": feature_hash,
-        "model_name": row.get("model", ""),
-        "predicted_class": row.get("predicted_class", -1),
-        "rate": row.get("rate", ""),
-        "reason": row.get("reason") or "미기록",
-        "feature": json.dumps(feature_vector, ensure_ascii=False),
-        "label": -1 if label is None and row.get("label") is None else (label if label is not None else row.get("label")),
-        "context": context
-    }
-
-    # ✅ 6. DB 저장
-    try:
-        conn.execute("""INSERT OR IGNORE INTO failure_patterns
-            (timestamp, symbol, strategy, direction, hash, model_name, predicted_class, rate, reason, feature, label, context)
-            VALUES (:timestamp, :symbol, :strategy, :direction, :hash, :model_name, :predicted_class, :rate, :reason, :feature, :label, :context)
-        """, record)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO failure_patterns
+            (timestamp, symbol, strategy, model_name, predicted_class, label,
+             reason, rate, return, entry_price, target_price, source, group_id, hash, feature_vector)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                now_kst(), symbol, strategy, model, pc, lbl,
+                reason, rate, ret_val, entry, target, source, gid, h, fv_json
+            ),
+        )
         conn.commit()
-        print(f"[✅ SAVE-DB] {record['symbol']} {record['strategy']} class={record['predicted_class']} ctx={context}")
+        conn.close()
     except Exception as e:
-        print(f"[⚠️ DB 저장 실패] {e}")
+        # DB 오류는 치명적이지 않게 무시(로그만)
+        print(f"[failure_db] insert 실패: {e}")
 
-    # ✅ 7. CSV 저장
+def load_existing_failure_hashes(limit: int = 50000) -> Set[str]:
+    """
+    저장되어 있는 실패 해시를 집합으로 반환(중복 방지용)
+    """
     try:
-        csv_record = record.copy()
-        csv_record.pop("feature")
-        csv_record["feature_hash"] = feature_hash
-        for i, v in enumerate(feature_vector):
-            csv_record[f"f{i}"] = np.nan if v is None else float(v)
-
-        if os.path.exists(CSV_PATH):
-            df_csv = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
-        else:
-            df_csv = pd.DataFrame()
-
-        df_csv = pd.concat([df_csv, pd.DataFrame([csv_record])], ignore_index=True)
-        df_csv.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
-        print(f"[✅ SAVE-CSV] {csv_record['symbol']} {csv_record['strategy']} class={csv_record['predicted_class']} ctx={context}")
-    except Exception as e:
-        print(f"[❌ CSV 저장 실패] {type(e).__name__}: {e}")
-
-
-def load_existing_failure_hashes():
-    try:
+        ensure_failure_db()
         conn = get_db_connection()
-        rows = conn.execute("SELECT hash FROM failure_patterns").fetchall()
-        valid_hashes = set(r[0] for r in rows if r and isinstance(r[0], str) and r[0].strip() != "")
-        return valid_hashes
-    except Exception as e:
-        print(f"[오류] 실패 해시 로드 실패 → {e}")
+        cur = conn.cursor()
+        cur.execute("SELECT hash FROM failure_patterns ORDER BY id DESC LIMIT ?", (int(limit),))
+        hashes = {r[0] for r in cur.fetchall() if r and r[0]}
+        conn.close()
+        return hashes
+    except Exception:
         return set()
