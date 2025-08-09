@@ -6,7 +6,7 @@ import torch
 import time
 
 MODEL_DIR = "/persistent/models"
-EVAL_RESULT = "/persistent/evaluation_result.csv"
+EVAL_RESULT_SINGLE = "/persistent/evaluation_result.csv"  # 있을 수도 있어서 추가 확인용
 
 # ✅ 모델 캐시 (state_dict TTL 캐싱)
 #  - 키: pt 경로, 값: state_dict
@@ -36,6 +36,7 @@ def load_model_cached(pt_path, model_obj, ttl_sec=600):
         if pt_path in _model_cache:
             try:
                 model_obj.load_state_dict(_model_cache[pt_path], strict=False)
+                model_obj.eval()
                 return model_obj
             except Exception as e:
                 print(f"[⚠️ 캐시 로드 실패, 디스크 재시도] {pt_path} → {e}")
@@ -48,12 +49,10 @@ def load_model_cached(pt_path, model_obj, ttl_sec=600):
         if isinstance(state, dict) and all(isinstance(k, str) for k in state.keys()):
             state_dict = state
         else:
-            # 혹시 전체 모델이 저장된 경우 .state_dict() 시도
             try:
                 state_dict = state.state_dict()
             except Exception:
-                # 마지막 안전책: 그대로 load_state_dict 시도
-                state_dict = state
+                state_dict = state  # 마지막 안전책
 
         model_obj.load_state_dict(state_dict, strict=False)
         model_obj.eval()
@@ -70,12 +69,51 @@ def load_model_cached(pt_path, model_obj, ttl_sec=600):
         return None
 
 
+def _load_all_eval_logs():
+    """
+    ✅ 평가 로그를 가능한 폭넓게 수집해서 하나의 DataFrame으로 반환
+    - /persistent/logs/evaluation_*.csv (일자별)
+    - /persistent/evaluation_result.csv (있으면)
+    """
+    frames = []
+
+    # 1) 일자별 평가 로그
+    eval_daily = sorted(glob.glob("/persistent/logs/evaluation_*.csv"))
+    for fp in eval_daily:
+        try:
+            frames.append(pd.read_csv(fp, encoding="utf-8-sig"))
+        except Exception as e:
+            print(f"[⚠️ 평가 파일 읽기 실패] {fp} → {e}")
+
+    # 2) 단일 평가 로그(있을 수 있음)
+    if os.path.exists(EVAL_RESULT_SINGLE):
+        try:
+            frames.append(pd.read_csv(EVAL_RESULT_SINGLE, encoding="utf-8-sig"))
+        except Exception as e:
+            print(f"[⚠️ 단일 평가 파일 읽기 실패] {EVAL_RESULT_SINGLE} → {e}")
+
+    if not frames:
+        return pd.DataFrame()
+
+    try:
+        df = pd.concat(frames, ignore_index=True)
+        # 중복 제거 (있을 경우 대비)
+        if "timestamp" in df.columns:
+            df = df.drop_duplicates(subset=[c for c in df.columns if c in ["timestamp","symbol","strategy","model"]])
+        else:
+            df = df.drop_duplicates()
+        return df
+    except Exception as e:
+        print(f"[⚠️ 평가 로그 병합 실패] → {e}")
+        return pd.DataFrame()
+
+
 def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_size=None):
     """
     ✅ 메타파일 및 최근 평가 로그 기반 가중치(0.0~1.0) 추정
     - 메타/평가로그가 부족하면 0.2로 보수적 fallback
+    - 일자별 로그와 단일 로그를 모두 탐색하여 샘플 부족 문제 완화
     """
-    MODEL_DIR = "/persistent/models"
     pattern = (
         os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json")
         if symbol != "ALL"
@@ -85,6 +123,12 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
 
     if not meta_files:
         print(f"[⚠️ meta 파일 없음] {pattern} → fallback weight=0.2 (모델 없음)")
+        return 0.2
+
+    # 평가 로그 로드
+    df_all = _load_all_eval_logs()
+    if df_all.empty:
+        print("[INFO] 평가 데이터 없음 → cold-start weight=0.2")
         return 0.2
 
     for meta_path in meta_files:
@@ -101,23 +145,13 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
                 print(f"[⚠️ 모델 파일 없음] {pt_path} → weight=0.2")
                 return 0.2
 
-            eval_files = sorted(glob.glob("/persistent/logs/evaluation_*.csv"))
-            if not eval_files:
-                print("[INFO] 평가 파일 없음 → cold-start weight=0.2")
+            # 평가 레코드 필터
+            df = df_all.copy()
+            need_cols = {"model", "strategy", "symbol", "status"}
+            if not need_cols.issubset(df.columns):
+                print("[INFO] 평가 로그 컬럼 부족 → cold-start weight=0.2")
                 return 0.2
 
-            df_list = []
-            for file in eval_files:
-                try:
-                    df_list.append(pd.read_csv(file, encoding="utf-8-sig"))
-                except Exception as e:
-                    print(f"[⚠️ 평가 파일 읽기 실패] {file} → {e}")
-
-            if not df_list:
-                print("[INFO] 평가 데이터 없음 → cold-start weight=0.2")
-                return 0.2
-
-            df = pd.concat(df_list, ignore_index=True)
             df = df[
                 (df["model"] == model_type)
                 & (df["strategy"] == strategy)
