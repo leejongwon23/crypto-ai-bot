@@ -21,11 +21,13 @@ for fp in font_paths:
 plt.rcParams['font.family'] = valid_fonts or ['sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
 
-PREDICTION_LOG = "/persistent/prediction_log.csv"
+# ✅ 경로 통일
+PREDICTION_LOG = "/persistent/logs/prediction_log.csv"
 AUDIT_LOG = "/persistent/logs/evaluation_audit.csv"
 
 def load_df(path):
-    df = pd.read_csv(path)
+    # 인코딩/깨진 줄 안전가드
+    df = pd.read_csv(path, encoding="utf-8-sig", on_bad_lines="skip")
     df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
     if df['timestamp'].dt.tz is None:
         df['timestamp'] = df['timestamp'].dt.tz_localize('UTC').dt.tz_convert('Asia/Seoul')
@@ -63,6 +65,7 @@ def generate_visuals_for_strategy(strategy):
         df_audit = pd.DataFrame()
         html += f"<p>audit_log.csv 로드 실패: {e}</p>"
 
+    # 1) 최근 성공률 추이
     try:
         df = df_pred[df_pred['strategy'] == strategy]
         df['date'] = df['timestamp'].dt.date
@@ -75,6 +78,7 @@ def generate_visuals_for_strategy(strategy):
     except Exception as e:
         html += f"<p>1번 오류: {e}</p>"
 
+    # 2) 예측 vs 실제 수익률
     try:
         df = df_audit[df_audit['strategy'] == strategy]
         fig, ax = plt.subplots(figsize=(5,2))
@@ -86,6 +90,7 @@ def generate_visuals_for_strategy(strategy):
     except Exception as e:
         html += f"<p>2번 오류: {e}</p>"
 
+    # 3) 오답학습 전후 정확도 변화
     try:
         df = df_audit.dropna(subset=['accuracy_before', 'accuracy_after'])
         df = df[df['strategy'] == strategy]
@@ -101,6 +106,7 @@ def generate_visuals_for_strategy(strategy):
     except Exception as e:
         html += f"<p>3번 오류: {e}</p>"
 
+    # 4) 최근 예측 히트맵
     try:
         df = df_pred[df_pred['strategy'] == strategy]
         df = df[df['status'].isin(['success', 'fail'])]
@@ -116,6 +122,7 @@ def generate_visuals_for_strategy(strategy):
     except Exception as e:
         html += f"<p>4번 오류: {e}</p>"
 
+    # 5) 누적 수익률 추적
     try:
         df = df_audit[df_audit['strategy'] == strategy]
         df = df.dropna(subset=['actual_return']).sort_values('timestamp')
@@ -128,6 +135,7 @@ def generate_visuals_for_strategy(strategy):
     except Exception as e:
         html += f"<p>5번 오류: {e}</p>"
 
+    # 6) 모델별 성공률 변화
     try:
         df = df_pred[df_pred['strategy'] == strategy]
         df = df[df['status'].isin(['success', 'fail']) & df['model'].notna()]
@@ -145,6 +153,7 @@ def generate_visuals_for_strategy(strategy):
     except Exception as e:
         html += f"<p>6번 오류: {e}</p>"
 
+    # 7) 변동성 예측 vs 실제
     try:
         df = df_audit[df_audit['strategy'] == strategy]
         df = df.dropna(subset=['predicted_volatility', 'actual_volatility'])
