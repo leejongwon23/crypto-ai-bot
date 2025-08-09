@@ -103,17 +103,15 @@ from collections import Counter
 import os
 from datetime import datetime as dt
 
-def get_recent_class_frequencies(strategy=None, recent_days=3):
-    from collections import Counter
-    import os
-    import pandas as pd
+# 🔁 경로 통일: logs 폴더
+PREDICTION_LOG_PATH = "/persistent/logs/prediction_log.csv"
 
+def get_recent_class_frequencies(strategy=None, recent_days=3):
     try:
-        path = "/persistent/prediction_log.csv"
-        if not os.path.exists(path):
+        if not os.path.exists(PREDICTION_LOG_PATH):
             return Counter()
 
-        df = pd.read_csv(path, encoding="utf-8-sig")
+        df = pd.read_csv(PREDICTION_LOG_PATH, encoding="utf-8-sig")
         if "predicted_class" not in df.columns:
             print("[⚠️ get_recent_class_frequencies] 'predicted_class' 컬럼 없음 → 빈 Counter 반환")
             return Counter()
@@ -133,11 +131,8 @@ def get_recent_class_frequencies(strategy=None, recent_days=3):
 
 # ✅ 확률 보정 함수
 import numpy as np
-from collections import Counter
 
 def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict = None, alpha=0.10, beta=0.10):
-    import numpy as np
-
     probs = probs.copy()
     if probs.ndim == 2:
         probs = probs[0]
