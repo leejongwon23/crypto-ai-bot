@@ -6,23 +6,20 @@ import pytz
 import os
 from matplotlib import font_manager
 
-# ✅ 한글 + 이모지 폰트 적용 (안전하게)
 font_paths = [
     os.path.join("fonts", "NanumGothic-Regular.ttf"),
     "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"
 ]
-
 valid_fonts = []
 for fp in font_paths:
     if os.path.exists(fp):
         font_manager.fontManager.addfont(fp)
         valid_fonts.append(font_manager.FontProperties(fname=fp).get_name())
-
 plt.rcParams['font.family'] = valid_fonts or ['sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
 
-# 🔧 경로 통일: prediction_log는 logs 폴더 사용
-PREDICTION_LOG = "/persistent/logs/prediction_log.csv"
+# ✅ 경로 통일: prediction_log는 루트
+PREDICTION_LOG = "/persistent/prediction_log.csv"
 AUDIT_LOG = "/persistent/logs/evaluation_audit.csv"
 
 def load_df(path):
@@ -50,14 +47,11 @@ def plot_to_html(fig, title):
         return f"<p>{title} 시각화 실패: {e}</p>"
 
 def generate_visuals_for_strategy(strategy):
-    strategy_kor = strategy  # ✅ 한글 전략명 자동 처리
-    html = f"<h2>📊 {strategy_kor} 전략 분석</h2><div style='display:flex;flex-wrap:wrap;'>"
-
+    html = f"<h2>📊 {strategy} 전략 분석</h2><div style='display:flex;flex-wrap:wrap;'>"
     try:
         df_pred = load_df(PREDICTION_LOG)
     except Exception as e:
         return f"<p>prediction_log.csv 로드 실패: {e}</p></div>"
-
     try:
         df_audit = load_df(AUDIT_LOG)
     except Exception as e:
@@ -77,28 +71,29 @@ def generate_visuals_for_strategy(strategy):
         html += f"<p>1번 오류: {e}</p>"
 
     try:
-        df = df_audit[df_audit['strategy'] == strategy]
-        fig, ax = plt.subplots(figsize=(5,2))
-        ax.scatter(df['predicted_return'], df['actual_return'], alpha=0.5)
-        ax.set_xlabel("예측 수익률")
-        ax.set_ylabel("실제 수익률")
-        ax.set_title("🎯 예측 vs 실제 수익률")
-        html += plot_to_html(fig, "🎯 예측 vs 실제 수익률")
+        if not df_audit.empty and {'predicted_return','actual_return','strategy'}.issubset(df_audit.columns):
+            df = df_audit[df_audit['strategy'] == strategy]
+            fig, ax = plt.subplots(figsize=(5,2))
+            ax.scatter(df['predicted_return'], df['actual_return'], alpha=0.5)
+            ax.set_xlabel("예측 수익률"); ax.set_ylabel("실제 수익률")
+            ax.set_title("🎯 예측 vs 실제 수익률")
+            html += plot_to_html(fig, "🎯 예측 vs 실제 수익률")
     except Exception as e:
         html += f"<p>2번 오류: {e}</p>"
 
     try:
-        df = df_audit.dropna(subset=['accuracy_before', 'accuracy_after'])
-        df = df[df['strategy'] == strategy]
-        df['accuracy_before'] = pd.to_numeric(df['accuracy_before'], errors='coerce')
-        df['accuracy_after'] = pd.to_numeric(df['accuracy_after'], errors='coerce')
-        fig, ax = plt.subplots(figsize=(5,2))
-        ax.plot(df['timestamp'], df['accuracy_before'], label="Before")
-        ax.plot(df['timestamp'], df['accuracy_after'], label="After")
-        if ax.get_legend_handles_labels()[1]:
-            ax.legend()
-        ax.set_title("📚 오답학습 전후 정확도 변화")
-        html += plot_to_html(fig, "📚 오답학습 전후 정확도 변화")
+        need_cols = {'accuracy_before','accuracy_after','strategy','timestamp'}
+        if not df_audit.empty and need_cols.issubset(df_audit.columns):
+            df = df_audit.dropna(subset=['accuracy_before', 'accuracy_after'])
+            df = df[df['strategy'] == strategy].copy()
+            df['accuracy_before'] = pd.to_numeric(df['accuracy_before'], errors='coerce')
+            df['accuracy_after'] = pd.to_numeric(df['accuracy_after'], errors='coerce')
+            fig, ax = plt.subplots(figsize=(5,2))
+            ax.plot(df['timestamp'], df['accuracy_before'], label="Before")
+            ax.plot(df['timestamp'], df['accuracy_after'], label="After")
+            if ax.get_legend_handles_labels()[1]: ax.legend()
+            ax.set_title("📚 오답학습 전후 정확도 변화")
+            html += plot_to_html(fig, "📚 오답학습 전후 정확도 변화")
     except Exception as e:
         html += f"<p>3번 오류: {e}</p>"
 
@@ -118,46 +113,46 @@ def generate_visuals_for_strategy(strategy):
         html += f"<p>4번 오류: {e}</p>"
 
     try:
-        df = df_audit[df_audit['strategy'] == strategy]
-        df = df.dropna(subset=['actual_return']).sort_values('timestamp')
-        df['date'] = df['timestamp'].dt.date
-        df['cum_return'] = df['actual_return'].cumsum()
-        fig, ax = plt.subplots(figsize=(5,2))
-        ax.plot(df['date'], df['cum_return'])
-        ax.set_title("💰 누적 수익률 추적")
-        html += plot_to_html(fig, "💰 누적 수익률 추적")
+        if not df_audit.empty and {'actual_return','timestamp','strategy'}.issubset(df_audit.columns):
+            df = df_audit[df_audit['strategy'] == strategy].dropna(subset=['actual_return']).sort_values('timestamp')
+            df['date'] = df['timestamp'].dt.date
+            df['cum_return'] = df['actual_return'].cumsum()
+            fig, ax = plt.subplots(figsize=(5,2))
+            ax.plot(df['date'], df['cum_return'])
+            ax.set_title("💰 누적 수익률 추적")
+            html += plot_to_html(fig, "💰 누적 수익률 추적")
     except Exception as e:
         html += f"<p>5번 오류: {e}</p>"
 
     try:
         df = df_pred[df_pred['strategy'] == strategy]
-        df = df[df['status'].isin(['success', 'fail']) & df['model'].notna()]
-        df['result'] = df['status'].map({'success': 1, 'fail': 0})
-        df['date'] = df['timestamp'].dt.date
-        group = df.groupby(['model', 'date'])['result'].mean().reset_index()
-        fig, ax = plt.subplots(figsize=(5,2))
-        for m in group['model'].unique():
-            temp = group[group['model'] == m]
-            ax.plot(temp['date'], temp['result'], label=m)
-        ax.set_title("🧠 모델별 성공률 변화")
-        if ax.get_legend_handles_labels()[1]:
-            ax.legend()
-        html += plot_to_html(fig, "🧠 모델별 성공률 변화")
+        if {'status','model','timestamp'}.issubset(df.columns):
+            df = df[df['status'].isin(['success', 'fail']) & df['model'].notna()]
+            df['result'] = df['status'].map({'success': 1, 'fail': 0})
+            df['date'] = df['timestamp'].dt.date
+            group = df.groupby(['model', 'date'])['result'].mean().reset_index()
+            fig, ax = plt.subplots(figsize=(5,2))
+            for m in group['model'].unique():
+                temp = group[group['model'] == m]
+                ax.plot(temp['date'], temp['result'], label=m)
+            ax.set_title("🧠 모델별 성공률 변화")
+            if ax.get_legend_handles_labels()[1]: ax.legend()
+            html += plot_to_html(fig, "🧠 모델별 성공률 변화")
     except Exception as e:
         html += f"<p>6번 오류: {e}</p>"
 
     try:
-        df = df_audit[df_audit['strategy'] == strategy]
-        df = df.dropna(subset=['predicted_volatility', 'actual_volatility'])
-        df['predicted_volatility'] = pd.to_numeric(df['predicted_volatility'], errors='coerce')
-        df['actual_volatility'] = pd.to_numeric(df['actual_volatility'], errors='coerce')
-        fig, ax = plt.subplots(figsize=(5,2))
-        ax.plot(df['timestamp'], df['predicted_volatility'], label="예측 변동성")
-        ax.plot(df['timestamp'], df['actual_volatility'], label="실제 변동성")
-        if ax.get_legend_handles_labels()[1]:
-            ax.legend()
-        ax.set_title("🌪️ 변동성 예측 vs 실제 변동성")
-        html += plot_to_html(fig, "🌪️ 변동성 예측 vs 실제 변동성")
+        need_cols = {'predicted_volatility','actual_volatility','timestamp','strategy'}
+        if not df_audit.empty and need_cols.issubset(df_audit.columns):
+            df = df_audit[df_audit['strategy'] == strategy].dropna(subset=['predicted_volatility', 'actual_volatility'])
+            df['predicted_volatility'] = pd.to_numeric(df['predicted_volatility'], errors='coerce')
+            df['actual_volatility'] = pd.to_numeric(df['actual_volatility'], errors='coerce')
+            fig, ax = plt.subplots(figsize=(5,2))
+            ax.plot(df['timestamp'], df['predicted_volatility'], label="예측 변동성")
+            ax.plot(df['timestamp'], df['actual_volatility'], label="실제 변동성")
+            if ax.get_legend_handles_labels()[1]: ax.legend()
+            ax.set_title("🌪️ 변동성 예측 vs 실제 변동성")
+            html += plot_to_html(fig, "🌪️ 변동성 예측 vs 실제 변동성")
     except Exception as e:
         html += f"<p>7번 오류: {e}</p>"
 
