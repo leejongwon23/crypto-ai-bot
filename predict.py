@@ -77,7 +77,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
     - 메타러너 + (있으면) 진화형 메타러너 적용
     - 성공 판정/목표가 심볼·전략별 클래스 경계와 일관
     """
-    from evo_meta_learner import predict_evo_meta, get_best_strategy_by_failure_probability
+    # ⛳ 변경: get_best_strategy_by_failure_probability 제거
+    from evo_meta_learner import predict_evo_meta
     from meta_learning import get_meta_prediction
 
     ensure_failure_db()
@@ -127,13 +128,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "no_valid_model", label=-1)
             return None
 
-        recommended_strategy = get_best_strategy_by_failure_probability(
-            symbol=symbol, current_strategy=strategy,
-            feature_tensor=feature_tensor, model_outputs=model_outputs_list
-        )
-        if recommended_strategy and recommended_strategy != strategy:
-            print(f"[🔁 전략 교체됨] {strategy} → {recommended_strategy}")
-            strategy = recommended_strategy
+        # ⛳ 제거된 전략 교체 로직
+        # recommended_strategy = get_best_strategy_by_failure_probability(...)
+        # if recommended_strategy and recommended_strategy != strategy: ...
+        # → 현재 전략 유지
+        strategy = log_strategy
 
         meta_success_rate = {c: 0.5 for c in range(len(model_outputs_list[0]["probs"]))}
         final_pred_class = get_meta_prediction(
