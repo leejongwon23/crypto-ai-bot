@@ -56,7 +56,7 @@ class CacheManager:
 
     @classmethod
     def get(cls, key, ttl_sec=None):
-        now = time.time()
+        now = time.time();
         if key in cls._cache:
             if ttl_sec is None or now - cls._ttl.get(key, 0) < ttl_sec:
                 print(f"[캐시 HIT] {key}")
@@ -124,33 +124,40 @@ def get_btc_dominance():
         return BTC_DOMINANCE_CACHE["value"]
 
 # =========================
-# 데이터셋 생성
+# 데이터셋 생성 (반환값 항상 X, y)
 # =========================
 def create_dataset(features, window=10, strategy="단기", input_size=None):
+    """
+    features: list[dict] (timestamp, open/high/low/close/volume, …)
+    window:   시퀀스 길이
+    return:   (X, y)  —  항상 2개 반환 (호출부 호환성 유지)
+    """
     import pandas as pd
     from config import MIN_FEATURES
     from logger import log_prediction
-    from collections import Counter
-    import random
 
-    X, y = [], []
-
-    def get_symbol_safe():
-        if isinstance(features, list) and features and isinstance(features[0], dict) and "symbol" in features[0]:
-            return features[0]["symbol"]
-        return "UNKNOWN"
-
-    if not isinstance(features, list) or len(features) <= window:
-        print(f"[⚠️ 부족] features length={len(features) if isinstance(features, list) else 'Invalid'}, window={window} → dummy 반환")
-        dummy_X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
-        dummy_y = np.array([-1], dtype=np.int64)
-        log_prediction(symbol=get_symbol_safe(), strategy=strategy, direction="dummy", entry_price=0,
-                       target_price=0, model="dummy_model", success=False, reason="입력 feature 부족",
+    def _dummy(symbol_name):
+        # 최소 더미 (호출부가 shape 의존 시에도 안전)
+        X = np.zeros((max(1, window), window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
+        y = np.zeros((max(1, window),), dtype=np.int64)
+        log_prediction(symbol=symbol_name, strategy=strategy, direction="dummy", entry_price=0,
+                       target_price=0, model="dummy_model", success=False, reason="입력 feature 부족/실패",
                        rate=0.0, return_value=0.0, volatility=False, source="create_dataset",
-                       predicted_class=-1, label=-1)
-        return dummy_X, dummy_y
+                       predicted_class=0, label=0)
+        return X, y
+
+    # 심볼명 안전 추출
+    symbol_name = "UNKNOWN"
+    if isinstance(features, list) and features and isinstance(features[0], dict) and "symbol" in features[0]:
+        symbol_name = features[0]["symbol"]
+
+    # 기본 유효성
+    if not isinstance(features, list) or len(features) <= window:
+        print(f"[⚠️ 부족] features length={len(features) if isinstance(features, list) else 'Invalid'}, window={window}")
+        return _dummy(symbol_name)
 
     try:
+        # ---- DataFrame 정리 ----
         df = pd.DataFrame(features)
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
@@ -158,7 +165,8 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
         feature_cols = [c for c in df.columns if c not in ["timestamp"]]
         if not feature_cols:
-            raise ValueError("feature_cols 없음")
+            print("[❌ feature_cols 없음]")
+            return _dummy(symbol_name)
 
         # 최소 피처 보장
         if len(feature_cols) < MIN_FEATURES:
@@ -173,6 +181,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         df_scaled["timestamp"] = df["timestamp"].values
         df_scaled["high"] = df["high"] if "high" in df.columns else df["close"]
 
+        # 필요한 input_size로 패딩
         if input_size and len(feature_cols) < input_size:
             for i in range(len(feature_cols), input_size):
                 pad_col = f"pad_{i}"
@@ -180,30 +189,35 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
         features = df_scaled.to_dict(orient="records")
 
+        # ---- 라벨링(1차: lookahead 기반 최고가 대비 상승률) ----
         strategy_minutes = {"단기": 240, "중기": 1440, "장기": 2880}
         lookahead_minutes = strategy_minutes.get(strategy, 1440)
 
-        valid_gains, samples = [], []
+        samples = []
+        gains = []
 
         for i in range(window, len(features)):
             seq = features[i - window:i]
             base = features[i]
             entry_time = pd.to_datetime(base.get("timestamp"), errors="coerce")
             entry_price = float(base.get("close", 0.0))
+
             if pd.isnull(entry_time) or entry_price <= 0:
                 continue
 
-            future = [f for f in features[i + 1:] if pd.to_datetime(f.get("timestamp", None)) - entry_time <= pd.Timedelta(minutes=lookahead_minutes)]
+            future = [f for f in features[i + 1:]
+                      if pd.to_datetime(f.get("timestamp", None)) - entry_time <= pd.Timedelta(minutes=lookahead_minutes)]
             valid_prices = [f.get("high", f.get("close", entry_price)) for f in future if f.get("high", 0) > 0]
             if len(seq) != window or not valid_prices:
                 continue
 
             max_future_price = max(valid_prices)
             gain = float((max_future_price - entry_price) / (entry_price + 1e-6))
-            valid_gains.append(gain)
+            gains.append(gain)
 
             row_cols = [c for c in df_scaled.columns if c != "timestamp"]
             sample = [[float(r.get(c, 0.0)) for c in row_cols] for r in seq]
+
             if input_size:
                 for j in range(len(sample)):
                     row = sample[j]
@@ -213,37 +227,70 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                         sample[j] = row[:input_size]
             samples.append((sample, gain))
 
-        if not samples or not valid_gains:
-            print("[❌ 수익률 없음] dummy 반환")
-            dummy_X = np.random.normal(0, 1, size=(10, window, input_size if input_size else MIN_FEATURES)).astype(np.float32)
-            dummy_y = np.random.randint(0, 5, size=(10,))
-            return dummy_X, dummy_y
+        # ---- 안전망 1: lookahead로 샘플이 안 만들어졌다면, 인접 수익률로 3-클래스 라벨링 ----
+        if not samples:
+            print("[ℹ️ lookahead 기반 샘플 없음 → 인접 변화율로 3‑클래스 라벨링 사용]")
+            closes = df_scaled.get("close", None)
+            if closes is None:
+                return _dummy(symbol_name)
 
-        # 동적 클래스 수 추정 (최대 21, 최소 3)
-        min_gain, max_gain = min(valid_gains), max(valid_gains)
+            closes_np = df_scaled["close"].to_numpy()
+            pct = np.diff(closes_np) / (closes_np[:-1] + 1e-6)
+            thresh = 0.001  # ±0.1%를 보합으로
+
+            for i in range(window, len(df_scaled) - 1):
+                seq_rows = df_scaled.iloc[i - window:i]
+                # 라벨: 상승(2)/보합(1)/하락(0)
+                g = pct[i] if i < len(pct) else 0.0
+                if g > thresh:
+                    cls = 2
+                elif g < -thresh:
+                    cls = 0
+                else:
+                    cls = 1
+
+                row_cols = [c for c in df_scaled.columns if c != "timestamp"]
+                sample = [[float(r.get(c, 0.0)) for c in row_cols] for _, r in seq_rows.iterrows()]
+                if input_size:
+                    for j in range(len(sample)):
+                        row = sample[j]
+                        if len(row) < input_size:
+                            row.extend([0.0] * (input_size - len(row)))
+                        elif len(row) > input_size:
+                            sample[j] = row[:input_size]
+                samples.append((sample, cls))
+
+            X = np.array([s[0] for s in samples], dtype=np.float32)
+            y = np.array([s[1] for s in samples], dtype=np.int64)
+            if len(X) == 0:
+                return _dummy(symbol_name)
+            print(f"[✅ create_dataset 완료] (fallback 3‑class) 샘플 수: {len(y)}, X.shape={X.shape}")
+            return X, y
+
+        # ---- 정상: lookahead 기반을 클래스화 ----
+        min_gain, max_gain = min(gains), max(gains)
         spread = max_gain - min_gain
+        # 경험적 bin 너비 1% -> 최대 21클래스 제한
         est_class = int(spread / 0.01)
-        num_classes = max(3, min(21, est_class))
-
+        num_classes = max(3, min(21, est_class if est_class > 0 else 3))
         step = spread / num_classes if num_classes > 0 else 1e-6
         if step == 0:
             step = 1e-6
 
-        X, y = [], []
+        X_list, y_list = [], []
         for sample, gain in samples:
             cls = min(int((gain - min_gain) / step), num_classes - 1)
-            X.append(sample); y.append(cls)
+            X_list.append(sample)
+            y_list.append(cls)
 
-        X = np.array(X, dtype=np.float32)
-        y = np.array(y, dtype=np.int64)
+        X = np.array(X_list, dtype=np.float32)
+        y = np.array(y_list, dtype=np.int64)
         print(f"[✅ create_dataset 완료] 샘플 수: {len(y)}, X.shape={X.shape}, 동적 클래스 수: {num_classes}")
-        return X, y, num_classes  # ⬅ 필요 시 사용
+        return X, y
 
     except Exception as e:
         print(f"[❌ 최상위 예외] create_dataset 실패 → {e}")
-        dummy_X = np.random.normal(0, 1, size=(10, window, 8)).astype(np.float32)
-        dummy_y = np.random.randint(0, 5, size=(10,))
-        return dummy_X, dummy_y, 5
+        return _dummy(symbol_name)
 
 # =========================
 # 거래소 수집기
