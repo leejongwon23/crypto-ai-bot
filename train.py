@@ -8,11 +8,11 @@ from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import MinMaxScaler
 
-from data.utils import SYMBOLS, get_kline_by_strategy, compute_features
+from data.utils import SYMBOLS, get_kline_by_strategy, compute_features, create_dataset
 from model.base_model import get_model
 from model_weight_loader import get_model_weight
 from feature_importance import compute_feature_importance, save_feature_importance
-from failure_db import load_existing_failure_hashes, insert_failure_record, ensure_failure_db
+from failure_db import insert_failure_record, ensure_failure_db
 from logger import log_training_result
 from window_optimizer import find_best_window
 from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges, set_NUM_CLASSES
@@ -55,7 +55,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     """
     - SSL 사전학습 실행 (실패해도 계속)
     - 가격/피처 로드 → 라벨링 → 윈도우 시퀀스 구성
-    - 필요 시 클래스 밸런싱
+    - find_best_window()로 동적 윈도우 선택
+    - 필요 시 클래스 밸런싱 및 마지막 안전 보강(fallback)으로 스킵 최소화
     - [lstm, cnn_lstm, transformer] 각각 학습/평가/저장
     - 메타파일(.meta.json) 동시 저장
     """
@@ -73,39 +74,21 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
             print(f"[⏩ 스킵] {symbol}-{strategy}-group{group_id} → 데이터 없음")
-            log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
-                                loss=0.0, note="데이터 없음", status="skipped")
-            insert_failure_record({
-                "symbol": symbol, "strategy": strategy, "model": "all",
-                "predicted_class": -1, "success": False, "rate": "", "reason": "데이터 없음"
-            }, feature_vector=[])
+            _log_skip(symbol, strategy, "데이터 없음")
             return
 
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.empty or feat.isnull().any().any():
             print(f"[⏩ 스킵] {symbol}-{strategy}-group{group_id} → 피처 없음/NaN")
-            log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
-                                loss=0.0, note="피처 없음", status="skipped")
-            insert_failure_record({
-                "symbol": symbol, "strategy": strategy, "model": "all",
-                "predicted_class": -1, "success": False, "rate": "", "reason": "피처 없음"
-            }, feature_vector=[])
+            _log_skip(symbol, strategy, "피처 없음")
             return
-
-        features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
-        feat_scaled = MinMaxScaler().fit_transform(features_only)
 
         # 2) 클래스 경계/라벨링
         try:
             class_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=group_id)
         except Exception as e:
             print(f"[❌ 클래스 범위 계산 실패] {e}")
-            log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
-                                loss=0.0, note="클래스 계산 실패", status="failed")
-            insert_failure_record({
-                "symbol": symbol, "strategy": strategy, "model": "all",
-                "predicted_class": -1, "success": False, "rate": "", "reason": "클래스 계산 실패"
-            }, feature_vector=[])
+            _log_fail(symbol, strategy, "클래스 계산 실패")
             return
 
         num_classes = len(class_ranges)
@@ -121,33 +104,53 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                     break
             labels.append(idx)
 
-        # 3) 시퀀스 생성
-        window = 60
+        # 3) 동적 윈도우 선택
+        try:
+            best_window = find_best_window(symbol, strategy, window_list=[10, 20, 30, 40, 60])
+        except Exception as e:
+            print(f"[⚠️ find_best_window 실패] {e}")
+            best_window = 60
+        window = int(max(5, best_window))
+        print(f"[🔧 선택된 WINDOW] {symbol}-{strategy} → {window}")
+
+        # 4) 시퀀스 생성 (기본 경로)
+        features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
+        feat_scaled = MinMaxScaler().fit_transform(features_only)
+
         X, y = [], []
         for i in range(len(feat_scaled) - window):
             X.append(feat_scaled[i:i+window])
             y.append(labels[i + window] if i + window < len(labels) else 0)
         X, y = np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
+        print(f"[📊 초기 시퀀스] {symbol}-{strategy} → {len(y)}건")
+
+        # 4-1) 마지막 안전 보강: 샘플 너무 적으면 create_dataset fallback
+        if len(X) < 20:
+            print("[ℹ️ 안전 보강: create_dataset fallback 사용]")
+            # compute_features 결과를 feature dict로 변환
+            feat_records = feat.to_dict(orient="records")
+            try:
+                X_fb, y_fb = create_dataset(feat_records, window=window, strategy=strategy, input_size=FEATURE_INPUT_SIZE)
+                if isinstance(X_fb, np.ndarray) and len(X_fb) > 0:
+                    X, y = X_fb.astype(np.float32), y_fb.astype(np.int64)
+                    print(f"[✅ fallback 적용] 최종 샘플: {len(y)}")
+            except Exception as e:
+                print(f"[⚠️ fallback 실패] {e}")
 
         if len(X) < 10:
-            print(f"[⏩ 스킵] {symbol}-{strategy}-group{group_id} → 샘플 부족({len(X)})")
-            log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
-                                loss=0.0, note="최종 샘플 부족", status="skipped")
-            insert_failure_record({
-                "symbol": symbol, "strategy": strategy, "model": "all",
-                "predicted_class": -1, "success": False, "rate": "", "reason": "최종 샘플 부족"
-            }, feature_vector=[])
+            print(f"[⏩ 스킵] {symbol}-{strategy}-group{group_id} → 최종 샘플 부족({len(X)})")
+            _log_skip(symbol, strategy, "최종 샘플 부족")
             return
 
-        # 4) 밸런싱(필요 시)
+        # 5) 밸런싱(필요 시)
         try:
-            if len(X) < 50:
+            if len(X) < 200:  # 규모가 작을 때만 과도한 증강 방지
                 X, y = balance_classes(X, y, num_classes=num_classes)
                 print(f"[✅ 증강/밸런싱 완료] 총 샘플: {len(X)}")
         except Exception as e:
             print(f"[⚠️ 밸런싱 실패] {e}")
 
-        # 5) 학습/평가/저장 (모델 3종)
+        # 6) 학습/평가/저장 (모델 3종)
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             print(f"[🧠 학습 시작] {model_type} | {symbol}-{strategy}-group{group_id}")
             model = get_model(model_type, input_size=FEATURE_INPUT_SIZE, output_size=num_classes).to(DEVICE)
@@ -208,7 +211,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
 
-            # ✅ log_training_result 호출 형식 통일
             log_training_result(
                 symbol=symbol,
                 strategy=strategy,
@@ -216,7 +218,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 accuracy=float(acc),
                 f1=float(f1),
                 loss=float(total_loss),
-                note="train_one_model",
+                note=f"train_one_model(window={window})",
                 source_exchange="BYBIT",
                 status="success",
             )
@@ -232,6 +234,22 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             "symbol": symbol, "strategy": strategy, "model": "all",
             "predicted_class": -1, "success": False, "rate": "", "reason": str(e)
         }, feature_vector=[])
+
+def _log_skip(symbol, strategy, reason):
+    log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
+                        loss=0.0, note=reason, status="skipped")
+    insert_failure_record({
+        "symbol": symbol, "strategy": strategy, "model": "all",
+        "predicted_class": -1, "success": False, "rate": "", "reason": reason
+    }, feature_vector=[])
+
+def _log_fail(symbol, strategy, reason):
+    log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
+                        loss=0.0, note=reason, status="failed")
+    insert_failure_record({
+        "symbol": symbol, "strategy": strategy, "model": "all",
+        "predicted_class": -1, "success": False, "rate": "", "reason": reason
+    }, feature_vector=[])
 
 # --------------------------------------------------
 # 전체 학습 루틴
@@ -258,15 +276,14 @@ def train_models(symbol_list):
                 max_gid = len(groups) - 1
             except Exception as e:
                 print(f"[❌ 클래스 경계 계산 실패] {symbol}-{strategy}: {e}")
-                log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
-                                    loss=0.0, note=f"클래스 계산 실패: {e}", status="failed")
+                _log_fail(symbol, strategy, f"클래스 계산 실패: {e}")
                 continue
 
             for gid in range(max_gid + 1):
                 train_one_model(symbol, strategy, group_id=gid)
                 time.sleep(0.5)
 
-    # 메타 보정(있다면)
+    # 메타 보정
     try:
         import maintenance_fix_meta
         maintenance_fix_meta.fix_all_meta_json()
