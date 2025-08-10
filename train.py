@@ -2,6 +2,7 @@ import os, json, time, traceback
 from datetime import datetime
 import pytz
 import numpy as np
+import pandas as pd  # ⬅ 추가: 미래 수익률 계산에 필요
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
@@ -48,13 +49,76 @@ def get_feature_hash_from_tensor(x, use_full=False, precision=3):
     except Exception:
         return "invalid"
 
+
+def _log_skip(symbol, strategy, reason):
+    log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
+                        loss=0.0, note=reason, status="skipped")
+    insert_failure_record({
+        "symbol": symbol, "strategy": strategy, "model": "all",
+        "predicted_class": -1, "success": False, "rate": "", "reason": reason
+    }, feature_vector=[])
+
+
+def _log_fail(symbol, strategy, reason):
+    log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
+                        loss=0.0, note=reason, status="failed")
+    insert_failure_record({
+        "symbol": symbol, "strategy": strategy, "model": "all",
+        "predicted_class": -1, "success": False, "rate": "", "reason": reason
+    }, feature_vector=[])
+
+
+def _strategy_horizon_hours(strategy: str) -> int:
+    """전략별 평가 구간(시간). predict/evaluate와 합치기 위해 동일 기준 사용."""
+    return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
+
+
+def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
+    """
+    각 시점 t에 대해 [t, t+horizon] 구간의 'max(high)'를 사용하여
+    미래 최대 수익률을 계산 ( (max_high - close_t) / close_t ).
+    길이는 df와 동일하게 맞춤. 마지막 구간은 데이터 부족 시 0으로 채움.
+    """
+    if df is None or df.empty or "timestamp" not in df.columns:
+        return np.zeros(len(df), dtype=np.float32)
+
+    ts = pd.to_datetime(df["timestamp"], errors="coerce")
+    close = df["close"].astype(float).values
+    high = (df["high"] if "high" in df.columns else df["close"]).astype(float).values
+
+    # 타임존 정규화
+    if ts.dt.tz is None:
+        ts = ts.dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+    else:
+        ts = ts.dt.tz_convert("Asia/Seoul")
+
+    out = np.zeros(len(df), dtype=np.float32)
+    horizon = pd.Timedelta(hours=horizon_hours)
+
+    # 슬라이딩 윈도우 방식(간단 구현)
+    j_start = 0
+    for i in range(len(df)):
+        t0 = ts.iloc[i]
+        t1 = t0 + horizon
+        # j 커서 앞으로 이동
+        j = max(j_start, i)
+        max_h = high[i]
+        while j < len(df) and ts.iloc[j] <= t1:
+            if high[j] > max_h:
+                max_h = high[j]
+            j += 1
+        j_start = max(j_start, i)  # 커서 관리(최적화 미세)
+        base = close[i] if close[i] > 0 else (close[i] + 1e-6)
+        out[i] = float((max_h - base) / (base + 1e-12))
+    return out.astype(np.float32)
+
 # --------------------------------------------------
 # 단일 (symbol, strategy, group_id) 모델 학습
 # --------------------------------------------------
 def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
     """
     - SSL 사전학습 실행 (실패해도 계속)
-    - 가격/피처 로드 → 라벨링 → 윈도우 시퀀스 구성
+    - 가격/피처 로드 → (미래 수익률 기반) 라벨링 → 윈도우 시퀀스 구성
     - find_best_window()로 동적 윈도우 선택
     - 필요 시 클래스 밸런싱 및 마지막 안전 보강(fallback)으로 스킵 최소화
     - [lstm, cnn_lstm, transformer] 각각 학습/평가/저장
@@ -83,7 +147,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             _log_skip(symbol, strategy, "피처 없음")
             return
 
-        # 2) 클래스 경계/라벨링
+        # 2) 클래스 경계/라벨링 (✅ 미래 수익률 기반)
         try:
             class_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=group_id)
         except Exception as e:
@@ -94,15 +158,20 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         num_classes = len(class_ranges)
         set_NUM_CLASSES(num_classes)
 
-        returns = df["close"].pct_change().fillna(0).values
+        # 미래 수익률
+        horizon_hours = _strategy_horizon_hours(strategy)
+        future_gains = _future_returns_by_timestamp(df, horizon_hours=horizon_hours)
+
+        # 클래스 매핑
         labels = []
-        for r in returns:
+        for r in future_gains:
             idx = 0
             for i, (lo, hi) in enumerate(class_ranges):
                 if lo <= r <= hi:
                     idx = i
                     break
             labels.append(idx)
+        labels = np.array(labels, dtype=np.int64)
 
         # 3) 동적 윈도우 선택
         try:
@@ -118,19 +187,25 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         feat_scaled = MinMaxScaler().fit_transform(features_only)
 
         X, y = [], []
+        # 윈도우 끝 시점의 '미래 수익률 라벨'을 정답으로 사용
         for i in range(len(feat_scaled) - window):
             X.append(feat_scaled[i:i+window])
-            y.append(labels[i + window] if i + window < len(labels) else 0)
+            y_idx = i + window - 1  # 윈도우 끝 시점 인덱스
+            y.append(labels[y_idx] if 0 <= y_idx < len(labels) else 0)
         X, y = np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
         print(f"[📊 초기 시퀀스] {symbol}-{strategy} → {len(y)}건")
 
         # 4-1) 마지막 안전 보강: 샘플 너무 적으면 create_dataset fallback
         if len(X) < 20:
             print("[ℹ️ 안전 보강: create_dataset fallback 사용]")
-            # compute_features 결과를 feature dict로 변환
             feat_records = feat.to_dict(orient="records")
             try:
-                X_fb, y_fb = create_dataset(feat_records, window=window, strategy=strategy, input_size=FEATURE_INPUT_SIZE)
+                # create_dataset은 미래 수익률 기반(look-ahead) 로직을 내장
+                res = create_dataset(feat_records, window=window, strategy=strategy, input_size=FEATURE_INPUT_SIZE)
+                if isinstance(res, tuple) and len(res) >= 2:
+                    X_fb, y_fb = res[0], res[1]
+                else:
+                    X_fb, y_fb = res
                 if isinstance(X_fb, np.ndarray) and len(X_fb) > 0:
                     X, y = X_fb.astype(np.float32), y_fb.astype(np.int64)
                     print(f"[✅ fallback 적용] 최종 샘플: {len(y)}")
@@ -234,22 +309,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             "symbol": symbol, "strategy": strategy, "model": "all",
             "predicted_class": -1, "success": False, "rate": "", "reason": str(e)
         }, feature_vector=[])
-
-def _log_skip(symbol, strategy, reason):
-    log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
-                        loss=0.0, note=reason, status="skipped")
-    insert_failure_record({
-        "symbol": symbol, "strategy": strategy, "model": "all",
-        "predicted_class": -1, "success": False, "rate": "", "reason": reason
-    }, feature_vector=[])
-
-def _log_fail(symbol, strategy, reason):
-    log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
-                        loss=0.0, note=reason, status="failed")
-    insert_failure_record({
-        "symbol": symbol, "strategy": strategy, "model": "all",
-        "predicted_class": -1, "success": False, "rate": "", "reason": reason
-    }, feature_vector=[])
 
 # --------------------------------------------------
 # 전체 학습 루틴
