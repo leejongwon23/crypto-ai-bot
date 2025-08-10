@@ -6,6 +6,7 @@ import pytz
 import os
 from matplotlib import font_manager
 
+# ✅ 한글 + 이모지 폰트
 font_paths = [
     os.path.join("fonts", "NanumGothic-Regular.ttf"),
     "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"
@@ -24,11 +25,12 @@ AUDIT_LOG = "/persistent/logs/evaluation_audit.csv"
 
 def load_df(path):
     df = pd.read_csv(path)
-    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-    if df['timestamp'].dt.tz is None:
-        df['timestamp'] = df['timestamp'].dt.tz_localize('UTC').dt.tz_convert('Asia/Seoul')
-    else:
-        df['timestamp'] = df['timestamp'].dt.tz_convert('Asia/Seoul')
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        if getattr(df["timestamp"].dt, "tz", None) is None:
+            df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+        else:
+            df["timestamp"] = df["timestamp"].dt.tz_convert("Asia/Seoul")
     return df
 
 def plot_to_html(fig, title):
@@ -58,98 +60,112 @@ def generate_visuals_for_strategy(strategy):
         df_audit = pd.DataFrame()
         html += f"<p>audit_log.csv 로드 실패: {e}</p>"
 
+    # 1) 최근 성공률 추이
     try:
-        df = df_pred[df_pred['strategy'] == strategy]
-        df['date'] = df['timestamp'].dt.date
-        df['result'] = df['status'].map({'success': 1, 'fail': 0})
-        sr = df[df['status'].isin(['success', 'fail'])].groupby('date')['result'].mean().reset_index()
-        fig, ax = plt.subplots(figsize=(5,2))
-        ax.plot(sr['date'], sr['result'])
-        ax.set_title("📈 최근 성공률 추이")
-        html += plot_to_html(fig, "📈 최근 성공률 추이")
+        need = {"strategy", "timestamp", "status"}
+        if need.issubset(df_pred.columns):
+            df = df_pred[df_pred["strategy"] == strategy].copy()
+            df["date"] = df["timestamp"].dt.date
+            df["result"] = df["status"].map({"success": 1, "fail": 0})
+            sr = df[df["status"].isin(["success", "fail"])].groupby("date")["result"].mean().reset_index()
+            if not sr.empty:
+                fig, ax = plt.subplots(figsize=(5, 2))
+                ax.plot(sr["date"], sr["result"])
+                ax.set_title("📈 최근 성공률 추이")
+                html += plot_to_html(fig, "📈 최근 성공률 추이")
     except Exception as e:
         html += f"<p>1번 오류: {e}</p>"
 
+    # 2) 예측 vs 실제 수익률
     try:
-        if not df_audit.empty and {'predicted_return','actual_return','strategy'}.issubset(df_audit.columns):
-            df = df_audit[df_audit['strategy'] == strategy]
-            fig, ax = plt.subplots(figsize=(5,2))
-            ax.scatter(df['predicted_return'], df['actual_return'], alpha=0.5)
+        if not df_audit.empty and {"predicted_return", "actual_return", "strategy"}.issubset(df_audit.columns):
+            df = df_audit[df_audit["strategy"] == strategy].copy()
+            fig, ax = plt.subplots(figsize=(5, 2))
+            ax.scatter(df["predicted_return"], df["actual_return"], alpha=0.5)
             ax.set_xlabel("예측 수익률"); ax.set_ylabel("실제 수익률")
             ax.set_title("🎯 예측 vs 실제 수익률")
             html += plot_to_html(fig, "🎯 예측 vs 실제 수익률")
     except Exception as e:
         html += f"<p>2번 오류: {e}</p>"
 
+    # 3) 오답학습 전후 정확도
     try:
-        need_cols = {'accuracy_before','accuracy_after','strategy','timestamp'}
+        need_cols = {"accuracy_before", "accuracy_after", "strategy", "timestamp"}
         if not df_audit.empty and need_cols.issubset(df_audit.columns):
-            df = df_audit.dropna(subset=['accuracy_before', 'accuracy_after'])
-            df = df[df['strategy'] == strategy].copy()
-            df['accuracy_before'] = pd.to_numeric(df['accuracy_before'], errors='coerce')
-            df['accuracy_after'] = pd.to_numeric(df['accuracy_after'], errors='coerce')
-            fig, ax = plt.subplots(figsize=(5,2))
-            ax.plot(df['timestamp'], df['accuracy_before'], label="Before")
-            ax.plot(df['timestamp'], df['accuracy_after'], label="After")
+            df = df_audit.dropna(subset=["accuracy_before", "accuracy_after"]).copy()
+            df = df[df["strategy"] == strategy]
+            df["accuracy_before"] = pd.to_numeric(df["accuracy_before"], errors="coerce")
+            df["accuracy_after"] = pd.to_numeric(df["accuracy_after"], errors="coerce")
+            fig, ax = plt.subplots(figsize=(5, 2))
+            ax.plot(df["timestamp"], df["accuracy_before"], label="Before")
+            ax.plot(df["timestamp"], df["accuracy_after"], label="After")
             if ax.get_legend_handles_labels()[1]: ax.legend()
             ax.set_title("📚 오답학습 전후 정확도 변화")
             html += plot_to_html(fig, "📚 오답학습 전후 정확도 변화")
     except Exception as e:
         html += f"<p>3번 오류: {e}</p>"
 
+    # 4) 최근 예측 히트맵
     try:
-        df = df_pred[df_pred['strategy'] == strategy]
-        df = df[df['status'].isin(['success', 'fail'])]
-        df['result'] = df['status'].map({'success': 1, 'fail': 0})
-        df = df.sort_values('timestamp', ascending=False).head(20)
-        pivot = df.pivot(index='symbol', columns='timestamp', values='result')
-        fig, ax = plt.subplots(figsize=(5,2))
-        data = pivot.fillna(0).values if not pivot.empty else np.zeros((1,1))
-        ax.imshow(data, cmap='Greens', aspect='auto')
-        ax.set_title("🧩 최근 예측 히트맵")
-        ax.set_yticks([]); ax.set_xticks([])
-        html += plot_to_html(fig, "🧩 최근 예측 히트맵")
+        need = {"strategy", "timestamp", "status", "symbol"}
+        if need.issubset(df_pred.columns):
+            df = df_pred[df_pred["strategy"] == strategy].copy()
+            df = df[df["status"].isin(["success", "fail"])]
+            df["result"] = df["status"].map({"success": 1, "fail": 0})
+            df = df.sort_values("timestamp", ascending=False).head(20)
+            pivot = df.pivot(index="symbol", columns="timestamp", values="result")
+            fig, ax = plt.subplots(figsize=(5, 2))
+            data = pivot.fillna(0).values if not pivot.empty else np.zeros((1, 1))
+            ax.imshow(data, cmap="Greens", aspect="auto")
+            ax.set_title("🧩 최근 예측 히트맵")
+            ax.set_yticks([]); ax.set_xticks([])
+            html += plot_to_html(fig, "🧩 최근 예측 히트맵")
     except Exception as e:
         html += f"<p>4번 오류: {e}</p>"
 
+    # 5) 누적 수익률 추적
     try:
-        if not df_audit.empty and {'actual_return','timestamp','strategy'}.issubset(df_audit.columns):
-            df = df_audit[df_audit['strategy'] == strategy].dropna(subset=['actual_return']).sort_values('timestamp')
-            df['date'] = df['timestamp'].dt.date
-            df['cum_return'] = df['actual_return'].cumsum()
-            fig, ax = plt.subplots(figsize=(5,2))
-            ax.plot(df['date'], df['cum_return'])
+        if not df_audit.empty and {"actual_return", "timestamp", "strategy"}.issubset(df_audit.columns):
+            df = df_audit[df_audit["strategy"] == strategy].dropna(subset=["actual_return"]).sort_values("timestamp").copy()
+            df["date"] = df["timestamp"].dt.date
+            df["cum_return"] = df["actual_return"].cumsum()
+            fig, ax = plt.subplots(figsize=(5, 2))
+            ax.plot(df["date"], df["cum_return"])
             ax.set_title("💰 누적 수익률 추적")
             html += plot_to_html(fig, "💰 누적 수익률 추적")
     except Exception as e:
         html += f"<p>5번 오류: {e}</p>"
 
+    # 6) 모델별 성공률 변화
     try:
-        df = df_pred[df_pred['strategy'] == strategy]
-        if {'status','model','timestamp'}.issubset(df.columns):
-            df = df[df['status'].isin(['success', 'fail']) & df['model'].notna()]
-            df['result'] = df['status'].map({'success': 1, 'fail': 0})
-            df['date'] = df['timestamp'].dt.date
-            group = df.groupby(['model', 'date'])['result'].mean().reset_index()
-            fig, ax = plt.subplots(figsize=(5,2))
-            for m in group['model'].unique():
-                temp = group[group['model'] == m]
-                ax.plot(temp['date'], temp['result'], label=m)
-            ax.set_title("🧠 모델별 성공률 변화")
-            if ax.get_legend_handles_labels()[1]: ax.legend()
-            html += plot_to_html(fig, "🧠 모델별 성공률 변화")
+        need = {"strategy", "timestamp", "status", "model"}
+        if need.issubset(df_pred.columns):
+            df = df_pred[df_pred["strategy"] == strategy].copy()
+            df = df[df["status"].isin(["success", "fail"]) & df["model"].notna()]
+            df["result"] = df["status"].map({"success": 1, "fail": 0})
+            df["date"] = df["timestamp"].dt.date
+            group = df.groupby(["model", "date"])["result"].mean().reset_index()
+            if not group.empty:
+                fig, ax = plt.subplots(figsize=(5, 2))
+                for m in group["model"].unique():
+                    temp = group[group["model"] == m]
+                    ax.plot(temp["date"], temp["result"], label=m)
+                ax.set_title("🧠 모델별 성공률 변화")
+                if ax.get_legend_handles_labels()[1]: ax.legend()
+                html += plot_to_html(fig, "🧠 모델별 성공률 변화")
     except Exception as e:
         html += f"<p>6번 오류: {e}</p>"
 
+    # 7) 변동성 예측 vs 실제
     try:
-        need_cols = {'predicted_volatility','actual_volatility','timestamp','strategy'}
+        need_cols = {"predicted_volatility", "actual_volatility", "timestamp", "strategy"}
         if not df_audit.empty and need_cols.issubset(df_audit.columns):
-            df = df_audit[df_audit['strategy'] == strategy].dropna(subset=['predicted_volatility', 'actual_volatility'])
-            df['predicted_volatility'] = pd.to_numeric(df['predicted_volatility'], errors='coerce')
-            df['actual_volatility'] = pd.to_numeric(df['actual_volatility'], errors='coerce')
-            fig, ax = plt.subplots(figsize=(5,2))
-            ax.plot(df['timestamp'], df['predicted_volatility'], label="예측 변동성")
-            ax.plot(df['timestamp'], df['actual_volatility'], label="실제 변동성")
+            df = df_audit[df_audit["strategy"] == strategy].dropna(subset=["predicted_volatility", "actual_volatility"]).copy()
+            df["predicted_volatility"] = pd.to_numeric(df["predicted_volatility"], errors="coerce")
+            df["actual_volatility"] = pd.to_numeric(df["actual_volatility"], errors="coerce")
+            fig, ax = plt.subplots(figsize=(5, 2))
+            ax.plot(df["timestamp"], df["predicted_volatility"], label="예측 변동성")
+            ax.plot(df["timestamp"], df["actual_volatility"], label="실제 변동성")
             if ax.get_legend_handles_labels()[1]: ax.legend()
             ax.set_title("🌪️ 변동성 예측 vs 실제 변동성")
             html += plot_to_html(fig, "🌪️ 변동성 예측 vs 실제 변동성")
