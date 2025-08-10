@@ -1,3 +1,4 @@
+import os  # ✅ 추가: prediction_log 존재 확인에 필요
 import pandas as pd
 import time
 import traceback
@@ -65,7 +66,7 @@ def run():
 
                 df = get_kline_by_strategy(symbol, strategy)
                 if df is None or len(df) < 60:
-                    print(f"[⛔ 데이터 부족] {symbol}-{strategy} → {len(df) if df is not None else 0}개")
+                    print(f"[⛔ 데이터 부족] {symbol}-{strategy} → {len(df) if isinstance(df, pd.DataFrame) else 0}개")
                     continue
 
                 if check_pre_burst_conditions(df, strategy):
