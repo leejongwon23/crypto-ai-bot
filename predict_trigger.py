@@ -1,4 +1,5 @@
-import os  # ✅ 추가: prediction_log 존재 확인에 필요
+# === predict_trigger.py (최종본) ===
+import os  # ✅ prediction_log 존재 확인/경로
 import pandas as pd
 import time
 import traceback
@@ -96,13 +97,22 @@ def get_recent_class_frequencies(strategy=None, recent_days=3):
         if not os.path.exists(path):
             return Counter()
         df = pd.read_csv(path, encoding="utf-8-sig")
-        if "predicted_class" not in df.columns:
+        if "predicted_class" not in df.columns or "timestamp" not in df.columns:
             return Counter()
         if strategy:
             df = df[df["strategy"] == strategy]
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        cutoff = pd.Timestamp.now() - pd.Timedelta(days=recent_days)
+
+        # ⛑️ 타임존 안전화
+        ts = pd.to_datetime(df["timestamp"], errors="coerce")
+        if getattr(ts.dt, "tz", None) is None:
+            ts = ts.dt.tz_localize("Asia/Seoul")
+        else:
+            ts = ts.dt.tz_convert("Asia/Seoul")
+        df["timestamp"] = ts
+
+        cutoff = pd.Timestamp.now(tz="Asia/Seoul") - pd.Timedelta(days=recent_days)
         df = df[df["timestamp"] >= cutoff]
+
         return Counter(df["predicted_class"].dropna().astype(int))
     except Exception as e:
         print(f"[⚠️ get_recent_class_frequencies 예외] {e}")
@@ -115,11 +125,13 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
         probs = probs[0]
     num_classes = len(probs)
     total_recent = sum(recent_freq.values()) + 1e-6
+
     recent_weights = np.array([
         np.exp(-alpha * (recent_freq.get(i, 0) / total_recent))
         for i in range(num_classes)
     ])
     recent_weights = np.clip(recent_weights, 0.85, 1.15)
+
     if class_counts:
         total_class = sum(class_counts.values()) + 1e-6
         class_weights = np.array([
@@ -128,8 +140,12 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
         ])
     else:
         class_weights = np.exp(np.ones(num_classes) * beta)
+
     class_weights = np.clip(class_weights, 0.85, 1.15)
     combined_weights = np.clip(recent_weights * class_weights, 0.85, 1.15)
     adjusted = probs * combined_weights
-    adjusted /= adjusted.sum()
+    s = adjusted.sum()
+    if s <= 0:
+        return probs  # ⛑️ 원본 반환(가중치가 모두 0으로 붕괴하는 경우)
+    adjusted /= s
     return adjusted
