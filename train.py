@@ -2,7 +2,7 @@ import os, json, time, traceback
 from datetime import datetime
 import pytz
 import numpy as np
-import pandas as pd  # ⬅ 추가: 미래 수익률 계산에 필요
+import pandas as pd  # ⬅ 미래 수익률 계산에 필요
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
@@ -15,7 +15,7 @@ from model_weight_loader import get_model_weight
 from feature_importance import compute_feature_importance, save_feature_importance
 from failure_db import insert_failure_record, ensure_failure_db
 from logger import log_training_result
-from window_optimizer import find_best_window
+from window_optimizer import find_best_window   # ⬅ (X, y) 시그니처 기준
 from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges, set_NUM_CLASSES
 from data_augmentation import balance_classes
 
@@ -100,14 +100,13 @@ def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.nda
     for i in range(len(df)):
         t0 = ts.iloc[i]
         t1 = t0 + horizon
-        # j 커서 앞으로 이동
         j = max(j_start, i)
         max_h = high[i]
         while j < len(df) and ts.iloc[j] <= t1:
             if high[j] > max_h:
                 max_h = high[j]
             j += 1
-        j_start = max(j_start, i)  # 커서 관리(최적화 미세)
+        j_start = max(j_start, i)
         base = close[i] if close[i] > 0 else (close[i] + 1e-6)
         out[i] = float((max_h - base) / (base + 1e-12))
     return out.astype(np.float32)
@@ -174,20 +173,19 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         labels = np.array(labels, dtype=np.int64)
 
         # 3) 동적 윈도우 선택
+        # [FIX] window_optimizer API 정합: (X, y)로 호출
+        features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
+        feat_scaled = MinMaxScaler().fit_transform(features_only)
         try:
-            best_window = find_best_window(symbol, strategy, window_list=[10, 20, 30, 40, 60])
+            best_window = find_best_window(feat_scaled, labels, min_window=10, max_window=60, step=10)
         except Exception as e:
             print(f"[⚠️ find_best_window 실패] {e}")
             best_window = 60
         window = int(max(5, best_window))
         print(f"[🔧 선택된 WINDOW] {symbol}-{strategy} → {window}")
 
-        # 4) 시퀀스 생성 (기본 경로)
-        features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
-        feat_scaled = MinMaxScaler().fit_transform(features_only)
-
+        # 4) 시퀀스 생성 (윈도우 끝 시점 라벨 사용)
         X, y = [], []
-        # 윈도우 끝 시점의 '미래 수익률 라벨'을 정답으로 사용
         for i in range(len(feat_scaled) - window):
             X.append(feat_scaled[i:i+window])
             y_idx = i + window - 1  # 윈도우 끝 시점 인덱스
@@ -200,8 +198,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             print("[ℹ️ 안전 보강: create_dataset fallback 사용]")
             feat_records = feat.to_dict(orient="records")
             try:
-                # create_dataset은 미래 수익률 기반(look-ahead) 로직을 내장
                 res = create_dataset(feat_records, window=window, strategy=strategy, input_size=FEATURE_INPUT_SIZE)
+                # [FIX] create_dataset 반환 가드: 2개/3개 모두 허용
                 if isinstance(res, tuple) and len(res) >= 2:
                     X_fb, y_fb = res[0], res[1]
                 else:
