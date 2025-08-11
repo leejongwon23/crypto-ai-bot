@@ -20,7 +20,7 @@ CSV_MAX_MB = int(os.getenv("SAFE_CSV_MAX_MB", "50"))             # 초과하면 
 CSV_BACKUPS = int(os.getenv("SAFE_CSV_BACKUPS", "3"))            # 롤오버 보관 개수
 
 MAX_MODELS_KEEP_GLOBAL = int(os.getenv("SAFE_MAX_MODELS_KEEP_GLOBAL", "200"))  # models 전체 상한
-MAX_MODELS_PER_KEY = int(os.getenv("SAFE_MAX_MODELS_PER_KEY", "2"))           # 같은 키(심볼/전략) 보관 개수
+MAX_MODELS_PER_KEY = int(os.getenv("SAFE_MAX_MODELS_PER_KEY", "2"))           # 같은 키(심볼/전략/모델) 보관 개수
 
 DRYRUN = os.getenv("SAFE_CLEANUP_DRYRUN", "0") == "1"            # 삭제 시도만 로그(실제 삭제 X)
 
@@ -142,12 +142,10 @@ def _limit_models_per_key(deleted_log):
     buckets = defaultdict(list)
     for p in files:
         base = os.path.basename(p)
-        # 키 추출(확장자 제거)
         key = base.split(".")[0]
-        # 심플 키(심볼_전략_모델명)만 남기고 group/cls는 같이 묶임
         parts = key.split("_")
         if len(parts) >= 3:
-            simple = "_".join(parts[:3])
+            simple = "_".join(parts[:3])  # SYMBOL_전략_모델타입
         else:
             simple = key
         buckets[simple].append(p)
