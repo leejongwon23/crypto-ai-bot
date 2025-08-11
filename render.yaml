@@ -2,9 +2,9 @@ services:
   - type: web
     name: yopo-ai
     env: python
-    plan: standard  # ✅ 여기만 'free' → 'standard' 로 변경
+    plan: standard
     buildCommand: pip install -r requirements.txt
-    startCommand: PYTHONUNBUFFERED=1 python ./app.py
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 180 --workers 1 --threads 2
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
