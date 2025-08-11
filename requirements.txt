@@ -1,26 +1,26 @@
-flask
-requests
-pandas
+flask==3.1.1
+requests==2.32.4
+pandas==2.3.1
 numpy==1.26.4
-scikit-learn
+scikit-learn==1.6.1
 python-telegram-bot==13.15
 APScheduler==3.6.3
 pytz>=2023.3
-gunicorn
+gunicorn==21.2.0
 
 # ✅ torch CPU 전용
 torch==2.1.2+cpu
 -f https://download.pytorch.org/whl/cpu/torch_stable.html
 
 # ✅ 시각화
-matplotlib
+matplotlib==3.10.5
 
 # ✅ 모델들
-xgboost
-imbalanced-learn
+xgboost==3.0.3
+imbalanced-learn==0.13.0
 
 # ✅ 피처 생성
-ta
+ta==0.11.0
 
 # ✅ 옵티마이저
 ranger-adabelief==0.1.0
