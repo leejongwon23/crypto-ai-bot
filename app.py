@@ -78,7 +78,8 @@ def yopo_health():
     model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
     model_info = {}
     for f in model_files:
-        m = re.match(r"(.+?)_(단기|중기|장기)_(lstm|cnn_lstm|transformer)\.pt", f)
+        # ✅ 접미사 허용 정규식으로 보정
+        m = re.match(r"(.+?)_(단기|중기|장기)_(lstm|cnn_lstm|transformer)(?:_.*)?\.pt$", f)
         if m:
             symbol, strat, mtype = m.groups()
             model_info.setdefault(strat, {}).setdefault(symbol, set()).add(mtype)
@@ -304,8 +305,8 @@ def reset_all():
         _kline_cache.clear(); _feature_cache.clear()
 
         ensure_prediction_log_exists()
-        clear_csv(WRONG_PREDICTIONS, ["timestamp","symbol","strategy","direction","entry_price","target_price","gain"])
-        clear_csv(LOG_FILE, ["timestamp","symbol","strategy","model","accuracy","f1","loss"])
+        clear_csv(WRONG_PREDICTIONS, ["timestamp","symbol","strategy","direction","entry_price","target_price","model","predicted_class","top_k","note","success","reason","rate","return_value","label","group_id","model_symbol","model_name","source","volatility","source_exchange"])
+        clear_csv(LOG_FILE, ["timestamp","symbol","strategy","model","accuracy","f1","loss","note","source_exchange","status"])
         clear_csv(AUDIT_LOG, ["timestamp","symbol","strategy","result","status"])
         clear_csv(MESSAGE_LOG, ["timestamp","symbol","strategy","message"])
         clear_csv(FAILURE_LOG, ["symbol","strategy","failures"])
