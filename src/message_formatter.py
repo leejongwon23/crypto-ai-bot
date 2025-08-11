@@ -51,9 +51,3 @@ def format_message(data):
 
     message += f"\n추천 사유: {reason}\n\n(기준시각: {now_kst()} KST)"
     return message
-
-    if isinstance(score, (float, int)) and not math.isnan(score):
-        message += f"\n스코어: {score:.5f}"
-
-    message += f"\n추천 사유: {reason}\n\n(기준시각: {now_kst()} KST)"
-    return message
