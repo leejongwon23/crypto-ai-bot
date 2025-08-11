@@ -14,8 +14,16 @@ from train import train_symbol_group_loop
 import maintenance_fix_meta
 from logger import ensure_prediction_log_exists
 
+# ✅ cleanup 모듈 경로 보정 (src/에서 실행하든, 루트에서 실행하든 동작)
+try:
+    from scheduler_cleanup import start_cleanup_scheduler   # [ADD]
+    import safe_cleanup                                      # [ADD]
+except ImportError:
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from scheduler_cleanup import start_cleanup_scheduler    # [ADD]
+    import safe_cleanup                                      # [ADD]
+
 # ✅ 서버 시작 직전 용량 정리 (예외 가드)
-import safe_cleanup
 try:
     safe_cleanup.cleanup_logs_and_models()
 except Exception as e:
@@ -353,6 +361,10 @@ if __name__ == "__main__":
         try:
             threading.Thread(target=train_symbol_group_loop, daemon=True).start()
             print("✅ 학습 루프 스레드 시작")
+
+            # ✅ 정리 스케줄러(기본 30분) 시작 — 평가 스케줄러보다 먼저
+            start_cleanup_scheduler()  # [ADD]
+
             try:
                 start_scheduler(); print("✅ 스케줄러 시작 완료")
             except Exception as e:
