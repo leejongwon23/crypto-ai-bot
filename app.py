@@ -1,4 +1,4 @@
-# === app.py 최종본 (Flask 3.1 / gunicorn 호환) ===
+# === app.py (patched) ===
 from flask import Flask, jsonify, request
 from recommend import main
 import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv, re
@@ -16,12 +16,12 @@ from logger import ensure_prediction_log_exists
 
 # ✅ cleanup 모듈 경로 보정 (src/에서 실행하든, 루트에서 실행하든 동작)
 try:
-    from scheduler_cleanup import start_cleanup_scheduler   # [ADD]
-    import safe_cleanup                                      # [ADD]
+    from scheduler_cleanup import start_cleanup_scheduler   # [KEEP]
+    import safe_cleanup                                      # [KEEP]
 except ImportError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from scheduler_cleanup import start_cleanup_scheduler    # [ADD]
-    import safe_cleanup                                      # [ADD]
+    from scheduler_cleanup import start_cleanup_scheduler    # [KEEP]
+    import safe_cleanup                                      # [KEEP]
 
 # ✅ 서버 시작 직전 용량 정리 (예외 가드)
 try:
@@ -49,22 +49,47 @@ ensure_prediction_log_exists()
 
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
+# -----------------------------
+# 스케줄러 (평가/트리거/메타복구)
+# -----------------------------
+_sched = None
 def start_scheduler():
+    global _sched
+    if _sched is not None:
+        print("⚠️ 스케줄러 이미 실행 중, 재시작 생략"); sys.stdout.flush()
+        return
+
     print(">>> 스케줄러 시작"); sys.stdout.flush()
     sched = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
 
     # ✅ 전략별 평가(30분마다)
     def 평가작업(strategy):
         def wrapped():
-            evaluate_predictions(lambda sym, _: get_kline_by_strategy(sym, strategy))
+            try:
+                ts = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"[EVAL][{ts}] 전략={strategy} 시작"); sys.stdout.flush()
+                evaluate_predictions(lambda sym, _: get_kline_by_strategy(sym, strategy))
+            except Exception as e:
+                print(f"[EVAL] {strategy} 실패: {e}")
         threading.Thread(target=wrapped, daemon=True).start()
 
     for strat in ["단기", "중기", "장기"]:
-        sched.add_job(lambda s=strat: 평가작업(s), trigger="interval", minutes=30)
+        sched.add_job(lambda s=strat: 평가작업(s), trigger="interval", minutes=30, id=f"eval_{strat}", replace_existing=True)
 
-    # ✅ 기타 트리거
-    sched.add_job(trigger_run, "interval", minutes=30)
+    # ✅ 예측 트리거(메타적용 포함) 30분
+    sched.add_job(trigger_run, "interval", minutes=30, id="predict_trigger", replace_existing=True)
+
+    # ✅ 메타 JSON 정합성/복구 주기작업 (30분)  ← [ADD]
+    def meta_fix_job():
+        try:
+            maintenance_fix_meta.fix_all_meta_json()
+        except Exception as e:
+            print(f"[META-FIX] 주기작업 실패: {e}")
+    sched.add_job(meta_fix_job, "interval", minutes=30, id="meta_fix", replace_existing=True)
+
     sched.start()
+    _sched = sched
+    print("✅ 스케줄러 시작 완료"); sys.stdout.flush()
 
 # ===== Flask =====
 app = Flask(__name__)
@@ -94,15 +119,15 @@ def _init_background_once():
             start_cleanup_scheduler()
             print("✅ cleanup 스케줄러 시작")
 
-            # 평가/트리거 스케줄러
+            # 평가/트리거/메타복구 스케줄러
             try:
-                start_scheduler(); print("✅ 스케줄러 시작 완료")
+                start_scheduler()
             except Exception as e:
                 print(f"⚠️ 스케줄러 시작 실패: {e}")
 
-            # 메타 보정
+            # 메타 보정(부팅 시 1회 선 실행)
             threading.Thread(target=maintenance_fix_meta.fix_all_meta_json, daemon=True).start()
-            print("✅ maintenance_fix_meta 실행 완료")
+            print("✅ maintenance_fix_meta 초기 실행 트리거")
 
             # 텔레그램 알림
             try:
@@ -137,14 +162,18 @@ def yopo_health():
     for name, path in file_map.items():
         try:
             logs[name] = pd.read_csv(path, encoding="utf-8-sig", on_bad_lines="skip")
-            logs[name] = logs[name][logs[name]["timestamp"].notna()] if "timestamp" in logs[name] else logs[name]
-        except:
+            if "timestamp" in logs[name]:
+                logs[name] = logs[name][logs[name]["timestamp"].notna()]
+        except Exception:
             logs[name] = pd.DataFrame()
 
-    model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
+    # 모델 파일 파싱 (접미사 허용 정규식)
+    try:
+        model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
+    except Exception:
+        model_files = []
     model_info = {}
     for f in model_files:
-        # ✅ 접미사 허용 정규식으로 보정
         m = re.match(r"(.+?)_(단기|중기|장기)_(lstm|cnn_lstm|transformer)(?:_.*)?\.pt$", f)
         if m:
             symbol, strat, mtype = m.groups()
@@ -152,21 +181,28 @@ def yopo_health():
 
     for strat in ["단기", "중기", "장기"]:
         try:
-            pred, train, audit = logs["pred"], logs["train"], logs["audit"]
+            pred  = logs.get("pred",  pd.DataFrame())
+            train = logs.get("train", pd.DataFrame())
+            audit = logs.get("audit", pd.DataFrame())
             pred  = pred.query(f"strategy == '{strat}'")  if not pred.empty  else pd.DataFrame()
             train = train.query(f"strategy == '{strat}'") if not train.empty else pd.DataFrame()
             audit = audit.query(f"strategy == '{strat}'") if not audit.empty else pd.DataFrame()
 
-            if "status" in pred.columns:
+            if not pred.empty and "status" in pred.columns:
                 pred["volatility"] = pred["status"].astype(str).str.startswith("v_")
             else:
                 pred["volatility"] = False
 
-            pred["return"] = pd.to_numeric(pred.get("return", pd.Series()), errors="coerce").fillna(0)
+            # return or rate
+            try:
+                pred["return"] = pd.to_numeric(pred.get("return", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+            except Exception:
+                pred["return"] = 0.0
+
             nvol = pred[~pred["volatility"]] if not pred.empty else pd.DataFrame()
             vol  = pred[ pred["volatility"]] if not pred.empty else pd.DataFrame()
 
-            stat = lambda df, s: len(df[df["status"] == s]) if not df.empty and "status" in df.columns else 0
+            stat = lambda df, s: int(((not df.empty) and ("status" in df.columns)) and (df["status"]==s).sum()) or 0
             sn, fn, pn_, fnl = map(lambda s: stat(nvol, s), ["success", "fail", "pending", "failed"])
             sv, fv, pv, fvl = map(lambda s: stat(vol,  s), ["v_success", "v_fail", "pending", "failed"])
 
@@ -175,10 +211,10 @@ def yopo_health():
                     s = stat(df, "v_success" if kind == "변동성" else "success")
                     f = stat(df, "v_fail"    if kind == "변동성" else "fail")
                     t = s + f
-                    avg = df["return"].mean()
+                    avg = float(df["return"].mean()) if ("return" in df) and (df.shape[0]>0) else 0.0
                     return {"succ": s, "fail": f, "succ_rate": s/t*100 if t else 0,
-                            "fail_rate": f/t*100 if t else 0, "r_avg": avg if pd.notna(avg) else 0, "total": t}
-                except:
+                            "fail_rate": f/t*100 if t else 0, "r_avg": avg, "total": t}
+                except Exception:
                     return {"succ": 0, "fail": 0, "succ_rate": 0, "fail_rate": 0, "r_avg": 0, "total": 0}
 
             pn, pv_stats = perf(nvol, "일반"), perf(vol, "변동성")
@@ -188,34 +224,42 @@ def yopo_health():
             for mtypes in strat_models.values():
                 for t in mtypes: types[t] += 1
             trained_syms = [s for s, t in strat_models.items() if {"lstm","cnn_lstm","transformer"}.issubset(t)]
-            untrained = sorted(set(SYMBOLS) - set(trained_syms))
+            try:
+                untrained = sorted(set(SYMBOLS) - set(trained_syms))
+            except Exception:
+                untrained = []
 
             if sum(types.values()) == 0: problems.append(f"{strat}: 모델 없음")
             if sn + fn + pn_ + fnl + sv + fv + pv + fvl == 0: problems.append(f"{strat}: 예측 없음")
-            if pn["succ"] + pn["fail"] == 0: problems.append(f"{strat}: 평가 미작동")
+            if pn["total"] == 0: problems.append(f"{strat}: 평가 미작동")
             if pn["fail_rate"]  > 50: problems.append(f"{strat}: 일반 실패율 {pn['fail_rate']:.1f}%")
             if pv_stats["fail_rate"] > 50: problems.append(f"{strat}: 변동성 실패율 {pv_stats['fail_rate']:.1f}%")
 
             table = "<i style='color:gray'>최근 예측 없음 또는 컬럼 부족</i>"
-            required_cols = {"timestamp","symbol","direction","return","rate","status"}
-            if pred.shape[0] > 0 and required_cols.issubset(set(pred.columns)):
+            required_cols = {"timestamp","symbol","direction","return","status"}
+            if (pred.shape[0] > 0) and required_cols.issubset(set(pred.columns)):
                 recent10 = pred.sort_values("timestamp").tail(10).copy()
                 rows = []
                 for _, r in recent10.iterrows():
                     rtn = r.get("return", 0.0) or r.get("rate", 0.0)
                     try: rtn_pct = f"{float(rtn) * 100:.2f}%"
                     except: rtn_pct = "0.00%"
-                    status_icon = '✅' if r['status'] in ['success','v_success'] else '❌' if r['status'] in ['fail','v_fail'] else '⏳' if r['status']=='pending' else '🛑'
-                    rows.append(f"<tr><td>{r['timestamp']}</td><td>{r['symbol']}</td><td>{r['direction']}</td><td>{rtn_pct}</td><td>{status_icon}</td></tr>")
-                table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>종목</th><th>방향</th><th>수익률</th><th>상태</th></tr>" + "".join(rows) + "</table>"
+                    s = str(r.get('status',''))
+                    status_icon = '✅' if s in ['success','v_success'] else '❌' if s in ['fail','v_fail'] else '⏳' if s in ['pending','v_pending'] else '🛑'
+                    rows.append(f"<tr><td>{r.get('timestamp','')}</td><td>{r.get('symbol','')}</td><td>{r.get('direction','')}</td><td>{rtn_pct}</td><td>{status_icon}</td></tr>")
+                table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>심볼</th><th>방향</th><th>수익률</th><th>상태</th></tr>" + "".join(rows) + "</table>"
+
+            last_train = train['timestamp'].iloc[-1] if (not train.empty and 'timestamp' in train) else '없음'
+            last_pred  = pred['timestamp'].iloc[-1]  if (not pred.empty and 'timestamp' in pred)  else '없음'
+            last_audit = audit['timestamp'].iloc[-1] if (not audit.empty and 'timestamp' in audit) else '없음'
 
             info_html = f"""<div style='border:1px solid #aaa;margin:16px 0;padding:10px;font-family:monospace;background:#f8f8f8;'>
 <b style='font-size:16px;'>📌 전략: {strat}</b><br>
 - 모델 수: {sum(types.values())} (lstm={types['lstm']}, cnn={types['cnn_lstm']}, trans={types['transformer']})<br>
 - 심볼 수: {len(SYMBOLS)} | 완전학습: {len(trained_syms)} | 미완성: {len(untrained)}<br>
-- 최근 학습: {train['timestamp'].iloc[-1] if not train.empty else '없음'}<br>
-- 최근 예측: {pred['timestamp'].iloc[-1] if not pred.empty else '없음'}<br>
-- 최근 평가: {audit['timestamp'].iloc[-1] if not audit.empty else '없음'}<br>
+- 최근 학습: {last_train}<br>
+- 최근 예측: {last_pred}<br>
+- 최근 평가: {last_audit}<br>
 - 예측 (일반): {sn + fn + pn_ + fnl}건 (✅{sn} ❌{fn} ⏳{pn_} 🛑{fnl})<br>
 - 예측 (변동성): {sv + fv + pv + fvl}건 (✅{sv} ❌{fv} ⏳{pv} 🛑{fvl})<br>
 <b style='color:#000088'>🎯 일반 예측</b>: {pn['total']}건 | {percent(pn['succ_rate'])} / {percent(pn['fail_rate'])} / {pn['r_avg']:.2f}%<br>
@@ -281,7 +325,7 @@ def list_models():
 @app.route("/check-log-full")
 def check_log_full():
     try:
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
         latest = df.sort_values(by="timestamp", ascending=False).head(100)
         return jsonify(latest.to_dict(orient="records"))
     except Exception as e:
@@ -293,6 +337,8 @@ def check_log():
         if not os.path.exists(PREDICTION_LOG):
             return jsonify({"error": "prediction_log.csv 없음"})
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
+        if "timestamp" not in df:
+            return jsonify([])
         df = df[df["timestamp"].notna()]
         return jsonify(df.tail(10).to_dict(orient='records'))
     except Exception as e:
@@ -304,7 +350,7 @@ def check_eval_log():
         path = PREDICTION_LOG
         if not os.path.exists(path): return "예측 로그 없음"
 
-        df = pd.read_csv(path, encoding="utf-8-sig")
+        df = pd.read_csv(path, encoding="utf-8-sig", on_bad_lines="skip")
         if "status" not in df.columns: return "상태 컬럼 없음"
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
@@ -347,6 +393,14 @@ def train_selected_symbols():
         return f"✅ {len(symbols)}개 심볼 학습 시작됨"
     except Exception as e:
         return f"❌ 학습 실패: {e}", 500
+
+@app.route("/meta-fix-now")  # ← [ADD] 필요 시 즉시 메타 복구
+def meta_fix_now():
+    try:
+        maintenance_fix_meta.fix_all_meta_json()
+        return "✅ meta.json 점검/복구 완료"
+    except Exception as e:
+        return f"⚠️ 실패: {e}", 500
 
 @app.route("/reset-all")
 def reset_all():
