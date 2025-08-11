@@ -10,4 +10,14 @@ services:
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
+      - key: SAFE_CLEANUP_INTERVAL_MIN
+        value: "30"
+      - key: DISK_SOFT_LIMIT_GB
+        value: "9.5"
+      - key: DISK_HARD_LIMIT_GB
+        value: "9.8"
+      - key: MAX_LOG_AGE_DAYS
+        value: "7"
+      - key: KEEP_RECENT_MODELS_PER_SYMBOL
+        value: "3"
     healthCheckPath: /ping
