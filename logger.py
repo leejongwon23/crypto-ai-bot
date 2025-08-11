@@ -315,36 +315,26 @@ def ensure_prediction_log_exists():
         print("✅ prediction_log.csv 이미 존재")
 
 # -------------------------
-# ✅ 누락되었던 get_available_models 구현
+# ✅ 고정: get_available_models (정규식 기반, cnn_lstm 정확 인식)
 # -------------------------
 def get_available_models(symbol: str):
     """
     모델 디렉토리에서 해당 symbol의 (lstm|cnn_lstm|transformer) 모델을 모두 수집
     반환 형식: [{"pt_file": "...pt", "model_type":"lstm"}, ...]
+    파일명 예: {symbol}_{strategy}_{model_type}_group{gid}_cls{N}.pt  (접미사는 옵션)
     """
+    import re
     MODEL_DIR = "/persistent/models"
     result = []
     try:
+        pat = re.compile(rf"^{re.escape(symbol)}_(단기|중기|장기)_(lstm|cnn_lstm|transformer)(?:_.*)?\.pt$")
         for f in os.listdir(MODEL_DIR):
-            if not f.startswith(f"{symbol}_"):
-                continue
             if not f.endswith(".pt"):
                 continue
-            parts = f.split("_")
-            # expected: symbol_strategy_model[...].pt
-            if len(parts) < 3:
+            m = pat.match(f)
+            if not m:
                 continue
-            model_type = parts[2].split(".")[0]
-            if model_type not in ["lstm", "cnn_lstm", "transformer"]:
-                # 허용: 접미사 포함(ex: transformer_group0_cls20.pt)
-                if any(mt in model_type for mt in ["lstm", "cnn_lstm", "transformer"]):
-                    # 추출
-                    for mt in ["cnn_lstm", "transformer", "lstm"]:
-                        if mt in model_type:
-                            model_type = mt
-                            break
-                else:
-                    continue
+            model_type = m.group(2)  # lstm | cnn_lstm | transformer
             result.append({"pt_file": f, "model_type": model_type})
     except Exception as e:
         print(f"[get_available_models 오류] {e}")
