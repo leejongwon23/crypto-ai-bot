@@ -21,24 +21,8 @@ from config import (
 )
 from data_augmentation import balance_classes
 
-# --- window_optimizer: 단/복수 함수명 모두 대응 ---
-try:
-    from window_optimizer import find_best_window as _find_best_window_api
-    def find_best_window(X, y, min_window=10, max_window=60, step=10):
-        return _find_best_window_api(X, y, min_window=min_window, max_window=max_window, step=step)
-except Exception:
-    try:
-        from window_optimizer import find_best_windows as _find_best_windows_api
-        def find_best_window(X, y, min_window=10, max_window=60, step=10):
-            # 리스트를 주는 구현일 수 있어 첫 후보 사용
-            win_list = _find_best_windows_api(X, y, min_window=min_window, max_window=max_window, step=step)
-            if isinstance(win_list, (list, tuple)) and len(win_list) > 0:
-                return int(win_list[0])
-            return max_window
-    except Exception:
-        # 완전 실패 시 안전 기본값
-        def find_best_window(X, y, min_window=10, max_window=60, step=10):
-            return max_window
+# --- window_optimizer: 정식 API 직접 임포트 ---
+from window_optimizer import find_best_window
 
 # --- ssl_pretrain: 없으면 no-op ---
 try:
@@ -165,8 +149,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         # 3) 동적 윈도우
         features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         feat_scaled = MinMaxScaler().fit_transform(features_only)
+
         try:
-            best_window = find_best_window(feat_scaled, labels, min_window=10, max_window=60, step=10)
+            window_list = [10, 20, 30, 40, 60]
+            best_window = find_best_window(symbol, strategy, window_list=window_list, group_id=group_id)
         except Exception as e:
             print(f"[⚠️ find_best_window 실패] {e}"); best_window = 60
         window = int(max(5, best_window))
