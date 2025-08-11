@@ -1,4 +1,4 @@
-# === recommend.py (최종본) ===
+# === recommend.py (수정본) ===
 import os
 import csv
 import time
@@ -9,7 +9,7 @@ import pytz
 
 from predict import predict
 from data.utils import SYMBOLS, get_kline_by_strategy
-from logger import log_prediction, strategy_stats, get_strategy_eval_count
+from logger import log_prediction  # ⬅️ 불필요/없는 심볼 임포트 제거
 from telegram_bot import send_message
 
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
