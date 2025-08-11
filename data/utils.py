@@ -17,6 +17,7 @@ BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"  # Binance Futures (USDT-M)
 BTC_DOMINANCE_CACHE = {"value": 0.5, "timestamp": 0}
 
+# ⚠️ SYMBOLS/SYMBOL_GROUPS는 프로젝트에서 data.utils를 기준으로 사용하므로 유지
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT",
     "AVAXUSDT", "DOGEUSDT", "MATICUSDT", "DOTUSDT", "TRXUSDT",
@@ -31,21 +32,25 @@ SYMBOLS = [
     "KAVAUSDT", "BATUSDT", "ZILUSDT", "WAVESUSDT", "OCEANUSDT",
     "1INCHUSDT", "YFIUSDT", "STGUSDT", "GALAUSDT", "IMXUSDT"
 ]
-
 # ✅ 고정 순서 유지하며 5개씩 묶어 SYMBOL_GROUPS 구성
 SYMBOL_GROUPS = [SYMBOLS[i:i + 5] for i in range(0, len(SYMBOLS), 5)]
 
-STRATEGY_CONFIG = {
-    "단기": {"interval": "240", "limit": 1000},   # 4시간봉 (240분)
-    "중기": {"interval": "D",   "limit": 500},    # 1일봉
-    "장기": {"interval": "D",   "limit": 500}     # 1일봉(장기)
-}
-
-# 거래소별 심볼 매핑
+# ✅ 거래소별 심볼 매핑
 SYMBOL_MAP = {
     "bybit": {s: s for s in SYMBOLS},
     "binance": {s: s for s in SYMBOLS}
 }
+
+# ✅ 전략 설정은 단일 소스(config.py)를 따른다
+try:
+    from config import STRATEGY_CONFIG  # {"단기":{"interval":"240","limit":1000,"binance_interval":"4h"}, ...}
+except Exception:
+    # 최후 안전망(만약 config 임포트가 실패하면)
+    STRATEGY_CONFIG = {
+        "단기": {"interval": "240", "limit": 1000, "binance_interval": "4h"},
+        "중기": {"interval": "D",   "limit": 500,  "binance_interval": "1d"},
+        "장기": {"interval": "D",   "limit": 500,  "binance_interval": "1d"},
+    }
 
 # =========================
 # 캐시 매니저 (이 파일 내부 사용)
@@ -56,7 +61,7 @@ class CacheManager:
 
     @classmethod
     def get(cls, key, ttl_sec=None):
-        now = time.time();
+        now = time.time()
         if key in cls._cache:
             if ttl_sec is None or now - cls._ttl.get(key, 0) < ttl_sec:
                 print(f"[캐시 HIT] {key}")
@@ -76,7 +81,7 @@ class CacheManager:
     def delete(cls, key):
         if key in cls._cache:
             del cls._cache[key]
-            del cls._ttl[key]
+            cls._ttl.pop(key, None)
             print(f"[캐시 DELETE] {key}")
 
     @classmethod
@@ -130,14 +135,13 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
     """
     features: list[dict] (timestamp, open/high/low/close/volume, …)
     window:   시퀀스 길이
-    return:   (X, y)  —  항상 2개 반환 (호출부 호환성 유지)
+    return:   (X, y) — 항상 2개 반환
     """
     import pandas as pd
     from config import MIN_FEATURES
     from logger import log_prediction
 
     def _dummy(symbol_name):
-        # 최소 더미 (호출부가 shape 의존 시에도 안전)
         X = np.zeros((max(1, window), window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
         y = np.zeros((max(1, window),), dtype=np.int64)
         log_prediction(symbol=symbol_name, strategy=strategy, direction="dummy", entry_price=0,
@@ -146,29 +150,25 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                        predicted_class=0, label=0)
         return X, y
 
-    # 심볼명 안전 추출
     symbol_name = "UNKNOWN"
     if isinstance(features, list) and features and isinstance(features[0], dict) and "symbol" in features[0]:
         symbol_name = features[0]["symbol"]
 
-    # 기본 유효성
     if not isinstance(features, list) or len(features) <= window:
         print(f"[⚠️ 부족] features length={len(features) if isinstance(features, list) else 'Invalid'}, window={window}")
         return _dummy(symbol_name)
 
     try:
-        # ---- DataFrame 정리 ----
         df = pd.DataFrame(features)
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         df = df.drop(columns=["strategy"], errors="ignore")
 
-        feature_cols = [c for c in df.columns if c not in ["timestamp"]]
+        feature_cols = [c for c in df.columns if c != "timestamp"]
         if not feature_cols:
             print("[❌ feature_cols 없음]")
             return _dummy(symbol_name)
 
-        # 최소 피처 보장
         if len(feature_cols) < MIN_FEATURES:
             for i in range(len(feature_cols), MIN_FEATURES):
                 pad_col = f"pad_{i}"
@@ -181,7 +181,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         df_scaled["timestamp"] = df["timestamp"].values
         df_scaled["high"] = df["high"] if "high" in df.columns else df["close"]
 
-        # 필요한 input_size로 패딩
         if input_size and len(feature_cols) < input_size:
             for i in range(len(feature_cols), input_size):
                 pad_col = f"pad_{i}"
@@ -189,13 +188,11 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
         features = df_scaled.to_dict(orient="records")
 
-        # ---- 라벨링(1차: lookahead 기반 최고가 대비 상승률) ----
+        # lookahead 기반 라벨링
         strategy_minutes = {"단기": 240, "중기": 1440, "장기": 2880}
         lookahead_minutes = strategy_minutes.get(strategy, 1440)
 
-        samples = []
-        gains = []
-
+        samples, gains = [], []
         for i in range(window, len(features)):
             seq = features[i - window:i]
             base = features[i]
@@ -227,27 +224,16 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                         sample[j] = row[:input_size]
             samples.append((sample, gain))
 
-        # ---- 안전망 1: lookahead로 샘플이 안 만들어졌다면, 인접 수익률로 3-클래스 라벨링 ----
         if not samples:
             print("[ℹ️ lookahead 기반 샘플 없음 → 인접 변화율로 3‑클래스 라벨링 사용]")
-            closes = df_scaled.get("close", None)
-            if closes is None:
-                return _dummy(symbol_name)
-
             closes_np = df_scaled["close"].to_numpy()
             pct = np.diff(closes_np) / (closes_np[:-1] + 1e-6)
-            thresh = 0.001  # ±0.1%를 보합으로
+            thresh = 0.001  # ±0.1%
 
             for i in range(window, len(df_scaled) - 1):
                 seq_rows = df_scaled.iloc[i - window:i]
-                # 라벨: 상승(2)/보합(1)/하락(0)
                 g = pct[i] if i < len(pct) else 0.0
-                if g > thresh:
-                    cls = 2
-                elif g < -thresh:
-                    cls = 0
-                else:
-                    cls = 1
+                cls = 2 if g > thresh else (0 if g < -thresh else 1)
 
                 row_cols = [c for c in df_scaled.columns if c != "timestamp"]
                 sample = [[float(r.get(c, 0.0)) for c in row_cols] for _, r in seq_rows.iterrows()]
@@ -267,10 +253,8 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             print(f"[✅ create_dataset 완료] (fallback 3‑class) 샘플 수: {len(y)}, X.shape={X.shape}")
             return X, y
 
-        # ---- 정상: lookahead 기반을 클래스화 ----
         min_gain, max_gain = min(gains), max(gains)
         spread = max_gain - min_gain
-        # 경험적 bin 너비 1% -> 최대 21클래스 제한
         est_class = int(spread / 0.01)
         num_classes = max(3, min(21, est_class if est_class > 0 else 3))
         step = spread / num_classes if num_classes > 0 else 1e-6
@@ -293,7 +277,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         return _dummy(symbol_name)
 
 # =========================
-# 거래소 수집기
+# 거래소 수집기(Bybit)
 # =========================
 def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
     real_symbol = SYMBOL_MAP["bybit"].get(symbol, symbol)
@@ -363,20 +347,31 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
             break
 
     if collected_data:
-        df = pd.concat(collected_data, ignore_index=True) \
-               .drop_duplicates(subset=["timestamp"]) \
-               .sort_values("timestamp") \
-               .reset_index(drop=True)
+        df = (pd.concat(collected_data, ignore_index=True)
+              .drop_duplicates(subset=["timestamp"])
+              .sort_values("timestamp")
+              .reset_index(drop=True))
         print(f"[📊 수집 완료] {symbol}-{interval} → 총 {len(df)}개 봉 확보")
         return df
     else:
         print(f"[❌ 최종 실패] {symbol}-{interval} → 수집된 봉 없음")
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
 
+# =========================
+# 거래소 수집기(Binance)
+# =========================
 def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
     real_symbol = SYMBOL_MAP["binance"].get(symbol, symbol)
-    interval_map = {"240": "4h", "D": "1d", "2D": "2d", "60": "1h"}
-    binance_interval = interval_map.get(interval, "1h")
+
+    # config의 binance_interval 우선 사용
+    _bin_iv = None
+    for name, cfg in STRATEGY_CONFIG.items():
+        if cfg.get("interval") == interval:
+            _bin_iv = cfg.get("binance_interval")
+            break
+    if _bin_iv is None:
+        interval_map = {"240": "4h", "D": "1d", "2D": "2d", "60": "1h"}
+        _bin_iv = interval_map.get(interval, "1h")
 
     target_rows = int(limit)
     collected_data, total_rows = [], 0
@@ -389,7 +384,7 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
                 request_limit = min(1000, rows_needed)
                 params = {
                     "symbol": real_symbol,
-                    "interval": binance_interval,
+                    "interval": _bin_iv,
                     "limit": request_limit
                 }
                 if end_time is not None:
@@ -408,8 +403,8 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
                     "close_time", "quote_asset_volume", "trades", "taker_base_vol", "taker_quote_vol", "ignore"
                 ])
                 df_chunk = df_chunk[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
-                df_chunk["timestamp"] = pd.to_datetime(df_chunk["timestamp"], unit="ms", errors="coerce") \
-                                          .dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+                df_chunk["timestamp"] = (pd.to_datetime(df_chunk["timestamp"], unit="ms", errors="coerce")
+                                          .dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul"))
                 df_chunk = df_chunk.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
                 df_chunk["datetime"] = df_chunk["timestamp"]
 
@@ -437,16 +432,19 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
             break
 
     if collected_data:
-        df = pd.concat(collected_data, ignore_index=True) \
-               .drop_duplicates(subset=["timestamp"]) \
-               .sort_values("timestamp") \
-               .reset_index(drop=True)
+        df = (pd.concat(collected_data, ignore_index=True)
+              .drop_duplicates(subset=["timestamp"])
+              .sort_values("timestamp")
+              .reset_index(drop=True))
         print(f"[📊 Binance 수집 완료] {symbol}-{interval} → 총 {len(df)}개 봉 확보")
         return df
     else:
         print(f"[❌ 최종 실패] {symbol}-{interval} → 수집된 봉 없음")
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
 
+# =========================
+# (옵션) 통합 수집 + 병합 도우미
+# =========================
 def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
     config = STRATEGY_CONFIG.get(strategy)
     if not config:
@@ -482,16 +480,12 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
         print(f"[✅ {source_name} 수집 완료] {symbol}-{strategy} → {len(df_final)}개")
         return df_final
 
-    # 1차 Bybit 수집
     df_bybit = fetch_until_target(get_kline, "Bybit")
-
-    # 2차 Binance 보충
     df_binance = pd.DataFrame()
     if len(df_bybit) < base_limit:
         print(f"[⏳ Binance 보충 시작] 부족 {base_limit - len(df_bybit)}개")
         df_binance = fetch_until_target(get_kline_binance, "Binance")
 
-    # 병합
     df_all = pd.concat([df_bybit, df_binance], ignore_index=True)
     if df_all.empty:
         print(f"[⏩ 학습 스킵] {symbol}-{strategy} → 거래소 데이터 전무")
@@ -512,7 +506,7 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
     return df_all
 
 # =========================
-# 전략별 Kline 수집(캐시포함)
+# 전략별 Kline 수집(캐시 포함, 기본 엔트리)
 # =========================
 def get_kline_by_strategy(symbol: str, strategy: str):
     cache_key = f"{symbol}-{strategy}"
@@ -522,11 +516,11 @@ def get_kline_by_strategy(symbol: str, strategy: str):
         return cached_df
 
     try:
-        config = STRATEGY_CONFIG.get(strategy, {"limit": 300})
-        limit = config.get("limit", 300)
-        interval = config.get("interval", "D")
+        cfg = STRATEGY_CONFIG.get(strategy, {"limit": 300, "interval": "D"})
+        limit = int(cfg.get("limit", 300))
+        interval = cfg.get("interval", "D")
 
-        # 1차: Bybit 반복 수집
+        # 1) Bybit 반복 수집
         df_bybit = []
         total_bybit = 0
         end_time = None
@@ -541,12 +535,12 @@ def get_kline_by_strategy(symbol: str, strategy: str):
             if len(df_chunk) < limit:
                 break
 
-        df_bybit = pd.concat(df_bybit, ignore_index=True) \
-            .drop_duplicates(subset=["timestamp"]) \
-            .sort_values("timestamp") \
-            .reset_index(drop=True) if df_bybit else pd.DataFrame()
+        df_bybit = (pd.concat(df_bybit, ignore_index=True)
+                    .drop_duplicates(subset=["timestamp"])
+                    .sort_values("timestamp")
+                    .reset_index(drop=True)) if df_bybit else pd.DataFrame()
 
-        # 2차: Binance 보완 수집
+        # 2) Binance 보완 수집
         df_binance = []
         total_binance = 0
         if len(df_bybit) < int(limit * 0.9):
@@ -566,17 +560,17 @@ def get_kline_by_strategy(symbol: str, strategy: str):
                     print(f"[❌ Binance 수집 실패] {symbol}-{strategy} → {be}")
                     break
 
-        df_binance = pd.concat(df_binance, ignore_index=True) \
-            .drop_duplicates(subset=["timestamp"]) \
-            .sort_values("timestamp") \
-            .reset_index(drop=True) if df_binance else pd.DataFrame()
+        df_binance = (pd.concat(df_binance, ignore_index=True)
+                      .drop_duplicates(subset=["timestamp"])
+                      .sort_values("timestamp")
+                      .reset_index(drop=True)) if df_binance else pd.DataFrame()
 
-        # 병합
+        # 3) 병합 + 정리
         df_list = [df for df in [df_bybit, df_binance] if not df.empty]
-        df = pd.concat(df_list, ignore_index=True) \
-            .drop_duplicates(subset=["timestamp"]) \
-            .sort_values("timestamp") \
-            .reset_index(drop=True) if df_list else pd.DataFrame()
+        df = (pd.concat(df_list, ignore_index=True)
+              .drop_duplicates(subset=["timestamp"])
+              .sort_values("timestamp")
+              .reset_index(drop=True)) if df_list else pd.DataFrame()
 
         total_count = len(df)
         if total_count < limit:
@@ -646,7 +640,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     elif "timestamp" not in df.columns:
         df["timestamp"] = pd.to_datetime("now", utc=True).tz_convert("Asia/Seoul")
 
-    df["strategy"] = strategy  # 로그용
+    df["strategy"] = strategy
     base_cols = ["open", "high", "low", "close", "volume"]
     for col in base_cols:
         if col not in df.columns:
@@ -660,7 +654,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         return df  # 최소 반환
 
     try:
-        # ✅ 기본 기술지표
+        # 기본 기술지표
         df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
         delta = df["close"].diff()
         gain = delta.where(delta > 0, 0).rolling(window=14, min_periods=1).mean()
@@ -687,7 +681,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df["stoch_d"] = ta.momentum.stoch_signal(df["high"], df["low"], df["close"], fillna=True)
         df["vwap"] = (df["volume"] * df["close"]).cumsum() / (df["volume"].cumsum() + 1e-6)
 
-        # ✅ 스케일링 및 패딩
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.fillna(0, inplace=True)
 
