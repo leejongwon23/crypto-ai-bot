@@ -1,10 +1,8 @@
-# === app.py (Gunicorn용 안정화 버전) ===
 from flask import Flask, jsonify, request
 import os, sys, re, csv, shutil, threading, traceback, datetime
 import pandas as pd
 import pytz
 
-# ----- 내부 모듈 (루트에 존재 가정) -----
 from logger import ensure_prediction_log_exists
 from telegram_bot import send_message
 from data.utils import SYMBOLS, get_kline_by_strategy, SYMBOL_GROUPS
@@ -15,7 +13,6 @@ import safe_cleanup
 from scheduler_cleanup import start_cleanup_scheduler
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# 선택적으로 쓰는 것들(없어도 앱은 뜨도록 import 지연)
 try:
     from recommend import main
 except Exception:
@@ -30,30 +27,23 @@ except Exception:
     def trigger_run():
         pass
 
-# ===== 공통 경로 =====
 PERSIST_DIR   = "/persistent"
 LOG_DIR       = os.path.join(PERSIST_DIR, "logs")
 MODEL_DIR     = os.path.join(PERSIST_DIR, "models")
 PREDICTION_LOG= os.path.join(PERSIST_DIR, "prediction_log.csv")
-
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# ===== 부팅 직후 최소한의 준비 =====
 try:
-    # 용량 정리 (파일 없으면 그냥 경고 찍고 넘어감)
     safe_cleanup.cleanup_logs_and_models()
 except Exception as e:
     print(f"[경고] startup cleanup 실패: {e}")
 
-# 예측 로그 헤더/파일 보장
 ensure_prediction_log_exists()
 print(">>> Flask 앱 생성 준비 완료"); sys.stdout.flush()
 
-# ===== Flask =====
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료"); sys.stdout.flush()
 
-# ----- 상태/헬스엔드포인트 -----
 @app.route("/")
 def index():
     return "Yopo server is running"
@@ -62,11 +52,9 @@ def index():
 def ping():
     return "pong"
 
-# ----- 간단 헬스 대시보드 -----
 @app.route("/yopo-health")
 def yopo_health():
     percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
-
     LOG_FILE    = os.path.join(LOG_DIR, "train_log.csv")
     AUDIT_LOG   = os.path.join(LOG_DIR, "evaluation_audit.csv")
     MESSAGE_LOG = os.path.join(LOG_DIR, "message_log.csv")
@@ -80,7 +68,6 @@ def yopo_health():
         except Exception:
             logs[name] = pd.DataFrame()
 
-    # 모델 파일 스캔
     model_info = {}
     try:
         files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
@@ -138,7 +125,6 @@ def yopo_health():
             if pn["fail_rate"]  > 50: problems.append(f"{strat}: 일반 실패율 {pn['fail_rate']:.1f}%")
             if pv_stats["fail_rate"] > 50: problems.append(f"{strat}: 변동성 실패율 {pv_stats['fail_rate']:.1f}%")
 
-            # 최근 10건 표
             table = "<i style='color:gray'>최근 예측 없음</i>"
             need = {"timestamp","symbol","direction","return","status"}
             if pred.shape[0] > 0 and need.issubset(set(pred.columns)):
@@ -173,7 +159,6 @@ def yopo_health():
     status = "🟢 전체 전략 정상(데이터 기준)" if not problems else "🔴 종합진단:<br>" + "<br>".join(problems)
     return f"<div style='font-family:monospace;line-height:1.6;font-size:15px;'><b>{status}</b><hr>" + "".join(strategy_html) + "</div>"
 
-# ----- 운영 라우트 -----
 @app.route("/run")
 def run():
     if main is None:
@@ -218,7 +203,6 @@ def check_log():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# ===== 백그라운드 초기화 (Gunicorn에서도 1회만) =====
 _INIT_DONE = False
 _INIT_LOCK = threading.Lock()
 
@@ -226,7 +210,6 @@ def _start_scheduler():
     print(">>> 스케줄러 시작"); sys.stdout.flush()
     sched = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
 
-    # 30분마다 평가
     def _eval_job(strategy):
         def wrapped():
             try:
@@ -238,7 +221,6 @@ def _start_scheduler():
     for strat in ["단기","중기","장기"]:
         sched.add_job(lambda s=strat: _eval_job(s), trigger="interval", minutes=30)
 
-    # 기타 트리거
     try:
         sched.add_job(trigger_run, "interval", minutes=30)
     except Exception:
@@ -254,17 +236,12 @@ def _init_background_once():
             return
         print(">>> 백그라운드 초기화 시작"); sys.stdout.flush()
         try:
-            # 정리 스케줄러 먼저
             start_cleanup_scheduler()
-            # 예측/평가 스케줄러
             _start_scheduler()
-            # 메타 보정
             threading.Thread(target=maintenance_fix_meta.fix_all_meta_json, daemon=True).start()
-            # 학습 루프(무거우면 꺼도 됨: DISABLE_AUTO_TRAIN=1)
             if os.environ.get("DISABLE_AUTO_TRAIN","0") != "1":
                 threading.Thread(target=train_symbol_group_loop, daemon=True).start()
                 print("✅ 학습 루프 스레드 시작")
-            # 텔레그램 알림 (토큰 없으면 내부에서 실패 무시되도록 가정)
             try:
                 send_message("[시작] YOPO 서버 실행됨")
                 print("✅ Telegram 알림 발송 완료")
@@ -279,9 +256,7 @@ def _init_background_once():
 def _boot_once():
     _init_background_once()
 
-# ===== 로컬에서 python app.py로 실행할 때만 =====
 if __name__ == "__main__":
-    # 로컬 실행 포트
     try:
         port = int(os.environ.get("PORT", 5000))
     except Exception:
