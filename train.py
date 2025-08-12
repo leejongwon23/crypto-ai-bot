@@ -1,5 +1,5 @@
-# === train.py (fixed, drop-in) ===
-import os, json, time, traceback
+# === train.py (final, drop-in) ===
+import os, json, time, traceback, tempfile, io, errno
 from datetime import datetime
 import pytz
 import numpy as np
@@ -51,6 +51,28 @@ training_in_progress = {"단기": False, "중기": False, "장기": False}
 # --------------------------------------------------
 # 유틸
 # --------------------------------------------------
+def _atomic_write(path: str, bytes_or_str, mode: str = "wb"):
+    """쓰기 실패/중단 대비 원자적 저장."""
+    dirpath = os.path.dirname(path)
+    os.makedirs(dirpath, exist_ok=True)
+    fd, tmppath = tempfile.mkstemp(dir=dirpath, prefix=".tmp_", suffix=".swap")
+    try:
+        with os.fdopen(fd, mode) as f:
+            if "b" in mode:
+                data = bytes_or_str if isinstance(bytes_or_str, (bytes, bytearray)) else bytes_or_str.encode("utf-8")
+                f.write(data)
+            else:
+                f.write(bytes_or_str)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmppath, path)
+    finally:
+        try:
+            if os.path.exists(tmppath):
+                os.remove(tmppath)
+        except Exception:
+            pass
+
 def _log_skip(symbol, strategy, reason):
     log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
                         loss=0.0, note=reason, status="skipped")
@@ -71,8 +93,9 @@ def _strategy_horizon_hours(strategy: str) -> int:
     return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
 
 def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
-    if df is None or df.empty or "timestamp" not in df.columns:
-        return np.zeros(len(df or []), dtype=np.float32)
+    # 안전 조기 반환 (기존 len(df or []) 패턴 제거)
+    if df is None or len(df) == 0 or "timestamp" not in df.columns:
+        return np.zeros(0 if df is None else len(df), dtype=np.float32)
 
     ts = pd.to_datetime(df["timestamp"], errors="coerce")
     close = df["close"].astype(float).values
@@ -99,10 +122,25 @@ def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.nda
         out[i] = float((max_h - base) / (base + 1e-12))
     return out.astype(np.float32)
 
+def _save_model_and_meta(model: nn.Module, path_pt: str, meta: dict):
+    """모델(.pt)과 메타(.meta.json)을 항상 쌍으로, 원자적으로 저장."""
+    # 1) 모델 저장 (to bytes -> atomic)
+    buffer = io.BytesIO()
+    torch.save(model.state_dict(), buffer)
+    _atomic_write(path_pt, buffer.getvalue(), mode="wb")
+
+    # 2) 메타 저장 (atomic)
+    meta_json = json.dumps(meta, ensure_ascii=False, indent=2)
+    _atomic_write(path_pt.replace(".pt", ".meta.json"), meta_json, mode="w")
+
 # --------------------------------------------------
 # 단일 (symbol, strategy, group_id) 모델 학습
 # --------------------------------------------------
 def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
+    result = {
+        "symbol": symbol, "strategy": strategy, "group_id": int(group_id or 0),
+        "models": []  # 각 모델별 {type, acc, f1, loss, pt, meta}
+    }
     try:
         print(f"✅ [train_one_model 시작] {symbol}-{strategy}-group{group_id}")
         ensure_failure_db()
@@ -117,19 +155,19 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
             print(f"[⏩ 스킵] {symbol}-{strategy}-group{group_id} → 데이터 없음")
-            _log_skip(symbol, strategy, "데이터 없음"); return
+            _log_skip(symbol, strategy, "데이터 없음"); return result
 
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.empty or feat.isnull().any().any():
             print(f"[⏩ 스킵] {symbol}-{strategy}-group{group_id} → 피처 없음/NaN")
-            _log_skip(symbol, strategy, "피처 없음"); return
+            _log_skip(symbol, strategy, "피처 없음"); return result
 
         # 2) 클래스 경계/라벨링
         try:
             class_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=group_id)
         except Exception as e:
             print(f"[❌ 클래스 범위 계산 실패] {e}")
-            _log_fail(symbol, strategy, "클래스 계산 실패"); return
+            _log_fail(symbol, strategy, "클래스 계산 실패"); return result
 
         num_classes = len(class_ranges)
         set_NUM_CLASSES(num_classes)
@@ -183,7 +221,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
 
         if len(X) < 10:
             print(f"[⏩ 스킵] {symbol}-{strategy}-group{group_id} → 최종 샘플 부족({len(X)})")
-            _log_skip(symbol, strategy, "최종 샘플 부족"); return
+            _log_skip(symbol, strategy, "최종 샘플 부족"); return result
 
         # 5) 밸런싱
         try:
@@ -209,6 +247,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             val_loader = DataLoader(TensorDataset(torch.tensor(val_X), torch.tensor(val_y)), batch_size=64)
 
             total_loss = 0.0
+            last_loss = 0.0
             for epoch in range(max_epochs):
                 model.train()
                 for xb, yb in train_loader:
@@ -217,9 +256,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                     loss = criterion(logits, yb)
                     if not torch.isfinite(loss): continue
                     optimizer.zero_grad(); loss.backward(); optimizer.step()
-                    total_loss += loss.item()
+                    total_loss += float(loss.item()); last_loss = float(loss.item())
                 if (epoch + 1) % 5 == 0 or epoch == max_epochs - 1:
-                    print(f"[📈 {model_type}] Epoch {epoch+1}/{max_epochs} | loss={loss.item():.4f}")
+                    print(f"[📈 {model_type}] Epoch {epoch+1}/{max_epochs} | loss={last_loss:.4f}")
 
             model.eval()
             all_preds, all_labels = [], []
@@ -227,34 +266,45 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 for xb, yb in val_loader:
                     preds = torch.argmax(model(xb.to(DEVICE)), dim=1).cpu().numpy()
                     all_preds.extend(preds); all_labels.extend(yb.numpy())
-            acc = accuracy_score(all_labels, all_preds)
-            f1 = f1_score(all_labels, all_preds, average="macro")
+            acc = float(accuracy_score(all_labels, all_preds))
+            f1 = float(f1_score(all_labels, all_preds, average="macro"))
             print(f"[🎯 {model_type}] acc={acc:.4f}, f1={f1:.4f}")
 
-            os.makedirs(MODEL_DIR, exist_ok=True)
+            # 파일 저장(원자적)
             model_name = f"{symbol}_{strategy}_{model_type}_group{group_id}_cls{num_classes}.pt"
             model_path = os.path.join(MODEL_DIR, model_name)
-            torch.save(model.state_dict(), model_path)
-
             meta = {
-                "symbol": symbol, "strategy": strategy, "model": model_type,
+                "symbol": symbol,
+                "strategy": strategy,
+                "model": model_type,
                 "group_id": int(group_id) if group_id is not None else 0,
                 "num_classes": int(num_classes),
                 "input_size": int(FEATURE_INPUT_SIZE),
+                "metrics": {"val_acc": acc, "val_f1": f1, "train_loss_sum": float(total_loss)},
                 "timestamp": now_kst().isoformat(),
                 "model_name": model_name
             }
-            with open(model_path.replace(".pt", ".meta.json"), "w", encoding="utf-8") as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
+            _save_model_and_meta(model, model_path, meta)
 
             log_training_result(
                 symbol=symbol, strategy=strategy, model=model_name,
-                accuracy=float(acc), f1=float(f1), loss=float(total_loss),
+                accuracy=acc, f1=f1, loss=float(total_loss),
                 note=f"train_one_model(window={window})",
                 source_exchange="BYBIT", status="success",
             )
 
+            result["models"].append({
+                "type": model_type, "acc": acc, "f1": f1,
+                "loss_sum": float(total_loss), "pt": model_path,
+                "meta": model_path.replace(".pt", ".meta.json")
+            })
+
+            # GPU 메모리 청소
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         print(f"[✅ train_one_model 완료] {symbol}-{strategy}-group{group_id}")
+        return result
 
     except Exception as e:
         print(f"[❌ train_one_model 실패] {symbol}-{strategy}-group{group_id} → {e}")
@@ -265,6 +315,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             "symbol": symbol, "strategy": strategy, "model": "all",
             "predicted_class": -1, "success": False, "rate": "", "reason": str(e)
         }, feature_vector=[])
+        return result
 
 # --------------------------------------------------
 # 전체 학습 루틴
@@ -321,7 +372,7 @@ def train_all_models():
 # --- 외부 모듈 호환용 얇은 래퍼 (model_checker 등) ---
 def train_model(symbol, strategy):
     """단일 심볼-전략 한 개 학습(그룹0)."""
-    train_one_model(symbol, strategy, group_id=0)
+    return train_one_model(symbol, strategy, group_id=0)
 
 # --------------------------------------------------
 # 그룹 루프(앱이 기대하는 엔트리)
