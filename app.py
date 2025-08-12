@@ -13,6 +13,7 @@ from predict import evaluate_predictions
 from train import train_symbol_group_loop
 import maintenance_fix_meta
 from logger import ensure_prediction_log_exists
+from integrity_guard import run as _integrity_check; _integrity_check()
 
 # ✅ cleanup 모듈 경로 보정 (src/에서 실행하든, 루트에서 실행하든 동작)
 try:
