@@ -13,7 +13,7 @@ from data.utils import SYMBOLS, get_kline_by_strategy, compute_features, create_
 from model.base_model import get_model
 from feature_importance import compute_feature_importance, save_feature_importance  # (미사용시에도 호환 유지)
 from failure_db import insert_failure_record, ensure_failure_db
-from logger import log_training_result
+import logger  # ✅ 변경: from logger import log_training_result → import logger
 from config import (
     get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups,
     get_class_ranges, set_NUM_CLASSES
@@ -73,16 +73,16 @@ def _atomic_write(path: str, bytes_or_str, mode: str = "wb"):
             pass
 
 def _log_skip(symbol, strategy, reason):
-    log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
-                        loss=0.0, note=reason, status="skipped")
+    logger.log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
+                               loss=0.0, note=reason, status="skipped")  # ✅ 접두사 추가
     insert_failure_record({
         "symbol": symbol, "strategy": strategy, "model": "all",
         "predicted_class": -1, "success": False, "rate": "", "reason": reason
     }, feature_vector=[])
 
 def _log_fail(symbol, strategy, reason):
-    log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
-                        loss=0.0, note=reason, status="failed")
+    logger.log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
+                               loss=0.0, note=reason, status="failed")  # ✅ 접두사 추가
     insert_failure_record({
         "symbol": symbol, "strategy": strategy, "model": "all",
         "predicted_class": -1, "success": False, "rate": "", "reason": reason
@@ -253,9 +253,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             }
             _save_model_and_meta(model, model_path, meta)
 
-            log_training_result(symbol, strategy, model=model_name, accuracy=acc, f1=f1,
-                                loss=float(total_loss), note=f"train_one_model(window={window})",
-                                source_exchange="BYBIT", status="success")
+            logger.log_training_result(  # ✅ 접두사 추가
+                symbol, strategy, model=model_name, accuracy=acc, f1=f1,
+                loss=float(total_loss), note=f"train_one_model(window={window})",
+                source_exchange="BYBIT", status="success"
+            )
             result["models"].append({
                 "type": model_type, "acc": acc, "f1": f1,
                 "loss_sum": float(total_loss), "pt": model_path,
