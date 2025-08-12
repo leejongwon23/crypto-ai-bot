@@ -4,7 +4,18 @@ services:
     env: python
     plan: standard
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 180 --workers 1 --threads 2
+    startCommand: >
+      gunicorn app:app
+      --bind 0.0.0.0:$PORT
+      --worker-class gthread
+      --workers 2
+      --threads 4
+      --timeout 300
+      --graceful-timeout 30
+      --preload
+      --access-logfile -
+      --error-logfile -
+      --log-level info
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
