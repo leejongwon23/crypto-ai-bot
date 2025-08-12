@@ -7,6 +7,7 @@ from collections import defaultdict
 # -------------------------
 DIR = "/persistent"
 LOG_DIR = os.path.join(DIR, "logs")
+os.makedirs(DIR, exist_ok=True)       # ✅ 루트 보장
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # ✅ prediction_log는 "루트" 경로로 통일
@@ -19,6 +20,35 @@ TRAIN_LOG = f"{LOG_DIR}/train_log.csv"
 AUDIT_LOG = f"{LOG_DIR}/evaluation_audit.csv"
 
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+
+# -------------------------
+# 유틸: 피처 해시 (중복 방지용)
+# -------------------------
+def get_feature_hash(feature_row) -> str:
+    """
+    임의의 피처 벡터/텐서를 안정적으로 해시.
+    - Tensor/ndarray/list/스칼라 모두 허용
+    - 소수점 2자리로 반올림 후 SHA1
+    """
+    try:
+        import numpy as _np
+        # torch.Tensor일 수도 있으니 안전 처리 (torch 미의존)
+        if feature_row is None:
+            return "none"
+        if hasattr(feature_row, "detach"):  # torch.Tensor 유사
+            arr = feature_row.detach().cpu().flatten().numpy().astype(float)
+        elif isinstance(feature_row, _np.ndarray):
+            arr = feature_row.flatten().astype(float)
+        elif isinstance(feature_row, (list, tuple)):
+            arr = _np.array(feature_row, dtype=float).flatten()
+        else:
+            arr = _np.array([float(feature_row)], dtype=float)
+
+        rounded = [round(float(x), 2) for x in arr]
+        joined = ",".join(map(str, rounded))
+        return hashlib.sha1(joined.encode()).hexdigest()
+    except Exception:
+        return "hash_error"
 
 # -------------------------
 # SQLite: 모델 성공/실패 집계
@@ -150,7 +180,7 @@ def get_strategy_eval_count(strategy):
         df = _normalize_status(df)
         return len(df[(df["strategy"] == strategy) & (df["status"].isin(["success", "fail"]))])
     except Exception as e:
-        print(f"[오류] get_strategy_eval_count 실패 → {e}")
+        print(f"[오류] get_strategy_eval_count 실패] → {e}")
         return 0
 
 def log_audit_prediction(s, t, status, reason):
