@@ -1,3 +1,4 @@
+# predict.py
 import os, sys, json, datetime, pytz
 import numpy as np
 import pandas as pd
@@ -6,8 +7,30 @@ import torch.nn.functional as F
 from sklearn.preprocessing import MinMaxScaler
 
 from data.utils import get_kline_by_strategy, compute_features
-from window_optimizer import find_best_windows
-from logger import log_prediction, get_feature_hash, get_available_models, update_model_success
+
+# --- window_optimizer 호환 임포트: find_best_windows가 없으면 find_best_window로 폴백 ---
+try:
+    from window_optimizer import find_best_windows  # 선호
+except Exception:
+    try:
+        from window_optimizer import find_best_window
+    except Exception:
+        find_best_window = None
+
+    def find_best_windows(symbol, strategy):
+        """find_best_window만 있는 구버전 호환용."""
+        try:
+            if callable(find_best_window):
+                best = int(find_best_window(symbol, strategy, window_list=[10, 20, 30, 40, 60], group_id=None))
+            else:
+                best = 60
+        except Exception:
+            best = 60
+        # 그룹 수를 아직 모르는 시점이므로 3개 정도 기본 제공
+        return [best, best, best]
+
+# logger에서 get_feature_hash 의존 제거 (내장 헬퍼 사용)
+from logger import log_prediction, get_available_models, update_model_success
 from failure_db import insert_failure_record, load_existing_failure_hashes, ensure_failure_db
 from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
 from model.base_model import get_model
@@ -27,6 +50,37 @@ NUM_CLASSES = get_NUM_CLASSES()
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
+# -----------------------------
+# 로컬 헬퍼: get_feature_hash (logger에 없어도 동작)
+# -----------------------------
+def _get_feature_hash(feature_row) -> str:
+    """
+    numpy array / torch tensor / list 모두 지원.
+    원본 logger.get_feature_hash와 동일한 라운딩(소수 2자리) + SHA1 방식.
+    """
+    try:
+        import hashlib
+        if feature_row is None:
+            return "none"
+        if isinstance(feature_row, torch.Tensor):
+            arr = feature_row.detach().cpu().flatten().numpy().astype(float)
+        elif isinstance(feature_row, np.ndarray):
+            arr = feature_row.flatten().astype(float)
+        elif isinstance(feature_row, (list, tuple)):
+            arr = np.array(feature_row, dtype=float).flatten()
+        else:
+            # 마지막 시도: 스칼라
+            arr = np.array([float(feature_row)], dtype=float)
+
+        rounded = [round(float(x), 2) for x in arr]
+        joined = ",".join(map(str, rounded))
+        return hashlib.sha1(joined.encode()).hexdigest()
+    except Exception:
+        return "hash_error"
+
+# -----------------------------
+# 앙상블 스태킹 (옵션)
+# -----------------------------
 def ensemble_stacking(model_outputs, meta_model=None):
     X_stack = np.array(model_outputs).reshape(1, -1)
     if meta_model is not None:
@@ -65,21 +119,30 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         print(f"[failed_result log_prediction 오류] {e}")
     try:
         if X_input is not None:
-            feature_hash = get_feature_hash(X_input)
-            insert_failure_record(result, feature_hash, feature_vector=X_input.tolist(), label=-1)
+            feature_hash = _get_feature_hash(X_input)
+            insert_failure_record(result, feature_hash, feature_vector=np.array(X_input).flatten().tolist(), label=-1)
     except Exception as e:
         print(f"[failed_result insert_failure_record 오류] {e}")
     return result
 
 def predict(symbol, strategy, source="일반", model_type=None):
     """
-    - 전 모델 참여
-    - 메타러너 + (있으면) 진화형 메타러너 적용
-    - 성공 판정/목표가 심볼·전략별 클래스 경계와 일관
+    - 모든 저장된 (lstm|cnn_lstm|transformer) 모델 예측 취합
+    - 메타러너 및 (존재 시) 진화형 메타러너로 최종 클래스 선택
+    - 성공 판정은 심볼·전략별 클래스 경계(get_class_return_range) 기준
     """
-    # ⛳ 변경: get_best_strategy_by_failure_probability 제거
-    from evo_meta_learner import predict_evo_meta
-    from meta_learning import get_meta_prediction
+    # 필요 시만 로드 (순환 임포트 방지)
+    try:
+        from evo_meta_learner import predict_evo_meta
+    except Exception:
+        predict_evo_meta = None
+    try:
+        from meta_learning import get_meta_prediction
+    except Exception:
+        def get_meta_prediction(probs_list, feature_tensor, meta_info=None):
+            # 간단 평균 메타
+            avg = np.mean(np.array(probs_list), axis=0)
+            return int(np.argmax(avg))
 
     ensure_failure_db()
     os.makedirs("/persistent/logs", exist_ok=True)
@@ -91,11 +154,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
     log_strategy = strategy
     try:
+        # 윈도우 후보 획득
         window_list = find_best_windows(symbol, strategy)
         if not window_list:
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "window_list_none", label=-1)
             return None
 
+        # 시세/피처
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or len(df) < max(window_list) + 1:
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "df_short", label=-1)
@@ -113,6 +178,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         else:
             feat_scaled = feat_scaled[:, :FEATURE_INPUT_SIZE]
 
+        # 사용 가능한 모델 스캔
         models = get_available_models(symbol)
         if not models:
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "no_models", label=-1)
@@ -128,12 +194,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "no_valid_model", label=-1)
             return None
 
-        # ⛳ 제거된 전략 교체 로직
-        # recommended_strategy = get_best_strategy_by_failure_probability(...)
-        # if recommended_strategy and recommended_strategy != strategy: ...
-        # → 현재 전략 유지
+        # 현재 전략 유지 (전략 교체 로직 제거됨)
         strategy = log_strategy
 
+        # 메타 예측
         meta_success_rate = {c: 0.5 for c in range(len(model_outputs_list[0]["probs"]))}
         final_pred_class = get_meta_prediction(
             [m["probs"] for m in model_outputs_list],
@@ -142,20 +206,21 @@ def predict(symbol, strategy, source="일반", model_type=None):
         )
 
         # 진화형 메타(있으면)
-        evo_model_path = os.path.join(MODEL_DIR, "evo_meta_learner.pt")
         use_evo = False
-        if os.path.exists(evo_model_path):
+        evo_model_path = os.path.join(MODEL_DIR, "evo_meta_learner.pt")
+        if os.path.exists(evo_model_path) and callable(predict_evo_meta):
             try:
                 evo_pred = predict_evo_meta(feature_tensor.unsqueeze(0), input_size=FEATURE_INPUT_SIZE)
                 if evo_pred is not None and evo_pred != final_pred_class:
                     print(f"[🔁 진화형 메타러너 전환] {final_pred_class} → {evo_pred}")
-                    final_pred_class = evo_pred
+                    final_pred_class = int(evo_pred)
                     use_evo = True
             except Exception as e:
                 print(f"[⚠️ 진화형 메타러너 예외] {e}")
 
         print(f"[META] {'진화형' if use_evo else '기본'} 메타 선택: 클래스 {final_pred_class}")
 
+        # 성공 판정 및 로깅
         cls_min, _ = get_class_return_range(final_pred_class, symbol, strategy)
         current_price = df.iloc[-1]["close"]
         expected_ret = class_to_expected_return(final_pred_class, symbol, strategy)
@@ -389,7 +454,8 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             input_size = meta.get("input_size", FEATURE_INPUT_SIZE)
             num_classes = meta.get("num_classes", NUM_CLASSES)
 
-            window = window_list[min(group_id, len(window_list)-1)]
+            # group_id에 따라 윈도우 선택 (초과 인덱스 안전 처리)
+            window = window_list[min(int(group_id), max(0, len(window_list) - 1))]
             input_seq = feat_scaled[-window:]
             if input_seq.shape[0] < window:
                 print(f"[⚠️ 데이터 부족] {symbol}-{strategy}-group{group_id}")
@@ -424,7 +490,7 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             all_model_predictions.append({
                 "class": predicted_class,
                 "probs": probs,
-                "entry_price": entry_price,
+                "entry_price": float(entry_price),
                 "num_classes": num_classes,
                 "group_id": group_id,
                 "model_name": model_type,
