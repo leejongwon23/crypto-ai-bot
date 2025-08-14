@@ -368,3 +368,76 @@ def log_training_result(
         update_model_success(symbol, strategy, model or "", str(status).lower() == "success")
     except Exception as e:
         print(f"[⚠️ model_success 집계 실패] {e}")
+
+# === [추가] 수익률 클래스 경계 로그 ===
+def log_class_ranges(symbol, strategy, class_ranges, group_id=None, source="train"):
+    """
+    /persistent/logs/class_ranges.csv 에 기록
+    컬럼: timestamp,symbol,strategy,group_id,idx,low,high,source
+    """
+    import csv, datetime, pytz, os
+    path = os.path.join(LOG_DIR, "class_ranges.csv")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    now = datetime.datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
+
+    write_header = not os.path.exists(path)
+    try:
+        with open(path, "a", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            if write_header:
+                w.writerow(["timestamp","symbol","strategy","group_id","idx","low","high","source"])
+            for i, rng in enumerate(class_ranges):
+                lo, hi = (float(rng[0]), float(rng[1])) if isinstance(rng, (list, tuple)) and len(rng) == 2 else (None, None)
+                w.writerow([now, symbol, strategy, int(group_id) if group_id is not None else 0, i, lo, hi, source])
+        print(f"[📐 클래스경계 로그] {symbol}-{strategy}-g{group_id} → {len(class_ranges)}개 기록")
+    except Exception as e:
+        print(f"[⚠️ 클래스경계 로그 실패] {e}")
+
+
+# === [추가] 라벨(표본) 분포 로그 ===
+def log_label_distribution(symbol, strategy, labels, group_id=None, note=""):
+    """
+    /persistent/logs/label_distribution.csv 에 기록
+    컬럼: timestamp,symbol,strategy,group_id,total,counts_json,n_unique,entropy,note
+    """
+    import csv, json, math, datetime, pytz, os
+    from collections import Counter
+
+    path = os.path.join(LOG_DIR, "label_distribution.csv")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    now = datetime.datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
+
+    # 안전 변환
+    try:
+        labels_list = list(map(int, list(labels)))
+    except Exception:
+        labels_list = []
+
+    cnt = Counter(labels_list)
+    total = sum(cnt.values())
+    if total > 0:
+        probs = [c/total for c in cnt.values()]
+        entropy = -sum(p*math.log(p + 1e-12) for p in probs)
+    else:
+        entropy = 0.0
+
+    row = [
+        now, str(symbol), str(strategy),
+        int(group_id) if group_id is not None else 0,
+        int(total),
+        json.dumps({int(k): int(v) for k, v in sorted(cnt.items())}, ensure_ascii=False),
+        int(len(cnt)),
+        float(round(entropy, 6)),
+        str(note or "")
+    ]
+
+    write_header = not os.path.exists(path)
+    try:
+        with open(path, "a", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            if write_header:
+                w.writerow(["timestamp","symbol","strategy","group_id","total","counts_json","n_unique","entropy","note"])
+            w.writerow(row)
+        print(f"[📊 라벨분포 로그] {symbol}-{strategy}-g{group_id} → total={total}, classes={len(cnt)}, H={round(entropy,4)}")
+    except Exception as e:
+        print(f"[⚠️ 라벨분포 로그 실패] {e}")
