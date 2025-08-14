@@ -9,7 +9,7 @@ import pytz
 
 from predict import predict
 from data.utils import SYMBOLS, get_kline_by_strategy
-from logger import log_prediction  # ⬅️ 불필요/없는 심볼 임포트 제거
+from logger import log_prediction
 from telegram_bot import send_message
 
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
@@ -18,7 +18,26 @@ STRATEGY_VOL = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
 FAILURE_LOG = "/persistent/logs/failure_count.csv"
 MESSAGE_LOG = "/persistent/logs/message_log.csv"
+PREDICTION_LOG = "/persistent/logs/prediction_log.csv"  # ✅ 예측 기록 로그 경로
 os.makedirs("/persistent/logs", exist_ok=True)
+
+# ──────────────────────────────────────────────────────────────
+# 성공률 필터 (성공률 65% 이상 + 최소 10회 기록 시 True)
+# ──────────────────────────────────────────────────────────────
+def check_prediction_filter(strategy, min_success_rate=0.65, min_samples=10):
+    try:
+        if not os.path.exists(PREDICTION_LOG):
+            return False
+        import pandas as pd
+        df = pd.read_csv(PREDICTION_LOG)
+        df = df[df["strategy"] == strategy]
+        if len(df) < min_samples:
+            return False
+        success_rate = df["success"].mean()
+        return success_rate >= min_success_rate
+    except Exception as e:
+        print(f"[prediction_filter 예외] {e}")
+        return False
 
 # ──────────────────────────────────────────────────────────────
 # 감사 로그
@@ -225,7 +244,6 @@ def run_prediction(symbol, strategy, source="단일"):
         pt_file = f"{symbol}_{strategy}_{mt}.pt"
         meta_file = f"{symbol}_{strategy}_{mt}.meta.json"
         if os.path.exists(os.path.join(model_dir, pt_file)) and os.path.exists(os.path.join(model_dir, meta_file)):
-            # 변동성 정보 없이 단일 실행
             run_prediction_loop(strategy, [{"symbol": symbol, "model_type": mt}], source=source, allow_prediction=True)
             return
 
@@ -249,46 +267,6 @@ def run_prediction(symbol, strategy, source="단일"):
     )
 
 # ──────────────────────────────────────────────────────────────
-# 유사 심볼 탐색 (메타/참고용)
-# ──────────────────────────────────────────────────────────────
-def get_similar_symbol(symbol, top_k=1):
-    import numpy as np
-    from sklearn.metrics.pairwise import cosine_similarity
-
-    MODEL_DIR = "/persistent/models"
-    meta_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".meta.json")]
-
-    def load_feature_vector(sym):
-        path = os.path.join(MODEL_DIR, f"{sym}_feature_vector.json")
-        if not os.path.exists(path):
-            return None
-        with open(path, "r", encoding="utf-8") as f:
-            return np.array(json.load(f))
-
-    target_vec = load_feature_vector(symbol)
-    if target_vec is None:
-        return []
-
-    similarities = []
-    for meta_file in meta_files:
-        try:
-            with open(os.path.join(MODEL_DIR, meta_file), "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            other_symbol = meta.get("symbol")
-            if other_symbol == symbol:
-                continue
-            vec = load_feature_vector(other_symbol)
-            if vec is None or len(vec) != len(target_vec):
-                continue
-            score = cosine_similarity([target_vec], [vec])[0][0]
-            similarities.append((other_symbol, score))
-        except Exception:
-            continue
-
-    similarities.sort(key=lambda x: x[1], reverse=True)
-    return [s[0] for s in similarities[:top_k]]
-
-# ──────────────────────────────────────────────────────────────
 # 메인 엔트리 — 배치 예측
 # ──────────────────────────────────────────────────────────────
 def main(strategy, symbols=None, force=False, allow_prediction=True):
@@ -296,37 +274,26 @@ def main(strategy, symbols=None, force=False, allow_prediction=True):
     target_symbols = symbols if symbols is not None else get_symbols_by_volatility(strategy)
 
     if not target_symbols:
-        print(f"[INFO] {strategy} 대상 심볼이 비었습니다(변동성 조건 미충족 등)")
+        print(f"[INFO] {strategy} 대상 심볼이 비었습니다")
         return
 
     results = run_prediction_loop(strategy, target_symbols, source="배치", allow_prediction=allow_prediction)
     succ = sum(1 for r in results if isinstance(r, dict))
     fail = len(target_symbols) - succ
     print(f"[요약] {strategy} 실행 결과: 성공기록 {succ} / 실패·스킵 {fail}")
-    try:
-        send_message(f"📡 전략 {strategy} 예측 완료: 기록 {succ} / 스킵 {fail}")
-    except Exception:
-        pass
 
-# ──────────────────────────────────────────────────────────────
-# 유틸: 디스크 사용량 점검
-# ──────────────────────────────────────────────────────────────
-def check_disk_usage(threshold_percent=90):
-    import shutil
-    try:
-        total, used, free = shutil.disk_usage("/persistent")
-        used_percent = (used / total) * 100
-        if used_percent >= threshold_percent:
-            print(f"🚨 경고: 디스크 사용량 {used_percent:.2f}% (한도 {threshold_percent}%) 초과")
-        else:
-            print(f"✅ 디스크 사용량 정상: {used_percent:.2f}%")
-    except Exception as e:
-        print(f"[디스크 사용량 확인 실패] {e}")
+    # ✅ 텔레그램 전송 필터 적용
+    if check_prediction_filter(strategy):
+        try:
+            send_message(f"📡 전략 {strategy} 예측 완료: 기록 {succ} / 스킵 {fail}")
+        except Exception:
+            pass
+    else:
+        print(f"[알림 생략] {strategy} — 성공률 65% 이상 + 최소 10회 조건 미충족")
 
 # ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--strategy", type=str, default="단기", choices=["단기", "중기", "장기"])
     parser.add_argument("--allow_prediction", action="store_true", default=True)
