@@ -1,4 +1,5 @@
-# predict.py
+# predict.py (FINAL)
+
 import os, sys, json, datetime, pytz
 import numpy as np
 import pandas as pd
@@ -16,6 +17,7 @@ except Exception:
         from window_optimizer import find_best_window
     except Exception:
         find_best_window = None
+
     def find_best_windows(symbol, strategy):
         try:
             if callable(find_best_window):
@@ -140,10 +142,14 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         print(f"[failed_result insert_failure_record 오류] {e}")
     return result
 
+# -----------------------------
+# 메인 예측
+# -----------------------------
 def predict(symbol, strategy, source="일반", model_type=None):
     """
     - 저장된 모델 예측 취합 → (메타 또는 진화형 메타) 최종 클래스 선택
     - 성공 판정은 get_class_return_range 기준
+    - 로그 강화: 윈도우/확률/선택 사유/클래스 경계 기록
     """
     try:
         from evo_meta_learner import predict_evo_meta
@@ -166,7 +172,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
     log_strategy = strategy
     try:
+        # ---------- 데이터/윈도우 ----------
         window_list = find_best_windows(symbol, strategy)
+        print(f"[🪟 윈도우 선택] {symbol}-{strategy} -> {window_list}")
         if not window_list:
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "window_list_none", label=-1)
             return None
@@ -188,14 +196,22 @@ def predict(symbol, strategy, source="일반", model_type=None):
         else:
             feat_scaled = feat_scaled[:, :FEATURE_INPUT_SIZE]
 
+        # ---------- 모델 스캔 ----------
         models = get_available_models(symbol, strategy)
         if not models:
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "no_models", label=-1)
             return None
+        print(f"[🧠 모델감지] {symbol}-{strategy} -> {len(models)}개")
 
-        recent_freq = get_recent_class_frequencies(strategy)
+        # 최근 클래스 빈도(확률 조정용, 없으면 무시)
+        try:
+            recent_freq = get_recent_class_frequencies(strategy)
+        except Exception:
+            recent_freq = None
+
         feature_tensor = torch.tensor(feat_scaled[-1], dtype=torch.float32)
 
+        # ---------- 개별 모델 예측 ----------
         model_outputs_list, all_model_predictions = get_model_predictions(
             symbol, strategy, models, df, feat_scaled, window_list, recent_freq
         )
@@ -203,15 +219,49 @@ def predict(symbol, strategy, source="일반", model_type=None):
             insert_failure_record({"symbol": symbol, "strategy": log_strategy}, "no_valid_model", label=-1)
             return None
 
-        # 메타 예측
-        meta_success_rate = {c: 0.5 for c in range(len(model_outputs_list[0]["probs"]))}
+        probs_stack = np.array([m["probs"] for m in model_outputs_list])
+        avg_probs = probs_stack.mean(axis=0)
+
+        # 최근 빈도 기반 조정(옵션)
+        adj_probs = avg_probs.copy()
+        try:
+            if recent_freq is not None:
+                cand = adjust_probs_with_diversity(avg_probs, recent_freq)
+                if isinstance(cand, (list, np.ndarray)) and len(cand) == len(avg_probs):
+                    adj_probs = np.array(cand, dtype=float)
+        except Exception as e:
+            print(f"[⚠️ 확률조정 실패] {e}")
+
+        # ---------- 클래스 경계 로그 ----------
+        try:
+            num_classes = len(avg_probs)
+            class_ranges = [get_class_return_range(c, symbol, strategy) for c in range(num_classes)]
+            # logger에 새 함수가 없을 수도 있어 try/except
+            import logger as _logger
+            _logger.log_class_ranges(
+                symbol=symbol, strategy=strategy, group_id=None,
+                class_ranges=class_ranges, note="predict"
+            )
+            print(f"[📏 클래스경계 로그] {symbol}-{strategy} -> {class_ranges}")
+        except Exception as e:
+            print(f"[⚠️ log_class_ranges 실패/미구현] {e}")
+
+        # ---------- 메타 결정 ----------
+        try:
+            from meta_learning import get_meta_prediction
+        except Exception:
+            def get_meta_prediction(probs_list, feature_tensor, meta_info=None):
+                avg = np.mean(np.array(probs_list), axis=0)
+                return int(np.argmax(avg))
+
+        meta_success_rate = {c: 0.5 for c in range(len(avg_probs))}  # 자리표시자
         final_pred_class = get_meta_prediction(
             [m["probs"] for m in model_outputs_list],
             feature_tensor,
-            meta_info={"success_rate": meta_success_rate}
+            meta_info={"success_rate": meta_success_rate, "adjusted_probs": adj_probs.tolist()}
         )
 
-        # 진화형 메타(있으면)
+        # 진화형 메타(있으면 우선)
         use_evo = False
         evo_model_path = os.path.join(MODEL_DIR, "evo_meta_learner.pt")
         if os.path.exists(evo_model_path) and callable(predict_evo_meta):
@@ -224,12 +274,21 @@ def predict(symbol, strategy, source="일반", model_type=None):
             except Exception as e:
                 print(f"[⚠️ 진화형 메타러너 예외] {e}")
 
-        print(f"[META] {'진화형' if use_evo else '기본'} 메타 선택: 클래스 {final_pred_class}")
+        # ---------- 로깅(확률 요약) ----------
+        def _topk_desc(probs, k=5):
+            idx = np.argsort(probs)[::-1][:k]
+            return [f"{int(i)}:{probs[i]:.3f}" for i in idx]
 
-        cls_min, _ = get_class_return_range(final_pred_class, symbol, strategy)
+        print(f"[🔢 확률(raw)] {symbol}-{strategy} -> {np.round(avg_probs, 3).tolist()}")
+        if not np.allclose(adj_probs, avg_probs):
+            print(f"[🎛️ 확률(adj)] {symbol}-{strategy} -> {np.round(adj_probs, 3).tolist()}")
+        print(f"[META] {'진화형' if use_evo else '기본'} 메타 선택: 클래스 {final_pred_class} | TOP5={_topk_desc(adj_probs)}")
+
+        # ---------- 성공 판정 & 기록 ----------
+        cls_min, cls_max = get_class_return_range(final_pred_class, symbol, strategy)
         current_price = float(df.iloc[-1]["close"])
         expected_ret = class_to_expected_return(final_pred_class, symbol, strategy)
-        entry_price = float(all_model_predictions[0]["entry_price"])
+        entry_price = float(all_model_predictions[0]["entry_price"])  # 동일 시점 가격 사용
         actual_return_meta = (current_price / (entry_price + 1e-12)) - 1
         meta_success_flag = actual_return_meta >= cls_min
 
@@ -249,9 +308,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
             model_name="evo_meta_learner",
             predicted_class=final_pred_class,
             label=final_pred_class,
-            note="진화형 메타 선택" if use_evo else "기본 메타 선택",
+            note=("진화형 메타 선택" if use_evo else "기본 메타 선택")
+                 + f" | win={window_list} | top5={_topk_desc(adj_probs)}",
+            top_k=_topk_desc(adj_probs),  # CSV에 확률 요약 저장
             success=meta_success_flag,
-            reason=f"수익률도달:{meta_success_flag}",
+            reason=f"수익률도달:{meta_success_flag}; cls_min={cls_min:.4f}, now_ret={actual_return_meta:.4f}",
             rate=expected_ret,
             return_value=actual_return_meta,
             source="진화형" if use_evo else "기본",
@@ -271,9 +332,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
         }
 
     except Exception as e:
+        print(f"[❌ predict 예외] {e}")
         insert_failure_record({"symbol": symbol or "None", "strategy": strategy or "None"}, "exception", label=-1)
         return None
 
+# -----------------------------
+# 평가(그대로 유지)
+# -----------------------------
 def evaluate_predictions(get_price_fn):
     import csv, os
     import pandas as pd
@@ -430,9 +495,15 @@ def evaluate_predictions(get_price_fn):
 
     print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
 
+# -----------------------------
+# 개별 모델 예측(그대로 + 로그 보강)
+# -----------------------------
 def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list, recent_freq):
     import json
     model_outputs_list, all_model_predictions = [], []
+
+    # 첫 모델의 클래스 수 기준으로 불일치 모델은 스킵
+    expected_num_classes = None
 
     for model_info in models:
         try:
@@ -451,6 +522,12 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             group_id = meta.get("group_id", 0)
             input_size = meta.get("input_size", FEATURE_INPUT_SIZE)
             num_classes = meta.get("num_classes", NUM_CLASSES)
+
+            if expected_num_classes is None:
+                expected_num_classes = int(num_classes)
+            elif int(num_classes) != expected_num_classes:
+                print(f"[⚠️ 클래스수 불일치 스킵] {pt_file} num_classes={num_classes} (expected={expected_num_classes})")
+                continue
 
             window = window_list[min(int(group_id), max(0, len(window_list) - 1))]
             input_seq = feat_scaled[-window:]
@@ -473,6 +550,8 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
                 predicted_class = torch.argmax(softmax_probs, dim=1).item()
                 probs = softmax_probs.squeeze().cpu().numpy()
 
+            print(f"[🔩 모델예측] {os.path.basename(model_path)} g{group_id} -> pred={predicted_class}, top5={np.argsort(probs)[::-1][:5].tolist()}")
+
             model_outputs_list.append({
                 "probs": probs, "predicted_class": predicted_class, "group_id": group_id,
                 "model_type": model_type, "model_path": model_path,
@@ -493,6 +572,9 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
 
     return model_outputs_list, all_model_predictions
 
+# -----------------------------
+# 단독 실행 테스트
+# -----------------------------
 if __name__ == "__main__":
     res = predict("BTCUSDT", "단기")
     print(res)
