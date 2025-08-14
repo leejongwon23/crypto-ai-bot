@@ -7,7 +7,6 @@ from collections import defaultdict
 # -------------------------
 DIR = "/persistent"
 LOG_DIR = os.path.join(DIR, "logs")
-os.makedirs(DIR, exist_ok=True)       # ✅ 루트 보장
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # ✅ prediction_log는 "루트" 경로로 통일
@@ -19,31 +18,74 @@ EVAL_RESULT = f"{LOG_DIR}/evaluation_result.csv"
 TRAIN_LOG = f"{LOG_DIR}/train_log.csv"
 AUDIT_LOG = f"{LOG_DIR}/evaluation_audit.csv"
 
+# ✅ 공용 헤더 (ensure_prediction_log_exists에서 사용)
+PREDICTION_HEADERS = [
+    "timestamp", "symbol", "strategy", "direction",
+    "entry_price", "target_price",
+    "model", "predicted_class", "top_k", "note",
+    "success", "reason", "rate", "return_value",
+    "label", "group_id", "model_symbol", "model_name",
+    "source", "volatility", "source_exchange"
+]
+
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 # -------------------------
-# 유틸: 피처 해시 (중복 방지용)
+# 새로 추가: 안전한 로그 파일 보장
+# -------------------------
+def ensure_prediction_log_exists():
+    """
+    /persistent/prediction_log.csv 가 없으면 헤더까지 생성.
+    디렉토리도 보장.
+    """
+    try:
+        os.makedirs(os.path.dirname(PREDICTION_LOG), exist_ok=True)
+        if not os.path.exists(PREDICTION_LOG):
+            with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
+                csv.writer(f).writerow(PREDICTION_HEADERS)
+            print("[✅ ensure_prediction_log_exists] prediction_log.csv 생성 완료")
+        else:
+            # 헤더 누락된 기존 파일 보정
+            try:
+                with open(PREDICTION_LOG, "r", encoding="utf-8-sig") as f:
+                    first_line = f.readline()
+                if "," not in first_line or any(h not in first_line for h in ["timestamp","symbol","strategy"]):
+                    # 백업 후 헤더 삽입
+                    bak = PREDICTION_LOG + ".bak"
+                    os.replace(PREDICTION_LOG, bak)
+                    with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
+                        csv.writer(f).writerow(PREDICTION_HEADERS)
+                    with open(bak, "r", encoding="utf-8-sig") as src, open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as dst:
+                        dst.write(src.read())
+                    print("[✅ ensure_prediction_log_exists] 기존 파일 헤더 보정 완료")
+            except Exception as e:
+                print(f"[⚠️ ensure_prediction_log_exists] 헤더 확인 실패: {e}")
+    except Exception as e:
+        print(f"[⚠️ ensure_prediction_log_exists] 예외: {e}")
+
+# -------------------------
+# 새로 추가: feature hash 유틸(다른 모듈에서 사용)
 # -------------------------
 def get_feature_hash(feature_row) -> str:
     """
-    임의의 피처 벡터/텐서를 안정적으로 해시.
-    - Tensor/ndarray/list/스칼라 모두 허용
-    - 소수점 2자리로 반올림 후 SHA1
+    numpy 배열/torch 텐서/리스트/스칼라 지원.
+    소수점 2자리 반올림 후 SHA1.
     """
     try:
         import numpy as _np
-        # torch.Tensor일 수도 있으니 안전 처리 (torch 미의존)
         if feature_row is None:
             return "none"
-        if hasattr(feature_row, "detach"):  # torch.Tensor 유사
-            arr = feature_row.detach().cpu().flatten().numpy().astype(float)
-        elif isinstance(feature_row, _np.ndarray):
+        if "torch" in str(type(feature_row)):
+            try:
+                feature_row = feature_row.detach().cpu().numpy()
+            except Exception:
+                feature_row = feature_row
+        if isinstance(feature_row, _np.ndarray):
             arr = feature_row.flatten().astype(float)
         elif isinstance(feature_row, (list, tuple)):
             arr = _np.array(feature_row, dtype=float).flatten()
         else:
             arr = _np.array([float(feature_row)], dtype=float)
-
         rounded = [round(float(x), 2) for x in arr]
         joined = ",".join(map(str, rounded))
         return hashlib.sha1(joined.encode()).hexdigest()
@@ -121,8 +163,9 @@ def get_model_success_rate(s, t, m):
         print(f"[오류] get_model_success_rate 실패 → {e}")
         return 0.0
 
-# 서버 시작 시 테이블 보장
+# 서버 시작 시 테이블/로그 파일 보장
 ensure_success_db()
+ensure_prediction_log_exists()
 
 # -------------------------
 # 파일 로드/유틸
@@ -180,7 +223,7 @@ def get_strategy_eval_count(strategy):
         df = _normalize_status(df)
         return len(df[(df["strategy"] == strategy) & (df["status"].isin(["success", "fail"]))])
     except Exception as e:
-        print(f"[오류] get_strategy_eval_count 실패] → {e}")
+        print(f"[오류] get_strategy_eval_count 실패 → {e}")
         return 0
 
 def log_audit_prediction(s, t, status, reason):
@@ -244,18 +287,11 @@ def log_prediction(
     ]
 
     try:
-        write_header = not os.path.exists(LOG_FILE)
+        write_header = not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0
         with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             if write_header:
-                writer.writerow([
-                    "timestamp", "symbol", "strategy", "direction",
-                    "entry_price", "target_price",
-                    "model", "predicted_class", "top_k", "note",
-                    "success", "reason", "rate", "return_value",
-                    "label", "group_id", "model_symbol", "model_name",
-                    "source", "volatility", "source_exchange"
-                ])
+                writer.writerow(PREDICTION_HEADERS)
             writer.writerow(row)
 
         print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} class={predicted_class} | success={success} | src={source_exchange} | reason={reason}")
