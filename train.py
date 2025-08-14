@@ -8,12 +8,13 @@ import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import MinMaxScaler
+from collections import Counter  # ✅ 추가
 
 from data.utils import SYMBOLS, get_kline_by_strategy, compute_features, create_dataset, SYMBOL_GROUPS
 from model.base_model import get_model
 from feature_importance import compute_feature_importance, save_feature_importance  # (미사용시에도 호환 유지)
 from failure_db import insert_failure_record, ensure_failure_db
-import logger  # ✅ 변경: from logger import log_training_result → import logger
+import logger  # ✅ 유지
 from config import (
     get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups,
     get_class_ranges, set_NUM_CLASSES
@@ -74,7 +75,7 @@ def _atomic_write(path: str, bytes_or_str, mode: str = "wb"):
 
 def _log_skip(symbol, strategy, reason):
     logger.log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
-                               loss=0.0, note=reason, status="skipped")  # ✅ 접두사 추가
+                               loss=0.0, note=reason, status="skipped")
     insert_failure_record({
         "symbol": symbol, "strategy": strategy, "model": "all",
         "predicted_class": -1, "success": False, "rate": "", "reason": reason
@@ -82,7 +83,7 @@ def _log_skip(symbol, strategy, reason):
 
 def _log_fail(symbol, strategy, reason):
     logger.log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
-                               loss=0.0, note=reason, status="failed")  # ✅ 접두사 추가
+                               loss=0.0, note=reason, status="failed")
     insert_failure_record({
         "symbol": symbol, "strategy": strategy, "model": "all",
         "predicted_class": -1, "success": False, "rate": "", "reason": reason
@@ -152,6 +153,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         if feat is None or feat.empty or feat.isnull().any().any():
             _log_skip(symbol, strategy, "피처 없음"); return result
 
+        # -----------------------------
+        # 1) 동적 클래스 경계 계산 & 로그
+        # -----------------------------
         try:
             class_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=group_id)
         except Exception as e:
@@ -160,9 +164,36 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         num_classes = len(class_ranges)
         set_NUM_CLASSES(num_classes)
 
+        # ✅ 클래스 경계 로그 (logger에 함수 없더라도 안전)
+        try:
+            logger.log_class_ranges(
+                symbol=symbol, strategy=strategy, group_id=group_id,
+                class_ranges=class_ranges, note="train_one_model"
+            )
+            print(f"[📏 클래스경계 로그] {symbol}-{strategy}-g{group_id} → {class_ranges}")
+        except Exception as e:
+            print(f"[⚠️ log_class_ranges 실패/미구현] {e}")
+
+        # -----------------------------
+        # 2) 미래 수익률 계산 + 요약 출력
+        # -----------------------------
         horizon_hours = _strategy_horizon_hours(strategy)
         future_gains = _future_returns_by_timestamp(df, horizon_hours=horizon_hours)
 
+        try:
+            fg = future_gains[np.isfinite(future_gains)]
+            if fg.size > 0:
+                q = np.nanpercentile(fg, [0, 25, 50, 75, 90, 95, 99])
+                print(
+                    f"[📈 수익률분포] {symbol}-{strategy}-g{group_id} "
+                    f"min={q[0]:.4f}, p50={q[2]:.4f}, p90={q[4]:.4f}, p99={q[6]:.4f}, max={np.nanmax(fg):.4f}"
+                )
+        except Exception as e:
+            print(f"[⚠️ 수익률분포 요약 실패] {e}")
+
+        # -----------------------------
+        # 3) 라벨링 + 분포 로그
+        # -----------------------------
         labels = []
         for r in future_gains:
             idx = 0
@@ -172,15 +203,43 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             labels.append(idx)
         labels = np.array(labels, dtype=np.int64)
 
+        # 분포/엔트로피 계산 (window 선택 후 기록을 위해 보관)
+        label_counts = Counter(labels.tolist())
+        total_labels = int(len(labels))
+        probs = np.array(list(label_counts.values()), dtype=np.float64)
+        if probs.sum() > 0:
+            probs = probs / probs.sum()
+            entropy = float(-(probs * np.log2(probs + 1e-12)).sum())
+        else:
+            entropy = 0.0
+
         features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         feat_scaled = MinMaxScaler().fit_transform(features_only)
 
+        # -----------------------------
+        # 4) 최적 윈도우 탐색
+        # -----------------------------
         try:
             best_window = find_best_window(symbol, strategy, window_list=[10,20,30,40,60], group_id=group_id)
         except Exception:
             best_window = 60
         window = int(max(5, best_window))
 
+        # ✅ 라벨 분포 로그 (윈도우 정보까지 포함)
+        try:
+            logger.log_label_distribution(
+                symbol=symbol, strategy=strategy, group_id=group_id,
+                counts=dict(label_counts), total=total_labels,
+                n_unique=int(len(label_counts)), entropy=float(entropy),
+                note=f"window={window}"
+            )
+            print(f"[🧮 라벨분포 로그] {symbol}-{strategy}-g{group_id} total={total_labels}, classes={len(label_counts)}, H={entropy:.4f}")
+        except Exception as e:
+            print(f"[⚠️ log_label_distribution 실패/미구현] {e}")
+
+        # -----------------------------
+        # 5) 시퀀스 생성
+        # -----------------------------
         X, y = [], []
         for i in range(len(feat_scaled) - window):
             X.append(feat_scaled[i:i+window])
@@ -209,6 +268,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         except Exception as e:
             print(f"[⚠️ 밸런싱 실패] {e}")
 
+        # -----------------------------
+        # 6) 학습/평가/저장
+        # -----------------------------
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size=FEATURE_INPUT_SIZE, output_size=num_classes).to(DEVICE)
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -249,11 +311,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
                 "group_id": int(group_id) if group_id is not None else 0,
                 "num_classes": int(num_classes), "input_size": int(FEATURE_INPUT_SIZE),
                 "metrics": {"val_acc": acc, "val_f1": f1, "train_loss_sum": float(total_loss)},
-                "timestamp": now_kst().isoformat(), "model_name": model_name
+                "timestamp": now_kst().isoformat(), "model_name": model_name,
+                "window": int(window)  # ✅ 메타에 윈도우 저장
             }
             _save_model_and_meta(model, model_path, meta)
 
-            logger.log_training_result(  # ✅ 접두사 추가
+            logger.log_training_result(
                 symbol, strategy, model=model_name, accuracy=acc, f1=f1,
                 loss=float(total_loss), note=f"train_one_model(window={window})",
                 source_exchange="BYBIT", status="success"
