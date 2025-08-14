@@ -175,19 +175,43 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
             print(f"[⚠️ log_class_ranges 실패/미구현] {e}")
 
         # -----------------------------
-        # 2) 미래 수익률 계산 + 요약 출력
+        # 2) 미래 수익률 계산 + 요약/로그
         # -----------------------------
         horizon_hours = _strategy_horizon_hours(strategy)
         future_gains = _future_returns_by_timestamp(df, horizon_hours=horizon_hours)
 
+        # 콘솔 요약
         try:
             fg = future_gains[np.isfinite(future_gains)]
             if fg.size > 0:
                 q = np.nanpercentile(fg, [0, 25, 50, 75, 90, 95, 99])
                 print(
                     f"[📈 수익률분포] {symbol}-{strategy}-g{group_id} "
-                    f"min={q[0]:.4f}, p50={q[2]:.4f}, p90={q[4]:.4f}, p99={q[6]:.4f}, max={np.nanmax(fg):.4f}"
+                    f"min={q[0]:.4f}, p25={q[1]:.4f}, p50={q[2]:.4f}, p75={q[3]:.4f}, "
+                    f"p90={q[4]:.4f}, p95={q[5]:.4f}, p99={q[6]:.4f}, max={np.nanmax(fg):.4f}"
                 )
+                # 파일 로그
+                try:
+                    logger.log_return_distribution(
+                        symbol=symbol,
+                        strategy=strategy,
+                        group_id=group_id,
+                        horizon_hours=int(horizon_hours),
+                        summary={
+                            "min": float(q[0]),
+                            "p25": float(q[1]),
+                            "p50": float(q[2]),
+                            "p75": float(q[3]),
+                            "p90": float(q[4]),
+                            "p95": float(q[5]),
+                            "p99": float(q[6]),
+                            "max": float(np.nanmax(fg)),
+                            "count": int(fg.size)
+                        },
+                        note="train_one_model"
+                    )
+                except Exception as le:
+                    print(f"[⚠️ log_return_distribution 실패/미구현] {le}")
         except Exception as e:
             print(f"[⚠️ 수익률분포 요약 실패] {e}")
 
