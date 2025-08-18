@@ -1,4 +1,4 @@
-# predict.py (FINAL)
+# predict.py (FINAL PATCHED)
 
 import os, sys, json, datetime, pytz
 import numpy as np
@@ -57,7 +57,7 @@ def _get_feature_hash(feature_row) -> str:
         if isinstance(feature_row, torch.Tensor):
             arr = feature_row.detach().cpu().flatten().numpy().astype(float)
         elif isinstance(feature_row, np.ndarray):
-            arr = arr = feature_row.flatten().astype(float)
+            arr = feature_row.flatten().astype(float)
         elif isinstance(feature_row, (list, tuple)):
             arr = np.array(feature_row, dtype=float).flatten()
         else:
@@ -155,25 +155,20 @@ def predict(symbol, strategy, source="일반", model_type=None):
     os.makedirs("/persistent/logs", exist_ok=True)
 
     if not symbol or not strategy:
-        insert_failure_record({"symbol": symbol or "None", "strategy": strategy or "None"},
-                              "invalid_symbol_strategy", label=-1)
-        return None
+        return failed_result(symbol or "None", strategy or "None", reason="invalid_symbol_strategy", X_input=None)
 
     # 1) 준비
     window_list = find_best_windows(symbol, strategy)
     if not window_list:
-        insert_failure_record({"symbol": symbol, "strategy": strategy}, "window_list_none", label=-1)
-        return None
+        return failed_result(symbol, strategy, reason="window_list_none", X_input=None)
 
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or len(df) < max(window_list) + 1:
-        insert_failure_record({"symbol": symbol, "strategy": strategy}, "df_short", label=-1)
-        return None
+        return failed_result(symbol, strategy, reason="df_short", X_input=None)
 
     feat = compute_features(symbol, df, strategy)
     if feat is None or feat.dropna().shape[0] < max(window_list) + 1:
-        insert_failure_record({"symbol": symbol, "strategy": strategy}, "feature_short", label=-1)
-        return None
+        return failed_result(symbol, strategy, reason="feature_short", X_input=None)
 
     features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
     feat_scaled = MinMaxScaler().fit_transform(features_only)
@@ -184,8 +179,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
     models = get_available_models(symbol, strategy)
     if not models:
-        insert_failure_record({"symbol": symbol, "strategy": strategy}, "no_models", label=-1)
-        return None
+        return failed_result(symbol, strategy, reason="no_models", X_input=feat_scaled[-1])
 
     recent_freq = get_recent_class_frequencies(strategy)
     feature_tensor = torch.tensor(feat_scaled[-1], dtype=torch.float32)
@@ -195,8 +189,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         symbol, strategy, models, df, feat_scaled, window_list, recent_freq
     )
     if not model_outputs_list:
-        insert_failure_record({"symbol": symbol, "strategy": strategy}, "no_valid_model", label=-1)
-        return None
+        return failed_result(symbol, strategy, reason="no_valid_model", X_input=feat_scaled[-1])
 
     # 3) (옵션) 진화형 메타 사용
     final_pred_class = None
@@ -213,7 +206,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
     # 4) 기본 메타 또는 '최고 성공확률 단일 모델' 선택
     if final_pred_class is None:
-        # 성공확률 점수 계산
         best_idx, best_score = -1, -1.0
         for i, m in enumerate(model_outputs_list):
             pred = int(m["predicted_class"])
@@ -226,8 +218,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             model_outputs_list[i]["success_score"] = score
             if score > best_score:
                 best_score, best_idx = score, i
-
-        # score가 가장 높은 모델의 클래스를 최종 선택
         final_pred_class = int(model_outputs_list[best_idx]["predicted_class"])
 
     print(f"[META] {'진화형' if use_evo else '최고확률모델'} 선택: 클래스 {final_pred_class}")
@@ -241,10 +231,17 @@ def predict(symbol, strategy, source="일반", model_type=None):
     meta_success_flag = actual_return_meta >= cls_min
 
     if not meta_success_flag:
-        insert_failure_record(
-            {"symbol": symbol, "strategy": strategy},
-            "meta_predicted_fail", label=final_pred_class, feature_vector=feature_tensor.numpy()
-        )
+        # 실패도 반드시 학습자산으로 남김
+        try:
+            feature_hash = _get_feature_hash(feature_tensor)
+            insert_failure_record(
+                {"symbol": symbol, "strategy": strategy, "reason": "meta_predicted_fail"},
+                feature_hash,
+                feature_vector=feature_tensor.numpy().flatten().tolist(),
+                label=final_pred_class
+            )
+        except Exception as e:
+            print(f"[meta 실패 기록 오류] {e}")
 
     log_prediction(
         symbol=symbol,
