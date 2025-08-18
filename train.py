@@ -164,7 +164,22 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
         num_classes = len(class_ranges)
         set_NUM_CLASSES(num_classes)
 
-        # ✅ 클래스 경계 로그 (logger에 함수 없더라도 안전)
+        # ✅ 추가: 클래스 수가 2개 미만이면 이 그룹 학습 스킵
+        if not class_ranges or len(class_ranges) < 2:
+            try:
+                logger.log_class_ranges(
+                    symbol=symbol, strategy=strategy, group_id=group_id,
+                    class_ranges=class_ranges or [], note="train_skip(<2 classes)"
+                )
+                logger.log_training_result(
+                    symbol, strategy, model="all", accuracy=0.0, f1=0.0, loss=0.0,
+                    note=f"스킵: group_id={group_id}, 클래스<2", status="skipped"
+                )
+            except Exception:
+                pass
+            return result
+
+        # ✅ 클래스 경계 로그
         try:
             logger.log_class_ranges(
                 symbol=symbol, strategy=strategy, group_id=group_id,
@@ -379,6 +394,33 @@ def train_models(symbol_list):
                 continue
 
             for gid in range(max_gid + 1):
+                # ✅ 추가: 각 그룹별로 클래스 수 2개 미만이면 스킵
+                try:
+                    grp_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=gid)
+                    if not grp_ranges or len(grp_ranges) < 2:
+                        try:
+                            logger.log_class_ranges(
+                                symbol=symbol, strategy=strategy, group_id=gid,
+                                class_ranges=grp_ranges or [], note="train_skip(<2 classes)"
+                            )
+                            logger.log_training_result(
+                                symbol, strategy, model=f"group{gid}", accuracy=0.0, f1=0.0, loss=0.0,
+                                note=f"스킵: group_id={gid}, 클래스<2", status="skipped"
+                            )
+                        except Exception:
+                            pass
+                        continue
+                except Exception as e:
+                    try:
+                        logger.log_training_result(
+                            symbol, strategy, model=f"group{gid}", accuracy=0.0, f1=0.0, loss=0.0,
+                            note=f"스킵: group_id={gid}, 경계계산실패 {e}", status="skipped"
+                        )
+                    except Exception:
+                        pass
+                    continue
+
+                # 통과 시 기존대로 학습
                 train_one_model(symbol, strategy, group_id=gid)
                 time.sleep(0.5)
 
