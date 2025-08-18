@@ -131,7 +131,7 @@ def _save_model_and_meta(model: nn.Module, path_pt: str, meta: dict):
 # --------------------------------------------------
 # 단일 모델 학습
 # --------------------------------------------------
-def train_one_model(symbol, strategy, group_id=None, max_epochs=20):
+def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
     result = {
         "symbol": symbol, "strategy": strategy, "group_id": int(group_id or 0),
         "models": []
