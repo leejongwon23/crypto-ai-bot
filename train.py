@@ -1,4 +1,4 @@
-# === train.py (PATCHED) ===
+# === train.py (FINAL) ===
 import os, json, time, traceback, tempfile, io, errno
 from datetime import datetime
 import pytz
@@ -20,7 +20,7 @@ from failure_db import insert_failure_record, ensure_failure_db
 import logger  # log_* 및 ensure_prediction_log_exists 사용
 from config import (
     get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups,
-    get_class_ranges, set_NUM_CLASSES, get_SYMBOL_GROUPS  # ⬅️ 추가
+    get_class_ranges, set_NUM_CLASSES, get_SYMBOL_GROUPS  # ⬅️ 유지
 )
 from data_augmentation import balance_classes
 
@@ -205,14 +205,44 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         except Exception as e:
             print(f"[⚠️ 수익률분포 요약 실패] {e}")
 
-        # 3) 라벨링 + 분포 로그
+        # 3) 라벨링 + 분포 로그  ── ★ 경계 이탈 보정(클리핑) 추가
         labels = []
+        clipped_low, clipped_high, unmatched = 0, 0, 0
+
+        lo0 = class_ranges[0][0]
+        hi_last = class_ranges[-1][1]
+
         for r in future_gains:
-            idx = 0
+            # NaN/inf 안전 가드
+            if not np.isfinite(r):
+                r = lo0
+
+            # 하한/상한 밖 → 양끝 클래스로 귀속
+            if r < lo0:
+                labels.append(0)
+                clipped_low += 1
+                continue
+            if r > hi_last:
+                labels.append(len(class_ranges) - 1)
+                clipped_high += 1
+                continue
+
+            # 정상 범위 내 매칭
+            idx = None
             for i, (lo, hi) in enumerate(class_ranges):
                 if lo <= r <= hi:
-                    idx = i; break
+                    idx = i
+                    break
+            if idx is None:
+                # 경계 반올림 등으로 누락될 경우 최근접 끝단으로
+                idx = len(class_ranges) - 1 if r > hi_last else 0
+                unmatched += 1
             labels.append(idx)
+
+        if clipped_low or clipped_high or unmatched:
+            print(f"[🔧 라벨 보정] {symbol}-{strategy}-g{group_id} "
+                  f"low_clip={clipped_low}, high_clip={clipped_high}, unmatched={unmatched}")
+
         labels = np.array(labels, dtype=np.int64)
 
         label_counts = Counter(labels.tolist())
