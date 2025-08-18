@@ -1,4 +1,4 @@
-# === train.py (FINAL) ===
+# === train.py (PATCHED) ===
 import os, json, time, traceback, tempfile, io, errno
 from datetime import datetime
 import pytz
@@ -11,14 +11,16 @@ from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import MinMaxScaler
 from collections import Counter
 
-from data.utils import SYMBOLS, get_kline_by_strategy, compute_features, create_dataset, SYMBOL_GROUPS
+# ⬇️ 불필요한 SYMBOLS/SYMBOL_GROUPS 의존 제거
+from data.utils import get_kline_by_strategy, compute_features, create_dataset
+
 from model.base_model import get_model
 from feature_importance import compute_feature_importance, save_feature_importance  # 호환용
 from failure_db import insert_failure_record, ensure_failure_db
 import logger  # log_* 및 ensure_prediction_log_exists 사용
 from config import (
     get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups,
-    get_class_ranges, set_NUM_CLASSES
+    get_class_ranges, set_NUM_CLASSES, get_SYMBOL_GROUPS  # ⬅️ 추가
 )
 from data_augmentation import balance_classes
 
@@ -399,7 +401,7 @@ def train_models(symbol_list):
         print(f"[⚠️ 진화형 메타러너 학습 실패] {e}")
 
 # --------------------------------------------------
-# 그룹 루프(즉시 예측 추가)
+# 그룹 루프(그룹 완료 후 예측 1회)
 # --------------------------------------------------
 def train_symbol_group_loop(sleep_sec: int = 0):
     try:
@@ -411,16 +413,17 @@ def train_symbol_group_loop(sleep_sec: int = 0):
         except Exception as e:
             print(f"[경고] prediction_log 준비 실패: {e}")
 
-        for idx, group in enumerate(SYMBOL_GROUPS):
-            print(f"🚀 [train_symbol_group_loop] 그룹 #{idx+1}/{len(SYMBOL_GROUPS)} → {group}")
+        groups = get_SYMBOL_GROUPS()  # ⬅️ 동적 그룹 로딩 (순서 오염 방지)
+        for idx, group in enumerate(groups):
+            print(f"🚀 [train_symbol_group_loop] 그룹 #{idx+1}/{len(groups)} → {group} | mode=per_symbol_all_horizons")
 
-            # 1) 그룹 학습
+            # 1) 그룹 학습 (심볼별 단→중→장 → 다음 심볼)
             train_models(group)
 
             # ✅ 모델 저장 직후 I/O 안정화
             time.sleep(0.2)
 
-            # 2) 그룹 학습 직후 예측 실행
+            # 2) 그룹 학습 완료 후 단 한 번씩 예측
             for symbol in group:
                 for strategy in ["단기", "중기", "장기"]:
                     try:
