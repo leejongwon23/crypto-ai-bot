@@ -130,6 +130,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
     MIN_HALF = 2
 
     def compute_equal_ranges(n_cls, reason=""):
+        n_cls = max(4, int(n_cls))
         step = 2.0 / n_cls  # [-1.0, +1.0] 균등
         raw = [(-1.0 + i * step, -1.0 + (i + 1) * step) for i in range(n_cls)]
         ranges = []
@@ -158,7 +159,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
     def compute_split_ranges_from_kline():
         try:
             df_price = get_kline_by_strategy(symbol, strategy)
-            if df_price is None or len(df_price) < 30:
+            if df_price is None or len(df_price) < 30 or "close" not in df_price:
                 return compute_equal_ranges(10, reason="가격 데이터 부족")
 
             returns = df_price["close"].pct_change().dropna().values
@@ -174,16 +175,17 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
                 if cap is not None:
                     pos = np.clip(pos, None, cap)
 
-            half_neg = max(MIN_HALF, min(8, len(neg) // 5))
-            half_pos = max(MIN_HALF, min(8, len(pos) // 5))
+            # 한쪽이 텅 비는 경우를 방지하기 위한 기본 분포 가드
+            if neg.size == 0 and pos.size == 0:
+                return compute_equal_ranges(10, reason="분할 불가(모두 0)")
+
+            half_neg = max(MIN_HALF, min(8, len(neg) // 5)) if neg.size > 0 else MIN_HALF
+            half_pos = max(MIN_HALF, min(8, len(pos) // 5)) if pos.size > 0 else MIN_HALF
 
             num_classes = min(MAX_CLASSES, half_neg + half_pos)
             if num_classes % 2 != 0:
                 num_classes -= 1
             num_classes = max(num_classes, 4)
-
-            if half_neg + half_pos <= 0:
-                return compute_equal_ranges(10, reason="분할 불가")
 
             # 분위/균등 선택
             if method == "quantile":
@@ -197,7 +199,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             neg_ranges = [(float(q_neg[i]), float(q_neg[i + 1])) for i in range(max(1, len(q_neg) - 1))]
             pos_ranges = [(float(q_pos[i]), float(q_pos[i + 1])) for i in range(max(1, len(q_pos) - 1))]
 
-            # 최소 폭/반올림/캡 재적용
+            # 최소 폭/반올림/캡 재적용 + 단조 보정
             cooked = []
             for lo, hi in neg_ranges + pos_ranges:
                 lo, hi = _enforce_min_width(lo, hi)
@@ -208,7 +210,13 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
                     hi = _round2(lo + _MIN_RANGE_WIDTH)
                 cooked.append((lo, hi))
 
-            return _fix_monotonic(cooked)
+            fixed = _fix_monotonic(cooked)
+
+            # 최종 안전 가드: 결과가 비거나 1개면 균등 분할 대체
+            if not fixed or len(fixed) < 2:
+                return compute_equal_ranges(10, reason="최종 경계 부족(가드)")
+
+            return fixed
 
         except Exception as e:
             return compute_equal_ranges(10, reason=f"예외 발생: {e}")
@@ -233,7 +241,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
                 if cap is not None and rets.size > 0:
                     rets = np.where(rets > 0, np.minimum(rets, cap), rets)
 
-                if rets.size > 0:
+                if rets.size > 0 and len(all_ranges) > 0:
                     qs = np.quantile(rets, [0.00, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 1.00])
                     print(
                         f"[📈 수익률분포] {symbol}-{strategy} "
@@ -247,9 +255,8 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
                     print(f"[📏 경계 리스트] {symbol}-{strategy} → {all_ranges}")
 
                     # 클래스별 샘플 카운트(히스토그램)
-                    # 엣지 배열: 연속 경계(마지막 우측엣지 약간 증가해 닫힘 방지)
                     edges = [all_ranges[0][0]] + [hi for (_, hi) in all_ranges]
-                    edges[-1] = float(edges[-1]) + 1e-9
+                    edges[-1] = float(edges[-1]) + 1e-9  # 우측 닫힘 충돌 방지
                     hist, _ = np.histogram(rets, bins=edges)
                     print(f"[📐 클래스 분포] {symbol}-{strategy} count={int(hist.sum())} → {hist.tolist()}")
             else:
@@ -257,6 +264,12 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
     except Exception as _e:
         print(f"[⚠️ 디버그 로그 실패] {symbol}-{strategy} → {_e}")
     # -----------------------------------------------------------------------
+
+    # ✅ 동적 클래스 수를 전역 NUM_CLASSES에 반영(그룹 로그와 실제 일치)
+    try:
+        set_NUM_CLASSES(len(all_ranges))
+    except Exception:
+        pass
 
     # 그룹 단위 슬라이싱(기존 인터페이스 유지)
     if group_id is None:
