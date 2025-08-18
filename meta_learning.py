@@ -177,6 +177,19 @@ def _aggregate_base_outputs(
     return agg, detail
 
 
+# ======= (NEW) 1% 미만 페널티 헬퍼 =======
+_RET_TH = 0.01  # 1%
+
+def _ret_gain(er: float) -> float:
+    """
+    기대수익률 절댓값 er -> 점수 가중치.
+    - 1% 미만이면 0 (사실상 선택 배제)
+    - 1% 이상이면 (|er|-0.01) 만큼 비례(필요시 더 세게/약하게 조정 가능)
+    """
+    er_abs = abs(float(er))
+    return max(0.0, er_abs - _RET_TH)
+
+
 def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None):
     """
     (유지) 단독 유틸: 성공률/수익률 고려 스코어로 최종 클래스 산출
@@ -196,24 +209,34 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
             softmax_list.append(np.array(m, dtype=np.float32))
 
     num_classes = len(softmax_list[0])
-    avg_softmax = np.mean(softmax_list, axis=0)
+    avg_softmax = (np.mean(softmax_list, axis=0) + 1e-12)
+    avg_softmax = avg_softmax / avg_softmax.sum()
 
-    success_rate_dict = meta_info.get("success_rate", {}) if meta_info else {}
-    expected_return_dict = meta_info.get("expected_return", {}) if meta_info else {}
-    failure_rate_dict = {c: (1.0 - success_rate_dict.get(c, 0.5)) for c in range(num_classes)}
+    meta_info = meta_info or {}
+    success_rate_dict = meta_info.get("success_rate", {})  # {cls: 0~1}
+    expected_return_dict = meta_info.get("expected_return", {})  # {cls: r}
 
+    # -------- 점수 계산 --------
     scores = np.zeros(num_classes, dtype=np.float32)
-    if not success_rate_dict:
-        stability_weight = 1.0 - np.std(softmax_list, axis=0)
-        scores = avg_softmax * stability_weight
-        mode = "기본 메타 (성공률 無)"
-    else:
-        for c in range(num_classes):
-            sr = success_rate_dict.get(c, 0.5)
-            fr = failure_rate_dict.get(c, 0.5)
-            er = expected_return_dict.get(c, 1.0)
-            scores[c] = avg_softmax[c] * (sr - fr) * abs(er)
-        mode = "성공률 기반 메타"
+    all_below = True  # 모든 클래스 ER<1%인지 확인
+
+    for c in range(num_classes):
+        sr = success_rate_dict.get(c, 0.5)          # 없으면 중립 0.5
+        er = expected_return_dict.get(c, 0.0)       # 없으면 0 → 임계 미만으로 처리
+        g  = _ret_gain(er)                          # 1% 미만이면 0
+        if g > 0:
+            all_below = False
+        scores[c] = avg_softmax[c] * (0.5 + 0.5*sr) * g
+
+    mode = "성공률 기반 메타" if success_rate_dict else "기본 메타 (성공률 無)"
+    note_reason = ""
+
+    # 모든 클래스가 1% 미만이면 → 페널티로 전부 0이 되므로
+    # 이때는 "평균 확률"로 고르되, 로그에 이유 남김
+    if all_below:
+        scores = avg_softmax.copy()
+        mode += " / all<1%→prob선택"
+        note_reason = "all<1%"
 
     final_pred_class = int(np.argmax(scores))
     print(f"[META] {mode} → 최종 클래스 {final_pred_class} / 점수={scores.round(4)}")
@@ -253,7 +276,7 @@ def meta_predict(
     """
     meta_state = meta_state or {}
     class_success = meta_state.get("success_rate", {})  # {cls: rate}
-    expected_return = meta_state.get("expected_return", {})
+    expected_return = meta_state.get("expected_return", {})  # {cls: r}
 
     # 1) 베이스 집계
     agg_probs, detail = _aggregate_base_outputs(groups_outputs, class_success, mode=agg_mode)
@@ -278,9 +301,7 @@ def meta_predict(
                     proba = clf.predict_proba(X_stack)[0]
                     final_class = int(stacked_pred)
                     used_mode = "stacking"
-                    # stacked 확률은 클래스 공간이 동일하다고 가정. 없으면 집계확률 사용.
                     try:
-                        # proba 길이가 클래스 수와 다르면 집계확률 사용
                         if len(proba) == len(agg_probs):
                             agg_probs = proba.astype(np.float32)
                         else:
@@ -293,26 +314,33 @@ def meta_predict(
             except Exception as e:
                 print(f"[⚠️ stacking 예측 실패 → 집계 폴백] {e}")
 
-    # 3) 룰기반 폴백(확신 낮으면 성공률/수익률로 보정)
+    # 3) 룰기반 폴백(확신 낮으면 성공률/수익률로 보정 + 1% 임계 적용)
     top1 = int(np.argmax(agg_probs))
     top1p = float(agg_probs[top1])
     margin = float(top1p - float(np.partition(agg_probs, -2)[-2]) if len(agg_probs) >= 2 else top1p)
     ent = _entropy(agg_probs)
 
     if used_mode != "stacking":
-        # 확신이 낮다(엔트로피 높고 마진 작다)고 판단되면 성공률/수익률 점수로 재선택
         low_conf = (margin < 0.05) or (ent > math.log(len(agg_probs)) * 0.8)
-        if low_conf:
+
+        # 기본 점수: 확률 × (0.5+0.5*성공률) × 수익률 가중(1% 미만 0)
+        scores = agg_probs.copy()
+        for c in range(len(scores)):
+            sr = class_success.get(c, 0.5)
+            er = expected_return.get(c, 0.0)
+            scores[c] = scores[c] * (0.5 + 0.5 * sr) * _ret_gain(er)
+
+        # 모든 클래스가 1% 미만이면 → 확률만으로 선택(로그에 이유 추가)
+        if np.all([_ret_gain(expected_return.get(c, 0.0)) == 0.0 for c in range(len(scores))]):
             scores = agg_probs.copy()
-            for c in range(len(scores)):
-                sr = class_success.get(c, 0.5)
-                er = abs(expected_return.get(c, 1.0))
-                scores[c] = scores[c] * (0.5 + 0.5 * sr) * er
-            rule_choice = int(np.argmax(scores))
-            if rule_choice != final_class:
-                used_mode = "rule_fallback"
-                final_class = rule_choice
-                # 확률 벡터는 원본 집계 확률 유지(스코어는 선택에만 사용)
+            low_conf = True  # 이유 표기를 위해
+
+        rule_choice = int(np.argmax(scores))
+
+        if low_conf or rule_choice != final_class:
+            used_mode = "rule_fallback"
+            final_class = rule_choice
+            # 확률 벡터는 원본 집계 확률 유지
 
     # 4) 결과 구성
     result = {
@@ -327,7 +355,11 @@ def meta_predict(
 
     # 5) 로깅(선택)
     if log:
-        note = f"meta:{used_mode} top1={result['class']} p={result['confidence']:.3f} margin={result['margin']:.3f}"
+        er_cho = expected_return.get(result["class"], 0.0)
+        sr_cho = class_success.get(result["class"], None)
+        note = (f"meta:{used_mode} top1={result['class']} p={result['confidence']:.3f} "
+                f"margin={result['margin']:.3f} ER={er_cho:.4f} SR={('-' if sr_cho is None else f'{sr_cho:.2f}')}")
+        reason = f"entropy={result['entropy']:.3f} TH={_RET_TH:.2%}"
         _safe_log_prediction(
             symbol=symbol,
             strategy=horizon,
@@ -340,7 +372,7 @@ def meta_predict(
             label=result["class"],
             note=note,
             success=True,
-            reason=f"entropy={result['entropy']:.3f}",
+            reason=reason,
             rate=0.0,
             return_value=0.0,
             volatility=False,
