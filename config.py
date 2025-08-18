@@ -267,7 +267,8 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
 
     # ✅ 동적 클래스 수를 전역 NUM_CLASSES에 반영(그룹 로그와 실제 일치)
     try:
-        set_NUM_CLASSES(len(all_ranges))
+        if isinstance(all_ranges, list) and len(all_ranges) >= 2:
+            set_NUM_CLASSES(len(all_ranges))
     except Exception:
         pass
 
