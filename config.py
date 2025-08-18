@@ -136,7 +136,8 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
         for lo, hi in raw:
             lo, hi = _enforce_min_width(lo, hi)
             ranges.append((_round2(lo), _round2(hi)))
-        print(f"[⚠️ 균등 분할 클래스 사용] 사유: {reason}")
+        if reason:
+            print(f"[⚠️ 균등 분할 클래스 사용] 사유: {reason}")
         return _fix_monotonic(ranges)
 
     def _fix_monotonic(ranges):
@@ -217,6 +218,45 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
     # 캐시 저장
     if symbol is not None and strategy is not None:
         _ranges_cache[(symbol, strategy)] = all_ranges
+
+    # --- 디버그 로깅: 경계/분포/수익률(항상 찍힘) -----------------------------
+    try:
+        if symbol is not None and strategy is not None:
+            import numpy as np
+            from data.utils import get_kline_by_strategy as _get_kline_dbg
+
+            df_price_dbg = _get_kline_dbg(symbol, strategy)
+            if df_price_dbg is not None and len(df_price_dbg) >= 2 and "close" in df_price_dbg:
+                rets = df_price_dbg["close"].pct_change().dropna().values
+                # 전략별 양수 캡 적용(위 로직과 일치)
+                cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy)
+                if cap is not None and rets.size > 0:
+                    rets = np.where(rets > 0, np.minimum(rets, cap), rets)
+
+                if rets.size > 0:
+                    qs = np.quantile(rets, [0.00, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 1.00])
+                    print(
+                        f"[📈 수익률분포] {symbol}-{strategy} "
+                        f"min={_round2(qs[0])}, p25={_round2(qs[1])}, p50={_round2(qs[2])}, "
+                        f"p75={_round2(qs[3])}, p90={_round2(qs[4])}, p95={_round2(qs[5])}, "
+                        f"p99={_round2(qs[6])}, max={_round2(qs[7])}"
+                    )
+
+                    # 클래스 경계 로그
+                    print(f"[📏 클래스경계 로그] {symbol}-{strategy} → {len(all_ranges)}개")
+                    print(f"[📏 경계 리스트] {symbol}-{strategy} → {all_ranges}")
+
+                    # 클래스별 샘플 카운트(히스토그램)
+                    # 엣지 배열: 연속 경계(마지막 우측엣지 약간 증가해 닫힘 방지)
+                    edges = [all_ranges[0][0]] + [hi for (_, hi) in all_ranges]
+                    edges[-1] = float(edges[-1]) + 1e-9
+                    hist, _ = np.histogram(rets, bins=edges)
+                    print(f"[📐 클래스 분포] {symbol}-{strategy} count={int(hist.sum())} → {hist.tolist()}")
+            else:
+                print(f"[ℹ️ 수익률분포 스킵] {symbol}-{strategy} → 데이터 부족")
+    except Exception as _e:
+        print(f"[⚠️ 디버그 로그 실패] {symbol}-{strategy} → {_e}")
+    # -----------------------------------------------------------------------
 
     # 그룹 단위 슬라이싱(기존 인터페이스 유지)
     if group_id is None:
