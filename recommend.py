@@ -9,7 +9,7 @@ import pandas as pd
 
 from predict import predict
 from data.utils import SYMBOLS, get_kline_by_strategy
-from logger import log_prediction
+from logger import log_prediction, ensure_prediction_log_exists  # ✅ 로그 파일 보장 추가
 from telegram_bot import send_message
 
 # 현재 KST 시각
@@ -21,25 +21,47 @@ STRATEGY_VOL = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
 # 로그 경로
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
 FAILURE_LOG = "/persistent/logs/failure_count.csv"
-PREDICTION_LOG = "/persistent/logs/prediction_log.csv"
+PREDICTION_LOG = "/persistent/prediction_log.csv"  # ✅ 루트 경로로 통일
 os.makedirs("/persistent/logs", exist_ok=True)
+
+# ──────────────────────────────────────────────────────────────
+# 유틸: 전략별 누적 성공률/표본수 계산
+#   - status가 있으면 success/fail만 집계
+#   - 없으면 success(True/False)로 집계
+# ──────────────────────────────────────────────────────────────
+def get_strategy_success_rate(strategy):
+    try:
+        if not os.path.exists(PREDICTION_LOG):
+            return 0.0, 0
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
+        df = df[df["strategy"] == strategy]
+
+        if "status" in df.columns:
+            st = df["status"].astype(str).str.lower()
+            df = df[st.isin(["success", "fail"])]
+            n = len(df)
+            if n == 0:
+                return 0.0, 0
+            succ = (st == "success").sum()
+            return round(succ / n, 6), n
+        else:
+            if "success" not in df.columns:
+                return 0.0, 0
+            s = df["success"].map(lambda x: str(x).strip().lower() in ["true", "1", "yes", "y"])
+            n = s.notna().sum()
+            if n == 0:
+                return 0.0, 0
+            return round(s.mean(), 6), n
+    except Exception as e:
+        print(f"[get_strategy_success_rate 예외] {e}")
+        return 0.0, 0
 
 # ──────────────────────────────────────────────────────────────
 # 성공률 필터 (성공률 ≥65% + 최소 10회 기록)
 # ──────────────────────────────────────────────────────────────
 def check_prediction_filter(strategy, min_success_rate=0.65, min_samples=10):
-    try:
-        if not os.path.exists(PREDICTION_LOG):
-            return False
-        df = pd.read_csv(PREDICTION_LOG)
-        df = df[df["strategy"] == strategy]
-        if len(df) < min_samples:
-            return False
-        success_rate = df["success"].mean()
-        return success_rate >= min_success_rate
-    except Exception as e:
-        print(f"[prediction_filter 예외] {e}")
-        return False
+    rate, n = get_strategy_success_rate(strategy)
+    return (n >= min_samples) and (rate >= min_success_rate)
 
 # ──────────────────────────────────────────────────────────────
 # 텔레그램 메시지 포맷
@@ -59,7 +81,7 @@ def format_message(data):
     strategy = data.get("strategy", "전략")
     symbol = data.get("symbol", "종목")
     success_rate = safe_float(data.get("success_rate"), 0.0)
-    rate = safe_float(data.get("rate"), 0.0)
+    rate = safe_float(data.get("rate"), 0.0)  # expected return (예: 0.125)
     reason = str(data.get("reason", "-")).strip()
     score = data.get("score", None)
     volatility = str(data.get("volatility", "False")).lower() in ["1", "true", "yes"]
@@ -144,20 +166,40 @@ def get_symbols_by_volatility(strategy):
     return sorted(result, key=lambda x: -x["volatility"])
 
 # ──────────────────────────────────────────────────────────────
+# 내부 유틸: 최신 종가(진입가) 조회
+# ──────────────────────────────────────────────────────────────
+def _get_latest_price(symbol, strategy):
+    try:
+        df = get_kline_by_strategy(symbol, strategy)
+        if df is None or len(df) == 0 or "close" not in df.columns:
+            return 0.0
+        return float(df["close"].iloc[-1])
+    except Exception:
+        return 0.0
+
+# ──────────────────────────────────────────────────────────────
 # 예측 실행 루프
 # ──────────────────────────────────────────────────────────────
 def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=True):
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼")
     results, fmap = [], load_failure_count()
 
+    # 예측/로그 파일 보장
+    try:
+        ensure_prediction_log_exists()
+    except Exception as e:
+        print(f"[경고] prediction_log 보장 실패: {e}")
+
     for item in symbols:
         symbol = item["symbol"]
+        vol_val = float(item.get("volatility", 0.0))
 
         if not allow_prediction:
             log_audit(symbol, strategy, "예측 생략", f"예측 차단됨 (source={source})")
             continue
 
         try:
+            # 모델 존재 여부 대략 체크
             model_dir = "/persistent/models"
             model_count = len([
                 f for f in os.listdir(model_dir)
@@ -167,6 +209,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                 log_audit(symbol, strategy, None, "모델 없음")
                 continue
 
+            # 실제 예측 실행
             pred_results = predict(symbol, strategy, source=source)
             if not isinstance(pred_results, list):
                 pred_results = [pred_results]
@@ -175,30 +218,57 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                 log_audit(symbol, strategy, None, "predict() 결과 없음")
                 continue
 
+            # 전략 누적 성공률(메시지 표시용)
+            strat_rate, strat_n = get_strategy_success_rate(strategy)
+
             for result in pred_results:
                 if not isinstance(result, dict):
                     log_audit(symbol, strategy, str(result), "예측 반환 형식 오류")
                     continue
 
+                expected_ret = float(result.get("expected_return", 0.0))
+                entry_price = _get_latest_price(symbol, strategy)
+                pred_class_val = int(result.get("class", -1))
+                model_name = result.get("model", "unknown")
+                ts = result.get("timestamp", now_kst().isoformat())
+                src = result.get("source", source)
+
+                # 방향(예상 수익률 기준): +면 롱, -면 숏
+                direction = "롱" if expected_ret >= 0 else "숏"
+
+                # 예측 로그(평가는 나중에 별도 모듈에서)
                 log_prediction(
                     symbol=result.get("symbol", symbol),
                     strategy=result.get("strategy", strategy),
-                    direction=result.get("direction", "class"),
-                    entry_price=float(result.get("price", 0.0)),
-                    target_price=float(result.get("price", 0.0)) * (1 + float(result.get("expected_return", 0.0))),
-                    timestamp=result.get("timestamp", now_kst().isoformat()),
-                    model=result.get("model", "unknown"),
-                    success=True,
+                    direction=f"class-{pred_class_val}",
+                    entry_price=entry_price,
+                    target_price=entry_price * (1 + expected_ret) if entry_price > 0 else 0,
+                    timestamp=ts,
+                    model=model_name,
+                    success=True,  # 최종 평가는 evaluate가 결정
                     reason=result.get("reason", "예측 기록"),
-                    rate=float(result.get("expected_return", 0.0)),
-                    return_value=float(result.get("expected_return", 0.0)),
-                    volatility=item.get("volatility", 0) > 0,
-                    source=source,
-                    predicted_class=int(result.get("class", -1)),
-                    label=int(result.get("class", -1)),
+                    rate=expected_ret,
+                    return_value=expected_ret,
+                    volatility=vol_val > 0,
+                    source=src,
+                    predicted_class=pred_class_val,
+                    label=pred_class_val,
                 )
-                results.append(result)
-                fmap[f"{symbol}-{strategy}"] = 0
+
+                # 텔레그램 메시지용으로 필드 보강
+                enriched = dict(result)
+                enriched.update({
+                    "symbol": symbol,
+                    "strategy": strategy,
+                    "price": entry_price,
+                    "rate": expected_ret,
+                    "direction": direction,
+                    "success_rate": strat_rate,   # 0~1
+                    "volatility": (vol_val > 0),
+                })
+
+                results.append(enriched)
+                fmap[f"{symbol}-{strategy}"] = 0  # 실패 카운터 리셋
 
         except Exception as e:
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
@@ -219,6 +289,7 @@ def main(strategy, symbols=None, force=False, allow_prediction=True):
 
     results = run_prediction_loop(strategy, target_symbols, source="배치", allow_prediction=allow_prediction)
 
+    # ✅ 필터 통과했을 때만 텔레그램 발송 (성공률 65% + 최소 10회)
     if check_prediction_filter(strategy):
         for r in results:
             try:
