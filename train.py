@@ -1,3 +1,4 @@
+# === train.py (FINAL) ===
 import os, json, time, traceback, tempfile, io, errno
 from datetime import datetime
 import pytz
@@ -8,30 +9,30 @@ import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import MinMaxScaler
-from collections import Counter  # ✅ 추가
+from collections import Counter
 
 from data.utils import SYMBOLS, get_kline_by_strategy, compute_features, create_dataset, SYMBOL_GROUPS
 from model.base_model import get_model
-from feature_importance import compute_feature_importance, save_feature_importance  # (미사용시에도 호환 유지)
+from feature_importance import compute_feature_importance, save_feature_importance  # 호환용
 from failure_db import insert_failure_record, ensure_failure_db
-import logger  # ✅ 유지
+import logger  # log_* 및 ensure_prediction_log_exists 사용
 from config import (
     get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups,
     get_class_ranges, set_NUM_CLASSES
 )
 from data_augmentation import balance_classes
 
-# --- window_optimizer: 정식 API 직접 임포트 ---
+# --- window_optimizer ---
 from window_optimizer import find_best_window
 
-# --- ssl_pretrain: 없으면 no-op ---
+# --- ssl_pretrain (옵션) ---
 try:
     from ssl_pretrain import masked_reconstruction
 except Exception:
     def masked_reconstruction(symbol, strategy, input_size):
         return None
 
-# --- evo meta learner: 학습 루프 (없어도 앱이 죽지 않도록) ---
+# --- evo meta learner (옵션) ---
 try:
     from evo_meta_learner import train_evo_meta_loop
 except Exception:
@@ -153,9 +154,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         if feat is None or feat.empty or feat.isnull().any().any():
             _log_skip(symbol, strategy, "피처 없음"); return result
 
-        # -----------------------------
-        # 1) 동적 클래스 경계 계산 & 로그
-        # -----------------------------
+        # 1) 동적 클래스 경계
         try:
             class_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=group_id)
         except Exception as e:
@@ -164,75 +163,47 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         num_classes = len(class_ranges)
         set_NUM_CLASSES(num_classes)
 
-        # ✅ 추가: 클래스 수가 2개 미만이면 이 그룹 학습 스킵
         if not class_ranges or len(class_ranges) < 2:
             try:
-                logger.log_class_ranges(
-                    symbol=symbol, strategy=strategy, group_id=group_id,
-                    class_ranges=class_ranges or [], note="train_skip(<2 classes)"
-                )
-                logger.log_training_result(
-                    symbol, strategy, model="all", accuracy=0.0, f1=0.0, loss=0.0,
-                    note=f"스킵: group_id={group_id}, 클래스<2", status="skipped"
-                )
+                logger.log_class_ranges(symbol, strategy, group_id=group_id,
+                                        class_ranges=class_ranges or [], note="train_skip(<2 classes)")
+                logger.log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0, loss=0.0,
+                                           note=f"스킵: group_id={group_id}, 클래스<2", status="skipped")
             except Exception:
                 pass
             return result
 
-        # ✅ 클래스 경계 로그
+        # 경계 로그
         try:
-            logger.log_class_ranges(
-                symbol=symbol, strategy=strategy, group_id=group_id,
-                class_ranges=class_ranges, note="train_one_model"
-            )
+            logger.log_class_ranges(symbol, strategy, group_id=group_id,
+                                    class_ranges=class_ranges, note="train_one_model")
             print(f"[📏 클래스경계 로그] {symbol}-{strategy}-g{group_id} → {class_ranges}")
         except Exception as e:
             print(f"[⚠️ log_class_ranges 실패/미구현] {e}")
 
-        # -----------------------------
-        # 2) 미래 수익률 계산 + 요약/로그
-        # -----------------------------
+        # 2) 미래 수익률 + 요약 로그
         horizon_hours = _strategy_horizon_hours(strategy)
         future_gains = _future_returns_by_timestamp(df, horizon_hours=horizon_hours)
-
-        # 콘솔 요약
         try:
             fg = future_gains[np.isfinite(future_gains)]
             if fg.size > 0:
-                q = np.nanpercentile(fg, [0, 25, 50, 75, 90, 95, 99])
-                print(
-                    f"[📈 수익률분포] {symbol}-{strategy}-g{group_id} "
-                    f"min={q[0]:.4f}, p25={q[1]:.4f}, p50={q[2]:.4f}, p75={q[3]:.4f}, "
-                    f"p90={q[4]:.4f}, p95={q[5]:.4f}, p99={q[6]:.4f}, max={np.nanmax(fg):.4f}"
-                )
-                # 파일 로그
+                q = np.nanpercentile(fg, [0,25,50,75,90,95,99])
+                print(f"[📈 수익률분포] {symbol}-{strategy}-g{group_id} "
+                      f"min={q[0]:.4f}, p25={q[1]:.4f}, p50={q[2]:.4f}, p75={q[3]:.4f}, "
+                      f"p90={q[4]:.4f}, p95={q[5]:.4f}, p99={q[6]:.4f}, max={np.nanmax(fg):.4f}")
                 try:
-                    logger.log_return_distribution(
-                        symbol=symbol,
-                        strategy=strategy,
-                        group_id=group_id,
+                    logger.log_return_distribution(symbol, strategy, group_id=group_id,
                         horizon_hours=int(horizon_hours),
-                        summary={
-                            "min": float(q[0]),
-                            "p25": float(q[1]),
-                            "p50": float(q[2]),
-                            "p75": float(q[3]),
-                            "p90": float(q[4]),
-                            "p95": float(q[5]),
-                            "p99": float(q[6]),
-                            "max": float(np.nanmax(fg)),
-                            "count": int(fg.size)
-                        },
-                        note="train_one_model"
-                    )
+                        summary={"min":float(q[0]),"p25":float(q[1]),"p50":float(q[2]),
+                                 "p75":float(q[3]),"p90":float(q[4]),"p95":float(q[5]),
+                                 "p99":float(q[6]),"max":float(np.nanmax(fg)),"count":int(fg.size)},
+                        note="train_one_model")
                 except Exception as le:
                     print(f"[⚠️ log_return_distribution 실패/미구현] {le}")
         except Exception as e:
             print(f"[⚠️ 수익률분포 요약 실패] {e}")
 
-        # -----------------------------
         # 3) 라벨링 + 분포 로그
-        # -----------------------------
         labels = []
         for r in future_gains:
             idx = 0
@@ -242,7 +213,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
             labels.append(idx)
         labels = np.array(labels, dtype=np.int64)
 
-        # 분포/엔트로피 계산 (window 선택 후 기록을 위해 보관)
         label_counts = Counter(labels.tolist())
         total_labels = int(len(labels))
         probs = np.array(list(label_counts.values()), dtype=np.float64)
@@ -255,30 +225,24 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         feat_scaled = MinMaxScaler().fit_transform(features_only)
 
-        # -----------------------------
-        # 4) 최적 윈도우 탐색
-        # -----------------------------
+        # 4) 최적 윈도우
         try:
             best_window = find_best_window(symbol, strategy, window_list=[10,20,30,40,60], group_id=group_id)
         except Exception:
             best_window = 60
         window = int(max(5, best_window))
 
-        # ✅ 라벨 분포 로그 (윈도우 정보까지 포함)
         try:
-            logger.log_label_distribution(
-                symbol=symbol, strategy=strategy, group_id=group_id,
-                counts=dict(label_counts), total=total_labels,
-                n_unique=int(len(label_counts)), entropy=float(entropy),
-                note=f"window={window}"
-            )
-            print(f"[🧮 라벨분포 로그] {symbol}-{strategy}-g{group_id} total={total_labels}, classes={len(label_counts)}, H={entropy:.4f}")
+            logger.log_label_distribution(symbol, strategy, group_id=group_id,
+                                          counts=dict(label_counts), total=total_labels,
+                                          n_unique=int(len(label_counts)), entropy=float(entropy),
+                                          note=f"window={window}")
+            print(f"[🧮 라벨분포 로그] {symbol}-{strategy}-g{group_id} total={total_labels}, "
+                  f"classes={len(label_counts)}, H={entropy:.4f}")
         except Exception as e:
             print(f"[⚠️ log_label_distribution 실패/미구현] {e}")
 
-        # -----------------------------
         # 5) 시퀀스 생성
-        # -----------------------------
         X, y = [], []
         for i in range(len(feat_scaled) - window):
             X.append(feat_scaled[i:i+window])
@@ -307,9 +271,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         except Exception as e:
             print(f"[⚠️ 밸런싱 실패] {e}")
 
-        # -----------------------------
         # 6) 학습/평가/저장
-        # -----------------------------
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
             model = get_model(model_type, input_size=FEATURE_INPUT_SIZE, output_size=num_classes).to(DEVICE)
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -351,7 +313,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
                 "num_classes": int(num_classes), "input_size": int(FEATURE_INPUT_SIZE),
                 "metrics": {"val_acc": acc, "val_f1": f1, "train_loss_sum": float(total_loss)},
                 "timestamp": now_kst().isoformat(), "model_name": model_name,
-                "window": int(window)  # ✅ 메타에 윈도우 저장
+                "window": int(window)
             }
             _save_model_and_meta(model, model_path, meta)
 
@@ -394,33 +356,28 @@ def train_models(symbol_list):
                 continue
 
             for gid in range(max_gid + 1):
-                # ✅ 추가: 각 그룹별로 클래스 수 2개 미만이면 스킵
+                # 각 그룹별 클래스 수 2개 미만이면 스킵
                 try:
                     grp_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=gid)
                     if not grp_ranges or len(grp_ranges) < 2:
                         try:
-                            logger.log_class_ranges(
-                                symbol=symbol, strategy=strategy, group_id=gid,
-                                class_ranges=grp_ranges or [], note="train_skip(<2 classes)"
-                            )
-                            logger.log_training_result(
-                                symbol, strategy, model=f"group{gid}", accuracy=0.0, f1=0.0, loss=0.0,
-                                note=f"스킵: group_id={gid}, 클래스<2", status="skipped"
-                            )
+                            logger.log_class_ranges(symbol, strategy, group_id=gid,
+                                                    class_ranges=grp_ranges or [], note="train_skip(<2 classes)")
+                            logger.log_training_result(symbol, strategy, model=f"group{gid}",
+                                                       accuracy=0.0, f1=0.0, loss=0.0,
+                                                       note=f"스킵: group_id={gid}, 클래스<2", status="skipped")
                         except Exception:
                             pass
                         continue
                 except Exception as e:
                     try:
-                        logger.log_training_result(
-                            symbol, strategy, model=f"group{gid}", accuracy=0.0, f1=0.0, loss=0.0,
-                            note=f"스킵: group_id={gid}, 경계계산실패 {e}", status="skipped"
-                        )
+                        logger.log_training_result(symbol, strategy, model=f"group{gid}",
+                                                   accuracy=0.0, f1=0.0, loss=0.0,
+                                                   note=f"스킵: group_id={gid}, 경계계산실패 {e}", status="skipped")
                     except Exception:
                         pass
                     continue
 
-                # 통과 시 기존대로 학습
                 train_one_model(symbol, strategy, group_id=gid)
                 time.sleep(0.5)
 
@@ -446,13 +403,22 @@ def train_models(symbol_list):
 # --------------------------------------------------
 def train_symbol_group_loop(sleep_sec: int = 0):
     try:
-        from predict import predict  # ✅ 예측 함수 불러오기
+        from predict import predict  # 예측 함수 불러오기
+
+        # ✅ 예측 로그 파일/헤더 보장
+        try:
+            logger.ensure_prediction_log_exists()
+        except Exception as e:
+            print(f"[경고] prediction_log 준비 실패: {e}")
 
         for idx, group in enumerate(SYMBOL_GROUPS):
             print(f"🚀 [train_symbol_group_loop] 그룹 #{idx+1}/{len(SYMBOL_GROUPS)} → {group}")
 
             # 1) 그룹 학습
             train_models(group)
+
+            # ✅ 모델 저장 직후 I/O 안정화
+            time.sleep(0.2)
 
             # 2) 그룹 학습 직후 예측 실행
             for symbol in group:
