@@ -7,7 +7,7 @@ import datetime
 import pytz
 
 from data.utils import SYMBOLS, get_kline_by_strategy
-from logger import log_audit_prediction as log_audit
+from logger import log_audit_prediction as log_audit, ensure_prediction_log_exists  # ✅ 추가: 로그 파일 보장
 
 last_trigger_time = {}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
@@ -51,6 +51,12 @@ def check_model_quality(symbol, strategy):
 
 def run():
     from recommend import run_prediction
+    # ✅ 예측/평가 로그 파일이 없을 경우 헤더까지 생성 (안전)
+    try:
+        ensure_prediction_log_exists()
+    except Exception as e:
+        print(f"[경고] prediction_log 보장 실패: {e}")
+
     print(f"[트리거 실행] 전조 패턴 감지 시작: {now_kst().isoformat()}")
     triggered = 0
 
