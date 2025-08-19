@@ -71,11 +71,30 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     # === 1. 실패 샘플 우선 수집 ===
     if os.path.exists(WRONG_CSV):
         try:
-            df = pd.read_csv(WRONG_CSV, encoding="utf-8-sig")
+            # ✅ 새 컬럼(regime/raw_prob/calib_prob) 유무와 상관없이 안전 로드
+            _df_all = pd.read_csv(WRONG_CSV, encoding="utf-8-sig", on_bad_lines="skip")
+            # 필요한 기본 컬럼 체크
+            base_cols = ["timestamp", "symbol", "strategy", "predicted_class"]
+            for c in base_cols:
+                if c not in _df_all.columns:
+                    raise ValueError(f"'{c}' 컬럼 없음")
+            # 선택 컬럼(없어도 됨)
+            opt_cols = [c for c in ["regime", "raw_prob", "calib_prob"] if c in _df_all.columns]
+            df = _df_all[base_cols + opt_cols].copy()
+
+            # 필터링
             df = df[(df["symbol"] == symbol) & (df["strategy"] == strategy)]
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
             df = df[df["timestamp"].notna()]
-            df["label"] = df.get("predicted_class", -1).astype(int)
+
+            # 타입 보정/클리핑(없으면 기본값)
+            if "raw_prob" not in df.columns:  df["raw_prob"] = np.nan
+            if "calib_prob" not in df.columns: df["calib_prob"] = np.nan
+            if "regime" not in df.columns:     df["regime"] = "unknown"
+
+            df["raw_prob"] = pd.to_numeric(df["raw_prob"], errors="coerce").clip(0, 1)
+            df["calib_prob"] = pd.to_numeric(df["calib_prob"], errors="coerce").clip(0, 1)
+            df["label"] = pd.to_numeric(df.get("predicted_class", -1), errors="coerce").astype("Int64")
             df = df[(df["label"] >= 0) & (df["label"] < num_classes)]
 
             for _, row in df.iterrows():
@@ -92,6 +111,8 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
                 if h in used_hashes or h in existing_hashes:
                     continue
                 used_hashes.add(h)
+
+                # 증강 횟수는 기존 그대로(신규 컬럼은 로깅/호환 목적)
                 for _ in range(FAIL_AUGMENT_RATIO * 2):
                     sequences.append((xb.copy(), label))
                     fail_count += 1
@@ -157,5 +178,3 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
 
     print(f"[✅ load_training_prediction_data 완료] {symbol}-{strategy} → 실패데이터 {fail_count} / 정상데이터 {normal_count} / 최종 {len(y)} (클래스별 최소 {min_per_class} 보장)")
     return X, y
-
-
