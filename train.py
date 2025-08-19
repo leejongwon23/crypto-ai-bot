@@ -41,6 +41,78 @@ except Exception:
     def train_evo_meta_loop(*args, **kwargs):
         return None
 
+# === (6번) 자동 후처리 훅: 학습 직후 캘리브레이션/실패학습 ===
+# 기존 파이프라인은 그대로 두고, logger.log_training_result를 래핑해
+# "훈련 완료 시 자동 캘리브레이션"을 시도(모듈 없으면 조용히 스킵).
+def _safe_print(msg):
+    try:
+        print(msg, flush=True)
+    except Exception:
+        pass
+
+def _try_auto_calibration(symbol, strategy, model_name):
+    try:
+        import calibration  # 4번에서 추가되는 파일(없으면 스킵)
+    except Exception as e:
+        _safe_print(f"[CALIB] 모듈 없음/로드 실패 → 스킵 ({e})")
+        return
+    for fn_name in ("learn_and_save_from_checkpoint", "learn_and_save"):
+        try:
+            fn = getattr(calibration, fn_name, None)
+            if callable(fn):
+                fn(symbol=symbol, strategy=strategy, model_name=model_name)
+                _safe_print(f"[CALIB] {symbol}-{strategy}-{model_name} → {fn_name} 실행")
+                return
+        except Exception as ce:
+            _safe_print(f"[CALIB] {fn_name} 예외 → {ce}")
+    _safe_print("[CALIB] 사용가능한 API 없음 → 스킵")
+
+try:
+    _orig_log_training_result = logger.log_training_result
+    def _wrapped_log_training_result(symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0.0,
+                                     note="", source_exchange="BYBIT", status="success"):
+        try:
+            _orig_log_training_result(symbol, strategy, model, accuracy, f1, loss, note, source_exchange, status)
+        finally:
+            try:
+                _try_auto_calibration(symbol, strategy, model or "")
+            except Exception as e:
+                _safe_print(f"[HOOK] 캘리브레이션 훅 예외 → {e}")
+    logger.log_training_result = _wrapped_log_training_result
+    _safe_print("[HOOK] logger.log_training_result → 캘리 훅 장착 완료")
+except Exception as _e:
+    _safe_print(f"[HOOK] 장착 실패(원본 미탐) → {_e}")
+
+def _maybe_run_failure_learn(background=True):
+    import threading
+    def _job():
+        try:
+            import failure_learn  # 7번 단계(없으면 스킵)
+        except Exception as e:
+            _safe_print(f"[FAIL-LEARN] 모듈 없음/로드 실패 → 스킵 ({e})")
+            return
+        for name in ("mini_retrain", "run_once", "run"):
+            try:
+                fn = getattr(failure_learn, name, None)
+                if callable(fn):
+                    fn()
+                    _safe_print(f"[FAIL-LEARN] {name} 실행 완료")
+                    return
+            except Exception as e:
+                _safe_print(f"[FAIL-LEARN] {name} 예외 → {e}")
+        _safe_print("[FAIL-LEARN] 실행 가능한 API 없음 → 스킵")
+    if background:
+        threading.Thread(target=_job, daemon=True).start()
+    else:
+        _job()
+
+# 초기 1회 조용히 시도(있으면 수행/없으면 스킵)
+try:
+    _maybe_run_failure_learn(background=True)
+except Exception as _e:
+    _safe_print(f"[FAIL-LEARN] 초기 시도 예외 → {_e}")
+# === 자동 후처리 훅 끝 ===
+
 NUM_CLASSES = get_NUM_CLASSES()
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 
