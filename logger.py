@@ -1,5 +1,5 @@
-# === logger.py (호환 최종본: 확장 스키마·자동정렬 지원) ===
-import os, csv, datetime, pandas as pd, pytz, hashlib
+# === logger.py (호환 최종본: 확장 스키마·자동정렬 + 인벤토리/통계 내보내기) ===
+import os, csv, json, datetime, pandas as pd, pytz, hashlib
 import sqlite3
 from collections import defaultdict
 
@@ -500,3 +500,118 @@ def log_label_distribution(
         print(f"[📊 라벨분포 로그] {symbol}-{strategy}-g{group_id} → total={total}, classes={n_unique}, H={entropy:.4f}")
     except Exception as e:
         print(f"[⚠️ 라벨분포 로그 실패] {e}")
+
+# -------------------------
+# [ADD] 모델 인벤토리 조회
+# -------------------------
+def get_available_models(symbol: str = None, strategy: str = None):
+    """
+    /persistent/models에서 .pt와 짝 메타(.meta.json)가 있는 항목만 나열.
+    선택적으로 symbol/strategy로 필터.
+    반환: [{pt_file, meta_file, symbol, strategy, model, group_id, num_classes, val_f1, timestamp}]
+    """
+    try:
+        model_dir = "/persistent/models"
+        if not os.path.isdir(model_dir):
+            return []
+        out = []
+        for fn in os.listdir(model_dir):
+            if not fn.endswith(".pt"):
+                continue
+            pt_path = os.path.join(model_dir, fn)
+            meta_path = pt_path.replace(".pt", ".meta.json")
+            if not os.path.exists(meta_path):
+                continue
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                meta = {}
+            sym = meta.get("symbol") or fn.split("_", 1)[0]
+            strat = meta.get("strategy") or ("단기" if "_단기_" in fn else "중기" if "_중기_" in fn else "장기" if "_장기_" in fn else "")
+            if symbol and sym != symbol:
+                continue
+            if strategy and strat != strategy:
+                continue
+            out.append({
+                "pt_file": fn,
+                "meta_file": os.path.basename(meta_path),
+                "symbol": sym,
+                "strategy": strat,
+                "model": meta.get("model", ""),
+                "group_id": meta.get("group_id", 0),
+                "num_classes": meta.get("num_classes", 0),
+                "val_f1": float(meta.get("metrics", {}).get("val_f1", 0.0)),
+                "timestamp": meta.get("timestamp", "")
+            })
+        # 보기 좋게 정렬
+        out.sort(key=lambda r: (r["symbol"], r["strategy"], r["model"], r["group_id"]))
+        return out
+    except Exception as e:
+        print(f"[오류] get_available_models 실패 → {e}")
+        return []
+
+# -------------------------
+# [ADD] 최근 예측 통계 산출/파일로 내보내기
+# -------------------------
+def export_recent_model_stats(days: int = 7, out_path: str = None):
+    """
+    /persistent/prediction_log.csv를 읽어 최근 N일 통계를 /persistent/logs/recent_model_stats.csv로 저장.
+    - success/fail/v_success/v_fail만 집계
+    - 필드: symbol,strategy,model,total,success,fail,success_rate,last_ts
+    """
+    try:
+        ensure_prediction_log_exists()
+        path = PREDICTION_LOG
+        if out_path is None:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            out_path = os.path.join(LOG_DIR, "recent_model_stats.csv")
+
+        df = pd.read_csv(path, encoding="utf-8-sig", on_bad_lines="skip")
+        if df.empty:
+            pd.DataFrame(columns=["symbol","strategy","model","total","success","fail","success_rate","last_ts"]).to_csv(out_path, index=False, encoding="utf-8-sig")
+            return out_path
+
+        # 상태 정규화
+        df = _normalize_status(df)
+        df = df[df["status"].isin(["success","fail","v_success","v_fail"])].copy()
+
+        # 최근 N일만
+        ts = pd.to_datetime(df["timestamp"], errors="coerce")
+        try:
+            ts = ts.dt.tz_localize("Asia/Seoul")
+        except Exception:
+            ts = ts.dt.tz_convert("Asia/Seoul")
+        cutoff = now_kst() - datetime.timedelta(days=int(days))
+        df["timestamp"] = ts
+        df = df[df["timestamp"] >= cutoff]
+
+        if df.empty:
+            pd.DataFrame(columns=["symbol","strategy","model","total","success","fail","success_rate","last_ts"]).to_csv(out_path, index=False, encoding="utf-8-sig")
+            return out_path
+
+        # 집계
+        df["ok_flag"] = df["status"].isin(["success","v_success"]).astype(int)
+        grp_cols = [c for c in ["symbol","strategy","model"] if c in df.columns]
+        g = df.groupby(grp_cols, dropna=False).agg(
+            total=("ok_flag","count"),
+            success=("ok_flag","sum"),
+            last_ts=("timestamp","max")
+        ).reset_index()
+        g["fail"] = g["total"] - g["success"]
+        g["success_rate"] = (g["success"] / g["total"]).round(4)
+        # 정렬
+        g = g.sort_values(["symbol","strategy","model","last_ts"]).copy()
+        # 저장
+        g.to_csv(out_path, index=False, encoding="utf-8-sig")
+        print(f"[✅ export_recent_model_stats] 저장: {out_path} (rows={len(g)})")
+        return out_path
+    except Exception as e:
+        print(f"[⚠️ export_recent_model_stats 실패] {e}")
+        # 실패해도 빈 파일 보장
+        try:
+            pd.DataFrame(columns=["symbol","strategy","model","total","success","fail","success_rate","last_ts"]).to_csv(
+                out_path or os.path.join(LOG_DIR, "recent_model_stats.csv"), index=False, encoding="utf-8-sig")
+        except Exception:
+            pass
+        return out_path or os.path.join(LOG_DIR, "recent_model_stats.csv")
