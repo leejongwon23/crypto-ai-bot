@@ -293,23 +293,26 @@ def ping(): return "pong"
 def diag_e2e():
     """
     사용법:
-      /diag/e2e?view=json                    → JSON(기본)
-      /diag/e2e?view=html                    → 한글 HTML 리포트
-      /diag/e2e?group=0                      → 그룹#0 학습(+예측)+평가
-      /diag/e2e?group=1&predict=0&evaluate=0 → 그룹#1 학습만
-      /diag/e2e?cum=1                        → 누적 통계(메모리 안전 스트리밍)
+      /diag/e2e?view=json         → JSON(기본)
+      /diag/e2e?view=html         → 한글 HTML 리포트
+      /diag/e2e?group=0           → 그룹 인덱스 기준 통계
+      /diag/e2e?cum=1             → 누적 통계(메모리 안전 스트리밍)
     """
     try:
         group = int(request.args.get("group", "-1"))
-        do_predict  = request.args.get("predict",  "1") != "0"
-        do_evaluate = request.args.get("evaluate","1") != "0"
         view = request.args.get("view", "json").lower()
         cumulative = request.args.get("cum", "0") == "1"
 
-        out = diag_e2e_run(group=group, do_predict=do_predict, do_evaluate=do_evaluate, view=view, cumulative=cumulative)
+        # diag_e2e.run은 (group, view, cumulative) 시그니처만 지원
+        out = diag_e2e_run(group=group, view=view, cumulative=cumulative)
+
+        # diag_e2e_run이 Flask Response를 직접 반환할 수도 있음
+        if isinstance(out, Response):
+            return out
 
         if view == "html":
-            return out, 200, {"Content-Type": "text/html; charset=utf-8"}
+            return Response(out if isinstance(out, str) else str(out),
+                            mimetype="text/html; charset=utf-8")
         return jsonify(out)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
