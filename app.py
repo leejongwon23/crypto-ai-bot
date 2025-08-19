@@ -1,4 +1,4 @@
-# === app.py (FINAL with /diag/e2e) ===
+# === app.py (FINAL with /diag/e2e HTML 지원) ===
 from flask import Flask, jsonify, request
 from recommend import main
 import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv, re
@@ -289,21 +289,29 @@ def index(): return "Yopo server is running"
 @app.route("/ping")
 def ping(): return "pong"
 
-# ✅ [ADD] 종합 점검 라우트
+# ✅ [MOD] 종합 점검 라우트: view=html 지원 (완전 한글 리포트)
 @app.route("/diag/e2e")
 def diag_e2e():
     """
     사용법:
-      /diag/e2e                                  → 전체 그룹 학습루프 + 평가
-      /diag/e2e?group=0                          → 그룹#0만 학습(+예측)+평가
-      /diag/e2e?group=1&predict=0&evaluate=0     → 그룹#1 학습만
+      /diag/e2e                                     → 전체 그룹 학습루프 + 평가 (JSON)
+      /diag/e2e?group=0                             → 그룹#0만 학습(+예측)+평가 (JSON)
+      /diag/e2e?group=1&predict=0&evaluate=0        → 그룹#1 학습만 (JSON)
+      /diag/e2e?view=html                           → 전체 그룹 (한글 HTML 리포트)
+      /diag/e2e?group=0&predict=1&evaluate=1&view=html → 그룹#0 (한글 HTML 리포트)
     """
     try:
         group = request.args.get("group", "-1")
         do_predict = request.args.get("predict", "1") != "0"
         do_evaluate = request.args.get("evaluate", "1") != "0"
-        report = diag_e2e_run(group=int(group), do_predict=do_predict, do_evaluate=do_evaluate)
-        return jsonify(report)
+        view = request.args.get("view", "json")
+
+        if view == "html":
+            html = diag_e2e_run(group=int(group), do_predict=do_predict, do_evaluate=do_evaluate, view="html")
+            return html  # text/html
+        else:
+            report = diag_e2e_run(group=int(group), do_predict=do_predict, do_evaluate=do_evaluate, view="json")
+            return jsonify(report)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
