@@ -1,4 +1,4 @@
-# predict.py (FINAL PATCHED)
+# predict.py (FINAL with regime+calibration logging, no schema break)
 
 import os, sys, json, datetime, pytz
 import numpy as np
@@ -26,6 +26,21 @@ except Exception:
         except Exception:
             best = 60
         return [best, best, best]
+
+# --- (옵션) 레짐/캘리브레이션 모듈: 없으면 안전 패스 ---
+try:
+    from regime_detector import detect_regime
+except Exception:
+    def detect_regime(symbol, strategy, now=None):
+        return "unknown"
+
+try:
+    from calibration import apply_calibration, get_calibration_version
+except Exception:
+    def apply_calibration(probs, *, symbol=None, strategy=None, regime=None, model_meta=None):
+        return probs  # no-op
+    def get_calibration_version():
+        return "none"
 
 # logger 의존 최소화: get_available_models 로컬 구현, 나머지는 그대로 사용
 from logger import log_prediction, update_model_success
@@ -137,8 +152,9 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 def predict(symbol, strategy, source="일반", model_type=None):
     """
     - 저장된 모델 출력 취합
-    - 진화형 메타러너가 있으면 사용, 없으면 '성공확률이 가장 높은 단일 모델'을 선택
-      success_score = adjusted_prob[pred] × (0.5 + 0.5 × val_f1)
+    - 진화형 메타러너가 있으면 사용, 없으면 '캘리브레이션 확률이 가장 높은 단일 모델'을 선택
+      success_score = adjusted_calib_prob[pred] × (0.5 + 0.5 × val_f1)
+    - 레짐/확률/캘리브 버전/선택모델은 note/top_k에 기록(스키마 불변)
     """
     try:
         from evo_meta_learner import predict_evo_meta
@@ -156,6 +172,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
     if not symbol or not strategy:
         return failed_result(symbol or "None", strategy or "None", reason="invalid_symbol_strategy", X_input=None)
+
+    # 0) 현재 레짐
+    regime = detect_regime(symbol, strategy, now=now_kst())
+    calib_ver = get_calibration_version()
 
     # 1) 준비
     window_list = find_best_windows(symbol, strategy)
@@ -184,9 +204,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
     recent_freq = get_recent_class_frequencies(strategy)
     feature_tensor = torch.tensor(feat_scaled[-1], dtype=torch.float32)
 
-    # 2) 각 모델의 확률/메타 읽기
+    # 2) 각 모델의 확률/메타 읽기(+캘리브레이션/다양성 보정)
     model_outputs_list, all_model_predictions = get_model_predictions(
-        symbol, strategy, models, df, feat_scaled, window_list, recent_freq
+        symbol, strategy, models, df, feat_scaled, window_list, recent_freq, regime=regime
     )
     if not model_outputs_list:
         return failed_result(symbol, strategy, reason="no_valid_model", X_input=feat_scaled[-1])
@@ -204,21 +224,29 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[⚠️ 진화형 메타러너 예외] {e}")
 
-    # 4) 기본 메타 또는 '최고 성공확률 단일 모델' 선택
+    # 4) 기본 메타 또는 '최고 성공확률 단일 모델' 선택 (캘리브레이션 확률 기반)
+    meta_choice = "best_single"
+    chosen_info = None
     if final_pred_class is None:
         best_idx, best_score = -1, -1.0
         for i, m in enumerate(model_outputs_list):
             pred = int(m["predicted_class"])
-            probs = m["probs"]
+            calib_probs = m["calib_probs"]  # ← 보정 후
             # 다양성 보정
-            adj = adjust_probs_with_diversity(probs, recent_freq, class_counts=None, alpha=0.10, beta=0.10)
-            val_f1 = float(m.get("val_f1", 0.6))  # 메타 없으면 보수적 기본치
+            adj = adjust_probs_with_diversity(calib_probs, recent_freq, class_counts=None, alpha=0.10, beta=0.10)
+            val_f1 = float(m.get("val_f1", 0.6))
             score = float(adj[pred]) * (0.5 + 0.5 * max(0.0, min(1.0, val_f1)))
             model_outputs_list[i]["adjusted_probs"] = adj
             model_outputs_list[i]["success_score"] = score
             if score > best_score:
                 best_score, best_idx = score, i
         final_pred_class = int(model_outputs_list[best_idx]["predicted_class"])
+        meta_choice = os.path.basename(model_outputs_list[best_idx]["model_path"])
+        chosen_info = model_outputs_list[best_idx]
+    else:
+        meta_choice = "evo_meta_learner"
+        # evo 사용시 가장 강한 모델 정보(로깅 보조)
+        chosen_info = max(model_outputs_list, key=lambda m: m.get("success_score", 0.0))
 
     print(f"[META] {'진화형' if use_evo else '최고확률모델'} 선택: 클래스 {final_pred_class}")
 
@@ -231,7 +259,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
     meta_success_flag = actual_return_meta >= cls_min
 
     if not meta_success_flag:
-        # 실패도 반드시 학습자산으로 남김
         try:
             feature_hash = _get_feature_hash(feature_tensor)
             insert_failure_record(
@@ -243,6 +270,22 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[meta 실패 기록 오류] {e}")
 
+    # 상위 K 클래스 기록
+    def _topk(probs, k=3):
+        idx = np.argsort(probs)[::-1][:k]
+        return [int(i) for i in idx]
+
+    raw_topk = _topk(chosen_info["raw_probs"]) if chosen_info else []
+    calib_topk = _topk(chosen_info["calib_probs"]) if chosen_info else []
+
+    note_payload = {
+        "regime": regime,
+        "meta_choice": meta_choice,
+        "raw_prob_pred": float(chosen_info["raw_probs"][final_pred_class]) if chosen_info else None,
+        "calib_prob_pred": float(chosen_info["calib_probs"][final_pred_class]) if chosen_info else None,
+        "calib_ver": calib_ver
+    }
+
     log_prediction(
         symbol=symbol,
         strategy=strategy,
@@ -253,13 +296,14 @@ def predict(symbol, strategy, source="일반", model_type=None):
         model_name="evo_meta_learner" if use_evo else "best_single",
         predicted_class=final_pred_class,
         label=final_pred_class,
-        note="진화형 메타 선택" if use_evo else "최고 확률 단일 모델",
+        note=json.dumps(note_payload, ensure_ascii=False),
+        top_k=",".join(map(str, calib_topk)),  # 상위 k(보정 기준)
         success=meta_success_flag,
         reason=f"수익률도달:{meta_success_flag}",
         rate=expected_ret,
         return_value=actual_return_meta,
         source="진화형" if use_evo else "기본",
-        group_id=all_model_predictions[0].get("group_id"),
+        group_id=chosen_info.get("group_id") if chosen_info else None,
         feature_vector=feature_tensor.numpy()
     )
 
@@ -270,8 +314,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
         "class": final_pred_class,
         "expected_return": expected_ret,
         "timestamp": now_kst().isoformat(),
-        "reason": "진화형 메타 최종 선택" if use_evo else "최고 확률 단일 모델 선택",
-        "source": source
+        "reason": "진화형 메타 최종 선택" if use_evo else f"최고 확률 단일 모델: {meta_choice}",
+        "source": source,
+        "regime": regime
     }
 
 # -----------------------------
@@ -434,9 +479,9 @@ def evaluate_predictions(get_price_fn):
     print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
 
 # -----------------------------
-# 개별 모델 예측 취합
+# 개별 모델 예측 취합 (+캘리브레이션)
 # -----------------------------
-def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list, recent_freq):
+def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list, recent_freq, regime="unknown"):
     model_outputs_list, all_model_predictions = [], []
 
     for model_info in models:
@@ -479,21 +524,29 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
                 out = model(input_tensor.to(DEVICE))
                 softmax_probs = F.softmax(out, dim=1)
                 predicted_class = torch.argmax(softmax_probs, dim=1).item()
-                probs = softmax_probs.squeeze().cpu().numpy()
+                raw_probs = softmax_probs.squeeze().cpu().numpy()
+
+            # 🔧 캘리브레이션 적용 (없으면 그대로)
+            calib_probs = apply_calibration(
+                raw_probs,
+                symbol=symbol, strategy=strategy, regime=regime, model_meta=meta
+            ).astype(float)
 
             model_outputs_list.append({
-                "probs": probs,
-                "predicted_class": predicted_class,
+                "raw_probs": raw_probs,
+                "calib_probs": calib_probs,
+                "predicted_class": int(np.argmax(calib_probs)),
                 "group_id": group_id,
                 "model_type": model_type,
                 "model_path": model_path,
-                "val_f1": val_f1,  # ✅ 성능 가중치에 사용
+                "val_f1": val_f1,
                 "symbol": symbol, "strategy": strategy
             })
 
             entry_price = df["close"].iloc[-1]
             all_model_predictions.append({
-                "class": predicted_class, "probs": probs, "entry_price": float(entry_price),
+                "class": int(np.argmax(calib_probs)),
+                "probs": calib_probs, "entry_price": float(entry_price),
                 "num_classes": num_classes, "group_id": group_id,
                 "model_name": model_type, "model_symbol": symbol,
                 "symbol": symbol, "strategy": strategy
