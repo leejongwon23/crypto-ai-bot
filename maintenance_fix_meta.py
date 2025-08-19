@@ -1,4 +1,4 @@
-# maintenance_fix_meta.py
+# maintenance_fix_meta.py (FINAL, 12번 반영: calibration/regime_cfg 점검·복구)
 import os
 import json
 import re
@@ -72,7 +72,92 @@ def _ensure_metrics(meta: dict):
     # 최소 스키마
     if "val_acc" not in metrics or not isinstance(metrics.get("val_acc"), (int, float)):
         metrics["val_acc"] = 0.0
+    # 있으면 그대로 두고, 없으면 기본 추가(호환)
+    if "val_f1" not in metrics or not isinstance(metrics.get("val_f1"), (int, float)):
+        metrics["val_f1"] = 0.0
+    if "train_loss_sum" not in metrics or not isinstance(metrics.get("train_loss_sum"), (int, float)):
+        metrics["train_loss_sum"] = 0.0
     meta["metrics"] = metrics
+
+def _ensure_calibration(meta: dict):
+    """
+    calibration 블록이 없거나 파손되면 안전 기본값으로 복구.
+    필드:
+      method: "none" | "temperature" | "platt"
+      temperature: float
+      platt: {"a": float, "b": float}
+      updated_at: ISO string
+      ver: int
+    """
+    cal = meta.get("calibration")
+    if not isinstance(cal, dict):
+        cal = {}
+    method = cal.get("method", "none")
+    if method not in ["none", "temperature", "platt"]:
+        method = "none"
+    # temperature
+    try:
+        temperature = float(cal.get("temperature", 1.0))
+        if temperature <= 0 or not (temperature == temperature):  # nan 체크
+            temperature = 1.0
+    except Exception:
+        temperature = 1.0
+    # platt 계수
+    platt = cal.get("platt")
+    if not isinstance(platt, dict):
+        platt = {}
+    try:
+        a = float(platt.get("a", 0.0))
+    except Exception:
+        a = 0.0
+    try:
+        b = float(platt.get("b", 0.0))
+    except Exception:
+        b = 0.0
+    # 버전/업데이트 시간
+    try:
+        ver = int(cal.get("ver", 1))
+    except Exception:
+        ver = 1
+    updated_at = cal.get("updated_at") or now_kst()
+
+    meta["calibration"] = {
+        "method": method,
+        "temperature": float(temperature),
+        "platt": {"a": float(a), "b": float(b)},
+        "updated_at": updated_at,
+        "ver": int(ver)
+    }
+
+def _ensure_regime_cfg(meta: dict):
+    """
+    regime_cfg 블록이 없거나 파손되면 안전 기본값으로 복구.
+    필드(경량):
+      enabled: bool
+      detector: "none" | "simple" | "volatility" (등, 프로젝트 내부 규약만 준수)
+      params: dict
+      ver: int
+    """
+    rc = meta.get("regime_cfg")
+    if not isinstance(rc, dict):
+        rc = {}
+    enabled = bool(rc.get("enabled", False))
+    detector = rc.get("detector", "none")
+    if detector not in ["none", "simple", "volatility"]:
+        detector = "none"
+    params = rc.get("params")
+    if not isinstance(params, dict):
+        params = {}
+    try:
+        ver = int(rc.get("ver", 1))
+    except Exception:
+        ver = 1
+    meta["regime_cfg"] = {
+        "enabled": bool(enabled),
+        "detector": detector,
+        "params": params,
+        "ver": int(ver)
+    }
 
 def _ensure_model_signature(meta: dict):
     """
@@ -140,6 +225,8 @@ def _fill_defaults(meta: dict, fname_info: dict):
 
     _ensure_model_signature(meta)
     _ensure_metrics(meta)
+    _ensure_calibration(meta)  # ✅ 12번 요구사항
+    _ensure_regime_cfg(meta)   # ✅ 12번 요구사항
 
 def _validate_and_fix(path: str, fname: str):
     """
