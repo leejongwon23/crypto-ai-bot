@@ -1,4 +1,4 @@
-# === app.py (FINAL with /diag/e2e HTML 지원) ===
+# === app.py (FINAL with /diag/e2e HTML/JSON toggle) ===
 from flask import Flask, jsonify, request
 from recommend import main
 import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv, re
@@ -15,7 +15,7 @@ import maintenance_fix_meta
 from logger import ensure_prediction_log_exists
 from integrity_guard import run as _integrity_check; _integrity_check()
 
-# ✅ [ADD] 종합점검 모듈
+# ✅ [ADD] 종합점검 모듈 (HTML/JSON 뷰 지원 버전)
 from diag_e2e import run as diag_e2e_run
 
 # ✅ cleanup 모듈 경로 보정 (src/에서 실행하든, 루트에서 실행하든 동작)
@@ -83,7 +83,7 @@ def start_scheduler():
     # ✅ 예측 트리거(메타적용 포함) 30분
     sched.add_job(trigger_run, "interval", minutes=30, id="predict_trigger", replace_existing=True)
 
-    # ✅ 메타 JSON 정합성/복구 주기작업 (30분)  ← [ADD]
+    # ✅ 메타 JSON 정합성/복구 주기작업 (30분)
     def meta_fix_job():
         try:
             maintenance_fix_meta.fix_all_meta_json()
@@ -197,7 +197,6 @@ def yopo_health():
             else:
                 pred["volatility"] = False
 
-            # return or rate
             try:
                 pred["return"] = pd.to_numeric(pred.get("return", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
             except Exception:
@@ -289,30 +288,31 @@ def index(): return "Yopo server is running"
 @app.route("/ping")
 def ping(): return "pong"
 
-# ✅ [MOD] 종합 점검 라우트: view=html 지원 (완전 한글 리포트)
+# ✅ [UPDATE] 종합 점검 라우트 (HTML/JSON 전환 지원)
 @app.route("/diag/e2e")
 def diag_e2e():
     """
     사용법:
-      /diag/e2e                                     → 전체 그룹 학습루프 + 평가 (JSON)
-      /diag/e2e?group=0                             → 그룹#0만 학습(+예측)+평가 (JSON)
-      /diag/e2e?group=1&predict=0&evaluate=0        → 그룹#1 학습만 (JSON)
-      /diag/e2e?view=html                           → 전체 그룹 (한글 HTML 리포트)
-      /diag/e2e?group=0&predict=1&evaluate=1&view=html → 그룹#0 (한글 HTML 리포트)
+      /diag/e2e                                   → 전체 그룹 학습루프 + 평가 (기본 JSON)
+      /diag/e2e?view=html                         → 한글 HTML 리포트
+      /diag/e2e?group=0                           → 그룹#0만 학습(+예측)+평가
+      /diag/e2e?group=1&predict=0&evaluate=0      → 그룹#1 학습만
     """
     try:
-        group = request.args.get("group", "-1")
+        group = int(request.args.get("group", "-1"))
         do_predict = request.args.get("predict", "1") != "0"
         do_evaluate = request.args.get("evaluate", "1") != "0"
-        view = request.args.get("view", "json")
+        view = request.args.get("view", "json").lower()
 
+        result = diag_e2e_run(group=group, do_predict=do_predict, do_evaluate=do_evaluate, view=view)
         if view == "html":
-            html = diag_e2e_run(group=int(group), do_predict=do_predict, do_evaluate=do_evaluate, view="html")
-            return html  # text/html
-        else:
-            report = diag_e2e_run(group=int(group), do_predict=do_predict, do_evaluate=do_evaluate, view="json")
-            return jsonify(report)
+            # diag_e2e.py가 HTML 문자열을 반환함
+            return result
+        return jsonify(result)
     except Exception as e:
+        view = request.args.get("view", "json").lower()
+        if view == "html":
+            return f"<pre>❌ 오류: {e}</pre>", 500
         return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route("/run")
@@ -424,7 +424,7 @@ def train_selected_symbols():
     except Exception as e:
         return f"❌ 학습 실패: {e}", 500
 
-@app.route("/meta-fix-now")  # ← [ADD] 필요 시 즉시 메타 복구
+@app.route("/meta-fix-now")
 def meta_fix_now():
     try:
         maintenance_fix_meta.fix_all_meta_json()
@@ -478,14 +478,11 @@ def force_fix_prediction_log():
 
 # ===== 로컬 개발 실행용 =====
 if __name__ == "__main__":
-    # 로컬에서 python app.py로 돌릴 때만 서버 실행
     try:
         port = int(os.environ.get("PORT", 5000))
     except ValueError:
         raise RuntimeError("❌ Render 환경변수 PORT가 없습니다. Render 서비스 타입 확인 필요")
 
-    # 백그라운드 초기화 한 번 실행
     _init_background_once()
-
     print(f"✅ Flask 서버 실행 시작 (PORT={port})")
     app.run(host="0.0.0.0", port=port)
