@@ -3,7 +3,9 @@ import os
 
 CONFIG_PATH = "/persistent/config.json"
 
-# ✅ 기본 설정값
+# ===============================
+# 기본 설정 + 신규 옵션(기본 OFF)
+# ===============================
 _default_config = {
     "NUM_CLASSES": 20,               # 전역 기본값(최소 보정용)
     "FEATURE_INPUT_SIZE": 24,
@@ -11,6 +13,38 @@ _default_config = {
     "MIN_FEATURES": 5,
     "SYMBOLS": ["BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "ADAUSDT"],
     "SYMBOL_GROUP_SIZE": 3,
+
+    # --- [2] 레짐(시장상태) 태깅 옵션 ---
+    "REGIME": {
+        "enabled": False,           # 기본 OFF → 켜면 predict에서 regime 기록/활용
+        "lookback": 200,            # 지표 계산 캔들 수
+        "atr_window": 14,
+        "rsi_window": 14,
+        "trend_window": 50,         # 이동평균/기울기 등
+        "vol_high_pct": 0.9,        # 변동성 상위 분위수 기준
+        "vol_low_pct": 0.5,         # 변동성 하위 분위수 기준
+        "cooldown_min": 5           # 재계산 쿨다운(분)
+    },
+
+    # --- [3] 확률 캘리브레이션(스케일링) 옵션 ---
+    "CALIB": {
+        "enabled": False,           # 기본 OFF → 켜면 train 후/주기적으로 보정 학습
+        "method": "platt",          # "platt" | "temperature"
+        "min_samples": 500,         # 최소 학습 샘플 수
+        "refresh_hours": 12,        # 재학습 주기(시간)
+        "per_model": True,          # 모델별 보정 파라미터 저장 여부
+        "save_dir": "/persistent/calibration",  # 보정 파라미터 저장 경로
+        "fallback_identity": True   # 파라미터 없으면 원시확률 그대로 사용
+    },
+
+    # --- [5] 실패학습(하드 예시) 옵션 ---
+    "FAILLEARN": {
+        "enabled": False,           # 기본 OFF → 켜면 주기적으로 wrong_predictions 재학습
+        "cooldown_min": 60,         # 실행 간 최소 간격(분)
+        "max_samples": 1000,        # 한 번에 재학습 최대 샘플
+        "class_weight_boost": 1.5,  # 실패 클래스 가중치 배수
+        "min_return_abs": 0.003     # |수익률| 최소 임계(너무 작은 잡음 제외)
+    },
 }
 
 # ✅ 전략별 K라인 설정
@@ -36,13 +70,35 @@ _config = _default_config.copy()
 _dynamic_num_classes = None
 _ranges_cache = {}
 
+def _deep_merge(dst: dict, src: dict):
+    """dict 재귀 병합(dst에 없는 키만 채움)."""
+    for k, v in src.items():
+        if isinstance(v, dict) and isinstance(dst.get(k), dict):
+            _deep_merge(dst[k], v)
+        else:
+            if k not in dst:
+                dst[k] = v
+
+# config.json 로드(+누락 키 보강)
 if os.path.exists(CONFIG_PATH):
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            _config = json.load(f)
-        print("[✅ config.py] config.json 로드 완료")
+            _loaded = json.load(f)
+        # 사용자가 가진 설정 우선, 기본에서 누락분만 채움
+        _config = _loaded if isinstance(_loaded, dict) else _default_config.copy()
+        _deep_merge(_config, _default_config)
+        print("[✅ config.py] config.json 로드/보강 완료")
     except Exception as e:
         print(f"[⚠️ config.py] config.json 로드 실패 → 기본값 사용: {e}")
+else:
+    # 파일 자체가 없으면 기본으로 생성
+    try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(_default_config, f, ensure_ascii=False, indent=2)
+        print("[ℹ️ config.py] 기본 config.json 생성")
+    except Exception as e:
+        print(f"[⚠️ config.py] 기본 config.json 생성 실패: {e}")
 
 def save_config():
     try:
@@ -52,6 +108,9 @@ def save_config():
     except Exception as e:
         print(f"[⚠️ config.py] config.json 저장 실패 → {e}")
 
+# ------------------------
+# Getter / Setter (기존)
+# ------------------------
 def set_NUM_CLASSES(n):
     global _dynamic_num_classes
     _dynamic_num_classes = n
@@ -87,6 +146,21 @@ def get_class_groups(num_classes=None, group_size=5):
     print(f"[📊 클래스 그룹화] 총 클래스 수: {num_classes}, 그룹 크기: {group_size}, 그룹 개수: {len(groups)}")
     return groups
 
+# ------------------------
+# 신규 옵션 Getter (2·3·5)
+# ------------------------
+def get_REGIME():
+    return _config.get("REGIME", _default_config["REGIME"])
+
+def get_CALIB():
+    return _config.get("CALIB", _default_config["CALIB"])
+
+def get_FAILLEARN():
+    return _config.get("FAILLEARN", _default_config["FAILLEARN"])
+
+# ------------------------
+# 수익률 클래스 경계 유틸
+# ------------------------
 def _round2(x: float) -> float:
     """소수 셋째 자리 반올림(노이즈 제거)."""
     return round(float(x), _ROUND_DECIMALS)
@@ -97,7 +171,7 @@ def _cap_positive_by_strategy(x: float, strategy: str) -> float:
         return min(x, cap)
     return x
 
-def _enforce_min_width(low: float, high: float) -> tuple[float, float]:
+def _enforce_min_width(low: float, high: float):
     if (high - low) < _MIN_RANGE_WIDTH:
         high = low + _MIN_RANGE_WIDTH
     return low, high
@@ -175,7 +249,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
                 if cap is not None:
                     pos = np.clip(pos, None, cap)
 
-            # 한쪽이 텅 비는 경우를 방지하기 위한 기본 분포 가드
+            # 한쪽이 텅 비는 경우를 방지
             if neg.size == 0 and pos.size == 0:
                 return compute_equal_ranges(10, reason="분할 불가(모두 0)")
 
@@ -212,7 +286,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
 
             fixed = _fix_monotonic(cooked)
 
-            # 최종 안전 가드: 결과가 비거나 1개면 균등 분할 대체
+            # 안전 가드
             if not fixed or len(fixed) < 2:
                 return compute_equal_ranges(10, reason="최종 경계 부족(가드)")
 
@@ -236,7 +310,6 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             df_price_dbg = _get_kline_dbg(symbol, strategy)
             if df_price_dbg is not None and len(df_price_dbg) >= 2 and "close" in df_price_dbg:
                 rets = df_price_dbg["close"].pct_change().dropna().values
-                # 전략별 양수 캡 적용(위 로직과 일치)
                 cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy)
                 if cap is not None and rets.size > 0:
                     rets = np.where(rets > 0, np.minimum(rets, cap), rets)
@@ -249,14 +322,11 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
                         f"p75={_round2(qs[3])}, p90={_round2(qs[4])}, p95={_round2(qs[5])}, "
                         f"p99={_round2(qs[6])}, max={_round2(qs[7])}"
                     )
-
-                    # 클래스 경계 로그
                     print(f"[📏 클래스경계 로그] {symbol}-{strategy} → {len(all_ranges)}개")
                     print(f"[📏 경계 리스트] {symbol}-{strategy} → {all_ranges}")
 
-                    # 클래스별 샘플 카운트(히스토그램)
                     edges = [all_ranges[0][0]] + [hi for (_, hi) in all_ranges]
-                    edges[-1] = float(edges[-1]) + 1e-9  # 우측 닫힘 충돌 방지
+                    edges[-1] = float(edges[-1]) + 1e-9
                     hist, _ = np.histogram(rets, bins=edges)
                     print(f"[📐 클래스 분포] {symbol}-{strategy} count={int(hist.sum())} → {hist.tolist()}")
             else:
@@ -277,6 +347,9 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
         return all_ranges
     return all_ranges[group_id * group_size: (group_id + 1) * group_size]
 
+# ------------------------
+# 전역 캐시된 값(기존)
+# ------------------------
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 NUM_CLASSES = get_NUM_CLASSES()
 FAIL_AUGMENT_RATIO = get_FAIL_AUGMENT_RATIO()
