@@ -1,4 +1,4 @@
-# === logger.py (호환 최종본) ===
+# === logger.py (호환 최종본: 확장 스키마·자동정렬 지원) ===
 import os, csv, datetime, pandas as pd, pytz, hashlib
 import sqlite3
 from collections import defaultdict
@@ -19,8 +19,8 @@ EVAL_RESULT = f"{LOG_DIR}/evaluation_result.csv"
 TRAIN_LOG = f"{LOG_DIR}/train_log.csv"
 AUDIT_LOG = f"{LOG_DIR}/evaluation_audit.csv"
 
-# ✅ 공용 헤더
-PREDICTION_HEADERS = [
+# ✅ 공용 헤더(기존 + 확장 컬럼)
+BASE_PRED_HEADERS = [
     "timestamp","symbol","strategy","direction",
     "entry_price","target_price",
     "model","predicted_class","top_k","note",
@@ -28,33 +28,51 @@ PREDICTION_HEADERS = [
     "label","group_id","model_symbol","model_name",
     "source","volatility","source_exchange"
 ]
+EXTRA_PRED_HEADERS = ["regime","meta_choice","raw_prob","calib_prob","calib_ver"]
+PREDICTION_HEADERS = BASE_PRED_HEADERS + EXTRA_PRED_HEADERS
 
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 # -------------------------
 # 안전한 로그 파일 보장
 # -------------------------
+def _read_csv_header(path):
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            first = f.readline().strip()
+        if not first:
+            return []
+        return [h.strip() for h in first.split(",")]
+    except Exception:
+        return []
+
 def ensure_prediction_log_exists():
     try:
         os.makedirs(os.path.dirname(PREDICTION_LOG), exist_ok=True)
-        if not os.path.exists(PREDICTION_LOG):
+        if not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0:
             with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
                 csv.writer(f).writerow(PREDICTION_HEADERS)
-            print("[✅ ensure_prediction_log_exists] prediction_log.csv 생성 완료")
+            print("[✅ ensure_prediction_log_exists] prediction_log.csv 생성(확장 스키마)")
         else:
-            try:
-                with open(PREDICTION_LOG, "r", encoding="utf-8-sig") as f:
-                    first_line = f.readline()
-                if "," not in first_line or any(h not in first_line for h in ["timestamp","symbol","strategy"]):
-                    bak = PREDICTION_LOG + ".bak"
-                    os.replace(PREDICTION_LOG, bak)
-                    with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
-                        csv.writer(f).writerow(PREDICTION_HEADERS)
-                    with open(bak, "r", encoding="utf-8-sig") as src, open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as dst:
-                        dst.write(src.read())
-                    print("[✅ ensure_prediction_log_exists] 기존 파일 헤더 보정 완료")
-            except Exception as e:
-                print(f"[⚠️ ensure_prediction_log_exists] 헤더 확인 실패: {e}")
+            # 헤더 점검: 없거나, 일부 누락이면 확장 스키마로 재작성(기존 데이터 보존)
+            existing = _read_csv_header(PREDICTION_LOG)
+            if not existing or "timestamp" not in existing or "symbol" not in existing:
+                bak = PREDICTION_LOG + ".bak"
+                os.replace(PREDICTION_LOG, bak)
+                with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as out,\
+                     open(bak, "r", encoding="utf-8-sig") as src:
+                    w = csv.writer(out); w.writerow(PREDICTION_HEADERS)
+                    # 첫 줄은 헤더였으니 skip하고 전체 복사(열 개수 불일치시 자동 패딩)
+                    reader = csv.reader(src)
+                    try: next(reader)
+                    except StopIteration: reader = []
+                    for row in reader:
+                        row = (row + [""]*len(PREDICTION_HEADERS))[:len(PREDICTION_HEADERS)]
+                        w.writerow(row)
+                print("[✅ ensure_prediction_log_exists] 기존 파일 헤더 보정(확장) 완료")
+            else:
+                # 기존이 구(기본) 헤더여도 그대로 둔다(쓰기 시 자동 정렬)
+                pass
     except Exception as e:
         print(f"[⚠️ ensure_prediction_log_exists] 예외: {e}")
 
@@ -219,15 +237,25 @@ def log_audit_prediction(s, t, status, reason):
         pass
 
 # -------------------------
-# 예측 로그
+# 예측 로그 (확장 인자 지원 + 자동 컬럼맞춤)
 # -------------------------
+def _align_row_to_header(row, header):
+    """현재 파일 헤더 길이에 맞게 row를 절단/패딩."""
+    if len(row) < len(header):
+        row = row + [""] * (len(header) - len(row))
+    elif len(row) > len(header):
+        row = row[:len(header)]
+    return row
+
 def log_prediction(
     symbol, strategy, direction=None, entry_price=0, target_price=0,
     timestamp=None, model=None, predicted_class=None, top_k=None,
     note="", success=False, reason="", rate=None, return_value=None,
     label=None, group_id=None, model_symbol=None, model_name=None,
     source="일반", volatility=False, feature_vector=None,
-    source_exchange="BYBIT"
+    source_exchange="BYBIT",
+    # --- 확장 필드(없어도 자동 빈칸/0 처리) ---
+    regime=None, meta_choice=None, raw_prob=None, calib_prob=None, calib_ver=None
 ):
     from datetime import datetime as _dt
     from failure_db import insert_failure_record
@@ -254,16 +282,28 @@ def log_prediction(
         now, symbol, strategy, direction, entry_price, target_price,
         (model or ""), predicted_class, top_k_str, note,
         str(success), reason, rate, return_value, label,
-        group_id, model_symbol, model_name, source, volatility, source_exchange
+        group_id, model_symbol, model_name, source, volatility, source_exchange,
+        # --- 확장 필드 순서 고정 ---
+        (regime or ""), (meta_choice or ""), 
+        (float(raw_prob) if raw_prob is not None else ""),
+        (float(calib_prob) if calib_prob is not None else ""),
+        (str(calib_ver) if calib_ver is not None else "")
     ]
 
     try:
+        # 현재 파일의 실제 헤더 파악
         write_header = not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0
+        current_header = PREDICTION_HEADERS
+        if not write_header:
+            h = _read_csv_header(LOG_FILE)
+            current_header = h if h else PREDICTION_HEADERS
+
         with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
-            writer = csv.writer(f)
+            w = csv.writer(f)
             if write_header:
-                writer.writerow(PREDICTION_HEADERS)
-            writer.writerow(row)
+                w.writerow(PREDICTION_HEADERS)
+                current_header = PREDICTION_HEADERS
+            w.writerow(_align_row_to_header(row, current_header))
 
         print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} class={predicted_class} | success={success} | src={source_exchange} | reason={reason}")
 
@@ -434,7 +474,6 @@ def log_label_distribution(
         total = int(total if total is not None else sum(counts.values()))
         n_unique = int(n_unique if n_unique is not None else len(counts))
         if entropy is None:
-            # 안전 계산
             import math
             probs = [c/total for c in counts.values()] if total > 0 else []
             entropy = round(float(-sum(p*math.log(p + 1e-12) for p in probs)) if probs else 0.0, 6)
