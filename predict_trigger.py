@@ -1,4 +1,4 @@
-# === predict_trigger.py (최종본) ===
+# === predict_trigger.py (FINAL with regime/calib pre-warm) ===
 import os  # ✅ prediction_log 존재 확인/경로
 import pandas as pd
 import time
@@ -8,6 +8,19 @@ import pytz
 
 from data.utils import SYMBOLS, get_kline_by_strategy
 from logger import log_audit_prediction as log_audit, ensure_prediction_log_exists  # ✅ 추가: 로그 파일 보장
+
+# ▷ (옵션) 레짐/캘리브레이션: 없으면 안전 통과
+try:
+    from regime_detector import detect_regime
+except Exception:
+    def detect_regime(symbol, strategy, now=None):
+        return "unknown"
+
+try:
+    from calibration import get_calibration_version
+except Exception:
+    def get_calibration_version():
+        return "none"
 
 last_trigger_time = {}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
@@ -77,6 +90,14 @@ def run():
                     continue
 
                 if check_pre_burst_conditions(df, strategy):
+                    # ✅ 10번 요구사항: 트리거 직전 레짐/캘리브 프리로드(캐시/로그용)
+                    try:
+                        regime = detect_regime(symbol, strategy, now=now_kst())
+                        calib_ver = get_calibration_version()
+                        log_audit(symbol, strategy, "프리로드", f"regime={regime}, calib_ver={calib_ver}")
+                    except Exception as preload_e:
+                        print(f"[프리로드 경고] {symbol}-{strategy}: {preload_e}")
+
                     print(f"[✅ 트리거 포착] {symbol} - {strategy} → 예측 실행")
                     try:
                         run_prediction(symbol, strategy, source="변동성")
