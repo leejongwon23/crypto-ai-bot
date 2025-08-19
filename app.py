@@ -14,7 +14,7 @@ import maintenance_fix_meta
 from logger import ensure_prediction_log_exists
 from integrity_guard import run as _integrity_check; _integrity_check()
 
-# ✅ 종합점검 모듈(HTML/JSON 지원)
+# ✅ 종합점검 모듈(HTML/JSON + 누적 통계 지원)
 from diag_e2e import run as diag_e2e_run
 
 # ✅ cleanup 모듈 경로 보정
@@ -37,9 +37,9 @@ PERSIST_DIR = "/persistent"
 LOG_DIR = os.path.join(PERSIST_DIR, "logs")
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
 os.makedirs(LOG_DIR, exist_ok=True)
-os.makedirs(MODEL_DIR, exist_ok=True)  # ✅ 모델 디렉토리도 보장
+os.makedirs(MODEL_DIR, exist_ok=True)  # ✅ 모델 디렉토리 보장
 
-# ✅ prediction_log은 logger와 동일한 위치/헤더로 관리 (logs/아님!)
+# ✅ prediction_log은 logger와 동일한 위치/헤더로 관리
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 
 LOG_FILE         = os.path.join(LOG_DIR, "train_log.csv")
@@ -171,14 +171,14 @@ def yopo_health():
         except Exception:
             logs[name] = pd.DataFrame()
 
-    # 모델 파일 파싱 (접미사 허용 정규식)
+    # 모델 파일 파싱
     try:
         model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
     except Exception:
         model_files = []
     model_info = {}
     for f in model_files:
-        m = re.match(r"(.+?)_(단기|중기|장기)_(lstm|cnn_lstm|transformer)(?:_.*)?\.pt$", f)
+        m = re.match(r"(.+?)_(단기|중기|장기)_(lstm|cnn_lstm|transformer)(?:_.*)?\.pt$")
         if m:
             symbol, strat, mtype = m.groups()
             model_info.setdefault(strat, {}).setdefault(symbol, set()).add(mtype)
@@ -197,7 +197,6 @@ def yopo_health():
             else:
                 pred["volatility"] = False
 
-            # return or rate
             try:
                 pred["return"] = pd.to_numeric(pred.get("return", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
             except Exception:
@@ -289,7 +288,7 @@ def index(): return "Yopo server is running"
 @app.route("/ping")
 def ping(): return "pong"
 
-# ✅ [ADD] 종합 점검 라우트 (HTML/JSON 지원)
+# ✅ 종합 점검 라우트 (HTML/JSON + 누적 옵션)
 @app.route("/diag/e2e")
 def diag_e2e():
     """
@@ -298,14 +297,16 @@ def diag_e2e():
       /diag/e2e?view=html                    → 한글 HTML 리포트
       /diag/e2e?group=0                      → 그룹#0 학습(+예측)+평가
       /diag/e2e?group=1&predict=0&evaluate=0 → 그룹#1 학습만
+      /diag/e2e?cum=1                        → 누적 통계(메모리 안전 스트리밍)
     """
     try:
         group = int(request.args.get("group", "-1"))
         do_predict  = request.args.get("predict",  "1") != "0"
         do_evaluate = request.args.get("evaluate","1") != "0"
         view = request.args.get("view", "json").lower()
+        cumulative = request.args.get("cum", "0") == "1"
 
-        out = diag_e2e_run(group=group, do_predict=do_predict, do_evaluate=do_evaluate, view=view)
+        out = diag_e2e_run(group=group, do_predict=do_predict, do_evaluate=do_evaluate, view=view, cumulative=cumulative)
 
         if view == "html":
             return out, 200, {"Content-Type": "text/html; charset=utf-8"}
@@ -326,7 +327,6 @@ def run():
 @app.route("/train-now")
 def train_now():
     try:
-        # 기존 train.train_all_models()는 존재하지 않을 수 있어 안전하게 그룹 루프 실행
         threading.Thread(target=train_symbol_group_loop, daemon=True).start()
         return "✅ 전체 그룹 학습 루프 시작됨 (백그라운드)"
     except Exception as e:
