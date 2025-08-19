@@ -288,27 +288,29 @@ def index(): return "Yopo server is running"
 @app.route("/ping")
 def ping(): return "pong"
 
-# ✅ 종합 점검 라우트 (기본: 한글 HTML, 옵션: JSON)
+# ✅ [ADD] 종합 점검 라우트 (HTML/JSON + detail 지원)
 @app.route("/diag/e2e")
 def diag_e2e():
     """
     사용법:
-      /diag/e2e                                  → 전체 그룹 학습루프 + 평가 (한글 HTML)
-      /diag/e2e?group=0                          → 그룹#0만 학습(+예측)+평가 (한글 HTML)
-      /diag/e2e?group=1&predict=0&evaluate=0     → 그룹#1 학습만 (한글 HTML)
-      /diag/e2e?view=json                        → JSON 원본으로 보고서 받기
+      /diag/e2e?view=json                       → JSON(기본)
+      /diag/e2e?view=html                       → 한글 HTML 요약
+      /diag/e2e?view=html&detail=1              → 한글 HTML(상세표 + 대기건수)
+      /diag/e2e?group=0                         → 그룹#0만 학습(+예측)+평가
+      /diag/e2e?group=1&predict=0&evaluate=0    → 그룹#1 학습만
     """
     try:
         group = int(request.args.get("group", "-1"))
         do_predict = request.args.get("predict", "1") != "0"
         do_evaluate = request.args.get("evaluate", "1") != "0"
-        view = request.args.get("view", "html").lower()
+        view = request.args.get("view", "json").lower()
+        detail = request.args.get("detail", "0") == "1"
 
-        result = diag_e2e_run(group=group, do_predict=do_predict, do_evaluate=do_evaluate, view=view)
+        out = diag_e2e_run(group=group, do_predict=do_predict, do_evaluate=do_evaluate, view=view, detail=detail)
 
         if view == "html":
-            return Response(result, mimetype="text/html; charset=utf-8")
-        return jsonify(result)
+            return out, 200, {"Content-Type": "text/html; charset=utf-8"}
+        return jsonify(out)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
