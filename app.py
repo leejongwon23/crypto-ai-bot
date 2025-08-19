@@ -1,4 +1,4 @@
-# === app.py (patched) ===
+# === app.py (FINAL with /diag/e2e) ===
 from flask import Flask, jsonify, request
 from recommend import main
 import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv, re
@@ -14,6 +14,9 @@ from train import train_symbol_group_loop
 import maintenance_fix_meta
 from logger import ensure_prediction_log_exists
 from integrity_guard import run as _integrity_check; _integrity_check()
+
+# ✅ [ADD] 종합점검 모듈
+from diag_e2e import run as diag_e2e_run
 
 # ✅ cleanup 모듈 경로 보정 (src/에서 실행하든, 루트에서 실행하든 동작)
 try:
@@ -285,6 +288,24 @@ def index(): return "Yopo server is running"
 
 @app.route("/ping")
 def ping(): return "pong"
+
+# ✅ [ADD] 종합 점검 라우트
+@app.route("/diag/e2e")
+def diag_e2e():
+    """
+    사용법:
+      /diag/e2e                                  → 전체 그룹 학습루프 + 평가
+      /diag/e2e?group=0                          → 그룹#0만 학습(+예측)+평가
+      /diag/e2e?group=1&predict=0&evaluate=0     → 그룹#1 학습만
+    """
+    try:
+        group = request.args.get("group", "-1")
+        do_predict = request.args.get("predict", "1") != "0"
+        do_evaluate = request.args.get("evaluate", "1") != "0"
+        report = diag_e2e_run(group=int(group), do_predict=do_predict, do_evaluate=do_evaluate)
+        return jsonify(report)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route("/run")
 def run():
