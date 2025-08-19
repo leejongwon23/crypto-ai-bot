@@ -228,7 +228,7 @@ def _build_snapshot(symbols_filter=None):
                         latest_f1 = lst_sorted[0].get("val_f1", None)
                     except Exception:
                         pass
-                df_model = df_ss[df_ss["model"].astype(str).str.contains(mt, na=False)]
+                df_model = df_ss[df_ss["model"].astype(str).str.contains(mt, na=False)] if not df_ss.empty else pd.DataFrame()
                 md = {
                     "model": mt,
                     "val_f1": float(latest_f1) if latest_f1 is not None else None,
@@ -310,8 +310,7 @@ def _build_snapshot(symbols_filter=None):
 
     for s in snapshot["symbols"]:
         for strat, blk in s["strategies"].items():
-            n = blk["prediction"]["normal"]
-            v = blk["prediction"]["volatility"]
+            n = blk["prediction"]["normal"]; v = blk["prediction"]["volatility"]
             total_normal_succ += n["succ"]; total_normal_fail += n["fail"]
             total_vol_succ += v["succ"]; total_vol_fail += v["fail"]
             # 경고 조건 수집
@@ -414,11 +413,17 @@ def _render_html(snapshot):
             # 모델별 상세(접기)
             rows = []
             for md in by_model:
+                val_f1_val = md.get("val_f1", None)
+                val_f1_txt = f"{float(val_f1_val):.3f}" if (val_f1_val is not None) else "-"
                 rows.append(
-                    f"<tr><td>{md['model']}</td>"
-                    f"<td>{(f'{md['val_f1']:.3f}' if md['val_f1'] is not None else '-')}</td>"
-                    f"<td>{md['succ']}</td><td>{md['fail']}</td><td>{md['total']}</td>"
-                    f"<td>{_pct(md['succ_rate'])}</td></tr>"
+                    "<tr>"
+                    f"<td>{md.get('model','')}</td>"
+                    f"<td>{val_f1_txt}</td>"
+                    f"<td>{md.get('succ',0)}</td>"
+                    f"<td>{md.get('fail',0)}</td>"
+                    f"<td>{md.get('total',0)}</td>"
+                    f"<td>{_pct(md.get('succ_rate',0.0))}</td>"
+                    "</tr>"
                 )
             card.append(
                 "<details class='card' style='margin-top:8px'><summary>모델별 상세</summary>"
