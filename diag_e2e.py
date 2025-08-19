@@ -1,4 +1,4 @@
-# === diag_e2e.py (FINAL, 예측/평가 상세 + 한글 HTML 뷰) ===
+# === diag_e2e.py (FINAL: 누적통계 옵션 + 예측/평가 상세 + 한글 HTML) ===
 import os, re, traceback, math
 from datetime import datetime, timedelta
 import pytz
@@ -27,9 +27,36 @@ def _now_str():
     return _now_kst().strftime("%Y-%m-%d %H:%M:%S")
 
 def _safe_read_csv(path, **kw):
+    """
+    기본: 전체 읽기(안전). 옵션:
+      - tail_rows=N : 파일 끝에서 N행만 빠르게 로드
+      - limit_rows=N: 앞에서 N행만 로드
+    """
     try:
         if not os.path.exists(path):
             return pd.DataFrame()
+
+        tail_rows = kw.pop("tail_rows", None)
+        limit_rows = kw.pop("limit_rows", None)
+
+        if limit_rows is not None and limit_rows > 0:
+            return pd.read_csv(path, encoding="utf-8-sig", on_bad_lines="skip", nrows=limit_rows, **kw)
+
+        if tail_rows is not None and tail_rows > 0:
+            # 큰 파일도 안전하게: 청크로 읽어서 마지막 tail_rows만 유지
+            chunk_size = max(50_000, tail_rows)
+            keep = []
+            for ch in pd.read_csv(path, encoding="utf-8-sig", on_bad_lines="skip", chunksize=chunk_size, **kw):
+                keep.append(ch.tail(tail_rows))
+                # 메모리 절약: 너무 많이 쌓이지 않도록 뒤에서 N만 남김
+                if len(keep) > 3:
+                    keep = keep[-2:]
+            if not keep:
+                return pd.DataFrame()
+            df = pd.concat(keep, ignore_index=True)
+            return df.tail(tail_rows)
+
+        # 기본 전체 읽기
         return pd.read_csv(path, encoding="utf-8-sig", on_bad_lines="skip", **kw)
     except Exception:
         return pd.DataFrame()
@@ -43,7 +70,6 @@ def _next_eval_eta_minutes(interval_min=30):
         slot_start = slot_start + timedelta(minutes=interval_min)
     next_slot = slot_start + timedelta(minutes=interval_min)
     eta = (next_slot - now).total_seconds() / 60.0
-    # 음수 방지/반올림
     return max(0, int(math.ceil(eta)))
 
 # -------- 모델 인벤토리 --------
@@ -85,99 +111,184 @@ def _group_training_status(model_map):
         out.append(entry)
     return out
 
-# -------- 예측/평가 상세 --------
-def _prediction_metrics():
+# -------- 예측/평가 상세 (최근 + 누적 옵션) --------
+def _prediction_metrics(cumulative=False, recent_rows=5000):
     """
-    prediction_log.csv에서 심볼×전략×모델별 성공률/건수 + 최신 예측 상세
-    - status: success|fail|v_success|v_fail 만 평가집계에 사용
-    - 최신 예측: 심볼×전략별 최신 1건에서 model/예측클래스/예측수익률/방향 추출
+    예측 통계:
+    - 기본: 최근 N행(가벼움) 통계 + 최신 예측 상세
+    - cumulative=True: 전체 파일을 청크로 스트리밍 집계(메모리 안전)
     """
     ensure_prediction_log_exists()
-    df = _safe_read_csv(PREDICTION_LOG)
-    if df.empty:
-        return {
+
+    # ---- 최신/최근 통계용: 최근 rows만 로드 ----
+    df_recent = _safe_read_csv(PREDICTION_LOG, tail_rows=recent_rows)
+    if df_recent.empty:
+        recent_part = {
             "ok": False,
             "error": "prediction_log.csv 없음 또는 내용 없음",
             "by_symbol": {},
-            "overall": {},
-            "latest": {},
+            "overall": {"total": 0, "success": 0, "fail": 0, "success_rate": 0.0, "avg_return": 0.0},
+            "latest": {}
         }
-
-    # 컬럼 보정
-    for col in ["return", "rate"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    if "return" not in df.columns:
-        df["return"] = df["rate"] if "rate" in df.columns else 0.0
-
-    # ---- 평가 집계(성공/실패만) ----
-    eval_mask = df["status"].isin(["success", "fail", "v_success", "v_fail"]) if "status" in df.columns else pd.Series([False]*len(df))
-    dfe = df[eval_mask].copy()
-    if not dfe.empty:
-        dfe["ok_flag"] = dfe["status"].isin(["success","v_success"]).astype(int)
-        total = len(dfe)
-        succ = int(dfe["ok_flag"].sum())
-        fail = int(total - succ)
-        overall = {
-            "total": total,
-            "success": succ,
-            "fail": fail,
-            "success_rate": round(succ/total, 4) if total else 0.0,
-            "avg_return": round(float(dfe["return"].mean()), 4),
-        }
-        by_symbol = {}
-        cols = [c for c in ["symbol","strategy","model"] if c in dfe.columns]
-        if cols:
-            g = dfe.groupby(cols, dropna=False)["ok_flag"].agg(["count","sum"]).reset_index()
-            for _, r in g.iterrows():
-                sym = str(r.get("symbol","?"))
-                strat = str(r.get("strategy","?"))
-                model = str(r.get("model","?"))
-                cnt = int(r["count"]); s = int(r["sum"]); f = cnt - s
-                by_symbol.setdefault(sym, {}).setdefault(strat, {})[model] = {
-                    "total": cnt, "success": s, "fail": f,
-                    "success_rate": round(s/cnt, 4) if cnt else 0.0
-                }
     else:
-        overall = {"total": 0, "success": 0, "fail": 0, "success_rate": 0.0, "avg_return": 0.0}
-        by_symbol = {}
+        # 숫자 보정
+        if "return" in df_recent.columns:
+            df_recent["return"] = pd.to_numeric(df_recent["return"], errors="coerce")
+        elif "rate" in df_recent.columns:
+            df_recent["return"] = pd.to_numeric(df_recent["rate"], errors="coerce")
+        else:
+            df_recent["return"] = 0.0
 
-    # ---- 최신 예측(심볼×전략별) ----
-    latest = {}
-    if "timestamp" in df.columns and {"symbol","strategy"}.issubset(df.columns):
-        try:
-            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-            df2 = df.sort_values("timestamp").dropna(subset=["symbol","strategy"])
-            grp = df2.groupby(["symbol","strategy"], dropna=False)
-            idx = grp["timestamp"].idxmax()
-            rows = df2.loc[idx]
-            for _, r in rows.iterrows():
-                sym = str(r["symbol"]); strat = str(r["strategy"])
-                latest.setdefault(sym, {})[strat] = {
-                    "timestamp": str(r.get("timestamp","")),
-                    "model": str(r.get("model","")),
-                    "predicted_class": (int(r.get("predicted_class")) if pd.notna(r.get("predicted_class")) else None) if "predicted_class" in df.columns else None,
-                    "top_k": str(r.get("top_k","")) if "top_k" in df.columns else None,
-                    "direction": str(r.get("direction","")) if "direction" in df.columns else "",
-                    "pred_return": float(r.get("return", 0.0)) if pd.notna(r.get("return", None)) else None,
-                    "status": str(r.get("status","")) if "status" in df.columns else "",
-                    "reason": str(r.get("reason","")) if "reason" in df.columns else "",
-                }
-        except Exception:
-            pass
+        status_col = "status" if "status" in df_recent.columns else None
+        model_col  = "model" if "model" in df_recent.columns else ("model_type" if "model_type" in df_recent.columns else None)
 
-    return {"ok": True, "by_symbol": by_symbol, "overall": overall, "latest": latest}
+        # 평가 집계(성공/실패만)
+        if status_col:
+            m = df_recent[status_col].isin(["success","fail","v_success","v_fail"])
+            dfe = df_recent[m].copy()
+        else:
+            dfe = pd.DataFrame()
+
+        if not dfe.empty:
+            dfe["ok_flag"] = dfe[status_col].isin(["success","v_success"]).astype(int)
+            total = len(dfe)
+            succ  = int(dfe["ok_flag"].sum())
+            fail  = int(total - succ)
+            overall_recent = {
+                "total": total,
+                "success": succ,
+                "fail": fail,
+                "success_rate": round(succ/total, 4) if total else 0.0,
+                "avg_return": round(float(dfe["return"].mean()), 4),
+            }
+            by_symbol_recent = {}
+            cols = [c for c in ["symbol","strategy",model_col] if c and c in dfe.columns]
+            if cols:
+                g = dfe.groupby(cols, dropna=False)["ok_flag"].agg(["count","sum"]).reset_index()
+                for _, r in g.iterrows():
+                    sym   = str(r.get("symbol","?"))
+                    strat = str(r.get("strategy","?"))
+                    mdl   = str(r.get(model_col,"?"))
+                    cnt = int(r["count"]); s = int(r["sum"]); f = cnt - s
+                    by_symbol_recent.setdefault(sym, {}).setdefault(strat, {})[mdl] = {
+                        "total": cnt, "success": s, "fail": f,
+                        "success_rate": round(s/cnt, 4) if cnt else 0.0
+                    }
+        else:
+            overall_recent = {"total": 0, "success": 0, "fail": 0, "success_rate": 0.0, "avg_return": 0.0}
+            by_symbol_recent = {}
+
+        # 최신 예측(심볼×전략별) 1건씩
+        latest = {}
+        if {"timestamp","symbol","strategy"}.issubset(df_recent.columns):
+            try:
+                df_recent["timestamp"] = pd.to_datetime(df_recent["timestamp"], errors="coerce")
+                df2  = df_recent.sort_values("timestamp").dropna(subset=["symbol","strategy"])
+                grp  = df2.groupby(["symbol","strategy"], dropna=False)
+                idx  = grp["timestamp"].idxmax()
+                rows = df2.loc[idx]
+                for _, r in rows.iterrows():
+                    sym   = str(r["symbol"]); strat = str(r["strategy"])
+                    latest.setdefault(sym, {})[strat] = {
+                        "timestamp": str(r.get("timestamp","")),
+                        "model": str(r.get(model_col,"")) if model_col else "",
+                        "predicted_class": int(r.get("predicted_class")) if "predicted_class" in df_recent.columns and pd.notna(r.get("predicted_class")) else None,
+                        "top_k": str(r.get("top_k","")) if "top_k" in df_recent.columns else None,
+                        "direction": str(r.get("direction","")) if "direction" in df_recent.columns else "",
+                        "pred_return": float(r.get("return", 0.0)) if pd.notna(r.get("return", None)) else None,
+                        "status": str(r.get(status_col,"")) if status_col else "",
+                        "reason": str(r.get("reason","")) if "reason" in df_recent.columns else "",
+                    }
+            except Exception:
+                pass
+
+        recent_part = {"ok": True, "by_symbol": by_symbol_recent, "overall": overall_recent, "latest": latest}
+
+    # ---- 누적 집계(옵션): 전체 파일 스트리밍 ----
+    if not cumulative:
+        return recent_part
+
+    overall_total = 0
+    overall_succ  = 0
+    overall_ret_sum = 0.0
+    overall_ret_cnt = 0
+    by_key = {}  # (sym,strat,model) -> {"total":..,"succ":..}
+
+    try:
+        # 모델/상태 컬럼 파악용 소량 읽기
+        head_df = _safe_read_csv(PREDICTION_LOG, limit_rows=5)
+        if head_df.empty:
+            recent_part["cumulative"] = False
+            return recent_part
+        model_col = "model" if "model" in head_df.columns else ("model_type" if "model_type" in head_df.columns else None)
+        status_col = "status" if "status" in head_df.columns else None
+        usecols = [c for c in ["symbol","strategy",model_col,status_col,"return","rate"] if c]
+
+        for ch in pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip",
+                              chunksize=100_000, usecols=usecols):
+            # return 보정
+            if "return" in ch.columns:
+                ch["return"] = pd.to_numeric(ch["return"], errors="coerce")
+            elif "rate" in ch.columns:
+                ch["return"] = pd.to_numeric(ch["rate"], errors="coerce")
+            else:
+                ch["return"] = 0.0
+
+            if status_col:
+                m = ch[status_col].isin(["success","fail","v_success","v_fail"])
+                ce = ch[m].copy()
+            else:
+                ce = pd.DataFrame()
+
+            if not ce.empty:
+                ce["ok_flag"] = ce[status_col].isin(["success","v_success"]).astype(int)
+                overall_total += len(ce)
+                overall_succ  += int(ce["ok_flag"].sum())
+                overall_ret_sum += float(ce["return"].sum())
+                overall_ret_cnt += int(ce["return"].notna().sum())
+
+                gcols = [c for c in ["symbol","strategy",model_col] if c and c in ce.columns]
+                if gcols:
+                    gg = ce.groupby(gcols, dropna=False)["ok_flag"].agg(["count","sum"]).reset_index()
+                    for _, r in gg.iterrows():
+                        key = (str(r.get("symbol","?")), str(r.get("strategy","?")), str(r.get(model_col,"?")))
+                        d = by_key.setdefault(key, {"total": 0, "succ": 0})
+                        d["total"] += int(r["count"])
+                        d["succ"]  += int(r["sum"])
+
+        overall_cum = {
+            "total": overall_total,
+            "success": overall_succ,
+            "fail": int(overall_total - overall_succ),
+            "success_rate": round(overall_succ/overall_total, 4) if overall_total else 0.0,
+            "avg_return": round(overall_ret_sum / overall_ret_cnt, 4) if overall_ret_cnt else 0.0
+        }
+        by_symbol_cum = {}
+        for (sym, strat, mdl), d in by_key.items():
+            by_symbol_cum.setdefault(sym, {}).setdefault(strat, {})[mdl] = {
+                "total": d["total"],
+                "success": d["succ"],
+                "fail": d["total"] - d["succ"],
+                "success_rate": round(d["succ"]/d["total"], 4) if d["total"] else 0.0
+            }
+
+        recent_part["overall_cumulative"] = overall_cum
+        recent_part["by_symbol_cumulative"] = by_symbol_cum
+        recent_part["cumulative"] = True
+        return recent_part
+    except Exception as e:
+        recent_part["cumulative"] = False
+        recent_part["cumulative_error"] = str(e)
+        return recent_part
 
 def _failure_learning_status():
     """
     실패학습 지표: wrong_predictions.csv 요약
-    - success 컬럼이 True/False로 있는 경우 집계
     """
     df = _safe_read_csv(WRONG_PREDICTIONS)
     if df.empty:
         return {"ok": False, "error": "wrong_predictions.csv 없음 또는 비어있음"}
 
-    # 기본 집계
     total = len(df)
     if "success" in df.columns:
         succ = int((df["success"].astype(str) == "True").sum())
@@ -194,7 +305,6 @@ def _failure_learning_status():
         except Exception:
             latest_ts = None
 
-    # 실패 항목에서 어느 모델/전략/심볼이 많이 나오는지 TOP5
     top5 = []
     cols = [c for c in ["symbol","strategy","model"] if c in df.columns]
     if cols and "success" in df.columns:
@@ -290,7 +400,10 @@ def _render_html_kr(report):
       <ul>
         <li>모델 파일 수: <b>{inv.get('count',0)}</b></li>
         <li>예측 로그: <b>{'존재' if report.get('prediction_log',{}).get('exists') else '없음'}</b> (크기: {report.get('prediction_log',{}).get('size',0)} bytes)</li>
-        <li>평가 집계: 총 {overall.get('total',0)}건, 성공률 {pct(overall.get('success_rate',0.0))}, 평균수익률 {overall.get('avg_return',0.0):.4f}</li>
+        <li>평가 집계(최근): 총 {overall.get('total',0)}건, 성공률 {pct(overall.get('success_rate',0.0))}, 평균수익률 {overall.get('avg_return',0.0):.4f}</li>
+        {"<li>평가 집계(누적): 총 " + str(report.get('prediction_metrics',{}).get('overall_cumulative',{}).get('total',0)) +
+         "건, 성공률 " + pct(report.get('prediction_metrics',{}).get('overall_cumulative',{}).get('success_rate',0.0)) +
+         ", 평균수익률 " + f"{report.get('prediction_metrics',{}).get('overall_cumulative',{}).get('avg_return',0.0):.4f}</li>" if report.get('prediction_metrics',{}).get('cumulative') else ""}
         <li>실패학습 로그: {('OK' if fail.get('ok') else '정보부족')} (행수 {fail.get('total_rows',0)}, 최근 {fail.get('latest','-')})</li>
       </ul>
 
@@ -325,7 +438,7 @@ def _predict_group(symbols, strategies=STRATS):
                 done.append(f"{sym}-{strat}:ERROR:{e}")
     return done
 
-def run(group=-1, do_predict=True, do_evaluate=True, view="json"):
+def run(group=-1, do_predict=True, do_evaluate=True, view="json", cumulative=False):
     """
     End-to-End 점검 실행:
     - group==-1: 전체 그룹 학습 루프(train_symbol_group_loop) 실행(루프 내 즉시 예측 포함)
@@ -396,7 +509,7 @@ def run(group=-1, do_predict=True, do_evaluate=True, view="json"):
             "size": os.path.getsize(PREDICTION_LOG) if os.path.exists(PREDICTION_LOG) else 0,
             "path": PREDICTION_LOG,
         }
-        report["prediction_metrics"] = _prediction_metrics()
+        report["prediction_metrics"] = _prediction_metrics(cumulative=cumulative)
         report["group_status"] = _group_training_status(inv.get("map", {}))
         report["failure_learning"] = _failure_learning_status()
 
