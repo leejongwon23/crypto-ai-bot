@@ -41,16 +41,25 @@ SYMBOL_MAP = {
     "binance": {s: s for s in SYMBOLS}
 }
 
-# ✅ 전략 설정은 단일 소스(config.py)를 따른다
+# ✅ 전략 설정은 단일 소스(config.py)를 따른다 + 레짐 옵션(get_REGIME) 안전 임포트
 try:
-    from config import STRATEGY_CONFIG  # {"단기":{"interval":"240","limit":1000,"binance_interval":"4h"}, ...}
+    from config import STRATEGY_CONFIG, get_REGIME  # {"단기":{"interval":"240","limit":1000,"binance_interval":"4h"}, ...}
 except Exception:
-    # 최후 안전망(만약 config 임포트가 실패하면)
     STRATEGY_CONFIG = {
         "단기": {"interval": "240", "limit": 1000, "binance_interval": "4h"},
         "중기": {"interval": "D",   "limit": 500,  "binance_interval": "1d"},
         "장기": {"interval": "D",   "limit": 500,  "binance_interval": "1d"},
     }
+    def get_REGIME():
+        # 기본: 꺼짐(기존 동작과 동일)
+        return {
+            "enabled": False,
+            "atr_window": 14,
+            "rsi_window": 14,
+            "trend_window": 50,
+            "vol_high_pct": 0.9,
+            "vol_low_pct": 0.5
+        }
 
 # =========================
 # 캐시 매니저 (이 파일 내부 사용)
@@ -615,7 +624,7 @@ def get_realtime_prices():
         return {}
 
 # =========================
-# 피처 생성
+# 피처 생성 (+ 시장 레짐 태깅)
 # =========================
 _feature_cache = {}
 
@@ -654,7 +663,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         return df  # 최소 반환
 
     try:
-        # 기본 기술지표
+        # ---------- 기본 기술지표 ----------
         df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
         delta = df["close"].diff()
         gain = delta.where(delta > 0, 0).rolling(window=14, min_periods=1).mean()
@@ -681,6 +690,30 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df["stoch_d"] = ta.momentum.stoch_signal(df["high"], df["low"], df["close"], fillna=True)
         df["vwap"] = (df["volume"] * df["close"]).cumsum() / (df["volume"].cumsum() + 1e-6)
 
+        # ---------- 시장 레짐 태깅 (옵션) ----------
+        regime_cfg = get_REGIME()
+        if regime_cfg.get("enabled", False):
+            atr_win = int(regime_cfg.get("atr_window", 14))
+            trend_win = int(regime_cfg.get("trend_window", 50))
+            vol_high_pct = float(regime_cfg.get("vol_high_pct", 0.9))
+            vol_low_pct = float(regime_cfg.get("vol_low_pct", 0.5))
+
+            # 변동성: ATR 기반 분위수 구간화
+            df["atr_val"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=atr_win, fillna=True)
+            thr_high = df["atr_val"].quantile(vol_high_pct)
+            thr_low = df["atr_val"].quantile(vol_low_pct)
+            df["vol_regime"] = np.where(df["atr_val"] >= thr_high, 2,
+                                 np.where(df["atr_val"] <= thr_low, 0, 1))
+
+            # 추세: 장기 이동평균의 기울기
+            df["ma_trend"] = df["close"].rolling(window=trend_win, min_periods=1).mean()
+            slope = df["ma_trend"].diff()
+            df["trend_regime"] = np.where(slope > 0, 2, np.where(slope < 0, 0, 1))
+
+            # 종합 태그: 3x3 조합(0~8)
+            df["regime_tag"] = df["vol_regime"] * 3 + df["trend_regime"]
+
+        # ---------- 정리/스케일 ----------
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.fillna(0, inplace=True)
 
