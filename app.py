@@ -1,5 +1,4 @@
-# === app.py (FINAL with /diag/e2e HTML/JSON toggle) ===
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
 from recommend import main
 import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv, re
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -15,10 +14,10 @@ import maintenance_fix_meta
 from logger import ensure_prediction_log_exists
 from integrity_guard import run as _integrity_check; _integrity_check()
 
-# ✅ [ADD] 종합점검 모듈 (HTML/JSON 뷰 지원 버전)
+# ✅ 종합점검 모듈(HTML/JSON 지원)
 from diag_e2e import run as diag_e2e_run
 
-# ✅ cleanup 모듈 경로 보정 (src/에서 실행하든, 루트에서 실행하든 동작)
+# ✅ cleanup 모듈 경로 보정
 try:
     from scheduler_cleanup import start_cleanup_scheduler   # [KEEP]
     import safe_cleanup                                      # [KEEP]
@@ -27,7 +26,7 @@ except ImportError:
     from scheduler_cleanup import start_cleanup_scheduler    # [KEEP]
     import safe_cleanup                                      # [KEEP]
 
-# ✅ 서버 시작 직전 용량 정리 (예외 가드)
+# ✅ 서버 시작 직전 용량 정리
 try:
     safe_cleanup.cleanup_logs_and_models()
 except Exception as e:
@@ -145,7 +144,7 @@ def _init_background_once():
         except Exception as e:
             print(f"❌ 백그라운드 초기화 실패: {e}")
 
-# Flask 3.1: before_first_request 제거 → before_serving 사용, 미지원 환경은 before_request 1회 실행
+# Flask 3.1 호환
 if hasattr(app, "before_serving"):
     @app.before_serving
     def _boot_once():
@@ -197,6 +196,7 @@ def yopo_health():
             else:
                 pred["volatility"] = False
 
+            # return or rate
             try:
                 pred["return"] = pd.to_numeric(pred.get("return", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
             except Exception:
@@ -288,31 +288,28 @@ def index(): return "Yopo server is running"
 @app.route("/ping")
 def ping(): return "pong"
 
-# ✅ [UPDATE] 종합 점검 라우트 (HTML/JSON 전환 지원)
+# ✅ 종합 점검 라우트 (기본: 한글 HTML, 옵션: JSON)
 @app.route("/diag/e2e")
 def diag_e2e():
     """
     사용법:
-      /diag/e2e                                   → 전체 그룹 학습루프 + 평가 (기본 JSON)
-      /diag/e2e?view=html                         → 한글 HTML 리포트
-      /diag/e2e?group=0                           → 그룹#0만 학습(+예측)+평가
-      /diag/e2e?group=1&predict=0&evaluate=0      → 그룹#1 학습만
+      /diag/e2e                                  → 전체 그룹 학습루프 + 평가 (한글 HTML)
+      /diag/e2e?group=0                          → 그룹#0만 학습(+예측)+평가 (한글 HTML)
+      /diag/e2e?group=1&predict=0&evaluate=0     → 그룹#1 학습만 (한글 HTML)
+      /diag/e2e?view=json                        → JSON 원본으로 보고서 받기
     """
     try:
         group = int(request.args.get("group", "-1"))
         do_predict = request.args.get("predict", "1") != "0"
         do_evaluate = request.args.get("evaluate", "1") != "0"
-        view = request.args.get("view", "json").lower()
+        view = request.args.get("view", "html").lower()
 
         result = diag_e2e_run(group=group, do_predict=do_predict, do_evaluate=do_evaluate, view=view)
+
         if view == "html":
-            # diag_e2e.py가 HTML 문자열을 반환함
-            return result
+            return Response(result, mimetype="text/html; charset=utf-8")
         return jsonify(result)
     except Exception as e:
-        view = request.args.get("view", "json").lower()
-        if view == "html":
-            return f"<pre>❌ 오류: {e}</pre>", 500
         return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route("/run")
@@ -464,7 +461,7 @@ def reset_all():
     except Exception as e:
         return f"초기화 실패: {e}", 500
 
-@app.route("/force-fix-prediction-log")
+@app.route("/force-fix-prediction_log")
 def force_fix_prediction_log():
     """logger의 표준 헤더로 prediction_log.csv를 안전하게 재생성"""
     try:
