@@ -1,4 +1,3 @@
-# diag_e2e.py
 import os, traceback, json
 from datetime import datetime
 import pytz
@@ -7,7 +6,12 @@ import pytz
 from train import train_symbol_group_loop, train_models
 from predict import predict, evaluate_predictions
 from config import get_SYMBOL_GROUPS
-from logger import ensure_prediction_log_exists
+from logger import (
+    ensure_prediction_log_exists,
+    get_model_success_rate,
+    analyze_class_success,
+)
+from failure_db import load_existing_failure_hashes
 
 MODEL_DIR = "/persistent/models"
 PREDICTION_LOG = "/persistent/prediction_log.csv"
@@ -43,10 +47,54 @@ def _predict_group(symbols, strategies=("단기","중기","장기")):
                 done.append(f"{sym}-{strat}:ERROR:{e}")
     return done
 
+def _failure_stats():
+    """실패학습 DB 요약"""
+    try:
+        hashes = load_existing_failure_hashes()
+        total = len(hashes)
+        sample = hashes[-1] if hashes else None
+        return {
+            "ok": True,
+            "total_failures": total,
+            "last_failure_hash": sample,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def _success_rate():
+    """심볼/전략/모델별 성공률"""
+    try:
+        rates = {}
+        for (symbol, strategy, model_type), val in get_model_success_rate().items():
+            if symbol not in rates:
+                rates[symbol] = {}
+            if strategy not in rates[symbol]:
+                rates[symbol][strategy] = {}
+            rates[symbol][strategy][model_type] = round(val, 3)
+        return {"ok": True, "rates": rates}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def _group_status():
+    """그룹별 학습 여부"""
+    groups = get_SYMBOL_GROUPS()
+    status = []
+    try:
+        files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
+        for gid, symbols in enumerate(groups):
+            sym_status = {}
+            for sym in symbols:
+                sym_models = [f for f in files if f.startswith(sym)]
+                sym_status[sym] = len(sym_models) > 0
+            status.append({"group": gid, "symbols": sym_status})
+        return {"ok": True, "groups": status}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 def run(group=-1, do_predict=True, do_evaluate=True):
     """
     End-to-End 점검 실행:
-    - group==-1: 전체 그룹 학습 루프(train_symbol_group_loop) 실행(내부에 예측 포함)
+    - group==-1: 전체 그룹 학습 루프(train_symbol_group_loop) 실행
     - group>=0 : 해당 그룹만 train_models → (옵션) 예측 → (옵션) 평가
     """
     report = {
@@ -59,33 +107,30 @@ def run(group=-1, do_predict=True, do_evaluate=True):
         "evaluate": None,
         "model_inventory": None,
         "prediction_log": None,
+        "failure_stats": None,
+        "success_rate": None,
+        "group_status": None,
+        "summary": None,  # ✅ 한글 요약 추가
     }
 
     try:
         report["order_trace"].append("start")
 
         if group is None or int(group) < 0:
-            # 전체 그룹 일괄 학습(내부에서 각 그룹 학습 직후 예측까지 수행)
             report["order_trace"].append("train_symbol_group_loop:start")
             train_symbol_group_loop(sleep_sec=0)
             report["order_trace"].append("train_symbol_group_loop:done")
             report["train"] = {"mode": "all_groups"}
-            # 별도 predict 단계는 생략 가능(루프 내 즉시예측 수행)
-
         else:
-            # 특정 그룹만 선택 학습
             groups = get_SYMBOL_GROUPS()
             gid = int(group)
             if gid >= len(groups):
                 raise ValueError(f"잘못된 group 인덱스: {gid} (총 {len(groups)}개)")
-
             symbols = groups[gid]
             report["train"] = {"mode": "single_group", "group_id": gid, "symbols": symbols}
             report["order_trace"].append(f"train_models:g{gid}:start")
             train_models(symbols)
             report["order_trace"].append(f"train_models:g{gid}:done")
-
-            # 예측(옵션) – train_models는 자동 예측이 없으므로 여기서 수행
             if do_predict:
                 report["order_trace"].append(f"predict:g{gid}:start")
                 done = _predict_group(symbols)
@@ -94,22 +139,31 @@ def run(group=-1, do_predict=True, do_evaluate=True):
             else:
                 report["predict"] = {"executed": False}
 
-        # 평가(옵션)
         if do_evaluate:
             report["order_trace"].append("evaluate:start")
             try:
                 eval_res = evaluate_predictions()
             except TypeError:
-                # 시그니처가 다른 경우도 있으니 안전 가드
-                eval_res = evaluate_predictions  # 함수 객체 정보라도 반환
-            report["evaluate"] = {"executed": True, "result": str(eval_res)[:5000]}
+                eval_res = evaluate_predictions
+            report["evaluate"] = {"executed": True, "result": str(eval_res)[:2000]}
             report["order_trace"].append("evaluate:done")
         else:
             report["evaluate"] = {"executed": False}
 
-        # 모델/로그 상태
+        # ✅ 추가 점검들
         report["model_inventory"] = _model_inventory()
         report["prediction_log"] = _prediction_log_status()
+        report["failure_stats"] = _failure_stats()
+        report["success_rate"] = _success_rate()
+        report["group_status"] = _group_status()
+
+        # ✅ 한글 요약
+        report["summary"] = {
+            "모델개수": report["model_inventory"].get("count"),
+            "실패기록수": report["failure_stats"].get("total_failures"),
+            "최근실패": report["failure_stats"].get("last_failure_hash"),
+            "예측로그크기(bytes)": report["prediction_log"].get("size"),
+        }
 
         report["ok"] = True
         report["order_trace"].append("done")
