@@ -37,6 +37,7 @@ PERSIST_DIR = "/persistent"
 LOG_DIR = os.path.join(PERSIST_DIR, "logs")
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
 os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(MODEL_DIR, exist_ok=True)  # ✅ 모델 디렉토리도 보장
 
 # ✅ prediction_log은 logger와 동일한 위치/헤더로 관리 (logs/아님!)
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
@@ -165,7 +166,7 @@ def yopo_health():
     for name, path in file_map.items():
         try:
             logs[name] = pd.read_csv(path, encoding="utf-8-sig", on_bad_lines="skip")
-            if "timestamp" in logs[name]:
+            if "timestamp" in logs[name].columns:
                 logs[name] = logs[name][logs[name]["timestamp"].notna()]
         except Exception:
             logs[name] = pd.DataFrame()
@@ -288,25 +289,23 @@ def index(): return "Yopo server is running"
 @app.route("/ping")
 def ping(): return "pong"
 
-# ✅ [ADD] 종합 점검 라우트 (HTML/JSON + detail 지원)
+# ✅ [ADD] 종합 점검 라우트 (HTML/JSON 지원)
 @app.route("/diag/e2e")
 def diag_e2e():
     """
     사용법:
-      /diag/e2e?view=json                       → JSON(기본)
-      /diag/e2e?view=html                       → 한글 HTML 요약
-      /diag/e2e?view=html&detail=1              → 한글 HTML(상세표 + 대기건수)
-      /diag/e2e?group=0                         → 그룹#0만 학습(+예측)+평가
-      /diag/e2e?group=1&predict=0&evaluate=0    → 그룹#1 학습만
+      /diag/e2e?view=json                    → JSON(기본)
+      /diag/e2e?view=html                    → 한글 HTML 리포트
+      /diag/e2e?group=0                      → 그룹#0 학습(+예측)+평가
+      /diag/e2e?group=1&predict=0&evaluate=0 → 그룹#1 학습만
     """
     try:
         group = int(request.args.get("group", "-1"))
-        do_predict = request.args.get("predict", "1") != "0"
-        do_evaluate = request.args.get("evaluate", "1") != "0"
+        do_predict  = request.args.get("predict",  "1") != "0"
+        do_evaluate = request.args.get("evaluate","1") != "0"
         view = request.args.get("view", "json").lower()
-        detail = request.args.get("detail", "0") == "1"
 
-        out = diag_e2e_run(group=group, do_predict=do_predict, do_evaluate=do_evaluate, view=view, detail=detail)
+        out = diag_e2e_run(group=group, do_predict=do_predict, do_evaluate=do_evaluate, view=view)
 
         if view == "html":
             return out, 200, {"Content-Type": "text/html; charset=utf-8"}
@@ -327,8 +326,9 @@ def run():
 @app.route("/train-now")
 def train_now():
     try:
-        train.train_all_models()
-        return "✅ 모든 전략 학습 시작됨"
+        # 기존 train.train_all_models()는 존재하지 않을 수 있어 안전하게 그룹 루프 실행
+        threading.Thread(target=train_symbol_group_loop, daemon=True).start()
+        return "✅ 전체 그룹 학습 루프 시작됨 (백그라운드)"
     except Exception as e:
         return f"학습 실패: {e}", 500
 
