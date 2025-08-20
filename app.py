@@ -297,14 +297,16 @@ def diag_e2e():
       /diag/e2e?view=html         → 한글 HTML 리포트
       /diag/e2e?group=0           → 그룹 인덱스 기준 통계
       /diag/e2e?cum=1             → 누적 통계(메모리 안전 스트리밍)
+      /diag/e2e?symbols=BTCUSDT,ETHUSDT → 특정 심볼만 집계
     """
     try:
         group = int(request.args.get("group", "-1"))
         view = request.args.get("view", "json").lower()
         cumulative = request.args.get("cum", "0") == "1"
+        symbols = request.args.get("symbols")  # ← 추가: 심볼 필터 받기
 
-        # diag_e2e.run은 (group, view, cumulative) 시그니처만 지원
-        out = diag_e2e_run(group=group, view=view, cumulative=cumulative)
+        # diag_e2e.run은 (group, view, cumulative, symbols) 시그니처 지원
+        out = diag_e2e_run(group=group, view=view, cumulative=cumulative, symbols=symbols)  # ← 추가: 전달
 
         # diag_e2e_run이 Flask Response를 직접 반환할 수도 있음
         if isinstance(out, Response):
