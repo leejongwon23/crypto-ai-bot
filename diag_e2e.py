@@ -585,7 +585,9 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow')); // 기본
                     f"{eval_block}{fail_block}{prob_block}"
                     "</div>"
                 )
-            parts.append(f"<div class='card'><h2 id='{_safe(sym)}'>📈 {_safe(sym)}</h2>{fs_html}{''.join(sym_cards) if sym_cards else '<div class=\"muted\">전략 데이터가 없습니다.</div>'}</div>")
+            # ✅ 백슬래시가 들어간 표현식을 f-string 밖으로 분리 (SyntaxError 방지)
+            body_html = ''.join(sym_cards) if sym_cards else '<div class="muted">전략 데이터가 없습니다.</div>'
+            parts.append(f"<div class='card'><h2 id='{_safe(sym)}'>📈 {_safe(sym)}</h2>{fs_html}{body_html}</div>")
         return "<div id='view-symbol' class='view'>" + "".join(parts) + "</div>"
 
     # ===== (B) 작동순서 리스트 뷰 (사진과 동일 구조) =====
