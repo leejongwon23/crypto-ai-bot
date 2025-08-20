@@ -23,10 +23,15 @@ services:
         sync: false
       - key: SAFE_CLEANUP_INTERVAL_MIN
         value: "30"
-      - key: DISK_SOFT_LIMIT_GB
+      # ✅ safe_cleanup.py와 키 일치 (DISK_* 대신 SAFE_*)
+      - key: SAFE_SOFT_CAP_GB
         value: "9.5"
-      - key: DISK_HARD_LIMIT_GB
+      - key: SAFE_HARD_CAP_GB
         value: "9.8"
+      - key: SAFE_TRIGGER_GB
+        value: "7.0"
+      - key: MIN_FREE_GB
+        value: "1.0"
       - key: MAX_LOG_AGE_DAYS
         value: "7"
       - key: KEEP_RECENT_MODELS_PER_SYMBOL
