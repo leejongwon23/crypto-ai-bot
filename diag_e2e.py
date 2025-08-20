@@ -11,7 +11,8 @@ TRAIN_LOG = os.path.join(LOG_DIR, "train_log.csv")
 AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
 
 KST = pytz.timezone("Asia/Seoul")
-now_kst = lambda: datetime.datetime.now(KST)
+# ✅ FIX: 항상 tz-aware pandas Timestamp 사용
+now_kst = lambda: pd.Timestamp.now(tz="Asia/Seoul")
 
 # 평가 지평(예측 1건의 평가마감 산출용)
 EVAL_HORIZON_HOURS = {"단기": 4, "중기": 24, "장기": 168}
@@ -30,8 +31,11 @@ def _to_kst(ts):
     try:
         t = pd.to_datetime(ts, errors="coerce")
         if pd.isna(t): return None
-        if t.tzinfo is None: t = t.tz_localize("Asia/Seoul")
-        else: t = t.tz_convert("Asia/Seoul")
+        # 항상 tz-aware로 맞춤
+        if t.tzinfo is None:
+            t = t.tz_localize("Asia/Seoul")
+        else:
+            t = t.tz_convert("Asia/Seoul")
         return t
     except Exception:
         return None
@@ -254,12 +258,15 @@ def _build_snapshot(symbols_filter=None):
                 if not df_eval.empty:
                     last_eval_ts = df_eval["timestamp"].max()
 
+            # ✅ FIX: tz-aware pandas Timestamp끼리만 비교/차이 계산
             delayed_min = 0
             if eval_due is not None and last_eval_ts is not None:
-                delayed_min = int(max(0, (last_eval_ts - eval_due).total_seconds() // 60))
+                # 둘 다 pandas.Timestamp (tz-aware)
+                delayed_min = int(max(0, (last_eval_ts - eval_due) / pd.Timedelta(minutes=1)))
             elif eval_due is not None and last_eval_ts is None:
-                now = now_kst()
-                delayed_min = int(max(0, (now - eval_due).total_seconds() // 60)) if now > eval_due else 0
+                now = now_kst()  # pandas.Timestamp(tz=KST)
+                # eval_due는 위에서 pandas.Timestamp로 생성됨
+                delayed_min = int(max(0, (now - eval_due) / pd.Timedelta(minutes=1))) if now > eval_due else 0
 
             recent_fail = df_ss[df_ss["status"].isin(["fail","v_fail"])] if "status" in df_ss.columns else pd.DataFrame()
             recent_fail_n = int(len(recent_fail))
