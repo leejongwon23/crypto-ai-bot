@@ -1,4 +1,4 @@
-# === diag_e2e.py (관우 v2.2-final: 메타선택 표시 + 문제진단 강화 + 가독성 향상 + 작동순서 뷰 + 모델별 최신 클래스/수익률) ===
+# === diag_e2e.py (관우 v2.2-final: 메타선택 표시 + 문제진단 강화 + 가독성 향상 + 작동순서 리스트 뷰 + 모델별 최신 클래스/수익률 + 아이콘) ===
 import os, json, traceback, datetime, pytz, re
 import pandas as pd
 from collections import defaultdict, Counter
@@ -220,7 +220,7 @@ def _build_snapshot(symbols_filter=None):
 
             # 모델별 (✅ 최신 클래스/수익률 포함)
             def _latest_for_model(df_model):
-                if df_model.empty: 
+                if df_model.empty:
                     return None, None
                 dfm = df_model.copy()
                 try:
@@ -393,285 +393,141 @@ def _build_snapshot(symbols_filter=None):
     return snapshot
 
 # ===================== HTML 렌더 =====================
+# ⚠️ 출력(HTML)만 사진과 같은 불릿 리스트 스타일 + 아이콘. 데이터 로직은 그대로 유지.
 def _render_html(snapshot):
-    css = """
-<style>
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans KR', Arial, sans-serif; line-height:1.55; background:#f6f7fb; }
-  .wrap { max-width: 1180px; margin: 20px auto; }
-  .badge { display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px; vertical-align:middle; }
-  .ok { background:#e6ffed; color:#037a0d; border:1px solid #b7f5c0; }
-  .warn { background:#fff7e6; color:#8a5b00; border:1px solid #ffe1a1; }
-  .err { background:#ffecec; color:#a10000; border:1px solid #ffb3b3; }
-  .card { border:1px solid #e2e8f0; border-radius:12px; padding:14px; margin:14px 0; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.04); }
-  .subtle { color:#555; }
-  table { border-collapse:collapse; width:100%; }
-  th, td { border:1px solid #e5e7eb; padding:8px 10px; font-size:13px; text-align:center; }
-  th { background:#f8fafc; }
-  details { margin:8px 0; }
-  summary { cursor:pointer; font-weight:600; outline:none; }
-  .legend span { margin-right:8px; }
-  .sticky-top { position: sticky; top: 0; background: #eef3ff; padding: 12px; border: 1px solid #ccd; z-index: 10; border-radius:12px; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .index { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0 0; }
-  .index a { text-decoration:none; border:1px solid #e2e8f0; background:#fff; padding:6px 10px; border-radius:10px; font-size:13px; color:#333; }
-  .kicker { color:#6b7280; font-size:12px; }
-  .pill { border-radius:999px; padding:2px 8px; border:1px solid #e5e7eb; background:#fafafa; font-size:12px; }
-  .row-title { font-weight:700; margin:6px 0; }
-  .muted { color:#6b7280; }
-  .small { font-size:12px; }
-  .controls { display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap; }
-  .btn { cursor:pointer; border:1px solid #d1d5db; background:#ffffff; padding:6px 10px; border-radius:8px; font-size:12px; }
-  .view { display:none; }
-  .view.active { display:block; }
-  .step { font-weight:700; margin:6px 0 8px; }
-  .hr { height:1px; background:#e5e7eb; margin:10px 0; }
-</style>
-"""
-    sm = snapshot.get("summary", {})
-    problems = sm.get("problems", []) or []
-    status_class = "ok" if not problems else "err"
-    status_text = "🟢 전체 정상" if not problems else f"🔴 문제 {len(problems)}건"
+    def _safe(s):
+        try:
+            return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+        except:
+            return str(s)
 
-    idx_links = []
-    for sym_item in snapshot.get("symbols", []):
-        sym = sym_item.get("symbol","")
-        if sym: idx_links.append(f"<a href='#{sym}'>{sym}</a>")
-    idx_html = "<div class='index'>" + "".join(idx_links) + "</div>" if idx_links else ""
+    def icon_train(last_train_iso):
+        return "✅" if last_train_iso else "❌"
 
-    header = f"""
-<div class="sticky-top mono">
-  <div><b>YOPO 통합 점검</b> <span class="kicker">— 시스템 상태를 한 눈에</span></div>
-  <div class="small">생성시각 {snapshot.get('time','')}</div>
-  <div style="margin-top:6px">
-    <span class="badge {status_class}">{status_text}</span>
-    <span class="pill">일반 성공률 {_pct(sm.get('normal_success_rate',0))}</span>
-    <span class="pill">변동성 성공률 {_pct(sm.get('vol_success_rate',0))}</span>
-    <span class="pill">심볼 {sm.get('symbols_count',0)}개</span>
-    <span class="pill">모델 파일 {sm.get('models_count',0)}개</span>
-  </div>
-  <div class="legend" style="margin-top:6px">
-    <span class="badge ok">성공률 양호 ≥60%</span>
-    <span class="badge warn">보통 40~60%</span>
-    <span class="badge err">주의 &lt;40% / 평가 지연</span>
-  </div>
-  <div class="controls">
-    <button class="btn" onclick="switchView('symbol')">심볼 중심 보기</button>
-    <button class="btn" onclick="switchView('flow')">작동순서 보기(전략→모델→심볼)</button>
-    <button class="btn" onclick="toggleAll(true)">모두 펼치기</button>
-    <button class="btn" onclick="toggleAll(false)">모두 접기</button>
-  </div>
-  {idx_html}
-</div>
-<script>
-function toggleAll(open) {{
-  document.querySelectorAll('details').forEach(d => d.open = open);
-}}
-function switchView(which) {{
-  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-  document.getElementById('view-' + which).classList.add('active');
-}}
-window.addEventListener('DOMContentLoaded', () => switchView('flow')); // 기본: 작동순서 보기
-</script>
-"""
+    def icon_ret(r):
+        if r is None: return "⏺"
+        try:
+            r = float(r)
+        except:
+            return "⏺"
+        if r > 1e-9: return "✅"
+        if r < -1e-9: return "❌"
+        return "⏺"
 
-    # ===== 심볼 중심 뷰 =====
-    def render_symbol_centric():
-        parts = []
+    def icon_delay(mins):
+        return "⏰⚠️" if mins and mins>0 else "⏰✅"
+
+    out = []
+    out.append("<div style='font-family:-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Noto Sans KR, Arial; line-height:1.65; padding:8px 14px'>")
+    out.append("<h2>📊 YOPO 운영 현황 (관우 한글 버전 예시)</h2>")
+    out.append(f"<div style='color:#6b7280;font-size:12px'>🕒 생성시각: {_safe(snapshot.get('time',''))}</div>")
+
+    # 1) 학습 현황
+    out.append("<h3>1. 학습 현황</h3>")
+    for strat in STRATEGIES:
+        out.append(f"<div style='margin:6px 0 2px'><b>• 전략: {_safe(strat)}</b></div>")
+        out.append("<ul>")
         for sym_item in snapshot.get("symbols", []):
             sym = sym_item.get("symbol")
-            fs = sym_item.get("fail_summary", []) or []
-            fs_html = f"<div class='muted small'>최근 실패 패턴: {', '.join(fs)}</div>" if fs else ""
-            sym_cards = []
-            for strat, blk in (sym_item.get("strategies") or {}).items():
-                n = blk["prediction"]["normal"]; v = blk["prediction"]["volatility"]
-                by_model = blk["prediction"]["by_model"]; ev = blk["evaluation"]; fl = blk["failure_learning"]
-                meta_choice = blk["prediction"].get("meta_choice", "-")
-                n_cls, v_cls = _grade_rate(n["succ_rate"]), _grade_rate(v["succ_rate"])
-                delay_cls = _delay_badge(ev.get("delay_min", 0))
+            blk = (sym_item.get("strategies") or {}).get(strat)
+            if not blk:
+                continue
+            last_train = blk.get("last_train_time")
+            icon = icon_train(last_train)
+            out.append(f"<li>{_safe(sym)}")
+            out.append("<ul>")
+            out.append(f"<li>{icon} 최근 학습: {_safe(_fmt_ts(_to_kst(last_train)))}</li>")
+            probs = blk.get("problems") or []
+            if probs:
+                out.append("<li>⚠️ 문제:")
+                out.append("<ul>")
+                for p in probs:
+                    out.append(f"<li>{_safe(p)}</li>")
+                out.append("</ul></li>")
+            out.append("</ul></li>")
+        out.append("</ul>")
 
-                head = (f"<div class='row-title'>전략: <b>{strat}</b> &nbsp;"
-                        f"<span class='muted small'>최근 학습 {_fmt_ts(_to_kst(blk['last_train_time']))}</span> &nbsp;"
-                        f"<span class='badge warn'>메타 선택: {meta_choice}</span></div>")
-
-                pred_table = (
-                    "<table><tr><th>구분</th><th>성공</th><th>실패</th><th>대기</th><th>기록오류</th>"
-                    "<th>총건수</th><th>성공률</th><th>평균수익</th></tr>"
-                    f"<tr><td>일반</td><td>{n['succ']}</td><td>{n['fail']}</td><td>{n['pending']}</td><td>{n['failed']}</td>"
-                    f"<td>{n['total']}</td><td>{_pct(n['succ_rate'])}</td><td>{_pct(n['avg_return'])}</td></tr>"
-                    f"<tr><td>변동성</td><td>{v['succ']}</td><td>{v['fail']}</td><td>{v['pending']}</td><td>{v['failed']}</td>"
-                    f"<td>{v['total']}</td><td>{_pct(v['succ_rate'])}</td><td>{_pct(v['avg_return'])}</td></tr></table>"
-                )
-                pred_header = (f"<div><span class='badge {n_cls}'>일반 {_pct(n['succ_rate'])}</span> "
-                               f"<span class='badge {v_cls}'>변동성 {_pct(v['succ_rate'])}</span></div>")
-
-                rows = []
-                for md in by_model:
-                    val_f1_val = md.get("val_f1", None)
-                    val_f1_txt = f"{float(val_f1_val):.3f}" if (val_f1_val is not None) else "-"
-                    last_cls = md.get("latest_class", "-")
-                    last_ret = md.get("latest_return", None)
-                    last_ret_txt = "-" if last_ret is None else _pct(last_ret)
-                    rows.append("<tr>"
-                                f"<td>{md.get('model','')}</td>"
-                                f"<td>{val_f1_txt}</td>"
-                                f"<td>{md.get('succ',0)}</td>"
-                                f"<td>{md.get('fail',0)}</td>"
-                                f"<td>{md.get('total',0)}</td>"
-                                f"<td>{_pct(md.get('succ_rate',0.0))}</td>"
-                                f"<td>{last_cls}</td>"
-                                f"<td>{last_ret_txt}</td>"
-                                "</tr>")
-                model_details = ("<details class='card' style='margin-top:8px'><summary>모델별 상세</summary>"
-                                 "<div style='margin-top:6px'>"
-                                 "<table><tr><th>모델</th><th>최근 val_f1</th><th>성공</th><th>실패</th><th>총건수</th>"
-                                 "<th>성공률</th><th>최근 클래스</th><th>최근 수익률</th></tr>"
-                                 + "".join(rows) + "</table></div></details>")
-
-                due = _fmt_ts(_to_kst(ev["due_time"]))
-                lastp = _fmt_ts(_to_kst(ev["last_prediction_time"]))
-                laste = _fmt_ts(_to_kst(ev["last_evaluated_time"]))
-                delay = ev.get("delay_min", 0)
-                eval_block = (f"<div class='card' style='margin-top:8px'><div class='step'>3) 평가</div>"
-                              f"<div><span class='badge {delay_cls}'>지연 {delay}분</span></div>"
-                              f"<div class='muted' style='margin-top:6px'>"
-                              f"마지막 예측: {lastp} · 평가 예정: {due} · 최근 평가완료: {laste}</div></div>")
-
-                rr = fl.get("reflect_ratio", None); rr_txt = "-" if rr is None else _pct(rr)
-                fail_block = (f"<div class='card' style='margin-top:8px'>"
-                              f"<div class='step'>🔁 실패학습</div>"
-                              f"<div class='muted'>최근 실패 {fl['recent_fail']}건 / 이후반영 {fl['reflected_count_after']}건 / 반영률 {rr_txt}</div>"
-                              f"</div>")
-
-                strat_problems = blk.get("problems") or []
-                prob_block = ""
-                if strat_problems:
-                    lis = "".join([f"<li>{p}</li>" for p in strat_problems])
-                    prob_block = (f"<div class='card' style='margin-top:8px'><div class='step'>⚠️ 문제</div>"
-                                  f"<ul style='margin:6px 0 0 18px'>{lis}</ul></div>")
-
-                sym_cards.append(
-                    "<div class='card'>"
-                    f"{head}"
-                    "<div class='step'>1) 학습</div>"
-                    f"<div class='muted small'>최근 학습시각: {_fmt_ts(_to_kst(blk['last_train_time']))}</div>"
-                    "<div class='hr'></div>"
-                    "<div class='step'>2) 예측</div>"
-                    f"{pred_header}{pred_table}"
-                    f"{model_details}"
-                    f"{eval_block}{fail_block}{prob_block}"
-                    "</div>"
-                )
-            parts.append(f"<div class='card'><h2 id='{sym}'>📈 {sym}</h2>{fs_html}{''.join(sym_cards) if sym_cards else '<div class=\"muted\">전략 데이터가 없습니다.</div>'}</div>")
-        return "<div id='view-symbol' class='view'>" + "".join(parts) + "</div>"
-
-    # ===== 작동순서(전략 → 모델 → 심볼) 뷰 =====
-    def render_flow_view():
-        by_strategy = {st: [] for st in STRATEGIES}
+    # 2) 예측 현황
+    out.append("<h3 style='margin-top:14px'>2. 예측 현황</h3>")
+    for strat in STRATEGIES:
+        out.append(f"<div style='margin:6px 0 2px'><b>• 전략: {_safe(strat)}</b></div>")
+        out.append("<ul>")
         for sym_item in snapshot.get("symbols", []):
-            for strat, blk in (sym_item.get("strategies") or {}).items():
-                by_strategy[strat].append((sym_item.get("symbol"), blk))
+            sym = sym_item.get("symbol")
+            blk = (sym_item.get("strategies") or {}).get(strat)
+            if not blk:
+                continue
+            pred = blk.get("prediction") or {}
+            out.append(f"<li>{_safe(sym)}")
+            out.append("<ul>")
+            out.append(f"<li>🎯 메타러너 선택: <b>{_safe(pred.get('meta_choice','-'))}</b></li>")
+            for md in pred.get("by_model", []):
+                last_cls = md.get("latest_class","-")
+                last_ret = md.get("latest_return", None)
+                last_ret_txt = "-" if last_ret is None else f"{last_ret:+.1%}"
+                ir = icon_ret(last_ret)
+                out.append(f"<li>{ir} {_safe(md.get('model','').upper())}: 클래스 {_safe(last_cls)} (수익률 {_safe(last_ret_txt)})</li>")
+            out.append("</ul></li>")
+        out.append("</ul>")
 
-        sections = []
-        for strat in STRATEGIES:
-            items = by_strategy.get(strat, [])
-            # 상단: 전략 요약(모델별 합산)
-            agg = {mt: {"succ":0,"fail":0,"total":0,"val_f1":None} for mt in MODEL_TYPES}
-            rows = []
-            for sym, blk in items:
-                for md in blk["prediction"]["by_model"]:
-                    mt = md["model"]; agg[mt]["succ"] += md["succ"]; agg[mt]["fail"] += md["fail"]; agg[mt]["total"] += md["total"]
-                    if md.get("val_f1") is not None:
-                        agg[mt]["val_f1"] = md["val_f1"]
-            for mt in MODEL_TYPES:
-                a = agg[mt]
-                rate = (a["succ"]/max(1,a["total"])) if a["total"]>0 else 0.0
-                rows.append("<tr>"
-                            f"<td>{mt}</td>"
-                            f"<td>{('-' if a['val_f1'] is None else f'{a['val_f1']:.3f}')}</td>"
-                            f"<td>{a['succ']}</td><td>{a['fail']}</td><td>{a['total']}</td>"
-                            f"<td>{_pct(rate)}</td>"
-                            "</tr>")
-            model_summary = ("<div class='card'><div class='row-title'>전략 요약 — 모델별</div>"
-                             "<table><tr><th>모델</th><th>최근 val_f1(샘플)</th><th>성공</th><th>실패</th><th>총건수</th><th>성공률</th></tr>"
-                             + "".join(rows) + "</table></div>")
+    # 3) 평가 현황
+    out.append("<h3 style='margin-top:14px'>3. 평가 현황</h3>")
+    for strat in STRATEGIES:
+        out.append(f"<div style='margin:6px 0 2px'><b>• 전략: {_safe(strat)}</b></div>")
+        out.append("<ul>")
+        for sym_item in snapshot.get("symbols", []):
+            sym = sym_item.get("symbol")
+            blk = (sym_item.get("strategies") or {}).get(strat)
+            if not blk:
+                continue
+            ev = blk.get("evaluation") or {}
+            delay_icon = icon_delay(int(ev.get("delay_min",0)))
+            out.append(f"<li>{_safe(sym)}")
+            out.append("<ul>")
+            out.append(f"<li>🕒 마지막 예측: {_safe(_fmt_ts(_to_kst(ev.get('last_prediction_time'))))}</li>")
+            out.append(f"<li>📅 평가 예정: {_safe(_fmt_ts(_to_kst(ev.get('due_time'))))}</li>")
+            out.append(f"<li>🧪 최근 평가완료: {_safe(_fmt_ts(_to_kst(ev.get('last_evaluated_time'))))}</li>")
+            out.append(f"<li>{delay_icon} 지연: {int(ev.get('delay_min',0))}분</li>")
+            md_list = (blk.get("prediction") or {}).get("by_model", [])
+            if md_list:
+                out.append("<li>🧩 모델별:")
+                out.append("<ul>")
+                for md in md_list:
+                    out.append(f"<li>{_safe(md.get('model','').upper())}</li>")
+                out.append("</ul></li>")
+            out.append("</ul></li>")
+        out.append("</ul>")
 
-            sym_cards = []
-            for sym, blk in items:
-                n = blk["prediction"]["normal"]; v = blk["prediction"]["volatility"]
-                by_model = blk["prediction"]["by_model"]; ev = blk["evaluation"]; fl = blk["failure_learning"]
-                meta_choice = blk["prediction"].get("meta_choice", "-")
-                n_cls, v_cls = _grade_rate(n["succ_rate"]), _grade_rate(v["succ_rate"])
-                delay_cls = _delay_badge(ev.get("delay_min", 0))
+    # 4) 실패 학습 현황
+    out.append("<h3 style='margin-top:14px'>4. 실패 학습 현황</h3>")
+    for strat in STRATEGIES:
+        out.append(f"<div style='margin:6px 0 2px'><b>• 전략: {_safe(strat)}</b></div>")
+        out.append("<ul>")
+        for sym_item in snapshot.get("symbols", []):
+            sym = sym_item.get("symbol")
+            blk = (sym_item.get("strategies") or {}).get(strat)
+            if not blk:
+                continue
+            fl = blk.get("failure_learning") or {}
+            rr = fl.get("reflect_ratio", None)
+            rr_txt = "-" if rr is None else _pct(rr)
+            out.append(f"<li>{_safe(sym)}")
+            out.append("<ul>")
+            out.append(f"<li>📉 최근 실패 {int(fl.get('recent_fail',0))}건</li>")
+            out.append(f"<li>📈 이후 반영 {int(fl.get('reflected_count_after',0))}건</li>")
+            out.append(f"<li>📘 반영률 {rr_txt}</li>")
+            fs = sym_item.get("fail_summary") or []
+            if fs:
+                out.append("<li>🧾 최근 실패 패턴:")
+                out.append("<ul>")
+                for r in fs:
+                    out.append(f"<li>{_safe(r)}</li>")
+                out.append("</ul></li>")
+            out.append("</ul></li>")
+        out.append("</ul>")
 
-                head = (f"<div class='row-title'>{sym} · <span class='muted small'>최근 학습 {_fmt_ts(_to_kst(blk['last_train_time']))}</span> "
-                        f" · <span class='badge warn'>메타 선택: {meta_choice}</span></div>")
-
-                pred_table = (
-                    "<table><tr><th>구분</th><th>성공</th><th>실패</th><th>대기</th><th>기록오류</th><th>총건수</th><th>성공률</th><th>평균수익</th></tr>"
-                    f"<tr><td>일반</td><td>{n['succ']}</td><td>{n['fail']}</td><td>{n['pending']}</td><td>{n['failed']}</td>"
-                    f"<td>{n['total']}</td><td>{_pct(n['succ_rate'])}</td><td>{_pct(n['avg_return'])}</td></tr>"
-                    f"<tr><td>변동성</td><td>{v['succ']}</td><td>{v['fail']}</td><td>{v['pending']}</td><td>{v['failed']}</td>"
-                    f"<td>{v['total']}</td><td>{_pct(v['succ_rate'])}</td><td>{_pct(v['avg_return'])}</td></tr></table>"
-                )
-                pred_header = (f"<div><span class='badge {n_cls}'>일반 {_pct(n['succ_rate'])}</span> "
-                               f"<span class='badge {v_cls}'>변동성 {_pct(v['succ_rate'])}</span></div>")
-
-                rows = []
-                for md in by_model:
-                    val_f1_val = md.get("val_f1", None)
-                    val_f1_txt = f"{float(val_f1_val):.3f}" if (val_f1_val is not None) else "-"
-                    last_cls = md.get("latest_class", "-")
-                    last_ret = md.get("latest_return", None)
-                    last_ret_txt = "-" if last_ret is None else _pct(last_ret)
-                    rows.append("<tr>"
-                                f"<td>{md.get('model','')}</td>"
-                                f"<td>{val_f1_txt}</td>"
-                                f"<td>{md.get('succ',0)}</td>"
-                                f"<td>{md.get('fail',0)}</td>"
-                                f"<td>{md.get('total',0)}</td>"
-                                f"<td>{_pct(md.get('succ_rate',0.0))}</td>"
-                                f"<td>{last_cls}</td>"
-                                f"<td>{last_ret_txt}</td>"
-                                "</tr>")
-                model_table = ("<table><tr><th>모델</th><th>최근 val_f1</th><th>성공</th><th>실패</th><th>총건수</th>"
-                               "<th>성공률</th><th>최근 클래스</th><th>최근 수익률</th></tr>"
-                               + "".join(rows) + "</table>")
-
-                due = _fmt_ts(_to_kst(ev["due_time"]))
-                lastp = _fmt_ts(_to_kst(ev["last_prediction_time"]))
-                laste = _fmt_ts(_to_kst(ev["last_evaluated_time"]))
-                delay = ev.get("delay_min", 0)
-                eval_block = (f"<div class='card' style='margin-top:8px'><div class='step'>3) 평가</div>"
-                              f"<div><span class='badge {delay_cls}'>지연 {delay}분</span></div>"
-                              f"<div class='muted' style='margin-top:6px'>마지막 예측: {lastp} · 평가 예정: {due} · 최근 평가완료: {laste}</div>"
-                              f"</div>")
-
-                rr = fl.get("reflect_ratio", None); rr_txt = "-" if rr is None else _pct(rr)
-                fail_block = (f"<div class='card' style='margin-top:8px'><div class='step'>🔁 실패학습</div>"
-                              f"<div class='muted'>최근 실패 {fl['recent_fail']}건 / 이후반영 {fl['reflected_count_after']}건 / 반영률 {rr_txt}</div></div>")
-
-                strat_problems = blk.get("problems") or []
-                prob_block = ""
-                if strat_problems:
-                    lis = "".join([f"<li>{p}</li>" for p in strat_problems])
-                    prob_block = (f"<div class='card' style='margin-top:8px'><div class='step'>⚠️ 문제</div>"
-                                  f"<ul style='margin:6px 0 0 18px'>{lis}</ul></div>")
-
-                sym_cards.append("<div class='card'>"
-                                 "<div class='step'>1) 학습</div>"
-                                 f"{head}"
-                                 "<div class='hr'></div>"
-                                 "<div class='step'>2) 예측</div>"
-                                 f"{pred_header}{pred_table}"
-                                 "<details class='card' style='margin-top:8px'><summary>모델별 상세</summary>"
-                                 f"{model_table}</details>"
-                                 f"{eval_block}{fail_block}{prob_block}"
-                                 "</div>")
-            sections.append(f"<div class='card'><h2>🧭 전략: {strat}</h2>{model_summary}{''.join(sym_cards) if sym_cards else '<div class=\"muted\">데이터 없음</div>'}</div>")
-        return "<div id='view-flow' class='view'>" + "".join(sections) + "</div>"
-
-    html = f"<div class='wrap'>{css}{header}" + render_flow_view() + render_symbol_centric() + "</div>"
-    return html
+    out.append("</div>")
+    return "\n".join(out)
 
 # ===================== 외부진입점 =====================
 def run(group=-1, view="json", cumulative=True, symbols=None, **kwargs):
