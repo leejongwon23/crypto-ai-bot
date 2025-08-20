@@ -1,3 +1,4 @@
+# recommend.py (FINAL — keep original flow, remove duplicate logging, handle dict return)
 import os
 import csv
 import json
@@ -9,7 +10,7 @@ import pandas as pd
 
 from predict import predict
 from data.utils import SYMBOLS, get_kline_by_strategy
-from logger import log_prediction, ensure_prediction_log_exists  # ✅ 로그 파일 보장 추가
+from logger import ensure_prediction_log_exists  # ✅ 중복 로깅 제거: log_prediction은 predict()에서만
 from telegram_bot import send_message
 
 # 현재 KST 시각
@@ -26,7 +27,7 @@ os.makedirs("/persistent/logs", exist_ok=True)
 
 # ──────────────────────────────────────────────────────────────
 # 유틸: 전략별 누적 성공률/표본수 계산
-#   - status가 있으면 success/fail만 집계
+#   - status가 있으면 success/fail(+v_success/v_fail)만 집계
 #   - 없으면 success(True/False)로 집계
 # ──────────────────────────────────────────────────────────────
 def get_strategy_success_rate(strategy):
@@ -38,11 +39,11 @@ def get_strategy_success_rate(strategy):
 
         if "status" in df.columns:
             st = df["status"].astype(str).str.lower()
-            df = df[st.isin(["success", "fail"])]
-            n = len(df)
+            df2 = df[st.isin(["success", "fail", "v_success", "v_fail"])]
+            n = len(df2)
             if n == 0:
                 return 0.0, 0
-            succ = (st == "success").sum()
+            succ = df2["status"].astype(str).str.lower().isin(["success", "v_success"]).sum()
             return round(succ / n, 6), n
         else:
             if "success" not in df.columns:
@@ -111,7 +112,7 @@ def format_message(data):
     return message
 
 # ──────────────────────────────────────────────────────────────
-# 감사 로그 기록
+# 감사 로그 기록(원래 그대로 유지)
 # ──────────────────────────────────────────────────────────────
 def log_audit(symbol, strategy, result, status):
     try:
@@ -130,7 +131,7 @@ def log_audit(symbol, strategy, result, status):
         print(f"[log_audit 오류] {e}")
 
 # ──────────────────────────────────────────────────────────────
-# 실패 카운트 로드/저장
+# 실패 카운트 로드/저장 (원본 유지)
 # ──────────────────────────────────────────────────────────────
 def load_failure_count():
     if not os.path.exists(FAILURE_LOG):
@@ -147,7 +148,7 @@ def save_failure_count(fmap):
             w.writerow({"symbol": s, "strategy": strat, "failures": v})
 
 # ──────────────────────────────────────────────────────────────
-# 변동성 높은 심볼 추출
+# 변동성 높은 심볼 추출 (원본 유지)
 # ──────────────────────────────────────────────────────────────
 def get_symbols_by_volatility(strategy):
     th = STRATEGY_VOL.get(strategy, 0.003)
@@ -166,7 +167,7 @@ def get_symbols_by_volatility(strategy):
     return sorted(result, key=lambda x: -x["volatility"])
 
 # ──────────────────────────────────────────────────────────────
-# 내부 유틸: 최신 종가(진입가) 조회
+# 내부 유틸: 최신 종가(진입가) 조회 (원본 유지)
 # ──────────────────────────────────────────────────────────────
 def _get_latest_price(symbol, strategy):
     try:
@@ -178,7 +179,7 @@ def _get_latest_price(symbol, strategy):
         return 0.0
 
 # ──────────────────────────────────────────────────────────────
-# 예측 실행 루프
+# 예측 실행 루프 — 핵심 수정: predict() dict 기준 + 중복 log 제거
 # ──────────────────────────────────────────────────────────────
 def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=True):
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼")
@@ -209,66 +210,35 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                 log_audit(symbol, strategy, None, "모델 없음")
                 continue
 
-            # 실제 예측 실행
-            pred_results = predict(symbol, strategy, source=source)
-            if not isinstance(pred_results, list):
-                pred_results = [pred_results]
-
-            if not pred_results:
-                log_audit(symbol, strategy, None, "predict() 결과 없음")
+            # ✅ predict() 실행 (dict 기준 수용)
+            res = predict(symbol, strategy, source=source)
+            if isinstance(res, list):
+                res = res[0] if res else None
+            if not isinstance(res, dict):
+                log_audit(symbol, strategy, None, "predict() 결과 없음/형식오류")
                 continue
 
             # 전략 누적 성공률(메시지 표시용)
             strat_rate, strat_n = get_strategy_success_rate(strategy)
 
-            for result in pred_results:
-                if not isinstance(result, dict):
-                    log_audit(symbol, strategy, str(result), "예측 반환 형식 오류")
-                    continue
+            # 텔레그램 메시지용으로 필드 보강
+            expected_ret = float(res.get("expected_return", 0.0))
+            entry_price = _get_latest_price(symbol, strategy)
+            direction = "롱" if expected_ret >= 0 else "숏"
 
-                expected_ret = float(result.get("expected_return", 0.0))
-                entry_price = _get_latest_price(symbol, strategy)
-                pred_class_val = int(result.get("class", -1))
-                model_name = result.get("model", "unknown")
-                ts = result.get("timestamp", now_kst().isoformat())
-                src = result.get("source", source)
+            enriched = dict(res)
+            enriched.update({
+                "symbol": symbol,
+                "strategy": strategy,
+                "price": entry_price,
+                "rate": expected_ret,
+                "direction": direction,
+                "success_rate": strat_rate,   # 0~1
+                "volatility": (vol_val > 0),
+            })
 
-                # 방향(예상 수익률 기준): +면 롱, -면 숏
-                direction = "롱" if expected_ret >= 0 else "숏"
-
-                # 예측 로그(평가는 나중에 별도 모듈에서)
-                log_prediction(
-                    symbol=result.get("symbol", symbol),
-                    strategy=result.get("strategy", strategy),
-                    direction=f"class-{pred_class_val}",
-                    entry_price=entry_price,
-                    target_price=entry_price * (1 + expected_ret) if entry_price > 0 else 0,
-                    timestamp=ts,
-                    model=model_name,
-                    success=True,  # 최종 평가는 evaluate가 결정
-                    reason=result.get("reason", "예측 기록"),
-                    rate=expected_ret,
-                    return_value=expected_ret,
-                    volatility=vol_val > 0,
-                    source=src,
-                    predicted_class=pred_class_val,
-                    label=pred_class_val,
-                )
-
-                # 텔레그램 메시지용으로 필드 보강
-                enriched = dict(result)
-                enriched.update({
-                    "symbol": symbol,
-                    "strategy": strategy,
-                    "price": entry_price,
-                    "rate": expected_ret,
-                    "direction": direction,
-                    "success_rate": strat_rate,   # 0~1
-                    "volatility": (vol_val > 0),
-                })
-
-                results.append(enriched)
-                fmap[f"{symbol}-{strategy}"] = 0  # 실패 카운터 리셋
+            results.append(enriched)
+            fmap[f"{symbol}-{strategy}"] = 0  # 실패 카운터 리셋
 
         except Exception as e:
             print(f"[ERROR] {symbol}-{strategy} 예측 실패: {e}")
@@ -278,7 +248,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
     return results
 
 # ──────────────────────────────────────────────────────────────
-# 메인 엔트리 — 배치 예측
+# 메인 엔트리 — 배치 예측 (원본 흐름 유지)
 # ──────────────────────────────────────────────────────────────
 def main(strategy, symbols=None, force=False, allow_prediction=True):
     print(f"\n📋 [예측 시작] 전략: {strategy} | 시각: {now_kst().strftime('%Y-%m-%d %H:%M:%S')}")
