@@ -1,4 +1,4 @@
-# predict.py (FIXED: canonical rewrite + numeric sanitation + safe top_k)
+# predict.py (FINAL — canonical rewrite + numeric sanitation + safe top_k + header-locked rewrite)
 
 import os, sys, json, datetime, pytz
 import numpy as np
@@ -43,7 +43,7 @@ except Exception:
         return "none"
 
 # logger: 헤더 고정값을 함께 가져와서 재작성 시 사용
-from logger import log_prediction, update_model_success, PREDICTION_HEADERS
+from logger import log_prediction, update_model_success, PREDICTION_HEADERS, ensure_prediction_log_exists
 from failure_db import insert_failure_record, load_existing_failure_hashes, ensure_failure_db
 from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
 from model.base_model import get_model
@@ -285,7 +285,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         "calib_ver": calib_ver
     }
 
-    # top_k는 리스트로 전달 (문자열 금지)
+    # top_k는 리스트로 전달 (logger가 문자열로 직렬화)
     log_prediction(
         symbol=symbol,
         strategy=strategy,
@@ -329,6 +329,7 @@ def evaluate_predictions(get_price_fn):
     from failure_db import check_failure_exists
 
     ensure_failure_db()
+    ensure_prediction_log_exists()  # 헤더/파일 보장
 
     PREDICTION_LOG = PREDICTION_LOG_PATH
     now_local = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
@@ -434,7 +435,6 @@ def evaluate_predictions(get_price_fn):
                     status = "success" if reached_target else "fail"
 
                 vol = str(r.get("volatility", "")).strip().lower() in ["1", "true"]
-
                 if vol:
                     status = "v_success" if status == "success" else "v_fail"
 
@@ -497,12 +497,8 @@ def evaluate_predictions(get_price_fn):
 
         sanitized = []
         for r in rows:
-            row = {}
-            # 먼저 전부 빈값으로 초기화
-            for k in fieldnames:
-                row[k] = ""
-
-            # 원본 반영
+            row = {k: "" for k in fieldnames}
+            # 원본 반영(교집합만)
             for k, v in r.items():
                 if k in row:
                     row[k] = v
@@ -518,15 +514,13 @@ def evaluate_predictions(get_price_fn):
             row["label"] = to_int(row.get("label", -1), -1)
             row["group_id"] = to_int(row.get("group_id", 0), 0)
 
-            # 불리언은 문자열로 정규화(True/False)
+            # 불리언은 문자열 "True"/"False" 로 정규화
             vol = str(r.get("volatility", row.get("volatility", ""))).strip().lower()
             row["volatility"] = "True" if vol in ["1", "true"] else ("False" if vol in ["0", "false"] else str(r.get("volatility", "")))
 
             sanitized.append(row)
 
-        with open(path, "w", newline="", encoding="utf-8-sig") as f:
-            writer = pd.DataFrame(sanitized, columns=fieldnames)
-            writer.to_csv(f, index=False)
+        pd.DataFrame(sanitized, columns=fieldnames).to_csv(path, index=False, encoding="utf-8-sig")
 
     # 원본 + 평가 결과 병합본을 고정 헤더로 재작성
     updated += evaluated
@@ -536,6 +530,7 @@ def evaluate_predictions(get_price_fn):
     def safe_write_csv(path, rows):
         if not rows:
             return
+        import csv
         fieldnames = sorted({str(k) for row in rows for k in row.keys() if k is not None})
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
