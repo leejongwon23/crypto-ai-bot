@@ -1,4 +1,4 @@
-# === diag_e2e.py (관우 v2.2-final-restored: 모든 기능 복원 + 아이콘 + 리스트/카드 듀얼뷰) ===
+# === diag_e2e.py (관우 v2.2-final-restored + KST timestamp hard-normalize) ===
 import os, json, traceback, datetime, pytz, re
 import pandas as pd
 from collections import defaultdict, Counter
@@ -34,6 +34,25 @@ def _to_kst(ts):
         return t
     except Exception:
         return None
+
+def _normalize_ts_series_kst(s):
+    """
+    시리즈 전체를 KST tz-aware로 강제 통일.
+    혼재(naive/aware)로 벡터화 실패 시 원소별 변환으로 폴백.
+    """
+    if s is None:
+        return pd.Series([], dtype="datetime64[ns, Asia/Seoul]")
+    s2 = pd.to_datetime(s, errors="coerce")
+    try:
+        # 전부 naive or 전부 aware인 일반 케이스
+        if getattr(s2.dt, "tz", None) is None:
+            s2 = s2.dt.tz_localize("Asia/Seoul")
+        else:
+            s2 = s2.dt.tz_convert("Asia/Seoul")
+        return s2
+    except Exception:
+        # 혼재/이상치 폴백: 원소별
+        return s2.apply(_to_kst)
 
 def _pct(x):
     try:
@@ -121,27 +140,14 @@ def _build_snapshot(symbols_filter=None):
     df_train = _safe_read_csv(TRAIN_LOG)
     _ = _safe_read_csv(AUDIT_LOG)
 
+    # 🔐 반드시 시리즈 전체를 KST tz-aware로 통일
     if "timestamp" in df_pred.columns:
-        df_pred["timestamp"] = pd.to_datetime(df_pred["timestamp"], errors="coerce")
-        try:
-            if getattr(df_pred["timestamp"].dt, "tz", None) is None:
-                df_pred["timestamp"] = df_pred["timestamp"].dt.tz_localize("Asia/Seoul")
-            else:
-                df_pred["timestamp"] = df_pred["timestamp"].dt.tz_convert("Asia/Seoul")
-        except Exception:
-            pass
+        df_pred["timestamp"] = _normalize_ts_series_kst(df_pred["timestamp"])
     else:
         df_pred["timestamp"] = pd.NaT
 
     if "timestamp" in df_train.columns:
-        df_train["timestamp"] = pd.to_datetime(df_train["timestamp"], errors="coerce")
-        try:
-            if getattr(df_train["timestamp"].dt, "tz", None) is None:
-                df_train["timestamp"] = df_train["timestamp"].dt.tz_localize("Asia/Seoul")
-            else:
-                df_train["timestamp"] = df_train["timestamp"].dt.tz_convert("Asia/Seoul")
-        except Exception:
-            pass
+        df_train["timestamp"] = _normalize_ts_series_kst(df_train["timestamp"])
     else:
         df_train["timestamp"] = pd.NaT
 
@@ -184,7 +190,9 @@ def _build_snapshot(symbols_filter=None):
                 return int((df["status"] == label).sum())
 
             if not df_ss.empty:
+                # 안전 수치화
                 if "status" in df_ss.columns:
+                    df_ss = df_ss.copy()
                     df_ss["is_vol"] = df_ss["status"].astype(str).str.startswith("v_")
                 else:
                     df_ss["is_vol"] = False
@@ -268,21 +276,23 @@ def _build_snapshot(symbols_filter=None):
                 denom = max(1, md["total"]); md["succ_rate"] = md["succ"] / denom
                 models_detail.append(md)
 
-            # 평가 일정
+            # ✅ 시리즈 전체가 이미 KST로 정규화되어 있으므로 max() 안전
             last_pred_ts_raw = df_ss["timestamp"].max() if "timestamp" in df_ss.columns and not df_ss.empty else pd.NaT
-            last_pred_ts = _to_kst(last_pred_ts_raw)  # ✅ TZ normalize
+            last_pred_ts = _to_kst(last_pred_ts_raw)
             eval_due = _eval_deadline(last_pred_ts, strat) if last_pred_ts is not None else None
 
             last_eval_ts = None
             if not df_ss.empty:
                 df_eval = df_ss.copy()
                 try:
-                    cond = (df_eval.get("source","") == "평가") | df_eval.get("direction","").astype(str).str.startswith("평가:")
+                    src_col = df_eval["source"].astype(str) if "source" in df_eval.columns else pd.Series("", index=df_eval.index)
+                    dir_col = df_eval["direction"].astype(str) if "direction" in df_eval.columns else pd.Series("", index=df_eval.index)
+                    cond = (src_col == "평가") | dir_col.str.startswith("평가:")
                     df_eval = df_eval[cond]
                 except Exception:
                     df_eval = pd.DataFrame()
                 if not df_eval.empty:
-                    last_eval_ts = _to_kst(df_eval["timestamp"].max())  # ✅ TZ normalize
+                    last_eval_ts = _to_kst(df_eval["timestamp"].max())
 
             delayed_min = 0
             if eval_due is not None and last_eval_ts is not None:
@@ -316,7 +326,7 @@ def _build_snapshot(symbols_filter=None):
             recent_fail = df_ss[df_ss["status"].isin(["fail","v_fail"])] if "status" in df_ss.columns else pd.DataFrame()
             recent_fail_n = int(len(recent_fail)); reflected = 0
             if recent_fail_n > 0 and "timestamp" in df_ss.columns:
-                last_fail_time = _to_kst(recent_fail["timestamp"].max())  # ✅ TZ normalize
+                last_fail_time = _to_kst(recent_fail["timestamp"].max())
                 after = df_ss[df_ss["timestamp"] > last_fail_time] if last_fail_time is not None else pd.DataFrame()
                 reflected = int((after["status"].isin(["success","v_success"])).sum()) if "status" in after.columns else 0
             reflect_ratio = (reflected / max(1, recent_fail_n)) if recent_fail_n>0 else None
@@ -586,7 +596,6 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow')); // 기본
                     f"{eval_block}{fail_block}{prob_block}"
                     "</div>"
                 )
-            # ✅ f-string 내부 백슬래시 회피
             body_html = ''.join(sym_cards) if sym_cards else '<div class="muted">전략 데이터가 없습니다.</div>'
             parts.append(f"<div class='card'><h2 id='{_safe(sym)}'>📈 {_safe(sym)}</h2>{fs_html}{body_html}</div>")
         return "<div id='view-symbol' class='view'>" + "".join(parts) + "</div>"
@@ -605,7 +614,7 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow')); // 기본
             for sym_item in snapshot.get("symbols", []):
                 sym = sym_item.get("symbol")
                 blk = (sym_item.get("strategies") or {}).get(strat)
-                if not blk: 
+                if not blk:
                     continue
                 last_train = blk.get("last_train_time")
                 out.append(f"<li>{_safe(sym)}")
