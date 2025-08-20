@@ -33,7 +33,6 @@ def start_cleanup_scheduler():
         misfire_grace_time=600
     )
 
-    # 부팅 직후 1회 즉시 정리 (디스크 꽉 찬 상태 복구용)
     try:
         cleanup_logs_and_models()
     except Exception as e:
