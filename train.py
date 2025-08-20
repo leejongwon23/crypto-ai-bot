@@ -1,4 +1,4 @@
-# === train.py (FINAL) ===
+# === train.py (FINAL, numeric hygiene & safe window clamp) ===
 import os, json, time, traceback, tempfile, io, errno
 from datetime import datetime
 import pytz
@@ -11,7 +11,7 @@ from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import MinMaxScaler
 from collections import Counter
 
-# ⬇️ 불필요한 SYMBOLS/SYMBOL_GROUPS 의존 제거
+# ⬇️ 불필요한 SYMBOLS/SYMBOLS_GROUPS 의존 제거
 from data.utils import get_kline_by_strategy, compute_features, create_dataset
 
 from model.base_model import get_model
@@ -42,8 +42,6 @@ except Exception:
         return None
 
 # === (6번) 자동 후처리 훅: 학습 직후 캘리브레이션/실패학습 ===
-# 기존 파이프라인은 그대로 두고, logger.log_training_result를 래핑해
-# "훈련 완료 시 자동 캘리브레이션"을 시도(모듈 없으면 조용히 스킵).
 def _safe_print(msg):
     try:
         print(msg, flush=True)
@@ -153,7 +151,8 @@ def _log_skip(symbol, strategy, reason):
                                loss=0.0, note=reason, status="skipped")
     insert_failure_record({
         "symbol": symbol, "strategy": strategy, "model": "all",
-        "predicted_class": -1, "success": False, "rate": "", "reason": reason
+        "predicted_class": -1, "success": False, "rate": 0.0,  # ← 빈 문자열 금지
+        "reason": reason
     }, feature_vector=[])
 
 def _log_fail(symbol, strategy, reason):
@@ -161,7 +160,8 @@ def _log_fail(symbol, strategy, reason):
                                loss=0.0, note=reason, status="failed")
     insert_failure_record({
         "symbol": symbol, "strategy": strategy, "model": "all",
-        "predicted_class": -1, "success": False, "rate": "", "reason": reason
+        "predicted_class": -1, "success": False, "rate": 0.0,  # ← 빈 문자열 금지
+        "reason": reason
     }, feature_vector=[])
 
 def _strategy_horizon_hours(strategy: str) -> int:
@@ -285,28 +285,17 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         hi_last = class_ranges[-1][1]
 
         for r in future_gains:
-            # NaN/inf 안전 가드
             if not np.isfinite(r):
                 r = lo0
-
-            # 하한/상한 밖 → 양끝 클래스로 귀속
             if r < lo0:
-                labels.append(0)
-                clipped_low += 1
-                continue
+                labels.append(0); clipped_low += 1; continue
             if r > hi_last:
-                labels.append(len(class_ranges) - 1)
-                clipped_high += 1
-                continue
-
-            # 정상 범위 내 매칭
+                labels.append(len(class_ranges) - 1); clipped_high += 1; continue
             idx = None
             for i, (lo, hi) in enumerate(class_ranges):
                 if lo <= r <= hi:
-                    idx = i
-                    break
+                    idx = i; break
             if idx is None:
-                # 경계 반올림 등으로 누락될 경우 최근접 끝단으로
                 idx = len(class_ranges) - 1 if r > hi_last else 0
                 unmatched += 1
             labels.append(idx)
@@ -335,6 +324,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         except Exception:
             best_window = 60
         window = int(max(5, best_window))
+        # 🔒 데이터 길이를 넘지 않도록 클램프
+        window = int(min(window, max(6, len(feat_scaled) - 1)))
 
         try:
             logger.log_label_distribution(symbol, strategy, group_id=group_id,
@@ -409,7 +400,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
             acc = float(accuracy_score(all_labels, all_preds))
             f1 = float(f1_score(all_labels, all_preds, average="macro"))
 
-            model_name = f"{symbol}_{strategy}_{model_type}_group{group_id}_cls{num_classes}.pt"
+            model_name = f"{symbol}_{strategy}_{model_type}_group{int(group_id) if group_id is not None else 0}_cls{int(num_classes)}.pt"
             model_path = os.path.join(MODEL_DIR, model_name)
             meta = {
                 "symbol": symbol, "strategy": strategy, "model": model_type,
