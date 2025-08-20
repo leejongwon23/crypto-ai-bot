@@ -1,4 +1,4 @@
-# predict.py (FINAL with regime+calibration logging, no schema break)
+# predict.py (FIXED: canonical rewrite + numeric sanitation + safe top_k)
 
 import os, sys, json, datetime, pytz
 import numpy as np
@@ -42,8 +42,8 @@ except Exception:
     def get_calibration_version():
         return "none"
 
-# logger 의존 최소화: get_available_models 로컬 구현, 나머지는 그대로 사용
-from logger import log_prediction, update_model_success
+# logger: 헤더 고정값을 함께 가져와서 재작성 시 사용
+from logger import log_prediction, update_model_success, PREDICTION_HEADERS
 from failure_db import insert_failure_record, load_existing_failure_hashes, ensure_failure_db
 from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
 from model.base_model import get_model
@@ -215,24 +215,25 @@ def predict(symbol, strategy, source="일반", model_type=None):
     final_pred_class = None
     use_evo = False
     evo_model_path = os.path.join(MODEL_DIR, "evo_meta_learner.pt")
-    if os.path.exists(evo_model_path) and callable(predict_evo_meta):
+    if os.path.exists(evo_model_path):
         try:
-            evo_pred = predict_evo_meta(feature_tensor.unsqueeze(0), input_size=FEATURE_INPUT_SIZE)
-            if evo_pred is not None:
-                final_pred_class = int(evo_pred)
-                use_evo = True
+            from evo_meta_learner import predict_evo_meta  # 재확인
+            if callable(predict_evo_meta):
+                evo_pred = predict_evo_meta(feature_tensor.unsqueeze(0), input_size=FEATURE_INPUT_SIZE)
+                if evo_pred is not None:
+                    final_pred_class = int(evo_pred)
+                    use_evo = True
         except Exception as e:
             print(f"[⚠️ 진화형 메타러너 예외] {e}")
 
-    # 4) 기본 메타 또는 '최고 성공확률 단일 모델' 선택 (캘리브레이션 확률 기반)
+    # 4) '최고 성공확률 단일 모델' 선택 (캘리브레이션 확률 기반)
     meta_choice = "best_single"
     chosen_info = None
     if final_pred_class is None:
         best_idx, best_score = -1, -1.0
         for i, m in enumerate(model_outputs_list):
             pred = int(m["predicted_class"])
-            calib_probs = m["calib_probs"]  # ← 보정 후
-            # 다양성 보정
+            calib_probs = m["calib_probs"]
             adj = adjust_probs_with_diversity(calib_probs, recent_freq, class_counts=None, alpha=0.10, beta=0.10)
             val_f1 = float(m.get("val_f1", 0.6))
             score = float(adj[pred]) * (0.5 + 0.5 * max(0.0, min(1.0, val_f1)))
@@ -245,7 +246,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         chosen_info = model_outputs_list[best_idx]
     else:
         meta_choice = "evo_meta_learner"
-        # evo 사용시 가장 강한 모델 정보(로깅 보조)
         chosen_info = max(model_outputs_list, key=lambda m: m.get("success_score", 0.0))
 
     print(f"[META] {'진화형' if use_evo else '최고확률모델'} 선택: 클래스 {final_pred_class}")
@@ -270,12 +270,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[meta 실패 기록 오류] {e}")
 
-    # 상위 K 클래스 기록
+    # 상위 K 클래스 기록 (보정 기준)
     def _topk(probs, k=3):
         idx = np.argsort(probs)[::-1][:k]
         return [int(i) for i in idx]
 
-    raw_topk = _topk(chosen_info["raw_probs"]) if chosen_info else []
     calib_topk = _topk(chosen_info["calib_probs"]) if chosen_info else []
 
     note_payload = {
@@ -286,6 +285,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         "calib_ver": calib_ver
     }
 
+    # top_k는 리스트로 전달 (문자열 금지)
     log_prediction(
         symbol=symbol,
         strategy=strategy,
@@ -297,7 +297,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         predicted_class=final_pred_class,
         label=final_pred_class,
         note=json.dumps(note_payload, ensure_ascii=False),
-        top_k=",".join(map(str, calib_topk)),  # 상위 k(보정 기준)
+        top_k=calib_topk,
         success=meta_success_flag,
         reason=f"수익률도달:{meta_success_flag}",
         rate=expected_ret,
@@ -362,16 +362,21 @@ def evaluate_predictions(get_price_fn):
                 symbol = r.get("symbol", "UNKNOWN")
                 strategy = r.get("strategy", "알수없음")
                 model = r.get("model", "unknown")
-                group_id = int(r.get("group_id", 0)) if str(r.get("group_id")).isdigit() else 0
+                group_id = int(float(r.get("group_id", 0))) if str(r.get("group_id", "")).strip().replace(".","",1).isdigit() else 0
 
                 pred_class = int(float(r.get("predicted_class", -1))) if pd.notnull(r.get("predicted_class")) else -1
                 label = int(float(r.get("label", -1))) if pd.notnull(r.get("label")) else -1
                 r["label"] = label
 
-                entry_price = float(r.get("entry_price", 0))
+                # 숫자화 안전 처리
+                try:
+                    entry_price = float(r.get("entry_price", 0) or 0)
+                except Exception:
+                    entry_price = 0.0
+
                 if entry_price <= 0 or label == -1:
                     reason = "entry_price 오류 또는 label=-1"
-                    r.update({"status": "fail", "reason": reason, "return": 0.0})
+                    r.update({"status": "fail", "reason": reason, "return": 0.0, "return_value": 0.0})
                     log_prediction(
                         symbol=symbol, strategy=strategy, direction="예측실패",
                         entry_price=entry_price, target_price=entry_price,
@@ -387,7 +392,7 @@ def evaluate_predictions(get_price_fn):
 
                 timestamp = pd.to_datetime(r.get("timestamp"), errors="coerce")
                 if timestamp is None or pd.isna(timestamp):
-                    r.update({"status": "fail", "reason": "timestamp 파싱 실패", "return": 0.0})
+                    r.update({"status": "fail", "reason": "timestamp 파싱 실패", "return": 0.0, "return_value": 0.0})
                     updated.append(r); continue
                 if timestamp.tzinfo is None:
                     timestamp = timestamp.tz_localize("Asia/Seoul")
@@ -399,14 +404,14 @@ def evaluate_predictions(get_price_fn):
 
                 df = get_price_fn(symbol, strategy)
                 if df is None or "timestamp" not in df.columns:
-                    r.update({"status": "fail", "reason": "가격 데이터 없음", "return": 0.0})
+                    r.update({"status": "fail", "reason": "가격 데이터 없음", "return": 0.0, "return_value": 0.0})
                     updated.append(r); continue
 
                 df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
                 df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
                 future_df = df[df["timestamp"] >= timestamp]
                 if future_df.empty:
-                    r.update({"status": "fail", "reason": "미래 데이터 없음", "return": 0.0})
+                    r.update({"status": "fail", "reason": "미래 데이터 없음", "return": 0.0, "return_value": 0.0})
                     updated.append(r); continue
 
                 actual_max = future_df["high"].max()
@@ -423,19 +428,21 @@ def evaluate_predictions(get_price_fn):
                     if reached_target:
                         status = "success"
                     else:
-                        r.update({"status": "pending", "reason": "⏳ 평가 대기 중", "return": round(gain, 5)})
+                        r.update({"status": "pending", "reason": "⏳ 평가 대기 중", "return": round(gain, 5), "return_value": round(gain, 5)})
                         updated.append(r); continue
                 else:
                     status = "success" if reached_target else "fail"
 
-                vol = str(r.get("volatility", "")).lower() in ["1", "true"]
+                vol = str(r.get("volatility", "")).strip().lower() in ["1", "true"]
+
                 if vol:
                     status = "v_success" if status == "success" else "v_fail"
 
                 r.update({
                     "status": status,
                     "reason": f"[pred_class={pred_class}] gain={gain:.3f} (cls_min={cls_min}, cls_max={cls_max})",
-                    "return": round(gain, 5),
+                    "return": round(gain, 5),           # UI 호환용
+                    "return_value": round(gain, 5),     # 스키마 정식 필드
                     "group_id": group_id
                 })
 
@@ -458,9 +465,74 @@ def evaluate_predictions(get_price_fn):
 
                 evaluated.append({str(k): (v if v is not None else "") for k, v in r.items()})
             except Exception as e:
-                r.update({"status": "fail", "reason": f"예외: {e}", "return": 0.0})
+                r.update({"status": "fail", "reason": f"예외: {e}", "return": 0.0, "return_value": 0.0})
                 updated.append(r)
 
+    # ---------- 안전 재작성 (헤더 고정 + 숫자 정규화) ----------
+    def rewrite_prediction_log_canonical(path, rows):
+        """
+        - 헤더는 logger.PREDICTION_HEADERS + ['status','return'] 고정 순서.
+        - 숫자 필드(rate, return_value, entry_price, target_price, predicted_class, label, group_id) 정규화.
+        - 불량 값은 안전 기본값으로 치환.
+        """
+        base = list(PREDICTION_HEADERS)
+        extras = ["status", "return"]  # UI 호환 컬럼은 끝에만 추가
+        fieldnames = base + [c for c in extras if c not in base]
+
+        def to_float(x, default=0.0):
+            try:
+                if x in [None, ""]:
+                    return float(default)
+                return float(x)
+            except Exception:
+                return float(default)
+
+        def to_int(x, default=-1):
+            try:
+                if x in [None, ""]:
+                    return int(default)
+                return int(float(x))
+            except Exception:
+                return int(default)
+
+        sanitized = []
+        for r in rows:
+            row = {}
+            # 먼저 전부 빈값으로 초기화
+            for k in fieldnames:
+                row[k] = ""
+
+            # 원본 반영
+            for k, v in r.items():
+                if k in row:
+                    row[k] = v
+
+            # 숫자 정규화
+            row["rate"] = to_float(row.get("rate", 0.0), 0.0)
+            rv = to_float(row.get("return_value", r.get("return", 0.0)), 0.0)
+            row["return_value"] = rv
+            row["return"] = rv  # UI용 미러
+            row["entry_price"] = to_float(row.get("entry_price", 0.0), 0.0)
+            row["target_price"] = to_float(row.get("target_price", 0.0), 0.0)
+            row["predicted_class"] = to_int(row.get("predicted_class", -1), -1)
+            row["label"] = to_int(row.get("label", -1), -1)
+            row["group_id"] = to_int(row.get("group_id", 0), 0)
+
+            # 불리언은 문자열로 정규화(True/False)
+            vol = str(r.get("volatility", row.get("volatility", ""))).strip().lower()
+            row["volatility"] = "True" if vol in ["1", "true"] else ("False" if vol in ["0", "false"] else str(r.get("volatility", "")))
+
+            sanitized.append(row)
+
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = pd.DataFrame(sanitized, columns=fieldnames)
+            writer.to_csv(f, index=False)
+
+    # 원본 + 평가 결과 병합본을 고정 헤더로 재작성
+    updated += evaluated
+    rewrite_prediction_log_canonical(PREDICTION_LOG, updated)
+
+    # 평가 산출물 별도 저장
     def safe_write_csv(path, rows):
         if not rows:
             return
@@ -470,10 +542,8 @@ def evaluate_predictions(get_price_fn):
             writer.writeheader()
             writer.writerows(rows)
 
-    updated += evaluated
-    safe_write_csv(PREDICTION_LOG, updated)
     safe_write_csv(EVAL_RESULT, evaluated)
-    failed = [r for r in evaluated if r["status"] in ["fail", "v_fail"]]
+    failed = [r for r in evaluated if r.get("status") in ["fail", "v_fail"]]
     safe_write_csv(WRONG, failed)
 
     print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
@@ -523,7 +593,6 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             with torch.no_grad():
                 out = model(input_tensor.to(DEVICE))
                 softmax_probs = F.softmax(out, dim=1)
-                predicted_class = torch.argmax(softmax_probs, dim=1).item()
                 raw_probs = softmax_probs.squeeze().cpu().numpy()
 
             # 🔧 캘리브레이션 적용 (없으면 그대로)
