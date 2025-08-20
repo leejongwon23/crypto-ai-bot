@@ -269,8 +269,9 @@ def _build_snapshot(symbols_filter=None):
                 models_detail.append(md)
 
             # 평가 일정
-            last_pred_ts = df_ss["timestamp"].max() if "timestamp" in df_ss.columns and not df_ss.empty else pd.NaT
-            eval_due = _eval_deadline(last_pred_ts, strat) if pd.notna(last_pred_ts) else None
+            last_pred_ts_raw = df_ss["timestamp"].max() if "timestamp" in df_ss.columns and not df_ss.empty else pd.NaT
+            last_pred_ts = _to_kst(last_pred_ts_raw)  # ✅ TZ normalize
+            eval_due = _eval_deadline(last_pred_ts, strat) if last_pred_ts is not None else None
 
             last_eval_ts = None
             if not df_ss.empty:
@@ -281,7 +282,7 @@ def _build_snapshot(symbols_filter=None):
                 except Exception:
                     df_eval = pd.DataFrame()
                 if not df_eval.empty:
-                    last_eval_ts = df_eval["timestamp"].max()
+                    last_eval_ts = _to_kst(df_eval["timestamp"].max())  # ✅ TZ normalize
 
             delayed_min = 0
             if eval_due is not None and last_eval_ts is not None:
@@ -315,8 +316,8 @@ def _build_snapshot(symbols_filter=None):
             recent_fail = df_ss[df_ss["status"].isin(["fail","v_fail"])] if "status" in df_ss.columns else pd.DataFrame()
             recent_fail_n = int(len(recent_fail)); reflected = 0
             if recent_fail_n > 0 and "timestamp" in df_ss.columns:
-                last_fail_time = recent_fail["timestamp"].max()
-                after = df_ss[df_ss["timestamp"] > last_fail_time]
+                last_fail_time = _to_kst(recent_fail["timestamp"].max())  # ✅ TZ normalize
+                after = df_ss[df_ss["timestamp"] > last_fail_time] if last_fail_time is not None else pd.DataFrame()
                 reflected = int((after["status"].isin(["success","v_success"])).sum()) if "status" in after.columns else 0
             reflect_ratio = (reflected / max(1, recent_fail_n)) if recent_fail_n>0 else None
 
@@ -327,7 +328,7 @@ def _build_snapshot(symbols_filter=None):
             if df_ss.empty: strat_problems.append("예측 기록 없음")
             if delayed_min > 0: strat_problems.append(f"평가 지연 {delayed_min}분")
             if pd.isna(last_train_ts): strat_problems.append("최근 학습 기록 없음")
-            if eval_due is None and pd.isna(last_pred_ts):
+            if eval_due is None and last_pred_ts is None:
                 strat_problems.append("최근 예측 시각 없음(평가 예정 산출 불가)")
 
             sym_block["strategies"][strat] = {
@@ -351,7 +352,7 @@ def _build_snapshot(symbols_filter=None):
                     "meta_choice": meta_choice_txt,      # 메타러너 선택 모델
                 },
                 "evaluation": {
-                    "last_prediction_time": last_pred_ts.isoformat() if pd.notna(last_pred_ts) else None,
+                    "last_prediction_time": last_pred_ts.isoformat() if last_pred_ts is not None else None,
                     "due_time": eval_due.isoformat() if eval_due is not None else None,
                     "last_evaluated_time": last_eval_ts.isoformat() if last_eval_ts is not None else None,
                     "delay_min": delayed_min
@@ -466,7 +467,7 @@ def _render_html(snapshot):
 <div class="sticky-top mono">
   <div><b>YOPO 통합 점검</b> <span class="kicker">— 시스템 상태를 한 눈에</span></div>
   <div class="small">생성시각 {snapshot.get('time','')}</div>
-  <div style="margin-top:6px">
+  <div style="margin-top:6px)">
     <span class="badge {status_class}">{status_text}</span>
     <span class="pill">일반 성공률 {_pct(sm.get('normal_success_rate',0))}</span>
     <span class="pill">변동성 성공률 {_pct(sm.get('vol_success_rate',0))}</span>
@@ -585,12 +586,12 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow')); // 기본
                     f"{eval_block}{fail_block}{prob_block}"
                     "</div>"
                 )
-            # ✅ 백슬래시가 들어간 표현식을 f-string 밖으로 분리 (SyntaxError 방지)
+            # ✅ f-string 내부 백슬래시 회피
             body_html = ''.join(sym_cards) if sym_cards else '<div class="muted">전략 데이터가 없습니다.</div>'
             parts.append(f"<div class='card'><h2 id='{_safe(sym)}'>📈 {_safe(sym)}</h2>{fs_html}{body_html}</div>")
         return "<div id='view-symbol' class='view'>" + "".join(parts) + "</div>"
 
-    # ===== (B) 작동순서 리스트 뷰 (사진과 동일 구조) =====
+    # ===== (B) 작동순서 리스트 뷰 =====
     def render_flow_list():
         out = []
         out.append("<div class='card'><h2>📊 YOPO 운영 현황 (리스트)</h2>")
