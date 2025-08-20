@@ -1,4 +1,4 @@
-# predict.py (FINAL — canonical rewrite + numeric sanitation + safe top_k + header-locked rewrite)
+# predict.py (FINAL — canonical rewrite + numeric sanitation + safe top_k + header-locked rewrite + KST timestamp normalization)
 
 import os, sys, json, datetime, pytz
 import numpy as np
@@ -468,12 +468,13 @@ def evaluate_predictions(get_price_fn):
                 r.update({"status": "fail", "reason": f"예외: {e}", "return": 0.0, "return_value": 0.0})
                 updated.append(r)
 
-    # ---------- 안전 재작성 (헤더 고정 + 숫자 정규화) ----------
+    # ---------- 안전 재작성 (헤더 고정 + 숫자 정규화 + 🔐 KST 타임스탬프 표준화) ----------
     def rewrite_prediction_log_canonical(path, rows):
         """
         - 헤더는 logger.PREDICTION_HEADERS + ['status','return'] 고정 순서.
         - 숫자 필드(rate, return_value, entry_price, target_price, predicted_class, label, group_id) 정규화.
-        - 불량 값은 안전 기본값으로 치환.
+        - volatility는 "True"/"False" 문자열로 정규화.
+        - 🔐 timestamp는 모두 Asia/Seoul 기준 ISO8601(+09:00)로 강제 통일 → naive/aware 혼재 방지.
         """
         base = list(PREDICTION_HEADERS)
         extras = ["status", "return"]  # UI 호환 컬럼은 끝에만 추가
@@ -502,6 +503,21 @@ def evaluate_predictions(get_price_fn):
             for k, v in r.items():
                 if k in row:
                     row[k] = v
+
+            # 🔐 timestamp 표준화 (Asia/Seoul ISO8601)
+            try:
+                ts_raw = r.get("timestamp", row.get("timestamp", ""))
+                ts = pd.to_datetime(ts_raw, errors="coerce")
+                if pd.isna(ts):
+                    row["timestamp"] = now_kst().isoformat()
+                else:
+                    if ts.tzinfo is None:
+                        ts = ts.tz_localize("Asia/Seoul")
+                    else:
+                        ts = ts.tz_convert("Asia/Seoul")
+                    row["timestamp"] = ts.isoformat()
+            except Exception:
+                row["timestamp"] = now_kst().isoformat()
 
             # 숫자 정규화
             row["rate"] = to_float(row.get("rate", 0.0), 0.0)
