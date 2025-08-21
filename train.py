@@ -1,5 +1,15 @@
-# === train.py (FINAL, speed-tuned: recent rows cap + lean DataLoader + narrow window search) ===
-import os, json, time, traceback, tempfile, io, errno
+# === train.py (FINAL, speed-tuned + SSL cache + CPU thread cap + Lightning Trainer) ===
+# ✅ 추가: CPU 스레드 상한(기본 2). 기존 환경변수 설정이 있으면 그대로 둠.
+import os
+def _set_default_thread_env(name: str, val: int):
+    if os.getenv(name) is None:
+        os.environ[name] = str(val)
+for _n in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+           "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "BLIS_NUM_THREADS",
+           "TORCH_NUM_THREADS"):
+    _set_default_thread_env(_n, int(os.getenv("CPU_THREAD_CAP", "2")))
+
+import json, time, traceback, tempfile, io, errno
 from datetime import datetime
 import pytz
 import numpy as np
@@ -10,6 +20,20 @@ from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import MinMaxScaler
 from collections import Counter
+
+# ✅ torch 내부 스레드도 제한
+try:
+    torch.set_num_threads(int(os.getenv("TORCH_NUM_THREADS", "2")))
+except Exception:
+    pass
+
+# (선택) Lightning 사용: 설치 안 되어 있으면 폴백
+_HAS_LIGHTNING = False
+try:
+    import pytorch_lightning as pl
+    _HAS_LIGHTNING = True
+except Exception:
+    _HAS_LIGHTNING = False
 
 # ⬇️ 불필요한 SYMBOLS/SYMBOLS_GROUPS 의존 제거
 from data.utils import get_kline_by_strategy, compute_features, create_dataset, SYMBOL_GROUPS
@@ -213,6 +237,29 @@ def _save_model_and_meta(model: nn.Module, path_pt: str, meta: dict):
     _atomic_write(path_pt.replace(".pt", ".meta.json"), meta_json, mode="w")
 
 # --------------------------------------------------
+# (추가) Lightning 모듈 래퍼
+# --------------------------------------------------
+if _HAS_LIGHTNING:
+    class LitSeqModel(pl.LightningModule):
+        def __init__(self, base_model: nn.Module, lr: float = 1e-3):
+            super().__init__()
+            self.model = base_model
+            self.criterion = nn.CrossEntropyLoss()
+            self.lr = lr
+
+        def forward(self, x):
+            return self.model(x)
+
+        def training_step(self, batch, batch_idx):
+            xb, yb = batch
+            logits = self(xb)
+            loss = self.criterion(logits, yb)
+            return loss
+
+        def configure_optimizers(self):
+            return torch.optim.Adam(self.parameters(), lr=self.lr)
+
+# --------------------------------------------------
 # 단일 모델 학습
 # --------------------------------------------------
 def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
@@ -224,7 +271,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         print(f"✅ [train_one_model 시작] {symbol}-{strategy}-group{group_id}")
         ensure_failure_db()
 
-        # ✅ SSL 사전학습 캐시 확인 후 스킵(스크린샷 반영)
+        # ✅ SSL 사전학습 캐시 스킵
         try:
             ssl_ckpt = f"/persistent/ssl_models/{symbol}_{strategy}_ssl.pt"
             if not os.path.exists(ssl_ckpt):
@@ -384,9 +431,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
 
         # 6) 학습/평가/저장
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
-            model = get_model(model_type, input_size=FEATURE_INPUT_SIZE, output_size=num_classes).to(DEVICE)
-            optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-            criterion = nn.CrossEntropyLoss()
+            base_model = get_model(model_type, input_size=FEATURE_INPUT_SIZE, output_size=num_classes).to(DEVICE)
 
             val_len = max(1, int(len(X) * 0.2))
             if len(X) - val_len < 1: val_len = len(X) - 1
@@ -405,16 +450,39 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
             )
 
             total_loss = 0.0
-            for epoch in range(max_epochs):
-                model.train()
-                for xb, yb in train_loader:
-                    xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-                    logits = model(xb)
-                    loss = criterion(logits, yb)
-                    if not torch.isfinite(loss): continue
-                    optimizer.zero_grad(); loss.backward(); optimizer.step()
-                    total_loss += float(loss.item())
 
+            if _HAS_LIGHTNING:
+                # ✅ Lightning 기반 학습(기본 경량 옵션, 체크포인트/로거 비활성)
+                lit = LitSeqModel(base_model, lr=1e-3)
+                trainer = pl.Trainer(
+                    max_epochs=max_epochs,
+                    accelerator="gpu" if torch.cuda.is_available() else "cpu",
+                    devices=1,
+                    enable_checkpointing=False,
+                    logger=False,
+                    enable_model_summary=False,
+                    enable_progress_bar=False,
+                )
+                # Lightning은 스텝 손실만 반환하므로 총합은 수동 추적하지 않음(평가 후 저장)
+                trainer.fit(lit, train_dataloaders=train_loader, val_dataloaders=val_loader)
+                model = lit.model.to(DEVICE)
+            else:
+                # 🔁 기존 수동 루프 폴백
+                model = base_model
+                optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+                criterion = nn.CrossEntropyLoss()
+
+                for epoch in range(max_epochs):
+                    model.train()
+                    for xb, yb in train_loader:
+                        xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                        logits = model(xb)
+                        loss = criterion(logits, yb)
+                        if not torch.isfinite(loss): continue
+                        optimizer.zero_grad(); loss.backward(); optimizer.step()
+                        total_loss += float(loss.item())
+
+            # 검증 평가(공통)
             model.eval()
             all_preds, all_labels = [], []
             with torch.no_grad():
@@ -432,13 +500,14 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
                 "num_classes": int(num_classes), "input_size": int(FEATURE_INPUT_SIZE),
                 "metrics": {"val_acc": acc, "val_f1": f1, "train_loss_sum": float(total_loss)},
                 "timestamp": now_kst().isoformat(), "model_name": model_name,
-                "window": int(window), "recent_cap": int(len(feat_scaled))
+                "window": int(window), "recent_cap": int(len(feat_scaled)),
+                "engine": "lightning" if _HAS_LIGHTNING else "manual"
             }
             _save_model_and_meta(model, model_path, meta)
 
             logger.log_training_result(
                 symbol, strategy, model=model_name, accuracy=acc, f1=f1,
-                loss=float(total_loss), note=f"train_one_model(window={window}, cap={len(feat_scaled)})",
+                loss=float(total_loss), note=f"train_one_model(window={window}, cap={len(feat_scaled)}, engine={'lightning' if _HAS_LIGHTNING else 'manual'})",
                 source_exchange="BYBIT", status="success"
             )
             result["models"].append({
