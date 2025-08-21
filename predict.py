@@ -61,6 +61,9 @@ NUM_CLASSES = get_NUM_CLASSES()
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
+# ✅ 최소 예측 기대수익률 임계치(기본 1%) — 이보다 작은 클래스는 선택하지 않음
+MIN_RET_THRESHOLD = float(os.getenv("PREDICT_MIN_RETURN", "0.01"))
+
 # -----------------------------
 # 로컬 헬퍼: feature hash
 # -----------------------------
@@ -155,6 +158,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     - 진화형 메타러너가 있으면 사용, 없으면 '캘리브레이션 확률이 가장 높은 단일 모델'을 선택
       success_score = adjusted_calib_prob[pred] × (0.5 + 0.5 × val_f1)
     - 레짐/확률/캘리브 버전/선택모델은 note/top_k에 기록(스키마 불변)
+    - ✅ MIN_RET_THRESHOLD(기본 1%) 미만 클래스는 선택하지 않음
     """
     try:
         from evo_meta_learner import predict_evo_meta
@@ -211,7 +215,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     if not model_outputs_list:
         return failed_result(symbol, strategy, reason="no_valid_model", X_input=feat_scaled[-1])
 
-    # 3) (옵션) 진화형 메타 사용
+    # 3) (옵션) 진화형 메타 사용 — ✅ 임계치 미만 클래스면 무시
     final_pred_class = None
     use_evo = False
     evo_model_path = os.path.join(MODEL_DIR, "evo_meta_learner.pt")
@@ -221,34 +225,102 @@ def predict(symbol, strategy, source="일반", model_type=None):
             if callable(predict_evo_meta):
                 evo_pred = predict_evo_meta(feature_tensor.unsqueeze(0), input_size=FEATURE_INPUT_SIZE)
                 if evo_pred is not None:
-                    final_pred_class = int(evo_pred)
-                    use_evo = True
+                    evo_pred = int(evo_pred)
+                    cls_min_evo, _ = get_class_return_range(evo_pred, symbol, strategy)
+                    if cls_min_evo >= MIN_RET_THRESHOLD:
+                        final_pred_class = evo_pred
+                        use_evo = True
+                    else:
+                        print(f"[META] 진화형 예측 클래스 {evo_pred} 최소수익 {cls_min_evo:.4f} < 임계 {MIN_RET_THRESHOLD:.4f} → 무시")
         except Exception as e:
             print(f"[⚠️ 진화형 메타러너 예외] {e}")
 
-    # 4) '최고 성공확률 단일 모델' 선택 (캘리브레이션 확률 기반)
+    # 4) '최고 성공확률 단일 모델' 선택 (캘리브레이션 확률 기반 + ✅ 1% 필터)
     meta_choice = "best_single"
     chosen_info = None
+    used_minret_filter = False
     if final_pred_class is None:
         best_idx, best_score = -1, -1.0
+        best_pred = None
         for i, m in enumerate(model_outputs_list):
-            pred = int(m["predicted_class"])
             calib_probs = m["calib_probs"]
             adj = adjust_probs_with_diversity(calib_probs, recent_freq, class_counts=None, alpha=0.10, beta=0.10)
             val_f1 = float(m.get("val_f1", 0.6))
-            score = float(adj[pred]) * (0.5 + 0.5 * max(0.0, min(1.0, val_f1)))
+
+            # ✅ 임계치 필터 마스크 구성
+            valid_mask = np.zeros_like(adj, dtype=float)
+            for ci in range(len(adj)):
+                try:
+                    cls_min, _ = get_class_return_range(ci, symbol, strategy)
+                    if float(cls_min) >= MIN_RET_THRESHOLD:
+                        valid_mask[ci] = 1.0
+                except Exception:
+                    pass
+            adj_filtered = adj * valid_mask
+            if adj_filtered.sum() > 0:
+                adj_filtered = adj_filtered / adj_filtered.sum()
+                pred = int(np.argmax(adj_filtered))
+                prob_for_score = float(adj_filtered[pred])
+                used_filter_here = True
+            else:
+                # 모든 클래스가 임계치 미만이면 원본 adj로 채점(단, 실제 선택 이후에 한 번 더 전역 검색 시도)
+                pred = int(np.argmax(adj))
+                prob_for_score = float(adj[pred])
+                used_filter_here = False
+
+            score = prob_for_score * (0.5 + 0.5 * max(0.0, min(1.0, val_f1)))
             model_outputs_list[i]["adjusted_probs"] = adj
             model_outputs_list[i]["success_score"] = score
+            model_outputs_list[i]["filtered_used"] = used_filter_here
+            model_outputs_list[i]["filtered_probs"] = adj_filtered if used_filter_here else None
+            model_outputs_list[i]["candidate_pred"] = pred
+
             if score > best_score:
                 best_score, best_idx = score, i
-        final_pred_class = int(model_outputs_list[best_idx]["predicted_class"])
+                best_pred = pred
+                used_minret_filter = used_filter_here
+
+        final_pred_class = int(best_pred)
         meta_choice = os.path.basename(model_outputs_list[best_idx]["model_path"])
         chosen_info = model_outputs_list[best_idx]
     else:
         meta_choice = "evo_meta_learner"
-        chosen_info = max(model_outputs_list, key=lambda m: m.get("success_score", 0.0))
+        # evo 사용 시에도, 로깅용 chosen_info는 최고 점수 모델로 채움(없으면 첫 모델)
+        chosen_info = max(model_outputs_list, key=lambda m: m.get("success_score", 0.0)) if model_outputs_list else None
 
-    print(f"[META] {'진화형' if use_evo else '최고확률모델'} 선택: 클래스 {final_pred_class}")
+    # ✅ 선택된 클래스가 임계치 미만이면, 전체 모델/확률을 가로질러 임계 이상 클래스 중 최우선 후보로 재선택
+    try:
+        cls_min_sel, _ = get_class_return_range(final_pred_class, symbol, strategy)
+        if float(cls_min_sel) < MIN_RET_THRESHOLD:
+            print(f"[GUARD] 선택 클래스 {final_pred_class} 최소수익 {cls_min_sel:.4f} < 임계 {MIN_RET_THRESHOLD:.4f} → 대체 후보 탐색")
+            best_global_idx = None
+            best_global_score = -1.0
+            best_global_class = None
+            for m in model_outputs_list:
+                adj = m.get("adjusted_probs", m["calib_probs"])
+                val_f1 = float(m.get("val_f1", 0.6))
+                for ci in range(len(adj)):
+                    try:
+                        cmin, _ = get_class_return_range(ci, symbol, strategy)
+                        if float(cmin) < MIN_RET_THRESHOLD:
+                            continue
+                        score = float(adj[ci]) * (0.5 + 0.5 * max(0.0, min(1.0, val_f1)))
+                        if score > best_global_score:
+                            best_global_score = score
+                            best_global_idx = m
+                            best_global_class = int(ci)
+                    except Exception:
+                        continue
+            if best_global_class is not None:
+                final_pred_class = best_global_class
+                chosen_info = best_global_idx
+                used_minret_filter = True
+            else:
+                return failed_result(symbol, strategy, reason="no_class_ge_min_return", X_input=feat_scaled[-1])
+    except Exception as e:
+        print(f"[임계치 최종 가드 예외] {e}")
+
+    print(f"[META] {'진화형' if meta_choice=='evo_meta_learner' else '최고확률모델'} 선택: 클래스 {final_pred_class}")
 
     # 5) 로깅 및 성공판정
     cls_min, _ = get_class_return_range(final_pred_class, symbol, strategy)
@@ -275,14 +347,16 @@ def predict(symbol, strategy, source="일반", model_type=None):
         idx = np.argsort(probs)[::-1][:k]
         return [int(i) for i in idx]
 
-    calib_topk = _topk(chosen_info["calib_probs"]) if chosen_info else []
+    calib_topk = _topk((chosen_info or model_outputs_list[0])["calib_probs"]) if (chosen_info or model_outputs_list) else []
 
     note_payload = {
         "regime": regime,
         "meta_choice": meta_choice,
-        "raw_prob_pred": float(chosen_info["raw_probs"][final_pred_class]) if chosen_info else None,
-        "calib_prob_pred": float(chosen_info["calib_probs"][final_pred_class]) if chosen_info else None,
-        "calib_ver": calib_ver
+        "raw_prob_pred": float((chosen_info or model_outputs_list[0])["raw_probs"][final_pred_class]) if (chosen_info or model_outputs_list) else None,
+        "calib_prob_pred": float((chosen_info or model_outputs_list[0])["calib_probs"][final_pred_class]) if (chosen_info or model_outputs_list) else None,
+        "calib_ver": calib_ver,
+        "min_return_threshold": float(MIN_RET_THRESHOLD),
+        "used_minret_filter": bool(used_minret_filter)
     }
 
     # top_k는 리스트로 전달 (logger가 문자열로 직렬화)
@@ -293,7 +367,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         entry_price=entry_price,
         target_price=entry_price * (1 + expected_ret),
         model="meta",
-        model_name="evo_meta_learner" if use_evo else "best_single",
+        model_name="evo_meta_learner" if meta_choice=="evo_meta_learner" else "best_single",
         predicted_class=final_pred_class,
         label=final_pred_class,
         note=json.dumps(note_payload, ensure_ascii=False),
@@ -302,8 +376,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
         reason=f"수익률도달:{meta_success_flag}",
         rate=expected_ret,
         return_value=actual_return_meta,
-        source="진화형" if use_evo else "기본",
-        group_id=chosen_info.get("group_id") if chosen_info else None,
+        source="진화형" if meta_choice=="evo_meta_learner" else "기본",
+        group_id=(chosen_info.get("group_id") if chosen_info else None) if isinstance(chosen_info, dict) else None,
         feature_vector=feature_tensor.numpy()
     )
 
@@ -314,7 +388,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         "class": final_pred_class,
         "expected_return": expected_ret,
         "timestamp": now_kst().isoformat(),
-        "reason": "진화형 메타 최종 선택" if use_evo else f"최고 확률 단일 모델: {meta_choice}",
+        "reason": "진화형 메타 최종 선택" if meta_choice=="evo_meta_learner" else f"최고 확률 단일 모델: {meta_choice}",
         "source": source,
         "regime": regime
     }
