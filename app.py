@@ -522,6 +522,13 @@ def reset_all():
         except Exception:
             pass
 
+        # 8) 🔁 초기화 직후 학습 루프 자동 재시작 (그룹0부터)
+        try:
+            threading.Thread(target=train_symbol_group_loop, daemon=True).start()
+            print("✅ 초기화 이후 학습 루프 재시작됨"); sys.stdout.flush()
+        except Exception as e:
+            print(f"⚠️ 초기화 후 학습 루프 재시작 실패: {e}")
+
         return "✅ 완전 초기화 완료"
     except Exception as e:
         return f"초기화 실패: {e}", 500
