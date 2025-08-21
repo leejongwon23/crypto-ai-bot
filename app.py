@@ -441,29 +441,72 @@ def reset_all():
     if request.args.get("key") != "3572":
         return "❌ 인증 실패", 403
     try:
+        # ==== 운영/관우 로그 완전 통일을 위한 확장 초기화 ====
         from data.utils import _kline_cache, _feature_cache
+        import importlib
+
         def clear_csv(f, h):
             os.makedirs(os.path.dirname(f), exist_ok=True)
             with open(f, "w", newline="", encoding="utf-8-sig") as wf:
                 wf.write(",".join(h) + "\n")
 
+        # 1) 진행상태 마커 제거
         done_path = os.path.join(PERSIST_DIR, "train_done.json")
         if os.path.exists(done_path): os.remove(done_path)
 
+        # 2) 모델/로그 디렉토리 전삭제 후 재생성
         if os.path.exists(MODEL_DIR): shutil.rmtree(MODEL_DIR)
         os.makedirs(MODEL_DIR, exist_ok=True)
 
         if os.path.exists(LOG_DIR): shutil.rmtree(LOG_DIR)
         os.makedirs(LOG_DIR, exist_ok=True)
 
-        _kline_cache.clear(); _feature_cache.clear()
+        # 3) prediction_log.csv 포함, 루트 잔여 로그 제거
+        if os.path.exists(PREDICTION_LOG):
+            os.remove(PREDICTION_LOG)
 
+        # 4) 관우/diag 추정 캐시 전부 제거 (파일/폴더)
+        #    - 이름 패턴: diag*, e2e*, guan*, 관우*
+        patterns = ("diag", "e2e", "guan", "관우")
+        for root, dirs, files in os.walk(PERSIST_DIR, topdown=False):
+            # 디렉토리 제거
+            for d in list(dirs):
+                name = d.lower()
+                if name.startswith(patterns) or any(k in d for k in ("관우",)):
+                    try: shutil.rmtree(os.path.join(root, d))
+                    except Exception: pass
+            # 파일 제거
+            for f in list(files):
+                low = f.lower()
+                if low.startswith(patterns) or ("관우" in f):
+                    try: os.remove(os.path.join(root, f))
+                    except Exception: pass
+
+        # 5) in-memory 캐시 초기화
+        try:
+            _kline_cache.clear()
+        except Exception:
+            pass
+        try:
+            _feature_cache.clear()
+        except Exception:
+            pass
+
+        # 6) 표준 로그 재생성(정확한 헤더) → 운영/관우가 같은 소스만 읽도록 강제
         ensure_prediction_log_exists()
         clear_csv(WRONG_PREDICTIONS, ["timestamp","symbol","strategy","direction","entry_price","target_price","model","predicted_class","top_k","note","success","reason","rate","return_value","label","group_id","model_symbol","model_name","source","volatility","source_exchange"])
         clear_csv(LOG_FILE, ["timestamp","symbol","strategy","model","accuracy","f1","loss","note","source_exchange","status"])
         clear_csv(AUDIT_LOG, ["timestamp","symbol","strategy","result","status"])
         clear_csv(MESSAGE_LOG, ["timestamp","symbol","strategy","message"])
         clear_csv(FAILURE_LOG, ["symbol","strategy","failures"])
+
+        # 7) diag_e2e 모듈 메모리 캐시 가능성 대비 강제 reload
+        try:
+            import diag_e2e as _diag_mod
+            importlib.reload(_diag_mod)
+        except Exception:
+            pass
+
         return "✅ 완전 초기화 완료"
     except Exception as e:
         return f"초기화 실패: {e}", 500
