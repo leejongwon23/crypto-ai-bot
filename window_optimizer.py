@@ -1,4 +1,4 @@
-# === window_optimizer.py (FINAL) ===
+# === window_optimizer.py (SPEED-OPT FINAL) ===
 import numpy as np
 import pandas as pd
 
@@ -7,6 +7,9 @@ from config import get_class_ranges, get_FEATURE_INPUT_SIZE
 
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 
+# 최근 구간만 사용(속도 최적화)
+_MAX_ROWS_FOR_SCORING = 800  # 필요 시 600~1000 사이에서 조정 가능
+
 # ──────────────────────────────────────────────────────────────
 # 내부 유틸: 전략별 평가 구간(시간)
 # ──────────────────────────────────────────────────────────────
@@ -14,11 +17,14 @@ def _strategy_horizon_hours(strategy: str) -> int:
     return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
 
 # ──────────────────────────────────────────────────────────────
-# 내부 유틸: 미래 수익률(look‑ahead) 계산
+# 내부 유틸: 미래 수익률(look‑ahead) 계산 (최근 구간만)
 # ──────────────────────────────────────────────────────────────
 def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
     if df is None or df.empty or "timestamp" not in df.columns:
-        return np.zeros(len(df), dtype=np.float32)
+        return np.zeros(len(df) if df is not None else 0, dtype=np.float32)
+
+    # 최근 구간만 사용
+    df = df.tail(_MAX_ROWS_FOR_SCORING).copy()
 
     ts = pd.to_datetime(df["timestamp"], errors="coerce")
     if ts.dt.tz is None:
@@ -68,9 +74,7 @@ def _label_from_future_returns(future_gains: np.ndarray, symbol: str, strategy: 
 def _window_score(feat_scaled: np.ndarray, labels: np.ndarray, window: int) -> float:
     if len(feat_scaled) < window or len(labels) < window:
         return -np.inf
-    # 전체 피처에 대한 표준편차(최근 window 구간)
     recent_vol = float(np.std(feat_scaled[-window:], dtype=np.float32))
-    # 최근 window 구간 내 라벨 변화 비율
     diffs = np.diff(labels[-window:])
     label_change = float(np.mean(diffs != 0)) if len(diffs) > 0 else 0.0
     score = recent_vol * (1.0 + label_change)
@@ -85,24 +89,28 @@ def find_best_window(symbol: str, strategy: str, window_list=None, group_id=None
     """
     train.py에서 호출하는 시그니처.
     - look-ahead 라벨링과 동일 로직으로, 주어진 window_list 중 최적을 선택
+    - 속도 최적화: 최근 최대 _MAX_ROWS_FOR_SCORING 행만 사용
     """
     if not window_list:
-        window_list = [10, 20, 30, 40, 60]
+        # 🔧 기본 후보 축소 → 탐색시간 절감
+        window_list = [20, 40]
 
-    # 1) 데이터/피처 로드
+    # 1) 데이터/피처 로드 (최근 구간만)
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or df.empty:
         print(f"[find_best_window] 데이터 없음 → fallback={min(window_list)}")
         return int(min(window_list))
+    df = df.tail(_MAX_ROWS_FOR_SCORING).copy()
 
     feat = compute_features(symbol, df, strategy)
     if feat is None or feat.empty:
         print(f"[find_best_window] 피처 없음 → fallback={min(window_list)}")
         return int(min(window_list))
 
+    # 동일하게 최근 구간만
+    feat = feat.tail(_MAX_ROWS_FOR_SCORING).copy()
     features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
     if features_only.shape[1] < FEATURE_INPUT_SIZE:
-        # 피처 패딩
         pad = FEATURE_INPUT_SIZE - features_only.shape[1]
         for i in range(pad):
             features_only[f"pad_{i}"] = 0.0
@@ -118,7 +126,6 @@ def find_best_window(symbol: str, strategy: str, window_list=None, group_id=None
     # 3) 윈도우별 점수 계산
     best_w, best_s = int(min(window_list)), -np.inf
     for w in sorted(set(int(x) for x in window_list)):
-        # 최소 길이 확보
         if len(feat_scaled) < w + 5:
             continue
         s = _window_score(feat_scaled, labels, w)
@@ -135,19 +142,22 @@ def find_best_window(symbol: str, strategy: str, window_list=None, group_id=None
 def find_best_windows(symbol: str, strategy: str, window_list=None, group_id=None):
     """
     앙상블용: 학습 가능한 윈도우만 추려서 점수 상위 3개 반환.
+    - 속도 최적화: 최근 최대 _MAX_ROWS_FOR_SCORING 행만 사용
     """
     if not window_list:
-        window_list = [10, 20, 30, 40, 60]
+        window_list = [20, 40]
 
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or df.empty:
         print(f"[find_best_windows] 데이터 없음 → 기본 반환 {window_list}")
         return window_list
+    df = df.tail(_MAX_ROWS_FOR_SCORING).copy()
 
     feat = compute_features(symbol, df, strategy)
     if feat is None or feat.empty:
         print(f"[find_best_windows] 피처 없음 → 기본 반환 {window_list}")
         return window_list
+    feat = feat.tail(_MAX_ROWS_FOR_SCORING).copy()
 
     features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
     if features_only.shape[1] < FEATURE_INPUT_SIZE:
