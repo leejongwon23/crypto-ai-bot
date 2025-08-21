@@ -20,6 +20,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import MinMaxScaler
 from collections import Counter
+import shutil  # ← 추가
 
 # ✅ torch 내부 스레드도 제한
 try:
@@ -235,6 +236,31 @@ def _save_model_and_meta(model: nn.Module, path_pt: str, meta: dict):
     _atomic_write(path_pt, buffer.getvalue(), mode="wb")
     meta_json = json.dumps(meta, ensure_ascii=False, indent=2)
     _atomic_write(path_pt.replace(".pt", ".meta.json"), meta_json, mode="w")
+
+# ⬇️ 추가: 예측/관우 호환 별칭 유틸
+def _safe_alias(src: str, dst: str):
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    try:
+        if os.path.islink(dst) or os.path.exists(dst):
+            os.remove(dst)
+    except Exception:
+        pass
+    try:
+        os.link(src, dst)  # 하드링크 시도
+    except Exception:
+        shutil.copyfile(src, dst)  # 실패 시 복사
+
+def _emit_aliases(model_path: str, meta_path: str, symbol: str, strategy: str, model_type: str):
+    # 1) 평탄(legacy) 별칭
+    flat_pt   = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.pt")
+    flat_meta = flat_pt.replace(".pt", ".meta.json")
+    _safe_alias(model_path, flat_pt)
+    _safe_alias(meta_path, flat_meta)
+    # 2) 디렉터리 구조 별칭
+    dir_pt   = os.path.join(MODEL_DIR, symbol, strategy, f"{model_type}.pt")
+    dir_meta = dir_pt.replace(".pt", ".meta.json")
+    _safe_alias(model_path, dir_pt)
+    _safe_alias(meta_path, dir_meta)
 
 # --------------------------------------------------
 # (추가) Lightning 모듈 래퍼
@@ -504,6 +530,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
                 "engine": "lightning" if _HAS_LIGHTNING else "manual"
             }
             _save_model_and_meta(model, model_path, meta)
+
+            # ⬇️ 추가: 예측/모니터 호환 별칭 생성
+            _emit_aliases(model_path, model_path.replace(".pt", ".meta.json"),
+                          symbol, strategy, model_type)
 
             logger.log_training_result(
                 symbol, strategy, model=model_name, accuracy=acc, f1=f1,
