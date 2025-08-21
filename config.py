@@ -176,6 +176,49 @@ def _enforce_min_width(low: float, high: float):
         high = low + _MIN_RANGE_WIDTH
     return low, high
 
+def _strategy_horizon_hours(strategy: str) -> int:
+    # train.py와 동일 기준
+    return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
+
+def _future_max_high_return_series(df, horizon_hours: int):
+    """
+    각 시점 i의 '미래 horizon 동안의 최대 고가' 대비 현재 종가 기준 수익률:
+      r_i = (max(high[i..j]) - close[i]) / close[i]
+    ※ 타임존 문제(Already tz-aware) 방지 로직 포함(train.py 동일 철학)
+    """
+    import numpy as np
+    import pandas as pd
+
+    if df is None or len(df) == 0 or "timestamp" not in df.columns or "close" not in df.columns:
+        return np.zeros(0, dtype=np.float32)
+
+    ts = pd.to_datetime(df["timestamp"], errors="coerce")
+    close = df["close"].astype(float).values
+    high = (df["high"] if "high" in df.columns else df["close"]).astype(float).values
+
+    # tz 처리(UTC 가정→KST 변환 / 이미 tz-aware면 convert)
+    if getattr(ts.dt, "tz", None) is None:
+        ts = ts.dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+    else:
+        ts = ts.dt.tz_convert("Asia/Seoul")
+
+    out = np.zeros(len(df), dtype=np.float32)
+    horizon = pd.Timedelta(hours=int(horizon_hours))
+
+    j_start = 0
+    for i in range(len(df)):
+        t0 = ts.iloc[i]; t1 = t0 + horizon
+        j = max(j_start, i)
+        max_h = high[i]
+        while j < len(df) and ts.iloc[j] <= t1:
+            if high[j] > max_h:
+                max_h = high[j]
+            j += 1
+        j_start = max(j_start, i)
+        base = close[i] if close[i] > 0 else (close[i] + 1e-6)
+        out[i] = float((max_h - base) / (base + 1e-12))
+    return out.astype(np.float32)
+
 def get_class_return_range(class_id: int, symbol: str, strategy: str):
     key = (symbol, strategy)
     ranges = _ranges_cache.get(key)
@@ -191,7 +234,8 @@ def class_to_expected_return(class_id: int, symbol: str, strategy: str):
 
 def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=None, group_size=5):
     """
-    가격 변화율(일반 수익률) 기반으로 음/양 영역을 분할하고,
+    ⚡️미래 최대고가 수익률 기반 클래스 경계 (train.py와 정의 일치)
+    - r_i = (max(high[i..i+h]) - close[i]) / close[i],  h=4h/24h/168h
     - 전략별 양수 캡 적용(과장 방지)
     - 최소 구간 폭 보장(0.1%)
     - 모든 경계 소수 셋째 자리 반올림
@@ -201,12 +245,13 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
     from data.utils import get_kline_by_strategy
 
     MAX_CLASSES = 20
-    MIN_HALF = 2
 
     def compute_equal_ranges(n_cls, reason=""):
         n_cls = max(4, int(n_cls))
-        step = 2.0 / n_cls  # [-1.0, +1.0] 균등
-        raw = [(-1.0 + i * step, -1.0 + (i + 1) * step) for i in range(n_cls)]
+        # [0.0, +CAP] 균등 분할 (미래 최대고가 수익률은 음수 거의 없음 → 0부터)
+        cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy, 0.5)
+        step = (float(cap) - 0.0) / n_cls
+        raw = [(0.0 + i * step, 0.0 + (i + 1) * step) for i in range(n_cls)]
         ranges = []
         for lo, hi in raw:
             lo, hi = _enforce_min_width(lo, hi)
@@ -236,49 +281,37 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             if df_price is None or len(df_price) < 30 or "close" not in df_price:
                 return compute_equal_ranges(10, reason="가격 데이터 부족")
 
-            returns = df_price["close"].pct_change().dropna().values
-            if len(returns) < 10:
+            # ✅ train.py와 동일한 '미래 최대고가 수익률'로 분포 만들기
+            horizon_hours = _strategy_horizon_hours(strategy)
+            rets = _future_max_high_return_series(df_price, horizon_hours=horizon_hours)
+            rets = rets[np.isfinite(rets)]
+            if rets.size < 10:
                 return compute_equal_ranges(10, reason="수익률 샘플 부족")
 
-            neg = returns[returns < 0]
-            pos = returns[returns >= 0]
+            # 음수는 이론적으로 거의 없지만(최대 high 기준) 안전하게 0 미만은 0으로 클리핑
+            rets = np.maximum(rets, 0.0)
 
-            # 양수 영역 캡 적용(과장 방지)
-            if pos.size > 0 and strategy is not None:
-                cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy)
-                if cap is not None:
-                    pos = np.clip(pos, None, cap)
+            # 전략별 양수 캡 적용
+            cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy)
+            if cap is not None and rets.size > 0:
+                rets = np.minimum(rets, cap)
 
-            # 한쪽이 텅 비는 경우를 방지
-            if neg.size == 0 and pos.size == 0:
-                return compute_equal_ranges(10, reason="분할 불가(모두 0)")
+            # 클래스 개수(동적): 기본 설정값을 상한 20으로 제한
+            base_n = int(_config.get("NUM_CLASSES", 20))
+            n_cls = min(MAX_CLASSES, max(4, base_n))
 
-            half_neg = max(MIN_HALF, min(8, len(neg) // 5)) if neg.size > 0 else MIN_HALF
-            half_pos = max(MIN_HALF, min(8, len(pos) // 5)) if pos.size > 0 else MIN_HALF
-
-            num_classes = min(MAX_CLASSES, half_neg + half_pos)
-            if num_classes % 2 != 0:
-                num_classes -= 1
-            num_classes = max(num_classes, 4)
-
-            # 분위/균등 선택
+            # 분위 기반 경계
             if method == "quantile":
-                q_neg = np.quantile(neg, np.linspace(0, 1, max(2, half_neg) + 1)) if neg.size > 0 else np.array([-0.05, 0.0])
-                q_pos = np.quantile(pos, np.linspace(0, 1, max(2, half_pos) + 1)) if pos.size > 0 else np.array([0.0, 0.05])
+                qs = np.quantile(rets, np.linspace(0, 1, n_cls + 1))
             else:
-                q_neg = np.linspace(neg.min(), neg.max(), max(2, half_neg) + 1) if neg.size > 0 else np.array([-0.05, 0.0])
-                q_pos = np.linspace(pos.min(), pos.max(), max(2, half_pos) + 1) if pos.size > 0 else np.array([0.0, 0.05])
+                qs = np.linspace(float(rets.min()), float(rets.max()), n_cls + 1)
 
-            # 구간 생성
-            neg_ranges = [(float(q_neg[i]), float(q_neg[i + 1])) for i in range(max(1, len(q_neg) - 1))]
-            pos_ranges = [(float(q_pos[i]), float(q_pos[i + 1])) for i in range(max(1, len(q_pos) - 1))]
-
-            # 최소 폭/반올림/캡 재적용 + 단조 보정
             cooked = []
-            for lo, hi in neg_ranges + pos_ranges:
+            for i in range(n_cls):
+                lo, hi = float(qs[i]), float(qs[i + 1])
                 lo, hi = _enforce_min_width(lo, hi)
-                lo = _cap_positive_by_strategy(lo, strategy) if lo > 0 else lo
-                hi = _cap_positive_by_strategy(hi, strategy) if hi > 0 else hi
+                lo = _cap_positive_by_strategy(lo, strategy)
+                hi = _cap_positive_by_strategy(hi, strategy)
                 lo, hi = _round2(lo), _round2(hi)
                 if hi <= lo:
                     hi = _round2(lo + _MIN_RANGE_WIDTH)
@@ -309,25 +342,30 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
 
             df_price_dbg = _get_kline_dbg(symbol, strategy)
             if df_price_dbg is not None and len(df_price_dbg) >= 2 and "close" in df_price_dbg:
-                rets = df_price_dbg["close"].pct_change().dropna().values
-                cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy)
-                if cap is not None and rets.size > 0:
-                    rets = np.where(rets > 0, np.minimum(rets, cap), rets)
+                horizon_hours = _strategy_horizon_hours(strategy)
+                rets_dbg = _future_max_high_return_series(df_price_dbg, horizon_hours=horizon_hours)
+                rets_dbg = rets_dbg[np.isfinite(rets_dbg)]
+                if rets_dbg.size > 0:
+                    rets_dbg = np.maximum(rets_dbg, 0.0)
+                    cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy)
+                    if cap is not None:
+                        rets_dbg = np.minimum(rets_dbg, cap)
 
-                if rets.size > 0 and len(all_ranges) > 0:
-                    qs = np.quantile(rets, [0.00, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 1.00])
+                    qs = np.quantile(rets_dbg, [0.00, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 1.00])
+                    def _r2(z): 
+                        return round(float(z), _ROUND_DECIMALS)
                     print(
                         f"[📈 수익률분포] {symbol}-{strategy} "
-                        f"min={_round2(qs[0])}, p25={_round2(qs[1])}, p50={_round2(qs[2])}, "
-                        f"p75={_round2(qs[3])}, p90={_round2(qs[4])}, p95={_round2(qs[5])}, "
-                        f"p99={_round2(qs[6])}, max={_round2(qs[7])}"
+                        f"min={_r2(qs[0])}, p25={_r2(qs[1])}, p50={_r2(qs[2])}, "
+                        f"p75={_r2(qs[3])}, p90={_r2(qs[4])}, p95={_r2(qs[5])}, "
+                        f"p99={_r2(qs[6])}, max={_r2(qs[7])}"
                     )
                     print(f"[📏 클래스경계 로그] {symbol}-{strategy} → {len(all_ranges)}개")
                     print(f"[📏 경계 리스트] {symbol}-{strategy} → {all_ranges}")
 
                     edges = [all_ranges[0][0]] + [hi for (_, hi) in all_ranges]
                     edges[-1] = float(edges[-1]) + 1e-9
-                    hist, _ = np.histogram(rets, bins=edges)
+                    hist, _ = np.histogram(rets_dbg, bins=edges)
                     print(f"[📐 클래스 분포] {symbol}-{strategy} count={int(hist.sum())} → {hist.tolist()}")
             else:
                 print(f"[ℹ️ 수익률분포 스킵] {symbol}-{strategy} → 데이터 부족")
