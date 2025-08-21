@@ -2,6 +2,7 @@
 import os, csv, json, datetime, pandas as pd, pytz, hashlib
 import sqlite3
 from collections import defaultdict
+import threading, time  # ⬅️ 추가: 동시성/재시도
 
 # -------------------------
 # 기본 경로/디렉토리
@@ -105,21 +106,93 @@ def get_feature_hash(feature_row) -> str:
 # SQLite: 모델 성공/실패 집계
 # -------------------------
 _db_conn = None
+_DB_PATH = os.path.join(LOG_DIR, "failure_patterns.db")
+_db_lock = threading.RLock()  # ⬅️ 추가: 동시 쓰기 직렬화
+
+def _apply_sqlite_pragmas(conn):
+    """WAL/동기화/타임아웃 설정으로 동시성·I/O 안정성 향상"""
+    try:
+        cur = conn.cursor()
+        # WAL이 이미 켜져 있어도 안전
+        cur.execute("PRAGMA journal_mode=WAL;")
+        cur.execute("PRAGMA synchronous=NORMAL;")
+        cur.execute("PRAGMA busy_timeout=5000;")  # 5초 대기
+        cur.close()
+    except Exception as e:
+        print(f"[경고] PRAGMA 설정 실패 → {e}")
+
+def _connect_sqlite():
+    """타임아웃을 늘리고 check_same_thread=False로 연결"""
+    conn = sqlite3.connect(_DB_PATH, timeout=30, check_same_thread=False)
+    _apply_sqlite_pragmas(conn)
+    return conn
+
 def get_db_connection():
     global _db_conn
-    if _db_conn is None:
+    with _db_lock:
+        if _db_conn is None:
+            try:
+                _db_conn = _connect_sqlite()
+                print("[✅ logger.py DB connection 생성 완료]")
+            except Exception as e:
+                print(f"[오류] logger.py DB connection 생성 실패 → {e}")
+                _db_conn = None
+        return _db_conn
+
+def _sqlite_exec_with_retry(sql, params=(), retries=5, sleep_base=0.2, commit=False):
+    """
+    공통 재시도 유틸: database is locked / disk I/O error 대비
+    """
+    last_err = None
+    for attempt in range(1, retries + 1):
         try:
-            _db_conn = sqlite3.connect(os.path.join(LOG_DIR, "failure_patterns.db"), check_same_thread=False)
-            print("[✅ logger.py DB connection 생성 완료]")
+            with _db_lock:
+                conn = get_db_connection()
+                if conn is None:
+                    # 연결 재시도
+                    conn = _connect_sqlite()
+                    globals()['_db_conn'] = conn
+                cur = conn.cursor()
+                cur.execute(sql, params)
+                if commit:
+                    conn.commit()
+                try:
+                    rows = cur.fetchall()
+                except sqlite3.ProgrammingError:
+                    rows = None
+                cur.close()
+                return rows
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            last_err = e
+            # 잠금/일시적 I/O 오류는 재시도
+            if ("database is locked" in msg) or ("disk i/o error" in msg) or ("database is busy" in msg):
+                # 연결 재생성 시도
+                with _db_lock:
+                    try:
+                        if globals().get("_db_conn"):
+                            try:
+                                globals()["_db_conn"].close()
+                            except Exception:
+                                pass
+                        globals()["_db_conn"] = _connect_sqlite()
+                    except Exception as ce:
+                        last_err = ce
+                time.sleep(sleep_base * attempt)
+                continue
+            else:
+                # 다른 OperationalError는 즉시 중단
+                raise
         except Exception as e:
-            print(f"[오류] logger.py DB connection 생성 실패 → {e}")
-            _db_conn = None
-    return _db_conn
+            last_err = e
+            time.sleep(sleep_base * attempt)
+            continue
+    # 모두 실패
+    raise last_err if last_err else RuntimeError("sqlite exec failed")
 
 def ensure_success_db():
     try:
-        conn = get_db_connection()
-        conn.execute("""
+        _sqlite_exec_with_retry("""
             CREATE TABLE IF NOT EXISTS model_success (
                 symbol TEXT,
                 strategy TEXT,
@@ -128,37 +201,31 @@ def ensure_success_db():
                 fail INTEGER,
                 PRIMARY KEY(symbol, strategy, model)
             )
-        """)
-        conn.commit()
+        """, params=(), retries=5, commit=True)
         print("[✅ ensure_success_db] model_success 테이블 확인 완료")
     except Exception as e:
         print(f"[오류] ensure_success_db 실패 → {e}")
 
 def update_model_success(s, t, m, success):
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
+        _sqlite_exec_with_retry("""
             INSERT INTO model_success (symbol, strategy, model, success, fail)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(symbol, strategy, model) DO UPDATE SET
                 success = success + excluded.success,
                 fail = fail + excluded.fail
-        """, (s, t or "알수없음", m, int(success), int(not success)))
-        conn.commit()
+        """, params=(s, t or "알수없음", m, int(success), int(not success)), retries=7, commit=True)
         print(f"[✅ update_model_success] {s}-{t}-{m} 기록 ({'성공' if success else '실패'})")
     except Exception as e:
         print(f"[오류] update_model_success 실패 → {e}")
 
 def get_model_success_rate(s, t, m):
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
+        rows = _sqlite_exec_with_retry("""
             SELECT success, fail FROM model_success
             WHERE symbol=? AND strategy=? AND model=?
-        """, (s, t or "알수없음", m))
-        row = cur.fetchone()
+        """, params=(s, t or "알수없음", m), retries=5, commit=False)
+        row = rows[0] if rows else None
         if row is None:
             return 0.0
         success_cnt, fail_cnt = row
