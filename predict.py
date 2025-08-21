@@ -482,14 +482,22 @@ def evaluate_predictions(get_price_fn):
                     r.update({"status": "fail", "reason": "가격 데이터 없음", "return": 0.0, "return_value": 0.0})
                     updated.append(r); continue
 
+                # 🔒 평가 구간을 반드시 마감(deadline)까지만 제한
                 df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
                 df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
-                future_df = df[df["timestamp"] >= timestamp]
-                if future_df.empty:
-                    r.update({"status": "fail", "reason": "미래 데이터 없음", "return": 0.0, "return_value": 0.0})
-                    updated.append(r); continue
+                mask_window = (df["timestamp"] >= timestamp) & (df["timestamp"] <= deadline)
+                future_df = df.loc[mask_window]
 
-                actual_max = future_df["high"].max()
+                if future_df.empty:
+                    # 마감 전이면 'pending', 마감 후면 'fail(데이터 부족)'
+                    if now_local() < deadline:
+                        r.update({"status": "pending", "reason": "⏳ 평가 대기 중(마감 전 데이터 없음)", "return": 0.0, "return_value": 0.0})
+                        updated.append(r); continue
+                    else:
+                        r.update({"status": "fail", "reason": "마감까지 데이터 없음", "return": 0.0, "return_value": 0.0})
+                        updated.append(r); continue
+
+                actual_max = float(future_df["high"].max())
                 gain = (actual_max - entry_price) / (entry_price + 1e-12)
 
                 if pred_class >= 0:
@@ -578,7 +586,7 @@ def evaluate_predictions(get_price_fn):
                 if k in row:
                     row[k] = v
 
-            # 🔐 timestamp 표준화 (Asia/Seoul ISO8601)
+            # 🔐 timestamp 표준화 (Asia/Seoul)
             try:
                 ts_raw = r.get("timestamp", row.get("timestamp", ""))
                 ts = pd.to_datetime(ts_raw, errors="coerce")
