@@ -138,6 +138,47 @@ def get_btc_dominance():
         return BTC_DOMINANCE_CACHE["value"]
 
 # =========================
+# ✅ 공용: 미래 수익률 계산기 (선택 추출)
+#  - train.py의 _future_returns_by_timestamp 와 동일한 규칙을 사용
+#  - 단기=4h, 중기=24h, 장기=168h, tz=Asia/Seoul
+#  - high(없으면 close) 기준으로 lookahead 내 최대치 대비 현재 close 수익률
+# =========================
+def future_gains_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
+    if df is None or len(df) == 0 or "timestamp" not in df.columns:
+        return np.zeros(0 if df is None else len(df), dtype=np.float32)
+
+    ts = pd.to_datetime(df["timestamp"], errors="coerce")
+    close = df["close"].astype(float).values
+    high = (df["high"] if "high" in df.columns else df["close"]).astype(float).values
+
+    if ts.dt.tz is None:
+        ts = ts.dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+    else:
+        ts = ts.dt.tz_convert("Asia/Seoul")
+
+    out = np.zeros(len(df), dtype=np.float32)
+    horizon = pd.Timedelta(hours=int(horizon_hours))
+
+    j_start = 0
+    for i in range(len(df)):
+        t0 = ts.iloc[i]
+        t1 = t0 + horizon
+        j = max(j_start, i)
+        max_h = high[i]
+        while j < len(df) and ts.iloc[j] <= t1:
+            if high[j] > max_h:
+                max_h = high[j]
+            j += 1
+        j_start = max(j_start, i)
+        base = close[i] if close[i] > 0 else (close[i] + 1e-6)
+        out[i] = float((max_h - base) / (base + 1e-12))
+    return out.astype(np.float32)
+
+def future_gains(df: pd.DataFrame, strategy: str) -> np.ndarray:
+    horizon = {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
+    return future_gains_by_hours(df, horizon)
+
+# =========================
 # 데이터셋 생성 (반환값 항상 X, y)
 # =========================
 def create_dataset(features, window=10, strategy="단기", input_size=None):
