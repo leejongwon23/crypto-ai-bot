@@ -224,8 +224,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         print(f"✅ [train_one_model 시작] {symbol}-{strategy}-group{group_id}")
         ensure_failure_db()
 
+        # ✅ SSL 사전학습 캐시 확인 후 스킵(스크린샷 반영)
         try:
-            masked_reconstruction(symbol, strategy, FEATURE_INPUT_SIZE)
+            ssl_ckpt = f"/persistent/ssl_models/{symbol}_{strategy}_ssl.pt"
+            if not os.path.exists(ssl_ckpt):
+                masked_reconstruction(symbol, strategy, FEATURE_INPUT_SIZE)
+            else:
+                print(f"[SSL] cache found → skip: {ssl_ckpt}")
         except Exception as e:
             print(f"[⚠️ SSL 사전학습 실패] {e}")
 
