@@ -33,6 +33,7 @@ except Exception as e:
     print(f"[경고] startup cleanup 실패: {e}")
 
 # ===== 경로 통일 =====
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # ← 추가: 루트 탐색용(초기화 강화에만 사용)
 PERSIST_DIR = "/persistent"
 LOG_DIR = os.path.join(PERSIST_DIR, "logs")
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
@@ -465,6 +466,24 @@ def reset_all():
         if os.path.exists(PREDICTION_LOG):
             os.remove(PREDICTION_LOG)
 
+        # 3-1) 작업 디렉토리/코드 루트에 남은 동일계열 파일까지 싹 정리(혼선 방지)
+        suspect_names = {
+            "prediction_log.csv", "wrong_predictions.csv",
+            "evaluation_audit.csv", "message_log.csv",
+            "failure_count.csv", "train_log.csv"
+        }
+        search_roots = {PERSIST_DIR, LOG_DIR, BASE_DIR, os.getcwd()}
+        for root in list(search_roots):
+            try:
+                if not os.path.isdir(root): continue
+                for fn in list(os.listdir(root)):
+                    low = fn.lower()
+                    if (fn in suspect_names) or low.startswith(("prediction_log", "eval", "message_log", "train_log", "wrong_predictions")):
+                        try: os.remove(os.path.join(root, fn))
+                        except Exception: pass
+            except Exception:
+                pass
+
         # 4) 관우/diag 추정 캐시 전부 제거 (파일/폴더)
         #    - 이름 패턴: diag*, e2e*, guan*, 관우*
         patterns = ("diag", "e2e", "guan", "관우")
@@ -483,14 +502,10 @@ def reset_all():
                     except Exception: pass
 
         # 5) in-memory 캐시 초기화
-        try:
-            _kline_cache.clear()
-        except Exception:
-            pass
-        try:
-            _feature_cache.clear()
-        except Exception:
-            pass
+        try: _kline_cache.clear()
+        except Exception: pass
+        try: _feature_cache.clear()
+        except Exception: pass
 
         # 6) 표준 로그 재생성(정확한 헤더) → 운영/관우가 같은 소스만 읽도록 강제
         ensure_prediction_log_exists()
