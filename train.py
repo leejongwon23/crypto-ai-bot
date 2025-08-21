@@ -1,4 +1,4 @@
-# === train.py (FINAL, numeric hygiene & safe window clamp) ===
+# === train.py (FINAL, speed-tuned: recent rows cap + lean DataLoader + narrow window search) ===
 import os, json, time, traceback, tempfile, io, errno
 from datetime import datetime
 import pytz
@@ -118,6 +118,15 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL_DIR = "/persistent/models"
 os.makedirs(MODEL_DIR, exist_ok=True)
 
+# ✅ 학습 데이터 최근 구간 상한 (정확도 영향 최소 / 속도 향상)
+_MAX_ROWS_FOR_TRAIN = int(os.getenv("TRAIN_MAX_ROWS", "1200"))
+
+# ✅ DataLoader 튜닝(안전): CPU 기준
+_BATCH_SIZE = int(os.getenv("TRAIN_BATCH_SIZE", "128"))
+_NUM_WORKERS = int(os.getenv("TRAIN_NUM_WORKERS", "0"))   # CPU 경량 파이프라인: 0 권장
+_PIN_MEMORY = False
+_PERSISTENT = False
+
 now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 training_in_progress = {"단기": False, "중기": False, "장기": False}
 
@@ -151,7 +160,7 @@ def _log_skip(symbol, strategy, reason):
                                loss=0.0, note=reason, status="skipped")
     insert_failure_record({
         "symbol": symbol, "strategy": strategy, "model": "all",
-        "predicted_class": -1, "success": False, "rate": 0.0,  # ← 빈 문자열 금지
+        "predicted_class": -1, "success": False, "rate": 0.0,
         "reason": reason
     }, feature_vector=[])
 
@@ -160,7 +169,7 @@ def _log_fail(symbol, strategy, reason):
                                loss=0.0, note=reason, status="failed")
     insert_failure_record({
         "symbol": symbol, "strategy": strategy, "model": "all",
-        "predicted_class": -1, "success": False, "rate": 0.0,  # ← 빈 문자열 금지
+        "predicted_class": -1, "success": False, "rate": 0.0,
         "reason": reason
     }, feature_vector=[])
 
@@ -306,36 +315,23 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
 
         labels = np.array(labels, dtype=np.int64)
 
-        label_counts = Counter(labels.tolist())
-        total_labels = int(len(labels))
-        probs = np.array(list(label_counts.values()), dtype=np.float64)
-        if probs.sum() > 0:
-            probs = probs / probs.sum()
-            entropy = float(-(probs * np.log2(probs + 1e-12)).sum())
-        else:
-            entropy = 0.0
-
         features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         feat_scaled = MinMaxScaler().fit_transform(features_only)
 
-        # 4) 최적 윈도우
+        # ✅ 속도 개선: 최근 구간만 사용(라벨과 정렬 유지)
+        if len(feat_scaled) > _MAX_ROWS_FOR_TRAIN or len(labels) > _MAX_ROWS_FOR_TRAIN:
+            cut = min(_MAX_ROWS_FOR_TRAIN, len(feat_scaled), len(labels))
+            feat_scaled = feat_scaled[-cut:]
+            labels = labels[-cut:]
+
+        # 4) 최적 윈도우(탐색 폭 축소)
         try:
-            best_window = find_best_window(symbol, strategy, window_list=[10,20,30,40,60], group_id=group_id)
+            best_window = find_best_window(symbol, strategy, window_list=[20, 40], group_id=group_id)
         except Exception:
-            best_window = 60
+            best_window = 40
         window = int(max(5, best_window))
         # 🔒 데이터 길이를 넘지 않도록 클램프
         window = int(min(window, max(6, len(feat_scaled) - 1)))
-
-        try:
-            logger.log_label_distribution(symbol, strategy, group_id=group_id,
-                                          counts=dict(label_counts), total=total_labels,
-                                          n_unique=int(len(label_counts)), entropy=float(entropy),
-                                          note=f"window={window}")
-            print(f"[🧮 라벨분포 로그] {symbol}-{strategy}-g{group_id} total={total_labels}, "
-                  f"classes={len(label_counts)}, H={entropy:.4f}")
-        except Exception as e:
-            print(f"[⚠️ log_label_distribution 실패/미구현] {e}")
 
         # 5) 시퀀스 생성
         X, y = [], []
@@ -344,6 +340,21 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
             y_idx = i + window - 1
             y.append(labels[y_idx] if 0 <= y_idx < len(labels) else 0)
         X, y = np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
+
+        # 라벨/분포 로그
+        try:
+            label_counts = Counter(y.tolist())
+            total_labels = int(len(y))
+            probs = np.array(list(label_counts.values()), dtype=np.float64)
+            entropy = float(-(probs / max(1, probs.sum()) * np.log2((probs / max(1, probs.sum())) + 1e-12)).sum()) if probs.sum() > 0 else 0.0
+            logger.log_label_distribution(symbol, strategy, group_id=group_id,
+                                          counts=dict(label_counts), total=total_labels,
+                                          n_unique=int(len(label_counts)), entropy=float(entropy),
+                                          note=f"window={window}, recent_cap={len(feat_scaled)}")
+            print(f"[🧮 라벨분포 로그] {symbol}-{strategy}-g{group_id} total={total_labels}, "
+                  f"classes={len(label_counts)}, H={entropy:.4f}")
+        except Exception as e:
+            print(f"[⚠️ log_label_distribution 실패/미구현] {e}")
 
         if len(X) < 20:
             try:
@@ -377,8 +388,16 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
             train_X, val_X = X[:-val_len], X[-val_len:]
             train_y, val_y = y[:-val_len], y[-val_len:]
 
-            train_loader = DataLoader(TensorDataset(torch.tensor(train_X), torch.tensor(train_y)), batch_size=64, shuffle=True)
-            val_loader = DataLoader(TensorDataset(torch.tensor(val_X), torch.tensor(val_y)), batch_size=64)
+            train_loader = DataLoader(
+                TensorDataset(torch.tensor(train_X), torch.tensor(train_y)),
+                batch_size=_BATCH_SIZE, shuffle=True,
+                num_workers=_NUM_WORKERS, pin_memory=_PIN_MEMORY, persistent_workers=_PERSISTENT
+            )
+            val_loader = DataLoader(
+                TensorDataset(torch.tensor(val_X), torch.tensor(val_y)),
+                batch_size=_BATCH_SIZE,
+                num_workers=_NUM_WORKERS, pin_memory=_PIN_MEMORY, persistent_workers=_PERSISTENT
+            )
 
             total_loss = 0.0
             for epoch in range(max_epochs):
@@ -408,13 +427,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
                 "num_classes": int(num_classes), "input_size": int(FEATURE_INPUT_SIZE),
                 "metrics": {"val_acc": acc, "val_f1": f1, "train_loss_sum": float(total_loss)},
                 "timestamp": now_kst().isoformat(), "model_name": model_name,
-                "window": int(window)
+                "window": int(window), "recent_cap": int(len(feat_scaled))
             }
             _save_model_and_meta(model, model_path, meta)
 
             logger.log_training_result(
                 symbol, strategy, model=model_name, accuracy=acc, f1=f1,
-                loss=float(total_loss), note=f"train_one_model(window={window})",
+                loss=float(total_loss), note=f"train_one_model(window={window}, cap={len(feat_scaled)})",
                 source_exchange="BYBIT", status="success"
             )
             result["models"].append({
