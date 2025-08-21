@@ -12,7 +12,7 @@ from sklearn.preprocessing import MinMaxScaler
 from collections import Counter
 
 # ⬇️ 불필요한 SYMBOLS/SYMBOLS_GROUPS 의존 제거
-from data.utils import get_kline_by_strategy, compute_features, create_dataset
+from data.utils import get_kline_by_strategy, compute_features, create_dataset, SYMBOL_GROUPS
 
 from model.base_model import get_model
 from feature_importance import compute_feature_importance, save_feature_importance  # 호환용
@@ -20,7 +20,7 @@ from failure_db import insert_failure_record, ensure_failure_db
 import logger  # log_* 및 ensure_prediction_log_exists 사용
 from config import (
     get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups,
-    get_class_ranges, set_NUM_CLASSES, get_SYMBOL_GROUPS  # ⬅️ 유지
+    get_class_ranges, set_NUM_CLASSES  # ⬅️ get_SYMBOL_GROUPS 제거
 )
 from data_augmentation import balance_classes
 
@@ -525,7 +525,7 @@ def train_symbol_group_loop(sleep_sec: int = 0):
         except Exception as e:
             print(f"[경고] prediction_log 준비 실패: {e}")
 
-        groups = get_SYMBOL_GROUPS()  # ⬅️ 동적 그룹 로딩 (순서 오염 방지)
+        groups = SYMBOL_GROUPS  # ⬅️ 동적 호출 제거, data.utils 기준 고정 그룹 사용
         for idx, group in enumerate(groups):
             print(f"🚀 [train_symbol_group_loop] 그룹 #{idx+1}/{len(groups)} → {group} | mode=per_symbol_all_horizons")
 
