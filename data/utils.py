@@ -324,12 +324,54 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         return _dummy(symbol_name)
 
 # =========================
+# 내부 헬퍼 (정제/클립)  🔧 추가
+# =========================
+def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    """타임존/형/정렬/중복 제거 표준화"""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+    df = df.copy()
+    # timestamp 표준화
+    if "timestamp" in df.columns:
+        ts = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+    elif "time" in df.columns:
+        ts = pd.to_datetime(df["time"], errors="coerce", utc=True)
+    else:
+        ts = pd.NaT
+    df["timestamp"] = pd.to_datetime(ts).dt.tz_convert("Asia/Seoul")
+    # 필수 수치형
+    for c in ["open","high","low","close","volume"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        else:
+            df[c] = np.nan
+    df = df.dropna(subset=["timestamp","open","high","low","close","volume"])
+    df["datetime"] = df["timestamp"]
+    # 정렬/중복 제거
+    df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    return df[["timestamp","open","high","low","close","volume","datetime"]]
+
+def _clip_tail(df: pd.DataFrame, limit: int) -> pd.DataFrame:
+    """최신 limit개만 유지, 타임스탬프 역행 방지"""
+    if df is None or df.empty:
+        return df
+    if len(df) > limit:
+        df = df.iloc[-limit:].reset_index(drop=True)
+    # 역행 방지 (혹시 있을 역행 행 제거)
+    ts = pd.to_datetime(df["timestamp"])
+    mask = ts.diff().fillna(pd.Timedelta(seconds=0)) >= pd.Timedelta(seconds=0)
+    if not mask.all():
+        df = df[mask].reset_index(drop=True)
+    return df
+
+# =========================
 # 거래소 수집기(Bybit)
 # =========================
 def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
     real_symbol = SYMBOL_MAP["bybit"].get(symbol, symbol)
     target_rows = int(limit)
     collected_data, total_rows = [], 0
+    last_oldest = None  # 🔧 추가: 무진행(같은 최저 ts 반복) 방지
 
     while total_rows < target_rows:
         success = False
@@ -346,7 +388,7 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                 if end_time is not None:
                     params["end"] = int(end_time.timestamp() * 1000)
 
-                print(f"[📡 Bybit 요청] {real_symbol}-{interval} | 시도 {attempt+1}/{max_retry} | 요청 수량={request_limit}")
+                print(f"[📡 Bybit 요청] {real_symbol}-{interval} | 시도 {attempt+1}/{max_retry} | 요청 수량={request_limit} | end={end_time}")
                 res = requests.get(f"{BASE_URL}/v5/market/kline", params=params, timeout=10)
                 res.raise_for_status()
                 data = res.json()
@@ -363,16 +405,10 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                 df_chunk = pd.DataFrame(raw, columns=[
                     "timestamp", "open", "high", "low", "close", "volume", "turnover"
                 ])
-                df_chunk = df_chunk[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
-                df_chunk.dropna(subset=["open", "high", "low", "close", "volume"], inplace=True)
+                df_chunk = _normalize_df(df_chunk)
+
                 if df_chunk.empty:
                     break
-
-                df_chunk["timestamp"] = pd.to_datetime(df_chunk["timestamp"], unit="ms", errors="coerce")
-                df_chunk.dropna(subset=["timestamp"], inplace=True)
-                df_chunk["timestamp"] = df_chunk["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
-                df_chunk = df_chunk.sort_values("timestamp").reset_index(drop=True)
-                df_chunk["datetime"] = df_chunk["timestamp"]
 
                 collected_data.append(df_chunk)
                 total_rows += len(df_chunk)
@@ -381,7 +417,13 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                 if total_rows >= target_rows:
                     break
 
-                end_time = df_chunk["timestamp"].min() - pd.Timedelta(milliseconds=1)
+                oldest_ts = df_chunk["timestamp"].min()
+                if last_oldest is not None and pd.to_datetime(oldest_ts) >= pd.to_datetime(last_oldest):
+                    # 🔧 같은 경계 ts가 반복되면 더 과거로 강제 점프
+                    oldest_ts = pd.to_datetime(oldest_ts) - pd.Timedelta(minutes=1)
+                last_oldest = oldest_ts
+                end_time = pd.to_datetime(oldest_ts).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
+
                 time.sleep(0.2)
                 break
 
@@ -394,10 +436,7 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
             break
 
     if collected_data:
-        df = (pd.concat(collected_data, ignore_index=True)
-              .drop_duplicates(subset=["timestamp"])
-              .sort_values("timestamp")
-              .reset_index(drop=True))
+        df = _normalize_df(pd.concat(collected_data, ignore_index=True))
         print(f"[📊 수집 완료] {symbol}-{interval} → 총 {len(df)}개 봉 확보")
         return df
     else:
@@ -422,6 +461,7 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
 
     target_rows = int(limit)
     collected_data, total_rows = [], 0
+    last_oldest = None  # 🔧 추가: 무진행 방지
 
     while total_rows < target_rows:
         success = False
@@ -449,11 +489,7 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
                     "timestamp", "open", "high", "low", "close", "volume",
                     "close_time", "quote_asset_volume", "trades", "taker_base_vol", "taker_quote_vol", "ignore"
                 ])
-                df_chunk = df_chunk[["timestamp", "open", "high", "low", "close", "volume"]].apply(pd.to_numeric, errors="coerce")
-                df_chunk["timestamp"] = (pd.to_datetime(df_chunk["timestamp"], unit="ms", errors="coerce")
-                                          .dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul"))
-                df_chunk = df_chunk.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-                df_chunk["datetime"] = df_chunk["timestamp"]
+                df_chunk = _normalize_df(df_chunk)
 
                 if df_chunk.empty:
                     break
@@ -466,7 +502,11 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
                     break
 
                 oldest_ts = df_chunk["timestamp"].min()
-                end_time = oldest_ts - pd.Timedelta(milliseconds=1)
+                if last_oldest is not None and pd.to_datetime(oldest_ts) >= pd.to_datetime(last_oldest):
+                    oldest_ts = pd.to_datetime(oldest_ts) - pd.Timedelta(minutes=1)
+                last_oldest = oldest_ts
+                end_time = pd.to_datetime(oldest_ts).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
+
                 time.sleep(0.2)
                 break
 
@@ -479,10 +519,7 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
             break
 
     if collected_data:
-        df = (pd.concat(collected_data, ignore_index=True)
-              .drop_duplicates(subset=["timestamp"])
-              .sort_values("timestamp")
-              .reset_index(drop=True))
+        df = _normalize_df(pd.concat(collected_data, ignore_index=True))
         print(f"[📊 Binance 수집 완료] {symbol}-{interval} → 총 {len(df)}개 봉 확보")
         return df
     else:
@@ -521,9 +558,9 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
                 break
 
             oldest_ts = df_chunk["timestamp"].min()
-            end_time = oldest_ts - pd.Timedelta(milliseconds=1)
+            end_time = pd.to_datetime(oldest_ts).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
 
-        df_final = pd.concat(total_data, ignore_index=True) if total_data else pd.DataFrame()
+        df_final = _normalize_df(pd.concat(total_data, ignore_index=True)) if total_data else pd.DataFrame()
         print(f"[✅ {source_name} 수집 완료] {symbol}-{strategy} → {len(df_final)}개")
         return df_final
 
@@ -533,12 +570,12 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
         print(f"[⏳ Binance 보충 시작] 부족 {base_limit - len(df_bybit)}개")
         df_binance = fetch_until_target(get_kline_binance, "Binance")
 
-    df_all = pd.concat([df_bybit, df_binance], ignore_index=True)
+    df_all = _normalize_df(pd.concat([df_bybit, df_binance], ignore_index=True))
     if df_all.empty:
         print(f"[⏩ 학습 스킵] {symbol}-{strategy} → 거래소 데이터 전무")
         return pd.DataFrame()
 
-    df_all = df_all.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    df_all = _clip_tail(df_all.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True), base_limit)
 
     required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
     for col in required_cols:
@@ -578,16 +615,14 @@ def get_kline_by_strategy(symbol: str, strategy: str):
                 break
             df_bybit.append(df_chunk)
             total_bybit += len(df_chunk)
-            end_time = df_chunk["timestamp"].min() - pd.Timedelta(milliseconds=1)
+            oldest_ts = df_chunk["timestamp"].min()
+            end_time = pd.to_datetime(oldest_ts).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
             if len(df_chunk) < limit:
                 break
 
-        df_bybit = (pd.concat(df_bybit, ignore_index=True)
-                    .drop_duplicates(subset=["timestamp"])
-                    .sort_values("timestamp")
-                    .reset_index(drop=True)) if df_bybit else pd.DataFrame()
+        df_bybit = _normalize_df(pd.concat(df_bybit, ignore_index=True)) if df_bybit else pd.DataFrame()
 
-        # 2) Binance 보완 수집
+        # 2) Binance 보완 수집 (강화) 🔧: 부족하면 충분히 반복 보완
         df_binance = []
         total_binance = 0
         if len(df_bybit) < int(limit * 0.9):
@@ -600,28 +635,35 @@ def get_kline_by_strategy(symbol: str, strategy: str):
                         break
                     df_binance.append(df_chunk)
                     total_binance += len(df_chunk)
-                    end_time = df_chunk["timestamp"].min() - pd.Timedelta(milliseconds=1)
+                    oldest_ts = df_chunk["timestamp"].min()
+                    end_time = pd.to_datetime(oldest_ts).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
                     if len(df_chunk) < limit:
                         break
                 except Exception as be:
                     print(f"[❌ Binance 수집 실패] {symbol}-{strategy} → {be}")
                     break
 
-        df_binance = (pd.concat(df_binance, ignore_index=True)
-                      .drop_duplicates(subset=["timestamp"])
-                      .sort_values("timestamp")
-                      .reset_index(drop=True)) if df_binance else pd.DataFrame()
+        df_binance = _normalize_df(pd.concat(df_binance, ignore_index=True)) if df_binance else pd.DataFrame()
 
         # 3) 병합 + 정리
-        df_list = [df for df in [df_bybit, df_binance] if not df.empty]
-        df = (pd.concat(df_list, ignore_index=True)
-              .drop_duplicates(subset=["timestamp"])
-              .sort_values("timestamp")
-              .reset_index(drop=True)) if df_list else pd.DataFrame()
+        df_list = [df for df in [df_bybit, df_binance] if df is not None and not df.empty]
+        df = _normalize_df(pd.concat(df_list, ignore_index=True)) if df_list else pd.DataFrame()
+        df = _clip_tail(df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True), limit)
 
         total_count = len(df)
-        if total_count < limit:
-            print(f"[⚠️ 수집 수량 부족] {symbol}-{strategy} → 총 {total_count}개 (목표: {limit})")
+        # 🔧 최소 보장 수량: 오래된 심볼 보강
+        min_required = max(60, int(limit * 0.90))
+        if total_count < min_required:
+            print(f"[⚠️ 수집 수량 부족] {symbol}-{strategy} → 총 {total_count}개 (최소보장 {min_required}, 목표 {limit}) → 통합 재시도")
+            # 최종 통합 재시도 (Bybit+Binance 병행 수집기)
+            df_retry = get_merged_kline_by_strategy(symbol, strategy)
+            if not df_retry.empty and len(df_retry) > total_count:
+                df = _clip_tail(df_retry, limit)
+                total_count = len(df)
+
+        if total_count < min_required:
+            print(f"[🚨 최종 부족] {symbol}-{strategy} → {total_count}/{min_required} (학습/예측 영향 가능)")
+
         else:
             print(f"[✅ 수집 성공] {symbol}-{strategy} → 총 {total_count}개")
 
