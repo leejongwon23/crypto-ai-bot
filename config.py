@@ -163,7 +163,7 @@ def get_FAILLEARN():
 # ------------------------
 def _round2(x: float) -> float:
     """소수 셋째 자리 반올림(노이즈 제거)."""
-    return round(float(x), _ROUND_DECIMALS)
+    return round(float(x), _ROUNDS_DECIMALS) if False else round(float(x), _ROUND_DECIMALS)
 
 def _cap_positive_by_strategy(x: float, strategy: str) -> float:
     cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy, None)
@@ -384,6 +384,37 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
     if group_id is None:
         return all_ranges
     return all_ranges[group_id * group_size: (group_id + 1) * group_size]
+
+# ------------------------
+# 🔧 환경변수 기반 퍼포먼스/학습 토글 (신규)
+# ------------------------
+def _get_int(name, default):
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return int(default)
+
+def _get_float(name, default):
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return float(default)
+
+# Render 환경변수와 연결되는 값들
+CPU_THREADS        = _get_int("OMP_NUM_THREADS", 4)  # 내부 연산 스레드(모델 하나 기준)
+TRAIN_NUM_WORKERS  = _get_int("TRAIN_NUM_WORKERS", 2)
+TRAIN_BATCH_SIZE   = _get_int("TRAIN_BATCH_SIZE", 256)
+ORDERED_TRAIN      = _get_int("ORDERED_TRAIN", 1)    # 1이면 심볼별 단기→중기→장기 후 다음 심볼
+PREDICT_MIN_RETURN = _get_float("PREDICT_MIN_RETURN", 0.01)
+SSL_CACHE_DIR      = os.getenv("SSL_CACHE_DIR", "/persistent/ssl_models")
+
+# 외부에서 import 해서 쓰는 Getter
+def get_CPU_THREADS():        return CPU_THREADS
+def get_TRAIN_NUM_WORKERS():  return TRAIN_NUM_WORKERS
+def get_TRAIN_BATCH_SIZE():   return TRAIN_BATCH_SIZE
+def get_ORDERED_TRAIN():      return ORDERED_TRAIN
+def get_PREDICT_MIN_RETURN(): return PREDICT_MIN_RETURN
+def get_SSL_CACHE_DIR():      return SSL_CACHE_DIR
 
 # ------------------------
 # 전역 캐시된 값(기존)
