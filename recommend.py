@@ -1,4 +1,4 @@
-# recommend.py (FINAL — keep original flow, remove duplicate logging, handle dict return)
+# recommend.py (FINAL — define run_prediction, keep original flow, safe single-call)
 import os
 import csv
 import json
@@ -10,7 +10,7 @@ import pandas as pd
 
 from predict import predict
 from data.utils import SYMBOLS, get_kline_by_strategy
-from logger import ensure_prediction_log_exists  # ✅ 중복 로깅 제거: log_prediction은 predict()에서만
+from logger import ensure_prediction_log_exists  # ✅ prediction_log 보장
 from telegram_bot import send_message
 
 # 현재 KST 시각
@@ -27,8 +27,6 @@ os.makedirs("/persistent/logs", exist_ok=True)
 
 # ──────────────────────────────────────────────────────────────
 # 유틸: 전략별 누적 성공률/표본수 계산
-#   - status가 있으면 success/fail(+v_success/v_fail)만 집계
-#   - 없으면 success(True/False)로 집계
 # ──────────────────────────────────────────────────────────────
 def get_strategy_success_rate(strategy):
     try:
@@ -179,7 +177,75 @@ def _get_latest_price(symbol, strategy):
         return 0.0
 
 # ──────────────────────────────────────────────────────────────
-# 예측 실행 루프 — 핵심 수정: predict() dict 기준 + 중복 log 제거
+# (신규) 단일 심볼 예측 엔트리 — predict_trigger에서 사용
+#   - 모델 파일 없으면 안전히 skip
+#   - predict()는 내부에서 로깅 처리, 여기서는 메시지 전송 조건만 판단
+# ──────────────────────────────────────────────────────────────
+def run_prediction(symbol, strategy, source="변동성", allow_send=True):
+    # 로그 파일 보장
+    try:
+        ensure_prediction_log_exists()
+    except Exception as e:
+        print(f"[경고] prediction_log 보장 실패: {e}")
+
+    # 모델 존재 대략 체크
+    try:
+        model_dir = "/persistent/models"
+        files = os.listdir(model_dir) if os.path.exists(model_dir) else []
+        model_count = len([
+            f for f in files
+            if f.startswith(f"{symbol}_{strategy}_") and (f.endswith(".pt") or f.endswith(".meta.json"))
+        ])
+        if model_count == 0:
+            log_audit(symbol, strategy, None, "모델 없음")
+            return None
+    except Exception as e:
+        print(f"[경고] 모델 체크 실패: {e}")
+
+    try:
+        res = predict(symbol, strategy, source=source)
+        if isinstance(res, list):
+            res = res[0] if res else None
+        if not isinstance(res, dict):
+            log_audit(symbol, strategy, None, "predict() 결과 없음/형식오류")
+            return None
+
+        # 메시지용 필드 보강
+        strat_rate, _n = get_strategy_success_rate(strategy)
+        expected_ret = float(res.get("expected_return", 0.0))
+        entry_price = _get_latest_price(symbol, strategy)
+        direction = "롱" if expected_ret >= 0 else "숏"
+
+        enriched = dict(res)
+        enriched.update({
+            "symbol": symbol,
+            "strategy": strategy,
+            "price": entry_price,
+            "rate": expected_ret,
+            "direction": direction,
+            "success_rate": strat_rate,
+            "volatility": True,  # 트리거 기반 호출이므로 신호 강조
+        })
+
+        # 필터 통과 시 텔레그램 (배치와 동일한 기준)
+        if allow_send and check_prediction_filter(strategy):
+            try:
+                send_message(format_message(enriched))
+            except Exception as e:
+                print(f"[텔레그램 전송 실패] {e}")
+        else:
+            print(f"[알림 생략] {symbol}-{strategy} (필터 미통과 또는 전송 비활성)")
+
+        return enriched
+
+    except Exception as e:
+        print(f"[ERROR] {symbol}-{strategy} run_prediction 실패: {e}")
+        traceback.print_exc()
+        log_audit(symbol, strategy, None, f"예측실패:{e}")
+        return None
+
+# ──────────────────────────────────────────────────────────────
+# 예측 실행 루프 — predict() dict 기준 + 중복 log 제거
 # ──────────────────────────────────────────────────────────────
 def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=True):
     print(f"[예측 시작 - {strategy}] {len(symbols)}개 심볼")
