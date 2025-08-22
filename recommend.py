@@ -1,4 +1,4 @@
-# recommend.py (FINAL — define run_prediction, keep original flow, safe single-call)
+# recommend.py (FINAL — meta-only success rate + all-evals counting, safe single-call)
 import os
 import csv
 import json
@@ -10,7 +10,11 @@ import pandas as pd
 
 from predict import predict
 from data.utils import SYMBOLS, get_kline_by_strategy
-from logger import ensure_prediction_log_exists  # ✅ prediction_log 보장
+from logger import (
+    ensure_prediction_log_exists,     # ✅ prediction_log 보장
+    get_meta_success_rate,            # ✅ 메타(선택)만 성공률 집계
+    get_strategy_eval_count           # ✅ 메타+섀도우 모두 카운팅(성공/실패 평가된 건)
+)
 from telegram_bot import send_message
 
 # 현재 KST 시각
@@ -26,40 +30,13 @@ PREDICTION_LOG = "/persistent/prediction_log.csv"  # ✅ 루트 경로로 통일
 os.makedirs("/persistent/logs", exist_ok=True)
 
 # ──────────────────────────────────────────────────────────────
-# 유틸: 전략별 누적 성공률/표본수 계산
-# ──────────────────────────────────────────────────────────────
-def get_strategy_success_rate(strategy):
-    try:
-        if not os.path.exists(PREDICTION_LOG):
-            return 0.0, 0
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
-        df = df[df["strategy"] == strategy]
-
-        if "status" in df.columns:
-            st = df["status"].astype(str).str.lower()
-            df2 = df[st.isin(["success", "fail", "v_success", "v_fail"])]
-            n = len(df2)
-            if n == 0:
-                return 0.0, 0
-            succ = df2["status"].astype(str).str.lower().isin(["success", "v_success"]).sum()
-            return round(succ / n, 6), n
-        else:
-            if "success" not in df.columns:
-                return 0.0, 0
-            s = df["success"].map(lambda x: str(x).strip().lower() in ["true", "1", "yes", "y"])
-            n = s.notna().sum()
-            if n == 0:
-                return 0.0, 0
-            return round(s.mean(), 6), n
-    except Exception as e:
-        print(f"[get_strategy_success_rate 예외] {e}")
-        return 0.0, 0
-
-# ──────────────────────────────────────────────────────────────
-# 성공률 필터 (성공률 ≥65% + 최소 10회 기록)
+# 성공률 필터 (성공률 ≥65% + 최소 10회 평가 완료)
+#   - 성공률: 메타(선택된) 예측만 집계
+#   - 표본수: 메타+섀도우 모두 중 '성공/실패'로 평가 끝난 건수
 # ──────────────────────────────────────────────────────────────
 def check_prediction_filter(strategy, min_success_rate=0.65, min_samples=10):
-    rate, n = get_strategy_success_rate(strategy)
+    rate = float(get_meta_success_rate(strategy, min_samples=min_samples) or 0.0)
+    n = int(get_strategy_eval_count(strategy) or 0)
     return (n >= min_samples) and (rate >= min_success_rate)
 
 # ──────────────────────────────────────────────────────────────
@@ -79,7 +56,7 @@ def format_message(data):
     direction = data.get("direction", "롱")
     strategy = data.get("strategy", "전략")
     symbol = data.get("symbol", "종목")
-    success_rate = safe_float(data.get("success_rate"), 0.0)
+    success_rate = safe_float(data.get("success_rate"), 0.0)   # ✅ 메타 성공률만 반영
     rate = safe_float(data.get("rate"), 0.0)  # expected return (예: 0.125)
     reason = str(data.get("reason", "-")).strip()
     score = data.get("score", None)
@@ -100,7 +77,7 @@ def format_message(data):
         f"💰 진입가: {price:.4f} USDT\n"
         f"🎯 목표가: {target:.4f} USDT\n"
         f"🛡 손절가: {stop_loss:.4f} USDT (-2.00%)\n\n"
-        f"📊 최근 전략 성공률: {success_rate_pct:.2f}%"
+        f"📊 최근 전략 성공률(메타): {success_rate_pct:.2f}%"
     )
 
     if isinstance(score, (float, int)) and not math.isnan(score):
@@ -210,8 +187,8 @@ def run_prediction(symbol, strategy, source="변동성", allow_send=True):
             log_audit(symbol, strategy, None, "predict() 결과 없음/형식오류")
             return None
 
-        # 메시지용 필드 보강
-        strat_rate, _n = get_strategy_success_rate(strategy)
+        # 메시지용 필드 보강 — ✅ 메타 성공률만
+        meta_rate = float(get_meta_success_rate(strategy, min_samples=10) or 0.0)
         expected_ret = float(res.get("expected_return", 0.0))
         entry_price = _get_latest_price(symbol, strategy)
         direction = "롱" if expected_ret >= 0 else "숏"
@@ -223,11 +200,11 @@ def run_prediction(symbol, strategy, source="변동성", allow_send=True):
             "price": entry_price,
             "rate": expected_ret,
             "direction": direction,
-            "success_rate": strat_rate,
-            "volatility": True,  # 트리거 기반 호출이므로 신호 강조
+            "success_rate": meta_rate,    # ✅ 0~1 (메타만)
+            "volatility": True,           # 트리거 기반 호출이므로 신호 강조
         })
 
-        # 필터 통과 시 텔레그램 (배치와 동일한 기준)
+        # 필터 통과 시 텔레그램 (성공률/표본수 기준)
         if allow_send and check_prediction_filter(strategy):
             try:
                 send_message(format_message(enriched))
@@ -284,10 +261,8 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                 log_audit(symbol, strategy, None, "predict() 결과 없음/형식오류")
                 continue
 
-            # 전략 누적 성공률(메시지 표시용)
-            strat_rate, strat_n = get_strategy_success_rate(strategy)
-
-            # 텔레그램 메시지용으로 필드 보강
+            # 텔레그램 메시지용 필드 보강 — ✅ 메타 성공률만
+            meta_rate = float(get_meta_success_rate(strategy, min_samples=10) or 0.0)
             expected_ret = float(res.get("expected_return", 0.0))
             entry_price = _get_latest_price(symbol, strategy)
             direction = "롱" if expected_ret >= 0 else "숏"
@@ -299,7 +274,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                 "price": entry_price,
                 "rate": expected_ret,
                 "direction": direction,
-                "success_rate": strat_rate,   # 0~1
+                "success_rate": meta_rate,   # 0~1 (메타만)
                 "volatility": (vol_val > 0),
             })
 
@@ -325,7 +300,7 @@ def main(strategy, symbols=None, force=False, allow_prediction=True):
 
     results = run_prediction_loop(strategy, target_symbols, source="배치", allow_prediction=allow_prediction)
 
-    # ✅ 필터 통과했을 때만 텔레그램 발송 (성공률 65% + 최소 10회)
+    # ✅ 필터 통과했을 때만 텔레그램 발송 (성공률 65% + 최소 10회 평가 완료)
     if check_prediction_filter(strategy):
         for r in results:
             try:
