@@ -1,8 +1,8 @@
-# === logger.py (호환 최종본: 확장 스키마·자동정렬 + 인벤토리/통계 내보내기) ===
+# === logger.py (호환 최종본: 확장 스키마·자동정렬 + 인벤토리/통계 내보내기 + meta전용 성공률) ===
 import os, csv, json, datetime, pandas as pd, pytz, hashlib
 import sqlite3
 from collections import defaultdict
-import threading, time  # ⬅️ 추가: 동시성/재시도
+import threading, time  # ⬅️ 동시성/재시도
 
 # -------------------------
 # 기본 경로/디렉토리
@@ -55,7 +55,6 @@ def ensure_prediction_log_exists():
                 csv.writer(f).writerow(PREDICTION_HEADERS)
             print("[✅ ensure_prediction_log_exists] prediction_log.csv 생성(확장 스키마)")
         else:
-            # 헤더 점검: 없거나, 일부 누락이면 확장 스키마로 재작성(기존 데이터 보존)
             existing = _read_csv_header(PREDICTION_LOG)
             if not existing or "timestamp" not in existing or "symbol" not in existing:
                 bak = PREDICTION_LOG + ".bak"
@@ -63,7 +62,6 @@ def ensure_prediction_log_exists():
                 with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as out,\
                      open(bak, "r", encoding="utf-8-sig") as src:
                     w = csv.writer(out); w.writerow(PREDICTION_HEADERS)
-                    # 첫 줄은 헤더였으니 skip하고 전체 복사(열 개수 불일치시 자동 패딩)
                     reader = csv.reader(src)
                     try: next(reader)
                     except StopIteration: reader = []
@@ -71,9 +69,6 @@ def ensure_prediction_log_exists():
                         row = (row + [""]*len(PREDICTION_HEADERS))[:len(PREDICTION_HEADERS)]
                         w.writerow(row)
                 print("[✅ ensure_prediction_log_exists] 기존 파일 헤더 보정(확장) 완료")
-            else:
-                # 기존이 구(기본) 헤더여도 그대로 둔다(쓰기 시 자동 정렬)
-                pass
     except Exception as e:
         print(f"[⚠️ ensure_prediction_log_exists] 예외: {e}")
 
@@ -103,26 +98,23 @@ def get_feature_hash(feature_row) -> str:
         return "hash_error"
 
 # -------------------------
-# SQLite: 모델 성공/실패 집계
+# SQLite: 모델 성공/실패 집계 (필요 시 사용)
 # -------------------------
 _db_conn = None
 _DB_PATH = os.path.join(LOG_DIR, "failure_patterns.db")
-_db_lock = threading.RLock()  # ⬅️ 추가: 동시 쓰기 직렬화
+_db_lock = threading.RLock()
 
 def _apply_sqlite_pragmas(conn):
-    """WAL/동기화/타임아웃 설정으로 동시성·I/O 안정성 향상"""
     try:
         cur = conn.cursor()
-        # WAL이 이미 켜져 있어도 안전
         cur.execute("PRAGMA journal_mode=WAL;")
         cur.execute("PRAGMA synchronous=NORMAL;")
-        cur.execute("PRAGMA busy_timeout=5000;")  # 5초 대기
+        cur.execute("PRAGMA busy_timeout=5000;")
         cur.close()
     except Exception as e:
         print(f"[경고] PRAGMA 설정 실패 → {e}")
 
 def _connect_sqlite():
-    """타임아웃을 늘리고 check_same_thread=False로 연결"""
     conn = sqlite3.connect(_DB_PATH, timeout=30, check_same_thread=False)
     _apply_sqlite_pragmas(conn)
     return conn
@@ -140,16 +132,12 @@ def get_db_connection():
         return _db_conn
 
 def _sqlite_exec_with_retry(sql, params=(), retries=5, sleep_base=0.2, commit=False):
-    """
-    공통 재시도 유틸: database is locked / disk I/O error 대비
-    """
     last_err = None
     for attempt in range(1, retries + 1):
         try:
             with _db_lock:
                 conn = get_db_connection()
                 if conn is None:
-                    # 연결 재시도
                     conn = _connect_sqlite()
                     globals()['_db_conn'] = conn
                 cur = conn.cursor()
@@ -165,9 +153,7 @@ def _sqlite_exec_with_retry(sql, params=(), retries=5, sleep_base=0.2, commit=Fa
         except sqlite3.OperationalError as e:
             msg = str(e).lower()
             last_err = e
-            # 잠금/일시적 I/O 오류는 재시도
             if ("database is locked" in msg) or ("disk i/o error" in msg) or ("database is busy" in msg):
-                # 연결 재생성 시도
                 with _db_lock:
                     try:
                         if globals().get("_db_conn"):
@@ -181,13 +167,11 @@ def _sqlite_exec_with_retry(sql, params=(), retries=5, sleep_base=0.2, commit=Fa
                 time.sleep(sleep_base * attempt)
                 continue
             else:
-                # 다른 OperationalError는 즉시 중단
                 raise
         except Exception as e:
             last_err = e
             time.sleep(sleep_base * attempt)
             continue
-    # 모두 실패
     raise last_err if last_err else RuntimeError("sqlite exec failed")
 
 def ensure_success_db():
@@ -263,6 +247,42 @@ def _normalize_status(df: pd.DataFrame) -> pd.DataFrame:
     df["status"] = ""
     return df
 
+# ✅ [메타만] 성공률
+def get_meta_success_rate(strategy, min_samples: int = 1):
+    """
+    model == 'meta' 만 집계. status ∈ {success, fail, v_success, v_fail}
+    min_samples 미만이면 0.0 반환.
+    """
+    try:
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
+        if df.empty: return 0.0
+        df = df[(df.get("strategy") == strategy) & (df.get("model") == "meta")].copy()
+        if df.empty: return 0.0
+        # 상태 정규화
+        df["status"] = df.get("status")
+        if "status" not in df.columns or df["status"].isna().all():
+            # evaluate_predictions가 status 채우기 전에 호출될 수 있으니 보수적으로 제외
+            return 0.0
+        df["sflag"] = df["status"].astype(str).str.lower().isin(["success","v_success"]).astype(int)
+        df = df[df["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])]
+        n = len(df)
+        if n < max(1, min_samples): return 0.0
+        return round(df["sflag"].mean(), 6)
+    except Exception as e:
+        print(f"[오류] get_meta_success_rate 실패 → {e}")
+        return 0.0
+
+# ✅ [메타+섀도우] 평가 건수
+def get_strategy_eval_count(strategy):
+    try:
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
+        # status가 채워진(성공/실패) 모든 예측 포함 → 섀도우 포함
+        return len(df[(df.get("strategy")==strategy) & (df.get("status").astype(str).str.lower().isin(['success','fail','v_success','v_fail']))])
+    except Exception as e:
+        print(f"[오류] get_strategy_eval_count 실패 → {e}")
+        return 0
+
+# (참고) 전체 성공률(메타+섀도우 혼합) — 필요 시만 사용
 def get_actual_success_rate(strategy, min_samples: int = 1):
     try:
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
@@ -276,15 +296,6 @@ def get_actual_success_rate(strategy, min_samples: int = 1):
     except Exception as e:
         print(f"[오류] get_actual_success_rate 실패 → {e}")
         return 0.0
-
-def get_strategy_eval_count(strategy):
-    try:
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
-        df = _normalize_status(df)
-        return len(df[(df["strategy"]==strategy) & (df["status"].isin(['success','fail']))])
-    except Exception as e:
-        print(f"[오류] get_strategy_eval_count 실패 → {e}")
-        return 0
 
 def log_audit_prediction(s, t, status, reason):
     row = {
@@ -307,7 +318,6 @@ def log_audit_prediction(s, t, status, reason):
 # 예측 로그 (확장 인자 지원 + 자동 컬럼맞춤)
 # -------------------------
 def _align_row_to_header(row, header):
-    """현재 파일 헤더 길이에 맞게 row를 절단/패딩."""
     if len(row) < len(header):
         row = row + [""] * (len(header) - len(row))
     elif len(row) > len(header):
@@ -321,7 +331,7 @@ def log_prediction(
     label=None, group_id=None, model_symbol=None, model_name=None,
     source="일반", volatility=False, feature_vector=None,
     source_exchange="BYBIT",
-    # --- 확장 필드(없어도 자동 빈칸/0 처리) ---
+    # --- 확장 필드 ---
     regime=None, meta_choice=None, raw_prob=None, calib_prob=None, calib_ver=None
 ):
     from datetime import datetime as _dt
@@ -341,7 +351,7 @@ def log_prediction(
     entry_price = entry_price or 0.0
     target_price = target_price or 0.0
 
-    allowed_sources = ["일반","meta","evo_meta","baseline_meta","진화형","평가","단일","변동성","train_loop"]
+    allowed_sources = ["일반","meta","evo_meta","baseline_meta","진화형","평가","단일","변동성","train_loop","섀도우"]
     if source not in allowed_sources:
         source = "일반"
 
@@ -350,7 +360,6 @@ def log_prediction(
         (model or ""), predicted_class, top_k_str, note,
         str(success), reason, rate, return_value, label,
         group_id, model_symbol, model_name, source, volatility, source_exchange,
-        # --- 확장 필드 순서 고정 ---
         (regime or ""), (meta_choice or ""), 
         (float(raw_prob) if raw_prob is not None else ""),
         (float(calib_prob) if calib_prob is not None else ""),
@@ -358,7 +367,6 @@ def log_prediction(
     ]
 
     try:
-        # 현재 파일의 실제 헤더 파악
         write_header = not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0
         current_header = PREDICTION_HEADERS
         if not write_header:
@@ -402,7 +410,7 @@ def log_prediction(
         print(f"[⚠️ 예측 로그 기록 실패] {e}")
 
 # -------------------------
-# 학습 로그
+# 학습 로그 (훈련 성공/실패는 성공률 집계에서 제외)
 # -------------------------
 def log_training_result(
     symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0.0,
@@ -429,20 +437,13 @@ def log_training_result(
         print(f"[✅ 학습 로그 기록] {symbol}-{strategy} {model} status={status}")
     except Exception as e:
         print(f"[⚠️ 학습 로그 기록 실패] {e}")
-    try:
-        ensure_success_db()
-        update_model_success(symbol, strategy, model or "", str(status).lower() == "success")
-    except Exception as e:
-        print(f"[⚠️ model_success 집계 실패] {e}")
+    # ⚠️ 주의: 훈련 성공/실패를 model_success 집계에 넣지 않는다(예측 성능과 무관).
+    # 필요 시 별도 집계가 필요하면 별도 테이블을 사용하도록 한다.
 
 # -------------------------
-# 수익률 클래스 경계 로그 (호출 호환)
+# 수익률 클래스 경계 로그
 # -------------------------
 def log_class_ranges(symbol, strategy, group_id=None, class_ranges=None, note=""):
-    """
-    /persistent/logs/class_ranges.csv
-    컬럼: timestamp,symbol,strategy,group_id,idx,low,high,note
-    """
     import csv, os
     path = os.path.join(LOG_DIR, "class_ranges.csv")
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -466,13 +467,9 @@ def log_class_ranges(symbol, strategy, group_id=None, class_ranges=None, note=""
         print(f"[⚠️ 클래스경계 로그 실패] {e}")
 
 # -------------------------
-# 수익률 분포 요약 로그 (신규)
+# 수익률 분포 요약 로그
 # -------------------------
 def log_return_distribution(symbol, strategy, group_id=None, horizon_hours=None, summary: dict=None, note=""):
-    """
-    /persistent/logs/return_distribution.csv
-    컬럼: timestamp,symbol,strategy,group_id,horizon_hours,min,p25,p50,p75,p90,p95,p99,max,count,note
-    """
     path = os.path.join(LOG_DIR, "return_distribution.csv")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     now = now_kst().isoformat()
@@ -501,19 +498,13 @@ def log_return_distribution(symbol, strategy, group_id=None, horizon_hours=None,
         print(f"[⚠️ 수익률분포 로그 실패] {e}")
 
 # -------------------------
-# 라벨 분포 로그 (두 형태 모두 지원)
+# 라벨 분포 로그
 # -------------------------
 def log_label_distribution(
     symbol, strategy, group_id=None,
     counts: dict=None, total: int=None, n_unique: int=None, entropy: float=None,
     labels=None, note=""
 ):
-    """
-    호출 호환:
-      1) train.py 최신: counts=..., total=..., n_unique=..., entropy=...
-      2) 구버전: labels=[...]
-    기록: /persistent/logs/label_distribution.csv
-    """
     import json, math
 
     path = os.path.join(LOG_DIR, "label_distribution.csv")
@@ -521,7 +512,6 @@ def log_label_distribution(
     now = now_kst().isoformat()
 
     if counts is None:
-        # labels 기반으로 계산
         from collections import Counter
         try:
             labels_list = list(map(int, list(labels or [])))
@@ -536,12 +526,10 @@ def log_label_distribution(
         n_unique = len(cnt)
         entropy = round(float(entropy_calc), 6)
     else:
-        # counts 기반(이미 계산된 값 사용)
         counts = {int(k): int(v) for k, v in sorted(counts.items())}
         total = int(total if total is not None else sum(counts.values()))
         n_unique = int(n_unique if n_unique is not None else len(counts))
         if entropy is None:
-            import math
             probs = [c/total for c in counts.values()] if total > 0 else []
             entropy = round(float(-sum(p*math.log(p + 1e-12) for p in probs)) if probs else 0.0, 6)
         else:
@@ -569,14 +557,9 @@ def log_label_distribution(
         print(f"[⚠️ 라벨분포 로그 실패] {e}")
 
 # -------------------------
-# [ADD] 모델 인벤토리 조회
+# 모델 인벤토리 조회
 # -------------------------
 def get_available_models(symbol: str = None, strategy: str = None):
-    """
-    /persistent/models에서 .pt와 짝 메타(.meta.json)가 있는 항목만 나열.
-    선택적으로 symbol/strategy로 필터.
-    반환: [{pt_file, meta_file, symbol, strategy, model, group_id, num_classes, val_f1, timestamp}]
-    """
     try:
         model_dir = "/persistent/models"
         if not os.path.isdir(model_dir):
@@ -611,7 +594,6 @@ def get_available_models(symbol: str = None, strategy: str = None):
                 "val_f1": float(meta.get("metrics", {}).get("val_f1", 0.0)),
                 "timestamp": meta.get("timestamp", "")
             })
-        # 보기 좋게 정렬
         out.sort(key=lambda r: (r["symbol"], r["strategy"], r["model"], r["group_id"]))
         return out
     except Exception as e:
@@ -619,14 +601,9 @@ def get_available_models(symbol: str = None, strategy: str = None):
         return []
 
 # -------------------------
-# [ADD] 최근 예측 통계 산출/파일로 내보내기
+# 최근 예측 통계 내보내기
 # -------------------------
 def export_recent_model_stats(days: int = 7, out_path: str = None):
-    """
-    /persistent/prediction_log.csv를 읽어 최근 N일 통계를 /persistent/logs/recent_model_stats.csv로 저장.
-    - success/fail/v_success/v_fail만 집계
-    - 필드: symbol,strategy,model,total,success,fail,success_rate,last_ts
-    """
     try:
         ensure_prediction_log_exists()
         path = PREDICTION_LOG
@@ -640,8 +617,12 @@ def export_recent_model_stats(days: int = 7, out_path: str = None):
             return out_path
 
         # 상태 정규화
-        df = _normalize_status(df)
-        df = df[df["status"].isin(["success","fail","v_success","v_fail"])].copy()
+        df = df.copy()
+        if "status" in df.columns:
+            df["status"] = df["status"].astype(str).str.lower()
+            df = df[df["status"].isin(["success","fail","v_success","v_fail"])]
+        else:
+            return out_path
 
         # 최근 N일만
         ts = pd.to_datetime(df["timestamp"], errors="coerce")
@@ -667,15 +648,12 @@ def export_recent_model_stats(days: int = 7, out_path: str = None):
         ).reset_index()
         g["fail"] = g["total"] - g["success"]
         g["success_rate"] = (g["success"] / g["total"]).round(4)
-        # 정렬
         g = g.sort_values(["symbol","strategy","model","last_ts"]).copy()
-        # 저장
         g.to_csv(out_path, index=False, encoding="utf-8-sig")
         print(f"[✅ export_recent_model_stats] 저장: {out_path} (rows={len(g)})")
         return out_path
     except Exception as e:
         print(f"[⚠️ export_recent_model_stats 실패] {e}")
-        # 실패해도 빈 파일 보장
         try:
             pd.DataFrame(columns=["symbol","strategy","model","total","success","fail","success_rate","last_ts"]).to_csv(
                 out_path or os.path.join(LOG_DIR, "recent_model_stats.csv"), index=False, encoding="utf-8-sig")
