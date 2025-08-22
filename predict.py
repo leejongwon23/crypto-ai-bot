@@ -42,7 +42,7 @@ except Exception:
     def get_calibration_version():
         return "none"
 
-# logger: 헤더 고정값을 함께 가져와서 재작성 시 사용
+# logger
 from logger import log_prediction, update_model_success, PREDICTION_HEADERS, ensure_prediction_log_exists
 from failure_db import insert_failure_record, load_existing_failure_hashes, ensure_failure_db
 from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
@@ -61,7 +61,7 @@ NUM_CLASSES = get_NUM_CLASSES()
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-# ✅ 최소 예측 기대수익률 임계치(기본 1%) — 이보다 작은 클래스는 선택하지 않음
+# ✅ 최소 예측 기대수익률 임계치(기본 1%) — 이보다 작은 클래스는 선택/기록하지 않음
 MIN_RET_THRESHOLD = float(os.getenv("PREDICT_MIN_RETURN", "0.01"))
 
 # -----------------------------
@@ -90,13 +90,6 @@ def _get_feature_hash(feature_row) -> str:
 # 로컬 헬퍼: 모델 탐색
 # -----------------------------
 def get_available_models(symbol: str, strategy: str):
-    """
-    /persistent/models에서 다음 규칙을 만족하는 pt만 반환:
-      - 파일명 시작이 '{symbol}_'
-      - 파일명에 '_{strategy}_' 포함
-      - 동일 경로에 .meta.json 존재
-    반환 포맷: [{"pt_file": "...pt"}]
-    """
     try:
         if not os.path.isdir(MODEL_DIR):
             return []
@@ -155,10 +148,9 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 def predict(symbol, strategy, source="일반", model_type=None):
     """
     - 저장된 모델 출력 취합
-    - 진화형 메타러너가 있으면 사용, 없으면 '캘리브레이션 확률이 가장 높은 단일 모델'을 선택
+    - 진화형 메타러너가 있으면 사용, 없으면 '캘리브레이션 확률이 가장 높은 단일 모델' 선택
       success_score = adjusted_calib_prob[pred] × (0.5 + 0.5 × val_f1)
-    - 레짐/확률/캘리브 버전/선택모델은 note/top_k에 기록(스키마 불변)
-    - ✅ MIN_RET_THRESHOLD(기본 1%) 미만 클래스는 선택하지 않음
+    - ✅ MIN_RET_THRESHOLD(기본 1%) 미만 클래스는 선택/기록하지 않음
     """
     try:
         from evo_meta_learner import predict_evo_meta
@@ -177,7 +169,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
     if not symbol or not strategy:
         return failed_result(symbol or "None", strategy or "None", reason="invalid_symbol_strategy", X_input=None)
 
-    # 0) 현재 레짐
     regime = detect_regime(symbol, strategy, now=now_kst())
     calib_ver = get_calibration_version()
 
@@ -208,14 +199,14 @@ def predict(symbol, strategy, source="일반", model_type=None):
     recent_freq = get_recent_class_frequencies(strategy)
     feature_tensor = torch.tensor(feat_scaled[-1], dtype=torch.float32)
 
-    # 2) 각 모델의 확률/메타 읽기(+캘리브레이션/다양성 보정)
+    # 2) 모델별 확률 계산
     model_outputs_list, all_model_predictions = get_model_predictions(
         symbol, strategy, models, df, feat_scaled, window_list, recent_freq, regime=regime
     )
     if not model_outputs_list:
         return failed_result(symbol, strategy, reason="no_valid_model", X_input=feat_scaled[-1])
 
-    # 3) (옵션) 진화형 메타 사용 — ✅ 임계치 미만 클래스면 무시
+    # 3) (옵션) 진화형 메타 사용 — 임계 미만 클래스면 무시
     final_pred_class = None
     use_evo = False
     evo_model_path = os.path.join(MODEL_DIR, "evo_meta_learner.pt")
@@ -231,23 +222,22 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         final_pred_class = evo_pred
                         use_evo = True
                     else:
-                        print(f"[META] 진화형 예측 클래스 {evo_pred} 최소수익 {cls_min_evo:.4f} < 임계 {MIN_RET_THRESHOLD:.4f} → 무시")
+                        print(f"[META] 진화형 예측 {evo_pred} 최소수익 {cls_min_evo:.4f} < 임계 {MIN_RET_THRESHOLD:.4f} → 무시")
         except Exception as e:
             print(f"[⚠️ 진화형 메타러너 예외] {e}")
 
-    # 4) '최고 성공확률 단일 모델' 선택 (캘리브레이션 확률 기반 + ✅ 1% 필터)
+    # 4) '최고 성공확률 단일 모델' (1% 필터 포함)
     meta_choice = "best_single"
     chosen_info = None
     used_minret_filter = False
     if final_pred_class is None:
-        best_idx, best_score = -1, -1.0
-        best_pred = None
+        best_idx, best_score, best_pred = -1, -1.0, None
         for i, m in enumerate(model_outputs_list):
             calib_probs = m["calib_probs"]
             adj = adjust_probs_with_diversity(calib_probs, recent_freq, class_counts=None, alpha=0.10, beta=0.10)
             val_f1 = float(m.get("val_f1", 0.6))
 
-            # ✅ 임계치 필터 마스크 구성
+            # 임계치 필터 마스크
             valid_mask = np.zeros_like(adj, dtype=float)
             for ci in range(len(adj)):
                 try:
@@ -263,21 +253,19 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 prob_for_score = float(adj_filtered[pred])
                 used_filter_here = True
             else:
-                # 모든 클래스가 임계치 미만이면 원본 adj로 채점(단, 실제 선택 이후에 한 번 더 전역 검색 시도)
                 pred = int(np.argmax(adj))
                 prob_for_score = float(adj[pred])
                 used_filter_here = False
 
             score = prob_for_score * (0.5 + 0.5 * max(0.0, min(1.0, val_f1)))
-            model_outputs_list[i]["adjusted_probs"] = adj
-            model_outputs_list[i]["success_score"] = score
-            model_outputs_list[i]["filtered_used"] = used_filter_here
-            model_outputs_list[i]["filtered_probs"] = adj_filtered if used_filter_here else None
-            model_outputs_list[i]["candidate_pred"] = pred
+            m["adjusted_probs"] = adj
+            m["success_score"] = score
+            m["filtered_used"] = used_filter_here
+            m["filtered_probs"] = adj_filtered if used_filter_here else None
+            m["candidate_pred"] = pred
 
             if score > best_score:
-                best_score, best_idx = score, i
-                best_pred = pred
+                best_score, best_idx, best_pred = score, i, pred
                 used_minret_filter = used_filter_here
 
         final_pred_class = int(best_pred)
@@ -285,17 +273,14 @@ def predict(symbol, strategy, source="일반", model_type=None):
         chosen_info = model_outputs_list[best_idx]
     else:
         meta_choice = "evo_meta_learner"
-        # evo 사용 시에도, 로깅용 chosen_info는 최고 점수 모델로 채움(없으면 첫 모델)
         chosen_info = max(model_outputs_list, key=lambda m: m.get("success_score", 0.0)) if model_outputs_list else None
 
-    # ✅ 선택된 클래스가 임계치 미만이면, 전체 모델/확률을 가로질러 임계 이상 클래스 중 최우선 후보로 재선택
+    # 최종 가드: 임계 미만이면 전 모델을 가로질러 대체 후보 탐색
     try:
         cls_min_sel, _ = get_class_return_range(final_pred_class, symbol, strategy)
         if float(cls_min_sel) < MIN_RET_THRESHOLD:
-            print(f"[GUARD] 선택 클래스 {final_pred_class} 최소수익 {cls_min_sel:.4f} < 임계 {MIN_RET_THRESHOLD:.4f} → 대체 후보 탐색")
-            best_global_idx = None
-            best_global_score = -1.0
-            best_global_class = None
+            print(f"[GUARD] 선택 클래스 {final_pred_class} 최소수익 {cls_min_sel:.4f} < 임계 {MIN_RET_THRESHOLD:.4f} → 대체 탐색")
+            best_global_idx, best_global_score, best_global_class = None, -1.0, None
             for m in model_outputs_list:
                 adj = m.get("adjusted_probs", m["calib_probs"])
                 val_f1 = float(m.get("val_f1", 0.6))
@@ -306,15 +291,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
                             continue
                         score = float(adj[ci]) * (0.5 + 0.5 * max(0.0, min(1.0, val_f1)))
                         if score > best_global_score:
-                            best_global_score = score
-                            best_global_idx = m
-                            best_global_class = int(ci)
+                            best_global_score, best_global_idx, best_global_class = score, m, int(ci)
                     except Exception:
                         continue
             if best_global_class is not None:
-                final_pred_class = best_global_class
-                chosen_info = best_global_idx
-                used_minret_filter = True
+                final_pred_class, chosen_info, used_minret_filter = best_global_class, best_global_idx, True
             else:
                 return failed_result(symbol, strategy, reason="no_class_ge_min_return", X_input=feat_scaled[-1])
     except Exception as e:
@@ -322,7 +303,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
     print(f"[META] {'진화형' if meta_choice=='evo_meta_learner' else '최고확률모델'} 선택: 클래스 {final_pred_class}")
 
-    # 5) 로깅 및 성공판정
+    # 5) 로깅 및 성공판정(메타 최종)
     cls_min, _ = get_class_return_range(final_pred_class, symbol, strategy)
     current_price = float(df.iloc[-1]["close"])
     expected_ret = class_to_expected_return(final_pred_class, symbol, strategy)
@@ -342,7 +323,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[meta 실패 기록 오류] {e}")
 
-    # 상위 K 클래스 기록 (보정 기준)
     def _topk(probs, k=3):
         idx = np.argsort(probs)[::-1][:k]
         return [int(i) for i in idx]
@@ -359,7 +339,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         "used_minret_filter": bool(used_minret_filter)
     }
 
-    # top_k는 리스트로 전달 (logger가 문자열로 직렬화)
     log_prediction(
         symbol=symbol,
         strategy=strategy,
@@ -380,6 +359,71 @@ def predict(symbol, strategy, source="일반", model_type=None):
         group_id=(chosen_info.get("group_id") if chosen_info else None) if isinstance(chosen_info, dict) else None,
         feature_vector=feature_tensor.numpy()
     )
+
+    # 🔥 [추가] 메타에 선택되지 않은 "모든 모델"도 섀도우 예측으로 기록 → 평가/실패학습 대상
+    try:
+        for m in model_outputs_list:
+            # 메타가 참조한 chosen_info와 같은 모델이면(이미 위에서 기록됨) 패스
+            if chosen_info and m.get("model_path") == chosen_info.get("model_path"):
+                continue
+
+            adj = m.get("adjusted_probs", m["calib_probs"])
+            filt = m.get("filtered_probs", None)
+            # 임계치 만족하는 클래스 우선
+            if filt is not None and np.sum(filt) > 0:
+                pred_i = int(np.argmax(filt))
+                topk_src = filt
+            else:
+                # 필요한 경우 즉석 필터
+                mask = np.zeros_like(adj, dtype=float)
+                for ci in range(len(adj)):
+                    try:
+                        cmin, _ = get_class_return_range(ci, symbol, strategy)
+                        if float(cmin) >= MIN_RET_THRESHOLD:
+                            mask[ci] = 1.0
+                    except Exception:
+                        pass
+                adj2 = adj * mask
+                if np.sum(adj2) == 0:
+                    # 이 모델은 임계 이상 클래스가 없음 → 기록 생략(설계상 <1% 미포함)
+                    continue
+                adj2 = adj2 / np.sum(adj2)
+                pred_i = int(np.argmax(adj2))
+                topk_src = adj2
+
+            exp_ret_i = class_to_expected_return(pred_i, symbol, strategy)
+            top_k_i = [int(i) for i in np.argsort(topk_src)[::-1][:3]]
+            note_shadow = {
+                "regime": regime,
+                "shadow": True,
+                "model_path": os.path.basename(m.get("model_path","")),
+                "model_type": m.get("model_type",""),
+                "val_f1": float(m.get("val_f1",0.0)),
+                "calib_ver": calib_ver,
+                "min_return_threshold": float(MIN_RET_THRESHOLD)
+            }
+            log_prediction(
+                symbol=symbol,
+                strategy=strategy,
+                direction="예측(섀도우)",
+                entry_price=entry_price,
+                target_price=entry_price * (1 + exp_ret_i),
+                model=m.get("model_type","model"),
+                model_name=os.path.basename(m.get("model_path","")),
+                predicted_class=pred_i,
+                label=pred_i,
+                note=json.dumps(note_shadow, ensure_ascii=False),
+                top_k=top_k_i,
+                success=False,                   # 평가는 evaluate_predictions에서 판정
+                reason="shadow",
+                rate=exp_ret_i,
+                return_value=actual_return_meta, # 로깅 일관성용(실제 평가는 별도)
+                source="섀도우",
+                group_id=m.get("group_id", 0),
+                feature_vector=feature_tensor.numpy()
+            )
+    except Exception as e:
+        print(f"[섀도우 로깅 예외] {e}")
 
     return {
         "symbol": symbol,
@@ -403,7 +447,7 @@ def evaluate_predictions(get_price_fn):
     from failure_db import check_failure_exists
 
     ensure_failure_db()
-    ensure_prediction_log_exists()  # 헤더/파일 보장
+    ensure_prediction_log_exists()
 
     PREDICTION_LOG = PREDICTION_LOG_PATH
     now_local = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
@@ -443,7 +487,6 @@ def evaluate_predictions(get_price_fn):
                 label = int(float(r.get("label", -1))) if pd.notnull(r.get("label")) else -1
                 r["label"] = label
 
-                # 숫자화 안전 처리
                 try:
                     entry_price = float(r.get("entry_price", 0) or 0)
                 except Exception:
@@ -482,14 +525,13 @@ def evaluate_predictions(get_price_fn):
                     r.update({"status": "fail", "reason": "가격 데이터 없음", "return": 0.0, "return_value": 0.0})
                     updated.append(r); continue
 
-                # 🔒 평가 구간을 반드시 마감(deadline)까지만 제한
+                # 🔒 반드시 예측 시점~마감(deadline)까지만 평가
                 df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
                 df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
                 mask_window = (df["timestamp"] >= timestamp) & (df["timestamp"] <= deadline)
                 future_df = df.loc[mask_window]
 
                 if future_df.empty:
-                    # 마감 전이면 'pending', 마감 후면 'fail(데이터 부족)'
                     if now_local() < deadline:
                         r.update({"status": "pending", "reason": "⏳ 평가 대기 중(마감 전 데이터 없음)", "return": 0.0, "return_value": 0.0})
                         updated.append(r); continue
@@ -523,8 +565,8 @@ def evaluate_predictions(get_price_fn):
                 r.update({
                     "status": status,
                     "reason": f"[pred_class={pred_class}] gain={gain:.3f} (cls_min={cls_min}, cls_max={cls_max})",
-                    "return": round(gain, 5),           # UI 호환용
-                    "return_value": round(gain, 5),     # 스키마 정식 필드
+                    "return": round(gain, 5),
+                    "return_value": round(gain, 5),
                     "group_id": group_id
                 })
 
@@ -542,6 +584,7 @@ def evaluate_predictions(get_price_fn):
                     insert_failure_record(r, f"{symbol}-{strategy}-{now_local().isoformat()}",
                                           feature_vector=None, label=label)
 
+                # (선택) 통계 집계는 meta 한정 — 현 설계 유지
                 if model == "meta":
                     update_model_success(symbol, strategy, model, status in ["success", "v_success"])
 
@@ -550,16 +593,10 @@ def evaluate_predictions(get_price_fn):
                 r.update({"status": "fail", "reason": f"예외: {e}", "return": 0.0, "return_value": 0.0})
                 updated.append(r)
 
-    # ---------- 안전 재작성 (헤더 고정 + 숫자 정규화 + 🔐 KST 타임스탬프 표준화) ----------
+    # ---------- 안전 재작성 ----------
     def rewrite_prediction_log_canonical(path, rows):
-        """
-        - 헤더는 logger.PREDICTION_HEADERS + ['status','return'] 고정 순서.
-        - 숫자 필드(rate, return_value, entry_price, target_price, predicted_class, label, group_id) 정규화.
-        - volatility는 "True"/"False" 문자열로 정규화.
-        - 🔐 timestamp는 모두 Asia/Seoul 기준 ISO8601(+09:00)로 강제 통일 → naive/aware 혼재 방지.
-        """
         base = list(PREDICTION_HEADERS)
-        extras = ["status", "return"]  # UI 호환 컬럼은 끝에만 추가
+        extras = ["status", "return"]
         fieldnames = base + [c for c in extras if c not in base]
 
         def to_float(x, default=0.0):
@@ -581,12 +618,9 @@ def evaluate_predictions(get_price_fn):
         sanitized = []
         for r in rows:
             row = {k: "" for k in fieldnames}
-            # 원본 반영(교집합만)
             for k, v in r.items():
                 if k in row:
                     row[k] = v
-
-            # 🔐 timestamp 표준화 (Asia/Seoul)
             try:
                 ts_raw = r.get("timestamp", row.get("timestamp", ""))
                 ts = pd.to_datetime(ts_raw, errors="coerce")
@@ -601,30 +635,25 @@ def evaluate_predictions(get_price_fn):
             except Exception:
                 row["timestamp"] = now_kst().isoformat()
 
-            # 숫자 정규화
             row["rate"] = to_float(row.get("rate", 0.0), 0.0)
             rv = to_float(row.get("return_value", r.get("return", 0.0)), 0.0)
             row["return_value"] = rv
-            row["return"] = rv  # UI용 미러
+            row["return"] = rv
             row["entry_price"] = to_float(row.get("entry_price", 0.0), 0.0)
             row["target_price"] = to_float(row.get("target_price", 0.0), 0.0)
             row["predicted_class"] = to_int(row.get("predicted_class", -1), -1)
             row["label"] = to_int(row.get("label", -1), -1)
             row["group_id"] = to_int(row.get("group_id", 0), 0)
 
-            # 불리언은 문자열 "True"/"False" 로 정규화
             vol = str(r.get("volatility", row.get("volatility", ""))).strip().lower()
             row["volatility"] = "True" if vol in ["1", "true"] else ("False" if vol in ["0", "false"] else str(r.get("volatility", "")))
-
             sanitized.append(row)
 
         pd.DataFrame(sanitized, columns=fieldnames).to_csv(path, index=False, encoding="utf-8-sig")
 
-    # 원본 + 평가 결과 병합본을 고정 헤더로 재작성
     updated += evaluated
     rewrite_prediction_log_canonical(PREDICTION_LOG, updated)
 
-    # 평가 산출물 별도 저장
     def safe_write_csv(path, rows):
         if not rows:
             return
@@ -666,7 +695,6 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             num_classes = meta.get("num_classes", NUM_CLASSES)
             val_f1 = float(meta.get("metrics", {}).get("val_f1", 0.6))
 
-            # 그룹별 윈도우
             idx = min(int(group_id), max(0, len(window_list) - 1))
             window = window_list[idx]
             input_seq = feat_scaled[-window:]
@@ -688,7 +716,6 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
                 softmax_probs = F.softmax(out, dim=1)
                 raw_probs = softmax_probs.squeeze().cpu().numpy()
 
-            # 🔧 캘리브레이션 적용 (없으면 그대로)
             calib_probs = apply_calibration(
                 raw_probs,
                 symbol=symbol, strategy=strategy, regime=regime, model_meta=meta
