@@ -1,13 +1,15 @@
-# === predict_trigger.py (FINAL v2 — import guard + direct predict call) ===
-import os  # ✅ prediction_log 존재 확인/경로
+# === predict_trigger.py (MEM-SAFE FINAL) ===
+import os
 import pandas as pd
 import time
 import traceback
 import datetime
 import pytz
+from collections import Counter
+import numpy as np
 
 from data.utils import SYMBOLS, get_kline_by_strategy
-from logger import log_audit_prediction as log_audit, ensure_prediction_log_exists  # ✅ 추가: 로그 파일 보장
+from logger import log_audit_prediction as log_audit, ensure_prediction_log_exists
 
 # ▷ (옵션) 레짐/캘리브레이션: 없으면 안전 통과
 try:
@@ -22,29 +24,44 @@ except Exception:
     def get_calibration_version():
         return "none"
 
-last_trigger_time = {}
-now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+# ===== 설정(환경변수로 조절 가능) =====
 TRIGGER_COOLDOWN = {"단기": 3600, "중기": 10800, "장기": 21600}
 MODEL_TYPES = ["lstm", "cnn_lstm", "transformer"]
+MAX_LOOKBACK = int(os.getenv("TRIGGER_MAX_LOOKBACK", "180"))   # 전조 계산시 최근 N행만 사용
+RECENT_DAYS_FOR_FREQ = int(os.getenv("TRIGGER_FREQ_DAYS", "3"))
+CSV_CHUNKSIZE = int(os.getenv("TRIGGER_CSV_CHUNKSIZE", "50000"))
 
+last_trigger_time = {}
+now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+
+# ──────────────────────────────────────────────────────────────
+# 전조 조건
+# ──────────────────────────────────────────────────────────────
 def check_pre_burst_conditions(df, strategy):
     try:
         if df is None or len(df) < 10:
             print("[경고] 데이터 너무 적음 → fallback 조건 평가")
             return True
 
+        # 메모리/연산량 절약: 최근 구간만 사용
+        if MAX_LOOKBACK > 0 and len(df) > MAX_LOOKBACK:
+            df = df.tail(MAX_LOOKBACK)
+
         vol_increasing = df['volume'].iloc[-3] < df['volume'].iloc[-2] < df['volume'].iloc[-1]
         price_range = df['close'].iloc[-6:]
-        stable_price = (price_range.max() - price_range.min()) / price_range.mean() < 0.005
+        stable_price = (price_range.max() - price_range.min()) / (price_range.mean() + 1e-12) < 0.005
 
         ema_5 = df['close'].ewm(span=5).mean().iloc[-1] if len(df) >= 5 else df['close'].mean()
         ema_15 = df['close'].ewm(span=15).mean().iloc[-1] if len(df) >= 15 else df['close'].mean()
         ema_60 = df['close'].ewm(span=60).mean().iloc[-1] if len(df) >= 60 else df['close'].mean()
         ema_pack = max(ema_5, ema_15, ema_60) - min(ema_5, ema_15, ema_60)
-        ema_compressed = ema_pack / df['close'].iloc[-1] < 0.003
+        ema_compressed = ema_pack / (df['close'].iloc[-1] + 1e-12) < 0.003
 
-        bb_std = df['close'].rolling(window=20).std() if len(df) >= 20 else pd.Series([0.0])
-        expanding_band = bb_std.iloc[-2] < bb_std.iloc[-1] and bb_std.iloc[-1] > 0.002 if len(bb_std) >= 2 else True
+        if len(df) >= 20:
+            bb_std = df['close'].rolling(window=20).std()
+            expanding_band = (bb_std.iloc[-2] < bb_std.iloc[-1]) and (bb_std.iloc[-1] > 0.002)
+        else:
+            expanding_band = True
 
         if strategy == "단기":
             return sum([vol_increasing, stable_price, ema_compressed, expanding_band]) >= 2
@@ -62,8 +79,10 @@ def check_pre_burst_conditions(df, strategy):
 def check_model_quality(symbol, strategy):
     return True
 
+# ──────────────────────────────────────────────────────────────
+# 트리거 실행 루프
+# ──────────────────────────────────────────────────────────────
 def run():
-    # ✅ recommend 의존 제거, predict 직접 호출(임포트 가드)
     try:
         from predict import predict as _predict
     except Exception as e:
@@ -71,7 +90,6 @@ def run():
         traceback.print_exc()
         return
 
-    # ✅ 예측/평가 로그 파일이 없을 경우 헤더까지 생성 (안전)
     try:
         ensure_prediction_log_exists()
     except Exception as e:
@@ -97,7 +115,7 @@ def run():
                     continue
 
                 if check_pre_burst_conditions(df, strategy):
-                    # ✅ 트리거 직전 레짐/캘리브 프리로드(캐시/로그용)
+                    # 프리로드(로그용)
                     try:
                         regime = detect_regime(symbol, strategy, now=now_kst())
                         calib_ver = get_calibration_version()
@@ -123,41 +141,51 @@ def run():
 
     print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
 
-# ✅ 최근 클래스 빈도 계산 (루트 prediction_log 사용)
-from collections import Counter
-def get_recent_class_frequencies(strategy=None, recent_days=3):
+# ──────────────────────────────────────────────────────────────
+# 최근 클래스 빈도(메모리 안전: 청크 누산)
+# ──────────────────────────────────────────────────────────────
+def get_recent_class_frequencies(strategy=None, recent_days=RECENT_DAYS_FOR_FREQ):
+    path = "/persistent/prediction_log.csv"
+    if not os.path.exists(path):
+        return Counter()
+
+    cutoff = pd.Timestamp.now(tz="Asia/Seoul") - pd.Timedelta(days=int(recent_days))
+    cols = ["timestamp", "strategy", "predicted_class"]
+    freq = Counter()
+
     try:
-        path = "/persistent/prediction_log.csv"  # ✅ 루트
-        if not os.path.exists(path):
-            return Counter()
-        df = pd.read_csv(path, encoding="utf-8-sig")
-        if "predicted_class" not in df.columns or "timestamp" not in df.columns:
-            return Counter()
-        if strategy:
-            df = df[df["strategy"] == strategy]
+        for chunk in pd.read_csv(path, usecols=lambda c: c in cols, encoding="utf-8-sig",
+                                 chunksize=CSV_CHUNKSIZE, on_bad_lines="skip"):
+            if "timestamp" not in chunk.columns or "predicted_class" not in chunk.columns:
+                continue
+            if strategy:
+                chunk = chunk[chunk["strategy"] == strategy]
 
-        # ⛑️ 타임존 안전화
-        ts = pd.to_datetime(df["timestamp"], errors="coerce")
-        if getattr(ts.dt, "tz", None) is None:
-            ts = ts.dt.tz_localize("Asia/Seoul")
-        else:
+            # ts 파싱 최소화
+            ts = pd.to_datetime(chunk["timestamp"], errors="coerce", utc=True)
+            # KST 변환(naive도 안전히 처리)
             ts = ts.dt.tz_convert("Asia/Seoul")
-        df["timestamp"] = ts
+            mask = ts >= cutoff
+            if not mask.any():
+                continue
 
-        cutoff = pd.Timestamp.now(tz="Asia/Seoul") - pd.Timedelta(days=recent_days)
-        df = df[df["timestamp"] >= cutoff]
-
-        return Counter(df["predicted_class"].dropna().astype(int))
+            sub = chunk.loc[mask, "predicted_class"].dropna()
+            try:
+                vals = sub.astype(int).tolist()
+            except Exception:
+                vals = [int(float(x)) for x in sub if str(x).strip() != ""]
+            freq.update(vals)
+        return freq
     except Exception as e:
         print(f"[⚠️ get_recent_class_frequencies 예외] {e}")
         return Counter()
 
-import numpy as np
+# ──────────────────────────────────────────────────────────────
 def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict = None, alpha=0.10, beta=0.10):
-    probs = probs.copy()
-    if probs.ndim == 2:
-        probs = probs[0]
-    num_classes = len(probs)
+    p = probs.copy()
+    if p.ndim == 2:
+        p = p[0]
+    num_classes = len(p)
     total_recent = sum(recent_freq.values()) + 1e-6
 
     recent_weights = np.array([
@@ -176,10 +204,9 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
         class_weights = np.exp(np.ones(num_classes) * beta)
 
     class_weights = np.clip(class_weights, 0.85, 1.15)
-    combined_weights = np.clip(recent_weights * class_weights, 0.85, 1.15)
-    adjusted = probs * combined_weights
+    combined = np.clip(recent_weights * class_weights, 0.85, 1.15)
+    adjusted = p * combined
     s = adjusted.sum()
     if s <= 0:
-        return probs  # ⛑️ 원본 반환(가중치가 모두 0으로 붕괴하는 경우)
-    adjusted /= s
-    return adjusted
+        return p
+    return adjusted / s
