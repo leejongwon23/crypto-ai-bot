@@ -51,7 +51,6 @@ except Exception:
         "장기": {"interval": "D",   "limit": 500,  "binance_interval": "1d"},
     }
     def get_REGIME():
-        # 기본: 꺼짐(기존 동작과 동일)
         return {
             "enabled": False,
             "atr_window": 14,
@@ -114,7 +113,8 @@ def safe_failed_result(symbol, strategy, reason=""):
             "predicted_class": -1,
             "label": -1
         }
-        insert_failure_record(payload, feature_hash="utils_error", feature_vector=None, label=-1)
+        # ✅ train.py와 동일한 안전 시그니처
+        insert_failure_record(payload, feature_vector=[])
     except Exception as e:
         print(f"[⚠️ safe_failed_result 실패] {e}")
 
@@ -138,10 +138,7 @@ def get_btc_dominance():
         return BTC_DOMINANCE_CACHE["value"]
 
 # =========================
-# ✅ 공용: 미래 수익률 계산기 (선택 추출)
-#  - train.py의 _future_returns_by_timestamp 와 동일한 규칙을 사용
-#  - 단기=4h, 중기=24h, 장기=168h, tz=Asia/Seoul
-#  - high(없으면 close) 기준으로 lookahead 내 최대치 대비 현재 close 수익률
+# ✅ 공용: 미래 수익률 계산기
 # =========================
 def future_gains_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
     if df is None or len(df) == 0 or "timestamp" not in df.columns:
