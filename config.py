@@ -1,3 +1,5 @@
+# config.py (FINAL)
+
 import json
 import os
 
@@ -13,6 +15,9 @@ _default_config = {
     "MIN_FEATURES": 5,
     "SYMBOLS": ["BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "ADAUSDT"],
     "SYMBOL_GROUP_SIZE": 3,
+
+    # ✅ SSL 캐시 디렉토리(ssl_pretrain/train에서 공통 사용)
+    "SSL_CACHE_DIR": "/persistent/ssl_models",
 
     # --- [2] 레짐(시장상태) 태깅 옵션 ---
     "REGIME": {
@@ -163,7 +168,7 @@ def get_FAILLEARN():
 # ------------------------
 def _round2(x: float) -> float:
     """소수 셋째 자리 반올림(노이즈 제거)."""
-    return round(float(x), _ROUNDS_DECIMALS) if False else round(float(x), _ROUND_DECIMALS)
+    return round(float(x), _ROUND_DECIMALS)  # 오타 수정: _ROUNDS_DECIMALS → _ROUND_DECIMALS
 
 def _cap_positive_by_strategy(x: float, strategy: str) -> float:
     cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy, None)
@@ -352,7 +357,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
                         rets_dbg = np.minimum(rets_dbg, cap)
 
                     qs = np.quantile(rets_dbg, [0.00, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 1.00])
-                    def _r2(z): 
+                    def _r2(z):
                         return round(float(z), _ROUND_DECIMALS)
                     print(
                         f"[📈 수익률분포] {symbol}-{strategy} "
@@ -406,7 +411,7 @@ TRAIN_NUM_WORKERS  = _get_int("TRAIN_NUM_WORKERS", 2)
 TRAIN_BATCH_SIZE   = _get_int("TRAIN_BATCH_SIZE", 256)
 ORDERED_TRAIN      = _get_int("ORDERED_TRAIN", 1)    # 1이면 심볼별 단기→중기→장기 후 다음 심볼
 PREDICT_MIN_RETURN = _get_float("PREDICT_MIN_RETURN", 0.01)
-SSL_CACHE_DIR      = os.getenv("SSL_CACHE_DIR", "/persistent/ssl_models")
+SSL_CACHE_DIR      = os.getenv("SSL_CACHE_DIR", _default_config["SSL_CACHE_DIR"])
 
 # 외부에서 import 해서 쓰는 Getter
 def get_CPU_THREADS():        return CPU_THREADS
@@ -414,7 +419,7 @@ def get_TRAIN_NUM_WORKERS():  return TRAIN_NUM_WORKERS
 def get_TRAIN_BATCH_SIZE():   return TRAIN_BATCH_SIZE
 def get_ORDERED_TRAIN():      return ORDERED_TRAIN
 def get_PREDICT_MIN_RETURN(): return PREDICT_MIN_RETURN
-def get_SSL_CACHE_DIR():      return SSL_CACHE_DIR
+def get_SSL_CACHE_DIR():      return os.getenv("SSL_CACHE_DIR", _config.get("SSL_CACHE_DIR", _default_config["SSL_CACHE_DIR"]))
 
 # ------------------------
 # 전역 캐시된 값(기존)
