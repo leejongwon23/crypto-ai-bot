@@ -1,6 +1,6 @@
-# predict.py (FINAL — canonical rewrite + numeric sanitation + safe top_k + header-locked rewrite + KST timestamp normalization)
+# predict.py (FINAL — canonical rewrite + numeric sanitation + safe top_k + header-locked rewrite + KST timestamp normalization + anti-bias exploration)
 
-import os, sys, json, datetime, pytz
+import os, sys, json, datetime, pytz, random, time
 import numpy as np
 import pandas as pd
 import torch
@@ -64,6 +64,50 @@ now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 # ✅ 최소 예측 기대수익률 임계치(기본 1%) — 이보다 작은 클래스는 선택/기록하지 않음
 MIN_RET_THRESHOLD = float(os.getenv("PREDICT_MIN_RETURN", "0.01"))
 
+# =======================
+# (NEW) 탐험(Explore) 설정
+# =======================
+EXPLORE_STATE_PATH = "/persistent/logs/meta_explore_state.json"
+EXPLORE_EPS_BASE   = float(os.getenv("EXPLORE_EPS_BASE", "0.15"))   # 기본 ε
+EXPLORE_DECAY_MIN  = float(os.getenv("EXPLORE_DECAY_MIN", "120"))   # 최근 탐험 이후 ε 감쇄 시간(분)
+EXPLORE_NEAR_GAP   = float(os.getenv("EXPLORE_NEAR_GAP", "0.07"))   # 1·2등 점수차 ≤ 이하면 탐험 고려
+EXPLORE_GAMMA      = float(os.getenv("EXPLORE_GAMMA", "0.05"))      # 덜 선택된 모델 보너스 강도
+
+def _load_explore_state():
+    try:
+        if os.path.exists(EXPLORE_STATE_PATH):
+            with open(EXPLORE_STATE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def _save_explore_state(state):
+    try:
+        os.makedirs(os.path.dirname(EXPLORE_STATE_PATH), exist_ok=True)
+        with open(EXPLORE_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def _bump_model_usage(symbol, strategy, model_path, explored=False):
+    key = f"{symbol}|{strategy}"
+    st = _load_explore_state()
+    st.setdefault(key, {})
+    rec = st[key].setdefault(model_path, {"n": 0, "n_explore": 0, "last_explore_ts": 0.0})
+    rec["n"] = int(rec.get("n", 0)) + 1
+    if explored:
+        rec["n_explore"] = int(rec.get("n_explore", 0)) + 1
+        rec["last_explore_ts"] = float(time.time())
+    st[key][model_path] = rec
+    _save_explore_state(st)
+
+def _get_model_usage(symbol, strategy, model_path):
+    key = f"{symbol}|{strategy}"
+    st = _load_explore_state()
+    rec = ((st.get(key) or {}).get(model_path)) or {"n": 0, "n_explore": 0, "last_explore_ts": 0.0}
+    return int(rec.get("n", 0)), int(rec.get("n_explore", 0)), float(rec.get("last_explore_ts", 0.0))
+
 # -----------------------------
 # 로컬 헬퍼: feature hash
 # -----------------------------
@@ -75,7 +119,7 @@ def _get_feature_hash(feature_row) -> str:
         if isinstance(feature_row, torch.Tensor):
             arr = feature_row.detach().cpu().flatten().numpy().astype(float)
         elif isinstance(feature_row, np.ndarray):
-            arr = feature_row.flatten().astype(float)
+            arr = arr = feature_row.flatten().astype(float)
         elif isinstance(feature_row, (list, tuple)):
             arr = np.array(feature_row, dtype=float).flatten()
         else:
@@ -104,9 +148,8 @@ def get_available_models(symbol: str, strategy: str):
             if needle not in fn:
                 continue
             meta = os.path.join(MODEL_DIR, fn.replace(".pt", ".meta.json"))
-            if not os.path.exists(meta):
-                continue
-            items.append({"pt_file": fn})
+            if os.path.exists(meta):
+                items.append({"pt_file": fn})
         items.sort(key=lambda x: x["pt_file"])
         return items
     except Exception as e:
@@ -148,9 +191,10 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 def predict(symbol, strategy, source="일반", model_type=None):
     """
     - 저장된 모델 출력 취합
-    - 진화형 메타러너가 있으면 사용, 없으면 '캘리브레이션 확률이 가장 높은 단일 모델' 선택
+    - 진화형 메타러너가 있으면 사용, 없으면 '캘리브레이션 확률이 가장 높은 단일 모델(+탐험)' 선택
       success_score = adjusted_calib_prob[pred] × (0.5 + 0.5 × val_f1)
     - ✅ MIN_RET_THRESHOLD(기본 1%) 미만 클래스는 선택/기록하지 않음
+    - ✅ (NEW) 편향 방지: 점수 비슷할 때 가끔 다른 모델을 탐험적으로 선택
     """
     try:
         from evo_meta_learner import predict_evo_meta
@@ -208,7 +252,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
     # 3) (옵션) 진화형 메타 사용 — 임계 미만 클래스면 무시
     final_pred_class = None
+    meta_choice = "best_single"
+    chosen_info = None
+    used_minret_filter = False
     use_evo = False
+
     evo_model_path = os.path.join(MODEL_DIR, "evo_meta_learner.pt")
     if os.path.exists(evo_model_path):
         try:
@@ -226,12 +274,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[⚠️ 진화형 메타러너 예외] {e}")
 
-    # 4) '최고 성공확률 단일 모델' (1% 필터 포함)
-    meta_choice = "best_single"
-    chosen_info = None
-    used_minret_filter = False
+    # 4) '최고 성공확률 단일 모델' + (NEW) 탐험
     if final_pred_class is None:
+        # 각 모델의 점수 계산
         best_idx, best_score, best_pred = -1, -1.0, None
+        scores = []  # [(idx, score, candidate_pred)]
         for i, m in enumerate(model_outputs_list):
             calib_probs = m["calib_probs"]
             adj = adjust_probs_with_diversity(calib_probs, recent_freq, class_counts=None, alpha=0.10, beta=0.10)
@@ -263,17 +310,61 @@ def predict(symbol, strategy, source="일반", model_type=None):
             m["filtered_used"] = used_filter_here
             m["filtered_probs"] = adj_filtered if used_filter_here else None
             m["candidate_pred"] = pred
+            scores.append((i, score, pred))
 
             if score > best_score:
                 best_score, best_idx, best_pred = score, i, pred
                 used_minret_filter = used_filter_here
 
+        # ----- (NEW) 탐험 로직 -----
+        # 조건: 상위 2개 점수 차이가 크지 않으면(≤ EXPLORE_NEAR_GAP), ε 확률로 '덜 뽑힌 모델'을 선택
+        explore_used = False
+        explore_alt_idx = None
+        if len(scores) >= 2:
+            scores_sorted = sorted(scores, key=lambda x: x[1], reverse=True)
+            top1_i, top1_score, _ = scores_sorted[0]
+            top2_i, top2_score, _ = scores_sorted[1]
+            gap = float(top1_score - top2_score)
+
+            # 최근 탐험 감쇄 반영(심볼/전략 단위)
+            key = f"{symbol}|{strategy}"
+            st = _load_explore_state()
+            last_explore = 0.0
+            if key in st:
+                # 가장 최근 탐험 시각(해당 키 아래 기록 중 max)
+                last_explore = max((rec.get("last_explore_ts", 0.0) or 0.0) for rec in st[key].values()) if st[key] else 0.0
+            minutes_since = (time.time() - last_explore) / 60.0 if last_explore > 0 else 1e9
+            eps = EXPLORE_EPS_BASE * (0.5 if minutes_since < EXPLORE_DECAY_MIN else 1.0)
+
+            if gap <= EXPLORE_NEAR_GAP and random.random() < eps:
+                # 후보들에게 '덜 선택된 모델' 보너스 부여
+                cand_scores = []
+                for i, base_score, _pred in scores_sorted[:min(3, len(scores_sorted))]:
+                    mp = model_outputs_list[i].get("model_path", "")
+                    n_chosen, _n_exp, _ts = _get_model_usage(symbol, strategy, mp)
+                    bonus = EXPLORE_GAMMA / np.sqrt(1.0 + float(n_chosen))
+                    cand_scores.append((i, base_score + bonus, base_score, bonus))
+
+                cand_scores.sort(key=lambda x: x[1], reverse=True)
+                if cand_scores:
+                    explore_alt_idx = cand_scores[0][0]
+                    if explore_alt_idx != top1_i:
+                        # 대체 후보가 1등과 다르면 탐험 채택
+                        best_idx = explore_alt_idx
+                        best_pred = model_outputs_list[best_idx]["candidate_pred"]
+                        best_score = model_outputs_list[best_idx]["success_score"]
+                        explore_used = True
+                        meta_choice = "best_single_explore"
+
         final_pred_class = int(best_pred)
-        meta_choice = os.path.basename(model_outputs_list[best_idx]["model_path"])
         chosen_info = model_outputs_list[best_idx]
+        if meta_choice != "best_single_explore":
+            meta_choice = os.path.basename(chosen_info["model_path"])
     else:
         meta_choice = "evo_meta_learner"
         chosen_info = max(model_outputs_list, key=lambda m: m.get("success_score", 0.0)) if model_outputs_list else None
+        explore_used = False
+        explore_alt_idx = None
 
     # 최종 가드: 임계 미만이면 전 모델을 가로질러 대체 후보 탐색
     try:
@@ -296,6 +387,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         continue
             if best_global_class is not None:
                 final_pred_class, chosen_info, used_minret_filter = best_global_class, best_global_idx, True
+                explore_used = False  # 임계치 가드가 우선
             else:
                 return failed_result(symbol, strategy, reason="no_class_ge_min_return", X_input=feat_scaled[-1])
     except Exception as e:
@@ -329,6 +421,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
     calib_topk = _topk((chosen_info or model_outputs_list[0])["calib_probs"]) if (chosen_info or model_outputs_list) else []
 
+    # 탐험 이력 업데이트(메타가 best_single 계열일 때만 의미)
+    try:
+        if meta_choice in ["best_single_explore"] or (isinstance(chosen_info, dict) and chosen_info.get("model_path")):
+            _bump_model_usage(symbol, strategy, chosen_info.get("model_path", ""), explored=(meta_choice=="best_single_explore"))
+    except Exception as _e:
+        print(f"[탐험 상태 업데이트 실패] {_e}")
+
     note_payload = {
         "regime": regime,
         "meta_choice": meta_choice,
@@ -336,7 +435,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
         "calib_prob_pred": float((chosen_info or model_outputs_list[0])["calib_probs"][final_pred_class]) if (chosen_info or model_outputs_list) else None,
         "calib_ver": calib_ver,
         "min_return_threshold": float(MIN_RET_THRESHOLD),
-        "used_minret_filter": bool(used_minret_filter)
+        "used_minret_filter": bool(used_minret_filter),
+        "explore_used": bool(explore_used),
+        "explore_alt_idx": int(explore_alt_idx) if explore_used and explore_alt_idx is not None else ""
     }
 
     log_prediction(
@@ -346,7 +447,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         entry_price=entry_price,
         target_price=entry_price * (1 + expected_ret),
         model="meta",
-        model_name="evo_meta_learner" if meta_choice=="evo_meta_learner" else "best_single",
+        model_name="evo_meta_learner" if meta_choice=="evo_meta_learner" else meta_choice,
         predicted_class=final_pred_class,
         label=final_pred_class,
         note=json.dumps(note_payload, ensure_ascii=False),
@@ -360,10 +461,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
         feature_vector=feature_tensor.numpy()
     )
 
-    # 🔥 [추가] 메타에 선택되지 않은 "모든 모델"도 섀도우 예측으로 기록 → 평가/실패학습 대상
+    # 🔥 메타에 선택되지 않은 "모든 모델"도 섀도우 예측으로 기록 → 평가/실패학습 대상
     try:
         for m in model_outputs_list:
-            # 메타가 참조한 chosen_info와 같은 모델이면(이미 위에서 기록됨) 패스
             if chosen_info and m.get("model_path") == chosen_info.get("model_path"):
                 continue
 
@@ -374,7 +474,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 pred_i = int(np.argmax(filt))
                 topk_src = filt
             else:
-                # 필요한 경우 즉석 필터
                 mask = np.zeros_like(adj, dtype=float)
                 for ci in range(len(adj)):
                     try:
@@ -385,7 +484,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         pass
                 adj2 = adj * mask
                 if np.sum(adj2) == 0:
-                    # 이 모델은 임계 이상 클래스가 없음 → 기록 생략(설계상 <1% 미포함)
                     continue
                 adj2 = adj2 / np.sum(adj2)
                 pred_i = int(np.argmax(adj2))
@@ -417,7 +515,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 success=False,                   # 평가는 evaluate_predictions에서 판정
                 reason="shadow",
                 rate=exp_ret_i,
-                return_value=actual_return_meta, # 로깅 일관성용(실제 평가는 별도)
+                return_value=actual_return_meta,
                 source="섀도우",
                 group_id=m.get("group_id", 0),
                 feature_vector=feature_tensor.numpy()
