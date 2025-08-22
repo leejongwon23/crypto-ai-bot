@@ -1,6 +1,6 @@
-# predict.py (FINAL — canonical rewrite + numeric sanitation + safe top_k + header-locked rewrite + KST timestamp normalization + anti-bias exploration)
+# predict.py (FINAL — canonical rewrite + numeric sanitation + safe top_k + KST timestamp normalization + anti-bias exploration + memory-safe evaluation)
 
-import os, sys, json, datetime, pytz, random, time
+import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv
 import numpy as np
 import pandas as pd
 import torch
@@ -119,7 +119,7 @@ def _get_feature_hash(feature_row) -> str:
         if isinstance(feature_row, torch.Tensor):
             arr = feature_row.detach().cpu().flatten().numpy().astype(float)
         elif isinstance(feature_row, np.ndarray):
-            arr = arr = feature_row.flatten().astype(float)
+            arr = feature_row.flatten().astype(float)  # ← 중복 대입 버그 수정
         elif isinstance(feature_row, (list, tuple)):
             arr = np.array(feature_row, dtype=float).flatten()
         else:
@@ -317,7 +317,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 used_minret_filter = used_filter_here
 
         # ----- (NEW) 탐험 로직 -----
-        # 조건: 상위 2개 점수 차이가 크지 않으면(≤ EXPLORE_NEAR_GAP), ε 확률로 '덜 뽑힌 모델'을 선택
         explore_used = False
         explore_alt_idx = None
         if len(scores) >= 2:
@@ -331,7 +330,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             st = _load_explore_state()
             last_explore = 0.0
             if key in st:
-                # 가장 최근 탐험 시각(해당 키 아래 기록 중 max)
                 last_explore = max((rec.get("last_explore_ts", 0.0) or 0.0) for rec in st[key].values()) if st[key] else 0.0
             minutes_since = (time.time() - last_explore) / 60.0 if last_explore > 0 else 1e9
             eps = EXPLORE_EPS_BASE * (0.5 if minutes_since < EXPLORE_DECAY_MIN else 1.0)
@@ -536,12 +534,17 @@ def predict(symbol, strategy, source="일반", model_type=None):
     }
 
 # -----------------------------
-# 배치 평가
+# 배치 평가 (메모리 안전 스트리밍 버전)
 # -----------------------------
 def evaluate_predictions(get_price_fn):
-    import csv, os
+    """
+    대용량 prediction_log.csv 도 메모리 폭주 없이 평가.
+    - 입력: 원본 CSV 줄단위 읽기
+    - 출력1: 임시 파일에 즉시 쓰기 → 완료 후 원자적 교체
+    - 출력2: evaluation_YYYY-MM-DD.csv (평가된 행만 스트리밍 기록)
+    - 출력3: wrong_YYYY-MM-DD.csv (실패만 스트리밍 기록)
+    """
     import pandas as pd
-    from collections import defaultdict
     from failure_db import check_failure_exists
 
     ensure_failure_db()
@@ -551,222 +554,238 @@ def evaluate_predictions(get_price_fn):
     now_local = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
     date_str = now_local().strftime("%Y-%m-%d")
     LOG_DIR = "/persistent/logs"
+    os.makedirs(LOG_DIR, exist_ok=True)
     EVAL_RESULT = os.path.join(LOG_DIR, f"evaluation_{date_str}.csv")
     WRONG = os.path.join(LOG_DIR, f"wrong_{date_str}.csv")
 
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
-    updated, evaluated = [], []
 
+    # 준비: 원본 열 헤더
     try:
-        rows = list(csv.DictReader(open(PREDICTION_LOG, "r", encoding="utf-8-sig")))
-        if not rows:
-            return
+        with open(PREDICTION_LOG, "r", encoding="utf-8-sig", newline="") as f_in:
+            reader = csv.DictReader(f_in)
+            if reader.fieldnames is None:
+                print("[오류] prediction_log.csv 헤더 없음")
+                return
+            # 로그 표준 헤더 + 추가필드 고정
+            base = list(PREDICTION_HEADERS)
+            extras = ["status", "return"]
+            fieldnames = base + [c for c in extras if c not in base]
+
+            # 임시 파일 준비
+            dir_name = os.path.dirname(PREDICTION_LOG) or "."
+            fd_tmp, tmp_path = tempfile.mkstemp(prefix="predlog_", suffix=".csv", dir=dir_name, text=True)
+            os.close(fd_tmp)  # DictWriter로 다시 열기
+            with open(tmp_path, "w", encoding="utf-8-sig", newline="") as f_tmp, \
+                 open(EVAL_RESULT, "w", encoding="utf-8-sig", newline="") as f_eval, \
+                 open(WRONG, "w", encoding="utf-8-sig", newline="") as f_wrong:
+
+                w_all = csv.DictWriter(f_tmp, fieldnames=fieldnames)
+                w_all.writeheader()
+
+                eval_fields_written = False
+                wrong_fields_written = False
+
+                for r in reader:
+                    try:
+                        # 이미 상태 확정이면 그대로 복사
+                        if r.get("status") not in [None, "", "pending", "v_pending"]:
+                            # 누락 필드 보정해 쓰기
+                            out = {k: r.get(k, "") for k in fieldnames}
+                            w_all.writerow(out)
+                            continue
+
+                        symbol = r.get("symbol", "UNKNOWN")
+                        strategy = r.get("strategy", "알수없음")
+                        model = r.get("model", "unknown")
+                        # group_id 정수화
+                        try:
+                            group_id = int(float(r.get("group_id", 0)))
+                        except Exception:
+                            group_id = 0
+
+                        # 클래스/라벨 정수화
+                        def to_int(x, default):
+                            try:
+                                if x in [None, ""]:
+                                    return default
+                                return int(float(x))
+                            except Exception:
+                                return default
+                        pred_class = to_int(r.get("predicted_class", -1), -1)
+                        label = to_int(r.get("label", -1), -1)
+                        r["label"] = label
+
+                        # 가격 체크
+                        try:
+                            entry_price = float(r.get("entry_price", 0) or 0)
+                        except Exception:
+                            entry_price = 0.0
+
+                        if entry_price <= 0 or label == -1:
+                            reason = "entry_price 오류 또는 label=-1"
+                            r.update({"status": "fail", "reason": reason, "return": 0.0, "return_value": 0.0})
+                            # 로깅
+                            log_prediction(
+                                symbol=symbol, strategy=strategy, direction="예측실패",
+                                entry_price=entry_price, target_price=entry_price,
+                                timestamp=now_local().isoformat(), model=model, predicted_class=pred_class,
+                                success=False, reason=reason, rate=0.0, return_value=0.0,
+                                volatility=False, source="평가", label=label, group_id=group_id
+                            )
+                            if not check_failure_exists(r):
+                                insert_failure_record(r, f"{symbol}-{strategy}-{now_local().isoformat()}",
+                                                     feature_vector=None, label=label)
+                            w_all.writerow({k: r.get(k, "") for k in fieldnames})
+                            # 실패는 WRONG에도 즉시 쓰기
+                            if not wrong_fields_written:
+                                wrong_writer = csv.DictWriter(f_wrong, fieldnames=sorted(r.keys()))
+                                wrong_writer.writeheader()
+                                wrong_fields_written = True
+                            wrong_writer.writerow({k: r.get(k, "") for k in r.keys()})
+                            continue
+
+                        # 타임스탬프
+                        ts = pd.to_datetime(r.get("timestamp"), errors="coerce")
+                        if ts is None or pd.isna(ts):
+                            r.update({"status": "fail", "reason": "timestamp 파싱 실패", "return": 0.0, "return_value": 0.0})
+                            w_all.writerow({k: r.get(k, "") for k in fieldnames})
+                            # 실패 즉시 WRONG 기록
+                            if not wrong_fields_written:
+                                wrong_writer = csv.DictWriter(f_wrong, fieldnames=sorted(r.keys()))
+                                wrong_writer.writeheader()
+                                wrong_fields_written = True
+                            wrong_writer.writerow({k: r.get(k, "") for k in r.keys()})
+                            continue
+                        if ts.tzinfo is None:
+                            ts = ts.tz_localize("Asia/Seoul")
+                        else:
+                            ts = ts.tz_convert("Asia/Seoul")
+
+                        eval_hours = eval_horizon_map.get(strategy, 6)
+                        deadline = ts + pd.Timedelta(hours=eval_hours)
+
+                        df_price = get_price_fn(symbol, strategy)
+                        if df_price is None or "timestamp" not in df_price.columns:
+                            r.update({"status": "fail", "reason": "가격 데이터 없음", "return": 0.0, "return_value": 0.0})
+                            w_all.writerow({k: r.get(k, "") for k in fieldnames})
+                            if not wrong_fields_written:
+                                wrong_writer = csv.DictWriter(f_wrong, fieldnames=sorted(r.keys()))
+                                wrong_writer.writeheader()
+                                wrong_fields_written = True
+                            wrong_writer.writerow({k: r.get(k, "") for k in r.keys()})
+                            continue
+
+                        # 평가 구간 제한
+                        dfp = df_price.copy()
+                        dfp["timestamp"] = pd.to_datetime(dfp["timestamp"], errors="coerce")
+                        dfp["timestamp"] = dfp["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+                        mask_window = (dfp["timestamp"] >= ts) & (dfp["timestamp"] <= deadline)
+                        future_df = dfp.loc[mask_window]
+
+                        if future_df.empty:
+                            if now_local() < deadline:
+                                r.update({"status": "pending", "reason": "⏳ 평가 대기 중(마감 전 데이터 없음)", "return": 0.0, "return_value": 0.0})
+                                w_all.writerow({k: r.get(k, "") for k in fieldnames})
+                                continue
+                            else:
+                                r.update({"status": "fail", "reason": "마감까지 데이터 없음", "return": 0.0, "return_value": 0.0})
+                                w_all.writerow({k: r.get(k, "") for k in fieldnames})
+                                if not wrong_fields_written:
+                                    wrong_writer = csv.DictWriter(f_wrong, fieldnames=sorted(r.keys()))
+                                    wrong_writer.writeheader()
+                                    wrong_fields_written = True
+                                wrong_writer.writerow({k: r.get(k, "") for k in r.keys()})
+                                continue
+
+                        actual_max = float(future_df["high"].max())
+                        gain = (actual_max - entry_price) / (entry_price + 1e-12)
+
+                        if pred_class >= 0:
+                            cls_min, cls_max = get_class_return_range(pred_class, symbol, strategy)
+                        else:
+                            cls_min, cls_max = (0.0, 0.0)
+
+                        reached_target = gain >= cls_min
+
+                        if now_local() < deadline:
+                            if reached_target:
+                                status = "success"
+                            else:
+                                r.update({"status": "pending", "reason": "⏳ 평가 대기 중", "return": round(gain, 5), "return_value": round(gain, 5)})
+                                w_all.writerow({k: r.get(k, "") for k in fieldnames})
+                                continue
+                        else:
+                            status = "success" if reached_target else "fail"
+
+                        vol = str(r.get("volatility", "")).strip().lower() in ["1", "true"]
+                        if vol:
+                            status = "v_success" if status == "success" else "v_fail"
+
+                        r.update({
+                            "status": status,
+                            "reason": f"[pred_class={pred_class}] gain={gain:.3f} (cls_min={cls_min}, cls_max={cls_max})",
+                            "return": round(gain, 5),
+                            "return_value": round(gain, 5),
+                            "group_id": group_id
+                        })
+
+                        # 로그 파일에 평가 기록(append)
+                        log_prediction(
+                            symbol=symbol, strategy=strategy, direction=f"평가:{status}",
+                            entry_price=entry_price, target_price=entry_price * (1 + gain),
+                            timestamp=now_local().isoformat(), model=model, predicted_class=pred_class,
+                            success=(status in ["success", "v_success"]), reason=r["reason"],
+                            rate=gain, return_value=gain, volatility=vol, source="평가",
+                            label=label, group_id=group_id
+                        )
+
+                        if status in ["fail", "v_fail"] and not check_failure_exists(r):
+                            insert_failure_record(r, f"{symbol}-{strategy}-{now_local().isoformat()}",
+                                                  feature_vector=None, label=label)
+
+                        if model == "meta":
+                            update_model_success(symbol, strategy, model, status in ["success", "v_success"])
+
+                        # 전체 로그 재작성 스트림에 한 줄 쓰기
+                        w_all.writerow({k: r.get(k, "") for k in fieldnames})
+
+                        # 평가결과·실패 파일도 스트리밍 쓰기
+                        if not eval_fields_written:
+                            eval_writer = csv.DictWriter(f_eval, fieldnames=sorted(r.keys()))
+                            eval_writer.writeheader()
+                            eval_fields_written = True
+                        eval_writer.writerow({k: r.get(k, "") for k in r.keys()})
+
+                        if status in ["fail", "v_fail"]:
+                            if not wrong_fields_written:
+                                wrong_writer = csv.DictWriter(f_wrong, fieldnames=sorted(r.keys()))
+                                wrong_writer.writeheader()
+                                wrong_fields_written = True
+                            wrong_writer.writerow({k: r.get(k, "") for k in r.keys()})
+
+                    except Exception as e:
+                        # 예외시 행을 fail로 마킹하고 그대로 유지
+                        r.update({"status": "fail", "reason": f"예외: {e}", "return": 0.0, "return_value": 0.0})
+                        w_all.writerow({k: r.get(k, "") for k in fieldnames})
+                        if not wrong_fields_written:
+                            wrong_writer = csv.DictWriter(f_wrong, fieldnames=sorted(r.keys()))
+                            wrong_writer.writeheader()
+                            wrong_fields_written = True
+                        wrong_writer.writerow({k: r.get(k, "") for k in r.keys()})
+
+            # 원자적 교체
+            shutil.move(tmp_path, PREDICTION_LOG)
+            print("[✅ 평가 완료] 스트리밍 재작성 성공")
+    except FileNotFoundError:
+        print(f"[정보] {PREDICTION_LOG} 없음 → 평가 스킵")
     except Exception as e:
-        print(f"[오류] prediction_log.csv 읽기 실패 → {e}")
-        return
-
-    grouped_preds = defaultdict(list)
-    for r in rows:
-        key = (r.get("symbol"), r.get("strategy"), r.get("timestamp"))
-        grouped_preds[key].append(r)
-
-    for key, preds in grouped_preds.items():
-        for r in preds:
-            try:
-                if r.get("status") not in [None, "", "pending", "v_pending"]:
-                    updated.append(r); continue
-
-                symbol = r.get("symbol", "UNKNOWN")
-                strategy = r.get("strategy", "알수없음")
-                model = r.get("model", "unknown")
-                group_id = int(float(r.get("group_id", 0))) if str(r.get("group_id", "")).strip().replace(".","",1).isdigit() else 0
-
-                pred_class = int(float(r.get("predicted_class", -1))) if pd.notnull(r.get("predicted_class")) else -1
-                label = int(float(r.get("label", -1))) if pd.notnull(r.get("label")) else -1
-                r["label"] = label
-
-                try:
-                    entry_price = float(r.get("entry_price", 0) or 0)
-                except Exception:
-                    entry_price = 0.0
-
-                if entry_price <= 0 or label == -1:
-                    reason = "entry_price 오류 또는 label=-1"
-                    r.update({"status": "fail", "reason": reason, "return": 0.0, "return_value": 0.0})
-                    log_prediction(
-                        symbol=symbol, strategy=strategy, direction="예측실패",
-                        entry_price=entry_price, target_price=entry_price,
-                        timestamp=now_local().isoformat(), model=model, predicted_class=pred_class,
-                        success=False, reason=reason, rate=0.0, return_value=0.0,
-                        volatility=False, source="평가", label=label, group_id=group_id
-                    )
-                    if not check_failure_exists(r):
-                        from failure_db import insert_failure_record
-                        insert_failure_record(r, f"{symbol}-{strategy}-{now_local().isoformat()}",
-                                              feature_vector=None, label=label)
-                    updated.append(r); continue
-
-                timestamp = pd.to_datetime(r.get("timestamp"), errors="coerce")
-                if timestamp is None or pd.isna(timestamp):
-                    r.update({"status": "fail", "reason": "timestamp 파싱 실패", "return": 0.0, "return_value": 0.0})
-                    updated.append(r); continue
-                if timestamp.tzinfo is None:
-                    timestamp = timestamp.tz_localize("Asia/Seoul")
-                else:
-                    timestamp = timestamp.tz_convert("Asia/Seoul")
-
-                eval_hours = eval_horizon_map.get(strategy, 6)
-                deadline = timestamp + pd.Timedelta(hours=eval_hours)
-
-                df = get_price_fn(symbol, strategy)
-                if df is None or "timestamp" not in df.columns:
-                    r.update({"status": "fail", "reason": "가격 데이터 없음", "return": 0.0, "return_value": 0.0})
-                    updated.append(r); continue
-
-                # 🔒 반드시 예측 시점~마감(deadline)까지만 평가
-                df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-                df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
-                mask_window = (df["timestamp"] >= timestamp) & (df["timestamp"] <= deadline)
-                future_df = df.loc[mask_window]
-
-                if future_df.empty:
-                    if now_local() < deadline:
-                        r.update({"status": "pending", "reason": "⏳ 평가 대기 중(마감 전 데이터 없음)", "return": 0.0, "return_value": 0.0})
-                        updated.append(r); continue
-                    else:
-                        r.update({"status": "fail", "reason": "마감까지 데이터 없음", "return": 0.0, "return_value": 0.0})
-                        updated.append(r); continue
-
-                actual_max = float(future_df["high"].max())
-                gain = (actual_max - entry_price) / (entry_price + 1e-12)
-
-                if pred_class >= 0:
-                    cls_min, cls_max = get_class_return_range(pred_class, symbol, strategy)
-                else:
-                    cls_min, cls_max = (0.0, 0.0)
-
-                reached_target = gain >= cls_min
-
-                if now_local() < deadline:
-                    if reached_target:
-                        status = "success"
-                    else:
-                        r.update({"status": "pending", "reason": "⏳ 평가 대기 중", "return": round(gain, 5), "return_value": round(gain, 5)})
-                        updated.append(r); continue
-                else:
-                    status = "success" if reached_target else "fail"
-
-                vol = str(r.get("volatility", "")).strip().lower() in ["1", "true"]
-                if vol:
-                    status = "v_success" if status == "success" else "v_fail"
-
-                r.update({
-                    "status": status,
-                    "reason": f"[pred_class={pred_class}] gain={gain:.3f} (cls_min={cls_min}, cls_max={cls_max})",
-                    "return": round(gain, 5),
-                    "return_value": round(gain, 5),
-                    "group_id": group_id
-                })
-
-                log_prediction(
-                    symbol=symbol, strategy=strategy, direction=f"평가:{status}",
-                    entry_price=entry_price, target_price=entry_price * (1 + gain),
-                    timestamp=now_local().isoformat(), model=model, predicted_class=pred_class,
-                    success=(status in ["success", "v_success"]), reason=r["reason"],
-                    rate=gain, return_value=gain, volatility=vol, source="평가",
-                    label=label, group_id=group_id
-                )
-
-                if status in ["fail", "v_fail"] and not check_failure_exists(r):
-                    from failure_db import insert_failure_record
-                    insert_failure_record(r, f"{symbol}-{strategy}-{now_local().isoformat()}",
-                                          feature_vector=None, label=label)
-
-                # (선택) 통계 집계는 meta 한정 — 현 설계 유지
-                if model == "meta":
-                    update_model_success(symbol, strategy, model, status in ["success", "v_success"])
-
-                evaluated.append({str(k): (v if v is not None else "") for k, v in r.items()})
-            except Exception as e:
-                r.update({"status": "fail", "reason": f"예외: {e}", "return": 0.0, "return_value": 0.0})
-                updated.append(r)
-
-    # ---------- 안전 재작성 ----------
-    def rewrite_prediction_log_canonical(path, rows):
-        base = list(PREDICTION_HEADERS)
-        extras = ["status", "return"]
-        fieldnames = base + [c for c in extras if c not in base]
-
-        def to_float(x, default=0.0):
-            try:
-                if x in [None, ""]:
-                    return float(default)
-                return float(x)
-            except Exception:
-                return float(default)
-
-        def to_int(x, default=-1):
-            try:
-                if x in [None, ""]:
-                    return int(default)
-                return int(float(x))
-            except Exception:
-                return int(default)
-
-        sanitized = []
-        for r in rows:
-            row = {k: "" for k in fieldnames}
-            for k, v in r.items():
-                if k in row:
-                    row[k] = v
-            try:
-                ts_raw = r.get("timestamp", row.get("timestamp", ""))
-                ts = pd.to_datetime(ts_raw, errors="coerce")
-                if pd.isna(ts):
-                    row["timestamp"] = now_kst().isoformat()
-                else:
-                    if ts.tzinfo is None:
-                        ts = ts.tz_localize("Asia/Seoul")
-                    else:
-                        ts = ts.tz_convert("Asia/Seoul")
-                    row["timestamp"] = ts.isoformat()
-            except Exception:
-                row["timestamp"] = now_kst().isoformat()
-
-            row["rate"] = to_float(row.get("rate", 0.0), 0.0)
-            rv = to_float(row.get("return_value", r.get("return", 0.0)), 0.0)
-            row["return_value"] = rv
-            row["return"] = rv
-            row["entry_price"] = to_float(row.get("entry_price", 0.0), 0.0)
-            row["target_price"] = to_float(row.get("target_price", 0.0), 0.0)
-            row["predicted_class"] = to_int(row.get("predicted_class", -1), -1)
-            row["label"] = to_int(row.get("label", -1), -1)
-            row["group_id"] = to_int(row.get("group_id", 0), 0)
-
-            vol = str(r.get("volatility", row.get("volatility", ""))).strip().lower()
-            row["volatility"] = "True" if vol in ["1", "true"] else ("False" if vol in ["0", "false"] else str(r.get("volatility", "")))
-            sanitized.append(row)
-
-        pd.DataFrame(sanitized, columns=fieldnames).to_csv(path, index=False, encoding="utf-8-sig")
-
-    updated += evaluated
-    rewrite_prediction_log_canonical(PREDICTION_LOG, updated)
-
-    def safe_write_csv(path, rows):
-        if not rows:
-            return
-        import csv
-        fieldnames = sorted({str(k) for row in rows for k in row.keys() if k is not None})
-        with open(path, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
-
-    safe_write_csv(EVAL_RESULT, evaluated)
-    failed = [r for r in evaluated if r.get("status") in ["fail", "v_fail"]]
-    safe_write_csv(WRONG, failed)
-
-    print(f"[✅ 평가 완료] 총 {len(evaluated)}건 평가, 실패 {len(failed)}건")
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        print(f"[오류] evaluate_predictions 스트리밍 실패 → {e}")
 
 # -----------------------------
 # 개별 모델 예측 취합 (+캘리브레이션)
