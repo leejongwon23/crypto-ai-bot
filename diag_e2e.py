@@ -1,21 +1,30 @@
-# === diag_e2e.py (관우 v2.2-final-restored + KST timestamp hard-normalize) ===
-import os, json, traceback, datetime, pytz, re
+# === diag_e2e.py (관우 v2.3 — 종합점검: 훈련+인벤토리+예측/평가 통합, KST 정규화) ===
+import os, json, traceback, re
 import pandas as pd
+import pytz
 from collections import defaultdict, Counter
+from datetime import datetime
 
-PERSIST_DIR = "/persistent"
-LOG_DIR = os.path.join(PERSIST_DIR, "logs")
-MODEL_DIR = os.path.join(PERSIST_DIR, "models")
-PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
-TRAIN_LOG = os.path.join(LOG_DIR, "train_log.csv")
-AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
+PERSIST_DIR   = "/persistent"
+LOG_DIR       = os.path.join(PERSIST_DIR, "logs")
+MODEL_DIR     = os.path.join(PERSIST_DIR, "models")
+PREDICTION_LOG= os.path.join(PERSIST_DIR, "prediction_log.csv")
+TRAIN_LOG     = os.path.join(LOG_DIR, "train_log.csv")              # ← 원본 경로 유지
+AUDIT_LOG     = os.path.join(LOG_DIR, "evaluation_audit.csv")
 
 KST = pytz.timezone("Asia/Seoul")
-now_kst = lambda: pd.Timestamp.now(tz="Asia/Seoul")  # tz-aware
+now_kst = lambda: pd.Timestamp.now(tz="Asia/Seoul")
 
 EVAL_HORIZON_HOURS = {"단기": 4, "중기": 24, "장기": 168}
-STRATEGIES = ["단기", "중기", "장기"]
+STRATEGIES  = ["단기", "중기", "장기"]
 MODEL_TYPES = ["lstm", "cnn_lstm", "transformer"]
+
+# (가능하면 설정의 심볼을 기준으로 진행률 집계)
+try:
+    from config import get_SYMBOLS
+    CONFIG_SYMBOLS = get_SYMBOLS()
+except Exception:
+    CONFIG_SYMBOLS = None
 
 # ===================== 유틸 =====================
 def _safe_read_csv(path, **kwargs):
@@ -36,32 +45,23 @@ def _to_kst(ts):
         return None
 
 def _normalize_ts_series_kst(s):
-    """
-    시리즈 전체를 KST tz-aware로 강제 통일.
-    혼재(naive/aware)로 벡터화 실패 시 원소별 변환으로 폴백.
-    """
     if s is None:
         return pd.Series([], dtype="datetime64[ns, Asia/Seoul]")
     s2 = pd.to_datetime(s, errors="coerce")
     try:
-        # 전부 naive or 전부 aware인 일반 케이스
         if getattr(s2.dt, "tz", None) is None:
             s2 = s2.dt.tz_localize("Asia/Seoul")
         else:
             s2 = s2.dt.tz_convert("Asia/Seoul")
         return s2
     except Exception:
-        # 혼재/이상치 폴백: 원소별
         return s2.apply(_to_kst)
 
 def _pct(x):
-    try:
-        return f"{float(x)*100:.1f}%"
-    except:
-        return "0.0%"
+    try: return f"{float(x)*100:.1f}%"
+    except: return "0.0%"
 
-def _fmt_ts(ts):
-    return ts.strftime("%Y-%m-%d %H:%M") if ts is not None else "없음"
+def _fmt_ts(ts): return ts.strftime("%Y-%m-%d %H:%M") if ts is not None else "없음"
 
 def _eval_deadline(pred_ts, strategy):
     if pred_ts is None: return None
@@ -81,44 +81,93 @@ def _delay_badge(delay_min):
     return "err"
 
 def _num(x, default=0.0):
-    try:
-        return float(x)
-    except:
-        return default
+    try: return float(x)
+    except: return default
 
-def _list_models():
-    out = []
-    if not os.path.isdir(MODEL_DIR): return out
+# ===================== 인벤토리 스캔(.pt + .meta.json) =====================
+_NAME_RE = re.compile(
+    r"^(?P<sym>[^_]+)_(?P<strat>단기|중기|장기)_(?P<model>lstm|cnn_lstm|transformer)"
+    r"(?:_group(?P<gid>\d+))?(?:_cls(?P<ncls>\d+))?$"
+)
+
+def _parse_filename_base(fname):
+    base = os.path.basename(fname)
+    base = re.sub(r"\.(pt|meta\.json)$", "", base)
+    m = _NAME_RE.match(base)
+    if not m: return None
+    d = m.groupdict()
+    return {
+        "symbol": d["sym"],
+        "strategy": d["strat"],
+        "model": d["model"],
+        "group_id": int(d["gid"]) if d.get("gid") else 0,
+        "num_classes": int(d["ncls"]) if d.get("ncls") else None,
+        "base": base
+    }
+
+def _list_inventory():
+    """
+    models 디렉토리에서 *.pt 와 *.meta.json 모두 스캔해 합침.
+    - key: (symbol, strategy, model)
+    - has_pt / has_meta / val_f1 / saved_at(메타 timestamp) / group_id / num_classes
+    """
+    inv = {}
+    if not os.path.isdir(MODEL_DIR): return inv
+
+    # 1) 메타부터 스캔 (학습만 끝나고 pt가 늦게 오는 케이스 보장)
     for fn in os.listdir(MODEL_DIR):
-        if not fn.endswith(".pt"): continue
-        base = fn[:-3]
-        m = re.match(r"^(?P<sym>[^_]+)_(?P<strat>단기|중기|장기)_(?P<model>lstm|cnn_lstm|transformer)(?:_group(?P<gid>\d+))?(?:_cls(?P<ncls>\d+))?$", base)
-        if not m: continue
-        d = m.groupdict()
-        meta_path = os.path.join(MODEL_DIR, base + ".meta.json")
-        val_f1, saved = None, None
+        if not fn.endswith(".meta.json"): continue
+        meta_path = os.path.join(MODEL_DIR, fn)
+        p = _parse_filename_base(fn)
+        if not p: continue
+        key = (p["symbol"], p["strategy"], p["model"])
+        val = inv.get(key, {
+            "symbol": p["symbol"], "strategy": p["strategy"], "model": p["model"],
+            "group_id": p["group_id"], "num_classes": p["num_classes"],
+            "has_pt": False, "has_meta": False,
+            "pt_file": None, "meta_file": None,
+            "val_f1": None, "saved_at": None
+        })
+        val["has_meta"] = True
+        val["meta_file"] = fn
+        # 메타 파싱
         try:
-            if os.path.exists(meta_path):
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-                val_f1 = float(meta.get("metrics", {}).get("val_f1", 0.0))
-                saved_raw = meta.get("timestamp") or meta.get("saved_at")
-                saved = _to_kst(saved_raw)
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            metrics = meta.get("metrics", {}) or {}
+            if "val_f1" in metrics:
+                val["val_f1"] = float(metrics.get("val_f1"))
+            ts_raw = meta.get("timestamp") or meta.get("saved_at")
+            ts_kst = _to_kst(ts_raw)
+            val["saved_at"] = ts_kst.isoformat() if ts_kst else None
+            # num_classes / group_id 보강
+            val["num_classes"] = val["num_classes"] or meta.get("num_classes")
+            if isinstance(val["num_classes"], str) and val["num_classes"].isdigit():
+                val["num_classes"] = int(val["num_classes"])
         except Exception:
             pass
-        out.append({
-            "pt_file": fn,
-            "meta_file": os.path.basename(meta_path),
-            "symbol": d["sym"],
-            "strategy": d["strat"],
-            "model": d["model"],
-            "group_id": int(d["gid"]) if d.get("gid") else 0,
-            "num_classes": int(d["ncls"]) if d.get("ncls") else None,
-            "val_f1": val_f1,
-            "timestamp": saved.isoformat() if saved else None
-        })
-    return out
+        inv[key] = val
 
+    # 2) pt 스캔
+    for fn in os.listdir(MODEL_DIR):
+        if not fn.endswith(".pt"): continue
+        p = _parse_filename_base(fn)
+        if not p: continue
+        key = (p["symbol"], p["strategy"], p["model"])
+        val = inv.get(key, {
+            "symbol": p["symbol"], "strategy": p["strategy"], "model": p["model"],
+            "group_id": p["group_id"], "num_classes": p["num_classes"],
+            "has_pt": False, "has_meta": False,
+            "pt_file": None, "meta_file": None,
+            "val_f1": None, "saved_at": None
+        })
+        val["has_pt"] = True
+        val["pt_file"] = fn
+        inv[key] = val
+
+    return inv
+
+# ===================== 보조 집계 =====================
 def _summarize_fail_patterns(df_pred_sym):
     try:
         df = df_pred_sym.copy()
@@ -134,55 +183,92 @@ def _summarize_fail_patterns(df_pred_sym):
     except Exception:
         return []
 
+def _expected_tuples(symbols):
+    return {(s, st, mt) for s in symbols for st in STRATEGIES for mt in MODEL_TYPES}
+
+def _progress(inv_map, symbols):
+    have = set([k for k in inv_map.keys()])  # (sym, strat, model)
+    need = _expected_tuples(symbols)
+    return {
+        "expected": len(need),
+        "have": len(need & have),
+        "missing": sorted(list(need - have))
+    }
+
 # ===================== 스냅샷 집계 =====================
 def _build_snapshot(symbols_filter=None):
-    df_pred = _safe_read_csv(PREDICTION_LOG)
+    df_pred  = _safe_read_csv(PREDICTION_LOG)
     df_train = _safe_read_csv(TRAIN_LOG)
-    _ = _safe_read_csv(AUDIT_LOG)
+    _        = _safe_read_csv(AUDIT_LOG)   # (옵션)
 
-    # 🔐 반드시 시리즈 전체를 KST tz-aware로 통일
+    # 타임스템프 KST 통일
     if "timestamp" in df_pred.columns:
         df_pred["timestamp"] = _normalize_ts_series_kst(df_pred["timestamp"])
     else:
         df_pred["timestamp"] = pd.NaT
-
     if "timestamp" in df_train.columns:
         df_train["timestamp"] = _normalize_ts_series_kst(df_train["timestamp"])
     else:
         df_train["timestamp"] = pd.NaT
 
-    models = _list_models()
+    # 인벤토리
+    inv = _list_inventory()  # key=(sym,strat,model) → dict
+    inv_keys = set(inv.keys())
 
-    symbols = set([m["symbol"] for m in models])
-    if "symbol" in df_pred.columns:
-        symbols |= set(df_pred["symbol"].dropna().astype(str).tolist())
-    symbols = sorted([s for s in symbols if s and s != "nan"])
-
+    # 심볼 목록 결정: (우선) 명시→(다음) config→(마지막) 로그/파일 유니온
     if symbols_filter:
-        allow = set([s.strip() for s in symbols_filter.split(",") if s.strip()])
-        symbols = [s for s in symbols if s in allow]
+        symbols = [s.strip() for s in symbols_filter.split(",") if s.strip()]
+    elif CONFIG_SYMBOLS:
+        symbols = list(CONFIG_SYMBOLS)
+    else:
+        symbols = set([k[0] for k in inv_keys])
+        if "symbol" in df_pred.columns:
+            symbols |= set(df_pred["symbol"].dropna().astype(str).tolist())
+        if "symbol" in df_train.columns:
+            symbols |= set(df_train["symbol"].dropna().astype(str).tolist())
+        symbols = sorted([s for s in symbols if s and s != "nan"])
 
-    model_index = defaultdict(list)
-    for m in models:
-        key = (m["symbol"], m["strategy"], m["model"])
-        model_index[key].append(m)
+    # 학습로그: 최근 f1/최근 학습시각 (전략/모델 보강)
+    train_last_map = {}   # (sym,strat) -> last_ts
+    train_f1_map   = {}   # (sym,strat,model) -> last f1
+    if not df_train.empty:
+        try:
+            df_train = df_train.sort_values("timestamp")
+            for (sym, st), g in df_train.groupby(["symbol","strategy"], dropna=False):
+                ts = g["timestamp"].iloc[-1]
+                train_last_map[(str(sym), str(st))] = ts
+            # 모델별 f1
+            if "model" in df_train.columns and "f1" in df_train.columns:
+                for (sym, st, mdl), g in df_train.groupby(["symbol","strategy","model"], dropna=False):
+                    try:
+                        last_f1 = float(pd.to_numeric(g["f1"], errors="coerce").dropna().iloc[-1])
+                        # 파일명 안에 모델타입이 포함 → 타입 추출
+                        m = re.search(r"(lstm|cnn_lstm|transformer)", str(mdl))
+                        if m:
+                            mt = m.group(1)
+                            train_f1_map[(str(sym), str(st), mt)] = last_f1
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
-    snapshot = {"time": now_kst().isoformat(), "symbols": []}
+    snapshot = {
+        "time": now_kst().isoformat(),
+        "symbols": [],
+        "progress": _progress(inv, symbols),  # 기대/보유/미싱
+    }
 
+    # 심볼 단위 집계
     for sym in symbols:
         sym_block = {"symbol": sym, "strategies": {}, "fail_summary": []}
         df_ps = df_pred[df_pred["symbol"] == sym] if "symbol" in df_pred.columns else pd.DataFrame()
         sym_block["fail_summary"] = _summarize_fail_patterns(df_ps)
 
         for strat in STRATEGIES:
-            # 최근 학습
-            if not df_train.empty:
-                df_ts = df_train[(df_train["symbol"] == sym) & (df_train["strategy"] == strat)]
-                last_train_ts = df_ts["timestamp"].max() if "timestamp" in df_ts.columns and not df_ts.empty else pd.NaT
-            else:
-                last_train_ts = pd.NaT
+            # 학습 시간
+            last_train_ts = train_last_map.get((sym, strat), pd.NaT)
 
-            # 해당 심볼/전략 예측 로그
+            # 예측 로그 (해당 심볼/전략)
             df_ss = df_ps[df_ps["strategy"] == strat] if not df_ps.empty else pd.DataFrame()
 
             def _stat_count(df, label):
@@ -190,9 +276,8 @@ def _build_snapshot(symbols_filter=None):
                 return int((df["status"] == label).sum())
 
             if not df_ss.empty:
-                # 안전 수치화
+                df_ss = df_ss.copy()
                 if "status" in df_ss.columns:
-                    df_ss = df_ss.copy()
                     df_ss["is_vol"] = df_ss["status"].astype(str).str.startswith("v_")
                 else:
                     df_ss["is_vol"] = False
@@ -225,48 +310,60 @@ def _build_snapshot(symbols_filter=None):
             }
             tv = max(1, summary_v["total"]); summary_v["succ_rate"] = summary_v["succ"]/tv
 
-            # 모델별 (✅ 최신 클래스/수익률 포함)
-            def _latest_for_model(df_model):
-                if df_model.empty:
-                    return None, None
-                dfm = df_model.copy()
-                try:
-                    dfm = dfm.sort_values("timestamp")
-                except Exception:
-                    pass
-                last = dfm.iloc[-1]
-                # 클래스 추정 컬럼 우선순위
-                for key in ["predicted_class", "class", "pred_class", "label"]:
-                    if key in dfm.columns:
-                        val = last.get(key, None)
-                        if pd.notna(val):
-                            latest_cls = str(val)
-                            break
-                else:
-                    latest_cls = "-"
-                # 수익률 컬럼 우선순위
-                latest_ret = None
-                if "return" in dfm.columns:
-                    latest_ret = _num(last.get("return"))
-                elif "rate" in dfm.columns:
-                    latest_ret = _num(last.get("rate"))
-                return latest_cls, latest_ret
-
+            # 모델별 상세(인벤토리 + 예측로그)
             models_detail = []
+            inventory_rows = []
             for mt in MODEL_TYPES:
-                lst = model_index.get((sym, strat, mt), [])
-                latest_f1 = None
-                if lst:
-                    try:
-                        lst_sorted = sorted(lst, key=lambda x: x.get("timestamp") or "", reverse=True)
-                        latest_f1 = lst_sorted[0].get("val_f1", None)
-                    except Exception:
-                        pass
+                key = (sym, strat, mt)
+                inv_item = inv.get(key)
+                # 예측 로그 중 해당 모델
                 df_model = df_ss[df_ss["model"].astype(str).str.contains(mt, na=False)] if not df_ss.empty else pd.DataFrame()
+
+                # 최신 클래스/수익률
+                def _latest_for_model(dfm):
+                    if dfm.empty: return "-", None
+                    try: dfm = dfm.sort_values("timestamp")
+                    except Exception: pass
+                    last = dfm.iloc[-1]
+                    # 클래스 키 우선순위
+                    latest_cls = "-"
+                    for k in ["predicted_class","class","pred_class","label"]:
+                        if k in dfm.columns:
+                            v = last.get(k, None)
+                            if pd.notna(v):
+                                latest_cls = str(v); break
+                    # 수익률 키
+                    latest_ret = None
+                    if "return" in dfm.columns: latest_ret = _num(last.get("return"))
+                    elif "rate" in dfm.columns: latest_ret = _num(last.get("rate"))
+                    return latest_cls, latest_ret
+
                 latest_cls, latest_ret = _latest_for_model(df_model)
+
+                # f1: 메타 우선, 없으면 학습로그 f1
+                val_f1 = None
+                if inv_item and inv_item.get("val_f1") is not None:
+                    val_f1 = float(inv_item["val_f1"])
+                elif (sym, strat, mt) in train_f1_map:
+                    val_f1 = float(train_f1_map[(sym, strat, mt)])
+
+                # 상태
+                if inv_item is None:
+                    status = "MISSING"
+                else:
+                    has_pt   = inv_item.get("has_pt", False)
+                    has_meta = inv_item.get("has_meta", False)
+                    if not has_meta and has_pt:
+                        status = "ERROR_META"
+                    elif df_model is not None and len(df_model) > 0:
+                        status = "PREDICTED"
+                    else:
+                        status = "TRAINED_NO_PRED"
+
                 md = {
                     "model": mt,
-                    "val_f1": float(latest_f1) if latest_f1 is not None else None,
+                    "status": status,
+                    "val_f1": val_f1,
                     "succ": _stat_count(df_model, "success") + _stat_count(df_model, "v_success"),
                     "fail": _stat_count(df_model, "fail") + _stat_count(df_model, "v_fail"),
                     "total": int(len(df_model)),
@@ -276,11 +373,25 @@ def _build_snapshot(symbols_filter=None):
                 denom = max(1, md["total"]); md["succ_rate"] = md["succ"] / denom
                 models_detail.append(md)
 
-            # ✅ 시리즈 전체가 이미 KST로 정규화되어 있으므로 max() 안전
+                # 인벤토리 행 (HTML용 상세 표)
+                inv_row = {
+                    "model": mt,
+                    "has_pt": bool(inv_item and inv_item.get("has_pt")),
+                    "has_meta": bool(inv_item and inv_item.get("has_meta")),
+                    "val_f1": val_f1,
+                    "saved_at": inv_item.get("saved_at") if inv_item else None,
+                    "pt_file": inv_item.get("pt_file") if inv_item else None,
+                    "meta_file": inv_item.get("meta_file") if inv_item else None,
+                    "status": status
+                }
+                inventory_rows.append(inv_row)
+
+            # 최근 예측시각/평가 예정/지연
             last_pred_ts_raw = df_ss["timestamp"].max() if "timestamp" in df_ss.columns and not df_ss.empty else pd.NaT
             last_pred_ts = _to_kst(last_pred_ts_raw)
             eval_due = _eval_deadline(last_pred_ts, strat) if last_pred_ts is not None else None
 
+            # 최근 평가완료(예측로그에서 source='평가' 또는 direction 시작 '평가:'로 추정)
             last_eval_ts = None
             if not df_ss.empty:
                 df_eval = df_ss.copy()
@@ -301,28 +412,32 @@ def _build_snapshot(symbols_filter=None):
                 now = now_kst()
                 delayed_min = int(max(0, (now - eval_due) / pd.Timedelta(minutes=1))) if now > eval_due else 0
 
-            # 메타 선택
-            meta_choice_txt = "-"
-            if not df_ss.empty:
-                try:
-                    meta_rows = df_ss[df_ss["model"].astype(str) == "meta"]
-                except Exception:
-                    meta_rows = pd.DataFrame()
-                if not meta_rows.empty:
-                    last_meta = meta_rows.sort_values("timestamp").iloc[-1]
-                    mc = last_meta.get("meta_choice", None)
-                    if pd.notna(mc) and str(mc).strip():
-                        meta_choice_txt = str(mc)
-                    else:
-                        mn = last_meta.get("model_name", None)
-                        if pd.notna(mn) and str(mn).strip():
-                            meta_choice_txt = str(mn)
-                        else:
-                            nt = last_meta.get("note", None)
-                            if pd.notna(nt) and str(nt).strip():
-                                meta_choice_txt = str(nt)
+            # 문제/노트
+            strat_problems = []
+            strat_notes = []
+            # 인벤토리에 모델이 하나도 없으면 문제
+            inv_count = sum(1 for mt in MODEL_TYPES if (sym, strat, mt) in inv)
+            if inv_count == 0:
+                strat_problems.append("모델 파일 없음")
+            # 메타 누락
+            for mt in MODEL_TYPES:
+                item = inv.get((sym, strat, mt))
+                if item and item.get("has_pt") and not item.get("has_meta"):
+                    strat_problems.append(f"{mt} 메타 누락")
+            # 예측 로그 없음: 훈련 완료면 '예측 대기' 노트, 아니면 문제
+            if df_ss.empty:
+                if inv_count > 0 or pd.notna(last_train_ts):
+                    strat_notes.append("예측 대기(훈련 완료)")
+                else:
+                    strat_problems.append("예측 기록 없음")
+            # 평가 지연
+            if delayed_min > 0:
+                strat_problems.append(f"평가 지연 {delayed_min}분")
+            # 최근 학습 기록 여부
+            if pd.isna(last_train_ts):
+                strat_notes.append("최근 학습 기록 없음")
 
-            # 실패학습 반영률
+            # 실패학습(간이 반영률)
             recent_fail = df_ss[df_ss["status"].isin(["fail","v_fail"])] if "status" in df_ss.columns else pd.DataFrame()
             recent_fail_n = int(len(recent_fail)); reflected = 0
             if recent_fail_n > 0 and "timestamp" in df_ss.columns:
@@ -331,18 +446,13 @@ def _build_snapshot(symbols_filter=None):
                 reflected = int((after["status"].isin(["success","v_success"])).sum()) if "status" in after.columns else 0
             reflect_ratio = (reflected / max(1, recent_fail_n)) if recent_fail_n>0 else None
 
-            # 전략 문제
-            strat_problems = []
-            total_models_for_strat = sum(len(model_index.get((sym, strat, mt), [])) for mt in MODEL_TYPES)
-            if total_models_for_strat == 0: strat_problems.append("모델 파일 없음")
-            if df_ss.empty: strat_problems.append("예측 기록 없음")
-            if delayed_min > 0: strat_problems.append(f"평가 지연 {delayed_min}분")
-            if pd.isna(last_train_ts): strat_problems.append("최근 학습 기록 없음")
-            if eval_due is None and last_pred_ts is None:
-                strat_problems.append("최근 예측 시각 없음(평가 예정 산출 불가)")
-
             sym_block["strategies"][strat] = {
                 "last_train_time": last_train_ts.isoformat() if pd.notna(last_train_ts) else None,
+                "inventory": {
+                    "rows": inventory_rows,
+                    "trained_models": inv_count,
+                    "missing_models": [mt for mt in MODEL_TYPES if (sym, strat, mt) not in inv]
+                },
                 "prediction": {
                     "normal": {
                         "succ": summary_n["succ"], "fail": summary_n["fail"],
@@ -358,8 +468,8 @@ def _build_snapshot(symbols_filter=None):
                         "succ_rate": summary_v["succ_rate"],
                         "avg_return": summary_v["avg_return"],
                     },
-                    "by_model": models_detail,           # 모델별 누적/성공률 + 최신 클래스/수익률
-                    "meta_choice": meta_choice_txt,      # 메타러너 선택 모델
+                    "by_model": models_detail,
+                    "meta_choice": "-"
                 },
                 "evaluation": {
                     "last_prediction_time": last_pred_ts.isoformat() if last_pred_ts is not None else None,
@@ -372,7 +482,8 @@ def _build_snapshot(symbols_filter=None):
                     "reflected_count_after": reflected,
                     "reflect_ratio": reflect_ratio
                 },
-                "problems": strat_problems
+                "problems": strat_problems,
+                "notes": strat_notes
             }
         snapshot["symbols"].append(sym_block)
 
@@ -385,6 +496,7 @@ def _build_snapshot(symbols_filter=None):
             n = blk["prediction"]["normal"]; v = blk["prediction"]["volatility"]
             total_normal_succ += n["succ"]; total_normal_fail += n["fail"]
             total_vol_succ += v["succ"]; total_vol_fail += v["fail"]
+            # 낮은 성공률은 '충분한 표본'일 때만 문제로
             if _grade_rate(n["succ_rate"]) == "err" and n["total"] >= 10:
                 problems.append(f"{s['symbol']} {strat}: 일반 성공률 낮음({int(n['succ_rate']*100)}%)")
             if blk["evaluation"]["delay_min"] > 0:
@@ -397,37 +509,28 @@ def _build_snapshot(symbols_filter=None):
         "normal_success_rate": _rate(total_normal_succ, total_normal_fail),
         "vol_success_rate": _rate(total_vol_succ, total_vol_fail),
         "symbols_count": len(snapshot["symbols"]),
-        "models_count": len(_list_models()),
-        "problems": problems
+        "models_count": len(inv),  # 인벤토리 기준
+        "problems": problems,
+        "progress": snapshot["progress"]  # 상단에도 노출
     }
     return snapshot
 
 # ===================== HTML 렌더 =====================
 def _render_html(snapshot):
-    # --- 아이콘 유틸 ---
     def _safe(s):
-        try:
-            return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-        except:
-            return str(s)
+        try: return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+        except: return str(s)
 
-    def icon_train(last_train_iso):
-        return "✅" if last_train_iso else "❌"
-
+    def icon_train(last_train_iso): return "✅" if last_train_iso else "❌"
     def icon_ret(r):
         if r is None: return "⏺"
-        try:
-            r = float(r)
-        except:
-            return "⏺"
+        try: r = float(r)
+        except: return "⏺"
         if r > 1e-9: return "✅"
         if r < -1e-9: return "❌"
         return "⏺"
+    def icon_delay(mins): return "⏰⚠️" if mins and mins>0 else "⏰✅"
 
-    def icon_delay(mins):
-        return "⏰⚠️" if mins and mins>0 else "⏰✅"
-
-    # --- 공통 CSS/헤더/컨트롤 ---
     css = """
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans KR', Arial, sans-serif; line-height:1.55; background:#f6f7fb; }
@@ -457,16 +560,14 @@ def _render_html(snapshot):
   .btn { cursor:pointer; border:1px solid #d1d5db; background:#ffffff; padding:6px 10px; border-radius:8px; font-size:12px; }
   .view { display:none; }
   .view.active { display:block; }
-  .step { font-weight:700; margin:6px 0 8px; }
-  .hr { height:1px; background:#e5e7eb; margin:10px 0; }
   ul { margin: 4px 0 6px 20px; }
 </style>
 """
     sm = snapshot.get("summary", {})
+    pr = sm.get("progress", {}) or {}
     problems = sm.get("problems", []) or []
     status_class = "ok" if not problems else "err"
-    status_text = "🟢 전체 정상" if not problems else f"🔴 문제 {len(problems)}건"
-
+    status_text  = "🟢 전체 정상" if not problems else f"🔴 문제 {len(problems)}건"
     idx_links = []
     for sym_item in snapshot.get("symbols", []):
         sym = sym_item.get("symbol","")
@@ -482,7 +583,8 @@ def _render_html(snapshot):
     <span class="pill">일반 성공률 {_pct(sm.get('normal_success_rate',0))}</span>
     <span class="pill">변동성 성공률 {_pct(sm.get('vol_success_rate',0))}</span>
     <span class="pill">심볼 {sm.get('symbols_count',0)}개</span>
-    <span class="pill">모델 파일 {sm.get('models_count',0)}개</span>
+    <span class="pill">인벤토리 {sm.get('models_count',0)}건</span>
+    <span class="pill">진행률 {pr.get('have',0)}/{pr.get('expected',0)}</span>
   </div>
   <div class="legend" style="margin-top:6px">
     <span class="badge ok">성공률 양호 ≥60%</span>
@@ -498,18 +600,16 @@ def _render_html(snapshot):
   {idx_html}
 </div>
 <script>
-function toggleAll(open) {{
-  document.querySelectorAll('details').forEach(d => d.open = open);
-}}
+function toggleAll(open) {{ document.querySelectorAll('details').forEach(d => d.open = open); }}
 function switchView(which) {{
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.getElementById('view-' + which).classList.add('active');
 }}
-window.addEventListener('DOMContentLoaded', () => switchView('flow')); // 기본: 리스트 뷰
+window.addEventListener('DOMContentLoaded', () => switchView('flow'));
 </script>
 """
 
-    # ===== (A) 심볼 중심 카드 뷰 =====
+    # ===== (A) 심볼 카드 =====
     def render_symbol_centric():
         parts = []
         for sym_item in snapshot.get("symbols", []):
@@ -520,6 +620,8 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow')); // 기본
             for strat, blk in (sym_item.get("strategies") or {}).items():
                 n = blk["prediction"]["normal"]; v = blk["prediction"]["volatility"]
                 by_model = blk["prediction"]["by_model"]; ev = blk["evaluation"]; fl = blk["failure_learning"]
+                inv_rows = blk.get("inventory", {}).get("rows", [])
+                notes = blk.get("notes", []) or []
                 meta_choice = blk["prediction"].get("meta_choice", "-")
                 n_cls, v_cls = _grade_rate(n["succ_rate"]), _grade_rate(v["succ_rate"])
                 delay_cls = _delay_badge(ev.get("delay_min", 0))
@@ -539,6 +641,7 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow')); // 기본
                 pred_header = (f"<div><span class='badge {n_cls}'>일반 {_pct(n['succ_rate'])}</span> "
                                f"<span class='badge {v_cls}'>변동성 {_pct(v['succ_rate'])}</span></div>")
 
+                # 모델별 상세(예측 요약)
                 rows = []
                 for md in by_model:
                     val_f1_val = md.get("val_f1", None)
@@ -548,6 +651,7 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow')); // 기본
                     last_ret_txt = "-" if last_ret is None else _pct(last_ret)
                     rows.append("<tr>"
                                 f"<td>{_safe(md.get('model',''))}</td>"
+                                f"<td>{_safe(md.get('status','-'))}</td>"
                                 f"<td>{val_f1_txt}</td>"
                                 f"<td>{md.get('succ',0)}</td>"
                                 f"<td>{md.get('fail',0)}</td>"
@@ -556,11 +660,29 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow')); // 기본
                                 f"<td>{_safe(last_cls)}</td>"
                                 f"<td>{_safe(last_ret_txt)}</td>"
                                 "</tr>")
-                model_details = ("<details class='card' style='margin-top:8px'><summary>모델별 상세</summary>"
+                model_details = ("<details class='card' style='margin-top:8px'><summary>모델별 상세(예측/성능)</summary>"
                                  "<div style='margin-top:6px'>"
-                                 "<table><tr><th>모델</th><th>최근 val_f1</th><th>성공</th><th>실패</th><th>총건수</th>"
+                                 "<table><tr><th>모델</th><th>상태</th><th>최근 val_f1</th><th>성공</th><th>실패</th><th>총건수</th>"
                                  "<th>성공률</th><th>최근 클래스</th><th>최근 수익률</th></tr>"
                                  + "".join(rows) + "</table></div></details>")
+
+                # 파일 인벤토리
+                inv_rows_html = []
+                for r in inv_rows:
+                    f1txt = "-" if r.get("val_f1") is None else f"{float(r['val_f1']):.3f}"
+                    saved = _fmt_ts(_to_kst(r.get("saved_at")))
+                    inv_rows_html.append("<tr>"
+                        f"<td>{_safe(r['model'])}</td>"
+                        f"<td>{'✅' if r['has_pt'] else '❌'}</td>"
+                        f"<td>{'✅' if r['has_meta'] else '❌'}</td>"
+                        f"<td>{f1txt}</td>"
+                        f"<td>{_safe(saved)}</td>"
+                        f"<td>{_safe(r.get('status','-'))}</td>"
+                    "</tr>")
+                inv_table = ("<details class='card' style='margin-top:8px'><summary>파일 인벤토리(PT/Meta)</summary>"
+                             "<div style='margin-top:6px'>"
+                             "<table><tr><th>모델</th><th>PT</th><th>Meta</th><th>최근 val_f1</th><th>저장시각</th><th>상태</th></tr>"
+                             + "".join(inv_rows_html) + "</table></div></details>")
 
                 due = _fmt_ts(_to_kst(ev["due_time"]))
                 lastp = _fmt_ts(_to_kst(ev["last_prediction_time"]))
@@ -577,11 +699,18 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow')); // 기본
                               f"<div class='muted'>최근 실패 {fl['recent_fail']}건 / 이후반영 {fl['reflected_count_after']}건 / 반영률 {rr_txt}</div>"
                               f"</div>")
 
+                # 문제/노트
                 strat_problems = blk.get("problems") or []
                 prob_block = ""
                 if strat_problems:
                     lis = "".join([f"<li>{_safe(p)}</li>" for p in strat_problems])
                     prob_block = (f"<div class='card' style='margin-top:8px'><div class='step'>⚠️ 문제</div>"
+                                  f"<ul style='margin:6px 0 0 18px'>{lis}</ul></div>")
+                notes = blk.get("notes") or []
+                note_block = ""
+                if notes:
+                    lis = "".join([f"<li>{_safe(p)}</li>" for p in notes])
+                    note_block = (f"<div class='card' style='margin-top:8px'><div class='step'>📝 노트</div>"
                                   f"<ul style='margin:6px 0 0 18px'>{lis}</ul></div>")
 
                 sym_cards.append(
@@ -589,82 +718,76 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow')); // 기본
                     f"{head}"
                     "<div class='step'>1) 학습</div>"
                     f"<div class='muted small'>{icon_train(blk['last_train_time'])} 최근 학습시각: {_safe(_fmt_ts(_to_kst(blk['last_train_time'])))}</div>"
-                    "<div class='hr'></div>"
+                    "<div class='hr' style='height:1px;background:#e5e7eb;margin:10px 0'></div>"
                     "<div class='step'>2) 예측</div>"
                     f"{pred_header}{pred_table}"
-                    f"{model_details}"
-                    f"{eval_block}{fail_block}{prob_block}"
+                    f"{model_details}{inv_table}"
+                    f"{eval_block}{fail_block}{note_block}{prob_block}"
                     "</div>"
                 )
             body_html = ''.join(sym_cards) if sym_cards else '<div class="muted">전략 데이터가 없습니다.</div>'
             parts.append(f"<div class='card'><h2 id='{_safe(sym)}'>📈 {_safe(sym)}</h2>{fs_html}{body_html}</div>")
         return "<div id='view-symbol' class='view'>" + "".join(parts) + "</div>"
 
-    # ===== (B) 작동순서 리스트 뷰 =====
+    # ===== (B) 작동순서 리스트 =====
     def render_flow_list():
         out = []
         out.append("<div class='card'><h2>📊 YOPO 운영 현황 (리스트)</h2>")
         out.append(f"<div class='muted small'>🕒 생성시각: {_safe(snapshot.get('time',''))}</div>")
 
-        # 1) 학습 현황
+        pr = snapshot.get("progress", {}) or {}
+        if pr:
+            miss_list = pr.get("missing", [])[:10]
+            miss_txt = ", ".join([f"{a}/{b}/{c}" for (a,b,c) in miss_list]) if miss_list else "없음"
+            out.append("<div class='muted small' style='margin:6px 0'>"
+                       f"진행률: {pr.get('have',0)}/{pr.get('expected',0)}"
+                       f" · 미싱(상위 10): { _safe(miss_txt) }</div>")
+
+        # 1) 학습
         out.append("<h3 style='margin-top:8px'>1. 학습 현황</h3>")
         for strat in STRATEGIES:
-            out.append(f"<div style='margin:6px 0 2px'><b>• 전략: {_safe(strat)}</b></div>")
-            out.append("<ul>")
+            out.append(f"<div style='margin:6px 0 2px'><b>• 전략: {_safe(strat)}</b></div><ul>")
             for sym_item in snapshot.get("symbols", []):
                 sym = sym_item.get("symbol")
                 blk = (sym_item.get("strategies") or {}).get(strat)
-                if not blk:
-                    continue
+                if not blk: continue
                 last_train = blk.get("last_train_time")
-                out.append(f"<li>{_safe(sym)}")
-                out.append("<ul>")
+                out.append(f"<li>{_safe(sym)}<ul>")
                 out.append(f"<li>{icon_train(last_train)} 최근 학습: {_safe(_fmt_ts(_to_kst(last_train)))}</li>")
-                probs = blk.get("problems") or []
-                if probs:
-                    out.append("<li>⚠️ 문제:<ul>")
-                    for p in probs:
-                        out.append(f"<li>{_safe(p)}</li>")
-                    out.append("</ul></li>")
                 out.append("</ul></li>")
             out.append("</ul>")
 
-        # 2) 예측 현황
+        # 2) 예측
         out.append("<h3 style='margin-top:8px'>2. 예측 현황</h3>")
         for strat in STRATEGIES:
-            out.append(f"<div style='margin:6px 0 2px'><b>• 전략: {_safe(strat)}</b></div>")
-            out.append("<ul>")
+            out.append(f"<div style='margin:6px 0 2px'><b>• 전략: {_safe(strat)}</b></div><ul>")
             for sym_item in snapshot.get("symbols", []):
                 sym = sym_item.get("symbol")
                 blk = (sym_item.get("strategies") or {}).get(strat)
-                if not blk:
-                    continue
+                if not blk: continue
                 pred = blk.get("prediction") or {}
-                out.append(f"<li>{_safe(sym)}")
-                out.append("<ul>")
+                out.append(f"<li>{_safe(sym)}<ul>")
                 out.append(f"<li>🎯 메타러너 선택: <b>{_safe(pred.get('meta_choice','-'))}</b></li>")
                 for md in pred.get("by_model", []):
                     last_cls = md.get("latest_class","-")
                     last_ret = md.get("latest_return", None)
                     last_ret_txt = "-" if last_ret is None else f"{last_ret:+.1%}"
-                    out.append(f"<li>{icon_ret(last_ret)} {_safe(md.get('model','').upper())}: 클래스 {_safe(last_cls)} (수익률 {_safe(last_ret_txt)})</li>")
+                    out.append(f"<li>{icon_ret(last_ret)} {_safe(md.get('model','').upper())}: {_safe(md.get('status','-'))}, "
+                               f"클래스 {_safe(last_cls)} (수익률 {_safe(last_ret_txt)})</li>")
                 out.append("</ul></li>")
             out.append("</ul>")
 
-        # 3) 평가 현황
+        # 3) 평가
         out.append("<h3 style='margin-top:8px'>3. 평가 현황</h3>")
         for strat in STRATEGIES:
-            out.append(f"<div style='margin:6px 0 2px'><b>• 전략: {_safe(strat)}</b></div>")
-            out.append("<ul>")
+            out.append(f"<div style='margin:6px 0 2px'><b>• 전략: {_safe(strat)}</b></div><ul>")
             for sym_item in snapshot.get("symbols", []):
                 sym = sym_item.get("symbol")
                 blk = (sym_item.get("strategies") or {}).get(strat)
-                if not blk:
-                    continue
+                if not blk: continue
                 ev = blk.get("evaluation") or {}
                 delay = int(ev.get("delay_min",0))
-                out.append(f"<li>{_safe(sym)}")
-                out.append("<ul>")
+                out.append(f"<li>{_safe(sym)}<ul>")
                 out.append(f"<li>🕒 마지막 예측: {_safe(_fmt_ts(_to_kst(ev.get('last_prediction_time'))))}</li>")
                 out.append(f"<li>📅 평가 예정: {_safe(_fmt_ts(_to_kst(ev.get('due_time'))))}</li>")
                 out.append(f"<li>🧪 최근 평가완료: {_safe(_fmt_ts(_to_kst(ev.get('last_evaluated_time'))))}</li>")
@@ -672,21 +795,18 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow')); // 기본
                 out.append("</ul></li>")
             out.append("</ul>")
 
-        # 4) 실패 학습 현황
+        # 4) 실패 학습
         out.append("<h3 style='margin-top:8px'>4. 실패 학습 현황</h3>")
         for strat in STRATEGIES:
-            out.append(f"<div style='margin:6px 0 2px'><b>• 전략: {_safe(strat)}</b></div>")
-            out.append("<ul>")
+            out.append(f"<div style='margin:6px 0 2px'><b>• 전략: {_safe(strat)}</b></div><ul>")
             for sym_item in snapshot.get("symbols", []):
                 sym = sym_item.get("symbol")
                 blk = (sym_item.get("strategies") or {}).get(strat)
-                if not blk:
-                    continue
+                if not blk: continue
                 fl = blk.get("failure_learning") or {}
                 rr = fl.get("reflect_ratio", None)
                 rr_txt = "-" if rr is None else _pct(rr)
-                out.append(f"<li>{_safe(sym)}")
-                out.append("<ul>")
+                out.append(f"<li>{_safe(sym)}<ul>")
                 out.append(f"<li>📉 최근 실패 {int(fl.get('recent_fail',0))}건</li>")
                 out.append(f"<li>📈 이후 반영 {int(fl.get('reflected_count_after',0))}건</li>")
                 out.append(f"<li>📘 반영률 {rr_txt}</li>")
@@ -705,11 +825,11 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow')); // 기본
     html = f"<div class='wrap'>{css}{header}" + render_flow_list() + render_symbol_centric() + "</div>"
     return html
 
-# ===================== 외부진입점 =====================
+# ===================== 외부 진입 =====================
 def run(group=-1, view="json", cumulative=True, symbols=None, **kwargs):
     """
-    ✅ 절대 학습/예측/평가 실행 없음 — 점검 전용 스냅샷
-    사용법:
+    ✅ 스냅샷만 생성 (학습/예측/평가 실행 없음)
+    사용:
       /diag/e2e?view=json
       /diag/e2e?view=html
       /diag/e2e?symbols=BTCUSDT,ETHUSDT
