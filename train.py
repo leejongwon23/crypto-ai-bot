@@ -54,10 +54,15 @@ from window_optimizer import find_best_window
 
 # --- ssl_pretrain (옵션) ---
 try:
-    from ssl_pretrain import masked_reconstruction
+    from ssl_pretrain import masked_reconstruction, get_ssl_ckpt_path   # ✅ 추가 임포트
 except Exception:
     def masked_reconstruction(symbol, strategy, input_size):
         return None
+    # ✅ 폴백 경로 헬퍼(ssl_pretrain.py 부재 시에도 안전)
+    def get_ssl_ckpt_path(symbol: str, strategy: str) -> str:
+        base = os.getenv("SSL_CACHE_DIR", "/persistent/ssl_models")
+        os.makedirs(base, exist_ok=True)
+        return f"{base}/{symbol}_{strategy}_ssl.pt"
 
 # --- evo meta learner (옵션) ---
 try:
@@ -299,7 +304,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
 
         # ✅ SSL 사전학습 캐시 스킵
         try:
-            ssl_ckpt = f"/persistent/ssl_models/{symbol}_{strategy}_ssl.pt"
+            ssl_ckpt = get_ssl_ckpt_path(symbol, strategy)   # ✅ 헬퍼 사용(경로 통일)
             if not os.path.exists(ssl_ckpt):
                 masked_reconstruction(symbol, strategy, FEATURE_INPUT_SIZE)
             else:
