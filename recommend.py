@@ -1,4 +1,4 @@
-# recommend.py (FINAL — meta-only success rate + all-evals counting, safe single-call)
+# recommend.py (MEM-SAFE FINAL — meta-only success rate + cached model list + recent-window volatility)
 import os
 import csv
 import json
@@ -11,22 +11,30 @@ import pandas as pd
 from predict import predict
 from data.utils import SYMBOLS, get_kline_by_strategy
 from logger import (
-    ensure_prediction_log_exists,     # ✅ prediction_log 보장
-    get_meta_success_rate,            # ✅ 메타(선택)만 성공률 집계
-    get_strategy_eval_count           # ✅ 메타+섀도우 모두 카운팅(성공/실패 평가된 건)
+    ensure_prediction_log_exists,     # prediction_log 보장
+    get_meta_success_rate,            # 메타(선택)만 성공률 집계 — 청크 기반
+    get_strategy_eval_count           # 메타+섀도우 평가 완료 건수 — 청크 기반
 )
 from telegram_bot import send_message
+
+# === 설정 (환경변수로도 조절 가능) ===
+MIN_SUCCESS_RATE = float(os.getenv("RECO_MIN_SUCCESS_RATE", "0.65"))
+MIN_SAMPLES      = int(os.getenv("RECO_MIN_SAMPLES", "10"))
+VOL_RT_단기      = float(os.getenv("VOL_TH_SHORT",  "0.003"))
+VOL_RT_중기      = float(os.getenv("VOL_TH_MID",    "0.005"))
+VOL_RT_장기      = float(os.getenv("VOL_TH_LONG",   "0.008"))
+VOL_LOOKBACK_MAX = int(os.getenv("VOL_LOOKBACK_MAX","120"))  # 변동성 계산 시 최근 N행만 사용
 
 # 현재 KST 시각
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 # 전략별 변동성 기준
-STRATEGY_VOL = {"단기": 0.003, "중기": 0.005, "장기": 0.008}
+STRATEGY_VOL = {"단기": VOL_RT_단기, "중기": VOL_RT_중기, "장기": VOL_RT_장기}
 
 # 로그 경로
 AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
 FAILURE_LOG = "/persistent/logs/failure_count.csv"
-PREDICTION_LOG = "/persistent/prediction_log.csv"  # ✅ 루트 경로로 통일
+PREDICTION_LOG = "/persistent/prediction_log.csv"  # 루트 경로로 통일
 os.makedirs("/persistent/logs", exist_ok=True)
 
 # ──────────────────────────────────────────────────────────────
@@ -34,7 +42,7 @@ os.makedirs("/persistent/logs", exist_ok=True)
 #   - 성공률: 메타(선택된) 예측만 집계
 #   - 표본수: 메타+섀도우 모두 중 '성공/실패'로 평가 끝난 건수
 # ──────────────────────────────────────────────────────────────
-def check_prediction_filter(strategy, min_success_rate=0.65, min_samples=10):
+def check_prediction_filter(strategy, min_success_rate=MIN_SUCCESS_RATE, min_samples=MIN_SAMPLES):
     rate = float(get_meta_success_rate(strategy, min_samples=min_samples) or 0.0)
     n = int(get_strategy_eval_count(strategy) or 0)
     return (n >= min_samples) and (rate >= min_success_rate)
@@ -56,7 +64,7 @@ def format_message(data):
     direction = data.get("direction", "롱")
     strategy = data.get("strategy", "전략")
     symbol = data.get("symbol", "종목")
-    success_rate = safe_float(data.get("success_rate"), 0.0)   # ✅ 메타 성공률만 반영
+    success_rate = safe_float(data.get("success_rate"), 0.0)   # 메타 성공률만 반영
     rate = safe_float(data.get("rate"), 0.0)  # expected return (예: 0.125)
     reason = str(data.get("reason", "-")).strip()
     score = data.get("score", None)
@@ -123,26 +131,29 @@ def save_failure_count(fmap):
             w.writerow({"symbol": s, "strategy": strat, "failures": v})
 
 # ──────────────────────────────────────────────────────────────
-# 변동성 높은 심볼 추출 (원본 유지)
+# 변동성 높은 심볼 추출 (최근 N행만 사용해 메모리/연산 절약)
 # ──────────────────────────────────────────────────────────────
 def get_symbols_by_volatility(strategy):
-    th = STRATEGY_VOL.get(strategy, 0.003)
+    th = STRATEGY_VOL.get(strategy, VOL_RT_단기)
     result = []
     for symbol in SYMBOLS:
         try:
             df = get_kline_by_strategy(symbol, strategy)
             if df is None or len(df) < 60:
                 continue
+            # 최근 구간만 사용해 계산량 축소
+            if VOL_LOOKBACK_MAX > 0 and len(df) > VOL_LOOKBACK_MAX:
+                df = df.tail(VOL_LOOKBACK_MAX)
             r_std = df["close"].pct_change().rolling(20).std().iloc[-1]
-            b_std = df["close"].pct_change().rolling(60).std().iloc[-1]
+            b_std = df["close"].pct_change().rolling(60).std().iloc[-1] if len(df) >= 60 else r_std
             if r_std >= th and (r_std / (b_std + 1e-8)) >= 1.2:
-                result.append({"symbol": symbol, "volatility": r_std})
+                result.append({"symbol": symbol, "volatility": float(r_std)})
         except Exception as e:
             print(f"[ERROR] 변동성 계산 실패: {symbol}-{strategy}: {e}")
     return sorted(result, key=lambda x: -x["volatility"])
 
 # ──────────────────────────────────────────────────────────────
-# 내부 유틸: 최신 종가(진입가) 조회 (원본 유지)
+# 내부 유틸: 최신 종가(진입가) 조회
 # ──────────────────────────────────────────────────────────────
 def _get_latest_price(symbol, strategy):
     try:
@@ -154,26 +165,34 @@ def _get_latest_price(symbol, strategy):
         return 0.0
 
 # ──────────────────────────────────────────────────────────────
-# (신규) 단일 심볼 예측 엔트리 — predict_trigger에서 사용
-#   - 모델 파일 없으면 안전히 skip
-#   - predict()는 내부에서 로깅 처리, 여기서는 메시지 전송 조건만 판단
+# (신규) 모델 파일 인벤토리 캐시
 # ──────────────────────────────────────────────────────────────
-def run_prediction(symbol, strategy, source="변동성", allow_send=True):
+def _build_model_index():
+    model_dir = "/persistent/models"
+    files = os.listdir(model_dir) if os.path.exists(model_dir) else []
+    return set(files)
+
+def _has_model_for(model_index, symbol, strategy):
+    pref = f"{symbol}_{strategy}_"
+    for f in model_index:
+        if f.startswith(pref) and (f.endswith(".pt") or f.endswith(".meta.json")):
+            return True
+    return False
+
+# ──────────────────────────────────────────────────────────────
+# (신규) 단일 심볼 예측 엔트리 — predict_trigger에서 사용
+# ──────────────────────────────────────────────────────────────
+def run_prediction(symbol, strategy, source="변동성", allow_send=True, _model_index=None):
     # 로그 파일 보장
     try:
         ensure_prediction_log_exists()
     except Exception as e:
         print(f"[경고] prediction_log 보장 실패: {e}")
 
-    # 모델 존재 대략 체크
+    # 모델 존재 대략 체크(캐시 사용)
     try:
-        model_dir = "/persistent/models"
-        files = os.listdir(model_dir) if os.path.exists(model_dir) else []
-        model_count = len([
-            f for f in files
-            if f.startswith(f"{symbol}_{strategy}_") and (f.endswith(".pt") or f.endswith(".meta.json"))
-        ])
-        if model_count == 0:
+        model_index = _model_index if _model_index is not None else _build_model_index()
+        if not _has_model_for(model_index, symbol, strategy):
             log_audit(symbol, strategy, None, "모델 없음")
             return None
     except Exception as e:
@@ -187,8 +206,8 @@ def run_prediction(symbol, strategy, source="변동성", allow_send=True):
             log_audit(symbol, strategy, None, "predict() 결과 없음/형식오류")
             return None
 
-        # 메시지용 필드 보강 — ✅ 메타 성공률만
-        meta_rate = float(get_meta_success_rate(strategy, min_samples=10) or 0.0)
+        # 메시지용 필드 보강 — 메타 성공률만
+        meta_rate = float(get_meta_success_rate(strategy, min_samples=MIN_SAMPLES) or 0.0)
         expected_ret = float(res.get("expected_return", 0.0))
         entry_price = _get_latest_price(symbol, strategy)
         direction = "롱" if expected_ret >= 0 else "숏"
@@ -200,7 +219,7 @@ def run_prediction(symbol, strategy, source="변동성", allow_send=True):
             "price": entry_price,
             "rate": expected_ret,
             "direction": direction,
-            "success_rate": meta_rate,    # ✅ 0~1 (메타만)
+            "success_rate": meta_rate,    # 0~1 (메타만)
             "volatility": True,           # 트리거 기반 호출이므로 신호 강조
         })
 
@@ -234,6 +253,9 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
     except Exception as e:
         print(f"[경고] prediction_log 보장 실패: {e}")
 
+    # 모델 인벤토리 캐시 1회 생성
+    model_index = _build_model_index()
+
     for item in symbols:
         symbol = item["symbol"]
         vol_val = float(item.get("volatility", 0.0))
@@ -243,17 +265,12 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
             continue
 
         try:
-            # 모델 존재 여부 대략 체크
-            model_dir = "/persistent/models"
-            model_count = len([
-                f for f in os.listdir(model_dir)
-                if f.startswith(f"{symbol}_{strategy}_") and (f.endswith(".pt") or f.endswith(".meta.json"))
-            ])
-            if model_count == 0:
+            # 모델 존재 여부 캐시로 판정
+            if not _has_model_for(model_index, symbol, strategy):
                 log_audit(symbol, strategy, None, "모델 없음")
                 continue
 
-            # ✅ predict() 실행 (dict 기준 수용)
+            # predict() 실행 (dict 기준 수용)
             res = predict(symbol, strategy, source=source)
             if isinstance(res, list):
                 res = res[0] if res else None
@@ -261,8 +278,8 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                 log_audit(symbol, strategy, None, "predict() 결과 없음/형식오류")
                 continue
 
-            # 텔레그램 메시지용 필드 보강 — ✅ 메타 성공률만
-            meta_rate = float(get_meta_success_rate(strategy, min_samples=10) or 0.0)
+            # 텔레그램 메시지용 필드 보강 — 메타 성공률만
+            meta_rate = float(get_meta_success_rate(strategy, min_samples=MIN_SAMPLES) or 0.0)
             expected_ret = float(res.get("expected_return", 0.0))
             entry_price = _get_latest_price(symbol, strategy)
             direction = "롱" if expected_ret >= 0 else "숏"
@@ -289,7 +306,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
     return results
 
 # ──────────────────────────────────────────────────────────────
-# 메인 엔트리 — 배치 예측 (원본 흐름 유지)
+# 메인 엔트리 — 배치 예측
 # ──────────────────────────────────────────────────────────────
 def main(strategy, symbols=None, force=False, allow_prediction=True):
     print(f"\n📋 [예측 시작] 전략: {strategy} | 시각: {now_kst().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -300,7 +317,7 @@ def main(strategy, symbols=None, force=False, allow_prediction=True):
 
     results = run_prediction_loop(strategy, target_symbols, source="배치", allow_prediction=allow_prediction)
 
-    # ✅ 필터 통과했을 때만 텔레그램 발송 (성공률 65% + 최소 10회 평가 완료)
+    # 필터 통과했을 때만 텔레그램 발송 (성공률 65% + 최소 10회 평가 완료)
     if check_prediction_filter(strategy):
         for r in results:
             try:
@@ -308,9 +325,8 @@ def main(strategy, symbols=None, force=False, allow_prediction=True):
             except Exception as e:
                 print(f"[텔레그램 전송 실패] {e}")
     else:
-        print(f"[알림 생략] {strategy} — 성공률 65% 이상 + 최소 10회 조건 미충족")
+        print(f"[알림 생략] {strategy} — 성공률 {MIN_SUCCESS_RATE:.0%} 이상 + 최소 {MIN_SAMPLES}회 조건 미충족")
 
-# ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
