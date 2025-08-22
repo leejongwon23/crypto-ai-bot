@@ -1,4 +1,4 @@
-# === predict_trigger.py (FINAL with regime/calib pre-warm) ===
+# === predict_trigger.py (FINAL v2 — import guard + direct predict call) ===
 import os  # ✅ prediction_log 존재 확인/경로
 import pandas as pd
 import time
@@ -63,7 +63,14 @@ def check_model_quality(symbol, strategy):
     return True
 
 def run():
-    from recommend import run_prediction
+    # ✅ recommend 의존 제거, predict 직접 호출(임포트 가드)
+    try:
+        from predict import predict as _predict
+    except Exception as e:
+        print(f"[치명] predict 모듈 로드 실패 → 트리거 중단: {e}")
+        traceback.print_exc()
+        return
+
     # ✅ 예측/평가 로그 파일이 없을 경우 헤더까지 생성 (안전)
     try:
         ensure_prediction_log_exists()
@@ -90,7 +97,7 @@ def run():
                     continue
 
                 if check_pre_burst_conditions(df, strategy):
-                    # ✅ 10번 요구사항: 트리거 직전 레짐/캘리브 프리로드(캐시/로그용)
+                    # ✅ 트리거 직전 레짐/캘리브 프리로드(캐시/로그용)
                     try:
                         regime = detect_regime(symbol, strategy, now=now_kst())
                         calib_ver = get_calibration_version()
@@ -100,7 +107,7 @@ def run():
 
                     print(f"[✅ 트리거 포착] {symbol} - {strategy} → 예측 실행")
                     try:
-                        run_prediction(symbol, strategy, source="변동성")
+                        _predict(symbol, strategy, source="변동성")
                         last_trigger_time[key] = now
                         log_audit(symbol, strategy, "트리거예측", "조건 만족으로 실행")
                         triggered += 1
