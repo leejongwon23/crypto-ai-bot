@@ -1,8 +1,8 @@
-# === logger.py (호환 최종본: 확장 스키마·자동정렬 + 인벤토리/통계 내보내기 + meta전용 성공률) ===
-import os, csv, json, datetime, pandas as pd, pytz, hashlib
+# === logger.py (메모리 안전: 로테이션 + 청크 집계 호환 최종본) ===
+import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil
 import sqlite3
 from collections import defaultdict
-import threading, time  # ⬅️ 동시성/재시도
+import threading, time  # 동시성/재시도
 
 # -------------------------
 # 기본 경로/디렉토리
@@ -11,16 +11,16 @@ DIR = "/persistent"
 LOG_DIR = os.path.join(DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# ✅ prediction_log는 "루트" 경로로 통일
+# prediction_log는 루트 경로로 통일
 PREDICTION_LOG = f"{DIR}/prediction_log.csv"
-WRONG = f"{DIR}/wrong_predictions.csv"  # (호환 목적)
+WRONG = f"{DIR}/wrong_predictions.csv"
 EVAL_RESULT = f"{LOG_DIR}/evaluation_result.csv"
 
-# ✅ 학습 로그 파일명 통일
+# 학습 로그 파일명
 TRAIN_LOG = f"{LOG_DIR}/train_log.csv"
 AUDIT_LOG = f"{LOG_DIR}/evaluation_audit.csv"
 
-# ✅ 공용 헤더(기존 + 확장 컬럼)
+# 공용 헤더(기존 + 확장 컬럼)
 BASE_PRED_HEADERS = [
     "timestamp","symbol","strategy","direction",
     "entry_price","target_price",
@@ -30,7 +30,11 @@ BASE_PRED_HEADERS = [
     "source","volatility","source_exchange"
 ]
 EXTRA_PRED_HEADERS = ["regime","meta_choice","raw_prob","calib_prob","calib_ver"]
-PREDICTION_HEADERS = BASE_PRED_HEADERS + EXTRA_PRED_HEADERS
+# ✅ feature_vector 포함(긴 벡터는 축약 저장)
+PREDICTION_HEADERS = BASE_PRED_HEADERS + EXTRA_PRED_HEADERS + ["feature_vector"]
+
+# 청크 크기 기본값
+CHUNK = 50_000
 
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
@@ -73,6 +77,36 @@ def ensure_prediction_log_exists():
         print(f"[⚠️ ensure_prediction_log_exists] 예외: {e}")
 
 # -------------------------
+# (NEW) 용량 기반 로그 로테이션
+# -------------------------
+def rotate_prediction_log_if_needed(max_mb: int = 200, backups: int = 3):
+    """
+    prediction_log.csv 용량이 max_mb(MB)를 넘으면 .1, .2 ...로 회전.
+    """
+    try:
+        if not os.path.exists(PREDICTION_LOG):
+            return
+        size_mb = os.path.getsize(PREDICTION_LOG) / (1024 * 1024)
+        if size_mb < max_mb:
+            return
+
+        # 오래된 백업부터 삭제/이동
+        for i in range(backups, 0, -1):
+            old = f"{PREDICTION_LOG}.{i}"
+            if i == backups and os.path.exists(old):
+                os.remove(old)
+            else:
+                prev = f"{PREDICTION_LOG}.{i-1}" if i-1 > 0 else PREDICTION_LOG
+                if os.path.exists(prev):
+                    shutil.move(prev, old)
+
+        # 빈 원본 생성(헤더 포함)
+        ensure_prediction_log_exists()
+        print(f"[logger] 🔁 rotate: {size_mb:.1f}MB → rotated with {backups} backups")
+    except Exception as e:
+        print(f"[logger] rotate error: {e}")
+
+# -------------------------
 # feature hash 유틸
 # -------------------------
 def get_feature_hash(feature_row) -> str:
@@ -98,7 +132,7 @@ def get_feature_hash(feature_row) -> str:
         return "hash_error"
 
 # -------------------------
-# SQLite: 모델 성공/실패 집계 (필요 시 사용)
+# SQLite: 모델 성공/실패 집계
 # -------------------------
 _db_conn = None
 _DB_PATH = os.path.join(LOG_DIR, "failure_patterns.db")
@@ -247,56 +281,95 @@ def _normalize_status(df: pd.DataFrame) -> pd.DataFrame:
     df["status"] = ""
     return df
 
-# ✅ [메타만] 성공률
+# -------------------------
+# 메모리 안전 집계 (청크 기반)
+# -------------------------
 def get_meta_success_rate(strategy, min_samples: int = 1):
     """
     model == 'meta' 만 집계. status ∈ {success, fail, v_success, v_fail}
     min_samples 미만이면 0.0 반환.
     """
-    try:
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
-        if df.empty: return 0.0
-        df = df[(df.get("strategy") == strategy) & (df.get("model") == "meta")].copy()
-        if df.empty: return 0.0
-        # 상태 정규화
-        df["status"] = df.get("status")
-        if "status" not in df.columns or df["status"].isna().all():
-            # evaluate_predictions가 status 채우기 전에 호출될 수 있으니 보수적으로 제외
-            return 0.0
-        df["sflag"] = df["status"].astype(str).str.lower().isin(["success","v_success"]).astype(int)
-        df = df[df["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])]
-        n = len(df)
-        if n < max(1, min_samples): return 0.0
-        return round(df["sflag"].mean(), 6)
-    except Exception as e:
-        print(f"[오류] get_meta_success_rate 실패 → {e}")
+    if not os.path.exists(PREDICTION_LOG):
         return 0.0
+    usecols = ["timestamp","strategy","model","status","success"]
+    succ = total = 0
+    for chunk in pd.read_csv(
+        PREDICTION_LOG, encoding="utf-8-sig",
+        usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success"]],
+        chunksize=CHUNK
+    ):
+        # 메타만 & 평가 완료행만
+        if "model" in chunk.columns:
+            chunk = chunk[chunk["model"] == "meta"]
+        if "strategy" in chunk.columns:
+            chunk = chunk[chunk["strategy"] == strategy]
+        if chunk.empty:
+            continue
+        # status 컬럼 우선, 없으면 success 불리언으로 대체
+        if "status" in chunk.columns and chunk["status"].notna().any():
+            mask = chunk["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
+            chunk = chunk[mask]
+            s = chunk["status"].astype(str).str.lower().isin(["success","v_success"])
+            succ += int(s.sum()); total += int(len(chunk))
+        elif "success" in chunk.columns:
+            s = chunk["success"].astype(str).str.lower().isin(["true","1","success","v_success"])
+            succ += int(s.sum()); total += int(len(chunk))
+    if total < max(1, min_samples):
+        return 0.0
+    return float(succ / total)
 
-# ✅ [메타+섀도우] 평가 건수
-def get_strategy_eval_count(strategy):
-    try:
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
-        # status가 채워진(성공/실패) 모든 예측 포함 → 섀도우 포함
-        return len(df[(df.get("strategy")==strategy) & (df.get("status").astype(str).str.lower().isin(['success','fail','v_success','v_fail']))])
-    except Exception as e:
-        print(f"[오류] get_strategy_eval_count 실패 → {e}")
+def get_strategy_eval_count(strategy: str):
+    """해당 전략의 평가 건수(성공/실패 확정행만, 청크 누산)."""
+    if not os.path.exists(PREDICTION_LOG):
         return 0
+    usecols = ["strategy","status","success"]
+    count = 0
+    for chunk in pd.read_csv(
+        PREDICTION_LOG, encoding="utf-8-sig",
+        usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success"]],
+        chunksize=CHUNK
+    ):
+        if "strategy" in chunk.columns:
+            chunk = chunk[chunk["strategy"] == strategy]
+        if chunk.empty:
+            continue
+        if "status" in chunk.columns and chunk["status"].notna().any():
+            mask = chunk["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
+            count += int(mask.sum())
+        elif "success" in chunk.columns:
+            # success가 쓰였던 과거 포맷(평가 시점 기록)
+            count += int(len(chunk))
+    return int(count)
 
-# (참고) 전체 성공률(메타+섀도우 혼합) — 필요 시만 사용
 def get_actual_success_rate(strategy, min_samples: int = 1):
-    try:
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
-        df = df[df["strategy"] == strategy]
-        df = _normalize_status(df)
-        df = df[df["status"].isin(["success","fail"])]
-        n = len(df)
-        if n < max(1, min_samples):
-            return 0.0
-        return round(len(df[df["status"]=="success"]) / n, 4)
-    except Exception as e:
-        print(f"[오류] get_actual_success_rate 실패 → {e}")
+    """전략별 전체 성공률(메타/섀도우 포함), 청크 누산."""
+    if not os.path.exists(PREDICTION_LOG):
         return 0.0
+    usecols = ["strategy","status","success"]
+    succ = total = 0
+    for chunk in pd.read_csv(
+        PREDICTION_LOG, encoding="utf-8-sig",
+        usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success"]],
+        chunksize=CHUNK
+    ):
+        if "strategy" in chunk.columns:
+            chunk = chunk[chunk["strategy"] == strategy]
+        if chunk.empty:
+            continue
+        if "status" in chunk.columns and chunk["status"].notna().any():
+            mask = chunk["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
+            s = chunk["status"].astype(str).str.lower().isin(["success","v_success"])
+            succ += int(s[mask].sum()); total += int(mask.sum())
+        elif "success" in chunk.columns:
+            s = chunk["success"].astype(str).str.lower().isin(["true","1","success","v_success"])
+            succ += int(s.sum()); total += int(len(chunk))
+    if total < max(1, min_samples):
+        return 0.0
+    return round(succ / total, 4)
 
+# -------------------------
+# 감사용 감사 로그
+# -------------------------
 def log_audit_prediction(s, t, status, reason):
     row = {
         "timestamp": now_kst().isoformat(),
@@ -331,7 +404,7 @@ def log_prediction(
     label=None, group_id=None, model_symbol=None, model_name=None,
     source="일반", volatility=False, feature_vector=None,
     source_exchange="BYBIT",
-    # --- 확장 필드 ---
+    # 확장 필드
     regime=None, meta_choice=None, raw_prob=None, calib_prob=None, calib_ver=None
 ):
     from datetime import datetime as _dt
@@ -339,6 +412,10 @@ def log_prediction(
 
     LOG_FILE = PREDICTION_LOG
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
+    # ✅ 용량 체크 & 로테이션
+    rotate_prediction_log_if_needed()
+    ensure_prediction_log_exists()
 
     now = _dt.now(pytz.timezone("Asia/Seoul")).isoformat() if timestamp is None else timestamp
     top_k_str = ",".join(map(str, top_k)) if top_k else ""
@@ -355,6 +432,23 @@ def log_prediction(
     if source not in allowed_sources:
         source = "일반"
 
+    # feature_vector 축약(길면 head/tail만)
+    fv_serial = ""
+    try:
+        if feature_vector is not None:
+            if isinstance(feature_vector, (list, tuple)):
+                v = list(feature_vector)
+            elif "numpy" in str(type(feature_vector)):
+                v = feature_vector.flatten().tolist()
+            else:
+                v = []
+            if len(v) > 64:
+                fv_serial = json.dumps({"head": v[:8], "tail": v[-8:]}, ensure_ascii=False)
+            else:
+                fv_serial = json.dumps(v, ensure_ascii=False)
+    except Exception:
+        fv_serial = ""
+
     row = [
         now, symbol, strategy, direction, entry_price, target_price,
         (model or ""), predicted_class, top_k_str, note,
@@ -363,7 +457,8 @@ def log_prediction(
         (regime or ""), (meta_choice or ""), 
         (float(raw_prob) if raw_prob is not None else ""),
         (float(calib_prob) if calib_prob is not None else ""),
-        (str(calib_ver) if calib_ver is not None else "")
+        (str(calib_ver) if calib_ver is not None else ""),
+        fv_serial
     ]
 
     try:
@@ -437,14 +532,13 @@ def log_training_result(
         print(f"[✅ 학습 로그 기록] {symbol}-{strategy} {model} status={status}")
     except Exception as e:
         print(f"[⚠️ 학습 로그 기록 실패] {e}")
-    # ⚠️ 주의: 훈련 성공/실패를 model_success 집계에 넣지 않는다(예측 성능과 무관).
-    # 필요 시 별도 집계가 필요하면 별도 테이블을 사용하도록 한다.
+    # 훈련 성공/실패는 model_success 집계에 넣지 않음.
 
 # -------------------------
 # 수익률 클래스 경계 로그
 # -------------------------
 def log_class_ranges(symbol, strategy, group_id=None, class_ranges=None, note=""):
-    import csv, os
+    import csv, os, math
     path = os.path.join(LOG_DIR, "class_ranges.csv")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     now = now_kst().isoformat()
@@ -601,7 +695,7 @@ def get_available_models(symbol: str = None, strategy: str = None):
         return []
 
 # -------------------------
-# 최근 예측 통계 내보내기
+# 최근 예측 통계 내보내기 (청크 누산)
 # -------------------------
 def export_recent_model_stats(days: int = 7, out_path: str = None):
     try:
@@ -611,46 +705,76 @@ def export_recent_model_stats(days: int = 7, out_path: str = None):
             os.makedirs(LOG_DIR, exist_ok=True)
             out_path = os.path.join(LOG_DIR, "recent_model_stats.csv")
 
-        df = pd.read_csv(path, encoding="utf-8-sig", on_bad_lines="skip")
-        if df.empty:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
             pd.DataFrame(columns=["symbol","strategy","model","total","success","fail","success_rate","last_ts"]).to_csv(out_path, index=False, encoding="utf-8-sig")
             return out_path
 
-        # 상태 정규화
-        df = df.copy()
-        if "status" in df.columns:
-            df["status"] = df["status"].astype(str).str.lower()
-            df = df[df["status"].isin(["success","fail","v_success","v_fail"])]
-        else:
-            return out_path
-
-        # 최근 N일만
-        ts = pd.to_datetime(df["timestamp"], errors="coerce")
-        try:
-            ts = ts.dt.tz_localize("Asia/Seoul")
-        except Exception:
-            ts = ts.dt.tz_convert("Asia/Seoul")
         cutoff = now_kst() - datetime.timedelta(days=int(days))
-        df["timestamp"] = ts
-        df = df[df["timestamp"] >= cutoff]
 
-        if df.empty:
-            pd.DataFrame(columns=["symbol","strategy","model","total","success","fail","success_rate","last_ts"]).to_csv(out_path, index=False, encoding="utf-8-sig")
-            return out_path
+        agg = {}  # key: (symbol,strategy,model) -> {"success":x,"total":y,"last_ts":ts}
 
-        # 집계
-        df["ok_flag"] = df["status"].isin(["success","v_success"]).astype(int)
-        grp_cols = [c for c in ["symbol","strategy","model"] if c in df.columns]
-        g = df.groupby(grp_cols, dropna=False).agg(
-            total=("ok_flag","count"),
-            success=("ok_flag","sum"),
-            last_ts=("timestamp","max")
-        ).reset_index()
-        g["fail"] = g["total"] - g["success"]
-        g["success_rate"] = (g["success"] / g["total"]).round(4)
-        g = g.sort_values(["symbol","strategy","model","last_ts"]).copy()
-        g.to_csv(out_path, index=False, encoding="utf-8-sig")
-        print(f"[✅ export_recent_model_stats] 저장: {out_path} (rows={len(g)})")
+        usecols = ["timestamp","symbol","strategy","model","status","success"]
+        for chunk in pd.read_csv(
+            path, encoding="utf-8-sig",
+            usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success"]],
+            chunksize=CHUNK
+        ):
+            # 시간 필터
+            if "timestamp" in chunk.columns:
+                ts = pd.to_datetime(chunk["timestamp"], errors="coerce")
+                try:
+                    ts = ts.dt.tz_localize("Asia/Seoul")
+                except Exception:
+                    ts = ts.dt.tz_convert("Asia/Seoul")
+                chunk = chunk.loc[ts >= cutoff]
+                chunk = chunk.assign(_ts=ts)
+            else:
+                continue
+
+            if chunk.empty or "model" not in chunk.columns:
+                continue
+
+            # 성공/실패 확정행
+            succ_mask = None
+            if "status" in chunk.columns and chunk["status"].notna().any():
+                ok_mask = chunk["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
+                succ_mask = chunk["status"].astype(str).str.lower().isin(["success","v_success"])
+                chunk = chunk[ok_mask]
+            elif "success" in chunk.columns:
+                succ_mask = chunk["success"].astype(str).str.lower().isin(["true","1","success","v_success"])
+            else:
+                continue
+
+            if chunk.empty:
+                continue
+
+            chunk = chunk.assign(_succ=succ_mask.astype(bool))
+
+            for (sym, strat, mdl), sub in chunk.groupby(["symbol","strategy","model"], dropna=False):
+                key = (str(sym), str(strat), str(mdl))
+                d = agg.setdefault(key, {"success":0, "total":0, "last_ts":None})
+                d["success"] += int(sub["_succ"].sum())
+                d["total"]   += int(len(sub))
+                last_ts = pd.to_datetime(sub["_ts"].max(), errors="coerce")
+                if d["last_ts"] is None or (pd.notna(last_ts) and last_ts > d["last_ts"]):
+                    d["last_ts"] = last_ts
+
+        # DataFrame으로 변환
+        rows = []
+        for (sym,strat,mdl), d in agg.items():
+            total = int(d["total"]); succ = int(d["success"])
+            rate = (succ/total) if total>0 else 0.0
+            last_ts = d["last_ts"].isoformat() if d["last_ts"] is not None else ""
+            rows.append({
+                "symbol": sym, "strategy": strat, "model": mdl,
+                "total": total, "success": succ, "fail": total - succ,
+                "success_rate": round(rate, 4), "last_ts": last_ts
+            })
+
+        df_out = pd.DataFrame(rows, columns=["symbol","strategy","model","total","success","fail","success_rate","last_ts"])
+        df_out = df_out.sort_values(["symbol","strategy","model","last_ts"])
+        df_out.to_csv(out_path, index=False, encoding="utf-8-sig")
+        print(f"[✅ export_recent_model_stats] 저장: {out_path} (rows={len(df_out)})")
         return out_path
     except Exception as e:
         print(f"[⚠️ export_recent_model_stats 실패] {e}")
