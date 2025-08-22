@@ -1,4 +1,4 @@
-# safe_cleanup.py (FINAL)
+# safe_cleanup.py (FINAL+guarded)
 import os
 import shutil
 from datetime import datetime, timedelta
@@ -8,6 +8,7 @@ ROOT_DIR = os.getenv("PERSIST_ROOT", "/persistent")
 LOG_DIR = os.path.join(ROOT_DIR, "logs")
 MODEL_DIR = os.path.join(ROOT_DIR, "models")
 SSL_DIR = os.path.join(ROOT_DIR, "ssl_models")
+LOCK_DIR = os.path.join(ROOT_DIR, "locks")
 DELETED_LOG_PATH = os.path.join(LOG_DIR, "deleted_log.txt")
 
 # ====== 정책(환경변수: SAFE_* 우선, DISK_* 백워드 호환) ======
@@ -22,6 +23,10 @@ CSV_BACKUPS = int(os.getenv("SAFE_CSV_BACKUPS", "3"))
 
 MAX_MODELS_KEEP_GLOBAL = int(os.getenv("SAFE_MAX_MODELS_KEEP_GLOBAL", "200"))
 MAX_MODELS_PER_KEY = int(os.getenv("SAFE_MAX_MODELS_PER_KEY", "2"))
+
+# 🔒 학습/예측 보호: 최근 파일 보호 시간(시간 단위) + 락 파일 경로
+PROTECT_HOURS = float(os.getenv("SAFE_PROTECT_HOURS", "12"))
+LOCK_PATH = os.getenv("SAFE_LOCK_PATH", os.path.join(LOCK_DIR, "train_or_predict.lock"))
 
 DRYRUN = os.getenv("SAFE_CLEANUP_DRYRUN", "0") == "1"
 
@@ -67,11 +72,19 @@ def _ensure_dirs():
     os.makedirs(LOG_DIR, exist_ok=True)
     os.makedirs(MODEL_DIR, exist_ok=True)
     os.makedirs(SSL_DIR, exist_ok=True)
+    os.makedirs(LOCK_DIR, exist_ok=True)
 
 def _should_delete_file(fname: str) -> bool:
     if os.path.basename(fname) in EXCLUDE_FILES:
         return False
     return any(os.path.basename(fname).startswith(p) for p in DELETE_PREFIXES)
+
+def _is_recent(path: str, hours: float) -> bool:
+    try:
+        mtime = datetime.fromtimestamp(os.path.getmtime(path))
+        return (datetime.now() - mtime) < timedelta(hours=hours)
+    except Exception:
+        return False
 
 def _rollover_csv(path: str, max_mb: int, backups: int):
     if not os.path.isfile(path):
@@ -113,6 +126,9 @@ def _delete_old_by_days(paths, cutoff_dt, deleted_log, accept_all=False):
                 continue
             if not accept_all and not _should_delete_file(p):
                 continue
+            # 🔒 최근 보호: 어떤 파일이든 PROTECT_HOURS 이내 변경분은 삭제 금지
+            if _is_recent(p, PROTECT_HOURS):
+                continue
             try:
                 mtime = datetime.fromtimestamp(os.path.getmtime(p))
             except Exception:
@@ -125,14 +141,17 @@ def _delete_until_target(deleted_log, target_gb):
     for d in [LOG_DIR, MODEL_DIR]:
         for p in _list_files(d):
             if os.path.isfile(p) and _should_delete_file(p):
+                # 🔒 최근 보호
+                if _is_recent(p, PROTECT_HOURS):
+                    continue
                 try:
                     ctime = os.path.getctime(p)
                 except Exception:
                     ctime = 0
                 candidates.append((ctime, p))
-    # SSL 모델은 접두사가 없으므로 모두 후보로
+    # SSL 모델은 접두사가 없으므로 모두 후보로. 단, 최근 보호는 동일 적용
     for p in _list_files(SSL_DIR):
-        if os.path.isfile(p):
+        if os.path.isfile(p) and not _is_recent(p, PROTECT_HOURS):
             try:
                 ctime = os.path.getctime(p)
             except Exception:
@@ -146,6 +165,8 @@ def _delete_until_target(deleted_log, target_gb):
 
 def _limit_models_per_key(deleted_log):
     files = [p for p in _list_files(MODEL_DIR) if os.path.isfile(p)]
+    # 🔒 최근 보호 제외
+    files = [p for p in files if not _is_recent(p, PROTECT_HOURS)]
     files.sort(key=os.path.getmtime, reverse=True)
     if len(files) > MAX_MODELS_KEEP_GLOBAL:
         for p in files[MAX_MODELS_KEEP_GLOBAL:]:
@@ -182,8 +203,29 @@ def _vacuum_sqlite():
         except Exception as e:
             print(f"[경고] VACUUM 실패: {path} | {e}")
 
+def _locked_by_runtime() -> bool:
+    """학습/예측 중이면 True."""
+    # 1) 지정 락 파일
+    if os.path.exists(LOCK_PATH):
+        print(f"[⛔ 중단] LOCK 발견: {LOCK_PATH}")
+        return True
+    # 2) locks 디렉토리 내 임의의 *.lock 파일 존재 시 중단
+    try:
+        for f in _list_files(LOCK_DIR):
+            if f.endswith(".lock"):
+                print(f"[⛔ 중단] LOCK 발견: {f}")
+                return True
+    except Exception:
+        pass
+    return False
+
 def auto_delete_old_logs():
     _ensure_dirs()
+
+    # 🔒 런타임 보호: 락 존재 시 즉시 종료
+    if _locked_by_runtime():
+        return
+
     now = datetime.now()
     cutoff = now - timedelta(days=KEEP_DAYS)
     deleted = []
