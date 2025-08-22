@@ -235,7 +235,7 @@ def update_model_success(s, t, m, success):
         """, params=(s, t or "알수없음", m, int(success), int(not success)), retries=7, commit=True)
         print(f"[✅ update_model_success] {s}-{t}-{m} 기록 ({'성공' if success else '실패'})")
     except Exception as e:
-        print(f"[오류] update_model_success 실패 → {e}")
+        print(f"[오류] update_model_success 실패] {e}")
 
 def get_model_success_rate(s, t, m):
     try:
