@@ -659,6 +659,12 @@ def train_symbol_group_loop(sleep_sec: int = 0):
     try:
         from predict import predict  # 예측 함수 불러오기
 
+        # ✅ 학습 로그 파일/헤더 보장 (추가됨)
+        try:
+            logger.ensure_train_log_exists()
+        except Exception as e:
+            print(f"[경고] train_log 준비 실패: {e}")
+
         # ✅ 예측 로그 파일/헤더 보장
         try:
             logger.ensure_prediction_log_exists()
@@ -693,3 +699,10 @@ def train_symbol_group_loop(sleep_sec: int = 0):
         print("✅ train_symbol_group_loop 완료")
     except Exception as e:
         print(f"[❌ train_symbol_group_loop 예외] {e}")
+
+if __name__ == "__main__":
+    # 필요 시 간단 실행 진입점
+    try:
+        train_symbol_group_loop(sleep_sec=0)
+    except Exception as e:
+        print(f"[MAIN] 예외: {e}")
