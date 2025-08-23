@@ -260,15 +260,13 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
     """
     import pandas as pd
     from config import MIN_FEATURES
-    from logger import log_prediction
+    # 🔧 변경: 예측 로그 오염 방지를 위해 log_prediction 호출 제거
 
     def _dummy(symbol_name):
+        # 🔧 변경: 실패는 failure_db로만 기록하여 예측 로그와 분리
+        safe_failed_result(symbol_name, strategy, reason="create_dataset 입력 feature 부족/실패")
         X = np.zeros((max(1, window), window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
         y = np.zeros((max(1, window),), dtype=np.int64)
-        log_prediction(symbol=symbol_name, strategy=strategy, direction="dummy", entry_price=0,
-                       target_price=0, model="dummy_model", success=False, reason="입력 feature 부족/실패",
-                       rate=0.0, return_value=0.0, volatility=False, source="create_dataset",
-                       predicted_class=0, label=0)
         return X, y
 
     symbol_name = "UNKNOWN"
@@ -754,6 +752,10 @@ def get_kline_by_strategy(symbol: str, strategy: str):
             print(f"[🚨 최종 부족] {symbol}-{strategy} → {total_count}/{min_required} (학습/예측 영향 가능)")
         else:
             print(f"[✅ 수집 성공] {symbol}-{strategy} → 총 {total_count}개")
+
+        # 🔧 변경: 항상 augment 플래그와 학습충족 여부를 attrs에 명시
+        df.attrs["augment_needed"] = total_count < limit
+        df.attrs["enough_for_training"] = total_count >= min_required
 
         CacheManager.set(cache_key, df)
         return df
