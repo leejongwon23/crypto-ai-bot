@@ -139,19 +139,15 @@ def get_btc_dominance():
 
 # =========================
 # ✅ 공용: 미래 수익률 계산기
+# (타임스탬프 파싱 고정: utc=True → Asia/Seoul)
 # =========================
 def future_gains_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
     if df is None or len(df) == 0 or "timestamp" not in df.columns:
         return np.zeros(0 if df is None else len(df), dtype=np.float32)
 
-    ts = pd.to_datetime(df["timestamp"], errors="coerce")
-    close = df["close"].astype(float).values
-    high = (df["high"] if "high" in df.columns else df["close"]).astype(float).values
-
-    if ts.dt.tz is None:
-        ts = ts.dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
-    else:
-        ts = ts.dt.tz_convert("Asia/Seoul")
+    ts = pd.to_datetime(df["timestamp"], errors="coerce", utc=True).dt.tz_convert("Asia/Seoul")
+    close = pd.to_numeric(df["close"], errors="coerce").astype(np.float32).values
+    high = pd.to_numeric((df["high"] if "high" in df.columns else df["close"]), errors="coerce").astype(np.float32).values
 
     out = np.zeros(len(df), dtype=np.float32)
     horizon = pd.Timedelta(hours=int(horizon_hours))
@@ -174,6 +170,22 @@ def future_gains_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
 def future_gains(df: pd.DataFrame, strategy: str) -> np.ndarray:
     horizon = {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
     return future_gains_by_hours(df, horizon)
+
+# =========================
+# 공통: 숫자 downcast 유틸 (메모리 절약)
+# =========================
+def _downcast_numeric(df: pd.DataFrame, prefer_float32: bool = True) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+    for col in df.columns:
+        if pd.api.types.is_integer_dtype(df[col]):
+            df[col] = pd.to_numeric(df[col], downcast="integer")
+        elif pd.api.types.is_float_dtype(df[col]) or pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = pd.to_numeric(df[col], downcast="float")
+            if prefer_float32 and df[col].dtype == np.float64:
+                df[col] = df[col].astype(np.float32)
+    return df
 
 # =========================
 # 데이터셋 생성 (반환값 항상 X, y)
@@ -207,31 +219,38 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
     try:
         df = pd.DataFrame(features)
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True).dt.tz_convert("Asia/Seoul")
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         df = df.drop(columns=["strategy"], errors="ignore")
+
+        # 숫자 칼럼 downcast
+        num_cols = [c for c in df.columns if c != "timestamp"]
+        for c in num_cols:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df[num_cols] = _downcast_numeric(df[num_cols])
 
         feature_cols = [c for c in df.columns if c != "timestamp"]
         if not feature_cols:
             print("[❌ feature_cols 없음]")
             return _dummy(symbol_name)
 
-        if len(feature_cols) < MIN_FEATURES:
-            for i in range(len(feature_cols), MIN_FEATURES):
+        from config import MIN_FEATURES as _MINF
+        if len(feature_cols) < _MINF:
+            for i in range(len(feature_cols), _MINF):
                 pad_col = f"pad_{i}"
-                df[pad_col] = 0.0
+                df[pad_col] = np.float32(0.0)
                 feature_cols.append(pad_col)
 
         scaler = MinMaxScaler()
-        scaled = scaler.fit_transform(df[feature_cols])
-        df_scaled = pd.DataFrame(scaled, columns=feature_cols)
+        scaled = scaler.fit_transform(df[feature_cols].astype(np.float32))
+        df_scaled = pd.DataFrame(scaled.astype(np.float32), columns=feature_cols)
         df_scaled["timestamp"] = df["timestamp"].values
         df_scaled["high"] = df["high"] if "high" in df.columns else df["close"]
 
         if input_size and len(feature_cols) < input_size:
             for i in range(len(feature_cols), input_size):
                 pad_col = f"pad_{i}"
-                df_scaled[pad_col] = 0.0
+                df_scaled[pad_col] = np.float32(0.0)
 
         features = df_scaled.to_dict(orient="records")
 
@@ -243,14 +262,14 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         for i in range(window, len(features)):
             seq = features[i - window:i]
             base = features[i]
-            entry_time = pd.to_datetime(base.get("timestamp"), errors="coerce")
+            entry_time = pd.to_datetime(base.get("timestamp"), errors="coerce", utc=True).tz_convert("Asia/Seoul")
             entry_price = float(base.get("close", 0.0))
 
             if pd.isnull(entry_time) or entry_price <= 0:
                 continue
 
             future = [f for f in features[i + 1:]
-                      if pd.to_datetime(f.get("timestamp", None)) - entry_time <= pd.Timedelta(minutes=lookahead_minutes)]
+                      if pd.to_datetime(f.get("timestamp", None), utc=True) - entry_time <= pd.Timedelta(minutes=lookahead_minutes)]
             valid_prices = [f.get("high", f.get("close", entry_price)) for f in future if f.get("high", 0) > 0]
             if len(seq) != window or not valid_prices:
                 continue
@@ -273,7 +292,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
         if not samples:
             print("[ℹ️ lookahead 기반 샘플 없음 → 인접 변화율로 3‑클래스 라벨링 사용]")
-            closes_np = df_scaled["close"].to_numpy()
+            closes_np = df_scaled["close"].to_numpy(dtype=np.float32)
             pct = np.diff(closes_np) / (closes_np[:-1] + 1e-6)
             thresh = 0.001  # ±0.1%
 
@@ -327,11 +346,12 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 # 내부 헬퍼 (정제/클립)  🔧 추가
 # =========================
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
-    """타임존/형/정렬/중복 제거 표준화"""
+    """타임존/형/정렬/중복 제거 표준화 + 숫자 downcast"""
     if df is None or df.empty:
         return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
     df = df.copy()
-    # timestamp 표준화
+
+    # timestamp 표준화 (항상 utc=True 후 Asia/Seoul로 변환)
     if "timestamp" in df.columns:
         ts = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
     elif "time" in df.columns:
@@ -339,16 +359,23 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     else:
         ts = pd.NaT
     df["timestamp"] = pd.to_datetime(ts).dt.tz_convert("Asia/Seoul")
+
     # 필수 수치형
     for c in ["open","high","low","close","volume"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
         else:
             df[c] = np.nan
+
     df = df.dropna(subset=["timestamp","open","high","low","close","volume"])
     df["datetime"] = df["timestamp"]
+
     # 정렬/중복 제거
     df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
+    # 숫자 downcast (float32/정수 downcast)
+    df = _downcast_numeric(df)
+
     return df[["timestamp","open","high","low","close","volume","datetime"]]
 
 def _clip_tail(df: pd.DataFrame, limit: int) -> pd.DataFrame:
@@ -358,7 +385,7 @@ def _clip_tail(df: pd.DataFrame, limit: int) -> pd.DataFrame:
     if len(df) > limit:
         df = df.iloc[-limit:].reset_index(drop=True)
     # 역행 방지 (혹시 있을 역행 행 제거)
-    ts = pd.to_datetime(df["timestamp"])
+    ts = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Seoul")
     mask = ts.diff().fillna(pd.Timedelta(seconds=0)) >= pd.Timedelta(seconds=0)
     if not mask.all():
         df = df[mask].reset_index(drop=True)
@@ -804,6 +831,8 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
                 df[pad_col] = 0.0
                 feature_cols.append(pad_col)
 
+        # downcast 후 스케일 → float32 유지
+        df[feature_cols] = _downcast_numeric(df[feature_cols]).astype(np.float32)
         df[feature_cols] = MinMaxScaler().fit_transform(df[feature_cols])
 
     except Exception as e:
