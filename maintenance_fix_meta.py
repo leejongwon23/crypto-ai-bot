@@ -1,4 +1,4 @@
-# maintenance_fix_meta.py (FINAL, 12번 반영: calibration/regime_cfg 점검·복구)
+# maintenance_fix_meta.py (FINAL, 12번 반영: calibration/regime_cfg 점검·복구 + saved_at↔timestamp 호환)
 import os
 import json
 import re
@@ -30,6 +30,9 @@ REQUIRED_TOP_FIELDS = [
     "input_size", "num_classes", "class_bins",
     "metrics", "saved_at"
 ]
+
+_ALLOWED_STRATEGIES = {"단기", "중기", "장기"}
+_ALLOWED_MODELS = {"lstm", "cnn_lstm", "transformer"}
 
 def _parse_from_filename(fname: str):
     base = fname.replace(".meta.json", "")
@@ -159,6 +162,23 @@ def _ensure_regime_cfg(meta: dict):
         "ver": int(ver)
     }
 
+def _ensure_saved_ts_fields(meta: dict):
+    """
+    saved_at만 있거나 timestamp만 있는 경우 상호 보강.
+    관우/로거 양쪽 호환을 위해 두 필드를 동기화해 둔다.
+    """
+    saved_at = meta.get("saved_at")
+    timestamp = meta.get("timestamp")
+    if not saved_at and not timestamp:
+        t = now_kst()
+        meta["saved_at"] = t
+        meta["timestamp"] = t
+        return
+    if saved_at and not timestamp:
+        meta["timestamp"] = saved_at
+    elif timestamp and not saved_at:
+        meta["saved_at"] = timestamp
+
 def _ensure_model_signature(meta: dict):
     """
     모델 구조를 불러 input_size/num_classes 정합성만 가볍게 확인.
@@ -214,14 +234,21 @@ def _fill_defaults(meta: dict, fname_info: dict):
     # 기본값
     if "symbol" not in meta or not meta["symbol"]:
         meta["symbol"] = "UNKNOWN"
-    if "strategy" not in meta or not meta["strategy"]:
-        meta["strategy"] = "단기"  # 안전 기본값
-    if "model" not in meta or not meta["model"]:
+
+    # 전략/모델 정규화(규격 밖 → 안전 기본값)
+    if "strategy" not in meta or not meta["strategy"] or str(meta["strategy"]) not in _ALLOWED_STRATEGIES:
+        meta["strategy"] = "단기"
+    if "model" not in meta or not meta["model"] or str(meta["model"]) not in _ALLOWED_MODELS:
         meta["model"] = "lstm"
+
     if "group_id" not in meta or not isinstance(meta["group_id"], int):
         meta["group_id"] = 0
+
     if "saved_at" not in meta or not meta["saved_at"]:
         meta["saved_at"] = now_kst()
+
+    # saved_at / timestamp 동기화(관우/로거 호환)
+    _ensure_saved_ts_fields(meta)
 
     _ensure_model_signature(meta)
     _ensure_metrics(meta)
