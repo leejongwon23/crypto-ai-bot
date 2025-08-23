@@ -22,6 +22,7 @@ from sklearn.preprocessing import MinMaxScaler
 from collections import Counter
 import shutil  # ← 추가
 import gc      # ← 추가
+import threading  # ← 추가 (루프 제어)
 
 # ✅ torch 내부 스레드도 제한
 try:
@@ -596,9 +597,7 @@ def _prune_caches_and_gc():
 #    그 그룹 내부에서도 BTCUSDT를 첫 원소로 고정. 나머지 순서는 보존.
 # --------------------------------------------------
 def _rotate_groups_starting_with(groups, anchor_symbol="BTCUSDT"):
-    # list로 표준화
     norm = [list(g) for g in groups]
-    # anchor가 들어있는 그룹 index 탐색
     anchor_gid = None
     for i, g in enumerate(norm):
         if anchor_symbol in g:
@@ -606,18 +605,21 @@ def _rotate_groups_starting_with(groups, anchor_symbol="BTCUSDT"):
             break
     if anchor_gid is not None and anchor_gid != 0:
         norm = norm[anchor_gid:] + norm[:anchor_gid]
-    # 첫 그룹 내부에서 anchor를 맨 앞으로 고정 (다른 심볼 순서는 그대로)
     if norm and anchor_symbol in norm[0]:
         norm[0] = [anchor_symbol] + [s for s in norm[0] if s != anchor_symbol]
     return norm
 
 # --------------------------------------------------
-# 전체 학습 루틴
+# 전체 학습 루틴  (✅ stop_event 지원)
 # --------------------------------------------------
-def train_models(symbol_list):
+def train_models(symbol_list, stop_event: threading.Event | None = None):
     strategies = ["단기", "중기", "장기"]
     for symbol in symbol_list:
+        if stop_event is not None and stop_event.is_set():
+            print("[STOP] train_models: stop_event 감지 → 조기 종료"); return
         for strategy in strategies:
+            if stop_event is not None and stop_event.is_set():
+                print("[STOP] train_models: stop_event 감지(strategy loop) → 조기 종료"); return
             try:
                 class_ranges = get_class_ranges(symbol=symbol, strategy=strategy)
                 if not class_ranges:
@@ -630,6 +632,8 @@ def train_models(symbol_list):
                 continue
 
             for gid in range(max_gid + 1):
+                if stop_event is not None and stop_event.is_set():
+                    print("[STOP] train_models: stop_event 감지(group loop) → 조기 종료"); return
                 # 각 그룹별 클래스 수 2개 미만이면 스킵
                 try:
                     grp_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=gid)
@@ -653,6 +657,8 @@ def train_models(symbol_list):
                     continue
 
                 train_one_model(symbol, strategy, group_id=gid)
+                if stop_event is not None and stop_event.is_set():
+                    print("[STOP] train_models: stop_event 감지(after one model) → 조기 종료"); return
                 time.sleep(0.5)
 
     try:
@@ -673,60 +679,124 @@ def train_models(symbol_list):
         print(f"[⚠️ 진화형 메타러너 학습 실패] {e}")
 
 # --------------------------------------------------
-# 그룹 루프(그룹 완료 후 예측 1회)
+# 그룹 루프(그룹 완료 후 예측 1회)  (✅ stop_event 지원)
 # --------------------------------------------------
-def train_symbol_group_loop(sleep_sec: int = 0):
+def train_symbol_group_loop(sleep_sec: int = 0, stop_event: threading.Event | None = None):
     try:
         from predict import predict  # 예측 함수 불러오기
 
-        # ✅ 학습 로그 파일/헤더 보장: 존재할 때만 호출(불필요 경고 제거)
+        # ✅ 학습/예측 로그 파일/헤더 보장(존재 시만)
         try:
             if hasattr(logger, "ensure_train_log_exists"):
                 logger.ensure_train_log_exists()
         except Exception:
             pass
-
-        # ✅ 예측 로그 파일/헤더 보장: 존재할 때만 호출
         try:
             if hasattr(logger, "ensure_prediction_log_exists"):
                 logger.ensure_prediction_log_exists()
         except Exception:
             pass
 
-        # 원본 그룹을 가져오되, BTCUSDT가 포함된 그룹을 맨 앞으로 회전
+        # 원본 그룹 → BTCUSDT 그룹을 맨 앞으로 회전
         groups = _rotate_groups_starting_with(SYMBOL_GROUPS, anchor_symbol="BTCUSDT")
 
         for idx, group in enumerate(groups):
+            if stop_event is not None and stop_event.is_set():
+                print("[STOP] train_symbol_group_loop: stop_event 감지(group idx) → 종료"); break
+
             print(f"🚀 [train_symbol_group_loop] 그룹 #{idx+1}/{len(groups)} → {group} | mode=per_symbol_all_horizons")
 
-            # 1) 그룹 학습 (심볼별 단→중→장 → 다음 심볼)
-            train_models(group)
+            # 1) 그룹 학습
+            train_models(group, stop_event=stop_event)
+            if stop_event is not None and stop_event.is_set():
+                print("[STOP] train_symbol_group_loop: stop_event 감지(after train_models) → 종료"); break
 
             # ✅ 모델 저장 직후 I/O 안정화
             time.sleep(0.2)
 
             # 2) 그룹 학습 완료 후 단 한 번씩 예측
             for symbol in group:
+                if stop_event is not None and stop_event.is_set():
+                    print("[STOP] train_symbol_group_loop: stop_event 감지(pred loop) → 종료"); break
                 for strategy in ["단기", "중기", "장기"]:
+                    if stop_event is not None and stop_event.is_set():
+                        print("[STOP] train_symbol_group_loop: stop_event 감지(pred inner) → 종료"); break
                     try:
                         print(f"🔮 [즉시예측] {symbol}-{strategy}")
                         predict(symbol, strategy, source="그룹직후", model_type=None)
                     except Exception as e:
                         print(f"[⚠️ 예측 실패] {symbol}-{strategy}: {e}")
 
-            # 3) 그룹 종료 정리: 캐시/가비지 경량 청소
+            # 3) 그룹 종료 정리
             _prune_caches_and_gc()
 
             if sleep_sec > 0:
-                time.sleep(sleep_sec)
+                for _ in range(sleep_sec):
+                    if stop_event is not None and stop_event.is_set():
+                        print("[STOP] train_symbol_group_loop: stop_event 감지(sleep) → 종료"); break
+                    time.sleep(1)
+                if stop_event is not None and stop_event.is_set():
+                    break
 
         print("✅ train_symbol_group_loop 완료")
     except Exception as e:
         print(f"[❌ train_symbol_group_loop 예외] {e}")
 
+# --------------------------------------------------
+# ✅ 루프 제어 유틸: 중복 방지용 (단일 루프 보장)
+# --------------------------------------------------
+_TRAIN_LOOP_THREAD: threading.Thread | None = None
+_TRAIN_LOOP_STOP: threading.Event | None = None
+_TRAIN_LOOP_LOCK = threading.Lock()
+
+def start_train_loop(force_restart: bool = False, sleep_sec: int = 0):
+    """학습 루프를 1개만 실행. force_restart=True면 기존 루프를 먼저 정지."""
+    global _TRAIN_LOOP_THREAD, _TRAIN_LOOP_STOP
+    with _TRAIN_LOOP_LOCK:
+        # 이미 돌고 있으면…
+        if _TRAIN_LOOP_THREAD is not None and _TRAIN_LOOP_THREAD.is_alive():
+            if not force_restart:
+                print("ℹ️ start_train_loop: 기존 루프가 실행 중 → 재시작 생략"); return False
+            # 강제 재시작: 먼저 정지
+            print("🛑 start_train_loop: 기존 루프 정지 시도")
+            stop_train_loop(timeout=30)
+
+        # 새 이벤트/스레드 준비
+        _TRAIN_LOOP_STOP = threading.Event()
+        def _runner():
+            try:
+                train_symbol_group_loop(sleep_sec=sleep_sec, stop_event=_TRAIN_LOOP_STOP)
+            finally:
+                # 스레드 종료 시 클리어
+                print("ℹ️ train loop thread 종료")
+        _TRAIN_LOOP_THREAD = threading.Thread(target=_runner, daemon=True)
+        _TRAIN_LOOP_THREAD.start()
+        print("✅ train loop 시작됨 (단일 인스턴스 보장)")
+        return True
+
+def stop_train_loop(timeout: int | float | None = 30):
+    """실행 중 루프를 안전하게 중단 요청하고 대기."""
+    global _TRAIN_LOOP_THREAD, _TRAIN_LOOP_STOP
+    with _TRAIN_LOOP_LOCK:
+        if _TRAIN_LOOP_THREAD is None or not _TRAIN_LOOP_THREAD.is_alive():
+            print("ℹ️ stop_train_loop: 실행 중인 루프 없음"); return True
+        if _TRAIN_LOOP_STOP is None:
+            print("⚠️ stop_train_loop: stop_event 없음(비정상 상태)"); return False
+        # 중단 요청
+        _TRAIN_LOOP_STOP.set()
+        _TRAIN_LOOP_THREAD.join(timeout=timeout)
+        if _TRAIN_LOOP_THREAD.is_alive():
+            print("⚠️ stop_train_loop: 타임아웃 — 여전히 실행 중")
+            return False
+        _TRAIN_LOOP_THREAD = None
+        _TRAIN_LOOP_STOP = None
+        print("✅ stop_train_loop: 정상 종료")
+        return True
+
 if __name__ == "__main__":
     # 필요 시 간단 실행 진입점
     try:
-        train_symbol_group_loop(sleep_sec=0)
+        # 단일 루프 보장 방식으로 시작
+        start_train_loop(force_restart=True, sleep_sec=0)
     except Exception as e:
         print(f"[MAIN] 예외: {e}")
