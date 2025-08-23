@@ -627,11 +627,11 @@ def _render_html(snapshot):
   {idx_html}
 </div>
 <script>
-function toggleAll(open) {{ document.querySelectorAll('details').forEach(d => d.open = open); }}
-function switchView(which) {{
+function toggleAll(open) { document.querySelectorAll('details').forEach(d => d.open = open); }
+function switchView(which) {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.getElementById('view-' + which).classList.add('active');
-}}
+}
 window.addEventListener('DOMContentLoaded', () => switchView('flow'));
 </script>
 """
