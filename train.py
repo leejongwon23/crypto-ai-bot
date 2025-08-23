@@ -592,6 +592,26 @@ def _prune_caches_and_gc():
         pass
 
 # --------------------------------------------------
+# ✅ 그룹 정렬 헬퍼 (신규): BTCUSDT가 포함된 그룹을 맨 앞으로 회전,
+#    그 그룹 내부에서도 BTCUSDT를 첫 원소로 고정. 나머지 순서는 보존.
+# --------------------------------------------------
+def _rotate_groups_starting_with(groups, anchor_symbol="BTCUSDT"):
+    # list로 표준화
+    norm = [list(g) for g in groups]
+    # anchor가 들어있는 그룹 index 탐색
+    anchor_gid = None
+    for i, g in enumerate(norm):
+        if anchor_symbol in g:
+            anchor_gid = i
+            break
+    if anchor_gid is not None and anchor_gid != 0:
+        norm = norm[anchor_gid:] + norm[:anchor_gid]
+    # 첫 그룹 내부에서 anchor를 맨 앞으로 고정 (다른 심볼 순서는 그대로)
+    if norm and anchor_symbol in norm[0]:
+        norm[0] = [anchor_symbol] + [s for s in norm[0] if s != anchor_symbol]
+    return norm
+
+# --------------------------------------------------
 # 전체 학습 루틴
 # --------------------------------------------------
 def train_models(symbol_list):
@@ -659,19 +679,23 @@ def train_symbol_group_loop(sleep_sec: int = 0):
     try:
         from predict import predict  # 예측 함수 불러오기
 
-        # ✅ 학습 로그 파일/헤더 보장 (추가됨)
+        # ✅ 학습 로그 파일/헤더 보장: 존재할 때만 호출(불필요 경고 제거)
         try:
-            logger.ensure_train_log_exists()
-        except Exception as e:
-            print(f"[경고] train_log 준비 실패: {e}")
+            if hasattr(logger, "ensure_train_log_exists"):
+                logger.ensure_train_log_exists()
+        except Exception:
+            pass
 
-        # ✅ 예측 로그 파일/헤더 보장
+        # ✅ 예측 로그 파일/헤더 보장: 존재할 때만 호출
         try:
-            logger.ensure_prediction_log_exists()
-        except Exception as e:
-            print(f"[경고] prediction_log 준비 실패: {e}")
+            if hasattr(logger, "ensure_prediction_log_exists"):
+                logger.ensure_prediction_log_exists()
+        except Exception:
+            pass
 
-        groups = SYMBOL_GROUPS  # ⬅️ 동적 호출 제거, data.utils 기준 고정 그룹 사용
+        # 원본 그룹을 가져오되, BTCUSDT가 포함된 그룹을 맨 앞으로 회전
+        groups = _rotate_groups_starting_with(SYMBOL_GROUPS, anchor_symbol="BTCUSDT")
+
         for idx, group in enumerate(groups):
             print(f"🚀 [train_symbol_group_loop] 그룹 #{idx+1}/{len(groups)} → {group} | mode=per_symbol_all_horizons")
 
