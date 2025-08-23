@@ -1,6 +1,6 @@
-# predict.py (FINAL — canonical rewrite + numeric sanitation + safe top_k + KST timestamp normalization + anti-bias exploration + memory-safe evaluation)
+# predict.py (FIXED — flexible meta matching + robust model discovery + ensured logging)
 
-import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv
+import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np
 import pandas as pd
 import torch
@@ -68,10 +68,10 @@ MIN_RET_THRESHOLD = float(os.getenv("PREDICT_MIN_RETURN", "0.01"))
 # (NEW) 탐험(Explore) 설정
 # =======================
 EXPLORE_STATE_PATH = "/persistent/logs/meta_explore_state.json"
-EXPLORE_EPS_BASE   = float(os.getenv("EXPLORE_EPS_BASE", "0.15"))   # 기본 ε
-EXPLORE_DECAY_MIN  = float(os.getenv("EXPLORE_DECAY_MIN", "120"))   # 최근 탐험 이후 ε 감쇄 시간(분)
-EXPLORE_NEAR_GAP   = float(os.getenv("EXPLORE_NEAR_GAP", "0.07"))   # 1·2등 점수차 ≤ 이하면 탐험 고려
-EXPLORE_GAMMA      = float(os.getenv("EXPLORE_GAMMA", "0.05"))      # 덜 선택된 모델 보너스 강도
+EXPLORE_EPS_BASE   = float(os.getenv("EXPLORE_EPS_BASE", "0.15"))
+EXPLORE_DECAY_MIN  = float(os.getenv("EXPLORE_DECAY_MIN", "120"))
+EXPLORE_NEAR_GAP   = float(os.getenv("EXPLORE_NEAR_GAP", "0.07"))
+EXPLORE_GAMMA      = float(os.getenv("EXPLORE_GAMMA", "0.05"))
 
 def _load_explore_state():
     try:
@@ -119,7 +119,7 @@ def _get_feature_hash(feature_row) -> str:
         if isinstance(feature_row, torch.Tensor):
             arr = feature_row.detach().cpu().flatten().numpy().astype(float)
         elif isinstance(feature_row, np.ndarray):
-            arr = feature_row.flatten().astype(float)  # ← 중복 대입 버그 수정
+            arr = feature_row.flatten().astype(float)
         elif isinstance(feature_row, (list, tuple)):
             arr = np.array(feature_row, dtype=float).flatten()
         else:
@@ -131,9 +131,43 @@ def _get_feature_hash(feature_row) -> str:
         return "hash_error"
 
 # -----------------------------
-# 로컬 헬퍼: 모델 탐색
+# 유연한 모델/메타 탐색 (핵심 FIX)
 # -----------------------------
+def _resolve_meta_for_pt(pt_basename: str) -> str | None:
+    """
+    pt 이름(예: BTCUSDT_단기_lstm.pt)에 대해 다음 우선순위로 meta를 찾는다.
+    1) 동일 basename: BTCUSDT_단기_lstm.meta.json
+    2) 그룹/클래스 버전: BTCUSDT_단기_lstm_*.meta.json
+    3) 디렉터리 별칭: models/SYMBOL/STRATEGY/{model}.meta.json
+    하나라도 찾으면 meta 경로를 반환.
+    """
+    base_no_ext = pt_basename[:-3]  # strip ".pt"
+    # 1) 동일 베이스
+    cand = os.path.join(MODEL_DIR, f"{base_no_ext}.meta.json")
+    if os.path.exists(cand):
+        return cand
+    # 2) group/cls가 붙은 원본 메타
+    pattern = os.path.join(MODEL_DIR, f"{base_no_ext}_*.meta.json")
+    matches = sorted(glob.glob(pattern))
+    if matches:
+        return matches[0]
+    # 3) 디렉터리 구조 별칭 (SYMBOL/STRATEGY/{model}.meta.json)
+    try:
+        parts = base_no_ext.split("_")
+        # 예: BTCUSDT_단기_lstm -> ['BTCUSDT','단기','lstm']
+        if len(parts) >= 3:
+            sym, strat, mtype = parts[0], parts[1], parts[2]
+            cand2 = os.path.join(MODEL_DIR, sym, strat, f"{mtype}.meta.json")
+            if os.path.exists(cand2):
+                return cand2
+    except Exception:
+        pass
+    return None
+
 def get_available_models(symbol: str, strategy: str):
+    """
+    PT와 META 파일명이 서로 달라도(평탄/그룹/디렉터리 혼재) 안전하게 모델을 수집.
+    """
     try:
         if not os.path.isdir(MODEL_DIR):
             return []
@@ -147,9 +181,28 @@ def get_available_models(symbol: str, strategy: str):
                 continue
             if needle not in fn:
                 continue
-            meta = os.path.join(MODEL_DIR, fn.replace(".pt", ".meta.json"))
-            if os.path.exists(meta):
-                items.append({"pt_file": fn})
+            # pt 후보 결정
+            pt_path = os.path.join(MODEL_DIR, fn)
+            # 메타 경로 유연 해석
+            meta_path = _resolve_meta_for_pt(fn)
+            if not meta_path or not os.path.exists(meta_path):
+                # 최후: 같은 stem으로 강제 짝 맞추기 시도
+                fallback = os.path.join(MODEL_DIR, fn.replace(".pt", ".meta.json"))
+                if not os.path.exists(fallback):
+                    # 스킵하지 말고 안내 로그 남기고 계속 탐색
+                    print(f"[메타 미발견] pt={fn} → meta 찾기 실패")
+                    continue
+                meta_path = fallback
+            items.append({"pt_file": fn, "meta_path": meta_path})
+        # 평탄 alias가 아니라 group형 원본(.pt)도 직접 탐색
+        # 예: BTCUSDT_단기_lstm_group1_cls5.pt 형태
+        group_pattern = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_*group*cls*.pt")
+        for gpt in glob.glob(group_pattern):
+            gfn = os.path.basename(gpt)
+            meta_path = _resolve_meta_for_pt(gfn)
+            if meta_path and {"pt_file": gfn, "meta_path": meta_path} not in items:
+                items.append({"pt_file": gfn, "meta_path": meta_path})
+        # 정렬
         items.sort(key=lambda x: x["pt_file"])
         return items
     except Exception as e:
@@ -168,6 +221,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         "timestamp": t, "source": source, "predicted_class": -1, "label": -1
     }
     try:
+        ensure_prediction_log_exists()
         log_prediction(
             symbol=symbol, strategy=strategy, direction="예측실패",
             entry_price=0, target_price=0, model=str(model_type or "unknown"),
@@ -190,12 +244,16 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 # -----------------------------
 def predict(symbol, strategy, source="일반", model_type=None):
     """
-    - 저장된 모델 출력 취합
-    - 진화형 메타러너가 있으면 사용, 없으면 '캘리브레이션 확률이 가장 높은 단일 모델(+탐험)' 선택
-      success_score = adjusted_calib_prob[pred] × (0.5 + 0.5 × val_f1)
-    - ✅ MIN_RET_THRESHOLD(기본 1%) 미만 클래스는 선택/기록하지 않음
-    - ✅ (NEW) 편향 방지: 점수 비슷할 때 가끔 다른 모델을 탐험적으로 선택
+    - 저장된 모델 출력 취합(파일명 불일치도 유연 매칭)
+    - 메타러너/단일최고확률(+탐험) 선택
+    - ✅ MIN_RET_THRESHOLD 미만 클래스는 제외
     """
+    # 📌 로그 헤더 보장(비어있었다고 했으니 시작마다 보강)
+    try:
+        ensure_prediction_log_exists()
+    except Exception as _e:
+        print(f"[헤더보장 실패] {_e}")
+
     try:
         from evo_meta_learner import predict_evo_meta
     except Exception:
@@ -347,7 +405,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 if cand_scores:
                     explore_alt_idx = cand_scores[0][0]
                     if explore_alt_idx != top1_i:
-                        # 대체 후보가 1등과 다르면 탐험 채택
                         best_idx = explore_alt_idx
                         best_pred = model_outputs_list[best_idx]["candidate_pred"]
                         best_score = model_outputs_list[best_idx]["success_score"]
@@ -397,21 +454,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
     cls_min, _ = get_class_return_range(final_pred_class, symbol, strategy)
     current_price = float(df.iloc[-1]["close"])
     expected_ret = class_to_expected_return(final_pred_class, symbol, strategy)
-    entry_price = float(all_model_predictions[0]["entry_price"])
-    actual_return_meta = (current_price / (entry_price + 1e-12)) - 1
-    meta_success_flag = actual_return_meta >= cls_min
-
-    if not meta_success_flag:
-        try:
-            feature_hash = _get_feature_hash(feature_tensor)
-            insert_failure_record(
-                {"symbol": symbol, "strategy": strategy, "reason": "meta_predicted_fail"},
-                feature_hash,
-                feature_vector=feature_tensor.numpy().flatten().tolist(),
-                label=final_pred_class
-            )
-        except Exception as e:
-            print(f"[meta 실패 기록 오류] {e}")
+    entry_price = float(current_price)  # 현재가를 진입가로 일치
+    actual_return_meta = 0.0  # 진입 시점 즉시 수익률은 0으로 기록(평가는 이후)
 
     def _topk(probs, k=3):
         idx = np.argsort(probs)[::-1][:k]
@@ -419,7 +463,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
     calib_topk = _topk((chosen_info or model_outputs_list[0])["calib_probs"]) if (chosen_info or model_outputs_list) else []
 
-    # 탐험 이력 업데이트(메타가 best_single 계열일 때만 의미)
+    # 탐험 이력 업데이트
     try:
         if meta_choice in ["best_single_explore"] or (isinstance(chosen_info, dict) and chosen_info.get("model_path")):
             _bump_model_usage(symbol, strategy, chosen_info.get("model_path", ""), explored=(meta_choice=="best_single_explore"))
@@ -434,10 +478,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
         "calib_ver": calib_ver,
         "min_return_threshold": float(MIN_RET_THRESHOLD),
         "used_minret_filter": bool(used_minret_filter),
-        "explore_used": bool(explore_used),
-        "explore_alt_idx": int(explore_alt_idx) if explore_used and explore_alt_idx is not None else ""
+        "explore_used": bool('best_single_explore' in str(meta_choice)),
     }
 
+    ensure_prediction_log_exists()
     log_prediction(
         symbol=symbol,
         strategy=strategy,
@@ -445,13 +489,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
         entry_price=entry_price,
         target_price=entry_price * (1 + expected_ret),
         model="meta",
-        model_name="evo_meta_learner" if meta_choice=="evo_meta_learner" else meta_choice,
+        model_name="evo_meta_learner" if meta_choice=="evo_meta_learner" else str(meta_choice),
         predicted_class=final_pred_class,
         label=final_pred_class,
         note=json.dumps(note_payload, ensure_ascii=False),
         top_k=calib_topk,
-        success=meta_success_flag,
-        reason=f"수익률도달:{meta_success_flag}",
+        success=False,                 # 즉시 성공판정 X → 평가에서 결정
+        reason="predicted",
         rate=expected_ret,
         return_value=actual_return_meta,
         source="진화형" if meta_choice=="evo_meta_learner" else "기본",
@@ -459,7 +503,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         feature_vector=feature_tensor.numpy()
     )
 
-    # 🔥 메타에 선택되지 않은 "모든 모델"도 섀도우 예측으로 기록 → 평가/실패학습 대상
+    # 🔥 메타에 선택되지 않은 "모든 모델"도 섀도우 예측으로 기록
     try:
         for m in model_outputs_list:
             if chosen_info and m.get("model_path") == chosen_info.get("model_path"):
@@ -510,10 +554,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 label=pred_i,
                 note=json.dumps(note_shadow, ensure_ascii=False),
                 top_k=top_k_i,
-                success=False,                   # 평가는 evaluate_predictions에서 판정
+                success=False,
                 reason="shadow",
                 rate=exp_ret_i,
-                return_value=actual_return_meta,
+                return_value=0.0,
                 source="섀도우",
                 group_id=m.get("group_id", 0),
                 feature_vector=feature_tensor.numpy()
@@ -537,13 +581,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
 # 배치 평가 (메모리 안전 스트리밍 버전)
 # -----------------------------
 def evaluate_predictions(get_price_fn):
-    """
-    대용량 prediction_log.csv 도 메모리 폭주 없이 평가.
-    - 입력: 원본 CSV 줄단위 읽기
-    - 출력1: 임시 파일에 즉시 쓰기 → 완료 후 원자적 교체
-    - 출력2: evaluation_YYYY-MM-DD.csv (평가된 행만 스트리밍 기록)
-    - 출력3: wrong_YYYY-MM-DD.csv (실패만 스트리밍 기록)
-    """
     import pandas as pd
     from failure_db import check_failure_exists
 
@@ -560,22 +597,19 @@ def evaluate_predictions(get_price_fn):
 
     eval_horizon_map = {"단기": 4, "중기": 24, "장기": 168}
 
-    # 준비: 원본 열 헤더
     try:
         with open(PREDICTION_LOG, "r", encoding="utf-8-sig", newline="") as f_in:
             reader = csv.DictReader(f_in)
             if reader.fieldnames is None:
                 print("[오류] prediction_log.csv 헤더 없음")
                 return
-            # 로그 표준 헤더 + 추가필드 고정
             base = list(PREDICTION_HEADERS)
             extras = ["status", "return"]
             fieldnames = base + [c for c in extras if c not in base]
 
-            # 임시 파일 준비
             dir_name = os.path.dirname(PREDICTION_LOG) or "."
             fd_tmp, tmp_path = tempfile.mkstemp(prefix="predlog_", suffix=".csv", dir=dir_name, text=True)
-            os.close(fd_tmp)  # DictWriter로 다시 열기
+            os.close(fd_tmp)
             with open(tmp_path, "w", encoding="utf-8-sig", newline="") as f_tmp, \
                  open(EVAL_RESULT, "w", encoding="utf-8-sig", newline="") as f_eval, \
                  open(WRONG, "w", encoding="utf-8-sig", newline="") as f_wrong:
@@ -588,9 +622,7 @@ def evaluate_predictions(get_price_fn):
 
                 for r in reader:
                     try:
-                        # 이미 상태 확정이면 그대로 복사
                         if r.get("status") not in [None, "", "pending", "v_pending"]:
-                            # 누락 필드 보정해 쓰기
                             out = {k: r.get(k, "") for k in fieldnames}
                             w_all.writerow(out)
                             continue
@@ -598,13 +630,11 @@ def evaluate_predictions(get_price_fn):
                         symbol = r.get("symbol", "UNKNOWN")
                         strategy = r.get("strategy", "알수없음")
                         model = r.get("model", "unknown")
-                        # group_id 정수화
                         try:
                             group_id = int(float(r.get("group_id", 0)))
                         except Exception:
                             group_id = 0
 
-                        # 클래스/라벨 정수화
                         def to_int(x, default):
                             try:
                                 if x in [None, ""]:
@@ -616,7 +646,6 @@ def evaluate_predictions(get_price_fn):
                         label = to_int(r.get("label", -1), -1)
                         r["label"] = label
 
-                        # 가격 체크
                         try:
                             entry_price = float(r.get("entry_price", 0) or 0)
                         except Exception:
@@ -625,7 +654,6 @@ def evaluate_predictions(get_price_fn):
                         if entry_price <= 0 or label == -1:
                             reason = "entry_price 오류 또는 label=-1"
                             r.update({"status": "fail", "reason": reason, "return": 0.0, "return_value": 0.0})
-                            # 로깅
                             log_prediction(
                                 symbol=symbol, strategy=strategy, direction="예측실패",
                                 entry_price=entry_price, target_price=entry_price,
@@ -637,7 +665,6 @@ def evaluate_predictions(get_price_fn):
                                 insert_failure_record(r, f"{symbol}-{strategy}-{now_local().isoformat()}",
                                                      feature_vector=None, label=label)
                             w_all.writerow({k: r.get(k, "") for k in fieldnames})
-                            # 실패는 WRONG에도 즉시 쓰기
                             if not wrong_fields_written:
                                 wrong_writer = csv.DictWriter(f_wrong, fieldnames=sorted(r.keys()))
                                 wrong_writer.writeheader()
@@ -645,12 +672,10 @@ def evaluate_predictions(get_price_fn):
                             wrong_writer.writerow({k: r.get(k, "") for k in r.keys()})
                             continue
 
-                        # 타임스탬프
                         ts = pd.to_datetime(r.get("timestamp"), errors="coerce")
                         if ts is None or pd.isna(ts):
                             r.update({"status": "fail", "reason": "timestamp 파싱 실패", "return": 0.0, "return_value": 0.0})
                             w_all.writerow({k: r.get(k, "") for k in fieldnames})
-                            # 실패 즉시 WRONG 기록
                             if not wrong_fields_written:
                                 wrong_writer = csv.DictWriter(f_wrong, fieldnames=sorted(r.keys()))
                                 wrong_writer.writeheader()
@@ -676,7 +701,6 @@ def evaluate_predictions(get_price_fn):
                             wrong_writer.writerow({k: r.get(k, "") for k in r.keys()})
                             continue
 
-                        # 평가 구간 제한
                         dfp = df_price.copy()
                         dfp["timestamp"] = pd.to_datetime(dfp["timestamp"], errors="coerce")
                         dfp["timestamp"] = dfp["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
@@ -730,7 +754,6 @@ def evaluate_predictions(get_price_fn):
                             "group_id": group_id
                         })
 
-                        # 로그 파일에 평가 기록(append)
                         log_prediction(
                             symbol=symbol, strategy=strategy, direction=f"평가:{status}",
                             entry_price=entry_price, target_price=entry_price * (1 + gain),
@@ -747,10 +770,8 @@ def evaluate_predictions(get_price_fn):
                         if model == "meta":
                             update_model_success(symbol, strategy, model, status in ["success", "v_success"])
 
-                        # 전체 로그 재작성 스트림에 한 줄 쓰기
                         w_all.writerow({k: r.get(k, "") for k in fieldnames})
 
-                        # 평가결과·실패 파일도 스트리밍 쓰기
                         if not eval_fields_written:
                             eval_writer = csv.DictWriter(f_eval, fieldnames=sorted(r.keys()))
                             eval_writer.writeheader()
@@ -765,7 +786,6 @@ def evaluate_predictions(get_price_fn):
                             wrong_writer.writerow({k: r.get(k, "") for k in r.keys()})
 
                     except Exception as e:
-                        # 예외시 행을 fail로 마킹하고 그대로 유지
                         r.update({"status": "fail", "reason": f"예외: {e}", "return": 0.0, "return_value": 0.0})
                         w_all.writerow({k: r.get(k, "") for k in fieldnames})
                         if not wrong_fields_written:
@@ -774,7 +794,6 @@ def evaluate_predictions(get_price_fn):
                             wrong_fields_written = True
                         wrong_writer.writerow({k: r.get(k, "") for k in r.keys()})
 
-            # 원자적 교체
             shutil.move(tmp_path, PREDICTION_LOG)
             print("[✅ 평가 완료] 스트리밍 재작성 성공")
     except FileNotFoundError:
@@ -796,16 +815,25 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
     for model_info in models:
         try:
             pt_file = model_info.get("pt_file")
+            meta_path = model_info.get("meta_path")
             if not pt_file:
                 continue
             model_path = os.path.join(MODEL_DIR, pt_file)
-            meta_path = model_path.replace(".pt", ".meta.json")
-            if not os.path.exists(meta_path):
-                print(f"[⚠️ 메타파일 없음] {meta_path}")
-                continue
+            if not os.path.exists(model_path):
+                # 혹시 디렉터리 별칭 형태면 바꿔보기
+                try:
+                    parts = pt_file[:-3].split("_")
+                    if len(parts) >= 3:
+                        sym, strat, mtype = parts[0], parts[1], parts[2]
+                        alt = os.path.join(MODEL_DIR, sym, strat, f"{mtype}.pt")
+                        if os.path.exists(alt):
+                            model_path = alt
+                except Exception:
+                    pass
 
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
+
             model_type = meta.get("model", "lstm")
             group_id = meta.get("group_id", 0)
             input_size = meta.get("input_size", FEATURE_INPUT_SIZE)
