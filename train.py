@@ -21,6 +21,7 @@ from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import MinMaxScaler
 from collections import Counter
 import shutil  # ← 추가
+import gc      # ← 추가
 
 # ✅ torch 내부 스레드도 제한
 try:
@@ -561,6 +562,36 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         return result
 
 # --------------------------------------------------
+# (추가) 경량 정리 유틸 — 그룹 종료 시 호출
+# --------------------------------------------------
+def _prune_caches_and_gc():
+    # cache 모듈이 있으면 prune
+    try:
+        from cache import CacheManager as _CM
+        try:
+            before = _CM.stats()
+        except Exception:
+            before = None
+        pruned = _CM.prune()
+        try:
+            after = _CM.stats()
+        except Exception:
+            after = None
+        print(f"[CACHE] prune ok: before={before}, after={after}, pruned={pruned}")
+    except Exception as e:
+        print(f"[CACHE] 모듈 없음/스킵 ({e})")
+    # safe_cleanup의 경량 정리 트리거(있으면 사용)
+    try:
+        from safe_cleanup import trigger_light_cleanup
+        trigger_light_cleanup()
+    except Exception:
+        pass
+    try:
+        gc.collect()
+    except Exception:
+        pass
+
+# --------------------------------------------------
 # 전체 학습 루틴
 # --------------------------------------------------
 def train_models(symbol_list):
@@ -652,6 +683,9 @@ def train_symbol_group_loop(sleep_sec: int = 0):
                         predict(symbol, strategy, source="그룹직후", model_type=None)
                     except Exception as e:
                         print(f"[⚠️ 예측 실패] {symbol}-{strategy}: {e}")
+
+            # 3) 그룹 종료 정리: 캐시/가비지 경량 청소
+            _prune_caches_and_gc()
 
             if sleep_sec > 0:
                 time.sleep(sleep_sec)
