@@ -8,6 +8,7 @@ import requests
 import pandas as pd
 import numpy as np
 import pytz
+import glob
 from sklearn.preprocessing import MinMaxScaler
 
 # =========================
@@ -17,8 +18,8 @@ BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"  # Binance Futures (USDT-M)
 BTC_DOMINANCE_CACHE = {"value": 0.5, "timestamp": 0}
 
-# ⚠️ SYMBOLS/SYMBOL_GROUPS는 프로젝트에서 data.utils를 기준으로 사용하므로 유지
-SYMBOLS = [
+# --- 기본(백업) 심볼 시드 60개: 최후 fallback 용 ---
+_BASELINE_SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT",
     "AVAXUSDT", "DOGEUSDT", "MATICUSDT", "DOTUSDT", "TRXUSDT",
     "LTCUSDT", "BCHUSDT", "LINKUSDT", "ATOMUSDT", "XLMUSDT",
@@ -32,14 +33,9 @@ SYMBOLS = [
     "KAVAUSDT", "BATUSDT", "ZILUSDT", "WAVESUSDT", "OCEANUSDT",
     "1INCHUSDT", "YFIUSDT", "STGUSDT", "GALAUSDT", "IMXUSDT"
 ]
-# ✅ 고정 순서 유지하며 5개씩 묶어 SYMBOL_GROUPS 구성
-SYMBOL_GROUPS = [SYMBOLS[i:i + 5] for i in range(0, len(SYMBOLS), 5)]
 
-# ✅ 거래소별 심볼 매핑
-SYMBOL_MAP = {
-    "bybit": {s: s for s in SYMBOLS},
-    "binance": {s: s for s in SYMBOLS}
-}
+# ✅ 거래소별 심볼 매핑 (초기값은 빈 dict; 아래 discover 이후 채움)
+SYMBOL_MAP = {"bybit": {}, "binance": {}}
 
 # ✅ 전략 설정은 단일 소스(config.py)를 따른다 + 레짐 옵션(get_REGIME) 안전 임포트
 try:
@@ -59,6 +55,73 @@ except Exception:
             "vol_high_pct": 0.9,
             "vol_low_pct": 0.5
         }
+
+# =========================
+# 심볼 동적 발견 + 60개 고정화
+# =========================
+def _merge_unique(*lists):
+    seen = set()
+    out = []
+    for L in lists:
+        for x in L:
+            if not x:
+                continue
+            if x not in seen:
+                seen.add(x)
+                out.append(x)
+    return out
+
+def _discover_from_env():
+    # 우선순위 1) ENV: PREDICT_SYMBOLS 또는 SYMBOLS_OVERRIDE (쉼표/공백 구분 허용)
+    raw = os.getenv("PREDICT_SYMBOLS") or os.getenv("SYMBOLS_OVERRIDE") or ""
+    if not raw.strip():
+        return []
+    parts = [p.strip().upper() for p in raw.replace("\n", ",").replace(" ", ",").split(",") if p.strip()]
+    return parts
+
+def _discover_from_models():
+    # 우선순위 2) /persistent/models 스캔: {SYMBOL}_{전략}_*.pt / .meta.json
+    model_dir = "/persistent/models"
+    if not os.path.isdir(model_dir):
+        return []
+    syms = []
+    for fn in os.listdir(model_dir):
+        if not (fn.endswith(".pt") or fn.endswith(".meta.json")):
+            continue
+        # 파일명 규약: SYMBOL_STRATEGY_*.* → 언더스코어 첫 토큰
+        sym = fn.split("_", 1)[0].upper()
+        # 간단 검증: 선물 USDT 마켓 패턴
+        if sym.endswith("USDT") and len(sym) >= 6:
+            syms.append(sym)
+    return sorted(set(syms), key=syms.index)
+
+def _select_60(symbols):
+    # 정확히 60개로 맞춤(부족하면 baseline로 채움, 초과면 앞에서 60개)
+    if len(symbols) >= 60:
+        return symbols[:60]
+    need = 60 - len(symbols)
+    filler = [s for s in _BASELINE_SYMBOLS if s not in symbols][:need]
+    return symbols + filler
+
+def _compute_groups(symbols, group_size=5):
+    return [symbols[i:i+group_size] for i in range(0, len(symbols), group_size)]
+
+# --- 실제 심볼 집합 계산 ---
+_env_syms   = _discover_from_env()
+_model_syms = _discover_from_models()
+SYMBOLS = _select_60(_merge_unique(_env_syms, _model_syms, _BASELINE_SYMBOLS))
+SYMBOL_GROUPS = _compute_groups(SYMBOLS, group_size=5)
+
+# 거래소 맵 갱신
+SYMBOL_MAP["bybit"]   = {s: s for s in SYMBOLS}
+SYMBOL_MAP["binance"] = {s: s for s in SYMBOLS}
+
+# 외부 공개 함수 (관우/트리거/백엔드 공통 사용)
+def get_ALL_SYMBOLS():
+    return list(SYMBOLS)
+
+def get_SYMBOL_GROUPS():
+    return list(SYMBOL_GROUPS)
 
 # =========================
 # 캐시 매니저 (이 파일 내부 사용)
@@ -113,7 +176,6 @@ def safe_failed_result(symbol, strategy, reason=""):
             "predicted_class": -1,
             "label": -1
         }
-        # ✅ train.py와 동일한 안전 시그니처
         insert_failure_record(payload, feature_vector=[])
     except Exception as e:
         print(f"[⚠️ safe_failed_result 실패] {e}")
@@ -343,7 +405,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         return _dummy(symbol_name)
 
 # =========================
-# 내부 헬퍼 (정제/클립)  🔧 추가
+# 내부 헬퍼 (정제/클립)
 # =========================
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     """타임존/형/정렬/중복 제거 표준화 + 숫자 downcast"""
@@ -649,7 +711,7 @@ def get_kline_by_strategy(symbol: str, strategy: str):
 
         df_bybit = _normalize_df(pd.concat(df_bybit, ignore_index=True)) if df_bybit else pd.DataFrame()
 
-        # 2) Binance 보완 수집 (강화) 🔧: 부족하면 충분히 반복 보완
+        # 2) Binance 보완 수집 (강화)
         df_binance = []
         total_binance = 0
         if len(df_bybit) < int(limit * 0.9):
@@ -678,7 +740,7 @@ def get_kline_by_strategy(symbol: str, strategy: str):
         df = _clip_tail(df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True), limit)
 
         total_count = len(df)
-        # 🔧 최소 보장 수량: 오래된 심볼 보강
+        # 🔧 최소 보장 수량
         min_required = max(60, int(limit * 0.90))
         if total_count < min_required:
             print(f"[⚠️ 수집 수량 부족] {symbol}-{strategy} → 총 {total_count}개 (최소보장 {min_required}, 목표 {limit}) → 통합 재시도")
@@ -690,7 +752,6 @@ def get_kline_by_strategy(symbol: str, strategy: str):
 
         if total_count < min_required:
             print(f"[🚨 최종 부족] {symbol}-{strategy} → {total_count}/{min_required} (학습/예측 영향 가능)")
-
         else:
             print(f"[✅ 수집 성공] {symbol}-{strategy} → 총 {total_count}개")
 
@@ -726,7 +787,8 @@ def get_realtime_prices():
         if "result" not in data or "list" not in data["result"]:
             return {}
         tickers = data["result"]["list"]
-        return {item["symbol"]: float(item["lastPrice"]) for item in tickers if item["symbol"] in SYMBOLS}
+        symset = set(get_ALL_SYMBOLS())
+        return {item["symbol"]: float(item["lastPrice"]) for item in tickers if item["symbol"] in symset}
     except:
         return {}
 
@@ -787,14 +849,15 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df["ema100"] = df["close"].ewm(span=100, adjust=False).mean()
         df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
         df["roc"] = df["close"].pct_change(periods=10)
-        df["adx"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14, fillna=True)
-        df["cci"] = ta.trend.cci(df["high"], df["low"], df["close"], window=20, fillna=True)
-        df["mfi"] = ta.volume.money_flow_index(df["high"], df["low"], df["close"], df["volume"], window=14, fillna=True)
-        df["obv"] = ta.volume.on_balance_volume(df["close"], df["volume"], fillna=True)
-        df["atr"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14, fillna=True)
-        df["williams_r"] = ta.momentum.williams_r(df["high"], df["low"], df["close"], lbp=14, fillna=True)
-        df["stoch_k"] = ta.momentum.stoch(df["high"], df["low"], df["close"], fillna=True)
-        df["stoch_d"] = ta.momentum.stoch_signal(df["high"], df["low"], df["close"], fillna=True)
+        import ta as _ta  # 일부 배포에서 별칭 사용 호환
+        df["adx"] = _ta.trend.adx(df["high"], df["low"], df["close"], window=14, fillna=True)
+        df["cci"] = _ta.trend.cci(df["high"], df["low"], df["close"], window=20, fillna=True)
+        df["mfi"] = _ta.volume.money_flow_index(df["high"], df["low"], df["close"], df["volume"], window=14, fillna=True)
+        df["obv"] = _ta.volume.on_balance_volume(df["close"], df["volume"], fillna=True)
+        df["atr"] = _ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14, fillna=True)
+        df["williams_r"] = _ta.momentum.williams_r(df["high"], df["low"], df["close"], lbp=14, fillna=True)
+        df["stoch_k"] = _ta.momentum.stoch(df["high"], df["low"], df["close"], fillna=True)
+        df["stoch_d"] = _ta.momentum.stoch_signal(df["high"], df["low"], df["close"], fillna=True)
         df["vwap"] = (df["volume"] * df["close"]).cumsum() / (df["volume"].cumsum() + 1e-6)
 
         # ---------- 시장 레짐 태깅 (옵션) ----------
@@ -805,19 +868,15 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
             vol_high_pct = float(regime_cfg.get("vol_high_pct", 0.9))
             vol_low_pct = float(regime_cfg.get("vol_low_pct", 0.5))
 
-            # 변동성: ATR 기반 분위수 구간화
-            df["atr_val"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=atr_win, fillna=True)
+            df["atr_val"] = _ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=atr_win, fillna=True)
             thr_high = df["atr_val"].quantile(vol_high_pct)
             thr_low = df["atr_val"].quantile(vol_low_pct)
             df["vol_regime"] = np.where(df["atr_val"] >= thr_high, 2,
                                  np.where(df["atr_val"] <= thr_low, 0, 1))
 
-            # 추세: 장기 이동평균의 기울기
             df["ma_trend"] = df["close"].rolling(window=trend_win, min_periods=1).mean()
             slope = df["ma_trend"].diff()
             df["trend_regime"] = np.where(slope > 0, 2, np.where(slope < 0, 0, 1))
-
-            # 종합 태그: 3x3 조합(0~8)
             df["regime_tag"] = df["vol_regime"] * 3 + df["trend_regime"]
 
         # ---------- 정리/스케일 ----------
@@ -825,8 +884,9 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df.fillna(0, inplace=True)
 
         feature_cols = [c for c in df.columns if c != "timestamp"]
-        if len(feature_cols) < FEATURE_INPUT_SIZE:
-            for i in range(len(feature_cols), FEATURE_INPUT_SIZE):
+        from config import FEATURE_INPUT_SIZE as _FIS
+        if len(feature_cols) < _FIS:
+            for i in range(len(feature_cols), _FIS):
                 pad_col = f"pad_{i}"
                 df[pad_col] = 0.0
                 feature_cols.append(pad_col)
