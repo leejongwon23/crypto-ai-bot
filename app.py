@@ -1,4 +1,4 @@
-# app.py — single-source, deduped train loop (ONE concurrent loop only)
+# app.py — single-source, deduped train loop via train.py (ONE concurrent loop only)
 
 from flask import Flask, jsonify, request, Response
 from recommend import main
@@ -11,7 +11,7 @@ from data.utils import SYMBOLS, get_kline_by_strategy
 from visualization import generate_visual_report, generate_visuals_for_strategy
 from wrong_data_loader import load_training_prediction_data
 from predict import evaluate_predictions
-from train import train_symbol_group_loop
+from train import train_symbol_group_loop  # (호환용) 직접 호출 루트 남김
 import maintenance_fix_meta
 from logger import ensure_prediction_log_exists
 from integrity_guard import run as _integrity_check; _integrity_check()
@@ -55,24 +55,6 @@ FAILURE_LOG      = os.path.join(LOG_DIR, "failure_count.csv")
 ensure_prediction_log_exists()
 
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
-
-# -----------------------------
-# 학습 루프 동시 실행 방지(핵심 수정)
-# -----------------------------
-TRAIN_LOOP_THREAD = None
-TRAIN_LOOP_LOCK = threading.Lock()
-
-def start_train_loop_once():
-    """train_symbol_group_loop를 동시 1개만 실행되게 보장"""
-    global TRAIN_LOOP_THREAD
-    with TRAIN_LOOP_LOCK:
-        if TRAIN_LOOP_THREAD is not None and TRAIN_LOOP_THREAD.is_alive():
-            print("⚠️ 학습 루프 이미 실행 중 — 재시작 생략"); sys.stdout.flush()
-            return False
-        TRAIN_LOOP_THREAD = threading.Thread(target=train_symbol_group_loop, daemon=True)
-        TRAIN_LOOP_THREAD.start()
-        print("✅ 학습 루프 스레드 시작"); sys.stdout.flush()
-        return True
 
 # -----------------------------
 # 스케줄러 (평가/트리거/메타복구)
@@ -136,8 +118,9 @@ def _init_background_once():
             print(">>> 서버 실행 준비")
             ensure_failure_db(); print("✅ failure_patterns DB 초기화 완료")
 
-            # 학습 루프 스레드 (동시 1개 보장)
-            start_train_loop_once()
+            # 학습 루프 스레드 — train.py의 단일 루프 보장 API 사용
+            train.start_train_loop(force_restart=False, sleep_sec=0)
+            print("✅ 학습 루프 스레드 시작")
 
             # 정리 스케줄러(기본 30분)
             start_cleanup_scheduler()
@@ -352,7 +335,7 @@ def run():
 @app.route("/train-now")
 def train_now():
     try:
-        started = start_train_loop_once()
+        started = train.start_train_loop(force_restart=False, sleep_sec=0)
         return "✅ 전체 그룹 학습 루프 시작됨 (백그라운드)" if started else "⏳ 이미 실행 중 (재시작 생략)"
     except Exception as e:
         return f"학습 실패: {e}", 500
@@ -541,8 +524,9 @@ def reset_all():
         except Exception:
             pass
 
-        # 8) 🔁 초기화 직후 학습 루프 자동 재시작 (그룹0부터, 중복 방지)
-        if start_train_loop_once():
+        # 8) 🔁 초기화 직후 학습 루프 재시작 (중복 방지: 먼저 중단 후 재시작)
+        train.stop_train_loop(timeout=30)
+        if train.start_train_loop(force_restart=True, sleep_sec=0):
             print("✅ 초기화 이후 학습 루프 재시작됨"); sys.stdout.flush()
         else:
             print("⏳ 초기화 이후에도 학습 루프가 이미 실행 중이라 재시작 생략"); sys.stdout.flush()
