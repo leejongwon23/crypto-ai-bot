@@ -47,7 +47,7 @@ from failure_db import insert_failure_record, ensure_failure_db
 import logger  # log_* 및 ensure_prediction_log_exists 사용
 from config import (
     get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups,
-    get_class_ranges, set_NUM_CLASSES  # ⬅️ get_SYMBOL_GROUPS 제거
+    get_class_ranges, set_NUM_CLASSES, STRATEGY_CONFIG  # 🔧 변경: STRATEGY_CONFIG 추가 임포트
 )
 from data_augmentation import balance_classes
 
@@ -318,6 +318,21 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         if df is None or df.empty:
             _log_skip(symbol, strategy, "데이터 없음"); return result
 
+        # 🔧 변경: 데이터 부족 신호(augment/enough) 인지 + 로그에 표현
+        try:
+            cfg = STRATEGY_CONFIG.get(strategy, {})
+            _limit = int(cfg.get("limit", 300))
+        except Exception:
+            _limit = 300
+        _min_required = max(60, int(_limit * 0.90))
+
+        _attrs = getattr(df, "attrs", {}) if df is not None else {}
+        augment_needed = bool(_attrs.get("augment_needed", len(df) < _limit))
+        enough_for_training = bool(_attrs.get("enough_for_training", len(df) >= _min_required))
+        print(f"[DATA] {symbol}-{strategy} rows={len(df)} limit={_limit} "
+              f"min_required={_min_required} augment_needed={augment_needed} "
+              f"enough_for_training={enough_for_training}")
+
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.empty or feat.isnull().any().any():
             _log_skip(symbol, strategy, "피처 없음"); return result
@@ -441,6 +456,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         except Exception as e:
             print(f"[⚠️ log_label_distribution 실패/미구현] {e}")
 
+        # 🔧 변경: 데이터 부족(enough_for_training=False)일 때, 기존 fallback/밸런싱 경로를 우선 시도.
         if len(X) < 20:
             try:
                 res = create_dataset(feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=FEATURE_INPUT_SIZE)
@@ -454,7 +470,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
                 print(f"[⚠️ fallback 실패] {e}")
 
         if len(X) < 10:
-            _log_skip(symbol, strategy, "최종 샘플 부족"); return result
+            # 데이터가 충분치 않으면 안전 스킵(실패 기록 포함)
+            _log_skip(symbol, strategy, f"최종 샘플 부족 (rows={len(df)}, limit={_limit}, min_required={_min_required})")
+            return result
 
         try:
             if len(X) < 200:
@@ -534,7 +552,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
                 "metrics": {"val_acc": acc, "val_f1": f1, "train_loss_sum": float(total_loss)},
                 "timestamp": now_kst().isoformat(), "model_name": model_name,
                 "window": int(window), "recent_cap": int(len(feat_scaled)),
-                "engine": "lightning" if _HAS_LIGHTNING else "manual"
+                "engine": "lightning" if _HAS_LIGHTNING else "manual",
+                # 🔧 변경: 데이터 상태 플래그를 메타에 저장(관우/후속 진단 용이)
+                "data_flags": {
+                    "rows": int(len(df)), "limit": int(_limit), "min_required": int(_min_required),
+                    "augment_needed": bool(augment_needed), "enough_for_training": bool(enough_for_training)
+                }
             }
             _save_model_and_meta(model, model_path, meta)
 
@@ -542,9 +565,14 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
             _emit_aliases(model_path, model_path.replace(".pt", ".meta.json"),
                           symbol, strategy, model_type)
 
+            # 🔧 변경: note에 data_flags 요약 포함
             logger.log_training_result(
                 symbol, strategy, model=model_name, accuracy=acc, f1=f1,
-                loss=float(total_loss), note=f"train_one_model(window={window}, cap={len(feat_scaled)}, engine={'lightning' if _HAS_LIGHTNING else 'manual'})",
+                loss=float(total_loss),
+                note=(f"train_one_model(window={window}, cap={len(feat_scaled)}, "
+                      f"engine={'lightning' if _HAS_LIGHTNING else 'manual'}, "
+                      f"data_flags={{rows:{len(df)},limit:{_limit},min:{_min_required},"
+                      f"aug:{int(augment_needed)},enough:{int(enough_for_training)}}})"),
                 source_exchange="BYBIT", status="success"
             )
             result["models"].append({
