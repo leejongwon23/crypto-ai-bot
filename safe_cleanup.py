@@ -1,12 +1,11 @@
-# safe_cleanup.py (FINAL: single-file, scheduler 포함)
+# safe_cleanup.py (FIXED-CONFIG: env 없이 동작, 스케줄러 포함 / micro-fix3)
 import os
-import shutil
 import time
 import threading
 import gc
 from datetime import datetime, timedelta
 
-# ====== 기본 경로 ======
+# ====== 기본 경로 (env 있으면 사용, 없으면 기본) ======
 ROOT_DIR = os.getenv("PERSIST_ROOT", "/persistent")
 LOG_DIR = os.path.join(ROOT_DIR, "logs")
 MODEL_DIR = os.path.join(ROOT_DIR, "models")
@@ -14,33 +13,29 @@ SSL_DIR = os.path.join(ROOT_DIR, "ssl_models")
 LOCK_DIR = os.path.join(ROOT_DIR, "locks")
 DELETED_LOG_PATH = os.path.join(LOG_DIR, "deleted_log.txt")
 
-# ====== 정책(환경변수: SAFE_* 우선, DISK_* 백워드 호환) ======
-KEEP_DAYS = int(os.getenv("SAFE_KEEP_DAYS", "1"))
-HARD_CAP_GB = float(os.getenv("SAFE_HARD_CAP_GB", os.getenv("DISK_HARD_LIMIT_GB", "9.8")))
-SOFT_CAP_GB = float(os.getenv("SAFE_SOFT_CAP_GB", os.getenv("DISK_SOFT_LIMIT_GB", "9.2")))
-TRIGGER_GB  = float(os.getenv("SAFE_TRIGGER_GB", os.getenv("DISK_TRIGGER_GB", "7.0")))
-MIN_FREE_GB = float(os.getenv("SAFE_MIN_FREE_GB", "1.0"))
+# ====== 정책(고정값) ======
+KEEP_DAYS = 1
+HARD_CAP_GB = 9.8
+SOFT_CAP_GB = 9.2
+TRIGGER_GB  = 7.0
+MIN_FREE_GB = 1.0
 
-CSV_MAX_MB = int(os.getenv("SAFE_CSV_MAX_MB", "50"))
-CSV_BACKUPS = int(os.getenv("SAFE_CSV_BACKUPS", "3"))
+CSV_MAX_MB = 50
+CSV_BACKUPS = 3
 
-MAX_MODELS_KEEP_GLOBAL = int(os.getenv("SAFE_MAX_MODELS_KEEP_GLOBAL", "200"))
-MAX_MODELS_PER_KEY = int(os.getenv("SAFE_MAX_MODELS_PER_KEY", "2"))
+MAX_MODELS_KEEP_GLOBAL = 200
+MAX_MODELS_PER_KEY = 2
 
-# 🔒 학습/예측 보호: 최근 파일 보호 시간(시간 단위) + 락 파일 경로
-PROTECT_HOURS = float(os.getenv("SAFE_PROTECT_HOURS", "12"))
-LOCK_PATH = os.getenv("SAFE_LOCK_PATH", os.path.join(LOCK_DIR, "train_or_predict.lock"))
+PROTECT_HOURS = 12
+LOCK_PATH = os.path.join(LOCK_DIR, "train_or_predict.lock")
+DRYRUN = False
 
-DRYRUN = os.getenv("SAFE_CLEANUP_DRYRUN", "0") == "1"
-
-# 삭제 후보 접두사 / 제외 파일
 DELETE_PREFIXES = ["prediction_", "evaluation_", "wrong_", "model_", "ssl_", "meta_", "evo_"]
 EXCLUDE_FILES = {
     "prediction_log.csv", "train_log.csv", "evaluation_result.csv",
     "deleted_log.txt", "wrong_predictions.csv", "fine_tune_target.csv"
 }
 
-# 루트 CSV (경로 일치 중요)
 ROOT_CSVS = [
     os.path.join(ROOT_DIR, "prediction_log.csv"),
     os.path.join(ROOT_DIR, "wrong_predictions.csv"),
@@ -55,6 +50,8 @@ def _size_bytes(path: str) -> int:
         return 0
 
 def get_directory_size_gb(path):
+    if not os.path.isdir(path):  # micro-fix: 루트 미존재 방어
+        return 0.0
     total = 0
     for dirpath, _, filenames in os.walk(path):
         for f in filenames:
@@ -129,7 +126,6 @@ def _delete_old_by_days(paths, cutoff_dt, deleted_log, accept_all=False):
                 continue
             if not accept_all and not _should_delete_file(p):
                 continue
-            # 🔒 최근 보호
             if _is_recent(p, PROTECT_HOURS):
                 continue
             try:
@@ -151,7 +147,6 @@ def _delete_until_target(deleted_log, target_gb):
                 except Exception:
                     ctime = 0
                 candidates.append((ctime, p))
-    # SSL은 접두사 없음 → 후보에 포함(최근 보호는 동일)
     for p in _list_files(SSL_DIR):
         if os.path.isfile(p) and not _is_recent(p, PROTECT_HOURS):
             try:
@@ -179,7 +174,7 @@ def _limit_models_per_key(deleted_log):
         base = os.path.basename(p)
         key = base.split(".")[0]
         parts = key.split("_")
-        simple = "_".join(parts[:3]) if len(parts) >= 3 else key  # SYMBOL_전략_모델타입
+        simple = "_".join(parts[:3]) if len(parts) >= 3 else key
         buckets[simple].append(p)
 
     for key, items in buckets.items():
@@ -204,7 +199,6 @@ def _vacuum_sqlite():
             print(f"[경고] VACUUM 실패: {path} | {e}")
 
 def _locked_by_runtime() -> bool:
-    """학습/예측 중이면 True."""
     if os.path.exists(LOCK_PATH):
         print(f"[⛔ 중단] LOCK 발견: {LOCK_PATH}")
         return True
@@ -220,7 +214,6 @@ def _locked_by_runtime() -> bool:
 def auto_delete_old_logs():
     _ensure_dirs()
 
-    # 🔒 런타임 보호: 락 존재 시 즉시 종료
     if _locked_by_runtime():
         return
 
@@ -231,7 +224,6 @@ def auto_delete_old_logs():
     current_gb = get_directory_size_gb(ROOT_DIR)
     print(f"[용량] 현재={_human_gb(current_gb)} | 트리거={_human_gb(TRIGGER_GB)} | 목표={_human_gb(SOFT_CAP_GB)} | 하드캡={_human_gb(HARD_CAP_GB)}")
 
-    # ✅ CSV 롤오버 (루트 + LOG_DIR)
     for csv_path in ROOT_CSVS + [os.path.join(LOG_DIR, n) for n in ["prediction_log.csv", "train_log.csv", "evaluation_result.csv", "wrong_predictions.csv"]]:
         deleted += _rollover_csv(csv_path, CSV_MAX_MB, CSV_BACKUPS)
 
@@ -256,6 +248,7 @@ def auto_delete_old_logs():
 
     if deleted:
         try:
+            os.makedirs(LOG_DIR, exist_ok=True)  # micro-fix: 기록 디렉터리 보장
             with open(DELETED_LOG_PATH, "a", encoding="utf-8") as f:
                 f.write(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 삭제된 파일 목록:\n")
                 for path in deleted:
@@ -268,21 +261,18 @@ def auto_delete_old_logs():
 def cleanup_logs_and_models():
     auto_delete_old_logs()
 
-# ====== (추가) 경량/주기 실행 유틸 ======
-INTERVAL_SEC = int(os.getenv("CLEANUP_INTERVAL_SEC", "300"))  # 5분 기본
-RUN_ON_START = os.getenv("CLEANUP_RUN_ON_START", "1") == "1"
-_VERBOSE = os.getenv("CLEANUP_VERBOSE", "1") == "1"
+# ====== 경량/주기 실행 유틸(고정값) ======
+INTERVAL_SEC = 300
+RUN_ON_START = True
+_VERBOSE = True
 
 def _log(msg: str):
     if _VERBOSE:
         print(f"[safe_cleanup] {msg}")
 
 def _light_cleanup():
-    """가벼운 정리: Python GC (빠르고 안전).
-    캐시 모듈이 있다면 여기서 import하여 prune 호출해도 됨."""
     try:
-        # 선택: 공용 캐시가 있다면 prune (없어도 무시)
-        from cache import CacheManager  # 존재 시
+        from cache import CacheManager
         try:
             before = CacheManager.stats()
         except Exception:
@@ -301,7 +291,6 @@ def _light_cleanup():
         pass
 
 def start_cleanup_scheduler(daemon: bool = True) -> threading.Thread:
-    """앱 시작 시 호출해서 주기적으로 auto_delete_old_logs()를 실행."""
     def _loop():
         if RUN_ON_START:
             _log("초기 1회 실행")
@@ -316,9 +305,7 @@ def start_cleanup_scheduler(daemon: bool = True) -> threading.Thread:
     return t
 
 def trigger_light_cleanup():
-    """그룹 학습 종료 등에서 즉시 호출하는 가벼운 정리."""
     _light_cleanup()
 
-# 단독 실행 지원
 if __name__ == "__main__":
     start_cleanup_scheduler(daemon=False)
