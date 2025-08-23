@@ -13,6 +13,30 @@ EVAL_RESULT_SINGLE = "/persistent/evaluation_result.csv"  # 있을 수도 있어
 _model_cache = {}
 _model_cache_ttl = {}
 
+def _safe_state_dict(obj):
+    """
+    다양한 저장 포맷(torch.save(state), torch.save(model), ckpt dict 등)을
+    최대한 state_dict으로 정규화.
+    """
+    try:
+        if isinstance(obj, dict) and all(isinstance(k, str) for k in obj.keys()):
+            # 일반적인 state_dict 형태
+            return obj
+        # nn.Module로 저장된 경우
+        try:
+            return obj.state_dict()
+        except Exception:
+            pass
+        # ckpt 래핑(dict 안에 'state_dict')
+        if isinstance(obj, dict) and "state_dict" in obj:
+            sd = obj["state_dict"]
+            if isinstance(sd, dict):
+                return sd
+        # 마지막 안전책: 그대로 반환(로드 시 strict=False로 수용)
+        return obj
+    except Exception:
+        return obj
+
 def load_model_cached(pt_path, model_obj, ttl_sec=600):
     """
     ✅ (프로젝트 표준) 주어진 model_obj에 pt_path의 state_dict를 로드하여 반환
@@ -44,15 +68,9 @@ def load_model_cached(pt_path, model_obj, ttl_sec=600):
                 _model_cache_ttl.pop(pt_path, None)
 
         # 디스크에서 state_dict 로드
-        # (torch 1.x/2.x 겸용: state_dict 저장된 파일/모델 전체 저장 모두 허용)
+        # (torch 1.x/2.x 겸용: state_dict 저장/모델 객체 저장/ckpt dict 모두 허용)
         state = torch.load(pt_path, map_location="cpu")
-        if isinstance(state, dict) and all(isinstance(k, str) for k in state.keys()):
-            state_dict = state
-        else:
-            try:
-                state_dict = state.state_dict()
-            except Exception:
-                state_dict = state  # 마지막 안전책
+        state_dict = _safe_state_dict(state)
 
         model_obj.load_state_dict(state_dict, strict=False)
         model_obj.eval()
@@ -67,6 +85,66 @@ def load_model_cached(pt_path, model_obj, ttl_sec=600):
     except Exception as e:
         print(f"[❌ load_model_cached 오류] {pt_path} → {e}")
         return None
+
+
+# =========================
+#  META 유연 탐색 헬퍼 추가
+# =========================
+def resolve_meta_for_pt(pt_path: str) -> str | None:
+    """
+    ✅ PT 파일에 대응하는 META 파일을 '유연 규칙'으로 찾아준다.
+    - 과거 규칙: {base}.pt ↔ {base}.meta.json (정확히 일치)
+    - 지금 허용: {base}*.meta.json (예: _group1_cls5 등 suffix 허용)
+    - 다수 매칭 시: 수정시각 최신(meta mtime) 우선
+    """
+    try:
+        if not pt_path:
+            return None
+        base = os.path.basename(pt_path)
+        if not base.endswith(".pt"):
+            return None
+        prefix = base[:-3]  # ".pt" 제거한 베이스
+        # 1) 완전 일치 우선
+        exact = os.path.join(MODEL_DIR, f"{prefix}.meta.json")
+        if os.path.exists(exact):
+            return exact
+        # 2) prefix로 시작하는 모든 meta 후보
+        cand = sorted(
+            glob.glob(os.path.join(MODEL_DIR, f"{prefix}*.meta.json")),
+            key=lambda p: os.path.getmtime(p),
+            reverse=True,
+        )
+        return cand[0] if cand else None
+    except Exception as e:
+        print(f"[⚠️ resolve_meta_for_pt 실패] {pt_path} → {e}")
+        return None
+
+
+def find_models_fuzzy(symbol: str, strategy: str):
+    """
+    ✅ 심볼/전략 기준으로 PT를 먼저 찾고, META는 유연 규칙으로 붙여 반환.
+    predict.py의 get_available_models 대체/참고용.
+    """
+    out = []
+    try:
+        prefix = f"{symbol}_"
+        needle = f"_{strategy}_"
+        for fn in os.listdir(MODEL_DIR):
+            if not fn.endswith(".pt"):
+                continue
+            if not fn.startswith(prefix):
+                continue
+            if needle not in fn:
+                continue
+            pt_path = os.path.join(MODEL_DIR, fn)
+            meta_path = resolve_meta_for_pt(pt_path)
+            if not meta_path:
+                continue
+            out.append({"pt_file": fn, "meta_file": os.path.basename(meta_path)})
+        out.sort(key=lambda x: x["pt_file"])
+    except Exception as e:
+        print(f"[⚠️ find_models_fuzzy 실패] {symbol}-{strategy} → {e}")
+    return out
 
 
 def _load_all_eval_logs():
@@ -119,7 +197,10 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
         if symbol != "ALL"
         else os.path.join(MODEL_DIR, f"*_{strategy}_{model_type}.meta.json")
     )
+    # 유연 매칭 추가: group/cls suffix 허용
     meta_files = glob.glob(pattern)
+    if symbol != "ALL" and not meta_files:
+        meta_files = glob.glob(os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}*.meta.json"))
 
     if not meta_files:
         print(f"[⚠️ meta 파일 없음] {pattern} → fallback weight=0.2 (모델 없음)")
@@ -141,6 +222,18 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
                 return 0.2
 
             pt_path = meta_path.replace(".meta.json", ".pt")
+            # PT가 base만 있고 META가 suffix를 가진 경우를 허용
+            if not os.path.exists(pt_path):
+                # base만 남기고 대응 PT 재탐색
+                base = os.path.basename(meta_path).replace(".meta.json", "")
+                # base에서 suffix를 떼고(첫 3토큰: SYMBOL, 전략, 모델타입)
+                parts = base.split("_")
+                if len(parts) >= 3:
+                    base_core = "_".join(parts[:3])
+                    cand_pt = os.path.join(MODEL_DIR, f"{base_core}.pt")
+                    if os.path.exists(cand_pt):
+                        pt_path = cand_pt
+
             if not os.path.exists(pt_path):
                 print(f"[⚠️ 모델 파일 없음] {pt_path} → weight=0.2")
                 return 0.2
