@@ -444,106 +444,156 @@ def meta_fix_now():
     except Exception as e:
         return f"⚠️ 실패: {e}", 500
 
-# ✅ 초기화: GET/POST/패스/쿼리 모두 허용 + 강로그
+# =========================
+# ✅ 초기화(비동기): GET/POST/패스/쿼리 모두 허용 + 즉시 200 응답
+# =========================
 @app.route("/reset-all", methods=["GET","POST"])
 @app.route("/reset-all/<key>", methods=["GET","POST"])
 def reset_all(key=None):
+    # 키 추출 (path → query → json 순)
     req_key = key or request.args.get("key") or (request.json.get("key") if request.is_json else None)
     if req_key != "3572":
         print(f"[RESET] 인증 실패 from {request.remote_addr} path={request.path}"); sys.stdout.flush()
         return "❌ 인증 실패", 403
-    try:
-        print(f"[RESET] 요청 수신 from {request.remote_addr} UA={request.headers.get('User-Agent','-')}"); sys.stdout.flush()
 
-        # ==== 운영/관우 로그 완전 통일을 위한 확장 초기화 ====
-        from data.utils import _kline_cache, _feature_cache
-        import importlib
+    # 즉시 로그
+    ua = request.headers.get("User-Agent", "-")
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    print(f"[RESET] 요청 수신 from {ip} UA={ua}"); sys.stdout.flush()
 
-        def clear_csv(f, h):
-            os.makedirs(os.path.dirname(f), exist_ok=True)
-            with open(f, "w", newline="", encoding="utf-8-sig") as wf:
-                wf.write(",".join(h) + "\n")
+    # 백그라운드 작업 정의
+    def _do_reset_work():
+        try:
+            from data.utils import _kline_cache, _feature_cache
+            import importlib
 
-        # 1) 진행상태 마커 제거
-        done_path = os.path.join(PERSIST_DIR, "train_done.json")
-        if os.path.exists(done_path): os.remove(done_path)
+            # 경로 상수 로컬 바인딩
+            BASE = BASE_DIR
+            PERSIST = PERSIST_DIR
+            LOGS = LOG_DIR
+            MODELS = MODEL_DIR
+            PRED_LOG = PREDICTION_LOG
+            WRONG = WRONG_PREDICTIONS
+            AUDIT = AUDIT_LOG
+            MSG = MESSAGE_LOG
+            FAIL = FAILURE_LOG
 
-        # 2) 모델/로그 디렉토리 전삭제 후 재생성
-        if os.path.exists(MODEL_DIR): shutil.rmtree(MODEL_DIR)
-        os.makedirs(MODEL_DIR, exist_ok=True)
+            def clear_csv(f, h):
+                os.makedirs(os.path.dirname(f), exist_ok=True)
+                with open(f, "w", newline="", encoding="utf-8-sig") as wf:
+                    wf.write(",".join(h) + "\n")
 
-        if os.path.exists(LOG_DIR): shutil.rmtree(LOG_DIR)
-        os.makedirs(LOG_DIR, exist_ok=True)
+            print("[RESET] 백그라운드 초기화 시작"); sys.stdout.flush()
 
-        # 3) prediction_log.csv 포함, 루트 잔여 로그 제거
-        if os.path.exists(PREDICTION_LOG):
-            os.remove(PREDICTION_LOG)
-
-        # 3-1) 작업 디렉토리/코드 루트에 남은 동일계열 파일까지 싹 정리(혼선 방지)
-        suspect_names = {
-            "prediction_log.csv", "wrong_predictions.csv",
-            "evaluation_audit.csv", "message_log.csv",
-            "failure_count.csv", "train_log.csv"
-        }
-        search_roots = {PERSIST_DIR, LOG_DIR, BASE_DIR, os.getcwd()}
-        for root in list(search_roots):
+            # 0) 학습 루프 중지 시도(타임아웃 환경변수로 제어 가능)
+            stop_timeout = int(os.getenv("RESET_STOP_TIMEOUT", "30"))
             try:
-                if not os.path.isdir(root): continue
-                for fn in list(os.listdir(root)):
-                    low = fn.lower()
-                    if (fn in suspect_names) or low.startswith(("prediction_log", "eval", "message_log", "train_log", "wrong_predictions")):
-                        try: os.remove(os.path.join(root, fn))
-                        except Exception: pass
+                if hasattr(train, "request_stop"):
+                    train.request_stop()
+            except Exception:
+                pass
+            stopped = False
+            try:
+                stopped = train.stop_train_loop(timeout=stop_timeout)
+            except Exception as e:
+                print(f"⚠️ [RESET] stop_train_loop 예외: {e}"); sys.stdout.flush()
+            print(f"[RESET] stop_train_loop 결과: {stopped} (timeout={stop_timeout}s)"); sys.stdout.flush()
+
+            # 1) 진행상태 마커 제거
+            try:
+                done_path = os.path.join(PERSIST, "train_done.json")
+                if os.path.exists(done_path): os.remove(done_path)
             except Exception:
                 pass
 
-        # 4) 관우/diag 추정 캐시 전부 제거 (파일/폴더)
-        patterns = ("diag", "e2e", "guan", "관우")
-        for root, dirs, files in os.walk(PERSIST_DIR, topdown=False):
-            # 디렉토리 제거
-            for d in list(dirs):
-                name = d.lower()
-                if name.startswith(patterns) or any(k in d for k in ("관우",)):
-                    try: shutil.rmtree(os.path.join(root, d))
-                    except Exception: pass
-            # 파일 제거
-            for f in list(files):
-                low = f.lower()
-                if low.startswith(patterns) or ("관우" in f):
-                    try: os.remove(os.path.join(root, f))
-                    except Exception: pass
+            # 2) 파일 정리는 루프가 멈췄을 때만 공격적으로
+            if stopped:
+                try:
+                    if os.path.exists(MODELS): shutil.rmtree(MODELS)
+                    os.makedirs(MODELS, exist_ok=True)
 
-        # 5) in-memory 캐시 초기화
-        try: _kline_cache.clear()
-        except Exception: pass
-        try: _feature_cache.clear()
-        except Exception: pass
+                    if os.path.exists(LOGS): shutil.rmtree(LOGS)
+                    os.makedirs(LOGS, exist_ok=True)
 
-        # 6) 표준 로그 재생성(정확한 헤더)
-        ensure_prediction_log_exists()
-        clear_csv(WRONG_PREDICTIONS, ["timestamp","symbol","strategy","direction","entry_price","target_price","model","predicted_class","top_k","note","success","reason","rate","return_value","label","group_id","model_symbol","model_name","source","volatility","source_exchange"])
-        clear_csv(LOG_FILE, ["timestamp","symbol","strategy","model","accuracy","f1","loss","note","source_exchange","status"])
-        clear_csv(AUDIT_LOG, ["timestamp","symbol","strategy","result","status"])
-        clear_csv(MESSAGE_LOG, ["timestamp","symbol","strategy","message"])
-        clear_csv(FAILURE_LOG, ["symbol","strategy","failures"])
+                    if os.path.exists(PRED_LOG): os.remove(PRED_LOG)
 
-        # 7) diag_e2e 모듈 메모리 캐시 가능성 대비 강제 reload
-        try:
-            import diag_e2e as _diag_mod
-            import importlib
-            importlib.reload(_diag_mod)
-        except Exception:
-            pass
+                    # 루트 잔여 혼선 파일 정리
+                    suspect_names = {
+                        "prediction_log.csv","wrong_predictions.csv",
+                        "evaluation_audit.csv","message_log.csv",
+                        "failure_count.csv","train_log.csv"
+                    }
+                    for root in {PERSIST, LOGS, BASE, os.getcwd()}:
+                        try:
+                            if not os.path.isdir(root): continue
+                            for fn in list(os.listdir(root)):
+                                low = fn.lower()
+                                if (fn in suspect_names) or low.startswith(("prediction_log","eval","message_log","train_log","wrong_predictions")):
+                                    try: os.remove(os.path.join(root, fn))
+                                    except Exception: pass
+                        except Exception:
+                            pass
 
-        # 8) 🔁 초기화 직후 학습 루프 재시작 (중복 방지: 먼저 중단 후 재시작)
-        train.stop_train_loop(timeout=30)
-        started = train.start_train_loop(force_restart=True, sleep_sec=0)
-        print(f"✅ 초기화 이후 학습 루프 재시작됨 started={started}"); sys.stdout.flush()
+                    # 관우/diag 캐시 추정 제거
+                    patterns = ("diag","e2e","guan","관우")
+                    for root, dirs, files in os.walk(PERSIST, topdown=False):
+                        for d in list(dirs):
+                            name = d.lower()
+                            if name.startswith(patterns) or ("관우" in d):
+                                try: shutil.rmtree(os.path.join(root, d))
+                                except Exception: pass
+                        for f in list(files):
+                            low = f.lower()
+                            if low.startswith(patterns) or ("관우" in f):
+                                try: os.remove(os.path.join(root, f))
+                                except Exception: pass
+                except Exception as e:
+                    print(f"⚠️ [RESET] 폴더 정리 중 예외: {e}"); sys.stdout.flush()
+            else:
+                print("⚠️ [RESET] 루프 미중지 → 보수모드(파일 전삭제 생략)"); sys.stdout.flush()
 
-        return Response("✅ 완전 초기화 완료", mimetype="text/plain; charset=utf-8")
-    except Exception as e:
-        print(f"[RESET] 실패: {e}"); sys.stdout.flush()
-        return Response(f"초기화 실패: {e}", status=500, mimetype="text/plain; charset=utf-8")
+            # 3) in-memory 캐시 초기화
+            try: _kline_cache.clear()
+            except Exception: pass
+            try: _feature_cache.clear()
+            except Exception: pass
+
+            # 4) 표준 로그 재생성(정확 헤더)
+            try:
+                ensure_prediction_log_exists()
+                clear_csv(WRONG, ["timestamp","symbol","strategy","direction","entry_price","target_price","model","predicted_class","top_k","note","success","reason","rate","return_value","label","group_id","model_symbol","model_name","source","volatility","source_exchange"])
+                clear_csv(LOG_FILE, ["timestamp","symbol","strategy","model","accuracy","f1","loss","note","source_exchange","status"])
+                clear_csv(AUDIT, ["timestamp","symbol","strategy","result","status"])
+                clear_csv(MSG, ["timestamp","symbol","strategy","message"])
+                clear_csv(FAIL, ["symbol","strategy","failures"])
+            except Exception as e:
+                print(f"⚠️ [RESET] 로그 재생성 예외: {e}"); sys.stdout.flush()
+
+            # 5) diag_e2e reload
+            try:
+                import diag_e2e as _diag_mod
+                import importlib as _imp
+                _imp.reload(_diag_mod)
+            except Exception:
+                pass
+
+            # 6) 루프 재시작 (강제)
+            try:
+                ok = train.start_train_loop(force_restart=True, sleep_sec=0)
+                print(f"✅ [RESET] 학습 루프 재시작 완료: {ok}"); sys.stdout.flush()
+            except Exception as e:
+                print(f"❌ [RESET] 루프 재시작 실패: {e}"); sys.stdout.flush()
+
+            print("✅ [RESET] 백그라운드 초기화 완료"); sys.stdout.flush()
+        except Exception as e:
+            print(f"❌ [RESET] 백그라운드 초기화 예외: {e}"); sys.stdout.flush()
+
+    # 백그라운드 작업 시작 후 즉시 응답
+    threading.Thread(target=_do_reset_work, daemon=True).start()
+    return Response(
+        "✅ 초기화 요청 접수됨. 백그라운드에서 정리 후 루프를 재시작합니다.\n(로그에서 [RESET] 태그를 확인하세요.)",
+        mimetype="text/plain; charset=utf-8"
+    )
 
 # 하이픈/언더스코어 모두 허용
 @app.route("/force-fix-prediction_log")
