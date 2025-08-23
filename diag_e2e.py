@@ -1,4 +1,4 @@
-# === diag_e2e.py (관우 v2.3 — 종합점검: 훈련+인벤토리+예측/평가 통합, KST 정규화) ===
+# === diag_e2e.py (관우 v2.4 — 종합점검: 훈련+인벤토리+예측/평가 통합, KST 정규화, 60심볼 보장) ===
 import os, json, traceback, re
 import pandas as pd
 import pytz
@@ -19,7 +19,11 @@ EVAL_HORIZON_HOURS = {"단기": 4, "중기": 24, "장기": 168}
 STRATEGIES  = ["단기", "중기", "장기"]
 MODEL_TYPES = ["lstm", "cnn_lstm", "transformer"]
 
-# (가능하면 설정의 심볼을 기준으로 진행률 집계)
+# (심볼 소스: data.utils 우선 → config → 유니온)
+try:
+    from data.utils import SYMBOLS as DATA_SYMBOLS
+except Exception:
+    DATA_SYMBOLS = None
 try:
     from config import get_SYMBOLS
     CONFIG_SYMBOLS = get_SYMBOLS()
@@ -173,8 +177,10 @@ def _summarize_fail_patterns(df_pred_sym):
         df = df_pred_sym.copy()
         if "status" in df.columns:
             df = df[df["status"].isin(["fail","v_fail"])]
+        elif "success" in df.columns:
+            df = df[df["success"].astype(str).str.lower().isin(["false","0","no"])]
         else:
-            df = df[str(df.get("success","")).lower() == "false"]
+            return []
         if df.empty: return []
         reasons = df.get("reason")
         if reasons is None: return []
@@ -215,9 +221,11 @@ def _build_snapshot(symbols_filter=None):
     inv = _list_inventory()  # key=(sym,strat,model) → dict
     inv_keys = set(inv.keys())
 
-    # 심볼 목록 결정: (우선) 명시→(다음) config→(마지막) 로그/파일 유니온
+    # 심볼 목록 결정: (요청) → data.utils(60개) → config → 로그/파일 유니온
     if symbols_filter:
         symbols = [s.strip() for s in symbols_filter.split(",") if s.strip()]
+    elif DATA_SYMBOLS:
+        symbols = list(DATA_SYMBOLS)
     elif CONFIG_SYMBOLS:
         symbols = list(CONFIG_SYMBOLS)
     else:
@@ -277,15 +285,22 @@ def _build_snapshot(symbols_filter=None):
 
             if not df_ss.empty:
                 df_ss = df_ss.copy()
+                # 변동성 분리
                 if "status" in df_ss.columns:
                     df_ss["is_vol"] = df_ss["status"].astype(str).str.startswith("v_")
+                elif "volatility" in df_ss.columns:
+                    df_ss["is_vol"] = df_ss["volatility"].astype(str).str.lower().isin(["1","true"])
                 else:
                     df_ss["is_vol"] = False
-                try:
-                    r_col = pd.to_numeric(df_ss.get("return", 0.0), errors="coerce").fillna(0.0)
-                    df_ss["_return_val"] = r_col
-                except Exception:
-                    df_ss["_return_val"] = 0.0
+                # 수익률 컬럼(우선순위: return → return_value → rate)
+                ret_series = None
+                for col in ["return","return_value","rate"]:
+                    if col in df_ss.columns:
+                        ret_series = pd.to_numeric(df_ss[col], errors="coerce")
+                        break
+                if ret_series is None:
+                    ret_series = pd.Series(0.0, index=df_ss.index)
+                df_ss["_return_val"] = ret_series.fillna(0.0)
 
             nvol = df_ss[~df_ss["is_vol"]] if not df_ss.empty else pd.DataFrame()
             vol  = df_ss[df_ss["is_vol"]]  if not df_ss.empty else pd.DataFrame()
@@ -335,6 +350,7 @@ def _build_snapshot(symbols_filter=None):
                     # 수익률 키
                     latest_ret = None
                     if "return" in dfm.columns: latest_ret = _num(last.get("return"))
+                    elif "return_value" in dfm.columns: latest_ret = _num(last.get("return_value"))
                     elif "rate" in dfm.columns: latest_ret = _num(last.get("rate"))
                     return latest_cls, latest_ret
 
@@ -412,6 +428,17 @@ def _build_snapshot(symbols_filter=None):
                 now = now_kst()
                 delayed_min = int(max(0, (now - eval_due) / pd.Timedelta(minutes=1))) if now > eval_due else 0
 
+            # 메타 선택 표시(note JSON에서 추출)
+            meta_choice = "-"
+            try:
+                df_meta = df_ss[df_ss["model"] == "meta"]
+                if not df_meta.empty and "note" in df_meta.columns:
+                    last_note = str(df_meta.sort_values("timestamp").iloc[-1].get("note","") or "")
+                    if last_note.strip().startswith("{"):
+                        meta_choice = json.loads(last_note).get("meta_choice", meta_choice)
+            except Exception:
+                pass
+
             # 문제/노트
             strat_problems = []
             strat_notes = []
@@ -469,7 +496,7 @@ def _build_snapshot(symbols_filter=None):
                         "avg_return": summary_v["avg_return"],
                     },
                     "by_model": models_detail,
-                    "meta_choice": "-"
+                    "meta_choice": meta_choice
                 },
                 "evaluation": {
                     "last_prediction_time": last_pred_ts.isoformat() if last_pred_ts is not None else None,
