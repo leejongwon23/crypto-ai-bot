@@ -1,3 +1,5 @@
+# app.py — single-source, deduped train loop (ONE concurrent loop only)
+
 from flask import Flask, jsonify, request, Response
 from recommend import main
 import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv, re
@@ -33,7 +35,7 @@ except Exception as e:
     print(f"[경고] startup cleanup 실패: {e}")
 
 # ===== 경로 통일 =====
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # ← 추가: 루트 탐색용(초기화 강화에만 사용)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # ← 루트 탐색용(초기화 강화에만 사용)
 PERSIST_DIR = "/persistent"
 LOG_DIR = os.path.join(PERSIST_DIR, "logs")
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
@@ -53,6 +55,24 @@ FAILURE_LOG      = os.path.join(LOG_DIR, "failure_count.csv")
 ensure_prediction_log_exists()
 
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+
+# -----------------------------
+# 학습 루프 동시 실행 방지(핵심 수정)
+# -----------------------------
+TRAIN_LOOP_THREAD = None
+TRAIN_LOOP_LOCK = threading.Lock()
+
+def start_train_loop_once():
+    """train_symbol_group_loop를 동시 1개만 실행되게 보장"""
+    global TRAIN_LOOP_THREAD
+    with TRAIN_LOOP_LOCK:
+        if TRAIN_LOOP_THREAD is not None and TRAIN_LOOP_THREAD.is_alive():
+            print("⚠️ 학습 루프 이미 실행 중 — 재시작 생략"); sys.stdout.flush()
+            return False
+        TRAIN_LOOP_THREAD = threading.Thread(target=train_symbol_group_loop, daemon=True)
+        TRAIN_LOOP_THREAD.start()
+        print("✅ 학습 루프 스레드 시작"); sys.stdout.flush()
+        return True
 
 # -----------------------------
 # 스케줄러 (평가/트리거/메타복구)
@@ -116,9 +136,8 @@ def _init_background_once():
             print(">>> 서버 실행 준비")
             ensure_failure_db(); print("✅ failure_patterns DB 초기화 완료")
 
-            # 학습 루프 스레드
-            threading.Thread(target=train_symbol_group_loop, daemon=True).start()
-            print("✅ 학습 루프 스레드 시작")
+            # 학습 루프 스레드 (동시 1개 보장)
+            start_train_loop_once()
 
             # 정리 스케줄러(기본 30분)
             start_cleanup_scheduler()
@@ -240,7 +259,7 @@ def yopo_health():
             if pv_stats["fail_rate"] > 50: problems.append(f"{strat}: 변동성 실패율 {pv_stats['fail_rate']:.1f}%")
 
             table = "<i style='color:gray'>최근 예측 없음 또는 컬럼 부족</i>"
-            required_cols = {"timestamp","symbol","direction","return","status"}
+            required_cols = {"timestamp","symbol","strategy","direction","return","status"}
             if (pred.shape[0] > 0) and required_cols.issubset(set(pred.columns)):
                 recent10 = pred.sort_values("timestamp").tail(10).copy()
                 rows = []
@@ -266,8 +285,8 @@ def yopo_health():
 - 최근 평가: {last_audit}<br>
 - 예측 (일반): {sn + fn + pn_ + fnl}건 (✅{sn} ❌{fn} ⏳{pn_} 🛑{fnl})<br>
 - 예측 (변동성): {sv + fv + pv + fvl}건 (✅{sv} ❌{fv} ⏳{pv} 🛑{fvl})<br>
-<b style='color:#000088'>🎯 일반 예측</b>: {pn['total']}건 | {percent(pn['succ_rate'])} / {percent(pn['fail_rate'])} / {pn['r_avg']:.2f}%<br>
-<b style='color:#880000'>🌪️ 변동성 예측</b>: {pv_stats['total']}건 | {percent(pv_stats['succ_rate'])} / {percent(pv_stats['fail_rate'])} / {pv_stats['r_avg']:.2f}%<br>
+<b style='color:#000088'>🎯 일반 예측</b>: {pn['total']}건 | {pn['succ_rate']:.1f}% / {pn['fail_rate']:.1f}% / {pn['r_avg']:.2f}%<br>
+<b style='color:#880000'>🌪️ 변동성 예측</b>: {pv_stats['total']}건 | {pv_stats['succ_rate']:.1f}% / {pv_stats['fail_rate']:.1f}% / {pv_stats['r_avg']:.2f}%<br>
 <b>📋 최근 예측 10건</b><br>{table}
 </div>"""
 
@@ -307,7 +326,7 @@ def diag_e2e():
         symbols = request.args.get("symbols")  # ← 추가: 심볼 필터 받기
 
         # diag_e2e.run은 (group, view, cumulative, symbols) 시그니처 지원
-        out = diag_e2e_run(group=group, view=view, cumulative=cumulative, symbols=symbols)  # ← 추가: 전달
+        out = diag_e2e_run(group=group, view=view, cumulative=cumulative, symbols=symbols)  # ← 전달
 
         # diag_e2e_run이 Flask Response를 직접 반환할 수도 있음
         if isinstance(out, Response):
@@ -333,8 +352,8 @@ def run():
 @app.route("/train-now")
 def train_now():
     try:
-        threading.Thread(target=train_symbol_group_loop, daemon=True).start()
-        return "✅ 전체 그룹 학습 루프 시작됨 (백그라운드)"
+        started = start_train_loop_once()
+        return "✅ 전체 그룹 학습 루프 시작됨 (백그라운드)" if started else "⏳ 이미 실행 중 (재시작 생략)"
     except Exception as e:
         return f"학습 실패: {e}", 500
 
@@ -522,12 +541,11 @@ def reset_all():
         except Exception:
             pass
 
-        # 8) 🔁 초기화 직후 학습 루프 자동 재시작 (그룹0부터)
-        try:
-            threading.Thread(target=train_symbol_group_loop, daemon=True).start()
+        # 8) 🔁 초기화 직후 학습 루프 자동 재시작 (그룹0부터, 중복 방지)
+        if start_train_loop_once():
             print("✅ 초기화 이후 학습 루프 재시작됨"); sys.stdout.flush()
-        except Exception as e:
-            print(f"⚠️ 초기화 후 학습 루프 재시작 실패: {e}")
+        else:
+            print("⏳ 초기화 이후에도 학습 루프가 이미 실행 중이라 재시작 생략"); sys.stdout.flush()
 
         return "✅ 완전 초기화 완료"
     except Exception as e:
@@ -555,3 +573,4 @@ if __name__ == "__main__":
     _init_background_once()
     print(f"✅ Flask 서버 실행 시작 (PORT={port})")
     app.run(host="0.0.0.0", port=port)
+```0
