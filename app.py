@@ -57,6 +57,11 @@ except Exception as e:
     print(f"[경고] startup cleanup 실패: {e}"); sys.stdout.flush()
 
 # ✅ 로그 파일 존재 보장(정확 헤더)
+try:
+    from logger import ensure_train_log_exists
+    ensure_train_log_exists()
+except Exception:
+    pass
 ensure_prediction_log_exists()
 
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
@@ -167,7 +172,6 @@ else:
 # ===== 라우트 =====
 @app.route("/yopo-health")
 def yopo_health():
-    percent = lambda v: f"{v:.1f}%" if pd.notna(v) else "0.0%"
     logs, strategy_html, problems = {}, [], []
 
     file_map = {"pred": PREDICTION_LOG, "train": LOG_FILE, "audit": AUDIT_LOG, "msg": MESSAGE_LOG}
@@ -213,7 +217,12 @@ def yopo_health():
             nvol = pred[~pred["volatility"]] if not pred.empty else pd.DataFrame()
             vol  = pred[ pred["volatility"]] if not pred.empty else pd.DataFrame()
 
-            stat = lambda df, s: int(((not df.empty) and ("status" in df.columns)) and (df["status"]==s).sum()) or 0
+            def stat(df, s):
+                try:
+                    return int(((not df.empty) and ("status" in df.columns)) and (df["status"] == s).sum()) or 0
+                except Exception:
+                    return 0
+
             sn, fn, pn_, fnl = map(lambda s: stat(nvol, s), ["success", "fail", "pending", "failed"])
             sv, fv, pv, fvl = map(lambda s: stat(vol,  s), ["v_success", "v_fail", "pending", "failed"])
 
@@ -222,7 +231,7 @@ def yopo_health():
                     s = stat(df, "v_success" if kind == "변동성" else "success")
                     f = stat(df, "v_fail"    if kind == "변동성" else "fail")
                     t = s + f
-                    avg = float(df["return"].mean()) if ("return" in df) and (df.shape>0) else 0.0
+                    avg = float(df["return"].mean()) if ("return" in df) and (df.shape[0] > 0) else 0.0
                     return {"succ": s, "fail": f, "succ_rate": s/t*100 if t else 0,
                             "fail_rate": f/t*100 if t else 0, "r_avg": avg, "total": t}
                 except Exception:
@@ -311,9 +320,8 @@ def diag_e2e():
         group = int(request.args.get("group", "-1"))
         view = request.args.get("view", "json").lower()
         cumulative = request.args.get("cum", "0") == "1"
-        symbols = request.args.get("symbols")  # ← 추가: 심볼 필터 받기
+        symbols = request.args.get("symbols")
 
-        # diag_e2e.run은 (group, view, cumulative, symbols) 시그니처 지원
         out = diag_e2e_run(group=group, view=view, cumulative=cumulative, symbols=symbols)
 
         if isinstance(out, Response):
@@ -337,9 +345,14 @@ def run():
 
 @app.route("/train-now")
 def train_now():
+    """쿼리 force=1이면 강제 재가동, 아니면 안전 시작(이미 실행 중이면 스킵 메시지)."""
     try:
-        started = train.start_train_loop(force_restart=False, sleep_sec=0)
-        return "✅ 전체 그룹 학습 루프 시작됨 (백그라운드)" if started else "⏳ 이미 실행 중 (재시작 생략)"
+        force = request.args.get("force", "0") == "1"
+        started = train.start_train_loop(force_restart=force, sleep_sec=0)
+        if started:
+            return "✅ 전체 그룹 학습 루프 시작됨 (백그라운드)"
+        else:
+            return "⏳ 이미 실행 중 (재시작 생략)" if not force else "⏳ 재시작 시도했으나 기존 루프 유지됨"
     except Exception as e:
         return f"학습 실패: {e}", 500
 
@@ -576,16 +589,10 @@ def reset_all(key=None):
             except Exception:
                 pass
 
-            # 6) 루프 재가동
+            # 6) 루프 **무조건 강제 재가동**
             try:
-                if stopped:
-                    print("[RESET] 정지 성공 → 강제 재시작"); sys.stdout.flush()
-                    ok = train.start_train_loop(force_restart=True, sleep_sec=0)
-                else:
-                    # 이미 돌고 있는 경우: 중복 방지 모드로 ‘상태 확인’만
-                    print("⚠️ [RESET] 정지 타임아웃 → 중복 방지 재가동 스킵, 상태 확인만 수행"); sys.stdout.flush()
-                    ok = train.start_train_loop(force_restart=False, sleep_sec=0)  # False면 이미 가동 중
-                    print(f"[RESET] 루프 상태 확인 safe_started={ok} (False면 이미 실행 중)"); sys.stdout.flush()
+                print("[RESET] 강제 재가동 시도(force_restart=True)"); sys.stdout.flush()
+                ok = train.start_train_loop(force_restart=True, sleep_sec=0)
                 print(f"✅ [RESET] 루프 처리 완료 ok={ok}"); sys.stdout.flush()
             except Exception as e:
                 print(f"❌ [RESET] 루프 처리 실패: {e}"); sys.stdout.flush()
@@ -597,7 +604,7 @@ def reset_all(key=None):
     # 백그라운드 작업 시작 후 즉시 응답
     threading.Thread(target=_do_reset_work, daemon=True).start()
     return Response(
-        "✅ 초기화 요청 접수됨. 백그라운드에서 정리 후 (상태에 맞춰) 루프를 재가동합니다.\n"
+        "✅ 초기화 요청 접수됨. 백그라운드에서 정리 후 루프를 강제 재가동합니다.\n"
         "로그에서 [RESET] 태그를 확인하세요.",
         mimetype="text/plain; charset=utf-8"
     )
