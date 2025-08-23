@@ -4,7 +4,6 @@ import torch.nn.functional as F
 import xgboost as xgb
 import numpy as np
 from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE
-from data.utils import compute_features, get_kline_by_strategy
 
 NUM_CLASSES = get_NUM_CLASSES()
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
@@ -183,7 +182,6 @@ MODEL_CLASSES = {
 
 def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_path=None, features=None):
     from config import FEATURE_INPUT_SIZE, NUM_CLASSES
-    from data.utils import get_kline_by_strategy, compute_features
 
     # ✅ XGBoost 비활성화 → 자동 대체
     if model_type == "xgboost":
@@ -201,30 +199,24 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
     if output_size is None:
         output_size = NUM_CLASSES
 
-    # ✅ 입력 크기 설정
+    # ✅ 입력 크기 설정(메타 우선, 동적 산출 제거)
+    # 1) 기본은 메타 값(FEATURE_INPUT_SIZE)
+    # 2) 호출자가 features를 넘기고, 그 차원이 메타보다 크면 그 값을 사용
     if input_size is None:
-        if features is not None:
-            input_size = features.shape[2]
-            print(f"[info] input_size 자동설정(features): {input_size}")
+        input_size = FEATURE_INPUT_SIZE
+        if features is not None and hasattr(features, "shape") and len(features.shape) >= 3:
+            feat_dim = int(features.shape[2])
+            if feat_dim >= FEATURE_INPUT_SIZE:
+                input_size = feat_dim
+                print(f"[info] input_size set from features: {input_size}")
+            else:
+                print(f"[info] features dim {feat_dim} < FEATURE_INPUT_SIZE {FEATURE_INPUT_SIZE} → use meta size")
         else:
-            try:
-                sample_df_df = get_kline_by_strategy("BTCUSDT", "단기")
-                if sample_df_df is not None and not sample_df_df.empty:
-                    sample_df = compute_features("BTCUSDT", sample_df_df, "단기")
-                    feature_cols = [c for c in sample_df.columns if c not in ["timestamp", "strategy"]]
-                    input_size = len(feature_cols)
-                    print(f"[info] input_size auto-calculated from compute_features: {input_size}")
-                else:
-                    input_size = FEATURE_INPUT_SIZE
-                    print(f"[⚠️ input_size fallback={FEATURE_INPUT_SIZE}] get_kline_by_strategy 반환 None 또는 empty")
-            except Exception as e:
-                input_size = FEATURE_INPUT_SIZE
-                print(f"[⚠️ input_size fallback={FEATURE_INPUT_SIZE}] compute_features 예외 발생: {e}")
+            print(f"[info] input_size fixed to FEATURE_INPUT_SIZE={FEATURE_INPUT_SIZE}")
 
-    # ✅ 입력 크기 검증
+    # ✅ 입력 크기 검증/패드
     if input_size is None:
         raise ValueError("❌ get_model: input_size 계산 실패 → None 반환됨")
-
     if input_size < FEATURE_INPUT_SIZE:
         print(f"[info] input_size pad 적용: {input_size} → {FEATURE_INPUT_SIZE}")
         input_size = FEATURE_INPUT_SIZE
@@ -238,4 +230,3 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
         model = model_cls(input_size=FEATURE_INPUT_SIZE, output_size=output_size)
 
     return model
-
