@@ -1,6 +1,9 @@
-# safe_cleanup.py (FINAL+guarded)
+# safe_cleanup.py (FINAL: single-file, scheduler 포함)
 import os
 import shutil
+import time
+import threading
+import gc
 from datetime import datetime, timedelta
 
 # ====== 기본 경로 ======
@@ -126,7 +129,7 @@ def _delete_old_by_days(paths, cutoff_dt, deleted_log, accept_all=False):
                 continue
             if not accept_all and not _should_delete_file(p):
                 continue
-            # 🔒 최근 보호: 어떤 파일이든 PROTECT_HOURS 이내 변경분은 삭제 금지
+            # 🔒 최근 보호
             if _is_recent(p, PROTECT_HOURS):
                 continue
             try:
@@ -141,7 +144,6 @@ def _delete_until_target(deleted_log, target_gb):
     for d in [LOG_DIR, MODEL_DIR]:
         for p in _list_files(d):
             if os.path.isfile(p) and _should_delete_file(p):
-                # 🔒 최근 보호
                 if _is_recent(p, PROTECT_HOURS):
                     continue
                 try:
@@ -149,7 +151,7 @@ def _delete_until_target(deleted_log, target_gb):
                 except Exception:
                     ctime = 0
                 candidates.append((ctime, p))
-    # SSL 모델은 접두사가 없으므로 모두 후보로. 단, 최근 보호는 동일 적용
+    # SSL은 접두사 없음 → 후보에 포함(최근 보호는 동일)
     for p in _list_files(SSL_DIR):
         if os.path.isfile(p) and not _is_recent(p, PROTECT_HOURS):
             try:
@@ -165,7 +167,6 @@ def _delete_until_target(deleted_log, target_gb):
 
 def _limit_models_per_key(deleted_log):
     files = [p for p in _list_files(MODEL_DIR) if os.path.isfile(p)]
-    # 🔒 최근 보호 제외
     files = [p for p in files if not _is_recent(p, PROTECT_HOURS)]
     files.sort(key=os.path.getmtime, reverse=True)
     if len(files) > MAX_MODELS_KEEP_GLOBAL:
@@ -187,7 +188,6 @@ def _limit_models_per_key(deleted_log):
             _delete_file(p, deleted_log)
 
 def _vacuum_sqlite():
-    # ROOT/LOG 디렉토리 내 모든 .db에 대해 VACUUM
     targets = []
     for base in [ROOT_DIR, LOG_DIR]:
         for f in _list_files(base):
@@ -205,11 +205,9 @@ def _vacuum_sqlite():
 
 def _locked_by_runtime() -> bool:
     """학습/예측 중이면 True."""
-    # 1) 지정 락 파일
     if os.path.exists(LOCK_PATH):
         print(f"[⛔ 중단] LOCK 발견: {LOCK_PATH}")
         return True
-    # 2) locks 디렉토리 내 임의의 *.lock 파일 존재 시 중단
     try:
         for f in _list_files(LOCK_DIR):
             if f.endswith(".lock"):
@@ -269,3 +267,58 @@ def auto_delete_old_logs():
 
 def cleanup_logs_and_models():
     auto_delete_old_logs()
+
+# ====== (추가) 경량/주기 실행 유틸 ======
+INTERVAL_SEC = int(os.getenv("CLEANUP_INTERVAL_SEC", "300"))  # 5분 기본
+RUN_ON_START = os.getenv("CLEANUP_RUN_ON_START", "1") == "1"
+_VERBOSE = os.getenv("CLEANUP_VERBOSE", "1") == "1"
+
+def _log(msg: str):
+    if _VERBOSE:
+        print(f"[safe_cleanup] {msg}")
+
+def _light_cleanup():
+    """가벼운 정리: Python GC (빠르고 안전).
+    캐시 모듈이 있다면 여기서 import하여 prune 호출해도 됨."""
+    try:
+        # 선택: 공용 캐시가 있다면 prune (없어도 무시)
+        from cache import CacheManager  # 존재 시
+        try:
+            before = CacheManager.stats()
+        except Exception:
+            before = None
+        pruned = CacheManager.prune()
+        try:
+            after = CacheManager.stats()
+        except Exception:
+            after = None
+        _log(f"cache prune ok: before={before}, after={after}, pruned={pruned}")
+    except Exception:
+        pass
+    try:
+        gc.collect()
+    except Exception:
+        pass
+
+def start_cleanup_scheduler(daemon: bool = True) -> threading.Thread:
+    """앱 시작 시 호출해서 주기적으로 auto_delete_old_logs()를 실행."""
+    def _loop():
+        if RUN_ON_START:
+            _log("초기 1회 실행")
+            auto_delete_old_logs()
+        while True:
+            time.sleep(INTERVAL_SEC)
+            _log("주기 실행")
+            auto_delete_old_logs()
+    t = threading.Thread(target=_loop, name="safe-cleanup-scheduler", daemon=daemon)
+    t.start()
+    _log(f"스케줄러 시작(주기 {INTERVAL_SEC}s, daemon={daemon})")
+    return t
+
+def trigger_light_cleanup():
+    """그룹 학습 종료 등에서 즉시 호출하는 가벼운 정리."""
+    _light_cleanup()
+
+# 단독 실행 지원
+if __name__ == "__main__":
+    start_cleanup_scheduler(daemon=False)
