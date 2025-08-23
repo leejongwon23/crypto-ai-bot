@@ -414,11 +414,13 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     # timestamp 표준화 (항상 utc=True 후 Asia/Seoul로 변환)
     if "timestamp" in df.columns:
         ts = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+        df["timestamp"] = ts.dt.tz_convert("Asia/Seoul")
     elif "time" in df.columns:
         ts = pd.to_datetime(df["time"], errors="coerce", utc=True)
+        df["timestamp"] = ts.dt.tz_convert("Asia/Seoul")
     else:
-        ts = pd.NaT
-    df["timestamp"] = pd.to_datetime(ts).dt.tz_convert("Asia/Seoul")
+        # 🛠 FIX: 스칼라 NaT에 .dt 사용 방지 — Series로 생성 후 변환
+        df["timestamp"] = pd.to_datetime(pd.Series([pd.NaT] * len(df)), errors="coerce", utc=True).dt.tz_convert("Asia/Seoul")
 
     # 필수 수치형
     for c in ["open","high","low","close","volume"]:
@@ -444,8 +446,15 @@ def _clip_tail(df: pd.DataFrame, limit: int) -> pd.DataFrame:
         return df
     if len(df) > limit:
         df = df.iloc[-limit:].reset_index(drop=True)
-    # 역행 방지 (혹시 있을 역행 행 제거)
-    ts = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Seoul")
+    # 🛠 FIX: tz-aware 시리즈에 다시 utc=True 강제하면 에러 가능 → 안전 변환
+    ts = pd.to_datetime(df["timestamp"], errors="coerce")
+    try:
+        # tz-aware면 그대로, 아니면 UTC로 가정 후 KST 변환
+        if getattr(ts.dt, "tz", None) is None:
+            ts = ts.dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+    except Exception:
+        # 문제 시 원본 유지
+        pass
     mask = ts.diff().fillna(pd.Timedelta(seconds=0)) >= pd.Timedelta(seconds=0)
     if not mask.all():
         df = df[mask].reset_index(drop=True)
