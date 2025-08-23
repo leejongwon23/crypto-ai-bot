@@ -573,4 +573,3 @@ if __name__ == "__main__":
     _init_background_once()
     print(f"✅ Flask 서버 실행 시작 (PORT={port})")
     app.run(host="0.0.0.0", port=port)
-```0
