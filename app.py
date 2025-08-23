@@ -28,12 +28,6 @@ except ImportError:
     from scheduler_cleanup import start_cleanup_scheduler    # [KEEP]
     import safe_cleanup                                      # [KEEP]
 
-# ✅ 서버 시작 직전 용량 정리
-try:
-    safe_cleanup.cleanup_logs_and_models()
-except Exception as e:
-    print(f"[경고] startup cleanup 실패: {e}")
-
 # ===== 경로 통일 =====
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # ← 루트 탐색용(초기화 강화에만 사용)
 PERSIST_DIR = "/persistent"
@@ -50,6 +44,17 @@ WRONG_PREDICTIONS= os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 AUDIT_LOG        = os.path.join(LOG_DIR, "evaluation_audit.csv")
 MESSAGE_LOG      = os.path.join(LOG_DIR, "message_log.csv")
 FAILURE_LOG      = os.path.join(LOG_DIR, "failure_count.csv")
+
+# ✅ 서버 시작 직전 용량 정리 (환경변수로 제어)
+try:
+    if os.getenv("CLEANUP_ON_BOOT", "0") == "1":
+        print("[BOOT-CLEANUP] CLEANUP_ON_BOOT=1 → logs/models 정리 시작"); sys.stdout.flush()
+        safe_cleanup.cleanup_logs_and_models()
+        print("[BOOT-CLEANUP] 완료"); sys.stdout.flush()
+    else:
+        print("[BOOT-CLEANUP] 비활성화(CLEANUP_ON_BOOT=0)"); sys.stdout.flush()
+except Exception as e:
+    print(f"[경고] startup cleanup 실패: {e}"); sys.stdout.flush()
 
 # ✅ 로그 파일 존재 보장(정확 헤더)
 ensure_prediction_log_exists()
@@ -439,11 +444,17 @@ def meta_fix_now():
     except Exception as e:
         return f"⚠️ 실패: {e}", 500
 
-@app.route("/reset-all")
-def reset_all():
-    if request.args.get("key") != "3572":
+# ✅ 초기화: GET/POST/패스/쿼리 모두 허용 + 강로그
+@app.route("/reset-all", methods=["GET","POST"])
+@app.route("/reset-all/<key>", methods=["GET","POST"])
+def reset_all(key=None):
+    req_key = key or request.args.get("key") or (request.json.get("key") if request.is_json else None)
+    if req_key != "3572":
+        print(f"[RESET] 인증 실패 from {request.remote_addr} path={request.path}"); sys.stdout.flush()
         return "❌ 인증 실패", 403
     try:
+        print(f"[RESET] 요청 수신 from {request.remote_addr} UA={request.headers.get('User-Agent','-')}"); sys.stdout.flush()
+
         # ==== 운영/관우 로그 완전 통일을 위한 확장 초기화 ====
         from data.utils import _kline_cache, _feature_cache
         import importlib
@@ -487,7 +498,6 @@ def reset_all():
                 pass
 
         # 4) 관우/diag 추정 캐시 전부 제거 (파일/폴더)
-        #    - 이름 패턴: diag*, e2e*, guan*, 관우*
         patterns = ("diag", "e2e", "guan", "관우")
         for root, dirs, files in os.walk(PERSIST_DIR, topdown=False):
             # 디렉토리 제거
@@ -509,7 +519,7 @@ def reset_all():
         try: _feature_cache.clear()
         except Exception: pass
 
-        # 6) 표준 로그 재생성(정확한 헤더) → 운영/관우가 같은 소스만 읽도록 강제
+        # 6) 표준 로그 재생성(정확한 헤더)
         ensure_prediction_log_exists()
         clear_csv(WRONG_PREDICTIONS, ["timestamp","symbol","strategy","direction","entry_price","target_price","model","predicted_class","top_k","note","success","reason","rate","return_value","label","group_id","model_symbol","model_name","source","volatility","source_exchange"])
         clear_csv(LOG_FILE, ["timestamp","symbol","strategy","model","accuracy","f1","loss","note","source_exchange","status"])
@@ -520,22 +530,24 @@ def reset_all():
         # 7) diag_e2e 모듈 메모리 캐시 가능성 대비 강제 reload
         try:
             import diag_e2e as _diag_mod
+            import importlib
             importlib.reload(_diag_mod)
         except Exception:
             pass
 
         # 8) 🔁 초기화 직후 학습 루프 재시작 (중복 방지: 먼저 중단 후 재시작)
         train.stop_train_loop(timeout=30)
-        if train.start_train_loop(force_restart=True, sleep_sec=0):
-            print("✅ 초기화 이후 학습 루프 재시작됨"); sys.stdout.flush()
-        else:
-            print("⏳ 초기화 이후에도 학습 루프가 이미 실행 중이라 재시작 생략"); sys.stdout.flush()
+        started = train.start_train_loop(force_restart=True, sleep_sec=0)
+        print(f"✅ 초기화 이후 학습 루프 재시작됨 started={started}"); sys.stdout.flush()
 
-        return "✅ 완전 초기화 완료"
+        return Response("✅ 완전 초기화 완료", mimetype="text/plain; charset=utf-8")
     except Exception as e:
-        return f"초기화 실패: {e}", 500
+        print(f"[RESET] 실패: {e}"); sys.stdout.flush()
+        return Response(f"초기화 실패: {e}", status=500, mimetype="text/plain; charset=utf-8")
 
+# 하이픈/언더스코어 모두 허용
 @app.route("/force-fix-prediction_log")
+@app.route("/force-fix-prediction-log")
 def force_fix_prediction_log():
     """logger의 표준 헤더로 prediction_log.csv를 안전하게 재생성"""
     try:
@@ -543,6 +555,7 @@ def force_fix_prediction_log():
         if os.path.exists(PREDICTION_LOG):
             os.remove(PREDICTION_LOG)
         ensure_prediction_log_exists()
+        print("[FORCE-FIX] prediction_log.csv 재생성 완료"); sys.stdout.flush()
         return "✅ prediction_log.csv 강제 초기화 완료"
     except Exception as e:
         return f"⚠️ 오류: {e}", 500
