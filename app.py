@@ -29,21 +29,21 @@ except ImportError:
     import safe_cleanup                                      # [KEEP]
 
 # ===== 경로 통일 =====
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # ← 루트 탐색용(초기화 강화에만 사용)
-PERSIST_DIR = "/persistent"
-LOG_DIR = os.path.join(PERSIST_DIR, "logs")
-MODEL_DIR = os.path.join(PERSIST_DIR, "models")
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))  # ← 루트 탐색용(초기화 강화에만 사용)
+PERSIST_DIR= "/persistent"
+LOG_DIR    = os.path.join(PERSIST_DIR, "logs")
+MODEL_DIR  = os.path.join(PERSIST_DIR, "models")
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)  # ✅ 모델 디렉토리 보장
 
 # ✅ prediction_log은 logger와 동일한 위치/헤더로 관리
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 
-LOG_FILE         = os.path.join(LOG_DIR, "train_log.csv")
-WRONG_PREDICTIONS= os.path.join(PERSIST_DIR, "wrong_predictions.csv")
-AUDIT_LOG        = os.path.join(LOG_DIR, "evaluation_audit.csv")
-MESSAGE_LOG      = os.path.join(LOG_DIR, "message_log.csv")
-FAILURE_LOG      = os.path.join(LOG_DIR, "failure_count.csv")
+LOG_FILE          = os.path.join(LOG_DIR, "train_log.csv")
+WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
+AUDIT_LOG         = os.path.join(LOG_DIR, "evaluation_audit.csv")
+MESSAGE_LOG       = os.path.join(LOG_DIR, "message_log.csv")
+FAILURE_LOG       = os.path.join(LOG_DIR, "failure_count.csv")
 
 # ✅ 서버 시작 직전 용량 정리 (환경변수로 제어)
 try:
@@ -222,7 +222,7 @@ def yopo_health():
                     s = stat(df, "v_success" if kind == "변동성" else "success")
                     f = stat(df, "v_fail"    if kind == "변동성" else "fail")
                     t = s + f
-                    avg = float(df["return"].mean()) if ("return" in df) and (df.shape[0]>0) else 0.0
+                    avg = float(df["return"].mean()) if ("return" in df) and (df.shape>0) else 0.0
                     return {"succ": s, "fail": f, "succ_rate": s/t*100 if t else 0,
                             "fail_rate": f/t*100 if t else 0, "r_avg": avg, "total": t}
                 except Exception:
@@ -314,12 +314,10 @@ def diag_e2e():
         symbols = request.args.get("symbols")  # ← 추가: 심볼 필터 받기
 
         # diag_e2e.run은 (group, view, cumulative, symbols) 시그니처 지원
-        out = diag_e2e_run(group=group, view=view, cumulative=cumulative, symbols=symbols)  # ← 전달
+        out = diag_e2e_run(group=group, view=view, cumulative=cumulative, symbols=symbols)
 
-        # diag_e2e_run이 Flask Response를 직접 반환할 수도 있음
         if isinstance(out, Response):
             return out
-
         if view == "html":
             return Response(out if isinstance(out, str) else str(out),
                             mimetype="text/html; charset=utf-8")
@@ -485,19 +483,21 @@ def reset_all(key=None):
 
             print("[RESET] 백그라운드 초기화 시작"); sys.stdout.flush()
 
-            # 0) 학습 루프 중지 시도(타임아웃 환경변수로 제어 가능)
+            # 0) 학습 루프 중지 시도
             stop_timeout = int(os.getenv("RESET_STOP_TIMEOUT", "30"))
             try:
                 if hasattr(train, "request_stop"):
                     train.request_stop()
             except Exception:
                 pass
+
             stopped = False
             try:
+                print(f"[RESET] 학습 루프 정지 시도(timeout={stop_timeout}s)"); sys.stdout.flush()
                 stopped = train.stop_train_loop(timeout=stop_timeout)
             except Exception as e:
                 print(f"⚠️ [RESET] stop_train_loop 예외: {e}"); sys.stdout.flush()
-            print(f"[RESET] stop_train_loop 결과: {stopped} (timeout={stop_timeout}s)"); sys.stdout.flush()
+            print(f"[RESET] stop_train_loop 결과: {stopped}"); sys.stdout.flush()
 
             # 1) 진행상태 마커 제거
             try:
@@ -506,7 +506,7 @@ def reset_all(key=None):
             except Exception:
                 pass
 
-            # 2) 파일 정리는 루프가 멈췄을 때만 공격적으로
+            # 2) 파일 정리 — 루프가 멈췄을 때만 공격적으로
             if stopped:
                 try:
                     if os.path.exists(MODELS): shutil.rmtree(MODELS)
@@ -517,7 +517,6 @@ def reset_all(key=None):
 
                     if os.path.exists(PRED_LOG): os.remove(PRED_LOG)
 
-                    # 루트 잔여 혼선 파일 정리
                     suspect_names = {
                         "prediction_log.csv","wrong_predictions.csv",
                         "evaluation_audit.csv","message_log.csv",
@@ -577,12 +576,19 @@ def reset_all(key=None):
             except Exception:
                 pass
 
-            # 6) 루프 재시작 (강제)
+            # 6) 루프 재가동
             try:
-                ok = train.start_train_loop(force_restart=True, sleep_sec=0)
-                print(f"✅ [RESET] 학습 루프 재시작 완료: {ok}"); sys.stdout.flush()
+                if stopped:
+                    print("[RESET] 정지 성공 → 강제 재시작"); sys.stdout.flush()
+                    ok = train.start_train_loop(force_restart=True, sleep_sec=0)
+                else:
+                    # 이미 돌고 있는 경우: 중복 방지 모드로 ‘상태 확인’만
+                    print("⚠️ [RESET] 정지 타임아웃 → 중복 방지 재가동 스킵, 상태 확인만 수행"); sys.stdout.flush()
+                    ok = train.start_train_loop(force_restart=False, sleep_sec=0)  # False면 이미 가동 중
+                    print(f"[RESET] 루프 상태 확인 safe_started={ok} (False면 이미 실행 중)"); sys.stdout.flush()
+                print(f"✅ [RESET] 루프 처리 완료 ok={ok}"); sys.stdout.flush()
             except Exception as e:
-                print(f"❌ [RESET] 루프 재시작 실패: {e}"); sys.stdout.flush()
+                print(f"❌ [RESET] 루프 처리 실패: {e}"); sys.stdout.flush()
 
             print("✅ [RESET] 백그라운드 초기화 완료"); sys.stdout.flush()
         except Exception as e:
@@ -591,7 +597,8 @@ def reset_all(key=None):
     # 백그라운드 작업 시작 후 즉시 응답
     threading.Thread(target=_do_reset_work, daemon=True).start()
     return Response(
-        "✅ 초기화 요청 접수됨. 백그라운드에서 정리 후 루프를 재시작합니다.\n(로그에서 [RESET] 태그를 확인하세요.)",
+        "✅ 초기화 요청 접수됨. 백그라운드에서 정리 후 (상태에 맞춰) 루프를 재가동합니다.\n"
+        "로그에서 [RESET] 태그를 확인하세요.",
         mimetype="text/plain; charset=utf-8"
     )
 
