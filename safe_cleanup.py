@@ -211,6 +211,70 @@ def _locked_by_runtime() -> bool:
         pass
     return False
 
+# ========= 🆘 EMERGENCY PURGE (접두사/보호시간/락 무시) =========
+def emergency_purge(target_gb=None):
+    """
+    디스크가 꽉 찼을 때 즉시 용량 확보.
+    - 접두사/보호시간/락 조건 무시
+    - ssl_models → models → logs 순서
+    - 오래된 파일부터 삭제
+    - target_gb 미지정 시: max(SOFT_CAP_GB, HARD_CAP_GB - MIN_FREE_GB)
+    """
+    _ensure_dirs()
+    deleted = []
+    target = target_gb or max(SOFT_CAP_GB, HARD_CAP_GB - MIN_FREE_GB)
+
+    def _collect_all(dirpath):
+        items = []
+        for p in _list_files(dirpath):
+            if not os.path.isfile(p):
+                continue
+            if os.path.basename(p) == "deleted_log.txt":
+                # 기록 파일은 남겨두자
+                continue
+            try:
+                mtime = os.path.getmtime(p)
+            except Exception:
+                mtime = 0
+            items.append((mtime, p))
+        # 오래된 것 먼저
+        items.sort(key=lambda x: x[0])
+        return [p for _, p in items]
+
+    print("[🆘 EMERGENCY] 즉시 강제 정리 시작 (락/보호시간 무시)")
+    # 우선순위: SSL → MODEL → LOG
+    ordered_dirs = [SSL_DIR, MODEL_DIR, LOG_DIR]
+    candidates = []
+    for d in ordered_dirs:
+        candidates.extend(_collect_all(d))
+
+    # 삭제 루프
+    while get_directory_size_gb(ROOT_DIR) > target and candidates:
+        p = candidates.pop(0)
+        _delete_file(p, deleted)
+
+    # 최소 정리 후 후속 정리 + VACUUM
+    _vacuum_sqlite()
+
+    # 삭제 기록
+    if deleted:
+        now = datetime.now()
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            with open(DELETED_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] [EMERGENCY] 삭제 파일:\n")
+                for path in deleted:
+                    f.write(f"  - {path}\n")
+            print(f"[🆘 EMERGENCY] 총 {len(deleted)}개 파일 삭제")
+        except Exception as e:
+            print(f"[⚠️ EMERGENCY 로그 기록 실패] → {e}")
+            print(f"[🆘 EMERGENCY] 총 {len(deleted)}개 파일 삭제(로그 기록 생략)")
+
+def run_emergency_purge():
+    """앱에서 한 줄로 호출하기 위한 래퍼"""
+    emergency_purge()
+
+# ========= 일반 주기 정리 =========
 def auto_delete_old_logs():
     _ensure_dirs()
 
