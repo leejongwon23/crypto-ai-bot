@@ -1,10 +1,11 @@
-# maintenance_fix_meta.py (FINAL, 12번 반영: calibration/regime_cfg 점검·복구 + saved_at↔timestamp 호환)
+# maintenance_fix_meta.py (FINAL, 12번+확장자 보정: calibration/regime_cfg 점검·복구 + saved_at↔timestamp 호환 + weight 확장자 동기화)
 import os
 import json
 import re
 import datetime
 import pytz
 import torch
+import glob
 
 from model.base_model import get_model  # 현재 모델 구조 확인용
 from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE
@@ -13,6 +14,7 @@ NUM_CLASSES = get_NUM_CLASSES()
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 
 MODEL_DIR = "/persistent/models"
+_KNOWN_EXTS = (".ptz", ".safetensors", ".pt")  # 선호 순서(압축 우선)
 
 KST = pytz.timezone("Asia/Seoul")
 now_kst = lambda: datetime.datetime.now(KST).isoformat()
@@ -34,8 +36,12 @@ REQUIRED_TOP_FIELDS = [
 _ALLOWED_STRATEGIES = {"단기", "중기", "장기"}
 _ALLOWED_MODELS = {"lstm", "cnn_lstm", "transformer"}
 
+def _stem_from_meta_filename(meta_filename: str) -> str:
+    # "xxx.meta.json" -> "xxx"
+    return meta_filename[:-10] if meta_filename.endswith(".meta.json") else os.path.splitext(meta_filename)[0]
+
 def _parse_from_filename(fname: str):
-    base = fname.replace(".meta.json", "")
+    base = _stem_from_meta_filename(fname)
     m = FILENAME_RE.match(base)
     if not m:
         return {}
@@ -72,10 +78,8 @@ def _ensure_metrics(meta: dict):
     metrics = meta.get("metrics")
     if not isinstance(metrics, dict):
         metrics = {}
-    # 최소 스키마
     if "val_acc" not in metrics or not isinstance(metrics.get("val_acc"), (int, float)):
         metrics["val_acc"] = 0.0
-    # 있으면 그대로 두고, 없으면 기본 추가(호환)
     if "val_f1" not in metrics or not isinstance(metrics.get("val_f1"), (int, float)):
         metrics["val_f1"] = 0.0
     if "train_loss_sum" not in metrics or not isinstance(metrics.get("train_loss_sum"), (int, float)):
@@ -83,15 +87,6 @@ def _ensure_metrics(meta: dict):
     meta["metrics"] = metrics
 
 def _ensure_calibration(meta: dict):
-    """
-    calibration 블록이 없거나 파손되면 안전 기본값으로 복구.
-    필드:
-      method: "none" | "temperature" | "platt"
-      temperature: float
-      platt: {"a": float, "b": float}
-      updated_at: ISO string
-      ver: int
-    """
     cal = meta.get("calibration")
     if not isinstance(cal, dict):
         cal = {}
@@ -101,11 +96,11 @@ def _ensure_calibration(meta: dict):
     # temperature
     try:
         temperature = float(cal.get("temperature", 1.0))
-        if temperature <= 0 or not (temperature == temperature):  # nan 체크
+        if temperature <= 0 or not (temperature == temperature):
             temperature = 1.0
     except Exception:
         temperature = 1.0
-    # platt 계수
+    # platt
     platt = cal.get("platt")
     if not isinstance(platt, dict):
         platt = {}
@@ -117,13 +112,11 @@ def _ensure_calibration(meta: dict):
         b = float(platt.get("b", 0.0))
     except Exception:
         b = 0.0
-    # 버전/업데이트 시간
     try:
         ver = int(cal.get("ver", 1))
     except Exception:
         ver = 1
     updated_at = cal.get("updated_at") or now_kst()
-
     meta["calibration"] = {
         "method": method,
         "temperature": float(temperature),
@@ -133,14 +126,6 @@ def _ensure_calibration(meta: dict):
     }
 
 def _ensure_regime_cfg(meta: dict):
-    """
-    regime_cfg 블록이 없거나 파손되면 안전 기본값으로 복구.
-    필드(경량):
-      enabled: bool
-      detector: "none" | "simple" | "volatility" (등, 프로젝트 내부 규약만 준수)
-      params: dict
-      ver: int
-    """
     rc = meta.get("regime_cfg")
     if not isinstance(rc, dict):
         rc = {}
@@ -163,10 +148,6 @@ def _ensure_regime_cfg(meta: dict):
     }
 
 def _ensure_saved_ts_fields(meta: dict):
-    """
-    saved_at만 있거나 timestamp만 있는 경우 상호 보강.
-    관우/로거 양쪽 호환을 위해 두 필드를 동기화해 둔다.
-    """
     saved_at = meta.get("saved_at")
     timestamp = meta.get("timestamp")
     if not saved_at and not timestamp:
@@ -180,20 +161,11 @@ def _ensure_saved_ts_fields(meta: dict):
         meta["saved_at"] = timestamp
 
 def _ensure_model_signature(meta: dict):
-    """
-    모델 구조를 불러 input_size/num_classes 정합성만 가볍게 확인.
-    실패해도 플로우 끊지 않음.
-    """
-    # input_size
     if not isinstance(meta.get("input_size"), int) or meta["input_size"] <= 0:
         meta["input_size"] = FEATURE_INPUT_SIZE
-
-    # num_classes
     if not isinstance(meta.get("num_classes"), int) or meta["num_classes"] <= 1:
         meta["num_classes"] = NUM_CLASSES
 
-    # class_bins: 프로젝트마다 의미가 다를 수 있어 안전 기본값 사용
-    # int 또는 리스트 모두 허용. 없으면 num_classes로 대체.
     cb = meta.get("class_bins", None)
     if cb is None:
         meta["class_bins"] = meta["num_classes"]
@@ -207,35 +179,86 @@ def _ensure_model_signature(meta: dict):
         else:
             meta["class_bins"] = meta["num_classes"]
 
-    # 모델 로드 시도(선택). 실패해도 경고만.
     try:
         mdl = get_model(
             meta.get("model", "lstm"),
             input_size=meta["input_size"],
             output_size=meta["num_classes"]
         )
-        # 아주 가벼운 더미 포워드(창 길이는 임의 20)
         x = torch.randn(1, 20, meta["input_size"])
-        if hasattr(mdl, "eval"):
-            mdl.eval()
+        if hasattr(mdl, "eval"): mdl.eval()
         with torch.no_grad():
             _ = mdl(x)
     except Exception as e:
         print(f"[⚠️ 모델 확인 실패] {meta.get('symbol','?')}-{meta.get('strategy','?')} "
               f"{meta.get('model','?')} → {e}")
 
-def _fill_defaults(meta: dict, fname_info: dict):
+def _find_existing_weight_by_stem(stem: str) -> str | None:
+    """
+    stem: /persistent/models/BTCUSDT_단기_lstm_group1_cls3 (확장자 없음)
+    존재하는 가중치 파일을 선호 순서대로 검색 후 경로 반환.
+    """
+    for ext in _KNOWN_EXTS:
+        cand = f"{stem}{ext}"
+        if os.path.exists(cand):
+            return cand
+    # 디렉터리 별칭(SYMBOL/STRATEGY/{model}.{ext})도 탐색
+    try:
+        parts = os.path.basename(stem).split("_")
+        if len(parts) >= 3:
+            sym, strat, mtype = parts[0], parts[1], parts[2]
+            for ext in _KNOWN_EXTS:
+                cand = os.path.join(MODEL_DIR, sym, strat, f"{mtype}{ext}")
+                if os.path.exists(cand):
+                    return cand
+    except Exception:
+        pass
+    # group/cls 와일드카드 버전도 마지막으로 탐색
+    for ext in _KNOWN_EXTS:
+        pat = f"{stem.split('_group')[0]}*{ext}"
+        matches = sorted(glob.glob(os.path.join(MODEL_DIR, os.path.basename(pat))))
+        for m in matches:
+            if os.path.exists(os.path.join(MODEL_DIR, os.path.basename(m))):
+                return os.path.join(MODEL_DIR, os.path.basename(m))
+    return None
+
+def _ensure_weight_fields(meta: dict, meta_filename: str):
+    """
+    메타에 들어있는 모델 파일 참조(예: model_name, weight_path 등)를
+    실제 존재하는 확장자(.ptz/.safetensors/.pt)에 맞게 동기화.
+    """
+    stem = _stem_from_meta_filename(meta_filename)
+    stem_abs = os.path.join(MODEL_DIR, stem)
+
+    found = _find_existing_weight_by_stem(stem_abs)
+    if not found:
+        # 동일 stem이 아닐 수 있으니, meta 내부 힌트로 재시도
+        hint = meta.get("model_name") or meta.get("weight_path") or meta.get("model_path")
+        if isinstance(hint, str) and hint:
+            hint_stem = os.path.join(MODEL_DIR, os.path.splitext(hint)[0])
+            found = _find_existing_weight_by_stem(hint_stem)
+
+    if not found:
+        # 못 찾으면 조용히 패스(로깅만)
+        print(f"[ℹ️ 가중치 미발견] {meta_filename} → stem='{stem}'")
+        return
+
+    bn = os.path.basename(found)
+    # 표준 키들 동기화(있을 때만 업데이트)
+    meta["model_name"] = bn
+    meta.setdefault("weight_path", bn)   # 상대 경로로 유지
+    meta.setdefault("model_path", bn)    # 호환 키
+
+def _fill_defaults(meta: dict, fname_info: dict, meta_filename: str):
     # 파일명에서 파싱한 값 우선 반영
     for k in ["symbol", "strategy", "model", "group_id", "num_classes"]:
         if k not in meta or meta.get(k) in [None, ""]:
             if fname_info.get(k) is not None:
                 meta[k] = fname_info[k]
 
-    # 기본값
     if "symbol" not in meta or not meta["symbol"]:
         meta["symbol"] = "UNKNOWN"
 
-    # 전략/모델 정규화(규격 밖 → 안전 기본값)
     if "strategy" not in meta or not meta["strategy"] or str(meta["strategy"]) not in _ALLOWED_STRATEGIES:
         meta["strategy"] = "단기"
     if "model" not in meta or not meta["model"] or str(meta["model"]) not in _ALLOWED_MODELS:
@@ -247,18 +270,20 @@ def _fill_defaults(meta: dict, fname_info: dict):
     if "saved_at" not in meta or not meta["saved_at"]:
         meta["saved_at"] = now_kst()
 
-    # saved_at / timestamp 동기화(관우/로거 호환)
     _ensure_saved_ts_fields(meta)
-
     _ensure_model_signature(meta)
     _ensure_metrics(meta)
-    _ensure_calibration(meta)  # ✅ 12번 요구사항
-    _ensure_regime_cfg(meta)   # ✅ 12번 요구사항
+    _ensure_calibration(meta)
+    _ensure_regime_cfg(meta)
+
+    # ✅ NEW: 가중치 파일 참조 확장자 동기화
+    _ensure_weight_fields(meta, meta_filename)
 
 def _validate_and_fix(path: str, fname: str):
     """
     - 깨진/빈 json 복구
     - 필수 필드 보정
+    - weight 확장자(.pt→.ptz/.safetensors 등) 동기화
     - 실패 시 안전 기본값으로 재생성(경고만 출력)
     """
     meta, err = _safe_load_json(path)
@@ -267,21 +292,17 @@ def _validate_and_fix(path: str, fname: str):
     if meta is None:
         print(f"[⚠️ 손상 감지] {fname} → {err}. 안전 기본값으로 재생성")
         meta = {}
-        _fill_defaults(meta, fname_info)
+        _fill_defaults(meta, fname_info, fname)
         _safe_write_json(path, meta)
         return True, "created_defaults"
 
-    # 정상 로드된 경우에도 필수 필드 보정
     changed = False
-
-    # 빈 오브젝트/부분 손상 방지
     if not isinstance(meta, dict):
         meta = {}
         changed = True
 
-    # 누락/잘못된 값 보정
     pre = json.dumps(meta, ensure_ascii=False, sort_keys=True)
-    _fill_defaults(meta, fname_info)
+    _fill_defaults(meta, fname_info, fname)
     post = json.dumps(meta, ensure_ascii=False, sort_keys=True)
     if pre != post:
         changed = True
@@ -289,7 +310,7 @@ def _validate_and_fix(path: str, fname: str):
     if changed:
         ok = _safe_write_json(path, meta)
         if ok:
-            print(f"[FIXED] {fname} → 스키마/필드 보정 완료")
+            print(f"[FIXED] {fname} → 스키마/필드 보정 완료(확장자 동기화 포함)")
         return ok, "fixed"
     else:
         print(f"[OK] {fname} → 수정 불필요")
@@ -314,10 +335,9 @@ def fix_all_meta_json():
         try:
             _validate_and_fix(path, file)
         except Exception as e:
-            # 최후 안전장치: 예외가 나도 기본값으로 덮어써서 진행
             print(f"[⚠️ 예외 발생] {file} → {e}. 안전 기본값 재생성 시도")
             meta = {}
-            _fill_defaults(meta, _parse_from_filename(file))
+            _fill_defaults(meta, _parse_from_filename(file), file)
             _safe_write_json(path, meta)
 
 def check_meta_input_size():
