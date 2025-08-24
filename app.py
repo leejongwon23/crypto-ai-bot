@@ -40,11 +40,23 @@ os.makedirs(MODEL_DIR, exist_ok=True)  # ✅ 모델 디렉토리 보장
 # 🆘 DB/SQLite 열기 전, 무조건 1회 응급 정리(락/보호시간 무시) → 백그라운드 실행으로 변경
 def _async_emergency_purge():
     try:
-        print("[EMERGENCY] pre-DB purge 시작"); sys.stdout.flush()
-        safe_cleanup.run_emergency_purge()
-        print("[EMERGENCY] pre-DB purge 완료"); sys.stdout.flush()
+        # 하드캡 초과 시에만 EMERGENCY, 그 외에는 옵션에 따라 온건 정리 또는 아무것도 안 함
+        used_gb = safe_cleanup.get_directory_size_gb(PERSIST_DIR)
+        hard_cap = getattr(safe_cleanup, "HARD_CAP_GB", 9.6)
+        print(f"[BOOT-CLEANUP] used={used_gb:.2f}GB hard_cap={hard_cap:.2f}GB"); sys.stdout.flush()
+        if used_gb >= hard_cap:
+            print("[EMERGENCY] pre-DB purge 시작 (하드캡 초과)"); sys.stdout.flush()
+            safe_cleanup.run_emergency_purge()
+            print("[EMERGENCY] pre-DB purge 완료"); sys.stdout.flush()
+        else:
+            if os.getenv("CLEANUP_ON_BOOT", "0") == "1":
+                print("[BOOT-CLEANUP] CLEANUP_ON_BOOT=1 → 온건 정리 실행"); sys.stdout.flush()
+                safe_cleanup.cleanup_logs_and_models()
+                print("[BOOT-CLEANUP] 완료"); sys.stdout.flush()
+            else:
+                print("[BOOT-CLEANUP] 비활성화(CLEANUP_ON_BOOT=0)"); sys.stdout.flush()
     except Exception as e:
-        print(f"[경고] pre-DB purge 실패: {e}"); sys.stdout.flush()
+        print(f"[경고] pre-DB purge/cleanup 결정 실패: {e}"); sys.stdout.flush()
 
 threading.Thread(target=_async_emergency_purge, daemon=True).start()
 
