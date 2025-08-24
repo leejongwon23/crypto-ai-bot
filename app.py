@@ -600,50 +600,47 @@ def reset_all(key=None):
             except Exception:
                 pass
 
-            # 3) 파일 정리 — 루프가 멈췄을 때만 공격적으로
-            if stopped:
-                try:
-                    if os.path.exists(MODELS): shutil.rmtree(MODELS)
-                    os.makedirs(MODELS, exist_ok=True)
+            # 3) 파일 정리 — 무조건 풀와이프(ssl_models 포함)
+            try:
+                # 대상 디렉터리 전부 제거
+                for d in [MODELS, LOGS, os.path.join(PERSIST, "ssl_models")]:
+                    if os.path.exists(d):
+                        shutil.rmtree(d, ignore_errors=True)
+                    os.makedirs(d, exist_ok=True)
 
-                    if os.path.exists(LOGS): shutil.rmtree(LOGS)
-                    os.makedirs(LOGS, exist_ok=True)
-
-                    if os.path.exists(PRED_LOG): os.remove(PRED_LOG)
-
-                    suspect_names = {
-                        "prediction_log.csv","wrong_predictions.csv",
-                        "evaluation_audit.csv","message_log.csv",
-                        "failure_count.csv","train_log.csv"
-                    }
-                    for root in {PERSIST, LOGS, BASE, os.getcwd()}:
+                # 루트 직속 파일/잔여물 전부 제거 (락/앱필수 제외)
+                keep = {os.path.basename(LOCK_DIR)}
+                for name in list(os.listdir(PERSIST)):
+                    p = os.path.join(PERSIST, name)
+                    if name in keep:
+                        continue
+                    if os.path.isdir(p):
+                        # 위에서 만든 기본 디렉터리( logs / models / ssl_models )는 유지
+                        if name not in {"logs", "models", "ssl_models"}:
+                            shutil.rmtree(p, ignore_errors=True)
+                    else:
                         try:
-                            if not os.path.isdir(root): continue
-                            for fn in list(os.listdir(root)):
-                                low = fn.lower()
-                                if (fn in suspect_names) or low.startswith(("prediction_log","eval","message_log","train_log","wrong_predictions")):
-                                    try: os.remove(os.path.join(root, fn))
-                                    except Exception: pass
+                            os.remove(p)
                         except Exception:
                             pass
 
-                    # 관우/diag 캐시 추정 제거
-                    patterns = ("diag","e2e","guan","관우")
-                    for root, dirs, files in os.walk(PERSIST, topdown=False):
-                        for d in list(dirs):
-                            name = d.lower()
-                            if name.startswith(patterns) or ("관우" in d):
-                                try: shutil.rmtree(os.path.join(root, d))
-                                except Exception: pass
-                        for f in list(files):
-                            low = f.lower()
-                            if low.startswith(patterns) or ("관우" in f):
-                                try: os.remove(os.path.join(root, f))
-                                except Exception: pass
-                except Exception as e:
-                    print(f"⚠️ [RESET] 폴더 정리 중 예외: {e}"); sys.stdout.flush()
-            else:
-                print("⚠️ [RESET] 루프 미중지 → 보수모드(파일 전삭제 생략)"); sys.stdout.flush()
+                # 의심 CSV/DB/캐시 전부 제거(안전망)
+                suspect_prefixes = ("prediction_log", "eval", "message_log", "train_log",
+                                    "wrong_predictions", "evaluation_audit", "failure_count",
+                                    "diag", "e2e", "guan", "관우")
+                for root, dirs, files in os.walk(PERSIST, topdown=False):
+                    for f in files:
+                        low = f.lower()
+                        if low.endswith((".csv", ".db", ".json", ".txt")) or low.startswith(suspect_prefixes):
+                            try: os.remove(os.path.join(root, f))
+                            except Exception: pass
+                    for d in dirs:
+                        low = d.lower()
+                        if low.startswith(suspect_prefixes) or ("관우" in d):
+                            try: shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                            except Exception: pass
+            except Exception as e:
+                print(f"⚠️ [RESET] 풀와이프 예외: {e}"); sys.stdout.flush()
 
             # 4) in-memory 캐시 초기화
             try: _kline_cache.clear()
