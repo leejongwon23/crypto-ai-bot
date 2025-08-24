@@ -718,7 +718,6 @@ def reset_all(key=None):
                 ok = train.start_train_loop(force_restart=True, sleep_sec=0)
                 print(f"✅ [RESET] 학습 루프 처리 완료 ok={ok}"); sys.stdout.flush()
                 if not ok:
-                    import time
                     time.sleep(1.0)
                     ok2 = train.start_train_loop(force_restart=True, sleep_sec=0)
                     print(f"🔁 [RESET] 학습 루프 재시도 ok={ok2}"); sys.stdout.flush()
