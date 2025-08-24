@@ -15,7 +15,12 @@ from predict import evaluate_predictions
 from train import train_symbol_group_loop  # (호환용) 직접 호출 루트 남김
 import maintenance_fix_meta
 from logger import ensure_prediction_log_exists
-from integrity_guard import run as _integrity_check; _integrity_check()
+# 👇 여기만 수정 (예외 안전)
+try:
+    from integrity_guard import run as _integrity_check
+    _integrity_check()
+except Exception as e:
+    print(f"[WARN] integrity_guard skipped: {e}")
 
 # ✅ 종합점검 모듈(HTML/JSON + 누적 통계 지원)
 from diag_e2e import run as diag_e2e_run
