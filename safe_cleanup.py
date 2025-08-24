@@ -30,6 +30,10 @@ PROTECT_HOURS = 12
 LOCK_PATH = os.path.join(LOCK_DIR, "train_or_predict.lock")
 DRYRUN = False
 
+# ✅ (5번) 압축 모델 확장자도 동일 취급
+MODEL_EXTS = (".pt", ".ptz", ".safetensors")
+META_EXT = ".meta.json"
+
 DELETE_PREFIXES = ["prediction_", "evaluation_", "wrong_", "model_", "ssl_", "meta_", "evo_"]
 EXCLUDE_FILES = {
     "prediction_log.csv", "train_log.csv", "evaluation_result.csv",
@@ -74,10 +78,37 @@ def _ensure_dirs():
     os.makedirs(SSL_DIR, exist_ok=True)
     os.makedirs(LOCK_DIR, exist_ok=True)
 
-def _should_delete_file(fname: str) -> bool:
-    if os.path.basename(fname) in EXCLUDE_FILES:
+def _is_model_file(path: str) -> bool:
+    """models/ 내부의 .pt/.ptz/.safetensors 및 짝 메타를 모델로 본다."""
+    if not isinstance(path, str):
         return False
-    return any(os.path.basename(fname).startswith(p) for p in DELETE_PREFIXES)
+    base = os.path.basename(path)
+    # 모델 가중치
+    if any(base.endswith(ext) for ext in MODEL_EXTS):
+        return True
+    # 메타(모델과 세트) — 파일명이 *_*.meta.json 형태라 접두사 체크가 안 먹었음
+    if base.endswith(META_EXT):
+        return True
+    return False
+
+def _should_delete_file(fname: str) -> bool:
+    """
+    기존 규칙 + (NEW) models/ 안의 모델 확장자는 접두사 없이도 정리 대상으로 인정.
+    """
+    base = os.path.basename(fname)
+    # 보호 목록
+    if base in EXCLUDE_FILES:
+        return False
+    # models/ 디렉토리의 모델/메타 파일은 접두사와 무관하게 삭제 후보
+    try:
+        if os.path.commonpath([os.path.abspath(fname), os.path.abspath(MODEL_DIR)]) == os.path.abspath(MODEL_DIR):
+            if _is_model_file(fname):
+                return True
+    except Exception:
+        # 공통 경로 계산 실패 시 무시
+        pass
+    # 일반 접두사 규칙
+    return any(base.startswith(p) for p in DELETE_PREFIXES)
 
 def _is_recent(path: str, hours: float) -> bool:
     try:
@@ -137,6 +168,7 @@ def _delete_old_by_days(paths, cutoff_dt, deleted_log, accept_all=False):
 
 def _delete_until_target(deleted_log, target_gb):
     candidates = []
+    # LOG/MODEL: 규칙 기반 후보 수집
     for d in [LOG_DIR, MODEL_DIR]:
         for p in _list_files(d):
             if os.path.isfile(p) and _should_delete_file(p):
@@ -147,6 +179,7 @@ def _delete_until_target(deleted_log, target_gb):
                 except Exception:
                     ctime = 0
                 candidates.append((ctime, p))
+    # SSL: 대용량 캐시 우선 제거
     for p in _list_files(SSL_DIR):
         if os.path.isfile(p) and not _is_recent(p, PROTECT_HOURS):
             try:
@@ -155,15 +188,21 @@ def _delete_until_target(deleted_log, target_gb):
                 ctime = 0
             candidates.append((ctime, p))
 
-    candidates.sort(key=lambda x: x[0])  # 오래된 것부터
+    # 오래된 것부터
+    candidates.sort(key=lambda x: x[0])
     while get_directory_size_gb(ROOT_DIR) > target_gb and candidates:
         _, p = candidates.pop(0)
         _delete_file(p, deleted_log)
 
 def _limit_models_per_key(deleted_log):
+    """
+    (변경 없음) 전체 모델 파일(.pt/.ptz/.safetensors/메타)을 시간 역순으로 정렬한 뒤
+    심볼_전략_모델 키별로 최신 MAX_MODELS_PER_KEY만 남김.
+    """
     files = [p for p in _list_files(MODEL_DIR) if os.path.isfile(p)]
     files = [p for p in files if not _is_recent(p, PROTECT_HOURS)]
     files.sort(key=os.path.getmtime, reverse=True)
+
     if len(files) > MAX_MODELS_KEEP_GLOBAL:
         for p in files[MAX_MODELS_KEEP_GLOBAL:]:
             _delete_file(p, deleted_log)
@@ -230,33 +269,27 @@ def emergency_purge(target_gb=None):
             if not os.path.isfile(p):
                 continue
             if os.path.basename(p) == "deleted_log.txt":
-                # 기록 파일은 남겨두자
                 continue
             try:
                 mtime = os.path.getmtime(p)
             except Exception:
                 mtime = 0
             items.append((mtime, p))
-        # 오래된 것 먼저
-        items.sort(key=lambda x: x[0])
+        items.sort(key=lambda x: x[0])  # 오래된 것 먼저
         return [p for _, p in items]
 
     print("[🆘 EMERGENCY] 즉시 강제 정리 시작 (락/보호시간 무시)")
-    # 우선순위: SSL → MODEL → LOG
     ordered_dirs = [SSL_DIR, MODEL_DIR, LOG_DIR]
     candidates = []
     for d in ordered_dirs:
         candidates.extend(_collect_all(d))
 
-    # 삭제 루프
     while get_directory_size_gb(ROOT_DIR) > target and candidates:
         p = candidates.pop(0)
         _delete_file(p, deleted)
 
-    # 최소 정리 후 후속 정리 + VACUUM
     _vacuum_sqlite()
 
-    # 삭제 기록
     if deleted:
         now = datetime.now()
         try:
