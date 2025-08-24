@@ -673,11 +673,19 @@ def reset_all(key=None):
             except Exception as e:
                 print(f"[RESET] meta 보정 실패: {e}")
 
-            # 8) 루프/스케줄러 **강제 재가동**
+            # ✅ (중요) 재가동 전에 글로벌 락 해제
+            _release_global_lock()
+
+            # 8) 루프/스케줄러 **강제 재가동** (+짧은 재시도)
             try:
                 print("[RESET] 강제 재가동 시도(force_restart=True)"); sys.stdout.flush()
                 ok = train.start_train_loop(force_restart=True, sleep_sec=0)
                 print(f"✅ [RESET] 학습 루프 처리 완료 ok={ok}"); sys.stdout.flush()
+                if not ok:
+                    import time
+                    time.sleep(1.0)
+                    ok2 = train.start_train_loop(force_restart=True, sleep_sec=0)
+                    print(f"🔁 [RESET] 학습 루프 재시도 ok={ok2}"); sys.stdout.flush()
             except Exception as e:
                 print(f"❌ [RESET] 루프 처리 실패: {e}"); sys.stdout.flush()
 
@@ -691,7 +699,7 @@ def reset_all(key=None):
         except Exception as e:
             print(f"❌ [RESET] 백그라운드 초기화 예외: {e}"); sys.stdout.flush()
         finally:
-            # ===== 글로벌 락 OFF =====
+            # (이중 호출이어도 안전) 혹시 못 풀었으면 풀기
             _release_global_lock()
 
     # 백그라운드 작업 시작 후 즉시 응답
