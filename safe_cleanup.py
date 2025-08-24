@@ -1,4 +1,4 @@
-# safe_cleanup.py (FIXED-CONFIG: env 없이 동작, 스케줄러 포함 / micro-fix3)
+# safe_cleanup.py (FIXED-CONFIG: env 없이 동작, 스케줄러 포함 / micro-fix3, 10GB 서버용 튜닝)
 import os
 import time
 import threading
@@ -13,12 +13,12 @@ SSL_DIR = os.path.join(ROOT_DIR, "ssl_models")
 LOCK_DIR = os.path.join(ROOT_DIR, "locks")
 DELETED_LOG_PATH = os.path.join(LOG_DIR, "deleted_log.txt")
 
-# ====== 정책(고정값) ======
-KEEP_DAYS = 1
-HARD_CAP_GB = 9.8
-SOFT_CAP_GB = 9.2
-TRIGGER_GB  = 7.0
-MIN_FREE_GB = 1.0
+# ====== 정책(고정값 / 10GB 환경 최적화) ======
+KEEP_DAYS   = 1
+HARD_CAP_GB = 9.6   # 10GB 한계 대비 여유
+SOFT_CAP_GB = 9.0
+TRIGGER_GB  = 7.5   # 여유 확보를 위해 약간 상향(7.0→7.5)
+MIN_FREE_GB = 0.8   # 하드캡 해제 후 최소 확보 목표
 
 CSV_MAX_MB = 50
 CSV_BACKUPS = 3
@@ -50,7 +50,7 @@ def _size_bytes(path: str) -> int:
         return 0
 
 def get_directory_size_gb(path):
-    if not os.path.isdir(path):  # micro-fix: 루트 미존재 방어
+    if not os.path.isdir(path):
         return 0.0
     total = 0
     for dirpath, _, filenames in os.walk(path):
@@ -224,21 +224,23 @@ def auto_delete_old_logs():
     current_gb = get_directory_size_gb(ROOT_DIR)
     print(f"[용량] 현재={_human_gb(current_gb)} | 트리거={_human_gb(TRIGGER_GB)} | 목표={_human_gb(SOFT_CAP_GB)} | 하드캡={_human_gb(HARD_CAP_GB)}")
 
+    # CSV 롤오버(먼저 공간 조금 확보)
     for csv_path in ROOT_CSVS + [os.path.join(LOG_DIR, n) for n in ["prediction_log.csv", "train_log.csv", "evaluation_result.csv", "wrong_predictions.csv"]]:
         deleted += _rollover_csv(csv_path, CSV_MAX_MB, CSV_BACKUPS)
 
     if current_gb >= HARD_CAP_GB:
         print(f"[🚨 하드캡 초과] 즉시 강제 정리 시작")
-        _delete_old_by_days([LOG_DIR, MODEL_DIR], cutoff, deleted_log=deleted)
-        _delete_old_by_days([SSL_DIR], cutoff, deleted_log=deleted, accept_all=True)
+        # 1) SSL(대용량) → 2) 모델/로그 순
+        _delete_old_by_days([SSL_DIR],  cutoff, deleted_log=deleted, accept_all=True)
+        _delete_old_by_days([MODEL_DIR, LOG_DIR], cutoff, deleted_log=deleted)
         _delete_until_target(deleted, max(SOFT_CAP_GB, HARD_CAP_GB - MIN_FREE_GB))
         _limit_models_per_key(deleted)
         _vacuum_sqlite()
 
     elif current_gb >= TRIGGER_GB:
         print(f"[⚠️ 트리거 초과] 정리 시작")
-        _delete_old_by_days([LOG_DIR, MODEL_DIR], cutoff, deleted_log=deleted)
-        _delete_old_by_days([SSL_DIR], cutoff, deleted_log=deleted, accept_all=True)
+        _delete_old_by_days([SSL_DIR],  cutoff, deleted_log=deleted, accept_all=True)
+        _delete_old_by_days([MODEL_DIR, LOG_DIR], cutoff, deleted_log=deleted)
         _delete_until_target(deleted, SOFT_CAP_GB)
         _limit_models_per_key(deleted)
         _vacuum_sqlite()
@@ -248,7 +250,7 @@ def auto_delete_old_logs():
 
     if deleted:
         try:
-            os.makedirs(LOG_DIR, exist_ok=True)  # micro-fix: 기록 디렉터리 보장
+            os.makedirs(LOG_DIR, exist_ok=True)
             with open(DELETED_LOG_PATH, "a", encoding="utf-8") as f:
                 f.write(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 삭제된 파일 목록:\n")
                 for path in deleted:
