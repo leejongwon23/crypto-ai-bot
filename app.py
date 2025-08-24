@@ -37,6 +37,32 @@ MODEL_DIR  = os.path.join(PERSIST_DIR, "models")
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)  # ✅ 모델 디렉토리 보장
 
+# ===== 글로벌 락 유틸(전체 일시정지) =====
+LOCK_DIR   = getattr(safe_cleanup, "LOCK_DIR", os.path.join(PERSIST_DIR, "locks"))
+LOCK_PATH  = getattr(safe_cleanup, "LOCK_PATH", os.path.join(LOCK_DIR, "train_or_predict.lock"))
+os.makedirs(LOCK_DIR, exist_ok=True)
+
+def _acquire_global_lock():
+    try:
+        os.makedirs(LOCK_DIR, exist_ok=True)
+        with open(LOCK_PATH, "w", encoding="utf-8") as f:
+            f.write(f"locked at {datetime.datetime.now().isoformat()}\n")
+        print(f"[LOCK] created: {LOCK_PATH}"); sys.stdout.flush()
+        return True
+    except Exception as e:
+        print(f"[LOCK] create failed: {e}"); sys.stdout.flush()
+        return False
+
+def _release_global_lock():
+    try:
+        if os.path.exists(LOCK_PATH):
+            os.remove(LOCK_PATH)
+            print(f"[LOCK] removed: {LOCK_PATH}"); sys.stdout.flush()
+            return True
+    except Exception as e:
+        print(f"[LOCK] remove failed: {e}"); sys.stdout.flush()
+    return False
+
 # 🆘 DB/SQLite 열기 전, 무조건 1회 응급 정리(락/보호시간 무시) → 백그라운드 실행으로 변경
 def _async_emergency_purge():
     try:
@@ -131,6 +157,28 @@ def start_scheduler():
     sched.start()
     _sched = sched
     print("✅ 스케줄러 시작 완료"); sys.stdout.flush()
+
+def _pause_and_clear_scheduler():
+    """초기화 동안 스케줄러 완전 정지(작업 제거)"""
+    global _sched
+    try:
+        if _sched is not None:
+            print("[SCHED] pause + remove_all_jobs"); sys.stdout.flush()
+            try:
+                _sched.pause()
+            except Exception:
+                pass
+            try:
+                _sched.remove_all_jobs()
+            except Exception:
+                pass
+            try:
+                _sched.shutdown(wait=False)
+            except Exception:
+                pass
+            _sched = None
+    except Exception as e:
+        print(f"[SCHED] 정지 실패: {e}"); sys.stdout.flush()
 
 # ===== Flask =====
 app = Flask(__name__)
@@ -502,6 +550,10 @@ def reset_all(key=None):
             from data.utils import _kline_cache, _feature_cache
             import importlib
 
+            # ===== 0) 글로벌 락 ON + 스케줄러 완전정지 =====
+            _acquire_global_lock()
+            _pause_and_clear_scheduler()
+
             # 경로 상수 로컬 바인딩
             BASE = BASE_DIR
             PERSIST = PERSIST_DIR
@@ -520,7 +572,7 @@ def reset_all(key=None):
 
             print("[RESET] 백그라운드 초기화 시작"); sys.stdout.flush()
 
-            # 0) 학습 루프 중지 시도
+            # 1) 학습 루프 정지
             stop_timeout = int(os.getenv("RESET_STOP_TIMEOUT", "30"))
             try:
                 if hasattr(train, "request_stop"):
@@ -536,14 +588,14 @@ def reset_all(key=None):
                 print(f"⚠️ [RESET] stop_train_loop 예외: {e}"); sys.stdout.flush()
             print(f"[RESET] stop_train_loop 결과: {stopped}"); sys.stdout.flush()
 
-            # 1) 진행상태 마커 제거
+            # 2) 진행상태 마커 제거
             try:
                 done_path = os.path.join(PERSIST, "train_done.json")
                 if os.path.exists(done_path): os.remove(done_path)
             except Exception:
                 pass
 
-            # 2) 파일 정리 — 루프가 멈췄을 때만 공격적으로
+            # 3) 파일 정리 — 루프가 멈췄을 때만 공격적으로
             if stopped:
                 try:
                     if os.path.exists(MODELS): shutil.rmtree(MODELS)
@@ -588,13 +640,13 @@ def reset_all(key=None):
             else:
                 print("⚠️ [RESET] 루프 미중지 → 보수모드(파일 전삭제 생략)"); sys.stdout.flush()
 
-            # 3) in-memory 캐시 초기화
+            # 4) in-memory 캐시 초기화
             try: _kline_cache.clear()
             except Exception: pass
             try: _feature_cache.clear()
             except Exception: pass
 
-            # 4) 표준 로그 재생성(정확 헤더)
+            # 5) 표준 로그 재생성(정확 헤더)
             try:
                 ensure_prediction_log_exists()
                 clear_csv(WRONG, ["timestamp","symbol","strategy","direction","entry_price","target_price","model","predicted_class","top_k","note","success","reason","rate","return_value","label","group_id","model_symbol","model_name","source","volatility","source_exchange"])
@@ -605,7 +657,7 @@ def reset_all(key=None):
             except Exception as e:
                 print(f"⚠️ [RESET] 로그 재생성 예외: {e}"); sys.stdout.flush()
 
-            # 5) diag_e2e reload
+            # 6) diag_e2e reload
             try:
                 import diag_e2e as _diag_mod
                 import importlib as _imp
@@ -613,23 +665,38 @@ def reset_all(key=None):
             except Exception:
                 pass
 
-            # 6) 루프 **무조건 강제 재가동**
+            # 7) 메타 보정 1회
+            try:
+                maintenance_fix_meta.fix_all_meta_json()
+            except Exception as e:
+                print(f"[RESET] meta 보정 실패: {e}")
+
+            # 8) 루프/스케줄러 **강제 재가동**
             try:
                 print("[RESET] 강제 재가동 시도(force_restart=True)"); sys.stdout.flush()
                 ok = train.start_train_loop(force_restart=True, sleep_sec=0)
-                print(f"✅ [RESET] 루프 처리 완료 ok={ok}"); sys.stdout.flush()
+                print(f"✅ [RESET] 학습 루프 처리 완료 ok={ok}"); sys.stdout.flush()
             except Exception as e:
                 print(f"❌ [RESET] 루프 처리 실패: {e}"); sys.stdout.flush()
+
+            try:
+                start_scheduler()
+                print("✅ [RESET] 스케줄러 재시작 완료"); sys.stdout.flush()
+            except Exception as e:
+                print(f"⚠️ [RESET] 스케줄러 재시작 실패: {e}"); sys.stdout.flush()
 
             print("✅ [RESET] 백그라운드 초기화 완료"); sys.stdout.flush()
         except Exception as e:
             print(f"❌ [RESET] 백그라운드 초기화 예외: {e}"); sys.stdout.flush()
+        finally:
+            # ===== 글로벌 락 OFF =====
+            _release_global_lock()
 
     # 백그라운드 작업 시작 후 즉시 응답
     threading.Thread(target=_do_reset_work, daemon=True).start()
     return Response(
-        "✅ 초기화 요청 접수됨. 백그라운드에서 정리 후 루프를 강제 재가동합니다.\n"
-        "로그에서 [RESET] 태그를 확인하세요.",
+        "✅ 초기화 요청 접수됨. 백그라운드에서 정지→정리→재가동합니다.\n"
+        "로그에서 [RESET]/[SCHED]/[LOCK] 태그를 확인하세요.",
         mimetype="text/plain; charset=utf-8"
     )
 
