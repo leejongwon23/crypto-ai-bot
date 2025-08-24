@@ -37,6 +37,14 @@ MODEL_DIR  = os.path.join(PERSIST_DIR, "models")
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)  # ✅ 모델 디렉토리 보장
 
+# 🆘 DB/SQLite 열기 전, 무조건 1회 응급 정리(락/보호시간 무시)
+try:
+    print("[EMERGENCY] pre-DB purge 시작"); sys.stdout.flush()
+    safe_cleanup.run_emergency_purge()
+    print("[EMERGENCY] pre-DB purge 완료"); sys.stdout.flush()
+except Exception as e:
+    print(f"[경고] pre-DB purge 실패: {e}"); sys.stdout.flush()
+
 # ✅ prediction_log은 logger와 동일한 위치/헤더로 관리
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
 
