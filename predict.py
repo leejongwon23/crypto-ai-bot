@@ -1,4 +1,8 @@
 # predict.py (FIXED — flexible meta matching + robust model discovery + ensured logging)
+# ✅ 변경 요약:
+# - 모델 탐색이 .pt / .ptz / .safetensors 모두 인식
+# - 디렉터리 별칭(SYMBOL/STRATEGY/{model}.{ext})도 동일하게 탐색
+# - 로딩 경로는 model_io.load_model(...) 사용(무손실 압축/안전 저장 포맷 지원)
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np
@@ -42,12 +46,30 @@ except Exception:
     def get_calibration_version():
         return "none"
 
+# ✅ 모델 입출력 통합(.pt/.ptz/.safetensors 지원)
+try:
+    from model_io import load_model as load_model_any  # 표준 경로
+except Exception:
+    # 폴백(구버전): 기존 캐시 로더가 있으면 사용, 최후엔 state_dict 로딩
+    try:
+        from model_weight_loader import load_model_cached as load_model_any  # 타입 호환
+    except Exception:
+        def load_model_any(path, model, ttl_sec=600):
+            try:
+                sd = torch.load(path, map_location="cpu")
+                if isinstance(sd, dict):
+                    model.load_state_dict(sd)
+                else:
+                    model = sd
+                return model
+            except Exception:
+                return None
+
 # logger
 from logger import log_prediction, update_model_success, PREDICTION_HEADERS, ensure_prediction_log_exists
 from failure_db import insert_failure_record, load_existing_failure_hashes, ensure_failure_db
 from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
 from model.base_model import get_model
-from model_weight_loader import load_model_cached
 from config import (
     get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups,
     get_class_return_range, class_to_expected_return
@@ -133,15 +155,23 @@ def _get_feature_hash(feature_row) -> str:
 # -----------------------------
 # 유연한 모델/메타 탐색 (핵심 FIX)
 # -----------------------------
-def _resolve_meta_for_pt(pt_basename: str) -> str | None:
+_KNOWN_EXTS = (".pt", ".ptz", ".safetensors")
+
+def _stem_without_ext(filename: str) -> str:
+    for ext in _KNOWN_EXTS:
+        if filename.endswith(ext):
+            return filename[: -len(ext)]
+    # fallback
+    return os.path.splitext(filename)[0]
+
+def _resolve_meta_for_weight(weight_basename: str) -> str | None:
     """
-    pt 이름(예: BTCUSDT_단기_lstm.pt)에 대해 다음 우선순위로 meta를 찾는다.
-    1) 동일 basename: BTCUSDT_단기_lstm.meta.json
+    weight 이름(예: BTCUSDT_단기_lstm.pt/ptz/safetensors)에 대해 다음 우선순위로 meta를 찾는다.
+    1) 동일 stem: BTCUSDT_단기_lstm.meta.json
     2) 그룹/클래스 버전: BTCUSDT_단기_lstm_*.meta.json
     3) 디렉터리 별칭: models/SYMBOL/STRATEGY/{model}.meta.json
-    하나라도 찾으면 meta 경로를 반환.
     """
-    base_no_ext = pt_basename[:-3]  # strip ".pt"
+    base_no_ext = _stem_without_ext(weight_basename)
     # 1) 동일 베이스
     cand = os.path.join(MODEL_DIR, f"{base_no_ext}.meta.json")
     if os.path.exists(cand):
@@ -154,7 +184,6 @@ def _resolve_meta_for_pt(pt_basename: str) -> str | None:
     # 3) 디렉터리 구조 별칭 (SYMBOL/STRATEGY/{model}.meta.json)
     try:
         parts = base_no_ext.split("_")
-        # 예: BTCUSDT_단기_lstm -> ['BTCUSDT','단기','lstm']
         if len(parts) >= 3:
             sym, strat, mtype = parts[0], parts[1], parts[2]
             cand2 = os.path.join(MODEL_DIR, sym, strat, f"{mtype}.meta.json")
@@ -164,9 +193,16 @@ def _resolve_meta_for_pt(pt_basename: str) -> str | None:
         pass
     return None
 
+def _glob_many(pattern_stem: str, exts=_KNOWN_EXTS):
+    """pattern_stem에 대해 여러 확장자 조합으로 glob."""
+    out = []
+    for ext in exts:
+        out.extend(glob.glob(f"{pattern_stem}{ext}"))
+    return out
+
 def get_available_models(symbol: str, strategy: str):
     """
-    PT와 META 파일명이 서로 달라도(평탄/그룹/디렉터리 혼재) 안전하게 모델을 수집.
+    PT/PTZ/SAFETENSORS와 META 파일명이 서로 달라도(평탄/그룹/디렉터리 혼재) 안전하게 모델을 수집.
     """
     try:
         if not os.path.isdir(MODEL_DIR):
@@ -174,34 +210,32 @@ def get_available_models(symbol: str, strategy: str):
         items = []
         prefix = f"{symbol}_"
         needle = f"_{strategy}_"
+        # 1) 평탄 파일 열거(.pt/.ptz/.safetensors)
         for fn in os.listdir(MODEL_DIR):
-            if not fn.endswith(".pt"):
+            if not any(fn.endswith(ext) for ext in _KNOWN_EXTS):
                 continue
             if not fn.startswith(prefix):
                 continue
             if needle not in fn:
                 continue
-            # pt 후보 결정
-            pt_path = os.path.join(MODEL_DIR, fn)
-            # 메타 경로 유연 해석
-            meta_path = _resolve_meta_for_pt(fn)
+            weight_path = os.path.join(MODEL_DIR, fn)
+            meta_path = _resolve_meta_for_weight(fn)
             if not meta_path or not os.path.exists(meta_path):
-                # 최후: 같은 stem으로 강제 짝 맞추기 시도
-                fallback = os.path.join(MODEL_DIR, fn.replace(".pt", ".meta.json"))
+                fallback = os.path.join(MODEL_DIR, f"{_stem_without_ext(fn)}.meta.json")
                 if not os.path.exists(fallback):
-                    # 스킵하지 말고 안내 로그 남기고 계속 탐색
-                    print(f"[메타 미발견] pt={fn} → meta 찾기 실패")
+                    print(f"[메타 미발견] weight={fn} → meta 찾기 실패")
                     continue
                 meta_path = fallback
             items.append({"pt_file": fn, "meta_path": meta_path})
-        # 평탄 alias가 아니라 group형 원본(.pt)도 직접 탐색
-        # 예: BTCUSDT_단기_lstm_group1_cls5.pt 형태
-        group_pattern = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_*group*cls*.pt")
-        for gpt in glob.glob(group_pattern):
-            gfn = os.path.basename(gpt)
-            meta_path = _resolve_meta_for_pt(gfn)
+
+        # 2) 그룹형 원본(.pt|.ptz|.safetensors)
+        group_stem = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_*group*cls*")
+        for gpath in _glob_many(group_stem):
+            gfn = os.path.basename(gpath)
+            meta_path = _resolve_meta_for_weight(gfn)
             if meta_path and {"pt_file": gfn, "meta_path": meta_path} not in items:
                 items.append({"pt_file": gfn, "meta_path": meta_path})
+
         # 정렬
         items.sort(key=lambda x: x["pt_file"])
         return items
@@ -315,8 +349,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
     used_minret_filter = False
     use_evo = False
 
-    evo_model_path = os.path.join(MODEL_DIR, "evo_meta_learner.pt")
-    if os.path.exists(evo_model_path):
+    # evo 메타 파일은 어떤 확장자든 허용
+    evo_candidates = _glob_many(os.path.join(MODEL_DIR, "evo_meta_learner"))
+    if evo_candidates:
         try:
             from evo_meta_learner import predict_evo_meta  # 재확인
             if callable(predict_evo_meta):
@@ -820,14 +855,16 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
                 continue
             model_path = os.path.join(MODEL_DIR, pt_file)
             if not os.path.exists(model_path):
-                # 혹시 디렉터리 별칭 형태면 바꿔보기
+                # 혹시 디렉터리 별칭 형태면 확장자 전체 검사
                 try:
-                    parts = pt_file[:-3].split("_")
+                    parts = _stem_without_ext(pt_file).split("_")
                     if len(parts) >= 3:
                         sym, strat, mtype = parts[0], parts[1], parts[2]
-                        alt = os.path.join(MODEL_DIR, sym, strat, f"{mtype}.pt")
-                        if os.path.exists(alt):
-                            model_path = alt
+                        for ext in _KNOWN_EXTS:
+                            alt = os.path.join(MODEL_DIR, sym, strat, f"{mtype}{ext}")
+                            if os.path.exists(alt):
+                                model_path = alt
+                                break
                 except Exception:
                     pass
 
@@ -850,7 +887,8 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             input_tensor = torch.tensor(input_seq, dtype=torch.float32).unsqueeze(0)
 
             model = get_model(model_type, input_size=input_size, output_size=num_classes)
-            model = load_model_cached(model_path, model, ttl_sec=600)
+            # ✅ 통합 로더 사용(.pt/.ptz/.safetensors 모두 지원)
+            model = load_model_any(model_path, model)
             if model is None:
                 print(f"[⚠️ 모델 로딩 실패] {model_path}")
                 continue
