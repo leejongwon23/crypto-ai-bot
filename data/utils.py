@@ -64,6 +64,55 @@ except Exception:
         }
 
 # =========================
+# (NEW) 혼합 timestamp 안전 파서
+# =========================
+def _parse_ts_series(s: pd.Series) -> pd.Series:
+    """
+    혼합된 timestamp 입력을 안전하게 UTC→KST로 변환:
+    - 정수/숫자 문자열: 자릿수로 초/밀리초 자동 판별
+    - ISO8601 '...Z': 포맷 명시
+    - 그 외: 안전 fallback
+    """
+    if s is None:
+        return pd.to_datetime(pd.Series([], dtype=object), errors="coerce", utc=True)
+
+    # 이미 datetime이면 그대로(UTC 미보장 시 로컬라이즈→UTC)
+    if pd.api.types.is_datetime64_any_dtype(s):
+        ts = s.copy()
+        try:
+            if getattr(ts.dt, "tz", None) is None:
+                ts = ts.dt.tz_localize("UTC")
+        except Exception:
+            pass
+        return ts.dt.tz_convert("Asia/Seoul")
+
+    s_str = s.astype(str).str.strip()
+
+    # 숫자만 있는 값: unix 초/밀리초
+    is_numeric = s_str.str.fullmatch(r"\d+")
+    if is_numeric.any():
+        num = pd.to_numeric(s_str.where(is_numeric), errors="coerce")
+        length = s_str.where(is_numeric).str.len()
+        unit_ms = (length >= 13)
+        ts_num = pd.to_datetime(num, unit="ms" if unit_ms.any() else "s", errors="coerce", utc=True)
+    else:
+        ts_num = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns, UTC]")
+
+    # ISO8601 Z (ms → s 순)
+    iso_ms = pd.to_datetime(
+        s_str, format="%Y-%m-%dT%H:%M:%S.%fZ", errors="coerce", utc=True
+    )
+    iso_s = pd.to_datetime(
+        s_str.where(iso_ms.isna()), format="%Y-%m-%dT%H:%M:%SZ", errors="coerce", utc=True
+    )
+
+    # fallback
+    fb = pd.to_datetime(s_str.where(iso_ms.isna() & iso_s.isna()), errors="coerce", utc=True)
+
+    ts = ts_num.fillna(iso_ms).fillna(iso_s).fillna(fb)
+    return ts.dt.tz_convert("Asia/Seoul")
+
+# =========================
 # 심볼 동적 발견 + 60개 고정화
 # =========================
 def _merge_unique(*lists):
@@ -216,7 +265,8 @@ def future_gains_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
     if df is None or len(df) == 0 or "timestamp" not in df.columns:
         return np.zeros(0 if df is None else len(df), dtype=np.float32)
 
-    ts = pd.to_datetime(df["timestamp"], errors="coerce", utc=True).dt.tz_convert("Asia/Seoul")
+    # (patched) 표준 파서 사용
+    ts = _parse_ts_series(df["timestamp"])
     close = pd.to_numeric(df["close"], errors="coerce").astype(np.float32).values
     high = pd.to_numeric((df["high"] if "high" in df.columns else df["close"]), errors="coerce").astype(np.float32).values
 
@@ -285,7 +335,8 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
     try:
         df = pd.DataFrame(features)
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True).dt.tz_convert("Asia/Seoul")
+        # (patched) 표준 파서 사용
+        df["timestamp"] = _parse_ts_series(df["timestamp"])
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         df = df.drop(columns=["strategy"], errors="ignore")
 
@@ -408,14 +459,13 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=cols)
     df = df.copy()
 
+    # (patched) 표준 파서 사용
     if "timestamp" in df.columns:
-        ts = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
-        df["timestamp"] = ts.dt.tz_convert("Asia/Seoul")
+        df["timestamp"] = _parse_ts_series(df["timestamp"])
     elif "time" in df.columns:
-        ts = pd.to_datetime(df["time"], errors="coerce", utc=True)
-        df["timestamp"] = ts.dt.tz_convert("Asia/Seoul")
+        df["timestamp"] = _parse_ts_series(df["time"])
     else:
-        df["timestamp"] = pd.to_datetime(pd.Series([pd.NaT] * len(df)), errors="coerce", utc=True).dt.tz_convert("Asia/Seoul")
+        df["timestamp"] = _parse_ts_series(pd.Series([pd.NaT] * len(df)))
 
     for c in ["open","high","low","close","volume"]:
         if c in df.columns:
