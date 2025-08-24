@@ -24,6 +24,9 @@ import shutil  # ← 추가
 import gc      # ← 추가
 import threading  # ← 추가 (루프 제어)
 
+# ✅ 추가: 무손실 모델 압축 유틸(신규 1번 파일)
+from model_io import convert_pt_to_ptz  # ← 추가 임포트
+
 # ✅ torch 내부 스레드도 제한
 try:
     torch.set_num_threads(int(os.getenv("TORCH_NUM_THREADS", "2")))
@@ -238,10 +241,12 @@ def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.nda
     return out.astype(np.float32)
 
 def _save_model_and_meta(model: nn.Module, path_pt: str, meta: dict):
+    # 모델은 그대로 .pt(무압축)로 저장 → 기존 로딩 경로 영향 없음
     buffer = io.BytesIO()
     torch.save(model.state_dict(), buffer)
     _atomic_write(path_pt, buffer.getvalue(), mode="wb")
-    meta_json = json.dumps(meta, ensure_ascii=False, indent=2)
+    # 메타 JSON은 공백 제거(무손실)로 저장 → 용량 절약
+    meta_json = json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
     _atomic_write(path_pt.replace(".pt", ".meta.json"), meta_json, mode="w")
 
 # ⬇️ 추가: 예측/관우 호환 별칭 유틸
@@ -268,6 +273,34 @@ def _emit_aliases(model_path: str, meta_path: str, symbol: str, strategy: str, m
     dir_meta = dir_pt.replace(".pt", ".meta.json")
     _safe_alias(model_path, dir_pt)
     _safe_alias(meta_path, dir_meta)
+
+# ✅ 추가: 이전 체크포인트 무손실 압축 아카이브(.pt → .ptz)
+def _archive_old_checkpoints(symbol: str, strategy: str, model_type: str, keep_n: int = 1):
+    """
+    같은 (symbol,strategy,model_type) 키에 대해 최신 .pt 몇 개만 남기고,
+    나머지 .pt는 무손실 압축 .ptz로 변환 후 .pt 삭제(메타는 유지).
+    기능 영향 없음: 최신 .pt는 계속 존재하므로 로딩 경로 동일.
+    """
+    import re, glob
+    patt = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_group*_cls*.pt")
+    paths = glob.glob(patt)
+    if not paths:
+        return
+    paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    survivors = paths[:max(1, int(keep_n))]
+    to_archive = paths[max(1, int(keep_n)):]
+    for p in to_archive:
+        try:
+            ptz = os.path.splitext(p)[0] + ".ptz"
+            if not os.path.exists(ptz):
+                convert_pt_to_ptz(p, ptz)
+            # 원본 .pt 제거(무손실 전환)
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[ARCHIVE] {os.path.basename(p)} 압축 실패 → {e}")
 
 # --------------------------------------------------
 # (추가) Lightning 모듈 래퍼
@@ -561,7 +594,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
             }
             _save_model_and_meta(model, model_path, meta)
 
-            # ⬇️ 추가: 예측/모니터 호환 별칭 생성
+            # ⬇️ 추가: 이전 체크포인트는 무손실 압축 아카이브(.ptz)로 전환
+            _archive_old_checkpoints(symbol, strategy, model_type, keep_n=1)
+
+            # ⬇️ 추가: 예측/모니터 호환 별칭 생성(최신 .pt 기준)
             _emit_aliases(model_path, model_path.replace(".pt", ".meta.json"),
                           symbol, strategy, model_type)
 
