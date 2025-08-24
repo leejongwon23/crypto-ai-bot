@@ -2,7 +2,8 @@
 
 from flask import Flask, jsonify, request, Response
 from recommend import main
-import train, os, threading, datetime, pandas as pd, pytz, traceback, sys, shutil, csv, re
+import train, os, threading, datetime, pytz, traceback, sys, shutil, csv, re
+import pandas as pd  # ← ✅ 별칭 임포트는 단독 줄로 분리해야 문법 오류 없음
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram_bot import send_message
 from predict_test import test_all_predictions
