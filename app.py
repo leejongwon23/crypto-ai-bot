@@ -2,7 +2,7 @@
 
 from flask import Flask, jsonify, request, Response
 from recommend import main
-import train, os, threading, datetime, pytz, traceback, sys, shutil, csv, re
+import train, os, threading, datetime, pytz, traceback, sys, shutil, csv, re, time  # 🆕 time 추가
 import pandas as pd  # ← ✅ 별칭 임포트는 단독 줄로 분리해야 문법 오류 없음
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram_bot import send_message
@@ -592,6 +592,42 @@ def reset_all(key=None):
             except Exception as e:
                 print(f"⚠️ [RESET] stop_train_loop 예외: {e}"); sys.stdout.flush()
             print(f"[RESET] stop_train_loop 결과: {stopped}"); sys.stdout.flush()
+
+            # 🆕 1-1) 30초 내 미정지 시, 완전 종료까지 폴링 대기(기본 600s)
+            if not stopped:
+                max_wait = int(os.getenv("RESET_MAX_WAIT_SEC", "600"))
+                poll_sec = max(1, int(os.getenv("RESET_POLL_SEC", "3")))
+                t0 = time.time()
+                print(f"[RESET] 정지 대기 시작… 최대 {max_wait}s (폴링 {poll_sec}s)"); sys.stdout.flush()
+                while time.time() - t0 < max_wait:
+                    try:
+                        if hasattr(train, "is_loop_running"):
+                            running = bool(train.is_loop_running())
+                            if not running:
+                                stopped = True
+                                break
+                    except Exception:
+                        pass
+                    # 짧은 재시도
+                    try:
+                        if hasattr(train, "stop_train_loop") and train.stop_train_loop(timeout=2):
+                            stopped = True
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(poll_sec)
+                print(f"[RESET] 정지 대기 완료 → stopped={stopped}"); sys.stdout.flush()
+
+            # 🆕 1-2) 그래도 안 멈추면 초기화 취소(겹침 방지) + 스케줄러 복구
+            if not stopped:
+                print("🛑 [RESET] 루프가 종료되지 않아 초기화를 취소합니다(겹침 방지). 잠시 후 다시 시도하세요."); sys.stdout.flush()
+                try:
+                    _release_global_lock()
+                    start_scheduler()
+                    print("↩️ [RESET] 스케줄러 복구 완료"); sys.stdout.flush()
+                except Exception as e:
+                    print(f"⚠️ [RESET] 복구 중 예외: {e}"); sys.stdout.flush()
+                return  # 더 진행하지 않음
 
             # 2) 진행상태 마커 제거
             try:
