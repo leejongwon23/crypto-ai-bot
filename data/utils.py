@@ -309,6 +309,61 @@ def _downcast_numeric(df: pd.DataFrame, prefer_float32: bool = True) -> pd.DataF
     return df
 
 # =========================
+# (NEW) 가격·거래량 일관성/극단치 보정
+# =========================
+def _fix_ohlc_consistency(df: pd.DataFrame) -> pd.DataFrame:
+    """OHLC 논리 일관성 강제 및 비정상값 가드(<=0 → 이전값/드롭)."""
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+
+    # 음수/0 보정: forward-fill → 그래도 비정상이면 드롭
+    for c in ["open", "high", "low", "close", "volume"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].replace([np.inf, -np.inf], np.nan)
+    df["volume"] = df["volume"].replace([np.inf, -np.inf], np.nan)
+
+    # 0/음수 → NaN → 앞값 보정
+    for c in ["open", "high", "low", "close"]:
+        df.loc[df[c] <= 0, c] = np.nan
+    df.loc[df["volume"] < 0, "volume"] = np.nan
+
+    df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].ffill()
+
+    # 여전히 NaN인 행 드롭
+    df = df.dropna(subset=["open", "high", "low", "close", "volume"])
+
+    # OHLC 논리: high >= max(o,c,l), low <= min(o,c,l)
+    max_ref = df[["open", "close", "low"]].max(axis=1)
+    min_ref = df[["open", "close", "high"]].min(axis=1)
+    df["high"] = np.maximum(df["high"].values, max_ref.values)
+    df["low"]  = np.minimum(df["low"].values,  min_ref.values)
+
+    return df
+
+def _winsorize_prices(df: pd.DataFrame, lower_q=0.001, upper_q=0.999) -> pd.DataFrame:
+    """극단치 윈저라이즈(백분위 클리핑)로 스파이크/노이즈 완화."""
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+    cols = ["open", "high", "low", "close"]
+    for c in cols:
+        if c not in df.columns:
+            continue
+        series = pd.to_numeric(df[c], errors="coerce")
+        lo = series.quantile(lower_q)
+        hi = series.quantile(upper_q)
+        series = series.clip(lower=lo, upper=hi)
+        df[c] = series.astype(np.float32)
+    if "volume" in df.columns:
+        vol = pd.to_numeric(df["volume"], errors="coerce")
+        lo = max(0.0, vol.quantile(lower_q))
+        hi = vol.quantile(upper_q)
+        df["volume"] = vol.clip(lower=lo, upper=hi).astype(np.float32)
+    return df
+
+# =========================
 # 데이터셋 생성 (반환값 항상 X, y)
 # =========================
 def create_dataset(features, window=10, strategy="단기", input_size=None):
@@ -336,7 +391,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
     try:
         df = pd.DataFrame(features)
         # (patched) 표준 파서 사용
-        df["timestamp"] = _parse_ts_series(df["timestamp"])
+        df["timestamp"] = _parse_ts_series(df.get("timestamp"))
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         df = df.drop(columns=["strategy"], errors="ignore")
 
@@ -453,7 +508,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 # 내부 헬퍼 (정제/클립)
 # =========================
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
-    """타임존/형/정렬/중복 제거 표준화 + 숫자 downcast"""
+    """타임존/형/정렬/중복 제거 표준화 + 숫자 downcast + OHLC 일관성 + 윈저라이즈."""
     cols = ["timestamp","open","high","low","close","volume","datetime"]
     if df is None or df.empty:
         return pd.DataFrame(columns=cols)
@@ -477,6 +532,12 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     df["datetime"] = df["timestamp"]
     df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
     df = _downcast_numeric(df)
+
+    # 🔧 추가: OHLC 일관성 강제 + 음수/0 가드
+    df = _fix_ohlc_consistency(df)
+    # 🔧 추가: 극단치 윈저라이즈(클리핑)로 스파이크 완화
+    df = _winsorize_prices(df, lower_q=0.001, upper_q=0.999)
+
     return df[cols]
 
 def _clip_tail(df: pd.DataFrame, limit: int) -> pd.DataFrame:
