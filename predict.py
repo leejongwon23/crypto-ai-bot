@@ -48,22 +48,50 @@ except Exception:
     def get_calibration_version():
         return "none"
 
-# ✅ 모델 입출력 통합(.pt/.ptz/.safetensors 지원)
+# ✅ 모델 입출력 통합(.pt/.ptz/.safetensors 지원) — **어댑터로 시그니처 자동 호환 (핵심 FIX)**
 try:
-    from model_io import load_model as load_model_any  # 표준 경로
+    import inspect
+    from model_io import load_model as _raw_load_model  # 원함수 시그니처가 1 or 2 인자일 수 있음
+
+    def load_model_any(path, model=None, **kwargs):
+        """
+        - model_io.load_model(path) 형태/ load_model(path, model, **kw) 형태 모두 자동 지원
+        - 실패 시 아래 폴백으로 재시도
+        """
+        try:
+            sig = inspect.signature(_raw_load_model)
+            # 인자 개수 확인(가변 args 고려하여 이름 기반 체크)
+            params = list(sig.parameters.values())
+            # path만 받는 형태
+            if len([p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]) <= 1:
+                return _raw_load_model(path)
+            # path, model 받는 형태
+            return _raw_load_model(path, model, **kwargs)
+        except TypeError:
+            # 런타임 타입 에러면 path 단독/이중 둘 다 시도
+            try:
+                return _raw_load_model(path, model, **kwargs)
+            except Exception:
+                return _raw_load_model(path)
+        except Exception:
+            # 아래 폴백으로
+            pass
 except Exception:
-    # 폴백(구버전): 기존 캐시 로더가 있으면 사용, 최후엔 state_dict 로딩
+    _raw_load_model = None
+
+# 최후 폴백(구버전 캐시 로더 → state_dict 직접 로딩)
+if 'load_model_any' not in globals():
     try:
         from model_weight_loader import load_model_cached as load_model_any  # 타입 호환
     except Exception:
-        def load_model_any(path, model, ttl_sec=600):
+        def load_model_any(path, model=None, ttl_sec=600, **kwargs):
             try:
                 sd = torch.load(path, map_location="cpu")
-                if isinstance(sd, dict):
+                if isinstance(sd, dict) and model is not None:
                     model.load_state_dict(sd)
+                    return model
                 else:
-                    model = sd
-                return model
+                    return sd
             except Exception:
                 return None
 
