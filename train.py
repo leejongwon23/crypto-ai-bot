@@ -200,8 +200,8 @@ def _log_skip(symbol, strategy, reason):
     }, feature_vector=[])
 
 def _log_fail(symbol, strategy, reason):
-    logger.log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0,
-                               loss=0.0, note=reason, status="failed")
+    logger.log_training_result(symbol, strategy, model="all", accuracy=0.0, f1=0.0, loss=0.0,
+                               note=reason, status="failed")
     insert_failure_record({
         "symbol": symbol, "strategy": strategy, "model": "all",
         "predicted_class": -1, "success": False, "rate": 0.0,
@@ -241,9 +241,9 @@ def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.nda
     return out.astype(np.float32)
 
 def _save_model_and_meta(model: nn.Module, path_pt: str, meta: dict):
-    # 모델은 그대로 .pt(무압축)로 저장 → 기존 로딩 경로 영향 없음
+    # [FIX] 모델을 state_dict가 아닌 **모듈 자체**로 저장 → 로드 시 nn.Module로 복원되어 .eval() 가능
     buffer = io.BytesIO()
-    torch.save(model.state_dict(), buffer)
+    torch.save(model, buffer)  # ← 변경: model.state_dict() → model
     _atomic_write(path_pt, buffer.getvalue(), mode="wb")
     # 메타 JSON은 공백 제거(무손실)로 저장 → 용량 절약
     meta_json = json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
@@ -782,15 +782,15 @@ def train_symbol_group_loop(sleep_sec: int = 0, stop_event: threading.Event | No
             # 1) 그룹 학습
             train_models(group, stop_event=stop_event)
 
-            # ✅ 여기서 stop이 걸려도, **이번 그룹의 예측 단계는 반드시 수행**
-            stop_after_prediction = bool(stop_event is not None and stop_event.is_set())
-            if stop_after_prediction:
-                print("🟡 stop 요청 감지 → 이번 그룹의 예측까지 수행 후 종료 예정")
+            # [FIX] stop이 걸렸으면 **예측/평가를 하지 않고 즉시 종료**
+            if stop_event is not None and stop_event.is_set():
+                print("🛑 stop 요청 반영 → 그룹 학습 직후 즉시 종료(예측/평가 생략)")
+                break
 
             # ✅ 모델 저장 직후 I/O 안정화
             time.sleep(0.2)
 
-            # 2) 그룹 학습 완료 후 단 한 번씩 예측 (여기서는 stop 체크하지 않음)
+            # 2) 그룹 학습 완료 후 단 한 번씩 예측
             for symbol in group:
                 for strategy in ["단기", "중기", "장기"]:
                     try:
@@ -809,14 +809,8 @@ def train_symbol_group_loop(sleep_sec: int = 0, stop_event: threading.Event | No
             # 3) 그룹 종료 정리
             _prune_caches_and_gc()
 
-            # stop이 요청된 상태였다면, 예측/정리까지 마치고 종료
-            if stop_after_prediction:
-                print("🛑 stop 요청 반영 → 그룹 예측 완료 후 안전 종료")
-                break
-
             if sleep_sec > 0:
                 for _ in range(sleep_sec):
-                    # 여기서만 stop 반영
                     if stop_event is not None and stop_event.is_set():
                         print("[STOP] train_symbol_group_loop: stop_event 감지(sleep) → 종료"); break
                     time.sleep(1)
