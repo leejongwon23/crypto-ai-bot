@@ -747,8 +747,8 @@ def train_models(symbol_list, stop_event: threading.Event | None = None):
 # --------------------------------------------------
 def train_symbol_group_loop(sleep_sec: int = 0, stop_event: threading.Event | None = None):
     try:
-        # ⬇️ predict는 그룹 예측만 호출 (즉시 평가 호출 제거 — 평가 대기는 2단계에서 구현)
-        from predict import predict  # ← 즉시 evaluate_predictions 임포트/호출 제거
+        # ⬇️ predict는 그룹 루프 안에서 임포트(순환 의존 안전)
+        from predict import predict  # ← ★ 평가 호출 제거 (evaluate_predictions 미임포트)
 
         # ✅ 학습/예측 로그 파일/헤더 보장(존재 시만)
         try:
@@ -775,30 +775,22 @@ def train_symbol_group_loop(sleep_sec: int = 0, stop_event: threading.Event | No
             # 1) 그룹 학습
             train_models(group, stop_event=stop_event)
 
-            # [FIX] stop이 걸렸으면 **예측/평가를 하지 않고 즉시 종료**
+            # [FIX] stop이 걸렸으면 **예측 없이 즉시 종료**
             if stop_event is not None and stop_event.is_set():
-                print("🛑 stop 요청 반영 → 그룹 학습 직후 즉시 종료(예측/평가 생략)")
+                print("🛑 stop 요청 반영 → 그룹 학습 직후 즉시 종료(예측 생략)")
                 break
 
             # ✅ 모델 저장 직후 I/O 안정화
             time.sleep(0.2)
 
-            # 2) 그룹 학습 완료 후 단 한 번씩 예측
+            # 2) 그룹 학습 완료 후 단 한 번씩 **예측만** 수행 (평가 호출 제거)
             for symbol in group:
                 for strategy in ["단기", "중기", "장기"]:
                     try:
-                        _safe_print(f"🔮 [즉시예측] {symbol}-{strategy}")
+                        print(f"🔮 [즉시예측] {symbol}-{strategy}")
                         predict(symbol, strategy, source="그룹직후", model_type=None)
                     except Exception as e:
-                        _safe_print(f"[⚠️ 예측 실패] {symbol}-{strategy}: {e}")
-
-            # ✅ (중요) 즉시 평가 호출 제거 — 평가 대기는 2단계(predict_trigger.py)에서 스케줄링
-            # (기존 코드)
-            # try:
-            #     print("🧪 [평가] evaluate_predictions 실행 (그룹 예측 직후 1회)")
-            #     evaluate_predictions(_get_price_df)
-            # except Exception as e:
-            #     print(f"[⚠️ 평가 호출 실패] {e}")
+                        print(f"[⚠️ 예측 실패] {symbol}-{strategy}: {e}")
 
             # 3) 그룹 종료 정리
             _prune_caches_and_gc()
