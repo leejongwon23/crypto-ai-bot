@@ -1,4 +1,4 @@
-# === failure_db.py (patched, req-unit connections) ===
+# === failure_db.py (patched, req-unit connections + invalid gate) ===
 import sqlite3
 import os
 import json
@@ -110,6 +110,48 @@ def check_failure_exists(row_or_hash, model_name=None, predicted_class=None):
 # ──────────────────────────────────────────────────────────────
 _write_lock = Lock()  # 파이썬 레벨 락으로 간단한 경쟁 방지
 
+# 🚫 추가: invalid 케이스 차단 게이트
+_INVALID_REASON_KEYS = (
+    "invalid",              # e.g. invalid_entry_or_label
+    "timestamp_parse_error",
+    "no_price_data",
+    "no_data_until_deadline",
+    "exception:"            # parsing/기타 예외
+)
+
+def _should_block(row: dict, label_val) -> bool:
+    try:
+        # label 미기록 또는 음수
+        if label_val is None or int(label_val) < 0:
+            return True
+    except Exception:
+        return True
+
+    # entry_price<=0 이면 차단 (prediction_log 에서 invalid 로 본 건 저장 X)
+    try:
+        ep = float(row.get("entry_price", 0) or 0)
+        if ep <= 0:
+            return True
+    except Exception:
+        return True
+
+    # symbol/strategy 필수
+    if not str(row.get("symbol", "")).strip() or not str(row.get("strategy", "")).strip():
+        return True
+
+    # 명시적 invalid/status
+    status = str(row.get("status", "")).strip().lower()
+    if status == "invalid":
+        return True
+
+    # 사유(reason)에 invalid/exception 류 키워드 포함 시 차단
+    reason = str(row.get("reason", "")).strip().lower()
+    for key in _INVALID_REASON_KEYS:
+        if key in reason:
+            return True
+
+    return False
+
 def insert_failure_record(row, feature_hash=None, feature_vector=None, label=None, context="evaluation"):
     """
     실패 예측을 기록한다.
@@ -121,8 +163,20 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         print("[failure_db] ❌ row must be dict")
         return
 
+    # label 정규화(음수/미기록 허용 → 차단 게이트에서 처리)
+    try:
+        label_val = label if label is not None else row.get("label", -1)
+        label_int = int(label_val)
+    except Exception:
+        label_int = -1
+
+    # 🚫 invalid 차단
+    if _should_block(row, label_int):
+        print("[failure_db] ⛔ blocked invalid failure record (not saved)")
+        return
+
     # hash
-    feature_hash = _build_hash_from_row(row, feature_hash=feature_hash, label=label)
+    feature_hash = _build_hash_from_row(row, feature_hash=feature_hash, label=label_int)
 
     mdl_name = row.get("model", "")
     pcls = int(row.get("predicted_class", -1))
@@ -145,13 +199,6 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         feature_json = json.dumps(to_list_safe(feature_vector), ensure_ascii=False)
     except Exception:
         feature_json = "[]"
-
-    # label 정규화(음수/미기록 허용)
-    try:
-        label_val = label if label is not None else row.get("label", -1)
-        label_int = int(label_val)
-    except Exception:
-        label_int = -1
 
     rec = {
         "timestamp": row.get("timestamp") or datetime.utcnow().isoformat(),
