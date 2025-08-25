@@ -618,16 +618,13 @@ def reset_all(key=None):
                     time.sleep(poll_sec)
                 print(f"[RESET] 정지 대기 완료 → stopped={stopped}"); sys.stdout.flush()
 
-            # 🆕 1-2) 그래도 안 멈추면 초기화 취소(겹침 방지) + 스케줄러 복구
+            # 🆕 1-2) 그래도 안 멈추면 **하드 종료** (3번 요구사항: 강제 중단 경로 + 프로세스 재기동)
             if not stopped:
-                print("🛑 [RESET] 루프가 종료되지 않아 초기화를 취소합니다(겹침 방지). 잠시 후 다시 시도하세요."); sys.stdout.flush()
+                print("🛑 [RESET] 루프가 종료되지 않음 → 하드 종료(os._exit) 수행"); sys.stdout.flush()
                 try:
                     _release_global_lock()
-                    start_scheduler()
-                    print("↩️ [RESET] 스케줄러 복구 완료"); sys.stdout.flush()
-                except Exception as e:
-                    print(f"⚠️ [RESET] 복구 중 예외: {e}"); sys.stdout.flush()
-                return  # 더 진행하지 않음
+                finally:
+                    os._exit(0)  # 프로세스 즉시 종료 → 플랫폼이 재기동
 
             # 2) 진행상태 마커 제거
             try:
