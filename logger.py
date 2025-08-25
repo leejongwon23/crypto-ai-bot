@@ -1,4 +1,4 @@
-# === logger.py (메모리 안전: 로테이션 + 청크 집계 호환 최종본) ===
+# === logger.py (메모리 안전: 로테이션 + 청크 집계 + 모델명 정규화 + 실패DB 노이즈 차단 최종본) ===
 import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil
 import sqlite3
 from collections import defaultdict
@@ -63,14 +63,16 @@ def ensure_prediction_log_exists():
             if not existing or "timestamp" not in existing or "symbol" not in existing:
                 bak = PREDICTION_LOG + ".bak"
                 os.replace(PREDICTION_LOG, bak)
-                with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as out,\
+                with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as out, \
                      open(bak, "r", encoding="utf-8-sig") as src:
                     w = csv.writer(out); w.writerow(PREDICTION_HEADERS)
                     reader = csv.reader(src)
-                    try: next(reader)
-                    except StopIteration: reader = []
+                    try:
+                        next(reader)
+                    except StopIteration:
+                        reader = []
                     for row in reader:
-                        row = (row + [""]*len(PREDICTION_HEADERS))[:len(PREDICTION_HEADERS)]
+                        row = (row + [""] * len(PREDICTION_HEADERS))[:len(PREDICTION_HEADERS)]
                         w.writerow(row)
                 print("[✅ ensure_prediction_log_exists] 기존 파일 헤더 보정(확장) 완료")
     except Exception as e:
@@ -397,6 +399,33 @@ def _align_row_to_header(row, header):
         row = row[:len(header)]
     return row
 
+# 모델/모델명 정규화(unknown/빈값 방지)
+def _clean_str(x):
+    s = str(x).strip() if x is not None else ""
+    if s.lower() in {"", "unknown", "none", "nan", "null"}:
+        return ""
+    return s
+
+def _normalize_model_fields(model, model_name, symbol, strategy):
+    m = _clean_str(model)
+    mn = _clean_str(model_name)
+    if not m and mn:
+        m = mn
+    if not mn and m:
+        mn = m
+    # 둘 다 비었으면 충돌 최소화를 위해 심볼/전략 기반 기본값
+    if not m and not mn:
+        base = f"auto_{symbol}_{strategy}"
+        m = mn = base
+    return m, mn
+
+# failure_db 초기화 1회 시도(있을 때만)
+try:
+    from failure_db import ensure_failure_db as _ensure_failure_db_once
+    _ensure_failure_db_once()
+except Exception:
+    pass
+
 def log_prediction(
     symbol, strategy, direction=None, entry_price=0, target_price=0,
     timestamp=None, model=None, predicted_class=None, top_k=None,
@@ -408,7 +437,11 @@ def log_prediction(
     regime=None, meta_choice=None, raw_prob=None, calib_prob=None, calib_ver=None
 ):
     from datetime import datetime as _dt
-    from failure_db import insert_failure_record
+    # 실패 DB는 필요 시에만 지연 import (ensure_failure_db 반복 호출 최소화)
+    try:
+        from failure_db import insert_failure_record
+    except Exception:
+        insert_failure_record = None
 
     LOG_FILE = PREDICTION_LOG
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -420,13 +453,15 @@ def log_prediction(
     now = _dt.now(pytz.timezone("Asia/Seoul")).isoformat() if timestamp is None else timestamp
     top_k_str = ",".join(map(str, top_k)) if top_k else ""
 
+    # 기본값/정규화
     predicted_class = predicted_class if predicted_class is not None else -1
     label = label if label is not None else -1
-    reason = reason or "사유없음"
+    reason = (reason or "사유없음").strip()
     rate = 0.0 if rate is None else float(rate)
     return_value = 0.0 if return_value is None else float(return_value)
-    entry_price = entry_price or 0.0
-    target_price = target_price or 0.0
+    entry_price = float(entry_price or 0.0)
+    target_price = float(target_price or 0.0)
+    model, model_name = _normalize_model_fields(model, model_name, symbol, strategy)
 
     allowed_sources = ["일반","meta","evo_meta","baseline_meta","진화형","평가","단일","변동성","train_loop","섀도우"]
     if source not in allowed_sources:
@@ -454,7 +489,7 @@ def log_prediction(
         (model or ""), predicted_class, top_k_str, note,
         str(success), reason, rate, return_value, label,
         group_id, model_symbol, model_name, source, volatility, source_exchange,
-        (regime or ""), (meta_choice or ""), 
+        (regime or ""), (meta_choice or ""),
         (float(raw_prob) if raw_prob is not None else ""),
         (float(calib_prob) if calib_prob is not None else ""),
         (str(calib_ver) if calib_ver is not None else ""),
@@ -477,8 +512,17 @@ def log_prediction(
 
         print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} class={predicted_class} | success={success} | src={source_exchange} | reason={reason}")
 
-        if not success:
-            feature_hash = f"{symbol}-{strategy}-{model or ''}-{predicted_class}-{label}-{rate}"
+        # -------------------------
+        # 실패 패턴 DB 기록 (노이즈 차단)
+        #  - label == -1 이거나 entry_price가 None/0이면 실제 실패로 보지 않고 DB 기록 생략
+        #  - model/model_name을 위에서 강제 정규화하여 해시 충돌/unknown 스팸 방지
+        # -------------------------
+        should_record_failure = (insert_failure_record is not None) and (not success) \
+            and (label not in (-1, "-1", None)) \
+            and (entry_price not in (None, 0.0))
+
+        if should_record_failure:
+            feature_hash = f"{symbol}-{strategy}-{model}-{predicted_class}-{label}-{rate}"
             safe_vector = []
             try:
                 import numpy as _np
@@ -487,20 +531,23 @@ def log_prediction(
                         safe_vector = feature_vector.flatten().tolist()
                     elif isinstance(feature_vector, list):
                         safe_vector = feature_vector
-            except:
+            except Exception:
                 safe_vector = []
 
             insert_failure_record(
                 {
                     "symbol": symbol, "strategy": strategy, "direction": direction,
-                    "model": model or "", "predicted_class": predicted_class,
+                    "model": model, "predicted_class": predicted_class,
                     "rate": rate, "reason": reason, "label": label, "source": source,
                     "entry_price": entry_price, "target_price": target_price,
                     "return_value": return_value
                 },
                 feature_hash=feature_hash, label=label, feature_vector=safe_vector
             )
-
+        else:
+            # 감사 로그로만 남겨서 원인 추적 가능하게
+            if not success:
+                log_audit_prediction(symbol, strategy, "skip_failure_db", f"label={label}, entry_price={entry_price}")
     except Exception as e:
         print(f"[⚠️ 예측 로그 기록 실패] {e}")
 
