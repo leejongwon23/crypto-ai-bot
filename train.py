@@ -747,7 +747,8 @@ def train_models(symbol_list, stop_event: threading.Event | None = None):
 # --------------------------------------------------
 def train_symbol_group_loop(sleep_sec: int = 0, stop_event: threading.Event | None = None):
     try:
-        from predict import predict  # 예측 함수 불러오기
+        # ⬇️ predict 및 평가 함수는 그룹 루프 안에서 임포트(순환 의존 안전)
+        from predict import predict, evaluate_predictions  # ← ★ 평가 호출 추가 임포트
 
         # ✅ 학습/예측 로그 파일/헤더 보장(존재 시만)
         try:
@@ -763,6 +764,13 @@ def train_symbol_group_loop(sleep_sec: int = 0, stop_event: threading.Event | No
 
         # 원본 그룹 → BTCUSDT 그룹을 맨 앞으로 회전
         groups = _rotate_groups_starting_with(SYMBOL_GROUPS, anchor_symbol="BTCUSDT")
+
+        # ⬇️ 평가에 사용할 가격 조회 래퍼( predict.evaluate_predictions 시그니처에 맞춤 )
+        def _get_price_df(symbol: str, strategy: str):
+            try:
+                return get_kline_by_strategy(symbol, strategy)
+            except Exception:
+                return None
 
         for idx, group in enumerate(groups):
             # ⛔️ 새 그룹에 들어가기 전에만 stop 체크 (이번 그룹 도중엔 예측까지 보장)
@@ -790,6 +798,13 @@ def train_symbol_group_loop(sleep_sec: int = 0, stop_event: threading.Event | No
                         predict(symbol, strategy, source="그룹직후", model_type=None)
                     except Exception as e:
                         print(f"[⚠️ 예측 실패] {symbol}-{strategy}: {e}")
+
+            # ✅ (신규) 예측 직후 평가 1회 실행 — 조기도달/마감시점 로직은 predict.evaluate_predictions 내에서 처리
+            try:
+                print("🧪 [평가] evaluate_predictions 실행 (그룹 예측 직후 1회)")
+                evaluate_predictions(_get_price_df)
+            except Exception as e:
+                print(f"[⚠️ 평가 호출 실패] {e}")
 
             # 3) 그룹 종료 정리
             _prune_caches_and_gc()
