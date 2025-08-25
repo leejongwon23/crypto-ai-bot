@@ -14,6 +14,7 @@ NUM_CLASSES = get_NUM_CLASSES()
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 
 MODEL_DIR = "/persistent/models"
+os.makedirs(MODEL_DIR, exist_ok=True)  # ← 안전 보강: 디렉터리 보장
 _KNOWN_EXTS = (".ptz", ".safetensors", ".pt")  # 선호 순서(압축 우선)
 
 KST = pytz.timezone("Asia/Seoul")
