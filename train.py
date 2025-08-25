@@ -765,26 +765,26 @@ def train_symbol_group_loop(sleep_sec: int = 0, stop_event: threading.Event | No
         groups = _rotate_groups_starting_with(SYMBOL_GROUPS, anchor_symbol="BTCUSDT")
 
         for idx, group in enumerate(groups):
+            # ⛔️ 새 그룹에 들어가기 전에만 stop 체크 (이번 그룹 도중엔 예측까지 보장)
             if stop_event is not None and stop_event.is_set():
-                print("[STOP] train_symbol_group_loop: stop_event 감지(group idx) → 종료"); break
+                print("[STOP] train_symbol_group_loop: stop_event 감지(다음 그룹 진입 전) → 종료"); break
 
             print(f"🚀 [train_symbol_group_loop] 그룹 #{idx+1}/{len(groups)} → {group} | mode=per_symbol_all_horizons")
 
             # 1) 그룹 학습
             train_models(group, stop_event=stop_event)
-            if stop_event is not None and stop_event.is_set():
-                print("[STOP] train_symbol_group_loop: stop_event 감지(after train_models) → 종료"); break
+
+            # ✅ 여기서 stop이 걸려도, **이번 그룹의 예측 단계는 반드시 수행**
+            stop_after_prediction = bool(stop_event is not None and stop_event.is_set())
+            if stop_after_prediction:
+                print("🟡 stop 요청 감지 → 이번 그룹의 예측까지 수행 후 종료 예정")
 
             # ✅ 모델 저장 직후 I/O 안정화
             time.sleep(0.2)
 
-            # 2) 그룹 학습 완료 후 단 한 번씩 예측
+            # 2) 그룹 학습 완료 후 단 한 번씩 예측 (여기서는 stop 체크하지 않음)
             for symbol in group:
-                if stop_event is not None and stop_event.is_set():
-                    print("[STOP] train_symbol_group_loop: stop_event 감지(pred loop) → 종료"); break
                 for strategy in ["단기", "중기", "장기"]:
-                    if stop_event is not None and stop_event.is_set():
-                        print("[STOP] train_symbol_group_loop: stop_event 감지(pred inner) → 종료"); break
                     try:
                         print(f"🔮 [즉시예측] {symbol}-{strategy}")
                         predict(symbol, strategy, source="그룹직후", model_type=None)
@@ -794,8 +794,14 @@ def train_symbol_group_loop(sleep_sec: int = 0, stop_event: threading.Event | No
             # 3) 그룹 종료 정리
             _prune_caches_and_gc()
 
+            # stop이 요청된 상태였다면, 예측/정리까지 마치고 종료
+            if stop_after_prediction:
+                print("🛑 stop 요청 반영 → 그룹 예측 완료 후 안전 종료")
+                break
+
             if sleep_sec > 0:
                 for _ in range(sleep_sec):
+                    # 여기서만 stop 반영
                     if stop_event is not None and stop_event.is_set():
                         print("[STOP] train_symbol_group_loop: stop_event 감지(sleep) → 종료"); break
                     time.sleep(1)
