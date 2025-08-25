@@ -9,7 +9,7 @@ for _n in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
            "TORCH_NUM_THREADS"):
     _set_default_thread_env(_n, int(os.getenv("CPU_THREAD_CAP", "2")))
 
-import json, time, traceback, tempfile, io, errno
+import json, time, traceback, tempfile, io, errno, glob
 from datetime import datetime
 import pytz
 import numpy as np
@@ -25,7 +25,7 @@ import gc      # ← 추가
 import threading  # ← 추가 (루프 제어)
 
 # ✅ 추가: 무손실 모델 압축 유틸(신규 1번 파일)
-from model_io import convert_pt_to_ptz  # ← 추가 임포트
+from model_io import convert_pt_to_ptz, save_model  # ← save_model 추가 임포트
 
 # ✅ torch 내부 스레드도 제한
 try:
@@ -240,16 +240,27 @@ def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.nda
         out[i] = float((max_h - base) / (base + 1e-12))
     return out.astype(np.float32)
 
-def _save_model_and_meta(model: nn.Module, path_pt: str, meta: dict):
-    # [FIX] 모델을 state_dict가 아닌 **모듈 자체**로 저장 → 로드 시 nn.Module로 복원되어 .eval() 가능
-    buffer = io.BytesIO()
-    torch.save(model, buffer)  # ← 변경: model.state_dict() → model
-    _atomic_write(path_pt, buffer.getvalue(), mode="wb")
-    # 메타 JSON은 공백 제거(무손실)로 저장 → 용량 절약
-    meta_json = json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
-    _atomic_write(path_pt.replace(".pt", ".meta.json"), meta_json, mode="w")
+# ===== 저장/별칭/아카이브 (지침 반영) =====
+def _stem(path: str) -> str:
+    return os.path.splitext(path)[0]
 
-# ⬇️ 추가: 예측/관우 호환 별칭 유틸
+def _save_model_and_meta(model: nn.Module, path_pt: str, meta: dict):
+    """
+    ⛳️ 변경점:
+      - 저장은 **state_dict만** → 확장자는 항상 `.ptz`
+      - 메타는 `.meta.json`(공백 제거)
+      - 호출부에서 넘기는 path_pt는 *.pt 형태였던 것을 유지해도 됨(여기서 stem으로 변환)
+    """
+    stem = _stem(path_pt)
+    weight_path = stem + ".ptz"
+    # state_dict를 .ptz로 무손실 압축 저장
+    save_model(weight_path, model.state_dict())
+    # 메타 저장
+    meta_json = json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
+    _atomic_write(stem + ".meta.json", meta_json, mode="w")
+    return weight_path, (stem + ".meta.json")
+
+# ⬇️ 예측/관우 호환 별칭 유틸 — **.ptz** 기준
 def _safe_alias(src: str, dst: str):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     try:
@@ -263,42 +274,36 @@ def _safe_alias(src: str, dst: str):
         shutil.copyfile(src, dst)  # 실패 시 복사
 
 def _emit_aliases(model_path: str, meta_path: str, symbol: str, strategy: str, model_type: str):
+    ext = os.path.splitext(model_path)[1]  # .ptz 유지
     # 1) 평탄(legacy) 별칭
-    flat_pt   = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.pt")
-    flat_meta = flat_pt.replace(".pt", ".meta.json")
+    flat_pt   = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}{ext}")
+    flat_meta = _stem(flat_pt) + ".meta.json"
     _safe_alias(model_path, flat_pt)
     _safe_alias(meta_path, flat_meta)
     # 2) 디렉터리 구조 별칭
-    dir_pt   = os.path.join(MODEL_DIR, symbol, strategy, f"{model_type}.pt")
-    dir_meta = dir_pt.replace(".pt", ".meta.json")
+    dir_pt   = os.path.join(MODEL_DIR, symbol, strategy, f"{model_type}{ext}")
+    dir_meta = _stem(dir_pt) + ".meta.json"
     _safe_alias(model_path, dir_pt)
     _safe_alias(meta_path, dir_meta)
 
-# ✅ 추가: 이전 체크포인트 무손실 압축 아카이브(.pt → .ptz)
+# ✅ 과거 체크포인트 무손실 압축/정리 (.pt → .ptz), 최신 keep_n 유지
 def _archive_old_checkpoints(symbol: str, strategy: str, model_type: str, keep_n: int = 1):
-    """
-    같은 (symbol,strategy,model_type) 키에 대해 최신 .pt 몇 개만 남기고,
-    나머지 .pt는 무손실 압축 .ptz로 변환 후 .pt 삭제(메타는 유지).
-    기능 영향 없음: 최신 .pt는 계속 존재하므로 로딩 경로 동일.
-    """
-    import re, glob
-    patt = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_group*_cls*.pt")
-    paths = glob.glob(patt)
+    patt_pt  = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_group*_cls*.pt")
+    patt_ptz = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_group*_cls*.ptz")
+    paths = sorted(glob.glob(patt_pt) + glob.glob(patt_ptz), key=lambda p: os.path.getmtime(p), reverse=True)
     if not paths:
         return
-    paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-    survivors = paths[:max(1, int(keep_n))]
-    to_archive = paths[max(1, int(keep_n)):]
-    for p in to_archive:
+    survivors = set(paths[:max(1, int(keep_n))])
+    for p in paths[max(1, int(keep_n)):]:
         try:
-            ptz = os.path.splitext(p)[0] + ".ptz"
-            if not os.path.exists(ptz):
-                convert_pt_to_ptz(p, ptz)
-            # 원본 .pt 제거(무손실 전환)
-            try:
-                os.remove(p)
-            except Exception:
-                pass
+            if p.endswith(".pt"):
+                ptz = os.path.splitext(p)[0] + ".ptz"
+                if not os.path.exists(ptz):
+                    convert_pt_to_ptz(p, ptz)
+                try:
+                    os.remove(p)  # 원본 .pt 제거
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[ARCHIVE] {os.path.basename(p)} 압축 실패 → {e}")
 
@@ -576,14 +581,17 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
             acc = float(accuracy_score(all_labels, all_preds))
             f1 = float(f1_score(all_labels, all_preds, average="macro"))
 
-            model_name = f"{symbol}_{strategy}_{model_type}_group{int(group_id) if group_id is not None else 0}_cls{int(num_classes)}.pt"
-            model_path = os.path.join(MODEL_DIR, model_name)
+            # 저장 파일명 stem(확장자는 .ptz로 통일 저장)
+            base_stem = os.path.join(
+                MODEL_DIR,
+                f"{symbol}_{strategy}_{model_type}_group{int(group_id) if group_id is not None else 0}_cls{int(num_classes)}"
+            )
             meta = {
                 "symbol": symbol, "strategy": strategy, "model": model_type,
                 "group_id": int(group_id) if group_id is not None else 0,
                 "num_classes": int(num_classes), "input_size": int(FEATURE_INPUT_SIZE),
                 "metrics": {"val_acc": acc, "val_f1": f1, "train_loss_sum": float(total_loss)},
-                "timestamp": now_kst().isoformat(), "model_name": model_name,
+                "timestamp": now_kst().isoformat(), "model_name": os.path.basename(base_stem) + ".ptz",
                 "window": int(window), "recent_cap": int(len(feat_scaled)),
                 "engine": "lightning" if _HAS_LIGHTNING else "manual",
                 # 🔧 변경: 데이터 상태 플래그를 메타에 저장(관우/후속 진단 용이)
@@ -592,18 +600,17 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
                     "augment_needed": bool(augment_needed), "enough_for_training": bool(enough_for_training)
                 }
             }
-            _save_model_and_meta(model, model_path, meta)
+            weight_path, meta_path = _save_model_and_meta(model, base_stem + ".pt", meta)
 
-            # ⬇️ 추가: 이전 체크포인트는 무손실 압축 아카이브(.ptz)로 전환
+            # ⬇️ 추가: 이전 체크포인트는 무손실 압축 아카이브(.pt → .ptz) & 최신 1개 유지
             _archive_old_checkpoints(symbol, strategy, model_type, keep_n=1)
 
-            # ⬇️ 추가: 예측/모니터 호환 별칭 생성(최신 .pt 기준)
-            _emit_aliases(model_path, model_path.replace(".pt", ".meta.json"),
-                          symbol, strategy, model_type)
+            # ⬇️ 추가: 예측/모니터 호환 별칭 생성(최신 **.ptz** 기준)
+            _emit_aliases(weight_path, meta_path, symbol, strategy, model_type)
 
             # 🔧 변경: note에 data_flags 요약 포함
             logger.log_training_result(
-                symbol, strategy, model=model_name, accuracy=acc, f1=f1,
+                symbol, strategy, model=os.path.basename(weight_path), accuracy=acc, f1=f1,
                 loss=float(total_loss),
                 note=(f"train_one_model(window={window}, cap={len(feat_scaled)}, "
                       f"engine={'lightning' if _HAS_LIGHTNING else 'manual'}, "
@@ -613,8 +620,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
             )
             result["models"].append({
                 "type": model_type, "acc": acc, "f1": f1,
-                "loss_sum": float(total_loss), "pt": model_path,
-                "meta": model_path.replace(".pt", ".meta.json")
+                "loss_sum": float(total_loss), "pt": weight_path,
+                "meta": meta_path
             })
 
             if torch.cuda.is_available():
