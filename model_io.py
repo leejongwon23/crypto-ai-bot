@@ -1,11 +1,17 @@
 # model_io.py — lossless compressed save/load wrapper for Torch models (pt / ptz / safetensors*)
 # *safetensors 사용은 설치되어 있을 때만 활성화됩니다. (기능 동일, 무손실)
-
 from __future__ import annotations
-import io, os, gzip, tempfile, shutil
+
+import io
+import os
+import gzip
+import tempfile
+import shutil
+import contextlib
 from typing import Any, Optional, Dict
 
 import torch
+import torch.nn as nn
 
 # safetensors가 있으면 사용(없어도 동작)
 try:
@@ -16,8 +22,10 @@ except Exception:
 
 SUPPORTED_EXTS = {".pt", ".ptz", ".safetensors"}
 
+
 def _ensure_dir(path: str) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+
 
 def _atomic_write(bytes_data: bytes, dst_path: str) -> None:
     _ensure_dir(dst_path)
@@ -29,8 +37,10 @@ def _atomic_write(bytes_data: bytes, dst_path: str) -> None:
         os.fsync(tf.fileno())
     os.replace(tmp, dst_path)
 
+
 def _ext(path: str) -> str:
     return os.path.splitext(path)[1].lower()
+
 
 def save_model(path: str, state_or_obj: Any, *, use_safetensors: Optional[bool] = None) -> None:
     """
@@ -50,7 +60,6 @@ def save_model(path: str, state_or_obj: Any, *, use_safetensors: Optional[bool] 
 
     # ===== .pt : 원형 torch.save =====
     if ext == ".pt":
-        # 그대로 직렬화(무손실/무압축)
         buf = io.BytesIO()
         torch.save(state_or_obj, buf)
         _atomic_write(buf.getvalue(), path)
@@ -61,7 +70,6 @@ def save_model(path: str, state_or_obj: Any, *, use_safetensors: Optional[bool] 
         raw = io.BytesIO()
         torch.save(state_or_obj, raw)
         raw_bytes = raw.getvalue()
-        # gzip mtime=0으로 재현성 향상
         gz_buf = io.BytesIO()
         with gzip.GzipFile(fileobj=gz_buf, mode="wb", mtime=0) as gz:
             gz.write(raw_bytes)
@@ -97,16 +105,9 @@ def save_model(path: str, state_or_obj: Any, *, use_safetensors: Optional[bool] 
             raise
         return
 
-def load_model(path: str, *, map_location: str | torch.device | None = "cpu") -> Any:
-    """
-    경로 확장자를 자동 인식해서 무손실 복원:
-      - .pt       : torch.load
-      - .ptz      : gzip 해제 후 torch.load
-      - .safetensors : safetensors.load_file → 텐서 dict 반환
-    반환값:
-      - .pt/.ptz : torch.save에 넣었던 원본 객체(모듈/ state_dict 등)
-      - .safetensors : 텐서 dict
-    """
+
+def _load_raw(path: str, map_location: str | torch.device | None = "cpu") -> Any:
+    """확장자에 맞게 '원본 저장물'을 복원(.pt/.ptz: torch 객체, .safetensors: 텐서 dict)"""
     if not os.path.isfile(path):
         raise FileNotFoundError(path)
 
@@ -123,33 +124,100 @@ def load_model(path: str, *, map_location: str | torch.device | None = "cpu") ->
     if ext == ".safetensors":
         if not _HAVE_ST:
             raise RuntimeError("safetensors 미설치: .safetensors 파일을 읽으려면 `pip install safetensors`가 필요합니다.")
-        return _st_load(path, device=map_location if isinstance(map_location, str) else "cpu")
+        # safetensors는 텐서 dict만 반환
+        device = map_location if isinstance(map_location, str) else "cpu"
+        return _st_load(path, device=device)
 
     raise ValueError(f"Unsupported extension: {ext}")
 
-def convert_pt_to_ptz(src_path: str, dst_path: Optional[str] = None, *, map_location: str | torch.device | None = "cpu") -> str:
+
+def _is_state_dict(obj: Any) -> bool:
+    # torch.save로 저장된 state_dict(dict[str, Tensor]) 또는 OrderedDict
+    if isinstance(obj, dict):
+        # 텐서 dict인지(모듈 전체 저장이 아닌지)
+        return all(isinstance(v, torch.Tensor) for v in obj.values()) or \
+               all(hasattr(v, "size") for v in obj.values())
+    # pytorch의 OrderedDict 타입명으로 오는 경우 방어
+    return obj.__class__.__name__.lower().endswith("ordereddict")
+
+
+def load_model(
+    path: str,
+    model: Optional[nn.Module] = None,
+    *,
+    map_location: str | torch.device | None = "cpu",
+    strict: bool = True,
+) -> nn.Module | Dict[str, torch.Tensor] | Any:
+    """
+    통합 로더:
+      - 파일 내용이 '모듈 전체'면 그 모듈을 그대로 반환
+      - 파일 내용이 'state_dict(또는 safetensors 텐서 dict)'이면, 전달받은 `model`에 주입 후 `nn.Module` 반환
+      - `model`이 None인데 state_dict인 경우: state_dict(또는 텐서 dict) 자체를 반환
+
+    predict.py는 항상 `get_model(...)`로 만든 모듈을 넘겨주므로,
+    여기서는 꼭 `nn.Module`을 반환하게 되어 .eval() 크래시가 다시는 나지 않음.
+    """
+    raw = _load_raw(path, map_location=map_location)
+
+    # 1) 저장물이 완성된 nn.Module인 경우(전체 모델 직렬화)
+    if isinstance(raw, nn.Module):
+        return raw
+
+    # 2) 저장물이 state_dict(또는 safetensors 텐서 dict)인 경우
+    if _is_state_dict(raw):
+        if model is None:
+            # 호출자가 주입 대상 모듈을 주지 않았다면, 원본 dict 그대로 반환
+            return raw  # (호출부에서 직접 처리)
+        # state_dict 키 호환 보정(필요시)
+        try:
+            model.load_state_dict(raw, strict=strict)
+        except RuntimeError as e:
+            # common: DataParallel 'module.' prefix mismatch 등
+            fixed = {}
+            if any(k.startswith("module.") for k in raw.keys()):
+                fixed = {k.replace("module.", "", 1): v for k, v in raw.items()}
+            else:
+                fixed = {("module." + k): v for k, v in raw.items()}
+            model.load_state_dict(fixed, strict=strict)
+        return model
+
+    # 3) 그 외 포맷(희귀) — 그대로 반환(호출자가 처리)
+    return raw
+
+
+def convert_pt_to_ptz(
+    src_path: str,
+    dst_path: Optional[str] = None,
+    *,
+    map_location: str | torch.device | None = "cpu",
+) -> str:
     """
     기존 .pt 파일을 .ptz로 무손실 변환(내용 동일, 용량만 축소).
     반환: 생성된 .ptz 경로
     """
     if _ext(src_path) != ".pt":
         raise ValueError("src_path는 .pt 여야 합니다.")
-    obj = load_model(src_path, map_location=map_location)
+    obj = _load_raw(src_path, map_location=map_location)
     if dst_path is None:
         dst_path = os.path.splitext(src_path)[0] + ".ptz"
     save_model(dst_path, obj)
     return dst_path
 
-def convert_ptz_to_pt(src_path: str, dst_path: Optional[str] = None, *, map_location: str | torch.device | None = "cpu") -> str:
+
+def convert_ptz_to_pt(
+    src_path: str,
+    dst_path: Optional[str] = None,
+    *,
+    map_location: str | torch.device | None = "cpu",
+) -> str:
     """
     .ptz를 풀어서 .pt로 변환(무손실).
     """
     if _ext(src_path) != ".ptz":
         raise ValueError("src_path는 .ptz 여야 합니다.")
-    obj = load_model(src_path, map_location=map_location)
+    obj = _load_raw(src_path, map_location=map_location)
     if dst_path is None:
         dst_path = os.path.splitext(src_path)[0] + ".pt"
-    # obj가 state_dict든 모듈이든 torch.save로 동일하게 복원됨
     buf = io.BytesIO()
     torch.save(obj, buf)
     _atomic_write(buf.getvalue(), dst_path)
