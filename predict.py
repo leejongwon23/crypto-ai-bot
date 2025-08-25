@@ -512,7 +512,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         "meta_choice": meta_choice,
         "raw_prob_pred": float((chosen_info or model_outputs_list[0])["raw_probs"][final_pred_class]) if (chosen_info or model_outputs_list) else None,
         "calib_prob_pred": float((chosen_info or model_outputs_list[0])["calib_probs"][final_pred_class]) if (chosen_info or model_outputs_list) else None,
-        "calib_ver": calib_ver,
+        "calib_ver": get_calibration_version(),
         "min_return_threshold": float(MIN_RET_THRESHOLD),
         "used_minret_filter": bool(used_minret_filter),
         "explore_used": bool('best_single_explore' in str(meta_choice)),
@@ -576,7 +576,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 "model_path": os.path.basename(m.get("model_path","")),
                 "model_type": m.get("model_type",""),
                 "val_f1": float(m.get("val_f1",0.0)),
-                "calib_ver": calib_ver,
+                "calib_ver": get_calibration_version(),
                 "min_return_threshold": float(MIN_RET_THRESHOLD)
             }
             log_prediction(
@@ -766,15 +766,42 @@ def evaluate_predictions(get_price_fn):
 
                         reached_target = gain >= cls_min
 
-                        if now_local() < deadline:
-                            if reached_target:
-                                status = "success"
-                            else:
-                                r.update({"status": "pending", "reason": "⏳ 평가 대기 중", "return": round(gain, 5), "return_value": round(gain, 5)})
-                                w_all.writerow({k: r.get(k, "") for k in fieldnames})
-                                continue
-                        else:
-                            status = "success" if reached_target else "fail"
+                        # 🔧 조기 성공 처리: 마감 전 목표 도달 시 즉시 success/v_success 기록 및 로그 추가
+                        if now_local() < deadline and reached_target:
+                            status = "success"
+                            vol = str(r.get("volatility", "")).strip().lower() in ["1", "true"]
+                            if vol:
+                                status = "v_success"
+                            r.update({
+                                "status": status,
+                                "reason": f"[조기성공 pred_class={pred_class}] gain={gain:.3f} (cls_min={cls_min}, cls_max={cls_max})",
+                                "return": round(gain, 5),
+                                "return_value": round(gain, 5),
+                                "group_id": group_id
+                            })
+                            log_prediction(
+                                symbol=symbol, strategy=strategy, direction=f"평가:{status}",
+                                entry_price=entry_price, target_price=entry_price * (1 + gain),
+                                timestamp=now_local().isoformat(), model=model, predicted_class=pred_class,
+                                success=True, reason=r["reason"], rate=gain, return_value=gain,
+                                volatility=vol, source="평가", label=label, group_id=group_id
+                            )
+                            if model == "meta":
+                                update_model_success(symbol, strategy, model, True)
+                            w_all.writerow({k: r.get(k, "") for k in fieldnames})
+                            if not eval_fields_written:
+                                eval_writer = csv.DictWriter(f_eval, fieldnames=sorted(r.keys()))
+                                eval_writer.writeheader()
+                                eval_fields_written = True
+                            eval_writer.writerow({k: r.get(k, "") for k in r.keys()})
+                            continue  # ← 조기 성공이면 여기서 끝
+
+                        if now_local() < deadline and not reached_target:
+                            r.update({"status": "pending", "reason": "⏳ 평가 대기 중", "return": round(gain, 5), "return_value": round(gain, 5)})
+                            w_all.writerow({k: r.get(k, "") for k in fieldnames})
+                            continue
+
+                        status = "success" if reached_target else "fail"
 
                         vol = str(r.get("volatility", "")).strip().lower() in ["1", "true"]
                         if vol:
