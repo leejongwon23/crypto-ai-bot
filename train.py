@@ -872,6 +872,21 @@ def stop_train_loop(timeout: int | float | None = 30):
         print("✅ stop_train_loop: 정상 종료")
         return True
 
+# ✅ app.py의 reset-all이 즉시 사용할 수 있도록 보조 API 추가
+def request_stop() -> bool:
+    """외부에서 중단 신호만 보내고 즉시 반환(폴링은 호출측에서)."""
+    global _TRAIN_LOOP_STOP
+    with _TRAIN_LOOP_LOCK:
+        if _TRAIN_LOOP_STOP is None:
+            return True
+        _TRAIN_LOOP_STOP.set()
+        return True
+
+def is_loop_running() -> bool:
+    """학습 루프 스레드가 살아있는지 반환."""
+    with _TRAIN_LOOP_LOCK:
+        return bool(_TRAIN_LOOP_THREAD is not None and _TRAIN_LOOP_THREAD.is_alive())
+
 if __name__ == "__main__":
     # 필요 시 간단 실행 진입점
     try:
