@@ -3,6 +3,8 @@
 # - 모델 탐색이 .pt / .ptz / .safetensors 모두 인식
 # - 디렉터리 별칭(SYMBOL/STRATEGY/{model}.{ext})도 동일하게 탐색
 # - 로딩 경로는 model_io.load_model(...) 사용(무손실 압축/안전 저장 포맷 지원)
+# - 🔧 evaluate_predictions: entry_price<=0 또는 label==-1 → prediction_log에 추가 로그 남기지 않음
+#   (status="invalid"으로 고정, failure_db에만 정규화 사유로 1회 기록)
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np
@@ -686,20 +688,17 @@ def evaluate_predictions(get_price_fn):
                         except Exception:
                             entry_price = 0.0
 
+                        # 🔧 중요: invalid(라벨/엔트리 오류) 행은 prediction_log에 새 행을 추가하지 않음
                         if entry_price <= 0 or label == -1:
-                            reason = "entry_price 오류 또는 label=-1"
-                            r.update({"status": "fail", "reason": reason, "return": 0.0, "return_value": 0.0})
-                            log_prediction(
-                                symbol=symbol, strategy=strategy, direction="예측실패",
-                                entry_price=entry_price, target_price=entry_price,
-                                timestamp=now_local().isoformat(), model=model, predicted_class=pred_class,
-                                success=False, reason=reason, rate=0.0, return_value=0.0,
-                                volatility=False, source="평가", label=label, group_id=group_id
-                            )
+                            reason = "invalid_entry_or_label"
+                            r.update({"status": "invalid", "reason": reason, "return": 0.0, "return_value": 0.0})
+                            # 실패 DB(중복 방지)
                             if not check_failure_exists(r):
                                 insert_failure_record(r, f"{symbol}-{strategy}-{now_local().isoformat()}",
                                                      feature_vector=None, label=label)
+                            # 현재 행만 갱신해서 재작성
                             w_all.writerow({k: r.get(k, "") for k in fieldnames})
+                            # wrong.csv에도 기록
                             if not wrong_fields_written:
                                 wrong_writer = csv.DictWriter(f_wrong, fieldnames=sorted(r.keys()))
                                 wrong_writer.writeheader()
@@ -709,7 +708,7 @@ def evaluate_predictions(get_price_fn):
 
                         ts = pd.to_datetime(r.get("timestamp"), errors="coerce")
                         if ts is None or pd.isna(ts):
-                            r.update({"status": "fail", "reason": "timestamp 파싱 실패", "return": 0.0, "return_value": 0.0})
+                            r.update({"status": "invalid", "reason": "timestamp_parse_error", "return": 0.0, "return_value": 0.0})
                             w_all.writerow({k: r.get(k, "") for k in fieldnames})
                             if not wrong_fields_written:
                                 wrong_writer = csv.DictWriter(f_wrong, fieldnames=sorted(r.keys()))
@@ -727,7 +726,7 @@ def evaluate_predictions(get_price_fn):
 
                         df_price = get_price_fn(symbol, strategy)
                         if df_price is None or "timestamp" not in df_price.columns:
-                            r.update({"status": "fail", "reason": "가격 데이터 없음", "return": 0.0, "return_value": 0.0})
+                            r.update({"status": "invalid", "reason": "no_price_data", "return": 0.0, "return_value": 0.0})
                             w_all.writerow({k: r.get(k, "") for k in fieldnames})
                             if not wrong_fields_written:
                                 wrong_writer = csv.DictWriter(f_wrong, fieldnames=sorted(r.keys()))
@@ -748,7 +747,7 @@ def evaluate_predictions(get_price_fn):
                                 w_all.writerow({k: r.get(k, "") for k in fieldnames})
                                 continue
                             else:
-                                r.update({"status": "fail", "reason": "마감까지 데이터 없음", "return": 0.0, "return_value": 0.0})
+                                r.update({"status": "invalid", "reason": "no_data_until_deadline", "return": 0.0, "return_value": 0.0})
                                 w_all.writerow({k: r.get(k, "") for k in fieldnames})
                                 if not wrong_fields_written:
                                     wrong_writer = csv.DictWriter(f_wrong, fieldnames=sorted(r.keys()))
@@ -789,6 +788,7 @@ def evaluate_predictions(get_price_fn):
                             "group_id": group_id
                         })
 
+                        # 정상 평가 결과만 prediction_log에 이벤트 추가
                         log_prediction(
                             symbol=symbol, strategy=strategy, direction=f"평가:{status}",
                             entry_price=entry_price, target_price=entry_price * (1 + gain),
@@ -821,7 +821,7 @@ def evaluate_predictions(get_price_fn):
                             wrong_writer.writerow({k: r.get(k, "") for k in r.keys()})
 
                     except Exception as e:
-                        r.update({"status": "fail", "reason": f"예외: {e}", "return": 0.0, "return_value": 0.0})
+                        r.update({"status": "invalid", "reason": f"exception:{e}", "return": 0.0, "return_value": 0.0})
                         w_all.writerow({k: r.get(k, "") for k in fieldnames})
                         if not wrong_fields_written:
                             wrong_writer = csv.DictWriter(f_wrong, fieldnames=sorted(r.keys()))
