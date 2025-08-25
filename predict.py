@@ -958,7 +958,39 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
     return model_outputs_list, all_model_predictions
 
 
+# =============================
+# (NEW) 평가 주기 실행 유틸
+# =============================
+def _get_price_df_for_eval(symbol: str, strategy: str):
+    """evaluate_predictions용 가격 소스 래퍼 — 기존 파이프라인 유지."""
+    return get_kline_by_strategy(symbol, strategy)
+
+def run_evaluation_once():
+    """평가 1회 실행 (조기도달 포함)."""
+    evaluate_predictions(_get_price_df_for_eval)
+
+def run_evaluation_loop(interval_minutes: int = None):
+    """
+    interval_minutes 간격으로 evaluate_predictions 반복 실행.
+    - 기본 30분(ENV: EVAL_INTERVAL_MIN로 조정 가능)
+    - 외부에서 EVAL_LOOP=1로 활성화
+    """
+    try:
+        iv = int(os.getenv("EVAL_INTERVAL_MIN", "30")) if interval_minutes is None else int(interval_minutes)
+    except Exception:
+        iv = 30
+    iv = max(1, iv)
+    print(f"[EVAL_LOOP] 시작 — {iv}분 주기")
+    while True:
+        try:
+            run_evaluation_once()
+        except Exception as e:
+            print(f"[EVAL_LOOP] evaluate_predictions 예외 → {e}")
+        time.sleep(iv * 60)
+
+
 if __name__ == "__main__":
+    # 기본 데모: 단건 예측 + 로그 미리보기 (기존 동작 유지)
     res = predict("BTCUSDT", "단기")
     print(res)
     try:
@@ -967,3 +999,9 @@ if __name__ == "__main__":
         print(df.head(20))
     except Exception as e:
         print(f"[오류] prediction_log.csv 로드 실패 → {e}")
+
+    # (NEW) 환경변수로 주기 평가 루프 옵션 제공
+    # - EVAL_LOOP=1 이면 30분(기본) 간격으로 evaluate_predictions를 반복 실행
+    # - 분 간격 조정: EVAL_INTERVAL_MIN
+    if str(os.getenv("EVAL_LOOP", "0")).strip() == "1":
+        run_evaluation_loop()
