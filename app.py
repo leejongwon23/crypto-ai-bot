@@ -471,7 +471,7 @@ def train_now():
         if started:
             return "✅ 전체 그룹 학습 루프 시작됨 (백그라운드)"
         else:
-            return "⏳ 이미 실행 중 (재시작 생략)" if not force else "⏳ 재시작 시도했으나 기존 루프 유지됨"
+            return "⏳ 이미 실행 중 (재가동 생략)" if not force else "⏳ 재가동 시도했으나 기존 루프 유지됨"
     except Exception as e:
         return f"학습 실패: {e}", 500
 
