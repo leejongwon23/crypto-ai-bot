@@ -29,10 +29,12 @@ from diag_e2e import run as diag_e2e_run
 try:
     from scheduler_cleanup import start_cleanup_scheduler   # [KEEP]
     import safe_cleanup                                      # [KEEP]
+    import scheduler_cleanup as _cleanup_mod                 # 🆕 stop 지원용 참조
 except ImportError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from scheduler_cleanup import start_cleanup_scheduler    # [KEEP]
     import safe_cleanup                                      # [KEEP]
+    import scheduler_cleanup as _cleanup_mod                 # 🆕
 
 # ===== 경로 통일 =====
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))  # ← 루트 탐색용(초기화 강화에만 사용)
@@ -131,6 +133,11 @@ def start_scheduler():
         print("⚠️ 스케줄러 이미 실행 중, 재시작 생략"); sys.stdout.flush()
         return
 
+    # ✅ 리셋 중이면 시작 금지
+    if os.path.exists(LOCK_PATH):
+        print("⏸️ 리셋 락 감지 → 스케줄러 시작 지연"); sys.stdout.flush()
+        return
+
     print(">>> 스케줄러 시작"); sys.stdout.flush()
     sched = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
 
@@ -185,6 +192,33 @@ def _pause_and_clear_scheduler():
     except Exception as e:
         print(f"[SCHED] 정지 실패: {e}"); sys.stdout.flush()
 
+# 🆕 Cleanup 스케줄러 및 잠재 스케줄러까지 전부 끄기
+def _stop_all_aux_schedulers():
+    try:
+        # 1) 앱 내부 스케줄러
+        _pause_and_clear_scheduler()
+    except Exception:
+        pass
+    try:
+        # 2) cleanup 모듈 내 스케줄러
+        if hasattr(_cleanup_mod, "stop_cleanup_scheduler"):
+            try:
+                _cleanup_mod.stop_cleanup_scheduler()
+                print("🧹 [SCHED] cleanup 스케줄러 stop 호출"); sys.stdout.flush()
+            except Exception as e:
+                print(f"⚠️ cleanup stop 실패: {e}"); sys.stdout.flush()
+        # fallback: 모듈 속 BackgroundScheduler 탐색 후 shutdown
+        for name in dir(_cleanup_mod):
+            obj = getattr(_cleanup_mod, name, None)
+            if isinstance(obj, BackgroundScheduler):
+                try:
+                    obj.shutdown(wait=False)
+                    print(f"🧹 [SCHED] cleanup.{name} shutdown"); sys.stdout.flush()
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"⚠️ cleanup 스케줄러 탐지 실패: {e}"); sys.stdout.flush()
+
 # ===== Flask =====
 app = Flask(__name__)
 print(">>> Flask 앱 생성 완료"); sys.stdout.flush()
@@ -201,6 +235,11 @@ def _init_background_once():
         if _INIT_DONE:
             return
         try:
+            # 리셋 중이면 모든 백그라운드 시작 금지
+            if os.path.exists(LOCK_PATH):
+                print("⏸️ 락 감지 → 백그라운드 초기화 지연"); sys.stdout.flush()
+                return
+
             from failure_db import ensure_failure_db
             print(">>> 서버 실행 준비")
             ensure_failure_db(); print("✅ failure_patterns DB 초기화 완료")
@@ -275,10 +314,10 @@ def yopo_health():
     for strat in ["단기", "중기", "장기"]:
         try:
             pred  = logs.get("pred",  pd.DataFrame())
-            train = logs.get("train", pd.DataFrame())
+            train_log_df = logs.get("train", pd.DataFrame())
             audit = logs.get("audit", pd.DataFrame())
             pred  = pred.query(f"strategy == '{strat}'")  if not pred.empty  else pd.DataFrame()
-            train = train.query(f"strategy == '{strat}'") if not train.empty else pd.DataFrame()
+            train_log_q = train_log_df.query(f"strategy == '{strat}'") if not train_log_df.empty else pd.DataFrame()
             audit = audit.query(f"strategy == '{strat}'") if not audit.empty else pd.DataFrame()
 
             if not pred.empty and "status" in pred.columns:
@@ -346,7 +385,7 @@ def yopo_health():
                     rows.append(f"<tr><td>{r.get('timestamp','')}</td><td>{r.get('symbol','')}</td><td>{r.get('direction','')}</td><td>{rtn_pct}</td><td>{status_icon}</td></tr>")
                 table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>심볼</th><th>방향</th><th>수익률</th><th>상태</th></tr>" + "".join(rows) + "</table>"
 
-            last_train = train['timestamp'].iloc[-1] if (not train.empty and 'timestamp' in train) else '없음'
+            last_train = train_log_q['timestamp'].iloc[-1] if (not train_log_q.empty and 'timestamp' in train_log_q) else '없음'
             last_pred  = pred['timestamp'].iloc[-1]  if (not pred.empty and 'timestamp' in pred)  else '없음'
             last_audit = audit['timestamp'].iloc[-1] if (not audit.empty and 'timestamp' in audit) else '없음'
 
@@ -424,6 +463,9 @@ def run():
 def train_now():
     """쿼리 force=1이면 강제 재가동, 아니면 안전 시작(이미 실행 중이면 스킵 메시지)."""
     try:
+        # 리셋 중이면 시작 금지
+        if os.path.exists(LOCK_PATH):
+            return "⏸️ 초기화 중: 학습 시작 차단됨", 423
         force = request.args.get("force", "0") == "1"
         started = train.start_train_loop(force_restart=force, sleep_sec=0)
         if started:
@@ -503,6 +545,9 @@ from data.utils import SYMBOL_GROUPS
 @app.route("/train-symbols")
 def train_symbols():
     try:
+        # 리셋 중이면 시작 금지
+        if os.path.exists(LOCK_PATH):
+            return f"⏸️ 초기화 중: 그룹 학습 시작 차단됨", 423
         group_idx = int(request.args.get("group", -1))
         if group_idx < 0 or group_idx >= len(SYMBOL_GROUPS):
             return f"❌ 잘못된 그룹 번호: {group_idx}", 400
@@ -516,6 +561,9 @@ def train_symbols():
 @app.route("/train-symbols", methods=["POST"])
 def train_selected_symbols():
     try:
+        # 리셋 중이면 시작 금지
+        if os.path.exists(LOCK_PATH):
+            return "⏸️ 초기화 중: 선택 학습 시작 차단됨", 423
         symbols = request.json.get("symbols", [])
         if not isinstance(symbols, list) or not symbols:
             return "❌ 유효하지 않은 symbols 리스트", 400
@@ -557,7 +605,7 @@ def reset_all(key=None):
 
             # ===== 0) 글로벌 락 ON + 스케줄러 완전정지 =====
             _acquire_global_lock()
-            _pause_and_clear_scheduler()
+            _stop_all_aux_schedulers()  # 🆕 내부/정리 스케줄러 모두 정지
 
             # 경로 상수 로컬 바인딩
             BASE = BASE_DIR
@@ -712,20 +760,34 @@ def reset_all(key=None):
             # 8) 루프/스케줄러 **강제 재가동** (+짧은 재시도)
             try:
                 print("[RESET] 강제 재가동 시도(force_restart=True)"); sys.stdout.flush()
-                ok = train.start_train_loop(force_restart=True, sleep_sec=0)
-                print(f"✅ [RESET] 학습 루프 처리 완료 ok={ok}"); sys.stdout.flush()
-                if not ok:
-                    time.sleep(1.0)
-                    ok2 = train.start_train_loop(force_restart=True, sleep_sec=0)
-                    print(f"🔁 [RESET] 학습 루프 재시도 ok={ok2}"); sys.stdout.flush()
+                # 이중 가드: 이미 실행 중이면 시작 금지
+                try:
+                    if hasattr(train, "is_loop_running") and train.is_loop_running():
+                        print("⏩ 기존 학습 루프 동작 감지 → 재시작 생략"); sys.stdout.flush()
+                    else:
+                        ok = train.start_train_loop(force_restart=True, sleep_sec=0)
+                        print(f"✅ [RESET] 학습 루프 처리 완료 ok={ok}"); sys.stdout.flush()
+                        if not ok:
+                            time.sleep(1.0)
+                            ok2 = train.start_train_loop(force_restart=True, sleep_sec=0)
+                            print(f"🔁 [RESET] 학습 루프 재시도 ok={ok2}"); sys.stdout.flush()
+                except Exception as e:
+                    print(f"❌ [RESET] 루프 처리 실패: {e}"); sys.stdout.flush()
             except Exception as e:
-                print(f"❌ [RESET] 루프 처리 실패: {e}"); sys.stdout.flush()
+                print(f"❌ [RESET] 루프 처리 외부 실패: {e}"); sys.stdout.flush()
 
             try:
                 start_scheduler()
                 print("✅ [RESET] 스케줄러 재시작 완료"); sys.stdout.flush()
             except Exception as e:
                 print(f"⚠️ [RESET] 스케줄러 재시작 실패: {e}"); sys.stdout.flush()
+
+            # cleanup 스케줄러도 재시작
+            try:
+                start_cleanup_scheduler()
+                print("✅ [RESET] cleanup 스케줄러 재시작 완료"); sys.stdout.flush()
+            except Exception as e:
+                print(f"⚠️ [RESET] cleanup 스케줄러 재시작 실패: {e}"); sys.stdout.flush()
 
             print("✅ [RESET] 백그라운드 초기화 완료"); sys.stdout.flush()
         except Exception as e:
