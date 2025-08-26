@@ -754,42 +754,11 @@ def reset_all(key=None):
             except Exception as e:
                 print(f"[RESET] meta 보정 실패: {e}")
 
-            # ✅ (중요) 재가동 전에 글로벌 락 해제
+            # ✅ 정리 완료 → 락 해제 후 즉시 종료(플랫폼이 재부팅)
+            print("🔚 [RESET] 정리 완료 → 프로세스 종료(os._exit)로 재부팅 진행"); sys.stdout.flush()
             _release_global_lock()
+            os._exit(0)
 
-            # 8) 루프/스케줄러 **강제 재가동** (+짧은 재시도)
-            try:
-                print("[RESET] 강제 재가동 시도(force_restart=True)"); sys.stdout.flush()
-                # 이중 가드: 이미 실행 중이면 시작 금지
-                try:
-                    if hasattr(train, "is_loop_running") and train.is_loop_running():
-                        print("⏩ 기존 학습 루프 동작 감지 → 재시작 생략"); sys.stdout.flush()
-                    else:
-                        ok = train.start_train_loop(force_restart=True, sleep_sec=0)
-                        print(f"✅ [RESET] 학습 루프 처리 완료 ok={ok}"); sys.stdout.flush()
-                        if not ok:
-                            time.sleep(1.0)
-                            ok2 = train.start_train_loop(force_restart=True, sleep_sec=0)
-                            print(f"🔁 [RESET] 학습 루프 재시도 ok={ok2}"); sys.stdout.flush()
-                except Exception as e:
-                    print(f"❌ [RESET] 루프 처리 실패: {e}"); sys.stdout.flush()
-            except Exception as e:
-                print(f"❌ [RESET] 루프 처리 외부 실패: {e}"); sys.stdout.flush()
-
-            try:
-                start_scheduler()
-                print("✅ [RESET] 스케줄러 재시작 완료"); sys.stdout.flush()
-            except Exception as e:
-                print(f"⚠️ [RESET] 스케줄러 재시작 실패: {e}"); sys.stdout.flush()
-
-            # cleanup 스케줄러도 재시작
-            try:
-                start_cleanup_scheduler()
-                print("✅ [RESET] cleanup 스케줄러 재시작 완료"); sys.stdout.flush()
-            except Exception as e:
-                print(f"⚠️ [RESET] cleanup 스케줄러 재시작 실패: {e}"); sys.stdout.flush()
-
-            print("✅ [RESET] 백그라운드 초기화 완료"); sys.stdout.flush()
         except Exception as e:
             print(f"❌ [RESET] 백그라운드 초기화 예외: {e}"); sys.stdout.flush()
         finally:
@@ -799,7 +768,7 @@ def reset_all(key=None):
     # 백그라운드 작업 시작 후 즉시 응답
     threading.Thread(target=_do_reset_work, daemon=True).start()
     return Response(
-        "✅ 초기화 요청 접수됨. 백그라운드에서 정지→정리→재가동합니다.\n"
+        "✅ 초기화 요청 접수됨. 백그라운드에서 정지→정리 후 서버 프로세스를 재시작합니다.\n"
         "로그에서 [RESET]/[SCHED]/[LOCK] 태그를 확인하세요.",
         mimetype="text/plain; charset=utf-8"
     )
