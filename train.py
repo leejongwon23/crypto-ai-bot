@@ -325,7 +325,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
             acc=float(accuracy_score(lbls,preds)); f1=float(f1_score(lbls,preds,average="macro"))
 
             stem=os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_group{int(group_id) if group_id is not None else 0}_cls{int(num_classes)}")
-            meta={"symbol":symbol,"strategy":strategy,"model":model_type,"group_id":int(group_id) if group_id is not None else 0,"num_classes":int(num_classes),"input_size":int(FEATURE_INPUT_SIZE),"metrics":{"val_acc":acc,"val_f1":f1,"train_loss_sum":float(total_loss)},"timestamp":now_kst().isoformat(),"model_name":os.path.basename(stem)+".ptz","window":int(window),"recent_cap":int(len(feat_scaled)),"engine":"lightning" if _HAS_LIGHTNING else "manual","data_flags":{"rows":int(len(df)),"limit":int(_limit),"min_required":int(_min_required),"augment_needed":bool(augment_needed),"enough_for_training":bool(enough_for_training)}}
+            meta={"symbol":symbol,"strategy":strategy,"model":model_type,"group_id":int(group_id) if group_id is not None else 0,"num_classes":int(num_classes),"input_size":int(FEATURE_INPUT_SIZE),"metrics":{"val_acc":acc,"val_f1":f1},"timestamp":now_kst().isoformat(),"model_name":os.path.basename(stem)+".ptz","window":int(window),"recent_cap":int(len(feat_scaled)),"engine":"lightning" if _HAS_LIGHTNING else "manual","data_flags":{"rows":int(len(df)),"limit":int(_limit),"min_required":int(_min_required),"augment_needed":bool(augment_needed),"enough_for_training":bool(enough_for_training)},"train_loss_sum":float(total_loss)}
             wpath,mpath=_save_model_and_meta(model, stem+".pt", meta)
             _archive_old_checkpoints(symbol,strategy,model_type,keep_n=1)
             _emit_aliases(wpath,mpath,symbol,strategy,model_type)
@@ -428,6 +428,16 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
         except: pass
 
         groups=_rotate_groups_starting_with(SYMBOL_GROUPS, anchor_symbol="BTCUSDT")
+
+        # --- 결정적 심볼 정렬(옵션, 환경변수 SYMBOL_ORDER 지원) ---
+        _CANON=os.getenv("SYMBOL_ORDER","BTCUSDT,ETHUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,SOLUSDT,TRXUSDT,DOTUSDT,AVAXUSDT,MATICUSDT").split(",")
+        _rank={s:i for i,s in enumerate(_CANON)}
+        def _sort_by_canon(g):
+            if "BTCUSDT" in g:
+                return ["BTCUSDT"] + [s for s in sorted([x for x in g if x!="BTCUSDT"], key=lambda k:_rank.get(k,10_000))]
+            return sorted(g, key=lambda k:_rank.get(k,10_000))
+        groups=[_sort_by_canon(g) for g in groups]
+
         for idx, group in enumerate(groups):
             if stop_event is not None and stop_event.is_set(): print("[STOP] group loop enter", flush=True); break
             print(f"🚀 [group] {idx+1}/{len(groups)} → {group}", flush=True)
