@@ -11,6 +11,7 @@ import pytz
 import glob
 from sklearn.preprocessing import MinMaxScaler
 from requests.exceptions import HTTPError, RequestException
+from typing import List, Dict, Any, Optional
 
 # =========================
 # 기본 상수/전역
@@ -170,6 +171,140 @@ def get_ALL_SYMBOLS():
 
 def get_SYMBOL_GROUPS():
     return list(SYMBOL_GROUPS)
+
+# =========================
+# (NEW) 그룹 순서 제어기 (파일 지속성 포함)
+# =========================
+_STATE_DIR = "/persistent/state"
+_STATE_PATH = os.path.join(_STATE_DIR, "group_order.json")
+
+class GroupOrderManager:
+    """
+    - 현재 그룹 인덱스/학습완료 심볼 집합을 관리
+    - train.py에서 should_train_symbol()로 차례를 강제
+    - 그룹 내 전 심볼 학습 후 ready_for_group_predict()가 True이면 예측 실행
+    - 예측 후 mark_group_predicted() 호출 시 다음 그룹으로 이동
+    상태는 파일로 저장되어 재기동에도 유지됨
+    """
+    def __init__(self, groups: List[List[str]]):
+        self.groups: List[List[str]] = [list(g) for g in groups]
+        self.idx: int = 0
+        self.trained: Dict[int, set] = {}
+        self._load()
+
+    # ---------- persistence ----------
+    def _load(self):
+        try:
+            os.makedirs(_STATE_DIR, exist_ok=True)
+            if os.path.isfile(_STATE_PATH):
+                with open(_STATE_PATH, "r", encoding="utf-8") as f:
+                    st = json.load(f)
+                saved_syms = st.get("symbols", [])
+                saved_groups = _compute_groups(saved_syms, 5) if saved_syms else st.get("groups", [])
+                if saved_groups:
+                    self.groups = saved_groups
+                self.idx = int(st.get("idx", 0))
+                self.trained = {int(k): set(v) for k, v in (st.get("trained", {}).items())}
+                print(f"[🧭 그룹상태 로드] idx={self.idx}, trained={ {k:list(v) for k,v in self.trained.items()} }")
+        except Exception as e:
+            print(f"[⚠️ 그룹상태 로드 실패] {e}")
+
+    def _save(self):
+        try:
+            os.makedirs(_STATE_DIR, exist_ok=True)
+            payload = {
+                "groups": self.groups,
+                "idx": self.idx,
+                "trained": {k: list(v) for k, v in self.trained.items()},
+                "symbols": SYMBOLS  # 참고용
+            }
+            with open(_STATE_PATH, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[⚠️ 그룹상태 저장 실패] {e}")
+
+    # ---------- core ops ----------
+    def current_index(self) -> int:
+        return max(0, min(self.idx, max(0, len(self.groups)-1)))
+
+    def current_group(self) -> List[str]:
+        i = self.current_index()
+        return self.groups[i] if self.groups else []
+
+    def should_train(self, symbol: str) -> bool:
+        i = self.current_index()
+        gset = set(self.current_group())
+        done = self.trained.get(i, set())
+        ok = (symbol in gset) and (symbol not in done)
+        if not ok:
+            where = "다음 그룹" if symbol not in gset else "이미 학습됨"
+            print(f"[⛔ 순서강제] {symbol} → 현재 그룹{i} 차례 아님 ({where})")
+        return ok
+
+    def mark_symbol_trained(self, symbol: str):
+        i = self.current_index()
+        self.trained.setdefault(i, set()).add(symbol)
+        self._save()
+        print(f"[🧩 학습기록] 그룹{i} 진행중: {sorted(list(self.trained[i]))} / {self.current_group()}")
+
+    def ready_for_group_predict(self) -> bool:
+        i = self.current_index()
+        group = set(self.current_group())
+        done = self.trained.get(i, set())
+        ready = group and group.issubset(done)
+        if ready:
+            print(f"[🚦 예측대기] 그룹{i} 전체 학습 완료 → 예측 실행 준비")
+        return ready
+
+    def mark_group_predicted(self):
+        i = self.current_index()
+        print(f"[✅ 예측완료] 그룹{i} → 다음 그룹으로 이동")
+        # 다음 그룹
+        self.idx = (i + 1) % max(1, len(self.groups))
+        # 다음 라운드 준비
+        self.trained.setdefault(self.idx, set())
+        self._save()
+
+    # ---------- admin ----------
+    def reset(self, start_index: int = 0):
+        self.idx = max(0, min(start_index, max(0, len(self.groups)-1)))
+        self.trained = {self.idx: set()}
+        self._save()
+        print(f"[♻️ 그룹순서 리셋] idx={self.idx}")
+
+    def rebuild_groups(self, symbols: Optional[List[str]] = None, group_size: int = 5):
+        syms = symbols or SYMBOLS
+        self.groups = _compute_groups(syms, group_size)
+        self.reset(0)
+        print(f"[🧱 그룹재구성] 총 {len(syms)}개 → {len(self.groups)}그룹")
+
+# 매니저 전역 인스턴스
+GROUP_MGR = GroupOrderManager(SYMBOL_GROUPS)
+
+# 외부(Train/Predict)에서 쓰기 쉬운 래퍼 함수들
+def should_train_symbol(symbol: str) -> bool:
+    return GROUP_MGR.should_train(symbol)
+
+def mark_symbol_trained(symbol: str) -> None:
+    GROUP_MGR.mark_symbol_trained(symbol)
+
+def ready_for_group_predict() -> bool:
+    return GROUP_MGR.ready_for_group_predict()
+
+def mark_group_predicted() -> None:
+    GROUP_MGR.mark_group_predicted()
+
+def get_current_group_index() -> int:
+    return GROUP_MGR.current_index()
+
+def get_current_group_symbols() -> List[str]:
+    return GROUP_MGR.current_group()
+
+def reset_group_order(start_index: int = 0) -> None:
+    GROUP_MGR.reset(start_index)
+
+def rebuild_symbol_groups(symbols: Optional[List[str]] = None, group_size: int = 5) -> None:
+    GROUP_MGR.rebuild_groups(symbols, group_size)
 
 # =========================
 # 캐시 매니저
@@ -457,7 +592,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             samples.append((sample, gain))
 
         if not samples:
-            print("[ℹ️ lookahead 기반 샘플 없음 → 인접 변화율로 3‑클래스 라벨링 사용]")
+            print("[ℹ️ lookahead 기반 샘플 없음 → 인접 변화율로 3-클래스 라벨링 사용]")
             closes_np = df_scaled["close"].to_numpy(dtype=np.float32)
             pct = np.diff(closes_np) / (closes_np[:-1] + 1e-6)
             thresh = 0.001  # ±0.1%
@@ -479,7 +614,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             y = np.array([s[1] for s in samples], dtype=np.int64)
             if len(X) == 0:
                 return _dummy(symbol_name)
-            print(f"[✅ create_dataset 완료] (fallback 3‑class) 샘플 수: {len(y)}, X.shape={X.shape}")
+            print(f"[✅ create_dataset 완료] (fallback 3-class) 샘플 수: {len(y)}, X.shape={X.shape}")
             return X, y
 
         min_gain, max_gain = min(gains), max(gains)
@@ -983,6 +1118,8 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         df["stoch_k"] = _ta.momentum.stoch(df["high"], df["low"], df["close"], fillna=True)
         df["stoch_d"] = _ta.momentum.stoch_signal(df["high"], df["low"], df["close"], fillna=True)
         df["vwap"] = (df["volume"] * df["close"]).cumsum() / (df["volume"].cumsum() + 1e-6)
+
+        
 
         # ---------- 시장 레짐 태깅 (옵션) ----------
         regime_cfg = get_REGIME()
