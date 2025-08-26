@@ -1,5 +1,5 @@
-# === train.py (FINAL, speed-tuned + SSL cache + CPU thread cap + Lightning Trainer) ===
-# ✅ 추가: CPU 스레드 상한(기본 2). 기존 환경변수 설정이 있으면 그대로 둠.
+# === train.py (FINAL, speed-tuned + SSL cache + CPU thread cap + Lightning Trainer + predict timeout) ===
+# ✅ CPU 스레드 상한(기본 2). 기존 환경변수 설정이 있으면 그대로 둠.
 import os
 def _set_default_thread_env(name: str, val: int):
     if os.getenv(name) is None:
@@ -20,12 +20,12 @@ from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import MinMaxScaler
 from collections import Counter
-import shutil  # ← 추가
-import gc      # ← 추가
-import threading  # ← 추가 (루프 제어)
+import shutil
+import gc
+import threading
 
-# ✅ 추가: 무손실 모델 압축 유틸(신규 1번 파일)
-from model_io import convert_pt_to_ptz, save_model  # ← save_model 추가 임포트
+# ✅ 무손실 모델 압축 유틸
+from model_io import convert_pt_to_ptz, save_model
 
 # ✅ torch 내부 스레드도 제한
 try:
@@ -33,13 +33,15 @@ try:
 except Exception:
     pass
 
-# (선택) Lightning 사용: 설치 안 되어 있으면 폴백
+# (선택) Lightning 사용: 설치 안 되어 있으면 폴백 (+ 환경변수로 비활성 가능)
+_DISABLE_LIGHTNING = os.getenv("DISABLE_LIGHTNING", "0") == "1"
 _HAS_LIGHTNING = False
-try:
-    import pytorch_lightning as pl
-    _HAS_LIGHTNING = True
-except Exception:
-    _HAS_LIGHTNING = False
+if not _DISABLE_LIGHTNING:
+    try:
+        import pytorch_lightning as pl
+        _HAS_LIGHTNING = True
+    except Exception:
+        _HAS_LIGHTNING = False
 
 # ⬇️ 불필요한 SYMBOLS/SYMBOLS_GROUPS 의존 제거
 from data.utils import get_kline_by_strategy, compute_features, create_dataset, SYMBOL_GROUPS
@@ -50,7 +52,7 @@ from failure_db import insert_failure_record, ensure_failure_db
 import logger  # log_* 및 ensure_prediction_log_exists 사용
 from config import (
     get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups,
-    get_class_ranges, set_NUM_CLASSES, STRATEGY_CONFIG  # 🔧 변경: STRATEGY_CONFIG 추가 임포트
+    get_class_ranges, set_NUM_CLASSES, STRATEGY_CONFIG
 )
 from data_augmentation import balance_classes
 
@@ -59,11 +61,10 @@ from window_optimizer import find_best_window
 
 # --- ssl_pretrain (옵션) ---
 try:
-    from ssl_pretrain import masked_reconstruction, get_ssl_ckpt_path   # ✅ 추가 임포트
+    from ssl_pretrain import masked_reconstruction, get_ssl_ckpt_path
 except Exception:
     def masked_reconstruction(symbol, strategy, input_size):
         return None
-    # ✅ 폴백 경로 헬퍼(ssl_pretrain.py 부재 시에도 안전)
     def get_ssl_ckpt_path(symbol: str, strategy: str) -> str:
         base = os.getenv("SSL_CACHE_DIR", "/persistent/ssl_models")
         os.makedirs(base, exist_ok=True)
@@ -85,7 +86,7 @@ def _safe_print(msg):
 
 def _try_auto_calibration(symbol, strategy, model_name):
     try:
-        import calibration  # 4번에서 추가되는 파일(없으면 스킵)
+        import calibration
     except Exception as e:
         _safe_print(f"[CALIB] 모듈 없음/로드 실패 → 스킵 ({e})")
         return
@@ -120,7 +121,7 @@ def _maybe_run_failure_learn(background=True):
     import threading
     def _job():
         try:
-            import failure_learn  # 7번 단계(없으면 스킵)
+            import failure_learn
         except Exception as e:
             _safe_print(f"[FAIL-LEARN] 모듈 없음/로드 실패 → 스킵 ({e})")
             return
@@ -139,7 +140,6 @@ def _maybe_run_failure_learn(background=True):
     else:
         _job()
 
-# 초기 1회 조용히 시도(있으면 수행/없으면 스킵)
 try:
     _maybe_run_failure_learn(background=True)
 except Exception as _e:
@@ -240,27 +240,18 @@ def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.nda
         out[i] = float((max_h - base) / (base + 1e-12))
     return out.astype(np.float32)
 
-# ===== 저장/별칭/아카이브 (지침 반영) =====
+# ===== 저장/별칭/아카이브 =====
 def _stem(path: str) -> str:
     return os.path.splitext(path)[0]
 
 def _save_model_and_meta(model: nn.Module, path_pt: str, meta: dict):
-    """
-    ⛳️ 변경점:
-      - 저장은 **state_dict만** → 확장자는 항상 `.ptz`
-      - 메타는 `.meta.json`(공백 제거)
-      - 호출부에서 넘기는 path_pt는 *.pt 형태였던 것을 유지해도 됨(여기서 stem으로 변환)
-    """
     stem = _stem(path_pt)
     weight_path = stem + ".ptz"
-    # state_dict를 .ptz로 무손실 압축 저장
     save_model(weight_path, model.state_dict())
-    # 메타 저장
     meta_json = json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
     _atomic_write(stem + ".meta.json", meta_json, mode="w")
     return weight_path, (stem + ".meta.json")
 
-# ⬇️ 예측/관우 호환 별칭 유틸 — **.ptz** 기준
 def _safe_alias(src: str, dst: str):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     try:
@@ -269,24 +260,21 @@ def _safe_alias(src: str, dst: str):
     except Exception:
         pass
     try:
-        os.link(src, dst)  # 하드링크 시도
+        os.link(src, dst)
     except Exception:
-        shutil.copyfile(src, dst)  # 실패 시 복사
+        shutil.copyfile(src, dst)
 
 def _emit_aliases(model_path: str, meta_path: str, symbol: str, strategy: str, model_type: str):
-    ext = os.path.splitext(model_path)[1]  # .ptz 유지
-    # 1) 평탄(legacy) 별칭
+    ext = os.path.splitext(model_path)[1]  # .ptz
     flat_pt   = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}{ext}")
     flat_meta = _stem(flat_pt) + ".meta.json"
     _safe_alias(model_path, flat_pt)
     _safe_alias(meta_path, flat_meta)
-    # 2) 디렉터리 구조 별칭
     dir_pt   = os.path.join(MODEL_DIR, symbol, strategy, f"{model_type}{ext}")
     dir_meta = _stem(dir_pt) + ".meta.json"
     _safe_alias(model_path, dir_pt)
     _safe_alias(meta_path, dir_meta)
 
-# ✅ 과거 체크포인트 무손실 압축/정리 (.pt → .ptz), 최신 keep_n 유지
 def _archive_old_checkpoints(symbol: str, strategy: str, model_type: str, keep_n: int = 1):
     patt_pt  = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_group*_cls*.pt")
     patt_ptz = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_group*_cls*.ptz")
@@ -301,14 +289,14 @@ def _archive_old_checkpoints(symbol: str, strategy: str, model_type: str, keep_n
                 if not os.path.exists(ptz):
                     convert_pt_to_ptz(p, ptz)
                 try:
-                    os.remove(p)  # 원본 .pt 제거
+                    os.remove(p)
                 except Exception:
                     pass
         except Exception as e:
             print(f"[ARCHIVE] {os.path.basename(p)} 압축 실패 → {e}")
 
 # --------------------------------------------------
-# (추가) Lightning 모듈 래퍼
+# Lightning 래퍼
 # --------------------------------------------------
 if _HAS_LIGHTNING:
     class LitSeqModel(pl.LightningModule):
@@ -339,24 +327,23 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         "models": []
     }
     try:
-        print(f"✅ [train_one_model 시작] {symbol}-{strategy}-group{group_id}")
+        print(f"✅ [train_one_model 시작] {symbol}-{strategy}-group{group_id}", flush=True)
         ensure_failure_db()
 
         # ✅ SSL 사전학습 캐시 스킵
         try:
-            ssl_ckpt = get_ssl_ckpt_path(symbol, strategy)   # ✅ 헬퍼 사용(경로 통일)
+            ssl_ckpt = get_ssl_ckpt_path(symbol, strategy)
             if not os.path.exists(ssl_ckpt):
                 masked_reconstruction(symbol, strategy, FEATURE_INPUT_SIZE)
             else:
-                print(f"[SSL] cache found → skip: {ssl_ckpt}")
+                print(f"[SSL] cache found → skip: {ssl_ckpt}", flush=True)
         except Exception as e:
-            print(f"[⚠️ SSL 사전학습 실패] {e}")
+            print(f"[⚠️ SSL 사전학습 실패] {e}", flush=True)
 
         df = get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
             _log_skip(symbol, strategy, "데이터 없음"); return result
 
-        # 🔧 변경: 데이터 부족 신호(augment/enough) 인지 + 로그에 표현
         try:
             cfg = STRATEGY_CONFIG.get(strategy, {})
             _limit = int(cfg.get("limit", 300))
@@ -369,7 +356,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         enough_for_training = bool(_attrs.get("enough_for_training", len(df) >= _min_required))
         print(f"[DATA] {symbol}-{strategy} rows={len(df)} limit={_limit} "
               f"min_required={_min_required} augment_needed={augment_needed} "
-              f"enough_for_training={enough_for_training}")
+              f"enough_for_training={enough_for_training}", flush=True)
 
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.empty or feat.isnull().any().any():
@@ -398,9 +385,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         try:
             logger.log_class_ranges(symbol, strategy, group_id=group_id,
                                     class_ranges=class_ranges, note="train_one_model")
-            print(f"[📏 클래스경계 로그] {symbol}-{strategy}-g{group_id} → {class_ranges}")
+            print(f"[📏 클래스경계 로그] {symbol}-{strategy}-g{group_id} → {class_ranges}", flush=True)
         except Exception as e:
-            print(f"[⚠️ log_class_ranges 실패/미구현] {e}")
+            print(f"[⚠️ log_class_ranges 실패/미구현] {e}", flush=True)
 
         # 2) 미래 수익률 + 요약 로그
         horizon_hours = _strategy_horizon_hours(strategy)
@@ -411,7 +398,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
                 q = np.nanpercentile(fg, [0,25,50,75,90,95,99])
                 print(f"[📈 수익률분포] {symbol}-{strategy}-g{group_id} "
                       f"min={q[0]:.4f}, p25={q[1]:.4f}, p50={q[2]:.4f}, p75={q[3]:.4f}, "
-                      f"p90={q[4]:.4f}, p95={q[5]:.4f}, p99={q[6]:.4f}, max={np.nanmax(fg):.4f}")
+                      f"p90={q[4]:.4f}, p95={q[5]:.4f}, p99={q[6]:.4f}, max={np.nanmax(fg):.4f}", flush=True)
                 try:
                     logger.log_return_distribution(symbol, strategy, group_id=group_id,
                         horizon_hours=int(horizon_hours),
@@ -420,11 +407,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
                                  "p99":float(q[6]),"max":float(np.nanmax(fg)),"count":int(fg.size)},
                         note="train_one_model")
                 except Exception as le:
-                    print(f"[⚠️ log_return_distribution 실패/미구현] {le}")
+                    print(f"[⚠️ log_return_distribution 실패/미구현] {le}", flush=True)
         except Exception as e:
-            print(f"[⚠️ 수익률분포 요약 실패] {e}")
+            print(f"[⚠️ 수익률분포 요약 실패] {e}", flush=True)
 
-        # 3) 라벨링 + 분포 로그  ── ★ 경계 이탈 보정(클리핑) 추가
+        # 3) 라벨링 + 분포 로그  ── ★ 경계 이탈 보정(클리핑)
         labels = []
         clipped_low, clipped_high, unmatched = 0, 0, 0
 
@@ -449,14 +436,14 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
 
         if clipped_low or clipped_high or unmatched:
             print(f"[🔧 라벨 보정] {symbol}-{strategy}-g{group_id} "
-                  f"low_clip={clipped_low}, high_clip={clipped_high}, unmatched={unmatched}")
+                  f"low_clip={clipped_low}, high_clip={clipped_high}, unmatched={unmatched}", flush=True)
 
         labels = np.array(labels, dtype=np.int64)
 
         features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         feat_scaled = MinMaxScaler().fit_transform(features_only)
 
-        # ✅ 속도 개선: 최근 구간만 사용(라벨과 정렬 유지)
+        # ✅ 속도 개선: 최근 구간만 사용
         if len(feat_scaled) > _MAX_ROWS_FOR_TRAIN or len(labels) > _MAX_ROWS_FOR_TRAIN:
             cut = min(_MAX_ROWS_FOR_TRAIN, len(feat_scaled), len(labels))
             feat_scaled = feat_scaled[-cut:]
@@ -468,7 +455,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         except Exception:
             best_window = 40
         window = int(max(5, best_window))
-        # 🔒 데이터 길이를 넘지 않도록 클램프
         window = int(min(window, max(6, len(feat_scaled) - 1)))
 
         # 5) 시퀀스 생성
@@ -490,11 +476,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
                                           n_unique=int(len(label_counts)), entropy=float(entropy),
                                           note=f"window={window}, recent_cap={len(feat_scaled)}")
             print(f"[🧮 라벨분포 로그] {symbol}-{strategy}-g{group_id} total={total_labels}, "
-                  f"classes={len(label_counts)}, H={entropy:.4f}")
+                  f"classes={len(label_counts)}, H={entropy:.4f}", flush=True)
         except Exception as e:
-            print(f"[⚠️ log_label_distribution 실패/미구현] {e}")
+            print(f"[⚠️ log_label_distribution 실패/미구현] {e}", flush=True)
 
-        # 🔧 변경: 데이터 부족(enough_for_training=False)일 때, 기존 fallback/밸런싱 경로를 우선 시도.
+        # 데이터 부족시 fallback
         if len(X) < 20:
             try:
                 res = create_dataset(feat.to_dict(orient="records"), window=window, strategy=strategy, input_size=FEATURE_INPUT_SIZE)
@@ -505,10 +491,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
                 if isinstance(X_fb, np.ndarray) and len(X_fb) > 0:
                     X, y = X_fb.astype(np.float32), y_fb.astype(np.int64)
             except Exception as e:
-                print(f"[⚠️ fallback 실패] {e}")
+                print(f"[⚠️ fallback 실패] {e}", flush=True)
 
         if len(X) < 10:
-            # 데이터가 충분치 않으면 안전 스킵(실패 기록 포함)
             _log_skip(symbol, strategy, f"최종 샘플 부족 (rows={len(df)}, limit={_limit}, min_required={_min_required})")
             return result
 
@@ -516,7 +501,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
             if len(X) < 200:
                 X, y = balance_classes(X, y, num_classes=num_classes)
         except Exception as e:
-            print(f"[⚠️ 밸런싱 실패] {e}")
+            print(f"[⚠️ 밸런싱 실패] {e}", flush=True)
 
         # 6) 학습/평가/저장
         for model_type in ["lstm", "cnn_lstm", "transformer"]:
@@ -541,7 +526,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
             total_loss = 0.0
 
             if _HAS_LIGHTNING:
-                # ✅ Lightning 기반 학습(기본 경량 옵션, 체크포인트/로거 비활성)
                 lit = LitSeqModel(base_model, lr=1e-3)
                 trainer = pl.Trainer(
                     max_epochs=max_epochs,
@@ -552,11 +536,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
                     enable_model_summary=False,
                     enable_progress_bar=False,
                 )
-                # Lightning은 스텝 손실만 반환하므로 총합은 수동 추적하지 않음(평가 후 저장)
                 trainer.fit(lit, train_dataloaders=train_loader, val_dataloaders=val_loader)
                 model = lit.model.to(DEVICE)
             else:
-                # 🔁 기존 수동 루프 폴백
                 model = base_model
                 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
                 criterion = nn.CrossEntropyLoss()
@@ -571,7 +553,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
                         optimizer.zero_grad(); loss.backward(); optimizer.step()
                         total_loss += float(loss.item())
 
-            # 검증 평가(공통)
+            # 검증
             model.eval()
             all_preds, all_labels = [], []
             with torch.no_grad():
@@ -581,7 +563,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
             acc = float(accuracy_score(all_labels, all_preds))
             f1 = float(f1_score(all_labels, all_preds, average="macro"))
 
-            # 저장 파일명 stem(확장자는 .ptz로 통일 저장)
+            # 저장
             base_stem = os.path.join(
                 MODEL_DIR,
                 f"{symbol}_{strategy}_{model_type}_group{int(group_id) if group_id is not None else 0}_cls{int(num_classes)}"
@@ -594,21 +576,15 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
                 "timestamp": now_kst().isoformat(), "model_name": os.path.basename(base_stem) + ".ptz",
                 "window": int(window), "recent_cap": int(len(feat_scaled)),
                 "engine": "lightning" if _HAS_LIGHTNING else "manual",
-                # 🔧 변경: 데이터 상태 플래그를 메타에 저장(관우/후속 진단 용이)
                 "data_flags": {
                     "rows": int(len(df)), "limit": int(_limit), "min_required": int(_min_required),
                     "augment_needed": bool(augment_needed), "enough_for_training": bool(enough_for_training)
                 }
             }
             weight_path, meta_path = _save_model_and_meta(model, base_stem + ".pt", meta)
-
-            # ⬇️ 추가: 이전 체크포인트는 무손실 압축 아카이브(.pt → .ptz) & 최신 1개 유지
             _archive_old_checkpoints(symbol, strategy, model_type, keep_n=1)
-
-            # ⬇️ 추가: 예측/모니터 호환 별칭 생성(최신 **.ptz** 기준)
             _emit_aliases(weight_path, meta_path, symbol, strategy, model_type)
 
-            # 🔧 변경: note에 data_flags 요약 포함
             logger.log_training_result(
                 symbol, strategy, model=os.path.basename(weight_path), accuracy=acc, f1=f1,
                 loss=float(total_loss),
@@ -634,10 +610,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         return result
 
 # --------------------------------------------------
-# (추가) 경량 정리 유틸 — 그룹 종료 시 호출
+# 경량 정리 유틸 — 그룹 종료 시 호출
 # --------------------------------------------------
 def _prune_caches_and_gc():
-    # cache 모듈이 있으면 prune
     try:
         from cache import CacheManager as _CM
         try:
@@ -649,10 +624,9 @@ def _prune_caches_and_gc():
             after = _CM.stats()
         except Exception:
             after = None
-        print(f"[CACHE] prune ok: before={before}, after={after}, pruned={pruned}")
+        print(f"[CACHE] prune ok: before={before}, after={after}, pruned={pruned}", flush=True)
     except Exception as e:
-        print(f"[CACHE] 모듈 없음/스킵 ({e})")
-    # safe_cleanup의 경량 정리 트리거(있으면 사용)
+        print(f"[CACHE] 모듈 없음/스킵 ({e})", flush=True)
     try:
         from safe_cleanup import trigger_light_cleanup
         trigger_light_cleanup()
@@ -664,8 +638,7 @@ def _prune_caches_and_gc():
         pass
 
 # --------------------------------------------------
-# ✅ 그룹 정렬 헬퍼 (신규): BTCUSDT가 포함된 그룹을 맨 앞으로 회전,
-#    그 그룹 내부에서도 BTCUSDT를 첫 원소로 고정. 나머지 순서는 보존.
+# 그룹 배열 회전: BTCUSDT 그룹을 맨 앞으로
 # --------------------------------------------------
 def _rotate_groups_starting_with(groups, anchor_symbol="BTCUSDT"):
     norm = [list(g) for g in groups]
@@ -681,16 +654,42 @@ def _rotate_groups_starting_with(groups, anchor_symbol="BTCUSDT"):
     return norm
 
 # --------------------------------------------------
+# 🔒 예측 타임아웃 래퍼 — 예측 단계 블로킹 방지 (기본 30초)
+# --------------------------------------------------
+_PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC", "30"))
+
+def _safe_predict_with_timeout(predict_fn, symbol, strategy, source, model_type=None, timeout=_PREDICT_TIMEOUT_SEC):
+    err = []
+    done = threading.Event()
+    def _run():
+        try:
+            predict_fn(symbol, strategy, source=source, model_type=model_type)
+        except Exception as e:
+            err.append(e)
+        finally:
+            done.set()
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    finished = done.wait(timeout)
+    if not finished:
+        print(f"[⏱️ 예측 타임아웃] {symbol}-{strategy} ({timeout}s) → 스킵", flush=True)
+        return False
+    if err:
+        print(f"[⚠️ 예측 실패] {symbol}-{strategy}: {err[0]}", flush=True)
+        return False
+    return True
+
+# --------------------------------------------------
 # 전체 학습 루틴  (✅ stop_event 지원)
 # --------------------------------------------------
 def train_models(symbol_list, stop_event: threading.Event | None = None):
     strategies = ["단기", "중기", "장기"]
     for symbol in symbol_list:
         if stop_event is not None and stop_event.is_set():
-            print("[STOP] train_models: stop_event 감지 → 조기 종료"); return
+            print("[STOP] train_models: stop_event 감지 → 조기 종료", flush=True); return
         for strategy in strategies:
             if stop_event is not None and stop_event.is_set():
-                print("[STOP] train_models: stop_event 감지(strategy loop) → 조기 종료"); return
+                print("[STOP] train_models: stop_event 감지(strategy loop) → 조기 종료", flush=True); return
             try:
                 class_ranges = get_class_ranges(symbol=symbol, strategy=strategy)
                 if not class_ranges:
@@ -704,8 +703,7 @@ def train_models(symbol_list, stop_event: threading.Event | None = None):
 
             for gid in range(max_gid + 1):
                 if stop_event is not None and stop_event.is_set():
-                    print("[STOP] train_models: stop_event 감지(group loop) → 조기 종료"); return
-                # 각 그룹별 클래스 수 2개 미만이면 스킵
+                    print("[STOP] train_models: stop_event 감지(group loop) → 조기 종료", flush=True); return
                 try:
                     grp_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=gid)
                     if not grp_ranges or len(grp_ranges) < 2:
@@ -729,35 +727,34 @@ def train_models(symbol_list, stop_event: threading.Event | None = None):
 
                 train_one_model(symbol, strategy, group_id=gid)
                 if stop_event is not None and stop_event.is_set():
-                    print("[STOP] train_models: stop_event 감지(after one model) → 조기 종료"); return
+                    print("[STOP] train_models: stop_event 감지(after one model) → 조기 종료", flush=True); return
                 time.sleep(0.5)
 
     try:
         import maintenance_fix_meta
         maintenance_fix_meta.fix_all_meta_json()
     except Exception as e:
-        print(f"[⚠️ meta 보정 실패] {e}")
+        print(f"[⚠️ meta 보정 실패] {e}", flush=True)
 
     try:
         import failure_trainer
         failure_trainer.run_failure_training()
     except Exception as e:
-        print(f"[⚠️ 실패학습 루프 예외] {e}")
+        print(f"[⚠️ 실패학습 루프 예외] {e}", flush=True)
 
     try:
         train_evo_meta_loop()
     except Exception as e:
-        print(f"[⚠️ 진화형 메타러너 학습 실패] {e}")
+        print(f"[⚠️ 진화형 메타러너 학습 실패] {e}", flush=True)
 
 # --------------------------------------------------
-# 그룹 루프(그룹 완료 후 예측 1회)  (✅ stop_event 지원)
+# 그룹 루프(그룹 완료 후 예측 1회)  (✅ stop_event 지원 + 예측 타임아웃)
 # --------------------------------------------------
 def train_symbol_group_loop(sleep_sec: int = 0, stop_event: threading.Event | None = None):
     try:
-        # ⬇️ predict는 그룹 루프 안에서 임포트(순환 의존 안전)
-        from predict import predict  # ← ★ 평가 호출 제거 (evaluate_predictions 미임포트)
+        from predict import predict  # evaluate 호출 없음
 
-        # ✅ 학습/예측 로그 파일/헤더 보장(존재 시만)
+        # 로그 파일/헤더 보장(존재 시만)
         try:
             if hasattr(logger, "ensure_train_log_exists"):
                 logger.ensure_train_log_exists()
@@ -773,31 +770,27 @@ def train_symbol_group_loop(sleep_sec: int = 0, stop_event: threading.Event | No
         groups = _rotate_groups_starting_with(SYMBOL_GROUPS, anchor_symbol="BTCUSDT")
 
         for idx, group in enumerate(groups):
-            # ⛔️ 새 그룹에 들어가기 전에만 stop 체크 (이번 그룹 도중엔 예측까지 보장)
+            # ⛔️ 새 그룹에 들어가기 전에만 stop 체크
             if stop_event is not None and stop_event.is_set():
-                print("[STOP] train_symbol_group_loop: stop_event 감지(다음 그룹 진입 전) → 종료"); break
+                print("[STOP] train_symbol_group_loop: stop_event 감지(다음 그룹 진입 전) → 종료", flush=True); break
 
-            print(f"🚀 [train_symbol_group_loop] 그룹 #{idx+1}/{len(groups)} → {group} | mode=per_symbol_all_horizons")
+            print(f"🚀 [train_symbol_group_loop] 그룹 #{idx+1}/{len(groups)} → {group} | mode=per_symbol_all_horizons", flush=True)
 
             # 1) 그룹 학습
             train_models(group, stop_event=stop_event)
 
-            # [FIX] stop이 걸렸으면 **예측 없이 즉시 종료**
+            # stop이면 예측 생략 후 종료
             if stop_event is not None and stop_event.is_set():
-                print("🛑 stop 요청 반영 → 그룹 학습 직후 즉시 종료(예측 생략)")
+                print("🛑 stop 요청 반영 → 그룹 학습 직후 즉시 종료(예측 생략)", flush=True)
                 break
 
             # ✅ 모델 저장 직후 I/O 안정화
             time.sleep(0.2)
 
-            # 2) 그룹 학습 완료 후 단 한 번씩 **예측만** 수행 (평가 호출 제거)
+            # 2) 그룹 학습 완료 후 단 한 번씩 **예측만** 수행 (타임아웃 보호)
             for symbol in group:
                 for strategy in ["단기", "중기", "장기"]:
-                    try:
-                        print(f"🔮 [즉시예측] {symbol}-{strategy}")
-                        predict(symbol, strategy, source="그룹직후", model_type=None)
-                    except Exception as e:
-                        print(f"[⚠️ 예측 실패] {symbol}-{strategy}: {e}")
+                    _safe_predict_with_timeout(predict, symbol, strategy, source="그룹직후", model_type=None)
 
             # 3) 그룹 종료 정리
             _prune_caches_and_gc()
@@ -805,14 +798,14 @@ def train_symbol_group_loop(sleep_sec: int = 0, stop_event: threading.Event | No
             if sleep_sec > 0:
                 for _ in range(sleep_sec):
                     if stop_event is not None and stop_event.is_set():
-                        print("[STOP] train_symbol_group_loop: stop_event 감지(sleep) → 종료"); break
+                        print("[STOP] train_symbol_group_loop: stop_event 감지(sleep) → 종료", flush=True); break
                     time.sleep(1)
                 if stop_event is not None and stop_event.is_set():
                     break
 
-        print("✅ train_symbol_group_loop 완료")
+        print("✅ train_symbol_group_loop 완료", flush=True)
     except Exception as e:
-        print(f"[❌ train_symbol_group_loop 예외] {e}")
+        print(f"[❌ train_symbol_group_loop 예외] {e}", flush=True)
 
 # --------------------------------------------------
 # ✅ 루프 제어 유틸: 중복 방지용 (단일 루프 보장)
@@ -825,25 +818,21 @@ def start_train_loop(force_restart: bool = False, sleep_sec: int = 0):
     """학습 루프를 1개만 실행. force_restart=True면 기존 루프를 먼저 정지."""
     global _TRAIN_LOOP_THREAD, _TRAIN_LOOP_STOP
     with _TRAIN_LOOP_LOCK:
-        # 이미 돌고 있으면…
         if _TRAIN_LOOP_THREAD is not None and _TRAIN_LOOP_THREAD.is_alive():
             if not force_restart:
-                print("ℹ️ start_train_loop: 기존 루프가 실행 중 → 재시작 생략"); return False
-            # 강제 재시작: 먼저 정지
-            print("🛑 start_train_loop: 기존 루프 정지 시도")
+                print("ℹ️ start_train_loop: 기존 루프가 실행 중 → 재시작 생략", flush=True); return False
+            print("🛑 start_train_loop: 기존 루프 정지 시도", flush=True)
             stop_train_loop(timeout=30)
 
-        # 새 이벤트/스레드 준비
         _TRAIN_LOOP_STOP = threading.Event()
         def _runner():
             try:
                 train_symbol_group_loop(sleep_sec=sleep_sec, stop_event=_TRAIN_LOOP_STOP)
             finally:
-                # 스레드 종료 시 클리어
-                print("ℹ️ train loop thread 종료")
+                print("ℹ️ train loop thread 종료", flush=True)
         _TRAIN_LOOP_THREAD = threading.Thread(target=_runner, daemon=True)
         _TRAIN_LOOP_THREAD.start()
-        print("✅ train loop 시작됨 (단일 인스턴스 보장)")
+        print("✅ train loop 시작됨 (단일 인스턴스 보장)", flush=True)
         return True
 
 def stop_train_loop(timeout: int | float | None = 30):
@@ -851,21 +840,20 @@ def stop_train_loop(timeout: int | float | None = 30):
     global _TRAIN_LOOP_THREAD, _TRAIN_LOOP_STOP
     with _TRAIN_LOOP_LOCK:
         if _TRAIN_LOOP_THREAD is None or not _TRAIN_LOOP_THREAD.is_alive():
-            print("ℹ️ stop_train_loop: 실행 중인 루프 없음"); return True
+            print("ℹ️ stop_train_loop: 실행 중인 루프 없음", flush=True); return True
         if _TRAIN_LOOP_STOP is None:
-            print("⚠️ stop_train_loop: stop_event 없음(비정상 상태)"); return False
-        # 중단 요청
+            print("⚠️ stop_train_loop: stop_event 없음(비정상 상태)", flush=True); return False
         _TRAIN_LOOP_STOP.set()
         _TRAIN_LOOP_THREAD.join(timeout=timeout)
         if _TRAIN_LOOP_THREAD.is_alive():
-            print("⚠️ stop_train_loop: 타임아웃 — 여전히 실행 중")
+            print("⚠️ stop_train_loop: 타임아웃 — 여전히 실행 중", flush=True)
             return False
         _TRAIN_LOOP_THREAD = None
         _TRAIN_LOOP_STOP = None
-        print("✅ stop_train_loop: 정상 종료")
+        print("✅ stop_train_loop: 정상 종료", flush=True)
         return True
 
-# ✅ app.py의 reset-all이 즉시 사용할 수 있도록 보조 API 추가
+# ✅ app.py의 reset-all이 즉시 사용할 수 있도록 보조 API
 def request_stop() -> bool:
     """외부에서 중단 신호만 보내고 즉시 반환(폴링은 호출측에서)."""
     global _TRAIN_LOOP_STOP
@@ -881,9 +869,7 @@ def is_loop_running() -> bool:
         return bool(_TRAIN_LOOP_THREAD is not None and _TRAIN_LOOP_THREAD.is_alive())
 
 if __name__ == "__main__":
-    # 필요 시 간단 실행 진입점
     try:
-        # 단일 루프 보장 방식으로 시작
         start_train_loop(force_restart=True, sleep_sec=0)
     except Exception as e:
-        print(f"[MAIN] 예외: {e}")
+        print(f"[MAIN] 예외: {e}", flush=True)
