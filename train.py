@@ -26,7 +26,12 @@ if not _DISABLE_LIGHTNING:
         _HAS_LIGHTNING=True
     except: _HAS_LIGHTNING=False
 
-from data.utils import get_kline_by_strategy, compute_features, create_dataset, SYMBOL_GROUPS
+# ✅ 순서제어 래퍼 포함 임포트
+from data.utils import (
+    get_kline_by_strategy, compute_features, create_dataset, SYMBOL_GROUPS,
+    should_train_symbol, mark_symbol_trained, ready_for_group_predict, mark_group_predicted
+)
+
 from model.base_model import get_model
 from feature_importance import compute_feature_importance, save_feature_importance  # 호환 유지
 from failure_db import insert_failure_record, ensure_failure_db
@@ -382,7 +387,11 @@ def _safe_predict_with_timeout(predict_fn,symbol,strategy,source,model_type=None
 def train_models(symbol_list, stop_event: threading.Event | None = None):
     strategies=["단기","중기","장기"]
     for symbol in symbol_list:
+        # ✅ 현재 그룹 차례가 아니면 스킵
+        if not should_train_symbol(symbol):
+            continue
         if stop_event is not None and stop_event.is_set(): print("[STOP] train_models: early", flush=True); return
+        trained_any=False
         for strategy in strategies:
             if stop_event is not None and stop_event.is_set(): print("[STOP] train_models: early(strategy)", flush=True); return
             try:
@@ -405,9 +414,14 @@ def train_models(symbol_list, stop_event: threading.Event | None = None):
                         logger.log_training_result(symbol,strategy,model=f"group{gid}",accuracy=0.0,f1=0.0,loss=0.0,note=f"스킵: group_id={gid}, 경계계산실패 {e}",status="skipped")
                     except: pass
                     continue
-                train_one_model(symbol,strategy,group_id=gid)
+                res=train_one_model(symbol,strategy,group_id=gid)
+                if res and isinstance(res,dict) and res.get("models"):
+                    trained_any=True
                 if stop_event is not None and stop_event.is_set(): print("[STOP] train_models: after one model", flush=True); return
                 time.sleep(0.5)
+        # ✅ 심볼 단위 학습 완료 표기(한 모델이라도 저장된 경우)
+        if trained_any:
+            mark_symbol_trained(symbol)
     try:
         import maintenance_fix_meta; maintenance_fix_meta.fix_all_meta_json()
     except Exception as e: print(f"[meta fix skip] {e}", flush=True)
@@ -441,12 +455,21 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
         for idx, group in enumerate(groups):
             if stop_event is not None and stop_event.is_set(): print("[STOP] group loop enter", flush=True); break
             print(f"🚀 [group] {idx+1}/{len(groups)} → {group}", flush=True)
+
+            # ✅ 현재 그룹만 학습(should_train_symbol은 train_models 내부에서 필터)
             train_models(group, stop_event=stop_event)
             if stop_event is not None and stop_event.is_set(): print("🛑 stop after train → exit", flush=True); break
-            time.sleep(0.2)
-            for symbol in group:
-                for strategy in ["단기","중기","장기"]:
-                    _safe_predict_with_timeout(predict, symbol, strategy, source="그룹직후", model_type=None)
+
+            # ✅ 그룹 전 심볼 학습 완료 시에만 예측 → 다음 그룹으로 이동
+            if ready_for_group_predict():
+                time.sleep(0.2)
+                for symbol in group:
+                    for strategy in ["단기","중기","장기"]:
+                        _safe_predict_with_timeout(predict, symbol, strategy, source="그룹직후", model_type=None)
+                mark_group_predicted()
+            else:
+                print(f"[⏸ 대기] 그룹{idx} 일부 미학습 → 예측 보류")
+
             _prune_caches_and_gc()
             if sleep_sec>0:
                 for _ in range(sleep_sec):
