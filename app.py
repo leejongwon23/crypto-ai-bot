@@ -301,7 +301,7 @@ def yopo_health():
 
     # 모델 파일 파싱
     try:
-        model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
+        model_files = [f for f in os.listdir(MODE_DIR) if f.endswith(".pt")]
     except Exception:
         model_files = []
     model_info = {}
@@ -597,8 +597,30 @@ def reset_all(key=None):
     ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     print(f"[RESET] 요청 수신 from {ip} UA={ua}"); sys.stdout.flush()
 
+    # 🛡️ 워치독: 초기화가 어떤 이유로든 걸려도 반드시 내려가도록 타이머 무장
+    def _arm_reset_watchdog(seconds: int):
+        seconds = max(30, int(seconds))
+        def _kill():
+            print(f"🛑 [WATCHDOG] reset watchdog fired after {seconds}s → os._exit(0)"); sys.stdout.flush()
+            try:
+                _release_global_lock()
+            finally:
+                os._exit(0)
+        t = threading.Timer(seconds, _kill)
+        t.daemon = True
+        t.start()
+        return t
+
     # 백그라운드 작업 정의
     def _do_reset_work():
+        # ---- 환경설정(시간) 먼저 파싱하고 워치독 무장 ----
+        stop_timeout = int(os.getenv("RESET_STOP_TIMEOUT", "30"))
+        max_wait     = int(os.getenv("RESET_MAX_WAIT_SEC", "600"))
+        poll_sec     = max(1, int(os.getenv("RESET_POLL_SEC", "3")))
+        # 워치독은 전체 예상 시간보다 조금 길게(여유 60s)
+        watchdog_sec = int(os.getenv("RESET_WATCHDOG_SEC", str(stop_timeout + max_wait + 60)))
+        _wd = _arm_reset_watchdog(watchdog_sec)
+
         try:
             from data.utils import _kline_cache, _feature_cache
             import importlib
@@ -626,7 +648,6 @@ def reset_all(key=None):
             print("[RESET] 백그라운드 초기화 시작"); sys.stdout.flush()
 
             # 1) 학습 루프 정지
-            stop_timeout = int(os.getenv("RESET_STOP_TIMEOUT", "30"))
             try:
                 if hasattr(train, "request_stop"):
                     train.request_stop()
@@ -641,10 +662,8 @@ def reset_all(key=None):
                 print(f"⚠️ [RESET] stop_train_loop 예외: {e}"); sys.stdout.flush()
             print(f"[RESET] stop_train_loop 결과: {stopped}"); sys.stdout.flush()
 
-            # 🆕 1-1) 30초 내 미정지 시, 완전 종료까지 폴링 대기(기본 600s)
+            # 🆕 1-1) 미정지 시 폴링 대기(최대 max_wait)
             if not stopped:
-                max_wait = int(os.getenv("RESET_MAX_WAIT_SEC", "600"))
-                poll_sec = max(1, int(os.getenv("RESET_POLL_SEC", "3")))
                 t0 = time.time()
                 print(f"[RESET] 정지 대기 시작… 최대 {max_wait}s (폴링 {poll_sec}s)"); sys.stdout.flush()
                 while time.time() - t0 < max_wait:
@@ -666,7 +685,7 @@ def reset_all(key=None):
                     time.sleep(poll_sec)
                 print(f"[RESET] 정지 대기 완료 → stopped={stopped}"); sys.stdout.flush()
 
-            # 🆕 1-2) 그래도 안 멈추면 **하드 종료** (3번 요구사항: 강제 중단 경로 + 프로세스 재기동)
+            # 🆕 1-2) 그래도 안 멈추면 **하드 종료**
             if not stopped:
                 print("🛑 [RESET] 루프가 종료되지 않음 → 하드 종료(os._exit) 수행"); sys.stdout.flush()
                 try:
@@ -757,6 +776,11 @@ def reset_all(key=None):
             # ✅ 정리 완료 → 락 해제 후 즉시 종료(플랫폼이 재부팅)
             print("🔚 [RESET] 정리 완료 → 프로세스 종료(os._exit)로 재부팅 진행"); sys.stdout.flush()
             _release_global_lock()
+            # 워치독이 더 먼저 쏘지 않도록 취소 후 종료
+            try:
+                _wd.cancel()
+            except Exception:
+                pass
             os._exit(0)
 
         except Exception as e:
