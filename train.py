@@ -441,16 +441,8 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
             if hasattr(logger,"ensure_prediction_log_exists"): logger.ensure_prediction_log_exists()
         except: pass
 
-        groups=_rotate_groups_starting_with(SYMBOL_GROUPS, anchor_symbol="BTCUSDT")
-
-        # --- 결정적 심볼 정렬(옵션, 환경변수 SYMBOL_ORDER 지원) ---
-        _CANON=os.getenv("SYMBOL_ORDER","BTCUSDT,ETHUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,SOLUSDT,TRXUSDT,DOTUSDT,AVAXUSDT,MATICUSDT").split(",")
-        _rank={s:i for i,s in enumerate(_CANON)}
-        def _sort_by_canon(g):
-            if "BTCUSDT" in g:
-                return ["BTCUSDT"] + [s for s in sorted([x for x in g if x!="BTCUSDT"], key=lambda k:_rank.get(k,10_000))]
-            return sorted(g, key=lambda k:_rank.get(k,10_000))
-        groups=[_sort_by_canon(g) for g in groups]
+        # ✅ 그룹 순서/구성: SYMBOL_GROUPS 를 있는 그대로 사용 (정렬/회전 없음)
+        groups=[list(g) for g in SYMBOL_GROUPS]
 
         for idx, group in enumerate(groups):
             if stop_event is not None and stop_event.is_set(): print("[STOP] group loop enter", flush=True); break
