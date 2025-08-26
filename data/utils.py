@@ -85,9 +85,11 @@ def _select_60(symbols):
 
 def _compute_groups(symbols,group_size=5): return [symbols[i:i+group_size] for i in range(0,len(symbols),group_size)]
 
-_env_syms=_discover_from_env(); _model_syms=_discover_from_models()
-SYMBOLS=_select_60(_merge_unique(_env_syms,_model_syms,_BASELINE_SYMBOLS))
+# ✅ [고정화] 심볼/그룹: 환경/모델 발견값과 무관하게 _BASELINE_SYMBOLS 그대로 사용
+# (discover 함수들은 호환 유지를 위해 남겨두되, 여기서는 사용하지 않음)
+SYMBOLS=list(_BASELINE_SYMBOLS)
 SYMBOL_GROUPS=_compute_groups(SYMBOLS,5)
+
 SYMBOL_MAP["bybit"]={s:s for s in SYMBOLS}; SYMBOL_MAP["binance"]={s:s for s in SYMBOLS}
 def get_ALL_SYMBOLS(): return list(SYMBOLS)
 def get_SYMBOL_GROUPS(): return list(SYMBOL_GROUPS)
