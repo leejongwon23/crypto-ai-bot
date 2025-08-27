@@ -682,11 +682,14 @@ def reset_all(key=None):
     # 백그라운드 작업 정의
     def _do_reset_work():
         # ---- 환경설정(시간) 먼저 파싱하고 워치독 무장 ----
-        stop_timeout = int(os.getenv("RESET_STOP_TIMEOUT", "30"))
-        max_wait     = int(os.getenv("RESET_MAX_WAIT_SEC", "600"))
-        poll_sec     = max(1, int(os.getenv("RESET_POLL_SEC", "3")))
-        # 워치독은 전체 예상 시간보다 조금 길게(여유 60s)
-        watchdog_sec = int(os.getenv("RESET_WATCHDOG_SEC", str(stop_timeout + max_wait + 60)))
+        # ⏱️ 보다 공격적인 기본값으로 단축
+        stop_timeout = int(os.getenv("RESET_STOP_TIMEOUT", "12"))   # 기존 30 → 12s
+        max_wait     = int(os.getenv("RESET_MAX_WAIT_SEC", "120"))  # 기존 600 → 120s
+        poll_sec     = max(1, int(os.getenv("RESET_POLL_SEC", "2")))# 기존 3 → 2s
+        # 워치독: 전체 합 + 여유 30s
+        watchdog_sec = int(os.getenv("RESET_WATCHDOG_SEC", str(stop_timeout + max_wait + 30)))
+        # 즉시 격리-와이프 옵션(기본 활성화)
+        qwipe_early  = os.getenv("RESET_QWIPE_EARLY", "1") == "1"
         _wd = _arm_reset_watchdog(watchdog_sec)
 
         try:
@@ -730,6 +733,14 @@ def reset_all(key=None):
                 print(f"⚠️ [RESET] stop_train_loop 예외: {e}"); sys.stdout.flush()
             print(f"[RESET] stop_train_loop 결과: {stopped}"); sys.stdout.flush()
 
+            # 🧨 (선택) 빠른 종료가 안 되면 **초기 단계에서 바로 QWIPE**로 리소스/파일 충돌 최소화
+            if (not stopped) and qwipe_early:
+                try:
+                    print("[RESET] 빠른 정지 실패 → 조기 QWIPE 수행"); sys.stdout.flush()
+                    _quarantine_wipe_persistent()
+                except Exception as e:
+                    print(f"⚠️ [RESET] 조기 QWIPE 실패: {e}"); sys.stdout.flush()
+
             # 🆕 1-1) 미정지 시 폴링 대기(최대 max_wait)
             if not stopped:
                 t0 = time.time()
@@ -753,10 +764,11 @@ def reset_all(key=None):
                     time.sleep(poll_sec)
                 print(f"[RESET] 정지 대기 완료 → stopped={stopped}"); sys.stdout.flush()
 
-            # 🆕 1-2) 그래도 안 멈추면 **격리-와이프 후 하드 종료**
+            # 🆕 1-2) 그래도 안 멈추면 **격리-와이프 보장 후 하드 종료**
             if not stopped:
                 print("🛑 [RESET] 루프가 종료되지 않음 → QWIPE 후 하드 종료(os._exit)"); sys.stdout.flush()
                 try:
+                    # 조기 QWIPE를 못 했거나 실패했다면 한 번 더 시도
                     _quarantine_wipe_persistent()
                 except Exception as e:
                     print(f"⚠️ [RESET] QWIPE 실패: {e}")
