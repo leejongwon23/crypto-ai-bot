@@ -6,6 +6,7 @@ import datetime
 import pytz
 import torch
 import glob
+import threading  # ✅ stop 이벤트 인지용
 
 from model.base_model import get_model  # 현재 모델 구조 확인용
 from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE
@@ -317,11 +318,18 @@ def _validate_and_fix(path: str, fname: str):
         print(f"[OK] {fname} → 수정 불필요")
         return False, "ok"
 
-def fix_all_meta_json():
+def fix_all_meta_json(stop_event: threading.Event | None = None):
     """
     /persistent/models 내 *.meta.json을 일괄 점검 및 복구.
     복구 실패해도 플로우는 계속(경고만 출력).
+
+    ✅ 변경점:
+    - stop_event가 설정되면 즉시/주기적으로 중단(리셋 시 빠른 탈출 보장)
+    - 대용량 처리에서 배치 단위로 주기적 휴지/체크
     """
+    def _should_stop():
+        return (stop_event is not None) and stop_event.is_set()
+
     if not os.path.isdir(MODEL_DIR):
         print(f"[⚠️ 디렉터리 없음] {MODEL_DIR}")
         return
@@ -331,7 +339,11 @@ def fix_all_meta_json():
         print("[ℹ️ 대상 meta.json 없음]")
         return
 
-    for file in sorted(files):
+    files.sort()
+    for i, file in enumerate(files, 1):
+        if _should_stop():
+            print("[STOP] fix_all_meta_json canceled")
+            break
         path = os.path.join(MODEL_DIR, file)
         try:
             _validate_and_fix(path, file)
@@ -340,6 +352,12 @@ def fix_all_meta_json():
             meta = {}
             _fill_defaults(meta, _parse_from_filename(file), file)
             _safe_write_json(path, meta)
+
+        # ✅ 주기적 휴지/중단 체크(응답성 향상)
+        if (i % 10) == 0:
+            if _should_stop():
+                print("[STOP] fix_all_meta_json canceled (batch)")
+                break
 
 def check_meta_input_size():
     files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".meta.json")]
