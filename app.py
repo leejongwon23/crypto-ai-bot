@@ -587,51 +587,58 @@ def check_eval_log():
 
 from data.utils import SYMBOL_GROUPS
 
-@app.route("/train-symbols")
+# ✅ 단일 핸들러로 통합된 /train-symbols (GET: group, POST: symbols)
+@app.route("/train-symbols", methods=["GET","POST"])
 def train_symbols():
     try:
         if os.path.exists(LOCK_PATH):
-            return f"⏸️ 초기화 중: 그룹 학습 시작 차단됨", 423
+            return f"⏸️ 초기화 중: 그룹/선택 학습 시작 차단됨", 423
 
-        group_idx = int(request.args.get("group", -1))
-        force = request.args.get("force", "0") == "1"
-        if group_idx < 0 or group_idx >= len(SYMBOL_GROUPS):
-            return f"❌ 잘못된 그룹 번호: {group_idx}", 400
-        group_symbols = SYMBOL_GROUPS[group_idx]
+        # 공통: 단일 학습 루프 보장
+        def _ensure_single_loop(force_flag: bool):
+            if train.is_loop_running():
+                if not force_flag:
+                    return False, ("🚫 이미 메인 학습 루프 실행 중 (force=1 또는 force=true 로 강제 교체 가능)", 409)
+                try:
+                    train.stop_train_loop(timeout=45)
+                except Exception:
+                    pass
+            return True, None
 
-        # 단일 루프 보장
-        if train.is_loop_running():
-            if not force:
-                return "🚫 이미 메인 학습 루프 실행 중 (force=1 로 강제 교체 가능)", 409
-            train.stop_train_loop(timeout=45)
+        if request.method == "GET":
+            # 그룹 학습: /train-symbols?group=0&force=1
+            group_idx = int(request.args.get("group", -1))
+            force = request.args.get("force", "0") == "1"
 
-        print(f"🚀 그룹 학습 요청됨 → 그룹 #{group_idx} | 심볼: {group_symbols}")
-        threading.Thread(target=lambda: train.train_models(group_symbols), daemon=True).start()
-        return f"✅ 그룹 #{group_idx} 학습 시작됨 (단일 루프 보장)"
+            if group_idx < 0 or group_idx >= len(SYMBOL_GROUPS):
+                return f"❌ 잘못된 그룹 번호: {group_idx}", 400
+
+            ok, resp = _ensure_single_loop(force)
+            if not ok:
+                return resp
+
+            group_symbols = SYMBOL_GROUPS[group_idx]
+            print(f"🚀 그룹 학습 요청됨 → 그룹 #{group_idx} | 심볼: {group_symbols}")
+            threading.Thread(target=lambda: train.train_models(group_symbols), daemon=True).start()
+            return f"✅ 그룹 #{group_idx} 학습 시작됨 (단일 루프 보장)"
+
+        else:
+            # 선택 학습: POST {"symbols":["BTCUSDT","ETHUSDT"], "force":true}
+            body = request.get_json(silent=True) or {}
+            symbols = body.get("symbols", [])
+            force = bool(body.get("force", False))
+
+            if not isinstance(symbols, list) or not symbols:
+                return "❌ 유효하지 않은 symbols 리스트", 400
+
+            ok, resp = _ensure_single_loop(force)
+            if not ok:
+                return resp
+
+            threading.Thread(target=lambda: train.train_models(symbols), daemon=True).start()
+            return f"✅ {len(symbols)}개 심볼 학습 시작됨 (단일 루프 보장)"
     except Exception as e:
         traceback.print_exc(); return f"❌ 오류: {e}", 500
-
-@app.route("/train-symbols", methods=["POST"])
-def train_selected_symbols():
-    try:
-        if os.path.exists(LOCK_PATH):
-            return "⏸️ 초기화 중: 선택 학습 시작 차단됨", 423
-
-        body = request.get_json(silent=True) or {}
-        symbols = body.get("symbols", [])
-        force = bool(body.get("force", False))
-        if not isinstance(symbols, list) or not symbols:
-            return "❌ 유효하지 않은 symbols 리스트", 400
-
-        if train.is_loop_running():
-            if not force:
-                return "🚫 이미 메인 학습 루프 실행 중 (force=true 로 강제 교체 가능)", 409
-            train.stop_train_loop(timeout=45)
-
-        threading.Thread(target=lambda: train.train_models(symbols), daemon=True).start()
-        return f"✅ {len(symbols)}개 심볼 학습 시작됨 (단일 루프 보장)"
-    except Exception as e:
-        return f"❌ 학습 실패: {e}", 500
 
 @app.route("/meta-fix-now")
 def meta_fix_now():
