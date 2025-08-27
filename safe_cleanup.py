@@ -1,4 +1,4 @@
-# safe_cleanup.py (FIXED-CONFIG: env 없이 동작, 스케줄러 포함 / micro-fix3, 10GB 서버용 튜닝)
+# safe_cleanup.py (FIXED-CONFIG: env 없이 동작, 스케줄러 포함 / micro-fix3, 10GB 서버용 튜닝 + 모델·메타 세트 정리 강화)
 import os
 import time
 import threading
@@ -33,6 +33,7 @@ DRYRUN = False
 # ✅ (5번) 압축 모델 확장자도 동일 취급
 MODEL_EXTS = (".pt", ".ptz", ".safetensors")
 META_EXT = ".meta.json"
+_PREFERRED_WEIGHT_EXTS = (".ptz", ".safetensors", ".pt")  # 보존 우선순위
 
 DELETE_PREFIXES = ["prediction_", "evaluation_", "wrong_", "model_", "ssl_", "meta_", "evo_"]
 EXCLUDE_FILES = {
@@ -47,6 +48,7 @@ ROOT_CSVS = [
     os.path.join(ROOT_DIR, "train_log.csv"),
 ]
 
+# ----------------- 공통 유틸 -----------------
 def _size_bytes(path: str) -> int:
     try:
         return os.path.getsize(path)
@@ -78,6 +80,14 @@ def _ensure_dirs():
     os.makedirs(SSL_DIR, exist_ok=True)
     os.makedirs(LOCK_DIR, exist_ok=True)
 
+def _is_within(child: str, parent: str) -> bool:
+    try:
+        child_abs  = os.path.abspath(child)
+        parent_abs = os.path.abspath(parent)
+        return os.path.commonpath([child_abs, parent_abs]) == parent_abs
+    except Exception:
+        return False
+
 def _is_model_file(path: str) -> bool:
     """models/ 내부의 .pt/.ptz/.safetensors 및 짝 메타를 모델로 본다."""
     if not isinstance(path, str):
@@ -86,7 +96,7 @@ def _is_model_file(path: str) -> bool:
     # 모델 가중치
     if any(base.endswith(ext) for ext in MODEL_EXTS):
         return True
-    # 메타(모델과 세트) — 파일명이 *_*.meta.json 형태라 접두사 체크가 안 먹었음
+    # 메타(모델과 세트)
     if base.endswith(META_EXT):
         return True
     return False
@@ -101,11 +111,10 @@ def _should_delete_file(fname: str) -> bool:
         return False
     # models/ 디렉토리의 모델/메타 파일은 접두사와 무관하게 삭제 후보
     try:
-        if os.path.commonpath([os.path.abspath(fname), os.path.abspath(MODEL_DIR)]) == os.path.abspath(MODEL_DIR):
+        if _is_within(fname, MODEL_DIR):
             if _is_model_file(fname):
                 return True
     except Exception:
-        # 공통 경로 계산 실패 시 무시
         pass
     # 일반 접두사 규칙
     return any(base.startswith(p) for p in DELETE_PREFIXES)
@@ -150,6 +159,57 @@ def _delete_file(path: str, deleted_log: list):
     except Exception as e:
         print(f"[경고] 삭제 실패: {path} | {e}")
 
+# ----------------- 모델·메타 세트 관리 -----------------
+def _split_stem_and_ext(path: str):
+    """
+    returns: (stem, ext)
+      - meta: "xxx.meta.json" -> ("xxx", ".meta.json")
+      - weight: "xxx.ptz" -> ("xxx", ".ptz")
+    """
+    base = os.path.basename(path)
+    if base.endswith(".meta.json"):
+        stem = base[:-10]  # drop ".meta.json"
+        ext = ".meta.json"
+        return stem, ext
+    root, ext = os.path.splitext(base)
+    return root, ext
+
+def _collect_model_sets():
+    """
+    models/ 내 파일들을 stem 기준으로 세트(가중치+메타)로 묶어서 반환.
+    return: dict[stem] = {"weights": {ext: path}, "meta": path|None, "mtime": latest_mtime}
+    (보호시간에 해당하는 최신 파일은 제외하여 삭제 후보만 대상으로 함)
+    """
+    sets = {}
+    for p in _list_files(MODEL_DIR):
+        if not os.path.isfile(p):
+            continue
+        if not _is_model_file(p):
+            continue
+        if _is_recent(p, PROTECT_HOURS):
+            continue
+        stem, ext = _split_stem_and_ext(p)
+        st = sets.setdefault(stem, {"weights": {}, "meta": None, "mtime": 0.0})
+        try:
+            mtime = os.path.getmtime(p)
+        except Exception:
+            mtime = 0.0
+        st["mtime"] = max(st["mtime"], mtime)
+        if ext == ".meta.json":
+            st["meta"] = p
+        else:
+            st["weights"][ext] = p
+    return sets
+
+def _key_from_stem(stem: str) -> str:
+    """
+    stem: 'BTCUSDT_단기_lstm_group1_cls3' -> key: 'BTCUSDT_단기_lstm'
+    (심볼_전략_모델 단위로 버킷팅)
+    """
+    parts = stem.split("_")
+    return "_".join(parts[:3]) if len(parts) >= 3 else stem
+
+# ----------------- 삭제/보존 로직 -----------------
 def _delete_old_by_days(paths, cutoff_dt, deleted_log, accept_all=False):
     for d in paths:
         for p in _list_files(d):
@@ -196,30 +256,59 @@ def _delete_until_target(deleted_log, target_gb):
 
 def _limit_models_per_key(deleted_log):
     """
-    (변경 없음) 전체 모델 파일(.pt/.ptz/.safetensors/메타)을 시간 역순으로 정렬한 뒤
-    심볼_전략_모델 키별로 최신 MAX_MODELS_PER_KEY만 남김.
+    모델/메타를 '세트'로 묶어 심볼_전략_모델 단위로 MAX_MODELS_PER_KEY '세트'만 남긴다.
+    - 세트 내 가중치는 선호 확장자 1개만 유지(.ptz > .safetensors > .pt)
+    - 세트 외 나머지 가중치/메타는 삭제
+    - 전체 상한(MAX_MODELS_KEEP_GLOBAL)도 세트 기준으로 적용
     """
-    files = [p for p in _list_files(MODEL_DIR) if os.path.isfile(p)]
-    files = [p for p in files if not _is_recent(p, PROTECT_HOURS)]
-    files.sort(key=os.path.getmtime, reverse=True)
+    sets = _collect_model_sets()
+    if not sets:
+        return
 
-    if len(files) > MAX_MODELS_KEEP_GLOBAL:
-        for p in files[MAX_MODELS_KEEP_GLOBAL:]:
-            _delete_file(p, deleted_log)
+    # 세트 단위로 정렬(최신 mtime 우선)
+    items = [(stem, data) for stem, data in sets.items()]
+    items.sort(key=lambda x: x[1]["mtime"], reverse=True)
 
+    # 글로벌 상한: 초과 세트는 전부 삭제
+    if len(items) > MAX_MODELS_KEEP_GLOBAL:
+        for stem, data in items[MAX_MODELS_KEEP_GLOBAL:]:
+            for wpath in data["weights"].values():
+                _delete_file(wpath, deleted_log)
+            if data["meta"]:
+                _delete_file(data["meta"], deleted_log)
+        items = items[:MAX_MODELS_KEEP_GLOBAL]
+
+    # 버킷(심볼_전략_모델)별 상한 적용
     from collections import defaultdict
     buckets = defaultdict(list)
-    for p in files:
-        base = os.path.basename(p)
-        key = base.split(".")[0]
-        parts = key.split("_")
-        simple = "_".join(parts[:3]) if len(parts) >= 3 else key
-        buckets[simple].append(p)
+    for stem, data in items:
+        buckets[_key_from_stem(stem)].append((stem, data))
 
-    for key, items in buckets.items():
-        items.sort(key=os.path.getmtime, reverse=True)
-        for p in items[MAX_MODELS_PER_KEY:]:
-            _delete_file(p, deleted_log)
+    for key, arr in buckets.items():
+        # 최신 세트 MAX_MODELS_PER_KEY개만 보존, 나머지는 삭제
+        arr.sort(key=lambda x: x[1]["mtime"], reverse=True)
+        keep = arr[:MAX_MODELS_PER_KEY]
+        drop = arr[MAX_MODELS_PER_KEY:]
+
+        # 보존 세트: 가중치는 선호 확장자 1개만 유지(+메타는 그대로 유지)
+        for stem, data in keep:
+            chosen = None
+            for ext in _PREFERRED_WEIGHT_EXTS:
+                if ext in data["weights"]:
+                    chosen = ext
+                    break
+            for ext, wpath in list(data["weights"].items()):
+                if chosen is not None and ext == chosen:
+                    continue
+                _delete_file(wpath, deleted_log)
+            # 메타는 있으면 보존 (삭제하지 않음)
+
+        # 드롭 세트: 전부 삭제(가중치+메타)
+        for stem, data in drop:
+            for wpath in data["weights"].values():
+                _delete_file(wpath, deleted_log)
+            if data["meta"]:
+                _delete_file(data["meta"], deleted_log)
 
 def _vacuum_sqlite():
     targets = []
