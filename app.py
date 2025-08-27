@@ -48,6 +48,7 @@ os.makedirs(MODEL_DIR, exist_ok=True)  # ✅ 모델 디렉터리 보장
 LOCK_DIR   = getattr(safe_cleanup, "LOCK_DIR", os.path.join(PERSIST_DIR, "locks"))
 LOCK_PATH  = getattr(safe_cleanup, "LOCK_PATH", os.path.join(LOCK_DIR, "train_or_predict.lock"))
 os.makedirs(LOCK_DIR, exist_ok=True)
+if os.path.exists(LOCK_PATH) and not getattr(train, "is_loop_running", lambda: False)(): os.remove(LOCK_PATH)  # 🩹 orphan lock auto-clean
 
 def _acquire_global_lock():
     try:
