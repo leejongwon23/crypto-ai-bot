@@ -1,4 +1,4 @@
-# === train.py (COMPRESSED: same features, smaller size) ===
+# === train.py (STOP-friendly, cooperative cancel) ===
 import os
 def _set_default_thread_env(n: str, v: int):
     if os.getenv(n) is None: os.environ[n] = str(v)
@@ -168,7 +168,8 @@ def _safe_alias(src:str,dst:str):
     try:
         if os.path.islink(dst) or os.path.exists(dst): os.remove(dst)
     except: pass
-    try: os.link(src,dst)
+    try:
+        os.link(src,dst)
     except: shutil.copyfile(src,dst)
 
 def _emit_aliases(model_path:str, meta_path:str, symbol:str, strategy:str, model_type:str):
@@ -216,8 +217,9 @@ if _HAS_LIGHTNING:
 
 # ⏱ TIMEOUT GUARD: 안전 실행 헬퍼 (multiprocessing 우선, 실패 시 thread 대체)
 import multiprocessing as _mp
-def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0):
-    """fn(*args, **kwargs)를 별도 프로세스에서 실행하고 timeout_sec 내 결과만 수집."""
+def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0, stop_event: threading.Event | None = None):
+    """fn(*args, **kwargs)를 별도 프로세스에서 실행하고, timeout_sec 내 결과만 수집.
+       ✅ stop_event 가 켜지면 즉시 terminate 하여 대기 차단."""
     if kwargs is None: kwargs={}
     try:
         ctx=_mp.get_context("spawn")
@@ -230,18 +232,27 @@ def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0):
                 q.put(("err", str(e)))
         p=ctx.Process(target=_worker, args=(q, fn, args, kwargs), daemon=True)
         p.start()
-        p.join(timeout=timeout_sec)
-        if p.is_alive():
-            try: p.terminate()
-            except: pass
-            return ("timeout", None)
+        deadline=time.time()+float(timeout_sec)
+        # 🔁 짧은 간격으로 join하며 stop_event 감지
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                try: p.terminate()
+                except: pass
+                return ("canceled", None)
+            remaining=deadline-time.time()
+            if remaining<=0:
+                try: p.terminate()
+                except: pass
+                return ("timeout", None)
+            p.join(timeout=min(0.5, max(0.0, remaining)))
+            if not p.is_alive(): break
         try:
             status, payload=q.get_nowait()
         except Exception:
             status, payload=("err","no-result")
         return (status, payload)
     except Exception as e:
-        # 최후 fallback: thread 기반
+        # 최후 fallback: thread 기반 (stop_event 폴링)
         res=[None]; err=[None]; done=threading.Event()
         def _t():
             try:
@@ -251,8 +262,11 @@ def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0):
             finally:
                 done.set()
         t=threading.Thread(target=_t, daemon=True); t.start()
-        finished=done.wait(timeout=timeout_sec)
-        if not finished: return ("timeout", None)
+        deadline=time.time()+float(timeout_sec)
+        while True:
+            if done.wait(timeout=0.25): break
+            if stop_event is not None and stop_event.is_set(): return ("canceled", None)
+            if time.time()>=deadline: return ("timeout", None)
         return ("ok", res[0]) if err[0] is None else ("err", err[0])
 
 def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: threading.Event | None = None):
@@ -280,11 +294,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
 
         _check_stop(stop_event,"before compute_features")
 
-        # ⏱ TIMEOUT GUARD: compute_features 제한 실행
+        # ⏱ TIMEOUT GUARD: compute_features 제한 실행 (stop_event 연동)
         _feat_timeout=float(os.getenv("FEATURE_TIMEOUT_SEC","120"))
-        status, feat = _run_with_timeout(compute_features, args=(symbol,df,strategy), kwargs={}, timeout_sec=_feat_timeout)
+        status, feat = _run_with_timeout(compute_features, args=(symbol,df,strategy), kwargs={}, timeout_sec=_feat_timeout, stop_event=stop_event)
         if status != "ok" or feat is None or getattr(feat, "empty", True) or (hasattr(feat,"isnull") and feat.isnull().any().any()):
-            reason = "피처 타임아웃" if status=="timeout" else f"피처 실패({status})"
+            reason = "피처 타임아웃" if status=="timeout" else ("피처 취소" if status=="canceled" else f"피처 실패({status})")
             print(f"[FEATURE] {reason} → 스킵", flush=True)
             _log_skip(symbol,strategy, reason)
             return res
@@ -334,6 +348,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
         labels=np.array(labels,dtype=np.int64)
 
         features_only=feat.drop(columns=["timestamp","strategy"],errors="ignore")
+        _check_stop(stop_event,"before scaler")
         feat_scaled=MinMaxScaler().fit_transform(features_only)
 
         if len(feat_scaled)>_MAX_ROWS_FOR_TRAIN or len(labels)>_MAX_ROWS_FOR_TRAIN:
@@ -347,7 +362,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
         _check_stop(stop_event,"before sequence build")
         X,y=[],[]
         for i in range(len(feat_scaled)-window):
-            # 빠른 중단 체크
             if i % 64 == 0: 
                 try: _check_stop(stop_event,"seq build")
                 except _ControlledStop: break
@@ -356,13 +370,14 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
 
         if len(X)<20:
             try:
-                # ⏱ TIMEOUT GUARD: create_dataset 제한 실행
+                # ⏱ TIMEOUT GUARD: create_dataset 제한 실행 (stop_event 연동)
                 _cd_timeout=float(os.getenv("CREATE_DATASET_TIMEOUT_SEC","60"))
                 status_ds, ds = _run_with_timeout(
                     create_dataset,
                     args=(feat.to_dict(orient="records"),),
                     kwargs={"window":window,"strategy":strategy,"input_size":FEATURE_INPUT_SIZE},
-                    timeout_sec=_cd_timeout
+                    timeout_sec=_cd_timeout,
+                    stop_event=stop_event
                 )
                 if status_ds=="ok" and isinstance(ds,tuple) and len(ds)>=2:
                     X_fb,y_fb=ds[0],ds[1]
@@ -394,7 +409,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
                 callbacks=[]
                 if stop_event is not None: callbacks.append(_StopOnEvent(stop_event))
                 trainer=pl.Trainer(max_epochs=max_epochs, accelerator=("gpu" if torch.cuda.is_available() else "cpu"), devices=1, enable_checkpointing=False, logger=False, enable_model_summary=False, enable_progress_bar=False, callbacks=callbacks)
-                # ⚠️ 콜백에서 _ControlledStop 발생 시 즉시 상위로 전파되어 try/except로 graceful cancel
                 trainer.fit(lit,train_dataloaders=train_loader,val_dataloaders=val_loader)
                 model=lit.model.to(DEVICE)
                 _check_stop(stop_event,f"after PL train {model_type}")
@@ -433,7 +447,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             if torch.cuda.is_available(): torch.cuda.empty_cache()
         return res
     except _ControlledStop:
-        # 조용히 중단 처리 (성공/실패로 기록하지 않음)
         _safe_print(f"[STOP] train_one_model canceled: {symbol}-{strategy}-g{group_id}")
         return res
     except Exception as e:
@@ -498,7 +511,6 @@ def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
 def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_should: bool = False):
     strategies=["단기","중기","장기"]
     for symbol in symbol_list:
-        # ✅ 그룹/선택 학습에서만 should_train_symbol 우회
         if (not ignore_should) and (not should_train_symbol(symbol)):
             continue
         if stop_event is not None and stop_event.is_set(): print("[STOP] train_models: early", flush=True); return
@@ -531,7 +543,6 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
                 if stop_event is not None and stop_event.is_set(): print("[STOP] train_models: after one model", flush=True); return
                 time.sleep(0.1)  # 더 빠른 중단 반응
 
-        # ✅ 심볼 단위 학습 완료 표기(한 모델이라도 저장된 경우)
         if trained_any:
             mark_symbol_trained(symbol)
 
