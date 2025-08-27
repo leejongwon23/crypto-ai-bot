@@ -2,11 +2,10 @@
 
 from flask import Flask, jsonify, request, Response
 from recommend import main
-import train, os, threading, datetime, pytz, traceback, sys, shutil, csv, re, time  # 🆕 time 추가
+import train, os, threading, datetime, pytz, traceback, sys, shutil, re, time  # time 사용
 import pandas as pd  # ← ✅ 별칭 임포트는 단독 줄로 분리해야 문법 오류 없음
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram_bot import send_message
-from predict_test import test_all_predictions
 from predict_trigger import run as trigger_run
 from data.utils import SYMBOLS, get_kline_by_strategy
 from visualization import generate_visual_report, generate_visuals_for_strategy
@@ -15,7 +14,8 @@ from predict import evaluate_predictions
 from train import train_symbol_group_loop  # (호환용) 직접 호출 루트 남김
 import maintenance_fix_meta
 from logger import ensure_prediction_log_exists
-# 👇 여기만 수정 (예외 안전)
+
+# 👇 무결성 점검(있으면 실행)
 try:
     from integrity_guard import run as _integrity_check
     _integrity_check()
@@ -181,7 +181,7 @@ def start_scheduler():
     print(">>> 스케줄러 시작"); sys.stdout.flush()
     sched = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
 
-    # ✅ 전략별 평가(30분마다)
+    # ✅ 전략별 평가(30분마다) — 실행 함수를 직접 등록해야 함
     def 평가작업(strategy):
         def wrapped():
             try:
@@ -190,10 +190,12 @@ def start_scheduler():
                 evaluate_predictions(lambda sym, _: get_kline_by_strategy(sym, strategy))
             except Exception as e:
                 print(f"[EVAL] {strategy} 실패: {e}")
-        threading.Thread(target=wrapped, daemon=True).start()
+        return wrapped
 
     for strat in ["단기", "중기", "장기"]:
-        sched.add_job(lambda s=strat: 평가작업(s), trigger="interval", minutes=30, id=f"eval_{strat}", replace_existing=True)
+        # ⛏️ 버그수정: 이전 코드(lambda s=strat: 평가작업(s))는 callable을 반환하지 않아 실행 안 됨
+        sched.add_job(평가작업(strat), trigger="interval", minutes=30,
+                      id=f"eval_{strat}", replace_existing=True)
 
     # ✅ 예측 트리거(메타적용 포함) 30분
     sched.add_job(trigger_run, "interval", minutes=30, id="predict_trigger", replace_existing=True)
@@ -339,16 +341,17 @@ def yopo_health():
         except Exception:
             logs[name] = pd.DataFrame()
 
-    # 모델 파일 파싱
+    # 모델 파일 파싱 (.pt / .ptz / .safetensors 모두)
     try:
-        model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
+        model_files = [f for f in os.listdir(MODEL_DIR)
+                       if f.endswith((".pt", ".ptz", ".safetensors"))]
     except Exception:
         model_files = []
     model_info = {}
     for f in model_files:
-        m = re.match(r"(.+?)_(단기|중기|장기)_(lstm|cnn_lstm|transformer)(?:_.*)?\.pt$")
+        m = re.match(r"(.+?)_(단기|중기|장기)_(lstm|cnn_lstm|transformer)(?:_.*)?\.(pt|ptz|safetensors)$", f)
         if m:
-            symbol, strat, mtype = m.groups()
+            symbol, strat, mtype, _ext = m.groups()
             model_info.setdefault(strat, {}).setdefault(symbol, set()).add(mtype)
 
     for strat in ["단기", "중기", "장기"]:
@@ -492,6 +495,8 @@ def diag_e2e():
 @app.route("/run")
 def run():
     try:
+        if os.path.exists(LOCK_PATH):
+            return "⏸️ 초기화 중: 예측 시작 차단됨", 423
         print("[RUN] 전략별 예측 실행"); sys.stdout.flush()
         for strategy in ["단기","중기","장기"]:
             main(strategy, force=True)
@@ -585,30 +590,46 @@ from data.utils import SYMBOL_GROUPS
 @app.route("/train-symbols")
 def train_symbols():
     try:
-        # 리셋 중이면 시작 금지
         if os.path.exists(LOCK_PATH):
             return f"⏸️ 초기화 중: 그룹 학습 시작 차단됨", 423
+
         group_idx = int(request.args.get("group", -1))
+        force = request.args.get("force", "0") == "1"
         if group_idx < 0 or group_idx >= len(SYMBOL_GROUPS):
             return f"❌ 잘못된 그룹 번호: {group_idx}", 400
         group_symbols = SYMBOL_GROUPS[group_idx]
+
+        # 단일 루프 보장
+        if train.is_loop_running():
+            if not force:
+                return "🚫 이미 메인 학습 루프 실행 중 (force=1 로 강제 교체 가능)", 409
+            train.stop_train_loop(timeout=45)
+
         print(f"🚀 그룹 학습 요청됨 → 그룹 #{group_idx} | 심볼: {group_symbols}")
         threading.Thread(target=lambda: train.train_models(group_symbols), daemon=True).start()
-        return f"✅ 그룹 #{group_idx} 학습 및 예측 시작됨"
+        return f"✅ 그룹 #{group_idx} 학습 시작됨 (단일 루프 보장)"
     except Exception as e:
         traceback.print_exc(); return f"❌ 오류: {e}", 500
 
 @app.route("/train-symbols", methods=["POST"])
 def train_selected_symbols():
     try:
-        # 리셋 중이면 시작 금지
         if os.path.exists(LOCK_PATH):
             return "⏸️ 초기화 중: 선택 학습 시작 차단됨", 423
-        symbols = request.json.get("symbols", [])
+
+        body = request.get_json(silent=True) or {}
+        symbols = body.get("symbols", [])
+        force = bool(body.get("force", False))
         if not isinstance(symbols, list) or not symbols:
             return "❌ 유효하지 않은 symbols 리스트", 400
-        train.train_models(symbols)
-        return f"✅ {len(symbols)}개 심볼 학습 시작됨"
+
+        if train.is_loop_running():
+            if not force:
+                return "🚫 이미 메인 학습 루프 실행 중 (force=true 로 강제 교체 가능)", 409
+            train.stop_train_loop(timeout=45)
+
+        threading.Thread(target=lambda: train.train_models(symbols), daemon=True).start()
+        return f"✅ {len(symbols)}개 심볼 학습 시작됨 (단일 루프 보장)"
     except Exception as e:
         return f"❌ 학습 실패: {e}", 500
 
@@ -799,11 +820,15 @@ def reset_all(key=None):
             # 5) 표준 로그 재생성(정확 헤더)
             try:
                 ensure_prediction_log_exists()
+                def clear_csv(f, h):
+                    os.makedirs(os.path.dirname(f), exist_ok=True)
+                    with open(f, "w", newline="", encoding="utf-8-sig") as wf:
+                        wf.write(",".join(h) + "\n")
                 clear_csv(WRONG, ["timestamp","symbol","strategy","direction","entry_price","target_price","model","predicted_class","top_k","note","success","reason","rate","return_value","label","group_id","model_symbol","model_name","source","volatility","source_exchange"])
                 clear_csv(LOG_FILE, ["timestamp","symbol","strategy","model","accuracy","f1","loss","note","source_exchange","status"])
                 clear_csv(AUDIT, ["timestamp","symbol","strategy","result","status"])
-                clear_csv(MSG, ["timestamp","symbol","strategy","message"])
-                clear_csv(FAIL, ["symbol","strategy","failures"])
+                clear_csv(MESSAGE_LOG, ["timestamp","symbol","strategy","message"])
+                clear_csv(FAILURE_LOG, ["symbol","strategy","failures"])
             except Exception as e:
                 print(f"⚠️ [RESET] 로그 재생성 예외: {e}"); sys.stdout.flush()
 
@@ -824,7 +849,6 @@ def reset_all(key=None):
             # ✅ 정리 완료 → 락 해제 후 즉시 종료(플랫폼이 재부팅)
             print("🔚 [RESET] 정리 완료 → 프로세스 종료(os._exit)로 재부팅 진행"); sys.stdout.flush()
             _release_global_lock()
-            # 워치독이 더 먼저 쏘지 않도록 취소 후 종료
             try:
                 _wd.cancel()
             except Exception:
@@ -834,7 +858,6 @@ def reset_all(key=None):
         except Exception as e:
             print(f"❌ [RESET] 백그라운드 초기화 예외: {e}"); sys.stdout.flush()
         finally:
-            # (이중 호출이어도 안전) 혹시 못 풀었으면 풀기
             _release_global_lock()
 
     # 백그라운드 작업 시작 후 즉시 응답
