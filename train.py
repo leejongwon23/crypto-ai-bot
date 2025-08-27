@@ -201,12 +201,18 @@ if _HAS_LIGHTNING:
             xb,yb=batch; logits=self(xb); return self.criterion(logits,yb)
         def configure_optimizers(self): return torch.optim.Adam(self.parameters(), lr=self.lr)
 
-    # ✅ 리셋 시 즉시 중단을 위한 콜백
+    # ✅ 리셋 시 즉시 중단을 위한 콜백 (예외로 탈출)
     class _StopOnEvent(pl.Callback):
         def __init__(self, ev: threading.Event): self.ev=ev
-        def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
-            if self.ev.is_set(): 
-                trainer.should_stop = True
+        def _maybe_raise(self, where:str):
+            if self.ev.is_set():
+                _safe_print(f"[STOP] PL callback → {where}")
+                raise _ControlledStop()
+        def on_train_start(self, trainer, pl_module): self._maybe_raise("on_train_start")
+        def on_train_epoch_start(self, trainer, pl_module): self._maybe_raise("on_train_epoch_start")
+        def on_train_batch_start(self, trainer, pl_module, batch, batch_idx): self._maybe_raise(f"on_train_batch_start(b{batch_idx})")
+        def on_validation_start(self, trainer, pl_module): self._maybe_raise("on_validation_start")
+        def on_validation_batch_start(self, trainer, pl_module, batch, batch_idx): self._maybe_raise(f"on_val_batch_start(b{batch_idx})")
 
 # ⏱ TIMEOUT GUARD: 안전 실행 헬퍼 (multiprocessing 우선, 실패 시 thread 대체)
 import multiprocessing as _mp
@@ -388,9 +394,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
                 callbacks=[]
                 if stop_event is not None: callbacks.append(_StopOnEvent(stop_event))
                 trainer=pl.Trainer(max_epochs=max_epochs, accelerator=("gpu" if torch.cuda.is_available() else "cpu"), devices=1, enable_checkpointing=False, logger=False, enable_model_summary=False, enable_progress_bar=False, callbacks=callbacks)
+                # ⚠️ 콜백에서 _ControlledStop 발생 시 즉시 상위로 전파되어 try/except로 graceful cancel
                 trainer.fit(lit,train_dataloaders=train_loader,val_dataloaders=val_loader)
                 model=lit.model.to(DEVICE)
-                # 혹시 should_stop로 종료된 경우 빠른 체크
                 _check_stop(stop_event,f"after PL train {model_type}")
             else:
                 model=base; opt=torch.optim.Adam(model.parameters(),lr=1e-3); crit=nn.CrossEntropyLoss()
@@ -447,7 +453,8 @@ def _prune_caches_and_gc():
         from safe_cleanup import trigger_light_cleanup
         trigger_light_cleanup()
     except: pass
-    try: gc.collect()
+    try:
+        gc.collect()
     except: pass
 
 def _rotate_groups_starting_with(groups, anchor_symbol="BTCUSDT"):
@@ -459,15 +466,22 @@ def _rotate_groups_starting_with(groups, anchor_symbol="BTCUSDT"):
     return norm
 
 _PREDICT_TIMEOUT_SEC=float(os.getenv("PREDICT_TIMEOUT_SEC","30"))
-def _safe_predict_with_timeout(predict_fn,symbol,strategy,source,model_type=None,timeout=_PREDICT_TIMEOUT_SEC):
+def _safe_predict_with_timeout(predict_fn,symbol,strategy,source,model_type=None,timeout=_PREDICT_TIMEOUT_SEC, stop_event: threading.Event | None = None):
+    """예측을 백그라운드에서 실행하고, timeout 동안 250ms 폴링 + stop_event 를 감지하여 즉시 스킵."""
     err=[]; done=threading.Event()
     def _run():
         try: predict_fn(symbol, strategy, source=source, model_type=model_type)
         except Exception as e: err.append(e)
         finally: done.set()
     t=threading.Thread(target=_run,daemon=True); t.start()
-    if not done.wait(timeout):
-        print(f"[TIMEOUT] predict {symbol}-{strategy} {timeout}s → skip", flush=True); return False
+    deadline=time.time()+float(timeout)
+    while True:
+        if done.wait(timeout=0.25): break
+        if stop_event is not None and stop_event.is_set():
+            _safe_print(f"[STOP] predict canceled: {symbol}-{strategy}")
+            return False
+        if time.time()>=deadline:
+            print(f"[TIMEOUT] predict {symbol}-{strategy} {timeout}s → skip", flush=True); return False
     if err:
         print(f"[PREDICT FAIL] {symbol}-{strategy}: {err[0]}", flush=True); return False
     return True
@@ -562,7 +576,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                     if stop_event is not None and stop_event.is_set(): break
                     for strategy in ["단기","중기","장기"]:
                         if stop_event is not None and stop_event.is_set(): break
-                        _safe_predict_with_timeout(predict, symbol, strategy, source="그룹직후", model_type=None)
+                        _safe_predict_with_timeout(predict, symbol, strategy, source="그룹직후", model_type=None, timeout=_PREDICT_TIMEOUT_SEC, stop_event=stop_event)
                 mark_group_predicted()
             else:
                 print(f"[⏸ 대기] 그룹{idx} 일부 미학습 → 예측 보류")
