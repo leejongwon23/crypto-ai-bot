@@ -42,7 +42,7 @@ PERSIST_DIR= "/persistent"
 LOG_DIR    = os.path.join(PERSIST_DIR, "logs")
 MODEL_DIR  = os.path.join(PERSIST_DIR, "models")
 os.makedirs(LOG_DIR, exist_ok=True)
-os.makedirs(MODEL_DIR, exist_ok=True)  # ✅ 모델 디렉토리 보장
+os.makedirs(MODEL_DIR, exist_ok=True)  # ✅ 모델 디렉터리 보장
 
 # ===== 글로벌 락 유틸(전체 일시정지) =====
 LOCK_DIR   = getattr(safe_cleanup, "LOCK_DIR", os.path.join(PERSIST_DIR, "locks"))
@@ -858,6 +858,7 @@ def reset_all(key=None):
         except Exception as e:
             print(f"❌ [RESET] 백그라운드 초기화 예외: {e}"); sys.stdout.flush()
         finally:
+            # (이중 호출이어도 안전) 혹시 못 풀었으면 풀기
             _release_global_lock()
 
     # 백그라운드 작업 시작 후 즉시 응답
