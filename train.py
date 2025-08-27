@@ -94,7 +94,7 @@ def _maybe_run_failure_learn(background=True):
         _safe_print("[FAIL-LEARN] no API")
     (threading.Thread(target=_job,daemon=True).start() if background else _job())
 try: _maybe_run_failure_learn(True)
-except Exception as _e: _safe_print(f"[FAIL-LEARN] init err → {_e}")
+except Exception as _e: _safe_print(f"[FAIL-LEARN] init err] {_e}")
 
 NUM_CLASSES=get_NUM_CLASSES()
 FEATURE_INPUT_SIZE=get_FEATURE_INPUT_SIZE()
@@ -108,6 +108,13 @@ _PIN_MEMORY=False; _PERSISTENT=False
 
 now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 training_in_progress={"단기":False,"중기":False,"장기":False}
+
+# ===== ✅ 협조적 취소 유틸 =====
+class _ControlledStop(Exception): ...
+def _check_stop(ev: threading.Event | None, where:str=""):
+    if ev is not None and ev.is_set():
+        _safe_print(f"[STOP] detected → {where}")
+        raise _ControlledStop()
 
 def _atomic_write(path:str,data,mode="wb"):
     d=os.path.dirname(path); os.makedirs(d,exist_ok=True)
@@ -194,16 +201,25 @@ if _HAS_LIGHTNING:
             xb,yb=batch; logits=self(xb); return self.criterion(logits,yb)
         def configure_optimizers(self): return torch.optim.Adam(self.parameters(), lr=self.lr)
 
-def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
+    # ✅ 리셋 시 즉시 중단을 위한 콜백
+    class _StopOnEvent(pl.Callback):
+        def __init__(self, ev: threading.Event): self.ev=ev
+        def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+            if self.ev.is_set(): 
+                trainer.should_stop = True
+
+def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: threading.Event | None = None):
     res={"symbol":symbol,"strategy":strategy,"group_id":int(group_id or 0),"models":[]}
     try:
         ensure_failure_db(); print(f"✅ [train_one_model] {symbol}-{strategy}-g{group_id}", flush=True)
+        _check_stop(stop_event,"before ssl_pretrain")
         try:
             ck=get_ssl_ckpt_path(symbol,strategy)
             if not os.path.exists(ck): masked_reconstruction(symbol,strategy,FEATURE_INPUT_SIZE)
             else: print(f"[SSL] cache → {ck}", flush=True)
         except Exception as e: print(f"[SSL] skip {e}", flush=True)
 
+        _check_stop(stop_event,"before data fetch")
         df=get_kline_by_strategy(symbol,strategy)
         if df is None or df.empty: _log_skip(symbol,strategy,"데이터 없음"); return res
 
@@ -215,6 +231,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         enough_for_training=bool(_attrs.get("enough_for_training", len(df)>=_min_required))
         print(f"[DATA] {symbol}-{strategy} rows={len(df)} limit={_limit} min={_min_required} aug={augment_needed} enough={enough_for_training}", flush=True)
 
+        _check_stop(stop_event,"before compute_features")
         feat=compute_features(symbol,df,strategy)
         if feat is None or feat.empty or feat.isnull().any().any(): _log_skip(symbol,strategy,"피처 없음"); return res
 
@@ -247,6 +264,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
                 except Exception as le: print(f"[log_return_distribution err] {le}", flush=True)
         except Exception as e: print(f"[ret summary err] {e}", flush=True)
 
+        _check_stop(stop_event,"before labeling")
         labels=[]; lo0=class_ranges[0][0]; hi_last=class_ranges[-1][1]; clipped_low=clipped_high=unmatched=0
         for r in future:
             if not np.isfinite(r): r=lo0
@@ -272,18 +290,15 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         except: best_window=40
         window=max(5,int(best_window)); window=min(window, max(6,len(feat_scaled)-1))
 
+        _check_stop(stop_event,"before sequence build")
         X,y=[],[]
         for i in range(len(feat_scaled)-window):
+            # 빠른 중단 체크
+            if i % 64 == 0: 
+                try: _check_stop(stop_event,"seq build")
+                except _ControlledStop: break
             X.append(feat_scaled[i:i+window]); yi=i+window-1; y.append(labels[yi] if 0<=yi<len(labels) else 0)
         X,y=np.array(X,dtype=np.float32),np.array(y,dtype=np.int64)
-
-        try:
-            cnt=Counter(y.tolist()); total=int(len(y))
-            arr=np.array(list(cnt.values()),dtype=np.float64)
-            H=-float(((arr/ max(1,arr.sum()))*np.log2((arr/ max(1,arr.sum()))+1e-12)).sum()) if arr.sum()>0 else 0.0
-            logger.log_label_distribution(symbol,strategy,group_id=group_id,counts=dict(cnt),total=total,n_unique=int(len(cnt)),entropy=float(H),note=f"window={window}, cap={len(feat_scaled)}")
-            print(f"[LBL] total={total}, classes={len(cnt)}, H={H:.4f}", flush=True)
-        except Exception as e: print(f"[log_label_distribution err] {e}", flush=True)
 
         if len(X)<20:
             try:
@@ -299,6 +314,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
         except Exception as e: print(f"[balance err] {e}", flush=True)
 
         for model_type in ["lstm","cnn_lstm","transformer"]:
+            _check_stop(stop_event,f"before train {model_type}")
             base=get_model(model_type,input_size=FEATURE_INPUT_SIZE,output_size=num_classes).to(DEVICE)
             val_len=max(1,int(len(X)*0.2)); 
             if len(X)-val_len<1: val_len=len(X)-1
@@ -309,14 +325,21 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
             total_loss=0.0
             if _HAS_LIGHTNING:
                 lit=LitSeqModel(base,lr=1e-3)
-                trainer=pl.Trainer(max_epochs=max_epochs, accelerator=("gpu" if torch.cuda.is_available() else "cpu"), devices=1, enable_checkpointing=False, logger=False, enable_model_summary=False, enable_progress_bar=False)
+                callbacks=[]
+                if stop_event is not None: callbacks.append(_StopOnEvent(stop_event))
+                trainer=pl.Trainer(max_epochs=max_epochs, accelerator=("gpu" if torch.cuda.is_available() else "cpu"), devices=1, enable_checkpointing=False, logger=False, enable_model_summary=False, enable_progress_bar=False, callbacks=callbacks)
                 trainer.fit(lit,train_dataloaders=train_loader,val_dataloaders=val_loader)
                 model=lit.model.to(DEVICE)
+                # 혹시 should_stop로 종료된 경우 빠른 체크
+                _check_stop(stop_event,f"after PL train {model_type}")
             else:
                 model=base; opt=torch.optim.Adam(model.parameters(),lr=1e-3); crit=nn.CrossEntropyLoss()
-                for _ in range(max_epochs):
+                for ep in range(max_epochs):
+                    _check_stop(stop_event,f"epoch {ep} pre")
                     model.train()
-                    for xb,yb in train_loader:
+                    for bi,(xb,yb) in enumerate(train_loader):
+                        if bi % 16 == 0:
+                            _check_stop(stop_event,f"epoch {ep} batch {bi}")
                         xb,yb=xb.to(DEVICE),yb.to(DEVICE)
                         loss=crit(model(xb), yb)
                         if not torch.isfinite(loss): continue
@@ -324,7 +347,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
 
             model.eval(); preds=[]; lbls=[]
             with torch.no_grad():
-                for xb,yb in val_loader:
+                for bi,(xb,yb) in enumerate(val_loader):
+                    if bi % 32 == 0: _check_stop(stop_event,f"val batch {bi}")
                     p=torch.argmax(model(xb.to(DEVICE)),dim=1).cpu().numpy()
                     preds.extend(p); lbls.extend(yb.numpy())
             acc=float(accuracy_score(lbls,preds)); f1=float(f1_score(lbls,preds,average="macro"))
@@ -341,6 +365,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12):
             res["models"].append({"type":model_type,"acc":acc,"f1":f1,"loss_sum":float(total_loss),"pt":wpath,"meta":mpath})
 
             if torch.cuda.is_available(): torch.cuda.empty_cache()
+        return res
+    except _ControlledStop:
+        # 조용히 중단 처리 (성공/실패로 기록하지 않음)
+        _safe_print(f"[STOP] train_one_model canceled: {symbol}-{strategy}-g{group_id}")
         return res
     except Exception as e:
         _log_fail(symbol,strategy,str(e)); return res
@@ -384,6 +412,14 @@ def _safe_predict_with_timeout(predict_fn,symbol,strategy,source,model_type=None
         print(f"[PREDICT FAIL] {symbol}-{strategy}: {err[0]}", flush=True); return False
     return True
 
+def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
+    """리셋 중이면 스킵, 아니면 데몬 스레드로 비동기 실행하여 학습 루프 종료를 막지 않음"""
+    if stop_event is not None and stop_event.is_set():
+        print(f"[SKIP:{name}] stop during reset", flush=True); return
+    th=threading.Thread(target=lambda: (fn()), daemon=True)
+    th.start()
+    print(f"[BG:{name}] started (daemon)", flush=True)
+
 def train_models(symbol_list, stop_event: threading.Event | None = None):
     strategies=["단기","중기","장기"]
     for symbol in symbol_list:
@@ -414,21 +450,27 @@ def train_models(symbol_list, stop_event: threading.Event | None = None):
                         logger.log_training_result(symbol,strategy,model=f"group{gid}",accuracy=0.0,f1=0.0,loss=0.0,note=f"스킵: group_id={gid}, 경계계산실패 {e}",status="skipped")
                     except: pass
                     continue
-                res=train_one_model(symbol,strategy,group_id=gid)
+                res=train_one_model(symbol,strategy,group_id=gid, stop_event=stop_event)
                 if res and isinstance(res,dict) and res.get("models"):
                     trained_any=True
                 if stop_event is not None and stop_event.is_set(): print("[STOP] train_models: after one model", flush=True); return
-                time.sleep(0.5)
+                time.sleep(0.1)  # 더 빠른 중단 반응
+
         # ✅ 심볼 단위 학습 완료 표기(한 모델이라도 저장된 경우)
         if trained_any:
             mark_symbol_trained(symbol)
+
+    # ✅ 리셋 중이면 무거운 후처리 스킵, 아니면 비동기 실행(루프 종료 방해 금지)
     try:
-        import maintenance_fix_meta; maintenance_fix_meta.fix_all_meta_json()
+        import maintenance_fix_meta
+        _run_bg_if_not_stopped("meta_fix", maintenance_fix_meta.fix_all_meta_json, stop_event)
     except Exception as e: print(f"[meta fix skip] {e}", flush=True)
     try:
-        import failure_trainer; failure_trainer.run_failure_training()
+        import failure_trainer
+        _run_bg_if_not_stopped("failure_train", failure_trainer.run_failure_training, stop_event)
     except Exception as e: print(f"[failure train skip] {e}", flush=True)
-    try: train_evo_meta_loop()
+    try:
+        _run_bg_if_not_stopped("evo_meta_train", train_evo_meta_loop, stop_event)
     except Exception as e: print(f"[evo meta train skip] {e}", flush=True)
 
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None = None):
@@ -454,9 +496,11 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
 
             # ✅ 그룹 전 심볼 학습 완료 시에만 예측 → 다음 그룹으로 이동
             if ready_for_group_predict():
-                time.sleep(0.2)
+                time.sleep(0.1)
                 for symbol in group:
+                    if stop_event is not None and stop_event.is_set(): break
                     for strategy in ["단기","중기","장기"]:
+                        if stop_event is not None and stop_event.is_set(): break
                         _safe_predict_with_timeout(predict, symbol, strategy, source="그룹직후", model_type=None)
                 mark_group_predicted()
             else:
