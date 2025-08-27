@@ -354,7 +354,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             acc=float(accuracy_score(lbls,preds)); f1=float(f1_score(lbls,preds,average="macro"))
 
             stem=os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_group{int(group_id) if group_id is not None else 0}_cls{int(num_classes)}")
-            meta={"symbol":symbol,"strategy":strategy,"model":model_type,"group_id":int(group_id) if group_id is not None else 0,"num_classes":int(num_classes),"input_size":int(FEATURE_INPUT_SIZE),"metrics":{"val_acc":acc,"val_f1":f1},"timestamp":now_kst().isoformat(),"model_name":os.path.basename(stem)+".ptz","window":int(window),"recent_cap":int(len(feat_scaled)),"engine":"lightning" if _HAS_LIGHTNING else "manual","data_flags":{"rows":int(len(df)),"limit":int(_limit),"min_required":int(_min_required),"augment_needed":bool(augment_needed),"enough_for_training":bool(enough_for_training)},"train_loss_sum":float(total_loss)}
+            meta={"symbol":symbol,"strategy":strategy,"model":model_type,"group_id":int(group_id) if group_id is not None else 0,"num_classes":int(num_classes),"input_size":int(FEATURE_INPUT_SIZE),"metrics":{"val_acc":acc,"val_f1":f1},"timestamp":now_kst().isoformat(),"model_name":os.path.basename(stem)+".ptz","window":int(window),"recent_cap":int(len(feat_scaled)),"engine":"lightning" if _HAS_LIGHTNING else "manual","data_flags":{"rows":int(len(df)),"limit":int(_limit),"min":int(_min_required),"augment_needed":bool(augment_needed),"enough_for_training":bool(enough_for_training)},"train_loss_sum":float(total_loss)}
             wpath,mpath=_save_model_and_meta(model, stem+".pt", meta)
             _archive_old_checkpoints(symbol,strategy,model_type,keep_n=1)
             _emit_aliases(wpath,mpath,symbol,strategy,model_type)
@@ -420,11 +420,12 @@ def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
     th.start()
     print(f"[BG:{name}] started (daemon)", flush=True)
 
-def train_models(symbol_list, stop_event: threading.Event | None = None):
+# ⚠️ 여기부터 변경: ignore_should 플래그 추가
+def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_should: bool = False):
     strategies=["단기","중기","장기"]
     for symbol in symbol_list:
-        # ✅ 현재 그룹 차례가 아니면 스킵
-        if not should_train_symbol(symbol):
+        # ✅ 그룹/선택 학습에서만 should_train_symbol 우회
+        if (not ignore_should) and (not should_train_symbol(symbol)):
             continue
         if stop_event is not None and stop_event.is_set(): print("[STOP] train_models: early", flush=True); return
         trained_any=False
@@ -491,7 +492,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
             print(f"🚀 [group] {idx+1}/{len(groups)} → {group}", flush=True)
 
             # ✅ 현재 그룹만 학습(should_train_symbol은 train_models 내부에서 필터)
-            train_models(group, stop_event=stop_event)
+            train_models(group, stop_event=stop_event, ignore_should=False)
             if stop_event is not None and stop_event.is_set(): print("🛑 stop after train → exit", flush=True); break
 
             # ✅ 그룹 전 심볼 학습 완료 시에만 예측 → 다음 그룹으로 이동
