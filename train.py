@@ -91,7 +91,7 @@ def _maybe_run_failure_learn(background=True):
                 fn=getattr(failure_learn,name,None)
                 if callable(fn): fn(); _safe_print(f"[FAIL-LEARN] {name} done"); return
             except Exception as e: _safe_print(f"[FAIL-LEARN] {name} err → {e}")
-        _safe_print("[FAIL-LEARN] no API")
+        _safe_print("[FAIL-LEARN] no API]")
     (threading.Thread(target=_job,daemon=True).start() if background else _job())
 try: _maybe_run_failure_learn(True)
 except Exception as _e: _safe_print(f"[FAIL-LEARN] init err] {_e}")
@@ -208,6 +208,47 @@ if _HAS_LIGHTNING:
             if self.ev.is_set(): 
                 trainer.should_stop = True
 
+# ⏱ TIMEOUT GUARD: 안전 실행 헬퍼 (multiprocessing 우선, 실패 시 thread 대체)
+import multiprocessing as _mp
+def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0):
+    """fn(*args, **kwargs)를 별도 프로세스에서 실행하고 timeout_sec 내 결과만 수집."""
+    if kwargs is None: kwargs={}
+    try:
+        ctx=_mp.get_context("spawn")
+        q=ctx.Queue(maxsize=1)
+        def _worker(q, fn, args, kwargs):
+            try:
+                out=fn(*args, **kwargs)
+                q.put(("ok", out))
+            except Exception as e:
+                q.put(("err", str(e)))
+        p=ctx.Process(target=_worker, args=(q, fn, args, kwargs), daemon=True)
+        p.start()
+        p.join(timeout=timeout_sec)
+        if p.is_alive():
+            try: p.terminate()
+            except: pass
+            return ("timeout", None)
+        try:
+            status, payload=q.get_nowait()
+        except Exception:
+            status, payload=("err","no-result")
+        return (status, payload)
+    except Exception as e:
+        # 최후 fallback: thread 기반
+        res=[None]; err=[None]; done=threading.Event()
+        def _t():
+            try:
+                res[0]=fn(*args, **(kwargs or {}))
+            except Exception as ex:
+                err[0]=str(ex)
+            finally:
+                done.set()
+        t=threading.Thread(target=_t, daemon=True); t.start()
+        finished=done.wait(timeout=timeout_sec)
+        if not finished: return ("timeout", None)
+        return ("ok", res[0]) if err[0] is None else ("err", err[0])
+
 def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: threading.Event | None = None):
     res={"symbol":symbol,"strategy":strategy,"group_id":int(group_id or 0),"models":[]}
     try:
@@ -232,8 +273,15 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
         print(f"[DATA] {symbol}-{strategy} rows={len(df)} limit={_limit} min={_min_required} aug={augment_needed} enough={enough_for_training}", flush=True)
 
         _check_stop(stop_event,"before compute_features")
-        feat=compute_features(symbol,df,strategy)
-        if feat is None or feat.empty or feat.isnull().any().any(): _log_skip(symbol,strategy,"피처 없음"); return res
+
+        # ⏱ TIMEOUT GUARD: compute_features 제한 실행
+        _feat_timeout=float(os.getenv("FEATURE_TIMEOUT_SEC","120"))
+        status, feat = _run_with_timeout(compute_features, args=(symbol,df,strategy), kwargs={}, timeout_sec=_feat_timeout)
+        if status != "ok" or feat is None or getattr(feat, "empty", True) or (hasattr(feat,"isnull") and feat.isnull().any().any()):
+            reason = "피처 타임아웃" if status=="timeout" else f"피처 실패({status})"
+            print(f"[FEATURE] {reason} → 스킵", flush=True)
+            _log_skip(symbol,strategy, reason)
+            return res
 
         try: class_ranges=get_class_ranges(symbol=symbol,strategy=strategy,group_id=group_id)
         except Exception as e: _log_fail(symbol,strategy,"클래스 계산 실패"); return res
@@ -302,10 +350,22 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
 
         if len(X)<20:
             try:
-                ds=create_dataset(feat.to_dict(orient="records"),window=window,strategy=strategy,input_size=FEATURE_INPUT_SIZE)
-                if isinstance(ds,tuple) and len(ds)>=2: X_fb,y_fb=ds[0],ds[1]
-                else: X_fb,y_fb=ds
-                if isinstance(X_fb,np.ndarray) and len(X_fb)>0: X,y=X_fb.astype(np.float32),y_fb.astype(np.int64)
+                # ⏱ TIMEOUT GUARD: create_dataset 제한 실행
+                _cd_timeout=float(os.getenv("CREATE_DATASET_TIMEOUT_SEC","60"))
+                status_ds, ds = _run_with_timeout(
+                    create_dataset,
+                    args=(feat.to_dict(orient="records"),),
+                    kwargs={"window":window,"strategy":strategy,"input_size":FEATURE_INPUT_SIZE},
+                    timeout_sec=_cd_timeout
+                )
+                if status_ds=="ok" and isinstance(ds,tuple) and len(ds)>=2:
+                    X_fb,y_fb=ds[0],ds[1]
+                elif status_ds=="ok":
+                    X_fb,y_fb=ds
+                else:
+                    X_fb,y_fb=None,None
+                if isinstance(X_fb,np.ndarray) and len(X_fb)>0:
+                    X,y=X_fb.astype(np.float32),y_fb.astype(np.int64)
             except Exception as e: print(f"[fallback dataset err] {e}", flush=True)
         if len(X)<10: _log_skip(symbol,strategy,f"샘플 부족(rows={len(df)}, limit={_limit}, min={_min_required})"); return res
 
