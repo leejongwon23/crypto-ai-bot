@@ -70,9 +70,49 @@ def _release_global_lock():
         print(f"[LOCK] remove failed: {e}"); sys.stdout.flush()
     return False
 
+# ---------- 🆕 공통 유틸: 즉시 격리-와이프 ----------
+def _quarantine_wipe_persistent():
+    """
+    /persistent 내부를 통째로 비우되, 충돌을 피하기 위해
+    내용을 /persistent/_trash_<ts>/ 로 **원자적으로 이동** 후
+    깨끗한 기본 디렉터리 구조를 재생성한다.
+    """
+    ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    trash_dir = os.path.join(PERSIST_DIR, f"_trash_{ts}")
+    os.makedirs(trash_dir, exist_ok=True)
+    keep_names = {os.path.basename(LOCK_DIR)}  # 락 디렉터리는 유지
+
+    moved = []
+    for name in list(os.listdir(PERSIST_DIR)):
+        if name in keep_names:
+            continue
+        src = os.path.join(PERSIST_DIR, name)
+        dst = os.path.join(trash_dir, name)
+        try:
+            shutil.move(src, dst)
+            moved.append(name)
+        except Exception as e:
+            print(f"⚠️ [QWIPE] move 실패: {src} -> {dst} ({e})")
+    # 깨끗한 기본 구조 재생성
+    for d in ["logs", "models", "ssl_models"]:
+        os.makedirs(os.path.join(PERSIST_DIR, d), exist_ok=True)
+
+    print(f"🧨 [QWIPE] moved_to_trash={moved} trash_dir={trash_dir}"); sys.stdout.flush()
+    return trash_dir
+
 # 🆘 DB/SQLite 열기 전, 무조건 1회 응급 정리(락/보호시간 무시) → 백그라운드 실행으로 변경
 def _async_emergency_purge():
     try:
+        # 먼저 트래시 디렉터리들 제거 (이전 리셋 잔여물 정리)
+        try:
+            for name in list(os.listdir(PERSIST_DIR)):
+                if name.startswith("_trash_"):
+                    path = os.path.join(PERSIST_DIR, name)
+                    shutil.rmtree(path, ignore_errors=True)
+                    print(f"[BOOT-CLEANUP] trashed removed: {name}")
+        except Exception as e:
+            print(f"⚠️ [BOOT-CLEANUP] trash 제거 실패: {e}")
+
         # 하드캡 초과 시에만 EMERGENCY, 그 외에는 옵션에 따라 온건 정리 또는 아무것도 안 함
         used_gb = safe_cleanup.get_directory_size_gb(PERSIST_DIR)
         hard_cap = getattr(safe_cleanup, "HARD_CAP_GB", 9.6)
@@ -301,7 +341,7 @@ def yopo_health():
 
     # 모델 파일 파싱
     try:
-        model_files = [f for f in os.listdir(MODE_DIR) if f.endswith(".pt")]
+        model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith(".pt")]
     except Exception:
         model_files = []
     model_info = {}
@@ -685,12 +725,20 @@ def reset_all(key=None):
                     time.sleep(poll_sec)
                 print(f"[RESET] 정지 대기 완료 → stopped={stopped}"); sys.stdout.flush()
 
-            # 🆕 1-2) 그래도 안 멈추면 **하드 종료**
+            # 🆕 1-2) 그래도 안 멈추면 **격리-와이프 후 하드 종료**
             if not stopped:
-                print("🛑 [RESET] 루프가 종료되지 않음 → 하드 종료(os._exit) 수행"); sys.stdout.flush()
+                print("🛑 [RESET] 루프가 종료되지 않음 → QWIPE 후 하드 종료(os._exit)"); sys.stdout.flush()
+                try:
+                    _quarantine_wipe_persistent()
+                except Exception as e:
+                    print(f"⚠️ [RESET] QWIPE 실패: {e}")
                 try:
                     _release_global_lock()
                 finally:
+                    try:
+                        _wd.cancel()
+                    except Exception:
+                        pass
                     os._exit(0)  # 프로세스 즉시 종료 → 플랫폼이 재기동
 
             # 2) 진행상태 마커 제거
@@ -793,7 +841,7 @@ def reset_all(key=None):
     threading.Thread(target=_do_reset_work, daemon=True).start()
     return Response(
         "✅ 초기화 요청 접수됨. 백그라운드에서 정지→정리 후 서버 프로세스를 재시작합니다.\n"
-        "로그에서 [RESET]/[SCHED]/[LOCK] 태그를 확인하세요.",
+        "로그에서 [RESET]/[SCHED]/[LOCK]/[QWIPE] 태그를 확인하세요.",
         mimetype="text/plain; charset=utf-8"
     )
 
