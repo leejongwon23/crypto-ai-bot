@@ -85,8 +85,7 @@ def _select_60(symbols):
 
 def _compute_groups(symbols,group_size=5): return [symbols[i:i+group_size] for i in range(0,len(symbols),group_size)]
 
-# ✅ [고정화] 심볼/그룹: 환경/모델 발견값과 무관하게 _BASELINE_SYMBOLS 그대로 사용
-# (discover 함수들은 호환 유지를 위해 남겨두되, 여기서는 사용하지 않음)
+# ✅ [고정화] 심볼/그룹
 SYMBOLS=list(_BASELINE_SYMBOLS)
 SYMBOL_GROUPS=_compute_groups(SYMBOLS,5)
 
@@ -158,10 +157,8 @@ def rebuild_symbol_groups(symbols:Optional[List[str]]=None,group_size:int=5)->No
 # 🚑 초기화 안전장치: 모델이 없거나 강제 플래그가 있으면 그룹 상태 자동 리셋
 def _models_exist(model_dir="/persistent/models"):
     try:
-        if not os.path.isdir(model_dir):
-            return False
+        if not os.path.isdir(model_dir): return False
         for fn in os.listdir(model_dir):
-            # 하위 폴더(BTCUSDT/단기/...) 내부도 스캔
             full = os.path.join(model_dir, fn)
             if os.path.isdir(full):
                 for root, _, files in os.walk(full):
@@ -179,11 +176,9 @@ def _auto_reset_group_state_if_needed():
     no_models = not _models_exist()
     if force or no_models:
         try:
-            # 상태 파일이 과거 기록을 들고 있을 수 있으니, 인덱스/학습기록을 리셋
             GROUP_MGR.reset(0)
-            # 캐시도 함께 비워 주면 첫 패스가 더 깔끔함 (선택)
             try:
-                CacheManager.clear()  # 아직 정의 전이어도 NameError는 아래 except로 무시됨
+                CacheManager.clear()
             except Exception:
                 pass
             print(f"[♻️ AUTO-RESET] 그룹 상태 자동 리셋 수행 (force={force}, no_models={no_models})")
@@ -248,8 +243,11 @@ def future_gains_by_hours(df:pd.DataFrame,horizon_hours:int)->np.ndarray:
     for i in range(len(df)):
         t0=ts.iloc[i]; t1=t0+H; j=max(j0,i); mx=high[i]
         while j<len(df) and ts.iloc[j]<=t1:
-            if high[j]>mx: mx=high[j]; j+=1
-        j0=max(j0,i); base=close[i] if close[i]>0 else (close[i]+1e-6)
+            # ✅ 교착 방지: 매 반복에서 j를 증가
+            if high[j]>mx: mx=high[j]
+            j+=1
+        j0=max(j-1,i)
+        base=close[i] if close[i]>0 else (close[i]+1e-6)
         out[i]=float((mx-base)/(base+1e-12))
     return out.astype(np.float32)
 def future_gains(df:pd.DataFrame,strategy:str)->np.ndarray: return future_gains_by_hours(df,{"단기":4,"중기":24,"장기":168}.get(strategy,24))
