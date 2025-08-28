@@ -66,12 +66,20 @@ _LAST_PROGRESS_TS = time.time()
 _LAST_PROGRESS_TAG = "init"
 _WATCHDOG_ABORT = threading.Event()
 
+# ▶︎ BG 1회 기동 가드 & 실패DB 준비 플래그
+_BG_STARTED = {"meta_fix": False, "failure_train": False, "evo_meta_train": False}
+_FAILURE_DB_READY = False
+
 def _progress(tag:str):
-    """진행 시점 갱신 + 드문 로그(5s)"""
+    """진행 시점 갱신 + 드문 로그(5s). 진행 발생 시 워치독 abort 래치 자동 해제."""
     global _LAST_PROGRESS_TS, _LAST_PROGRESS_TAG
     now = time.time()
     _LAST_PROGRESS_TS = now
     _LAST_PROGRESS_TAG = tag
+    # ▶︎ 새 진행이 감지되면 abort 래치 해제 (핵심 수정)
+    if _WATCHDOG_ABORT.is_set():
+        _WATCHDOG_ABORT.clear()
+        _safe_print(f"🟢 [WATCHDOG] abort cleared on progress → {tag}")
     if (now % 5.0) < 0.1:
         _safe_print(f"📌 progress: {tag}")
 
@@ -84,9 +92,16 @@ def _watchdog_loop(stop_event: threading.Event | None):
         if since > _STALL_WARN_SEC:
             _safe_print(f"🟡 [WATCHDOG] {since:.0f}s no progress at '{_LAST_PROGRESS_TAG}'")
             if since > _STALL_WARN_SEC * 2:
+                # 래치 세트 (진행 재개 시 _progress에서 자동 해제됨)
                 _WATCHDOG_ABORT.set()
                 _safe_print("🔴 [WATCHDOG] abort set (hard stall)")
         time.sleep(5)
+
+def _reset_watchdog(reason:str):
+    """그룹/심볼 경계 등 안전 구간에서 명시적으로 abort 해제."""
+    if _WATCHDOG_ABORT.is_set():
+        _WATCHDOG_ABORT.clear()
+        _safe_print(f"🟢 [WATCHDOG] abort cleared ({reason})")
 
 def _try_auto_calibration(symbol,strategy,model_name):
     try: import calibration
@@ -324,9 +339,12 @@ def _log_class_ranges_safe(symbol, strategy, group_id, class_ranges, note, stop_
         _safe_print(f"[log_class_ranges err] {e}")
 
 def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: threading.Event | None = None):
+    global _FAILURE_DB_READY
     res={"symbol":symbol,"strategy":strategy,"group_id":int(group_id or 0),"models":[]}
     try:
-        ensure_failure_db(); _safe_print(f"✅ [train_one_model] {symbol}-{strategy}-g{group_id}")
+        ensure_failure_db(); _FAILURE_DB_READY = True
+        _safe_print(f"✅ [train_one_model] {symbol}-{strategy}-g{group_id}")
+        _reset_watchdog("enter train_one_model")  # ▶︎ 안전 구간에서 한번 더 해제
         _progress(f"start:{symbol}-{strategy}-g{group_id}")
 
         _check_stop(stop_event,"before ssl_pretrain")
@@ -625,8 +643,17 @@ def _safe_predict_with_timeout(predict_fn,symbol,strategy,source,model_type=None
     return True
 
 def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
+    """BG 작업은 최초 1회만 기동 + stop 요청시 미기동 + 실패DB 준비전엔 failure_train 미기동."""
     if stop_event is not None and stop_event.is_set():
         _safe_print(f"[SKIP:{name}] stop during reset"); return
+    # 1회 기동 가드
+    if _BG_STARTED.get(name, False):
+        return
+    # 실패학습은 DB 준비 후만
+    if name=="failure_train" and not _FAILURE_DB_READY:
+        _safe_print("[BG:failure_train] deferred (failure DB not ready yet)")
+        return
+    _BG_STARTED[name] = True
     th=threading.Thread(target=lambda: (fn()), daemon=True)
     th.start()
     _safe_print(f"[BG:{name}] started (daemon)")
@@ -661,6 +688,7 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
                         logger.log_training_result(symbol,strategy,model=f"group{gid}",accuracy=0.0,f1=0.0,loss=0.0,note=f"스킵: group_id={gid}, 경계계산실패 {e}",status="skipped")
                     except: pass
                     continue
+                _reset_watchdog("enter symbol/group")   # ▶︎ 심볼 전환 시 한번 더 안전 해제
                 _progress(f"train_models:{symbol}-{strategy}-g{gid}")
                 res=train_one_model(symbol,strategy,group_id=gid, stop_event=stop_event)
                 if res and isinstance(res,dict) and res.get("models"):
@@ -684,6 +712,7 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
 
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None = None):
     threading.Thread(target=_watchdog_loop, args=(stop_event,), daemon=True).start()
+    _reset_watchdog("loop start")  # ▶︎ 루프 시작시 초기화
     # ✅ 콜드스타트면 첫 패스만 should 체크 무시 + 그룹상태 리셋
     force_full_pass = _is_cold_start()
     if force_full_pass:
@@ -711,6 +740,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
 
             for idx, group in enumerate(groups):
                 if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] group loop enter"); break
+                _reset_watchdog(f"enter group {idx}")  # ▶︎ 그룹 경계에서도 초기화
                 _safe_print(f"🚀 [group] {idx+1}/{len(groups)} → {group}")
                 _progress(f"group{idx}:start")
 
