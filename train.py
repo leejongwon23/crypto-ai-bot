@@ -71,7 +71,6 @@ def _progress(tag:str):
     now = time.time()
     _LAST_PROGRESS_TS = now
     _LAST_PROGRESS_TAG = tag
-    # 5초마다 한 번만 찍음
     if (now % 5.0) < 0.1:
         _safe_print(f"📌 progress: {tag}")
 
@@ -83,7 +82,6 @@ def _watchdog_loop(stop_event: threading.Event | None):
         since = now - _LAST_PROGRESS_TS
         if since > _STALL_WARN_SEC:
             _safe_print(f"🟡 [WATCHDOG] {since:.0f}s no progress at '{_LAST_PROGRESS_TAG}'")
-            # 치명적 스톨로 판단: 경고 기준의 2배 지속 시 강제 중단 플래그 세팅
             if since > _STALL_WARN_SEC * 2:
                 _WATCHDOG_ABORT.set()
                 _safe_print("🔴 [WATCHDOG] abort set (hard stall)")
@@ -185,7 +183,6 @@ def _future_returns_by_timestamp(df:pd.DataFrame,horizon_hours:int)->np.ndarray:
     for i in range(len(df)):
         t0=ts.iloc[i]; t1=t0+H; j=max(j0,i); mx=high[i]
         while j<len(df) and ts.iloc[j]<=t1:
-            # ✅ 핵심 버그 수정: j를 항상 증가시켜 무한루프 방지
             if high[j]>mx: mx=high[j]
             j+=1
         j0=max(j0,i); base=close[i] if close[i]>0 else (close[i]+1e-6)
@@ -238,7 +235,6 @@ if _HAS_LIGHTNING:
             xb,yb=batch; logits=self(xb); return self.criterion(logits,yb)
         def configure_optimizers(self): return torch.optim.Adam(self.parameters(), lr=self.lr)
 
-    # ✅ 리셋/워치독 대응 콜백 (진행하트비트 + 즉시중단)
     class _HeartbeatAndStop(pl.Callback):
         def __init__(self, ev: threading.Event | None):
             self.ev=ev
@@ -254,12 +250,9 @@ if _HAS_LIGHTNING:
         def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx): self._hb("on_train_batch_end", batch_idx)
         def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx): self._hb("on_val_batch_end", batch_idx)
 
-# ⏱ TIMEOUT GUARD: 안전 실행 헬퍼 (multiprocessing 우선, 실패 시 thread 대체)
+# ⏱ TIMEOUT GUARD (+ heartbeat)
 import multiprocessing as _mp
 def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0, stop_event: threading.Event | None = None, hb_tag:str|None=None, hb_interval:float=5.0):
-    """fn(*args, **kwargs)를 별도 프로세스에서 실행하고, timeout_sec 내 결과만 수집.
-       ✅ stop_event 가 켜지면 즉시 terminate 하여 대기 차단.
-       ✅ hb_tag 가 주어지면 대기 중 주기적으로 _progress(hb_tag) 호출."""
     if kwargs is None: kwargs={}
     try:
         ctx=_mp.get_context("spawn")
@@ -272,9 +265,7 @@ def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0, stop_ev
                 q.put(("err", str(e)))
         p=ctx.Process(target=_worker, args=(q, fn, args, kwargs), daemon=True)
         p.start()
-        deadline=time.time()+float(timeout_sec)
-        last_hb=0.0
-        # 🔁 짧은 간격으로 join하며 stop_event 감지
+        deadline=time.time()+float(timeout_sec); last_hb=0.0
         while True:
             now=time.time()
             if hb_tag and (now-last_hb)>=hb_interval:
@@ -296,7 +287,6 @@ def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0, stop_ev
             status, payload=("err","no-result")
         return (status, payload)
     except Exception as e:
-        # 최후 fallback: thread 기반 (stop_event 폴링)
         res=[None]; err=[None]; done=threading.Event()
         def _t():
             try:
@@ -306,8 +296,7 @@ def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0, stop_ev
             finally:
                 done.set()
         t=threading.Thread(target=_t, daemon=True); t.start()
-        deadline=time.time()+float(timeout_sec)
-        last_hb=0.0
+        deadline=time.time()+float(timeout_sec); last_hb=0.0
         while True:
             now=time.time()
             if hb_tag and (now-last_hb)>=hb_interval:
@@ -323,10 +312,7 @@ def _log_class_ranges_safe(symbol, strategy, group_id, class_ranges, note, stop_
     try:
         status, _ = _run_with_timeout(
             lambda: logger.log_class_ranges(symbol, strategy, group_id=group_id, class_ranges=class_ranges, note=note),
-            args=(),
-            kwargs={},
-            timeout_sec=_LOGGER_TIMEOUT,
-            stop_event=stop_event,
+            args=(), kwargs={}, timeout_sec=_LOGGER_TIMEOUT, stop_event=stop_event,
             hb_tag="logger:wait", hb_interval=2.5
         )
         if status != "ok":
@@ -343,16 +329,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
         _check_stop(stop_event,"before ssl_pretrain")
         try:
             ck=get_ssl_ckpt_path(symbol,strategy)
-            if not os.path.exists(ck):
+            if not os.path.exists(ck)):
                 _safe_print(f"[SSL] start masked_reconstruction → {ck}")
-                # 🔧 SSL 프리트레인: 타임아웃 + 하트비트로 워치독 오경고 제거
                 _ssl_timeout=float(os.getenv("SSL_TIMEOUT_SEC","180"))
                 status_ssl, _ = _run_with_timeout(
                     masked_reconstruction,
                     args=(symbol,strategy,FEATURE_INPUT_SIZE),
-                    kwargs={},
-                    timeout_sec=_ssl_timeout,
-                    stop_event=stop_event,
+                    kwargs={}, timeout_sec=_ssl_timeout, stop_event=stop_event,
                     hb_tag="ssl:wait", hb_interval=5.0
                 )
                 if status_ssl != "ok":
@@ -375,18 +358,18 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
 
         _check_stop(stop_event,"before compute_features")
         _progress("compute_features")
-
-        # ⏱ TIMEOUT GUARD: compute_features 제한 실행 (stop_event 연동 + 하트비트)
         _feat_timeout=float(os.getenv("FEATURE_TIMEOUT_SEC","120"))
-        status, feat = _run_with_timeout(compute_features, args=(symbol,df,strategy), kwargs={}, timeout_sec=_feat_timeout, stop_event=stop_event, hb_tag="feature:wait", hb_interval=3.0)
+        status, feat = _run_with_timeout(
+            compute_features, args=(symbol,df,strategy), kwargs={},
+            timeout_sec=_feat_timeout, stop_event=stop_event,
+            hb_tag="feature:wait", hb_interval=3.0
+        )
         if status != "ok" or feat is None or getattr(feat, "empty", True) or (hasattr(feat,"isnull") and feat.isnull().any().any()):
             reason = "피처 타임아웃" if status=="timeout" else ("피처 취소" if status=="canceled" else f"피처 실패({status})")
             _safe_print(f"[FEATURE] {reason} → 스킵")
-            _log_skip(symbol,strategy, reason)
-            return res
+            _log_skip(symbol,strategy, reason); return res
         _safe_print(f"[FEATURE] ok shape={getattr(feat,'shape',None)}"); _progress("feature_ok")
 
-        # 🔎 추가: class_ranges 단계 관찰 마커
         _progress("class_ranges:get")
         try:
             class_ranges=get_class_ranges(symbol=symbol,strategy=strategy,group_id=group_id)
@@ -402,7 +385,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             except: pass
             return res
 
-        # ✅ 클래스 경계 로그 타임아웃 적용 + 진행 태그 갱신
         _progress("after_class_ranges")
         _log_class_ranges_safe(symbol,strategy,group_id=group_id,class_ranges=class_ranges,note="train_one_model", stop_event=stop_event)
         try: _safe_print(f"[RANGES] {symbol}-{strategy}-g{group_id} → {class_ranges}")
@@ -410,21 +392,15 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
 
         H=_strategy_horizon_hours(strategy)
         _progress("future:calc")
-        # ⏱ future 계산 타임아웃/중단 대응 + 하트비트로 워치독 억제
         _fto=float(os.getenv("FUTURE_TIMEOUT_SEC","60"))
         status_fut, future = _run_with_timeout(
-            _future_returns_by_timestamp,
-            args=(df,),
-            kwargs={"horizon_hours":H},
-            timeout_sec=_fto,
-            stop_event=stop_event,
-            hb_tag="future:wait", hb_interval=5.0
+            _future_returns_by_timestamp, args=(df,), kwargs={"horizon_hours":H},
+            timeout_sec=_fto, stop_event=stop_event, hb_tag="future:wait", hb_interval=5.0
         )
         if status_fut != "ok" or future is None or len(future)==0:
             reason = "미래수익 타임아웃" if status_fut=="timeout" else ("미래수익 취소" if status_fut=="canceled" else f"미래수익 실패({status_fut})")
             _safe_print(f"[FUTURE] {reason} → 스킵")
-            _log_skip(symbol,strategy,reason)
-            return res
+            _log_skip(symbol,strategy,reason); return res
         _progress("future:ok")
 
         try:
@@ -479,14 +455,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
 
         if len(X)<20:
             try:
-                # ⏱ TIMEOUT GUARD: create_dataset 제한 실행 (stop_event 연동 + 하트비트)
                 _cd_timeout=float(os.getenv("CREATE_DATASET_TIMEOUT_SEC","60"))
                 status_ds, ds = _run_with_timeout(
                     create_dataset,
                     args=(feat.to_dict(orient="records"),),
                     kwargs={"window":window,"strategy":strategy,"input_size":FEATURE_INPUT_SIZE},
-                    timeout_sec=_cd_timeout,
-                    stop_event=stop_event,
+                    timeout_sec=_cd_timeout, stop_event=stop_event,
                     hb_tag="dataset:wait", hb_interval=3.0
                 )
                 if status_ds=="ok" and isinstance(ds,tuple) and len(ds)>=2:
@@ -550,7 +524,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
                         loss=crit(model(xb), yb)
                         if not torch.isfinite(loss): continue
                         opt.zero_grad(); loss.backward(); opt.step(); total_loss+=float(loss.item())
-                    # epoch 로그
                     now=time.time()
                     if now-last_log_ts>2:
                         _safe_print(f"   ↳ {model_type} ep{ep+1}/{max_epochs} loss_sum={total_loss:.4f}")
@@ -614,9 +587,17 @@ def _rotate_groups_starting_with(groups, anchor_symbol="BTCUSDT"):
     if norm and anchor_symbol in norm[0]: norm[0]=[anchor_symbol]+[s for s in norm[0] if s!=anchor_symbol]
     return norm
 
+# 🔎 콜드스타트 감지: 모델(.ptz) 하나라도 있으면 False
+def _is_cold_start()->bool:
+    try:
+        any_flat = bool(glob.glob(os.path.join(MODEL_DIR, "*.ptz")))
+        any_tree = bool(glob.glob(os.path.join(MODEL_DIR, "*", "*", "*.ptz")))
+        return not (any_flat or any_tree)
+    except Exception:
+        return True
+
 _PREDICT_TIMEOUT_SEC=float(os.getenv("PREDICT_TIMEOUT_SEC","30"))
 def _safe_predict_with_timeout(predict_fn,symbol,strategy,source,model_type=None,timeout=_PREDICT_TIMEOUT_SEC, stop_event: threading.Event | None = None):
-    """예측을 백그라운드에서 실행하고, timeout 동안 250ms 폴링 + stop_event 를 감지하여 즉시 스킵."""
     err=[]; done=threading.Event()
     def _run():
         try:
@@ -641,14 +622,13 @@ def _safe_predict_with_timeout(predict_fn,symbol,strategy,source,model_type=None
     return True
 
 def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
-    """리셋 중이면 스킵, 아니면 데몬 스레드로 비동기 실행하여 학습 루프 종료를 막지 않음"""
     if stop_event is not None and stop_event.is_set():
         _safe_print(f"[SKIP:{name}] stop during reset"); return
     th=threading.Thread(target=lambda: (fn()), daemon=True)
     th.start()
     _safe_print(f"[BG:{name}] started (daemon)")
 
-# ⚠️ 여기부터 변경: ignore_should 플래그 추가
+# ⚠️ 여기부터 변경: ignore_should 플래그 + 콜드스타트 1패스 강제학습
 def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_should: bool = False):
     strategies=["단기","중기","장기"]
     for symbol in symbol_list:
@@ -683,12 +663,10 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
                 if res and isinstance(res,dict) and res.get("models"):
                     trained_any=True
                 if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] train_models: after one model"); return
-                time.sleep(0.1)  # 더 빠른 중단 반응
-
+                time.sleep(0.1)
         if trained_any:
             mark_symbol_trained(symbol)
 
-    # ✅ 리셋 중이면 무거운 후처리 스킵, 아니면 비동기 실행(루프 종료 방해 금지)
     try:
         import maintenance_fix_meta
         _run_bg_if_not_stopped("meta_fix", maintenance_fix_meta.fix_all_meta_json, stop_event)
@@ -702,10 +680,11 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
     except Exception as e: _safe_print(f"[evo meta train skip] {e}")
 
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None = None):
-    # 🔁 초기 한 번만 돌고 정지되는 현상 방지: 무한 루프 + 예외 포집 + 하트비트
-    #    (예외 발생 시에도 다음 사이클로 이어감)
-    # 워치독 스레드 기동
     threading.Thread(target=_watchdog_loop, args=(stop_event,), daemon=True).start()
+    # ✅ 콜드스타트면 첫 패스만 should 체크 무시
+    force_full_pass = _is_cold_start()
+    if force_full_pass:
+        _safe_print("🧪 cold start detected → first pass will ignore should_train_symbol()")
 
     while True:
         if stop_event is not None and stop_event.is_set():
@@ -727,7 +706,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 _safe_print(f"🚀 [group] {idx+1}/{len(groups)} → {group}")
                 _progress(f"group{idx}:start")
 
-                train_models(group, stop_event=stop_event, ignore_should=False)
+                train_models(group, stop_event=stop_event, ignore_should=force_full_pass)
                 if stop_event is not None and stop_event.is_set(): _safe_print("🛑 stop after train → exit"); break
 
                 if ready_for_group_predict():
@@ -753,13 +732,16 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                     if stop_event is not None and stop_event.is_set(): break
 
             _safe_print("✅ group pass done (loop will continue unless stopped)")
+            # 콜드스타트 1회전 종료 후 정상 모드로 복귀
+            if force_full_pass:
+                force_full_pass = False
+                _safe_print("🧪 cold start first pass completed → resume normal scheduling")
         except _ControlledStop:
             _safe_print("🛑 cooperative stop inside group loop")
             break
         except Exception as e:
             _safe_print(f"[group loop err] {e}\n{traceback.format_exc()}")
 
-        # 주기적 생존 하트비트(서비스 로그 상 ping만 보일 때도 여기가 찍혀야 함)
         _safe_print("💓 heartbeat: train loop alive")
         time.sleep(max(1, int(os.getenv("TRAIN_LOOP_IDLE_SEC","3"))))
 
