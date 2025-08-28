@@ -1,4 +1,4 @@
-# === train.py (STOP-friendly, cooperative cancel) ===
+# === train.py (STOP-friendly, cooperative cancel + heartbeat/watchdog) ===
 import os
 def _set_default_thread_env(n: str, v: int):
     if os.getenv(n) is None: os.environ[n] = str(v)
@@ -51,12 +51,41 @@ except:
 
 # --- evo meta learner (옵션) ---
 try: from evo_meta_learner import train_evo_meta_loop
-except: 
+except:
     def train_evo_meta_loop(*a,**k): return None
 
 def _safe_print(msg):
     try: print(msg, flush=True)
     except: pass
+
+# ====== 🔔 글로벌 진행 하트비트/워치독 ======
+_HEARTBEAT_SEC = int(os.getenv("HEARTBEAT_SEC","10"))          # 주기적 생존 로그
+_STALL_WARN_SEC = int(os.getenv("STALL_WARN_SEC","60"))          # 진행지연 경고
+_LAST_PROGRESS_TS = time.time()
+_LAST_PROGRESS_TAG = "init"
+_WATCHDOG_ABORT = threading.Event()
+
+def _progress(tag:str):
+    """진행 시점 갱신 + 드문 로그(5s)"""
+    global _LAST_PROGRESS_TS, _LAST_PROGRESS_TAG
+    now = time.time()
+    _LAST_PROGRESS_TS = now
+    _LAST_PROGRESS_TAG = tag
+    # 5초마다 한 번만 찍음
+    if (now % 5.0) < 0.1:
+        _safe_print(f"📌 progress: {tag}")
+
+def _watchdog_loop(stop_event: threading.Event | None):
+    """진행이 오래 멈추면 경고 로그(필요 시 abort flag 세팅)."""
+    while True:
+        if stop_event is not None and stop_event.is_set(): break
+        now = time.time()
+        since = now - _LAST_PROGRESS_TS
+        if since > _STALL_WARN_SEC:
+            _safe_print(f"🟡 [WATCHDOG] {since:.0f}s no progress at '{_LAST_PROGRESS_TAG}'")
+            # 치명적 상황으로 판단 시 abort도 가능(현재는 경고만)
+            # if since > _STALL_WARN_SEC*2: _WATCHDOG_ABORT.set()
+        time.sleep(5)
 
 def _try_auto_calibration(symbol,strategy,model_name):
     try: import calibration
@@ -112,6 +141,9 @@ training_in_progress={"단기":False,"중기":False,"장기":False}
 # ===== ✅ 협조적 취소 유틸 =====
 class _ControlledStop(Exception): ...
 def _check_stop(ev: threading.Event | None, where:str=""):
+    if _WATCHDOG_ABORT.is_set():
+        _safe_print(f"[STOP] watchdog abort → {where}")
+        raise _ControlledStop()
     if ev is not None and ev.is_set():
         _safe_print(f"[STOP] detected → {where}")
         raise _ControlledStop()
@@ -202,18 +234,21 @@ if _HAS_LIGHTNING:
             xb,yb=batch; logits=self(xb); return self.criterion(logits,yb)
         def configure_optimizers(self): return torch.optim.Adam(self.parameters(), lr=self.lr)
 
-    # ✅ 리셋 시 즉시 중단을 위한 콜백 (예외로 탈출)
-    class _StopOnEvent(pl.Callback):
-        def __init__(self, ev: threading.Event): self.ev=ev
-        def _maybe_raise(self, where:str):
-            if self.ev.is_set():
-                _safe_print(f"[STOP] PL callback → {where}")
+    # ✅ 리셋/워치독 대응 콜백 (진행하트비트 + 즉시중단)
+    class _HeartbeatAndStop(pl.Callback):
+        def __init__(self, ev: threading.Event | None):
+            self.ev=ev
+        def _hb(self, where:str, batch_idx:int|None=None):
+            tag = where if batch_idx is None else f"{where}(b{batch_idx})"
+            _progress(f"PL:{tag}")
+            if self.ev is not None and self.ev.is_set():
+                _safe_print(f"[STOP] PL callback → {tag}")
                 raise _ControlledStop()
-        def on_train_start(self, trainer, pl_module): self._maybe_raise("on_train_start")
-        def on_train_epoch_start(self, trainer, pl_module): self._maybe_raise("on_train_epoch_start")
-        def on_train_batch_start(self, trainer, pl_module, batch, batch_idx): self._maybe_raise(f"on_train_batch_start(b{batch_idx})")
-        def on_validation_start(self, trainer, pl_module): self._maybe_raise("on_validation_start")
-        def on_validation_batch_start(self, trainer, pl_module, batch, batch_idx): self._maybe_raise(f"on_val_batch_start(b{batch_idx})")
+        def on_train_start(self, trainer, pl_module): self._hb("on_train_start")
+        def on_train_epoch_start(self, trainer, pl_module): self._hb(f"on_train_epoch_start(ep{trainer.current_epoch})")
+        def on_train_batch_start(self, trainer, pl_module, batch, batch_idx): self._hb("on_train_batch_start", batch_idx)
+        def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx): self._hb("on_train_batch_end", batch_idx)
+        def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx): self._hb("on_val_batch_end", batch_idx)
 
 # ⏱ TIMEOUT GUARD: 안전 실행 헬퍼 (multiprocessing 우선, 실패 시 thread 대체)
 import multiprocessing as _mp
@@ -272,15 +307,20 @@ def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0, stop_ev
 def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: threading.Event | None = None):
     res={"symbol":symbol,"strategy":strategy,"group_id":int(group_id or 0),"models":[]}
     try:
-        ensure_failure_db(); print(f"✅ [train_one_model] {symbol}-{strategy}-g{group_id}", flush=True)
+        ensure_failure_db(); _safe_print(f"✅ [train_one_model] {symbol}-{strategy}-g{group_id}")
+        _progress(f"start:{symbol}-{strategy}-g{group_id}")
+
         _check_stop(stop_event,"before ssl_pretrain")
         try:
             ck=get_ssl_ckpt_path(symbol,strategy)
-            if not os.path.exists(ck): masked_reconstruction(symbol,strategy,FEATURE_INPUT_SIZE)
-            else: print(f"[SSL] cache → {ck}", flush=True)
-        except Exception as e: print(f"[SSL] skip {e}", flush=True)
+            if not os.path.exists(ck):
+                _safe_print(f"[SSL] start masked_reconstruction → {ck}")
+                masked_reconstruction(symbol,strategy,FEATURE_INPUT_SIZE)
+            else: _safe_print(f"[SSL] cache → {ck}")
+        except Exception as e: _safe_print(f"[SSL] skip {e}")
 
         _check_stop(stop_event,"before data fetch")
+        _progress("data_fetch")
         df=get_kline_by_strategy(symbol,strategy)
         if df is None or df.empty: _log_skip(symbol,strategy,"데이터 없음"); return res
 
@@ -290,18 +330,20 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
         _attrs=getattr(df,"attrs",{}) if df is not None else {}
         augment_needed=bool(_attrs.get("augment_needed", len(df)<_limit))
         enough_for_training=bool(_attrs.get("enough_for_training", len(df)>=_min_required))
-        print(f"[DATA] {symbol}-{strategy} rows={len(df)} limit={_limit} min={_min_required} aug={augment_needed} enough={enough_for_training}", flush=True)
+        _safe_print(f"[DATA] {symbol}-{strategy} rows={len(df)} limit={_limit} min={_min_required} aug={augment_needed} enough={enough_for_training}")
 
         _check_stop(stop_event,"before compute_features")
+        _progress("compute_features")
 
         # ⏱ TIMEOUT GUARD: compute_features 제한 실행 (stop_event 연동)
         _feat_timeout=float(os.getenv("FEATURE_TIMEOUT_SEC","120"))
         status, feat = _run_with_timeout(compute_features, args=(symbol,df,strategy), kwargs={}, timeout_sec=_feat_timeout, stop_event=stop_event)
         if status != "ok" or feat is None or getattr(feat, "empty", True) or (hasattr(feat,"isnull") and feat.isnull().any().any()):
             reason = "피처 타임아웃" if status=="timeout" else ("피처 취소" if status=="canceled" else f"피처 실패({status})")
-            print(f"[FEATURE] {reason} → 스킵", flush=True)
+            _safe_print(f"[FEATURE] {reason} → 스킵")
             _log_skip(symbol,strategy, reason)
             return res
+        _safe_print(f"[FEATURE] ok shape={getattr(feat,'shape',None)}"); _progress("feature_ok")
 
         try: class_ranges=get_class_ranges(symbol=symbol,strategy=strategy,group_id=group_id)
         except Exception as e: _log_fail(symbol,strategy,"클래스 계산 실패"); return res
@@ -315,8 +357,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             return res
         try:
             logger.log_class_ranges(symbol,strategy,group_id=group_id,class_ranges=class_ranges,note="train_one_model")
-            print(f"[RANGES] {symbol}-{strategy}-g{group_id} → {class_ranges}", flush=True)
-        except Exception as e: print(f"[log_class_ranges err] {e}", flush=True)
+            _safe_print(f"[RANGES] {symbol}-{strategy}-g{group_id} → {class_ranges}")
+        except Exception as e: _safe_print(f"[log_class_ranges err] {e}")
 
         H=_strategy_horizon_hours(strategy)
         future=_future_returns_by_timestamp(df,horizon_hours=H)
@@ -324,15 +366,16 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             fg=future[np.isfinite(future)]
             if fg.size>0:
                 q=np.nanpercentile(fg,[0,25,50,75,90,95,99])
-                print(f"[RET] {symbol}-{strategy}-g{group_id} min={q[0]:.4f} p50={q[2]:.4f} p75={q[3]:.4f} p95={q[5]:.4f} max={np.nanmax(fg):.4f}", flush=True)
+                _safe_print(f"[RET] {symbol}-{strategy}-g{group_id} min={q[0]:.4f} p50={q[2]:.4f} p75={q[3]:.4f} p95={q[5]:.4f} max={np.nanmax(fg):.4f}")
                 try:
                     logger.log_return_distribution(symbol,strategy,group_id=group_id,horizon_hours=int(H),
                         summary={"min":float(q[0]),"p25":float(q[1]),"p50":float(q[2]),"p75":float(q[3]),"p90":float(q[4]),"p95":float(q[5]),"p99":float(q[6]),"max":float(np.nanmax(fg)),"count":int(fg.size)},
                         note="train_one_model")
-                except Exception as le: print(f"[log_return_distribution err] {le}", flush=True)
-        except Exception as e: print(f"[ret summary err] {e}", flush=True)
+                except Exception as le: _safe_print(f"[log_return_distribution err] {le}")
+        except Exception as e: _safe_print(f"[ret summary err] {e}")
 
         _check_stop(stop_event,"before labeling")
+        _progress("labeling")
         labels=[]; lo0=class_ranges[0][0]; hi_last=class_ranges[-1][1]; clipped_low=clipped_high=unmatched=0
         for r in future:
             if not np.isfinite(r): r=lo0
@@ -344,7 +387,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             if idx is None: idx=len(class_ranges)-1 if r>hi_last else 0; unmatched+=1
             labels.append(idx)
         if clipped_low or clipped_high or unmatched:
-            print(f"[LABEL CLIP] low={clipped_low} high={clipped_high} unmatched={unmatched}", flush=True)
+            _safe_print(f"[LABEL CLIP] low={clipped_low} high={clipped_high} unmatched={unmatched}")
         labels=np.array(labels,dtype=np.int64)
 
         features_only=feat.drop(columns=["timestamp","strategy"],errors="ignore")
@@ -360,11 +403,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
         window=max(5,int(best_window)); window=min(window, max(6,len(feat_scaled)-1))
 
         _check_stop(stop_event,"before sequence build")
+        _progress("seq_build")
         X,y=[],[]
         for i in range(len(feat_scaled)-window):
-            if i % 64 == 0: 
-                try: _check_stop(stop_event,"seq build")
-                except _ControlledStop: break
+            if i % 128 == 0:
+                _check_stop(stop_event,"seq build")
+                _progress(f"seq_build@{i}")
             X.append(feat_scaled[i:i+window]); yi=i+window-1; y.append(labels[yi] if 0<=yi<len(labels) else 0)
         X,y=np.array(X,dtype=np.float32),np.array(y,dtype=np.int64)
 
@@ -387,48 +431,71 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
                     X_fb,y_fb=None,None
                 if isinstance(X_fb,np.ndarray) and len(X_fb)>0:
                     X,y=X_fb.astype(np.float32),y_fb.astype(np.int64)
-            except Exception as e: print(f"[fallback dataset err] {e}", flush=True)
+                    _safe_print("[DATASET] fallback create_dataset 사용")
+            except Exception as e: _safe_print(f"[fallback dataset err] {e}")
         if len(X)<10: _log_skip(symbol,strategy,f"샘플 부족(rows={len(df)}, limit={_limit}, min={_min_required})"); return res
 
         try:
             if len(X)<200: X,y=balance_classes(X,y,num_classes=num_classes)
-        except Exception as e: print(f"[balance err] {e}", flush=True)
+        except Exception as e: _safe_print(f"[balance err] {e}")
 
         for model_type in ["lstm","cnn_lstm","transformer"]:
             _check_stop(stop_event,f"before train {model_type}")
+            _progress(f"train:{model_type}:prep")
             base=get_model(model_type,input_size=FEATURE_INPUT_SIZE,output_size=num_classes).to(DEVICE)
-            val_len=max(1,int(len(X)*0.2)); 
+            val_len=max(1,int(len(X)*0.2));
             if len(X)-val_len<1: val_len=len(X)-1
             train_X,val_X=X[:-val_len],X[-val_len:]; train_y,val_y=y[:-val_len],y[-val_len:]
-            train_loader=DataLoader(TensorDataset(torch.tensor(train_X),torch.tensor(train_y)),batch_size=_BATCH_SIZE,shuffle=True,num_workers=_NUM_WORKERS,pin_memory=_PIN_MEMORY,persistent_workers=_PERSISTENT)
-            val_loader=DataLoader(TensorDataset(torch.tensor(val_X),torch.tensor(val_y)),batch_size=_BATCH_SIZE,num_workers=_NUM_WORKERS,pin_memory=_PIN_MEMORY,persistent_workers=_PERSISTENT)
+            train_loader=DataLoader(
+                TensorDataset(torch.tensor(train_X),torch.tensor(train_y)),
+                batch_size=_BATCH_SIZE,shuffle=True,
+                num_workers=_NUM_WORKERS,pin_memory=_PIN_MEMORY,persistent_workers=_PERSISTENT
+            )
+            val_loader=DataLoader(
+                TensorDataset(torch.tensor(val_X),torch.tensor(val_y)),
+                batch_size=_BATCH_SIZE,
+                num_workers=_NUM_WORKERS,pin_memory=_PIN_MEMORY,persistent_workers=_PERSISTENT
+            )
 
             total_loss=0.0
+            _safe_print(f"🟦 TRAIN begin → {symbol}-{strategy}-g{group_id} [{model_type}] (epochs={max_epochs}, train={len(train_X)}, val={len(val_X)})")
+
             if _HAS_LIGHTNING:
                 lit=LitSeqModel(base,lr=1e-3)
-                callbacks=[]
-                if stop_event is not None: callbacks.append(_StopOnEvent(stop_event))
-                trainer=pl.Trainer(max_epochs=max_epochs, accelerator=("gpu" if torch.cuda.is_available() else "cpu"), devices=1, enable_checkpointing=False, logger=False, enable_model_summary=False, enable_progress_bar=False, callbacks=callbacks)
+                callbacks=[_HeartbeatAndStop(stop_event)] if stop_event is not None else [_HeartbeatAndStop(None)]
+                trainer=pl.Trainer(max_epochs=max_epochs, accelerator=("gpu" if torch.cuda.is_available() else "cpu"),
+                                   devices=1, enable_checkpointing=False, logger=False, enable_model_summary=False,
+                                   enable_progress_bar=False, callbacks=callbacks)
                 trainer.fit(lit,train_dataloaders=train_loader,val_dataloaders=val_loader)
                 model=lit.model.to(DEVICE)
                 _check_stop(stop_event,f"after PL train {model_type}")
             else:
                 model=base; opt=torch.optim.Adam(model.parameters(),lr=1e-3); crit=nn.CrossEntropyLoss()
+                last_log_ts = time.time()
                 for ep in range(max_epochs):
                     _check_stop(stop_event,f"epoch {ep} pre")
+                    _progress(f"{model_type}:ep{ep}:start")
                     model.train()
                     for bi,(xb,yb) in enumerate(train_loader):
                         if bi % 16 == 0:
                             _check_stop(stop_event,f"epoch {ep} batch {bi}")
+                            _progress(f"{model_type}:ep{ep}:b{bi}")
                         xb,yb=xb.to(DEVICE),yb.to(DEVICE)
                         loss=crit(model(xb), yb)
                         if not torch.isfinite(loss): continue
                         opt.zero_grad(); loss.backward(); opt.step(); total_loss+=float(loss.item())
+                    # epoch 로그
+                    now=time.time()
+                    if now-last_log_ts>2:
+                        _safe_print(f"   ↳ {model_type} ep{ep+1}/{max_epochs} loss_sum={total_loss:.4f}")
+                        last_log_ts=now
+                    _progress(f"{model_type}:ep{ep}:end")
 
+            _progress(f"eval:{model_type}")
             model.eval(); preds=[]; lbls=[]
             with torch.no_grad():
                 for bi,(xb,yb) in enumerate(val_loader):
-                    if bi % 32 == 0: _check_stop(stop_event,f"val batch {bi}")
+                    if bi % 32 == 0: _check_stop(stop_event,f"val batch {bi}"); _progress(f"val_b{bi}")
                     p=torch.argmax(model(xb.to(DEVICE)),dim=1).cpu().numpy()
                     preds.extend(p); lbls.extend(yb.numpy())
             acc=float(accuracy_score(lbls,preds)); f1=float(f1_score(lbls,preds,average="macro"))
@@ -443,13 +510,16 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
                 note=(f"train_one_model(window={window}, cap={len(feat_scaled)}, engine={'lightning' if _HAS_LIGHTNING else 'manual'}, data_flags={{rows:{len(df)},limit:{_limit},min:{_min_required},aug:{int(augment_needed)},enough:{int(enough_for_training)}}})"),
                 source_exchange="BYBIT", status="success")
             res["models"].append({"type":model_type,"acc":acc,"f1":f1,"loss_sum":float(total_loss),"pt":wpath,"meta":mpath})
+            _safe_print(f"🟩 TRAIN done [{model_type}] acc={acc:.4f} f1={f1:.4f} → {os.path.basename(wpath)}")
 
             if torch.cuda.is_available(): torch.cuda.empty_cache()
+        _progress("train_one_model:end")
         return res
     except _ControlledStop:
         _safe_print(f"[STOP] train_one_model canceled: {symbol}-{strategy}-g{group_id}")
         return res
     except Exception as e:
+        _safe_print(f"[EXC] train_one_model {symbol}-{strategy}-g{group_id} → {e}\n{traceback.format_exc()}")
         _log_fail(symbol,strategy,str(e)); return res
 
 def _prune_caches_and_gc():
@@ -460,8 +530,8 @@ def _prune_caches_and_gc():
         pruned=CM.prune()
         try: after=CM.stats()
         except: after=None
-        print(f"[CACHE] prune ok: before={before}, after={after}, pruned={pruned}", flush=True)
-    except Exception as e: print(f"[CACHE] skip ({e})", flush=True)
+        _safe_print(f"[CACHE] prune ok: before={before}, after={after}, pruned={pruned}")
+    except Exception as e: _safe_print(f"[CACHE] skip ({e})")
     try:
         from safe_cleanup import trigger_light_cleanup
         trigger_light_cleanup()
@@ -494,18 +564,18 @@ def _safe_predict_with_timeout(predict_fn,symbol,strategy,source,model_type=None
             _safe_print(f"[STOP] predict canceled: {symbol}-{strategy}")
             return False
         if time.time()>=deadline:
-            print(f"[TIMEOUT] predict {symbol}-{strategy} {timeout}s → skip", flush=True); return False
+            _safe_print(f"[TIMEOUT] predict {symbol}-{strategy} {timeout}s → skip"); return False
     if err:
-        print(f"[PREDICT FAIL] {symbol}-{strategy}: {err[0]}", flush=True); return False
+        _safe_print(f"[PREDICT FAIL] {symbol}-{strategy}: {err[0]}"); return False
     return True
 
 def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
     """리셋 중이면 스킵, 아니면 데몬 스레드로 비동기 실행하여 학습 루프 종료를 막지 않음"""
     if stop_event is not None and stop_event.is_set():
-        print(f"[SKIP:{name}] stop during reset", flush=True); return
+        _safe_print(f"[SKIP:{name}] stop during reset"); return
     th=threading.Thread(target=lambda: (fn()), daemon=True)
     th.start()
-    print(f"[BG:{name}] started (daemon)", flush=True)
+    _safe_print(f"[BG:{name}] started (daemon)")
 
 # ⚠️ 여기부터 변경: ignore_should 플래그 추가
 def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_should: bool = False):
@@ -513,17 +583,17 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
     for symbol in symbol_list:
         if (not ignore_should) and (not should_train_symbol(symbol)):
             continue
-        if stop_event is not None and stop_event.is_set(): print("[STOP] train_models: early", flush=True); return
+        if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] train_models: early"); return
         trained_any=False
         for strategy in strategies:
-            if stop_event is not None and stop_event.is_set(): print("[STOP] train_models: early(strategy)", flush=True); return
+            if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] train_models: early(strategy)"); return
             try:
                 cr=get_class_ranges(symbol=symbol,strategy=strategy)
                 if not cr: raise ValueError("빈 클래스 경계")
                 num_classes=len(cr); groups=get_class_groups(num_classes=num_classes); max_gid=len(groups)-1
             except Exception as e: _log_fail(symbol,strategy,f"클래스 계산 실패: {e}"); continue
             for gid in range(max_gid+1):
-                if stop_event is not None and stop_event.is_set(): print("[STOP] train_models: early(group)", flush=True); return
+                if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] train_models: early(group)"); return
                 try:
                     gr=get_class_ranges(symbol=symbol,strategy=strategy,group_id=gid)
                     if not gr or len(gr)<2:
@@ -537,10 +607,11 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
                         logger.log_training_result(symbol,strategy,model=f"group{gid}",accuracy=0.0,f1=0.0,loss=0.0,note=f"스킵: group_id={gid}, 경계계산실패 {e}",status="skipped")
                     except: pass
                     continue
+                _progress(f"train_models:{symbol}-{strategy}-g{gid}")
                 res=train_one_model(symbol,strategy,group_id=gid, stop_event=stop_event)
                 if res and isinstance(res,dict) and res.get("models"):
                     trained_any=True
-                if stop_event is not None and stop_event.is_set(): print("[STOP] train_models: after one model", flush=True); return
+                if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] train_models: after one model"); return
                 time.sleep(0.1)  # 더 빠른 중단 반응
 
         if trained_any:
@@ -550,21 +621,24 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
     try:
         import maintenance_fix_meta
         _run_bg_if_not_stopped("meta_fix", maintenance_fix_meta.fix_all_meta_json, stop_event)
-    except Exception as e: print(f"[meta fix skip] {e}", flush=True)
+    except Exception as e: _safe_print(f"[meta fix skip] {e}")
     try:
         import failure_trainer
         _run_bg_if_not_stopped("failure_train", failure_trainer.run_failure_training, stop_event)
-    except Exception as e: print(f"[failure train skip] {e}", flush=True)
+    except Exception as e: _safe_print(f"[failure train skip] {e}")
     try:
         _run_bg_if_not_stopped("evo_meta_train", train_evo_meta_loop, stop_event)
-    except Exception as e: print(f"[evo meta train skip] {e}", flush=True)
+    except Exception as e: _safe_print(f"[evo meta train skip] {e}")
 
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None = None):
-    # 🔁 사진상 문제(초기 1회 작업 후 루프 종료/감시 부재)를 막기 위해
-    #    메인 루프를 while-not-stopped 감시 루프로 감쌈 + 예외 로깅 후 지속.
+    # 🔁 초기 한 번만 돌고 정지되는 현상 방지: 무한 루프 + 예외 포집 + 하트비트
+    #    (예외 발생 시에도 다음 사이클로 이어감)
+    # 워치독 스레드 기동
+    threading.Thread(target=_watchdog_loop, args=(stop_event,), daemon=True).start()
+
     while True:
         if stop_event is not None and stop_event.is_set():
-            print("🛑 stop event set → exit main loop", flush=True)
+            _safe_print("🛑 stop event set → exit main loop")
             break
         try:
             from predict import predict
@@ -575,18 +649,16 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 if hasattr(logger,"ensure_prediction_log_exists"): logger.ensure_prediction_log_exists()
             except: pass
 
-            # ✅ 그룹 순서/구성: SYMBOL_GROUPS 를 있는 그대로 사용 (정렬/회전 없음)
             groups=[list(g) for g in SYMBOL_GROUPS]
 
             for idx, group in enumerate(groups):
-                if stop_event is not None and stop_event.is_set(): print("[STOP] group loop enter", flush=True); break
-                print(f"🚀 [group] {idx+1}/{len(groups)} → {group}", flush=True)
+                if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] group loop enter"); break
+                _safe_print(f"🚀 [group] {idx+1}/{len(groups)} → {group}")
+                _progress(f"group{idx}:start")
 
-                # ✅ 현재 그룹만 학습(should_train_symbol은 train_models 내부에서 필터)
                 train_models(group, stop_event=stop_event, ignore_should=False)
-                if stop_event is not None and stop_event.is_set(): print("🛑 stop after train → exit", flush=True); break
+                if stop_event is not None and stop_event.is_set(): _safe_print("🛑 stop after train → exit"); break
 
-                # ✅ 그룹 전 심볼 학습 완료 시에만 예측 → 다음 그룹으로 이동
                 if ready_for_group_predict():
                     time.sleep(0.1)
                     for symbol in group:
@@ -596,26 +668,26 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                             _safe_predict_with_timeout(predict, symbol, strategy, source="그룹직후", model_type=None, timeout=_PREDICT_TIMEOUT_SEC, stop_event=stop_event)
                     mark_group_predicted()
                 else:
-                    print(f"[⏸ 대기] 그룹{idx} 일부 미학습 → 예측 보류")
+                    _safe_print(f"[⏸ 대기] 그룹{idx} 일부 미학습 → 예측 보류")
 
                 _prune_caches_and_gc()
+                _progress(f"group{idx}:done")
+
                 if sleep_sec>0:
                     for _ in range(sleep_sec):
-                        if stop_event is not None and stop_event.is_set(): print("[STOP] sleep break", flush=True); break
+                        if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] sleep break"); break
                         time.sleep(1)
                     if stop_event is not None and stop_event.is_set(): break
 
-            print("✅ group pass done (loop will continue unless stopped)", flush=True)
-
+            _safe_print("✅ group pass done (loop will continue unless stopped)")
         except _ControlledStop:
-            print("🛑 cooperative stop inside group loop", flush=True)
+            _safe_print("🛑 cooperative stop inside group loop")
             break
         except Exception as e:
-            # 예외가 루프를 죽이지 않도록 로그 후 계속
-            print(f"[group loop err] {e}\n{traceback.format_exc()}", flush=True)
+            _safe_print(f"[group loop err] {e}\n{traceback.format_exc()}")
 
-        # 최근 로그 없을 때 헬스 유지용 heartbeat
-        print("💓 heartbeat: train loop alive", flush=True)
+        # 주기적 생존 하트비트(서비스 로그 상 ping만 보일 때도 여기가 찍혀야 함)
+        _safe_print("💓 heartbeat: train loop alive")
         time.sleep(max(1, int(os.getenv("TRAIN_LOOP_IDLE_SEC","3"))))
 
 _TRAIN_LOOP_THREAD: threading.Thread | None = None
@@ -627,27 +699,27 @@ def start_train_loop(force_restart:bool=False, sleep_sec:int=0):
     with _TRAIN_LOOP_LOCK:
         if _TRAIN_LOOP_THREAD is not None and _TRAIN_LOOP_THREAD.is_alive():
             if not force_restart:
-                print("ℹ️ start_train_loop: already running", flush=True); return False
-            print("🛑 restarting...", flush=True); stop_train_loop(timeout=30)
+                _safe_print("ℹ️ start_train_loop: already running"); return False
+            _safe_print("🛑 restarting..."); stop_train_loop(timeout=30)
         _TRAIN_LOOP_STOP=threading.Event()
         def _runner():
             try: train_symbol_group_loop(sleep_sec=sleep_sec, stop_event=_TRAIN_LOOP_STOP)
-            finally: print("ℹ️ train loop thread exit", flush=True)
+            finally: _safe_print("ℹ️ train loop thread exit")
         _TRAIN_LOOP_THREAD=threading.Thread(target=_runner,daemon=True); _TRAIN_LOOP_THREAD.start()
-        print("✅ train loop started", flush=True); return True
+        _safe_print("✅ train loop started"); return True
 
 def stop_train_loop(timeout:int|float|None=30):
     global _TRAIN_LOOP_THREAD,_TRAIN_LOOP_STOP
     with _TRAIN_LOOP_LOCK:
         if _TRAIN_LOOP_THREAD is None or not _TRAIN_LOOP_THREAD.is_alive():
-            print("ℹ️ no loop running", flush=True); return True
+            _safe_print("ℹ️ no loop running"); return True
         if _TRAIN_LOOP_STOP is None:
-            print("⚠️ no stop event", flush=True); return False
+            _safe_print("⚠️ no stop event"); return False
         _TRAIN_LOOP_STOP.set(); _TRAIN_LOOP_THREAD.join(timeout=timeout)
         if _TRAIN_LOOP_THREAD.is_alive():
-            print("⚠️ stop timeout", flush=True); return False
+            _safe_print("⚠️ stop timeout"); return False
         _TRAIN_LOOP_THREAD=None; _TRAIN_LOOP_STOP=None
-        print("✅ loop stopped", flush=True); return True
+        _safe_print("✅ loop stopped"); return True
 
 def request_stop()->bool:
     global _TRAIN_LOOP_STOP
@@ -661,4 +733,4 @@ def is_loop_running()->bool:
 
 if __name__=="__main__":
     try: start_train_loop(force_restart=True, sleep_sec=0)
-    except Exception as e: print(f"[MAIN] err: {e}", flush=True)
+    except Exception as e: _safe_print(f"[MAIN] err: {e}")
