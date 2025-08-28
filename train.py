@@ -256,9 +256,10 @@ if _HAS_LIGHTNING:
 
 # ⏱ TIMEOUT GUARD: 안전 실행 헬퍼 (multiprocessing 우선, 실패 시 thread 대체)
 import multiprocessing as _mp
-def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0, stop_event: threading.Event | None = None):
+def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0, stop_event: threading.Event | None = None, hb_tag:str|None=None, hb_interval:float=5.0):
     """fn(*args, **kwargs)를 별도 프로세스에서 실행하고, timeout_sec 내 결과만 수집.
-       ✅ stop_event 가 켜지면 즉시 terminate 하여 대기 차단."""
+       ✅ stop_event 가 켜지면 즉시 terminate 하여 대기 차단.
+       ✅ hb_tag 가 주어지면 대기 중 주기적으로 _progress(hb_tag) 호출."""
     if kwargs is None: kwargs={}
     try:
         ctx=_mp.get_context("spawn")
@@ -272,13 +273,17 @@ def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0, stop_ev
         p=ctx.Process(target=_worker, args=(q, fn, args, kwargs), daemon=True)
         p.start()
         deadline=time.time()+float(timeout_sec)
+        last_hb=0.0
         # 🔁 짧은 간격으로 join하며 stop_event 감지
         while True:
+            now=time.time()
+            if hb_tag and (now-last_hb)>=hb_interval:
+                _progress(hb_tag); last_hb=now
             if stop_event is not None and stop_event.is_set():
                 try: p.terminate()
                 except: pass
                 return ("canceled", None)
-            remaining=deadline-time.time()
+            remaining=deadline-now
             if remaining<=0:
                 try: p.terminate()
                 except: pass
@@ -302,10 +307,14 @@ def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0, stop_ev
                 done.set()
         t=threading.Thread(target=_t, daemon=True); t.start()
         deadline=time.time()+float(timeout_sec)
+        last_hb=0.0
         while True:
+            now=time.time()
+            if hb_tag and (now-last_hb)>=hb_interval:
+                _progress(hb_tag); last_hb=now
             if done.wait(timeout=0.25): break
             if stop_event is not None and stop_event.is_set(): return ("canceled", None)
-            if time.time()>=deadline: return ("timeout", None)
+            if now>=deadline: return ("timeout", None)
         return ("ok", res[0]) if err[0] is None else ("err", err[0])
 
 # 🧯 logger.log_class_ranges 타임아웃 래퍼
@@ -317,7 +326,8 @@ def _log_class_ranges_safe(symbol, strategy, group_id, class_ranges, note, stop_
             args=(),
             kwargs={},
             timeout_sec=_LOGGER_TIMEOUT,
-            stop_event=stop_event
+            stop_event=stop_event,
+            hb_tag="logger:wait", hb_interval=2.5
         )
         if status != "ok":
             _safe_print(f"[log_class_ranges skip] status={status}")
@@ -335,7 +345,18 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             ck=get_ssl_ckpt_path(symbol,strategy)
             if not os.path.exists(ck):
                 _safe_print(f"[SSL] start masked_reconstruction → {ck}")
-                masked_reconstruction(symbol,strategy,FEATURE_INPUT_SIZE)
+                # 🔧 SSL 프리트레인: 타임아웃 + 하트비트로 워치독 오경고 제거
+                _ssl_timeout=float(os.getenv("SSL_TIMEOUT_SEC","180"))
+                status_ssl, _ = _run_with_timeout(
+                    masked_reconstruction,
+                    args=(symbol,strategy,FEATURE_INPUT_SIZE),
+                    kwargs={},
+                    timeout_sec=_ssl_timeout,
+                    stop_event=stop_event,
+                    hb_tag="ssl:wait", hb_interval=5.0
+                )
+                if status_ssl != "ok":
+                    _safe_print(f"[SSL] skip ({status_ssl})")
             else: _safe_print(f"[SSL] cache → {ck}")
         except Exception as e: _safe_print(f"[SSL] skip {e}")
 
@@ -355,9 +376,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
         _check_stop(stop_event,"before compute_features")
         _progress("compute_features")
 
-        # ⏱ TIMEOUT GUARD: compute_features 제한 실행 (stop_event 연동)
+        # ⏱ TIMEOUT GUARD: compute_features 제한 실행 (stop_event 연동 + 하트비트)
         _feat_timeout=float(os.getenv("FEATURE_TIMEOUT_SEC","120"))
-        status, feat = _run_with_timeout(compute_features, args=(symbol,df,strategy), kwargs={}, timeout_sec=_feat_timeout, stop_event=stop_event)
+        status, feat = _run_with_timeout(compute_features, args=(symbol,df,strategy), kwargs={}, timeout_sec=_feat_timeout, stop_event=stop_event, hb_tag="feature:wait", hb_interval=3.0)
         if status != "ok" or feat is None or getattr(feat, "empty", True) or (hasattr(feat,"isnull") and feat.isnull().any().any()):
             reason = "피처 타임아웃" if status=="timeout" else ("피처 취소" if status=="canceled" else f"피처 실패({status})")
             _safe_print(f"[FEATURE] {reason} → 스킵")
@@ -389,14 +410,15 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
 
         H=_strategy_horizon_hours(strategy)
         _progress("future:calc")
-        # ⏱ future 계산 타임아웃/중단 대응
+        # ⏱ future 계산 타임아웃/중단 대응 + 하트비트로 워치독 억제
         _fto=float(os.getenv("FUTURE_TIMEOUT_SEC","60"))
         status_fut, future = _run_with_timeout(
             _future_returns_by_timestamp,
             args=(df,),
             kwargs={"horizon_hours":H},
             timeout_sec=_fto,
-            stop_event=stop_event
+            stop_event=stop_event,
+            hb_tag="future:wait", hb_interval=5.0
         )
         if status_fut != "ok" or future is None or len(future)==0:
             reason = "미래수익 타임아웃" if status_fut=="timeout" else ("미래수익 취소" if status_fut=="canceled" else f"미래수익 실패({status_fut})")
@@ -457,14 +479,15 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
 
         if len(X)<20:
             try:
-                # ⏱ TIMEOUT GUARD: create_dataset 제한 실행 (stop_event 연동)
+                # ⏱ TIMEOUT GUARD: create_dataset 제한 실행 (stop_event 연동 + 하트비트)
                 _cd_timeout=float(os.getenv("CREATE_DATASET_TIMEOUT_SEC","60"))
                 status_ds, ds = _run_with_timeout(
                     create_dataset,
                     args=(feat.to_dict(orient="records"),),
                     kwargs={"window":window,"strategy":strategy,"input_size":FEATURE_INPUT_SIZE},
                     timeout_sec=_cd_timeout,
-                    stop_event=stop_event
+                    stop_event=stop_event,
+                    hb_tag="dataset:wait", hb_interval=3.0
                 )
                 if status_ds=="ok" and isinstance(ds,tuple) and len(ds)>=2:
                     X_fb,y_fb=ds[0],ds[1]
@@ -596,9 +619,14 @@ def _safe_predict_with_timeout(predict_fn,symbol,strategy,source,model_type=None
     """예측을 백그라운드에서 실행하고, timeout 동안 250ms 폴링 + stop_event 를 감지하여 즉시 스킵."""
     err=[]; done=threading.Event()
     def _run():
-        try: predict_fn(symbol, strategy, source=source, model_type=model_type)
-        except Exception as e: err.append(e)
-        finally: done.set()
+        try:
+            _safe_print(f"[PREDICT] start {symbol}-{strategy} ({source})")
+            predict_fn(symbol, strategy, source=source, model_type=model_type)
+            _safe_print(f"[PREDICT] done  {symbol}-{strategy}")
+        except Exception as e:
+            err.append(e)
+        finally:
+            done.set()
     t=threading.Thread(target=_run,daemon=True); t.start()
     deadline=time.time()+float(timeout)
     while True:
@@ -704,12 +732,14 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
 
                 if ready_for_group_predict():
                     time.sleep(0.1)
+                    _safe_print(f"[PREDICT] group {idx+1} begin")
                     for symbol in group:
                         if stop_event is not None and stop_event.is_set(): break
                         for strategy in ["단기","중기","장기"]:
                             if stop_event is not None and stop_event.is_set(): break
                             _safe_predict_with_timeout(predict, symbol, strategy, source="그룹직후", model_type=None, timeout=_PREDICT_TIMEOUT_SEC, stop_event=stop_event)
                     mark_group_predicted()
+                    _safe_print(f"[PREDICT] group {idx+1} done")
                 else:
                     _safe_print(f"[⏸ 대기] 그룹{idx} 일부 미학습 → 예측 보류")
 
