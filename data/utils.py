@@ -155,6 +155,43 @@ def get_current_group_symbols()->List[str]: return GROUP_MGR.current_group()
 def reset_group_order(start_index:int=0)->None: GROUP_MGR.reset(start_index)
 def rebuild_symbol_groups(symbols:Optional[List[str]]=None,group_size:int=5)->None: GROUP_MGR.rebuild_groups(symbols,group_size)
 
+# 🚑 초기화 안전장치: 모델이 없거나 강제 플래그가 있으면 그룹 상태 자동 리셋
+def _models_exist(model_dir="/persistent/models"):
+    try:
+        if not os.path.isdir(model_dir):
+            return False
+        for fn in os.listdir(model_dir):
+            # 하위 폴더(BTCUSDT/단기/...) 내부도 스캔
+            full = os.path.join(model_dir, fn)
+            if os.path.isdir(full):
+                for root, _, files in os.walk(full):
+                    if any(f.endswith((".pt", ".ptz", ".meta.json")) for f in files):
+                        return True
+            else:
+                if fn.endswith((".pt", ".ptz", ".meta.json")):
+                    return True
+        return False
+    except Exception:
+        return False
+
+def _auto_reset_group_state_if_needed():
+    force = os.getenv("FORCE_RESET_GROUPS", "0") == "1"
+    no_models = not _models_exist()
+    if force or no_models:
+        try:
+            # 상태 파일이 과거 기록을 들고 있을 수 있으니, 인덱스/학습기록을 리셋
+            GROUP_MGR.reset(0)
+            # 캐시도 함께 비워 주면 첫 패스가 더 깔끔함 (선택)
+            try:
+                CacheManager.clear()  # 아직 정의 전이어도 NameError는 아래 except로 무시됨
+            except Exception:
+                pass
+            print(f"[♻️ AUTO-RESET] 그룹 상태 자동 리셋 수행 (force={force}, no_models={no_models})")
+        except Exception as e:
+            print(f"[⚠️ AUTO-RESET 실패] {e}")
+
+_auto_reset_group_state_if_needed()
+
 # ========================= 캐시/백오프 =========================
 class CacheManager:
     _cache={}; _ttl={}
