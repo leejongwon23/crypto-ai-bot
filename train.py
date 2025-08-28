@@ -26,10 +26,11 @@ if not _DISABLE_LIGHTNING:
         _HAS_LIGHTNING=True
     except: _HAS_LIGHTNING=False
 
-# ✅ 순서제어 래퍼 포함 임포트
+# ✅ 순서제어 래퍼 포함 임포트 (+ reset_group_order 추가)
 from data.utils import (
     get_kline_by_strategy, compute_features, create_dataset, SYMBOL_GROUPS,
-    should_train_symbol, mark_symbol_trained, ready_for_group_predict, mark_group_predicted
+    should_train_symbol, mark_symbol_trained, ready_for_group_predict, mark_group_predicted,
+    reset_group_order
 )
 
 from model.base_model import get_model
@@ -185,7 +186,9 @@ def _future_returns_by_timestamp(df:pd.DataFrame,horizon_hours:int)->np.ndarray:
         while j<len(df) and ts.iloc[j]<=t1:
             if high[j]>mx: mx=high[j]
             j+=1
-        j0=max(j0,i); base=close[i] if close[i]>0 else (close[i]+1e-6)
+        # 다음 루프에서 불필요한 재스캔 방지
+        j0 = max(j-1, i)
+        base=close[i] if close[i]>0 else (close[i]+1e-6)
         out[i]=float((mx-base)/(base+1e-12))
     return out
 
@@ -329,7 +332,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
         _check_stop(stop_event,"before ssl_pretrain")
         try:
             ck=get_ssl_ckpt_path(symbol,strategy)
-            if not os.path.exists(ck)):
+            if not os.path.exists(ck):
                 _safe_print(f"[SSL] start masked_reconstruction → {ck}")
                 _ssl_timeout=float(os.getenv("SSL_TIMEOUT_SEC","180"))
                 status_ssl, _ = _run_with_timeout(
@@ -628,7 +631,7 @@ def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
     th.start()
     _safe_print(f"[BG:{name}] started (daemon)")
 
-# ⚠️ 여기부터 변경: ignore_should 플래그 + 콜드스타트 1패스 강제학습
+# ⚠️ 변경: ignore_should 플래그 + 콜드스타트 1패스 강제학습
 def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_should: bool = False):
     strategies=["단기","중기","장기"]
     for symbol in symbol_list:
@@ -681,10 +684,15 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
 
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None = None):
     threading.Thread(target=_watchdog_loop, args=(stop_event,), daemon=True).start()
-    # ✅ 콜드스타트면 첫 패스만 should 체크 무시
+    # ✅ 콜드스타트면 첫 패스만 should 체크 무시 + 그룹상태 리셋
     force_full_pass = _is_cold_start()
     if force_full_pass:
         _safe_print("🧪 cold start detected → first pass will ignore should_train_symbol()")
+        try:
+            reset_group_order(0)
+            _safe_print("♻️ group order state reset (cold start)")
+        except Exception as e:
+            _safe_print(f"[group reset skip] {e}")
 
     while True:
         if stop_event is not None and stop_event.is_set():
