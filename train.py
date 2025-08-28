@@ -83,8 +83,10 @@ def _watchdog_loop(stop_event: threading.Event | None):
         since = now - _LAST_PROGRESS_TS
         if since > _STALL_WARN_SEC:
             _safe_print(f"🟡 [WATCHDOG] {since:.0f}s no progress at '{_LAST_PROGRESS_TAG}'")
-            # 치명적 상황으로 판단 시 abort도 가능(현재는 경고만)
-            # if since > _STALL_WARN_SEC*2: _WATCHDOG_ABORT.set()
+            # 치명적 스톨로 판단: 경고 기준의 2배 지속 시 강제 중단 플래그 세팅
+            if since > _STALL_WARN_SEC * 2:
+                _WATCHDOG_ABORT.set()
+                _safe_print("🔴 [WATCHDOG] abort set (hard stall)")
         time.sleep(5)
 
 def _try_auto_calibration(symbol,strategy,model_name):
@@ -304,6 +306,22 @@ def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0, stop_ev
             if time.time()>=deadline: return ("timeout", None)
         return ("ok", res[0]) if err[0] is None else ("err", err[0])
 
+# 🧯 logger.log_class_ranges 타임아웃 래퍼
+def _log_class_ranges_safe(symbol, strategy, group_id, class_ranges, note, stop_event: threading.Event | None = None):
+    _LOGGER_TIMEOUT = float(os.getenv("LOGGER_TIMEOUT_SEC","10"))
+    try:
+        status, _ = _run_with_timeout(
+            lambda: logger.log_class_ranges(symbol, strategy, group_id=group_id, class_ranges=class_ranges, note=note),
+            args=(),
+            kwargs={},
+            timeout_sec=_LOGGER_TIMEOUT,
+            stop_event=stop_event
+        )
+        if status != "ok":
+            _safe_print(f"[log_class_ranges skip] status={status}")
+    except Exception as e:
+        _safe_print(f"[log_class_ranges err] {e}")
+
 def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: threading.Event | None = None):
     res={"symbol":symbol,"strategy":strategy,"group_id":int(group_id or 0),"models":[]}
     try:
@@ -356,13 +374,15 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
         num_classes=len(class_ranges); set_NUM_CLASSES(num_classes)
         if not class_ranges or len(class_ranges)<2:
             try:
-                logger.log_class_ranges(symbol,strategy,group_id=group_id,class_ranges=class_ranges or [],note="train_skip(<2 classes)")
+                _log_class_ranges_safe(symbol,strategy,group_id=group_id,class_ranges=class_ranges or [],note="train_skip(<2 classes)", stop_event=stop_event)
                 logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note=f"스킵: g={group_id}, cls<2",status="skipped")
             except: pass
             return res
-        try:
-            logger.log_class_ranges(symbol,strategy,group_id=group_id,class_ranges=class_ranges,note="train_one_model")
-            _safe_print(f"[RANGES] {symbol}-{strategy}-g{group_id} → {class_ranges}")
+
+        # ✅ 클래스 경계 로그 타임아웃 적용 + 진행 태그 갱신
+        _progress("after_class_ranges")
+        _log_class_ranges_safe(symbol,strategy,group_id=group_id,class_ranges=class_ranges,note="train_one_model", stop_event=stop_event)
+        try: _safe_print(f"[RANGES] {symbol}-{strategy}-g{group_id} → {class_ranges}")
         except Exception as e: _safe_print(f"[log_class_ranges err] {e}")
 
         H=_strategy_horizon_hours(strategy)
@@ -619,7 +639,7 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
                     gr=get_class_ranges(symbol=symbol,strategy=strategy,group_id=gid)
                     if not gr or len(gr)<2:
                         try:
-                            logger.log_class_ranges(symbol,strategy,group_id=gid,class_ranges=gr or [],note="train_skip(<2 classes)")
+                            _log_class_ranges_safe(symbol,strategy,group_id=gid,class_ranges=gr or [],note="train_skip(<2 classes)", stop_event=stop_event)
                             logger.log_training_result(symbol,strategy,model=f"group{gid}",accuracy=0.0,f1=0.0,loss=0.0,note=f"스킵: group_id={gid}, cls<2",status="skipped")
                         except: pass
                         continue
