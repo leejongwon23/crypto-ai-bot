@@ -345,8 +345,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             return res
         _safe_print(f"[FEATURE] ok shape={getattr(feat,'shape',None)}"); _progress("feature_ok")
 
-        try: class_ranges=get_class_ranges(symbol=symbol,strategy=strategy,group_id=group_id)
-        except Exception as e: _log_fail(symbol,strategy,"클래스 계산 실패"); return res
+        # 🔎 추가: class_ranges 단계 관찰 마커
+        _progress("class_ranges:get")
+        try:
+            class_ranges=get_class_ranges(symbol=symbol,strategy=strategy,group_id=group_id)
+            _progress("class_ranges:ok")
+        except Exception as e:
+            _log_fail(symbol,strategy,"클래스 계산 실패"); return res
 
         num_classes=len(class_ranges); set_NUM_CLASSES(num_classes)
         if not class_ranges or len(class_ranges)<2:
