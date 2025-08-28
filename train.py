@@ -560,46 +560,63 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
     except Exception as e: print(f"[evo meta train skip] {e}", flush=True)
 
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None = None):
-    try:
-        from predict import predict
+    # 🔁 사진상 문제(초기 1회 작업 후 루프 종료/감시 부재)를 막기 위해
+    #    메인 루프를 while-not-stopped 감시 루프로 감쌈 + 예외 로깅 후 지속.
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            print("🛑 stop event set → exit main loop", flush=True)
+            break
         try:
-            if hasattr(logger,"ensure_train_log_exists"): logger.ensure_train_log_exists()
-        except: pass
-        try:
-            if hasattr(logger,"ensure_prediction_log_exists"): logger.ensure_prediction_log_exists()
-        except: pass
+            from predict import predict
+            try:
+                if hasattr(logger,"ensure_train_log_exists"): logger.ensure_train_log_exists()
+            except: pass
+            try:
+                if hasattr(logger,"ensure_prediction_log_exists"): logger.ensure_prediction_log_exists()
+            except: pass
 
-        # ✅ 그룹 순서/구성: SYMBOL_GROUPS 를 있는 그대로 사용 (정렬/회전 없음)
-        groups=[list(g) for g in SYMBOL_GROUPS]
+            # ✅ 그룹 순서/구성: SYMBOL_GROUPS 를 있는 그대로 사용 (정렬/회전 없음)
+            groups=[list(g) for g in SYMBOL_GROUPS]
 
-        for idx, group in enumerate(groups):
-            if stop_event is not None and stop_event.is_set(): print("[STOP] group loop enter", flush=True); break
-            print(f"🚀 [group] {idx+1}/{len(groups)} → {group}", flush=True)
+            for idx, group in enumerate(groups):
+                if stop_event is not None and stop_event.is_set(): print("[STOP] group loop enter", flush=True); break
+                print(f"🚀 [group] {idx+1}/{len(groups)} → {group}", flush=True)
 
-            # ✅ 현재 그룹만 학습(should_train_symbol은 train_models 내부에서 필터)
-            train_models(group, stop_event=stop_event, ignore_should=False)
-            if stop_event is not None and stop_event.is_set(): print("🛑 stop after train → exit", flush=True); break
+                # ✅ 현재 그룹만 학습(should_train_symbol은 train_models 내부에서 필터)
+                train_models(group, stop_event=stop_event, ignore_should=False)
+                if stop_event is not None and stop_event.is_set(): print("🛑 stop after train → exit", flush=True); break
 
-            # ✅ 그룹 전 심볼 학습 완료 시에만 예측 → 다음 그룹으로 이동
-            if ready_for_group_predict():
-                time.sleep(0.1)
-                for symbol in group:
-                    if stop_event is not None and stop_event.is_set(): break
-                    for strategy in ["단기","중기","장기"]:
+                # ✅ 그룹 전 심볼 학습 완료 시에만 예측 → 다음 그룹으로 이동
+                if ready_for_group_predict():
+                    time.sleep(0.1)
+                    for symbol in group:
                         if stop_event is not None and stop_event.is_set(): break
-                        _safe_predict_with_timeout(predict, symbol, strategy, source="그룹직후", model_type=None, timeout=_PREDICT_TIMEOUT_SEC, stop_event=stop_event)
-                mark_group_predicted()
-            else:
-                print(f"[⏸ 대기] 그룹{idx} 일부 미학습 → 예측 보류")
+                        for strategy in ["단기","중기","장기"]:
+                            if stop_event is not None and stop_event.is_set(): break
+                            _safe_predict_with_timeout(predict, symbol, strategy, source="그룹직후", model_type=None, timeout=_PREDICT_TIMEOUT_SEC, stop_event=stop_event)
+                    mark_group_predicted()
+                else:
+                    print(f"[⏸ 대기] 그룹{idx} 일부 미학습 → 예측 보류")
 
-            _prune_caches_and_gc()
-            if sleep_sec>0:
-                for _ in range(sleep_sec):
-                    if stop_event is not None and stop_event.is_set(): print("[STOP] sleep break", flush=True); break
-                    time.sleep(1)
-                if stop_event is not None and stop_event.is_set(): break
-        print("✅ group loop done", flush=True)
-    except Exception as e: print(f"[group loop err] {e}", flush=True)
+                _prune_caches_and_gc()
+                if sleep_sec>0:
+                    for _ in range(sleep_sec):
+                        if stop_event is not None and stop_event.is_set(): print("[STOP] sleep break", flush=True); break
+                        time.sleep(1)
+                    if stop_event is not None and stop_event.is_set(): break
+
+            print("✅ group pass done (loop will continue unless stopped)", flush=True)
+
+        except _ControlledStop:
+            print("🛑 cooperative stop inside group loop", flush=True)
+            break
+        except Exception as e:
+            # 예외가 루프를 죽이지 않도록 로그 후 계속
+            print(f"[group loop err] {e}\n{traceback.format_exc()}", flush=True)
+
+        # 최근 로그 없을 때 헬스 유지용 heartbeat
+        print("💓 heartbeat: train loop alive", flush=True)
+        time.sleep(max(1, int(os.getenv("TRAIN_LOOP_IDLE_SEC","3"))))
 
 _TRAIN_LOOP_THREAD: threading.Thread | None = None
 _TRAIN_LOOP_STOP: threading.Event | None = None
