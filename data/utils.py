@@ -157,7 +157,8 @@ def rebuild_symbol_groups(symbols:Optional[List[str]]=None,group_size:int=5)->No
 # 🚑 초기화 안전장치: 모델이 없거나 강제 플래그가 있으면 그룹 상태 자동 리셋
 def _models_exist(model_dir="/persistent/models"):
     try:
-        if not os.path.isdir(model_dir): return False
+        if not os.path.isdir(model_dir):
+            return False
         for fn in os.listdir(model_dir):
             full = os.path.join(model_dir, fn)
             if os.path.isdir(full):
@@ -291,17 +292,33 @@ def _winsorize_prices(df:pd.DataFrame,lower_q=0.001,upper_q=0.999)->pd.DataFrame
     return df
 
 # ========================= 데이터셋 생성 =========================
+def _bin_labels(values: np.ndarray, num_classes: int) -> np.ndarray:
+    """연속값을 균등 구간으로 잘라 0..num_classes-1 라벨로 매핑"""
+    if len(values) == 0 or num_classes < 2:
+        return np.zeros(len(values), dtype=np.int64)
+    lo = float(np.nanmin(values))
+    hi = float(np.nanmax(values))
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        return np.zeros(len(values), dtype=np.int64)
+    edges = np.linspace(lo, hi, num_classes + 1, dtype=np.float64)
+    idx = np.searchsorted(edges, values, side="right") - 1
+    idx = np.clip(idx, 0, num_classes - 1)
+    return idx.astype(np.int64)
+
 def create_dataset(features,window=10,strategy="단기",input_size=None):
     """
     features: list[dict], return: (X,y). 부족 시 더미 샘플 반환.
+    - ✅ 라벨은 항상 현재 NUM_CLASSES에 맞춰 생성(동적 3클래스 금지)
     """
     import pandas as _pd
-    from config import MIN_FEATURES
+    from config import MIN_FEATURES, get_NUM_CLASSES
     def _dummy(symbol_name):
         from config import MIN_FEATURES as _MINF
         safe_failed_result(symbol_name, strategy, reason="create_dataset 입력 feature 부족/실패")
         X=np.zeros((max(1,window),window,input_size if input_size else _MINF),dtype=np.float32)
         y=np.zeros((max(1,window),),dtype=np.int64); return X,y
+
+    num_classes = max(2, int(get_NUM_CLASSES()))
     symbol_name="UNKNOWN"
     if isinstance(features,list) and features and isinstance(features[0],dict) and "symbol" in features[0]: symbol_name=features[0]["symbol"]
     if not isinstance(features,list) or len(features)<=window:
@@ -322,6 +339,8 @@ def create_dataset(features,window=10,strategy="단기",input_size=None):
         if input_size and len(feature_cols)<input_size:
             for i in range(len(feature_cols),input_size): df_s[f"pad_{i}"]=np.float32(0.0)
         features=df_s.to_dict(orient="records")
+
+        # ── 시퀀스 & 이득률 계산 ──
         strategy_minutes={"단기":240,"중기":1440,"장기":2880}; lookahead=strategy_minutes.get(strategy,1440)
         samples,gains=[],[]
         row_cols=[c for c in df_s.columns if c!="timestamp"]
@@ -330,7 +349,10 @@ def create_dataset(features,window=10,strategy="단기",input_size=None):
             entry_time=pd.to_datetime(base.get("timestamp"),errors="coerce",utc=True).tz_convert("Asia/Seoul")
             entry_price=float(base.get("close",0.0))
             if pd.isnull(entry_time) or entry_price<=0: continue
-            future=[f for f in features[i+1:] if pd.to_datetime(f.get("timestamp",None),utc=True)-entry_time<=pd.Timedelta(minutes=lookahead)]
+            try:
+                future=[f for f in features[i+1:] if (pd.to_datetime(f.get("timestamp",None),utc=True)-entry_time)<=pd.Timedelta(minutes=lookahead)]
+            except Exception:
+                continue
             vprices=[f.get("high",f.get("close",entry_price)) for f in future if f.get("high",0)>0]
             if len(seq)!=window or not vprices: continue
             max_future=max(vprices); gain=float((max_future-entry_price)/(entry_price+1e-6)); gains.append(gain)
@@ -340,29 +362,38 @@ def create_dataset(features,window=10,strategy="단기",input_size=None):
                     row=sample[j]
                     if len(row)<input_size: row.extend([0.0]*(input_size-len(row)))
                     elif len(row)>input_size: sample[j]=row[:input_size]
-            samples.append((sample,gain))
-        if not samples:
-            print("[ℹ️ lookahead 기반 샘플 없음 → 인접 변화율로 3-클래스 라벨링 사용]")
-            closes=df_s["close"].to_numpy(dtype=np.float32); pct=np.diff(closes)/(closes[:-1]+1e-6); thresh=0.001
-            for i in range(window,len(df_s)-1):
-                seq_rows=df_s.iloc[i-window:i]; g=pct[i] if i<len(pct) else 0.0; cls=2 if g>thresh else (0 if g<-thresh else 1)
-                sample=[[float(r.get(c,0.0)) for c in row_cols] for _,r in seq_rows.iterrows()]
-                if input_size:
-                    for j in range(len(sample)):
-                        row=sample[j]
-                        if len(row)<input_size: row.extend([0.0]*(input_size-len(row)))
-                        elif len(row)>input_size: sample[j]=row[:input_size]
-                samples.append((sample,cls))
-            X=np.array([s[0] for s in samples],dtype=np.float32); y=np.array([s[1] for s in samples],dtype=np.int64)
-            if len(X)==0: return _dummy(symbol_name)
-            print(f"[✅ create_dataset 완료] (fallback 3-class) 샘플 수: {len(y)}, X.shape={X.shape}"); return X,y
-        mn,mx=min(gains),max(gains); spread=mx-mn; est_class=int(spread/0.01); ncls=max(3,min(21,est_class if est_class>0 else 3))
-        step=spread/ncls if ncls>0 else 1e-6; step=step or 1e-6
-        X_list,y_list=[],[]
-        for sample,gain in samples:
-            cls=min(int((gain-mn)/step),ncls-1); X_list.append(sample); y_list.append(cls)
-        X=np.array(X_list,dtype=np.float32); y=np.array(y_list,dtype=np.int64)
-        print(f"[✅ create_dataset 완료] 샘플 수: {len(y)}, X.shape={X.shape}, 동적 클래스 수: {ncls}"); return X,y
+            samples.append(sample)
+
+        # 라벨 생성(항상 NUM_CLASSES)
+        if samples:
+            gains_arr=np.asarray(gains,dtype=np.float64)
+            y=_bin_labels(gains_arr, num_classes)
+            X=np.array(samples,dtype=np.float32)
+            if len(X)!=len(y): 
+                m=min(len(X),len(y)); X=X[:m]; y=y[:m]
+            print(f"[✅ create_dataset 완료] 샘플 수: {len(y)}, X.shape={X.shape}, NUM_CLASSES={num_classes}")
+            return X,y
+
+        # fallback: 인접 변화율 기반이지만 역시 NUM_CLASSES로 binning
+        closes=df_s["close"].to_numpy(dtype=np.float32)
+        pct=np.diff(closes)/(closes[:-1]+1e-6)
+        fb_samples, fb_labels=[],[]
+        for i in range(window,len(df_s)-1):
+            seq_rows=df_s.iloc[i-window:i]
+            sample=[[float(r.get(c,0.0)) for c in row_cols] for _,r in seq_rows.iterrows()]
+            if input_size:
+                for j in range(len(sample)):
+                    row=sample[j]
+                    if len(row)<input_size: row.extend([0.0]*(input_size-len(row)))
+                    elif len(row)>input_size: sample[j]=row[:input_size]
+            fb_samples.append(sample); fb_labels.append(pct[i] if i<len(pct) else 0.0)
+        if not fb_samples: return _dummy(symbol_name)
+        y=_bin_labels(np.asarray(fb_labels,dtype=np.float64), num_classes)
+        X=np.array(fb_samples,dtype=np.float32)
+        if len(X)!=len(y):
+            m=min(len(X),len(y)); X=X[:m]; y=y[:m]
+        print(f"[✅ create_dataset 완료] (fallback pct) 샘플 수: {len(y)}, X.shape={X.shape}, NUM_CLASSES={num_classes}")
+        return X,y
     except Exception as e:
         print(f"[❌ 최상위 예외] create_dataset 실패 → {e}"); return _dummy(symbol_name)
 
@@ -378,7 +409,9 @@ def _normalize_df(df:pd.DataFrame)->pd.DataFrame:
         if c in df.columns: df[c]=pd.to_numeric(df[c],errors="coerce")
         else: df[c]=np.nan
     df=df.dropna(subset=["timestamp","open","high","low","close","volume"])
-    df["datetime"]=df["timestamp"]; df=df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    df["datetime"]=df["timestamp"]; df=df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop_by=True if hasattr(pd.DataFrame, "reset_index") else False)
+    if "reset_index" in dir(pd.DataFrame):
+        df=df.reset_index(drop=True)
     df=_downcast_numeric(df); df=_fix_ohlc_consistency(df); df=_winsorize_prices(df,0.001,0.999)
     return df[cols]
 
