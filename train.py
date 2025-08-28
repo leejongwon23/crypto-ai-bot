@@ -185,7 +185,9 @@ def _future_returns_by_timestamp(df:pd.DataFrame,horizon_hours:int)->np.ndarray:
     for i in range(len(df)):
         t0=ts.iloc[i]; t1=t0+H; j=max(j0,i); mx=high[i]
         while j<len(df) and ts.iloc[j]<=t1:
-            if high[j]>mx: mx=high[j]; j+=1
+            # ✅ 핵심 버그 수정: j를 항상 증가시켜 무한루프 방지
+            if high[j]>mx: mx=high[j]
+            j+=1
         j0=max(j0,i); base=close[i] if close[i]>0 else (close[i]+1e-6)
         out[i]=float((mx-base)/(base+1e-12))
     return out
@@ -348,7 +350,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
         _attrs=getattr(df,"attrs",{}) if df is not None else {}
         augment_needed=bool(_attrs.get("augment_needed", len(df)<_limit))
         enough_for_training=bool(_attrs.get("enough_for_training", len(df)>=_min_required))
-        _safe_print(f"[DATA] {symbol}-{strategy} rows={len(df)} limit={_limit} min={_min_required} aug={augment_needed} enough={enough_for_training}")
+        _safe_print(f"[DATA] {symbol}-{strategy} rows={len(df)} limit={_limit} min={_min_required} aug={augment_needed} enough_for_training={enough_for_training}")
 
         _check_stop(stop_event,"before compute_features")
         _progress("compute_features")
@@ -548,7 +550,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             _emit_aliases(wpath,mpath,symbol,strategy,model_type)
 
             logger.log_training_result(symbol, strategy, model=os.path.basename(wpath), accuracy=acc, f1=f1, loss=float(total_loss),
-                note=(f"train_one_model(window={window}, cap={len(feat_scaled)}, engine={'lightning' if _HAS_LIGHTNING else 'manual'}, data_flags={{rows:{len(df)},limit:{_limit},min:{_min_required},aug:{int(augment_needed)},enough:{int(enough_for_training)}}})"),
+                note=(f"train_one_model(window={window}, cap={len(feat_scaled)}, engine={'lightning' if _HAS_LIGHTNING else 'manual'}, data_flags={{rows:{len(df)},limit:{_limit},min:{_min_required},aug:{int(augment_needed)},enough_for_training:{int(enough_for_training)}}})"),
                 source_exchange="BYBIT", status="success")
             res["models"].append({"type":model_type,"acc":acc,"f1":f1,"loss_sum":float(total_loss),"pt":wpath,"meta":mpath})
             _safe_print(f"🟩 TRAIN done [{model_type}] acc={acc:.4f} f1={f1:.4f} → {os.path.basename(wpath)}")
