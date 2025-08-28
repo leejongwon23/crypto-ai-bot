@@ -366,7 +366,23 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
         except Exception as e: _safe_print(f"[log_class_ranges err] {e}")
 
         H=_strategy_horizon_hours(strategy)
-        future=_future_returns_by_timestamp(df,horizon_hours=H)
+        _progress("future:calc")
+        # ⏱ future 계산 타임아웃/중단 대응
+        _fto=float(os.getenv("FUTURE_TIMEOUT_SEC","60"))
+        status_fut, future = _run_with_timeout(
+            _future_returns_by_timestamp,
+            args=(df,),
+            kwargs={"horizon_hours":H},
+            timeout_sec=_fto,
+            stop_event=stop_event
+        )
+        if status_fut != "ok" or future is None or len(future)==0:
+            reason = "미래수익 타임아웃" if status_fut=="timeout" else ("미래수익 취소" if status_fut=="canceled" else f"미래수익 실패({status_fut})")
+            _safe_print(f"[FUTURE] {reason} → 스킵")
+            _log_skip(symbol,strategy,reason)
+            return res
+        _progress("future:ok")
+
         try:
             fg=future[np.isfinite(future)]
             if fg.size>0:
