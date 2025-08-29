@@ -1,4 +1,4 @@
-# === train.py (STOP-friendly, cooperative cancel + heartbeat/watchdog) ===
+# === train.py (STOP-friendly, cooperative cancel + heartbeat/watchdog + order-override) ===
 import os
 def _set_default_thread_env(n: str, v: int):
     if os.getenv(n) is None: os.environ[n] = str(v)
@@ -243,6 +243,21 @@ def _archive_old_checkpoints(symbol:str,strategy:str,model_type:str,keep_n:int=1
                 try: os.remove(p)
                 except: pass
         except Exception as e: print(f"[ARCHIVE] {os.path.basename(p)} compress fail → {e}")
+
+# 🔎 모델 존재 여부(심볼 단위) → 없으면 순서제약 무시 강행
+_KNOWN_EXTS = (".ptz", ".safetensors", ".pt")
+def _has_any_model_for_symbol(symbol: str) -> bool:
+    try:
+        # flat
+        if any(glob.glob(os.path.join(MODEL_DIR, f"{symbol}_*{ext}")) for ext in _KNOWN_EXTS):
+            return True
+        # tree
+        if os.path.isdir(os.path.join(MODEL_DIR, symbol)):
+            if any(glob.glob(os.path.join(MODEL_DIR, symbol, "*", f"*{ext}")) for ext in _KNOWN_EXTS):
+                return True
+    except Exception:
+        pass
+    return False
 
 if _HAS_LIGHTNING:
     class LitSeqModel(pl.LightningModule):
@@ -658,12 +673,22 @@ def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
     th.start()
     _safe_print(f"[BG:{name}] started (daemon)")
 
-# ⚠️ 변경: ignore_should 플래그 + 콜드스타트 1패스 강제학습
+# ⚠️ 변경: ignore_should 플래그 + 콜드스타트/환경변수/모델부재 강제학습
 def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_should: bool = False):
     strategies=["단기","중기","장기"]
+    env_force = (os.getenv("TRAIN_FORCE_IGNORE_SHOULD","0") == "1")
     for symbol in symbol_list:
-        if (not ignore_should) and (not should_train_symbol(symbol)):
-            continue
+        # 심볼에 모델이 하나도 없으면 강제 학습
+        symbol_has_model = _has_any_model_for_symbol(symbol)
+        local_ignore = ignore_should or env_force or (not symbol_has_model)
+        if not local_ignore:
+            if not should_train_symbol(symbol):
+                _safe_print(f"[ORDER] skip {symbol} (should_train_symbol=False, models_exist={symbol_has_model})")
+                continue
+        else:
+            why = "env" if env_force else ("no_model" if not symbol_has_model else "first_pass")
+            _safe_print(f"[order-override] {symbol}: force train (reason={why})")
+
         if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] train_models: early"); return
         trained_any=False
         for strategy in strategies:
@@ -713,13 +738,19 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None = None):
     threading.Thread(target=_watchdog_loop, args=(stop_event,), daemon=True).start()
     _reset_watchdog("loop start")  # ▶︎ 루프 시작시 초기화
+
+    # ✅ 강제 옵션: 환경변수로 순서 무시/그룹상태 리셋 지원
+    env_force_ignore = (os.getenv("TRAIN_FORCE_IGNORE_SHOULD","0") == "1")
+    env_reset = (os.getenv("RESET_GROUP_ORDER_ON_START","0") == "1")
+
     # ✅ 콜드스타트면 첫 패스만 should 체크 무시 + 그룹상태 리셋
-    force_full_pass = _is_cold_start()
-    if force_full_pass:
-        _safe_print("🧪 cold start detected → first pass will ignore should_train_symbol()")
+    force_full_pass = _is_cold_start() or env_force_ignore
+    if force_full_pass or env_reset:
+        _safe_print("🧪 start → force mode: "
+                    f"ignore_should={force_full_pass} (env={env_force_ignore}), reset_group_order={env_reset or force_full_pass}")
         try:
             reset_group_order(0)
-            _safe_print("♻️ group order state reset (cold start)")
+            _safe_print("♻️ group order state reset")
         except Exception as e:
             _safe_print(f"[group reset skip] {e}")
 
@@ -771,7 +802,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
 
             _safe_print("✅ group pass done (loop will continue unless stopped)")
             # 콜드스타트 1회전 종료 후 정상 모드로 복귀
-            if force_full_pass:
+            if force_full_pass and not env_force_ignore:
                 force_full_pass = False
                 _safe_print("🧪 cold start first pass completed → resume normal scheduling")
         except _ControlledStop:
