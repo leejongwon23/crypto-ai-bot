@@ -8,22 +8,37 @@ services:
       gunicorn app:app
       --bind 0.0.0.0:$PORT
       --worker-class gthread
-      --workers 2
-      --threads 4
+      --workers ${WEB_CONCURRENCY:-1}
+      --threads ${GTHREADS:-2}
       --timeout 300
       --graceful-timeout 30
+      --keep-alive 5
+      --max-requests 200
+      --max-requests-jitter 50
       --preload
       --access-logfile -
       --error-logfile -
       --log-level info
     envVars:
+      # === 필수 시크릿 ===
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
+
+      # === 런타임/스케줄러 충돌 방지 (단일 워커) ===
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: GTHREADS
+        value: "2"
+      - key: TZ
+        value: "Asia/Seoul"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+
+      # === safe_cleanup 스케줄러 ===
       - key: SAFE_CLEANUP_INTERVAL_MIN
         value: "30"
-      # ✅ safe_cleanup.py와 키 일치 (DISK_* 대신 SAFE_*)
       - key: SAFE_SOFT_CAP_GB
         value: "9.5"
       - key: SAFE_HARD_CAP_GB
@@ -36,7 +51,21 @@ services:
         value: "7"
       - key: KEEP_RECENT_MODELS_PER_SYMBOL
         value: "3"
-      # 필요시 자동학습 끄기
+
+      # === 선택: 자동학습 끄기 원하면 주석 해제 ===
       # - key: DISABLE_AUTO_TRAIN
       #   value: "1"
+
+      # === 선택: CPU 스레드 캡(미설정 시 기본 2) ===
+      - key: CPU_THREAD_CAP
+        value: "2"
+      - key: OMP_NUM_THREADS
+        value: "2"
+      - key: MKL_NUM_THREADS
+        value: "2"
+      - key: NUMEXPR_NUM_THREADS
+        value: "2"
+      - key: TORCH_NUM_THREADS
+        value: "2"
+
     healthCheckPath: /ping
