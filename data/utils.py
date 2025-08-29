@@ -67,7 +67,6 @@ def _parse_ts_series(s: pd.Series) -> pd.Series:
         # 숫자형(초/밀리초) 처리
         if pd.api.types.is_numeric_dtype(s):
             num = pd.to_numeric(s, errors="coerce")
-            # 단위 추정: 13자리 이상이면 ms, 아니면 s
             med = float(num.dropna().median()) if num.dropna().size else 0.0
             unit = "ms" if med >= 1e12 else "s"
             ts = pd.to_datetime(num, unit=unit, errors="coerce", utc=True)
@@ -623,7 +622,8 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                 req = min(1000, rows_needed)
                 params = {"category": "linear", "symbol": real_symbol, "interval": interval, "limit": req}
                 if end_time is not None:
-                    params["end"] = int(end_time.timestamp() * 1000)
+                    # Bybit end: ms(UTC)
+                    params["end"] = int(pd.to_datetime(end_time).tz_convert("UTC").timestamp() * 1000)
 
                 print(f"[📡 Bybit 요청] {real_symbol}-{interval} | 시도 {attempt+1}/{max_retry} | 요청 수량={req} | end={end_time}")
                 res = requests.get(f"{BASE_URL}/v5/market/kline", params=params, timeout=10, headers=REQUEST_HEADERS)
@@ -653,7 +653,7 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                 if last_oldest is not None and pd.to_datetime(oldest_ts) >= pd.to_datetime(last_oldest):
                     oldest_ts = pd.to_datetime(oldest_ts) - pd.Timedelta(minutes=1)
                 last_oldest = oldest_ts
-                # Bybit API end 파라미터는 밀리초 UTC 기준 → UTC로 맞춰 뒤로 이동
+                # Bybit end 파라미터는 밀리초 UTC 기준 → UTC로 맞춰 뒤로 이동
                 end_time = pd.to_datetime(oldest_ts).tz_convert("UTC") - pd.Timedelta(milliseconds=1)
                 time.sleep(0.2)
                 break
@@ -701,7 +701,8 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
                 req = min(1000, rows_needed)
                 params = {"symbol": real_symbol, "interval": _bin_iv, "limit": req}
                 if end_time is not None:
-                    params["endTime"] = int(end_time.timestamp() * 1000)
+                    # Binance endTime: ms(UTC)
+                    params["endTime"] = int(pd.to_datetime(end_time).tz_convert("UTC").timestamp() * 1000)
                 print(f"[📡 Binance 요청] {real_symbol}-{interval} | 요청 {req}개 | 시도 {attempt+1}/{max_retry} | end_time={end_time}")
 
                 res = requests.get(f"{BINANCE_BASE_URL}/fapi/v1/klines", params=params, timeout=10, headers=REQUEST_HEADERS)
@@ -741,7 +742,8 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
                 if last_oldest is not None and pd.to_datetime(oldest_ts) >= pd.to_datetime(last_oldest):
                     oldest_ts = pd.to_datetime(oldest_ts) - pd.Timedelta(minutes=1)
                 last_oldest = oldest_ts
-                end_time = pd.to_datetime(oldest_ts).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
+                # Binance도 endTime은 UTC ms
+                end_time = pd.to_datetime(oldest_ts).tz_convert("UTC") - pd.Timedelta(milliseconds=1)
                 time.sleep(0.3)
                 break
             except RequestException as e:
@@ -781,7 +783,8 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
             if len(dfc) < base_limit:
                 break
             oldest = dfc["timestamp"].min()
-            end = pd.to_datetime(oldest).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
+            # 통일: 다음 요청 end는 UTC ms 기준
+            end = pd.to_datetime(oldest).tz_convert("UTC") - pd.Timedelta(milliseconds=1)
         dff = _normalize_df(pd.concat(total, ignore_index=True)) if total else pd.DataFrame()
         print(f"[✅ {src} 수집 완료] {symbol}-{strategy} → {len(dff)}개")
         return dff
@@ -826,7 +829,7 @@ def get_kline_by_strategy(symbol: str, strategy: str):
                 break
             df_bybit.append(dfc); total_bybit += len(dfc)
             oldest = dfc["timestamp"].min()
-            end = pd.to_datetime(oldest).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
+            end = pd.to_datetime(oldest).tz_convert("UTC") - pd.Timedelta(milliseconds=1)
             if len(dfc) < limit:
                 break
         df_bybit = _normalize_df(pd.concat(df_bybit, ignore_index=True)) if df_bybit else pd.DataFrame()
@@ -842,7 +845,7 @@ def get_kline_by_strategy(symbol: str, strategy: str):
                         break
                     df_binance.append(dfc); total_binance += len(dfc)
                     oldest = dfc["timestamp"].min()
-                    end = pd.to_datetime(oldest).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
+                    end = pd.to_datetime(oldest).tz_convert("UTC") - pd.Timedelta(milliseconds=1)
                     if len(dfc) < limit:
                         break
                 except Exception as be:
@@ -965,7 +968,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
             df["stoch_k"] = _ta.momentum.stoch(df["high"], df["low"], df["close"], fillna=True)
             df["stoch_d"] = _ta.momentum.stoch_signal(df["high"], df["low"], df["close"], fillna=True)
         except Exception:
-            # ta 미설치/오류 시 최소 피처만
             pass
 
         df["vwap"] = (df["volume"] * df["close"]).cumsum() / (df["volume"].cumsum() + 1e-6)
