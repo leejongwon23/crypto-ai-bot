@@ -42,9 +42,14 @@ except Exception:
 def _map_bybit_interval(interval: str) -> str:
     """Bybit API가 요구하는 interval 문자열로 변환"""
     mapping = {
-        "60": "60", "240": "240", "1h": "60", "4h": "240",
-        "D": "D", "1d": "D", "2D": "120", "3D": "180",
-        "W": "W", "M": "M"
+        "60": "60", "1h": "60",
+        "120": "120", "2h": "120",
+        "240": "240", "4h": "240",
+        "360": "360", "6h": "360",
+        "720": "720", "12h": "720",
+        "D": "D", "1d": "D",
+        "W": "W",
+        "M": "M"
     }
     return mapping.get(str(interval), str(interval))
 
