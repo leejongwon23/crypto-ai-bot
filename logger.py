@@ -1,4 +1,4 @@
-# === logger.py (메모리 안전: 로테이션 + 청크 집계 + 모델명 정규화 + 실패DB 노이즈 차단 최종본) ===
+# === logger.py (메모리 안전: 로테이션 + 청크 집계 + 모델명 정규화 + 실패DB 노이즈 차단 + 파일락 추가 최종본) ===
 import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil
 import sqlite3
 from collections import defaultdict
@@ -37,6 +37,56 @@ PREDICTION_HEADERS = BASE_PRED_HEADERS + EXTRA_PRED_HEADERS + ["feature_vector"]
 CHUNK = 50_000
 
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+
+# -------------------------
+# (NEW) 간단 파일락 유틸 (멀티프로세스 동시쓰기 보호)
+# -------------------------
+_PRED_LOCK_PATH = PREDICTION_LOG + ".lock"
+_LOCK_STALE_SEC = 120  # 고아 락 정리 기준
+
+class _FileLock:
+    def __init__(self, path: str, timeout: float = 10.0, poll: float = 0.05):
+        self.path = path
+        self.timeout = float(timeout)
+        self.poll = float(poll)
+
+    def __enter__(self):
+        deadline = time.time() + self.timeout
+        while True:
+            try:
+                # 존재하는 고아 락(너무 오래된 락)은 제거
+                if os.path.exists(self.path):
+                    try:
+                        mtime = os.path.getmtime(self.path)
+                        if (time.time() - mtime) > _LOCK_STALE_SEC:
+                            os.remove(self.path)
+                    except Exception:
+                        pass
+                # 원자적 생성 시도
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(f"pid={os.getpid()} ts={time.time()}\n")
+                break  # 획득 성공
+            except FileExistsError:
+                if time.time() >= deadline:
+                    # 마지막 시도: 고아락 판단되면 제거하고 재시도
+                    try:
+                        mtime = os.path.getmtime(self.path)
+                        if (time.time() - mtime) > _LOCK_STALE_SEC:
+                            os.remove(self.path)
+                            continue
+                    except Exception:
+                        pass
+                    raise TimeoutError(f"lock timeout: {self.path}")
+                time.sleep(self.poll)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if os.path.exists(self.path):
+                os.remove(self.path)
+        except Exception:
+            pass
 
 # -------------------------
 # 안전한 로그 파일 보장
@@ -390,7 +440,7 @@ def log_audit_prediction(s, t, status, reason):
         pass
 
 # -------------------------
-# 예측 로그 (확장 인자 지원 + 자동 컬럼맞춤)
+# 예측 로그 (확장 인자 지원 + 자동 컬럼맞춤 + 파일락)
 # -------------------------
 def _align_row_to_header(row, header):
     if len(row) < len(header):
@@ -446,110 +496,112 @@ def log_prediction(
     LOG_FILE = PREDICTION_LOG
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
-    # ✅ 용량 체크 & 로테이션
-    rotate_prediction_log_if_needed()
-    ensure_prediction_log_exists()
+    # 파일락으로 회전+쓰기 보호
+    with _FileLock(_PRED_LOCK_PATH, timeout=10.0):
+        # ✅ 용량 체크 & 로테이션
+        rotate_prediction_log_if_needed()
+        ensure_prediction_log_exists()
 
-    now = _dt.now(pytz.timezone("Asia/Seoul")).isoformat() if timestamp is None else timestamp
-    top_k_str = ",".join(map(str, top_k)) if top_k else ""
+        now = _dt.now(pytz.timezone("Asia/Seoul")).isoformat() if timestamp is None else timestamp
+        top_k_str = ",".join(map(str, top_k)) if top_k else ""
 
-    # 기본값/정규화
-    predicted_class = predicted_class if predicted_class is not None else -1
-    label = label if label is not None else -1
-    reason = (reason or "사유없음").strip()
-    rate = 0.0 if rate is None else float(rate)
-    return_value = 0.0 if return_value is None else float(return_value)
-    entry_price = float(entry_price or 0.0)
-    target_price = float(target_price or 0.0)
-    model, model_name = _normalize_model_fields(model, model_name, symbol, strategy)
+        # 기본값/정규화
+        predicted_class = predicted_class if predicted_class is not None else -1
+        label = label if label is not None else -1
+        reason = (reason or "사유없음").strip()
+        rate = 0.0 if rate is None else float(rate)
+        return_value = 0.0 if return_value is None else float(return_value)
+        entry_price = float(entry_price or 0.0)
+        target_price = float(target_price or 0.0)
+        model, model_name = _normalize_model_fields(model, model_name, symbol, strategy)
 
-    allowed_sources = ["일반","meta","evo_meta","baseline_meta","진화형","평가","단일","변동성","train_loop","섀도우"]
-    if source not in allowed_sources:
-        source = "일반"
+        allowed_sources = ["일반","meta","evo_meta","baseline_meta","진화형","평가","단일","변동성","train_loop","섀도우"]
+        if source not in allowed_sources:
+            source = "일반"
 
-    # feature_vector 축약(길면 head/tail만)
-    fv_serial = ""
-    try:
-        if feature_vector is not None:
-            if isinstance(feature_vector, (list, tuple)):
-                v = list(feature_vector)
-            elif "numpy" in str(type(feature_vector)):
-                v = feature_vector.flatten().tolist()
-            else:
-                v = []
-            if len(v) > 64:
-                fv_serial = json.dumps({"head": v[:8], "tail": v[-8:]}, ensure_ascii=False)
-            else:
-                fv_serial = json.dumps(v, ensure_ascii=False)
-    except Exception:
+        # feature_vector 축약(길면 head/tail만)
         fv_serial = ""
+        try:
+            if feature_vector is not None:
+                if isinstance(feature_vector, (list, tuple)):
+                    v = list(feature_vector)
+                elif "numpy" in str(type(feature_vector)):
+                    v = feature_vector.flatten().tolist()
+                else:
+                    v = []
+                if len(v) > 64:
+                    fv_serial = json.dumps({"head": v[:8], "tail": v[-8:]}, ensure_ascii=False)
+                else:
+                    fv_serial = json.dumps(v, ensure_ascii=False)
+        except Exception:
+            fv_serial = ""
 
-    row = [
-        now, symbol, strategy, direction, entry_price, target_price,
-        (model or ""), predicted_class, top_k_str, note,
-        str(success), reason, rate, return_value, label,
-        group_id, model_symbol, model_name, source, volatility, source_exchange,
-        (regime or ""), (meta_choice or ""),
-        (float(raw_prob) if raw_prob is not None else ""),
-        (float(calib_prob) if calib_prob is not None else ""),
-        (str(calib_ver) if calib_ver is not None else ""),
-        fv_serial
-    ]
+        row = [
+            now, symbol, strategy, direction, entry_price, target_price,
+            (model or ""), predicted_class, top_k_str, note,
+            str(success), reason, rate, return_value, label,
+            group_id, model_symbol, model_name, source, volatility, source_exchange,
+            (regime or ""), (meta_choice or ""),
+            (float(raw_prob) if raw_prob is not None else ""),
+            (float(calib_prob) if calib_prob is not None else ""),
+            (str(calib_ver) if calib_ver is not None else ""),
+            fv_serial
+        ]
 
-    try:
-        write_header = not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0
-        current_header = PREDICTION_HEADERS
-        if not write_header:
-            h = _read_csv_header(LOG_FILE)
-            current_header = h if h else PREDICTION_HEADERS
+        try:
+            write_header = not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0
+            current_header = PREDICTION_HEADERS
+            if not write_header:
+                h = _read_csv_header(LOG_FILE)
+                current_header = h if h else PREDICTION_HEADERS
 
-        with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.writer(f)
-            if write_header:
-                w.writerow(PREDICTION_HEADERS)
-                current_header = PREDICTION_HEADERS
-            w.writerow(_align_row_to_header(row, current_header))
+            with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                if write_header:
+                    w.writerow(PREDICTION_HEADERS)
+                    current_header = PREDICTION_HEADERS
+                w.writerow(_align_row_to_header(row, current_header))
 
-        print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} class={predicted_class} | success={success} | src={source_exchange} | reason={reason}")
+            print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} class={predicted_class} | success={success} | src={source_exchange} | reason={reason}")
 
-        # -------------------------
-        # 실패 패턴 DB 기록 (노이즈 차단)
-        #  - label == -1 이거나 entry_price가 None/0이면 실제 실패로 보지 않고 DB 기록 생략
-        #  - model/model_name을 위에서 강제 정규화하여 해시 충돌/unknown 스팸 방지
-        # -------------------------
-        should_record_failure = (insert_failure_record is not None) and (not success) \
-            and (label not in (-1, "-1", None)) \
-            and (entry_price not in (None, 0.0))
+            # -------------------------
+            # 실패 패턴 DB 기록 (노이즈 차단)
+            #  - label == -1 이거나 entry_price가 None/0이면 실제 실패로 보지 않고 DB 기록 생략
+            #  - model/model_name을 위에서 강제 정규화하여 해시 충돌/unknown 스팸 방지
+            # -------------------------
+            should_record_failure = (insert_failure_record is not None) and (not success) \
+                and (label not in (-1, "-1", None)) \
+                and (entry_price not in (None, 0.0))
 
-        if should_record_failure:
-            feature_hash = f"{symbol}-{strategy}-{model}-{predicted_class}-{label}-{rate}"
-            safe_vector = []
-            try:
-                import numpy as _np
-                if feature_vector is not None:
-                    if isinstance(feature_vector, _np.ndarray):
-                        safe_vector = feature_vector.flatten().tolist()
-                    elif isinstance(feature_vector, list):
-                        safe_vector = feature_vector
-            except Exception:
+            if should_record_failure:
+                feature_hash = f"{symbol}-{strategy}-{model}-{predicted_class}-{label}-{rate}"
                 safe_vector = []
+                try:
+                    import numpy as _np
+                    if feature_vector is not None:
+                        if isinstance(feature_vector, _np.ndarray):
+                            safe_vector = feature_vector.flatten().tolist()
+                        elif isinstance(feature_vector, list):
+                            safe_vector = feature_vector
+                except Exception:
+                    safe_vector = []
 
-            insert_failure_record(
-                {
-                    "symbol": symbol, "strategy": strategy, "direction": direction,
-                    "model": model, "predicted_class": predicted_class,
-                    "rate": rate, "reason": reason, "label": label, "source": source,
-                    "entry_price": entry_price, "target_price": target_price,
-                    "return_value": return_value
-                },
-                feature_hash=feature_hash, label=label, feature_vector=safe_vector
-            )
-        else:
-            # 감사 로그로만 남겨서 원인 추적 가능하게
-            if not success:
-                log_audit_prediction(symbol, strategy, "skip_failure_db", f"label={label}, entry_price={entry_price}")
-    except Exception as e:
-        print(f"[⚠️ 예측 로그 기록 실패] {e}")
+                insert_failure_record(
+                    {
+                        "symbol": symbol, "strategy": strategy, "direction": direction,
+                        "model": model, "predicted_class": predicted_class,
+                        "rate": rate, "reason": reason, "label": label, "source": source,
+                        "entry_price": entry_price, "target_price": target_price,
+                        "return_value": return_value
+                    },
+                    feature_hash=feature_hash, label=label, feature_vector=safe_vector
+                )
+            else:
+                # 감사 로그로만 남겨서 원인 추적 가능하게
+                if not success:
+                    log_audit_prediction(symbol, strategy, "skip_failure_db", f"label={label}, entry_price={entry_price}")
+        except Exception as e:
+            print(f"[⚠️ 예측 로그 기록 실패] {e}")
 
 # -------------------------
 # 학습 로그 (훈련 성공/실패는 성공률 집계에서 제외)
