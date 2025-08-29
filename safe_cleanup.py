@@ -1,9 +1,30 @@
-# safe_cleanup.py (FIXED-CONFIG: env 없이 동작, 스케줄러 포함 / micro-fix3, 10GB 서버용 튜닝 + 모델·메타 세트 정리 강화)
+# safe_cleanup.py (FIXED-CONFIG + ENV OVERRIDES: 10GB 서버 최적화, 모델·메타 세트 정리 강화)
 import os
 import time
 import threading
 import gc
 from datetime import datetime, timedelta
+
+# ========= ENV helpers =========
+def _env_float(key: str, default: float) -> float:
+    try:
+        v = os.getenv(key, None)
+        return float(v) if v is not None and str(v).strip() != "" else float(default)
+    except Exception:
+        return float(default)
+
+def _env_int(key: str, default: int) -> int:
+    try:
+        v = os.getenv(key, None)
+        return int(float(v)) if v is not None and str(v).strip() != "" else int(default)
+    except Exception:
+        return int(default)
+
+def _env_bool(key: str, default: bool) -> bool:
+    v = os.getenv(key, None)
+    if v is None:
+        return bool(default)
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 # ====== 기본 경로 (env 있으면 사용, 없으면 기본) ======
 ROOT_DIR = os.getenv("PERSIST_ROOT", "/persistent")
@@ -13,24 +34,24 @@ SSL_DIR = os.path.join(ROOT_DIR, "ssl_models")
 LOCK_DIR = os.path.join(ROOT_DIR, "locks")
 DELETED_LOG_PATH = os.path.join(LOG_DIR, "deleted_log.txt")
 
-# ====== 정책(고정값 / 10GB 환경 최적화) ======
-KEEP_DAYS   = 1
-HARD_CAP_GB = 9.6   # 10GB 한계 대비 여유
-SOFT_CAP_GB = 9.0
-TRIGGER_GB  = 7.5   # 여유 확보를 위해 약간 상향(7.0→7.5)
-MIN_FREE_GB = 0.8   # 하드캡 해제 후 최소 확보 목표
+# ====== 정책(10GB 환경 기본값) + ✅ SAFE_* 환경변수로 덮어쓰기 ======
+KEEP_DAYS   = _env_int("MAX_LOG_AGE_DAYS", 1)
+HARD_CAP_GB = _env_float("SAFE_HARD_CAP_GB", 9.6)
+SOFT_CAP_GB = _env_float("SAFE_SOFT_CAP_GB", 9.0)
+TRIGGER_GB  = _env_float("SAFE_TRIGGER_GB", 7.5)
+MIN_FREE_GB = _env_float("MIN_FREE_GB", 0.8)
 
-CSV_MAX_MB = 50
-CSV_BACKUPS = 3
+CSV_MAX_MB  = _env_int("CSV_MAX_MB", 50)
+CSV_BACKUPS = _env_int("CSV_BACKUPS", 3)
 
-MAX_MODELS_KEEP_GLOBAL = 200
-MAX_MODELS_PER_KEY = 2
+MAX_MODELS_KEEP_GLOBAL = _env_int("MAX_MODELS_KEEP_GLOBAL", 200)
+MAX_MODELS_PER_KEY     = _env_int("KEEP_RECENT_MODELS_PER_SYMBOL", 2)
 
-PROTECT_HOURS = 12
+PROTECT_HOURS = _env_int("PROTECT_HOURS", 12)
 LOCK_PATH = os.path.join(LOCK_DIR, "train_or_predict.lock")
-DRYRUN = False
+DRYRUN = _env_bool("SAFE_DRYRUN", False)
 
-# ✅ (5번) 압축 모델 확장자도 동일 취급
+# ✅ 모델/메타 파일 인식
 MODEL_EXTS = (".pt", ".ptz", ".safetensors")
 META_EXT = ".meta.json"
 _PREFERRED_WEIGHT_EXTS = (".ptz", ".safetensors", ".pt")  # 보존 우선순위
@@ -93,10 +114,8 @@ def _is_model_file(path: str) -> bool:
     if not isinstance(path, str):
         return False
     base = os.path.basename(path)
-    # 모델 가중치
     if any(base.endswith(ext) for ext in MODEL_EXTS):
         return True
-    # 메타(모델과 세트)
     if base.endswith(META_EXT):
         return True
     return False
@@ -106,17 +125,13 @@ def _should_delete_file(fname: str) -> bool:
     기존 규칙 + (NEW) models/ 안의 모델 확장자는 접두사 없이도 정리 대상으로 인정.
     """
     base = os.path.basename(fname)
-    # 보호 목록
     if base in EXCLUDE_FILES:
         return False
-    # models/ 디렉토리의 모델/메타 파일은 접두사와 무관하게 삭제 후보
     try:
-        if _is_within(fname, MODEL_DIR):
-            if _is_model_file(fname):
-                return True
+        if _is_within(fname, MODEL_DIR) and _is_model_file(fname):
+            return True
     except Exception:
         pass
-    # 일반 접두사 규칙
     return any(base.startswith(p) for p in DELETE_PREFIXES)
 
 def _is_recent(path: str, hours: float) -> bool:
@@ -168,7 +183,7 @@ def _split_stem_and_ext(path: str):
     """
     base = os.path.basename(path)
     if base.endswith(".meta.json"):
-        stem = base[:-10]  # drop ".meta.json"
+        stem = base[:-10]
         ext = ".meta.json"
         return stem, ext
     root, ext = os.path.splitext(base)
@@ -228,7 +243,7 @@ def _delete_old_by_days(paths, cutoff_dt, deleted_log, accept_all=False):
 
 def _delete_until_target(deleted_log, target_gb):
     candidates = []
-    # LOG/MODEL: 규칙 기반 후보 수집
+    # LOG/MODEL
     for d in [LOG_DIR, MODEL_DIR]:
         for p in _list_files(d):
             if os.path.isfile(p) and _should_delete_file(p):
@@ -239,7 +254,7 @@ def _delete_until_target(deleted_log, target_gb):
                 except Exception:
                     ctime = 0
                 candidates.append((ctime, p))
-    # SSL: 대용량 캐시 우선 제거
+    # SSL: 대용량 우선 제거
     for p in _list_files(SSL_DIR):
         if os.path.isfile(p) and not _is_recent(p, PROTECT_HOURS):
             try:
@@ -248,8 +263,7 @@ def _delete_until_target(deleted_log, target_gb):
                 ctime = 0
             candidates.append((ctime, p))
 
-    # 오래된 것부터
-    candidates.sort(key=lambda x: x[0])
+    candidates.sort(key=lambda x: x[0])  # 오래된 것부터
     while get_directory_size_gb(ROOT_DIR) > target_gb and candidates:
         _, p = candidates.pop(0)
         _delete_file(p, deleted_log)
@@ -265,11 +279,10 @@ def _limit_models_per_key(deleted_log):
     if not sets:
         return
 
-    # 세트 단위로 정렬(최신 mtime 우선)
     items = [(stem, data) for stem, data in sets.items()]
     items.sort(key=lambda x: x[1]["mtime"], reverse=True)
 
-    # 글로벌 상한: 초과 세트는 전부 삭제
+    # 글로벌 상한
     if len(items) > MAX_MODELS_KEEP_GLOBAL:
         for stem, data in items[MAX_MODELS_KEEP_GLOBAL:]:
             for wpath in data["weights"].values():
@@ -278,19 +291,18 @@ def _limit_models_per_key(deleted_log):
                 _delete_file(data["meta"], deleted_log)
         items = items[:MAX_MODELS_KEEP_GLOBAL]
 
-    # 버킷(심볼_전략_모델)별 상한 적용
+    # 버킷 상한
     from collections import defaultdict
     buckets = defaultdict(list)
     for stem, data in items:
         buckets[_key_from_stem(stem)].append((stem, data))
 
     for key, arr in buckets.items():
-        # 최신 세트 MAX_MODELS_PER_KEY개만 보존, 나머지는 삭제
         arr.sort(key=lambda x: x[1]["mtime"], reverse=True)
         keep = arr[:MAX_MODELS_PER_KEY]
         drop = arr[MAX_MODELS_PER_KEY:]
 
-        # 보존 세트: 가중치는 선호 확장자 1개만 유지(+메타는 그대로 유지)
+        # keep: 가중치 1개만 유지
         for stem, data in keep:
             chosen = None
             for ext in _PREFERRED_WEIGHT_EXTS:
@@ -301,9 +313,9 @@ def _limit_models_per_key(deleted_log):
                 if chosen is not None and ext == chosen:
                     continue
                 _delete_file(wpath, deleted_log)
-            # 메타는 있으면 보존 (삭제하지 않음)
+            # 메타는 보존
 
-        # 드롭 세트: 전부 삭제(가중치+메타)
+        # drop: 전부 삭제
         for stem, data in drop:
             for wpath in data["weights"].values():
                 _delete_file(wpath, deleted_log)
@@ -339,14 +351,14 @@ def _locked_by_runtime() -> bool:
         pass
     return False
 
-# ========= 🆘 EMERGENCY PURGE (접두사/보호시간/락 무시) =========
+# ========= 🆘 EMERGENCY PURGE =========
 def emergency_purge(target_gb=None):
     """
     디스크가 꽉 찼을 때 즉시 용량 확보.
     - 접두사/보호시간/락 조건 무시
     - ssl_models → models → logs 순서
     - 오래된 파일부터 삭제
-    - target_gb 미지정 시: max(SOFT_CAP_GB, HARD_CAP_GB - MIN_FREE_GB)
+    - target_gb 미지정: max(SOFT_CAP_GB, HARD_CAP_GB - MIN_FREE_GB)
     """
     _ensure_dirs()
     deleted = []
@@ -410,13 +422,12 @@ def auto_delete_old_logs():
     current_gb = get_directory_size_gb(ROOT_DIR)
     print(f"[용량] 현재={_human_gb(current_gb)} | 트리거={_human_gb(TRIGGER_GB)} | 목표={_human_gb(SOFT_CAP_GB)} | 하드캡={_human_gb(HARD_CAP_GB)}")
 
-    # CSV 롤오버(먼저 공간 조금 확보)
+    # CSV 롤오버
     for csv_path in ROOT_CSVS + [os.path.join(LOG_DIR, n) for n in ["prediction_log.csv", "train_log.csv", "evaluation_result.csv", "wrong_predictions.csv"]]:
         deleted += _rollover_csv(csv_path, CSV_MAX_MB, CSV_BACKUPS)
 
     if current_gb >= HARD_CAP_GB:
         print(f"[🚨 하드캡 초과] 즉시 강제 정리 시작")
-        # 1) SSL(대용량) → 2) 모델/로그 순
         _delete_old_by_days([SSL_DIR],  cutoff, deleted_log=deleted, accept_all=True)
         _delete_old_by_days([MODEL_DIR, LOG_DIR], cutoff, deleted_log=deleted)
         _delete_until_target(deleted, max(SOFT_CAP_GB, HARD_CAP_GB - MIN_FREE_GB))
@@ -449,10 +460,11 @@ def auto_delete_old_logs():
 def cleanup_logs_and_models():
     auto_delete_old_logs()
 
-# ====== 경량/주기 실행 유틸(고정값) ======
-INTERVAL_SEC = 300
-RUN_ON_START = True
-_VERBOSE = True
+# ====== 경량/주기 실행 유틸 ======
+# minutes → seconds (render.yaml에서 SAFE_CLEANUP_INTERVAL_MIN 사용)
+INTERVAL_SEC = _env_int("SAFE_CLEANUP_INTERVAL_MIN", 5) * 60
+RUN_ON_START = _env_bool("SAFE_CLEANUP_RUN_ON_START", True)
+_VERBOSE = _env_bool("SAFE_CLEANUP_VERBOSE", True)
 
 def _log(msg: str):
     if _VERBOSE:
