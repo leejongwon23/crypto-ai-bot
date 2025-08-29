@@ -66,9 +66,13 @@ def _bybit_interval_minutes(mapped: str) -> int:
 
 # ========================= 공통 유틸 =========================
 def _parse_ts_series(s: pd.Series) -> pd.Series:
-    """혼합 timestamp(정수 초/밀리초, ISO 문자열, datetime)를 UTC→KST로 안전 변환."""
+    """
+    혼합 timestamp(정수 초/밀리초, 숫자형 문자열, ISO 문자열, datetime)를 UTC→KST로 안전 변환.
+    - Bybit v5는 ms가 '문자열'로 오는 경우가 잦음 → 이를 숫자로 인지해 단위(ms/s) 판별 후 변환.
+    """
     if s is None:
         return pd.to_datetime(pd.Series([], dtype="object"), errors="coerce", utc=True)
+
     try:
         # 이미 datetime이면 tz 보정
         if pd.api.types.is_datetime64_any_dtype(s):
@@ -80,7 +84,7 @@ def _parse_ts_series(s: pd.Series) -> pd.Series:
                 pass
             return ts.dt.tz_convert("Asia/Seoul")
 
-        # 숫자형(초/밀리초) 처리
+        # 1) 숫자형 dtype
         if pd.api.types.is_numeric_dtype(s):
             num = pd.to_numeric(s, errors="coerce")
             med = float(num.dropna().median()) if num.dropna().size else 0.0
@@ -88,10 +92,24 @@ def _parse_ts_series(s: pd.Series) -> pd.Series:
             ts = pd.to_datetime(num, unit=unit, errors="coerce", utc=True)
             return ts.dt.tz_convert("Asia/Seoul")
 
-        # 문자열 혼합 처리(자동 추정) — infer_datetime_format 제거(경고 방지)
+        # 2) object/string dtype
         ss = s.astype(str).str.strip()
+
+        # 2-1) "숫자형 문자열" 비율이 높으면 숫자로 처리
+        # (길이 10~13, 전부 숫자) → 초/밀리초 자동 판정
+        # 예: "1724956800" (s), "1724956800000" (ms)
+        is_digit_like = ss.str.match(r"^\d{10,13}$", na=False)
+        if is_digit_like.mean() > 0.7:  # 대다수가 숫자형이면 숫자로 간주
+            num = pd.to_numeric(ss.where(is_digit_like, np.nan), errors="coerce")
+            med = float(num.dropna().median()) if num.dropna().size else 0.0
+            unit = "ms" if med >= 1e12 else "s"
+            ts = pd.to_datetime(num, unit=unit, errors="coerce", utc=True)
+            return ts.dt.tz_convert("Asia/Seoul")
+
+        # 2-2) ISO 포맷/일반 문자열
         ts = pd.to_datetime(ss, errors="coerce", utc=True)
         return ts.dt.tz_convert("Asia/Seoul")
+
     except Exception:
         return pd.to_datetime(pd.Series([], dtype="object"), errors="coerce", utc=True)
 
@@ -593,12 +611,30 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=cols)
     df = df.copy()
 
-    if "timestamp" in df.columns:
-        df["timestamp"] = _parse_ts_series(df["timestamp"])
-    elif "time" in df.columns:
-        df["timestamp"] = _parse_ts_series(df["time"])
+    # 다양한 키 지원: bybit(list), bybit(dict), binance 등
+    ts_candidate = None
+    for k in ["timestamp", "start", "t", "open_time", "openTime", 0]:
+        if (isinstance(k, int) and k in getattr(df, "columns", [])) or (isinstance(k, str) and k in df.columns):
+            ts_candidate = k
+            break
+
+    if ts_candidate is None and "time" in df.columns:
+        ts_candidate = "time"
+
+    if ts_candidate is not None:
+        df["timestamp"] = _parse_ts_series(df[ts_candidate])
     else:
         df["timestamp"] = _parse_ts_series(pd.Series([pd.NaT] * len(df)))
+
+    # 가격/볼륨 컬럼 보정
+    rename_map = {}
+    if "1" in df.columns: rename_map["1"] = "open"
+    if "2" in df.columns: rename_map["2"] = "high"
+    if "3" in df.columns: rename_map["3"] = "low"
+    if "4" in df.columns: rename_map["4"] = "close"
+    if "5" in df.columns: rename_map["5"] = "volume"
+    if rename_map:
+        df = df.rename(columns=rename_map)
 
     for c in ["open", "high", "low", "close", "volume"]:
         if c in df.columns:
