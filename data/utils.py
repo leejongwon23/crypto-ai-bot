@@ -48,6 +48,17 @@ def _map_bybit_interval(interval: str) -> str:
     }
     return mapping.get(str(interval), str(interval))
 
+def _bybit_interval_minutes(mapped: str) -> int:
+    """Bybit interval 문자 기준 분 단위 환산"""
+    m = str(mapped)
+    if m.isdigit():  # "60", "240", "120" ...
+        return int(m)
+    if m == "D": return 1440
+    if m == "W": return 10080
+    if m == "M": return 43200  # 대략 30일
+    # 안전망: 기본 60분
+    return 60
+
 # ========================= 공통 유틸 =========================
 def _parse_ts_series(s: pd.Series) -> pd.Series:
     """혼합 timestamp(정수 초/밀리초, ISO 문자열, datetime)를 UTC→KST로 안전 변환."""
@@ -72,9 +83,9 @@ def _parse_ts_series(s: pd.Series) -> pd.Series:
             ts = pd.to_datetime(num, unit=unit, errors="coerce", utc=True)
             return ts.dt.tz_convert("Asia/Seoul")
 
-        # 문자열 혼합 처리(자동 추정)
+        # 문자열 혼합 처리(자동 추정) — infer_datetime_format 제거(경고 방지)
         ss = s.astype(str).str.strip()
-        ts = pd.to_datetime(ss, errors="coerce", utc=True, infer_datetime_format=True)
+        ts = pd.to_datetime(ss, errors="coerce", utc=True)
         return ts.dt.tz_convert("Asia/Seoul")
     except Exception:
         return pd.to_datetime(pd.Series([], dtype="object"), errors="coerce", utc=True)
@@ -303,6 +314,14 @@ def _is_binance_blocked():
 def _block_binance_for(seconds=1800):
     CacheManager.set("binance_blocked_until", time.time() + seconds)
     print(f"[🚫 Binance 차단] {seconds}초 동안 Binance 폴백 비활성화")
+
+def _bybit_blocked_until(): return CacheManager.get("bybit_blocked_until")
+def _is_bybit_blocked():
+    until = _bybit_blocked_until()
+    return until is not None and time.time() < until
+def _block_bybit_for(seconds=900):
+    CacheManager.set("bybit_blocked_until", time.time() + seconds)
+    print(f"[🚫 Bybit 차단] {seconds}초 동안 Bybit 1차 수집 비활성화")
 
 # ========================= 실패 로깅 경량 헬퍼 =========================
 def safe_failed_result(symbol, strategy, reason=""):
@@ -540,7 +559,8 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                 for j in range(len(sample)):
                     row = sample[j]
                     if len(row) < input_size:
-                        row.extend([0.0] * (input_size - len(row)))
+                        row.extend([0.0] * (input_size - len(row))
+                        )
                     elif len(row) > input_size:
                         sample[j] = row[:input_size]
             fb_samples.append(sample)
@@ -608,11 +628,27 @@ def _clip_tail(df: pd.DataFrame, limit: int) -> pd.DataFrame:
 
 # ========================= 거래소 수집기(Bybit) =========================
 def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
+    # Bybit 백오프 중이면 즉시 중단
+    if _is_bybit_blocked():
+        print("[⛔ Bybit 비활성화 상태] 일시차단 중")
+        return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+
     real_symbol = SYMBOL_MAP["bybit"].get(symbol, symbol)
     target_rows = int(limit)
     collected, total, last_oldest = [], 0, None
 
     interval = _map_bybit_interval(interval)
+    iv_minutes = _bybit_interval_minutes(interval)
+
+    # 첫 호출 시 lookback 기반 start(ms) 계산 (UTC 기준)
+    start_ms = None
+    if end_time is None:
+        # limit * interval_minutes 만큼 뒤로 가서 시작
+        lookback_ms = int(target_rows * iv_minutes * 60 * 1000)
+        now_ms = int(pd.Timestamp.utcnow().timestamp() * 1000)
+        start_ms = max(0, now_ms - lookback_ms)
+
+    empty_resp_count = 0
 
     while total < target_rows:
         success = False
@@ -620,43 +656,56 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
             try:
                 rows_needed = target_rows - total
                 req = min(1000, rows_needed)
-                params = {"category": "linear", "symbol": real_symbol, "interval": interval, "limit": req}
-                if end_time is not None:
-                    # Bybit end: ms(UTC)
-                    params["end"] = int(pd.to_datetime(end_time).tz_convert("UTC").timestamp() * 1000)
 
-                print(f"[📡 Bybit 요청] {real_symbol}-{interval} | 시도 {attempt+1}/{max_retry} | 요청 수량={req} | end={end_time}")
-                res = requests.get(f"{BASE_URL}/v5/market/kline", params=params, timeout=10, headers=REQUEST_HEADERS)
-                res.raise_for_status()
-                data = res.json()
-                raw = (data or {}).get("result", {}).get("list", [])
-                if not raw:
-                    print(f"[❌ 데이터 없음] {real_symbol} (시도 {attempt+1})")
-                    break
+                # 우선 linear로, 빈 응답이면 같은 attempt에서 1회 spot로 재시도
+                for category in ("linear", "spot"):
+                    params = {"category": category, "symbol": real_symbol, "interval": interval, "limit": req}
+                    if end_time is not None:
+                        params["end"] = int(end_time.timestamp() * 1000)
+                    elif start_ms is not None:
+                        params["start"] = start_ms  # 첫 페이지는 start만 넣고 end 생략
 
-                if isinstance(raw[0], (list, tuple)) and len(raw[0]) >= 6:
-                    df_chunk = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"][:len(raw[0])])
-                else:
-                    df_chunk = pd.DataFrame(raw)
+                    print(f"[📡 Bybit 요청] {real_symbol}-{interval} cat={category} | 시도 {attempt+1}/{max_retry} | 요청 수량={req} | start={params.get('start')} | end={params.get('end')}")
+                    res = requests.get(f"{BASE_URL}/v5/market/kline", params=params, timeout=10, headers=REQUEST_HEADERS)
+                    res.raise_for_status()
+                    data = res.json()
 
-                df_chunk = _normalize_df(df_chunk)
-                if df_chunk.empty:
-                    break
+                    # retCode/retMsg 디버깅 로그
+                    rc = data.get("retCode"); rm = data.get("retMsg")
+                    if rc not in (0, "0", None):
+                        print(f"[Bybit ret] code={rc} msg={rm}")
 
-                collected.append(df_chunk)
-                total += len(df_chunk)
-                success = True
-                if total >= target_rows:
-                    break
+                    raw = (data or {}).get("result", {}).get("list", [])
+                    if not raw:
+                        print(f"[❌ Bybit 데이터 없음] {real_symbol}-{interval} cat={category} (시도 {attempt+1})")
+                        empty_resp_count += 1
+                        # category 전환 후에도 비면 다음 attempt
+                        continue  # 다음 category 또는 바깥 루프으로
+                    # ---- 정상 데이터 ----
+                    if isinstance(raw[0], (list, tuple)) and len(raw[0]) >= 6:
+                        df_chunk = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"][:len(raw[0])])
+                    else:
+                        df_chunk = pd.DataFrame(raw)
 
-                oldest_ts = df_chunk["timestamp"].min()
-                if last_oldest is not None and pd.to_datetime(oldest_ts) >= pd.to_datetime(last_oldest):
-                    oldest_ts = pd.to_datetime(oldest_ts) - pd.Timedelta(minutes=1)
-                last_oldest = oldest_ts
-                # Bybit end 파라미터는 밀리초 UTC 기준 → UTC로 맞춰 뒤로 이동
-                end_time = pd.to_datetime(oldest_ts).tz_convert("UTC") - pd.Timedelta(milliseconds=1)
-                time.sleep(0.2)
-                break
+                    df_chunk = _normalize_df(df_chunk)
+                    if df_chunk.empty:
+                        print(f"[❌ Bybit 정규화 후 비어있음] {real_symbol}-{interval} cat={category}")
+                        continue
+
+                    collected.append(df_chunk)
+                    total += len(df_chunk)
+                    success = True
+
+                    # 다음 페이지 준비: 가장 오래된 ts 기준 end 이동(UTC ms)
+                    oldest_ts = df_chunk["timestamp"].min()
+                    if last_oldest is not None and pd.to_datetime(oldest_ts) >= pd.to_datetime(last_oldest):
+                        oldest_ts = pd.to_datetime(oldest_ts) - pd.Timedelta(minutes=1)
+                    last_oldest = oldest_ts
+                    end_time = pd.to_datetime(oldest_ts).tz_convert("UTC") - pd.Timedelta(milliseconds=1)
+                    time.sleep(0.2)
+                    break  # category 루프 탈출
+                if success:
+                    break  # attempt 루프 탈출
             except RequestException as e:
                 print(f"[에러] get_kline({real_symbol}) 네트워크 실패 → {e}")
                 time.sleep(1)
@@ -666,12 +715,18 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                 time.sleep(0.5)
                 continue
         if not success:
+            # attempt 내 모든 category에서 실패
             break
 
     if collected:
         df = _normalize_df(pd.concat(collected, ignore_index=True))
         print(f"[📊 수집 완료] {symbol}-{interval} → 총 {len(df)}개 봉 확보")
         return df
+
+    # 연속 빈 응답이면 Bybit 백오프(소프트밴/정책차 방어)
+    if empty_resp_count >= max_retry * 2:
+        _block_bybit_for(int(os.getenv("BYBIT_BACKOFF_SEC", "900")))
+
     print(f"[❌ 최종 실패] {symbol}-{interval} → 수집된 봉 없음")
     return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
 
@@ -701,8 +756,7 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
                 req = min(1000, rows_needed)
                 params = {"symbol": real_symbol, "interval": _bin_iv, "limit": req}
                 if end_time is not None:
-                    # Binance endTime: ms(UTC)
-                    params["endTime"] = int(pd.to_datetime(end_time).tz_convert("UTC").timestamp() * 1000)
+                    params["endTime"] = int(end_time.timestamp() * 1000)
                 print(f"[📡 Binance 요청] {real_symbol}-{interval} | 요청 {req}개 | 시도 {attempt+1}/{max_retry} | end_time={end_time}")
 
                 res = requests.get(f"{BINANCE_BASE_URL}/fapi/v1/klines", params=params, timeout=10, headers=REQUEST_HEADERS)
@@ -742,8 +796,7 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
                 if last_oldest is not None and pd.to_datetime(oldest_ts) >= pd.to_datetime(last_oldest):
                     oldest_ts = pd.to_datetime(oldest_ts) - pd.Timedelta(minutes=1)
                 last_oldest = oldest_ts
-                # Binance도 endTime은 UTC ms
-                end_time = pd.to_datetime(oldest_ts).tz_convert("UTC") - pd.Timedelta(milliseconds=1)
+                end_time = pd.to_datetime(oldest_ts).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
                 time.sleep(0.3)
                 break
             except RequestException as e:
@@ -783,8 +836,7 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
             if len(dfc) < base_limit:
                 break
             oldest = dfc["timestamp"].min()
-            # 통일: 다음 요청 end는 UTC ms 기준
-            end = pd.to_datetime(oldest).tz_convert("UTC") - pd.Timedelta(milliseconds=1)
+            end = pd.to_datetime(oldest).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
         dff = _normalize_df(pd.concat(total, ignore_index=True)) if total else pd.DataFrame()
         print(f"[✅ {src} 수집 완료] {symbol}-{strategy} → {len(dff)}개")
         return dff
@@ -829,7 +881,7 @@ def get_kline_by_strategy(symbol: str, strategy: str):
                 break
             df_bybit.append(dfc); total_bybit += len(dfc)
             oldest = dfc["timestamp"].min()
-            end = pd.to_datetime(oldest).tz_convert("UTC") - pd.Timedelta(milliseconds=1)
+            end = pd.to_datetime(oldest).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
             if len(dfc) < limit:
                 break
         df_bybit = _normalize_df(pd.concat(df_bybit, ignore_index=True)) if df_bybit else pd.DataFrame()
@@ -845,7 +897,7 @@ def get_kline_by_strategy(symbol: str, strategy: str):
                         break
                     df_binance.append(dfc); total_binance += len(dfc)
                     oldest = dfc["timestamp"].min()
-                    end = pd.to_datetime(oldest).tz_convert("UTC") - pd.Timedelta(milliseconds=1)
+                    end = pd.to_datetime(oldest).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
                     if len(dfc) < limit:
                         break
                 except Exception as be:
@@ -968,6 +1020,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
             df["stoch_k"] = _ta.momentum.stoch(df["high"], df["low"], df["close"], fillna=True)
             df["stoch_d"] = _ta.momentum.stoch_signal(df["high"], df["low"], df["close"], fillna=True)
         except Exception:
+            # ta 미설치/오류 시 최소 피처만
             pass
 
         df["vwap"] = (df["volume"] * df["close"]).cumsum() / (df["volume"].cumsum() + 1e-6)
