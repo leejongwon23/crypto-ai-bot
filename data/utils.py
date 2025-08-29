@@ -38,6 +38,16 @@ except Exception:
             "vol_high_pct": 0.9, "vol_low_pct": 0.5
         }
 
+# ========================= Bybit interval 매핑 =========================
+def _map_bybit_interval(interval: str) -> str:
+    """Bybit API가 요구하는 interval 문자열로 변환"""
+    mapping = {
+        "60": "60", "240": "240", "1h": "60", "4h": "240",
+        "D": "D", "1d": "D", "2D": "120", "3D": "180",
+        "W": "W", "M": "M"
+    }
+    return mapping.get(str(interval), str(interval))
+
 # ========================= 공통 유틸 =========================
 def _parse_ts_series(s: pd.Series) -> pd.Series:
     """혼합 timestamp(정수 초/밀리초, ISO 문자열, datetime)를 UTC→KST로 안전 변환."""
@@ -603,6 +613,8 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
     target_rows = int(limit)
     collected, total, last_oldest = [], 0, None
 
+    interval = _map_bybit_interval(interval)
+
     while total < target_rows:
         success = False
         for attempt in range(max_retry):
@@ -641,7 +653,8 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                 if last_oldest is not None and pd.to_datetime(oldest_ts) >= pd.to_datetime(last_oldest):
                     oldest_ts = pd.to_datetime(oldest_ts) - pd.Timedelta(minutes=1)
                 last_oldest = oldest_ts
-                end_time = pd.to_datetime(oldest_ts).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
+                # Bybit API end 파라미터는 밀리초 UTC 기준 → UTC로 맞춰 뒤로 이동
+                end_time = pd.to_datetime(oldest_ts).tz_convert("UTC") - pd.Timedelta(milliseconds=1)
                 time.sleep(0.2)
                 break
             except RequestException as e:
