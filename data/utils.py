@@ -183,6 +183,8 @@ class GroupOrderManager:
         self.groups = [list(g) for g in groups]
         self.idx = 0
         self.trained = {}
+        # ▶︎ 추가: 중복 예측 방지를 위한 마지막 예측 완료 인덱스
+        self.last_predicted_idx = -1
         self._load()
 
     def _load(self):
@@ -196,7 +198,9 @@ class GroupOrderManager:
                     self.groups = saved_groups
                 self.idx = int(st.get("idx", 0))
                 self.trained = {int(k): set(v) for k, v in st.get("trained", {}).items()}
-                print(f"[🧭 그룹상태 로드] idx={self.idx}, trained_keys={list(self.trained.keys())}")
+                # ▶︎ 로드: last_predicted_idx
+                self.last_predicted_idx = int(st.get("last_predicted_idx", -1))
+                print(f"[🧭 그룹상태 로드] idx={self.idx}, last_predicted_idx={self.last_predicted_idx}, trained_keys={list(self.trained.keys())}")
         except Exception as e:
             print(f"[⚠️ 그룹상태 로드 실패] {e}")
 
@@ -208,6 +212,8 @@ class GroupOrderManager:
                 "idx": self.idx,
                 "trained": {k: list(v) for k, v in self.trained.items()},
                 "symbols": SYMBOLS,
+                # ▶︎ 저장: last_predicted_idx
+                "last_predicted_idx": self.last_predicted_idx,
             }
             json.dump(payload, open(_STATE_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
         except Exception as e:
@@ -220,7 +226,22 @@ class GroupOrderManager:
         i = self.current_index()
         return self.groups[i] if self.groups else []
 
+    def _force_allow(self) -> bool:
+        """콜드스타트/강제 환경변수 시 순서 우회 허용."""
+        try:
+            if os.getenv("TRAIN_FORCE_IGNORE_SHOULD", "0") == "1":
+                return True
+            # 전체 모델 부재 시(콜드스타트) 허용
+            return not _models_exist()
+        except Exception:
+            return False
+
     def should_train(self, symbol: str) -> bool:
+        # ▶︎ 강제 허용 분기
+        if self._force_allow():
+            print(f"[order-override(utils)] {symbol}: force allow (cold-start/env)")
+            return True
+
         i = self.current_index()
         gset = set(self.current_group())
         done = self.trained.get(i, set())
@@ -243,24 +264,42 @@ class GroupOrderManager:
         print(f"[🧩 학습기록] 그룹{i} 진행중: {sorted(list(self.trained[i]))} / {self.current_group()}")
 
     def ready_for_group_predict(self) -> bool:
+        """
+        ▶︎ 변경: '그룹 내 최소 1개 심볼이라도 학습 완료'면 True.
+        또한 같은 그룹을 이미 예측 처리했다면 False.
+        """
         i = self.current_index()
         group = set(self.current_group())
         done = self.trained.get(i, set())
-        ready = group and group.issubset(done)
+        trained_cnt = len(group.intersection(done))
+        ready = (trained_cnt >= 1) and (self.last_predicted_idx != i)
         if ready:
-            print(f"[🚦 예측대기] 그룹{i} 전체 학습 완료 → 예측 실행 준비")
+            print(f"[🚦 예측대기] 그룹{i} 학습완료 {trained_cnt}/{len(group)} → 예측 실행 준비")
+        else:
+            if self.last_predicted_idx == i:
+                print(f"[⏸ 예측보류] 그룹{i}는 이미 예측 처리됨(last_predicted_idx={self.last_predicted_idx})")
         return ready
 
     def mark_group_predicted(self):
+        """
+        ▶︎ 변경: 동일 그룹 중복 호출을 방지(정확히 1회만 다음 그룹으로 이동).
+        """
         i = self.current_index()
+        if self.last_predicted_idx == i:
+            print(f"[🛡 중복차단] 그룹{i} 예측 완료가 이미 반영됨 → 스킵")
+            return
         print(f"[✅ 예측완료] 그룹{i} → 다음 그룹으로 이동")
+        self.last_predicted_idx = i
+        # 다음 그룹으로 인덱스 이동
         self.idx = (i + 1) % max(1, len(self.groups))
+        # 다음 그룹의 학습 집합 초기화 보장
         self.trained.setdefault(self.idx, set())
         self._save()
 
     def reset(self, start_index: int = 0):
         self.idx = max(0, min(start_index, max(0, len(self.groups) - 1)))
         self.trained = {self.idx: set()}
+        self.last_predicted_idx = -1
         self._save()
         print(f"[♻️ 그룹순서 리셋] idx={self.idx}")
 
