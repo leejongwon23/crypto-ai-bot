@@ -781,11 +781,29 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 if ready_for_group_predict():
                     time.sleep(0.1)
                     _safe_print(f"[PREDICT] group {idx+1} begin")
-                    for symbol in group:
-                        if stop_event is not None and stop_event.is_set(): break
-                        for strategy in ["단기","중기","장기"]:
+
+                    # 🔓 게이트 열기 → 예측 → 🔒 게이트 닫기 (보장)
+                    try:
+                        from predict import open_predict_gate, close_predict_gate
+                    except Exception:
+                        open_predict_gate = None; close_predict_gate = None
+                    try:
+                        try:
+                            if open_predict_gate: open_predict_gate(note=f"group_{idx+1}_start")
+                        except Exception as e:
+                            _safe_print(f"[gate open err] {e}")
+
+                        for symbol in group:
                             if stop_event is not None and stop_event.is_set(): break
-                            _safe_predict_with_timeout(predict, symbol, strategy, source="그룹직후", model_type=None, timeout=_PREDICT_TIMEOUT_SEC, stop_event=stop_event)
+                            for strategy in ["단기","중기","장기"]:
+                                if stop_event is not None and stop_event.is_set(): break
+                                _safe_predict_with_timeout(predict, symbol, strategy, source="그룹직후", model_type=None, timeout=_PREDICT_TIMEOUT_SEC, stop_event=stop_event)
+                    finally:
+                        try:
+                            if close_predict_gate: close_predict_gate()
+                        except Exception as e:
+                            _safe_print(f"[gate close err] {e}")
+
                     mark_group_predicted()
                     _safe_print(f"[PREDICT] group {idx+1} done")
                 else:
