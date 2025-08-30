@@ -792,7 +792,13 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 train_models(group, stop_event=stop_event, ignore_should=force_full_pass)
                 if stop_event is not None and stop_event.is_set(): _safe_print("🛑 stop after train → exit"); break
 
-                if ready_for_group_predict():
+                # ✅ 변경 핵심: ready_for_group_predict() 결과에 상관없이
+                # 이번 그룹에서 '실제로 모델이 존재하는(symbol 단위)' 심볼만 선별해 부분 예측 수행
+                trained_syms = [s for s in group if _has_any_model_for_symbol(s)]
+                do_predict = len(trained_syms) > 0
+                _safe_print(f"[PREDICT-DECIDE] ready={bool(ready_for_group_predict())} trained_syms={trained_syms}")
+
+                if do_predict:
                     time.sleep(0.1)
                     _safe_print(f"[PREDICT] group {idx+1} begin")
 
@@ -807,7 +813,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                         except Exception as e:
                             _safe_print(f"[gate open err] {e}")
 
-                        for symbol in group:
+                        for symbol in trained_syms:
                             if stop_event is not None and stop_event.is_set(): break
                             for strategy in ["단기","중기","장기"]:
                                 if stop_event is not None and stop_event.is_set(): break
@@ -818,10 +824,14 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                         except Exception as e:
                             _safe_print(f"[gate close err] {e}")
 
-                    mark_group_predicted()
+                    # ✅ 실제 예측을 수행한 경우에만 1회 마킹
+                    try:
+                        mark_group_predicted()
+                    except Exception as e:
+                        _safe_print(f"[mark_group_predicted err] {e}")
                     _safe_print(f"[PREDICT] group {idx+1} done")
                 else:
-                    _safe_print(f"[⏸ 대기] 그룹{idx} 일부 미학습 → 예측 보류")
+                    _safe_print(f"[⏸ 대기] 그룹{idx+1} 예측 건 없음(생성된 모델 없음) → 보류")
 
                 _prune_caches_and_gc()
                 _progress(f"group{idx}:done")
