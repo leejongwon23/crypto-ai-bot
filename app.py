@@ -71,6 +71,14 @@ def _release_global_lock():
         print(f"[LOCK] remove failed: {e}"); sys.stdout.flush()
     return False
 
+# ---------- 🆕 공통 유틸: 학습 상태 확인(직렬화 게이트) ----------
+def _is_training() -> bool:
+    """train 모듈의 단일 루프 동작 여부를 안전하게 확인."""
+    try:
+        return bool(getattr(train, "is_loop_running", lambda: False)())
+    except Exception:
+        return False
+
 # ---------- 🆕 공통 유틸: 즉시 격리-와이프 ----------
 def _quarantine_wipe_persistent():
     """
@@ -182,10 +190,13 @@ def start_scheduler():
     print(">>> 스케줄러 시작"); sys.stdout.flush()
     sched = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
 
-    # ✅ 전략별 평가(30분마다) — 실행 함수를 직접 등록해야 함
+    # ✅ 평가작업: 학습 중이면 **스킵** (직렬화 게이트)
     def 평가작업(strategy):
         def wrapped():
             try:
+                if _is_training() or os.path.exists(LOCK_PATH):
+                    print(f"[EVAL] skip: training/lock active (strategy={strategy})"); sys.stdout.flush()
+                    return
                 ts = now_kst().strftime("%Y-%m-%d %H:%M:%S")
                 print(f"[EVAL][{ts}] 전략={strategy} 시작"); sys.stdout.flush()
                 evaluate_predictions(lambda sym, _: get_kline_by_strategy(sym, strategy))
@@ -194,14 +205,24 @@ def start_scheduler():
         return wrapped
 
     for strat in ["단기", "중기", "장기"]:
-        # ⛏️ 버그수정: 이전 코드(lambda s=strat: 평가작업(s))는 callable을 반환하지 않아 실행 안 됨
         sched.add_job(평가작업(strat), trigger="interval", minutes=30,
                       id=f"eval_{strat}", replace_existing=True)
 
-    # ✅ 예측 트리거(메타적용 포함) 30분
-    sched.add_job(trigger_run, "interval", minutes=30, id="predict_trigger", replace_existing=True)
+    # ✅ 예측 트리거: 학습 중이면 **스킵** (직렬화 게이트)
+    def _predict_job():
+        try:
+            if _is_training() or os.path.exists(LOCK_PATH):
+                print("[PREDICT] skip: training/lock active"); sys.stdout.flush()
+                return
+            print("[PREDICT] trigger_run start"); sys.stdout.flush()
+            trigger_run()
+            print("[PREDICT] trigger_run done"); sys.stdout.flush()
+        except Exception as e:
+            print(f"[PREDICT] 실패: {e}")
 
-    # ✅ 메타 JSON 정합성/복구 주기작업 (30분)
+    sched.add_job(_predict_job, "interval", minutes=30, id="predict_trigger", replace_existing=True)
+
+    # ✅ 메타 JSON 정합성/복구 주기작업 (30분) — 학습과 무관, 그대로
     def meta_fix_job():
         try:
             maintenance_fix_meta.fix_all_meta_json()
@@ -286,6 +307,9 @@ def _init_background_once():
             from failure_db import ensure_failure_db
             print(">>> 서버 실행 준비")
             ensure_failure_db(); print("✅ failure_patterns DB 초기화 완료")
+
+            # 🆕 파이프라인 고정 안내 로그(직렬화 정책)
+            print("[pipeline] serialized: train -> predict -> next-group"); sys.stdout.flush()
 
             # 학습 루프 스레드 — train.py의 단일 루프 보장 API 사용
             train.start_train_loop(force_restart=False, sleep_sec=0)
@@ -496,8 +520,9 @@ def diag_e2e():
 @app.route("/run")
 def run():
     try:
-        if os.path.exists(LOCK_PATH):
-            return "⏸️ 초기화 중: 예측 시작 차단됨", 423
+        # 🆕 학습 중 또는 초기화 락이면 예측 차단(직렬화)
+        if os.path.exists(LOCK_PATH) or _is_training():
+            return "⏸️ 학습/초기화 진행 중: 예측 시작 차단됨", 423
         print("[RUN] 전략별 예측 실행"); sys.stdout.flush()
         for strategy in ["단기","중기","장기"]:
             main(strategy, force=True)
@@ -534,8 +559,10 @@ def train_log():
 @app.route("/models")
 def list_models():
     try:
-        if not os.path.exists(MODEL_DIR): return "models 폴더 없음"
-        files = os.listdir(MODEL_DIR)
+        if os.path.exists(MODEL_DIR):
+            files = os.listdir(MODEL_DIR)
+        else:
+            files = []
         return "<pre>" + "\n".join(files) + "</pre>" if files else "models 폴더 비어 있음"
     except Exception as e:
         return f"오류: {e}", 500
