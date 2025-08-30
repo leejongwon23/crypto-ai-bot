@@ -239,8 +239,9 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     except Exception as e:
         print(f"[failed_result log_prediction 오류] {e}")
     try:
+        # 🔧 시그니처 정합: train.py와 동일하게 keyword 인자만 사용
         if X_input is not None:
-            insert_failure_record(res, _feature_hash(X_input), feature_vector=np.array(X_input).flatten().tolist(), label=-1)
+            insert_failure_record(res, feature_vector=np.array(X_input).flatten().tolist(), label=-1)
     except Exception as e:
         print(f"[failed_result insert_failure_record 오류] {e}")
     return res
@@ -495,7 +496,7 @@ def evaluate_predictions(get_price_fn):
                         except Exception: entry = 0.0
                         if entry <= 0 or label == -1:
                             r.update({"status": "invalid", "reason": "invalid_entry_or_label", "return": 0.0, "return_value": 0.0})
-                            if not check_failure_exists(r): insert_failure_record(r, f"{sym}-{strat}-{now_local().isoformat()}", feature_vector=None, label=label)
+                            if not check_failure_exists(r): insert_failure_record(r, feature_vector=None, label=label)
                             w_all.writerow({k: r.get(k, "") for k in fields})
                             if not wrong_written:
                                 wrong_writer = csv.DictWriter(f_wrong, fieldnames=sorted(r.keys())); wrong_writer.writeheader(); wrong_written = True
@@ -561,7 +562,7 @@ def evaluate_predictions(get_price_fn):
                                        volatility=("v_" in status), source="평가", label=label, group_id=gid)
                         if status in ["fail","v_fail"]:
                             if not check_failure_exists(r):
-                                insert_failure_record(r, f"{sym}-{strat}-{now_local().isoformat()}", feature_vector=None, label=label)
+                                insert_failure_record(r, feature_vector=None, label=label)
                         if model == "meta": update_model_success(sym, strat, model, status in ["success","v_success"])
                         w_all.writerow({k: r.get(k, "") for k in fields})
                         if not eval_written:
