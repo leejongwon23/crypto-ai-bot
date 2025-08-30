@@ -305,6 +305,16 @@ def get_model_success_rate(s, t, m):
         print(f"[오류] get_model_success_rate 실패 → {e}")
         return 0.0
 
+# -------------------------
+# failure_db 초기화: 부팅 직후 반드시 스키마 준비(명시 로그)
+# -------------------------
+try:
+    from failure_db import ensure_failure_db as _ensure_failure_db_once
+    _ensure_failure_db_once()
+    print("[logger] failure_db initialized (schema ready)")
+except Exception as _e:
+    print(f"[logger] failure_db init failed: {_e}")
+
 # 서버 시작 시 보장
 ensure_success_db()
 ensure_prediction_log_exists()
@@ -469,12 +479,7 @@ def _normalize_model_fields(model, model_name, symbol, strategy):
         m = mn = base
     return m, mn
 
-# failure_db 초기화 1회 시도(있을 때만)
-try:
-    from failure_db import ensure_failure_db as _ensure_failure_db_once
-    _ensure_failure_db_once()
-except Exception:
-    pass
+# failure_db 초기화 1회 시도(있을 때만) — 위로 이동/강화되어 명시 로그를 남깁니다.
 
 def log_prediction(
     symbol, strategy, direction=None, entry_price=0, target_price=0,
