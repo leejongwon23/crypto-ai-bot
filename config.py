@@ -114,6 +114,18 @@ def save_config():
         print(f"[⚠️ config.py] config.json 저장 실패 → {e}")
 
 # ------------------------
+# ✅ Binance 폴백 상태 로그 (요청사항)
+# ------------------------
+try:
+    _ENABLE_BINANCE = int(os.getenv("ENABLE_BINANCE", "1"))
+    if _ENABLE_BINANCE == 1:
+        print("[config] ENABLE_BINANCE=1 (fallback ready)")
+    else:
+        print("[config] ENABLE_BINANCE=0 (fallback disabled)")
+except Exception:
+    pass
+
+# ------------------------
 # Getter / Setter (기존)
 # ------------------------
 def set_NUM_CLASSES(n):
