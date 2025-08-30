@@ -154,6 +154,13 @@ _PIN_MEMORY=False; _PERSISTENT=False
 now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 training_in_progress={"단기":False,"중기":False,"장기":False}
 
+# ✅ 예측 게이트 전역 임포트 + 폴백 (추가)
+try:
+    from predict import open_predict_gate, close_predict_gate
+except Exception:
+    def open_predict_gate(*args, **kwargs): return None
+    def close_predict_gate(*args, **kwargs): return None
+
 # ===== ✅ 협조적 취소 유틸 =====
 class _ControlledStop(Exception): ...
 def _check_stop(ev: threading.Event | None, where:str=""):
@@ -772,6 +779,13 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
             for idx, group in enumerate(groups):
                 if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] group loop enter"); break
                 _reset_watchdog(f"enter group {idx}")  # ▶︎ 그룹 경계에서도 초기화
+
+                # ✅ (추가) 그룹 학습 전에 예측 게이트 확실히 닫아두기
+                try:
+                    close_predict_gate()
+                except Exception as e:
+                    _safe_print(f"[gate pre-close err] {e}")
+
                 _safe_print(f"🚀 [group] {idx+1}/{len(groups)} → {group}")
                 _progress(f"group{idx}:start")
 
