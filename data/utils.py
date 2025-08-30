@@ -164,6 +164,19 @@ def get_SYMBOL_GROUPS(): return list(SYMBOL_GROUPS)
 _STATE_DIR = "/persistent/state"
 _STATE_PATH = os.path.join(_STATE_DIR, "group_order.json")
 
+# 🔒 예측 게이트 상태 확인(읽기 전용) — predict.py와 동일 경로 사용
+_RUN_DIR = "/persistent/run"
+_PREDICT_GATE = os.path.join(_RUN_DIR, "predict_gate.json")
+def _is_predict_gate_open() -> bool:
+    try:
+        if not os.path.exists(_PREDICT_GATE):
+            return False
+        with open(_PREDICT_GATE, "r", encoding="utf-8") as f:
+            o = json.load(f)
+        return bool(o.get("open", False))
+    except Exception:
+        return False
+
 class GroupOrderManager:
     """현재 그룹 인덱스/학습 완료 심볼 집합 관리 + 파일 지속성"""
     def __init__(self, groups: List[List[str]]):
@@ -215,6 +228,12 @@ class GroupOrderManager:
         if not ok:
             where = "다음 그룹" if symbol not in gset else "이미 학습됨"
             print(f"[⛔ 순서강제] {symbol} → 현재 그룹{i} 차례 아님 ({where})")
+        # ✅ 게이트 상태 로깅(예측 금지 원칙 일치 확인용)
+        try:
+            gate = "open" if _is_predict_gate_open() else "closed"
+            print(f"[order] group={i} gate={gate}")
+        except Exception:
+            pass
         return ok
 
     def mark_symbol_trained(self, symbol: str):
