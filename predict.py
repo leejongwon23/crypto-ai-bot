@@ -7,18 +7,25 @@ from data.utils import get_kline_by_strategy, compute_features
 
 # ====== Gate (학습 블록 종료 시에만 예측 허용) ======
 RUN_DIR = "/persistent/run"; os.makedirs(RUN_DIR, exist_ok=True)
-PREDICT_GATE = os.path.join(RUN_DIR, "predict_gate.json")      # {"open":true, ...}
+PREDICT_GATE = os.path.join(RUN_DIR, "predict_gate.json")      # {"open":true, ...} (옵션)
 PREDICT_LOCK = os.path.join(RUN_DIR, "predict_running.lock")   # 예측 실행 중 표시
+PREDICT_BLOCK = "/persistent/predict.block"                    # 있으면 강제 차단(옵션)
 
 def _now_kst(): return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 def is_predict_gate_open():
+    # 기본: 열림. 명시적으로 닫으라는 신호가 있을 때만 차단.
     try:
-        if not os.path.exists(PREDICT_GATE): return False
-        with open(PREDICT_GATE, "r", encoding="utf-8") as f:
-            o = json.load(f)
-        return bool(o.get("open", False))
+        if os.getenv("FORCE_PREDICT_CLOSE", "0") == "1":
+            return False
+        if os.path.exists(PREDICT_BLOCK):
+            return False
+        if os.path.exists(PREDICT_GATE):
+            with open(PREDICT_GATE, "r", encoding="utf-8") as f:
+                o = json.load(f)
+            return bool(o.get("open", True))
+        return True
     except Exception:
-        return False
+        return True
 
 def open_predict_gate(note=""):
     try:
@@ -28,9 +35,11 @@ def open_predict_gate(note=""):
         pass
 
 def close_predict_gate():
+    # JSON/락파일 둘 중 아무거나 사용 가능
     try:
         with open(PREDICT_GATE, "w", encoding="utf-8") as f:
             json.dump({"open": False, "closed_at": _now_kst().isoformat()}, f, ensure_ascii=False)
+        open(PREDICT_BLOCK, "a").close()
     except Exception:
         pass
 
