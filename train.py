@@ -380,7 +380,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
         _check_stop(stop_event,"before ssl_pretrain")
         try:
             ck=get_ssl_ckpt_path(symbol,strategy)
-            if not os.path.exists(ck)):
+            if not os.path.exists(ck):
                 _safe_print(f"[SSL] start masked_reconstruction → {ck}")
                 _ssl_timeout=float(os.getenv("SSL_TIMEOUT_SEC","180"))
                 status_ssl, _ = _run_with_timeout(
