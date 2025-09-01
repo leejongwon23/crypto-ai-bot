@@ -221,19 +221,49 @@ def _save_model_and_meta(model:nn.Module,path_pt:str,meta:dict):
     _atomic_write(stem+".meta.json", json.dumps(meta,ensure_ascii=False,separators=(",",":")), mode="w")
     return weight, stem+".meta.json"
 
+# === ⬇️ 변경: 복제 금지 alias 생성기 (hardlink → symlink → skip) ===
 def _safe_alias(src:str,dst:str):
-    os.makedirs(os.path.dirname(dst),exist_ok=True)
+    """
+    파일 복제 없이 별명만 만든다.
+    1) 하드링크 시도
+    2) 실패 시 심볼릭링크 시도(상대경로)
+    3) 모두 실패하면 경고만 남기고 건너뜀 (copy 금지)
+    """
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
     try:
-        if os.path.islink(dst) or os.path.exists(dst): os.remove(dst)
-    except: pass
+        if os.path.islink(dst) or os.path.exists(dst):
+            os.remove(dst)
+    except Exception:
+        pass
+
+    # 하드링크
     try:
-        os.link(src,dst)
-    except: shutil.copyfile(src,dst)
+        os.link(src, dst)
+        return "hardlink"
+    except Exception as e_hl:
+        # 심볼릭링크(상대경로)
+        try:
+            rel = os.path.relpath(src, os.path.dirname(dst))
+            os.symlink(rel, dst)
+            return "symlink"
+        except Exception as e_sl:
+            _safe_print(f"[ALIAS] link failed → skip copy (dst={dst}) "
+                        f"hardlink_err={getattr(e_hl,'__class__',type(e_hl)).__name__} "
+                        f"symlink_err={getattr(e_sl,'__class__',type(e_sl)).__name__}")
+            return "skip"
 
 def _emit_aliases(model_path:str, meta_path:str, symbol:str, strategy:str, model_type:str):
+    """
+    flat 경로(alias)와 트리 경로(alias)를 만들되,
+    실제 가중치 파일은 단 1개만 존재. (copy 금지)
+    DISABLE_FLAT_ALIAS=1 이면 flat 별명은 만들지 않음.
+    """
     ext=os.path.splitext(model_path)[1]
-    flat_pt=os.path.join(MODEL_DIR,f"{symbol}_{strategy}_{model_type}{ext}")
-    _safe_alias(model_path,flat_pt); _safe_alias(meta_path,_stem(flat_pt)+".meta.json")
+    # flat 별명 (옵션)
+    if os.getenv("DISABLE_FLAT_ALIAS","0") != "1":
+        flat_pt=os.path.join(MODEL_DIR,f"{symbol}_{strategy}_{model_type}{ext}")
+        _safe_alias(model_path,flat_pt); _safe_alias(meta_path,_stem(flat_pt)+".meta.json")
+    # 트리 별명 (항상)
     dir_pt=os.path.join(MODEL_DIR,symbol,strategy,f"{model_type}{ext}")
     _safe_alias(model_path,dir_pt); _safe_alias(meta_path,_stem(dir_pt)+".meta.json")
 
@@ -634,7 +664,7 @@ def _rotate_groups_starting_with(groups, anchor_symbol="BTCUSDT"):
 def _is_cold_start()->bool:
     try:
         any_flat = bool(glob.glob(os.path.join(MODEL_DIR, "*.ptz")))
-        any_tree = bool(glob.glob(glob.glob(os.path.join(MODEL_DIR, "*", "*", "*.ptz"))))
+        any_tree = bool(glob.glob(os.path.join(MODEL_DIR, "*", "*", "*.ptz")))
         return not (any_flat or any_tree)
     except Exception:
         return True
