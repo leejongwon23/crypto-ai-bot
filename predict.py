@@ -62,6 +62,26 @@ def _release_predict_lock():
     except Exception:
         pass
 
+# ====== 예측 하트비트(경량 진행 로그) ======
+import threading
+PREDICT_HEARTBEAT_SEC = int(os.getenv("PREDICT_HEARTBEAT_SEC", "3"))
+
+def _predict_hb_loop(stop_evt: threading.Event, tag: str):
+    """예측이 길어질 때 3초 주기로 진행 하트비트 출력"""
+    last_note = ""
+    while not stop_evt.is_set():
+        try:
+            # 간단한 1줄 상태 (게이트, 락 존재 여부 포함)
+            gate = "open" if is_predict_gate_open() else "closed"
+            lock = os.path.exists(PREDICT_LOCK)
+            note = f"[HB] predict alive ({tag}) gate={gate} lock={'1' if lock else '0'} ts={_now_kst().strftime('%H:%M:%S')}"
+            if note != last_note:
+                print(note); sys.stdout.flush()
+                last_note = note
+        except Exception:
+            pass
+        stop_evt.wait(max(1, PREDICT_HEARTBEAT_SEC))
+
 # ====== 옵션 모듈(없으면 안전 대체) ======
 try:
     from window_optimizer import find_best_windows
@@ -262,6 +282,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
         return failed_result(symbol or "None", strategy or "None", reason="predict_gate_closed", X_input=None)
     if not _acquire_predict_lock():
         return failed_result(symbol or "None", strategy or "None", reason="predict_already_running", X_input=None)
+
+    # 🫀 하트비트 시작
+    _hb_stop = threading.Event()
+    _hb_tag = f"{symbol}-{strategy}"
+    _hb_thread = threading.Thread(target=_predict_hb_loop, args=(_hb_stop, _hb_tag), daemon=True)
+    _hb_thread.start()
+
     try:
         try:
             ensure_prediction_log_exists()
@@ -282,6 +309,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
             return failed_result(symbol or "None", strategy or "None", reason="invalid_symbol_strategy", X_input=None)
 
         regime = detect_regime(symbol, strategy, now=now_kst()); _ = get_calibration_version()
+        print(f"[predict] start {symbol}-{strategy} regime={regime}"); sys.stdout.flush()
+
         windows = find_best_windows(symbol, strategy)
         if not windows: return failed_result(symbol, strategy, reason="window_list_none", X_input=None)
 
@@ -459,6 +488,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
                                          else f"최고 확률 단일 모델: {meta_choice}")
         }
     finally:
+        # 하트비트 종료 및 락 해제
+        try:
+            _hb_stop.set()
+            _hb_thread.join(timeout=2)
+        except Exception:
+            pass
         _release_predict_lock()
 
 # ====== 평가 ======
