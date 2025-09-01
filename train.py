@@ -76,7 +76,6 @@ def _progress(tag:str):
     now = time.time()
     _LAST_PROGRESS_TS = now
     _LAST_PROGRESS_TAG = tag
-    # ▶︎ 새 진행이 감지되면 abort 래치 해제 (핵심 수정)
     if _WATCHDOG_ABORT.is_set():
         _WATCHDOG_ABORT.clear()
         _safe_print(f"🟢 [WATCHDOG] abort cleared on progress → {tag}")
@@ -92,7 +91,6 @@ def _watchdog_loop(stop_event: threading.Event | None):
         if since > _STALL_WARN_SEC:
             _safe_print(f"🟡 [WATCHDOG] {since:.0f}s no progress at '{_LAST_PROGRESS_TAG}'")
             if since > _STALL_WARN_SEC * 2:
-                # 래치 세트 (진행 재개 시 _progress에서 자동 해제됨)
                 _WATCHDOG_ABORT.set()
                 _safe_print("🔴 [WATCHDOG] abort set (hard stall)")
         time.sleep(5)
@@ -154,14 +152,14 @@ _PIN_MEMORY=False; _PERSISTENT=False
 now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 training_in_progress={"단기":False,"중기":False,"장기":False}
 
-# ✅ 예측 게이트 전역 임포트 + 폴백 (추가)
+# ✅ 예측 게이트 전역 임포트 + 폴백
 try:
     from predict import open_predict_gate, close_predict_gate
 except Exception:
     def open_predict_gate(*args, **kwargs): return None
     def close_predict_gate(*args, **kwargs): return None
 
-# ===== ✅ 협조적 취소 유틸 =====
+# ===== 협조적 취소 =====
 class _ControlledStop(Exception): ...
 def _check_stop(ev: threading.Event | None, where:str=""):
     if _WATCHDOG_ABORT.is_set():
@@ -208,7 +206,6 @@ def _future_returns_by_timestamp(df:pd.DataFrame,horizon_hours:int)->np.ndarray:
         while j<len(df) and ts.iloc[j]<=t1:
             if high[j]>mx: mx=high[j]
             j+=1
-        # 다음 루프에서 불필요한 재스캔 방지
         j0 = max(j-1, i)
         base=close[i] if close[i]>0 else (close[i]+1e-6)
         out[i]=float((mx-base)/(base+1e-12))
@@ -221,27 +218,18 @@ def _save_model_and_meta(model:nn.Module,path_pt:str,meta:dict):
     _atomic_write(stem+".meta.json", json.dumps(meta,ensure_ascii=False,separators=(",",":")), mode="w")
     return weight, stem+".meta.json"
 
-# === ⬇️ 변경: 복제 금지 alias 생성기 (hardlink → symlink → skip) ===
+# === ⬇️ 복제 금지 alias 생성기 (hardlink → symlink → skip) ===
 def _safe_alias(src:str,dst:str):
-    """
-    파일 복제 없이 별명만 만든다.
-    1) 하드링크 시도
-    2) 실패 시 심볼릭링크 시도(상대경로)
-    3) 모두 실패하면 경고만 남기고 건너뜀 (copy 금지)
-    """
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     try:
         if os.path.islink(dst) or os.path.exists(dst):
             os.remove(dst)
     except Exception:
         pass
-
-    # 하드링크
     try:
         os.link(src, dst)
         return "hardlink"
     except Exception as e_hl:
-        # 심볼릭링크(상대경로)
         try:
             rel = os.path.relpath(src, os.path.dirname(dst))
             os.symlink(rel, dst)
@@ -253,17 +241,10 @@ def _safe_alias(src:str,dst:str):
             return "skip"
 
 def _emit_aliases(model_path:str, meta_path:str, symbol:str, strategy:str, model_type:str):
-    """
-    flat 경로(alias)와 트리 경로(alias)를 만들되,
-    실제 가중치 파일은 단 1개만 존재. (copy 금지)
-    DISABLE_FLAT_ALIAS=1 이면 flat 별명은 만들지 않음.
-    """
     ext=os.path.splitext(model_path)[1]
-    # flat 별명 (옵션)
     if os.getenv("DISABLE_FLAT_ALIAS","0") != "1":
         flat_pt=os.path.join(MODEL_DIR,f"{symbol}_{strategy}_{model_type}{ext}")
         _safe_alias(model_path,flat_pt); _safe_alias(meta_path,_stem(flat_pt)+".meta.json")
-    # 트리 별명 (항상)
     dir_pt=os.path.join(MODEL_DIR,symbol,strategy,f"{model_type}{ext}")
     _safe_alias(model_path,dir_pt); _safe_alias(meta_path,_stem(dir_pt)+".meta.json")
 
@@ -281,14 +262,11 @@ def _archive_old_checkpoints(symbol:str,strategy:str,model_type:str,keep_n:int=1
                 except: pass
         except Exception as e: print(f"[ARCHIVE] {os.path.basename(p)} compress fail → {e}")
 
-# 🔎 모델 존재 여부(심볼 단위) → 없으면 순서제약 무시 강행
 _KNOWN_EXTS = (".ptz", ".safetensors", ".pt")
 def _has_any_model_for_symbol(symbol: str) -> bool:
     try:
-        # flat
         if any(glob.glob(os.path.join(MODEL_DIR, f"{symbol}_*{ext}")) for ext in _KNOWN_EXTS):
             return True
-        # tree
         if os.path.isdir(os.path.join(MODEL_DIR, symbol)):
             if any(glob.glob(os.path.join(MODEL_DIR, symbol, "*", f"*{ext}")) for ext in _KNOWN_EXTS):
                 return True
@@ -396,13 +374,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
     try:
         ensure_failure_db(); _FAILURE_DB_READY = True
         _safe_print(f"✅ [train_one_model] {symbol}-{strategy}-g{group_id}")
-        _reset_watchdog("enter train_one_model")  # ▶︎ 안전 구간에서 한번 더 해제
+        _reset_watchdog("enter train_one_model")
         _progress(f"start:{symbol}-{strategy}-g{group_id}")
 
         _check_stop(stop_event,"before ssl_pretrain")
         try:
             ck=get_ssl_ckpt_path(symbol,strategy)
-            if not os.path.exists(ck):
+            if not os.path.exists(ck)):
                 _safe_print(f"[SSL] start masked_reconstruction → {ck}")
                 _ssl_timeout=float(os.getenv("SSL_TIMEOUT_SEC","180"))
                 status_ssl, _ = _run_with_timeout(
@@ -660,7 +638,6 @@ def _rotate_groups_starting_with(groups, anchor_symbol="BTCUSDT"):
     if norm and anchor_symbol in norm[0]: norm[0]=[anchor_symbol]+[s for s in norm[0] if s!=anchor_symbol]
     return norm
 
-# 🔎 콜드스타트 감지: 모델(.ptz) 하나라도 있으면 False
 def _is_cold_start()->bool:
     try:
         any_flat = bool(glob.glob(os.path.join(MODEL_DIR, "*.ptz")))
@@ -695,13 +672,10 @@ def _safe_predict_with_timeout(predict_fn,symbol,strategy,source,model_type=None
     return True
 
 def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
-    """BG 작업은 최초 1회만 기동 + stop 요청시 미기동 + 실패DB 준비전엔 failure_train 미기동."""
     if stop_event is not None and stop_event.is_set():
         _safe_print(f"[SKIP:{name}] stop during reset"); return
-    # 1회 기동 가드
     if _BG_STARTED.get(name, False):
         return
-    # 실패학습은 DB 준비 후만
     if name=="failure_train" and not _FAILURE_DB_READY:
         _safe_print("[BG:failure_train] deferred (failure DB not ready yet)")
         return
@@ -710,12 +684,10 @@ def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
     th.start()
     _safe_print(f"[BG:{name}] started (daemon)")
 
-# ⚠️ 변경: ignore_should 플래그 + 콜드스타트/환경변수/모델부재 강제학습
 def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_should: bool = False):
     strategies=["단기","중기","장기"]
     env_force = (os.getenv("TRAIN_FORCE_IGNORE_SHOULD","0") == "1")
     for symbol in symbol_list:
-        # 심볼에 모델이 하나도 없으면 강제 학습
         symbol_has_model = _has_any_model_for_symbol(symbol)
         local_ignore = ignore_should or env_force or (not symbol_has_model)
         if not local_ignore:
@@ -750,7 +722,7 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
                         logger.log_training_result(symbol,strategy,model=f"group{gid}",accuracy=0.0,f1=0.0,loss=0.0,note=f"스킵: group_id={gid}, 경계계산실패 {e}",status="skipped")
                     except: pass
                     continue
-                _reset_watchdog("enter symbol/group")   # ▶︎ 심볼 전환 시 한번 더 안전 해제
+                _reset_watchdog("enter symbol/group")
                 _progress(f"train_models:{symbol}-{strategy}-g{gid}")
                 res=train_one_model(symbol,strategy,group_id=gid, stop_event=stop_event)
                 if res and isinstance(res,dict) and res.get("models"):
@@ -774,13 +746,11 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
 
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None = None):
     threading.Thread(target=_watchdog_loop, args=(stop_event,), daemon=True).start()
-    _reset_watchdog("loop start")  # ▶︎ 루프 시작시 초기화
+    _reset_watchdog("loop start")
 
-    # ✅ 강제 옵션: 환경변수로 순서 무시/그룹상태 리셋 지원
     env_force_ignore = (os.getenv("TRAIN_FORCE_IGNORE_SHOULD","0") == "1")
     env_reset = (os.getenv("RESET_GROUP_ORDER_ON_START","0") == "1")
 
-    # ✅ 콜드스타트면 첫 패스만 should 체크 무시 + 그룹상태 리셋
     force_full_pass = _is_cold_start() or env_force_ignore
     if force_full_pass or env_reset:
         _safe_print("🧪 start → force mode: "
@@ -808,9 +778,9 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
 
             for idx, group in enumerate(groups):
                 if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] group loop enter"); break
-                _reset_watchdog(f"enter group {idx}")  # ▶︎ 그룹 경계에서도 초기화
+                _reset_watchdog(f"enter group {idx}")
 
-                # ✅ (수정) 그룹 학습 전에 예측 게이트 확실히 닫아두기 — 전역 심볼 사용 (로컬 변수 섀도잉 회피)
+                # 🔒 그룹 학습 전에 예측 게이트 닫기
                 try:
                     close_predict_gate()
                 except Exception as e:
@@ -822,18 +792,13 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 train_models(group, stop_event=stop_event, ignore_should=force_full_pass)
                 if stop_event is not None and stop_event.is_set(): _safe_print("🛑 stop after train → exit"); break
 
-                # ✅ 변경 핵심: ready_for_group_predict() 결과에 상관없이
-                # 이번 그룹에서 '실제로 모델이 존재하는(symbol 단위)' 심볼만 선별해 부분 예측 수행
+                # ✅ 이번 그룹에서 실제 모델이 존재하는 심볼만 선별해 '반드시' 예측
                 trained_syms = [s for s in group if _has_any_model_for_symbol(s)]
-                do_predict = len(trained_syms) > 0
                 _safe_print(f"[PREDICT-DECIDE] ready={bool(ready_for_group_predict())} trained_syms={trained_syms}")
 
-                if do_predict:
+                if trained_syms:
                     time.sleep(0.1)
                     _safe_print(f"[PREDICT] group {idx+1} begin")
-
-                    # 🔓 게이트 열기 → 예측 → 🔒 게이트 닫기 (보장)
-                    # (수정) 로컬 별칭으로 가져와 전역 이름 섀도잉을 피함
                     try:
                         from predict import open_predict_gate as _open_gate, close_predict_gate as _close_gate
                     except Exception:
@@ -855,7 +820,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                         except Exception as e:
                             _safe_print(f"[gate close err] {e}")
 
-                    # ✅ 실제 예측을 수행한 경우에만 1회 마킹
                     try:
                         mark_group_predicted()
                     except Exception as e:
@@ -874,7 +838,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                     if stop_event is not None and stop_event.is_set(): break
 
             _safe_print("✅ group pass done (loop will continue unless stopped)")
-            # 콜드스타트 1회전 종료 후 정상 모드로 복귀
             if force_full_pass and not env_force_ignore:
                 force_full_pass = False
                 _safe_print("🧪 cold start first pass completed → resume normal scheduling")
