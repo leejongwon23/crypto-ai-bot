@@ -36,6 +36,29 @@ except ImportError:
     import safe_cleanup                                      # [KEEP]
     import scheduler_cleanup as _cleanup_mod                 # 🆕
 
+# 🆕 예측 게이트: 전역 안전 임포트 + 폴백(no-op)
+try:
+    from predict import open_predict_gate, close_predict_gate
+except Exception:
+    def open_predict_gate(*args, **kwargs): 
+        return None
+    def close_predict_gate(*args, **kwargs): 
+        return None
+
+def _safe_open_gate(note: str = ""):
+    try:
+        open_predict_gate(note=note)
+        print(f"[gate] open ({note})"); sys.stdout.flush()
+    except Exception as e:
+        print(f"[gate] open err: {e}"); sys.stdout.flush()
+
+def _safe_close_gate(note: str = ""):
+    try:
+        close_predict_gate(note=note)
+        print(f"[gate] close ({note})"); sys.stdout.flush()
+    except Exception as e:
+        print(f"[gate] close err: {e}"); sys.stdout.flush()
+
 # ===== 경로 통일 =====
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))  # ← 루트 탐색용(초기화 강화에만 사용)
 PERSIST_DIR= "/persistent"
@@ -215,7 +238,11 @@ def start_scheduler():
                 print("[PREDICT] skip: training/lock active"); sys.stdout.flush()
                 return
             print("[PREDICT] trigger_run start"); sys.stdout.flush()
-            trigger_run()
+            _safe_open_gate("sched_trigger")
+            try:
+                trigger_run()
+            finally:
+                _safe_close_gate("sched_trigger")
             print("[PREDICT] trigger_run done"); sys.stdout.flush()
         except Exception as e:
             print(f"[PREDICT] 실패: {e}")
@@ -524,8 +551,12 @@ def run():
         if os.path.exists(LOCK_PATH) or _is_training():
             return "⏸️ 학습/초기화 진행 중: 예측 시작 차단됨", 423
         print("[RUN] 전략별 예측 실행"); sys.stdout.flush()
-        for strategy in ["단기","중기","장기"]:
-            main(strategy, force=True)
+        _safe_open_gate("route_run")
+        try:
+            for strategy in ["단기","중기","장기"]:
+                main(strategy, force=True)
+        finally:
+            _safe_close_gate("route_run")
         return "Recommendation started"
     except Exception as e:
         traceback.print_exc(); return f"Error: {e}", 500
@@ -692,6 +723,9 @@ def reset_all(key=None):
     ua = request.headers.get("User-Agent", "-")
     ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     print(f"[RESET] 요청 수신 from {ip} UA={ua}"); sys.stdout.flush()
+
+    # 🛡️ 리셋 진입 즉시 예측 게이트 닫기(외부 트리거 차단)
+    _safe_close_gate("reset_enter")
 
     # 🛡️ 워치독: 초기화가 어떤 이유로든 걸려도 반드시 내려가도록 타이머 무장
     def _arm_reset_watchdog(seconds: int):
