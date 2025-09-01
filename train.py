@@ -634,7 +634,7 @@ def _rotate_groups_starting_with(groups, anchor_symbol="BTCUSDT"):
 def _is_cold_start()->bool:
     try:
         any_flat = bool(glob.glob(os.path.join(MODEL_DIR, "*.ptz")))
-        any_tree = bool(glob.glob(os.path.join(MODEL_DIR, "*", "*", "*.ptz")))
+        any_tree = bool(glob.glob(glob.glob(os.path.join(MODEL_DIR, "*", "*", "*.ptz"))))
         return not (any_flat or any_tree)
     except Exception:
         return True
@@ -780,7 +780,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] group loop enter"); break
                 _reset_watchdog(f"enter group {idx}")  # ▶︎ 그룹 경계에서도 초기화
 
-                # ✅ (추가) 그룹 학습 전에 예측 게이트 확실히 닫아두기
+                # ✅ (수정) 그룹 학습 전에 예측 게이트 확실히 닫아두기 — 전역 심볼 사용 (로컬 변수 섀도잉 회피)
                 try:
                     close_predict_gate()
                 except Exception as e:
@@ -803,13 +803,14 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                     _safe_print(f"[PREDICT] group {idx+1} begin")
 
                     # 🔓 게이트 열기 → 예측 → 🔒 게이트 닫기 (보장)
+                    # (수정) 로컬 별칭으로 가져와 전역 이름 섀도잉을 피함
                     try:
-                        from predict import open_predict_gate, close_predict_gate
+                        from predict import open_predict_gate as _open_gate, close_predict_gate as _close_gate
                     except Exception:
-                        open_predict_gate = None; close_predict_gate = None
+                        _open_gate = None; _close_gate = None
                     try:
                         try:
-                            if open_predict_gate: open_predict_gate(note=f"group_{idx+1}_start")
+                            if _open_gate: _open_gate(note=f"group_{idx+1}_start")
                         except Exception as e:
                             _safe_print(f"[gate open err] {e}")
 
@@ -820,7 +821,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                                 _safe_predict_with_timeout(predict, symbol, strategy, source="그룹직후", model_type=None, timeout=_PREDICT_TIMEOUT_SEC, stop_event=stop_event)
                     finally:
                         try:
-                            if close_predict_gate: close_predict_gate()
+                            if _close_gate: _close_gate()
                         except Exception as e:
                             _safe_print(f"[gate close err] {e}")
 
