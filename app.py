@@ -40,9 +40,9 @@ except ImportError:
 try:
     from predict import open_predict_gate, close_predict_gate
 except Exception:
-    def open_predict_gate(*args, **kwargs): 
+    def open_predict_gate(*args, **kwargs):
         return None
-    def close_predict_gate(*args, **kwargs): 
+    def close_predict_gate(*args, **kwargs):
         return None
 
 def _safe_open_gate(note: str = ""):
@@ -211,7 +211,11 @@ def start_scheduler():
         return
 
     print(">>> 스케줄러 시작"); sys.stdout.flush()
-    sched = BackgroundScheduler(timezone=pytz.timezone("Asia/Seoul"))
+    # 🛡️ 전역 기본값: 한 번에 1개만 실행, 미스파이어는 합치고 90초 유예
+    sched = BackgroundScheduler(
+        timezone=pytz.timezone("Asia/Seoul"),
+        job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 90},
+    )
 
     # ✅ 평가작업: 학습 중이면 **스킵** (직렬화 게이트)
     def 평가작업(strategy):
@@ -228,8 +232,16 @@ def start_scheduler():
         return wrapped
 
     for strat in ["단기", "중기", "장기"]:
-        sched.add_job(평가작업(strat), trigger="interval", minutes=30,
-                      id=f"eval_{strat}", replace_existing=True)
+        sched.add_job(
+            평가작업(strat),
+            trigger="interval",
+            minutes=30,
+            id=f"eval_{strat}",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=90,
+        )
 
     # ✅ 예측 트리거: 학습 중이면 **스킵** (직렬화 게이트)
     def _predict_job():
@@ -247,15 +259,34 @@ def start_scheduler():
         except Exception as e:
             print(f"[PREDICT] 실패: {e}")
 
-    sched.add_job(_predict_job, "interval", minutes=30, id="predict_trigger", replace_existing=True)
+    sched.add_job(
+        _predict_job,
+        "interval",
+        minutes=30,
+        id="predict_trigger",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=90,
+    )
 
-    # ✅ 메타 JSON 정합성/복구 주기작업 (30분) — 학습과 무관, 그대로
+    # ✅ 메타 JSON 정합성/복구 주기작업 (30분) — 학습과 무관
     def meta_fix_job():
         try:
             maintenance_fix_meta.fix_all_meta_json()
         except Exception as e:
             print(f"[META-FIX] 주기작업 실패: {e}")
-    sched.add_job(meta_fix_job, "interval", minutes=30, id="meta_fix", replace_existing=True)
+
+    sched.add_job(
+        meta_fix_job,
+        "interval",
+        minutes=30,
+        id="meta_fix",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=90,
+    )
 
     sched.start()
     _sched = sched
