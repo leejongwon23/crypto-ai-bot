@@ -47,6 +47,10 @@ CSV_BACKUPS = _env_int("CSV_BACKUPS", 3)
 MAX_MODELS_KEEP_GLOBAL = _env_int("MAX_MODELS_KEEP_GLOBAL", 200)
 MAX_MODELS_PER_KEY     = _env_int("KEEP_RECENT_MODELS_PER_SYMBOL", 2)
 
+# 🆕 SSL 캐시 보존 개수/소프트캡 (없으면 기본 1개/1.0GB)
+SSL_KEEP_PER_KEY = _env_int("SSL_KEEP_PER_KEY", 1)
+SSL_SOFT_CAP_GB  = _env_float("SSL_SOFT_CAP_GB", 1.0)
+
 PROTECT_HOURS = _env_int("PROTECT_HOURS", 12)
 LOCK_PATH = os.path.join(LOCK_DIR, "train_or_predict.lock")
 DRYRUN = _env_bool("SAFE_DRYRUN", False)
@@ -173,6 +177,71 @@ def _delete_file(path: str, deleted_log: list):
         print(f"[🗑 삭제] {path}")
     except Exception as e:
         print(f"[경고] 삭제 실패: {path} | {e}")
+
+# ----------------- (NEW) ssl_models 정리 -----------------
+def _cleanup_ssl_models_impl(keep_per_key, soft_cap_gb, deleted_log):
+    """
+    ssl_models 폴더 슬림화:
+      - 파일 패턴: <심볼>_(단기|중기|장기)_ssl*.pt
+      - 심볼×전략별 최신 keep_per_key개만 유지
+      - 폴더 전체 용량이 soft_cap_gb 초과 시, 가장 오래된 파일부터 추가 삭제
+    """
+    try:
+        import re
+        os.makedirs(SSL_DIR, exist_ok=True)
+        files = [p for p in _list_files(SSL_DIR) if os.path.isfile(p) and p.endswith(".pt")]
+        rgx = re.compile(r"^(?P<sym>.+?)_(?P<strat>단기|중기|장기)_ssl.*\.pt$", re.U)
+
+        buckets = {}
+        for p in files:
+            key = None
+            try:
+                m = rgx.match(os.path.basename(p))
+                key = f"{m.group('sym')}_{m.group('strat')}" if m else os.path.basename(p)
+            except Exception:
+                key = os.path.basename(p)
+            buckets.setdefault(key, []).append(p)
+
+        # 키별 최신만 보관
+        for key, arr in buckets.items():
+            arr.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+            for i, path in enumerate(arr):
+                if i >= keep_per_key and not _is_recent(path, PROTECT_HOURS):
+                    _delete_file(path, deleted_log)
+
+        # 소프트캡 초과 시 오래된 것 추가 삭제
+        def _ssl_size():
+            return get_directory_size_gb(SSL_DIR)
+        while _ssl_size() > soft_cap_gb:
+            rest = [p for p in _list_files(SSL_DIR) if os.path.isfile(p)]
+            if not rest:
+                break
+            rest.sort(key=lambda x: os.path.getmtime(x))  # oldest first
+            victim = None
+            # 보호시간 지난 것 우선
+            for p in rest:
+                if not _is_recent(p, PROTECT_HOURS):
+                    victim = p
+                    break
+            if victim is None:
+                # 모두 보호시간 이내면, 더 진행하지 않음(보수적)
+                break
+            _delete_file(victim, deleted_log)
+    except Exception as e:
+        print(f"[ssl_cleanup] 실패: {e}")
+
+def cleanup_ssl_models(keep_per_key=None, soft_cap_gb=None, deleted_log=None):
+    """
+    외부 호출용 래퍼. 인자 생략 시 환경변수/기본값 사용.
+    """
+    if keep_per_key is None:
+        keep_per_key = SSL_KEEP_PER_KEY
+    if soft_cap_gb is None:
+        soft_cap_gb = SSL_SOFT_CAP_GB
+    if deleted_log is None:
+        deleted_log = []
+    _cleanup_ssl_models_impl(int(keep_per_key), float(soft_cap_gb), deleted_log)
+    return deleted_log
 
 # ----------------- 모델·메타 세트 관리 -----------------
 def _split_stem_and_ext(path: str):
@@ -419,6 +488,9 @@ def auto_delete_old_logs():
     cutoff = now - timedelta(days=KEEP_DAYS)
     deleted = []
 
+    # 🆕 0) ssl_models 먼저 정리(안전: 캐시) — 최신 N개 + 소프트캡
+    cleanup_ssl_models(keep_per_key=SSL_KEEP_PER_KEY, soft_cap_gb=SSL_SOFT_CAP_GB, deleted_log=deleted)
+
     current_gb = get_directory_size_gb(ROOT_DIR)
     print(f"[용량] 현재={_human_gb(current_gb)} | 트리거={_human_gb(TRIGGER_GB)} | 목표={_human_gb(SOFT_CAP_GB)} | 하드캡={_human_gb(HARD_CAP_GB)}")
 
@@ -432,6 +504,8 @@ def auto_delete_old_logs():
         _delete_old_by_days([MODEL_DIR, LOG_DIR], cutoff, deleted_log=deleted)
         _delete_until_target(deleted, max(SOFT_CAP_GB, HARD_CAP_GB - MIN_FREE_GB))
         _limit_models_per_key(deleted)
+        # 마무리로 ssl 재점검(캡 유지)
+        cleanup_ssl_models(keep_per_key=SSL_KEEP_PER_KEY, soft_cap_gb=SSL_SOFT_CAP_GB, deleted_log=deleted)
         _vacuum_sqlite()
 
     elif current_gb >= TRIGGER_GB:
@@ -440,10 +514,14 @@ def auto_delete_old_logs():
         _delete_old_by_days([MODEL_DIR, LOG_DIR], cutoff, deleted_log=deleted)
         _delete_until_target(deleted, SOFT_CAP_GB)
         _limit_models_per_key(deleted)
+        # 마무리로 ssl 재점검(캡 유지)
+        cleanup_ssl_models(keep_per_key=SSL_KEEP_PER_KEY, soft_cap_gb=SSL_SOFT_CAP_GB, deleted_log=deleted)
         _vacuum_sqlite()
     else:
         print(f"[✅ 용량정상] 정리 불필요")
         _limit_models_per_key(deleted)
+        # 정상 상태에서도 ssl 폴더는 얌전하게 유지
+        cleanup_ssl_models(keep_per_key=SSL_KEEP_PER_KEY, soft_cap_gb=SSL_SOFT_CAP_GB, deleted_log=deleted)
 
     if deleted:
         try:
@@ -489,6 +567,11 @@ def _light_cleanup():
         gc.collect()
     except Exception:
         pass
+    # 🆕 경량 클린에도 ssl 슬림화 한 번
+    try:
+        cleanup_ssl_models(keep_per_key=SSL_KEEP_PER_KEY, soft_cap_gb=SSL_SOFT_CAP_GB, deleted_log=[])
+    except Exception as e:
+        _log(f"ssl light cleanup skip: {e}")
 
 def start_cleanup_scheduler(daemon: bool = True) -> threading.Thread:
     def _loop():
