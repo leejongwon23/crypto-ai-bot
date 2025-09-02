@@ -11,9 +11,18 @@ PREDICT_GATE = os.path.join(RUN_DIR, "predict_gate.json")      # {"open":true, .
 PREDICT_LOCK = os.path.join(RUN_DIR, "predict_running.lock")   # 예측 실행 중 표시
 PREDICT_BLOCK = "/persistent/predict.block"                    # 있으면 강제 차단(옵션)
 
+# 🆕 락 스테일 타임아웃(고아 락 자동해제)
+PREDICT_LOCK_TTL = int(os.getenv("PREDICT_LOCK_TTL", "1800"))  # 30분
+
 def _now_kst(): return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+
 def is_predict_gate_open():
-    # 기본: 열림. 명시적으로 닫으라는 신호가 있을 때만 차단.
+    """
+    ✅ 기본 open, 단 아래 조건이면 닫힘으로 간주:
+      - FORCE_PREDICT_CLOSE=1
+      - /persistent/predict.block 존재
+      - /persistent/run/predict_gate.json 이 있고 "open": False
+    """
     try:
         if os.getenv("FORCE_PREDICT_CLOSE", "0") == "1":
             return False
@@ -31,24 +40,49 @@ def open_predict_gate(note=""):
     try:
         with open(PREDICT_GATE, "w", encoding="utf-8") as f:
             json.dump({"open": True, "opened_at": _now_kst().isoformat(), "note": note}, f, ensure_ascii=False)
+        # 안전: block 파일이 있으면 제거
+        if os.path.exists(PREDICT_BLOCK):
+            try: os.remove(PREDICT_BLOCK)
+            except Exception: pass
     except Exception:
         pass
 
-def close_predict_gate():
+def close_predict_gate(note=""):
     # JSON/락파일 둘 중 아무거나 사용 가능
     try:
         with open(PREDICT_GATE, "w", encoding="utf-8") as f:
-            json.dump({"open": False, "closed_at": _now_kst().isoformat()}, f, ensure_ascii=False)
+            json.dump({"open": False, "closed_at": _now_kst().isoformat(), "note": note}, f, ensure_ascii=False)
+        # block 존재 보장(외부 트리거 차단)
         open(PREDICT_BLOCK, "a").close()
     except Exception:
         pass
 
-def _acquire_predict_lock():
-    # 락은 원자적으로 생성 시도
+def _is_stale_lock(path: str, ttl_sec: int) -> bool:
     try:
+        if not os.path.exists(path): return False
+        mtime = os.path.getmtime(path)
+        return (time.time() - float(mtime)) > max(30, int(ttl_sec))
+    except Exception:
+        return False
+
+def _acquire_predict_lock():
+    """
+    ✅ 원자적 생성 + 스테일 감지:
+       - 락이 살아있으면 False
+       - 스테일이면 제거 후 재시도
+    """
+    try:
+        if os.path.exists(PREDICT_LOCK) and _is_stale_lock(PREDICT_LOCK, PREDICT_LOCK_TTL):
+            try:
+                os.remove(PREDICT_LOCK)
+                print(f"[LOCK] stale predict lock removed (> {PREDICT_LOCK_TTL}s)")
+                sys.stdout.flush()
+            except Exception:
+                pass
+
         fd = os.open(PREDICT_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         with os.fdopen(fd, "w") as f:
-            f.write(_now_kst().isoformat())
+            f.write(json.dumps({"pid": os.getpid(), "ts": _now_kst().isoformat()}, ensure_ascii=False))
         return True
     except FileExistsError:
         return False
@@ -278,9 +312,12 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
 # ====== 핵심: 예측 ======
 def predict(symbol, strategy, source="일반", model_type=None):
     # 0) 게이트/락
+    #    ✅ 게이트가 닫혀 있으면 실제 추론 없이 실패 레코드만 남김.
     if not is_predict_gate_open():
         return failed_result(symbol or "None", strategy or "None", reason="predict_gate_closed", X_input=None)
+
     if not _acquire_predict_lock():
+        # 락이 잡혀있으면 중복 실행 방지. 실패 레코드만.
         return failed_result(symbol or "None", strategy or "None", reason="predict_already_running", X_input=None)
 
     # 🫀 하트비트 시작
@@ -488,7 +525,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                                          else f"최고 확률 단일 모델: {meta_choice}")
         }
     finally:
-        # 하트비트 종료 및 락 해제
+        # 하트비트 종료 및 락 해제(반드시)
         try:
             _hb_stop.set()
             _hb_thread.join(timeout=2)
