@@ -1,4 +1,4 @@
-# === train.py (STOP-friendly, cooperative cancel + heartbeat/watchdog + order-override) ===
+# === train.py (STOP-friendly, cooperative cancel + heartbeat/watchdog + strict symbol->strategy->group order) ===
 import os
 def _set_default_thread_env(n: str, v: int):
     if os.getenv(n) is None: os.environ[n] = str(v)
@@ -684,10 +684,87 @@ def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
     th.start()
     _safe_print(f"[BG:{name}] started (daemon)")
 
+# =========================
+# 🔒 엄격 순서/완결 강제 설정
+# =========================
+_ENFORCE_FULL_STRATEGY = os.getenv("ENFORCE_FULL_STRATEGY","1")=="1"  # 심볼당 3전략 모두 성공해야 완료 처리
+_STRICT_HALT_ON_INCOMPLETE = os.getenv("STRICT_HALT_ON_INCOMPLETE","1")=="1"  # 불완료 심볼 발견 시 그룹 진행 중단
+_SYMBOL_RETRY_LIMIT = int(os.getenv("SYMBOL_RETRY_LIMIT","1"))  # 심볼 단위 재시도 횟수
+_REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = os.getenv("REQUIRE_ONE_PER_GROUP","1")=="1"  # 각 group별 최소 1개 모델 성공
+
+def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) -> tuple[bool, dict]:
+    """
+    반환: (symbol_complete, detail)
+      - symbol_complete: 세 전략 모두, 각 그룹마다 최소 1개 모델 성공했는지
+      - detail: { strategy: {gid: bool_success} }
+    """
+    strategies=["단기","중기","장기"]
+    detail={}
+    symbol_complete=True
+    for strategy in strategies:
+        if stop_event is not None and stop_event.is_set(): return False, detail
+        try:
+            cr=get_class_ranges(symbol=symbol,strategy=strategy)
+            if not cr:
+                logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note="클래스 경계 없음",status="skipped")
+                detail[strategy]={-1:False}
+                symbol_complete=False
+                continue
+            num_classes=len(cr); groups=get_class_groups(num_classes=num_classes); max_gid=len(groups)-1
+            strat_complete=True; detail[strategy]={}
+            for gid in range(max_gid+1):
+                if stop_event is not None and stop_event.is_set(): return False, detail
+                try:
+                    gr=get_class_ranges(symbol=symbol,strategy=strategy,group_id=gid)
+                except Exception as e:
+                    gr=None
+                if not gr or len(gr)<2:
+                    try:
+                        _log_class_ranges_safe(symbol,strategy,group_id=gid,class_ranges=gr or [],note="train_skip(<2 classes)", stop_event=stop_event)
+                        logger.log_training_result(symbol,strategy,model=f"group{gid}",accuracy=0.0,f1=0.0,loss=0.0,note=f"스킵: group_id={gid}, cls<2",status="skipped")
+                    except: pass
+                    detail[strategy][gid]=False
+                    strat_complete=False
+                    continue
+
+                _reset_watchdog("enter symbol/group")
+                _progress(f"train_models:{symbol}-{strategy}-g{gid}")
+                res=train_one_model(symbol,strategy,group_id=gid, stop_event=stop_event)
+                ok = bool(res and isinstance(res,dict) and res.get("models"))
+                detail[strategy][gid]=ok
+                if not ok and _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP:
+                    strat_complete=False
+                if stop_event is not None and stop_event.is_set(): return False, detail
+                time.sleep(0.05)
+
+            if not strat_complete:
+                symbol_complete=False
+        except Exception as e:
+            try:
+                logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note=f"전략 실패: {e}",status="failed")
+            except: pass
+            detail[strategy]={-1:False}
+            symbol_complete=False
+    return symbol_complete, detail
+
 def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_should: bool = False):
+    """
+    변경점:
+      - 심볼별로 3전략 * 모든 그룹 학습을 완료해야 다음 심볼로 이동
+      - 불완료 시 재시도(_SYMBOL_RETRY_LIMIT) 후에도 미완료면, 정책에 따라 그룹 진행 중단(_STRICT_HALT_ON_INCOMPLETE)
+      - mark_symbol_trained는 '완료'시에만 호출
+    반환:
+      - completed_symbols: 이번 호출에서 완결된 심볼 리스트
+      - partial_symbols: 일부만 학습된(미완결) 심볼 리스트
+    """
+    completed_symbols=[]; partial_symbols=[]
     strategies=["단기","중기","장기"]
     env_force = (os.getenv("TRAIN_FORCE_IGNORE_SHOULD","0") == "1")
+
     for symbol in symbol_list:
+        if stop_event is not None and stop_event.is_set():
+            _safe_print("[STOP] train_models: early"); break
+
         symbol_has_model = _has_any_model_for_symbol(symbol)
         local_ignore = ignore_should or env_force or (not symbol_has_model)
         if not local_ignore:
@@ -698,40 +775,27 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
             why = "env" if env_force else ("no_model" if not symbol_has_model else "first_pass")
             _safe_print(f"[order-override] {symbol}: force train (reason={why})")
 
-        if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] train_models: early"); return
-        trained_any=False
-        for strategy in strategies:
-            if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] train_models: early(strategy)"); return
-            try:
-                cr=get_class_ranges(symbol=symbol,strategy=strategy)
-                if not cr: raise ValueError("빈 클래스 경계")
-                num_classes=len(cr); groups=get_class_groups(num_classes=num_classes); max_gid=len(groups)-1
-            except Exception as e: _log_fail(symbol,strategy,f"클래스 계산 실패: {e}"); continue
-            for gid in range(max_gid+1):
-                if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] train_models: early(group)"); return
-                try:
-                    gr=get_class_ranges(symbol=symbol,strategy=strategy,group_id=gid)
-                    if not gr or len(gr)<2:
-                        try:
-                            _log_class_ranges_safe(symbol,strategy,group_id=gid,class_ranges=gr or [],note="train_skip(<2 classes)", stop_event=stop_event)
-                            logger.log_training_result(symbol,strategy,model=f"group{gid}",accuracy=0.0,f1=0.0,loss=0.0,note=f"스킵: group_id={gid}, cls<2",status="skipped")
-                        except: pass
-                        continue
-                except Exception as e:
-                    try:
-                        logger.log_training_result(symbol,strategy,model=f"group{gid}",accuracy=0.0,f1=0.0,loss=0.0,note=f"스킵: group_id={gid}, 경계계산실패 {e}",status="skipped")
-                    except: pass
-                    continue
-                _reset_watchdog("enter symbol/group")
-                _progress(f"train_models:{symbol}-{strategy}-g{gid}")
-                res=train_one_model(symbol,strategy,group_id=gid, stop_event=stop_event)
-                if res and isinstance(res,dict) and res.get("models"):
-                    trained_any=True
-                if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] train_models: after one model"); return
-                time.sleep(0.1)
-        if trained_any:
-            mark_symbol_trained(symbol)
+        trained_complete=False
+        for attempt in range(max(1,_SYMBOL_RETRY_LIMIT)):
+            if stop_event is not None and stop_event.is_set(): break
+            complete, detail = _train_full_symbol(symbol, stop_event=stop_event)
+            _safe_print(f"[ORDER] {symbol} attempt {attempt+1}/{_SYMBOL_RETRY_LIMIT} → complete={complete} detail={detail}")
+            if complete:
+                trained_complete=True
+                break
 
+        if trained_complete:
+            completed_symbols.append(symbol)
+            try: mark_symbol_trained(symbol)
+            except Exception as e: _safe_print(f"[mark_symbol_trained err] {e}")
+        else:
+            partial_symbols.append(symbol)
+            if _ENFORCE_FULL_STRATEGY and _STRICT_HALT_ON_INCOMPLETE:
+                _safe_print(f"[HALT] {symbol} 심볼 불완료 → 그룹 진행 중단")
+                # 현재 심볼에서 중단 → 더 이상 진행하지 않음
+                break
+
+    # BG 작업 트리거 (원본 유지)
     try:
         import maintenance_fix_meta
         _run_bg_if_not_stopped("meta_fix", maintenance_fix_meta.fix_all_meta_json, stop_event)
@@ -743,6 +807,8 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
     try:
         _run_bg_if_not_stopped("evo_meta_train", train_evo_meta_loop, stop_event)
     except Exception as e: _safe_print(f"[evo meta train skip] {e}")
+
+    return completed_symbols, partial_symbols
 
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None = None):
     threading.Thread(target=_watchdog_loop, args=(stop_event,), daemon=True).start()
@@ -789,12 +855,12 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 _safe_print(f"🚀 [group] {idx+1}/{len(groups)} → {group}")
                 _progress(f"group{idx}:start")
 
-                train_models(group, stop_event=stop_event, ignore_should=force_full_pass)
+                completed_syms, partial_syms = train_models(group, stop_event=stop_event, ignore_should=force_full_pass)
                 if stop_event is not None and stop_event.is_set(): _safe_print("🛑 stop after train → exit"); break
 
-                # ✅ 이번 그룹에서 실제 모델이 존재하는 심볼만 선별해 '반드시' 예측
-                trained_syms = [s for s in group if _has_any_model_for_symbol(s)]
-                _safe_print(f"[PREDICT-DECIDE] ready={bool(ready_for_group_predict())} trained_syms={trained_syms}")
+                # ✅ 이번 그룹에서 '완결된 심볼'만 예측
+                trained_syms = [s for s in completed_syms if _has_any_model_for_symbol(s)]
+                _safe_print(f"[PREDICT-DECIDE] ready={bool(ready_for_group_predict())} completed_syms={completed_syms} partial_syms={partial_syms} trained_syms={trained_syms}")
 
                 if trained_syms:
                     time.sleep(0.1)
@@ -826,10 +892,15 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                         _safe_print(f"[mark_group_predicted err] {e}")
                     _safe_print(f"[PREDICT] group {idx+1} done")
                 else:
-                    _safe_print(f"[⏸ 대기] 그룹{idx+1} 예측 건 없음(생성된 모델 없음) → 보류")
+                    _safe_print(f"[⏸ 대기] 그룹{idx+1} 예측 건 없음(완결 심볼 없음) → 보류")
 
                 _prune_caches_and_gc()
                 _progress(f"group{idx}:done")
+
+                # 심볼 미완료가 있고 중단 정책이면, 남은 그룹 스킵
+                if partial_syms and _ENFORCE_FULL_STRATEGY and _STRICT_HALT_ON_INCOMPLETE:
+                    _safe_print(f"[HALT] 그룹 {idx+1}: 미완결 심볼 존재 → 그룹 루프 중단")
+                    break
 
                 if sleep_sec>0:
                     for _ in range(sleep_sec):
