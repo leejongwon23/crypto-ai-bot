@@ -71,7 +71,8 @@ os.makedirs(MODEL_DIR, exist_ok=True)  # ✅ 모델 디렉터리 보장
 LOCK_DIR   = getattr(safe_cleanup, "LOCK_DIR", os.path.join(PERSIST_DIR, "locks"))
 LOCK_PATH  = getattr(safe_cleanup, "LOCK_PATH", os.path.join(LOCK_DIR, "train_or_predict.lock"))
 os.makedirs(LOCK_DIR, exist_ok=True)
-if os.path.exists(LOCK_PATH) and not getattr(train, "is_loop_running", lambda: False)(): os.remove(LOCK_PATH)  # 🩹 orphan lock auto-clean
+if os.path.exists(LOCK_PATH) and not getattr(train, "is_loop_running", lambda: False)():
+    os.remove(LOCK_PATH)  # 🩹 orphan lock auto-clean
 
 def _acquire_global_lock():
     try:
@@ -370,6 +371,7 @@ def _init_background_once():
             print("[pipeline] serialized: train -> predict -> next-group"); sys.stdout.flush()
 
             # 학습 루프 스레드 — train.py의 단일 루프 보장 API 사용
+            _safe_close_gate("init_train_start")  # 🔒 학습 전 predict 게이트 강제 닫기(중복예측 방지)
             train.start_train_loop(force_restart=False, sleep_sec=0)
             print("✅ 학습 루프 스레드 시작")
 
@@ -600,6 +602,7 @@ def train_now():
         if os.path.exists(LOCK_PATH):
             return "⏸️ 초기화 중: 학습 시작 차단됨", 423
         force = request.args.get("force", "0") == "1"
+        _safe_close_gate("train_now_start")  # 🔒 학습 전 predict 게이트 강제 닫기
         started = train.start_train_loop(force_restart=force, sleep_sec=0)
         if started:
             return "✅ 전체 그룹 학습 루프 시작됨 (백그라운드)"
@@ -709,6 +712,7 @@ def train_symbols():
 
             group_symbols = SYMBOL_GROUPS[group_idx]
             print(f"🚀 그룹 학습 요청됨 → 그룹 #{group_idx} | 심볼: {group_symbols}")
+            _safe_close_gate("train_group_start")  # 🔒 학습 전 predict 게이트 강제 닫기
             threading.Thread(target=lambda: train.train_models(group_symbols), daemon=True).start()
             return f"✅ 그룹 #{group_idx} 학습 시작됨 (단일 루프 보장)"
 
@@ -725,6 +729,7 @@ def train_symbols():
             if not ok:
                 return resp
 
+            _safe_close_gate("train_selected_start")  # 🔒 학습 전 predict 게이트 강제 닫기
             threading.Thread(target=lambda: train.train_models(symbols), daemon=True).start()
             return f"✅ {len(symbols)}개 심볼 학습 시작됨 (단일 루프 보장)"
     except Exception as e:
@@ -826,7 +831,7 @@ def reset_all(key=None):
                 print(f"⚠️ [RESET] stop_train_loop 예외: {e}"); sys.stdout.flush()
             print(f"[RESET] stop_train_loop 결과: {stopped}"); sys.stdout.flush()
 
-            # 🧨 (선택) 빠른 종료가 안 되면 **초기 단계에서 바로 QWIPE**로 리소스/파일 충돌 최소화
+            # 🧨 (선택) 빠른 종료가 안 되면 **초기 단계에서 바로 QWIPE** 수행
             if (not stopped) and qwipe_early:
                 try:
                     print("[RESET] 빠른 정지 실패 → 조기 QWIPE 수행"); sys.stdout.flush()
@@ -861,7 +866,6 @@ def reset_all(key=None):
             if not stopped:
                 print("🛑 [RESET] 루프가 종료되지 않음 → QWIPE 후 하드 종료(os._exit)"); sys.stdout.flush()
                 try:
-                    # 조기 QWIPE를 못 했거나 실패했다면 한 번 더 시도
                     _quarantine_wipe_persistent()
                 except Exception as e:
                     print(f"⚠️ [RESET] QWIPE 실패: {e}")
@@ -896,7 +900,6 @@ def reset_all(key=None):
                     if name in keep:
                         continue
                     if os.path.isdir(p):
-                        # 위에서 만든 기본 디렉터리( logs / models / ssl_models )는 유지
                         if name not in {"logs", "models", "ssl_models"}:
                             shutil.rmtree(p, ignore_errors=True)
                     else:
@@ -970,10 +973,8 @@ def reset_all(key=None):
         except Exception as e:
             print(f"❌ [RESET] 백그라운드 초기화 예외: {e}"); sys.stdout.flush()
         finally:
-            # (이중 호출이어도 안전) 혹시 못 풀었으면 풀기
             _release_global_lock()
 
-    # 백그라운드 작업 시작 후 즉시 응답
     threading.Thread(target=_do_reset_work, daemon=True).start()
     return Response(
         "✅ 초기화 요청 접수됨. 백그라운드에서 정지→정리 후 서버 프로세스를 재시작합니다.\n"
