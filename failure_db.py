@@ -1,4 +1,4 @@
-# === failure_db.py (patched, req-unit connections + invalid gate) ===
+# === failure_db.py (FINAL: req-scoped conn, invalid-gate, txn-safe, indexes) ===
 import sqlite3
 import os
 import json
@@ -11,8 +11,7 @@ os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 # ──────────────────────────────────────────────────────────────
 # 커넥션 팩토리 (요청 단위로 열고 닫음)
-#  - autocommit 모드(isolation_level=None) + 필요한 곳에서 BEGIN/COMMIT
-#  - WAL / NORMAL / busy_timeout 설정
+#  - autocommit(isolation_level=None), WAL/NORMAL, busy_timeout
 # ──────────────────────────────────────────────────────────────
 def open_conn():
     conn = sqlite3.connect(DB_PATH, timeout=5.0, isolation_level=None, check_same_thread=False)
@@ -54,15 +53,16 @@ def ensure_failure_db():
                         UNIQUE(hash, model_name, predicted_class)
                     )
                 """)
-                # autocommit 모드이므로 명시 커밋 필요 없음
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_failure_ts ON failure_patterns(timestamp)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_failure_sym_strat ON failure_patterns(symbol, strategy)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_failure_model ON failure_patterns(model_name)")
             _schema_ready = True
             print("[failure_db] ✅ ensure_failure_db OK")
         except Exception as e:
             print(f"[failure_db] ❌ ensure_failure_db error: {e}")
 
 # ──────────────────────────────────────────────────────────────
-# 존재 확인 (중복 방지)
-#  - 요청 단위 커넥션 사용
+# 해시 유틸
 # ──────────────────────────────────────────────────────────────
 def _build_hash_from_row(row, feature_hash=None, label=None):
     if feature_hash:
@@ -76,10 +76,12 @@ def _build_hash_from_row(row, feature_hash=None, label=None):
     raw = f"{sym}_{strat}_{mdl}_{pcls}_{lab}_{rt}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
+# ──────────────────────────────────────────────────────────────
+# 중복 존재 확인
+# ──────────────────────────────────────────────────────────────
 def check_failure_exists(row_or_hash, model_name=None, predicted_class=None):
     """
-    row_or_hash 가 dict면 내부 키로 해시 계산/조회,
-    str 이면 그대로 hash 로 간주.
+    dict를 주면 내부 키로 해시 생성/조회, str이면 그대로 hash 사용.
     """
     ensure_failure_db()
     try:
@@ -104,13 +106,10 @@ def check_failure_exists(row_or_hash, model_name=None, predicted_class=None):
         return False
 
 # ──────────────────────────────────────────────────────────────
-# 저장
-#  - 체크+인서트를 같은 트랜잭션으로(경합 제거)
-#  - 요청 단위 커넥션 + BEGIN IMMEDIATE
+# 저장 (트랜잭션 + invalid 게이트)
 # ──────────────────────────────────────────────────────────────
-_write_lock = Lock()  # 파이썬 레벨 락으로 간단한 경쟁 방지
+_write_lock = Lock()
 
-# 🚫 추가: invalid 케이스 차단 게이트
 _INVALID_REASON_KEYS = (
     "invalid",              # e.g. invalid_entry_or_label
     "timestamp_parse_error",
@@ -121,13 +120,11 @@ _INVALID_REASON_KEYS = (
 
 def _should_block(row: dict, label_val) -> bool:
     try:
-        # label 미기록 또는 음수
         if label_val is None or int(label_val) < 0:
             return True
     except Exception:
         return True
 
-    # entry_price<=0 이면 차단 (prediction_log 에서 invalid 로 본 건 저장 X)
     try:
         ep = float(row.get("entry_price", 0) or 0)
         if ep <= 0:
@@ -135,27 +132,22 @@ def _should_block(row: dict, label_val) -> bool:
     except Exception:
         return True
 
-    # symbol/strategy 필수
     if not str(row.get("symbol", "")).strip() or not str(row.get("strategy", "")).strip():
         return True
 
-    # 명시적 invalid/status
     status = str(row.get("status", "")).strip().lower()
     if status == "invalid":
         return True
 
-    # 사유(reason)에 invalid/exception 류 키워드 포함 시 차단
     reason = str(row.get("reason", "")).strip().lower()
     for key in _INVALID_REASON_KEYS:
         if key in reason:
             return True
-
     return False
 
 def insert_failure_record(row, feature_hash=None, feature_vector=None, label=None, context="evaluation"):
     """
-    실패 예측을 기록한다.
-    context: "evaluation" | "prediction" 등
+    실패 예측을 기록한다. context: "evaluation" | "prediction"
     """
     ensure_failure_db()
 
@@ -163,23 +155,22 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         print("[failure_db] ❌ row must be dict")
         return
 
-    # label 정규화(음수/미기록 허용 → 차단 게이트에서 처리)
     try:
         label_val = label if label is not None else row.get("label", -1)
         label_int = int(label_val)
     except Exception:
         label_int = -1
 
-    # 🚫 invalid 차단
     if _should_block(row, label_int):
         print("[failure_db] ⛔ blocked invalid failure record (not saved)")
         return
 
-    # hash
     feature_hash = _build_hash_from_row(row, feature_hash=feature_hash, label=label_int)
-
     mdl_name = row.get("model", "")
-    pcls = int(row.get("predicted_class", -1))
+    try:
+        pcls = int(row.get("predicted_class", -1))
+    except Exception:
+        pcls = -1
 
     # feature vector serialize
     try:
@@ -217,41 +208,47 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
 
     # 동일 트랜잭션으로 중복 체크 + 삽입
     with _write_lock:
+        conn = None
         try:
-            with open_conn() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                cur = conn.execute(
-                    "SELECT 1 FROM failure_patterns WHERE hash=? AND model_name=? AND predicted_class=? LIMIT 1",
-                    (rec["hash"], rec["model_name"], rec["predicted_class"]),
-                )
-                if cur.fetchone():
-                    conn.execute("COMMIT")
-                    print(f"[failure_db] ⏭️ skip duplicate hash={rec['hash']}")
-                    return
-
-                conn.execute(
-                    """
-                    INSERT INTO failure_patterns
-                    (timestamp, symbol, strategy, direction, hash, model_name, predicted_class,
-                     rate, reason, feature, label, context)
-                    VALUES (:timestamp, :symbol, :strategy, :direction, :hash, :model_name, :predicted_class,
-                            :rate, :reason, :feature, :label, :context)
-                    """,
-                    rec,
-                )
+            conn = open_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            cur = conn.execute(
+                "SELECT 1 FROM failure_patterns WHERE hash=? AND model_name=? AND predicted_class=? LIMIT 1",
+                (rec["hash"], rec["model_name"], rec["predicted_class"]),
+            )
+            if cur.fetchone():
                 conn.execute("COMMIT")
-                print(f"[failure_db] ✅ saved {rec['symbol']} {rec['strategy']} cls={rec['predicted_class']} ctx={context}")
+                print(f"[failure_db] ⏭️ skip duplicate hash={rec['hash']}")
+                return
+
+            conn.execute(
+                """
+                INSERT INTO failure_patterns
+                (timestamp, symbol, strategy, direction, hash, model_name, predicted_class,
+                 rate, reason, feature, label, context)
+                VALUES (:timestamp, :symbol, :strategy, :direction, :hash, :model_name, :predicted_class,
+                        :rate, :reason, :feature, :label, :context)
+                """,
+                rec,
+            )
+            conn.execute("COMMIT")
+            print(f"[failure_db] ✅ saved {rec['symbol']} {rec['strategy']} cls={rec['predicted_class']} ctx={context}")
         except Exception as e:
-            # 트랜잭션 에러 시 롤백 시도
             try:
-                with open_conn() as conn:
+                if conn is not None:
                     conn.execute("ROLLBACK")
             except Exception:
                 pass
             print(f"[failure_db] ❌ insert error: {e}")
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
 
 # ──────────────────────────────────────────────────────────────
-# 헬퍼
+# 조회 헬퍼
 # ──────────────────────────────────────────────────────────────
 def load_failure_samples(limit=1000):
     """최근 실패 샘플 일부 반환 (메타학습/분석용)"""
