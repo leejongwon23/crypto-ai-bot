@@ -476,13 +476,25 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "explore_used": ("best_single_explore" in str(meta_choice)),
         }
         ensure_prediction_log_exists()
-        log_prediction(symbol=symbol, strategy=strategy, direction="예측", entry_price=entry, target_price=entry*(1+exp_ret),
-                       model="meta", model_name=("evo_meta_learner" if meta_choice=="evo_meta_learner" else str(meta_choice)),
-                       predicted_class=final_cls, label=final_cls, note=json.dumps(note, ensure_ascii=False),
-                       top_k=topk, success=False, reason="predicted", rate=exp_ret, return_value=0.0,
-                       source=("진화형" if meta_choice=="evo_meta_learner" else "기본"),
-                       group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None),
-                       feature_vector=feat_row.numpy())
+        # ✅ 개별 컬럼(regime/meta_choice/raw_prob/calib_prob/calib_ver)로도 기록
+        log_prediction(
+            symbol=symbol, strategy=strategy, direction="예측",
+            entry_price=entry, target_price=entry*(1+exp_ret),
+            model="meta",
+            model_name=("evo_meta_learner" if meta_choice=="evo_meta_learner" else str(meta_choice)),
+            predicted_class=final_cls, label=final_cls,
+            note=json.dumps(note, ensure_ascii=False),
+            top_k=topk, success=False, reason="predicted",
+            rate=exp_ret, return_value=0.0,
+            source=("진화형" if meta_choice=="evo_meta_learner" else "기본"),
+            group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None),
+            feature_vector=feat_row.numpy(),
+            regime=regime,
+            meta_choice=meta_choice,
+            raw_prob=float((chosen or outs[0])["raw_probs"][final_cls]) if (chosen or outs) else None,
+            calib_prob=float((chosen or outs[0])["calib_probs"][final_cls]) if (chosen or outs) else None,
+            calib_ver=get_calibration_version()
+        )
 
         # 섀도우 로깅
         try:
@@ -509,12 +521,22 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     "model_type": m.get("model_type", ""), "val_f1": float(m.get("val_f1", 0.0)),
                     "calib_ver": get_calibration_version(), "min_return_threshold": float(MIN_RET_THRESHOLD),
                 }
-                log_prediction(symbol=symbol, strategy=strategy, direction="예측(섀도우)", entry_price=entry,
-                               target_price=entry*(1+exp_i), model=m.get("model_type","model"),
-                               model_name=os.path.basename(m.get("model_path","")), predicted_class=pred_i, label=pred_i,
-                               note=json.dumps(note_s, ensure_ascii=False), top_k=top_i, success=False, reason="shadow",
-                               rate=exp_i, return_value=0.0, source="섀도우", group_id=m.get("group_id",0),
-                               feature_vector=feat_row.numpy())
+                log_prediction(
+                    symbol=symbol, strategy=strategy, direction="예측(섀도우)",
+                    entry_price=entry, target_price=entry*(1+exp_i),
+                    model=m.get("model_type","model"),
+                    model_name=os.path.basename(m.get("model_path","")),
+                    predicted_class=pred_i, label=pred_i,
+                    note=json.dumps(note_s, ensure_ascii=False),
+                    top_k=top_i, success=False, reason="shadow",
+                    rate=exp_i, return_value=0.0, source="섀도우",
+                    group_id=m.get("group_id",0), feature_vector=feat_row.numpy(),
+                    regime=regime,
+                    meta_choice="shadow",
+                    raw_prob=float(m["raw_probs"][pred_i]),
+                    calib_prob=float(m["calib_probs"][pred_i]),
+                    calib_ver=get_calibration_version()
+                )
         except Exception as e:
             print(f"[섀도우 로깅 예외] {e}")
 
