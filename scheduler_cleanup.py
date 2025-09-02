@@ -1,169 +1,202 @@
-# scheduler_cleanup.py (FINAL — deduped, compatible wrapper)
-import os
-import atexit
-import threading
-from typing import Optional
+# scheduler_cleanup.py — light-first, collision-safe cleanup scheduler
+# - 학습/예측 타이트 구간에서는 '가벼운 모드'만 실행하거나 스킵
+# - 무거운 정리는 한가할 때만 (학습/락/게이트 닫힘/예측락 등 없을 때)
+# - app.py 에서 start_cleanup_scheduler(), stop_cleanup_scheduler() 사용
 
-# 공용 정리 로직/락 경로
+import os, sys, time, threading, datetime, pytz, traceback
+from apscheduler.schedulers.background import BackgroundScheduler
+
+# 필수 의존: safe_cleanup(이미 프로젝트에 존재)
 import safe_cleanup
-from safe_cleanup import cleanup_logs_and_models  # 호환을 위해 유지
 
-# ─────────────────────────────────────────────────────────────
-# 실행 모드 결정
-#   - 기본: safe_cleanup 내부 스케줄러 스레드 사용(중복 제거)
-#   - 환경변수 USE_APSCHEDULER=1 이면 APScheduler 모드 강제
-# ─────────────────────────────────────────────────────────────
-_USE_APS = os.getenv("USE_APSCHEDULER", "0").strip() == "1"
+# 선택 의존: train 모듈의 상태질의 (없으면 항상 False)
+try:
+    import train
+    _is_training = getattr(train, "is_loop_running", lambda: False)
+except Exception:
+    def _is_training(): return False
 
-# APS 모드 준비(없으면 자동으로 래퍼 모드로 폴백)
-BackgroundScheduler = None
-if _USE_APS:
+# 예측 게이트/락 경로 (predict.py와 합)
+RUN_DIR        = "/persistent/run"
+PREDICT_LOCK   = os.path.join(RUN_DIR, "predict_running.lock")
+PREDICT_BLOCK  = "/persistent/predict.block"
+PREDICT_GATE   = os.path.join(RUN_DIR, "predict_gate.json")
+
+# 전역 락 (app.py/safe_cleanup 에서 공유)
+LOCK_DIR  = getattr(safe_cleanup, "LOCK_DIR", "/persistent/locks")
+LOCK_PATH = getattr(safe_cleanup, "LOCK_PATH", os.path.join(LOCK_DIR, "train_or_predict.lock"))
+
+# 튜너블 파라미터 (환경변수로 오버라이드 가능)
+CLEAN_INTERVAL_MIN   = int(os.getenv("CLEAN_INTERVAL_MIN", "30"))  # 기본 30분
+LIGHT_ONLY_IF_BUSY   = os.getenv("CLEAN_LIGHT_ONLY_IF_BUSY", "1") == "1"
+HEAVY_ALLOW_IF_IDLE  = os.getenv("CLEAN_HEAVY_ALLOW_IF_IDLE", "1") == "1"
+HEAVY_MIN_GAP_MIN    = int(os.getenv("CLEAN_HEAVY_MIN_GAP_MIN", "180"))  # 무거운 정리 최소 간격(3h)
+DISK_HARDCAP_GB      = float(getattr(safe_cleanup, "HARD_CAP_GB", 9.6))
+DISK_SOFTCAP_GB      = float(os.getenv("CLEAN_SOFTCAP_GB", "8.0"))      # 소프트 캡(넘으면 heavy 고려)
+
+_tz = pytz.timezone("Asia/Seoul")
+_now = lambda: datetime.datetime.now(_tz)
+
+_sched = None
+_last_heavy_at = 0.0
+_lock = threading.Lock()
+
+def _is_predict_busy() -> bool:
+    """예측 타이트 구간 여부."""
     try:
-        from pytz import timezone
-        from apscheduler.schedulers.background import BackgroundScheduler as _BG
-        BackgroundScheduler = _BG
+        if os.path.exists(PREDICT_LOCK):   # 예측 실행 중 표시
+            return True
+        if os.path.exists(LOCK_PATH):      # 앱 전역 초기화/정지 중
+            return True
+        if os.path.exists(PREDICT_BLOCK):  # 강제 차단 중이면 충돌 가능성 -> busy 취급
+            return True
+        # 게이트가 닫혀 있으면 학습/초기화 등과 겹칠 확률 높다고 보고 보수적으로 busy
+        if os.path.exists(PREDICT_GATE):
+            import json
+            with open(PREDICT_GATE, "r", encoding="utf-8") as f:
+                if not json.load(f).get("open", True):
+                    return True
     except Exception:
-        # 라이브러리 없으면 자동 폴백
-        _USE_APS = False
-
-# 공통 상태
-_scheduler_thread: Optional[threading.Thread] = None  # 래퍼 모드용
-_scheduler_aps: Optional["BackgroundScheduler"] = None  # APS 모드용
-_JOB_ID = "cleanup_job"
-
-
-def _should_skip() -> bool:
-    """글로벌 락이 잡혀 있으면 정리 작업을 스킵한다."""
-    lock_path = getattr(safe_cleanup, "LOCK_PATH", None)
-    if lock_path and os.path.exists(lock_path):
-        print("[cleanup] lock detected → skip this run", flush=True)
+        # 알 수 없으면 안전하게 busy 취급
         return True
     return False
 
+def _should_run_heavy() -> bool:
+    """무거운 정리를 지금 해도 되는가? (완전 한가 + 최소 간격 + 용량 압박)"""
+    if not HEAVY_ALLOW_IF_IDLE:
+        return False
+    if _is_training():
+        return False
+    if _is_predict_busy():
+        return False
+    # 최근 heavy 이후 최소 간격
+    gap_min = (time.time() - _last_heavy_ts()) / 60.0
+    if gap_min < HEAVY_MIN_GAP_MIN:
+        return False
+    # 용량 상태 확인
+    try:
+        used = safe_cleanup.get_directory_size_gb("/persistent")
+        if used >= DISK_SOFTCAP_GB:
+            return True
+    except Exception:
+        # 상태를 못 읽으면 heavy는 미루자
+        return False
+    return False
+
+def _last_heavy_ts() -> float:
+    global _last_heavy_at
+    return float(_last_heavy_at or 0.0)
+
+def _mark_heavy_now():
+    global _last_heavy_at
+    _last_heavy_at = time.time()
+
+def _run_light():
+    """가벼운 모드: 로그/구식 모델/캐시 등 소량 삭제(빠름)."""
+    try:
+        safe_cleanup.cleanup_logs_and_models(light=True)
+        print(f"[CLEANUP] light done @ {_now().strftime('%H:%M:%S')}")
+        sys.stdout.flush()
+    except Exception as e:
+        print(f"[CLEANUP] light error: {e}")
+        sys.stdout.flush()
+
+def _run_heavy():
+    """무거운 모드: 공간 압박 시 실행. 시간이 다소 걸릴 수 있어 한가할 때만."""
+    try:
+        safe_cleanup.cleanup_logs_and_models(light=False)
+        _mark_heavy_now()
+        print(f"[CLEANUP] HEAVY done @ {_now().strftime('%H:%M:%S')}")
+        sys.stdout.flush()
+    except Exception as e:
+        print(f"[CLEANUP] heavy error: {e}")
+        sys.stdout.flush()
 
 def _cleanup_job():
-    """스케줄러가 호출하는 실제 작업 (락 체크 포함)."""
-    try:
-        if _should_skip():
-            return
-        # safe_cleanup 내부가 용량/보호시간/모델세트 정책을 처리
-        cleanup_logs_and_models()
-    except Exception as e:
-        print(f"[cleanup] run failed: {e}", flush=True)
-
-
-# ─────────────────────────────────────────────────────────────
-# 래퍼 모드 (기본): safe_cleanup 내부 스레드 스케줄러 사용
-# ─────────────────────────────────────────────────────────────
-def _start_wrapper_mode():
-    global _scheduler_thread
-    if _scheduler_thread is not None and _scheduler_thread.is_alive():
-        return _scheduler_thread
-    # safe_cleanup 안의 스케줄러는 daemon 스레드로 주기 실행
-    _scheduler_thread = safe_cleanup.start_cleanup_scheduler(daemon=True)
-    atexit.register(lambda: stop_cleanup_scheduler())  # 호환용 로그만 남김
-    print("[cleanup] wrapper mode started (safe_cleanup internal scheduler).", flush=True)
-    return _scheduler_thread
-
-
-# ─────────────────────────────────────────────────────────────
-# APS 모드 (선택): APScheduler 사용 — 중복 방지 옵션 포함
-# ─────────────────────────────────────────────────────────────
-def _start_aps_mode():
-    global _scheduler_aps
-    if _scheduler_aps is not None:
-        # 이미 실행 중이면 그대로 반환
-        if is_cleanup_scheduler_running():
-            return _scheduler_aps
+    """
+    스케줄러에서 호출되는 본체.
+    - busy(학습중/예측락/게이트닫힘/글로벌락)면: light-only 또는 skip
+    - idle 이고 용량 압박 + 최소간격 충족: heavy
+    """
+    with _lock:
         try:
-            _scheduler_aps.start()
-            return _scheduler_aps
+            used = safe_cleanup.get_directory_size_gb("/persistent")
         except Exception:
-            pass  # 새로 생성
+            used = -1.0
 
-    tz = timezone(os.getenv("TZ", "Asia/Seoul"))
-    interval_min = int(os.getenv("SAFE_CLEANUP_INTERVAL_MIN", "30"))
+        busy = _is_training() or _is_predict_busy()
+        print(f"[CLEANUP] tick busy={busy} used={used:.2f}GB "
+              f"(soft={DISK_SOFTCAP_GB:.2f} hard={DISK_HARDCAP_GB:.2f})")
+        sys.stdout.flush()
 
-    _scheduler_aps = BackgroundScheduler(timezone=tz)
-    _scheduler_aps.add_job(
+        # 하드캡 초과면 즉시 비상 정리 (safe_cleanup 내장 루틴 사용)
+        try:
+            if used >= DISK_HARDCAP_GB:
+                print("[CLEANUP] EMERGENCY: hard cap exceeded -> run_emergency_purge()")
+                sys.stdout.flush()
+                safe_cleanup.run_emergency_purge()
+                return
+        except Exception:
+            pass
+
+        if busy:
+            if LIGHT_ONLY_IF_BUSY:
+                _run_light()
+            else:
+                print("[CLEANUP] busy -> skip")
+                sys.stdout.flush()
+            return
+
+        # idle
+        if _should_run_heavy():
+            _run_heavy()
+        else:
+            _run_light()
+
+def start_cleanup_scheduler():
+    """외부에서 호출: 정리 스케줄러 시작 (중복 시작 방지)."""
+    global _sched
+    if _sched is not None:
+        print("[CLEANUP] scheduler already running")
+        sys.stdout.flush()
+        return
+
+    sched = BackgroundScheduler(
+        timezone=_tz,
+        job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 90},
+    )
+    sched.add_job(
         _cleanup_job,
         trigger="interval",
-        minutes=interval_min,
-        id=_JOB_ID,
+        minutes=max(5, CLEAN_INTERVAL_MIN),  # 최소 5분
+        id="cleanup_tick",
         replace_existing=True,
-        coalesce=True,           # 지연 시 1회로 합치기
-        max_instances=1,         # 동시 실행 방지
-        misfire_grace_time=600,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=90,
     )
+    sched.start()
+    _sched = sched
+    print(f"[CLEANUP] scheduler started (every {max(5, CLEAN_INTERVAL_MIN)} min)")
+    sys.stdout.flush()
 
-    # 부팅 직후 1회 즉시 실행(락이면 스킵)
+def stop_cleanup_scheduler():
+    """외부에서 호출: 정리 스케줄러 완전 종료."""
+    global _sched
     try:
-        _cleanup_job()
-    except Exception as e:
-        print(f"[cleanup] startup run failed: {e}", flush=True)
-
-    _scheduler_aps.start()
-    atexit.register(lambda: stop_cleanup_scheduler())
-    print(f"[cleanup] APS mode started (every {interval_min} min)", flush=True)
-    return _scheduler_aps
-
-
-# ─────────────────────────────────────────────────────────────
-# 공개 API (인터페이스 유지)
-# ─────────────────────────────────────────────────────────────
-def start_cleanup_scheduler():
-    """
-    - 기본: safe_cleanup 내부 스케줄러 스레드 1회만 기동(중복 제거).
-    - USE_APSCHEDULER=1 이면 APScheduler 모드로 실행.
-    """
-    if _USE_APS:
-        return _start_aps_mode()
-    return _start_wrapper_mode()
-
-
-def stop_cleanup_scheduler(wait: bool = False):
-    """
-    스케줄러 중지.
-    - 래퍼 모드: safe_cleanup 내부 루프는 종료 훅이 없어 실제 중지는 불가(호환용 로그만 출력).
-    - APS 모드: 정상적으로 shutdown.
-    """
-    global _scheduler_thread, _scheduler_aps
-    if _USE_APS:
-        if _scheduler_aps is None:
-            return False
-        try:
+        if _sched is not None:
             try:
-                _scheduler_aps.remove_all_jobs()
+                _sched.pause()
             except Exception:
                 pass
-            _scheduler_aps.shutdown(wait=wait)
-            print("[cleanup] APS scheduler stopped", flush=True)
-            return True
-        except Exception as e:
-            print(f"[cleanup] stop error: {e}", flush=True)
-            return False
-        finally:
-            _scheduler_aps = None
-    else:
-        print("[cleanup] wrapper mode: stop not supported (safe_cleanup runs a persistent daemon).", flush=True)
-        _scheduler_thread = None
-        return False
-
-
-def is_cleanup_scheduler_running() -> bool:
-    """실행 상태 조회."""
-    if _USE_APS:
-        try:
-            # 1 == STATE_RUNNING
-            return _scheduler_aps is not None and getattr(_scheduler_aps, "state", 0) == 1
-        except Exception:
-            return False
-    try:
-        return _scheduler_thread is not None and _scheduler_thread.is_alive()
-    except Exception:
-        return False
-
-
-def run_cleanup_now():
-    """수동으로 즉시 1회 실행 (락이면 스킵)."""
-    _cleanup_job()
+            try:
+                _sched.remove_all_jobs()
+            except Exception:
+                pass
+            _sched.shutdown(wait=False)
+            _sched = None
+            print("[CLEANUP] scheduler stopped")
+            sys.stdout.flush()
+    except Exception as e:
+        print(f"[CLEANUP] stop error: {e}")
+        sys.stdout.flush()
