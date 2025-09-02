@@ -287,7 +287,7 @@ def update_model_success(s, t, m, success):
         """, params=(s, t or "알수없음", m, int(success), int(not success)), retries=7, commit=True)
         print(f"[✅ update_model_success] {s}-{t}-{m} 기록 ({'성공' if success else '실패'})")
     except Exception as e:
-        print(f"[오류] update_model_success 실패] {e}")
+        print(f"[오류] update_model_success 실패 → {e}")
 
 def get_model_success_rate(s, t, m):
     try:
@@ -520,7 +520,8 @@ def log_prediction(
         target_price = float(target_price or 0.0)
         model, model_name = _normalize_model_fields(model, model_name, symbol, strategy)
 
-        allowed_sources = ["일반","meta","evo_meta","baseline_meta","진화형","평가","단일","변동성","train_loop","섀도우"]
+        # ⬅︎ "기본" 추가 (predict.py 호환)
+        allowed_sources = ["일반","기본","meta","evo_meta","baseline_meta","진화형","평가","단일","변동성","train_loop","섀도우"]
         if source not in allowed_sources:
             source = "일반"
 
