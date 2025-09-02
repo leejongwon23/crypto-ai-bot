@@ -265,24 +265,31 @@ class GroupOrderManager:
 
     def ready_for_group_predict(self) -> bool:
         """
-        ▶︎ 변경: '그룹 내 최소 1개 심볼이라도 학습 완료'면 True.
-        또한 같은 그룹을 이미 예측 처리했다면 False.
+        ▶︎ 강화: '그룹 내 **모든 심볼이 학습 완료**'이고, 해당 그룹이 아직 예측 처리되지 않았을 때만 True.
+           - 조기 예측을 원천 차단하여 '학습 모두 끝난 뒤 → 예측 → 다음 그룹' 순서를 보장.
         """
         i = self.current_index()
         group = set(self.current_group())
         done = self.trained.get(i, set())
-        trained_cnt = len(group.intersection(done))
-        ready = (trained_cnt >= 1) and (self.last_predicted_idx != i)
-        if ready:
-            print(f"[🚦 예측대기] 그룹{i} 학습완료 {trained_cnt}/{len(group)} → 예측 실행 준비")
+        # 모든 심볼이 학습되었는지
+        all_trained = group.issubset(done) and len(group) > 0
+        already_pred = (self.last_predicted_idx == i)
+
+        if all_trained and not already_pred:
+            print(f"[🚦 예측준비] 그룹{i} 완주({len(done)}/{len(group)}) → 예측 실행 OK")
+            return True
+
+        if already_pred:
+            print(f"[⏸ 예측보류] 그룹{i}는 이미 예측 처리됨(last_predicted_idx={self.last_predicted_idx})")
         else:
-            if self.last_predicted_idx == i:
-                print(f"[⏸ 예측보류] 그룹{i}는 이미 예측 처리됨(last_predicted_idx={self.last_predicted_idx})")
-        return ready
+            remaining = sorted(list(group - done))
+            print(f"[⏳ 대기] 그룹{i} 미완료 심볼: {remaining} ({len(done)}/{len(group)})")
+
+        return False
 
     def mark_group_predicted(self):
         """
-        ▶︎ 변경: 동일 그룹 중복 호출을 방지(정확히 1회만 다음 그룹으로 이동).
+        ▶︎ 동일 그룹 중복 호출 방지(정확히 1회만 다음 그룹으로 이동).
         """
         i = self.current_index()
         if self.last_predicted_idx == i:
