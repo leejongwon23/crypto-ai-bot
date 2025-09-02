@@ -1,4 +1,4 @@
-# === train.py (STOP-friendly, cooperative cancel + heartbeat/watchdog + strict symbol->strategy->group order) ===
+# === train.py (STRICT: short->mid->long hard order, cooperative cancel, watchdog) ===
 import os
 def _set_default_thread_env(n: str, v: int):
     if os.getenv(n) is None: os.environ[n] = str(v)
@@ -12,7 +12,6 @@ import torch, torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import MinMaxScaler
-from collections import Counter
 
 from model_io import convert_pt_to_ptz, save_model
 try: torch.set_num_threads(int(os.getenv("TORCH_NUM_THREADS","2")))
@@ -26,7 +25,7 @@ if not _DISABLE_LIGHTNING:
         _HAS_LIGHTNING=True
     except: _HAS_LIGHTNING=False
 
-# ✅ 순서제어 래퍼 포함 임포트 (+ reset_group_order 추가)
+# ✅ 순서제어 래퍼 포함 임포트
 from data.utils import (
     get_kline_by_strategy, compute_features, create_dataset, SYMBOL_GROUPS,
     should_train_symbol, mark_symbol_trained, ready_for_group_predict, mark_group_predicted,
@@ -34,7 +33,7 @@ from data.utils import (
 )
 
 from model.base_model import get_model
-from feature_importance import compute_feature_importance, save_feature_importance  # 호환 유지
+from feature_importance import compute_feature_importance, save_feature_importance
 from failure_db import insert_failure_record, ensure_failure_db
 import logger
 from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges, set_NUM_CLASSES, STRATEGY_CONFIG
@@ -59,35 +58,30 @@ def _safe_print(msg):
     try: print(msg, flush=True)
     except: pass
 
-# ====== 🔔 글로벌 진행 하트비트/워치독 ======
-_HEARTBEAT_SEC = int(os.getenv("HEARTBEAT_SEC","10"))          # 주기적 생존 로그
-_STALL_WARN_SEC = int(os.getenv("STALL_WARN_SEC","60"))          # 진행지연 경고
+# ====== 🔔 하트비트/워치독 ======
+_HEARTBEAT_SEC = int(os.getenv("HEARTBEAT_SEC","10"))
+_STALL_WARN_SEC = int(os.getenv("STALL_WARN_SEC","60"))
 _LAST_PROGRESS_TS = time.time()
 _LAST_PROGRESS_TAG = "init"
 _WATCHDOG_ABORT = threading.Event()
 
-# ▶︎ BG 1회 기동 가드 & 실패DB 준비 플래그
 _BG_STARTED = {"meta_fix": False, "failure_train": False, "evo_meta_train": False}
 _FAILURE_DB_READY = False
 
 def _progress(tag:str):
-    """진행 시점 갱신 + 드문 로그(5s). 진행 발생 시 워치독 abort 래치 자동 해제."""
     global _LAST_PROGRESS_TS, _LAST_PROGRESS_TAG
     now = time.time()
-    _LAST_PROGRESS_TS = now
-    _LAST_PROGRESS_TAG = tag
+    _LAST_PROGRESS_TS = now; _LAST_PROGRESS_TAG = tag
     if _WATCHDOG_ABORT.is_set():
         _WATCHDOG_ABORT.clear()
-        _safe_print(f"🟢 [WATCHDOG] abort cleared on progress → {tag}")
+        _safe_print(f"🟢 [WATCHDOG] abort cleared → {tag}")
     if (now % 5.0) < 0.1:
         _safe_print(f"📌 progress: {tag}")
 
 def _watchdog_loop(stop_event: threading.Event | None):
-    """진행이 오래 멈추면 경고 로그(필요 시 abort flag 세팅)."""
     while True:
         if stop_event is not None and stop_event.is_set(): break
-        now = time.time()
-        since = now - _LAST_PROGRESS_TS
+        now = time.time(); since = now - _LAST_PROGRESS_TS
         if since > _STALL_WARN_SEC:
             _safe_print(f"🟡 [WATCHDOG] {since:.0f}s no progress at '{_LAST_PROGRESS_TAG}'")
             if since > _STALL_WARN_SEC * 2:
@@ -96,7 +90,6 @@ def _watchdog_loop(stop_event: threading.Event | None):
         time.sleep(5)
 
 def _reset_watchdog(reason:str):
-    """그룹/심볼 경계 등 안전 구간에서 명시적으로 abort 해제."""
     if _WATCHDOG_ABORT.is_set():
         _WATCHDOG_ABORT.clear()
         _safe_print(f"🟢 [WATCHDOG] abort cleared ({reason})")
@@ -150,16 +143,15 @@ _NUM_WORKERS=int(os.getenv("TRAIN_NUM_WORKERS","0"))
 _PIN_MEMORY=False; _PERSISTENT=False
 
 now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
-training_in_progress={"단기":False,"중기":False,"장기":False}
 
-# ✅ 예측 게이트 전역 임포트 + 폴백
+# ✅ 예측 게이트 폴백
 try:
     from predict import open_predict_gate, close_predict_gate
 except Exception:
     def open_predict_gate(*args, **kwargs): return None
     def close_predict_gate(*args, **kwargs): return None
 
-# ===== 협조적 취소 =====
+# ===== 협조 취소 =====
 class _ControlledStop(Exception): ...
 def _check_stop(ev: threading.Event | None, where:str=""):
     if _WATCHDOG_ABORT.is_set():
@@ -218,7 +210,7 @@ def _save_model_and_meta(model:nn.Module,path_pt:str,meta:dict):
     _atomic_write(stem+".meta.json", json.dumps(meta,ensure_ascii=False,separators=(",",":")), mode="w")
     return weight, stem+".meta.json"
 
-# === ⬇️ 복제 금지 alias 생성기 (hardlink → symlink → skip) ===
+# === 링크/별칭 생성기 ===
 def _safe_alias(src:str,dst:str):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     try:
@@ -227,13 +219,11 @@ def _safe_alias(src:str,dst:str):
     except Exception:
         pass
     try:
-        os.link(src, dst)
-        return "hardlink"
+        os.link(src, dst); return "hardlink"
     except Exception as e_hl:
         try:
             rel = os.path.relpath(src, os.path.dirname(dst))
-            os.symlink(rel, dst)
-            return "symlink"
+            os.symlink(rel, dst); return "symlink"
         except Exception as e_sl:
             _safe_print(f"[ALIAS] link failed → skip copy (dst={dst}) "
                         f"hardlink_err={getattr(e_hl,'__class__',type(e_hl)).__name__} "
@@ -307,8 +297,7 @@ def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0, stop_ev
         q=ctx.Queue(maxsize=1)
         def _worker(q, fn, args, kwargs):
             try:
-                out=fn(*args, **kwargs)
-                q.put(("ok", out))
+                out=fn(*args, **kwargs); q.put(("ok", out))
             except Exception as e:
                 q.put(("err", str(e)))
         p=ctx.Process(target=_worker, args=(q, fn, args, kwargs), daemon=True)
@@ -674,8 +663,7 @@ def _safe_predict_with_timeout(predict_fn,symbol,strategy,source,model_type=None
 def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
     if stop_event is not None and stop_event.is_set():
         _safe_print(f"[SKIP:{name}] stop during reset"); return
-    if _BG_STARTED.get(name, False):
-        return
+    if _BG_STARTED.get(name, False): return
     if name=="failure_train" and not _FAILURE_DB_READY:
         _safe_print("[BG:failure_train] deferred (failure DB not ready yet)")
         return
@@ -687,36 +675,48 @@ def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
 # =========================
 # 🔒 엄격 순서/완결 강제 설정
 # =========================
-_ENFORCE_FULL_STRATEGY = os.getenv("ENFORCE_FULL_STRATEGY","1")=="1"  # 심볼당 3전략 모두 성공해야 완료 처리
-_STRICT_HALT_ON_INCOMPLETE = os.getenv("STRICT_HALT_ON_INCOMPLETE","1")=="1"  # 불완료 심볼 발견 시 그룹 진행 중단
-_SYMBOL_RETRY_LIMIT = int(os.getenv("SYMBOL_RETRY_LIMIT","1"))  # 심볼 단위 재시도 횟수
-_REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = os.getenv("REQUIRE_ONE_PER_GROUP","1")=="1"  # 각 group별 최소 1개 모델 성공
+_ENFORCE_FULL_STRATEGY = os.getenv("ENFORCE_FULL_STRATEGY","1")=="1"
+_STRICT_HALT_ON_INCOMPLETE = os.getenv("STRICT_HALT_ON_INCOMPLETE","1")=="1"
+_SYMBOL_RETRY_LIMIT = int(os.getenv("SYMBOL_RETRY_LIMIT","1"))
+_REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = os.getenv("REQUIRE_ONE_PER_GROUP","1")=="1"
 
 def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) -> tuple[bool, dict]:
     """
+    (핵심) 단기 → 중기 → 장기 순서 고정.
+    앞 전략이 미완료면 뒤 전략 **진입 자체 금지**.
     반환: (symbol_complete, detail)
-      - symbol_complete: 세 전략 모두, 각 그룹마다 최소 1개 모델 성공했는지
-      - detail: { strategy: {gid: bool_success} }
     """
     strategies=["단기","중기","장기"]
     detail={}
     symbol_complete=True
+    # 이전 전략이 완료되었는지 플래그
+    prev_strategy_ok = True
+
     for strategy in strategies:
         if stop_event is not None and stop_event.is_set(): return False, detail
+        if not prev_strategy_ok:
+            _safe_print(f"[ORDER-STOP] 이전 전략 미완료 → {symbol} {strategy} 스킵")
+            detail[strategy] = {-1: False}
+            symbol_complete = False
+            break
+
         try:
             cr=get_class_ranges(symbol=symbol,strategy=strategy)
             if not cr:
                 logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note="클래스 경계 없음",status="skipped")
                 detail[strategy]={-1:False}
                 symbol_complete=False
+                prev_strategy_ok=False
                 continue
+
             num_classes=len(cr); groups=get_class_groups(num_classes=num_classes); max_gid=len(groups)-1
             strat_complete=True; detail[strategy]={}
+
             for gid in range(max_gid+1):
                 if stop_event is not None and stop_event.is_set(): return False, detail
                 try:
                     gr=get_class_ranges(symbol=symbol,strategy=strategy,group_id=gid)
-                except Exception as e:
+                except Exception:
                     gr=None
                 if not gr or len(gr)<2:
                     try:
@@ -739,26 +739,27 @@ def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) ->
 
             if not strat_complete:
                 symbol_complete=False
+                prev_strategy_ok=False
+            else:
+                prev_strategy_ok=True
+
         except Exception as e:
             try:
                 logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note=f"전략 실패: {e}",status="failed")
             except: pass
             detail[strategy]={-1:False}
             symbol_complete=False
+            prev_strategy_ok=False
+
     return symbol_complete, detail
 
 def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_should: bool = False):
     """
-    변경점:
-      - 심볼별로 3전략 * 모든 그룹 학습을 완료해야 다음 심볼로 이동
-      - 불완료 시 재시도(_SYMBOL_RETRY_LIMIT) 후에도 미완료면, 정책에 따라 그룹 진행 중단(_STRICT_HALT_ON_INCOMPLETE)
-      - mark_symbol_trained는 '완료'시에만 호출
-    반환:
-      - completed_symbols: 이번 호출에서 완결된 심볼 리스트
-      - partial_symbols: 일부만 학습된(미완결) 심볼 리스트
+    심볼당:
+      - 단기 완료 → 중기 → 장기.
+      - 중간에 미완료면 재시도 후에도 미완료면 **그 심볼 종료**.
     """
     completed_symbols=[]; partial_symbols=[]
-    strategies=["단기","중기","장기"]
     env_force = (os.getenv("TRAIN_FORCE_IGNORE_SHOULD","0") == "1")
 
     for symbol in symbol_list:
@@ -791,11 +792,10 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
         else:
             partial_symbols.append(symbol)
             if _ENFORCE_FULL_STRATEGY and _STRICT_HALT_ON_INCOMPLETE:
-                _safe_print(f"[HALT] {symbol} 심볼 불완료 → 그룹 진행 중단")
-                # 현재 심볼에서 중단 → 더 이상 진행하지 않음
+                _safe_print(f"[HALT] {symbol} 미완료 → 그룹 진행 중단")
                 break
 
-    # BG 작업 트리거 (원본 유지)
+    # BG 작업 트리거
     try:
         import maintenance_fix_meta
         _run_bg_if_not_stopped("meta_fix", maintenance_fix_meta.fix_all_meta_json, stop_event)
@@ -847,10 +847,8 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 _reset_watchdog(f"enter group {idx}")
 
                 # 🔒 그룹 학습 전에 예측 게이트 닫기
-                try:
-                    close_predict_gate()
-                except Exception as e:
-                    _safe_print(f"[gate pre-close err] {e}")
+                try: close_predict_gate()
+                except Exception as e: _safe_print(f"[gate pre-close err] {e}")
 
                 _safe_print(f"🚀 [group] {idx+1}/{len(groups)} → {group}")
                 _progress(f"group{idx}:start")
