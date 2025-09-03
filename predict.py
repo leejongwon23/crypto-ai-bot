@@ -1,9 +1,19 @@
 # === predict.py — sequence-corrected, gate-respecting, robust I/O ===
+# (2025-09-03) — train.py와 호환: open/close_predict_gate, 게이트 닫힘 시 즉시 반환, 스테일 락 자동 해제
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
 from sklearn.preprocessing import MinMaxScaler
 from data.utils import get_kline_by_strategy, compute_features
+
+__all__ = [
+    "predict",
+    "is_predict_gate_open",
+    "open_predict_gate",
+    "close_predict_gate",
+    "run_evaluation_once",
+    "run_evaluation_loop",
+]
 
 # ====== Gate (학습 블록 종료 시에만 예측 허용) ======
 RUN_DIR = "/persistent/run"; os.makedirs(RUN_DIR, exist_ok=True)
@@ -488,7 +498,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             rate=exp_ret, return_value=0.0,
             source=("진화형" if meta_choice=="evo_meta_learner" else "기본"),
             group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None),
-            feature_vector=feat_row.numpy(),
+            feature_vector=torch.tensor(X[-1], dtype=torch.float32).numpy(),
             regime=regime,
             meta_choice=meta_choice,
             raw_prob=float((chosen or outs[0])["raw_probs"][final_cls]) if (chosen or outs) else None,
@@ -530,7 +540,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     note=json.dumps(note_s, ensure_ascii=False),
                     top_k=top_i, success=False, reason="shadow",
                     rate=exp_i, return_value=0.0, source="섀도우",
-                    group_id=m.get("group_id",0), feature_vector=feat_row.numpy(),
+                    group_id=m.get("group_id",0), feature_vector=torch.tensor(X[-1], dtype=torch.float32).numpy(),
                     regime=regime,
                     meta_choice="shadow",
                     raw_prob=float(m["raw_probs"][pred_i]),
