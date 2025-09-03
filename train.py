@@ -695,6 +695,31 @@ _STRICT_HALT_ON_INCOMPLETE = os.getenv("STRICT_HALT_ON_INCOMPLETE","1")=="1"
 _SYMBOL_RETRY_LIMIT = int(os.getenv("SYMBOL_RETRY_LIMIT","1"))
 _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = os.getenv("REQUIRE_ONE_PER_GROUP","1")=="1"
 
+# === [ADD] gid 학습 직후 "즉시 예측" 강제 함수 ===
+def _predict_immediately_after_gid(symbol:str, strategy:str, gid:int, stop_event: threading.Event | None = None):
+    try:
+        from predict import predict
+    except Exception as e:
+        _safe_print(f"[PREDICT] import fail → {e}")
+        return False
+    # 실제 모델 존재 확인
+    if not _has_model_for(symbol, strategy):
+        _safe_print(f"[PREDICT] skip {symbol}-{strategy}-g{gid} (no model)")
+        return False
+    # 게이트 열고 해당 전략만 예측
+    try:
+        try: open_predict_gate(note=f"gid_{gid}_post_train")
+        except Exception as ge: _safe_print(f"[gate open err] {ge}")
+        ok = _safe_predict_with_timeout(
+            predict, symbol, strategy,
+            source=f"그룹직후(gid={gid})", model_type=None,
+            timeout=_PREDICT_TIMEOUT_SEC, stop_event=stop_event
+        )
+        return ok
+    finally:
+        try: close_predict_gate()
+        except Exception as ge: _safe_print(f"[gate close err] {ge}")
+
 def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) -> tuple[bool, dict]:
     """
     (핵심) 단기 → 중기 → 장기 순서 고정.
@@ -749,6 +774,14 @@ def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) ->
                 detail[strategy][gid]=ok
                 if not ok and _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP:
                     strat_complete=False
+
+                # 🔒 [NEW] 이 지점에서 해당 gid 즉시 예측 강제
+                if ok or (_PREDICT_PARTIAL_OK and _has_model_for(symbol, strategy)):
+                    _safe_print(f"[PREDICT] immediate → {symbol}-{strategy}-g{gid}")
+                    _predict_immediately_after_gid(symbol, strategy, gid, stop_event=stop_event)
+                else:
+                    _safe_print(f"[PREDICT] skip immediate (no ok model) → {symbol}-{strategy}-g{gid}")
+
                 if stop_event is not None and stop_event.is_set(): return False, detail
                 time.sleep(0.05)
 
@@ -874,11 +907,10 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 completed_syms, partial_syms = train_models(group, stop_event=stop_event, ignore_should=force_full_pass)
                 if stop_event is not None and stop_event.is_set(): _safe_print("🛑 stop after train → exit"); break
 
-                # === [MOD] 예측 대상 결정: 완료 + (옵션)부분심볼 허용, 전략별 모델 존재 체크 ===
+                # === [INFO] 이 아래 블록은 '심볼그룹 단위' 일괄 예측(보조). gid별 즉시예측이 이미 수행되므로 중복될 수 있음.
                 predict_candidates = list(completed_syms)
                 if _PREDICT_PARTIAL_OK:
                     predict_candidates += list(partial_syms)
-
                 predict_syms = sorted({s for s in predict_candidates if _has_any_model_for_symbol(s)})
 
                 _safe_print(f"[PREDICT-DECIDE] ready={bool(ready_for_group_predict())} "
@@ -902,7 +934,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                             if stop_event is not None and stop_event.is_set(): break
                             for strategy in ["단기","중기","장기"]:
                                 if stop_event is not None and stop_event.is_set(): break
-                                # 전략별 실제 모델이 있을 때만 예측
                                 if not _has_model_for(symbol, strategy):
                                     continue
                                 _safe_predict_with_timeout(
@@ -927,7 +958,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 _prune_caches_and_gc()
                 _progress(f"group{idx}:done")
 
-                # 심볼 미완료가 있고 중단 정책이면, 남은 그룹 스킵
                 if partial_syms and _ENFORCE_FULL_STRATEGY and _STRICT_HALT_ON_INCOMPLETE:
                     _safe_print(f"[HALT] 그룹 {idx+1}: 미완결 심볼 존재 → 그룹 루프 중단")
                     break
