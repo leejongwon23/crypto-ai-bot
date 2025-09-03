@@ -253,6 +253,7 @@ def _archive_old_checkpoints(symbol:str,strategy:str,model_type:str,keep_n:int=1
         except Exception as e: print(f"[ARCHIVE] {os.path.basename(p)} compress fail → {e}")
 
 _KNOWN_EXTS = (".ptz", ".safetensors", ".pt")
+
 def _has_any_model_for_symbol(symbol: str) -> bool:
     try:
         if any(glob.glob(os.path.join(MODEL_DIR, f"{symbol}_*{ext}")) for ext in _KNOWN_EXTS):
@@ -260,6 +261,20 @@ def _has_any_model_for_symbol(symbol: str) -> bool:
         if os.path.isdir(os.path.join(MODEL_DIR, symbol)):
             if any(glob.glob(os.path.join(MODEL_DIR, symbol, "*", f"*{ext}")) for ext in _KNOWN_EXTS):
                 return True
+    except Exception:
+        pass
+    return False
+
+# === [ADD] 심볼+전략 단위 모델 존재 체크 (부분 예측에 필요) ===
+def _has_model_for(symbol: str, strategy: str) -> bool:
+    try:
+        # 평면 형태
+        if any(glob.glob(os.path.join(MODEL_DIR, f"{symbol}_{strategy}_*{ext}")) for ext in _KNOWN_EXTS):
+            return True
+        # 디렉토리 형태
+        d = os.path.join(MODEL_DIR, symbol, strategy)
+        if os.path.isdir(d) and any(glob.glob(os.path.join(d, f"*{ext}")) for ext in _KNOWN_EXTS):
+            return True
     except Exception:
         pass
     return False
@@ -810,6 +825,9 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
 
     return completed_symbols, partial_symbols
 
+# === 부분 예측 허용 스위치(ENV) ===
+_PREDICT_PARTIAL_OK = os.getenv("PREDICT_PARTIAL_OK", "1") == "1"
+
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None = None):
     threading.Thread(target=_watchdog_loop, args=(stop_event,), daemon=True).start()
     _reset_watchdog("loop start")
@@ -856,11 +874,18 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 completed_syms, partial_syms = train_models(group, stop_event=stop_event, ignore_should=force_full_pass)
                 if stop_event is not None and stop_event.is_set(): _safe_print("🛑 stop after train → exit"); break
 
-                # ✅ 이번 그룹에서 '완결된 심볼'만 예측
-                trained_syms = [s for s in completed_syms if _has_any_model_for_symbol(s)]
-                _safe_print(f"[PREDICT-DECIDE] ready={bool(ready_for_group_predict())} completed_syms={completed_syms} partial_syms={partial_syms} trained_syms={trained_syms}")
+                # === [MOD] 예측 대상 결정: 완료 + (옵션)부분심볼 허용, 전략별 모델 존재 체크 ===
+                predict_candidates = list(completed_syms)
+                if _PREDICT_PARTIAL_OK:
+                    predict_candidates += list(partial_syms)
 
-                if trained_syms:
+                predict_syms = sorted({s for s in predict_candidates if _has_any_model_for_symbol(s)})
+
+                _safe_print(f"[PREDICT-DECIDE] ready={bool(ready_for_group_predict())} "
+                            f"completed_syms={completed_syms} partial_syms={partial_syms} "
+                            f"predict_syms={predict_syms}")
+
+                if predict_syms:
                     time.sleep(0.1)
                     _safe_print(f"[PREDICT] group {idx+1} begin")
                     try:
@@ -873,11 +898,18 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                         except Exception as e:
                             _safe_print(f"[gate open err] {e}")
 
-                        for symbol in trained_syms:
+                        for symbol in predict_syms:
                             if stop_event is not None and stop_event.is_set(): break
                             for strategy in ["단기","중기","장기"]:
                                 if stop_event is not None and stop_event.is_set(): break
-                                _safe_predict_with_timeout(predict, symbol, strategy, source="그룹직후", model_type=None, timeout=_PREDICT_TIMEOUT_SEC, stop_event=stop_event)
+                                # 전략별 실제 모델이 있을 때만 예측
+                                if not _has_model_for(symbol, strategy):
+                                    continue
+                                _safe_predict_with_timeout(
+                                    predict, symbol, strategy,
+                                    source="그룹직후", model_type=None,
+                                    timeout=_PREDICT_TIMEOUT_SEC, stop_event=stop_event
+                                )
                     finally:
                         try:
                             if _close_gate: _close_gate()
@@ -890,7 +922,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                         _safe_print(f"[mark_group_predicted err] {e}")
                     _safe_print(f"[PREDICT] group {idx+1} done")
                 else:
-                    _safe_print(f"[⏸ 대기] 그룹{idx+1} 예측 건 없음(완결 심볼 없음) → 보류")
+                    _safe_print(f"[⏸ 대기] 그룹{idx+1} 예측 건 없음(모델 없음) → 보류")
 
                 _prune_caches_and_gc()
                 _progress(f"group{idx}:done")
