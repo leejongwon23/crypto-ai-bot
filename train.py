@@ -1,4 +1,4 @@
-# === train.py (STRICT: short->mid->long hard order, cooperative cancel, watchdog) ===
+# === train.py (STRICT: short->mid->long hard order, cooperative cancel, watchdog, robust predict barrier) ===
 import os
 def _set_default_thread_env(n: str, v: int):
     if os.getenv(n) is None: os.environ[n] = str(v)
@@ -176,6 +176,28 @@ def _atomic_write(path:str,data,mode="wb"):
             if os.path.exists(tmp): os.remove(tmp)
         except: pass
 
+def _fsync_dir(d: str):
+    try:
+        if not os.path.isdir(d): return
+        fd = os.open(d, os.O_RDONLY)
+        try: os.fsync(fd)
+        finally: os.close(fd)
+    except Exception: pass
+
+def _disk_barrier(paths: list[str]):
+    # 강제 플러시(가능한 경우)
+    for p in paths:
+        try:
+            if os.path.isdir(p):
+                _fsync_dir(p)
+            elif os.path.exists(p):
+                with open(p, "rb") as f:
+                    os.fsync(f.fileno())
+        except Exception: pass
+    try:
+        if hasattr(os, "sync"): os.sync()
+    except Exception: pass
+
 def _log_skip(symbol,strategy,reason):
     logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note=reason,status="skipped")
     insert_failure_record({"symbol":symbol,"strategy":strategy,"model":"all","predicted_class":-1,"success":False,"rate":0.0,"reason":reason},feature_vector=[])
@@ -207,8 +229,11 @@ def _stem(p:str)->str: return os.path.splitext(p)[0]
 
 def _save_model_and_meta(model:nn.Module,path_pt:str,meta:dict):
     stem=_stem(path_pt); weight=stem+".ptz"; save_model(weight, model.state_dict())
-    _atomic_write(stem+".meta.json", json.dumps(meta,ensure_ascii=False,separators=(",",":")), mode="w")
-    return weight, stem+".meta.json"
+    meta_path = stem+".meta.json"
+    _atomic_write(meta_path, json.dumps(meta,ensure_ascii=False,separators=(",",":")), mode="w")
+    # 저장 직후 디스크 배리어
+    _disk_barrier([weight, meta_path, MODEL_DIR])
+    return weight, meta_path
 
 # === 링크/별칭 생성기 ===
 def _safe_alias(src:str,dst:str):
@@ -218,17 +243,23 @@ def _safe_alias(src:str,dst:str):
             os.remove(dst)
     except Exception:
         pass
+    # 하드링크/심링크 실패시 복사로 폴백(신뢰성 우선)
     try:
-        os.link(src, dst); return "hardlink"
-    except Exception as e_hl:
+        os.link(src, dst); mode="hardlink"
+    except Exception:
         try:
             rel = os.path.relpath(src, os.path.dirname(dst))
-            os.symlink(rel, dst); return "symlink"
-        except Exception as e_sl:
-            _safe_print(f"[ALIAS] link failed → skip copy (dst={dst}) "
-                        f"hardlink_err={getattr(e_hl,'__class__',type(e_hl)).__name__} "
-                        f"symlink_err={getattr(e_sl,'__class__',type(e_sl)).__name__}")
-            return "skip"
+            os.symlink(rel, dst); mode="symlink"
+        except Exception:
+            try:
+                if os.getenv("ALIAS_COPY_FALLBACK","1")=="1":
+                    shutil.copy2(src, dst); mode="copy"
+                else:
+                    _safe_print(f"[ALIAS] link failed → skip copy (dst={dst})"); return "skip"
+            except Exception as e:
+                _safe_print(f"[ALIAS] link/copy failed → {e} (dst={dst})"); return "skip"
+    _disk_barrier([dst, os.path.dirname(dst)])
+    return mode
 
 def _emit_aliases(model_path:str, meta_path:str, symbol:str, strategy:str, model_type:str):
     ext=os.path.splitext(model_path)[1]
@@ -278,6 +309,23 @@ def _has_model_for(symbol: str, strategy: str) -> bool:
     except Exception:
         pass
     return False
+
+# === [NEW] 예측 전 모델 가시화 보장 대기 ===
+def _await_models_visible(symbols:list[str], timeout_sec:int=20, poll_sec:float=0.5) -> list[str]:
+    """학습 직후 파일시스템 전파/동기화 지연 대비: 모델이 보일 때까지 대기."""
+    deadline = time.time() + max(1, int(timeout_sec))
+    remaining = set(symbols or [])
+    last_report = 0.0
+    while remaining and time.time() < deadline:
+        ready = [s for s in list(remaining) if _has_any_model_for_symbol(s)]
+        for s in ready:
+            remaining.discard(s)
+        now = time.time()
+        if now - last_report > 2.5:
+            _safe_print(f"[AWAIT] models visible check — ready:{sorted(set(symbols)-remaining)} pending:{sorted(remaining)}")
+            last_report = now
+        time.sleep(max(0.1, float(poll_sec)))
+    return sorted(set(symbols) - remaining)
 
 if _HAS_LIGHTNING:
     class LitSeqModel(pl.LightningModule):
@@ -600,6 +648,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             _archive_old_checkpoints(symbol,strategy,model_type,keep_n=1)
             _emit_aliases(wpath,mpath,symbol,strategy,model_type)
 
+            # 모델 가시화 보조 배리어
+            _disk_barrier([wpath, mpath, MODEL_DIR, os.path.join(MODEL_DIR, symbol), os.path.join(MODEL_DIR, symbol, strategy)])
+
             logger.log_training_result(symbol, strategy, model=os.path.basename(wpath), accuracy=acc, f1=f1, loss=float(total_loss),
                 note=(f"train_one_model(window={window}, cap={len(feat_scaled)}, engine={'lightning' if _HAS_LIGHTNING else 'manual'}, data_flags={{rows:{len(df)},limit:{_limit},min:{_min_required},aug:{int(augment_needed)},enough_for_training:{int(enough_for_training)}}})"),
                 source_exchange="BYBIT", status="success")
@@ -695,31 +746,6 @@ _STRICT_HALT_ON_INCOMPLETE = os.getenv("STRICT_HALT_ON_INCOMPLETE","1")=="1"
 _SYMBOL_RETRY_LIMIT = int(os.getenv("SYMBOL_RETRY_LIMIT","1"))
 _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = os.getenv("REQUIRE_ONE_PER_GROUP","1")=="1"
 
-# === [ADD] gid 학습 직후 "즉시 예측" 강제 함수 ===
-def _predict_immediately_after_gid(symbol:str, strategy:str, gid:int, stop_event: threading.Event | None = None):
-    try:
-        from predict import predict
-    except Exception as e:
-        _safe_print(f"[PREDICT] import fail → {e}")
-        return False
-    # 실제 모델 존재 확인
-    if not _has_model_for(symbol, strategy):
-        _safe_print(f"[PREDICT] skip {symbol}-{strategy}-g{gid} (no model)")
-        return False
-    # 게이트 열고 해당 전략만 예측
-    try:
-        try: open_predict_gate(note=f"gid_{gid}_post_train")
-        except Exception as ge: _safe_print(f"[gate open err] {ge}")
-        ok = _safe_predict_with_timeout(
-            predict, symbol, strategy,
-            source=f"그룹직후(gid={gid})", model_type=None,
-            timeout=_PREDICT_TIMEOUT_SEC, stop_event=stop_event
-        )
-        return ok
-    finally:
-        try: close_predict_gate()
-        except Exception as ge: _safe_print(f"[gate close err] {ge}")
-
 def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) -> tuple[bool, dict]:
     """
     (핵심) 단기 → 중기 → 장기 순서 고정.
@@ -729,7 +755,6 @@ def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) ->
     strategies=["단기","중기","장기"]
     detail={}
     symbol_complete=True
-    # 이전 전략이 완료되었는지 플래그
     prev_strategy_ok = True
 
     for strategy in strategies:
@@ -774,14 +799,6 @@ def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) ->
                 detail[strategy][gid]=ok
                 if not ok and _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP:
                     strat_complete=False
-
-                # 🔒 [NEW] 이 지점에서 해당 gid 즉시 예측 강제
-                if ok or (_PREDICT_PARTIAL_OK and _has_model_for(symbol, strategy)):
-                    _safe_print(f"[PREDICT] immediate → {symbol}-{strategy}-g{gid}")
-                    _predict_immediately_after_gid(symbol, strategy, gid, stop_event=stop_event)
-                else:
-                    _safe_print(f"[PREDICT] skip immediate (no ok model) → {symbol}-{strategy}-g{gid}")
-
                 if stop_event is not None and stop_event.is_set(): return False, detail
                 time.sleep(0.05)
 
@@ -898,7 +915,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 _reset_watchdog(f"enter group {idx}")
 
                 # 🔒 그룹 학습 전에 예측 게이트 닫기
-                try: close_predict_gate()
+                try: close_predict_gate(note=f"group_{idx+1}_train")
                 except Exception as e: _safe_print(f"[gate pre-close err] {e}")
 
                 _safe_print(f"🚀 [group] {idx+1}/{len(groups)} → {group}")
@@ -907,45 +924,51 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 completed_syms, partial_syms = train_models(group, stop_event=stop_event, ignore_should=force_full_pass)
                 if stop_event is not None and stop_event.is_set(): _safe_print("🛑 stop after train → exit"); break
 
-                # === [INFO] 이 아래 블록은 '심볼그룹 단위' 일괄 예측(보조). gid별 즉시예측이 이미 수행되므로 중복될 수 있음.
+                # === 예측 대상 결정 ===
                 predict_candidates = list(completed_syms)
                 if _PREDICT_PARTIAL_OK:
                     predict_candidates += list(partial_syms)
-                predict_syms = sorted({s for s in predict_candidates if _has_any_model_for_symbol(s)})
+
+                # 🔐 모델 가시화 보장(파일시스템 동기화 지연 방지)
+                visible_syms = _await_models_visible(predict_candidates, timeout_sec=int(os.getenv("PREDICT_MODEL_AWAIT_SEC","20")))
+                if not visible_syms:
+                    _safe_print(f"[⏸ 대기] 그룹{idx+1} — 학습심볼은 있으나 모델 파일이 아직 보이지 않음 → 예측 보류 "
+                                f"(candidates={sorted(set(predict_candidates))})")
+                # 실제 예측에 쓸 심볼(모델 존재하는 것만)
+                predict_syms = sorted({s for s in visible_syms if _has_any_model_for_symbol(s)})
 
                 _safe_print(f"[PREDICT-DECIDE] ready={bool(ready_for_group_predict())} "
                             f"completed_syms={completed_syms} partial_syms={partial_syms} "
-                            f"predict_syms={predict_syms}")
+                            f"visible_syms={predict_syms}")
 
                 if predict_syms:
-                    time.sleep(0.1)
-                    _safe_print(f"[PREDICT] group {idx+1} begin")
+                    # 게이트 열기
                     try:
-                        from predict import open_predict_gate as _open_gate, close_predict_gate as _close_gate
-                    except Exception:
-                        _open_gate = None; _close_gate = None
-                    try:
-                        try:
-                            if _open_gate: _open_gate(note=f"group_{idx+1}_start")
-                        except Exception as e:
-                            _safe_print(f"[gate open err] {e}")
+                        open_predict_gate(note=f"group_{idx+1}_start")
+                    except Exception as e:
+                        _safe_print(f"[gate open err] {e}")
 
-                        for symbol in predict_syms:
+                    time.sleep(0.5)  # 게이트 파일 반영 여유
+
+                    _safe_print(f"[PREDICT] group {idx+1} begin")
+                    for symbol in predict_syms:
+                        if stop_event is not None and stop_event.is_set(): break
+                        for strategy in ["단기","중기","장기"]:
                             if stop_event is not None and stop_event.is_set(): break
-                            for strategy in ["단기","중기","장기"]:
-                                if stop_event is not None and stop_event.is_set(): break
-                                if not _has_model_for(symbol, strategy):
-                                    continue
-                                _safe_predict_with_timeout(
-                                    predict, symbol, strategy,
-                                    source="그룹직후", model_type=None,
-                                    timeout=_PREDICT_TIMEOUT_SEC, stop_event=stop_event
-                                )
-                    finally:
-                        try:
-                            if _close_gate: _close_gate()
-                        except Exception as e:
-                            _safe_print(f"[gate close err] {e}")
+                            # 전략별 모델이 있을 때만 예측
+                            if not _has_model_for(symbol, strategy):
+                                _safe_print(f"[PREDICT-SKIP] {symbol}-{strategy}: 모델 없음(전략별)")
+                                continue
+                            _safe_predict_with_timeout(
+                                predict, symbol, strategy,
+                                source="그룹직후", model_type=None,
+                                timeout=_PREDICT_TIMEOUT_SEC, stop_event=stop_event
+                            )
+                    # 게이트 닫기
+                    try:
+                        close_predict_gate(note=f"group_{idx+1}_end")
+                    except Exception as e:
+                        _safe_print(f"[gate close err] {e}")
 
                     try:
                         mark_group_predicted()
@@ -953,11 +976,12 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                         _safe_print(f"[mark_group_predicted err] {e}")
                     _safe_print(f"[PREDICT] group {idx+1} done")
                 else:
-                    _safe_print(f"[⏸ 대기] 그룹{idx+1} 예측 건 없음(모델 없음) → 보류")
+                    _safe_print(f"[⏸ 대기] 그룹{idx+1} 예측 건 없음(모델 미가시화/미존재) → 보류")
 
                 _prune_caches_and_gc()
                 _progress(f"group{idx}:done")
 
+                # 심볼 미완료가 있고 중단 정책이면, 남은 그룹 스킵
                 if partial_syms and _ENFORCE_FULL_STRATEGY and _STRICT_HALT_ON_INCOMPLETE:
                     _safe_print(f"[HALT] 그룹 {idx+1}: 미완결 심볼 존재 → 그룹 루프 중단")
                     break
