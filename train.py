@@ -1,11 +1,11 @@
-# === train.py (STRICT: short->mid->long hard order, cooperative cancel, watchdog, robust predict barrier) ===
+# === train.py (STRICT: short->mid->long hard order, cooperative cancel, watchdog, robust predict barrier + SMOKE PREDICT) ===
 import os
 def _set_default_thread_env(n: str, v: int):
     if os.getenv(n) is None: os.environ[n] = str(v)
 for _n in ("OMP_NUM_THREADS","MKL_NUM_THREADS","OPENBLAS_NUM_THREADS","NUMEXPR_NUM_THREADS","VECLIB_MAXIMUM_THREADS","BLIS_NUM_THREADS","TORCH_NUM_THREADS"):
     _set_default_thread_env(_n, int(os.getenv("CPU_THREAD_CAP","2")))
 
-import json, time, tempfile, glob, shutil, gc, threading, traceback
+import json, time, tempfile, glob, shutil, gc, threading, traceback, re
 from datetime import datetime
 import pytz, numpy as np, pandas as pd
 import torch, torch.nn as nn
@@ -126,7 +126,7 @@ def _maybe_run_failure_learn(background=True):
             try:
                 fn=getattr(failure_learn,name,None)
                 if callable(fn): fn(); _safe_print(f"[FAIL-LEARN] {name} done"); return
-            except Exception as e: _safe_print(f"[FAIL-LEARN] {name} err] {e}")
+            except Exception as e: _safe_print(f"[FAIL-LEARN] {name} err → {e}")
         _safe_print("[FAIL-LEARN] no API]")
     (threading.Thread(target=_job,daemon=True).start() if background else _job())
 try: _maybe_run_failure_learn(True)
@@ -915,6 +915,36 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
 
     return completed_symbols, partial_symbols
 
+# === [SMOKE] 후보 찾기 & 스모크 예측 유틸 ===
+def _scan_symbols_from_model_dir() -> list[str]:
+    syms=set()
+    try:
+        # flat files
+        for p in glob.glob(os.path.join(MODEL_DIR, f"*_*_*.*")):
+            b=os.path.basename(p)
+            m=re.match(r"^([A-Z0-9]+)_[^_]+_", b)
+            if m: syms.add(m.group(1))
+        # tree dirs
+        for d in glob.glob(os.path.join(MODEL_DIR, "*")):
+            if os.path.isdir(d):
+                syms.add(os.path.basename(d))
+    except Exception: pass
+    return sorted(syms)
+
+def _pick_smoke_symbol(candidates:list[str]) -> str|None:
+    cand = [s for s in candidates if _has_any_model_for_symbol(s)]
+    if cand: return sorted(cand)[0]
+    pool=_scan_symbols_from_model_dir()
+    pool=[s for s in pool if _has_any_model_for_symbol(s)]
+    return pool[0] if pool else None
+
+def _run_smoke_predict(predict_fn, symbol: str):
+    ok_any=False
+    for strat in ["단기","중기","장기"]:
+        if _has_model_for(symbol, strat):
+            ok_any |= _safe_predict_sync(predict_fn, symbol, strat, source="그룹직후(스모크)")
+    return ok_any
+
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None = None):
     threading.Thread(target=_watchdog_loop, args=(stop_event,), daemon=True).start()
     _reset_watchdog("loop start")
@@ -967,7 +997,8 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                     predict_candidates += list(partial_syms)
 
                 # 🔐 모델 가시화 보장(파일시스템 동기화 지연 방지)
-                visible_syms = _await_models_visible(predict_candidates, timeout_sec=int(os.getenv("PREDICT_MODEL_AWAIT_SEC","20")))
+                await_sec_default = int(os.getenv("PREDICT_MODEL_AWAIT_SEC","60"))  # ⬅ 기본 60초로 상향
+                visible_syms = _await_models_visible(predict_candidates, timeout_sec=await_sec_default)
                 if not visible_syms:
                     _safe_print(f"[⏸ 대기] 그룹{idx+1} — 학습심볼은 있으나 모델 파일이 아직 보이지 않음 → 예측 보류 "
                                 f"(candidates={sorted(set(predict_candidates))})")
@@ -977,6 +1008,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                             f"completed_syms={completed_syms} partial_syms={partial_syms} "
                             f"visible_syms={predict_syms}")
 
+                ran_any=False
                 if predict_syms:
                     # 🧹 예측 시작 전: 남아있을 수 있는 전역 락 정리/대기
                     _wait_predict_lock_clear(
@@ -984,14 +1016,10 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                         stale_sec=int(os.getenv("PREDICT_LOCK_STALE_TRAIN_SEC","120")),
                         tag=f"group_{idx+1}:pre-open"
                     )
-
                     # 게이트 열기 (우리 예측 시작)
-                    try:
-                        open_predict_gate(note=f"group_{idx+1}_start")
-                    except Exception as e:
-                        _safe_print(f"[gate open err] {e}")
-
-                    time.sleep(0.5)  # 게이트 파일 반영 여유
+                    try: open_predict_gate(note=f"group_{idx+1}_start")
+                    except Exception as e: _safe_print(f"[gate open err] {e}")
+                    time.sleep(0.5)
 
                     _safe_print(f"[PREDICT] group {idx+1} begin")
                     for symbol in predict_syms:
@@ -1001,33 +1029,51 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                             if not _has_model_for(symbol, strategy):
                                 _safe_print(f"[PREDICT-SKIP] {symbol}-{strategy}: 모델 없음(전략별)")
                                 continue
-                            # 🔁 동기 예측 (락 점유/해제 명확)
-                            _safe_predict_sync(
+                            ran_any |= _safe_predict_sync(
                                 predict, symbol, strategy,
                                 source="그룹직후", model_type=None,
                                 stop_event=stop_event
                             )
-
-                    # 게이트 닫기
-                    try:
-                        close_predict_gate(note=f"group_{idx+1}_end")
-                    except Exception as e:
-                        _safe_print(f"[gate close err] {e}")
-
-                    # 종료 후 혹시 남은 락이 있으면 정리
+                    # 게이트 닫기 + 락 정리 + 마킹
+                    try: close_predict_gate(note=f"group_{idx+1}_end")
+                    except Exception as e: _safe_print(f"[gate close err] {e}")
                     _wait_predict_lock_clear(
                         timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_POST_SEC","10")),
                         stale_sec=int(os.getenv("PREDICT_LOCK_STALE_TRAIN_SEC","120")),
                         tag=f"group_{idx+1}:post-close"
                     )
-
-                    try:
-                        mark_group_predicted()
-                    except Exception as e:
-                        _safe_print(f"[mark_group_predicted err] {e}")
+                    try: mark_group_predicted()
+                    except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
                     _safe_print(f"[PREDICT] group {idx+1} done")
-                else:
-                    _safe_print(f"[⏸ 대기] 그룹{idx+1} 예측 건 없음(모델 미가시화/미존재) → 보류")
+
+                # ⛑ 스모크 폴백: 예측을 한 건도 못 돌렸다면 최소 1건 보장
+                if not ran_any:
+                    cand_symbol = _pick_smoke_symbol(predict_candidates)
+                    if cand_symbol:
+                        _safe_print(f"[SMOKE] no visible syms → fallback predict for {cand_symbol}")
+                        # 동일한 게이트/락 프로토콜로 실행
+                        _wait_predict_lock_clear(
+                            timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_PREOPEN_SEC","15")),
+                            stale_sec=int(os.getenv("PREDICT_LOCK_STALE_TRAIN_SEC","120")),
+                            tag=f"group_{idx+1}:smoke-pre"
+                        )
+                        try: open_predict_gate(note=f"group_{idx+1}_smoke_start")
+                        except Exception as e: _safe_print(f"[gate open err] {e}")
+                        time.sleep(0.3)
+                        try:
+                            ran_any = _run_smoke_predict(predict, cand_symbol)
+                        finally:
+                            try: close_predict_gate(note=f"group_{idx+1}_smoke_end")
+                            except Exception as e: _safe_print(f"[gate close err] {e}")
+                            _wait_predict_lock_clear(
+                                timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_POST_SEC","10")),
+                                stale_sec=int(os.getenv("PREDICT_LOCK_STALE_TRAIN_SEC","120")),
+                                tag=f"group_{idx+1}:smoke-post"
+                            )
+                            try: mark_group_predicted()
+                            except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
+                    else:
+                        _safe_print(f"[SMOKE] fallback symbol not found → skip")
 
                 _prune_caches_and_gc()
                 _progress(f"group{idx}:done")
