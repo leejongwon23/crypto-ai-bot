@@ -1,5 +1,6 @@
 # === predict.py — sequence-corrected, gate-respecting, robust I/O ===
 # (2025-09-03) — train.py와 호환: open/close_predict_gate, 게이트 닫힘 시 즉시 반환, 스테일 락 자동 해제
+# (2025-09-04) — [수정] predict 락 즉시실패 → 짧은 대기·재시도 후 실패 처리
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -319,6 +320,20 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         print(f"[failed_result insert_failure_record 오류] {e}")
     return res
 
+# 🆕 락 재시도 헬퍼
+def _acquire_predict_lock_with_retry():
+    """
+    현재 락이 있으면 3~15초 사이 랜덤 대기하며 재시도.
+    (환경변수 PREDICT_LOCK_WAIT_MAX_SEC 로 상한 조정 가능, 기본 15)
+    """
+    max_wait = int(os.getenv("PREDICT_LOCK_WAIT_MAX_SEC", "15"))
+    deadline = time.time() + max(1, max_wait)
+    while time.time() < deadline:
+        if _acquire_predict_lock():
+            return True
+        time.sleep(random.uniform(0.5, 2.0))
+    return False
+
 # ====== 핵심: 예측 ======
 def predict(symbol, strategy, source="일반", model_type=None):
     # 0) 게이트/락
@@ -326,9 +341,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
     if not is_predict_gate_open():
         return failed_result(symbol or "None", strategy or "None", reason="predict_gate_closed", X_input=None)
 
-    if not _acquire_predict_lock():
-        # 락이 잡혀있으면 중복 실행 방지. 실패 레코드만.
-        return failed_result(symbol or "None", strategy or "None", reason="predict_already_running", X_input=None)
+    # 🔒 락: 즉시 실패 → 짧은 대기·재시도 후 실패로 변경
+    if not _acquire_predict_lock_with_retry():
+        return failed_result(symbol or "None", strategy or "None", reason="predict_lock_timeout", X_input=None)
 
     # 🫀 하트비트 시작
     _hb_stop = threading.Event()
