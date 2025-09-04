@@ -1,6 +1,7 @@
 # === predict.py — sequence-corrected, gate-respecting, robust I/O ===
 # (2025-09-03) — train.py와 호환: open/close_predict_gate, 게이트 닫힘 시 즉시 반환, 스테일 락 자동 해제
 # (2025-09-04) — [수정] predict 락 즉시실패 → 짧은 대기·재시도 후 실패 처리
+# (2025-09-04b) — [보강] gate/lock 파일 write 후 flush+fsync로 가시화 보장
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -39,8 +40,8 @@ def is_predict_gate_open():
             return False
         if os.path.exists(PREDICT_BLOCK):
             return False
-        if os.path.exists(PREDICT_GATE):
-            with open(PREDICT_GATE, "r", encoding="utf-8") as f:
+        if os.path.exists(PEDICT_GATE:=PREDICT_GATE):  # local alias to avoid typos later
+            with open(PEDICT_GATE, "r", encoding="utf-8") as f:
                 o = json.load(f)
             return bool(o.get("open", True))
         return True
@@ -51,6 +52,8 @@ def open_predict_gate(note=""):
     try:
         with open(PREDICT_GATE, "w", encoding="utf-8") as f:
             json.dump({"open": True, "opened_at": _now_kst().isoformat(), "note": note}, f, ensure_ascii=False)
+            try: f.flush(); os.fsync(f.fileno())
+            except Exception: pass
         # 안전: block 파일이 있으면 제거
         if os.path.exists(PREDICT_BLOCK):
             try: os.remove(PREDICT_BLOCK)
@@ -63,8 +66,15 @@ def close_predict_gate(note=""):
     try:
         with open(PREDICT_GATE, "w", encoding="utf-8") as f:
             json.dump({"open": False, "closed_at": _now_kst().isoformat(), "note": note}, f, ensure_ascii=False)
+            try: f.flush(); os.fsync(f.fileno())
+            except Exception: pass
         # block 존재 보장(외부 트리거 차단)
-        open(PREDICT_BLOCK, "a").close()
+        try:
+            with open(PREDICT_BLOCK, "a") as bf:
+                try: bf.flush(); os.fsync(bf.fileno())
+                except Exception: pass
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -94,6 +104,8 @@ def _acquire_predict_lock():
         fd = os.open(PREDICT_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         with os.fdopen(fd, "w") as f:
             f.write(json.dumps({"pid": os.getpid(), "ts": _now_kst().isoformat()}, ensure_ascii=False))
+            try: f.flush(); os.fsync(f.fileno())
+            except Exception: pass
         return True
     except FileExistsError:
         return False
@@ -501,7 +513,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "explore_used": ("best_single_explore" in str(meta_choice)),
         }
         ensure_prediction_log_exists()
-        # ✅ 개별 컬럼(regime/meta_choice/raw_prob/calib_prob/calib_ver)로도 기록
         log_prediction(
             symbol=symbol, strategy=strategy, direction="예측",
             entry_price=entry, target_price=entry*(1+exp_ret),
