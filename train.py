@@ -126,7 +126,7 @@ def _maybe_run_failure_learn(background=True):
             try:
                 fn=getattr(failure_learn,name,None)
                 if callable(fn): fn(); _safe_print(f"[FAIL-LEARN] {name} done"); return
-            except Exception as e: _safe_print(f"[FAIL-LEARN] {name} err → {e}")
+            except Exception as e: _safe_print(f"[FAIL-LEARN] {name} err] {e}")
         _safe_print("[FAIL-LEARN] no API]")
     (threading.Thread(target=_job,daemon=True).start() if background else _job())
 try: _maybe_run_failure_learn(True)
@@ -750,6 +750,21 @@ def _safe_predict_sync(predict_fn,symbol,strategy,source,model_type=None, stop_e
     except Exception as e:
         _safe_print(f"[PREDICT FAIL] {symbol}-{strategy}: {e}")
         return False
+
+# === [ADD] predict_trigger가 사용할 (옵션) 타임아웃 래퍼 익스포트 ===
+def _safe_predict_with_timeout(predict_fn, *, symbol, strategy, source="그룹직후", model_type=None, timeout=None):
+    """
+    predict_trigger.py가 존재하면 가져다 씀. 없으면 무시됨(옵션).
+    내부 predict()는 자체 락/게이트를 준수함.
+    반환: True(성공) / False(타임아웃·에러·취소)
+    """
+    t = float(timeout or _PREDICT_TIMEOUT_SEC)
+    status, _ = _run_with_timeout(
+        lambda: predict_fn(symbol, strategy, source=source, model_type=model_type),
+        args=(), kwargs={}, timeout_sec=t, stop_event=None,
+        hb_tag="predict:wait", hb_interval=2.0
+    )
+    return status == "ok"
 
 def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
     if stop_event is not None and stop_event.is_set():
