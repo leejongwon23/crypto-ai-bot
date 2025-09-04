@@ -1,4 +1,4 @@
-# === predict_trigger.py (MEM-SAFE FINAL+ — lock-aware, timeout safe, freq & diversity, unified symbols) ===
+# === predict_trigger.py (MEM-SAFE FINAL++ — gate/lock aware, stale lock cleanup, timeout-safe, freq & diversity) ===
 import os
 import time
 import traceback
@@ -22,7 +22,7 @@ try:
 except Exception:
     _LOCK_PATH = "/persistent/locks/train_or_predict.lock"
 
-# ✅ 그룹예측 게이트/락 준수 (predict.py와 합의된 경로)
+# ✅ 그룹예측 게이트/락 (predict.py와 합의된 경로)
 PREDICT_BLOCK = "/persistent/predict.block"
 PREDICT_RUN_LOCK = "/persistent/run/predict_running.lock"
 
@@ -39,16 +39,15 @@ except Exception:
     def get_calibration_version():
         return "none"
 
-# ▷ (옵션) 예측 실행 타임아웃(있으면 사용)
+# ▷ (옵션) 예측 실행 타임아웃(있으면 사용) — train.py에서 제공
 _safe_predict_with_timeout = None
 try:
-    # 순환 의존 없음(train은 predict_trigger를 import하지 않음)
     from train import _safe_predict_with_timeout as __t_safe
     _safe_predict_with_timeout = __t_safe
 except Exception:
     _safe_predict_with_timeout = None
 
-# ▷ 게이트 상태 확인 API (있으면 사용)
+# ▷ (옵션) 게이트 상태 확인 API (predict.py)
 _is_gate_open = None
 try:
     from predict import is_predict_gate_open as __is_open
@@ -65,8 +64,49 @@ CSV_CHUNKSIZE = max(10000, int(os.getenv("TRIGGER_CSV_CHUNKSIZE", "50000")))
 TRIGGER_MAX_PER_RUN = max(1, int(os.getenv("TRIGGER_MAX_PER_RUN", "999")))  # 1회 루프에서 최대 실행 수
 PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC", "30"))         # _safe_predict_with_timeout이 없을 때만 사용
 
+# 🔧 stale lock(고아 락) 처리 임계
+PREDICT_LOCK_STALE_TRIGGER_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRIGGER_SEC", "120"))
+
 last_trigger_time = {}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
+
+# ──────────────────────────────────────────────────────────────
+# 유틸: 게이트/락, stale lock 정리
+# ──────────────────────────────────────────────────────────────
+def _gate_closed() -> bool:
+    """그룹 예측 중에는 조용히 스킵(실제 예측 호출 자체를 피함)."""
+    try:
+        if os.path.exists(PREDICT_BLOCK):
+            return True
+        if _is_gate_open is not None and (not _is_gate_open()):
+            return True
+    except Exception:
+        pass
+    return False
+
+def _predict_busy() -> bool:
+    """동시에 predict가 이미 돌고 있으면 조용히 스킵."""
+    try:
+        return os.path.exists(PREDICT_RUN_LOCK)
+    except Exception:
+        return False
+
+def _is_stale_lock(path: str, ttl_sec: int) -> bool:
+    try:
+        if not os.path.exists(path): return False
+        mtime = os.path.getmtime(path)
+        return (time.time() - float(mtime)) > max(30, int(ttl_sec))
+    except Exception:
+        return False
+
+def _clear_stale_predict_lock(ttl_sec: int):
+    """오래된 고아 락 자동 제거(예: 이전 예측 중 비정상 종료)."""
+    try:
+        if _is_stale_lock(PREDICT_RUN_LOCK, ttl_sec):
+            os.remove(PREDICT_RUN_LOCK)
+            print(f"[LOCK] stale predict lock removed (> {ttl_sec}s)")
+    except Exception as e:
+        print(f"[LOCK] stale cleanup error: {e}")
 
 # ──────────────────────────────────────────────────────────────
 # 전조 조건(메모리/연산 예산 보호 포함)
@@ -126,33 +166,20 @@ def check_model_quality(symbol, strategy):
 # ──────────────────────────────────────────────────────────────
 # 트리거 실행 루프(락/쿨다운/최대 실행 수/타임아웃 지원)
 # ──────────────────────────────────────────────────────────────
-def _gate_closed() -> bool:
-    """그룹 예측 중에는 조용히 스킵(실제 예측 호출 자체를 피함)."""
-    try:
-        if os.path.exists(PREDICT_BLOCK):
-            return True
-        if _is_gate_open is not None and (not _is_gate_open()):
-            return True
-    except Exception:
-        pass
-    return False
-
-def _predict_busy() -> bool:
-    """동시에 predict가 이미 돌고 있으면 조용히 스킵."""
-    try:
-        return os.path.exists(PREDICT_RUN_LOCK)
-    except Exception:
-        return False
-
 def run():
     # 전역 락이면 전체 스킵
     if _LOCK_PATH and os.path.exists(_LOCK_PATH):
         print(f"[트리거] 전역 락 감지({_LOCK_PATH}) → 전체 스킵 @ {now_kst().isoformat()}")
         return
-    # 그룹 예측 게이트 닫힘이면 전체 스킵
+
+    # 예측 고아 락 정리(있다면)
+    _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
+
+    # 게이트 닫힘이면 전체 스킵(그룹 학습/예측 중일 수 있음)
     if _gate_closed():
-        print(f"[트리거] 그룹 예측 진행 중(게이트 닫힘) → 스킵 @ {now_kst().isoformat()}")
+        print(f"[트리거] 게이트 닫힘(그룹 예측 진행 중) → 스킵 @ {now_kst().isoformat()}")
         return
+
     # 이미 예측 중이면 스킵(중복 실행 방지)
     if _predict_busy():
         print(f"[트리거] 예측 실행 중(lock) → 스킵 @ {now_kst().isoformat()}")
@@ -189,11 +216,12 @@ def run():
                 print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
                 return
 
-            # 실행 중간에도 게이트 닫힘/락이 걸리면 조용히 중단
+            # 실행 중간에도 락/게이트 상태 변하면 조용히 종료
             if _LOCK_PATH and os.path.exists(_LOCK_PATH):
                 print(f"[트리거] 실행 중 전역 락 감지 → 중단")
                 print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
                 return
+            _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
             if _gate_closed() or _predict_busy():
                 print(f"[트리거] 게이트 닫힘/예측 중 → 스킵")
                 return
@@ -227,7 +255,7 @@ def run():
                     print(f"[✅ 트리거 포착] {symbol} - {strategy} → 예측 실행")
 
                     try:
-                        # 타임아웃 안전 호출
+                        # 타임아웃 안전 호출 (train.py 제공 시)
                         if _safe_predict_with_timeout:
                             ok = _safe_predict_with_timeout(
                                 predict_fn=_predict,
@@ -240,7 +268,7 @@ def run():
                             if not ok:
                                 raise RuntimeError("predict timeout/failed")
                         else:
-                            # 폴백: 직접 호출(타임아웃 미지원)
+                            # 폴백: 직접 호출(타임아웃 미지원, predict.py 내부에서 gate/lock/heartbeat 처리)
                             _predict(symbol, strategy, source="변동성")
 
                         last_trigger_time[key] = now
