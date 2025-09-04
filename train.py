@@ -701,30 +701,55 @@ def _is_cold_start()->bool:
     except Exception:
         return True
 
+# === [NEW] 전역 예측 락 대기/정리 유틸 ===
+_PREDICT_LOCK_FILE = "/persistent/run/predict_running.lock"
+def _predict_lock_exists()->bool:
+    try: return os.path.exists(_PREDICT_LOCK_FILE)
+    except: return False
+
+def _predict_lock_is_stale(stale_sec:int)->bool:
+    try:
+        if not os.path.exists(_PREDICT_LOCK_FILE): return False
+        m = os.path.getmtime(_PREDICT_LOCK_FILE)
+        return (time.time() - float(m)) > max(10, int(stale_sec))
+    except: return False
+
+def _clear_predict_lock(force:bool=False, stale_sec:int=120, tag:str=""):
+    try:
+        if not _predict_lock_exists(): return
+        if force or _predict_lock_is_stale(stale_sec):
+            os.remove(_PREDICT_LOCK_FILE)
+            _safe_print(f"[LOCK] cleared predict lock (force={int(force)} stale>{stale_sec}s) {tag}")
+    except Exception as e:
+        _safe_print(f"[LOCK] clear fail → {e} {tag}")
+
+def _wait_predict_lock_clear(timeout_sec:int=20, stale_sec:int=120, poll:float=0.25, tag:str=""):
+    deadline = time.time() + max(1, int(timeout_sec))
+    while _predict_lock_exists() and time.time() < deadline:
+        if _predict_lock_is_stale(stale_sec):
+            _clear_predict_lock(force=True, stale_sec=stale_sec, tag=tag)
+            break
+        time.sleep(max(0.05, float(poll)))
+    if _predict_lock_exists():
+        # 마지막 시도: 아주 짧게라도 강제 해제(훈련 사이클 독점 보장 목적)
+        _clear_predict_lock(force=True, stale_sec=stale_sec, tag=f"{tag}|final")
+    return not _predict_lock_exists()
+
+# === 부분 예측 허용 스위치(ENV) ===
+_PREDICT_PARTIAL_OK = os.getenv("PREDICT_PARTIAL_OK", "1") == "1"
+
+# === [CHANGED] 예측은 **동기 실행** (스레드/타임아웃 제거)
 _PREDICT_TIMEOUT_SEC=float(os.getenv("PREDICT_TIMEOUT_SEC","30"))
-def _safe_predict_with_timeout(predict_fn,symbol,strategy,source,model_type=None,timeout=_PREDICT_TIMEOUT_SEC, stop_event: threading.Event | None = None):
-    err=[]; done=threading.Event()
-    def _run():
-        try:
-            _safe_print(f"[PREDICT] start {symbol}-{strategy} ({source})")
-            predict_fn(symbol, strategy, source=source, model_type=model_type)
-            _safe_print(f"[PREDICT] done  {symbol}-{strategy}")
-        except Exception as e:
-            err.append(e)
-        finally:
-            done.set()
-    t=threading.Thread(target=_run,daemon=True); t.start()
-    deadline=time.time()+float(timeout)
-    while True:
-        if done.wait(timeout=0.25): break
-        if stop_event is not None and stop_event.is_set():
-            _safe_print(f"[STOP] predict canceled: {symbol}-{strategy}")
-            return False
-        if time.time()>=deadline:
-            _safe_print(f"[TIMEOUT] predict {symbol}-{strategy} {timeout}s → skip"); return False
-    if err:
-        _safe_print(f"[PREDICT FAIL] {symbol}-{strategy}: {err[0]}"); return False
-    return True
+def _safe_predict_sync(predict_fn,symbol,strategy,source,model_type=None, stop_event: threading.Event | None = None):
+    try:
+        _safe_print(f"[PREDICT] start {symbol}-{strategy} ({source})")
+        # 동기 호출: 내부에서 락 획득/해제까지 완료됨
+        predict_fn(symbol, strategy, source=source, model_type=model_type)
+        _safe_print(f"[PREDICT] done  {symbol}-{strategy}")
+        return True
+    except Exception as e:
+        _safe_print(f"[PREDICT FAIL] {symbol}-{strategy}: {e}")
+        return False
 
 def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
     if stop_event is not None and stop_event.is_set():
@@ -875,9 +900,6 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
 
     return completed_symbols, partial_symbols
 
-# === 부분 예측 허용 스위치(ENV) ===
-_PREDICT_PARTIAL_OK = os.getenv("PREDICT_PARTIAL_OK", "1") == "1"
-
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None = None):
     threading.Thread(target=_watchdog_loop, args=(stop_event,), daemon=True).start()
     _reset_watchdog("loop start")
@@ -926,7 +948,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
 
                 # === 예측 대상 결정 ===
                 predict_candidates = list(completed_syms)
-                if _PREDICT_PARTIAL_OK:
+                if os.getenv("PREDICT_PARTIAL_OK", "1") == "1":
                     predict_candidates += list(partial_syms)
 
                 # 🔐 모델 가시화 보장(파일시스템 동기화 지연 방지)
@@ -934,7 +956,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 if not visible_syms:
                     _safe_print(f"[⏸ 대기] 그룹{idx+1} — 학습심볼은 있으나 모델 파일이 아직 보이지 않음 → 예측 보류 "
                                 f"(candidates={sorted(set(predict_candidates))})")
-                # 실제 예측에 쓸 심볼(모델 존재하는 것만)
                 predict_syms = sorted({s for s in visible_syms if _has_any_model_for_symbol(s)})
 
                 _safe_print(f"[PREDICT-DECIDE] ready={bool(ready_for_group_predict())} "
@@ -942,7 +963,14 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                             f"visible_syms={predict_syms}")
 
                 if predict_syms:
-                    # 게이트 열기
+                    # 🧹 예측 시작 전: 남아있을 수 있는 전역 락 정리/대기
+                    _wait_predict_lock_clear(
+                        timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_PREOPEN_SEC","15")),
+                        stale_sec=int(os.getenv("PREDICT_LOCK_STALE_TRAIN_SEC","120")),
+                        tag=f"group_{idx+1}:pre-open"
+                    )
+
+                    # 게이트 열기 (우리 예측 시작)
                     try:
                         open_predict_gate(note=f"group_{idx+1}_start")
                     except Exception as e:
@@ -955,20 +983,28 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                         if stop_event is not None and stop_event.is_set(): break
                         for strategy in ["단기","중기","장기"]:
                             if stop_event is not None and stop_event.is_set(): break
-                            # 전략별 모델이 있을 때만 예측
                             if not _has_model_for(symbol, strategy):
                                 _safe_print(f"[PREDICT-SKIP] {symbol}-{strategy}: 모델 없음(전략별)")
                                 continue
-                            _safe_predict_with_timeout(
+                            # 🔁 동기 예측 (락 점유/해제 명확)
+                            _safe_predict_sync(
                                 predict, symbol, strategy,
                                 source="그룹직후", model_type=None,
-                                timeout=_PREDICT_TIMEOUT_SEC, stop_event=stop_event
+                                stop_event=stop_event
                             )
+
                     # 게이트 닫기
                     try:
                         close_predict_gate(note=f"group_{idx+1}_end")
                     except Exception as e:
                         _safe_print(f"[gate close err] {e}")
+
+                    # 종료 후 혹시 남은 락이 있으면 정리
+                    _wait_predict_lock_clear(
+                        timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_POST_SEC","10")),
+                        stale_sec=int(os.getenv("PREDICT_LOCK_STALE_TRAIN_SEC","120")),
+                        tag=f"group_{idx+1}:post-close"
+                    )
 
                     try:
                         mark_group_predicted()
