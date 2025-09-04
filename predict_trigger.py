@@ -1,4 +1,4 @@
-# === predict_trigger.py (MEM-SAFE FINAL++ — gate/lock aware, stale lock cleanup, timeout-safe, freq & diversity) ===
+# === predict_trigger.py (MEM-SAFE FINAL+++ — gate/lock aware, stale lock cleanup, timeout-safe, freq & diversity) ===
 import os
 import time
 import traceback
@@ -39,13 +39,19 @@ except Exception:
     def get_calibration_version():
         return "none"
 
-# ▷ (옵션) 예측 실행 타임아웃(있으면 사용) — train.py에서 제공
-_safe_predict_with_timeout = None
+# ▷ (옵션) 예측 실행 호출 래퍼 — train.py에서 제공(있으면 사용)
+_safe_predict_with_timeout = None   # (선호) 타임아웃 지원 버전
+_safe_predict_sync = None           # (대안) 동기 버전
 try:
-    from train import _safe_predict_with_timeout as __t_safe
-    _safe_predict_with_timeout = __t_safe
+    from train import _safe_predict_with_timeout as __t_safe_to
+    _safe_predict_with_timeout = __t_safe_to
 except Exception:
-    _safe_predict_with_timeout = None
+    pass
+try:
+    from train import _safe_predict_sync as __t_safe_sync
+    _safe_predict_sync = __t_safe_sync
+except Exception:
+    pass
 
 # ▷ (옵션) 게이트 상태 확인 API (predict.py)
 _is_gate_open = None
@@ -62,7 +68,7 @@ MAX_LOOKBACK = int(os.getenv("TRIGGER_MAX_LOOKBACK", "180"))   # 전조 계산�
 RECENT_DAYS_FOR_FREQ = max(1, int(os.getenv("TRIGGER_FREQ_DAYS", "3")))
 CSV_CHUNKSIZE = max(10000, int(os.getenv("TRIGGER_CSV_CHUNKSIZE", "50000")))
 TRIGGER_MAX_PER_RUN = max(1, int(os.getenv("TRIGGER_MAX_PER_RUN", "999")))  # 1회 루프에서 최대 실행 수
-PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC", "30"))         # _safe_predict_with_timeout이 없을 때만 사용
+PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC", "30"))         # _safe_predict_with_timeout 없을 때는 미사용
 
 # 🔧 stale lock(고아 락) 처리 임계
 PREDICT_LOCK_STALE_TRIGGER_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRIGGER_SEC", "120"))
@@ -255,7 +261,7 @@ def run():
                     print(f"[✅ 트리거 포착] {symbol} - {strategy} → 예측 실행")
 
                     try:
-                        # 타임아웃 안전 호출 (train.py 제공 시)
+                        # 1순위: 타임아웃 지원 호출
                         if _safe_predict_with_timeout:
                             ok = _safe_predict_with_timeout(
                                 predict_fn=_predict,
@@ -267,8 +273,17 @@ def run():
                             )
                             if not ok:
                                 raise RuntimeError("predict timeout/failed")
+                        # 2순위: 동기 호출 래퍼(타임아웃 없음)
+                        elif _safe_predict_sync:
+                            _safe_predict_sync(
+                                predict_fn=_predict,
+                                symbol=symbol,
+                                strategy=strategy,
+                                source="변동성",
+                                model_type=None,
+                            )
                         else:
-                            # 폴백: 직접 호출(타임아웃 미지원, predict.py 내부에서 gate/lock/heartbeat 처리)
+                            # 3순위: 직접 호출(타임아웃 미지원, predict.py 내부에서 gate/lock/heartbeat 처리)
                             _predict(symbol, strategy, source="변동성")
 
                         last_trigger_time[key] = now
