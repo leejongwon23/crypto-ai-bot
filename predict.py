@@ -1,11 +1,12 @@
-# === predict.py — sequence-corrected, gate-respecting, robust I/O ===
+# === predict.py — lock self-heal, gate-respecting, robust I/O ===
 # (2025-09-03) — train.py와 호환: open/close_predict_gate, 게이트 닫힘 시 즉시 반환, 스테일 락 자동 해제
 # (2025-09-04) — [수정] predict 락 즉시실패 → 짧은 대기·재시도 후 실패 처리
 # (2025-09-04b) — [보강] gate/lock 파일 write 후 flush+fsync로 가시화 보장
 # (2025-09-05c) — [FIX] failure_db 시그니처 조정, 그룹직후 락 강건화
 # (2025-09-05d) — [통일] 스테일 TTL 600s로 통일, 게이트 파일 오탈자 정정, 그룹직후 주석 정합
+# (2025-09-05e) — [중요] 자물쇠 주인(PID) 생사확인 + 하트비트로 mtime 갱신 + 그룹직후 공격적 정리(12s)
 
-import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
+import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob, threading
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
 from sklearn.preprocessing import MinMaxScaler
 from data.utils import get_kline_by_strategy, compute_features
@@ -19,25 +20,30 @@ __all__ = [
     "run_evaluation_loop",
 ]
 
-# ====== Gate (학습 블록 종료 시에만 예측 허용) ======
+# ====== Gate/Lock 경로 ======
 RUN_DIR = "/persistent/run"; os.makedirs(RUN_DIR, exist_ok=True)
-PREDICT_GATE = os.path.join(RUN_DIR, "predict_gate.json")      # {"open":true, ...} (옵션)
+PREDICT_GATE = os.path.join(RUN_DIR, "predict_gate.json")      # {"open":true, ...}
 PREDICT_LOCK = os.path.join(RUN_DIR, "predict_running.lock")   # 예측 실행 중 표시
 PREDICT_BLOCK = "/persistent/predict.block"                    # 있으면 강제 차단(옵션)
 
-# 🆕 락 스테일 타임아웃(고아 락 자동해제) — 프로젝트 전역 600s로 통일
-PREDICT_LOCK_TTL = int(os.getenv("PREDICT_LOCK_TTL", "600"))  # 10분
-# 🆕 train.py와 맞춤: 그룹직후 구간에서 스테일 판단 임계 (전역과 동일 600s)
-PREDICT_LOCK_STALE_TRAIN_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRAIN_SEC", "600"))
+# ====== 락 관련 기본값 ======
+# 전체 기본(보수적): 600초
+PREDICT_LOCK_TTL = int(os.getenv("PREDICT_LOCK_TTL", "600"))
+# 그룹직후(공격적): 기본 12초 (환경변수로 늘릴 수 있음)
+PREDICT_LOCK_STALE_GROUP_SEC = int(os.getenv("PREDICT_LOCK_STALE_GROUP_SEC", "12"))
+# 그룹직후 대기 상한: 기본 30초
+PREDICT_LOCK_WAIT_GROUP_SEC = int(os.getenv("PREDICT_LOCK_WAIT_GROUP_SEC", "30"))
+# 일반 대기 상한: 기본 15초
+PREDICT_LOCK_WAIT_MAX_SEC = int(os.getenv("PREDICT_LOCK_WAIT_MAX_SEC", "15"))
 
 def _now_kst(): return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def is_predict_gate_open():
     """
-    ✅ 기본 open, 단 아래 조건이면 닫힘으로 간주:
+    ✅ 기본 open, 단 아래면 닫힘:
       - FORCE_PREDICT_CLOSE=1
       - /persistent/predict.block 존재
-      - /persistent/run/predict_gate.json 이 있고 "open": False
+      - predict_gate.json에 "open": false
     """
     try:
         if os.getenv("FORCE_PREDICT_CLOSE", "0") == "1":
@@ -58,7 +64,6 @@ def open_predict_gate(note=""):
             json.dump({"open": True, "opened_at": _now_kst().isoformat(), "note": note}, f, ensure_ascii=False)
             try: f.flush(); os.fsync(f.fileno())
             except Exception: pass
-        # 안전: block 파일이 있으면 제거
         if os.path.exists(PREDICT_BLOCK):
             try: os.remove(PREDICT_BLOCK)
             except Exception: pass
@@ -71,7 +76,6 @@ def close_predict_gate(note=""):
             json.dump({"open": False, "closed_at": _now_kst().isoformat(), "note": note}, f, ensure_ascii=False)
             try: f.flush(); os.fsync(f.fileno())
             except Exception: pass
-        # block 존재 보장(외부 트리거 차단)
         try:
             with open(PREDICT_BLOCK, "a") as bf:
                 try: bf.flush(); os.fsync(bf.fileno())
@@ -81,30 +85,72 @@ def close_predict_gate(note=""):
     except Exception:
         pass
 
+# ====== 락 유틸 ======
+def _lock_owner_alive(path: str) -> bool:
+    """
+    자물쇠 파일에 기록된 PID가 실제로 살아있는지 확인.
+    살아있으면 True, 아니면 False.
+    """
+    try:
+        if not os.path.exists(path): return False
+        with open(path, "r", encoding="utf-8") as f:
+            txt = f.read().strip()
+        pid = None
+        if txt:
+            try:
+                j = json.loads(txt)
+                pid = int(j.get("pid", 0))
+            except Exception:
+                pid = None
+        if not pid or pid <= 0:
+            return False
+        # 리눅스 기준: 0 시그널은 존재/권한만 확인
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # 프로세스는 있는데 권한만 없는 경우 → 살아있다고 간주
+        return True
+    except Exception:
+        return False
+
 def _is_stale_lock(path: str, ttl_sec: int) -> bool:
     try:
         if not os.path.exists(path): return False
         mtime = os.path.getmtime(path)
-        return (time.time() - float(mtime)) > max(30, int(ttl_sec))
+        return (time.time() - float(mtime)) > max(3, int(ttl_sec))
     except Exception:
         return False
 
-def _clear_stale_lock(ttl_sec: int, tag: str = ""):
+def _clear_stale_lock(ttl_sec: int, tag: str = "", check_pid: bool = True):
+    """
+    - check_pid=True면: 주인이 죽었거나(ttl와 무관) 또는 ttl초 넘으면 제거
+    - check_pid=False면: ttl초만 기준
+    """
     try:
-        if os.path.exists(PREDICT_LOCK) and _is_stale_lock(PREDICT_LOCK, ttl_sec):
+        if not os.path.exists(PREDICT_LOCK): return
+        remove = False
+        if check_pid:
+            alive = _lock_owner_alive(PREDICT_LOCK)
+            if not alive:
+                remove = True
+            elif _is_stale_lock(PREDICT_LOCK, ttl_sec):
+                remove = True
+        else:
+            if _is_stale_lock(PREDICT_LOCK, ttl_sec):
+                remove = True
+        if remove:
             os.remove(PREDICT_LOCK)
-            print(f"[LOCK] stale predict lock removed (> {ttl_sec}s) {tag}"); sys.stdout.flush()
+            print(f"[LOCK] stale/owner-dead predict lock removed (>{ttl_sec}s or dead) {tag}"); sys.stdout.flush()
     except Exception:
         pass
 
 def _acquire_predict_lock():
     """
-    ✅ 원자적 생성 + 스테일 감지:
-       - 락이 살아있으면 False
-       - 스테일이면 제거 후 재시도
+    원자적 생성. 있으면 False.
     """
     try:
-        _clear_stale_lock(PREDICT_LOCK_TTL, tag="(normal)")
         fd = os.open(PREDICT_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         with os.fdopen(fd, "w") as f:
             f.write(json.dumps({"pid": os.getpid(), "ts": _now_kst().isoformat()}, ensure_ascii=False))
@@ -123,8 +169,7 @@ def _release_predict_lock():
     except Exception:
         pass
 
-# ====== 예측 하트비트(경량 진행 로그) ======
-import threading
+# ====== 예측 하트비트 ======
 PREDICT_HEARTBEAT_SEC = int(os.getenv("PREDICT_HEARTBEAT_SEC", "3"))
 
 def _predict_hb_loop(stop_evt: threading.Event, tag: str):
@@ -137,6 +182,10 @@ def _predict_hb_loop(stop_evt: threading.Event, tag: str):
             if note != last_note:
                 print(note); sys.stdout.flush()
                 last_note = note
+            # 살아있는 동안 자물쇠에 '살아있다' 표시(파일 시간 갱신)
+            if lock:
+                try: os.utime(PREDICT_LOCK, None)
+                except Exception: pass
         except Exception:
             pass
         stop_evt.wait(max(1, PREDICT_HEARTBEAT_SEC))
@@ -167,7 +216,7 @@ except Exception:
     def apply_calibration(probs, *, symbol=None, strategy=None, regime=None, model_meta=None): return probs
     def get_calibration_version(): return "none"
 
-# ====== 모델 로딩 어댑터(.pt/.ptz/.safetensors 모두) ======
+# ====== 모델 로딩 어댑터 ======
 try:
     import inspect
     from model_io import load_model as _raw_load_model
@@ -285,7 +334,7 @@ def _resolve_meta(weight_base):
         pass
     return None
 
-def _glob_many(stem): 
+def _glob_many(stem):
     out = []
     for e in _KNOWN_EXTS: out.extend(glob.glob(f"{stem}{e}"))
     return out
@@ -327,49 +376,48 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     except Exception as e:
         print(f"[failed_result log_prediction 오류] {e}")
     try:
-        # [FIX] failure_db 시그니처: (record_dict, feature_vector) 만 전달
         if X_input is not None:
             insert_failure_record(res, feature_vector=np.array(X_input).flatten().tolist())
     except Exception as e:
         print(f"[failed_result insert_failure_record 오류] {e}")
     return res
 
-# 🆕 락 재시도 헬퍼
-def _acquire_predict_lock_with_retry(max_wait_sec:int):
+# 🆕 락 재시도(대기 중에도 주기적으로 정리 시도)
+def _acquire_predict_lock_with_retry(max_wait_sec:int, stale_ttl_sec:int, tag:str):
     deadline = time.time() + max(1, int(max_wait_sec))
+    # 시작 전에 한 번 강제 정리
+    _clear_stale_lock(stale_ttl_sec, tag=f"{tag}-pre", check_pid=True)
     while time.time() < deadline:
         if _acquire_predict_lock():
             return True
-        time.sleep(random.uniform(0.5, 2.0))
+        # 대기 중에도 주기적으로 정리(낡았거나 주인 없으면 제거)
+        _clear_stale_lock(stale_ttl_sec, tag=f"{tag}-loop", check_pid=True)
+        time.sleep(random.uniform(0.4, 1.2))
     return False
 
-def _prep_lock_for_source(source:str):
+def _prep_lock_policy(source:str):
     """
-    [NEW] train.py 그룹직후 콜에선 더 공격적으로:
-      - 스테일 기준을 TRAIN 값으로 강제 (기본 600s, train과 통일)
-      - 대기 상한은 기본 30s (환경변수 PREDICT_LOCK_WAIT_GROUP_SEC 로 조절)
+    그룹직후: 공격적 정리(짧은 ttl) + 더 긴 대기
+    일반: 보수적 정리 + 짧은 대기
     """
     src = str(source or "")
     if "그룹직후" in src:
-        _clear_stale_lock(PREDICT_LOCK_STALE_TRAIN_SEC, tag="(group)")
-        try:
-            return int(os.getenv("PREDICT_LOCK_WAIT_GROUP_SEC", "30"))
-        except Exception:
-            return 30
-    return int(os.getenv("PREDICT_LOCK_WAIT_MAX_SEC", "15"))
+        return PREDICT_LOCK_WAIT_GROUP_SEC, PREDICT_LOCK_STALE_GROUP_SEC
+    return PREDICT_LOCK_WAIT_MAX_SEC, PREDICT_LOCK_TTL
 
 # ====== 핵심: 예측 ======
 def predict(symbol, strategy, source="일반", model_type=None):
-    # 0) 게이트/락
+    # 0) 게이트
     if not is_predict_gate_open():
         return failed_result(symbol or "None", strategy or "None", reason="predict_gate_closed", source=source, X_input=None)
 
-    # 🔒 락: 그룹직후면 스테일 클리어+대기 연장
-    lock_wait = _prep_lock_for_source(source)
-    if not _acquire_predict_lock_with_retry(lock_wait):
+    # 🔒 락 정책 결정
+    lock_wait, stale_ttl = _prep_lock_policy(source)
+    # 🔒 락 획득 (대기 중에도 낡은 자물쇠 정리)
+    if not _acquire_predict_lock_with_retry(lock_wait, stale_ttl, tag=("group" if "그룹직후" in str(source) else "normal")):
         return failed_result(symbol or "None", strategy or "None", reason="predict_lock_timeout", source=source, X_input=None)
 
-    # 🫀 하트비트 시작
+    # 🫀 하트비트 시작(살아있음 표시)
     _hb_stop = threading.Event()
     _hb_tag = f"{symbol}-{strategy}"
     _hb_thread = threading.Thread(target=_predict_hb_loop, args=(_hb_stop, _hb_tag), daemon=True)
@@ -712,6 +760,7 @@ def evaluate_predictions(get_price_fn):
                                        success=(status in ["success","v_success"]), reason=r["reason"], rate=gain, return_value=gain,
                                        volatility=("v_" in status), source="평가", label=label, group_id=gid)
                         if status in ["fail","v_fail"]:
+                            from failure_db import check_failure_exists
                             if not check_failure_exists(r):
                                 insert_failure_record(r, feature_vector=None)
                         if model == "meta": update_model_success(sym, strat, model, status in ["success","v_success"])
