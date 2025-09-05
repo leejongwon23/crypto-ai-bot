@@ -2,6 +2,7 @@
 # (2025-09-03) — train.py와 호환: open/close_predict_gate, 게이트 닫힘 시 즉시 반환, 스테일 락 자동 해제
 # (2025-09-04) — [수정] predict 락 즉시실패 → 짧은 대기·재시도 후 실패 처리
 # (2025-09-04b) — [보강] gate/lock 파일 write 후 flush+fsync로 가시화 보장
+# (2025-09-05c) — [FIX] failure_db 시그니처 조정, 그룹직후 락 강건화
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -25,6 +26,8 @@ PREDICT_BLOCK = "/persistent/predict.block"                    # 있으면 강�
 
 # 🆕 락 스테일 타임아웃(고아 락 자동해제)
 PREDICT_LOCK_TTL = int(os.getenv("PREDICT_LOCK_TTL", "1800"))  # 30분
+# 🆕 train.py와 맞춤: 그룹직후 구간에서 스테일 판단 상향(기본 120s)
+PREDICT_LOCK_STALE_TRAIN_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRAIN_SEC", "120"))
 
 def _now_kst(): return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
@@ -40,7 +43,7 @@ def is_predict_gate_open():
             return False
         if os.path.exists(PREDICT_BLOCK):
             return False
-        if os.path.exists(PEDICT_GATE:=PREDICT_GATE):  # local alias to avoid typos later
+        if os.path.exists(PEDICT_GATE:=PREDICT_GATE):
             with open(PEDICT_GATE, "r", encoding="utf-8") as f:
                 o = json.load(f)
             return bool(o.get("open", True))
@@ -62,7 +65,6 @@ def open_predict_gate(note=""):
         pass
 
 def close_predict_gate(note=""):
-    # JSON/락파일 둘 중 아무거나 사용 가능
     try:
         with open(PREDICT_GATE, "w", encoding="utf-8") as f:
             json.dump({"open": False, "closed_at": _now_kst().isoformat(), "note": note}, f, ensure_ascii=False)
@@ -86,6 +88,14 @@ def _is_stale_lock(path: str, ttl_sec: int) -> bool:
     except Exception:
         return False
 
+def _clear_stale_lock(ttl_sec: int, tag: str = ""):
+    try:
+        if os.path.exists(PREDICT_LOCK) and _is_stale_lock(PREDICT_LOCK, ttl_sec):
+            os.remove(PREDICT_LOCK)
+            print(f"[LOCK] stale predict lock removed (> {ttl_sec}s) {tag}"); sys.stdout.flush()
+    except Exception:
+        pass
+
 def _acquire_predict_lock():
     """
     ✅ 원자적 생성 + 스테일 감지:
@@ -93,14 +103,7 @@ def _acquire_predict_lock():
        - 스테일이면 제거 후 재시도
     """
     try:
-        if os.path.exists(PREDICT_LOCK) and _is_stale_lock(PREDICT_LOCK, PREDICT_LOCK_TTL):
-            try:
-                os.remove(PREDICT_LOCK)
-                print(f"[LOCK] stale predict lock removed (> {PREDICT_LOCK_TTL}s)")
-                sys.stdout.flush()
-            except Exception:
-                pass
-
+        _clear_stale_lock(PREDICT_LOCK_TTL, tag="(normal)")
         fd = os.open(PREDICT_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         with os.fdopen(fd, "w") as f:
             f.write(json.dumps({"pid": os.getpid(), "ts": _now_kst().isoformat()}, ensure_ascii=False))
@@ -124,11 +127,9 @@ import threading
 PREDICT_HEARTBEAT_SEC = int(os.getenv("PREDICT_HEARTBEAT_SEC", "3"))
 
 def _predict_hb_loop(stop_evt: threading.Event, tag: str):
-    """예측이 길어질 때 3초 주기로 진행 하트비트 출력"""
     last_note = ""
     while not stop_evt.is_set():
         try:
-            # 간단한 1줄 상태 (게이트, 락 존재 여부 포함)
             gate = "open" if is_predict_gate_open() else "closed"
             lock = os.path.exists(PREDICT_LOCK)
             note = f"[HB] predict alive ({tag}) gate={gate} lock={'1' if lock else '0'} ts={_now_kst().strftime('%H:%M:%S')}"
@@ -172,7 +173,7 @@ try:
     def load_model_any(path, model=None, **kwargs):
         try:
             ps = [p for p in inspect.signature(_raw_load_model).parameters.values()
-                  if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+                  if p.kind in (p.POSITIONAL_ONLY, p.POSITION_OR_KEYWORD)]
             if len(ps) <= 1:
                 return _raw_load_model(path)
             return _raw_load_model(path, model, **kwargs)
@@ -325,37 +326,47 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     except Exception as e:
         print(f"[failed_result log_prediction 오류] {e}")
     try:
-        # 🔧 시그니처 정합: train.py와 동일하게 keyword 인자만 사용
+        # [FIX] failure_db 시그니처: (record_dict, feature_vector) 만 전달
         if X_input is not None:
-            insert_failure_record(res, feature_vector=np.array(X_input).flatten().tolist(), label=-1)
+            insert_failure_record(res, feature_vector=np.array(X_input).flatten().tolist())
     except Exception as e:
         print(f"[failed_result insert_failure_record 오류] {e}")
     return res
 
 # 🆕 락 재시도 헬퍼
-def _acquire_predict_lock_with_retry():
-    """
-    현재 락이 있으면 3~15초 사이 랜덤 대기하며 재시도.
-    (환경변수 PREDICT_LOCK_WAIT_MAX_SEC 로 상한 조정 가능, 기본 15)
-    """
-    max_wait = int(os.getenv("PREDICT_LOCK_WAIT_MAX_SEC", "15"))
-    deadline = time.time() + max(1, max_wait)
+def _acquire_predict_lock_with_retry(max_wait_sec:int):
+    deadline = time.time() + max(1, int(max_wait_sec))
     while time.time() < deadline:
         if _acquire_predict_lock():
             return True
         time.sleep(random.uniform(0.5, 2.0))
     return False
 
+def _prep_lock_for_source(source:str):
+    """
+    [NEW] train.py 그룹직후 콜에선 더 공격적으로:
+      - 스테일 기준을 TRAIN 값으로 강제
+      - 대기 상한을 기본 30s로 상향 (환경변수로 조절)
+    """
+    src = str(source or "")
+    if "그룹직후" in src:
+        _clear_stale_lock(PREDICT_LOCK_STALE_TRAIN_SEC, tag="(group)")
+        try:
+            return int(os.getenv("PREDICT_LOCK_WAIT_GROUP_SEC", "30"))
+        except Exception:
+            return 30
+    return int(os.getenv("PREDICT_LOCK_WAIT_MAX_SEC", "15"))
+
 # ====== 핵심: 예측 ======
 def predict(symbol, strategy, source="일반", model_type=None):
     # 0) 게이트/락
-    #    ✅ 게이트가 닫혀 있으면 실제 추론 없이 실패 레코드만 남김.
     if not is_predict_gate_open():
-        return failed_result(symbol or "None", strategy or "None", reason="predict_gate_closed", X_input=None)
+        return failed_result(symbol or "None", strategy or "None", reason="predict_gate_closed", source=source, X_input=None)
 
-    # 🔒 락: 즉시 실패 → 짧은 대기·재시도 후 실패로 변경
-    if not _acquire_predict_lock_with_retry():
-        return failed_result(symbol or "None", strategy or "None", reason="predict_lock_timeout", X_input=None)
+    # 🔒 락: 그룹직후면 스테일 클리어+대기 연장
+    lock_wait = _prep_lock_for_source(source)
+    if not _acquire_predict_lock_with_retry(lock_wait):
+        return failed_result(symbol or "None", strategy or "None", reason="predict_lock_timeout", source=source, X_input=None)
 
     # 🫀 하트비트 시작
     _hb_stop = threading.Event()
@@ -380,20 +391,20 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
         ensure_failure_db(); os.makedirs("/persistent/logs", exist_ok=True)
         if not symbol or not strategy:
-            return failed_result(symbol or "None", strategy or "None", reason="invalid_symbol_strategy", X_input=None)
+            return failed_result(symbol or "None", strategy or "None", reason="invalid_symbol_strategy", source=source, X_input=None)
 
         regime = detect_regime(symbol, strategy, now=now_kst()); _ = get_calibration_version()
-        print(f"[predict] start {symbol}-{strategy} regime={regime}"); sys.stdout.flush()
+        print(f"[predict] start {symbol}-{strategy} regime={regime} source={source}"); sys.stdout.flush()
 
         windows = find_best_windows(symbol, strategy)
-        if not windows: return failed_result(symbol, strategy, reason="window_list_none", X_input=None)
+        if not windows: return failed_result(symbol, strategy, reason="window_list_none", source=source, X_input=None)
 
         df = get_kline_by_strategy(symbol, strategy)
-        if df is None or len(df) < max(windows) + 1: return failed_result(symbol, strategy, reason="df_short", X_input=None)
+        if df is None or len(df) < max(windows) + 1: return failed_result(symbol, strategy, reason="df_short", source=source, X_input=None)
 
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.dropna().shape[0] < max(windows) + 1:
-            return failed_result(symbol, strategy, reason="feature_short", X_input=None)
+            return failed_result(symbol, strategy, reason="feature_short", source=source, X_input=None)
 
         X = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         X = MinMaxScaler().fit_transform(X)
@@ -403,17 +414,17 @@ def predict(symbol, strategy, source="일반", model_type=None):
             X = X[:, :FEATURE_INPUT_SIZE]
 
         models = get_available_models(symbol, strategy)
-        if not models: return failed_result(symbol, strategy, reason="no_models", X_input=X[-1])
+        if not models: return failed_result(symbol, strategy, reason="no_models", source=source, X_input=X[-1])
 
         rec_freq = get_recent_class_frequencies(strategy)
         feat_row = torch.tensor(X[-1], dtype=torch.float32)
 
         outs, all_preds = get_model_predictions(symbol, strategy, models, df, X, windows, rec_freq, regime=regime)
-        if not outs: return failed_result(symbol, strategy, reason="no_valid_model", X_input=X[-1])
+        if not outs: return failed_result(symbol, strategy, reason="no_valid_model", source=source, X_input=X[-1])
 
         final_cls = None; meta_choice = "best_single"; chosen = None; used_minret = False
 
-        # (A) 진화형 메타(있으면) — 임계 미만이면 버림
+        # (A) 진화형 메타
         if _glob_many(os.path.join(MODEL_DIR, "evo_meta_learner")):
             try:
                 from evo_meta_learner import predict_evo_meta
@@ -475,7 +486,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             except Exception:
                 pass
 
-        # (C) 최종 가드(최소 수익 임계 미충족 시 재선택)
+        # (C) 최종 가드
         try:
             cmin_sel, _ = get_class_return_range(final_cls, symbol, strategy)
             if float(cmin_sel) < MIN_RET_THRESHOLD:
@@ -491,7 +502,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         except Exception:
                             pass
                 if best_cls is None:
-                    return failed_result(symbol, strategy, reason="no_class_ge_min_return", X_input=X[-1])
+                    return failed_result(symbol, strategy, reason="no_class_ge_min_return", source=source, X_input=X[-1])
                 final_cls, chosen, used_minret = best_cls, best_m, True
         except Exception as e:
             print(f"[임계 가드 예외] {e}")
@@ -635,7 +646,7 @@ def evaluate_predictions(get_price_fn):
                         except Exception: entry = 0.0
                         if entry <= 0 or label == -1:
                             r.update({"status": "invalid", "reason": "invalid_entry_or_label", "return": 0.0, "return_value": 0.0})
-                            if not check_failure_exists(r): insert_failure_record(r, feature_vector=None, label=label)
+                            if not check_failure_exists(r): insert_failure_record(r, feature_vector=None)
                             w_all.writerow({k: r.get(k, "") for k in fields})
                             if not wrong_written:
                                 wrong_writer = csv.DictWriter(f_wrong, fieldnames=sorted(r.keys())); wrong_writer.writeheader(); wrong_written = True
@@ -701,7 +712,7 @@ def evaluate_predictions(get_price_fn):
                                        volatility=("v_" in status), source="평가", label=label, group_id=gid)
                         if status in ["fail","v_fail"]:
                             if not check_failure_exists(r):
-                                insert_failure_record(r, feature_vector=None, label=label)
+                                insert_failure_record(r, feature_vector=None)
                         if model == "meta": update_model_success(sym, strat, model, status in ["success","v_success"])
                         w_all.writerow({k: r.get(k, "") for k in fields})
                         if not eval_written:
@@ -786,7 +797,7 @@ def run_evaluation_loop(interval_minutes=None):
         time.sleep(iv * 60)
 
 if __name__ == "__main__":
-    res = predict("BTCUSDT", "단기"); print(res)
+    res = predict("BTCUSDT", "단기", source="테스트"); print(res)
     try:
         df = pd.read_csv(PREDICTION_LOG_PATH, encoding="utf-8-sig")
         print("[✅ prediction_log.csv 상위 20줄 출력]"); print(df.head(20))
