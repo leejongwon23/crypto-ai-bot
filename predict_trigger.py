@@ -4,6 +4,7 @@ import time
 import traceback
 import datetime
 from collections import Counter
+import glob  # [ADD] for fast model existence check
 
 import numpy as np
 import pandas as pd
@@ -25,6 +26,25 @@ except Exception:
 # ✅ 그룹예측 게이트/락 (predict.py와 합의된 경로)
 PREDICT_BLOCK = "/persistent/predict.block"
 PREDICT_RUN_LOCK = "/persistent/run/predict_running.lock"
+
+# [ADD] 모델 경로(빠른 존재 확인용)
+MODEL_DIR = "/persistent/models"
+_KNOWN_EXTS = (".pt", ".ptz", ".safetensors")
+
+def _has_model_for(symbol: str, strategy: str) -> bool:
+    """train.py와 동일한 기준의 경량판: 심볼·전략 단위 가용 모델 존재 여부."""
+    try:
+        # flat
+        for e in _KNOWN_EXTS:
+            if glob.glob(os.path.join(MODEL_DIR, f"{symbol}_{strategy}_*{e}")):
+                return True
+        # tree
+        d = os.path.join(MODEL_DIR, symbol, strategy)
+        if os.path.isdir(d) and any(glob.glob(os.path.join(d, f"*{e}")) for e in _KNOWN_EXTS):
+            return True
+    except Exception:
+        pass
+    return False
 
 # ▷ (옵션) 레짐/캘리브레이션: 없으면 안전 통과
 try:
@@ -166,8 +186,8 @@ def check_pre_burst_conditions(df, strategy):
         return False
 
 def check_model_quality(symbol, strategy):
-    # TODO: 필요시 메타/성능 기준 추가
-    return True
+    # [ADD] 최소: 실제 가용 모델이 하나라도 있어야 실행
+    return _has_model_for(symbol, strategy)
 
 # ──────────────────────────────────────────────────────────────
 # 트리거 실행 루프(락/쿨다운/최대 실행 수/타임아웃 지원)
@@ -222,12 +242,13 @@ def run():
                 print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
                 return
 
-            # 실행 중간에도 락/게이트 상태 변하면 조용히 종료
+            # [MOVE/RECHECK] 실행 중간에도 락/게이트 변동 시 즉시 종료하기 전에 스테일 락 한 번 더 정리
+            _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
+            # 실행 중 변동 체크
             if _LOCK_PATH and os.path.exists(_LOCK_PATH):
                 print(f"[트리거] 실행 중 전역 락 감지 → 중단")
                 print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
                 return
-            _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
             if _gate_closed() or _predict_busy():
                 print(f"[트리거] 게이트 닫힘/예측 중 → 스킵")
                 return
@@ -241,59 +262,60 @@ def run():
                     # 너무 시끄럽지 않게 간단 출력
                     continue
 
+                # [ADD] 모델 유무 사전 점검(불필요한 predict 호출/실패 로그 방지)
+                if not check_model_quality(symbol, strategy):
+                    continue
+
                 df = get_kline_by_strategy(symbol, strategy)
                 if df is None or len(df) < 60 or not _has_cols(df, ["close"]):
                     # 데이터 부족/컬럼 부족
                     continue
 
-                if not check_model_quality(symbol, strategy):
+                if not check_pre_burst_conditions(df, strategy):
                     continue
 
-                if check_pre_burst_conditions(df, strategy):
-                    # 프리로드(로그용)
-                    try:
-                        regime = detect_regime(symbol, strategy, now=now_kst())
-                        calib_ver = get_calibration_version()
-                        log_audit(symbol, strategy, "프리로드", f"regime={regime}, calib_ver={calib_ver}")
-                    except Exception as preload_e:
-                        print(f"[프리로드 경고] {symbol}-{strategy}: {preload_e}")
+                # 프리로드(로그용)
+                try:
+                    regime = detect_regime(symbol, strategy, now=now_kst())
+                    calib_ver = get_calibration_version()
+                    log_audit(symbol, strategy, "프리로드", f"regime={regime}, calib_ver={calib_ver}")
+                except Exception as preload_e:
+                    print(f"[프리로드 경고] {symbol}-{strategy}: {preload_e}")
 
-                    print(f"[✅ 트리거 포착] {symbol} - {strategy} → 예측 실행")
+                print(f"[✅ 트리거 포착] {symbol} - {strategy} → 예측 실행")
 
-                    try:
-                        # 1순위: 타임아웃 지원 호출
-                        if _safe_predict_with_timeout:
-                            ok = _safe_predict_with_timeout(
-                                predict_fn=_predict,
-                                symbol=symbol,
-                                strategy=strategy,
-                                source="변동성",
-                                model_type=None,
-                                timeout=PREDICT_TIMEOUT_SEC,
-                            )
-                            if not ok:
-                                raise RuntimeError("predict timeout/failed")
-                        # 2순위: 동기 호출 래퍼(타임아웃 없음)
-                        elif _safe_predict_sync:
-                            _safe_predict_sync(
-                                predict_fn=_predict,
-                                symbol=symbol,
-                                strategy=strategy,
-                                source="변동성",
-                                model_type=None,
-                            )
-                        else:
-                            # 3순위: 직접 호출(타임아웃 미지원, predict.py 내부에서 gate/lock/heartbeat 처리)
-                            _predict(symbol, strategy, source="변동성")
+                try:
+                    # 1순위: 타임아웃 지원 호출
+                    if _safe_predict_with_timeout:
+                        ok = _safe_predict_with_timeout(
+                            predict_fn=_predict,
+                            symbol=symbol,
+                            strategy=strategy,
+                            source="변동성",
+                            model_type=None,
+                            timeout=PREDICT_TIMEOUT_SEC,
+                        )
+                        if not ok:
+                            raise RuntimeError("predict timeout/failed")
+                    # 2순위: 동기 호출 래퍼(타임아웃 없음)
+                    elif _safe_predict_sync:
+                        _safe_predict_sync(
+                            predict_fn=_predict,
+                            symbol=symbol,
+                            strategy=strategy,
+                            source="변동성",
+                            model_type=None,
+                        )
+                    else:
+                        # 3순위: 직접 호출(타임아웃 미지원, predict.py 내부에서 gate/lock/heartbeat 처리)
+                        _predict(symbol, strategy, source="변동성")
 
-                        last_trigger_time[key] = now
-                        log_audit(symbol, strategy, "트리거예측", "조건 만족으로 실행")
-                        triggered += 1
-                    except Exception as inner:
-                        print(f"[❌ 예측 실행 실패] {symbol}-{strategy}: {inner}")
-                        log_audit(symbol, strategy, "트리거예측오류", f"예측실행실패: {inner}")
-                # else: 조건 미충족은 조용히 넘어감
-
+                    last_trigger_time[key] = now
+                    log_audit(symbol, strategy, "트리거예측", "조건 만족으로 실행")
+                    triggered += 1
+                except Exception as inner:
+                    print(f"[❌ 예측 실행 실패] {symbol}-{strategy}: {inner}")
+                    log_audit(symbol, strategy, "트리거예측오류", f"예측실행실패: {inner}")
             except Exception as e:
                 print(f"[트리거 오류] {symbol} {strategy}: {e}")
                 log_audit(symbol, strategy or "알수없음", "트리거오류", str(e))
