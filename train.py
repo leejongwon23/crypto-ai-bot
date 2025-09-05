@@ -643,7 +643,26 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             acc=float(accuracy_score(lbls,preds)); f1=float(f1_score(lbls,preds,average="macro"))
 
             stem=os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_group{int(group_id) if group_id is not None else 0}_cls{int(num_classes)}")
-            meta={"symbol":symbol,"strategy":strategy,"model":model_type,"group_id":int(group_id) if group_id is not None else 0,"num_classes":int(num_classes),"input_size":int(FEATURE_INPUT_SIZE),"metrics":{"val_acc":acc,"val_f1":f1},"timestamp":now_kst().isoformat(),"model_name":os.path.basename(stem)+".ptz","window":int(window),"recent_cap":int(len(feat_scaled)),"engine":"lightning" if _HAS_LIGHTNING else "manual","data_flags":{"rows":int(len(df)),"limit":int(_limit),"min":int(_min_required),"augment_needed":bool(augment_needed),"enough_for_training":bool(enough_for_training)},"train_loss_sum":float(total_loss)}
+
+            # 🔸 meta에 class_ranges를 포함 (predict가 예측 클래스/수익률 계산·로그에 반드시 필요)
+            meta={
+                "symbol":symbol,
+                "strategy":strategy,
+                "model":model_type,
+                "group_id":int(group_id) if group_id is not None else 0,
+                "num_classes":int(num_classes),
+                "class_ranges": [[float(lo), float(hi)] for (lo,hi) in class_ranges],  # ⬅⬅⬅ 핵심 추가
+                "input_size":int(FEATURE_INPUT_SIZE),
+                "metrics":{"val_acc":acc,"val_f1":f1},
+                "timestamp":now_kst().isoformat(),
+                "model_name":os.path.basename(stem)+".ptz",
+                "window":int(window),
+                "recent_cap":int(len(feat_scaled)),
+                "engine":"lightning" if _HAS_LIGHTNING else "manual",
+                "data_flags":{"rows":int(len(df)),"limit":int(_limit),"min":int(_min_required),"augment_needed":bool(augment_needed),"enough_for_training":bool(enough_for_training)},
+                "train_loss_sum":float(total_loss)
+            }
+
             wpath,mpath=_save_model_and_meta(model, stem+".pt", meta)
             _archive_old_checkpoints(symbol,strategy,model_type,keep_n=1)
             _emit_aliases(wpath,mpath,symbol,strategy,model_type)
