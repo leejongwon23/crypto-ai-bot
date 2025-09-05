@@ -3,6 +3,7 @@
 # (2025-09-04) — [수정] predict 락 즉시실패 → 짧은 대기·재시도 후 실패 처리
 # (2025-09-04b) — [보강] gate/lock 파일 write 후 flush+fsync로 가시화 보장
 # (2025-09-05c) — [FIX] failure_db 시그니처 조정, 그룹직후 락 강건화
+# (2025-09-05d) — [통일] 스테일 TTL 600s로 통일, 게이트 파일 오탈자 정정, 그룹직후 주석 정합
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -24,10 +25,10 @@ PREDICT_GATE = os.path.join(RUN_DIR, "predict_gate.json")      # {"open":true, .
 PREDICT_LOCK = os.path.join(RUN_DIR, "predict_running.lock")   # 예측 실행 중 표시
 PREDICT_BLOCK = "/persistent/predict.block"                    # 있으면 강제 차단(옵션)
 
-# 🆕 락 스테일 타임아웃(고아 락 자동해제)
-PREDICT_LOCK_TTL = int(os.getenv("PREDICT_LOCK_TTL", "1800"))  # 30분
-# 🆕 train.py와 맞춤: 그룹직후 구간에서 스테일 판단 상향(기본 120s)
-PREDICT_LOCK_STALE_TRAIN_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRAIN_SEC", "120"))
+# 🆕 락 스테일 타임아웃(고아 락 자동해제) — 프로젝트 전역 600s로 통일
+PREDICT_LOCK_TTL = int(os.getenv("PREDICT_LOCK_TTL", "600"))  # 10분
+# 🆕 train.py와 맞춤: 그룹직후 구간에서 스테일 판단 임계 (전역과 동일 600s)
+PREDICT_LOCK_STALE_TRAIN_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRAIN_SEC", "600"))
 
 def _now_kst(): return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
@@ -43,8 +44,8 @@ def is_predict_gate_open():
             return False
         if os.path.exists(PREDICT_BLOCK):
             return False
-        if os.path.exists(PEDICT_GATE:=PREDICT_GATE):
-            with open(PEDICT_GATE, "r", encoding="utf-8") as f:
+        if os.path.exists(PREDICT_GATE):
+            with open(PREDICT_GATE, "r", encoding="utf-8") as f:
                 o = json.load(f)
             return bool(o.get("open", True))
         return True
@@ -173,7 +174,7 @@ try:
     def load_model_any(path, model=None, **kwargs):
         try:
             ps = [p for p in inspect.signature(_raw_load_model).parameters.values()
-                  if p.kind in (p.POSITIONAL_ONLY, p.POSITION_OR_KEYWORD)]
+                  if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
             if len(ps) <= 1:
                 return _raw_load_model(path)
             return _raw_load_model(path, model, **kwargs)
@@ -345,8 +346,8 @@ def _acquire_predict_lock_with_retry(max_wait_sec:int):
 def _prep_lock_for_source(source:str):
     """
     [NEW] train.py 그룹직후 콜에선 더 공격적으로:
-      - 스테일 기준을 TRAIN 값으로 강제
-      - 대기 상한을 기본 30s로 상향 (환경변수로 조절)
+      - 스테일 기준을 TRAIN 값으로 강제 (기본 600s, train과 통일)
+      - 대기 상한은 기본 30s (환경변수 PREDICT_LOCK_WAIT_GROUP_SEC 로 조절)
     """
     src = str(source or "")
     if "그룹직후" in src:
