@@ -83,15 +83,15 @@ except Exception:
 
 # ===== 설정(환경변수로 조절 가능) =====
 TRIGGER_COOLDOWN = {"단기": 3600, "중기": 10800, "장기": 21600}
-MODEL_TYPES = ["lstm", "cnn_lstm", "transformer"]
+MODEL_TYPES = ["lstm", "cnn_lstm", "transformer"]  # (참고) 현재 파일에선 직접 사용 안 함
 MAX_LOOKBACK = int(os.getenv("TRIGGER_MAX_LOOKBACK", "180"))   # 전조 계산시 최근 N행만 사용
 RECENT_DAYS_FOR_FREQ = max(1, int(os.getenv("TRIGGER_FREQ_DAYS", "3")))
 CSV_CHUNKSIZE = max(10000, int(os.getenv("TRIGGER_CSV_CHUNKSIZE", "50000")))
 TRIGGER_MAX_PER_RUN = max(1, int(os.getenv("TRIGGER_MAX_PER_RUN", "999")))  # 1회 루프에서 최대 실행 수
 PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC", "30"))         # _safe_predict_with_timeout 없을 때는 미사용
 
-# 🔧 stale lock(고아 락) 처리 임계
-PREDICT_LOCK_STALE_TRIGGER_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRIGGER_SEC", "120"))
+# 🔧 stale lock(고아 락) 처리 임계 — 프로젝트 전역과 통일(600s)
+PREDICT_LOCK_STALE_TRIGGER_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRIGGER_SEC", "600"))
 
 last_trigger_time = {}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
@@ -242,9 +242,8 @@ def run():
                 print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
                 return
 
-            # [MOVE/RECHECK] 실행 중간에도 락/게이트 변동 시 즉시 종료하기 전에 스테일 락 한 번 더 정리
+            # [RECHECK] 실행 중간에도 스테일 락 한 번 더 정리 → 게이트/락 변동 재확인
             _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
-            # 실행 중 변동 체크
             if _LOCK_PATH and os.path.exists(_LOCK_PATH):
                 print(f"[트리거] 실행 중 전역 락 감지 → 중단")
                 print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
