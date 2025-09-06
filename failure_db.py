@@ -18,6 +18,7 @@ def open_conn():
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute("PRAGMA foreign_keys=ON;")
     return conn
 
 # ──────────────────────────────────────────────────────────────
@@ -35,6 +36,7 @@ def ensure_failure_db():
             return
         try:
             with open_conn() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS failure_patterns (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,9 +58,15 @@ def ensure_failure_db():
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_failure_ts ON failure_patterns(timestamp)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_failure_sym_strat ON failure_patterns(symbol, strategy)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_failure_model ON failure_patterns(model_name)")
+                conn.execute("COMMIT")
             _schema_ready = True
             print("[failure_db] ✅ ensure_failure_db OK")
         except Exception as e:
+            try:
+                with open_conn() as conn:
+                    conn.execute("ROLLBACK")
+            except Exception:
+                pass
             print(f"[failure_db] ❌ ensure_failure_db error: {e}")
 
 # ──────────────────────────────────────────────────────────────
