@@ -1016,9 +1016,9 @@ def _group_active_off():
 def _get_group_stale_sec() -> int:
     """
     predict.py(2번)과 환경변수 합치:
-      - 우선: PREDICT_LOCK_STALE_GROUP_SEC (기본 12)
+      - 우선: PREDICT_LOCK_STALE_GROUP_SEC (기본 600)
       - 백워드: PREDICT_LOCK_STALE_TRAIN_SEC (설정돼 있으면 사용)
-      - 최종 기본: 120
+      - 최종 기본: 600
     """
     v1 = os.getenv("PREDICT_LOCK_STALE_GROUP_SEC")
     if v1 is not None: 
@@ -1028,7 +1028,7 @@ def _get_group_stale_sec() -> int:
     if v2 is not None:
         try: return max(3, int(v2))
         except: pass
-    return 120
+    return 600
 
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None = None):
     threading.Thread(target=_watchdog_loop, args=(stop_event,), daemon=True).start()
