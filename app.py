@@ -38,12 +38,11 @@ except ImportError:
 
 # 🆕 예측 게이트: 전역 안전 임포트 + 폴백(no-op)
 try:
-    from predict import open_predict_gate, close_predict_gate
+    from predict import open_predict_gate, close_predict_gate, predict
 except Exception:
-    def open_predict_gate(*args, **kwargs):
-        return None
-    def close_predict_gate(*args, **kwargs):
-        return None
+    def open_predict_gate(*args, **kwargs): return None
+    def close_predict_gate(*args, **kwargs): return None
+    def predict(*args, **kwargs): raise RuntimeError("predict 불가")
 
 def _safe_open_gate(note: str = ""):
     try:
@@ -412,6 +411,41 @@ else:
         if not _INIT_DONE:
             _init_background_once()
 
+# ===== [ADD] 학습 직후 즉시 예측 실행 헬퍼 =====
+# train.py 내부 유틸 재사용
+try:
+    from train import _await_models_visible as _await_models_visible
+    from train import _has_model_for as _has_model_for
+except Exception:
+    def _await_models_visible(symbols, timeout_sec=20, poll_sec=0.5): return list(symbols or [])
+    def _has_model_for(symbol, strategy): return True
+
+def _predict_after_training(symbols:list[str], source_note:str):
+    """그룹/선택 학습 직후에만 호출. 모델 가시화 대기 → 게이트 열기 → 동기 예측."""
+    if not symbols: return
+    try:
+        await_sec = int(os.getenv("PREDICT_MODEL_AWAIT_SEC","60"))
+    except Exception:
+        await_sec = 60
+    vis = _await_models_visible(symbols, timeout_sec=await_sec)
+    if not vis:
+        print(f"[APP-PRED] 모델 가시화 실패 → 예측 생략 candidates={sorted(set(symbols))}")
+        return
+    _safe_open_gate(source_note)
+    try:
+        for sym in sorted(set(vis)):
+            for strat in ["단기","중기","장기"]:
+                try:
+                    if not _has_model_for(sym, strat):
+                        print(f"[APP-PRED] skip {sym}-{strat}: model missing")
+                        continue
+                    print(f"[APP-PRED] predict {sym}-{strat}")
+                    predict(sym, strat, source=source_note, model_type=None)
+                except Exception as e:
+                    print(f"[APP-PRED] {sym}-{strat} 실패: {e}")
+    finally:
+        _safe_close_gate(source_note + "_end")
+
 # ===== 라우트 =====
 @app.route("/yopo-health")
 def yopo_health():
@@ -713,9 +747,15 @@ def train_symbols():
             group_symbols = SYMBOL_GROUPS[group_idx]
             print(f"🚀 그룹 학습 요청됨 → 그룹 #{group_idx} | 심볼: {group_symbols}")
             _safe_close_gate("train_group_start")  # 🔒 학습 전 predict 게이트 강제 닫기
-            threading.Thread(target=lambda: train.train_models(group_symbols), daemon=True).start()
-            return f"✅ 그룹 #{group_idx} 학습 시작됨 (단일 루프 보장)"
 
+            def _worker():
+                try:
+                    train.train_models(group_symbols)
+                finally:
+                    # ✅ 학습 직후 즉시 예측 실행
+                    _predict_after_training(group_symbols, source_note=f"group{group_idx}_after_train")
+            threading.Thread(target=_worker, daemon=True).start()
+            return f"✅ 그룹 #{group_idx} 학습 시작됨 (단일 루프 보장, 학습 직후 예측 수행)"
         else:
             # 선택 학습: POST {"symbols":["BTCUSDT","ETHUSDT"], "force":true}
             body = request.get_json(silent=True) or {}
@@ -730,8 +770,14 @@ def train_symbols():
                 return resp
 
             _safe_close_gate("train_selected_start")  # 🔒 학습 전 predict 게이트 강제 닫기
-            threading.Thread(target=lambda: train.train_models(symbols), daemon=True).start()
-            return f"✅ {len(symbols)}개 심볼 학습 시작됨 (단일 루프 보장)"
+            def _worker():
+                try:
+                    train.train_models(symbols)
+                finally:
+                    # ✅ 학습 직후 즉시 예측 실행
+                    _predict_after_training(symbols, source_note="selected_after_train")
+            threading.Thread(target=_worker, daemon=True).start()
+            return f"✅ {len(symbols)}개 심볼 학습 시작됨 (단일 루프 보장, 학습 직후 예측 수행)"
     except Exception as e:
         traceback.print_exc(); return f"❌ 오류: {e}", 500
 
