@@ -964,6 +964,29 @@ def _run_smoke_predict(predict_fn, symbol: str):
             ok_any |= _safe_predict_sync(predict_fn, symbol, strat, source="그룹직후(스모크)")
     return ok_any
 
+# === 그룹 예측 독점 플래그 (predict.py와 동일 경로/파일명) ===
+_RUN_DIR = "/persistent/run"
+_GROUP_ACTIVE = os.path.join(_RUN_DIR, "group_predict.active")
+
+def _group_active_on(note:str=""):
+    try:
+        os.makedirs(_RUN_DIR, exist_ok=True)
+        with open(_GROUP_ACTIVE, "w", encoding="utf-8") as f:
+            f.write(note or "1")
+            try: f.flush(); os.fsync(f.fileno())
+            except Exception: pass
+        _fsync_dir(_RUN_DIR)
+    except Exception as e:
+        _safe_print(f"[GROUP_ACTIVE on err] {e}")
+
+def _group_active_off():
+    try:
+        if os.path.exists(_GROUP_ACTIVE):
+            os.remove(_GROUP_ACTIVE)
+            _fsync_dir(_RUN_DIR)
+    except Exception as e:
+        _safe_print(f"[GROUP_ACTIVE off err] {e}")
+
 # === 그룹 루프 ===
 
 def _get_group_stale_sec() -> int:
@@ -986,6 +1009,9 @@ def _get_group_stale_sec() -> int:
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None = None):
     threading.Thread(target=_watchdog_loop, args=(stop_event,), daemon=True).start()
     _reset_watchdog("loop start")
+
+    # 시작 시 혹시 남아있던 플래그 정리
+    _group_active_off()
 
     env_force_ignore = (os.getenv("TRAIN_FORCE_IGNORE_SHOULD","0") == "1")
     env_reset = (os.getenv("RESET_GROUP_ORDER_ON_START","0") == "1")
@@ -1047,69 +1073,81 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                             f"visible_syms={predict_syms}")
 
                 ran_any=False
+                # ← 그룹별 예측 전체를 하나의 보호영역으로 묶고, 플래그를 반드시 해제
                 if predict_syms:
-                    # 🧹 예측 시작 전: 남아있을 수 있는 전역 락 정리/대기
-                    _wait_predict_lock_clear(
-                        timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_PREOPEN_SEC","15")),
-                        stale_sec=_get_group_stale_sec(),
-                        tag=f"group_{idx+1}:pre-open"
-                    )
-                    # 게이트 열기 (우리 예측 시작)
-                    try: open_predict_gate(note=f"group_{idx+1}_start")
-                    except Exception as e: _safe_print(f"[gate open err] {e}")
-                    time.sleep(0.5)
+                    try:
+                        # 🧹 예측 시작 전: 남아있을 수 있는 전역 락 정리/대기
+                        _wait_predict_lock_clear(
+                            timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_PREOPEN_SEC","15")),
+                            stale_sec=_get_group_stale_sec(),
+                            tag=f"group_{idx+1}:pre-open"
+                        )
+                        # ✅ 그룹 예측 독점 플래그 ON
+                        _group_active_on(note=f"group_{idx+1}")
 
-                    _safe_print(f"[PREDICT] group {idx+1} begin")
-                    for symbol in predict_syms:
-                        if stop_event is not None and stop_event.is_set(): break
-                        for strategy in ["단기","중기","장기"]:
+                        # 게이트 열기 (우리 예측 시작)
+                        try: open_predict_gate(note=f"group_{idx+1}_start")
+                        except Exception as e: _safe_print(f"[gate open err] {e}")
+                        time.sleep(0.5)
+
+                        _safe_print(f"[PREDICT] group {idx+1} begin")
+                        for symbol in predict_syms:
                             if stop_event is not None and stop_event.is_set(): break
-                            if not _has_model_for(symbol, strategy):
-                                _safe_print(f"[PREDICT-SKIP] {symbol}-{strategy}: 모델 없음(전략별)")
-                                continue
-                            ran_any |= _safe_predict_sync(
-                                predict, symbol, strategy,
-                                source="그룹직후", model_type=None,
-                                stop_event=stop_event
-                            )
-                    # 게이트 닫기 + 락 정리 + 마킹
-                    try: close_predict_gate(note=f"group_{idx+1}_end")
-                    except Exception as e: _safe_print(f"[gate close err] {e}")
-                    _wait_predict_lock_clear(
-                        timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_POST_SEC","10")),
-                        stale_sec=_get_group_stale_sec(),
-                        tag=f"group_{idx+1}:post-close"
-                    )
-                    try: mark_group_predicted()
-                    except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
-                    _safe_print(f"[PREDICT] group {idx+1} done")
+                            for strategy in ["단기","중기","장기"]:
+                                if stop_event is not None and stop_event.is_set(): break
+                                if not _has_model_for(symbol, strategy):
+                                    _safe_print(f"[PREDICT-SKIP] {symbol}-{strategy}: 모델 없음(전략별)")
+                                    continue
+                                ran_any |= _safe_predict_sync(
+                                    predict, symbol, strategy,
+                                    source="그룹직후", model_type=None,
+                                    stop_event=stop_event
+                                )
+                        # 게이트 닫기 + 락 정리 + 마킹
+                        try: close_predict_gate(note=f"group_{idx+1}_end")
+                        except Exception as e: _safe_print(f"[gate close err] {e}")
+                        _wait_predict_lock_clear(
+                            timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_POST_SEC","10")),
+                            stale_sec=_get_group_stale_sec(),
+                            tag=f"group_{idx+1}:post-close"
+                        )
+                        try: mark_group_predicted()
+                        except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
+                        _safe_print(f"[PREDICT] group {idx+1} done")
+                    finally:
+                        # ✅ 반드시 해제
+                        _group_active_off()
 
                 # ⛑ 스모크 폴백: 예측을 한 건도 못 돌렸다면 최소 1건 보장
                 if not ran_any:
                     cand_symbol = _pick_smoke_symbol(predict_candidates)
                     if cand_symbol:
-                        _safe_print(f"[SMOKE] no visible syms → fallback predict for {cand_symbol}")
-                        # 동일한 게이트/락 프로토콜로 실행
-                        _wait_predict_lock_clear(
-                            timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_PREOPEN_SEC","15")),
-                            stale_sec=_get_group_stale_sec(),
-                            tag=f"group_{idx+1}:smoke-pre"
-                        )
-                        try: open_predict_gate(note=f"group_{idx+1}_smoke_start")
-                        except Exception as e: _safe_print(f"[gate open err] {e}")
-                        time.sleep(0.3)
+                        # 스모크도 독점 플래그 하에서 수행
                         try:
-                            ran_any = _run_smoke_predict(predict, cand_symbol)
-                        finally:
-                            try: close_predict_gate(note=f"group_{idx+1}_smoke_end")
-                            except Exception as e: _safe_print(f"[gate close err] {e}")
+                            _safe_print(f"[SMOKE] no visible syms → fallback predict for {cand_symbol}")
                             _wait_predict_lock_clear(
-                                timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_POST_SEC","10")),
+                                timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_PREOPEN_SEC","15")),
                                 stale_sec=_get_group_stale_sec(),
-                                tag=f"group_{idx+1}:smoke-post"
+                                tag=f"group_{idx+1}:smoke-pre"
                             )
-                            try: mark_group_predicted()
-                            except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
+                            _group_active_on(note=f"group_{idx+1}_smoke")
+                            try: open_predict_gate(note=f"group_{idx+1}_smoke_start")
+                            except Exception as e: _safe_print(f"[gate open err] {e}")
+                            time.sleep(0.3)
+                            try:
+                                ran_any = _run_smoke_predict(predict, cand_symbol)
+                            finally:
+                                try: close_predict_gate(note=f"group_{idx+1}_smoke_end")
+                                except Exception as e: _safe_print(f"[gate close err] {e}")
+                                _wait_predict_lock_clear(
+                                    timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_POST_SEC","10")),
+                                    stale_sec=_get_group_stale_sec(),
+                                    tag=f"group_{idx+1}:smoke-post"
+                                )
+                                try: mark_group_predicted()
+                                except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
+                        finally:
+                            _group_active_off()
                     else:
                         _safe_print(f"[SMOKE] fallback symbol not found → skip")
 
@@ -1136,6 +1174,9 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
             break
         except Exception as e:
             _safe_print(f"[group loop err] {e}\n{traceback.format_exc()}")
+        finally:
+            # 루프 단위 안전 정리
+            _group_active_off()
 
         _safe_print("💓 heartbeat: train loop alive")
         time.sleep(max(1, int(os.getenv("TRAIN_LOOP_IDLE_SEC","3"))))
