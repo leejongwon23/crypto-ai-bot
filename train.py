@@ -132,6 +132,12 @@ def _maybe_run_failure_learn(background=True):
 try: _maybe_run_failure_learn(True)
 except Exception as _e: _safe_print(f"[FAIL-LEARN] init err] {_e}")
 
+# [ADD] failure DB를 모듈 로드시 보장 (예측이 선행되어도 안전)
+try:
+    ensure_failure_db(); _FAILURE_DB_READY = True
+except Exception as _e:
+    _safe_print(f"[FAILURE_DB] init err → {_e}")
+
 NUM_CLASSES=get_NUM_CLASSES()
 FEATURE_INPUT_SIZE=get_FEATURE_INPUT_SIZE()
 DEVICE=torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -750,7 +756,6 @@ def _wait_predict_lock_clear(timeout_sec:int=20, stale_sec:int=120, poll:float=0
             break
         time.sleep(max(0.05, float(poll)))
     if _predict_lock_exists():
-        # 마지막 시도: 아주 짧게라도 강제 해제(훈련 사이클 독점 보장 목적)
         _clear_predict_lock(force=True, stale_sec=stale_sec, tag=f"{tag}|final")
     return not _predict_lock_exists()
 
@@ -762,7 +767,6 @@ _PREDICT_TIMEOUT_SEC=float(os.getenv("PREDICT_TIMEOUT_SEC","30"))
 def _safe_predict_sync(predict_fn,symbol,strategy,source,model_type=None, stop_event: threading.Event | None = None):
     try:
         _safe_print(f"[PREDICT] start {symbol}-{strategy} ({source})")
-        # 동기 호출: 내부에서 락 획득/해제까지 완료됨
         predict_fn(symbol, strategy, source=source, model_type=model_type)
         _safe_print(f"[PREDICT] done  {symbol}-{strategy}")
         return True
@@ -772,11 +776,6 @@ def _safe_predict_sync(predict_fn,symbol,strategy,source,model_type=None, stop_e
 
 # === [ADD] predict_trigger가 사용할 (옵션) 타임아웃 래퍼 익스포트 ===
 def _safe_predict_with_timeout(predict_fn, *, symbol, strategy, source="그룹직후", model_type=None, timeout=None):
-    """
-    predict_trigger.py가 존재하면 가져다 씀. 없으면 무시됨(옵션).
-    내부 predict()는 자체 락/게이트를 준수함.
-    반환: True(성공) / False(타임아웃·에러·취소)
-    """
     t = float(timeout or _PREDICT_TIMEOUT_SEC)
     status, _ = _run_with_timeout(
         lambda: predict_fn(symbol, strategy, source=source, model_type=model_type),
@@ -1012,6 +1011,9 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
 
     # 시작 시 혹시 남아있던 플래그 정리
     _group_active_off()
+    # 루프 시작 즉시 예측 게이트 닫기(외부 조기예측 차단)
+    try: close_predict_gate(note="loop_start")
+    except Exception as e: _safe_print(f"[gate pre-close(err@start) {e}]")
 
     env_force_ignore = (os.getenv("TRAIN_FORCE_IGNORE_SHOULD","0") == "1")
     env_reset = (os.getenv("RESET_GROUP_ORDER_ON_START","0") == "1")
@@ -1045,9 +1047,15 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] group loop enter"); break
                 _reset_watchdog(f"enter group {idx}")
 
-                # 🔒 그룹 학습 전에 예측 게이트 닫기
+                # 🔒 그룹 학습 전 전체 구간 보호: 플래그 ON + 게이트 닫기 + 낡은 예측 락 정리
+                _group_active_on(note=f"group_{idx+1}_train")
                 try: close_predict_gate(note=f"group_{idx+1}_train")
                 except Exception as e: _safe_print(f"[gate pre-close err] {e}")
+                _wait_predict_lock_clear(
+                    timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_PREOPEN_SEC","15")),
+                    stale_sec=_get_group_stale_sec(),
+                    tag=f"group_{idx+1}:pre-train"
+                )
 
                 _safe_print(f"🚀 [group] {idx+1}/{len(groups)} → {group}")
                 _progress(f"group{idx}:start")
@@ -1073,7 +1081,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                             f"visible_syms={predict_syms}")
 
                 ran_any=False
-                # ← 그룹별 예측 전체를 하나의 보호영역으로 묶고, 플래그를 반드시 해제
                 if predict_syms:
                     try:
                         # 🧹 예측 시작 전: 남아있을 수 있는 전역 락 정리/대기
@@ -1082,8 +1089,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                             stale_sec=_get_group_stale_sec(),
                             tag=f"group_{idx+1}:pre-open"
                         )
-                        # ✅ 그룹 예측 독점 플래그 ON
-                        _group_active_on(note=f"group_{idx+1}")
+                        # ✅ 플래그는 이미 ON 상태(학습 시작 시 ON)
 
                         # 게이트 열기 (우리 예측 시작)
                         try: open_predict_gate(note=f"group_{idx+1}_start")
@@ -1115,14 +1121,13 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                         except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
                         _safe_print(f"[PREDICT] group {idx+1} done")
                     finally:
-                        # ✅ 반드시 해제
-                        _group_active_off()
+                        # 해제는 그룹 전체 종료 시점(finally)에서 일괄 수행
+                        pass
 
                 # ⛑ 스모크 폴백: 예측을 한 건도 못 돌렸다면 최소 1건 보장
                 if not ran_any:
                     cand_symbol = _pick_smoke_symbol(predict_candidates)
                     if cand_symbol:
-                        # 스모크도 독점 플래그 하에서 수행
                         try:
                             _safe_print(f"[SMOKE] no visible syms → fallback predict for {cand_symbol}")
                             _wait_predict_lock_clear(
@@ -1130,7 +1135,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                                 stale_sec=_get_group_stale_sec(),
                                 tag=f"group_{idx+1}:smoke-pre"
                             )
-                            _group_active_on(note=f"group_{idx+1}_smoke")
+                            # 이미 플래그 ON 상태 유지
                             try: open_predict_gate(note=f"group_{idx+1}_smoke_start")
                             except Exception as e: _safe_print(f"[gate open err] {e}")
                             time.sleep(0.3)
@@ -1147,12 +1152,15 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                                 try: mark_group_predicted()
                                 except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
                         finally:
-                            _group_active_off()
+                            pass
                     else:
                         _safe_print(f"[SMOKE] fallback symbol not found → skip")
 
                 _prune_caches_and_gc()
                 _progress(f"group{idx}:done")
+
+                # 그룹 보호 플래그 해제(학습+예측 완료)
+                _group_active_off()
 
                 # 심볼 미완료가 있고 중단 정책이면, 남은 그룹 스킵
                 if partial_syms and _ENFORCE_FULL_STRATEGY and _STRICT_HALT_ON_INCOMPLETE:
