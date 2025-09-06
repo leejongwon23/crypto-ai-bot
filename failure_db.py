@@ -22,7 +22,7 @@ def open_conn():
     return conn
 
 # ──────────────────────────────────────────────────────────────
-# 스키마 보장 (프로세스 생애 동안 1회만)
+# 스키ма 보장 (프로세스 생애 동안 1회만)
 # ──────────────────────────────────────────────────────────────
 _schema_ready = False
 _schema_lock = Lock()
@@ -126,36 +126,46 @@ _INVALID_REASON_KEYS = (
     "exception:"            # parsing/기타 예외
 )
 
-def _should_block(row: dict, label_val) -> bool:
-    try:
-        if label_val is None or int(label_val) < 0:
-            return True
-    except Exception:
-        return True
+def _should_block(row: dict, label_val, context: str) -> bool:
+    """
+    컨텍스트 기반 게이트:
+      - evaluation: 엄격. label>=0, entry_price>0 필수.
+      - 그 외(prediction, training, skip 등): 완화. 심볼/전략 존재와 명백한 invalid 사유만 차단.
+    """
+    ctx = (context or "").strip().lower()
 
-    try:
-        ep = float(row.get("entry_price", 0) or 0)
-        if ep <= 0:
-            return True
-    except Exception:
-        return True
-
+    # 공통 필수: 심볼/전략 존재
     if not str(row.get("symbol", "")).strip() or not str(row.get("strategy", "")).strip():
         return True
 
+    # 공통 차단: status=invalid 또는 이유 내 명백 invalid 키워드
     status = str(row.get("status", "")).strip().lower()
     if status == "invalid":
         return True
-
     reason = str(row.get("reason", "")).strip().lower()
     for key in _INVALID_REASON_KEYS:
         if key in reason:
             return True
+
+    if ctx == "evaluation":
+        try:
+            if label_val is None or int(label_val) < 0:
+                return True
+        except Exception:
+            return True
+        try:
+            ep = float(row.get("entry_price", 0) or 0)
+            if ep <= 0:
+                return True
+        except Exception:
+            return True
+    # prediction/training/기타는 완화 → 위 공통 조건만 통과하면 저장
     return False
 
 def insert_failure_record(row, feature_hash=None, feature_vector=None, label=None, context="evaluation"):
     """
-    실패 예측을 기록한다. context: "evaluation" | "prediction"
+    실패 예측을 기록한다.
+    context: "evaluation" | "prediction" | "training" | 기타
     """
     ensure_failure_db()
 
@@ -163,16 +173,19 @@ def insert_failure_record(row, feature_hash=None, feature_vector=None, label=Non
         print("[failure_db] ❌ row must be dict")
         return
 
+    # label 정규화
     try:
         label_val = label if label is not None else row.get("label", -1)
         label_int = int(label_val)
     except Exception:
         label_int = -1
 
-    if _should_block(row, label_int):
-        print("[failure_db] ⛔ blocked invalid failure record (not saved)")
+    # 게이트 체크(컨텍스트 반영)
+    if _should_block(row, label_int, context):
+        print(f"[failure_db] ⛔ blocked record (ctx={context})")
         return
 
+    # 해시 생성
     feature_hash = _build_hash_from_row(row, feature_hash=feature_hash, label=label_int)
     mdl_name = row.get("model", "")
     try:
