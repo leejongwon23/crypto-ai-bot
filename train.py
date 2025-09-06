@@ -68,6 +68,11 @@ _WATCHDOG_ABORT = threading.Event()
 _BG_STARTED = {"meta_fix": False, "failure_train": False, "evo_meta_train": False}
 _FAILURE_DB_READY = False
 
+# === [NEW] 환경 가드 ===
+_ENABLE_TRAIN_FAILURE_RECORD = os.getenv("ENABLE_TRAIN_FAILURE_RECORD","0")=="1"  # 기본 차단
+_ENABLE_BG_FAILURE_TRAIN     = os.getenv("ENABLE_BG_FAILURE_TRAIN","0")=="1"      # 기본 차단
+_ENABLE_EVO_META_BG          = os.getenv("ENABLE_EVO_META_BG","0")=="1"           # 기본 차단
+
 def _progress(tag:str):
     global _LAST_PROGRESS_TS, _LAST_PROGRESS_TAG
     now = time.time()
@@ -119,6 +124,12 @@ try:
 except Exception as _e: _safe_print(f"[HOOK] attach fail → {_e}")
 
 def _maybe_run_failure_learn(background=True):
+    if _is_cold_start():  # 콜드스타트 방지
+        _safe_print("[FAIL-LEARN] cold start → skip")
+        return
+    if not _ENABLE_BG_FAILURE_TRAIN:
+        _safe_print("[FAIL-LEARN] disabled by env → skip")
+        return
     def _job():
         try: import failure_learn
         except Exception as e: _safe_print(f"[FAIL-LEARN] skip ({e})"); return
@@ -204,13 +215,24 @@ def _disk_barrier(paths: list[str]):
         if hasattr(os, "sync"): os.sync()
     except Exception: pass
 
+# === [NEW] 실패기록 가드 ===
+def _maybe_insert_failure(payload:dict, feature_vector:list|None=None):
+    try:
+        if not _ENABLE_TRAIN_FAILURE_RECORD:
+            # 평가/예측 체계 준비 전에는 차단
+            if not ready_for_group_predict():
+                return
+        insert_failure_record(payload, feature_vector=(feature_vector or []))
+    except Exception as e:
+        _safe_print(f"[FAILREC skip] {e}")
+
 def _log_skip(symbol,strategy,reason):
     logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note=reason,status="skipped")
-    insert_failure_record({"symbol":symbol,"strategy":strategy,"model":"all","predicted_class":-1,"success":False,"rate":0.0,"reason":reason},feature_vector=[])
+    _maybe_insert_failure({"symbol":symbol,"strategy":strategy,"model":"all","predicted_class":-1,"success":False,"rate":0.0,"reason":reason},feature_vector=[])
 
 def _log_fail(symbol,strategy,reason):
     logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note=reason,status="failed")
-    insert_failure_record({"symbol":symbol,"strategy":strategy,"model":"all","predicted_class":-1,"success":False,"rate":0.0,"reason":reason},feature_vector=[])
+    _maybe_insert_failure({"symbol":symbol,"strategy":strategy,"model":"all","predicted_class":-1,"success":False,"rate":0.0,"reason":reason},feature_vector=[])
 
 def _strategy_horizon_hours(s:str)->int: return {"단기":4,"중기":24,"장기":168}.get(s,24)
 
@@ -788,8 +810,11 @@ def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
     if stop_event is not None and stop_event.is_set():
         _safe_print(f"[SKIP:{name}] stop during reset"); return
     if _BG_STARTED.get(name, False): return
-    if name=="failure_train" and not _FAILURE_DB_READY:
-        _safe_print("[BG:failure_train] deferred (failure DB not ready yet)")
+    if name=="failure_train" and ( _is_cold_start() or not _ENABLE_BG_FAILURE_TRAIN ):
+        _safe_print("[BG:failure_train] disabled or cold start → skip")
+        return
+    if name=="evo_meta_train" and ( _is_cold_start() or not _ENABLE_EVO_META_BG ):
+        _safe_print("[BG:evo_meta_train] disabled or cold start → skip")
         return
     _BG_STARTED[name] = True
     th=threading.Thread(target=lambda: (fn()), daemon=True)
@@ -918,7 +943,7 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
                 _safe_print(f"[HALT] {symbol} 미완료 → 그룹 진행 중단")
                 break
 
-    # BG 작업 트리거
+    # BG 작업 트리거 (콜드스타트/ENV 가드)
     try:
         import maintenance_fix_meta
         _run_bg_if_not_stopped("meta_fix", maintenance_fix_meta.fix_all_meta_json, stop_event)
