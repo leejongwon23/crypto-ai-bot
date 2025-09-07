@@ -1,4 +1,4 @@
-# config.py (FINAL)
+# config.py (FIXED, 2025-09-08)
 
 import json
 import os
@@ -9,46 +9,46 @@ CONFIG_PATH = "/persistent/config.json"
 # 기본 설정 + 신규 옵션(기본 OFF)
 # ===============================
 _default_config = {
-    "NUM_CLASSES": 20,               # 전역 기본값(최소 보정용)
+    "NUM_CLASSES": 20,
     "FEATURE_INPUT_SIZE": 24,
     "FAIL_AUGMENT_RATIO": 3,
     "MIN_FEATURES": 5,
     "SYMBOLS": ["BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "ADAUSDT"],
     "SYMBOL_GROUP_SIZE": 3,
 
-    # ✅ SSL 캐시 디렉토리(ssl_pretrain/train에서 공통 사용)
+    # ✅ SSL 캐시 디렉토리
     "SSL_CACHE_DIR": "/persistent/ssl_models",
 
     # --- [2] 레짐(시장상태) 태깅 옵션 ---
     "REGIME": {
-        "enabled": False,           # 기본 OFF → 켜면 predict에서 regime 기록/활용
-        "lookback": 200,            # 지표 계산 캔들 수
+        "enabled": False,
+        "lookback": 200,
         "atr_window": 14,
         "rsi_window": 14,
-        "trend_window": 50,         # 이동평균/기울기 등
-        "vol_high_pct": 0.9,        # 변동성 상위 분위수 기준
-        "vol_low_pct": 0.5,         # 변동성 하위 분위수 기준
-        "cooldown_min": 5           # 재계산 쿨다운(분)
+        "trend_window": 50,
+        "vol_high_pct": 0.9,
+        "vol_low_pct": 0.5,
+        "cooldown_min": 5
     },
 
     # --- [3] 확률 캘리브레이션(스케일링) 옵션 ---
     "CALIB": {
-        "enabled": False,           # 기본 OFF → 켜면 train 후/주기적으로 보정 학습
-        "method": "platt",          # "platt" | "temperature"
-        "min_samples": 500,         # 최소 학습 샘플 수
-        "refresh_hours": 12,        # 재학습 주기(시간)
-        "per_model": True,          # 모델별 보정 파라미터 저장 여부
-        "save_dir": "/persistent/calibration",  # 보정 파라미터 저장 경로
-        "fallback_identity": True   # 파라미터 없으면 원시확률 그대로 사용
+        "enabled": False,
+        "method": "platt",  # "platt" | "temperature"
+        "min_samples": 500,
+        "refresh_hours": 12,
+        "per_model": True,
+        "save_dir": "/persistent/calibration",
+        "fallback_identity": True
     },
 
     # --- [5] 실패학습(하드 예시) 옵션 ---
     "FAILLEARN": {
-        "enabled": False,           # 기본 OFF → 켜면 주기적으로 wrong_predictions 재학습
-        "cooldown_min": 60,         # 실행 간 최소 간격(분)
-        "max_samples": 1000,        # 한 번에 재학습 최대 샘플
-        "class_weight_boost": 1.5,  # 실패 클래스 가중치 배수
-        "min_return_abs": 0.003     # |수익률| 최소 임계(너무 작은 잡음 제외)
+        "enabled": False,
+        "cooldown_min": 60,
+        "max_samples": 1000,
+        "class_weight_boost": 1.5,
+        "min_return_abs": 0.003
     },
 }
 
@@ -60,23 +60,23 @@ STRATEGY_CONFIG = {
 }
 
 # ✅ 전략별 양의 수익률 상한(과장 방지용 캡)
-#    - 단기: +12%, 중기: +25%, 장기: +50%
 _STRATEGY_RETURN_CAP_POS_MAX = {
     "단기": 0.12,
     "중기": 0.25,
     "장기": 0.50,
 }
 
-# ✅ 최소 구간 폭 및 반올림 자릿수
-_MIN_RANGE_WIDTH = 0.001   # 0.1%
-_ROUND_DECIMALS = 3        # 소수 셋째 자리
+# ✅ 표시 안정화용 파라미터
+_MIN_RANGE_WIDTH   = 0.0005   # 0.05%
+_ROUND_DECIMALS    = 4        # 소수 넷째 자리
+_EPS_START         = 1e-4     # 첫 구간이 0%로 딱 붙는 걸 회피
+_DISPLAY_MIN_RET   = 1e-4     # 표시에만 쓰는 최소값(0.01%p)
 
 _config = _default_config.copy()
 _dynamic_num_classes = None
 _ranges_cache = {}
 
 def _deep_merge(dst: dict, src: dict):
-    """dict 재귀 병합(dst에 없는 키만 채움)."""
     for k, v in src.items():
         if isinstance(v, dict) and isinstance(dst.get(k), dict):
             _deep_merge(dst[k], v)
@@ -84,19 +84,16 @@ def _deep_merge(dst: dict, src: dict):
             if k not in dst:
                 dst[k] = v
 
-# config.json 로드(+누락 키 보강)
 if os.path.exists(CONFIG_PATH):
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             _loaded = json.load(f)
-        # 사용자가 가진 설정 우선, 기본에서 누락분만 채움
         _config = _loaded if isinstance(_loaded, dict) else _default_config.copy()
         _deep_merge(_config, _default_config)
         print("[✅ config.py] config.json 로드/보강 완료")
     except Exception as e:
         print(f"[⚠️ config.py] config.json 로드 실패 → 기본값 사용: {e}")
 else:
-    # 파일 자체가 없으면 기본으로 생성
     try:
         os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -114,7 +111,7 @@ def save_config():
         print(f"[⚠️ config.py] config.json 저장 실패 → {e}")
 
 # ------------------------
-# ✅ Binance 폴백 상태 로그 (요청사항)
+# ✅ Binance 폴백 상태 로그
 # ------------------------
 try:
     _ENABLE_BINANCE = int(os.getenv("ENABLE_BINANCE", "1"))
@@ -179,8 +176,7 @@ def get_FAILLEARN():
 # 수익률 클래스 경계 유틸
 # ------------------------
 def _round2(x: float) -> float:
-    """소수 셋째 자리 반올림(노이즈 제거)."""
-    return round(float(x), _ROUND_DECIMALS)  # 오타 수정: _ROUNDS_DECIMALS → _ROUND_DECIMALS
+    return round(float(x), _ROUND_DECIMALS)
 
 def _cap_positive_by_strategy(x: float, strategy: str) -> float:
     cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy, None)
@@ -194,15 +190,9 @@ def _enforce_min_width(low: float, high: float):
     return low, high
 
 def _strategy_horizon_hours(strategy: str) -> int:
-    # train.py와 동일 기준
     return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
 
 def _future_max_high_return_series(df, horizon_hours: int):
-    """
-    각 시점 i의 '미래 horizon 동안의 최대 고가' 대비 현재 종가 기준 수익률:
-      r_i = (max(high[i..j]) - close[i]) / close[i]
-    ※ 타임존 문제(Already tz-aware) 방지 로직 포함(train.py 동일 철학)
-    """
     import numpy as np
     import pandas as pd
 
@@ -213,7 +203,6 @@ def _future_max_high_return_series(df, horizon_hours: int):
     close = df["close"].astype(float).values
     high = (df["high"] if "high" in df.columns else df["close"]).astype(float).values
 
-    # tz 처리(UTC 가정→KST 변환 / 이미 tz-aware면 convert)
     if getattr(ts.dt, "tz", None) is None:
         ts = ts.dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
     else:
@@ -251,12 +240,12 @@ def class_to_expected_return(class_id: int, symbol: str, strategy: str):
 
 def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=None, group_size=5):
     """
-    ⚡️미래 최대고가 수익률 기반 클래스 경계 (train.py와 정의 일치)
-    - r_i = (max(high[i..i+h]) - close[i]) / close[i],  h=4h/24h/168h
-    - 전략별 양수 캡 적용(과장 방지)
-    - 최소 구간 폭 보장(0.1%)
-    - 모든 경계 소수 셋째 자리 반올림
-    - 경계 단조성/겹침 자동 보정
+    미래 최대고가 수익률 기반 클래스 경계
+    - r_i = (max(high[i..i+h]) - close[i]) / close[i]
+    - 전략별 양수 캡
+    - 최소 구간 폭
+    - 모든 경계 소수 넷째 자리 반올림
+    - 첫 구간을 0에서 살짝 띄워 표시상 0% 고정 현상 방지
     """
     import numpy as np
     from data.utils import get_kline_by_strategy
@@ -265,10 +254,10 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
 
     def compute_equal_ranges(n_cls, reason=""):
         n_cls = max(4, int(n_cls))
-        # [0.0, +CAP] 균등 분할 (미래 최대고가 수익률은 음수 거의 없음 → 0부터)
         cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy, 0.5)
-        step = (float(cap) - 0.0) / n_cls
-        raw = [(0.0 + i * step, 0.0 + (i + 1) * step) for i in range(n_cls)]
+        start = _EPS_START  # 0이 아닌 작은 양수
+        step = (float(cap) - start) / n_cls
+        raw = [(start + i * step, start + (i + 1) * step) for i in range(n_cls)]
         ranges = []
         for lo, hi in raw:
             lo, hi = _enforce_min_width(lo, hi)
@@ -278,7 +267,6 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
         return _fix_monotonic(ranges)
 
     def _fix_monotonic(ranges):
-        """겹침 제거 및 단조 증가 보정."""
         fixed = []
         prev_hi = None
         for lo, hi in ranges:
@@ -290,6 +278,9 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
                 hi = _round2(lo + _MIN_RANGE_WIDTH)
             fixed.append((lo, hi))
             prev_hi = hi
+        # 첫 구간이 0 또는 0에 매우 근접하면 EPS로 끌어올림(표시 안정)
+        if fixed and fixed[0][0] <= 0.0:
+            fixed[0] = (_round2(_EPS_START), fixed[0][1])
         return fixed
 
     def compute_split_ranges_from_kline():
@@ -298,30 +289,28 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             if df_price is None or len(df_price) < 30 or "close" not in df_price:
                 return compute_equal_ranges(10, reason="가격 데이터 부족")
 
-            # ✅ train.py와 동일한 '미래 최대고가 수익률'로 분포 만들기
             horizon_hours = _strategy_horizon_hours(strategy)
             rets = _future_max_high_return_series(df_price, horizon_hours=horizon_hours)
             rets = rets[np.isfinite(rets)]
             if rets.size < 10:
                 return compute_equal_ranges(10, reason="수익률 샘플 부족")
 
-            # 음수는 이론적으로 거의 없지만(최대 high 기준) 안전하게 0 미만은 0으로 클리핑
             rets = np.maximum(rets, 0.0)
 
-            # 전략별 양수 캡 적용
             cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy)
             if cap is not None and rets.size > 0:
                 rets = np.minimum(rets, cap)
 
-            # 클래스 개수(동적): 기본 설정값을 상한 20으로 제한
             base_n = int(_config.get("NUM_CLASSES", 20))
             n_cls = min(MAX_CLASSES, max(4, base_n))
 
-            # 분위 기반 경계
             if method == "quantile":
                 qs = np.quantile(rets, np.linspace(0, 1, n_cls + 1))
+                # 첫 엣지가 0이면 EPS로 승격(표시 0% 회피)
+                qs[0] = max(float(qs[0]), _EPS_START)
             else:
-                qs = np.linspace(float(rets.min()), float(rets.max()), n_cls + 1)
+                lo0 = max(float(rets.min()), _EPS_START)
+                qs = np.linspace(lo0, float(rets.max()), n_cls + 1)
 
             cooked = []
             for i in range(n_cls):
@@ -336,7 +325,6 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
 
             fixed = _fix_monotonic(cooked)
 
-            # 안전 가드
             if not fixed or len(fixed) < 2:
                 return compute_equal_ranges(10, reason="최종 경계 부족(가드)")
 
@@ -347,11 +335,10 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
 
     all_ranges = compute_split_ranges_from_kline()
 
-    # 캐시 저장
     if symbol is not None and strategy is not None:
         _ranges_cache[(symbol, strategy)] = all_ranges
 
-    # --- 디버그 로깅: 경계/분포/수익률(항상 찍힘) -----------------------------
+    # 디버그 로깅
     try:
         if symbol is not None and strategy is not None:
             import numpy as np
@@ -369,8 +356,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
                         rets_dbg = np.minimum(rets_dbg, cap)
 
                     qs = np.quantile(rets_dbg, [0.00, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 1.00])
-                    def _r2(z):
-                        return round(float(z), _ROUND_DECIMALS)
+                    def _r2(z): return round(float(z), _ROUND_DECIMALS)
                     print(
                         f"[📈 수익률분포] {symbol}-{strategy} "
                         f"min={_r2(qs[0])}, p25={_r2(qs[1])}, p50={_r2(qs[2])}, "
@@ -388,22 +374,20 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
                 print(f"[ℹ️ 수익률분포 스킵] {symbol}-{strategy} → 데이터 부족")
     except Exception as _e:
         print(f"[⚠️ 디버그 로그 실패] {symbol}-{strategy} → {_e}")
-    # -----------------------------------------------------------------------
 
-    # ✅ 동적 클래스 수를 전역 NUM_CLASSES에 반영(그룹 로그와 실제 일치)
+    # ✅ 동적 클래스 수 반영
     try:
         if isinstance(all_ranges, list) and len(all_ranges) >= 2:
             set_NUM_CLASSES(len(all_ranges))
     except Exception:
         pass
 
-    # 그룹 단위 슬라이싱(기존 인터페이스 유지)
     if group_id is None:
         return all_ranges
     return all_ranges[group_id * group_size: (group_id + 1) * group_size]
 
 # ------------------------
-# 🔧 환경변수 기반 퍼포먼스/학습 토글 (신규)
+# 🔧 환경변수 기반 퍼포먼스/학습 토글
 # ------------------------
 def _get_int(name, default):
     try:
@@ -417,20 +401,23 @@ def _get_float(name, default):
     except Exception:
         return float(default)
 
-# Render 환경변수와 연결되는 값들
-CPU_THREADS        = _get_int("OMP_NUM_THREADS", 4)  # 내부 연산 스레드(모델 하나 기준)
+CPU_THREADS        = _get_int("OMP_NUM_THREADS", 4)
 TRAIN_NUM_WORKERS  = _get_int("TRAIN_NUM_WORKERS", 2)
 TRAIN_BATCH_SIZE   = _get_int("TRAIN_BATCH_SIZE", 256)
-ORDERED_TRAIN      = _get_int("ORDERED_TRAIN", 1)    # 1이면 심볼별 단기→중기→장기 후 다음 심볼
-PREDICT_MIN_RETURN = _get_float("PREDICT_MIN_RETURN", 0.01)
+ORDERED_TRAIN      = _get_int("ORDERED_TRAIN", 1)
+
+# ⚠️ ‘표시’ 하한만 책임. 실제 타겟 계산은 모델/서비스 로직에서 결정.
+PREDICT_MIN_RETURN = _get_float("PREDICT_MIN_RETURN", 0.0)  # 강제 하한 제거
+DISPLAY_MIN_RETURN = _get_float("DISPLAY_MIN_RETURN", _DISPLAY_MIN_RET)
+
 SSL_CACHE_DIR      = os.getenv("SSL_CACHE_DIR", _default_config["SSL_CACHE_DIR"])
 
-# 외부에서 import 해서 쓰는 Getter
 def get_CPU_THREADS():        return CPU_THREADS
 def get_TRAIN_NUM_WORKERS():  return TRAIN_NUM_WORKERS
 def get_TRAIN_BATCH_SIZE():   return TRAIN_BATCH_SIZE
 def get_ORDERED_TRAIN():      return ORDERED_TRAIN
 def get_PREDICT_MIN_RETURN(): return PREDICT_MIN_RETURN
+def get_DISPLAY_MIN_RETURN(): return DISPLAY_MIN_RETURN
 def get_SSL_CACHE_DIR():      return os.getenv("SSL_CACHE_DIR", _config.get("SSL_CACHE_DIR", _default_config["SSL_CACHE_DIR"]))
 
 # ------------------------
