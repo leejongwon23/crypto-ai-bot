@@ -5,6 +5,7 @@
 # (2025-09-05c) — [FIX] failure_db 시그니처 조정, 그룹직후 락 강건화
 # (2025-09-05d) — [통일] 스테일 TTL 600s로 통일, 게이트 파일 오탈자 정정, 그룹직후 주석 정합
 # (2025-09-06) — [ROOT FIX] 그룹 예측 독점 플래그 도입 + 게이트 우회(bypass) 지원
+# (2025-09-07) — [보강] meta.class_ranges 최우선 사용(없으면 config 폴백). expected_return/필터/가드/섀도우 모두 일치화.
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -235,6 +236,30 @@ EXP_DEC_MIN = float(os.getenv("EXPLORE_DECAY_MIN", "120"))
 EXP_NEAR = float(os.getenv("EXPLORE_NEAR_GAP", "0.07"))
 EXP_GAMMA = float(os.getenv("EXPLORE_GAMMA", "0.05"))
 
+# ====== [NEW] 메타 class_ranges 우선 헬퍼 ======
+def _ranges_from_meta(meta):
+    try:
+        cr = meta.get("class_ranges", None)
+        if isinstance(cr, list) and len(cr) >= 2 and all(isinstance(x, (list, tuple)) and len(x) == 2 for x in cr):
+            return [(float(a), float(b)) for a, b in cr]
+    except Exception:
+        pass
+    return None
+
+def _class_range_by_meta_or_cfg(cls_id: int, meta, symbol: str, strategy: str):
+    cr = _ranges_from_meta(meta) if isinstance(meta, dict) else None
+    if cr and 0 <= int(cls_id) < len(cr):
+        return cr[int(cls_id)]
+    return get_class_return_range(int(cls_id), symbol, strategy)
+
+def _class_min_meta_or_cfg(cls_id: int, meta, symbol: str, strategy: str) -> float:
+    lo, _ = _class_range_by_meta_or_cfg(cls_id, meta, symbol, strategy)
+    return float(lo)
+
+def _expected_return_meta_or_cfg(cls_id: int, meta, symbol: str, strategy: str) -> float:
+    lo, hi = _class_range_by_meta_or_cfg(cls_id, meta, symbol, strategy)
+    return (float(lo) + float(hi)) / 2.0
+
 # ====== 작은 헬퍼들 ======
 def _load_json(p, default):
     try:
@@ -451,13 +476,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 from evo_meta_learner import predict_evo_meta
                 if callable(predict_evo_meta):
                     pred = int(predict_evo_meta(feat_row.unsqueeze(0), input_size=FEATURE_INPUT_SIZE))
-                    cmin, _ = get_class_return_range(pred, symbol, strategy)
+                    cmin, _ = get_class_return_range(pred, symbol, strategy)  # evo_meta에는 per-model meta 없음 → config 기준
                     if float(cmin) >= MIN_RET_THRESHOLD:
                         final_cls = pred; meta_choice = "evo_meta_learner"
             except Exception as e:
                 print(f"[evo_meta 예외] {e}")
 
-        # (B) 단일 최고 + 탐험
+        # (B) 단일 최고 + 탐험 (메타 경계 우선)
         if final_cls is None:
             best_i, best_score, best_pred = -1, -1.0, None; scores = []
             for i, m in enumerate(outs):
@@ -466,7 +491,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 mask = np.zeros_like(adj, dtype=float)
                 for ci in range(len(adj)):
                     try:
-                        cmin, _ = get_class_return_range(ci, symbol, strategy)
+                        cmin = _class_min_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
                         if float(cmin) >= MIN_RET_THRESHOLD: mask[ci] = 1.0
                     except Exception:
                         pass
@@ -507,16 +532,16 @@ def predict(symbol, strategy, source="일반", model_type=None):
             except Exception:
                 pass
 
-        # (C) 최종 가드
+        # (C) 최종 가드(메타 경계 우선)
         try:
-            cmin_sel, _ = get_class_return_range(final_cls, symbol, strategy)
+            cmin_sel, _ = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
             if float(cmin_sel) < MIN_RET_THRESHOLD:
                 best_m, best_sc, best_cls = None, -1.0, None
                 for m in outs:
                     adj = m.get("adjusted_probs", m["calib_probs"]); val_f1 = float(m.get("val_f1", 0.6))
                     for ci in range(len(adj)):
                         try:
-                            cm, _ = get_class_return_range(ci, symbol, strategy)
+                            cm = _class_min_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
                             if float(cm) < MIN_RET_THRESHOLD: continue
                             sc = float(adj[ci]) * (0.5 + 0.5 * max(0.0, min(1.0, val_f1)))
                             if sc > best_sc: best_sc, best_m, best_cls = sc, m, int(ci)
@@ -528,9 +553,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[임계 가드 예외] {e}")
 
-        # 로깅
+        # 로깅 (expected_return도 메타 경계 우선)
         current = float(df.iloc[-1]["close"])
-        exp_ret = class_to_expected_return(final_cls, symbol, strategy)
+        exp_ret = _expected_return_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
         entry = current
         def _topk(p, k=3): return [int(i) for i in np.argsort(p)[::-1][:k]]
         topk = _topk((chosen or outs[0])["calib_probs"]) if (chosen or outs) else []
@@ -564,7 +589,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             calib_ver=get_calibration_version()
         )
 
-        # 섀도우 로깅
+        # 섀도우 로깅(메타 경계 우선)
         try:
             for m in outs:
                 if chosen and m.get("model_path") == chosen.get("model_path"): continue
@@ -575,13 +600,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     mask = np.zeros_like(adj, dtype=float)
                     for ci in range(len(adj)):
                         try:
-                            cmin, _ = get_class_return_range(ci, symbol, strategy)
+                            cmin = _class_min_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
                             if float(cmin) >= MIN_RET_THRESHOLD: mask[ci] = 1.0
                         except Exception: pass
                     adj2 = adj * mask
                     if np.sum(adj2) == 0: continue
                     adj2 = adj2 / np.sum(adj2); pred_i = int(np.argmax(adj2)); src = adj2
-                exp_i = class_to_expected_return(pred_i, symbol, strategy)
+                exp_i = _expected_return_meta_or_cfg(pred_i, m.get("meta"), symbol, strategy)
                 top_i = [int(i) for i in np.argsort(src)[::-1][:3]]
                 note_s = {
                     "regime": regime, "shadow": True,
@@ -706,8 +731,11 @@ def evaluate_predictions(get_price_fn):
                                     wrong_writer = csv.DictWriter(f_wrong, fieldnames=sorted(r.keys())); wrong_writer.writeheader(); wrong_written = True
                                 wrong_writer.writerow({k: r.get(k, "") for k in r.keys()}); continue
                         actual_max = float(fut["high"].max()); gain = (actual_max - entry) / (entry + 1e-12)
-                        if pred_cls >= 0: cmin, cmax = get_class_return_range(pred_cls, sym, strat)
-                        else: cmin, cmax = (0.0, 0.0)
+                        if pred_cls >= 0: 
+                            try: cmin, cmax = get_class_return_range(pred_cls, sym, strat)  # 평가 임계는 보수적으로 config 기준 유지
+                            except Exception: cmin, cmax = (0.0, 0.0)
+                        else: 
+                            cmin, cmax = (0.0, 0.0)
                         reached = gain >= cmin
                         if now_local() < deadline and reached:
                             status = "v_success" if str(r.get("volatility","")).strip().lower() in ["1","true"] else "success"
@@ -799,7 +827,7 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             cprobs = apply_calibration(probs, symbol=symbol, strategy=strategy, regime=regime, model_meta=meta).astype(float)
             outs.append({"raw_probs": probs, "calib_probs": cprobs, "predicted_class": int(np.argmax(cprobs)),
                          "group_id": gid, "model_type": mtype, "model_path": model_path, "val_f1": val_f1,
-                         "symbol": symbol, "strategy": strategy})
+                         "symbol": symbol, "strategy": strategy, "meta": meta})  # ← meta 동봉
             entry_price = df["close"].iloc[-1]
             allpreds.append({"class": int(np.argmax(cprobs)), "probs": cprobs, "entry_price": float(entry_price),
                              "num_classes": num_cls, "group_id": gid, "model_name": mtype, "model_symbol": symbol,
