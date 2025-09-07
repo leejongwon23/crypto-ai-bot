@@ -22,7 +22,7 @@ def open_conn():
     return conn
 
 # ──────────────────────────────────────────────────────────────
-# 스키ма 보장 (프로세스 생애 동안 1회만)
+# 스키마 보장 (프로세스 생애 동안 1회만)
 # ──────────────────────────────────────────────────────────────
 _schema_ready = False
 _schema_lock = Lock()
@@ -131,6 +131,7 @@ def _should_block(row: dict, label_val, context: str) -> bool:
     컨텍스트 기반 게이트:
       - evaluation: 엄격. label>=0, entry_price>0 필수.
       - 그 외(prediction, training, skip 등): 완화. 심볼/전략 존재와 명백한 invalid 사유만 차단.
+      - 추가: 예측/섀도우 단계는 '실패' 보관 대상 아님 → 차단.
     """
     ctx = (context or "").strip().lower()
 
@@ -147,6 +148,12 @@ def _should_block(row: dict, label_val, context: str) -> bool:
         if key in reason:
             return True
 
+    # 예측/섀도우 단계 레코드 차단 (첫예측·성공 편향 상황 고려)
+    if ctx != "evaluation":
+        direction = str(row.get("direction", ""))
+        if ("예측" in direction) or ("shadow" in reason) or ("predicted" in reason):
+            return True
+
     if ctx == "evaluation":
         try:
             if label_val is None or int(label_val) < 0:
@@ -159,7 +166,7 @@ def _should_block(row: dict, label_val, context: str) -> bool:
                 return True
         except Exception:
             return True
-    # prediction/training/기타는 완화 → 위 공통 조건만 통과하면 저장
+    # prediction/training/기타는 위 조건만 통과하면 저장
     return False
 
 def insert_failure_record(row, feature_hash=None, feature_vector=None, label=None, context="evaluation"):
@@ -317,3 +324,6 @@ def load_existing_failure_hashes():
     except Exception as e:
         print(f"[failure_db] ❌ load_existing_failure_hashes error: {e}")
         return set()
+
+# 모듈 임포트 시 테이블 1회 보장
+ensure_failure_db()
