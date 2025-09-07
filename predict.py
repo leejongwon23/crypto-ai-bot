@@ -6,6 +6,7 @@
 # (2025-09-05d) — [통일] 스테일 TTL 600s로 통일, 게이트 파일 오탈자 정정, 그룹직후 주석 정합
 # (2025-09-06) — [ROOT FIX] 그룹 예측 독점 플래그 도입 + 게이트 우회(bypass) 지원
 # (2025-09-07) — [보강] meta.class_ranges 최우선 사용(없으면 config 폴백). expected_return/필터/가드/섀도우 모두 일치화.
+# (2025-09-07b) — [로그강화] 선택 클래스의 동적 범위/중앙값/포지션을 예측·섀도우 로그에 명시
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -36,12 +37,6 @@ PREDICT_LOCK_STALE_TRAIN_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRAIN_SEC", "60
 def _now_kst(): return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def is_predict_gate_open():
-    """
-    ✅ 기본 open, 단 아래 조건이면 닫힘으로 간주:
-      - FORCE_PREDICT_CLOSE=1
-      - /persistent/predict.block 존재
-      - /persistent/run/predict_gate.json 이 있고 "open": False
-    """
     try:
         if os.getenv("FORCE_PREDICT_CLOSE", "0") == "1":
             return False
@@ -56,9 +51,8 @@ def is_predict_gate_open():
         return True
 
 def _bypass_gate_for_source(source: str) -> bool:
-    """그룹예측/특정 소스에 대해 게이트 체크를 우회."""
     s = str(source or "")
-    if "그룹직후" in s:  # train.py에서의 그룹 예측 호출
+    if "그룹직후" in s:
         return True
     bl = os.getenv("PREDICT_GATE_BYPASS_SOURCES", "")
     return any(t and t in s for t in [x.strip() for x in bl.split(",") if x.strip()])
@@ -75,7 +69,6 @@ def open_predict_gate(note=""):
             json.dump({"open": True, "opened_at": _now_kst().isoformat(), "note": note}, f, ensure_ascii=False)
             try: f.flush(); os.fsync(f.fileno())
             except Exception: pass
-        # 안전: block 파일이 있으면 제거
         if os.path.exists(PREDICT_BLOCK):
             try: os.remove(PREDICT_BLOCK)
             except Exception: pass
@@ -88,7 +81,6 @@ def close_predict_gate(note=""):
             json.dump({"open": False, "closed_at": _now_kst().isoformat(), "note": note}, f, ensure_ascii=False)
             try: f.flush(); os.fsync(f.fileno())
             except Exception: pass
-        # block 존재 보장(외부 트리거 차단)
         try:
             with open(PREDICT_BLOCK, "a") as bf:
                 try: bf.flush(); os.fsync(bf.fileno())
@@ -115,11 +107,6 @@ def _clear_stale_lock(ttl_sec: int, tag: str = ""):
         pass
 
 def _acquire_predict_lock():
-    """
-    ✅ 원자적 생성 + 스테일 감지:
-       - 락이 살아있으면 False
-       - 스테일이면 제거 후 재시도
-    """
     try:
         _clear_stale_lock(PREDICT_LOCK_TTL, tag="(normal)")
         fd = os.open(PREDICT_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -140,7 +127,7 @@ def _release_predict_lock():
     except Exception:
         pass
 
-# ====== 예측 하트비트(경량 진행 로그) ======
+# ====== 예측 하트비트 ======
 import threading
 PREDICT_HEARTBEAT_SEC = int(os.getenv("PREDICT_HEARTBEAT_SEC", "3"))
 
@@ -158,7 +145,7 @@ def _predict_hb_loop(stop_evt: threading.Event, tag: str):
             pass
         stop_evt.wait(max(1, PREDICT_HEARTBEAT_SEC))
 
-# ====== 옵션 모듈(없으면 안전 대체) ======
+# ====== 옵션 모듈 ======
 try:
     from window_optimizer import find_best_windows
 except Exception:
@@ -184,7 +171,7 @@ except Exception:
     def apply_calibration(probs, *, symbol=None, strategy=None, regime=None, model_meta=None): return probs
     def get_calibration_version(): return "none"
 
-# ====== 모델 로딩 어댑터(.pt/.ptz/.safetensors 모두) ======
+# ====== 모델 로딩 어댑터 ======
 try:
     import inspect
     from model_io import load_model as _raw_load_model
@@ -259,6 +246,15 @@ def _class_min_meta_or_cfg(cls_id: int, meta, symbol: str, strategy: str) -> flo
 def _expected_return_meta_or_cfg(cls_id: int, meta, symbol: str, strategy: str) -> float:
     lo, hi = _class_range_by_meta_or_cfg(cls_id, meta, symbol, strategy)
     return (float(lo) + float(hi)) / 2.0
+
+def _position_from_range(lo: float, hi: float) -> str:
+    try:
+        lo = float(lo); hi = float(hi)
+        if hi <= 0 and lo < 0: return "short"
+        if lo >= 0 and hi > 0: return "long"
+        return "neutral"
+    except Exception:
+        return "neutral"
 
 # ====== 작은 헬퍼들 ======
 def _load_json(p, default):
@@ -368,7 +364,6 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     except Exception as e:
         print(f"[failed_result log_prediction 오류] {e}")
     try:
-        # [FIX] failure_db 시그니처: (record_dict, feature_vector) 만 전달
         if X_input is not None:
             insert_failure_record(res, feature_vector=np.array(X_input).flatten().tolist())
     except Exception as e:
@@ -385,11 +380,6 @@ def _acquire_predict_lock_with_retry(max_wait_sec:int):
     return False
 
 def _prep_lock_for_source(source:str):
-    """
-    [NEW] train.py 그룹직후 콜에선 더 공격적으로:
-      - 스테일 기준을 TRAIN 값으로 강제 (기본 600s, train과 통일)
-      - 대기 상한은 기본 30s (환경변수 PREDICT_LOCK_WAIT_GROUP_SEC 로 조절)
-    """
     src = str(source or "")
     if "그룹직후" in src:
         _clear_stale_lock(PREDICT_LOCK_STALE_TRAIN_SEC, tag="(group)")
@@ -401,20 +391,16 @@ def _prep_lock_for_source(source:str):
 
 # ====== 핵심: 예측 ======
 def predict(symbol, strategy, source="일반", model_type=None):
-    # 0) 그룹 독점 플래그: 그룹예측 중엔 외부 요청 거절
     if _group_active() and not _bypass_gate_for_source(source):
         return failed_result(symbol or "None", strategy or "None", reason="group_predict_active", source=source, X_input=None)
 
-    # 1) 게이트: 그룹예측 호출은 우회, 그 외엔 기존 규칙 적용
     if not (_bypass_gate_for_source(source) or is_predict_gate_open()):
         return failed_result(symbol or "None", strategy or "None", reason="predict_gate_closed", source=source, X_input=None)
 
-    # 🔒 락: 그룹직후면 스테일 클리어+대기 연장
     lock_wait = _prep_lock_for_source(source)
     if not _acquire_predict_lock_with_retry(lock_wait):
         return failed_result(symbol or "None", strategy or "None", reason="predict_lock_timeout", source=source, X_input=None)
 
-    # 🫀 하트비트 시작
     _hb_stop = threading.Event()
     _hb_tag = f"{symbol}-{strategy}"
     _hb_thread = threading.Thread(target=_predict_hb_loop, args=(_hb_stop, _hb_tag), daemon=True)
@@ -476,13 +462,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 from evo_meta_learner import predict_evo_meta
                 if callable(predict_evo_meta):
                     pred = int(predict_evo_meta(feat_row.unsqueeze(0), input_size=FEATURE_INPUT_SIZE))
-                    cmin, _ = get_class_return_range(pred, symbol, strategy)  # evo_meta에는 per-model meta 없음 → config 기준
+                    cmin, _ = get_class_return_range(pred, symbol, strategy)
                     if float(cmin) >= MIN_RET_THRESHOLD:
                         final_cls = pred; meta_choice = "evo_meta_learner"
             except Exception as e:
                 print(f"[evo_meta 예외] {e}")
 
-        # (B) 단일 최고 + 탐험 (메타 경계 우선)
+        # (B) 단일 최고 + 탐험
         if final_cls is None:
             best_i, best_score, best_pred = -1, -1.0, None; scores = []
             for i, m in enumerate(outs):
@@ -532,7 +518,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             except Exception:
                 pass
 
-        # (C) 최종 가드(메타 경계 우선)
+        # (C) 최종 가드
         try:
             cmin_sel, _ = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
             if float(cmin_sel) < MIN_RET_THRESHOLD:
@@ -553,12 +539,16 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[임계 가드 예외] {e}")
 
-        # 로깅 (expected_return도 메타 경계 우선)
+        # ===== 로깅: 동적 범위/중앙값/포지션 명시 =====
+        lo_sel, hi_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
+        exp_ret = (float(lo_sel) + float(hi_sel)) / 2.0
+        pos_sel = _position_from_range(lo_sel, hi_sel)
+
         current = float(df.iloc[-1]["close"])
-        exp_ret = _expected_return_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
         entry = current
         def _topk(p, k=3): return [int(i) for i in np.argsort(p)[::-1][:k]]
         topk = _topk((chosen or outs[0])["calib_probs"]) if (chosen or outs) else []
+
         note = {
             "regime": regime,
             "meta_choice": meta_choice,
@@ -568,6 +558,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "min_return_threshold": float(MIN_RET_THRESHOLD),
             "used_minret_filter": bool(used_minret),
             "explore_used": ("best_single_explore" in str(meta_choice)),
+            # ── 추가: 선택 클래스의 동적 경계/중앙값/포지션
+            "class_range_lo": float(lo_sel),
+            "class_range_hi": float(hi_sel),
+            "expected_return_mid": float(exp_ret),
+            "position": pos_sel,
         }
         ensure_prediction_log_exists()
         log_prediction(
@@ -578,7 +573,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             predicted_class=final_cls, label=final_cls,
             note=json.dumps(note, ensure_ascii=False),
             top_k=topk, success=False, reason="predicted",
-            rate=exp_ret, return_value=0.0,
+            rate=float(exp_ret), return_value=0.0,
             source=("진화형" if meta_choice=="evo_meta_learner" else "기본"),
             group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None),
             feature_vector=torch.tensor(X[-1], dtype=torch.float32).numpy(),
@@ -589,7 +584,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             calib_ver=get_calibration_version()
         )
 
-        # 섀도우 로깅(메타 경계 우선)
+        # 섀도우 로깅(동일 정보 포함)
         try:
             for m in outs:
                 if chosen and m.get("model_path") == chosen.get("model_path"): continue
@@ -606,13 +601,22 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     adj2 = adj * mask
                     if np.sum(adj2) == 0: continue
                     adj2 = adj2 / np.sum(adj2); pred_i = int(np.argmax(adj2)); src = adj2
-                exp_i = _expected_return_meta_or_cfg(pred_i, m.get("meta"), symbol, strategy)
+
+                lo_i, hi_i = _class_range_by_meta_or_cfg(pred_i, m.get("meta"), symbol, strategy)
+                exp_i = (float(lo_i) + float(hi_i)) / 2.0
+                pos_i = _position_from_range(lo_i, hi_i)
                 top_i = [int(i) for i in np.argsort(src)[::-1][:3]]
+
                 note_s = {
                     "regime": regime, "shadow": True,
                     "model_path": os.path.basename(m.get("model_path", "")),
                     "model_type": m.get("model_type", ""), "val_f1": float(m.get("val_f1", 0.0)),
                     "calib_ver": get_calibration_version(), "min_return_threshold": float(MIN_RET_THRESHOLD),
+                    # ── 추가: 섀도우 선택 클래스의 동적 경계/중앙값/포지션
+                    "class_range_lo": float(lo_i),
+                    "class_range_hi": float(hi_i),
+                    "expected_return_mid": float(exp_i),
+                    "position": pos_i,
                 }
                 log_prediction(
                     symbol=symbol, strategy=strategy, direction="예측(섀도우)",
@@ -622,7 +626,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     predicted_class=pred_i, label=pred_i,
                     note=json.dumps(note_s, ensure_ascii=False),
                     top_k=top_i, success=False, reason="shadow",
-                    rate=exp_i, return_value=0.0, source="섀도우",
+                    rate=float(exp_i), return_value=0.0, source="섀도우",
                     group_id=m.get("group_id",0), feature_vector=torch.tensor(X[-1], dtype=torch.float32).numpy(),
                     regime=regime,
                     meta_choice="shadow",
@@ -635,12 +639,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
         return {
             "symbol": symbol, "strategy": strategy, "model": "meta", "class": final_cls,
-            "expected_return": exp_ret, "timestamp": now_kst().isoformat(), "source": source,
+            "expected_return": float(exp_ret), "timestamp": now_kst().isoformat(), "source": source,
             "regime": regime, "reason": ("진화형 메타 최종 선택" if meta_choice=='evo_meta_learner'
                                          else f"최고 확률 단일 모델: {meta_choice}")
         }
     finally:
-        # 하트비트 종료 및 락 해제(반드시)
         try:
             _hb_stop.set()
             _hb_thread.join(timeout=2)
@@ -669,7 +672,6 @@ def evaluate_predictions(get_price_fn):
             dir_name = os.path.dirname(P) or "."
             fd, tmp = tempfile.mkstemp(prefix="predlog_", suffix=".csv", dir=dir_name, text=True)
             os.close(fd)
-            # ✅ 줄바꿈 연속기호(\) 제거: 괄호로 감싸 안전한 다중 context manager
             with (
                 open(tmp, "w", encoding="utf-8-sig", newline="") as f_tmp,
                 open(EVAL, "w", encoding="utf-8-sig", newline="") as f_eval,
@@ -732,7 +734,7 @@ def evaluate_predictions(get_price_fn):
                                 wrong_writer.writerow({k: r.get(k, "") for k in r.keys()}); continue
                         actual_max = float(fut["high"].max()); gain = (actual_max - entry) / (entry + 1e-12)
                         if pred_cls >= 0: 
-                            try: cmin, cmax = get_class_return_range(pred_cls, sym, strat)  # 평가 임계는 보수적으로 config 기준 유지
+                            try: cmin, cmax = get_class_return_range(pred_cls, sym, strat)
                             except Exception: cmin, cmax = (0.0, 0.0)
                         else: 
                             cmin, cmax = (0.0, 0.0)
@@ -827,7 +829,7 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             cprobs = apply_calibration(probs, symbol=symbol, strategy=strategy, regime=regime, model_meta=meta).astype(float)
             outs.append({"raw_probs": probs, "calib_probs": cprobs, "predicted_class": int(np.argmax(cprobs)),
                          "group_id": gid, "model_type": mtype, "model_path": model_path, "val_f1": val_f1,
-                         "symbol": symbol, "strategy": strategy, "meta": meta})  # ← meta 동봉
+                         "symbol": symbol, "strategy": strategy, "meta": meta})
             entry_price = df["close"].iloc[-1]
             allpreds.append({"class": int(np.argmax(cprobs)), "probs": cprobs, "entry_price": float(entry_price),
                              "num_classes": num_cls, "group_id": gid, "model_name": mtype, "model_symbol": symbol,
