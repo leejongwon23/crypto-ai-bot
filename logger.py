@@ -30,8 +30,9 @@ BASE_PRED_HEADERS = [
     "source","volatility","source_exchange"
 ]
 EXTRA_PRED_HEADERS = ["regime","meta_choice","raw_prob","calib_prob","calib_ver"]
-# ✅ feature_vector 포함(긴 벡터는 축약 저장)
-PREDICTION_HEADERS = BASE_PRED_HEADERS + EXTRA_PRED_HEADERS + ["feature_vector"]
+# ✅ feature_vector + (NEW) class return 3컬럼
+CLASS_RANGE_HEADERS = ["class_return_min","class_return_max","class_return_text"]
+PREDICTION_HEADERS = BASE_PRED_HEADERS + EXTRA_PRED_HEADERS + ["feature_vector"] + CLASS_RANGE_HEADERS
 
 # 청크 크기 기본값
 CHUNK = 50_000
@@ -110,17 +111,15 @@ def ensure_prediction_log_exists():
             print("[✅ ensure_prediction_log_exists] prediction_log.csv 생성(확장 스키마)")
         else:
             existing = _read_csv_header(PREDICTION_LOG)
-            if not existing or "timestamp" not in existing or "symbol" not in existing:
+            if existing != PREDICTION_HEADERS:
                 bak = PREDICTION_LOG + ".bak"
                 os.replace(PREDICTION_LOG, bak)
                 with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as out, \
                      open(bak, "r", encoding="utf-8-sig") as src:
                     w = csv.writer(out); w.writerow(PREDICTION_HEADERS)
                     reader = csv.reader(src)
-                    try:
-                        next(reader)
-                    except StopIteration:
-                        reader = []
+                    try: next(reader)  # old header skip
+                    except StopIteration: reader = []
                     for row in reader:
                         row = (row + [""] * len(PREDICTION_HEADERS))[:len(PREDICTION_HEADERS)]
                         w.writerow(row)
@@ -132,17 +131,12 @@ def ensure_prediction_log_exists():
 # (NEW) 용량 기반 로그 로테이션
 # -------------------------
 def rotate_prediction_log_if_needed(max_mb: int = 200, backups: int = 3):
-    """
-    prediction_log.csv 용량이 max_mb(MB)를 넘으면 .1, .2 ...로 회전.
-    """
     try:
         if not os.path.exists(PREDICTION_LOG):
             return
         size_mb = os.path.getsize(PREDICTION_LOG) / (1024 * 1024)
         if size_mb < max_mb:
             return
-
-        # 오래된 백업부터 삭제/이동
         for i in range(backups, 0, -1):
             old = f"{PREDICTION_LOG}.{i}"
             if i == backups and os.path.exists(old):
@@ -151,8 +145,6 @@ def rotate_prediction_log_if_needed(max_mb: int = 200, backups: int = 3):
                 prev = f"{PREDICTION_LOG}.{i-1}" if i-1 > 0 else PREDICTION_LOG
                 if os.path.exists(prev):
                     shutil.move(prev, old)
-
-        # 빈 원본 생성(헤더 포함)
         ensure_prediction_log_exists()
         print(f"[logger] 🔁 rotate: {size_mb:.1f}MB → rotated with {backups} backups")
     except Exception as e:
@@ -347,10 +339,6 @@ def _normalize_status(df: pd.DataFrame) -> pd.DataFrame:
 # 메모리 안전 집계 (청크 기반)
 # -------------------------
 def get_meta_success_rate(strategy, min_samples: int = 1):
-    """
-    model == 'meta' 만 집계. status ∈ {success, fail, v_success, v_fail}
-    min_samples 미만이면 0.0 반환.
-    """
     if not os.path.exists(PREDICTION_LOG):
         return 0.0
     usecols = ["timestamp","strategy","model","status","success"]
@@ -360,14 +348,12 @@ def get_meta_success_rate(strategy, min_samples: int = 1):
         usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success"]],
         chunksize=CHUNK
     ):
-        # 메타만 & 평가 완료행만
         if "model" in chunk.columns:
             chunk = chunk[chunk["model"] == "meta"]
         if "strategy" in chunk.columns:
             chunk = chunk[chunk["strategy"] == strategy]
         if chunk.empty:
             continue
-        # status 컬럼 우선, 없으면 success 불리언으로 대체
         if "status" in chunk.columns and chunk["status"].notna().any():
             mask = chunk["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
             chunk = chunk[mask]
@@ -381,7 +367,6 @@ def get_meta_success_rate(strategy, min_samples: int = 1):
     return float(succ / total)
 
 def get_strategy_eval_count(strategy: str):
-    """해당 전략의 평가 건수(성공/실패 확정행만, 청크 누산)."""
     if not os.path.exists(PREDICTION_LOG):
         return 0
     usecols = ["strategy","status","success"]
@@ -399,12 +384,10 @@ def get_strategy_eval_count(strategy: str):
             mask = chunk["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
             count += int(mask.sum())
         elif "success" in chunk.columns:
-            # success가 쓰였던 과거 포맷(평가 시점 기록)
             count += int(len(chunk))
     return int(count)
 
 def get_actual_success_rate(strategy, min_samples: int = 1):
-    """전략별 전체 성공률(메타/섀도우 포함), 청크 누산."""
     if not os.path.exists(PREDICTION_LOG):
         return 0.0
     usecols = ["strategy","status","success"]
@@ -459,7 +442,6 @@ def _align_row_to_header(row, header):
         row = row[:len(header)]
     return row
 
-# 모델/모델명 정규화(unknown/빈값 방지)
 def _clean_str(x):
     s = str(x).strip() if x is not None else ""
     if s.lower() in {"", "unknown", "none", "nan", "null"}:
@@ -473,13 +455,10 @@ def _normalize_model_fields(model, model_name, symbol, strategy):
         m = mn
     if not mn and m:
         mn = m
-    # 둘 다 비었으면 충돌 최소화를 위해 심볼/전략 기반 기본값
     if not m and not mn:
         base = f"auto_{symbol}_{strategy}"
         m = mn = base
     return m, mn
-
-# failure_db 초기화 1회 시도(있을 때만) — 위로 이동/강화되어 명시 로그를 남깁니다.
 
 def log_prediction(
     symbol, strategy, direction=None, entry_price=0, target_price=0,
@@ -489,10 +468,11 @@ def log_prediction(
     source="일반", volatility=False, feature_vector=None,
     source_exchange="BYBIT",
     # 확장 필드
-    regime=None, meta_choice=None, raw_prob=None, calib_prob=None, calib_ver=None
+    regime=None, meta_choice=None, raw_prob=None, calib_prob=None, calib_ver=None,
+    # (NEW) 클래스 수익률 범위 3컬럼
+    class_return_min=None, class_return_max=None, class_return_text=None,
 ):
     from datetime import datetime as _dt
-    # 실패 DB는 필요 시에만 지연 import
     try:
         from failure_db import insert_failure_record
     except Exception:
@@ -501,16 +481,13 @@ def log_prediction(
     LOG_FILE = PREDICTION_LOG
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
-    # 파일락으로 회전+쓰기 보호
     with _FileLock(_PRED_LOCK_PATH, timeout=10.0):
-        # ✅ 용량 체크 & 로테이션
         rotate_prediction_log_if_needed()
         ensure_prediction_log_exists()
 
         now = _dt.now(pytz.timezone("Asia/Seoul")).isoformat() if timestamp is None else timestamp
         top_k_str = ",".join(map(str, top_k)) if top_k else ""
 
-        # 기본값/정규화
         predicted_class = predicted_class if predicted_class is not None else -1
         label = label if label is not None else -1
         reason = (reason or "사유없음").strip()
@@ -520,19 +497,14 @@ def log_prediction(
         target_price = float(target_price or 0.0)
         model, model_name = _normalize_model_fields(model, model_name, symbol, strategy)
 
-        # ⬅︎ "기본" 추가 (predict.py 호환)
         allowed_sources = ["일반","기본","meta","evo_meta","baseline_meta","진화형","평가","단일","변동성","train_loop","섀도우"]
         if source not in allowed_sources:
             source = "일반"
 
-        # ▶ 실패DB 컨텍스트 분기
-        #   - 평가 행: source=="평가" 또는 direction 이 "평가:" 로 시작 → context="evaluation"
-        #   - 그 외(예측/섀도우/탐험 등): context="prediction"
         dir_s = str(direction or "")
         src_s = str(source or "")
         ctx = "evaluation" if (src_s == "평가" or dir_s.startswith("평가")) else "prediction"
 
-        # feature_vector 축약(길면 head/tail만)
         fv_serial = ""
         try:
             if feature_vector is not None:
@@ -558,7 +530,11 @@ def log_prediction(
             (float(raw_prob) if raw_prob is not None else ""),
             (float(calib_prob) if calib_prob is not None else ""),
             (str(calib_ver) if calib_ver is not None else ""),
-            fv_serial
+            fv_serial,
+            # 새 컬럼 3개
+            (float(class_return_min) if class_return_min is not None else ""),
+            (float(class_return_max) if class_return_max is not None else ""),
+            (str(class_return_text) if class_return_text is not None else ""),
         ]
 
         try:
@@ -577,11 +553,6 @@ def log_prediction(
 
             print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} class={predicted_class} | success={success} | src={source_exchange} | reason={reason}")
 
-            # -------------------------
-            # 실패 패턴 DB 기록 (노이즈 차단)
-            #  - 평가 단계(context='evaluation')에서만 기록
-            #  - label/entry_price 유효성 체크
-            # -------------------------
             should_record_failure = (
                 insert_failure_record is not None
                 and (ctx == "evaluation")
@@ -614,14 +585,13 @@ def log_prediction(
                     feature_hash=feature_hash, label=label, feature_vector=safe_vector, context=ctx
                 )
             else:
-                # 감사 로그로만 남겨서 원인 추적 가능하게
                 if (insert_failure_record is None) or (ctx != "evaluation"):
                     log_audit_prediction(symbol, strategy, "skip_failure_db", f"ctx={ctx}, label={label}, entry_price={entry_price}")
         except Exception as e:
             print(f"[⚠️ 예측 로그 기록 실패] {e}")
 
 # -------------------------
-# 학습 로그 (훈련 성공/실패는 성공률 집계에서 제외)
+# 학습 로그
 # -------------------------
 def log_training_result(
     symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0.0,
@@ -648,7 +618,6 @@ def log_training_result(
         print(f"[✅ 학습 로그 기록] {symbol}-{strategy} {model} status={status}")
     except Exception as e:
         print(f"[⚠️ 학습 로그 기록 실패] {e}")
-    # 훈련 성공/실패는 model_success 집계에 넣지 않음.
 
 # -------------------------
 # 수익률 클래스 경계 로그
@@ -827,7 +796,7 @@ def export_recent_model_stats(days: int = 7, out_path: str = None):
 
         cutoff = now_kst() - datetime.timedelta(days=int(days))
 
-        agg = {}  # key: (symbol,strategy,model) -> {"success":x,"total":y,"last_ts":ts}
+        agg = {}
 
         usecols = ["timestamp","symbol","strategy","model","status","success"]
         for chunk in pd.read_csv(
@@ -835,7 +804,6 @@ def export_recent_model_stats(days: int = 7, out_path: str = None):
             usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success"]],
             chunksize=CHUNK
         ):
-            # 시간 필터
             if "timestamp" in chunk.columns:
                 ts = pd.to_datetime(chunk["timestamp"], errors="coerce")
                 try:
@@ -850,7 +818,6 @@ def export_recent_model_stats(days: int = 7, out_path: str = None):
             if chunk.empty or "model" not in chunk.columns:
                 continue
 
-            # 성공/실패 확정행
             succ_mask = None
             if "status" in chunk.columns and chunk["status"].notna().any():
                 ok_mask = chunk["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
@@ -875,7 +842,6 @@ def export_recent_model_stats(days: int = 7, out_path: str = None):
                 if d["last_ts"] is None or (pd.notna(last_ts) and last_ts > d["last_ts"]):
                     d["last_ts"] = last_ts
 
-        # DataFrame으로 변환
         rows = []
         for (sym,strat,mdl), d in agg.items():
             total = int(d["total"]); succ = int(d["success"])
