@@ -1,4 +1,4 @@
-# === logger.py (메모리 안전: 로테이션 + 청크 집계 + 모델명 정규화 + 실패DB 노이즈 차단 + 파일락 추가 최종본) ===
+# === logger.py (메모리 안전: 로테이션 + 청크 집계 + 모델명 정규화 + 실패DB 노이즈 차단 + 파일락 + 컨텍스트 분기 최종본) ===
 import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil
 import sqlite3
 from collections import defaultdict
@@ -492,7 +492,7 @@ def log_prediction(
     regime=None, meta_choice=None, raw_prob=None, calib_prob=None, calib_ver=None
 ):
     from datetime import datetime as _dt
-    # 실패 DB는 필요 시에만 지연 import (ensure_failure_db 반복 호출 최소화)
+    # 실패 DB는 필요 시에만 지연 import
     try:
         from failure_db import insert_failure_record
     except Exception:
@@ -524,6 +524,13 @@ def log_prediction(
         allowed_sources = ["일반","기본","meta","evo_meta","baseline_meta","진화형","평가","단일","변동성","train_loop","섀도우"]
         if source not in allowed_sources:
             source = "일반"
+
+        # ▶ 실패DB 컨텍스트 분기
+        #   - 평가 행: source=="평가" 또는 direction 이 "평가:" 로 시작 → context="evaluation"
+        #   - 그 외(예측/섀도우/탐험 등): context="prediction"
+        dir_s = str(direction or "")
+        src_s = str(source or "")
+        ctx = "evaluation" if (src_s == "평가" or dir_s.startswith("평가")) else "prediction"
 
         # feature_vector 축약(길면 head/tail만)
         fv_serial = ""
@@ -572,12 +579,16 @@ def log_prediction(
 
             # -------------------------
             # 실패 패턴 DB 기록 (노이즈 차단)
-            #  - label == -1 이거나 entry_price가 None/0이면 실제 실패로 보지 않고 DB 기록 생략
-            #  - model/model_name을 위에서 강제 정규화하여 해시 충돌/unknown 스팸 방지
+            #  - 평가 단계(context='evaluation')에서만 기록
+            #  - label/entry_price 유효성 체크
             # -------------------------
-            should_record_failure = (insert_failure_record is not None) and (not success) \
-                and (label not in (-1, "-1", None)) \
+            should_record_failure = (
+                insert_failure_record is not None
+                and (ctx == "evaluation")
+                and (not success)
+                and (label not in (-1, "-1", None))
                 and (entry_price not in (None, 0.0))
+            )
 
             if should_record_failure:
                 feature_hash = f"{symbol}-{strategy}-{model}-{predicted_class}-{label}-{rate}"
@@ -600,12 +611,12 @@ def log_prediction(
                         "entry_price": entry_price, "target_price": target_price,
                         "return_value": return_value
                     },
-                    feature_hash=feature_hash, label=label, feature_vector=safe_vector
+                    feature_hash=feature_hash, label=label, feature_vector=safe_vector, context=ctx
                 )
             else:
                 # 감사 로그로만 남겨서 원인 추적 가능하게
-                if not success:
-                    log_audit_prediction(symbol, strategy, "skip_failure_db", f"label={label}, entry_price={entry_price}")
+                if (insert_failure_record is None) or (ctx != "evaluation"):
+                    log_audit_prediction(symbol, strategy, "skip_failure_db", f"ctx={ctx}, label={label}, entry_price={entry_price}")
         except Exception as e:
             print(f"[⚠️ 예측 로그 기록 실패] {e}")
 
