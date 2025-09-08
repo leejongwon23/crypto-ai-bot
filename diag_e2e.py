@@ -221,7 +221,7 @@ def _build_snapshot(symbols_filter=None):
     inv = _list_inventory()  # key=(sym,strat,model) → dict
     inv_keys = set(inv.keys())
 
-    # 심볼 목록 결정: (요청) → data.utils(60개) → config → 로그/파일 유니온
+    # 심볼 목록 결정
     if symbols_filter:
         symbols = [s.strip() for s in symbols_filter.split(",") if s.strip()]
     elif DATA_SYMBOLS:
@@ -236,21 +236,19 @@ def _build_snapshot(symbols_filter=None):
             symbols |= set(df_train["symbol"].dropna().astype(str).tolist())
         symbols = sorted([s for s in symbols if s and s != "nan"])
 
-    # 학습로그: 최근 f1/최근 학습시각 (전략/모델 보강)
-    train_last_map = {}   # (sym,strat) -> last_ts
-    train_f1_map   = {}   # (sym,strat,model) -> last f1
+    # 학습로그: 최근 f1/최근 학습시각
+    train_last_map = {}
+    train_f1_map   = {}
     if not df_train.empty:
         try:
             df_train = df_train.sort_values("timestamp")
             for (sym, st), g in df_train.groupby(["symbol","strategy"], dropna=False):
                 ts = g["timestamp"].iloc[-1]
                 train_last_map[(str(sym), str(st))] = ts
-            # 모델별 f1
             if "model" in df_train.columns and "f1" in df_train.columns:
                 for (sym, st, mdl), g in df_train.groupby(["symbol","strategy","model"], dropna=False):
                     try:
                         last_f1 = float(pd.to_numeric(g["f1"], errors="coerce").dropna().iloc[-1])
-                        # 파일명 안에 모델타입이 포함 → 타입 추출
                         m = re.search(r"(lstm|cnn_lstm|transformer)", str(mdl))
                         if m:
                             mt = m.group(1)
@@ -263,7 +261,7 @@ def _build_snapshot(symbols_filter=None):
     snapshot = {
         "time": now_kst().isoformat(),
         "symbols": [],
-        "progress": _progress(inv, symbols),  # 기대/보유/미싱
+        "progress": _progress(inv, symbols),
     }
 
     # 심볼 단위 집계
@@ -273,10 +271,7 @@ def _build_snapshot(symbols_filter=None):
         sym_block["fail_summary"] = _summarize_fail_patterns(df_ps)
 
         for strat in STRATEGIES:
-            # 학습 시간
             last_train_ts = train_last_map.get((sym, strat), pd.NaT)
-
-            # 예측 로그 (해당 심볼/전략)
             df_ss = df_ps[df_ps["strategy"] == strat] if not df_ps.empty else pd.DataFrame()
 
             def _stat_count(df, label):
@@ -285,14 +280,12 @@ def _build_snapshot(symbols_filter=None):
 
             if not df_ss.empty:
                 df_ss = df_ss.copy()
-                # 변동성 분리
                 if "status" in df_ss.columns:
                     df_ss["is_vol"] = df_ss["status"].astype(str).str.startswith("v_")
                 elif "volatility" in df_ss.columns:
                     df_ss["is_vol"] = df_ss["volatility"].astype(str).str.lower().isin(["1","true"])
                 else:
                     df_ss["is_vol"] = False
-                # 수익률 컬럼(우선순위: return → return_value → rate)
                 ret_series = None
                 for col in ["return","return_value","rate"]:
                     if col in df_ss.columns:
@@ -331,39 +324,41 @@ def _build_snapshot(symbols_filter=None):
             for mt in MODEL_TYPES:
                 key = (sym, strat, mt)
                 inv_item = inv.get(key)
-                # 예측 로그 중 해당 모델
                 df_model = df_ss[df_ss["model"].astype(str).str.contains(mt, na=False)] if not df_ss.empty else pd.DataFrame()
 
-                # 최신 클래스/수익률
+                # 최신 클래스/수익률(+ 텍스트 우선)
                 def _latest_for_model(dfm):
-                    if dfm.empty: return "-", None
+                    if dfm.empty: return "-", None, ""
                     try: dfm = dfm.sort_values("timestamp")
                     except Exception: pass
                     last = dfm.iloc[-1]
-                    # 클래스 키 우선순위
                     latest_cls = "-"
                     for k in ["predicted_class","class","pred_class","label"]:
                         if k in dfm.columns:
                             v = last.get(k, None)
                             if pd.notna(v):
                                 latest_cls = str(v); break
-                    # 수익률 키
                     latest_ret = None
                     if "return" in dfm.columns: latest_ret = _num(last.get("return"))
                     elif "return_value" in dfm.columns: latest_ret = _num(last.get("return_value"))
                     elif "rate" in dfm.columns: latest_ret = _num(last.get("rate"))
-                    return latest_cls, latest_ret
+                    latest_text = ""
+                    if "class_return_text" in dfm.columns:
+                        try:
+                            txt = str(last.get("class_return_text","")).strip()
+                            if txt: latest_text = txt
+                        except Exception:
+                            pass
+                    return latest_cls, latest_ret, latest_text
 
-                latest_cls, latest_ret = _latest_for_model(df_model)
+                latest_cls, latest_ret, latest_text = _latest_for_model(df_model)
 
-                # f1: 메타 우선, 없으면 학습로그 f1
                 val_f1 = None
                 if inv_item and inv_item.get("val_f1") is not None:
                     val_f1 = float(inv_item["val_f1"])
                 elif (sym, strat, mt) in train_f1_map:
                     val_f1 = float(train_f1_map[(sym, strat, mt)])
 
-                # 상태
                 if inv_item is None:
                     status = "MISSING"
                 else:
@@ -384,12 +379,12 @@ def _build_snapshot(symbols_filter=None):
                     "fail": _stat_count(df_model, "fail") + _stat_count(df_model, "v_fail"),
                     "total": int(len(df_model)),
                     "latest_class": latest_cls,
-                    "latest_return": latest_ret
+                    "latest_return": latest_ret,
+                    "latest_return_text": latest_text,  # ← NEW
                 }
                 denom = max(1, md["total"]); md["succ_rate"] = md["succ"] / denom
                 models_detail.append(md)
 
-                # 인벤토리 행 (HTML용 상세 표)
                 inv_row = {
                     "model": mt,
                     "has_pt": bool(inv_item and inv_item.get("has_pt")),
@@ -402,12 +397,10 @@ def _build_snapshot(symbols_filter=None):
                 }
                 inventory_rows.append(inv_row)
 
-            # 최근 예측시각/평가 예정/지연
             last_pred_ts_raw = df_ss["timestamp"].max() if "timestamp" in df_ss.columns and not df_ss.empty else pd.NaT
             last_pred_ts = _to_kst(last_pred_ts_raw)
             eval_due = _eval_deadline(last_pred_ts, strat) if last_pred_ts is not None else None
 
-            # 최근 평가완료(예측로그에서 source='평가' 또는 direction 시작 '평가:'로 추정)
             last_eval_ts = None
             if not df_ss.empty:
                 df_eval = df_ss.copy()
@@ -439,32 +432,25 @@ def _build_snapshot(symbols_filter=None):
             except Exception:
                 pass
 
-            # 문제/노트
             strat_problems = []
             strat_notes = []
-            # 인벤토리에 모델이 하나도 없으면 문제
             inv_count = sum(1 for mt in MODEL_TYPES if (sym, strat, mt) in inv)
             if inv_count == 0:
                 strat_problems.append("모델 파일 없음")
-            # 메타 누락
             for mt in MODEL_TYPES:
                 item = inv.get((sym, strat, mt))
                 if item and item.get("has_pt") and not item.get("has_meta"):
                     strat_problems.append(f"{mt} 메타 누락")
-            # 예측 로그 없음: 훈련 완료면 '예측 대기' 노트, 아니면 문제
             if df_ss.empty:
                 if inv_count > 0 or pd.notna(last_train_ts):
                     strat_notes.append("예측 대기(훈련 완료)")
                 else:
                     strat_problems.append("예측 기록 없음")
-            # 평가 지연
             if delayed_min > 0:
                 strat_problems.append(f"평가 지연 {delayed_min}분")
-            # 최근 학습 기록 여부
             if pd.isna(last_train_ts):
                 strat_notes.append("최근 학습 기록 없음")
 
-            # 실패학습(간이 반영률)
             recent_fail = df_ss[df_ss["status"].isin(["fail","v_fail"])] if "status" in df_ss.columns else pd.DataFrame()
             recent_fail_n = int(len(recent_fail)); reflected = 0
             if recent_fail_n > 0 and "timestamp" in df_ss.columns:
@@ -523,7 +509,6 @@ def _build_snapshot(symbols_filter=None):
             n = blk["prediction"]["normal"]; v = blk["prediction"]["volatility"]
             total_normal_succ += n["succ"]; total_normal_fail += n["fail"]
             total_vol_succ += v["succ"]; total_vol_fail += v["fail"]
-            # 낮은 성공률은 '충분한 표본'일 때만 문제로
             if _grade_rate(n["succ_rate"]) == "err" and n["total"] >= 10:
                 problems.append(f"{s['symbol']} {strat}: 일반 성공률 낮음({int(n['succ_rate']*100)}%)")
             if blk["evaluation"]["delay_min"] > 0:
@@ -536,9 +521,9 @@ def _build_snapshot(symbols_filter=None):
         "normal_success_rate": _rate(total_normal_succ, total_normal_fail),
         "vol_success_rate": _rate(total_vol_succ, total_vol_fail),
         "symbols_count": len(snapshot["symbols"]),
-        "models_count": len(inv),  # 인벤토리 기준
+        "models_count": len(inv),
         "problems": problems,
-        "progress": snapshot["progress"]  # 상단에도 노출
+        "progress": snapshot["progress"]
     }
     return snapshot
 
@@ -675,7 +660,8 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow'));
                     val_f1_txt = f"{float(val_f1_val):.3f}" if (val_f1_val is not None) else "-"
                     last_cls = md.get("latest_class", "-")
                     last_ret = md.get("latest_return", None)
-                    last_ret_txt = "-" if last_ret is None else _pct(last_ret)
+                    # ← NEW: 텍스트 우선
+                    last_ret_txt = md.get("latest_return_text") or ("-" if last_ret is None else _pct(last_ret))
                     rows.append("<tr>"
                                 f"<td>{_safe(md.get('model',''))}</td>"
                                 f"<td>{_safe(md.get('status','-'))}</td>"
@@ -726,7 +712,6 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow'));
                               f"<div class='muted'>최근 실패 {fl['recent_fail']}건 / 이후반영 {fl['reflected_count_after']}건 / 반영률 {rr_txt}</div>"
                               f"</div>")
 
-                # 문제/노트
                 strat_problems = blk.get("problems") or []
                 prob_block = ""
                 if strat_problems:
@@ -798,7 +783,8 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow'));
                 for md in pred.get("by_model", []):
                     last_cls = md.get("latest_class","-")
                     last_ret = md.get("latest_return", None)
-                    last_ret_txt = "-" if last_ret is None else f"{last_ret:+.1%}"
+                    # ← NEW: 텍스트 우선 표시
+                    last_ret_txt = md.get("latest_return_text") or ("-" if last_ret is None else f"{last_ret:+.1%}")
                     out.append(f"<li>{icon_ret(last_ret)} {_safe(md.get('model','').upper())}: {_safe(md.get('status','-'))}, "
                                f"클래스 {_safe(last_cls)} (수익률 {_safe(last_ret_txt)})</li>")
                 out.append("</ul></li>")
