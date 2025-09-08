@@ -15,25 +15,6 @@ from train import train_symbol_group_loop  # (호환용) 직접 호출 루트 �
 import maintenance_fix_meta
 from logger import ensure_prediction_log_exists
 
-# =========================
-# 🛡️ EARLY DB GUARANTEE (race fix)
-# =========================
-# 전역 경로 먼저 고정
-PERSIST_DIR = "/persistent"
-os.makedirs(PERSIST_DIR, exist_ok=True)
-# failure_db가 사용할 절대경로를 환경변수로 강제(상대경로/다중 파일 생성 방지)
-os.environ.setdefault("FAILURE_DB_PATH", os.path.join(PERSIST_DIR, "failure_patterns.db"))
-
-# 가장 이른 시점에서 테이블 생성 보장
-try:
-    from failure_db import ensure_failure_db as _ensure_failure_db
-    _ensure_failure_db()
-    print("✅ [BOOT] failure_patterns DB 초기화(early) 완료"); sys.stdout.flush()
-except Exception as e:
-    print(f"⚠️ [BOOT] failure_db 초기화 실패(early): {e}"); sys.stdout.flush()
-    def _ensure_failure_db():  # 폴백 정의
-        return None
-
 # 👇 무결성 점검(있으면 실행)
 try:
     from integrity_guard import run as _integrity_check
@@ -78,9 +59,10 @@ def _safe_close_gate(note: str = ""):
         print(f"[gate] close err: {e}"); sys.stdout.flush()
 
 # ===== 경로 통일 =====
-BASE_DIR    = os.path.dirname(os.path.abspath(__file__))  # ← 루트 탐색용(초기화 강화에만 사용)
-LOG_DIR     = os.path.join(PERSIST_DIR, "logs")
-MODEL_DIR   = os.path.join(PERSIST_DIR, "models")
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))  # ← 루트 탐색용(초기화 강화에만 사용)
+PERSIST_DIR= "/persistent"
+LOG_DIR    = os.path.join(PERSIST_DIR, "logs")
+MODEL_DIR  = os.path.join(PERSIST_DIR, "models")
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)  # ✅ 모델 디렉터리 보장
 
@@ -88,8 +70,13 @@ os.makedirs(MODEL_DIR, exist_ok=True)  # ✅ 모델 디렉터리 보장
 LOCK_DIR   = getattr(safe_cleanup, "LOCK_DIR", os.path.join(PERSIST_DIR, "locks"))
 LOCK_PATH  = getattr(safe_cleanup, "LOCK_PATH", os.path.join(LOCK_DIR, "train_or_predict.lock"))
 os.makedirs(LOCK_DIR, exist_ok=True)
-if os.path.exists(LOCK_PATH) and not getattr(train, "is_loop_running", lambda: False)():
-    os.remove(LOCK_PATH)  # 🩹 orphan lock auto-clean
+# 🔧 변경 1: 부팅 시 락이 보이면 **무조건 제거** (죽은 락 방지)
+if os.path.exists(LOCK_PATH):
+    try:
+        os.remove(LOCK_PATH)
+        print("[BOOT] orphan lock removed"); sys.stdout.flush()
+    except Exception as e:
+        print(f"[BOOT] lock remove failed: {e}"); sys.stdout.flush()
 
 def _acquire_global_lock():
     try:
@@ -380,11 +367,9 @@ def _init_background_once():
                 print("⏸️ 락 감지 → 백그라운드 초기화 지연"); sys.stdout.flush()
                 return
 
-            # ✅ 여기서도 재확인(이중 안전망)
-            try:
-                _ensure_failure_db(); print("✅ failure_patterns DB 초기화 완료")
-            except Exception as e:
-                print(f"⚠️ failure_db 초기화 실패(late): {e}")
+            from failure_db import ensure_failure_db
+            print(">>> 서버 실행 준비")
+            ensure_failure_db(); print("✅ failure_patterns DB 초기화 완료")
 
             # 🆕 파이프라인 고정 안내 로그(직렬화 정책)
             print("[pipeline] serialized: train -> predict -> next-group"); sys.stdout.flush()
@@ -451,6 +436,13 @@ def _predict_after_training(symbols:list[str], source_note:str):
     if not vis:
         print(f"[APP-PRED] 모델 가시화 실패 → 예측 생략 candidates={sorted(set(symbols))}")
         return
+    # 🔧 변경 2: 예측 직전, 남아있는 락이 있으면 **즉시 제거**
+    if os.path.exists(LOCK_PATH):
+        try:
+            os.remove(LOCK_PATH)
+            print("[APP-PRED] cleared stale lock before predict"); sys.stdout.flush()
+        except Exception as e:
+            print(f"[APP-PRED] lock remove failed: {e}"); sys.stdout.flush()
     _safe_open_gate(source_note)
     try:
         for sym in sorted(set(vis)):
@@ -467,6 +459,12 @@ def _predict_after_training(symbols:list[str], source_note:str):
         _safe_close_gate(source_note + "_end")
 
 # ===== 라우트 =====
+@app.route("/")
+def index(): return "Yopo server is running"
+
+@app.route("/ping")
+def ping(): return "pong"
+
 @app.route("/yopo-health")
 def yopo_health():
     logs, strategy_html, problems = {}, [], []
@@ -597,12 +595,6 @@ def yopo_health():
     status = "🟢 전체 전략 정상 작동 중" if not problems else "🔴 종합진단 요약:<br>" + "<br>".join(problems)
     return f"<div style='font-family:monospace;line-height:1.6;font-size:15px;'><b>{status}</b><hr>" + "".join(strategy_html) + "</div>"
 
-@app.route("/")
-def index(): return "Yopo server is running"
-
-@app.route("/ping")
-def ping(): return "pong"
-
 # ✅ 종합 점검 라우트 (HTML/JSON + 누적 옵션)
 @app.route("/diag/e2e")
 def diag_e2e():
@@ -634,10 +626,6 @@ def diag_e2e():
 @app.route("/run")
 def run():
     try:
-        # 🛡️ 예측 전 DB 보장(이중 안전망)
-        try: _ensure_failure_db()
-        except: pass
-
         # 🆕 학습 중 또는 초기화 락이면 예측 차단(직렬화)
         if os.path.exists(LOCK_PATH) or _is_training():
             return "⏸️ 학습/초기화 진행 중: 예측 시작 차단됨", 423
