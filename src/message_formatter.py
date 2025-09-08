@@ -5,50 +5,82 @@ import math
 def now_kst():
     return datetime.datetime.now(pytz.timezone("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
 
-def format_message(data):
-    def safe_float(value, default=0.0):
-        try:
-            if value is None or (isinstance(value, str) and not str(value).strip()):
-                return default
-            val = float(value)
-            return val if not math.isnan(val) else default
-        except:
+def _safe_float(v, default=0.0):
+    try:
+        if v is None or (isinstance(v, str) and not str(v).strip()):
             return default
+        x = float(v)
+        return x if not math.isnan(x) else default
+    except:
+        return default
 
-    price = safe_float(data.get("price"), 0.0)
-    direction = data.get("direction", "롱")
-    strategy = data.get("strategy", "전략")
-    symbol = data.get("symbol", "종목")
-    success_rate = safe_float(data.get("success_rate"), 0.0)
-    rate = safe_float(data.get("rate"), 0.0)  # expected return
-    reason = str(data.get("reason", "-")).strip()
-    score = data.get("score", None)
-    volatility = str(data.get("volatility", "False")).lower() in ["1", "true", "yes"]
+def format_message(data):
+    # 기본 필드
+    price      = _safe_float(data.get("price"), 0.0)
+    direction  = data.get("direction", "롱")  # "롱" or "숏"
+    strategy   = data.get("strategy", "전략")
+    symbol     = data.get("symbol", "종목")
+    reason     = str(data.get("reason", "-")).strip()
+    score      = data.get("score", None)
+    volatility = str(data.get("volatility", "False")).lower() in ["1","true","yes"]
 
-    # 목표가 / 손절가 계산
-    target = price * (1 + rate) if direction == "롱" else price * (1 - rate)
-    stop_loss = price * (1 - 0.02) if direction == "롱" else price * (1 + 0.02)
+    # 클래스 범위(신규) + 중앙값 계산
+    # 우선순위: rate_min/rate_max → class_low/class_high → rate(단일)
+    rmin = _safe_float(data.get("rate_min", data.get("class_low")), None)
+    rmax = _safe_float(data.get("rate_max", data.get("class_high")), None)
+    rmid = None
+    if rmin is None and rmax is None:
+        r = _safe_float(data.get("rate"), 0.0)   # 구버전 호환(단일 중앙값)
+        rmin = rmax = r
+    elif rmin is None:
+        rmin = rmax
+    elif rmax is None:
+        rmax = rmin
+    rmid = (rmin + rmax) / 2.0
 
-    rate_pct = abs(rate) * 100
-    success_rate_pct = success_rate * 100
-    dir_str = "상승" if direction == "롱" else "하락"
+    # 성공률: 횟수 기반(신규) → 비율(fallback)
+    succ_n = data.get("success_successes")
+    total_n = data.get("success_total")
+    if isinstance(succ_n, str) and succ_n.isdigit(): succ_n = int(succ_n)
+    if isinstance(total_n, str) and total_n.isdigit(): total_n = int(total_n)
+
+    if isinstance(succ_n, int) and isinstance(total_n, int) and total_n > 0 and 0 <= succ_n <= total_n:
+        succ_pct = (succ_n / total_n) * 100.0
+        succ_text = f"{succ_n}/{total_n} ({succ_pct:.2f}%)"
+    else:
+        # 기존 success_rate(0.0~1.0) 폴백
+        sr = _safe_float(data.get("success_rate"), 0.0)
+        succ_text = f"{sr*100:.2f}%"
+
+    # 목표가: 범위 표시(최소~최대)
+    if direction == "롱":
+        tgt_min = price * (1 + min(rmin, rmax))
+        tgt_max = price * (1 + max(rmin, rmax))
+        stop_loss = price * (1 - 0.02)
+        dir_str = "상승"
+        arrow = "📈"
+    else:  # "숏"
+        # 숏은 하락 목표: 더 크게 떨어진 값이 '최대 수익'이므로 (1 - rmax) 가 더 낮음
+        lo = min(rmin, rmax); hi = max(rmin, rmax)
+        tgt_min = price * (1 - lo)  # 최소 기대 하락
+        tgt_max = price * (1 - hi)  # 최대 기대 하락(더 낮은 가격)
+        stop_loss = price * (1 + 0.02)
+        dir_str = "하락"
+        arrow = "📉"
+
     vol_tag = "⚡ " if volatility else ""
 
-    # 📩 메시지 구성
-    message = (
-        f"{vol_tag}{'📈' if direction == '롱' else '📉'} "
-        f"[{strategy} 전략] {symbol} {direction} 추천\n"
-        f"🎯 예상 수익률: {rate_pct:.2f}% "
-        f"{'📈 상승 예상' if direction == '롱' else '📉 하락 예상'}\n"
+    # 메시지 구성
+    msg = (
+        f"{vol_tag}{arrow} [{strategy} 전략] {symbol} {direction} 추천\n"
+        f"🎯 예상 수익률 범위: {rmin*100:.2f}% ~ {rmax*100:.2f}% (중앙값 {rmid*100:.2f}%)\n"
         f"💰 진입가: {price:.4f} USDT\n"
-        f"🎯 목표가: {target:.4f} USDT\n"
+        f"🎯 목표가(범위): {tgt_min:.4f} ~ {tgt_max:.4f} USDT\n"
         f"🛡 손절가: {stop_loss:.4f} USDT (-2.00%)\n\n"
-        f"📊 신호 방향: {'📈 상승' if direction == '롱' else '📉 하락'}\n"
-        f"✅ 최근 전략 성공률: {success_rate_pct:.2f}%"
+        f"📊 신호 방향: {arrow} {dir_str}\n"
+        f"✅ 최근 전략 성과: {succ_text}"
     )
-
     if isinstance(score, (float, int)) and not math.isnan(score):
-        message += f"\n🏆 스코어: {score:.5f}"
-
-    message += f"\n💡 추천 사유: {reason}\n\n🕒 (기준시각: {now_kst()} KST)"
-    return message
+        msg += f"\n🏆 스코어: {float(score):.5f}"
+    msg += f"\n💡 추천 사유: {reason}\n\n🕒 (기준시각: {now_kst()} KST)"
+    return msg
