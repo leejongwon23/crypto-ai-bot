@@ -8,6 +8,7 @@
 # (2025-09-07) — [보강] meta.class_ranges 최우선 사용(없으면 config 폴백). expected_return/필터/가드/섀도우 모두 일치화.
 # (2025-09-07b) — [로그강화] 선택 클래스의 동적 범위/중앙값/포지션을 예측·섀도우 로그에 명시
 # (2025-09-07c) — [FIX] failed_result → insert_failure_record 호출 시 context="prediction" 반영
+# (2025-09-08) — [추가] CSV에 class_return_min/max/text 3컬럼 직접 기록(메인/섀도우)
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -375,7 +376,9 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         ensure_prediction_log_exists()
         log_prediction(symbol=symbol, strategy=strategy, direction="예측실패", entry_price=0, target_price=0,
                        model=str(model_type or "unknown"), success=False, reason=reason, rate=0.0, timestamp=t,
-                       return_value=0.0, volatility=True, source=source, predicted_class=-1, label=-1)
+                       return_value=0.0, volatility=True, source=source, predicted_class=-1, label=-1,
+                       # 실패행에도 컬럼 형태 유지(0값)
+                       class_return_min=0.0, class_return_max=0.0, class_return_text="")
     except Exception as e:
         print(f"[failed_result log_prediction 오류] {e}")
     try:
@@ -568,6 +571,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         lo_sel, hi_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
         exp_ret = (float(lo_sel) + float(hi_sel)) / 2.0
         pos_sel = _position_from_range(lo_sel, hi_sel)
+        class_text = f"{float(lo_sel)*100:.2f}% ~ {float(hi_sel)*100:.2f}%"
 
         current = float(df.iloc[-1]["close"])
         entry = current
@@ -606,7 +610,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
             meta_choice=meta_choice,
             raw_prob=float((chosen or outs[0])["raw_probs"][final_cls]) if (chosen or outs) else None,
             calib_prob=float((chosen or outs[0])["calib_probs"][final_cls]) if (chosen or outs) else None,
-            calib_ver=get_calibration_version()
+            calib_ver=get_calibration_version(),
+            # ⬇️ 새 컬럼 3개
+            class_return_min=float(lo_sel),
+            class_return_max=float(hi_sel),
+            class_return_text=class_text
         )
 
         # 섀도우 로깅(동일 정보 포함)
@@ -631,6 +639,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 exp_i = (float(lo_i) + float(hi_i)) / 2.0
                 pos_i = _position_from_range(lo_i, hi_i)
                 top_i = [int(i) for i in np.argsort(src)[::-1][:3]]
+                class_text_i = f"{float(lo_i)*100:.2f}% ~ {float(hi_i)*100:.2f}%"
 
                 note_s = {
                     "regime": regime, "shadow": True,
@@ -657,7 +666,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     meta_choice="shadow",
                     raw_prob=float(m["raw_probs"][pred_i]),
                     calib_prob=float(m["calib_probs"][pred_i]),
-                    calib_ver=get_calibration_version()
+                    calib_ver=get_calibration_version(),
+                    # ⬇️ 새 컬럼 3개
+                    class_return_min=float(lo_i),
+                    class_return_max=float(hi_i),
+                    class_return_text=class_text_i
                 )
         except Exception as e:
             print(f"[섀도우 로깅 예외] {e}")
