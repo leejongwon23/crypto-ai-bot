@@ -1,4 +1,4 @@
-# === diag_e2e.py (관우 v2.4 — 종합점검: 훈련+인벤토리+예측/평가 통합, KST 정규화, 60심볼 보장) ===
+# === diag_e2e.py (관우 v2.5 — 종합점검: 훈련+인벤토리+예측/평가 통합, KST 정규화, 60심볼 보장, 누적 성과 배지/표 추가) ===
 import os, json, traceback, re
 import pandas as pd
 import pytz
@@ -459,6 +459,15 @@ def _build_snapshot(symbols_filter=None):
                 reflected = int((after["status"].isin(["success","v_success"])).sum()) if "status" in after.columns else 0
             reflect_ratio = (reflected / max(1, recent_fail_n)) if recent_fail_n>0 else None
 
+            # === 누적(일반+변동성) 집계 ===
+            cum_succ    = summary_n["succ"] + summary_v["succ"]
+            cum_fail    = summary_n["fail"] + summary_v["fail"]
+            cum_pending = summary_n["pending"] + summary_v["pending"]
+            cum_failed  = summary_n["failed"] + summary_v["failed"]
+            cum_total   = (summary_n["total"] + summary_v["total"])
+            denom_sf    = max(1, (cum_succ + cum_fail))  # 성공률 분모: 성공+실패
+            cum_rate    = cum_succ / denom_sf
+
             sym_block["strategies"][strat] = {
                 "last_train_time": last_train_ts.isoformat() if pd.notna(last_train_ts) else None,
                 "inventory": {
@@ -482,7 +491,16 @@ def _build_snapshot(symbols_filter=None):
                         "avg_return": summary_v["avg_return"],
                     },
                     "by_model": models_detail,
-                    "meta_choice": meta_choice
+                    "meta_choice": meta_choice,
+                    "cumulative": {                            # ★ NEW
+                        "succ": cum_succ,
+                        "fail": cum_fail,
+                        "pending": cum_pending,
+                        "failed": cum_failed,
+                        "total": cum_total,
+                        "succ_rate": cum_rate,                 # 성공/(성공+실패)
+                        "sf_denominator": denom_sf             # (성공+실패)
+                    }
                 },
                 "evaluation": {
                     "last_prediction_time": last_pred_ts.isoformat() if last_pred_ts is not None else None,
@@ -631,11 +649,13 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow'));
             sym_cards = []
             for strat, blk in (sym_item.get("strategies") or {}).items():
                 n = blk["prediction"]["normal"]; v = blk["prediction"]["volatility"]
+                cum = blk["prediction"]["cumulative"]  # ★ NEW
                 by_model = blk["prediction"]["by_model"]; ev = blk["evaluation"]; fl = blk["failure_learning"]
                 inv_rows = blk.get("inventory", {}).get("rows", [])
                 notes = blk.get("notes", []) or []
                 meta_choice = blk["prediction"].get("meta_choice", "-")
                 n_cls, v_cls = _grade_rate(n["succ_rate"]), _grade_rate(v["succ_rate"])
+                cum_cls = _grade_rate(cum.get("succ_rate",0.0))
                 delay_cls = _delay_badge(ev.get("delay_min", 0))
 
                 head = (f"<div class='row-title'>전략: <b>{_safe(strat)}</b> &nbsp;"
@@ -648,10 +668,19 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow'));
                     f"<tr><td>일반</td><td>{n['succ']}</td><td>{n['fail']}</td><td>{n['pending']}</td><td>{n['failed']}</td>"
                     f"<td>{n['total']}</td><td>{_pct(n['succ_rate'])}</td><td>{_pct(n['avg_return'])}</td></tr>"
                     f"<tr><td>변동성</td><td>{v['succ']}</td><td>{v['fail']}</td><td>{v['pending']}</td><td>{v['failed']}</td>"
-                    f"<td>{v['total']}</td><td>{_pct(v['succ_rate'])}</td><td>{_pct(v['avg_return'])}</td></tr></table>"
+                    f"<td>{v['total']}</td><td>{_pct(v['succ_rate'])}</td><td>{_pct(v['avg_return'])}</td></tr>"
+                    f"<tr><td><b>누적</b></td><td><b>{cum['succ']}</b></td><td><b>{cum['fail']}</b></td>"
+                    f"<td>{cum['pending']}</td><td>{cum['failed']}</td>"
+                    f"<td><b>{cum['total']}</b></td>"
+                    f"<td><b>{_pct(cum['succ_rate'])} ({cum['succ']}/{cum['sf_denominator']})</b></td>"
+                    f"<td>-</td></tr>"
+                    "</table>"
                 )
-                pred_header = (f"<div><span class='badge {n_cls}'>일반 {_pct(n['succ_rate'])}</span> "
-                               f"<span class='badge {v_cls}'>변동성 {_pct(v['succ_rate'])}</span></div>")
+                pred_header = (f"<div>"
+                               f"<span class='badge {n_cls}'>일반 {_pct(n['succ_rate'])}</span> "
+                               f"<span class='badge {v_cls}'>변동성 {_pct(v['succ_rate'])}</span> "
+                               f"<span class='badge {cum_cls}'>누적 {_pct(cum['succ_rate'])} ({cum['succ']}/{cum['sf_denominator']})</span>"
+                               f"</div>")
 
                 # 모델별 상세(예측 요약)
                 rows = []
@@ -660,7 +689,7 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow'));
                     val_f1_txt = f"{float(val_f1_val):.3f}" if (val_f1_val is not None) else "-"
                     last_cls = md.get("latest_class", "-")
                     last_ret = md.get("latest_return", None)
-                    # ← NEW: 텍스트 우선
+                    # 텍스트 우선
                     last_ret_txt = md.get("latest_return_text") or ("-" if last_ret is None else _pct(last_ret))
                     rows.append("<tr>"
                                 f"<td>{_safe(md.get('model',''))}</td>"
@@ -778,15 +807,17 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow'));
                 blk = (sym_item.get("strategies") or {}).get(strat)
                 if not blk: continue
                 pred = blk.get("prediction") or {}
+                cum = pred.get("cumulative") or {"succ":0,"fail":0,"sf_denominator":1,"succ_rate":0.0}  # ★ NEW
                 out.append(f"<li>{_safe(sym)}<ul>")
                 out.append(f"<li>🎯 메타러너 선택: <b>{_safe(pred.get('meta_choice','-'))}</b></li>")
                 for md in pred.get("by_model", []):
                     last_cls = md.get("latest_class","-")
                     last_ret = md.get("latest_return", None)
-                    # ← NEW: 텍스트 우선 표시
                     last_ret_txt = md.get("latest_return_text") or ("-" if last_ret is None else f"{last_ret:+.1%}")
                     out.append(f"<li>{icon_ret(last_ret)} {_safe(md.get('model','').upper())}: {_safe(md.get('status','-'))}, "
                                f"클래스 {_safe(last_cls)} (수익률 {_safe(last_ret_txt)})</li>")
+                # 누적 한 줄 요약
+                out.append(f"<li>🧮 누적: 성공 {cum['succ']} / 실패 {cum['fail']} · 성공률 {_pct(cum['succ_rate'])} ({cum['succ']}/{cum['sf_denominator']})</li>")
                 out.append("</ul></li>")
             out.append("</ul>")
 
