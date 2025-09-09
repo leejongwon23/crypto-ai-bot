@@ -161,7 +161,7 @@ class GroupOrderManager:
         self.groups = [list(g) for g in groups]
         self.idx = 0
         self.trained = {}
-               self.last_predicted_idx = -1
+        self.last_predicted_idx = -1
         self._load()
 
     def _load(self):
