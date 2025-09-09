@@ -10,6 +10,7 @@
 # (2025-09-07c) — [FIX] failed_result → insert_failure_record 호출 시 context="prediction" 반영
 # (2025-09-08) — [추가] CSV에 class_return_min/max/text 3컬럼 직접 기록(메인/섀도우)
 # (2025-09-09) — [추가] predict() 반환 객체에도 class_return_min/max/text/position 포함
+# (2025-09-09b) — [핵심] (B) 마스크·(C) 가드에 “포지션 힌트(EMA20/60 + 기울기)” 적용 → 롱/숏 분리 강제
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -27,30 +28,20 @@ __all__ = [
 
 # ====== Gate (학습 블록 종료 시에만 예측 허용) ======
 RUN_DIR = "/persistent/run"; os.makedirs(RUN_DIR, exist_ok=True)
-PREDICT_GATE = os.path.join(RUN_DIR, "predict_gate.json")      # {"open":true, ...} (옵션)
-PREDICT_LOCK = os.path.join(RUN_DIR, "predict_running.lock")   # 예측 실행 중 표시
-PREDICT_BLOCK = "/persistent/predict.block"                    # 있으면 강제 차단(옵션)
-GROUP_ACTIVE = os.path.join(RUN_DIR, "group_predict.active")   # ← 그룹 예측 독점 플래그
+PREDICT_GATE = os.path.join(RUN_DIR, "predict_gate.json")
+PREDICT_LOCK = os.path.join(RUN_DIR, "predict_running.lock")
+PREDICT_BLOCK = "/persistent/predict.block"
+GROUP_ACTIVE = os.path.join(RUN_DIR, "group_predict.active")
 
-# 🆕 락 스테일 타임아웃(고아 락 자동해제) — 프로젝트 전역 600s로 통일
-PREDICT_LOCK_TTL = int(os.getenv("PREDICT_LOCK_TTL", "600"))  # 10분
-# 🆕 train.py와 맞춤: 그룹직후 구간에서 스테일 판단 임계 (전역과 동일 600s)
+PREDICT_LOCK_TTL = int(os.getenv("PREDICT_LOCK_TTL", "600"))
 PREDICT_LOCK_STALE_TRAIN_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRAIN_SEC", "600"))
 
 def _now_kst(): return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def is_predict_gate_open():
-    """
-    ✅ 기본 open, 단 아래 조건이면 닫힘으로 간주:
-      - FORCE_PREDICT_CLOSE=1
-      - /persistent/predict.block 존재
-      - /persistent/run/predict_gate.json 이 있고 "open": False
-    """
     try:
-        if os.getenv("FORCE_PREDICT_CLOSE", "0") == "1":
-            return False
-        if os.path.exists(PREDICT_BLOCK):
-            return False
+        if os.getenv("FORCE_PREDICT_CLOSE", "0") == "1": return False
+        if os.path.exists(PREDICT_BLOCK): return False
         if os.path.exists(PREDICT_GATE):
             with open(PREDICT_GATE, "r", encoding="utf-8") as f:
                 o = json.load(f)
@@ -60,7 +51,6 @@ def is_predict_gate_open():
         return True
 
 def _bypass_gate_for_source(source: str) -> bool:
-    """그룹예측/특정 소스에 대해 게이트 체크를 우회."""
     s = str(source or "")
     if "그룹직후" in s:  # train.py에서의 그룹 예측 호출
         return True
@@ -79,7 +69,6 @@ def open_predict_gate(note=""):
             json.dump({"open": True, "opened_at": _now_kst().isoformat(), "note": note}, f, ensure_ascii=False)
             try: f.flush(); os.fsync(f.fileno())
             except Exception: pass
-        # 안전: block 파일이 있으면 제거
         if os.path.exists(PREDICT_BLOCK):
             try: os.remove(PREDICT_BLOCK)
             except Exception: pass
@@ -92,7 +81,6 @@ def close_predict_gate(note=""):
             json.dump({"open": False, "closed_at": _now_kst().isoformat(), "note": note}, f, ensure_ascii=False)
             try: f.flush(); os.fsync(f.fileno())
             except Exception: pass
-        # block 존재 보장(외부 트리거 차단)
         try:
             with open(PREDICT_BLOCK, "a") as bf:
                 try: bf.flush(); os.fsync(bf.fileno())
@@ -119,11 +107,6 @@ def _clear_stale_lock(ttl_sec: int, tag: str = ""):
         pass
 
 def _acquire_predict_lock():
-    """
-    ✅ 원자적 생성 + 스테일 감지:
-       - 락이 살아있으면 False
-       - 스테일이면 제거 후 재시도
-    """
     try:
         _clear_stale_lock(PREDICT_LOCK_TTL, tag="(normal)")
         fd = os.open(PREDICT_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -144,7 +127,7 @@ def _release_predict_lock():
     except Exception:
         pass
 
-# ====== 예측 하트비트(경량 진행 로그) ======
+# ====== 예측 하트비트 ======
 import threading
 PREDICT_HEARTBEAT_SEC = int(os.getenv("PREDICT_HEARTBEAT_SEC", "3"))
 
@@ -188,7 +171,7 @@ except Exception:
     def apply_calibration(probs, *, symbol=None, strategy=None, regime=None, model_meta=None): return probs
     def get_calibration_version(): return "none"
 
-# ====== 모델 로딩 어댑터(.pt/.ptz/.safetensors 모두) ======
+# ====== 모델 로딩 어댑터 ======
 try:
     import inspect
     from model_io import load_model as _raw_load_model
@@ -240,7 +223,7 @@ EXP_DEC_MIN = float(os.getenv("EXPLORE_DECAY_MIN", "120"))
 EXP_NEAR = float(os.getenv("EXPLORE_NEAR_GAP", "0.07"))
 EXP_GAMMA = float(os.getenv("EXPLORE_GAMMA", "0.05"))
 
-# ====== [NEW] 메타 class_ranges 우선 헬퍼 ======
+# ====== meta class_ranges 우선 ======
 def _ranges_from_meta(meta):
     try:
         cr = meta.get("class_ranges", None)
@@ -378,12 +361,10 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         log_prediction(symbol=symbol, strategy=strategy, direction="예측실패", entry_price=0, target_price=0,
                        model=str(model_type or "unknown"), success=False, reason=reason, rate=0.0, timestamp=t,
                        return_value=0.0, volatility=True, source=source, predicted_class=-1, label=-1,
-                       # 실패행에도 컬럼 형태 유지(0값)
                        class_return_min=0.0, class_return_max=0.0, class_return_text="")
     except Exception as e:
         print(f"[failed_result log_prediction 오류] {e}")
     try:
-        # ⬇️ 예측 실패 기록은 prediction 컨텍스트로 저장
         if X_input is not None:
             insert_failure_record(res, feature_vector=np.array(X_input).flatten().tolist(), context="prediction")
     except Exception as e:
@@ -400,11 +381,6 @@ def _acquire_predict_lock_with_retry(max_wait_sec:int):
     return False
 
 def _prep_lock_for_source(source:str):
-    """
-    [NEW] train.py 그룹직후 콜에선 더 공격적으로:
-      - 스테일 기준을 TRAIN 값으로 강제 (기본 600s, train과 통일)
-      - 대기 상한은 기본 30s (환경변수 PREDICT_LOCK_WAIT_GROUP_SEC 로 조절)
-    """
     src = str(source or "")
     if "그룹직후" in src:
         _clear_stale_lock(PREDICT_LOCK_STALE_TRAIN_SEC, tag="(group)")
@@ -414,22 +390,55 @@ def _prep_lock_for_source(source:str):
             return 30
     return int(os.getenv("PREDICT_LOCK_WAIT_MAX_SEC", "15"))
 
+# ====== (NEW) 포지션 힌트 ======
+def _ema(arr: np.ndarray, span: int) -> np.ndarray:
+    if len(arr) == 0: return arr
+    s = pd.Series(arr, dtype=float)
+    return s.ewm(span=span, adjust=False).mean().values
+
+def _position_hint_from_market(df: pd.DataFrame) -> dict:
+    """
+    EMA 20/60 + 최근 30캔들 기울기 기반의 간단한 시장 힌트.
+    - 강한 상승: 롱 우선(allow_long=True, allow_short=False)
+    - 강한 하락: 숏 우선(allow_long=False, allow_short=True)
+    - 애매/횡보: 둘 다 허용
+    """
+    try:
+        close = df["close"].astype(float).values
+        if close.size < 70:
+            return {"allow_long": True, "allow_short": True, "ma_fast": None, "ma_slow": None, "slope": 0.0}
+        ma_fast = _ema(close, 20)
+        ma_slow = _ema(close, 60)
+        # 최근 30개 단순 선형기울기
+        y = close[-30:]
+        x = np.arange(len(y))
+        slope = float(np.polyfit(x, y, 1)[0]) / (np.mean(y) + 1e-12)  # 정규화 기울기
+        diff = float(ma_fast[-1] - ma_slow[-1]) / (close[-1] + 1e-12)
+
+        strong_up = (diff > 0.0015) and (slope > 0)   # 임계는 보수적으로
+        strong_dn = (diff < -0.0015) and (slope < 0)
+
+        if strong_up and not strong_dn:
+            return {"allow_long": True, "allow_short": False, "ma_fast": float(ma_fast[-1]), "ma_slow": float(ma_slow[-1]), "slope": float(slope)}
+        if strong_dn and not strong_up:
+            return {"allow_long": False, "allow_short": True, "ma_fast": float(ma_fast[-1]), "ma_slow": float(ma_slow[-1]), "slope": float(slope)}
+        # 애매하면 모두 허용
+        return {"allow_long": True, "allow_short": True, "ma_fast": float(ma_fast[-1]), "ma_slow": float(ma_slow[-1]), "slope": float(slope)}
+    except Exception:
+        return {"allow_long": True, "allow_short": True, "ma_fast": None, "ma_slow": None, "slope": 0.0}
+
 # ====== 핵심: 예측 ======
 def predict(symbol, strategy, source="일반", model_type=None):
-    # 0) 그룹 독점 플래그: 그룹예측 중엔 외부 요청 거절
     if _group_active() and not _bypass_gate_for_source(source):
         return failed_result(symbol or "None", strategy or "None", reason="group_predict_active", source=source, X_input=None)
 
-    # 1) 게이트: 그룹예측 호출은 우회, 그 외엔 기존 규칙 적용
     if not (_bypass_gate_for_source(source) or is_predict_gate_open()):
         return failed_result(symbol or "None", strategy or "None", reason="predict_gate_closed", source=source, X_input=None)
 
-    # 🔒 락: 그룹직후면 스테일 클리어+대기 연장
     lock_wait = _prep_lock_for_source(source)
     if not _acquire_predict_lock_with_retry(lock_wait):
         return failed_result(symbol or "None", strategy or "None", reason="predict_lock_timeout", source=source, X_input=None)
 
-    # 🫀 하트비트 시작
     _hb_stop = threading.Event()
     _hb_tag = f"{symbol}-{strategy}"
     _hb_thread = threading.Thread(target=_predict_hb_loop, args=(_hb_stop, _hb_tag), daemon=True)
@@ -483,21 +492,27 @@ def predict(symbol, strategy, source="일반", model_type=None):
         outs, all_preds = get_model_predictions(symbol, strategy, models, df, X, windows, rec_freq, regime=regime)
         if not outs: return failed_result(symbol, strategy, reason="no_valid_model", source=source, X_input=X[-1])
 
+        # ── (NEW) 시장 포지션 힌트 계산
+        hint = _position_hint_from_market(df)
+        allow_long, allow_short = bool(hint["allow_long"]), bool(hint["allow_short"])
+
         final_cls = None; meta_choice = "best_single"; chosen = None; used_minret = False
 
-        # (A) 진화형 메타
+        # (A) 진화형 메타 (그대로)
         if _glob_many(os.path.join(MODEL_DIR, "evo_meta_learner")):
             try:
                 from evo_meta_learner import predict_evo_meta
                 if callable(predict_evo_meta):
                     pred = int(predict_evo_meta(feat_row.unsqueeze(0), input_size=FEATURE_INPUT_SIZE))
-                    cmin, _ = get_class_return_range(pred, symbol, strategy)  # evo_meta에는 per-model meta 없음 → config 기준
-                    if float(cmin) >= MIN_RET_THRESHOLD:
+                    cmin, cmax = get_class_return_range(pred, symbol, strategy)  # evo_meta는 config 기준
+                    pos = _position_from_range(cmin, cmax)
+                    # 힌트 불일치면 보류
+                    if float(cmin) >= MIN_RET_THRESHOLD and ((pos=="long" and allow_long) or (pos=="short" and allow_short) or (pos=="neutral")):
                         final_cls = pred; meta_choice = "evo_meta_learner"
             except Exception as e:
                 print(f"[evo_meta 예외] {e}")
 
-        # (B) 단일 최고 + 탐험 (메타 경계 우선)
+        # (B) 단일 최고 + 탐험 (+ 포지션/최소수익 마스크)
         if final_cls is None:
             best_i, best_score, best_pred = -1, -1.0, None; scores = []
             for i, m in enumerate(outs):
@@ -506,14 +521,22 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 mask = np.zeros_like(adj, dtype=float)
                 for ci in range(len(adj)):
                     try:
-                        cmin = _class_min_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
-                        if float(cmin) >= MIN_RET_THRESHOLD: mask[ci] = 1.0
+                        lo, hi = _class_range_by_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
+                        pos = _position_from_range(lo, hi)
+                        # 최소 기대수익 필터
+                        if float(lo) < MIN_RET_THRESHOLD:
+                            continue
+                        # 포지션 힌트 필터
+                        if (pos == "long" and not allow_long) or (pos == "short" and not allow_short):
+                            continue
+                        mask[ci] = 1.0
                     except Exception:
                         pass
                 filt = adj * mask
                 if filt.sum() > 0:
                     filt = filt / filt.sum(); pred = int(np.argmax(filt)); p = float(filt[pred]); fused = True
                 else:
+                    # 마스크 전부 0이면 원본 adj 사용(완전 차단 방지)
                     pred = int(np.argmax(adj)); p = float(adj[pred]); fused = False
                 score = p * (0.5 + 0.5 * max(0.0, min(1.0, val_f1)))
                 m.update({"adjusted_probs": adj, "filtered_probs": (filt if fused else None),
@@ -542,33 +565,37 @@ def predict(symbol, strategy, source="일반", model_type=None):
             final_cls = int(best_pred); chosen = outs[best_i]
             if meta_choice != "best_single_explore": meta_choice = os.path.basename(chosen["model_path"])
             try:
-                if meta_choice == "best_single_explore" or chosen.get("model_path"):
-                    _bump_use(symbol, strategy, chosen.get("model_path", ""), explored=(meta_choice == "best_single_explore"))
+                _bump_use(symbol, strategy, chosen.get("model_path", ""), explored=("best_single_explore" in meta_choice))
             except Exception:
                 pass
 
-        # (C) 최종 가드(메타 경계 우선)
+        # (C) 최종 가드: 최소수익 + 포지션 힌트 일치 확인
         try:
-            cmin_sel, _ = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
+            cmin_sel, cmax_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
+            pos_sel = _position_from_range(cmin_sel, cmax_sel)
+            need_switch = False
             if float(cmin_sel) < MIN_RET_THRESHOLD:
+                need_switch = True
+            if (pos_sel == "long" and not allow_long) or (pos_sel == "short" and not allow_short):
+                need_switch = True
+
+            if need_switch:
                 best_m, best_sc, best_cls = None, -1.0, None
                 for m in outs:
                     adj = m.get("adjusted_probs", m["calib_probs"]); val_f1 = float(m.get("val_f1", 0.6))
                     for ci in range(len(adj)):
-                        try:
-                            cm = _class_min_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
-                            if float(cm) < MIN_RET_THRESHOLD: continue
-                            sc = float(adj[ci]) * (0.5 + 0.5 * max(0.0, min(1.0, val_f1)))
-                            if sc > best_sc: best_sc, best_m, best_cls = sc, m, int(ci)
-                        except Exception:
-                            pass
-                if best_cls is None:
-                    return failed_result(symbol, strategy, reason="no_class_ge_min_return", source=source, X_input=X[-1])
-                final_cls, chosen, used_minret = best_cls, best_m, True
+                        lo, hi = _class_range_by_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
+                        pos = _position_from_range(lo, hi)
+                        if float(lo) < MIN_RET_THRESHOLD: continue
+                        if (pos == "long" and not allow_long) or (pos == "short" and not allow_short): continue
+                        sc = float(adj[ci]) * (0.5 + 0.5 * max(0.0, min(1.0, val_f1)))
+                        if sc > best_sc: best_sc, best_m, best_cls = sc, m, int(ci)
+                if best_cls is not None:
+                    final_cls, chosen, used_minret = best_cls, best_m, True
         except Exception as e:
             print(f"[임계 가드 예외] {e}")
 
-        # ===== 로깅: 동적 범위/중앙값/포지션 명시 =====
+        # ===== 로깅 =====
         lo_sel, hi_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
         exp_ret = (float(lo_sel) + float(hi_sel)) / 2.0
         pos_sel = _position_from_range(lo_sel, hi_sel)
@@ -588,11 +615,16 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "min_return_threshold": float(MIN_RET_THRESHOLD),
             "used_minret_filter": bool(used_minret),
             "explore_used": ("best_single_explore" in str(meta_choice)),
-            # ── 추가: 선택 클래스의 동적 경계/중앙값/포지션
             "class_range_lo": float(lo_sel),
             "class_range_hi": float(hi_sel),
             "expected_return_mid": float(exp_ret),
             "position": pos_sel,
+            # ── (NEW) 포지션 힌트 기록
+            "hint_allow_long": allow_long,
+            "hint_allow_short": allow_short,
+            "hint_ma_fast": hint.get("ma_fast"),
+            "hint_ma_slow": hint.get("ma_slow"),
+            "hint_slope": hint.get("slope"),
         }
         ensure_prediction_log_exists()
         log_prediction(
@@ -612,7 +644,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             raw_prob=float((chosen or outs[0])["raw_probs"][final_cls]) if (chosen or outs) else None,
             calib_prob=float((chosen or outs[0])["calib_probs"][final_cls]) if (chosen or outs) else None,
             calib_ver=get_calibration_version(),
-            # ⬇️ 새 컬럼 3개 (관우/텔레그램용)
             class_return_min=float(lo_sel),
             class_return_max=float(hi_sel),
             class_return_text=class_text
@@ -629,8 +660,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     mask = np.zeros_like(adj, dtype=float)
                     for ci in range(len(adj)):
                         try:
-                            cmin = _class_min_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
-                            if float(cmin) >= MIN_RET_THRESHOLD: mask[ci] = 1.0
+                            lo_i, hi_i = _class_range_by_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
+                            pos_i = _position_from_range(lo_i, hi_i)
+                            if float(lo_i) < MIN_RET_THRESHOLD: continue
+                            if (pos_i=="long" and not allow_long) or (pos_i=="short" and not allow_short): continue
+                            mask[ci] = 1.0
                         except Exception: pass
                     adj2 = adj * mask
                     if np.sum(adj2) == 0: continue
@@ -647,11 +681,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     "model_path": os.path.basename(m.get("model_path", "")),
                     "model_type": m.get("model_type", ""), "val_f1": float(m.get("val_f1", 0.0)),
                     "calib_ver": get_calibration_version(), "min_return_threshold": float(MIN_RET_THRESHOLD),
-                    # ── 추가: 섀도우 선택 클래스의 동적 경계/중앙값/포지션
                     "class_range_lo": float(lo_i),
                     "class_range_hi": float(hi_i),
                     "expected_return_mid": float(exp_i),
                     "position": pos_i,
+                    "hint_allow_long": allow_long,
+                    "hint_allow_short": allow_short,
                 }
                 log_prediction(
                     symbol=symbol, strategy=strategy, direction="예측(섀도우)",
@@ -668,7 +703,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     raw_prob=float(m["raw_probs"][pred_i]),
                     calib_prob=float(m["calib_probs"][pred_i]),
                     calib_ver=get_calibration_version(),
-                    # ⬇️ 새 컬럼 3개
                     class_return_min=float(lo_i),
                     class_return_max=float(hi_i),
                     class_return_text=class_text_i
@@ -693,10 +727,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                        else f"최고 확률 단일 모델: {meta_choice}")
         }
     finally:
-        # 하트비트 종료 및 락 해제(반드시)
         try:
-            _hb_stop.set()
-            _hb_thread.join(timeout=2)
+            _hb_stop.set(); _hb_thread.join(timeout=2)
         except Exception:
             pass
         _release_predict_lock()
@@ -722,7 +754,6 @@ def evaluate_predictions(get_price_fn):
             dir_name = os.path.dirname(P) or "."
             fd, tmp = tempfile.mkstemp(prefix="predlog_", suffix=".csv", dir=dir_name, text=True)
             os.close(fd)
-            # ✅ 줄바꿈 연속기호(\) 제거: 괄호로 감싸 안전한 다중 context manager
             with (
                 open(tmp, "w", encoding="utf-8-sig", newline="") as f_tmp,
                 open(EVAL, "w", encoding="utf-8-sig", newline="") as f_eval,
@@ -785,7 +816,7 @@ def evaluate_predictions(get_price_fn):
                                 wrong_writer.writerow({k: r.get(k, "") for k in r.keys()}); continue
                         actual_max = float(fut["high"].max()); gain = (actual_max - entry) / (entry + 1e-12)
                         if pred_cls >= 0: 
-                            try: cmin, cmax = get_class_return_range(pred_cls, sym, strat)  # 평가 임계는 보수적으로 config 기준 유지
+                            try: cmin, cmax = get_class_return_range(pred_cls, sym, strat)
                             except Exception: cmin, cmax = (0.0, 0.0)
                         else: 
                             cmin, cmax = (0.0, 0.0)
@@ -880,7 +911,7 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             cprobs = apply_calibration(probs, symbol=symbol, strategy=strategy, regime=regime, model_meta=meta).astype(float)
             outs.append({"raw_probs": probs, "calib_probs": cprobs, "predicted_class": int(np.argmax(cprobs)),
                          "group_id": gid, "model_type": mtype, "model_path": model_path, "val_f1": val_f1,
-                         "symbol": symbol, "strategy": strategy, "meta": meta})  # ← meta 동봉
+                         "symbol": symbol, "strategy": strategy, "meta": meta})
             entry_price = df["close"].iloc[-1]
             allpreds.append({"class": int(np.argmax(cprobs)), "probs": cprobs, "entry_price": float(entry_price),
                              "num_classes": num_cls, "group_id": gid, "model_name": mtype, "model_symbol": symbol,
