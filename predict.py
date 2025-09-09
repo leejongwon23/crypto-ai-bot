@@ -11,6 +11,7 @@
 # (2025-09-08) — [추가] CSV에 class_return_min/max/text 3컬럼 직접 기록(메인/섀도우)
 # (2025-09-09) — [추가] predict() 반환 객체에도 class_return_min/max/text/position 포함
 # (2025-09-09b) — [핵심] (B) 마스크·(C) 가드에 “포지션 힌트(EMA20/60 + 기울기)” 적용 → 롱/숏 분리 강제
+# (2025-09-09c) — [FIX] (B)/(C) 최소수익 임계 판단을 양/음 공통식으로 교체: long=hi>=THRESH, short=-lo>=THRESH, 둘 다 허용 시 max(hi,-lo)>=THRESH
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -256,6 +257,18 @@ def _position_from_range(lo: float, hi: float) -> str:
     except Exception:
         return "neutral"
 
+# --- 공통 임계 판단(롱/숏 분리 + 힌트 동시 반영)
+def _meets_minret_with_hint(lo: float, hi: float, allow_long: bool, allow_short: bool, thr: float) -> bool:
+    try:
+        lo = float(lo); hi = float(hi); thr = float(thr)
+        long_ok = allow_long and (hi > 0.0) and (hi >= thr)
+        short_ok = allow_short and (lo < 0.0) and ((-lo) >= thr)
+        if allow_long and allow_short:
+            return (hi > 0.0 and hi >= thr) or (lo < 0.0 and (-lo) >= thr)
+        return long_ok or short_ok
+    except Exception:
+        return False
+
 # ====== 작은 헬퍼들 ======
 def _load_json(p, default):
     try:
@@ -498,21 +511,19 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
         final_cls = None; meta_choice = "best_single"; chosen = None; used_minret = False
 
-        # (A) 진화형 메타 (그대로)
+        # (A) 진화형 메타 (그대로) + 공통 임계/힌트 체크
         if _glob_many(os.path.join(MODEL_DIR, "evo_meta_learner")):
             try:
                 from evo_meta_learner import predict_evo_meta
                 if callable(predict_evo_meta):
                     pred = int(predict_evo_meta(feat_row.unsqueeze(0), input_size=FEATURE_INPUT_SIZE))
                     cmin, cmax = get_class_return_range(pred, symbol, strategy)  # evo_meta는 config 기준
-                    pos = _position_from_range(cmin, cmax)
-                    # 힌트 불일치면 보류
-                    if float(cmin) >= MIN_RET_THRESHOLD and ((pos=="long" and allow_long) or (pos=="short" and allow_short) or (pos=="neutral")):
+                    if _meets_minret_with_hint(cmin, cmax, allow_long, allow_short, MIN_RET_THRESHOLD):
                         final_cls = pred; meta_choice = "evo_meta_learner"
             except Exception as e:
                 print(f"[evo_meta 예외] {e}")
 
-        # (B) 단일 최고 + 탐험 (+ 포지션/최소수익 마스크)
+        # (B) 단일 최고 + 탐험 (+ 포지션/최소수익 마스크 — 공통식)
         if final_cls is None:
             best_i, best_score, best_pred = -1, -1.0, None; scores = []
             for i, m in enumerate(outs):
@@ -522,14 +533,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 for ci in range(len(adj)):
                     try:
                         lo, hi = _class_range_by_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
-                        pos = _position_from_range(lo, hi)
-                        # 최소 기대수익 필터
-                        if float(lo) < MIN_RET_THRESHOLD:
-                            continue
-                        # 포지션 힌트 필터
-                        if (pos == "long" and not allow_long) or (pos == "short" and not allow_short):
-                            continue
-                        mask[ci] = 1.0
+                        if _meets_minret_with_hint(lo, hi, allow_long, allow_short, MIN_RET_THRESHOLD):
+                            mask[ci] = 1.0
                     except Exception:
                         pass
                 filt = adj * mask
@@ -569,25 +574,17 @@ def predict(symbol, strategy, source="일반", model_type=None):
             except Exception:
                 pass
 
-        # (C) 최종 가드: 최소수익 + 포지션 힌트 일치 확인
+        # (C) 최종 가드 — 공통 임계 + 힌트 동시 확인
         try:
             cmin_sel, cmax_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
-            pos_sel = _position_from_range(cmin_sel, cmax_sel)
-            need_switch = False
-            if float(cmin_sel) < MIN_RET_THRESHOLD:
-                need_switch = True
-            if (pos_sel == "long" and not allow_long) or (pos_sel == "short" and not allow_short):
-                need_switch = True
-
-            if need_switch:
+            if not _meets_minret_with_hint(cmin_sel, cmax_sel, allow_long, allow_short, MIN_RET_THRESHOLD):
                 best_m, best_sc, best_cls = None, -1.0, None
                 for m in outs:
                     adj = m.get("adjusted_probs", m["calib_probs"]); val_f1 = float(m.get("val_f1", 0.6))
                     for ci in range(len(adj)):
                         lo, hi = _class_range_by_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
-                        pos = _position_from_range(lo, hi)
-                        if float(lo) < MIN_RET_THRESHOLD: continue
-                        if (pos == "long" and not allow_long) or (pos == "short" and not allow_short): continue
+                        if not _meets_minret_with_hint(lo, hi, allow_long, allow_short, MIN_RET_THRESHOLD):
+                            continue
                         sc = float(adj[ci]) * (0.5 + 0.5 * max(0.0, min(1.0, val_f1)))
                         if sc > best_sc: best_sc, best_m, best_cls = sc, m, int(ci)
                 if best_cls is not None:
@@ -661,10 +658,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     for ci in range(len(adj)):
                         try:
                             lo_i, hi_i = _class_range_by_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
-                            pos_i = _position_from_range(lo_i, hi_i)
-                            if float(lo_i) < MIN_RET_THRESHOLD: continue
-                            if (pos_i=="long" and not allow_long) or (pos_i=="short" and not allow_short): continue
-                            mask[ci] = 1.0
+                            if _meets_minret_with_hint(lo_i, hi_i, allow_long, allow_short, MIN_RET_THRESHOLD):
+                                mask[ci] = 1.0
                         except Exception: pass
                     adj2 = adj * mask
                     if np.sum(adj2) == 0: continue
