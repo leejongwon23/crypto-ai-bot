@@ -1,4 +1,8 @@
 # app.py — single-source, deduped train loop via train.py (ONE concurrent loop only)
+# ⛳️ 변경 핵심
+# - 서버 부팅 시 자동 학습 금지(기본): APP_AUTOSTART_TRAIN=1 일 때만 시작
+# - 텔레그램 부팅 알림도 기본 끔: TELEGRAM_BOOT_MSG=1 일 때만 발송
+# - 예측 게이트/전역락·스케줄러/리셋 로직은 기존 유지(중복 실행 방지)
 
 from flask import Flask, jsonify, request, Response
 from recommend import main
@@ -374,10 +378,14 @@ def _init_background_once():
             # 🆕 파이프라인 고정 안내 로그(직렬화 정책)
             print("[pipeline] serialized: train -> predict -> next-group"); sys.stdout.flush()
 
-            # 학습 루프 스레드 — train.py의 단일 루프 보장 API 사용
+            # 🔧 변경 2: 자동 학습은 기본 OFF (환경변수로만 ON)
+            autostart = os.getenv("APP_AUTOSTART_TRAIN", "0") == "1"
             _safe_close_gate("init_train_start")  # 🔒 학습 전 predict 게이트 강제 닫기(중복예측 방지)
-            train.start_train_loop(force_restart=False, sleep_sec=0)
-            print("✅ 학습 루프 스레드 시작")
+            if autostart:
+                train.start_train_loop(force_restart=False, sleep_sec=0)
+                print("✅ 학습 루프 스레드 시작 (APP_AUTOSTART_TRAIN=1)")
+            else:
+                print("⏸️ 학습 루프 자동 시작 안함 (APP_AUTOSTART_TRAIN=0)")
 
             # 정리 스케줄러(기본 30분)
             start_cleanup_scheduler()
@@ -393,12 +401,15 @@ def _init_background_once():
             threading.Thread(target=maintenance_fix_meta.fix_all_meta_json, daemon=True).start()
             print("✅ maintenance_fix_meta 초기 실행 트리거")
 
-            # 텔레그램 알림
-            try:
-                send_message("[시작] YOPO 서버 실행됨")
-                print("✅ Telegram 알림 발송 완료")
-            except Exception as e:
-                print(f"⚠️ Telegram 발송 실패: {e}")
+            # 🔧 변경 3: 텔레그램 부팅 알림은 기본 OFF
+            if os.getenv("TELEGRAM_BOOT_MSG", "0") == "1":
+                try:
+                    send_message("[시작] YOPO 서버 실행됨")
+                    print("✅ Telegram 알림 발송 완료")
+                except Exception as e:
+                    print(f"⚠️ Telegram 발송 실패: {e}")
+            else:
+                print("⏸️ Telegram 부팅 알림 비활성화 (TELEGRAM_BOOT_MSG=0)")
 
             _INIT_DONE = True
             print("✅ 백그라운드 초기화 완료")
@@ -436,7 +447,7 @@ def _predict_after_training(symbols:list[str], source_note:str):
     if not vis:
         print(f"[APP-PRED] 모델 가시화 실패 → 예측 생략 candidates={sorted(set(symbols))}")
         return
-    # 🔧 변경 2: 예측 직전, 남아있는 락이 있으면 **즉시 제거**
+    # 🔧 변경 4: 예측 직전, 남아있는 락이 있으면 **즉시 제거**
     if os.path.exists(LOCK_PATH):
         try:
             os.remove(LOCK_PATH)
