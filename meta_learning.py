@@ -50,7 +50,6 @@ class MAML:
             meta_loss += self.loss_fn(logits, y_va)
         meta_loss /= max(1, len(tasks))
         self.optimizer.zero_grad()
-        meta_loss.backward()
         self.optimizer.step()
         return meta_loss.item()
 
@@ -224,7 +223,7 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
     all_below = True  # 모든 클래스 ER<1%인지 확인
 
     for c in range(num_classes):
-        # ✅ 수정: 성공 이력 없으면 META_BASE_SUCCESS(기본 0.55) 사용
+        # ✅ 성공 이력 없으면 META_BASE_SUCCESS 사용
         sr = success_rate_dict.get(c, META_BASE_SUCCESS)
         er = expected_return_dict.get(c, 0.0)       # 없으면 0 → 임계 미만으로 처리
         g  = _ret_gain(er)                          # 1% 미만이면 0
@@ -234,7 +233,7 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
 
     mode = "성공률 기반 메타" if success_rate_dict else "기본 메타 (성공률 無)"
 
-    # 모든 클래스가 1% 미만이면 → 확률로 선택(로그 이유는 상위 로직에서 표기 가능)
+    # 모든 클래스가 1% 미만이면 → 확률로 선택
     if all_below:
         scores = avg_softmax.copy()
         mode += " / all<1%→prob선택"
@@ -313,7 +312,7 @@ def meta_predict(
 
         scores = agg_probs.copy()
         for c in range(len(scores)):
-            # ✅ 동일하게 META_BASE_SUCCESS 사용
+            # ✅ 동일하게 META_BASE_SUCCESS 사용 + 1% 임계
             sr = class_success.get(c, META_BASE_SUCCESS)
             er = expected_return.get(c, 0.0)
             scores[c] = scores[c] * (0.5 + 0.5 * sr) * _ret_gain(er)
