@@ -16,8 +16,8 @@ PREDICTION_LOG = f"{DIR}/prediction_log.csv"
 WRONG = f"{DIR}/wrong_predictions.csv"
 EVAL_RESULT = f"{LOG_DIR}/evaluation_result.csv"
 
-# 학습 로그 파일명
-TRAIN_LOG = f"{LOG_DIR}/train_log.csv"}
+# 학습 로그 파일명  ✅ 불필요한 } 제거
+TRAIN_LOG = f"{LOG_DIR}/train_log.csv"
 AUDIT_LOG = f"{LOG_DIR}/evaluation_audit.csv"
 
 # 공용 헤더(기존 + 확장 컬럼)
@@ -587,6 +587,7 @@ def log_prediction(
 
             print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} class={predicted_class} | success={success} | src={source_exchange} | reason={reason}")
 
+            # 실패 DB 기록은 '평가 컨텍스트'에서만, 최소 요건 충족 시에만
             should_record_failure = (
                 insert_failure_record is not None
                 and (ctx == "evaluation")
