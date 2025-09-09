@@ -161,7 +161,7 @@ class GroupOrderManager:
         self.groups = [list(g) for g in groups]
         self.idx = 0
         self.trained = {}
-        self.last_predicted_idx = -1
+               self.last_predicted_idx = -1
         self._load()
 
     def _load(self):
@@ -517,39 +517,55 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         scaled = scaler.fit_transform(df[feature_cols].astype(np.float32))
         df_s = pd.DataFrame(scaled.astype(np.float32), columns=feature_cols)
         df_s["timestamp"] = df["timestamp"].values
+
+        # ▼ 라벨 계산용으로 원시 OHLC 보존
         df_s["high"] = df["high"] if "high" in df.columns else df["close"]
+        df_s["low"]  = df["low"]  if "low"  in df.columns else df["close"]
 
         if input_size and len(feature_cols) < input_size:
             for i in range(len(feature_cols), input_size):
                 df_s[f"pad_{i}"] = np.float32(0.0)
 
-        features = df_s.to_dict(orient="records")
+        # 샘플 텐서는 스케일된 df_s 사용, 라벨 계산은 '원시 df' 사용
+        features_s = df_s.to_dict(orient="records")
+        raw_records = df.to_dict(orient="records")
 
         strategy_minutes = {"단기": 240, "중기": 1440, "장기": 2880}
         lookahead = strategy_minutes.get(strategy, 1440)
-        samples, gains = [], []
+        samples, signed_vals = [], []
         row_cols = [c for c in df_s.columns if c != "timestamp"]
 
-        for i in range(window, len(features)):
-            seq = features[i - window:i]
-            base = features[i]
-            entry_time = pd.to_datetime(base.get("timestamp"), errors="coerce", utc=True).tz_convert("Asia/Seoul")
-            entry_price = float(base.get("close", 0.0))
+        for i in range(window, len(features_s)):
+            seq = features_s[i - window:i]
+            base_raw = raw_records[i]
+            entry_time = pd.to_datetime(base_raw.get("timestamp"), errors="coerce", utc=True).tz_convert("Asia/Seoul")
+            entry_price = float(base_raw.get("close", 0.0))
             if pd.isnull(entry_time) or entry_price <= 0:
                 continue
             try:
-                future = [
-                    f for f in features[i + 1:]
-                    if (pd.to_datetime(f.get("timestamp", None), utc=True) - entry_time) <= pd.Timedelta(minutes=lookahead)
+                fut_raw = [
+                    r for r in raw_records[i + 1:]
+                    if (pd.to_datetime(r.get("timestamp", None), utc=True) - entry_time) <= pd.Timedelta(minutes=lookahead)
                 ]
             except Exception:
                 continue
-            vprices = [f.get("high", f.get("close", entry_price)) for f in future if f.get("high", 0) > 0]
-            if len(seq) != window or not vprices:
+
+            if len(seq) != window or not fut_raw:
                 continue
-            max_future = max(vprices)
-            gain = float((max_future - entry_price) / (entry_price + 1e-6))
-            gains.append(gain)
+
+            v_highs = [float(r.get("high", r.get("close", entry_price))) for r in fut_raw if r.get("high", 0) > 0]
+            v_lows  = [float(r.get("low",  r.get("close", entry_price))) for r in fut_raw if r.get("low",  0) > 0]
+
+            if not v_highs and not v_lows:
+                continue
+
+            max_future = max(v_highs) if v_highs else entry_price
+            min_future = min(v_lows)  if v_lows  else entry_price
+            ret_up = (max_future - entry_price) / (entry_price + 1e-6)
+            ret_dn = (min_future - entry_price) / (entry_price + 1e-6)  # 음수 또는 0
+
+            signed_ret = ret_up if abs(ret_up) >= abs(ret_dn) else ret_dn
+            signed_vals.append(float(signed_ret))
 
             sample = [[float(r.get(c, 0.0)) for c in row_cols] for r in seq]
             if input_size:
@@ -562,19 +578,19 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             samples.append(sample)
 
         if samples:
-            gains_arr = np.asarray(gains, dtype=np.float64)
-            y = _bin_labels(gains_arr, num_classes)
+            y = _bin_labels(np.asarray(signed_vals, dtype=np.float64), num_classes)
             X = np.array(samples, dtype=np.float32)
             if len(X) != len(y):
                 m = min(len(X), len(y))
                 X = X[:m]; y = y[:m]
-            print(f"[✅ create_dataset 완료] 샘플 수: {len(y)}, X.shape={X.shape}, NUM_CLASSES={num_classes}")
+            print(f"[✅ create_dataset 완료] (signed) 샘플 수: {len(y)}, X.shape={X.shape}, NUM_CLASSES={num_classes}")
             return X, y
 
-        closes = df_s["close"].to_numpy(dtype=np.float32)
+        # ── 최후 fallback: 1-step pct (이미 ± 가능) ──
+        closes = df["close"].to_numpy(dtype=np.float32)
         pct = np.diff(closes) / (closes[:-1] + 1e-6)
         fb_samples, fb_labels = [], []
-        for i in range(window, len(df_s) - 1):
+        for i in range(window, len(df) - 1):
             seq_rows = df_s.iloc[i - window:i]
             sample = [[float(r.get(c, 0.0)) for c in row_cols] for _, r in seq_rows.iterrows()]
             if input_size:
