@@ -17,7 +17,7 @@ def _strategy_horizon_hours(strategy: str) -> int:
     return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
 
 # ──────────────────────────────────────────────────────────────
-# 내부 유틸: 미래 수익률(look‑ahead) 계산 (최근 구간만)
+# 내부 유틸: 미래 수익률(look-ahead) 계산 (최근 구간만)
 # ──────────────────────────────────────────────────────────────
 def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
     if df is None or df.empty or "timestamp" not in df.columns:
