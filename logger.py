@@ -264,7 +264,6 @@ def ensure_success_db():
                 PRIMARY KEY(symbol, strategy, model)
             )
         """, params=(), retries=5, commit=True)
-        print("[✅ ensure_success_db] model_success 테이블 확인 완료")
     except Exception as e:
         print(f"[오류] ensure_success_db 실패 → {e}")
 
