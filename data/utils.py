@@ -411,7 +411,7 @@ def future_gains_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
 def future_gains(df: pd.DataFrame, strategy: str) -> np.ndarray:
     return future_gains_by_hours(df, {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24))
 
-def _downcast_numeric(df: pd.DataFrame, prefer_float32: bool = True) -> pdDataFrame:
+def _downcast_numeric(df: pd.DataFrame, prefer_float32: bool = True) -> pd.DataFrame:
     if df is None or df.empty:
         return df
     df = df.copy()
