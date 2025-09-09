@@ -1,7 +1,7 @@
 # app.py — single-source, deduped train loop via train.py (ONE concurrent loop only)
 # ⛳️ 변경 핵심
-# - 서버 부팅 시 자동 학습 금지(기본): APP_AUTOSTART_TRAIN=1 일 때만 시작
-# - 텔레그램 부팅 알림도 기본 끔: TELEGRAM_BOOT_MSG=1 일 때만 발송
+# - 서버 부팅 시 자동 학습 기본 ON: APP_AUTOSTART_TRAIN=0 일 때만 비활성
+# - 텔레그램 부팅 알림은 기본 끔: TELEGRAM_BOOT_MSG=1 일 때만 발송
 # - 예측 게이트/전역락·스케줄러/리셋 로직은 기존 유지(중복 실행 방지)
 
 from flask import Flask, jsonify, request, Response
@@ -378,12 +378,12 @@ def _init_background_once():
             # 🆕 파이프라인 고정 안내 로그(직렬화 정책)
             print("[pipeline] serialized: train -> predict -> next-group"); sys.stdout.flush()
 
-            # 🔧 변경 2: 자동 학습은 기본 OFF (환경변수로만 ON)
-            autostart = os.getenv("APP_AUTOSTART_TRAIN", "0") == "1"
+            # 🔧 변경 2: 자동 학습 기본 ON (APP_AUTOSTART_TRAIN=0 일 때만 비활성)
+            autostart = os.getenv("APP_AUTOSTART_TRAIN", "1") != "0"
             _safe_close_gate("init_train_start")  # 🔒 학습 전 predict 게이트 강제 닫기(중복예측 방지)
             if autostart:
                 train.start_train_loop(force_restart=False, sleep_sec=0)
-                print("✅ 학습 루프 스레드 시작 (APP_AUTOSTART_TRAIN=1)")
+                print("✅ 학습 루프 스레드 시작 (APP_AUTOSTART_TRAIN!=0)")
             else:
                 print("⏸️ 학습 루프 자동 시작 안함 (APP_AUTOSTART_TRAIN=0)")
 
@@ -576,7 +576,7 @@ def yopo_health():
                     rows.append(f"<tr><td>{r.get('timestamp','')}</td><td>{r.get('symbol','')}</td><td>{r.get('direction','')}</td><td>{rtn_pct}</td><td>{status_icon}</td></tr>")
                 table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>심볼</th><th>방향</th><th>수익률</th><th>상태</th></tr>" + "".join(rows) + "</table>"
 
-            last_train = train_log_q['timestamp'].iloc[-1] if (not train_log_q.empty and 'timestamp' in train_log_q) else '없음'
+            last_train = train_log_df['timestamp'].iloc[-1] if (not train_log_df.empty and 'timestamp' in train_log_df) else '없음'
             last_pred  = pred['timestamp'].iloc[-1]  if (not pred.empty and 'timestamp' in pred)  else '없음'
             last_audit = audit['timestamp'].iloc[-1] if (not audit.empty and 'timestamp' in audit) else '없음'
 
