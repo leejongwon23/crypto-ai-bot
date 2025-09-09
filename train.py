@@ -3,7 +3,7 @@ import os
 def _set_default_thread_env(n: str, v: int):
     if os.getenv(n) is None: os.environ[n] = str(v)
 for _n in ("OMP_NUM_THREADS","MKL_NUM_THREADS","OPENBLAS_NUM_THREADS","NUMEXPR_NUM_THREADS","VECLIB_MAXIMUM_THREADS","BLIS_NUM_THREADS","TORCH_NUM_THREADS"):
-    _set_default_thread_env(_n, int(os.getenv("CPU_THREAD_CAP","2")))
+    _set_default_thread_env(_n, int(os.getenv("CPU_THREAD_CAP","1")))  # ← default 1
 
 import json, time, tempfile, glob, shutil, gc, threading, traceback, re
 from datetime import datetime
@@ -14,7 +14,7 @@ from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import MinMaxScaler
 
 from model_io import convert_pt_to_ptz, save_model
-try: torch.set_num_threads(int(os.getenv("TORCH_NUM_THREADS","2")))
+try: torch.set_num_threads(int(os.getenv("TORCH_NUM_THREADS","1")))  # ← default 1
 except: pass
 
 _DISABLE_LIGHTNING = os.getenv("DISABLE_LIGHTNING","0")=="1"
@@ -55,8 +55,14 @@ except:
     def train_evo_meta_loop(*a,**k): return None
 
 def _safe_print(msg):
-    try: print(msg, flush=True)
-    except: pass
+    try:
+        # 로그 폭주 방지: QUIET_PROGRESS=1이면 중요 수준만 출력
+        if os.getenv("QUIET_PROGRESS","1")=="1":
+            if not (isinstance(msg,str) and msg.startswith(("🟩","🟦","✅","🛑","🔴","⚠️","🚀","📌","🟡","🟢","ℹ️","[STOP]","[PREDICT]","[HALT]"))):
+                return
+        print(msg, flush=True)
+    except: 
+        pass
 
 # ====== 🔔 하트비트/워치독 ======
 _HEARTBEAT_SEC = int(os.getenv("HEARTBEAT_SEC","10"))
@@ -80,7 +86,8 @@ def _progress(tag:str):
     if _WATCHDOG_ABORT.is_set():
         _WATCHDOG_ABORT.clear()
         _safe_print(f"🟢 [WATCHDOG] abort cleared → {tag}")
-    if (now % 5.0) < 0.1:
+    # 조용모드에선 progress 스팸 억제
+    if os.getenv("QUIET_PROGRESS","1")!="1" and (now % 5.0) < 0.1:
         _safe_print(f"📌 progress: {tag}")
 
 def _watchdog_loop(stop_event: threading.Event | None):
@@ -156,7 +163,7 @@ MODEL_DIR="/persistent/models"; os.makedirs(MODEL_DIR,exist_ok=True)
 
 _MAX_ROWS_FOR_TRAIN=int(os.getenv("TRAIN_MAX_ROWS","1200"))
 _BATCH_SIZE=int(os.getenv("TRAIN_BATCH_SIZE","128"))
-_NUM_WORKERS=int(os.getenv("TRAIN_NUM_WORKERS","0"))
+_NUM_WORKERS=int(os.getenv("TRAIN_NUM_WORKERS","0"))  # 기본 0 (멀티워커 금지)
 _PIN_MEMORY=False; _PERSISTENT=False
 
 now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
