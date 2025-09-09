@@ -771,6 +771,71 @@ def log_label_distribution(
         print(f"[⚠️ 라벨분포 로그 실패] {e}")
 
 # -------------------------
+# (NEW) 검증 클래스 커버 경고 + 단일 클래스 예측 경고
+# -------------------------
+def log_eval_coverage(symbol: str, strategy: str, counts: dict, num_classes: int, note: str = ""):
+    """
+    검증 세트 라벨 분포의 커버리지를 기록하고, 커버 비율이 낮거나 단일 클래스면 경고를 남긴다.
+    """
+    path = os.path.join(LOG_DIR, "validation_coverage.csv")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    now = now_kst().isoformat()
+
+    counts = {int(k): int(v) for k, v in sorted((counts or {}).items())}
+    covered = sum(1 for v in counts.values() if int(v) > 0)
+    total = int(sum(counts.values()))
+    coverage = (covered / max(1, int(num_classes))) if num_classes else 0.0
+
+    write_header = not os.path.exists(path)
+    try:
+        with open(path, "a", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            if write_header:
+                w.writerow(["timestamp","symbol","strategy","num_classes","covered","coverage","total","counts_json","note"])
+            w.writerow([now, symbol, strategy, int(num_classes), int(covered), float(round(coverage,4)), int(total), json.dumps(counts, ensure_ascii=False), str(note or "")])
+        if covered <= 1:
+            print(f"🔴 [경고] 검증 라벨 단일 클래스 감지 → {symbol}-{strategy} (covered={covered}/{num_classes})")
+        elif coverage < 0.6:
+            print(f"🟠 [주의] 검증 클래스 커버 낮음 → {symbol}-{strategy} (coverage={coverage:.2f})")
+    except Exception as e:
+        print(f"[⚠️ validation_coverage 로그 실패] {e}")
+
+def alert_if_single_class_prediction(symbol: str, strategy: str, lookback_days: int = 3, min_rows: int = 100):
+    """
+    최근 예측에서 단일 클래스만 출력되는지 경고(데이터 누락/라벨링 문제 조기 감지).
+    """
+    try:
+        ensure_prediction_log_exists()
+        if not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0:
+            return False
+        cutoff = now_kst() - datetime.timedelta(days=int(lookback_days))
+        uniq = set(); total = 0
+        usecols = ["timestamp","symbol","strategy","predicted_class"]
+        for chunk in pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", usecols=[c for c in usecols if c in PREDICTION_HEADERS], chunksize=CHUNK):
+            if "timestamp" not in chunk.columns or "predicted_class" not in chunk.columns:
+                continue
+            ts = pd.to_datetime(chunk["timestamp"], errors="coerce")
+            try:
+                ts = ts.dt.tz_localize("Asia/Seoul")
+            except Exception:
+                ts = ts.dt.tz_convert("Asia/Seoul")
+            sub = chunk[(chunk.get("symbol","")==symbol) & (chunk.get("strategy","")==strategy)]
+            sub = sub.loc[ts >= cutoff]
+            if sub.empty:
+                continue
+            pcs = pd.to_numeric(sub["predicted_class"], errors="coerce").dropna().astype(int)
+            uniq.update(pcs.unique().tolist())
+            total += int(len(pcs))
+        if total >= int(min_rows) and len(uniq) <= 1:
+            print(f"🔴 [경고] 최근 예측이 사실상 단일 클래스 → {symbol}-{strategy} (rows={total}, uniq={len(uniq)})")
+            log_audit_prediction(symbol, strategy, "single_class_pred", f"rows={total}, uniq={len(uniq)}")
+            return True
+        return False
+    except Exception as e:
+        print(f"[⚠️ 단일클래스 예측 점검 실패] {e}")
+        return False
+
+# -------------------------
 # 정렬 키 (lambda 사용 안 함)
 # -------------------------
 def _model_sort_key(r):
