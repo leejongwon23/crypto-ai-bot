@@ -17,7 +17,7 @@ WRONG = f"{DIR}/wrong_predictions.csv"
 EVAL_RESULT = f"{LOG_DIR}/evaluation_result.csv"
 
 # 학습 로그 파일명
-TRAIN_LOG = f"{LOG_DIR}/train_log.csv"
+TRAIN_LOG = f"{LOG_DIR}/train_log.csv"}
 AUDIT_LOG = f"{LOG_DIR}/evaluation_audit.csv"
 
 # 공용 헤더(기존 + 확장 컬럼)
@@ -300,7 +300,7 @@ def get_model_success_rate(s, t, m):
         return 0.0
 
 # -------------------------
-# failure_db 초기화: 부팅 직후 반드시 스키마 준비(명시 로그)
+# failure_db 초기화
 # -------------------------
 try:
     from failure_db import ensure_failure_db as _ensure_failure_db_once
@@ -474,12 +474,10 @@ def _extract_from_note(note_str: str):
             for k in list(fields.keys()):
                 if k in obj:
                     v = obj.get(k)
-                    # 숫자는 그대로, bool은 0/1, 나머지는 문자열
                     if isinstance(v, bool):
                         fields[k] = int(v)
                     else:
                         fields[k] = v if (v is not None) else ""
-            # meta_choice가 explore면 explore_used 보조 판단
             if not fields.get("explore_used"):
                 mc = obj.get("meta_choice", "")
                 fields["explore_used"] = 1 if ("explore" in str(mc)) else 0
@@ -548,7 +546,6 @@ def log_prediction(
         except Exception:
             fv_serial = ""
 
-        # (NEW) note에서 핵심 신호 추출
         note_fields = _extract_from_note(note)
 
         row = [
@@ -561,11 +558,9 @@ def log_prediction(
             (float(calib_prob) if calib_prob is not None else ""),
             (str(calib_ver) if calib_ver is not None else ""),
             fv_serial,
-            # 새 컬럼 3개
             (float(class_return_min) if class_return_min is not None else ""),
             (float(class_return_max) if class_return_max is not None else ""),
             (str(class_return_text) if class_return_text is not None else ""),
-            # (NEW) note 추출 8개
             note_fields.get("position",""),
             note_fields.get("hint_allow_long",""),
             note_fields.get("hint_allow_short",""),
@@ -775,6 +770,17 @@ def log_label_distribution(
         print(f"[⚠️ 라벨분포 로그 실패] {e}")
 
 # -------------------------
+# 정렬 키 (lambda 사용 안 함)
+# -------------------------
+def _model_sort_key(r):
+    return (
+        str(r.get("symbol", "")),
+        str(r.get("strategy", "")),
+        str(r.get("model", "")),
+        int(r.get("group_id", 0)),
+    )
+
+# -------------------------
 # 모델 인벤토리 조회
 # -------------------------
 def get_available_models(symbol: str = None, strategy: str = None):
@@ -812,7 +818,7 @@ def get_available_models(symbol: str = None, strategy: str = None):
                 "val_f1": float(meta.get("metrics", {}).get("val_f1", 0.0)),
                 "timestamp": meta.get("timestamp", "")
             })
-        out.sort(key=lambda r: (r{"symbol"}, r["strategy"], r["model"], r["group_id"]))
+        out.sort(key=_model_sort_key)
         return out
     except Exception as e:
         print(f"[오류] get_available_models 실패 → {e}")
