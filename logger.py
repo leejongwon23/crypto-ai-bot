@@ -32,7 +32,10 @@ BASE_PRED_HEADERS = [
 EXTRA_PRED_HEADERS = ["regime","meta_choice","raw_prob","calib_prob","calib_ver"]
 # ✅ feature_vector + (NEW) class return 3컬럼
 CLASS_RANGE_HEADERS = ["class_return_min","class_return_max","class_return_text"]
-PREDICTION_HEADERS = BASE_PRED_HEADERS + EXTRA_PRED_HEADERS + ["feature_vector"] + CLASS_RANGE_HEADERS
+# ✅ (NEW) note JSON에서 뽑아내는 포지션/힌트/필터 사용여부 컬럼
+NOTE_EXTRACT_HEADERS = ["position","hint_allow_long","hint_allow_short","hint_slope","used_minret_filter","explore_used","hint_ma_fast","hint_ma_slow"]
+
+PREDICTION_HEADERS = BASE_PRED_HEADERS + EXTRA_PRED_HEADERS + ["feature_vector"] + CLASS_RANGE_HEADERS + NOTE_EXTRACT_HEADERS
 
 # 청크 크기 기본값
 CHUNK = 50_000
@@ -459,6 +462,31 @@ def _normalize_model_fields(model, model_name, symbol, strategy):
         m = mn = base
     return m, mn
 
+def _extract_from_note(note_str: str):
+    """predict.py가 넣는 JSON note를 파싱해 열로 추출 (없으면 공백)."""
+    fields = {
+        "position": "", "hint_allow_long": "", "hint_allow_short": "", "hint_slope": "",
+        "used_minret_filter": "", "explore_used": "", "hint_ma_fast": "", "hint_ma_slow": ""
+    }
+    try:
+        obj = json.loads(note_str) if isinstance(note_str, str) else {}
+        if isinstance(obj, dict):
+            for k in list(fields.keys()):
+                if k in obj:
+                    v = obj.get(k)
+                    # 숫자는 그대로, bool은 0/1, 나머지는 문자열
+                    if isinstance(v, bool):
+                        fields[k] = int(v)
+                    else:
+                        fields[k] = v if (v is not None) else ""
+            # meta_choice가 explore면 explore_used 보조 판단
+            if not fields.get("explore_used"):
+                mc = obj.get("meta_choice", "")
+                fields["explore_used"] = 1 if ("explore" in str(mc)) else 0
+    except Exception:
+        pass
+    return fields
+
 def log_prediction(
     symbol, strategy, direction=None, entry_price=0, target_price=0,
     timestamp=None, model=None, predicted_class=None, top_k=None,
@@ -520,6 +548,9 @@ def log_prediction(
         except Exception:
             fv_serial = ""
 
+        # (NEW) note에서 핵심 신호 추출
+        note_fields = _extract_from_note(note)
+
         row = [
             now, symbol, strategy, direction, entry_price, target_price,
             (model or ""), predicted_class, top_k_str, note,
@@ -534,6 +565,15 @@ def log_prediction(
             (float(class_return_min) if class_return_min is not None else ""),
             (float(class_return_max) if class_return_max is not None else ""),
             (str(class_return_text) if class_return_text is not None else ""),
+            # (NEW) note 추출 8개
+            note_fields.get("position",""),
+            note_fields.get("hint_allow_long",""),
+            note_fields.get("hint_allow_short",""),
+            note_fields.get("hint_slope",""),
+            note_fields.get("used_minret_filter",""),
+            note_fields.get("explore_used",""),
+            note_fields.get("hint_ma_fast",""),
+            note_fields.get("hint_ma_slow",""),
         ]
 
         try:
@@ -772,7 +812,7 @@ def get_available_models(symbol: str = None, strategy: str = None):
                 "val_f1": float(meta.get("metrics", {}).get("val_f1", 0.0)),
                 "timestamp": meta.get("timestamp", "")
             })
-        out.sort(key=lambda r: (r["symbol"], r["strategy"], r["model"], r["group_id"]))
+        out.sort(key=lambda r: (r{"symbol"}, r["strategy"], r["model"], r["group_id"]))
         return out
     except Exception as e:
         print(f"[오류] get_available_models 실패 → {e}")
