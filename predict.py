@@ -9,6 +9,7 @@
 # (2025-09-07b) — [로그강화] 선택 클래스의 동적 범위/중앙값/포지션을 예측·섀도우 로그에 명시
 # (2025-09-07c) — [FIX] failed_result → insert_failure_record 호출 시 context="prediction" 반영
 # (2025-09-08) — [추가] CSV에 class_return_min/max/text 3컬럼 직접 기록(메인/섀도우)
+# (2025-09-09) — [추가] predict() 반환 객체에도 class_return_min/max/text/position 포함
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -611,7 +612,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             raw_prob=float((chosen or outs[0])["raw_probs"][final_cls]) if (chosen or outs) else None,
             calib_prob=float((chosen or outs[0])["calib_probs"][final_cls]) if (chosen or outs) else None,
             calib_ver=get_calibration_version(),
-            # ⬇️ 새 컬럼 3개
+            # ⬇️ 새 컬럼 3개 (관우/텔레그램용)
             class_return_min=float(lo_sel),
             class_return_max=float(hi_sel),
             class_return_text=class_text
@@ -676,10 +677,20 @@ def predict(symbol, strategy, source="일반", model_type=None):
             print(f"[섀도우 로깅 예외] {e}")
 
         return {
-            "symbol": symbol, "strategy": strategy, "model": "meta", "class": final_cls,
-            "expected_return": float(exp_ret), "timestamp": now_kst().isoformat(), "source": source,
-            "regime": regime, "reason": ("진화형 메타 최종 선택" if meta_choice=='evo_meta_learner'
-                                         else f"최고 확률 단일 모델: {meta_choice}")
+            "symbol": symbol,
+            "strategy": strategy,
+            "model": "meta",
+            "class": final_cls,
+            "expected_return": float(exp_ret),
+            "class_return_min": float(lo_sel),
+            "class_return_max": float(hi_sel),
+            "class_return_text": class_text,
+            "position": pos_sel,
+            "timestamp": now_kst().isoformat(),
+            "source": source,
+            "regime": regime,
+            "reason": ("진화형 메타 최종 선택" if meta_choice=='evo_meta_learner'
+                       else f"최고 확률 단일 모델: {meta_choice}")
         }
     finally:
         # 하트비트 종료 및 락 해제(반드시)
