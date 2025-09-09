@@ -9,6 +9,13 @@ import math
 import pandas as pd
 
 from predict import predict
+# 🔐 예측 게이트(있으면 사용, 없으면 no-op)
+try:
+    from predict import open_predict_gate, close_predict_gate
+except Exception:
+    def open_predict_gate(*a, **k): return None
+    def close_predict_gate(*a, **k): return None
+
 from data.utils import SYMBOLS, get_kline_by_strategy
 from logger import (
     ensure_prediction_log_exists,     # prediction_log 보장
@@ -175,7 +182,7 @@ def _build_model_index():
 def _has_model_for(model_index, symbol, strategy):
     pref = f"{symbol}_{strategy}_"
     for f in model_index:
-        if f.startswith(pref) and (f.endswith(".pt") or f.endswith(".meta.json")):
+        if f.startswith(pref) and (f.endswith(".pt") or f.endswith(".meta.json") or f.endswith(".ptz") or f.endswith(".safetensors")):
             return True
     return False
 
@@ -315,17 +322,22 @@ def main(strategy, symbols=None, force=False, allow_prediction=True):
         print(f"[INFO] {strategy} 대상 심볼이 없습니다")
         return
 
-    results = run_prediction_loop(strategy, target_symbols, source="배치", allow_prediction=allow_prediction)
+    # 🔐 app.py 외 단독 실행 대비: 예측 구간을 게이트로 감싼다
+    open_predict_gate(note=f"recommend_main_{strategy}")
+    try:
+        results = run_prediction_loop(strategy, target_symbols, source="배치", allow_prediction=allow_prediction)
 
-    # 필터 통과했을 때만 텔레그램 발송 (성공률 65% + 최소 10회 평가 완료)
-    if check_prediction_filter(strategy):
-        for r in results:
-            try:
-                send_message(format_message(r))
-            except Exception as e:
-                print(f"[텔레그램 전송 실패] {e}")
-    else:
-        print(f"[알림 생략] {strategy} — 성공률 {MIN_SUCCESS_RATE:.0%} 이상 + 최소 {MIN_SAMPLES}회 조건 미충족")
+        # 필터 통과했을 때만 텔레그램 발송 (성공률 65% + 최소 10회 평가 완료)
+        if allow_prediction and check_prediction_filter(strategy):
+            for r in results:
+                try:
+                    send_message(format_message(r))
+                except Exception as e:
+                    print(f"[텔레그램 전송 실패] {e}")
+        else:
+            print(f"[알림 생략] allow_prediction={allow_prediction} 또는 필터 미통과")
+    finally:
+        close_predict_gate(note=f"recommend_main_{strategy}")
 
 if __name__ == "__main__":
     import argparse
