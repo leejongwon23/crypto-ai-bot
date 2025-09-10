@@ -69,6 +69,8 @@ LOG_DIR    = os.path.join(PERSIST_DIR, "logs")
 MODEL_DIR  = os.path.join(PERSIST_DIR, "models")
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)  # ✅ 모델 디렉터리 보장
+DEPLOY_ID  = os.getenv("RENDER_RELEASE_ID") or os.getenv("RENDER_GIT_COMMIT") or os.getenv("RENDER_SERVICE_ID") or "local"
+BOOT_MARK  = os.path.join(PERSIST_DIR, f".boot_notice_{DEPLOY_ID}")
 
 # ===== 글로벌 락 유틸(전체 일시정지) =====
 LOCK_DIR   = getattr(safe_cleanup, "LOCK_DIR", os.path.join(PERSIST_DIR, "locks"))
@@ -163,7 +165,7 @@ def _async_emergency_purge():
             safe_cleanup.run_emergency_purge()
             print("[EMERGENCY] pre-DB purge 완료"); sys.stdout.flush()
         else:
-            if os.getenv("CLEANUP_ON_BOOT", "0") == "1":
+            if os.getenv("CLEANUP_ON_BOOT", "1") == "1":
                 print("[BOOT-CLEANUP] CLEANUP_ON_BOOT=1 → 온건 정리 실행"); sys.stdout.flush()
                 safe_cleanup.cleanup_logs_and_models()
                 print("[BOOT-CLEANUP] 완료"); sys.stdout.flush()
@@ -401,10 +403,14 @@ def _init_background_once():
             threading.Thread(target=maintenance_fix_meta.fix_all_meta_json, daemon=True).start()
             print("✅ maintenance_fix_meta 초기 실행 트리거")
 
-            # 🔔 부팅 시 항상 텔레그램 알림 발송
+            # 🔔 부팅 알림: 같은 배포(DEPLOY_ID)에서 **1회만** 발송 → 워커 재부팅 폭주 방지
             try:
-                send_message("[시작] YOPO 서버 실행됨")
-                print("✅ Telegram 알림 발송 완료")
+                if not os.path.exists(BOOT_MARK):
+                    send_message("[시작] YOPO 서버 실행됨")
+                    open(BOOT_MARK, "w").close()
+                    print("✅ Telegram 알림 발송 완료")
+                else:
+                    print("ℹ️ 부팅 알림 생략(동일 DEPLOY_ID에서 이미 발송)")
             except Exception as e:
                 print(f"⚠️ Telegram 발송 실패: {e}")
 
