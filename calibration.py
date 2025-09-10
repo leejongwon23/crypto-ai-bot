@@ -1,4 +1,4 @@
-# === calibration.py (FINAL) ==============================================
+# === calibration.py (FINAL + train.py hook shims) =========================
 """
 확률 보정 모듈 (가볍고 안전)
 - 기본 OFF: config.get_CALIB()["enabled"]가 False면 모든 API는 원본 그대로 반환.
@@ -8,7 +8,10 @@
 - 저장/로드: /persistent/calib/{symbol}_{strategy}_{model}.json
 - 외부에서 쓰는 핵심 함수:
     * apply_calibration(raw_prob, meta) -> prob
-    * fit_and_save(y_true, y_pred_proba, meta)  # 훈련 끝난 뒤 혹은 주기적으로
+    * fit_and_save(y_true, y_pred_proba, meta)
+- 호환용( train.py 의 hook ):
+    * learn_and_save(symbol, strategy, model_name)         # 데이터 소스 없으면 조용히 패스
+    * learn_and_save_from_checkpoint(symbol, strategy, model_name)  # 동일 동작
 """
 
 from __future__ import annotations
@@ -77,8 +80,7 @@ def _fit_temperature(logits: np.ndarray, y_true: np.ndarray, max_iter=100, lr=0.
 
     for _ in range(max_iter):
         p = _softmax(logits, T)  # (N,K)
-        # NLL의 d/dT 근사: (∂log softmax/∂T) * (p - y)
-        # 안정적 근사를 위해 수치적 gradient 사용
+        # 수치적 gradient
         eps = 1e-3
         p_eps = _softmax(logits, T + eps)
         nll = -np.mean(np.sum(y_oh * np.log(p + 1e-12), axis=1))
@@ -103,8 +105,6 @@ def _fit_platt(scores: np.ndarray, y_true: np.ndarray, max_iter=100, lr=0.01) ->
     for _ in range(max_iter):
         s = A * scores + B
         p = _sigmoid(s)
-        # 로스 = -[y log p + (1-y) log(1-p)]
-        # dA = (p - y)*x, dB = (p - y)
         grad = (p - y)
         dA = np.mean(grad * scores)
         dB = np.mean(grad)
@@ -168,7 +168,6 @@ def fit_and_save(y_true: np.ndarray,
     if is_logits:
         logits = X
     else:
-        # 확률 → 로짓 근사
         P = np.clip(X, cfg["clip_eps"], 1.0 - cfg["clip_eps"])
         logits = np.log(P)
     T = _fit_temperature(logits, y_true)
@@ -187,12 +186,10 @@ def apply_calibration(raw_prob_or_scores: np.ndarray,
     cfg = _get_CALIB()
     X = np.asarray(raw_prob_or_scores, dtype=np.float64)
     if not cfg.get("enabled", False):
-        # 안정화만
         if X.ndim == 2:
             P = np.clip(X, cfg["clip_eps"], 1.0 - cfg["clip_eps"])
             P = P / (P.sum(axis=1, keepdims=True) + 1e-12)
             return P
-        # 1D는 sigmoid 확률로 가정하지 않고 그대로 반환(메타러너가 처리)
         return X
 
     symbol   = meta.get("symbol", "UNK")
@@ -202,7 +199,6 @@ def apply_calibration(raw_prob_or_scores: np.ndarray,
 
     params = load(symbol, strategy, model)
     if params is None:
-        # 파라미터 없음 → 입력 안정화 후 반환
         if X.ndim == 2:
             P = np.clip(X, cfg["clip_eps"], 1.0 - cfg["clip_eps"])
             P = P / (P.sum(axis=1, keepdims=True) + 1e-12)
@@ -211,24 +207,19 @@ def apply_calibration(raw_prob_or_scores: np.ndarray,
 
     method = params.get("method", "temperature")
     if method == "temperature":
-        # multi-class
         if X.ndim == 1:
-            # 1D가 들어오면 그대로 반환
             return X
         T = max(1e-3, float(params.get("T", 1.0)))
         if is_logits:
             P = _softmax(X, T)
         else:
             P = np.clip(X, cfg["clip_eps"], 1.0 - cfg["clip_eps"])
-            # 확률에 온도 적용은 로짓 변환 후 softmax가 더 안정적
             logits = np.log(P)
             P = _softmax(logits, T)
         return P
 
     elif method == "platt":
-        # binary 전용: 1D 점수/로짓 → 확률
         if X.ndim != 1:
-            # shape (N,2) 확률이 들어오면 그대로
             P = np.clip(X, cfg["clip_eps"], 1.0 - cfg["clip_eps"])
             P = P / (P.sum(axis=1, keepdims=True) + 1e-12)
             return P
@@ -236,7 +227,6 @@ def apply_calibration(raw_prob_or_scores: np.ndarray,
         p = _sigmoid(A * X + B)
         return p
 
-    # 알 수 없는 메서드 → 안정화만
     if X.ndim == 2:
         P = np.clip(X, cfg["clip_eps"], 1.0 - cfg["clip_eps"])
         P = P / (P.sum(axis=1, keepdims=True) + 1e-12)
@@ -267,4 +257,21 @@ def expected_calibration_error(y_true: np.ndarray,
             conf_mean = conf[m].mean()
             ece += (m.mean()) * abs(acc - conf_mean)
     return float(ece)
+
+# ---- train.py 호환용 얇은 래퍼 -------------------------------------------
+def learn_and_save(symbol: str, strategy: str, model_name: str):
+    """
+    train.py의 훅을 만족하기 위한 래퍼.
+    여기서는 외부에서 y_true/proba 저장소를 제공하지 않으므로 조용히 패스.
+    (향후 검증 예측을 파일로 남기면 그걸 읽어 fit_and_save에 연결)
+    """
+    try:
+        _ = (symbol, strategy, model_name)  # noqa
+        return None
+    except Exception:
+        return None
+
+def learn_and_save_from_checkpoint(symbol: str, strategy: str, model_name: str):
+    # 현재는 learn_and_save와 동일 동작
+    return learn_and_save(symbol, strategy, model_name)
 # ========================================================================
