@@ -306,7 +306,7 @@ def _feature_hash(row):
     try:
         import hashlib
         if isinstance(row, torch.Tensor): arr = row.detach().cpu().flatten().numpy().astype(float)
-        elif isinstance(row, np.ndarray): arr = row.flatten().astype(float)
+        elif isinstance(row, np.ndarray): arr = arr.flatten().astype(float)
         elif isinstance(row, (list, tuple)): arr = np.array(row, dtype=float).flatten()
         else: arr = np.array([float(row)], dtype=float)
         r = [round(float(x), 2) for x in arr]
@@ -360,7 +360,7 @@ def get_available_models(symbol, strategy):
             gfn = os.path.basename(g); mp = _resolve_meta(gfn)
             if mp and {"pt_file": gfn, "meta_path": mp} not in items:
                 items.append({"pt_file": gfn, "meta_path": mp})
-        items.sort(key=lambda x: x["pt_file"])
+        items.sort(key=lambda x: x: x["pt_file"])
         return items
     except Exception as e:
         print(f"[get_available_models 오류] {e}")
