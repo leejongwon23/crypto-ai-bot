@@ -5,13 +5,28 @@ def _set_default_thread_env(n: str, v: int):
 for _n in ("OMP_NUM_THREADS","MKL_NUM_THREADS","OPENBLAS_NUM_THREADS","NUMEXPR_NUM_THREADS","VECLIB_MAXIMUM_THREADS","BLIS_NUM_THREADS","TORCH_NUM_THREADS"):
     _set_default_thread_env(_n, int(os.getenv("CPU_THREAD_CAP","1")))  # ← default 1
 
-import json, time, tempfile, glob, shutil, gc, threading, traceback, re
+import json, time, tempfile, glob, shutil, gc, threading, traceback, re, random
 from datetime import datetime
 import pytz, numpy as np, pandas as pd
 import torch, torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.utils.class_weight import compute_class_weight
+
+# >>> ADD: deterministic seeds
+def set_global_seed(s:int=20240101):
+    os.environ["PYTHONHASHSEED"]=str(s)
+    random.seed(s); np.random.seed(s); torch.manual_seed(s)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(s)
+    try:
+        torch.backends.cudnn.deterministic=True
+        torch.backends.cudnn.benchmark=False
+    except Exception:
+        pass
+set_global_seed(int(os.getenv("GLOBAL_SEED","20240101")))
 
 from model_io import convert_pt_to_ptz, save_model
 try: torch.set_num_threads(int(os.getenv("TORCH_NUM_THREADS","1")))  # ← default 1
@@ -627,9 +642,14 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             _check_stop(stop_event,f"before train {model_type}")
             _progress(f"train:{model_type}:prep")
             base=get_model(model_type,input_size=feat_dim,output_size=num_classes).to(DEVICE)  # ← 변경: 동적 feat_dim
-            val_len=max(1,int(len(X)*0.2));
-            if len(X)-val_len<1: val_len=len(X)-1
-            train_X,val_X=X[:-val_len],X[-val_len:]; train_y,val_y=y[:-val_len],y[-val_len:]
+
+            # >>> REPLACE: stratified split (stable)
+            sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=20240101)
+            (train_idx, val_idx), = sss.split(X, y)
+            train_X, val_X = X[train_idx], X[val_idx]
+            train_y, val_y = y[train_idx], y[val_idx]
+
+            # 공통 DataLoader (Lightning/수동 공용 – 수동은 아래서 generator로 재정의)
             train_loader=DataLoader(
                 TensorDataset(torch.tensor(train_X),torch.tensor(train_y)),
                 batch_size=_BATCH_SIZE,shuffle=True,
@@ -654,8 +674,26 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
                 model=lit.model.to(DEVICE)
                 _check_stop(stop_event,f"after PL train {model_type}")
             else:
-                model=base; opt=torch.optim.Adam(model.parameters(),lr=1e-3); crit=nn.CrossEntropyLoss()
-                last_log_ts = time.time()
+                # ====== 수동 학습 경로 (가중치 + 얼리스톱 + 베스트웨이트) ======
+                model=base
+                cls_w = compute_class_weight(class_weight="balanced", classes=np.arange(num_classes), y=train_y)
+                w = torch.tensor(cls_w, dtype=torch.float32, device=DEVICE)
+                opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+                crit = nn.CrossEntropyLoss(weight=w)
+
+                # deterministic shuffle
+                g = torch.Generator()
+                g.manual_seed(20240101)
+                train_loader=DataLoader(
+                    TensorDataset(torch.tensor(train_X),torch.tensor(train_y)),
+                    batch_size=_BATCH_SIZE, shuffle=True, generator=g,
+                    num_workers=_NUM_WORKERS,pin_memory=_PIN_MEMORY,persistent_workers=_PERSISTENT
+                )
+
+                patience=int(os.getenv("EARLY_STOP_PATIENCE","5"))
+                best_f1=-1.0; best_state=None; bad=0; total_loss=0.0
+                last_log_ts=time.time()
+
                 for ep in range(max_epochs):
                     _check_stop(stop_event,f"epoch {ep} pre")
                     _progress(f"{model_type}:ep{ep}:start")
@@ -664,15 +702,38 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
                         if bi % 16 == 0:
                             _check_stop(stop_event,f"epoch {ep} batch {bi}")
                             _progress(f"{model_type}:ep{ep}:b{bi}")
-                        xb,yb=xb.to(DEVICE),yb.to(DEVICE)
-                        loss=crit(model(xb), yb)
+                        xb,yb=xb.to(DEVICE), yb.to(DEVICE)
+                        logits=model(xb); loss=crit(logits,yb)
                         if not torch.isfinite(loss): continue
-                        opt.zero_grad(); loss.backward(); opt.step(); total_loss+=float(loss.item())
-                    now=time.time()
-                    if now-last_log_ts>2:
-                        _safe_print(f"   ↳ {model_type} ep{ep+1}/{max_epochs} loss_sum={total_loss:.4f}")
-                        last_log_ts=now
+                        opt.zero_grad(); loss.backward(); opt.step(); total_loss += float(loss.item())
+
+                    # ---- evaluate macro-F1 on val
+                    model.eval(); preds=[]; lbls=[]
+                    with torch.no_grad():
+                        for xb,yb in val_loader:
+                            p=torch.argmax(model(xb.to(DEVICE)),dim=1).cpu().numpy()
+                            preds.extend(p); lbls.extend(yb.numpy())
+                    cur_f1=float(f1_score(lbls,preds,average="macro"))
+
+                    # early stop/bookkeep
+                    improved = cur_f1 > best_f1 + 1e-6
+                    if improved:
+                        best_f1 = cur_f1
+                        best_state = {k:v.detach().cpu().clone() for k,v in model.state_dict().items()}
+                        bad = 0
+                    else:
+                        bad += 1
+                    if time.time()-last_log_ts>2:
+                        _safe_print(f"   ↳ {model_type} ep{ep+1}/{max_epochs} val_f1={cur_f1:.4f} bad={bad}/{patience} loss_sum={total_loss:.4f}")
+                        last_log_ts=time.time()
                     _progress(f"{model_type}:ep{ep}:end")
+                    if bad >= patience:
+                        _safe_print(f"🛑 early stop @ ep{ep+1} (best_f1={best_f1:.4f})")
+                        break
+
+                # load best weights before saving
+                if best_state is not None:
+                    model.load_state_dict(best_state)
 
             _progress(f"eval:{model_type}")
             model.eval(); preds=[]; lbls=[]
@@ -1271,3 +1332,4 @@ def is_loop_running()->bool:
 if __name__=="__main__":
     try: start_train_loop(force_restart=True, sleep_sec=0)
     except Exception as e: _safe_print(f"[MAIN] err: {e}")
+```0
