@@ -132,6 +132,19 @@ def ensure_prediction_log_exists():
     except Exception as e:
         print(f"[⚠️ ensure_prediction_log_exists] 예외: {e}")
 
+# ✅ train.py가 호출하는 보조 보장 함수
+def ensure_train_log_exists():
+    try:
+        os.makedirs(os.path.dirname(TRAIN_LOG), exist_ok=True)
+        if not os.path.exists(TRAIN_LOG) or os.path.getsize(TRAIN_LOG) == 0:
+            with open(TRAIN_LOG, "w", newline="", encoding="utf-8-sig") as f:
+                csv.writer(f).writerow(
+                    ["timestamp","symbol","strategy","model","accuracy","f1","loss","note","source_exchange","status"]
+                )
+            print("[✅ ensure_train_log_exists] train_log.csv 생성")
+    except Exception as e:
+        print(f"[⚠️ ensure_train_log_exists] 예외: {e}")
+
 # -------------------------
 # (NEW) 용량 기반 로그 로테이션
 # -------------------------
