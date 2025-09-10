@@ -3,6 +3,8 @@ import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil
 import sqlite3
 from collections import defaultdict
 import threading, time  # 동시성/재시도
+# [ADD] per-class F1 출력용 (선택)
+from sklearn.metrics import classification_report
 
 # -------------------------
 # 기본 경로/디렉토리
@@ -631,6 +633,8 @@ def log_prediction(
 def log_training_result(
     symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0.0,
     note="", source_exchange="BYBIT", status="success",
+    # [ADD] 옵션: per-class F1 모니터링용
+    y_true=None, y_pred=None
 ):
     LOG_FILE = TRAIN_LOG
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -653,6 +657,26 @@ def log_training_result(
         print(f"[✅ 학습 로그 기록] {symbol}-{strategy} {model} status={status}")
     except Exception as e:
         print(f"[⚠️ 학습 로그 기록 실패] {e}")
+
+    # [ADD] 이동평균 F1 & per-class F1 모니터링 (콘솔 출력 전용)
+    try:
+        N = int(os.getenv("LOG_F1_MA_N", "20"))
+        df_ma = pd.read_csv(LOG_FILE, encoding="utf-8-sig")
+        if "f1" in df_ma.columns:
+            sub = df_ma[df_ma.get("strategy","") == strategy].tail(max(1, N))
+            if not sub.empty:
+                ma_f1 = float(pd.to_numeric(sub["f1"], errors="coerce").dropna().mean()) if "f1" in sub else float("nan")
+                if ma_f1 == ma_f1:  # not NaN
+                    print(f"[📊 이동평균 F1] 전략={strategy} 최근{len(sub)}회 → {ma_f1:.4f}")
+    except Exception:
+        pass
+    if y_true is not None and y_pred is not None:
+        try:
+            rep = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
+            per_cls = {k: v["f1-score"] for k, v in rep.items() if k.isdigit()}
+            print(f"[📊 per-class F1] {symbol}-{strategy} {model} → {json.dumps(per_cls, ensure_ascii=False)}")
+        except Exception as e:
+            print(f"[⚠️ per-class F1 계산 실패] {e}")
 
 # -------------------------
 # 수익률 클래스 경계 로그
