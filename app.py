@@ -1,7 +1,7 @@
 # app.py — single-source, deduped train loop via train.py (ONE concurrent loop only)
 # ⛳️ 변경 핵심
 # - 서버 부팅 시 자동 학습 기본 ON: APP_AUTOSTART_TRAIN=0 일 때만 비활성
-# - 텔레그램 부팅 알림은 **항상 발송**(환경변수와 무관)
+# - 텔레그램 부팅 알림은 **항상 발송**(환경변수와 무관) + 원자적 마크로 중복 발송 차단
 # - 예측 게이트/전역락·스케줄러/리셋 로직은 기존 유지(중복 실행 방지)
 
 from flask import Flask, jsonify, request, Response
@@ -165,7 +165,8 @@ def _async_emergency_purge():
             safe_cleanup.run_emergency_purge()
             print("[EMERGENCY] pre-DB purge 완료"); sys.stdout.flush()
         else:
-            if os.getenv("CLEANUP_ON_BOOT", "1") == "1":
+            # 🔧 기본값 0: 명시적으로 CLEANUP_ON_BOOT=1일 때만 온건 정리 실행
+            if os.getenv("CLEANUP_ON_BOOT", "0") == "1":
                 print("[BOOT-CLEANUP] CLEANUP_ON_BOOT=1 → 온건 정리 실행"); sys.stdout.flush()
                 safe_cleanup.cleanup_logs_and_models()
                 print("[BOOT-CLEANUP] 완료"); sys.stdout.flush()
@@ -184,17 +185,6 @@ WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 AUDIT_LOG         = os.path.join(LOG_DIR, "evaluation_audit.csv")
 MESSAGE_LOG       = os.path.join(LOG_DIR, "message_log.csv")
 FAILURE_LOG       = os.path.join(LOG_DIR, "failure_count.csv")
-
-# ✅ 서버 시작 직전 용량 정리 (환경변수로 제어)
-try:
-    if os.getenv("CLEANUP_ON_BOOT", "0") == "1":
-        print("[BOOT-CLEANUP] CLEANUP_ON_BOOT=1 → logs/models 정리 시작"); sys.stdout.flush()
-        safe_cleanup.cleanup_logs_and_models()
-        print("[BOOT-CLEANUP] 완료"); sys.stdout.flush()
-    else:
-        print("[BOOT-CLEANUP] 비활성화(CLEANUP_ON_BOOT=0)"); sys.stdout.flush()
-except Exception as e:
-    print(f"[경고] startup cleanup 실패: {e}"); sys.stdout.flush()
 
 # ✅ 로그 파일 존재 보장(정확 헤더)
 try:
@@ -403,14 +393,14 @@ def _init_background_once():
             threading.Thread(target=maintenance_fix_meta.fix_all_meta_json, daemon=True).start()
             print("✅ maintenance_fix_meta 초기 실행 트리거")
 
-            # 🔔 부팅 알림: 같은 배포(DEPLOY_ID)에서 **1회만** 발송 → 워커 재부팅 폭주 방지
+            # 🔔 부팅 알림: 동일 DEPLOY_ID 기준 1회만 (원자적 마크로 경합 차단)
             try:
-                if not os.path.exists(BOOT_MARK):
-                    send_message("[시작] YOPO 서버 실행됨")
-                    open(BOOT_MARK, "w").close()
-                    print("✅ Telegram 알림 발송 완료")
-                else:
-                    print("ℹ️ 부팅 알림 생략(동일 DEPLOY_ID에서 이미 발송)")
+                fd = os.open(BOOT_MARK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                send_message("[시작] YOPO 서버 실행됨")
+                print("✅ Telegram 알림 발송 완료")
+            except FileExistsError:
+                print("ℹ️ 부팅 알림 생략(동일 DEPLOY_ID에서 이미 발송)")
             except Exception as e:
                 print(f"⚠️ Telegram 발송 실패: {e}")
 
