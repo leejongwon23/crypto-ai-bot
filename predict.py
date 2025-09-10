@@ -12,6 +12,7 @@
 # (2025-09-09) — [추가] predict() 반환 객체에도 class_return_min/max/text/position 포함
 # (2025-09-09b) — [핵심] (B) 마스크·(C) 가드에 “포지션 힌트(EMA20/60 + 기울기)” 적용 → 롱/숏 분리 강제
 # (2025-09-09c) — [FIX] (B)/(C) 최소수익 임계 판단을 양/음 공통식으로 교체: long=hi>=THRESH, short=-lo>=THRESH, 둘 다 허용 시 max(hi,-lo)>=THRESH
+# (2025-09-10) — [INPUT_SIZE 통일] meta.input_size 최우선, 없으면 feat_scaled.shape[1] 사용. 고정 상수 경로 제거.
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -214,7 +215,7 @@ DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 PREDICTION_LOG_PATH = "/persistent/prediction_log.csv"
 NUM_CLASSES = get_NUM_CLASSES()
-FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
+FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()  # ← 더 이상 사용하지 않지만 호환을 위해 남김
 now_kst = lambda: _now_kst()
 
 MIN_RET_THRESHOLD = float(os.getenv("PREDICT_MIN_RETURN", "0.01"))
@@ -491,10 +492,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
         X = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         X = MinMaxScaler().fit_transform(X)
-        if X.shape[1] < FEATURE_INPUT_SIZE:
-            X = np.pad(X, ((0, 0), (0, FEATURE_INPUT_SIZE - X.shape[1])), mode="constant")
-        else:
-            X = X[:, :FEATURE_INPUT_SIZE]
+        feat_dim = int(X.shape[1])  # ← 실측 피처 개수
 
         models = get_available_models(symbol, strategy)
         if not models: return failed_result(symbol, strategy, reason="no_models", source=source, X_input=X[-1])
@@ -516,7 +514,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             try:
                 from evo_meta_learner import predict_evo_meta
                 if callable(predict_evo_meta):
-                    pred = int(predict_evo_meta(feat_row.unsqueeze(0), input_size=FEATURE_INPUT_SIZE))
+                    pred = int(predict_evo_meta(feat_row.unsqueeze(0), input_size=feat_dim))  # ← 고정 상수 대신 실측
                     cmin, cmax = get_class_return_range(pred, symbol, strategy)  # evo_meta는 config 기준
                     if _meets_minret_with_hint(cmin, cmax, allow_long, allow_short, MIN_RET_THRESHOLD):
                         final_cls = pred; meta_choice = "evo_meta_learner"
@@ -541,7 +539,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 if filt.sum() > 0:
                     filt = filt / filt.sum(); pred = int(np.argmax(filt)); p = float(filt[pred]); fused = True
                 else:
-                    # 마스크 전부 0이면 원본 adj 사용(완전 차단 방지)
                     pred = int(np.argmax(adj)); p = float(adj[pred]); fused = False
                 score = p * (0.5 + 0.5 * max(0.0, min(1.0, val_f1)))
                 m.update({"adjusted_probs": adj, "filtered_probs": (filt if fused else None),
@@ -616,7 +613,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "class_range_hi": float(hi_sel),
             "expected_return_mid": float(exp_ret),
             "position": pos_sel,
-            # ── (NEW) 포지션 힌트 기록
             "hint_allow_long": allow_long,
             "hint_allow_short": allow_short,
             "hint_ma_fast": hint.get("ma_fast"),
@@ -646,7 +642,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             class_return_text=class_text
         )
 
-        # 섀도우 로깅(동일 정보 포함)
+        # 섀도우 로깅
         try:
             for m in outs:
                 if chosen and m.get("model_path") == chosen.get("model_path"): continue
@@ -890,9 +886,17 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             with open(meta_path, "r", encoding="utf-8") as mf:
                 meta = json.load(mf)
             mtype = meta.get("model", "lstm"); gid = meta.get("group_id", 0)
-            inp_size = meta.get("input_size", FEATURE_INPUT_SIZE); num_cls = meta.get("num_classes", NUM_CLASSES)
+            # ▶ 입력 차원: meta 우선, 없으면 현재 피처 차원 사용
+            inp_size = int(meta.get("input_size", feat_scaled.shape[1]))
+            num_cls = int(meta.get("num_classes", NUM_CLASSES))
             val_f1 = float(meta.get("metrics", {}).get("val_f1", 0.6))
-            idx = min(int(gid), max(0, len(window_list)-1)); win = window_list[idx]; seq = feat_scaled[-win:]
+            idx = min(int(gid), max(0, len(window_list)-1)); win = window_list[idx]
+            seq = feat_scaled[-win:]
+            # ▶ 모델이 기대하는 입력 크기에 맞게 열 맞춤(pad / slice)
+            if seq.shape[1] < inp_size:
+                seq = np.pad(seq, ((0,0),(0, inp_size - seq.shape[1])), mode="constant")
+            elif seq.shape[1] > inp_size:
+                seq = seq[:, :inp_size]
             if seq.shape[0] < win:
                 print(f"[⚠️ 데이터 부족] {symbol}-{strategy}-group{gid}"); continue
             x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0)
