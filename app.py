@@ -1,7 +1,7 @@
 # app.py — single-source, deduped train loop via train.py (ONE concurrent loop only)
 # ⛳️ 변경 핵심
 # - 서버 부팅 시 자동 학습 기본 ON: APP_AUTOSTART_TRAIN=0 일 때만 비활성
-# - 텔레그램 부팅 알림은 기본 끔: TELEGRAM_BOOT_MSG=1 일 때만 발송
+# - 텔레그램 부팅 알림은 **항상 발송**(환경변수와 무관)
 # - 예측 게이트/전역락·스케줄러/리셋 로직은 기존 유지(중복 실행 방지)
 
 from flask import Flask, jsonify, request, Response
@@ -401,15 +401,12 @@ def _init_background_once():
             threading.Thread(target=maintenance_fix_meta.fix_all_meta_json, daemon=True).start()
             print("✅ maintenance_fix_meta 초기 실행 트리거")
 
-            # 🔧 변경 3: 텔레그램 부팅 알림은 기본 OFF
-            if os.getenv("TELEGRAM_BOOT_MSG", "0") == "1":
-                try:
-                    send_message("[시작] YOPO 서버 실행됨")
-                    print("✅ Telegram 알림 발송 완료")
-                except Exception as e:
-                    print(f"⚠️ Telegram 발송 실패: {e}")
-            else:
-                print("⏸️ Telegram 부팅 알림 비활성화 (TELEGRAM_BOOT_MSG=0)")
+            # 🔔 부팅 시 항상 텔레그램 알림 발송
+            try:
+                send_message("[시작] YOPO 서버 실행됨")
+                print("✅ Telegram 알림 발송 완료")
+            except Exception as e:
+                print(f"⚠️ Telegram 발송 실패: {e}")
 
             _INIT_DONE = True
             print("✅ 백그라운드 초기화 완료")
