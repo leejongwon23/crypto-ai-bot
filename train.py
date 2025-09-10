@@ -570,6 +570,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
         labels=np.array(labels,dtype=np.int64)
 
         features_only=feat.drop(columns=["timestamp","strategy"],errors="ignore")
+        # === NEW: 동적 feat_dim 계산 (fallback은 기존 FEATURE_INPUT_SIZE) ===
+        try:
+            feat_dim = int(getattr(features_only, "shape", [0, FEATURE_INPUT_SIZE])[1])
+        except Exception:
+            feat_dim = int(FEATURE_INPUT_SIZE)
+
         _check_stop(stop_event,"before scaler")
         feat_scaled=MinMaxScaler().fit_transform(features_only)
 
@@ -597,7 +603,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
                 status_ds, ds = _run_with_timeout(
                     create_dataset,
                     args=(feat.to_dict(orient="records"),),
-                    kwargs={"window":window,"strategy":strategy,"input_size":FEATURE_INPUT_SIZE},
+                    kwargs={"window":window,"strategy":strategy,"input_size":feat_dim},  # ← 변경: 동적 feat_dim
                     timeout_sec=_cd_timeout, stop_event=stop_event,
                     hb_tag="dataset:wait", hb_interval=3.0
                 )
@@ -620,7 +626,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
         for model_type in ["lstm","cnn_lstm","transformer"]:
             _check_stop(stop_event,f"before train {model_type}")
             _progress(f"train:{model_type}:prep")
-            base=get_model(model_type,input_size=FEATURE_INPUT_SIZE,output_size=num_classes).to(DEVICE)
+            base=get_model(model_type,input_size=feat_dim,output_size=num_classes).to(DEVICE)  # ← 변경: 동적 feat_dim
             val_len=max(1,int(len(X)*0.2));
             if len(X)-val_len<1: val_len=len(X)-1
             train_X,val_X=X[:-val_len],X[-val_len:]; train_y,val_y=y[:-val_len],y[-val_len:]
@@ -687,7 +693,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
                 "group_id":int(group_id) if group_id is not None else 0,
                 "num_classes":int(num_classes),
                 "class_ranges": [[float(lo), float(hi)] for (lo,hi) in class_ranges],
-                "input_size":int(FEATURE_INPUT_SIZE),
+                "input_size":int(feat_dim),  # ← 변경: 동적 feat_dim
                 "metrics":{"val_acc":acc,"val_f1":f1},
                 "timestamp":now_kst().isoformat(),
                 "model_name":os.path.basename(stem)+".ptz",
