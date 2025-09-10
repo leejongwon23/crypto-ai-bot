@@ -1,5 +1,5 @@
-# === logger.py (메모리 안전: 로테이션 + 청크 집계 + 모델명 정규화 + 실패DB 노이즈 차단 + 파일락 + 컨텍스트 분기 최종본) ===
-import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil
+# === logger.py (메모리 안전: 로테이션 + 청크 집계 + 모델명 정규화 + 실패DB 노이즈 차단 + 파일락 + 컨텍스트 분기 + 학습지표 확장) ===
+import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil, re
 import sqlite3
 from collections import defaultdict
 import threading, time  # 동시성/재시도
@@ -18,7 +18,7 @@ PREDICTION_LOG = f"{DIR}/prediction_log.csv"
 WRONG = f"{DIR}/wrong_predictions.csv"
 EVAL_RESULT = f"{LOG_DIR}/evaluation_result.csv"
 
-# 학습 로그 파일명  ✅ 불필요한 } 제거
+# 학습 로그 파일명
 TRAIN_LOG = f"{LOG_DIR}/train_log.csv"
 AUDIT_LOG = f"{LOG_DIR}/evaluation_audit.csv"
 
@@ -32,12 +32,19 @@ BASE_PRED_HEADERS = [
     "source","volatility","source_exchange"
 ]
 EXTRA_PRED_HEADERS = ["regime","meta_choice","raw_prob","calib_prob","calib_ver"]
-# ✅ feature_vector + (NEW) class return 3컬럼
 CLASS_RANGE_HEADERS = ["class_return_min","class_return_max","class_return_text"]
-# ✅ (NEW) note JSON에서 뽑아내는 포지션/힌트/필터 사용여부 컬럼
 NOTE_EXTRACT_HEADERS = ["position","hint_allow_long","hint_allow_short","hint_slope","used_minret_filter","explore_used","hint_ma_fast","hint_ma_slow"]
 
 PREDICTION_HEADERS = BASE_PRED_HEADERS + EXTRA_PRED_HEADERS + ["feature_vector"] + CLASS_RANGE_HEADERS + NOTE_EXTRACT_HEADERS
+
+# ✅ 학습 로그 확장 헤더(기존 accuracy/f1/loss를 보존 + 세부 지표 추가)
+TRAIN_HEADERS = [
+    "timestamp","symbol","strategy","model",
+    "val_acc","val_f1","train_loss_sum",
+    "engine","window","recent_cap",
+    "rows","limit","min","augment_needed","enough_for_training",
+    "note","source_exchange","status"
+]
 
 # 청크 크기 기본값
 CHUNK = 50_000
@@ -60,7 +67,6 @@ class _FileLock:
         deadline = time.time() + self.timeout
         while True:
             try:
-                # 존재하는 고아 락(너무 오래된 락)은 제거
                 if os.path.exists(self.path):
                     try:
                         mtime = os.path.getmtime(self.path)
@@ -68,14 +74,12 @@ class _FileLock:
                             os.remove(self.path)
                     except Exception:
                         pass
-                # 원자적 생성 시도
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(f"pid={os.getpid()} ts={time.time()}\n")
-                break  # 획득 성공
+                break
             except FileExistsError:
                 if time.time() >= deadline:
-                    # 마지막 시도: 고아락 판단되면 제거하고 재시도
                     try:
                         mtime = os.path.getmtime(self.path)
                         if (time.time() - mtime) > _LOCK_STALE_SEC:
@@ -123,7 +127,7 @@ def ensure_prediction_log_exists():
                      open(bak, "r", encoding="utf-8-sig") as src:
                     w = csv.writer(out); w.writerow(PREDICTION_HEADERS)
                     reader = csv.reader(src)
-                    try: next(reader)  # old header skip
+                    try: next(reader)
                     except StopIteration: reader = []
                     for row in reader:
                         row = (row + [""] * len(PREDICTION_HEADERS))[:len(PREDICTION_HEADERS)]
@@ -132,16 +136,36 @@ def ensure_prediction_log_exists():
     except Exception as e:
         print(f"[⚠️ ensure_prediction_log_exists] 예외: {e}")
 
-# ✅ train.py가 호출하는 보조 보장 함수
+# ✅ train.py가 호출하는 보조 보장 함수 (헤더 자동 마이그레이션 포함)
 def ensure_train_log_exists():
     try:
         os.makedirs(os.path.dirname(TRAIN_LOG), exist_ok=True)
         if not os.path.exists(TRAIN_LOG) or os.path.getsize(TRAIN_LOG) == 0:
             with open(TRAIN_LOG, "w", newline="", encoding="utf-8-sig") as f:
-                csv.writer(f).writerow(
-                    ["timestamp","symbol","strategy","model","accuracy","f1","loss","note","source_exchange","status"]
-                )
-            print("[✅ ensure_train_log_exists] train_log.csv 생성")
+                csv.writer(f).writerow(TRAIN_HEADERS)
+            print("[✅ ensure_train_log_exists] train_log.csv 생성(확장 스키마)")
+        else:
+            existing = _read_csv_header(TRAIN_LOG)
+            if existing != TRAIN_HEADERS:
+                bak = TRAIN_LOG + ".bak"
+                os.replace(TRAIN_LOG, bak)
+                with open(TRAIN_LOG, "w", newline="", encoding="utf-8-sig") as out, \
+                     open(bak, "r", encoding="utf-8-sig") as src:
+                    w = csv.writer(out); w.writerow(TRAIN_HEADERS)
+                    reader = csv.reader(src)
+                    try: old_header = next(reader)
+                    except StopIteration: old_header = []
+                    for row in reader:
+                        # 가능한 값 매핑 (구버전: timestamp,symbol,strategy,model,accuracy,f1,loss,note,source_exchange,status)
+                        mapped = {h:row[i] for i,h in enumerate(old_header)} if old_header else {}
+                        new_row = [
+                            mapped.get("timestamp",""), mapped.get("symbol",""), mapped.get("strategy",""), mapped.get("model",""),
+                            mapped.get("accuracy",""), mapped.get("f1",""), mapped.get("loss",""),
+                            "", "", "", "", "", "", "", "",  # engine/window/recent_cap/rows/limit/min/aug/enough
+                            mapped.get("note",""), mapped.get("source_exchange",""), mapped.get("status",""),
+                        ]
+                        w.writerow(new_row[:len(TRAIN_HEADERS)])
+                print("[✅ ensure_train_log_exists] train_log.csv 헤더 보정(확장) 완료")
     except Exception as e:
         print(f"[⚠️ ensure_train_log_exists] 예외: {e}")
 
@@ -293,7 +317,7 @@ def update_model_success(s, t, m, success):
             ON CONFLICT(symbol, strategy, model) DO UPDATE SET
                 success = success + excluded.success,
                 fail = fail + excluded.fail
-        """, params=(s, t or "알수없음", m, int(success), int(not success)), retries=7, commit=True)
+        """, params=(s, t or "알수없음", m, int(success), int(!success)), retries=7, commit=True)
         print(f"[✅ update_model_success] {s}-{t}-{m} 기록 ({'성공' if success else '실패'})")
     except Exception as e:
         print(f"[오류] update_model_success 실패 → {e}")
@@ -327,6 +351,7 @@ except Exception as _e:
 # 서버 시작 시 보장
 ensure_success_db()
 ensure_prediction_log_exists()
+ensure_train_log_exists()
 
 # -------------------------
 # 파일 로드/유틸
@@ -478,7 +503,6 @@ def _normalize_model_fields(model, model_name, symbol, strategy):
     return m, mn
 
 def _extract_from_note(note_str: str):
-    """predict.py가 넣는 JSON note를 파싱해 열로 추출 (없으면 공백)."""
     fields = {
         "position": "", "hint_allow_long": "", "hint_allow_short": "", "hint_slope": "",
         "used_minret_filter": "", "explore_used": "", "hint_ma_fast": "", "hint_ma_slow": ""
@@ -507,9 +531,7 @@ def log_prediction(
     label=None, group_id=None, model_symbol=None, model_name=None,
     source="일반", volatility=False, feature_vector=None,
     source_exchange="BYBIT",
-    # 확장 필드
     regime=None, meta_choice=None, raw_prob=None, calib_prob=None, calib_ver=None,
-    # (NEW) 클래스 수익률 범위 3컬럼
     class_return_min=None, class_return_max=None, class_return_text=None,
 ):
     from datetime import datetime as _dt
@@ -602,7 +624,6 @@ def log_prediction(
 
             print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} class={predicted_class} | success={success} | src={source_exchange} | reason={reason}")
 
-            # 실패 DB 기록은 '평가 컨텍스트'에서만, 최소 요건 충족 시에만
             should_record_failure = (
                 insert_failure_record is not None
                 and (ctx == "evaluation")
@@ -643,43 +664,72 @@ def log_prediction(
 # -------------------------
 # 학습 로그
 # -------------------------
+# note 문자열에서 엔진/윈도/캡/데이터 플래그를 최대한 추출
+_note_re_engine   = re.compile(r"engine=([a-zA-Z_]+)")
+_note_re_window   = re.compile(r"window=(\d+)")
+_note_re_cap      = re.compile(r"cap=(\d+)")
+_note_re_flags    = re.compile(r"data_flags=\{?rows:(\d+),\s*limit:(\d+),\s*min:(\d+),\s*aug:(\d+),\s*enough_for_training:(\d+)\}?")
+
+def _parse_train_note(note: str):
+    s = str(note or "")
+    eng = (_note_re_engine.search(s) or [None, ""])[1]
+    win = (_note_re_window.search(s) or [None, ""])[1]
+    cap = (_note_re_cap.search(s) or [None, ""])[1]
+    mfl = _note_re_flags.search(s)
+    rows = limit = minv = aug = enough = ""
+    if mfl:
+        rows, limit, minv, aug, enough = mfl.groups()
+    return {
+        "engine": eng, "window": win, "recent_cap": cap,
+        "rows": rows, "limit": limit, "min": minv,
+        "augment_needed": aug, "enough_for_training": enough
+    }
+
 def log_training_result(
     symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0.0,
     note="", source_exchange="BYBIT", status="success",
-    # [ADD] 옵션: per-class F1 모니터링용
     y_true=None, y_pred=None
 ):
     LOG_FILE = TRAIN_LOG
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     now = datetime.datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
+
+    # 확장 필드 파싱
+    extras = _parse_train_note(note)
+
     row = [
         now, str(symbol), str(strategy), str(model or ""),
-        float(accuracy) if accuracy is not None else 0.0,
-        float(f1) if f1 is not None else 0.0,
-        float(loss) if loss is not None else 0.0,
+        float(accuracy) if accuracy is not None else "",
+        float(f1) if f1 is not None else "",
+        float(loss) if loss is not None else "",
+        extras.get("engine",""), extras.get("window",""), extras.get("recent_cap",""),
+        extras.get("rows",""), extras.get("limit",""), extras.get("min",""),
+        extras.get("augment_needed",""), extras.get("enough_for_training",""),
         str(note or ""), str(source_exchange or "BYBIT"),
         str(status or "success")
     ]
     try:
-        write_header = not os.path.exists(LOG_FILE)
+        write_header = not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0
+        if write_header:
+            ensure_train_log_exists()
         with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
             if write_header:
-                w.writerow(["timestamp","symbol","strategy","model","accuracy","f1","loss","note","source_exchange","status"])
-            w.writerow(row)
-        print(f"[✅ 학습 로그 기록] {symbol}-{strategy} {model} status={status}")
+                w.writerow(TRAIN_HEADERS)
+            w.writerow(_align_row_to_header(row, TRAIN_HEADERS))
+        print(f"[✅ 학습 로그 기록] {symbol}-{strategy} {model} val_f1={f1:.4f} status={status}")
     except Exception as e:
         print(f"[⚠️ 학습 로그 기록 실패] {e}")
 
-    # [ADD] 이동평균 F1 & per-class F1 모니터링 (콘솔 출력 전용)
+    # 이동평균 F1 & per-class F1 모니터링 (콘솔 출력 전용)
     try:
         N = int(os.getenv("LOG_F1_MA_N", "20"))
         df_ma = pd.read_csv(LOG_FILE, encoding="utf-8-sig")
-        if "f1" in df_ma.columns:
+        if "val_f1" in df_ma.columns:
             sub = df_ma[df_ma.get("strategy","") == strategy].tail(max(1, N))
             if not sub.empty:
-                ma_f1 = float(pd.to_numeric(sub["f1"], errors="coerce").dropna().mean()) if "f1" in sub else float("nan")
-                if ma_f1 == ma_f1:  # not NaN
+                ma_f1 = float(pd.to_numeric(sub["val_f1"], errors="coerce").dropna().mean()) if "val_f1" in sub else float("nan")
+                if ma_f1 == ma_f1:
                     print(f"[📊 이동평균 F1] 전략={strategy} 최근{len(sub)}회 → {ma_f1:.4f}")
     except Exception:
         pass
@@ -811,9 +861,6 @@ def log_label_distribution(
 # (NEW) 검증 클래스 커버 경고 + 단일 클래스 예측 경고
 # -------------------------
 def log_eval_coverage(symbol: str, strategy: str, counts: dict, num_classes: int, note: str = ""):
-    """
-    검증 세트 라벨 분포의 커버리지를 기록하고, 커버 비율이 낮거나 단일 클래스면 경고를 남긴다.
-    """
     path = os.path.join(LOG_DIR, "validation_coverage.csv")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     now = now_kst().isoformat()
@@ -838,9 +885,6 @@ def log_eval_coverage(symbol: str, strategy: str, counts: dict, num_classes: int
         print(f"[⚠️ validation_coverage 로그 실패] {e}")
 
 def alert_if_single_class_prediction(symbol: str, strategy: str, lookback_days: int = 3, min_rows: int = 100):
-    """
-    최근 예측에서 단일 클래스만 출력되는지 경고(데이터 누락/라벨링 문제 조기 감지).
-    """
     try:
         ensure_prediction_log_exists()
         if not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0:
@@ -873,7 +917,7 @@ def alert_if_single_class_prediction(symbol: str, strategy: str, lookback_days: 
         return False
 
 # -------------------------
-# 정렬 키 (lambda 사용 안 함)
+# 정렬 키
 # -------------------------
 def _model_sort_key(r):
     return (
@@ -1014,3 +1058,4 @@ def export_recent_model_stats(days: int = 7, out_path: str = None):
         except Exception:
             pass
         return out_path or os.path.join(LOG_DIR, "recent_model_stats.csv")
+```0
