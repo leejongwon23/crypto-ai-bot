@@ -142,6 +142,7 @@ def get_SYMBOL_GROUPS(): return list(SYMBOL_GROUPS)
 # ========================= 그룹 순서 제어(지속성) =========================
 _STATE_DIR = "/persistent/state"
 _STATE_PATH = os.path.join(_STATE_DIR, "group_order.json")
+_STATE_BAK  = _STATE_PATH + ".bak"
 
 # 🔒 예측 게이트 상태 확인(읽기 전용)
 _RUN_DIR = "/persistent/run"
@@ -156,6 +157,24 @@ def _is_predict_gate_open() -> bool:
     except Exception:
         return False
 
+# --- 원자적 저장 유틸 ---
+def _atomic_write_json(path: str, obj: dict):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+        try:
+            f.flush(); os.fsync(f.fileno())
+        except Exception:
+            pass
+    os.replace(tmp, path)
+    try:
+        dfd = os.open(os.path.dirname(path), os.O_RDONLY)
+        try: os.fsync(dfd)
+        finally: os.close(dfd)
+    except Exception:
+        pass
+
 class GroupOrderManager:
     def __init__(self, groups: List[List[str]]):
         self.groups = [list(g) for g in groups]
@@ -167,8 +186,9 @@ class GroupOrderManager:
     def _load(self):
         try:
             os.makedirs(_STATE_DIR, exist_ok=True)
-            if os.path.isfile(_STATE_PATH):
-                st = json.load(open(_STATE_PATH, "r", encoding="utf-8"))
+            target = _STATE_PATH if os.path.isfile(_STATE_PATH) else (_STATE_BAK if os.path.isfile(_STATE_BAK) else None)
+            if target:
+                st = json.load(open(target, "r", encoding="utf-8"))
                 saved_syms = st.get("symbols", [])
                 saved_groups = _compute_groups(saved_syms, 5) if saved_syms else st.get("groups", [])
                 if saved_groups:
@@ -190,7 +210,9 @@ class GroupOrderManager:
                 "symbols": SYMBOLS,
                 "last_predicted_idx": self.last_predicted_idx,
             }
-            json.dump(payload, open(_STATE_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+            _atomic_write_json(_STATE_PATH, payload)
+            # 백업도 함께 갱신
+            _atomic_write_json(_STATE_BAK, payload)
         except Exception as e:
             print(f"[⚠️ 그룹상태 저장 실패] {e}")
 
