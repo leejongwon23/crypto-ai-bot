@@ -1,11 +1,18 @@
+# === model/base_model.py (stable init, dynamic input_size, safe XGB fallback) ===
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import xgboost as xgb
 import numpy as np
+
 from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE
 
-NUM_CLASSES = get_NUM_CLASSES()
+# ---- Optional deps (non-fatal) ----
+try:
+    import xgboost as xgb
+    _HAS_XGB = True
+except Exception:
+    _HAS_XGB = False
+
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -22,10 +29,12 @@ def _init_module(m):
         if m.bias is not None:
             nn.init.zeros_(m.bias)
     elif isinstance(m, nn.BatchNorm1d):
-        nn.init.ones_(m.weight)
-        nn.init.zeros_(m.bias)
+        if m.weight is not None:
+            nn.init.ones_(m.weight)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
 
-def _init_lstm_forget_bias(lstm: nn.LSTM, hidden_size: int):
+def _init_lstm_forget_bias(lstm: nn.LSTM):
     # LSTM 가중치/바이어스 안정 초기화 + forget gate bias = 1.0
     for name, param in lstm.named_parameters():
         if "weight_ih" in name:
@@ -34,9 +43,8 @@ def _init_lstm_forget_bias(lstm: nn.LSTM, hidden_size: int):
             nn.init.orthogonal_(param)
         elif "bias" in name:
             nn.init.zeros_(param)
-            # i, f, g, o 게이트 순서 가정(pytorch 표준)
             n = param.shape[0] // 4
-            param.data[n:2*n].fill_(1.0)
+            param.data[n:2*n].fill_(1.0)  # forget gate
 
 # =========================
 # Attention (안정 소프트맥스 + dropout)
@@ -60,8 +68,9 @@ class Attention(nn.Module):
 # LSTM Price Predictor
 # =========================
 class LSTMPricePredictor(nn.Module):
-    def __init__(self, input_size, hidden_size=256, num_layers=4, dropout=0.4, output_size=NUM_CLASSES):
+    def __init__(self, input_size, hidden_size=256, num_layers=4, dropout=0.4, output_size=None):
         super().__init__()
+        output_size = output_size if output_size is not None else get_NUM_CLASSES()
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers,
                             dropout=dropout, batch_first=True, bidirectional=True)
         self.attention = Attention(hidden_size * 2, dropout=dropout * 0.5)
@@ -72,8 +81,7 @@ class LSTMPricePredictor(nn.Module):
         self.fc2 = nn.Linear(hidden_size, hidden_size // 2)
         self.fc_logits = nn.Linear(hidden_size // 2, output_size)
 
-        # 안정 초기화
-        _init_lstm_forget_bias(self.lstm, hidden_size)
+        _init_lstm_forget_bias(self.lstm)
         self.apply(_init_module)
 
     def forward(self, x, params=None):
@@ -89,11 +97,11 @@ class LSTMPricePredictor(nn.Module):
             hidden = self.dropout(hidden)
             logits = self.fc_logits(hidden)
         else:
-            hidden = F.gelu(F.linear(context, params['fc1.weight'], params['fc1.bias']))
+            hidden = F.gelu(F.linear(context, params['fc1.weight'], params.get('fc1.bias')))
             hidden = F.dropout(hidden, p=self.dropout.p, training=self.training)
-            hidden = F.gelu(F.linear(hidden, params['fc2.weight'], params['fc2.bias']))
+            hidden = F.gelu(F.linear(hidden, params['fc2.weight'], params.get('fc2.bias')))
             hidden = F.dropout(hidden, p=self.dropout.p, training=self.training)
-            logits = F.linear(hidden, params['fc_logits.weight'], params['fc_logits.bias'])
+            logits = F.linear(hidden, params['fc_logits.weight'], params.get('fc_logits.bias'))
         return logits
 
 # =========================
@@ -116,8 +124,9 @@ class SEBlock(nn.Module):
 # CNN + LSTM Price Predictor
 # =========================
 class CNNLSTMPricePredictor(nn.Module):
-    def __init__(self, input_size, cnn_channels=128, lstm_hidden_size=256, lstm_layers=3, dropout=0.4, output_size=NUM_CLASSES):
+    def __init__(self, input_size, cnn_channels=128, lstm_hidden_size=256, lstm_layers=3, dropout=0.4, output_size=None):
         super().__init__()
+        output_size = output_size if output_size is not None else get_NUM_CLASSES()
         self.conv1 = nn.Conv1d(input_size, cnn_channels, kernel_size=3, padding=1)
         self.bn1   = nn.BatchNorm1d(cnn_channels)
         self.conv2 = nn.Conv1d(cnn_channels, cnn_channels, kernel_size=3, padding=1)
@@ -135,8 +144,7 @@ class CNNLSTMPricePredictor(nn.Module):
         self.fc2 = nn.Linear(lstm_hidden_size, lstm_hidden_size // 2)
         self.fc_logits = nn.Linear(lstm_hidden_size // 2, output_size)
 
-        # 안정 초기화
-        _init_lstm_forget_bias(self.lstm, lstm_hidden_size)
+        _init_lstm_forget_bias(self.lstm)
         self.apply(_init_module)
 
     def forward(self, x, params=None):
@@ -160,11 +168,11 @@ class CNNLSTMPricePredictor(nn.Module):
             hidden = self.dropout(hidden)
             logits = self.fc_logits(hidden)
         else:
-            hidden = F.gelu(F.linear(context, params['fc1.weight'], params['fc1.bias']))
+            hidden = F.gelu(F.linear(context, params['fc1.weight'], params.get('fc1.bias')))
             hidden = F.dropout(hidden, p=self.dropout.p, training=self.training)
-            hidden = F.gelu(F.linear(hidden, params['fc2.weight'], params['fc2.bias']))
+            hidden = F.gelu(F.linear(hidden, params['fc2.weight'], params.get('fc2.bias')))
             hidden = F.dropout(hidden, p=self.dropout.p, training=self.training)
-            logits = F.linear(hidden, params['fc_logits.weight'], params['fc_logits.bias'])
+            logits = F.linear(hidden, params['fc_logits.weight'], params.get('fc_logits.bias'))
         return logits
 
 # =========================
@@ -174,6 +182,7 @@ class TransformerPricePredictor(nn.Module):
     def __init__(self, input_size, d_model=128, nhead=8, num_layers=3, dropout=0.4, output_size=None, mode="classification"):
         super().__init__()
         self.mode = mode
+        output_size = output_size if output_size is not None else get_NUM_CLASSES()
         self.input_proj = nn.Linear(input_size, d_model)
         self.pos_encoder = PositionalEncoding(d_model)
         self.encoder_layers = nn.ModuleList()
@@ -184,7 +193,6 @@ class TransformerPricePredictor(nn.Module):
                     dropout=dropout, activation='gelu', batch_first=True, norm_first=True
                 )
             except TypeError:
-                # older torch: norm_first 없음
                 layer = nn.TransformerEncoderLayer(
                     d_model=d_model, nhead=nhead, dim_feedforward=512,
                     dropout=dropout, activation='gelu', batch_first=True
@@ -194,7 +202,6 @@ class TransformerPricePredictor(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-        # 분류 헤드
         if self.mode == "classification":
             self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
             nn.init.normal_(self.cls_token, std=0.02)
@@ -204,7 +211,6 @@ class TransformerPricePredictor(nn.Module):
         elif self.mode == "reconstruction":
             self.decoder = nn.Linear(d_model, output_size)
 
-        # 안정 초기화
         self.apply(_init_module)
 
     def forward(self, x, params=None):
@@ -212,7 +218,7 @@ class TransformerPricePredictor(nn.Module):
         if self.mode == "classification":
             B = x.size(0)
             cls = self.cls_token.expand(B, 1, -1)              # [B,1,D]
-            x = torch.cat([cls, x], dim=1)                     # CLS prepend
+            x = torch.cat([cls, x], dim=1)
         x = self.pos_encoder(x)
         for layer in self.encoder_layers:
             x = layer(x)
@@ -220,17 +226,17 @@ class TransformerPricePredictor(nn.Module):
         x = self.dropout(x)
 
         if self.mode == "classification":
-            x = x[:, 0]  # CLS 토큰만
+            x = x[:, 0]  # CLS 토큰
             if params is None:
                 x = self.act(self.fc1(x))
                 x = self.dropout(x)
                 logits = self.fc_logits(x)
             else:
-                x = F.gelu(F.linear(x, params['fc1.weight'], params['fc1.bias']))
+                x = F.gelu(F.linear(x, params['fc1.weight'], params.get('fc1.bias')))
                 x = F.dropout(x, p=self.dropout.p, training=self.training)
-                logits = F.linear(x, params['fc_logits.weight'], params['fc_logits.bias'])
+                logits = F.linear(x, params['fc_logits.weight'], params.get('fc_logits.bias'))
             return logits
-        elif self.mode == "reconstruction":
+        else:
             return self.decoder(x)
 
 # =========================
@@ -251,10 +257,12 @@ class PositionalEncoding(nn.Module):
         return x
 
 # =========================
-# XGBoost Wrapper (비활성 안내 그대로)
+# XGBoost Wrapper (optional)
 # =========================
 class XGBoostWrapper:
     def __init__(self, model_path):
+        if not _HAS_XGB:
+            raise RuntimeError("xgboost가 설치되어 있지 않습니다.")
         self.model = xgb.Booster()
         self.model.load_model(model_path)
 
@@ -301,23 +309,9 @@ MODEL_CLASSES = {
 }
 
 def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_path=None, features=None):
-    from config import FEATURE_INPUT_SIZE, NUM_CLASSES
-
-    # ✅ XGBoost 비활성화 → 자동 대체
-    if model_type == "xgboost":
-        print("[⚠️ get_model] 현재 XGBoost 모델은 비활성화 상태입니다. cnn_lstm 대체 사용")
-        model_type = "cnn_lstm"  # 자동 대체
-
-    # ✅ MODEL_CLASSES 직접 사용
-    if model_type not in MODEL_CLASSES:
-        print(f"[경고] 알 수 없는 모델 타입 '{model_type}', 기본 모델 cnn_lstm 사용")
-        model_cls = CNNLSTMPricePredictor
-    else:
-        model_cls = MODEL_CLASSES[model_type]
-
-    # ✅ 출력 클래스 수 설정
+    # ✅ 출력 클래스 수는 항상 최신 get_NUM_CLASSES() 사용
     if output_size is None:
-        output_size = NUM_CLASSES
+        output_size = get_NUM_CLASSES()
 
     # ✅ 입력 크기 설정(메타 우선, features가 더 크면 승격)
     if input_size is None:
@@ -332,18 +326,27 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
         else:
             print(f"[info] input_size fixed to FEATURE_INPUT_SIZE={FEATURE_INPUT_SIZE}")
 
-    if input_size is None:
-        raise ValueError("❌ get_model: input_size 계산 실패 → None 반환됨")
     if input_size < FEATURE_INPUT_SIZE:
         print(f"[info] input_size pad 적용: {input_size} → {FEATURE_INPUT_SIZE}")
         input_size = FEATURE_INPUT_SIZE
 
+    # ✅ XGBoost는 옵션 의존성 → 미설치/미지정 시 안전 대체
+    if model_type == "xgboost":
+        if not _HAS_XGB or not model_path:
+            print("[⚠️ get_model] XGBoost 사용 불가(미설치 또는 경로 없음). cnn_lstm 대체.")
+            model_type = "cnn_lstm"
+
+    model_cls = MODEL_CLASSES.get(model_type, CNNLSTMPricePredictor)
+
     # ✅ 모델 생성
     try:
-        model = model_cls(input_size=input_size, output_size=output_size)
+        if model_type == "xgboost":
+            model = model_cls(model_path=model_path)
+        else:
+            model = model_cls(input_size=input_size, output_size=output_size)
     except Exception as e:
         print(f"[⚠️ get_model 예외] {e}")
         print(f"[Fallback] input_size={FEATURE_INPUT_SIZE}로 재시도")
-        model = model_cls(input_size=FEATURE_INPUT_SIZE, output_size=output_size)
+        model = CNNLSTMPricePredictor(input_size=FEATURE_INPUT_SIZE, output_size=output_size)
 
     return model
