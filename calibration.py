@@ -1,4 +1,4 @@
-# === calibration.py (FINAL + train.py hook shims) =========================
+# === calibration.py (FINAL + train.py hook shims | compat with predict.py) =========================
 """
 확률 보정 모듈 (가볍고 안전)
 - 기본 OFF: config.get_CALIB()["enabled"]가 False면 모든 API는 원본 그대로 반환.
@@ -175,16 +175,42 @@ def fit_and_save(y_true: np.ndarray,
     save(params, symbol, strategy, model)
     return params
 
+def _normalize_meta_kwargs(symbol, strategy, model, model_meta, meta):
+    """
+    predict.py 호환용:
+      - (symbol, strategy, regime, model_meta=meta) 스타일
+      - meta={"symbol","strategy","model"} 스타일
+    """
+    sym = (meta or {}).get("symbol", None) if isinstance(meta, dict) else None
+    strat = (meta or {}).get("strategy", None) if isinstance(meta, dict) else None
+    mdl = (meta or {}).get("model", None) if isinstance(meta, dict) else None
+
+    if isinstance(model_meta, dict):
+        sym = sym or model_meta.get("symbol")
+        strat = strat or model_meta.get("strategy")
+        mdl = mdl or model_meta.get("model")
+
+    sym = symbol or sym or "UNK"
+    strat = strategy or strat or "UNK"
+    mdl = model or mdl or (model_meta.get("model") if isinstance(model_meta, dict) else "UNK")
+    return sym, strat, mdl
+
 def apply_calibration(raw_prob_or_scores: np.ndarray,
-                      meta: dict) -> np.ndarray:
+                      meta: dict = None,
+                      *,
+                      symbol: str = None, strategy: str = None, regime: str = None,
+                      model_meta: dict = None, model: str = None,
+                      is_logits: bool = None) -> np.ndarray:
     """
     예측 직후 호출.
-    - meta: {"symbol","strategy","model","is_logits":bool}
+    - meta(dict) 또는 (symbol,strategy,model_meta) 키워드 모두 지원 (predict.py 호환)
     - 반환값: 보정된 확률 배열 (shape 유지)
     - 설정 OFF 또는 파라미터 없음: 입력을 안정화(CLIP)만 해서 그대로 반환.
     """
     cfg = _get_CALIB()
     X = np.asarray(raw_prob_or_scores, dtype=np.float64)
+
+    # 전역 OFF → 안정화만
     if not cfg.get("enabled", False):
         if X.ndim == 2:
             P = np.clip(X, cfg["clip_eps"], 1.0 - cfg["clip_eps"])
@@ -192,12 +218,10 @@ def apply_calibration(raw_prob_or_scores: np.ndarray,
             return P
         return X
 
-    symbol   = meta.get("symbol", "UNK")
-    strategy = meta.get("strategy", "UNK")
-    model    = meta.get("model", "UNK")
-    is_logits= bool(meta.get("is_logits", False))
+    sym, strat, mdl = _normalize_meta_kwargs(symbol, strategy, model, model_meta, meta)
+    params = load(sym, strat, mdl)
 
-    params = load(symbol, strategy, model)
+    # 파라미터 없으면 안정화만
     if params is None:
         if X.ndim == 2:
             P = np.clip(X, cfg["clip_eps"], 1.0 - cfg["clip_eps"])
@@ -206,6 +230,11 @@ def apply_calibration(raw_prob_or_scores: np.ndarray,
         return X
 
     method = params.get("method", "temperature")
+
+    # 호출자가 is_logits를 명시했다면 우선 적용
+    if is_logits is None:
+        is_logits = bool((meta or {}).get("is_logits")) if isinstance(meta, dict) else False
+
     if method == "temperature":
         if X.ndim == 1:
             return X
@@ -227,11 +256,24 @@ def apply_calibration(raw_prob_or_scores: np.ndarray,
         p = _sigmoid(A * X + B)
         return p
 
+    # 알 수 없는 method → 안정화만
     if X.ndim == 2:
         P = np.clip(X, cfg["clip_eps"], 1.0 - cfg["clip_eps"])
         P = P / (P.sum(axis=1, keepdims=True) + 1e-12)
         return P
     return X
+
+# ---- 버전 문자열 (predict/logger에서 로깅용) ------------------------------
+def get_calibration_version() -> str:
+    """
+    로깅용 간단 버전 문자열.
+    OFF이면 "off", 아니면 "<method>@1"
+    """
+    cfg = _get_CALIB()
+    if not cfg.get("enabled", False):
+        return "off"
+    m = str(cfg.get("method", "temperature")).lower()
+    return f"{m}@1"
 
 # ---- 품질 리포트(선택) ----------------------------------------------------
 def expected_calibration_error(y_true: np.ndarray,
