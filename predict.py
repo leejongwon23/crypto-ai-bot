@@ -360,7 +360,7 @@ def get_available_models(symbol, strategy):
             gfn = os.path.basename(g); mp = _resolve_meta(gfn)
             if mp and {"pt_file": gfn, "meta_path": mp} not in items:
                 items.append({"pt_file": gfn, "meta_path": mp})
-        items.sort(key=lambda x: x: x["pt_file"])
+        items.sort(key=lambda x: x["pt_file"])  # ← FIX: 문법 오류 수정
         return items
     except Exception as e:
         print(f"[get_available_models 오류] {e}")
@@ -939,3 +939,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[오류] prediction_log.csv 로드 실패 → {e}")
     if str(os.getenv("EVAL_LOOP", "0")).strip() == "1": run_evaluation_loop()
+```0
