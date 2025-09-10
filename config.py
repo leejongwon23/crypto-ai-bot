@@ -1,4 +1,4 @@
-# config.py (FIXED, 2025-09-09) — long/neutral/short 구간 포함
+# config.py (PATCH, 2025-09-10) — long/neutral/short 구간 포함
 
 import json
 import os
@@ -81,6 +81,13 @@ _config = _default_config.copy()
 _dynamic_num_classes = None
 _ranges_cache = {}
 
+# ▶ 로그 억제 스위치(환경변수 QUIET_CONFIG_LOG=1 이면 상세 로그 최소화)
+def _quiet(): return os.getenv("QUIET_CONFIG_LOG", "0") == "1"
+def _log(msg): 
+    if not _quiet():
+        try: print(msg)
+        except Exception: pass
+
 def _deep_merge(dst: dict, src: dict):
     for k, v in src.items():
         if isinstance(v, dict) and isinstance(dst.get(k), dict):
@@ -94,36 +101,34 @@ if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             _loaded = json.load(f)
         _config = _loaded if isinstance(_loaded, dict) else _default_config.copy()
-        _deep_merge(_config, _default_config)
-        print("[✅ config.py] config.json 로드/보강 완료")
+        _deep_merge(_config, _default_config)  # 누락키 보강
+        _log("[✅ config.py] config.json 로드/보강 완료")
     except Exception as e:
-        print(f"[⚠️ config.py] config.json 로드 실패 → 기본값 사용: {e}")
+        _log(f"[⚠️ config.py] config.json 로드 실패 → 기본값 사용: {e}")
 else:
     try:
         os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(_default_config, f, ensure_ascii=False, indent=2)
-        print("[ℹ️ config.py] 기본 config.json 생성")
+        _log("[ℹ️ config.py] 기본 config.json 생성")
     except Exception as e:
-        print(f"[⚠️ config.py] 기본 config.json 생성 실패: {e}")
+        _log(f"[⚠️ config.py] 기본 config.json 생성 실패: {e}")
 
 def save_config():
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(_config, f, ensure_ascii=False, indent=2)
-        print("[✅ config.py] config.json 저장 완료")
+        _log("[✅ config.py] config.json 저장 완료")
     except Exception as e:
-        print(f"[⚠️ config.py] config.json 저장 실패 → {e}")
+        _log(f"[⚠️ config.py] config.json 저장 실패 → {e}")
 
 # ------------------------
 # ✅ Binance 폴백 상태 로그
 # ------------------------
 try:
     _ENABLE_BINANCE = int(os.getenv("ENABLE_BINANCE", "1"))
-    if _ENABLE_BINANCE == 1:
-        print("[config] ENABLE_BINANCE=1 (fallback ready)")
-    else:
-        print("[config] ENABLE_BINANCE=0 (fallback disabled)")
+    _log("[config] ENABLE_BINANCE=1 (fallback ready)" if _ENABLE_BINANCE == 1
+         else "[config] ENABLE_BINANCE=0 (fallback disabled)")
 except Exception:
     pass
 
@@ -132,7 +137,7 @@ except Exception:
 # ------------------------
 def set_NUM_CLASSES(n):
     global _dynamic_num_classes
-    _dynamic_num_classes = n
+    _dynamic_num_classes = int(n)
 
 def get_NUM_CLASSES():
     global _dynamic_num_classes
@@ -162,7 +167,7 @@ def get_class_groups(num_classes=None, group_size=5):
         groups = [list(range(num_classes))]
     else:
         groups = [list(range(i, min(i + group_size, num_classes))) for i in range(0, num_classes, group_size)]
-    print(f"[📊 클래스 그룹화] 총 클래스 수: {num_classes}, 그룹 크기: {group_size}, 그룹 개수: {len(groups)}")
+    _log(f"[📊 클래스 그룹화] 총 클래스 수: {num_classes}, 그룹 크기: {group_size}, 그룹 개수: {len(groups)}")
     return groups
 
 # ------------------------
@@ -185,8 +190,8 @@ def _round2(x: float) -> float:
 
 def _cap_by_strategy(x: float, strategy: str) -> float:
     """전략별 양/음수 캡을 동시에 적용."""
-    pos_cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy, None)
-    neg_cap = _STRATEGY_RETURN_CAP_NEG_MIN.get(strategy, None)
+    pos_cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy)
+    neg_cap = _STRATEGY_RETURN_CAP_NEG_MIN.get(strategy)
     if x > 0 and pos_cap is not None:
         return min(x, pos_cap)
     if x < 0 and neg_cap is not None:
@@ -248,7 +253,6 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
         j_dn = max(j_dn, i)
         dn[i] = float((min_l - base) / (base + 1e-12))  # 음수 또는 0
 
-    # 음/양 모두 포함하는 분포로 합침
     signed = np.concatenate([dn, up]).astype(np.float32)
     return signed
 
@@ -258,7 +262,9 @@ def get_class_return_range(class_id: int, symbol: str, strategy: str):
     if ranges is None:
         ranges = get_class_ranges(symbol=symbol, strategy=strategy)
         _ranges_cache[key] = ranges
-    assert 0 <= class_id < len(ranges), f"class_id {class_id} 범위 오류 (0~{len(ranges)-1})"
+    n = len(ranges)
+    if not (0 <= class_id < n):
+        raise ValueError(f"class_id {class_id} 범위 오류 (0~{n-1})")
     return ranges[class_id]
 
 def class_to_expected_return(class_id: int, symbol: str, strategy: str):
@@ -267,11 +273,11 @@ def class_to_expected_return(class_id: int, symbol: str, strategy: str):
 
 def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=None, group_size=5):
     """
-    미래 최대고가/최저저가 기반의 'signed' 수익률 분포로 클래스 경계를 생성.
+    미래 최대고가/최저저가 기반 'signed' 수익률 분포로 클래스 경계 생성.
     - r_up  = (max(high[i..i+h]) - close[i]) / close[i]  (>=0)
     - r_down= (min(low [i..i+h]) - close[i]) / close[i]  (<=0)
-    - 분포 = concat(r_down, r_up)  → 음/양 공존
-    - 전략별 ±캡 적용, 최소 구간 폭, 0% 중립 밴드 보장
+    - 분포 = concat(r_down, r_up) → 음/양 공존
+    - 전략별 ±캡, 최소 구간 폭, 0% 중립 밴드 보장
     """
     import numpy as np
     from data.utils import get_kline_by_strategy
@@ -296,29 +302,23 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
         """0%를 가로지르는 최소 폭의 '중립 구간'이 존재하도록 보정."""
         crosses = [i for i, (lo, hi) in enumerate(ranges) if lo < 0.0 <= hi]
         if crosses:
-            # 이미 0을 포함하는 구간이 있으면 최소 폭 보장
             i = crosses[0]
             lo, hi = ranges[i]
             if (hi - lo) < max(_MIN_RANGE_WIDTH, _EPS_ZERO_BAND * 2):
-                mid = 0.0
                 lo = min(lo, -_EPS_ZERO_BAND)
                 hi = max(hi,  _EPS_ZERO_BAND)
                 ranges[i] = (_round2(lo), _round2(hi))
             return ranges
 
-        # 없으면 0에 가장 가까운 경계를 넓혀 0 포함
-        # 가장 가까운 hi<0 구간과 lo>0 구간을 찾아 확장
         left_idx  = max([i for i,(lo,hi) in enumerate(ranges) if hi <= 0.0], default=None)
         right_idx = min([i for i,(lo,hi) in enumerate(ranges) if lo >  0.0], default=None)
         if left_idx is None or right_idx is None:
-            return ranges  # 안전
+            return ranges
         lo_l, hi_l = ranges[left_idx]
         lo_r, hi_r = ranges[right_idx]
-        new_lo = min(lo_l, -_EPS_ZERO_BAND)
-        new_hi = max(hi_r,  _EPS_ZERO_BAND)
         ranges[left_idx]  = (_round2(lo_l), _round2(-_EPS_ZERO_BAND))
         ranges[right_idx] = (_round2(_EPS_ZERO_BAND), _round2(hi_r))
-        # 사이에 새 중립 구간 삽입
+        # 중앙에 새 중립 구간 삽입
         ranges = ranges[:right_idx] + [(_round2(-_EPS_ZERO_BAND), _round2(_EPS_ZERO_BAND))] + ranges[right_idx:]
         return _fix_monotonic(ranges)
 
@@ -334,7 +334,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             lo, hi = _cap_by_strategy(lo, strategy), _cap_by_strategy(hi, strategy)
             ranges.append((_round2(lo), _round2(hi)))
         if reason:
-            print(f"[⚠️ 균등 분할 클래스 사용] 사유: {reason}")
+            _log(f"[⚠️ 균등 분할 클래스 사용] 사유: {reason}")
         ranges = _fix_monotonic(ranges)
         return _ensure_zero_band(ranges)
 
@@ -384,9 +384,9 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
     if symbol is not None and strategy is not None:
         _ranges_cache[(symbol, strategy)] = all_ranges
 
-    # 디버그 로깅
+    # 디버그 로깅(요약)
     try:
-        if symbol is not None and strategy is not None:
+        if symbol is not None and strategy is not None and not _quiet():
             import numpy as np
             from data.utils import get_kline_by_strategy as _get_kline_dbg
 
@@ -409,14 +409,13 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
                     print(f"[📏 경계 리스트] {symbol}-{strategy} → {all_ranges}")
 
                     edges = [all_ranges[0][0]] + [hi for (_, hi) in all_ranges]
-                    # 가장 마지막 경계 살짝 확장
-                    edges[-1] = float(edges[-1]) + 1e-9
+                    edges[-1] = float(edges[-1]) + 1e-9  # 최종 구간 포함 보장
                     hist, _ = np.histogram(rets_dbg, bins=edges)
                     print(f"[📐 클래스 분포] {symbol}-{strategy} count={int(hist.sum())} → {hist.tolist()}")
             else:
                 print(f"[ℹ️ 수익률분포 스킵] {symbol}-{strategy} → 데이터 부족")
     except Exception as _e:
-        print(f"[⚠️ 디버그 로그 실패] {symbol}-{strategy} → {_e}")
+        _log(f"[⚠️ 디버그 로그 실패] {symbol}-{strategy} → {_e}")
 
     # ✅ 동적 클래스 수 반영
     try:
@@ -427,7 +426,13 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
 
     if group_id is None:
         return all_ranges
-    return all_ranges[group_id * group_size: (group_id + 1) * group_size]
+
+    # ▶ 그룹 슬라이싱 가드(범위 밖이면 빈 리스트)
+    start = int(group_id) * int(group_size)
+    end = start + int(group_size)
+    if start >= len(all_ranges):
+        return []
+    return all_ranges[start:end]
 
 # ------------------------
 # 🔧 환경변수 기반 퍼포먼스/학습 토글
@@ -470,3 +475,17 @@ FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 NUM_CLASSES = get_NUM_CLASSES()
 FAIL_AUGMENT_RATIO = get_FAIL_AUGMENT_RATIO()
 MIN_FEATURES = get_MIN_FEATURES()
+
+__all__ = [
+    "STRATEGY_CONFIG",
+    "get_NUM_CLASSES", "set_NUM_CLASSES",
+    "get_FEATURE_INPUT_SIZE",
+    "get_class_groups", "get_class_ranges",
+    "get_class_return_range", "class_to_expected_return",
+    "get_SYMBOLS", "get_SYMBOL_GROUPS",
+    "get_REGIME", "get_CALIB", "get_FAILLEARN",
+    "get_CPU_THREADS", "get_TRAIN_NUM_WORKERS", "get_TRAIN_BATCH_SIZE",
+    "get_ORDERED_TRAIN", "get_PREDICT_MIN_RETURN", "get_DISPLAY_MIN_RETURN",
+    "get_SSL_CACHE_DIR",
+    "FEATURE_INPUT_SIZE", "NUM_CLASSES", "FAIL_AUGMENT_RATIO", "MIN_FEATURES",
+]
