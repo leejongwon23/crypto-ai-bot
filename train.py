@@ -37,6 +37,7 @@ _HAS_LIGHTNING=False
 if not _DISABLE_LIGHTNING:
     try:
         import pytorch_lightning as pl
+        from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
         _HAS_LIGHTNING=True
     except: _HAS_LIGHTNING=False
 
@@ -379,11 +380,16 @@ def _await_models_visible(symbols:list[str], timeout_sec:int=20, poll_sec:float=
 
 if _HAS_LIGHTNING:
     class LitSeqModel(pl.LightningModule):
-        def __init__(self, base_model:nn.Module, lr:float=1e-3):
-            super().__init__(); self.model=base_model; self.criterion=nn.CrossEntropyLoss(); self.lr=lr
+        def __init__(self, base_model:nn.Module, lr:float=1e-3, cls_w:torch.Tensor|None=None):
+            super().__init__(); self.model=base_model; self.criterion=nn.CrossEntropyLoss(weight=cls_w); self.lr=lr
         def forward(self,x): return self.model(x)
         def training_step(self,batch,idx):
-            xb,yb=batch; logits=self(xb); return self.criterion(logits,yb)
+            xb,yb=batch; logits=self(xb); loss=self.criterion(logits,yb); return loss
+        def validation_step(self,batch,idx):
+            xb,yb=batch; logits=self(xb); loss=self.criterion(logits,yb)
+            preds=torch.argmax(logits,dim=1)
+            self.log("val_loss", loss, prog_bar=False)
+            self.log("val_f1", pl.metrics.functional.f1.f1_score(preds, yb, num_classes=self.criterion.weight.shape[0] if self.criterion.weight is not None else None, average="macro"), prog_bar=False)
         def configure_optimizers(self): return torch.optim.Adam(self.parameters(), lr=self.lr)
 
     class _HeartbeatAndStop(pl.Callback):
@@ -556,18 +562,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             _log_skip(symbol,strategy,reason); return res
         _progress("future:ok")
 
-        try:
-            fg=future[np.isfinite(future)]
-            if fg.size>0:
-                q=np.nanpercentile(fg,[0,25,50,75,90,95,99])
-                _safe_print(f"[RET] {symbol}-{strategy}-g{group_id} min={q[0]:.4f} p50={q[2]:.4f} p75={q[3]:.4f} p95={q[5]:.4f} max={np.nanmax(fg):.4f}")
-                try:
-                    logger.log_return_distribution(symbol,strategy,group_id=group_id,horizon_hours=int(H),
-                        summary={"min":float(q[0]),"p25":float(q[1]),"p50":float(q[2]),"p75":float(q[3]),"p90":float(q[4]),"p95":float(q[5]),"p99":float(q[6]),"max":float(np.nanmax(fg)),"count":int(fg.size)},
-                        note="train_one_model")
-                except Exception as le: _safe_print(f"[log_return_distribution err] {le}")
-        except Exception as e: _safe_print(f"[ret summary err] {e}")
-
+        # ---- 라벨링
         _check_stop(stop_event,"before labeling")
         _progress("labeling")
         labels=[]; lo0=class_ranges[0][0]; hi_last=class_ranges[-1][1]; clipped_low=clipped_high=unmatched=0
@@ -584,41 +579,42 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             _safe_print(f"[LABEL CLIP] low={clipped_low} high={clipped_high} unmatched={unmatched}")
         labels=np.array(labels,dtype=np.int64)
 
+        # ---- 특징행렬 (스케일링 없이 시퀀스 생성)
         features_only=feat.drop(columns=["timestamp","strategy"],errors="ignore")
-        # === NEW: 동적 feat_dim 계산 (fallback은 기존 FEATURE_INPUT_SIZE) ===
         try:
             feat_dim = int(getattr(features_only, "shape", [0, FEATURE_INPUT_SIZE])[1])
         except Exception:
             feat_dim = int(FEATURE_INPUT_SIZE)
 
-        _check_stop(stop_event,"before scaler")
-        feat_scaled=MinMaxScaler().fit_transform(features_only)
-
-        if len(feat_scaled)>_MAX_ROWS_FOR_TRAIN or len(labels)>_MAX_ROWS_FOR_TRAIN:
-            cut=min(_MAX_ROWS_FOR_TRAIN,len(feat_scaled),len(labels))
-            feat_scaled=feat_scaled[-cut:]; labels=labels[-cut:]
+        if len(features_only)>_MAX_ROWS_FOR_TRAIN or len(labels)>_MAX_ROWS_FOR_TRAIN:
+            cut=min(_MAX_ROWS_FOR_TRAIN,len(features_only),len(labels))
+            features_only=features_only.iloc[-cut:,:]
+            labels=labels[-cut:]
 
         try: best_window=find_best_window(symbol,strategy,window_list=[20,40],group_id=group_id)
         except: best_window=40
-        window=max(5,int(best_window)); window=min(window, max(6,len(feat_scaled)-1))
+        window=max(5,int(best_window)); window=min(window, max(6,len(features_only)-1))
 
         _check_stop(stop_event,"before sequence build")
         _progress("seq_build")
-        X,y=[],[]
-        for i in range(len(feat_scaled)-window):
+        X_raw,y=[],[]
+        fv=features_only.values.astype(np.float32)
+        for i in range(len(fv)-window):
             if i % 128 == 0:
                 _check_stop(stop_event,"seq build")
                 _progress(f"seq_build@{i}")
-            X.append(feat_scaled[i:i+window]); yi=i+window-1; y.append(labels[yi] if 0<=yi<len(labels) else 0)
-        X,y=np.array(X,dtype=np.float32),np.array(y,dtype=np.int64)
+            X_raw.append(fv[i:i+window])
+            yi=i+window-1
+            y.append(labels[yi] if 0<=yi<len(labels) else 0)
+        X_raw=np.array(X_raw,dtype=np.float32); y=np.array(y,dtype=np.int64)
 
-        if len(X)<20:
+        if len(X_raw)<20:
             try:
                 _cd_timeout=float(os.getenv("CREATE_DATASET_TIMEOUT_SEC","60"))
                 status_ds, ds = _run_with_timeout(
                     create_dataset,
                     args=(feat.to_dict(orient="records"),),
-                    kwargs={"window":window,"strategy":strategy,"input_size":feat_dim},  # ← 변경: 동적 feat_dim
+                    kwargs={"window":window,"strategy":strategy,"input_size":feat_dim},
                     timeout_sec=_cd_timeout, stop_event=stop_event,
                     hb_tag="dataset:wait", hb_interval=3.0
                 )
@@ -629,27 +625,31 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
                 else:
                     X_fb,y_fb=None,None
                 if isinstance(X_fb,np.ndarray) and len(X_fb)>0:
-                    X,y=X_fb.astype(np.float32),y_fb.astype(np.int64)
+                    X_raw,y=X_fb.astype(np.float32),y_fb.astype(np.int64)
                     _safe_print("[DATASET] fallback create_dataset 사용")
             except Exception as e: _safe_print(f"[fallback dataset err] {e}")
-        if len(X)<10: _log_skip(symbol,strategy,f"샘플 부족(rows={len(df)}, limit={_limit}, min={_min_required})"); return res
+        if len(X_raw)<10: _log_skip(symbol,strategy,f"샘플 부족(rows={len(df)}, limit={_limit}, min={_min_required})"); return res
+
+        # ---- 분할 후 'train에만 fit' 스케일링
+        sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=20240101)
+        (train_idx, val_idx), = sss.split(X_raw, y)
+        scaler = MinMaxScaler()
+        Xtr_flat = X_raw[train_idx].reshape(-1, feat_dim)
+        scaler.fit(Xtr_flat)
+        train_X = scaler.transform(Xtr_flat).reshape(len(train_idx), window, feat_dim)
+        val_X   = scaler.transform(X_raw[val_idx].reshape(-1, feat_dim)).reshape(len(val_idx), window, feat_dim)
+        train_y, val_y = y[train_idx], y[val_idx]
 
         try:
-            if len(X)<200: X,y=balance_classes(X,y,num_classes=num_classes)
+            if len(train_X)<200: train_X,train_y=balance_classes(train_X,train_y,num_classes=len(class_ranges))
         except Exception as e: _safe_print(f"[balance err] {e}")
 
         for model_type in ["lstm","cnn_lstm","transformer"]:
             _check_stop(stop_event,f"before train {model_type}")
             _progress(f"train:{model_type}:prep")
-            base=get_model(model_type,input_size=feat_dim,output_size=num_classes).to(DEVICE)  # ← 변경: 동적 feat_dim
+            base=get_model(model_type,input_size=feat_dim,output_size=len(class_ranges)).to(DEVICE)
 
-            # >>> REPLACE: stratified split (stable)
-            sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=20240101)
-            (train_idx, val_idx), = sss.split(X, y)
-            train_X, val_X = X[train_idx], X[val_idx]
-            train_y, val_y = y[train_idx], y[val_idx]
-
-            # 공통 DataLoader (Lightning/수동 공용 – 수동은 아래서 generator로 재정의)
+            # DataLoaders
             train_loader=DataLoader(
                 TensorDataset(torch.tensor(train_X),torch.tensor(train_y)),
                 batch_size=_BATCH_SIZE,shuffle=True,
@@ -664,20 +664,34 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             total_loss=0.0
             _safe_print(f"🟦 TRAIN begin → {symbol}-{strategy}-g{group_id} [{model_type}] (epochs={max_epochs}, train={len(train_X)}, val={len(val_X)})")
 
+            # 공통 손실 가중치
+            cls_w = compute_class_weight(class_weight="balanced", classes=np.arange(len(class_ranges)), y=train_y)
+            w = torch.tensor(cls_w, dtype=torch.float32, device=DEVICE)
+
             if _HAS_LIGHTNING:
-                lit=LitSeqModel(base,lr=1e-3)
-                callbacks=[_HeartbeatAndStop(stop_event)] if stop_event is not None else [_HeartbeatAndStop(None)]
+                lit=LitSeqModel(base,lr=1e-3,cls_w=w)
+                callbacks=[_HeartbeatAndStop(stop_event)]
+                ckpt_cb = ModelCheckpoint(monitor="val_f1", mode="max", save_top_k=1, filename=f"{symbol}-{strategy}-{model_type}-best")
+                es_cb   = EarlyStopping(monitor="val_f1", mode="max", patience=int(os.getenv("EARLY_STOP_PATIENCE","5")), check_finite=True)
+                callbacks += [ckpt_cb, es_cb]
                 trainer=pl.Trainer(max_epochs=max_epochs, accelerator=("gpu" if torch.cuda.is_available() else "cpu"),
-                                   devices=1, enable_checkpointing=False, logger=False, enable_model_summary=False,
+                                   devices=1, enable_checkpointing=True, logger=False, enable_model_summary=False,
                                    enable_progress_bar=False, callbacks=callbacks)
                 trainer.fit(lit,train_dataloaders=train_loader,val_dataloaders=val_loader)
-                model=lit.model.to(DEVICE)
+                model=base
+                # ckpt 로드 (가능 시)
+                if ckpt_cb.best_model_path and os.path.exists(ckpt_cb.best_model_path):
+                    try:
+                        state=torch.load(ckpt_cb.best_model_path, map_location="cpu")["state_dict"]
+                        # Lightning state_dict 키 정리
+                        cleaned={k.replace("model.",""):v for k,v in state.items() if k.startswith("model.")}
+                        model.load_state_dict(cleaned, strict=False)
+                    except Exception as _e:
+                        _safe_print(f"[CKPT load skip] {_e}")
                 _check_stop(stop_event,f"after PL train {model_type}")
             else:
                 # ====== 수동 학습 경로 (가중치 + 얼리스톱 + 베스트웨이트) ======
                 model=base
-                cls_w = compute_class_weight(class_weight="balanced", classes=np.arange(num_classes), y=train_y)
-                w = torch.tensor(cls_w, dtype=torch.float32, device=DEVICE)
                 opt = torch.optim.Adam(model.parameters(), lr=1e-3)
                 crit = nn.CrossEntropyLoss(weight=w)
 
@@ -707,7 +721,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
                         if not torch.isfinite(loss): continue
                         opt.zero_grad(); loss.backward(); opt.step(); total_loss += float(loss.item())
 
-                    # ---- evaluate macro-F1 on val
+                    # ---- 평가 (val_f1)
                     model.eval(); preds=[]; lbls=[]
                     with torch.no_grad():
                         for xb,yb in val_loader:
@@ -735,31 +749,36 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
                 if best_state is not None:
                     model.load_state_dict(best_state)
 
+            # ---- 최종 검증: acc, f1, val_loss 계산
             _progress(f"eval:{model_type}")
-            model.eval(); preds=[]; lbls=[]
+            model.eval(); preds=[]; lbls=[]; val_loss_sum=0.0; n_val=0
+            crit_eval = nn.CrossEntropyLoss(weight=w)
             with torch.no_grad():
                 for bi,(xb,yb) in enumerate(val_loader):
                     if bi % 32 == 0: _check_stop(stop_event,f"val batch {bi}"); _progress(f"val_b{bi}")
-                    p=torch.argmax(model(xb.to(DEVICE)),dim=1).cpu().numpy()
+                    logits=model(xb.to(DEVICE)); loss=crit_eval(logits, yb.to(DEVICE))
+                    val_loss_sum += float(loss.item()) * xb.size(0); n_val += xb.size(0)
+                    p=torch.argmax(logits,dim=1).cpu().numpy()
                     preds.extend(p); lbls.extend(yb.numpy())
             acc=float(accuracy_score(lbls,preds)); f1=float(f1_score(lbls,preds,average="macro"))
+            val_loss = float(val_loss_sum / max(1,n_val))
 
-            stem=os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_group{int(group_id) if group_id is not None else 0}_cls{int(num_classes)}")
+            stem=os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_group{int(group_id) if group_id is not None else 0}_cls{int(len(class_ranges))}")
 
-            # 🔸 meta에 class_ranges를 포함 (predict가 예측 클래스/수익률 계산·로그에 반드시 필요)
+            # 🔸 meta에 class_ranges를 포함
             meta={
                 "symbol":symbol,
                 "strategy":strategy,
                 "model":model_type,
                 "group_id":int(group_id) if group_id is not None else 0,
-                "num_classes":int(num_classes),
+                "num_classes":int(len(class_ranges)),
                 "class_ranges": [[float(lo), float(hi)] for (lo,hi) in class_ranges],
-                "input_size":int(feat_dim),  # ← 변경: 동적 feat_dim
-                "metrics":{"val_acc":acc,"val_f1":f1},
+                "input_size":int(feat_dim),
+                "metrics":{"val_acc":acc,"val_f1":f1,"val_loss":val_loss},
                 "timestamp":now_kst().isoformat(),
                 "model_name":os.path.basename(stem)+".ptz",
                 "window":int(window),
-                "recent_cap":int(len(feat_scaled)),
+                "recent_cap":int(len(features_only)),
                 "engine":"lightning" if _HAS_LIGHTNING else "manual",
                 "data_flags":{"rows":int(len(df)),"limit":int(_limit),"min":int(_min_required),"augment_needed":bool(augment_needed),"enough_for_training":bool(enough_for_training)},
                 "train_loss_sum":float(total_loss)
@@ -772,11 +791,14 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             # 모델 가시화 보조 배리어
             _disk_barrier([wpath, mpath, MODEL_DIR, os.path.join(MODEL_DIR, symbol), os.path.join(MODEL_DIR, symbol, strategy)])
 
-            logger.log_training_result(symbol, strategy, model=os.path.basename(wpath), accuracy=acc, f1=f1, loss=float(total_loss),
-                note=(f"train_one_model(window={window}, cap={len(feat_scaled)}, engine={'lightning' if _HAS_LIGHTNING else 'manual'}, data_flags={{rows:{len(df)},limit:{_limit},min:{_min_required},aug:{int(augment_needed)},enough_for_training:{int(enough_for_training)}}})"),
-                source_exchange="BYBIT", status="success")
-            res["models"].append({"type":model_type,"acc":acc,"f1":f1,"loss_sum":float(total_loss),"pt":wpath,"meta":mpath})
-            _safe_print(f"🟩 TRAIN done [{model_type}] acc={acc:.4f} f1={f1:.4f} → {os.path.basename(wpath)}")
+            logger.log_training_result(
+                symbol, strategy, model=os.path.basename(wpath), accuracy=acc, f1=f1, loss=val_loss,
+                note=(f"train_one_model(window={window}, cap={len(features_only)}, engine={'lightning' if _HAS_LIGHTNING else 'manual'}, "
+                      f"data_flags={{rows:{len(df)},limit:{_limit},min:{_min_required},aug:{int(augment_needed)},enough_for_training:{int(enough_for_training)}}})"),
+                source_exchange="BYBIT", status="success"
+            )
+            res["models"].append({"type":model_type,"acc":acc,"f1":f1,"val_loss":val_loss,"loss_sum":float(total_loss),"pt":wpath,"meta":mpath})
+            _safe_print(f"🟩 TRAIN done [{model_type}] acc={acc:.4f} f1={f1:.4f} val_loss={val_loss:.5f} → {os.path.basename(wpath)}")
 
             if torch.cuda.is_available(): torch.cuda.empty_cache()
         _progress("train_one_model:end")
