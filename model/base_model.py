@@ -1,4 +1,5 @@
 # === model/base_model.py (stable init, dynamic input_size, safe XGB fallback) ===
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,6 +16,10 @@ except Exception:
 
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# (옵션) 라벨/중립밴드 환경변수 — 학습 파이프라인에서 사용할 수 있음
+LABEL_EPS = float(os.getenv("LABEL_EPS", "1e-9"))
+FALLBACK_NEUTRAL_BAND = float(os.getenv("FALLBACK_NEUTRAL_BAND", "0.002"))
 
 # =========================
 # Init Utilities (안정 초기화)
@@ -176,6 +181,23 @@ class CNNLSTMPricePredictor(nn.Module):
         return logits
 
 # =========================
+# Positional Encoding
+# =========================
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-np.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe.unsqueeze(0))
+
+    def forward(self, x):
+        x = x + self.pe[:, :x.size(1)].to(x.device)
+        return x
+
+# =========================
 # Transformer Price Predictor
 # =========================
 class TransformerPricePredictor(nn.Module):
@@ -185,8 +207,10 @@ class TransformerPricePredictor(nn.Module):
         output_size = output_size if output_size is not None else get_NUM_CLASSES()
         self.input_proj = nn.Linear(input_size, d_model)
         self.pos_encoder = PositionalEncoding(d_model)
+
         self.encoder_layers = nn.ModuleList()
         for _ in range(num_layers):
+            # torch 버전 호환 (norm_first 지원 유무)
             try:
                 layer = nn.TransformerEncoderLayer(
                     d_model=d_model, nhead=nhead, dim_feedforward=512,
@@ -240,23 +264,6 @@ class TransformerPricePredictor(nn.Module):
             return self.decoder(x)
 
 # =========================
-# Positional Encoding
-# =========================
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
-        super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-np.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe.unsqueeze(0))
-
-    def forward(self, x):
-        x = x + self.pe[:, :x.size(1)].to(x.device)
-        return x
-
-# =========================
 # XGBoost Wrapper (optional)
 # =========================
 class XGBoostWrapper:
@@ -302,7 +309,7 @@ class AutoEncoder(nn.Module):
 MODEL_CLASSES = {
     "lstm": LSTMPricePredictor,
     "cnn_lstm": CNNLSTMPricePredictor,
-    "cnn": CNNLSTMPricePredictor,
+    "cnn": CNNLSTMPricePredictor,          # 별칭 유지
     "transformer": TransformerPricePredictor,
     "xgboost": XGBoostWrapper,
     "autoencoder": AutoEncoder
