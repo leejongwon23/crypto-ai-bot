@@ -303,6 +303,12 @@ def get_current_group_index() -> int: return GROUP_MGR.current_index()
 def get_current_group_symbols() -> List[str]: return GROUP_MGR.current_group()
 def reset_group_order(start_index: int = 0) -> None: GROUP_MGR.reset(start_index)
 def rebuild_symbol_groups(symbols: Optional[List[str]] = None, group_size: int = 5) -> None: GROUP_MGR.rebuild_groups(symbols, group_size)
+# ✅ 추가: 현재 그룹의 ‘학습 완료 여부’만 반환 (예측 여부와 무관)
+def group_all_complete() -> bool:
+    i = GROUP_MGR.current_index()
+    group = set(GROUP_MGR.current_group())
+    done = GROUP_MGR.trained.get(i, set())
+    return (len(group) > 0) and group.issubset(done)
 
 def _models_exist(model_dir="/persistent/models"):
     try:
