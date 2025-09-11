@@ -57,6 +57,7 @@ from data_augmentation import balance_classes
 from window_optimizer import find_best_window
 
 # --- ssl_pretrain (옵션) ---
+DISABLE_SSL = os.getenv("DISABLE_SSL","1")=="1"  # 기본 비활성(시간 단축)
 try:
     from ssl_pretrain import masked_reconstruction, get_ssl_ckpt_path
 except:
@@ -181,6 +182,13 @@ _MAX_ROWS_FOR_TRAIN=int(os.getenv("TRAIN_MAX_ROWS","1200"))
 _BATCH_SIZE=int(os.getenv("TRAIN_BATCH_SIZE","128"))
 _NUM_WORKERS=int(os.getenv("TRAIN_NUM_WORKERS","0"))  # 기본 0 (멀티워커 금지)
 _PIN_MEMORY=False; _PERSISTENT=False
+
+# 전략별 에폭(기본: 단6/중8/장10)
+def _epochs_for(strategy:str)->int:
+    if strategy=="단기": return int(os.getenv("EPOCHS_SHORT","6"))
+    if strategy=="중기": return int(os.getenv("EPOCHS_MID","8"))
+    if strategy=="장기": return int(os.getenv("EPOCHS_LONG","10"))
+    return 8
 
 now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 
@@ -476,8 +484,12 @@ def _log_class_ranges_safe(symbol, strategy, group_id, class_ranges, note, stop_
     except Exception as e:
         _safe_print(f"[log_class_ranges err] {e}")
 
-def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: threading.Event | None = None):
+def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event: threading.Event | None = None):
     global _FAILURE_DB_READY
+    # 동적 에폭 결정
+    if max_epochs is None:
+        max_epochs = _epochs_for(strategy)
+
     res={"symbol":symbol,"strategy":strategy,"group_id":int(group_id or 0),"models":[]}
     try:
         ensure_failure_db(); _FAILURE_DB_READY = True
@@ -487,19 +499,22 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
 
         _check_stop(stop_event,"before ssl_pretrain")
         try:
-            ck=get_ssl_ckpt_path(symbol,strategy)
-            if not os.path.exists(ck):
-                _safe_print(f"[SSL] start masked_reconstruction → {ck}")
-                _ssl_timeout=float(os.getenv("SSL_TIMEOUT_SEC","180"))
-                status_ssl, _ = _run_with_timeout(
-                    masked_reconstruction,
-                    args=(symbol,strategy,FEATURE_INPUT_SIZE),
-                    kwargs={}, timeout_sec=_ssl_timeout, stop_event=stop_event,
-                    hb_tag="ssl:wait", hb_interval=5.0
-                )
-                if status_ssl != "ok":
-                    _safe_print(f"[SSL] skip ({status_ssl})")
-            else: _safe_print(f"[SSL] cache → {ck}")
+            if not DISABLE_SSL:
+                ck=get_ssl_ckpt_path(symbol,strategy)
+                if not os.path.exists(ck):
+                    _safe_print(f"[SSL] start masked_reconstruction → {ck}")
+                    _ssl_timeout=float(os.getenv("SSL_TIMEOUT_SEC","120"))
+                    status_ssl, _ = _run_with_timeout(
+                        masked_reconstruction,
+                        args=(symbol,strategy,FEATURE_INPUT_SIZE),
+                        kwargs={}, timeout_sec=_ssl_timeout, stop_event=stop_event,
+                        hb_tag="ssl:wait", hb_interval=5.0
+                    )
+                    if status_ssl != "ok":
+                        _safe_print(f"[SSL] skip ({status_ssl})")
+                else: _safe_print(f"[SSL] cache → {ck}")
+            else:
+                _safe_print("[SSL] disabled → skip")
         except Exception as e: _safe_print(f"[SSL] skip {e}")
 
         _check_stop(stop_event,"before data fetch")
@@ -608,31 +623,23 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             y.append(labels[yi] if 0<=yi<len(labels) else 0)
         X_raw=np.array(X_raw,dtype=np.float32); y=np.array(y,dtype=np.int64)
 
-        if len(X_raw)<20:
-            try:
-                _cd_timeout=float(os.getenv("CREATE_DATASET_TIMEOUT_SEC","60"))
-                status_ds, ds = _run_with_timeout(
-                    create_dataset,
-                    args=(feat.to_dict(orient="records"),),
-                    kwargs={"window":window,"strategy":strategy,"input_size":feat_dim},
-                    timeout_sec=_cd_timeout, stop_event=stop_event,
-                    hb_tag="dataset:wait", hb_interval=3.0
-                )
-                if status_ds=="ok" and isinstance(ds,tuple) and len(ds)>=2:
-                    X_fb,y_fb=ds[0],ds[1]
-                elif status_ds=="ok":
-                    X_fb,y_fb=ds
-                else:
-                    X_fb,y_fb=None,None
-                if isinstance(X_fb,np.ndarray) and len(X_fb)>0:
-                    X_raw,y=X_fb.astype(np.float32),y_fb.astype(np.int64)
-                    _safe_print("[DATASET] fallback create_dataset 사용")
-            except Exception as e: _safe_print(f"[fallback dataset err] {e}")
-        if len(X_raw)<10: _log_skip(symbol,strategy,f"샘플 부족(rows={len(df)}, limit={_limit}, min={_min_required})"); return res
+        # ===== 성능 0 방지: 단일 클래스/검증 불가 케이스 스킵 =====
+        if len(X_raw) < 10:
+            _log_skip(symbol,strategy,f"샘플 부족(rows={len(df)}, limit={_limit}, min={_min_required})"); return res
+        uniq_all = np.unique(y)
+        if len(uniq_all) < 2:
+            _log_skip(symbol,strategy,"라벨 단일 클래스 → 학습/평가 스킵"); return res
 
-        # ---- 분할 후 'train에만 fit' 스케일링
-        sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=20240101)
-        (train_idx, val_idx), = sss.split(X_raw, y)
+        # ---- 분할 (Stratified → 실패 시 안전 폴백)
+        try:
+            sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=20240101)
+            (train_idx, val_idx), = sss.split(X_raw, y)
+        except Exception as _split_err:
+            _safe_print(f"[SPLIT] stratified split fail → fallback split ({_split_err})")
+            n=len(X_raw); idx=np.arange(n); rs=np.random.RandomState(20240101); rs.shuffle(idx)
+            cut=max(1,int(n*0.2)); val_idx=idx[:cut]; train_idx=idx[cut:]
+
+        # ---- train-only fit scaler
         scaler = MinMaxScaler()
         Xtr_flat = X_raw[train_idx].reshape(-1, feat_dim)
         scaler.fit(Xtr_flat)
@@ -640,9 +647,29 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
         val_X   = scaler.transform(X_raw[val_idx].reshape(-1, feat_dim)).reshape(len(val_idx), window, feat_dim)
         train_y, val_y = y[train_idx], y[val_idx]
 
+        # ===== 성능 0 방지: 분할 후에도 단일 클래스면 스킵 =====
+        if len(np.unique(train_y)) < 2 or len(np.unique(val_y)) < 2:
+            _log_skip(symbol,strategy,"분할 후 단일 클래스 → 학습/평가 스킵"); return res
+
+        # 데이터 적을 땐 에폭 자동 축소
+        if len(train_X) < 200:
+            max_epochs = max(4, int(round(max_epochs * 0.7)))
+
         try:
             if len(train_X)<200: train_X,train_y=balance_classes(train_X,train_y,num_classes=len(class_ranges))
         except Exception as e: _safe_print(f"[balance err] {e}")
+
+        # ===== 클래스 가중치: 등장한 클래스만 계산 → 전체 크기로 확장 =====
+        present = np.unique(train_y)
+        try:
+            cw_present = compute_class_weight(class_weight="balanced", classes=present, y=train_y)
+            w_full = np.ones(len(class_ranges), dtype=np.float32)
+            for cls, wv in zip(present, cw_present):
+                w_full[int(cls)] = float(wv)
+        except Exception as e:
+            _safe_print(f"[class_weight warn] {e}")
+            w_full = np.ones(len(class_ranges), dtype=np.float32)
+        w = torch.tensor(w_full, dtype=torch.float32, device=DEVICE)
 
         for model_type in ["lstm","cnn_lstm","transformer"]:
             _check_stop(stop_event,f"before train {model_type}")
@@ -664,10 +691,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
             total_loss=0.0
             _safe_print(f"🟦 TRAIN begin → {symbol}-{strategy}-g{group_id} [{model_type}] (epochs={max_epochs}, train={len(train_X)}, val={len(val_X)})")
 
-            # 공통 손실 가중치
-            cls_w = compute_class_weight(class_weight="balanced", classes=np.arange(len(class_ranges)), y=train_y)
-            w = torch.tensor(cls_w, dtype=torch.float32, device=DEVICE)
-
             if _HAS_LIGHTNING:
                 lit=LitSeqModel(base,lr=1e-3,cls_w=w)
                 callbacks=[_HeartbeatAndStop(stop_event)]
@@ -683,7 +706,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
                 if ckpt_cb.best_model_path and os.path.exists(ckpt_cb.best_model_path):
                     try:
                         state=torch.load(ckpt_cb.best_model_path, map_location="cpu")["state_dict"]
-                        # Lightning state_dict 키 정리
                         cleaned={k.replace("model.",""):v for k,v in state.items() if k.startswith("model.")}
                         model.load_state_dict(cleaned, strict=False)
                     except Exception as _e:
@@ -740,7 +762,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=12, stop_event: 
                     if time.time()-last_log_ts>2:
                         _safe_print(f"   ↳ {model_type} ep{ep+1}/{max_epochs} val_f1={cur_f1:.4f} bad={bad}/{patience} loss_sum={total_loss:.4f}")
                         last_log_ts=time.time()
-                    _progress(f"{model_type}:ep{ep}:end")
+                    _progress(f"{model_type}:ep{ep}:end}")
                     if bad >= patience:
                         _safe_print(f"🛑 early stop @ ep{ep+1} (best_f1={best_f1:.4f})")
                         break
@@ -973,7 +995,7 @@ def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) ->
 
                 _reset_watchdog("enter symbol/group")
                 _progress(f"train_models:{symbol}-{strategy}-g{gid}")
-                res=train_one_model(symbol,strategy,group_id=gid, stop_event=stop_event)
+                res=train_one_model(symbol,strategy,group_id=gid, max_epochs=_epochs_for(strategy), stop_event=stop_event)
                 ok = bool(res and isinstance(res,dict) and res.get("models"))
                 detail[strategy][gid]=ok
                 if not ok and _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP:
