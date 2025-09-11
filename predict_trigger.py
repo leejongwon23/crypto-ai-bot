@@ -1,4 +1,4 @@
-# === predict_trigger.py (MEM-SAFE FINAL+++ — gate/lock aware, stale lock cleanup, timeout-safe, freq & diversity) ===
+# === predict_trigger.py (MEM-SAFE FINAL++++ — gate/lock aware, stale lock cleanup, timeout-safe, freq & diversity, group-aware) ===
 import os
 import time
 import traceback
@@ -80,6 +80,37 @@ try:
     _is_gate_open = __is_open
 except Exception:
     _is_gate_open = None
+
+# ▷ (옵션) 그룹 순서 매니저 (없으면 전체 심볼 대상으로 동작)
+_GOM = None
+try:
+    from group_order import GroupOrderManager as _GOM
+except Exception:
+    try:
+        from data.group_order import GroupOrderManager as _GOM
+    except Exception:
+        _GOM = None
+
+def _get_current_group_symbols():
+    """GroupOrderManager가 있으면 현재 그룹 심볼 목록을 반환, 없으면 None."""
+    if _GOM is None:
+        return None
+    try:
+        gom = _GOM()
+        # 가능한 API 이름들을 보수적으로 시도
+        if hasattr(gom, "get_current_group_symbols"):
+            syms = gom.get_current_group_symbols()
+        elif hasattr(gom, "current_group_index") and hasattr(gom, "get_group_symbols"):
+            idx = gom.current_group_index()
+            syms = gom.get_group_symbols(idx)
+        else:
+            return None
+        if not syms:
+            return None
+        # 중복 제거 + 정렬(안정적 순회)
+        return list(dict.fromkeys(syms))
+    except Exception:
+        return None
 
 # ===== 설정(환경변수로 조절 가능) =====
 TRIGGER_COOLDOWN = {"단기": 3600, "중기": 10800, "장기": 21600}
@@ -190,7 +221,7 @@ def check_model_quality(symbol, strategy):
     return _has_model_for(symbol, strategy)
 
 # ──────────────────────────────────────────────────────────────
-# 트리거 실행 루프(락/쿨다운/최대 실행 수/타임아웃 지원)
+# 트리거 실행 루프(락/쿨다운/최대 실행 수/타임아웃 지원 + 그룹 인식)
 # ──────────────────────────────────────────────────────────────
 def run():
     # 전역 락이면 전체 스킵
@@ -223,16 +254,25 @@ def run():
     except Exception as e:
         print(f"[경고] prediction_log 보장 실패: {e}")
 
-    print(f"[트리거 실행] 전조 패턴 감지 시작: {now_kst().isoformat()}")
-
-    triggered = 0
-
-    # 심볼 목록 방어: 중복 제거 + 정렬(안정적 순회)
+    # 전체 심볼 목록 확보
     try:
-        symbols = list(dict.fromkeys(get_ALL_SYMBOLS()))
+        all_symbols = list(dict.fromkeys(get_ALL_SYMBOLS()))
     except Exception as e:
         print(f"[경고] 심볼 로드 실패: {e}")
-        symbols = []
+        all_symbols = []
+
+    # [NEW] 그룹 매니저가 제공하는 현재 그룹 심볼만 대상으로 제한(있으면)
+    group_syms = _get_current_group_symbols()
+    if isinstance(group_syms, (list, tuple)) and len(group_syms) > 0:
+        symset = set(group_syms)
+        symbols = [s for s in all_symbols if s in symset]
+        print(f"[그룹제한] 현재 그룹 심볼 {len(symbols)}/{len(all_symbols)}개 대상으로 실행")
+    else:
+        symbols = all_symbols
+
+    print(f"[트리거 실행] 전조 패턴 감지 시작: {now_kst().isoformat()} (대상 심볼 {len(symbols)}개)")
+
+    triggered = 0
 
     for symbol in symbols:
         for strategy in ["단기", "중기", "장기"]:
