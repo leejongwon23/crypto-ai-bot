@@ -3,6 +3,8 @@
 # - 서버 부팅 시 자동 학습 기본 ON: APP_AUTOSTART_TRAIN=0 일 때만 비활성
 # - 텔레그램 부팅 알림은 **항상 발송**(환경변수와 무관) + 원자적 마크로 중복 발송 차단
 # - 예측 게이트/전역락·스케줄러/리셋 로직은 기존 유지(중복 실행 방지)
+# - 🆕 그룹 학습 라우트: 학습 직후 예측은 group_all_complete() & ready_for_group_predict() 통과시에만 수행
+#   완료 예측 후 mark_group_predicted() 호출로 단일화
 
 from flask import Flask, jsonify, request, Response
 from recommend import main
@@ -12,6 +14,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from telegram_bot import send_message
 from predict_trigger import run as trigger_run
 from data.utils import SYMBOLS, get_kline_by_strategy
+# 🆕 그룹 완료/게이트 검증 유틸
+from data.utils import ready_for_group_predict, mark_group_predicted, group_all_complete, get_current_group_symbols
 from visualization import generate_visual_report, generate_visuals_for_strategy
 from wrong_data_loader import load_training_prediction_data
 from predict import evaluate_predictions
@@ -430,7 +434,7 @@ except Exception:
     def _has_model_for(symbol, strategy): return True
 
 def _predict_after_training(symbols:list[str], source_note:str):
-    """그룹/선택 학습 직후에만 호출. 모델 가시화 대기 → 게이트 열기 → 동기 예측."""
+    """선택 학습/검증용: 모델 가시화 대기 → 게이트 열기 → 동기 예측."""
     if not symbols: return
     try:
         await_sec = int(os.getenv("PREDICT_MODEL_AWAIT_SEC","60"))
@@ -440,7 +444,7 @@ def _predict_after_training(symbols:list[str], source_note:str):
     if not vis:
         print(f"[APP-PRED] 모델 가시화 실패 → 예측 생략 candidates={sorted(set(symbols))}")
         return
-    # 🔧 변경 4: 예측 직전, 남아있는 락이 있으면 **즉시 제거**
+    # 🔧 예측 직전, 남아있는 락이 있으면 **즉시 제거**
     if os.path.exists(LOCK_PATH):
         try:
             os.remove(LOCK_PATH)
@@ -766,12 +770,27 @@ def train_symbols():
 
             def _worker():
                 try:
+                    # 1) 그룹 학습 수행
                     train.train_models(group_symbols)
-                finally:
-                    # ✅ 학습 직후 즉시 예측 실행
+                    # 2) 완료 검증: 모든 전략 모델 존재 + 진행중 그룹 완주 상태
+                    if not group_all_complete():
+                        print("[GROUP-AFTER] 미완료: group_all_complete()=False → 예측 생략")
+                        return
+                    if not ready_for_group_predict():
+                        print("[GROUP-AFTER] 미완료: ready_for_group_predict()=False → 예측 생략")
+                        return
+                    # 3) 통과시 단일 게이트에서 예측 실행
                     _predict_after_training(group_symbols, source_note=f"group{group_idx}_after_train")
+                    # 4) 전량 예측 완료 표시
+                    try:
+                        mark_group_predicted()
+                        print("[GROUP-AFTER] mark_group_predicted() 호출 완료")
+                    except Exception as e:
+                        print(f"[GROUP-AFTER] mark_group_predicted 예외: {e}")
+                finally:
+                    pass
             threading.Thread(target=_worker, daemon=True).start()
-            return f"✅ 그룹 #{group_idx} 학습 시작됨 (단일 루프 보장, 학습 직후 예측 수행)"
+            return f"✅ 그룹 #{group_idx} 학습 시작됨 (완료 검증 통과 시 학습 직후 예측, 이후 mark_group_predicted)"
         else:
             # 선택 학습: POST {"symbols":["BTCUSDT","ETHUSDT"], "force":true}
             body = request.get_json(silent=True) or {}
@@ -789,11 +808,12 @@ def train_symbols():
             def _worker():
                 try:
                     train.train_models(symbols)
-                finally:
-                    # ✅ 학습 직후 즉시 예측 실행
+                    # 선택 학습은 그룹 인덱스 이동/마킹에 관여하지 않음 — 즉시 예측만 수행
                     _predict_after_training(symbols, source_note="selected_after_train")
+                finally:
+                    pass
             threading.Thread(target=_worker, daemon=True).start()
-            return f"✅ {len(symbols)}개 심볼 학습 시작됨 (단일 루프 보장, 학습 직후 예측 수행)"
+            return f"✅ {len(symbols)}개 심볼 학습 시작됨 (학습 직후 예측 수행 — 그룹 마킹 없음)"
     except Exception as e:
         traceback.print_exc(); return f"❌ 오류: {e}", 500
 
