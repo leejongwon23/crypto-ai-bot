@@ -646,7 +646,8 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                 for j in range(len(sample)):
                     row = sample[j]
                     if len(row) < input_size:
-                        row.extend([0.0] * (input_size - len(row)))
+                        row.extend([0.0] * (input_size - len(row))
+                        )
                     elif len(row) > input_size:
                         sample[j] = row[:input_size]
             samples.append(sample)
