@@ -1184,21 +1184,40 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 completed_syms, partial_syms = train_models(group, stop_event=stop_event, ignore_should=force_full_pass)
                 if stop_event is not None and stop_event.is_set(): _safe_print("🛑 stop after train → exit"); break
 
-                # === 예측 대상 결정 ===
-                predict_candidates = list(completed_syms)
-                if os.getenv("PREDICT_PARTIAL_OK", "1") == "1":
-                    predict_candidates += list(partial_syms)
+                # === 그룹 완료 여부 판정 (부분 예측 금지)
+                group_complete = set(completed_syms) >= set(group) and len(partial_syms) == 0
+                if not group_complete:
+                    _safe_print(f"[BLOCK] 그룹{idx+1} 미완료 → 예측/마킹 금지 "
+                                f"(completed={sorted(completed_syms)}, partial={sorted(partial_syms)})")
+                    # 그룹 보호 플래그 해제
+                    _group_active_off()
+                    # 정책상 중단이면 즉시 중단
+                    if partial_syms and _ENFORCE_FULL_STRATEGY and _STRICT_HALT_ON_INCOMPLETE:
+                        _safe_print(f"[HALT] 그룹 {idx+1}: 미완결 심볼 존재 → 그룹 루프 중단")
+                        break
+                    # 다음 그룹으로 넘어가되, 마킹은 하지 않음
+                    _prune_caches_and_gc()
+                    _progress(f"group{idx}:incomplete-skip-predict")
+                    continue
+
+                # === 예측 readiness 확인
+                if not ready_for_group_predict():
+                    _safe_print(f"[PREDICT-BLOCK] 그룹{idx+1} ready_for_group_predict()==False → 예측 보류 및 마킹 금지")
+                    _group_active_off()
+                    _prune_caches_and_gc()
+                    _progress(f"group{idx}:ready_false")
+                    continue
+
+                # === 예측 대상은 '해당 그룹 전체 심볼'
+                predict_candidates = list(group)
 
                 # 🔐 모델 가시화 보장(파일시스템 동기화 지연 방지)
                 await_sec_default = int(os.getenv("PREDICT_MODEL_AWAIT_SEC","60"))  # 기본 60초
                 visible_syms = _await_models_visible(predict_candidates, timeout_sec=await_sec_default)
-                if not visible_syms:
-                    _safe_print(f"[⏸ 대기] 그룹{idx+1} — 학습심볼은 있으나 모델 파일이 아직 보이지 않음 → 예측 보류 "
-                                f"(candidates={sorted(set(predict_candidates))})")
                 predict_syms = sorted({s for s in visible_syms if _has_any_model_for_symbol(s)})
 
                 _safe_print(f"[PREDICT-DECIDE] ready={bool(ready_for_group_predict())} "
-                            f"completed_syms={completed_syms} partial_syms={partial_syms} "
+                            f"group={group} completed={completed_syms} partial={partial_syms} "
                             f"visible_syms={predict_syms}")
 
                 ran_any=False
@@ -1209,7 +1228,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                         stale_sec=_get_group_stale_sec(),
                         tag=f"group_{idx+1}:pre-open"
                     )
-                    # ✅ 플래그는 이미 ON 상태(학습 시작 시 ON)
                     try:
                         # 게이트 열기 (우리 예측 시작)
                         try: open_predict_gate(note=f"group_{idx+1}_start")
@@ -1230,7 +1248,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                                     stop_event=stop_event
                                 )
                     finally:
-                        # 게이트 닫기 + 락 정리 + 마킹 (예외 여부와 무관하게 보장)
                         try: close_predict_gate(note=f"group_{idx+1}_end(finalize)")
                         except Exception as e: _safe_print(f"[gate close err] {e}")
                         _wait_predict_lock_clear(
@@ -1238,11 +1255,9 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                             stale_sec=_get_group_stale_sec(),
                             tag=f"group_{idx+1}:post-close"
                         )
-                        try: mark_group_predicted()
-                        except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
-                        _safe_print(f"[PREDICT] group {idx+1} done (finalize)")
+                        _safe_print(f"[PREDICT] group {idx+1} end")
 
-                # ⛑ 스모크 폴백: 예측을 한 건도 못 돌렸다면 최소 1건 보장
+                # ⛑ 스모크 폴백: 그룹 완료 상태에서 모델 가시성 지연일 때만 1건 보장
                 if not ran_any:
                     cand_symbol = _pick_smoke_symbol(predict_candidates)
                     if cand_symbol:
@@ -1253,7 +1268,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                                 stale_sec=_get_group_stale_sec(),
                                 tag=f"group_{idx+1}:smoke-pre"
                             )
-                            # 이미 플래그 ON 상태 유지
                             try: open_predict_gate(note=f"group_{idx+1}_smoke_start")
                             except Exception as e: _safe_print(f"[gate open err] {e}")
                             time.sleep(0.3)
@@ -1267,23 +1281,21 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                                     stale_sec=_get_group_stale_sec(),
                                     tag=f"group_{idx+1}:smoke-post"
                                 )
-                                try: mark_group_predicted()
-                                except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
                         finally:
                             pass
-                    else:
-                        _safe_print(f"[SMOKE] fallback symbol not found → skip")
+
+                # ✅ 전량 예측이 최소 1건 이상 수행된 경우에만 마킹
+                if ran_any:
+                    try: mark_group_predicted()
+                    except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
+                else:
+                    _safe_print(f"[MARK-SKIP] group {idx+1}: 예측 수행 없음 → 마킹 생략")
 
                 _prune_caches_and_gc()
                 _progress(f"group{idx}:done")
 
-                # 그룹 보호 플래그 해제(학습+예측 완료)
+                # 그룹 보호 플래그 해제(학습+예측 완료 또는 스킵)
                 _group_active_off()
-
-                # 심볼 미완료가 있고 중단 정책이면, 남은 그룹 스킵
-                if partial_syms and _ENFORCE_FULL_STRATEGY and _STRICT_HALT_ON_INCOMPLETE:
-                    _safe_print(f"[HALT] 그룹 {idx+1}: 미완결 심볼 존재 → 그룹 루프 중단")
-                    break
 
                 if sleep_sec>0:
                     for _ in range(sleep_sec):
