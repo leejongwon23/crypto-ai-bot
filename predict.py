@@ -939,4 +939,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[오류] prediction_log.csv 로드 실패 → {e}")
     if str(os.getenv("EVAL_LOOP", "0")).strip() == "1": run_evaluation_loop()
-
