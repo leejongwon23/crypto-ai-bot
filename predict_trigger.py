@@ -27,9 +27,15 @@ except Exception:
 PREDICT_BLOCK = "/persistent/predict.block"
 PREDICT_RUN_LOCK = "/persistent/run/predict_running.lock"
 
+# [ADD] 그룹 학습 상태 락(훈련중 차단용) —— train/group 루프에서 생성/삭제
+GROUP_TRAIN_LOCK = "/persistent/run/group_training.lock"  # [ADD]
+
 # [ADD] 모델 경로(빠른 존재 확인용)
 MODEL_DIR = "/persistent/models"
 _KNOWN_EXTS = (".pt", ".ptz", ".safetensors")
+
+# [ADD] 전략 공통 상수
+STRATEGIES = ["단기", "중기", "장기"]  # [ADD]
 
 def _has_model_for(symbol: str, strategy: str) -> bool:
     """train.py와 동일한 기준의 경량판: 심볼·전략 단위 가용 모델 존재 여부."""
@@ -135,6 +141,8 @@ def _gate_closed() -> bool:
     try:
         if os.path.exists(PREDICT_BLOCK):
             return True
+        if os.path.exists(GROUP_TRAIN_LOCK):  # [ADD] 그룹 학습중이면 차단
+            return True
         if _is_gate_open is not None and (not _is_gate_open()):
             return True
     except Exception:
@@ -164,6 +172,26 @@ def _clear_stale_predict_lock(ttl_sec: int):
             print(f"[LOCK] stale predict lock removed (> {ttl_sec}s)")
     except Exception as e:
         print(f"[LOCK] stale cleanup error: {e}")
+
+# ──────────────────────────────────────────────────────────────
+# [ADD] 그룹 완료 검증 (요구사항: group_all_complete == True 여야만 예측 허용)
+# ──────────────────────────────────────────────────────────────
+def _is_group_complete_for_all_strategies(group_syms) -> bool:
+    """
+    현재 그룹의 모든 심볼이 모든 전략(단/중/장기)에서 최소 1개 모델이라도 갖고 있는지 검사.
+    모델 ‘존재’만 보며, 파일명에 그룹 인덱스가 없어도 무관.
+    """
+    if not group_syms:
+        # 그룹 매니저가 없거나, 그룹이 비어 있으면 차단하지 않음(보수적 허용)
+        return True
+    try:
+        for sym in group_syms:
+            for st in STRATEGIES:
+                if not _has_model_for(sym, st):
+                    return False
+        return True
+    except Exception:
+        return False
 
 # ──────────────────────────────────────────────────────────────
 # 전조 조건(메모리/연산 예산 보호 포함)
@@ -234,7 +262,7 @@ def run():
 
     # 게이트 닫힘이면 전체 스킵(그룹 학습/예측 중일 수 있음)
     if _gate_closed():
-        print(f"[트리거] 게이트 닫힘(그룹 예측 진행 중) → 스킵 @ {now_kst().isoformat()}")
+        print(f"[트리거] 게이트 닫힘(그룹 예측/학습 진행 중) → 스킵 @ {now_kst().isoformat()}")
         return
 
     # 이미 예측 중이면 스킵(중복 실행 방지)
@@ -267,6 +295,11 @@ def run():
         symset = set(group_syms)
         symbols = [s for s in all_symbols if s in symset]
         print(f"[그룹제한] 현재 그룹 심볼 {len(symbols)}/{len(all_symbols)}개 대상으로 실행")
+
+        # === [ADD: 하드 차단] group_all_complete == True 인 경우에만 예측 허용 ===
+        if not _is_group_complete_for_all_strategies(symbols):
+            print("[트리거] 현재 그룹 미완료(일부 심볼/전략 모델 부재) → 예측 전면 스킵")
+            return
     else:
         symbols = all_symbols
 
@@ -275,7 +308,7 @@ def run():
     triggered = 0
 
     for symbol in symbols:
-        for strategy in ["단기", "중기", "장기"]:
+        for strategy in STRATEGIES:
             # 최대 실행 수 초과 시 즉시 종료(스케줄 다음 턴으로 넘김)
             if triggered >= TRIGGER_MAX_PER_RUN:
                 print(f"[트리거] 이번 루프 최대 실행 수({TRIGGER_MAX_PER_RUN}) 도달 → 조기 종료")
@@ -298,7 +331,6 @@ def run():
                 cooldown = TRIGGER_COOLDOWN.get(strategy, 3600)
 
                 if now - last_trigger_time.get(key, 0) < cooldown:
-                    # 너무 시끄럽지 않게 간단 출력
                     continue
 
                 # [ADD] 모델 유무 사전 점검(불필요한 predict 호출/실패 로그 방지)
@@ -307,7 +339,6 @@ def run():
 
                 df = get_kline_by_strategy(symbol, strategy)
                 if df is None or len(df) < 60 or not _has_cols(df, ["close"]):
-                    # 데이터 부족/컬럼 부족
                     continue
 
                 if not check_pre_burst_conditions(df, strategy):
