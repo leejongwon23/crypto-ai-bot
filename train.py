@@ -762,7 +762,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
                     if time.time()-last_log_ts>2:
                         _safe_print(f"   ↳ {model_type} ep{ep+1}/{max_epochs} val_f1={cur_f1:.4f} bad={bad}/{patience} loss_sum={total_loss:.4f}")
                         last_log_ts=time.time()
-                    _progress(f"{model_type}:ep{ep}:end}")
+                    _progress(f"{model_type}:ep{ep}:end")
                     if bad >= patience:
                         _safe_print(f"🛑 early stop @ ep{ep+1} (best_f1={best_f1:.4f})")
                         break
