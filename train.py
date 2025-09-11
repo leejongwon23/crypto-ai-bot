@@ -1203,15 +1203,14 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
 
                 ran_any=False
                 if predict_syms:
+                    # 🧹 예측 시작 전: 남아있을 수 있는 전역 락 정리/대기
+                    _wait_predict_lock_clear(
+                        timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_PREOPEN_SEC","15")),
+                        stale_sec=_get_group_stale_sec(),
+                        tag=f"group_{idx+1}:pre-open"
+                    )
+                    # ✅ 플래그는 이미 ON 상태(학습 시작 시 ON)
                     try:
-                        # 🧹 예측 시작 전: 남아있을 수 있는 전역 락 정리/대기
-                        _wait_predict_lock_clear(
-                            timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_PREOPEN_SEC","15")),
-                            stale_sec=_get_group_stale_sec(),
-                            tag=f"group_{idx+1}:pre-open"
-                        )
-                        # ✅ 플래그는 이미 ON 상태(학습 시작 시 ON)
-
                         # 게이트 열기 (우리 예측 시작)
                         try: open_predict_gate(note=f"group_{idx+1}_start")
                         except Exception as e: _safe_print(f"[gate open err] {e}")
@@ -1230,8 +1229,9 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                                     source="그룹직후", model_type=None,
                                     stop_event=stop_event
                                 )
-                        # 게이트 닫기 + 락 정리 + 마킹
-                        try: close_predict_gate(note=f"group_{idx+1}_end")
+                    finally:
+                        # 게이트 닫기 + 락 정리 + 마킹 (예외 여부와 무관하게 보장)
+                        try: close_predict_gate(note=f"group_{idx+1}_end(finalize)")
                         except Exception as e: _safe_print(f"[gate close err] {e}")
                         _wait_predict_lock_clear(
                             timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_POST_SEC","10")),
@@ -1240,10 +1240,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                         )
                         try: mark_group_predicted()
                         except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
-                        _safe_print(f"[PREDICT] group {idx+1} done")
-                    finally:
-                        # 해제는 그룹 전체 종료 시점(finally)에서 일괄 수행
-                        pass
+                        _safe_print(f"[PREDICT] group {idx+1} done (finalize)")
 
                 # ⛑ 스모크 폴백: 예측을 한 건도 못 돌렸다면 최소 1건 보장
                 if not ran_any:
