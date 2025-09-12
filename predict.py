@@ -13,6 +13,7 @@
 # (2025-09-09b) — [핵심] (B) 마스크·(C) 가드에 “포지션 힌트(EMA20/60 + 기울기)” 적용 → 롱/숏 분리 강제
 # (2025-09-09c) — [FIX] (B)/(C) 최소수익 임계 판단을 양/음 공통식으로 교체: long=hi>=THRESH, short=-lo>=THRESH, 둘 다 허용 시 max(hi,-lo)>=THRESH
 # (2025-09-10) — [INPUT_SIZE 통일] meta.input_size 최우선, 없으면 feat_scaled.shape[1] 사용. 고정 상수 경로 제거.
+# (2025-09-12) — [NEW] 앙상블(mean of top-3 calibrated) 후보 추가 + 보류컷(ABSTAIN_PROB_MIN) 도입
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -219,6 +220,9 @@ FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()  # ← 더 이상 사용하지 않
 now_kst = lambda: _now_kst()
 
 MIN_RET_THRESHOLD = float(os.getenv("PREDICT_MIN_RETURN", "0.01"))
+# 🆕 보류 컷(최종 선택 모델의 최고 보정확률이 이 값 미만이면 예측 보류)
+ABSTAIN_PROB_MIN = float(os.getenv("ABSTAIN_PROB_MIN", "0.35"))
+
 EXP_STATE = "/persistent/logs/meta_explore_state.json"
 EXP_EPS = float(os.getenv("EXPLORE_EPS_BASE", "0.15"))
 EXP_DEC_MIN = float(os.getenv("EXPLORE_DECAY_MIN", "120"))
@@ -411,32 +415,21 @@ def _ema(arr: np.ndarray, span: int) -> np.ndarray:
     return s.ewm(span=span, adjust=False).mean().values
 
 def _position_hint_from_market(df: pd.DataFrame) -> dict:
-    """
-    EMA 20/60 + 최근 30캔들 기울기 기반의 간단한 시장 힌트.
-    - 강한 상승: 롱 우선(allow_long=True, allow_short=False)
-    - 강한 하락: 숏 우선(allow_long=False, allow_short=True)
-    - 애매/횡보: 둘 다 허용
-    """
     try:
         close = df["close"].astype(float).values
         if close.size < 70:
             return {"allow_long": True, "allow_short": True, "ma_fast": None, "ma_slow": None, "slope": 0.0}
         ma_fast = _ema(close, 20)
         ma_slow = _ema(close, 60)
-        # 최근 30개 단순 선형기울기
-        y = close[-30:]
-        x = np.arange(len(y))
-        slope = float(np.polyfit(x, y, 1)[0]) / (np.mean(y) + 1e-12)  # 정규화 기울기
+        y = close[-30:]; x = np.arange(len(y))
+        slope = float(np.polyfit(x, y, 1)[0]) / (np.mean(y) + 1e-12)
         diff = float(ma_fast[-1] - ma_slow[-1]) / (close[-1] + 1e-12)
-
-        strong_up = (diff > 0.0015) and (slope > 0)   # 임계는 보수적으로
+        strong_up = (diff > 0.0015) and (slope > 0)
         strong_dn = (diff < -0.0015) and (slope < 0)
-
         if strong_up and not strong_dn:
             return {"allow_long": True, "allow_short": False, "ma_fast": float(ma_fast[-1]), "ma_slow": float(ma_slow[-1]), "slope": float(slope)}
         if strong_dn and not strong_up:
             return {"allow_long": False, "allow_short": True, "ma_fast": float(ma_fast[-1]), "ma_slow": float(ma_slow[-1]), "slope": float(slope)}
-        # 애매하면 모두 허용
         return {"allow_long": True, "allow_short": True, "ma_fast": float(ma_fast[-1]), "ma_slow": float(ma_slow[-1]), "slope": float(slope)}
     except Exception:
         return {"allow_long": True, "allow_short": True, "ma_fast": None, "ma_slow": None, "slope": 0.0}
@@ -492,7 +485,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
         X = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         X = MinMaxScaler().fit_transform(X)
-        feat_dim = int(X.shape[1])  # ← 실측 피처 개수
+        feat_dim = int(X.shape[1])
 
         models = get_available_models(symbol, strategy)
         if not models: return failed_result(symbol, strategy, reason="no_models", source=source, X_input=X[-1])
@@ -503,25 +496,49 @@ def predict(symbol, strategy, source="일반", model_type=None):
         outs, all_preds = get_model_predictions(symbol, strategy, models, df, X, windows, rec_freq, regime=regime)
         if not outs: return failed_result(symbol, strategy, reason="no_valid_model", source=source, X_input=X[-1])
 
-        # ── (NEW) 시장 포지션 힌트 계산
+        # ── (NEW) 앙상블 후보 추가: val_f1 상위 3개 calibrated 확률 평균
+        try:
+            if len(outs) >= 2:
+                tops = sorted(outs, key=lambda m: float(m.get("val_f1", 0.0)), reverse=True)[:min(3, len(outs))]
+                if len(tops) >= 2:
+                    mean_c = np.mean([np.asarray(m["calib_probs"], dtype=float) for m in tops], axis=0)
+                    mean_c = (mean_c / (mean_c.sum() + 1e-12)).astype(float)
+                    mean_r = np.mean([np.asarray(m["raw_probs"], dtype=float) for m in tops], axis=0)
+                    val_f1_mean = float(np.mean([float(m.get("val_f1", 0.0)) for m in tops]))
+                    outs.append({
+                        "raw_probs": mean_r,
+                        "calib_probs": mean_c,
+                        "predicted_class": int(np.argmax(mean_c)),
+                        "group_id": -1,
+                        "model_type": "ensemble",
+                        "model_path": "ensemble_mean_top3",
+                        "val_f1": val_f1_mean,
+                        "symbol": symbol,
+                        "strategy": strategy,
+                        "meta": {"model": "ensemble", "num_classes": len(mean_c)}
+                    })
+        except Exception as e:
+            print(f"[앙상블 구성 예외] {e}")
+
+        # ── 시장 포지션 힌트
         hint = _position_hint_from_market(df)
         allow_long, allow_short = bool(hint["allow_long"]), bool(hint["allow_short"])
 
         final_cls = None; meta_choice = "best_single"; chosen = None; used_minret = False
 
-        # (A) 진화형 메타 (그대로) + 공통 임계/힌트 체크
+        # (A) 진화형 메타 (있는 경우 시도)
         if _glob_many(os.path.join(MODEL_DIR, "evo_meta_learner")):
             try:
                 from evo_meta_learner import predict_evo_meta
                 if callable(predict_evo_meta):
-                    pred = int(predict_evo_meta(feat_row.unsqueeze(0), input_size=feat_dim))  # ← 고정 상수 대신 실측
-                    cmin, cmax = get_class_return_range(pred, symbol, strategy)  # evo_meta는 config 기준
+                    pred = int(predict_evo_meta(feat_row.unsqueeze(0), input_size=feat_dim))
+                    cmin, cmax = get_class_return_range(pred, symbol, strategy)
                     if _meets_minret_with_hint(cmin, cmax, allow_long, allow_short, MIN_RET_THRESHOLD):
                         final_cls = pred; meta_choice = "evo_meta_learner"
             except Exception as e:
                 print(f"[evo_meta 예외] {e}")
 
-        # (B) 단일 최고 + 탐험 (+ 포지션/최소수익 마스크 — 공통식)
+        # (B) 단일/앙상블 경쟁 + 탐험 (+ 포지션/최소수익 마스크)
         if final_cls is None:
             best_i, best_score, best_pred = -1, -1.0, None; scores = []
             for i, m in enumerate(outs):
@@ -571,7 +588,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             except Exception:
                 pass
 
-        # (C) 최종 가드 — 공통 임계 + 힌트 동시 확인
+        # (C) 최종 가드 — 공통 임계 + 힌트
         try:
             cmin_sel, cmax_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
             if not _meets_minret_with_hint(cmin_sel, cmax_sel, allow_long, allow_short, MIN_RET_THRESHOLD):
@@ -588,6 +605,36 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     final_cls, chosen, used_minret = best_cls, best_m, True
         except Exception as e:
             print(f"[임계 가드 예외] {e}")
+
+        # 🆕 (D) 보류 컷: 최종 후보의 최대 보정확률이 너무 낮으면 예측 보류
+        try:
+            chosen_probs = (chosen or outs[0])["calib_probs"]
+            if float(np.max(chosen_probs)) < ABSTAIN_PROB_MIN:
+                ensure_prediction_log_exists()
+                cur = float(df.iloc[-1]["close"])
+                note_abstain = {
+                    "reason": "abstain_low_confidence",
+                    "abstain_prob_min": float(ABSTAIN_PROB_MIN),
+                    "max_calib_prob": float(np.max(chosen_probs)),
+                    "meta_choice": meta_choice,
+                    "regime": regime
+                }
+                log_prediction(
+                    symbol=symbol, strategy=strategy, direction="예측보류",
+                    entry_price=cur, target_price=cur,
+                    model="meta", model_name=str(meta_choice),
+                    predicted_class=-1, label=-1,
+                    note=json.dumps(note_abstain, ensure_ascii=False),
+                    top_k=[], success=False, reason="abstain_low_confidence",
+                    rate=0.0, return_value=0.0, source="보류", group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None),
+                    feature_vector=torch.tensor(X[-1], dtype=torch.float32).numpy(),
+                    regime=regime, meta_choice="abstain",
+                    raw_prob=None, calib_prob=float(np.max(chosen_probs)), calib_ver=get_calibration_version(),
+                    class_return_min=0.0, class_return_max=0.0, class_return_text=""
+                )
+                return failed_result(symbol, strategy, model_type="meta", reason="abstain_low_confidence", source=source, X_input=X[-1])
+        except Exception as e:
+            print(f"[보류 컷 예외] {e}")
 
         # ===== 로깅 =====
         lo_sel, hi_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
@@ -886,13 +933,11 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             with open(meta_path, "r", encoding="utf-8") as mf:
                 meta = json.load(mf)
             mtype = meta.get("model", "lstm"); gid = meta.get("group_id", 0)
-            # ▶ 입력 차원: meta 우선, 없으면 현재 피처 차원 사용
             inp_size = int(meta.get("input_size", feat_scaled.shape[1]))
             num_cls = int(meta.get("num_classes", NUM_CLASSES))
             val_f1 = float(meta.get("metrics", {}).get("val_f1", 0.6))
             idx = min(int(gid), max(0, len(window_list)-1)); win = window_list[idx]
             seq = feat_scaled[-win:]
-            # ▶ 모델이 기대하는 입력 크기에 맞게 열 맞춤(pad / slice)
             if seq.shape[1] < inp_size:
                 seq = np.pad(seq, ((0,0),(0, inp_size - seq.shape[1])), mode="constant")
             elif seq.shape[1] > inp_size:
