@@ -190,6 +190,11 @@ def _epochs_for(strategy:str)->int:
     if strategy=="장기": return int(os.getenv("EPOCHS_LONG","10"))
     return 8
 
+# === SMART TRAIN switches ===
+SMART_TRAIN = os.getenv("SMART_TRAIN","1")=="1"
+LABEL_SMOOTH = float(os.getenv("LABEL_SMOOTH","0.05"))   # 0.0~0.1 권장
+GRAD_CLIP = float(os.getenv("GRAD_CLIP_NORM","1.0"))     # 0.0(해제)~2.0 권장
+
 now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 
 # ✅ 예측 게이트 폴백
@@ -736,7 +741,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
                 callbacks += [ckpt_cb, es_cb]
                 trainer=pl.Trainer(max_epochs=max_epochs, accelerator=("gpu" if torch.cuda.is_available() else "cpu"),
                                    devices=1, enable_checkpointing=True, logger=False, enable_model_summary=False,
-                                   enable_progress_bar=False, callbacks=callbacks)
+                                   enable_progress_bar=False, callbacks=callbacks,
+                                   gradient_clip_val=GRAD_CLIP if SMART_TRAIN else 0.0)  # ← 추가
                 trainer.fit(lit,train_dataloaders=train_loader,val_dataloaders=val_loader)
                 model=base
                 # ckpt 로드 (가능 시)
@@ -752,16 +758,29 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
                 # ====== 수동 학습 경로 (가중치 + 얼리스톱 + 베스트웨이트) ======
                 model=base
                 opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-                crit = nn.CrossEntropyLoss(weight=w)
+                # 손실: 라벨 스무딩 적용
+                crit = nn.CrossEntropyLoss(weight=w, label_smoothing=(LABEL_SMOOTH if SMART_TRAIN else 0.0))
 
-                # deterministic shuffle
-                g = torch.Generator()
-                g.manual_seed(20240101)
-                train_loader=DataLoader(
-                    TensorDataset(torch.tensor(train_X),torch.tensor(train_y)),
-                    batch_size=_BATCH_SIZE, shuffle=True, generator=g,
-                    num_workers=_NUM_WORKERS,pin_memory=_PIN_MEMORY,persistent_workers=_PERSISTENT
-                )
+                # deterministic seed
+                g = torch.Generator(); g.manual_seed(20240101)
+
+                # WeightedRandomSampler (불균형 보정)
+                base_ds = TensorDataset(torch.tensor(train_X), torch.tensor(train_y))
+                if SMART_TRAIN:
+                    cls_counts = np.bincount(train_y, minlength=len(class_ranges)).astype(np.float64)
+                    inv = 1.0 / np.clip(cls_counts, 1.0, None)
+                    sample_w = torch.tensor(inv[train_y], dtype=torch.double)
+                    sampler = torch.utils.data.WeightedRandomSampler(sample_w, num_samples=len(train_y), replacement=True)
+                    train_loader = DataLoader(base_ds, batch_size=_BATCH_SIZE, sampler=sampler,
+                                              num_workers=_NUM_WORKERS, pin_memory=_PIN_MEMORY, persistent_workers=_PERSISTENT)
+                else:
+                    train_loader = DataLoader(base_ds, batch_size=_BATCH_SIZE, shuffle=True, generator=g,
+                                              num_workers=_NUM_WORKERS, pin_memory=_PIN_MEMORY, persistent_workers=_PERSISTENT)
+
+                # 스케줄러: plateau 시 LR ↓
+                scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    opt, mode="max", factor=0.5, patience=2, min_lr=1e-5
+                ) if SMART_TRAIN else None
 
                 patience=int(os.getenv("EARLY_STOP_PATIENCE","5"))
                 best_f1=-1.0; best_state=None; bad=0; total_loss=0.0
@@ -778,7 +797,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
                         xb,yb=xb.to(DEVICE), yb.to(DEVICE)
                         logits=model(xb); loss=crit(logits,yb)
                         if not torch.isfinite(loss): continue
-                        opt.zero_grad(); loss.backward(); opt.step(); total_loss += float(loss.item())
+                        opt.zero_grad(); loss.backward()
+                        if SMART_TRAIN and GRAD_CLIP > 0:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+                        opt.step(); total_loss += float(loss.item())
 
                     # ---- 평가 (val_f1)
                     model.eval(); preds=[]; lbls=[]
@@ -787,6 +809,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
                             p=torch.argmax(model(xb.to(DEVICE)),dim=1).cpu().numpy()
                             preds.extend(p); lbls.extend(yb.numpy())
                     cur_f1=float(f1_score(lbls,preds,average="macro"))
+
+                    # 스케줄러 스텝
+                    if scheduler is not None:
+                        scheduler.step(cur_f1)
 
                     # early stop/bookkeep
                     improved = cur_f1 > best_f1 + 1e-6
@@ -811,7 +837,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
             # ---- 최종 검증: acc, f1, val_loss 계산
             _progress(f"eval:{model_type}")
             model.eval(); preds=[]; lbls=[]; val_loss_sum=0.0; n_val=0
-            crit_eval = nn.CrossEntropyLoss(weight=w)
+            crit_eval = nn.CrossEntropyLoss(weight=w)  # eval은 스무딩 없이
             with torch.no_grad():
                 for bi,(xb,yb) in enumerate(val_loader):
                     if bi % 32 == 0: _check_stop(stop_event,f"val batch {bi}"); _progress(f"val_b{bi}")
