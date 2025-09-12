@@ -267,21 +267,48 @@ def _log_fail(symbol,strategy,reason):
 
 def _strategy_horizon_hours(s:str)->int: return {"단기":4,"중기":24,"장기":168}.get(s,24)
 
-def _future_returns_by_timestamp(df:pd.DataFrame,horizon_hours:int)->np.ndarray:
-    if df is None or len(df)==0 or "timestamp" not in df.columns: return np.zeros(0 if df is None else len(df),dtype=np.float32)
-    ts=pd.to_datetime(df["timestamp"],errors="coerce")
-    close=df["close"].astype(float).values
-    high=(df["high"] if "high" in df.columns else df["close"]).astype(float).values
+# ⬇️ 변경: 라벨 수익률을 모드로 선택 (기본 close→ signed ±)
+def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
+    if df is None or len(df) == 0 or "timestamp" not in df.columns:
+        return np.zeros(0 if df is None else len(df), dtype=np.float32)
+
+    mode = os.getenv("LABEL_RETURN_MODE", "close")  # "close" | "max" | "signed_extreme"
+    ts = pd.to_datetime(df["timestamp"], errors="coerce")
     ts = (ts.dt.tz_localize("UTC") if ts.dt.tz is None else ts).dt.tz_convert("Asia/Seoul")
-    out=np.zeros(len(df),dtype=np.float32); H=pd.Timedelta(hours=horizon_hours); j0=0
+
+    close = df["close"].astype(float).values
+    high  = (df["high"] if "high" in df.columns else df["close"]).astype(float).values
+    low   = (df["low"]  if "low"  in df.columns else df["close"]).astype(float).values
+
+    out = np.zeros(len(df), dtype=np.float32)
+    H = pd.Timedelta(hours=horizon_hours)
+    j0 = 0
+
     for i in range(len(df)):
-        t0=ts.iloc[i]; t1=t0+H; j=max(j0,i); mx=high[i]
-        while j<len(df) and ts.iloc[j]<=t1:
-            if high[j]>mx: mx=high[j]
-            j+=1
-        j0 = max(j-1, i)
-        base=close[i] if close[i]>0 else (close[i]+1e-6)
-        out[i]=float((mx-base)/(base+1e-12))
+        t0 = ts.iloc[i]; t1 = t0 + H
+        j = max(j0, i)
+        mx = high[i]; mn = low[i]; j_last = i
+        while j < len(df) and ts.iloc[j] <= t1:
+            if high[j] > mx: mx = high[j]
+            if low[j]  < mn: mn = low[j]
+            j_last = j
+            j += 1
+        j0 = max(j_last, i)
+
+        base = close[i] if close[i] > 0 else (close[i] + 1e-6)
+
+        if mode == "max":
+            r = (mx - base) / (base + 1e-12)                 # 항상 ≥0 (옛 방식)
+        elif mode == "signed_extreme":
+            up = (mx - base) / (base + 1e-12)
+            dn = (mn - base) / (base + 1e-12)                # 음수 가능
+            r = up if abs(up) >= abs(dn) else dn             # 방향 보존 극값
+        else:  # "close" (기본)
+            fut = close[j_last]
+            r = (fut - base) / (base + 1e-12)                # 종가-대-종가, ± 가능
+
+        out[i] = float(r)
+
     return out
 
 def _stem(p:str)->str: return os.path.splitext(p)[0]
