@@ -386,6 +386,15 @@ def _await_models_visible(symbols:list[str], timeout_sec:int=20, poll_sec:float=
         time.sleep(max(0.1, float(poll_sec)))
     return sorted(set(symbols) - remaining)
 
+# ====== (★) 성능 임계치: 단기 통과가 반드시 선행되어야 다음 단계 진입 ======
+EVAL_MIN_F1_SHORT = float(os.getenv("EVAL_MIN_F1_SHORT", "0.55"))
+EVAL_MIN_F1_MID   = float(os.getenv("EVAL_MIN_F1_MID",   "0.50"))
+EVAL_MIN_F1_LONG  = float(os.getenv("EVAL_MIN_F1_LONG",  "0.45"))
+_SHORT_RETRY      = int(os.getenv("SHORT_STRATEGY_RETRY", "3"))
+
+def _min_f1_for(strategy:str)->float:
+    return EVAL_MIN_F1_SHORT if strategy=="단기" else (EVAL_MIN_F1_MID if strategy=="중기" else EVAL_MIN_F1_LONG)
+
 if _HAS_LIGHTNING:
     class LitSeqModel(pl.LightningModule):
         def __init__(self, base_model:nn.Module, lr:float=1e-3, cls_w:torch.Tensor|None=None):
@@ -606,7 +615,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
             features_only=features_only.iloc[-cut:,:]
             labels=labels[-cut:]
 
-        try: best_window=find_best_window(symbol,strategy,window_list=[20,40],group_id=group_id)
+        try:
+            best_window=find_best_window(symbol,strategy,window_list=[20,40],group_id=group_id)
         except: best_window=40
         window=max(5,int(best_window)); window=min(window, max(6,len(features_only)-1))
 
@@ -810,7 +820,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
             _archive_old_checkpoints(symbol,strategy,model_type,keep_n=1)
             _emit_aliases(wpath,mpath,symbol,strategy,model_type)
 
-            # 모델 가시화 보조 배리어
+            # 모델 가시화 보장(파일시스템 동기화 지연 방지)
             _disk_barrier([wpath, mpath, MODEL_DIR, os.path.join(MODEL_DIR, symbol), os.path.join(MODEL_DIR, symbol, strategy)])
 
             logger.log_training_result(
@@ -819,10 +829,20 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
                       f"data_flags={{rows:{len(df)},limit:{_limit},min:{_min_required},aug:{int(augment_needed)},enough_for_training:{int(enough_for_training)}}})"),
                 source_exchange="BYBIT", status="success"
             )
-            res["models"].append({"type":model_type,"acc":acc,"f1":f1,"val_loss":val_loss,"loss_sum":float(total_loss),"pt":wpath,"meta":mpath})
-            _safe_print(f"🟩 TRAIN done [{model_type}] acc={acc:.4f} f1={f1:.4f} val_loss={val_loss:.5f} → {os.path.basename(wpath)}")
+
+            # === (★) 개별 모델 통과 여부 기록
+            passed = bool(f1 >= _min_f1_for(strategy))
+            res["models"].append({
+                "type":model_type,"acc":acc,"f1":f1,"val_loss":val_loss,
+                "loss_sum":float(total_loss),"pt":wpath,"meta":mpath,"passed":passed
+            })
+            _safe_print(f"🟩 TRAIN done [{model_type}] acc={acc:.4f} f1={f1:.4f} val_loss={val_loss:.5f} → {os.path.basename(wpath)} (passed={int(passed)})")
 
             if torch.cuda.is_available(): torch.cuda.empty_cache()
+
+        # === (★) 전략/그룹 레벨 ok: 임계치 통과 모델이 하나라도 있어야 True
+        res["ok"] = any(m.get("passed") for m in res.get("models", []))
+        _safe_print(f"[RESULT] {symbol}-{strategy}-g{group_id} ok={res['ok']}")
         _progress("train_one_model:end")
         return res
     except _ControlledStop:
@@ -950,7 +970,7 @@ _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = os.getenv("REQUIRE_ONE_PER_GROUP","1")==
 def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) -> tuple[bool, dict]:
     """
     (핵심) 단기 → 중기 → 장기 순서 고정.
-    앞 전략이 미완료면 뒤 전략 **진입 자체 금지**.
+    '단기 성공(F1 임계치 통과)'이 선행되지 않으면 뒤 전략 **진입 자체 금지**.
     반환: (symbol_complete, detail)
     """
     strategies=["단기","중기","장기"]
@@ -961,7 +981,7 @@ def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) ->
     for strategy in strategies:
         if stop_event is not None and stop_event.is_set(): return False, detail
         if not prev_strategy_ok:
-            _safe_print(f"[ORDER-STOP] 이전 전략 미완료 → {symbol} {strategy} 스킵")
+            _safe_print(f"[ORDER-STOP] 이전 전략 미완료(성공 기준 미충족) → {symbol} {strategy} 스킵")
             detail[strategy] = {-1: False}
             symbol_complete = False
             break
@@ -995,10 +1015,20 @@ def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) ->
 
                 _reset_watchdog("enter symbol/group")
                 _progress(f"train_models:{symbol}-{strategy}-g{gid}")
-                res=train_one_model(symbol,strategy,group_id=gid, max_epochs=_epochs_for(strategy), stop_event=stop_event)
-                ok = bool(res and isinstance(res,dict) and res.get("models"))
-                detail[strategy][gid]=ok
-                if not ok and _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP:
+
+                # === (★) 단기는 재시도 허용, 나머지는 1회
+                attempts = (_SHORT_RETRY if strategy=="단기" else 1)
+                ok_once = False
+                for attempt in range(attempts):
+                    res=train_one_model(symbol,strategy,group_id=gid, max_epochs=_epochs_for(strategy), stop_event=stop_event)
+                    ok = bool(res and isinstance(res,dict) and res.get("ok") is True)
+                    if ok:
+                        ok_once = True
+                        break
+                    _safe_print(f"[RETRY] {symbol}-{strategy}-g{gid} attempt {attempt+1}/{attempts} failed(F1<th).")
+
+                detail[strategy][gid]=ok_once
+                if not ok_once and _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP:
                     strat_complete=False
                 if stop_event is not None and stop_event.is_set(): return False, detail
                 time.sleep(0.05)
@@ -1022,7 +1052,7 @@ def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) ->
 def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_should: bool = False):
     """
     심볼당:
-      - 단기 완료 → 중기 → 장기.
+      - 단기 '성공(F1≥임계치)' 완료 → 중기 → 장기.
       - 중간에 미완료면 재시도 후에도 미완료면 **그 심볼 종료**.
     """
     completed_symbols=[]; partial_symbols=[]
