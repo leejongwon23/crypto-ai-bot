@@ -1,4 +1,4 @@
-# config.py (PATCH, 2025-09-12) — long/neutral/short 구간 포함 + strict bins + quality cut
+# config.py (FINAL, 2025-09-12) — long/neutral/short 구간 포함 + strict bins + quality cut + round-robin hint
 
 import json
 import os
@@ -9,7 +9,8 @@ CONFIG_PATH = "/persistent/config.json"
 # 기본 설정 + 신규 옵션(기본 OFF)
 # ===============================
 _default_config = {
-    "NUM_CLASSES": 10,                    # ← 20 → 10 (B)
+    "NUM_CLASSES": 10,                    # 기본 10 (동적 계산 시 자동 반영)
+    "MAX_CLASSES": 20,                    # 상한값 가드
     "FEATURE_INPUT_SIZE": 24,
     "FAIL_AUGMENT_RATIO": 3,
     "MIN_FEATURES": 5,
@@ -51,10 +52,26 @@ _default_config = {
         "min_return_abs": 0.003
     },
 
-    # --- [Q] 품질 컷(모의고사 합격선) 기본값 (C)
+    # --- [Q] 품질 컷(모의고사 합격선) 기본값 ---
     "QUALITY": {
         "VAL_F1_MIN": 0.10,   # F1 0.10 미만이면 예측·실거래 진입 금지
         "VAL_ACC_MIN": 0.20   # 보조 가드(선택 적용)
+    },
+
+    # --- [BIN] 클래스 경계 토글/파라미터 ---
+    "CLASS_BIN": {
+        "method": "quantile",    # "quantile" | "linear"
+        "strict": True,          # 구간 단조/겹침 방지
+        "zero_band_eps": 0.0015, # 0% 주변 중립 밴드(±0.15%p)
+        "min_width": 0.0005      # 최소 구간 폭(0.05%p)
+    },
+
+    # --- [SCHED] 학습 스케줄러 힌트(엔진에서 참조) ---
+    "SCHED": {
+        "round_robin": True,                # 심볼 라운드로빈 강제
+        "max_minutes_per_symbol": 10,       # 한 심볼 연속 학습 상한
+        "on_incomplete": "skip_and_rotate", # 미완료시 다음 심볼로
+        "eval_during_training": True        # 학습 중에도 EVAL 허용
     },
 }
 
@@ -78,9 +95,9 @@ _STRATEGY_RETURN_CAP_NEG_MIN = {  # 음수 하한(절댓값 캡)
 }
 
 # ✅ 표시 안정화용 파라미터
-_MIN_RANGE_WIDTH   = 0.0005   # 0.05%
-_ROUND_DECIMALS    = 4        # 소수 넷째 자리
-_EPS_ZERO_BAND     = 0.0015   # 0% 주변 중립 밴드 최소 폭(±0.15%p)
+_MIN_RANGE_WIDTH   = _default_config["CLASS_BIN"]["min_width"]   # 0.05%
+_ROUND_DECIMALS    = 4                                           # 소수 넷째 자리
+_EPS_ZERO_BAND     = _default_config["CLASS_BIN"]["zero_band_eps"]  # ±0.15%p
 _DISPLAY_MIN_RET   = 1e-4
 
 _config = _default_config.copy()
@@ -102,6 +119,9 @@ def _deep_merge(dst: dict, src: dict):
             if k not in dst:
                 dst[k] = v
 
+# ------------------------
+# config.json 로드/생성
+# ------------------------
 if os.path.exists(CONFIG_PATH):
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -142,8 +162,12 @@ except Exception:
 # Getter / Setter (기존)
 # ------------------------
 def set_NUM_CLASSES(n):
-    global _dynamic_num_classes
+    global _dynamic_num_classes, NUM_CLASSES
     _dynamic_num_classes = int(n)
+    try:
+        NUM_CLASSES = _dynamic_num_classes
+    except Exception:
+        pass
 
 def get_NUM_CLASSES():
     global _dynamic_num_classes
@@ -177,7 +201,7 @@ def get_class_groups(num_classes=None, group_size=5):
     return groups
 
 # ------------------------
-# 신규 옵션 Getter (2·3·5·Q)
+# 신규 옵션 Getter (2·3·5·Q·BIN·SCHED)
 # ------------------------
 def get_REGIME():
     return _config.get("REGIME", _default_config["REGIME"])
@@ -191,11 +215,17 @@ def get_FAILLEARN():
 def get_QUALITY():
     return _config.get("QUALITY", _default_config["QUALITY"])
 
+def get_CLASS_BIN():
+    return _config.get("CLASS_BIN", _default_config["CLASS_BIN"])
+
+def get_SCHED():
+    return _config.get("SCHED", _default_config["SCHED"])
+
 # ------------------------
 # 수익률 클래스 경계 유틸
 # ------------------------
 def _round2(x: float) -> float:
-    return round(float(x), _ROUND_DECIMALS)
+    return round(float(x), _ROUNDED := _ROUND_DECIMALS)
 
 def _cap_by_strategy(x: float, strategy: str) -> float:
     """전략별 양/음수 캡을 동시에 적용."""
@@ -245,6 +275,8 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
     j_dn = 0
     for i in range(len(df)):
         t0 = ts.iloc[i]; t1 = t0 + horizon
+
+        # 최대 상승
         j = max(j_up, i)
         max_h = high[i]
         while j < len(df) and ts.iloc[j] <= t1:
@@ -252,15 +284,16 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
             j += 1
         j_up = max(j_up, i)
         base = close[i] if close[i] > 0 else (close[i] + 1e-6)
-        up[i] = float((max_h - base) / (base + 1e-12))
+        up[i] = float((max_h - base) / (base + 1e-12))  # >= 0
 
+        # 최대 하락
         k = max(j_dn, i)
         min_l = low[i]
         while k < len(df) and ts.iloc[k] <= t1:
             if low[k] < min_l: min_l = low[k]
             k += 1
         j_dn = max(j_dn, i)
-        dn[i] = float((min_l - base) / (base + 1e-12))  # 음수 또는 0
+        dn[i] = float((min_l - base) / (base + 1e-12))  # <= 0
 
     signed = np.concatenate([dn, up]).astype(np.float32)
     return signed
@@ -286,12 +319,14 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
     - r_up  = (max(high[i..i+h]) - close[i]) / close[i]  (>=0)
     - r_down= (min(low [i..i+h]) - close[i]) / close[i]  (<=0)
     - 분포 = concat(r_down, r_up) → 음/양 공존
-    - 전략별 ±캡, 최소 구간 폭, 0% 중립 밴드 보장
+    - 전략별 ±캡, 최소 구간 폭, 0% 중립 밴드 보장, 엄격 단조(strict) 보정
     """
     import numpy as np
     from data.utils import get_kline_by_strategy
 
-    MAX_CLASSES = 20
+    MAX_CLASSES = int(_config.get("MAX_CLASSES", _default_config["MAX_CLASSES"]))
+    BIN_CONF = get_CLASS_BIN()
+    method = (method or BIN_CONF.get("method") or "quantile").lower()
 
     def _fix_monotonic(ranges):
         fixed = []
@@ -331,7 +366,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
         ranges = ranges[:right_idx] + [(_round2(-_EPS_ZERO_BAND), _round2(_EPS_ZERO_BAND))] + ranges[right_idx:]
         return _fix_monotonic(ranges)
 
-    # 엄격 단조화: 모든 구간을 prev_hi → next_hi로 재조립하여 겹침/역전 제거 (A)
+    # 엄격 단조: prev_hi → next_hi로 재조립하여 겹침/역전 제거
     def _strictify(ranges):
         if not ranges:
             return []
@@ -364,20 +399,21 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             _log(f"[⚠️ 균등 분할 클래스 사용] 사유: {reason}")
         ranges = _fix_monotonic(ranges)
         ranges = _ensure_zero_band(ranges)
-        ranges = _strictify(ranges)   # 최종 보정
+        if BIN_CONF.get("strict", True):
+            ranges = _strictify(ranges)
         return ranges
 
     def compute_ranges_from_kline():
         try:
             df_price = get_kline_by_strategy(symbol, strategy)
             if df_price is None or len(df_price) < 30 or "close" not in df_price:
-                return compute_equal_ranges(10, reason="가격 데이터 부족")
+                return compute_equal_ranges(get_NUM_CLASSES(), reason="가격 데이터 부족")
 
             horizon_hours = _strategy_horizon_hours(strategy)
             rets_signed = _future_extreme_signed_returns(df_price, horizon_hours=horizon_hours)
             rets_signed = rets_signed[np.isfinite(rets_signed)]
             if rets_signed.size < 10:
-                return compute_equal_ranges(10, reason="수익률 샘플 부족")
+                return compute_equal_ranges(get_NUM_CLASSES(), reason="수익률 샘플 부족")
 
             # 전략별 ±캡
             rets_signed = np.array([_cap_by_strategy(float(r), strategy) for r in rets_signed], dtype=np.float32)
@@ -387,7 +423,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
 
             if method == "quantile":
                 qs = np.quantile(rets_signed, np.linspace(0, 1, n_cls + 1))
-            else:
+            else:  # "linear"
                 qs = np.linspace(float(rets_signed.min()), float(rets_signed.max()), n_cls + 1)
 
             cooked = []
@@ -399,15 +435,16 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
 
             fixed = _fix_monotonic(cooked)
             fixed = _ensure_zero_band(fixed)
-            fixed = _strictify(fixed)           # ← 핵심 추가 (A)
+            if BIN_CONF.get("strict", True):
+                fixed = _strictify(fixed)
 
             if not fixed or len(fixed) < 2:
-                return compute_equal_ranges(10, reason="최종 경계 부족(가드)")
+                return compute_equal_ranges(get_NUM_CLASSES(), reason="최종 경계 부족(가드)")
 
             return fixed
 
         except Exception as e:
-            return compute_equal_ranges(10, reason=f"예외 발생: {e}")
+            return compute_equal_ranges(get_NUM_CLASSES(), reason=f"예외 발생: {e}")
 
     all_ranges = compute_ranges_from_kline()
 
@@ -514,6 +551,7 @@ __all__ = [
     "get_class_return_range", "class_to_expected_return",
     "get_SYMBOLS", "get_SYMBOL_GROUPS",
     "get_REGIME", "get_CALIB", "get_FAILLEARN", "get_QUALITY",
+    "get_CLASS_BIN", "get_SCHED",
     "get_CPU_THREADS", "get_TRAIN_NUM_WORKERS", "get_TRAIN_BATCH_SIZE",
     "get_ORDERED_TRAIN", "get_PREDICT_MIN_RETURN", "get_DISPLAY_MIN_RETURN",
     "get_SSL_CACHE_DIR",
