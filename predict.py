@@ -1,4 +1,4 @@
-# === predict.py — sequence-corrected, gate-respecting, robust I/O ===
+# === predict.py — sequence-corrected, gate-respecting, robust I/O (ENSEMBLE-FIRST) ===
 # (2025-09-03) — train.py와 호환: open/close_predict_gate, 게이트 닫힘 시 즉시 반환, 스테일 락 자동 해제
 # (2025-09-04) — [수정] predict 락 즉시실패 → 짧은 대기·재시도 후 실패 처리
 # (2025-09-04b) — [보강] gate/lock 파일 write 후 flush+fsync로 가시화 보장
@@ -13,7 +13,8 @@
 # (2025-09-09b) — [핵심] (B) 마스크·(C) 가드에 “포지션 힌트(EMA20/60 + 기울기)” 적용 → 롱/숏 분리 강제
 # (2025-09-09c) — [FIX] (B)/(C) 최소수익 임계 판단을 양/음 공통식으로 교체: long=hi>=THRESH, short=-lo>=THRESH, 둘 다 허용 시 max(hi,-lo)>=THRESH
 # (2025-09-10) — [INPUT_SIZE 통일] meta.input_size 최우선, 없으면 feat_scaled.shape[1] 사용. 고정 상수 경로 제거.
-# (2025-09-12) — [NEW] 앙상블(mean of top-3 calibrated) 후보 추가 + 보류컷(ABSTAIN_PROB_MIN) 도입
+# (2025-09-12a) — [NEW] 앙상블(mean of top-3 calibrated) 후보 추가 + 보류컷(ABSTAIN_PROB_MIN) 도입
+# (2025-09-12b) — [DEFAULT] **Ensemble-first** 선택 로직: 가능한 경우 앙상블 우선 채택, 불가 시 단일 모델로 폴백
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -216,7 +217,7 @@ DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 PREDICTION_LOG_PATH = "/persistent/prediction_log.csv"
 NUM_CLASSES = get_NUM_CLASSES()
-FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()  # ← 더 이상 사용하지 않지만 호환을 위해 남김
+FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()  # ← 호환 유지
 now_kst = lambda: _now_kst()
 
 MIN_RET_THRESHOLD = float(os.getenv("PREDICT_MIN_RETURN", "0.01"))
@@ -364,7 +365,7 @@ def get_available_models(symbol, strategy):
             gfn = os.path.basename(g); mp = _resolve_meta(gfn)
             if mp and {"pt_file": gfn, "meta_path": mp} not in items:
                 items.append({"pt_file": gfn, "meta_path": mp})
-        items.sort(key=lambda x: x["pt_file"])  # ← FIX: 문법 오류 수정
+        items.sort(key=lambda x: x["pt_file"])  # ← FIX
         return items
     except Exception as e:
         print(f"[get_available_models 오류] {e}")
@@ -538,7 +539,35 @@ def predict(symbol, strategy, source="일반", model_type=None):
             except Exception as e:
                 print(f"[evo_meta 예외] {e}")
 
-        # (B) 단일/앙상블 경쟁 + 탐험 (+ 포지션/최소수익 마스크)
+        # (B0) **Ensemble-first**: 앙상블 후보가 있고, (보류컷/최소수익/포지션) 통과 시 우선 채택
+        if final_cls is None:
+            ens_idx = None
+            for i, m in enumerate(outs):
+                if str(m.get("model_type","")) == "ensemble":
+                    ens_idx = i; break
+            if ens_idx is not None:
+                m = outs[ens_idx]
+                adj = adjust_probs_with_diversity(m["calib_probs"], rec_freq, class_counts=None, alpha=0.10, beta=0.10)
+                mask = np.zeros_like(adj, dtype=float)
+                for ci in range(len(adj)):
+                    try:
+                        lo, hi = _class_range_by_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
+                        if _meets_minret_with_hint(lo, hi, allow_long, allow_short, MIN_RET_THRESHOLD):
+                            mask[ci] = 1.0
+                    except Exception:
+                        pass
+                filt = adj * mask
+                if filt.sum() > 0:
+                    filt = filt / filt.sum(); pred = int(np.argmax(filt)); fused = True
+                else:
+                    pred = int(np.argmax(adj)); fused = False
+                # 보류컷
+                if float(np.max(m["calib_probs"])) >= ABSTAIN_PROB_MIN:
+                    lo_e, hi_e = _class_range_by_meta_or_cfg(pred, m.get("meta"), symbol, strategy)
+                    if _meets_minret_with_hint(lo_e, hi_e, allow_long, allow_short, MIN_RET_THRESHOLD):
+                        final_cls = int(pred); chosen = m; used_minret = fused; meta_choice = "ensemble_mean_top3"
+
+        # (B1) 단일/앙상블 경쟁 + 탐험 (+ 포지션/최소수익 마스크) — 앙상블 실패 시 폴백
         if final_cls is None:
             best_i, best_score, best_pred = -1, -1.0, None; scores = []
             for i, m in enumerate(outs):
@@ -563,7 +592,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 scores.append((i, score, pred))
                 if score > best_score:
                     best_i, best_score, best_pred = i, score, pred; used_minret = fused
-
             explore = False
             if len(scores) >= 2:
                 ss = sorted(scores, key=lambda x: x[1], reverse=True)
@@ -580,7 +608,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     cands.sort(key=lambda x: x[1], reverse=True)
                     if cands and cands[0][0] != top1[0]:
                         best_i = cands[0][0]; best_pred = outs[best_i]["candidate_pred"]; explore = True; meta_choice = "best_single_explore"
-
             final_cls = int(best_pred); chosen = outs[best_i]
             if meta_choice != "best_single_explore": meta_choice = os.path.basename(chosen["model_path"])
             try:
@@ -762,7 +789,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "source": source,
             "regime": regime,
             "reason": ("진화형 메타 최종 선택" if meta_choice=='evo_meta_learner'
-                       else f"최고 확률 단일 모델: {meta_choice}")
+                       else f"선택 모델: {meta_choice}")
         }
     finally:
         try:
