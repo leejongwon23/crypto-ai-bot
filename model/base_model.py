@@ -1,4 +1,4 @@
-# === model/base_model.py (stable init, dynamic input_size, safe XGB fallback) ===
+# === model/base_model.py (residual heads, LSTM context-gate, CNN residual conv, safe XGB) ===
 import os
 import torch
 import torch.nn as nn
@@ -70,18 +70,43 @@ class Attention(nn.Module):
         return context, weights
 
 # =========================
-# LSTM Price Predictor
+# SE-like Context Gate (for LSTM context)
+# =========================
+class ContextGate(nn.Module):
+    """
+    LSTM/Attention context에 채널 게이팅을 적용(SE와 유사).
+    입력: [B, H] -> 게이트: sigmoid(MLP([B, H])) -> [B, H]
+    """
+    def __init__(self, dim, reduction=8):
+        super().__init__()
+        r = max(1, dim // reduction)
+        self.fc1 = nn.Linear(dim, r, bias=True)
+        self.fc2 = nn.Linear(r, dim, bias=True)
+
+    def forward(self, x):  # x: [B, H]
+        z = F.gelu(self.fc1(x))
+        g = torch.sigmoid(self.fc2(z))
+        return x * g
+
+# =========================
+# LSTM Price Predictor (Residual Head + ContextGate)
 # =========================
 class LSTMPricePredictor(nn.Module):
     def __init__(self, input_size, hidden_size=256, num_layers=4, dropout=0.4, output_size=None):
         super().__init__()
         output_size = output_size if output_size is not None else get_NUM_CLASSES()
+        H = hidden_size * 2
+
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers,
                             dropout=dropout, batch_first=True, bidirectional=True)
-        self.attention = Attention(hidden_size * 2, dropout=dropout * 0.5)
-        self.norm = nn.LayerNorm(hidden_size * 2)
+        self.attention = Attention(H, dropout=dropout * 0.5)
+        self.norm = nn.LayerNorm(H)
+        self.ctx_gate = ContextGate(H, reduction=16)            # ★ Context 게이팅
+
         self.dropout = nn.Dropout(dropout)
-        self.fc1 = nn.Linear(hidden_size * 2, hidden_size)
+        # Residual head: fc1(context) + res_proj(context) → hidden
+        self.fc1 = nn.Linear(H, hidden_size)
+        self.res_proj = nn.Linear(H, hidden_size)               # ★ Residual shortcut
         self.act = nn.GELU()
         self.fc2 = nn.Linear(hidden_size, hidden_size // 2)
         self.fc_logits = nn.Linear(hidden_size // 2, output_size)
@@ -93,20 +118,24 @@ class LSTMPricePredictor(nn.Module):
         lstm_out, _ = self.lstm(x)
         context, _ = self.attention(lstm_out)
         context = self.norm(context)
+        context = self.ctx_gate(context)                        # ★ 게이팅
         context = self.dropout(context)
 
         if params is None:
-            hidden = self.act(self.fc1(context))
-            hidden = self.dropout(hidden)
-            hidden = self.act(self.fc2(hidden))
-            hidden = self.dropout(hidden)
-            logits = self.fc_logits(hidden)
+            h1 = self.act(self.fc1(context))
+            h1 = self.dropout(h1)
+            # ★ Residual: add projected context
+            h1 = h1 + self.res_proj(context)
+            h2 = self.act(self.fc2(h1))
+            h2 = self.dropout(h2)
+            logits = self.fc_logits(h2)
         else:
-            hidden = F.gelu(F.linear(context, params['fc1.weight'], params.get('fc1.bias')))
-            hidden = F.dropout(hidden, p=self.dropout.p, training=self.training)
-            hidden = F.gelu(F.linear(hidden, params['fc2.weight'], params.get('fc2.bias')))
-            hidden = F.dropout(hidden, p=self.dropout.p, training=self.training)
-            logits = F.linear(hidden, params['fc_logits.weight'], params.get('fc_logits.bias'))
+            h1 = F.gelu(F.linear(context, params['fc1.weight'], params.get('fc1.bias')))
+            h1 = F.dropout(h1, p=self.dropout.p, training=self.training)
+            h1 = h1 + F.linear(context, params['res_proj.weight'], params.get('res_proj.bias'))
+            h2 = F.gelu(F.linear(h1, params['fc2.weight'], params.get('fc2.bias')))
+            h2 = F.dropout(h2, p=self.dropout.p, training=self.training)
+            logits = F.linear(h2, params['fc_logits.weight'], params.get('fc_logits.bias'))
         return logits
 
 # =========================
@@ -121,30 +150,37 @@ class SEBlock(nn.Module):
 
     def forward(self, x):  # x: [B, C, T]
         s = x.mean(dim=2)                          # [B, C]
-        z = F.relu(self.fc1(s))
+        z = F.gelu(self.fc1(s))
         z = torch.sigmoid(self.fc2(z))             # [B, C]
         return x * z.unsqueeze(-1)                 # [B, C, T]
 
 # =========================
-# CNN + LSTM Price Predictor
+# CNN + LSTM Price Predictor (Residual Conv + SE + Residual Head)
 # =========================
 class CNNLSTMPricePredictor(nn.Module):
     def __init__(self, input_size, cnn_channels=128, lstm_hidden_size=256, lstm_layers=3, dropout=0.4, output_size=None):
         super().__init__()
         output_size = output_size if output_size is not None else get_NUM_CLASSES()
+
+        # Conv stem
         self.conv1 = nn.Conv1d(input_size, cnn_channels, kernel_size=3, padding=1)
         self.bn1   = nn.BatchNorm1d(cnn_channels)
         self.conv2 = nn.Conv1d(cnn_channels, cnn_channels, kernel_size=3, padding=1)
         self.bn2   = nn.BatchNorm1d(cnn_channels)
+        self.proj  = nn.Conv1d(input_size, cnn_channels, kernel_size=1)  # ★ Residual shortcut
         self.se    = SEBlock(cnn_channels, reduction=16)
 
         self.relu = nn.ReLU()
         self.lstm = nn.LSTM(cnn_channels, lstm_hidden_size, lstm_layers,
                             batch_first=True, bidirectional=True, dropout=dropout)
-        self.attention = Attention(lstm_hidden_size * 2, dropout=dropout * 0.5)
-        self.norm = nn.LayerNorm(lstm_hidden_size * 2)
+        H = lstm_hidden_size * 2
+        self.attention = Attention(H, dropout=dropout * 0.5)
+        self.norm = nn.LayerNorm(H)
         self.dropout = nn.Dropout(dropout)
-        self.fc1 = nn.Linear(lstm_hidden_size * 2, lstm_hidden_size)
+
+        # Residual head
+        self.fc1 = nn.Linear(H, lstm_hidden_size)
+        self.res_proj = nn.Linear(H, lstm_hidden_size)          # ★ Residual shortcut
         self.act = nn.GELU()
         self.fc2 = nn.Linear(lstm_hidden_size, lstm_hidden_size // 2)
         self.fc_logits = nn.Linear(lstm_hidden_size // 2, output_size)
@@ -153,31 +189,34 @@ class CNNLSTMPricePredictor(nn.Module):
         self.apply(_init_module)
 
     def forward(self, x, params=None):
-        # CNN feature extractor
-        x = x.permute(0, 2, 1)           # [B, F, T]
-        x = self.relu(self.bn1(self.conv1(x)))
-        x = self.relu(self.bn2(self.conv2(x)))
-        x = self.se(x)
-        x = x.permute(0, 2, 1)           # [B, T, C]
+        # CNN feature extractor (with residual)
+        x_in = x.permute(0, 2, 1)           # [B, F, T]
+        y = self.relu(self.bn1(self.conv1(x_in)))
+        y = self.bn2(self.conv2(y))
+        y = self.relu(y + self.proj(x_in))  # ★ Residual + ReLU
+        y = self.se(y)
+        y = y.permute(0, 2, 1)              # [B, T, C]
 
         # LSTM + Attention
-        lstm_out, _ = self.lstm(x)
+        lstm_out, _ = self.lstm(y)
         context, _ = self.attention(lstm_out)
         context = self.norm(context)
         context = self.dropout(context)
 
         if params is None:
-            hidden = self.act(self.fc1(context))
-            hidden = self.dropout(hidden)
-            hidden = self.act(self.fc2(hidden))
-            hidden = self.dropout(hidden)
-            logits = self.fc_logits(hidden)
+            h1 = self.act(self.fc1(context))
+            h1 = self.dropout(h1)
+            h1 = h1 + self.res_proj(context)         # ★ Residual head
+            h2 = self.act(self.fc2(h1))
+            h2 = self.dropout(h2)
+            logits = self.fc_logits(h2)
         else:
-            hidden = F.gelu(F.linear(context, params['fc1.weight'], params.get('fc1.bias')))
-            hidden = F.dropout(hidden, p=self.dropout.p, training=self.training)
-            hidden = F.gelu(F.linear(hidden, params['fc2.weight'], params.get('fc2.bias')))
-            hidden = F.dropout(hidden, p=self.dropout.p, training=self.training)
-            logits = F.linear(hidden, params['fc_logits.weight'], params.get('fc_logits.bias'))
+            h1 = F.gelu(F.linear(context, params['fc1.weight'], params.get('fc1.bias')))
+            h1 = F.dropout(h1, p=self.dropout.p, training=self.training)
+            h1 = h1 + F.linear(context, params['res_proj.weight'], params.get('res_proj.bias'))
+            h2 = F.gelu(F.linear(h1, params['fc2.weight'], params.get('fc2.bias')))
+            h2 = F.dropout(h2, p=self.dropout.p, training=self.training)
+            logits = F.linear(h2, params['fc_logits.weight'], params.get('fc_logits.bias'))
         return logits
 
 # =========================
@@ -198,7 +237,7 @@ class PositionalEncoding(nn.Module):
         return x
 
 # =========================
-# Transformer Price Predictor
+# Transformer Price Predictor (Residual Head)
 # =========================
 class TransformerPricePredictor(nn.Module):
     def __init__(self, input_size, d_model=128, nhead=8, num_layers=3, dropout=0.4, output_size=None, mode="classification"):
@@ -230,6 +269,7 @@ class TransformerPricePredictor(nn.Module):
             self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
             nn.init.normal_(self.cls_token, std=0.02)
             self.fc1 = nn.Linear(d_model, d_model // 2)
+            self.res_proj = nn.Linear(d_model, d_model // 2)    # ★ Residual head
             self.act = nn.GELU()
             self.fc_logits = nn.Linear(d_model // 2, output_size)
         elif self.mode == "reconstruction":
@@ -250,15 +290,17 @@ class TransformerPricePredictor(nn.Module):
         x = self.dropout(x)
 
         if self.mode == "classification":
-            x = x[:, 0]  # CLS 토큰
+            x_cls = x[:, 0]  # CLS 토큰
             if params is None:
-                x = self.act(self.fc1(x))
-                x = self.dropout(x)
-                logits = self.fc_logits(x)
+                h = self.act(self.fc1(x_cls))
+                h = self.dropout(h)
+                h = h + self.res_proj(x_cls)                    # ★ Residual head
+                logits = self.fc_logits(h)
             else:
-                x = F.gelu(F.linear(x, params['fc1.weight'], params.get('fc1.bias')))
-                x = F.dropout(x, p=self.dropout.p, training=self.training)
-                logits = F.linear(x, params['fc_logits.weight'], params.get('fc_logits.bias'))
+                h = F.gelu(F.linear(x_cls, params['fc1.weight'], params.get('fc1.bias')))
+                h = F.dropout(h, p=self.dropout.p, training=self.training)
+                h = h + F.linear(x_cls, params['res_proj.weight'], params.get('res_proj.bias'))
+                logits = F.linear(h, params['fc_logits.weight'], params.get('fc_logits.bias'))
             return logits
         else:
             return self.decoder(x)
