@@ -52,7 +52,7 @@ from model.base_model import get_model
 from feature_importance import compute_feature_importance, save_feature_importance
 from failure_db import insert_failure_record, ensure_failure_db
 import logger
-from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges, set_NUM_CLASSES, STRATEGY_CONFIG
+from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges, set_NUM_CLASSES, STRATEGY_CONFIG, get_QUALITY  # ← ADD get_QUALITY
 from data_augmentation import balance_classes
 from window_optimizer import find_best_window
 
@@ -637,6 +637,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
 
         # ---- 특징행렬 (스케일링 없이 시퀀스 생성)
         features_only=feat.drop(columns=["timestamp","strategy"],errors="ignore")
+        features_only = features_only.replace([np.inf, -np.inf], np.nan).fillna(0.0)  # ← ADD: NaN/inf 가드
         try:
             feat_dim = int(getattr(features_only, "shape", [0, FEATURE_INPUT_SIZE])[1])
         except Exception:
@@ -672,14 +673,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
         if len(uniq_all) < 2:
             _log_skip(symbol,strategy,"라벨 단일 클래스 → 학습/평가 스킵"); return res
 
-        # ---- 분할 (Stratified → 실패 시 안전 폴백)
-        try:
-            sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=20240101)
-            (train_idx, val_idx), = sss.split(X_raw, y)
-        except Exception as _split_err:
-            _safe_print(f"[SPLIT] stratified split fail → fallback split ({_split_err})")
-            n=len(X_raw); idx=np.arange(n); rs=np.random.RandomState(20240101); rs.shuffle(idx)
-            cut=max(1,int(n*0.2)); val_idx=idx[:cut]; train_idx=idx[cut:]
+        # ── 분할 (시간순: 마지막 20%를 검증으로)  ← CHANGED
+        n = len(X_raw)
+        cut = max(1, int(n * 0.2))
+        train_idx = np.arange(0, n - cut)
+        val_idx   = np.arange(n - cut, n)
 
         # ---- train-only fit scaler
         scaler = MinMaxScaler()
@@ -848,9 +846,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
             acc=float(accuracy_score(lbls,preds)); f1=float(f1_score(lbls,preds,average="macro"))
             val_loss = float(val_loss_sum / max(1,n_val))
 
+            # === 품질 최소 게이트(전략별 임계와 전역 VAL_F1_MIN 중 더 높은 값) ← ADD
+            min_gate = max(_min_f1_for(strategy), float(get_QUALITY().get("VAL_F1_MIN", 0.10)))
+
             stem=os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_group{int(group_id) if group_id is not None else 0}_cls{int(len(class_ranges))}")
 
-            # 🔸 meta에 class_ranges를 포함
+            # 🔸 meta에 class_ranges를 포함 + gate/passed 기록
             meta={
                 "symbol":symbol,
                 "strategy":strategy,
@@ -866,7 +867,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
                 "recent_cap":int(len(features_only)),
                 "engine":"lightning" if _HAS_LIGHTNING else "manual",
                 "data_flags":{"rows":int(len(df)),"limit":int(_limit),"min":int(_min_required),"augment_needed":bool(augment_needed),"enough_for_training":bool(enough_for_training)},
-                "train_loss_sum":float(total_loss)
+                "train_loss_sum":float(total_loss),
+                "min_f1_gate": float(min_gate)  # ← ADD
             }
 
             wpath,mpath=_save_model_and_meta(model, stem+".pt", meta)
@@ -883,13 +885,14 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
                 source_exchange="BYBIT", status="success"
             )
 
-            # === (★) 개별 모델 통과 여부 기록
-            passed = bool(f1 >= _min_f1_for(strategy))
+            # === (★) 개별 모델 통과 여부 기록 (전역게이트 반영) ← CHANGED
+            passed = bool(f1 >= min_gate)
+            meta.update({"passed": int(passed)})
             res["models"].append({
                 "type":model_type,"acc":acc,"f1":f1,"val_loss":val_loss,
                 "loss_sum":float(total_loss),"pt":wpath,"meta":mpath,"passed":passed
             })
-            _safe_print(f"🟩 TRAIN done [{model_type}] acc={acc:.4f} f1={f1:.4f} val_loss={val_loss:.5f} → {os.path.basename(wpath)} (passed={int(passed)})")
+            _safe_print(f"🟩 TRAIN done [{model_type}] acc={acc:.4f} f1={f1:.4f} val_loss={val_loss:.5f} → {os.path.basename(wpath)} (passed={int(passed)} gate={min_gate:.2f})")
 
             if torch.cuda.is_available(): torch.cuda.empty_cache()
 
