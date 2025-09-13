@@ -375,7 +375,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         print(f"[failed_result insert_failure_record 오류] {e}")
     return res
 
-# ★ 소프트 보류 헬퍼
+# ★ 소프트 보류 헬퍼 (이중 로깅 방지: failed_result 호출 제거)
 def _soft_abstain(symbol, strategy, *, reason, meta_choice="abstain", regime="unknown", X_last=None, group_id=None, df=None, source="보류"):
     try:
         ensure_prediction_log_exists()
@@ -402,8 +402,15 @@ def _soft_abstain(symbol, strategy, *, reason, meta_choice="abstain", regime="un
         )
     except Exception as e:
         print(f"[soft_abstain 예외] {e}")
-    # 반환은 형식을 맞추기 위해 failed_result로 통일(상위 로직 호환성)
-    return failed_result(symbol, strategy, model_type="meta", reason=reason, source=source, X_input=X_last)
+    return {
+        "symbol": symbol, "strategy": strategy, "model": "meta",
+        "class": -1, "expected_return": 0.0,
+        "class_return_min": 0.0, "class_return_max": 0.0,
+        "class_return_text": "", "position": "neutral",
+        "timestamp": _now_kst().isoformat(), "source": source,
+        "regime": regime, "reason": reason, "success": False,
+        "predicted_class": -1, "label": -1
+    }
 
 # 🆕 락 재시도
 def _acquire_predict_lock_with_retry(max_wait_sec:int):
@@ -656,7 +663,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[임계 가드 예외] {e}")
 
-        # (D) 보류 컷
+        # (D) 보류 컷 (이중 로깅 방지: failed_result 대신 딕셔너리 반환)
         try:
             chosen_probs = (chosen or outs[0])["calib_probs"]
             if float(np.max(chosen_probs)) < ABSTAIN_PROB_MIN:
@@ -682,7 +689,15 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     raw_prob=None, calib_prob=float(np.max(chosen_probs)), calib_ver=get_calibration_version(),
                     class_return_min=0.0, class_return_max=0.0, class_return_text=""
                 )
-                return failed_result(symbol, strategy, model_type="meta", reason="abstain_low_confidence", source=source, X_input=X[-1])
+                return {
+                    "symbol": symbol, "strategy": strategy, "model": "meta",
+                    "class": -1, "expected_return": 0.0,
+                    "class_return_min": 0.0, "class_return_max": 0.0,
+                    "class_return_text": "", "position": "neutral",
+                    "timestamp": _now_kst().isoformat(), "source": source,
+                    "regime": regime, "reason": "abstain_low_confidence", "success": False,
+                    "predicted_class": -1, "label": -1
+                }
         except Exception as e:
             print(f"[보류 컷 예외] {e}")
 
