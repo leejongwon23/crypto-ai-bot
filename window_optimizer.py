@@ -209,7 +209,7 @@ def find_best_window(symbol: str, strategy: str, window_list=None, group_id=None
     """
     t0 = time.time()
     if not window_list:
-        window_list = [20, 40]
+        window_list = [20, 40, 60]
 
     # 1) 데이터/피처 로드 (최근 구간만)
     df = get_kline_by_strategy(symbol, strategy)
@@ -288,7 +288,7 @@ def find_best_windows(symbol: str, strategy: str, window_list=None, group_id=Non
     """
     t0 = time.time()
     if not window_list:
-        window_list = [20, 40]
+        window_list = [20, 40, 60]
 
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or df.empty:
