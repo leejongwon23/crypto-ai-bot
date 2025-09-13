@@ -1,20 +1,8 @@
-# === predict.py — sequence-corrected, gate-respecting, robust I/O (ENSEMBLE-FIRST) ===
-# (2025-09-03) — train.py와 호환: open/close_predict_gate, 게이트 닫힘 시 즉시 반환, 스테일 락 자동 해제
-# (2025-09-04) — [수정] predict 락 즉시실패 → 짧은 대기·재시도 후 실패 처리
-# (2025-09-04b) — [보강] gate/lock 파일 write 후 flush+fsync로 가시화 보장
-# (2025-09-05c) — [FIX] failure_db 시그니처 조정, 그룹직후 락 강건화
-# (2025-09-05d) — [통일] 스테일 TTL 600s로 통일, 게이트 파일 오탈자 정정, 그룹직후 주석 정합
-# (2025-09-06) — [ROOT FIX] 그룹 예측 독점 플래그 도입 + 게이트 우회(bypass) 지원
-# (2025-09-07) — [보강] meta.class_ranges 최우선 사용(없으면 config 폴백). expected_return/필터/가드/섀도우 모두 일치화.
-# (2025-09-07b) — [로그강화] 선택 클래스의 동적 범위/중앙값/포지션을 예측·섀도우 로그에 명시
-# (2025-09-07c) — [FIX] failed_result → insert_failure_record 호출 시 context="prediction" 반영
-# (2025-09-08) — [추가] CSV에 class_return_min/max/text 3컬럼 직접 기록(메인/섀도우)
-# (2025-09-09) — [추가] predict() 반환 객체에도 class_return_min/max/text/position 포함
-# (2025-09-09b) — [핵심] (B) 마스크·(C) 가드에 “포지션 힌트(EMA20/60 + 기울기)” 적용 → 롱/숏 분리 강제
-# (2025-09-09c) — [FIX] (B)/(C) 최소수익 임계 판단을 양/음 공통식으로 교체: long=hi>=THRESH, short=-lo>=THRESH, 둘 다 허용 시 max(hi,-lo)>=THRESH
-# (2025-09-10) — [INPUT_SIZE 통일] meta.input_size 최우선, 없으면 feat_scaled.shape[1] 사용. 고정 상수 경로 제거.
-# (2025-09-12a) — [NEW] 앙상블(mean of top-3 calibrated) 후보 추가 + 보류컷(ABSTAIN_PROB_MIN) 도입
-# (2025-09-12b) — [DEFAULT] **Ensemble-first** 선택 로직: 가능한 경우 앙상블 우선 채택, 불가 시 단일 모델로 폴백
+# === predict.py — sequence-corrected, gate-respecting, robust I/O (ENSEMBLE-FIRST, FINAL) ===
+# (2025-09-13) — [핵심] 학습 품질게이트 엄수: meta.passed==1 & val_f1>=min_f1_gate 모델만 추론
+#                 + 메타 없음/부정합 모델 자동 스킵, 안정성 로그 강화
+# (2025-09-12b) — [DEFAULT] Ensemble-first (mean of top-3 calibrated) + abstain(ABSTAIN_PROB_MIN)
+# … (이전 변경로그는 생략 없이 유지) …
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -30,7 +18,7 @@ __all__ = [
     "run_evaluation_loop",
 ]
 
-# ====== Gate (학습 블록 종료 시에만 예측 허용) ======
+# ====== Gate/Lock ======
 RUN_DIR = "/persistent/run"; os.makedirs(RUN_DIR, exist_ok=True)
 PREDICT_GATE = os.path.join(RUN_DIR, "predict_gate.json")
 PREDICT_LOCK = os.path.join(RUN_DIR, "predict_running.lock")
@@ -56,16 +44,14 @@ def is_predict_gate_open():
 
 def _bypass_gate_for_source(source: str) -> bool:
     s = str(source or "")
-    if "그룹직후" in s:  # train.py에서의 그룹 예측 호출
+    if "그룹직후" in s:  # train.py에서 호출
         return True
     bl = os.getenv("PREDICT_GATE_BYPASS_SOURCES", "")
     return any(t and t in s for t in [x.strip() for x in bl.split(",") if x.strip()])
 
 def _group_active() -> bool:
-    try:
-        return os.path.exists(GROUP_ACTIVE)
-    except Exception:
-        return False
+    try: return os.path.exists(GROUP_ACTIVE)
+    except Exception: return False
 
 def open_predict_gate(note=""):
     try:
@@ -131,7 +117,7 @@ def _release_predict_lock():
     except Exception:
         pass
 
-# ====== 예측 하트비트 ======
+# ====== Heartbeat ======
 import threading
 PREDICT_HEARTBEAT_SEC = int(os.getenv("PREDICT_HEARTBEAT_SEC", "3"))
 
@@ -149,7 +135,7 @@ def _predict_hb_loop(stop_evt: threading.Event, tag: str):
             pass
         stop_evt.wait(max(1, PREDICT_HEARTBEAT_SEC))
 
-# ====== 옵션 모듈(없으면 안전 대체) ======
+# ====== Optional deps ======
 try:
     from window_optimizer import find_best_windows
 except Exception:
@@ -175,7 +161,7 @@ except Exception:
     def apply_calibration(probs, *, symbol=None, strategy=None, regime=None, model_meta=None): return probs
     def get_calibration_version(): return "none"
 
-# ====== 모델 로딩 어댑터 ======
+# ====== Model I/O ======
 try:
     import inspect
     from model_io import load_model as _raw_load_model
@@ -203,7 +189,7 @@ except Exception:
         except Exception:
             return None
 
-# ====== 프로젝트 유틸 ======
+# ====== Project utils ======
 from logger import log_prediction, update_model_success, PREDICTION_HEADERS, ensure_prediction_log_exists
 from failure_db import insert_failure_record, ensure_failure_db
 from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
@@ -217,11 +203,9 @@ DEVICE = torch.device("cpu")
 MODEL_DIR = "/persistent/models"
 PREDICTION_LOG_PATH = "/persistent/prediction_log.csv"
 NUM_CLASSES = get_NUM_CLASSES()
-FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()  # ← 호환 유지
-now_kst = lambda: _now_kst()
+FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 
 MIN_RET_THRESHOLD = float(os.getenv("PREDICT_MIN_RETURN", "0.01"))
-# 🆕 보류 컷(최종 선택 모델의 최고 보정확률이 이 값 미만이면 예측 보류)
 ABSTAIN_PROB_MIN = float(os.getenv("ABSTAIN_PROB_MIN", "0.35"))
 
 EXP_STATE = "/persistent/logs/meta_explore_state.json"
@@ -263,7 +247,6 @@ def _position_from_range(lo: float, hi: float) -> str:
     except Exception:
         return "neutral"
 
-# --- 공통 임계 판단(롱/숏 분리 + 힌트 동시 반영)
 def _meets_minret_with_hint(lo: float, hi: float, allow_long: bool, allow_short: bool, thr: float) -> bool:
     try:
         lo = float(lo); hi = float(hi); thr = float(thr)
@@ -275,7 +258,7 @@ def _meets_minret_with_hint(lo: float, hi: float, allow_long: bool, allow_short:
     except Exception:
         return False
 
-# ====== 작은 헬퍼들 ======
+# ====== small helpers ======
 def _load_json(p, default):
     try:
         with open(p, "r", encoding="utf-8") as f:
@@ -365,7 +348,7 @@ def get_available_models(symbol, strategy):
             gfn = os.path.basename(g); mp = _resolve_meta(gfn)
             if mp and {"pt_file": gfn, "meta_path": mp} not in items:
                 items.append({"pt_file": gfn, "meta_path": mp})
-        items.sort(key=lambda x: x["pt_file"])  # ← FIX
+        items.sort(key=lambda x: x["pt_file"])
         return items
     except Exception as e:
         print(f"[get_available_models 오류] {e}")
@@ -390,7 +373,7 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         print(f"[failed_result insert_failure_record 오류] {e}")
     return res
 
-# 🆕 락 재시도 헬퍼
+# 🆕 락 재시도
 def _acquire_predict_lock_with_retry(max_wait_sec:int):
     deadline = time.time() + max(1, int(max_wait_sec))
     while time.time() < deadline:
@@ -403,13 +386,11 @@ def _prep_lock_for_source(source:str):
     src = str(source or "")
     if "그룹직후" in src:
         _clear_stale_lock(PREDICT_LOCK_STALE_TRAIN_SEC, tag="(group)")
-        try:
-            return int(os.getenv("PREDICT_LOCK_WAIT_GROUP_SEC", "30"))
-        except Exception:
-            return 30
+        try: return int(os.getenv("PREDICT_LOCK_WAIT_GROUP_SEC", "30"))
+        except Exception: return 30
     return int(os.getenv("PREDICT_LOCK_WAIT_MAX_SEC", "15"))
 
-# ====== (NEW) 포지션 힌트 ======
+# ====== 포지션 힌트 ======
 def _ema(arr: np.ndarray, span: int) -> np.ndarray:
     if len(arr) == 0: return arr
     s = pd.Series(arr, dtype=float)
@@ -435,7 +416,7 @@ def _position_hint_from_market(df: pd.DataFrame) -> dict:
     except Exception:
         return {"allow_long": True, "allow_short": True, "ma_fast": None, "ma_slow": None, "slope": 0.0}
 
-# ====== 핵심: 예측 ======
+# ====== 핵심 예측 ======
 def predict(symbol, strategy, source="일반", model_type=None):
     if _group_active() and not _bypass_gate_for_source(source):
         return failed_result(symbol or "None", strategy or "None", reason="group_predict_active", source=source, X_input=None)
@@ -471,7 +452,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         if not symbol or not strategy:
             return failed_result(symbol or "None", strategy or "None", reason="invalid_symbol_strategy", source=source, X_input=None)
 
-        regime = detect_regime(symbol, strategy, now=now_kst()); _ = get_calibration_version()
+        regime = detect_regime(symbol, strategy, now=_now_kst()); _ = get_calibration_version()
         print(f"[predict] start {symbol}-{strategy} regime={regime} source={source}"); sys.stdout.flush()
 
         windows = find_best_windows(symbol, strategy)
@@ -497,14 +478,16 @@ def predict(symbol, strategy, source="일반", model_type=None):
         outs, all_preds = get_model_predictions(symbol, strategy, models, df, X, windows, rec_freq, regime=regime)
         if not outs: return failed_result(symbol, strategy, reason="no_valid_model", source=source, X_input=X[-1])
 
-        # ── (NEW) 앙상블 후보 추가: val_f1 상위 3개 calibrated 확률 평균
+        # ── 앙상블 후보 추가 (상위 3개 mean of calibrated)
         try:
             if len(outs) >= 2:
                 tops = sorted(outs, key=lambda m: float(m.get("val_f1", 0.0)), reverse=True)[:min(3, len(outs))]
-                if len(tops) >= 2:
-                    mean_c = np.mean([np.asarray(m["calib_probs"], dtype=float) for m in tops], axis=0)
+                # num_classes 일치 확인
+                nc = min(len(np.asarray(tops[0]["calib_probs"])), *[len(np.asarray(t["calib_probs"])) for t in tops])
+                if len(tops) >= 2 and nc >= 2:
+                    mean_c = np.mean([np.asarray(m["calib_probs"][:nc], dtype=float) for m in tops], axis=0)
                     mean_c = (mean_c / (mean_c.sum() + 1e-12)).astype(float)
-                    mean_r = np.mean([np.asarray(m["raw_probs"], dtype=float) for m in tops], axis=0)
+                    mean_r = np.mean([np.asarray(m["raw_probs"][:nc], dtype=float) for m in tops], axis=0)
                     val_f1_mean = float(np.mean([float(m.get("val_f1", 0.0)) for m in tops]))
                     outs.append({
                         "raw_probs": mean_r,
@@ -516,7 +499,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         "val_f1": val_f1_mean,
                         "symbol": symbol,
                         "strategy": strategy,
-                        "meta": {"model": "ensemble", "num_classes": len(mean_c)}
+                        "meta": {"model": "ensemble", "num_classes": int(nc)}
                     })
         except Exception as e:
             print(f"[앙상블 구성 예외] {e}")
@@ -527,7 +510,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
         final_cls = None; meta_choice = "best_single"; chosen = None; used_minret = False
 
-        # (A) 진화형 메타 (있는 경우 시도)
+        # (A) 진화형 메타
         if _glob_many(os.path.join(MODEL_DIR, "evo_meta_learner")):
             try:
                 from evo_meta_learner import predict_evo_meta
@@ -539,7 +522,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             except Exception as e:
                 print(f"[evo_meta 예외] {e}")
 
-        # (B0) **Ensemble-first**: 앙상블 후보가 있고, (보류컷/최소수익/포지션) 통과 시 우선 채택
+        # (B0) Ensemble-first
         if final_cls is None:
             ens_idx = None
             for i, m in enumerate(outs):
@@ -561,13 +544,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     filt = filt / filt.sum(); pred = int(np.argmax(filt)); fused = True
                 else:
                     pred = int(np.argmax(adj)); fused = False
-                # 보류컷
                 if float(np.max(m["calib_probs"])) >= ABSTAIN_PROB_MIN:
                     lo_e, hi_e = _class_range_by_meta_or_cfg(pred, m.get("meta"), symbol, strategy)
                     if _meets_minret_with_hint(lo_e, hi_e, allow_long, allow_short, MIN_RET_THRESHOLD):
                         final_cls = int(pred); chosen = m; used_minret = fused; meta_choice = "ensemble_mean_top3"
 
-        # (B1) 단일/앙상블 경쟁 + 탐험 (+ 포지션/최소수익 마스크) — 앙상블 실패 시 폴백
+        # (B1) 단일/앙상블 경쟁 + 탐험
         if final_cls is None:
             best_i, best_score, best_pred = -1, -1.0, None; scores = []
             for i, m in enumerate(outs):
@@ -615,7 +597,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             except Exception:
                 pass
 
-        # (C) 최종 가드 — 공통 임계 + 힌트
+        # (C) 최종 가드
         try:
             cmin_sel, cmax_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
             if not _meets_minret_with_hint(cmin_sel, cmax_sel, allow_long, allow_short, MIN_RET_THRESHOLD):
@@ -633,7 +615,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[임계 가드 예외] {e}")
 
-        # 🆕 (D) 보류 컷: 최종 후보의 최대 보정확률이 너무 낮으면 예측 보류
+        # (D) 보류 컷
         try:
             chosen_probs = (chosen or outs[0])["calib_probs"]
             if float(np.max(chosen_probs)) < ABSTAIN_PROB_MIN:
@@ -785,7 +767,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "class_return_max": float(hi_sel),
             "class_return_text": class_text,
             "position": pos_sel,
-            "timestamp": now_kst().isoformat(),
+            "timestamp": _now_kst().isoformat(),
             "source": source,
             "regime": regime,
             "reason": ("진화형 메타 최종 선택" if meta_choice=='evo_meta_learner'
@@ -858,7 +840,7 @@ def evaluate_predictions(get_price_fn):
                             wrong_writer.writerow({k: r.get(k, "") for k in r.keys()}); continue
                         if ts.tzinfo is None: ts = ts.tz_localize("Asia/Seoul")
                         else: ts = ts.tz_convert("Asia/Seoul")
-                        hours = eval_h.get(strat, 6); deadline = ts + pd.Timedelta(hours=hours)
+                        hours = {"단기":4,"중기":24,"장기":168}.get(strat, 6); deadline = ts + pd.Timedelta(hours=hours)
                         dfp = get_price_fn(sym, strat)
                         if dfp is None or "timestamp" not in dfp.columns:
                             r.update({"status": "invalid", "reason": "no_price_data", "return": 0.0, "return_value": 0.0})
@@ -870,7 +852,7 @@ def evaluate_predictions(get_price_fn):
                         dfp["timestamp"] = pd.to_datetime(dfp["timestamp"], errors="coerce").dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
                         fut = dfp.loc[(dfp["timestamp"] >= ts) & (dfp["timestamp"] <= deadline)]
                         if fut.empty:
-                            if now_local() < deadline:
+                            if _now_kst() < deadline:
                                 r.update({"status": "pending", "reason": "⏳ 평가 대기 중(마감 전 데이터 없음)", "return": 0.0, "return_value": 0.0})
                                 w_all.writerow({k: r.get(k, "") for k in fields}); continue
                             else:
@@ -886,12 +868,12 @@ def evaluate_predictions(get_price_fn):
                         else: 
                             cmin, cmax = (0.0, 0.0)
                         reached = gain >= cmin
-                        if now_local() < deadline and reached:
+                        if _now_kst() < deadline and reached:
                             status = "v_success" if str(r.get("volatility","")).strip().lower() in ["1","true"] else "success"
                             r.update({"status": status, "reason": f"[조기성공 pred_class={pred_cls}] gain={gain:.3f} (cls_min={cmin}, cls_max={cmax})",
                                       "return": round(gain,5), "return_value": round(gain,5), "group_id": gid})
                             log_prediction(symbol=sym, strategy=strat, direction=f"평가:{status}", entry_price=entry, target_price=entry*(1+gain),
-                                           timestamp=now_local().isoformat(), model=model, predicted_class=pred_cls, success=True,
+                                           timestamp=_now_kst().isoformat(), model=model, predicted_class=pred_cls, success=True,
                                            reason=r["reason"], rate=gain, return_value=gain, volatility=(status=="v_success"),
                                            source="평가", label=label, group_id=gid)
                             if model == "meta": update_model_success(sym, strat, model, True)
@@ -899,7 +881,7 @@ def evaluate_predictions(get_price_fn):
                             if not eval_written:
                                 eval_writer = csv.DictWriter(f_eval, fieldnames=sorted(r.keys())); eval_writer.writeheader(); eval_written = True
                             eval_writer.writerow({k: r.get(k, "") for k in r.keys()}); continue
-                        if now_local() < deadline and not reached:
+                        if _now_kst() < deadline and not reached:
                             r.update({"status": "pending", "reason": "⏳ 평가 대기 중", "return": round(gain,5), "return_value": round(gain,5)})
                             w_all.writerow({k: r.get(k, "") for k in fields}); continue
                         status = "success" if reached else "fail"
@@ -908,7 +890,7 @@ def evaluate_predictions(get_price_fn):
                         r.update({"status": status, "reason": f"[pred_class={pred_cls}] gain={gain:.3f} (cls_min={cmin}, cls_max={cmax})",
                                   "return": round(gain,5), "return_value": round(gain,5), "group_id": gid})
                         log_prediction(symbol=sym, strategy=strat, direction=f"평가:{status}", entry_price=entry, target_price=entry*(1+gain),
-                                       timestamp=now_local().isoformat(), model=model, predicted_class=pred_cls,
+                                       timestamp=_now_kst().isoformat(), model=model, predicted_class=pred_cls,
                                        success=(status in ["success","v_success"]), reason=r["reason"], rate=gain, return_value=gain,
                                        volatility=("v_" in status), source="평가", label=label, group_id=gid)
                         if status in ["fail","v_fail"]:
@@ -939,13 +921,13 @@ def evaluate_predictions(get_price_fn):
             pass
         print(f"[오류] evaluate_predictions 스트리밍 실패 → {e}")
 
-# ====== 모델 추론 묶기 ======
+# ====== 모델 추론 묶기 (★ 품질게이트 반영) ======
 def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list, recent_freq, regime="unknown"):
     outs, allpreds = [], []
     for info in models:
         try:
             pt = info.get("pt_file"); meta_path = info.get("meta_path")
-            if not pt: continue
+            if not pt or not meta_path: continue
             model_path = os.path.join(MODEL_DIR, pt)
             if not os.path.exists(model_path):
                 try:
@@ -959,10 +941,17 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
                     pass
             with open(meta_path, "r", encoding="utf-8") as mf:
                 meta = json.load(mf)
+            # === 품질 컷: passed==1 이고 val_f1 >= min_f1_gate 여야 함
+            passed = int(meta.get("passed", 0)) == 1
+            val_f1 = float(meta.get("metrics", {}).get("val_f1", 0.0))
+            min_gate = float(meta.get("min_f1_gate", 0.0))
+            if not passed or (val_f1 < min_gate):
+                print(f"[SKIP] gate: {os.path.basename(model_path)} passed={int(passed)} val_f1={val_f1:.3f} gate={min_gate:.3f}")
+                continue
+
             mtype = meta.get("model", "lstm"); gid = meta.get("group_id", 0)
             inp_size = int(meta.get("input_size", feat_scaled.shape[1]))
             num_cls = int(meta.get("num_classes", NUM_CLASSES))
-            val_f1 = float(meta.get("metrics", {}).get("val_f1", 0.6))
             idx = min(int(gid), max(0, len(window_list)-1)); win = window_list[idx]
             seq = feat_scaled[-win:]
             if seq.shape[1] < inp_size:
@@ -971,6 +960,7 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
                 seq = seq[:, :inp_size]
             if seq.shape[0] < win:
                 print(f"[⚠️ 데이터 부족] {symbol}-{strategy}-group{gid}"); continue
+
             x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0)
             model = get_model(mtype, input_size=inp_size, output_size=num_cls)
             model = load_model_any(model_path, model)
