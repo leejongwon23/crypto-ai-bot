@@ -21,6 +21,14 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 LABEL_EPS = float(os.getenv("LABEL_EPS", "1e-9"))
 FALLBACK_NEUTRAL_BAND = float(os.getenv("FALLBACK_NEUTRAL_BAND", "0.002"))
 
+# ✅ 드롭아웃 하한(소폭 상향): 기본 0.2
+GLOBAL_DROPOUT_MIN = float(os.getenv("MODEL_DROPOUT_MIN", "0.2"))
+def _resolve_dropout(d):
+    try:
+        return max(float(d), GLOBAL_DROPOUT_MIN)
+    except Exception:
+        return GLOBAL_DROPOUT_MIN
+
 # =========================
 # Init Utilities (안정 초기화)
 # =========================
@@ -58,7 +66,7 @@ class Attention(nn.Module):
     def __init__(self, hidden_size, dropout=0.1):
         super().__init__()
         self.attn = nn.Linear(hidden_size, 1)
-        self.drop = nn.Dropout(dropout)
+        self.drop = nn.Dropout(_resolve_dropout(dropout))
 
     def forward(self, lstm_out):
         # lstm_out: [B, T, H]
@@ -96,6 +104,8 @@ class LSTMPricePredictor(nn.Module):
         super().__init__()
         output_size = output_size if output_size is not None else get_NUM_CLASSES()
         H = hidden_size * 2
+
+        dropout = _resolve_dropout(dropout)
 
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers,
                             dropout=dropout, batch_first=True, bidirectional=True)
@@ -161,6 +171,8 @@ class CNNLSTMPricePredictor(nn.Module):
     def __init__(self, input_size, cnn_channels=128, lstm_hidden_size=256, lstm_layers=3, dropout=0.4, output_size=None):
         super().__init__()
         output_size = output_size if output_size is not None else get_NUM_CLASSES()
+
+        dropout = _resolve_dropout(dropout)
 
         # Conv stem
         self.conv1 = nn.Conv1d(input_size, cnn_channels, kernel_size=3, padding=1)
@@ -244,6 +256,9 @@ class TransformerPricePredictor(nn.Module):
         super().__init__()
         self.mode = mode
         output_size = output_size if output_size is not None else get_NUM_CLASSES()
+
+        dropout = _resolve_dropout(dropout)
+
         self.input_proj = nn.Linear(input_size, d_model)
         self.pos_encoder = PositionalEncoding(d_model)
 
