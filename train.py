@@ -649,7 +649,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
             labels=labels[-cut:]
 
         try:
-            best_window=find_best_window(symbol,strategy,window_list=[20,40],group_id=group_id)
+            best_window=find_best_window(symbol,strategy,window_list=[20,40,60],group_id=group_id)  # ← window 후보 확장
         except: best_window=40
         window=max(5,int(best_window)); window=min(window, max(6,len(features_only)-1))
 
