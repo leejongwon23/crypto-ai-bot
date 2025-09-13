@@ -1,4 +1,5 @@
 # === predict.py — sequence-corrected, gate-respecting, robust I/O (ENSEMBLE-FIRST, FINAL) ===
+# (2025-09-13c) — [소프트 폴백] PREDICT_SOFT_ABORT=1 시 no_models/no_valid_model을 "예측보류"로 처리
 # (2025-09-13) — [핵심] 학습 품질게이트 엄수: meta.passed==1 & val_f1>=min_f1_gate 모델만 추론
 #                 + 메타 없음/부정합 모델 자동 스킵, 안정성 로그 강화
 # (2025-09-12b) — [DEFAULT] Ensemble-first (mean of top-3 calibrated) + abstain(ABSTAIN_PROB_MIN)
@@ -207,6 +208,7 @@ FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 
 MIN_RET_THRESHOLD = float(os.getenv("PREDICT_MIN_RETURN", "0.01"))
 ABSTAIN_PROB_MIN = float(os.getenv("ABSTAIN_PROB_MIN", "0.35"))
+PREDICT_SOFT_ABORT = int(os.getenv("PREDICT_SOFT_ABORT", "1"))  # ★ no_models/no_valid_model → 예측보류로 처리
 
 EXP_STATE = "/persistent/logs/meta_explore_state.json"
 EXP_EPS = float(os.getenv("EXPLORE_EPS_BASE", "0.15"))
@@ -373,6 +375,36 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         print(f"[failed_result insert_failure_record 오류] {e}")
     return res
 
+# ★ 소프트 보류 헬퍼
+def _soft_abstain(symbol, strategy, *, reason, meta_choice="abstain", regime="unknown", X_last=None, group_id=None, df=None, source="보류"):
+    try:
+        ensure_prediction_log_exists()
+        cur = float((df["close"].iloc[-1] if df is not None and len(df) else 0.0))
+        note = {
+            "reason": reason,
+            "abstain_prob_min": float(ABSTAIN_PROB_MIN),
+            "max_calib_prob": None,
+            "meta_choice": meta_choice,
+            "regime": regime
+        }
+        log_prediction(
+            symbol=symbol, strategy=strategy, direction="예측보류",
+            entry_price=cur, target_price=cur,
+            model="meta", model_name=str(meta_choice),
+            predicted_class=-1, label=-1,
+            note=json.dumps(note, ensure_ascii=False),
+            top_k=[], success=False, reason=reason,
+            rate=0.0, return_value=0.0, source=source, group_id=group_id,
+            feature_vector=(torch.tensor(X_last, dtype=torch.float32).numpy() if X_last is not None else None),
+            regime=regime, meta_choice="abstain",
+            raw_prob=None, calib_prob=None, calib_ver=get_calibration_version(),
+            class_return_min=0.0, class_return_max=0.0, class_return_text=""
+        )
+    except Exception as e:
+        print(f"[soft_abstain 예외] {e}")
+    # 반환은 형식을 맞추기 위해 failed_result로 통일(상위 로직 호환성)
+    return failed_result(symbol, strategy, model_type="meta", reason=reason, source=source, X_input=X_last)
+
 # 🆕 락 재시도
 def _acquire_predict_lock_with_retry(max_wait_sec:int):
     deadline = time.time() + max(1, int(max_wait_sec))
@@ -456,27 +488,36 @@ def predict(symbol, strategy, source="일반", model_type=None):
         print(f"[predict] start {symbol}-{strategy} regime={regime} source={source}"); sys.stdout.flush()
 
         windows = find_best_windows(symbol, strategy)
-        if not windows: return failed_result(symbol, strategy, reason="window_list_none", source=source, X_input=None)
+        if not windows:
+            return _soft_abstain(symbol, strategy, reason="window_list_none", meta_choice="abstain", regime=regime, X_last=None, group_id=None, df=None) \
+                   if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="window_list_none", source=source, X_input=None)
 
         df = get_kline_by_strategy(symbol, strategy)
-        if df is None or len(df) < max(windows) + 1: return failed_result(symbol, strategy, reason="df_short", source=source, X_input=None)
+        if df is None or len(df) < max(windows) + 1:
+            return _soft_abstain(symbol, strategy, reason="df_short", meta_choice="abstain", regime=regime, X_last=None, group_id=None, df=df) \
+                   if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="df_short", source=source, X_input=None)
 
         feat = compute_features(symbol, df, strategy)
         if feat is None or feat.dropna().shape[0] < max(windows) + 1:
-            return failed_result(symbol, strategy, reason="feature_short", source=source, X_input=None)
+            return _soft_abstain(symbol, strategy, reason="feature_short", meta_choice="abstain", regime=regime, X_last=None, group_id=None, df=df) \
+                   if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="feature_short", source=source, X_input=None)
 
         X = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
         X = MinMaxScaler().fit_transform(X)
         feat_dim = int(X.shape[1])
 
         models = get_available_models(symbol, strategy)
-        if not models: return failed_result(symbol, strategy, reason="no_models", source=source, X_input=X[-1])
+        if not models:
+            return _soft_abstain(symbol, strategy, reason="no_models", meta_choice="abstain", regime=regime, X_last=X[-1], group_id=None, df=df) \
+                   if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="no_models", source=source, X_input=X[-1])
 
         rec_freq = get_recent_class_frequencies(strategy)
         feat_row = torch.tensor(X[-1], dtype=torch.float32)
 
         outs, all_preds = get_model_predictions(symbol, strategy, models, df, X, windows, rec_freq, regime=regime)
-        if not outs: return failed_result(symbol, strategy, reason="no_valid_model", source=source, X_input=X[-1])
+        if not outs:
+            return _soft_abstain(symbol, strategy, reason="no_valid_model", meta_choice="abstain", regime=regime, X_last=X[-1], group_id=None, df=df) \
+                   if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="no_valid_model", source=source, X_input=X[-1])
 
         # ── 앙상블 후보 추가 (상위 3개 mean of calibrated)
         try:
