@@ -584,7 +584,8 @@ TRAIN_BATCH_SIZE   = _get_int("TRAIN_BATCH_SIZE", 256)
 ORDERED_TRAIN      = _get_int("ORDERED_TRAIN", 1)
 
 # ⚠️ ‘표시’ 하한만 책임. 실제 타겟 계산은 모델/서비스 로직에서 결정.
-PREDICT_MIN_RETURN = _get_float("PREDICT_MIN_RETURN", 0.0)   # 강제 하한 제거(실제 필터는 predict.py)
+# predict.py 기본 임계(환경변수 미설정 시 0.01)와 일치시킴
+PREDICT_MIN_RETURN = _get_float("PREDICT_MIN_RETURN", 0.01)
 DISPLAY_MIN_RETURN = _get_float("DISPLAY_MIN_RETURN", _DISPLAY_MIN_RET)
 
 SSL_CACHE_DIR      = os.getenv("SSL_CACHE_DIR", _default_config["SSL_CACHE_DIR"])
@@ -618,4 +619,4 @@ __all__ = [
     "get_ORDERED_TRAIN", "get_PREDICT_MIN_RETURN", "get_DISPLAY_MIN_RETURN",
     "get_SSL_CACHE_DIR",
     "FEATURE_INPUT_SIZE", "NUM_CLASSES", "FAIL_AUGMENT_RATIO", "MIN_FEATURES",
-]
+        ]
