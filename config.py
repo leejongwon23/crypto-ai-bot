@@ -1,4 +1,4 @@
-# config.py (FINAL, 2025-09-12) — long/neutral/short 구간 포함 + strict bins + quality cut + round-robin hint
+# config.py (FINAL, 2025-09-13) — 동적 클래스(4~MAX) 완전복구 + strict bins + quality cut + round-robin hint
 
 import json
 import os
@@ -9,8 +9,8 @@ CONFIG_PATH = "/persistent/config.json"
 # 기본 설정 + 신규 옵션(기본 OFF)
 # ===============================
 _default_config = {
-    "NUM_CLASSES": 10,                    # 기본 10 (동적 계산 시 자동 반영)
-    "MAX_CLASSES": 20,                    # 상한값 가드
+    "NUM_CLASSES": 10,                    # 기본 힌트(최소치/백업용). 동적 계산이 우선.
+    "MAX_CLASSES": 20,                    # 상한값 가드(동적 계산 결과를 여기까지 허용)
     "FEATURE_INPUT_SIZE": 24,
     "FAIL_AUGMENT_RATIO": 3,
     "MIN_FEATURES": 5,
@@ -95,7 +95,7 @@ _STRATEGY_RETURN_CAP_NEG_MIN = {  # 음수 하한(절댓값 캡)
 }
 
 # ✅ 표시 안정화용 파라미터
-_MIN_RANGE_WIDTH   = _default_config["CLASS_BIN"]["min_width"]   # 0.05%
+_MIN_RANGE_WIDTH   = _default_config["CLASS_BIN"]["min_width"]   # 0.05%p
 _ROUND_DECIMALS    = 4                                           # 소수 넷째 자리
 _EPS_ZERO_BAND     = _default_config["CLASS_BIN"]["zero_band_eps"]  # ±0.15%p
 _DISPLAY_MIN_RET   = 1e-4
@@ -298,6 +298,61 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
     signed = np.concatenate([dn, up]).astype(np.float32)
     return signed
 
+# ---- 동적 bin 개수 결정 로직(최대 20) ---------------------------------------
+def _choose_n_classes(rets_signed, max_classes, hint_min=4):
+    """
+    데이터 기반 동적 bin 수 결정:
+      - Freedman–Diaconis 규칙 기반(기본)
+      - 예외(IQR==0 등) 시 sqrt(N) 백업
+      - 최종 범위: [max(hint_min, 4), max_classes]
+    """
+    import numpy as np
+    N = int(rets_signed.size)
+    if N <= 1:
+        return max(4, hint_min)
+
+    q25, q75 = np.quantile(rets_signed, [0.25, 0.75])
+    iqr = float(q75 - q25)
+    data_min, data_max = float(np.min(rets_signed)), float(np.max(rets_signed))
+    data_range = max(1e-12, data_max - data_min)
+
+    if iqr <= 1e-12:
+        # 분포가 지나치게 뾰족할 때: sqrt(N) 백업
+        est = int(round(np.sqrt(N)))
+    else:
+        h = 2.0 * iqr * (N ** (-1.0/3.0))  # FD bin width
+        est = int(round(data_range / max(h, 1e-12)))
+
+    # 최소/최대 클립, 너무 작은 경우는 힌트/기본값으로 보강
+    base_hint = int(_config.get("NUM_CLASSES", 10))
+    lower = max(4, hint_min, min(base_hint, max_classes) if est < 4 else 4)
+    n_cls = max(lower, min(est, max_classes))
+    return int(n_cls)
+
+def _merge_smallest_adjacent(ranges, max_classes):
+    """len(ranges) > max_classes인 경우, 가장 폭이 작은 인접 구간을 병합해 상한 맞춤."""
+    if not ranges or len(ranges) <= max_classes:
+        return ranges
+    import numpy as np
+    rs = list(ranges)
+    while len(rs) > max_classes:
+        widths = np.array([hi - lo for (lo, hi) in rs], dtype=float)
+        idx = int(np.argmin(widths))
+        if idx == 0:
+            rs[0] = (rs[0][0], rs[1][1]); del rs[1]
+        elif idx == len(rs) - 1:
+            rs[-2] = (rs[-2][0], rs[-1][1]); del rs[-1]
+        else:
+            # 좌/우 중 더 작은 쪽과 병합
+            left_w  = rs[idx][0] - rs[idx-1][0] if idx-1 >= 0 else float("inf")
+            right_w = rs[idx+1][1] - rs[idx][1] if idx+1 < len(rs) else float("inf")
+            if left_w <= right_w:
+                rs[idx-1] = (rs[idx-1][0], rs[idx][1]); del rs[idx]
+            else:
+                rs[idx] = (rs[idx][0], rs[idx+1][1]); del rs[idx+1]
+    return rs
+# ---------------------------------------------------------------------------
+
 def get_class_return_range(class_id: int, symbol: str, strategy: str):
     key = (symbol, strategy)
     ranges = _ranges_cache.get(key)
@@ -317,9 +372,10 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
     """
     미래 최대고가/최저저가 기반 'signed' 수익률 분포로 클래스 경계 생성.
     - r_up  = (max(high[i..i+h]) - close[i]) / close[i]  (>=0)
-    - r_down= (min(low [i..i+h]) - close[i]) / close[i]  (<=0)
+    - r_down= (min(low [i..i+h])  - close[i]) / close[i]  (<=0)
     - 분포 = concat(r_down, r_up) → 음/양 공존
     - 전략별 ±캡, 최소 구간 폭, 0% 중립 밴드 보장, 엄격 단조(strict) 보정
+    - ❗️bin 개수는 데이터 기반으로 4~MAX_CLASSES 사이에서 자동 결정
     """
     import numpy as np
     from data.utils import get_kline_by_strategy
@@ -362,7 +418,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
         lo_r, hi_r = ranges[right_idx]
         ranges[left_idx]  = (_round2(lo_l), _round2(-_EPS_ZERO_BAND))
         ranges[right_idx] = (_round2(_EPS_ZERO_BAND), _round2(hi_r))
-        # 중앙에 새 중립 구간 삽입
+        # 중앙에 새 중립 구간 삽입 → 이후 strict/상한 보정
         ranges = ranges[:right_idx] + [(_round2(-_EPS_ZERO_BAND), _round2(_EPS_ZERO_BAND))] + ranges[right_idx:]
         return _fix_monotonic(ranges)
 
@@ -401,6 +457,8 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
         ranges = _ensure_zero_band(ranges)
         if BIN_CONF.get("strict", True):
             ranges = _strictify(ranges)
+        if len(ranges) > MAX_CLASSES:
+            ranges = _merge_smallest_adjacent(ranges, MAX_CLASSES)
         return ranges
 
     def compute_ranges_from_kline():
@@ -411,6 +469,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
 
             horizon_hours = _strategy_horizon_hours(strategy)
             rets_signed = _future_extreme_signed_returns(df_price, horizon_hours=horizon_hours)
+            import numpy as np
             rets_signed = rets_signed[np.isfinite(rets_signed)]
             if rets_signed.size < 10:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="수익률 샘플 부족")
@@ -418,9 +477,10 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             # 전략별 ±캡
             rets_signed = np.array([_cap_by_strategy(float(r), strategy) for r in rets_signed], dtype=np.float32)
 
-            base_n = int(_config.get("NUM_CLASSES", 10))
-            n_cls = min(MAX_CLASSES, max(4, base_n))
+            # ✅ 동적 bin 수 결정 (최소4 ~ MAX_CLASSES, 기본 힌트(NUM_CLASSES)는 하한 가이드 역할만)
+            n_cls = _choose_n_classes(rets_signed, max_classes=int(_config.get("MAX_CLASSES", 20)), hint_min=int(_config.get("NUM_CLASSES", 10)))
 
+            # 분할 방식
             if method == "quantile":
                 qs = np.quantile(rets_signed, np.linspace(0, 1, n_cls + 1))
             else:  # "linear"
@@ -437,6 +497,8 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             fixed = _ensure_zero_band(fixed)
             if BIN_CONF.get("strict", True):
                 fixed = _strictify(fixed)
+            if len(fixed) > int(_config.get("MAX_CLASSES", 20)):
+                fixed = _merge_smallest_adjacent(fixed, int(_config.get("MAX_CLASSES", 20)))
 
             if not fixed or len(fixed) < 2:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="최종 경계 부족(가드)")
@@ -556,4 +618,4 @@ __all__ = [
     "get_ORDERED_TRAIN", "get_PREDICT_MIN_RETURN", "get_DISPLAY_MIN_RETURN",
     "get_SSL_CACHE_DIR",
     "FEATURE_INPUT_SIZE", "NUM_CLASSES", "FAIL_AUGMENT_RATIO", "MIN_FEATURES",
-    ]
+]
