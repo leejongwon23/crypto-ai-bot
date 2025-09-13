@@ -668,7 +668,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
 
         # ===== 성능 0 방지: 단일 클래스/검증 불가 케이스 스킵 =====
         if len(X_raw) < 10:
-            _log_skip(symbol,strategy,f"샘플 부족(rows={len(df)}, limit={_limit}, min={_min_required})"); return res
+            _log_skip(symbol,strategy,f"샘플 부족(rows={len[df]}, limit={_limit}, min={_min_required})"); return res
         uniq_all = np.unique(y)
         if len(uniq_all) < 2:
             _log_skip(symbol,strategy,"라벨 단일 클래스 → 학습/평가 스킵"); return res
