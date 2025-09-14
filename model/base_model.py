@@ -404,5 +404,23 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
         print(f"[info] input_size pad 적용: {input_size} → {FEATURE_INPUT_SIZE}")
         input_size = FEATURE_INPUT_SIZE
 
+    # ✅ XGBoost는 옵션 의존성 → 미설치/미지정 시 안전 대체
     if model_type == "xgboost":
-        if not
+        if not _HAS_XGB or not model_path:
+            print("[⚠️ get_model] XGBoost 사용 불가(미설치 또는 경로 없음). cnn_lstm 대체.")
+            model_type = "cnn_lstm"
+
+    model_cls = MODEL_CLASSES.get(model_type, CNNLSTMPricePredictor)
+
+    # ✅ 모델 생성 (예외 시 안전 폴백)
+    try:
+        if model_type == "xgboost":
+            model = model_cls(model_path=model_path)
+        else:
+            model = model_cls(input_size=input_size, output_size=output_size)
+    except Exception as e:
+        print(f"[⚠️ get_model 예외] {e}")
+        print(f"[Fallback] input_size={FEATURE_INPUT_SIZE}로 재시도")
+        model = CNNLSTMPricePredictor(input_size=FEATURE_INPUT_SIZE, output_size=output_size)
+
+    return model
