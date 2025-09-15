@@ -1,4 +1,4 @@
-# === train.py (STRICT: short->mid->long hard order, cooperative cancel, watchdog, robust predict barrier + SMOKE PREDICT) ===
+# === train.py (STRICT: long-enough training, strict order, coop cancel, watchdog, robust gate + SMOKE PREDICT) ===
 import os
 def _set_default_thread_env(n: str, v: int):
     if os.getenv(n) is None: os.environ[n] = str(v)
@@ -53,10 +53,10 @@ from model.base_model import get_model
 from feature_importance import compute_feature_importance, save_feature_importance
 from failure_db import insert_failure_record, ensure_failure_db
 import logger
-from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges, set_NUM_CLASSES, STRATEGY_CONFIG, get_QUALITY  # ← ADD get_QUALITY
+from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges, set_NUM_CLASSES, STRATEGY_CONFIG, get_QUALITY
 from data_augmentation import balance_classes
 from window_optimizer import find_best_window
-from focal_loss import FocalLoss  # ← CHANGED: use FocalLoss
+from focal_loss import FocalLoss
 
 # --- ssl_pretrain (옵션) ---
 DISABLE_SSL = os.getenv("DISABLE_SSL","1")=="1"  # 기본 비활성(시간 단축)
@@ -75,12 +75,11 @@ except:
 
 def _safe_print(msg):
     try:
-        # 로그 폭주 방지: QUIET_PROGRESS=1이면 중요 수준만 출력
         if os.getenv("QUIET_PROGRESS","1")=="1":
             if not (isinstance(msg,str) and msg.startswith(("🟩","🟦","✅","🛑","🔴","⚠️","🚀","📌","🟡","🟢","ℹ️","[STOP]","[PREDICT]","[HALT]"))):
                 return
         print(msg, flush=True)
-    except: 
+    except:
         pass
 
 # ====== 🔔 하트비트/워치독 ======
@@ -105,7 +104,6 @@ def _progress(tag:str):
     if _WATCHDOG_ABORT.is_set():
         _WATCHDOG_ABORT.clear()
         _safe_print(f"🟢 [WATCHDOG] abort cleared → {tag}")
-    # 조용모드에선 progress 스팸 억제
     if os.getenv("QUIET_PROGRESS","1")!="1" and (now % 5.0) < 0.1:
         _safe_print(f"📌 progress: {tag}")
 
@@ -150,7 +148,7 @@ try:
 except Exception as _e: _safe_print(f"[HOOK] attach fail → {_e}")
 
 def _maybe_run_failure_learn(background=True):
-    if _is_cold_start():  # 콜드스타트 방지
+    if _is_cold_start():
         _safe_print("[FAIL-LEARN] cold start → skip")
         return
     if not _ENABLE_BG_FAILURE_TRAIN:
@@ -169,7 +167,7 @@ def _maybe_run_failure_learn(background=True):
 try: _maybe_run_failure_learn(True)
 except Exception as _e: _safe_print(f"[FAIL-LEARN] init err] {_e}")
 
-# [ADD] failure DB를 모듈 로드시 보장 (예측이 선행되어도 안전)
+# [ADD] failure DB를 모듈 로드시 보장
 try:
     ensure_failure_db(); _FAILURE_DB_READY = True
 except Exception as _e:
@@ -182,21 +180,26 @@ MODEL_DIR="/persistent/models"; os.makedirs(MODEL_DIR,exist_ok=True)
 
 _MAX_ROWS_FOR_TRAIN=int(os.getenv("TRAIN_MAX_ROWS","1200"))
 _BATCH_SIZE=int(os.getenv("TRAIN_BATCH_SIZE","128"))
-_NUM_WORKERS=int(os.getenv("TRAIN_NUM_WORKERS","0"))  # 기본 0 (멀티워커 금지)
+_NUM_WORKERS=int(os.getenv("TRAIN_NUM_WORKERS","0"))
 _PIN_MEMORY=False; _PERSISTENT=False
 
-# 전략별 에폭(기본: 단6/중8/장10)
+# === 전략별 에폭 (3번 수정: 충분히 오래 돌리기 기본값 상향) ===
+# 기본값: 단기 24 / 중기 28 / 장기 32  (env로 덮어쓰기 가능)
 def _epochs_for(strategy:str)->int:
-    if strategy=="단기": return int(os.getenv("EPOCHS_SHORT","6"))
-    if strategy=="중기": return int(os.getenv("EPOCHS_MID","8"))
-    if strategy=="장기": return int(os.getenv("EPOCHS_LONG","10"))
-    return 8
+    if strategy=="단기": return int(os.getenv("EPOCHS_SHORT","24"))
+    if strategy=="중기": return int(os.getenv("EPOCHS_MID","28"))
+    if strategy=="장기": return int(os.getenv("EPOCHS_LONG","32"))
+    return 24
 
 # === SMART TRAIN switches ===
 SMART_TRAIN = os.getenv("SMART_TRAIN","1")=="1"
-LABEL_SMOOTH = float(os.getenv("LABEL_SMOOTH","0.05"))   # kept for compatibility (not used in FocalLoss)
-GRAD_CLIP = float(os.getenv("GRAD_CLIP_NORM","1.0"))     # 0.0(해제)~2.0 권장
-FOCAL_GAMMA = float(os.getenv("FOCAL_GAMMA","2.0"))      # ← NEW: focal focusing parameter
+LABEL_SMOOTH = float(os.getenv("LABEL_SMOOTH","0.05"))
+GRAD_CLIP = float(os.getenv("GRAD_CLIP_NORM","1.0"))
+FOCAL_GAMMA = float(os.getenv("FOCAL_GAMMA","2.0"))
+
+# 3번 수정: EarlyStopping 민감도 조절
+EARLY_STOP_PATIENCE = int(os.getenv("EARLY_STOP_PATIENCE","5"))
+EARLY_STOP_MIN_DELTA = float(os.getenv("EARLY_STOP_MIN_DELTA","0.001"))  # ← NEW
 
 now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 
@@ -241,7 +244,6 @@ def _fsync_dir(d: str):
     except Exception: pass
 
 def _disk_barrier(paths: list[str]):
-    # 강제 플러시(가능한 경우)
     for p in paths:
         try:
             if os.path.isdir(p):
@@ -258,7 +260,6 @@ def _disk_barrier(paths: list[str]):
 def _maybe_insert_failure(payload:dict, feature_vector:list|None=None):
     try:
         if not _ENABLE_TRAIN_FAILURE_RECORD:
-            # 평가/예측 체계 준비 전에는 차단
             if not ready_for_group_predict():
                 return
         insert_failure_record(payload, feature_vector=(feature_vector or []))
@@ -275,7 +276,7 @@ def _log_fail(symbol,strategy,reason):
 
 def _strategy_horizon_hours(s:str)->int: return {"단기":4,"중기":24,"장기":168}.get(s,24)
 
-# ⬇️ 변경: 라벨 수익률을 모드로 선택 (기본 close→ signed ±)
+# ⬇️ 변경: 라벨 수익률 모드 선택
 def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
     if df is None or len(df) == 0 or "timestamp" not in df.columns:
         return np.zeros(0 if df is None else len(df), dtype=np.float32)
@@ -306,25 +307,21 @@ def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.nda
         base = close[i] if close[i] > 0 else (close[i] + 1e-6)
 
         if mode == "max":
-            r = (mx - base) / (base + 1e-12)                 # 항상 ≥0 (옛 방식)
+            r = (mx - base) / (base + 1e-12)
         elif mode == "signed_extreme":
             up = (mx - base) / (base + 1e-12)
-            dn = (mn - base) / (base + 1e-12)                # 음수 가능
-            r = up if abs(up) >= abs(dn) else dn             # 방향 보존 극값
-        else:  # "close" (기본)
+            dn = (mn - base) / (base + 1e-12)
+            r = up if abs(up) >= abs(dn) else dn
+        else:  # "close"
             fut = close[j_last]
-            r = (fut - base) / (base + 1e-12)                # 종가-대-종가, ± 가능
+            r = (fut - base) / (base + 1e-12)
 
         out[i] = float(r)
 
     return out
 
-# === ADD: 커버리지 기반 검증 분할 ===
+# === 커버리지 기반 검증 분할 ===
 def coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, max_windows=200, num_classes=None):
-    """
-    y: 1D 라벨 배열
-    검증셋이 가능한 한 많은 클래스(coverage)를 포함하도록 뒤에서부터 여러 구간을 훑어 최적 구간 선택.
-    """
     y = np.asarray(y).astype(int)
     n = len(y)
     val_len = max(1, int(round(n * float(val_frac))))
@@ -360,12 +357,8 @@ def coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, max_w
 
     val_idx = np.arange(start, end)
     train_idx = np.concatenate([np.arange(0, start), np.arange(end, n)], axis=0)
-
-    # 로그 한 줄 (과다출력 방지 위해 _safe_print 사용)
     _safe_print(f"[✅ 검증셋 커버리지] covered={len(cnt)}/{num_classes} ({coverage:.2f}) window={start}:{end} size={len(val_idx)}")
-
     return train_idx, val_idx
-# === end coverage split ===
 
 def _stem(p:str)->str: return os.path.splitext(p)[0]
 
@@ -373,7 +366,6 @@ def _save_model_and_meta(model:nn.Module,path_pt:str,meta:dict):
     stem=_stem(path_pt); weight=stem+".ptz"; save_model(weight, model.state_dict())
     meta_path = stem+".meta.json"
     _atomic_write(meta_path, json.dumps(meta,ensure_ascii=False,separators=(",",":")), mode="w")
-    # 저장 직후 디스크 배리어
     _disk_barrier([weight, meta_path, MODEL_DIR])
     return weight, meta_path
 
@@ -385,7 +377,6 @@ def _safe_alias(src:str,dst:str):
             os.remove(dst)
     except Exception:
         pass
-    # 하드링크/심링크 실패시 복사로 폴백(신뢰성 우선)
     try:
         os.link(src, dst); mode="hardlink"
     except Exception:
@@ -438,13 +429,10 @@ def _has_any_model_for_symbol(symbol: str) -> bool:
         pass
     return False
 
-# === [ADD] 심볼+전략 단위 모델 존재 체크 (부분 예측에 필요) ===
 def _has_model_for(symbol: str, strategy: str) -> bool:
     try:
-        # 평면 형태
         if any(glob.glob(os.path.join(MODEL_DIR, f"{symbol}_{strategy}_*{ext}")) for ext in _KNOWN_EXTS):
             return True
-        # 디렉토리 형태
         d = os.path.join(MODEL_DIR, symbol, strategy)
         if os.path.isdir(d) and any(glob.glob(os.path.join(d, f"*{ext}")) for ext in _KNOWN_EXTS):
             return True
@@ -452,9 +440,8 @@ def _has_model_for(symbol: str, strategy: str) -> bool:
         pass
     return False
 
-# === [NEW] 예측 전 모델 가시화 보장 대기 ===
+# === 예측 전 모델 가시화 보장 대기 ===
 def _await_models_visible(symbols:list[str], timeout_sec:int=20, poll_sec:float=0.5) -> list[str]:
-    """학습 직후 파일시스템 전파/동기화 지연 대비: 모델이 보일 때까지 대기."""
     deadline = time.time() + max(1, int(timeout_sec))
     remaining = set(symbols or [])
     last_report = 0.0
@@ -469,7 +456,7 @@ def _await_models_visible(symbols:list[str], timeout_sec:int=20, poll_sec:float=
         time.sleep(max(0.1, float(poll_sec)))
     return sorted(set(symbols) - remaining)
 
-# ====== (★) 성능 임계치: 단기 통과가 반드시 선행되어야 다음 단계 진입 ======
+# ====== (★) 성능 임계치 ======
 EVAL_MIN_F1_SHORT = float(os.getenv("EVAL_MIN_F1_SHORT", "0.55"))
 EVAL_MIN_F1_MID   = float(os.getenv("EVAL_MIN_F1_MID",   "0.50"))
 EVAL_MIN_F1_LONG  = float(os.getenv("EVAL_MIN_F1_LONG",  "0.45"))
@@ -482,8 +469,8 @@ if _HAS_LIGHTNING:
     class LitSeqModel(pl.LightningModule):
         def __init__(self, base_model:nn.Module, lr:float=1e-3, cls_w:torch.Tensor|None=None, gamma:float=2.0):
             super().__init__(); self.model=base_model
-            self.train_crit=FocalLoss(gamma=gamma, weight=cls_w)  # ← CHANGED
-            self.eval_crit =nn.CrossEntropyLoss(weight=cls_w)     # eval은 CE 유지
+            self.train_crit=FocalLoss(gamma=gamma, weight=cls_w)
+            self.eval_crit =nn.CrossEntropyLoss(weight=cls_w)
             self.lr=lr
         def forward(self,x): return self.model(x)
         def training_step(self,batch,idx):
@@ -491,7 +478,6 @@ if _HAS_LIGHTNING:
         def validation_step(self,batch,idx):
             xb,yb=batch
             logits=self(xb)
-            # ← FIX: PL 버전 차이 회피, sklearn로 F1 계산
             preds=torch.argmax(logits,dim=1).detach().cpu().numpy()
             ytrue=yb.detach().cpu().numpy()
             f1 = float(f1_score(ytrue, preds, average="macro"))
@@ -515,7 +501,7 @@ if _HAS_LIGHTNING:
         def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx): self._hb("on_train_batch_end", batch_idx)
         def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx): self._hb("on_val_batch_end", batch_idx)
 
-# ⏱ TIMEOUT GUARD (+ heartbeat)
+# ⏱ TIMEOUT GUARD
 import multiprocessing as _mp
 def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0, stop_event: threading.Event | None = None, hb_tag:str|None=None, hb_interval:float=5.0):
     if kwargs is None: kwargs={}
@@ -586,7 +572,6 @@ def _log_class_ranges_safe(symbol, strategy, group_id, class_ranges, note, stop_
 
 def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event: threading.Event | None = None):
     global _FAILURE_DB_READY
-    # 동적 에폭 결정
     if max_epochs is None:
         max_epochs = _epochs_for(strategy)
 
@@ -601,7 +586,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
         try:
             if not DISABLE_SSL:
                 ck=get_ssl_ckpt_path(symbol,strategy)
-                if not os.path.exists(ck):
+                if not os.path.exists(ck)):
                     _safe_print(f"[SSL] start masked_reconstruction → {ck}")
                     _ssl_timeout=float(os.getenv("SSL_TIMEOUT_SEC","120"))
                     status_ssl, _ = _run_with_timeout(
@@ -694,9 +679,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
             _safe_print(f"[LABEL CLIP] low={clipped_low} high={clipped_high} unmatched={unmatched}")
         labels=np.array(labels,dtype=np.int64)
 
-        # ---- 특징행렬 (스케일링 없이 시퀀스 생성)
+        # ---- 특징행렬
         features_only=feat.drop(columns=["timestamp","strategy"],errors="ignore")
-        features_only = features_only.replace([np.inf, -np.inf], np.nan).fillna(0.0)  # ← ADD: NaN/inf 가드
+        features_only = features_only.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         try:
             feat_dim = int(getattr(features_only, "shape", [0, FEATURE_INPUT_SIZE])[1])
         except Exception:
@@ -704,11 +689,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
 
         if len(features_only)>_MAX_ROWS_FOR_TRAIN or len(labels)>_MAX_ROWS_FOR_TRAIN:
             cut=min(_MAX_ROWS_FOR_TRAIN,len(features_only),len(labels))
-            features_only=features_only.iloc[-cut:,:]
-            labels=labels[-cut:]
+            features_only=features_only.iloc[-cut:,:]; labels=labels[-cut:]
 
         try:
-            # ← CHANGED: window 후보 고정 [16,20,24,32]
             best_window=find_best_window(symbol,strategy,window_list=[16,20,24,32],group_id=group_id)
         except: best_window=20
         window=max(5,int(best_window)); window=min(window, max(6,len(features_only)-1))
@@ -726,14 +709,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
             y.append(labels[yi] if 0<=yi<len(labels) else 0)
         X_raw=np.array(X_raw,dtype=np.float32); y=np.array(y,dtype=np.int64)
 
-        # ===== 성능 0 방지: 단일 클래스/검증 불가 케이스 스킵 =====
         if len(X_raw) < 10:
-            _log_skip(symbol,strategy,f"샘플 부족(rows={len(df)}, limit={_limit}, min={_min_required})"); return res  # ← FIX: len(df)
-        uniq_all = np.unique(y)
-        if len(uniq_all) < 2:
+            _log_skip(symbol,strategy,f"샘플 부족(rows={len(df)}, limit={_limit}, min={_min_required})"); return res
+        if len(np.unique(y)) < 2:
             _log_skip(symbol,strategy,"라벨 단일 클래스 → 학습/평가 스킵"); return res
 
-        # ── 분할: 커버리지 우선 검증 분할 ← REPLACED
         train_idx, val_idx = coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, num_classes=len(class_ranges))
 
         # ---- train-only fit scaler
@@ -744,19 +724,18 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
         val_X   = scaler.transform(X_raw[val_idx].reshape(-1, feat_dim)).reshape(len(val_idx), window, feat_dim)
         train_y, val_y = y[train_idx], y[val_idx]
 
-        # ===== 성능 0 방지: 분할 후에도 단일 클래스면 스킵 =====
         if len(np.unique(train_y)) < 2 or len(np.unique(val_y)) < 2:
             _log_skip(symbol,strategy,"분할 후 단일 클래스 → 학습/평가 스킵"); return res
 
-        # 데이터 적을 땐 에폭 자동 축소
+        # 데이터가 극히 적으면 에폭 자동 축소
         if len(train_X) < 200:
-            max_epochs = max(4, int(round(max_epochs * 0.7)))
+            max_epochs = max(8, int(round(max_epochs * 0.7)))
 
         try:
             if len(train_X)<200: train_X,train_y=balance_classes(train_X,train_y,num_classes=len(class_ranges))
         except Exception as e: _safe_print(f"[balance err] {e}")
 
-        # ===== 클래스 가중치: 등장한 클래스만 계산 → 전체 크기로 확장 =====
+        # ===== 클래스 가중치
         present = np.unique(train_y)
         try:
             cw_present = compute_class_weight(class_weight="balanced", classes=present, y=train_y)
@@ -774,25 +753,31 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
             base=get_model(model_type,input_size=feat_dim,output_size=len(class_ranges)).to(DEVICE)
 
             # DataLoaders
-            train_loader=DataLoader(
-                TensorDataset(torch.tensor(train_X),torch.tensor(train_y)),
-                batch_size=_BATCH_SIZE,shuffle=True,
-                num_workers=_NUM_WORKERS,pin_memory=_PIN_MEMORY,persistent_workers=_PERSISTENT
-            )
-            val_loader=DataLoader(
-                TensorDataset(torch.tensor(val_X),torch.tensor(val_y)),
-                batch_size=_BATCH_SIZE,
-                num_workers=_NUM_WORKERS,pin_memory=_PIN_MEMORY,persistent_workers=_PERSISTENT
-            )
+            base_ds=TensorDataset(torch.tensor(train_X),torch.tensor(train_y))
+            if SMART_TRAIN:
+                cls_counts = np.bincount(train_y, minlength=len(class_ranges)).astype(np.float64)
+                inv = 1.0 / np.clip(cls_counts, 1.0, None)
+                sample_w = torch.tensor(inv[train_y], dtype=torch.double)
+                sampler = torch.utils.data.WeightedRandomSampler(sample_w, num_samples=len(train_y), replacement=True)
+                train_loader=DataLoader(base_ds,batch_size=_BATCH_SIZE,sampler=sampler,
+                                        num_workers=_NUM_WORKERS,pin_memory=_PIN_MEMORY,persistent_workers=_PERSISTENT)
+            else:
+                train_loader=DataLoader(base_ds,batch_size=_BATCH_SIZE,shuffle=True,
+                                        num_workers=_NUM_WORKERS,pin_memory=_PIN_MEMORY,persistent_workers=_PERSISTENT)
+            val_loader=DataLoader(TensorDataset(torch.tensor(val_X),torch.tensor(val_y)),
+                                  batch_size=_BATCH_SIZE,
+                                  num_workers=_NUM_WORKERS,pin_memory=_PIN_MEMORY,persistent_workers=_PERSISTENT)
 
             total_loss=0.0
             _safe_print(f"🟦 TRAIN begin → {symbol}-{strategy}-g{group_id} [{model_type}] (epochs={max_epochs}, train={len(train_X)}, val={len(val_X)})")
 
             if _HAS_LIGHTNING:
-                lit=LitSeqModel(base,lr=1e-3,cls_w=w,gamma=FOCAL_GAMMA)  # ← CHANGED
+                lit=LitSeqModel(base,lr=1e-3,cls_w=w,gamma=FOCAL_GAMMA)
                 callbacks=[_HeartbeatAndStop(stop_event)]
                 ckpt_cb = ModelCheckpoint(monitor="val_f1", mode="max", save_top_k=1, filename=f"{symbol}-{strategy}-{model_type}-best")
-                es_cb   = EarlyStopping(monitor="val_f1", mode="max", patience=int(os.getenv("EARLY_STOP_PATIENCE","5")), check_finite=True)
+                es_cb   = EarlyStopping(monitor="val_f1", mode="max",
+                                        patience=EARLY_STOP_PATIENCE, min_delta=EARLY_STOP_MIN_DELTA,
+                                        check_finite=True)
                 callbacks += [ckpt_cb, es_cb]
                 trainer=pl.Trainer(max_epochs=max_epochs, accelerator=("gpu" if torch.cuda.is_available() else "cpu"),
                                    devices=1, enable_checkpointing=True, logger=False, enable_model_summary=False,
@@ -800,7 +785,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
                                    gradient_clip_val=GRAD_CLIP if SMART_TRAIN else 0.0)
                 trainer.fit(lit,train_dataloaders=train_loader,val_dataloaders=val_loader)
                 model=base
-                # ckpt 로드 (가능 시)
                 if ckpt_cb.best_model_path and os.path.exists(ckpt_cb.best_model_path):
                     try:
                         state=torch.load(ckpt_cb.best_model_path, map_location="cpu")["state_dict"]
@@ -810,34 +794,16 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
                         _safe_print(f"[CKPT load skip] {_e}")
                 _check_stop(stop_event,f"after PL train {model_type}")
             else:
-                # ====== 수동 학습 경로 (가중치 + 얼리스톱 + 베스트웨이트) ======
                 model=base
                 opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-                # 손실: FocalLoss(+가중치) ← CHANGED
                 crit = FocalLoss(gamma=FOCAL_GAMMA, weight=w)
 
-                # deterministic seed
-                g = torch.Generator(); g.manual_seed(20240101)
-
-                # WeightedRandomSampler (불균형 보정)
-                base_ds = TensorDataset(torch.tensor(train_X), torch.tensor(train_y))
-                if SMART_TRAIN:
-                    cls_counts = np.bincount(train_y, minlength=len(class_ranges)).astype(np.float64)
-                    inv = 1.0 / np.clip(cls_counts, 1.0, None)
-                    sample_w = torch.tensor(inv[train_y], dtype=torch.double)
-                    sampler = torch.utils.data.WeightedRandomSampler(sample_w, num_samples=len(train_y), replacement=True)
-                    train_loader = DataLoader(base_ds, batch_size=_BATCH_SIZE, sampler=sampler,
-                                              num_workers=_NUM_WORKERS, pin_memory=_PIN_MEMORY, persistent_workers=_PERSISTENT)
-                else:
-                    train_loader = DataLoader(base_ds, batch_size=_BATCH_SIZE, shuffle=True, generator=g,
-                                              num_workers=_NUM_WORKERS, pin_memory=_PIN_MEMORY, persistent_workers=_PERSISTENT)
-
-                # 스케줄러: plateau 시 LR ↓
                 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                     opt, mode="max", factor=0.5, patience=2, min_lr=1e-5
                 ) if SMART_TRAIN else None
 
-                patience=int(os.getenv("EARLY_STOP_PATIENCE","5"))
+                patience=EARLY_STOP_PATIENCE
+                min_delta=EARLY_STOP_MIN_DELTA
                 best_f1=-1.0; best_state=None; bad=0; total_loss=0.0
                 last_log_ts=time.time()
 
@@ -865,12 +831,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
                             preds.extend(p); lbls.extend(yb.numpy())
                     cur_f1=float(f1_score(lbls,preds,average="macro"))
 
-                    # 스케줄러 스텝
                     if scheduler is not None:
                         scheduler.step(cur_f1)
 
-                    # early stop/bookkeep
-                    improved = cur_f1 > best_f1 + 1e-6
+                    # early stop/bookkeep (3번 수정: min_delta 반영)
+                    improved = (cur_f1 - best_f1) > min_delta if best_f1 >= 0 else True
                     if improved:
                         best_f1 = cur_f1
                         best_state = {k:v.detach().cpu().clone() for k,v in model.state_dict().items()}
@@ -878,21 +843,20 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
                     else:
                         bad += 1
                     if time.time()-last_log_ts>2:
-                        _safe_print(f"   ↳ {model_type} ep{ep+1}/{max_epochs} val_f1={cur_f1:.4f} bad={bad}/{patience} loss_sum={total_loss:.4f}")
+                        _safe_print(f"   ↳ {model_type} ep{ep+1}/{max_epochs} val_f1={cur_f1:.4f} best={best_f1:.4f} bad={bad}/{patience} loss_sum={total_loss:.4f}")
                         last_log_ts=time.time()
                     _progress(f"{model_type}:ep{ep}:end")
                     if bad >= patience:
-                        _safe_print(f"🛑 early stop @ ep{ep+1} (best_f1={best_f1:.4f})")
+                        _safe_print(f"🛑 early stop @ ep{ep+1} (best_f1={best_f1:.4f}, min_delta={min_delta})")
                         break
 
-                # load best weights before saving
                 if best_state is not None:
                     model.load_state_dict(best_state)
 
-            # ---- 최종 검증: acc, f1, val_loss 계산
+            # ---- 최종 검증
             _progress(f"eval:{model_type}")
             model.eval(); preds=[]; lbls=[]; val_loss_sum=0.0; n_val=0
-            crit_eval = nn.CrossEntropyLoss(weight=w)  # eval은 스무딩 없이 CE 유지
+            crit_eval = nn.CrossEntropyLoss(weight=w)
             with torch.no_grad():
                 for bi,(xb,yb) in enumerate(val_loader):
                     if bi % 32 == 0: _check_stop(stop_event,f"val batch {bi}"); _progress(f"val_b{bi}")
@@ -903,16 +867,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
             acc=float(accuracy_score(lbls,preds)); f1=float(f1_score(lbls,preds,average="macro"))
             val_loss = float(val_loss_sum / max(1,n_val))
 
-            # === 품질 최소 게이트(전략별 임계와 전역 VAL_F1_MIN 중 더 높은 값) ← ADD
             min_gate = max(_min_f1_for(strategy), float(get_QUALITY().get("VAL_F1_MIN", 0.10)))
 
             stem=os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_group{int(group_id) if group_id is not None else 0}_cls{int(len(class_ranges))}")
-
-            # 🔸 meta에 class_ranges를 포함 + gate/passed 기록
             meta={
-                "symbol":symbol,
-                "strategy":strategy,
-                "model":model_type,
+                "symbol":symbol,"strategy":strategy,"model":model_type,
                 "group_id":int(group_id) if group_id is not None else 0,
                 "num_classes":int(len(class_ranges)),
                 "class_ranges": [[float(lo), float(hi)] for (lo,hi) in class_ranges],
@@ -925,24 +884,22 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
                 "engine":"lightning" if _HAS_LIGHTNING else "manual",
                 "data_flags":{"rows":int(len(df)),"limit":int(_limit),"min":int(_min_required),"augment_needed":bool(augment_needed),"enough_for_training":bool(enough_for_training)},
                 "train_loss_sum":float(total_loss),
-                "min_f1_gate": float(min_gate)  # ← ADD
+                "min_f1_gate": float(min_gate)
             }
 
             wpath,mpath=_save_model_and_meta(model, stem+".pt", meta)
             _archive_old_checkpoints(symbol,strategy,model_type,keep_n=1)
             _emit_aliases(wpath,mpath,symbol,strategy,model_type)
-
-            # 모델 가시화 보장(파일시스템 동기화 지연 방지)
             _disk_barrier([wpath, mpath, MODEL_DIR, os.path.join(MODEL_DIR, symbol), os.path.join(MODEL_DIR, symbol, strategy)])
 
             logger.log_training_result(
                 symbol, strategy, model=os.path.basename(wpath), accuracy=acc, f1=f1, loss=val_loss,
                 note=(f"train_one_model(window={window}, cap={len(features_only)}, engine={'lightning' if _HAS_LIGHTNING else 'manual'}, "
-                      f"data_flags={{rows:{len(df)},limit:{_limit},min:{_min_required},aug:{int(augment_needed)},enough_for_training:{int(enough_for_training)}}})"),
+                      f"data_flags={{rows:{len(df)},limit:{_limit},min:{_min_required},aug:{int(augment_needed)},enough:{int(enough_for_training)}}}, "
+                      f"epochs={max_epochs}, es_patience={EARLY_STOP_PATIENCE}, es_delta={EARLY_STOP_MIN_DELTA})"),
                 source_exchange="BYBIT", status="success"
             )
 
-            # === (★) 개별 모델 통과 여부 기록 (전역게이트 반영) ← CHANGED
             passed = bool(f1 >= min_gate)
             meta.update({"passed": int(passed)})
             res["models"].append({
@@ -953,7 +910,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
 
             if torch.cuda.is_available(): torch.cuda.empty_cache()
 
-        # === (★) 전략/그룹 레벨 ok: 임계치 통과 모델이 하나라도 있어야 True
         res["ok"] = any(m.get("passed") for m in res.get("models", []))
         _safe_print(f"[RESULT] {symbol}-{strategy}-g{group_id} ok={res['ok']}")
         _progress("train_one_model:end")
@@ -999,19 +955,17 @@ def _is_cold_start()->bool:
     except Exception:
         return True
 
-# === [NEW] 전역 예측 락 대기/정리 유틸 ===
+# === 전역 예측 락 유틸 ===
 _PREDICT_LOCK_FILE = "/persistent/run/predict_running.lock"
 def _predict_lock_exists()->bool:
     try: return os.path.exists(_PREDICT_LOCK_FILE)
     except: return False
-
 def _predict_lock_is_stale(stale_sec:int)->bool:
     try:
         if not os.path.exists(_PREDICT_LOCK_FILE): return False
         m = os.path.getmtime(_PREDICT_LOCK_FILE)
         return (time.time() - float(m)) > max(10, int(stale_sec))
     except: return False
-
 def _clear_predict_lock(force:bool=False, stale_sec:int=120, tag:str=""):
     try:
         if not _predict_lock_exists(): return
@@ -1020,7 +974,6 @@ def _clear_predict_lock(force:bool=False, stale_sec:int=120, tag:str=""):
             _safe_print(f"[LOCK] cleared predict lock (force={int(force)} stale>{stale_sec}s) {tag}")
     except Exception as e:
         _safe_print(f"[LOCK] clear fail → {e} {tag}")
-
 def _wait_predict_lock_clear(timeout_sec:int=20, stale_sec:int=120, poll:float=0.25, tag:str=""):
     deadline = time.time() + max(1, int(timeout_sec))
     while _predict_lock_exists() and time.time() < deadline:
@@ -1032,10 +985,8 @@ def _wait_predict_lock_clear(timeout_sec:int=20, stale_sec:int=120, poll:float=0
         _clear_predict_lock(force=True, stale_sec=stale_sec, tag=f"{tag}|final")
     return not _predict_lock_exists()
 
-# === 부분 예측 허용 스위치(ENV) ===
 _PREDICT_PARTIAL_OK = os.getenv("PREDICT_PARTIAL_OK", "1") == "1"
 
-# === [CHANGED] 예측은 **동기 실행** (스레드/타임아웃 제거)
 _PREDICT_TIMEOUT_SEC=float(os.getenv("PREDICT_TIMEOUT_SEC","30"))
 def _safe_predict_sync(predict_fn,symbol,strategy,source,model_type=None, stop_event: threading.Event | None = None):
     try:
@@ -1047,7 +998,6 @@ def _safe_predict_sync(predict_fn,symbol,strategy,source,model_type=None, stop_e
         _safe_print(f"[PREDICT FAIL] {symbol}-{strategy}: {e}")
         return False
 
-# === [ADD] predict_trigger가 사용할 (옵션) 타임아웃 래퍼 익스포트 ===
 def _safe_predict_with_timeout(predict_fn, *, symbol, strategy, source="그룹직후", model_type=None, timeout=None):
     t = float(timeout or _PREDICT_TIMEOUT_SEC)
     status, _ = _run_with_timeout(
@@ -1081,11 +1031,6 @@ _SYMBOL_RETRY_LIMIT = int(os.getenv("SYMBOL_RETRY_LIMIT","1"))
 _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = os.getenv("REQUIRE_ONE_PER_GROUP","1")=="1"
 
 def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) -> tuple[bool, dict]:
-    """
-    (핵심) 단기 → 중기 → 장기 순서 고정.
-    '단기 성공(F1 임계치 통과)'이 선행되지 않으면 뒤 전략 **진입 자체 금지**.
-    반환: (symbol_complete, detail)
-    """
     strategies=["단기","중기","장기"]
     detail={}
     symbol_complete=True
@@ -1129,7 +1074,6 @@ def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) ->
                 _reset_watchdog("enter symbol/group")
                 _progress(f"train_models:{symbol}-{strategy}-g{gid}")
 
-                # === (★) 단기는 재시도 허용, 나머지는 1회
                 attempts = (_SHORT_RETRY if strategy=="단기" else 1)
                 ok_once = False
                 for attempt in range(attempts):
@@ -1163,11 +1107,6 @@ def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) ->
     return symbol_complete, detail
 
 def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_should: bool = False):
-    """
-    심볼당:
-      - 단기 '성공(F1≥임계치)' 완료 → 중기 → 장기.
-      - 중간에 미완료면 재시도 후에도 미완료면 **그 심볼 종료**.
-    """
     completed_symbols=[]; partial_symbols=[]
     env_force = (os.getenv("TRAIN_FORCE_IGNORE_SHOULD","0") == "1")
 
@@ -1204,7 +1143,6 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
                 _safe_print(f"[HALT] {symbol} 미완료 → 그룹 진행 중단")
                 break
 
-    # BG 작업 트리거 (콜드스타트/ENV 가드)
     try:
         import maintenance_fix_meta
         _run_bg_if_not_stopped("meta_fix", maintenance_fix_meta.fix_all_meta_json, stop_event)
@@ -1219,16 +1157,14 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
 
     return completed_symbols, partial_symbols
 
-# === [SMOKE] 후보 찾기 & 스모크 예측 유틸 ===
+# === [SMOKE] 후보 찾기 & 스모크 예측 ===
 def _scan_symbols_from_model_dir() -> list[str]:
     syms=set()
     try:
-        # flat files
         for p in glob.glob(os.path.join(MODEL_DIR, f"*_*_*.*")):
             b=os.path.basename(p)
             m=re.match(r"^([A-Z0-9]+)_[^_]+_", b)
             if m: syms.add(m.group(1))
-        # tree dirs
         for d in glob.glob(os.path.join(MODEL_DIR, "*")):
             if os.path.isdir(d):
                 syms.add(os.path.basename(d))
@@ -1249,7 +1185,7 @@ def _run_smoke_predict(predict_fn, symbol: str):
             ok_any |= _safe_predict_sync(predict_fn, symbol, strat, source="그룹직후(스모크)")
     return ok_any
 
-# === 그룹 예측 독점 플래그 (predict.py와 동일 경로/파일명) ===
+# === 그룹 예측 독점 플래그 ===
 _RUN_DIR = "/persistent/run"
 _GROUP_ACTIVE = os.path.join(_RUN_DIR, "group_predict.active")
 
@@ -1273,16 +1209,9 @@ def _group_active_off():
         _safe_print(f"[GROUP_ACTIVE off err] {e}")
 
 # === 그룹 루프 ===
-
 def _get_group_stale_sec() -> int:
-    """
-    predict.py(2번)과 환경변수 합치:
-      - 우선: PREDICT_LOCK_STALE_GROUP_SEC (기본 600)
-      - 백워드: PREDICT_LOCK_STALE_TRAIN_SEC (설정돼 있으면 사용)
-      - 최종 기본: 600
-    """
     v1 = os.getenv("PREDICT_LOCK_STALE_GROUP_SEC")
-    if v1 is not None: 
+    if v1 is not None:
         try: return max(3, int(v1))
         except: pass
     v2 = os.getenv("PREDICT_LOCK_STALE_TRAIN_SEC")
@@ -1295,9 +1224,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
     threading.Thread(target=_watchdog_loop, args=(stop_event,), daemon=True).start()
     _reset_watchdog("loop start")
 
-    # 시작 시 혹시 남아있던 플래그 정리
     _group_active_off()
-    # 루프 시작 즉시 예측 게이트 닫기(외부 조기예측 차단)
     try: close_predict_gate(note="loop_start")
     except Exception as e: _safe_print(f"[gate pre-close(err@start) {e}]")
 
@@ -1333,7 +1260,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 if stop_event is not None and stop_event.is_set(): _safe_print("[STOP] group loop enter"); break
                 _reset_watchdog(f"enter group {idx}")
 
-                # 🔒 그룹 학습 전 전체 구간 보호: 플래그 ON + 게이트 닫기 + 낡은 예측 락 정리
                 _group_active_on(note=f"group_{idx+1}_train")
                 try: close_predict_gate(note=f"group_{idx+1}_train")
                 except Exception as e: _safe_print(f"[gate pre-close err] {e}")
@@ -1349,23 +1275,18 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                 completed_syms, partial_syms = train_models(group, stop_event=stop_event, ignore_should=force_full_pass)
                 if stop_event is not None and stop_event.is_set(): _safe_print("🛑 stop after train → exit"); break
 
-                # === 그룹 완료 여부 판정 (부분 예측 금지)
                 group_complete = set(completed_syms) >= set(group) and len(partial_syms) == 0
                 if not group_complete:
                     _safe_print(f"[BLOCK] 그룹{idx+1} 미완료 → 예측/마킹 금지 "
                                 f"(completed={sorted(completed_syms)}, partial={sorted(partial_syms)})")
-                    # 그룹 보호 플래그 해제
                     _group_active_off()
-                    # 정책상 중단이면 즉시 중단
                     if partial_syms and _ENFORCE_FULL_STRATEGY and _STRICT_HALT_ON_INCOMPLETE:
                         _safe_print(f"[HALT] 그룹 {idx+1}: 미완결 심볼 존재 → 그룹 루프 중단")
                         break
-                    # 다음 그룹으로 넘어가되, 마킹은 하지 않음
                     _prune_caches_and_gc()
                     _progress(f"group{idx}:incomplete-skip-predict")
                     continue
 
-                # === 예측 readiness 확인
                 if not ready_for_group_predict():
                     _safe_print(f"[PREDICT-BLOCK] 그룹{idx+1} ready_for_group_predict()==False → 예측 보류 및 마킹 금지")
                     _group_active_off()
@@ -1373,11 +1294,9 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                     _progress(f"group{idx}:ready_false")
                     continue
 
-                # === 예측 대상은 '해당 그룹 전체 심볼'
                 predict_candidates = list(group)
 
-                # 🔐 모델 가시화 보장(파일시스템 동기화 지연 방지)
-                await_sec_default = int(os.getenv("PREDICT_MODEL_AWAIT_SEC","60"))  # 기본 60초
+                await_sec_default = int(os.getenv("PREDICT_MODEL_AWAIT_SEC","60"))
                 visible_syms = _await_models_visible(predict_candidates, timeout_sec=await_sec_default)
                 predict_syms = sorted({s for s in visible_syms if _has_any_model_for_symbol(s)})
 
@@ -1387,14 +1306,12 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
 
                 ran_any=False
                 if predict_syms:
-                    # 🧹 예측 시작 전: 남아있을 수 있는 전역 락 정리/대기
                     _wait_predict_lock_clear(
                         timeout_sec=int(os.getenv("PREDICT_LOCK_WAIT_PREOPEN_SEC","15")),
                         stale_sec=_get_group_stale_sec(),
                         tag=f"group_{idx+1}:pre-open"
                     )
                     try:
-                        # 게이트 열기 (우리 예측 시작)
                         try: open_predict_gate(note=f"group_{idx+1}_start")
                         except Exception as e: _safe_print(f"[gate open err] {e}")
                         time.sleep(0.5)
@@ -1422,7 +1339,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                         )
                         _safe_print(f"[PREDICT] group {idx+1} end")
 
-                # ⛑ 스모크 폴백: 그룹 완료 상태에서 모델 가시성 지연일 때만 1건 보장
                 if not ran_any:
                     cand_symbol = _pick_smoke_symbol(predict_candidates)
                     if cand_symbol:
@@ -1449,7 +1365,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
                         finally:
                             pass
 
-                # ✅ 전량 예측이 최소 1건 이상 수행된 경우에만 마킹
                 if ran_any:
                     try: mark_group_predicted()
                     except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
@@ -1458,8 +1373,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
 
                 _prune_caches_and_gc()
                 _progress(f"group{idx}:done")
-
-                # 그룹 보호 플래그 해제(학습+예측 완료 또는 스킵)
                 _group_active_off()
 
                 if sleep_sec>0:
@@ -1478,7 +1391,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
         except Exception as e:
             _safe_print(f"[group loop err] {e}\n{traceback.format_exc()}")
         finally:
-            # 루프 단위 안전 정리
             _group_active_off()
 
         _safe_print("💓 heartbeat: train loop alive")
