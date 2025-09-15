@@ -1,9 +1,8 @@
 # === predict.py — sequence-corrected, gate-respecting, robust I/O (ENSEMBLE-FIRST, FINAL) ===
+# (2025-09-13d) — [STRICT_BOUNDS] 메타 class_ranges가 없거나 불일치하면 **무조건 스킵/보류**, 폴백 금지
 # (2025-09-13c) — [소프트 폴백] PREDICT_SOFT_ABORT=1 시 no_models/no_valid_model을 "예측보류"로 처리
 # (2025-09-13) — [핵심] 학습 품질게이트 엄수: meta.passed==1 & val_f1>=min_f1_gate 모델만 추론
-#                 + 메타 없음/부정합 모델 자동 스킵, 안정성 로그 강화
 # (2025-09-12b) — [DEFAULT] Ensemble-first (mean of top-3 calibrated) + abstain(ABSTAIN_PROB_MIN)
-# … (이전 변경로그는 생략 없이 유지) …
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -162,6 +161,9 @@ except Exception:
     def apply_calibration(probs, *, symbol=None, strategy=None, regime=None, model_meta=None): return probs
     def get_calibration_version(): return "none"
 
+# ====== STRICT: 메타 경계만 사용 ======
+STRICT_SAME_BOUNDS = os.getenv("STRICT_SAME_BOUNDS", "1") == "1"
+
 # ====== Model I/O ======
 try:
     import inspect
@@ -228,9 +230,12 @@ def _ranges_from_meta(meta):
 
 def _class_range_by_meta_or_cfg(cls_id: int, meta, symbol: str, strategy: str):
     cr = _ranges_from_meta(meta) if isinstance(meta, dict) else None
-    if cr and 0 <= int(cls_id) < len(cr):
+    if STRICT_SAME_BOUNDS:
+        if not (cr and 0 <= int(cls_id) < len(cr)):
+            raise RuntimeError("no_class_ranges_in_meta")
         return cr[int(cls_id)]
-    return get_class_return_range(int(cls_id), symbol, strategy)
+    # (비엄격 모드에서만) 구형 폴백 허용
+    return cr[int(cls_id)] if (cr and 0 <= int(cls_id) < len(cr)) else get_class_return_range(int(cls_id), symbol, strategy)
 
 def _class_min_meta_or_cfg(cls_id: int, meta, symbol: str, strategy: str) -> float:
     lo, _ = _class_range_by_meta_or_cfg(cls_id, meta, symbol, strategy)
@@ -375,18 +380,12 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
         print(f"[failed_result insert_failure_record 오류] {e}")
     return res
 
-# ★ 소프트 보류 헬퍼 (이중 로깅 방지: failed_result 호출 제거)
+# ★ 소프트 보류 헬퍼
 def _soft_abstain(symbol, strategy, *, reason, meta_choice="abstain", regime="unknown", X_last=None, group_id=None, df=None, source="보류"):
     try:
         ensure_prediction_log_exists()
         cur = float((df["close"].iloc[-1] if df is not None and len(df) else 0.0))
-        note = {
-            "reason": reason,
-            "abstain_prob_min": float(ABSTAIN_PROB_MIN),
-            "max_calib_prob": None,
-            "meta_choice": meta_choice,
-            "regime": regime
-        }
+        note = {"reason": reason, "abstain_prob_min": float(ABSTAIN_PROB_MIN), "max_calib_prob": None, "meta_choice": meta_choice, "regime": regime}
         log_prediction(
             symbol=symbol, strategy=strategy, direction="예측보류",
             entry_price=cur, target_price=cur,
@@ -440,8 +439,7 @@ def _position_hint_from_market(df: pd.DataFrame) -> dict:
         close = df["close"].astype(float).values
         if close.size < 70:
             return {"allow_long": True, "allow_short": True, "ma_fast": None, "ma_slow": None, "slope": 0.0}
-        ma_fast = _ema(close, 20)
-        ma_slow = _ema(close, 60)
+        ma_fast = _ema(close, 20); ma_slow = _ema(close, 60)
         y = close[-30:]; x = np.arange(len(y))
         slope = float(np.polyfit(x, y, 1)[0]) / (np.mean(y) + 1e-12)
         diff = float(ma_fast[-1] - ma_slow[-1]) / (close[-1] + 1e-12)
@@ -530,7 +528,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         try:
             if len(outs) >= 2:
                 tops = sorted(outs, key=lambda m: float(m.get("val_f1", 0.0)), reverse=True)[:min(3, len(outs))]
-                # num_classes 일치 확인
                 nc = min(len(np.asarray(tops[0]["calib_probs"])), *[len(np.asarray(t["calib_probs"])) for t in tops])
                 if len(tops) >= 2 and nc >= 2:
                     mean_c = np.mean([np.asarray(m["calib_probs"][:nc], dtype=float) for m in tops], axis=0)
@@ -547,7 +544,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         "val_f1": val_f1_mean,
                         "symbol": symbol,
                         "strategy": strategy,
-                        "meta": {"model": "ensemble", "num_classes": int(nc)}
+                        "meta": {"model": "ensemble", "num_classes": int(nc), "class_ranges": _ranges_from_meta(tops[0].get("meta"))}
                     })
         except Exception as e:
             print(f"[앙상블 구성 예외] {e}")
@@ -564,7 +561,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 from evo_meta_learner import predict_evo_meta
                 if callable(predict_evo_meta):
                     pred = int(predict_evo_meta(feat_row.unsqueeze(0), input_size=feat_dim))
-                    cmin, cmax = get_class_return_range(pred, symbol, strategy)
+                    cmin, cmax = _class_range_by_meta_or_cfg(pred, (chosen or {}).get("meta"), symbol, strategy)
                     if _meets_minret_with_hint(cmin, cmax, allow_long, allow_short, MIN_RET_THRESHOLD):
                         final_cls = pred; meta_choice = "evo_meta_learner"
             except Exception as e:
@@ -593,9 +590,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 else:
                     pred = int(np.argmax(adj)); fused = False
                 if float(np.max(m["calib_probs"])) >= ABSTAIN_PROB_MIN:
-                    lo_e, hi_e = _class_range_by_meta_or_cfg(pred, m.get("meta"), symbol, strategy)
-                    if _meets_minret_with_hint(lo_e, hi_e, allow_long, allow_short, MIN_RET_THRESHOLD):
-                        final_cls = int(pred); chosen = m; used_minret = fused; meta_choice = "ensemble_mean_top3"
+                    try:
+                        lo_e, hi_e = _class_range_by_meta_or_cfg(pred, m.get("meta"), symbol, strategy)
+                        if _meets_minret_with_hint(lo_e, hi_e, allow_long, allow_short, MIN_RET_THRESHOLD):
+                            final_cls = int(pred); chosen = m; used_minret = fused; meta_choice = "ensemble_mean_top3"
+                    except Exception:
+                        pass
 
         # (B1) 단일/앙상블 경쟁 + 탐험
         if final_cls is None:
@@ -653,7 +653,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 for m in outs:
                     adj = m.get("adjusted_probs", m["calib_probs"]); val_f1 = float(m.get("val_f1", 0.6))
                     for ci in range(len(adj)):
-                        lo, hi = _class_range_by_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
+                        try:
+                            lo, hi = _class_range_by_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
+                        except Exception:
+                            continue
                         if not _meets_minret_with_hint(lo, hi, allow_long, allow_short, MIN_RET_THRESHOLD):
                             continue
                         sc = float(adj[ci]) * (0.5 + 0.5 * max(0.0, min(1.0, val_f1)))
@@ -663,7 +666,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[임계 가드 예외] {e}")
 
-        # (D) 보류 컷 (이중 로깅 방지: failed_result 대신 딕셔너리 반환)
+        # (D) 보류 컷
         try:
             chosen_probs = (chosen or outs[0])["calib_probs"]
             if float(np.max(chosen_probs)) < ABSTAIN_PROB_MIN:
@@ -977,7 +980,7 @@ def evaluate_predictions(get_price_fn):
             pass
         print(f"[오류] evaluate_predictions 스트리밍 실패 → {e}")
 
-# ====== 모델 추론 묶기 (★ 품질게이트 반영) ======
+# ====== 모델 추론 묶기 (★ 품질게이트 + STRICT_BOUNDS) ======
 def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list, recent_freq, regime="unknown"):
     outs, allpreds = [], []
     for info in models:
@@ -997,7 +1000,14 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
                     pass
             with open(meta_path, "r", encoding="utf-8") as mf:
                 meta = json.load(mf)
-            # === 품질 컷: passed==1 이고 val_f1 >= min_f1_gate 여야 함
+
+            # === STRICT_BOUNDS: 메타에 class_ranges 없으면 즉시 스킵
+            cr_meta = _ranges_from_meta(meta)
+            if STRICT_SAME_BOUNDS and not (cr_meta and len(cr_meta) >= 2):
+                print(f"[SKIP] no class_ranges in meta → {os.path.basename(model_path)}")
+                continue
+
+            # === 품질 컷: passed==1 이고 val_f1 >= min_f1_gate
             passed = int(meta.get("passed", 0)) == 1
             val_f1 = float(meta.get("metrics", {}).get("val_f1", 0.0))
             min_gate = float(meta.get("min_f1_gate", 0.0))
@@ -1007,7 +1017,7 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
 
             mtype = meta.get("model", "lstm"); gid = meta.get("group_id", 0)
             inp_size = int(meta.get("input_size", feat_scaled.shape[1]))
-            num_cls = int(meta.get("num_classes", NUM_CLASSES))
+            num_cls = int(meta.get("num_classes", (len(cr_meta) if cr_meta else NUM_CLASSES)))
             idx = min(int(gid), max(0, len(window_list)-1)); win = window_list[idx]
             seq = feat_scaled[-win:]
             if seq.shape[1] < inp_size:
