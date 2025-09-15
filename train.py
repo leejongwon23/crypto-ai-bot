@@ -14,6 +14,7 @@ from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.utils.class_weight import compute_class_weight
+from collections import Counter  # ← ADD
 
 # >>> ADD: deterministic seeds
 def set_global_seed(s:int=20240101):
@@ -317,6 +318,54 @@ def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.nda
         out[i] = float(r)
 
     return out
+
+# === ADD: 커버리지 기반 검증 분할 ===
+def coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, max_windows=200, num_classes=None):
+    """
+    y: 1D 라벨 배열
+    검증셋이 가능한 한 많은 클래스(coverage)를 포함하도록 뒤에서부터 여러 구간을 훑어 최적 구간 선택.
+    """
+    y = np.asarray(y).astype(int)
+    n = len(y)
+    val_len = max(1, int(round(n * float(val_frac))))
+    if num_classes is None:
+        uniq = np.unique(y)
+        if uniq.size and uniq.min() >= 0:
+            num_classes = max(len(uniq), int(uniq.max()) + 1)
+        else:
+            num_classes = len(uniq)
+
+    tried = 0
+    best = None  # (coverage, start, end, counts)
+    end = n
+    while end - val_len >= 0 and tried < max_windows:
+        start = end - val_len
+        yv = y[start:end]
+        cnt = Counter(yv.tolist())
+        covered = len([1 for v in cnt.values() if v > 0])
+        coverage = covered / max(1, num_classes)
+        snap = (coverage, start, end, dict(sorted(cnt.items())))
+        if best is None or snap[0] > best[0]:
+            best = snap
+        if coverage >= float(min_coverage):
+            break
+        end -= int(max(1, stride))
+        tried += 1
+
+    if best is None:
+        start, end = max(0, n - val_len), n
+        cnt = Counter(y[start:end].tolist()); covered = len(cnt); coverage = covered / max(1, num_classes)
+    else:
+        coverage, start, end, cnt = best
+
+    val_idx = np.arange(start, end)
+    train_idx = np.concatenate([np.arange(0, start), np.arange(end, n)], axis=0)
+
+    # 로그 한 줄 (과다출력 방지 위해 _safe_print 사용)
+    _safe_print(f"[✅ 검증셋 커버리지] covered={len(cnt)}/{num_classes} ({coverage:.2f}) window={start}:{end} size={len(val_idx)}")
+
+    return train_idx, val_idx
+# === end coverage split ===
 
 def _stem(p:str)->str: return os.path.splitext(p)[0]
 
@@ -684,11 +733,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
         if len(uniq_all) < 2:
             _log_skip(symbol,strategy,"라벨 단일 클래스 → 학습/평가 스킵"); return res
 
-        # ── 분할 (시간순: 마지막 20%를 검증으로)  ← CHANGED
-        n = len(X_raw)
-        cut = max(1, int(n * 0.2))
-        train_idx = np.arange(0, n - cut)
-        val_idx   = np.arange(n - cut, n)
+        # ── 분할: 커버리지 우선 검증 분할 ← REPLACED
+        train_idx, val_idx = coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, num_classes=len(class_ranges))
 
         # ---- train-only fit scaler
         scaler = MinMaxScaler()
@@ -834,7 +880,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
                     if time.time()-last_log_ts>2:
                         _safe_print(f"   ↳ {model_type} ep{ep+1}/{max_epochs} val_f1={cur_f1:.4f} bad={bad}/{patience} loss_sum={total_loss:.4f}")
                         last_log_ts=time.time()
-                    _progress(f"{model_type}:ep{ep}:end")
+                    _progress(f"{model_type}:ep{ep}:end}")
                     if bad >= patience:
                         _safe_print(f"🛑 early stop @ ep{ep+1} (best_f1={best_f1:.4f})")
                         break
