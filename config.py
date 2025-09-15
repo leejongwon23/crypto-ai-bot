@@ -1,4 +1,4 @@
-# config.py (FINAL, 2025-09-13) — 동적 클래스(4~MAX) 완전복구 + strict bins + quality cut + round-robin hint
+# config.py (FINAL, 2025-09-13, fixed_step=0.5%) — 동적 클래스(4~MAX) 완전복구 + strict bins + quality cut + round-robin hint
 
 import json
 import os
@@ -60,10 +60,11 @@ _default_config = {
 
     # --- [BIN] 클래스 경계 토글/파라미터 ---
     "CLASS_BIN": {
-        "method": "quantile",    # "quantile" | "linear"
-        "strict": True,          # 구간 단조/겹침 방지
-        "zero_band_eps": 0.0015, # 0% 주변 중립 밴드(±0.15%p)
-        "min_width": 0.0005      # 최소 구간 폭(0.05%p)
+        "method": "fixed_step",   # "fixed_step" | "quantile" | "linear"
+        "strict": True,           # 구간 단조/겹침 방지
+        "zero_band_eps": 0.0015,  # 0% 주변 중립 밴드(±0.15%p)
+        "min_width": 0.0005,      # 최소 구간 폭(0.05%p)
+        "step_pct": 0.005         # ← 0.5% 단위 고정 bin 간격
     },
 
     # --- [SCHED] 학습 스케줄러 힌트(엔진에서 참조) ---
@@ -376,13 +377,14 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
     - 분포 = concat(r_down, r_up) → 음/양 공존
     - 전략별 ±캡, 최소 구간 폭, 0% 중립 밴드 보장, 엄격 단조(strict) 보정
     - ❗️bin 개수는 데이터 기반으로 4~MAX_CLASSES 사이에서 자동 결정
+      (단, method=="fixed_step"이면 0.5% 단위 고정 간격으로 분할)
     """
     import numpy as np
     from data.utils import get_kline_by_strategy
 
     MAX_CLASSES = int(_config.get("MAX_CLASSES", _default_config["MAX_CLASSES"]))
     BIN_CONF = get_CLASS_BIN()
-    method = (method or BIN_CONF.get("method") or "quantile").lower()
+    method_req = (method or BIN_CONF.get("method") or "quantile").lower()
 
     def _fix_monotonic(ranges):
         fixed = []
@@ -461,6 +463,44 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             ranges = _merge_smallest_adjacent(ranges, MAX_CLASSES)
         return ranges
 
+    # ✅ 추가: 0.5% 고정 간격 분할
+    def compute_fixed_step_ranges():
+        step = float(BIN_CONF.get("step_pct", 0.005))  # 0.5% = 0.005
+        if step <= 0:
+            step = 0.005
+        neg = _STRATEGY_RETURN_CAP_NEG_MIN.get(strategy, -0.5)
+        pos = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy,  0.5)
+
+        # 간격 생성
+        edges = []
+        val = float(neg)
+        # 오차 누적 방지용 반복
+        while val < pos - 1e-12:
+            edges.append(val)
+            val += step
+        edges.append(pos)
+        if len(edges) < 2:
+            return compute_equal_ranges(get_NUM_CLASSES(), reason="fixed_step edges 부족")
+
+        cooked = []
+        for i in range(len(edges) - 1):
+            lo, hi = float(edges[i]), float(edges[i + 1])
+            lo, hi = _cap_by_strategy(lo, strategy), _cap_by_strategy(hi, strategy)
+            lo, hi = _enforce_min_width(lo, hi)
+            cooked.append((_round2(lo), _round2(hi)))
+
+        fixed = _fix_monotonic(cooked)
+        fixed = _ensure_zero_band(fixed)
+        if BIN_CONF.get("strict", True):
+            fixed = _strictify(fixed)
+        if len(fixed) > MAX_CLASSES:
+            fixed = _merge_smallest_adjacent(fixed, MAX_CLASSES)
+
+        if not fixed or len(fixed) < 2:
+            return compute_equal_ranges(get_NUM_CLASSES(), reason="fixed_step 최종 경계 부족")
+
+        return fixed
+
     def compute_ranges_from_kline():
         try:
             df_price = get_kline_by_strategy(symbol, strategy)
@@ -481,6 +521,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             n_cls = _choose_n_classes(rets_signed, max_classes=int(_config.get("MAX_CLASSES", 20)), hint_min=int(_config.get("NUM_CLASSES", 10)))
 
             # 분할 방식
+            method = (BIN_CONF.get("method") or "quantile").lower()
             if method == "quantile":
                 qs = np.quantile(rets_signed, np.linspace(0, 1, n_cls + 1))
             else:  # "linear"
@@ -508,7 +549,11 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
         except Exception as e:
             return compute_equal_ranges(get_NUM_CLASSES(), reason=f"예외 발생: {e}")
 
-    all_ranges = compute_ranges_from_kline()
+    # === 분기: fixed_step 우선 처리 ===
+    if method_req == "fixed_step":
+        all_ranges = compute_fixed_step_ranges()
+    else:
+        all_ranges = compute_ranges_from_kline()
 
     if symbol is not None and strategy is not None:
         _ranges_cache[(symbol, strategy)] = all_ranges
