@@ -1,32 +1,69 @@
+# === focal_loss.py (FINAL) ===
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional, Sequence
 
 class FocalLoss(nn.Module):
-    def __init__(self, gamma=2.0, alpha=0.25, reduction='mean', class_weight=None, y_train=None, num_classes=21):
-        super(FocalLoss, self).__init__()
-        self.gamma = gamma
-        self.alpha = alpha
+    def __init__(
+        self,
+        gamma: float = 2.0,
+        alpha: float = 0.25,
+        reduction: str = "mean",
+        *,
+        weight: Optional[Sequence[float]] = None,   # ✅ 외부 class weight 지원
+        class_weight: Optional[Sequence[float]] = None,  # 기존 호환
+        y_train: Optional[Sequence[int]] = None,    # 라벨 분포 기반 동적 가중치
+        num_classes: int = 21
+    ):
+        super().__init__()
+        self.gamma = float(gamma)
+        self.alpha = float(alpha)
         self.reduction = reduction
 
-        # ✅ class_weight 동적 계산
-        if y_train is not None:
+        # 우선순위: weight > class_weight > y_train 동적계산 > None
+        cw = None
+        if weight is not None:
+            cw = torch.as_tensor(weight, dtype=torch.float32)
+        elif class_weight is not None:
+            cw = torch.as_tensor(class_weight, dtype=torch.float32)
+        elif y_train is not None:
             from collections import Counter
-            counts = Counter(y_train)
-            total = sum(counts.values())
-            weights = [total / counts.get(i, 1) for i in range(num_classes)]
-            self.class_weight = torch.tensor(weights, dtype=torch.float32)
-        else:
-            self.class_weight = class_weight
+            cnt = Counter(int(y) for y in y_train)
+            total = sum(cnt.values())
+            if total > 0:
+                cw = torch.tensor(
+                    [total / max(1, cnt.get(i, 0)) for i in range(int(num_classes))],
+                    dtype=torch.float32
+                )
+        self.class_weight = cw  # device/dtype/길이 보정은 forward에서 수행
 
-    def forward(self, inputs, targets):
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none', weight=self.class_weight.to(inputs.device) if self.class_weight is not None else None)
-        pt = torch.exp(-ce_loss)
-        focal_loss = self.alpha * ((1 - pt) ** self.gamma) * ce_loss
+    def _normalize_class_weight(self, n_classes: int, device, dtype):
+        """클래스 수 불일치 시 잘라내거나 1.0 패딩. device/dtype 일치."""
+        if self.class_weight is None:
+            return None
+        w = self.class_weight
+        if w.numel() != n_classes:
+            if w.numel() > n_classes:
+                w = w[:n_classes]
+            else:
+                pad = torch.ones(n_classes - w.numel(), dtype=w.dtype)
+                w = torch.cat([w, pad], dim=0)
+        return w.to(device=device, dtype=dtype)
 
-        if self.reduction == 'mean':
-            return focal_loss.mean()
-        elif self.reduction == 'sum':
-            return focal_loss.sum()
-        else:
-            return focal_loss
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        inputs: [B, C], targets: [B]
+        """
+        n_classes = inputs.size(1)
+        w = self._normalize_class_weight(n_classes, device=inputs.device, dtype=inputs.dtype)
+
+        ce = F.cross_entropy(inputs, targets, reduction="none", weight=w)
+        pt = torch.exp(-ce)
+        fl = self.alpha * ((1.0 - pt) ** self.gamma) * ce
+
+        if self.reduction == "mean":
+            return fl.mean()
+        if self.reduction == "sum":
+            return fl.sum()
+        return fl
