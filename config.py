@@ -1,4 +1,4 @@
-# config.py (FINAL, 2025-09-13, fixed_step=0.5%) — 동적 클래스(4~MAX) 완전복구 + strict bins + quality cut + round-robin hint
+# config.py (FINAL, 2025-09-13, fixed_step=0.5% + merge_sparse_bins) — 동적 클래스(4~MAX) 완전복구 + strict bins + quality cut + round-robin hint
 
 import json
 import os
@@ -58,13 +58,20 @@ _default_config = {
         "VAL_ACC_MIN": 0.20   # 보조 가드(선택 적용)
     },
 
-    # --- [BIN] 클래스 경계 토글/파라미터 ---
+    # --- [BIN] 클래스 경계/병합 파라미터 ---
     "CLASS_BIN": {
         "method": "fixed_step",   # "fixed_step" | "quantile" | "linear"
         "strict": True,           # 구간 단조/겹침 방지
         "zero_band_eps": 0.0015,  # 0% 주변 중립 밴드(±0.15%p)
         "min_width": 0.0005,      # 최소 구간 폭(0.05%p)
-        "step_pct": 0.005         # ← 0.5% 단위 고정 bin 간격
+        "step_pct": 0.005,        # ← 0.5% 단위 고정 bin 간격
+        # 희소 bin 병합 옵션
+        "merge_sparse": {
+            "enabled": True,          # 켬
+            "min_ratio": 0.01,        # 전체 샘플의 1% 미만이면 희소로 간주
+            "min_count_floor": 20,    # 추가 가드(절대 개수 하한)
+            "prefer": "denser"        # "denser"(더 많은 이웃) | "left" | "right"
+        }
     },
 
     # --- [SCHED] 학습 스케줄러 힌트(엔진에서 참조) ---
@@ -352,6 +359,95 @@ def _merge_smallest_adjacent(ranges, max_classes):
             else:
                 rs[idx] = (rs[idx][0], rs[idx+1][1]); del rs[idx+1]
     return rs
+
+def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
+    """
+    히스토그램 기준 희소 bin을 이웃과 병합.
+    - 기준: min_ratio / min_count_floor
+    - 병합 방향: prefer ("denser"|"left"|"right")
+    - 병합 후 strict/zero-band/폭 보정 유지
+    """
+    import numpy as np
+
+    if not ranges or rets_signed is None or rets_signed.size == 0:
+        return ranges
+
+    opt = (bin_conf or {}).get("merge_sparse", {})
+    if not opt or not opt.get("enabled", True):
+        return ranges
+
+    total = int(rets_signed.size)
+    min_ratio = float(opt.get("min_ratio", 0.01))
+    min_floor = int(opt.get("min_count_floor", 20))
+    prefer = str(opt.get("prefer", "denser")).lower()
+
+    # 히스토그램 카운트 계산
+    edges = [ranges[0][0]] + [hi for (_, hi) in ranges]
+    edges[-1] = float(edges[-1]) + 1e-12  # 우측 포함
+    hist, _ = np.histogram(rets_signed, bins=np.array(edges, dtype=float))
+    rs = list(ranges)
+
+    def _rebuild_edges(rr):
+        ee = [rr[0][0]] + [hi for (_, hi) in rr]
+        ee[-1] = float(ee[-1]) + 1e-12
+        return np.array(ee, dtype=float)
+
+    def _counts(rr):
+        ee = _rebuild_edges(rr)
+        h, _ = np.histogram(rets_signed, bins=ee)
+        return h
+
+    changed = True
+    while changed:
+        changed = False
+        if len(rs) <= 2:
+            break
+        counts = _counts(rs)
+        thresh = max(int(total * min_ratio), min_floor)
+        # 희소 인덱스 찾기 (여러 개면 가장 작은 count부터)
+        sparse_idxs = [i for i, c in enumerate(counts) if c < thresh]
+        if not sparse_idxs:
+            break
+
+        # 병합 대상 선택
+        i = int(sorted(sparse_idxs, key=lambda k: counts[k])[0])
+        # 병합 방향 결정
+        if prefer == "left" and i > 0:
+            j = i - 1
+        elif prefer == "right" and i < len(rs) - 1:
+            j = i + 1
+        else:
+            # denser: 양옆 중 count가 큰 쪽으로 병합
+            left_ok = i - 1 >= 0
+            right_ok = i + 1 < len(rs)
+            if left_ok and right_ok:
+                j = i - 1 if counts[i - 1] >= counts[i + 1] else i + 1
+            elif left_ok:
+                j = i - 1
+            elif right_ok:
+                j = i + 1
+            else:
+                break
+
+        lo = min(rs[i][0], rs[j][0])
+        hi = max(rs[i][1], rs[j][1])
+        rs[min(i, j)] = (float(lo), float(hi))
+        del rs[max(i, j)]
+        changed = True
+
+        # 상한 초과 시 최소폭 인접 병합
+        if len(rs) > max_classes:
+            rs = _merge_smallest_adjacent(rs, max_classes)
+
+    # 최종 보정
+    rs = [(float(lo), float(hi)) for (lo, hi) in rs]
+    rs = _fix_monotonic(rs:=rs)
+    rs = _ensure_zero_band(rs)
+    if get_CLASS_BIN().get("strict", True):
+        rs = _strictify(rs)
+    if len(rs) > max_classes:
+        rs = _merge_smallest_adjacent(rs, max_classes)
+    return rs
 # ---------------------------------------------------------------------------
 
 def get_class_return_range(class_id: int, symbol: str, strategy: str):
@@ -377,7 +473,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
     - 분포 = concat(r_down, r_up) → 음/양 공존
     - 전략별 ±캡, 최소 구간 폭, 0% 중립 밴드 보장, 엄격 단조(strict) 보정
     - ❗️bin 개수는 데이터 기반으로 4~MAX_CLASSES 사이에서 자동 결정
-      (단, method=="fixed_step"이면 0.5% 단위 고정 간격으로 분할)
+      (method=="fixed_step"이면 0.5% 단위 고정 간격으로 분할 + 희소 bin 자동 병합)
     """
     import numpy as np
     from data.utils import get_kline_by_strategy
@@ -463,8 +559,8 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             ranges = _merge_smallest_adjacent(ranges, MAX_CLASSES)
         return ranges
 
-    # ✅ 추가: 0.5% 고정 간격 분할
-    def compute_fixed_step_ranges():
+    # ✅ 추가: 0.5% 고정 간격 분할 (+ 희소 병합)
+    def compute_fixed_step_ranges(rets_for_merge):
         step = float(BIN_CONF.get("step_pct", 0.005))  # 0.5% = 0.005
         if step <= 0:
             step = 0.005
@@ -474,7 +570,6 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
         # 간격 생성
         edges = []
         val = float(neg)
-        # 오차 누적 방지용 반복
         while val < pos - 1e-12:
             edges.append(val)
             val += step
@@ -493,6 +588,9 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
         fixed = _ensure_zero_band(fixed)
         if BIN_CONF.get("strict", True):
             fixed = _strictify(fixed)
+        # 희소 bin 병합 (학습 데이터 기반)
+        if rets_for_merge is not None and rets_for_merge.size > 0:
+            fixed = _merge_sparse_bins_by_hist(fixed, rets_for_merge, MAX_CLASSES, BIN_CONF)
         if len(fixed) > MAX_CLASSES:
             fixed = _merge_smallest_adjacent(fixed, MAX_CLASSES)
 
@@ -544,6 +642,8 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             if not fixed or len(fixed) < 2:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="최종 경계 부족(가드)")
 
+            # 희소 bin 병합(동적 방식에도 동일 적용)
+            fixed = _merge_sparse_bins_by_hist(fixed, rets_signed, MAX_CLASSES, BIN_CONF)
             return fixed
 
         except Exception as e:
@@ -551,7 +651,19 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
 
     # === 분기: fixed_step 우선 처리 ===
     if method_req == "fixed_step":
-        all_ranges = compute_fixed_step_ranges()
+        # 병합 판단에 사용할 학습 분포 확보 후 적용
+        try:
+            from data.utils import get_kline_by_strategy as _dbg_k
+            df_dbg = _dbg_k(symbol, strategy)
+            if df_dbg is not None and len(df_dbg) >= 2 and "close" in df_dbg:
+                import numpy as np, pandas as pd
+                rets_for_merge = _future_extreme_signed_returns(df_dbg, horizon_hours=_strategy_horizon_hours(strategy))
+                rets_for_merge = rets_for_merge[np.isfinite(rets_for_merge)]
+            else:
+                rets_for_merge = None
+        except Exception:
+            rets_for_merge = None
+        all_ranges = compute_fixed_step_ranges(rets_for_merge)
     else:
         all_ranges = compute_ranges_from_kline()
 
