@@ -55,6 +55,7 @@ import logger
 from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges, set_NUM_CLASSES, STRATEGY_CONFIG, get_QUALITY  # ← ADD get_QUALITY
 from data_augmentation import balance_classes
 from window_optimizer import find_best_window
+from focal_loss import FocalLoss  # ← CHANGED: use FocalLoss
 
 # --- ssl_pretrain (옵션) ---
 DISABLE_SSL = os.getenv("DISABLE_SSL","1")=="1"  # 기본 비활성(시간 단축)
@@ -192,8 +193,9 @@ def _epochs_for(strategy:str)->int:
 
 # === SMART TRAIN switches ===
 SMART_TRAIN = os.getenv("SMART_TRAIN","1")=="1"
-LABEL_SMOOTH = float(os.getenv("LABEL_SMOOTH","0.05"))   # 0.0~0.1 권장
+LABEL_SMOOTH = float(os.getenv("LABEL_SMOOTH","0.05"))   # kept for compatibility (not used in FocalLoss)
 GRAD_CLIP = float(os.getenv("GRAD_CLIP_NORM","1.0"))     # 0.0(해제)~2.0 권장
+FOCAL_GAMMA = float(os.getenv("FOCAL_GAMMA","2.0"))      # ← NEW: focal focusing parameter
 
 now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 
@@ -429,16 +431,19 @@ def _min_f1_for(strategy:str)->float:
 
 if _HAS_LIGHTNING:
     class LitSeqModel(pl.LightningModule):
-        def __init__(self, base_model:nn.Module, lr:float=1e-3, cls_w:torch.Tensor|None=None):
-            super().__init__(); self.model=base_model; self.criterion=nn.CrossEntropyLoss(weight=cls_w); self.lr=lr
+        def __init__(self, base_model:nn.Module, lr:float=1e-3, cls_w:torch.Tensor|None=None, gamma:float=2.0):
+            super().__init__(); self.model=base_model
+            self.train_crit=FocalLoss(gamma=gamma, weight=cls_w)  # ← CHANGED
+            self.eval_crit =nn.CrossEntropyLoss(weight=cls_w)     # eval은 CE 유지
+            self.lr=lr
         def forward(self,x): return self.model(x)
         def training_step(self,batch,idx):
-            xb,yb=batch; logits=self(xb); loss=self.criterion(logits,yb); return loss
+            xb,yb=batch; logits=self(xb); loss=self.train_crit(logits,yb); return loss
         def validation_step(self,batch,idx):
-            xb,yb=batch; logits=self(xb); loss=self.criterion(logits,yb)
+            xb,yb=batch; logits=self(xb); loss=self.eval_crit(logits,yb)
             preds=torch.argmax(logits,dim=1)
             self.log("val_loss", loss, prog_bar=False)
-            self.log("val_f1", pl.metrics.functional.f1.f1_score(preds, yb, num_classes=self.criterion.weight.shape[0] if self.criterion.weight is not None else None, average="macro"), prog_bar=False)
+            self.log("val_f1", pl.metrics.functional.f1.f1_score(preds, yb, num_classes=self.eval_crit.weight.shape[0] if self.eval_crit.weight is not None else None, average="macro"), prog_bar=False)
         def configure_optimizers(self): return torch.optim.Adam(self.parameters(), lr=self.lr)
 
     class _HeartbeatAndStop(pl.Callback):
@@ -649,8 +654,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
             labels=labels[-cut:]
 
         try:
-            best_window=find_best_window(symbol,strategy,window_list=[20,40,60],group_id=group_id)  # ← window 후보 확장
-        except: best_window=40
+            # ← CHANGED: window 후보 고정 [16,20,24,32]
+            best_window=find_best_window(symbol,strategy,window_list=[16,20,24,32],group_id=group_id)
+        except: best_window=20
         window=max(5,int(best_window)); window=min(window, max(6,len(features_only)-1))
 
         _check_stop(stop_event,"before sequence build")
@@ -732,7 +738,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
             _safe_print(f"🟦 TRAIN begin → {symbol}-{strategy}-g{group_id} [{model_type}] (epochs={max_epochs}, train={len(train_X)}, val={len(val_X)})")
 
             if _HAS_LIGHTNING:
-                lit=LitSeqModel(base,lr=1e-3,cls_w=w)
+                lit=LitSeqModel(base,lr=1e-3,cls_w=w,gamma=FOCAL_GAMMA)  # ← CHANGED
                 callbacks=[_HeartbeatAndStop(stop_event)]
                 ckpt_cb = ModelCheckpoint(monitor="val_f1", mode="max", save_top_k=1, filename=f"{symbol}-{strategy}-{model_type}-best")
                 es_cb   = EarlyStopping(monitor="val_f1", mode="max", patience=int(os.getenv("EARLY_STOP_PATIENCE","5")), check_finite=True)
@@ -740,7 +746,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
                 trainer=pl.Trainer(max_epochs=max_epochs, accelerator=("gpu" if torch.cuda.is_available() else "cpu"),
                                    devices=1, enable_checkpointing=True, logger=False, enable_model_summary=False,
                                    enable_progress_bar=False, callbacks=callbacks,
-                                   gradient_clip_val=GRAD_CLIP if SMART_TRAIN else 0.0)  # ← 추가
+                                   gradient_clip_val=GRAD_CLIP if SMART_TRAIN else 0.0)
                 trainer.fit(lit,train_dataloaders=train_loader,val_dataloaders=val_loader)
                 model=base
                 # ckpt 로드 (가능 시)
@@ -756,8 +762,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
                 # ====== 수동 학습 경로 (가중치 + 얼리스톱 + 베스트웨이트) ======
                 model=base
                 opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-                # 손실: 라벨 스무딩 적용
-                crit = nn.CrossEntropyLoss(weight=w, label_smoothing=(LABEL_SMOOTH if SMART_TRAIN else 0.0))
+                # 손실: FocalLoss(+가중치) ← CHANGED
+                crit = FocalLoss(gamma=FOCAL_GAMMA, weight=w)
 
                 # deterministic seed
                 g = torch.Generator(); g.manual_seed(20240101)
@@ -835,7 +841,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event
             # ---- 최종 검증: acc, f1, val_loss 계산
             _progress(f"eval:{model_type}")
             model.eval(); preds=[]; lbls=[]; val_loss_sum=0.0; n_val=0
-            crit_eval = nn.CrossEntropyLoss(weight=w)  # eval은 스무딩 없이
+            crit_eval = nn.CrossEntropyLoss(weight=w)  # eval은 스무딩 없이 CE 유지
             with torch.no_grad():
                 for bi,(xb,yb) in enumerate(val_loader):
                     if bi % 32 == 0: _check_stop(stop_event,f"val batch {bi}"); _progress(f"val_b{bi}")
