@@ -47,7 +47,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 # prediction_log는 루트 경로로 통일
 PREDICTION_LOG = f"{DIR}/prediction_log.csv"
-WRONG = f"{DIR}/wrong_predictions.csv}"
+WRONG = f"{DIR}/wrong_predictions.csv"
 EVAL_RESULT = f"{LOG_DIR}/evaluation_result.csv"
 
 # 학습 로그 파일명
