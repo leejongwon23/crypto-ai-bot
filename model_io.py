@@ -7,6 +7,7 @@ from __future__ import annotations
 import io
 import os
 import gzip
+import json
 import tempfile
 import contextlib
 from typing import Any, Optional, Dict
@@ -42,8 +43,31 @@ def _atomic_write(bytes_data: bytes, dst_path: str) -> None:
     os.replace(tmp, dst_path)
 
 
+def _atomic_write_json(dst_path: str, obj: dict) -> None:
+    _ensure_dir(dst_path)
+    dirpath = os.path.dirname(os.path.abspath(dst_path))
+    with tempfile.NamedTemporaryFile(dir=dirpath, suffix=".tmp", delete=False, mode="w", encoding="utf-8") as tf:
+        tmp = tf.name
+        json.dump(obj, tf, ensure_ascii=False, indent=2)
+        tf.flush()
+        try:
+            os.fsync(tf.fileno())
+        except Exception:
+            pass
+    os.replace(tmp, dst_path)
+
+
 def _ext(path: str) -> str:
     return os.path.splitext(path)[1].lower()
+
+
+def _stem(path: str) -> str:
+    base, _ = os.path.splitext(os.path.abspath(path))
+    return base
+
+
+def _meta_path_for(model_path: str) -> str:
+    return _stem(model_path) + ".meta.json"
 
 
 def _to_state_dict(obj: Any) -> Dict[str, torch.Tensor] | Any:
@@ -201,6 +225,50 @@ def load_model(
 
     # 3) 그 외 포맷(희귀) — 그대로 반환(호출자가 처리)
     return raw
+
+
+# ========================= 메타 저장/로드 (사이드카) =========================
+def save_meta(model_path: str, meta: Dict[str, Any]) -> str:
+    """
+    모델 경로 옆에 `<stem>.meta.json`으로 원자적으로 저장.
+    예) /persistent/models/A.ptz -> /persistent/models/A.meta.json
+    """
+    if not isinstance(meta, dict):
+        raise ValueError("meta는 dict여야 합니다.")
+    mpath = _meta_path_for(model_path)
+    _atomic_write_json(mpath, meta)
+    return mpath
+
+
+def load_meta(model_path: str, default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    모델 경로 옆의 메타 파일을 읽어 dict로 반환. 없으면 default 또는 {} 반환.
+    """
+    mpath = _meta_path_for(model_path)
+    if not os.path.isfile(mpath):
+        return {} if default is None else dict(default)
+    try:
+        with open(mpath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {} if default is None else dict(default)
+
+
+def save_model_with_meta(
+    path: str,
+    state_or_obj: Any,
+    meta: Optional[Dict[str, Any]] = None,
+    *,
+    use_safetensors: Optional[bool] = None,
+) -> None:
+    """
+    모델 저장 + (선택) 메타 저장을 한 번에 수행.
+    - 모델 저장은 기존 save_model과 동일 동작
+    - meta가 주어지면 사이드카 `<stem>.meta.json`에 함께 기록
+    """
+    save_model(path, state_or_obj, use_safetensors=use_safetensors)
+    if meta:
+        save_meta(path, meta)
 
 
 def convert_pt_to_ptz(
