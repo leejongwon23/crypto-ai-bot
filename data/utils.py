@@ -520,17 +520,13 @@ def get_class_ranges(values: np.ndarray, num_classes: int) -> List[Tuple[float, 
     return ranges
 
 def _label_with_edges(values: np.ndarray, edges: List[Tuple[float, float]]) -> np.ndarray:
-    """경계 리스트에 맞춰 레이블 생성(훈련/로그 모두 동일 규칙)."""
+    """경계 리스트에 맞춰 레이블 생성(훈련/로그/평가 동일 규칙). 상한선 기준 digitize."""
     if len(edges) == 1:
         return np.zeros(len(values), dtype=np.int64)
-    starts = np.array([a for a, _ in edges], dtype=np.float64)
-    stops  = np.array([b for _, b in edges], dtype=np.float64)
-    # 오른쪽 닫힘 처리(로그와 일치): [a, b]
-    lbl = np.searchsorted(starts, values, side="right") - 1
-    lbl = np.clip(lbl, 0, len(edges)-1)
-    # 상단 초과값은 마지막 클래스로
-    lbl = np.where(values > stops[-1], len(edges)-1, lbl)
-    return lbl.astype(np.int64)
+    stops = np.array([b for (_, b) in edges[:-1]], dtype=np.float64)  # 마지막 bin 제외 상한선들
+    idx = np.digitize(values, stops, right=True)  # (-inf, s0]→0, (s0, s1]→1, ...
+    idx = np.clip(idx, 0, len(edges)-1)
+    return idx.astype(np.int64)
 
 # ========================= 데이터셋 생성 =========================
 def _bin_labels(values: np.ndarray, num_classes: int) -> np.ndarray:
@@ -575,39 +571,46 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             df[c] = pd.to_numeric(df[c], errors="coerce")
         df[num_cols] = _downcast_numeric(df[num_cols])
 
+        # 입력 스케일링 대상 컬럼
         feature_cols = [c for c in df.columns if c != "timestamp"]
         if not feature_cols:
             print("[❌ feature_cols 없음]")
             return _dummy(symbol_name)
 
         from config import MIN_FEATURES as _MINF
-        if len(feature_cols) < _MINF:
-            for i in range(len(feature_cols), _MINF):
-                df[f"pad_{i}"] = np.float32(0.0)
-                feature_cols.append(f"pad_{i}")
-
+        # (중요) 스케일은 입력용에만, 라벨용 원시 OHLC는 따로 유지
         scaler = MinMaxScaler()
         scaled = scaler.fit_transform(df[feature_cols].astype(np.float32))
         df_s = pd.DataFrame(scaled.astype(np.float32), columns=feature_cols)
         df_s["timestamp"] = df["timestamp"].values
 
-        # ▼ 라벨 계산용으로 원시 OHLC 보존
-        df_s["high"] = df["high"] if "high" in df.columns else df["close"]
-        df_s["low"]  = df["low"]  if "low"  in df.columns else df["close"]
-
-        if input_size and len(feature_cols) < input_size:
-            for i in range(len(feature_cols), input_size):
-                df_s[f"pad_{i}"] = np.float32(0.0)
-
-        # 샘플 텐서는 스케일된 df_s 사용, 라벨 계산은 '원시 df' 사용
-        features_s = df_s.to_dict(orient="records")
+        # 라벨 계산용 원시 OHLC (입력에 포함하지 않음)
         raw_records = df.to_dict(orient="records")
+
+        # 입력 컬럼 확정 (timestamp 제외)
+        input_cols = [c for c in df_s.columns if c != "timestamp"]
+
+        # 최소/요구 입력 크기 패딩은 스케일 후 입력에만 적용
+        target_input = input_size if input_size else max(_MINF, len(input_cols))
+        if len(input_cols) < target_input:
+            for i in range(len(input_cols), target_input):
+                padc = f"pad_{i}"
+                df_s[padc] = np.float32(0.0)
+                input_cols.append(padc)
+        elif len(input_cols) > target_input:
+            # 과다 컬럼이면 잘라서 고정
+            keep = set(input_cols[:target_input])
+            drop_cols = [c for c in input_cols if c not in keep]
+            df_s = df_s.drop(columns=drop_cols, errors="ignore")
+            input_cols = [c for c in input_cols if c in keep]
+
+        # 샘플/라벨 생성
+        features_s = df_s.to_dict(orient="records")
 
         strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}  # 장기 7일(로그 기준 168h)
         lookahead = strategy_minutes.get(strategy, 1440)
 
         samples, signed_vals = [], []
-        row_cols = [c for c in df_s.columns if c != "timestamp"]
 
         for i in range(window, len(features_s)):
             seq = features_s[i - window:i]
@@ -627,8 +630,8 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             if len(seq) != window or not fut_raw:
                 continue
 
-            v_highs = [float(r.get("high", r.get("close", entry_price))) for r in fut_raw if r.get("high", 0) > 0]
-            v_lows  = [float(r.get("low",  r.get("close", entry_price))) for r in fut_raw if r.get("low",  0) > 0]
+            v_highs = [float(r.get("high", r.get("close", entry_price))) for r in fut_raw if float(r.get("high", r.get("close", entry_price))) > 0]
+            v_lows  = [float(r.get("low",  r.get("close", entry_price))) for r in fut_raw if float(r.get("low",  r.get("close", entry_price)))  > 0]
 
             if not v_highs and not v_lows:
                 continue
@@ -641,18 +644,10 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             signed_ret = ret_up if abs(ret_up) >= abs(ret_dn) else ret_dn
             signed_vals.append(float(signed_ret))
 
-            sample = [[float(r.get(c, 0.0)) for c in row_cols] for r in seq]
-            if input_size:
-                for j in range(len(sample)):
-                    row = sample[j]
-                    if len(row) < input_size:
-                        row.extend([0.0] * (input_size - len(row))
-                        )
-                    elif len(row) > input_size:
-                        sample[j] = row[:input_size]
+            sample = [[float(r.get(c, 0.0)) for c in input_cols] for r in seq]
             samples.append(sample)
 
-        # ── 개선된 라벨링: 분위수 기반 경계 사용(훈련/로그 일관) ──
+        # ── 개선된 라벨링: 분위수 기반 경계 사용(훈련/로그/평가 일관) ──
         if samples and signed_vals:
             signed_arr = np.asarray(signed_vals, dtype=np.float64)
             ranges = get_class_ranges(signed_arr, num_classes)
@@ -672,14 +667,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         fb_samples, fb_labels = [], []
         for i in range(window, len(df) - 1):
             seq_rows = df_s.iloc[i - window:i]
-            sample = [[float(r.get(c, 0.0)) for c in row_cols] for _, r in seq_rows.iterrows()]
-            if input_size:
-                for j in range(len(sample)):
-                    row = sample[j]
-                    if len(row) < input_size:
-                        row.extend([0.0] * (input_size - len(row)))
-                    elif len(row) > input_size:
-                        sample[j] = row[:input_size]
+            sample = [[float(seq_rows.iloc[j].get(c, 0.0)) for c in input_cols] for j in range(window)]
             fb_samples.append(sample)
             fb_labels.append(pct[i] if i < len(pct) else 0.0)
 
