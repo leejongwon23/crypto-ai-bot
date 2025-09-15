@@ -6,7 +6,7 @@ import os
 CONFIG_PATH = "/persistent/config.json"
 
 # ===============================
-# 기본 설정 + 신규 옵션(기본 OFF)
+# 기본 설정 + 신규 옵션(기본 ON for CALIB)
 # ===============================
 _default_config = {
     "NUM_CLASSES": 10,                    # 기본 힌트(최소치/백업용). 동적 계산이 우선.
@@ -34,9 +34,9 @@ _default_config = {
 
     # --- [3] 확률 캘리브레이션(스케일링) 옵션 ---
     "CALIB": {
-        "enabled": False,
-        "method": "platt",  # "platt" | "temperature"
-        "min_samples": 500,
+        "enabled": True,             # ← 켬
+        "method": "temperature",     # ← 멀티클래스 기본
+        "min_samples": 200,          # 200~300 권장
         "refresh_hours": 12,
         "per_model": True,
         "save_dir": "/persistent/calibration",
@@ -606,6 +606,9 @@ NUM_CLASSES = get_NUM_CLASSES()
 FAIL_AUGMENT_RATIO = get_FAIL_AUGMENT_RATIO()
 MIN_FEATURES = get_MIN_FEATURES()
 
+# === 캘리브레이션 모듈 호환용 전역 노출 ===
+CALIB = get_CALIB()
+
 __all__ = [
     "STRATEGY_CONFIG",
     "get_NUM_CLASSES", "set_NUM_CLASSES",
@@ -619,4 +622,5 @@ __all__ = [
     "get_ORDERED_TRAIN", "get_PREDICT_MIN_RETURN", "get_DISPLAY_MIN_RETURN",
     "get_SSL_CACHE_DIR",
     "FEATURE_INPUT_SIZE", "NUM_CLASSES", "FAIL_AUGMENT_RATIO", "MIN_FEATURES",
-        ]
+    "CALIB",
+]
