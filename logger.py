@@ -1,7 +1,7 @@
-# === logger.py (메모리 안전: 로테이션 + 청크 집계 + 모델명 정규화 + 실패DB 노이즈 차단 + 파일락 + 컨텍스트 분기 + 학습지표 확장 + 1회 INFO/DEBUG 전환 + 캐시HIT 샘플링) ===
+# === logger.py (메모리 안전: 로테이션 + 청크 집계 + 모델명 정규화 + 실패DB 노이즈 차단 + 파일락 + 컨텍스트 분기 + 학습지표 확장 + 1회 INFO/DEBUG 전환 + 캐시HIT 샘플링 + 연속실패 요약) ===
 import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil, re
 import sqlite3
-from collections import defaultdict
+from collections import defaultdict, deque
 import threading, time  # 동시성/재시도
 # [ADD] per-class F1 출력용 (선택)
 from sklearn.metrics import classification_report
@@ -129,6 +129,69 @@ class _FileLock:
                 os.remove(self.path)
         except Exception:
             pass
+
+# -------------------------
+# (NEW) 연속 실패 집계기 (폭주 방지)
+# -------------------------
+class _ConsecutiveFailAggregator:
+    """
+    동일 (symbol,strategy,group_id,model)의 '연속 실패'를 메모리에서 집계해
+    N회마다 1줄 요약만 남김. 성공이 끼어들면 즉시 플러시 후 초기화.
+    - FAIL_SUMMARY_THRESHOLD: 요약 주기 (기본 5회)
+    - FAIL_SUMMARY_WINDOW  : 동일 키 유지 허용 시간(초, 기본 900초). 초과 시 자동 리셋.
+    """
+    TH = max(2, int(os.getenv("FAIL_SUMMARY_THRESHOLD", "5")))
+    WINDOW = max(60, int(os.getenv("FAIL_SUMMARY_WINDOW", "900")))
+    _state = defaultdict(lambda: {"cnt":0, "first_ts":0.0, "last_ts":0.0, "last_reason":""})
+
+    @classmethod
+    def _flush(cls, key, where="periodic"):
+        st = cls._state.get(key)
+        if not st or st["cnt"] <= 0:
+            return
+        sym, strat, gid, model = key
+        msg = f"[연속실패요약/{where}] {sym}-{strat}-g{gid} {model} ×{st['cnt']} (last_reason={st['last_reason']})"
+        try:
+            # 감사 로그 1줄
+            with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
+                w = csv.DictWriter(f, fieldnames=["timestamp","symbol","strategy","status","reason"])
+                if f.tell() == 0:
+                    w.writeheader()
+                w.writerow({
+                    "timestamp": now_kst().isoformat(),
+                    "symbol": sym, "strategy": strat,
+                    "status": f"consecutive_fail_{st['cnt']}",
+                    "reason": st["last_reason"]
+                })
+        except Exception:
+            pass
+        _print_once(f"cfail:{sym}:{strat}:{gid}:{model}", "🔻 " + msg)
+        # 리셋
+        cls._state.pop(key, None)
+
+    @classmethod
+    def add(cls, key, success: bool, reason: str = ""):
+        now = time.time()
+        st = cls._state[key]
+        # 오래된 키 정리
+        if st["last_ts"] and now - st["last_ts"] > cls.WINDOW:
+            cls._flush(key, "stale")
+            st = cls._state[key]  # 새 상태
+        if success:
+            # 성공 → 지금까지의 실패 요약만 남기고 리셋
+            if st["cnt"] > 0:
+                cls._flush(key, "recovered")
+            cls._state.pop(key, None)
+            return
+        # 실패 누적
+        st["cnt"] = int(st["cnt"]) + 1
+        st["last_reason"] = (reason or "")[:200]
+        st["last_ts"] = now
+        if st["first_ts"] == 0.0:
+            st["first_ts"] = now
+        # 임계치마다 1회 요약
+        if st["cnt"] % cls.TH == 0:
+            cls._flush(key, "periodic")
 
 # -------------------------
 # 안전한 로그 파일 보장
@@ -654,7 +717,12 @@ def log_prediction(
                     current_header = PREDICTION_HEADERS
                 w.writerow(_align_row_to_header(row, current_header))
 
-            print(f"[✅ 예측 로그 기록됨] {symbol}-{strategy} class={predicted_class} | success={success} | src={source_exchange} | reason={reason}")
+            # 단건 로그 출력은 최소화 (성공은 1회성, 실패는 집계기로 대체)
+            if success:
+                _print_once(f"pred_ok:{symbol}:{strategy}:{model_name}",
+                            f"[✅ 예측 OK] {symbol}-{strategy} class={predicted_class} src={source_exchange}")
+            else:
+                _ConsecutiveFailAggregator.add((symbol, strategy, group_id or 0, model_name), False, reason)
 
             should_record_failure = (
                 insert_failure_record is not None
@@ -692,6 +760,10 @@ def log_prediction(
                     log_audit_prediction(symbol, strategy, "skip_failure_db", f"ctx={ctx}, label={label}, entry_price={entry_price}")
         except Exception as e:
             print(f"[⚠️ 예측 로그 기록 실패] {e}")
+        finally:
+            # 성공으로 회복 시 집계기 flush
+            if success:
+                _ConsecutiveFailAggregator.add((symbol, strategy, group_id or 0, model_name), True, reason="")
 
 # -------------------------
 # 학습 로그
@@ -749,7 +821,24 @@ def log_training_result(
             if write_header:
                 w.writerow(TRAIN_HEADERS)
             w.writerow(_align_row_to_header(row, TRAIN_HEADERS))
-        print(f"[✅ 학습 로그 기록] {symbol}-{strategy} {model} val_f1={f1:.4f} status={status}")
+        # F1=0 연속 경고 최소화: 심볼/전략별로 1회만 INFO, 이후는 임계치마다 요약
+        _f1_key = (str(symbol), str(strategy))
+        if not hasattr(log_training_result, "_f1_zero"):
+            log_training_result._f1_zero = defaultdict(int)
+        if float(f1 or 0.0) <= 0.0:
+            log_training_result._f1_zero[_f1_key] += 1
+            n = log_training_result._f1_zero[_f1_key]
+            if n == 1:
+                print(f"🟠 [경고] F1=0.0 발생 → {symbol}-{strategy} {model} (1회)")
+            elif n % int(os.getenv('F1_ZERO_WARN_EVERY','5')) == 0:
+                print(f"🟠 [요약] F1=0.0 연속 {n}회 → {symbol}-{strategy} {model}")
+        else:
+            # 정상 회복 시 1회 알림 후 카운터 리셋
+            if getattr(log_training_result, "_f1_zero", {}).get(_f1_key, 0) > 0:
+                print(f"[✅ 복구] {symbol}-{strategy} {model} F1 회복 → {float(f1):.4f}")
+            log_training_result._f1_zero[_f1_key] = 0
+        _print_once(f"trainlog:{symbol}:{strategy}:{model}",
+                    f"[✅ 학습 로그 기록] {symbol}-{strategy} {model} val_f1={float(f1 or 0.0):.4f} status={status}")
     except Exception as e:
         print(f"[⚠️ 학습 로그 기록 실패] {e}")
 
