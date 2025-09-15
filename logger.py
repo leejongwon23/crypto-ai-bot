@@ -1,10 +1,42 @@
-# === logger.py (메모리 안전: 로테이션 + 청크 집계 + 모델명 정규화 + 실패DB 노이즈 차단 + 파일락 + 컨텍스트 분기 + 학습지표 확장) ===
+# === logger.py (메모리 안전: 로테이션 + 청크 집계 + 모델명 정규화 + 실패DB 노이즈 차단 + 파일락 + 컨텍스트 분기 + 학습지표 확장 + 1회 INFO/DEBUG 전환 + 캐시HIT 샘플링) ===
 import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil, re
 import sqlite3
 from collections import defaultdict
 import threading, time  # 동시성/재시도
 # [ADD] per-class F1 출력용 (선택)
 from sklearn.metrics import classification_report
+
+# -------------------------
+# 로그 레벨/샘플링 유틸 (NEW)
+# -------------------------
+LOGGER_DEBUG = os.getenv("LOGGER_DEBUG", "0") == "1"
+_once_printed = set()
+
+def _print_once(tag: str, msg: str):
+    """같은 tag는 1회만 INFO로 출력. 이후에는 LOGGER_DEBUG=1일 때만 DEBUG로 출력."""
+    try:
+        if tag not in _once_printed:
+            _once_printed.add(tag)
+            print(msg)
+        elif LOGGER_DEBUG:
+            print("[DBG] " + msg)
+    except Exception:
+        pass
+
+_cache_hit_counts = defaultdict(int)
+_CACHE_HIT_LOG_SAMPLE = max(1, int(os.getenv("CACHE_HIT_LOG_SAMPLE", "50")))
+def log_cache_hit(name: str):
+    """
+    캐시 HIT 로그 샘플링: 첫 1회, 그리고 N회마다 한 번만 출력.
+    샘플링 주기 환경변수 CACHE_HIT_LOG_SAMPLE(기본 50).
+    """
+    try:
+        _cache_hit_counts[name] += 1
+        c = _cache_hit_counts[name]
+        if c == 1 or (c % _CACHE_HIT_LOG_SAMPLE == 0) or LOGGER_DEBUG:
+            print(f"[CACHE HIT] {name} count={c}")
+    except Exception:
+        pass
 
 # -------------------------
 # 기본 경로/디렉토리
@@ -15,7 +47,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 # prediction_log는 루트 경로로 통일
 PREDICTION_LOG = f"{DIR}/prediction_log.csv"
-WRONG = f"{DIR}/wrong_predictions.csv"
+WRONG = f"{DIR}/wrong_predictions.csv}"
 EVAL_RESULT = f"{LOG_DIR}/evaluation_result.csv"
 
 # 학습 로그 파일명
@@ -763,7 +795,7 @@ def log_class_ranges(symbol, strategy, group_id=None, class_ranges=None, note=""
                 except Exception:
                     lo, hi = (None, None)
                 w.writerow([now, symbol, strategy, int(group_id) if group_id is not None else 0, i, lo, hi, str(note or "")])
-        print(f"[📐 클래스경계 로그] {symbol}-{strategy}-g{group_id} → {len(class_ranges)}개 기록")
+        _print_once(f"class_ranges:{symbol}:{strategy}", f"[📐 클래스경계 로그] {symbol}-{strategy}-g{group_id} → {len(class_ranges)}개 기록")
     except Exception as e:
         print(f"[⚠️ 클래스경계 로그 실패] {e}")
 
@@ -794,7 +826,7 @@ def log_return_distribution(symbol, strategy, group_id=None, horizon_hours=None,
                 w.writerow(["timestamp","symbol","strategy","group_id","horizon_hours",
                             "min","p25","p50","p75","p90","p95","p99","max","count","note"])
             w.writerow(row)
-        print(f"[📈 수익률분포 로그] {symbol}-{strategy}-g{group_id} count={s.get('count',0)}")
+        _print_once(f"ret_dist:{symbol}:{strategy}", f"[📈 수익률분포 로그] {symbol}-{strategy}-g{group_id} count={s.get('count',0)}")
     except Exception as e:
         print(f"[⚠️ 수익률분포 로그 실패] {e}")
 
@@ -853,7 +885,7 @@ def log_label_distribution(
             if write_header:
                 w.writerow(["timestamp","symbol","strategy","group_id","total","counts_json","n_unique","entropy","note"])
             w.writerow(row)
-        print(f"[📊 라벨분포 로그] {symbol}-{strategy}-g{group_id} → total={total}, classes={n_unique}, H={entropy:.4f}")
+        _print_once(f"label_dist:{symbol}:{strategy}", f"[📊 라벨분포 로그] {symbol}-{strategy}-g{group_id} → total={total}, classes={n_unique}, H={entropy:.4f}")
     except Exception as e:
         print(f"[⚠️ 라벨분포 로그 실패] {e}")
 
