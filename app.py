@@ -15,7 +15,10 @@ from telegram_bot import send_message
 from predict_trigger import run as trigger_run
 from data.utils import SYMBOLS, get_kline_by_strategy
 # 🆕 그룹 완료/게이트 검증 유틸
-from data.utils import ready_for_group_predict, mark_group_predicted, group_all_complete, get_current_group_symbols
+from data.utils import (
+    ready_for_group_predict, mark_group_predicted, group_all_complete,
+    get_current_group_symbols, SYMBOL_GROUPS
+)
 from visualization import generate_visual_report, generate_visuals_for_strategy
 from wrong_data_loader import load_training_prediction_data
 from predict import evaluate_predictions
@@ -731,8 +734,6 @@ def check_eval_log():
         return html
     except Exception as e:
         return f"❌ 오류: {e}", 500
-
-from data.utils import SYMBOL_GROUPS
 
 # ✅ 단일 핸들러로 통합된 /train-symbols (GET: group, POST: symbols)
 @app.route("/train-symbols", methods=["GET","POST"])
