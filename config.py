@@ -134,7 +134,7 @@ if os.path.exists(CONFIG_PATH):
 else:
     try:
         os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f):
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(_default_config, f, ensure_ascii=False, indent=2)
         _log("[ℹ️ config.py] 기본 config.json 생성")
     except Exception as e:
