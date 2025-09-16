@@ -1,20 +1,53 @@
-# ssl_pretrain.py (FINAL — input-dim autosync + cache verify + cooperative stop)
-import os, json, time, threading
+# ssl_pretrain.py (PATCHED: input-dim autosync + cache verify + cooperative stop + import fallbacks)
+import os
+import json
+import time
+import threading
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.optim as optim
 
-from model.base_model import TransformerPricePredictor
-from data.utils import get_kline_by_strategy, compute_features
-from config import get_FEATURE_INPUT_SIZE, get_SSL_CACHE_DIR
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+except Exception:
+    torch = None
+    nn = None
+    optim = None
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# 안전한 import: model.base_model, data.utils, config
+try:
+    from model.base_model import TransformerPricePredictor
+except Exception:
+    TransformerPricePredictor = None
 
+try:
+    from data.utils import get_kline_by_strategy, compute_features
+except Exception:
+    def get_kline_by_strategy(symbol, strategy):
+        return None
+    def compute_features(symbol, df, strategy):
+        return None
+
+try:
+    from config import get_FEATURE_INPUT_SIZE, get_SSL_CACHE_DIR
+except Exception:
+    def get_FEATURE_INPUT_SIZE():
+        try:
+            return int(os.getenv("FEATURE_INPUT_SIZE", "0"))
+        except Exception:
+            return 0
+    def get_SSL_CACHE_DIR():
+        return os.getenv("SSL_CACHE_DIR", "/persistent/ssl_cache")
+
+# DEVICE selection safe-guard
+if torch is not None:
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+else:
+    DEVICE = None
 
 def get_ssl_ckpt_path(symbol: str, strategy: str) -> str:
     """SSL 체크포인트 표준 경로(메타는 .meta.json에 저장)"""
-    ssl_dir = get_SSL_CACHE_DIR()
+    ssl_dir = get_SSL_CACHE_DIR() or "/persistent/ssl_cache"
     os.makedirs(ssl_dir, exist_ok=True)
     base = os.path.join(ssl_dir, f"{symbol}_{strategy}_ssl.pt")
     return base
@@ -24,7 +57,8 @@ def _meta_path(ckpt_path: str) -> str:
 
 def _load_meta(ckpt_path: str) -> dict | None:
     mp = _meta_path(ckpt_path)
-    if not os.path.exists(mp): return None
+    if not os.path.exists(mp):
+        return None
     try:
         with open(mp, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -44,12 +78,19 @@ def _check_stop(ev: threading.Event | None, where: str = ""):
         print(f"[SSL] stop detected → {where}")
         raise KeyboardInterrupt  # 상위에서 조용히 중단
 
-@torch.no_grad()
-def _to_tensor_3d(feat_df) -> torch.Tensor:
+@torch.no_grad() if torch is not None else (lambda f: f)
+def _to_tensor_3d(feat_df) -> "torch.Tensor | None":
     """(1, T, F) 텐서 변환"""
-    X = feat_df.drop(columns=["timestamp", "strategy"], errors="ignore").to_numpy(dtype=np.float32)
-    X = np.expand_dims(X, axis=0)  # (1, T, F)
-    return torch.tensor(X, dtype=torch.float32, device=DEVICE)
+    if feat_df is None:
+        return None
+    try:
+        X = feat_df.drop(columns=["timestamp", "strategy"], errors="ignore").to_numpy(dtype=np.float32)
+        X = np.expand_dims(X, axis=0)  # (1, T, F)
+        if torch is None:
+            return X
+        return torch.tensor(X, dtype=torch.float32, device=DEVICE)
+    except Exception:
+        return None
 
 def masked_reconstruction(
     symbol: str,
@@ -79,11 +120,21 @@ def masked_reconstruction(
 
         _check_stop(stop_event, "before features")
         feat = compute_features(symbol, df, strategy)
-        if feat is None or feat.empty or feat.isnull().any().any():
+        if feat is None or getattr(feat, "empty", False) or (hasattr(feat, "isnull") and feat.isnull().any().any()):
             print("[SSL] feature 생성 실패 또는 NaN 포함 → 스킵")
             return None
 
-        X_tensor = _to_tensor_3d(feat)  # (1, T, F)
+        X_tensor = _to_tensor_3d(feat)  # (1, T, F) or numpy if torch missing
+        if X_tensor is None:
+            print("[SSL] 텐서 생성 실패 → 스킵")
+            return None
+
+        # handle numpy fallback
+        if torch is None:
+            # cannot train without torch
+            print("[SSL] torch 미설치 → 사전학습 불가능")
+            return None
+
         T, F = int(X_tensor.shape[1]), int(X_tensor.shape[2])
 
         # --- 캐시 확인(입력차원 일치 시에만 스킵)
@@ -94,7 +145,7 @@ def masked_reconstruction(
             return ckpt_path
 
         # --- 입력차원 자동 동기화
-        cfg_F = int(input_size or get_FEATURE_INPUT_SIZE())
+        cfg_F = int(input_size or get_FEATURE_INPUT_SIZE() or 0)
         if cfg_F != F:
             print(f"[SSL] input_size 자동 동기화: config={cfg_F} → features={F}")
         input_size = F  # 강제 동기화
@@ -103,11 +154,20 @@ def masked_reconstruction(
         print(f"[SSL] {symbol}-{strategy} pretraining 시작 (T={T}, F={F})")
 
         # --- 모델/학습
-        model = TransformerPricePredictor(
-            input_size=input_size,
-            output_size=output_size,
-            mode="reconstruction"
-        ).to(DEVICE)
+        if TransformerPricePredictor is None:
+            print("[SSL] TransformerPricePredictor 미발견 → 사전학습 불가")
+            return None
+
+        try:
+            model = TransformerPricePredictor(
+                input_size=input_size,
+                output_size=output_size,
+                mode="reconstruction"
+            ).to(DEVICE)
+        except Exception as e:
+            print(f"[SSL] 모델 생성 실패: {e}")
+            return None
+
         model.train()
 
         optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -147,11 +207,21 @@ def masked_reconstruction(
             print(f"[SSL] epoch {epoch+1}/{epochs}, loss={loss.item():.6f}")
 
         # --- 저장(메타 포함)
-        torch.save(model.state_dict(), ckpt_path)
-        _save_meta(ckpt_path, input_size=input_size, feature_dim=F, timestamp=time.time())
-        print(f"[SSL] {symbol}-{strategy} pretraining 완료 → 저장: {ckpt_path} (F={F})")
-        return ckpt_path
+        try:
+            dirp = os.path.dirname(ckpt_path)
+            if dirp:
+                os.makedirs(dirp, exist_ok=True)
+            torch.save(model.state_dict(), ckpt_path)
+            _save_meta(ckpt_path, input_size=input_size, feature_dim=F, timestamp=time.time())
+            print(f"[SSL] {symbol}-{strategy} pretraining 완료 → 저장: {ckpt_path} (F={F})")
+            return ckpt_path
+        except Exception as e:
+            print(f"[SSL] 저장 실패: {e}")
+            return None
 
     except KeyboardInterrupt:
         print("[SSL] canceled by stop signal")
+        return None
+    except Exception as e:
+        print(f"[SSL] 예외 발생: {e}")
         return None
