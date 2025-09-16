@@ -1,4 +1,4 @@
-# data/utils.py — 안정성/정합성 강화판
+# data/utils.py — 안정성/정합성 강화판 (augmented 소수클래스 증강 기능 추가)
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
 _kline_cache = {}
 
@@ -7,6 +7,7 @@ from sklearn.preprocessing import MinMaxScaler
 from requests.exceptions import HTTPError, RequestException
 from typing import List, Dict, Any, Optional, Tuple
 from collections import Counter
+import random
 
 # 🔗 라벨 경계/그룹은 config에서만 관리 (일원화)
 from config import (
@@ -1008,6 +1009,103 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     CacheManager.set(cache_key, df)
     return df
 
+# ========================= 증강 관련 함수 (새로 추가) =========================
+def augment_jitter(seq: np.ndarray, sigma_min: float = 0.0005, sigma_max: float = 0.002) -> np.ndarray:
+    """
+    작은 실수 노이즈를 곱셈 형태로 적용.
+    seq: (window, features) numpy array
+    반환: 동일 shape의 augment sample (float32)
+    """
+    seq = np.asarray(seq, dtype=np.float32)
+    if seq.size == 0:
+        return seq.copy()
+    # 랜덤 sigma per-sample within [sigma_min, sigma_max]
+    sigma = float(np.random.uniform(sigma_min, sigma_max))
+    noise = np.random.normal(loc=0.0, scale=sigma, size=seq.shape).astype(np.float32)
+    # multiplicative: seq * (1 + noise)
+    aug = seq * (1.0 + noise)
+    return aug.astype(np.float32)
+
+def augment_time_shift(seq: np.ndarray, max_shift: int = 2) -> np.ndarray:
+    """
+    시퀀스 내에서 1~max_shift 캔들만큼 앞/뒤로 시프트.
+    부족한 부분은 가장자리 값으로 채움(pad).
+    """
+    seq = np.asarray(seq, dtype=np.float32)
+    if seq.ndim != 2 or seq.shape[0] <= 1 or max_shift <= 0:
+        return seq.copy()
+    shift = int(np.random.randint(-max_shift, max_shift + 1))
+    if shift == 0:
+        return seq.copy()
+    w, f = seq.shape
+    if shift > 0:
+        pad = np.repeat(seq[0:1, :], shift, axis=0)
+        new = np.vstack([pad, seq[:-shift]])
+    else:
+        pad = np.repeat(seq[-1:, :], -shift, axis=0)
+        new = np.vstack([seq[-shift:], pad]) if shift < 0 else seq.copy()
+        # if negative shift, left-rotate: seq[-shift:] + pad of last
+        if new.shape[0] != w:
+            # fallback safe behavior
+            new = np.concatenate([seq[-shift:], pad], axis=0)[:w]
+    return new.astype(np.float32)
+
+def augment_for_min_count(X: np.ndarray, y: np.ndarray, target_count: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    소수 클래스에 대해 현실적인 변형(복제X) 방식으로 샘플을 늘려 균형 맞춤.
+    - X: (N, window, features)
+    - y: (N,)
+    - target_count: 각 클래스마다 맞출 목표 수 (예: 현재 최대 클래스 수)
+    반환: (X_aug, y_aug) — 원본 + 생성된 샘플
+    """
+    if X is None or y is None:
+        return X, y
+    X = np.array(X, dtype=np.float32)
+    y = np.array(y, dtype=np.int64)
+    unique, counts = np.unique(y, return_counts=True)
+    class_counts = dict(zip(unique.tolist(), counts.tolist()))
+    to_add = []
+    to_add_labels = []
+
+    # 안전 cap: 전체 augment 초과를 방지 (원본의 3배까지 추가)
+    cap_total = max(X.shape[0] * 3, target_count * len(unique))
+
+    for cls in unique:
+        cur = class_counts.get(int(cls), 0)
+        if cur >= target_count:
+            continue
+        need = target_count - cur
+        # sample indices of this class (with replacement)
+        idxs = np.where(y == cls)[0]
+        if idxs.size == 0:
+            continue
+        # generate needed samples
+        gen = 0
+        attempts = 0
+        while gen < need and (len(to_add) + X.shape[0]) < cap_total:
+            attempts += 1
+            src_idx = int(np.random.choice(idxs))
+            base = X[src_idx]
+            # randomly choose augmentation type
+            if np.random.rand() < 0.6:
+                aug = augment_jitter(base)
+            else:
+                aug = augment_time_shift(base, max_shift=2)
+                # then small jitter
+                aug = augment_jitter(aug, sigma_min=0.0003, sigma_max=0.0015)
+            to_add.append(aug)
+            to_add_labels.append(int(cls))
+            gen += 1
+            if attempts > need * 10:
+                # safety break to avoid infinite loops
+                break
+
+    if to_add:
+        X_new = np.concatenate([X, np.stack(to_add, axis=0)], axis=0)
+        y_new = np.concatenate([y, np.array(to_add_labels, dtype=np.int64)], axis=0)
+        return X_new, y_new
+    return X, y
+
 # ========================= 데이터셋 생성 =========================
 def create_dataset(features, window=10, strategy="단기", input_size=None):
     import pandas as _pd
@@ -1111,6 +1209,20 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             if len(X) != len(y):
                 m = min(len(X), len(y)); X = X[:m]; y = y[:m]
             X.attrs = {"class_ranges": ranges, "class_groups": cfg_get_class_groups(len(ranges), 5)}
+
+            # --- 소수클래스 현실적 증강 적용 ---
+            try:
+                # 목표: 가장 많은 클래스 수와 맞춤
+                uniq, cnts = np.unique(y, return_counts=True)
+                if cnts.size > 0:
+                    max_cnt = int(np.max(cnts))
+                    # only augment if imbalance severe (예: 어떤 클래스가 전체의  >50% 이상을 차지)
+                    total = len(y)
+                    if total > 0 and (np.max(cnts) / float(total)) >= 0.5:
+                        X, y = augment_for_min_count(X, y, target_count=max_cnt)
+            except Exception:
+                pass
+
             return X, y
 
         closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float32)
@@ -1133,6 +1245,18 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         if len(X) != len(y):
             m = min(len(X), len(y)); X = X[:m]; y = y[:m]
         X.attrs = {"class_ranges": ranges, "class_groups": cfg_get_class_groups(len(ranges), 5)}
+
+        # --- 소수클래스 현실적 증강 적용 (fallback path) ---
+        try:
+            uniq, cnts = np.unique(y, return_counts=True)
+            if cnts.size > 0:
+                max_cnt = int(np.max(cnts))
+                total = len(y)
+                if total > 0 and (np.max(cnts) / float(total)) >= 0.5:
+                    X, y = augment_for_min_count(X, y, target_count=max_cnt)
+        except Exception:
+            pass
+
         return X, y
 
     except Exception as e:
