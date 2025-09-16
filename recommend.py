@@ -1,4 +1,4 @@
-# recommend.py (MEM-SAFE FINAL — meta-only success rate + cached model list + recent-window volatility)
+# recommend.py (PATCHED: MEM-SAFE FINAL — meta-only success rate + cached model list + recent-window volatility)
 import os
 import csv
 import json
@@ -16,13 +16,38 @@ except Exception:
     def open_predict_gate(*a, **k): return None
     def close_predict_gate(*a, **k): return None
 
-from data.utils import SYMBOLS, get_kline_by_strategy
-from logger import (
-    ensure_prediction_log_exists,     # prediction_log 보장
-    get_meta_success_rate,            # 메타(선택)만 성공률 집계 — 청크 기반
-    get_strategy_eval_count           # 메타+섀도우 평가 완료 건수 — 청크 기반
-)
-from telegram_bot import send_message
+# data.utils 경로 불확실성 보호: data.utils 또는 루트 utils
+try:
+    from data.utils import SYMBOLS, get_kline_by_strategy
+except Exception:
+    try:
+        from utils import SYMBOLS, get_kline_by_strategy
+    except Exception:
+        SYMBOLS = []
+        def get_kline_by_strategy(symbol, strategy):
+            return None
+
+# logger 함수 폴백 (안정성)
+try:
+    from logger import (
+        ensure_prediction_log_exists,     # prediction_log 보장
+        get_meta_success_rate,            # 메타(선택)만 성공률 집계 — 청크 기반
+        get_strategy_eval_count           # 메타+섀도우 평가 완료 건수 — 청크 기반
+    )
+except Exception:
+    def ensure_prediction_log_exists():
+        return None
+    def get_meta_success_rate(strategy, min_samples=0):
+        return 0.0
+    def get_strategy_eval_count(strategy):
+        return 0
+
+# telegram bot 폴백
+try:
+    from telegram_bot import send_message
+except Exception:
+    def send_message(msg):
+        print(f"[TELEGRAM MISSING] {msg}")
 
 # === 설정 (환경변수로도 조절 가능) ===
 MIN_SUCCESS_RATE = float(os.getenv("RECO_MIN_SUCCESS_RATE", "0.65"))
@@ -126,33 +151,64 @@ def log_audit(symbol, strategy, result, status):
 def load_failure_count():
     if not os.path.exists(FAILURE_LOG):
         return {}
-    with open(FAILURE_LOG, "r", encoding="utf-8-sig") as f:
-        return {f"{r['symbol']}-{r['strategy']}": int(r["failures"]) for r in csv.DictReader(f)}
+    try:
+        with open(FAILURE_LOG, "r", encoding="utf-8-sig") as f:
+            return {f"{r['symbol']}-{r['strategy']}": int(r["failures"]) for r in csv.DictReader(f)}
+    except Exception as e:
+        print(f"[load_failure_count 오류] {e}")
+        return {}
 
 def save_failure_count(fmap):
-    with open(FAILURE_LOG, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=["symbol", "strategy", "failures"])
-        w.writeheader()
-        for k, v in fmap.items():
-            s, strat = k.split("-")
-            w.writerow({"symbol": s, "strategy": strat, "failures": v})
+    try:
+        with open(FAILURE_LOG, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.DictWriter(f, fieldnames=["symbol", "strategy", "failures"])
+            w.writeheader()
+            for k, v in fmap.items():
+                if "-" not in k:
+                    continue
+                s, strat = k.split("-", 1)
+                w.writerow({"symbol": s, "strategy": strat, "failures": v})
+    except Exception as e:
+        print(f"[save_failure_count 오류] {e}")
 
 # ──────────────────────────────────────────────────────────────
 # 변동성 높은 심볼 추출 (최근 N행만 사용해 메모리/연산 절약)
 # ──────────────────────────────────────────────────────────────
+def _normalize_kline_result(k):
+    """
+    get_kline_by_strategy의 반환이 DataFrame 또는 tuple/list일 수 있음.
+    DataFrame이면 그대로, tuple/list이면 첫 요소가 DataFrame인 경우 이를 반환.
+    """
+    if k is None:
+        return None
+    if isinstance(k, pd.DataFrame):
+        return k
+    if isinstance(k, (list, tuple)) and len(k) > 0:
+        cand = k[0]
+        if isinstance(cand, pd.DataFrame):
+            return cand
+    # 못 읽으면 None
+    return None
+
 def get_symbols_by_volatility(strategy):
     th = STRATEGY_VOL.get(strategy, VOL_RT_단기)
     result = []
     for symbol in SYMBOLS:
         try:
-            df = get_kline_by_strategy(symbol, strategy)
+            raw = get_kline_by_strategy(symbol, strategy)
+            df = _normalize_kline_result(raw)
             if df is None or len(df) < 60:
                 continue
             # 최근 구간만 사용해 계산량 축소
             if VOL_LOOKBACK_MAX > 0 and len(df) > VOL_LOOKBACK_MAX:
                 df = df.tail(VOL_LOOKBACK_MAX)
+            # 안전: close 컬럼 존재 확인
+            if "close" not in df.columns:
+                continue
             r_std = df["close"].pct_change().rolling(20).std().iloc[-1]
             b_std = df["close"].pct_change().rolling(60).std().iloc[-1] if len(df) >= 60 else r_std
+            if pd.isna(r_std):
+                continue
             if r_std >= th and (r_std / (b_std + 1e-8)) >= 1.2:
                 result.append({"symbol": symbol, "volatility": float(r_std)})
         except Exception as e:
@@ -164,7 +220,8 @@ def get_symbols_by_volatility(strategy):
 # ──────────────────────────────────────────────────────────────
 def _get_latest_price(symbol, strategy):
     try:
-        df = get_kline_by_strategy(symbol, strategy)
+        raw = get_kline_by_strategy(symbol, strategy)
+        df = _normalize_kline_result(raw)
         if df is None or len(df) == 0 or "close" not in df.columns:
             return 0.0
         return float(df["close"].iloc[-1])
@@ -176,7 +233,10 @@ def _get_latest_price(symbol, strategy):
 # ──────────────────────────────────────────────────────────────
 def _build_model_index():
     model_dir = "/persistent/models"
-    files = os.listdir(model_dir) if os.path.exists(model_dir) else []
+    try:
+        files = os.listdir(model_dir) if os.path.exists(model_dir) else []
+    except Exception:
+        files = []
     return set(files)
 
 def _has_model_for(model_index, symbol, strategy):
@@ -264,8 +324,10 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
     model_index = _build_model_index()
 
     for item in symbols:
-        symbol = item["symbol"]
-        vol_val = float(item.get("volatility", 0.0))
+        symbol = item.get("symbol") if isinstance(item, dict) else (item if isinstance(item, str) else None)
+        if symbol is None:
+            continue
+        vol_val = float(item.get("volatility", 0.0)) if isinstance(item, dict) else 0.0
 
         if not allow_prediction:
             log_audit(symbol, strategy, "예측 생략", f"예측 차단됨 (source={source})")
