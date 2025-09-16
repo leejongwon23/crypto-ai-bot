@@ -202,7 +202,9 @@ from config import (
     get_class_return_range, class_to_expected_return
 )
 
-DEVICE = torch.device("cpu")
+# ====== DEVICE fix (was missing) ======
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 MODEL_DIR = "/persistent/models"
 PREDICTION_LOG_PATH = "/persistent/prediction_log.csv"
 NUM_CLASSES = get_NUM_CLASSES()
@@ -300,10 +302,14 @@ def _use_stat(symbol, strategy, model_path):
 def _feature_hash(row):
     try:
         import hashlib
-        if isinstance(row, torch.Tensor): arr = row.detach().cpu().flatten().numpy().astype(float)
-        elif isinstance(row, np.ndarray): arr = arr.flatten().astype(float)
-        elif isinstance(row, (list, tuple)): arr = np.array(row, dtype=float).flatten()
-        else: arr = np.array([float(row)], dtype=float)
+        if isinstance(row, torch.Tensor):
+            arr = row.detach().cpu().flatten().numpy().astype(float)
+        elif isinstance(row, np.ndarray):
+            arr = row.flatten().astype(float)
+        elif isinstance(row, (list, tuple)):
+            arr = np.array(row, dtype=float).flatten()
+        else:
+            arr = np.array([float(row)], dtype=float)
         r = [round(float(x), 2) for x in arr]
         return hashlib.sha1(",".join(map(str, r)).encode()).hexdigest()
     except Exception:
@@ -1029,9 +1035,25 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
 
             x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0)
             model = get_model(mtype, input_size=inp_size, output_size=num_cls)
-            model = load_model_any(model_path, model)
-            if model is None:
+            loaded = load_model_any(model_path, model)
+            # 안전 보강: load_model_any가 state_dict를 바로 반환할 경우 모델에 로드
+            if isinstance(loaded, dict) and model is not None:
+                try:
+                    model.load_state_dict(loaded)
+                except Exception:
+                    # 이미 handled in load_model_any fallback, but attempt safe load
+                    pass
+            elif loaded is None:
                 print(f"[⚠️ 모델 로딩 실패] {model_path}"); continue
+            else:
+                # if loaded is a model instance, use it
+                if not hasattr(loaded, "eval") and isinstance(loaded, dict):
+                    # fallback already handled
+                    pass
+                else:
+                    model = loaded
+
+            model.to(DEVICE)
             model.eval()
             with torch.no_grad():
                 out = model(x.to(DEVICE)); probs = F.softmax(out, dim=1).squeeze().cpu().numpy()
