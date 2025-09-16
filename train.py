@@ -408,7 +408,9 @@ def _archive_old_checkpoints(symbol:str,strategy:str,model_type:str,keep_n:int=1
     patt_ptz=os.path.join(MODEL_DIR,f"{symbol}_{strategy}_{model_type}_group*_cls*.ptz")
     paths=sorted(glob.glob(patt_pt)+glob.glob(patt_ptz), key=lambda p: os.path.getmtime(p), reverse=True)
     if not paths: return
-    for p in paths[max(1,int(keep_n)):-0]:
+    # remove everything after the first keep_n (keep most recent keep_n)
+    start_idx = max(1, int(keep_n))
+    for p in paths[start_idx:]:
         try:
             if p.endswith(".pt"):
                 ptz=os.path.splitext(p)[0]+".ptz"
@@ -755,19 +757,28 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
 
             # DataLoaders
             base_ds=TensorDataset(torch.tensor(train_X),torch.tensor(train_y))
-            if SMART_TRAIN:
-                cls_counts = np.bincount(train_y, minlength=len(class_ranges)).astype(np.float64)
-                inv = 1.0 / np.clip(cls_counts, 1.0, None)
-                sample_w = torch.tensor(inv[train_y], dtype=torch.double)
-                sampler = torch.utils.data.WeightedRandomSampler(sample_w, num_samples=len(train_y), replacement=True)
-                train_loader=DataLoader(base_ds,batch_size=_BATCH_SIZE,sampler=sampler,
-                                        num_workers=_NUM_WORKERS,pin_memory=_PIN_MEMORY,persistent_workers=_PERSISTENT)
-            else:
-                train_loader=DataLoader(base_ds,batch_size=_BATCH_SIZE,shuffle=True,
-                                        num_workers=_NUM_WORKERS,pin_memory=_PIN_MEMORY,persistent_workers=_PERSISTENT)
-            val_loader=DataLoader(TensorDataset(torch.tensor(val_X),torch.tensor(val_y)),
-                                  batch_size=_BATCH_SIZE,
-                                  num_workers=_NUM_WORKERS,pin_memory=_PIN_MEMORY,persistent_workers=_PERSISTENT)
+            # create train_loader robustly (persistent_workers only valid when num_workers>0)
+            try:
+                if SMART_TRAIN:
+                    cls_counts = np.bincount(train_y, minlength=len(class_ranges)).astype(np.float64)
+                    inv = 1.0 / np.clip(cls_counts, 1.0, None)
+                    sample_w_np = inv[train_y].astype(np.float64)
+                    sample_w = torch.from_numpy(sample_w_np).double()
+                    sampler = torch.utils.data.WeightedRandomSampler(sample_w.tolist(), num_samples=len(train_y), replacement=True)
+                    dl_kwargs = {"batch_size": _BATCH_SIZE, "sampler": sampler, "num_workers": max(0,_NUM_WORKERS), "pin_memory": _PIN_MEMORY}
+                    if _NUM_WORKERS > 0 and _PERSISTENT: dl_kwargs["persistent_workers"] = True
+                    train_loader=DataLoader(base_ds, **dl_kwargs)
+                else:
+                    dl_kwargs = {"batch_size": _BATCH_SIZE, "shuffle": True, "num_workers": max(0,_NUM_WORKERS), "pin_memory": _PIN_MEMORY}
+                    if _NUM_WORKERS > 0 and _PERSISTENT: dl_kwargs["persistent_workers"] = True
+                    train_loader=DataLoader(base_ds, **dl_kwargs)
+            except Exception as e:
+                _safe_print(f"[DATALOADER WARN] building train_loader failed -> {e}; fallback to simple loader")
+                train_loader=DataLoader(base_ds,batch_size=_BATCH_SIZE,shuffle=True,num_workers=0,pin_memory=False)
+
+            val_loader_kwargs = {"batch_size": _BATCH_SIZE, "num_workers": max(0,_NUM_WORKERS), "pin_memory": _PIN_MEMORY}
+            if _NUM_WORKERS > 0 and _PERSISTENT: val_loader_kwargs["persistent_workers"] = True
+            val_loader=DataLoader(TensorDataset(torch.tensor(val_X),torch.tensor(val_y)), **val_loader_kwargs)
 
             total_loss=0.0
             _safe_print(f"🟦 TRAIN begin → {symbol}-{strategy}-g{group_id} [{model_type}] (epochs={max_epochs}, train={len(train_X)}, val={len(val_X)})")
@@ -817,12 +828,21 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                             _check_stop(stop_event,f"epoch {ep} batch {bi}")
                             _progress(f"{model_type}:ep{ep}:b{bi}")
                         xb,yb=xb.to(DEVICE), yb.to(DEVICE)
-                        logits=model(xb); loss=crit(logits,yb)
-                        if not torch.isfinite(loss): continue
+                        logits=model(xb)
+                        loss=crit(logits,yb)
+                        # safe scalar extraction and finite check
+                        try:
+                            loss_val = float(loss.item())
+                        except Exception:
+                            _safe_print("[LOSS] non-scalar loss encountered -> skipping batch")
+                            continue
+                        if not np.isfinite(loss_val):
+                            _safe_print("[LOSS] non-finite loss -> skipping batch")
+                            continue
                         opt.zero_grad(); loss.backward()
                         if SMART_TRAIN and GRAD_CLIP > 0:
                             torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
-                        opt.step(); total_loss += float(loss.item())
+                        opt.step(); total_loss += float(loss_val)
 
                     # ---- 평가 (val_f1)
                     model.eval(); preds=[]; lbls=[]
@@ -830,16 +850,23 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                         for xb,yb in val_loader:
                             p=torch.argmax(model(xb.to(DEVICE)),dim=1).cpu().numpy()
                             preds.extend(p); lbls.extend(yb.numpy())
-                    cur_f1=float(f1_score(lbls,preds,average="macro"))
+                    try:
+                        cur_f1=float(f1_score(lbls,preds,average="macro"))
+                    except Exception:
+                        cur_f1=0.0
 
                     if scheduler is not None:
-                        scheduler.step(cur_f1)
+                        try: scheduler.step(cur_f1)
+                        except Exception: pass
 
                     # early stop/bookkeep (3번 수정: min_delta 반영)
                     improved = (cur_f1 - best_f1) > min_delta if best_f1 >= 0 else True
                     if improved:
                         best_f1 = cur_f1
-                        best_state = {k:v.detach().cpu().clone() for k,v in model.state_dict().items()}
+                        try:
+                            best_state = {k:v.detach().cpu().clone() for k,v in model.state_dict().items()}
+                        except Exception:
+                            best_state = None
                         bad = 0
                     else:
                         bad += 1
@@ -852,7 +879,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                         break
 
                 if best_state is not None:
-                    model.load_state_dict(best_state)
+                    try: model.load_state_dict(best_state)
+                    except Exception: pass
 
             # ---- 최종 검증
             _progress(f"eval:{model_type}")
@@ -862,10 +890,17 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                 for bi,(xb,yb) in enumerate(val_loader):
                     if bi % 32 == 0: _check_stop(stop_event,f"val batch {bi}"); _progress(f"val_b{bi}")
                     logits=model(xb.to(DEVICE)); loss=crit_eval(logits, yb.to(DEVICE))
-                    val_loss_sum += float(loss.item()) * xb.size(0); n_val += xb.size(0)
+                    try:
+                        loss_val = float(loss.item())
+                    except Exception:
+                        loss_val = 0.0
+                    val_loss_sum += float(loss_val) * xb.size(0); n_val += xb.size(0)
                     p=torch.argmax(logits,dim=1).cpu().numpy()
                     preds.extend(p); lbls.extend(yb.numpy())
-            acc=float(accuracy_score(lbls,preds)); f1=float(f1_score(lbls,preds,average="macro"))
+            try:
+                acc=float(accuracy_score(lbls,preds)); f1_val=float(f1_score(lbls,preds,average="macro"))
+            except Exception:
+                acc=0.0; f1_val=0.0
             val_loss = float(val_loss_sum / max(1,n_val))
 
             min_gate = max(_min_f1_for(strategy), float(get_QUALITY().get("VAL_F1_MIN", 0.10)))
@@ -877,7 +912,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                 "num_classes":int(len(class_ranges)),
                 "class_ranges": [[float(lo), float(hi)] for (lo,hi) in class_ranges],
                 "input_size":int(feat_dim),
-                "metrics":{"val_acc":acc,"val_f1":f1,"val_loss":val_loss},
+                "metrics":{"val_acc":acc,"val_f1":f1_val,"val_loss":val_loss},
                 "timestamp":now_kst().isoformat(),
                 "model_name":os.path.basename(stem)+".ptz",
                 "window":int(window),
@@ -894,20 +929,20 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
             _disk_barrier([wpath, mpath, MODEL_DIR, os.path.join(MODEL_DIR, symbol), os.path.join(MODEL_DIR, symbol, strategy)])
 
             logger.log_training_result(
-                symbol, strategy, model=os.path.basename(wpath), accuracy=acc, f1=f1, loss=val_loss,
+                symbol, strategy, model=os.path.basename(wpath), accuracy=acc, f1=f1_val, loss=val_loss,
                 note=(f"train_one_model(window={window}, cap={len(features_only)}, engine={'lightning' if _HAS_LIGHTNING else 'manual'}, "
                       f"data_flags={{rows:{len(df)},limit:{_limit},min:{_min_required},aug:{int(augment_needed)},enough:{int(enough_for_training)}}}, "
                       f"epochs={max_epochs}, es_patience={EARLY_STOP_PATIENCE}, es_delta={EARLY_STOP_MIN_DELTA})"),
                 source_exchange="BYBIT", status="success"
             )
 
-            passed = bool(f1 >= min_gate)
+            passed = bool(f1_val >= min_gate)
             meta.update({"passed": int(passed)})
             res["models"].append({
-                "type":model_type,"acc":acc,"f1":f1,"val_loss":val_loss,
+                "type":model_type,"acc":acc,"f1":f1_val,"val_loss":val_loss,
                 "loss_sum":float(total_loss),"pt":wpath,"meta":mpath,"passed":passed
             })
-            _safe_print(f"🟩 TRAIN done [{model_type}] acc={acc:.4f} f1={f1:.4f} val_loss={val_loss:.5f} → {os.path.basename(wpath)} (passed={int(passed)} gate={min_gate:.2f})")
+            _safe_print(f"🟩 TRAIN done [{model_type}] acc={acc:.4f} f1={f1_val:.4f} val_loss={val_loss:.5f} → {os.path.basename(wpath)} (passed={int(passed)} gate={min_gate:.2f})")
 
             if torch.cuda.is_available(): torch.cuda.empty_cache()
 
