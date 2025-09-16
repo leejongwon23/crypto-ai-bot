@@ -1,4 +1,4 @@
-# === model/base_model.py (FINAL, 2025-09-13) — CNN+BiLSTM+Attention 강화, 안정초기화, 게이팅/레지듀얼 헤드, 안전 XGB 대체 ===
+# === model/base_model.py (patched) ===
 import os
 import torch
 import torch.nn as nn
@@ -34,51 +34,71 @@ def _resolve_dropout(d):
 # =========================
 def _init_module(m):
     if isinstance(m, nn.Linear):
-        nn.init.xavier_uniform_(m.weight)
+        try:
+            nn.init.xavier_uniform_(m.weight)
+        except Exception:
+            pass
         if m.bias is not None:
             nn.init.zeros_(m.bias)
     elif isinstance(m, nn.Conv1d):
-        nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+        try:
+            nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+        except Exception:
+            pass
         if m.bias is not None:
             nn.init.zeros_(m.bias)
     elif isinstance(m, nn.BatchNorm1d):
-        if m.weight is not None:
+        if getattr(m, "weight", None) is not None:
             nn.init.ones_(m.weight)
-        if m.bias is not None:
+        if getattr(m, "bias", None) is not None:
             nn.init.zeros_(m.bias)
     elif isinstance(m, nn.LayerNorm):
-        if m.bias is not None:
+        if getattr(m, "bias", None) is not None:
             nn.init.zeros_(m.bias)
-        if m.weight is not None:
+        if getattr(m, "weight", None) is not None:
             nn.init.ones_(m.weight)
 
 def _init_lstm_forget_bias(lstm: nn.LSTM):
     # LSTM 가중치/바이어스 안정 초기화 + forget gate bias = 1.0
     for name, param in lstm.named_parameters():
         if "weight_ih" in name:
-            nn.init.xavier_uniform_(param)
+            try:
+                nn.init.xavier_uniform_(param)
+            except Exception:
+                pass
         elif "weight_hh" in name:
-            nn.init.orthogonal_(param)
+            try:
+                nn.init.orthogonal_(param)
+            except Exception:
+                pass
         elif "bias" in name:
-            nn.init.zeros_(param)
-            n = param.shape[0] // 4
-            param.data[n:2*n].fill_(1.0)  # forget gate
+            try:
+                nn.init.zeros_(param)
+                n = param.shape[0] // 4
+                param.data[n:2*n].fill_(1.0)  # forget gate bias
+            except Exception:
+                pass
 
 # =========================
-# Attention (안정 소프트맥스 + dropout)
+# Attention (안정 소프트맥스 + dropout + 재정규화)
 # =========================
 class Attention(nn.Module):
     def __init__(self, hidden_size, dropout=0.1):
         super().__init__()
         self.attn = nn.Linear(hidden_size, 1)
         self.drop = nn.Dropout(_resolve_dropout(dropout))
+        self._eps = 1e-12
 
     def forward(self, lstm_out):
         # lstm_out: [B, T, H]
         score = self.attn(lstm_out).squeeze(-1)                 # [B, T]
-        score = score - score.max(dim=1, keepdim=True).values   # 수치 안정화
+        # 안정화
+        score = score - score.max(dim=1, keepdim=True).values
         weights = F.softmax(score, dim=1)                       # [B, T]
+        # dropout on weights can break normalization -> apply then renormalize
         weights = self.drop(weights)
+        s = weights.sum(dim=1, keepdim=True)
+        weights = weights / (s + self._eps)
         context = torch.sum(lstm_out * weights.unsqueeze(-1), dim=1)  # [B, H]
         return context, weights
 
@@ -113,7 +133,8 @@ class ResConvBlock(nn.Module):
     def forward(self, x):  # [B,C,T]
         y = self.act(self.bn1(self.conv1(x)))
         y = self.bn2(self.conv2(y))
-        y = self.act(y + (self.proj(x) if not isinstance(self.proj, nn.Identity) else x))
+        residual = self.proj(x) if not isinstance(self.proj, nn.Identity) else x
+        y = self.act(y + residual)
         return y
 
 # =========================
@@ -161,6 +182,7 @@ class LSTMPricePredictor(nn.Module):
         self.apply(_init_module)
 
     def forward(self, x, params=None):
+        # x: [B, T, F]
         x = self.in_norm(x)
         lstm_out, _ = self.lstm(x)
         context, _ = self.attention(lstm_out)
@@ -176,6 +198,7 @@ class LSTMPricePredictor(nn.Module):
             h2 = self.dropout(h2)
             logits = self.fc_logits(h2)
         else:
+            # meta-params path (weights provided externally)
             h1 = F.gelu(F.linear(context, params['fc1.weight'], params.get('fc1.bias')))
             h1 = F.dropout(h1, p=self.dropout.p, training=self.training)
             h1 = h1 + F.linear(context, params['res_proj.weight'], params.get('res_proj.bias'))
@@ -194,6 +217,7 @@ class CNNLSTMPricePredictor(nn.Module):
         dropout = _resolve_dropout(dropout)
 
         self.in_norm = nn.LayerNorm(input_size)
+        # conv expects channels -> we treat input_size as channel count after permute
         self.res1 = ResConvBlock(input_size,  cnn_channels, k=3, p=1)
         self.res2 = ResConvBlock(cnn_channels, cnn_channels, k=5, p=2)
         self.se    = SEBlock(cnn_channels, reduction=16)
@@ -215,6 +239,7 @@ class CNNLSTMPricePredictor(nn.Module):
         self.apply(_init_module)
 
     def forward(self, x, params=None):
+        # x: [B, T, F]
         x = self.in_norm(x)
         x_in = x.permute(0, 2, 1)           # [B, F, T]
         y = self.res1(x_in)
@@ -249,14 +274,15 @@ class CNNLSTMPricePredictor(nn.Module):
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
         super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-np.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, d_model, dtype=torch.float32)
+        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float32) * (-np.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         self.register_buffer('pe', pe.unsqueeze(0))
 
     def forward(self, x):
+        # x: [B, T, D]
         x = x + self.pe[:, :x.size(1)].to(x.device)
         return x
 
@@ -304,6 +330,7 @@ class TransformerPricePredictor(nn.Module):
         self.apply(_init_module)
 
     def forward(self, x, params=None):
+        # x: [B, T, F]
         x = self.in_norm(x)
         x = self.input_proj(x)           # [B, T, D]
         if self.mode == "classification":
@@ -333,7 +360,7 @@ class TransformerPricePredictor(nn.Module):
             return self.decoder(x)
 
 # =========================
-# XGBoost Wrapper (optional)
+# XGBoost Wrapper (optional) - 안정적 출력 처리
 # =========================
 class XGBoostWrapper:
     def __init__(self, model_path):
@@ -345,30 +372,70 @@ class XGBoostWrapper:
     def predict(self, X):
         dmatrix = xgb.DMatrix(X.reshape(X.shape[0], -1))
         probs = self.model.predict(dmatrix)
-        return np.argmax(probs, axis=1)
+        if isinstance(probs, np.ndarray):
+            if probs.ndim == 1:
+                # binary or raw score -> threshold 0.5
+                try:
+                    # if values in [0,1] assume probs
+                    if probs.max() <= 1.0 and probs.min() >= 0.0:
+                        return (probs > 0.5).astype(np.int64)
+                    # otherwise argmax over single dim not possible -> convert sign
+                    return (probs > 0).astype(np.int64)
+                except Exception:
+                    return np.argmax(np.vstack([1-probs, probs]).T, axis=1)
+            elif probs.ndim == 2:
+                return np.argmax(probs, axis=1)
+        # fallback: flatten and argmax
+        try:
+            return np.argmax(np.array(probs), axis=1)
+        except Exception:
+            return np.asarray(probs).reshape(-1).astype(np.int64)
 
 # =========================
-# AutoEncoder (SSL/유틸)
+# AutoEncoder (SSL/유틸) - 입력 형태 유연화
 # =========================
 class AutoEncoder(nn.Module):
     def __init__(self, input_size, hidden_size=64):
         super().__init__()
+        self.input_size = int(input_size)
+        self.hidden_size = int(hidden_size)
         self.encoder = nn.Sequential(
-            nn.Linear(input_size, hidden_size),
+            nn.Linear(self.input_size, self.hidden_size),
             nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size // 2),
+            nn.Linear(self.hidden_size, max(1, self.hidden_size // 2)),
             nn.ReLU()
         )
         self.decoder = nn.Sequential(
-            nn.Linear(hidden_size // 2, hidden_size),
+            nn.Linear(max(1, self.hidden_size // 2), self.hidden_size),
             nn.ReLU(),
-            nn.Linear(hidden_size, input_size)
+            nn.Linear(self.hidden_size, self.input_size)
         )
+        self.apply(_init_module)
 
     def forward(self, x):
-        x = x.squeeze(1)           # [B, F]
-        encoded = self.encoder(x)
+        # Accept x: [B, T, F] or [B, F] or [B,1,F]
+        if x is None:
+            return x
+        if x.dim() == 3:
+            B, T, F = x.shape
+            if T == 1:
+                flat = x.squeeze(1)
+            else:
+                flat = x.reshape(B, -1)
+        elif x.dim() == 2:
+            flat = x
+        else:
+            flat = x.view(x.size(0), -1)
+        # if shape doesn't match input_size, try to trim/pad
+        if flat.size(1) != self.input_size:
+            if flat.size(1) > self.input_size:
+                flat = flat[:, :self.input_size]
+            else:
+                pad = torch.zeros(flat.size(0), self.input_size - flat.size(1), device=flat.device, dtype=flat.dtype)
+                flat = torch.cat([flat, pad], dim=1)
+        encoded = self.encoder(flat)
         decoded = self.decoder(encoded)
+        # restore to [B,1,input_size] to be compatible
         decoded = decoded.unsqueeze(1)
         return decoded
 
@@ -398,6 +465,7 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
             else:
                 print(f"[info] features dim {feat_dim} < FEATURE_INPUT_SIZE {FEATURE_INPUT_SIZE} → use meta size")
         else:
+            # explicit info removed for noise, but keep a short print
             print(f"[info] input_size fixed to FEATURE_INPUT_SIZE={FEATURE_INPUT_SIZE}")
 
     if input_size < FEATURE_INPUT_SIZE:
