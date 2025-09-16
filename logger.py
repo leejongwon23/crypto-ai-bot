@@ -1,8 +1,9 @@
-# === logger.py (메모리 안전: 로테이션 + 청크 집계 + 모델명 정규화 + 실패DB 노이즈 차단 + 파일락 + 컨텍스트 분기 + 학습지표 확장 + 1회 INFO/DEBUG 전환 + 캐시HIT 샘플링 + 연속실패 요약) ===
+# === logger.py (patched) ===
 import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil, re
 import sqlite3
 from collections import defaultdict, deque
 import threading, time  # 동시성/재시도
+from typing import Optional, Any, Dict
 # [ADD] per-class F1 출력용 (선택)
 from sklearn.metrics import classification_report
 
@@ -103,7 +104,10 @@ class _FileLock:
                     try:
                         mtime = os.path.getmtime(self.path)
                         if (time.time() - mtime) > _LOCK_STALE_SEC:
-                            os.remove(self.path)
+                            try:
+                                os.remove(self.path)
+                            except Exception:
+                                pass
                     except Exception:
                         pass
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -115,7 +119,10 @@ class _FileLock:
                     try:
                         mtime = os.path.getmtime(self.path)
                         if (time.time() - mtime) > _LOCK_STALE_SEC:
-                            os.remove(self.path)
+                            try:
+                                os.remove(self.path)
+                            except Exception:
+                                pass
                             continue
                     except Exception:
                         pass
@@ -152,7 +159,7 @@ class _ConsecutiveFailAggregator:
         sym, strat, gid, model = key
         msg = f"[연속실패요약/{where}] {sym}-{strat}-g{gid} {model} ×{st['cnt']} (last_reason={st['last_reason']})"
         try:
-            # 감사 로그 1줄
+            os.makedirs(os.path.dirname(AUDIT_LOG), exist_ok=True)
             with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
                 w = csv.DictWriter(f, fieldnames=["timestamp","symbol","strategy","status","reason"])
                 if f.tell() == 0:
@@ -217,7 +224,12 @@ def ensure_prediction_log_exists():
             existing = _read_csv_header(PREDICTION_LOG)
             if existing != PREDICTION_HEADERS:
                 bak = PREDICTION_LOG + ".bak"
-                os.replace(PREDICTION_LOG, bak)
+                try:
+                    os.replace(PREDICTION_LOG, bak)
+                except Exception:
+                    # fallback: copy then truncate
+                    shutil.copyfile(PREDICTION_LOG, bak)
+                    open(PREDICTION_LOG, "w", encoding="utf-8-sig").close()
                 with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as out, \
                      open(bak, "r", encoding="utf-8-sig") as src:
                     w = csv.writer(out); w.writerow(PREDICTION_HEADERS)
@@ -243,7 +255,11 @@ def ensure_train_log_exists():
             existing = _read_csv_header(TRAIN_LOG)
             if existing != TRAIN_HEADERS:
                 bak = TRAIN_LOG + ".bak"
-                os.replace(TRAIN_LOG, bak)
+                try:
+                    os.replace(TRAIN_LOG, bak)
+                except Exception:
+                    shutil.copyfile(TRAIN_LOG, bak)
+                    open(TRAIN_LOG, "w", encoding="utf-8-sig").close()
                 with open(TRAIN_LOG, "w", newline="", encoding="utf-8-sig") as out, \
                      open(bak, "r", encoding="utf-8-sig") as src:
                     w = csv.writer(out); w.writerow(TRAIN_HEADERS)
@@ -251,7 +267,6 @@ def ensure_train_log_exists():
                     try: old_header = next(reader)
                     except StopIteration: old_header = []
                     for row in reader:
-                        # 가능한 값 매핑 (구버전: timestamp,symbol,strategy,model,accuracy,f1,loss,note,source_exchange,status)
                         mapped = {h:row[i] for i,h in enumerate(old_header)} if old_header else {}
                         new_row = [
                             mapped.get("timestamp",""), mapped.get("symbol",""), mapped.get("strategy",""), mapped.get("model",""),
@@ -274,14 +289,17 @@ def rotate_prediction_log_if_needed(max_mb: int = 200, backups: int = 3):
         size_mb = os.path.getsize(PREDICTION_LOG) / (1024 * 1024)
         if size_mb < max_mb:
             return
+        # rotate: shift existing files up by one
         for i in range(backups, 0, -1):
-            old = f"{PREDICTION_LOG}.{i}"
-            if i == backups and os.path.exists(old):
-                os.remove(old)
-            else:
-                prev = f"{PREDICTION_LOG}.{i-1}" if i-1 > 0 else PREDICTION_LOG
-                if os.path.exists(prev):
-                    shutil.move(prev, old)
+            dst = f"{PREDICTION_LOG}.{i}"
+            src = f"{PREDICTION_LOG}.{i-1}" if i-1 > 0 else PREDICTION_LOG
+            if os.path.exists(src):
+                try:
+                    if os.path.exists(dst):
+                        os.remove(dst)
+                    shutil.move(src, dst)
+                except Exception:
+                    pass
         ensure_prediction_log_exists()
         print(f"[logger] 🔁 rotate: {size_mb:.1f}MB → rotated with {backups} backups")
     except Exception as e:
@@ -330,6 +348,7 @@ def _apply_sqlite_pragmas(conn):
         print(f"[경고] PRAGMA 설정 실패 → {e}")
 
 def _connect_sqlite():
+    os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
     conn = sqlite3.connect(_DB_PATH, timeout=30, check_same_thread=False)
     _apply_sqlite_pragmas(conn)
     return conn
@@ -340,6 +359,17 @@ def get_db_connection():
         if _db_conn is None:
             try:
                 _db_conn = _connect_sqlite()
+                # quick sanity check
+                try:
+                    cur = _db_conn.cursor()
+                    cur.execute("SELECT 1;")
+                    cur.close()
+                except Exception:
+                    try:
+                        _db_conn.close()
+                    except Exception:
+                        pass
+                    _db_conn = _connect_sqlite()
                 print("[✅ logger.py DB connection 생성 완료]")
             except Exception as e:
                 print(f"[오류] logger.py DB connection 생성 실패 → {e}")
@@ -561,6 +591,7 @@ def log_audit_prediction(s, t, status, reason):
         "reason": str(reason)
     }
     try:
+        os.makedirs(os.path.dirname(AUDIT_LOG), exist_ok=True)
         with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=row.keys())
             if f.tell() == 0:
@@ -1020,11 +1051,16 @@ def alert_if_single_class_prediction(symbol: str, strategy: str, lookback_days: 
             try:
                 ts = ts.dt.tz_localize("Asia/Seoul")
             except Exception:
-                ts = ts.dt.tz_convert("Asia/Seoul")
+                try:
+                    ts = ts.dt.tz_convert("Asia/Seoul")
+                except Exception:
+                    pass
             sub = chunk[(chunk.get("symbol","")==symbol) & (chunk.get("strategy","")==strategy)]
-            sub = sub.loc[ts >= cutoff]
             if sub.empty:
                 continue
+            # align timestamps with rows
+            if ts.shape[0] == sub.shape[0]:
+                sub = sub.loc[ts >= cutoff]
             pcs = pd.to_numeric(sub["predicted_class"], errors="coerce").dropna().astype(int)
             uniq.update(pcs.unique().tolist())
             total += int(len(pcs))
@@ -1122,7 +1158,10 @@ def export_recent_model_stats(days: int = 7, out_path: str = None):
                 try:
                     ts = ts.dt.tz_localize("Asia/Seoul")
                 except Exception:
-                    ts = ts.dt.tz_convert("Asia/Seoul")
+                    try:
+                        ts = ts.dt.tz_convert("Asia/Seoul")
+                    except Exception:
+                        pass
                 chunk = chunk.loc[ts >= cutoff]
                 chunk = chunk.assign(_ts=ts)
             else:
