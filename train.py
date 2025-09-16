@@ -54,7 +54,7 @@ from model.base_model import get_model
 from feature_importance import compute_feature_importance, save_feature_importance
 from failure_db import insert_failure_record, ensure_failure_db
 import logger
-from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges, set_NUM_CLASSES, STRATEGY_CONFIG, get_QUALITY
+from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges, set_NUM_CLASSES, STRATEGY_CONFIG, get_QUALITY, get_LOSS
 from data_augmentation import balance_classes
 from window_optimizer import find_best_window
 from focal_loss import FocalLoss
@@ -738,16 +738,44 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
             if len(train_X)<200: train_X,train_y=balance_classes(train_X,train_y,num_classes=len(class_ranges))
         except Exception as e: _safe_print(f"[balance err] {e}")
 
-        # ===== 클래스 가중치
-        present = np.unique(train_y)
+        # ===== 클래스 가중치 (3번 수정: inverse_freq / inverse_freq_clip 적용)
         try:
-            cw_present = compute_class_weight(class_weight="balanced", classes=present, y=train_y)
-            w_full = np.ones(len(class_ranges), dtype=np.float32)
-            for cls, wv in zip(present, cw_present):
-                w_full[int(cls)] = float(wv)
+            loss_cfg = get_LOSS()
+            cw_cfg = loss_cfg.get("class_weight", {}) if isinstance(loss_cfg, dict) else {}
+            mode = str(cw_cfg.get("mode", "inverse_freq_clip")).lower()
+            cw_min = float(cw_cfg.get("min", 0.5))
+            cw_max = float(cw_cfg.get("max", 2.0))
+            eps = float(cw_cfg.get("eps", 1e-6))
+
+            # class counts on training set (minlength ensures full vector)
+            class_counts = np.bincount(train_y, minlength=len(class_ranges)).astype(np.float32)
+
+            if mode == "none":
+                w_full = np.ones(len(class_ranges), dtype=np.float32)
+            elif mode == "inverse_freq":
+                w = 1.0 / (np.sqrt(class_counts + eps))
+                w_full = w.astype(np.float32)
+            elif mode == "inverse_freq_clip":
+                w = 1.0 / (np.sqrt(class_counts + eps))
+                w = np.clip(w, cw_min, cw_max)
+                w_full = w.astype(np.float32)
+            else:
+                # fallback to sklearn balanced for unknown mode
+                present = np.unique(train_y)
+                cw_present = compute_class_weight(class_weight="balanced", classes=present, y=train_y)
+                w_full = np.ones(len(class_ranges), dtype=np.float32)
+                for cls, wv in zip(present, cw_present):
+                    w_full[int(cls)] = float(wv)
+
+            # if any class has zero count, set to maximum safe value to avoid zeros
+            zero_mask = (class_counts == 0)
+            if zero_mask.any():
+                w_full[zero_mask] = max(cw_max, np.max(w_full))
+
         except Exception as e:
             _safe_print(f"[class_weight warn] {e}")
             w_full = np.ones(len(class_ranges), dtype=np.float32)
+
         w = torch.tensor(w_full, dtype=torch.float32, device=DEVICE)
 
         for model_type in ["lstm","cnn_lstm","transformer"]:
