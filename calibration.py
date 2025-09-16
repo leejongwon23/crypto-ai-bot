@@ -1,22 +1,8 @@
-# === calibration.py (FINAL + train.py hook shims | compat with predict.py) =========================
-"""
-확률 보정 모듈 (가볍고 안전)
-- 기본 OFF: config.get_CALIB()["enabled"]가 False면 모든 API는 원본 그대로 반환.
-- 지원 기법:
-    * Temperature Scaling (다중클래스 가능)
-    * Platt Scaling (이진 전용)
-- 저장/로드: /persistent/calib/{symbol}_{strategy}_{model}.json
-- 외부에서 쓰는 핵심 함수:
-    * apply_calibration(raw_prob, meta) -> prob
-    * fit_and_save(y_true, y_pred_proba, meta)
-- 호환용( train.py 의 hook ):
-    * learn_and_save(symbol, strategy, model_name)         # 데이터 소스 없으면 조용히 패스
-    * learn_and_save_from_checkpoint(symbol, strategy, model_name)  # 동일 동작
-"""
-
+# === calibration.py (patched: atomic save/load, file lock, meta, validation) ===
 from __future__ import annotations
-import os, json, math
+import os, json, math, time
 import numpy as np
+from typing import Optional, Tuple
 
 # ---- Config 안전 로더 ----------------------------------------------------
 try:
@@ -30,21 +16,21 @@ except Exception:
     _default_config = {}
 
 def _get_CALIB():
-    # 기본값(OFF)
     base = {
-        "enabled": False,          # 전역 스위치
-        "method": "temperature",   # "temperature" | "platt"
-        "min_samples": 200,        # 학습 최소 표본
-        "clip_eps": 1e-6           # 확률 안정화
+        "enabled": False,
+        "method": "temperature",
+        "min_samples": 200,
+        "clip_eps": 1e-6,
+        "lock_timeout": 5.0
     }
     try:
-        from config import CALIB  # 있으면 사용
+        from config import CALIB
         base.update(CALIB if isinstance(CALIB, dict) else {})
     except Exception:
         pass
     return base
 
-# ---- 파일 경로 -----------------------------------------------------------
+# ---- 파일 경로 / 원자적 쓰기 / 간단 파일락 --------------------------------
 CALIB_DIR = "/persistent/calib"
 os.makedirs(CALIB_DIR, exist_ok=True)
 
@@ -52,7 +38,49 @@ def _calib_path(symbol: str, strategy: str, model: str) -> str:
     fname = f"{symbol}_{strategy}_{model}.json".replace("/", "_")
     return os.path.join(CALIB_DIR, fname)
 
-# ---- 수학 유틸 -----------------------------------------------------------
+def _atomic_write_json(path: str, obj: dict):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+        try:
+            f.flush(); os.fsync(f.fileno())
+        except Exception:
+            pass
+    os.replace(tmp, path)
+
+class _SimpleFileLock:
+    def __init__(self, path: str, timeout: float = 5.0, poll: float = 0.05):
+        self.lockfile = path + ".lock"
+        self.timeout = float(timeout)
+        self.poll = float(poll)
+    def __enter__(self):
+        deadline = time.time() + self.timeout
+        while True:
+            try:
+                fd = os.open(self.lockfile, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(f"pid={os.getpid()} ts={time.time()}\n")
+                return self
+            except FileExistsError:
+                try:
+                    mtime = os.path.getmtime(self.lockfile)
+                    if time.time() - mtime > max(60.0, self.timeout*2):
+                        os.remove(self.lockfile)
+                        continue
+                except Exception:
+                    pass
+                if time.time() >= deadline:
+                    raise TimeoutError("lock timeout")
+                time.sleep(self.poll)
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if os.path.exists(self.lockfile):
+                os.remove(self.lockfile)
+        except Exception:
+            pass
+
+# ---- 수학 유틸 ------------------------------------------------------------
 def _softmax(z: np.ndarray, T: float = 1.0) -> np.ndarray:
     z = np.asarray(z, dtype=np.float64) / max(T, 1e-6)
     z = z - np.max(z, axis=1, keepdims=True)
@@ -60,6 +88,9 @@ def _softmax(z: np.ndarray, T: float = 1.0) -> np.ndarray:
     return ez / np.sum(ez, axis=1, keepdims=True)
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float64)
+    # 안정화
+    x = np.clip(x, -100.0, 100.0)
     return 1.0 / (1.0 + np.exp(-x))
 
 def _to_onehot(y: np.ndarray, K: int) -> np.ndarray:
@@ -69,23 +100,25 @@ def _to_onehot(y: np.ndarray, K: int) -> np.ndarray:
     return oh
 
 # ---- Temperature Scaling (multi-class) -----------------------------------
-def _fit_temperature(logits: np.ndarray, y_true: np.ndarray, max_iter=100, lr=0.01) -> float:
+def _fit_temperature(logits: np.ndarray, y_true: np.ndarray, max_iter=200, lr=0.01) -> float:
     """
-    간단한 1D GD로 NLL 최소화(안정/가벼움). 반환: T>0
-    logits: (N,K) — 모델의 로짓(또는 logit 비례 점수). 확률이 들어온 경우 logit으로 변환 권장.
+    안정된 1D GD (finite-diff 기반)로 NLL 최소화. 반환 T>0.
+    logits: (N,K)
     """
-    T = 1.0
-    K = logits.shape[1]
+    logits = np.asarray(logits, dtype=np.float64)
+    N, K = logits.shape
     y_oh = _to_onehot(y_true, K)
-
+    T = 1.0
     for _ in range(max_iter):
-        p = _softmax(logits, T)  # (N,K)
-        # 수치적 gradient
-        eps = 1e-3
-        p_eps = _softmax(logits, T + eps)
-        nll = -np.mean(np.sum(y_oh * np.log(p + 1e-12), axis=1))
-        nll_eps = -np.mean(np.sum(y_oh * np.log(p_eps + 1e-12), axis=1))
-        g = (nll_eps - nll) / eps
+        P = _softmax(logits, T)  # (N,K)
+        nll = -np.mean(np.sum(y_oh * np.log(P + 1e-12), axis=1))
+        # 중앙차분 근사 gradient (수치적으로 안정)
+        eps = max(1e-4, 1e-3 * T)
+        Pp = _softmax(logits, T + eps)
+        Pm = _softmax(logits, max(1e-8, T - eps))
+        nll_p = -np.mean(np.sum(y_oh * np.log(Pp + 1e-12), axis=1))
+        nll_m = -np.mean(np.sum(y_oh * np.log(Pm + 1e-12), axis=1))
+        g = (nll_p - nll_m) / (2 * eps)
         T_new = max(1e-3, T - lr * g)
         if abs(T_new - T) < 1e-6:
             T = T_new
@@ -94,17 +127,14 @@ def _fit_temperature(logits: np.ndarray, y_true: np.ndarray, max_iter=100, lr=0.
     return float(T)
 
 # ---- Platt Scaling (binary) ----------------------------------------------
-def _fit_platt(scores: np.ndarray, y_true: np.ndarray, max_iter=100, lr=0.01) -> tuple[float, float]:
-    """
-    Platt: sigmoid(A*x + B). 여기서 x는 logit 혹은 점수(양수=긍정 쪽).
-    간단한 GD (A,B) 학습.
-    """
+def _fit_platt(scores: np.ndarray, y_true: np.ndarray, max_iter=200, lr=0.01) -> tuple[float, float]:
     A, B = 1.0, 0.0
     y = y_true.astype(np.float64)
-
+    scores = np.asarray(scores, dtype=np.float64)
     for _ in range(max_iter):
         s = A * scores + B
         p = _sigmoid(s)
+        # gradient of BCE
         grad = (p - y)
         dA = np.mean(grad * scores)
         dB = np.mean(grad)
@@ -113,32 +143,53 @@ def _fit_platt(scores: np.ndarray, y_true: np.ndarray, max_iter=100, lr=0.01) ->
     return float(A), float(B)
 
 # ---- 저장/로드 ------------------------------------------------------------
-def load(symbol: str, strategy: str, model: str) -> dict | None:
+def load(symbol: str, strategy: str, model: str) -> Optional[dict]:
     path = _calib_path(symbol, strategy, model)
     if not os.path.exists(path):
         return None
+    cfg = _get_CALIB()
+    timeout = float(cfg.get("lock_timeout", 5.0))
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            obj = json.load(f)
+        with _SimpleFileLock(path, timeout=timeout):
+            with open(path, "r", encoding="utf-8") as f:
+                obj = json.load(f)
+        # 간단 검증
+        if not isinstance(obj, dict):
+            return None
+        if "method" not in obj:
+            return None
         return obj
     except Exception:
         return None
 
 def save(params: dict, symbol: str, strategy: str, model: str) -> None:
     path = _calib_path(symbol, strategy, model)
+    cfg = _get_CALIB()
+    timeout = float(cfg.get("lock_timeout", 5.0))
+    meta = {
+        "meta": {
+            "symbol": symbol, "strategy": strategy, "model": model,
+            "num_classes": int(params.get("num_classes", -1)),
+            "created_at": time.time()
+        },
+        "params": params
+    }
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(params, f, ensure_ascii=False, indent=2)
+        with _SimpleFileLock(path, timeout=timeout):
+            _atomic_write_json(path, meta)
     except Exception:
-        pass
+        # best-effort: try direct write
+        try:
+            _atomic_write_json(path, meta)
+        except Exception:
+            pass
 
 # ---- 외부 API -------------------------------------------------------------
 def fit_and_save(y_true: np.ndarray,
                  y_pred_proba_or_logits: np.ndarray,
-                 meta: dict) -> dict | None:
+                 meta: dict) -> Optional[dict]:
     """
-    훈련/주기 업데이트용.
-    meta = {"symbol":.., "strategy":.., "model":.., "is_logits":bool}
+    meta = {"symbol":.., "strategy":.., "model":.., "is_logits":bool (optional)}
     """
     cfg = _get_CALIB()
     if not cfg.get("enabled", False):
@@ -152,35 +203,35 @@ def fit_and_save(y_true: np.ndarray,
     y_true = np.asarray(y_true)
     X = np.asarray(y_pred_proba_or_logits, dtype=np.float64)
 
+    if y_true.ndim != 1 or y_true.shape[0] != X.shape[0]:
+        return None
+
     if X.ndim == 1:
-        # binary 점수로 간주 → Platt
-        if y_true.shape[0] < cfg["min_samples"]:
+        # binary -> Platt
+        if y_true.shape[0] < int(cfg.get("min_samples", 200)):
             return None
         A, B = _fit_platt(X, y_true)
-        params = {"method": "platt", "A": A, "B": B, "ver": 1}
+        params = {"method": "platt", "A": A, "B": B, "ver": 1, "num_classes": 2}
         save(params, symbol, strategy, model)
         return params
 
-    # multi-class
-    if y_true.shape[0] < cfg["min_samples"]:
+    # multiclass
+    if y_true.shape[0] < int(cfg.get("min_samples", 200)):
         return None
 
     if is_logits:
         logits = X
     else:
         P = np.clip(X, cfg["clip_eps"], 1.0 - cfg["clip_eps"])
-        logits = np.log(P)
+        # avoid log(0)
+        logits = np.log(P + 1e-12)
+
     T = _fit_temperature(logits, y_true)
-    params = {"method": "temperature", "T": T, "ver": 1}
+    params = {"method": "temperature", "T": T, "ver": 1, "num_classes": int(logits.shape[1])}
     save(params, symbol, strategy, model)
     return params
 
 def _normalize_meta_kwargs(symbol, strategy, model, model_meta, meta):
-    """
-    predict.py 호환용:
-      - (symbol, strategy, regime, model_meta=meta) 스타일
-      - meta={"symbol","strategy","model"} 스타일
-    """
     sym = (meta or {}).get("symbol", None) if isinstance(meta, dict) else None
     strat = (meta or {}).get("strategy", None) if isinstance(meta, dict) else None
     mdl = (meta or {}).get("model", None) if isinstance(meta, dict) else None
@@ -200,13 +251,7 @@ def apply_calibration(raw_prob_or_scores: np.ndarray,
                       *,
                       symbol: str = None, strategy: str = None, regime: str = None,
                       model_meta: dict = None, model: str = None,
-                      is_logits: bool = None) -> np.ndarray:
-    """
-    예측 직후 호출.
-    - meta(dict) 또는 (symbol,strategy,model_meta) 키워드 모두 지원 (predict.py 호환)
-    - 반환값: 보정된 확률 배열 (shape 유지)
-    - 설정 OFF 또는 파라미터 없음: 입력을 안정화(CLIP)만 해서 그대로 반환.
-    """
+                      is_logits: Optional[bool] = None) -> np.ndarray:
     cfg = _get_CALIB()
     X = np.asarray(raw_prob_or_scores, dtype=np.float64)
 
@@ -219,9 +264,9 @@ def apply_calibration(raw_prob_or_scores: np.ndarray,
         return X
 
     sym, strat, mdl = _normalize_meta_kwargs(symbol, strategy, model, model_meta, meta)
-    params = load(sym, strat, mdl)
+    loaded = load(sym, strat, mdl)
+    params = (loaded.get("params") if isinstance(loaded, dict) else loaded) if loaded else None
 
-    # 파라미터 없으면 안정화만
     if params is None:
         if X.ndim == 2:
             P = np.clip(X, cfg["clip_eps"], 1.0 - cfg["clip_eps"])
@@ -231,7 +276,6 @@ def apply_calibration(raw_prob_or_scores: np.ndarray,
 
     method = params.get("method", "temperature")
 
-    # 호출자가 is_logits를 명시했다면 우선 적용
     if is_logits is None:
         is_logits = bool((meta or {}).get("is_logits")) if isinstance(meta, dict) else False
 
@@ -243,7 +287,7 @@ def apply_calibration(raw_prob_or_scores: np.ndarray,
             P = _softmax(X, T)
         else:
             P = np.clip(X, cfg["clip_eps"], 1.0 - cfg["clip_eps"])
-            logits = np.log(P)
+            logits = np.log(P + 1e-12)
             P = _softmax(logits, T)
         return P
 
@@ -256,32 +300,23 @@ def apply_calibration(raw_prob_or_scores: np.ndarray,
         p = _sigmoid(A * X + B)
         return p
 
-    # 알 수 없는 method → 안정화만
+    # unknown method -> stabilize
     if X.ndim == 2:
         P = np.clip(X, cfg["clip_eps"], 1.0 - cfg["clip_eps"])
         P = P / (P.sum(axis=1, keepdims=True) + 1e-12)
         return P
     return X
 
-# ---- 버전 문자열 (predict/logger에서 로깅용) ------------------------------
 def get_calibration_version() -> str:
-    """
-    로깅용 간단 버전 문자열.
-    OFF이면 "off", 아니면 "<method>@1"
-    """
     cfg = _get_CALIB()
     if not cfg.get("enabled", False):
         return "off"
     m = str(cfg.get("method", "temperature")).lower()
     return f"{m}@1"
 
-# ---- 품질 리포트(선택) ----------------------------------------------------
 def expected_calibration_error(y_true: np.ndarray,
                                y_prob: np.ndarray,
                                n_bins: int = 10) -> float:
-    """
-    간단 ECE(멀티클래스는 argmax 기준).
-    """
     y_true = np.asarray(y_true).astype(int)
     if y_prob.ndim == 1:
         conf = y_prob
@@ -300,20 +335,30 @@ def expected_calibration_error(y_true: np.ndarray,
             ece += (m.mean()) * abs(acc - conf_mean)
     return float(ece)
 
-# ---- train.py 호환용 얇은 래퍼 -------------------------------------------
+# ---- train.py 호환용 얇은 래퍼 (best-effort: 파일 기반 학습 데이터 찾아 적용) ----
 def learn_and_save(symbol: str, strategy: str, model_name: str):
     """
-    train.py의 훅을 만족하기 위한 래퍼.
-    여기서는 외부에서 y_true/proba 저장소를 제공하지 않으므로 조용히 패스.
-    (향후 검증 예측을 파일로 남기면 그걸 읽어 fit_and_save에 연결)
+    기본적으로 외부 검증 예측 데이터를 자동으로 찾는 로직은 제공하지 않음.
+    여기서는 /persistent/calib_sources/{symbol}_{strategy}_{model}.json 형식의
+    검증 결과 파일이 있으면 읽어 fit_and_save를 수행하도록 시도함.
     """
     try:
-        _ = (symbol, strategy, model_name)  # noqa
-        return None
+        src_dir = "/persistent/calib_sources"
+        fn = f"{symbol}_{strategy}_{model_name}.json".replace("/", "_")
+        path = os.path.join(src_dir, fn)
+        if not os.path.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        y_true = np.asarray(obj.get("y_true", []))
+        y_scores = np.asarray(obj.get("y_scores", []))
+        is_logits = bool(obj.get("is_logits", False))
+        if y_true.size == 0 or y_scores.size == 0:
+            return None
+        meta = {"symbol": symbol, "strategy": strategy, "model": model_name, "is_logits": is_logits}
+        return fit_and_save(y_true, y_scores, meta)
     except Exception:
         return None
 
 def learn_and_save_from_checkpoint(symbol: str, strategy: str, model_name: str):
-    # 현재는 learn_and_save와 동일 동작
     return learn_and_save(symbol, strategy, model_name)
-# ========================================================================
