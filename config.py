@@ -43,6 +43,29 @@ _default_config = {
         "fallback_identity": True
     },
 
+    # --- [LOSS] 손실/가중치 옵션(후속 단계에서 사용) ---
+    "LOSS": {
+        "label_smoothing": 0.02,
+        "focal_gamma": 0.0,
+        "class_weight": {
+            "mode": "inverse_freq_clip",  # none | inverse_freq | inverse_freq_clip
+            "min": 0.5,
+            "max": 2.0
+        }
+    },
+
+    # --- [AUG] 약간의 입력 증강 토글(후속 단계에서 사용) ---
+    "AUG": {
+        "mixup": 0.0,
+        "cutmix": 0.0
+    },
+
+    # --- [EVAL] 평가 설정(후속 단계에서 사용) ---
+    "EVAL": {
+        "macro_f1": True,
+        "topk": [1, 3]
+    },
+
     # --- [5] 실패학습(하드 예시) 옵션 ---
     "FAILLEARN": {
         "enabled": False,
@@ -201,13 +224,22 @@ def get_class_groups(num_classes=None, group_size=5):
     return groups
 
 # ------------------------
-# 신규 옵션 Getter (2·3·5·Q·BIN·SCHED)
+# 신규 옵션 Getter (2·3·LOSS·AUG·EVAL·5·Q·BIN·SCHED)
 # ------------------------
 def get_REGIME():
     return _config.get("REGIME", _default_config["REGIME"])
 
 def get_CALIB():
     return _config.get("CALIB", _default_config["CALIB"])
+
+def get_LOSS():
+    return _config.get("LOSS", _default_config["LOSS"])
+
+def get_AUG():
+    return _config.get("AUG", _default_config["AUG"])
+
+def get_EVAL():
+    return _config.get("EVAL", _default_config["EVAL"])
 
 def get_FAILLEARN():
     return _config.get("FAILLEARN", _default_config["FAILLEARN"])
@@ -225,7 +257,10 @@ def get_SCHED():
 # 헬퍼(모듈 전역) — 이전 스코프 오류 방지
 # ------------------------
 def _round2(x: float) -> float:
-    return round(float(x), _ROUND_DECIMALS)
+    return round(float(x), _ROUNDS())
+
+def _ROUNDS():
+    return _ROUND_DECIMALS
 
 def _cap_by_strategy(x: float, strategy: str) -> float:
     """전략별 양/음수 캡을 동시에 적용."""
@@ -758,11 +793,12 @@ __all__ = [
     "get_class_groups", "get_class_ranges",
     "get_class_return_range", "class_to_expected_return",
     "get_SYMBOLS", "get_SYMBOL_GROUPS",
-    "get_REGIME", "get_CALIB", "get_FAILLEARN", "get_QUALITY",
+    "get_REGIME", "get_CALIB", "get_LOSS", "get_AUG", "get_EVAL",
+    "get_FAILLEARN", "get_QUALITY",
     "get_CLASS_BIN", "get_SCHED",
     "get_CPU_THREADS", "get_TRAIN_NUM_WORKERS", "get_TRAIN_BATCH_SIZE",
     "get_ORDERED_TRAIN", "get_PREDICT_MIN_RETURN", "get_DISPLAY_MIN_RETURN",
     "get_SSL_CACHE_DIR",
     "FEATURE_INPUT_SIZE", "NUM_CLASSES", "FAIL_AUGMENT_RATIO", "MIN_FEATURES",
     "CALIB",
-        ]
+]
