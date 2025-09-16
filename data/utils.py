@@ -6,6 +6,13 @@ from sklearn.preprocessing import MinMaxScaler
 from requests.exceptions import HTTPError, RequestException
 from typing import List, Dict, Any, Optional, Tuple
 
+# 🔗 라벨 경계/그룹은 config에서만 관리 (일원화)
+from config import (
+    get_class_ranges as cfg_get_class_ranges,
+    get_class_groups as cfg_get_class_groups,
+    get_NUM_CLASSES as cfg_get_NUM_CLASSES,
+)
+
 BASE_URL = "https://api.bybit.com"
 BINANCE_BASE_URL = "https://fapi.binance.com"
 BTC_DOMINANCE_CACHE = {"value": 0.5, "timestamp": 0}
@@ -488,40 +495,10 @@ def _winsorize_prices(df: pd.DataFrame, lower_q=0.001, upper_q=0.999) -> pd.Data
         df["volume"] = v.clip(lower=lo, upper=hi).astype(np.float32)
     return df
 
-# ========================= 클래스 경계/그룹 (추가/정합성 보장) =========================
-def get_class_groups(num_classes: int, group_size: int = 5) -> List[Tuple[int, int]]:
-    """클래스 인덱스를 group_size씩 묶은 구간 리스트 반환."""
-    groups = []
-    start = 0
-    while start < num_classes:
-        end = min(start + group_size, num_classes)
-        groups.append((start, end - 1))
-        start = end
-    return groups
-
-def get_class_ranges(values: np.ndarray, num_classes: int) -> List[Tuple[float, float]]:
-    """
-    라벨링에 사용할 '경계 리스트' 계산.
-    - 입력: signed 수익률 배열(values)
-    - 방식: 균등분위수(quantile) 기반으로 클래스 커버가 최대한 균일하도록 분할
-    """
-    v = np.asarray(values, dtype=np.float64)
-    v = v[np.isfinite(v)]
-    if v.size == 0 or num_classes < 2:
-        return [(0.0, 0.0)]
-    # 중복 경계 방지를 위해 약간의 마진을 둔다
-    qs = np.linspace(0.0, 1.0, num_classes + 1)
-    edges = np.quantile(v, qs)
-    # 동일한 값으로 뭉치면 작은 노이즈로 분리
-    for i in range(1, len(edges)):
-        if edges[i] <= edges[i-1]:
-            edges[i] = np.nextafter(edges[i-1], float("inf"))
-    ranges = [(float(edges[i]), float(edges[i+1])) for i in range(num_classes)]
-    return ranges
-
+# ========================= 라벨링 유틸 (경계 기반) =========================
 def _label_with_edges(values: np.ndarray, edges: List[Tuple[float, float]]) -> np.ndarray:
     """경계 리스트에 맞춰 레이블 생성(훈련/로그/평가 동일 규칙). 상한선 기준 digitize."""
-    if len(edges) == 1:
+    if len(edges) <= 1:
         return np.zeros(len(values), dtype=np.int64)
     stops = np.array([b for (_, b) in edges[:-1]], dtype=np.float64)  # 마지막 bin 제외 상한선들
     idx = np.digitize(values, stops, right=True)  # (-inf, s0]→0, (s0, s1]→1, ...
@@ -529,21 +506,10 @@ def _label_with_edges(values: np.ndarray, edges: List[Tuple[float, float]]) -> n
     return idx.astype(np.int64)
 
 # ========================= 데이터셋 생성 =========================
-def _bin_labels(values: np.ndarray, num_classes: int) -> np.ndarray:
-    # (이전 단순 min-max 균등 분할 → 보정 위해 내부용으로만 남김)
-    if len(values) == 0 or num_classes < 2:
-        return np.zeros(len(values), dtype=np.int64)
-    lo = float(np.nanmin(values)); hi = float(np.nanmax(values))
-    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-        return np.zeros(len(values), dtype=np.int64)
-    edges = np.linspace(lo, hi, num_classes + 1, dtype=np.float64)
-    idx = np.searchsorted(edges, values, side="right") - 1
-    idx = np.clip(idx, 0, num_classes - 1)
-    return idx.astype(np.int64)
-
 def create_dataset(features, window=10, strategy="단기", input_size=None):
     import pandas as _pd
-    from config import MIN_FEATURES, get_NUM_CLASSES
+    from config import MIN_FEATURES
+
     def _dummy(symbol_name):
         from config import MIN_FEATURES as _MINF
         safe_failed_result(symbol_name, strategy, reason="create_dataset 입력 feature 부족/실패")
@@ -551,7 +517,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         y = np.zeros((max(1, window),), dtype=np.int64)
         return X, y
 
-    num_classes = max(2, int(get_NUM_CLASSES()))
     symbol_name = "UNKNOWN"
     if isinstance(features, list) and features and isinstance(features[0], dict) and "symbol" in features[0]:
         symbol_name = features[0]["symbol"]
@@ -577,7 +542,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             print("[❌ feature_cols 없음]")
             return _dummy(symbol_name)
 
-        from config import MIN_FEATURES as _MINF
         # (중요) 스케일은 입력용에만, 라벨용 원시 OHLC는 따로 유지
         scaler = MinMaxScaler()
         scaled = scaler.fit_transform(df[feature_cols].astype(np.float32))
@@ -591,29 +555,25 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         input_cols = [c for c in df_s.columns if c != "timestamp"]
 
         # 최소/요구 입력 크기 패딩은 스케일 후 입력에만 적용
-        target_input = input_size if input_size else max(_MINF, len(input_cols))
+        target_input = input_size if input_size else max(MIN_FEATURES, len(input_cols))
         if len(input_cols) < target_input:
             for i in range(len(input_cols), target_input):
                 padc = f"pad_{i}"
                 df_s[padc] = np.float32(0.0)
                 input_cols.append(padc)
         elif len(input_cols) > target_input:
-            # 과다 컬럼이면 잘라서 고정
             keep = set(input_cols[:target_input])
             drop_cols = [c for c in input_cols if c not in keep]
             df_s = df_s.drop(columns=drop_cols, errors="ignore")
             input_cols = [c for c in input_cols if c in keep]
 
-        # 샘플/라벨 생성
-        features_s = df_s.to_dict(orient="records")
-
-        strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}  # 장기 7일(로그 기준 168h)
+        # ── 샘플/라벨용 signed 수익률 생성: 미래 기간 내 최대상승/최저하락 중 절대값 큰 쪽 선택 ──
+        strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
         lookahead = strategy_minutes.get(strategy, 1440)
 
         samples, signed_vals = [], []
-
-        for i in range(window, len(features_s)):
-            seq = features_s[i - window:i]
+        for i in range(window, len(df_s)):
+            seq = df_s.iloc[i - window:i]
             base_raw = raw_records[i]
             entry_time = pd.to_datetime(base_raw.get("timestamp"), errors="coerce", utc=True).tz_convert("Asia/Seoul")
             entry_price = float(base_raw.get("close", 0.0))
@@ -640,49 +600,48 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             min_future = min(v_lows)  if v_lows  else entry_price
             ret_up = (max_future - entry_price) / (entry_price + 1e-6)
             ret_dn = (min_future - entry_price) / (entry_price + 1e-6)  # 음수 또는 0
-
             signed_ret = ret_up if abs(ret_up) >= abs(ret_dn) else ret_dn
             signed_vals.append(float(signed_ret))
 
-            sample = [[float(r.get(c, 0.0)) for c in input_cols] for r in seq]
+            sample = [[float(seq.iloc[j].get(c, 0.0)) for c in input_cols] for j in range(window)]
             samples.append(sample)
 
-        # ── 개선된 라벨링: 분위수 기반 경계 사용(훈련/로그/평가 일관) ──
+        # ── 경계/라벨: config의 고정 0.5% bin(희소 병합 포함)을 ‘그대로’ 사용 ──
         if samples and signed_vals:
-            signed_arr = np.asarray(signed_vals, dtype=np.float64)
-            ranges = get_class_ranges(signed_arr, num_classes)
-            y = _label_with_edges(signed_arr, ranges)
+            # 심볼 이름 복구 (features에 담긴 symbol 필드 기준)
+            sym = symbol_name
+            ranges = cfg_get_class_ranges(symbol=sym, strategy=strategy)  # 일원화된 경계
+            y = _label_with_edges(np.asarray(signed_vals, dtype=np.float64), ranges)
             X = np.array(samples, dtype=np.float32)
             if len(X) != len(y):
-                m = min(len(X), len(y))
-                X = X[:m]; y = y[:m]
-            print(f"[✅ create_dataset 완료] (quantile signed) 샘플 수: {len(y)}, X.shape={X.shape}, NUM_CLASSES={num_classes}")
-            # 경계/그룹 로그를 남겨 train.py와 동일 포맷으로 맞출 수 있도록 반환 속성 부여
-            X.attrs = {"class_ranges": ranges, "class_groups": get_class_groups(num_classes, 5)}
+                m = min(len(X), len(y)); X = X[:m]; y = y[:m]
+            print(f"[✅ create_dataset 완료] (config ranges) 샘플 수: {len(y)}, X.shape={X.shape}, 클래스={len(ranges)}")
+            # 경계/그룹 메타
+            X.attrs = {"class_ranges": ranges, "class_groups": cfg_get_class_groups(len(ranges), 5)}
             return X, y
 
-        # ── 최후 fallback: 1-step pct ──
-        closes = df["close"].to_numpy(dtype=np.float32)
+        # ── 최후 fallback: 1-step pct + 동일 경계 적용 ──
+        closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float32)
+        if len(closes) <= window + 1:
+            return _dummy(symbol_name)
         pct = np.diff(closes) / (closes[:-1] + 1e-6)
-        fb_samples, fb_labels = [], []
+        fb_samples, fb_vals = [], []
         for i in range(window, len(df) - 1):
             seq_rows = df_s.iloc[i - window:i]
             sample = [[float(seq_rows.iloc[j].get(c, 0.0)) for c in input_cols] for j in range(window)]
             fb_samples.append(sample)
-            fb_labels.append(pct[i] if i < len(pct) else 0.0)
+            fb_vals.append(float(pct[i] if i < len(pct) else 0.0))
 
         if not fb_samples:
             return _dummy(symbol_name)
 
-        fb_arr = np.asarray(fb_labels, dtype=np.float64)
-        ranges = get_class_ranges(fb_arr, num_classes)
-        y = _label_with_edges(fb_arr, ranges)
+        ranges = cfg_get_class_ranges(symbol=symbol_name, strategy=strategy)
+        y = _label_with_edges(np.asarray(fb_vals, dtype=np.float64), ranges)
         X = np.array(fb_samples, dtype=np.float32)
         if len(X) != len(y):
-            m = min(len(X), len(y))
-            X = X[:m]; y = y[:m]
-        print(f"[✅ create_dataset 완료] (fallback pct) 샘플 수: {len(y)}, X.shape={X.shape}, NUM_CLASSES={num_classes}")
-        X.attrs = {"class_ranges": ranges, "class_groups": get_class_groups(num_classes, 5)}
+            m = min(len(X), len(y)); X = X[:m]; y = y[:m]
+        print(f"[✅ create_dataset 완료] (fallback pct + config ranges) 샘플 수: {len(y)}, X.shape={X.shape}, 클래스={len(ranges)}")
+        X.attrs = {"class_ranges": ranges, "class_groups": cfg_get_class_groups(len(ranges), 5)}
         return X, y
 
     except Exception as e:
