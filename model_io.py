@@ -1,7 +1,4 @@
-# model_io.py — lossless compressed save/load wrapper for Torch models (pt / ptz / safetensors*)
-# - ENFORCE_STATE_DICT_ONLY=True 면 어떤 입력이 와도 state_dict 로 강제 저장(용량 폭주 방지)
-# - .ptz 는 gzip 무손실 압축
-# - .safetensors 는 설치 시에만 사용(텐서 dict만)
+# model_io.py (patched: file-lock, meta integrity, load/save robustness)
 from __future__ import annotations
 
 import io
@@ -10,13 +7,15 @@ import gzip
 import json
 import tempfile
 import contextlib
+import hashlib
+import time
 from typing import Any, Optional, Dict
 
 import torch
 import torch.nn as nn
 
 # ===== 저장 정책 플래그 =====
-ENFORCE_STATE_DICT_ONLY = True  # ← 프로젝트 전역에서 "state_dict만 저장"을 강제
+ENFORCE_STATE_DICT_ONLY = True  # 프로젝트 전역에서 "state_dict만 저장"을 강제
 
 # safetensors가 있으면 사용(없어도 동작)
 try:
@@ -26,6 +25,11 @@ except Exception:
     _HAVE_ST = False
 
 SUPPORTED_EXTS = {".pt", ".ptz", ".safetensors"}
+
+# 환경: gzip 압축 레벨 (0-9), 기본 6
+_GZIP_LEVEL = int(os.getenv("MODEL_IO_GZIP_LEVEL", "6"))
+# 메타 버전
+_META_VERSION = 1
 
 
 def _ensure_dir(path: str) -> None:
@@ -39,7 +43,10 @@ def _atomic_write(bytes_data: bytes, dst_path: str) -> None:
         tmp = tf.name
         tf.write(bytes_data)
         tf.flush()
-        os.fsync(tf.fileno())
+        try:
+            os.fsync(tf.fileno())
+        except Exception:
+            pass
     os.replace(tmp, dst_path)
 
 
@@ -70,21 +77,75 @@ def _meta_path_for(model_path: str) -> str:
     return _stem(model_path) + ".meta.json"
 
 
+# 간단 파일락 (멀티프로세스 원자성 보조)
+_LOCK_STALE_SEC = 120
+class _FileLock:
+    def __init__(self, path: str, timeout: float = 10.0, poll: float = 0.05):
+        self.path = path + ".lock"
+        self.timeout = float(timeout)
+        self.poll = float(poll)
+
+    def __enter__(self):
+        deadline = time.time() + self.timeout
+        while True:
+            try:
+                if os.path.exists(self.path):
+                    try:
+                        mtime = os.path.getmtime(self.path)
+                        if (time.time() - mtime) > _LOCK_STALE_SEC:
+                            os.remove(self.path)
+                    except Exception:
+                        pass
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(f"pid={os.getpid()} ts={time.time()}\n")
+                break
+            except FileExistsError:
+                if time.time() >= deadline:
+                    raise TimeoutError(f"lock timeout: {self.path}")
+                time.sleep(self.poll)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if os.path.exists(self.path):
+                os.remove(self.path)
+        except Exception:
+            pass
+
+
 def _to_state_dict(obj: Any) -> Dict[str, torch.Tensor] | Any:
     """
-    ENFORCE_STATE_DICT_ONLY가 True면 어떤 입력이 와도 state_dict로 변환.
+    ENFORCE_STATE_DICT_ONLY가 True면 가능한 경우 state_dict로 변환.
     - dict[str, Tensor] 그대로 통과
     - nn.Module 이면 .state_dict() 추출
-    - 그 외는 에러(무분별한 객체 저장 방지)
+    - OrderedDict-like 또는 mapping이면 텐서 값만 필터하여 dict로 반환
+    - else 에러
     """
     if not ENFORCE_STATE_DICT_ONLY:
         return obj
 
+    # already a dict-like of tensors
     if isinstance(obj, dict):
-        return obj
+        # accept if values are tensor-like
+        def _is_tensor_like(v):
+            return hasattr(v, "shape") or hasattr(v, "size") or isinstance(v, torch.Tensor)
+        if all(_is_tensor_like(v) for v in obj.values()):
+            return obj
+        # if dict but contains non-tensor entries, raise to avoid accidental saving big objects
+        raise ValueError("ENFORCE_STATE_DICT_ONLY=True: dict contains non-tensor values; pass state_dict() with tensors only.")
+
+    # nn.Module -> state_dict
     if hasattr(obj, "state_dict") and callable(obj.state_dict):
         return obj.state_dict()
-    raise ValueError("state_dict만 저장하도록 강제되었습니다. nn.Module을 전달했다면 .state_dict() 결과를 사용하세요.")
+
+    # try OrderedDict-like
+    name = getattr(obj, "__class__", None)
+    if name and getattr(obj.__class__, "__name__", "").lower().endswith("ordereddict"):
+        # assume mapping
+        return dict(obj)
+
+    raise ValueError("state_dict만 저장하도록 강제되었습니다. nn.Module을 전달하거나 텐서 dict를 전달하세요.")
 
 
 def save_model(path: str, state_or_obj: Any, *, use_safetensors: Optional[bool] = None) -> None:
@@ -99,60 +160,51 @@ def save_model(path: str, state_or_obj: Any, *, use_safetensors: Optional[bool] 
     if ext not in SUPPORTED_EXTS:
         raise ValueError(f"Unsupported extension: {ext}. Supported: {', '.join(sorted(SUPPORTED_EXTS))}")
 
-    # .safetensors 강제 요구 시 확장자 확인
     if use_safetensors is True and ext != ".safetensors":
         raise ValueError("use_safetensors=True 일 때는 경로 확장자가 .safetensors 여야 합니다.")
 
-    # ===== 입력을 정책에 맞게 정규화 (state_dict 강제) =====
     obj = _to_state_dict(state_or_obj)
 
-    # ===== .pt : 원형 torch.save =====
-    if ext == ".pt":
-        buf = io.BytesIO()
-        torch.save(obj, buf)
-        _atomic_write(buf.getvalue(), path)
-        return
+    # write with file lock to avoid concurrent writes
+    with _FileLock(path, timeout=10.0):
+        # .pt : torch.save raw
+        if ext == ".pt":
+            buf = io.BytesIO()
+            torch.save(obj, buf)
+            _atomic_write(buf.getvalue(), path)
+            return
 
-    # ===== .ptz : torch.save 결과를 gzip으로 무손실 압축 =====
-    if ext == ".ptz":
-        raw = io.BytesIO()
-        torch.save(obj, raw)
-        raw_bytes = raw.getvalue()
-        gz_buf = io.BytesIO()
-        # mtime=0 → gzip 헤더 고정(바이트 결정적) / 무손실
-        with gzip.GzipFile(fileobj=gz_buf, mode="wb", mtime=0) as gz:
-            gz.write(raw_bytes)
-        _atomic_write(gz_buf.getvalue(), path)
-        return
+        # .ptz : gzip of torch.save (mtime=0 for deterministic)
+        if ext == ".ptz":
+            raw = io.BytesIO()
+            torch.save(obj, raw)
+            raw_bytes = raw.getvalue()
+            gz_buf = io.BytesIO()
+            # mtime=0 -> deterministic gzip header
+            with gzip.GzipFile(fileobj=gz_buf, mode="wb", mtime=0) as gz:
+                gz.write(raw_bytes)
+            _atomic_write(gz_buf.getvalue(), path)
+            return
 
-    # ===== .safetensors : 설치되어 있을 때만 사용(텐서 dict만) =====
-    if ext == ".safetensors":
-        if not _HAVE_ST:
-            raise RuntimeError("safetensors 미설치: `pip install safetensors` 후 사용하거나 .ptz를 사용하세요.")
-        # safetensors는 텐서 dict만 지원
-        tensors: Dict[str, torch.Tensor]
-        if isinstance(obj, dict) and all(isinstance(v, torch.Tensor) for v in obj.values()):
-            tensors = obj  # 이미 텐서 dict
-        else:
-            # state_dict에 텐서 외 값이 섞여 있으면 방지
-            if hasattr(obj, "items"):
-                if not all(isinstance(v, torch.Tensor) for _, v in obj.items()):
-                    raise ValueError("safetensors 저장은 텐서 dict만 지원합니다.")
-                tensors = dict(obj)
-            else:
+        # .safetensors
+        if ext == ".safetensors":
+            if not _HAVE_ST:
+                raise RuntimeError("safetensors 미설치: `pip install safetensors` 후 사용하거나 .ptz를 사용하세요.")
+            # must be tensor dict
+            if not isinstance(obj, dict) or not all(isinstance(v, torch.Tensor) for v in obj.values()):
                 raise ValueError("safetensors 저장은 텐서 dict만 지원합니다.")
-        _ensure_dir(path)
-        dirpath = os.path.dirname(os.path.abspath(path))
-        with tempfile.NamedTemporaryFile(dir=dirpath, delete=False) as tf:
-            tmp = tf.name
-        try:
-            _st_save(tensors, tmp)
-            os.replace(tmp, path)
-        except Exception:
-            with contextlib.suppress(Exception):
-                os.remove(tmp)
-            raise
-        return
+            _ensure_dir(path)
+            dirpath = os.path.dirname(os.path.abspath(path))
+            with tempfile.NamedTemporaryFile(dir=dirpath, delete=False) as tf:
+                tmp = tf.name
+            try:
+                _st_save(obj, tmp)
+                os.replace(tmp, path)
+            except Exception:
+                with contextlib.suppress(Exception):
+                    os.remove(tmp)
+                raise
+            return
 
 
 def _load_raw(path: str, map_location: str | torch.device | None = "cpu") -> Any:
@@ -166,6 +218,7 @@ def _load_raw(path: str, map_location: str | torch.device | None = "cpu") -> Any
             return torch.load(f, map_location=map_location)
 
     if ext == ".ptz":
+        # read gz and torch.load
         with gzip.open(path, "rb") as gz:
             data = gz.read()
         return torch.load(io.BytesIO(data), map_location=map_location)
@@ -173,20 +226,29 @@ def _load_raw(path: str, map_location: str | torch.device | None = "cpu") -> Any
     if ext == ".safetensors":
         if not _HAVE_ST:
             raise RuntimeError("safetensors 미설치: .safetensors 파일을 읽으려면 `pip install safetensors`가 필요합니다.")
-        # safetensors는 텐서 dict만 반환
-        device = map_location if isinstance(map_location, str) else "cpu"
+        device = map_location if isinstance(map_location, (str, torch.device)) else "cpu"
         return _st_load(path, device=device)
 
     raise ValueError(f"Unsupported extension: {ext}")
 
 
 def _is_state_dict(obj: Any) -> bool:
-    # torch.save로 저장된 state_dict(dict[str, Tensor]) 또는 OrderedDict
+    # dict-like with tensor-like values
     if isinstance(obj, dict):
-        return all(isinstance(v, torch.Tensor) for v in obj.values()) or \
-               all(hasattr(v, "size") for v in obj.values())
-    # pytorch의 OrderedDict 타입명으로 오는 경우 방어
+        if not obj:
+            return True
+        def _is_tensor_like(v):
+            return isinstance(v, torch.Tensor) or hasattr(v, "shape") or hasattr(v, "size")
+        return all(_is_tensor_like(v) for v in obj.values())
+    # OrderedDict fallback
     return obj.__class__.__name__.lower().endswith("ordereddict")
+
+
+def _strip_module_prefix(state: Dict[str, Any]) -> Dict[str, Any]:
+    """module. 접두어 제거"""
+    if not any(k.startswith("module.") for k in state.keys()):
+        return state
+    return {k.replace("module.", "", 1): v for k, v in state.items()}
 
 
 def load_model(
@@ -204,39 +266,65 @@ def load_model(
     """
     raw = _load_raw(path, map_location=map_location)
 
-    # 1) 저장물이 완성된 nn.Module인 경우(전체 직렬화). (과거 파일 호환)
+    # 1) 저장물이 완성된 nn.Module인 경우
     if isinstance(raw, nn.Module):
         return raw
 
     # 2) 저장물이 state_dict(또는 safetensors 텐서 dict)인 경우
     if _is_state_dict(raw):
         if model is None:
-            return raw  # 호출부에서 직접 처리 가능
+            return raw
         try:
             model.load_state_dict(raw, strict=strict)
+            return model
         except RuntimeError:
-            # DataParallel 'module.' prefix mismatch 등 호환 보정
-            if any(k.startswith("module.") for k in raw.keys()):
-                fixed = {k.replace("module.", "", 1): v for k, v in raw.items()}
-            else:
-                fixed = {("module." + k): v for k, v in raw.items()}
-            model.load_state_dict(fixed, strict=strict)
-        return model
+            # try stripping/adding module. variations
+            try:
+                fixed = _strip_module_prefix(raw)
+                model.load_state_dict(fixed, strict=strict)
+                return model
+            except Exception:
+                # try adding module. prefix if model was wrapped in DataParallel
+                try:
+                    augmented = {("module." + k): v for k, v in raw.items()}
+                    model.load_state_dict(augmented, strict=strict)
+                    return model
+                except Exception as e:
+                    # re-raise the original for caller to inspect
+                    raise
 
-    # 3) 그 외 포맷(희귀) — 그대로 반환(호출자가 처리)
+    # 3) 그 외 포맷(희귀) — 그대로 반환
     return raw
 
 
 # ========================= 메타 저장/로드 (사이드카) =========================
+def _compute_sha1_of_file(path: str) -> str:
+    try:
+        h = hashlib.sha1()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return ""
+
+
 def save_meta(model_path: str, meta: Dict[str, Any]) -> str:
     """
     모델 경로 옆에 `<stem>.meta.json`으로 원자적으로 저장.
-    예) /persistent/models/A.ptz -> /persistent/models/A.meta.json
+    메타에 기본 필드(version, created_at, file_sha1) 추가.
     """
     if not isinstance(meta, dict):
         raise ValueError("meta는 dict여야 합니다.")
     mpath = _meta_path_for(model_path)
-    _atomic_write_json(mpath, meta)
+    base = dict(meta)
+    base.setdefault("meta_version", _META_VERSION)
+    base.setdefault("created_at", time.time())
+    try:
+        base["file_sha1"] = _compute_sha1_of_file(model_path) if os.path.exists(model_path) else ""
+    except Exception:
+        base["file_sha1"] = ""
+    _atomic_write_json(mpath, base)
     return mpath
 
 
@@ -249,7 +337,10 @@ def load_meta(model_path: str, default: Optional[Dict[str, Any]] = None) -> Dict
         return {} if default is None else dict(default)
     try:
         with open(mpath, "r", encoding="utf-8") as f:
-            return json.load(f)
+            obj = json.load(f)
+        if not isinstance(obj, dict):
+            return {} if default is None else dict(default)
+        return obj
     except Exception:
         return {} if default is None else dict(default)
 
@@ -263,8 +354,6 @@ def save_model_with_meta(
 ) -> None:
     """
     모델 저장 + (선택) 메타 저장을 한 번에 수행.
-    - 모델 저장은 기존 save_model과 동일 동작
-    - meta가 주어지면 사이드카 `<stem>.meta.json`에 함께 기록
     """
     save_model(path, state_or_obj, use_safetensors=use_safetensors)
     if meta:
@@ -277,10 +366,6 @@ def convert_pt_to_ptz(
     *,
     map_location: str | torch.device | None = "cpu",
 ) -> str:
-    """
-    기존 .pt 파일을 .ptz로 무손실 변환(내용 동일, 용량만 축소).
-    반환: 생성된 .ptz 경로
-    """
     if _ext(src_path) != ".pt":
         raise ValueError("src_path는 .pt 여야 합니다.")
     obj = _load_raw(src_path, map_location=map_location)
@@ -296,9 +381,6 @@ def convert_ptz_to_pt(
     *,
     map_location: str | torch.device | None = "cpu",
 ) -> str:
-    """
-    .ptz를 풀어서 .pt로 변환(무손실).
-    """
     if _ext(src_path) != ".ptz":
         raise ValueError("src_path는 .ptz 여야 합니다.")
     obj = _load_raw(src_path, map_location=map_location)
