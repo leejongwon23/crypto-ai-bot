@@ -92,7 +92,7 @@ _default_config = {
         "merge_sparse": {
             "enabled": True,
             "min_ratio": 0.01,        # 전체 샘플의 1% 미만이면 희소로 간주
-            "min_count_floor": 20,    # 추가 가드(절대 개수 하한)
+            "min_count_floor": 50,    # ---- 변경: 절대 개수 하한을 50으로 설정
             "prefer": "denser"        # "denser"(더 많은 이웃) | "left" | "right"
         }
     },
@@ -459,7 +459,7 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
 
     total = int(rets_signed.size)
     min_ratio = float(opt.get("min_ratio", 0.01))
-    min_floor = int(opt.get("min_count_floor", 20))
+    min_floor = int(opt.get("min_count_floor", 50))
     prefer = str(opt.get("prefer", "denser")).lower()
 
     # 히스토그램 카운트 계산
