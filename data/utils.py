@@ -129,17 +129,18 @@ def _discover_from_models():
     return sorted(set(syms), key=syms.index)
 
 def _select_60(symbols):
-    if len(symbols) >= 60:
-        return symbols[:60]
-    need = 60 - len(symbols)
+    # 이름 유지: 동작은 '최종 40개' 보장하도록 변경
+    if len(symbols) >= 40:
+        return symbols[:40]
+    need = 40 - len(symbols)
     filler = [s for s in _BASELINE_SYMBOLS if s not in symbols][:need]
     return symbols + filler
 
 def _compute_groups(symbols, group_size=5):
     return [symbols[i:i+group_size] for i in range(0, len(symbols), group_size)]
 
-# ✅ [고정화] 심볼/그룹
-SYMBOLS = list(_BASELINE_SYMBOLS)
+# ✅ [고정화] 심볼/그룹 — 앞 40개만 사용 (5개씩 8그룹)
+SYMBOLS = list(_BASELINE_SYMBOLS[:40])
 SYMBOL_GROUPS = _compute_groups(SYMBOLS, 5)
 
 SYMBOL_MAP["bybit"]  = {s: s for s in SYMBOLS}
@@ -186,7 +187,8 @@ def _atomic_write_json(path: str, obj: dict):
 
 class GroupOrderManager:
     def __init__(self, groups: List[List[str]]):
-        self.groups = [list(g) for g in groups]
+        # 보정: groups 복사 및 길이 제한(최대 8그룹)
+        self.groups = [list(g) for g in (groups[:8] if groups else [])]
         self.idx = 0
         self.trained = {}
         self.last_predicted_idx = -1
@@ -201,7 +203,8 @@ class GroupOrderManager:
                 saved_syms = st.get("symbols", [])
                 saved_groups = _compute_groups(saved_syms, 5) if saved_syms else st.get("groups", [])
                 if saved_groups:
-                    self.groups = saved_groups
+                    # 핵심: 저장된 그룹이 있어도 처음 8그룹(0~7)만 사용
+                    self.groups = saved_groups[:8]
                 self.idx = int(st.get("idx", 0))
                 self.trained = {int(k): set(v) for k, v in st.get("trained", {}).items()}
                 self.last_predicted_idx = int(st.get("last_predicted_idx", -1))
@@ -298,7 +301,8 @@ class GroupOrderManager:
         print(f"[♻️ 그룹순서 리셋] idx={self.idx}")
 
     def rebuild_groups(self, symbols: Optional[List[str]] = None, group_size: int = 5):
-        self.groups = _compute_groups(symbols or SYMBOLS, group_size)
+        # rebuild then cap to first 8 groups
+        self.groups = _compute_groups(symbols or SYMBOLS, group_size)[:8]
         self.reset(0)
         print(f"[🧱 그룹재구성] 총 {len(symbols or SYMBOLS)}개 → {len(self.groups)}그룹")
 
