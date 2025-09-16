@@ -15,6 +15,7 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.utils.class_weight import compute_class_weight
 from collections import Counter  # ← ADD
+from typing import Optional, List, Tuple, Dict, Any
 
 # >>> ADD: deterministic seeds
 def set_global_seed(s:int=20240101):
@@ -107,7 +108,7 @@ def _progress(tag:str):
     if os.getenv("QUIET_PROGRESS","1")!="1" and (now % 5.0) < 0.1:
         _safe_print(f"📌 progress: {tag}")
 
-def _watchdog_loop(stop_event: threading.Event | None):
+def _watchdog_loop(stop_event: Optional[threading.Event] = None):
     while True:
         if stop_event is not None and stop_event.is_set(): break
         now = time.time(); since = now - _LAST_PROGRESS_TS
@@ -212,7 +213,7 @@ except Exception:
 
 # ===== 협조 취소 =====
 class _ControlledStop(Exception): ...
-def _check_stop(ev: threading.Event | None, where:str=""):
+def _check_stop(ev: Optional[threading.Event], where:str=""):
     if _WATCHDOG_ABORT.is_set():
         _safe_print(f"[STOP] watchdog abort → {where}")
         raise _ControlledStop()
@@ -257,7 +258,7 @@ def _disk_barrier(paths: list[str]):
     except Exception: pass
 
 # === [NEW] 실패기록 가드 ===
-def _maybe_insert_failure(payload:dict, feature_vector:list|None=None):
+def _maybe_insert_failure(payload:dict, feature_vector:Optional[List[Any]] = None):
     try:
         if not _ENABLE_TRAIN_FAILURE_RECORD:
             if not ready_for_group_predict():
@@ -407,7 +408,7 @@ def _archive_old_checkpoints(symbol:str,strategy:str,model_type:str,keep_n:int=1
     patt_ptz=os.path.join(MODEL_DIR,f"{symbol}_{strategy}_{model_type}_group*_cls*.ptz")
     paths=sorted(glob.glob(patt_pt)+glob.glob(patt_ptz), key=lambda p: os.path.getmtime(p), reverse=True)
     if not paths: return
-    for p in paths[max(1,int(keep_n)):]:
+    for p in paths[max(1,int(keep_n)):-0]:
         try:
             if p.endswith(".pt"):
                 ptz=os.path.splitext(p)[0]+".ptz"
@@ -441,7 +442,7 @@ def _has_model_for(symbol: str, strategy: str) -> bool:
     return False
 
 # === 예측 전 모델 가시화 보장 대기 ===
-def _await_models_visible(symbols:list[str], timeout_sec:int=20, poll_sec:float=0.5) -> list[str]:
+def _await_models_visible(symbols: List[str], timeout_sec:int=20, poll_sec:float=0.5) -> List[str]:
     deadline = time.time() + max(1, int(timeout_sec))
     remaining = set(symbols or [])
     last_report = 0.0
@@ -467,7 +468,7 @@ def _min_f1_for(strategy:str)->float:
 
 if _HAS_LIGHTNING:
     class LitSeqModel(pl.LightningModule):
-        def __init__(self, base_model:nn.Module, lr:float=1e-3, cls_w:torch.Tensor|None=None, gamma:float=2.0):
+        def __init__(self, base_model:nn.Module, lr:float=1e-3, cls_w:Optional[torch.Tensor]=None, gamma:float=2.0):
             super().__init__(); self.model=base_model
             self.train_crit=FocalLoss(gamma=gamma, weight=cls_w)
             self.eval_crit =nn.CrossEntropyLoss(weight=cls_w)
@@ -487,7 +488,7 @@ if _HAS_LIGHTNING:
         def configure_optimizers(self): return torch.optim.Adam(self.parameters(), lr=self.lr)
 
     class _HeartbeatAndStop(pl.Callback):
-        def __init__(self, ev: threading.Event | None):
+        def __init__(self, ev: Optional[threading.Event]):
             self.ev=ev
         def _hb(self, where:str, batch_idx:int|None=None):
             tag = where if batch_idx is None else f"{where}(b{batch_idx})"
@@ -503,7 +504,7 @@ if _HAS_LIGHTNING:
 
 # ⏱ TIMEOUT GUARD
 import multiprocessing as _mp
-def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0, stop_event: threading.Event | None = None, hb_tag:str|None=None, hb_interval:float=5.0):
+def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0, stop_event: Optional[threading.Event] = None, hb_tag:Optional[str]=None, hb_interval:float=5.0):
     if kwargs is None: kwargs={}
     try:
         ctx=_mp.get_context("spawn")
@@ -557,7 +558,7 @@ def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec:float=120.0, stop_ev
         return ("ok", res[0]) if err[0] is None else ("err", err[0])
 
 # 🧯 logger.log_class_ranges 타임아웃 래퍼
-def _log_class_ranges_safe(symbol, strategy, group_id, class_ranges, note, stop_event: threading.Event | None = None):
+def _log_class_ranges_safe(symbol, strategy, group_id, class_ranges, note, stop_event: Optional[threading.Event] = None):
     _LOGGER_TIMEOUT = float(os.getenv("LOGGER_TIMEOUT_SEC","10"))
     try:
         status, _ = _run_with_timeout(
@@ -570,7 +571,7 @@ def _log_class_ranges_safe(symbol, strategy, group_id, class_ranges, note, stop_
     except Exception as e:
         _safe_print(f"[log_class_ranges err] {e}")
 
-def train_one_model(symbol, strategy, group_id=None, max_epochs=None, stop_event: threading.Event | None = None):
+def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=None, stop_event: Optional[threading.Event] = None) -> Dict[str, Any]:
     global _FAILURE_DB_READY
     if max_epochs is None:
         max_epochs = _epochs_for(strategy)
@@ -988,7 +989,7 @@ def _wait_predict_lock_clear(timeout_sec:int=20, stale_sec:int=120, poll:float=0
 _PREDICT_PARTIAL_OK = os.getenv("PREDICT_PARTIAL_OK", "1") == "1"
 
 _PREDICT_TIMEOUT_SEC=float(os.getenv("PREDICT_TIMEOUT_SEC","30"))
-def _safe_predict_sync(predict_fn,symbol,strategy,source,model_type=None, stop_event: threading.Event | None = None):
+def _safe_predict_sync(predict_fn,symbol,strategy,source,model_type=None, stop_event: Optional[threading.Event] = None):
     try:
         _safe_print(f"[PREDICT] start {symbol}-{strategy} ({source})")
         predict_fn(symbol, strategy, source=source, model_type=model_type)
@@ -1007,7 +1008,7 @@ def _safe_predict_with_timeout(predict_fn, *, symbol, strategy, source="그룹�
     )
     return status == "ok"
 
-def _run_bg_if_not_stopped(name:str, fn, stop_event: threading.Event | None):
+def _run_bg_if_not_stopped(name:str, fn, stop_event: Optional[threading.Event]):
     if stop_event is not None and stop_event.is_set():
         _safe_print(f"[SKIP:{name}] stop during reset"); return
     if _BG_STARTED.get(name, False): return
@@ -1030,7 +1031,7 @@ _STRICT_HALT_ON_INCOMPLETE = os.getenv("STRICT_HALT_ON_INCOMPLETE","1")=="1"
 _SYMBOL_RETRY_LIMIT = int(os.getenv("SYMBOL_RETRY_LIMIT","1"))
 _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = os.getenv("REQUIRE_ONE_PER_GROUP","1")=="1"
 
-def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) -> tuple[bool, dict]:
+def _train_full_symbol(symbol:str, stop_event: Optional[threading.Event] = None) -> Tuple[bool, Dict[str, Any]]:
     strategies=["단기","중기","장기"]
     detail={}
     symbol_complete=True
@@ -1106,7 +1107,7 @@ def _train_full_symbol(symbol:str, stop_event: threading.Event | None = None) ->
 
     return symbol_complete, detail
 
-def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_should: bool = False):
+def train_models(symbol_list, stop_event: Optional[threading.Event] = None, ignore_should: bool = False):
     completed_symbols=[]; partial_symbols=[]
     env_force = (os.getenv("TRAIN_FORCE_IGNORE_SHOULD","0") == "1")
 
@@ -1158,7 +1159,7 @@ def train_models(symbol_list, stop_event: threading.Event | None = None, ignore_
     return completed_symbols, partial_symbols
 
 # === [SMOKE] 후보 찾기 & 스모크 예측 ===
-def _scan_symbols_from_model_dir() -> list[str]:
+def _scan_symbols_from_model_dir() -> List[str]:
     syms=set()
     try:
         for p in glob.glob(os.path.join(MODEL_DIR, f"*_*_*.*")):
@@ -1171,7 +1172,7 @@ def _scan_symbols_from_model_dir() -> list[str]:
     except Exception: pass
     return sorted(syms)
 
-def _pick_smoke_symbol(candidates:list[str]) -> str|None:
+def _pick_smoke_symbol(candidates: List[str]) -> Optional[str]:
     cand = [s for s in candidates if _has_any_model_for_symbol(s)]
     if cand: return sorted(cand)[0]
     pool=_scan_symbols_from_model_dir()
@@ -1220,7 +1221,7 @@ def _get_group_stale_sec() -> int:
         except: pass
     return 600
 
-def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None = None):
+def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Event] = None):
     threading.Thread(target=_watchdog_loop, args=(stop_event,), daemon=True).start()
     _reset_watchdog("loop start")
 
@@ -1396,8 +1397,8 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: threading.Event | None 
         _safe_print("💓 heartbeat: train loop alive")
         time.sleep(max(1, int(os.getenv("TRAIN_LOOP_IDLE_SEC","3"))))
 
-_TRAIN_LOOP_THREAD: threading.Thread | None = None
-_TRAIN_LOOP_STOP: threading.Event | None = None
+_TRAIN_LOOP_THREAD: Optional[threading.Thread] = None
+_TRAIN_LOOP_STOP: Optional[threading.Event] = None
 _TRAIN_LOOP_LOCK=threading.Lock()
 
 def start_train_loop(force_restart:bool=False, sleep_sec:int=0):
