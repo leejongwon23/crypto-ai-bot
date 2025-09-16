@@ -1,4 +1,4 @@
-# config.py (FINAL, 2025-09-13, fixed_step=0.5% + merge_sparse_bins) — 동적 클래스(4~MAX) 완전복구 + strict bins + quality cut + round-robin hint
+# config.py (FINAL FIXED: fixed_step bins applied, helpers at module scope)
 
 import json
 import os
@@ -9,8 +9,8 @@ CONFIG_PATH = "/persistent/config.json"
 # 기본 설정 + 신규 옵션(기본 ON for CALIB)
 # ===============================
 _default_config = {
-    "NUM_CLASSES": 10,                    # 기본 힌트(최소치/백업용). 동적 계산이 우선.
-    "MAX_CLASSES": 20,                    # 상한값 가드(동적 계산 결과를 여기까지 허용)
+    "NUM_CLASSES": 10,
+    "MAX_CLASSES": 20,
     "FEATURE_INPUT_SIZE": 24,
     "FAIL_AUGMENT_RATIO": 3,
     "MIN_FEATURES": 5,
@@ -34,9 +34,9 @@ _default_config = {
 
     # --- [3] 확률 캘리브레이션(스케일링) 옵션 ---
     "CALIB": {
-        "enabled": True,             # ← 켬
-        "method": "temperature",     # ← 멀티클래스 기본
-        "min_samples": 200,          # 200~300 권장
+        "enabled": True,
+        "method": "temperature",
+        "min_samples": 200,
         "refresh_hours": 12,
         "per_model": True,
         "save_dir": "/persistent/calibration",
@@ -54,8 +54,8 @@ _default_config = {
 
     # --- [Q] 품질 컷(모의고사 합격선) 기본값 ---
     "QUALITY": {
-        "VAL_F1_MIN": 0.20,   # ▲ F1 0.20 미만이면 예측·실거래 진입 금지
-        "VAL_ACC_MIN": 0.20   # 보조 가드(선택 적용)
+        "VAL_F1_MIN": 0.20,
+        "VAL_ACC_MIN": 0.20
     },
 
     # --- [BIN] 클래스 경계/병합 파라미터 ---
@@ -67,7 +67,7 @@ _default_config = {
         "step_pct": 0.005,        # ← 0.5% 단위 고정 bin 간격
         # 희소 bin 병합 옵션
         "merge_sparse": {
-            "enabled": True,          # 켬
+            "enabled": True,
             "min_ratio": 0.01,        # 전체 샘플의 1% 미만이면 희소로 간주
             "min_count_floor": 20,    # 추가 가드(절대 개수 하한)
             "prefer": "denser"        # "denser"(더 많은 이웃) | "left" | "right"
@@ -76,10 +76,10 @@ _default_config = {
 
     # --- [SCHED] 학습 스케줄러 힌트(엔진에서 참조) ---
     "SCHED": {
-        "round_robin": True,                # 심볼 라운드로빈 강제
-        "max_minutes_per_symbol": 10,       # 한 심볼 연속 학습 상한
-        "on_incomplete": "skip_and_rotate", # 미완료시 다음 심볼로
-        "eval_during_training": True        # 학습 중에도 EVAL 허용
+        "round_robin": True,
+        "max_minutes_per_symbol": 10,
+        "on_incomplete": "skip_and_rotate",
+        "eval_during_training": True
     },
 }
 
@@ -91,16 +91,8 @@ STRATEGY_CONFIG = {
 }
 
 # ✅ 전략별 수익률 캡(과장 방지용)
-_STRATEGY_RETURN_CAP_POS_MAX = {  # 양수 상한
-    "단기": 0.12,
-    "중기": 0.25,
-    "장기": 0.50,
-}
-_STRATEGY_RETURN_CAP_NEG_MIN = {  # 음수 하한(절댓값 캡)
-    "단기": -0.12,
-    "중기": -0.25,
-    "장기": -0.50,
-}
+_STRATEGY_RETURN_CAP_POS_MAX = {"단기": 0.12, "중기": 0.25, "장기": 0.50}
+_STRATEGY_RETURN_CAP_NEG_MIN = {"단기": -0.12, "중기": -0.25, "장기": -0.50}
 
 # ✅ 표시 안정화용 파라미터
 _MIN_RANGE_WIDTH   = _default_config["CLASS_BIN"]["min_width"]   # 0.05%p
@@ -230,10 +222,10 @@ def get_SCHED():
     return _config.get("SCHED", _default_config["SCHED"])
 
 # ------------------------
-# 수익률 클래스 경계 유틸
+# 헬퍼(모듈 전역) — 이전 스코프 오류 방지
 # ------------------------
 def _round2(x: float) -> float:
-    return round(float(x), _ROUNDED := _ROUND_DECIMALS)
+    return round(float(x), _ROUND_DECIMALS)
 
 def _cap_by_strategy(x: float, strategy: str) -> float:
     """전략별 양/음수 캡을 동시에 적용."""
@@ -250,13 +242,68 @@ def _enforce_min_width(low: float, high: float):
         high = low + _MIN_RANGE_WIDTH
     return low, high
 
+def _fix_monotonic(ranges):
+    fixed = []
+    prev_hi = None
+    for lo, hi in ranges:
+        if prev_hi is not None and lo < prev_hi:
+            lo = prev_hi
+            lo, hi = _enforce_min_width(lo, hi)
+        lo, hi = _round2(lo), _round2(hi)
+        if hi <= lo:
+            hi = _round2(lo + _MIN_RANGE_WIDTH)
+        fixed.append((lo, hi))
+        prev_hi = hi
+    return fixed
+
+def _ensure_zero_band(ranges):
+    """0%를 가로지르는 최소 폭의 '중립 구간'이 존재하도록 보정."""
+    crosses = [i for i, (lo, hi) in enumerate(ranges) if lo < 0.0 <= hi]
+    if crosses:
+        i = crosses[0]
+        lo, hi = ranges[i]
+        if (hi - lo) < max(_MIN_RANGE_WIDTH, _EPS_ZERO_BAND * 2):
+            lo = min(lo, -_EPS_ZERO_BAND)
+            hi = max(hi,  _EPS_ZERO_BAND)
+            ranges[i] = (_round2(lo), _round2(hi))
+        return ranges
+
+    left_idx  = max([i for i,(lo,hi) in enumerate(ranges) if hi <= 0.0], default=None)
+    right_idx = min([i for i,(lo,hi) in enumerate(ranges) if lo >  0.0], default=None)
+    if left_idx is None or right_idx is None:
+        return ranges
+    lo_l, hi_l = ranges[left_idx]
+    lo_r, hi_r = ranges[right_idx]
+    ranges[left_idx]  = (_round2(lo_l), _round2(-_EPS_ZERO_BAND))
+    ranges[right_idx] = (_round2(_EPS_ZERO_BAND), _round2(hi_r))
+    # 중앙에 새 중립 구간 삽입 → 이후 strict/상한 보정
+    ranges = ranges[:right_idx] + [(_round2(-_EPS_ZERO_BAND), _round2(_EPS_ZERO_BAND))] + ranges[right_idx:]
+    return _fix_monotonic(ranges)
+
+def _strictify(ranges):
+    if not ranges:
+        return []
+    fixed = []
+    lo = float(ranges[0][0])
+    for _, hi in ranges:
+        hi = float(hi)
+        if hi <= lo:
+            hi = lo + _MIN_RANGE_WIDTH
+        lo_r = _round2(lo)
+        hi_r = _round2(hi)
+        if hi_r <= lo_r:
+            hi_r = _round2(lo_r + _MIN_RANGE_WIDTH)
+        fixed.append((lo_r, hi_r))
+        lo = hi_r
+    return fixed
+
 def _strategy_horizon_hours(strategy: str) -> int:
     return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
 
 def _future_extreme_signed_returns(df, horizon_hours: int):
     """
-    각 시점 i에서 horizon 동안의 최대상승률(>=0)과 최대하락률(<=0)을 모두 계산해
-    '음수/양수'가 공존하는 signed 수익률 샘플을 만든다.
+    각 시점 i에서 horizon 동안의 최대상승률(>=0)과 최대하락률(<=0)을 계산해
+    '음수/양수'가 공존하는 signed 수익률 샘플 생성.
     """
     import numpy as np
     import pandas as pd
@@ -282,7 +329,7 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
     j_up = 0
     j_dn = 0
     for i in range(len(df)):
-        t0 = ts.iloc[i]; t1 = t0 + horizon
+        t1 = ts.iloc[i] + horizon
 
         # 최대 상승
         j = max(j_up, i)
@@ -303,8 +350,7 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
         j_dn = max(j_dn, i)
         dn[i] = float((min_l - base) / (base + 1e-12))  # <= 0
 
-    signed = np.concatenate([dn, up]).astype(np.float32)
-    return signed
+    return np.concatenate([dn, up]).astype(np.float32)
 
 # ---- 동적 bin 개수 결정 로직(최대 20) ---------------------------------------
 def _choose_n_classes(rets_signed, max_classes, hint_min=4):
@@ -441,7 +487,7 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
 
     # 최종 보정
     rs = [(float(lo), float(hi)) for (lo, hi) in rs]
-    rs = _fix_monotonic(rs:=rs)
+    rs = _fix_monotonic(rs)
     rs = _ensure_zero_band(rs)
     if get_CLASS_BIN().get("strict", True):
         rs = _strictify(rs)
@@ -465,15 +511,11 @@ def class_to_expected_return(class_id: int, symbol: str, strategy: str):
     r_min, r_max = get_class_return_range(class_id, symbol, strategy)
     return (r_min + r_max) / 2
 
-def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=None, group_size=5):
+def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, group_size=5):
     """
-    미래 최대고가/최저저가 기반 'signed' 수익률 분포로 클래스 경계 생성.
-    - r_up  = (max(high[i..i+h]) - close[i]) / close[i]  (>=0)
-    - r_down= (min(low [i..i+h])  - close[i]) / close[i]  (<=0)
-    - 분포 = concat(r_down, r_up) → 음/양 공존
-    - 전략별 ±캡, 최소 구간 폭, 0% 중립 밴드 보장, 엄격 단조(strict) 보정
-    - ❗️bin 개수는 데이터 기반으로 4~MAX_CLASSES 사이에서 자동 결정
-      (method=="fixed_step"이면 0.5% 단위 고정 간격으로 분할 + 희소 bin 자동 병합)
+    미래 최대고가/최저저가 기반 signed 수익률 분포로 클래스 경계 생성.
+    - 기본: fixed_step(0.5%) + 희소 bin 병합
+    - 예외 시: 동적/균등 분할 백업
     """
     import numpy as np
     from data.utils import get_kline_by_strategy
@@ -481,62 +523,6 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
     MAX_CLASSES = int(_config.get("MAX_CLASSES", _default_config["MAX_CLASSES"]))
     BIN_CONF = get_CLASS_BIN()
     method_req = (method or BIN_CONF.get("method") or "quantile").lower()
-
-    def _fix_monotonic(ranges):
-        fixed = []
-        prev_hi = None
-        for lo, hi in ranges:
-            if prev_hi is not None and lo < prev_hi:
-                lo = prev_hi
-                lo, hi = _enforce_min_width(lo, hi)
-            lo, hi = _round2(lo), _round2(hi)
-            if hi <= lo:
-                hi = _round2(lo + _MIN_RANGE_WIDTH)
-            fixed.append((lo, hi))
-            prev_hi = hi
-        return fixed
-
-    def _ensure_zero_band(ranges):
-        """0%를 가로지르는 최소 폭의 '중립 구간'이 존재하도록 보정."""
-        crosses = [i for i, (lo, hi) in enumerate(ranges) if lo < 0.0 <= hi]
-        if crosses:
-            i = crosses[0]
-            lo, hi = ranges[i]
-            if (hi - lo) < max(_MIN_RANGE_WIDTH, _EPS_ZERO_BAND * 2):
-                lo = min(lo, -_EPS_ZERO_BAND)
-                hi = max(hi,  _EPS_ZERO_BAND)
-                ranges[i] = (_round2(lo), _round2(hi))
-            return ranges
-
-        left_idx  = max([i for i,(lo,hi) in enumerate(ranges) if hi <= 0.0], default=None)
-        right_idx = min([i for i,(lo,hi) in enumerate(ranges) if lo >  0.0], default=None)
-        if left_idx is None or right_idx is None:
-            return ranges
-        lo_l, hi_l = ranges[left_idx]
-        lo_r, hi_r = ranges[right_idx]
-        ranges[left_idx]  = (_round2(lo_l), _round2(-_EPS_ZERO_BAND))
-        ranges[right_idx] = (_round2(_EPS_ZERO_BAND), _round2(hi_r))
-        # 중앙에 새 중립 구간 삽입 → 이후 strict/상한 보정
-        ranges = ranges[:right_idx] + [(_round2(-_EPS_ZERO_BAND), _round2(_EPS_ZERO_BAND))] + ranges[right_idx:]
-        return _fix_monotonic(ranges)
-
-    # 엄격 단조: prev_hi → next_hi로 재조립하여 겹침/역전 제거
-    def _strictify(ranges):
-        if not ranges:
-            return []
-        fixed = []
-        lo = float(ranges[0][0])
-        for _, hi in ranges:
-            hi = float(hi)
-            if hi <= lo:
-                hi = lo + _MIN_RANGE_WIDTH
-            lo_r = _round2(lo)
-            hi_r = _round2(hi)
-            if hi_r <= lo_r:
-                hi_r = _round2(lo_r + _MIN_RANGE_WIDTH)
-            fixed.append((lo_r, hi_r))
-            lo = hi_r
-        return fixed
 
     def compute_equal_ranges(n_cls, reason=""):
         n_cls = max(4, int(n_cls))
@@ -559,7 +545,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             ranges = _merge_smallest_adjacent(ranges, MAX_CLASSES)
         return ranges
 
-    # ✅ 추가: 0.5% 고정 간격 분할 (+ 희소 병합)
+    # ✅ 0.5% 고정 간격 분할 (+ 희소 병합)
     def compute_fixed_step_ranges(rets_for_merge):
         step = float(BIN_CONF.get("step_pct", 0.005))  # 0.5% = 0.005
         if step <= 0:
@@ -607,7 +593,6 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
 
             horizon_hours = _strategy_horizon_hours(strategy)
             rets_signed = _future_extreme_signed_returns(df_price, horizon_hours=horizon_hours)
-            import numpy as np
             rets_signed = rets_signed[np.isfinite(rets_signed)]
             if rets_signed.size < 10:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="수익률 샘플 부족")
@@ -619,8 +604,8 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             n_cls = _choose_n_classes(rets_signed, max_classes=int(_config.get("MAX_CLASSES", 20)), hint_min=int(_config.get("NUM_CLASSES", 10)))
 
             # 분할 방식
-            method = (BIN_CONF.get("method") or "quantile").lower()
-            if method == "quantile":
+            method2 = (BIN_CONF.get("method") or "quantile").lower()
+            if method2 == "quantile":
                 qs = np.quantile(rets_signed, np.linspace(0, 1, n_cls + 1))
             else:  # "linear"
                 qs = np.linspace(float(rets_signed.min()), float(rets_signed.max()), n_cls + 1)
@@ -656,7 +641,7 @@ def get_class_ranges(symbol=None, strategy=None, method="quantile", group_id=Non
             from data.utils import get_kline_by_strategy as _dbg_k
             df_dbg = _dbg_k(symbol, strategy)
             if df_dbg is not None and len(df_dbg) >= 2 and "close" in df_dbg:
-                import numpy as np, pandas as pd
+                import numpy as np
                 rets_for_merge = _future_extreme_signed_returns(df_dbg, horizon_hours=_strategy_horizon_hours(strategy))
                 rets_for_merge = rets_for_merge[np.isfinite(rets_for_merge)]
             else:
@@ -780,4 +765,4 @@ __all__ = [
     "get_SSL_CACHE_DIR",
     "FEATURE_INPUT_SIZE", "NUM_CLASSES", "FAIL_AUGMENT_RATIO", "MIN_FEATURES",
     "CALIB",
-            ]
+                ]
