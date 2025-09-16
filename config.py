@@ -87,7 +87,7 @@ _default_config = {
         "strict": True,           # 구간 단조/겹침 방지
         "zero_band_eps": 0.0015,  # 0% 주변 중립 밴드(±0.15%p)
         "min_width": 0.0005,      # 최소 구간 폭(0.05%p)
-        "step_pct": 0.005,        # ← 0.5% 단위 고정 bin 간격
+        "step_pct": 0.0075,       # ← 변경됨: 0.75% 단위 고정 bin 간격 (기존 0.005 = 0.5%)
         # 희소 bin 병합 옵션
         "merge_sparse": {
             "enabled": True,
@@ -106,11 +106,11 @@ _default_config = {
     },
 }
 
-# ✅ 전략별 K라인 설정
+# ✅ 전략별 K라인 설정 (모두 1200개로 통일)
 STRATEGY_CONFIG = {
-    "단기": {"interval": "240", "limit": 1000, "binance_interval": "4h"},
-    "중기": {"interval": "D",   "limit": 500,  "binance_interval": "1d"},
-    "장기": {"interval": "D",   "limit": 500,  "binance_interval": "1d"},
+    "단기": {"interval": "240", "limit": 1200, "binance_interval": "4h"},
+    "중기": {"interval": "D",   "limit": 1200, "binance_interval": "1d"},
+    "장기": {"interval": "D",   "limit": 1200, "binance_interval": "1d"},
 }
 
 # ✅ 전략별 수익률 캡(과장 방지용)
@@ -582,9 +582,9 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
 
     # ✅ 0.5% 고정 간격 분할 (+ 희소 병합)
     def compute_fixed_step_ranges(rets_for_merge):
-        step = float(BIN_CONF.get("step_pct", 0.005))  # 0.5% = 0.005
+        step = float(BIN_CONF.get("step_pct", 0.005))  # 0.75%로 설정됨 via config
         if step <= 0:
-            step = 0.005
+            step = 0.0075
         neg = _STRATEGY_RETURN_CAP_NEG_MIN.get(strategy, -0.5)
         pos = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy,  0.5)
 
