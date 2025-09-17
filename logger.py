@@ -1,10 +1,10 @@
-# === logger.py (patched) ===
+# === logger.py (FINAL for #11: per-class F1 & coverage 신호 연결 + 기존 패치 포함) ===
 import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil, re
 import sqlite3
 from collections import defaultdict, deque
 import threading, time  # 동시성/재시도
 from typing import Optional, Any, Dict
-# [ADD] per-class F1 출력용 (선택)
+# per-class F1 출력용
 from sklearn.metrics import classification_report
 
 # -------------------------
@@ -823,7 +823,7 @@ def _parse_train_note(note: str):
 def log_training_result(
     symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0.0,
     note="", source_exchange="BYBIT", status="success",
-    y_true=None, y_pred=None
+    y_true=None, y_pred=None, num_classes=None
 ):
     LOG_FILE = TRAIN_LOG
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -873,7 +873,7 @@ def log_training_result(
     except Exception as e:
         print(f"[⚠️ 학습 로그 기록 실패] {e}")
 
-    # 이동평균 F1 & per-class F1 모니터링 (콘솔 출력 전용)
+    # 이동평균 F1 & per-class F1/coverage (콘솔 출력 + 커버리지 로그)
     try:
         N = int(os.getenv("LOG_F1_MA_N", "20"))
         df_ma = pd.read_csv(LOG_FILE, encoding="utf-8-sig")
@@ -885,13 +885,25 @@ def log_training_result(
                     print(f"[📊 이동평균 F1] 전략={strategy} 최근{len(sub)}회 → {ma_f1:.4f}")
     except Exception:
         pass
+
+    # ▶ per-class F1 및 coverage 신호 (y_true/y_pred가 주어질 때)
     if y_true is not None and y_pred is not None:
         try:
             rep = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
             per_cls = {k: v["f1-score"] for k, v in rep.items() if k.isdigit()}
             print(f"[📊 per-class F1] {symbol}-{strategy} {model} → {json.dumps(per_cls, ensure_ascii=False)}")
+
+            counts = {int(k): int(v["support"]) for k, v in rep.items() if k.isdigit()}
+            # 커버리지(검증라벨 분포) 로깅 – 의사결정 신호로 활용
+            log_eval_coverage(
+                symbol=symbol,
+                strategy=strategy,
+                counts=counts,
+                num_classes=(num_classes if num_classes is not None else len(per_cls)),
+                note="train_end"
+            )
         except Exception as e:
-            print(f"[⚠️ per-class F1 계산 실패] {e}")
+            print(f"[⚠️ per-class F1/coverage 계산 실패] {e}")
 
 # -------------------------
 # 수익률 클래스 경계 로그
