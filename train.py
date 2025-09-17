@@ -1155,7 +1155,7 @@ def _wait_predict_lock_clear(timeout_sec:int=20, stale_sec:int=120, poll:float=0
             break
         time.sleep(max(0.05, float(poll)))
     if _predict_lock_exists():
-        _clear_predict_lock(force=True, stale_sec=stale_sec, tag=f"{tag}|final}")
+        _clear_predict_lock(force=True, stale_sec=stale_sec, tag=f"{tag}|final")
     return not _predict_lock_exists()
 
 
