@@ -1028,7 +1028,7 @@ def augment_jitter(seq: np.ndarray, sigma_min: float = 0.0005, sigma_max: float 
 
 def augment_time_shift(seq: np.ndarray, max_shift: int = 2) -> np.ndarray:
     """
-    시퀀스 내에서 1~max_shift 캔들만큼 앞/뒤로 시프트.
+    시퀀스 내에서 -max_shift ~ +max_shift 캔들만큼 앞/뒤로 시프트.
     부족한 부분은 가장자리 값으로 채움(pad).
     """
     seq = np.asarray(seq, dtype=np.float32)
@@ -1038,16 +1038,24 @@ def augment_time_shift(seq: np.ndarray, max_shift: int = 2) -> np.ndarray:
     if shift == 0:
         return seq.copy()
     w, f = seq.shape
+    # shift > 0 : right shift (delay) — pad with first row at the top
     if shift > 0:
-        pad = np.repeat(seq[0:1, :], shift, axis=0)
-        new = np.vstack([pad, seq[:-shift]])
+        s = shift
+        pad = np.repeat(seq[0:1, :], s, axis=0)
+        new = np.vstack([pad, seq[:w - s, :]])
     else:
-        pad = np.repeat(seq[-1:, :], -shift, axis=0)
-        new = np.vstack([seq[-shift:], pad]) if shift < 0 else seq.copy()
-        # if negative shift, left-rotate: seq[-shift:] + pad of last
-        if new.shape[0] != w:
-            # fallback safe behavior
-            new = np.concatenate([seq[-shift:], pad], axis=0)[:w]
+        # shift < 0 : left shift (advance) — pad with last row at the bottom
+        s = -shift
+        pad = np.repeat(seq[-1:, :], s, axis=0)
+        new = np.vstack([seq[s:, :], pad])
+    # safety: ensure shape matches
+    if new.shape[0] != w:
+        # truncate or pad as fallback
+        if new.shape[0] > w:
+            new = new[:w, :]
+        else:
+            extra = np.repeat(seq[-1:, :], w - new.shape[0], axis=0)
+            new = np.vstack([new, extra])
     return new.astype(np.float32)
 
 def augment_for_min_count(X: np.ndarray, y: np.ndarray, target_count: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -1114,8 +1122,9 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
     def _dummy(symbol_name):
         from config import MIN_FEATURES as _MINF
         safe_failed_result(symbol_name, strategy, reason="create_dataset 입력 feature 부족/실패")
-        X = np.zeros((max(1, window), window, input_size if input_size else _MINF), dtype=np.float32)
-        y = np.zeros((max(1, window),), dtype=np.int64)
+        # return one dummy sample (1, window, features)
+        X = np.zeros((1, window, input_size if input_size else _MINF), dtype=np.float32)
+        y = np.zeros((1,), dtype=np.int64)
         return X, y
 
     symbol_name = "UNKNOWN"
