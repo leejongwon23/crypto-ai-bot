@@ -202,6 +202,10 @@ FOCAL_GAMMA = float(os.getenv("FOCAL_GAMMA","2.0"))
 EARLY_STOP_PATIENCE = int(os.getenv("EARLY_STOP_PATIENCE","5"))
 EARLY_STOP_MIN_DELTA = float(os.getenv("EARLY_STOP_MIN_DELTA","0.001"))  # ← NEW
 
+# NEW: 검증 단계 cost-sensitive argmax 강도 (0이면 비활성)
+COST_SENSITIVE_ARGMAX = int(os.getenv("COST_SENSITIVE_ARGMAX","1")) == "1" if os.getenv("COST_SENSITIVE_ARGMAX") in ("0","1") else True
+CS_ARG_BETA = float(os.getenv("CS_ARG_BETA","1.0"))  # 로짓 보정 강도( logit - beta*log(prior) )
+
 now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 
 # ✅ 예측 게이트 폴백
@@ -799,6 +803,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
 
         w = torch.tensor(w_full, dtype=torch.float32, device=DEVICE)
 
+        # ====== 검증 단계 cost-sensitive argmax용 prior 준비 ======
+        # p(y=k) ~ class_counts/sum ; 로짓을 log priors로 보정 (logit - beta*log(p_k))
+        priors = class_counts / max(1.0, float(class_counts.sum()))
+        priors[priors <= 0] = 1e-6
+        priors_t = torch.tensor(priors, dtype=torch.float32, device=DEVICE)
+
         for model_type in ["lstm","cnn_lstm","transformer"]:
             _check_stop(stop_event,f"before train {model_type}")
             _progress(f"train:{model_type}:prep")
@@ -909,7 +919,14 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                         for xb,yb in val_loader:
                             xb = xb.to(DEVICE, dtype=torch.float32)
                             logits = model(xb)
-                            p=torch.argmax(logits,dim=1).cpu().numpy()
+
+                            if COST_SENSITIVE_ARGMAX:
+                                # cost-sensitive argmax: 로짓을 학습 분포 priors로 보정
+                                adj = logits - (CS_ARG_BETA * torch.log(priors_t.unsqueeze(0)))
+                                p = torch.argmax(adj, dim=1).cpu().numpy()
+                            else:
+                                p = torch.argmax(logits, dim=1).cpu().numpy()
+
                             preds.extend(p); lbls.extend(yb.numpy())
                     try:
                         cur_f1=float(f1_score(lbls,preds,average="macro"))
@@ -934,7 +951,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                     if time.time()-last_log_ts>2:
                         _safe_print(f"   ↳ {model_type} ep{ep+1}/{max_epochs} val_f1={cur_f1:.4f} best={best_f1:.4f} bad={bad}/{patience} loss_sum={total_loss:.4f}")
                         last_log_ts=time.time()
-                    _progress(f"{model_type}:ep{ep}:end")
+                    _progress(f"{model_type}:ep{ep}:end}")
                     if bad >= patience:
                         _safe_print(f"🛑 early stop @ ep{ep+1} (best_f1={best_f1:.4f}, min_delta={min_delta})")
                         break
@@ -958,7 +975,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                     except Exception:
                         loss_val = 0.0
                     val_loss_sum += float(loss_val) * xb.size(0); n_val += xb.size(0)
-                    p=torch.argmax(logits,dim=1).cpu().numpy()
+
+                    if COST_SENSITIVE_ARGMAX:
+                        adj = logits - (CS_ARG_BETA * torch.log(priors_t.unsqueeze(0)))
+                        p=torch.argmax(adj,dim=1).cpu().numpy()
+                    else:
+                        p=torch.argmax(logits,dim=1).cpu().numpy()
                     preds.extend(p); lbls.extend(yb.numpy())
             try:
                 acc=float(accuracy_score(lbls,preds)); f1_val=float(f1_score(lbls,preds,average="macro"))
@@ -983,7 +1005,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                 "engine":"lightning" if _HAS_LIGHTNING else "manual",
                 "data_flags":{"rows":int(len(df)),"limit":int(_limit),"min":int(_min_required),"augment_needed":bool(augment_needed),"enough_for_training":bool(enough_for_training)},
                 "train_loss_sum":float(total_loss),
-                "min_f1_gate": float(min_gate)
+                "min_f1_gate": float(min_gate),
+                "cs_argmax":{"enabled":bool(COST_SENSITIVE_ARGMAX), "beta": float(CS_ARG_BETA)}
             }
 
             wpath,mpath=_save_model_and_meta(model, stem+".pt", meta)
