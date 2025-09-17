@@ -7,6 +7,13 @@ import pandas as pd
 from data.utils import get_kline_by_strategy, compute_features
 from config import get_class_ranges, get_FEATURE_INPUT_SIZE
 
+# optional cache (존재 시만 사용)
+try:
+    from data.utils import CacheManager as DataCacheManager  # noqa
+    _HAS_DCACHE = True
+except Exception:
+    _HAS_DCACHE = False
+
 # lightweight CV / metrics
 try:
     from sklearn.model_selection import StratifiedKFold
@@ -22,6 +29,29 @@ try:
     _HAS_TORCH = True
 except Exception:
     _HAS_TORCH = False
+
+# ──────────────────────────────────────────────────────────────
+# 결정적 시드(동일 조건 재현)
+# ──────────────────────────────────────────────────────────────
+def _set_global_seed():
+    try:
+        s = int(os.getenv("GLOBAL_SEED", "20240101"))
+        np.random.seed(s)
+        if _HAS_TORCH:
+            import random
+            random.seed(s)
+            torch.manual_seed(s)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(s)
+            try:
+                torch.backends.cudnn.deterministic = True
+                torch.backends.cudnn.benchmark = False
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+_set_global_seed()
 
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 
@@ -59,8 +89,8 @@ def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.nda
     else:
         ts = ts.dt.tz_convert("Asia/Seoul")
 
-    close = df["close"].astype(float).values
-    high  = (df["high"] if "high" in df.columns else df["close"]).astype(float).values
+    close = pd.to_numeric(df["close"], errors="coerce").fillna(method="ffill").fillna(method="bfill").astype(float).values
+    high  = pd.to_numeric(df["high"] if "high" in df.columns else df["close"], errors="coerce").fillna(method="ffill").fillna(method="bfill").astype(float).values
 
     out = np.zeros(len(df), dtype=np.float32)
     horizon = pd.Timedelta(hours=horizon_hours)
@@ -89,9 +119,14 @@ def _label_from_future_returns(future_gains: np.ndarray, symbol: str, strategy: 
     lo0 = class_ranges[0][0] if class_ranges else 0.0
     hiN = class_ranges[-1][1] if class_ranges else 0.0
     for r in future_gains:
-        if not np.isfinite(r): r = lo0
-        if r <= lo0: labels.append(0); continue
-        if r >= hiN: labels.append(len(class_ranges) - 1 if class_ranges else 0); continue
+        if not np.isfinite(r):
+            r = lo0
+        if r <= lo0:
+            labels.append(0)
+            continue
+        if r >= hiN:
+            labels.append(len(class_ranges) - 1 if class_ranges else 0)
+            continue
         idx = 0
         for i, (lo, hi) in enumerate(class_ranges):
             if lo <= r <= hi:
@@ -133,7 +168,7 @@ def _cv_macro_f1_score(X: np.ndarray, y: np.ndarray, n_classes: int, folds: int 
     k = int(min(folds, np.max([2, np.min(cnts)])))
     if k < 2:
         return np.nan
-    skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=42)
+    skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=int(os.getenv("GLOBAL_SEED", "20240101")))
     f1s = []
 
     for tr_idx, va_idx in skf.split(Xf, y):
@@ -173,7 +208,10 @@ def _cv_macro_f1_score(X: np.ndarray, y: np.ndarray, n_classes: int, folds: int 
 def _heuristic_score(feat_scaled: np.ndarray, labels: np.ndarray, window: int) -> float:
     if len(feat_scaled) < window or len(labels) < window:
         return -np.inf
-    recent_vol = float(np.std(feat_scaled[-window:], dtype=np.float32))
+    recent = feat_scaled[-window:]
+    # NaN/inf 방지
+    recent = np.nan_to_num(recent, nan=0.0, posinf=0.0, neginf=0.0)
+    recent_vol = float(np.std(recent, dtype=np.float32))
     diffs = np.diff(labels[-window:])
     label_change = float(np.mean(diffs != 0)) if len(diffs) > 0 else 0.0
     score = recent_vol * (1.0 + label_change)
@@ -187,7 +225,9 @@ def _heuristic_score(feat_scaled: np.ndarray, labels: np.ndarray, window: int) -
 def _recent_variance(feat_scaled: np.ndarray, window: int) -> float:
     if len(feat_scaled) < window:
         return np.inf
-    return float(np.var(feat_scaled[-window:], dtype=np.float32))
+    recent = feat_scaled[-window:]
+    recent = np.nan_to_num(recent, nan=0.0, posinf=0.0, neginf=0.0)
+    return float(np.var(recent, dtype=np.float32))
 
 def _apply_variance_penalty(score: float, var: float) -> float:
     # 점수에 분산 패널티 적용(낮은 분산 선호)
@@ -200,6 +240,20 @@ def _apply_variance_penalty(score: float, var: float) -> float:
 # ──────────────────────────────────────────────────────────────
 # 외부 API (train.py에서 사용하는 형태)
 # ──────────────────────────────────────────────────────────────
+def _normalize_features_df(feat: pd.DataFrame) -> np.ndarray:
+    """FEATURE_INPUT_SIZE에 맞춰 패딩/슬라이스, NaN/inf 정리."""
+    features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
+    # NaN/inf 정리
+    features_only = features_only.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    # 입력 차원 정규화
+    if features_only.shape[1] < FEATURE_INPUT_SIZE:
+        pad = FEATURE_INPUT_SIZE - features_only.shape[1]
+        for i in range(pad):
+            features_only[f"pad_{i}"] = 0.0
+    elif features_only.shape[1] > FEATURE_INPUT_SIZE:
+        features_only = features_only.iloc[:, :FEATURE_INPUT_SIZE]
+    return features_only.to_numpy(dtype=np.float32)
+
 def find_best_window(symbol: str, strategy: str, window_list=None, group_id=None):
     """
     - 점수 = Stratified K-Fold macro-F1 평균 (초경량 선형분류) - 분산 패널티 적용
@@ -224,20 +278,15 @@ def find_best_window(symbol: str, strategy: str, window_list=None, group_id=None
         return int(min(window_list))
 
     feat = feat.tail(_MAX_ROWS_FOR_SCORING).copy()
-    features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
-    # 입력 차원 정규화
-    if features_only.shape[1] < FEATURE_INPUT_SIZE:
-        pad = FEATURE_INPUT_SIZE - features_only.shape[1]
-        for i in range(pad):
-            features_only[f"pad_{i}"] = 0.0
-    elif features_only.shape[1] > FEATURE_INPUT_SIZE:
-        features_only = features_only.iloc[:, :FEATURE_INPUT_SIZE]
-    feat_scaled = features_only.to_numpy(dtype=np.float32)
+    feat_scaled = _normalize_features_df(feat)
 
     # 2) 미래 수익률 → 라벨
     gains = _future_returns_by_timestamp(df, _strategy_horizon_hours(strategy))
     labels = _label_from_future_returns(gains, symbol, strategy, group_id=group_id)
-    n_classes = int(np.max(labels)) + 1 if labels.size else 0
+    if labels.size == 0:
+        print(f"[find_best_window] 라벨 없음 → fallback={min(window_list)}")
+        return int(min(window_list))
+    n_classes = int(np.max(labels)) + 1
 
     # 3) 윈도우별 점수 계산 (CV macro-F1 → 휴리스틱 폴백)
     best_w = int(min(window_list))
@@ -301,19 +350,13 @@ def find_best_windows(symbol: str, strategy: str, window_list=None, group_id=Non
         print(f"[find_best_windows] 피처 없음 → 기본 반환 {window_list}")
         return [int(x) for x in window_list]
     feat = feat.tail(_MAX_ROWS_FOR_SCORING).copy()
-
-    features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
-    if features_only.shape[1] < FEATURE_INPUT_SIZE:
-        pad = FEATURE_INPUT_SIZE - features_only.shape[1]
-        for i in range(pad):
-            features_only[f"pad_{i}"] = 0.0
-    elif features_only.shape[1] > FEATURE_INPUT_SIZE:
-        features_only = features_only.iloc[:, :FEATURE_INPUT_SIZE]
-    feat_scaled = features_only.to_numpy(dtype=np.float32)
+    feat_scaled = _normalize_features_df(feat)
 
     gains = _future_returns_by_timestamp(df, _strategy_horizon_hours(strategy))
     labels = _label_from_future_returns(gains, symbol, strategy, group_id=group_id)
-    n_classes = int(np.max(labels)) + 1 if labels.size else 0
+    if labels.size == 0:
+        return [int(min(window_list))]
+    n_classes = int(np.max(labels)) + 1
 
     scored = []
     for w in sorted(set(int(x) for x in window_list)):
@@ -348,3 +391,5 @@ def find_best_windows(symbol: str, strategy: str, window_list=None, group_id=Non
     top = [int(w) for w, _, _ in scored[:3]]
     print(f"[find_best_windows] {symbol}-{strategy} -> {top}")
     return top
+
+__all__ = ["find_best_window", "find_best_windows"]
