@@ -3,6 +3,9 @@
 # (2025-09-13c) — [소프트 폴백] PREDICT_SOFT_ABORT=1 시 no_models/no_valid_model을 "예측보류"로 처리
 # (2025-09-13) — [핵심] 학습 품질게이트 엄수: meta.passed==1 & val_f1>=min_f1_gate 모델만 추론
 # (2025-09-12b) — [DEFAULT] Ensemble-first (mean of top-3 calibrated) + abstain(ABSTAIN_PROB_MIN)
+# (2025-09-17a) — [6번 반영] **윈도우 앙상블(평균/분산가중)**: find_best_windows 상위 윈도우들에서
+#                   동일 가중치 평균 또는 분산 패널티(mean/(1+γ·var))로 클래스별 확률을 합성.
+#                   메타러너 입력 포맷(캘리브레이션된 확률 벡터)은 동일.
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -213,6 +216,12 @@ FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 MIN_RET_THRESHOLD = float(os.getenv("PREDICT_MIN_RETURN", "0.01"))
 ABSTAIN_PROB_MIN = float(os.getenv("ABSTAIN_PROB_MIN", "0.35"))
 PREDICT_SOFT_ABORT = int(os.getenv("PREDICT_SOFT_ABORT", "1"))  # ★ no_models/no_valid_model → 예측보류로 처리
+
+# === 6번: 윈도우 앙상블 환경 토글 ===
+#   PREDICT_WINDOW_ENSEMBLE:  "mean" | "varpen" | "mean_var" (기본)
+#   ENSEMBLE_VAR_GAMMA:       분산 패널티 강도( varpen/mean_var에서 사용 )
+PREDICT_WINDOW_ENSEMBLE = os.getenv("PREDICT_WINDOW_ENSEMBLE", "mean_var").lower()
+ENSEMBLE_VAR_GAMMA = float(os.getenv("ENSEMBLE_VAR_GAMMA", "1.0"))
 
 EXP_STATE = "/persistent/logs/meta_explore_state.json"
 EXP_EPS = float(os.getenv("EXPLORE_EPS_BASE", "0.15"))
@@ -986,7 +995,36 @@ def evaluate_predictions(get_price_fn):
             pass
         print(f"[오류] evaluate_predictions 스트리밍 실패 → {e}")
 
-# ====== 모델 추론 묶기 (★ 품질게이트 + STRICT_BOUNDS) ======
+# ====== 모델 추론 묶기 (★ 품질게이트 + STRICT_BOUNDS + 윈도우 앙상블) ======
+def _combine_windows(calib_stack: np.ndarray, raw_stack: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    calib_stack/raw_stack: shape (W, C) — 각 윈도우별 확률
+    반환: (calib_combined, raw_combined) — 클래스별 확률(정규화 완료)
+    """
+    eps = 1e-12
+    mean_c = calib_stack.mean(axis=0)
+    mean_r = raw_stack.mean(axis=0)
+
+    if PREDICT_WINDOW_ENSEMBLE == "mean":
+        cc = mean_c
+        rr = mean_r
+    else:
+        # 분산 패널티: 클래스별 윈도우 분산이 큰 경우 가중치↓ (mean / (1+γ·var))
+        var_c = calib_stack.var(axis=0)
+        var_r = raw_stack.var(axis=0)
+        cc = mean_c / (1.0 + ENSEMBLE_VAR_GAMMA * var_c)
+        rr = mean_r / (1.0 + ENSEMBLE_VAR_GAMMA * var_r)
+
+        if PREDICT_WINDOW_ENSEMBLE == "mean_var":
+            # mean과 var-penalize 혼합(50:50)
+            cc = 0.5 * mean_c + 0.5 * cc
+            rr = 0.5 * mean_r + 0.5 * rr
+
+    # 정규화
+    cc = cc / (cc.sum() + eps)
+    rr = rr / (rr.sum() + eps)
+    return cc.astype(float), rr.astype(float)
+
 def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list, recent_freq, regime="unknown"):
     outs, allpreds = [], []
     for info in models:
@@ -1024,45 +1062,61 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             mtype = meta.get("model", "lstm"); gid = meta.get("group_id", 0)
             inp_size = int(meta.get("input_size", feat_scaled.shape[1]))
             num_cls = int(meta.get("num_classes", (len(cr_meta) if cr_meta else NUM_CLASSES)))
-            idx = min(int(gid), max(0, len(window_list)-1)); win = window_list[idx]
-            seq = feat_scaled[-win:]
-            if seq.shape[1] < inp_size:
-                seq = np.pad(seq, ((0,0),(0, inp_size - seq.shape[1])), mode="constant")
-            elif seq.shape[1] > inp_size:
-                seq = seq[:, :inp_size]
-            if seq.shape[0] < win:
-                print(f"[⚠️ 데이터 부족] {symbol}-{strategy}-group{gid}"); continue
 
-            x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0)
-            model = get_model(mtype, input_size=inp_size, output_size=num_cls)
-            loaded = load_model_any(model_path, model)
-            # 안전 보강: load_model_any가 state_dict를 바로 반환할 경우 모델에 로드
-            if isinstance(loaded, dict) and model is not None:
-                try:
-                    model.load_state_dict(loaded)
-                except Exception:
-                    # 이미 handled in load_model_any fallback, but attempt safe load
-                    pass
-            elif loaded is None:
-                print(f"[⚠️ 모델 로딩 실패] {model_path}"); continue
-            else:
-                # if loaded is a model instance, use it
-                if not hasattr(loaded, "eval") and isinstance(loaded, dict):
-                    # fallback already handled
-                    pass
+            # === (★) 윈도우 앙상블: 상위 N 윈도우 모두에서 추론 → 평균 / 분산가중 합성
+            preds_c_list, preds_r_list = [], []
+            used_windows = []
+            for win in list(dict.fromkeys([int(w) for w in window_list if int(w) > 0])):  # 중복 제거 & 정렬 유지
+                if feat_scaled.shape[0] < win: 
+                    continue
+                seq = feat_scaled[-win:]
+                # input size 정합
+                if seq.shape[1] < inp_size:
+                    seq = np.pad(seq, ((0,0),(0, inp_size - seq.shape[1])), mode="constant")
+                elif seq.shape[1] > inp_size:
+                    seq = seq[:, :inp_size]
+
+                x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0)
+                model = get_model(mtype, input_size=inp_size, output_size=num_cls)
+                loaded = load_model_any(model_path, model)
+                if isinstance(loaded, dict) and model is not None:
+                    try:
+                        model.load_state_dict(loaded)
+                    except Exception:
+                        pass
+                elif loaded is None:
+                    print(f"[⚠️ 모델 로딩 실패] {model_path}"); 
+                    preds_c_list = []; preds_r_list = []; break
                 else:
-                    model = loaded
+                    if not hasattr(loaded, "eval") and isinstance(loaded, dict):
+                        pass
+                    else:
+                        model = loaded
 
-            model.to(DEVICE)
-            model.eval()
-            with torch.no_grad():
-                out = model(x.to(DEVICE)); probs = F.softmax(out, dim=1).squeeze().cpu().numpy()
-            cprobs = apply_calibration(probs, symbol=symbol, strategy=strategy, regime=regime, model_meta=meta).astype(float)
-            outs.append({"raw_probs": probs, "calib_probs": cprobs, "predicted_class": int(np.argmax(cprobs)),
-                         "group_id": gid, "model_type": mtype, "model_path": model_path, "val_f1": val_f1,
-                         "symbol": symbol, "strategy": strategy, "meta": meta})
+                model.to(DEVICE); model.eval()
+                with torch.no_grad():
+                    out = model(x.to(DEVICE)); probs = F.softmax(out, dim=1).squeeze().cpu().numpy()
+                cprobs = apply_calibration(probs, symbol=symbol, strategy=strategy, regime=regime, model_meta=meta).astype(float)
+
+                preds_c_list.append(cprobs); preds_r_list.append(probs); used_windows.append(int(win))
+
+            if not preds_c_list:
+                continue
+
+            calib_stack = np.vstack(preds_c_list)   # (W, C)
+            raw_stack   = np.vstack(preds_r_list)   # (W, C)
+            comb_c, comb_r = _combine_windows(calib_stack, raw_stack)
+
+            outs.append({
+                "raw_probs": comb_r, "calib_probs": comb_c,
+                "predicted_class": int(np.argmax(comb_c)),
+                "group_id": gid, "model_type": mtype, "model_path": model_path,
+                "val_f1": val_f1, "symbol": symbol, "strategy": strategy, "meta": meta,
+                "window_ensemble": {"mode": PREDICT_WINDOW_ENSEMBLE, "gamma": ENSEMBLE_VAR_GAMMA, "wins": used_windows}
+            })
+
             entry_price = df["close"].iloc[-1]
-            allpreds.append({"class": int(np.argmax(cprobs)), "probs": cprobs, "entry_price": float(entry_price),
+            allpreds.append({"class": int(np.argmax(comb_c)), "probs": comb_c, "entry_price": float(entry_price),
                              "num_classes": num_cls, "group_id": gid, "model_name": mtype, "model_symbol": symbol,
                              "symbol": symbol, "strategy": strategy})
         except Exception as e:
