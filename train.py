@@ -43,11 +43,11 @@ if not _DISABLE_LIGHTNING:
         _HAS_LIGHTNING=True
     except: _HAS_LIGHTNING=False
 
-# ✅ 순서제어 래퍼 포함 임포트
+# ✅ 순서제어 래퍼 포함 임포트 (CacheManager 추가)
 from data.utils import (
     get_kline_by_strategy, compute_features, create_dataset, SYMBOL_GROUPS,
     should_train_symbol, mark_symbol_trained, ready_for_group_predict, mark_group_predicted,
-    reset_group_order
+    reset_group_order, CacheManager as DataCacheManager
 )
 
 from model.base_model import get_model
@@ -717,7 +717,21 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
         if len(np.unique(y)) < 2:
             _log_skip(symbol,strategy,"라벨 단일 클래스 → 학습/평가 스킵"); return res
 
-        train_idx, val_idx = coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, num_classes=len(class_ranges))
+        # Try stratified split when possible, else fall back to coverage window split
+        strat_ok = False
+        try:
+            if len(y) >= 40 and len(np.unique(y)) >= 2:
+                splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.20, random_state=int(os.getenv("GLOBAL_SEED","20240101")))
+                tr_idx, val_idx = next(splitter.split(X_raw, y))
+                strat_ok = True
+                _safe_print("[SPLIT] stratified shuffle split used")
+        except Exception as _e:
+            strat_ok = False
+
+        if not strat_ok:
+            train_idx, val_idx = coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, num_classes=len(class_ranges))
+        else:
+            train_idx, val_idx = tr_idx, val_idx
 
         # ---- train-only fit scaler
         scaler = MinMaxScaler()
@@ -776,6 +790,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
             _safe_print(f"[class_weight warn] {e}")
             w_full = np.ones(len(class_ranges), dtype=np.float32)
 
+        # normalize optional: keep mean ~1 (helps LR scale)
+        try:
+            if np.mean(w_full) > 0:
+                w_full = w_full / float(np.mean(w_full))
+        except Exception:
+            pass
+
         w = torch.tensor(w_full, dtype=torch.float32, device=DEVICE)
 
         for model_type in ["lstm","cnn_lstm","transformer"]:
@@ -783,15 +804,23 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
             _progress(f"train:{model_type}:prep")
             base=get_model(model_type,input_size=feat_dim,output_size=len(class_ranges)).to(DEVICE)
 
-            # DataLoaders
-            base_ds=TensorDataset(torch.tensor(train_X),torch.tensor(train_y))
-            # create train_loader robustly (persistent_workers only valid when num_workers>0)
+            # DataLoaders: ensure tensors with explicit dtype
             try:
+                tr_tensor_X = torch.tensor(train_X, dtype=torch.float32)
+                tr_tensor_y = torch.tensor(train_y, dtype=torch.long)
+                val_tensor_X = torch.tensor(val_X, dtype=torch.float32)
+                val_tensor_y = torch.tensor(val_y, dtype=torch.long)
+
+                base_ds=TensorDataset(tr_tensor_X, tr_tensor_y)
+
+                # create train_loader robustly (persistent_workers only valid when num_workers>0)
                 if SMART_TRAIN:
                     cls_counts = np.bincount(train_y, minlength=len(class_ranges)).astype(np.float64)
                     inv = 1.0 / np.clip(cls_counts, 1.0, None)
-                    sample_w_np = inv[train_y].astype(np.float64)
-                    sample_w = torch.from_numpy(sample_w_np).double()
+                    sample_w_np = inv[train_y].astype(np.float32)
+                    # safe: avoid zeros or nans
+                    sample_w_np = np.nan_to_num(sample_w_np, nan=1.0, posinf=1.0, neginf=1.0)
+                    sample_w = torch.from_numpy(sample_w_np.astype(np.float32))
                     sampler = torch.utils.data.WeightedRandomSampler(sample_w.tolist(), num_samples=len(train_y), replacement=True)
                     dl_kwargs = {"batch_size": _BATCH_SIZE, "sampler": sampler, "num_workers": max(0,_NUM_WORKERS), "pin_memory": _PIN_MEMORY}
                     if _NUM_WORKERS > 0 and _PERSISTENT: dl_kwargs["persistent_workers"] = True
@@ -802,11 +831,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                     train_loader=DataLoader(base_ds, **dl_kwargs)
             except Exception as e:
                 _safe_print(f"[DATALOADER WARN] building train_loader failed -> {e}; fallback to simple loader")
+                base_ds=TensorDataset(torch.tensor(train_X, dtype=torch.float32), torch.tensor(train_y, dtype=torch.long))
                 train_loader=DataLoader(base_ds,batch_size=_BATCH_SIZE,shuffle=True,num_workers=0,pin_memory=False)
 
-            val_loader_kwargs = {"batch_size": _BATCH_SIZE, "num_workers": max(0,_NUM_WORKERS), "pin_memory": _PIN_MEMORY}
+            val_loader_kwargs = {"batch_size": _BATCH_SIZE, "num_workers": max(0,_NUM_WORKERS), "pin_memory": _PIN_MEMORY, "shuffle": False}
             if _NUM_WORKERS > 0 and _PERSISTENT: val_loader_kwargs["persistent_workers"] = True
-            val_loader=DataLoader(TensorDataset(torch.tensor(val_X),torch.tensor(val_y)), **val_loader_kwargs)
+            val_loader=DataLoader(TensorDataset(torch.tensor(val_X, dtype=torch.float32), torch.tensor(val_y, dtype=torch.long)), **val_loader_kwargs)
 
             total_loss=0.0
             _safe_print(f"🟦 TRAIN begin → {symbol}-{strategy}-g{group_id} [{model_type}] (epochs={max_epochs}, train={len(train_X)}, val={len(val_X)})")
@@ -855,7 +885,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                         if bi % 16 == 0:
                             _check_stop(stop_event,f"epoch {ep} batch {bi}")
                             _progress(f"{model_type}:ep{ep}:b{bi}")
-                        xb,yb=xb.to(DEVICE), yb.to(DEVICE)
+                        xb = xb.to(DEVICE, dtype=torch.float32)
+                        yb = yb.to(DEVICE, dtype=torch.long)
                         logits=model(xb)
                         loss=crit(logits,yb)
                         # safe scalar extraction and finite check
@@ -876,7 +907,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                     model.eval(); preds=[]; lbls=[]
                     with torch.no_grad():
                         for xb,yb in val_loader:
-                            p=torch.argmax(model(xb.to(DEVICE)),dim=1).cpu().numpy()
+                            xb = xb.to(DEVICE, dtype=torch.float32)
+                            logits = model(xb)
+                            p=torch.argmax(logits,dim=1).cpu().numpy()
                             preds.extend(p); lbls.extend(yb.numpy())
                     try:
                         cur_f1=float(f1_score(lbls,preds,average="macro"))
@@ -917,7 +950,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
             with torch.no_grad():
                 for bi,(xb,yb) in enumerate(val_loader):
                     if bi % 32 == 0: _check_stop(stop_event,f"val batch {bi}"); _progress(f"val_b{bi}")
-                    logits=model(xb.to(DEVICE)); loss=crit_eval(logits, yb.to(DEVICE))
+                    xb = xb.to(DEVICE, dtype=torch.float32)
+                    logits=model(xb)
+                    loss=crit_eval(logits, yb.to(DEVICE, dtype=torch.long))
                     try:
                         loss_val = float(loss.item())
                     except Exception:
@@ -955,6 +990,14 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
             _archive_old_checkpoints(symbol,strategy,model_type,keep_n=1)
             _emit_aliases(wpath,mpath,symbol,strategy,model_type)
             _disk_barrier([wpath, mpath, MODEL_DIR, os.path.join(MODEL_DIR, symbol), os.path.join(MODEL_DIR, symbol, strategy)])
+
+            # 캐시 제거: kline / features 캐시를 강제 무효화
+            try:
+                DataCacheManager.delete(f"{symbol}-{strategy}")
+                DataCacheManager.delete(f"{symbol}-{strategy}-features")
+                _safe_print(f"[CACHE] deleted {symbol}-{strategy} and {symbol}-{strategy}-features")
+            except Exception as e:
+                _safe_print(f"[CACHE] delete fail → {e}")
 
             logger.log_training_result(
                 symbol, strategy, model=os.path.basename(wpath), accuracy=acc, f1=f1_val, loss=val_loss,
