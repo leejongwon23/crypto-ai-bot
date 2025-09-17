@@ -43,10 +43,12 @@ _default_config = {
         "fallback_identity": True
     },
 
-    # --- [LOSS] 손실/가중치 옵션(후속 단계에서 사용) ---
+    # --- [LOSS] 손실/가중치 옵션(학습 코드에서 사용) ---
     "LOSS": {
+        "use_focal": False,            # ⇦ 추가: CE↔Focal 토글
+        "alpha_mode": "auto",          # ⇦ 추가: 클래스별 α 자동/수동
         "label_smoothing": 0.02,
-        "focal_gamma": 0.0,
+        "focal_gamma": 0.0,            # 0.0이면 비활성 (train.py에서 gamma>0이면 Focal)
         "class_weight": {
             "mode": "inverse_freq_clip",  # none | inverse_freq | inverse_freq_clip
             "min": 0.5,
@@ -63,7 +65,8 @@ _default_config = {
     # --- [EVAL] 평가 설정(후속 단계에서 사용) ---
     "EVAL": {
         "macro_f1": True,
-        "topk": [1, 3]
+        "topk": [1, 3],
+        "use_cost_sensitive_argmax": True   # ⇦ 추가: 빈도보정 argmax 사용 허용
     },
 
     # --- [5] 실패학습(하드 예시) 옵션 ---
@@ -87,7 +90,7 @@ _default_config = {
         "strict": True,           # 구간 단조/겹침 방지
         "zero_band_eps": 0.0015,  # 0% 주변 중립 밴드(±0.15%p)
         "min_width": 0.0005,      # 최소 구간 폭(0.05%p)
-        "step_pct": 0.0075,       # ← 변경됨: 0.75% 단위 고정 bin 간격 (기존 0.005 = 0.5%)
+        "step_pct": 0.0075,       # ← 변경됨: 0.75% 단위 고정 bin 간격
         # 희소 bin 병합 옵션
         "merge_sparse": {
             "enabled": True,
@@ -95,6 +98,25 @@ _default_config = {
             "min_count_floor": 50,    # ---- 변경: 절대 개수 하한을 50으로 설정
             "prefer": "denser"        # "denser"(더 많은 이웃) | "left" | "right"
         }
+    },
+
+    # --- [TRAIN] 학습 스케줄/조기종료 표준화 (학습 코드에서 읽음) ---
+    "TRAIN": {                           # ⇦ 추가 섹션
+        "early_stop": {
+            "patience": 4,
+            "min_delta": 0.0005,
+            "warmup_epochs": 2
+        },
+        "lr_scheduler": {
+            "patience": 3,
+            "min_lr": 5e-6
+        }
+    },
+
+    # --- [ENSEMBLE] 멀티-윈도우 앙상블 토글 ---
+    "ENSEMBLE": {                        # ⇦ 추가 섹션
+        "topk_windows": 3,
+        "use_var_weight": True           # 윈도우 분산 가중치 사용
     },
 
     # --- [SCHED] 학습 스케줄러 힌트(엔진에서 참조) ---
@@ -224,7 +246,7 @@ def get_class_groups(num_classes=None, group_size=5):
     return groups
 
 # ------------------------
-# 신규 옵션 Getter (2·3·LOSS·AUG·EVAL·5·Q·BIN·SCHED)
+# 신규 옵션 Getter (2·3·LOSS·AUG·EVAL·5·Q·BIN·TRAIN·ENSEMBLE·SCHED)
 # ------------------------
 def get_REGIME():
     return _config.get("REGIME", _default_config["REGIME"])
@@ -249,6 +271,12 @@ def get_QUALITY():
 
 def get_CLASS_BIN():
     return _config.get("CLASS_BIN", _default_config["CLASS_BIN"])
+
+def get_TRAIN():
+    return _config.get("TRAIN", _default_config["TRAIN"])
+
+def get_ENSEMBLE():
+    return _config.get("ENSEMBLE", _default_config["ENSEMBLE"])
 
 def get_SCHED():
     return _config.get("SCHED", _default_config["SCHED"])
@@ -549,7 +577,7 @@ def class_to_expected_return(class_id: int, symbol: str, strategy: str):
 def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, group_size=5):
     """
     미래 최대고가/최저저가 기반 signed 수익률 분포로 클래스 경계 생성.
-    - 기본: fixed_step(0.5%) + 희소 bin 병합
+    - 기본: fixed_step(0.75%) + 희소 병합
     - 예외 시: 동적/균등 분할 백업
     """
     import numpy as np
@@ -580,9 +608,9 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             ranges = _merge_smallest_adjacent(ranges, MAX_CLASSES)
         return ranges
 
-    # ✅ 0.5% 고정 간격 분할 (+ 희소 병합)
+    # ✅ 고정 간격 분할 (+ 희소 병합)
     def compute_fixed_step_ranges(rets_for_merge):
-        step = float(BIN_CONF.get("step_pct", 0.005))  # 0.75%로 설정됨 via config
+        step = float(BIN_CONF.get("step_pct", 0.0075))
         if step <= 0:
             step = 0.0075
         neg = _STRATEGY_RETURN_CAP_NEG_MIN.get(strategy, -0.5)
@@ -795,7 +823,7 @@ __all__ = [
     "get_SYMBOLS", "get_SYMBOL_GROUPS",
     "get_REGIME", "get_CALIB", "get_LOSS", "get_AUG", "get_EVAL",
     "get_FAILLEARN", "get_QUALITY",
-    "get_CLASS_BIN", "get_SCHED",
+    "get_CLASS_BIN", "get_TRAIN", "get_ENSEMBLE", "get_SCHED",
     "get_CPU_THREADS", "get_TRAIN_NUM_WORKERS", "get_TRAIN_BATCH_SIZE",
     "get_ORDERED_TRAIN", "get_PREDICT_MIN_RETURN", "get_DISPLAY_MIN_RETURN",
     "get_SSL_CACHE_DIR",
