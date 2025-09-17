@@ -56,7 +56,16 @@ from failure_db import insert_failure_record, ensure_failure_db
 import logger
 from config import get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges, set_NUM_CLASSES, STRATEGY_CONFIG, get_QUALITY, get_LOSS
 from data_augmentation import balance_classes
-from window_optimizer import find_best_window
+
+# ⑤ 윈도우 최적화: 상위 3개 API 사용(없으면 단일 함수 폴백)
+try:
+    from window_optimizer import find_best_window, find_best_windows
+except Exception:
+    from window_optimizer import find_best_window
+    def find_best_windows(symbol, strategy, window_list, top_k=3, group_id=None):
+        w = find_best_window(symbol, strategy, window_list=window_list, group_id=group_id)
+        return [w]
+
 from focal_loss import FocalLoss
 
 # --- ssl_pretrain (옵션) ---
@@ -374,7 +383,7 @@ def _save_model_and_meta(model:nn.Module,path_pt:str,meta:dict):
     _disk_barrier([weight, meta_path, MODEL_DIR])
     return weight, meta_path
 
-# === 링크/별칭 생성기 ===
+# === 링크/별칭 생성기 (5번: window 별칭 옵션 추가) ===
 def _safe_alias(src:str,dst:str):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     try:
@@ -399,20 +408,26 @@ def _safe_alias(src:str,dst:str):
     _disk_barrier([dst, os.path.dirname(dst)])
     return mode
 
-def _emit_aliases(model_path:str, meta_path:str, symbol:str, strategy:str, model_type:str):
+def _emit_aliases(model_path:str, meta_path:str, symbol:str, strategy:str, model_type:str, window:Optional[int]=None):
     ext=os.path.splitext(model_path)[1]
     if os.getenv("DISABLE_FLAT_ALIAS","0") != "1":
         flat_pt=os.path.join(MODEL_DIR,f"{symbol}_{strategy}_{model_type}{ext}")
         _safe_alias(model_path,flat_pt); _safe_alias(meta_path,_stem(flat_pt)+".meta.json")
     dir_pt=os.path.join(MODEL_DIR,symbol,strategy,f"{model_type}{ext}")
     _safe_alias(model_path,dir_pt); _safe_alias(meta_path,_stem(dir_pt)+".meta.json")
+    # 추가: window 포함 별칭 (옵션)
+    if window is not None and os.getenv("ALIAS_INCLUDE_WINDOW","1")=="1":
+        flat_w=os.path.join(MODEL_DIR,f"{symbol}_{strategy}_{model_type}_w{int(window)}{ext}")
+        _safe_alias(model_path,flat_w); _safe_alias(meta_path,_stem(flat_w)+".meta.json")
 
 def _archive_old_checkpoints(symbol:str,strategy:str,model_type:str,keep_n:int=1):
-    patt_pt=os.path.join(MODEL_DIR,f"{symbol}_{strategy}_{model_type}_group*_cls*.pt")
-    patt_ptz=os.path.join(MODEL_DIR,f"{symbol}_{strategy}_{model_type}_group*_cls*.ptz")
-    paths=sorted(glob.glob(patt_pt)+glob.glob(patt_ptz), key=lambda p: os.path.getmtime(p), reverse=True)
+    patt_pt = os.path.join(MODEL_DIR,f"{symbol}_{strategy}_{model_type}_group*_cls*.pt")
+    patt_ptz= os.path.join(MODEL_DIR,f"{symbol}_{strategy}_{model_type}_group*_cls*.ptz")
+    patt_pt_w = os.path.join(MODEL_DIR,f"{symbol}_{strategy}_{model_type}_w*_group*_cls*.pt")   # window 포함
+    patt_ptz_w= os.path.join(MODEL_DIR,f"{symbol}_{strategy}_{model_type}_w*_group*_cls*.ptz")
+    paths=sorted(glob.glob(patt_pt)+glob.glob(patt_ptz)+glob.glob(patt_pt_w)+glob.glob(patt_ptz_w),
+                 key=lambda p: os.path.getmtime(p), reverse=True)
     if not paths: return
-    # remove everything after the first keep_n (keep most recent keep_n)
     start_idx = max(1, int(keep_n))
     for p in paths[start_idx:]:
         try:
@@ -578,17 +593,23 @@ def _log_class_ranges_safe(symbol, strategy, group_id, class_ranges, note, stop_
         _safe_print(f"[log_class_ranges err] {e}")
 
 def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=None, stop_event: Optional[threading.Event] = None) -> Dict[str, Any]:
+    """
+    ⑤ 상위 3 윈도우 순차 학습/평가/저장.
+    - window_optimizer.find_best_windows(...) → [w1, w2, w3] 사용 (없으면 단일 best 폴백).
+    - 각 윈도우마다 모델 3종(lstm/cnn_lstm/transformer) 학습 후, 파일명에 _w{window}를 포함해 저장.
+    """
     global _FAILURE_DB_READY
     if max_epochs is None:
         max_epochs = _epochs_for(strategy)
 
-    res={"symbol":symbol,"strategy":strategy,"group_id":int(group_id or 0),"models":[]}
+    res={"symbol":symbol,"strategy":strategy,"group_id":int(group_id or 0),"windows":[], "models": []}
     try:
         ensure_failure_db(); _FAILURE_DB_READY = True
         _safe_print(f"✅ [train_one_model] {symbol}-{strategy}-g{group_id}")
         _reset_watchdog("enter train_one_model")
         _progress(f"start:{symbol}-{strategy}-g{group_id}")
 
+        # --- SSL 사전학습(옵션) ---
         _check_stop(stop_event,"before ssl_pretrain")
         try:
             if not DISABLE_SSL:
@@ -609,6 +630,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                 _safe_print("[SSL] disabled → skip")
         except Exception as e: _safe_print(f"[SSL] skip {e}")
 
+        # --- 데이터 로딩 ---
         _check_stop(stop_event,"before data fetch")
         _progress("data_fetch")
         df=get_kline_by_strategy(symbol,strategy)
@@ -622,6 +644,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
         enough_for_training=bool(_attrs.get("enough_for_training", len(df)>=_min_required))
         _safe_print(f"[DATA] {symbol}-{strategy} rows={len(df)} limit={_limit} min={_min_required} aug={augment_needed} enough_for_training={enough_for_training}")
 
+        # --- 피처 계산 ---
         _check_stop(stop_event,"before compute_features")
         _progress("compute_features")
         _feat_timeout=float(os.getenv("FEATURE_TIMEOUT_SEC","120"))
@@ -636,13 +659,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
             _log_skip(symbol,strategy, reason); return res
         _safe_print(f"[FEATURE] ok shape={getattr(feat,'shape',None)}"); _progress("feature_ok")
 
+        # --- 클래스 경계 ---
         _progress("class_ranges:get")
         try:
             class_ranges=get_class_ranges(symbol=symbol,strategy=strategy,group_id=group_id)
             _progress("class_ranges:ok")
         except Exception as e:
             _log_fail(symbol,strategy,"클래스 계산 실패"); return res
-
         num_classes=len(class_ranges); set_NUM_CLASSES(num_classes)
         if not class_ranges or len(class_ranges)<2:
             try:
@@ -650,12 +673,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                 logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note=f"스킵: g={group_id}, cls<2",status="skipped")
             except: pass
             return res
-
         _progress("after_class_ranges")
         _log_class_ranges_safe(symbol,strategy,group_id=group_id,class_ranges=class_ranges,note="train_one_model", stop_event=stop_event)
         try: _safe_print(f"[RANGES] {symbol}-{strategy}-g{group_id} → {class_ranges}")
         except Exception as e: _safe_print(f"[log_class_ranges err] {e}")
 
+        # --- 미래수익 계산 ---
         H=_strategy_horizon_hours(strategy)
         _progress("future:calc")
         _fto=float(os.getenv("FUTURE_TIMEOUT_SEC","60"))
@@ -698,358 +721,375 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
             cut=min(_MAX_ROWS_FOR_TRAIN,len(features_only),len(labels))
             features_only=features_only.iloc[-cut:,:]; labels=labels[-cut:]
 
+        # === ⑤ 상위 3 윈도우 선정 ===
         try:
-            best_window=find_best_window(symbol,strategy,window_list=[16,20,24,32],group_id=group_id)
-        except: best_window=20
-        window=max(5,int(best_window)); window=min(window, max(6,len(features_only)-1))
-
-        _check_stop(stop_event,"before sequence build")
-        _progress("seq_build")
-        X_raw,y=[],[]
-        fv=features_only.values.astype(np.float32)
-        for i in range(len(fv)-window):
-            if i % 128 == 0:
-                _check_stop(stop_event,"seq build")
-                _progress(f"seq_build@{i}")
-            X_raw.append(fv[i:i+window])
-            yi=i+window-1
-            y.append(labels[yi] if 0<=yi<len(labels) else 0)
-        X_raw=np.array(X_raw,dtype=np.float32); y=np.array(y,dtype=np.int64)
-
-        if len(X_raw) < 10:
-            _log_skip(symbol,strategy,f"샘플 부족(rows={len(df)}, limit={_limit}, min={_min_required})"); return res
-        if len(np.unique(y)) < 2:
-            _log_skip(symbol,strategy,"라벨 단일 클래스 → 학습/평가 스킵"); return res
-
-        # Try stratified split when possible, else fall back to coverage window split
-        strat_ok = False
-        try:
-            if len(y) >= 40 and len(np.unique(y)) >= 2:
-                splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.20, random_state=int(os.getenv("GLOBAL_SEED","20240101")))
-                tr_idx, val_idx = next(splitter.split(X_raw, y))
-                strat_ok = True
-                _safe_print("[SPLIT] stratified shuffle split used")
-        except Exception as _e:
-            strat_ok = False
-
-        if not strat_ok:
-            train_idx, val_idx = coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, num_classes=len(class_ranges))
-        else:
-            train_idx, val_idx = tr_idx, val_idx
-
-        # ---- train-only fit scaler
-        scaler = MinMaxScaler()
-        Xtr_flat = X_raw[train_idx].reshape(-1, feat_dim)
-        scaler.fit(Xtr_flat)
-        train_X = scaler.transform(Xtr_flat).reshape(len(train_idx), window, feat_dim)
-        val_X   = scaler.transform(X_raw[val_idx].reshape(-1, feat_dim)).reshape(len(val_idx), window, feat_dim)
-        train_y, val_y = y[train_idx], y[val_idx]
-
-        if len(np.unique(train_y)) < 2 or len(np.unique(val_y)) < 2:
-            _log_skip(symbol,strategy,"분할 후 단일 클래스 → 학습/평가 스킵"); return res
-
-        # 데이터가 극히 적으면 에폭 자동 축소
-        if len(train_X) < 200:
-            max_epochs = max(8, int(round(max_epochs * 0.7)))
-
-        try:
-            if len(train_X)<200: train_X,train_y=balance_classes(train_X,train_y,num_classes=len(class_ranges))
-        except Exception as e: _safe_print(f"[balance err] {e}")
-
-        # ===== 클래스 가중치 (3번 수정: inverse_freq / inverse_freq_clip 적용)
-        try:
-            loss_cfg = get_LOSS()
-            cw_cfg = loss_cfg.get("class_weight", {}) if isinstance(loss_cfg, dict) else {}
-            mode = str(cw_cfg.get("mode", "inverse_freq_clip")).lower()
-            cw_min = float(cw_cfg.get("min", 0.5))
-            cw_max = float(cw_cfg.get("max", 2.0))
-            eps = float(cw_cfg.get("eps", 1e-6))
-
-            # class counts on training set (minlength ensures full vector)
-            class_counts = np.bincount(train_y, minlength=len(class_ranges)).astype(np.float32)
-
-            if mode == "none":
-                w_full = np.ones(len(class_ranges), dtype=np.float32)
-            elif mode == "inverse_freq":
-                w = 1.0 / (np.sqrt(class_counts + eps))
-                w_full = w.astype(np.float32)
-            elif mode == "inverse_freq_clip":
-                w = 1.0 / (np.sqrt(class_counts + eps))
-                w = np.clip(w, cw_min, cw_max)
-                w_full = w.astype(np.float32)
-            else:
-                # fallback to sklearn balanced for unknown mode
-                present = np.unique(train_y)
-                cw_present = compute_class_weight(class_weight="balanced", classes=present, y=train_y)
-                w_full = np.ones(len(class_ranges), dtype=np.float32)
-                for cls, wv in zip(present, cw_present):
-                    w_full[int(cls)] = float(wv)
-
-            # if any class has zero count, set to maximum safe value to avoid zeros
-            zero_mask = (class_counts == 0)
-            if zero_mask.any():
-                w_full[zero_mask] = max(cw_max, np.max(w_full))
-
-        except Exception as e:
-            _safe_print(f"[class_weight warn] {e}")
-            w_full = np.ones(len(class_ranges), dtype=np.float32)
-
-        # normalize optional: keep mean ~1 (helps LR scale)
-        try:
-            if np.mean(w_full) > 0:
-                w_full = w_full / float(np.mean(w_full))
+            top_windows = find_best_windows(symbol, strategy, window_list=[16,20,24,28,32], top_k=3, group_id=group_id)
         except Exception:
-            pass
-
-        w = torch.tensor(w_full, dtype=torch.float32, device=DEVICE)
-
-        # ====== 검증 단계 cost-sensitive argmax용 prior 준비 ======
-        # p(y=k) ~ class_counts/sum ; 로짓을 log priors로 보정 (logit - beta*log(p_k))
-        priors = class_counts / max(1.0, float(class_counts.sum()))
-        priors[priors <= 0] = 1e-6
-        priors_t = torch.tensor(priors, dtype=torch.float32, device=DEVICE)
-
-        for model_type in ["lstm","cnn_lstm","transformer"]:
-            _check_stop(stop_event,f"before train {model_type}")
-            _progress(f"train:{model_type}:prep")
-            base=get_model(model_type,input_size=feat_dim,output_size=len(class_ranges)).to(DEVICE)
-
-            # DataLoaders: ensure tensors with explicit dtype
             try:
-                tr_tensor_X = torch.tensor(train_X, dtype=torch.float32)
-                tr_tensor_y = torch.tensor(train_y, dtype=torch.long)
-                val_tensor_X = torch.tensor(val_X, dtype=torch.float32)
-                val_tensor_y = torch.tensor(val_y, dtype=torch.long)
+                bw=find_best_window(symbol,strategy,window_list=[16,20,24,28,32],group_id=group_id)
+            except Exception:
+                bw=20
+            top_windows=[int(bw)]
+        # sanity
+        top_windows=[int(max(5, w)) for w in top_windows if isinstance(w,(int,float)) and w==w]
+        if not top_windows: top_windows=[20]
+        _safe_print(f"[WINDOWS] top={top_windows}")
 
-                base_ds=TensorDataset(tr_tensor_X, tr_tensor_y)
+        # ====== 학습 공통 준비(스플릿/스케일러는 윈도우와 무관: 시퀀스 빌드 이후 수행) ======
+        all_window_results=[]
 
-                # create train_loader robustly (persistent_workers only valid when num_workers>0)
-                if SMART_TRAIN:
-                    cls_counts = np.bincount(train_y, minlength=len(class_ranges)).astype(np.float64)
-                    inv = 1.0 / np.clip(cls_counts, 1.0, None)
-                    sample_w_np = inv[train_y].astype(np.float32)
-                    # safe: avoid zeros or nans
-                    sample_w_np = np.nan_to_num(sample_w_np, nan=1.0, posinf=1.0, neginf=1.0)
-                    sample_w = torch.from_numpy(sample_w_np.astype(np.float32))
-                    sampler = torch.utils.data.WeightedRandomSampler(sample_w.tolist(), num_samples=len(train_y), replacement=True)
-                    dl_kwargs = {"batch_size": _BATCH_SIZE, "sampler": sampler, "num_workers": max(0,_NUM_WORKERS), "pin_memory": _PIN_MEMORY}
-                    if _NUM_WORKERS > 0 and _PERSISTENT: dl_kwargs["persistent_workers"] = True
-                    train_loader=DataLoader(base_ds, **dl_kwargs)
-                else:
-                    dl_kwargs = {"batch_size": _BATCH_SIZE, "shuffle": True, "num_workers": max(0,_NUM_WORKERS), "pin_memory": _PIN_MEMORY}
-                    if _NUM_WORKERS > 0 and _PERSISTENT: dl_kwargs["persistent_workers"] = True
-                    train_loader=DataLoader(base_ds, **dl_kwargs)
-            except Exception as e:
-                _safe_print(f"[DATALOADER WARN] building train_loader failed -> {e}; fallback to simple loader")
-                base_ds=TensorDataset(torch.tensor(train_X, dtype=torch.float32), torch.tensor(train_y, dtype=torch.long))
-                train_loader=DataLoader(base_ds,batch_size=_BATCH_SIZE,shuffle=True,num_workers=0,pin_memory=False)
+        for window in top_windows:
+            # window 상한
+            window=min(window, max(6,len(features_only)-1))
 
-            val_loader_kwargs = {"batch_size": _BATCH_SIZE, "num_workers": max(0,_NUM_WORKERS), "pin_memory": _PIN_MEMORY, "shuffle": False}
-            if _NUM_WORKERS > 0 and _PERSISTENT: val_loader_kwargs["persistent_workers"] = True
-            val_loader=DataLoader(TensorDataset(torch.tensor(val_X, dtype=torch.float32), torch.tensor(val_y, dtype=torch.long)), **val_loader_kwargs)
+            _check_stop(stop_event,f"before sequence build(w{window})")
+            _progress(f"seq_build:w{window}")
+            X_raw,y=[],[]
+            fv=features_only.values.astype(np.float32)
+            for i in range(len(fv)-window):
+                if i % 128 == 0:
+                    _check_stop(stop_event,"seq build")
+                    _progress(f"seq_build@{i}")
+                X_raw.append(fv[i:i+window])
+                yi=i+window-1
+                y.append(labels[yi] if 0<=yi<len(labels) else 0)
+            X_raw=np.array(X_raw,dtype=np.float32); y=np.array(y,dtype=np.int64)
 
-            total_loss=0.0
-            _safe_print(f"🟦 TRAIN begin → {symbol}-{strategy}-g{group_id} [{model_type}] (epochs={max_epochs}, train={len(train_X)}, val={len(val_X)})")
+            if len(X_raw) < 10:
+                _log_skip(symbol,strategy,f"샘플 부족(rows={len(df)}, limit={_limit}, min={_min_required}, w={window})"); 
+                continue
+            if len(np.unique(y)) < 2:
+                _log_skip(symbol,strategy,f"라벨 단일 클래스(w={window}) → 스킵"); 
+                continue
 
-            if _HAS_LIGHTNING:
-                lit=LitSeqModel(base,lr=1e-3,cls_w=w,gamma=FOCAL_GAMMA)
-                callbacks=[_HeartbeatAndStop(stop_event)]
-                ckpt_cb = ModelCheckpoint(monitor="val_f1", mode="max", save_top_k=1, filename=f"{symbol}-{strategy}-{model_type}-best")
-                es_cb   = EarlyStopping(monitor="val_f1", mode="max",
-                                        patience=EARLY_STOP_PATIENCE, min_delta=EARLY_STOP_MIN_DELTA,
-                                        check_finite=True)
-                callbacks += [ckpt_cb, es_cb]
-                trainer=pl.Trainer(max_epochs=max_epochs, accelerator=("gpu" if torch.cuda.is_available() else "cpu"),
-                                   devices=1, enable_checkpointing=True, logger=False, enable_model_summary=False,
-                                   enable_progress_bar=False, callbacks=callbacks,
-                                   gradient_clip_val=GRAD_CLIP if SMART_TRAIN else 0.0)
-                trainer.fit(lit,train_dataloaders=train_loader,val_dataloaders=val_loader)
-                model=base
-                if ckpt_cb.best_model_path and os.path.exists(ckpt_cb.best_model_path):
-                    try:
-                        state=torch.load(ckpt_cb.best_model_path, map_location="cpu")["state_dict"]
-                        cleaned={k.replace("model.",""):v for k,v in state.items() if k.startswith("model.")}
-                        model.load_state_dict(cleaned, strict=False)
-                    except Exception as _e:
-                        _safe_print(f"[CKPT load skip] {_e}")
-                _check_stop(stop_event,f"after PL train {model_type}")
+            # Try stratified split when possible, else fall back to coverage window split
+            strat_ok = False
+            try:
+                if len(y) >= 40 and len(np.unique(y)) >= 2:
+                    splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.20, random_state=int(os.getenv("GLOBAL_SEED","20240101")))
+                    tr_idx, val_idx = next(splitter.split(X_raw, y))
+                    strat_ok = True
+                    _safe_print(f"[SPLIT] stratified used (w={window})")
+            except Exception:
+                strat_ok = False
+
+            if not strat_ok:
+                train_idx, val_idx = coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, num_classes=len(class_ranges))
             else:
-                model=base
-                opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-                crit = FocalLoss(gamma=FOCAL_GAMMA, weight=w)
+                train_idx, val_idx = tr_idx, val_idx
 
-                scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    opt, mode="max", factor=0.5, patience=2, min_lr=1e-5
-                ) if SMART_TRAIN else None
+            # ---- train-only fit scaler
+            scaler = MinMaxScaler()
+            Xtr_flat = X_raw[train_idx].reshape(-1, feat_dim)
+            scaler.fit(Xtr_flat)
+            train_X = scaler.transform(Xtr_flat).reshape(len(train_idx), window, feat_dim)
+            val_X   = scaler.transform(X_raw[val_idx].reshape(-1, feat_dim)).reshape(len(val_idx), window, feat_dim)
+            train_y, val_y = y[train_idx], y[val_idx]
 
-                patience=EARLY_STOP_PATIENCE
-                min_delta=EARLY_STOP_MIN_DELTA
-                best_f1=-1.0; best_state=None; bad=0; total_loss=0.0
-                last_log_ts=time.time()
+            if len(np.unique(train_y)) < 2 or len(np.unique(val_y)) < 2:
+                _log_skip(symbol,strategy,f"분할 후 단일 클래스(w={window}) → 스킵"); 
+                continue
 
-                for ep in range(max_epochs):
-                    _check_stop(stop_event,f"epoch {ep} pre")
-                    _progress(f"{model_type}:ep{ep}:start")
-                    model.train()
-                    for bi,(xb,yb) in enumerate(train_loader):
-                        if bi % 16 == 0:
-                            _check_stop(stop_event,f"epoch {ep} batch {bi}")
-                            _progress(f"{model_type}:ep{ep}:b{bi}")
-                        xb = xb.to(DEVICE, dtype=torch.float32)
-                        yb = yb.to(DEVICE, dtype=torch.long)
-                        logits=model(xb)
-                        loss=crit(logits,yb)
-                        # safe scalar extraction and finite check
+            # 데이터가 극히 적으면 에폭 자동 축소
+            local_epochs = max_epochs
+            if len(train_X) < 200:
+                local_epochs = max(8, int(round(local_epochs * 0.7)))
+
+            try:
+                if len(train_X)<200: train_X,train_y=balance_classes(train_X,train_y,num_classes=len(class_ranges))
+            except Exception as e: _safe_print(f"[balance err] {e}")
+
+            # ===== 클래스 가중치 =====
+            try:
+                loss_cfg = get_LOSS()
+                cw_cfg = loss_cfg.get("class_weight", {}) if isinstance(loss_cfg, dict) else {}
+                mode = str(cw_cfg.get("mode", "inverse_freq_clip")).lower()
+                cw_min = float(cw_cfg.get("min", 0.5))
+                cw_max = float(cw_cfg.get("max", 2.0))
+                eps = float(cw_cfg.get("eps", 1e-6))
+
+                class_counts = np.bincount(train_y, minlength=len(class_ranges)).astype(np.float32)
+
+                if mode == "none":
+                    w_full = np.ones(len(class_ranges), dtype=np.float32)
+                elif mode == "inverse_freq":
+                    w = 1.0 / (np.sqrt(class_counts + eps))
+                    w_full = w.astype(np.float32)
+                elif mode == "inverse_freq_clip":
+                    w = 1.0 / (np.sqrt(class_counts + eps))
+                    w = np.clip(w, cw_min, cw_max)
+                    w_full = w.astype(np.float32)
+                else:
+                    present = np.unique(train_y)
+                    cw_present = compute_class_weight(class_weight="balanced", classes=present, y=train_y)
+                    w_full = np.ones(len(class_ranges), dtype=np.float32)
+                    for cls, wv in zip(present, cw_present):
+                        w_full[int(cls)] = float(wv)
+
+                zero_mask = (class_counts == 0)
+                if zero_mask.any():
+                    w_full[zero_mask] = max(cw_max, np.max(w_full))
+            except Exception as e:
+                _safe_print(f"[class_weight warn] {e}")
+                w_full = np.ones(len(class_ranges), dtype=np.float32)
+
+            try:
+                if np.mean(w_full) > 0:
+                    w_full = w_full / float(np.mean(w_full))
+            except Exception:
+                pass
+            w = torch.tensor(w_full, dtype=torch.float32, device=DEVICE)
+
+            # ====== 검증 단계 cost-sensitive argmax prior ======
+            priors = (np.bincount(train_y, minlength=len(class_ranges)).astype(np.float32))
+            priors = priors / max(1.0, float(priors.sum()))
+            priors[priors <= 0] = 1e-6
+            priors_t = torch.tensor(priors, dtype=torch.float32, device=DEVICE)
+
+            # ===== 모델별 학습 =====
+            window_results=[]
+            for model_type in ["lstm","cnn_lstm","transformer"]:
+                _check_stop(stop_event,f"before train {model_type} (w={window})")
+                _progress(f"train:{model_type}:prep:w{window}")
+                base=get_model(model_type,input_size=feat_dim,output_size=len(class_ranges)).to(DEVICE)
+
+                # DataLoaders
+                try:
+                    tr_tensor_X = torch.tensor(train_X, dtype=torch.float32)
+                    tr_tensor_y = torch.tensor(train_y, dtype=torch.long)
+                    val_tensor_X = torch.tensor(val_X, dtype=torch.float32)
+                    val_tensor_y = torch.tensor(val_y, dtype=torch.long)
+
+                    base_ds=TensorDataset(tr_tensor_X, tr_tensor_y)
+
+                    if SMART_TRAIN:
+                        cls_counts = np.bincount(train_y, minlength=len(class_ranges)).astype(np.float64)
+                        inv = 1.0 / np.clip(cls_counts, 1.0, None)
+                        sample_w_np = inv[train_y].astype(np.float32)
+                        sample_w_np = np.nan_to_num(sample_w_np, nan=1.0, posinf=1.0, neginf=1.0)
+                        sample_w = torch.from_numpy(sample_w_np.astype(np.float32))
+                        sampler = torch.utils.data.WeightedRandomSampler(sample_w.tolist(), num_samples=len(train_y), replacement=True)
+                        dl_kwargs = {"batch_size": _BATCH_SIZE, "sampler": sampler, "num_workers": max(0,_NUM_WORKERS), "pin_memory": _PIN_MEMORY}
+                        if _NUM_WORKERS > 0 and _PERSISTENT: dl_kwargs["persistent_workers"] = True
+                        train_loader=DataLoader(base_ds, **dl_kwargs)
+                    else:
+                        dl_kwargs = {"batch_size": _BATCH_SIZE, "shuffle": True, "num_workers": max(0,_NUM_WORKERS), "pin_memory": _PIN_MEMORY}
+                        if _NUM_WORKERS > 0 and _PERSISTENT: dl_kwargs["persistent_workers"] = True
+                        train_loader=DataLoader(base_ds, **dl_kwargs)
+                except Exception as e:
+                    _safe_print(f"[DATALOADER WARN] building train_loader failed -> {e}; fallback to simple loader")
+                    base_ds=TensorDataset(torch.tensor(train_X, dtype=torch.float32), torch.tensor(train_y, dtype=torch.long))
+                    train_loader=DataLoader(base_ds,batch_size=_BATCH_SIZE,shuffle=True,num_workers=0,pin_memory=False)
+
+                val_loader_kwargs = {"batch_size": _BATCH_SIZE, "num_workers": max(0,_NUM_WORKERS), "pin_memory": _PIN_MEMORY, "shuffle": False}
+                if _NUM_WORKERS > 0 and _PERSISTENT: val_loader_kwargs["persistent_workers"] = True
+                val_loader=DataLoader(TensorDataset(torch.tensor(val_tensor_X, dtype=torch.float32), torch.tensor(val_tensor_y, dtype=torch.long)), **val_loader_kwargs)
+
+                total_loss=0.0
+                _safe_print(f"🟦 TRAIN begin → {symbol}-{strategy}-g{group_id} [w={window}] [{model_type}] (epochs={local_epochs}, train={len(train_X)}, val={len(val_X)})")
+
+                if _HAS_LIGHTNING:
+                    lit=LitSeqModel(base,lr=1e-3,cls_w=w,gamma=FOCAL_GAMMA)
+                    callbacks=[_HeartbeatAndStop(stop_event)]
+                    ckpt_cb = ModelCheckpoint(monitor="val_f1", mode="max", save_top_k=1, filename=f"{symbol}-{strategy}-{model_type}-w{window}-best")
+                    es_cb   = EarlyStopping(monitor="val_f1", mode="max",
+                                            patience=EARLY_STOP_PATIENCE, min_delta=EARLY_STOP_MIN_DELTA,
+                                            check_finite=True)
+                    callbacks += [ckpt_cb, es_cb]
+                    trainer=pl.Trainer(max_epochs=local_epochs, accelerator=("gpu" if torch.cuda.is_available() else "cpu"),
+                                       devices=1, enable_checkpointing=True, logger=False, enable_model_summary=False,
+                                       enable_progress_bar=False, callbacks=callbacks,
+                                       gradient_clip_val=GRAD_CLIP if SMART_TRAIN else 0.0)
+                    trainer.fit(lit,train_dataloaders=train_loader,val_dataloaders=val_loader)
+                    model=base
+                    if ckpt_cb.best_model_path and os.path.exists(ckpt_cb.best_model_path):
                         try:
-                            loss_val = float(loss.item())
-                        except Exception:
-                            _safe_print("[LOSS] non-scalar loss encountered -> skipping batch")
-                            continue
-                        if not np.isfinite(loss_val):
-                            _safe_print("[LOSS] non-finite loss -> skipping batch")
-                            continue
-                        opt.zero_grad(); loss.backward()
-                        if SMART_TRAIN and GRAD_CLIP > 0:
-                            torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
-                        opt.step(); total_loss += float(loss_val)
+                            state=torch.load(ckpt_cb.best_model_path, map_location="cpu")["state_dict"]
+                            cleaned={k.replace("model.",""):v for k,v in state.items() if k.startswith("model.")}
+                            model.load_state_dict(cleaned, strict=False)
+                        except Exception as _e:
+                            _safe_print(f"[CKPT load skip] {_e}")
+                    _check_stop(stop_event,f"after PL train {model_type} (w={window})")
+                else:
+                    model=base
+                    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+                    crit = FocalLoss(gamma=FOCAL_GAMMA, weight=w)
+                    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                        opt, mode="max", factor=0.5, patience=2, min_lr=1e-5
+                    ) if SMART_TRAIN else None
 
-                    # ---- 평가 (val_f1)
-                    model.eval(); preds=[]; lbls=[]
-                    with torch.no_grad():
-                        for xb,yb in val_loader:
+                    patience=EARLY_STOP_PATIENCE
+                    min_delta=EARLY_STOP_MIN_DELTA
+                    best_f1=-1.0; best_state=None; bad=0; total_loss=0.0
+                    last_log_ts=time.time()
+
+                    for ep in range(local_epochs):
+                        _check_stop(stop_event,f"epoch {ep} pre (w={window})")
+                        _progress(f"{model_type}:ep{ep}:start:w{window}")
+                        model.train()
+                        for bi,(xb,yb) in enumerate(train_loader):
+                            if bi % 16 == 0:
+                                _check_stop(stop_event,f"epoch {ep} batch {bi} (w={window})")
+                                _progress(f"{model_type}:ep{ep}:b{bi}:w{window}")
                             xb = xb.to(DEVICE, dtype=torch.float32)
-                            logits = model(xb)
+                            yb = yb.to(DEVICE, dtype=torch.long)
+                            logits=model(xb)
+                            loss=crit(logits,yb)
+                            try:
+                                loss_val = float(loss.item())
+                            except Exception:
+                                _safe_print("[LOSS] non-scalar -> skip batch"); continue
+                            if not np.isfinite(loss_val):
+                                _safe_print("[LOSS] non-finite -> skip batch"); continue
+                            opt.zero_grad(); loss.backward()
+                            if SMART_TRAIN and GRAD_CLIP > 0:
+                                torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+                            opt.step(); total_loss += float(loss_val)
 
-                            if COST_SENSITIVE_ARGMAX:
-                                # cost-sensitive argmax: 로짓을 학습 분포 priors로 보정
-                                adj = logits - (CS_ARG_BETA * torch.log(priors_t.unsqueeze(0)))
-                                p = torch.argmax(adj, dim=1).cpu().numpy()
-                            else:
-                                p = torch.argmax(logits, dim=1).cpu().numpy()
+                        # ---- 평가 (val_f1)
+                        model.eval(); preds=[]; lbls=[]
+                        with torch.no_grad():
+                            for xb,yb in val_loader:
+                                xb = xb.to(DEVICE, dtype=torch.float32)
+                                logits = model(xb)
+                                if COST_SENSITIVE_ARGMAX:
+                                    adj = logits - (CS_ARG_BETA * torch.log(priors_t.unsqueeze(0)))
+                                    p = torch.argmax(adj, dim=1).cpu().numpy()
+                                else:
+                                    p = torch.argmax(logits, dim=1).cpu().numpy()
+                                preds.extend(p); lbls.extend(yb.numpy())
+                        try:
+                            cur_f1=float(f1_score(lbls,preds,average="macro"))
+                        except Exception:
+                            cur_f1=0.0
 
-                            preds.extend(p); lbls.extend(yb.numpy())
-                    try:
-                        cur_f1=float(f1_score(lbls,preds,average="macro"))
-                    except Exception:
-                        cur_f1=0.0
+                        if scheduler is not None:
+                            try: scheduler.step(cur_f1)
+                            except Exception: pass
 
-                    if scheduler is not None:
-                        try: scheduler.step(cur_f1)
+                        improved = (cur_f1 - best_f1) > min_delta if best_f1 >= 0 else True
+                        if improved:
+                            best_f1 = cur_f1
+                            try:
+                                best_state = {k:v.detach().cpu().clone() for k,v in model.state_dict().items()}
+                            except Exception:
+                                best_state = None
+                            bad = 0
+                        else:
+                            bad += 1
+                        if time.time()-last_log_ts>2:
+                            _safe_print(f"   ↳ w{window} {model_type} ep{ep+1}/{local_epochs} val_f1={cur_f1:.4f} best={best_f1:.4f} bad={bad}/{patience} loss_sum={total_loss:.4f}")
+                            last_log_ts=time.time()
+                        _progress(f"{model_type}:ep{ep}:end:w{window}")
+                        if bad >= patience:
+                            _safe_print(f"🛑 early stop @ ep{ep+1} (best_f1={best_f1:.4f}, min_delta={min_delta}, w={window})")
+                            break
+
+                    if best_state is not None:
+                        try: model.load_state_dict(best_state)
                         except Exception: pass
 
-                    # early stop/bookkeep (3번 수정: min_delta 반영)
-                    improved = (cur_f1 - best_f1) > min_delta if best_f1 >= 0 else True
-                    if improved:
-                        best_f1 = cur_f1
-                        try:
-                            best_state = {k:v.detach().cpu().clone() for k,v in model.state_dict().items()}
-                        except Exception:
-                            best_state = None
-                        bad = 0
-                    else:
-                        bad += 1
-                    if time.time()-last_log_ts>2:
-                        _safe_print(f"   ↳ {model_type} ep{ep+1}/{max_epochs} val_f1={cur_f1:.4f} best={best_f1:.4f} bad={bad}/{patience} loss_sum={total_loss:.4f}")
-                        last_log_ts=time.time()
-                    _progress(f"{model_type}:ep{ep}:end}")
-                    if bad >= patience:
-                        _safe_print(f"🛑 early stop @ ep{ep+1} (best_f1={best_f1:.4f}, min_delta={min_delta})")
-                        break
+                # ---- 최종 검증/저장
+                _progress(f"eval:{model_type}:w{window}")
+                model.eval(); preds=[]; lbls=[]; val_loss_sum=0.0; n_val=0
+                crit_eval = nn.CrossEntropyLoss(weight=w)
+                with torch.no_grad():
+                    for bi,(xb,yb) in enumerate(val_loader):
+                        if bi % 32 == 0: _check_stop(stop_event,f"val batch {bi} (w={window})"); _progress(f"val_b{bi}:w{window}")
+                        xb = xb.to(DEVICE, dtype=torch.float32)
+                        logits=model(xb)
+                        loss=crit_eval(logits, yb.to(DEVICE, dtype=torch.long))
+                        try: loss_val = float(loss.item())
+                        except Exception: loss_val = 0.0
+                        val_loss_sum += float(loss_val) * xb.size(0); n_val += xb.size(0)
 
-                if best_state is not None:
-                    try: model.load_state_dict(best_state)
-                    except Exception: pass
+                        if COST_SENSITIVE_ARGMAX:
+                            adj = logits - (CS_ARG_BETA * torch.log(priors_t.unsqueeze(0)))
+                            p=torch.argmax(adj,dim=1).cpu().numpy()
+                        else:
+                            p=torch.argmax(logits,dim=1).cpu().numpy()
+                        preds.extend(p); lbls.extend(yb.numpy())
+                try:
+                    acc=float(accuracy_score(lbls,preds)); f1_val=float(f1_score(lbls,preds,average="macro"))
+                except Exception:
+                    acc=0.0; f1_val=0.0
+                val_loss = float(val_loss_sum / max(1,n_val))
 
-            # ---- 최종 검증
-            _progress(f"eval:{model_type}")
-            model.eval(); preds=[]; lbls=[]; val_loss_sum=0.0; n_val=0
-            crit_eval = nn.CrossEntropyLoss(weight=w)
-            with torch.no_grad():
-                for bi,(xb,yb) in enumerate(val_loader):
-                    if bi % 32 == 0: _check_stop(stop_event,f"val batch {bi}"); _progress(f"val_b{bi}")
-                    xb = xb.to(DEVICE, dtype=torch.float32)
-                    logits=model(xb)
-                    loss=crit_eval(logits, yb.to(DEVICE, dtype=torch.long))
-                    try:
-                        loss_val = float(loss.item())
-                    except Exception:
-                        loss_val = 0.0
-                    val_loss_sum += float(loss_val) * xb.size(0); n_val += xb.size(0)
+                min_gate = max(_min_f1_for(strategy), float(get_QUALITY().get("VAL_F1_MIN", 0.10)))
 
-                    if COST_SENSITIVE_ARGMAX:
-                        adj = logits - (CS_ARG_BETA * torch.log(priors_t.unsqueeze(0)))
-                        p=torch.argmax(adj,dim=1).cpu().numpy()
-                    else:
-                        p=torch.argmax(logits,dim=1).cpu().numpy()
-                    preds.extend(p); lbls.extend(yb.numpy())
-            try:
-                acc=float(accuracy_score(lbls,preds)); f1_val=float(f1_score(lbls,preds,average="macro"))
-            except Exception:
-                acc=0.0; f1_val=0.0
-            val_loss = float(val_loss_sum / max(1,n_val))
+                # 파일명에 window 표시 (⑤)
+                stem=os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_w{int(window)}_group{int(group_id) if group_id is not None else 0}_cls{int(len(class_ranges))}")
+                meta={
+                    "symbol":symbol,"strategy":strategy,"model":model_type,
+                    "group_id":int(group_id) if group_id is not None else 0,
+                    "num_classes":int(len(class_ranges)),
+                    "class_ranges": [[float(lo), float(hi)] for (lo,hi) in class_ranges],
+                    "input_size":int(feat_dim),
+                    "metrics":{"val_acc":acc,"val_f1":f1_val,"val_loss":val_loss},
+                    "timestamp":now_kst().isoformat(),
+                    "model_name":os.path.basename(stem)+".ptz",
+                    "window":int(window),
+                    "recent_cap":int(len(features_only)),
+                    "engine":"lightning" if _HAS_LIGHTNING else "manual",
+                    "data_flags":{"rows":int(len(df)),"limit":int(_limit),"min":int(_min_required),"augment_needed":bool(augment_needed),"enough_for_training":bool(enough_for_training)},
+                    "train_loss_sum":float(total_loss),
+                    "min_f1_gate": float(min_gate),
+                    "cs_argmax":{"enabled":bool(COST_SENSITIVE_ARGMAX), "beta": float(CS_ARG_BETA)}
+                }
 
-            min_gate = max(_min_f1_for(strategy), float(get_QUALITY().get("VAL_F1_MIN", 0.10)))
+                wpath,mpath=_save_model_and_meta(model, stem+".pt", meta)
+                _archive_old_checkpoints(symbol,strategy,model_type,keep_n=1)
+                _emit_aliases(wpath,mpath,symbol,strategy,model_type,window=window)
+                _disk_barrier([wpath, mpath, MODEL_DIR, os.path.join(MODEL_DIR, symbol), os.path.join(MODEL_DIR, symbol, strategy)])
 
-            stem=os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_group{int(group_id) if group_id is not None else 0}_cls{int(len(class_ranges))}")
-            meta={
-                "symbol":symbol,"strategy":strategy,"model":model_type,
-                "group_id":int(group_id) if group_id is not None else 0,
-                "num_classes":int(len(class_ranges)),
-                "class_ranges": [[float(lo), float(hi)] for (lo,hi) in class_ranges],
-                "input_size":int(feat_dim),
-                "metrics":{"val_acc":acc,"val_f1":f1_val,"val_loss":val_loss},
-                "timestamp":now_kst().isoformat(),
-                "model_name":os.path.basename(stem)+".ptz",
-                "window":int(window),
-                "recent_cap":int(len(features_only)),
-                "engine":"lightning" if _HAS_LIGHTNING else "manual",
-                "data_flags":{"rows":int(len(df)),"limit":int(_limit),"min":int(_min_required),"augment_needed":bool(augment_needed),"enough_for_training":bool(enough_for_training)},
-                "train_loss_sum":float(total_loss),
-                "min_f1_gate": float(min_gate),
-                "cs_argmax":{"enabled":bool(COST_SENSITIVE_ARGMAX), "beta": float(CS_ARG_BETA)}
-            }
+                # 캐시 제거
+                try:
+                    DataCacheManager.delete(f"{symbol}-{strategy}")
+                    DataCacheManager.delete(f"{symbol}-{strategy}-features")
+                    _safe_print(f"[CACHE] deleted {symbol}-{strategy} and {symbol}-{strategy}-features")
+                except Exception as e:
+                    _safe_print(f"[CACHE] delete fail → {e}")
 
-            wpath,mpath=_save_model_and_meta(model, stem+".pt", meta)
-            _archive_old_checkpoints(symbol,strategy,model_type,keep_n=1)
-            _emit_aliases(wpath,mpath,symbol,strategy,model_type)
-            _disk_barrier([wpath, mpath, MODEL_DIR, os.path.join(MODEL_DIR, symbol), os.path.join(MODEL_DIR, symbol, strategy)])
+                logger.log_training_result(
+                    symbol, strategy, model=os.path.basename(wpath), accuracy=acc, f1=f1_val, loss=val_loss,
+                    note=(f"train_one_model(window={window}, cap={len(features_only)}, engine={'lightning' if _HAS_LIGHTNING else 'manual'}, "
+                          f"data_flags={{rows:{len(df)},limit:{_limit},min:{_min_required},aug:{int(augment_needed)},enough:{int(enough_for_training)}}}, "
+                          f"epochs={local_epochs}, es_patience={EARLY_STOP_PATIENCE}, es_delta={EARLY_STOP_MIN_DELTA})"),
+                    source_exchange="BYBIT", status="success"
+                )
 
-            # 캐시 제거: kline / features 캐시를 강제 무효화
-            try:
-                DataCacheManager.delete(f"{symbol}-{strategy}")
-                DataCacheManager.delete(f"{symbol}-{strategy}-features")
-                _safe_print(f"[CACHE] deleted {symbol}-{strategy} and {symbol}-{strategy}-features")
-            except Exception as e:
-                _safe_print(f"[CACHE] delete fail → {e}")
+                passed = bool(f1_val >= min_gate)
+                meta.update({"passed": int(passed)})
+                win_rec = {
+                    "window": int(window),
+                    "type": model_type,
+                    "acc": acc, "f1": f1_val, "val_loss": val_loss,
+                    "loss_sum": float(total_loss),
+                    "pt": wpath, "meta": mpath, "passed": passed
+                }
+                window_results.append(win_rec)
+                res["models"].append(win_rec)
 
-            logger.log_training_result(
-                symbol, strategy, model=os.path.basename(wpath), accuracy=acc, f1=f1_val, loss=val_loss,
-                note=(f"train_one_model(window={window}, cap={len(features_only)}, engine={'lightning' if _HAS_LIGHTNING else 'manual'}, "
-                      f"data_flags={{rows:{len(df)},limit:{_limit},min:{_min_required},aug:{int(augment_needed)},enough:{int(enough_for_training)}}}, "
-                      f"epochs={max_epochs}, es_patience={EARLY_STOP_PATIENCE}, es_delta={EARLY_STOP_MIN_DELTA})"),
-                source_exchange="BYBIT", status="success"
-            )
+                _safe_print(f"🟩 TRAIN done [w={window} {model_type}] acc={acc:.4f} f1={f1_val:.4f} val_loss={val_loss:.5f} → {os.path.basename(wpath)} (passed={int(passed)} gate={min_gate:.2f})")
 
-            passed = bool(f1_val >= min_gate)
-            meta.update({"passed": int(passed)})
-            res["models"].append({
-                "type":model_type,"acc":acc,"f1":f1_val,"val_loss":val_loss,
-                "loss_sum":float(total_loss),"pt":wpath,"meta":mpath,"passed":passed
-            })
-            _safe_print(f"🟩 TRAIN done [{model_type}] acc={acc:.4f} f1={f1_val:.4f} val_loss={val_loss:.5f} → {os.path.basename(wpath)} (passed={int(passed)} gate={min_gate:.2f})")
+                if torch.cuda.is_available(): torch.cuda.empty_cache()
 
-            if torch.cuda.is_available(): torch.cuda.empty_cache()
+            # 윈도우별 결과 요약
+            res["windows"].append({"window": int(window), "results": window_results})
 
+        # 전체 윈도우 중 하나라도 통과하면 ok
         res["ok"] = any(m.get("passed") for m in res.get("models", []))
-        _safe_print(f"[RESULT] {symbol}-{strategy}-g{group_id} ok={res['ok']}")
+        _safe_print(f"[RESULT] {symbol}-{strategy}-g{group_id} ok={res['ok']} (windows={ [w['window'] for w in res['windows']] })")
         _progress("train_one_model:end")
         return res
+
     except _ControlledStop:
         _safe_print(f"[STOP] train_one_model canceled: {symbol}-{strategy}-g{group_id}")
         return res
     except Exception as e:
         _safe_print(f"[EXC] train_one_model {symbol}-{strategy}-g{group_id} → {e}\n{traceback.format_exc()}")
         _log_fail(symbol,strategy,str(e)); return res
+
 
 def _prune_caches_and_gc():
     try:
@@ -1069,6 +1109,7 @@ def _prune_caches_and_gc():
         gc.collect()
     except: pass
 
+
 def _rotate_groups_starting_with(groups, anchor_symbol="BTCUSDT"):
     norm=[list(g) for g in groups]; anchor=None
     for i,g in enumerate(norm):
@@ -1077,6 +1118,7 @@ def _rotate_groups_starting_with(groups, anchor_symbol="BTCUSDT"):
     if norm and anchor_symbol in norm[0]: norm[0]=[anchor_symbol]+[s for s in norm[0] if s!=anchor_symbol]
     return norm
 
+
 def _is_cold_start()->bool:
     try:
         any_flat = bool(glob.glob(os.path.join(MODEL_DIR, "*.ptz")))
@@ -1084,6 +1126,7 @@ def _is_cold_start()->bool:
         return not (any_flat or any_tree)
     except Exception:
         return True
+
 
 # === 전역 예측 락 유틸 ===
 _PREDICT_LOCK_FILE = "/persistent/run/predict_running.lock"
@@ -1112,11 +1155,11 @@ def _wait_predict_lock_clear(timeout_sec:int=20, stale_sec:int=120, poll:float=0
             break
         time.sleep(max(0.05, float(poll)))
     if _predict_lock_exists():
-        _clear_predict_lock(force=True, stale_sec=stale_sec, tag=f"{tag}|final")
+        _clear_predict_lock(force=True, stale_sec=stale_sec, tag=f"{tag}|final}")
     return not _predict_lock_exists()
 
-_PREDICT_PARTIAL_OK = os.getenv("PREDICT_PARTIAL_OK", "1") == "1"
 
+_PREDICT_PARTIAL_OK = os.getenv("PREDICT_PARTIAL_OK", "1") == "1"
 _PREDICT_TIMEOUT_SEC=float(os.getenv("PREDICT_TIMEOUT_SEC","30"))
 def _safe_predict_sync(predict_fn,symbol,strategy,source,model_type=None, stop_event: Optional[threading.Event] = None):
     try:
@@ -1128,6 +1171,7 @@ def _safe_predict_sync(predict_fn,symbol,strategy,source,model_type=None, stop_e
         _safe_print(f"[PREDICT FAIL] {symbol}-{strategy}: {e}")
         return False
 
+
 def _safe_predict_with_timeout(predict_fn, *, symbol, strategy, source="그룹직후", model_type=None, timeout=None):
     t = float(timeout or _PREDICT_TIMEOUT_SEC)
     status, _ = _run_with_timeout(
@@ -1136,6 +1180,7 @@ def _safe_predict_with_timeout(predict_fn, *, symbol, strategy, source="그룹�
         hb_tag="predict:wait", hb_interval=2.0
     )
     return status == "ok"
+
 
 def _run_bg_if_not_stopped(name:str, fn, stop_event: Optional[threading.Event]):
     if stop_event is not None and stop_event.is_set():
@@ -1152,6 +1197,7 @@ def _run_bg_if_not_stopped(name:str, fn, stop_event: Optional[threading.Event]):
     th.start()
     _safe_print(f"[BG:{name}] started (daemon)")
 
+
 # =========================
 # 🔒 엄격 순서/완결 강제 설정
 # =========================
@@ -1159,6 +1205,7 @@ _ENFORCE_FULL_STRATEGY = os.getenv("ENFORCE_FULL_STRATEGY","1")=="1"
 _STRICT_HALT_ON_INCOMPLETE = os.getenv("STRICT_HALT_ON_INCOMPLETE","1")=="1"
 _SYMBOL_RETRY_LIMIT = int(os.getenv("SYMBOL_RETRY_LIMIT","1"))
 _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = os.getenv("REQUIRE_ONE_PER_GROUP","1")=="1"
+
 
 def _train_full_symbol(symbol:str, stop_event: Optional[threading.Event] = None) -> Tuple[bool, Dict[str, Any]]:
     strategies=["단기","중기","장기"]
@@ -1236,6 +1283,7 @@ def _train_full_symbol(symbol:str, stop_event: Optional[threading.Event] = None)
 
     return symbol_complete, detail
 
+
 def train_models(symbol_list, stop_event: Optional[threading.Event] = None, ignore_should: bool = False):
     completed_symbols=[]; partial_symbols=[]
     env_force = (os.getenv("TRAIN_FORCE_IGNORE_SHOULD","0") == "1")
@@ -1287,6 +1335,7 @@ def train_models(symbol_list, stop_event: Optional[threading.Event] = None, igno
 
     return completed_symbols, partial_symbols
 
+
 # === [SMOKE] 후보 찾기 & 스모크 예측 ===
 def _scan_symbols_from_model_dir() -> List[str]:
     syms=set()
@@ -1301,6 +1350,7 @@ def _scan_symbols_from_model_dir() -> List[str]:
     except Exception: pass
     return sorted(syms)
 
+
 def _pick_smoke_symbol(candidates: List[str]) -> Optional[str]:
     cand = [s for s in candidates if _has_any_model_for_symbol(s)]
     if cand: return sorted(cand)[0]
@@ -1308,12 +1358,14 @@ def _pick_smoke_symbol(candidates: List[str]) -> Optional[str]:
     pool=[s for s in pool if _has_any_model_for_symbol(s)]
     return pool[0] if pool else None
 
+
 def _run_smoke_predict(predict_fn, symbol: str):
     ok_any=False
     for strat in ["단기","중기","장기"]:
         if _has_model_for(symbol, strat):
             ok_any |= _safe_predict_sync(predict_fn, symbol, strat, source="그룹직후(스모크)")
     return ok_any
+
 
 # === 그룹 예측 독점 플래그 ===
 _RUN_DIR = "/persistent/run"
@@ -1338,6 +1390,7 @@ def _group_active_off():
     except Exception as e:
         _safe_print(f"[GROUP_ACTIVE off err] {e}")
 
+
 # === 그룹 루프 ===
 def _get_group_stale_sec() -> int:
     v1 = os.getenv("PREDICT_LOCK_STALE_GROUP_SEC")
@@ -1349,6 +1402,7 @@ def _get_group_stale_sec() -> int:
         try: return max(3, int(v2))
         except: pass
     return 600
+
 
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Event] = None):
     threading.Thread(target=_watchdog_loop, args=(stop_event,), daemon=True).start()
@@ -1526,6 +1580,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
         _safe_print("💓 heartbeat: train loop alive")
         time.sleep(max(1, int(os.getenv("TRAIN_LOOP_IDLE_SEC","3"))))
 
+
 _TRAIN_LOOP_THREAD: Optional[threading.Thread] = None
 _TRAIN_LOOP_STOP: Optional[threading.Event] = None
 _TRAIN_LOOP_LOCK=threading.Lock()
@@ -1544,6 +1599,7 @@ def start_train_loop(force_restart:bool=False, sleep_sec:int=0):
         _TRAIN_LOOP_THREAD=threading.Thread(target=_runner,daemon=True); _TRAIN_LOOP_THREAD.start()
         _safe_print("✅ train loop started"); return True
 
+
 def stop_train_loop(timeout:int|float|None=30):
     global _TRAIN_LOOP_THREAD,_TRAIN_LOOP_STOP
     with _TRAIN_LOOP_LOCK:
@@ -1557,15 +1613,18 @@ def stop_train_loop(timeout:int|float|None=30):
         _TRAIN_LOOP_THREAD=None; _TRAIN_LOOP_STOP=None
         _safe_print("✅ loop stopped"); return True
 
+
 def request_stop()->bool:
     global _TRAIN_LOOP_STOP
     with _TRAIN_LOOP_LOCK:
         if _TRAIN_LOOP_STOP is None: return True
         _TRAIN_LOOP_STOP.set(); return True
 
+
 def is_loop_running()->bool:
     with _TRAIN_LOOP_LOCK:
         return bool(_TRAIN_LOOP_THREAD is not None and _TRAIN_LOOP_THREAD.is_alive())
+
 
 if __name__=="__main__":
     try: start_train_loop(force_restart=True, sleep_sec=0)
