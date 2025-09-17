@@ -1,4 +1,6 @@
 # evo_meta_learner.py (PATCHED: input/DataFrame fallback + torch safety + save/load robustness + predict input shape guard)
+# (2025-09-17a) — [규칙 보강] EVO_META_AGG(mean|varpen|mean_var) + EVO_META_VAR_GAMMA
+#                 앙상블 확률 스택을 평균/분산가중으로 단일 벡터로 합성하는 유틸 추가
 import os
 import json
 import ast
@@ -20,6 +22,10 @@ except Exception:
 
 MODEL_PATH = "/persistent/models/evo_meta_learner.pt"
 META_PATH  = MODEL_PATH.replace(".pt", ".meta.json")
+
+# ── 앙상블 합성 규칙 환경변수 (predict.py와 일관)
+EVO_META_AGG = os.getenv("EVO_META_AGG", "mean_var").lower()   # mean | varpen | mean_var
+EVO_META_VAR_GAMMA = float(os.getenv("EVO_META_VAR_GAMMA", "1.0"))
 
 class EvoMetaModel(nn.Module if nn is not None else object):
     def __init__(self, input_size, hidden_size=64, output_size=3):
@@ -61,6 +67,39 @@ def _df_from_path_or_df(path_or_df):
             except Exception:
                 return None
     return None
+
+# ── (NEW) 앙상블 확률 합성 유틸: (W, C) -> (C,)
+def aggregate_probs_for_meta(probs_stack: np.ndarray,
+                             mode: str = None,
+                             gamma: float = None) -> np.ndarray:
+    """
+    probs_stack: shape (W, C) — 윈도우/모델 등에서 나온 C-클래스 확률 스택
+    mode: "mean" | "varpen" | "mean_var" (기본은 EVO_META_AGG)
+    gamma: 분산 패널티 강도(기본 EVO_META_VAR_GAMMA)
+    반환: 정규화된 (C,) 확률 벡터
+    """
+    if probs_stack is None:
+        return None
+    ps = np.asarray(probs_stack, dtype=float)
+    if ps.ndim != 2 or ps.shape[0] == 0 or ps.shape[1] == 0:
+        return None
+    mode = (mode or EVO_META_AGG).lower()
+    gamma = EVO_META_VAR_GAMMA if gamma is None else float(gamma)
+    eps = 1e-12
+
+    mean = ps.mean(axis=0)
+    if mode == "mean":
+        out = mean
+    else:
+        var = ps.var(axis=0)
+        penal = mean / (1.0 + gamma * var)
+        if mode == "varpen":
+            out = penal
+        else:  # "mean_var" (혼합)
+            out = 0.5 * mean + 0.5 * penal
+
+    out = out / (out.sum() + eps)
+    return out.astype(float)
 
 def prepare_evo_meta_dataset(path_or_df="/persistent/wrong_predictions.csv", min_samples=50):
     """
@@ -159,7 +198,9 @@ def train_evo_meta(X, y, input_size, output_size=3, epochs=10, batch_size=32, lr
         "task": str(task),               # "strategy" 또는 "class"
         "input_size": int(input_size),
         "output_size": int(output_size),
-        "version": 1
+        "version": 1,
+        "agg_mode": EVO_META_AGG,
+        "agg_gamma": EVO_META_VAR_GAMMA,
     }
     try:
         with open(META_PATH, "w", encoding="utf-8") as f:
@@ -199,10 +240,12 @@ def _load_meta():
             pass
     return meta
 
-def predict_evo_meta(X_new, input_size):
+def predict_evo_meta(X_new, input_size, probs_stack: np.ndarray = None):
     """
     predict.py에서 불러 쓰는 진입점.
     현재 저장된 메타가 task!='class'면 '클래스 선택' 용도가 아니므로 None 반환(안전 가드).
+    probs_stack(선택): (W, C) 앙상블 확률 스택. 제공되면 합성 규칙으로 대표 벡터를 만들고
+                       로깅/디버깅 용도로만 사용(모델 입력은 X_new 그대로 — 호환성 유지).
     """
     if torch is None:
         print("[❌ evo_meta_learner] torch 미설치")
@@ -217,6 +260,19 @@ def predict_evo_meta(X_new, input_size):
     if task != "class":
         print(f"[ℹ️ evo_meta_learner] task={task} → class 예측에 사용하지 않음")
         return None
+
+    # (선택) 앙상블 확률 합성 규칙 적용(디버깅 로그용)
+    if probs_stack is not None:
+        vec = aggregate_probs_for_meta(probs_stack, mode=meta.get("agg_mode", EVO_META_AGG),
+                                       gamma=float(meta.get("agg_gamma", EVO_META_VAR_GAMMA)))
+        if vec is not None:
+            try:
+                top = np.argsort(vec)[::-1][:3].tolist()
+                print(f"[evo_meta_agg] mode={meta.get('agg_mode', EVO_META_AGG)}, "
+                      f"gamma={meta.get('agg_gamma', EVO_META_VAR_GAMMA)}, top3={top}, "
+                      f"max={float(vec.max()):.3f}")
+            except Exception:
+                pass
 
     out_size = int(meta.get("output_size", 3))
     model = EvoMetaModel(input_size, output_size=out_size)
