@@ -1,4 +1,4 @@
-# === window_optimizer.py (CV macro-F1 scoring, variance-penalized, time-guarded) ===
+# === window_optimizer.py (KST, '< t1', labels.py와 완전 일치) ===
 import os
 import time
 import numpy as np
@@ -30,9 +30,6 @@ try:
 except Exception:
     _HAS_TORCH = False
 
-# ──────────────────────────────────────────────────────────────
-# 결정적 시드(동일 조건 재현)
-# ──────────────────────────────────────────────────────────────
 def _set_global_seed():
     try:
         s = int(os.getenv("GLOBAL_SEED", "20240101"))
@@ -50,94 +47,75 @@ def _set_global_seed():
                 pass
     except Exception:
         pass
-
 _set_global_seed()
 
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 
-# 최근 구간만 사용(속도 최적화)
-_MAX_ROWS_FOR_SCORING = int(os.getenv("WINOPT_MAX_ROWS", "800"))  # 600~1000 권장
-_MIN_SAMPLES_PER_CLASS = 2   # CV 안정성 확보용
+_MAX_ROWS_FOR_SCORING = int(os.getenv("WINOPT_MAX_ROWS", "800"))
+_MIN_SAMPLES_PER_CLASS = 2
 
-# 점수 가중치(분산 패널티)
-_VAR_PENALTY = float(os.getenv("WINOPT_VAR_PENALTY", "0.05"))  # 0이면 패널티 없음
+_VAR_PENALTY = float(os.getenv("WINOPT_VAR_PENALTY", "0.05"))
 
-# 시간 가드
-_TIME_BUDGET_SEC = float(os.getenv("WINOPT_TIMEOUT_SEC", "12"))  # 윈도우 탐색 전체 제한
+_TIME_BUDGET_SEC = float(os.getenv("WINOPT_TIMEOUT_SEC", "12"))
 _FIT_EPOCHS = int(os.getenv("WINOPT_EPOCHS", "3"))
 _CV_FOLDS = int(os.getenv("WINOPT_FOLDS", "3"))
 
-# ──────────────────────────────────────────────────────────────
-# 내부 유틸: 전략별 평가 구간(시간)
-# ──────────────────────────────────────────────────────────────
 def _strategy_horizon_hours(strategy: str) -> int:
     return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
 
-# ──────────────────────────────────────────────────────────────
-# 내부 유틸: 미래 수익률(look-ahead) 계산 (최근 구간만)
-# ──────────────────────────────────────────────────────────────
+# ── (1) 라벨 산식과 완전 동일: KST + 종가 기준 + 창경계 '< t1' ──
 def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
     if df is None or df.empty or "timestamp" not in df.columns:
         return np.zeros(len(df) if df is not None else 0, dtype=np.float32)
 
-    # 최근 구간만 사용
     df = df.tail(_MAX_ROWS_FOR_SCORING).copy()
 
     ts = pd.to_datetime(df["timestamp"], errors="coerce")
     if getattr(ts.dt, "tz", None) is None:
-        ts = ts.dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+        ts = ts.dt.tz_localize("Asia/Seoul")
     else:
         ts = ts.dt.tz_convert("Asia/Seoul")
 
-    close = pd.to_numeric(df["close"], errors="coerce").fillna(method="ffill").fillna(method="bfill").astype(float).values
-    high  = pd.to_numeric(df["high"] if "high" in df.columns else df["close"], errors="coerce").fillna(method="ffill").fillna(method="bfill").astype(float).values
+    close = pd.to_numeric(df["close"], errors="coerce").ffill().bfill().astype(float).values
 
     out = np.zeros(len(df), dtype=np.float32)
-    horizon = pd.Timedelta(hours=horizon_hours)
+    H = pd.Timedelta(hours=int(horizon_hours))
 
-    j_start = 0
-    for i in range(len(df)):
-        t0 = ts.iloc[i]
-        t1 = t0 + horizon
-        j = max(j_start, i)
-        max_h = high[i]
-        while j < len(df) and ts.iloc[j] <= t1:
-            if high[j] > max_h:
-                max_h = high[j]
+    j = 0
+    n = len(df)
+    for i in range(n):
+        t1 = ts.iloc[i] + H
+        j = max(j, i)
+        while j < n and ts.iloc[j] < t1:  # ✅ '< t1' (labels.py와 동일)
             j += 1
-        j_start = max(j_start, i)
-        base = close[i] if close[i] > 0 else (close[i] + 1e-6)
-        out[i] = float((max_h - base) / (base + 1e-12))
+        tgt_idx = max(i, min(j - 1, n - 1))  # 마지막 '< t1'
+        ref = close[i] if close[i] != 0 else (close[i] + 1e-6)
+        tgt = close[tgt_idx]
+        out[i] = float((tgt - ref) / (ref + 1e-12))
     return out.astype(np.float32)
 
-# ──────────────────────────────────────────────────────────────
-# 내부 유틸: 미래 수익률 → 클래스 매핑
-# ──────────────────────────────────────────────────────────────
+# ── (2) 구간 매핑 규칙도 labels.py와 동일: [lo, hi), 마지막만 [lo, hi] ──
 def _label_from_future_returns(future_gains: np.ndarray, symbol: str, strategy: str, group_id=None) -> np.ndarray:
     class_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=group_id) or []
-    labels = []
-    lo0 = class_ranges[0][0] if class_ranges else 0.0
-    hiN = class_ranges[-1][1] if class_ranges else 0.0
-    for r in future_gains:
-        if not np.isfinite(r):
-            r = lo0
-        if r <= lo0:
-            labels.append(0)
-            continue
-        if r >= hiN:
-            labels.append(len(class_ranges) - 1 if class_ranges else 0)
-            continue
-        idx = 0
-        for i, (lo, hi) in enumerate(class_ranges):
-            if lo <= r <= hi:
-                idx = i
-                break
-        labels.append(idx)
-    return np.array(labels, dtype=np.int64)
+    if not class_ranges:
+        return np.zeros_like(future_gains, dtype=np.int64)
 
-# ──────────────────────────────────────────────────────────────
-# 시퀀스 데이터셋 구성 (윈도우별)
-# ──────────────────────────────────────────────────────────────
+    n = len(class_ranges)
+    labels = np.zeros(len(future_gains), dtype=np.int64)
+    for idx, g in enumerate(future_gains):
+        val = float(g) if np.isfinite(g) else class_ranges[0][0]
+        # 앞 구간들 [lo, hi)
+        found = False
+        for k, (lo, hi) in enumerate(class_ranges[:-1]):
+            if (val >= lo) and (val < hi):
+                labels[idx] = k
+                found = True
+                break
+        if not found:
+            lo_last, hi_last = class_ranges[-1]
+            labels[idx] = n - 1 if val >= lo_last else 0
+    return labels
+
 def _build_sequences(feat_scaled: np.ndarray, labels: np.ndarray, window: int):
     if len(feat_scaled) < window + 1:
         return None, None
@@ -146,34 +124,25 @@ def _build_sequences(feat_scaled: np.ndarray, labels: np.ndarray, window: int):
         X.append(feat_scaled[i:i + window])
         yi = i + window - 1
         y.append(labels[yi] if 0 <= yi < len(labels) else 0)
-    X = np.asarray(X, dtype=np.float32)
-    y = np.asarray(y, dtype=np.int64)
-    return X, y
+    return np.asarray(X, dtype=np.float32), np.asarray(y, dtype=np.int64)
 
-# ──────────────────────────────────────────────────────────────
-# 아주 가벼운 선형 분류기 (torch)로 CV macro-F1 계산
-# 실패 시 휴리스틱으로 폴백
-# ──────────────────────────────────────────────────────────────
 def _cv_macro_f1_score(X: np.ndarray, y: np.ndarray, n_classes: int, folds: int = 3, epochs: int = 3, time_guard=None) -> float:
     if (not _HAS_SKLEARN) or (not _HAS_TORCH):
         return np.nan
 
-    # 각 클래스 표본수 확인 (CV 안정성)
     uniq, cnts = np.unique(y, return_counts=True)
     if (len(uniq) < 2) or np.min(cnts) < _MIN_SAMPLES_PER_CLASS:
         return np.nan
 
-    # 입력을 평탄화하여 초경량 선형 분류
     Xf = X.reshape(len(X), -1)
     k = int(min(folds, np.max([2, np.min(cnts)])))
     if k < 2:
         return np.nan
+
     skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=int(os.getenv("GLOBAL_SEED", "20240101")))
     f1s = []
-
     for tr_idx, va_idx in skf.split(Xf, y):
         if time_guard and (time.time() - time_guard["t0"] > time_guard["budget"]):
-            # 시간 초과 시 즉시 중단 → 현재까지 평균 반환
             return float(np.mean(f1s)) if f1s else np.nan
 
         Xtr = torch.tensor(Xf[tr_idx], dtype=torch.float32)
@@ -202,50 +171,32 @@ def _cv_macro_f1_score(X: np.ndarray, y: np.ndarray, n_classes: int, folds: int 
 
     return float(np.mean(f1s)) if f1s else np.nan
 
-# ──────────────────────────────────────────────────────────────
-# 휴리스틱 백업 점수: 최근 피처 변동성 × 라벨 변화율
-# ──────────────────────────────────────────────────────────────
 def _heuristic_score(feat_scaled: np.ndarray, labels: np.ndarray, window: int) -> float:
     if len(feat_scaled) < window or len(labels) < window:
         return -np.inf
-    recent = feat_scaled[-window:]
-    # NaN/inf 방지
-    recent = np.nan_to_num(recent, nan=0.0, posinf=0.0, neginf=0.0)
+    recent = np.nan_to_num(feat_scaled[-window:], nan=0.0, posinf=0.0, neginf=0.0)
     recent_vol = float(np.std(recent, dtype=np.float32))
     diffs = np.diff(labels[-window:])
     label_change = float(np.mean(diffs != 0)) if len(diffs) > 0 else 0.0
     score = recent_vol * (1.0 + label_change)
-    if np.isnan(score) or np.isinf(score):
-        return -np.inf
-    return score
+    return -np.inf if (np.isnan(score) or np.isinf(score)) else score
 
-# ──────────────────────────────────────────────────────────────
-# tiebreak/penalty: 최근 분산 계산
-# ──────────────────────────────────────────────────────────────
 def _recent_variance(feat_scaled: np.ndarray, window: int) -> float:
     if len(feat_scaled) < window:
         return np.inf
-    recent = feat_scaled[-window:]
-    recent = np.nan_to_num(recent, nan=0.0, posinf=0.0, neginf=0.0)
+    recent = np.nan_to_num(feat_scaled[-window:], nan=0.0, posinf=0.0, neginf=0.0)
     return float(np.var(recent, dtype=np.float32))
 
 def _apply_variance_penalty(score: float, var: float) -> float:
-    # 점수에 분산 패널티 적용(낮은 분산 선호)
     if not np.isfinite(score):
         return -np.inf
     if _VAR_PENALTY <= 0:
         return score
     return float(score - _VAR_PENALTY * np.log1p(max(var, 0.0)))
 
-# ──────────────────────────────────────────────────────────────
-# 외부 API (train.py에서 사용하는 형태)
-# ──────────────────────────────────────────────────────────────
 def _normalize_features_df(feat: pd.DataFrame) -> np.ndarray:
-    """FEATURE_INPUT_SIZE에 맞춰 패딩/슬라이스, NaN/inf 정리."""
     features_only = feat.drop(columns=["timestamp", "strategy"], errors="ignore")
-    # NaN/inf 정리
     features_only = features_only.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    # 입력 차원 정규화
     if features_only.shape[1] < FEATURE_INPUT_SIZE:
         pad = FEATURE_INPUT_SIZE - features_only.shape[1]
         for i in range(pad):
@@ -255,17 +206,10 @@ def _normalize_features_df(feat: pd.DataFrame) -> np.ndarray:
     return features_only.to_numpy(dtype=np.float32)
 
 def find_best_window(symbol: str, strategy: str, window_list=None, group_id=None):
-    """
-    - 점수 = Stratified K-Fold macro-F1 평균 (초경량 선형분류) - 분산 패널티 적용
-    - 동률이면 최근 분산 낮은 쪽을 선택
-    - 실패/미지원/시간초과 시 휴리스틱(_heuristic_score)로 폴백
-    - 속도 최적화: 최근 최대 _MAX_ROWS_FOR_SCORING 행만 사용
-    """
     t0 = time.time()
     if not window_list:
         window_list = [20, 40, 60]
 
-    # 1) 데이터/피처 로드 (최근 구간만)
     df = get_kline_by_strategy(symbol, strategy)
     if df is None or df.empty:
         print(f"[find_best_window] 데이터 없음 → fallback={min(window_list)}")
@@ -276,11 +220,9 @@ def find_best_window(symbol: str, strategy: str, window_list=None, group_id=None
     if feat is None or feat.empty:
         print(f"[find_best_window] 피처 없음 → fallback={min(window_list)}")
         return int(min(window_list))
-
     feat = feat.tail(_MAX_ROWS_FOR_SCORING).copy()
     feat_scaled = _normalize_features_df(feat)
 
-    # 2) 미래 수익률 → 라벨
     gains = _future_returns_by_timestamp(df, _strategy_horizon_hours(strategy))
     labels = _label_from_future_returns(gains, symbol, strategy, group_id=group_id)
     if labels.size == 0:
@@ -288,16 +230,10 @@ def find_best_window(symbol: str, strategy: str, window_list=None, group_id=None
         return int(min(window_list))
     n_classes = int(np.max(labels)) + 1
 
-    # 3) 윈도우별 점수 계산 (CV macro-F1 → 휴리스틱 폴백)
-    best_w = int(min(window_list))
-    best_score = -np.inf
-    best_var = np.inf
-
+    best_w, best_score, best_var = int(min(window_list)), -np.inf, np.inf
     for w in sorted(set(int(x) for x in window_list)):
         if len(feat_scaled) < w + 5:
             continue
-
-        # 시간 초과 가드
         if time.time() - t0 > _TIME_BUDGET_SEC:
             print(f"[find_best_window] 시간 초과 → 조기종료, 현재 best={best_w}")
             break
@@ -317,7 +253,6 @@ def find_best_window(symbol: str, strategy: str, window_list=None, group_id=None
         var = _recent_variance(feat_scaled, w)
         adj = _apply_variance_penalty(score, var)
 
-        # 동률(±1e-6)이면 최근 분산 낮은 쪽 선택
         better = (adj > best_score + 1e-6) or (abs(adj - best_score) <= 1e-6 and var < best_var)
         if better:
             best_score, best_w, best_var = adj, w, var
@@ -330,11 +265,6 @@ def find_best_window(symbol: str, strategy: str, window_list=None, group_id=None
     return int(best_w)
 
 def find_best_windows(symbol: str, strategy: str, window_list=None, group_id=None):
-    """
-    앙상블용: 학습 가능한 윈도우만 추려서 (분산 패널티 적용) 상위 3개 반환.
-    - 실패/미지원/시간초과 시 휴리스틱으로 점수.
-    - 속도 최적화: 최근 최대 _MAX_ROWS_FOR_SCORING 행만 사용
-    """
     t0 = time.time()
     if not window_list:
         window_list = [20, 40, 60]
@@ -362,7 +292,6 @@ def find_best_windows(symbol: str, strategy: str, window_list=None, group_id=Non
     for w in sorted(set(int(x) for x in window_list)):
         if len(feat_scaled) < w + 5:
             continue
-
         if time.time() - t0 > _TIME_BUDGET_SEC:
             print(f"[find_best_windows] 시간 초과 → 조기종료")
             break
@@ -386,7 +315,6 @@ def find_best_windows(symbol: str, strategy: str, window_list=None, group_id=Non
     if not scored:
         return [int(min(window_list))]
 
-    # 1차: 조정점수 내림차순, 2차: 최근분산 오름차순
     scored.sort(key=lambda x: (-x[1], x[2]))
     top = [int(w) for w, _, _ in scored[:3]]
     print(f"[find_best_windows] {symbol}-{strategy} -> {top}")
