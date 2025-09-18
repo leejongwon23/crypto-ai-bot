@@ -1587,7 +1587,18 @@ def start_train_loop(force_restart:bool=False, sleep_sec:int=0):
         _TRAIN_LOOP_THREAD=threading.Thread(target=_runner,daemon=True); _TRAIN_LOOP_THREAD.start()
         _safe_print("✅ train loop started"); return True
 
-
+def stop_train_loop(timeout:int|float|None=30):
+    global _TRAIN_LOOP_THREAD,_TRAIN_LOOP_STOP
+    with _TRAIN_LOOP_LOCK:
+        if _TRAIN_LOOP_THREAD is None or not _TRAIN_LOOP_THREAD.is_alive():
+            _safe_print("ℹ️ no loop running"); return True
+        if _TRAIN_LOOP_STOP is None:
+            _safe_print("⚠️ no stop event"); return False
+        _TRAIN_LOOP_STOP.set(); _TRAIN_LOOP_THREAD.join(timeout=timeout)
+        if _TRAIN_LOOP_THREAD.is_alive():
+            _safe_print("⚠️ stop timeout"); return False
+        _TRAIN_LOOP_THREAD=None; _TRAIN_LOOP_STOP=None
+        _safe_print("✅ loop stopped"); return True
 
 def request_stop()->bool:
     global _TRAIN_LOOP_STOP
