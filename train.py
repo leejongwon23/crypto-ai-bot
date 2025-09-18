@@ -1097,7 +1097,6 @@ def _prune_caches_and_gc():
         gc.collect()
     except: pass
 
-
 def _rotate_groups_starting_with(groups, anchor_symbol="BTCUSDT"):
     norm=[list(g) for g in groups]; anchor=None
     for i,g in enumerate(norm):
