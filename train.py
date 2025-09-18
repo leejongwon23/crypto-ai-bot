@@ -1129,7 +1129,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
         _safe_print(f"[EXC] train_one_model {symbol}-{strategy}-g{group_id} → {e}\n{traceback.format_exc()}")
         _log_fail(symbol,strategy,str(e)); return res
 
-
 def _prune_caches_and_gc():
     try:
         from cache import CacheManager as CM
