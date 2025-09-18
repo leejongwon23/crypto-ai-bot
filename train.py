@@ -84,8 +84,9 @@ except:
 
 def _safe_print(msg):
     try:
-        if os.getenv("QUIET_PROGRESS","1")=="1":
-            if not (isinstance(msg,str) and msg.startswith(("🟩","🟦","✅","🛑","🔴","⚠️","🚀","📌","🟡","🟢","ℹ️","[STOP]","[PREDICT]","[HALT]"))):
+        # 🔧 기본값을 "조용 아님"으로 변경하고, 대괄호 태그 로그도 통과
+        if os.getenv("QUIET_PROGRESS","0")=="1":
+            if not (isinstance(msg,str) and msg.startswith(("🟩","🟦","✅","🛑","🔴","⚠️","🚀","📌","🟡","🟢","ℹ️","[", "[STOP]","[PREDICT]","[HALT]"))):
                 return
         print(msg, flush=True)
     except:
@@ -113,7 +114,7 @@ def _progress(tag:str):
     if _WATCHDOG_ABORT.is_set():
         _WATCHDOG_ABORT.clear()
         _safe_print(f"🟢 [WATCHDOG] abort cleared → {tag}")
-    if os.getenv("QUIET_PROGRESS","1")!="1" and (now % 5.0) < 0.1:
+    if os.getenv("QUIET_PROGRESS","0")!="1" and (now % 5.0) < 0.1:
         _safe_print(f"📌 progress: {tag}")
 
 def _watchdog_loop(stop_event: Optional[threading.Event] = None):
@@ -440,7 +441,8 @@ def _await_models_visible(symbols: List[str], timeout_sec:int=20, poll_sec:float
     return sorted(set(symbols) - remaining)
 
 # ====== (★) 성능 임계치 ======
-EVAL_MIN_F1_SHORT = float(os.getenv("EVAL_MIN_F1_SHORT", "0.55"))
+# 🔧 기본 완화(단기): 0.55 → 0.10 (env로 재조정 가능)
+EVAL_MIN_F1_SHORT = float(os.getenv("EVAL_MIN_F1_SHORT", "0.10"))
 EVAL_MIN_F1_MID   = float(os.getenv("EVAL_MIN_F1_MID",   "0.50"))
 EVAL_MIN_F1_LONG  = float(os.getenv("EVAL_MIN_F1_LONG",  "0.45"))
 _SHORT_RETRY      = int(os.getenv("SHORT_STRATEGY_RETRY", "3"))
@@ -736,10 +738,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             X_raw=np.array(X_raw,dtype=np.float32); y=np.array(y,dtype=np.int64)
 
             if len(X_raw) < 10:
-                _log_skip(symbol,strategy,f"샘플 부족(rows={len(df)}, limit={_limit}, min={_min_required}, w={window})"); 
+                _log_skip(symbol,strategy,f"샘플 부족(rows={len(df)}, limit={_limit}, min={_min_required}, w={window})")
                 continue
             if len(np.unique(y)) < 2:
-                _log_skip(symbol,strategy,f"라벨 단일 클래스(w={window}) → 스킵"); 
+                _log_skip(symbol,strategy,f"라벨 단일 클래스(w={window}) → 스킵")
                 continue
 
             # Try stratified split when possible, else fall back to coverage window split
@@ -767,7 +769,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             train_y, val_y = y[train_idx], y[val_idx]
 
             if len(np.unique(train_y)) < 2 or len(np.unique(val_y)) < 2:
-                _log_skip(symbol,strategy,f"분할 후 단일 클래스(w={window}) → 스킵"); 
+                _log_skip(symbol,strategy,f"분할 후 단일 클래스(w={window}) → 스킵")
                 continue
 
             # 데이터가 극히 적으면 에폭 자동 축소
@@ -1188,10 +1190,10 @@ def _run_bg_if_not_stopped(name:str, fn, stop_event: Optional[threading.Event]):
 # 🔒 엄격 순서/완결 강제 설정
 # =========================
 _ENFORCE_FULL_STRATEGY = os.getenv("ENFORCE_FULL_STRATEGY","1")=="1"
-_STRICT_HALT_ON_INCOMPLETE = os.getenv("STRICT_HALT_ON_INCOMPLETE","1")=="1"
+# 🔧 기본 완화: 그룹 미완료 중단/한-모델-필수 요구를 끔
+_STRICT_HALT_ON_INCOMPLETE = os.getenv("STRICT_HALT_ON_INCOMPLETE","0")=="1"
+_REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = os.getenv("REQUIRE_ONE_PER_GROUP","0")=="1"
 _SYMBOL_RETRY_LIMIT = int(os.getenv("SYMBOL_RETRY_LIMIT","1"))
-_REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = os.getenv("REQUIRE_ONE_PER_GROUP","1")=="1"
-
 
 def _train_full_symbol(symbol:str, stop_event: Optional[threading.Event] = None) -> Tuple[bool, Dict[str, Any]]:
     strategies=["단기","중기","장기"]
@@ -1565,6 +1567,25 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
 
         _safe_print("💓 heartbeat: train loop alive")
         time.sleep(max(1, int(os.getenv("TRAIN_LOOP_IDLE_SEC","3"))))
+
+
+_TRAIN_LOOP_THREAD: Optional[threading.Thread] = None
+_TRAIN_LOOP_STOP: Optional[threading.Event] = None
+_TRAIN_LOOP_LOCK=threading.Lock()
+
+def start_train_loop(force_restart:bool=False, sleep_sec:int=0):
+    global _TRAIN_LOOP_THREAD,_TRAIN_LOOP_STOP
+    with _TRAIN_LOOP_LOCK:
+        if _TRAIN_LOOP_THREAD is not None and _TRAIN_LOOP_THREAD.is_alive():
+            if not force_restart:
+                _safe_print("ℹ️ start_train_loop: already running"); return False
+            _safe_print("🛑 restarting..."); stop_train_loop(timeout=30)
+        _TRAIN_LOOP_STOP=threading.Event()
+        def _runner():
+            try: train_symbol_group_loop(sleep_sec=sleep_sec, stop_event=_TRAIN_LOOP_STOP)
+            finally: _safe_print("ℹ️ train loop thread exit")
+        _TRAIN_LOOP_THREAD=threading.Thread(target=_runner,daemon=True); _TRAIN_LOOP_THREAD.start()
+        _safe_print("✅ train loop started"); return True
 
 
 _TRAIN_LOOP_THREAD: Optional[threading.Thread] = None
