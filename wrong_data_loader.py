@@ -1,4 +1,4 @@
-# wrong_data_loader.py (PATCHED v2025-09-17a: 소수클래스 실패우선 + 오프셋±5 + 증강상향 + 해시가드강화)
+# wrong_data_loader.py (FINAL v2025-09-17b: 소수클래스 실패우선 + 오프셋±5 + 증강상향 + 해시가드강화 + 수치컬럼 필터/라벨클램프)
 import os
 import pandas as pd
 import numpy as np
@@ -123,7 +123,12 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
             print(f"[❌ 실패] {symbol}-{strategy}: compute_features 반환 형식 오류")
             return None, None
 
-    df_feat = df_feat.tail(_MAX_ROWS_FOR_SAMPLING).dropna(axis=0, how='any').reset_index(drop=True)
+    df_feat = df_feat.tail(_MAX_ROWS_FOR_SAMPLING).reset_index(drop=True)
+    # 숫자형 컬럼만 사용 + NaN 0.0 치환
+    num_cols = df_feat.select_dtypes(include=[np.number]).columns.tolist()
+    if "timestamp" in df_feat.columns and "timestamp" not in num_cols:
+        num_cols = [c for c in num_cols if c != "timestamp"]
+    df_feat[num_cols] = df_feat[num_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     # ✅ 타임스탬프 컬럼 통일
     if "timestamp" not in df_feat.columns:
@@ -149,6 +154,8 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
         pad_val = labels_all[-1] if labels_all else 0
         labels_all += [pad_val] * (len(df_feat) - len(labels_all))
     labels = labels_all[:len(df_feat)]
+    # 안전: 라벨 클램프
+    labels = [int(max(0, min(num_classes - 1, l))) for l in labels]
     df_feat["label"] = labels
 
     # 중복 해시 가드 세트 (기존 + 강화)
@@ -159,7 +166,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
         existing_hashes = set()
 
     fail_count, normal_count = 0, 0
-    feat_cols = [c for c in df_feat.columns if c not in ("timestamp", "label")]
+    feat_cols = [c for c in num_cols if c not in ("timestamp", "label")]
 
     # ========= 2) 실패 샘플 우선 수집 =========
     if os.path.exists(WRONG_CSV):
@@ -262,7 +269,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
                                 h_last = get_feature_hash(xb[-1])
                                 h_full = _hash_window(xb) if _USE_FULL_WINDOW_HASH else None
                                 if (h_last not in used_hashes and h_last not in existing_hashes) and (not h_full or (h_full not in used_hashes and h_full not in existing_hashes)):
-                                    used_hashes.add(h_last); 
+                                    used_hashes.add(h_last)
                                     if h_full: used_hashes.add(h_full)
                                     sequences.append((xb.copy(), label))
                                     aug_times = max(0, int(FAIL_AUGMENT_RATIO) * max(1, _FAIL_AUG_MULT) - 1)
@@ -280,8 +287,9 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
         try:
             window_df = df_feat.iloc[i - window:i]
             label = int(df_feat.iloc[i].get("label", -1))
+            # 안전: 라벨 클램프
             if not (0 <= label < num_classes):
-                continue
+                label = int(max(0, min(num_classes - 1, label)))
 
             xb = window_df[feat_cols].to_numpy(dtype=np.float32)
 
@@ -297,7 +305,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
             h_full = _hash_window(xb) if _USE_FULL_WINDOW_HASH else None
             if (h_last in used_hashes) or (h_full and h_full in used_hashes):
                 continue
-            used_hashes.add(h_last); 
+            used_hashes.add(h_last)
             if h_full: used_hashes.add(h_full)
 
             sequences.append((xb.copy(), label))
