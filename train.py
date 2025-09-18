@@ -1,4 +1,3 @@
-# === train.py (STRICT: long-enough training, strict order, coop cancel, watchdog, robust gate + SMOKE PREDICT) ===
 import os
 def _set_default_thread_env(n: str, v: int):
     if os.getenv(n) is None: os.environ[n] = str(v)
