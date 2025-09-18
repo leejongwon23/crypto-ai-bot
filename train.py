@@ -10,7 +10,7 @@ from datetime import datetime
 import pytz, numpy as np, pandas as pd
 import torch, torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.utils.class_weight import compute_class_weight
@@ -592,6 +592,40 @@ def _log_class_ranges_safe(symbol, strategy, group_id, class_ranges, note, stop_
     except Exception as e:
         _safe_print(f"[log_class_ranges err] {e}")
 
+# === [진단 헬퍼] F1 하락 원인 로그 ===
+def _diag_log_eval(lbls, preds, class_ranges, window, model_type, model_f1, _safe_print_fn):
+    import numpy as _np
+    try:
+        lbls = _np.asarray(lbls)
+        preds = _np.asarray(preds)
+        num_classes = len(class_ranges) if class_ranges else int(max(lbls.max(), preds.max()) + 1)
+
+        # 다수 클래스 베이스라인
+        if lbls.size:
+            maj_cls = _np.bincount(lbls, minlength=num_classes).argmax()
+            baseline_preds = _np.full_like(lbls, maj_cls)
+            baseline_f1 = f1_score(lbls, baseline_preds, average="macro")
+        else:
+            baseline_f1 = 0.0
+
+        # ±1 허용 정확
+        tol_acc = float((_np.abs(lbls - preds) <= 1).mean()) if lbls.size else 0.0
+
+        # 분포/혼동행렬
+        y_dist = _np.bincount(lbls, minlength=num_classes).tolist() if lbls.size else []
+        p_dist = _np.bincount(preds, minlength=num_classes).tolist() if preds.size else []
+        try:
+            cm = confusion_matrix(lbls, preds, labels=list(range(num_classes)))
+        except Exception:
+            cm = None
+
+        _safe_print_fn(f"[진단] w={int(window)} {model_type} | baseline_f1={baseline_f1:.4f} | model_f1={model_f1:.4f} | tol@±1={tol_acc:.4f}")
+        _safe_print_fn(f"[진단] 분포  y={y_dist}  p={p_dist}")
+        if cm is not None:
+            _safe_print_fn(f"[진단] 혼동행렬\n{cm}")
+    except Exception as _e:
+        _safe_print_fn(f"[진단] 로그 실패 → {_e}")
+
 def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=None, stop_event: Optional[threading.Event] = None) -> Dict[str, Any]:
     """
     ⑤ 상위 3 윈도우 순차 학습/평가/저장.
@@ -1014,6 +1048,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                 except Exception:
                     acc=0.0; f1_val=0.0
                 val_loss = float(val_loss_sum / max(1,n_val))
+                # === [진단 호출] 성능 원인 로그 ===
+try: _diag_log_eval(lbls, preds, class_ranges, window, model_type, f1_val, _safe_print)
+except Exception as _e: _safe_print(f"[진단] skip → {_e}")
+# === [진단 호출 끝] ===
+                
 
                 min_gate = max(_min_f1_for(strategy), float(get_QUALITY().get("VAL_F1_MIN", 0.10)))
 
