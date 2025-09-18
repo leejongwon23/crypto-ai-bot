@@ -14,7 +14,7 @@ from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.utils.class_weight import compute_class_weight
-from collections import Counter  # ← ADD
+from collections import Counter
 from typing import Optional, List, Tuple, Dict, Any
 
 # >>> ADD: deterministic seeds
@@ -131,7 +131,7 @@ def _watchdog_loop(stop_event: Optional[threading.Event] = None):
 def _reset_watchdog(reason:str):
     if _WATCHDOG_ABORT.is_set():
         _WATCHDOG_ABORT.clear()
-        _safe_print(f"🟢 [WATCHDOG] abort cleared ({reason})")
+        _safe_print(f"[WATCHDOG] abort cleared ({reason})")
 
 def _try_auto_calibration(symbol,strategy,model_name):
     try: import calibration
@@ -207,12 +207,18 @@ LABEL_SMOOTH = float(os.getenv("LABEL_SMOOTH","0.05"))
 GRAD_CLIP = float(os.getenv("GRAD_CLIP_NORM","1.0"))
 FOCAL_GAMMA = float(os.getenv("FOCAL_GAMMA","2.0"))
 
-# 3번 수정: EarlyStopping 민감도 조절
+# === BOOL ENV PARSER (Fix for COST_SENSITIVE_ARGMAX) ===
+def _as_bool_env(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    if v is None: return default
+    return v.strip().lower() in ("1","true","yes","on")
+
+# EarlyStopping 민감도 조절
 EARLY_STOP_PATIENCE = int(os.getenv("EARLY_STOP_PATIENCE","5"))
-EARLY_STOP_MIN_DELTA = float(os.getenv("EARLY_STOP_MIN_DELTA","0.001"))  # ← NEW
+EARLY_STOP_MIN_DELTA = float(os.getenv("EARLY_STOP_MIN_DELTA","0.001"))
 
 # NEW: 검증 단계 cost-sensitive argmax 강도 (0이면 비활성)
-COST_SENSITIVE_ARGMAX = int(os.getenv("COST_SENSITIVE_ARGMAX","1")) == "1" if os.getenv("COST_SENSITIVE_ARGMAX") in ("0","1") else True
+COST_SENSITIVE_ARGMAX = _as_bool_env("COST_SENSITIVE_ARGMAX", True)
 CS_ARG_BETA = float(os.getenv("CS_ARG_BETA","1.0"))  # 로짓 보정 강도( logit - beta*log(prior) )
 
 now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
@@ -289,9 +295,6 @@ def _log_fail(symbol,strategy,reason):
     _maybe_insert_failure({"symbol":symbol,"strategy":strategy,"model":"all","predicted_class":-1,"success":False,"rate":0.0,"reason":reason},feature_vector=[])
 
 def _strategy_horizon_hours(s:str)->int: return {"단기":4,"중기":24,"장기":168}.get(s,24)
-
-# ⛔️ 라벨 계산은 labels.make_labels로 일원화하므로
-# 과거 _future_returns_by_timestamp 함수는 제거됨.
 
 # === 커버리지 기반 검증 분할 ===
 def coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, max_windows=200, num_classes=None):
@@ -585,60 +588,16 @@ def _diag_log_eval(lbls, preds, class_ranges, window, model_type, model_f1, _saf
     except Exception as _e:
         _safe_print_fn(f"[진단] 로그 실패 → {_e}")
 
-# ===== 라벨 단일화(UTC,’< t1’) + 경계밴드 상수 =====
+# ===== 라벨 단일화 엔드포인트 =====
 from data.labels import make_labels
 from config import BOUNDARY_BAND
-
-# 라벨 계산(윈도우 옵티마이저와 호환) — 최근 구간 전용
-def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
-    if df is None or len(df) == 0 or "timestamp" not in df.columns:
-        return np.zeros(0 if df is None else len(df), dtype=np.float32)
-
-    mode = os.getenv("LABEL_RETURN_MODE", "close")  # "close" | "max" | "signed_extreme"
-    ts = pd.to_datetime(df["timestamp"], errors="coerce")
-    ts = (ts.dt.tz_localize("UTC") if ts.dt.tz is None else ts).dt.tz_convert("Asia/Seoul")
-
-    close = df["close"].astype(float).values
-    high  = (df["high"] if "high" in df.columns else df["close"]).astype(float).values
-    low   = (df["low"]  if "low"  in df.columns else df["close"]).astype(float).values
-
-    out = np.zeros(len(df), dtype=np.float32)
-    H = pd.Timedelta(hours=horizon_hours)
-    j0 = 0
-
-    for i in range(len(df)):
-        t0 = ts.iloc[i]; t1 = t0 + H
-        j = max(j0, i)
-        mx = high[i]; mn = low[i]; j_last = i
-        while j < len(df) and ts.iloc[j] <= t1:
-            if high[j] > mx: mx = high[j]
-            if low[j]  < mn: mn = low[j]
-            j_last = j
-            j += 1
-        j0 = max(j_last, i)
-
-        base = close[i] if close[i] > 0 else (close[i] + 1e-6)
-
-        if mode == "max":
-            r = (mx - base) / (base + 1e-12)
-        elif mode == "signed_extreme":
-            up = (mx - base) / (base + 1e-12)
-            dn = (mn - base) / (base + 1e-12)
-            r = up if abs(up) >= abs(dn) else dn
-        else:  # "close"
-            fut = close[j_last]
-            r = (fut - base) / (base + 1e-12)
-
-        out[i] = float(r)
-
-    return out
-
 
 def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] = None, stop_event: Optional[threading.Event] = None) -> Dict[str, Any]:
     """
     ⑤ 상위 3 윈도우 순차 학습/평가/저장.
     - window_optimizer.find_best_windows(...) → [w1, w2, w3] 사용 (없으면 단일 best 폴백).
     - 각 윈도우마다 모델 3종(lstm/cnn_lstm/transformer) 학습 후, 파일명에 _w{window}를 포함해 저장.
+    - ✅ 라벨/가인 계산은 labels.make_labels()로 단일화(KST, '< t1', [lo, hi) 규칙).
     """
     global _FAILURE_DB_READY
     if max_epochs is None:
@@ -720,36 +679,18 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         try: _safe_print(f"[RANGES] {symbol}-{strategy}-g{group_id} → {class_ranges}")
         except Exception as e: _safe_print(f"[log_class_ranges err] {e}")
 
-        # --- 미래수익 계산 ---
-        H=_strategy_horizon_hours(strategy)
-        _progress("future:calc")
-        _fto=float(os.getenv("FUTURE_TIMEOUT_SEC","60"))
-        status_fut, future = _run_with_timeout(
-            _future_returns_by_timestamp, args=(df,), kwargs={"horizon_hours":H},
-            timeout_sec=_fto, stop_event=stop_event, hb_tag="future:wait", hb_interval=5.0
-        )
-        if status_fut != "ok" or future is None or len(future)==0:
-            reason = "미래수익 타임아웃" if status_fut=="timeout" else ("미래수익 취소" if status_fut=="canceled" else f"미래수익 실패({status_fut})")
-            _safe_print(f"[FUTURE] {reason} → 스킵")
-            _log_skip(symbol,strategy,reason); return res
-        _progress("future:ok")
-
-        # ---- 라벨링
+        # ---- 라벨/가인 계산(단일화) ----
         _check_stop(stop_event,"before labeling")
         _progress("labeling")
-        labels=[]; lo0=class_ranges[0][0]; hi_last=class_ranges[-1][1]; clipped_low=clipped_high=unmatched=0
-        for r in future:
-            if not np.isfinite(r): r=lo0
-            if r<lo0: labels.append(0); clipped_low+=1; continue
-            if r>hi_last: labels.append(len(class_ranges)-1); clipped_high+=1; continue
-            idx=None
-            for i,(lo,hi) in enumerate(class_ranges):
-                if lo<=r<=hi: idx=i; break
-            if idx is None: idx=len(class_ranges)-1 if r>hi_last else 0; unmatched+=1
-            labels.append(idx)
-        if clipped_low or clipped_high or unmatched:
-            _safe_print(f"[LABEL CLIP] low={clipped_low} high={clipped_high} unmatched={unmatched}")
-        labels=np.array(labels,dtype=np.int64)
+        try:
+            gains, labels, class_ranges_used = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=group_id)
+            if (not isinstance(labels, np.ndarray)) or labels.size == 0:
+                _log_skip(symbol,strategy,"라벨 없음"); return res
+            # 경계는 상단에서 구한 것과 동일해야 함(수비적 가드)
+            if class_ranges_used and class_ranges_used != class_ranges:
+                _safe_print("[LABEL] 경계 재계산 불일치 → 상단 경계 우선 사용")
+        except Exception as e:
+            _log_skip(symbol,strategy,f"라벨 계산 실패: {e}"); return res
 
         # ---- 특징행렬
         features_only=feat.drop(columns=["timestamp","strategy"],errors="ignore")
@@ -1264,7 +1205,7 @@ def _train_full_symbol(symbol:str, stop_event: Optional[threading.Event] = None)
         if not prev_strategy_ok:
             _safe_print(f"[ORDER-STOP] 이전 전략 미완료(성공 기준 미충족) → {symbol} {strategy} 스킵")
             detail[strategy] = {-1: False}
-            symbol_complete = False
+            symbol_complete=False
             break
 
         try:
