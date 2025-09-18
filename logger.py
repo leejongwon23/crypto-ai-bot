@@ -1,4 +1,3 @@
-# === logger.py (FINAL for #11: per-class F1 & coverage 신호 연결 + 기존 패치 포함) ===
 import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil, re
 import sqlite3
 from collections import defaultdict, deque
@@ -70,10 +69,11 @@ NOTE_EXTRACT_HEADERS = ["position","hint_allow_long","hint_allow_short","hint_sl
 
 PREDICTION_HEADERS = BASE_PRED_HEADERS + EXTRA_PRED_HEADERS + ["feature_vector"] + CLASS_RANGE_HEADERS + NOTE_EXTRACT_HEADERS
 
-# ✅ 학습 로그 확장 헤더(기존 accuracy/f1/loss를 보존 + 세부 지표 추가)
+# ✅ 학습 로그 확장 헤더
+#    - 세 번째 지표는 실제로 train.py에서 'val_loss'를 기록하므로 컬럼명을 'val_loss'로 정정
 TRAIN_HEADERS = [
     "timestamp","symbol","strategy","model",
-    "val_acc","val_f1","train_loss_sum",
+    "val_acc","val_f1","val_loss",
     "engine","window","recent_cap",
     "rows","limit","min","augment_needed","enough_for_training",
     "note","source_exchange","status"
@@ -268,10 +268,12 @@ def ensure_train_log_exists():
                     except StopIteration: old_header = []
                     for row in reader:
                         mapped = {h:row[i] for i,h in enumerate(old_header)} if old_header else {}
+                        # 이전 버전의 "loss" 또는 "train_loss_sum" 필드를 새 "val_loss"로 안전 매핑
+                        val_loss_val = mapped.get("val_loss", mapped.get("loss", mapped.get("train_loss_sum","")))
                         new_row = [
                             mapped.get("timestamp",""), mapped.get("symbol",""), mapped.get("strategy",""), mapped.get("model",""),
-                            mapped.get("accuracy",""), mapped.get("f1",""), mapped.get("loss",""),
-                            "", "", "", "", "", "", "", "",  # engine/window/recent_cap/rows/limit/min/aug/enough
+                            mapped.get("accuracy", mapped.get("val_acc","")), mapped.get("f1", mapped.get("val_f1","")), val_loss_val,
+                            "", "", "", "", "", "", "", "",
                             mapped.get("note",""), mapped.get("source_exchange",""), mapped.get("status",""),
                         ]
                         w.writerow(new_row[:len(TRAIN_HEADERS)])
@@ -836,7 +838,7 @@ def log_training_result(
         now, str(symbol), str(strategy), str(model or ""),
         float(accuracy) if accuracy is not None else "",
         float(f1) if f1 is not None else "",
-        float(loss) if loss is not None else "",
+        float(loss) if loss is not None else "",  # ← 컬럼명은 TRAIN_HEADERS의 'val_loss'
         extras.get("engine",""), extras.get("window",""), extras.get("recent_cap",""),
         extras.get("rows",""), extras.get("limit",""), extras.get("min",""),
         extras.get("augment_needed",""), extras.get("enough_for_training",""),
@@ -1070,9 +1072,10 @@ def alert_if_single_class_prediction(symbol: str, strategy: str, lookback_days: 
             sub = chunk[(chunk.get("symbol","")==symbol) & (chunk.get("strategy","")==strategy)]
             if sub.empty:
                 continue
-            # align timestamps with rows
-            if ts.shape[0] == sub.shape[0]:
-                sub = sub.loc[ts >= cutoff]
+            # 안전 정렬: sub 인덱스에 맞춰 ts도 슬라이스 후 컷오프
+            ts_sub = ts.loc[sub.index]
+            sub = sub.loc[ts_sub >= cutoff]
+
             pcs = pd.to_numeric(sub["predicted_class"], errors="coerce").dropna().astype(int)
             uniq.update(pcs.unique().tolist())
             total += int(len(pcs))
@@ -1097,7 +1100,7 @@ def _model_sort_key(r):
     )
 
 # -------------------------
-# 모델 인벤토리 조회
+# 모델 인벤토리 조회 ('.pt' + '.ptz' + '.safetensors' 지원)
 # -------------------------
 def get_available_models(symbol: str = None, strategy: str = None):
     try:
@@ -1105,11 +1108,21 @@ def get_available_models(symbol: str = None, strategy: str = None):
         if not os.path.isdir(model_dir):
             return []
         out = []
+        exts = (".pt", ".ptz", ".safetensors")
+
+        def _stem_meta(path: str) -> str:
+            b = os.path.basename(path)
+            for e in exts:
+                if b.endswith(e):
+                    return os.path.join(os.path.dirname(path), b[: -len(e)] + ".meta.json")
+            # fallback: 그대로 .meta.json
+            return path + ".meta.json"
+
         for fn in os.listdir(model_dir):
-            if not fn.endswith(".pt"):
+            if not fn.endswith(exts):
                 continue
             pt_path = os.path.join(model_dir, fn)
-            meta_path = pt_path.replace(".pt", ".meta.json")
+            meta_path = _stem_meta(pt_path)
             if not os.path.exists(meta_path):
                 continue
             try:
