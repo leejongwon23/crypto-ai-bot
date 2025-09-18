@@ -63,7 +63,7 @@ def _group_active() -> bool:
 
 def open_predict_gate(note=""):
     try:
-        with open(PREDICT_GATE, "w", encoding="utf-8") opt as f:
+        with open(PREDICT_GATE, "w", encoding="utf-8") as f:
             json.dump({"open": True, "opened_at": _now_kst().isoformat(), "note": note}, f, ensure_ascii=False)
             try: f.flush(); os.fsync(f.fileno())
             except Exception: pass
@@ -1155,5 +1155,5 @@ if __name__ == "__main__":
         df = pd.read_csv(PREDICTION_LOG_PATH, encoding="utf-8-sig")
         print("[✅ prediction_log.csv 상위 20줄 출력]"); print(df.head(20))
     except Exception as e:
-        print(f"[오류] prediction_log.csv 로드 실패 → {e}")
+        print(f"[오류] prediction_log.csv 로드 실패] {e}")
     if str(os.getenv("EVAL_LOOP", "0")).strip() == "1": run_evaluation_loop()
