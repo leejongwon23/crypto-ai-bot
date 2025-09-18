@@ -5,10 +5,9 @@ from typing import Optional, List, Tuple, Dict, Any
 
 import numpy as np, pandas as pd, pytz, torch, torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
-from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
+from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import StratifiedShuffleSplit
-from sklearn.utils.class_weight import compute_class_weight
 from collections import Counter
 
 # ---------- 기본 환경/시드 ----------
@@ -60,7 +59,6 @@ try:
     from data_augmentation import balance_classes
 except Exception:
     def balance_classes(X: np.ndarray, y: np.ndarray, num_classes: int):
-        # 대체: 아무 수정 없이 원본 반환 (학습은 진행 가능)
         return X, y
 
 # [가드] focal_loss (없으면 CE Loss 대체)
@@ -70,7 +68,6 @@ except Exception:
     class FocalLoss(nn.Module):
         def __init__(self, gamma: float = 2.0, weight: Optional[torch.Tensor] = None):
             super().__init__()
-            # 안전 대체: CrossEntropy 사용(가중치 지원)
             self.ce = nn.CrossEntropyLoss(weight=weight)
         def forward(self, logits, targets):
             return self.ce(logits, targets)
@@ -138,7 +135,6 @@ def _stem(p:str)->str:
 
 def _save_model_and_meta(model:nn.Module,path_pt:str,meta:dict):
     os.makedirs(os.path.dirname(path_pt),exist_ok=True)
-    # .ptz로 직접 저장(호환 유지용 API 사용)
     weight=_stem(path_pt)+".ptz"
     save_model(weight, model.state_dict())
     meta_path = _stem(path_pt)+".meta.json"
@@ -223,7 +219,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         set_NUM_CLASSES(len(class_ranges))
         logger.log_class_ranges(symbol, strategy, group_id=group_id, class_ranges=class_ranges, note="train_one_model")
 
-        # 라벨
+        # 라벨 (※ labels.py에서 -1 = 경계 근접 샘플)
         gains, labels, class_ranges_used = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=group_id)
         if (not isinstance(labels, np.ndarray)) or labels.size == 0:
             _log_skip(symbol,strategy,"라벨 없음"); return res
@@ -247,14 +243,31 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         # 각 윈도우 학습
         for window in top_windows:
             window=min(window, max(6,len(features_only)-1))
-            X_raw,y=[],[]
+
+            # ✅ 샘플 생성 시 타깃 라벨이 -1(마스킹)이면 '그 샘플 자체를 버림'
             fv=features_only.values.astype(np.float32)
+            X_raw, y = [], []
             for i in range(len(fv)-window):
-                X_raw.append(fv[i:i+window]); yi=i+window-1
-                y.append(labels[yi] if 0<=yi<len(labels) else 0)
-            X_raw=np.array(X_raw,dtype=np.float32); y=np.array(y,dtype=np.int64)
-            if len(X_raw)<10: _log_skip(symbol,strategy,f"샘플 부족(w={window})"); continue
-            if len(np.unique(y))<2: _log_skip(symbol,strategy,f"라벨 단일 클래스(w={window})"); continue
+                yi = i + window - 1
+                if yi<0 or yi>=len(labels): continue
+                lab = int(labels[yi])
+                if lab < 0:    # 경계 근접/불확실 → 학습 제외
+                    continue
+                X_raw.append(fv[i:i+window])
+                y.append(lab)
+
+            if not X_raw or not y:
+                _log_skip(symbol,strategy,f"유효 라벨 샘플 없음(w={window})"); continue
+            X_raw=np.array(X_raw,dtype=np.float32)
+            y=np.array(y,dtype=np.int64)
+
+            # 안전 가드
+            if y.min()<0:
+                _log_skip(symbol,strategy,f"음수 라벨 유입 감지(w={window})"); continue
+            if len(X_raw)<10:
+                _log_skip(symbol,strategy,f"샘플 부족(w={window})"); continue
+            if len(np.unique(y))<2:
+                _log_skip(symbol,strategy,f"라벨 단일 클래스(w={window})"); continue
 
             # split
             strat_ok=False
@@ -279,10 +292,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             local_epochs=_epochs_for(strategy)
             if len(train_X)<200: local_epochs=max(8, int(round(local_epochs*0.7)))
             try:
-                if len(train_X)<200: train_X,train_y=balance_classes(train_X,train_y,num_classes=len(class_ranges))
+                if len(train_X)<200:
+                    train_X,train_y=balance_classes(train_X,train_y,num_classes=len(class_ranges))
             except Exception as e: _safe_print(f"[balance warn] {e}")
 
-            # class weight
+            # class weight (음수 라벨 없음 보장)
             try:
                 loss_cfg=get_LOSS(); cw_cfg=loss_cfg.get("class_weight", {}) if isinstance(loss_cfg,dict) else {}
                 mode=str(cw_cfg.get("mode","inverse_freq_clip")).lower()
@@ -294,7 +308,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 else:
                     w=(1.0/np.sqrt(cc+eps)); w=np.clip(w, cw_min, cw_max); w_full=w.astype(np.float32)
                 zero=(cc==0); 
-                if zero.any(): w_full[zero]=max(cw_max, np.max(w_full))
+                if zero.any(): w_full[zero]=max(cw_max, float(np.max(w_full)) if w_full.size else 1.0)
             except Exception:
                 w_full=np.ones(len(class_ranges),dtype=np.float32)
             try:
@@ -356,7 +370,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                             else:
                                 p=torch.argmax(logits,dim=1).cpu().numpy()
                             preds.extend(p); lbls.extend(yb.numpy())
-                    cur_f1=float(f1_score(lbls,preds,average="macro")) if len(lbls) else 0.0
+                    cur_f1=float(f1_score(lbls,preds,average="macro",
+                                          labels=list(range(len(class_ranges))),
+                                          zero_division=0)) if len(lbls) else 0.0
                     if scheduler is not None:
                         try: scheduler.step(cur_f1)
                         except: pass
@@ -390,7 +406,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                             p=torch.argmax(logits,dim=1).cpu().numpy()
                         preds.extend(p); lbls.extend(yb.numpy())
                 acc=float(accuracy_score(lbls,preds)) if len(lbls) else 0.0
-                f1_val=float(f1_score(lbls,preds,average="macro")) if len(lbls) else 0.0
+                f1_val=float(f1_score(lbls,preds,average="macro",
+                                       labels=list(range(len(class_ranges))),
+                                       zero_division=0)) if len(lbls) else 0.0
                 val_loss=float(val_loss_sum/max(1,n_val))
 
                 # 메타/저장
@@ -409,13 +427,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                       "cs_argmax":{"enabled":bool(COST_SENSITIVE_ARGMAX),"beta":float(CS_ARG_BETA)}}
                 wpath,mpath=_save_model_and_meta(model, stem+".pt", meta)
 
-                # 캐시 제거(동작 유지)
+                # 캐시 제거
                 try:
                     DataCacheManager.delete(f"{symbol}-{strategy}")
                     DataCacheManager.delete(f"{symbol}-{strategy}-features")
                 except: pass
 
-                # ✅ 변경점: per-class F1 & coverage 계산을 위해 y_true/y_pred/num_classes 전달
                 logger.log_training_result(
                     symbol, strategy, model=os.path.basename(wpath), accuracy=acc, f1=f1_val, loss=val_loss,
                     note=(f"train_one_model(window={window}, cap={len(features_only)}, engine=manual)"),
@@ -537,7 +554,6 @@ def _run_smoke_predict(predict_fn, symbol: str):
     return ok_any
 
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Event] = None):
-    # cold-start/리셋
     env_force_ignore = (os.getenv("TRAIN_FORCE_IGNORE_SHOULD","0") == "1")
     env_reset = (os.getenv("RESET_GROUP_ORDER_ON_START","0") == "1")
     force_full_pass = env_force_ignore
@@ -569,7 +585,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                     _safe_print(f"[PREDICT-BLOCK] 그룹{idx+1} ready_for_group_predict()==False")
                     continue
 
-                # 예측
                 ran_any=False
                 for symbol in group:
                     for strategy in ["단기","중기","장기"]:
