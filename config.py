@@ -45,10 +45,10 @@ _default_config = {
 
     # --- [LOSS] 손실/가중치 옵션(학습 코드에서 사용) ---
     "LOSS": {
-        "use_focal": False,            # ⇦ 추가: CE↔Focal 토글
-        "alpha_mode": "auto",          # ⇦ 추가: 클래스별 α 자동/수동
+        "use_focal": False,
+        "alpha_mode": "auto",
         "label_smoothing": 0.02,
-        "focal_gamma": 0.0,            # 0.0이면 비활성 (train.py에서 gamma>0이면 Focal)
+        "focal_gamma": 0.0,  # 0.0이면 비활성 (train.py에서 gamma>0이면 Focal)
         "class_weight": {
             "mode": "inverse_freq_clip",  # none | inverse_freq | inverse_freq_clip
             "min": 0.5,
@@ -66,7 +66,7 @@ _default_config = {
     "EVAL": {
         "macro_f1": True,
         "topk": [1, 3],
-        "use_cost_sensitive_argmax": True   # ⇦ 추가: 빈도보정 argmax 사용 허용
+        "use_cost_sensitive_argmax": True
     },
 
     # --- [5] 실패학습(하드 예시) 옵션 ---
@@ -90,18 +90,17 @@ _default_config = {
         "strict": True,           # 구간 단조/겹침 방지
         "zero_band_eps": 0.0015,  # 0% 주변 중립 밴드(±0.15%p)
         "min_width": 0.0005,      # 최소 구간 폭(0.05%p)
-        "step_pct": 0.0075,       # ← 변경됨: 0.75% 단위 고정 bin 간격
-        # 희소 bin 병합 옵션
+        "step_pct": 0.0075,       # 0.75% 단위 고정 bin 간격
         "merge_sparse": {
             "enabled": True,
             "min_ratio": 0.01,        # 전체 샘플의 1% 미만이면 희소로 간주
-            "min_count_floor": 50,    # ---- 변경: 절대 개수 하한을 50으로 설정
-            "prefer": "denser"        # "denser"(더 많은 이웃) | "left" | "right"
+            "min_count_floor": 50,    # 절대 하한 50
+            "prefer": "denser"        # "denser" | "left" | "right"
         }
     },
 
-    # --- [TRAIN] 학습 스케줄/조기종료 표준화 (학습 코드에서 읽음) ---
-    "TRAIN": {                           # ⇦ 추가 섹션
+    # --- [TRAIN] 학습 스케줄/조기종료 표준화 ---
+    "TRAIN": {
         "early_stop": {
             "patience": 4,
             "min_delta": 0.0005,
@@ -113,13 +112,13 @@ _default_config = {
         }
     },
 
-    # --- [ENSEMBLE] 멀티-윈도우 앙상블 토글 ---
-    "ENSEMBLE": {                        # ⇦ 추가 섹션
+    # --- [ENSEMBLE] 멀티-윈도우 앙상블 ---
+    "ENSEMBLE": {
         "topk_windows": 3,
-        "use_var_weight": True           # 윈도우 분산 가중치 사용
+        "use_var_weight": True
     },
 
-    # --- [SCHED] 학습 스케줄러 힌트(엔진에서 참조) ---
+    # --- [SCHED] 학습 스케줄러 힌트 ---
     "SCHED": {
         "round_robin": True,
         "max_minutes_per_symbol": 10,
@@ -140,16 +139,16 @@ _STRATEGY_RETURN_CAP_POS_MAX = {"단기": 0.12, "중기": 0.25, "장기": 0.50}
 _STRATEGY_RETURN_CAP_NEG_MIN = {"단기": -0.12, "중기": -0.25, "장기": -0.50}
 
 # ✅ 표시 안정화용 파라미터
-_MIN_RANGE_WIDTH   = _default_config["CLASS_BIN"]["min_width"]   # 0.05%p
-_ROUND_DECIMALS    = 4                                           # 소수 넷째 자리
-_EPS_ZERO_BAND     = _default_config["CLASS_BIN"]["zero_band_eps"]  # ±0.15%p
+_MIN_RANGE_WIDTH   = _default_config["CLASS_BIN"]["min_width"]
+_ROUND_DECIMALS    = 4
+_EPS_ZERO_BAND     = _default_config["CLASS_BIN"]["zero_band_eps"]
 _DISPLAY_MIN_RET   = 1e-4
 
 _config = _default_config.copy()
 _dynamic_num_classes = None
 _ranges_cache = {}
 
-# ▶ 로그 억제 스위치(환경변수 QUIET_CONFIG_LOG=1 이면 상세 로그 최소화)
+# ▶ 로그 억제 스위치
 def _quiet(): return os.getenv("QUIET_CONFIG_LOG", "0") == "1"
 def _log(msg):
     if not _quiet():
@@ -246,7 +245,7 @@ def get_class_groups(num_classes=None, group_size=5):
     return groups
 
 # ------------------------
-# 신규 옵션 Getter (2·3·LOSS·AUG·EVAL·5·Q·BIN·TRAIN·ENSEMBLE·SCHED)
+# 신규 옵션 Getter
 # ------------------------
 def get_REGIME():
     return _config.get("REGIME", _default_config["REGIME"])
@@ -339,7 +338,6 @@ def _ensure_zero_band(ranges):
     lo_r, hi_r = ranges[right_idx]
     ranges[left_idx]  = (_round2(lo_l), _round2(-_EPS_ZERO_BAND))
     ranges[right_idx] = (_round2(_EPS_ZERO_BAND), _round2(hi_r))
-    # 중앙에 새 중립 구간 삽입 → 이후 strict/상한 보정
     ranges = ranges[:right_idx] + [(_round2(-_EPS_ZERO_BAND), _round2(_EPS_ZERO_BAND))] + ranges[right_idx:]
     return _fix_monotonic(ranges)
 
@@ -434,13 +432,11 @@ def _choose_n_classes(rets_signed, max_classes, hint_min=4):
     data_range = max(1e-12, data_max - data_min)
 
     if iqr <= 1e-12:
-        # 분포가 지나치게 뾰족할 때: sqrt(N) 백업
         est = int(round(np.sqrt(N)))
     else:
         h = 2.0 * iqr * (N ** (-1.0/3.0))  # FD bin width
         est = int(round(data_range / max(h, 1e-12)))
 
-    # 최소/최대 클립, 너무 작은 경우는 힌트/기본값으로 보강
     base_hint = int(_config.get("NUM_CLASSES", 10))
     lower = max(4, hint_min, min(base_hint, max_classes) if est < 4 else 4)
     n_cls = max(lower, min(est, max_classes))
@@ -460,7 +456,6 @@ def _merge_smallest_adjacent(ranges, max_classes):
         elif idx == len(rs) - 1:
             rs[-2] = (rs[-2][0], rs[-1][1]); del rs[-1]
         else:
-            # 좌/우 중 더 작은 쪽과 병합
             left_w  = rs[idx][0] - rs[idx-1][0] if idx-1 >= 0 else float("inf")
             right_w = rs[idx+1][1] - rs[idx][1] if idx+1 < len(rs) else float("inf")
             if left_w <= right_w:
@@ -490,7 +485,6 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
     min_floor = int(opt.get("min_count_floor", 50))
     prefer = str(opt.get("prefer", "denser")).lower()
 
-    # 히스토그램 카운트 계산
     edges = [ranges[0][0]] + [hi for (_, hi) in ranges]
     edges[-1] = float(edges[-1]) + 1e-12  # 우측 포함
     hist, _ = np.histogram(rets_signed, bins=np.array(edges, dtype=float))
@@ -513,20 +507,16 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
             break
         counts = _counts(rs)
         thresh = max(int(total * min_ratio), min_floor)
-        # 희소 인덱스 찾기 (여러 개면 가장 작은 count부터)
         sparse_idxs = [i for i, c in enumerate(counts) if c < thresh]
         if not sparse_idxs:
             break
 
-        # 병합 대상 선택
         i = int(sorted(sparse_idxs, key=lambda k: counts[k])[0])
-        # 병합 방향 결정
         if prefer == "left" and i > 0:
             j = i - 1
         elif prefer == "right" and i < len(rs) - 1:
             j = i + 1
         else:
-            # denser: 양옆 중 count가 큰 쪽으로 병합
             left_ok = i - 1 >= 0
             right_ok = i + 1 < len(rs)
             if left_ok and right_ok:
@@ -544,11 +534,9 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
         del rs[max(i, j)]
         changed = True
 
-        # 상한 초과 시 최소폭 인접 병합
         if len(rs) > max_classes:
             rs = _merge_smallest_adjacent(rs, max_classes)
 
-    # 최종 보정
     rs = [(float(lo), float(hi)) for (lo, hi) in rs]
     rs = _fix_monotonic(rs)
     rs = _ensure_zero_band(rs)
@@ -616,7 +604,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         neg = _STRATEGY_RETURN_CAP_NEG_MIN.get(strategy, -0.5)
         pos = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy,  0.5)
 
-        # 간격 생성
         edges = []
         val = float(neg)
         while val < pos - 1e-12:
@@ -637,7 +624,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         fixed = _ensure_zero_band(fixed)
         if BIN_CONF.get("strict", True):
             fixed = _strictify(fixed)
-        # 희소 bin 병합 (학습 데이터 기반)
         if rets_for_merge is not None and rets_for_merge.size > 0:
             fixed = _merge_sparse_bins_by_hist(fixed, rets_for_merge, MAX_CLASSES, BIN_CONF)
         if len(fixed) > MAX_CLASSES:
@@ -660,13 +646,10 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             if rets_signed.size < 10:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="수익률 샘플 부족")
 
-            # 전략별 ±캡
             rets_signed = np.array([_cap_by_strategy(float(r), strategy) for r in rets_signed], dtype=np.float32)
 
-            # ✅ 동적 bin 수 결정 (최소4 ~ MAX_CLASSES, 기본 힌트(NUM_CLASSES)는 하한 가이드 역할만)
             n_cls = _choose_n_classes(rets_signed, max_classes=int(_config.get("MAX_CLASSES", 20)), hint_min=int(_config.get("NUM_CLASSES", 10)))
 
-            # 분할 방식
             method2 = (BIN_CONF.get("method") or "quantile").lower()
             if method2 == "quantile":
                 qs = np.quantile(rets_signed, np.linspace(0, 1, n_cls + 1))
@@ -690,7 +673,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             if not fixed or len(fixed) < 2:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="최종 경계 부족(가드)")
 
-            # 희소 bin 병합(동적 방식에도 동일 적용)
             fixed = _merge_sparse_bins_by_hist(fixed, rets_signed, MAX_CLASSES, BIN_CONF)
             return fixed
 
@@ -699,7 +681,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
 
     # === 분기: fixed_step 우선 처리 ===
     if method_req == "fixed_step":
-        # 병합 판단에 사용할 학습 분포 확보 후 적용
         try:
             from data.utils import get_kline_by_strategy as _dbg_k
             df_dbg = _dbg_k(symbol, strategy)
@@ -761,7 +742,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     if group_id is None:
         return all_ranges
 
-    # ▶ 그룹 슬라이싱 가드(범위 밖이면 빈 리스트)
     start = int(group_id) * int(group_size)
     end = start + int(group_size)
     if start >= len(all_ranges):
@@ -789,7 +769,6 @@ TRAIN_BATCH_SIZE   = _get_int("TRAIN_BATCH_SIZE", 256)
 ORDERED_TRAIN      = _get_int("ORDERED_TRAIN", 1)
 
 # ⚠️ ‘표시’ 하한만 책임. 실제 타겟 계산은 모델/서비스 로직에서 결정.
-# predict.py 기본 임계(환경변수 미설정 시 0.01)와 일치시킴
 PREDICT_MIN_RETURN = _get_float("PREDICT_MIN_RETURN", 0.01)
 DISPLAY_MIN_RETURN = _get_float("DISPLAY_MIN_RETURN", _DISPLAY_MIN_RET)
 
@@ -802,6 +781,17 @@ def get_ORDERED_TRAIN():      return ORDERED_TRAIN
 def get_PREDICT_MIN_RETURN(): return PREDICT_MIN_RETURN
 def get_DISPLAY_MIN_RETURN(): return DISPLAY_MIN_RETURN
 def get_SSL_CACHE_DIR():      return os.getenv("SSL_CACHE_DIR", _config.get("SSL_CACHE_DIR", _default_config["SSL_CACHE_DIR"]))
+
+# ------------------------
+# ✅ 순서 1에서 요구한 전역 상수 (값만 확인/추가)
+# ------------------------
+# - DYN_CLASS_STEP: 고정 간격 bin 폭(0.75%) — 기본은 CLASS_BIN.step_pct를 따름, ENV로 override 가능
+DYN_CLASS_STEP = float(os.getenv("DYN_CLASS_STEP", str(_config.get("CLASS_BIN", {}).get("step_pct", 0.0075))))
+# - BOUNDARY_BAND: 라벨 경계 제외 폭(±). 학습 시 bin 경계 주변 샘플 마스킹에 사용.
+BOUNDARY_BAND = float(os.getenv("BOUNDARY_BAND", "0.0015"))
+# - CV 파라미터
+CV_FOLDS   = int(os.getenv("CV_FOLDS", "5"))
+CV_GATE_F1 = float(os.getenv("CV_GATE_F1", "0.50"))
 
 # ------------------------
 # 전역 캐시된 값(기존)
@@ -829,4 +819,6 @@ __all__ = [
     "get_SSL_CACHE_DIR",
     "FEATURE_INPUT_SIZE", "NUM_CLASSES", "FAIL_AUGMENT_RATIO", "MIN_FEATURES",
     "CALIB",
-]
+    # 순서1 추가 내보내기
+    "DYN_CLASS_STEP", "BOUNDARY_BAND", "CV_FOLDS", "CV_GATE_F1",
+    ]
