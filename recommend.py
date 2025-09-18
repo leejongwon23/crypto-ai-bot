@@ -229,20 +229,41 @@ def _get_latest_price(symbol, strategy):
         return 0.0
 
 # ──────────────────────────────────────────────────────────────
-# (신규) 모델 파일 인벤토리 캐시
+# (신규) 모델 파일 인벤토리 캐시 — 하위 디렉토리까지 일괄 수집(일관화)
 # ──────────────────────────────────────────────────────────────
 def _build_model_index():
+    """
+    /persistent/models
+      ├─ <files...>
+      └─ <SYMBOL>/<STRATEGY>/<files...>
+    를 모두 스캔하여 상대경로 세트로 반환.
+    """
     model_dir = "/persistent/models"
+    idx = set()
     try:
-        files = os.listdir(model_dir) if os.path.exists(model_dir) else []
-    except Exception:
-        files = []
-    return set(files)
+        if not os.path.isdir(model_dir):
+            return idx
+        for root, dirs, files in os.walk(model_dir):
+            for f in files:
+                if f.endswith((".pt", ".ptz", ".safetensors", ".meta.json")):
+                    rel = os.path.relpath(os.path.join(root, f), model_dir)
+                    # 통일된 구분자 사용
+                    idx.add(rel.replace("\\", "/"))
+    except Exception as e:
+        print(f"[warn] model index build failed: {e}")
+    return idx
 
 def _has_model_for(model_index, symbol, strategy):
-    pref = f"{symbol}_{strategy}_"
-    for f in model_index:
-        if f.startswith(pref) and (f.endswith(".pt") or f.endswith(".meta.json") or f.endswith(".ptz") or f.endswith(".safetensors")):
+    """
+    1) 루트: {symbol}_{strategy}_*.{pt,ptz,safetensors}
+    2) 트리:  {symbol}/{strategy}/*.{pt,ptz,safetensors}
+    """
+    pref_root = f"{symbol}_{strategy}_"
+    pref_tree = f"{symbol}/{strategy}/"
+    for p in model_index:
+        if p.startswith(pref_root) and (p.endswith(".pt") or p.endswith(".ptz") or p.endswith(".safetensors")):
+            return True
+        if p.startswith(pref_tree) and (p.endswith(".pt") or p.endswith(".ptz") or p.endswith(".safetensors")):
             return True
     return False
 
@@ -320,7 +341,7 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
     except Exception as e:
         print(f"[경고] prediction_log 보장 실패: {e}")
 
-    # 모델 인벤토리 캐시 1회 생성
+    # 모델 인벤토리 캐시 1회 생성 (하위 트리 포함)
     model_index = _build_model_index()
 
     for item in symbols:
