@@ -1,3 +1,4 @@
+# === logger.py (v2025-09-17 final: 확장 스키마/락/로테이션/집계 포함) ===
 import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil, re
 import sqlite3
 from collections import defaultdict, deque
