@@ -1,6 +1,6 @@
 # data/labels.py
-# 라벨 단일화 모듈
-# - 미래 수익률(gain) 계산(UTC, 창 경계 '< t1')
+# 라벨 단일화 모듈 (KST 고정, 창 경계 '< t1')
+# - 미래 수익률(gain) 계산
 # - config.get_class_ranges() 경계에 따라 클래스 할당
 # - (gains, labels, class_ranges) 반환
 
@@ -10,31 +10,32 @@ import numpy as np
 import pandas as pd
 from config import get_class_ranges
 
-# 전략별 예측 지평(시간) — config 내부 구현과 동일 값 사용
+# 전략별 예측 지평(시간) — config와 동일
 _HOURS = {"단기": 4, "중기": 24, "장기": 168}
 
 
-def _to_series_ts_utc(ts_like) -> pd.Series:
-    """timestamp -> UTC timezone-aware Series (라벨/컨피그와 1:1 일치)."""
+def _to_series_ts_kst(ts_like) -> pd.Series:
+    """timestamp -> Asia/Seoul timezone-aware Series."""
     ts = pd.to_datetime(ts_like, errors="coerce")
     if getattr(ts.dt, "tz", None) is None:
-        ts = ts.dt.tz_localize("UTC")       # ✅ UTC 고정
+        # 들어오는 데이터가 naive면 KST로 로컬라이즈
+        ts = ts.dt.tz_localize("Asia/Seoul")
     else:
-        ts = ts.dt.tz_convert("UTC")        # ✅ 변환 시에도 UTC
+        ts = ts.dt.tz_convert("Asia/Seoul")
     return ts
 
 
 def signed_future_return(df: pd.DataFrame, strategy: str) -> np.ndarray:
     """
     각 시점 t에서 horizon H 동안의 종가 기반 미래 수익률.
-    - 타임존: UTC
+    - 타임존: KST(Asia/Seoul) 고정
     - 창 경계: '< t1' (t1 직전까지의 마지막 캔들)  → 미래 누수 방지
     - close는 float 강제 + NaN 보간
     """
     if df is None or len(df) == 0 or "timestamp" not in df.columns or "close" not in df.columns:
         return np.zeros(0, dtype=np.float32)
 
-    ts = _to_series_ts_utc(df["timestamp"])
+    ts = _to_series_ts_kst(df["timestamp"])
     close = pd.to_numeric(df["close"], errors="coerce").ffill().bfill().astype(float).values
 
     H = pd.Timedelta(hours=_HOURS.get(strategy, 24))
@@ -50,7 +51,7 @@ def signed_future_return(df: pd.DataFrame, strategy: str) -> np.ndarray:
         while j < n and ts.iloc[j] < t1:
             j += 1
 
-        tgt_idx = max(i, min(j - 1, n - 1))  # ✅ 마지막 '< t1'을 사용
+        tgt_idx = max(i, min(j - 1, n - 1))  # 마지막 '< t1'을 사용
         ref = close[i] if close[i] != 0 else (close[i] + 1e-6)
         tgt = close[tgt_idx]
         out[i] = float((tgt - ref) / (ref + 1e-12))
@@ -82,7 +83,7 @@ def make_labels(
 ) -> tuple[np.ndarray, np.ndarray, list[tuple[float, float]]]:
     """
     라벨 단일화 엔드포인트.
-    1) 미래 수익률 gains 계산(UTC, '< t1')
+    1) 미래 수익률 gains 계산(KST, '< t1')
     2) config.get_class_ranges(...)로 경계 획득(고정간격+희소병합/제로밴드 보정)
     3) gains를 경계에 따라 정수 라벨로 매핑
     """
