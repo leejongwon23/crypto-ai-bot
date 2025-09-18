@@ -769,9 +769,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
         if not top_windows: top_windows=[20]
         _safe_print(f"[WINDOWS] top={top_windows}")
 
-        # ====== 학습 공통 준비(스플릿/스케일러는 윈도우와 무관: 시퀀스 빌드 이후 수행) ======
-        all_window_results=[]
-
+        # ====== 학습 공통 준비 ======
         for window in top_windows:
             # window 상한
             window=min(window, max(6,len(features_only)-1))
@@ -1048,11 +1046,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                 except Exception:
                     acc=0.0; f1_val=0.0
                 val_loss = float(val_loss_sum / max(1,n_val))
-                # === [진단 호출] 성능 원인 로그 ===
-try: _diag_log_eval(lbls, preds, class_ranges, window, model_type, f1_val, _safe_print)
-except Exception as _e: _safe_print(f"[진단] skip → {_e}")
-# === [진단 호출 끝] ===
-                
+
+                # === [진단 호출] 성능 원인 로그 (인덴트 고정) ===
+                try:
+                    _diag_log_eval(lbls, preds, class_ranges, window, model_type, f1_val, _safe_print)
+                except Exception as _e:
+                    _safe_print(f"ℹ️ [진단] skip → {_e}")
+                # === [진단 호출 끝] ===
 
                 min_gate = max(_min_f1_for(strategy), float(get_QUALITY().get("VAL_F1_MIN", 0.10)))
 
