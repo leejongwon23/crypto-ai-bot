@@ -1,4 +1,4 @@
-# config.py (FINAL FIXED: fixed_step bins applied, helpers at module scope, KST-consistent)
+# config.py (FIXED FINAL: F1 안정화 — bin 수 축소·간격 확대·제로밴드/폭 강화, 히스토그램 병합 기준 강화, KST 일관)
 
 import json
 import os
@@ -10,7 +10,7 @@ CONFIG_PATH = "/persistent/config.json"
 # ===============================
 _default_config = {
     "NUM_CLASSES": 10,
-    "MAX_CLASSES": 20,
+    "MAX_CLASSES": 12,  # 🔧 기존 20 → 12 (희소 클래스/데이터 파편화 방지)
     "FEATURE_INPUT_SIZE": 24,
     "FAIL_AUGMENT_RATIO": 3,
     "MIN_FEATURES": 5,
@@ -88,13 +88,13 @@ _default_config = {
     "CLASS_BIN": {
         "method": "fixed_step",   # "fixed_step" | "quantile" | "linear"
         "strict": True,           # 구간 단조/겹침 방지
-        "zero_band_eps": 0.0015,  # 0% 주변 중립 밴드(±0.15%p)
-        "min_width": 0.0005,      # 최소 구간 폭(0.05%p)
-        "step_pct": 0.0075,       # 0.75% 단위 고정 bin 간격
+        "zero_band_eps": 0.0020,  # 🔧 0% 주변 중립 밴드(±0.20%p) — 기존 0.0015 → 0.0020
+        "min_width": 0.0010,      # 🔧 최소 구간 폭(0.10%p) — 기존 0.0005 → 0.0010
+        "step_pct": 0.0150,       # 🔧 1.5% 단위 고정 bin 간격 — 기존 0.0075 → 0.0150
         "merge_sparse": {
             "enabled": True,
-            "min_ratio": 0.01,        # 전체 샘플의 1% 미만이면 희소로 간주
-            "min_count_floor": 50,    # 절대 하한 50
+            "min_ratio": 0.02,        # 🔧 전체 샘플의 2% 미만이면 희소 — 기존 0.01 → 0.02
+            "min_count_floor": 80,    # 🔧 절대 하한 80 — 기존 50 → 80
             "prefer": "denser"        # "denser" | "left" | "right"
         }
     },
@@ -417,7 +417,7 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
 
     return np.concatenate([dn, up]).astype(np.float32)
 
-# ---- 동적 bin 개수 결정 로직(최대 20) ---------------------------------------
+# ---- 동적 bin 개수 결정 로직(최대 20→MAX_CLASSES) ---------------------------------------
 def _choose_n_classes(rets_signed, max_classes, hint_min=4):
     """
     데이터 기반 동적 bin 수 결정:
@@ -485,8 +485,8 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
         return ranges
 
     total = int(rets_signed.size)
-    min_ratio = float(opt.get("min_ratio", 0.01))
-    min_floor = int(opt.get("min_count_floor", 50))
+    min_ratio = float(opt.get("min_ratio", 0.02))        # 🔧 상향
+    min_floor = int(opt.get("min_count_floor", 80))      # 🔧 상향
     prefer = str(opt.get("prefer", "denser")).lower()
 
     edges = [ranges[0][0]] + [hi for (_, hi) in ranges]
@@ -569,7 +569,7 @@ def class_to_expected_return(class_id: int, symbol: str, strategy: str):
 def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, group_size=5):
     """
     미래 최대고가/최저저가 기반 signed 수익률 분포로 클래스 경계 생성.
-    - 기본: fixed_step(0.75%) + 희소 병합
+    - 기본: fixed_step(1.5%) + 희소 병합(강화 기준)
     - 예외 시: 동적/균등 분할 백업
     """
     import numpy as np
@@ -602,9 +602,9 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
 
     # ✅ 고정 간격 분할 (+ 희소 병합)
     def compute_fixed_step_ranges(rets_for_merge):
-        step = float(BIN_CONF.get("step_pct", 0.0075))
+        step = float(BIN_CONF.get("step_pct", 0.0150))  # 🔧 1.5%
         if step <= 0:
-            step = 0.0075
+            step = 0.0150
         neg = _STRATEGY_RETURN_CAP_NEG_MIN.get(strategy, -0.5)
         pos = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy,  0.5)
 
@@ -652,7 +652,7 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
 
             rets_signed = np.array([_cap_by_strategy(float(r), strategy) for r in rets_signed], dtype=np.float32)
 
-            n_cls = _choose_n_classes(rets_signed, max_classes=int(_config.get("MAX_CLASSES", 20)), hint_min=int(_config.get("NUM_CLASSES", 10)))
+            n_cls = _choose_n_classes(rets_signed, max_classes=int(_config.get("MAX_CLASSES", 12)), hint_min=int(_config.get("NUM_CLASSES", 10)))
 
             method2 = (BIN_CONF.get("method") or "quantile").lower()
             if method2 == "quantile":
@@ -671,8 +671,8 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             fixed = _ensure_zero_band(fixed)
             if BIN_CONF.get("strict", True):
                 fixed = _strictify(fixed)
-            if len(fixed) > int(_config.get("MAX_CLASSES", 20)):
-                fixed = _merge_smallest_adjacent(fixed, int(_config.get("MAX_CLASSES", 20)))
+            if len(fixed) > int(_config.get("MAX_CLASSES", 12)):
+                fixed = _merge_smallest_adjacent(fixed, int(_config.get("MAX_CLASSES", 12)))
 
             if not fixed or len(fixed) < 2:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="최종 경계 부족(가드)")
@@ -789,10 +789,10 @@ def get_SSL_CACHE_DIR():      return os.getenv("SSL_CACHE_DIR", _config.get("SSL
 # ------------------------
 # ✅ 순서 1에서 요구한 전역 상수 (값만 확인/추가)
 # ------------------------
-# - DYN_CLASS_STEP: 고정 간격 bin 폭(0.75%) — 기본은 CLASS_BIN.step_pct를 따름, ENV로 override 가능
-DYN_CLASS_STEP = float(os.getenv("DYN_CLASS_STEP", str(_config.get("CLASS_BIN", {}).get("step_pct", 0.0075))))
+# - DYN_CLASS_STEP: 고정 간격 bin 폭(1.5%) — 기본은 CLASS_BIN.step_pct를 따름, ENV로 override 가능
+DYN_CLASS_STEP = float(os.getenv("DYN_CLASS_STEP", str(_config.get("CLASS_BIN", {}).get("step_pct", 0.0150))))
 # - BOUNDARY_BAND: 라벨 경계 제외 폭(±). 학습 시 bin 경계 주변 샘플 마스킹에 사용.
-BOUNDARY_BAND = float(os.getenv("BOUNDARY_BAND", "0.0015"))
+BOUNDARY_BAND = float(os.getenv("BOUNDARY_BAND", "0.0020"))  # 🔧 기존 0.0015 → 0.0020
 # - CV 파라미터
 CV_FOLDS   = int(os.getenv("CV_FOLDS", "5"))
 CV_GATE_F1 = float(os.getenv("CV_GATE_F1", "0.50"))
@@ -825,4 +825,4 @@ __all__ = [
     "CALIB",
     # 순서1 추가 내보내기
     "DYN_CLASS_STEP", "BOUNDARY_BAND", "CV_FOLDS", "CV_GATE_F1",
-    ]
+        ]
