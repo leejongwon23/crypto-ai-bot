@@ -10,8 +10,20 @@ import numpy as np
 import pandas as pd
 import pytz
 
-# ✅ 단일 소스 심볼/데이터
-from data.utils import get_ALL_SYMBOLS, get_kline_by_strategy
+# ✅ 단일 소스 심볼/데이터 (패키지/루트 양쪽 폴백)
+try:
+    from data.utils import get_ALL_SYMBOLS, get_kline_by_strategy
+except Exception:
+    try:
+        from utils import get_ALL_SYMBOLS, get_kline_by_strategy  # 루트 폴백
+    except Exception as _e:
+        # 마지막 안전책: 런타임 시 즉시 실패 대신 빈 동작으로 강제 안전화
+        def get_ALL_SYMBOLS():
+            print(f"[경고] get_ALL_SYMBOLS 임포트 실패: {_e}")
+            return []
+        def get_kline_by_strategy(symbol, strategy):
+            print(f"[경고] get_kline_by_strategy 임포트 실패: {symbol}-{strategy} / {_e}")
+            return None
 
 # ✅ 로그 보장
 from logger import log_audit_prediction as log_audit, ensure_prediction_log_exists
