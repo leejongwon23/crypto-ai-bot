@@ -290,49 +290,8 @@ def _log_fail(symbol,strategy,reason):
 
 def _strategy_horizon_hours(s:str)->int: return {"단기":4,"중기":24,"장기":168}.get(s,24)
 
-# ⬇️ 변경: 라벨 수익률 모드 선택
-def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
-    if df is None or len(df) == 0 or "timestamp" not in df.columns:
-        return np.zeros(0 if df is None else len(df), dtype=np.float32)
-
-    mode = os.getenv("LABEL_RETURN_MODE", "close")  # "close" | "max" | "signed_extreme"
-    ts = pd.to_datetime(df["timestamp"], errors="coerce")
-    ts = (ts.dt.tz_localize("UTC") if ts.dt.tz is None else ts).dt.tz_convert("Asia/Seoul")
-
-    close = df["close"].astype(float).values
-    high  = (df["high"] if "high" in df.columns else df["close"]).astype(float).values
-    low   = (df["low"]  if "low"  in df.columns else df["close"]).astype(float).values
-
-    out = np.zeros(len(df), dtype=np.float32)
-    H = pd.Timedelta(hours=horizon_hours)
-    j0 = 0
-
-    for i in range(len(df)):
-        t0 = ts.iloc[i]; t1 = t0 + H
-        j = max(j0, i)
-        mx = high[i]; mn = low[i]; j_last = i
-        while j < len(df) and ts.iloc[j] <= t1:
-            if high[j] > mx: mx = high[j]
-            if low[j]  < mn: mn = low[j]
-            j_last = j
-            j += 1
-        j0 = max(j_last, i)
-
-        base = close[i] if close[i] > 0 else (close[i] + 1e-6)
-
-        if mode == "max":
-            r = (mx - base) / (base + 1e-12)
-        elif mode == "signed_extreme":
-            up = (mx - base) / (base + 1e-12)
-            dn = (mn - base) / (base + 1e-12)
-            r = up if abs(up) >= abs(dn) else dn
-        else:  # "close"
-            fut = close[j_last]
-            r = (fut - base) / (base + 1e-12)
-
-        out[i] = float(r)
-
-    return out
+# ⛔️ 라벨 계산은 labels.make_labels로 일원화하므로
+# 과거 _future_returns_by_timestamp 함수는 제거됨.
 
 # === 커버리지 기반 검증 분할 ===
 def coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, max_windows=200, num_classes=None):
@@ -626,7 +585,56 @@ def _diag_log_eval(lbls, preds, class_ranges, window, model_type, model_f1, _saf
     except Exception as _e:
         _safe_print_fn(f"[진단] 로그 실패 → {_e}")
 
-def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=None, stop_event: Optional[threading.Event] = None) -> Dict[str, Any]:
+# ===== 라벨 단일화(UTC,’< t1’) + 경계밴드 상수 =====
+from data.labels import make_labels
+from config import BOUNDARY_BAND
+
+# 라벨 계산(윈도우 옵티마이저와 호환) — 최근 구간 전용
+def _future_returns_by_timestamp(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
+    if df is None or len(df) == 0 or "timestamp" not in df.columns:
+        return np.zeros(0 if df is None else len(df), dtype=np.float32)
+
+    mode = os.getenv("LABEL_RETURN_MODE", "close")  # "close" | "max" | "signed_extreme"
+    ts = pd.to_datetime(df["timestamp"], errors="coerce")
+    ts = (ts.dt.tz_localize("UTC") if ts.dt.tz is None else ts).dt.tz_convert("Asia/Seoul")
+
+    close = df["close"].astype(float).values
+    high  = (df["high"] if "high" in df.columns else df["close"]).astype(float).values
+    low   = (df["low"]  if "low"  in df.columns else df["close"]).astype(float).values
+
+    out = np.zeros(len(df), dtype=np.float32)
+    H = pd.Timedelta(hours=horizon_hours)
+    j0 = 0
+
+    for i in range(len(df)):
+        t0 = ts.iloc[i]; t1 = t0 + H
+        j = max(j0, i)
+        mx = high[i]; mn = low[i]; j_last = i
+        while j < len(df) and ts.iloc[j] <= t1:
+            if high[j] > mx: mx = high[j]
+            if low[j]  < mn: mn = low[j]
+            j_last = j
+            j += 1
+        j0 = max(j_last, i)
+
+        base = close[i] if close[i] > 0 else (close[i] + 1e-6)
+
+        if mode == "max":
+            r = (mx - base) / (base + 1e-12)
+        elif mode == "signed_extreme":
+            up = (mx - base) / (base + 1e-12)
+            dn = (mn - base) / (base + 1e-12)
+            r = up if abs(up) >= abs(dn) else dn
+        else:  # "close"
+            fut = close[j_last]
+            r = (fut - base) / (base + 1e-12)
+
+        out[i] = float(r)
+
+    return out
+
+
+def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] = None, stop_event: Optional[threading.Event] = None) -> Dict[str, Any]:
     """
     ⑤ 상위 3 윈도우 순차 학습/평가/저장.
     - window_optimizer.find_best_windows(...) → [w1, w2, w3] 사용 (없으면 단일 best 폴백).
@@ -1047,12 +1055,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
                     acc=0.0; f1_val=0.0
                 val_loss = float(val_loss_sum / max(1,n_val))
 
-                # === [진단 호출] 성능 원인 로그 (인덴트 고정) ===
+                # === [진단 호출] 성능 원인 로그
                 try:
                     _diag_log_eval(lbls, preds, class_ranges, window, model_type, f1_val, _safe_print)
                 except Exception as _e:
                     _safe_print(f"ℹ️ [진단] skip → {_e}")
-                # === [진단 호출 끝] ===
 
                 min_gate = max(_min_f1_for(strategy), float(get_QUALITY().get("VAL_F1_MIN", 0.10)))
 
@@ -1128,6 +1135,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs:Optional[int]=No
     except Exception as e:
         _safe_print(f"[EXC] train_one_model {symbol}-{strategy}-g{group_id} → {e}\n{traceback.format_exc()}")
         _log_fail(symbol,strategy,str(e)); return res
+
 
 def _prune_caches_and_gc():
     try:
