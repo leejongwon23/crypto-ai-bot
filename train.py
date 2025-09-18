@@ -381,10 +381,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     DataCacheManager.delete(f"{symbol}-{strategy}-features")
                 except: pass
 
+                # ✅ 변경점: per-class F1 & coverage 계산을 위해 y_true/y_pred/num_classes 전달
                 logger.log_training_result(
                     symbol, strategy, model=os.path.basename(wpath), accuracy=acc, f1=f1_val, loss=val_loss,
                     note=(f"train_one_model(window={window}, cap={len(features_only)}, engine=manual)"),
-                    source_exchange="BYBIT", status="success"
+                    source_exchange="BYBIT", status="success",
+                    y_true=lbls, y_pred=preds, num_classes=len(class_ranges)
                 )
                 passed=bool(f1_val>=min_gate)
                 res["models"].append({"window":int(window),"type":model_type,"acc":acc,"f1":f1_val,"val_loss":val_loss,
