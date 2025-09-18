@@ -10,7 +10,12 @@
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
 from sklearn.preprocessing import MinMaxScaler
-from data.utils import get_kline_by_strategy, compute_features
+
+# ✅ utils 임포트 — 패키지/루트 폴백
+try:
+    from data.utils import get_kline_by_strategy, compute_features
+except Exception:
+    from utils import get_kline_by_strategy, compute_features
 
 __all__ = [
     "predict",
@@ -58,7 +63,7 @@ def _group_active() -> bool:
 
 def open_predict_gate(note=""):
     try:
-        with open(PREDICT_GATE, "w", encoding="utf-8") as f:
+        with open(PREDICT_GATE, "w", encoding="utf-8") opt as f:
             json.dump({"open": True, "opened_at": _now_kst().isoformat(), "note": note}, f, ensure_ascii=False)
             try: f.flush(); os.fsync(f.fileno())
             except Exception: pass
@@ -195,11 +200,17 @@ except Exception:
         except Exception:
             return None
 
-# ====== Project utils ======
+# ====== Project utils & models ======
 from logger import log_prediction, update_model_success, PREDICTION_HEADERS, ensure_prediction_log_exists
 from failure_db import insert_failure_record, ensure_failure_db
 from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
-from model.base_model import get_model
+
+# ✅ base_model 임포트 — 패키지/루트 폴백
+try:
+    from model.base_model import get_model
+except Exception:
+    from base_model import get_model
+
 from config import (
     get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups,
     get_class_return_range, class_to_expected_return
@@ -1077,7 +1088,10 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
                     seq = seq[:, :inp_size]
 
                 x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0)
+
+                # ✅ base_model.get_model — 패키지/루트 폴백을 통해 확보
                 model = get_model(mtype, input_size=inp_size, output_size=num_cls)
+
                 loaded = load_model_any(model_path, model)
                 if isinstance(loaded, dict) and model is not None:
                     try:
