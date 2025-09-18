@@ -1,6 +1,6 @@
 # data/labels.py
 # 라벨 단일화 모듈 (KST 고정, 창 경계 '< t1')
-# - 미래 수익률(gain) 계산
+# - 미래 수익률(gain) 계산 (극단 수익률 방식, config와 동일)
 # - config.get_class_ranges() 경계에 따라 클래스 할당
 # - (gains, labels, class_ranges) 반환
 
@@ -8,17 +8,13 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from config import get_class_ranges
-
-# 전략별 예측 지평(시간) — config와 동일
-_HOURS = {"단기": 4, "중기": 24, "장기": 168}
+from config import get_class_ranges, BOUNDARY_BAND, _strategy_horizon_hours, _future_extreme_signed_returns
 
 
 def _to_series_ts_kst(ts_like) -> pd.Series:
     """timestamp -> Asia/Seoul timezone-aware Series."""
     ts = pd.to_datetime(ts_like, errors="coerce")
     if getattr(ts.dt, "tz", None) is None:
-        # 들어오는 데이터가 naive면 KST로 로컬라이즈
         ts = ts.dt.tz_localize("Asia/Seoul")
     else:
         ts = ts.dt.tz_convert("Asia/Seoul")
@@ -27,36 +23,17 @@ def _to_series_ts_kst(ts_like) -> pd.Series:
 
 def signed_future_return(df: pd.DataFrame, strategy: str) -> np.ndarray:
     """
-    각 시점 t에서 horizon H 동안의 종가 기반 미래 수익률.
+    각 시점 t에서 horizon H 동안의 극단 수익률(최대 상승/최대 하락) 기반 signed return.
+    - config._future_extreme_signed_returns()와 동일 정의 사용
     - 타임존: KST(Asia/Seoul) 고정
-    - 창 경계: '< t1' (t1 직전까지의 마지막 캔들)  → 미래 누수 방지
-    - close는 float 강제 + NaN 보간
+    - 창 경계: '< t1'
     """
     if df is None or len(df) == 0 or "timestamp" not in df.columns or "close" not in df.columns:
         return np.zeros(0, dtype=np.float32)
 
-    ts = _to_series_ts_kst(df["timestamp"])
-    close = pd.to_numeric(df["close"], errors="coerce").ffill().bfill().astype(float).values
-
-    H = pd.Timedelta(hours=_HOURS.get(strategy, 24))
-    n = len(df)
-
-    out = np.zeros(n, dtype=np.float32)
-    j = 0
-    for i in range(n):
-        t1 = ts.iloc[i] + H
-
-        # i 이상에서 t1 직전(< t1)까지 포인터 전진
-        j = max(j, i)
-        while j < n and ts.iloc[j] < t1:
-            j += 1
-
-        tgt_idx = max(i, min(j - 1, n - 1))  # 마지막 '< t1'을 사용
-        ref = close[i] if close[i] != 0 else (close[i] + 1e-6)
-        tgt = close[tgt_idx]
-        out[i] = float((tgt - ref) / (ref + 1e-12))
-
-    return out
+    horizon_hours = _strategy_horizon_hours(strategy)
+    rets_signed = _future_extreme_signed_returns(df, horizon_hours=horizon_hours)
+    return rets_signed
 
 
 def _assign_label_one(g: float, class_ranges: list[tuple[float, float]]) -> int:
@@ -83,15 +60,22 @@ def make_labels(
 ) -> tuple[np.ndarray, np.ndarray, list[tuple[float, float]]]:
     """
     라벨 단일화 엔드포인트.
-    1) 미래 수익률 gains 계산(KST, '< t1')
+    1) 미래 수익률 gains 계산(KST, '< t1', 극단 수익률)
     2) config.get_class_ranges(...)로 경계 획득(고정간격+희소병합/제로밴드 보정)
     3) gains를 경계에 따라 정수 라벨로 매핑
+    4) 경계 ±BOUNDARY_BAND 이내 샘플은 -1로 마스킹
     """
     gains = signed_future_return(df, strategy)
     class_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=group_id)
 
     labels = np.zeros(len(gains), dtype=np.int64)
     for i, g in enumerate(gains):
-        labels[i] = _assign_label_one(float(g), class_ranges)
+        lbl = _assign_label_one(float(g), class_ranges)
+        # 경계 근처 샘플은 마스킹 처리
+        for lo, hi in class_ranges:
+            if abs(g - lo) <= BOUNDARY_BAND or abs(g - hi) <= BOUNDARY_BAND:
+                lbl = -1
+                break
+        labels[i] = lbl
 
     return gains.astype(np.float32), labels.astype(np.int64), class_ranges
