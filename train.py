@@ -31,11 +31,21 @@ set_global_seed(int(os.getenv("GLOBAL_SEED","20240101")))
 
 # ---------- 외부 의존 ----------
 from model_io import save_model
-from data.utils import (
-    get_kline_by_strategy, compute_features, SYMBOL_GROUPS,
-    should_train_symbol, mark_symbol_trained, ready_for_group_predict, mark_group_predicted,
-    reset_group_order, CacheManager as DataCacheManager
-)
+
+# [풀백] data.utils → utils
+try:
+    from data.utils import (
+        get_kline_by_strategy, compute_features, SYMBOL_GROUPS,
+        should_train_symbol, mark_symbol_trained, ready_for_group_predict, mark_group_predicted,
+        reset_group_order, CacheManager as DataCacheManager
+    )
+except Exception:
+    from utils import (
+        get_kline_by_strategy, compute_features, SYMBOL_GROUPS,
+        should_train_symbol, mark_symbol_trained, ready_for_group_predict, mark_group_predicted,
+        reset_group_order, CacheManager as DataCacheManager
+    )
+
 from model.base_model import get_model
 from feature_importance import compute_feature_importance, save_feature_importance  # (유지)
 from failure_db import insert_failure_record, ensure_failure_db
@@ -44,9 +54,33 @@ from config import (
     get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges, set_NUM_CLASSES,
     STRATEGY_CONFIG, get_QUALITY, get_LOSS, BOUNDARY_BAND
 )
-from data_augmentation import balance_classes
-from focal_loss import FocalLoss
-from data.labels import make_labels
+
+# [가드] data_augmentation (없으면 원본 그대로 통과)
+try:
+    from data_augmentation import balance_classes
+except Exception:
+    def balance_classes(X: np.ndarray, y: np.ndarray, num_classes: int):
+        # 대체: 아무 수정 없이 원본 반환 (학습은 진행 가능)
+        return X, y
+
+# [가드] focal_loss (없으면 CE Loss 대체)
+try:
+    from focal_loss import FocalLoss
+except Exception:
+    class FocalLoss(nn.Module):
+        def __init__(self, gamma: float = 2.0, weight: Optional[torch.Tensor] = None):
+            super().__init__()
+            # 안전 대체: CrossEntropy 사용(가중치 지원)
+            self.ce = nn.CrossEntropyLoss(weight=weight)
+        def forward(self, logits, targets):
+            return self.ce(logits, targets)
+
+# [풀백] data.labels → labels
+try:
+    from data.labels import make_labels
+except Exception:
+    from labels import make_labels
+
 try:
     from window_optimizer import find_best_window, find_best_windows
 except Exception:
