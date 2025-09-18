@@ -1,4 +1,4 @@
-# config.py (FINAL FIXED: fixed_step bins applied, helpers at module scope)
+# config.py (FINAL FIXED: fixed_step bins applied, helpers at module scope, KST-consistent)
 
 import json
 import os
@@ -365,7 +365,7 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
     """
     각 시점 i에서 horizon 동안의 최대상승률(>=0)과 최대하락률(<=0)을 계산해
     '음수/양수'가 공존하는 signed 수익률 샘플 생성.
-    👉 라벨 산식과 완벽히 일치: UTC 기준, 창 경계는 '< t1'
+    👉 라벨/윈도우옵티마이저와 완벽히 일치: **KST(Asia/Seoul) 기준**, 창 경계는 '< t1'
     """
     import numpy as np
     import pandas as pd
@@ -374,13 +374,15 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
         return np.zeros(0, dtype=np.float32)
 
     ts = pd.to_datetime(df["timestamp"], errors="coerce")
-    close = df["close"].astype(float).values
-    high = (df["high"] if "high" in df.columns else df["close"]).astype(float).values
-    low  = (df["low"]  if "low"  in df.columns else df["close"]).astype(float).values
-
-    # ✅ UTC 고정(라벨과 동일) — 변환/지역시간 사용 금지
+    # ✅ KST(Asia/Seoul) 기준 고정
     if getattr(ts.dt, "tz", None) is None:
-        ts = ts.dt.tz_localize("UTC")
+        ts = ts.dt.tz_localize("Asia/Seoul")
+    else:
+        ts = ts.dt.tz_convert("Asia/Seoul")
+
+    close = pd.to_numeric(df["close"], errors="coerce").ffill().bfill().astype(float).values
+    high  = pd.to_numeric(df["high"] if "high" in df.columns else df["close"], errors="coerce").ffill().bfill().astype(float).values
+    low   = pd.to_numeric(df["low"]  if "low"  in df.columns else df["close"], errors="coerce").ffill().bfill().astype(float).values
 
     horizon = pd.Timedelta(hours=int(horizon_hours))
 
@@ -396,7 +398,8 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
         j = max(j_up, i)
         max_h = high[i]
         while j < len(df) and ts.iloc[j] < t1:
-            if high[j] > max_h: max_h = high[j]
+            if high[j] > max_h:
+                max_h = high[j]
             j += 1
         j_up = max(j_up, i)
         base = close[i] if close[i] > 0 else (close[i] + 1e-6)
@@ -406,7 +409,8 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
         k = max(j_dn, i)
         min_l = low[i]
         while k < len(df) and ts.iloc[k] < t1:
-            if low[k] < min_l: min_l = low[k]
+            if low[k] < min_l:
+                min_l = low[k]
             k += 1
         j_dn = max(j_dn, i)
         dn[i] = float((min_l - base) / (base + 1e-12))  # <= 0
@@ -821,4 +825,4 @@ __all__ = [
     "CALIB",
     # 순서1 추가 내보내기
     "DYN_CLASS_STEP", "BOUNDARY_BAND", "CV_FOLDS", "CV_GATE_F1",
-]
+    ]
