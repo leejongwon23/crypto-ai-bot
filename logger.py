@@ -1,4 +1,4 @@
-# === logger.py (v2025-09-17 final: 확장 스키마/락/로테이션/집계 포함) ===
+# === logger.py (v2025-09-17 final: 확장 스키마/락/로테이션/집계 포함 + 8번 요약 옵션) ===
 import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil, re
 import sqlite3
 from collections import defaultdict, deque
@@ -38,6 +38,27 @@ def log_cache_hit(name: str):
             print(f"[CACHE HIT] {name} count={c}")
     except Exception:
         pass
+
+# -------------------------
+# 8번: 경계 요약 로깅 옵션 (NEW)
+# -------------------------
+LOG_BOUNDARY_SUMMARY = os.getenv("LOG_BOUNDARY_SUMMARY", "0") == "1"  # 1이면 요약모드
+LOG_BOUNDARY_TOPK    = max(1, int(os.getenv("LOG_BOUNDARY_TOPK", "20")))
+LOG_BOUNDARY_BUCKET  = float(os.getenv("LOG_BOUNDARY_BUCKET", "0.01"))  # 1% 단위 기본
+
+def _bucketize(v: float, step: float) -> tuple:
+    """
+    값 v를 step 단위 버킷으로 스냅. (하한, 상한) 튜플 반환.
+    예: step=0.01, v=0.053 → (0.05, 0.06)
+    """
+    try:
+        import math
+        base = math.floor(v / step) * step
+        lo = round(base, 6)
+        hi = round(base + step, 6)
+        return (lo, hi)
+    except Exception:
+        return (v, v)
 
 # -------------------------
 # 기본 경로/디렉토리
@@ -918,6 +939,77 @@ def log_class_ranges(symbol, strategy, group_id=None, class_ranges=None, note=""
     now = now_kst().isoformat()
 
     class_ranges = class_ranges or []
+
+    # ---- (NEW) 요약 모드: 중앙값을 LOG_BOUNDARY_BUCKET 단위로 버킷 집계 ----
+    if LOG_BOUNDARY_SUMMARY and class_ranges:
+        # 버킷 집계
+        bucket = max(LOG_BOUNDARY_BUCKET, 1e-9)
+        agg = {}
+        for rng in class_ranges:
+            try:
+                lo, hi = float(rng[0]), float(rng[1])
+                mid = (lo + hi) / 2.0
+            except Exception:
+                continue
+            blo, bhi = _bucketize(mid, bucket)
+            key = (blo, bhi)
+            d = agg.setdefault(key, {"cnt":0, "min":lo, "max":hi, "sum_mid":0.0})
+            d["cnt"] += 1
+            d["min"] = min(d["min"], lo)
+            d["max"] = max(d["max"], hi)
+            d["sum_mid"] += mid
+
+        rows = []
+        for (blo, bhi), d in agg.items():
+            mean_mid = d["sum_mid"] / max(1, d["cnt"])
+            rows.append({
+                "timestamp": now,
+                "symbol": str(symbol),
+                "strategy": str(strategy),
+                "group_id": int(group_id) if group_id is not None else 0,
+                "bucket_lo": float(blo),
+                "bucket_hi": float(bhi),
+                "count": int(d["cnt"]),
+                "min": float(d["min"]),
+                "max": float(d["max"]),
+                "mean_mid": float(round(mean_mid, 6)),
+                "note": str(note or "")
+            })
+
+        # 상위 TOPK(빈도 우선, 동률은 |mean_mid| 큰 순)
+        rows.sort(key=lambda r: (r["count"], abs(r["mean_mid"])), reverse=True)
+        top_rows = rows[:LOG_BOUNDARY_TOPK]
+
+        sum_path = os.path.join(LOG_DIR, "class_ranges_summary.csv")
+        write_header = not os.path.exists(sum_path)
+        try:
+            with open(sum_path, "a", newline="", encoding="utf-8-sig") as f:
+                w = csv.DictWriter(f, fieldnames=[
+                    "timestamp","symbol","strategy","group_id",
+                    "bucket_lo","bucket_hi","count","min","max","mean_mid","note"
+                ])
+                if write_header:
+                    w.writeheader()
+                for r in top_rows:
+                    w.writerow(r)
+            _print_once(f"class_ranges_sum:{symbol}:{strategy}",
+                        f"[📐 클래스경계 요약] {symbol}-{strategy}-g{group_id} → buckets={len(rows)} topk={len(top_rows)} (step={bucket})")
+        except Exception as e:
+            print(f"[⚠️ 클래스경계 요약 로그 실패] {e}")
+
+        # 요약 모드시 상세 CSV는 **헤더만 보장 + 마커 한 줄**(폭주 방지)
+        write_header_detail = not os.path.exists(path)
+        try:
+            with open(path, "a", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                if write_header_detail:
+                    w.writerow(["timestamp","symbol","strategy","group_id","idx","low","high","note"])
+                w.writerow([now, symbol, strategy, int(group_id) if group_id is not None else 0, -1, "", "", f"summary_only step={bucket} topk={LOG_BOUNDARY_TOPK}"])
+        except Exception as e:
+            print(f"[⚠️ 클래스경계(요약마커) 기록 실패] {e}")
+        return  # 상세 기록 종료
+
+    # ---- (기존 상세 기록 경로) ----
     write_header = not os.path.exists(path)
     try:
         with open(path, "a", newline="", encoding="utf-8-sig") as f:
@@ -1040,9 +1132,9 @@ def log_eval_coverage(symbol: str, strategy: str, counts: dict, num_classes: int
     write_header = not os.path.exists(path)
     try:
         with open(path, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.writer(f)
+            w = csv.DictWriter(f, fieldnames=["timestamp","symbol","strategy","num_classes","covered","coverage","total","counts_json","note"])
             if write_header:
-                w.writerow(["timestamp","symbol","strategy","num_classes","covered","coverage","total","counts_json","note"])
+                w.writeheader()
             w.writerow([now, symbol, strategy, int(num_classes), int(covered), float(round(coverage,4)), int(total), json.dumps(counts, ensure_ascii=False), str(note or "")])
         if covered <= 1:
             print(f"🔴 [경고] 검증 라벨 단일 클래스 감지 → {symbol}-{strategy} (covered={covered}/{num_classes})")
