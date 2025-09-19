@@ -723,7 +723,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     "class": -1, "expected_return": 0.0,
                     "class_return_min": 0.0, "class_return_max": 0.0,
                     "class_return_text": "", "position": "neutral",
-                    "timestamp": _now_kst().isoformat(), "source": source,
+                    "timestamp": _now_kst().isoformat(),
+                    "source": source,
                     "regime": regime, "reason": "abstain_low_confidence", "success": False,
                     "predicted_class": -1, "label": -1
                 }
