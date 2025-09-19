@@ -1,4 +1,4 @@
-# app.py — patched (train API safe wrappers + robust checks)
+# app.py — patched (train API safe wrappers + robust checks + log schema align)
 from flask import Flask, jsonify, request, Response
 from recommend import main
 import train, os, threading, datetime, pytz, traceback, sys, shutil, re, time
@@ -16,7 +16,8 @@ from wrong_data_loader import load_training_prediction_data
 from predict import evaluate_predictions
 from train import train_symbol_group_loop  # compatibility
 import maintenance_fix_meta
-from logger import ensure_prediction_log_exists
+# 🔧 확장 스키마/보장 유틸: 헤더 상수까지 직접 사용
+from logger import ensure_prediction_log_exists, ensure_train_log_exists, PREDICTION_HEADERS, TRAIN_HEADERS
 
 # integrity guard optional
 try:
@@ -286,7 +287,6 @@ FAILURE_LOG       = os.path.join(LOG_DIR, "failure_count.csv")
 
 # ensure logs
 try:
-    from logger import ensure_train_log_exists
     ensure_train_log_exists()
 except Exception:
     pass
@@ -562,7 +562,8 @@ def yopo_health():
             else:
                 pred["volatility"] = False
             try:
-                pred["return"] = pd.to_numeric(pred.get("return", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+                # 우리 스키마는 return_value임. 없으면 rate로 대체.
+                pred["return"] = pd.to_numeric(pred.get("return_value", pred.get("rate", pd.Series(dtype=float))), errors="coerce").fillna(0.0)
             except Exception:
                 pred["return"] = 0.0
             nvol = pred[~pred["volatility"]] if not pred.empty else pd.DataFrame()
@@ -743,7 +744,15 @@ def check_eval_log():
         html = "<table border='1'><tr><th>시각</th><th>심볼</th><th>전략</th><th>모델</th><th>예측</th><th>수익률</th><th>상태</th><th>사유</th></tr>"
         for _, r in latest.iterrows():
             icon = status_icon(r.get("status",""))
-            html += f"<tr><td>{r.get('timestamp','')}</td><td>{r.get('symbol','')}</td><td>{r.get('strategy','')}</td><td>{r.get('model','')}</td><td>{r.get('direction','')}</td><td>{float(r.get('return',0) or 0):.4f}</td><td>{icon}</td><td>{r.get('reason','')}</td></tr>"
+            # ✅ 우리 스키마 호환
+            rv = r.get('return_value', None)
+            if pd.isna(rv) or rv is None:
+                rv = r.get('rate', 0)
+            try:
+                rv = float(rv)
+            except Exception:
+                rv = 0.0
+            html += f"<tr><td>{r.get('timestamp','')}</td><td>{r.get('symbol','')}</td><td>{r.get('strategy','')}</td><td>{r.get('model','')}</td><td>{r.get('direction','')}</td><td>{rv:.4f}</td><td>{icon}</td><td>{r.get('reason','')}</td></tr>"
         html += "</table>"
         return html
     except Exception as e:
@@ -867,10 +876,10 @@ def reset_all(key=None):
             AUDIT = AUDIT_LOG
             MSG = MESSAGE_LOG
             FAIL = FAILURE_LOG
-            def clear_csv(f, h):
+            def clear_csv(f, headers):
                 os.makedirs(os.path.dirname(f), exist_ok=True)
                 with open(f, "w", newline="", encoding="utf-8-sig") as wf:
-                    wf.write(",".join(h) + "\n")
+                    wf.write(",".join(headers) + "\n")
             print("[RESET] 백그라운드 초기화 시작"); sys.stdout.flush()
             try:
                 if hasattr(train, "request_stop"):
@@ -967,14 +976,11 @@ def reset_all(key=None):
             try: _feature_cache.clear()
             except Exception: pass
             try:
+                # ✅ 확장 스키마로 재생성/초기화
                 ensure_prediction_log_exists()
-                def clear_csv(f, h):
-                    os.makedirs(os.path.dirname(f), exist_ok=True)
-                    with open(f, "w", newline="", encoding="utf-8-sig") as wf:
-                        wf.write(",".join(h) + "\n")
-                clear_csv(WRONG, ["timestamp","symbol","strategy","direction","entry_price","target_price","model","predicted_class","top_k","note","success","reason","rate","return_value","label","group_id","model_symbol","model_name","source","volatility","source_exchange"])
-                clear_csv(LOG_FILE, ["timestamp","symbol","strategy","model","accuracy","f1","loss","note","source_exchange","status"])
-                clear_csv(AUDIT, ["timestamp","symbol","strategy","result","status"])
+                ensure_train_log_exists()
+                clear_csv(WRONG, PREDICTION_HEADERS)
+                clear_csv(AUDIT, ["timestamp","symbol","strategy","status","reason"])
                 clear_csv(MESSAGE_LOG, ["timestamp","symbol","strategy","message"])
                 clear_csv(FAILURE_LOG, ["symbol","strategy","failures"])
             except Exception as e:
@@ -1011,7 +1017,7 @@ def reset_all(key=None):
 @app.route("/force-fix-prediction-log")
 def force_fix_prediction_log():
     try:
-        from logger import ensure_prediction_log_exists
+        # ensure_*는 이미 임포트됨
         if os.path.exists(PREDICTION_LOG):
             os.remove(PREDICTION_LOG)
         ensure_prediction_log_exists()
