@@ -45,8 +45,11 @@ except Exception:
         reset_group_order, CacheManager as DataCacheManager
     )
 
-# NOTE: 리포 구조에 맞춰 경로 정정
-from base_model import get_model
+# NOTE: 리포 구조에 맞춰 경로 정정 (robust dual import)
+try:
+    from model.base_model import get_model
+except Exception:
+    from base_model import get_model
 
 from feature_importance import compute_feature_importance, save_feature_importance  # (유지)
 from failure_db import insert_failure_record, ensure_failure_db
@@ -398,7 +401,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     try: model.load_state_dict(best_state)
                     except: pass
 
-                # 평가/저장 (저장은 F1과 무관하게 항상 진행)
+                # 평가/저장
                 model.eval(); preds=[]; lbls=[]; val_loss_sum=0.0; n_val=0
                 crit_eval=nn.CrossEntropyLoss(weight=w)
                 with torch.no_grad():
@@ -417,32 +420,21 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                                        zero_division=0)) if len(lbls) else 0.0
                 val_loss=float(val_loss_sum/max(1,n_val))
 
-                # 🔸 게이트값은 로깅 참고용으로만 계산(저장/통과 판정에는 사용하지 않음)
-                gate_for_log = max(_min_f1_for(strategy), float(get_QUALITY().get("VAL_F1_MIN",0.10)))
-
+                # 메타/저장
+                min_gate=max(_min_f1_for(strategy), float(get_QUALITY().get("VAL_F1_MIN",0.10)))
                 stem=os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_w{int(window)}_group{int(group_id) if group_id is not None else 0}_cls{int(len(class_ranges))}")
-                meta={
-                    "symbol":symbol,"strategy":strategy,"model":model_type,"group_id":int(group_id or 0),
-                    "num_classes":int(len(class_ranges)),
-                    "class_ranges":[[float(lo),float(hi)] for (lo,hi) in class_ranges],
-                    "input_size":int(feat_dim),
-                    "metrics":{"val_acc":acc,"val_f1":f1_val,"val_loss":val_loss},
-                    "timestamp":now_kst().isoformat(),"model_name":os.path.basename(stem)+".ptz",
-                    "window":int(window),"recent_cap":int(len(features_only)),"engine":"manual",
-                    "data_flags":{"rows":int(len(df)),"limit":int(_limit),"min":int(_min_required),
-                                  "augment_needed":bool(augment_needed),"enough_for_training":bool(enough_for_training)},
-                    "train_loss_sum":float(loss_sum),
-
-                    # 🔸 요구사항: 저장 메타에는 하드 게이트를 기록하지 않음
-                    "min_f1_gate": 0.0,
-                    "passed": 1,   # 저장 차단 없음(항상 사용 가능)
-
-                    "boundary_band": float(BOUNDARY_BAND),
-                    "cs_argmax":{"enabled":bool(COST_SENSITIVE_ARGMAX),"beta":float(CS_ARG_BETA)},
-
-                    # 참고용(디버깅): 내부 평가에서 본 게이트값(실제 판정에는 미사용)
-                    "gate_for_log": float(gate_for_log)
-                }
+                meta={"symbol":symbol,"strategy":strategy,"model":model_type,"group_id":int(group_id or 0),
+                      "num_classes":int(len(class_ranges)),
+                      "class_ranges":[[float(lo),float(hi)] for (lo,hi) in class_ranges],
+                      "input_size":int(feat_dim),
+                      "metrics":{"val_acc":acc,"val_f1":f1_val,"val_loss":val_loss},
+                      "timestamp":now_kst().isoformat(),"model_name":os.path.basename(stem)+".ptz",
+                      "window":int(window),"recent_cap":int(len(features_only)),"engine":"manual",
+                      "data_flags":{"rows":int(len(df)),"limit":int(_limit),"min":int(_min_required),"augment_needed":bool(augment_needed),"enough_for_training":bool(enough_for_training)},
+                      "train_loss_sum":float(loss_sum),
+                      "min_f1_gate":float(min_gate),
+                      "boundary_band": float(BOUNDARY_BAND),
+                      "cs_argmax":{"enabled":bool(COST_SENSITIVE_ARGMAX),"beta":float(CS_ARG_BETA)}}
                 wpath,mpath=_save_model_and_meta(model, stem+".pt", meta)
 
                 # 캐시 제거
@@ -457,13 +449,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     source_exchange="BYBIT", status="success",
                     y_true=lbls, y_pred=preds, num_classes=len(class_ranges)
                 )
-
-                # 🔸 결과 리포트에도 passed=True로 고정(게이트 미적용)
-                res["models"].append({
-                    "window":int(window),"type":model_type,"acc":acc,"f1":f1_val,"val_loss":val_loss,
-                    "loss_sum":float(loss_sum),"pt":wpath,"meta":mpath,"passed":True
-                })
-                _safe_print(f"🟩 DONE w={window} {model_type} acc={acc:.4f} f1={f1_val:.4f} val_loss={val_loss:.5f} (log_gate={gate_for_log:.2f})")
+                passed=bool(f1_val>=min_gate)
+                res["models"].append({"window":int(window),"type":model_type,"acc":acc,"f1":f1_val,"val_loss":val_loss,
+                                      "loss_sum":float(loss_sum),"pt":wpath,"meta":mpath,"passed":passed})
+                _safe_print(f"🟩 DONE w={window} {model_type} acc={acc:.4f} f1={f1_val:.4f} val_loss={val_loss:.5f} (gate={min_gate:.2f})")
 
             res["windows"].append({"window":int(window), "results":[m for m in res["models"] if m["window"]==window]})
 
