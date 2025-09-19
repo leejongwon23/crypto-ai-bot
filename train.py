@@ -45,7 +45,9 @@ except Exception:
         reset_group_order, CacheManager as DataCacheManager
     )
 
-from model.base_model import get_model
+# NOTE: 리포 구조에 맞춰 경로 정정
+from base_model import get_model
+
 from feature_importance import compute_feature_importance, save_feature_importance  # (유지)
 from failure_db import insert_failure_record, ensure_failure_db
 import logger
@@ -219,10 +221,14 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         set_NUM_CLASSES(len(class_ranges))
         logger.log_class_ranges(symbol, strategy, group_id=group_id, class_ranges=class_ranges, note="train_one_model")
 
-        # 라벨 (※ labels.py에서 -1 = 경계 근접 샘플)
+        # 라벨 (-1 = 경계 근접 샘플 → 제외)
         gains, labels, class_ranges_used = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=group_id)
         if (not isinstance(labels, np.ndarray)) or labels.size == 0:
             _log_skip(symbol,strategy,"라벨 없음"); return res
+
+        # 마스크/분포 진단
+        mask_cnt=int((labels<0).sum())
+        _safe_print(f"[LABELS] total={len(labels)} masked={mask_cnt} ({mask_cnt/max(1,len(labels)):.2%}) BOUNDARY_BAND=±{BOUNDARY_BAND}")
 
         # 특징행렬
         features_only=feat.drop(columns=["timestamp","strategy"],errors="ignore").replace([np.inf,-np.inf], np.nan).fillna(0.0)
@@ -244,7 +250,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         for window in top_windows:
             window=min(window, max(6,len(features_only)-1))
 
-            # ✅ 샘플 생성 시 타깃 라벨이 -1(마스킹)이면 '그 샘플 자체를 버림'
+            # 샘플 생성 (라벨 -1 완전 제외)
             fv=features_only.values.astype(np.float32)
             X_raw, y = [], []
             for i in range(len(fv)-window):
@@ -424,6 +430,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                       "data_flags":{"rows":int(len(df)),"limit":int(_limit),"min":int(_min_required),"augment_needed":bool(augment_needed),"enough_for_training":bool(enough_for_training)},
                       "train_loss_sum":float(loss_sum),
                       "min_f1_gate":float(min_gate),
+                      "boundary_band": float(BOUNDARY_BAND),
                       "cs_argmax":{"enabled":bool(COST_SENSITIVE_ARGMAX),"beta":float(CS_ARG_BETA)}}
                 wpath,mpath=_save_model_and_meta(model, stem+".pt", meta)
 
