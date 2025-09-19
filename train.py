@@ -120,11 +120,12 @@ def _epochs_for(strategy:str)->int:
     if strategy=="장기": return int(os.getenv("EPOCHS_LONG","32"))
     return 24
 
+# (참고용으로만 유지: 운영 결정에는 사용 안 함)
 EVAL_MIN_F1_SHORT = float(os.getenv("EVAL_MIN_F1_SHORT", "0.10"))
 EVAL_MIN_F1_MID   = float(os.getenv("EVAL_MIN_F1_MID",   "0.50"))
 EVAL_MIN_F1_LONG  = float(os.getenv("EVAL_MIN_F1_LONG",  "0.45"))
 _SHORT_RETRY      = int(os.getenv("SHORT_STRATEGY_RETRY", "3"))
-def _min_f1_for(strategy:str)->float:
+def _min_f1_for(strategy:str)->float:  # 더 이상 게이트에 쓰지 않음(로깅 참고용)
     return EVAL_MIN_F1_SHORT if strategy=="단기" else (EVAL_MIN_F1_MID if strategy=="중기" else EVAL_MIN_F1_LONG)
 
 now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
@@ -359,6 +360,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
 
                 _safe_print(f"🟦 TRAIN {symbol}-{strategy}-g{group_id} w={window} model={model_type} epochs={local_epochs}")
                 for ep in range(local_epochs):
+                    if stop_event is not None and stop_event.is_set(): break
                     model.train()
                     for xb,yb in train_loader:
                         xb=xb.to(DEVICE,dtype=torch.float32); yb=yb.to(DEVICE,dtype=torch.long)
@@ -368,7 +370,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                         if SMART_TRAIN and GRAD_CLIP>0: torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
                         opt.step(); loss_sum += float(loss.item())
 
-                    # val f1
+                    # val f1 (학습 내부 기준치로만 사용, 운영 게이트 아님)
                     model.eval(); preds=[]; lbls=[]
                     with torch.no_grad():
                         for xb,yb in val_loader:
@@ -401,7 +403,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     try: model.load_state_dict(best_state)
                     except: pass
 
-                # 평가/저장
+                # 평가/저장 (운영게이트 없음)
                 model.eval(); preds=[]; lbls=[]; val_loss_sum=0.0; n_val=0
                 crit_eval=nn.CrossEntropyLoss(weight=w)
                 with torch.no_grad():
@@ -421,7 +423,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 val_loss=float(val_loss_sum/max(1,n_val))
 
                 # 메타/저장
-                min_gate=max(_min_f1_for(strategy), float(get_QUALITY().get("VAL_F1_MIN",0.10)))
                 stem=os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_w{int(window)}_group{int(group_id) if group_id is not None else 0}_cls{int(len(class_ranges))}")
                 meta={"symbol":symbol,"strategy":strategy,"model":model_type,"group_id":int(group_id or 0),
                       "num_classes":int(len(class_ranges)),
@@ -432,9 +433,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                       "window":int(window),"recent_cap":int(len(features_only)),"engine":"manual",
                       "data_flags":{"rows":int(len(df)),"limit":int(_limit),"min":int(_min_required),"augment_needed":bool(augment_needed),"enough_for_training":bool(enough_for_training)},
                       "train_loss_sum":float(loss_sum),
-                      "min_f1_gate":float(min_gate),
                       "boundary_band": float(BOUNDARY_BAND),
-                      "cs_argmax":{"enabled":bool(COST_SENSITIVE_ARGMAX),"beta":float(CS_ARG_BETA)}}
+                      "cs_argmax":{"enabled":bool(COST_SENSITIVE_ARGMAX),"beta":float(CS_ARG_BETA)},
+                      "eval_gate":"none"}
                 wpath,mpath=_save_model_and_meta(model, stem+".pt", meta)
 
                 # 캐시 제거
@@ -449,14 +450,15 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     source_exchange="BYBIT", status="success",
                     y_true=lbls, y_pred=preds, num_classes=len(class_ranges)
                 )
-                passed=bool(f1_val>=min_gate)
+                # 운영 판정: 저장 성공이면 통과(게이트 없음)
                 res["models"].append({"window":int(window),"type":model_type,"acc":acc,"f1":f1_val,"val_loss":val_loss,
-                                      "loss_sum":float(loss_sum),"pt":wpath,"meta":mpath,"passed":passed})
-                _safe_print(f"🟩 DONE w={window} {model_type} acc={acc:.4f} f1={f1_val:.4f} val_loss={val_loss:.5f} (gate={min_gate:.2f})")
+                                      "loss_sum":float(loss_sum),"pt":wpath,"meta":mpath,"passed":True})
+                _safe_print(f"🟩 DONE w={window} {model_type} acc={acc:.4f} f1={f1_val:.4f} val_loss={val_loss:.5f} (no gate)")
 
             res["windows"].append({"window":int(window), "results":[m for m in res["models"] if m["window"]==window]})
 
-        res["ok"]=any(m.get("passed") for m in res.get("models",[]))
+        # ok 판정: 하나라도 저장되면 True
+        res["ok"]=bool(res.get("models"))
         _safe_print(f"[RESULT] {symbol}-{strategy}-g{group_id} ok={res['ok']}")
         return res
 
@@ -465,43 +467,42 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         _log_fail(symbol,strategy,str(e)); return res
 
 # ---------- 심볼 전체/그룹 순서 ----------
-_ENFORCE_FULL_STRATEGY = os.getenv("ENFORCE_FULL_STRATEGY","1")=="1"
-_STRICT_HALT_ON_INCOMPLETE = os.getenv("STRICT_HALT_ON_INCOMPLETE","0")=="1"
-_REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = os.getenv("REQUIRE_ONE_PER_GROUP","0")=="1"
+# HALT/완료 강제 로직은 비활성화 방향으로(오케스트레이션 단순화)
+_ENFORCE_FULL_STRATEGY = False
+_STRICT_HALT_ON_INCOMPLETE = False
+_REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = False
 _SYMBOL_RETRY_LIMIT = int(os.getenv("SYMBOL_RETRY_LIMIT","1"))
 
 def _train_full_symbol(symbol:str, stop_event: Optional[threading.Event] = None) -> Tuple[bool, Dict[str, Any]]:
-    strategies=["단기","중기","장기"]; detail={}; symbol_complete=True; prev_strategy_ok=True
+    strategies=["단기","중기","장기"]; detail={}; any_saved=False
     for strategy in strategies:
-        if stop_event is not None and stop_event.is_set(): return False, detail
-        if not prev_strategy_ok:
-            _safe_print(f"[ORDER-STOP] 이전 전략 미완료 → {symbol} {strategy} 스킵"); detail[strategy]={-1:False}; symbol_complete=False; break
+        if stop_event is not None and stop_event.is_set(): return any_saved, detail
         try:
             cr=get_class_ranges(symbol=symbol,strategy=strategy)
             if not cr:
                 logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note="클래스 경계 없음",status="skipped")
-                detail[strategy]={-1:False}; symbol_complete=False; prev_strategy_ok=False; continue
+                detail[strategy]={-1:False}
+                continue
             num_classes=len(cr); groups=get_class_groups(num_classes=num_classes); max_gid=len(groups)-1
-            strat_complete=True; detail[strategy]={}
+            detail[strategy]={}
             for gid in range(max_gid+1):
-                if stop_event is not None and stop_event.is_set(): return False, detail
+                if stop_event is not None and stop_event.is_set(): return any_saved, detail
                 gr=get_class_ranges(symbol=symbol,strategy=strategy,group_id=gid)
                 if not gr or len(gr)<2:
                     logger.log_training_result(symbol,strategy,model=f"group{gid}",accuracy=0.0,f1=0.0,loss=0.0,note=f"스킵: group_id={gid}, cls<2",status="skipped")
-                    detail[strategy][gid]=False; strat_complete=False; continue
+                    detail[strategy][gid]=False; continue
                 attempts=(_SHORT_RETRY if strategy=="단기" else 1); ok_once=False
                 for _ in range(attempts):
                     res=train_one_model(symbol,strategy,group_id=gid, max_epochs=_epochs_for(strategy), stop_event=stop_event)
-                    if bool(res and isinstance(res,dict) and res.get("ok") is True): ok_once=True; break
+                    if bool(res and isinstance(res,dict) and res.get("models")):
+                        ok_once=True; any_saved=True; break
                 detail[strategy][gid]=ok_once
-                if not ok_once and _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP: strat_complete=False
                 time.sleep(0.01)
-            if not strat_complete: symbol_complete=False; prev_strategy_ok=False
-            else: prev_strategy_ok=True
         except Exception as e:
             logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note=f"전략 실패: {e}",status="failed")
-            detail[strategy]={-1:False}; symbol_complete=False; prev_strategy_ok=False
-    return symbol_complete, detail
+            detail[strategy]={-1:False}
+    # complete 여부: 최소 1개라도 저장되었으면 True
+    return any_saved, detail
 
 def train_models(symbol_list, stop_event: Optional[threading.Event] = None, ignore_should: bool = False):
     completed_symbols=[]; partial_symbols=[]
@@ -530,8 +531,7 @@ def train_models(symbol_list, stop_event: Optional[threading.Event] = None, igno
             except Exception as e: _safe_print(f"[mark_symbol_trained err] {e}")
         else:
             partial_symbols.append(symbol)
-            if _ENFORCE_FULL_STRATEGY and _STRICT_HALT_ON_INCOMPLETE:
-                _safe_print(f"[HALT] {symbol} 미완료 → 그룹 진행 중단"); break
+        # HALT 제거: 어떤 경우에도 다음 심볼로 진행
     return completed_symbols, partial_symbols
 
 # ---------- 그룹 루프 및 예측 ----------
@@ -586,36 +586,30 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                 completed_syms, partial_syms = train_models(group, stop_event=stop_event, ignore_should=force_full_pass)
                 if stop_event is not None and stop_event.is_set(): break
 
-                group_complete = set(completed_syms) >= set(group) and len(partial_syms) == 0
-                if not group_complete:
-                    _safe_print(f"[BLOCK] 그룹{idx+1} 미완료 (completed={sorted(completed_syms)}, partial={sorted(partial_syms)})")
-                    continue
-
+                # ✅ 그룹 학습 직후 즉시 예측(완료 여부 상관없이, 모델 있는 조합만)
                 if not ready_for_group_predict():
                     _safe_print(f"[PREDICT-BLOCK] 그룹{idx+1} ready_for_group_predict()==False")
-                    continue
+                else:
+                    ran_any=False
+                    for symbol in group:
+                        for strategy in ["단기","중기","장기"]:
+                            if not _has_model_for(symbol, strategy): 
+                                _safe_print(f"[PREDICT-SKIP] {symbol}-{strategy}: 모델 없음"); 
+                                continue
+                            try:
+                                predict(symbol, strategy, source="그룹직후", model_type=None); ran_any=True
+                            except Exception as e:
+                                _safe_print(f"[PREDICT FAIL] {symbol}-{strategy}: {e}")
 
-                ran_any=False
-                for symbol in group:
-                    for strategy in ["단기","중기","장기"]:
-                        if not _has_model_for(symbol, strategy): 
-                            _safe_print(f"[PREDICT-SKIP] {symbol}-{strategy}: 모델 없음"); 
-                            continue
-                        try:
-                            predict(symbol, strategy, source="그룹직후", model_type=None); ran_any=True
-                        except Exception as e:
-                            _safe_print(f"[PREDICT FAIL] {symbol}-{strategy}: {e}")
-
-                if not ran_any:
-                    cand_symbol=_pick_smoke_symbol(group)
-                    if cand_symbol:
-                        _safe_print(f"[SMOKE] fallback predict for {cand_symbol}")
-                        try: _run_smoke_predict(predict, cand_symbol)
-                        except: pass
-
-                if ran_any:
-                    try: mark_group_predicted()
-                    except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
+                    if not ran_any:
+                        cand_symbol=_pick_smoke_symbol(group)
+                        if cand_symbol:
+                            _safe_print(f"[SMOKE] fallback predict for {cand_symbol}")
+                            try: _run_smoke_predict(predict, cand_symbol)
+                            except: pass
+                    if ran_any:
+                        try: mark_group_predicted()
+                        except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
 
                 if sleep_sec>0:
                     for _ in range(sleep_sec):
