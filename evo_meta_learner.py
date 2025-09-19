@@ -1,6 +1,7 @@
-# evo_meta_learner.py (PATCHED: input/DataFrame fallback + torch safety + save/load robustness + predict input shape guard)
-# (2025-09-17a) — [규칙 보강] EVO_META_AGG(mean|varpen|mean_var) + EVO_META_VAR_GAMMA
-#                 앙상블 확률 스택을 평균/분산가중으로 단일 벡터로 합성하는 유틸 추가
+# evo_meta_learner.py (FINAL)
+# (2025-09-17a) — input/DataFrame fallback + torch safety + save/load robustness + predict input shape guard
+#                 EVO_META_AGG(mean|varpen|mean_var) + EVO_META_VAR_GAMMA: 윈도우/모델 확률 스택 합성 유틸
+
 import os
 import json
 import ast
@@ -60,10 +61,10 @@ def _df_from_path_or_df(path_or_df):
         if not os.path.exists(path_or_df):
             return None
         try:
-            return pd.read_csv(path_or_df, encoding="utf-8-sig")
+            return pd.read_csv(path_or_df, encoding="utf-8-sig", on_bad_lines="skip")
         except Exception:
             try:
-                return pd.read_csv(path_or_df)
+                return pd.read_csv(path_or_df, on_bad_lines="skip")
             except Exception:
                 return None
     return None
