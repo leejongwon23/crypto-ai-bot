@@ -1,11 +1,12 @@
-# === predict.py — sequence-corrected, gate-respecting, robust I/O (ENSEMBLE-FIRST, FINAL) ===
-# (2025-09-13d) — [STRICT_BOUNDS] 메타 class_ranges가 없거나 불일치하면 **무조건 스킵/보류**, 폴백 금지
-# (2025-09-13c) — [소프트 폴백] PREDICT_SOFT_ABORT=1 시 no_models/no_valid_model을 "예측보류"로 처리
-# (2025-09-13) — [핵심] 학습 품질게이트 엄수: meta.passed==1 & val_f1>=min_f1_gate 모델만 추론
-# (2025-09-12b) — [DEFAULT] Ensemble-first (mean of top-3 calibrated) + abstain(ABSTAIN_PROB_MIN)
-# (2025-09-17a) — [6번 반영] **윈도우 앙상블(평균/분산가중)**: find_best_windows 상위 윈도우들에서
-#                   동일 가중치 평균 또는 분산 패널티(mean/(1+γ·var))로 클래스별 확률을 합성.
-#                   메타러너 입력 포맷(캘리브레이션된 확률 벡터)은 동일.
+# === predict.py — F1/라벨분포 비의존, gate-respecting, robust I/O (ENSEMBLE-FIRST, FINAL) ===
+# (2025-09-20) — F1/라벨분포에 의존한 의사결정 제거:
+#   - 모델 게이트: meta.passed==1 만 요구( val_f1 / min_f1_gate 미사용 )
+#   - 후보 모델 점수: 확률 p만 사용( f1가중 제거 )
+#   - 분포 보정은 기본 OFF(ADJUST_WITH_DIVERSITY=1로만 활성)
+# (기타 유지)
+#   - STRICT_BOUNDS: meta.class_ranges 없으면 스킵
+#   - 윈도우 앙상블(mean / var-penalize)
+#   - ABSTAIN_PROB_MIN, 최소 기대수익 필터, 게이트/락/하트비트
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -216,7 +217,7 @@ from config import (
     get_class_return_range, class_to_expected_return
 )
 
-# ====== DEVICE fix (was missing) ======
+# ====== DEVICE ======
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 MODEL_DIR = "/persistent/models"
@@ -226,13 +227,14 @@ FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 
 MIN_RET_THRESHOLD = float(os.getenv("PREDICT_MIN_RETURN", "0.01"))
 ABSTAIN_PROB_MIN = float(os.getenv("ABSTAIN_PROB_MIN", "0.35"))
-PREDICT_SOFT_ABORT = int(os.getenv("PREDICT_SOFT_ABORT", "1"))  # ★ no_models/no_valid_model → 예측보류로 처리
+PREDICT_SOFT_ABORT = int(os.getenv("PREDICT_SOFT_ABORT", "1"))
 
-# === 6번: 윈도우 앙상블 환경 토글 ===
-#   PREDICT_WINDOW_ENSEMBLE:  "mean" | "varpen" | "mean_var" (기본)
-#   ENSEMBLE_VAR_GAMMA:       분산 패널티 강도( varpen/mean_var에서 사용 )
+# 윈도우 앙상블
 PREDICT_WINDOW_ENSEMBLE = os.getenv("PREDICT_WINDOW_ENSEMBLE", "mean_var").lower()
 ENSEMBLE_VAR_GAMMA = float(os.getenv("ENSEMBLE_VAR_GAMMA", "1.0"))
+
+# 🔧 분포 보정 토글(기본 OFF)
+ADJUST_WITH_DIVERSITY = os.getenv("ADJUST_WITH_DIVERSITY", "0") == "1"
 
 EXP_STATE = "/persistent/logs/meta_explore_state.json"
 EXP_EPS = float(os.getenv("EXPLORE_EPS_BASE", "0.15"))
@@ -256,16 +258,13 @@ def _class_range_by_meta_or_cfg(cls_id: int, meta, symbol: str, strategy: str):
         if not (cr and 0 <= int(cls_id) < len(cr)):
             raise RuntimeError("no_class_ranges_in_meta")
         return cr[int(cls_id)]
-    # (비엄격 모드에서만) 구형 폴백 허용
     return cr[int(cls_id)] if (cr and 0 <= int(cls_id) < len(cr)) else get_class_return_range(int(cls_id), symbol, strategy)
 
 def _class_min_meta_or_cfg(cls_id: int, meta, symbol: str, strategy: str) -> float:
-    lo, _ = _class_range_by_meta_or_cfg(cls_id, meta, symbol, strategy)
-    return float(lo)
+    lo, _ = _class_range_by_meta_or_cfg(cls_id, meta, symbol, strategy); return float(lo)
 
 def _expected_return_meta_or_cfg(cls_id: int, meta, symbol: str, strategy: str) -> float:
-    lo, hi = _class_range_by_meta_or_cfg(cls_id, meta, symbol, strategy)
-    return (float(lo) + float(hi)) / 2.0
+    lo, hi = _class_range_by_meta_or_cfg(cls_id, meta, symbol, strategy); return (float(lo) + float(hi)) / 2.0
 
 def _position_from_range(lo: float, hi: float) -> str:
     try:
@@ -550,16 +549,15 @@ def predict(symbol, strategy, source="일반", model_type=None):
             return _soft_abstain(symbol, strategy, reason="no_valid_model", meta_choice="abstain", regime=regime, X_last=X[-1], group_id=None, df=df) \
                    if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="no_valid_model", source=source, X_input=X[-1])
 
-        # ── 앙상블 후보 추가 (상위 3개 mean of calibrated)
+        # ── 앙상블 후보(상위 3개 mean of calibrated)
         try:
             if len(outs) >= 2:
-                tops = sorted(outs, key=lambda m: float(m.get("val_f1", 0.0)), reverse=True)[:min(3, len(outs))]
+                tops = sorted(outs, key=lambda m: os.path.basename(m.get("model_path","")))[:min(3, len(outs))]  # F1 미사용
                 nc = min(len(np.asarray(tops[0]["calib_probs"])), *[len(np.asarray(t["calib_probs"])) for t in tops])
                 if len(tops) >= 2 and nc >= 2:
                     mean_c = np.mean([np.asarray(m["calib_probs"][:nc], dtype=float) for m in tops], axis=0)
                     mean_c = (mean_c / (mean_c.sum() + 1e-12)).astype(float)
                     mean_r = np.mean([np.asarray(m["raw_probs"][:nc], dtype=float) for m in tops], axis=0)
-                    val_f1_mean = float(np.mean([float(m.get("val_f1", 0.0)) for m in tops]))
                     outs.append({
                         "raw_probs": mean_r,
                         "calib_probs": mean_c,
@@ -567,7 +565,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         "group_id": -1,
                         "model_type": "ensemble",
                         "model_path": "ensemble_mean_top3",
-                        "val_f1": val_f1_mean,
+                        "val_f1": None,
                         "symbol": symbol,
                         "strategy": strategy,
                         "meta": {"model": "ensemble", "num_classes": int(nc), "class_ranges": _ranges_from_meta(tops[0].get("meta"))}
@@ -581,7 +579,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
         final_cls = None; meta_choice = "best_single"; chosen = None; used_minret = False
 
-        # (A) 진화형 메타
+        # (A) 진화형 메타 (선택적)
         if _glob_many(os.path.join(MODEL_DIR, "evo_meta_learner")):
             try:
                 from evo_meta_learner import predict_evo_meta
@@ -594,6 +592,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 print(f"[evo_meta 예외] {e}")
 
         # (B0) Ensemble-first
+        def _maybe_adjust(probs, recent):
+            if ADJUST_WITH_DIVERSITY:
+                return adjust_probs_with_diversity(probs, recent, class_counts=None, alpha=0.10, beta=0.10)
+            return np.asarray(probs, dtype=float)
+
         if final_cls is None:
             ens_idx = None
             for i, m in enumerate(outs):
@@ -601,7 +604,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     ens_idx = i; break
             if ens_idx is not None:
                 m = outs[ens_idx]
-                adj = adjust_probs_with_diversity(m["calib_probs"], rec_freq, class_counts=None, alpha=0.10, beta=0.10)
+                adj = _maybe_adjust(m["calib_probs"], rec_freq)
                 mask = np.zeros_like(adj, dtype=float)
                 for ci in range(len(adj)):
                     try:
@@ -623,12 +626,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     except Exception:
                         pass
 
-        # (B1) 단일/앙상블 경쟁 + 탐험
+        # (B1) 단일/앙상블 경쟁 + 탐험(점수=확률만)
         if final_cls is None:
             best_i, best_score, best_pred = -1, -1.0, None; scores = []
             for i, m in enumerate(outs):
-                adj = adjust_probs_with_diversity(m["calib_probs"], rec_freq, class_counts=None, alpha=0.10, beta=0.10)
-                val_f1 = float(m.get("val_f1", 0.6))
+                adj = _maybe_adjust(m["calib_probs"], rec_freq)
                 mask = np.zeros_like(adj, dtype=float)
                 for ci in range(len(adj)):
                     try:
@@ -642,7 +644,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     filt = filt / filt.sum(); pred = int(np.argmax(filt)); p = float(filt[pred]); fused = True
                 else:
                     pred = int(np.argmax(adj)); p = float(adj[pred]); fused = False
-                score = p * (0.5 + 0.5 * max(0.0, min(1.0, val_f1)))
+                score = p  # ← F1 가중 제거
                 m.update({"adjusted_probs": adj, "filtered_probs": (filt if fused else None),
                           "candidate_pred": pred, "success_score": score, "filtered_used": fused})
                 scores.append((i, score, pred))
@@ -671,13 +673,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
             except Exception:
                 pass
 
-        # (C) 최종 가드
+        # (C) 최종 가드(최소 기대수익 만족 클래스가 있으면 교체)
         try:
             cmin_sel, cmax_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
             if not _meets_minret_with_hint(cmin_sel, cmax_sel, allow_long, allow_short, MIN_RET_THRESHOLD):
                 best_m, best_sc, best_cls = None, -1.0, None
                 for m in outs:
-                    adj = m.get("adjusted_probs", m["calib_probs"]); val_f1 = float(m.get("val_f1", 0.6))
+                    adj = m.get("adjusted_probs", m["calib_probs"])
                     for ci in range(len(adj)):
                         try:
                             lo, hi = _class_range_by_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
@@ -685,14 +687,14 @@ def predict(symbol, strategy, source="일반", model_type=None):
                             continue
                         if not _meets_minret_with_hint(lo, hi, allow_long, allow_short, MIN_RET_THRESHOLD):
                             continue
-                        sc = float(adj[ci]) * (0.5 + 0.5 * max(0.0, min(1.0, val_f1)))
+                        sc = float(adj[ci])  # F1 비가중
                         if sc > best_sc: best_sc, best_m, best_cls = sc, m, int(ci)
                 if best_cls is not None:
                     final_cls, chosen, used_minret = best_cls, best_m, True
         except Exception as e:
             print(f"[임계 가드 예외] {e}")
 
-        # (D) 보류 컷
+        # (D) 보류 컷(캘리브 최대 확률 기준)
         try:
             chosen_probs = (chosen or outs[0])["calib_probs"]
             if float(np.max(chosen_probs)) < ABSTAIN_PROB_MIN:
@@ -723,8 +725,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     "class": -1, "expected_return": 0.0,
                     "class_return_min": 0.0, "class_return_max": 0.0,
                     "class_return_text": "", "position": "neutral",
-                    "timestamp": _now_kst().isoformat(),
-                    "source": source,
+                    "timestamp": _now_kst().isoformat(), "source": source,
                     "regime": regime, "reason": "abstain_low_confidence", "success": False,
                     "predicted_class": -1, "label": -1
                 }
@@ -784,7 +785,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             class_return_text=class_text
         )
 
-        # 섀도우 로깅
+        # 섀도우 로깅(정보용, F1 지표는 기록만 가능)
         try:
             for m in outs:
                 if chosen and m.get("model_path") == chosen.get("model_path"): continue
@@ -812,7 +813,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 note_s = {
                     "regime": regime, "shadow": True,
                     "model_path": os.path.basename(m.get("model_path", "")),
-                    "model_type": m.get("model_type", ""), "val_f1": float(m.get("val_f1", 0.0)),
+                    "model_type": m.get("model_type", ""), "val_f1": (None if m.get("val_f1") is None else float(m.get("val_f1"))),
                     "calib_ver": get_calibration_version(), "min_return_threshold": float(MIN_RET_THRESHOLD),
                     "class_range_lo": float(lo_i),
                     "class_range_hi": float(hi_i),
@@ -1007,32 +1008,23 @@ def evaluate_predictions(get_price_fn):
             pass
         print(f"[오류] evaluate_predictions 스트리밍 실패 → {e}")
 
-# ====== 모델 추론 묶기 (★ 품질게이트 + STRICT_BOUNDS + 윈도우 앙상블) ======
+# ====== 모델 추론 묶기 (STRICT_BOUNDS + 윈도우 앙상블) ======
 def _combine_windows(calib_stack: np.ndarray, raw_stack: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """
-    calib_stack/raw_stack: shape (W, C) — 각 윈도우별 확률
-    반환: (calib_combined, raw_combined) — 클래스별 확률(정규화 완료)
-    """
     eps = 1e-12
     mean_c = calib_stack.mean(axis=0)
     mean_r = raw_stack.mean(axis=0)
 
     if PREDICT_WINDOW_ENSEMBLE == "mean":
-        cc = mean_c
-        rr = mean_r
+        cc = mean_c; rr = mean_r
     else:
-        # 분산 패널티: 클래스별 윈도우 분산이 큰 경우 가중치↓ (mean / (1+γ·var))
         var_c = calib_stack.var(axis=0)
         var_r = raw_stack.var(axis=0)
         cc = mean_c / (1.0 + ENSEMBLE_VAR_GAMMA * var_c)
         rr = mean_r / (1.0 + ENSEMBLE_VAR_GAMMA * var_r)
-
         if PREDICT_WINDOW_ENSEMBLE == "mean_var":
-            # mean과 var-penalize 혼합(50:50)
             cc = 0.5 * mean_c + 0.5 * cc
             rr = 0.5 * mean_r + 0.5 * rr
 
-    # 정규화
     cc = cc / (cc.sum() + eps)
     rr = rr / (rr.sum() + eps)
     return cc.astype(float), rr.astype(float)
@@ -1057,28 +1049,24 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             with open(meta_path, "r", encoding="utf-8") as mf:
                 meta = json.load(mf)
 
-            # === STRICT_BOUNDS: 메타에 class_ranges 없으면 즉시 스킵
+            # STRICT_BOUNDS: meta에 class_ranges 없으면 스킵
             cr_meta = _ranges_from_meta(meta)
             if STRICT_SAME_BOUNDS and not (cr_meta and len(cr_meta) >= 2):
-                print(f"[SKIP] no class_ranges in meta → {os.path.basename(model_path)}")
-                continue
+                print(f"[SKIP] no class_ranges in meta → {os.path.basename(model_path)}"); continue
 
-            # === 품질 컷: passed==1 이고 val_f1 >= min_f1_gate
+            # 품질 컷: passed==1 만 확인(F1 기반 게이트 제거)
             passed = int(meta.get("passed", 0)) == 1
-            val_f1 = float(meta.get("metrics", {}).get("val_f1", 0.0))
-            min_gate = float(meta.get("min_f1_gate", 0.0))
-            if not passed or (val_f1 < min_gate):
-                print(f"[SKIP] gate: {os.path.basename(model_path)} passed={int(passed)} val_f1={val_f1:.3f} gate={min_gate:.3f}")
-                continue
+            if not passed:
+                print(f"[SKIP] gate: {os.path.basename(model_path)} passed=0"); continue
 
             mtype = meta.get("model", "lstm"); gid = meta.get("group_id", 0)
             inp_size = int(meta.get("input_size", feat_scaled.shape[1]))
             num_cls = int(meta.get("num_classes", (len(cr_meta) if cr_meta else NUM_CLASSES)))
 
-            # === (★) 윈도우 앙상블: 상위 N 윈도우 모두에서 추론 → 평균 / 분산가중 합성
+            # 윈도우 앙상블 추론
             preds_c_list, preds_r_list = [], []
             used_windows = []
-            for win in list(dict.fromkeys([int(w) for w in window_list if int(w) > 0])):  # 중복 제거 & 정렬 유지
+            for win in list(dict.fromkeys([int(w) for w in window_list if int(w) > 0])):
                 if feat_scaled.shape[0] < win: 
                     continue
                 seq = feat_scaled[-win:]
@@ -1090,7 +1078,6 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
 
                 x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0)
 
-                # ✅ base_model.get_model — 패키지/루트 폴백을 통해 확보
                 model = get_model(mtype, input_size=inp_size, output_size=num_cls)
 
                 loaded = load_model_any(model_path, model)
@@ -1126,7 +1113,8 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
                 "raw_probs": comb_r, "calib_probs": comb_c,
                 "predicted_class": int(np.argmax(comb_c)),
                 "group_id": gid, "model_type": mtype, "model_path": model_path,
-                "val_f1": val_f1, "symbol": symbol, "strategy": strategy, "meta": meta,
+                "val_f1": None,  # 기록 목적 외 의사결정 미사용
+                "symbol": symbol, "strategy": strategy, "meta": meta,
                 "window_ensemble": {"mode": PREDICT_WINDOW_ENSEMBLE, "gamma": ENSEMBLE_VAR_GAMMA, "wins": used_windows}
             })
 
