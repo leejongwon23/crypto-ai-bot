@@ -1,23 +1,24 @@
-# === predict_trigger.py (MEM-SAFE FINAL++++ — gate/lock aware, stale lock cleanup, timeout-safe, freq & diversity, group-aware) ===
+# === predict_trigger.py (MEM-SAFE FINAL++++ — group-finished only, no hard gate, stale-lock safe, partial-run OK) ===
 import os
 import time
 import traceback
 import datetime
 from collections import Counter
-import glob  # [ADD] for fast model existence check
+import glob
 
 import numpy as np
 import pandas as pd
 import pytz
 
-# ✅ 단일 소스 심볼/데이터 (패키지/루트 양쪽 폴백)
+# ──────────────────────────────────────────────────────────────
+# 데이터 소스 (패키지/루트 폴백)
+# ──────────────────────────────────────────────────────────────
 try:
     from data.utils import get_ALL_SYMBOLS, get_kline_by_strategy
 except Exception:
     try:
         from utils import get_ALL_SYMBOLS, get_kline_by_strategy  # 루트 폴백
     except Exception as _e:
-        # 마지막 안전책: 런타임 시 즉시 실패 대신 빈 동작으로 강제 안전화
         def get_ALL_SYMBOLS():
             print(f"[경고] get_ALL_SYMBOLS 임포트 실패: {_e}")
             return []
@@ -25,32 +26,30 @@ except Exception:
             print(f"[경고] get_kline_by_strategy 임포트 실패: {symbol}-{strategy} / {_e}")
             return None
 
-# ✅ 로그 보장
+# 로깅 보장
 from logger import log_audit_prediction as log_audit, ensure_prediction_log_exists
 
-# ✅ 전역 락(RESET/초기화 중) 감지 → 전체 트리거 스킵
+# 전역 리셋/정리 락
 try:
     import safe_cleanup
     _LOCK_PATH = getattr(safe_cleanup, "LOCK_PATH", "/persistent/locks/train_or_predict.lock")
 except Exception:
     _LOCK_PATH = "/persistent/locks/train_or_predict.lock"
 
-# ✅ 그룹예측 게이트/락 (predict.py와 합의된 경로)
-PREDICT_BLOCK = "/persistent/predict.block"
-PREDICT_RUN_LOCK = "/persistent/run/predict_running.lock"
+# 예측 게이트/락 경로 (predict.py와 합의)
+PREDICT_BLOCK    = "/persistent/predict.block"              # 수동 비상차단
+PREDICT_RUN_LOCK = "/persistent/run/predict_running.lock"   # 예측 실행 중
+GROUP_TRAIN_LOCK = "/persistent/run/group_training.lock"    # 그룹 학습 중(→ 예측 금지)
 
-# [ADD] 그룹 학습 상태 락(훈련중 차단용) —— train/group 루프에서 생성/삭제
-GROUP_TRAIN_LOCK = "/persistent/run/group_training.lock"  # [ADD]
-
-# [ADD] 모델 경로(빠른 존재 확인용)
-MODEL_DIR = "/persistent/models"
+# 모델 경로
+MODEL_DIR   = "/persistent/models"
 _KNOWN_EXTS = (".pt", ".ptz", ".safetensors")
 
-# [ADD] 전략 공통 상수
-STRATEGIES = ["단기", "중기", "장기"]  # [ADD]
+# 전략 집합
+STRATEGIES  = ["단기", "중기", "장기"]
 
 def _has_model_for(symbol: str, strategy: str) -> bool:
-    """train.py와 동일한 기준의 경량판: 심볼·전략 단위 가용 모델 존재 여부."""
+    """심볼·전략 단위 가용 모델 존재 여부(평면/트리 모두 탐색)."""
     try:
         # flat
         for e in _KNOWN_EXTS:
@@ -58,13 +57,15 @@ def _has_model_for(symbol: str, strategy: str) -> bool:
                 return True
         # tree
         d = os.path.join(MODEL_DIR, symbol, strategy)
-        if os.path.isdir(d) and any(glob.glob(os.path.join(d, f"*{e}")) for e in _KNOWN_EXTS):
-            return True
+        if os.path.isdir(d):
+            for e in _KNOWN_EXTS:
+                if glob.glob(os.path.join(d, f"*{e}")):
+                    return True
     except Exception:
         pass
     return False
 
-# ▷ (옵션) 레짐/캘리브레이션: 없으면 안전 통과
+# (옵션) 레짐/캘리브레이션 정보
 try:
     from regime_detector import detect_regime
 except Exception:
@@ -77,9 +78,9 @@ except Exception:
     def get_calibration_version():
         return "none"
 
-# ▷ (옵션) 예측 실행 호출 래퍼 — train.py에서 제공(있으면 사용)
-_safe_predict_with_timeout = None   # (선호) 타임아웃 지원 버전
-_safe_predict_sync = None           # (대안) 동기 버전
+# (옵션) 예측 호출 래퍼 — train.py 제공 시 사용
+_safe_predict_with_timeout = None
+_safe_predict_sync = None
 try:
     from train import _safe_predict_with_timeout as __t_safe_to
     _safe_predict_with_timeout = __t_safe_to
@@ -91,15 +92,13 @@ try:
 except Exception:
     pass
 
-# ▷ (옵션) 게이트 상태 확인 API (predict.py)
-_is_gate_open = None
+# (옵션) 예측 게이트 상태 API — 의존하지 않도록만 로드
 try:
     from predict import is_predict_gate_open as __is_open
-    _is_gate_open = __is_open
 except Exception:
-    _is_gate_open = None
+    __is_open = None
 
-# ▷ (옵션) 그룹 순서 매니저 (없으면 전체 심볼 대상으로 동작)
+# 그룹 오더 매니저
 _GOM = None
 try:
     from group_order import GroupOrderManager as _GOM
@@ -110,59 +109,62 @@ except Exception:
         _GOM = None
 
 def _get_current_group_symbols():
-    """GroupOrderManager가 있으면 현재 그룹 심볼 목록을 반환, 없으면 None."""
+    """현재 그룹 심볼 목록. 없으면 None 반환(전심볼 대상)."""
     if _GOM is None:
         return None
     try:
         gom = _GOM()
-        # 가능한 API 이름들을 보수적으로 시도
         if hasattr(gom, "get_current_group_symbols"):
             syms = gom.get_current_group_symbols()
         elif hasattr(gom, "current_group_index") and hasattr(gom, "get_group_symbols"):
-            idx = gom.current_group_index()
-            syms = gom.get_group_symbols(idx)
+            syms = gom.get_group_symbols(gom.current_group_index())
         else:
             return None
         if not syms:
             return None
-        # 중복 제거 + 정렬(안정적 순회)
         return list(dict.fromkeys(syms))
     except Exception:
         return None
 
-# ===== 설정(환경변수로 조절 가능) =====
+# ──────────────────────────────────────────────────────────────
+# 설정 (환경변수로 조절 가능)
+# ──────────────────────────────────────────────────────────────
 TRIGGER_COOLDOWN = {"단기": 3600, "중기": 10800, "장기": 21600}
-MODEL_TYPES = ["lstm", "cnn_lstm", "transformer"]  # (참고) 현재 파일에선 직접 사용 안 함
-MAX_LOOKBACK = int(os.getenv("TRIGGER_MAX_LOOKBACK", "180"))   # 전조 계산시 최근 N행만 사용
+MAX_LOOKBACK = int(os.getenv("TRIGGER_MAX_LOOKBACK", "180"))          # 전조 계산 시 최근 N행만
 RECENT_DAYS_FOR_FREQ = max(1, int(os.getenv("TRIGGER_FREQ_DAYS", "3")))
 CSV_CHUNKSIZE = max(10000, int(os.getenv("TRIGGER_CSV_CHUNKSIZE", "50000")))
-TRIGGER_MAX_PER_RUN = max(1, int(os.getenv("TRIGGER_MAX_PER_RUN", "999")))  # 1회 루프에서 최대 실행 수
-PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC", "30"))         # _safe_predict_with_timeout 없을 때는 미사용
-
-# 🔧 stale lock(고아 락) 처리 임계 — 프로젝트 전역과 통일(600s)
+TRIGGER_MAX_PER_RUN = max(1, int(os.getenv("TRIGGER_MAX_PER_RUN", "999")))
+PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC", "30"))
 PREDICT_LOCK_STALE_TRIGGER_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRIGGER_SEC", "600"))
+
+# 그룹 완료 모드
+#  - 1: 그룹 전 심볼·전략 모델이 있어야 예측(엄격)  → 미충족 시 '부분 실행'로 자동 다운시프트(전면 스톱 방지)
+#  - 0: 부분 실행(기본) — 그룹 내 존재하는 조합만 예측
+REQUIRE_GROUP_COMPLETE = int(os.getenv("REQUIRE_GROUP_COMPLETE", "0"))
 
 last_trigger_time = {}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 # ──────────────────────────────────────────────────────────────
-# 유틸: 게이트/락, stale lock 정리
+# 게이트/락 & 스테일락 정리
 # ──────────────────────────────────────────────────────────────
 def _gate_closed() -> bool:
-    """그룹 예측 중에는 조용히 스킵(실제 예측 호출 자체를 피함)."""
+    """
+    설계: 그룹 학습 중에는 예측 금지, 그 외 예측 허용.
+    - PREDICT_BLOCK: 비상차단 파일이 있을 때만 차단.
+    - predict_gate_open() 여부에는 의존하지 않음(전면 차단 방지).
+    """
     try:
+        if os.path.exists(GROUP_TRAIN_LOCK):
+            return True
         if os.path.exists(PREDICT_BLOCK):
             return True
-        if os.path.exists(GROUP_TRAIN_LOCK):  # [ADD] 그룹 학습중이면 차단
-            return True
-        if _is_gate_open is not None and (not _is_gate_open()):
-            return True
+        # __is_open은 참고만, 차단 조건으로 사용하지 않음
     except Exception:
         pass
     return False
 
 def _predict_busy() -> bool:
-    """동시에 predict가 이미 돌고 있으면 조용히 스킵."""
     try:
         return os.path.exists(PREDICT_RUN_LOCK)
     except Exception:
@@ -170,7 +172,8 @@ def _predict_busy() -> bool:
 
 def _is_stale_lock(path: str, ttl_sec: int) -> bool:
     try:
-        if not os.path.exists(path): return False
+        if not os.path.exists(path):
+            return False
         mtime = os.path.getmtime(path)
         return (time.time() - float(mtime)) > max(30, int(ttl_sec))
     except Exception:
@@ -186,27 +189,30 @@ def _clear_stale_predict_lock(ttl_sec: int):
         print(f"[LOCK] stale cleanup error: {e}")
 
 # ──────────────────────────────────────────────────────────────
-# [ADD] 그룹 완료 검증 (요구사항: group_all_complete == True 여야만 예측 허용)
+# 그룹 완성 검사 & 대상 페어 산출
 # ──────────────────────────────────────────────────────────────
-def _is_group_complete_for_all_strategies(group_syms) -> bool:
-    """
-    현재 그룹의 모든 심볼이 모든 전략(단/중/장기)에서 최소 1개 모델이라도 갖고 있는지 검사.
-    모델 ‘존재’만 보며, 파일명에 그룹 인덱스가 없어도 무관.
-    """
-    if not group_syms:
-        # 그룹 매니저가 없거나, 그룹이 비어 있으면 차단하지 않음(보수적 허용)
-        return True
-    try:
-        for sym in group_syms:
-            for st in STRATEGIES:
-                if not _has_model_for(sym, st):
-                    return False
-        return True
-    except Exception:
-        return False
+def _missing_pairs(symbols):
+    """모델이 없는 (심볼,전략) 쌍 목록."""
+    miss = []
+    for sym in symbols:
+        for st in STRATEGIES:
+            if not _has_model_for(sym, st):
+                miss.append((sym, st))
+    return miss
+
+def _available_pairs(symbols):
+    """모델이 있는 (심볼,전략) 쌍만 생성."""
+    for sym in symbols:
+        for st in STRATEGIES:
+            if _has_model_for(sym, st):
+                yield sym, st
+
+def _is_group_complete_for_all_strategies(symbols) -> bool:
+    """그룹 내 모든 심볼이 모든 전략 모델을 최소 1개라도 보유?"""
+    return len(_missing_pairs(symbols)) == 0
 
 # ──────────────────────────────────────────────────────────────
-# 전조 조건(메모리/연산 예산 보호 포함)
+# 전조(메모리/연산 예산 보호)
 # ──────────────────────────────────────────────────────────────
 def _has_cols(df: pd.DataFrame, cols) -> bool:
     return isinstance(df, pd.DataFrame) and set(cols).issubset(set(df.columns))
@@ -214,14 +220,14 @@ def _has_cols(df: pd.DataFrame, cols) -> bool:
 def check_pre_burst_conditions(df, strategy):
     try:
         if df is None or len(df) < 10 or not _has_cols(df, ["close"]):
-            print("[경고] 데이터 너무 적음/컬럼부족 → fallback 조건 평가")
+            # 데이터가 너무 적으면 보수적 허용(상위 레벨에서 최소 길이로 다시 필터링)
             return True
 
-        # 메모리/연산량 절약: 최근 구간만 사용
+        # 최근 구간만 사용
         if MAX_LOOKBACK > 0 and len(df) > MAX_LOOKBACK:
             df = df.tail(MAX_LOOKBACK)
 
-        # 방어: volume 없으면 단조 증가 체크 건너뜀
+        # volume 단조증가(있으면)
         if "volume" in df.columns and len(df) >= 3:
             vol_increasing = df["volume"].iloc[-3] < df["volume"].iloc[-2] < df["volume"].iloc[-1]
         else:
@@ -241,7 +247,7 @@ def check_pre_burst_conditions(df, strategy):
             bb_std = df["close"].rolling(window=20).std()
             expanding_band = (bb_std.iloc[-2] < bb_std.iloc[-1]) and (bb_std.iloc[-1] > 0.002)
         else:
-            expanding_band = True  # 짧은 시계열은 관대한 기준
+            expanding_band = True  # 짧은 시계열은 관대
 
         if strategy == "단기":
             return sum([vol_increasing, stable_price, ema_compressed, expanding_band]) >= 2
@@ -257,31 +263,31 @@ def check_pre_burst_conditions(df, strategy):
         return False
 
 def check_model_quality(symbol, strategy):
-    # [ADD] 최소: 실제 가용 모델이 하나라도 있어야 실행
     return _has_model_for(symbol, strategy)
 
 # ──────────────────────────────────────────────────────────────
-# 트리거 실행 루프(락/쿨다운/최대 실행 수/타임아웃 지원 + 그룹 인식)
+# 트리거 실행 루프
 # ──────────────────────────────────────────────────────────────
 def run():
-    # 전역 락이면 전체 스킵
+    # 전역 락 → 전체 스킵
     if _LOCK_PATH and os.path.exists(_LOCK_PATH):
         print(f"[트리거] 전역 락 감지({_LOCK_PATH}) → 전체 스킵 @ {now_kst().isoformat()}")
         return
 
-    # 예측 고아 락 정리(있다면)
+    # 예측 고아 락 정리
     _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
 
-    # 게이트 닫힘이면 전체 스킵(그룹 학습/예측 중일 수 있음)
+    # 그룹 학습 중이면 스킵(설계 요구)
     if _gate_closed():
-        print(f"[트리거] 게이트 닫힘(그룹 예측/학습 진행 중) → 스킵 @ {now_kst().isoformat()}")
+        print(f"[트리거] 그룹 학습 중/비상차단 → 스킵 @ {now_kst().isoformat()}")
         return
 
-    # 이미 예측 중이면 스킵(중복 실행 방지)
+    # 이미 예측 중이면 스킵
     if _predict_busy():
         print(f"[트리거] 예측 실행 중(lock) → 스킵 @ {now_kst().isoformat()}")
         return
 
+    # predict 진입점
     try:
         from predict import predict as _predict
     except Exception as e:
@@ -289,123 +295,124 @@ def run():
         traceback.print_exc()
         return
 
+    # prediction_log 헤더 보장
     try:
         ensure_prediction_log_exists()
     except Exception as e:
         print(f"[경고] prediction_log 보장 실패: {e}")
 
-    # 전체 심볼 목록 확보
+    # 전체 심볼 확보
     try:
         all_symbols = list(dict.fromkeys(get_ALL_SYMBOLS()))
     except Exception as e:
         print(f"[경고] 심볼 로드 실패: {e}")
         all_symbols = []
 
-    # [NEW] 그룹 매니저가 제공하는 현재 그룹 심볼만 대상으로 제한(있으면)
+    # 현재 그룹만 대상으로 제한(있으면)
     group_syms = _get_current_group_symbols()
     if isinstance(group_syms, (list, tuple)) and len(group_syms) > 0:
         symset = set(group_syms)
         symbols = [s for s in all_symbols if s in symset]
         print(f"[그룹제한] 현재 그룹 심볼 {len(symbols)}/{len(all_symbols)}개 대상으로 실행")
 
-        # === [ADD: 하드 차단] group_all_complete == True 인 경우에만 예측 허용 ===
-        if not _is_group_complete_for_all_strategies(symbols):
-            print("[트리거] 현재 그룹 미완료(일부 심볼/전략 모델 부재) → 예측 전면 스킵")
-            return
+        if REQUIRE_GROUP_COMPLETE and not _is_group_complete_for_all_strategies(symbols):
+            # 엄격 모드지만 전면 스톱은 하지 않고 부분 실행으로 다운시프트
+            miss = _missing_pairs(symbols)
+            print(f"[경고] 그룹 미완료(누락 {len(miss)}): {miss} → 부분 실행으로 전환")
     else:
         symbols = all_symbols
 
-    print(f"[트리거 실행] 전조 패턴 감지 시작: {now_kst().isoformat()} (대상 심볼 {len(symbols)}개)")
+    print(f"[트리거 시작] {now_kst().isoformat()} / 대상 심볼 {len(symbols)}개")
 
     triggered = 0
+    # 대상 (심볼,전략) 조합: 존재하는 모델만
+    target_pairs = list(_available_pairs(symbols))
 
-    for symbol in symbols:
-        for strategy in STRATEGIES:
-            # 최대 실행 수 초과 시 즉시 종료(스케줄 다음 턴으로 넘김)
-            if triggered >= TRIGGER_MAX_PER_RUN:
-                print(f"[트리거] 이번 루프 최대 실행 수({TRIGGER_MAX_PER_RUN}) 도달 → 조기 종료")
-                print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
-                return
+    for symbol, strategy in target_pairs:
+        # 최대 실행 수 초과 시 종료
+        if triggered >= TRIGGER_MAX_PER_RUN:
+            print(f"[트리거] 이번 루프 최대 실행 수({TRIGGER_MAX_PER_RUN}) 도달 → 조기 종료")
+            print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
+            return
 
-            # [RECHECK] 실행 중간에도 스테일 락 한 번 더 정리 → 게이트/락 변동 재확인
-            _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
-            if _LOCK_PATH and os.path.exists(_LOCK_PATH):
-                print(f"[트리거] 실행 중 전역 락 감지 → 중단")
-                print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
-                return
-            if _gate_closed() or _predict_busy():
-                print(f"[트리거] 게이트 닫힘/예측 중 → 스킵")
-                return
+        # 중간 재확인: 스테일락 정리/락/게이트
+        _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
+        if _LOCK_PATH and os.path.exists(_LOCK_PATH):
+            print(f"[트리거] 실행 중 전역 락 감지 → 중단")
+            print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
+            return
+        if _gate_closed() or _predict_busy():
+            print(f"[트리거] 게이트 닫힘/예측 중 → 중단")
+            print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
+            return
 
+        try:
+            key = f"{symbol}_{strategy}"
+            now = time.time()
+            cooldown = TRIGGER_COOLDOWN.get(strategy, 3600)
+            if now - last_trigger_time.get(key, 0) < cooldown:
+                continue
+
+            # 모델 유무(안전)
+            if not check_model_quality(symbol, strategy):
+                continue
+
+            # 데이터 최소요건
+            df = get_kline_by_strategy(symbol, strategy)
+            if df is None or len(df) < 60 or not _has_cols(df, ["close"]):
+                continue
+
+            # 전조 조건
+            if not check_pre_burst_conditions(df, strategy):
+                continue
+
+            # 프리로드 감사로그
             try:
-                key = f"{symbol}_{strategy}"
-                now = time.time()
-                cooldown = TRIGGER_COOLDOWN.get(strategy, 3600)
+                regime = detect_regime(symbol, strategy, now=now_kst())
+                calib_ver = get_calibration_version()
+                log_audit(symbol, strategy, "프리로드", f"regime={regime}, calib_ver={calib_ver}")
+            except Exception as preload_e:
+                print(f"[프리로드 경고] {symbol}-{strategy}: {preload_e}")
 
-                if now - last_trigger_time.get(key, 0) < cooldown:
-                    continue
+            print(f"[✅ 트리거 포착] {symbol} - {strategy} → 예측 실행")
 
-                # [ADD] 모델 유무 사전 점검(불필요한 predict 호출/실패 로그 방지)
-                if not check_model_quality(symbol, strategy):
-                    continue
-
-                df = get_kline_by_strategy(symbol, strategy)
-                if df is None or len(df) < 60 or not _has_cols(df, ["close"]):
-                    continue
-
-                if not check_pre_burst_conditions(df, strategy):
-                    continue
-
-                # 프리로드(로그용)
-                try:
-                    regime = detect_regime(symbol, strategy, now=now_kst())
-                    calib_ver = get_calibration_version()
-                    log_audit(symbol, strategy, "프리로드", f"regime={regime}, calib_ver={calib_ver}")
-                except Exception as preload_e:
-                    print(f"[프리로드 경고] {symbol}-{strategy}: {preload_e}")
-
-                print(f"[✅ 트리거 포착] {symbol} - {strategy} → 예측 실행")
-
-                try:
-                    # 1순위: 타임아웃 지원 호출
-                    if _safe_predict_with_timeout:
-                        ok = _safe_predict_with_timeout(
-                            predict_fn=_predict,
-                            symbol=symbol,
-                            strategy=strategy,
-                            source="변동성",
-                            model_type=None,
-                            timeout=PREDICT_TIMEOUT_SEC,
-                        )
-                        if not ok:
-                            raise RuntimeError("predict timeout/failed")
-                    # 2순위: 동기 호출 래퍼(타임아웃 없음)
-                    elif _safe_predict_sync:
-                        _safe_predict_sync(
-                            predict_fn=_predict,
-                            symbol=symbol,
-                            strategy=strategy,
-                            source="변동성",
-                            model_type=None,
-                        )
-                    else:
-                        # 3순위: 직접 호출(타임아웃 미지원, predict.py 내부에서 gate/lock/heartbeat 처리)
-                        _predict(symbol, strategy, source="변동성")
-
-                    last_trigger_time[key] = now
-                    log_audit(symbol, strategy, "트리거예측", "조건 만족으로 실행")
-                    triggered += 1
-                except Exception as inner:
-                    print(f"[❌ 예측 실행 실패] {symbol}-{strategy}: {inner}")
-                    log_audit(symbol, strategy, "트리거예측오류", f"예측실행실패: {inner}")
-            except Exception as e:
-                print(f"[트리거 오류] {symbol} {strategy}: {e}")
-                log_audit(symbol, strategy or "알수없음", "트리거오류", str(e))
+            # 예측 호출(타임아웃 래퍼 우선)
+            try:
+                if _safe_predict_with_timeout:
+                    ok = _safe_predict_with_timeout(
+                        predict_fn=_predict,
+                        symbol=symbol,
+                        strategy=strategy,
+                        source="변동성",
+                        model_type=None,
+                        timeout=PREDICT_TIMEOUT_SEC,
+                    )
+                    if not ok:
+                        raise RuntimeError("predict timeout/failed")
+                elif _safe_predict_sync:
+                    _safe_predict_sync(
+                        predict_fn=_predict,
+                        symbol=symbol,
+                        strategy=strategy,
+                        source="변동성",
+                        model_type=None,
+                    )
+                else:
+                    _predict(symbol, strategy, source="변동성")
+                last_trigger_time[key] = now
+                log_audit(symbol, strategy, "트리거예측", "조건 만족으로 실행")
+                triggered += 1
+            except Exception as inner:
+                print(f"[❌ 예측 실행 실패] {symbol}-{strategy}: {inner}")
+                log_audit(symbol, strategy, "트리거예측오류", f"예측실행실패: {inner}")
+        except Exception as e:
+            print(f"[트리거 오류] {symbol} {strategy}: {e}")
+            log_audit(symbol, strategy or "알수없음", "트리거오류", str(e))
 
     print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
 
 # ──────────────────────────────────────────────────────────────
-# 최근 클래스 빈도(메모리 안전: 청크 누산, 빈 로그/누락 컬럼/타임존 안전)
+# 최근 클래스 빈도(메모리 안전)
 # ──────────────────────────────────────────────────────────────
 def get_recent_class_frequencies(strategy=None, recent_days=RECENT_DAYS_FOR_FREQ):
     path = "/persistent/prediction_log.csv"
@@ -458,7 +465,7 @@ def get_recent_class_frequencies(strategy=None, recent_days=RECENT_DAYS_FOR_FREQ
         return Counter()
 
 # ──────────────────────────────────────────────────────────────
-# 확률 보정: 최근 과다/과소 예측 및 클래스 불균형을 완만히 보정 (빈 입력/음수/NaN 모두 안전)
+# 확률 보정(최근 빈도/클래스 불균형)
 # ──────────────────────────────────────────────────────────────
 def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict = None, alpha=0.10, beta=0.10):
     p = np.asarray(probs, dtype=np.float64)
@@ -503,6 +510,6 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
         return p
     return adjusted / s
 
-# (엔트리 포인트용)
+# 엔트리포인트
 if __name__ == "__main__":
     run()
