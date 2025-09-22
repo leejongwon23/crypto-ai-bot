@@ -431,6 +431,14 @@ def get_recent_class_frequencies(strategy=None, recent_days=RECENT_DAYS_FOR_FREQ
 # 확률 보정
 # ──────────────────────────────────────────────────────────────
 def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict = None, alpha=0.10, beta=0.10):
+    """
+    probs           : (C,) or (1,C) 확률 벡터
+    recent_freq     : 최근 예측된 클래스 빈도 Counter
+    class_counts    : (선택) 학습시 클래스 샘플 수 {cls: count}
+    alpha           : 최근 과다선택된 클래스 패널티 강도
+    beta            : 데이터 희소클래스 보정 강도
+    반환            : 정규화된 (C,) 벡터
+    """
     p = np.asarray(probs, dtype=np.float64)
     if p.ndim == 2:
         p = p[0]
@@ -443,6 +451,7 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
 
     num_classes = len(p)
 
+    # 최근 빈도 기반 가중치 (많이 나왔던 클래스 패널티)
     total_recent = float(sum(recent_freq.values()))
     if total_recent <= 0:
         recent_weights = np.ones(num_classes, dtype=np.float64)
@@ -451,4 +460,29 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
             np.exp(-alpha * (float(recent_freq.get(i, 0)) / total_recent))
             for i in range(num_classes)
         ], dtype=np.float64)
-        recent_weights = np.clip(re
+        # 안전 클리핑(너무 과도한 패널티/증폭 방지)
+        recent_weights = np.clip(recent_weights, 0.5, 1.5)
+
+    # (선택) 클래스 데이터 수 기반 희소성 보정
+    if class_counts and isinstance(class_counts, dict):
+        counts = np.array([float(class_counts.get(i, 0.0)) for i in range(num_classes)], dtype=np.float64)
+        counts = np.where(np.isfinite(counts), counts, 0.0)
+        # 희소 클래스(작은 count) 우대: 1/sqrt(count+eps)
+        inv_sqrt = 1.0 / np.sqrt(counts + 1e-6)
+        # 평균 1로 정규화
+        inv_sqrt = inv_sqrt / (inv_sqrt.mean() + 1e-12)
+        # beta 비율로 혼합(0이면 미사용, 1이면 전부 반영)
+        rarity_weights = (1.0 - beta) + beta * inv_sqrt
+    else:
+        rarity_weights = np.ones(num_classes, dtype=np.float64)
+
+    # 가중치 결합 후 정규화
+    w = recent_weights * rarity_weights
+    w = np.where(np.isfinite(w), w, 1.0)
+    w = np.clip(w, 1e-6, None)
+
+    p_adj = p * w
+    s = p_adj.sum()
+    if s <= 0:
+        return np.ones_like(p) / max(1, len(p))
+    return (p_adj / s).astype(np.float64)
