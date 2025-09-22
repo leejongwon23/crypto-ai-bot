@@ -448,4 +448,7 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
         recent_weights = np.ones(num_classes, dtype=np.float64)
     else:
         recent_weights = np.array([
-            np.exp(-alpha * (float(recent_freq.get(i,
+            np.exp(-alpha * (float(recent_freq.get(i, 0)) / total_recent))
+            for i in range(num_classes)
+        ], dtype=np.float64)
+        recent_weights = np.clip(re
