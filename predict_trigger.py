@@ -1,4 +1,4 @@
-# === predict_trigger.py (MEM-SAFE FINAL++++ — group-finished only, no hard gate, stale-lock safe, partial-run OK) ===
+# === predict_trigger.py (MEM-SAFE FINAL++++ — group-finished only, hard gate enforced, stale-lock safe) ===
 import os
 import time
 import traceback
@@ -36,10 +36,10 @@ try:
 except Exception:
     _LOCK_PATH = "/persistent/locks/train_or_predict.lock"
 
-# 예측 게이트/락 경로 (predict.py와 합의)
-PREDICT_BLOCK    = "/persistent/predict.block"              # 수동 비상차단
-PREDICT_RUN_LOCK = "/persistent/run/predict_running.lock"   # 예측 실행 중
-GROUP_TRAIN_LOCK = "/persistent/run/group_training.lock"    # 그룹 학습 중(→ 예측 금지)
+# 예측 게이트/락 경로
+PREDICT_BLOCK    = "/persistent/predict.block"
+PREDICT_RUN_LOCK = "/persistent/run/predict_running.lock"
+GROUP_TRAIN_LOCK = "/persistent/run/group_training.lock"
 
 # 모델 경로
 MODEL_DIR   = "/persistent/models"
@@ -49,13 +49,10 @@ _KNOWN_EXTS = (".pt", ".ptz", ".safetensors")
 STRATEGIES  = ["단기", "중기", "장기"]
 
 def _has_model_for(symbol: str, strategy: str) -> bool:
-    """심볼·전략 단위 가용 모델 존재 여부(평면/트리 모두 탐색)."""
     try:
-        # flat
         for e in _KNOWN_EXTS:
             if glob.glob(os.path.join(MODEL_DIR, f"{symbol}_{strategy}_*{e}")):
                 return True
-        # tree
         d = os.path.join(MODEL_DIR, symbol, strategy)
         if os.path.isdir(d):
             for e in _KNOWN_EXTS:
@@ -78,7 +75,7 @@ except Exception:
     def get_calibration_version():
         return "none"
 
-# (옵션) 예측 호출 래퍼 — train.py 제공 시 사용
+# (옵션) 예측 호출 래퍼
 _safe_predict_with_timeout = None
 _safe_predict_sync = None
 try:
@@ -92,7 +89,7 @@ try:
 except Exception:
     pass
 
-# (옵션) 예측 게이트 상태 API — 의존하지 않도록만 로드
+# (옵션) 예측 게이트 상태 API
 try:
     from predict import is_predict_gate_open as __is_open
 except Exception:
@@ -109,7 +106,6 @@ except Exception:
         _GOM = None
 
 def _get_current_group_symbols():
-    """현재 그룹 심볼 목록. 없으면 None 반환(전심볼 대상)."""
     if _GOM is None:
         return None
     try:
@@ -127,10 +123,10 @@ def _get_current_group_symbols():
         return None
 
 # ──────────────────────────────────────────────────────────────
-# 설정 (환경변수로 조절 가능)
+# 설정
 # ──────────────────────────────────────────────────────────────
 TRIGGER_COOLDOWN = {"단기": 3600, "중기": 10800, "장기": 21600}
-MAX_LOOKBACK = int(os.getenv("TRIGGER_MAX_LOOKBACK", "180"))          # 전조 계산 시 최근 N행만
+MAX_LOOKBACK = int(os.getenv("TRIGGER_MAX_LOOKBACK", "180"))
 RECENT_DAYS_FOR_FREQ = max(1, int(os.getenv("TRIGGER_FREQ_DAYS", "3")))
 CSV_CHUNKSIZE = max(10000, int(os.getenv("TRIGGER_CSV_CHUNKSIZE", "50000")))
 TRIGGER_MAX_PER_RUN = max(1, int(os.getenv("TRIGGER_MAX_PER_RUN", "999")))
@@ -138,28 +134,20 @@ PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC", "30"))
 PREDICT_LOCK_STALE_TRIGGER_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRIGGER_SEC", "600"))
 
 # 그룹 완료 모드
-#  - 1: 그룹 전 심볼·전략 모델이 있어야 예측(엄격)  → 미충족 시 '부분 실행'로 자동 다운시프트(전면 스톱 방지)
-#  - 0: 부분 실행(기본) — 그룹 내 존재하는 조합만 예측
 REQUIRE_GROUP_COMPLETE = int(os.getenv("REQUIRE_GROUP_COMPLETE", "0"))
 
 last_trigger_time = {}
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 # ──────────────────────────────────────────────────────────────
-# 게이트/락 & 스테일락 정리
+# 게이트/락 관리
 # ──────────────────────────────────────────────────────────────
 def _gate_closed() -> bool:
-    """
-    설계: 그룹 학습 중에는 예측 금지, 그 외 예측 허용.
-    - PREDICT_BLOCK: 비상차단 파일이 있을 때만 차단.
-    - predict_gate_open() 여부에는 의존하지 않음(전면 차단 방지).
-    """
     try:
         if os.path.exists(GROUP_TRAIN_LOCK):
             return True
         if os.path.exists(PREDICT_BLOCK):
             return True
-        # __is_open은 참고만, 차단 조건으로 사용하지 않음
     except Exception:
         pass
     return False
@@ -180,7 +168,6 @@ def _is_stale_lock(path: str, ttl_sec: int) -> bool:
         return False
 
 def _clear_stale_predict_lock(ttl_sec: int):
-    """오래된 고아 락 자동 제거(예: 이전 예측 중 비정상 종료)."""
     try:
         if _is_stale_lock(PREDICT_RUN_LOCK, ttl_sec):
             os.remove(PREDICT_RUN_LOCK)
@@ -189,10 +176,9 @@ def _clear_stale_predict_lock(ttl_sec: int):
         print(f"[LOCK] stale cleanup error: {e}")
 
 # ──────────────────────────────────────────────────────────────
-# 그룹 완성 검사 & 대상 페어 산출
+# 그룹 완성 검사
 # ──────────────────────────────────────────────────────────────
 def _missing_pairs(symbols):
-    """모델이 없는 (심볼,전략) 쌍 목록."""
     miss = []
     for sym in symbols:
         for st in STRATEGIES:
@@ -201,18 +187,16 @@ def _missing_pairs(symbols):
     return miss
 
 def _available_pairs(symbols):
-    """모델이 있는 (심볼,전략) 쌍만 생성."""
     for sym in symbols:
         for st in STRATEGIES:
             if _has_model_for(sym, st):
                 yield sym, st
 
 def _is_group_complete_for_all_strategies(symbols) -> bool:
-    """그룹 내 모든 심볼이 모든 전략 모델을 최소 1개라도 보유?"""
     return len(_missing_pairs(symbols)) == 0
 
 # ──────────────────────────────────────────────────────────────
-# 전조(메모리/연산 예산 보호)
+# 전조 조건
 # ──────────────────────────────────────────────────────────────
 def _has_cols(df: pd.DataFrame, cols) -> bool:
     return isinstance(df, pd.DataFrame) and set(cols).issubset(set(df.columns))
@@ -220,20 +204,15 @@ def _has_cols(df: pd.DataFrame, cols) -> bool:
 def check_pre_burst_conditions(df, strategy):
     try:
         if df is None or len(df) < 10 or not _has_cols(df, ["close"]):
-            # 데이터가 너무 적으면 보수적 허용(상위 레벨에서 최소 길이로 다시 필터링)
             return True
-
-        # 최근 구간만 사용
         if MAX_LOOKBACK > 0 and len(df) > MAX_LOOKBACK:
             df = df.tail(MAX_LOOKBACK)
 
-        # volume 단조증가(있으면)
         if "volume" in df.columns and len(df) >= 3:
             vol_increasing = df["volume"].iloc[-3] < df["volume"].iloc[-2] < df["volume"].iloc[-1]
         else:
             vol_increasing = False
 
-        # 가격 안정/압축
         price_range = df["close"].iloc[-min(len(df), 6):]
         stable_price = (price_range.max() - price_range.min()) / (price_range.mean() + 1e-12) < 0.005
 
@@ -247,7 +226,7 @@ def check_pre_burst_conditions(df, strategy):
             bb_std = df["close"].rolling(window=20).std()
             expanding_band = (bb_std.iloc[-2] < bb_std.iloc[-1]) and (bb_std.iloc[-1] > 0.002)
         else:
-            expanding_band = True  # 짧은 시계열은 관대
+            expanding_band = True
 
         if strategy == "단기":
             return sum([vol_increasing, stable_price, ema_compressed, expanding_band]) >= 2
@@ -269,25 +248,20 @@ def check_model_quality(symbol, strategy):
 # 트리거 실행 루프
 # ──────────────────────────────────────────────────────────────
 def run():
-    # 전역 락 → 전체 스킵
     if _LOCK_PATH and os.path.exists(_LOCK_PATH):
         print(f"[트리거] 전역 락 감지({_LOCK_PATH}) → 전체 스킵 @ {now_kst().isoformat()}")
         return
 
-    # 예측 고아 락 정리
     _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
 
-    # 그룹 학습 중이면 스킵(설계 요구)
     if _gate_closed():
         print(f"[트리거] 그룹 학습 중/비상차단 → 스킵 @ {now_kst().isoformat()}")
         return
 
-    # 이미 예측 중이면 스킵
     if _predict_busy():
         print(f"[트리거] 예측 실행 중(lock) → 스킵 @ {now_kst().isoformat()}")
         return
 
-    # predict 진입점
     try:
         from predict import predict as _predict
     except Exception as e:
@@ -295,20 +269,17 @@ def run():
         traceback.print_exc()
         return
 
-    # prediction_log 헤더 보장
     try:
         ensure_prediction_log_exists()
     except Exception as e:
         print(f"[경고] prediction_log 보장 실패: {e}")
 
-    # 전체 심볼 확보
     try:
         all_symbols = list(dict.fromkeys(get_ALL_SYMBOLS()))
     except Exception as e:
         print(f"[경고] 심볼 로드 실패: {e}")
         all_symbols = []
 
-    # 현재 그룹만 대상으로 제한(있으면)
     group_syms = _get_current_group_symbols()
     if isinstance(group_syms, (list, tuple)) and len(group_syms) > 0:
         symset = set(group_syms)
@@ -316,26 +287,23 @@ def run():
         print(f"[그룹제한] 현재 그룹 심볼 {len(symbols)}/{len(all_symbols)}개 대상으로 실행")
 
         if REQUIRE_GROUP_COMPLETE and not _is_group_complete_for_all_strategies(symbols):
-            # 엄격 모드지만 전면 스톱은 하지 않고 부분 실행으로 다운시프트
             miss = _missing_pairs(symbols)
-            print(f"[경고] 그룹 미완료(누락 {len(miss)}): {miss} → 부분 실행으로 전환")
+            print(f"[차단] 그룹 미완료(누락 {len(miss)}) {miss} → 예측 실행 안 함")
+            return
     else:
         symbols = all_symbols
 
     print(f"[트리거 시작] {now_kst().isoformat()} / 대상 심볼 {len(symbols)}개")
 
     triggered = 0
-    # 대상 (심볼,전략) 조합: 존재하는 모델만
     target_pairs = list(_available_pairs(symbols))
 
     for symbol, strategy in target_pairs:
-        # 최대 실행 수 초과 시 종료
         if triggered >= TRIGGER_MAX_PER_RUN:
             print(f"[트리거] 이번 루프 최대 실행 수({TRIGGER_MAX_PER_RUN}) 도달 → 조기 종료")
             print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
             return
 
-        # 중간 재확인: 스테일락 정리/락/게이트
         _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
         if _LOCK_PATH and os.path.exists(_LOCK_PATH):
             print(f"[트리거] 실행 중 전역 락 감지 → 중단")
@@ -353,20 +321,16 @@ def run():
             if now - last_trigger_time.get(key, 0) < cooldown:
                 continue
 
-            # 모델 유무(안전)
             if not check_model_quality(symbol, strategy):
                 continue
 
-            # 데이터 최소요건
             df = get_kline_by_strategy(symbol, strategy)
             if df is None or len(df) < 60 or not _has_cols(df, ["close"]):
                 continue
 
-            # 전조 조건
             if not check_pre_burst_conditions(df, strategy):
                 continue
 
-            # 프리로드 감사로그
             try:
                 regime = detect_regime(symbol, strategy, now=now_kst())
                 calib_ver = get_calibration_version()
@@ -376,7 +340,6 @@ def run():
 
             print(f"[✅ 트리거 포착] {symbol} - {strategy} → 예측 실행")
 
-            # 예측 호출(타임아웃 래퍼 우선)
             try:
                 if _safe_predict_with_timeout:
                     ok = _safe_predict_with_timeout(
@@ -412,7 +375,7 @@ def run():
     print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
 
 # ──────────────────────────────────────────────────────────────
-# 최근 클래스 빈도(메모리 안전)
+# 최근 클래스 빈도
 # ──────────────────────────────────────────────────────────────
 def get_recent_class_frequencies(strategy=None, recent_days=RECENT_DAYS_FOR_FREQ):
     path = "/persistent/prediction_log.csv"
@@ -465,7 +428,7 @@ def get_recent_class_frequencies(strategy=None, recent_days=RECENT_DAYS_FOR_FREQ
         return Counter()
 
 # ──────────────────────────────────────────────────────────────
-# 확률 보정(최근 빈도/클래스 불균형)
+# 확률 보정
 # ──────────────────────────────────────────────────────────────
 def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict = None, alpha=0.10, beta=0.10):
     p = np.asarray(probs, dtype=np.float64)
@@ -485,31 +448,4 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
         recent_weights = np.ones(num_classes, dtype=np.float64)
     else:
         recent_weights = np.array([
-            np.exp(-alpha * (float(recent_freq.get(i, 0)) / total_recent))
-            for i in range(num_classes)
-        ], dtype=np.float64)
-        recent_weights = np.clip(recent_weights, 0.85, 1.15)
-
-    if class_counts:
-        def _get_cc(i):
-            return class_counts.get(i, class_counts.get(str(i), 0))
-        total_class = float(sum(float(v) for v in class_counts.values())) or 1.0
-        class_weights = np.array([
-            np.exp(beta * (1.0 - float(_get_cc(i)) / total_class))
-            for i in range(num_classes)
-        ], dtype=np.float64)
-    else:
-        class_weights = np.ones(num_classes, dtype=np.float64)
-
-    class_weights = np.clip(class_weights, 0.85, 1.15)
-
-    combined = np.clip(recent_weights * class_weights, 0.85, 1.15)
-    adjusted = p * combined
-    s = adjusted.sum()
-    if s <= 0 or not np.isfinite(s):
-        return p
-    return adjusted / s
-
-# 엔트리포인트
-if __name__ == "__main__":
-    run()
+            np.exp(-alpha * (float(recent_freq.get(i,
