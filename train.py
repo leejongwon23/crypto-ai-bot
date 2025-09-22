@@ -130,6 +130,9 @@ def _min_f1_for(strategy:str)->float:  # 더 이상 게이트에 쓰지 않음(�
 
 now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 
+# ✅ 그룹 끝난 직후 예측을 락 예외로 허용할지(예측 쪽에서 처리)
+PREDICT_OVERRIDE_ON_GROUP_END = _as_bool_env("PREDICT_OVERRIDE_ON_GROUP_END", True)
+
 # ---------- 유틸 ----------
 def _safe_print(msg): 
     try: print(msg, flush=True)
@@ -457,7 +460,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
 
             res["windows"].append({"window":int(window), "results":[m for m in res["models"] if m["window"]==window]})
 
-        # ok 판정: 하나라도 저장되면 True
+        # ok 판정: 하나라도 저장되었으면 True
         res["ok"]=bool(res.get("models"))
         _safe_print(f"[RESULT] {symbol}-{strategy}-g{group_id} ok={res['ok']}")
         return res
@@ -467,7 +470,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         _log_fail(symbol,strategy,str(e)); return res
 
 # ---------- 심볼 전체/그룹 순서 ----------
-# HALT/완료 강제 로직은 비활성화 방향으로(오케스트레이션 단순화)
 _ENFORCE_FULL_STRATEGY = False
 _STRICT_HALT_ON_INCOMPLETE = False
 _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = False
@@ -501,7 +503,6 @@ def _train_full_symbol(symbol:str, stop_event: Optional[threading.Event] = None)
         except Exception as e:
             logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note=f"전략 실패: {e}",status="failed")
             detail[strategy]={-1:False}
-    # complete 여부: 최소 1개라도 저장되었으면 True
     return any_saved, detail
 
 def train_models(symbol_list, stop_event: Optional[threading.Event] = None, ignore_should: bool = False):
@@ -531,7 +532,6 @@ def train_models(symbol_list, stop_event: Optional[threading.Event] = None, igno
             except Exception as e: _safe_print(f"[mark_symbol_trained err] {e}")
         else:
             partial_symbols.append(symbol)
-        # HALT 제거: 어떤 경우에도 다음 심볼로 진행
     return completed_symbols, partial_symbols
 
 # ---------- 그룹 루프 및 예측 ----------
@@ -558,7 +558,7 @@ def _run_smoke_predict(predict_fn, symbol: str):
     for strat in ["단기","중기","장기"]:
         if _has_model_for(symbol, strat):
             try:
-                predict_fn(symbol, strat, source="그룹직후(스모크)", model_type=None); ok_any=True
+                predict_fn(symbol, strat, source="group_end(smoke)", model_type=None); ok_any=True
             except Exception as e:
                 _safe_print(f"[SMOKE fail] {symbol}-{strat}: {e}")
     return ok_any
@@ -588,16 +588,18 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
 
                 # ✅ 그룹 학습 직후 즉시 예측(완료 여부 상관없이, 모델 있는 조합만)
                 if not ready_for_group_predict():
-                    _safe_print(f"[PREDICT-BLOCK] 그룹{idx+1} ready_for_group_predict()==False")
+                    _safe_print(f"[PREDICT-BLOCK] group{idx+1} ready_for_group_predict()==False")
                 else:
                     ran_any=False
                     for symbol in group:
                         for strategy in ["단기","중기","장기"]:
-                            if not _has_model_for(symbol, strategy): 
-                                _safe_print(f"[PREDICT-SKIP] {symbol}-{strategy}: 모델 없음"); 
+                            if not _has_model_for(symbol, strategy):
+                                _safe_print(f"[PREDICT-SKIP] {symbol}-{strategy}: 모델 없음")
                                 continue
                             try:
-                                predict(symbol, strategy, source="그룹직후", model_type=None); ran_any=True
+                                # 중요: source='group_end'로 명시 → predict.py에서 락 예외 허용(2~3단계에서 처리)
+                                predict(symbol, strategy, source="group_end", model_type=None)
+                                ran_any=True
                             except Exception as e:
                                 _safe_print(f"[PREDICT FAIL] {symbol}-{strategy}: {e}")
 
