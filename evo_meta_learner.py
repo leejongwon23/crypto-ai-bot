@@ -1,6 +1,7 @@
 # evo_meta_learner.py (FINAL)
-# (2025-09-17a) — input/DataFrame fallback + torch safety + save/load robustness + predict input shape guard
+# (2025-09-17b) — input/DataFrame fallback + torch safety + save/load robustness + predict input shape guard
 #                 EVO_META_AGG(mean|varpen|mean_var) + EVO_META_VAR_GAMMA: 윈도우/모델 확률 스택 합성 유틸
+#                 + predict(task='strategy'도 허용), 로깅 강화
 
 import os
 import json
@@ -244,7 +245,7 @@ def _load_meta():
 def predict_evo_meta(X_new, input_size, probs_stack: np.ndarray = None):
     """
     predict.py에서 불러 쓰는 진입점.
-    현재 저장된 메타가 task!='class'면 '클래스 선택' 용도가 아니므로 None 반환(안전 가드).
+    저장된 메타의 task가 'class' 또는 'strategy'이면 사용, 그 외는 None 반환(가드).
     probs_stack(선택): (W, C) 앙상블 확률 스택. 제공되면 합성 규칙으로 대표 벡터를 만들고
                        로깅/디버깅 용도로만 사용(모델 입력은 X_new 그대로 — 호환성 유지).
     """
@@ -258,8 +259,8 @@ def predict_evo_meta(X_new, input_size, probs_stack: np.ndarray = None):
 
     meta = _load_meta()
     task = meta.get("task", "class")
-    if task != "class":
-        print(f"[ℹ️ evo_meta_learner] task={task} → class 예측에 사용하지 않음")
+    if task not in ("class", "strategy"):
+        print(f"[ℹ️ evo_meta_learner] task={task} → 사용하지 않음")
         return None
 
     # (선택) 앙상블 확률 합성 규칙 적용(디버깅 로그용)
@@ -284,13 +285,25 @@ def predict_evo_meta(X_new, input_size, probs_stack: np.ndarray = None):
         print(f"[❌ evo_meta_learner] 모델 로드 실패: {e}")
         return None
 
-    model.eval()
-    with torch.no_grad():
+    # 입력 모양 가드
+    try:
         x = torch.tensor(X_new, dtype=torch.float32)
         if x.ndim == 1:
             x = x.unsqueeze(0)
+        if x.shape[1] != int(input_size):
+            # 열 수가 다르면 가능한 경우 마지막 축 자동 리쉐이프 (안전 범위 내에서만)
+            x = x.reshape(x.shape[0], int(input_size))
+    except Exception as e:
+        print(f"[❌ evo_meta_learner] 입력 가공 실패: {e}")
+        return None
+
+    model.eval()
+    with torch.no_grad():
         try:
             logits = model(x)
+            if F is None:
+                print("[❌ evo_meta_learner] torch.nn.functional 없음")
+                return None
             probs = F.softmax(logits, dim=1)
             best = int(torch.argmax(probs, dim=1).item())
             return best
