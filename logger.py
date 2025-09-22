@@ -709,7 +709,8 @@ def log_prediction(
         target_price = float(target_price or 0.0)
         model, model_name = _normalize_model_fields(model, model_name, symbol, strategy)
 
-        allowed_sources = ["일반","기본","meta","evo_meta","baseline_meta","진화형","평가","단일","변동성","train_loop","섀도우"]
+        # 🔧 '보류' 소스 반영 (predict.py 보류 로깅과 정합)
+        allowed_sources = ["일반","기본","meta","evo_meta","baseline_meta","진화형","평가","단일","변동성","train_loop","섀도우","보류"]
         if source not in allowed_sources:
             source = "일반"
 
@@ -1132,10 +1133,22 @@ def log_eval_coverage(symbol: str, strategy: str, counts: dict, num_classes: int
     write_header = not os.path.exists(path)
     try:
         with open(path, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=["timestamp","symbol","strategy","num_classes","covered","coverage","total","counts_json","note"])
+            # 🔧 FIX: DictWriter에는 dict를 넘겨야 함
+            fieldnames = ["timestamp","symbol","strategy","num_classes","covered","coverage","total","counts_json","note"]
+            w = csv.DictWriter(f, fieldnames=fieldnames)
             if write_header:
                 w.writeheader()
-            w.writerow([now, symbol, strategy, int(num_classes), int(covered), float(round(coverage,4)), int(total), json.dumps(counts, ensure_ascii=False), str(note or "")])
+            w.writerow({
+                "timestamp": now,
+                "symbol": symbol,
+                "strategy": strategy,
+                "num_classes": int(num_classes),
+                "covered": int(covered),
+                "coverage": float(round(coverage,4)),
+                "total": int(total),
+                "counts_json": json.dumps(counts, ensure_ascii=False),
+                "note": str(note or "")
+            })
         if covered <= 1:
             print(f"🔴 [경고] 검증 라벨 단일 클래스 감지 → {symbol}-{strategy} (covered={covered}/{num_classes})")
         elif coverage < 0.6:
