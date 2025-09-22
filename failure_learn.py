@@ -1,4 +1,4 @@
-# === failure_learn.py (v2025-09-17c: MEM-SAFE + mini-epochs + rollback + runtime lock + cooldown) ===
+# === failure_learn.py (v2025-09-17d: TZ-safe + manifest backup/restore + runtime lock guard) ===
 import os, json, time, glob, shutil, csv
 from datetime import datetime, timedelta
 import pandas as pd
@@ -22,13 +22,13 @@ LOCK_PATH      = os.getenv("SAFE_LOCK_PATH", os.path.join(LOCK_DIR, "train_or_pr
 
 # ── 설정 (환경변수로 조정) ─────────────────────────────────────
 KST = pytz.timezone("Asia/Seoul")
-CSV_CHUNKSIZE        = int(os.getenv("FAIL_LEARN_CHUNKSIZE", "50000"))   # 청크 읽기 크기
+CSV_CHUNKSIZE        = int(os.getenv("FAIL_LEARN_CHUNKSIZE", "50000"))
 LOOKBACK_DAYS_DEFAULT= int(os.getenv("FAIL_LEARN_LOOKBACK_DAYS", "7"))
 COOLDOWN_MINUTES     = int(os.getenv("FAIL_LEARN_COOLDOWN_MIN", "20"))
 # 이어학습/롤백 파라미터( failure_trainer 와 동일 키 )
-MINI_EPOCHS          = max(1, min(3, int(os.getenv("FAIL_MINI_EPOCHS", "2"))))  # 1~3 미니에폭
+MINI_EPOCHS          = max(1, min(3, int(os.getenv("FAIL_MINI_EPOCHS", "2"))))
 ROLLBACK_ENABLE      = os.getenv("ROLLBACK_ON_DEGRADE", "1") == "1"
-ROLLBACK_TOLERANCE   = float(os.getenv("ROLLBACK_TOLERANCE", "0.01"))           # 성능악화 허용오차
+ROLLBACK_TOLERANCE   = float(os.getenv("ROLLBACK_TOLERANCE", "0.01"))
 MAX_TARGETS          = int(os.getenv("FAIL_MAX_TARGETS", "8"))
 
 # ── 모델 아티팩트 탐색/백업/복구 유틸 ───────────────────────────
@@ -83,28 +83,75 @@ def _read_meta_f1(meta_path: str):
         return None
 
 BACKUP_DIR = os.path.join(PERSIST_DIR, "tmp", "failure_retrain_backups")
+
+def _rel_path_under_model_dir(path: str) -> str:
+    # MODEL_DIR 기준 상대경로 (동일 루트 내 파일만)
+    abs_p = os.path.abspath(path)
+    abs_root = os.path.abspath(MODEL_DIR)
+    if abs_p.startswith(abs_root):
+        rel = os.path.relpath(abs_p, abs_root)
+    else:
+        # 루트 밖이면 베이스이름만 (최소보장)
+        rel = os.path.basename(path)
+    return rel
+
 def _backup_group(symbol: str, strategy: str, group_id: int):
+    """
+    상대경로 + manifest.json로 원위치 복구 가능하도록 백업
+    """
     try:
         ts = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
         dst = os.path.join(BACKUP_DIR, f"{symbol}_{strategy}_g{group_id}_{ts}")
         os.makedirs(dst, exist_ok=True)
+        manifest = []
         for it in _find_group_artifacts(symbol, strategy, group_id):
             for p in [it.get("weight"), it.get("meta")]:
                 if p and os.path.exists(p):
-                    shutil.copy2(p, os.path.join(dst, os.path.basename(p)))
+                    rel = _rel_path_under_model_dir(p)
+                    # 백업 파일 경로는 상대경로의 디렉토리 구조를 유지
+                    out_path = os.path.join(dst, rel)
+                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                    shutil.copy2(p, out_path)
+                    manifest.append({"rel": rel})
+        # manifest 저장
+        with open(os.path.join(dst, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"items": manifest}, f, ensure_ascii=False, indent=2)
         return dst
     except Exception as e:
         print(f"[백업 실패] {symbol}-{strategy}-g{group_id} → {e}")
         return None
 
 def _restore_from_backup(backup_dir: str) -> bool:
+    """
+    manifest.json을 사용하여 원래 상대경로로 복구
+    """
     try:
         if not backup_dir or not os.path.isdir(backup_dir): return False
-        for fn in os.listdir(backup_dir):
-            src = os.path.join(backup_dir, fn)
-            dst = os.path.join(MODEL_DIR, fn)
-            shutil.copy2(src, dst)
-        return True
+        manifest_path = os.path.join(backup_dir, "manifest.json")
+        items = []
+        if os.path.exists(manifest_path):
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                doc = json.load(f)
+                items = [it.get("rel") for it in doc.get("items", []) if it and it.get("rel")]
+        else:
+            # manifest가 없다면 백업 디렉토리 파일 전체를 평면 복사 (하위 호환)
+            for root, _, files in os.walk(backup_dir):
+                for fn in files:
+                    if fn == "manifest.json": continue
+                    rel = os.path.relpath(os.path.join(root, fn), backup_dir)
+                    items.append(rel)
+
+        ok = True
+        for rel in items:
+            src = os.path.join(backup_dir, rel)
+            dst = os.path.join(MODEL_DIR, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            try:
+                shutil.copy2(src, dst)
+            except Exception as e:
+                ok = False
+                print(f"[복구 실패] {src} → {dst} : {e}")
+        return ok
     except Exception as e:
         print(f"[복구 실패] {backup_dir} → {e}")
         return False
@@ -137,6 +184,29 @@ def _load_state():
         pass
     return {"last_run_ts": None}
 
+def _to_kst_aware(dt_str: str):
+    """
+    ISO 문자열을 KST aware datetime으로 변환.
+    타임존 정보가 없으면 KST로 가정.
+    """
+    if not dt_str:
+        return None
+    try:
+        # pandas를 통해 robust 파싱
+        ts = pd.to_datetime(dt_str, errors="coerce", utc=True)
+        if ts is not pd.NaT and pd.notnull(ts):
+            return ts.tz_convert(KST).to_pydatetime()
+    except Exception:
+        pass
+    try:
+        dt = datetime.fromisoformat(dt_str)
+        if dt.tzinfo is None:
+            return KST.localize(dt)
+        # 다른 tz면 KST로 변환
+        return dt.astimezone(KST)
+    except Exception:
+        return None
+
 def _save_state(state: dict):
     try:
         with open(STATE_JSON, "w", encoding="utf-8") as f:
@@ -147,7 +217,6 @@ def _save_state(state: dict):
 def _append_summary_row(row: dict):
     os.makedirs(os.path.dirname(SUMMARY_CSV), exist_ok=True)
     write_header = not os.path.exists(SUMMARY_CSV)
-    # 헤더를 고정 순서로( failure_trainer 와 호환 )
     base_fields = ["timestamp","symbol","strategy","score","group_id",
                    "before_f1","after_f1","delta","result","backup_dir"]
     for k in list(row.keys()):
@@ -272,16 +341,22 @@ def run_failure_training(max_targets: int = MAX_TARGETS, lookback_days: int = LO
     - 실행 중 런타임 락 생성(클린업/동시 실행 충돌 방지)
     - 요약은 logs/failure_retrain_summary.csv 에 append
     """
+    # 전역 락이 이미 존재하면 안전상 스킵
+    if os.path.exists(LOCK_PATH):
+        return {"ok": True, "skipped": True, "reason": "global_lock"}
+
     # 쿨다운
     state = _load_state()
     last_ts = state.get("last_run_ts")
     if last_ts:
-        try:
-            last_dt = datetime.fromisoformat(last_ts)
-            if _now_kst() - last_dt < timedelta(minutes=COOLDOWN_MINUTES):
-                return {"ok": True, "skipped": True, "reason": "cooldown", "last_run_ts": last_ts}
-        except Exception:
-            pass
+        last_dt = _to_kst_aware(last_ts)
+        if last_dt is not None:
+            try:
+                if (_now_kst() - last_dt) < timedelta(minutes=COOLDOWN_MINUTES):
+                    return {"ok": True, "skipped": True, "reason": "cooldown", "last_run_ts": last_ts}
+            except Exception:
+                # 비교 실패 시 쿨다운 무시하고 진행
+                pass
 
     # 실패 데이터 로드
     df = _load_recent_wrong(days=lookback_days)
@@ -305,7 +380,6 @@ def run_failure_training(max_targets: int = MAX_TARGETS, lookback_days: int = LO
                 if not class_ranges or len(class_ranges) < 2:
                     logger.log_training_result(symbol, strategy, model="failure_retrain",
                                                note="경계<2 → 스킵", status="skipped")
-                    # 요약만 기록
                     _append_summary_row({
                         "timestamp": _now_str(), "symbol": symbol, "strategy": strategy,
                         "score": float(score), "group_id": -1,
