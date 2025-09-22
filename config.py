@@ -1,8 +1,7 @@
-# config.py (STEP 1 FINAL)
-# - 1% 경계 지원: CLASS_BIN.step_pct 기본 0.0100 (ENV로 override 가능)
-# - DYN_CLASS_STEP/CLASS_BIN_STEP 환경변수로도 제어
-# - BLEND(α/β/γ), PATTERN.K 노출(후속 predict/meta에서 사용)
-# - 기존 F1 안정화 로직/히스토그램 병합/KST 일관 로직 유지
+# config.py (STEP 5 FINAL) — publish filter/ENV 확장 + 헬퍼 포함
+# - 기존 STEP 1 FINAL 기반
+# - 발송 필터(PUBLISH) 섹션/ENV 오버라이드 + passes_publish_filter(...) 제공
+# - predict.py는 "항상 기록", 발송은 이 필터를 통과할 때만 수행하도록 트리거/봇에서 사용
 
 import json
 import os
@@ -22,7 +21,7 @@ _default_config = {
     "SYMBOL_GROUP_SIZE": 3,
 
     # ✅ 패턴/블렌딩 파라미터(후속 단계에서 사용)
-    "PATTERN": {"K": 200},                 # 과거 패턴 검색 인접 수
+    "PATTERN": {"K": 200},
     "BLEND":   {"alpha": 0.6, "beta": 0.2, "gamma": 0.2, "enabled": True},
 
     # ✅ SSL 캐시 디렉토리
@@ -85,15 +84,15 @@ _default_config = {
     # --- [BIN] 클래스 경계/병합 파라미터 ---
     "CLASS_BIN": {
         "method": "fixed_step",   # "fixed_step" | "quantile" | "linear"
-        "strict": True,           # 구간 단조/겹침 방지
+        "strict": True,
         "zero_band_eps": 0.0020,  # ±0.20%p
         "min_width": 0.0010,      # 최소 폭 0.10%p
         "step_pct": 0.0100,       # ✅ 기본 1.0% 단위 고정 bin 간격
         "merge_sparse": {
             "enabled": True,
-            "min_ratio": 0.02,        # 전체 샘플 2% 미만이면 희소
-            "min_count_floor": 80,    # 절대 하한
-            "prefer": "denser"        # "denser" | "left" | "right"
+            "min_ratio": 0.02,
+            "min_count_floor": 80,
+            "prefer": "denser"
         }
     },
 
@@ -112,6 +111,19 @@ _default_config = {
         "max_minutes_per_symbol": 10,
         "on_incomplete": "skip_and_rotate",
         "eval_during_training": True
+    },
+
+    # --- [PUBLISH] 텔레그램(또는 알림) 발송 필터 임계치 ---
+    # 예측은 predict.py에서 항상 기록되고, 발송은 이 임계치를 통과할 때만 수행.
+    "PUBLISH": {
+        "enabled": True,          # 전체 발송 on/off
+        "recent_window": 10,      # 최근 N건 성공률 창
+        "recent_success_min": 0.60,  # 최근 성공률 하한(예: 60%)
+        "min_expected_return": 0.010,  # 최소 기대수익률 |E[R]| (예: 1%)
+        "abstain_prob_min": 0.35,     # 최소 칼리브 확률(=ABSTAIN_PROB_MIN과 동일하게 맞추기 추천)
+        "min_meta_confidence": 0.0,   # 메타 신뢰도 하한(없으면 0)
+        "allow_shadow": True,         # 섀도우도 기록은 하되 발송은 제한할지 여부
+        "always_log": True            # 항상 prediction_log.csv 기록
     },
 }
 
@@ -240,12 +252,13 @@ def get_ENSEMBLE(): return _config.get("ENSEMBLE", _default_config["ENSEMBLE"])
 def get_SCHED():    return _config.get("SCHED", _default_config["SCHED"])
 def get_PATTERN():  return _config.get("PATTERN", _default_config["PATTERN"])
 def get_BLEND():    return _config.get("BLEND", _default_config["BLEND"])
+def get_PUBLISH():  return _config.get("PUBLISH", _default_config["PUBLISH"])
 
 # ------------------------
 # 헬퍼
 # ------------------------
-def _ROUNDS(): return _ROUND_DECIMALS
-def _round2(x: float) -> float: return round(float(x), _ROUNDS())
+def _ROUNDS(): return _ROUNDS_DECIMALS if 'ROUNDS_DECIMALS' in globals() else _ROUND_DECIMALS
+def _round2(x: float) -> float: return round(float(x), _ROUND_DECIMALS)
 
 def _cap_by_strategy(x: float, strategy: str) -> float:
     pos_cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy)
@@ -315,6 +328,7 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
     high  = pd.to_numeric(df["high"] if "high" in df.columns else df["close"], errors="coerce").ffill().bfill().astype(float).values
     low   = pd.to_numeric(df["low"]  if "low"  in df.columns else df["close"], errors="coerce").ffill().bfill().astype(float).values
     horizon = pd.Timedelta(hours=int(horizon_hours))
+    import numpy as np
     up = np.zeros(len(df), dtype=np.float32); dn = np.zeros(len(df), dtype=np.float32)
     j_up = j_dn = 0
     for i in range(len(df)):
@@ -466,7 +480,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         return ranges
 
     def compute_fixed_step_ranges(rets_for_merge):
-        # ENV 우선: CLASS_BIN_STEP > DYN_CLASS_STEP > config.step_pct
         env_step = os.getenv("CLASS_BIN_STEP") or os.getenv("DYN_CLASS_STEP")
         step = float(env_step) if env_step is not None else float(BIN_CONF.get("step_pct", 0.0100))
         if step <= 0: step = 0.0100
@@ -547,6 +560,7 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     if symbol is not None and strategy is not None:
         _ranges_cache[(symbol, strategy)] = all_ranges
 
+    # 디버그 출력(옵션)
     try:
         if symbol is not None and strategy is not None and not _quiet():
             import numpy as np
@@ -614,14 +628,79 @@ def get_SSL_CACHE_DIR():      return os.getenv("SSL_CACHE_DIR", _config.get("SSL
 # ------------------------
 # ✅ 순서 1 전역 상수(ENV override 지원)
 # ------------------------
-# - DYN_CLASS_STEP/CLASS_BIN_STEP: 고정 간격 bin 폭. 둘 중 하나라도 지정되면 사용.
 _DFLT_STEP = str(_config.get("CLASS_BIN", {}).get("step_pct", 0.0100))
 DYN_CLASS_STEP = float(os.getenv("CLASS_BIN_STEP", os.getenv("DYN_CLASS_STEP", _DFLT_STEP)))
-# - BOUNDARY_BAND: 라벨 경계 제외 폭(±)
 BOUNDARY_BAND = float(os.getenv("BOUNDARY_BAND", "0.0020"))
-# - CV 파라미터
 CV_FOLDS   = int(os.getenv("CV_FOLDS", "5"))
 CV_GATE_F1 = float(os.getenv("CV_GATE_F1", "0.50"))
+
+# ------------------------
+# ✅ 발송(PUBLISH) 섹션 ENV 오버라이드 + 필터 헬퍼
+# ------------------------
+def _publish_from_env(base: dict) -> dict:
+    d = dict(base or {})
+    def _b(k, env, cast):
+        v = os.getenv(env, None)
+        if v is None: return
+        try:
+            d[k] = cast(v)
+        except Exception:
+            pass
+
+    _b("enabled", "PUBLISH_ENABLED", lambda x: str(x).strip() not in {"0","false","False"})
+    _b("recent_window", "PUBLISH_RECENT_WINDOW", int)
+    _b("recent_success_min", "PUBLISH_RECENT_SUCCESS_MIN", float)
+    _b("min_expected_return", "PUBLISH_MIN_EXPECTED_RETURN", float)
+    _b("abstain_prob_min", "PUBLISH_ABSTAIN_PROB_MIN", float)
+    _b("min_meta_confidence", "PUBLISH_MIN_META_CONFIDENCE", float)
+    _b("allow_shadow", "PUBLISH_ALLOW_SHADOW", lambda x: str(x).strip() not in {"0","false","False"})
+    _b("always_log", "PUBLISH_ALWAYS_LOG", lambda x: str(x).strip() not in {"0","false","False"})
+    return d
+
+# 호출 시점마다 최신 ENV 반영
+def get_PUBLISH_RUNTIME() -> dict:
+    base = get_PUBLISH()
+    return _publish_from_env(base)
+
+def passes_publish_filter(*, meta_confidence=None, recent_success_rate=None,
+                          expected_return=None, calib_prob=None, shadow=False, source=None):
+    """
+    발송여부 판단 헬퍼.
+    - predict는 항상 기록, 발송은 여기 True일 때만 진행.
+    - 반환: (ok:bool, reason:str, thresholds:dict)
+    """
+    cfg = get_PUBLISH_RUNTIME()
+    thr = {
+        "enabled": bool(cfg.get("enabled", True)),
+        "recent_window": int(cfg.get("recent_window", 10)),
+        "recent_success_min": float(cfg.get("recent_success_min", 0.60)),
+        "min_expected_return": float(cfg.get("min_expected_return", 0.01)),
+        "abstain_prob_min": float(cfg.get("abstain_prob_min", 0.35)),
+        "min_meta_confidence": float(cfg.get("min_meta_confidence", 0.0)),
+        "allow_shadow": bool(cfg.get("allow_shadow", True)),
+        "always_log": bool(cfg.get("always_log", True)),
+    }
+
+    if not thr["enabled"]:
+        return (False, "publish_disabled", thr)
+
+    if shadow and not thr["allow_shadow"]:
+        return (False, "shadow_not_allowed", thr)
+
+    if expected_return is not None and abs(float(expected_return)) < thr["min_expected_return"]:
+        return (False, "min_expected_return_not_met", thr)
+
+    if calib_prob is not None and float(calib_prob) < thr["abstain_prob_min"]:
+        return (False, "low_confidence", thr)
+
+    if meta_confidence is not None and float(meta_confidence) < thr["min_meta_confidence"]:
+        return (False, "low_meta_confidence", thr)
+
+    if recent_success_rate is not None and float(recent_success_rate) < thr["recent_success_min"]:
+        return (False, "recent_success_rate_too_low", thr)
+
+    # source가 group_end면 강행하고 싶다면, 트리거 쪽에서 이 리턴값을 무시하거나 별 분기 사용
+    return (True, "ok", thr)
 
 # ------------------------
 # 전역 캐시된 값(기존)
@@ -644,12 +723,12 @@ __all__ = [
     "get_REGIME", "get_CALIB", "get_LOSS", "get_AUG", "get_EVAL",
     "get_FAILLEARN", "get_QUALITY",
     "get_CLASS_BIN", "get_TRAIN", "get_ENSEMBLE", "get_SCHED",
-    "get_PATTERN", "get_BLEND",
+    "get_PATTERN", "get_BLEND", "get_PUBLISH", "get_PUBLISH_RUNTIME",
+    "passes_publish_filter",
     "get_CPU_THREADS", "get_TRAIN_NUM_WORKERS", "get_TRAIN_BATCH_SIZE",
     "get_ORDERED_TRAIN", "get_PREDICT_MIN_RETURN", "get_DISPLAY_MIN_RETURN",
     "get_SSL_CACHE_DIR",
     "FEATURE_INPUT_SIZE", "NUM_CLASSES", "FAIL_AUGMENT_RATIO", "MIN_FEATURES",
     "CALIB",
-    # 순서1 추가 내보내기
     "DYN_CLASS_STEP", "BOUNDARY_BAND", "CV_FOLDS", "CV_GATE_F1",
     ]
