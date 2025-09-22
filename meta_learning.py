@@ -180,19 +180,16 @@ def _aggregate_base_outputs(
         agg = probs_mat.mean(axis=0)
 
     elif mode == "weighted":
-        # 클래스 성공률이 있으면 cls별 가중치로 보정 (soft weighting)
         if not class_success:
             agg = probs_mat.mean(axis=0)
         else:
             w = np.array([class_success.get(c, META_BASE_SUCCESS) for c in range(C)], dtype=np.float64)
-            # 0~1 정규화 후 0.5~1.0 범위로 축소
             w = (w - w.min()) / (w.max() - w.min() + 1e-9)
             w = 0.5 + 0.5 * w
             agg = (probs_mat * w).mean(axis=0)
             detail["class_weights"] = w.tolist()
 
     elif mode == "maxvote":
-        # 각 모델의 argmax에 대한 다수결
         votes = np.bincount(np.argmax(probs_mat, axis=1), minlength=C)
         agg = votes.astype(np.float64) / max(1, votes.sum())
         detail["votes"] = votes.tolist()
@@ -224,12 +221,10 @@ def _ret_gain(er: float) -> float:
 def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None):
     """
     (유지) 단독 유틸: 성공률/수익률 고려 스코어로 최종 클래스 산출
-    model_outputs_list: [{"probs": ...}, ...] 또는 [np.array, ...]
     """
     if not model_outputs_list:
         raise ValueError("❌ get_meta_prediction: 모델 출력 없음")
 
-    # dict/array 모두 허용
     softmax_list = []
     for m in model_outputs_list:
         if isinstance(m, dict):
@@ -243,25 +238,20 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
     avg_softmax = _normalize(np.mean(softmax_list, axis=0))
 
     meta_info = meta_info or {}
-    success_rate_dict = meta_info.get("success_rate", {})       # {cls: 0~1}
-    expected_return_dict = meta_info.get("expected_return", {}) # {cls: r}
+    success_rate_dict = meta_info.get("success_rate", {})
+    expected_return_dict = meta_info.get("expected_return", {})
 
-    # -------- 점수 계산 --------
     scores = np.zeros(num_classes, dtype=np.float64)
-    all_below = True  # 모든 클래스 ER<임계인지 확인
-
+    all_below = True
     for c in range(num_classes):
-        # ✅ 성공 이력 없으면 META_BASE_SUCCESS 사용
         sr = float(success_rate_dict.get(c, META_BASE_SUCCESS))
-        er = float(expected_return_dict.get(c, 0.0))  # 없으면 0 → 임계 미만 처리
-        g  = _ret_gain(er)                            # 임계 미만이면 0
+        er = float(expected_return_dict.get(c, 0.0))
+        g  = _ret_gain(er)
         if g > 0:
             all_below = False
-        scores[c] = float(avg_softmax[c]) * (0.5 + 0.5 * sr) * g
+        scores[c] = float(avg_softmax[c]) * sr * g
 
     mode = "성공률 기반 메타" if success_rate_dict else "기본 메타 (성공률 無)"
-
-    # 모든 클래스가 임계 미만이면 → 확률로 선택
     if all_below:
         scores = avg_softmax.copy()
         mode += " / all<TH→prob선택"
@@ -279,35 +269,28 @@ def meta_predict(
     features: Optional["torch.Tensor"] = None,
     meta_state: Optional[Dict] = None,
     *,
-    agg_mode: str = "avg",        # "avg" | "weighted" | "maxvote"
-    use_stacking: bool = True,    # 저장된 스태킹 메타러너가 있으면 사용
+    agg_mode: str = "avg",
+    use_stacking: bool = True,
     log: bool = True,
     source: str = "meta"
 ) -> Dict:
     """
     ✅ 단일 진입점
-    - 베이스 모델 출력 집계(평균/가중치/다수결) + 스태킹/룰기반 폴백
-    - 임계 미만 수익률은 자동 페널티
+    - 베이스 모델 출력 집계 + 스태킹/룰기반 폴백
+    - 성공률/실패율/수익률을 모두 고려
     """
     meta_state = meta_state or {}
-    class_success = meta_state.get("success_rate", {})      # {cls: rate}
-    expected_return = meta_state.get("expected_return", {}) # {cls: r}
+    class_success = meta_state.get("success_rate", {})
+    expected_return = meta_state.get("expected_return", {})
 
-    # 1) 베이스 집계
     agg_probs, detail = _aggregate_base_outputs(groups_outputs, class_success, mode=agg_mode)
 
-    # 2) 스태킹 시도
     used_mode = agg_mode
     final_class = int(np.argmax(agg_probs))
     if use_stacking:
-        clf = None
         try:
             clf = load_meta_learner()
-        except Exception as e:
-            print(f"[⚠️ stacking 로드 실패] {e}")
-
-        if clf is not None:
-            try:
+            if clf is not None:
                 X_stack = np.concatenate(
                     [np.asarray(g["probs"], dtype=np.float64).flatten() for g in groups_outputs],
                     axis=0
@@ -317,20 +300,14 @@ def meta_predict(
                     proba = clf.predict_proba(X_stack)[0]
                     final_class = int(stacked_pred)
                     used_mode = "stacking"
-                    try:
-                        if len(proba) == len(agg_probs):
-                            agg_probs = proba.astype(np.float32)
-                        else:
-                            used_mode = "stacking(base-probs)"
-                    except Exception:
-                        used_mode = "stacking(base-probs)"
+                    if len(proba) == len(agg_probs):
+                        agg_probs = proba.astype(np.float32)
                 else:
                     final_class = int(stacked_pred)
                     used_mode = "stacking(base-probs)"
-            except Exception as e:
-                print(f"[⚠️ stacking 예측 실패 → 집계 폴백] {e}")
+        except Exception as e:
+            print(f"[⚠️ stacking 예측 실패 → 집계 폴백] {e}")
 
-    # 3) 룰기반 폴백(확신 낮으면 성공률/수익률 보정 + 임계 적용)
     top1 = int(np.argmax(agg_probs))
     top1p = float(agg_probs[top1])
     margin = float(top1p - float(np.partition(agg_probs, -2)[-2]) if len(agg_probs) >= 2 else top1p)
@@ -338,25 +315,25 @@ def meta_predict(
 
     if used_mode != "stacking":
         low_conf = (margin < 0.05) or (ent > math.log(len(agg_probs)) * 0.8)
-
         scores = agg_probs.astype(np.float64).copy()
         for c in range(len(scores)):
-            # ✅ 동일하게 META_BASE_SUCCESS 사용 + 임계 적용
             sr = float(class_success.get(c, META_BASE_SUCCESS))
+            sr = max(0.0, min(sr, 1.0))
+            fr = 1.0 - sr
             er = float(expected_return.get(c, 0.0))
-            scores[c] = float(scores[c]) * (0.5 + 0.5 * sr) * _ret_gain(er)
+            g = _ret_gain(er)
+            scores[c] = scores[c] * sr * g * (1.0 - 0.3*fr)
 
-        # 모든 클래스가 임계 미만이면 확률 사용 + 저확신 처리
         if np.all([_ret_gain(float(expected_return.get(c, 0.0))) == 0.0 for c in range(len(scores))]):
             scores = agg_probs.astype(np.float64).copy()
             low_conf = True
 
         rule_choice = int(np.argmax(scores))
+        detail["final_scores"] = scores.round(4).tolist()
         if low_conf or rule_choice != final_class:
             used_mode = "rule_fallback"
             final_class = rule_choice
 
-    # 4) 결과 구성
     result = {
         "class": int(final_class),
         "probs": np.asarray(agg_probs, dtype=np.float32).tolist(),
@@ -367,7 +344,6 @@ def meta_predict(
         "detail": detail,
     }
 
-    # 5) 로깅(선택)
     if log:
         er_cho = float(expected_return.get(result["class"], 0.0))
         sr_cho = class_success.get(result["class"], None)
@@ -398,5 +374,4 @@ def meta_predict(
     print(f"[META] mode={used_mode} class={result['class']} "
           f"conf={result['confidence']:.3f} margin={result['margin']:.3f} "
           f"entropy={result['entropy']:.3f}")
-
     return result
