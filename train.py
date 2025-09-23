@@ -59,6 +59,12 @@ from config import (
     STRATEGY_CONFIG, get_QUALITY, get_LOSS, BOUNDARY_BAND
 )
 
+# ✅ 예측 게이트: 안전 임포트(없으면 no-op)
+try:
+    from predict import close_predict_gate
+except Exception:
+    def close_predict_gate(*a, **k): return None
+
 # [가드] data_augmentation (없으면 원본 그대로 통과)
 try:
     from data_augmentation import balance_classes
@@ -558,7 +564,7 @@ def _run_smoke_predict(predict_fn, symbol: str):
     for strat in ["단기","중기","장기"]:
         if _has_model_for(symbol, strat):
             try:
-                predict_fn(symbol, strat, source="group_end(smoke)", model_type=None); ok_any=True
+                predict_fn(symbol, strat, source="그룹직후(스모크)", model_type=None); ok_any=True
             except Exception as e:
                 _safe_print(f"[SMOKE fail] {symbol}-{strat}: {e}")
     return ok_any
@@ -597,8 +603,8 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                                 _safe_print(f"[PREDICT-SKIP] {symbol}-{strategy}: 모델 없음")
                                 continue
                             try:
-                                # 중요: source='group_end'로 명시 → predict.py에서 락 예외 허용(2~3단계에서 처리)
-                                predict(symbol, strategy, source="group_end", model_type=None)
+                                # 중요: source='그룹직후' → predict.py에서 게이트 우회 허용
+                                predict(symbol, strategy, source="그룹직후", model_type=None)
                                 ran_any=True
                             except Exception as e:
                                 _safe_print(f"[PREDICT FAIL] {symbol}-{strategy}: {e}")
@@ -613,6 +619,10 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                         try: mark_group_predicted()
                         except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
 
+                # 🔒 1) 그룹 루프가 끝날 때마다 예측 게이트 확실히 닫기
+                try: close_predict_gate(note=f"train:group{idx+1}_end")
+                except Exception as e: _safe_print(f"[gate close warn] {e}")
+
                 if sleep_sec>0:
                     for _ in range(sleep_sec):
                         if stop_event is not None and stop_event.is_set(): break
@@ -620,6 +630,10 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                     if stop_event is not None and stop_event.is_set(): break
 
             _safe_print("✅ group pass done")
+            # 🔒 2) 한 패스 완료 후에도 한 번 더 닫아 안정성 확보
+            try: close_predict_gate(note="train:group_pass_done")
+            except Exception as e: _safe_print(f"[gate close warn] {e}")
+
             if force_full_pass and not env_force_ignore:
                 force_full_pass=False
         except Exception as e:
