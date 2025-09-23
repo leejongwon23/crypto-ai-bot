@@ -1,4 +1,4 @@
-# safe_cleanup.py (FIXED-CONFIG + ENV OVERRIDES: 10GB 서버 최적화, 모델·메타 세트 정리 강화)
+# safe_cleanup.py (LOCK-SAFE FINAL — 절대 .lock 삭제/접근 금지 + 10GB 서버 최적화)
 import os
 import time
 import threading
@@ -73,6 +73,8 @@ ROOT_CSVS = [
     os.path.join(ROOT_DIR, "train_log.csv"),
 ]
 
+LOCK_SUFFIX = ".lock"
+
 # ----------------- 공통 유틸 -----------------
 def _size_bytes(path: str) -> int:
     try:
@@ -85,7 +87,13 @@ def get_directory_size_gb(path):
         return 0.0
     total = 0
     for dirpath, _, filenames in os.walk(path):
+        # 🔒 LOCK 디렉터리는 아예 순회 제외
+        if os.path.abspath(dirpath).startswith(os.path.abspath(LOCK_DIR)):
+            continue
         for f in filenames:
+            # 🔒 어떤 경로라도 *.lock 은 용량 계산 대상에서도 제외(안전)
+            if f.endswith(LOCK_SUFFIX):
+                continue
             fp = os.path.join(dirpath, f)
             if os.path.isfile(fp):
                 total += _size_bytes(fp)
@@ -95,6 +103,9 @@ def _human_gb(v): return f"{v:.2f}GB"
 
 def _list_files(dir_path):
     try:
+        # 🔒 LOCK_DIR 은 호출선에서 절대 넘기지 않지만, 혹시 넘어와도 반환을 비움
+        if os.path.abspath(dir_path).startswith(os.path.abspath(LOCK_DIR)):
+            return []
         return [os.path.join(dir_path, f) for f in os.listdir(dir_path)]
     except Exception:
         return []
@@ -113,6 +124,17 @@ def _is_within(child: str, parent: str) -> bool:
     except Exception:
         return False
 
+def _is_lock_file(path: str) -> bool:
+    """어떤 경로라도 .lock 파일 또는 LOCK_DIR 내부는 무조건 보호."""
+    try:
+        if not isinstance(path, str):
+            return False
+        if path.endswith(LOCK_SUFFIX):
+            return True
+        return _is_within(path, LOCK_DIR)
+    except Exception:
+        return False
+
 def _is_model_file(path: str) -> bool:
     """models/ 내부의 .pt/.ptz/.safetensors 및 짝 메타를 모델로 본다."""
     if not isinstance(path, str):
@@ -127,7 +149,10 @@ def _is_model_file(path: str) -> bool:
 def _should_delete_file(fname: str) -> bool:
     """
     기존 규칙 + (NEW) models/ 안의 모델 확장자는 접두사 없이도 정리 대상으로 인정.
+    단, 🔒 락 파일/디렉터리는 절대 삭제하지 않음.
     """
+    if _is_lock_file(fname):
+        return False
     base = os.path.basename(fname)
     if base in EXCLUDE_FILES:
         return False
@@ -147,6 +172,9 @@ def _is_recent(path: str, hours: float) -> bool:
 
 def _rollover_csv(path: str, max_mb: int, backups: int):
     if not os.path.isfile(path):
+        return []
+    # 🔒 혹시 CSV 경로가 잘못 들어와도 .lock 은 무조건 제외
+    if _is_lock_file(path):
         return []
     size_mb = _size_bytes(path) / (1024 ** 2)
     if size_mb <= max_mb:
@@ -169,6 +197,9 @@ def _rollover_csv(path: str, max_mb: int, backups: int):
 
 def _delete_file(path: str, deleted_log: list):
     try:
+        # 🔒 락 파일/폴더는 절대 삭제 금지
+        if _is_lock_file(path):
+            return
         if DRYRUN:
             print(f"[DRYRUN] 삭제 예정: {path}")
             return
@@ -189,7 +220,7 @@ def _cleanup_ssl_models_impl(keep_per_key, soft_cap_gb, deleted_log):
     try:
         import re
         os.makedirs(SSL_DIR, exist_ok=True)
-        files = [p for p in _list_files(SSL_DIR) if os.path.isfile(p) and p.endswith(".pt")]
+        files = [p for p in _list_files(SSL_DIR) if os.path.isfile(p) and p.endswith(".pt") and not _is_lock_file(p)]
         rgx = re.compile(r"^(?P<sym>.+?)_(?P<strat>단기|중기|장기)_ssl.*\.pt$", re.U)
 
         buckets = {}
@@ -213,7 +244,7 @@ def _cleanup_ssl_models_impl(keep_per_key, soft_cap_gb, deleted_log):
         def _ssl_size():
             return get_directory_size_gb(SSL_DIR)
         while _ssl_size() > soft_cap_gb:
-            rest = [p for p in _list_files(SSL_DIR) if os.path.isfile(p)]
+            rest = [p for p in _list_files(SSL_DIR) if os.path.isfile(p) and not _is_lock_file(p)]
             if not rest:
                 break
             rest.sort(key=lambda x: os.path.getmtime(x))  # oldest first
@@ -266,7 +297,7 @@ def _collect_model_sets():
     """
     sets = {}
     for p in _list_files(MODEL_DIR):
-        if not os.path.isfile(p):
+        if not os.path.isfile(p) or _is_lock_file(p):
             continue
         if not _is_model_file(p):
             continue
@@ -297,7 +328,7 @@ def _key_from_stem(stem: str) -> str:
 def _delete_old_by_days(paths, cutoff_dt, deleted_log, accept_all=False):
     for d in paths:
         for p in _list_files(d):
-            if not os.path.isfile(p):
+            if not os.path.isfile(p) or _is_lock_file(p):
                 continue
             if not accept_all and not _should_delete_file(p):
                 continue
@@ -315,7 +346,7 @@ def _delete_until_target(deleted_log, target_gb):
     # LOG/MODEL
     for d in [LOG_DIR, MODEL_DIR]:
         for p in _list_files(d):
-            if os.path.isfile(p) and _should_delete_file(p):
+            if os.path.isfile(p) and not _is_lock_file(p) and _should_delete_file(p):
                 if _is_recent(p, PROTECT_HOURS):
                     continue
                 try:
@@ -325,7 +356,7 @@ def _delete_until_target(deleted_log, target_gb):
                 candidates.append((ctime, p))
     # SSL: 대용량 우선 제거
     for p in _list_files(SSL_DIR):
-        if os.path.isfile(p) and not _is_recent(p, PROTECT_HOURS):
+        if os.path.isfile(p) and not _is_lock_file(p) and not _is_recent(p, PROTECT_HOURS):
             try:
                 ctime = os.path.getctime(p)
             except Exception:
@@ -395,7 +426,7 @@ def _vacuum_sqlite():
     targets = []
     for base in [ROOT_DIR, LOG_DIR]:
         for f in _list_files(base):
-            if os.path.isfile(f) and f.lower().endswith(".db"):
+            if os.path.isfile(f) and f.lower().endswith(".db") and not _is_lock_file(f):
                 targets.append(f)
     for path in targets:
         try:
@@ -408,12 +439,13 @@ def _vacuum_sqlite():
             print(f"[경고] VACUUM 실패: {path} | {e}")
 
 def _locked_by_runtime() -> bool:
+    # 🔒 LOCK_DIR 내부나 *.lock 이 보이면 정리 중단
     if os.path.exists(LOCK_PATH):
         print(f"[⛔ 중단] LOCK 발견: {LOCK_PATH}")
         return True
     try:
         for f in _list_files(LOCK_DIR):
-            if f.endswith(".lock"):
+            if f.endswith(LOCK_SUFFIX):
                 print(f"[⛔ 중단] LOCK 발견: {f}")
                 return True
     except Exception:
@@ -424,9 +456,10 @@ def _locked_by_runtime() -> bool:
 def emergency_purge(target_gb=None):
     """
     디스크가 꽉 찼을 때 즉시 용량 확보.
-    - 접두사/보호시간/락 조건 무시
+    - 접두사/보호시간 무시
     - ssl_models → models → logs 순서
     - 오래된 파일부터 삭제
+    - 🔒 어떤 경우에도 .lock/LOCK_DIR 은 삭제하지 않음
     - target_gb 미지정: max(SOFT_CAP_GB, HARD_CAP_GB - MIN_FREE_GB)
     """
     _ensure_dirs()
@@ -436,7 +469,7 @@ def emergency_purge(target_gb=None):
     def _collect_all(dirpath):
         items = []
         for p in _list_files(dirpath):
-            if not os.path.isfile(p):
+            if not os.path.isfile(p) or _is_lock_file(p):
                 continue
             if os.path.basename(p) == "deleted_log.txt":
                 continue
@@ -448,7 +481,7 @@ def emergency_purge(target_gb=None):
         items.sort(key=lambda x: x[0])  # 오래된 것 먼저
         return [p for _, p in items]
 
-    print("[🆘 EMERGENCY] 즉시 강제 정리 시작 (락/보호시간 무시)")
+    print("[🆘 EMERGENCY] 즉시 강제 정리 시작 (락 보호 유지)")
     ordered_dirs = [SSL_DIR, MODEL_DIR, LOG_DIR]
     candidates = []
     for d in ordered_dirs:
