@@ -1,4 +1,4 @@
-# === predict_trigger.py (MEM-SAFE FINAL++++ — group-finished only, hard gate enforced, stale-lock safe) ===
+# === predict_trigger.py (MEM-SAFE FINAL++++ — group-finished only, hard gate enforced, stale-lock safe, RETRY-ON-UNLOCK) ===
 import os
 import time
 import traceback
@@ -133,6 +133,14 @@ TRIGGER_MAX_PER_RUN = max(1, int(os.getenv("TRIGGER_MAX_PER_RUN", "999")))
 PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC", "30"))
 PREDICT_LOCK_STALE_TRIGGER_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRIGGER_SEC", "600"))
 
+# ✅ 재시도/대기 설정 (2번 요구사항)
+RETRY_AFTER_TRAIN_MAX_WAIT_SEC   = int(os.getenv("RETRY_AFTER_TRAIN_MAX_WAIT_SEC", "900"))   # 훈련락 해제 대기 최대(초)
+RETRY_AFTER_TRAIN_SLEEP_SEC      = float(os.getenv("RETRY_AFTER_TRAIN_SLEEP_SEC", "1.0"))    # 폴링 주기
+STARTUP_WAIT_FOR_GATE_OPEN_SEC   = int(os.getenv("STARTUP_WAIT_FOR_GATE_OPEN_SEC", "600"))   # run 시작 시 게이트 닫힘이면 기다리는 최대 시간
+PAIR_WAIT_FOR_GATE_OPEN_SEC      = int(os.getenv("PAIR_WAIT_FOR_GATE_OPEN_SEC", "120"))      # 심볼/전략 단위 실행 중 게이트 닫힘이면 기다리는 최대 시간
+RETRY_ON_TIMEOUT                 = int(os.getenv("RETRY_ON_TIMEOUT", "1")) == 1               # timeout 후 재시도 여부
+TIMEOUT_RETRY_ONCE_EXTRA_SEC     = float(os.getenv("TIMEOUT_RETRY_ONCE_EXTRA_SEC", "20"))     # 재시도시 타임아웃
+
 # 그룹 완료 모드
 REQUIRE_GROUP_COMPLETE = int(os.getenv("REQUIRE_GROUP_COMPLETE", "0"))
 
@@ -174,6 +182,19 @@ def _clear_stale_predict_lock(ttl_sec: int):
             print(f"[LOCK] stale predict lock removed (> {ttl_sec}s)")
     except Exception as e:
         print(f"[LOCK] stale cleanup error: {e}")
+
+def _wait_for_gate_open(max_wait_sec: int) -> bool:
+    """게이트/락이 열릴 때까지 최대 max_wait_sec 동안 폴링."""
+    start = time.time()
+    while time.time() - start < max_wait_sec:
+        _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
+        if _LOCK_PATH and os.path.exists(_LOCK_PATH):
+            # 전역 락이면 즉시 중단
+            return False
+        if (not _gate_closed()) and (not _predict_busy()):
+            return True
+        time.sleep(RETRY_AFTER_TRAIN_SLEEP_SEC)
+    return False
 
 # ──────────────────────────────────────────────────────────────
 # 그룹 완성 검사
@@ -245,22 +266,71 @@ def check_model_quality(symbol, strategy):
     return _has_model_for(symbol, strategy)
 
 # ──────────────────────────────────────────────────────────────
+# 내부: 예측 실행(타임아웃/재시도 포함)
+# ──────────────────────────────────────────────────────────────
+def _invoke_predict(_predict, symbol, strategy, source, timeout_sec: float) -> bool:
+    """timeout 지원 래퍼 (train 제공 함수가 있으면 사용)"""
+    if _safe_predict_with_timeout:
+        ok = _safe_predict_with_timeout(
+            predict_fn=_predict,
+            symbol=symbol,
+            strategy=strategy,
+            source=source,
+            model_type=None,
+            timeout=timeout_sec,
+        )
+        return bool(ok)
+    elif _safe_predict_sync:
+        _safe_predict_sync(
+            predict_fn=_predict,
+            symbol=symbol,
+            strategy=strategy,
+            source=source,
+            model_type=None,
+        )
+        return True
+    else:
+        _predict(symbol, strategy, source=source)
+        return True
+
+def _retry_after_training(_predict, symbol, strategy, first_err: Exception | str = None) -> bool:
+    """훈련락/게이트 해제까지 기다렸다가 1회 재시도(요구사항 2)"""
+    why = f"timeout/lock; first_err={first_err}" if first_err else "timeout/lock"
+    log_audit(symbol, strategy, "트리거재시도대기", why)
+    ok = _wait_for_gate_open(RETRY_AFTER_TRAIN_MAX_WAIT_SEC)
+    if not ok:
+        log_audit(symbol, strategy, "트리거재시도포기", "게이트 미오픈(대기초과)")
+        return False
+    # 게이트가 열렸으면 한 번 더 호출
+    try:
+        ok2 = _invoke_predict(_predict, symbol, strategy, "변동성(재시도)", max(PREDICT_TIMEOUT_SEC, TIMEOUT_RETRY_ONCE_EXTRA_SEC))
+        if ok2:
+            log_audit(symbol, strategy, "트리거예측(재시도성공)", "훈련락 해제 후 성공")
+        else:
+            log_audit(symbol, strategy, "트리거예측(재시도실패)", "재시도 실패")
+        return bool(ok2)
+    except Exception as e:
+        log_audit(symbol, strategy, "트리거예측(재시도예외)", f"{e}")
+        return False
+
+# ──────────────────────────────────────────────────────────────
 # 트리거 실행 루프
 # ──────────────────────────────────────────────────────────────
 def run():
+    # 전역 강제 락: 즉시 스킵
     if _LOCK_PATH and os.path.exists(_LOCK_PATH):
         print(f"[트리거] 전역 락 감지({_LOCK_PATH}) → 전체 스킵 @ {now_kst().isoformat()}")
         return
 
     _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
 
-    if _gate_closed():
-        print(f"[트리거] 그룹 학습 중/비상차단 → 스킵 @ {now_kst().isoformat()}")
-        return
-
-    if _predict_busy():
-        print(f"[트리거] 예측 실행 중(lock) → 스킵 @ {now_kst().isoformat()}")
-        return
+    # 시작 시 게이트 닫힘이면 일정 시간 대기 후 계속(기존: 즉시 return)
+    if _gate_closed() or _predict_busy():
+        print(f"[트리거] 시작 시 게이트 닫힘/예측중 → 최대 {STARTUP_WAIT_FOR_GATE_OPEN_SEC}s 대기")
+        opened = _wait_for_gate_open(STARTUP_WAIT_FOR_GATE_OPEN_SEC)
+        if not opened:
+            print(f"[트리거] 게이트 미오픈(대기초과) → 스킵 @ {now_kst().isoformat()}")
+            return
 
     try:
         from predict import predict as _predict
@@ -305,14 +375,19 @@ def run():
             return
 
         _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
+
+        # 페어 단위에서도 게이트가 닫히면 일정 시간 기다렸다 진행(기존: 즉시 return)
         if _LOCK_PATH and os.path.exists(_LOCK_PATH):
             print(f"[트리거] 실행 중 전역 락 감지 → 중단")
             print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
             return
         if _gate_closed() or _predict_busy():
-            print(f"[트리거] 게이트 닫힘/예측 중 → 중단")
-            print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
-            return
+            print(f"[트리거] 게이트 닫힘/예측중 → 최대 {PAIR_WAIT_FOR_GATE_OPEN_SEC}s 대기 후 재시도")
+            opened = _wait_for_gate_open(PAIR_WAIT_FOR_GATE_OPEN_SEC)
+            if not opened:
+                print(f"[트리거] 게이트 미오픈(대기초과) → 중단")
+                print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
+                return
 
         try:
             key = f"{symbol}_{strategy}"
@@ -341,30 +416,16 @@ def run():
             print(f"[✅ 트리거 포착] {symbol} - {strategy} → 예측 실행")
 
             try:
-                if _safe_predict_with_timeout:
-                    ok = _safe_predict_with_timeout(
-                        predict_fn=_predict,
-                        symbol=symbol,
-                        strategy=strategy,
-                        source="변동성",
-                        model_type=None,
-                        timeout=PREDICT_TIMEOUT_SEC,
-                    )
-                    if not ok:
-                        raise RuntimeError("predict timeout/failed")
-                elif _safe_predict_sync:
-                    _safe_predict_sync(
-                        predict_fn=_predict,
-                        symbol=symbol,
-                        strategy=strategy,
-                        source="변동성",
-                        model_type=None,
-                    )
+                ok = _invoke_predict(_predict, symbol, strategy, "변동성", PREDICT_TIMEOUT_SEC)
+                if not ok and RETRY_ON_TIMEOUT:
+                    # timeout/실패 시: 훈련락 해제될 때까지 기다렸다가 1회 재시도
+                    ok = _retry_after_training(_predict, symbol, strategy, first_err="timeout/failed")
+                if ok:
+                    last_trigger_time[key] = now
+                    log_audit(symbol, strategy, "트리거예측", "조건 만족으로 실행")
+                    triggered += 1
                 else:
-                    _predict(symbol, strategy, source="변동성")
-                last_trigger_time[key] = now
-                log_audit(symbol, strategy, "트리거예측", "조건 만족으로 실행")
-                triggered += 1
+                    raise RuntimeError("predict timeout/failed (after optional retry)")
             except Exception as inner:
                 print(f"[❌ 예측 실행 실패] {symbol}-{strategy}: {inner}")
                 log_audit(symbol, strategy, "트리거예측오류", f"예측실행실패: {inner}")
