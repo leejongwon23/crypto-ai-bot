@@ -126,18 +126,72 @@ def _epochs_for(strategy:str)->int:
     if strategy=="장기": return int(os.getenv("EPOCHS_LONG","32"))
     return 24
 
-# (참고용으로만 유지: 운영 결정에는 사용 안 함)
+# (참고용: 운영 게이트엔 미사용)
 EVAL_MIN_F1_SHORT = float(os.getenv("EVAL_MIN_F1_SHORT", "0.10"))
 EVAL_MIN_F1_MID   = float(os.getenv("EVAL_MIN_F1_MID",   "0.50"))
 EVAL_MIN_F1_LONG  = float(os.getenv("EVAL_MIN_F1_LONG",  "0.45"))
 _SHORT_RETRY      = int(os.getenv("SHORT_STRATEGY_RETRY", "3"))
-def _min_f1_for(strategy:str)->float:  # 더 이상 게이트에 쓰지 않음(로깅 참고용)
+def _min_f1_for(strategy:str)->float:
     return EVAL_MIN_F1_SHORT if strategy=="단기" else (EVAL_MIN_F1_MID if strategy=="중기" else EVAL_MIN_F1_LONG)
 
 now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 
 # ✅ 그룹 끝난 직후 예측을 락 예외로 허용할지(예측 쪽에서 처리)
 PREDICT_OVERRIDE_ON_GROUP_END = _as_bool_env("PREDICT_OVERRIDE_ON_GROUP_END", True)
+
+# [ADD] ───────── 예측 락/타임아웃 안전 유틸 ─────────
+PREDICT_RUN_LOCK = "/persistent/run/predict_running.lock"
+PREDICT_LOCK_STALE_TRIGGER_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRIGGER_SEC","600"))
+PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC","60"))
+
+def _is_stale_lock(path: str, ttl_sec: int) -> bool:
+    try:
+        if not os.path.exists(path): return False
+        mtime = os.path.getmtime(path)
+        return (time.time() - float(mtime)) > max(30, int(ttl_sec))
+    except Exception:
+        return False
+
+def _clear_stale_predict_lock(ttl_sec: int = PREDICT_LOCK_STALE_TRIGGER_SEC):
+    try:
+        if _is_stale_lock(PREDICT_RUN_LOCK, ttl_sec):
+            os.remove(PREDICT_RUN_LOCK)
+            print(f"[LOCK] stale predict lock removed (> {ttl_sec}s)")
+    except Exception as e:
+        print(f"[LOCK] stale cleanup error: {e}")
+
+# 외부에서 사용할 수 있게 내보내는 안전 래퍼 (predict_trigger.py 가 import 가능)
+def _safe_predict_sync(predict_fn, symbol: str, strategy: str, source: str = "group_end", model_type: str | None = None):
+    _clear_stale_predict_lock()
+    return predict_fn(symbol, strategy, source=source, model_type=model_type)
+
+def _safe_predict_with_timeout(predict_fn, symbol: str, strategy: str, source: str = "group_end",
+                               model_type: str | None = None, timeout: float = PREDICT_TIMEOUT_SEC) -> bool:
+    """
+    predict() 호출을 타임아웃으로 보호. 타임아웃 시 False 반환.
+    (락 파일은 'stale' 일 때만 정리하고, 살아있는 락은 건드리지 않음)
+    """
+    _clear_stale_predict_lock()
+    ok = [False]
+    err = [None]
+
+    def _run():
+        try:
+            predict_fn(symbol, strategy, source=source, model_type=model_type)
+            ok[0] = True
+        except Exception as e:
+            err[0] = e
+
+    th = threading.Thread(target=_run, daemon=True, name=f"predict-{symbol}-{strategy}")
+    th.start()
+    th.join(timeout=float(timeout))
+    if th.is_alive():
+        # 스레드가 여전히 살아있음 → 타임아웃
+        return False
+    if err[0] is not None:
+        # 예측 내부 예외
+        raise err[0]
+    return ok[0]
 
 # ---------- 유틸 ----------
 def _safe_print(msg): 
@@ -319,7 +373,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             try:
                 loss_cfg=get_LOSS(); cw_cfg=loss_cfg.get("class_weight", {}) if isinstance(loss_cfg,dict) else {}
                 mode=str(cw_cfg.get("mode","inverse_freq_clip")).lower()
-                cw_min=float(cw_cfg.get("min",0.5)); cw_max=float(cw_cfg.get("max",2.0)); eps=float(cw_cfg.get("eps",1e-6))
+                cw_min=float(cw_cfg.get("min",0.5)); cw_max=float(cw_cfg.get("max",2.0)); eps=float(cw_cfg.get("eps",1e-6"))
                 cc=np.bincount(train_y, minlength=len(class_ranges)).astype(np.float32)
                 if mode=="none": w_full=np.ones(len(class_ranges),dtype=np.float32)
                 elif mode=="inverse_freq":
@@ -379,7 +433,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                         if SMART_TRAIN and GRAD_CLIP>0: torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
                         opt.step(); loss_sum += float(loss.item())
 
-                    # val f1 (학습 내부 기준치로만 사용, 운영 게이트 아님)
+                    # val f1
                     model.eval(); preds=[]; lbls=[]
                     with torch.no_grad():
                         for xb,yb in val_loader:
@@ -412,7 +466,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     try: model.load_state_dict(best_state)
                     except: pass
 
-                # 평가/저장 (운영게이트 없음)
+                # 평가/저장
                 model.eval(); preds=[]; lbls=[]; val_loss_sum=0.0; n_val=0
                 crit_eval=nn.CrossEntropyLoss(weight=w)
                 with torch.no_grad():
@@ -459,14 +513,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     source_exchange="BYBIT", status="success",
                     y_true=lbls, y_pred=preds, num_classes=len(class_ranges)
                 )
-                # 운영 판정: 저장 성공이면 통과(게이트 없음)
                 res["models"].append({"window":int(window),"type":model_type,"acc":acc,"f1":f1_val,"val_loss":val_loss,
                                       "loss_sum":float(loss_sum),"pt":wpath,"meta":mpath,"passed":True})
                 _safe_print(f"🟩 DONE w={window} {model_type} acc={acc:.4f} f1={f1_val:.4f} val_loss={val_loss:.5f} (no gate)")
 
             res["windows"].append({"window":int(window), "results":[m for m in res["models"] if m["window"]==window]})
 
-        # ok 판정: 하나라도 저장되었으면 True
         res["ok"]=bool(res.get("models"))
         _safe_print(f"[RESULT] {symbol}-{strategy}-g{group_id} ok={res['ok']}")
         return res
@@ -597,6 +649,10 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                     _safe_print(f"[PREDICT-BLOCK] group{idx+1} ready_for_group_predict()==False")
                 else:
                     ran_any=False
+
+                    # [ADD] 예측 시작 전마다 stale-lock 청소
+                    _clear_stale_predict_lock()
+
                     for symbol in group:
                         for strategy in ["단기","중기","장기"]:
                             if not _has_model_for(symbol, strategy):
@@ -604,8 +660,18 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                                 continue
                             try:
                                 # 중요: source='그룹직후' → predict.py에서 게이트 우회 허용
-                                predict(symbol, strategy, source="그룹직후", model_type=None)
-                                ran_any=True
+                                ok = _safe_predict_with_timeout(
+                                    predict_fn=predict,
+                                    symbol=symbol,
+                                    strategy=strategy,
+                                    source="그룹직후",
+                                    model_type=None,
+                                    timeout=PREDICT_TIMEOUT_SEC,
+                                )
+                                if ok:
+                                    ran_any=True
+                                else:
+                                    _safe_print(f"[PREDICT TIMEOUT] {symbol}-{strategy} (> {PREDICT_TIMEOUT_SEC}s)")
                             except Exception as e:
                                 _safe_print(f"[PREDICT FAIL] {symbol}-{strategy}: {e}")
 
