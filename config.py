@@ -87,7 +87,7 @@ _default_config = {
         "strict": True,
         "zero_band_eps": 0.0020,  # ±0.20%p
         "min_width": 0.0010,      # 최소 폭 0.10%p
-        "step_pct": 0.0100,       # ✅ 기본 1.0% 단위 고정 bin 간격
+        "step_pct": 0.0050,       # ✅ 기본 0.5% 단위 고정 bin 간격 (기존 1.0% → 0.5%)
         "merge_sparse": {
             "enabled": True,
             "min_ratio": 0.02,
@@ -481,8 +481,8 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
 
     def compute_fixed_step_ranges(rets_for_merge):
         env_step = os.getenv("CLASS_BIN_STEP") or os.getenv("DYN_CLASS_STEP")
-        step = float(env_step) if env_step is not None else float(BIN_CONF.get("step_pct", 0.0100))
-        if step <= 0: step = 0.0100
+        step = float(env_step) if env_step is not None else float(BIN_CONF.get("step_pct", 0.0050))
+        if step <= 0: step = 0.0050
         neg = _STRATEGY_RETURN_CAP_NEG_MIN.get(strategy, -0.5)
         pos = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy,  0.5)
 
@@ -628,7 +628,7 @@ def get_SSL_CACHE_DIR():      return os.getenv("SSL_CACHE_DIR", _config.get("SSL
 # ------------------------
 # ✅ 순서 1 전역 상수(ENV override 지원)
 # ------------------------
-_DFLT_STEP = str(_config.get("CLASS_BIN", {}).get("step_pct", 0.0100))
+_DFLT_STEP = str(_config.get("CLASS_BIN", {}).get("step_pct", 0.0050))
 DYN_CLASS_STEP = float(os.getenv("CLASS_BIN_STEP", os.getenv("DYN_CLASS_STEP", _DFLT_STEP)))
 BOUNDARY_BAND = float(os.getenv("BOUNDARY_BAND", "0.0020"))
 CV_FOLDS   = int(os.getenv("CV_FOLDS", "5"))
@@ -731,4 +731,4 @@ __all__ = [
     "FEATURE_INPUT_SIZE", "NUM_CLASSES", "FAIL_AUGMENT_RATIO", "MIN_FEATURES",
     "CALIB",
     "DYN_CLASS_STEP", "BOUNDARY_BAND", "CV_FOLDS", "CV_GATE_F1",
-    ]
+]
