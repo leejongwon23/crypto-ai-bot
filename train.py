@@ -373,7 +373,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             try:
                 loss_cfg=get_LOSS(); cw_cfg=loss_cfg.get("class_weight", {}) if isinstance(loss_cfg,dict) else {}
                 mode=str(cw_cfg.get("mode","inverse_freq_clip")).lower()
-                cw_min=float(cw_cfg.get("min",0.5)); cw_max=float(cw_cfg.get("max",2.0)); eps=float(cw_cfg.get("eps",1e-6"))
+                cw_min=float(cw_cfg.get("min",0.5)); cw_max=float(cw_cfg.get("max",2.0)); eps=float(cw_cfg.get("eps",1e-6))
                 cc=np.bincount(train_y, minlength=len(class_ranges)).astype(np.float32)
                 if mode=="none": w_full=np.ones(len(class_ranges),dtype=np.float32)
                 elif mode=="inverse_freq":
