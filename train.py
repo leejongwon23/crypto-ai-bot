@@ -373,7 +373,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             try:
                 loss_cfg=get_LOSS(); cw_cfg=loss_cfg.get("class_weight", {}) if isinstance(loss_cfg,dict) else {}
                 mode=str(cw_cfg.get("mode","inverse_freq_clip")).lower()
-                cw_min=float(cw_cfg.get("min",0.5)); cw_max=float(cw_cfg.get("max",2.0)); eps=float(cw_cfg.get("eps",1e-6))
+                cw_min=float(cw_cfg.get("min",0.5)); cw_max=float(cw_cfg.get("max",2.0)); eps=float(cw_cfg.get("eps",1e-6"))
                 cc=np.bincount(train_y, minlength=len(class_ranges)).astype(np.float32)
                 if mode=="none": w_full=np.ones(len(class_ranges),dtype=np.float32)
                 elif mode=="inverse_freq":
@@ -485,7 +485,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                                        zero_division=0)) if len(lbls) else 0.0
                 val_loss=float(val_loss_sum/max(1,n_val))
 
-                # 메타/저장
+                # 메타/저장  👇👇👇 (중요 변경: passed=1 추가)
                 stem=os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_w{int(window)}_group{int(group_id) if group_id is not None else 0}_cls{int(len(class_ranges))}")
                 meta={"symbol":symbol,"strategy":strategy,"model":model_type,"group_id":int(group_id or 0),
                       "num_classes":int(len(class_ranges)),
@@ -498,7 +498,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                       "train_loss_sum":float(loss_sum),
                       "boundary_band": float(BOUNDARY_BAND),
                       "cs_argmax":{"enabled":bool(COST_SENSITIVE_ARGMAX),"beta":float(CS_ARG_BETA)},
-                      "eval_gate":"none"}
+                      "eval_gate":"none",
+                      "passed": 1}  # ←←← 반드시 포함: predict.py가 meta.passed==1만 허용
                 wpath,mpath=_save_model_and_meta(model, stem+".pt", meta)
 
                 # 캐시 제거
@@ -513,7 +514,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     source_exchange="BYBIT", status="success",
                     y_true=lbls, y_pred=preds, num_classes=len(class_ranges)
                 )
-                res["models"].append({"window":int(window),"type":model_type,"acc":acc,"f1":f1_val,"val_loss":val_loss,
+                res["models"].append({"window":int(window),"type":model_type,"acc":acc,"f1":f1_val, "val_loss":val_loss,
                                       "loss_sum":float(loss_sum),"pt":wpath,"meta":mpath,"passed":True})
                 _safe_print(f"🟩 DONE w={window} {model_type} acc={acc:.4f} f1={f1_val:.4f} val_loss={val_loss:.5f} (no gate)")
 
