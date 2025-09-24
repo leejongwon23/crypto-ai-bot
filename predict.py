@@ -1141,7 +1141,9 @@ if __name__ == "__main__":
     res = predict("BTCUSDT", "단기", source="테스트"); print(res)
     try:
         df = pd.read_csv(PREDICTION_LOG_PATH, encoding="utf-8-sig")
-        print("[✅ prediction_log.csv 상위 20줄 출력]"); print(df.head(20))
+        print("[✅ prediction_log.csv 상위 20줄 출력]")
+        print(df.head(20))
     except Exception as e:
         print(f"[오류] prediction_log.csv 로드 실패] {e}")
-    if str(os.getenv("EVAL_LOOP", "0")).strip() == "1": run_evaluation_loop()
+    if str(os.getenv("EVAL_LOOP", "0")).strip() == "1":
+        run_evaluation_loop()
