@@ -1,4 +1,4 @@
-# maintenance_fix_meta.py (FINAL, 12번+확장자 보정: calibration/regime_cfg 점검·복구 + saved_at↔timestamp 호환 + weight 확장자 동기화)
+# maintenance_fix_meta.py (FINAL, passed 주입 포함)
 import os
 import json
 import re
@@ -28,12 +28,6 @@ FILENAME_RE = re.compile(
     r"(?:_group(?P<group_id>\d+))?"
     r"(?:_cls(?P<num_classes>\d+))?$"
 )
-
-REQUIRED_TOP_FIELDS = [
-    "symbol", "strategy", "model", "group_id",
-    "input_size", "num_classes", "class_bins",
-    "metrics", "saved_at"
-]
 
 _ALLOWED_STRATEGIES = {"단기", "중기", "장기"}
 _ALLOWED_MODELS = {"lstm", "cnn_lstm", "transformer"}
@@ -251,6 +245,16 @@ def _ensure_weight_fields(meta: dict, meta_filename: str):
     meta.setdefault("weight_path", bn)   # 상대 경로로 유지
     meta.setdefault("model_path", bn)    # 호환 키
 
+def _ensure_pass_flag(meta: dict):
+    """
+    predict.py는 meta.passed == 1 이어야 게이트 통과.
+    class_ranges가 2개 이상일 때 passed=1로 보정.
+    """
+    cr = meta.get("class_ranges")
+    ok = isinstance(cr, list) and len(cr) >= 2
+    # 이미 1이 아니면 덮어씀(안전 보정)
+    meta["passed"] = 1 if ok else 0
+
 def _fill_defaults(meta: dict, fname_info: dict, meta_filename: str):
     # 파일명에서 파싱한 값 우선 반영
     for k in ["symbol", "strategy", "model", "group_id", "num_classes"]:
@@ -281,11 +285,15 @@ def _fill_defaults(meta: dict, fname_info: dict, meta_filename: str):
     # ✅ NEW: 가중치 파일 참조 확장자 동기화
     _ensure_weight_fields(meta, meta_filename)
 
+    # ✅ NEW: 게이트 통과 플래그 보정
+    _ensure_pass_flag(meta)
+
 def _validate_and_fix(path: str, fname: str):
     """
     - 깨진/빈 json 복구
     - 필수 필드 보정
     - weight 확장자(.pt→.ptz/.safetensors 등) 동기화
+    - passed 플래그 보정(중요)
     - 실패 시 안전 기본값으로 재생성(경고만 출력)
     """
     meta, err = _safe_load_json(path)
@@ -312,7 +320,7 @@ def _validate_and_fix(path: str, fname: str):
     if changed:
         ok = _safe_write_json(path, meta)
         if ok:
-            print(f"[FIXED] {fname} → 스키마/필드 보정 완료(확장자 동기화 포함)")
+            print(f"[FIXED] {fname} → 스키마/필드 보정 완료(확장자/Passed 동기화 포함)")
         return ok, "fixed"
     else:
         print(f"[OK] {fname} → 수정 불필요")
