@@ -371,17 +371,24 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
 
             # class weight (음수 라벨 없음 보장)
             try:
-                loss_cfg=get_LOSS(); cw_cfg=loss_cfg.get("class_weight", {}) if isinstance(loss_cfg,dict) else {}
-                mode=str(cw_cfg.get("mode","inverse_freq_clip")).lower()
-                cw_min=float(cw_cfg.get("min",0.5)); cw_max=float(cw_cfg.get("max",2.0)); eps=float(cw_cfg.get("eps",1e-6"))
-                cc=np.bincount(train_y, minlength=len(class_ranges)).astype(np.float32)
-                if mode=="none": w_full=np.ones(len(class_ranges),dtype=np.float32)
-                elif mode=="inverse_freq":
-                    w_full=(1.0/np.sqrt(cc+eps)).astype(np.float32)
+                loss_cfg = get_LOSS()
+                cw_cfg = loss_cfg.get("class_weight", {}) if isinstance(loss_cfg, dict) else {}
+                mode = str(cw_cfg.get("mode", "inverse_freq_clip")).lower()
+                cw_min = float(cw_cfg.get("min", 0.5))
+                cw_max = float(cw_cfg.get("max", 2.0))
+                eps    = float(cw_cfg.get("eps", 1e-6))
+                cc = np.bincount(train_y, minlength=len(class_ranges)).astype(np.float32)
+                if mode == "none":
+                    w_full = np.ones(len(class_ranges), dtype=np.float32)
+                elif mode == "inverse_freq":
+                    w_full = (1.0 / np.sqrt(cc + eps)).astype(np.float32)
                 else:
-                    w=(1.0/np.sqrt(cc+eps)); w=np.clip(w, cw_min, cw_max); w_full=w.astype(np.float32)
-                zero=(cc==0); 
-                if zero.any(): w_full[zero]=max(cw_max, float(np.max(w_full)) if w_full.size else 1.0)
+                    w = (1.0 / np.sqrt(cc + eps))
+                    w = np.clip(w, cw_min, cw_max)
+                    w_full = w.astype(np.float32)
+                zero = (cc == 0)
+                if zero.any():
+                    w_full[zero] = max(cw_max, float(np.max(w_full)) if w_full.size else 1.0)
             except Exception:
                 w_full=np.ones(len(class_ranges),dtype=np.float32)
             try:
@@ -499,7 +506,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                       "boundary_band": float(BOUNDARY_BAND),
                       "cs_argmax":{"enabled":bool(COST_SENSITIVE_ARGMAX),"beta":float(CS_ARG_BETA)},
                       "eval_gate":"none",
-                      "passed": 1}  # ←←← 반드시 포함: predict.py가 meta.passed==1만 허용
+                      "passed": 1}
                 wpath,mpath=_save_model_and_meta(model, stem+".pt", meta)
 
                 # 캐시 제거
