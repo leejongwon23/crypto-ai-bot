@@ -14,20 +14,35 @@ except Exception:
     nn = None
     optim = None
 
-# 안전한 import: model.base_model, data.utils, config
+# ─────────────────────────────────────────────────────────────
+# 안전한 import: 모델 및 유틸 이중 폴백
+# ─────────────────────────────────────────────────────────────
+# 모델: model.base_model → 실패 시 base_model
+TransformerPricePredictor = None
 try:
-    from model.base_model import TransformerPricePredictor
+    from model.base_model import TransformerPricePredictor  # type: ignore
 except Exception:
-    TransformerPricePredictor = None
+    try:
+        from base_model import TransformerPricePredictor  # type: ignore
+    except Exception:
+        TransformerPricePredictor = None
 
+# 유틸: data.utils → 실패 시 utils → 실패 시 no-op 더미
+_get_ok = False
 try:
-    from data.utils import get_kline_by_strategy, compute_features
+    from data.utils import get_kline_by_strategy, compute_features  # type: ignore
+    _get_ok = True
 except Exception:
-    def get_kline_by_strategy(symbol, strategy):
-        return None
-    def compute_features(symbol, df, strategy):
-        return None
+    try:
+        from utils import get_kline_by_strategy, compute_features  # type: ignore
+        _get_ok = True
+    except Exception:
+        def get_kline_by_strategy(symbol, strategy):
+            return None
+        def compute_features(symbol, df, strategy):
+            return None
 
+# 설정: 정상 경로 → 실패 시 env 폴백
 try:
     from config import get_FEATURE_INPUT_SIZE, get_SSL_CACHE_DIR
 except Exception:
