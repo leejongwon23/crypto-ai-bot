@@ -4,15 +4,23 @@ import time
 import numpy as np
 import pandas as pd
 
-from data.utils import get_kline_by_strategy, compute_features
-from config import get_class_ranges, get_FEATURE_INPUT_SIZE
-
-# optional cache (존재 시만 사용)
+# ✅ 안전한 이중 임포트 가드: data.utils → 실패 시 utils
 try:
-    from data.utils import CacheManager as DataCacheManager  # noqa
-    _HAS_DCACHE = True
+    from data.utils import get_kline_by_strategy, compute_features
+    try:
+        from data.utils import CacheManager as DataCacheManager  # optional
+        _HAS_DCACHE = True
+    except Exception:
+        _HAS_DCACHE = False
 except Exception:
-    _HAS_DCACHE = False
+    from utils import get_kline_by_strategy, compute_features
+    try:
+        from utils import CacheManager as DataCacheManager  # optional
+        _HAS_DCACHE = True
+    except Exception:
+        _HAS_DCACHE = False
+
+from config import get_class_ranges, get_FEATURE_INPUT_SIZE
 
 # lightweight CV / metrics
 try:
