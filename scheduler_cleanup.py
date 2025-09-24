@@ -61,6 +61,14 @@ def _is_predict_busy() -> bool:
         return True
     return False
 
+def _last_heavy_ts() -> float:
+    global _last_heavy_at
+    return float(_last_heavy_at or 0.0)
+
+def _mark_heavy_now():
+    global _last_heavy_at
+    _last_heavy_at = time.time()
+
 def _should_run_heavy() -> bool:
     """무거운 정리를 지금 해도 되는가? (완전 한가 + 최소 간격 + 용량 압박)"""
     if not HEAVY_ALLOW_IF_IDLE:
@@ -83,18 +91,11 @@ def _should_run_heavy() -> bool:
         return False
     return False
 
-def _last_heavy_ts() -> float:
-    global _last_heavy_at
-    return float(_last_heavy_at or 0.0)
-
-def _mark_heavy_now():
-    global _last_heavy_at
-    _last_heavy_at = time.time()
-
 def _run_light():
     """가벼운 모드: 로그/구식 모델/캐시 등 소량 삭제(빠름)."""
     try:
-        safe_cleanup.cleanup_logs_and_models(light=True)
+        # ✅ 시그니처 정합: 인자 없는 라이트 트리거 사용
+        safe_cleanup.trigger_light_cleanup()
         print(f"[CLEANUP] light done @ {_now().strftime('%H:%M:%S')}")
         sys.stdout.flush()
     except Exception as e:
@@ -104,7 +105,8 @@ def _run_light():
 def _run_heavy():
     """무거운 모드: 공간 압박 시 실행. 시간이 다소 걸릴 수 있어 한가할 때만."""
     try:
-        safe_cleanup.cleanup_logs_and_models(light=False)
+        # ✅ 시그니처 정합: 무거운 정리 래퍼(인자 없음)
+        safe_cleanup.cleanup_logs_and_models()
         _mark_heavy_now()
         print(f"[CLEANUP] HEAVY done @ {_now().strftime('%H:%M:%S')}")
         sys.stdout.flush()
