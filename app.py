@@ -1,4 +1,4 @@
-# app.py — patched (train API safe wrappers + robust checks + log schema align)
+# app.py — patched (train API safe wrappers + robust checks + log schema align + predict-lock stale GC)
 from flask import Flask, jsonify, request, Response
 from recommend import main
 import train, os, threading, datetime, pytz, traceback, sys, shutil, re, time
@@ -45,6 +45,16 @@ except Exception:
         safe_cleanup = type("sc", (), {"get_directory_size_gb": lambda p: 0, "HARD_CAP_GB": 9.6, "run_emergency_purge": lambda: None, "cleanup_logs_and_models": lambda: None})
         _cleanup_mod = safe_cleanup
 
+# ✅ predict-lock(Stale GC) 안전 임포트
+try:
+    import predict_lock as _pl
+    _pl_clear = getattr(_pl, "clear_stale_predict_lock", lambda: None)
+    _pl_is_running = getattr(_pl, "is_predict_running", lambda: False)
+except Exception:
+    _pl = None
+    _pl_clear = lambda: None
+    _pl_is_running = lambda: False
+
 # predict gate safe imports
 try:
     from predict import open_predict_gate, close_predict_gate, predict
@@ -82,13 +92,17 @@ LOCK_DIR   = getattr(safe_cleanup, "LOCK_DIR", os.path.join(PERSIST_DIR, "locks"
 LOCK_PATH  = getattr(safe_cleanup, "LOCK_PATH", os.path.join(LOCK_DIR, "train_or_predict.lock"))
 os.makedirs(LOCK_DIR, exist_ok=True)
 
-# remove orphan lock at boot
+# ── BOOT: orphan 전역락 제거 + 예측락 stale GC
 if os.path.exists(LOCK_PATH):
     try:
         os.remove(LOCK_PATH)
         print("[BOOT] orphan lock removed"); sys.stdout.flush()
     except Exception as e:
         print(f"[BOOT] lock remove failed: {e}"); sys.stdout.flush()
+try:
+    _pl_clear(); print("[BOOT] predict lock stale-GC done")
+except Exception as e:
+    print(f"[BOOT] predict lock GC failed: {e}")
 
 def _acquire_global_lock():
     try:
@@ -304,6 +318,12 @@ def start_scheduler():
     if os.path.exists(LOCK_PATH):
         print("⏸️ 리셋 락 감지 → 스케줄러 시작 지연"); sys.stdout.flush()
         return
+    # 스케줄 시작 전 1회 예측락 정리
+    try:
+        _pl_clear(); print("[SCHED] predict lock stale-GC pre-start")
+    except Exception as e:
+        print(f"[SCHED] predict lock GC failed pre-start: {e}")
+
     print(">>> 스케줄러 시작"); sys.stdout.flush()
     sched = BackgroundScheduler(
         timezone=pytz.timezone("Asia/Seoul"),
@@ -335,11 +355,30 @@ def start_scheduler():
             misfire_grace_time=90,
         )
 
+    # 🔁 예측락 정리 주기잡 (5분)
+    def _pred_lock_gc():
+        try:
+            _pl_clear()
+        except Exception as e:
+            print(f"[LOCK] periodic GC fail: {e}")
+    sched.add_job(
+        _pred_lock_gc,
+        "interval",
+        minutes=int(os.getenv("PREDICT_LOCK_GC_MIN", "5")),
+        id="predict_lock_gc",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=90,
+    )
+
     def _predict_job():
         try:
             if _is_training() or os.path.exists(LOCK_PATH):
                 print("[PREDICT] skip: training/lock active"); sys.stdout.flush()
                 return
+            # 실행 직전 정리
+            _pl_clear()
             print("[PREDICT] trigger_run start"); sys.stdout.flush()
             _safe_open_gate("sched_trigger")
             try:
@@ -440,6 +479,8 @@ def _init_background_once():
             from failure_db import ensure_failure_db
             print(">>> 서버 실행 준비")
             ensure_failure_db(); print("✅ failure_patterns DB 초기화 완료")
+            # 부팅 직후 1회 더 정리
+            _pl_clear()
             print("[pipeline] serialized: train -> predict -> next-group"); sys.stdout.flush()
 
             autostart = os.getenv("APP_AUTOSTART_TRAIN", "1") != "0"
@@ -503,6 +544,7 @@ def _predict_after_training(symbols, source_note):
             print("[APP-PRED] cleared stale lock before predict"); sys.stdout.flush()
         except Exception as e:
             print(f"[APP-PRED] lock remove failed: {e}"); sys.stdout.flush()
+    _pl_clear()
     _safe_open_gate(source_note)
     try:
         for sym in sorted(set(vis)):
@@ -527,6 +569,15 @@ def index(): return "Yopo server is running"
 
 @app.route("/ping")
 def ping(): return "pong"
+
+# 수동 예측락 정리 API
+@app.route("/admin/clear-predict-lock", methods=["POST","GET"])
+def clear_predict_lock_admin():
+    try:
+        _pl_clear()
+        return "✅ predict lock stale-GC executed"
+    except Exception as e:
+        return f"⚠️ fail: {e}", 500
 
 @app.route("/yopo-health")
 def yopo_health():
@@ -662,6 +713,7 @@ def run():
         if os.path.exists(LOCK_PATH) or _is_training():
             return "⏸️ 학습/초기화 진행 중: 예측 시작 차단됨", 423
         print("[RUN] 전략별 예측 실행"); sys.stdout.flush()
+        _pl_clear()
         _safe_open_gate("route_run")
         try:
             for strategy in ["단기","중기","장기"]:
@@ -867,6 +919,8 @@ def reset_all(key=None):
             import importlib
             _acquire_global_lock()
             _stop_all_aux_schedulers()
+            # 예측락 선정리
+            _pl_clear()
             BASE = BASE_DIR
             PERSIST = PERSIST_DIR
             LOGS = LOG_DIR
