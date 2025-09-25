@@ -1,9 +1,9 @@
-# === predict_trigger.py (MEM-SAFE FINAL++++ — group-finished only, hard gate enforced, stale-lock safe, RETRY-ON-UNLOCK) ===
+# === predict_trigger.py (FINAL — lock-aware, retry-on-unlock, stale-safe, log-throttled) ===
 import os
 import time
 import traceback
 import datetime
-from collections import Counter
+from collections import Counter, defaultdict
 import glob
 
 import numpy as np
@@ -36,7 +36,7 @@ try:
 except Exception:
     _LOCK_PATH = "/persistent/locks/train_or_predict.lock"
 
-# 예측 게이트/락 경로
+# 예측 게이트/락 경로(파일 폴백)
 PREDICT_BLOCK    = "/persistent/predict.block"
 PREDICT_RUN_LOCK = "/persistent/run/predict_running.lock"
 GROUP_TRAIN_LOCK = "/persistent/run/group_training.lock"
@@ -95,6 +95,18 @@ try:
 except Exception:
     __is_open = None
 
+# (옵션) 중앙 락 유틸 사용: 있으면 우선 사용
+_lock_api = {"is_locked": None, "clear_stale": None, "wait_until_free": None, "ttl": None}
+try:
+    from predict_lock import is_predict_running as _is_locked
+    from predict_lock import clear_stale_predict_lock as _clear_stale
+    from predict_lock import wait_until_free as _wait_until_free
+    from predict_lock import PREDICT_LOCK_TTL as _LOCK_TTL
+    _lock_api.update(is_locked=_is_locked, clear_stale=_clear_stale,
+                     wait_until_free=_wait_until_free, ttl=int(_LOCK_TTL))
+except Exception:
+    pass  # 파일기반 폴백 사용
+
 # 그룹 오더 매니저
 _GOM = None
 try:
@@ -133,22 +145,31 @@ TRIGGER_MAX_PER_RUN = max(1, int(os.getenv("TRIGGER_MAX_PER_RUN", "999")))
 PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC", "30"))
 PREDICT_LOCK_STALE_TRIGGER_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRIGGER_SEC", "600"))
 
-# ✅ 재시도/대기 설정 (2번 요구사항)
-RETRY_AFTER_TRAIN_MAX_WAIT_SEC   = int(os.getenv("RETRY_AFTER_TRAIN_MAX_WAIT_SEC", "900"))   # 훈련락 해제 대기 최대(초)
-RETRY_AFTER_TRAIN_SLEEP_SEC      = float(os.getenv("RETRY_AFTER_TRAIN_SLEEP_SEC", "1.0"))    # 폴링 주기
-STARTUP_WAIT_FOR_GATE_OPEN_SEC   = int(os.getenv("STARTUP_WAIT_FOR_GATE_OPEN_SEC", "600"))   # run 시작 시 게이트 닫힘이면 기다리는 최대 시간
-PAIR_WAIT_FOR_GATE_OPEN_SEC      = int(os.getenv("PAIR_WAIT_FOR_GATE_OPEN_SEC", "120"))      # 심볼/전략 단위 실행 중 게이트 닫힘이면 기다리는 최대 시간
-RETRY_ON_TIMEOUT                 = int(os.getenv("RETRY_ON_TIMEOUT", "1")) == 1               # timeout 후 재시도 여부
-TIMEOUT_RETRY_ONCE_EXTRA_SEC     = float(os.getenv("TIMEOUT_RETRY_ONCE_EXTRA_SEC", "20"))     # 재시도시 타임아웃
+# ✅ 재시도/대기/쓰로틀 설정
+RETRY_AFTER_TRAIN_MAX_WAIT_SEC   = int(os.getenv("RETRY_AFTER_TRAIN_MAX_WAIT_SEC", "900"))
+RETRY_AFTER_TRAIN_SLEEP_SEC      = float(os.getenv("RETRY_AFTER_TRAIN_SLEEP_SEC", "1.0"))
+STARTUP_WAIT_FOR_GATE_OPEN_SEC   = int(os.getenv("STARTUP_WAIT_FOR_GATE_OPEN_SEC", "600"))
+PAIR_WAIT_FOR_GATE_OPEN_SEC      = int(os.getenv("PAIR_WAIT_FOR_GATE_OPEN_SEC", "120"))
+RETRY_ON_TIMEOUT                 = int(os.getenv("RETRY_ON_TIMEOUT", "1")) == 1
+TIMEOUT_RETRY_ONCE_EXTRA_SEC     = float(os.getenv("TIMEOUT_RETRY_ONCE_EXTRA_SEC", "20"))
+# 쓰로틀: 바쁜상태/타임아웃 로그 최소 간격
+THROTTLE_BUSY_LOG_SEC            = int(os.getenv("THROTTLE_BUSY_LOG_SEC", "15"))
+# 페어별 백오프(타임아웃/락실패 반복 방지)
+PAIR_BACKOFF_BASE_SEC            = int(os.getenv("PAIR_BACKOFF_BASE_SEC", "60"))
+PAIR_BACKOFF_MAX_SEC             = int(os.getenv("PAIR_BACKOFF_MAX_SEC", "600"))
 
 # 그룹 완료 모드
 REQUIRE_GROUP_COMPLETE = int(os.getenv("REQUIRE_GROUP_COMPLETE", "0"))
 
 last_trigger_time = {}
+_last_busy_log_at = 0.0
+_pair_backoff_until = defaultdict(float)   # key -> unix ts
+_pair_backoff_step  = defaultdict(int)     # key -> step
+
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 # ──────────────────────────────────────────────────────────────
-# 게이트/락 관리
+# 게이트/락 관리 (파일 폴백 포함)
 # ──────────────────────────────────────────────────────────────
 def _gate_closed() -> bool:
     try:
@@ -156,11 +177,21 @@ def _gate_closed() -> bool:
             return True
         if os.path.exists(PREDICT_BLOCK):
             return True
+        if __is_open is not None:
+            # predict.py 게이트 API가 있으면 신뢰
+            return (not bool(__is_open()))
     except Exception:
         pass
     return False
 
 def _predict_busy() -> bool:
+    # 중앙 락 API가 있으면 우선
+    if callable(_lock_api["is_locked"]):
+        try:
+            return bool(_lock_api["is_locked"]())
+        except Exception:
+            pass
+    # 파일 폴백
     try:
         return os.path.exists(PREDICT_RUN_LOCK)
     except Exception:
@@ -176,6 +207,13 @@ def _is_stale_lock(path: str, ttl_sec: int) -> bool:
         return False
 
 def _clear_stale_predict_lock(ttl_sec: int):
+    # 중앙 락 API가 있으면 우선
+    if callable(_lock_api["clear_stale"]):
+        try:
+            _lock_api["clear_stale"]()
+            return
+        except Exception:
+            pass
     try:
         if _is_stale_lock(PREDICT_RUN_LOCK, ttl_sec):
             os.remove(PREDICT_RUN_LOCK)
@@ -189,7 +227,6 @@ def _wait_for_gate_open(max_wait_sec: int) -> bool:
     while time.time() - start < max_wait_sec:
         _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
         if _LOCK_PATH and os.path.exists(_LOCK_PATH):
-            # 전역 락이면 즉시 중단
             return False
         if (not _gate_closed()) and (not _predict_busy()):
             return True
@@ -294,14 +331,13 @@ def _invoke_predict(_predict, symbol, strategy, source, timeout_sec: float) -> b
         return True
 
 def _retry_after_training(_predict, symbol, strategy, first_err: Exception | str = None) -> bool:
-    """훈련락/게이트 해제까지 기다렸다가 1회 재시도(요구사항 2)"""
+    """훈련락/게이트 해제까지 기다렸다가 1회 재시도"""
     why = f"timeout/lock; first_err={first_err}" if first_err else "timeout/lock"
     log_audit(symbol, strategy, "트리거재시도대기", why)
     ok = _wait_for_gate_open(RETRY_AFTER_TRAIN_MAX_WAIT_SEC)
     if not ok:
         log_audit(symbol, strategy, "트리거재시도포기", "게이트 미오픈(대기초과)")
         return False
-    # 게이트가 열렸으면 한 번 더 호출
     try:
         ok2 = _invoke_predict(_predict, symbol, strategy, "변동성(재시도)", max(PREDICT_TIMEOUT_SEC, TIMEOUT_RETRY_ONCE_EXTRA_SEC))
         if ok2:
@@ -317,6 +353,8 @@ def _retry_after_training(_predict, symbol, strategy, first_err: Exception | str
 # 트리거 실행 루프
 # ──────────────────────────────────────────────────────────────
 def run():
+    global _last_busy_log_at
+
     # 전역 강제 락: 즉시 스킵
     if _LOCK_PATH and os.path.exists(_LOCK_PATH):
         print(f"[트리거] 전역 락 감지({_LOCK_PATH}) → 전체 스킵 @ {now_kst().isoformat()}")
@@ -324,7 +362,7 @@ def run():
 
     _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
 
-    # 시작 시 게이트 닫힘이면 일정 시간 대기 후 계속(기존: 즉시 return)
+    # 시작 시 게이트 닫힘/바쁨이면 일정 시간 대기
     if _gate_closed() or _predict_busy():
         print(f"[트리거] 시작 시 게이트 닫힘/예측중 → 최대 {STARTUP_WAIT_FOR_GATE_OPEN_SEC}s 대기")
         opened = _wait_for_gate_open(STARTUP_WAIT_FOR_GATE_OPEN_SEC)
@@ -374,26 +412,37 @@ def run():
             print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
             return
 
+        # 페어별 백오프 적용
+        key = f"{symbol}_{strategy}"
+        nowu = time.time()
+        if nowu < _pair_backoff_until[key]:
+            continue
+
         _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
 
-        # 페어 단위에서도 게이트가 닫히면 일정 시간 기다렸다 진행(기존: 즉시 return)
+        # 실행 중 전역 락/게이트 닫힘 → 대기
         if _LOCK_PATH and os.path.exists(_LOCK_PATH):
             print(f"[트리거] 실행 중 전역 락 감지 → 중단")
             print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
             return
+
         if _gate_closed() or _predict_busy():
-            print(f"[트리거] 게이트 닫힘/예측중 → 최대 {PAIR_WAIT_FOR_GATE_OPEN_SEC}s 대기 후 재시도")
+            # 로그 쓰로틀
+            if (nowu - _last_busy_log_at) >= THROTTLE_BUSY_LOG_SEC:
+                print(f"[트리거] 게이트 닫힘/예측중 → 최대 {PAIR_WAIT_FOR_GATE_OPEN_SEC}s 대기 후 재시도")
+                _last_busy_log_at = nowu
             opened = _wait_for_gate_open(PAIR_WAIT_FOR_GATE_OPEN_SEC)
             if not opened:
-                print(f"[트리거] 게이트 미오픈(대기초과) → 중단")
+                if (nowu - _last_busy_log_at) >= THROTTLE_BUSY_LOG_SEC:
+                    print(f"[트리거] 게이트 미오픈(대기초과) → 중단")
+                    _last_busy_log_at = nowu
                 print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
                 return
 
         try:
-            key = f"{symbol}_{strategy}"
-            now = time.time()
+            nowt = time.time()
             cooldown = TRIGGER_COOLDOWN.get(strategy, 3600)
-            if now - last_trigger_time.get(key, 0) < cooldown:
+            if nowt - last_trigger_time.get(key, 0) < cooldown:
                 continue
 
             if not check_model_quality(symbol, strategy):
@@ -418,14 +467,21 @@ def run():
             try:
                 ok = _invoke_predict(_predict, symbol, strategy, "변동성", PREDICT_TIMEOUT_SEC)
                 if not ok and RETRY_ON_TIMEOUT:
-                    # timeout/실패 시: 훈련락 해제될 때까지 기다렸다가 1회 재시도
                     ok = _retry_after_training(_predict, symbol, strategy, first_err="timeout/failed")
+
                 if ok:
-                    last_trigger_time[key] = now
+                    last_trigger_time[key] = nowt
+                    # 성공 시 백오프 해제/초기화
+                    _pair_backoff_until.pop(key, None)
+                    _pair_backoff_step.pop(key, None)
                     log_audit(symbol, strategy, "트리거예측", "조건 만족으로 실행")
                     triggered += 1
                 else:
-                    raise RuntimeError("predict timeout/failed (after optional retry)")
+                    # 실패 시 페어 백오프(지수 증가, 상한 있음)
+                    step = _pair_backoff_step[key] = min(_pair_backoff_step[key] + 1, 8)
+                    wait_sec = min(PAIR_BACKOFF_BASE_SEC * (2 ** (step - 1)), PAIR_BACKOFF_MAX_SEC)
+                    _pair_backoff_until[key] = time.time() + wait_sec
+                    raise RuntimeError(f"predict timeout/failed (backoff {wait_sec}s)")
             except Exception as inner:
                 print(f"[❌ 예측 실행 실패] {symbol}-{strategy}: {inner}")
                 log_audit(symbol, strategy, "트리거예측오류", f"예측실행실패: {inner}")
@@ -521,23 +577,18 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
             np.exp(-alpha * (float(recent_freq.get(i, 0)) / total_recent))
             for i in range(num_classes)
         ], dtype=np.float64)
-        # 안전 클리핑(너무 과도한 패널티/증폭 방지)
         recent_weights = np.clip(recent_weights, 0.5, 1.5)
 
     # (선택) 클래스 데이터 수 기반 희소성 보정
     if class_counts and isinstance(class_counts, dict):
         counts = np.array([float(class_counts.get(i, 0.0)) for i in range(num_classes)], dtype=np.float64)
         counts = np.where(np.isfinite(counts), counts, 0.0)
-        # 희소 클래스(작은 count) 우대: 1/sqrt(count+eps)
         inv_sqrt = 1.0 / np.sqrt(counts + 1e-6)
-        # 평균 1로 정규화
         inv_sqrt = inv_sqrt / (inv_sqrt.mean() + 1e-12)
-        # beta 비율로 혼합(0이면 미사용, 1이면 전부 반영)
         rarity_weights = (1.0 - beta) + beta * inv_sqrt
     else:
         rarity_weights = np.ones(num_classes, dtype=np.float64)
 
-    # 가중치 결합 후 정규화
     w = recent_weights * rarity_weights
     w = np.where(np.isfinite(w), w, 1.0)
     w = np.clip(w, 1e-6, None)
