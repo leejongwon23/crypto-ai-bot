@@ -1,4 +1,4 @@
-# scheduler_cleanup.py — light-first, collision-safe cleanup scheduler
+# scheduler_cleanup.py — light-first, collision-safe cleanup scheduler (patched: stale predict-lock GC)
 # - 학습/예측 타이트 구간에서는 '가벼운 모드'만 실행하거나 스킵
 # - 무거운 정리는 한가할 때만 (학습/락/게이트 닫힘/예측락 등 없을 때)
 # - app.py 에서 start_cleanup_scheduler(), stop_cleanup_scheduler() 사용
@@ -15,6 +15,26 @@ try:
     _is_training = getattr(train, "is_loop_running", lambda: False)
 except Exception:
     def _is_training(): return False
+
+# ✅ 선택 의존: predict_lock (stale일 때만 정리)
+try:
+    import predict_lock as _pl
+    _pl_clear = getattr(_pl, "clear", None)                  # clear(force=..., stale_sec=..., tag=...)
+    _pl_is_stale = getattr(_pl, "_is_stale", None)           # _is_stale(stale_sec=...)
+except Exception:
+    _pl, _pl_clear, _pl_is_stale = None, None, None
+
+def _clear_stale_predict_lock(tag="cleanup"):
+    """예측락을 무조건 지우지 말고, stale일 때만 안전하게 정리."""
+    try:
+        if _pl_clear is None or _pl_is_stale is None:
+            return
+        # stale이면만 강제 제거
+        if _pl_is_stale(stale_sec=int(os.getenv("PREDICT_LOCK_STALE_SEC", "60"))):
+            _pl_clear(force=True, stale_sec=0, tag=tag)
+    except Exception:
+        # 어떤 이유로든 실패해도 정리 루틴은 계속 진행
+        pass
 
 # 예측 게이트/락 경로 (predict.py와 합)
 RUN_DIR        = "/persistent/run"
@@ -105,6 +125,8 @@ def _run_light():
 def _run_heavy():
     """무거운 모드: 공간 압박 시 실행. 시간이 다소 걸릴 수 있어 한가할 때만."""
     try:
+        # heavy 직전에도 stale 예측락만 정리(충돌 방지)
+        _clear_stale_predict_lock(tag="heavy")
         # ✅ 시그니처 정합: 무거운 정리 래퍼(인자 없음)
         safe_cleanup.cleanup_logs_and_models()
         _mark_heavy_now()
@@ -126,14 +148,19 @@ def _cleanup_job():
         except Exception:
             used = -1.0
 
+        # 틱 시작 시, stale 예측락만 정리 (정상 락은 유지)
+        _clear_stale_predict_lock(tag="tick")
+
         busy = _is_training() or _is_predict_busy()
         print(f"[CLEANUP] tick busy={busy} used={used:.2f}GB "
               f"(soft={DISK_SOFTCAP_GB:.2f} hard={DISK_HARDCAP_GB:.2f})")
         sys.stdout.flush()
 
-        # 하드캡 초과면 즉시 비상 정리 (safe_cleanup 내장 루틴 사용)
+        # 하드캡 초과면 즉시 비상 정리
         try:
             if used >= DISK_HARDCAP_GB:
+                # EMERGENCY 직전에도 stale 예측락만 정리(충돌 방지)
+                _clear_stale_predict_lock(tag="emergency")
                 print("[CLEANUP] EMERGENCY: hard cap exceeded -> run_emergency_purge()")
                 sys.stdout.flush()
                 safe_cleanup.run_emergency_purge()
