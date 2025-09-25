@@ -553,7 +553,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         try:
             if len(outs) >= 2:
                 tops = sorted(outs, key=lambda m: os.path.basename(m.get("model_path","")))[:min(3, len(outs))]  # F1 미사용
-                nc = min(len(np.asarray(tops[0]["calib_probs"])), *[len(np.asarray(t["calib_probs"])) for t in tops])
+                nc = min(len(np.asarray(tops[0]["calib_probs"])), *[len(np.asarray(t["calib_probs"])) for m in [tops] for t in tops])
                 if len(tops) >= 2 and nc >= 2:
                     mean_c = np.mean([np.asarray(m["calib_probs"][:nc], dtype=float) for m in tops], axis=0)
                     mean_c = (mean_c / (mean_c.sum() + 1e-12)).astype(float)
