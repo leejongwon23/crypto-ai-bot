@@ -49,11 +49,9 @@ except Exception:
 try:
     import predict_lock as _pl
     _pl_clear = getattr(_pl, "clear_stale_predict_lock", lambda: None)
-    _pl_is_running = getattr(_pl, "is_predict_running", lambda: False)
 except Exception:
     _pl = None
     _pl_clear = lambda: None
-    _pl_is_running = lambda: False
 
 # predict gate safe imports
 try:
@@ -212,17 +210,39 @@ def _await_models_visible(symbols, timeout_sec=20, poll_sec=0.5):
             return fn(symbols, timeout_sec=timeout_sec)
         except Exception:
             pass
-    # fallback: naive wait with polling for model files presence
+    # fallback: naive wait with polling for model files presence (top-level + nested)
+    exts = (".pt", ".ptz", ".safetensors")
     deadline = time.time() + timeout_sec
-    visible = []
     while time.time() < deadline:
-        visible = [s for s in symbols if any(
-            f.startswith(f"{s}_") for f in (os.listdir(MODEL_DIR) if os.path.exists(MODEL_DIR) else [])
-        )]
-        if visible:
-            return visible
+        found = set()
+        try:
+            if os.path.isdir(MODEL_DIR):
+                # 1) top-level files
+                try:
+                    for f in os.listdir(MODEL_DIR):
+                        for s in symbols:
+                            if f.startswith(f"{s}_") and f.endswith(exts):
+                                found.add(s)
+                except Exception:
+                    pass
+                # 2) nested: {MODEL_DIR}/{symbol}/{strategy}/*
+                for s in symbols:
+                    sdir = os.path.join(MODEL_DIR, s)
+                    if os.path.isdir(sdir):
+                        for strat in ("단기", "중기", "장기"):
+                            d = os.path.join(sdir, strat)
+                            if os.path.isdir(d):
+                                try:
+                                    if any(name.endswith(exts) for name in os.listdir(d)):
+                                        found.add(s)
+                                except Exception:
+                                    pass
+        except Exception:
+            pass
+        if found:
+            return sorted(found)
         time.sleep(poll_sec)
-    return visible
+    return []
 
 def _has_model_for(symbol, strategy):
     fn = getattr(train, "_has_model_for", None)
@@ -231,12 +251,26 @@ def _has_model_for(symbol, strategy):
             return bool(fn(symbol, strategy))
         except Exception:
             pass
-    # fallback: check files heuristically
+    # fallback: top-level + nested
     try:
+        exts = (".pt", ".ptz", ".safetensors")
         pref = f"{symbol}_{strategy}_"
-        for f in os.listdir(MODEL_DIR):
-            if f.startswith(pref) and f.endswith((".pt", ".ptz", ".safetensors")):
-                return True
+        if os.path.isdir(MODEL_DIR):
+            # top-level
+            try:
+                for f in os.listdir(MODEL_DIR):
+                    if f.startswith(pref) and f.endswith(exts):
+                        return True
+            except Exception:
+                pass
+            # nested
+            d = os.path.join(MODEL_DIR, symbol, strategy)
+            if os.path.isdir(d):
+                try:
+                    if any(name.endswith(exts) for name in os.listdir(d)):
+                        return True
+                except Exception:
+                    pass
     except Exception:
         pass
     return False
@@ -317,7 +351,21 @@ def start_scheduler():
         return
     if os.path.exists(LOCK_PATH):
         print("⏸️ 리셋 락 감지 → 스케줄러 시작 지연"); sys.stdout.flush()
+
+        # ⏳ 락 해제 감시 후 자동 시작 (지수 백오프 최대 60s)
+        def _deferred():
+            backoff = 1.0
+            while os.path.exists(LOCK_PATH):
+                time.sleep(backoff)
+                backoff = min(backoff * 2.0, 60.0)
+            try:
+                start_scheduler()
+                print("▶️ 지연 후 스케줄러 시작"); sys.stdout.flush()
+            except Exception as e:
+                print(f"❌ 지연 시작 실패: {e}")
+        threading.Thread(target=_deferred, daemon=True).start()
         return
+
     # 스케줄 시작 전 1회 예측락 정리
     try:
         _pl_clear(); print("[SCHED] predict lock stale-GC pre-start")
