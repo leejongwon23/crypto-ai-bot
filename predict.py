@@ -30,9 +30,15 @@ __all__ = [
 # ====== Gate/Lock ======
 RUN_DIR = "/persistent/run"; os.makedirs(RUN_DIR, exist_ok=True)
 PREDICT_GATE = os.path.join(RUN_DIR, "predict_gate.json")
-PREDICT_LOCK = os.path.join(RUN_DIR, "predict_running.lock")
 PREDICT_BLOCK = "/persistent/predict.block"
 GROUP_ACTIVE = os.path.join(RUN_DIR, "group_predict.active")
+
+# ▲ 기존 전역 단일락을 제거하고, 심볼/전략별 락으로 운영
+def _lock_path_for(symbol: str, strategy: str) -> str:
+    def _clean(s: str) -> str:
+        s = (s or "None")
+        return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in s)
+    return os.path.join(RUN_DIR, f"predict_{_clean(symbol)}_{_clean(strategy)}.lock")
 
 PREDICT_LOCK_TTL = int(os.getenv("PREDICT_LOCK_TTL", "600"))
 PREDICT_LOCK_STALE_TRAIN_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRAIN_SEC", "600"))
@@ -97,18 +103,17 @@ def _is_stale_lock(path: str, ttl_sec: int) -> bool:
     except Exception:
         return False
 
-def _clear_stale_lock(ttl_sec: int, tag: str = ""):
+def _clear_stale_lock(path: str, ttl_sec: int, tag: str = ""):
     try:
-        if os.path.exists(PREDICT_LOCK) and _is_stale_lock(PREDICT_LOCK, ttl_sec):
-            os.remove(PREDICT_LOCK)
-            print(f"[LOCK] stale predict lock removed (> {ttl_sec}s) {tag}"); sys.stdout.flush()
+        if os.path.exists(path) and _is_stale_lock(path, ttl_sec):
+            os.remove(path)
+            print(f"[LOCK] stale predict lock removed ({os.path.basename(path)}) > {ttl_sec}s {tag}"); sys.stdout.flush()
     except Exception:
         pass
 
-def _acquire_predict_lock():
+def _acquire_predict_lock(path: str):
     try:
-        _clear_stale_lock(PREDICT_LOCK_TTL, tag="(normal)")
-        fd = os.open(PREDICT_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         with os.fdopen(fd, "w") as f:
             f.write(json.dumps({"pid": os.getpid(), "ts": _now_kst().isoformat()}, ensure_ascii=False))
             try: f.flush(); os.fsync(f.fileno())
@@ -119,10 +124,10 @@ def _acquire_predict_lock():
     except Exception:
         return False
 
-def _release_predict_lock():
+def _release_predict_lock(path: str):
     try:
-        if os.path.exists(PREDICT_LOCK):
-            os.remove(PREDICT_LOCK)
+        if os.path.exists(path):
+            os.remove(path)
     except Exception:
         pass
 
@@ -130,12 +135,12 @@ def _release_predict_lock():
 import threading
 PREDICT_HEARTBEAT_SEC = int(os.getenv("PREDICT_HEARTBEAT_SEC", "3"))
 
-def _predict_hb_loop(stop_evt: threading.Event, tag: str):
+def _predict_hb_loop(stop_evt: threading.Event, tag: str, lock_path: str):
     last_note = ""
     while not stop_evt.is_set():
         try:
             gate = "open" if is_predict_gate_open() else "closed"
-            lock = os.path.exists(PREDICT_LOCK)
+            lock = os.path.exists(lock_path)
             note = f"[HB] predict alive ({tag}) gate={gate} lock={'1' if lock else '0'} ts={_now_kst().strftime('%H:%M:%S')}"
             if note != last_note:
                 print(note); sys.stdout.flush()
@@ -436,11 +441,11 @@ def _soft_abstain(symbol, strategy, *, reason, meta_choice="abstain", regime="un
         "predicted_class": -1, "label": -1
     }
 
-# 🆕 락 재시도
-def _acquire_predict_lock_with_retry(max_wait_sec:int):
+# 🆕 락 재시도 (경로 인자화)
+def _acquire_predict_lock_with_retry(path: str, max_wait_sec:int):
     deadline = time.time() + max(1, int(max_wait_sec))
     while time.time() < deadline:
-        if _acquire_predict_lock():
+        if _acquire_predict_lock(path):
             return True
         time.sleep(random.uniform(0.5, 2.0))
     return False
@@ -448,7 +453,6 @@ def _acquire_predict_lock_with_retry(max_wait_sec:int):
 def _prep_lock_for_source(source:str):
     src = str(source or "")
     if "그룹직후" in src:
-        _clear_stale_lock(PREDICT_LOCK_STALE_TRAIN_SEC, tag="(group)")
         try: return int(os.getenv("PREDICT_LOCK_WAIT_GROUP_SEC", "30"))
         except Exception: return 30
     return int(os.getenv("PREDICT_LOCK_WAIT_MAX_SEC", "15"))
@@ -480,22 +484,34 @@ def _position_hint_from_market(df: pd.DataFrame) -> dict:
 
 # ====== 핵심 예측 ======
 def predict(symbol, strategy, source="일반", model_type=None):
+    # 게이트
     if _group_active() and not _bypass_gate_for_source(source):
         return failed_result(symbol or "None", strategy or "None", reason="group_predict_active", source=source, X_input=None)
-
     if not (_bypass_gate_for_source(source) or is_predict_gate_open()):
         return failed_result(symbol or "None", strategy or "None", reason="predict_gate_closed", source=source, X_input=None)
 
+    # ── 심볼/전략별 락 경로
+    lock_path = _lock_path_for(symbol or "None", strategy or "None")
+
+    # ── 진입부 선제 stale 락 정리
+    if "그룹직후" in str(source or ""):
+        _clear_stale_lock(lock_path, PREDICT_LOCK_STALE_TRAIN_SEC, tag="(group)")
+    else:
+        _clear_stale_lock(lock_path, PREDICT_LOCK_TTL, tag="(normal)")
+
+    # ── 락 획득(+재시도)
     lock_wait = _prep_lock_for_source(source)
-    if not _acquire_predict_lock_with_retry(lock_wait):
+    if not _acquire_predict_lock_with_retry(lock_path, lock_wait):
         return failed_result(symbol or "None", strategy or "None", reason="predict_lock_timeout", source=source, X_input=None)
 
+    # ── 하트비트 시작
     _hb_stop = threading.Event()
     _hb_tag = f"{symbol}-{strategy}"
-    _hb_thread = threading.Thread(target=_predict_hb_loop, args=(_hb_stop, _hb_tag), daemon=True)
+    _hb_thread = threading.Thread(target=_predict_hb_loop, args=(_hb_stop, _hb_tag, lock_path), daemon=True)
     _hb_thread.start()
 
     try:
+        # (예측 본문 이하 원본 유지)
         try:
             ensure_prediction_log_exists()
         except Exception as _e:
@@ -784,7 +800,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             class_return_text=class_text
         )
 
-        # 섀도우 로깅(정보용, F1 지표는 기록만 가능)
+        # 섀도우 로깅
         try:
             for m in outs:
                 if chosen and m.get("model_path") == chosen.get("model_path"): continue
@@ -860,11 +876,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
                        else f"선택 모델: {meta_choice}")
         }
     finally:
+        # 하트비트와 락 해제는 반드시 수행
         try:
             _hb_stop.set(); _hb_thread.join(timeout=2)
         except Exception:
             pass
-        _release_predict_lock()
+        _release_predict_lock(lock_path)
 
 # ====== 평가 ======
 def evaluate_predictions(get_price_fn):
