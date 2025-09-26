@@ -96,6 +96,19 @@ except Exception:
     def find_best_windows(symbol, strategy, window_list, top_k=3, group_id=None):
         return [find_best_window(symbol, strategy, window_list=window_list, group_id=group_id)]
 
+# ───────── predict_lock: per-key 락 사용 ─────────
+try:
+    from predict_lock import (
+        clear_stale_predict_lock as pl_clear_stale,
+        wait_until_free as pl_wait_free,
+        # acquire_with_retry as pl_acquire,  # (train에서는 미사용)
+        # release as pl_release,             # (train에서는 미사용)
+    )
+except Exception:
+    # 런타임에 predict_lock 미존재 시 no-op 백업
+    def pl_clear_stale(lock_key=None): return None
+    def pl_wait_free(max_wait_sec: int, lock_key=None): return True
+
 # ---------- 전역 상수 ----------
 DEVICE=torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL_DIR="/persistent/models"; os.makedirs(MODEL_DIR,exist_ok=True)
@@ -139,61 +152,17 @@ now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 # ✅ 그룹 끝난 직후 예측을 락 예외로 허용할지(예측 쪽에서 처리)
 PREDICT_OVERRIDE_ON_GROUP_END = _as_bool_env("PREDICT_OVERRIDE_ON_GROUP_END", True)
 
-# [ADD] ───────── 예측 락/타임아웃 안전 유틸 ─────────
-PREDICT_RUN_LOCK = "/persistent/run/predict_running.lock"
-PREDICT_LOCK_STALE_TRIGGER_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRIGGER_SEC","600"))
+# ───────── 예측 타임아웃 보호 ─────────
 PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC","60"))
 
-def _is_stale_lock(path: str, ttl_sec: int) -> bool:
+def _maybe_insert_failure(payload:dict, feature_vector:Optional[List[Any]] = None):
     try:
-        if not os.path.exists(path): return False
-        mtime = os.path.getmtime(path)
-        return (time.time() - float(mtime)) > max(30, int(ttl_sec))
-    except Exception:
-        return False
+        if not ready_for_group_predict(): return
+        insert_failure_record(payload, feature_vector=(feature_vector or []))
+    except Exception as e: 
+        try: print(f"[FAILREC skip] {e}", flush=True)
+        except: pass
 
-def _clear_stale_predict_lock(ttl_sec: int = PREDICT_LOCK_STALE_TRIGGER_SEC):
-    try:
-        if _is_stale_lock(PREDICT_RUN_LOCK, ttl_sec):
-            os.remove(PREDICT_RUN_LOCK)
-            print(f"[LOCK] stale predict lock removed (> {ttl_sec}s)")
-    except Exception as e:
-        print(f"[LOCK] stale cleanup error: {e}")
-
-# 외부에서 사용할 수 있게 내보내는 안전 래퍼 (predict_trigger.py 가 import 가능)
-def _safe_predict_sync(predict_fn, symbol: str, strategy: str, source: str = "group_end", model_type: str | None = None):
-    _clear_stale_predict_lock()
-    return predict_fn(symbol, strategy, source=source, model_type=model_type)
-
-def _safe_predict_with_timeout(predict_fn, symbol: str, strategy: str, source: str = "group_end",
-                               model_type: str | None = None, timeout: float = PREDICT_TIMEOUT_SEC) -> bool:
-    """
-    predict() 호출을 타임아웃으로 보호. 타임아웃 시 False 반환.
-    (락 파일은 'stale' 일 때만 정리하고, 살아있는 락은 건드리지 않음)
-    """
-    _clear_stale_predict_lock()
-    ok = [False]
-    err = [None]
-
-    def _run():
-        try:
-            predict_fn(symbol, strategy, source=source, model_type=model_type)
-            ok[0] = True
-        except Exception as e:
-            err[0] = e
-
-    th = threading.Thread(target=_run, daemon=True, name=f"predict-{symbol}-{strategy}")
-    th.start()
-    th.join(timeout=float(timeout))
-    if th.is_alive():
-        # 스레드가 여전히 살아있음 → 타임아웃
-        return False
-    if err[0] is not None:
-        # 예측 내부 예외
-        raise err[0]
-    return ok[0]
-
-# ---------- 유틸 ----------
 def _safe_print(msg): 
     try: print(msg, flush=True)
     except: pass
@@ -228,12 +197,6 @@ def coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, max_w
     val_idx=np.arange(start,end); train_idx=np.concatenate([np.arange(0,start), np.arange(end,n)],axis=0)
     _safe_print(f"[VAL COVER] {len(cnt)}/{num_classes} ({coverage:.2f}) window={start}:{end} size={len(val_idx)}")
     return train_idx, val_idx
-
-def _maybe_insert_failure(payload:dict, feature_vector:Optional[List[Any]] = None):
-    try:
-        if not ready_for_group_predict(): return
-        insert_failure_record(payload, feature_vector=(feature_vector or []))
-    except Exception as e: _safe_print(f"[FAILREC skip] {e}")
 
 def _log_skip(symbol,strategy,reason):
     logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note=reason,status="skipped")
@@ -629,6 +592,38 @@ def _run_smoke_predict(predict_fn, symbol: str):
                 _safe_print(f"[SMOKE fail] {symbol}-{strat}: {e}")
     return ok_any
 
+def _safe_predict_with_timeout(predict_fn, symbol: str, strategy: str, source: str = "group_end",
+                               model_type: str | None = None, timeout: float = PREDICT_TIMEOUT_SEC) -> bool:
+    """
+    predict() 호출을 타임아웃으로 보호.
+    - 호출 전: 해당 (symbol,strategy) 락의 stale만 정리, 살아있는 락은 대기(wait)만 함.
+    - 타임아웃 시 False 반환.
+    """
+    # 1) per-key stale 정리
+    try: pl_clear_stale(lock_key=(symbol, strategy))
+    except Exception: pass
+    # 2) 살아있는 락이 있으면 지정한 시간만큼 대기(예측 함수가 정상적으로 락을 사용하므로 train은 소유하지 않음)
+    try: pl_wait_free(max_wait_sec=int(max(1, timeout/2)), lock_key=(symbol, strategy))
+    except Exception: pass
+
+    ok = [False]
+    err = [None]
+    def _run():
+        try:
+            predict_fn(symbol, strategy, source=source, model_type=model_type)
+            ok[0] = True
+        except Exception as e:
+            err[0] = e
+
+    th = threading.Thread(target=_run, daemon=True, name=f"predict-{symbol}-{strategy}")
+    th.start()
+    th.join(timeout=float(timeout))
+    if th.is_alive():
+        return False
+    if err[0] is not None:
+        raise err[0]
+    return ok[0]
+
 def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Event] = None):
     env_force_ignore = (os.getenv("TRAIN_FORCE_IGNORE_SHOULD","0") == "1")
     env_reset = (os.getenv("RESET_GROUP_ORDER_ON_START","0") == "1")
@@ -657,17 +652,12 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                     _safe_print(f"[PREDICT-BLOCK] group{idx+1} ready_for_group_predict()==False")
                 else:
                     ran_any=False
-
-                    # [ADD] 예측 시작 전마다 stale-lock 청소
-                    _clear_stale_predict_lock()
-
                     for symbol in group:
                         for strategy in ["단기","중기","장기"]:
                             if not _has_model_for(symbol, strategy):
                                 _safe_print(f"[PREDICT-SKIP] {symbol}-{strategy}: 모델 없음")
                                 continue
                             try:
-                                # 중요: source='그룹직후' → predict.py에서 게이트 우회 허용
                                 ok = _safe_predict_with_timeout(
                                     predict_fn=predict,
                                     symbol=symbol,
