@@ -222,15 +222,29 @@ def _clear_stale_predict_lock(ttl_sec: int):
         print(f"[LOCK] stale cleanup error: {e}")
 
 def _wait_for_gate_open(max_wait_sec: int) -> bool:
-    """게이트/락이 열릴 때까지 최대 max_wait_sec 동안 폴링."""
+    """게이트/락이 열릴 때까지 최대 max_wait_sec 동안 대기."""
     start = time.time()
     while time.time() - start < max_wait_sec:
+        # 1) stale 정리(안전)
         _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
+
+        # 2) 전역 유지보수 락이면 즉시 포기
         if _LOCK_PATH and os.path.exists(_LOCK_PATH):
             return False
+
+        # 3) 게이트가 열려 있고, 예측 락도 비어있으면 통과
         if (not _gate_closed()) and (not _predict_busy()):
             return True
-        time.sleep(RETRY_AFTER_TRAIN_SLEEP_SEC)
+
+        # 4) 중앙 wait API 있으면 활용(짧게 대기)
+        if callable(_lock_api["wait_until_free"]):
+            try:
+                if _lock_api["wait_until_free"](max_wait_sec=1):
+                    # 락은 비었으나 게이트가 닫혀있을 수 있음 — 루프 재평가
+                    pass
+            except Exception:
+                pass
+        time.sleep(max(0.05, RETRY_AFTER_TRAIN_SLEEP_SEC))
     return False
 
 # ──────────────────────────────────────────────────────────────
