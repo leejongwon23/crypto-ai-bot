@@ -1,6 +1,6 @@
 # meta_learning.py
 # ------------------------------------------------------------
-# 3) 메타러너 파일 (단일 진입점 + 집계 + 룰기반 폴백 + 안전 로그)
+# 4) 메타러너 파일 (단일 진입점 + 집계 + 스태킹 + EVO-메타 연동 + 룰기반 폴백 + 안전 로그)
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -22,12 +22,28 @@ except Exception:
     nn = object  # type: ignore
     optim = object  # type: ignore
 
+# (선택) 1단계 evo_meta_learner 연동
+_EVO_OK = False
+try:
+    from evo_meta_learner import (
+        predict_evo_meta,               # (X_new, input_size, probs_stack=None) -> int or None
+        aggregate_probs_for_meta        # (W,C)->(C,)
+    )
+    _EVO_OK = True
+except Exception:
+    _EVO_OK = False
+
 # ===== (환경설정) 성공률 기본값: 성공 이력 없을 때 사용할 prior =====
 META_BASE_SUCCESS = float(os.getenv("META_BASE_SUCCESS", "0.55"))
-# 1% 임계(환경변수로 조정 가능)
+
+# 기대수익률 임계(절댓값). 미만은 패널티(=0 처리)
 _RET_TH = float(os.getenv("META_ER_THRESHOLD", "0.01"))
 
-# ========== (A) MAML - 기존 유틸 유지 ==========
+# EVO-메타 합성 규칙 환경변수 (1단계와 일관)
+EVO_META_AGG = os.getenv("EVO_META_AGG", "mean_var").lower()   # mean | varpen | mean_var
+EVO_META_VAR_GAMMA = float(os.getenv("EVO_META_VAR_GAMMA", "1.0"))
+
+# ======================= (A) MAML (유지) =======================
 if _TORCH_OK:
     class MAML:
         def __init__(self, model, inner_lr=0.01, outer_lr=0.001, inner_steps=1):
@@ -63,7 +79,7 @@ if _TORCH_OK:
                 meta_loss = meta_loss / float(len(tasks))
             else:
                 return 0.0
-            # ✅ 누락되어 있던 역전파 추가
+            # ✅ 역전파 추가
             self.optimizer.zero_grad()
             meta_loss.backward()
             self.optimizer.step()
@@ -89,7 +105,7 @@ def maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.
         return None
 
 
-# ========== (B) 스태킹형 메타러너(Scikit) ==========
+# ================= (B) 스태킹형 메타러너(Scikit) =================
 import pickle
 
 META_MODEL_PATH = "/persistent/models/meta_learner.pkl"
@@ -133,13 +149,12 @@ def _safe_log_prediction(**kwargs):
         from logger import log_prediction  # 선택적 의존
         log_prediction(**kwargs)
     except Exception:
-        # 로거 없거나 실패하면 콘솔 출력
         info = {k: kwargs.get(k) for k in ["symbol", "strategy", "model",
                                            "predicted_class", "note", "rate", "reason", "source"]}
         print(f"[META-LOG Fallback] {info}")
 
 
-# ========== (D) 집계·폴백 로직 ==========
+# ================= (D) 집계·폴백 기본 로직 =================
 def _entropy(p: np.ndarray) -> float:
     p = np.asarray(p, dtype=np.float64)
     p = np.clip(p, 1e-12, 1.0)
@@ -204,6 +219,7 @@ def _aggregate_base_outputs(
     # margin(탑1-탑2)
     top2_prob = float(np.partition(agg, -2)[-2]) if C >= 2 else 0.0
     detail["margin"] = float(detail["top1_prob"] - top2_prob)
+    detail["probs_stack_shape"] = list(probs_mat.shape)
     return agg.astype(np.float32), detail
 
 
@@ -261,7 +277,54 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
     return final_pred_class
 
 
-# ========== (E) 단일 진입점: meta_predict(...) ==========
+# ================= (E) EVO-메타 연동 보조 =================
+def _build_evo_meta_vector(
+    agg_probs: np.ndarray,
+    expected_return: Dict[int, float]
+) -> np.ndarray:
+    """
+    1단계 학습 스키마(softmax, expected_returns, hit)를 가능한 범위에서 재현.
+    - hit 정보는 실시간 예측에서 알 수 없으므로 0으로 채움.
+    - 클래스 수 C에 대해 [prob_c, er_c, hit_c(=0)] 묶음 반복 → 길이 3*C
+    """
+    C = int(len(agg_probs))
+    vec = []
+    for c in range(C):
+        p = float(agg_probs[c])
+        er = float(expected_return.get(c, 0.0))
+        vec.extend([p, er, 0.0])  # hit=0
+    return np.array(vec, dtype=np.float32)
+
+
+def _maybe_evo_decide(
+    groups_outputs: List[Dict],
+    agg_probs: np.ndarray,
+    expected_return: Dict[int, float],
+) -> Optional[int]:
+    """
+    EVO 메타 모델이 있으면 사용해 class를 제안. 실패 시 None.
+    """
+    if not _EVO_OK:
+        return None
+    try:
+        # (W,C) 확률 스택 생성
+        probs_stack = np.stack([_normalize(np.asarray(g["probs"], dtype=np.float64)) for g in groups_outputs], axis=0)
+        # (선택) 규칙 합성(로깅/디버그용)
+        try:
+            _ = aggregate_probs_for_meta(probs_stack, mode=EVO_META_AGG, gamma=EVO_META_VAR_GAMMA)
+        except Exception:
+            pass
+        # 입력 벡터(3*C)
+        X_new = _build_evo_meta_vector(agg_probs, expected_return)  # shape (3*C,)
+        pred = predict_evo_meta(X_new, input_size=int(X_new.shape[0]), probs_stack=probs_stack)
+        if isinstance(pred, (int, np.integer)):
+            return int(pred)
+    except Exception as e:
+        print(f"[⚠️ EVO 메타 예측 실패] {e}")
+    return None
+
+
+# ========== (F) 단일 진입점: meta_predict(...) ==========
 def meta_predict(
     symbol: str,
     horizon: str,
@@ -271,23 +334,35 @@ def meta_predict(
     *,
     agg_mode: str = "avg",
     use_stacking: bool = True,
+    use_evo_meta: bool = True,
     log: bool = True,
     source: str = "meta"
 ) -> Dict:
     """
     ✅ 단일 진입점
-    - 베이스 모델 출력 집계 + 스태킹/룰기반 폴백
+    - 베이스 모델 출력 집계 + EVO-메타/스태킹/룰기반 폴백
     - 성공률/실패율/수익률을 모두 고려
     """
     meta_state = meta_state or {}
     class_success = meta_state.get("success_rate", {})
     expected_return = meta_state.get("expected_return", {})
 
+    # (1) 집계
     agg_probs, detail = _aggregate_base_outputs(groups_outputs, class_success, mode=agg_mode)
 
     used_mode = agg_mode
     final_class = int(np.argmax(agg_probs))
-    if use_stacking:
+
+    # (2) EVO 메타 (가능하면 최우선 시도)
+    evo_choice: Optional[int] = None
+    if use_evo_meta:
+        evo_choice = _maybe_evo_decide(groups_outputs, agg_probs, expected_return)
+        if isinstance(evo_choice, int):
+            used_mode = "evo_meta"
+            final_class = int(evo_choice)
+
+    # (3) 스태킹 (EVO 사용 안 했거나 실패 시)
+    if use_stacking and used_mode != "evo_meta":
         try:
             clf = load_meta_learner()
             if clf is not None:
@@ -308,31 +383,44 @@ def meta_predict(
         except Exception as e:
             print(f"[⚠️ stacking 예측 실패 → 집계 폴백] {e}")
 
+    # (4) 신뢰도 점검 + 룰기반 보정
     top1 = int(np.argmax(agg_probs))
     top1p = float(agg_probs[top1])
     margin = float(top1p - float(np.partition(agg_probs, -2)[-2]) if len(agg_probs) >= 2 else top1p)
     ent = _entropy(agg_probs)
 
-    if used_mode != "stacking":
-        low_conf = (margin < 0.05) or (ent > math.log(len(agg_probs)) * 0.8)
+    # EVO/스태킹 결과와 집계 확률 간 충돌 시 판단 강화
+    low_conf = (margin < 0.05) or (ent > math.log(max(2, len(agg_probs))) * 0.8)
+    scores = agg_probs.astype(np.float64).copy()
+    for c in range(len(scores)):
+        sr = float(class_success.get(c, META_BASE_SUCCESS))
+        sr = max(0.0, min(sr, 1.0))
+        fr = 1.0 - sr
+        er = float(expected_return.get(c, 0.0))
+        g = _ret_gain(er)
+        scores[c] = scores[c] * sr * g * (1.0 - 0.3*fr)
+
+    # 기대수익률 전부 임계 미만이면 확률에 폴백
+    if np.all([_ret_gain(float(expected_return.get(c, 0.0))) == 0.0 for c in range(len(scores))]):
         scores = agg_probs.astype(np.float64).copy()
-        for c in range(len(scores)):
-            sr = float(class_success.get(c, META_BASE_SUCCESS))
-            sr = max(0.0, min(sr, 1.0))
-            fr = 1.0 - sr
-            er = float(expected_return.get(c, 0.0))
-            g = _ret_gain(er)
-            scores[c] = scores[c] * sr * g * (1.0 - 0.3*fr)
+        low_conf = True
 
-        if np.all([_ret_gain(float(expected_return.get(c, 0.0))) == 0.0 for c in range(len(scores))]):
-            scores = agg_probs.astype(np.float64).copy()
-            low_conf = True
+    rule_choice = int(np.argmax(scores))
+    detail["final_scores"] = np.round(scores, 4).tolist()
 
-        rule_choice = int(np.argmax(scores))
-        detail["final_scores"] = scores.round(4).tolist()
-        if low_conf or rule_choice != final_class:
-            used_mode = "rule_fallback"
-            final_class = rule_choice
+    # 최종 선택 규칙:
+    # - 우선순위: EVO > 스태킹 > 집계
+    # - 단, 신뢰도 낮음(low_conf)일 때는 rule_choice로 보정
+    if low_conf:
+        used_mode = "rule_fallback"
+        final_class = rule_choice
+    else:
+        # 신뢰도 충분한데 스코어 보정이 다른 결과를 주면,
+        # 기대수익/성공률 가중치가 월등히 높을 때만 보정
+        if rule_choice != final_class:
+            if scores[rule_choice] >= scores[final_class] * 1.1:
+                used_mode = "rule_bias"
+                final_class = rule_choice
 
     result = {
         "class": int(final_class),
@@ -344,12 +432,14 @@ def meta_predict(
         "detail": detail,
     }
 
+    # (5) 로깅
     if log:
         er_cho = float(expected_return.get(result["class"], 0.0))
         sr_cho = class_success.get(result["class"], None)
         note = (f"meta:{used_mode} top1={result['class']} p={result['confidence']:.3f} "
                 f"margin={result['margin']:.3f} ER={er_cho:.4f} "
-                f"SR={('-' if sr_cho is None else f'{float(sr_cho):.2f}')} TH={_RET_TH:.2%}")
+                f"SR={('-' if sr_cho is None else f'{float(sr_cho):.2f}')} "
+                f"TH={_RET_TH:.2%} EVO_AGG={EVO_META_AGG} γ={EVO_META_VAR_GAMMA}")
         reason = f"entropy={result['entropy']:.3f}"
         _safe_log_prediction(
             symbol=symbol,
