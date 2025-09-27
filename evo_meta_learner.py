@@ -1,7 +1,8 @@
-# evo_meta_learner.py (FINAL)
-# (2025-09-17b) — input/DataFrame fallback + torch safety + save/load robustness + predict input shape guard
-#                 EVO_META_AGG(mean|varpen|mean_var) + EVO_META_VAR_GAMMA: 윈도우/모델 확률 스택 합성 유틸
-#                 + predict(task='strategy'도 허용), 로깅 강화
+# evo_meta_learner.py (FINAL+GUARDS)
+# (2025-09-27) — BTC 앵커 가드 + 기간 상호모순 가드 추가
+# - predict_evo_meta(..., symbol=None, strategy=None, ...) 인자 확장(하위호환)
+# - 앵커/모순 가드가 트리거되면 None 반환(상위 predict.py가 기본 경로로 진행)
+# - 로그/CSV 안전 처리
 
 import os
 import json
@@ -22,13 +23,37 @@ except Exception:
     DataLoader = None
     TensorDataset = None
 
+# ── optional: config에서 클래스 수익구간 가져오기(가드에 사용)
+try:
+    from config import get_class_return_range
+except Exception:
+    def get_class_return_range(cls_id: int, symbol: str = None, strategy: str = None):
+        # 보수적 폴백: 양/음/중립 3클래스 가정
+        if int(cls_id) == 0: return (-0.30, -0.05)
+        if int(cls_id) == 1: return (-0.02, 0.02)
+        return (0.05, 0.30)
+
 MODEL_PATH = "/persistent/models/evo_meta_learner.pt"
 META_PATH  = MODEL_PATH.replace(".pt", ".meta.json")
+PRED_LOG   = "/persistent/prediction_log.csv"
 
-# ── 앙상블 합성 규칙 환경변수 (predict.py와 일관)
+# ── 앙상블 합성 규칙 (predict.py와 일관)
 EVO_META_AGG = os.getenv("EVO_META_AGG", "mean_var").lower()   # mean | varpen | mean_var
 EVO_META_VAR_GAMMA = float(os.getenv("EVO_META_VAR_GAMMA", "1.0"))
 
+# ── 가드 파라미터 (환경변수로 미세 조정 가능)
+ANCHOR_ENABLE         = os.getenv("EVO_ANCHOR_ENABLE", "1") == "1"
+ANCHOR_LOOKBACK_HRS   = float(os.getenv("EVO_ANCHOR_LOOKBACK_HRS", "6"))
+ANCHOR_MIN_CONF       = float(os.getenv("EVO_ANCHOR_MIN_CONF", "0.55"))  # BTC 예측 신뢰 컷(=calib_prob)
+ANCHOR_REQUIRE_LONG   = os.getenv("EVO_ANCHOR_REQUIRE_STRATEGY", "장기")  # BTC 앵커 기준 기간
+CONFLICT_ENABLE       = os.getenv("EVO_CONFLICT_ENABLE", "1") == "1"
+CONFLICT_LOOKBACK_MIN = float(os.getenv("EVO_CONFLICT_LOOKBACK_MIN", "90"))
+CONFLICT_MIN_CONF     = float(os.getenv("EVO_CONFLICT_MIN_CONF", "0.55"))
+MINRET_THR            = float(os.getenv("PREDICT_MIN_RETURN", "0.01"))   # predict.py와 맞춤
+
+# =========================================
+# 기본 모델
+# =========================================
 class EvoMetaModel(nn.Module if nn is not None else object):
     def __init__(self, input_size, hidden_size=64, output_size=3):
         if nn is None:
@@ -51,9 +76,6 @@ def _safe_lit(x, default):
         return default
 
 def _df_from_path_or_df(path_or_df):
-    """
-    Accept either a path string or a pandas DataFrame.
-    """
     if path_or_df is None:
         return None
     if isinstance(path_or_df, pd.DataFrame):
@@ -61,25 +83,17 @@ def _df_from_path_or_df(path_or_df):
     if isinstance(path_or_df, str):
         if not os.path.exists(path_or_df):
             return None
-        try:
-            return pd.read_csv(path_or_df, encoding="utf-8-sig", on_bad_lines="skip")
-        except Exception:
+        for enc in ("utf-8-sig", None):
             try:
-                return pd.read_csv(path_or_df, on_bad_lines="skip")
+                return pd.read_csv(path_or_df, encoding=enc, on_bad_lines="skip")
             except Exception:
-                return None
+                continue
     return None
 
 # ── (NEW) 앙상블 확률 합성 유틸: (W, C) -> (C,)
 def aggregate_probs_for_meta(probs_stack: np.ndarray,
                              mode: str = None,
                              gamma: float = None) -> np.ndarray:
-    """
-    probs_stack: shape (W, C) — 윈도우/모델 등에서 나온 C-클래스 확률 스택
-    mode: "mean" | "varpen" | "mean_var" (기본은 EVO_META_AGG)
-    gamma: 분산 패널티 강도(기본 EVO_META_VAR_GAMMA)
-    반환: 정규화된 (C,) 확률 벡터
-    """
     if probs_stack is None:
         return None
     ps = np.asarray(probs_stack, dtype=float)
@@ -95,19 +109,15 @@ def aggregate_probs_for_meta(probs_stack: np.ndarray,
     else:
         var = ps.var(axis=0)
         penal = mean / (1.0 + gamma * var)
-        if mode == "varpen":
-            out = penal
-        else:  # "mean_var" (혼합)
-            out = 0.5 * mean + 0.5 * penal
+        out = penal if mode == "varpen" else (0.5 * mean + 0.5 * penal)
 
     out = out / (out.sum() + eps)
     return out.astype(float)
 
+# =========================================
+# 데이터 준비/학습 루틴(원본 유지)
+# =========================================
 def prepare_evo_meta_dataset(path_or_df="/persistent/wrong_predictions.csv", min_samples=50):
-    """
-    실패/오답 로그를 기반으로 '전략 선택' 학습용 피처 구성.
-    Accepts either CSV path or already-loaded DataFrame.
-    """
     df = _df_from_path_or_df(path_or_df)
     if df is None:
         print(f"[❌ prepare_evo_meta_dataset] 파일/데이터 없음 또는 읽기 실패: {path_or_df}")
@@ -127,10 +137,8 @@ def prepare_evo_meta_dataset(path_or_df="/persistent/wrong_predictions.csv", min
             sm = _safe_lit(row.get("softmax"), [])
             er = _safe_lit(row.get("expected_returns"), [0, 0, 0])
             mp = _safe_lit(row.get("model_predictions"), [0, 0, 0])
-            # require softmax-like vector length 3
             if not sm or len(sm) < 3:
                 continue
-            # label may be missing; best to proceed with safe defaults
             label = int(float(row.get("label", -1))) if pd.notnull(row.get("label")) else -1
             feats = []
             for i in range(3):
@@ -138,14 +146,11 @@ def prepare_evo_meta_dataset(path_or_df="/persistent/wrong_predictions.csv", min
                 e_val = float(er[i]) if i < len(er) else 0.0
                 hit = 1 if (i < len(mp) and int(mp[i]) == label and label >= 0) else 0
                 feats.extend([s_val, e_val, hit])
-            # ensure feature vector length = 9
             if len(feats) != 9:
                 continue
             X_list.append(feats)
-            # best_strategy fallback
-            best_str = row.get("best_strategy", 0)
             try:
-                y_list.append(int(float(best_str)))
+                y_list.append(int(float(row.get("best_strategy", 0))))
             except Exception:
                 y_list.append(0)
         except Exception:
@@ -161,9 +166,6 @@ def prepare_evo_meta_dataset(path_or_df="/persistent/wrong_predictions.csv", min
     return X, y
 
 def train_evo_meta(X, y, input_size, output_size=3, epochs=10, batch_size=32, lr=1e-3, task="strategy"):
-    """
-    task: "strategy"(기본) 또는 "class" — 메타 JSON에 기록되어 추론 시 가드로 사용.
-    """
     if torch is None:
         raise RuntimeError("torch is required for train_evo_meta")
 
@@ -186,18 +188,16 @@ def train_evo_meta(X, y, input_size, output_size=3, epochs=10, batch_size=32, lr
 
     os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
     try:
-        # save cpu state dict to avoid device-specific tensors
         model_cpu = model.to("cpu")
         torch.save(model_cpu.state_dict(), MODEL_PATH)
     finally:
-        # return model to DEVICE if needed
         try:
             model.to(DEVICE)
         except Exception:
             pass
 
     meta_info = {
-        "task": str(task),               # "strategy" 또는 "class"
+        "task": str(task),
         "input_size": int(input_size),
         "output_size": int(output_size),
         "version": 1,
@@ -214,9 +214,6 @@ def train_evo_meta(X, y, input_size, output_size=3, epochs=10, batch_size=32, lr
     return model
 
 def train_evo_meta_loop(min_samples=50, auto_trigger=False, task="strategy", path_or_df="/persistent/wrong_predictions.csv"):
-    """
-    기본은 '전략 선택' 학습. (task='strategy')
-    """
     if task == "strategy":
         X, y = prepare_evo_meta_dataset(path_or_df, min_samples=min_samples)
     else:
@@ -242,17 +239,124 @@ def _load_meta():
             pass
     return meta
 
-def predict_evo_meta(X_new, input_size, probs_stack: np.ndarray = None):
+# =========================================
+# 가드 유틸
+# =========================================
+def _class_sign(cls_id: int, symbol: str = None, strategy: str = None) -> str:
+    """클래스 수익구간으로 long/short/neutral 판정"""
+    try:
+        lo, hi = get_class_return_range(int(cls_id), symbol, strategy)
+    except Exception:
+        lo, hi = (-0.01, 0.01)
+    if hi <= 0 and lo < 0:  return "short"
+    if lo >= 0 and hi > 0:  return "long"
+    return "neutral"
+
+def _load_recent_predictions(symbol: str = None,
+                             strategy: str = None,
+                             lookback_minutes: float = 120) -> pd.DataFrame | None:
+    if not os.path.exists(PRED_LOG):
+        return None
+    try:
+        df = pd.read_csv(PRED_LOG, encoding="utf-8-sig", on_bad_lines="skip")
+    except Exception:
+        try:
+            df = pd.read_csv(PRED_LOG, on_bad_lines="skip")
+        except Exception:
+            return None
+    if df.empty:
+        return None
+    # 시간 파싱
+    ts = pd.to_datetime(df.get("timestamp"), errors="coerce")
+    now = pd.Timestamp.utcnow().tz_localize("UTC")
+    df = df.assign(_ts=ts.dt.tz_localize("UTC", nonexistent="shift_forward", ambiguous="NaT", errors="coerce"))
+    df = df.dropna(subset=["_ts"])
+    df = df[df["_ts"] >= (now - pd.Timedelta(minutes=float(lookback_minutes)))]
+    if symbol:
+        df = df[df.get("symbol") == symbol]
+    if strategy:
+        df = df[df.get("strategy") == strategy]
+    return df if not df.empty else None
+
+def _sign_from_row(row) -> str:
+    try:
+        lo = float(row.get("class_return_min", 0.0))
+        hi = float(row.get("class_return_max", 0.0))
+        if hi <= 0 and lo < 0:  return "short"
+        if lo >= 0 and hi > 0:  return "long"
+    except Exception:
+        pass
+    # 보조: note에 position이 기록되는 경우
+    try:
+        note = str(row.get("note", ""))
+        if '"position": "short"' in note: return "short"
+        if '"position": "long"'  in note: return "long"
+    except Exception:
+        pass
+    return "neutral"
+
+def _btc_anchor() -> dict | None:
+    """BTCUSDT 장기 예측 앵커 로드"""
+    if not ANCHOR_ENABLE:
+        return None
+    df = _load_recent_predictions(symbol="BTCUSDT",
+                                  strategy=str(ANCHOR_REQUIRE_LONG),
+                                  lookback_minutes=ANCHOR_LOOKBACK_HRS * 60.0)
+    if df is None:
+        return None
+    # 최신 한 건
+    row = df.sort_values("_ts").iloc[-1]
+    sign = _sign_from_row(row)
+    try:
+        conf = float(row.get("calib_prob", np.nan))
+    except Exception:
+        conf = np.nan
+    return {"sign": sign, "conf": conf}
+
+def _has_cross_horizon_conflict(symbol: str, strategy: str, proposed_sign: str) -> bool:
+    """같은 심볼의 다른 기간 예측과 정면 충돌 여부(최근 N분)"""
+    if not CONFLICT_ENABLE:
+        return False
+    other_map = {"단기": ["중기", "장기"], "중기": ["단기", "장기"], "장기": ["단기", "중기"]}
+    others = other_map.get(str(strategy), ["단기", "중기", "장기"])
+    df = _load_recent_predictions(symbol=symbol, strategy=None,
+                                  lookback_minutes=CONFLICT_LOOKBACK_MIN)
+    if df is None:
+        return False
+    df = df[df["strategy"].isin(others)]
+    if df.empty:
+        return False
+    # 신뢰도 필터
+    if "calib_prob" in df.columns:
+        df = df[pd.to_numeric(df["calib_prob"], errors="coerce") >= CONFLICT_MIN_CONF]
+    if df.empty:
+        return False
+    # 반대 방향이 강하게 존재?
+    opp = "short" if proposed_sign == "long" else ("long" if proposed_sign == "short" else "neutral")
+    if opp == "neutral":
+        return False
+    signs = df.apply(_sign_from_row, axis=1).values.tolist()
+    return opp in signs
+
+# =========================================
+# 예측(진입점) — 가드 적용
+# =========================================
+def predict_evo_meta(X_new,
+                     input_size,
+                     probs_stack: np.ndarray = None,
+                     *,
+                     symbol: str = None,
+                     strategy: str = None):
     """
-    predict.py에서 불러 쓰는 진입점.
-    저장된 메타의 task가 'class' 또는 'strategy'이면 사용, 그 외는 None 반환(가드).
-    probs_stack(선택): (W, C) 앙상블 확률 스택. 제공되면 합성 규칙으로 대표 벡터를 만들고
-                       로깅/디버깅 용도로만 사용(모델 입력은 X_new 그대로 — 호환성 유지).
+    저장된 메타의 task가 'class' 또는 'strategy'이면 사용.
+    가드 로직:
+      - BTC 앵커 가드(장기): BTC 장기 신뢰 높은 방향과 정면 충돌 시 None(패스)
+      - 기간 상호모순 가드: 동일 심볼의 최근 타 기간 예측과 강한 충돌 시 None(패스)
+    ※ None을 반환하면 상위 predict.py가 기본 경로로 진행(메타 비사용).
     """
     if torch is None:
         print("[❌ evo_meta_learner] torch 미설치")
         return None
-
     if not os.path.exists(MODEL_PATH):
         print("[❌ evo_meta_learner] 모델 없음")
         return None
@@ -263,7 +367,7 @@ def predict_evo_meta(X_new, input_size, probs_stack: np.ndarray = None):
         print(f"[ℹ️ evo_meta_learner] task={task} → 사용하지 않음")
         return None
 
-    # (선택) 앙상블 확률 합성 규칙 적용(디버깅 로그용)
+    # (선택) 앙상블 확률 합성 규칙 로그
     if probs_stack is not None:
         vec = aggregate_probs_for_meta(probs_stack, mode=meta.get("agg_mode", EVO_META_AGG),
                                        gamma=float(meta.get("agg_gamma", EVO_META_VAR_GAMMA)))
@@ -291,7 +395,6 @@ def predict_evo_meta(X_new, input_size, probs_stack: np.ndarray = None):
         if x.ndim == 1:
             x = x.unsqueeze(0)
         if x.shape[1] != int(input_size):
-            # 열 수가 다르면 가능한 경우 마지막 축 자동 리쉐이프 (안전 범위 내에서만)
             x = x.reshape(x.shape[0], int(input_size))
     except Exception as e:
         print(f"[❌ evo_meta_learner] 입력 가공 실패: {e}")
@@ -306,17 +409,47 @@ def predict_evo_meta(X_new, input_size, probs_stack: np.ndarray = None):
                 return None
             probs = F.softmax(logits, dim=1)
             best = int(torch.argmax(probs, dim=1).item())
-            return best
         except Exception as e:
             print(f"[❌ evo_meta_learner] 예측 실패: {e}")
             return None
 
-def get_best_strategy_by_failure_probability(symbol, current_strategy, feature_tensor, model_outputs):
-    """
-    간단 휴리스틱: 최근 심볼별 전략 성공률을 보고 제안.
-    """
+    # ==========================
+    # 가드 적용 (symbol/strategy가 제공된 경우)
+    # ==========================
     try:
-        path = "/persistent/prediction_log.csv"
+        if symbol is not None and strategy is not None:
+            proposed_sign = _class_sign(best, symbol, strategy)
+
+            # 1) BTC 앵커 가드 (장기 예측에만 적용)
+            if ANCHOR_ENABLE and str(strategy) == str(ANCHOR_REQUIRE_LONG) and str(symbol) != "BTCUSDT":
+                anchor = _btc_anchor()
+                if anchor and anchor.get("sign") in ("long", "short"):
+                    conf = float(anchor.get("conf") or 0.0)
+                    if conf >= ANCHOR_MIN_CONF:
+                        # 강한 충돌 시: None 반환(메타 패스)
+                        if (anchor["sign"] == "long" and proposed_sign == "short") or \
+                           (anchor["sign"] == "short" and proposed_sign == "long"):
+                            print(f"[ANCHOR_GUARD] BTC({ANCHOR_REQUIRE_LONG})={anchor['sign']}@{conf:.2f} "
+                                  f"↔ {symbol}-{strategy}:{proposed_sign} → PASS(meta)")
+                            return None
+
+            # 2) 기간 상호모순 가드 (최근 N분 내 타 기간 강한 반대 신호)
+            if CONFLICT_ENABLE:
+                if _has_cross_horizon_conflict(symbol, strategy, proposed_sign):
+                    print(f"[CONFLICT_GUARD] {symbol}-{strategy}:{proposed_sign} "
+                          f"↔ 최근 타기간 강한 반대 → PASS(meta)")
+                    return None
+    except Exception as e:
+        print(f"[WARN] 가드 적용 중 예외: {e}")
+
+    return best
+
+# =========================================
+# 보조 휴리스틱(원본 유지)
+# =========================================
+def get_best_strategy_by_failure_probability(symbol, current_strategy, feature_tensor, model_outputs):
+    try:
+        path = PRED_LOG
         if not os.path.exists(path):
             return None
         df = pd.read_csv(path, encoding="utf-8-sig", on_bad_lines="skip")
