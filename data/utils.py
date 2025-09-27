@@ -1,4 +1,4 @@
-# data/utils.py — 안정성/정합성 강화판 (augmented 소수클래스 증강 기능 추가)
+# data/utils.py — 안정성/정합성 강화판 (augmented 소수클래스 증강 + 3단계 컨텍스트 호환)
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
 _kline_cache = {}
 
@@ -28,6 +28,57 @@ BINANCE_BASE_URL = "https://fapi.binance.com"
 BTC_DOMINANCE_CACHE = {"value": 0.5, "timestamp": 0}
 REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; QuantWorker/1.0; +https://example.com/bot)"}
 BINANCE_ENABLED = int(os.getenv("ENABLE_BINANCE", "1"))
+
+# --- (3단계) 추가 모듈: 선택적 import (없으면 자동 무시) ------------------------
+# - features/market.py:       get_market_context_df(ts, strategy) -> DataFrame[timestamp,...]
+# - features/correlations.py: get_rolling_corr_df(symbol, ts)     -> DataFrame[timestamp,...]
+# - features/regime.py:       get_regime_tags_df(ts, strategy)     -> DataFrame[timestamp,...]
+# 위 시그니처는 권장 형태이며, 없으면 try/except로 빈 DF 반환
+try:
+    from features.market import get_market_context_df as _get_market_ctx
+except Exception:
+    def _get_market_ctx(ts: pd.Series, strategy: str, symbol: Optional[str] = None) -> pd.DataFrame:
+        return pd.DataFrame(columns=["timestamp"])
+
+try:
+    from features.correlations import get_rolling_corr_df as _get_corr_ctx
+except Exception:
+    def _get_corr_ctx(symbol: str, ts: pd.Series, strategy: str) -> pd.DataFrame:
+        return pd.DataFrame(columns=["timestamp"])
+
+try:
+    from features.regime import get_regime_tags_df as _get_ext_regime_ctx
+except Exception:
+    def _get_ext_regime_ctx(ts: pd.Series, strategy: str) -> pd.DataFrame:
+        return pd.DataFrame(columns=["timestamp"])
+
+def _guess_tolerance_by_strategy(strategy: str) -> pd.Timedelta:
+    # 4h: 2h, 1d: 12h, default: 1h
+    iv = {"단기": pd.Timedelta(hours=2), "중기": pd.Timedelta(hours=12), "장기": pd.Timedelta(hours=12)}
+    return iv.get(strategy, pd.Timedelta(hours=1))
+
+def _merge_asof_all(base: pd.DataFrame, add_list: List[pd.DataFrame], strategy: str) -> pd.DataFrame:
+    """timestamp 기준으로 asof 병합 (뒤쪽이 base보다 같은/이전 시각이면 매칭)"""
+    out = base.copy()
+    tol = _guess_tolerance_by_strategy(strategy)
+    for add in add_list:
+        if add is None or add.empty:
+            continue
+        add = add.copy()
+        if "timestamp" not in add.columns:
+            continue
+        add["timestamp"] = _parse_ts_series(add["timestamp"])
+        cols = [c for c in add.columns if c != "timestamp"]
+        if not cols:
+            continue
+        out = pd.merge_asof(
+            out.sort_values("timestamp"),
+            add[["timestamp"] + cols].sort_values("timestamp"),
+            on="timestamp",
+            direction="backward",
+            tolerance=tol,
+        )
+    return out
 
 # --- 기본(백업) 심볼 시드 60개: 최후 fallback 용 ---
 _BASELINE_SYMBOLS = [
@@ -854,7 +905,7 @@ def get_realtime_prices():
     except Exception:
         return {}
 
-# ========================= 피처 생성 (+레짐) =========================
+# ========================= 피처 생성 (+레짐 + 3단계 컨텍스트 병합) =========================
 _feature_cache = {}
 def _ensure_columns(df: pd.DataFrame, cols: List[str]):
     for c in cols:
@@ -966,7 +1017,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
 
         df["vwap"] = (df["volume"] * df["close"]).cumsum() / (df["volume"].cumsum() + 1e-6)
 
-        # regime
+        # (내부 레짐)
         regime_cfg = get_REGIME()
         if regime_cfg.get("enabled", False):
             try:
@@ -984,6 +1035,19 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
                 df["regime_tag"] = df["vol_regime"] * 3 + df["trend_regime"]
             except Exception:
                 pass
+
+        # (3단계) 외부 시장 컨텍스트 병합 — 모듈이 없으면 자동 skip
+        try:
+            ts = _parse_ts_series(df["timestamp"])
+            ctx_list = [
+                _get_market_ctx(ts, strategy, symbol),
+                _get_corr_ctx(symbol, ts, strategy),
+                _get_ext_regime_ctx(ts, strategy),
+            ]
+            df = _merge_asof_all(df, ctx_list, strategy)
+        except Exception:
+            # 컨텍스트 병합 실패해도 기본 피처는 유지
+            pass
 
         must_have = [
             "rsi","macd","macd_signal","macd_hist",
