@@ -1,10 +1,12 @@
-# === predict.py — F1/라벨분포 비의존, gate-respecting, robust I/O (ENSEMBLE-FIRST, FINAL) ===
-# (2025-09-20) — F1/라벨분포에 의존한 의사결정 제거:
+# === predict.py — F1/라벨분포 비의존, gate-respecting, robust I/O (ENSEMBLE-FIRST, FINAL v1.1) ===
+# (2025-09-20, 1단계 최종)
+# 변경 핵심:
 #   - 모델 게이트: meta.passed==1 만 요구( val_f1 / min_f1_gate 미사용 )
 #   - 후보 모델 점수: 확률 p만 사용( f1가중 제거 )
+#   - Top3 앙상블 선별: 파일명 정렬 → "캘리브 최대값" 상위 3개 기반 평균으로 개선
 #   - 분포 보정은 기본 OFF(ADJUST_WITH_DIVERSITY=1로만 활성)
-# (기타 유지)
-#   - STRICT_BOUNDS: meta.class_ranges 없으면 스킵
+# 유지:
+#   - STRICT_BOUNDS (meta.class_ranges 미존재시 스킵)
 #   - 윈도우 앙상블(mean / var-penalize)
 #   - ABSTAIN_PROB_MIN, 최소 기대수익 필터, 게이트/락/하트비트
 
@@ -33,7 +35,6 @@ PREDICT_GATE = os.path.join(RUN_DIR, "predict_gate.json")
 PREDICT_BLOCK = "/persistent/predict.block"
 GROUP_ACTIVE = os.path.join(RUN_DIR, "group_predict.active")
 
-# ▲ 기존 전역 단일락을 제거하고, 심볼/전략별 락으로 운영
 def _lock_path_for(symbol: str, strategy: str) -> str:
     def _clean(s: str) -> str:
         s = (s or "None")
@@ -211,7 +212,6 @@ from logger import log_prediction, update_model_success, PREDICTION_HEADERS, ens
 from failure_db import insert_failure_record, ensure_failure_db
 from predict_trigger import get_recent_class_frequencies, adjust_probs_with_diversity
 
-# ✅ base_model 임포트 — 패키지/루트 폴백
 try:
     from model.base_model import get_model
 except Exception:
@@ -511,7 +511,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
     _hb_thread.start()
 
     try:
-        # (예측 본문 이하 원본 유지)
         try:
             ensure_prediction_log_exists()
         except Exception as _e:
@@ -565,27 +564,37 @@ def predict(symbol, strategy, source="일반", model_type=None):
             return _soft_abstain(symbol, strategy, reason="no_valid_model", meta_choice="abstain", regime=regime, X_last=X[-1], group_id=None, df=df) \
                    if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="no_valid_model", source=source, X_input=X[-1])
 
-        # ── 앙상블 후보(상위 3개 mean of calibrated)
+        # ── 앙상블 후보(상위 3개 mean of calibrated) — 개선: 확률 기반 선별
         try:
             if len(outs) >= 2:
-                tops = sorted(outs, key=lambda m: os.path.basename(m.get("model_path","")))[:min(3, len(outs))]  # F1 미사용
-                nc = min(len(np.asarray(tops[0]["calib_probs"])), *[len(np.asarray(t["calib_probs"])) for m in [tops] for t in tops])
-                if len(tops) >= 2 and nc >= 2:
-                    mean_c = np.mean([np.asarray(m["calib_probs"][:nc], dtype=float) for m in tops], axis=0)
-                    mean_c = (mean_c / (mean_c.sum() + 1e-12)).astype(float)
-                    mean_r = np.mean([np.asarray(m["raw_probs"][:nc], dtype=float) for m in tops], axis=0)
-                    outs.append({
-                        "raw_probs": mean_r,
-                        "calib_probs": mean_c,
-                        "predicted_class": int(np.argmax(mean_c)),
-                        "group_id": -1,
-                        "model_type": "ensemble",
-                        "model_path": "ensemble_mean_top3",
-                        "val_f1": None,
-                        "symbol": symbol,
-                        "strategy": strategy,
-                        "meta": {"model": "ensemble", "num_classes": int(nc), "class_ranges": _ranges_from_meta(tops[0].get("meta"))}
-                    })
+                # 각 모델의 "최대 캘리브 확률"로 상위 k 선별
+                scored = []
+                for i, m in enumerate(outs):
+                    cp = np.asarray(m.get("calib_probs", []), dtype=float)
+                    if cp.size == 0: continue
+                    scored.append((i, float(cp.max())))
+                scored.sort(key=lambda t: t[1], reverse=True)
+                keep_idx = [i for i, _ in scored[:min(3, len(scored))]]
+                if len(keep_idx) >= 2:
+                    # 클래스 수 정합
+                    nc = min([len(np.asarray(outs[i]["calib_probs"])) for i in keep_idx])
+                    if nc >= 2:
+                        mean_c = np.mean([np.asarray(outs[i]["calib_probs"][:nc], dtype=float) for i in keep_idx], axis=0)
+                        mean_c = (mean_c / (mean_c.sum() + 1e-12)).astype(float)
+                        mean_r = np.mean([np.asarray(outs[i]["raw_probs"][:nc], dtype=float) for i in keep_idx], axis=0)
+                        outs.append({
+                            "raw_probs": mean_r,
+                            "calib_probs": mean_c,
+                            "predicted_class": int(np.argmax(mean_c)),
+                            "group_id": -1,
+                            "model_type": "ensemble",
+                            "model_path": "ensemble_mean_top3",
+                            "val_f1": None,
+                            "symbol": symbol,
+                            "strategy": strategy,
+                            "meta": {"model": "ensemble", "num_classes": int(nc),
+                                     "class_ranges": _ranges_from_meta(outs[keep_idx[0]].get("meta"))}
+                        })
         except Exception as e:
             print(f"[앙상블 구성 예외] {e}")
 
@@ -660,7 +669,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     filt = filt / filt.sum(); pred = int(np.argmax(filt)); p = float(filt[pred]); fused = True
                 else:
                     pred = int(np.argmax(adj)); p = float(adj[pred]); fused = False
-                score = p  # ← F1 가중 제거
+                score = p
                 m.update({"adjusted_probs": adj, "filtered_probs": (filt if fused else None),
                           "candidate_pred": pred, "success_score": score, "filtered_used": fused})
                 scores.append((i, score, pred))
@@ -703,7 +712,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                             continue
                         if not _meets_minret_with_hint(lo, hi, allow_long, allow_short, MIN_RET_THRESHOLD):
                             continue
-                        sc = float(adj[ci])  # F1 비가중
+                        sc = float(adj[ci])
                         if sc > best_sc: best_sc, best_m, best_cls = sc, m, int(ci)
                 if best_cls is not None:
                     final_cls, chosen, used_minret = best_cls, best_m, True
@@ -876,7 +885,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                        else f"선택 모델: {meta_choice}")
         }
     finally:
-        # 하트비트와 락 해제는 반드시 수행
         try:
             _hb_stop.set(); _hb_thread.join(timeout=2)
         except Exception:
@@ -1086,7 +1094,6 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
                 if feat_scaled.shape[0] < win: 
                     continue
                 seq = feat_scaled[-win:]
-                # input size 정합
                 if seq.shape[1] < inp_size:
                     seq = np.pad(seq, ((0,0),(0, inp_size - seq.shape[1])), mode="constant")
                 elif seq.shape[1] > inp_size:
@@ -1129,7 +1136,7 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
                 "raw_probs": comb_r, "calib_probs": comb_c,
                 "predicted_class": int(np.argmax(comb_c)),
                 "group_id": gid, "model_type": mtype, "model_path": model_path,
-                "val_f1": None,  # 기록 목적 외 의사결정 미사용
+                "val_f1": None,
                 "symbol": symbol, "strategy": strategy, "meta": meta,
                 "window_ensemble": {"mode": PREDICT_WINDOW_ENSEMBLE, "gamma": ENSEMBLE_VAR_GAMMA, "wins": used_windows}
             })
