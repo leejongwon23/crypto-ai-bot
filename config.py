@@ -82,16 +82,19 @@ _default_config = {
     "QUALITY": {"VAL_F1_MIN": 0.20, "VAL_ACC_MIN": 0.20},
 
     # --- [BIN] 클래스 경계/병합 파라미터 ---
+    # 🔄 변경점:
+    #   - method 기본값을 "quantile"로 변경 (실제 분포 기반)
+    #   - merge_sparse 기본 비활성화 (희소 bin 강제 병합 방지)
     "CLASS_BIN": {
-        "method": "fixed_step",   # "fixed_step" | "quantile" | "linear"
+        "method": "quantile",     # "fixed_step" | "quantile" | "linear"
         "strict": True,
         "zero_band_eps": 0.0020,  # ±0.20%p
         "min_width": 0.0010,      # 최소 폭 0.10%p
-        "step_pct": 0.0050,       # ✅ 기본 0.5% 단위 고정 bin 간격 (기존 1.0% → 0.5%)
+        "step_pct": 0.0050,       # (fixed_step일 때) 0.5% 단위
         "merge_sparse": {
-            "enabled": True,
-            "min_ratio": 0.02,
-            "min_count_floor": 80,
+            "enabled": False,     # ✅ 기본 꺼둠 (원치 않는 광범위 병합 방지)
+            "min_ratio": 0.01,    # 샘플 비율 임계
+            "min_count_floor": 20,
             "prefer": "denser"
         }
     },
@@ -114,16 +117,15 @@ _default_config = {
     },
 
     # --- [PUBLISH] 텔레그램(또는 알림) 발송 필터 임계치 ---
-    # 예측은 predict.py에서 항상 기록되고, 발송은 이 임계치를 통과할 때만 수행.
     "PUBLISH": {
-        "enabled": True,          # 전체 발송 on/off
-        "recent_window": 10,      # 최근 N건 성공률 창
-        "recent_success_min": 0.60,  # 최근 성공률 하한(예: 60%)
-        "min_expected_return": 0.010,  # 최소 기대수익률 |E[R]| (예: 1%)
-        "abstain_prob_min": 0.35,     # 최소 칼리브 확률(=ABSTAIN_PROB_MIN과 동일하게 맞추기 추천)
-        "min_meta_confidence": 0.0,   # 메타 신뢰도 하한(없으면 0)
-        "allow_shadow": True,         # 섀도우도 기록은 하되 발송은 제한할지 여부
-        "always_log": True            # 항상 prediction_log.csv 기록
+        "enabled": True,
+        "recent_window": 10,
+        "recent_success_min": 0.60,
+        "min_expected_return": 0.010,
+        "abstain_prob_min": 0.35,
+        "min_meta_confidence": 0.0,
+        "allow_shadow": True,
+        "always_log": True
     },
 }
 
@@ -387,10 +389,19 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
     import numpy as np
     if not ranges or rets_signed is None or rets_signed.size == 0: return ranges
     opt = (bin_conf or {}).get("merge_sparse", {})
-    if not opt or not opt.get("enabled", True): return ranges
+    # 🔧 ENV 오버라이드: MERGE_SPARSE_ENABLED/MIN_RATIO/MIN_FLOOR
+    env_enabled = os.getenv("MERGE_SPARSE_ENABLED", None)
+    if env_enabled is not None:
+        opt = dict(opt or {})
+        opt["enabled"] = str(env_enabled).strip().lower() not in {"0", "false", "no"}
+    if not opt or not opt.get("enabled", False):  # 기본 False
+        return ranges
+    env_ratio = os.getenv("MERGE_SPARSE_MIN_RATIO", None)
+    env_floor = os.getenv("MERGE_SPARSE_MIN_FLOOR", None)
+
     total = int(rets_signed.size)
-    min_ratio = float(opt.get("min_ratio", 0.02))
-    min_floor = int(opt.get("min_count_floor", 80))
+    min_ratio = float(env_ratio) if env_ratio is not None else float(opt.get("min_ratio", 0.02))
+    min_floor = int(env_floor) if env_floor is not None else int(opt.get("min_count_floor", 80))
     prefer = str(opt.get("prefer", "denser")).lower()
     edges = [ranges[0][0]] + [hi for (_, hi) in ranges]
     edges[-1] = float(edges[-1]) + 1e-12
@@ -460,7 +471,8 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
 
     MAX_CLASSES = int(_config.get("MAX_CLASSES", _default_config["MAX_CLASSES"]))
     BIN_CONF = get_CLASS_BIN()
-    method_req = (method or BIN_CONF.get("method") or "quantile").lower()
+    # 🔧 ENV 오버라이드: CLASS_BIN_METHOD
+    method_req = (os.getenv("CLASS_BIN_METHOD") or method or BIN_CONF.get("method") or "quantile").lower()
 
     def compute_equal_ranges(n_cls, reason=""):
         n_cls = max(4, int(n_cls))
@@ -521,7 +533,7 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="수익률 샘플 부족")
             rets_signed = np.array([_cap_by_strategy(float(r), strategy) for r in rets_signed], dtype=np.float32)
             n_cls = _choose_n_classes(rets_signed, max_classes=int(_config.get("MAX_CLASSES", 12)), hint_min=int(_config.get("NUM_CLASSES", 10)))
-            method2 = (BIN_CONF.get("method") or "quantile").lower()
+            method2 = method_req  # ← 분위수/선형 선택
             qs = np.quantile(rets_signed, np.linspace(0, 1, n_cls + 1)) if method2 == "quantile" \
                  else np.linspace(float(rets_signed.min()), float(rets_signed.max()), n_cls + 1)
             cooked = []
@@ -731,4 +743,4 @@ __all__ = [
     "FEATURE_INPUT_SIZE", "NUM_CLASSES", "FAIL_AUGMENT_RATIO", "MIN_FEATURES",
     "CALIB",
     "DYN_CLASS_STEP", "BOUNDARY_BAND", "CV_FOLDS", "CV_GATE_F1",
-]
+    ]
