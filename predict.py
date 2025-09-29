@@ -1060,7 +1060,7 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             pt = info.get("pt_file"); meta_path = info.get("meta_path")
             if not pt or not meta_path: continue
             model_path = os.path.join(MODEL_DIR, pt)
-            if not os.path.exists(model_path):
+            if os.path.exists(model_path) is False:
                 try:
                     p = _stem(pt).split("_")
                     if len(p) >= 3:
