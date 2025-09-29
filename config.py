@@ -127,6 +127,16 @@ _default_config = {
         "allow_shadow": True,
         "always_log": True
     },
+
+    # --- ✅ [EVAL_RUNTIME] 평가 실행 주기/그레이스/슬랙(UTC 기준 저장) ---
+    # 평가 스케줄러/워크커가 참고하는 런타임 파라미터
+    "EVAL_RUNTIME": {
+        "timebase": "utc",              # 저장/판정 타임존(UTC 고정 권장)
+        "check_interval_min": 2,        # 워커가 주기적으로 체크할 간격(분)
+        "grace_min": 5,                 # 만료 이후 허용 지연(분) — 캔들 확정 대기
+        "price_window_slack_min": 10,   # 평가 시 캔들 tail 포함 허용 슬랙(분)
+        "max_backfill_hours": 48        # 오프라인 시 되돌이 평가 가능한 최대 시간
+    },
 }
 
 # ✅ 전략별 K라인 설정 (모두 1200개로 통일)
@@ -715,6 +725,37 @@ def passes_publish_filter(*, meta_confidence=None, recent_success_rate=None,
     return (True, "ok", thr)
 
 # ------------------------
+# ✅ [EVAL_RUNTIME] ENV 오버라이드 + 평가 헬퍼
+# ------------------------
+def _eval_from_env(base: dict) -> dict:
+    d = dict(base or {})
+    def _b(k, env, cast):
+        v = os.getenv(env, None)
+        if v is None: return
+        try: d[k] = cast(v)
+        except Exception: pass
+
+    _b("timebase", "EVAL_TIMEBASE", str)
+    _b("check_interval_min", "EVAL_CHECK_INTERVAL_MIN", int)
+    _b("grace_min", "EVAL_GRACE_MIN", int)
+    _b("price_window_slack_min", "EVAL_PRICE_WINDOW_SLACK_MIN", int)
+    _b("max_backfill_hours", "EVAL_MAX_BACKFILL_HOURS", int)
+    return d
+
+def get_EVAL_RUNTIME() -> dict:
+    base = _config.get("EVAL_RUNTIME", _default_config["EVAL_RUNTIME"])
+    return _eval_from_env(base)
+
+def strategy_horizon_hours(strategy: str) -> int:
+    """평가/만기 산정에 쓰는 전략별 horizon (시간)."""
+    return _strategy_horizon_hours(strategy)
+
+def compute_eval_due_at(now_utc, strategy: str):
+    """predict 시점(now_utc) 기준, 전략별 평가 예정 시각을 반환."""
+    from datetime import timedelta
+    return now_utc + timedelta(hours=_strategy_horizon_hours(strategy))
+
+# ------------------------
 # 전역 캐시된 값(기존)
 # ------------------------
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
@@ -743,4 +784,6 @@ __all__ = [
     "FEATURE_INPUT_SIZE", "NUM_CLASSES", "FAIL_AUGMENT_RATIO", "MIN_FEATURES",
     "CALIB",
     "DYN_CLASS_STEP", "BOUNDARY_BAND", "CV_FOLDS", "CV_GATE_F1",
-    ]
+    # ▼ 추가 노출 (평가 런타임/헬퍼)
+    "get_EVAL_RUNTIME", "strategy_horizon_hours", "compute_eval_due_at",
+]
