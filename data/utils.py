@@ -828,8 +828,13 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
     return df_all
 
 # ========================= 전략별 Kline (캐시 포함) =========================
-def get_kline_by_strategy(symbol: str, strategy: str):
-    cache_key = f"{symbol}-{strategy}"
+def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
+    """
+    전략 기반 캔들 조회.
+    - end_slack_min: 종료 시점 이후 몇 분까지 허용할지 (캔들 직후 데이터 포함)
+    - 저장(timestamp)은 UTC, 표시(datetime)는 KST
+    """
+    cache_key = f"{symbol}-{strategy}-slack{end_slack_min}"
     cached = CacheManager.get(cache_key, ttl_sec=600)
     if cached is not None:
         return cached
@@ -844,7 +849,11 @@ def get_kline_by_strategy(symbol: str, strategy: str):
                 break
             df_bybit.append(dfc); total_bybit += len(dfc)
             oldest = dfc["timestamp"].min()
-            end = pd.to_datetime(oldest).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
+            # 🔁 슬랙 적용 + UTC 기준 end 이동
+            oldest_utc = pd.to_datetime(oldest).tz_convert("UTC")
+            if end_slack_min:
+                oldest_utc = oldest_utc - pd.Timedelta(minutes=int(end_slack_min))
+            end = oldest_utc - pd.Timedelta(milliseconds=1)
             if len(dfc) < limit:
                 break
         df_bybit = _normalize_df(pd.concat(df_bybit, ignore_index=True)) if df_bybit else pd.DataFrame()
@@ -858,7 +867,10 @@ def get_kline_by_strategy(symbol: str, strategy: str):
                     break
                 df_binance.append(dfc); total_binance += len(dfc)
                 oldest = dfc["timestamp"].min()
-                end = pd.to_datetime(oldest).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
+                oldest_utc = pd.to_datetime(oldest).tz_convert("UTC")
+                if end_slack_min:
+                    oldest_utc = oldest_utc - pd.Timedelta(minutes=int(end_slack_min))
+                end = oldest_utc - pd.Timedelta(milliseconds=1)
                 if len(dfc) < limit:
                     break
         df_binance = _normalize_df(pd.concat(df_binance, ignore_index=True)) if df_binance else pd.DataFrame()
@@ -875,6 +887,14 @@ def get_kline_by_strategy(symbol: str, strategy: str):
 
         df.attrs["augment_needed"] = total < limit
         df.attrs["enough_for_training"] = total >= min_required
+
+        # 🕒 UTC 저장 + KST 표시 컬럼 보장
+        try:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("UTC")
+            df["datetime"] = df["timestamp"].dt.tz_convert("Asia/Seoul")
+        except Exception:
+            pass
+
         CacheManager.set(cache_key, df)
         return df
     except Exception as e:
