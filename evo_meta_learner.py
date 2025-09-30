@@ -1,7 +1,8 @@
-# evo_meta_learner.py (FINAL+GUARDS)
-# (2025-09-27) — BTC 앵커 가드 + 기간 상호모순 가드 추가
-# - predict_evo_meta(..., symbol=None, strategy=None, ...) 인자 확장(하위호환)
-# - 앵커/모순 가드가 트리거되면 None 반환(상위 predict.py가 기본 경로로 진행)
+# evo_meta_learner.py (FINAL+GUARDS, meta-only; no ensemble)
+# (2025-09-27) — BTC 앵커 가드 + 기간 상호모순 가드 유지
+# - predict_evo_meta(..., symbol=None, strategy=None, probs_stack=None) 인자 유지(하위호환)
+# - 앙상블 합성/로그 제거 → 메타러너 단일 선택만 사용
+# - 앵커/모순 가드 트리거 시 None 반환(상위 predict.py 기본 경로로 진행)
 # - 로그/CSV 안전 처리
 
 import os
@@ -36,10 +37,6 @@ except Exception:
 MODEL_PATH = "/persistent/models/evo_meta_learner.pt"
 META_PATH  = MODEL_PATH.replace(".pt", ".meta.json")
 PRED_LOG   = "/persistent/prediction_log.csv"
-
-# ── 앙상블 합성 규칙 (predict.py와 일관)
-EVO_META_AGG = os.getenv("EVO_META_AGG", "mean_var").lower()   # mean | varpen | mean_var
-EVO_META_VAR_GAMMA = float(os.getenv("EVO_META_VAR_GAMMA", "1.0"))
 
 # ── 가드 파라미터 (환경변수로 미세 조정 가능)
 ANCHOR_ENABLE         = os.getenv("EVO_ANCHOR_ENABLE", "1") == "1"
@@ -89,30 +86,6 @@ def _df_from_path_or_df(path_or_df):
             except Exception:
                 continue
     return None
-
-# ── (NEW) 앙상블 확률 합성 유틸: (W, C) -> (C,)
-def aggregate_probs_for_meta(probs_stack: np.ndarray,
-                             mode: str = None,
-                             gamma: float = None) -> np.ndarray:
-    if probs_stack is None:
-        return None
-    ps = np.asarray(probs_stack, dtype=float)
-    if ps.ndim != 2 or ps.shape[0] == 0 or ps.shape[1] == 0:
-        return None
-    mode = (mode or EVO_META_AGG).lower()
-    gamma = EVO_META_VAR_GAMMA if gamma is None else float(gamma)
-    eps = 1e-12
-
-    mean = ps.mean(axis=0)
-    if mode == "mean":
-        out = mean
-    else:
-        var = ps.var(axis=0)
-        penal = mean / (1.0 + gamma * var)
-        out = penal if mode == "varpen" else (0.5 * mean + 0.5 * penal)
-
-    out = out / (out.sum() + eps)
-    return out.astype(float)
 
 # =========================================
 # 데이터 준비/학습 루틴(원본 유지)
@@ -201,8 +174,6 @@ def train_evo_meta(X, y, input_size, output_size=3, epochs=10, batch_size=32, lr
         "input_size": int(input_size),
         "output_size": int(output_size),
         "version": 1,
-        "agg_mode": EVO_META_AGG,
-        "agg_gamma": EVO_META_VAR_GAMMA,
     }
     try:
         with open(META_PATH, "w", encoding="utf-8") as f:
@@ -339,11 +310,11 @@ def _has_cross_horizon_conflict(symbol: str, strategy: str, proposed_sign: str) 
     return opp in signs
 
 # =========================================
-# 예측(진입점) — 가드 적용
+# 예측(진입점) — 가드 적용 (메타 단일 선택)
 # =========================================
 def predict_evo_meta(X_new,
                      input_size,
-                     probs_stack: np.ndarray = None,
+                     probs_stack: np.ndarray = None,  # 하위호환용(미사용)
                      *,
                      symbol: str = None,
                      strategy: str = None):
@@ -366,19 +337,6 @@ def predict_evo_meta(X_new,
     if task not in ("class", "strategy"):
         print(f"[ℹ️ evo_meta_learner] task={task} → 사용하지 않음")
         return None
-
-    # (선택) 앙상블 확률 합성 규칙 로그
-    if probs_stack is not None:
-        vec = aggregate_probs_for_meta(probs_stack, mode=meta.get("agg_mode", EVO_META_AGG),
-                                       gamma=float(meta.get("agg_gamma", EVO_META_VAR_GAMMA)))
-        if vec is not None:
-            try:
-                top = np.argsort(vec)[::-1][:3].tolist()
-                print(f"[evo_meta_agg] mode={meta.get('agg_mode', EVO_META_AGG)}, "
-                      f"gamma={meta.get('agg_gamma', EVO_META_VAR_GAMMA)}, top3={top}, "
-                      f"max={float(vec.max()):.3f}")
-            except Exception:
-                pass
 
     out_size = int(meta.get("output_size", 3))
     model = EvoMetaModel(input_size, output_size=out_size)
