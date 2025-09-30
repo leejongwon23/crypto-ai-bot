@@ -21,6 +21,7 @@ from config import (
     get_class_ranges as cfg_get_class_ranges,
     get_class_groups as cfg_get_class_groups,
     get_NUM_CLASSES as cfg_get_NUM_CLASSES,
+    get_EVAL_RUNTIME,  # ✅ 슬랙 기본값 반영용
 )
 
 BASE_URL = "https://api.bybit.com"
@@ -712,6 +713,7 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
 
     if collected:
         df = _normalize_df(pd.concat(collected, ignore_index=True))
+        df.attrs["source_exchange"] = "BYBIT"  # ✅ 소스 표시
         return df
 
     if empty_resp_count >= max_retry * 2:
@@ -785,6 +787,7 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
 
     if collected:
         df = _normalize_df(pd.concat(collected, ignore_index=True))
+        df.attrs["source_exchange"] = "BINANCE"  # ✅ 소스 표시
         return df
     return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
 
@@ -819,6 +822,13 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     df_all = _clip_tail(df_all.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True), base_limit)
+
+    # ✅ 소스 속성 부여
+    srcs = []
+    if not df_bybit.empty: srcs.append("BYBIT")
+    if not df_binance.empty: srcs.append("BINANCE")
+    df_all.attrs["source_exchange"] = "+".join(srcs) if srcs else "UNKNOWN"
+
     for c in ["timestamp","open","high","low","close","volume"]:
         if c not in df_all.columns:
             df_all[c] = 0.0 if c != "timestamp" else pd.Timestamp.now(tz="Asia/Seoul")
@@ -834,6 +844,13 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
     - end_slack_min: 종료 시점 이후 몇 분까지 허용할지 (캔들 직후 데이터 포함)
     - 저장(timestamp)은 UTC, 표시(datetime)는 KST
     """
+    # ✅ 슬랙 기본값을 설정에서 자동 반영
+    if not end_slack_min:
+        try:
+            end_slack_min = int(get_EVAL_RUNTIME().get("price_window_slack_min", 10))
+        except Exception:
+            end_slack_min = 0
+
     cache_key = f"{symbol}-{strategy}-slack{end_slack_min}"
     cached = CacheManager.get(cache_key, ttl_sec=600)
     if cached is not None:
@@ -878,6 +895,12 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
         df_list = [d for d in [df_bybit, df_binance] if d is not None and not d.empty]
         df = _normalize_df(pd.concat(df_list, ignore_index=True)) if df_list else pd.DataFrame()
         df = _clip_tail(df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True), limit)
+
+        # ✅ 소스 표시
+        srcs = []
+        if not df_bybit.empty: srcs.append("BYBIT")
+        if not df_binance.empty: srcs.append("BINANCE")
+        df.attrs["source_exchange"] = "+".join(srcs) if srcs else "UNKNOWN"
 
         total = len(df); min_required = max(60, int(limit * 0.90))
         if total < min_required:
