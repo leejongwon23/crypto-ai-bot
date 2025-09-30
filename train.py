@@ -1,3 +1,4 @@
+# train.py — STEP 5 FINAL (검증/분할/메트릭 가드 강화, 그룹예측 연동 안정화)
 # -*- coding: utf-8 -*-
 import os, time, glob, shutil, json, random, traceback, threading
 from datetime import datetime
@@ -317,6 +318,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             else:
                 train_idx, val_idx = tr_idx, val_idx
 
+            # 최종 분할 가드
+            if len(train_idx)==0 or len(val_idx)==0:
+                _log_skip(symbol,strategy,f"분할 실패(w={window})"); continue
+
             scaler=MinMaxScaler()
             Xtr_flat=X_raw[train_idx].reshape(-1, feat_dim); scaler.fit(Xtr_flat)
             train_X=scaler.transform(Xtr_flat).reshape(len(train_idx),window,feat_dim)
@@ -414,9 +419,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                             else:
                                 p=torch.argmax(logits,dim=1).cpu().numpy()
                             preds.extend(p); lbls.extend(yb.numpy())
-                    cur_f1=float(f1_score(lbls,preds,average="macro",
-                                          labels=list(range(len(class_ranges))),
-                                          zero_division=0)) if len(lbls) else 0.0
+                    try:
+                        cur_f1=float(f1_score(lbls,preds,average="macro",
+                                              labels=list(range(len(class_ranges))),
+                                              zero_division=0)) if len(lbls) else 0.0
+                    except Exception:
+                        cur_f1=0.0
                     if scheduler is not None:
                         try: scheduler.step(cur_f1)
                         except: pass
@@ -442,17 +450,27 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 with torch.no_grad():
                     for xb,yb in val_loader:
                         xb=xb.to(DEVICE,dtype=torch.float32); logits=model(xb)
-                        val_loss_sum += float(crit_eval(logits, yb.to(DEVICE,dtype=torch.long)).item()) * xb.size(0); n_val += xb.size(0)
+                        try:
+                            val_loss_sum += float(crit_eval(logits, yb.to(DEVICE,dtype=torch.long)).item()) * xb.size(0)
+                        except Exception:
+                            pass
+                        n_val += xb.size(0)
                         if COST_SENSITIVE_ARGMAX:
                             adj=logits-(CS_ARG_BETA*torch.log(priors_t.unsqueeze(0)))
                             p=torch.argmax(adj,dim=1).cpu().numpy()
                         else:
                             p=torch.argmax(logits,dim=1).cpu().numpy()
                         preds.extend(p); lbls.extend(yb.numpy())
-                acc=float(accuracy_score(lbls,preds)) if len(lbls) else 0.0
-                f1_val=float(f1_score(lbls,preds,average="macro",
-                                       labels=list(range(len(class_ranges))),
-                                       zero_division=0)) if len(lbls) else 0.0
+                try:
+                    acc=float(accuracy_score(lbls,preds)) if len(lbls) else 0.0
+                except Exception:
+                    acc=0.0
+                try:
+                    f1_val=float(f1_score(lbls,preds,average="macro",
+                                           labels=list(range(len(class_ranges))),
+                                           zero_division=0)) if len(lbls) else 0.0
+                except Exception:
+                    f1_val=0.0
                 val_loss=float(val_loss_sum/max(1,n_val))
 
                 # 메타/저장  👇👇👇 (중요 변경: passed=1 추가)
