@@ -1,4 +1,4 @@
-# wrong_data_loader.py (FINAL v2025-09-17b: 소수클래스 실패우선 + 오프셋±5 + 증강상향 + 해시가드강화 + 수치컬럼 필터/라벨클램프)
+# wrong_data_loader.py (FINAL v2025-09-30c: 실패우선+오프셋±5 유지, 중복가드/타임스탬프/수치열/엣지보강)
 import os
 import pandas as pd
 import numpy as np
@@ -17,10 +17,10 @@ except Exception:
     import hashlib
     def get_feature_hash(vec):
         try:
-            b = np.ascontiguousarray(vec).tobytes()
+            b = np.ascontiguousarray(np.asarray(vec, dtype=np.float32)).tobytes()
             return hashlib.md5(b).hexdigest()
         except Exception:
-            return str(hash(bytes(np.ascontiguousarray(vec).flatten())))
+            return hashlib.md5(str(vec).encode()).hexdigest()
 
 try:
     from failure_db import load_existing_failure_hashes
@@ -51,32 +51,40 @@ _USE_FULL_WINDOW_HASH = os.getenv("USE_FULL_WINDOW_HASH", "1") == "1" # 윈도�
 
 def _map_to_class_idx(r: float, class_ranges) -> int:
     """누적 수익률 r을 동적 클래스 경계(class_ranges)에 매핑."""
-    idx = 0
-    for i, rng in enumerate(class_ranges):
-        if isinstance(rng, (tuple, list)) and len(rng) == 2:
-            low, high = rng
-            try:
-                if float(low) <= float(r) <= float(high):
-                    idx = i
-                    break
-            except Exception:
-                continue
-    return idx
+    try:
+        for i, rng in enumerate(class_ranges):
+            if isinstance(rng, (tuple, list)) and len(rng) == 2:
+                low, high = float(rng[0]), float(rng[1])
+                if low <= float(r) <= high:
+                    return i
+    except Exception:
+        pass
+    return 0
 
 def _future_cum_return(close: pd.Series, k_future: int) -> np.ndarray:
     """미래 k 스텝 누적수익률: (close[t+k]/close[t]) - 1 (끝 k개는 0으로 채움)."""
-    future = close.shift(-k_future)
-    ret = (future / close - 1.0).fillna(0.0).to_numpy()
-    return ret
+    try:
+        c = pd.to_numeric(close, errors="coerce")
+        future = c.shift(-k_future)
+        ret = (future / c - 1.0).fillna(0.0).to_numpy(dtype=float)
+        ret[~np.isfinite(ret)] = 0.0
+        return ret
+    except Exception:
+        return np.zeros(len(close), dtype=float)
 
 def _hash_window(xb: np.ndarray) -> str:
     """윈도우 전체를 이용한 강한 해시(옵션)."""
     try:
         import hashlib
-        arr = np.ascontiguousarray(xb).tobytes()
+        arr = np.ascontiguousarray(xb, dtype=np.float32).tobytes()
         return hashlib.sha256(arr).hexdigest()
     except Exception:
         return get_feature_hash(xb[-1])
+
+def _ensure_ts(series_like) -> pd.Series:
+    """타임스탬프 시리즈를 안전하게 생성(UTC 인식 → 비교 안전)."""
+    ts = pd.to_datetime(series_like, errors="coerce", utc=True)
+    return ts
 
 def load_training_prediction_data(symbol, strategy, input_size, window, group_id=None, min_per_class=10):
     import random
@@ -111,6 +119,11 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
             return None, None
 
     df_price = df_price.tail(_MAX_ROWS_FOR_SAMPLING).copy().reset_index(drop=True)
+    # 숫자 안정화
+    for col in ["open", "high", "low", "close", "volume"]:
+        if col in df_price.columns:
+            df_price[col] = pd.to_numeric(df_price[col], errors="coerce")
+    df_price = df_price.dropna(subset=["close"]).reset_index(drop=True)
 
     df_feat = compute_features(symbol, df_price, strategy)
     if df_feat is None or (hasattr(df_feat, "empty") and df_feat.empty):
@@ -124,23 +137,31 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
             return None, None
 
     df_feat = df_feat.tail(_MAX_ROWS_FOR_SAMPLING).reset_index(drop=True)
+
     # 숫자형 컬럼만 사용 + NaN 0.0 치환
     num_cols = df_feat.select_dtypes(include=[np.number]).columns.tolist()
-    if "timestamp" in df_feat.columns and "timestamp" not in num_cols:
-        num_cols = [c for c in num_cols if c != "timestamp"]
-    df_feat[num_cols] = df_feat[num_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    # 전략/라벨 컬럼은 피처에서 제외(뒤에서 따로 붙임)
+    for drop_c in ["label", "strategy"]:
+        if drop_c in num_cols:
+            num_cols.remove(drop_c)
 
     # ✅ 타임스탬프 컬럼 통일
     if "timestamp" not in df_feat.columns:
         if "datetime" in df_feat.columns:
             df_feat = df_feat.rename(columns={"datetime": "timestamp"})
+        elif "timestamp" in df_price.columns:
+            df_feat["timestamp"] = df_price["timestamp"].tail(len(df_feat)).values
+        elif "datetime" in df_price.columns:
+            df_feat["timestamp"] = df_price["datetime"].tail(len(df_feat)).values
         else:
-            if "timestamp" in df_price.columns:
-                df_feat["timestamp"] = df_price["timestamp"].tail(len(df_feat)).values
-            elif "datetime" in df_price.columns:
-                df_feat["timestamp"] = df_price["datetime"].tail(len(df_feat)).values
-            else:
-                df_feat["timestamp"] = pd.date_range(end=pd.Timestamp.now(), periods=len(df_feat), freq="T")
+            df_feat["timestamp"] = pd.date_range(end=pd.Timestamp.utcnow(), periods=len(df_feat), freq="T")
+
+    # 숫자형 컬럼이 비면, timestamp 제외한 나머지 전부 시도
+    if not num_cols:
+        num_cols = [c for c in df_feat.columns if c not in ("timestamp", "strategy", "label")]
+
+    # 숫자 안정화
+    df_feat[num_cols] = df_feat[num_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(np.float32)
 
     # ========= 1) 라벨링 =========
     k_future = max(2, min(8, max(1, int(window // 4))))
@@ -154,14 +175,16 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
         pad_val = labels_all[-1] if labels_all else 0
         labels_all += [pad_val] * (len(df_feat) - len(labels_all))
     labels = labels_all[:len(df_feat)]
-    # 안전: 라벨 클램프
     labels = [int(max(0, min(num_classes - 1, l))) for l in labels]
     df_feat["label"] = labels
 
-    # 중복 해시 가드 세트 (기존 + 강화)
+    # ========= 1-1) 타임스탬프 ndarray(UTC) 준비 (정렬 및 비교 안정)
+    ts_feat = _ensure_ts(df_feat["timestamp"]).values
+
+    # ========= 중복 해시 가드 세트 (기존 + 강화) =========
     used_hashes = set()
     try:
-        existing_hashes = load_existing_failure_hashes() or set()
+        existing_hashes = set(load_existing_failure_hashes() or set())
     except Exception:
         existing_hashes = set()
 
@@ -179,11 +202,11 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
             opt_cols = [c for c in ["regime", "raw_prob", "calib_prob"] if c in _df_all.columns]
             dfw = _df_all[base_cols + opt_cols].copy()
             dfw = dfw[(dfw["symbol"] == symbol) & (dfw["strategy"] == strategy)].copy()
-            dfw["timestamp"] = pd.to_datetime(dfw["timestamp"], errors="coerce")
+            dfw["timestamp"] = _ensure_ts(dfw["timestamp"])
             dfw = dfw[dfw["timestamp"].notna()]
 
             # feat 최소 시각 이후만
-            feat_min_ts = pd.to_datetime(df_feat["timestamp"], errors="coerce").min()
+            feat_min_ts = pd.to_datetime(ts_feat.min())
             if pd.notna(feat_min_ts):
                 dfw = dfw[dfw["timestamp"] >= feat_min_ts]
 
@@ -202,14 +225,15 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
             offset_max = max(offset_min, int(_OFFSET_MAX))
             offsets = list(range(-offset_max, -offset_min + 1)) + [0] + list(range(offset_min, offset_max + 1))
 
-            ts_series = pd.to_datetime(df_feat["timestamp"], errors="coerce").values
+            ts_series = ts_feat  # numpy datetime64[ns, UTC]
             for _, row in dfw.iterrows():
                 try:
-                    entry_time = row["timestamp"]
+                    entry_time = np.datetime64(row["timestamp"].to_datetime64())
                     label = int(row["label"])
-                    if pd.isna(entry_time):
+                    if pd.isna(row["timestamp"]):
                         continue
-                    idx_candidates = np.where(ts_series >= np.datetime64(entry_time))[0]
+
+                    idx_candidates = np.where(ts_series >= entry_time)[0]
                     if len(idx_candidates) == 0:
                         continue
                     end_idx0 = int(idx_candidates[0])
@@ -258,25 +282,30 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
 
                     # 매칭 실패 시 과거 윈도우 보완
                     if not appended_once:
-                        past_window = df_feat[df_feat["timestamp"] < row["timestamp"]].tail(window)
-                        if past_window.shape[0] == window:
-                            xb = past_window[feat_cols].to_numpy(dtype=np.float32)
-                            if xb.shape[1] < input_size:
-                                xb = np.pad(xb, ((0, 0), (0, input_size - xb.shape[1])), mode="constant")
-                            elif xb.shape[1] > input_size:
-                                xb = xb[:, :input_size]
-                            if xb.shape == (window, input_size):
-                                h_last = get_feature_hash(xb[-1])
-                                h_full = _hash_window(xb) if _USE_FULL_WINDOW_HASH else None
-                                if (h_last not in used_hashes and h_last not in existing_hashes) and (not h_full or (h_full not in used_hashes and h_full not in existing_hashes)):
-                                    used_hashes.add(h_last)
-                                    if h_full: used_hashes.add(h_full)
-                                    sequences.append((xb.copy(), label))
-                                    aug_times = max(0, int(FAIL_AUGMENT_RATIO) * max(1, _FAIL_AUG_MULT) - 1)
-                                    for _ in range(aug_times):
-                                        noise = np.random.normal(0, 0.01, xb.shape).astype(np.float32)
-                                        sequences.append((xb.copy() + noise, label))
-                                    fail_count += 1
+                        past_mask = ts_series < entry_time
+                        if past_mask.any():
+                            last_idx = int(np.where(past_mask)[0][-1])
+                            start_idx = last_idx - window + 1
+                            if start_idx >= 0 and (last_idx + 1) <= len(df_feat):
+                                past_window = df_feat.iloc[start_idx:last_idx + 1]
+                                if past_window.shape[0] == window:
+                                    xb = past_window[feat_cols].to_numpy(dtype=np.float32)
+                                    if xb.shape[1] < input_size:
+                                        xb = np.pad(xb, ((0, 0), (0, input_size - xb.shape[1])), mode="constant")
+                                    elif xb.shape[1] > input_size:
+                                        xb = xb[:, :input_size]
+                                    if xb.shape == (window, input_size):
+                                        h_last = get_feature_hash(xb[-1])
+                                        h_full = _hash_window(xb) if _USE_FULL_WINDOW_HASH else None
+                                        if (h_last not in used_hashes and h_last not in existing_hashes) and (not h_full or (h_full not in used_hashes and h_full not in existing_hashes)):
+                                            used_hashes.add(h_last)
+                                            if h_full: used_hashes.add(h_full)
+                                            sequences.append((xb.copy(), label))
+                                            aug_times = max(0, int(FAIL_AUGMENT_RATIO) * max(1, _FAIL_AUG_MULT) - 1)
+                                            for _ in range(aug_times):
+                                                noise = np.random.normal(0, 0.01, xb.shape).astype(np.float32)
+                                                sequences.append((xb.copy() + noise, label))
+                                            fail_count += 1
                 except Exception:
                     continue
         except Exception as e:
@@ -287,9 +316,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
         try:
             window_df = df_feat.iloc[i - window:i]
             label = int(df_feat.iloc[i].get("label", -1))
-            # 안전: 라벨 클램프
-            if not (0 <= label < num_classes):
-                label = int(max(0, min(num_classes - 1, label)))
+            label = int(max(0, min(num_classes - 1, label)))
 
             xb = window_df[feat_cols].to_numpy(dtype=np.float32)
 
@@ -321,7 +348,7 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
 
     # 소수클래스 기준: 중앙값 미만인 클래스들
     if label_counts:
-        med = np.median([c for c in label_counts.values()])
+        med = float(np.median([c for c in label_counts.values()])) if len(label_counts) > 0 else 0.0
         minority = [cls for cls, c in label_counts.items() if c < med]
     else:
         minority = []
@@ -329,13 +356,14 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     # 최소 보장
     for cls in range(num_classes):
         while len(all_by_label[cls]) < min_per_class:
+            # 이웃 클래스에서 차용
             neighbors = [c for c in (cls - 1, cls + 1) if 0 <= c < num_classes and all_by_label.get(c)]
             candidates = sum((all_by_label[c] for c in neighbors), []) if neighbors else []
             if not candidates:
                 dummy = np.random.normal(0, 1, (window, input_size)).astype(np.float32)
                 all_by_label[cls].append(dummy)
             else:
-                xb = random.choice(candidates)
+                xb = candidates[np.random.randint(0, len(candidates))]
                 noise = np.random.normal(0, 0.01, xb.shape).astype(np.float32)
                 all_by_label[cls].append(xb + noise)
 
@@ -354,7 +382,8 @@ def load_training_prediction_data(symbol, strategy, input_size, window, group_id
     if not sequences:
         for _ in range(2):
             dummy = np.random.normal(0, 1, (window, input_size)).astype(np.float32)
-            random_label = random.randint(0, max(0, num_classes - 1))
+            random_label = np.random.randint(0, max(1, num_classes)) - 1
+            random_label = int(max(0, min(num_classes - 1, random_label)))
             sequences.append((dummy, random_label))
 
     X = np.array([s[0] for s in sequences], dtype=np.float32)
