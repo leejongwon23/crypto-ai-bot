@@ -1,13 +1,11 @@
-# === predict.py — Meta-only final (FINAL v1.1, no cross-model ensemble) ===
-# (2025-09-20, 메타러너만 최종 선택 — 교차-모델 앙상블 제거)
+# === predict.py — Meta-only final (FINAL v1.2 with RealityGuard) ===
+# (2025-09-30, 메타러너 최종 선택 + 현실 가드 추가)
 # 변경 핵심:
-#   - 교차-모델 앙상블(Top-k 평균/투표 등) 전면 제거
-#   - 최종 선택 경로: [진화형 메타러너] → [단일모델 경쟁 + 탐험] → [최소 기대수익 가드/보정] → [보류컷]
-#   - STRICT_BOUNDS, 윈도우 앙상블(mean / var-penalize), 게이트/락/하트비트/로깅 그대로 유지
-# 유지:
-#   - 모델 게이트: meta.passed==1 만 확인
-#   - 후보 모델 점수: 확률 p만 사용( f1 가중 제거 유지 )
-#   - 분포 보정 토글 ADJUST_WITH_DIVERSITY는 그대로(기본 OFF)
+#   - 현실 가드(RealityGuard) 추가:
+#       (1) 포지션 모순: 시장 힌트가 long/short 금지인데 해당 방향 예측 시 보류
+#       (2) 변동성 대비 과장: 예측 기대수익(|mid|) > k * 최근 변동성이면 보류
+#   - 기존 흐름 유지: [메타러너] → [단일모델 경쟁+탐험] → [최소 기대수익 가드] → [RealityGuard] → [보류컷]
+#   - STRICT_BOUNDS, 윈도우 앙상블(mean/var-penalize), 게이트/락/하트비트/로깅 그대로 유지
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -246,6 +244,21 @@ EXP_DEC_MIN = float(os.getenv("EXPLORE_DECAY_MIN", "120"))
 EXP_NEAR = float(os.getenv("EXPLORE_NEAR_GAP", "0.07"))
 EXP_GAMMA = float(os.getenv("EXPLORE_GAMMA", "0.05"))
 
+# ====== RealityGuard 설정 ======
+RG_ENABLE = os.getenv("RG_ENABLE", "1") == "1"
+# 포지션 모순 차단 (시장 힌트가 금지한 방향이면 보류)
+RG_BLOCK_POSITION_CONFLICT = os.getenv("RG_BLOCK_POSITION_CONFLICT", "1") == "1"
+# 변동성 배수(예측 mid가 최근 변동성 * 배수보다 크면 과장으로 판단)
+RG_VOL_MULT = float(os.getenv("RG_VOL_MULT", "2.0"))
+# 변동성 계산용 lookback(봉 개수) — 전략별 기본값
+RG_LOOKBACK_SHORT = int(os.getenv("RG_LOOKBACK_SHORT", "48"))   # 단기
+RG_LOOKBACK_MID   = int(os.getenv("RG_LOOKBACK_MID", "96"))     # 중기
+RG_LOOKBACK_LONG  = int(os.getenv("RG_LOOKBACK_LONG", "336"))   # 장기
+# 변동성 추정 방식: 표준편차(std) vs. 평균절대편차(mad)
+RG_VOL_METHOD = os.getenv("RG_VOL_METHOD", "std").lower()       # "std" or "mad"
+# 예측 mid가 너무 작을 때는 과장 체크 생략할 최소치 (잡음 회피)
+RG_MIN_ABS_MID_FOR_VOLCHECK = float(os.getenv("RG_MIN_ABS_MID_FOR_VOLCHECK", "0.004"))  # 0.4%
+
 # ====== meta class_ranges 우선 ======
 def _ranges_from_meta(meta):
     try:
@@ -481,6 +494,51 @@ def _position_hint_from_market(df: pd.DataFrame) -> dict:
     except Exception:
         return {"allow_long": True, "allow_short": True, "ma_fast": None, "ma_slow": None, "slope": 0.0}
 
+# ====== RealityGuard: 변동성 추정 & 충돌 체크 ======
+def _recent_volatility(df: pd.DataFrame, strategy: str) -> float:
+    """최근 변동성(퍼센트 기준)을 추정. close 기준 pct_change의 산포를 사용."""
+    try:
+        if df is None or df.empty or "close" not in df.columns:
+            return 0.0
+        close = df["close"].astype(float).values
+        if close.size < 10: return 0.0
+        if strategy == "단기": lb = RG_LOOKBACK_SHORT
+        elif strategy == "중기": lb = RG_LOOKBACK_MID
+        else: lb = RG_LOOKBACK_LONG
+        lb = max(10, min(int(lb), len(close)-1))
+        ret = pd.Series(close).pct_change().dropna().values[-lb:]
+        if ret.size == 0: return 0.0
+        if RG_VOL_METHOD == "mad":
+            vol = float(np.mean(np.abs(ret - np.median(ret))) * 1.2533)  # MAD ≈ 0.8*std → 보정계수
+        else:
+            vol = float(np.std(ret))
+        return max(0.0, vol)
+    except Exception:
+        return 0.0
+
+def _reality_guard_check(df, strategy, hint, lo_sel, hi_sel, exp_mid) -> tuple[bool, str]:
+    """현실 가드 판단: (허용여부, 이유) 반환"""
+    try:
+        pos = _position_from_range(lo_sel, hi_sel)
+        # (1) 포지션 모순
+        if RG_BLOCK_POSITION_CONFLICT:
+            if pos == "long" and not bool(hint.get("allow_long", True)):
+                return False, "reality_guard_position_conflict_long"
+            if pos == "short" and not bool(hint.get("allow_short", True)):
+                return False, "reality_guard_position_conflict_short"
+
+        # (2) 변동성 대비 과장
+        if abs(exp_mid) >= RG_MIN_ABS_MID_FOR_VOLCHECK:
+            vol = _recent_volatility(df, strategy)
+            # vol이 0이면 판단 불가 → 통과
+            if vol > 0:
+                if abs(exp_mid) > RG_VOL_MULT * vol:
+                    return False, f"reality_guard_overclaim(vol={vol:.4f}, mid={exp_mid:.4f})"
+        return True, "ok"
+    except Exception as e:
+        # 문제가 있으면 가드가 판단을 막지 않음
+        return True, f"rg_exception:{e}"
+
 # ====== 핵심 예측 ======
 def predict(symbol, strategy, source="일반", model_type=None):
     # 게이트
@@ -655,6 +713,23 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[임계 가드 예외] {e}")
 
+        # (C-2) RealityGuard — 시장 현실과 충돌/과장 체크
+        try:
+            lo_sel, hi_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
+            exp_ret = (float(lo_sel) + float(hi_sel)) / 2.0
+            if RG_ENABLE:
+                ok, why = _reality_guard_check(df, strategy, hint, lo_sel, hi_sel, exp_ret)
+                if not ok:
+                    return _soft_abstain(
+                        symbol, strategy,
+                        reason=why, meta_choice=str(meta_choice),
+                        regime=regime, X_last=X[-1],
+                        group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None),
+                        df=df, source="보류"
+                    )
+        except Exception as e:
+            print(f"[RealityGuard 예외] {e}")
+
         # (D) 보류 컷(캘리브 최대 확률 기준)
         try:
             chosen_probs = (chosen or outs[0])["calib_probs"]
@@ -721,6 +796,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "hint_ma_fast": hint.get("ma_fast"),
             "hint_ma_slow": hint.get("ma_slow"),
             "hint_slope": hint.get("slope"),
+            "reality_guard": {
+                "enabled": bool(RG_ENABLE),
+                "vol_mult": float(RG_VOL_MULT),
+                "method": RG_VOL_METHOD
+            }
         }
         ensure_prediction_log_exists()
         log_prediction(
