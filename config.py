@@ -1,8 +1,5 @@
-# config.py (STEP 5 FINAL) — publish filter/ENV 확장 + 헬퍼 포함
-# - 기존 STEP 1 FINAL 기반
-# - 발송 필터(PUBLISH) 섹션/ENV 오버라이드 + passes_publish_filter(...) 제공
-# - predict.py는 "항상 기록", 발송은 이 필터를 통과할 때만 수행하도록 트리거/봇에서 사용
-
+# config.py (STEP 5 FINAL+) — publish filter/ENV 확장 + 데이터 병합/클래스 일관성/CV 가드 옵션 추가
+# - 원본 보존 + 옵션/헬퍼 확장: DATA / CLASS_ENFORCE / CV_CONFIG / RUNTIME getters
 import json
 import os
 
@@ -26,6 +23,23 @@ _default_config = {
 
     # ✅ SSL 캐시 디렉토리
     "SSL_CACHE_DIR": "/persistent/ssl_models",
+
+    # --- [DATA] 거래소 병합/정합 옵션 (신설) ---
+    "DATA": {
+        "merge_enabled": True,                       # Bybit+Binance 병합 기본 ON
+        "sources": ["bybit", "binance"],            # 우선순위는 prefer가 결정
+        "prefer": "binance_if_overlap",             # 겹치면 binance 우선
+        "align": {"method": "timestamp", "tolerance_sec": 60},
+        "fill":  {"method": "ffill", "max_gap": 2}, # 2개 캔들까지 전방 보간 허용
+        "dedup": {"enabled": True, "keep": "last"}
+    },
+
+    # --- [CLASS_ENFORCE] 그룹/심볼 간 클래스 수 일관성 (신설) ---
+    "CLASS_ENFORCE": {
+        "same_across_groups": True,   # 그룹0/1/2가 항상 동일 클래스 수 사용
+        "same_across_symbols": True,  # 다른 심볼도 동일 클래스 수 사용
+        "n_override": None            # 지정 시 동적결정 무시하고 이 값 고정
+    },
 
     # --- [2] 레짐(시장상태) 태깅 옵션 ---
     "REGIME": {
@@ -82,9 +96,7 @@ _default_config = {
     "QUALITY": {"VAL_F1_MIN": 0.20, "VAL_ACC_MIN": 0.20},
 
     # --- [BIN] 클래스 경계/병합 파라미터 ---
-    # 🔄 변경점:
-    #   - method 기본값을 "quantile"로 변경 (실제 분포 기반)
-    #   - merge_sparse 기본 비활성화 (희소 bin 강제 병합 방지)
+    #   method 기본값 "quantile" (실제 분포 기반), merge_sparse 기본 False
     "CLASS_BIN": {
         "method": "quantile",     # "fixed_step" | "quantile" | "linear"
         "strict": True,
@@ -92,17 +104,26 @@ _default_config = {
         "min_width": 0.0010,      # 최소 폭 0.10%p
         "step_pct": 0.0050,       # (fixed_step일 때) 0.5% 단위
         "merge_sparse": {
-            "enabled": False,     # ✅ 기본 꺼둠 (원치 않는 광범위 병합 방지)
+            "enabled": False,
             "min_ratio": 0.01,    # 샘플 비율 임계
             "min_count_floor": 20,
             "prefer": "denser"
         }
     },
 
+    # --- [CV_CONFIG] 교차검증·가드 (신설) ---
+    "CV_CONFIG": {
+        "folds": 5,                   # 기본 폴드 수 (ENV로도 제어)
+        "min_per_class": 3,           # 각 폴드당 최소 클래스 샘플
+        "fallback_reduce_folds": True,# 불가 시 자동 폴드 축소
+        "fallback_stratified": True   # Stratified 실패 시 일반 KFold 폴백
+    },
+
     # --- [TRAIN] 학습 스케줄/조기종료 ---
     "TRAIN": {
         "early_stop": {"patience": 4, "min_delta": 0.0005, "warmup_epochs": 2},
-        "lr_scheduler": {"patience": 3, "min_lr": 5e-6}
+        "lr_scheduler": {"patience": 3, "min_lr": 5e-6},
+        "ensure_class_coverage": True  # 각 epoch 검증세트 클래스커버리지 보장 시도
     },
 
     # --- [ENSEMBLE] 멀티-윈도우 앙상블 ---
@@ -129,13 +150,12 @@ _default_config = {
     },
 
     # --- ✅ [EVAL_RUNTIME] 평가 실행 주기/그레이스/슬랙(UTC 기준 저장) ---
-    # 평가 스케줄러/워크커가 참고하는 런타임 파라미터
     "EVAL_RUNTIME": {
-        "timebase": "utc",              # 저장/판정 타임존(UTC 고정 권장)
-        "check_interval_min": 2,        # 워커가 주기적으로 체크할 간격(분)
-        "grace_min": 5,                 # 만료 이후 허용 지연(분) — 캔들 확정 대기
-        "price_window_slack_min": 10,   # 평가 시 캔들 tail 포함 허용 슬랙(분)
-        "max_backfill_hours": 48        # 오프라인 시 되돌이 평가 가능한 최대 시간
+        "timebase": "utc",
+        "check_interval_min": 2,
+        "grace_min": 5,
+        "price_window_slack_min": 10,
+        "max_backfill_hours": 48
     },
 }
 
@@ -266,11 +286,69 @@ def get_PATTERN():  return _config.get("PATTERN", _default_config["PATTERN"])
 def get_BLEND():    return _config.get("BLEND", _default_config["BLEND"])
 def get_PUBLISH():  return _config.get("PUBLISH", _default_config["PUBLISH"])
 
+# --- 🔧 DATA / CLASS_ENFORCE / CV_CONFIG 런타임 Getter (ENV 오버라이드 지원) ---
+def _env_bool(v): return str(v).strip().lower() not in {"0","false","no","off","none",""}
+
+def get_CLASS_ENFORCE() -> dict:
+    base = dict(_config.get("CLASS_ENFORCE", _default_config["CLASS_ENFORCE"]))
+    ov = os.getenv("CLASS_N_OVERRIDE", None)
+    if ov is not None:
+        try: base["n_override"] = int(ov)
+        except Exception: pass
+    s1 = os.getenv("CLASS_SAME_ACROSS_GROUPS", None)
+    if s1 is not None: base["same_across_groups"] = _env_bool(s1)
+    s2 = os.getenv("CLASS_SAME_ACROSS_SYMBOLS", None)
+    if s2 is not None: base["same_across_symbols"] = _env_bool(s2)
+    return base
+
+def _data_from_env(base: dict) -> dict:
+    d = dict(base or {})
+    v = os.getenv("ENABLE_DATA_MERGE", None)
+    if v is not None: d["merge_enabled"] = _env_bool(v)
+    pv = os.getenv("DATA_PREFER", None)
+    if pv is not None: d["prefer"] = str(pv).strip().lower()
+    tol = os.getenv("DATA_ALIGN_TOL_SEC", None)
+    if tol is not None:
+        try:
+            d.setdefault("align", {})["tolerance_sec"] = int(tol)
+        except Exception:
+            pass
+    fg = os.getenv("DATA_FILL_MAX_GAP", None)
+    if fg is not None:
+        try:
+            d.setdefault("fill", {})["max_gap"] = int(fg)
+        except Exception:
+            pass
+    return d
+
+def get_DATA() -> dict:
+    return _config.get("DATA", _default_config["DATA"])
+
+def get_DATA_RUNTIME() -> dict:
+    return _data_from_env(get_DATA())
+
+def get_CV_CONFIG() -> dict:
+    base = dict(_config.get("CV_CONFIG", _default_config["CV_CONFIG"]))
+    f = os.getenv("CV_FOLDS", None)
+    if f is not None:
+        try: base["folds"] = int(f)
+        except Exception: pass
+    mpc = os.getenv("CV_MIN_PER_CLASS", None)
+    if mpc is not None:
+        try: base["min_per_class"] = int(mpc)
+        except Exception: pass
+    fr = os.getenv("CV_FALLBACK_REDUCE_FOLDS", None)
+    if fr is not None: base["fallback_reduce_folds"] = _env_bool(fr)
+    fs = os.getenv("CV_FALLBACK_STRATIFIED", None)
+    if fs is not None: base["fallback_stratified"] = _env_bool(fs)
+    return base
+
 # ------------------------
 # 헬퍼
 # ------------------------
-def _ROUNDS(): return _ROUNDS_DECIMALS if 'ROUNDS_DECIMALS' in globals() else _ROUND_DECIMALS
-def _round2(x: float) -> float: return round(float(x), _ROUND_DECIMALS)
+def _ROUNDS(): return _ROUNDS_DECIMALS if 'ROUNDS_DECIMALS' in globals() else _ROUNDS_DECIMALS
+_ROUNDS_DECIMALS = 4
+def _round2(x: float) -> float: return round(float(x), _ROUNDS_DECIMALS)
 
 def _cap_by_strategy(x: float, strategy: str) -> float:
     pos_cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy)
@@ -340,7 +418,6 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
     high  = pd.to_numeric(df["high"] if "high" in df.columns else df["close"], errors="coerce").ffill().bfill().astype(float).values
     low   = pd.to_numeric(df["low"]  if "low"  in df.columns else df["close"], errors="coerce").ffill().bfill().astype(float).values
     horizon = pd.Timedelta(hours=int(horizon_hours))
-    import numpy as np
     up = np.zeros(len(df), dtype=np.float32); dn = np.zeros(len(df), dtype=np.float32)
     j_up = j_dn = 0
     for i in range(len(df)):
@@ -399,12 +476,11 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
     import numpy as np
     if not ranges or rets_signed is None or rets_signed.size == 0: return ranges
     opt = (bin_conf or {}).get("merge_sparse", {})
-    # 🔧 ENV 오버라이드: MERGE_SPARSE_ENABLED/MIN_RATIO/MIN_FLOOR
     env_enabled = os.getenv("MERGE_SPARSE_ENABLED", None)
     if env_enabled is not None:
         opt = dict(opt or {})
         opt["enabled"] = str(env_enabled).strip().lower() not in {"0", "false", "no"}
-    if not opt or not opt.get("enabled", False):  # 기본 False
+    if not opt or not opt.get("enabled", False):
         return ranges
     env_ratio = os.getenv("MERGE_SPARSE_MIN_RATIO", None)
     env_floor = os.getenv("MERGE_SPARSE_MIN_FLOOR", None)
@@ -477,12 +553,22 @@ def class_to_expected_return(class_id: int, symbol: str, strategy: str):
 
 def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, group_size=5):
     import numpy as np
-    from data.utils import get_kline_by_strategy
+    from data.utils import get_kline_by_strategy  # 프로젝트 환경에 맞춘 경로 유지
 
     MAX_CLASSES = int(_config.get("MAX_CLASSES", _default_config["MAX_CLASSES"]))
     BIN_CONF = get_CLASS_BIN()
-    # 🔧 ENV 오버라이드: CLASS_BIN_METHOD
     method_req = (os.getenv("CLASS_BIN_METHOD") or method or BIN_CONF.get("method") or "quantile").lower()
+
+    # --- 클래스 수 정책 반영 (일관성/강제 고정) ---
+    ce = get_CLASS_ENFORCE()
+    n_override = ce.get("n_override", None)
+    if n_override is not None:
+        try:
+            n_override = int(n_override)
+            if n_override >= 2:
+                set_NUM_CLASSES(n_override)
+        except Exception:
+            pass
 
     def compute_equal_ranges(n_cls, reason=""):
         n_cls = max(4, int(n_cls))
@@ -542,10 +628,20 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             if rets_signed.size < 10:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="수익률 샘플 부족")
             rets_signed = np.array([_cap_by_strategy(float(r), strategy) for r in rets_signed], dtype=np.float32)
-            n_cls = _choose_n_classes(rets_signed, max_classes=int(_config.get("MAX_CLASSES", 12)), hint_min=int(_config.get("NUM_CLASSES", 10)))
-            method2 = method_req  # ← 분위수/선형 선택
-            qs = np.quantile(rets_signed, np.linspace(0, 1, n_cls + 1)) if method2 == "quantile" \
-                 else np.linspace(float(rets_signed.min()), float(rets_signed.max()), n_cls + 1)
+
+            n_cls = _choose_n_classes(
+                rets_signed,
+                max_classes=int(_config.get("MAX_CLASSES", 12)),
+                hint_min=int(_config.get("NUM_CLASSES", 10))
+            )
+            # 일관성 강제: n_override가 있으면 사용
+            if isinstance(n_override, int) and n_override >= 2:
+                n_cls = n_override
+
+            method2 = method_req
+            qs = (np.quantile(rets_signed, np.linspace(0, 1, n_cls + 1))
+                  if method2 == "quantile"
+                  else np.linspace(float(rets_signed.min()), float(rets_signed.max()), n_cls + 1))
             cooked = []
             for i in range(n_cls):
                 lo, hi = float(qs[i]), float(qs[i + 1])
@@ -568,7 +664,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             from data.utils import get_kline_by_strategy as _dbg_k
             df_dbg = _dbg_k(symbol, strategy)
             if df_dbg is not None and len(df_dbg) >= 2 and "close" in df_dbg:
-                import numpy as np
                 rets_for_merge = _future_extreme_signed_returns(df_dbg, horizon_hours=_strategy_horizon_hours(strategy))
                 rets_for_merge = rets_for_merge[np.isfinite(rets_for_merge)]
             else:
@@ -721,7 +816,6 @@ def passes_publish_filter(*, meta_confidence=None, recent_success_rate=None,
     if recent_success_rate is not None and float(recent_success_rate) < thr["recent_success_min"]:
         return (False, "recent_success_rate_too_low", thr)
 
-    # source가 group_end면 강행하고 싶다면, 트리거 쪽에서 이 리턴값을 무시하거나 별 분기 사용
     return (True, "ok", thr)
 
 # ------------------------
@@ -784,6 +878,7 @@ __all__ = [
     "FEATURE_INPUT_SIZE", "NUM_CLASSES", "FAIL_AUGMENT_RATIO", "MIN_FEATURES",
     "CALIB",
     "DYN_CLASS_STEP", "BOUNDARY_BAND", "CV_FOLDS", "CV_GATE_F1",
-    # ▼ 추가 노출 (평가 런타임/헬퍼)
     "get_EVAL_RUNTIME", "strategy_horizon_hours", "compute_eval_due_at",
-]
+    # ▼ 신규 노출
+    "get_DATA", "get_DATA_RUNTIME", "get_CLASS_ENFORCE", "get_CV_CONFIG",
+                ]
