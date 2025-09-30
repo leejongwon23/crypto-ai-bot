@@ -43,6 +43,14 @@ _RET_TH = float(os.getenv("META_ER_THRESHOLD", "0.01"))
 EVO_META_AGG = os.getenv("EVO_META_AGG", "mean_var").lower()   # mean | varpen | mean_var
 EVO_META_VAR_GAMMA = float(os.getenv("EVO_META_VAR_GAMMA", "1.0"))
 
+# ===== (NEW) 폭·신뢰도 보정 관련 환경변수 =====
+# 클래스 범위 최대 폭(절댓값, 예: 0.10 = 10%). 폭이 이 값보다 크면 기대수익 영향도를 축소
+CLAMP_MAX_WIDTH = float(os.getenv("CLAMP_MAX_WIDTH", "0.10"))
+# 성공률 신뢰구간 z-score (기본 1.64 ≈ 90% CI). 하한 CI로 보정
+META_CI_Z = float(os.getenv("META_CI_Z", "1.64"))
+# 표본수 스무딩을 위한 베이지안 블렌딩 기준 n0
+META_MIN_N = int(os.getenv("META_MIN_N", "30"))
+
 # ======================= (A) MAML (유지) =======================
 if _TORCH_OK:
     class MAML:
@@ -223,7 +231,8 @@ def _aggregate_base_outputs(
     return agg.astype(np.float32), detail
 
 
-# ======= (NEW) 1% 미만 페널티 헬퍼 =======
+# ======= (NEW) 폭·신뢰도 보정 유틸 =======
+
 def _ret_gain(er: float) -> float:
     """
     기대수익률 절댓값 er -> 점수 가중치.
@@ -234,9 +243,109 @@ def _ret_gain(er: float) -> float:
     return max(0.0, er_abs - _RET_TH)
 
 
+def _extract_counts(meta_info: Dict) -> Dict[int, int]:
+    """
+    성공률 표본수 추정: meta_info에 있을 법한 키들을 유연하게 수용.
+    허용 키(하나라도 있으면 사용):
+      - "counts"            : {cls: n}
+      - "trial_counts"      : {cls: n}
+      - "samples"           : {cls: n}
+      - "success_total"     : {cls: (s, n)} 형태도 허용
+    """
+    if not isinstance(meta_info, dict):
+        return {}
+    cand = {}
+    for k in ["counts", "trial_counts", "samples"]:
+        v = meta_info.get(k)
+        if isinstance(v, dict):
+            # 숫자만 취함
+            cand = {int(c): int(vv) for c, vv in v.items() if isinstance(vv, (int, float))}
+            if cand:
+                return cand
+    # (s, n) 튜플 형태 지원
+    v = meta_info.get("success_total")
+    if isinstance(v, dict):
+        out = {}
+        for c, pair in v.items():
+            try:
+                s, n = pair
+                out[int(c)] = int(n)
+            except Exception:
+                pass
+        if out:
+            return out
+    return {}
+
+
+def _adjust_success_rates_with_ci(
+    sr_dict: Dict[int, float],
+    counts: Dict[int, int],
+    z: float = META_CI_Z,
+    n0: int = META_MIN_N,
+    prior: float = META_BASE_SUCCESS
+) -> Dict[int, float]:
+    """
+    성공률 신뢰구간 하한으로 보정 + 표본수 부족 시 prior와 베이지안 블렌딩.
+    - sr' = max(0, sr - z*sqrt(sr*(1-sr)/n))
+    - n이 작으면 sr <- (n/(n+n0))*sr + (n0/(n+n0))*prior  (사전정보와 혼합)
+    """
+    out: Dict[int, float] = {}
+    for c, sr in sr_dict.items():
+        try:
+            sr = float(sr)
+        except Exception:
+            continue
+        sr = max(0.0, min(1.0, sr))
+        n = int(counts.get(c, 0))
+        # 베이지안 블렌딩 (n이 작을수록 prior 비중↑)
+        if n >= 0:
+            sr_blend = (n / (n + n0)) * sr + (n0 / (n + n0)) * prior
+        else:
+            sr_blend = sr
+        # CI 하향 보정
+        if n > 0:
+            se = math.sqrt(max(1e-12, sr_blend * (1.0 - sr_blend) / n))
+            lo = max(0.0, sr_blend - z * se)
+            out[int(c)] = float(lo)
+        else:
+            # 표본 전무 → prior에 의존
+            out[int(c)] = float(max(0.0, prior - z * math.sqrt(prior * (1 - prior) / (n0 + 1e-9))))
+    return out
+
+
+def _width_scaled_er(
+    er_dict: Dict[int, float],
+    class_ranges: Optional[List[Tuple[float, float]]] = None,
+    max_width: float = CLAMP_MAX_WIDTH
+) -> Dict[int, float]:
+    """
+    클래스 폭(clamp) 반영: 폭이 max_width를 초과하면 기대수익 영향도를 축소.
+    - 스케일 팩터 = min(1, max_width / width)
+    - class_ranges가 없으면 er 자체 사용(폭 정보가 없으니 보정하지 않음)
+    """
+    if not class_ranges:
+        return {int(c): float(er) for c, er in er_dict.items()}
+    out: Dict[int, float] = {}
+    for c, er in er_dict.items():
+        try:
+            lo, hi = class_ranges[int(c)]
+            width = float(hi) - float(lo)
+        except Exception:
+            width = None
+        if width is None or width <= 0:
+            out[int(c)] = float(er)
+            continue
+        # 기대수익 영향도 축소 (폭이 클수록 축소)
+        scale = min(1.0, max(1e-9, float(max_width) / abs(width)))
+        out[int(c)] = float(er) * scale
+    return out
+
+
+# ========== (E) 단독 유틸: 성공률/수익률 고려 최종 클래스 산출 ==========
 def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None):
     """
     (유지) 단독 유틸: 성공률/수익률 고려 스코어로 최종 클래스 산출
+    + (추가) 폭·신뢰도 보정
     """
     if not model_outputs_list:
         raise ValueError("❌ get_meta_prediction: 모델 출력 없음")
@@ -254,8 +363,18 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
     avg_softmax = _normalize(np.mean(softmax_list, axis=0))
 
     meta_info = meta_info or {}
-    success_rate_dict = meta_info.get("success_rate", {})
-    expected_return_dict = meta_info.get("expected_return", {})
+    success_rate_dict = dict(meta_info.get("success_rate", {}))
+    expected_return_dict = dict(meta_info.get("expected_return", {}))
+    class_ranges = meta_info.get("class_ranges", None)
+
+    # (NEW) 성공률 신뢰구간 보정
+    counts = _extract_counts(meta_info)
+    if success_rate_dict:
+        success_rate_dict = _adjust_success_rates_with_ci(success_rate_dict, counts)
+
+    # (NEW) 폭 기반 기대수익 영향도 축소
+    if expected_return_dict:
+        expected_return_dict = _width_scaled_er(expected_return_dict, class_ranges, CLAMP_MAX_WIDTH)
 
     scores = np.zeros(num_classes, dtype=np.float64)
     all_below = True
@@ -267,7 +386,7 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
             all_below = False
         scores[c] = float(avg_softmax[c]) * sr * g
 
-    mode = "성공률 기반 메타" if success_rate_dict else "기본 메타 (성공률 無)"
+    mode = "성공률 기반 메타(CI/폭보정)" if success_rate_dict or expected_return_dict else "기본 메타 (성공률/ER 無)"
     if all_below:
         scores = avg_softmax.copy()
         mode += " / all<TH→prob선택"
@@ -277,7 +396,7 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
     return final_pred_class
 
 
-# ================= (E) EVO-메타 연동 보조 =================
+# ================= (F) EVO-메타 연동 보조 =================
 def _build_evo_meta_vector(
     agg_probs: np.ndarray,
     expected_return: Dict[int, float]
@@ -324,7 +443,7 @@ def _maybe_evo_decide(
     return None
 
 
-# ========== (F) 단일 진입점: meta_predict(...) ==========
+# ========== (G) 단일 진입점: meta_predict(...) ==========
 def meta_predict(
     symbol: str,
     horizon: str,
@@ -342,21 +461,35 @@ def meta_predict(
     ✅ 단일 진입점
     - 베이스 모델 출력 집계 + EVO-메타/스태킹/룰기반 폴백
     - 성공률/실패율/수익률을 모두 고려
+    - (NEW) 클래스폭·성공률 신뢰도 보정 통합
     """
     meta_state = meta_state or {}
-    class_success = meta_state.get("success_rate", {})
-    expected_return = meta_state.get("expected_return", {})
+    class_success_raw = dict(meta_state.get("success_rate", {}))
+    expected_return_raw = dict(meta_state.get("expected_return", {}))
+    class_ranges = meta_state.get("class_ranges", None)
 
     # (1) 집계
-    agg_probs, detail = _aggregate_base_outputs(groups_outputs, class_success, mode=agg_mode)
+    agg_probs, detail = _aggregate_base_outputs(groups_outputs, class_success_raw, mode=agg_mode)
 
     used_mode = agg_mode
     final_class = int(np.argmax(agg_probs))
 
+    # (NEW) 성공률 신뢰구간 보정 + 폭 보정된 기대수익
+    counts = _extract_counts(meta_state)
+    if class_success_raw:
+        class_success_ci = _adjust_success_rates_with_ci(class_success_raw, counts)
+    else:
+        class_success_ci = {}
+
+    if expected_return_raw:
+        expected_return_scaled = _width_scaled_er(expected_return_raw, class_ranges, CLAMP_MAX_WIDTH)
+    else:
+        expected_return_scaled = {}
+
     # (2) EVO 메타 (가능하면 최우선 시도)
     evo_choice: Optional[int] = None
     if use_evo_meta:
-        evo_choice = _maybe_evo_decide(groups_outputs, agg_probs, expected_return)
+        evo_choice = _maybe_evo_decide(groups_outputs, agg_probs, expected_return_scaled)
         if isinstance(evo_choice, int):
             used_mode = "evo_meta"
             final_class = int(evo_choice)
@@ -376,7 +509,7 @@ def meta_predict(
                     final_class = int(stacked_pred)
                     used_mode = "stacking"
                     if len(proba) == len(agg_probs):
-                        agg_probs = proba.astype(np.float32)
+                        agg_probs = _normalize(proba.astype(np.float64)).astype(np.float32)
                 else:
                     final_class = int(stacked_pred)
                     used_mode = "stacking(base-probs)"
@@ -389,24 +522,33 @@ def meta_predict(
     margin = float(top1p - float(np.partition(agg_probs, -2)[-2]) if len(agg_probs) >= 2 else top1p)
     ent = _entropy(agg_probs)
 
-    # EVO/스태킹 결과와 집계 확률 간 충돌 시 판단 강화
-    low_conf = (margin < 0.05) or (ent > math.log(max(2, len(agg_probs))) * 0.8)
+    # CI/폭 보정을 반영한 스코어링
     scores = agg_probs.astype(np.float64).copy()
-    for c in range(len(scores)):
-        sr = float(class_success.get(c, META_BASE_SUCCESS))
-        sr = max(0.0, min(sr, 1.0))
+    C = len(scores)
+    all_er_below = True
+    for c in range(C):
+        sr = float(class_success_ci.get(c, META_BASE_SUCCESS))
+        sr = max(0.0, min(1.0, sr))
         fr = 1.0 - sr
-        er = float(expected_return.get(c, 0.0))
+        er = float(expected_return_scaled.get(c, 0.0))
         g = _ret_gain(er)
-        scores[c] = scores[c] * sr * g * (1.0 - 0.3*fr)
+        if g > 0:
+            all_er_below = False
+        scores[c] = scores[c] * sr * g * (1.0 - 0.3 * fr)
 
-    # 기대수익률 전부 임계 미만이면 확률에 폴백
-    if np.all([_ret_gain(float(expected_return.get(c, 0.0))) == 0.0 for c in range(len(scores))]):
+    low_conf = (margin < 0.05) or (ent > math.log(max(2, len(agg_probs))) * 0.8)
+
+    # 기대수익률 전부 임계 미만이면 확률로 폴백
+    if all_er_below:
         scores = agg_probs.astype(np.float64).copy()
         low_conf = True
 
     rule_choice = int(np.argmax(scores))
     detail["final_scores"] = np.round(scores, 4).tolist()
+    detail["success_rate_ci"] = {int(k): float(v) for k, v in class_success_ci.items()}
+    detail["expected_return_scaled"] = {int(k): float(v) for k, v in expected_return_scaled.items()}
+    detail["ci_z"] = float(META_CI_Z)
+    detail["clamp_max_width"] = float(CLAMP_MAX_WIDTH)
 
     # 최종 선택 규칙:
     # - 우선순위: EVO > 스태킹 > 집계
@@ -434,12 +576,13 @@ def meta_predict(
 
     # (5) 로깅
     if log:
-        er_cho = float(expected_return.get(result["class"], 0.0))
-        sr_cho = class_success.get(result["class"], None)
+        er_cho = float(expected_return_scaled.get(result["class"], 0.0))
+        sr_cho = class_success_ci.get(result["class"], None)
         note = (f"meta:{used_mode} top1={result['class']} p={result['confidence']:.3f} "
                 f"margin={result['margin']:.3f} ER={er_cho:.4f} "
                 f"SR={('-' if sr_cho is None else f'{float(sr_cho):.2f}')} "
-                f"TH={_RET_TH:.2%} EVO_AGG={EVO_META_AGG} γ={EVO_META_VAR_GAMMA}")
+                f"TH={_RET_TH:.2%} EVO_AGG={EVO_META_AGG} γ={EVO_META_VAR_GAMMA} "
+                f"CIz={META_CI_Z:.2f} Wmax={CLAMP_MAX_WIDTH:.3f}")
         reason = f"entropy={result['entropy']:.3f}"
         _safe_log_prediction(
             symbol=symbol,
