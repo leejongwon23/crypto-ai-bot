@@ -1,14 +1,13 @@
-# === predict.py — F1/라벨분포 비의존, gate-respecting, robust I/O (ENSEMBLE-FIRST, FINAL v1.1) ===
-# (2025-09-20, 1단계 최종)
+# === predict.py — Meta-only final (FINAL v1.1, no cross-model ensemble) ===
+# (2025-09-20, 메타러너만 최종 선택 — 교차-모델 앙상블 제거)
 # 변경 핵심:
-#   - 모델 게이트: meta.passed==1 만 요구( val_f1 / min_f1_gate 미사용 )
-#   - 후보 모델 점수: 확률 p만 사용( f1가중 제거 )
-#   - Top3 앙상블 선별: 파일명 정렬 → "캘리브 최대값" 상위 3개 기반 평균으로 개선
-#   - 분포 보정은 기본 OFF(ADJUST_WITH_DIVERSITY=1로만 활성)
+#   - 교차-모델 앙상블(Top-k 평균/투표 등) 전면 제거
+#   - 최종 선택 경로: [진화형 메타러너] → [단일모델 경쟁 + 탐험] → [최소 기대수익 가드/보정] → [보류컷]
+#   - STRICT_BOUNDS, 윈도우 앙상블(mean / var-penalize), 게이트/락/하트비트/로깅 그대로 유지
 # 유지:
-#   - STRICT_BOUNDS (meta.class_ranges 미존재시 스킵)
-#   - 윈도우 앙상블(mean / var-penalize)
-#   - ABSTAIN_PROB_MIN, 최소 기대수익 필터, 게이트/락/하트비트
+#   - 모델 게이트: meta.passed==1 만 확인
+#   - 후보 모델 점수: 확률 p만 사용( f1 가중 제거 유지 )
+#   - 분포 보정 토글 ADJUST_WITH_DIVERSITY는 그대로(기본 OFF)
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -564,40 +563,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             return _soft_abstain(symbol, strategy, reason="no_valid_model", meta_choice="abstain", regime=regime, X_last=X[-1], group_id=None, df=df) \
                    if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="no_valid_model", source=source, X_input=X[-1])
 
-        # ── 앙상블 후보(상위 3개 mean of calibrated) — 개선: 확률 기반 선별
-        try:
-            if len(outs) >= 2:
-                # 각 모델의 "최대 캘리브 확률"로 상위 k 선별
-                scored = []
-                for i, m in enumerate(outs):
-                    cp = np.asarray(m.get("calib_probs", []), dtype=float)
-                    if cp.size == 0: continue
-                    scored.append((i, float(cp.max())))
-                scored.sort(key=lambda t: t[1], reverse=True)
-                keep_idx = [i for i, _ in scored[:min(3, len(scored))]]
-                if len(keep_idx) >= 2:
-                    # 클래스 수 정합
-                    nc = min([len(np.asarray(outs[i]["calib_probs"])) for i in keep_idx])
-                    if nc >= 2:
-                        mean_c = np.mean([np.asarray(outs[i]["calib_probs"][:nc], dtype=float) for i in keep_idx], axis=0)
-                        mean_c = (mean_c / (mean_c.sum() + 1e-12)).astype(float)
-                        mean_r = np.mean([np.asarray(outs[i]["raw_probs"][:nc], dtype=float) for i in keep_idx], axis=0)
-                        outs.append({
-                            "raw_probs": mean_r,
-                            "calib_probs": mean_c,
-                            "predicted_class": int(np.argmax(mean_c)),
-                            "group_id": -1,
-                            "model_type": "ensemble",
-                            "model_path": "ensemble_mean_top3",
-                            "val_f1": None,
-                            "symbol": symbol,
-                            "strategy": strategy,
-                            "meta": {"model": "ensemble", "num_classes": int(nc),
-                                     "class_ranges": _ranges_from_meta(outs[keep_idx[0]].get("meta"))}
-                        })
-        except Exception as e:
-            print(f"[앙상블 구성 예외] {e}")
-
         # ── 시장 포지션 힌트
         hint = _position_hint_from_market(df)
         allow_long, allow_short = bool(hint["allow_long"]), bool(hint["allow_short"])
@@ -616,42 +581,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
             except Exception as e:
                 print(f"[evo_meta 예외] {e}")
 
-        # (B0) Ensemble-first
+        # Helper: 분포 보정(옵션)
         def _maybe_adjust(probs, recent):
             if ADJUST_WITH_DIVERSITY:
                 return adjust_probs_with_diversity(probs, recent, class_counts=None, alpha=0.10, beta=0.10)
             return np.asarray(probs, dtype=float)
 
-        if final_cls is None:
-            ens_idx = None
-            for i, m in enumerate(outs):
-                if str(m.get("model_type","")) == "ensemble":
-                    ens_idx = i; break
-            if ens_idx is not None:
-                m = outs[ens_idx]
-                adj = _maybe_adjust(m["calib_probs"], rec_freq)
-                mask = np.zeros_like(adj, dtype=float)
-                for ci in range(len(adj)):
-                    try:
-                        lo, hi = _class_range_by_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
-                        if _meets_minret_with_hint(lo, hi, allow_long, allow_short, MIN_RET_THRESHOLD):
-                            mask[ci] = 1.0
-                    except Exception:
-                        pass
-                filt = adj * mask
-                if filt.sum() > 0:
-                    filt = filt / filt.sum(); pred = int(np.argmax(filt)); fused = True
-                else:
-                    pred = int(np.argmax(adj)); fused = False
-                if float(np.max(m["calib_probs"])) >= ABSTAIN_PROB_MIN:
-                    try:
-                        lo_e, hi_e = _class_range_by_meta_or_cfg(pred, m.get("meta"), symbol, strategy)
-                        if _meets_minret_with_hint(lo_e, hi_e, allow_long, allow_short, MIN_RET_THRESHOLD):
-                            final_cls = int(pred); chosen = m; used_minret = fused; meta_choice = "ensemble_mean_top3"
-                    except Exception:
-                        pass
-
-        # (B1) 단일/앙상블 경쟁 + 탐험(점수=확률만)
+        # (B1) 단일모델 경쟁 + 탐험(점수=확률만)
         if final_cls is None:
             best_i, best_score, best_pred = -1, -1.0, None; scores = []
             for i, m in enumerate(outs):
