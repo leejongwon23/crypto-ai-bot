@@ -1,9 +1,10 @@
-# === failure_db.py (v2025-09-18a) ===
+# === failure_db.py (v2025-09-30b, 견고화 반영본) ===
 # 실패 레코드 표준화 + 안전 CSV/SQLite 동시 기록
 # - wrong_predictions.csv 스키마를 로더(wrong_data_loader.py)가 기대하는 최소 컬럼을 보장
 # - 중복가드: feature_hash / 근접타임스탬프+키 기준
 # - 원인태깅: negative_label, nan_label, prob_nan, class_out_of_range, bounds_mismatch 등
 # - 즉시 경보: 콘솔(필수) + /persistent/logs/alerts.log 파일(선택)
+# - 2025-09-30: SQL 조건/CSV-락/SQLite 재시도 패치
 
 import os, csv, json, math, hashlib, time, threading, datetime, pytz
 import sqlite3
@@ -33,11 +34,6 @@ WRONG_HEADERS = [
     "raw_prob","calib_prob","calib_ver",
     "feature_hash","feature_vector","source","source_exchange"
 ]
-
-# wrong_data_loader.py 가 사용하는 주요 컬럼:
-# - timestamp, symbol, strategy, predicted_class  (필수)
-# - regime, raw_prob, calib_prob (있으면 사용)
-# 위 3개는 항상 쓰도록 보장한다.
 
 # ------------- 공용 유틸 -------------
 def _now_kst_iso():
@@ -151,7 +147,6 @@ def ensure_failure_db():
 def _candidate_hash(record: Dict[str, Any]) -> str:
     if record is None:
         return "none"
-    # 우선 주어진 feature_hash 사용, 없으면 feature_vector에서 생성
     fh = str(record.get("feature_hash") or "").strip()
     if fh:
         return fh
@@ -168,12 +163,22 @@ def check_failure_exists(row: Dict[str, Any]) -> bool:
     """최근(±90분) 동일 키의 실패 레코드 존재 여부"""
     try:
         ensure_failure_db()
+
         ts = pd.to_datetime(row.get("timestamp"), errors="coerce")
         if pd.isna(ts):
             return False
-        ts_min = (ts - pd.Timedelta(minutes=90)).isoformat()
-        ts_max = (ts + pd.Timedelta(minutes=90)).isoformat()
-        sym = str(row.get("symbol","")); strat = str(row.get("strategy",""))
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("Asia/Seoul")
+        else:
+            ts = ts.tz_convert("Asia/Seoul")
+
+        ts_min_ts = ts - pd.Timedelta(minutes=90)
+        ts_max_ts = ts + pd.Timedelta(minutes=90)
+        ts_min = ts_min_ts.isoformat()
+        ts_max = ts_max_ts.isoformat()
+
+        sym = str(row.get("symbol", ""))
+        strat = str(row.get("strategy", ""))
         pcls = _safe_int(row.get("predicted_class"), default="")
         fh = _candidate_hash(row)
 
@@ -183,44 +188,59 @@ def check_failure_exists(row: Dict[str, Any]) -> bool:
             c = conn.cursor()
             c.execute("""
                 SELECT 1 FROM failures
-                 WHERE symbol=? AND strategy=? 
-                   AND (ts BETWEEN ? AND ?)
-                   AND (predicted_class IS ? OR predicted_class=?)
-                   AND (feature_hash=? OR ?='none')
+                 WHERE symbol=? AND strategy=?
+                   AND ts BETWEEN ? AND ?
+                   AND (? = '' OR predicted_class = ?)
+                   AND (? = 'none' OR feature_hash = ?)
                  LIMIT 1;
-            """, (sym, strat, ts_min, ts_max, None if pcls=="" else pcls, None if pcls=="" else pcls, fh, fh))
+            """, (sym, strat, ts_min, ts_max,
+                  "" if pcls == "" else None, pcls if pcls != "" else None,
+                  fh, fh))
             hit = c.fetchone()
             c.close()
-            if hit:
-                return True
+        if hit:
+            return True
 
-        # 2) CSV의 최근 부분만 스캔(최대 20000행)
+        # 2) CSV 최근 부분 스캔
         if os.path.exists(WRONG_CSV):
             try:
                 tail_rows = 20000
-                df = pd.read_csv(WRONG_CSV, encoding="utf-8-sig")
+                use = ["timestamp", "symbol", "strategy", "predicted_class", "feature_hash"]
+                df = pd.read_csv(WRONG_CSV, encoding="utf-8-sig", usecols=lambda c: c in use)
                 if len(df) > tail_rows:
                     df = df.tail(tail_rows)
-                df = df[(df.get("symbol","")==sym) & (df.get("strategy","")==strat)]
-                if not df.empty:
-                    t = pd.to_datetime(df.get("timestamp"), errors="coerce")
-                    m = (t >= ts_min) & (t <= ts_max)
-                    df = df[m]
-                    if "feature_hash" in df.columns and fh != "none":
-                        if (df["feature_hash"].astype(str) == fh).any():
-                            return True
-                    if "predicted_class" in df.columns and pcls != "":
-                        if (pd.to_numeric(df["predicted_class"], errors="coerce")==int(pcls)).any() and not df.empty:
-                            return True
+
+                df = df[(df["symbol"] == sym) & (df["strategy"] == strat)].copy()
+                if df.empty:
+                    return False
+
+                t = pd.to_datetime(df["timestamp"], errors="coerce")
+                t = t.dt.tz_localize("Asia/Seoul", nonexistent="NaT", ambiguous="NaT", errors="ignore")
+                m = (t >= ts_min_ts) & (t <= ts_max_ts)
+                df = df[m]
+
+                if df.empty:
+                    return False
+
+                if fh != "none" and "feature_hash" in df.columns:
+                    if (df["feature_hash"].astype(str) == fh).any():
+                        return True
+
+                if pcls != "" and "predicted_class" in df.columns:
+                    pc = pd.to_numeric(df["predicted_class"], errors="coerce")
+                    if (pc == int(pcls)).any():
+                        return True
+
+                return False
             except Exception:
-                pass
+                return False
+
         return False
     except Exception:
         return False
 
 # ------------- 기존 실패 해시 로딩 -------------
 def load_existing_failure_hashes() -> set:
-    """wrong_predictions.csv 의 feature_hash 집합(중복가드용)"""
     ensure_failure_db()
     hashes = set()
     try:
@@ -242,7 +262,6 @@ def _classify_failure_reason(rec: Dict[str, Any]) -> str:
                 if li < 0:
                     return "negative_label"
             except Exception:
-                # 라벨 파싱 불가 → nan_label 취급
                 return "nan_label"
         rp = rec.get("raw_prob", None)
         cp = rec.get("calib_prob", None)
@@ -250,8 +269,6 @@ def _classify_failure_reason(rec: Dict[str, Any]) -> str:
             return "prob_nan"
         if cp not in (None, "") and (math.isnan(float(cp)) or math.isinf(float(cp))):
             return "prob_nan"
-
-        # 클래스 범위 불일치/초과 등은 상위 레이어에서 전달된 reason을 우선
         rs = str(rec.get("reason","")).strip().lower()
         if "bounds" in rs or "range" in rs:
             return "bounds_mismatch"
@@ -270,21 +287,40 @@ def _emit_alert(msg: str):
     except Exception:
         pass
 
+# ------------- CSV append with lock/retry -------------
+def _append_wrong_csv_row(row: Dict[str, Any], max_retries: int = 5, sleep_sec: float = 0.05):
+    _ensure_wrong_csv()
+    attempt = 0
+    while True:
+        try:
+            try:
+                import fcntl
+                with open(WRONG_CSV, "a", newline="", encoding="utf-8-sig") as f:
+                    try: fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    except Exception: pass
+                    w = csv.DictWriter(f, fieldnames=WRONG_HEADERS)
+                    w.writerow({k: row.get(k, "") for k in WRONG_HEADERS})
+                    try: f.flush(); os.fsync(f.fileno())
+                    except Exception: pass
+            except Exception:
+                with open(WRONG_CSV, "a", newline="", encoding="utf-8-sig") as f:
+                    w = csv.DictWriter(f, fieldnames=WRONG_HEADERS)
+                    w.writerow({k: row.get(k, "") for k in WRONG_HEADERS})
+            return
+        except Exception:
+            attempt += 1
+            if attempt >= max_retries:
+                raise
+            time.sleep(sleep_sec)
+
 # ------------- 메인 API -------------
 def insert_failure_record(record: Dict[str, Any],
                           feature_hash: Optional[str] = None,
                           label: Optional[int] = None,
                           feature_vector: Optional[Iterable[float]] = None,
                           context: Optional[str] = None) -> bool:
-    """
-    실패 레코드를 CSV/SQLite 두 곳에 기록.
-    - record: logger/evaluator가 넘기는 dict(필수 키는 유연)
-    - feature_hash/label/feature_vector/context: 보강 필드(있으면 우선 사용)
-    반환: True(기록됨) / False(중복 또는 오류)
-    """
     try:
         ensure_failure_db()
-
         rec = dict(record or {})
         rec = _sanitize_dict(rec)
 
@@ -296,16 +332,12 @@ def insert_failure_record(record: Dict[str, Any],
 
         fv = feature_vector if feature_vector is not None else rec.get("feature_vector", None)
         if isinstance(fv, str):
-            try:
-                fv = json.loads(fv)
-            except Exception:
-                fv = []
+            try: fv = json.loads(fv)
+            except Exception: fv = []
         fh = feature_hash or rec.get("feature_hash") or (_sha1_of_list(fv) if isinstance(fv,(list,tuple,np.ndarray)) else "none")
 
         row = {
-            "timestamp": ts,
-            "symbol": sym,
-            "strategy": strat,
+            "timestamp": ts, "symbol": sym, "strategy": strat,
             "predicted_class": pcls if pcls != "" else -1,
             "label": lbl if lbl != "" else -1,
             "model": rec.get("model",""),
@@ -327,48 +359,44 @@ def insert_failure_record(record: Dict[str, Any],
             "source_exchange": rec.get("source_exchange","BYBIT"),
         }
 
-        # 원인 자동 태깅(빈 reason이면 보강)
         auto_reason = _classify_failure_reason({**rec, **row})
         if not str(row["reason"]).strip():
             row["reason"] = auto_reason
 
-        # 중복이면 패스
         if check_failure_exists({**rec, **row}):
             return False
 
-        # CSV 기록
-        _ensure_wrong_csv()
-        write_header = (not os.path.exists(WRONG_CSV)) or os.path.getsize(WRONG_CSV) == 0
-        with open(WRONG_CSV, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=WRONG_HEADERS)
-            if write_header:
-                w.writeheader()
-            safe_row = {k: row.get(k, "") for k in WRONG_HEADERS}
-            w.writerow(safe_row)
+        try: _append_wrong_csv_row(row)
+        except Exception as e: print(f"[failure_db] CSV 기록 실패: {e}")
 
-        # SQLite 기록
         try:
-            with _db_lock:
-                conn = _get_db()
-                c = conn.cursor()
-                c.execute("""
-                    INSERT OR IGNORE INTO failures
-                    (ts,symbol,strategy,predicted_class,label,model,group_id,reason,context,regime,raw_prob,calib_prob,feature_hash)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, (row["timestamp"], row["symbol"], row["strategy"],
-                      None if row["predicted_class"]=="" else row["predicted_class"],
-                      None if row["label"]=="" else row["label"],
-                      row["model"], None if row["group_id"]=="" else row["group_id"],
-                      row["reason"], row["context"], row["regime"],
-                      None if row["raw_prob"]=="" else row["raw_prob"],
-                      None if row["calib_prob"]=="" else row["calib_prob"],
-                      row["feature_hash"]))
-                conn.commit()
-                c.close()
+            max_trials = 5
+            for k in range(max_trials):
+                try:
+                    with _db_lock:
+                        conn = _get_db()
+                        c = conn.cursor()
+                        c.execute("""
+                            INSERT OR IGNORE INTO failures
+                            (ts,symbol,strategy,predicted_class,label,model,group_id,reason,context,regime,raw_prob,calib_prob,feature_hash)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """, (row["timestamp"], row["symbol"], row["strategy"],
+                              None if row["predicted_class"]=="" else row["predicted_class"],
+                              None if row["label"]=="" else row["label"],
+                              row["model"], None if row["group_id"]=="" else row["group_id"],
+                              row["reason"], row["context"], row["regime"],
+                              None if row["raw_prob"]=="" else row["raw_prob"],
+                              None if row["calib_prob"]=="" else row["calib_prob"],
+                              row["feature_hash"]))
+                        conn.commit(); c.close()
+                    break
+                except sqlite3.OperationalError as oe:
+                    if "locked" in str(oe).lower() and k < max_trials-1:
+                        time.sleep(0.05*(k+1)); continue
+                    raise
         except Exception as e:
             print(f"[failure_db] sqlite 기록 실패: {e}")
 
-        # 즉시 경보(선택) — 음수라벨/NaN/범위불일치 등은 강도 높게
         if row["reason"] in ["negative_label","nan_label","prob_nan","class_out_of_range","bounds_mismatch"]:
             _emit_alert(f"{row['symbol']}-{row['strategy']} reason={row['reason']} pcls={row['predicted_class']} label={row['label']}")
 
