@@ -124,23 +124,80 @@ def make_labels(
     lows = ranges_arr[:, 0]
     highs = ranges_arr[:, 1]
 
-    # --- 경계 마스크: ±BOUNDARY_BAND 이내 샘플 -1
+    # --- 마지막 구간 우측 포함
+    highs_adj = highs.copy()
+    highs_adj[-1] = highs[-1] + 1e-12
+
+    # --- 벡터화 binning (우측 포함 처리)
+    edges = np.concatenate(([lows[0]], highs_adj), axis=0)  # 길이 C+1
+    bins = np.searchsorted(edges, gains, side="right") - 1
+    bins = np.clip(bins, 0, len(class_ranges) - 1).astype(np.int64)
+
+    # --- 경계 마스크 1차 적용: ±BOUNDARY_BAND
     gcol = gains.reshape(-1, 1)  # (N,1)
     near_lo = np.abs(gcol - lows.reshape(1, -1)) <= BOUNDARY_BAND
     near_hi = np.abs(gcol - highs.reshape(1, -1)) <= BOUNDARY_BAND
     is_mask = np.any(near_lo | near_hi, axis=1)
 
-    # --- 마지막 구간 우측 포함
-    highs_adj = highs.copy()
-    highs_adj[-1] = highs[-1] + 1e-12
-
-    # --- 벡터화 binning
-    edges = np.concatenate(([lows[0]], highs_adj), axis=0)  # 길이 C+1
-    bins = np.searchsorted(edges, gains, side="right") - 1
-    bins = np.clip(bins, 0, len(class_ranges) - 1).astype(np.int64)
-
     labels[:] = bins
     labels[is_mask] = -1
+
+    # -----------------------------
+    # ✅ 가드 1: 마스크 과다 시 자동 완화
+    #  - 경계밴드가 너무 넓어 다수 샘플이 -1 되면 밴드를 절반으로 줄여 재적용
+    #  - 그래도 과다하면 원상복구(1차 결과 유지)하되 경고 로그만 남김
+    # -----------------------------
+    try:
+        masked_ratio = float((labels == -1).sum()) / float(max(1, n))
+    except Exception:
+        masked_ratio = 0.0
+
+    if masked_ratio > 0.60 and n > 0:
+        try:
+            # 밴드 축소 후 재마스킹
+            shrink_band = float(BOUNDARY_BAND) * 0.5
+            near_lo2 = np.abs(gcol - lows.reshape(1, -1)) <= shrink_band
+            near_hi2 = np.abs(gcol - highs.reshape(1, -1)) <= shrink_band
+            is_mask2 = np.any(near_lo2 | near_hi2, axis=1)
+            labels2 = bins.copy()
+            labels2[is_mask2] = -1
+
+            masked_ratio2 = float((labels2 == -1).sum()) / float(max(1, n))
+            # 더 나아졌으면 교체
+            if masked_ratio2 + 1e-6 < masked_ratio:
+                labels = labels2
+                logger.info(
+                    "make_labels: boundary band shrunk %.4f->%.4f (mask %.2f%% -> %.2f%%) %s/%s",
+                    float(BOUNDARY_BAND),
+                    shrink_band,
+                    masked_ratio * 100.0,
+                    masked_ratio2 * 100.0,
+                    symbol,
+                    strategy,
+                )
+        except Exception as e:
+            logger.warning("make_labels: band shrink safeguard failed: %s", e)
+
+    # -----------------------------
+    # ✅ 가드 2: 유효 클래스 수 커버리지 체크
+    #  - 마스킹 제외 후 클래스가 1개 이하이면 상위단에서 증강/폴드축소를 하도록
+    #    전부 -1로 리턴하여 '학습 보류' 시그널을 보낸다.
+    # -----------------------------
+    try:
+        valid = labels[labels >= 0]
+        n_valid = int(valid.size)
+        n_unique = int(np.unique(valid).size) if n_valid > 0 else 0
+        if n_unique <= 1:
+            labels[:] = -1
+            logger.warning(
+                "make_labels: insufficient class coverage after masking (%d unique). "
+                "Mark all as -1 to trigger augmentation/CV fallback. %s/%s",
+                n_unique,
+                symbol,
+                strategy,
+            )
+    except Exception as e:
+        logger.warning("make_labels: coverage check failed: %s", e)
 
     # --- 방어 검사
     if not ((labels == -1) | ((labels >= 0) & (labels < len(class_ranges)))).all():
