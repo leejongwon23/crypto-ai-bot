@@ -1,51 +1,39 @@
-# config.py (STEP 5 FINAL+++)
-# - 클래스 수 단순화(8개 고정) + 경계(Zero band) 완화 + 희소구간 병합 ON
-# - 데이터 병합/클래스 일관성/CV 가드 옵션 유지
-# - 디버그 로그 변수 오타(_ROUND_DECIMALS → _ROUNDS_DECIMALS) 수정
-import json
-import os
+# config.py — Dynamic classing w/ safety rails: min/max width, zero band, sparse merge, CV guards
+import json, os
 
 CONFIG_PATH = "/persistent/config.json"
 
-# ===============================
-# 기본 설정 + 신규 옵션
-# ===============================
 _default_config = {
-    # ✅ 클래스 개수 정책 (단순화)
-    "NUM_CLASSES": 8,      # 기존 10 → 8
-    "MAX_CLASSES": 8,      # 기존 12 → 8 (상한도 8로 맞춤)
-
+    "NUM_CLASSES": 10,          # 동적 힌트(최소 권고치) — 실제 n은 데이터가 결정
+    "MAX_CLASSES": 12,          # 상한
     "FEATURE_INPUT_SIZE": 24,
     "FAIL_AUGMENT_RATIO": 3,
     "MIN_FEATURES": 5,
     "SYMBOLS": ["BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "ADAUSDT"],
     "SYMBOL_GROUP_SIZE": 3,
 
-    # ✅ 패턴/블렌딩 파라미터(후속 단계에서 사용)
     "PATTERN": {"K": 200},
     "BLEND":   {"alpha": 0.6, "beta": 0.2, "gamma": 0.2, "enabled": True},
 
-    # ✅ SSL 캐시 디렉토리
     "SSL_CACHE_DIR": "/persistent/ssl_models",
 
-    # --- [DATA] 거래소 병합/정합 옵션 ---
+    # DATA: 거래소 병합/정합
     "DATA": {
-        "merge_enabled": True,                       # Bybit+Binance 병합 기본 ON
-        "sources": ["bybit", "binance"],            # 우선순위는 prefer가 결정
-        "prefer": "binance_if_overlap",             # 겹치면 binance 우선
+        "merge_enabled": True,
+        "sources": ["bybit", "binance"],
+        "prefer": "binance_if_overlap",
         "align": {"method": "timestamp", "tolerance_sec": 60},
-        "fill":  {"method": "ffill", "max_gap": 2}, # 2개 캔들까지 전방 보간 허용
+        "fill":  {"method": "ffill", "max_gap": 2},
         "dedup": {"enabled": True, "keep": "last"}
     },
 
-    # --- [CLASS_ENFORCE] 그룹/심볼 간 클래스 수 일관성 ---
+    # 클래스 일관성 정책 (강제 고정 n_override는 기본 None → 동적)
     "CLASS_ENFORCE": {
-        "same_across_groups": True,   # 그룹0/1/2가 항상 동일 클래스 수 사용
-        "same_across_symbols": True,  # 다른 심볼도 동일 클래스 수 사용
-        "n_override": 8               # ✅ 강제 고정: 8
+        "same_across_groups": True,
+        "same_across_symbols": True,
+        "n_override": None
     },
 
-    # --- [2] 레짐(시장상태) 태깅 옵션 ---
     "REGIME": {
         "enabled": False,
         "lookback": 200,
@@ -57,7 +45,6 @@ _default_config = {
         "cooldown_min": 5
     },
 
-    # --- [3] 확률 캘리브레이션(스케일링) 옵션 ---
     "CALIB": {
         "enabled": True,
         "method": "temperature",
@@ -68,72 +55,55 @@ _default_config = {
         "fallback_identity": True
     },
 
-    # --- [LOSS] 손실/가중치 옵션 ---
     "LOSS": {
         "use_focal": False,
         "alpha_mode": "auto",
         "label_smoothing": 0.02,
         "focal_gamma": 0.0,
-        "class_weight": {
-            "mode": "inverse_freq_clip",
-            "min": 0.5,
-            "max": 2.0
-        }
+        "class_weight": {"mode": "inverse_freq_clip", "min": 0.5, "max": 2.0}
     },
 
-    # --- [AUG] 입력 증강 토글 ---
     "AUG": {"mixup": 0.0, "cutmix": 0.0},
 
-    # --- [EVAL] 평가 설정 ---
     "EVAL": {"macro_f1": True, "topk": [1, 3], "use_cost_sensitive_argmax": True},
 
-    # --- [5] 실패학습(하드 예시) 옵션 ---
-    "FAILLEARN": {
-        "enabled": False,
-        "cooldown_min": 60,
-        "max_samples": 1000,
-        "class_weight_boost": 1.5,
-        "min_return_abs": 0.003
-    },
+    "FAILLEARN": {"enabled": False, "cooldown_min": 60, "max_samples": 1000,
+                  "class_weight_boost": 1.5, "min_return_abs": 0.003},
 
-    # --- [Q] 품질 컷(모의고사 합격선) ---
     "QUALITY": {"VAL_F1_MIN": 0.20, "VAL_ACC_MIN": 0.20},
 
-    # --- [BIN] 클래스 경계/병합 파라미터 ---
-    #   method 기본값 "quantile" (실제 분포 기반)
+    # 클래스 경계/병합 파라미터
     "CLASS_BIN": {
-        "method": "quantile",     # "fixed_step" | "quantile" | "linear"
+        "method": "quantile",      # "quantile" | "fixed_step" | "linear"
         "strict": True,
-        "zero_band_eps": 0.0005,  # ✅ 완화: ±0.05%p (기존 0.20%p)
-        "min_width": 0.0010,      # 최소 폭 0.10%p
-        "step_pct": 0.0050,       # (fixed_step일 때) 0.5% 단위
+        "zero_band_eps": 0.0020,   # ±0.20%p
+        "min_width": 0.0010,       # 최소 폭 0.10%p
+        "max_width": 0.05,         # ✅ (신규) 한 구간 최대 폭 5%p — 과도한 넓은 구간 자동 세분화
+        "step_pct": 0.0050,
         "merge_sparse": {
-            "enabled": True,      # ✅ 희소 구간 자동 병합 켜기
-            "min_ratio": 0.02,    # ✅ 샘플 비율 임계 2%
-            "min_count_floor": 50,# ✅ 최소 카운트 하한 50
+            "enabled": True,       # ✅ 기본 ON (희귀 구간 자동 병합)
+            "min_ratio": 0.01,
+            "min_count_floor": 20,
             "prefer": "denser"
         }
     },
 
-    # --- [CV_CONFIG] 교차검증·가드 ---
+    # 교차검증/가드
     "CV_CONFIG": {
-        "folds": 5,                   # 기본 폴드 수 (ENV로도 제어)
-        "min_per_class": 3,           # 각 폴드당 최소 클래스 샘플
-        "fallback_reduce_folds": True,# 불가 시 자동 폴드 축소
-        "fallback_stratified": True   # Stratified 실패 시 일반 KFold 폴백
+        "folds": 5,
+        "min_per_class": 3,
+        "fallback_reduce_folds": True,
+        "fallback_stratified": True
     },
 
-    # --- [TRAIN] 학습 스케줄/조기종료 ---
     "TRAIN": {
         "early_stop": {"patience": 4, "min_delta": 0.0005, "warmup_epochs": 2},
         "lr_scheduler": {"patience": 3, "min_lr": 5e-6},
-        "ensure_class_coverage": True  # 각 epoch 검증세트 클래스커버리지 보장 시도
+        "ensure_class_coverage": True
     },
 
-    # --- [ENSEMBLE] 멀티-윈도우 앙상블 ---
     "ENSEMBLE": {"topk_windows": 3, "use_var_weight": True},
 
-    # --- [SCHED] 학습 스케줄러 힌트 ---
     "SCHED": {
         "round_robin": True,
         "max_minutes_per_symbol": 10,
@@ -141,7 +111,6 @@ _default_config = {
         "eval_during_training": True
     },
 
-    # --- [PUBLISH] 텔레그램(또는 알림) 발송 필터 임계치 ---
     "PUBLISH": {
         "enabled": True,
         "recent_window": 10,
@@ -153,7 +122,6 @@ _default_config = {
         "always_log": True
     },
 
-    # --- ✅ [EVAL_RUNTIME] 평가 실행 주기/그레이스/슬랙(UTC 기준 저장) ---
     "EVAL_RUNTIME": {
         "timebase": "utc",
         "check_interval_min": 2,
@@ -162,33 +130,24 @@ _default_config = {
         "max_backfill_hours": 48
     },
 
-    # --- [ONCHAIN] 온체인 지표 옵션 ---
     "ONCHAIN": {
-        "enabled": False,                # 기본 OFF (데이터 준비 후 ON)
-        "dir": "/persistent/onchain",    # 온체인 CSV/파케 디렉토리
-        "features": [                    # 기본 제공 키워드(임의 확장 가능)
-            "active_address",
-            "tx_count",
-            "exchange_inflow",
-            "exchange_outflow"
-        ],
-        "fill": {"method": "ffill", "max_gap": 6},  # 6 step까지 보간 허용
-        "zscore_window": 96,             # 표준화 윈도우(시장/상관과 일관)
+        "enabled": False,
+        "dir": "/persistent/onchain",
+        "features": ["active_address","tx_count","exchange_inflow","exchange_outflow"],
+        "fill": {"method": "ffill", "max_gap": 6},
+        "zscore_window": 96
     },
 }
 
-# ✅ 전략별 K라인 설정 (모두 1200개로 통일)
 STRATEGY_CONFIG = {
     "단기": {"interval": "240", "limit": 1200, "binance_interval": "4h"},
     "중기": {"interval": "D",   "limit": 1200, "binance_interval": "1d"},
     "장기": {"interval": "D",   "limit": 1200, "binance_interval": "1d"},
 }
 
-# ✅ 전략별 수익률 캡(과장 방지용)
 _STRATEGY_RETURN_CAP_POS_MAX = {"단기": 0.12, "중기": 0.25, "장기": 0.50}
 _STRATEGY_RETURN_CAP_NEG_MIN = {"단기": -0.12, "중기": -0.25, "장기": -0.50}
 
-# ✅ 표시 안정화용 파라미터
 _MIN_RANGE_WIDTH = _default_config["CLASS_BIN"]["min_width"]
 _ROUND_DECIMALS  = 4
 _EPS_ZERO_BAND   = _default_config["CLASS_BIN"]["zero_band_eps"]
@@ -209,18 +168,14 @@ def _deep_merge(dst: dict, src: dict):
         if isinstance(v, dict) and isinstance(dst.get(k), dict):
             _deep_merge(dst[k], v)
         else:
-            if k not in dst:
-                dst[k] = v
+            if k not in dst: dst[k] = v
 
-# ------------------------
 # config.json 로드/생성
-# ------------------------
 if os.path.exists(CONFIG_PATH):
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            _loaded = json.load(f)
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f: _loaded = json.load(f)
         _config = _loaded if isinstance(_loaded, dict) else _default_config.copy()
-        _deep_merge(_config, _default_config)  # 누락키 보강
+        _deep_merge(_config, _default_config)
         _log("[✅ config.py] config.json 로드/보강 완료")
     except Exception as e:
         _log(f"[⚠️ config.py] config.json 로드 실패 → 기본값 사용: {e}")
@@ -241,9 +196,7 @@ def save_config():
     except Exception as e:
         _log(f"[⚠️ config.py] config.json 저장 실패 → {e}")
 
-# ------------------------
-# ✅ Binance 폴백 상태 로그
-# ------------------------
+# Binance 폴백 상태 로그
 try:
     _ENABLE_BINANCE = int(os.getenv("ENABLE_BINANCE", "1"))
     _log("[config] ENABLE_BINANCE=1 (fallback ready)" if _ENABLE_BINANCE == 1
@@ -251,19 +204,14 @@ try:
 except Exception:
     pass
 
-# ------------------------
-# Getter / Setter (기존)
-# ------------------------
+# Getter/Setter
 def set_NUM_CLASSES(n):
     global _dynamic_num_classes, NUM_CLASSES
     _dynamic_num_classes = int(n)
-    try:
-        NUM_CLASSES = _dynamic_num_classes
-    except Exception:
-        pass
+    try: NUM_CLASSES = _dynamic_num_classes
+    except Exception: pass
 
 def get_NUM_CLASSES():
-    global _dynamic_num_classes
     return _dynamic_num_classes if _dynamic_num_classes is not None else _config.get("NUM_CLASSES", _default_config["NUM_CLASSES"])
 
 def get_FEATURE_INPUT_SIZE(): return _config.get("FEATURE_INPUT_SIZE", _default_config["FEATURE_INPUT_SIZE"])
@@ -277,18 +225,12 @@ def get_SYMBOL_GROUPS():
     return [symbols[i:i+group_size] for i in range(0, len(symbols), group_size)]
 
 def get_class_groups(num_classes=None, group_size=5):
-    if num_classes is None or num_classes < 2:
-        num_classes = get_NUM_CLASSES()
-    if num_classes <= group_size:
-        groups = [list(range(num_classes))]
-    else:
-        groups = [list(range(i, min(i + group_size, num_classes))) for i in range(0, num_classes, group_size)]
+    if num_classes is None or num_classes < 2: num_classes = get_NUM_CLASSES()
+    groups = [list(range(num_classes))] if num_classes <= group_size else [list(range(i, min(i + group_size, num_classes))) for i in range(0, num_classes, group_size)]
     _log(f"[📊 클래스 분포 그룹] 총={num_classes}, 그룹크기={group_size}, 그룹수={len(groups)}")
     return groups
 
-# ------------------------
 # 신규 옵션 Getter
-# ------------------------
 def get_REGIME():   return _config.get("REGIME", _default_config["REGIME"])
 def get_CALIB():    return _config.get("CALIB", _default_config["CALIB"])
 def get_LOSS():     return _config.get("LOSS", _default_config["LOSS"])
@@ -304,7 +246,6 @@ def get_PATTERN():  return _config.get("PATTERN", _default_config["PATTERN"])
 def get_BLEND():    return _config.get("BLEND", _default_config["BLEND"])
 def get_PUBLISH():  return _config.get("PUBLISH", _default_config["PUBLISH"])
 
-# --- 🔧 DATA / CLASS_ENFORCE / CV_CONFIG 런타임 Getter (ENV 오버라이드 지원) ---
 def _env_bool(v): return str(v).strip().lower() not in {"0","false","no","off","none",""}
 
 def get_CLASS_ENFORCE() -> dict:
@@ -327,23 +268,16 @@ def _data_from_env(base: dict) -> dict:
     if pv is not None: d["prefer"] = str(pv).strip().lower()
     tol = os.getenv("DATA_ALIGN_TOL_SEC", None)
     if tol is not None:
-        try:
-            d.setdefault("align", {})["tolerance_sec"] = int(tol)
-        except Exception:
-            pass
+        try: d.setdefault("align", {})["tolerance_sec"] = int(tol)
+        except Exception: pass
     fg = os.getenv("DATA_FILL_MAX_GAP", None)
     if fg is not None:
-        try:
-            d.setdefault("fill", {})["max_gap"] = int(fg)
-        except Exception:
-            pass
+        try: d.setdefault("fill", {})["max_gap"] = int(fg)
+        except Exception: pass
     return d
 
-def get_DATA() -> dict:
-    return _config.get("DATA", _default_config["DATA"])
-
-def get_DATA_RUNTIME() -> dict:
-    return _data_from_env(get_DATA())
+def get_DATA() -> dict:         return _config.get("DATA", _default_config["DATA"])
+def get_DATA_RUNTIME() -> dict: return _data_from_env(get_DATA())
 
 def get_CV_CONFIG() -> dict:
     base = dict(_config.get("CV_CONFIG", _default_config["CV_CONFIG"]))
@@ -361,14 +295,9 @@ def get_CV_CONFIG() -> dict:
     if fs is not None: base["fallback_stratified"] = _env_bool(fs)
     return base
 
-# --- ONCHAIN Getter ---
-def get_ONCHAIN() -> dict:
-    return _config.get("ONCHAIN", _default_config["ONCHAIN"])
+def get_ONCHAIN() -> dict: return _config.get("ONCHAIN", _default_config["ONCHAIN"])
 
-# ------------------------
-# 헬퍼
-# ------------------------
-def _ROUNDS(): return _ROUNDS_DECIMALS if 'ROUNDS_DECIMALS' in globals() else _ROUNDS_DECIMALS
+# 헬퍼들
 _ROUNDS_DECIMALS = 4
 def _round2(x: float) -> float: return round(float(x), _ROUNDS_DECIMALS)
 
@@ -422,8 +351,7 @@ def _strictify(ranges):
         if hi <= lo: hi = lo + _MIN_RANGE_WIDTH
         lo_r, hi_r = _round2(lo), _round2(hi)
         if hi_r <= lo_r: hi_r = _round2(lo_r + _MIN_RANGE_WIDTH)
-        fixed.append((lo_r, hi_r))
-        lo = hi_r
+        fixed.append((lo_r, hi_r)); lo = hi_r
     return fixed
 
 def _strategy_horizon_hours(strategy: str) -> int:
@@ -446,35 +374,30 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
         t1 = ts.iloc[i] + horizon
         j = max(j_up, i); max_h = high[i]
         while j < len(df) and ts.iloc[j] < t1:
-            if high[j] > max_h: max_h = high[j]
-            j += 1
+            if high[j] > max_h: max_h = high[j]; j += 1
         j_up = max(j_up, i)
         base = close[i] if close[i] > 0 else (close[i] + 1e-6)
         up[i] = float((max_h - base) / (base + 1e-12))
         k = max(j_dn, i); min_l = low[i]
         while k < len(df) and ts.iloc[k] < t1:
-            if low[k] < min_l: min_l = low[k]
-            k += 1
+            if low[k] < min_l: min_l = low[k]; k += 1
         j_dn = max(j_dn, i)
         dn[i] = float((min_l - base) / (base + 1e-12))
     return np.concatenate([dn, up]).astype(np.float32)
 
-# ---- 동적 bin 개수 결정 로직 ---------------------------------------
 def _choose_n_classes(rets_signed, max_classes, hint_min=4):
     import numpy as np
     N = int(rets_signed.size)
     if N <= 1: return max(4, hint_min)
-    q25, q75 = np.quantile(rets_signed, [0.25, 0.75])
-    iqr = float(q75 - q25)
+    q25, q75 = np.quantile(rets_signed, [0.25, 0.75]); iqr = float(q75 - q25)
     data_min, data_max = float(np.min(rets_signed)), float(np.max(rets_signed))
     data_range = max(1e-12, data_max - data_min)
-    if iqr <= 1e-12:
-        est = int(round(np.sqrt(N)))
+    if iqr <= 1e-12: est = int(round(np.sqrt(N)))
     else:
         h = 2.0 * iqr * (N ** (-1.0/3.0))
         est = int(round(data_range / max(h, 1e-12)))
-    base_hint = int(_config.get("NUM_CLASSES", 8))
-    lower = max(4, hint_min, min(base_hint, max_classes) if est < 4 else 4)
+    base_hint = int(_config.get("NUM_CLASSES", 10))
+    lower = max(4, hint_min)
     n_cls = max(lower, min(est, max_classes))
     return int(n_cls)
 
@@ -500,32 +423,25 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
     opt = (bin_conf or {}).get("merge_sparse", {})
     env_enabled = os.getenv("MERGE_SPARSE_ENABLED", None)
     if env_enabled is not None:
-        opt = dict(opt or {})
-        opt["enabled"] = str(env_enabled).strip().lower() not in {"0", "false", "no"}
-    if not opt or not opt.get("enabled", False):
-        return ranges
+        opt = dict(opt or {}); opt["enabled"] = str(env_enabled).strip().lower() not in {"0","false","no"}
+    if not opt or not opt.get("enabled", False): return ranges
     env_ratio = os.getenv("MERGE_SPARSE_MIN_RATIO", None)
     env_floor = os.getenv("MERGE_SPARSE_MIN_FLOOR", None)
-
     total = int(rets_signed.size)
     min_ratio = float(env_ratio) if env_ratio is not None else float(opt.get("min_ratio", 0.02))
-    min_floor = int(env_floor) if env_floor is not None else int(opt.get("min_count_floor", 50))
+    min_floor = int(env_floor) if env_floor is not None else int(opt.get("min_count_floor", 80))
     prefer = str(opt.get("prefer", "denser")).lower()
-    edges = [ranges[0][0]] + [hi for (_, hi) in ranges]
-    edges[-1] = float(edges[-1]) + 1e-12
-    hist, _ = np.histogram(rets_signed, bins=np.array(edges, dtype=float))
-    rs = list(ranges)
 
     def _rebuild_edges(rr):
-        ee = [rr[0][0]] + [hi for (_, hi) in rr]
-        ee[-1] = float(ee[-1]) + 1e-12
-        return np.array(ee, dtype=float)
-    def _counts(rr):
-        ee = _rebuild_edges(rr)
-        h, _ = np.histogram(rets_signed, bins=ee)
-        return h
+        ee = [rr[0][0]] + [hi for (_, hi) in rr]; ee[-1] = float(ee[-1]) + 1e-12
+        return ee
 
-    changed = True
+    def _counts(rr):
+        edges = _rebuild_edges(rr)
+        hist, _ = np.histogram(rets_signed, bins=np.array(edges, dtype=float))
+        return hist
+
+    rs = list(ranges); changed = True
     while changed:
         changed = False
         if len(rs) <= 2: break
@@ -543,19 +459,35 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
             elif right_ok: j = i + 1
             else: break
         lo, hi = min(rs[i][0], rs[j][0]), max(rs[i][1], rs[j][1])
-        rs[min(i, j)] = (float(lo), float(hi))
-        del rs[max(i, j)]
+        rs[min(i, j)] = (float(lo), float(hi)); del rs[max(i, j)]
         changed = True
         if len(rs) > max_classes:
             rs = _merge_smallest_adjacent(rs, max_classes)
 
     rs = [(float(lo), float(hi)) for (lo, hi) in rs]
-    rs = _fix_monotonic(rs)
-    rs = _ensure_zero_band(rs)
-    if get_CLASS_BIN().get("strict", True):
-        rs = _strictify(rs)
-    if len(rs) > max_classes:
-        rs = _merge_smallest_adjacent(rs, max_classes)
+    rs = _fix_monotonic(rs); rs = _ensure_zero_band(rs)
+    if get_CLASS_BIN().get("strict", True): rs = _strictify(rs)
+    if len(rs) > max_classes: rs = _merge_smallest_adjacent(rs, max_classes)
+    return rs
+
+def _split_wide_bins_by_quantiles(ranges, rets_signed, max_width):
+    """너무 넓은 구간을 데이터 분위수로 자동 세분화 (상한: CLASS_BIN.max_width)."""
+    import numpy as np
+    if not ranges or rets_signed is None or rets_signed.size == 0: return ranges
+    rs = []
+    for (lo, hi) in ranges:
+        if (hi - lo) <= max_width:
+            rs.append((lo, hi)); continue
+        # 필요한 분할 개수 k = ceil(width / max_width)
+        k = int(np.ceil((hi - lo) / max_width))
+        sub_edges = np.quantile(rets_signed[(rets_signed >= lo) & (rets_signed <= hi)], np.linspace(0, 1, k+1))
+        sub_edges[0], sub_edges[-1] = float(lo), float(hi)
+        for i in range(k):
+            s_lo, s_hi = float(sub_edges[i]), float(sub_edges[i+1])
+            if s_hi - s_lo <= 0: s_hi = s_lo + _MIN_RANGE_WIDTH
+            rs.append((_round2(s_lo), _round2(s_hi)))
+    rs = _fix_monotonic(rs); rs = _ensure_zero_band(rs)
+    if get_CLASS_BIN().get("strict", True): rs = _strictify(rs)
     return rs
 
 def get_class_return_range(class_id: int, symbol: str, strategy: str):
@@ -575,22 +507,20 @@ def class_to_expected_return(class_id: int, symbol: str, strategy: str):
 
 def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, group_size=5):
     import numpy as np
-    from data.utils import get_kline_by_strategy  # 프로젝트 환경에 맞춘 경로 유지
+    from data.utils import get_kline_by_strategy
 
     MAX_CLASSES = int(_config.get("MAX_CLASSES", _default_config["MAX_CLASSES"]))
     BIN_CONF = get_CLASS_BIN()
     method_req = (os.getenv("CLASS_BIN_METHOD") or method or BIN_CONF.get("method") or "quantile").lower()
+    max_width = float(BIN_CONF.get("max_width", 0.05))
 
-    # --- 클래스 수 정책 반영 (일관성/강제 고정) ---
+    # n_override: ENV가 지정된 경우에만 사용(기본 동적)
     ce = get_CLASS_ENFORCE()
     n_override = ce.get("n_override", None)
-    if n_override is not None:
-        try:
-            n_override = int(n_override)
-            if n_override >= 2:
-                set_NUM_CLASSES(n_override)
-        except Exception:
-            pass
+    try:
+        if n_override is not None: n_override = int(n_override)
+    except Exception:
+        n_override = None
 
     def compute_equal_ranges(n_cls, reason=""):
         n_cls = max(4, int(n_cls))
@@ -615,21 +545,18 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         if step <= 0: step = 0.0050
         neg = _STRATEGY_RETURN_CAP_NEG_MIN.get(strategy, -0.5)
         pos = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy,  0.5)
-
         edges, val = [], float(neg)
         while val < pos - 1e-12:
             edges.append(val); val += step
         edges.append(pos)
         if len(edges) < 2:
             return compute_equal_ranges(get_NUM_CLASSES(), reason="fixed_step edges 부족")
-
         cooked = []
         for i in range(len(edges) - 1):
             lo, hi = float(edges[i]), float(edges[i + 1])
             lo, hi = _cap_by_strategy(lo, strategy), _cap_by_strategy(hi, strategy)
             lo, hi = _enforce_min_width(lo, hi)
             cooked.append((_round2(lo), _round2(hi)))
-
         fixed = _fix_monotonic(cooked); fixed = _ensure_zero_band(fixed)
         if BIN_CONF.get("strict", True): fixed = _strictify(fixed)
         if rets_for_merge is not None and rets_for_merge.size > 0:
@@ -637,6 +564,9 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         if len(fixed) > MAX_CLASSES: fixed = _merge_smallest_adjacent(fixed, MAX_CLASSES)
         if not fixed or len(fixed) < 2:
             return compute_equal_ranges(get_NUM_CLASSES(), reason="fixed_step 최종 경계 부족")
+        # 넓은 구간 자동 분할
+        if rets_for_merge is not None and rets_for_merge.size > 0 and max_width > 0:
+            fixed = _split_wide_bins_by_quantiles(fixed, rets_for_merge, max_width)
         return fixed
 
     def compute_ranges_from_kline():
@@ -646,37 +576,47 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="가격 데이터 부족")
             horizon_hours = _strategy_horizon_hours(strategy)
             rets_signed = _future_extreme_signed_returns(df_price, horizon_hours=horizon_hours)
+            import numpy as np
             rets_signed = rets_signed[np.isfinite(rets_signed)]
             if rets_signed.size < 10:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="수익률 샘플 부족")
             rets_signed = np.array([_cap_by_strategy(float(r), strategy) for r in rets_signed], dtype=np.float32)
 
-            n_cls = _choose_n_classes(
-                rets_signed,
-                max_classes=int(_config.get("MAX_CLASSES", 8)),
-                hint_min=int(_config.get("NUM_CLASSES", 8))
-            )
-            # 일관성 강제: n_override가 있으면 사용
+            n_cls = _choose_n_classes(rets_signed, max_classes=int(_config.get("MAX_CLASSES", 12)),
+                                      hint_min=int(_config.get("NUM_CLASSES", 10)))
+            # ENV로 지정한 경우에만 강제(기본 동적)
             if isinstance(n_override, int) and n_override >= 2:
                 n_cls = n_override
 
             method2 = method_req
-            qs = (np.quantile(rets_signed, np.linspace(0, 1, n_cls + 1))
-                  if method2 == "quantile"
-                  else np.linspace(float(rets_signed.min()), float(rets_signed.max()), n_cls + 1))
+            if method2 == "quantile":
+                qs = np.quantile(rets_signed, np.linspace(0, 1, n_cls + 1))
+            else:
+                qs = np.linspace(float(rets_signed.min()), float(rets_signed.max()), n_cls + 1)
+
             cooked = []
             for i in range(n_cls):
                 lo, hi = float(qs[i]), float(qs[i + 1])
                 lo, hi = _cap_by_strategy(lo, strategy), _cap_by_strategy(hi, strategy)
                 lo, hi = _enforce_min_width(lo, hi)
                 cooked.append((_round2(lo), _round2(hi)))
+
             fixed = _fix_monotonic(cooked); fixed = _ensure_zero_band(fixed)
             if BIN_CONF.get("strict", True): fixed = _strictify(fixed)
-            if len(fixed) > int(_config.get("MAX_CLASSES", 8)):
-                fixed = _merge_smallest_adjacent(fixed, int(_config.get("MAX_CLASSES", 8)))
+
+            # 넓은 구간 자동 분할(최대 폭 가드)
+            if max_width > 0:
+                fixed = _split_wide_bins_by_quantiles(fixed, rets_signed, max_width)
+
+            # 희귀 구간 병합
+            fixed = _merge_sparse_bins_by_hist(fixed, rets_signed, int(_config.get("MAX_CLASSES", 12)), BIN_CONF)
+
+            if len(fixed) > int(_config.get("MAX_CLASSES", 12)):
+                fixed = _merge_smallest_adjacent(fixed, int(_config.get("MAX_CLASSES", 12)))
+
             if not fixed or len(fixed) < 2:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="최종 경계 부족(가드)")
-            fixed = _merge_sparse_bins_by_hist(fixed, rets_signed, MAX_CLASSES, BIN_CONF)
+
             return fixed
         except Exception as e:
             return compute_equal_ranges(get_NUM_CLASSES(), reason=f"예외 발생: {e}")
@@ -687,6 +627,7 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             df_dbg = _dbg_k(symbol, strategy)
             if df_dbg is not None and len(df_dbg) >= 2 and "close" in df_dbg:
                 rets_for_merge = _future_extreme_signed_returns(df_dbg, horizon_hours=_strategy_horizon_hours(strategy))
+                import numpy as np
                 rets_for_merge = rets_for_merge[np.isfinite(rets_for_merge)]
             else:
                 rets_for_merge = None
@@ -699,7 +640,7 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     if symbol is not None and strategy is not None:
         _ranges_cache[(symbol, strategy)] = all_ranges
 
-    # 디버그 출력(옵션)
+    # 디버그 프린트(로그와 동일 포맷)
     try:
         if symbol is not None and strategy is not None and not _quiet():
             import numpy as np
@@ -712,7 +653,7 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
                 if rets_dbg.size > 0:
                     rets_dbg = np.array([_cap_by_strategy(float(r), strategy) for r in rets_dbg], dtype=np.float32)
                     qs = np.quantile(rets_dbg, [0.00, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 1.00])
-                    def _r2(z): return round(float(z), _ROUNDS_DECIMALS)  # <- 오타 수정
+                    def _r2(z): return round(float(z), _ROUND_DECIMALS)
                     print(f"[📈 수익률분포(±)] {symbol}-{strategy} min={_r2(qs[0])}, p25={_r2(qs[1])}, p50={_r2(qs[2])}, p75={_r2(qs[3])}, p90={_r2(qs[4])}, p95={_r2(qs[5])}, p99={_r2(qs[6])}, max={_r2(qs[7])}")
                     print(f"[📏 클래스경계 로그] {symbol}-{strategy} → {len(all_ranges)}개")
                     print(f"[📏 경계 리스트] {symbol}-{strategy} → {all_ranges}")
@@ -731,14 +672,13 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     except Exception:
         pass
 
-    if group_id is None: return all_ranges
+    if group_id is None:
+        return all_ranges
     start, end = int(group_id) * int(group_size), int(group_id) * int(group_size) + int(group_size)
     if start >= len(all_ranges): return []
     return all_ranges[start:end]
 
-# ------------------------
-# 🔧 환경변수 기반 퍼포먼스/학습 토글
-# ------------------------
+# ENV 기반 러닝 파라미터
 def _get_int(name, default):
     try: return int(os.getenv(name, str(default)))
     except Exception: return int(default)
@@ -764,28 +704,21 @@ def get_PREDICT_MIN_RETURN(): return PREDICT_MIN_RETURN
 def get_DISPLAY_MIN_RETURN(): return DISPLAY_MIN_RETURN
 def get_SSL_CACHE_DIR():      return os.getenv("SSL_CACHE_DIR", _config.get("SSL_CACHE_DIR", _default_config["SSL_CACHE_DIR"]))
 
-# ------------------------
-# ✅ 순서 1 전역 상수(ENV override 지원)
-# ------------------------
+# ENV override 노출
 _DFLT_STEP = str(_config.get("CLASS_BIN", {}).get("step_pct", 0.0050))
 DYN_CLASS_STEP = float(os.getenv("CLASS_BIN_STEP", os.getenv("DYN_CLASS_STEP", _DFLT_STEP)))
-BOUNDARY_BAND = float(os.getenv("BOUNDARY_BAND", str(_default_config["CLASS_BIN"]["zero_band_eps"])))
+BOUNDARY_BAND = float(os.getenv("BOUNDARY_BAND", "0.0020"))
 CV_FOLDS   = int(os.getenv("CV_FOLDS", "5"))
 CV_GATE_F1 = float(os.getenv("CV_GATE_F1", "0.50"))
 
-# ------------------------
-# ✅ 발송(PUBLISH) 섹션 ENV 오버라이드 + 필터 헬퍼
-# ------------------------
+# PUBLISH 런타임 오버라이드
 def _publish_from_env(base: dict) -> dict:
     d = dict(base or {})
     def _b(k, env, cast):
         v = os.getenv(env, None)
         if v is None: return
-        try:
-            d[k] = cast(v)
-        except Exception:
-            pass
-
+        try: d[k] = cast(v)
+        except Exception: pass
     _b("enabled", "PUBLISH_ENABLED", lambda x: str(x).strip() not in {"0","false","False"})
     _b("recent_window", "PUBLISH_RECENT_WINDOW", int)
     _b("recent_success_min", "PUBLISH_RECENT_SUCCESS_MIN", float)
@@ -796,18 +729,12 @@ def _publish_from_env(base: dict) -> dict:
     _b("always_log", "PUBLISH_ALWAYS_LOG", lambda x: str(x).strip() not in {"0","false","False"})
     return d
 
-# 호출 시점마다 최신 ENV 반영
 def get_PUBLISH_RUNTIME() -> dict:
     base = get_PUBLISH()
     return _publish_from_env(base)
 
 def passes_publish_filter(*, meta_confidence=None, recent_success_rate=None,
                           expected_return=None, calib_prob=None, shadow=False, source=None):
-    """
-    발송여부 판단 헬퍼.
-    - predict는 항상 기록, 발송은 여기 True일 때만 진행.
-    - 반환: (ok:bool, reason:str, thresholds:dict)
-    """
     cfg = get_PUBLISH_RUNTIME()
     thr = {
         "enabled": bool(cfg.get("enabled", True)),
@@ -819,30 +746,18 @@ def passes_publish_filter(*, meta_confidence=None, recent_success_rate=None,
         "allow_shadow": bool(cfg.get("allow_shadow", True)),
         "always_log": bool(cfg.get("always_log", True)),
     }
-
-    if not thr["enabled"]:
-        return (False, "publish_disabled", thr)
-
-    if shadow and not thr["allow_shadow"]:
-        return (False, "shadow_not_allowed", thr)
-
+    if not thr["enabled"]: return (False, "publish_disabled", thr)
+    if shadow and not thr["allow_shadow"]: return (False, "shadow_not_allowed", thr)
     if expected_return is not None and abs(float(expected_return)) < thr["min_expected_return"]:
         return (False, "min_expected_return_not_met", thr)
-
     if calib_prob is not None and float(calib_prob) < thr["abstain_prob_min"]:
         return (False, "low_confidence", thr)
-
     if meta_confidence is not None and float(meta_confidence) < thr["min_meta_confidence"]:
         return (False, "low_meta_confidence", thr)
-
     if recent_success_rate is not None and float(recent_success_rate) < thr["recent_success_min"]:
         return (False, "recent_success_rate_too_low", thr)
-
     return (True, "ok", thr)
 
-# ------------------------
-# ✅ [EVAL_RUNTIME] ENV 오버라이드 + 평가 헬퍼
-# ------------------------
 def _eval_from_env(base: dict) -> dict:
     d = dict(base or {})
     def _b(k, env, cast):
@@ -850,13 +765,11 @@ def _eval_from_env(base: dict) -> dict:
         if v is None: return
         try: d[k] = cast(v)
         except Exception: pass
-
     _b("timebase", "EVAL_TIMEBASE", str)
     _b("check_interval_min", "EVAL_CHECK_INTERVAL_MIN", int)
     _b("grace_min", "EVAL_GRACE_MIN", int)
     _b("price_window_slack_min", "EVAL_PRICE_WINDOW_SLACK_MIN", int)
-    _b("max_backfill_hours", "EVAL_MAX_BACKFIL
-L_HOURS", int)
+    _b("max_backfill_hours", "EVAL_MAX_BACKFILL_HOURS", int)
     return d
 
 def get_EVAL_RUNTIME() -> dict:
@@ -864,24 +777,18 @@ def get_EVAL_RUNTIME() -> dict:
     return _eval_from_env(base)
 
 def strategy_horizon_hours(strategy: str) -> int:
-    """평가/만기 산정에 쓰는 전략별 horizon (시간)."""
-    return _strategy_horizon_hours(strategy)
+    return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
 
 def compute_eval_due_at(now_utc, strategy: str):
-    """predict 시점(now_utc) 기준, 전략별 평가 예정 시각을 반환."""
     from datetime import timedelta
-    return now_utc + timedelta(hours=_strategy_horizon_hours(strategy))
+    return now_utc + timedelta(hours=strategy_horizon_hours(strategy))
 
-# ------------------------
-# 전역 캐시된 값(기존)
-# ------------------------
+# 전역 캐시
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 NUM_CLASSES        = get_NUM_CLASSES()
 FAIL_AUGMENT_RATIO = get_FAIL_AUGMENT_RATIO()
 MIN_FEATURES       = get_MIN_FEATURES()
-
-# === 캘리브레이션 모듈 호환용 전역 노출 ===
-CALIB = get_CALIB()
+CALIB              = get_CALIB()
 
 __all__ = [
     "STRATEGY_CONFIG",
@@ -902,7 +809,6 @@ __all__ = [
     "CALIB",
     "DYN_CLASS_STEP", "BOUNDARY_BAND", "CV_FOLDS", "CV_GATE_F1",
     "get_EVAL_RUNTIME", "strategy_horizon_hours", "compute_eval_due_at",
-    # ▼ 신규 노출
     "get_DATA", "get_DATA_RUNTIME", "get_CLASS_ENFORCE", "get_CV_CONFIG",
     "get_ONCHAIN",
-                  ]
+    ]
