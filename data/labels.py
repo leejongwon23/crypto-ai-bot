@@ -117,7 +117,7 @@ def _bin_with_boundary_mask(
     - 마지막 구간만 우측 포함
     - 경계 ±BOUNDARY_BAND 이내는 -1 마스킹
     - 마스킹 과다(>60%) 시 밴드 1/2로 축소하여 1회 재시도
-    - 커버리지(유효 클래스 수) <= 1 이면 전부 -1로 리턴
+    - 커버리지(유효 클래스 수) <= 1 이면 폴백 수행
     """
     n = gains.shape[0]
     labels = np.empty(n, dtype=np.int64)
@@ -178,18 +178,36 @@ def _bin_with_boundary_mask(
         except Exception as e:
             logger.warning("labels: band shrink safeguard failed: %s", e)
 
-    # 커버리지 가드: 유효 클래스 수 <= 1이면 전부 -1로 리턴(상위 증강/폴드축소 유도)
+    # 커버리지 가드(강화): 유효 클래스 수 <=1 이면 순차 폴백
     try:
-        valid = labels[labels >= 0]
-        n_valid = int(valid.size)
-        n_unique = int(np.unique(valid).size) if n_valid > 0 else 0
-        if n_unique <= 1:
-            labels[:] = -1
-            logger.warning(
-                "labels: insufficient class coverage after masking (%d unique). "
-                "Mark all as -1. %s/%s",
-                n_unique, symbol, strategy,
-            )
+        def _coverage_count(x):
+            v = x[x >= 0]
+            return (int(v.size), int(np.unique(v).size) if v.size > 0 else 0)
+
+        n_valid, n_unique = _coverage_count(labels)
+        if n_unique <= 1 and n > 0:
+            # 1) 밴드 1/4로 재시도
+            shrink_band = float(BOUNDARY_BAND) * 0.25
+            near_lo3 = np.abs(gcol - lows.reshape(1, -1)) <= shrink_band
+            near_hi3 = np.abs(gcol - highs.reshape(1, -1)) <= shrink_band
+            is_mask3 = np.any(near_lo3 | near_hi3, axis=1)
+            labels3 = bins.copy()
+            labels3[is_mask3] = -1
+            _, u3 = _coverage_count(labels3)
+            if u3 > 1:
+                labels = labels3
+                logger.info(
+                    "labels: coverage fix by shrinking band to %.4f (%s/%s)",
+                    shrink_band, symbol, strategy
+                )
+            else:
+                # 2) 최후 폴백: 경계 마스킹 해제(빈즈 그대로 사용)
+                labels = bins.copy()
+                _, u4 = _coverage_count(labels)
+                logger.warning(
+                    "labels: boundary mask disabled to recover coverage (unique=%d->%d) %s/%s",
+                    n_unique, u4, symbol, strategy
+                )
     except Exception as e:
         logger.warning("labels: coverage check failed: %s", e)
 
