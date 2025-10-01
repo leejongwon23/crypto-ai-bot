@@ -78,14 +78,19 @@ _default_config = {
         "strict": True,
         "zero_band_eps": 0.0020,   # ±0.20%p
         "min_width": 0.0010,       # 최소 폭 0.10%p
-        "max_width": 0.05,         # ✅ (신규) 한 구간 최대 폭 5%p — 과도한 넓은 구간 자동 세분화
+        "max_width": 0.05,         # 한 구간 최대 폭 5%p — 과도한 넓은 구간 자동 세분화
         "step_pct": 0.0050,
         "merge_sparse": {
-            "enabled": True,       # ✅ 기본 ON (희귀 구간 자동 병합)
+            "enabled": True,       # 기본 ON (희귀 구간 자동 병합)
             "min_ratio": 0.01,
             "min_count_floor": 20,
             "prefer": "denser"
-        }
+        },
+        # ▼ 비용선/패스/실효기대수익 (신규)
+        "no_trade_floor_abs": 0.01,      # 절대 1% (수수료/펀딩비 고려 최소 기대수익선)
+        "add_abstain_class": True,       # [-1%, +1%]를 '패스' 전용 클래스로 둘지
+        "abstain_expand_eps": 0.0005,    # 중앙 패스 구간 여유폭(스냅 방지)
+        "expected_return_mode": "truncated_mid"  # "mid" | "truncated_mid"
     },
 
     # 교차검증/가드
@@ -150,6 +155,8 @@ _STRATEGY_RETURN_CAP_NEG_MIN = {"단기": -0.12, "중기": -0.25, "장기": -0.5
 
 _MIN_RANGE_WIDTH = _default_config["CLASS_BIN"]["min_width"]
 _ROUND_DECIMALS  = 4
+_ROUNDS_DECIMALS = 4           # for _round2
+_ROUND_DECIMALS  = 4           # for pretty debug printing
 _EPS_ZERO_BAND   = _default_config["CLASS_BIN"]["zero_band_eps"]
 _DISPLAY_MIN_RET = 1e-4
 
@@ -298,7 +305,6 @@ def get_CV_CONFIG() -> dict:
 def get_ONCHAIN() -> dict: return _config.get("ONCHAIN", _default_config["ONCHAIN"])
 
 # 헬퍼들
-_ROUNDS_DECIMALS = 4
 def _round2(x: float) -> float: return round(float(x), _ROUNDS_DECIMALS)
 
 def _cap_by_strategy(x: float, strategy: str) -> float:
@@ -374,13 +380,15 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
         t1 = ts.iloc[i] + horizon
         j = max(j_up, i); max_h = high[i]
         while j < len(df) and ts.iloc[j] < t1:
-            if high[j] > max_h: max_h = high[j]; j += 1
+            if high[j] > max_h: max_h = high[j]
+            j += 1
         j_up = max(j_up, i)
         base = close[i] if close[i] > 0 else (close[i] + 1e-6)
         up[i] = float((max_h - base) / (base + 1e-12))
         k = max(j_dn, i); min_l = low[i]
         while k < len(df) and ts.iloc[k] < t1:
-            if low[k] < min_l: min_l = low[k]; k += 1
+            if low[k] < min_l: min_l = low[k]
+            k += 1
         j_dn = max(j_dn, i)
         dn[i] = float((min_l - base) / (base + 1e-12))
     return np.concatenate([dn, up]).astype(np.float32)
@@ -437,6 +445,7 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
         return ee
 
     def _counts(rr):
+        import numpy as np
         edges = _rebuild_edges(rr)
         hist, _ = np.histogram(rets_signed, bins=np.array(edges, dtype=float))
         return hist
@@ -478,9 +487,11 @@ def _split_wide_bins_by_quantiles(ranges, rets_signed, max_width):
     for (lo, hi) in ranges:
         if (hi - lo) <= max_width:
             rs.append((lo, hi)); continue
-        # 필요한 분할 개수 k = ceil(width / max_width)
         k = int(np.ceil((hi - lo) / max_width))
-        sub_edges = np.quantile(rets_signed[(rets_signed >= lo) & (rets_signed <= hi)], np.linspace(0, 1, k+1))
+        sub = rets_signed[(rets_signed >= lo) & (rets_signed <= hi)]
+        if sub.size < 2:
+            rs.append((_round2(lo), _round2(hi))); continue
+        sub_edges = np.quantile(sub, np.linspace(0, 1, k+1))
         sub_edges[0], sub_edges[-1] = float(lo), float(hi)
         for i in range(k):
             s_lo, s_hi = float(sub_edges[i]), float(sub_edges[i+1])
@@ -489,6 +500,56 @@ def _split_wide_bins_by_quantiles(ranges, rets_signed, max_width):
     rs = _fix_monotonic(rs); rs = _ensure_zero_band(rs)
     if get_CLASS_BIN().get("strict", True): rs = _strictify(rs)
     return rs
+
+# ===== 비용선 하드컷 & 패스 구간 =====
+def _insert_cut(ranges, cut_val):
+    """ranges(정렬된 (lo,hi))를 cut_val에서 분할. 필요할 때만 자름."""
+    out = []
+    for (lo, hi) in ranges:
+        lo_f, hi_f = float(lo), float(hi)
+        if cut_val <= lo_f or cut_val >= hi_f:
+            out.append((lo_f, hi_f))
+        else:
+            out.append((lo_f, cut_val))
+            out.append((cut_val, hi_f))
+    return _fix_monotonic(out)
+
+def _apply_trade_floor_cuts(ranges):
+    """
+    1) ±no_trade_floor_abs에서 하드컷(클래스가 비용선을 넘나들지 않게)
+    2) add_abstain_class=True면 [-floor, +floor] 하나의 '패스' 버킷으로 통합
+    """
+    conf = get_CLASS_BIN()
+    floor = float(conf.get("no_trade_floor_abs", 0.01))
+    expand = float(conf.get("abstain_expand_eps", 0.0005))
+    add_abstain = bool(conf.get("add_abstain_class", True))
+    if not ranges or floor <= 0:
+        return ranges
+
+    rs = list(ranges)
+    rs = _insert_cut(rs, -floor)
+    rs = _insert_cut(rs, +floor)
+
+    # 중앙 패스 버킷 구성(여유폭 포함)
+    floor_lo = _round2(-floor - expand)
+    floor_hi = _round2(+floor + expand)
+    new_rs, merged_center = [], False
+    for (lo, hi) in rs:
+        if add_abstain and lo >= floor_lo and hi <= floor_hi:
+            if not merged_center:
+                new_rs.append((max(lo, floor_lo), min(hi, floor_hi)))
+                merged_center = True
+            else:
+                prev_lo, prev_hi = new_rs[-1]
+                new_rs[-1] = (min(prev_lo, lo), max(prev_hi, hi))
+        else:
+            new_rs.append((lo, hi))
+
+    new_rs = _fix_monotonic(new_rs)
+    new_rs = _ensure_zero_band(new_rs)
+    if get_CLASS_BIN().get("strict", True):
+        new_rs = _strictify(new_rs)
+    return new_rs
 
 def get_class_return_range(class_id: int, symbol: str, strategy: str):
     key = (symbol, strategy)
@@ -502,8 +563,35 @@ def get_class_return_range(class_id: int, symbol: str, strategy: str):
     return ranges[class_id]
 
 def class_to_expected_return(class_id: int, symbol: str, strategy: str):
+    """
+    expected_return_mode == "truncated_mid":
+      - 클래스 구간을 no-trade 영역(±floor) 기준으로 절단한 뒤의 중앙값 사용
+      - 완전히 no-trade 내부면 0.0
+    """
     r_min, r_max = get_class_return_range(class_id, symbol, strategy)
-    return (r_min + r_max) / 2
+    conf = get_CLASS_BIN()
+    mode = str(conf.get("expected_return_mode", "truncated_mid")).lower()
+    if mode == "mid":
+        return (r_min + r_max) / 2.0
+
+    floor = float(conf.get("no_trade_floor_abs", 0.01))
+    lo, hi = float(r_min), float(r_max)
+
+    # 클래스가 완전히 no-trade 안이면 0
+    if -floor <= lo and hi <= floor:
+        return 0.0
+
+    # no-trade 부분 절단
+    if lo < -floor < hi:
+        if abs(hi - (-floor)) >= abs((-floor) - lo): lo = -floor
+        else: hi = -floor
+    if lo < floor < hi:
+        if abs(hi - floor) >= abs(floor - lo): lo = floor
+        else: hi = floor
+
+    if hi <= lo:
+        return 0.0
+    return (lo + hi) / 2.0
 
 def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, group_size=5):
     import numpy as np
@@ -536,6 +624,8 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         if reason: _log(f"[⚠️ 균등 분할 클래스 사용] 사유: {reason}")
         ranges = _fix_monotonic(ranges); ranges = _ensure_zero_band(ranges)
         if BIN_CONF.get("strict", True): ranges = _strictify(ranges)
+        # 비용선 하드컷
+        ranges = _apply_trade_floor_cuts(ranges)
         if len(ranges) > MAX_CLASSES: ranges = _merge_smallest_adjacent(ranges, MAX_CLASSES)
         return ranges
 
@@ -567,6 +657,8 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         # 넓은 구간 자동 분할
         if rets_for_merge is not None and rets_for_merge.size > 0 and max_width > 0:
             fixed = _split_wide_bins_by_quantiles(fixed, rets_for_merge, max_width)
+        # 비용선 하드컷
+        fixed = _apply_trade_floor_cuts(fixed)
         return fixed
 
     def compute_ranges_from_kline():
@@ -576,11 +668,10 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="가격 데이터 부족")
             horizon_hours = _strategy_horizon_hours(strategy)
             rets_signed = _future_extreme_signed_returns(df_price, horizon_hours=horizon_hours)
-            import numpy as np
             rets_signed = rets_signed[np.isfinite(rets_signed)]
             if rets_signed.size < 10:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="수익률 샘플 부족")
-            rets_signed = np.array([_cap_by_strategy(float(r), strategy) for r in rets_signed], dtype=np.float32)
+            rets_signed = (np.array([_cap_by_strategy(float(r), strategy) for r in rets_signed], dtype=np.float32))
 
             n_cls = _choose_n_classes(rets_signed, max_classes=int(_config.get("MAX_CLASSES", 12)),
                                       hint_min=int(_config.get("NUM_CLASSES", 10)))
@@ -617,6 +708,9 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             if not fixed or len(fixed) < 2:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="최종 경계 부족(가드)")
 
+            # 비용선 하드컷 & 패스 구간 반영 (핵심)
+            fixed = _apply_trade_floor_cuts(fixed)
+
             return fixed
         except Exception as e:
             return compute_equal_ranges(get_NUM_CLASSES(), reason=f"예외 발생: {e}")
@@ -627,7 +721,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             df_dbg = _dbg_k(symbol, strategy)
             if df_dbg is not None and len(df_dbg) >= 2 and "close" in df_dbg:
                 rets_for_merge = _future_extreme_signed_returns(df_dbg, horizon_hours=_strategy_horizon_hours(strategy))
-                import numpy as np
                 rets_for_merge = rets_for_merge[np.isfinite(rets_for_merge)]
             else:
                 rets_for_merge = None
