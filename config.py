@@ -1,5 +1,7 @@
-# config.py (STEP 5 FINAL+) — publish filter/ENV 확장 + 데이터 병합/클래스 일관성/CV 가드 옵션 추가
-# - 원본 보존 + 옵션/헬퍼 확장: DATA / CLASS_ENFORCE / CV_CONFIG / RUNTIME getters
+# config.py (STEP 5 FINAL+++)
+# - 클래스 수 단순화(8개 고정) + 경계(Zero band) 완화 + 희소구간 병합 ON
+# - 데이터 병합/클래스 일관성/CV 가드 옵션 유지
+# - 디버그 로그 변수 오타(_ROUND_DECIMALS → _ROUNDS_DECIMALS) 수정
 import json
 import os
 
@@ -9,8 +11,10 @@ CONFIG_PATH = "/persistent/config.json"
 # 기본 설정 + 신규 옵션
 # ===============================
 _default_config = {
-    "NUM_CLASSES": 10,
-    "MAX_CLASSES": 12,
+    # ✅ 클래스 개수 정책 (단순화)
+    "NUM_CLASSES": 8,      # 기존 10 → 8
+    "MAX_CLASSES": 8,      # 기존 12 → 8 (상한도 8로 맞춤)
+
     "FEATURE_INPUT_SIZE": 24,
     "FAIL_AUGMENT_RATIO": 3,
     "MIN_FEATURES": 5,
@@ -24,7 +28,7 @@ _default_config = {
     # ✅ SSL 캐시 디렉토리
     "SSL_CACHE_DIR": "/persistent/ssl_models",
 
-    # --- [DATA] 거래소 병합/정합 옵션 (신설) ---
+    # --- [DATA] 거래소 병합/정합 옵션 ---
     "DATA": {
         "merge_enabled": True,                       # Bybit+Binance 병합 기본 ON
         "sources": ["bybit", "binance"],            # 우선순위는 prefer가 결정
@@ -34,11 +38,11 @@ _default_config = {
         "dedup": {"enabled": True, "keep": "last"}
     },
 
-    # --- [CLASS_ENFORCE] 그룹/심볼 간 클래스 수 일관성 (신설) ---
+    # --- [CLASS_ENFORCE] 그룹/심볼 간 클래스 수 일관성 ---
     "CLASS_ENFORCE": {
         "same_across_groups": True,   # 그룹0/1/2가 항상 동일 클래스 수 사용
         "same_across_symbols": True,  # 다른 심볼도 동일 클래스 수 사용
-        "n_override": None            # 지정 시 동적결정 무시하고 이 값 고정
+        "n_override": 8               # ✅ 강제 고정: 8
     },
 
     # --- [2] 레짐(시장상태) 태깅 옵션 ---
@@ -96,22 +100,22 @@ _default_config = {
     "QUALITY": {"VAL_F1_MIN": 0.20, "VAL_ACC_MIN": 0.20},
 
     # --- [BIN] 클래스 경계/병합 파라미터 ---
-    #   method 기본값 "quantile" (실제 분포 기반), merge_sparse 기본 False
+    #   method 기본값 "quantile" (실제 분포 기반)
     "CLASS_BIN": {
         "method": "quantile",     # "fixed_step" | "quantile" | "linear"
         "strict": True,
-        "zero_band_eps": 0.0020,  # ±0.20%p
+        "zero_band_eps": 0.0005,  # ✅ 완화: ±0.05%p (기존 0.20%p)
         "min_width": 0.0010,      # 최소 폭 0.10%p
         "step_pct": 0.0050,       # (fixed_step일 때) 0.5% 단위
         "merge_sparse": {
-            "enabled": False,
-            "min_ratio": 0.01,    # 샘플 비율 임계
-            "min_count_floor": 20,
+            "enabled": True,      # ✅ 희소 구간 자동 병합 켜기
+            "min_ratio": 0.02,    # ✅ 샘플 비율 임계 2%
+            "min_count_floor": 50,# ✅ 최소 카운트 하한 50
             "prefer": "denser"
         }
     },
 
-    # --- [CV_CONFIG] 교차검증·가드 (신설) ---
+    # --- [CV_CONFIG] 교차검증·가드 ---
     "CV_CONFIG": {
         "folds": 5,                   # 기본 폴드 수 (ENV로도 제어)
         "min_per_class": 3,           # 각 폴드당 최소 클래스 샘플
@@ -158,7 +162,7 @@ _default_config = {
         "max_backfill_hours": 48
     },
 
-    # --- [ONCHAIN] 온체인 지표 옵션 (신설) ---
+    # --- [ONCHAIN] 온체인 지표 옵션 ---
     "ONCHAIN": {
         "enabled": False,                # 기본 OFF (데이터 준비 후 ON)
         "dir": "/persistent/onchain",    # 온체인 CSV/파케 디렉토리
@@ -357,7 +361,7 @@ def get_CV_CONFIG() -> dict:
     if fs is not None: base["fallback_stratified"] = _env_bool(fs)
     return base
 
-# --- ONCHAIN Getter (신설) ---
+# --- ONCHAIN Getter ---
 def get_ONCHAIN() -> dict:
     return _config.get("ONCHAIN", _default_config["ONCHAIN"])
 
@@ -469,7 +473,7 @@ def _choose_n_classes(rets_signed, max_classes, hint_min=4):
     else:
         h = 2.0 * iqr * (N ** (-1.0/3.0))
         est = int(round(data_range / max(h, 1e-12)))
-    base_hint = int(_config.get("NUM_CLASSES", 10))
+    base_hint = int(_config.get("NUM_CLASSES", 8))
     lower = max(4, hint_min, min(base_hint, max_classes) if est < 4 else 4)
     n_cls = max(lower, min(est, max_classes))
     return int(n_cls)
@@ -505,7 +509,7 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
 
     total = int(rets_signed.size)
     min_ratio = float(env_ratio) if env_ratio is not None else float(opt.get("min_ratio", 0.02))
-    min_floor = int(env_floor) if env_floor is not None else int(opt.get("min_count_floor", 80))
+    min_floor = int(env_floor) if env_floor is not None else int(opt.get("min_count_floor", 50))
     prefer = str(opt.get("prefer", "denser")).lower()
     edges = [ranges[0][0]] + [hi for (_, hi) in ranges]
     edges[-1] = float(edges[-1]) + 1e-12
@@ -649,8 +653,8 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
 
             n_cls = _choose_n_classes(
                 rets_signed,
-                max_classes=int(_config.get("MAX_CLASSES", 12)),
-                hint_min=int(_config.get("NUM_CLASSES", 10))
+                max_classes=int(_config.get("MAX_CLASSES", 8)),
+                hint_min=int(_config.get("NUM_CLASSES", 8))
             )
             # 일관성 강제: n_override가 있으면 사용
             if isinstance(n_override, int) and n_override >= 2:
@@ -668,8 +672,8 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
                 cooked.append((_round2(lo), _round2(hi)))
             fixed = _fix_monotonic(cooked); fixed = _ensure_zero_band(fixed)
             if BIN_CONF.get("strict", True): fixed = _strictify(fixed)
-            if len(fixed) > int(_config.get("MAX_CLASSES", 12)):
-                fixed = _merge_smallest_adjacent(fixed, int(_config.get("MAX_CLASSES", 12)))
+            if len(fixed) > int(_config.get("MAX_CLASSES", 8)):
+                fixed = _merge_smallest_adjacent(fixed, int(_config.get("MAX_CLASSES", 8)))
             if not fixed or len(fixed) < 2:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="최종 경계 부족(가드)")
             fixed = _merge_sparse_bins_by_hist(fixed, rets_signed, MAX_CLASSES, BIN_CONF)
@@ -708,7 +712,7 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
                 if rets_dbg.size > 0:
                     rets_dbg = np.array([_cap_by_strategy(float(r), strategy) for r in rets_dbg], dtype=np.float32)
                     qs = np.quantile(rets_dbg, [0.00, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 1.00])
-                    def _r2(z): return round(float(z), _ROUND_DECIMALS)
+                    def _r2(z): return round(float(z), _ROUNDS_DECIMALS)  # <- 오타 수정
                     print(f"[📈 수익률분포(±)] {symbol}-{strategy} min={_r2(qs[0])}, p25={_r2(qs[1])}, p50={_r2(qs[2])}, p75={_r2(qs[3])}, p90={_r2(qs[4])}, p95={_r2(qs[5])}, p99={_r2(qs[6])}, max={_r2(qs[7])}")
                     print(f"[📏 클래스경계 로그] {symbol}-{strategy} → {len(all_ranges)}개")
                     print(f"[📏 경계 리스트] {symbol}-{strategy} → {all_ranges}")
@@ -765,7 +769,7 @@ def get_SSL_CACHE_DIR():      return os.getenv("SSL_CACHE_DIR", _config.get("SSL
 # ------------------------
 _DFLT_STEP = str(_config.get("CLASS_BIN", {}).get("step_pct", 0.0050))
 DYN_CLASS_STEP = float(os.getenv("CLASS_BIN_STEP", os.getenv("DYN_CLASS_STEP", _DFLT_STEP)))
-BOUNDARY_BAND = float(os.getenv("BOUNDARY_BAND", "0.0020"))
+BOUNDARY_BAND = float(os.getenv("BOUNDARY_BAND", str(_default_config["CLASS_BIN"]["zero_band_eps"])))
 CV_FOLDS   = int(os.getenv("CV_FOLDS", "5"))
 CV_GATE_F1 = float(os.getenv("CV_GATE_F1", "0.50"))
 
@@ -851,7 +855,8 @@ def _eval_from_env(base: dict) -> dict:
     _b("check_interval_min", "EVAL_CHECK_INTERVAL_MIN", int)
     _b("grace_min", "EVAL_GRACE_MIN", int)
     _b("price_window_slack_min", "EVAL_PRICE_WINDOW_SLACK_MIN", int)
-    _b("max_backfill_hours", "EVAL_MAX_BACKFILL_HOURS", int)
+    _b("max_backfill_hours", "EVAL_MAX_BACKFIL
+L_HOURS", int)
     return d
 
 def get_EVAL_RUNTIME() -> dict:
@@ -900,4 +905,4 @@ __all__ = [
     # ▼ 신규 노출
     "get_DATA", "get_DATA_RUNTIME", "get_CLASS_ENFORCE", "get_CV_CONFIG",
     "get_ONCHAIN",
-        ]
+                  ]
