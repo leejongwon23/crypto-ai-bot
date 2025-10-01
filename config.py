@@ -157,6 +157,20 @@ _default_config = {
         "price_window_slack_min": 10,
         "max_backfill_hours": 48
     },
+
+    # --- [ONCHAIN] 온체인 지표 옵션 (신설) ---
+    "ONCHAIN": {
+        "enabled": False,                # 기본 OFF (데이터 준비 후 ON)
+        "dir": "/persistent/onchain",    # 온체인 CSV/파케 디렉토리
+        "features": [                    # 기본 제공 키워드(임의 확장 가능)
+            "active_address",
+            "tx_count",
+            "exchange_inflow",
+            "exchange_outflow"
+        ],
+        "fill": {"method": "ffill", "max_gap": 6},  # 6 step까지 보간 허용
+        "zscore_window": 96,             # 표준화 윈도우(시장/상관과 일관)
+    },
 }
 
 # ✅ 전략별 K라인 설정 (모두 1200개로 통일)
@@ -342,6 +356,10 @@ def get_CV_CONFIG() -> dict:
     fs = os.getenv("CV_FALLBACK_STRATIFIED", None)
     if fs is not None: base["fallback_stratified"] = _env_bool(fs)
     return base
+
+# --- ONCHAIN Getter (신설) ---
+def get_ONCHAIN() -> dict:
+    return _config.get("ONCHAIN", _default_config["ONCHAIN"])
 
 # ------------------------
 # 헬퍼
@@ -881,4 +899,5 @@ __all__ = [
     "get_EVAL_RUNTIME", "strategy_horizon_hours", "compute_eval_due_at",
     # ▼ 신규 노출
     "get_DATA", "get_DATA_RUNTIME", "get_CLASS_ENFORCE", "get_CV_CONFIG",
-                ]
+    "get_ONCHAIN",
+        ]
