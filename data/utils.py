@@ -1,4 +1,4 @@
-# data/utils.py — 안정성/정합성 강화판 (MTF 피처화 + 경계보강/버킷균형 + augmented 소수클래스 증강 + 3단계 컨텍스트 호환)
+# data/utils.py — 안정성/정합성 강화판 (MTF 피처화 + 경계보강/버킷균형 + augmented 소수클래스 증강 + 3단계 컨텍스트 호환 + ✅ 온체인 컨텍스트)
 # ✅ Render 캐시 강제 무효화용 주석 — 절대 삭제하지 마
 _kline_cache = {}
 
@@ -48,6 +48,13 @@ try:
     from features.regime import get_regime_tags_df as _get_ext_regime_ctx
 except Exception:
     def _get_ext_regime_ctx(ts: pd.Series, strategy: str) -> pd.DataFrame:
+        return pd.DataFrame(columns=["timestamp"])
+
+# ✅ 추가: 온체인 컨텍스트 (없으면 안전 무시)
+try:
+    from features.onchain import get_onchain_context_df as _get_onchain_ctx
+except Exception:
+    def _get_onchain_ctx(ts: pd.Series, strategy: str, symbol: Optional[str] = None) -> pd.DataFrame:
         return pd.DataFrame(columns=["timestamp"])
 
 def _guess_tolerance_by_strategy(strategy: str) -> pd.Timedelta:
@@ -315,7 +322,7 @@ class GroupOrderManager:
     def mark_group_predicted(self):
         i = self.current_index()
         if self.last_predicted_idx == i:
-            print(f"[🛡 중복차단] 그룹{i} 예측 완료가 이미 반영됨 → 스킵")
+            print(f"[🛡 중복차단] 그룹{i} 예측 완료가 이미 반영됨 → 스킱")
             return
         print(f"[✅ 예측완료] 그룹{i} → 다음 그룹으로 이동")
         self.last_predicted_idx = i
@@ -1111,6 +1118,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
                 _get_market_ctx(ts, strategy, symbol),
                 _get_corr_ctx(symbol, ts, strategy),
                 _get_ext_regime_ctx(ts, strategy),
+                _get_onchain_ctx(ts, strategy, symbol),  # ✅ 온체인 컨텍스트 병합
             ]
             feat = _merge_asof_all(feat, ctx_list, strategy)
         except Exception:
@@ -1257,7 +1265,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
         scaler = MinMaxScaler()
         scaled = scaler.fit_transform(df[feature_cols].astype(np.float32))
-        df_s = pd.DataFrame(scaled.astype(np.float32), columns=feature_cols)
+        df_s = _pd.DataFrame(scaled.astype(np.float32), columns=feature_cols)
         df_s["timestamp"] = df["timestamp"].values
 
         raw_records = df.to_dict(orient="records")
@@ -1341,12 +1349,8 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             # --- 레짐×변동성 버킷 균형(옵션) ---
             try:
                 if int(os.getenv("BALANCE_BY_BUCKETS", "0")) == 1:
-                    # 추출 가능한 경우에 한해 버킷 계산 (마지막 스텝의 특성으로 근사)
-                    # trend_regime in {0,1,2}, vol_regime in {0,1,2} 가정
-                    # df_s 끝부분에서 동일 인덱스 매칭은 어렵기 때문에 근사: 레이블 개수만큼 뒤쪽 행 사용
                     vol = pd.to_numeric(df.get("vol_regime", pd.Series([1]*len(df))), errors="coerce").fillna(1).astype(int).values
                     trd = pd.to_numeric(df.get("trend_regime", pd.Series([1]*len(df))), errors="coerce").fillna(1).astype(int).values
-                    # 윈도우 정렬을 고려해 y 길이에 맞춰 tail에서 슬라이스
                     start = len(vol) - len(y)
                     start = max(0, start)
                     bucket = (vol[start:start+len(y)] * 3 + trd[start:start+len(y)]).astype(int)
