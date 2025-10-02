@@ -153,8 +153,9 @@ now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 # ✅ 그룹 끝난 직후 예측을 락 예외로 허용할지(예측 쪽에서 처리)
 PREDICT_OVERRIDE_ON_GROUP_END = _as_bool_env("PREDICT_OVERRIDE_ON_GROUP_END", True)
 
-# ───────── 예측 타임아웃 보호 ─────────
-PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC","60"))
+# ───────── 예측 타임아웃/강제 옵션 (수정) ─────────
+PREDICT_FORCE_AFTER_GROUP = _as_bool_env("PREDICT_FORCE_AFTER_GROUP", True)  # 새 옵션: 게이트 False여도 강제 실행
+PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC","180"))          # 60 → 180
 
 def _maybe_insert_failure(payload:dict, feature_vector:Optional[List[Any]] = None):
     try:
@@ -473,7 +474,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     f1_val=0.0
                 val_loss=float(val_loss_sum/max(1,n_val))
 
-                # 메타/저장  👇👇👇 (중요 변경: passed=1 추가)
+                # 메타/저장
                 stem=os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_w{int(window)}_group{int(group_id) if group_id is not None else 0}_cls{int(len(class_ranges))}")
                 meta={"symbol":symbol,"strategy":strategy,"model":model_type,"group_id":int(group_id or 0),
                       "num_classes":int(len(class_ranges)),
@@ -665,10 +666,19 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                 completed_syms, partial_syms = train_models(group, stop_event=stop_event, ignore_should=force_full_pass)
                 if stop_event is not None and stop_event.is_set(): break
 
-                # ✅ 그룹 학습 직후 즉시 예측(완료 여부 상관없이, 모델 있는 조합만)
-                if not ready_for_group_predict():
-                    _safe_print(f"[PREDICT-BLOCK] group{idx+1} ready_for_group_predict()==False")
+                # ✅ 그룹 학습 직후 즉시 예측(완료 여부 상관없이, 모델 있는 조합만) — 수정 반영
+                gate_ok = True
+                try:
+                    gate_ok = ready_for_group_predict()
+                except Exception as e:
+                    _safe_print(f"[PREDICT-GATE warn] {e} -> 게이트 무시하고 진행")
+
+                if (not gate_ok) and (not PREDICT_FORCE_AFTER_GROUP):
+                    _safe_print(f"[PREDICT-BLOCK] group{idx+1} ready_for_group_predict()==False (강제 실행 비활성)")
                 else:
+                    if (not gate_ok) and PREDICT_FORCE_AFTER_GROUP:
+                        _safe_print(f"[PREDICT-OVERRIDE] group{idx+1} 게이트 False지만 강제 실행")
+
                     ran_any=False
                     for symbol in group:
                         for strategy in ["단기","중기","장기"]:
@@ -696,7 +706,8 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                         if cand_symbol:
                             _safe_print(f"[SMOKE] fallback predict for {cand_symbol}")
                             try: _run_smoke_predict(predict, cand_symbol)
-                            except: pass
+                            except Exception as e: _safe_print(f"[SMOKE fail] {e}")
+
                     if ran_any:
                         try: mark_group_predicted()
                         except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
