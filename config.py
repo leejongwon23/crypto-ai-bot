@@ -74,14 +74,14 @@ _default_config = {
 
     # 클래스 경계/병합 파라미터
     "CLASS_BIN": {
-        "method": "quantile",      # "quantile" | "fixed_step" | "linear"
+        "method": "fixed_step",     # "quantile" | "fixed_step" | "linear"  ← 기본을 fixed_step로
         "strict": True,
-        "zero_band_eps": 0.0020,   # ±0.20%p
-        "min_width": 0.0010,       # 최소 폭 0.10%p
-        "max_width": 0.05,         # 한 구간 최대 폭 5%p — 과도한 넓은 구간 자동 세분화
-        "step_pct": 0.0050,
+        "zero_band_eps": 0.0020,    # ±0.20%p
+        "min_width": 0.0010,        # 최소 폭 0.10%p
+        "max_width": 0.03,          # 한 구간 최대 폭 3%p (더 타이트)
+        "step_pct": 0.0030,         # 0.30%p 고정 스텝 (단기 ±6% 구간에서 최대 40 스텝)
         "merge_sparse": {
-            "enabled": True,       # 기본 ON (희귀 구간 자동 병합)
+            "enabled": True,        # 기본 ON (희귀 구간 자동 병합)
             "min_ratio": 0.01,
             "min_count_floor": 20,
             "prefer": "denser"
@@ -150,8 +150,9 @@ STRATEGY_CONFIG = {
     "장기": {"interval": "D",   "limit": 1200, "binance_interval": "1d"},
 }
 
-_STRATEGY_RETURN_CAP_POS_MAX = {"단기": 0.12, "중기": 0.25, "장기": 0.50}
-_STRATEGY_RETURN_CAP_NEG_MIN = {"단기": -0.12, "중기": -0.25, "장기": -0.50}
+# 더 보수적인 수익률 상/하한(클래스 폭 비정상 확대 방지)
+_STRATEGY_RETURN_CAP_POS_MAX = {"단기": 0.06, "중기": 0.20, "장기": 0.50}
+_STRATEGY_RETURN_CAP_NEG_MIN = {"단기": -0.06, "중기": -0.20, "장기": -0.50}
 
 _MIN_RANGE_WIDTH = _default_config["CLASS_BIN"]["min_width"]
 _ROUND_DECIMALS  = 4
@@ -572,7 +573,8 @@ def class_to_expected_return(class_id: int, symbol: str, strategy: str):
     conf = get_CLASS_BIN()
     mode = str(conf.get("expected_return_mode", "truncated_mid")).lower()
     if mode == "mid":
-        return (r_min + r_max) / 2.0
+        val = (r_min + r_max) / 2.0
+        return _cap_by_strategy(val, strategy)
 
     floor = float(conf.get("no_trade_floor_abs", 0.01))
     lo, hi = float(r_min), float(r_max)
@@ -591,7 +593,8 @@ def class_to_expected_return(class_id: int, symbol: str, strategy: str):
 
     if hi <= lo:
         return 0.0
-    return (lo + hi) / 2.0
+    val = (lo + hi) / 2.0
+    return _cap_by_strategy(val, strategy)
 
 def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, group_size=5):
     import numpy as np
@@ -599,8 +602,8 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
 
     MAX_CLASSES = int(_config.get("MAX_CLASSES", _default_config["MAX_CLASSES"]))
     BIN_CONF = get_CLASS_BIN()
-    method_req = (os.getenv("CLASS_BIN_METHOD") or method or BIN_CONF.get("method") or "quantile").lower()
-    max_width = float(BIN_CONF.get("max_width", 0.05))
+    method_req = (os.getenv("CLASS_BIN_METHOD") or method or BIN_CONF.get("method") or "fixed_step").lower()
+    max_width = float(BIN_CONF.get("max_width", 0.03))
 
     # n_override: ENV가 지정된 경우에만 사용(기본 동적)
     ce = get_CLASS_ENFORCE()
@@ -631,8 +634,8 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
 
     def compute_fixed_step_ranges(rets_for_merge):
         env_step = os.getenv("CLASS_BIN_STEP") or os.getenv("DYN_CLASS_STEP")
-        step = float(env_step) if env_step is not None else float(BIN_CONF.get("step_pct", 0.0050))
-        if step <= 0: step = 0.0050
+        step = float(env_step) if env_step is not None else float(BIN_CONF.get("step_pct", 0.0030))
+        if step <= 0: step = 0.0030
         neg = _STRATEGY_RETURN_CAP_NEG_MIN.get(strategy, -0.5)
         pos = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy,  0.5)
         edges, val = [], float(neg)
@@ -798,7 +801,7 @@ def get_DISPLAY_MIN_RETURN(): return DISPLAY_MIN_RETURN
 def get_SSL_CACHE_DIR():      return os.getenv("SSL_CACHE_DIR", _config.get("SSL_CACHE_DIR", _default_config["SSL_CACHE_DIR"]))
 
 # ENV override 노출
-_DFLT_STEP = str(_config.get("CLASS_BIN", {}).get("step_pct", 0.0050))
+_DFLT_STEP = str(_config.get("CLASS_BIN", {}).get("step_pct", 0.0030))
 DYN_CLASS_STEP = float(os.getenv("CLASS_BIN_STEP", os.getenv("DYN_CLASS_STEP", _DFLT_STEP)))
 BOUNDARY_BAND = float(os.getenv("BOUNDARY_BAND", "0.0020"))
 CV_FOLDS   = int(os.getenv("CV_FOLDS", "5"))
@@ -904,4 +907,4 @@ __all__ = [
     "get_EVAL_RUNTIME", "strategy_horizon_hours", "compute_eval_due_at",
     "get_DATA", "get_DATA_RUNTIME", "get_CLASS_ENFORCE", "get_CV_CONFIG",
     "get_ONCHAIN",
-    ]
+            ]
