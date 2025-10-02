@@ -1,10 +1,13 @@
-# === predict.py — Meta-only final (FINAL v1.2 with RealityGuard) ===
-# (2025-09-30, 메타러너 최종 선택 + 현실 가드 추가)
+# === predict.py — Meta-only final (FINAL v1.2 with RealityGuard + ExitGuard) ===
+# (2025-09-30, 메타러너 최종 선택 + 현실/출구 가드 추가)
 # 변경 핵심:
-#   - 현실 가드(RealityGuard) 추가:
+#   - 현실 가드(RealityGuard):
 #       (1) 포지션 모순: 시장 힌트가 long/short 금지인데 해당 방향 예측 시 보류
 #       (2) 변동성 대비 과장: 예측 기대수익(|mid|) > k * 최근 변동성이면 보류
-#   - 기존 흐름 유지: [메타러너] → [단일모델 경쟁+탐험] → [최소 기대수익 가드] → [RealityGuard] → [보류컷]
+#   - 출구 가드(ExitGuard):
+#       (3) 클래스 폭 초과: (hi-lo) > CLASS_BIN.max_width → 보류
+#       (4) 기대수익 미달: |mid| < PUBLISH.min_expected_return → 보류
+#   - 기존 흐름 유지: [메타러너] → [단일모델 경쟁+탐험] → [최소 기대수익 가드] → [ExitGuard] → [RealityGuard] → [보류컷]
 #   - STRICT_BOUNDS, 윈도우 앙상블(mean/var-penalize), 게이트/락/하트비트/로깅 그대로 유지
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
@@ -216,7 +219,8 @@ except Exception:
 
 from config import (
     get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups,
-    get_class_return_range, class_to_expected_return
+    get_class_return_range, class_to_expected_return,
+    get_CLASS_BIN, get_PUBLISH_RUNTIME  # ← 추가된 import
 )
 
 # ====== DEVICE ======
@@ -712,6 +716,37 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     final_cls, chosen, used_minret = best_cls, best_m, True
         except Exception as e:
             print(f"[임계 가드 예외] {e}")
+
+        # (C-1) 출구 가드: 과도폭/최소 기대수익 미달 시 즉시 보류
+        try:
+            lo_sel, hi_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
+            exp_ret = (float(lo_sel) + float(hi_sel)) / 2.0
+
+            bin_conf = get_CLASS_BIN()
+            pub_conf = get_PUBLISH_RUNTIME()
+            max_width = float(bin_conf.get("max_width", 0.03))
+            min_er    = float(pub_conf.get("min_expected_return", 0.01))
+
+            width = float(hi_sel) - float(lo_sel)
+            if width > (max_width + 1e-12):
+                return _soft_abstain(
+                    symbol, strategy,
+                    reason=f"exit_guard_width(width={width:.4f}, max={max_width:.4f})",
+                    meta_choice=str(meta_choice), regime=regime, X_last=X[-1],
+                    group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None),
+                    df=df, source="보류"
+                )
+
+            if abs(float(exp_ret)) < min_er:
+                return _soft_abstain(
+                    symbol, strategy,
+                    reason=f"exit_guard_min_expected_return(mid={float(exp_ret):.4f}, min={min_er:.4f})",
+                    meta_choice=str(meta_choice), regime=regime, X_last=X[-1],
+                    group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None),
+                    df=df, source="보류"
+                )
+        except Exception as e:
+            print(f"[출구 가드 예외] {e}")
 
         # (C-2) RealityGuard — 시장 현실과 충돌/과장 체크
         try:
