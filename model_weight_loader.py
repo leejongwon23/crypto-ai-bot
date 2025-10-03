@@ -1,4 +1,4 @@
-# model_weight_loader.py (patched: cache+meta-fuzzy+eval-merge)
+# model_weight_loader.py (patched: cache+meta-fuzzy+eval-merge, pt+ptz 지원)
 import os
 import pandas as pd
 import json
@@ -10,7 +10,6 @@ MODEL_DIR = "/persistent/models"
 EVAL_RESULT_SINGLE = "/persistent/evaluation_result.csv"  # 있을 수도 있어서 추가 확인용
 
 # ✅ 모델 캐시 (state_dict TTL 캐싱)
-#  - 키: pt 경로, 값: state_dict
 _model_cache = {}
 _model_cache_ttl = {}
 
@@ -21,19 +20,15 @@ def _safe_state_dict(obj):
     """
     try:
         if isinstance(obj, dict) and all(isinstance(k, str) for k in obj.keys()):
-            # 일반적인 state_dict 형태
             return obj
-        # nn.Module로 저장된 경우
         try:
             return obj.state_dict()
         except Exception:
             pass
-        # ckpt 래핑(dict 안에 'state_dict')
         if isinstance(obj, dict) and "state_dict" in obj:
             sd = obj["state_dict"]
             if isinstance(sd, dict):
                 return sd
-        # 마지막 안전책: 그대로 반환(로드 시 strict=False로 수용)
         return obj
     except Exception:
         return obj
@@ -69,7 +64,6 @@ def load_model_cached(pt_path, model_obj, ttl_sec=600):
                 _model_cache_ttl.pop(pt_path, None)
 
         # 디스크에서 state_dict 로드
-        # (torch 1.x/2.x 겸용: state_dict 저장/모델 객체 저장/ckpt dict 모두 허용)
         state = torch.load(pt_path, map_location="cpu")
         state_dict = _safe_state_dict(state)
 
@@ -89,27 +83,27 @@ def load_model_cached(pt_path, model_obj, ttl_sec=600):
 
 
 # =========================
-#  META 유연 탐색 헬퍼 추가
+#  META 유연 탐색 헬퍼
 # =========================
 def resolve_meta_for_pt(pt_path: str) -> str | None:
     """
-    ✅ PT 파일에 대응하는 META 파일을 '유연 규칙'으로 찾아준다.
-    - 과거 규칙: {base}.pt ↔ {base}.meta.json (정확히 일치)
-    - 지금 허용: {base}*.meta.json (예: _group1_cls5 등 suffix 허용)
-    - 다수 매칭 시: 수정시각 최신(meta mtime) 우선
+    ✅ PT/PTZ 파일에 대응하는 META 파일을 '유연 규칙'으로 찾아준다.
+    - {base}.pt ↔ {base}.meta.json
+    - {base}*.meta.json (suffix 허용)
+    - 다수 매칭 시 최신 mtime 우선
     """
     try:
         if not pt_path:
             return None
         base = os.path.basename(pt_path)
-        if not base.endswith(".pt"):
+        if not (base.endswith(".pt") or base.endswith(".ptz")):
             return None
-        prefix = base[:-3]  # ".pt" 제거한 베이스
-        # 1) 완전 일치 우선
+        prefix = base.rsplit(".", 1)[0]  # 확장자 제거
+        # 1) 완전 일치
         exact = os.path.join(MODEL_DIR, f"{prefix}.meta.json")
         if os.path.exists(exact):
             return exact
-        # 2) prefix로 시작하는 모든 meta 후보
+        # 2) prefix로 시작하는 모든 후보
         cand = sorted(
             glob.glob(os.path.join(MODEL_DIR, f"{prefix}*.meta.json")),
             key=lambda p: os.path.getmtime(p),
@@ -123,15 +117,14 @@ def resolve_meta_for_pt(pt_path: str) -> str | None:
 
 def find_models_fuzzy(symbol: str, strategy: str):
     """
-    ✅ 심볼/전략 기준으로 PT를 먼저 찾고, META는 유연 규칙으로 붙여 반환.
-    predict.py의 get_available_models 대체/참고용.
+    ✅ 심볼/전략 기준으로 PT/PTZ를 먼저 찾고, META를 유연 규칙으로 붙여 반환.
     """
     out = []
     try:
         prefix = f"{symbol}_"
         needle = f"_{strategy}_"
         for fn in os.listdir(MODEL_DIR):
-            if not fn.endswith(".pt"):
+            if not (fn.endswith(".pt") or fn.endswith(".ptz")):
                 continue
             if not fn.startswith(prefix):
                 continue
@@ -151,32 +144,23 @@ def find_models_fuzzy(symbol: str, strategy: str):
 def _load_all_eval_logs():
     """
     ✅ 평가 로그를 가능한 폭넓게 수집해서 하나의 DataFrame으로 반환
-    - /persistent/logs/evaluation_*.csv (일자별)
-    - /persistent/evaluation_result.csv (있으면)
     """
     frames = []
-
-    # 1) 일자별 평가 로그
     eval_daily = sorted(glob.glob("/persistent/logs/evaluation_*.csv"))
     for fp in eval_daily:
         try:
             frames.append(pd.read_csv(fp, encoding="utf-8-sig"))
         except Exception as e:
             print(f"[⚠️ 평가 파일 읽기 실패] {fp} → {e}")
-
-    # 2) 단일 평가 로그(있을 수 있음)
     if os.path.exists(EVAL_RESULT_SINGLE):
         try:
             frames.append(pd.read_csv(EVAL_RESULT_SINGLE, encoding="utf-8-sig"))
         except Exception as e:
             print(f"[⚠️ 단일 평가 파일 읽기 실패] {EVAL_RESULT_SINGLE} → {e}")
-
     if not frames:
         return pd.DataFrame()
-
     try:
         df = pd.concat(frames, ignore_index=True)
-        # 중복 제거 (있을 경우 대비)
         if "timestamp" in df.columns:
             df = df.drop_duplicates(subset=[c for c in df.columns if c in ["timestamp","symbol","strategy","model"]])
         else:
@@ -190,24 +174,20 @@ def _load_all_eval_logs():
 def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_size=None):
     """
     ✅ 메타파일 및 최근 평가 로그 기반 가중치(0.0~1.0) 추정
-    - 메타/평가로그가 부족하면 0.2로 보수적 fallback
-    - 일자별 로그와 단일 로그를 모두 탐색하여 샘플 부족 문제 완화
     """
     pattern = (
         os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json")
         if symbol != "ALL"
         else os.path.join(MODEL_DIR, f"*_{strategy}_{model_type}.meta.json")
     )
-    # 유연 매칭 추가: group/cls suffix 허용
     meta_files = glob.glob(pattern)
     if symbol != "ALL" and not meta_files:
         meta_files = glob.glob(os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}*.meta.json"))
 
     if not meta_files:
-        print(f"[⚠️ meta 파일 없음] {pattern} → fallback weight=0.2 (모델 없음)")
+        print(f"[⚠️ meta 파일 없음] {pattern} → fallback weight=0.2")
         return 0.2
 
-    # 평가 로그 로드
     df_all = _load_all_eval_logs()
     if df_all.empty:
         print("[INFO] 평가 데이터 없음 → cold-start weight=0.2")
@@ -222,24 +202,17 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
                 print(f"[⚠️ input_size 불일치] meta={meta.get('input_size')} vs input={input_size} → weight=0.2")
                 return 0.2
 
+            # PT/PTZ 대응
             pt_path = meta_path.replace(".meta.json", ".pt")
-            # PT가 base만 있고 META가 suffix를 가진 경우를 허용
             if not os.path.exists(pt_path):
-                # base만 남기고 대응 PT 재탐색
-                base = os.path.basename(meta_path).replace(".meta.json", "")
-                # base에서 suffix를 떼고(첫 3토큰: SYMBOL, 전략, 모델타입)
-                parts = base.split("_")
-                if len(parts) >= 3:
-                    base_core = "_".join(parts[:3])
-                    cand_pt = os.path.join(MODEL_DIR, f"{base_core}.pt")
-                    if os.path.exists(cand_pt):
-                        pt_path = cand_pt
+                ptz_path = meta_path.replace(".meta.json", ".ptz")
+                if os.path.exists(ptz_path):
+                    pt_path = ptz_path
 
             if not os.path.exists(pt_path):
                 print(f"[⚠️ 모델 파일 없음] {pt_path} → weight=0.2")
                 return 0.2
 
-            # 평가 레코드 필터
             df = df_all.copy()
             need_cols = {"model", "strategy", "symbol", "status"}
             if not need_cols.issubset(df.columns):
@@ -281,7 +254,7 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
 def model_exists(symbol, strategy):
     try:
         for file in os.listdir(MODEL_DIR):
-            if file.startswith(f"{symbol}_{strategy}_") and file.endswith(".pt"):
+            if file.startswith(f"{symbol}_{strategy}_") and (file.endswith(".pt") or file.endswith(".ptz")):
                 return True
     except Exception as e:
         print(f"[오류] 모델 존재 확인 실패: {e}")
@@ -292,7 +265,7 @@ def count_models_per_strategy():
     counts = {"단기": 0, "중기": 0, "장기": 0}
     try:
         for file in os.listdir(MODEL_DIR):
-            if not file.endswith(".pt"):
+            if not (file.endswith(".pt") or file.endswith(".ptz")):
                 continue
             parts = file.split("_")
             if len(parts) >= 3:
@@ -304,14 +277,6 @@ def count_models_per_strategy():
     return counts
 
 
-# ✅ logger.get_available_models()에서 import하는 유틸 (호환용)
+# ✅ 호환 유틸
 def get_similar_symbol(symbol: str):
-    """
-    간단 호환용 스텁: 타 심볼을 허용하지 않음 (필요 시 확장)
-    """
     return []
-
-# ⚠️ 주의:
-#  - 과거 이 파일에 있었던 `get_class_return_range`는 제거했습니다.
-#    클래스 경계/수익률 관련 로직은 반드시 `config.py`의
-#    `get_class_return_range(class_id, symbol, strategy)`를 사용하세요.
