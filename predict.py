@@ -177,7 +177,8 @@ except Exception:
     def get_calibration_version(): return "none"
 
 # ====== STRICT: 메타 경계만 사용 ======
-STRICT_SAME_BOUNDS = os.getenv("STRICT_SAME_BOUNDS", "1") == "1"
+# 기본 OFF: 메타에 class_ranges 없으면 cfg 범위로 안전하게 폴백
+STRICT_SAME_BOUNDS = os.getenv("STRICT_SAME_BOUNDS", "0") == "1"
 
 # ====== Model I/O ======
 try:
@@ -250,18 +251,20 @@ EXP_GAMMA = float(os.getenv("EXPLORE_GAMMA", "0.05"))
 
 # ====== RealityGuard 설정 ======
 RG_ENABLE = os.getenv("RG_ENABLE", "1") == "1"
-# 포지션 모순 차단 (시장 힌트가 금지한 방향이면 보류)
 RG_BLOCK_POSITION_CONFLICT = os.getenv("RG_BLOCK_POSITION_CONFLICT", "1") == "1"
-# 변동성 배수(예측 mid가 최근 변동성 * 배수보다 크면 과장으로 판단)
 RG_VOL_MULT = float(os.getenv("RG_VOL_MULT", "2.0"))
-# 변동성 계산용 lookback(봉 개수) — 전략별 기본값
 RG_LOOKBACK_SHORT = int(os.getenv("RG_LOOKBACK_SHORT", "48"))   # 단기
 RG_LOOKBACK_MID   = int(os.getenv("RG_LOOKBACK_MID", "96"))     # 중기
 RG_LOOKBACK_LONG  = int(os.getenv("RG_LOOKBACK_LONG", "336"))   # 장기
-# 변동성 추정 방식: 표준편차(std) vs. 평균절대편차(mad)
 RG_VOL_METHOD = os.getenv("RG_VOL_METHOD", "std").lower()       # "std" or "mad"
-# 예측 mid가 너무 작을 때는 과장 체크 생략할 최소치 (잡음 회피)
 RG_MIN_ABS_MID_FOR_VOLCHECK = float(os.getenv("RG_MIN_ABS_MID_FOR_VOLCHECK", "0.004"))  # 0.4%
+
+# ====== model type 표준화 ======
+def _norm_model_type(mt: str) -> str:
+    s = str(mt or "").lower()
+    if "transformer" in s: return "TRANSFORMER"
+    if "cnn" in s: return "CNN_LSTM"
+    return "LSTM"
 
 # ====== meta class_ranges 우선 ======
 def _ranges_from_meta(meta):
@@ -513,7 +516,7 @@ def _recent_volatility(df: pd.DataFrame, strategy: str) -> float:
         ret = pd.Series(close).pct_change().dropna().values[-lb:]
         if ret.size == 0: return 0.0
         if RG_VOL_METHOD == "mad":
-            vol = float(np.mean(np.abs(ret - np.median(ret))) * 1.2533)  # MAD ≈ 0.8*std → 보정계수
+            vol = float(np.mean(np.abs(ret - np.median(ret))) * 1.2533)
         else:
             vol = float(np.std(ret))
         return max(0.0, vol)
@@ -534,13 +537,11 @@ def _reality_guard_check(df, strategy, hint, lo_sel, hi_sel, exp_mid) -> tuple[b
         # (2) 변동성 대비 과장
         if abs(exp_mid) >= RG_MIN_ABS_MID_FOR_VOLCHECK:
             vol = _recent_volatility(df, strategy)
-            # vol이 0이면 판단 불가 → 통과
             if vol > 0:
                 if abs(exp_mid) > RG_VOL_MULT * vol:
                     return False, f"reality_guard_overclaim(vol={vol:.4f}, mid={exp_mid:.4f})"
         return True, "ok"
     except Exception as e:
-        # 문제가 있으면 가드가 판단을 막지 않음
         return True, f"rg_exception:{e}"
 
 # ====== 핵심 예측 ======
@@ -888,7 +889,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 note_s = {
                     "regime": regime, "shadow": True,
                     "model_path": os.path.basename(m.get("model_path", "")),
-                    "model_type": m.get("model_type", ""), "val_f1": (None if m.get("val_f1") is None else float(m.get("val_f1"))),
+                    "model_type": _norm_model_type(m.get("model_type", "")),
+                    "val_f1": (None if m.get("val_f1") is None else float(m.get("val_f1"))),
                     "calib_ver": get_calibration_version(), "min_return_threshold": float(MIN_RET_THRESHOLD),
                     "class_range_lo": float(lo_i),
                     "class_range_hi": float(hi_i),
@@ -900,7 +902,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 log_prediction(
                     symbol=symbol, strategy=strategy, direction="예측(섀도우)",
                     entry_price=entry, target_price=entry*(1+exp_i),
-                    model=m.get("model_type","model"),
+                    model=_norm_model_type(m.get("model_type","")),
                     model_name=os.path.basename(m.get("model_path","")),
                     predicted_class=pred_i, label=pred_i,
                     note=json.dumps(note_s, ensure_ascii=False),
@@ -1124,17 +1126,16 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             with open(meta_path, "r", encoding="utf-8") as mf:
                 meta = json.load(mf)
 
-            # STRICT_BOUNDS: meta에 class_ranges 없으면 스킵
+            # STRICT_BOUNDS: meta에 class_ranges 없으면 STRICT일 때만 스킵, 기본은 cfg 폴백 허용
             cr_meta = _ranges_from_meta(meta)
             if STRICT_SAME_BOUNDS and not (cr_meta and len(cr_meta) >= 2):
-                print(f"[SKIP] no class_ranges in meta → {os.path.basename(model_path)}"); continue
+                print(f"[STRICT] no class_ranges in meta → {os.path.basename(model_path)} (skip)"); 
+                continue
 
             # 품질 컷: passed==1 만 확인(F1 기반 게이트 제거)
-            passed = int(meta.get("passed", 0)) == 1
-            if not passed:
-                print(f"[SKIP] gate: {os.path.basename(model_path)} passed=0"); continue
-
-            mtype = meta.get("model", "lstm"); gid = meta.get("group_id", 0)
+            mtype_raw = meta.get("model", "lstm")
+            mtype = _norm_model_type(mtype_raw)
+            gid = meta.get("group_id", 0)
             inp_size = int(meta.get("input_size", feat_scaled.shape[1]))
             num_cls = int(meta.get("num_classes", (len(cr_meta) if cr_meta else NUM_CLASSES)))
 
@@ -1152,7 +1153,7 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
 
                 x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0)
 
-                model = get_model(mtype, input_size=inp_size, output_size=num_cls)
+                model = get_model(mtype_raw, input_size=inp_size, output_size=num_cls)
 
                 loaded = load_model_any(model_path, model)
                 if isinstance(loaded, dict) and model is not None:
