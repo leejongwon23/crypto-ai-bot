@@ -1,4 +1,4 @@
-# === failure_learn.py (v2025-09-17d: TZ-safe + manifest backup/restore + runtime lock guard) ===
+# === failure_learn.py (v2025-10-03r: shadow-weighted targeting + TZ-safe cooldown + manifest backup/restore + runtime lock) ===
 import os, json, time, glob, shutil, csv
 from datetime import datetime, timedelta
 import pandas as pd
@@ -22,14 +22,20 @@ LOCK_PATH      = os.getenv("SAFE_LOCK_PATH", os.path.join(LOCK_DIR, "train_or_pr
 
 # ── 설정 (환경변수로 조정) ─────────────────────────────────────
 KST = pytz.timezone("Asia/Seoul")
-CSV_CHUNKSIZE        = int(os.getenv("FAIL_LEARN_CHUNKSIZE", "50000"))
-LOOKBACK_DAYS_DEFAULT= int(os.getenv("FAIL_LEARN_LOOKBACK_DAYS", "7"))
-COOLDOWN_MINUTES     = int(os.getenv("FAIL_LEARN_COOLDOWN_MIN", "20"))
+CSV_CHUNKSIZE         = int(os.getenv("FAIL_LEARN_CHUNKSIZE", "50000"))
+LOOKBACK_DAYS_DEFAULT = int(os.getenv("FAIL_LEARN_LOOKBACK_DAYS", "7"))
+COOLDOWN_MINUTES      = int(os.getenv("FAIL_LEARN_COOLDOWN_MIN", "20"))
 # 이어학습/롤백 파라미터( failure_trainer 와 동일 키 )
-MINI_EPOCHS          = max(1, min(3, int(os.getenv("FAIL_MINI_EPOCHS", "2"))))
-ROLLBACK_ENABLE      = os.getenv("ROLLBACK_ON_DEGRADE", "1") == "1"
-ROLLBACK_TOLERANCE   = float(os.getenv("ROLLBACK_TOLERANCE", "0.01"))
-MAX_TARGETS          = int(os.getenv("FAIL_MAX_TARGETS", "8"))
+MINI_EPOCHS           = max(1, min(3, int(os.getenv("FAIL_MINI_EPOCHS", "2"))))
+ROLLBACK_ENABLE       = os.getenv("ROLLBACK_ON_DEGRADE", "1") == "1"
+ROLLBACK_TOLERANCE    = float(os.getenv("ROLLBACK_TOLERANCE", "0.01"))
+MAX_TARGETS           = int(os.getenv("FAIL_MAX_TARGETS", "8"))
+
+# 타깃 스코어 가중(섀도우/최근)
+W_RECENT_DAY          = float(os.getenv("FAIL_WEIGHT_RECENT", "1.5"))
+W_VERY_RECENT_DAY     = float(os.getenv("FAIL_WEIGHT_VERY_RECENT", "2.0"))
+W_SHADOW_FAIL         = float(os.getenv("FAIL_WEIGHT_SHADOW", "1.3"))
+W_NORMAL_FAIL         = float(os.getenv("FAIL_WEIGHT_NORMAL", "1.0"))
 
 # ── 모델 아티팩트 탐색/백업/복구 유틸 ───────────────────────────
 MODEL_DIR   = "/persistent/models"
@@ -74,15 +80,29 @@ def _find_group_artifacts(symbol: str, strategy: str, group_id: int):
     return items
 
 def _read_meta_f1(meta_path: str):
+    """여러 키 후보에서 val_f1 탐색(로버스트)."""
     try:
         if not meta_path or not os.path.exists(meta_path): return None
         with open(meta_path, "r", encoding="utf-8") as f:
             m = json.load(f)
-        return float(m.get("metrics", {}).get("val_f1", None))
+        for path in [
+            ("metrics","val_f1"),
+            ("metrics","best_val_f1"),
+            ("val","f1"),
+            ("f1",),
+        ]:
+            cur = m
+            try:
+                for k in path: cur = cur[k]
+                if cur is not None: return float(cur)
+            except Exception:
+                continue
+        return None
     except Exception:
         return None
 
 BACKUP_DIR = os.path.join(PERSIST_DIR, "tmp", "failure_retrain_backups")
+os.makedirs(BACKUP_DIR, exist_ok=True)
 
 def _rel_path_under_model_dir(path: str) -> str:
     # MODEL_DIR 기준 상대경로 (동일 루트 내 파일만)
@@ -91,8 +111,7 @@ def _rel_path_under_model_dir(path: str) -> str:
     if abs_p.startswith(abs_root):
         rel = os.path.relpath(abs_p, abs_root)
     else:
-        # 루트 밖이면 베이스이름만 (최소보장)
-        rel = os.path.basename(path)
+        rel = os.path.basename(path)  # 루트 밖이면 베이스이름만
     return rel
 
 def _backup_group(symbol: str, strategy: str, group_id: int):
@@ -104,19 +123,19 @@ def _backup_group(symbol: str, strategy: str, group_id: int):
         dst = os.path.join(BACKUP_DIR, f"{symbol}_{strategy}_g{group_id}_{ts}")
         os.makedirs(dst, exist_ok=True)
         manifest = []
+        copied = 0
         for it in _find_group_artifacts(symbol, strategy, group_id):
             for p in [it.get("weight"), it.get("meta")]:
                 if p and os.path.exists(p):
                     rel = _rel_path_under_model_dir(p)
-                    # 백업 파일 경로는 상대경로의 디렉토리 구조를 유지
                     out_path = os.path.join(dst, rel)
                     os.makedirs(os.path.dirname(out_path), exist_ok=True)
                     shutil.copy2(p, out_path)
                     manifest.append({"rel": rel})
-        # manifest 저장
+                    copied += 1
         with open(os.path.join(dst, "manifest.json"), "w", encoding="utf-8") as f:
             json.dump({"items": manifest}, f, ensure_ascii=False, indent=2)
-        return dst
+        return dst if copied > 0 else None
     except Exception as e:
         print(f"[백업 실패] {symbol}-{strategy}-g{group_id} → {e}")
         return None
@@ -192,7 +211,6 @@ def _to_kst_aware(dt_str: str):
     if not dt_str:
         return None
     try:
-        # pandas를 통해 robust 파싱
         ts = pd.to_datetime(dt_str, errors="coerce", utc=True)
         if ts is not pd.NaT and pd.notnull(ts):
             return ts.tz_convert(KST).to_pydatetime()
@@ -202,7 +220,6 @@ def _to_kst_aware(dt_str: str):
         dt = datetime.fromisoformat(dt_str)
         if dt.tzinfo is None:
             return KST.localize(dt)
-        # 다른 tz면 KST로 변환
         return dt.astimezone(KST)
     except Exception:
         return None
@@ -231,7 +248,7 @@ def _append_summary_row(row: dict):
 
 # ── 메모리-세이프 wrong 로그 머지 ───────────────────────────────
 def _iter_recent_rows_from_csv(path, cutoff_kst, chunksize=CSV_CHUNKSIZE):
-    cols = ["timestamp", "symbol", "strategy", "status", "success"]
+    cols = ["timestamp", "symbol", "strategy", "status", "success", "note"]
     try:
         for chunk in pd.read_csv(
             path,
@@ -269,16 +286,16 @@ def _load_recent_wrong(days=LOOKBACK_DAYS_DEFAULT) -> pd.DataFrame:
         for sub in _iter_recent_rows_from_csv(path, cutoff):
             parts.append(sub)
     if not parts:
-        return pd.DataFrame(columns=["timestamp","symbol","strategy","status","success","__ts"])
-    cols_union = ["timestamp","symbol","strategy","status","success","__ts"]
+        return pd.DataFrame(columns=["timestamp","symbol","strategy","status","success","note","__ts"])
+    cols_union = ["timestamp","symbol","strategy","status","success","note","__ts"]
     df = pd.concat([p[cols_union] if all(c in p.columns for c in cols_union) else p for p in parts],
                    ignore_index=True)
-    keep_cols = [c for c in ["__ts","symbol","strategy","status","success"] if c in df.columns]
+    keep_cols = [c for c in ["__ts","symbol","strategy","status","success","note"] if c in df.columns]
     try: df = df.drop_duplicates(subset=keep_cols)
     except Exception: df = df.drop_duplicates()
     return df
 
-# ── 타깃 선정(최근 실패 많은 (symbol,strategy)) ─────────────────
+# ── 타깃 선정(최근/섀도우 가중) ─────────────────────────────────
 def _pick_targets(df: pd.DataFrame, lookback_days=LOOKBACK_DAYS_DEFAULT, max_targets=8):
     if df.empty: return []
     ts_col = "__ts" if "__ts" in df.columns else "timestamp"
@@ -292,23 +309,37 @@ def _pick_targets(df: pd.DataFrame, lookback_days=LOOKBACK_DAYS_DEFAULT, max_tar
     since = now - timedelta(days=int(lookback_days))
 
     dff = df.copy()
+
+    # 실패 행만 선별
     if "status" in dff.columns:
-        dff = dff[dff["status"].astype(str).str.lower().isin(["fail", "v_fail"])]
+        dff = dff[dff["status"].astype(str).str.lower().isin(["fail", "v_fail", "shadow_fail"])]
     elif "success" in dff.columns:
         dff = dff[dff["success"].astype(str).str.lower().isin(["false", "0", "no", "n"])]
 
-    dff["recency_w"] = 1.0
+    if dff.empty:
+        return []
+
+    # 기본/섀도우/최근 가중
+    dff["w"] = W_NORMAL_FAIL
+    try:
+        flags = (dff.get("status", "").astype(str).str.lower() + " " +
+                 dff.get("note",   "").astype(str).str.lower())
+        shadow_mask = flags.str.contains("shadow", na=False) | dff.get("status", "").astype(str).str.lower().eq("v_fail")
+        dff.loc[shadow_mask, "w"] = dff.loc[shadow_mask, "w"] * W_SHADOW_FAIL
+    except Exception:
+        pass
+
     try:
         recent_mask = dff[ts_col].notna() & (dff[ts_col] >= since)
-        dff.loc[recent_mask, "recency_w"] = 1.5
+        dff.loc[recent_mask, "w"] = dff.loc[recent_mask, "w"] * W_RECENT_DAY
         very_recent = dff[ts_col].notna() & (dff[ts_col] >= now - timedelta(days=1))
-        dff.loc[very_recent, "recency_w"] = 2.0
+        dff.loc[very_recent, "w"] = dff.loc[very_recent, "w"] * W_VERY_RECENT_DAY
     except Exception:
         pass
 
     cols = [c for c in ["symbol","strategy"] if c in dff.columns]
     if len(cols) < 2: return []
-    g = dff.groupby(cols, dropna=False)["recency_w"].sum().reset_index(name="score")
+    g = dff.groupby(cols, dropna=False)["w"].sum().reset_index(name="score")
     g = g.sort_values("score", ascending=False)
 
     out = []
@@ -336,7 +367,7 @@ def _release_lock():
 def run_failure_training(max_targets: int = MAX_TARGETS, lookback_days: int = LOOKBACK_DAYS_DEFAULT):
     """
     최근 wrong_*.csv + root wrong 기반으로 실패 많은 (symbol,strategy)를 골라
-    각 그룹별 미니에폭 이어학습을 수행하고, 성능 악화 시 자동 롤백한다.
+    각 그룹별 미니에폭 이어학습을 수행하고, 성능 악화 시 자동 로백한다.
     - 쿨다운: 마지막 실행 후 COOLDOWN_MINUTES 분 이내면 스킵
     - 실행 중 런타임 락 생성(클린업/동시 실행 충돌 방지)
     - 요약은 logs/failure_retrain_summary.csv 에 append
@@ -355,8 +386,7 @@ def run_failure_training(max_targets: int = MAX_TARGETS, lookback_days: int = LO
                 if (_now_kst() - last_dt) < timedelta(minutes=COOLDOWN_MINUTES):
                     return {"ok": True, "skipped": True, "reason": "cooldown", "last_run_ts": last_ts}
             except Exception:
-                # 비교 실패 시 쿨다운 무시하고 진행
-                pass
+                pass  # 비교 실패 시 진행
 
     # 실패 데이터 로드
     df = _load_recent_wrong(days=lookback_days)
