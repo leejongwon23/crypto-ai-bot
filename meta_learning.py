@@ -1,6 +1,7 @@
 # meta_learning.py
 # ------------------------------------------------------------
 # 4) 메타러너 파일 (단일 진입점 + 집계 + 스태킹 + EVO-메타 연동 + 룰기반 폴백 + 안전 로그)
+# + position_hint / min_return 필터 정합 (predict.py와 일치)
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -38,6 +39,9 @@ META_BASE_SUCCESS = float(os.getenv("META_BASE_SUCCESS", "0.55"))
 
 # 기대수익률 임계(절댓값). 미만은 패널티(=0 처리)
 _RET_TH = float(os.getenv("META_ER_THRESHOLD", "0.01"))
+
+# predict.py와 정합: 기본 최소 기대수익(절댓값) — 필요 시 인자로 덮어씀
+META_MIN_RETURN = float(os.getenv("META_MIN_RETURN", "0.01"))
 
 # EVO-메타 합성 규칙 환경변수 (1단계와 일관)
 EVO_META_AGG = os.getenv("EVO_META_AGG", "mean_var").lower()   # mean | varpen | mean_var
@@ -258,11 +262,9 @@ def _extract_counts(meta_info: Dict) -> Dict[int, int]:
     for k in ["counts", "trial_counts", "samples"]:
         v = meta_info.get(k)
         if isinstance(v, dict):
-            # 숫자만 취함
             cand = {int(c): int(vv) for c, vv in v.items() if isinstance(vv, (int, float))}
             if cand:
                 return cand
-    # (s, n) 튜플 형태 지원
     v = meta_info.get("success_total")
     if isinstance(v, dict):
         out = {}
@@ -297,18 +299,15 @@ def _adjust_success_rates_with_ci(
             continue
         sr = max(0.0, min(1.0, sr))
         n = int(counts.get(c, 0))
-        # 베이지안 블렌딩 (n이 작을수록 prior 비중↑)
         if n >= 0:
             sr_blend = (n / (n + n0)) * sr + (n0 / (n + n0)) * prior
         else:
             sr_blend = sr
-        # CI 하향 보정
         if n > 0:
             se = math.sqrt(max(1e-12, sr_blend * (1.0 - sr_blend) / n))
             lo = max(0.0, sr_blend - z * se)
             out[int(c)] = float(lo)
         else:
-            # 표본 전무 → prior에 의존
             out[int(c)] = float(max(0.0, prior - z * math.sqrt(prior * (1 - prior) / (n0 + 1e-9))))
     return out
 
@@ -335,10 +334,63 @@ def _width_scaled_er(
         if width is None or width <= 0:
             out[int(c)] = float(er)
             continue
-        # 기대수익 영향도 축소 (폭이 클수록 축소)
         scale = min(1.0, max(1e-9, float(max_width) / abs(width)))
         out[int(c)] = float(er) * scale
     return out
+
+
+# ======= (NEW) 포지션/최소 기대수익 필터 =======
+
+def _position_from_range(lo: float, hi: float) -> str:
+    try:
+        lo = float(lo); hi = float(hi)
+        if hi <= 0 and lo < 0: return "short"
+        if lo >= 0 and hi > 0: return "long"
+        return "neutral"
+    except Exception:
+        return "neutral"
+
+def _mask_by_hint_and_minret(
+    scores: np.ndarray,
+    class_ranges: Optional[List[Tuple[float, float]]],
+    *,
+    allow_long: bool,
+    allow_short: bool,
+    min_return_thr: float
+) -> Tuple[np.ndarray, Dict]:
+    """
+    클래스별 (lo, hi)에서 mid=(lo+hi)/2를 계산해:
+      - |mid| < min_return_thr → 0
+      - pos=='long' 이고 allow_long=False → 0
+      - pos=='short'이고 allow_short=False → 0
+    """
+    C = len(scores)
+    reasons: Dict[int, str] = {}
+    if not class_ranges or len(class_ranges) < C:
+        return scores, reasons
+
+    out = scores.astype(np.float64).copy()
+    for c in range(C):
+        try:
+            lo, hi = class_ranges[c]
+            mid = 0.5 * (float(lo) + float(hi))
+            pos = _position_from_range(lo, hi)
+            if abs(mid) < float(min_return_thr):
+                out[c] = 0.0
+                reasons[c] = f"minret({abs(mid):.4f}<{min_return_thr:.4f})"
+                continue
+            if pos == "long" and not allow_long:
+                out[c] = 0.0
+                reasons[c] = "hint_block_long"
+                continue
+            if pos == "short" and not allow_short:
+                out[c] = 0.0
+                reasons[c] = "hint_block_short"
+                continue
+        except Exception:
+            # 문제 시 필터 미적용
+            pass
+    return out, reasons
 
 
 # ========== (E) 단독 유틸: 성공률/수익률 고려 최종 클래스 산출 ==========
@@ -426,14 +478,11 @@ def _maybe_evo_decide(
     if not _EVO_OK:
         return None
     try:
-        # (W,C) 확률 스택 생성
         probs_stack = np.stack([_normalize(np.asarray(g["probs"], dtype=np.float64)) for g in groups_outputs], axis=0)
-        # (선택) 규칙 합성(로깅/디버그용)
         try:
             _ = aggregate_probs_for_meta(probs_stack, mode=EVO_META_AGG, gamma=EVO_META_VAR_GAMMA)
         except Exception:
             pass
-        # 입력 벡터(3*C)
         X_new = _build_evo_meta_vector(agg_probs, expected_return)  # shape (3*C,)
         pred = predict_evo_meta(X_new, input_size=int(X_new.shape[0]), probs_stack=probs_stack)
         if isinstance(pred, (int, np.integer)):
@@ -455,22 +504,29 @@ def meta_predict(
     use_stacking: bool = True,
     use_evo_meta: bool = True,
     log: bool = True,
-    source: str = "meta"
+    source: str = "meta",
+    # ▼▼ 추가: predict.py와 정합되는 필터 인자 ▼▼
+    position_hint: Optional[Dict[str, bool]] = None,  # {"allow_long": bool, "allow_short": bool}
+    min_return_thr: Optional[float] = None
 ) -> Dict:
     """
     ✅ 단일 진입점
     - 베이스 모델 출력 집계 + EVO-메타/스태킹/룰기반 폴백
     - 성공률/실패율/수익률을 모두 고려
     - (NEW) 클래스폭·성공률 신뢰도 보정 통합
+    - (NEW) 포지션 힌트/최소 기대수익 마스킹을 스코어/확률 레벨에 적용
     """
     meta_state = meta_state or {}
     class_success_raw = dict(meta_state.get("success_rate", {}))
     expected_return_raw = dict(meta_state.get("expected_return", {}))
     class_ranges = meta_state.get("class_ranges", None)
 
+    allow_long = bool((position_hint or {}).get("allow_long", True))
+    allow_short = bool((position_hint or {}).get("allow_short", True))
+    min_thr = float(min_return_thr if min_return_thr is not None else max(META_MIN_RETURN, _RET_TH))
+
     # (1) 집계
     agg_probs, detail = _aggregate_base_outputs(groups_outputs, class_success_raw, mode=agg_mode)
-
     used_mode = agg_mode
     final_class = int(np.argmax(agg_probs))
 
@@ -485,6 +541,15 @@ def meta_predict(
         expected_return_scaled = _width_scaled_er(expected_return_raw, class_ranges, CLAMP_MAX_WIDTH)
     else:
         expected_return_scaled = {}
+
+    # (1.5) 우선, 확률 자체에 힌트/최소 기대수익 마스크 1차 적용 (확률 기반 경로 안정화)
+    probs_masked, mask_reasons_p = _mask_by_hint_and_minret(
+        agg_probs, class_ranges,
+        allow_long=allow_long, allow_short=allow_short, min_return_thr=min_thr
+    )
+    if probs_masked.sum() > 0:
+        agg_probs = _normalize(probs_masked)
+        detail.setdefault("filters", {})["prob_mask"] = mask_reasons_p
 
     # (2) EVO 메타 (가능하면 최우선 시도)
     evo_choice: Optional[int] = None
@@ -516,13 +581,12 @@ def meta_predict(
         except Exception as e:
             print(f"[⚠️ stacking 예측 실패 → 집계 폴백] {e}")
 
-    # (4) 신뢰도 점검 + 룰기반 보정
+    # (4) 신뢰도 점검 + 룰기반 보정 (성공률/ER 가중치 스코어)
     top1 = int(np.argmax(agg_probs))
     top1p = float(agg_probs[top1])
     margin = float(top1p - float(np.partition(agg_probs, -2)[-2]) if len(agg_probs) >= 2 else top1p)
     ent = _entropy(agg_probs)
 
-    # CI/폭 보정을 반영한 스코어링
     scores = agg_probs.astype(np.float64).copy()
     C = len(scores)
     all_er_below = True
@@ -536,11 +600,23 @@ def meta_predict(
             all_er_below = False
         scores[c] = scores[c] * sr * g * (1.0 - 0.3 * fr)
 
+    # (4.1) 스코어에도 힌트/최소 기대수익 마스크 2차 적용 (최종 안정화)
+    scores_masked, mask_reasons_s = _mask_by_hint_and_minret(
+        scores, class_ranges,
+        allow_long=allow_long, allow_short=allow_short, min_return_thr=min_thr
+    )
+    detail.setdefault("filters", {})["score_mask"] = mask_reasons_s
+    scores = scores_masked
+
     low_conf = (margin < 0.05) or (ent > math.log(max(2, len(agg_probs))) * 0.8)
 
-    # 기대수익률 전부 임계 미만이면 확률로 폴백
-    if all_er_below:
+    # 기대수익률 전부 임계 미만이면 확률로 폴백 (단, 힌트 마스크는 유지)
+    if all_er_below or scores.sum() == 0:
         scores = agg_probs.astype(np.float64).copy()
+        scores, _ = _mask_by_hint_and_minret(
+            scores, class_ranges,
+            allow_long=allow_long, allow_short=allow_short, min_return_thr=min_thr
+        )
         low_conf = True
 
     rule_choice = int(np.argmax(scores))
@@ -549,6 +625,9 @@ def meta_predict(
     detail["expected_return_scaled"] = {int(k): float(v) for k, v in expected_return_scaled.items()}
     detail["ci_z"] = float(META_CI_Z)
     detail["clamp_max_width"] = float(CLAMP_MAX_WIDTH)
+    detail["min_return_thr"] = float(min_thr)
+    detail["hint_allow_long"] = bool(allow_long)
+    detail["hint_allow_short"] = bool(allow_short)
 
     # 최종 선택 규칙:
     # - 우선순위: EVO > 스태킹 > 집계
@@ -557,8 +636,6 @@ def meta_predict(
         used_mode = "rule_fallback"
         final_class = rule_choice
     else:
-        # 신뢰도 충분한데 스코어 보정이 다른 결과를 주면,
-        # 기대수익/성공률 가중치가 월등히 높을 때만 보정
         if rule_choice != final_class:
             if scores[rule_choice] >= scores[final_class] * 1.1:
                 used_mode = "rule_bias"
@@ -576,13 +653,20 @@ def meta_predict(
 
     # (5) 로깅
     if log:
-        er_cho = float(expected_return_scaled.get(result["class"], 0.0))
+        er_cho = 0.0
+        try:
+            if class_ranges and 0 <= result["class"] < len(class_ranges):
+                lo, hi = class_ranges[result["class"]]
+                er_cho = 0.5 * (float(lo) + float(hi))
+        except Exception:
+            pass
         sr_cho = class_success_ci.get(result["class"], None)
         note = (f"meta:{used_mode} top1={result['class']} p={result['confidence']:.3f} "
-                f"margin={result['margin']:.3f} ER={er_cho:.4f} "
+                f"margin={result['margin']:.3f} ERmid={er_cho:.4f} "
                 f"SR={('-' if sr_cho is None else f'{float(sr_cho):.2f}')} "
                 f"TH={_RET_TH:.2%} EVO_AGG={EVO_META_AGG} γ={EVO_META_VAR_GAMMA} "
-                f"CIz={META_CI_Z:.2f} Wmax={CLAMP_MAX_WIDTH:.3f}")
+                f"CIz={META_CI_Z:.2f} Wmax={CLAMP_MAX_WIDTH:.3f} "
+                f"allowL={allow_long} allowS={allow_short} minER={min_thr:.4f}")
         reason = f"entropy={result['entropy']:.3f}"
         _safe_log_prediction(
             symbol=symbol,
