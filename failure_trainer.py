@@ -1,4 +1,4 @@
-# === failure_trainer.py (v2025-09-17c: 섀도우 실패 가중 + 미니에폭 이어학습 + 성능저하 롤백 + 요약 로그 + 런타임 락) ===
+# === failure_trainer.py (v2025-10-03r: TZ-safe cooldown, robust backup/restore, shadow weighting, safer metrics) ===
 import os, csv, json, glob, shutil, time
 from datetime import datetime, timedelta
 import pytz
@@ -19,6 +19,7 @@ os.makedirs(LOCK_DIR, exist_ok=True)
 STATE_JSON  = os.path.join(LOG_DIR, "failure_learn_state.json")        # 마지막 실행 시각 저장
 SUMMARY_CSV = os.path.join(LOG_DIR, "failure_retrain_summary.csv")     # 재학습 요약 로그
 BACKUP_DIR  = os.path.join(PERSIST_DIR, "tmp", "failure_retrain_backups")
+os.makedirs(BACKUP_DIR, exist_ok=True)
 LOCK_PATH   = os.getenv("SAFE_LOCK_PATH", os.path.join(LOCK_DIR, "train_or_predict.lock"))
 
 # ── 환경 파라미터 ─────────────────────────────────────────────
@@ -67,12 +68,13 @@ def _save_state(state: dict):
 def _append_summary_row(row: dict):
     write_header = not os.path.exists(SUMMARY_CSV)
     try:
+        # 고정 헤더 + 추가 필드 보존
+        base_fields = ["timestamp","symbol","strategy","score","group_id",
+                       "before_f1","after_f1","delta","result","backup_dir"]
+        for k in row.keys():
+            if k not in base_fields:
+                base_fields.append(k)
         with open(SUMMARY_CSV, "a", newline="", encoding="utf-8-sig") as f:
-            base_fields = ["timestamp","symbol","strategy","score","group_id",
-                           "before_f1","after_f1","delta","result","backup_dir"]
-            # 추가 필드가 있으면 보존(형식은 고정 헤더 뒤에)
-            for k in list(row.keys()):
-                if k not in base_fields: base_fields.append(k)
             w = csv.DictWriter(f, fieldnames=base_fields)
             if write_header: w.writeheader()
             w.writerow({k: row.get(k,"") for k in base_fields})
@@ -88,7 +90,9 @@ def _stem_without_ext(p: str) -> str:
     return os.path.splitext(base)[0]
 
 def _find_group_artifacts(symbol: str, strategy: str, group_id: int):
-    """해당 심볼/전략/그룹의 모델 가중치(.pt/.ptz/...)와 .meta.json 경로들을 수집."""
+    """
+    해당 심볼/전략/그룹의 모델 가중치와 .meta.json 경로 수집.
+    """
     items = []
     patt = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_*_group{int(group_id)}_cls*")
     cands = []
@@ -119,11 +123,27 @@ def _find_group_artifacts(symbol: str, strategy: str, group_id: int):
     return items
 
 def _read_meta_f1(meta_path: str):
+    """여러 키 후보에서 val_f1 탐색."""
     try:
         if not meta_path or not os.path.exists(meta_path): return None
         with open(meta_path, "r", encoding="utf-8") as f:
             m = json.load(f)
-        return float(m.get("metrics", {}).get("val_f1", None))
+        # 우선순위 키들
+        for k in [
+            ("metrics","val_f1"),
+            ("metrics","best_val_f1"),
+            ("val","f1"),
+            ("f1",),
+        ]:
+            cur = m
+            try:
+                for kk in k:
+                    cur = cur[kk]
+                if cur is not None:
+                    return float(cur)
+            except Exception:
+                continue
+        return None
     except Exception:
         return None
 
@@ -132,11 +152,12 @@ def _backup_group(symbol: str, strategy: str, group_id: int):
         ts = _now_kst().strftime("%Y%m%d_%H%M%S")
         dst = os.path.join(BACKUP_DIR, f"{symbol}_{strategy}_g{group_id}_{ts}")
         os.makedirs(dst, exist_ok=True)
+        copied = 0
         for it in _find_group_artifacts(symbol, strategy, group_id):
             for p in [it.get("weight"), it.get("meta")]:
                 if p and os.path.exists(p):
-                    shutil.copy2(p, os.path.join(dst, os.path.basename(p)))
-        return dst
+                    shutil.copy2(p, os.path.join(dst, os.path.basename(p))); copied += 1
+        return dst if copied > 0 else None
     except Exception as e:
         print(f"[백업 실패] {symbol}-{strategy}-g{group_id} → {e}")
         return None
@@ -144,11 +165,15 @@ def _backup_group(symbol: str, strategy: str, group_id: int):
 def _restore_from_backup(backup_dir: str) -> bool:
     try:
         if not backup_dir or not os.path.isdir(backup_dir): return False
+        ok = True
         for fn in os.listdir(backup_dir):
             src = os.path.join(backup_dir, fn)
             dst = os.path.join(MODEL_DIR, fn)
-            shutil.copy2(src, dst)
-        return True
+            try:
+                shutil.copy2(src, dst)
+            except Exception:
+                ok = False
+        return ok
     except Exception as e:
         print(f"[복구 실패] {backup_dir} → {e}")
         return False
@@ -166,7 +191,7 @@ def _score_targets(failure_data, lookback_days=LOOKBACK_DAYS, max_targets=MAX_TA
     실패 샘플들을 (symbol,strategy)로 묶고 점수화해 상위 N개만 반환.
     - 기본 가중치: 1.0
     - 최근(lookback) 범위면 W_RECENT_DAY, 1일 이내면 W_VERY_RECENT_DAY
-    - 섀도우 실패(is_shadow=True 또는 status in {v_fail, shadow_fail} 등)면 W_SHADOW_FAIL 추가 곱
+    - 섀도우 실패(is_shadow True / status에 'shadow' 또는 'v_fail' 포함)면 W_SHADOW_FAIL 곱
     반환: [(symbol, strategy, score), ...]
     """
     from collections import defaultdict
@@ -186,7 +211,13 @@ def _score_targets(failure_data, lookback_days=LOOKBACK_DAYS, max_targets=MAX_TA
 
         # 섀도우 판단
         status = (str(item.get("status", "")).lower() if item.get("status") is not None else "")
-        is_shadow = bool(item.get("is_shadow", False)) or ("shadow" in status) or (status in {"v_fail"})
+        note   = (str(item.get("note", "")).lower() if item.get("note") is not None else "")
+        flags  = " ".join([status, note])
+        is_shadow = (
+            bool(item.get("is_shadow", False))
+            or ("shadow" in flags)
+            or (status in {"v_fail", "shadow_fail"})
+        )
         if is_shadow:
             w *= W_SHADOW_FAIL
 
@@ -195,11 +226,15 @@ def _score_targets(failure_data, lookback_days=LOOKBACK_DAYS, max_targets=MAX_TA
         try:
             if ts:
                 if isinstance(ts, str):
-                    ts_dt = datetime.fromisoformat(ts.replace("Z","+00:00")) if "T" in ts else datetime.fromisoformat(ts)
+                    # ISO8601 안전 파싱
+                    if "T" in ts or "Z" in ts:
+                        ts_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    else:
+                        ts_dt = datetime.fromisoformat(ts)
                     ts_dt = (KST.localize(ts_dt) if ts_dt.tzinfo is None else ts_dt.astimezone(KST))
                 else:
-                    ts_dt = ts
-                if ts_dt >= since:              w *= W_RECENT_DAY
+                    ts_dt = ts if ts.tzinfo is not None else KST.localize(ts)
+                if ts_dt >= since:                   w *= W_RECENT_DAY
                 if ts_dt >= now - timedelta(days=1): w *= W_VERY_RECENT_DAY
         except Exception:
             pass
@@ -233,12 +268,14 @@ def run_failure_training():
     - 런타임 락으로 train/predict 충돌 방지.
     - 요약은 /persistent/logs/failure_retrain_summary.csv 에 적재.
     """
-    # 쿨다운 체크
+    # 쿨다운 체크 (TZ-aware 안전 비교)
     state = _load_state()
     last_ts = state.get("last_run_ts")
     if last_ts:
         try:
             last_dt = datetime.fromisoformat(last_ts)
+            if last_dt.tzinfo is None:
+                last_dt = KST.localize(last_dt)
             if _now_kst() - last_dt < timedelta(minutes=COOLDOWN_MIN):
                 print(f"⏳ 실패학습 쿨다운 중({COOLDOWN_MIN}분). 이번 턴은 스킵.")
                 return
