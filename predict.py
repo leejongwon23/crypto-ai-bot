@@ -180,33 +180,61 @@ except Exception:
 # 기본 OFF: 메타에 class_ranges 없으면 cfg 범위로 안전하게 폴백
 STRICT_SAME_BOUNDS = os.getenv("STRICT_SAME_BOUNDS", "0") == "1"
 
-# ====== Model I/O ======
+# ====== Model I/O (2번 수정사항 반영: model_weight_loader 연동) ======
+import inspect
+PREDICT_MODEL_LOADER_TTL = int(os.getenv("MODEL_LOADER_TTL", "600"))
+
+# 1순위: 새 로더
 try:
-    import inspect
-    from model_io import load_model as _raw_load_model
-    def load_model_any(path, model=None, **kwargs):
-        try:
-            ps = [p for p in inspect.signature(_raw_load_model).parameters.values()
-                  if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
-            if len(ps) <= 1:
-                return _raw_load_model(path)
-            return _raw_load_model(path, model, **kwargs)
-        except TypeError:
-            try:
-                return _raw_load_model(path, model, **kwargs)
-            except Exception:
-                return _raw_load_model(path)
-        except Exception:
-            return None
+    from model_weight_loader import load_model_cached as _raw_load_model
 except Exception:
-    def load_model_any(path, model=None, **kwargs):
+    _raw_load_model = None
+
+# 2순위: 기존 로더
+if _raw_load_model is None:
+    try:
+        from model_io import load_model as _raw_load_model
+    except Exception:
+        _raw_load_model = None
+
+def load_model_any(path, model=None, **kwargs):
+    """
+    통합 로더:
+    - model_weight_loader.load_model_cached(pt_path, model_obj, ttl_sec=...) 시그니처 우선
+    - 다음으로 model_io.load_model(...)
+    - 최후 폴백: torch.load + state_dict 로드
+    """
+    ttl = kwargs.pop("ttl_sec", PREDICT_MODEL_LOADER_TTL)
+    # 새/기존 로더 시도
+    if _raw_load_model is not None:
         try:
-            sd = torch.load(path, map_location="cpu")
-            if isinstance(sd, dict) and model is not None:
-                model.load_state_dict(sd); return model
-            return sd
+            sig = inspect.signature(_raw_load_model)
+            params = list(sig.parameters.values())
+            if len(params) >= 2:
+                # (pt_path, model_obj, ttl_sec=...) 형태 지원
+                try:
+                    return _raw_load_model(path, model, ttl_sec=ttl, **kwargs)
+                except TypeError:
+                    # ttl_sec 미지원 로더
+                    return _raw_load_model(path, model, **kwargs)
+            else:
+                # 인자 1개짜리 (path만)
+                return _raw_load_model(path)
         except Exception:
-            return None
+            pass
+    # 폴백: 직접 로드
+    try:
+        sd = torch.load(path, map_location="cpu")
+        if isinstance(sd, dict) and model is not None:
+            try:
+                model.load_state_dict(sd, strict=False)
+                model.eval()
+                return model
+            except Exception:
+                return sd
+        return sd
+    except Exception:
+        return None
 
 # ====== Project utils & models ======
 from logger import log_prediction, update_model_success, PREDICTION_HEADERS, ensure_prediction_log_exists
@@ -1155,10 +1183,12 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
 
                 model = get_model(mtype_raw, input_size=inp_size, output_size=num_cls)
 
-                loaded = load_model_any(model_path, model)
+                # 🔧 2번 수정사항: TTL 캐시 로더 사용
+                loaded = load_model_any(model_path, model, ttl_sec=PREDICT_MODEL_LOADER_TTL)
                 if isinstance(loaded, dict) and model is not None:
                     try:
-                        model.load_state_dict(loaded)
+                        model.load_state_dict(loaded, strict=False)
+                        model.eval()
                     except Exception:
                         pass
                 elif loaded is None:
