@@ -1,16 +1,12 @@
-# === predict.py — Meta-only final (FINAL v1.2 with RealityGuard + ExitGuard) ===
-# (2025-09-30, 메타러너 최종 선택 + 현실/출구 가드 추가)
-# 변경 핵심:
-#   - 현실 가드(RealityGuard):
-#       (1) 포지션 모순: 시장 힌트가 long/short 금지인데 해당 방향 예측 시 보류
-#       (2) 변동성 대비 과장: 예측 기대수익(|mid|) > k * 최근 변동성이면 보류
-#   - 출구 가드(ExitGuard):
-#       (3) 클래스 폭 초과: (hi-lo) > CLASS_BIN.max_width → 보류
-#       (4) 기대수익 미달: |mid| < PUBLISH.min_expected_return → 보류
-#   - 기존 흐름 유지: [메타러너] → [단일모델 경쟁+탐험] → [최소 기대수익 가드] → [ExitGuard] → [RealityGuard] → [보류컷]
-#   - STRICT_BOUNDS, 윈도우 앙상블(mean/var-penalize), 게이트/락/하트비트/로깅 그대로 유지
+# === predict.py — Meta-only final (FINAL v1.3 with Relaxed Guards) ===
+# (2025-10-04, v1.2 기반 완전본 + 가드 완화 적용)
+# 변경 사항 (v1.2 → v1.3):
+#   - ExitGuard(완화): 클래스 폭 허용치 +20%, 기대수익 하한 50%로 완화
+#   - RealityGuard(완화): 변동성 대비 과장 기준 2→3배로 완화, 포지션 모순은 차단 대신 경고만
+#   - Abstain 컷 완화: 0.35 → 0.25
+#   - 그 외 흐름/로깅/섀도우/평가 루프/락/하트비트/STRICT_BOUNDS 등은 v1.2와 동일 유지
 
-import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob
+import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob, inspect, threading
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
 from sklearn.preprocessing import MinMaxScaler
 
@@ -133,7 +129,6 @@ def _release_predict_lock(path: str):
         pass
 
 # ====== Heartbeat ======
-import threading
 PREDICT_HEARTBEAT_SEC = int(os.getenv("PREDICT_HEARTBEAT_SEC", "3"))
 
 def _predict_hb_loop(stop_evt: threading.Event, tag: str, lock_path: str):
@@ -180,17 +175,12 @@ except Exception:
 # 기본 OFF: 메타에 class_ranges 없으면 cfg 범위로 안전하게 폴백
 STRICT_SAME_BOUNDS = os.getenv("STRICT_SAME_BOUNDS", "0") == "1"
 
-# ====== Model I/O (2번 수정사항 반영: model_weight_loader 연동) ======
-import inspect
+# ====== Model I/O (TTL 캐시 로더 연동) ======
 PREDICT_MODEL_LOADER_TTL = int(os.getenv("MODEL_LOADER_TTL", "600"))
-
-# 1순위: 새 로더
 try:
     from model_weight_loader import load_model_cached as _raw_load_model
 except Exception:
     _raw_load_model = None
-
-# 2순위: 기존 로더
 if _raw_load_model is None:
     try:
         from model_io import load_model as _raw_load_model
@@ -205,24 +195,19 @@ def load_model_any(path, model=None, **kwargs):
     - 최후 폴백: torch.load + state_dict 로드
     """
     ttl = kwargs.pop("ttl_sec", PREDICT_MODEL_LOADER_TTL)
-    # 새/기존 로더 시도
     if _raw_load_model is not None:
         try:
             sig = inspect.signature(_raw_load_model)
             params = list(sig.parameters.values())
             if len(params) >= 2:
-                # (pt_path, model_obj, ttl_sec=...) 형태 지원
                 try:
                     return _raw_load_model(path, model, ttl_sec=ttl, **kwargs)
                 except TypeError:
-                    # ttl_sec 미지원 로더
                     return _raw_load_model(path, model, **kwargs)
             else:
-                # 인자 1개짜리 (path만)
                 return _raw_load_model(path)
         except Exception:
             pass
-    # 폴백: 직접 로드
     try:
         sd = torch.load(path, map_location="cpu")
         if isinstance(sd, dict) and model is not None:
@@ -249,7 +234,7 @@ except Exception:
 from config import (
     get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups,
     get_class_return_range, class_to_expected_return,
-    get_CLASS_BIN, get_PUBLISH_RUNTIME  # ← 추가된 import
+    get_CLASS_BIN, get_PUBLISH_RUNTIME
 )
 
 # ====== DEVICE ======
@@ -261,7 +246,7 @@ NUM_CLASSES = get_NUM_CLASSES()
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 
 MIN_RET_THRESHOLD = float(os.getenv("PREDICT_MIN_RETURN", "0.01"))
-ABSTAIN_PROB_MIN = float(os.getenv("ABSTAIN_PROB_MIN", "0.35"))
+ABSTAIN_PROB_MIN = float(os.getenv("ABSTAIN_PROB_MIN", "0.25"))  # v1.3 완화
 PREDICT_SOFT_ABORT = int(os.getenv("PREDICT_SOFT_ABORT", "1"))
 
 # 윈도우 앙상블
@@ -271,16 +256,16 @@ ENSEMBLE_VAR_GAMMA = float(os.getenv("ENSEMBLE_VAR_GAMMA", "1.0"))
 # 🔧 분포 보정 토글(기본 OFF)
 ADJUST_WITH_DIVERSITY = os.getenv("ADJUST_WITH_DIVERSITY", "0") == "1"
 
+# 탐험(메타 상태)
 EXP_STATE = "/persistent/logs/meta_explore_state.json"
 EXP_EPS = float(os.getenv("EXPLORE_EPS_BASE", "0.15"))
 EXP_DEC_MIN = float(os.getenv("EXPLORE_DECAY_MIN", "120"))
 EXP_NEAR = float(os.getenv("EXPLORE_NEAR_GAP", "0.07"))
 EXP_GAMMA = float(os.getenv("EXPLORE_GAMMA", "0.05"))
 
-# ====== RealityGuard 설정 ======
+# ====== RealityGuard 설정 (완화판) ======
 RG_ENABLE = os.getenv("RG_ENABLE", "1") == "1"
-RG_BLOCK_POSITION_CONFLICT = os.getenv("RG_BLOCK_POSITION_CONFLICT", "1") == "1"
-RG_VOL_MULT = float(os.getenv("RG_VOL_MULT", "2.0"))
+RG_VOL_MULT = float(os.getenv("RG_VOL_MULT", "3.0"))  # v1.3: 3배
 RG_LOOKBACK_SHORT = int(os.getenv("RG_LOOKBACK_SHORT", "48"))   # 단기
 RG_LOOKBACK_MID   = int(os.getenv("RG_LOOKBACK_MID", "96"))     # 중기
 RG_LOOKBACK_LONG  = int(os.getenv("RG_LOOKBACK_LONG", "336"))   # 장기
@@ -529,7 +514,7 @@ def _position_hint_from_market(df: pd.DataFrame) -> dict:
     except Exception:
         return {"allow_long": True, "allow_short": True, "ma_fast": None, "ma_slow": None, "slope": 0.0}
 
-# ====== RealityGuard: 변동성 추정 & 충돌 체크 ======
+# ====== RealityGuard: 변동성 추정 & 충돌 체크 (완화판) ======
 def _recent_volatility(df: pd.DataFrame, strategy: str) -> float:
     """최근 변동성(퍼센트 기준)을 추정. close 기준 pct_change의 산포를 사용."""
     try:
@@ -552,17 +537,16 @@ def _recent_volatility(df: pd.DataFrame, strategy: str) -> float:
         return 0.0
 
 def _reality_guard_check(df, strategy, hint, lo_sel, hi_sel, exp_mid) -> tuple[bool, str]:
-    """현실 가드 판단: (허용여부, 이유) 반환"""
+    """현실 가드 판단(완화판): 포지션 모순은 경고만, 과장만 차단"""
     try:
         pos = _position_from_range(lo_sel, hi_sel)
-        # (1) 포지션 모순
-        if RG_BLOCK_POSITION_CONFLICT:
-            if pos == "long" and not bool(hint.get("allow_long", True)):
-                return False, "reality_guard_position_conflict_long"
-            if pos == "short" and not bool(hint.get("allow_short", True)):
-                return False, "reality_guard_position_conflict_short"
+        # (1) 포지션 모순 → 차단 대신 경고
+        if pos == "long" and not bool(hint.get("allow_long", True)):
+            return True, "warn_position_conflict_long"
+        if pos == "short" and not bool(hint.get("allow_short", True)):
+            return True, "warn_position_conflict_short"
 
-        # (2) 변동성 대비 과장
+        # (2) 변동성 대비 과장 (v1.3: 3배)
         if abs(exp_mid) >= RG_MIN_ABS_MID_FOR_VOLCHECK:
             vol = _recent_volatility(df, strategy)
             if vol > 0:
@@ -571,6 +555,22 @@ def _reality_guard_check(df, strategy, hint, lo_sel, hi_sel, exp_mid) -> tuple[b
         return True, "ok"
     except Exception as e:
         return True, f"rg_exception:{e}"
+
+# ====== ExitGuard (완화판): 과도폭/기대수익 기준 완화 ======
+def _exit_guard_check(lo_sel: float, hi_sel: float, exp_ret: float) -> tuple[bool, str]:
+    try:
+        bin_conf = get_CLASS_BIN()
+        pub_conf = get_PUBLISH_RUNTIME()
+        max_width = float(bin_conf.get("max_width", 0.03))
+        min_er    = float(pub_conf.get("min_expected_return", 0.01))
+        width = float(hi_sel) - float(lo_sel)
+        if width > (max_width * 1.2 + 1e-12):  # +20%까지 허용
+            return False, f"exit_guard_width(width={width:.4f}, max={max_width:.4f})"
+        if abs(float(exp_ret)) < (min_er * 0.5):  # 절반까지 허용
+            return False, f"exit_guard_min_expected_return(mid={float(exp_ret):.4f}, min={min_er:.4f})"
+        return True, "ok"
+    except Exception as e:
+        return True, f"exit_guard_exception:{e}"
 
 # ====== 핵심 예측 ======
 def predict(symbol, strategy, source="일반", model_type=None):
@@ -746,30 +746,16 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[임계 가드 예외] {e}")
 
-        # (C-1) 출구 가드: 과도폭/최소 기대수익 미달 시 즉시 보류
+        # (C-1) ExitGuard — 과도폭/최소 기대수익 (완화판)
         try:
             lo_sel, hi_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
             exp_ret = (float(lo_sel) + float(hi_sel)) / 2.0
 
-            bin_conf = get_CLASS_BIN()
-            pub_conf = get_PUBLISH_RUNTIME()
-            max_width = float(bin_conf.get("max_width", 0.03))
-            min_er    = float(pub_conf.get("min_expected_return", 0.01))
-
-            width = float(hi_sel) - float(lo_sel)
-            if width > (max_width + 1e-12):
+            ok, why = _exit_guard_check(lo_sel, hi_sel, exp_ret)
+            if not ok:
                 return _soft_abstain(
                     symbol, strategy,
-                    reason=f"exit_guard_width(width={width:.4f}, max={max_width:.4f})",
-                    meta_choice=str(meta_choice), regime=regime, X_last=X[-1],
-                    group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None),
-                    df=df, source="보류"
-                )
-
-            if abs(float(exp_ret)) < min_er:
-                return _soft_abstain(
-                    symbol, strategy,
-                    reason=f"exit_guard_min_expected_return(mid={float(exp_ret):.4f}, min={min_er:.4f})",
+                    reason=why,
                     meta_choice=str(meta_choice), regime=regime, X_last=X[-1],
                     group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None),
                     df=df, source="보류"
@@ -777,7 +763,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[출구 가드 예외] {e}")
 
-        # (C-2) RealityGuard — 시장 현실과 충돌/과장 체크
+        # (C-2) RealityGuard — 시장 현실과 충돌/과장 체크 (완화판)
         try:
             lo_sel, hi_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
             exp_ret = (float(lo_sel) + float(hi_sel)) / 2.0
@@ -1183,7 +1169,6 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
 
                 model = get_model(mtype_raw, input_size=inp_size, output_size=num_cls)
 
-                # 🔧 2번 수정사항: TTL 캐시 로더 사용
                 loaded = load_model_any(model_path, model, ttl_sec=PREDICT_MODEL_LOADER_TTL)
                 if isinstance(loaded, dict) and model is not None:
                     try:
