@@ -1,4 +1,4 @@
-# === predict_trigger.py (FINAL — lock-aware, retry-on-unlock, stale-safe, log-throttled) ===
+# === predict_trigger.py (FINAL — lock-aware, retry-on-unlock, stale-safe, log-throttled, 그룹 미완료 시 완료된 심볼만 예측 진행) ===
 import os
 import time
 import traceback
@@ -408,10 +408,15 @@ def run():
         symbols = [s for s in all_symbols if s in symset]
         print(f"[그룹제한] 현재 그룹 심볼 {len(symbols)}/{len(all_symbols)}개 대상으로 실행")
 
+        # 🔧 패치: 그룹 미완료라도 '완료된 심볼'만 예측 진행 (기존엔 return으로 전체 차단)
         if REQUIRE_GROUP_COMPLETE and not _is_group_complete_for_all_strategies(symbols):
             miss = _missing_pairs(symbols)
-            print(f"[차단] 그룹 미완료(누락 {len(miss)}) {miss} → 예측 실행 안 함")
-            return
+            print(f"[경고] 그룹 일부 미완료(누락 {len(miss)}) → 완료된 심볼만 예측 진행")
+            missing_syms = {s for s, _ in miss}
+            symbols = [s for s in symbols if s not in missing_syms]
+            if not symbols:
+                print("[차단] 예측 가능한 심볼 없음 → 스킵")
+                return
     else:
         symbols = all_symbols
 
