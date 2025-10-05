@@ -398,27 +398,52 @@ def _glob_many(stem):
     for e in _KNOWN_EXTS: out.extend(glob.glob(f"{stem}{e}"))
     return out
 
+# ====== 🔧 수정됨: 모델 탐색 (하위 폴더 재귀 + 메타 자동해결) ======
 def get_available_models(symbol, strategy):
+    """
+    MODEL_DIR 및 하위 폴더를 모두 탐색하여 해당 심볼/전략 모델(.pt, .ptz, .safetensors)을 찾는다.
+    train.py 저장 규칙(/symbol_strategy_modeltype_wXX_groupYY_clsZZ.ptz)에 완전 호환.
+    """
     try:
-        if not os.path.isdir(MODEL_DIR): return []
+        if not os.path.isdir(MODEL_DIR):
+            return []
+
         items = []
-        prefix = f"{symbol}_"; needle = f"_{strategy}_"
-        for fn in os.listdir(MODEL_DIR):
-            if not any(fn.endswith(e) for e in _KNOWN_EXTS): continue
-            if not (fn.startswith(prefix) and needle in fn): continue
-            mp = _resolve_meta(fn)
-            if not mp:
-                fb = os.path.join(MODEL_DIR, f"{_stem(fn)}.meta.json")
-                if not os.path.exists(fb):
-                    print(f"[메타 미발견] {fn}"); continue
-                mp = fb
-            items.append({"pt_file": fn, "meta_path": mp})
-        for g in _glob_many(os.path.join(MODEL_DIR, f"{symbol}_{strategy}_*group*cls*")):
-            gfn = os.path.basename(g); mp = _resolve_meta(gfn)
-            if mp and {"pt_file": gfn, "meta_path": mp} not in items:
-                items.append({"pt_file": gfn, "meta_path": mp})
-        items.sort(key=lambda x: x["pt_file"])
-        return items
+        # 대표 패턴들: 평면 저장, 심볼/전략 폴더 저장 모두 커버
+        search_patterns = [
+            os.path.join(MODEL_DIR, f"{symbol}_{strategy}_*"),
+            os.path.join(MODEL_DIR, symbol, strategy, "*"),
+            os.path.join(MODEL_DIR, symbol, f"{strategy}_*"),
+        ]
+
+        for pattern in search_patterns:
+            for e in _KNOWN_EXTS:
+                for fn in glob.glob(f"{pattern}{e}", recursive=True):
+                    if not os.path.isfile(fn):
+                        continue
+                    base = os.path.basename(fn)
+
+                    # meta 우선 해결: top-level 규칙 → 실패 시 동일 디렉토리 폴백
+                    mp = _resolve_meta(base)
+                    if not mp:
+                        fb = os.path.splitext(fn)[0] + ".meta.json"  # 같은 폴더 내 메타
+                        if not os.path.exists(fb):
+                            print(f"[메타 미발견] {base}")
+                            continue
+                        mp = fb
+
+                    # MODEL_DIR 기준 상대경로로 저장 (로더에서 join)
+                    items.append({"pt_file": os.path.relpath(fn, MODEL_DIR), "meta_path": mp})
+
+        # 중복 제거
+        seen = set(); unique = []
+        for it in items:
+            key = it["pt_file"]
+            if key not in seen:
+                seen.add(key); unique.append(it)
+
+        unique.sort(key=lambda x: x["pt_file"])
+        return unique
     except Exception as e:
         print(f"[get_available_models 오류] {e}")
         return []
@@ -466,8 +491,8 @@ def _soft_abstain(symbol, strategy, *, reason, meta_choice="abstain", regime="un
     return {
         "symbol": symbol, "strategy": strategy, "model": "meta",
         "class": -1, "expected_return": 0.0,
-        "class_return_min": 0.0, "class_return_max": 0.0,
-        "class_return_text": "", "position": "neutral",
+        "class_return_min": 0.0, "class_return_max": 0.0, "class_return_text": "",
+        "position": "neutral",
         "timestamp": _now_kst().isoformat(), "source": source,
         "regime": regime, "reason": reason, "success": False,
         "predicted_class": -1, "label": -1
