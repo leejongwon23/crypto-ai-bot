@@ -147,6 +147,10 @@ def load_meta_learner():
 def _safe_log_prediction(**kwargs):
     try:
         from logger import log_prediction  # 선택적 의존
+        # 숫자 보장을 위해 한번 더 nan→0 처리
+        for k in ("rate", "return_value", "entry_price", "target_price"):
+            if k in kwargs:
+                kwargs[k] = float(np.nan_to_num(kwargs[k], nan=0.0, posinf=0.0, neginf=0.0))
         log_prediction(**kwargs)
     except Exception:
         info = {k: kwargs.get(k) for k in ["symbol", "strategy", "model",
@@ -155,6 +159,20 @@ def _safe_log_prediction(**kwargs):
 
 
 # ================= (D) 안전 정규화/집계 유틸 =================
+
+# ▼ 추가: 범용 나노가드(스칼라/벡터 모두 숫자 강제) -----------------
+def _nan_guard(x: Any, *, fill: float = 0.0):
+    try:
+        if isinstance(x, (list, tuple, np.ndarray)):
+            arr = np.asarray(x, dtype=np.float64)
+            arr = np.nan_to_num(arr, nan=fill, posinf=fill, neginf=fill)
+            return arr
+        # 스칼라
+        return float(np.nan_to_num(x, nan=fill, posinf=fill, neginf=fill))
+    except Exception:
+        return fill
+# ----------------------------------------------------------------
+
 def _normalize_safe(v: np.ndarray) -> np.ndarray:
     v = np.asarray(v, dtype=np.float64)
     v[~np.isfinite(v)] = 0.0
@@ -162,7 +180,8 @@ def _normalize_safe(v: np.ndarray) -> np.ndarray:
     s = float(v.sum())
     if s <= 0 or not np.isfinite(s):
         # 완전 망가졌을 때 균등분포
-        return np.ones_like(v, dtype=np.float64) / max(1, len(v))
+        n = max(1, len(v))
+        return np.ones(n, dtype=np.float64) / n
     return v / s
 
 def _to_probs(x: Any, C_expected: Optional[int] = None) -> Optional[np.ndarray]:
@@ -456,6 +475,8 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
         scores = avg_softmax.copy()
         mode += " / all<TH→prob선택"
 
+    # ▼ 숫자 보장
+    scores = _nan_guard(scores)
     final_pred_class = int(np.argmax(scores))
     print(f"[META] {mode} → 최종 클래스 {final_pred_class} / 점수={np.round(scores, 4)}")
     return final_pred_class
@@ -626,6 +647,10 @@ def meta_predict(
         scores = tmp if tmp.sum() > 0 else (np.ones_like(agg_probs, dtype=np.float64) / len(agg_probs))
         low_conf = True
 
+    # ▼ 숫자 보장
+    scores = _nan_guard(scores)
+    agg_probs = _nan_guard(agg_probs)
+
     rule_choice = int(np.argmax(scores))
     detail["final_scores"] = np.round(scores, 4).tolist()
     detail["success_rate_ci"] = {int(k): float(v) for k, v in class_success_ci.items()}
@@ -653,9 +678,9 @@ def meta_predict(
     result = {
         "class": int(final_class),
         "probs": np.asarray(agg_probs, dtype=np.float32).tolist(),
-        "confidence": float(max(agg_probs)),
-        "margin": float(margin),
-        "entropy": float(ent),
+        "confidence": float(np.nan_to_num(max(agg_probs), nan=0.0, posinf=0.0, neginf=0.0)),
+        "margin": float(np.nan_to_num(margin, nan=0.0, posinf=0.0, neginf=0.0)),
+        "entropy": float(np.nan_to_num(ent, nan=0.0, posinf=0.0, neginf=0.0)),
         "mode": used_mode,
         "detail": detail,
     }
