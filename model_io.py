@@ -1,4 +1,4 @@
-# model_io.py (patched: file-lock, meta integrity, load/save robustness)
+# model_io.py (patched: file-lock, meta integrity, load/save robustness + strict=False default & rich errors)
 from __future__ import annotations
 
 import io
@@ -16,6 +16,14 @@ import torch.nn as nn
 
 # ===== 저장 정책 플래그 =====
 ENFORCE_STATE_DICT_ONLY = True  # 프로젝트 전역에서 "state_dict만 저장"을 강제
+
+# ===== 명확한 실패 사유 전달을 위한 예외 =====
+class ModelLoadError(RuntimeError):
+    def __init__(self, reason: str, *, path: str = "", detail: str = ""):
+        super().__init__(f"{reason} :: {path} :: {detail}")
+        self.reason = reason
+        self.path = path
+        self.detail = detail
 
 # safetensors가 있으면 사용(없어도 동작)
 try:
@@ -43,10 +51,8 @@ def _atomic_write(bytes_data: bytes, dst_path: str) -> None:
         tmp = tf.name
         tf.write(bytes_data)
         tf.flush()
-        try:
+        with contextlib.suppress(Exception):
             os.fsync(tf.fileno())
-        except Exception:
-            pass
     os.replace(tmp, dst_path)
 
 
@@ -57,10 +63,8 @@ def _atomic_write_json(dst_path: str, obj: dict) -> None:
         tmp = tf.name
         json.dump(obj, tf, ensure_ascii=False, indent=2)
         tf.flush()
-        try:
+        with contextlib.suppress(Exception):
             os.fsync(tf.fileno())
-        except Exception:
-            pass
     os.replace(tmp, dst_path)
 
 
@@ -90,12 +94,10 @@ class _FileLock:
         while True:
             try:
                 if os.path.exists(self.path):
-                    try:
+                    with contextlib.suppress(Exception):
                         mtime = os.path.getmtime(self.path)
                         if (time.time() - mtime) > _LOCK_STALE_SEC:
                             os.remove(self.path)
-                    except Exception:
-                        pass
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(f"pid={os.getpid()} ts={time.time()}\n")
@@ -107,11 +109,9 @@ class _FileLock:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        try:
+        with contextlib.suppress(Exception):
             if os.path.exists(self.path):
                 os.remove(self.path)
-        except Exception:
-            pass
 
 
 def _to_state_dict(obj: Any) -> Dict[str, torch.Tensor] | Any:
@@ -125,24 +125,18 @@ def _to_state_dict(obj: Any) -> Dict[str, torch.Tensor] | Any:
     if not ENFORCE_STATE_DICT_ONLY:
         return obj
 
-    # already a dict-like of tensors
     if isinstance(obj, dict):
-        # accept if values are tensor-like
         def _is_tensor_like(v):
             return hasattr(v, "shape") or hasattr(v, "size") or isinstance(v, torch.Tensor)
         if all(_is_tensor_like(v) for v in obj.values()):
             return obj
-        # if dict but contains non-tensor entries, raise to avoid accidental saving big objects
         raise ValueError("ENFORCE_STATE_DICT_ONLY=True: dict contains non-tensor values; pass state_dict() with tensors only.")
 
-    # nn.Module -> state_dict
     if hasattr(obj, "state_dict") and callable(obj.state_dict):
         return obj.state_dict()
 
-    # try OrderedDict-like
     name = getattr(obj, "__class__", None)
     if name and getattr(obj.__class__, "__name__", "").lower().endswith("ordereddict"):
-        # assume mapping
         return dict(obj)
 
     raise ValueError("state_dict만 저장하도록 강제되었습니다. nn.Module을 전달하거나 텐서 dict를 전달하세요.")
@@ -165,32 +159,26 @@ def save_model(path: str, state_or_obj: Any, *, use_safetensors: Optional[bool] 
 
     obj = _to_state_dict(state_or_obj)
 
-    # write with file lock to avoid concurrent writes
     with _FileLock(path, timeout=10.0):
-        # .pt : torch.save raw
         if ext == ".pt":
             buf = io.BytesIO()
             torch.save(obj, buf)
             _atomic_write(buf.getvalue(), path)
             return
 
-        # .ptz : gzip of torch.save (mtime=0 for deterministic)
         if ext == ".ptz":
             raw = io.BytesIO()
             torch.save(obj, raw)
             raw_bytes = raw.getvalue()
             gz_buf = io.BytesIO()
-            # mtime=0 -> deterministic gzip header
             with gzip.GzipFile(fileobj=gz_buf, mode="wb", mtime=0) as gz:
                 gz.write(raw_bytes)
             _atomic_write(gz_buf.getvalue(), path)
             return
 
-        # .safetensors
         if ext == ".safetensors":
             if not _HAVE_ST:
                 raise RuntimeError("safetensors 미설치: `pip install safetensors` 후 사용하거나 .ptz를 사용하세요.")
-            # must be tensor dict
             if not isinstance(obj, dict) or not all(isinstance(v, torch.Tensor) for v in obj.values()):
                 raise ValueError("safetensors 저장은 텐서 dict만 지원합니다.")
             _ensure_dir(path)
@@ -204,43 +192,45 @@ def save_model(path: str, state_or_obj: Any, *, use_safetensors: Optional[bool] 
                 with contextlib.suppress(Exception):
                     os.remove(tmp)
                 raise
-            return
 
 
 def _load_raw(path: str, map_location: str | torch.device | None = "cpu") -> Any:
     """확장자에 맞게 '원본 저장물'을 복원(.pt/.ptz: torch 객체, .safetensors: 텐서 dict)"""
     if not os.path.isfile(path):
-        raise FileNotFoundError(path)
+        raise ModelLoadError("file_not_found", path=path)
 
     ext = _ext(path)
-    if ext == ".pt":
-        with open(path, "rb") as f:
-            return torch.load(f, map_location=map_location)
+    try:
+        if ext == ".pt":
+            with open(path, "rb") as f:
+                return torch.load(f, map_location=map_location)
 
-    if ext == ".ptz":
-        # read gz and torch.load
-        with gzip.open(path, "rb") as gz:
-            data = gz.read()
-        return torch.load(io.BytesIO(data), map_location=map_location)
+        if ext == ".ptz":
+            with gzip.open(path, "rb") as gz:
+                data = gz.read()
+            return torch.load(io.BytesIO(data), map_location=map_location)
 
-    if ext == ".safetensors":
-        if not _HAVE_ST:
-            raise RuntimeError("safetensors 미설치: .safetensors 파일을 읽으려면 `pip install safetensors`가 필요합니다.")
-        device = map_location if isinstance(map_location, (str, torch.device)) else "cpu"
-        return _st_load(path, device=device)
+        if ext == ".safetensors":
+            if not _HAVE_ST:
+                raise ModelLoadError("safetensors_not_installed", path=path, detail="pip install safetensors")
+            device = map_location if isinstance(map_location, (str, torch.device)) else "cpu"
+            return _st_load(path, device=device)
 
-    raise ValueError(f"Unsupported extension: {ext}")
+    except ModelLoadError:
+        raise
+    except Exception as e:
+        raise ModelLoadError("raw_load_failed", path=path, detail=str(e))
+
+    raise ModelLoadError("unsupported_extension", path=path, detail=ext)
 
 
 def _is_state_dict(obj: Any) -> bool:
-    # dict-like with tensor-like values
     if isinstance(obj, dict):
         if not obj:
             return True
         def _is_tensor_like(v):
             return isinstance(v, torch.Tensor) or hasattr(v, "shape") or hasattr(v, "size")
         return all(_is_tensor_like(v) for v in obj.values())
-    # OrderedDict fallback
     return obj.__class__.__name__.lower().endswith("ordereddict")
 
 
@@ -256,15 +246,21 @@ def load_model(
     model: Optional[nn.Module] = None,
     *,
     map_location: str | torch.device | None = "cpu",
-    strict: bool = True,
+    strict: bool = False,  # ✅ 기본 strict=False (키 불일치 허용)
 ) -> nn.Module | Dict[str, torch.Tensor] | Any:
     """
     통합 로더:
       - 파일 내용이 '모듈 전체'면 그 모듈을 그대로 반환
       - 파일 내용이 'state_dict(또는 safetensors 텐서 dict)'이면, 전달받은 `model`에 주입 후 `nn.Module` 반환
       - `model`이 None인데 state_dict인 경우: state_dict(또는 텐서 dict) 자체를 반환
+    실패 시 ModelLoadError(reason=...)로 상세 사유 전달 → 상위(predict)에서 해당 모델만 스킵 가능.
     """
-    raw = _load_raw(path, map_location=map_location)
+    try:
+        raw = _load_raw(path, map_location=map_location)
+    except ModelLoadError:
+        raise
+    except Exception as e:
+        raise ModelLoadError("load_io_error", path=path, detail=str(e))
 
     # 1) 저장물이 완성된 nn.Module인 경우
     if isinstance(raw, nn.Module):
@@ -274,24 +270,28 @@ def load_model(
     if _is_state_dict(raw):
         if model is None:
             return raw
+        # 시도 1: 전달된 strict로 로드
         try:
             model.load_state_dict(raw, strict=strict)
             return model
-        except RuntimeError:
-            # try stripping/adding module. variations
+        except Exception as e1:
+            # 시도 2: module. 접두어 제거
             try:
                 fixed = _strip_module_prefix(raw)
                 model.load_state_dict(fixed, strict=strict)
                 return model
-            except Exception:
-                # try adding module. prefix if model was wrapped in DataParallel
+            except Exception as e2:
+                # 시도 3: module. 접두어 추가
                 try:
                     augmented = {("module." + k): v for k, v in raw.items()}
                     model.load_state_dict(augmented, strict=strict)
                     return model
-                except Exception as e:
-                    # re-raise the original for caller to inspect
-                    raise
+                except Exception as e3:
+                    raise ModelLoadError(
+                        "state_dict_load_failed",
+                        path=path,
+                        detail=f"e1={type(e1).__name__}, e2={type(e2).__name__}, e3={type(e3).__name__}"
+                    )
 
     # 3) 그 외 포맷(희귀) — 그대로 반환
     return raw
