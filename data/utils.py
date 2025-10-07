@@ -31,6 +31,9 @@ BTC_DOMINANCE_CACHE = {"value": 0.5, "timestamp": 0}
 REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; QuantWorker/1.0; +https://example.com/bot)"}
 BINANCE_ENABLED = int(os.getenv("ENABLE_BINANCE", "1"))
 
+# 예측용 최소 윈도우(부족 시 not_enough_rows=True로 플래그) — predict.py에서 스킵
+_PREDICT_MIN_WINDOW = int(os.getenv("PREDICT_WINDOW", "10"))
+
 # --- (3단계) 추가 모듈: 선택적 import (없으면 자동 무시) ------------------------
 try:
     from features.market import get_market_context_df as _get_market_ctx
@@ -867,6 +870,10 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
         df.attrs["augment_needed"] = total < limit
         df.attrs["enough_for_training"] = total >= min_required
 
+        # ▲ 예측용 보조 플래그: 최근 캔들 수/부족 여부 저장
+        df.attrs["recent_rows"] = int(total)
+        df.attrs["not_enough_rows"] = bool(total < _PREDICT_MIN_WINDOW)
+
         try:
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("UTC")
             df["datetime"] = df["timestamp"].dt.tz_convert("Asia/Seoul")
@@ -1068,9 +1075,19 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     if cached is not None:
         return cached
 
+    # 입력 점검
     if df is None or df.empty or not isinstance(df, pd.DataFrame):
         safe_failed_result(symbol, strategy, reason="입력DataFrame empty")
-        return pd.DataFrame()
+        dummy = pd.DataFrame()
+        dummy.attrs["not_enough_rows"] = True
+        return dummy
+
+    # 윈도우 부족 시 바로 플래그 반환 (predict.py가 스킵)
+    if len(df) < _PREDICT_MIN_WINDOW:
+        dummy = pd.DataFrame()
+        dummy.attrs["not_enough_rows"] = True
+        dummy.attrs["recent_rows"] = int(len(df))
+        return dummy
 
     df = df.copy()
     if "datetime" in df.columns:
@@ -1086,7 +1103,10 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
 
     if len(df) < 20:
         safe_failed_result(symbol, strategy, reason=f"row 부족 {len(df)}")
-        return df
+        dummy = pd.DataFrame()
+        dummy.attrs["not_enough_rows"] = True
+        dummy.attrs["recent_rows"] = int(len(df))
+        return dummy
 
     try:
         # ============ MTF 피처화 ============ #
@@ -1103,7 +1123,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
                 feat["atr_val"] = _atr(feat["high"], feat["low"], feat["close"], window=atr_win)
                 thr_high = feat["atr_val"].quantile(vol_high)
                 thr_low  = feat["atr_val"].quantile(vol_low)
-                feat["vol_regime"] = np.where(feat["atr_val"] >= thr_high, 2, np.where(feat["atr_val"] <= thr_low, 0, 1))
+                feat["vol_regime"] = np.where(feat["atr_val"] >= thr_high, 2, np.where(fet["atr_val"] <= thr_low, 0, 1))
                 feat["ma_trend"] = feat["close"].rolling(window=trend_win, min_periods=1).mean()
                 slope = feat["ma_trend"].diff()
                 feat["trend_regime"] = np.where(slope > 0, 2, np.where(slope < 0, 0, 1))
@@ -1133,8 +1153,10 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         ]
         _ensure_columns(feat, must_have)
 
-        feat.replace([np.inf, -np.inf], np.nan, inplace=True)
+        # ✅ NaN/Inf 정규화 (훈련과 동일)
+        feat.replace([np.inf, -np.inf], 0, inplace=True)
         feat.fillna(0, inplace=True)
+
         feat_cols = [c for c in feat.columns if c != "timestamp"]
 
         if len(feat_cols) < _FIS:
@@ -1147,11 +1169,15 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
 
     except Exception as e:
         safe_failed_result(symbol, strategy, reason=f"feature 계산 실패: {e}")
-        return df
+        dummy = pd.DataFrame()
+        dummy.attrs["not_enough_rows"] = True
+        return dummy
 
     if feat.empty or feat.isnull().values.any():
         safe_failed_result(symbol, strategy, reason="최종 결과 DataFrame 오류")
-        return feat
+        dummy = pd.DataFrame()
+        dummy.attrs["not_enough_rows"] = True
+        return dummy
 
     CacheManager.set(cache_key, feat)
     return feat
@@ -1246,6 +1272,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         symbol_name = features[0]["symbol"]
 
     if not isinstance(features, list) or len(features) <= window:
+        safe_failed_result(symbol_name, strategy, reason="not_enough_rows<window")
         return _dummy(symbol_name)
 
     try:
