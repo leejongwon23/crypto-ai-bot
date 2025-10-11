@@ -1,3 +1,9 @@
+# === predict.py (YOPO v1.4 — 예측 정상화 완전판) ===
+# 변경 핵심:
+# ① group_id 자동추론 + meta 보정 (_infer_group_id)
+# ② 모델 검색/로드 시 group 불일치로 스킵되던 문제 제거 (하드 필터 → 보정)
+# ③ YOPO 철학(성공률 중심, F1 배제, 1% 미만 예측 제외) 그대로 유지
+
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob, inspect, threading
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
 from sklearn.preprocessing import MinMaxScaler
@@ -321,10 +327,30 @@ def _parse_group_cls_from_filename(path:str):
     except Exception:
         return None,None
 
+# === [NEW] 그룹 자동추론 및 보정 ===
+def _infer_group_id(symbol: str, strategy: str) -> int:
+    """
+    현재 심볼/전략 기반으로 그룹 자동추론.
+    - meta에 group_id 없거나 잘못된 경우 0~7 보정
+    """
+    try:
+        group_map = {
+            "BTCUSDT": 0, "ETHUSDT": 1, "XRPUSDT": 2, "SOLUSDT": 3,
+            "ADAUSDT": 4, "DOGEUSDT": 5, "DOTUSDT": 6, "MATICUSDT": 7
+        }
+        gid = group_map.get((symbol or "").upper(), None)
+        if gid is None:
+            gid = int(abs(hash(f"{symbol}|{strategy}")) % 8)
+        return max(0,min(7,int(gid)))
+    except Exception:
+        return 0
+
 def get_available_models(symbol,strategy):
     try:
         if not os.path.isdir(MODEL_DIR): return []
-        items=[]; search_patterns=[os.path.join(MODEL_DIR,f"{symbol}_{strategy}_*"),os.path.join(MODEL_DIR,symbol,strategy,"*"),os.path.join(MODEL_DIR,symbol,f"{strategy}_*")]
+        items=[]; search_patterns=[os.path.join(MODEL_DIR,f"{symbol}_{strategy}_*"),
+                                   os.path.join(MODEL_DIR,symbol,strategy,"*"),
+                                   os.path.join(MODEL_DIR,symbol,f"{strategy}_*")]
         for pattern in search_patterns:
             for e in _KNOWN_EXTS:
                 for fn in glob.glob(f"{pattern}{e}",recursive=True):
@@ -336,7 +362,28 @@ def get_available_models(symbol,strategy):
                         if not os.path.exists(fb):
                             print(f"[메타 미발견] {base}"); continue
                         mp=fb
-                    items.append({"pt_file":os.path.relpath(fn,MODEL_DIR),"meta_path":mp})
+                    # 메타 로드 & group 보정
+                    try:
+                        with open(mp,"r",encoding="utf-8") as mf: meta=json.load(mf)
+                    except Exception:
+                        print(f"[메타 파싱 실패] {mp}"); continue
+                    fname_grp,_fname_cls=_parse_group_cls_from_filename(fn)
+                    gid=meta.get("group_id",None)
+                    # 우선순위: 파일명 group 태그 > meta 값 > 자동추론
+                    if fname_grp is not None:
+                        gid=int(fname_grp)
+                    elif gid is None or (isinstance(gid,str) and not str(gid).isdigit()):
+                        gid=_infer_group_id(symbol,strategy)
+                    # 잘못된 값 보정
+                    gid=max(0,min(7,int(gid)))
+                    if meta.get("group_id",None)!=gid:
+                        meta["group_id"]=gid
+                        try:
+                            with open(mp,"w",encoding="utf-8") as wf:
+                                json.dump(meta,wf,ensure_ascii=False,indent=2)
+                        except Exception:
+                            pass
+                    items.append({"pt_file":os.path.relpath(fn,MODEL_DIR),"meta_path":mp,"group_id":gid})
         seen=set(); unique=[]
         for it in items:
             key=it["pt_file"]
@@ -474,7 +521,7 @@ def predict(symbol,strategy,source="일반",model_type=None):
         X=feat.drop(columns=["timestamp","strategy"],errors="ignore")
         X=MinMaxScaler().fit_transform(X); feat_dim=int(X.shape[1])
 
-        # 입력 윈도우 가드: 최근 행이 최대 window를 못 채우면 즉시 종료 (NaN 방지 핵심)
+        # 입력 윈도우 가드
         if X.shape[0] < max(windows):
             return _soft_abstain(symbol,strategy,reason="insufficient_recent_rows",meta_choice="abstain",regime=regime,X_last=None,group_id=None,df=df) if PREDICT_SOFT_ABORT else failed_result(symbol,strategy,reason="insufficient_recent_rows",source=source,X_input=None)
 
@@ -489,7 +536,7 @@ def predict(symbol,strategy,source="일반",model_type=None):
         hint=_position_hint_from_market(df); allow_long,allow_short=bool(hint["allow_long"]),bool(hint["allow_short"])
         final_cls=None; meta_choice="best_single"; chosen=None; used_minret=False
 
-        # (A) 진화형 메타 (선택적)
+        # (A) 진화형 메타
         if _glob_many(os.path.join(MODEL_DIR,"evo_meta_learner")):
             try:
                 from evo_meta_learner import predict_evo_meta
@@ -499,12 +546,11 @@ def predict(symbol,strategy,source="일반",model_type=None):
                     if _meets_minret_with_hint(cmin,cmax,allow_long,allow_short,MIN_RET_THRESHOLD): final_cls=pred; meta_choice="evo_meta_learner"
             except Exception as e: print(f"[evo_meta 예외] {e}")
 
-        # Helper: 분포 보정(옵션)
         def _maybe_adjust(probs,recent):
             if ADJUST_WITH_DIVERSITY: return adjust_probs_with_diversity(probs,recent,class_counts=None,alpha=0.10,beta=0.10)
             return np.asarray(probs,dtype=float)
 
-        # (B1) 단일모델 경쟁 + 탐험(점수=확률만, 임계 0.51 참고)
+        # (B1) 단일모델 경쟁 + 탐험
         if final_cls is None:
             best_i,best_score,best_pred=-1,-1.0,None; scores=[]
             for i,m in enumerate(outs):
@@ -526,7 +572,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
                 scores.append((i,score,pred))
                 if score>best_score:
                     best_i,best_score,best_pred=i,score,pred; used_minret=fused
-            # 탐험
             if len(scores)>=2:
                 ss=sorted(scores,key=lambda x:x[1],reverse=True); top1,top2=ss[0],ss[1]; gap=float(top1[1]-top2[1])
                 st=_load_json(EXP_STATE,{}).get(f"{symbol}|{strategy}",{}); last=max([v.get("last_explore_ts",0.0) for v in st.values()],default=0.0) if st else 0.0
@@ -579,9 +624,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
                     return _soft_abstain(symbol,strategy,reason=why,meta_choice=str(meta_choice),regime=regime,X_last=X[-1],group_id=(chosen.get("group_id") if isinstance(chosen,dict) else None),df=df,source="보류")
         except Exception as e: print(f"[RealityGuard 예외] {e}")
 
-        # (D) — 수정: abstain은 유효 모델 0개일 때만. (낮은 확률로 abstain 금지)
-        #  → 위에서 outs가 비었을 때만 보류 처리. 여기서는 아무 것도 하지 않음.
-
         # ===== 로깅 =====
         lo_sel,hi_sel=_class_range_by_meta_or_cfg(final_cls,(chosen or {}).get("meta"),symbol,strategy)
         exp_ret=(float(lo_sel)+float(hi_sel))/2.0
@@ -590,7 +632,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
         current=float(df.iloc[-1]["close"]); entry=current
         def _topk(p,k=3): return [int(i) for i in np.argsort(p)[::-1][:k]]
         topk=_topk((chosen or outs[0])["calib_probs"]) if (chosen or outs) else []
-        # NaN 치환 로깅
         raw_pred = float(np.nan_to_num((chosen or outs[0])["raw_probs"][final_cls],nan=0.0,posinf=0.0,neginf=0.0)) if (chosen or outs) else None
         calib_pred = float(np.nan_to_num((chosen or outs[0])["calib_probs"][final_cls],nan=0.0,posinf=0.0,neginf=0.0)) if (chosen or outs) else None
 
@@ -761,13 +802,13 @@ def _combine_windows(calib_stack:np.ndarray,raw_stack:np.ndarray)->tuple[np.ndar
         cc=mean_c/(1.0+ENSEMBLE_VAR_GAMMA*var_c); rr=mean_r/(1.0+ENSEMBLE_VAR_GAMMA*var_r)
         if PREDICT_WINDOW_ENSEMBLE=="mean_var":
             cc=0.5*mean_c+0.5*cc; rr=0.5*mean_r+0.5*rr
-    # priors/확률 안정화(1e-9 보정)
     cc=np.nan_to_num(cc,nan=0.0,posinf=0.0,neginf=0.0); rr=np.nan_to_num(rr,nan=0.0,posinf=0.0,neginf=0.0)
     cc=(cc+1e-9); rr=(rr+1e-9)
     cc=cc/(cc.sum()+1e-12); rr=rr/(rr.sum()+1e-12)
     return cc.astype(float),rr.astype(float)
 
 def get_model_predictions(symbol,strategy,models,df,feat_scaled,window_list,recent_freq,regime="unknown"):
+    outs,allpreds=[]
     outs,allpreds=[],[]
     for info in models:
         try:
@@ -785,25 +826,27 @@ def get_model_predictions(symbol,strategy,models,df,feat_scaled,window_list,rece
                 except Exception: pass
             with open(meta_path,"r",encoding="utf-8") as mf: meta=json.load(mf)
 
-            # 파일명 group/cls 태그와 메타 불일치 모델 제외
-            fname_grp,fname_cls=_parse_group_cls_from_filename(model_path)
-            cr_meta=_ranges_from_meta(meta)
-            num_cls_in_meta = int(meta.get("num_classes",(len(cr_meta) if cr_meta else NUM_CLASSES)))
-            if (fname_grp is not None and int(meta.get("group_id",0))!=fname_grp) or (fname_cls is not None and num_cls_in_meta!=fname_cls):
-                print(f"[필터] group/cls 불일치 스킵: {os.path.basename(model_path)}"); 
-                continue
+            # 파일명 group 태그가 있으면 meta 보정(하드 스킵 제거)
+            fname_grp,_fname_cls=_parse_group_cls_from_filename(model_path)
+            if fname_grp is not None:
+                meta["group_id"]=int(fname_grp)
+            elif "group_id" not in meta or not str(meta.get("group_id")).isdigit():
+                meta["group_id"]=_infer_group_id(symbol,strategy)
 
-            if STRICT_SAME_BOUNDS and not (cr_meta and len(cr_meta)>=2):
-                print(f"[STRICT] no class_ranges in meta → {os.path.basename(model_path)} (skip)"); 
-                continue
+            if STRICT_SAME_BOUNDS:
+                cr_meta=_ranges_from_meta(meta)
+                if not (cr_meta and len(cr_meta)>=2):
+                    print(f"[STRICT] no class_ranges in meta → {os.path.basename(model_path)} (skip)")
+                    continue
 
             mtype_raw=meta.get("model","lstm"); mtype=_norm_model_type(mtype_raw); gid=meta.get("group_id",0)
-            inp_size=int(meta.get("input_size",feat_scaled.shape[1])); num_cls=int(num_cls_in_meta)
+            inp_size=int(meta.get("input_size",feat_scaled.shape[1]))
+            cr_meta=_ranges_from_meta(meta)
+            num_cls=int(meta.get("num_classes",(len(cr_meta) if cr_meta else NUM_CLASSES)))
 
             preds_c_list,preds_r_list=[],[]; used_windows=[]
             for win in list(dict.fromkeys([int(w) for w in window_list if int(w)>0])):
                 if feat_scaled.shape[0]<win:
-                    # 윈도우 못 채우면 해당 모델 자체를 무효화 (NaN 방지)
                     preds_c_list=[]; preds_r_list=[]; used_windows=[]; break
                 seq=feat_scaled[-win:]
                 if seq.shape[1]<inp_size: seq=np.pad(seq,((0,0),(0,inp_size-seq.shape[1])),mode="constant")
@@ -822,10 +865,9 @@ def get_model_predictions(symbol,strategy,models,df,feat_scaled,window_list,rece
                 model.to(DEVICE); model.eval()
                 with torch.no_grad():
                     logits=model(x.to(DEVICE))
-                    logits=torch.nan_to_num(logits)  # 추론 안정화
+                    logits=torch.nan_to_num(logits)
                     probs=F.softmax(logits,dim=1)
                     probs=torch.nan_to_num(probs).squeeze().cpu().numpy()
-                # priors 보정(1e-9) 및 재정규화
                 probs=np.nan_to_num(probs,nan=0.0,posinf=0.0,neginf=0.0)+1e-9
                 probs=probs/(probs.sum()+1e-12)
                 cprobs=apply_calibration(probs,symbol=symbol,strategy=strategy,regime=regime,model_meta=meta).astype(float)
