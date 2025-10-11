@@ -431,6 +431,14 @@ def start_scheduler():
             _safe_open_gate("sched_trigger")
             try:
                 trigger_run()
+            except Exception as e:
+                print(f"[PREDICT] ❌ trigger_run 실패: {e}")
+                try:
+                    # 예외 시에도 실패 레코드 남김
+                    from predict import failed_result
+                    failed_result("ALL", "auto", reason=str(e), source="sched_trigger")
+                except Exception:
+                    pass
             finally:
                 _safe_close_gate("sched_trigger")
             print("[PREDICT] trigger_run done"); sys.stdout.flush()
@@ -574,7 +582,7 @@ else:
         if not _INIT_DONE:
             _init_background_once()
 
-# predict after training helper
+# predict after training helper  ✅ 반환 검증 + 실패 기록 보장
 def _predict_after_training(symbols, source_note):
     if not symbols:
         return
@@ -603,11 +611,25 @@ def _predict_after_training(symbols, source_note):
                         continue
                     print(f"[APP-PRED] predict {sym}-{strat}")
                     try:
-                        predict(sym, strat, source=source_note, model_type=None)
+                        result = predict(sym, strat, source=source_note, model_type=None)
+                        if not isinstance(result, dict):
+                            print(f"[APP-PRED] ⚠️ 비정상 반환({type(result)}), 강제 failed_result 기록"); sys.stdout.flush()
+                            try:
+                                from predict import failed_result
+                                failed_result(sym, strat, reason="invalid_return", source="app_predict")
+                            except Exception:
+                                pass
+                        else:
+                            print(f"[APP-PRED] ✅ 예측 완료: {sym}-{strat} result={result.get('reason','ok')}"); sys.stdout.flush()
                     except Exception as e:
-                        print(f"[APP-PRED] predict call failed: {e}")
+                        print(f"[APP-PRED] ❌ 예측 중 오류: {e}"); sys.stdout.flush()
+                        try:
+                            from predict import failed_result
+                            failed_result(sym, strat, reason=str(e), source="app_predict")
+                        except Exception:
+                            pass
                 except Exception as e:
-                    print(f"[APP-PRED] {sym}-{strat} 실패: {e}")
+                    print(f"[APP-PRED] {sym}-{strat} 실패: {e}"); sys.stdout.flush()
     finally:
         _safe_close_gate(source_note + "_end")
 
