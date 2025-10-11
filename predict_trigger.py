@@ -1,11 +1,7 @@
-# === predict_trigger.py (FINAL — lock-aware, retry-on-unlock, stale-safe, log-throttled, 그룹 미완료 시 완료된 심볼만 예측 진행) ===
-import os
-import time
-import traceback
-import datetime
+# === predict_trigger.py (FINAL — lock-aware, retry-on-unlock, stale-safe, log-throttled,
+# 그룹 미완료 시 '완료된 심볼'만 예측 진행 + train.py 연동 run_after_training 포함, 누락 없음) ===
+import os, time, glob, traceback, datetime
 from collections import Counter, defaultdict
-import glob
-
 import numpy as np
 import pandas as pd
 import pytz
@@ -75,7 +71,7 @@ except Exception:
     def get_calibration_version():
         return "none"
 
-# (옵션) 예측 호출 래퍼
+# (옵션) 예측 호출 래퍼 — train.py 제공 함수 우선 사용
 _safe_predict_with_timeout = None
 _safe_predict_sync = None
 try:
@@ -248,7 +244,7 @@ def _wait_for_gate_open(max_wait_sec: int) -> bool:
     return False
 
 # ──────────────────────────────────────────────────────────────
-# 그룹 완성 검사
+# 그룹 완성 검사/페어 선택
 # ──────────────────────────────────────────────────────────────
 def _missing_pairs(symbols):
     miss = []
@@ -408,7 +404,7 @@ def run():
         symbols = [s for s in all_symbols if s in symset]
         print(f"[그룹제한] 현재 그룹 심볼 {len(symbols)}/{len(all_symbols)}개 대상으로 실행")
 
-        # 🔧 패치: 그룹 미완료라도 '완료된 심볼'만 예측 진행 (기존엔 return으로 전체 차단)
+        # 🔧 패치: 그룹 미완료라도 '완료된 심볼'만 예측 진행
         if REQUIRE_GROUP_COMPLETE and not _is_group_complete_for_all_strategies(symbols):
             miss = _missing_pairs(symbols)
             print(f"[경고] 그룹 일부 미완료(누락 {len(miss)}) → 완료된 심볼만 예측 진행")
@@ -617,3 +613,57 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
     if s <= 0:
         return np.ones_like(p) / max(1, len(p))
     return (p_adj / s).astype(np.float64)
+
+# ──────────────────────────────────────────────────────────────
+# 학습 직후 단일 페어 트리거 — train.py에서 직접 호출
+# ──────────────────────────────────────────────────────────────
+def run_after_training(symbol: str, strategy: str) -> bool:
+    """train.py가 학습 완료 후 즉시 호출 (게이트/락/재시도 포함)"""
+    try:
+        ensure_prediction_log_exists()
+    except Exception:
+        pass
+
+    if _LOCK_PATH and os.path.exists(_LOCK_PATH):
+        log_audit(symbol, strategy, "학습후트리거스킵", "전역락")
+        return False
+
+    try:
+        from predict import predict as _predict
+    except Exception as e:
+        log_audit(symbol, strategy, "학습후트리거에러", f"predict로드실패: {e}")
+        return False
+
+    if not _has_model_for(symbol, strategy):
+        log_audit(symbol, strategy, "학습후트리거스킵", "모델없음")
+        return False
+
+    if _gate_closed() or _predict_busy():
+        _wait_for_gate_open(min(PAIR_WAIT_FOR_GATE_OPEN_SEC, 60))
+
+    first_err = None
+    try:
+        ok = _invoke_predict(_predict, symbol, strategy, "train_end", max(10.0, PREDICT_TIMEOUT_SEC))
+        if ok:
+            log_audit(symbol, strategy, "학습후트리거", "즉시성공")
+            return True
+        else:
+            first_err = "timeout/failed"
+    except Exception as e:
+        first_err = e
+
+    try:
+        ok2 = _retry_after_training(_predict, symbol, strategy, first_err=first_err)
+        return bool(ok2)
+    except Exception as e:
+        log_audit(symbol, strategy, "학습후트리거에러", f"{e}")
+        return False
+
+
+# (선택) 직접 실행 테스트용
+if __name__ == "__main__":
+    try:
+        run()
+    except Exception as e:
+        print(f"[MAIN] trigger run error: {e}")
+        traceback.print_exc()
