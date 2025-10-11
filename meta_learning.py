@@ -1,4 +1,4 @@
-# meta_learning.py
+# meta_learning.py (YOPO v1.4 — 메타러너 정상화/과도 abstain 방지)
 # ------------------------------------------------------------
 # 단일 진입점 메타러너 (NaN/None 방어, 과도 abstain 방지, EVO/스태킹/룰 폴백)
 # predict.py의 포지션 힌트/최소 기대수익 필터와 정합
@@ -8,8 +8,15 @@ from __future__ import annotations
 import os
 import math
 from typing import List, Dict, Optional, Tuple, Any
-
 import numpy as np
+
+__all__ = [
+    "get_meta_prediction",
+    "meta_predict",
+    "maml_train_entry",
+    "train_meta_learner",
+    "load_meta_learner",
+]
 
 # (선택) 토치 의존은 존재할 때만 사용
 try:
@@ -147,7 +154,6 @@ def load_meta_learner():
 def _safe_log_prediction(**kwargs):
     try:
         from logger import log_prediction  # 선택적 의존
-        # 숫자 보장을 위해 한번 더 nan→0 처리
         for k in ("rate", "return_value", "entry_price", "target_price"):
             if k in kwargs:
                 kwargs[k] = float(np.nan_to_num(kwargs[k], nan=0.0, posinf=0.0, neginf=0.0))
@@ -159,9 +165,7 @@ def _safe_log_prediction(**kwargs):
 
 
 # ================= (D) 안전 정규화/집계 유틸 =================
-
 def _nan_guard(x: Any, *, fill: float = 0.0):
-    """스칼라/벡터 모두 NaN/Inf → fill"""
     try:
         if isinstance(x, (list, tuple, np.ndarray)):
             arr = np.asarray(x, dtype=np.float64)
@@ -182,11 +186,6 @@ def _normalize_safe(v: np.ndarray) -> np.ndarray:
     return v / s
 
 def _to_probs(x: Any, C_expected: Optional[int] = None) -> Optional[np.ndarray]:
-    """
-    입력을 확률 벡터로 강제 변환.
-    허용: list/ndarray, dict{class:prob}, torch.Tensor
-    길이 불일치/파싱 실패 → None
-    """
     try:
         if x is None:
             return None
@@ -215,18 +214,9 @@ def _entropy(p: np.ndarray) -> float:
     p = np.clip(np.asarray(p, dtype=np.float64), 1e-12, 1.0)
     return float(-(p * np.log(p)).sum())
 
-
-# -------------- (NEW) 3번 요구 반영: 단일 선택 집계 --------------
+# -------------- NaN/Inf 제거 + 단일 선택 집계 --------------
 def _aggregate_pick_maxprob(groups_outputs: List[Dict]) -> Tuple[np.ndarray, Dict]:
-    """
-    NaN/Inf/음수/합계0 등 비정상 확률 벡터를 가진 모델 **제거**.
-    남은 모델 중에서 `max(probs)`가 가장 큰 모델 하나를 선택해 그 확률을 반환.
-    동률이면 val_f1(desc) → val_loss(asc) → index(asc) 순으로 tie-break.
-    유효 모델이 0개면 균등분포를 반환하고 detail['no_valid_model']=True.
-    """
     detail: Dict[str, Any] = {"picked": None, "candidates": []}
-
-    # C 추정
     C_guess = None
     for g in groups_outputs:
         arr = _to_probs(g.get("probs"), None)
@@ -241,7 +231,6 @@ def _aggregate_pick_maxprob(groups_outputs: List[Dict]) -> Tuple[np.ndarray, Dic
         arr = _to_probs(g.get("probs"), C_guess)
         if arr is None:
             continue
-        # 유효성 체크: 모두 유한 & >=0 & 합>0
         if not np.all(np.isfinite(arr)) or np.any(arr < 0) or float(arr.sum()) <= 0:
             continue
         arr = _normalize_safe(arr)
@@ -251,12 +240,10 @@ def _aggregate_pick_maxprob(groups_outputs: List[Dict]) -> Tuple[np.ndarray, Dic
         candidates.append((idx, arr, maxp, val_f1, val_loss))
 
     if not candidates:
-        # no_valid_model
         uniform = np.ones(C_guess, dtype=np.float64) / C_guess
         detail.update({"no_valid_model": True, "probs_stack_shape": [0, C_guess]})
         return uniform.astype(np.float32), detail
 
-    # 정렬: maxp desc, val_f1 desc, val_loss asc, idx asc
     candidates.sort(key=lambda t: (-t[2], -t[3], t[4], t[0]))
     best_idx, best_arr, best_maxp, best_f1, best_loss = candidates[0]
     detail.update({
@@ -268,25 +255,17 @@ def _aggregate_pick_maxprob(groups_outputs: List[Dict]) -> Tuple[np.ndarray, Dic
         "no_valid_model": False
     })
     return best_arr.astype(np.float32), detail
-# --------------------------------------------------------------
-
 
 def _aggregate_base_outputs(
     groups_outputs: List[Dict],
     class_success: Optional[Dict[int, float]] = None,
     mode: str = "avg"
 ) -> Tuple[np.ndarray, Dict]:
-    """
-    기존 집계 함수.
-    3번 요구에 따라 기본 모드를 'maxprob_pick'으로 확장.
-    """
     if not groups_outputs:
         raise ValueError("groups_outputs 비어있음")
-
     if mode == "maxprob_pick":
         return _aggregate_pick_maxprob(groups_outputs)
 
-    # 아래는 기존 평균/가중/다수결 로직(유지)
     C_guess = None
     for g in groups_outputs:
         p = g.get("probs")
@@ -302,12 +281,10 @@ def _aggregate_base_outputs(
         arr = _to_probs(g.get("probs"), C_guess)
         if arr is None:
             continue
-        # 3번 요구에 맞춰 NaN/Inf/음수/합계0 행은 **제거**
         if not np.all(np.isfinite(arr)) or np.any(arr < 0) or float(arr.sum()) <= 0:
             continue
         probs_mat.append(_normalize_safe(arr))
     if not probs_mat:
-        # 모든 항목 무효 → no_valid_model
         agg = np.ones(C_guess, dtype=np.float64) / C_guess
         detail = {"entropy": _entropy(agg), "top1": int(np.argmax(agg)),
                   "top1_prob": float(agg.max()), "margin": 0.0,
@@ -315,13 +292,12 @@ def _aggregate_base_outputs(
                   "no_valid_model": True}
         return agg.astype(np.float32), detail
 
-    probs_mat = np.stack(probs_mat, axis=0)  # (N, C)
+    probs_mat = np.stack(probs_mat, axis=0)
     C = probs_mat.shape[1]
 
     detail: Dict = {}
     if mode == "avg":
         agg = probs_mat.mean(axis=0)
-
     elif mode == "weighted":
         if not class_success:
             agg = probs_mat.mean(axis=0)
@@ -331,14 +307,12 @@ def _aggregate_base_outputs(
             w = 0.5 + 0.5 * w
             agg = (probs_mat * w).mean(axis=0)
             detail["class_weights"] = w.tolist()
-
     elif mode == "maxvote":
         votes = np.bincount(np.argmax(probs_mat, axis=1), minlength=C)
         agg = votes.astype(np.float64) / max(1, votes.sum())
         detail["votes"] = votes.tolist()
-
     else:
-        agg = probs_mat.mean(axis=0)  # 알 수 없는 모드 → 평균 폴백
+        agg = probs_mat.mean(axis=0)
         detail["fallback"] = f"unknown_agg:{mode}"
 
     agg = _normalize_safe(agg)
@@ -481,7 +455,6 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
     if not model_outputs_list:
         raise ValueError("❌ get_meta_prediction: 모델 출력 없음")
 
-    # 첫 유효 확률에서 C 추정
     C_guess = None
     for m in model_outputs_list:
         probs = m["probs"] if isinstance(m, dict) else m
@@ -508,12 +481,9 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
     expected_return_dict = dict(meta_info.get("expected_return", {}))
     class_ranges = meta_info.get("class_ranges", None)
 
-    # 성공률 신뢰구간 보정
     counts = _extract_counts(meta_info)
     if success_rate_dict:
         success_rate_dict = _adjust_success_rates_with_ci(success_rate_dict, counts)
-
-    # 폭 기반 기대수익 영향도 축소
     if expected_return_dict:
         expected_return_dict = _width_scaled_er(expected_return_dict, class_ranges, CLAMP_MAX_WIDTH)
 
@@ -532,7 +502,6 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
         scores = avg_softmax.copy()
         mode += " / all<TH→prob선택"
 
-    # ▼ 숫자 보장
     scores = _nan_guard(scores)
     final_pred_class = int(np.argmax(scores))
     print(f"[META] {mode} → 최종 클래스 {final_pred_class} / 점수={np.round(scores, 4)}")
@@ -582,23 +551,14 @@ def meta_predict(
     features: Optional["torch.Tensor"] = None,
     meta_state: Optional[Dict] = None,
     *,
-    # 3번 요구 기본 채택: maxprob_pick
     agg_mode: str = "maxprob_pick",
     use_stacking: bool = True,
     use_evo_meta: bool = True,
     log: bool = True,
     source: str = "meta",
-    # ▼ predict.py와 정합되는 필터 인자 ▼
-    position_hint: Optional[Dict[str, bool]] = None,  # {"allow_long": bool, "allow_short": bool}
+    position_hint: Optional[Dict[str, bool]] = None,
     min_return_thr: Optional[float] = None
 ) -> Dict:
-    """
-    단일 진입점
-    - (3번) 다모델 집계: NaN/Inf 제거 후 max_prob 최댓값 모델 단일 선택 (tie: val_f1 desc → val_loss asc)
-    - EVO-메타/스태킹/룰기반 폴백 유지
-    - 과도 abstain 방지: 항상 유효 클래스 반환(보류 여부는 predict.py 정책)
-    - 유효 모델 0개면 result['no_valid_model']=True
-    """
     meta_state = meta_state or {}
     class_success_raw = dict(meta_state.get("success_rate", {}))
     expected_return_raw = dict(meta_state.get("expected_return", {}))
@@ -608,20 +568,15 @@ def meta_predict(
     allow_short = bool((position_hint or {}).get("allow_short", True))
     min_thr = float(min_return_thr if min_return_thr is not None else max(META_MIN_RETURN, _RET_TH))
 
-    # (1) 집계 (3번 요구 반영)
     agg_probs, detail = _aggregate_base_outputs(groups_outputs, class_success_raw, mode=agg_mode)
     used_mode = agg_mode
     final_class = int(np.argmax(agg_probs))
-
-    # no_valid_model 플래그는 결과에 그대로 전달( predict.py 에서도 활용 가능 )
     no_valid_model = bool(detail.get("no_valid_model", False))
 
-    # 성공률 CI 보정 + 폭 보정된 기대수익
     counts = _extract_counts(meta_state)
     class_success_ci = _adjust_success_rates_with_ci(class_success_raw, counts) if class_success_raw else {}
     expected_return_scaled = _width_scaled_er(expected_return_raw, class_ranges, CLAMP_MAX_WIDTH) if expected_return_raw else {}
 
-    # (1.5) 확률에 힌트/최소 기대수익 마스크 1차 적용
     probs_masked, mask_reasons_p = _mask_by_hint_and_minret(
         agg_probs, class_ranges,
         allow_long=allow_long, allow_short=allow_short, min_return_thr=min_thr
@@ -633,15 +588,13 @@ def meta_predict(
         detail.setdefault("filters", {})["prob_mask"] = {"_fallback": "all_zero → ignore_mask"}
         agg_probs = _normalize_safe(agg_probs)
 
-    # (2) EVO 메타 (가능하면 최우선)
     evo_choice: Optional[int] = None
-    if use_evo_meta and not no_valid_model:  # 유효 모델 없을 땐 EVO도 건너뜀
+    if use_evo_meta and not no_valid_model:
         evo_choice = _maybe_evo_decide(groups_outputs, agg_probs, expected_return_scaled)
         if isinstance(evo_choice, int):
             used_mode = "evo_meta"
             final_class = int(evo_choice)
 
-    # (3) 스태킹 (EVO 실패 시)
     if use_stacking and used_mode != "evo_meta" and not no_valid_model:
         try:
             clf = load_meta_learner()
@@ -664,7 +617,6 @@ def meta_predict(
         except Exception as e:
             print(f"[⚠️ stacking 예측 실패 → 집계 폴백] {e}")
 
-    # (4) 신뢰도 점검 + 룰기반 보정 (성공률/ER 가중치 스코어)
     top1 = int(np.argmax(agg_probs))
     top1p = float(agg_probs[top1])
     margin = float(top1p - float(np.partition(agg_probs, -2)[-2]) if len(agg_probs) >= 2 else top1p)
@@ -683,7 +635,6 @@ def meta_predict(
             all_er_below = False
         scores[c] = scores[c] * sr * g * (1.0 - 0.3 * fr)
 
-    # (4.1) 스코어에도 힌트/최소 기대수익 마스크 2차 적용
     scores_masked, mask_reasons_s = _mask_by_hint_and_minret(
         scores, class_ranges,
         allow_long=allow_long, allow_short=allow_short, min_return_thr=min_thr
@@ -705,7 +656,6 @@ def meta_predict(
         scores = tmp if tmp.sum() > 0 else (np.ones_like(agg_probs, dtype=np.float64) / len(agg_probs))
         low_conf = True
 
-    # ▼ 숫자 보장
     scores = _nan_guard(scores)
     agg_probs = _nan_guard(agg_probs)
 
@@ -742,7 +692,6 @@ def meta_predict(
         "no_valid_model": bool(no_valid_model),
     }
 
-    # (5) 로깅
     if log:
         er_cho = 0.0
         try:
