@@ -66,6 +66,12 @@ try:
 except Exception:
     def close_predict_gate(*a, **k): return None
 
+# ✅ 학습 직후 자동 예측 트리거 (없으면 no-op)
+try:
+    from predict_trigger import run_after_training
+except Exception:
+    def run_after_training(symbol, strategy, *a, **k): return False
+
 # [가드] data_augmentation (없으면 원본 그대로 통과)
 try:
     from data_augmentation import balance_classes
@@ -511,6 +517,14 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
 
         res["ok"]=bool(res.get("models"))
         _safe_print(f"[RESULT] {symbol}-{strategy}-g{group_id} ok={res['ok']}")
+
+        # 🔥 학습 완료 직후 자동 예측 트리거 (심볼-전략 단위, 그룹 루프 외 상황 보장)
+        try:
+            run_after_training(symbol, strategy)
+            _safe_print(f"[AUTO-PREDICT] triggered after training {symbol}-{strategy}")
+        except Exception as e:
+            _safe_print(f"[AUTO-PREDICT FAIL] {symbol}-{strategy} → {e}")
+
         return res
 
     except Exception as e:
