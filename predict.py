@@ -345,52 +345,123 @@ def _infer_group_id(symbol: str, strategy: str) -> int:
     except Exception:
         return 0
 
-def get_available_models(symbol,strategy):
+# === [PATCHED] get_available_models — fallback + auto meta recovery ===
+def get_available_models(symbol, strategy):
+    """
+    모델 파일을 심볼/전략 기반으로 탐색.
+    없을 경우 전체 MODEL_DIR에서 최신 모델로 폴백.
+    항상 최소 1개라도 반환하려 시도.
+    """
     try:
-        if not os.path.isdir(MODEL_DIR): return []
-        items=[]; search_patterns=[os.path.join(MODEL_DIR,f"{symbol}_{strategy}_*"),
-                                   os.path.join(MODEL_DIR,symbol,strategy,"*"),
-                                   os.path.join(MODEL_DIR,symbol,f"{strategy}_*")]
+        if not os.path.isdir(MODEL_DIR):
+            return []
+
+        results = []
+        search_patterns = [
+            os.path.join(MODEL_DIR, f"{symbol}_{strategy}_*"),
+            os.path.join(MODEL_DIR, symbol, strategy, "*"),
+            os.path.join(MODEL_DIR, symbol, f"{strategy}_*"),
+        ]
+
+        def _resolve_meta_abs(weight_abs):
+            base = _stem(weight_abs)
+            m1 = f"{base}.meta.json"
+            if os.path.exists(m1):
+                return m1
+            cand = glob.glob(os.path.join(MODEL_DIR, f"**/{os.path.basename(base)}.meta.json"), recursive=True)
+            return cand[0] if cand else None
+
+        # 1) 일반 탐색 (심볼·전략명 패턴)
         for pattern in search_patterns:
-            for e in _KNOWN_EXTS:
-                for fn in glob.glob(f"{pattern}{e}",recursive=True):
-                    if not os.path.isfile(fn): continue
-                    base=os.path.basename(fn)
-                    mp=_resolve_meta(base)
-                    if not mp:
-                        fb=os.path.splitext(fn)[0]+".meta.json"
-                        if not os.path.exists(fb):
-                            print(f"[메타 미발견] {base}"); continue
-                        mp=fb
-                    # 메타 로드 & group 보정
+            for ext in _KNOWN_EXTS:
+                for w in glob.glob(f"{pattern}{ext}", recursive=True):
+                    if not os.path.isfile(w):
+                        continue
+                    meta_path = _resolve_meta_abs(w)
+                    if not meta_path:
+                        # 메타파일 없으면 임시 생성
+                        meta_tmp = {
+                            "symbol": symbol,
+                            "strategy": strategy,
+                            "group_id": _infer_group_id(symbol, strategy),
+                            "input_size": FEATURE_INPUT_SIZE,
+                            "num_classes": NUM_CLASSES,
+                            "created_at": time.time(),
+                        }
+                        meta_path = _stem(w) + ".meta.json"
+                        with open(meta_path, "w", encoding="utf-8") as f:
+                            json.dump(meta_tmp, f, ensure_ascii=False, indent=2)
+
                     try:
-                        with open(mp,"r",encoding="utf-8") as mf: meta=json.load(mf)
+                        with open(meta_path, "r", encoding="utf-8") as mf:
+                            meta = json.load(mf)
                     except Exception:
-                        print(f"[메타 파싱 실패] {mp}"); continue
-                    fname_grp,_fname_cls=_parse_group_cls_from_filename(fn)
-                    gid=meta.get("group_id",None)
-                    # 우선순위: 파일명 group 태그 > meta 값 > 자동추론
+                        continue
+
+                    fname_grp, _ = _parse_group_cls_from_filename(w)
+                    gid = meta.get("group_id")
                     if fname_grp is not None:
-                        gid=int(fname_grp)
-                    elif gid is None or (isinstance(gid,str) and not str(gid).isdigit()):
-                        gid=_infer_group_id(symbol,strategy)
-                    # 잘못된 값 보정
-                    gid=max(0,min(7,int(gid)))
-                    if meta.get("group_id",None)!=gid:
-                        meta["group_id"]=gid
-                        try:
-                            with open(mp,"w",encoding="utf-8") as wf:
-                                json.dump(meta,wf,ensure_ascii=False,indent=2)
-                        except Exception:
-                            pass
-                    items.append({"pt_file":os.path.relpath(fn,MODEL_DIR),"meta_path":mp,"group_id":gid})
-        seen=set(); unique=[]
-        for it in items:
-            key=it["pt_file"]
-            if key not in seen: seen.add(key); unique.append(it)
-        unique.sort(key=lambda x:x["pt_file"]); return unique
+                        gid = int(fname_grp)
+                    elif gid is None or not str(gid).isdigit():
+                        gid = _infer_group_id(symbol, strategy)
+                    gid = max(0, min(7, int(gid)))
+                    meta["group_id"] = gid
+
+                    results.append({
+                        "pt_file": os.path.relpath(w, MODEL_DIR),
+                        "meta_path": meta_path,
+                        "group_id": gid
+                    })
+
+        # 2) 폴백: 모델 없음 → 전체 MODEL_DIR에서 최신 가중치 탐색
+        if not results:
+            all_candidates = []
+            for ext in _KNOWN_EXTS:
+                all_candidates += glob.glob(os.path.join(MODEL_DIR, f"**/*{ext}"), recursive=True)
+            if not all_candidates:
+                return []
+
+            # 최근 수정일 기준 상위 3개
+            all_candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            top = all_candidates[:3]
+            for w in top:
+                meta_path = _resolve_meta_abs(w)
+                if not meta_path:
+                    meta_tmp = {
+                        "symbol": symbol,
+                        "strategy": strategy,
+                        "group_id": _infer_group_id(symbol, strategy),
+                        "input_size": FEATURE_INPUT_SIZE,
+                        "num_classes": NUM_CLASSES,
+                        "created_at": time.time(),
+                    }
+                    meta_path = _stem(w) + ".meta.json"
+                    with open(meta_path, "w", encoding="utf-8") as f:
+                        json.dump(meta_tmp, f, ensure_ascii=False, indent=2)
+                results.append({
+                    "pt_file": os.path.relpath(w, MODEL_DIR),
+                    "meta_path": meta_path,
+                    "group_id": _infer_group_id(symbol, strategy)
+                })
+
+        # 중복 제거 + 최신순 정렬
+        seen = set()
+        uniq = []
+        for it in results:
+            if it["pt_file"] not in seen:
+                seen.add(it["pt_file"])
+                uniq.append(it)
+        uniq.sort(key=lambda x: os.path.getmtime(os.path.join(MODEL_DIR, x["pt_file"])), reverse=True)
+
+        if not uniq:
+            print(f"[⚠️ 모델 탐색 실패] {symbol}-{strategy} → 빈 목록")
+        else:
+            print(f"[✅ 모델 탐색 성공] {symbol}-{strategy} → {len(uniq)}개 모델 발견")
+
+        return uniq
     except Exception as e:
-        print(f"[get_available_models 오류] {e}"); return []
+        print(f"[get_available_models 오류] {e}")
+        return []
 
 def failed_result(symbol,strategy,model_type="unknown",reason="",source="일반",X_input=None):
     t=_now_kst().strftime("%Y-%m-%d %H:%M:%S")
@@ -729,7 +800,7 @@ def evaluate_predictions(get_price_fn):
                             r.update({"status":"invalid","reason":"no_price_data","return":0.0,"return_value":0.0})
                             w_all.writerow({k:r.get(k,"") for k in fields})
                             if not wrong_written:
-                                wrong_writer=csv.DictWriter=csv.DictWriter(f_wrong,fieldnames=sorted(r.keys())); wrong_writer.writeheader(); wrong_written=True
+                                wrong_writer=csv.DictWriter(f_wrong,fieldnames=sorted(r.keys())); wrong_writer.writeheader(); wrong_written=True
                             wrong_writer.writerow({k:r.get(k,"") for k in r.keys()}); continue
                         dfp=dfp.copy()
                         dfp["timestamp"]=pd.to_datetime(dfp["timestamp"],errors="coerce").dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
