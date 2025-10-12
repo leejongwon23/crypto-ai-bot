@@ -602,7 +602,7 @@ def predict(symbol,strategy,source="일반",model_type=None):
                         if not _meets_minret_with_hint(lo,hi,allow_long,allow_short,MIN_RET_THRESHOLD): continue
                         sc=float(adj[ci])
                         if sc>best_sc: best_sc,best_m,best_cls=sc,m,int(ci)
-                if best_cls is not None: final_cls,chosen,used_minret=best_cls,best_m,True
+                if best_cls is not None: final_cls,best_sc; chosen,used_minret=best_cls,best_m,True
         except Exception as e: print(f"[임계 가드 예외] {e}")
 
         # (C-1) ExitGuard
@@ -729,7 +729,7 @@ def evaluate_predictions(get_price_fn):
                             r.update({"status":"invalid","reason":"no_price_data","return":0.0,"return_value":0.0})
                             w_all.writerow({k:r.get(k,"") for k in fields})
                             if not wrong_written:
-                                wrong_writer=csv.DictWriter(f_wrong,fieldnames=sorted(r.keys())); wrong_writer.writeheader(); wrong_written=True
+                                wrong_writer=csv.DictWriter=csv.DictWriter(f_wrong,fieldnames=sorted(r.keys())); wrong_writer.writeheader(); wrong_written=True
                             wrong_writer.writerow({k:r.get(k,"") for k in r.keys()}); continue
                         dfp=dfp.copy()
                         dfp["timestamp"]=pd.to_datetime(dfp["timestamp"],errors="coerce").dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
