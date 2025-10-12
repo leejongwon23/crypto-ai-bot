@@ -1,4 +1,4 @@
-# train.py — STEP 5 FINAL (검증/분할/메트릭 가드 강화, 그룹예측 연동 안정화)
+# train.py — FINAL v1.6 (검증/분할/메트릭 가드 강화, 그룹예측 연동 안정화 + 학습후 트리거 락보강)
 # -*- coding: utf-8 -*-
 import os, time, glob, shutil, json, random, traceback, threading
 from datetime import datetime
@@ -211,7 +211,7 @@ def _log_skip(symbol,strategy,reason):
     _maybe_insert_failure({"symbol":symbol,"strategy":strategy,"model":"all","predicted_class":-1,"success":False,"rate":0.0,"reason":reason},feature_vector=[])
 
 def _log_fail(symbol,strategy,reason):
-    logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note=reason,status="failed")
+    logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note=reason, status="failed")
     _maybe_insert_failure({"symbol":symbol,"strategy":strategy,"model":"all","predicted_class":-1,"success":False,"rate":0.0,"reason":reason},feature_vector=[])
 
 def _has_any_model_for_symbol(symbol: str) -> bool:
@@ -518,8 +518,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         res["ok"]=bool(res.get("models"))
         _safe_print(f"[RESULT] {symbol}-{strategy}-g{group_id} ok={res['ok']}")
 
-        # 🔥 학습 완료 직후 자동 예측 트리거 (심볼-전략 단위, 그룹 루프 외 상황 보장)
+        # 🔥 학습 완료 직후 자동 예측 트리거 (심볼-전략 단위)
         try:
+            # 락 충돌 방지: 해당 페어 락의 스테일 정리 + 짧은 대기
+            pl_clear_stale(lock_key=(symbol, strategy))
+            pl_wait_free(max_wait_sec=10, lock_key=(symbol, strategy))
+
             run_after_training(symbol, strategy)
             _safe_print(f"[AUTO-PREDICT] triggered after training {symbol}-{strategy}")
         except Exception as e:
@@ -680,7 +684,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                 completed_syms, partial_syms = train_models(group, stop_event=stop_event, ignore_should=force_full_pass)
                 if stop_event is not None and stop_event.is_set(): break
 
-                # ✅ 그룹 학습 직후 즉시 예측(완료 여부 상관없이, 모델 있는 조합만) — 수정 반영
+                # ✅ 그룹 학습 직후 즉시 예측(완료 여부 상관없이, 모델 있는 조합만)
                 gate_ok = True
                 try:
                     gate_ok = ready_for_group_predict()
