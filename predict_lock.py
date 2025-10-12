@@ -1,16 +1,15 @@
-# predict_lock.py (FINAL: per-key atomic lock, owner-check, wait/clear API)
+# predict_lock.py (FINAL v1.5 — per-key atomic lock, auto-clear on stale, safe-release)
 import os
 import time
 import atexit
 import json
 from typing import Optional, Tuple, Union
 
-# ── 기본 전역(하위호환용)
+# Legacy single lock path (kept for backward compatibility)
 LOCK_FILE = os.getenv("PREDICT_LOCK_FILE", "/persistent/run/predict_running.lock")
 
-# 기본 TTL / 폴링
-_DEFAULT_STALE = int(os.getenv("PREDICT_LOCK_STALE_SEC", "60"))
-PREDICT_LOCK_TTL = int(os.getenv("PREDICT_LOCK_TTL", str(_DEFAULT_STALE)))
+# Short TTL so stale locks are cleared quickly
+PREDICT_LOCK_TTL = int(os.getenv("PREDICT_LOCK_TTL", "30"))
 _WAIT_POLL = float(os.getenv("PREDICT_LOCK_POLL", "0.1"))
 
 __all__ = [
@@ -22,20 +21,15 @@ __all__ = [
     "lock_path_for",
 ]
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 내부 유틸
-# ──────────────────────────────────────────────────────────────────────────────
-
+# ───────────────────────────────────────────────
+# Internals
+# ───────────────────────────────────────────────
 def _clean_key(s: str) -> str:
     s = (s or "None")
     return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in s)
 
 def lock_path_for(lock_key: Optional[Union[str, Tuple[str, str]]] = None) -> str:
-    """
-    lock_key:
-      - None  -> legacy 단일 락 (LOCK_FILE)
-      - "BTCUSDT_단기" 또는 ("BTCUSDT","단기")
-    """
+    """lock_key: None -> legacy single lock; 'BTCUSDT_단기' or ('BTCUSDT','단기') -> per-key lock"""
     if lock_key is None:
         return LOCK_FILE
     if isinstance(lock_key, (tuple, list)) and len(lock_key) >= 2:
@@ -50,7 +44,6 @@ def lock_path_for(lock_key: Optional[Union[str, Tuple[str, str]]] = None) -> str
         pass
     return os.path.join(run_dir, f"predict_{key}.lock")
 
-# atexit 정리를 위해 내가 보유한 락 경로를 기억
 _HELD_LOCKS = set()
 
 def _exists(path: str) -> bool:
@@ -66,53 +59,51 @@ def _read_lock(path: str):
             try:
                 return json.loads(txt)
             except Exception:
-                parts = dict(item.split("=", 1) for item in txt.split() if "=" in item)
-                return {"pid": int(parts.get("pid", -1)), "ts": float(parts.get("ts", 0)), "note": parts.get("note", "")}
+                return {}
     except Exception:
-        return None
+        return {}
 
-def _is_stale(path: str, stale_sec: Optional[int] = None) -> bool:
+def _is_stale(path: str, ttl: Optional[int] = None) -> bool:
+    ttl = ttl or PREDICT_LOCK_TTL
     try:
         if not os.path.exists(path):
             return False
-        ttl = PREDICT_LOCK_TTL if stale_sec is None else int(stale_sec)
         mtime = os.path.getmtime(path)
-        age = time.time() - mtime
-        if age > max(5, ttl):
+        # time-based staleness
+        if time.time() - mtime > max(5, ttl):
             return True
+        # owner process liveness
         info = _read_lock(path)
-        if info and "pid" in info:
-            pid = int(info.get("pid", -1))
-            if pid <= 0:
-                return True
-            try:
-                # pid 살아있는지 체크 (권한 불필요한 0 시그널)
-                os.kill(pid, 0)
-                return False
-            except Exception:
-                return True
-        return False
+        pid = int(info.get("pid", -1)) if info else -1
+        if pid <= 0:
+            return True
+        try:
+            os.kill(pid, 0)  # does not actually kill; checks existence
+            return False
+        except Exception:
+            return True
     except Exception:
-        return False
+        # On any error, treat as stale to fail open
+        return True
 
-def _clear(path: str, force: bool = False, stale_sec: Optional[int] = None, tag: str = ""):
+def _clear(path: str, force: bool = False, tag: str = ""):
     try:
         if not _exists(path):
             return
-        ttl = PREDICT_LOCK_TTL if stale_sec is None else int(stale_sec)
-        if force or _is_stale(path, ttl):
+        os.remove(path)
+        print(f"[LOCK] cleared {os.path.basename(path)} ({tag})", flush=True)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        if force:
             try:
                 os.remove(path)
-                print(f"[LOCK] cleared {os.path.basename(path)} (force={int(bool(force))}) {tag}", flush=True)
-            except FileNotFoundError:
+            except Exception:
                 pass
-            except Exception as e:
-                print(f"[LOCK] clear fail remove: {e} {tag}", flush=True)
-    except Exception as e:
-        print(f"[LOCK] clear fail: {e} {tag}", flush=True)
+        print(f"[LOCK] clear error {e} {tag}", flush=True)
 
 def _write_atomic(path: str, content: str) -> bool:
-    """O_CREAT|O_EXCL 원자적 생성."""
+    """Create the lock file atomically (O_CREAT|O_EXCL)."""
     dirp = os.path.dirname(path)
     if dirp:
         try:
@@ -132,124 +123,109 @@ def _write_atomic(path: str, content: str) -> bool:
         return True
     except FileExistsError:
         return False
-    except Exception as e:
-        # best-effort fallback
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content)
-                f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except Exception:
-                    pass
-            return True
-        except Exception:
-            print(f"[LOCK] atomic write fail: {e}", flush=True)
-            return False
+    except Exception:
+        return False
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 공개 API (모두 lock_key 인자 지원, 미지정 시 legacy 파일 사용)
-# ──────────────────────────────────────────────────────────────────────────────
-
+# ───────────────────────────────────────────────
+# Public API
+# ───────────────────────────────────────────────
 def clear(force: bool = False, stale_sec: Optional[int] = None, tag: str = "", lock_key: Optional[Union[str, Tuple[str, str]]] = None):
-    _clear(lock_path_for(lock_key), force=force, stale_sec=stale_sec, tag=tag)
+    _clear(lock_path_for(lock_key), force=force, tag=(tag or "manual"))
 
 def wait_clear(timeout_sec: int = 10, stale_sec: Optional[int] = None, poll: float = _WAIT_POLL, tag: str = "", lock_key: Optional[Union[str, Tuple[str, str]]] = None):
     path = lock_path_for(lock_key)
     deadline = time.time() + max(1, int(timeout_sec))
-    ttl = PREDICT_LOCK_TTL if stale_sec is None else int(stale_sec)
+    ttl = int(stale_sec) if stale_sec is not None else PREDICT_LOCK_TTL
     while _exists(path) and time.time() < deadline:
-        try:
-            if _is_stale(path, ttl):
-                _clear(path, force=True, stale_sec=ttl, tag=tag or "wait_clear")
-                break
-        except Exception:
-            pass
+        if _is_stale(path, ttl):
+            _clear(path, force=True, tag=(tag or "wait_clear"))
+            break
         time.sleep(max(0.05, float(poll)))
-    # 마지막 안전장치
-    if _exists(path):
-        _clear(path, force=True, stale_sec=ttl, tag=(tag + "|final").strip("|"))
+    # final safeguard
+    if _exists(path) and _is_stale(path, ttl):
+        _clear(path, force=True, tag=((tag + "|final").strip("|") or "wait_clear|final"))
     return not _exists(path)
 
 def acquire(note: str = "", lock_key: Optional[Union[str, Tuple[str, str]]] = None):
     """
-    락 획득(원자적). stale 기준은 PREDICT_LOCK_TTL 사용.
-    lock_key로 심볼/전략별 락을 생성한다.
+    Acquire per-key lock atomically. Stale locks are cleared automatically.
     """
     path = lock_path_for(lock_key)
-    # stale만 정리(정상 보유는 건드리지 않음)
-    _clear(path, force=False, stale_sec=PREDICT_LOCK_TTL, tag=f"acquire_pre:{note}")
+    # Pre-clear stale only (don't touch healthy locks)
+    if _is_stale(path):
+        _clear(path, force=True, tag=f"acquire_pre:{note}")
     pid = os.getpid()
     content = json.dumps({"pid": pid, "ts": time.time(), "note": note})
-    for attempt in range(0, 6):
-        ok = _write_atomic(path, content)
-        if ok:
+    for attempt in range(0, 10):
+        if _write_atomic(path, content):
             _HELD_LOCKS.add(path)
             print(f"[LOCK] acquired {os.path.basename(path)} pid={pid} note={note}", flush=True)
             return True
-        # 이미 있고 stale 아님 → 짧게 백오프 후 재시도
-        if _exists(path) and not _is_stale(path):
-            time.sleep(0.05 + attempt * 0.05)
-            continue
-        # stale이면 정리 후 즉시 재시도
+        # If someone holds it but it turns stale, clear and retry
         if _is_stale(path):
-            _clear(path, force=True, stale_sec=PREDICT_LOCK_TTL, tag=f"acquire_retry:{note}")
+            _clear(path, force=True, tag=f"acquire_retry:{note}")
             time.sleep(0.05)
             continue
+        time.sleep(0.05 + 0.05 * attempt)
     raise RuntimeError(f"Failed to acquire lock {path} after retries")
 
 def release(note: str = "", lock_key: Optional[Union[str, Tuple[str, str]]] = None):
-    """소유자만 해제(또는 stale이면 안전 해제)."""
+    """
+    Release only if owner OR if the lock is stale (to guarantee no orphan locks left).
+    """
     path = lock_path_for(lock_key)
     try:
+        if not _exists(path):
+            return True
         info = _read_lock(path)
-        if info and "pid" in info and int(info.get("pid", -1)) == os.getpid():
-            try:
-                os.remove(path)
-                _HELD_LOCKS.discard(path)
-                print(f"[LOCK] released by owner pid={os.getpid()} file={os.path.basename(path)} note={note}", flush=True)
-                return True
-            except FileNotFoundError:
-                _HELD_LOCKS.discard(path)
-                return True
-            except Exception as e:
-                print(f"[LOCK] release fail: {e} {note}", flush=True)
-                return False
-        else:
-            if _is_stale(path, stale_sec=0):
-                try:
-                    os.remove(path)
-                    print(f"[LOCK] released stale by non-owner pid={os.getpid()} file={os.path.basename(path)} note={note}", flush=True)
-                    return True
-                except Exception as e:
-                    print(f"[LOCK] non-owner clear fail: {e} {note}", flush=True)
-                    return False
-            print(f"[LOCK] release skipped (not owner) file={os.path.basename(path)} note={note}", flush=True)
-            return False
-    except Exception as e:
-        print(f"[LOCK] release exception: {e} {note}", flush=True)
+        pid = int(info.get("pid", -1)) if info else -1
+        if pid == os.getpid() or _is_stale(path, 0):
+            _clear(path, force=True, tag=f"release:{note}")
+            _HELD_LOCKS.discard(path)
+            print(f"[LOCK] released {os.path.basename(path)} note={note}", flush=True)
+            return True
+        print(f"[LOCK] release skipped (not owner) file={os.path.basename(path)} note={note}", flush=True)
         return False
+    except Exception as e:
+        print(f"[LOCK] release exception: {e} note={note}", flush=True)
+        _clear(path, force=True, tag=f"release_force:{note}")
+        return True
 
 def is_predict_running(lock_key: Optional[Union[str, Tuple[str, str]]] = None):
-    """예측 락이 살아있는지. stale이면 즉시 정리 후 False."""
+    """Return False if lock is stale (and clear it), True if healthy."""
     path = lock_path_for(lock_key)
     if not _exists(path):
         return False
     if _is_stale(path):
-        _clear(path, force=True, stale_sec=PREDICT_LOCK_TTL, tag="is_running_stale")
+        _clear(path, force=True, tag="is_running_stale")
         return False
     return True
 
 def clear_stale_predict_lock(lock_key: Optional[Union[str, Tuple[str, str]]] = None):
-    """TTL 기준으로만 stale 정리."""
-    _clear(lock_path_for(lock_key), force=False, stale_sec=PREDICT_LOCK_TTL, tag="clear_stale_api")
+    """Clear only when considered stale."""
+    path = lock_path_for(lock_key)
+    if _is_stale(path):
+        _clear(path, force=True, tag="clear_stale_api")
 
 def wait_until_free(max_wait_sec: int, lock_key: Optional[Union[str, Tuple[str, str]]] = None):
-    """게이트가 풀릴 때까지 대기. (stale는 TTL 기준 자동정리)"""
-    return wait_clear(timeout_sec=max_wait_sec, stale_sec=PREDICT_LOCK_TTL, poll=_WAIT_POLL, tag="wait_until_free", lock_key=lock_key)
+    """
+    Wait for a healthy lock to free. If stale is detected at any point, clear immediately and return True.
+    """
+    path = lock_path_for(lock_key)
+    if not _exists(path):
+        return True
+    if _is_stale(path):
+        _clear(path, force=True, tag="wait_until_free")
+        return True
+    start = time.time()
+    while _exists(path) and (time.time() - start) < max(1, int(max_wait_sec)):
+        if _is_stale(path):
+            _clear(path, force=True, tag="wait_until_free")
+            return True
+        time.sleep(_WAIT_POLL)
+    return not _exists(path)
 
 def acquire_with_retry(max_wait_sec: int, note: str = "", lock_key: Optional[Union[str, Tuple[str, str]]] = None):
-    """deadline 내에서 락 획득 재시도."""
     deadline = time.time() + max(1, int(max_wait_sec))
     while time.time() < deadline:
         try:
@@ -260,13 +236,12 @@ def acquire_with_retry(max_wait_sec: int, note: str = "", lock_key: Optional[Uni
         time.sleep(0.1)
     return False
 
-# ───── 프로세스 종료 시 내가 가진 모든 락 정리 ─────
+# Ensure all held locks are cleared on process exit
 def _atexit_clear():
     try:
         for path in list(_HELD_LOCKS):
-            info = _read_lock(path)
-            if info and "pid" in info and int(info.get("pid", -1)) == os.getpid():
-                _clear(path, force=True, stale_sec=0, tag="atexit")
+            if _exists(path):
+                _clear(path, force=True, tag="atexit")
     except Exception:
         pass
 
