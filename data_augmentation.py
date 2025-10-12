@@ -1,74 +1,105 @@
-# data_augmentation.py — 안정적이고 초보 친화적으로 정리된 버전
+# data_augmentation.py — 증강/클래스균형 + (옵션) 패턴유사도 보류까지 "한 파일"로 통합
+
+from __future__ import annotations
 import numpy as np
-import random
 from collections import Counter
 from typing import Tuple, Optional
 
-# ---------- 기본 증강 유틸 ----------
-def add_gaussian_noise(X: np.ndarray, mean: float = 0.0, std: float = 0.01, rng: Optional[np.random.Generator] = None) -> np.ndarray:
+# ─────────────────────────────────────────────────────────────
+# (옵션) 데이터 접근: predict 단계 유사도 보류용
+# ─────────────────────────────────────────────────────────────
+try:
+    from data.utils import get_kline_by_strategy
+except Exception:
+    try:
+        from utils import get_kline_by_strategy  # 루트 폴백
+    except Exception:
+        get_kline_by_strategy = None  # 없으면 보류 기능은 자동 비활성
+
+# ─────────────────────────────────────────────────────────────
+# 기본 증강 유틸
+# ─────────────────────────────────────────────────────────────
+def add_gaussian_noise(X: np.ndarray, mean: float = 0.0, std: float = 0.01,
+                       rng: Optional[np.random.Generator] = None) -> np.ndarray:
     rng = rng or np.random
     noise = rng.normal(mean, std, X.shape).astype(np.float32)
     return (X.astype(np.float32) + noise)
 
-def apply_scaling(X: np.ndarray, scale_range: Tuple[float, float] = (0.9, 1.1), rng: Optional[np.random.Generator] = None) -> np.ndarray:
+def apply_scaling(X: np.ndarray, scale_range: Tuple[float, float] = (0.95, 1.05),
+                  rng: Optional[np.random.Generator] = None) -> np.ndarray:
     rng = rng or np.random
-    scale = float(rng.uniform(scale_range[0], scale_range[1]))
+    scale = float(rng.uniform(*scale_range))
     return (X.astype(np.float32) * scale)
 
-def apply_shift(X: np.ndarray, shift_range: Tuple[float, float] = (-0.1, 0.1), rng: Optional[np.random.Generator] = None) -> np.ndarray:
+def apply_shift(X: np.ndarray, shift_range: Tuple[float, float] = (-0.02, 0.02),
+                rng: Optional[np.random.Generator] = None) -> np.ndarray:
     rng = rng or np.random
-    shift = float(rng.uniform(shift_range[0], shift_range[1]))
+    shift = float(rng.uniform(*shift_range))
     return (X.astype(np.float32) + shift)
 
-def apply_dropout_mask(X: np.ndarray, dropout_prob: float = 0.1, rng: Optional[np.random.Generator] = None) -> np.ndarray:
+def apply_dropout_mask(X: np.ndarray, dropout_prob: float = 0.05,
+                       rng: Optional[np.random.Generator] = None) -> np.ndarray:
     rng = rng or np.random
     mask = rng.binomial(1, 1.0 - float(dropout_prob), X.shape).astype(np.float32)
     return (X.astype(np.float32) * mask)
 
-# ---------- 배치 증강 ----------
+# ─────────────────────────────────────────────────────────────
+# 배치 증강
+# ─────────────────────────────────────────────────────────────
 def augment_batch(X_batch: np.ndarray,
                   add_noise_prob: float = 0.9,
-                  scale_prob: float = 0.7,
+                  scale_prob: float = 0.6,
                   shift_prob: float = 0.5,
                   dropout_prob: float = 0.3,
                   rng: Optional[np.random.Generator] = None) -> np.ndarray:
     """
-    X_batch: numpy array (batch_size, window, feature_dim) or (window, feature_dim)
-    returns augmented X_batch (dtype=float32)
+    X_batch: (batch, window, feat) 또는 (window, feat)
+    반환: float32 배열
     """
     if X_batch is None:
         return np.array([], dtype=np.float32)
 
     rng_local = rng if isinstance(rng, np.random.Generator) else np.random.default_rng()
-
     arr = np.array(X_batch, dtype=np.float32)
-    # if single sample passed, make it 1D batch
     if arr.ndim == 2:
         arr = arr[np.newaxis, ...]
 
-    out_list = []
+    outs = []
     for x in arr:
-        x_aug = x.copy()
-        # Probabilistic application of augmentations (combination possible)
+        xa = x.copy()
         try:
             if rng_local.random() < add_noise_prob:
-                x_aug = add_gaussian_noise(x_aug, std=0.01, rng=rng_local)
+                xa = add_gaussian_noise(xa, std=0.01, rng=rng_local)
             if rng_local.random() < scale_prob:
-                x_aug = apply_scaling(x_aug, scale_range=(0.95, 1.05), rng=rng_local)
+                xa = apply_scaling(xa, (0.95, 1.05), rng_local)
             if rng_local.random() < shift_prob:
-                x_aug = apply_shift(x_aug, shift_range=(-0.02, 0.02), rng=rng_local)
+                xa = apply_shift(xa, (-0.02, 0.02), rng_local)
             if rng_local.random() < dropout_prob:
-                x_aug = apply_dropout_mask(x_aug, dropout_prob=0.05, rng=rng_local)
+                xa = apply_dropout_mask(xa, 0.05, rng_local)
         except Exception:
-            # If any op fails, fall back to original x
-            x_aug = x.copy()
-        out_list.append(x_aug.astype(np.float32))
+            xa = x.copy()
+        outs.append(xa.astype(np.float32))
 
-    out = np.stack(out_list, axis=0)
-    # if original was single sample, return shape (1, window, feat)
-    return out
+    return np.stack(outs, axis=0)
 
-# ---------- 클래스 불균형 보정 ----------
+# ─────────────────────────────────────────────────────────────
+# 소수 클래스 복제 + 미세 노이즈
+# ─────────────────────────────────────────────────────────────
+def _dup_with_noise(X: np.ndarray, times: int, noise_level: float = 0.005) -> np.ndarray:
+    if times <= 1:
+        return X.astype(np.float32)
+    X_rep = np.repeat(X.astype(np.float32), times, axis=0)
+    if noise_level > 0:
+        std = np.std(X, axis=0)
+        std = np.where(np.isfinite(std), std, 0.0)
+        std = np.clip(std, 1e-6, None)
+        noise = np.random.normal(0.0, noise_level, size=X_rep.shape) * std
+        X_rep = (X_rep + noise.astype(np.float32)).astype(np.float32)
+    return X_rep
+
+# ─────────────────────────────────────────────────────────────
+# 클래스 불균형 보정 (안정 캡 포함)
+# ─────────────────────────────────────────────────────────────
 def balance_classes(X: np.ndarray,
                     y: np.ndarray,
                     min_count: int = 5,
@@ -76,102 +107,123 @@ def balance_classes(X: np.ndarray,
                     target_ratio: float = 0.8,
                     rng: Optional[np.random.Generator] = None) -> Tuple[np.ndarray, np.ndarray]:
     """
-    안전한 클래스 균형 함수.
-    - X: ndarray (n_samples, window, feature_dim)
-    - y: ndarray (n_samples,) integer labels
-    - returns (X_balanced, y_balanced)
+    - 소수 클래스만 적당히 오버샘플
+    - 과도 증폭 방지: 상위 75퍼센타일 캡 + 배수 상한(2~6배)
+    - 원본 분포를 크게 훼손하지 않도록 경미 변형 위주
     """
-
     if X is None or y is None or len(X) == 0 or len(y) == 0:
         raise ValueError("balance_classes 중단: X 또는 y 비어있음")
 
     rng_local = rng if isinstance(rng, np.random.Generator) else np.random.default_rng()
+    X = np.asarray(X, dtype=np.float32)
+    y = np.asarray(y).astype(np.int64)
+
+    if X.ndim != 3 or y.ndim != 1 or len(X) != len(y):
+        return X, y
 
     if num_classes is None:
         num_classes = int(np.max(y)) + 1 if len(y) > 0 else 0
+    if num_classes <= 1:
+        return X, y
 
-    y = np.asarray(y).astype(np.int64)
+    cc = Counter(y.tolist())
+    print(f"[📊 클래스 분포] {dict(cc)}")
 
-    # mask out invalid labels (-1 or non-finite)
-    valid_mask = (y != -1) & np.isfinite(y)
-    X = np.asarray(X, dtype=np.float32)[valid_mask]
-    y = y[valid_mask]
+    X_parts = [X]
+    y_parts = [y]
 
-    if len(y) == 0:
-        raise ValueError("balance_classes 중단: 유효 라벨 없음")
+    nz = np.array([c for c in cc.values() if c > 0], dtype=int)
+    if nz.size == 0:
+        return X, y
+    cap = max(int(np.percentile(nz, 75)), int(np.mean(nz)), 32)
 
-    class_counts = Counter(y.tolist())
-    print(f"[📊 클래스 분포] {dict(class_counts)}")
-
-    n_samples, win_len, feat_dim = X.shape
-    X_balanced = list(X)
-    y_balanced = list(y)
-
-    # target: either at least min_count, or target_ratio * current max class count
-    max_count = max(class_counts.values()) if class_counts else 0
-    target_count = max(min_count, int(max(1, max_count) * float(target_ratio)))
-
-    # create dictionary of samples per class
-    samples_by_label = {cls: [] for cls in range(num_classes)}
-    for xb, yb in zip(X, y):
-        if 0 <= int(yb) < num_classes:
-            samples_by_label[int(yb)].append(xb)
-
+    idx_by_cls = {c: np.where(y == c)[0] for c in range(num_classes)}
     for cls in range(num_classes):
-        existing = samples_by_label.get(cls, [])
-        count = len(existing)
-        needed = max(0, target_count - count)
-        if needed == 0:
+        idx = idx_by_cls.get(cls, np.array([], dtype=int))
+        c = int(len(idx))
+        if c <= 0 or c >= cap:
             continue
+        need = cap - c
+        times = int(np.ceil((c + need) / max(c, 1)))
+        times = max(2, min(times, 6))
 
-        # 1) 증강이 가능한 경우 (복제 + augment)
-        if count > 0:
+        X_cls = X[idx]
+        X_aug = _dup_with_noise(X_cls, times=times, noise_level=0.005)
+        take = min(max(0, len(X_aug) - c), need) if len(X_aug) > c else min(len(X_aug), need)
+        if take > 0:
+            base = X_aug[:take]
             try:
-                # choose base indices with replacement
-                idxs = rng_local.integers(0, count, size=needed)
-                base = np.stack([existing[i] for i in idxs], axis=0)
-                aug = augment_batch(base, rng=rng_local)
-                X_balanced.extend(aug)
-                y_balanced.extend([cls] * len(aug))
-                continue
-            except Exception as e:
-                print(f"[⚠️ 증강 실패] 클래스 {cls} → {e}")
+                base = augment_batch(base, rng=rng_local)
+            except Exception:
+                pass
+            X_parts.append(base.astype(np.float32))
+            y_parts.append(np.full((take,), cls, dtype=np.int64))
 
-        # 2) 인접 클래스에서 샘플 가져와 소량 노이즈 추가
-        candidates = []
-        for neighbor in (cls - 1, cls + 1):
-            if 0 <= neighbor < num_classes:
-                candidates.extend(samples_by_label.get(neighbor, []))
-        if candidates:
-            for _ in range(needed):
-                xb = candidates[rng_local.integers(0, len(candidates))]
-                noise = rng_local.normal(0, 0.01, size=xb.shape).astype(np.float32)
-                X_balanced.append((xb + noise).astype(np.float32))
-                y_balanced.append(cls)
-            continue
+    X_out = np.concatenate(X_parts, axis=0)
+    y_out = np.concatenate(y_parts, axis=0)
 
-        # 3) 전혀 샘플 없는 클래스는 데이터 통계 기반 더미 생성 (평균/표준편차 사용)
-        # fallback: use global mean/std from dataset if possible
-        try:
-            global_mean = np.mean(X, axis=(0, 1), keepdims=False)
-            global_std = np.std(X, axis=(0, 1), keepdims=False) + 1e-6
-            dummy = rng_local.normal(loc=global_mean, scale=global_std, size=(needed, win_len, feat_dim)).astype(np.float32)
-        except Exception:
-            dummy = rng_local.normal(0, 1.0, size=(needed, win_len, feat_dim)).astype(np.float32)
-            dummy = np.clip(dummy, -3, 3).astype(np.float32)
+    perm = rng_local.permutation(len(y_out))
+    X_out = X_out[perm].astype(np.float32)
+    y_out = y_out[perm].astype(np.int64)
 
-        X_balanced.extend(dummy)
-        y_balanced.extend([cls] * needed)
+    print(f"[📊 최종 클래스 분포] {dict(Counter(y_out.tolist()))}")
+    print(f"[✅ balance_classes 완료] 총 샘플수: {len(y_out)} (캡={cap})")
+    return X_out, y_out
 
-    # shuffle final set
-    X_arr = np.array(X_balanced, dtype=np.float32)
-    y_arr = np.array(y_balanced, dtype=np.int64)
-    perm = rng_local.permutation(len(y_arr))
-    X_final = X_arr[perm]
-    y_final = y_arr[perm]
+# ─────────────────────────────────────────────────────────────
+# (옵션) 코사인 유사도 기반 보류 Guard — predict에서 필요 시 사용
+# ─────────────────────────────────────────────────────────────
+def _to_returns(close: np.ndarray) -> np.ndarray:
+    close = np.asarray(close, dtype=np.float64)
+    if close.size < 3:
+        return np.zeros((0,), dtype=np.float64)
+    r = np.diff(close) / (close[:-1] + 1e-12)
+    r = np.tanh(r * 5.0)
+    r = r - r.mean()
+    std = r.std() + 1e-12
+    return (r / std)
 
-    final_counts = Counter(y_final.tolist())
-    print(f"[📊 최종 클래스 분포] {dict(final_counts)}")
-    print(f"[✅ balance_classes 완료] 총 샘플수: {len(y_final)}")
+def _cosine(a: np.ndarray, b: np.ndarray) -> float:
+    a = a.astype(np.float64, copy=False)
+    b = b.astype(np.float64, copy=False)
+    na = np.linalg.norm(a) + 1e-12
+    nb = np.linalg.norm(b) + 1e-12
+    return float(np.dot(a, b) / (na * nb))
 
-    return X_final, y_final
+def _rolling_template(x: np.ndarray, w: int, stride: int = 8) -> np.ndarray:
+    vs = []
+    if x.size < w:
+        return np.zeros((0, w), dtype=np.float64)
+    for i in range(0, x.size - w + 1, stride):
+        vs.append(x[i:i+w])
+    if not vs:
+        return np.zeros((0, w), dtype=np.float64)
+    return np.stack(vs, axis=0)
+
+def should_abstain_by_similarity(symbol: str, strategy: str, window: int = 60, thr: float = 0.10) -> bool:
+    """
+    최근 window 길이 반환율 패턴과 과거 템플릿의 평균 코사인 유사도가 thr 미만이면 보류(True).
+    get_kline_by_strategy가 없거나 데이터 부족이면 False(보류 아님).
+    """
+    if get_kline_by_strategy is None:
+        return False
+    try:
+        df = get_kline_by_strategy(symbol, strategy)
+        if df is None or "close" not in df.columns or len(df) < (window * 4):
+            return False
+        close = df["close"].to_numpy(dtype=np.float64)
+        r = _to_returns(close)
+        if r.size < (window * 4):
+            return False
+
+        cur = r[-window:]
+        hist = r[:-(window*3)]
+        tmpl = _rolling_template(hist, w=window, stride=max(4, window // 8))
+        if tmpl.shape[0] == 0:
+            return False
+
+        sims = np.array([_cosine(cur, t) for t in tmpl], dtype=np.float64)
+        sim_mean = float(np.nanmean(sims)) if sims.size else 0.0
+        return (sim_mean < float(thr))
+    except Exception:
+        return False
