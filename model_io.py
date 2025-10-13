@@ -1,4 +1,5 @@
-# model_io.py (patched: file-lock, meta integrity, load/save robustness + strict=False default & rich errors)
+# model_io.py (final)
+
 from __future__ import annotations
 
 import io
@@ -246,7 +247,7 @@ def load_model(
     model: Optional[nn.Module] = None,
     *,
     map_location: str | torch.device | None = "cpu",
-    strict: bool = False,  # ✅ 기본 strict=False (키 불일치 허용)
+    strict: bool = False,  # 기본 strict=False (키 불일치 허용)
 ) -> nn.Module | Dict[str, torch.Tensor] | Any:
     """
     통합 로더:
@@ -390,3 +391,15 @@ def convert_ptz_to_pt(
         dst_path = os.path.splitext(src_path)[0] + ".pt"
     _atomic_write(buf.getvalue(), dst_path)
     return dst_path
+
+
+__all__ = [
+    "ModelLoadError",
+    "save_model",
+    "load_model",
+    "save_meta",
+    "load_meta",
+    "save_model_with_meta",
+    "convert_pt_to_ptz",
+    "convert_ptz_to_pt",
+]
