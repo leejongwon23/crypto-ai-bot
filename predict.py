@@ -1,8 +1,8 @@
-# === predict.py (YOPO v1.4 — 예측 정상화 완전판) ===
-# 변경 핵심:
-# ① group_id 자동추론 + meta 보정 (_infer_group_id)
-# ② 모델 검색/로드 시 group 불일치로 스킵되던 문제 제거 (하드 필터 → 보정)
-# ③ YOPO 철학(성공률 중심, F1 배제, 1% 미만 예측 제외) 그대로 유지
+# === predict.py (YOPO v1.5 — 예측 정상화 완전판) ===
+# 핵심 수정
+# ① get_model_predictions(): 로더 실패시 다중 폴백( model_io → torch.load → state_dict 주입 )로 복구
+# ② predict(): gate/group_active 스킵 사유를 콘솔에 즉시 출력 + 그룹 스테일 자동 정리
+# ③ _group_active(): STALE 처리(만료시 자동 해제)
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob, inspect, threading
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -18,6 +18,7 @@ RUN_DIR="/persistent/run"; os.makedirs(RUN_DIR,exist_ok=True)
 PREDICT_GATE=os.path.join(RUN_DIR,"predict_gate.json")
 PREDICT_BLOCK="/persistent/predict.block"
 GROUP_ACTIVE=os.path.join(RUN_DIR,"group_predict.active")
+GROUP_ACTIVE_STALE_SEC=int(os.getenv("GROUP_ACTIVE_STALE_SEC","600"))  # 10분 기본
 
 def _lock_path_for(symbol:str,strategy:str)->str:
     def _clean(s:str)->str:
@@ -47,8 +48,19 @@ def _bypass_gate_for_source(source:str)->bool:
     return any(t and t in s for t in [x.strip() for x in bl.split(",") if x.strip()])
 
 def _group_active()->bool:
-    try: return os.path.exists(GROUP_ACTIVE)
-    except Exception: return False
+    try:
+        if not os.path.exists(GROUP_ACTIVE): return False
+        # 스테일 처리
+        try:
+            mtime=os.path.getmtime(GROUP_ACTIVE)
+            if (time.time()-mtime)>max(60,GROUP_ACTIVE_STALE_SEC):
+                os.remove(GROUP_ACTIVE)
+                print(f"[group_active] stale file removed ({int(time.time()-mtime)}s old)")
+                return False
+        except Exception: pass
+        return True
+    except Exception: 
+        return False
 
 def open_predict_gate(note=""):
     try:
@@ -163,6 +175,7 @@ def load_model_any(path,model=None,**kwargs):
                 except TypeError: return _raw_load_model(path,model,**kwargs)
             else: return _raw_load_model(path)
         except Exception: pass
+    # 1차 실패 → torch.load 직접
     try:
         sd=torch.load(path,map_location="cpu")
         if isinstance(sd,dict) and model is not None:
@@ -170,7 +183,8 @@ def load_model_any(path,model=None,**kwargs):
                 model.load_state_dict(sd,strict=False); model.eval(); return model
             except Exception: return sd
         return sd
-    except Exception: return None
+    except Exception: 
+        return None
 
 from logger import log_prediction, update_model_success, PREDICTION_HEADERS, ensure_prediction_log_exists
 from failure_db import insert_failure_record, ensure_failure_db
@@ -329,10 +343,6 @@ def _parse_group_cls_from_filename(path:str):
 
 # === [NEW] 그룹 자동추론 및 보정 ===
 def _infer_group_id(symbol: str, strategy: str) -> int:
-    """
-    현재 심볼/전략 기반으로 그룹 자동추론.
-    - meta에 group_id 없거나 잘못된 경우 0~7 보정
-    """
     try:
         group_map = {
             "BTCUSDT": 0, "ETHUSDT": 1, "XRPUSDT": 2, "SOLUSDT": 3,
@@ -347,11 +357,6 @@ def _infer_group_id(symbol: str, strategy: str) -> int:
 
 # === [PATCHED] get_available_models — fallback + auto meta recovery ===
 def get_available_models(symbol, strategy):
-    """
-    모델 파일을 심볼/전략 기반으로 탐색.
-    없을 경우 전체 MODEL_DIR에서 최신 모델로 폴백.
-    항상 최소 1개라도 반환하려 시도.
-    """
     try:
         if not os.path.isdir(MODEL_DIR):
             return []
@@ -371,7 +376,6 @@ def get_available_models(symbol, strategy):
             cand = glob.glob(os.path.join(MODEL_DIR, f"**/{os.path.basename(base)}.meta.json"), recursive=True)
             return cand[0] if cand else None
 
-        # 1) 일반 탐색 (심볼·전략명 패턴)
         for pattern in search_patterns:
             for ext in _KNOWN_EXTS:
                 for w in glob.glob(f"{pattern}{ext}", recursive=True):
@@ -379,7 +383,6 @@ def get_available_models(symbol, strategy):
                         continue
                     meta_path = _resolve_meta_abs(w)
                     if not meta_path:
-                        # 메타파일 없으면 임시 생성
                         meta_tmp = {
                             "symbol": symbol,
                             "strategy": strategy,
@@ -413,15 +416,12 @@ def get_available_models(symbol, strategy):
                         "group_id": gid
                     })
 
-        # 2) 폴백: 모델 없음 → 전체 MODEL_DIR에서 최신 가중치 탐색
         if not results:
             all_candidates = []
             for ext in _KNOWN_EXTS:
                 all_candidates += glob.glob(os.path.join(MODEL_DIR, f"**/*{ext}"), recursive=True)
             if not all_candidates:
                 return []
-
-            # 최근 수정일 기준 상위 3개
             all_candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
             top = all_candidates[:3]
             for w in top:
@@ -444,7 +444,6 @@ def get_available_models(symbol, strategy):
                     "group_id": _infer_group_id(symbol, strategy)
                 })
 
-        # 중복 제거 + 최신순 정렬
         seen = set()
         uniq = []
         for it in results:
@@ -465,6 +464,7 @@ def get_available_models(symbol, strategy):
 
 def failed_result(symbol,strategy,model_type="unknown",reason="",source="일반",X_input=None):
     t=_now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[predict] skip {symbol}-{strategy} :: {reason}")
     res={"symbol":symbol,"strategy":strategy,"success":False,"reason":reason,"model":str(model_type or "unknown"),"rate":0.0,"class":-1,"timestamp":t,"source":source,"predicted_class":-1,"label":-1}
     try:
         ensure_prediction_log_exists()
@@ -482,6 +482,7 @@ def _soft_abstain(symbol,strategy,*,reason,meta_choice="abstain",regime="unknown
         note={"reason":reason,"abstain_prob_min":float(ABSTAIN_PROB_MIN),"max_calib_prob":None,"meta_choice":meta_choice,"regime":regime}
         log_prediction(symbol=symbol,strategy=strategy,direction="예측보류",entry_price=cur,target_price=cur,model="meta",model_name=str(meta_choice),predicted_class=-1,label=-1,note=json.dumps(note,ensure_ascii=False),top_k=[],success=False,reason=reason,rate=0.0,return_value=0.0,source=source,group_id=group_id,feature_vector=(torch.tensor(X_last,dtype=torch.float32).numpy() if X_last is not None else None),regime=regime,meta_choice="abstain",raw_prob=None,calib_prob=None,calib_ver=get_calibration_version(),class_return_min=0.0,class_return_max=0.0,class_return_text="")
     except Exception as e: print(f"[soft_abstain 예외] {e}")
+    print(f"[predict] abstain {symbol}-{strategy} :: {reason}")
     return {"symbol":symbol,"strategy":strategy,"model":"meta","class":-1,"expected_return":0.0,"class_return_min":0.0,"class_return_max":0.0,"class_return_text":"","position":"neutral","timestamp":_now_kst().isoformat(),"source":source,"regime":regime,"reason":reason,"success":False,"predicted_class":-1,"label":-1}
 
 def _acquire_predict_lock_with_retry(path:str,max_wait_sec:int):
@@ -559,13 +560,22 @@ def _exit_guard_check(lo_sel:float,hi_sel:float,exp_ret:float)->tuple[bool,str]:
     except Exception as e: return True,f"exit_guard_exception:{e}"
 
 def predict(symbol,strategy,source="일반",model_type=None):
-    if _group_active() and not _bypass_gate_for_source(source): return failed_result(symbol or "None",strategy or "None",reason="group_predict_active",source=source,X_input=None)
-    if not (_bypass_gate_for_source(source) or is_predict_gate_open()): return failed_result(symbol or "None",strategy or "None",reason="predict_gate_closed",source=source,X_input=None)
+    # 그룹/게이트 체크 (이유 출력)
+    if _group_active() and not _bypass_gate_for_source(source):
+        print(f"[predict] blocked by group_active (source={source})")
+        return failed_result(symbol or "None",strategy or "None",reason="group_predict_active",source=source,X_input=None)
+    if not (_bypass_gate_for_source(source) or is_predict_gate_open()):
+        print(f"[predict] gate closed (source={source})")
+        return failed_result(symbol or "None",strategy or "None",reason="predict_gate_closed",source=source,X_input=None)
+
     lock_path=_lock_path_for(symbol or "None",strategy or "None")
     if "그룹직후" in str(source or ""): _clear_stale_lock(lock_path,PREDICT_LOCK_STALE_TRAIN_SEC,tag="(group)")
     else: _clear_stale_lock(lock_path,PREDICT_LOCK_TTL,tag="(normal)")
     lock_wait=_prep_lock_for_source(source)
-    if not _acquire_predict_lock_with_retry(lock_path,lock_wait): return failed_result(symbol or "None",strategy or "None",reason="predict_lock_timeout",source=source,X_input=None)
+    if not _acquire_predict_lock_with_retry(lock_path,lock_wait):
+        print(f"[predict] lock timeout {symbol}-{strategy}")
+        return failed_result(symbol or "None",strategy or "None",reason="predict_lock_timeout",source=source,X_input=None)
+
     _hb_stop=threading.Event(); _hb_tag=f"{symbol}-{strategy}"
     _hb_thread=threading.Thread(target=_predict_hb_loop,args=(_hb_stop,_hb_tag,lock_path),daemon=True); _hb_thread.start()
     try:
@@ -592,7 +602,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
         X=feat.drop(columns=["timestamp","strategy"],errors="ignore")
         X=MinMaxScaler().fit_transform(X); feat_dim=int(X.shape[1])
 
-        # 입력 윈도우 가드
         if X.shape[0] < max(windows):
             return _soft_abstain(symbol,strategy,reason="insufficient_recent_rows",meta_choice="abstain",regime=regime,X_last=None,group_id=None,df=df) if PREDICT_SOFT_ABORT else failed_result(symbol,strategy,reason="insufficient_recent_rows",source=source,X_input=None)
 
@@ -607,7 +616,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
         hint=_position_hint_from_market(df); allow_long,allow_short=bool(hint["allow_long"]),bool(hint["allow_short"])
         final_cls=None; meta_choice="best_single"; chosen=None; used_minret=False
 
-        # (A) 진화형 메타
         if _glob_many(os.path.join(MODEL_DIR,"evo_meta_learner")):
             try:
                 from evo_meta_learner import predict_evo_meta
@@ -621,7 +629,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
             if ADJUST_WITH_DIVERSITY: return adjust_probs_with_diversity(probs,recent,class_counts=None,alpha=0.10,beta=0.10)
             return np.asarray(probs,dtype=float)
 
-        # (B1) 단일모델 경쟁 + 탐험
         if final_cls is None:
             best_i,best_score,best_pred=-1,-1.0,None; scores=[]
             for i,m in enumerate(outs):
@@ -660,7 +667,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
             try: _bump_use(symbol,strategy,chosen.get("model_path",""),explored=("best_single_explore" in meta_choice))
             except Exception: pass
 
-        # (C) 최종 가드(최소 기대수익 만족 클래스가 있으면 교체)
         try:
             cmin_sel,cmax_sel=_class_range_by_meta_or_cfg(final_cls,(chosen or {}).get("meta"),symbol,strategy)
             if not _meets_minret_with_hint(cmin_sel,cmax_sel,allow_long,allow_short,MIN_RET_THRESHOLD):
@@ -676,7 +682,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
                 if best_cls is not None: final_cls,best_sc; chosen,used_minret=best_cls,best_m,True
         except Exception as e: print(f"[임계 가드 예외] {e}")
 
-        # (C-1) ExitGuard
         try:
             lo_sel,hi_sel=_class_range_by_meta_or_cfg(final_cls,(chosen or {}).get("meta"),symbol,strategy)
             exp_ret=(float(lo_sel)+float(hi_sel))/2.0
@@ -685,7 +690,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
                 return _soft_abstain(symbol,strategy,reason=why,meta_choice=str(meta_choice),regime=regime,X_last=X[-1],group_id=(chosen.get("group_id") if isinstance(chosen,dict) else None),df=df,source="보류")
         except Exception as e: print(f"[출구 가드 예외] {e}")
 
-        # (C-2) RealityGuard
         try:
             lo_sel,hi_sel=_class_range_by_meta_or_cfg(final_cls,(chosen or {}).get("meta"),symbol,strategy)
             exp_ret=(float(lo_sel)+float(hi_sel))/2.0
@@ -695,7 +699,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
                     return _soft_abstain(symbol,strategy,reason=why,meta_choice=str(meta_choice),regime=regime,X_last=X[-1],group_id=(chosen.get("group_id") if isinstance(chosen,dict) else None),df=df,source="보류")
         except Exception as e: print(f"[RealityGuard 예외] {e}")
 
-        # ===== 로깅 =====
         lo_sel,hi_sel=_class_range_by_meta_or_cfg(final_cls,(chosen or {}).get("meta"),symbol,strategy)
         exp_ret=(float(lo_sel)+float(hi_sel))/2.0
         pos_sel=_position_from_range(lo_sel,hi_sel)
@@ -879,8 +882,7 @@ def _combine_windows(calib_stack:np.ndarray,raw_stack:np.ndarray)->tuple[np.ndar
     return cc.astype(float),rr.astype(float)
 
 def get_model_predictions(symbol,strategy,models,df,feat_scaled,window_list,recent_freq,regime="unknown"):
-    outs,allpreds=[]
-    outs,allpreds=[],[]
+    outs=[]; allpreds=[]
     for info in models:
         try:
             pt=info.get("pt_file"); meta_path=info.get("meta_path")
@@ -897,7 +899,7 @@ def get_model_predictions(symbol,strategy,models,df,feat_scaled,window_list,rece
                 except Exception: pass
             with open(meta_path,"r",encoding="utf-8") as mf: meta=json.load(mf)
 
-            # 파일명 group 태그가 있으면 meta 보정(하드 스킵 제거)
+            # 파일명 group 태그가 있으면 meta 보정
             fname_grp,_fname_cls=_parse_group_cls_from_filename(model_path)
             if fname_grp is not None:
                 meta["group_id"]=int(fname_grp)
@@ -923,17 +925,33 @@ def get_model_predictions(symbol,strategy,models,df,feat_scaled,window_list,rece
                 if seq.shape[1]<inp_size: seq=np.pad(seq,((0,0),(0,inp_size-seq.shape[1])),mode="constant")
                 elif seq.shape[1]>inp_size: seq=seq[:,:inp_size]
                 x=torch.tensor(seq,dtype=torch.float32).unsqueeze(0)
+
+                # === 로딩 파이프라인 (다중 폴백) ===
                 model=get_model(mtype_raw,input_size=inp_size,output_size=num_cls)
                 loaded=load_model_any(model_path,model,ttl_sec=PREDICT_MODEL_LOADER_TTL)
+                if loaded is None:
+                    # 2차: torch.load 후 주입 시도
+                    try:
+                        obj=torch.load(model_path,map_location="cpu")
+                        if isinstance(obj,dict):
+                            try: model.load_state_dict(obj,strict=False); loaded=model
+                            except Exception: loaded=None
+                        else:
+                            loaded=obj
+                    except Exception:
+                        loaded=None
                 if isinstance(loaded,dict) and model is not None:
                     try: model.load_state_dict(loaded,strict=False); model.eval()
-                    except Exception: pass
+                    except Exception: 
+                        print(f"[모델 주입 실패] {model_path}")
+                        preds_c_list=[]; preds_r_list=[]; break
                 elif loaded is None:
-                    print(f"[⚠️ 모델 로딩 실패] {model_path}"); preds_c_list=[]; preds_r_list=[]; break
+                    print(f"[⚠️ 모델 로딩 실패] {model_path}")
+                    preds_c_list=[]; preds_r_list=[]; break
                 else:
-                    if not hasattr(loaded,"eval") and isinstance(loaded,dict): pass
-                    else: model=loaded
+                    if hasattr(loaded,"eval"): model=loaded  # 모듈 자체 로드
                 model.to(DEVICE); model.eval()
+
                 with torch.no_grad():
                     logits=model(x.to(DEVICE))
                     logits=torch.nan_to_num(logits)
@@ -946,7 +964,9 @@ def get_model_predictions(symbol,strategy,models,df,feat_scaled,window_list,rece
                 cprobs=cprobs/(cprobs.sum()+1e-12)
                 preds_c_list.append(cprobs); preds_r_list.append(probs); used_windows.append(int(win))
 
-            if not preds_c_list: continue
+            if not preds_c_list: 
+                print(f"[모델 스킵] 예측값 없음 → {os.path.basename(model_path)}")
+                continue
 
             calib_stack=np.vstack(preds_c_list); raw_stack=np.vstack(preds_r_list)
             comb_c,comb_r=_combine_windows(calib_stack,raw_stack)
