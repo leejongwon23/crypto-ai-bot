@@ -34,6 +34,16 @@ for _n in ("OMP_NUM_THREADS","MKL_NUM_THREADS","OPENBLAS_NUM_THREADS","NUMEXPR_N
 try: torch.set_num_threads(int(os.getenv("TORCH_NUM_THREADS","1")))
 except: pass
 
+# --- CPU 최적화 ---
+try: torch.set_num_interop_threads(1)
+except: pass
+try: torch.backends.mkldnn.enabled = True
+except: pass
+try:
+    torch.use_deterministic_algorithms(False)
+    torch.set_deterministic_debug(False)
+except: pass
+
 def set_global_seed(s:int=20240101):
     os.environ["PYTHONHASHSEED"]=str(s)
     random.seed(s); np.random.seed(s); torch.manual_seed(s)
@@ -143,8 +153,8 @@ SMART_TRAIN = os.getenv("SMART_TRAIN","1")=="1"
 LABEL_SMOOTH = float(os.getenv("LABEL_SMOOTH","0.05"))
 GRAD_CLIP = float(os.getenv("GRAD_CLIP_NORM","1.0"))
 FOCAL_GAMMA = float(os.getenv("FOCAL_GAMMA","2.0"))
-EARLY_STOP_PATIENCE = int(os.getenv("EARLY_STOP_PATIENCE","5"))
-EARLY_STOP_MIN_DELTA = float(os.getenv("EARLY_STOP_MIN_DELTA","0.001"))
+EARLY_STOP_PATIENCE = int(os.getenv("EARLY_STOP_PATIENCE","2"))
+EARLY_STOP_MIN_DELTA = float(os.getenv("EARLY_STOP_MIN_DELTA","0.0001"))
 
 # AMP 옵션
 USE_AMP = os.getenv("USE_AMP","1")=="1"
