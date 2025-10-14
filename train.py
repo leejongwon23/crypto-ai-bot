@@ -1,6 +1,6 @@
-# train.py — FINAL v1.6 (검증/분할/메트릭 가드 강화, 그룹예측 연동 안정화 + 학습후 트리거 락보강)
+# train.py — FINAL v1.7 (메모리 누수 방지 패치: 에폭/모델/윈도우 단위 정리, AMP 옵션, 게이트 연동 유지)
 # -*- coding: utf-8 -*-
-import os, time, glob, shutil, json, random, traceback, threading
+import os, time, glob, shutil, json, random, traceback, threading, gc
 from datetime import datetime
 from typing import Optional, List, Tuple, Dict, Any
 
@@ -10,6 +10,21 @@ from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import StratifiedShuffleSplit
 from collections import Counter
+
+# ---------- 공용 메모리 유틸 ----------
+def _safe_empty_cache():
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+def _release_memory(*objs):
+    for o in objs:
+        try: del o
+        except Exception: pass
+    gc.collect()
+    _safe_empty_cache()
 
 # ---------- 기본 환경/시드 ----------
 def _set_default_thread_env(n: str, v: int):
@@ -108,11 +123,8 @@ try:
     from predict_lock import (
         clear_stale_predict_lock as pl_clear_stale,
         wait_until_free as pl_wait_free,
-        # acquire_with_retry as pl_acquire,  # (train에서는 미사용)
-        # release as pl_release,             # (train에서는 미사용)
     )
 except Exception:
-    # 런타임에 predict_lock 미존재 시 no-op 백업
     def pl_clear_stale(lock_key=None): return None
     def pl_wait_free(max_wait_sec: int, lock_key=None): return True
 
@@ -124,14 +136,19 @@ FEATURE_INPUT_SIZE=get_FEATURE_INPUT_SIZE()
 
 _MAX_ROWS_FOR_TRAIN=int(os.getenv("TRAIN_MAX_ROWS","1200"))
 _BATCH_SIZE=int(os.getenv("TRAIN_BATCH_SIZE","128"))
-_NUM_WORKERS=int(os.getenv("TRAIN_NUM_WORKERS","0"))
-_PIN_MEMORY=False; _PERSISTENT=False
+_NUM_WORKERS=int(os.getenv("TRAIN_NUM_WORKERS","0"))   # 누수 방지: 0 권장
+_PIN_MEMORY=False                                       # 누수 방지: False 권장
+_PERSISTENT=False
 SMART_TRAIN = os.getenv("SMART_TRAIN","1")=="1"
 LABEL_SMOOTH = float(os.getenv("LABEL_SMOOTH","0.05"))
 GRAD_CLIP = float(os.getenv("GRAD_CLIP_NORM","1.0"))
 FOCAL_GAMMA = float(os.getenv("FOCAL_GAMMA","2.0"))
 EARLY_STOP_PATIENCE = int(os.getenv("EARLY_STOP_PATIENCE","5"))
 EARLY_STOP_MIN_DELTA = float(os.getenv("EARLY_STOP_MIN_DELTA","0.001"))
+
+# AMP 옵션
+USE_AMP = os.getenv("USE_AMP","1")=="1"
+TRAIN_CUDA_EMPTY_EVERY_EP = os.getenv("TRAIN_CUDA_EMPTY_EVERY_EP","1")=="1"
 
 def _as_bool_env(name: str, default: bool) -> bool:
     v = os.getenv(name); 
@@ -160,8 +177,8 @@ now_kst=lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 PREDICT_OVERRIDE_ON_GROUP_END = _as_bool_env("PREDICT_OVERRIDE_ON_GROUP_END", True)
 
 # ───────── 예측 타임아웃/강제 옵션 (수정) ─────────
-PREDICT_FORCE_AFTER_GROUP = _as_bool_env("PREDICT_FORCE_AFTER_GROUP", True)  # 새 옵션: 게이트 False여도 강제 실행
-PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC","180"))          # 60 → 180
+PREDICT_FORCE_AFTER_GROUP = _as_bool_env("PREDICT_FORCE_AFTER_GROUP", True)
+PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC","180"))
 
 def _maybe_insert_failure(payload:dict, feature_vector:Optional[List[Any]] = None):
     try:
@@ -335,7 +352,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             val_X  =scaler.transform(X_raw[val_idx].reshape(-1,feat_dim)).reshape(len(val_idx),window,feat_dim)
             train_y, val_y = y[train_idx], y[val_idx]
             if len(np.unique(train_y))<2 or len(np.unique(val_y))<2:
-                _log_skip(symbol,strategy,f"분할 후 단일 클래스(w={window})"); continue
+                _log_skip(symbol,strategy,f"분할 후 단일 클래스(w={window})"); _release_memory(X_raw,y,train_idx,val_idx,scaler); continue
 
             local_epochs=_epochs_for(strategy)
             if len(train_X)<200: local_epochs=max(8, int(round(local_epochs*0.7)))
@@ -344,7 +361,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     train_X,train_y=balance_classes(train_X,train_y,num_classes=len(class_ranges))
             except Exception as e: _safe_print(f"[balance warn] {e}")
 
-            # class weight (음수 라벨 없음 보장)
+            # class weight
             try:
                 loss_cfg = get_LOSS()
                 cw_cfg = loss_cfg.get("class_weight", {}) if isinstance(loss_cfg, dict) else {}
@@ -375,7 +392,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             priors=priors/max(1.0,float(priors.sum())); priors[priors<=0]=1e-6
             priors_t=torch.tensor(priors,dtype=torch.float32,device=DEVICE)
 
-            # DataLoaders
+            # DataLoaders  (num_workers=0, pin_memory=False 권장)
             def _make_train_loader():
                 base_ds=TensorDataset(torch.tensor(train_X, dtype=torch.float32), torch.tensor(train_y, dtype=torch.long))
                 if SMART_TRAIN:
@@ -394,6 +411,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             if _NUM_WORKERS>0 and _PERSISTENT: vkw["persistent_workers"]=True
             val_loader=DataLoader(vds, **vkw)
 
+            scaler_amp = torch.cuda.amp.GradScaler(enabled=(USE_AMP and DEVICE.type=="cuda"))
+
             # 모델 3종 학습
             for model_type in ["lstm","cnn_lstm","transformer"]:
                 base=get_model(model_type,input_size=feat_dim,output_size=len(class_ranges)).to(DEVICE)
@@ -409,23 +428,35 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     model.train()
                     for xb,yb in train_loader:
                         xb=xb.to(DEVICE,dtype=torch.float32); yb=yb.to(DEVICE,dtype=torch.long)
-                        logits=model(xb); loss=crit(logits,yb)
+                        with torch.cuda.amp.autocast(enabled=(USE_AMP and DEVICE.type=="cuda")):
+                            logits=model(xb); loss=crit(logits,yb)
                         if not np.isfinite(float(loss.item())): continue
-                        opt.zero_grad(); loss.backward()
-                        if SMART_TRAIN and GRAD_CLIP>0: torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
-                        opt.step(); loss_sum += float(loss.item())
+                        opt.zero_grad(set_to_none=True)
+                        if scaler_amp.is_enabled():
+                            scaler_amp.scale(loss).backward()
+                            if SMART_TRAIN and GRAD_CLIP>0: scaler_amp.unscale_(opt); torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+                            scaler_amp.step(opt); scaler_amp.update()
+                        else:
+                            loss.backward()
+                            if SMART_TRAIN and GRAD_CLIP>0: torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+                            opt.step()
+                        loss_sum += float(loss.item())
+                        _release_memory(xb,yb,loss,logits)
 
                     # val f1
                     model.eval(); preds=[]; lbls=[]
                     with torch.no_grad():
                         for xb,yb in val_loader:
-                            xb=xb.to(DEVICE,dtype=torch.float32); logits=model(xb)
+                            xb=xb.to(DEVICE,dtype=torch.float32)
+                            with torch.cuda.amp.autocast(enabled=(USE_AMP and DEVICE.type=="cuda")):
+                                logits=model(xb)
                             if COST_SENSITIVE_ARGMAX:
                                 adj=logits-(CS_ARG_BETA*torch.log(priors_t.unsqueeze(0)))
                                 p=torch.argmax(adj,dim=1).cpu().numpy()
                             else:
                                 p=torch.argmax(logits,dim=1).cpu().numpy()
                             preds.extend(p); lbls.extend(yb.numpy())
+                            _release_memory(xb,logits)
                     try:
                         cur_f1=float(f1_score(lbls,preds,average="macro",
                                               labels=list(range(len(class_ranges))),
@@ -443,6 +474,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                         bad=0
                     else:
                         bad+=1
+                    if TRAIN_CUDA_EMPTY_EVERY_EP: _safe_empty_cache()
                     if bad>=patience:
                         _safe_print(f"🛑 early stop @ ep{ep+1} best_f1={best_f1:.4f}")
                         break
@@ -450,15 +482,19 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 if best_state is not None:
                     try: model.load_state_dict(best_state)
                     except: pass
+                _release_memory(best_state)
 
                 # 평가/저장
                 model.eval(); preds=[]; lbls=[]; val_loss_sum=0.0; n_val=0
                 crit_eval=nn.CrossEntropyLoss(weight=w)
                 with torch.no_grad():
                     for xb,yb in val_loader:
-                        xb=xb.to(DEVICE,dtype=torch.float32); logits=model(xb)
+                        xb=xb.to(DEVICE,dtype=torch.float32)
+                        with torch.cuda.amp.autocast(enabled=(USE_AMP and DEVICE.type=="cuda")):
+                            logits=model(xb)
+                            loss_eval = crit_eval(logits, yb.to(DEVICE,dtype=torch.long))
                         try:
-                            val_loss_sum += float(crit_eval(logits, yb.to(DEVICE,dtype=torch.long)).item()) * xb.size(0)
+                            val_loss_sum += float(loss_eval.item()) * xb.size(0)
                         except Exception:
                             pass
                         n_val += xb.size(0)
@@ -468,6 +504,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                         else:
                             p=torch.argmax(logits,dim=1).cpu().numpy()
                         preds.extend(p); lbls.extend(yb.numpy())
+                        _release_memory(xb,logits,loss_eval)
                 try:
                     acc=float(accuracy_score(lbls,preds)) if len(lbls) else 0.0
                 except Exception:
@@ -513,6 +550,16 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                                       "loss_sum":float(loss_sum),"pt":wpath,"meta":mpath,"passed":True})
                 _safe_print(f"🟩 DONE w={window} {model_type} acc={acc:.4f} f1={f1_val:.4f} val_loss={val_loss:.5f} (no gate)")
 
+                # 모델 단위 메모리 정리
+                _release_memory(model, base, opt, crit, scheduler)
+                _release_memory(preds, lbls)
+                if DEVICE.type=="cuda": _safe_empty_cache()
+
+            # 윈도우 단위 메모리 정리
+            _release_memory(train_loader, val_loader, vds)
+            _release_memory(train_X, val_X, train_y, val_y, X_raw, y, train_idx, val_idx, scaler)
+            if DEVICE.type=="cuda": _safe_empty_cache()
+
             res["windows"].append({"window":int(window), "results":[m for m in res["models"] if m["window"]==window]})
 
         res["ok"]=bool(res.get("models"))
@@ -520,14 +567,15 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
 
         # 🔥 학습 완료 직후 자동 예측 트리거 (심볼-전략 단위)
         try:
-            # 락 충돌 방지: 해당 페어 락의 스테일 정리 + 짧은 대기
             pl_clear_stale(lock_key=(symbol, strategy))
             pl_wait_free(max_wait_sec=10, lock_key=(symbol, strategy))
-
             run_after_training(symbol, strategy)
             _safe_print(f"[AUTO-PREDICT] triggered after training {symbol}-{strategy}")
         except Exception as e:
             _safe_print(f"[AUTO-PREDICT FAIL] {symbol}-{strategy} → {e}")
+
+        # 함수 종료 직전 정리
+        _release_memory(feat, features_only, df)
 
         return res
 
@@ -636,10 +684,8 @@ def _safe_predict_with_timeout(predict_fn, symbol: str, strategy: str, source: s
     - 호출 전: 해당 (symbol,strategy) 락의 stale만 정리, 살아있는 락은 대기(wait)만 함.
     - 타임아웃 시 False 반환.
     """
-    # 1) per-key stale 정리
     try: pl_clear_stale(lock_key=(symbol, strategy))
     except Exception: pass
-    # 2) 살아있는 락이 있으면 지정한 시간만큼 대기(예측 함수가 정상적으로 락을 사용하므로 train은 소유하지 않음)
     try: pl_wait_free(max_wait_sec=int(max(1, timeout/2)), lock_key=(symbol, strategy))
     except Exception: pass
 
@@ -684,7 +730,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                 completed_syms, partial_syms = train_models(group, stop_event=stop_event, ignore_should=force_full_pass)
                 if stop_event is not None and stop_event.is_set(): break
 
-                # ✅ 그룹 학습 직후 즉시 예측(완료 여부 상관없이, 모델 있는 조합만)
                 gate_ok = True
                 try:
                     gate_ok = ready_for_group_predict()
@@ -730,7 +775,7 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                         try: mark_group_predicted()
                         except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
 
-                # 🔒 1) 그룹 루프가 끝날 때마다 예측 게이트 확실히 닫기
+                # 🔒 그룹 루프가 끝날 때마다 예측 게이트 닫기
                 try: close_predict_gate(note=f"train:group{idx+1}_end")
                 except Exception as e: _safe_print(f"[gate close warn] {e}")
 
@@ -741,7 +786,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                     if stop_event is not None and stop_event.is_set(): break
 
             _safe_print("✅ group pass done")
-            # 🔒 2) 한 패스 완료 후에도 한 번 더 닫아 안정성 확보
             try: close_predict_gate(note="train:group_pass_done")
             except Exception as e: _safe_print(f"[gate close warn] {e}")
 
