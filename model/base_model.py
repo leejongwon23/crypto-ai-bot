@@ -80,6 +80,69 @@ def _init_lstm_forget_bias(lstm: nn.LSTM):
                 pass
 
 # =========================
+# TBPTT Mixin (훈련용 스텝)
+# =========================
+class TBPTTMixin:
+    @torch.no_grad()
+    def _detach_grads_(self):
+        for p in self.parameters():
+            if p.grad is not None:
+                p.grad.detach_()
+
+    def tbptt_train_step(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        criterion,
+        optimizer,
+        chunk_len: int = 64,
+        grad_clip: float = 1.0,
+        amp: bool = False,
+        scaler: "torch.cuda.amp.GradScaler | None" = None,
+    ) -> float:
+        """
+        x: [B, T, F], y: [B] 분류 기준
+        chunk별로 역전파와 step을 수행하여 메모리 사용을 제한.
+        반환값: 평균 loss
+        """
+        self.train()
+        T = int(x.size(1))
+        chunks = max(1, (T + chunk_len - 1) // chunk_len)
+        total = 0.0
+
+        optimizer.zero_grad(set_to_none=True)
+
+        for i in range(0, T, chunk_len):
+            x_chunk = x[:, i:i + chunk_len, :]
+            if x_chunk.numel() == 0:
+                continue
+
+            if amp and scaler is not None and torch.cuda.is_available():
+                with torch.cuda.amp.autocast():
+                    logits = self.forward(x_chunk)
+                    loss = criterion(logits, y)
+                scaler.scale(loss).backward()
+                if grad_clip and grad_clip > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+            else:
+                logits = self.forward(x_chunk)
+                loss = criterion(logits, y)
+                loss.backward()
+                if grad_clip and grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(self.parameters(), grad_clip)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+
+            total += float(loss.detach().item())
+            self._detach_grads_()  # 그래프 절단
+
+        return total / float(chunks)
+
+# =========================
 # Attention (안정 소프트맥스 + dropout + 재정규화)
 # =========================
 class Attention(nn.Module):
@@ -156,7 +219,7 @@ class SEBlock(nn.Module):
 # =========================
 # LSTM Price Predictor (Residual Head + ContextGate)
 # =========================
-class LSTMPricePredictor(nn.Module):
+class LSTMPricePredictor(TBPTTMixin, nn.Module):
     def __init__(self, input_size, hidden_size=256, num_layers=4, dropout=0.4, output_size=None):
         super().__init__()
         output_size = output_size if output_size is not None else get_NUM_CLASSES()
@@ -210,7 +273,7 @@ class LSTMPricePredictor(nn.Module):
 # =========================
 # CNN + LSTM Price Predictor (ResConv*2 + SE + BiLSTM + Attention + Residual Head)
 # =========================
-class CNNLSTMPricePredictor(nn.Module):
+class CNNLSTMPricePredictor(TBPTTMixin, nn.Module):
     def __init__(self, input_size, cnn_channels=128, lstm_hidden_size=256, lstm_layers=3, dropout=0.4, output_size=None):
         super().__init__()
         output_size = output_size if output_size is not None else get_NUM_CLASSES()
@@ -289,7 +352,7 @@ class PositionalEncoding(nn.Module):
 # =========================
 # Transformer Price Predictor (Residual Head)
 # =========================
-class TransformerPricePredictor(nn.Module):
+class TransformerPricePredictor(TBPTTMixin, nn.Module):
     def __init__(self, input_size, d_model=128, nhead=8, num_layers=3, dropout=0.4, output_size=None, mode="classification"):
         super().__init__()
         self.mode = mode
@@ -417,7 +480,7 @@ class AutoEncoder(nn.Module):
         if x is None:
             return x
         if x.dim() == 3:
-            B, T, F = x.shape
+            B, T, F_ = x.shape
             if T == 1:
                 flat = x.squeeze(1)
             else:
