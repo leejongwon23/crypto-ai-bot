@@ -5,6 +5,7 @@ _kline_cache = {}
 import os
 import time
 import json
+import pickle
 import requests
 import pandas as pd
 import numpy as np
@@ -33,6 +34,58 @@ BINANCE_ENABLED = int(os.getenv("ENABLE_BINANCE", "1"))
 
 # 예측용 최소 윈도우(부족 시 not_enough_rows=True로 플래그) — predict.py에서 스킵
 _PREDICT_MIN_WINDOW = int(os.getenv("PREDICT_WINDOW", "10"))
+
+# ========================= 디스크 캐시 설정 =========================
+_CACHE_DIR = os.getenv("PRICE_CACHE_DIR", "/persistent/cache")
+os.makedirs(_CACHE_DIR, exist_ok=True)
+
+def _cache_key(symbol: str, strategy: str, slack: int) -> str:
+    return f"{symbol}__{strategy}__slack{int(slack)}.pkl"
+
+def _cache_path(symbol: str, strategy: str, slack: int) -> str:
+    return os.path.join(_CACHE_DIR, _cache_key(symbol, strategy, slack))
+
+def _cache_ttl_seconds(interval: str) -> int:
+    env = os.getenv("PRICE_CACHE_TTL_SEC")
+    if env:
+        try:
+            return max(60, int(env))
+        except Exception:
+            pass
+    m = {"60": 600, "120": 900, "240": 1200, "360": 1800, "720": 1800, "D": 3600, "W": 6*3600, "M": 24*3600}
+    return m.get(str(interval), 1200)
+
+def _load_df_cache(symbol: str, strategy: str, interval: str, slack: int):
+    p = _cache_path(symbol, strategy, slack)
+    if not os.path.exists(p): return None
+    ttl = _cache_ttl_seconds(interval)
+    try:
+        if time.time() - os.path.getmtime(p) <= ttl:
+            with open(p, "rb") as f:
+                df = pickle.load(f)
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    return df
+    except Exception:
+        pass
+    return None
+
+def _save_df_cache(symbol: str, strategy: str, slack: int, df: pd.DataFrame):
+    try:
+        with open(_cache_path(symbol, strategy, slack), "wb") as f:
+            pickle.dump(df, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        pass
+
+def clear_price_cache(symbol: Optional[str] = None, strategy: Optional[str] = None):
+    try:
+        for fn in os.listdir(_CACHE_DIR):
+            if not fn.endswith(".pkl"): continue
+            if symbol and f"{symbol}__" not in fn: continue
+            if strategy and f"__{strategy}__" not in fn: continue
+            try: os.remove(os.path.join(_CACHE_DIR, fn))
+            except Exception: pass
+    except Exception:
+        pass
 
 # --- (3단계) 추가 모듈: 선택적 import (없으면 자동 무시) ------------------------
 try:
@@ -816,6 +869,18 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
     cached = CacheManager.get(cache_key, ttl_sec=600)
     if cached is not None:
         return cached
+
+    # 디스크 캐시 우선 로드
+    try:
+        cfg_tmp = STRATEGY_CONFIG.get(strategy, {"interval": "D"})
+        interval_for_ttl = cfg_tmp.get("interval", "D")
+        disk_cached = _load_df_cache(symbol, strategy, interval_for_ttl, end_slack_min)
+        if isinstance(disk_cached, pd.DataFrame) and not disk_cached.empty:
+            CacheManager.set(cache_key, disk_cached)
+            return disk_cached
+    except Exception:
+        pass
+
     try:
         cfg = STRATEGY_CONFIG.get(strategy, {"limit": 300, "interval": "D"})
         limit = int(cfg.get("limit", 300)); interval = cfg.get("interval", "D")
@@ -881,6 +946,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
             pass
 
         CacheManager.set(cache_key, df)
+        _save_df_cache(symbol, strategy, end_slack_min, df)
         return df
     except Exception as e:
         safe_failed_result(symbol, strategy, reason=str(e))
@@ -1123,7 +1189,8 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
                 feat["atr_val"] = _atr(feat["high"], feat["low"], feat["close"], window=atr_win)
                 thr_high = feat["atr_val"].quantile(vol_high)
                 thr_low  = feat["atr_val"].quantile(vol_low)
-                feat["vol_regime"] = np.where(feat["atr_val"] >= thr_high, 2, np.where(fet["atr_val"] <= thr_low, 0, 1))
+                feat["vol_regime"] = np.where(feat["atr_val"] >= thr_high, 2,
+                                              np.where(feat["atr_val"] <= thr_low, 0, 1))
                 feat["ma_trend"] = feat["close"].rolling(window=trend_win, min_periods=1).mean()
                 slope = feat["ma_trend"].diff()
                 feat["trend_regime"] = np.where(slope > 0, 2, np.where(slope < 0, 0, 1))
