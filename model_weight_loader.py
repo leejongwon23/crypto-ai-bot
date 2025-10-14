@@ -1,59 +1,132 @@
-# model_weight_loader.py (YOPO v1.4 fixed)
+# YOPO v1.5 — robust weight+meta loader
 import os
 import json
 import glob
 import time
+from typing import Optional, Dict, Any, Tuple, List
+
 import torch
 import pandas as pd
+
+# 프로젝트 표준 I/O 사용 (PT / PTZ / safetensors 지원, prefix 자동보정)
+from model_io import load_model as _load_with_policy, ModelLoadError, load_meta as _load_meta
 
 MODEL_DIR = "/persistent/models"
 EVAL_RESULT_SINGLE = "/persistent/evaluation_result.csv"  # 있을 수도 있어서 추가 확인용
 
-# ============== 캐시 ==============
-_model_cache = {}
-_model_cache_ttl = {}
+SUPPORTED_WEIGHTS = (".pt", ".ptz", ".safetensors")
 
-def _safe_state_dict(obj):
+# ============== 캐시 ==============
+_model_cache: Dict[str, Dict[str, torch.Tensor]] = {}
+_model_cache_ttl: Dict[str, float] = {}
+
+def _is_weight_file(path: str) -> bool:
+    return path and os.path.splitext(path)[1].lower() in SUPPORTED_WEIGHTS and os.path.isfile(path)
+
+def _now() -> float:
+    return time.time()
+
+def _stem(path: str) -> str:
+    base = os.path.basename(path)
+    return base.rsplit(".", 1)[0]
+
+def _meta_path_for(weight_path: str) -> str:
+    return os.path.splitext(os.path.abspath(weight_path))[0] + ".meta.json"
+
+def _find_weight_candidates(symbol: str, strategy: str, model_type: str) -> List[str]:
     """
-    다양한 저장 포맷(torch.save(state), torch.save(model), ckpt dict 등)을
-    최대한 state_dict으로 정규화.
+    {SYMBOL}_{STRATEGY}_{TYPE}.* (pt/ptz/safetensors) 을 전 디렉터리에서 탐색
+    가장 최근 mtime 순으로 정렬하여 반환
+    """
+    patt = os.path.join(MODEL_DIR, "**", f"{symbol}_{strategy}_{model_type}*")
+    found: List[str] = []
+    for p in glob.iglob(patt, recursive=True):
+        if _is_weight_file(p):
+            found.append(p)
+    found.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return found
+
+def _resolve_meta(weight_path: str) -> Optional[str]:
+    """
+    가중치 옆의 {stem}.meta.json 우선, 없으면 동일 디렉·루트에서 prefix 매칭 최신본
     """
     try:
-        # state_dict 형태
-        if isinstance(obj, dict) and all(isinstance(k, str) for k in obj.keys()):
-            return obj
-        # 모듈 객체
-        try:
-            return obj.state_dict()
-        except Exception:
-            pass
-        # ckpt dict 안에 state_dict 키
-        if isinstance(obj, dict) and "state_dict" in obj and isinstance(obj["state_dict"], dict):
-            return obj["state_dict"]
-        return obj
+        exact = _meta_path_for(weight_path)
+        if os.path.exists(exact):
+            return exact
+        dirn = os.path.dirname(weight_path) or MODEL_DIR
+        stem = _stem(weight_path)
+        cands = sorted(
+            glob.glob(os.path.join(dirn, f"{stem}*.meta.json")),
+            key=lambda p: os.path.getmtime(p),
+            reverse=True,
+        )
+        if cands:
+            return cands[0]
+        # 루트에서도 fallback
+        root_cands = sorted(
+            glob.glob(os.path.join(MODEL_DIR, f"{os.path.basename(stem)}*.meta.json")),
+            key=lambda p: os.path.getmtime(p),
+            reverse=True,
+        )
+        if root_cands:
+            return root_cands[0]
+    except Exception as e:
+        print(f"[⚠️ META 탐색 실패] {weight_path} → {e}")
+    return None
+
+def _preflight(weight_path: str, model_type: str, input_size: Optional[int]) -> Tuple[bool, str]:
+    """
+    사전 점검: 파일 존재, 메타 일관성(input_size 등) 확인
+    """
+    if not _is_weight_file(weight_path):
+        return False, "weight_missing"
+    meta_path = _resolve_meta(weight_path)
+    if not meta_path or not os.path.isfile(meta_path):
+        return False, "meta_missing"
+
+    try:
+        meta = _load_meta(weight_path, default={}) if os.path.samefile(_meta_path_for(weight_path), meta_path) else json.load(open(meta_path, "r", encoding="utf-8"))
     except Exception:
-        return obj
+        meta = {}
 
-def load_model_cached(pt_path, model_obj, ttl_sec=600):
-    """
-    프로젝트 표준: 주어진 model_obj에 pt_path의 state_dict를 로드하여 반환
-    - predict.py가 기대하는 시그니처: (pt_path, model_obj, ttl_sec)
-    - 내부 캐시는 state_dict 기준 (메모리 절약 + 호환성 ↑)
-    """
-    now = time.time()
+    if input_size is not None:
+        mi = meta.get("input_size")
+        if mi not in (None, input_size):
+            return False, f"input_size_mismatch(meta={mi}, in={input_size})"
 
-    # TTL 만료 캐시 정리
+    mt = str(meta.get("model_type") or meta.get("type") or "").lower()
+    if mt and mt != str(model_type).lower():
+        # 경고만 — 다른 타입 메타가 붙었어도 로딩은 시도
+        print(f"[⚠️ 경고] meta.model_type={mt} ≠ req={model_type}")
+
+    return True, "ok"
+
+def _drop_expired(ttl_sec: int):
+    now = _now()
     expired = [k for k, t in _model_cache_ttl.items() if now - t >= ttl_sec]
     for k in expired:
         _model_cache.pop(k, None)
         _model_cache_ttl.pop(k, None)
 
+def load_model_cached(pt_path: str, model_obj: torch.nn.Module, ttl_sec: int = 600) -> Optional[torch.nn.Module]:
+    """
+    표준 로더: 정책 준수(model_io.load_model) + module. prefix 자동보정 + 캐시
+    predict.py가 기대하는 시그니처 유지
+    """
+    _drop_expired(ttl_sec)
+
     if not pt_path or not os.path.exists(pt_path):
         print(f"[❌ load_model_cached] 파일 없음: {pt_path}")
         return None
 
+    ok, why = _preflight(pt_path, model_type=_infer_model_type_from_fname(pt_path), input_size=None)
+    if not ok:
+        print(f"[❌ load_model_cached 사전점검 실패] {pt_path} → {why}")
+        return None
+
     try:
-        # 캐시 히트
+        # 캐시 hit
         if pt_path in _model_cache:
             try:
                 model_obj.load_state_dict(_model_cache[pt_path], strict=False)
@@ -64,121 +137,65 @@ def load_model_cached(pt_path, model_obj, ttl_sec=600):
                 _model_cache.pop(pt_path, None)
                 _model_cache_ttl.pop(pt_path, None)
 
-        # 디스크에서 state_dict 로드
-        state = torch.load(pt_path, map_location="cpu")
-        state_dict = _safe_state_dict(state)
-        model_obj.load_state_dict(state_dict, strict=False)
+        # 디스크에서 정책 준수 로드 (PT/PTZ/safetensors & prefix 보정 포함)
+        loaded = _load_with_policy(pt_path, model=model_obj, map_location="cpu", strict=False)
+        # _load_with_policy가 nn.Module을 반환 — state_dict를 캐시에 저장
+        state_dict = loaded.state_dict() if hasattr(loaded, "state_dict") else None
+        if state_dict:
+            _model_cache[pt_path] = dict(state_dict)
+            _model_cache_ttl[pt_path] = _now()
         model_obj.eval()
-
-        # 캐시에 저장
-        _model_cache[pt_path] = state_dict
-        _model_cache_ttl[pt_path] = now
-
-        print(f"[✅ 모델 state_dict 로드 완료] {pt_path}")
+        print(f"[✅ 모델 로드 완료] {pt_path}")
         return model_obj
 
+    except ModelLoadError as e:
+        print(f"[❌ ModelLoadError] {pt_path} → {e.reason} :: {e.detail}")
+        return None
     except Exception as e:
         print(f"[❌ load_model_cached 오류] {pt_path} → {e}")
         return None
 
-# ============== META 유연 탐색 ==============
-def _stem(path: str) -> str:
-    base = os.path.basename(path)
-    return base.rsplit(".", 1)[0]
-
-def resolve_meta_for_pt(pt_path: str):
+# ============== 가중치 후보/리스트 ==============
+def find_models_fuzzy(symbol: str, strategy: str) -> List[Dict[str, str]]:
     """
-    PT/PTZ 파일에 대응하는 META 파일을 유연 규칙으로 탐색.
-    우선순위:
-      1) 동일 디렉터리에서 {base}.meta.json
-      2) 동일 디렉터리에서 {base}*.meta.json (mtime 최신)
-      3) MODEL_DIR 루트에서 {base}.meta.json
-      4) MODEL_DIR 루트에서 {base}*.meta.json (mtime 최신)
-      5) 심볼/전략 추정 시 {MODEL_DIR}/{SYMBOL}/{STRATEGY}/(lstm|cnn_lstm|transformer).meta.json
+    YOPO 탐색 표준: 심볼/전략 기준으로 가중치 파일을 찾고, 유효 META를 붙여 반환
     """
+    out: List[Dict[str, str]] = []
     try:
-        if not pt_path:
-            return None
-        base = os.path.basename(pt_path)
-        if not (base.endswith(".pt") or base.endswith(".ptz")):
-            return None
-
-        dirn = os.path.dirname(pt_path) or MODEL_DIR
-        stem = _stem(base)
-
-        # 1) 동일 디렉터리 완전 일치
-        exact_local = os.path.join(dirn, f"{stem}.meta.json")
-        if os.path.exists(exact_local):
-            return exact_local
-
-        # 2) 동일 디렉터리 prefix 후보
-        cand_local = sorted(
-            glob.glob(os.path.join(dirn, f"{stem}*.meta.json")),
-            key=lambda p: os.path.getmtime(p),
-            reverse=True,
-        )
-        if cand_local:
-            return cand_local[0]
-
-        # 3) 루트 완전 일치
-        exact_root = os.path.join(MODEL_DIR, f"{stem}.meta.json")
-        if os.path.exists(exact_root):
-            return exact_root
-
-        # 4) 루트 prefix 후보
-        cand_root = sorted(
-            glob.glob(os.path.join(MODEL_DIR, f"{stem}*.meta.json")),
-            key=lambda p: os.path.getmtime(p),
-            reverse=True,
-        )
-        if cand_root:
-            return cand_root[0]
-
-        # 5) {SYMBOL}_{STRATEGY}_{TYPE} 패턴 역추정
-        parts = stem.split("_")
-        if len(parts) >= 3:
-            sym, strat, mtype = parts[0], parts[1], parts[2]
-            guess = os.path.join(MODEL_DIR, sym, strat, f"{mtype}.meta.json")
-            if os.path.exists(guess):
-                return guess
-    except Exception as e:
-        print(f"[⚠️ resolve_meta_for_pt 실패] {pt_path} → {e}")
-    return None
-
-# ============== 모델 리스트 찾기 (리커시브) ==============
-def find_models_fuzzy(symbol: str, strategy: str):
-    """
-    심볼/전략 기준으로 PT/PTZ를 먼저 찾고, META를 유연 규칙으로 붙여 반환.
-    - MODEL_DIR 하위 전체(서브폴더 포함) 탐색
-    """
-    out = []
-    try:
-        prefix = f"{symbol}_"
-        needle = f"_{strategy}_"
         for root, _, files in os.walk(MODEL_DIR):
             for fn in files:
-                if not (fn.endswith(".pt") or fn.endswith(".ptz")):
+                if not fn.endswith(SUPPORTED_WEIGHTS):
                     continue
-                if not fn.startswith(prefix):
+                if not fn.startswith(f"{symbol}_"):
                     continue
-                if needle not in fn:
+                if f"_{strategy}_" not in fn:
                     continue
-                pt_path = os.path.join(root, fn)
-                meta_path = resolve_meta_for_pt(pt_path)
-                if not meta_path:
+                wpath = os.path.join(root, fn)
+                mpath = _resolve_meta(wpath)
+                if not mpath:
                     continue
                 out.append({
-                    "pt_file": os.path.relpath(pt_path, MODEL_DIR),
-                    "meta_file": os.path.relpath(meta_path, MODEL_DIR)
+                    "pt_file": os.path.relpath(wpath, MODEL_DIR),
+                    "meta_file": os.path.relpath(mpath, MODEL_DIR),
                 })
-        out.sort(key=lambda x: x["pt_file"])
+        out.sort(key=lambda x: os.path.getmtime(os.path.join(MODEL_DIR, x["pt_file"])), reverse=True)
     except Exception as e:
         print(f"[⚠️ find_models_fuzzy 실패] {symbol}-{strategy} → {e}")
     return out
 
+def locate_best_weight(symbol: str, strategy: str, model_type: str) -> Optional[str]:
+    """
+    가장 최근 mtime 가중치 후보 중 메타 일치/사전점검 통과한 첫 번째 경로 반환
+    """
+    for w in _find_weight_candidates(symbol, strategy, model_type):
+        ok, _ = _preflight(w, model_type, input_size=None)
+        if ok:
+            return w
+    return None
+
 # ============== 평가 로그 수집 ==============
-def _load_all_eval_logs():
-    frames = []
+def _load_all_eval_logs() -> pd.DataFrame:
+    frames: List[pd.DataFrame] = []
     eval_daily = sorted(glob.glob("/persistent/logs/evaluation_*.csv"))
     for fp in eval_daily:
         try:
@@ -195,7 +212,8 @@ def _load_all_eval_logs():
     try:
         df = pd.concat(frames, ignore_index=True)
         if "timestamp" in df.columns:
-            df = df.drop_duplicates(subset=[c for c in df.columns if c in ["timestamp","symbol","strategy","model"]])
+            dedup_cols = [c for c in ["timestamp", "symbol", "strategy", "model", "status"] if c in df.columns]
+            df = df.drop_duplicates(subset=dedup_cols)
         else:
             df = df.drop_duplicates()
         return df
@@ -203,25 +221,27 @@ def _load_all_eval_logs():
         print(f"[⚠️ 평가 로그 병합 실패] → {e}")
         return pd.DataFrame()
 
-# ============== 가중치 추정 ==============
-def _symbol_from_meta_path(meta_path: str):
-    """
-    meta에 symbol 키가 없을 때 파일명에서 추정
-    """
+# ============== 가중치 추정(메타+로그) ==============
+def _symbol_from_meta_path(meta_path: str) -> Optional[str]:
     try:
-        base = os.path.basename(meta_path).replace(".meta.json","")
+        base = os.path.basename(meta_path).replace(".meta.json", "")
         parts = base.split("_")
-        if len(parts) >= 1:
+        if parts:
             return parts[0]
     except Exception:
         pass
     return None
 
-def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_size=None):
+def _infer_model_type_from_fname(path: str) -> str:
+    base = os.path.basename(path)
+    core = _stem(base)
+    parts = core.split("_")
+    return parts[2] if len(parts) >= 3 else ""
+
+def get_model_weight(model_type: str, strategy: str, symbol: str = "ALL", min_samples: int = 3, input_size: Optional[int] = None) -> float:
     """
     메타파일 및 최근 평가 로그 기반 가중치(0.0~1.0) 추정
     """
-    # 메타 파일 후보
     if symbol != "ALL":
         pattern = os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}.meta.json")
         meta_files = glob.glob(pattern) or glob.glob(os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}*.meta.json"))
@@ -250,18 +270,15 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
             meta = {}
 
         meta_symbol = meta.get("symbol") or _symbol_from_meta_path(meta_path)
-        if input_size is not None and meta.get("input_size") not in [None, input_size]:
+        if input_size is not None and meta.get("input_size") not in (None, input_size):
             print(f"[⚠️ input_size 불일치] meta={meta.get('input_size')} vs input={input_size} → weight=0.2")
             return 0.2
 
-        # PT/PTZ 존재 확인
-        pt_path = meta_path.replace(".meta.json", ".pt")
-        if not os.path.exists(pt_path):
-            ptz_path = meta_path.replace(".meta.json", ".ptz")
-            if os.path.exists(ptz_path):
-                pt_path = ptz_path
-        if not os.path.exists(pt_path):
-            print(f"[⚠️ 모델 파일 없음] {pt_path} → weight=0.2")
+        # 가중치 파일 존재 확인(모든 포맷)
+        base = meta_path.replace(".meta.json", "")
+        candidates = [base + ext for ext in [".pt", ".ptz", ".safetensors"]]
+        if not any(os.path.exists(c) for c in candidates):
+            print(f"[⚠️ 모델 파일 없음] {base}.[pt|ptz|safetensors] → weight=0.2")
             return 0.2
 
         df = df_all[
@@ -292,22 +309,22 @@ def get_model_weight(model_type, strategy, symbol="ALL", min_samples=3, input_si
     return 0.2
 
 # ============== 기타 유틸 ==============
-def model_exists(symbol, strategy):
+def model_exists(symbol: str, strategy: str) -> bool:
     try:
-        for root, _, files in os.walk(MODEL_DIR):
+        for _, _, files in os.walk(MODEL_DIR):
             for file in files:
-                if file.startswith(f"{symbol}_{strategy}_") and (file.endswith(".pt") or file.endswith(".ptz")):
+                if file.startswith(f"{symbol}_{strategy}_") and file.endswith(SUPPORTED_WEIGHTS):
                     return True
     except Exception as e:
         print(f"[오류] 모델 존재 확인 실패: {e}")
     return False
 
-def count_models_per_strategy():
+def count_models_per_strategy() -> Dict[str, int]:
     counts = {"단기": 0, "중기": 0, "장기": 0}
     try:
-        for root, _, files in os.walk(MODEL_DIR):
+        for _, _, files in os.walk(MODEL_DIR):
             for file in files:
-                if not (file.endswith(".pt") or file.endswith(".ptz")):
+                if not file.endswith(SUPPORTED_WEIGHTS):
                     continue
                 parts = file.split("_")
                 if len(parts) >= 3:
@@ -318,5 +335,5 @@ def count_models_per_strategy():
         print(f"[오류] 모델 수 계산 실패: {e}")
     return counts
 
-def get_similar_symbol(symbol: str):
+def get_similar_symbol(symbol: str) -> list:
     return []
