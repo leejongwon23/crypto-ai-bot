@@ -1,11 +1,13 @@
-# === predict.py (YOPO v1.5 — 예측 정상화 완전판) ===
+# === predict.py (YOPO v1.5 — 예측 정상화 완전판, 메모리 누수/초과 패치 적용) ===
 # 핵심 수정
-# ① get_model_predictions(): 로더 실패시 다중 폴백( model_io → torch.load → state_dict 주입 )로 복구
-# ② predict(): gate/group_active 스킵 사유를 콘솔에 즉시 출력 + 그룹 스테일 자동 정리
-# ③ _group_active(): STALE 처리(만료시 자동 해제)
+# ① get_model_predictions(): 로더 실패시 다중 폴백( model_io → torch.load → state_dict 주입 ) + 윈도우/모델 루프마다 즉시 메모리 해제
+# ② predict(): gate/group_active 스킵 사유를 콘솔에 즉시 출력 + 그룹 스테일 자동 정리 + finally에서 대형 객체 일괄 정리
+# ③ evaluate_predictions(): 종료 시 메모리 정리
+# ④ 공용 헬퍼: _safe_empty_cache(), _release_memory()
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob, inspect, threading
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
+import gc  # [패치] 메모리 수거
 from sklearn.preprocessing import MinMaxScaler
 try:
     from data.utils import get_kline_by_strategy, compute_features
@@ -13,6 +15,25 @@ except Exception:
     from utils import get_kline_by_strategy, compute_features
 
 __all__ = ["predict","is_predict_gate_open","open_predict_gate","close_predict_gate","run_evaluation_once","run_evaluation_loop"]
+
+# [패치] 공용 메모리 정리 헬퍼
+def _safe_empty_cache():
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+def _release_memory(*objs):
+    try:
+        for o in objs:
+            try:
+                del o
+            except Exception:
+                pass
+    finally:
+        gc.collect()
+        _safe_empty_cache()
 
 RUN_DIR="/persistent/run"; os.makedirs(RUN_DIR,exist_ok=True)
 PREDICT_GATE=os.path.join(RUN_DIR,"predict_gate.json")
@@ -681,8 +702,145 @@ def predict(symbol,strategy,source="일반",model_type=None):
                         if sc>best_sc: best_sc,best_m,best_cls=sc,m,int(ci)
                 if best_cls is not None: final_cls,best_sc; chosen,used_minret=best_cls,best_m,True
         except Exception as e: print(f"[임계 가드 예외] {e}")
+        # (Part 2/2에서 이어짐)
 
+def _combine_windows(calib_stack:np.ndarray,raw_stack:np.ndarray)->tuple[np.ndarray,np.ndarray]:
+    eps=1e-12
+    mean_c=calib_stack.mean(axis=0); mean_r=raw_stack.mean(axis=0)
+    if PREDICT_WINDOW_ENSEMBLE=="mean":
+        cc=mean_c; rr=mean_r
+    else:
+        var_c=calib_stack.var(axis=0); var_r=raw_stack.var(axis=0)
+        cc=mean_c/(1.0+ENSEMBLE_VAR_GAMMA*var_c); rr=mean_r/(1.0+ENSEMBLE_VAR_GAMMA*var_r)
+        if PREDICT_WINDOW_ENSEMBLE=="mean_var":
+            cc=0.5*mean_c+0.5*cc; rr=0.5*mean_r+0.5*rr
+    cc=np.nan_to_num(cc,nan=0.0,posinf=0.0,neginf=0.0); rr=np.nan_to_num(rr,nan=0.0,posinf=0.0,neginf=0.0)
+    cc=(cc+1e-9); rr=(rr+1e-9)
+    cc=cc/(cc.sum()+1e-12); rr=rr/(rr.sum()+1e-12)
+    return cc.astype(float),rr.astype(float)
+
+def get_model_predictions(symbol,strategy,models,df,feat_scaled,window_list,recent_freq,regime="unknown"):
+    outs=[]; allpreds=[]
+    for info in models:
         try:
+            pt=info.get("pt_file"); meta_path=info.get("meta_path")
+            if not pt or not meta_path: continue
+            model_path=os.path.join(MODEL_DIR,pt)
+            if os.path.exists(model_path) is False:
+                try:
+                    p=_stem(pt).split("_")
+                    if len(p)>=3:
+                        sym,strat,mtype=p[0],p[1],p[2]
+                        for e in _KNOWN_EXTS:
+                            alt=os.path.join(MODEL_DIR,sym,strat,f"{mtype}{e}")
+                            if os.path.exists(alt): model_path=alt; break
+                except Exception: pass
+            with open(meta_path,"r",encoding="utf-8") as mf: meta=json.load(mf)
+
+            # 파일명 group 태그가 있으면 meta 보정
+            fname_grp,_fname_cls=_parse_group_cls_from_filename(model_path)
+            if fname_grp is not None:
+                meta["group_id"]=int(fname_grp)
+            elif "group_id" not in meta or not str(meta.get("group_id")).isdigit():
+                meta["group_id"]=_infer_group_id(symbol,strategy)
+
+            if STRICT_SAME_BOUNDS:
+                cr_meta=_ranges_from_meta(meta)
+                if not (cr_meta and len(cr_meta)>=2):
+                    print(f"[STRICT] no class_ranges in meta → {os.path.basename(model_path)} (skip)")
+                    continue
+
+            mtype_raw=meta.get("model","lstm"); mtype=_norm_model_type(mtype_raw); gid=meta.get("group_id",0)
+            inp_size=int(meta.get("input_size",feat_scaled.shape[1]))
+            cr_meta=_ranges_from_meta(meta)
+            num_cls=int(meta.get("num_classes",(len(cr_meta) if cr_meta else NUM_CLASSES)))
+
+            preds_c_list,preds_r_list=[],[]; used_windows=[]
+            for win in list(dict.fromkeys([int(w) for w in window_list if int(w)>0])):
+                if feat_scaled.shape[0]<win:
+                    preds_c_list=[]; preds_r_list=[]; used_windows=[]; break
+                seq=feat_scaled[-win:]
+                if seq.shape[1]<inp_size: seq=np.pad(seq,((0,0),(0,inp_size-seq.shape[1])),mode="constant")
+                elif seq.shape[1]>inp_size: seq=seq[:,:inp_size]
+                x=torch.tensor(seq,dtype=torch.float32).unsqueeze(0)
+
+                # === 로딩 파이프라인 (다중 폴백) ===
+                model=get_model(mtype_raw,input_size=inp_size,output_size=num_cls)
+                loaded=load_model_any(model_path,model,ttl_sec=PREDICT_MODEL_LOADER_TTL)
+                if loaded is None:
+                    # 2차: torch.load 후 주입 시도
+                    try:
+                        obj=torch.load(model_path,map_location="cpu")
+                        if isinstance(obj,dict):
+                            try: model.load_state_dict(obj,strict=False); loaded=model
+                            except Exception: loaded=None
+                        else:
+                            loaded=obj
+                    except Exception:
+                        loaded=None
+                if isinstance(loaded,dict) and model is not None:
+                    try: model.load_state_dict(loaded,strict=False); model.eval()
+                    except Exception: 
+                        print(f"[모델 주입 실패] {model_path}")
+                        preds_c_list=[]; preds_r_list=[]; break
+                elif loaded is None:
+                    print(f"[⚠️ 모델 로딩 실패] {model_path}")
+                    preds_c_list=[]; preds_r_list=[]; break
+                else:
+                    if hasattr(loaded,"eval"): model=loaded  # 모듈 자체 로드
+                model.to(DEVICE); model.eval()
+
+                with torch.no_grad():
+                    logits=model(x.to(DEVICE))
+                    logits=torch.nan_to_num(logits)
+                    probs=F.softmax(logits,dim=1)
+                    probs=torch.nan_to_num(probs).squeeze().cpu().numpy()
+                probs=np.nan_to_num(probs,nan=0.0,posinf=0.0,neginf=0.0)+1e-9
+                probs=probs/(probs.sum()+1e-12)
+                cprobs=apply_calibration(probs,symbol=symbol,strategy=strategy,regime=regime,model_meta=meta).astype(float)
+                cprobs=np.nan_to_num(cprobs,nan=0.0,posinf=0.0,neginf=0.0)+1e-9
+                cprobs=cprobs/(cprobs.sum()+1e-12)
+                preds_c_list.append(cprobs); preds_r_list.append(probs); used_windows.append(int(win))
+
+                # [패치] 윈도우 단위 즉시 메모리 해제
+                try:
+                    del x, logits
+                except Exception:
+                    pass
+                try:
+                    del model  # 루프마다 모델 임시 객체 해제
+                except Exception:
+                    pass
+                _safe_empty_cache()
+                gc.collect()
+
+            if not preds_c_list: 
+                print(f"[모델 스킵] 예측값 없음 → {os.path.basename(model_path)}")
+                continue
+
+            calib_stack=np.vstack(preds_c_list); raw_stack=np.vstack(preds_r_list)
+            comb_c,comb_r=_combine_windows(calib_stack,raw_stack)
+
+            outs.append({"raw_probs":comb_r,"calib_probs":comb_c,"predicted_class":int(np.argmax(comb_c)),"group_id":gid,"model_type":mtype,"model_path":model_path,"val_f1":None,"symbol":symbol,"strategy":strategy,"meta":meta,"window_ensemble":{"mode":PREDICT_WINDOW_ENSEMBLE,"gamma":ENSEMBLE_VAR_GAMMA,"wins":used_windows}})
+            entry_price=df["close"].iloc[-1]
+            allpreds.append({"class":int(np.argmax(comb_c)),"probs":comb_c,"entry_price":float(entry_price),"num_classes":num_cls,"group_id":gid,"model_name":mtype,"model_symbol":symbol,"symbol":symbol,"strategy":strategy})
+
+            # [패치] 모델별 루프 끝 메모리 정리
+            try:
+                del preds_c_list, preds_r_list, calib_stack, raw_stack
+            except Exception:
+                pass
+            _safe_empty_cache()
+            gc.collect()
+
+        except Exception as e:
+            print(f"[❌ 모델 예측 실패] {info} → {e}")
+            _safe_empty_cache()
+            gc.collect()
+            continue
+    return outs,allpreds
+
+try:
             lo_sel,hi_sel=_class_range_by_meta_or_cfg(final_cls,(chosen or {}).get("meta"),symbol,strategy)
             exp_ret=(float(lo_sel)+float(hi_sel))/2.0
             ok,why=_exit_guard_check(lo_sel,hi_sel,exp_ret)
@@ -743,6 +901,11 @@ def predict(symbol,strategy,source="일반",model_type=None):
         try: _hb_stop.set(); _hb_thread.join(timeout=2)
         except Exception: pass
         _release_predict_lock(lock_path)
+        # [패치] 예측 종료 시 대형 객체 정리
+        try:
+            _release_memory(df, feat, X, outs, all_preds)
+        except Exception:
+            pass
 
 def evaluate_predictions(get_price_fn):
     from failure_db import check_failure_exists
@@ -865,118 +1028,9 @@ def evaluate_predictions(get_price_fn):
             if tmp and os.path.exists(tmp): os.remove(tmp)
         except Exception: pass
         print(f"[오류] evaluate_predictions 스트리밍 실패 → {e}")
-
-def _combine_windows(calib_stack:np.ndarray,raw_stack:np.ndarray)->tuple[np.ndarray,np.ndarray]:
-    eps=1e-12
-    mean_c=calib_stack.mean(axis=0); mean_r=raw_stack.mean(axis=0)
-    if PREDICT_WINDOW_ENSEMBLE=="mean":
-        cc=mean_c; rr=mean_r
-    else:
-        var_c=calib_stack.var(axis=0); var_r=raw_stack.var(axis=0)
-        cc=mean_c/(1.0+ENSEMBLE_VAR_GAMMA*var_c); rr=mean_r/(1.0+ENSEMBLE_VAR_GAMMA*var_r)
-        if PREDICT_WINDOW_ENSEMBLE=="mean_var":
-            cc=0.5*mean_c+0.5*cc; rr=0.5*mean_r+0.5*rr
-    cc=np.nan_to_num(cc,nan=0.0,posinf=0.0,neginf=0.0); rr=np.nan_to_num(rr,nan=0.0,posinf=0.0,neginf=0.0)
-    cc=(cc+1e-9); rr=(rr+1e-9)
-    cc=cc/(cc.sum()+1e-12); rr=rr/(rr.sum()+1e-12)
-    return cc.astype(float),rr.astype(float)
-
-def get_model_predictions(symbol,strategy,models,df,feat_scaled,window_list,recent_freq,regime="unknown"):
-    outs=[]; allpreds=[]
-    for info in models:
-        try:
-            pt=info.get("pt_file"); meta_path=info.get("meta_path")
-            if not pt or not meta_path: continue
-            model_path=os.path.join(MODEL_DIR,pt)
-            if os.path.exists(model_path) is False:
-                try:
-                    p=_stem(pt).split("_")
-                    if len(p)>=3:
-                        sym,strat,mtype=p[0],p[1],p[2]
-                        for e in _KNOWN_EXTS:
-                            alt=os.path.join(MODEL_DIR,sym,strat,f"{mtype}{e}")
-                            if os.path.exists(alt): model_path=alt; break
-                except Exception: pass
-            with open(meta_path,"r",encoding="utf-8") as mf: meta=json.load(mf)
-
-            # 파일명 group 태그가 있으면 meta 보정
-            fname_grp,_fname_cls=_parse_group_cls_from_filename(model_path)
-            if fname_grp is not None:
-                meta["group_id"]=int(fname_grp)
-            elif "group_id" not in meta or not str(meta.get("group_id")).isdigit():
-                meta["group_id"]=_infer_group_id(symbol,strategy)
-
-            if STRICT_SAME_BOUNDS:
-                cr_meta=_ranges_from_meta(meta)
-                if not (cr_meta and len(cr_meta)>=2):
-                    print(f"[STRICT] no class_ranges in meta → {os.path.basename(model_path)} (skip)")
-                    continue
-
-            mtype_raw=meta.get("model","lstm"); mtype=_norm_model_type(mtype_raw); gid=meta.get("group_id",0)
-            inp_size=int(meta.get("input_size",feat_scaled.shape[1]))
-            cr_meta=_ranges_from_meta(meta)
-            num_cls=int(meta.get("num_classes",(len(cr_meta) if cr_meta else NUM_CLASSES)))
-
-            preds_c_list,preds_r_list=[],[]; used_windows=[]
-            for win in list(dict.fromkeys([int(w) for w in window_list if int(w)>0])):
-                if feat_scaled.shape[0]<win:
-                    preds_c_list=[]; preds_r_list=[]; used_windows=[]; break
-                seq=feat_scaled[-win:]
-                if seq.shape[1]<inp_size: seq=np.pad(seq,((0,0),(0,inp_size-seq.shape[1])),mode="constant")
-                elif seq.shape[1]>inp_size: seq=seq[:,:inp_size]
-                x=torch.tensor(seq,dtype=torch.float32).unsqueeze(0)
-
-                # === 로딩 파이프라인 (다중 폴백) ===
-                model=get_model(mtype_raw,input_size=inp_size,output_size=num_cls)
-                loaded=load_model_any(model_path,model,ttl_sec=PREDICT_MODEL_LOADER_TTL)
-                if loaded is None:
-                    # 2차: torch.load 후 주입 시도
-                    try:
-                        obj=torch.load(model_path,map_location="cpu")
-                        if isinstance(obj,dict):
-                            try: model.load_state_dict(obj,strict=False); loaded=model
-                            except Exception: loaded=None
-                        else:
-                            loaded=obj
-                    except Exception:
-                        loaded=None
-                if isinstance(loaded,dict) and model is not None:
-                    try: model.load_state_dict(loaded,strict=False); model.eval()
-                    except Exception: 
-                        print(f"[모델 주입 실패] {model_path}")
-                        preds_c_list=[]; preds_r_list=[]; break
-                elif loaded is None:
-                    print(f"[⚠️ 모델 로딩 실패] {model_path}")
-                    preds_c_list=[]; preds_r_list=[]; break
-                else:
-                    if hasattr(loaded,"eval"): model=loaded  # 모듈 자체 로드
-                model.to(DEVICE); model.eval()
-
-                with torch.no_grad():
-                    logits=model(x.to(DEVICE))
-                    logits=torch.nan_to_num(logits)
-                    probs=F.softmax(logits,dim=1)
-                    probs=torch.nan_to_num(probs).squeeze().cpu().numpy()
-                probs=np.nan_to_num(probs,nan=0.0,posinf=0.0,neginf=0.0)+1e-9
-                probs=probs/(probs.sum()+1e-12)
-                cprobs=apply_calibration(probs,symbol=symbol,strategy=strategy,regime=regime,model_meta=meta).astype(float)
-                cprobs=np.nan_to_num(cprobs,nan=0.0,posinf=0.0,neginf=0.0)+1e-9
-                cprobs=cprobs/(cprobs.sum()+1e-12)
-                preds_c_list.append(cprobs); preds_r_list.append(probs); used_windows.append(int(win))
-
-            if not preds_c_list: 
-                print(f"[모델 스킵] 예측값 없음 → {os.path.basename(model_path)}")
-                continue
-
-            calib_stack=np.vstack(preds_c_list); raw_stack=np.vstack(preds_r_list)
-            comb_c,comb_r=_combine_windows(calib_stack,raw_stack)
-
-            outs.append({"raw_probs":comb_r,"calib_probs":comb_c,"predicted_class":int(np.argmax(comb_c)),"group_id":gid,"model_type":mtype,"model_path":model_path,"val_f1":None,"symbol":symbol,"strategy":strategy,"meta":meta,"window_ensemble":{"mode":PREDICT_WINDOW_ENSEMBLE,"gamma":ENSEMBLE_VAR_GAMMA,"wins":used_windows}})
-            entry_price=df["close"].iloc[-1]
-            allpreds.append({"class":int(np.argmax(comb_c)),"probs":comb_c,"entry_price":float(entry_price),"num_classes":num_cls,"group_id":gid,"model_name":mtype,"model_symbol":symbol,"symbol":symbol,"strategy":strategy})
-        except Exception as e:
-            print(f"[❌ 모델 예측 실패] {info} → {e}"); continue
-    return outs,allpreds
+    finally:
+        # [패치] 평가 종료 시 정리
+        _release_memory()
 
 def _get_price_df_for_eval(symbol,strategy): return get_kline_by_strategy(symbol,strategy)
 def run_evaluation_once(): evaluate_predictions(_get_price_df_for_eval)
