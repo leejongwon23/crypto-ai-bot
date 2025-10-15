@@ -1,14 +1,15 @@
-# meta_learning.py (YOPO v1.4 — 메타러너 정상화/과도 abstain 방지)
-# ------------------------------------------------------------
-# 단일 진입점 메타러너 (NaN/None 방어, 과도 abstain 방지, EVO/스태킹/룰 폴백)
-# predict.py의 포지션 힌트/최소 기대수익 필터와 정합
-# ------------------------------------------------------------
+# meta_learning.py (YOPO v1.5 — 메타러너 정상화/과도 abstain 방지, meta_choice=predicted 표기)
+# ------------------------------------------------------------------
+# - get_meta_prediction(): 정상 선택 시 meta_choice="predicted"로 로그 남김.
+# - 기존 기능/인터페이스 유지. NaN/None 가드 및 EVO/스태킹/룰 폴백 그대로.
+# ------------------------------------------------------------------
 
 from __future__ import annotations
 import os
 import math
 from typing import List, Dict, Optional, Tuple, Any
 import numpy as np
+import pickle
 
 __all__ = [
     "get_meta_prediction",
@@ -18,7 +19,7 @@ __all__ = [
     "load_meta_learner",
 ]
 
-# (선택) 토치 의존은 존재할 때만 사용
+# optional torch
 try:
     import torch
     import torch.nn as nn
@@ -30,7 +31,7 @@ except Exception:
     nn = object  # type: ignore
     optim = object  # type: ignore
 
-# (선택) 1단계 evo_meta_learner 연동
+# optional evo_meta_learner
 _EVO_OK = False
 try:
     from evo_meta_learner import (
@@ -41,22 +42,14 @@ try:
 except Exception:
     _EVO_OK = False
 
-# ===== (환경설정) 성공률 기본값: 성공 이력 없을 때 prior =====
+# ===== 환경설정 =====
 META_BASE_SUCCESS = float(os.getenv("META_BASE_SUCCESS", "0.55"))
-
-# 기대수익률 임계(절댓값). 미만은 0 처리 → 선택 영향 제거
 _RET_TH = float(os.getenv("META_ER_THRESHOLD", "0.01"))
-
-# predict.py와 정합: 기본 최소 기대수익(절댓값) — 필요 시 인자로 덮어씀
 META_MIN_RETURN = float(os.getenv("META_MIN_RETURN", "0.01"))
-
-# EVO-메타 합성 규칙 환경변수
-EVO_META_AGG = os.getenv("EVO_META_AGG", "mean_var").lower()   # mean | varpen | mean_var
+EVO_META_AGG = os.getenv("EVO_META_AGG", "mean_var").lower()
 EVO_META_VAR_GAMMA = float(os.getenv("EVO_META_VAR_GAMMA", "1.0"))
-
-# ===== 폭·신뢰도 보정 관련 환경변수 =====
 CLAMP_MAX_WIDTH = float(os.getenv("CLAMP_MAX_WIDTH", "0.10"))
-META_CI_Z = float(os.getenv("META_CI_Z", "1.64"))  # ~90% CI
+META_CI_Z = float(os.getenv("META_CI_Z", "1.64"))
 META_MIN_N = int(os.getenv("META_MIN_N", "30"))
 
 # ======================= (A) MAML (유지) =======================
@@ -115,10 +108,7 @@ def maml_train_entry(model, train_loader, val_loader, inner_lr=0.01, outer_lr=0.
         print(f"[❌ MAML 예외 발생] {e}")
         return None
 
-
 # ================= (B) 스태킹형 메타러너(Scikit) =================
-import pickle
-
 META_MODEL_PATH = "/persistent/models/meta_learner.pkl"
 
 def train_meta_learner(model_outputs_list, true_labels):
@@ -149,8 +139,7 @@ def load_meta_learner():
     print("[⚠️ meta learner 파일 없음 → None 반환]")
     return None
 
-
-# ========== (C) 안전 로그 유틸(있으면 사용, 없으면 프린트) ==========
+# ========== (C) 안전 로그 유틸 ==========
 def _safe_log_prediction(**kwargs):
     try:
         from logger import log_prediction  # 선택적 의존
@@ -162,7 +151,6 @@ def _safe_log_prediction(**kwargs):
         info = {k: kwargs.get(k) for k in ["symbol", "strategy", "model",
                                            "predicted_class", "note", "rate", "reason", "source"]}
         print(f"[META-LOG Fallback] {info}")
-
 
 # ================= (D) 안전 정규화/집계 유틸 =================
 def _nan_guard(x: Any, *, fill: float = 0.0):
@@ -325,7 +313,6 @@ def _aggregate_base_outputs(
     detail["no_valid_model"] = False
     return agg.astype(np.float32), detail
 
-
 # ======= 폭·신뢰도 보정 유틸 =======
 def _ret_gain(er: float) -> float:
     er_abs = abs(float(er))
@@ -399,7 +386,6 @@ def _width_scaled_er(
         out[int(c)] = float(er) * scale
     return out
 
-
 # ======= 포지션/최소 기대수익 필터 =======
 def _position_from_range(lo: float, hi: float) -> str:
     try:
@@ -445,12 +431,12 @@ def _mask_by_hint_and_minret(
             pass
     return out, reasons
 
-
 # ========== (E) 단독 유틸: 성공률/수익률 고려 최종 클래스 산출 ==========
 def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None):
     """
-    기본 유틸: 성공률/수익률 고려 스코어로 최종 클래스 산출
-    (과도 abstain 방지 — 항상 유효 클래스 반환)
+    기본 유틸: 성공률/수익률 고려 스코어로 최종 클래스 산출.
+    과도 abstain 방지. 항상 int 반환.
+    정상 선택 시 model_name/meta_choice="predicted"로 로그 남김.
     """
     if not model_outputs_list:
         raise ValueError("❌ get_meta_prediction: 모델 출력 없음")
@@ -504,9 +490,33 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
 
     scores = _nan_guard(scores)
     final_pred_class = int(np.argmax(scores))
+
+    # === 핵심 패치: meta_choice="predicted" 표기 로그 ===
+    try:
+        _safe_log_prediction(
+            symbol=meta_info.get("symbol","-"),
+            strategy=meta_info.get("strategy","-"),
+            direction="메타예측",
+            entry_price=0,
+            target_price=0,
+            model="meta",
+            model_name="predicted",            # <- 표준 표기
+            predicted_class=final_pred_class,
+            label=final_pred_class,
+            note=f"meta_choice=predicted mode={mode}",
+            success=True,
+            reason=f"scores_entropy={_entropy(_normalize_safe(scores)):.3f}",
+            rate=0.0,
+            return_value=0.0,
+            volatility=False,
+            source="meta",
+            group_id=0
+        )
+    except Exception:
+        pass
+
     print(f"[META] {mode} → 최종 클래스 {final_pred_class} / 점수={np.round(scores, 4)}")
     return final_pred_class
-
 
 # ================= (F) EVO-메타 연동 보조 =================
 def _build_evo_meta_vector(agg_probs: np.ndarray, expected_return: Dict[int, float]) -> np.ndarray:
@@ -541,7 +551,6 @@ def _maybe_evo_decide(
     except Exception as e:
         print(f"[⚠️ EVO 메타 예측 실패] {e}")
     return None
-
 
 # ========== (G) 단일 진입점: meta_predict(...) ==========
 def meta_predict(
@@ -701,7 +710,7 @@ def meta_predict(
         except Exception:
             pass
         sr_cho = class_success_ci.get(result["class"], None)
-        note = (f"meta:{used_mode} top1={result['class']} p={result['confidence']:.3f} "
+        note = (f"meta_choice={used_mode} top1={result['class']} p={result['confidence']:.3f} "
                 f"margin={result['margin']:.3f} ERmid={er_cho:.4f} "
                 f"SR={('-' if sr_cho is None else f'{float(sr_cho):.2f}')} "
                 f"TH={_RET_TH:.2%} EVO_AGG={EVO_META_AGG} γ={EVO_META_VAR_GAMMA} "
