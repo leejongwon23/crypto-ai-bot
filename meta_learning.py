@@ -1,7 +1,8 @@
 # meta_learning.py (YOPO v1.5 — 메타러너 정상화/과도 abstain 방지, meta_choice=predicted 표기)
 # ------------------------------------------------------------------
 # - get_meta_prediction(): 정상 선택 시 meta_choice="predicted"로 로그 남김.
-# - 기존 기능/인터페이스 유지. NaN/None 가드 및 EVO/스태킹/룰 폴백 그대로.
+# - select(): calib_prob 우선, 동률 시 |expected_return_mid| 큰 것. PROFIT_MIN 미만 후보 제외.
+# - NaN/None 가드 및 EVO/스태킹/룰 폴백 유지.
 # ------------------------------------------------------------------
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ __all__ = [
     "maml_train_entry",
     "train_meta_learner",
     "load_meta_learner",
+    "select",                    # ← 신규
 ]
 
 # optional torch
@@ -51,6 +53,7 @@ EVO_META_VAR_GAMMA = float(os.getenv("EVO_META_VAR_GAMMA", "1.0"))
 CLAMP_MAX_WIDTH = float(os.getenv("CLAMP_MAX_WIDTH", "0.10"))
 META_CI_Z = float(os.getenv("META_CI_Z", "1.64"))
 META_MIN_N = int(os.getenv("META_MIN_N", "30"))
+CALIB_NAN_MODE = os.getenv("CALIB_NAN_MODE", "abstain").lower()  # "abstain" | "drop"
 
 # ======================= (A) MAML (유지) =======================
 if _TORCH_OK:
@@ -491,7 +494,7 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
     scores = _nan_guard(scores)
     final_pred_class = int(np.argmax(scores))
 
-    # === 핵심 패치: meta_choice="predicted" 표기 로그 ===
+    # === 표준 표기 로그(meta_choice="predicted") ===
     try:
         _safe_log_prediction(
             symbol=meta_info.get("symbol","-"),
@@ -500,7 +503,7 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
             entry_price=0,
             target_price=0,
             model="meta",
-            model_name="predicted",            # <- 표준 표기
+            model_name="predicted",
             predicted_class=final_pred_class,
             label=final_pred_class,
             note=f"meta_choice=predicted mode={mode}",
@@ -742,3 +745,51 @@ def meta_predict(
           f"conf={result['confidence']:.3f} margin={result['margin']:.3f} "
           f"entropy={result['entropy']:.3f} no_valid={no_valid_model}")
     return result
+
+# ========== (H) 후보 선택기: calib_prob 1순위, |ER_mid| 동률 정렬 ==========
+def select(candidates: List[Dict[str, Any]],
+           profit_min: float = META_MIN_RETURN) -> Dict[str, Any]:
+    """
+    입력: 후보 dict 리스트.
+      필수키: 'calib_prob' (float), 'expected_return_mid' (float)
+      선택키: 임의(모델경로 등). 반환에 candidate_rank, meta_prob 포함.
+    규칙:
+      1) calib_prob NaN/None → 제외. (CALIB_NAN_MODE=='drop')
+         'abstain' 모드면 전체 보류 반환.
+      2) abs(expected_return_mid) < profit_min → 제외.
+      3) 정렬키: (-calib_prob, -abs(expected_return_mid)).
+      4) 1등 반환. 동점 다수면 입력 순서 빠른 것.
+    """
+    if not candidates:
+        return {"abstain": True, "reason": "no_candidates"}
+
+    _clean = []
+    for idx, c in enumerate(candidates):
+        cp = c.get("calib_prob", None)
+        er = c.get("expected_return_mid", None)
+        try:
+            cp = float(cp)
+            er = float(er)
+        except Exception:
+            cp = float("nan")
+            er = 0.0
+        if not np.isfinite(cp):
+            if CALIB_NAN_MODE == "abstain":
+                return {"abstain": True, "reason": "calib_prob_nan"}
+            else:  # drop
+                continue
+        if abs(er) < float(profit_min):
+            continue
+        _clean.append((idx, cp, er, c))
+
+    if not _clean:
+        return {"abstain": True, "reason": "filtered_out_by_rules"}
+
+    _clean.sort(key=lambda t: (-t[1], -abs(t[2]), t[0]))
+    best_idx, best_cp, best_er, best_obj = _clean[0]
+    best = dict(best_obj)
+    best["candidate_rank"] = int(1)
+    best["meta_prob"] = float(best_cp)
+    best["expected_return_mid"] = float(best_er)
+    best["abstain"] = False
+    return best
