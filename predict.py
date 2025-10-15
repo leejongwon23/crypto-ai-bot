@@ -490,7 +490,7 @@ def failed_result(symbol,strategy,model_type="unknown",reason="",source="일반"
     res={"symbol":symbol,"strategy":strategy,"success":False,"reason":reason,"model":str(model_type or "unknown"),"rate":0.0,"class":-1,"timestamp":t,"source":source,"predicted_class":-1,"label":-1}
     try:
         ensure_prediction_log_exists()
-        log_prediction(symbol=symbol,strategy=strategy,direction="예측실패",entry_price=0,target_price=0,model=str(model_type or "unknown"),success=False,reason=reason,rate=0.0,timestamp=t,return_value=0.0,volatility=True,source=source,predicted_class=-1,label=-1,class_return_min=0.0,class_return_max=0.0,class_return_text="")
+        log_prediction(symbol=symbol,strategy=strategy,direction="예측실패",entry_price=0,target_price=0,model=str(model_type or "unknown"),success=False,reason=reason,rate=0.0,expected_return=0.0,position="neutral",timestamp=t,return_value=0.0,volatility=True,source=source,predicted_class=-1,label=-1,class_return_min=0.0,class_return_max=0.0,class_return_text="")
     except Exception as e: print(f"[failed_result log_prediction 오류] {e}")
     try:
         if X_input is not None: insert_failure_record(res,feature_vector=np.array(X_input).flatten().tolist(),context="prediction")
@@ -502,7 +502,7 @@ def _soft_abstain(symbol,strategy,*,reason,meta_choice="abstain",regime="unknown
         ensure_prediction_log_exists()
         cur=float((df["close"].iloc[-1] if df is not None and len(df) else 0.0))
         note={"reason":reason,"abstain_prob_min":float(ABSTAIN_PROB_MIN),"max_calib_prob":None,"meta_choice":meta_choice,"regime":regime}
-        log_prediction(symbol=symbol,strategy=strategy,direction="예측보류",entry_price=cur,target_price=cur,model="meta",model_name=str(meta_choice),predicted_class=-1,label=-1,note=json.dumps(note,ensure_ascii=False),top_k=[],success=False,reason=reason,rate=0.0,return_value=0.0,source=source,group_id=group_id,feature_vector=(torch.tensor(X_last,dtype=torch.float32).numpy() if X_last is not None else None),regime=regime,meta_choice="abstain",raw_prob=None,calib_prob=None,calib_ver=get_calibration_version(),class_return_min=0.0,class_return_max=0.0,class_return_text="")
+        log_prediction(symbol=symbol,strategy=strategy,direction="예측보류",entry_price=cur,target_price=cur,model="meta",model_name=str(meta_choice),predicted_class=-1,label=-1,note=json.dumps(note,ensure_ascii=False),top_k=[],success=False,reason=reason,rate=0.0,expected_return=0.0,position="neutral",return_value=0.0,source=source,group_id=group_id,feature_vector=(torch.tensor(X_last,dtype=torch.float32).numpy() if X_last is not None else None),regime=regime,meta_choice="abstain",raw_prob=None,calib_prob=None,calib_ver=get_calibration_version(),class_return_min=0.0,class_return_max=0.0,class_return_text="")
     except Exception as e: print(f"[soft_abstain 예외] {e}")
     print(f"[predict] abstain {symbol}-{strategy} :: {reason}")
     return {"symbol":symbol,"strategy":strategy,"model":"meta","class":-1,"expected_return":0.0,"class_return_min":0.0,"class_return_max":0.0,"class_return_text":"","position":"neutral","timestamp":_now_kst().isoformat(),"source":source,"regime":regime,"reason":reason,"success":False,"predicted_class":-1,"label":-1}
@@ -840,7 +840,7 @@ def predict(symbol,strategy,source="일반",model_type=None):
                 if gap<=EXP_NEAR and random.random()<eps:
                     cands=[]
                     for i,base,_ in ss[:min(3,len(ss))]:
-                        mp=outs[i].get("model_path",""); n,_ne,_ts=_load_json(EXP_STATE,{}).get(f"{symbol}|{strategy}",{}).get(mp,{"n":0}).get("n",0),None,None
+                        mp=outs[i].get("model_path",""); n=_load_json(EXP_STATE,{}).get(f"{symbol}|{strategy}",{}).get(mp,{"n":0}).get("n",0)
                         bonus=EXP_GAMMA/np.sqrt(1.0+float(n)); cands.append((i,base+bonus))
                     cands.sort(key=lambda x:x[1],reverse=True)
                     if cands and cands[0][0]!=top1[0]:
@@ -910,7 +910,7 @@ def predict(symbol,strategy,source="일반",model_type=None):
         log_prediction(symbol=symbol,strategy=strategy,direction="예측",entry_price=entry,target_price=entry*(1+exp_ret),model="meta",
                        model_name=("evo_meta_learner" if meta_choice=="evo_meta_learner" else str(meta_choice)),
                        predicted_class=final_cls,label=final_cls,note=json.dumps(note,ensure_ascii=False),top_k=topk,success=False,reason="predicted",
-                       rate=float(exp_ret),return_value=0.0,source=("진화형" if meta_choice=="evo_meta_learner" else "기본"),
+                       rate=float(exp_ret),expected_return=float(exp_ret),position=pos_sel,return_value=0.0,source=("진화형" if meta_choice=="evo_meta_learner" else "기본"),
                        group_id=(chosen.get("group_id") if isinstance(chosen,dict) else None),
                        feature_vector=torch.tensor(X[-1],dtype=torch.float32).numpy(),regime=regime,meta_choice=meta_choice,
                        raw_prob=raw_pred,calib_prob=calib_pred,calib_ver=get_calibration_version(),
@@ -946,7 +946,7 @@ def predict(symbol,strategy,source="일반",model_type=None):
                 log_prediction(symbol=symbol,strategy=strategy,direction="예측(섀도우)",entry_price=entry,target_price=entry*(1+exp_i),
                                model=_norm_model_type(m.get("model_type","")),model_name=os.path.basename(m.get("model_path","")),
                                predicted_class=pred_i,label=pred_i,note=json.dumps(note_s,ensure_ascii=False),top_k=top_i,success=False,reason="shadow",
-                               rate=float(exp_i),return_value=0.0,source="섀도우",group_id=m.get("group_id",0),
+                               rate=float(exp_i),expected_return=float(exp_i),position=pos_i,return_value=0.0,source="섀도우",group_id=m.get("group_id",0),
                                feature_vector=torch.tensor(X[-1],dtype=torch.float32).numpy(),regime=regime,meta_choice="shadow",
                                raw_prob=raw_i,calib_prob=calib_i,calib_ver=get_calibration_version(),
                                class_return_min=float(lo_i),class_return_max=float(hi_i),class_return_text=class_text_i)
@@ -1052,7 +1052,7 @@ def evaluate_predictions(get_price_fn):
                         if _now_kst()<deadline and reached:
                             status="v_success" if str(r.get("volatility","")).strip().lower() in ["1","true"] else "success"
                             r.update({"status":status,"reason":f"[조기성공 pred_class={pred_cls}] gain={gain:.3f} (cls_min={cmin}, cls_max={cmax})","return":round(gain,5),"return_value":round(gain,5),"group_id":gid})
-                            log_prediction(symbol=sym,strategy=strat,direction=f"평가:{status}",entry_price=entry,target_price=entry*(1+gain),timestamp=_now_kst().isoformat(),model=model,predicted_class=pred_cls,success=True,reason=r["reason"],rate=gain,return_value=gain,volatility=(status=="v_success"),source="평가",label=label,group_id=gid)
+                            log_prediction(symbol=sym,strategy=strat,direction=f"평가:{status}",entry_price=entry,target_price=entry*(1+gain),timestamp=_now_kst().isoformat(),model=model,predicted_class=pred_cls,success=True,reason=r["reason"],rate=gain,expected_return=gain,position=("long" if cmax>0 else "short" if cmin<0 else "neutral"),return_value=gain,volatility=(status=="v_success"),source="평가",label=label,group_id=gid)
                             if model=="meta": update_model_success(sym,strat,model,True)
                             w_all.writerow({k:r.get(k,"") for k in fields})
                             if not eval_written:
@@ -1065,7 +1065,7 @@ def evaluate_predictions(get_price_fn):
                         if str(r.get("volatility","")).strip().lower() in ["1","true"]:
                             status="v_success" if status=="success" else "v_fail"
                         r.update({"status":status,"reason":f"[pred_class={pred_cls}] gain={gain:.3f} (cls_min={cmin}, cls_max={cmax})","return":round(gain,5),"return_value":round(gain,5),"group_id":gid})
-                        log_prediction(symbol=sym,strategy=strat,direction=f"평가:{status}",entry_price=entry,target_price=entry*(1+gain),timestamp=_now_kst().isoformat(),model=model,predicted_class=pred_cls,success=(status in ["success","v_success"]),reason=r["reason"],rate=gain,return_value=gain,volatility=("v_" in status),source="평가",label=label,group_id=gid)
+                        log_prediction(symbol=sym,strategy=strat,direction=f"평가:{status}",entry_price=entry,target_price=entry*(1+gain),timestamp=_now_kst().isoformat(),model=model,predicted_class=pred_cls,success=(status in ["success","v_success"]),reason=r["reason"],rate=gain,expected_return=gain,position=("long" if cmax>0 else "short" if cmin<0 else "neutral"),return_value=gain,volatility=("v_" in status),source="평가",label=label,group_id=gid)
                         if status in ["fail","v_fail"]:
                             if not check_failure_exists(r): insert_failure_record(r,feature_vector=None)
                         if model=="meta": update_model_success(sym,strat,model,status in ["success","v_success"])
