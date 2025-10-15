@@ -1150,6 +1150,26 @@ def force_fix_prediction_log():
     except Exception as e:
         return f"⚠️ 오류: {e}", 500
 
+# ✅ 모든 모델 즉시 예측 실행 라우트
+@app.route("/run-now", methods=["GET"])
+def run_now():
+    try:
+        if os.path.exists(LOCK_PATH) or _is_training():
+            return "⏸️ 학습 중이거나 락 상태입니다. 예측 불가.", 423
+        _pl_clear()
+        _safe_open_gate("manual_run_now")
+        print("[RUN-NOW] 모든 모델 즉시 예측 시작"); sys.stdout.flush()
+        for strat in ["단기", "중기", "장기"]:
+            try:
+                trigger_run(strategy=strat)
+            except Exception as e:
+                print(f"[RUN-NOW] {strat} 실패: {e}")
+        _safe_close_gate("manual_run_now_end")
+        return "✅ 모든 전략(단기/중기/장기)에 대한 즉시 예측 완료 요청됨"
+    except Exception as e:
+        traceback.print_exc()
+        return f"❌ 예측 실패: {e}", 500
+
 if __name__ == "__main__":
     try:
         port = int(os.environ.get("PORT", 5000))
