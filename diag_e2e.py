@@ -1,4 +1,4 @@
-# === diag_e2e.py (관우 v2.6 — RealityGuard 표시 반영: rg_mu/rg_lo/rg_hi) ===
+# === diag_e2e.py (관우 v2.7 — 모델별 예상수익률·확률·포지션 표기 추가) ===
 import os, json, traceback, re
 import pandas as pd
 import pytz
@@ -88,6 +88,14 @@ def _num(x, default=0.0):
     try: return float(x)
     except: return default
 
+def _num_or_none(x):
+    try:
+        v = float(x)
+        if pd.isna(v): return None
+        return v
+    except:
+        return None
+
 # ===================== 인벤토리 스캔(.pt + .meta.json) =====================
 _NAME_RE = re.compile(
     r"^(?P<sym>[^_]+)_(?P<strat>단기|중기|장기)_(?P<model>lstm|cnn_lstm|transformer)"
@@ -118,7 +126,7 @@ def _list_inventory():
     inv = {}
     if not os.path.isdir(MODEL_DIR): return inv
 
-    # 1) 메타부터 스캔 (학습만 끝나고 pt가 늦게 오는 케이스 보장)
+    # 1) 메타부터 스캔
     for fn in os.listdir(MODEL_DIR):
         if not fn.endswith(".meta.json"): continue
         meta_path = os.path.join(MODEL_DIR, fn)
@@ -134,7 +142,6 @@ def _list_inventory():
         })
         val["has_meta"] = True
         val["meta_file"] = fn
-        # 메타 파싱
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
@@ -144,7 +151,6 @@ def _list_inventory():
             ts_raw = meta.get("timestamp") or meta.get("saved_at")
             ts_kst = _to_kst(ts_raw)
             val["saved_at"] = ts_kst.isoformat() if ts_kst else None
-            # num_classes / group_id 보강
             val["num_classes"] = val["num_classes"] or meta.get("num_classes")
             if isinstance(val["num_classes"], str) and val["num_classes"].isdigit():
                 val["num_classes"] = int(val["num_classes"])
@@ -348,38 +354,72 @@ def _build_snapshot(symbols_filter=None):
                 inv_item = inv.get(key)
                 df_model = df_ss[df_ss["model"].astype(str).str.contains(mt, na=False)] if not df_ss.empty else pd.DataFrame()
 
-                # 최신 클래스/수익률/RealityGuard 텍스트
+                # 최신 클래스/수익률/확률/포지션/RealityGuard 텍스트
                 def _latest_for_model(dfm):
-                    if dfm.empty: return "-", None, ""
+                    if dfm.empty:
+                        return {
+                            "cls": "-",
+                            "rate": None,
+                            "rg_text": "",
+                            "class_text": None,
+                            "prob": None,
+                            "prob_src": None,
+                            "position": None
+                        }
                     try: dfm = dfm.sort_values("timestamp")
                     except Exception: pass
                     last = dfm.iloc[-1]
+
+                    # 클래스
                     latest_cls = "-"
                     for k in ["predicted_class","class","pred_class","label"]:
                         if k in dfm.columns:
                             v = last.get(k, None)
                             if pd.notna(v):
-                                latest_cls = str(v); break
-                    latest_ret = None
-                    if "return" in dfm.columns: latest_ret = _num(last.get("return"))
-                    elif "return_value" in dfm.columns: latest_ret = _num(last.get("return_value"))
-                    elif "rate" in dfm.columns: latest_ret = _num(last.get("rate"))
-                    # RealityGuard 우선 표시
-                    rg_text = _rg_text_from_row(last)
-                    latest_text = rg_text
-                    # RG가 없으면 class_return_text → 마지막으로 일반 수익률 %
-                    if not latest_text:
-                        if "class_return_text" in dfm.columns:
-                            try:
-                                txt = str(last.get("class_return_text","")).strip()
-                                if txt: latest_text = txt
-                            except Exception:
-                                pass
-                    if not latest_text:
-                        latest_text = "-" if latest_ret is None else _pct(latest_ret)
-                    return latest_cls, latest_ret, latest_text
+                                latest_cls = str(int(v)) if str(v).isdigit() else str(v)
+                                break
 
-                latest_cls, latest_ret, latest_text = _latest_for_model(df_model)
+                    # 예상 수익률
+                    latest_rate = None
+                    if "rate" in dfm.columns: latest_rate = _num_or_none(last.get("rate"))
+                    elif "return" in dfm.columns: latest_rate = _num_or_none(last.get("return"))
+                    elif "return_value" in dfm.columns: latest_rate = _num_or_none(last.get("return_value"))
+
+                    # 구간 텍스트
+                    class_text = None
+                    if "class_return_text" in dfm.columns:
+                        try:
+                            txt = str(last.get("class_return_text","")).strip()
+                            if txt: class_text = txt
+                        except Exception:
+                            pass
+
+                    # 확률
+                    prob = None; prob_src = None
+                    cp = last.get("calib_prob", None)
+                    rp = last.get("raw_prob", None)
+                    if cp is not None and str(cp)!="nan":
+                        prob = _num_or_none(cp); prob_src = "calib"
+                    elif rp is not None and str(rp)!="nan":
+                        prob = _num_or_none(rp); prob_src = "raw"
+
+                    # 포지션
+                    pos = last.get("position", None)
+                    pos = str(pos) if pos is not None and str(pos).strip() not in ["nan","None",""] else None
+
+                    # RealityGuard 우선 텍스트
+                    rg_text = _rg_text_from_row(last)
+                    return {
+                        "cls": latest_cls,
+                        "rate": latest_rate,
+                        "rg_text": rg_text,
+                        "class_text": class_text,
+                        "prob": prob,
+                        "prob_src": prob_src,
+                        "position": pos
+                    }
+
+                latest = _latest_for_model(df_model)
 
                 val_f1 = None
                 if inv_item and inv_item.get("val_f1") is not None:
@@ -406,9 +446,12 @@ def _build_snapshot(symbols_filter=None):
                     "succ": _stat_count(df_model, "success") + _stat_count(df_model, "v_success"),
                     "fail": _stat_count(df_model, "fail") + _stat_count(df_model, "v_fail"),
                     "total": int(len(df_model)),
-                    "latest_class": latest_cls,
-                    "latest_return": latest_ret,
-                    "latest_return_text": latest_text,  # ← RG 우선 텍스트 저장
+                    "latest_class": latest["cls"],
+                    "latest_return": latest["rate"],            # 숫자값
+                    "latest_return_text": latest["rg_text"] or latest["class_text"],  # 표시용(우선 RG)
+                    "latest_prob": latest["prob"],
+                    "latest_prob_src": latest["prob_src"],
+                    "latest_position": latest["position"],
                 }
                 denom = max(1, md["total"]); md["succ_rate"] = md["succ"] / denom
                 models_detail.append(md)
@@ -710,15 +753,19 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow'));
                                f"<span class='badge {cum_cls}'>누적 {_pct(cum['succ_rate'])} ({cum['succ']}/{cum['sf_denominator']})</span>"
                                f"</div>")
 
-                # 모델별 상세(예측 요약)
+                # 모델별 상세(예측 요약) — 컬럼 확장
                 rows = []
                 for md in by_model:
                     val_f1_val = md.get("val_f1", None)
                     val_f1_txt = f"{float(val_f1_val):.3f}" if (val_f1_val is not None) else "-"
                     last_cls = md.get("latest_class", "-")
-                    last_ret = md.get("latest_return", None)
-                    # RealityGuard 텍스트 우선
-                    last_ret_txt = md.get("latest_return_text") or ("-" if last_ret is None else _pct(last_ret))
+                    last_rate = md.get("latest_return", None)
+                    rate_txt = "-" if last_rate is None else _pct(last_rate)
+                    prob = md.get("latest_prob", None)
+                    prob_txt = "-" if prob is None else _pct(prob)
+                    pos = md.get("latest_position", None) or "-"
+                    # 구간/RealityGuard 텍스트
+                    rg_or_class = md.get("latest_return_text") or "-"
                     rows.append("<tr>"
                                 f"<td>{_safe(md.get('model',''))}</td>"
                                 f"<td>{_safe(md.get('status','-'))}</td>"
@@ -728,12 +775,16 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow'));
                                 f"<td>{md.get('total',0)}</td>"
                                 f"<td>{_pct(md.get('succ_rate',0.0))}</td>"
                                 f"<td>{_safe(last_cls)}</td>"
-                                f"<td>{_safe(last_ret_txt)}</td>"
+                                f"<td>{_safe(rg_or_class)}</td>"
+                                f"<td>{_safe(rate_txt)}</td>"
+                                f"<td>{_safe(prob_txt)}</td>"
+                                f"<td>{_safe(pos)}</td>"
                                 "</tr>")
                 model_details = ("<details class='card' style='margin-top:8px'><summary>모델별 상세(예측/성능)</summary>"
                                  "<div style='margin-top:6px'>"
-                                 "<table><tr><th>모델</th><th>상태</th><th>최근 val_f1</th><th>성공</th><th>실패</th><th>총건수</th>"
-                                 "<th>성공률</th><th>최근 클래스</th><th>최근 RG(μ/구간)</th></tr>"
+                                 "<table><tr><th>모델</th><th>상태</th><th>최근 val_f1</th>"
+                                 "<th>성공</th><th>실패</th><th>총건수</th><th>성공률</th>"
+                                 "<th>최근 클래스</th><th>구간(RG/클래스)</th><th>예상수익률</th><th>확률</th><th>포지션</th></tr>"
                                  + "".join(rows) + "</table></div></details>")
 
                 # 파일 인벤토리
@@ -835,16 +886,19 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow'));
                 blk = (sym_item.get("strategies") or {}).get(strat)
                 if not blk: continue
                 pred = blk.get("prediction") or {}
-                cum = pred.get("cumulative") or {"succ":0,"fail":0,"sf_denominator":1,"succ_rate":0.0}  # ★ NEW
+                cum = pred.get("cumulative") or {"succ":0,"fail":0,"sf_denominator":1,"succ_rate":0.0}
                 out.append(f"<li>{_safe(sym)}<ul>")
                 out.append(f"<li>🎯 메타러너 선택: <b>{_safe(pred.get('meta_choice','-'))}</b></li>")
                 for md in pred.get("by_model", []):
                     last_cls = md.get("latest_class","-")
-                    last_ret = md.get("latest_return", None)
-                    last_ret_txt = md.get("latest_return_text") or ("-" if last_ret is None else f"{last_ret:+.1%}")
-                    out.append(f"<li>{icon_ret(last_ret)} {_safe(md.get('model','').upper())}: {_safe(md.get('status','-'))}, "
-                               f"클래스 {_safe(last_cls)} (RG {_safe(last_ret_txt)})</li>")
-                # 누적 한 줄 요약
+                    rg_or_class = md.get("latest_return_text") or "-"
+                    rate = md.get("latest_return", None)
+                    rate_txt = "-" if rate is None else f"{rate:+.1%}"
+                    prob = md.get("latest_prob", None)
+                    prob_txt = "-" if prob is None else f"{prob:.1%}"
+                    pos = md.get("latest_position", None) or "-"
+                    out.append(f"<li>{icon_ret(rate)} {_safe(md.get('model','').upper())}: {_safe(md.get('status','-'))}, "
+                               f"클래스 {_safe(last_cls)} · 구간 {_safe(rg_or_class)} · 예상 {rate_txt} · 확률 {prob_txt} · 포지션 {pos}</li>")
                 out.append(f"<li>🧮 누적: 성공 {cum['succ']} / 실패 {cum['fail']} · 성공률 {_pct(cum['succ_rate'])} ({cum['succ']}/{cum['sf_denominator']})</li>")
                 out.append("</ul></li>")
             out.append("</ul>")
