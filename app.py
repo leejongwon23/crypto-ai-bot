@@ -1150,25 +1150,70 @@ def force_fix_prediction_log():
     except Exception as e:
         return f"⚠️ 오류: {e}", 500
 
-# ✅ 모든 모델 즉시 예측 실행 라우트
-@app.route("/run-now", methods=["GET"])
-def run_now():
+# === 즉시 전체 예측: 학습 일시정지 → 예측 → 학습 재개 ===
+@app.route("/predict-now", methods=["POST","GET"])
+def predict_now():
     try:
-        if os.path.exists(LOCK_PATH) or _is_training():
-            return "⏸️ 학습 중이거나 락 상태입니다. 예측 불가.", 423
+        # 1) 학습 중이면 정지
+        was_running = _is_training()
+        if was_running:
+            print("[PREDICT-NOW] training detected → stopping..."); sys.stdout.flush()
+            try: _request_stop_safe()
+            except Exception: pass
+            stopped = _stop_train_loop_safe(timeout=45)
+            if not stopped:
+                return "❌ 학습 정지 실패로 예측 취소됨", 423
+
+        # 2) 예측 준비
+        if os.path.exists(LOCK_PATH):
+            try: os.remove(LOCK_PATH)
+            except Exception: pass
         _pl_clear()
-        _safe_open_gate("manual_run_now")
-        print("[RUN-NOW] 모든 모델 즉시 예측 시작"); sys.stdout.flush()
-        for strat in ["단기", "중기", "장기"]:
-            try:
-                trigger_run(strategy=strat)
-            except Exception as e:
-                print(f"[RUN-NOW] {strat} 실패: {e}")
-        _safe_close_gate("manual_run_now_end")
-        return "✅ 모든 전략(단기/중기/장기)에 대한 즉시 예측 완료 요청됨"
+        _safe_open_gate("predict_now")
+
+        # 3) 이미 학습된 모델만 전 전략 예측
+        total, done, skipped = 0, 0, 0
+        try:
+            for sym in SYMBOLS:
+                for strat in ["단기","중기","장기"]:
+                    total += 1
+                    if not _has_model_for(sym, strat):
+                        skipped += 1
+                        print(f"[PREDICT-NOW] skip {sym}-{strat}: model missing"); sys.stdout.flush()
+                        continue
+                    try:
+                        result = predict(sym, strat, source="predict_now", model_type=None)
+                        if not isinstance(result, dict):
+                            try:
+                                from predict import failed_result
+                                failed_result(sym, strat, reason="invalid_return", source="predict_now")
+                            except Exception: pass
+                        done += 1
+                        print(f"[PREDICT-NOW] ok {sym}-{strat}"); sys.stdout.flush()
+                    except Exception as e:
+                        print(f"[PREDICT-NOW] fail {sym}-{strat}: {e}"); sys.stdout.flush()
+                        try:
+                            from predict import failed_result
+                            failed_result(sym, strat, reason=str(e), source="predict_now")
+                        except Exception: pass
+        finally:
+            _safe_close_gate("predict_now_end")
+
+        # 4) 학습 재개
+        resumed = False
+        if was_running:
+            resumed = _start_train_loop_safe(force_restart=False, sleep_sec=0)
+            print(f"[PREDICT-NOW] training resumed={resumed}"); sys.stdout.flush()
+
+        return (
+            f"✅ 예측 완료 | 총:{total} 성공:{done} 스킵:{skipped} | "
+            f"학습정지:{'예' if was_running else '아니오'} → 재개:{'예' if resumed else '아니오'}"
+        )
     except Exception as e:
         traceback.print_exc()
-        return f"❌ 예측 실패: {e}", 500
+        return f"❌ 오류: {e}", 500
+
+
 
 if __name__ == "__main__":
     try:
