@@ -142,6 +142,15 @@ _default_config = {
         "fill": {"method": "ffill", "max_gap": 6},
         "zscore_window": 96
     },
+
+    # === Guards & meta thresholds (예측 파이프라인 공통 사용) ===
+    "GUARD": {
+        "PROFIT_MIN": 0.01,            # Profit Filter 절대 최소 기대수익(롱/숏 공통)
+        "ABSTAIN_MIN_META": 0.25,      # 메타확률 미만이면 보류
+        "REALITY_GUARD_VOL_MULT": 5.0, # 변동성 대비 과장 차단 배수
+        "EXIT_GUARD_MIN_ER": 0.01,     # ExitGuard 기대수익 하한
+        "CALIB_NAN_MODE": "abstain"    # calib_prob NaN 처리: 'abstain' | 'drop'
+    },
 }
 
 STRATEGY_CONFIG = {
@@ -304,6 +313,32 @@ def get_CV_CONFIG() -> dict:
     return base
 
 def get_ONCHAIN() -> dict: return _config.get("ONCHAIN", _default_config["ONCHAIN"])
+
+# ===== GUARD 런타임 오버라이드 =====
+def get_GUARD() -> dict:
+    base = dict(_config.get("GUARD", _default_config["GUARD"]))
+    def _ov(name, env, cast):
+        v = os.getenv(env, None)
+        if v is None: return
+        try: base[name] = cast(v)
+        except Exception: pass
+    _ov("PROFIT_MIN", "GUARD_PROFIT_MIN", float)
+    _ov("ABSTAIN_MIN_META", "ABSTAIN_MIN_META", float)
+    _ov("REALITY_GUARD_VOL_MULT", "REALITY_GUARD_VOL_MULT", float)
+    _ov("EXIT_GUARD_MIN_ER", "EXIT_GUARD_MIN_ER", float)
+    v = os.getenv("CALIB_NAN_MODE", None)
+    if v is not None:
+        v2 = str(v).strip().lower()
+        if v2 in {"abstain","drop"}:
+            base["CALIB_NAN_MODE"] = v2
+    # PREDICT_MIN_RETURN 동기화
+    try:
+        pmr = float(os.getenv("PREDICT_MIN_RETURN", str(base.get("PROFIT_MIN", 0.01))))
+        if "GUARD_PROFIT_MIN" not in os.environ:
+            base["PROFIT_MIN"] = pmr
+    except Exception:
+        pass
+    return base
 
 # 헬퍼들
 def _round2(x: float) -> float: return round(float(x), _ROUNDS_DECIMALS)
@@ -906,5 +941,5 @@ __all__ = [
     "DYN_CLASS_STEP", "BOUNDARY_BAND", "CV_FOLDS", "CV_GATE_F1",
     "get_EVAL_RUNTIME", "strategy_horizon_hours", "compute_eval_due_at",
     "get_DATA", "get_DATA_RUNTIME", "get_CLASS_ENFORCE", "get_CV_CONFIG",
-    "get_ONCHAIN",
+    "get_ONCHAIN", "get_GUARD",
             ]
