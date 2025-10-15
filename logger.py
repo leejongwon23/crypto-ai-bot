@@ -680,146 +680,74 @@ def log_prediction(
     note="", success=False, reason="", rate=None, return_value=None,
     label=None, group_id=None, model_symbol=None, model_name=None,
     source="일반", volatility=False, feature_vector=None,
-    source_exchange="BYBIT",
-    regime=None, meta_choice=None, raw_prob=None, calib_prob=None, calib_ver=None,
+    source_exchange="BYBIT", regime=None, meta_choice=None,
+    raw_prob=None, calib_prob=None, calib_ver=None,
     class_return_min=None, class_return_max=None, class_return_text=None,
 ):
+    """예측 로그에 모델별 클래스, 예상수익률, 확률, 메타선택 정보를 모두 기록"""
     from datetime import datetime as _dt
+    ensure_prediction_log_exists()
+
+    now = _dt.now(pytz.timezone("Asia/Seoul")).isoformat() if timestamp is None else timestamp
+    top_k_str = ",".join(map(str, top_k)) if top_k else ""
+    reason = (reason or "").strip()
+    rate = 0.0 if rate is None else float(rate)
+    return_value = 0.0 if return_value is None else float(return_value)
+    entry_price = float(entry_price or 0.0)
+    target_price = float(target_price or 0.0)
+    model, model_name = _normalize_model_fields(model, model_name, symbol, strategy)
+
+    # note 안에 포함된 상세 예측 정보 추출
     try:
-        from failure_db import insert_failure_record
+        note_obj = json.loads(note) if isinstance(note, str) else {}
     except Exception:
-        insert_failure_record = None
+        note_obj = {}
+    expected_return_mid = note_obj.get("expected_return_mid", "")
+    raw_prob_pred = note_obj.get("raw_prob_pred", "")
+    calib_prob_pred = note_obj.get("calib_prob_pred", "")
+    meta_choice_detail = note_obj.get("meta_choice", "")
 
-    LOG_FILE = PREDICTION_LOG
-    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    # feature_vector 직렬화
+    fv_serial = ""
+    try:
+        if feature_vector is not None:
+            import numpy as np
+            if isinstance(feature_vector, np.ndarray):
+                v = feature_vector.flatten().tolist()
+            elif isinstance(feature_vector, (list, tuple)):
+                v = feature_vector
+            else:
+                v = []
+            fv_serial = json.dumps(v if len(v) <= 64 else {"head": v[:8], "tail": v[-8:]}, ensure_ascii=False)
+    except Exception:
+        fv_serial = ""
 
+    row = [
+        now, symbol, strategy, direction, entry_price, target_price,
+        model, predicted_class, top_k_str, note, str(success), reason,
+        rate, return_value, label, group_id, model_symbol, model_name,
+        source, volatility, source_exchange, regime, meta_choice,
+        raw_prob, calib_prob, calib_ver, fv_serial,
+        class_return_min, class_return_max, class_return_text,
+        "", "", "", "", "", "", "", "",
+        expected_return_mid, raw_prob_pred, calib_prob_pred, meta_choice_detail
+    ]
+
+    # 파일에 기록
     with _FileLock(_PRED_LOCK_PATH, timeout=10.0):
         rotate_prediction_log_if_needed()
-        ensure_prediction_log_exists()
+        write_header = not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0
+        with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            if write_header:
+                w.writerow(PREDICTION_HEADERS)
+            w.writerow(_align_row_to_header(row, PREDICTION_HEADERS))
 
-        now = _dt.now(pytz.timezone("Asia/Seoul")).isoformat() if timestamp is None else timestamp
-        top_k_str = ",".join(map(str, top_k)) if top_k else ""
-
-        predicted_class = predicted_class if predicted_class is not None else -1
-        label = label if label is not None else -1
-        reason = (reason or "사유없음").strip()
-        rate = 0.0 if rate is None else float(rate)
-        return_value = 0.0 if return_value is None else float(return_value)
-        entry_price = float(entry_price or 0.0)
-        target_price = float(target_price or 0.0)
-        model, model_name = _normalize_model_fields(model, model_name, symbol, strategy)
-
-        # 🔧 '보류' 소스 반영 (predict.py 보류 로깅과 정합)
-        allowed_sources = ["일반","기본","meta","evo_meta","baseline_meta","진화형","평가","단일","변동성","train_loop","섀도우","보류"]
-        if source not in allowed_sources:
-            source = "일반"
-
-        dir_s = str(direction or "")
-        src_s = str(source or "")
-        ctx = "evaluation" if (src_s == "평가" or dir_s.startswith("평가")) else "prediction"
-
-        fv_serial = ""
-        try:
-            if feature_vector is not None:
-                if isinstance(feature_vector, (list, tuple)):
-                    v = list(feature_vector)
-                elif "numpy" in str(type(feature_vector)):
-                    v = feature_vector.flatten().tolist()
-                else:
-                    v = []
-                if len(v) > 64:
-                    fv_serial = json.dumps({"head": v[:8], "tail": v[-8:]}, ensure_ascii=False)
-                else:
-                    fv_serial = json.dumps(v, ensure_ascii=False)
-        except Exception:
-            fv_serial = ""
-
-        note_fields = _extract_from_note(note)
-
-        row = [
-            now, symbol, strategy, direction, entry_price, target_price,
-            (model or ""), predicted_class, top_k_str, note,
-            str(success), reason, rate, return_value, label,
-            group_id, model_symbol, model_name, source, volatility, source_exchange,
-            (regime or ""), (meta_choice or ""),
-            (float(raw_prob) if raw_prob is not None else ""),
-            (float(calib_prob) if calib_prob is not None else ""),
-            (str(calib_ver) if calib_ver is not None else ""),
-            fv_serial,
-            (float(class_return_min) if class_return_min is not None else ""),
-            (float(class_return_max) if class_return_max is not None else ""),
-            (str(class_return_text) if class_return_text is not None else ""),
-            note_fields.get("position",""),
-            note_fields.get("hint_allow_long",""),
-            note_fields.get("hint_allow_short",""),
-            note_fields.get("hint_slope",""),
-            note_fields.get("used_minret_filter",""),
-            note_fields.get("explore_used",""),
-            note_fields.get("hint_ma_fast",""),
-            note_fields.get("hint_ma_slow",""),
-        ]
-
-        try:
-            write_header = not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0
-            current_header = PREDICTION_HEADERS
-            if not write_header:
-                h = _read_csv_header(LOG_FILE)
-                current_header = h if h else PREDICTION_HEADERS
-
-            with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
-                w = csv.writer(f)
-                if write_header:
-                    w.writerow(PREDICTION_HEADERS)
-                    current_header = PREDICTION_HEADERS
-                w.writerow(_align_row_to_header(row, current_header))
-
-            # 단건 로그 출력은 최소화 (성공은 1회성, 실패는 집계기로 대체)
-            if success:
-                _print_once(f"pred_ok:{symbol}:{strategy}:{model_name}",
-                            f"[✅ 예측 OK] {symbol}-{strategy} class={predicted_class} src={source_exchange}")
-            else:
-                _ConsecutiveFailAggregator.add((symbol, strategy, group_id or 0, model_name), False, reason)
-
-            should_record_failure = (
-                insert_failure_record is not None
-                and (ctx == "evaluation")
-                and (not success)
-                and (label not in (-1, "-1", None))
-                and (entry_price not in (None, 0.0))
-            )
-
-            if should_record_failure:
-                feature_hash = f"{symbol}-{strategy}-{model}-{predicted_class}-{label}-{rate}"
-                safe_vector = []
-                try:
-                    import numpy as _np
-                    if feature_vector is not None:
-                        if isinstance(feature_vector, _np.ndarray):
-                            safe_vector = feature_vector.flatten().tolist()
-                        elif isinstance(feature_vector, list):
-                            safe_vector = feature_vector
-                except Exception:
-                    safe_vector = []
-
-                insert_failure_record(
-                    {
-                        "symbol": symbol, "strategy": strategy, "direction": direction,
-                        "model": model, "predicted_class": predicted_class,
-                        "rate": rate, "reason": reason, "label": label, "source": source,
-                        "entry_price": entry_price, "target_price": target_price,
-                        "return_value": return_value
-                    },
-                    feature_hash=feature_hash, label=label, feature_vector=safe_vector, context=ctx
-                )
-            else:
-                if (insert_failure_record is None) or (ctx != "evaluation"):
-                    log_audit_prediction(symbol, strategy, "skip_failure_db", f"ctx={ctx}, label={label}, entry_price={entry_price}")
-        except Exception as e:
-            print(f"[⚠️ 예측 로그 기록 실패] {e}")
-        finally:
-            # 성공으로 회복 시 집계기 flush
-            if success:
-                _ConsecutiveFailAggregator.add((symbol, strategy, group_id or 0, model_name), True, reason="")
+        if success:
+            _print_once(f"pred_ok:{symbol}:{strategy}:{model_name}",
+                        f"[✅ 예측 OK] {symbol}-{strategy} class={predicted_class} rate={rate:.4f} prob={raw_prob_pred} src={source_exchange}")
+        else:
+            _ConsecutiveFailAggregator.add((symbol, strategy, group_id or 0, model_name), False, reason)
 
 # -------------------------
 # 학습 로그
