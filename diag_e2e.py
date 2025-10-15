@@ -1,4 +1,4 @@
-# === diag_e2e.py (관우 v2.7 — 모델별 예상수익률·확률·포지션 표기 추가) ===
+# === diag_e2e.py (관우 v2.7 — 모델별 예상수익률·확률·포지션 표기 추가, .ptz 및 대소문자 보강) ===
 import os, json, traceback, re
 import pandas as pd
 import pytz
@@ -96,22 +96,24 @@ def _num_or_none(x):
     except:
         return None
 
-# ===================== 인벤토리 스캔(.pt + .meta.json) =====================
+# ===================== 인벤토리 스캔(.pt | .ptz | .meta.json) =====================
 _NAME_RE = re.compile(
     r"^(?P<sym>[^_]+)_(?P<strat>단기|중기|장기)_(?P<model>lstm|cnn_lstm|transformer)"
-    r"(?:_group(?P<gid>\d+))?(?:_cls(?P<ncls>\d+))?$"
+    r"(?:_group(?P<gid>\d+))?(?:_cls(?P<ncls>\d+))?$",
+    re.IGNORECASE
 )
 
 def _parse_filename_base(fname):
     base = os.path.basename(fname)
-    base = re.sub(r"\.(pt|meta\.json)$", "", base)
+    # .pt, .ptz, .meta.json 모두 제거
+    base = re.sub(r"\.(pt|ptz|meta\.json)$", "", base, flags=re.IGNORECASE)
     m = _NAME_RE.match(base)
     if not m: return None
     d = m.groupdict()
     return {
         "symbol": d["sym"],
         "strategy": d["strat"],
-        "model": d["model"],
+        "model": d["model"].lower(),  # 정규화
         "group_id": int(d["gid"]) if d.get("gid") else 0,
         "num_classes": int(d["ncls"]) if d.get("ncls") else None,
         "base": base
@@ -119,7 +121,7 @@ def _parse_filename_base(fname):
 
 def _list_inventory():
     """
-    models 디렉토리에서 *.pt 와 *.meta.json 모두 스캔해 합침.
+    models 디렉토리에서 *.pt, *.ptz, *.meta.json 스캔해 합침.
     - key: (symbol, strategy, model)
     - has_pt / has_meta / val_f1 / saved_at(메타 timestamp) / group_id / num_classes
     """
@@ -128,7 +130,7 @@ def _list_inventory():
 
     # 1) 메타부터 스캔
     for fn in os.listdir(MODEL_DIR):
-        if not fn.endswith(".meta.json"): continue
+        if not fn.lower().endswith(".meta.json"): continue
         meta_path = os.path.join(MODEL_DIR, fn)
         p = _parse_filename_base(fn)
         if not p: continue
@@ -158,9 +160,10 @@ def _list_inventory():
             pass
         inv[key] = val
 
-    # 2) pt 스캔
+    # 2) pt | ptz 스캔
     for fn in os.listdir(MODEL_DIR):
-        if not fn.endswith(".pt"): continue
+        lfn = fn.lower()
+        if not (lfn.endswith(".pt") or lfn.endswith(".ptz")): continue
         p = _parse_filename_base(fn)
         if not p: continue
         key = (p["symbol"], p["strategy"], p["model"])
@@ -255,9 +258,9 @@ def _build_snapshot(symbols_filter=None):
                 for (sym, st, mdl), g in df_train.groupby(["symbol","strategy","model"], dropna=False):
                     try:
                         last_f1 = float(pd.to_numeric(g["f1"], errors="coerce").dropna().iloc[-1])
-                        m = re.search(r"(lstm|cnn_lstm|transformer)", str(mdl))
+                        m = re.search(r"(lstm|cnn_lstm|transformer)", str(mdl), flags=re.IGNORECASE)
                         if m:
-                            mt = m.group(1)
+                            mt = m.group(1).lower()
                             train_f1_map[(str(sym), str(st), mt)] = last_f1
                     except Exception:
                         pass
@@ -352,7 +355,11 @@ def _build_snapshot(symbols_filter=None):
             for mt in MODEL_TYPES:
                 key = (sym, strat, mt)
                 inv_item = inv.get(key)
-                df_model = df_ss[df_ss["model"].astype(str).str.contains(mt, na=False)] if not df_ss.empty else pd.DataFrame()
+                # 대소문자 무시 contains
+                if not df_ss.empty and "model" in df_ss.columns:
+                    df_model = df_ss[df_ss["model"].astype(str).str.contains(mt, case=False, na=False)]
+                else:
+                    df_model = pd.DataFrame()
 
                 # 최신 클래스/수익률/확률/포지션/RealityGuard 텍스트
                 def _latest_for_model(dfm):
@@ -492,10 +499,13 @@ def _build_snapshot(symbols_filter=None):
                 now = now_kst()
                 delayed_min = int(max(0, (now - eval_due) / pd.Timedelta(minutes=1))) if now > eval_due else 0
 
-            # 메타 선택 표시(note JSON에서 추출)
+            # 메타 선택 표시(note JSON에서 추출) — 대소문자 무시
             meta_choice = "-"
             try:
-                df_meta = df_ss[df_ss["model"] == "meta"]
+                if not df_ss.empty and "model" in df_ss.columns:
+                    df_meta = df_ss[df_ss["model"].astype(str).str.lower() == "meta"]
+                else:
+                    df_meta = pd.DataFrame()
                 if not df_meta.empty and "note" in df_meta.columns:
                     last_note = str(df_meta.sort_values("timestamp").iloc[-1].get("note","") or "")
                     if last_note.strip().startswith("{"):
@@ -563,14 +573,14 @@ def _build_snapshot(symbols_filter=None):
                     },
                     "by_model": models_detail,
                     "meta_choice": meta_choice,
-                    "cumulative": {                            # ★ NEW
+                    "cumulative": {
                         "succ": cum_succ,
                         "fail": cum_fail,
                         "pending": cum_pending,
                         "failed": cum_failed,
                         "total": cum_total,
-                        "succ_rate": cum_rate,                 # 성공/(성공+실패)
-                        "sf_denominator": denom_sf             # (성공+실패)
+                        "succ_rate": cum_rate,
+                        "sf_denominator": denom_sf
                     }
                 },
                 "evaluation": {
@@ -720,7 +730,7 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow'));
             sym_cards = []
             for strat, blk in (sym_item.get("strategies") or {}).items():
                 n = blk["prediction"]["normal"]; v = blk["prediction"]["volatility"]
-                cum = blk["prediction"]["cumulative"]  # ★ NEW
+                cum = blk["prediction"]["cumulative"]
                 by_model = blk["prediction"]["by_model"]; ev = blk["evaluation"]; fl = blk["failure_learning"]
                 inv_rows = blk.get("inventory", {}).get("rows", [])
                 notes = blk.get("notes", []) or []
@@ -753,7 +763,7 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow'));
                                f"<span class='badge {cum_cls}'>누적 {_pct(cum['succ_rate'])} ({cum['succ']}/{cum['sf_denominator']})</span>"
                                f"</div>")
 
-                # 모델별 상세(예측 요약) — 컬럼 확장
+                # 모델별 상세(예측 요약)
                 rows = []
                 for md in by_model:
                     val_f1_val = md.get("val_f1", None)
@@ -764,7 +774,6 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow'));
                     prob = md.get("latest_prob", None)
                     prob_txt = "-" if prob is None else _pct(prob)
                     pos = md.get("latest_position", None) or "-"
-                    # 구간/RealityGuard 텍스트
                     rg_or_class = md.get("latest_return_text") or "-"
                     rows.append("<tr>"
                                 f"<td>{_safe(md.get('model',''))}</td>"
