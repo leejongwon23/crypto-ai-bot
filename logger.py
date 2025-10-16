@@ -325,7 +325,7 @@ def rotate_prediction_log_if_needed(max_mb: int = 200, backups: int = 3):
                 except Exception:
                     pass
         ensure_prediction_log_exists()
-        print(f"[logger] 🔁 rotate: {size_mb:.1f}MB → rotated with {backups} backups")
+        print(f"[logger] 🔁 rotate: {size_mb:.1}MB → rotated with {backups} backups")
     except Exception as e:
         print(f"[logger] rotate error: {e}")
 
