@@ -1286,15 +1286,16 @@ def export_recent_model_stats(days: int = 7, out_path: str = None):
             pass
         return out_path or os.path.join(LOG_DIR, "recent_model_stats.csv")
 
+# === logger.py (patched: group_trigger 포함 관우요약 정상화) ===
+# 기존 내용 동일 — 마지막 부분만 수정
+# ...
 # ============================================================
-# (NEW) 관우 요약 로그 생성기 — prediction_result.json 누락 방어
+# (UPDATED) 관우 요약 로그 생성기 — group_trigger 포함 버전
 # ============================================================
 def flush_gwanwoo_summary():
     """
     관우(시각화) 로그용 summary.csv 생성.
-    - prediction_result.json / evaluation_result.csv / prediction_log.csv 중
-      존재하는 최신 데이터 기준으로 병합 요약.
-    - 누락 파일은 자동 skip 후 빈 값으로 채움.
+    자동예측(group_trigger 등) 포함.
     """
     base_dir = "/persistent"
     paths = {
@@ -1305,6 +1306,7 @@ def flush_gwanwoo_summary():
     out_path = os.path.join(base_dir, "logs", "gwanwoo_summary.csv")
 
     records = []
+
     # 1️⃣ prediction_result.json
     try:
         if os.path.exists(paths["pred_json"]):
@@ -1319,12 +1321,13 @@ def flush_gwanwoo_summary():
                         "predicted_class": j.get("predicted_class",""),
                         "expected_return": j.get("expected_return",""),
                         "prob": j.get("prob",""),
-                        "model": j.get("model","meta")
+                        "model": j.get("model","meta"),
+                        "source": j.get("source","prediction_result")
                     })
     except Exception as e:
         print(f"[⚠️ 관우요약] prediction_result.json 읽기 실패: {e}")
 
-    # 2️⃣ evaluation_result.csv (평가기록)
+    # 2️⃣ evaluation_result.csv
     try:
         if os.path.exists(paths["eval_csv"]):
             df = pd.read_csv(paths["eval_csv"], encoding="utf-8-sig")
@@ -1334,15 +1337,17 @@ def flush_gwanwoo_summary():
     except Exception as e:
         print(f"[⚠️ 관우요약] evaluation_result.csv 읽기 실패: {e}")
 
-    # 3️⃣ prediction_log.csv (예측전체)
+    # 3️⃣ prediction_log.csv — group_trigger 포함
     try:
         if os.path.exists(paths["pred_csv"]):
             df = pd.read_csv(paths["pred_csv"], encoding="utf-8-sig")
             if not df.empty:
-                df["source"] = "prediction_log"
-                # 필요한 필드만 추출
+                df["source"] = df.get("source", "")
+                # 자동예측 + 수동예측 모두 허용
+                allowed = {"manual","api","group_trigger","group_trigger_retry","train_end","변동성"}
+                df = df[df["source"].isin(allowed)] if "source" in df.columns else df
                 keep = [c for c in ["timestamp","symbol","strategy","predicted_class",
-                                    "rate","raw_prob","calib_prob","success","reason"] if c in df.columns]
+                                    "rate","raw_prob","calib_prob","success","reason","source"] if c in df.columns]
                 records.extend(df[keep].to_dict("records"))
     except Exception as e:
         print(f"[⚠️ 관우요약] prediction_log.csv 읽기 실패: {e}")
@@ -1356,7 +1361,7 @@ def flush_gwanwoo_summary():
 
     df_out = pd.DataFrame(records)
     # 결측치 보완
-    for col in ["expected_return","prob","model","predicted_class"]:
+    for col in ["expected_return","prob","model","predicted_class","source"]:
         if col not in df_out.columns:
             df_out[col] = ""
     df_out = df_out.fillna("")
