@@ -349,7 +349,7 @@ def _retry_after_training(_predict, symbol, strategy, first_err: Exception | str
         log_audit(symbol, strategy, "트리거재시도포기", "게이트 미오픈(대기초과)")
         return False
     try:
-        ok2 = _invoke_predict(_predict, symbol, strategy, "변동성(재시도)", max(PREDICT_TIMEOUT_SEC, TIMEOUT_RETRY_ONCE_EXTRA_SEC))
+        ok2 = _invoke_predict(_predict, symbol, strategy, "group_trigger_retry", max(PREDICT_TIMEOUT_SEC, TIMEOUT_RETRY_ONCE_EXTRA_SEC))
         if ok2:
             log_audit(symbol, strategy, "트리거예측(재시도성공)", "훈련락 해제 후 성공")
         else:
@@ -480,7 +480,7 @@ def run():
             print(f"[✅ 트리거 포착] {symbol} - {strategy} → 예측 실행")
 
             try:
-                ok = _invoke_predict(_predict, symbol, strategy, "변동성", PREDICT_TIMEOUT_SEC)
+                ok = _invoke_predict(_predict, symbol, strategy, "group_trigger", PREDICT_TIMEOUT_SEC)
                 if not ok and RETRY_ON_TIMEOUT:
                     ok = _retry_after_training(_predict, symbol, strategy, first_err="timeout/failed")
 
