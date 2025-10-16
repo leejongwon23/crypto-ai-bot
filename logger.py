@@ -1285,3 +1285,81 @@ def export_recent_model_stats(days: int = 7, out_path: str = None):
         except Exception:
             pass
         return out_path or os.path.join(LOG_DIR, "recent_model_stats.csv")
+
+# ============================================================
+# (NEW) 관우 요약 로그 생성기 — prediction_result.json 누락 방어
+# ============================================================
+def flush_gwanwoo_summary():
+    """
+    관우(시각화) 로그용 summary.csv 생성.
+    - prediction_result.json / evaluation_result.csv / prediction_log.csv 중
+      존재하는 최신 데이터 기준으로 병합 요약.
+    - 누락 파일은 자동 skip 후 빈 값으로 채움.
+    """
+    base_dir = "/persistent"
+    paths = {
+        "pred_json": os.path.join(base_dir, "prediction_result.json"),
+        "eval_csv": os.path.join(base_dir, "logs", "evaluation_result.csv"),
+        "pred_csv": os.path.join(base_dir, "prediction_log.csv"),
+    }
+    out_path = os.path.join(base_dir, "logs", "gwanwoo_summary.csv")
+
+    records = []
+    # 1️⃣ prediction_result.json
+    try:
+        if os.path.exists(paths["pred_json"]):
+            with open(paths["pred_json"], "r", encoding="utf-8") as f:
+                js = json.load(f)
+            if isinstance(js, list):
+                for j in js:
+                    records.append({
+                        "timestamp": j.get("timestamp",""),
+                        "symbol": j.get("symbol",""),
+                        "strategy": j.get("strategy",""),
+                        "predicted_class": j.get("predicted_class",""),
+                        "expected_return": j.get("expected_return",""),
+                        "prob": j.get("prob",""),
+                        "model": j.get("model","meta")
+                    })
+    except Exception as e:
+        print(f"[⚠️ 관우요약] prediction_result.json 읽기 실패: {e}")
+
+    # 2️⃣ evaluation_result.csv (평가기록)
+    try:
+        if os.path.exists(paths["eval_csv"]):
+            df = pd.read_csv(paths["eval_csv"], encoding="utf-8-sig")
+            if not df.empty:
+                df["source"] = "evaluation"
+                records.extend(df.to_dict("records"))
+    except Exception as e:
+        print(f"[⚠️ 관우요약] evaluation_result.csv 읽기 실패: {e}")
+
+    # 3️⃣ prediction_log.csv (예측전체)
+    try:
+        if os.path.exists(paths["pred_csv"]):
+            df = pd.read_csv(paths["pred_csv"], encoding="utf-8-sig")
+            if not df.empty:
+                df["source"] = "prediction_log"
+                # 필요한 필드만 추출
+                keep = [c for c in ["timestamp","symbol","strategy","predicted_class",
+                                    "rate","raw_prob","calib_prob","success","reason"] if c in df.columns]
+                records.extend(df[keep].to_dict("records"))
+    except Exception as e:
+        print(f"[⚠️ 관우요약] prediction_log.csv 읽기 실패: {e}")
+
+    if not records:
+        print("[⚠️ 관우요약] 데이터 없음 → summary 비움")
+        with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
+            csv.writer(f).writerow(["timestamp","symbol","strategy","predicted_class",
+                                    "expected_return","prob","model","source"])
+        return out_path
+
+    df_out = pd.DataFrame(records)
+    # 결측치 보완
+    for col in ["expected_return","prob","model","predicted_class"]:
+        if col not in df_out.columns:
+            df_out[col] = ""
+    df_out = df_out.fillna("")
+    df_out.to_csv(out_path, index=False, encoding="utf-8-sig")
+    print(f"[✅ 관우요약] {len(df_out)}행 생성: {out_path}")
+    return out_path
