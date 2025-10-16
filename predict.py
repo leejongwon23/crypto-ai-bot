@@ -4,6 +4,7 @@
 #    + 윈도우/모델 루프마다 즉시 메모리 해제(model.cpu(); del) + 캐시 비움
 # ② predict(): gate/group_active 사유 출력 + 락 스테일 정리 + finally에서 대형 객체/캐시 일괄 정리
 # ③ evaluate_predictions(): 종료 시 메모리 정리 강화
+# ④ 관우로그 표시 보강: _soft_abstain 시 기존 "예측보류" 로그와 함께 "예측(보류)" 요약행 추가 기록
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob, inspect, threading
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -502,7 +503,10 @@ def _soft_abstain(symbol,strategy,*,reason,meta_choice="abstain",regime="unknown
         ensure_prediction_log_exists()
         cur=float((df["close"].iloc[-1] if df is not None and len(df) else 0.0))
         note={"reason":reason,"abstain_prob_min":float(ABSTAIN_PROB_MIN),"max_calib_prob":None,"meta_choice":meta_choice,"regime":regime}
+        # 1) 기존 상세 보류 기록
         log_prediction(symbol=symbol,strategy=strategy,direction="예측보류",entry_price=cur,target_price=cur,model="meta",model_name=str(meta_choice),predicted_class=-1,label=-1,note=json.dumps(note,ensure_ascii=False),top_k=[],success=False,reason=reason,rate=0.0,expected_return=0.0,position="neutral",return_value=0.0,source=source,group_id=group_id,feature_vector=(torch.tensor(X_last,dtype=torch.float32).numpy() if X_last is not None else None),regime=regime,meta_choice="abstain",raw_prob=None,calib_prob=None,calib_ver=get_calibration_version(),class_return_min=0.0,class_return_max=0.0,class_return_text="")
+        # 2) 관우 뷰 노출용 요약 행 추가(관측 쿼리: direction LIKE '예측%')
+        log_prediction(symbol=symbol,strategy=strategy,direction="예측(보류)",entry_price=cur,target_price=cur,model="meta",model_name=str(meta_choice),predicted_class=-1,label=-1,note=json.dumps({"reason":reason,"summary":True},ensure_ascii=False),top_k=[],success=False,reason=reason,rate=0.0,expected_return=0.0,position="neutral",return_value=0.0,source=source,group_id=group_id,feature_vector=None,regime=regime,meta_choice="abstain",raw_prob=None,calib_prob=None,calib_ver=get_calibration_version(),class_return_min=0.0,class_return_max=0.0,class_return_text="")
     except Exception as e: print(f"[soft_abstain 예외] {e}")
     print(f"[predict] abstain {symbol}-{strategy} :: {reason}")
     return {"symbol":symbol,"strategy":strategy,"model":"meta","class":-1,"expected_return":0.0,"class_return_min":0.0,"class_return_max":0.0,"class_return_text":"","position":"neutral","timestamp":_now_kst().isoformat(),"source":source,"regime":regime,"reason":reason,"success":False,"predicted_class":-1,"label":-1}
