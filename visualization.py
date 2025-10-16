@@ -1,3 +1,4 @@
+# === visualization.py (관우 리포트: skipped 카운트 포함) ===
 import pandas as pd
 import matplotlib.pyplot as plt
 import io, base64, numpy as np
@@ -23,14 +24,22 @@ plt.rcParams['axes.unicode_minus'] = False
 PREDICTION_LOG = "/persistent/prediction_log.csv"
 AUDIT_LOG = "/persistent/logs/evaluation_audit.csv"
 
+# ----------------------------
+# 로드 + TZ 정규화
+# ----------------------------
 def load_df(path):
     df = pd.read_csv(path)
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        if getattr(df["timestamp"].dt, "tz", None) is None:
-            df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
-        else:
-            df["timestamp"] = df["timestamp"].dt.tz_convert("Asia/Seoul")
+        try:
+            # tz 없는 경우 UTC로 보고 KST로 변환
+            if df["timestamp"].dt.tz is None:
+                df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
+            else:
+                df["timestamp"] = df["timestamp"].dt.tz_convert("Asia/Seoul")
+        except Exception:
+            # 혼합형 대비: 개별 변환 실패는 NaT 처리
+            df["timestamp"] = pd.to_datetime(df["timestamp"].astype(str), errors="coerce")
     return df
 
 def plot_to_html(fig, title):
@@ -48,6 +57,32 @@ def plot_to_html(fig, title):
     except Exception as e:
         return f"<p>{title} 시각화 실패: {e}</p>"
 
+# ----------------------------
+# 진행률 집계: 'predicted' + 'skipped' 모두 카운트
+# - status 컬럼 우선 사용
+# - 없으면 direction 매핑으로 대체
+# ----------------------------
+_STATUS_DONE = {"success","fail","v_success","v_fail","skipped"}
+_STATUS_TOTAL = {"predicted","skipped","success","fail","v_success","v_fail","pending"}
+
+def _progress_counts(df_pred, strategy):
+    df = df_pred[df_pred.get("strategy","") == strategy].copy()
+    n_pred = n_skip = 0
+    if "status" in df.columns:
+        s = df["status"].astype(str).str.lower()
+        n_pred = int((s == "predicted").sum())
+        n_skip = int((s == "skipped").sum())
+        total = int(s.isin(_STATUS_TOTAL).sum())
+        done = int(s.isin(_STATUS_DONE).sum() + (s == "predicted").sum())  # 예측 발생도 완료로 간주
+    else:
+        # direction 기반 대체: 예측 → predicted, 예측보류 → skipped
+        d = df.get("direction","").astype(str)
+        n_pred = int((d == "예측").sum())
+        n_skip = int((d == "예측보류").sum())
+        total = int(((d == "예측") | (d == "예측보류")).sum())
+        done = total  # 둘 다 완료 처리
+    return n_pred, n_skip, done, total
+
 def generate_visuals_for_strategy(strategy):
     html = f"<h2>📊 {strategy} 전략 분석</h2><div style='display:flex;flex-wrap:wrap;'>"
     try:
@@ -60,14 +95,27 @@ def generate_visuals_for_strategy(strategy):
         df_audit = pd.DataFrame()
         html += f"<p>audit_log.csv 로드 실패: {e}</p>"
 
+    # 0) 진행률 카드: predicted + skipped 모두 집계
+    try:
+        n_pred, n_skip, done, total = _progress_counts(df_pred, strategy)
+        html += (
+            f"<div style='width:98%;margin:1%;padding:12px;border:1px solid #ddd;border-radius:8px;'>"
+            f"<b>진행</b> "
+            f"<span>predicted={n_pred}, skipped={n_skip}</span> "
+            f"<span style='margin-left:12px;'>완료 {done}/{total}</span>"
+            f"</div>"
+        )
+    except Exception as e:
+        html += f"<p>진행률 계산 오류: {e}</p>"
+
     # 1) 최근 성공률 추이
     try:
         need = {"strategy", "timestamp", "status"}
         if need.issubset(df_pred.columns):
             df = df_pred[df_pred["strategy"] == strategy].copy()
             df["date"] = df["timestamp"].dt.date
-            df["result"] = df["status"].map({"success": 1, "fail": 0})
-            sr = df[df["status"].isin(["success", "fail"])].groupby("date")["result"].mean().reset_index()
+            df["result"] = df["status"].astype(str).str.lower().map({"success": 1, "v_success": 1, "fail": 0, "v_fail": 0})
+            sr = df[df["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])].groupby("date")["result"].mean().reset_index()
             if not sr.empty:
                 fig, ax = plt.subplots(figsize=(5, 2))
                 ax.plot(sr["date"], sr["result"])
@@ -110,8 +158,9 @@ def generate_visuals_for_strategy(strategy):
         need = {"strategy", "timestamp", "status", "symbol"}
         if need.issubset(df_pred.columns):
             df = df_pred[df_pred["strategy"] == strategy].copy()
-            df = df[df["status"].isin(["success", "fail"])]
-            df["result"] = df["status"].map({"success": 1, "fail": 0})
+            mask = df["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
+            df = df[mask]
+            df["result"] = df["status"].astype(str).str.lower().map({"success": 1, "v_success": 1, "fail": 0, "v_fail": 0})
             df = df.sort_values("timestamp", ascending=False).head(20)
             pivot = df.pivot(index="symbol", columns="timestamp", values="result")
             fig, ax = plt.subplots(figsize=(5, 2))
@@ -141,8 +190,9 @@ def generate_visuals_for_strategy(strategy):
         need = {"strategy", "timestamp", "status", "model"}
         if need.issubset(df_pred.columns):
             df = df_pred[df_pred["strategy"] == strategy].copy()
-            df = df[df["status"].isin(["success", "fail"]) & df["model"].notna()]
-            df["result"] = df["status"].map({"success": 1, "fail": 0})
+            mask = df["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
+            df = df[mask & df["model"].notna()]
+            df["result"] = df["status"].astype(str).str.lower().map({"success": 1, "v_success": 1, "fail": 0, "v_fail": 0})
             df["date"] = df["timestamp"].dt.date
             group = df.groupby(["model", "date"])["result"].mean().reset_index()
             if not group.empty:
@@ -180,4 +230,4 @@ def generate_visual_report():
         generate_visuals_for_strategy("단기") +
         generate_visuals_for_strategy("중기") +
         generate_visuals_for_strategy("장기")
-    )
+            )
