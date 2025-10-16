@@ -674,6 +674,8 @@ def _extract_from_note(note_str: str):
         pass
     return fields
 
+# 🔧 logger.py: log_prediction 함수만 교체
+
 def log_prediction(
     symbol, strategy, direction=None, entry_price=0, target_price=0,
     timestamp=None, model=None, predicted_class=None, top_k=None,
@@ -683,15 +685,22 @@ def log_prediction(
     source_exchange="BYBIT", regime=None, meta_choice=None,
     raw_prob=None, calib_prob=None, calib_ver=None,
     class_return_min=None, class_return_max=None, class_return_text=None,
+    # ▼ 추가: predict.py 호환용
+    expected_return=None,
+    **kwargs
 ):
     """예측 로그에 모델별 클래스, 예상수익률, 확률, 메타선택 정보를 모두 기록"""
     from datetime import datetime as _dt
     ensure_prediction_log_exists()
 
+    # ▶ expected_return → rate로 안전 매핑
+    if rate is None:
+        rate = expected_return if expected_return is not None else 0.0
+
     now = _dt.now(pytz.timezone("Asia/Seoul")).isoformat() if timestamp is None else timestamp
     top_k_str = ",".join(map(str, top_k)) if top_k else ""
     reason = (reason or "").strip()
-    rate = 0.0 if rate is None else float(rate)
+    rate = float(rate)
     return_value = 0.0 if return_value is None else float(return_value)
     entry_price = float(entry_price or 0.0)
     target_price = float(target_price or 0.0)
@@ -733,7 +742,6 @@ def log_prediction(
         expected_return_mid, raw_prob_pred, calib_prob_pred, meta_choice_detail
     ]
 
-    # 파일에 기록
     with _FileLock(_PRED_LOCK_PATH, timeout=10.0):
         rotate_prediction_log_if_needed()
         write_header = not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0
