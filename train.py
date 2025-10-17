@@ -372,23 +372,29 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             feat=compute_features(symbol, df, strategy)
         if feat is None or getattr(feat,"empty",True): _log_skip(symbol,strategy,"피처 없음"); return res
 
-        # 클래스 경계
-        class_ranges=get_class_ranges(symbol=symbol,strategy=strategy,group_id=group_id)
-        if not class_ranges or len(class_ranges)<2:
-            logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note=f"스킵: g={group_id}, cls<2",status="skipped")
-            return res
-        set_NUM_CLASSES(len(class_ranges))
-        logger.log_class_ranges(symbol, strategy, group_id=group_id, class_ranges=class_ranges, note="train_one_model")
-
-        # 라벨: 사전계산 우선 사용
+        # 라벨: 사전계산 우선 사용 (글로벌 인덱스 기준)
         if isinstance(pre_lbl, tuple) and len(pre_lbl)==3:
-            gains, labels, class_ranges_used = pre_lbl
+            gains, labels, class_ranges_used_global = pre_lbl
         elif isinstance(pre_lbl, dict) and pre_lbl.get(strategy, None) is not None:
-            gains, labels, class_ranges_used = pre_lbl[strategy]
+            gains, labels, class_ranges_used_global = pre_lbl[strategy]
         else:
-            gains, labels, class_ranges_used = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=group_id)
+            gains, labels, class_ranges_used_global = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=None)  # ← 글로벌
+
         if (not isinstance(labels, np.ndarray)) or labels.size == 0:
             _log_skip(symbol,strategy,"라벨 없음"); return res
+
+        # --------- [핵심 패치] 그룹 로컬 재매핑 ---------
+        # 전체 클래스 경계와 그룹 인덱스
+        all_ranges_full = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
+        groups_full = get_class_groups(num_classes=len(all_ranges_full))
+        gid = int(group_id or 0)
+        gidx = groups_full[gid] if 0 <= gid < len(groups_full) else list(range(len(all_ranges_full)))
+        keep_set = set(gidx)
+        # 로컬 경계로 교체
+        class_ranges = [all_ranges_full[i] for i in gidx]
+        # 글로벌→로컬 인덱스 맵
+        to_local = {g:i for i, g in enumerate(gidx)}
+        # -----------------------------------------------
 
         # 마스크/분포 진단
         mask_cnt=int((labels<0).sum())
@@ -414,15 +420,16 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         for window in top_windows:
             window=min(window, max(6,len(features_only)-1))
 
-            # 샘플 생성 (라벨 -1 완전 제외)
+            # 샘플 생성: 라벨을 그룹 로컬로 재매핑하며 생성
             fv=features_only.values.astype(np.float32)
             X_raw, y = [], []
             for i in range(len(fv)-window):
                 yi = i + window - 1
                 if yi<0 or yi>=len(labels): continue
-                lab = int(labels[yi])
-                if lab < 0:
-                    continue
+                lab_g = int(labels[yi])  # 글로벌 라벨
+                if lab_g < 0 or lab_g not in keep_set:
+                    continue  # 이 그룹 소속 아님 → 스킵
+                lab = to_local[lab_g]    # 로컬 라벨
                 X_raw.append(fv[i:i+window])
                 y.append(lab)
 
@@ -438,6 +445,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 _log_skip(symbol,strategy,f"샘플 부족(w={window})"); continue
             if len(np.unique(y))<2:
                 _log_skip(symbol,strategy,f"라벨 단일 클래스(w={window})"); continue
+
+            # --------- 출력 차원/가중치 일치 ----------
+            set_NUM_CLASSES(len(class_ranges))
+            # ----------------------------------------
 
             # split
             strat_ok=False
