@@ -223,6 +223,9 @@ PREDICT_OVERRIDE_ON_GROUP_END = _as_bool_env("PREDICT_OVERRIDE_ON_GROUP_END", Tr
 PREDICT_FORCE_AFTER_GROUP = _as_bool_env("PREDICT_FORCE_AFTER_GROUP", True)
 PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC","180"))
 
+# === 중요도 저장 플래그 추가 ===
+IMPORTANCE_ENABLE = os.getenv("IMPORTANCE_ENABLE", "1") == "1"
+
 def _maybe_insert_failure(payload:dict, feature_vector:Optional[List[Any]] = None):
     try:
         if not ready_for_group_predict(): return
@@ -685,6 +688,32 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                                       "loss_sum":float(loss_sum),"pt":wpath,"meta":mpath,"passed":True})
                 _safe_print(f"🟩 DONE w={window} {model_type} acc={acc:.4f} f1={f1_val:.4f} val_loss={val_loss:.5f} (no gate)")
 
+                # === Feature Importance 계산·저장(디스크 여유 없으면 자동 스킵) ===
+                try:
+                    if IMPORTANCE_ENABLE:
+                        # val 세트를 사용. 이름은 features_only 컬럼.
+                        X_val_t = torch.tensor(val_X, dtype=torch.float32, device="cpu")
+                        y_val_t = torch.tensor(val_y, dtype=torch.long, device="cpu")
+                        fi = compute_feature_importance(
+                            model.to("cpu"),
+                            X_val=X_val_t, y_val=y_val_t,
+                            feature_names=list(features_only.columns.drop(labels=["timestamp","strategy"], errors="ignore")),
+                            max_seconds=30
+                        )
+                        try:
+                            save_feature_importance(fi, symbol, strategy, model_type, method="permutation")
+                        except OSError as e:
+                            import errno
+                            if getattr(e, "errno", None) == errno.ENOSPC:
+                                _safe_print("[경고] 디스크 부족으로 feature importance 저장 스킵")
+                            else:
+                                _safe_print(f"[경고] feature importance 저장 실패: {e}")
+                        finally:
+                            try: model.to(DEVICE)
+                            except Exception: pass
+                except Exception as e:
+                    _safe_print(f"[경고] feature importance 비활성화/실패: {e}")
+
                 _release_memory(model, base, opt, crit, scheduler)
                 _release_memory(preds, lbls)
                 if DEVICE.type=="cuda": _safe_empty_cache()
@@ -706,6 +735,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             _safe_print(f"[AUTO-PREDICT] triggered after training {symbol}-{strategy}")
         except Exception as e:
             _safe_print(f"[AUTO-PREDICT FAIL] {symbol}-{strategy} → {e}")
+
+        # 관우 요약 갱신
+        try:
+            from logger import flush_gwanwoo_summary
+            flush_gwanwoo_summary()
+        except Exception:
+            pass
 
         _release_memory(feat, features_only, df)
         return res
@@ -911,6 +947,13 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                         try: mark_group_predicted()
                         except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
 
+                # 그룹 종료 시 관우 요약 생성 시도
+                try:
+                    from logger import flush_gwanwoo_summary
+                    flush_gwanwoo_summary()
+                except Exception:
+                    pass
+
                 try: close_predict_gate(note=f"train:group{idx+1}_end")
                 except Exception as e: _safe_print(f"[gate close warn] {e}")
 
@@ -921,6 +964,11 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                     if stop_event is not None and stop_event.is_set(): break
 
             _safe_print("✅ group pass done")
+            try:
+                from logger import flush_gwanwoo_summary
+                flush_gwanwoo_summary()
+            except Exception:
+                pass
             try: close_predict_gate(note="train:group_pass_done")
             except Exception as e: _safe_print(f"[gate close warn] {e}")
 
@@ -1024,6 +1072,11 @@ def train_group(group_id: int | None = None) -> dict:
                 try: mark_group_predicted()
                 except Exception: pass
         finally:
+            try:
+                from logger import flush_gwanwoo_summary
+                flush_gwanwoo_summary()
+            except Exception:
+                pass
             try: close_predict_gate(note=f"train_group:idx{idx}_end")
             except Exception: pass
     return out
