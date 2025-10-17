@@ -17,8 +17,17 @@ from typing import List, Dict, Any, Optional, Tuple
 from collections import Counter
 import hashlib
 import random
-# 추가
-from labels import make_labels as _make_labels
+# 🔽 기존 라인 삭제
+# from labels import make_labels as _make_labels
+
+# 🔽 아래로 교체
+try:
+    from data.labels import make_labels as _make_labels
+except Exception:
+    try:
+        from labels import make_labels as _make_labels
+    except Exception:
+        _make_labels = None
 
 # 🔗 라벨 경계/그룹은 config에서만 관리 (일원화)
 from config import (
