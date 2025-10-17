@@ -1,4 +1,4 @@
-# model_io.py (final, robust load for prediction)
+# model_io.py (final, robust load for prediction + finetune loader)
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import tempfile
 import contextlib
 import hashlib
 import time
-from typing import Any, Optional, Dict
+from typing import Any, Optional, Dict, Tuple, List
 
 import torch
 import torch.nn as nn
@@ -122,10 +122,6 @@ def _tensor_like(v: Any) -> bool:
 def _to_state_dict(obj: Any) -> Dict[str, torch.Tensor] | Any:
     """
     ENFORCE_STATE_DICT_ONLY가 True면 가능한 경우 state_dict로 변환.
-    - dict[str, Tensor] 그대로 통과
-    - nn.Module 이면 .state_dict() 추출
-    - OrderedDict-like 또는 mapping이면 텐서 값만 필터하여 dict로 반환
-    - else 에러
     """
     if not ENFORCE_STATE_DICT_ONLY:
         return obj
@@ -151,7 +147,6 @@ def save_model(path: str, state_or_obj: Any, *, use_safetensors: Optional[bool] 
       - .pt       : torch.save (무압축, state_dict 강제)
       - .ptz      : torch.save + gzip 무손실 압축 (권장)
       - .safetensors : safetensors (설치 시), 텐서 dict만 허용
-    use_safetensors=True 를 주면 확장자가 .safetensors 가 아니면 ValueError.
     """
     ext = _ext(path)
     if ext not in SUPPORTED_EXTS:
@@ -202,19 +197,16 @@ def _is_state_dict(obj: Any) -> bool:
         if not obj:
             return True
         return all(_tensor_like(v) for v in obj.values())
-    # OrderedDict 등
     return obj.__class__.__name__.lower().endswith("ordereddict")
 
 
 def _strip_module_prefix(state: Dict[str, Any]) -> Dict[str, Any]:
-    """module. 접두어 제거"""
     if not any(k.startswith("module.") for k in state.keys()):
         return state
     return {k.replace("module.", "", 1): v for k, v in state.items()}
 
 
 def _try_torch_load_bytes(data: bytes, map_location: str | torch.device | None = "cpu") -> Any | None:
-    """torch.load를 여러 map_location으로 시도"""
     for loc in (map_location, "cpu"):
         try:
             return torch.load(io.BytesIO(data), map_location=loc)
@@ -224,13 +216,6 @@ def _try_torch_load_bytes(data: bytes, map_location: str | torch.device | None =
 
 
 def _try_load_ptz_with_fallbacks(path: str, map_location: str | torch.device | None = "cpu") -> Any:
-    """
-    .ptz 복원 강화:
-      1) gzip.open → torch.load
-      2) gzip 실패 시 raw bytes로 torch.load (잘못 저장된 케이스 대비)
-      3) 위 모두 실패 시 ModelLoadError
-    """
-    # 1) 정석 경로
     try:
         with gzip.open(path, "rb") as gz:
             data = gz.read()
@@ -240,7 +225,6 @@ def _try_load_ptz_with_fallbacks(path: str, map_location: str | torch.device | N
     except Exception:
         pass
 
-    # 2) gzip이 아니거나 손상된 경우 raw torch.load 시도
     try:
         with open(path, "rb") as f:
             raw = f.read()
@@ -254,7 +238,6 @@ def _try_load_ptz_with_fallbacks(path: str, map_location: str | torch.device | N
 
 
 def _load_raw(path: str, map_location: str | torch.device | None = "cpu") -> Any:
-    """확장자에 맞게 '원본 저장물'을 복원(.pt/.ptz: torch 객체, .safetensors: 텐서 dict)"""
     if not os.path.isfile(path):
         raise ModelLoadError("file_not_found", path=path)
 
@@ -282,9 +265,8 @@ def _load_raw(path: str, map_location: str | torch.device | None = "cpu") -> Any
 
 
 def _coerce_to_state_dict(raw: Any) -> Dict[str, torch.Tensor] | None:
-    """nn.Module/임의객체에서 state_dict를 최대한 뽑아냄"""
     if _is_state_dict(raw):
-        return raw  # 이미 state_dict
+        return raw
     if isinstance(raw, nn.Module):
         try:
             return raw.state_dict()
@@ -295,7 +277,6 @@ def _coerce_to_state_dict(raw: Any) -> Dict[str, torch.Tensor] | None:
             return raw.state_dict()
         except Exception:
             return None
-    # OrderedDict-like
     if raw.__class__.__name__.lower().endswith("ordereddict"):
         try:
             d = dict(raw)
@@ -311,15 +292,8 @@ def load_model(
     model: Optional[nn.Module] = None,
     *,
     map_location: str | torch.device | None = "cpu",
-    strict: bool = False,  # 기본 strict=False (키 불일치 허용)
+    strict: bool = False,
 ) -> nn.Module | Dict[str, torch.Tensor] | Any:
-    """
-    통합 로더:
-      - 파일 내용이 '모듈 전체'면 그 모듈을 그대로 반환(또는 state_dict로 변환 후 주입)
-      - 파일 내용이 'state_dict(또는 safetensors 텐서 dict)'이면, 전달받은 `model`에 주입 후 `nn.Module` 반환
-      - `model`이 None인데 state_dict인 경우: state_dict(또는 텐서 dict) 자체를 반환
-    실패 시 ModelLoadError(reason=...)로 상세 사유 전달 → 상위(predict)에서 해당 모델만 스킵 가능.
-    """
     try:
         raw = _load_raw(path, map_location=map_location)
     except ModelLoadError:
@@ -327,16 +301,13 @@ def load_model(
     except Exception as e:
         raise ModelLoadError("load_io_error", path=path, detail=str(e))
 
-    # 1) 저장물이 완성된 nn.Module인 경우
     if isinstance(raw, nn.Module):
         if model is None:
-            return raw  # 그대로 사용 가능
-        # 저장물 모듈의 state_dict를 추출해 주입
+            return raw
         try:
             model.load_state_dict(raw.state_dict(), strict=strict)
             return model
         except Exception as e:
-            # module. 접두어 변형까지 시도
             try:
                 fixed = _strip_module_prefix(raw.state_dict())
                 model.load_state_dict(fixed, strict=strict)
@@ -353,22 +324,18 @@ def load_model(
                         detail=f"e1={type(e).__name__}, e2={type(e2).__name__}, e3={type(e3).__name__}",
                     )
 
-    # 2) 저장물이 state_dict(또는 safetensors 텐서 dict)인 경우
     if _is_state_dict(raw):
         if model is None:
             return raw
-        # 시도 1: 전달된 strict로 로드
         try:
             model.load_state_dict(raw, strict=strict)
             return model
         except Exception as e1:
-            # 시도 2: module. 접두어 제거
             try:
                 fixed = _strip_module_prefix(raw)
                 model.load_state_dict(fixed, strict=strict)
                 return model
             except Exception as e2:
-                # 시도 3: module. 접두어 추가
                 try:
                     augmented = {("module." + k): v for k, v in raw.items()}
                     model.load_state_dict(augmented, strict=strict)
@@ -380,7 +347,6 @@ def load_model(
                         detail=f"e1={type(e1).__name__}, e2={type(e2).__name__}, e3={type(e3).__name__}"
                     )
 
-    # 3) 기타 객체 — state_dict로 강제 변환 시도
     coerced = _coerce_to_state_dict(raw)
     if coerced is not None:
         if model is None:
@@ -405,7 +371,6 @@ def load_model(
                         detail=f"e1={type(e1).__name__}, e2={type(e2).__name__}, e3={type(e3).__name__}"
                     )
 
-    # 4) 그 외 포맷(희귀) — 그대로 반환 (상위에서 처리)
     return raw
 
 
@@ -422,10 +387,6 @@ def _compute_sha1_of_file(path: str) -> str:
 
 
 def save_meta(model_path: str, meta: Dict[str, Any]) -> str:
-    """
-    모델 경로 옆에 `<stem>.meta.json`으로 원자적으로 저장.
-    메타에 기본 필드(version, created_at, file_sha1) 추가.
-    """
     if not isinstance(meta, dict):
         raise ValueError("meta는 dict여야 합니다.")
     mpath = _meta_path_for(model_path)
@@ -441,9 +402,6 @@ def save_meta(model_path: str, meta: Dict[str, Any]) -> str:
 
 
 def load_meta(model_path: str, default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """
-    모델 경로 옆의 메타 파일을 읽어 dict로 반환. 없으면 default 또는 {} 반환.
-    """
     mpath = _meta_path_for(model_path)
     if not os.path.isfile(mpath):
         return {} if default is None else dict(default)
@@ -464,9 +422,6 @@ def save_model_with_meta(
     *,
     use_safetensors: Optional[bool] = None,
 ) -> None:
-    """
-    모델 저장 + (선택) 메타 저장을 한 번에 수행.
-    """
     save_model(path, state_or_obj, use_safetensors=use_safetensors)
     if meta:
         save_meta(path, meta)
@@ -504,6 +459,89 @@ def convert_ptz_to_pt(
     return dst_path
 
 
+# ========================= 파인튜닝 전용 로더 =========================
+def _filter_backbone_keys(
+    state: Dict[str, torch.Tensor],
+    drop_head: bool,
+    head_prefixes: Tuple[str, ...]
+) -> Tuple[Dict[str, torch.Tensor], List[str], List[str]]:
+    kept: Dict[str, torch.Tensor] = {}
+    kept_keys: List[str] = []
+    dropped: List[str] = []
+    for k, v in state.items():
+        top = k.split(".", 1)[0]
+        if drop_head and any(top.startswith(h) or k.startswith(h) for h in head_prefixes):
+            dropped.append(k)
+            continue
+        kept[k] = v
+        kept_keys.append(k)
+    return kept, kept_keys, dropped
+
+
+def load_for_finetune(
+    model: nn.Module,
+    prev_path: str,
+    *,
+    strict: bool = False,
+    map_location: str | torch.device | None = "cpu",
+    drop_head: bool = True,
+    head_prefixes: Tuple[str, ...] = ("fc_logits", "fc2", "fc1", "res_proj"),
+) -> Dict[str, Any]:
+    """
+    이전 모델 가중치를 '백본 중심'으로 주입.
+    - 헤드 계층(head_prefixes)은 기본적으로 제외(drop_head=True).
+    - 키 접두어(module.) 처리 및 크기 불일치 자동 스킵.
+    반환: {"loaded": [...], "skipped": [...], "dropped": [...], "path": prev_path}
+    """
+    # 1) raw 로드 -> state_dict 확보
+    raw = load_model(prev_path, model=None, map_location=map_location, strict=False)
+    state = _coerce_to_state_dict(raw)
+    if state is None and _is_state_dict(raw):
+        state = raw  # type: ignore
+    if state is None:
+        raise ModelLoadError("finetune_state_missing", path=prev_path, detail="no state_dict coercible")
+
+    state = _strip_module_prefix(state)  # module. 제거
+
+    # 2) 헤드 제외 필터링
+    filt_state, kept_keys, dropped = _filter_backbone_keys(state, drop_head, head_prefixes)
+
+    # 3) 크기 불일치 키 제거
+    own_state = dict(model.state_dict())
+    loadable: Dict[str, torch.Tensor] = {}
+    skipped: List[str] = []
+    for k, v in filt_state.items():
+        if k not in own_state:
+            skipped.append(k)
+            continue
+        try:
+            if own_state[k].shape != v.shape:
+                skipped.append(k)
+                continue
+        except Exception:
+            skipped.append(k)
+            continue
+        loadable[k] = v
+
+    # 4) 주입
+    missing, unexpected = [], []
+    try:
+        res = model.load_state_dict(loadable, strict=strict)
+        missing = list(getattr(res, "missing_keys", [])) if hasattr(res, "missing_keys") else []
+        unexpected = list(getattr(res, "unexpected_keys", [])) if hasattr(res, "unexpected_keys") else []
+    except Exception:
+        # 안전 폴백: strict=False 재시도
+        model.load_state_dict(loadable, strict=False)
+
+    return {
+        "path": prev_path,
+        "loaded": sorted(list(loadable.keys())),
+        "skipped": sorted(skipped + unexpected),
+        "dropped": sorted(dropped),
+        "missing": sorted(missing),
+    }
+
+
 __all__ = [
     "ModelLoadError",
     "save_model",
@@ -513,4 +551,5 @@ __all__ = [
     "save_model_with_meta",
     "convert_pt_to_ptz",
     "convert_ptz_to_pt",
-    ]
+    "load_for_finetune",
+]
