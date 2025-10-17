@@ -34,6 +34,14 @@ _default_config = {
         "n_override": None
     },
 
+    # 전략별 기본 그룹 크기(모델 당 클래스 수) 권장값
+    # ENV로 덮어쓰기 가능: GROUP_SIZE_SHORT / GROUP_SIZE_MID / GROUP_SIZE_LONG
+    "GROUP_SIZE": {
+        "단기": 3,   # 로그에서 cls3/cls2가 안정적 → 기본 3
+        "중기": 2,   # 로그에서 cls2 성능 안정
+        "장기": 2    # 로그에서 cls2 성능 안정
+    },
+
     "REGIME": {
         "enabled": False,
         "lookback": 200,
@@ -74,23 +82,23 @@ _default_config = {
 
     # 클래스 경계/병합 파라미터
     "CLASS_BIN": {
-        "method": "fixed_step",     # "quantile" | "fixed_step" | "linear"  ← 기본을 fixed_step로
+        "method": "fixed_step",     # "quantile" | "fixed_step" | "linear"
         "strict": True,
         "zero_band_eps": 0.0020,    # ±0.20%p
         "min_width": 0.0010,        # 최소 폭 0.10%p
-        "max_width": 0.03,          # 한 구간 최대 폭 3%p (더 타이트)
-        "step_pct": 0.0030,         # 0.30%p 고정 스텝 (단기 ±6% 구간에서 최대 40 스텝)
+        "max_width": 0.03,          # 한 구간 최대 폭 3%p
+        "step_pct": 0.0030,         # 0.30%p 고정 스텝
         "merge_sparse": {
-            "enabled": True,        # 기본 ON (희귀 구간 자동 병합)
+            "enabled": True,        # 희귀 구간 자동 병합
             "min_ratio": 0.01,
             "min_count_floor": 20,
             "prefer": "denser"
         },
-        # ▼ 비용선/패스/실효기대수익 (신규)
-        "no_trade_floor_abs": 0.01,      # 절대 1% (수수료/펀딩비 고려 최소 기대수익선)
-        "add_abstain_class": True,       # [-1%, +1%]를 '패스' 전용 클래스로 둘지
-        "abstain_expand_eps": 0.0005,    # 중앙 패스 구간 여유폭(스냅 방지)
-        "expected_return_mode": "truncated_mid"  # "mid" | "truncated_mid"
+        # ▼ 비용선/패스/실효기대수익
+        "no_trade_floor_abs": 0.01,      # 절대 1%
+        "add_abstain_class": True,       # 중앙 패스 클래스 사용
+        "abstain_expand_eps": 0.0005,    # 중앙 여유폭
+        "expected_return_mode": "truncated_mid"
     },
 
     # 교차검증/가드
@@ -145,11 +153,11 @@ _default_config = {
 
     # === Guards & meta thresholds (예측 파이프라인 공통 사용) ===
     "GUARD": {
-        "PROFIT_MIN": 0.01,            # Profit Filter 절대 최소 기대수익(롱/숏 공통)
-        "ABSTAIN_MIN_META": 0.25,      # 메타확률 미만이면 보류
-        "REALITY_GUARD_VOL_MULT": 5.0, # 변동성 대비 과장 차단 배수
-        "EXIT_GUARD_MIN_ER": 0.01,     # ExitGuard 기대수익 하한
-        "CALIB_NAN_MODE": "abstain"    # calib_prob NaN 처리: 'abstain' | 'drop'
+        "PROFIT_MIN": 0.01,
+        "ABSTAIN_MIN_META": 0.25,
+        "REALITY_GUARD_VOL_MULT": 5.0,
+        "EXIT_GUARD_MIN_ER": 0.01,
+        "CALIB_NAN_MODE": "abstain"
     },
 }
 
@@ -164,9 +172,7 @@ _STRATEGY_RETURN_CAP_POS_MAX = {"단기": 0.06, "중기": 0.20, "장기": 0.50}
 _STRATEGY_RETURN_CAP_NEG_MIN = {"단기": -0.06, "중기": -0.20, "장기": -0.50}
 
 _MIN_RANGE_WIDTH = _default_config["CLASS_BIN"]["min_width"]
-_ROUND_DECIMALS  = 4
-_ROUNDS_DECIMALS = 4           # for _round2
-_ROUND_DECIMALS  = 4           # for pretty debug printing
+_ROUNDS_DECIMALS = 4
 _EPS_ZERO_BAND   = _default_config["CLASS_BIN"]["zero_band_eps"]
 _DISPLAY_MIN_RET = 1e-4
 
@@ -241,8 +247,25 @@ def get_SYMBOL_GROUPS():
     group_size = _config.get("SYMBOL_GROUP_SIZE", _default_config["SYMBOL_GROUP_SIZE"])
     return [symbols[i:i+group_size] for i in range(0, len(symbols), group_size)]
 
-def get_class_groups(num_classes=None, group_size=5):
+# === 전략별 그룹 크기(모델 당 클래스 수) ===
+def _group_size_env_or_default(strategy: str) -> int:
+    m = dict(_config.get("GROUP_SIZE", {}))
+    # ENV 오버라이드
+    gs_env = {
+        "단기": os.getenv("GROUP_SIZE_SHORT"),
+        "중기": os.getenv("GROUP_SIZE_MID"),
+        "장기": os.getenv("GROUP_SIZE_LONG"),
+    }.get(strategy)
+    if gs_env is not None:
+        try: return max(2, int(gs_env))
+        except Exception: pass
+    return max(2, int(m.get(strategy, 5)))
+
+def get_class_groups(num_classes=None, group_size=None):
+    """전략별 권장 그룹크기를 기본값으로 사용."""
     if num_classes is None or num_classes < 2: num_classes = get_NUM_CLASSES()
+    if group_size is None: group_size = _group_size_env_or_default(os.getenv("CURRENT_STRATEGY", "중기"))
+    if group_size < 2: group_size = 2
     groups = [list(range(num_classes))] if num_classes <= group_size else [list(range(i, min(i + group_size, num_classes))) for i in range(0, num_classes, group_size)]
     _log(f"[📊 클래스 분포 그룹] 총={num_classes}, 그룹크기={group_size}, 그룹수={len(groups)}")
     return groups
@@ -631,7 +654,7 @@ def class_to_expected_return(class_id: int, symbol: str, strategy: str):
     val = (lo + hi) / 2.0
     return _cap_by_strategy(val, strategy)
 
-def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, group_size=5):
+def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, group_size=None):
     import numpy as np
     from data.utils import get_kline_by_strategy
 
@@ -647,6 +670,11 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         if n_override is not None: n_override = int(n_override)
     except Exception:
         n_override = None
+
+    # 그룹 크기 기본값 보정
+    if group_size is None and strategy is not None:
+        group_size = _group_size_env_or_default(strategy)
+    if group_size is None: group_size = 5
 
     def compute_equal_ranges(n_cls, reason=""):
         n_cls = max(4, int(n_cls))
@@ -684,7 +712,7 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             lo, hi = float(edges[i]), float(edges[i + 1])
             lo, hi = _cap_by_strategy(lo, strategy), _cap_by_strategy(hi, strategy)
             lo, hi = _enforce_min_width(lo, hi)
-            cooked.append((_round2(lo), _round2(hi)))
+            cooked.append((_round2(lo), _round2(hi)])
         fixed = _fix_monotonic(cooked); fixed = _ensure_zero_band(fixed)
         if BIN_CONF.get("strict", True): fixed = _strictify(fixed)
         if rets_for_merge is not None and rets_for_merge.size > 0:
@@ -746,7 +774,7 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             if not fixed or len(fixed) < 2:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="최종 경계 부족(가드)")
 
-            # 비용선 하드컷 & 패스 구간 반영 (핵심)
+            # 비용선 하드컷 & 패스 구간 반영
             fixed = _apply_trade_floor_cuts(fixed)
 
             return fixed
@@ -771,7 +799,7 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     if symbol is not None and strategy is not None:
         _ranges_cache[(symbol, strategy)] = all_ranges
 
-    # 디버그 프린트(로그와 동일 포맷)
+    # 디버그 프린트
     try:
         if symbol is not None and strategy is not None and not _quiet():
             import numpy as np
@@ -784,7 +812,7 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
                 if rets_dbg.size > 0:
                     rets_dbg = np.array([_cap_by_strategy(float(r), strategy) for r in rets_dbg], dtype=np.float32)
                     qs = np.quantile(rets_dbg, [0.00, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 1.00])
-                    def _r2(z): return round(float(z), _ROUND_DECIMALS)
+                    def _r2(z): return round(float(z), _ROUNDS_DECIMALS)
                     print(f"[📈 수익률분포(±)] {symbol}-{strategy} min={_r2(qs[0])}, p25={_r2(qs[1])}, p50={_r2(qs[2])}, p75={_r2(qs[3])}, p90={_r2(qs[4])}, p95={_r2(qs[5])}, p99={_r2(qs[6])}, max={_r2(qs[7])}")
                     print(f"[📏 클래스경계 로그] {symbol}-{strategy} → {len(all_ranges)}개")
                     print(f"[📏 경계 리스트] {symbol}-{strategy} → {all_ranges}")
@@ -805,7 +833,10 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
 
     if group_id is None:
         return all_ranges
-    start, end = int(group_id) * int(group_size), int(group_id) * int(group_size) + int(group_size)
+
+    # 그룹 슬라이스: 전략별 권장 그룹크기 사용
+    start = int(group_id) * int(group_size)
+    end   = start + int(group_size)
     if start >= len(all_ranges): return []
     return all_ranges[start:end]
 
@@ -942,4 +973,4 @@ __all__ = [
     "get_EVAL_RUNTIME", "strategy_horizon_hours", "compute_eval_due_at",
     "get_DATA", "get_DATA_RUNTIME", "get_CLASS_ENFORCE", "get_CV_CONFIG",
     "get_ONCHAIN", "get_GUARD",
-            ]
+    ]
