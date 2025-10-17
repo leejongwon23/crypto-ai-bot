@@ -1251,6 +1251,41 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     CacheManager.set(cache_key, feat)
     return feat
 
+# 파일: data/utils.py
+# compute_features 정의 바로 아래 또는 하단 적절한 위치에 추가
+
+def compute_features_multi(symbol: str, df_base: pd.DataFrame) -> Dict[str, Optional[pd.DataFrame]]:
+    """
+    전략별 피처 1회화 계산.
+    - 단기: 전달받은 df_base 재사용
+    - 중기/장기: 전략별 kline 재수집 후 피처화
+    반환: {"단기": DataFrame|None, "중기": DataFrame|None, "장기": DataFrame|None}
+    """
+    out: Dict[str, Optional[pd.DataFrame]] = {"단기": None, "중기": None, "장기": None}
+
+    # 단기: 주어진 df_base 사용
+    try:
+        if isinstance(df_base, pd.DataFrame) and not df_base.empty:
+            f_short = compute_features(symbol, df_base, "단기")
+            out["단기"] = f_short if isinstance(f_short, pd.DataFrame) and not f_short.empty else None
+    except Exception:
+        out["단기"] = None
+
+    # 중기/장기: 전략별로 수집 후 계산
+    for strat in ("중기", "장기"):
+        try:
+            df_s = get_kline_by_strategy(symbol, strat)
+            if isinstance(df_s, pd.DataFrame) and not df_s.empty:
+                f_s = compute_features(symbol, df_s, strat)
+                out[strat] = f_s if isinstance(f_s, pd.DataFrame) and not f_s.empty else None
+            else:
+                out[strat] = None
+        except Exception:
+            out[strat] = None
+
+    return out
+
+
 # ========================= 증강 관련 함수 =========================
 def augment_jitter(seq: np.ndarray, sigma_min: float = 0.0005, sigma_max: float = 0.002) -> np.ndarray:
     seq = np.asarray(seq, dtype=np.float32)
