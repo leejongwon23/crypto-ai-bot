@@ -83,6 +83,18 @@ except Exception:
                 out[s] = None
         return out
 
+# ===== [ADD] 보강 임포트: data.utils 에서 현재 그룹 조회 =====
+try:
+    from data.utils import (
+        get_current_group_index, get_current_group_symbols
+    )
+except Exception:
+    try:
+        from utils import get_current_group_index, get_current_group_symbols
+    except Exception:
+        def get_current_group_index(): return 0
+        def get_current_group_symbols(): return SYMBOL_GROUPS[0] if SYMBOL_GROUPS else []
+
 # NOTE: 리포 구조에 맞춰 경로 정정 (robust dual import)
 try:
     from model.base_model import get_model, freeze_backbone, unfreeze_last_k_layers
@@ -945,6 +957,96 @@ def request_stop()->bool:
 def is_loop_running()->bool:
     with _TRAIN_LOOP_LOCK:
         return bool(_TRAIN_LOOP_THREAD is not None and _TRAIN_LOOP_THREAD.is_alive())
+
+# ===== [ADD] 공개 API 구현 (train_symbol / train_group / train_all / continue_from_failure) =====
+def train_symbol(symbol: str, strategy: str, group_id: int | None = None) -> dict:
+    """
+    단일 심볼·전략 학습. 그룹 강제 순서 체크는 호출자가 책임.
+    """
+    res = train_one_model(symbol=symbol, strategy=strategy, group_id=group_id)
+    try:
+        if res.get("models"):
+            mark_symbol_trained(symbol)
+            # 학습 직후 스모크 예측 트리거
+            try:
+                from predict import predict
+                _safe_predict_with_timeout(predict_fn=predict, symbol=symbol, strategy=strategy,
+                                           source="train_symbol", model_type=None, timeout=PREDICT_TIMEOUT_SEC)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return res
+
+def train_group(group_id: int | None = None) -> dict:
+    """
+    현재 그룹(기본) 또는 지정 그룹 전체 심볼에 대해 단기→중기→장기 순으로 학습.
+    그룹 완료 시 예측 트리거 및 group_predicted 마킹.
+    """
+    idx = get_current_group_index() if group_id is None else int(group_id)
+    symbols = get_current_group_symbols() if group_id is None else (SYMBOL_GROUPS[idx] if 0 <= idx < len(SYMBOL_GROUPS) else [])
+    out = {"group_index": idx, "symbols": symbols, "results": {}}
+
+    completed, partial = train_models(symbols, stop_event=None, ignore_should=False)
+    out["completed"] = completed; out["partial"] = partial
+
+    # 그룹 완료 시 자동 예측
+    try:
+        gate_ok = ready_for_group_predict()
+    except Exception:
+        gate_ok = True
+    if gate_ok:
+        try:
+            from predict import predict
+            ran_any = False
+            for s in symbols:
+                for strat in ["단기", "중기", "장기"]:
+                    if _has_model_for(s, strat):
+                        try:
+                            ok = _safe_predict_with_timeout(predict_fn=predict, symbol=s, strategy=strat,
+                                                            source="train_group", model_type=None,
+                                                            timeout=PREDICT_TIMEOUT_SEC)
+                            ran_any = ran_any or ok
+                        except Exception:
+                            pass
+            if ran_any:
+                try: mark_group_predicted()
+                except Exception: pass
+        finally:
+            try: close_predict_gate(note=f"train_group:idx{idx}_end")
+            except Exception: pass
+    return out
+
+def train_all() -> dict:
+    """
+    1→8 전체 그룹 순회 학습. 각 그룹 완료 시 예측 트리거.
+    """
+    summary = {"groups": []}
+    for gid, group in enumerate(SYMBOL_GROUPS):
+        res = train_group(group_id=gid)
+        summary["groups"].append(res)
+    return summary
+
+def continue_from_failure(limit: int = 50) -> dict:
+    """
+    실패 레코드 기반 재학습 엔트리. 사용 가능 모듈 자동 탐색.
+    """
+    tried = []
+    ok = False
+    err = None
+    try:
+        import failure_learn as FL
+        tried.append("failure_learn.run")
+        ok = bool(FL.run(limit=limit))
+    except Exception as e1:
+        err = str(e1)
+        try:
+            import failure_trainer as FT
+            tried.append("failure_trainer.retrain_failures")
+            ok = bool(FT.retrain_failures(limit=limit))
+        except Exception as e2:
+            err = f"{err} | {e2}"
+    return {"ok": ok, "tried": tried, "error": err}
 
 if __name__=="__main__":
     try: start_train_loop(force_restart=True, sleep_sec=0)
