@@ -37,9 +37,9 @@ _default_config = {
     # 전략별 기본 그룹 크기(모델 당 클래스 수) 권장값
     # ENV로 덮어쓰기 가능: GROUP_SIZE_SHORT / GROUP_SIZE_MID / GROUP_SIZE_LONG
     "GROUP_SIZE": {
-        "단기": 3,   # 로그에서 cls3/cls2가 안정적 → 기본 3
-        "중기": 2,   # 로그에서 cls2 성능 안정
-        "장기": 2    # 로그에서 cls2 성능 안정
+        "단기": 3,
+        "중기": 2,
+        "장기": 2
     },
 
     "REGIME": {
@@ -84,20 +84,20 @@ _default_config = {
     "CLASS_BIN": {
         "method": "fixed_step",     # "quantile" | "fixed_step" | "linear"
         "strict": True,
-        "zero_band_eps": 0.0020,    # ±0.20%p
-        "min_width": 0.0010,        # 최소 폭 0.10%p
-        "max_width": 0.03,          # 한 구간 최대 폭 3%p
-        "step_pct": 0.0030,         # 0.30%p 고정 스텝
+        "zero_band_eps": 0.0020,
+        "min_width": 0.0010,
+        "max_width": 0.03,
+        "step_pct": 0.0030,
         "merge_sparse": {
-            "enabled": True,        # 희귀 구간 자동 병합
+            "enabled": True,
             "min_ratio": 0.01,
             "min_count_floor": 20,
             "prefer": "denser"
         },
         # ▼ 비용선/패스/실효기대수익
-        "no_trade_floor_abs": 0.01,      # 절대 1%
-        "add_abstain_class": True,       # 중앙 패스 클래스 사용
-        "abstain_expand_eps": 0.0005,    # 중앙 여유폭
+        "no_trade_floor_abs": 0.01,
+        "add_abstain_class": True,
+        "abstain_expand_eps": 0.0005,
         "expected_return_mode": "truncated_mid"
     },
 
@@ -712,7 +712,7 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             lo, hi = float(edges[i]), float(edges[i + 1])
             lo, hi = _cap_by_strategy(lo, strategy), _cap_by_strategy(hi, strategy)
             lo, hi = _enforce_min_width(lo, hi)
-            cooked.append((_round2(lo), _round2(hi)])
+            cooked.append((_round2(lo), _round2(hi)))
         fixed = _fix_monotonic(cooked); fixed = _ensure_zero_band(fixed)
         if BIN_CONF.get("strict", True): fixed = _strictify(fixed)
         if rets_for_merge is not None and rets_for_merge.size > 0:
