@@ -1,4 +1,4 @@
-# train.py — FINAL v1.7 (메모리 누수 방지 패치: 에폭/모델/윈도우 단위 정리, AMP 옵션, 게이트 연동 유지)
+# train.py — SPEED v2.0 (전략간 피처/라벨 1회화 + 중·장기 파인튜닝 경로, 폴백 안전)
 # -*- coding: utf-8 -*-
 import os, time, glob, shutil, json, random, traceback, threading, gc
 from datetime import datetime
@@ -62,7 +62,9 @@ try:
     from data.utils import (
         get_kline_by_strategy, compute_features, SYMBOL_GROUPS,
         should_train_symbol, mark_symbol_trained, ready_for_group_predict, mark_group_predicted,
-        reset_group_order, CacheManager as DataCacheManager
+        reset_group_order, CacheManager as DataCacheManager,
+        # 신규 경로(있으면 사용)
+        compute_features_multi
     )
 except Exception:
     from utils import (
@@ -70,12 +72,24 @@ except Exception:
         should_train_symbol, mark_symbol_trained, ready_for_group_predict, mark_group_predicted,
         reset_group_order, CacheManager as DataCacheManager
     )
+    # 선택적 신규 API 폴백
+    def compute_features_multi(symbol: str, df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+        # 폴백: 기존 compute_features를 전략별로 호출
+        out = {}
+        for s in ("단기","중기","장기"):
+            try:
+                out[s] = compute_features(symbol, df, s)
+            except Exception:
+                out[s] = None
+        return out
 
 # NOTE: 리포 구조에 맞춰 경로 정정 (robust dual import)
 try:
-    from model.base_model import get_model
+    from model.base_model import get_model, freeze_backbone, unfreeze_last_k_layers
 except Exception:
     from base_model import get_model
+    def freeze_backbone(model): return None
+    def unfreeze_last_k_layers(model, k:int=1): return None
 
 from feature_importance import compute_feature_importance, save_feature_importance  # (유지)
 from failure_db import insert_failure_record, ensure_failure_db
@@ -117,9 +131,9 @@ except Exception:
 
 # [풀백] data.labels → labels
 try:
-    from data.labels import make_labels
+    from data.labels import make_labels, make_all_horizon_labels
 except Exception:
-    from labels import make_labels
+    from labels import make_labels, make_all_horizon_labels
 
 try:
     from window_optimizer import find_best_window, find_best_windows
@@ -137,6 +151,12 @@ try:
 except Exception:
     def pl_clear_stale(lock_key=None): return None
     def pl_wait_free(max_wait_sec: int, lock_key=None): return True
+
+# ───────── 파인튜닝 로더(선택) ─────────
+try:
+    from model_io import load_for_finetune as _load_for_finetune
+except Exception:
+    _load_for_finetune = None
 
 # ---------- 전역 상수 ----------
 DEVICE=torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -168,9 +188,10 @@ COST_SENSITIVE_ARGMAX = _as_bool_env("COST_SENSITIVE_ARGMAX", True)
 CS_ARG_BETA = float(os.getenv("CS_ARG_BETA","1.0"))
 
 def _epochs_for(strategy:str)->int:
+    # 중·장기는 파인튜닝을 가정해 기본 에폭을 낮춤
     if strategy=="단기": return int(os.getenv("EPOCHS_SHORT","24"))
-    if strategy=="중기": return int(os.getenv("EPOCHS_MID","28"))
-    if strategy=="장기": return int(os.getenv("EPOCHS_LONG","32"))
+    if strategy=="중기": return int(os.getenv("EPOCHS_MID","12"))
+    if strategy=="장기": return int(os.getenv("EPOCHS_LONG","12"))
     return 24
 
 # (참고용: 운영 게이트엔 미사용)
@@ -257,8 +278,55 @@ def _has_model_for(symbol: str, strategy: str) -> bool:
         return any(glob.glob(os.path.join(d,"*"+e)) for e in exts) if os.path.isdir(d) else False
     except: return False
 
+# ---------- 신규: 전략 간 피처/라벨 패스다운 지원 ----------
+def _build_precomputed(symbol: str) -> tuple[Optional[pd.DataFrame], Dict[str, Any], Dict[str, Any]]:
+    """
+    단일 df 기반으로 3전략 피처/라벨을 미리 계산. (없으면 폴백)
+    Returns: (df_base, pre_feat, pre_lbl)
+    pre_feat[strategy] = features DataFrame or None
+    pre_lbl[strategy]  = (gains, labels, class_ranges) or None
+    """
+    try:
+        # 단기 전략용 df를 기준으로 일관성 확보
+        df = get_kline_by_strategy(symbol, "단기")
+        if df is None or df.empty:
+            return None, {}, {}
+        # 멀티 피처 (있으면 1회 계산)
+        feats = compute_features_multi(symbol, df)
+        # 멀티 라벨 (있으면 1회 계산)
+        lbls_all = make_all_horizon_labels(df=df, symbol=symbol, group_id=None)  # keys: "4h","1d","7d"
+        pre_lbl = {}
+        for strat, key in (("단기","4h"),("중기","1d"),("장기","7d")):
+            v = lbls_all.get(key, None)
+            if v is None:
+                pre_lbl[strat] = None
+            else:
+                pre_lbl[strat] = v  # (gains, labels, ranges)
+        return df, feats, pre_lbl
+    except Exception:
+        return None, {}, {}
+
+def _find_prev_model_for(symbol: str, prev_strategy: str) -> Optional[str]:
+    try:
+        candidates = []
+        for p in glob.glob(os.path.join(MODEL_DIR, f"{symbol}_{prev_strategy}_*.ptz")):
+            candidates.append((os.path.getmtime(p), p))
+        if not candidates:
+            # 하위 디렉토리 패턴
+            for p in glob.glob(os.path.join(MODEL_DIR, symbol, prev_strategy, "*.ptz")):
+                candidates.append((os.path.getmtime(p), p))
+        if not candidates:
+            return None
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+    except Exception:
+        return None
+
 # ---------- 핵심: 단일 그룹 학습 ----------
-def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] = None, stop_event: Optional[threading.Event] = None) -> Dict[str, Any]:
+def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] = None,
+                    stop_event: Optional[threading.Event] = None,
+                    pre_feat: Optional[pd.DataFrame] = None,
+                    pre_lbl: Optional[tuple] = None) -> Dict[str, Any]:
     if max_epochs is None: max_epochs = _epochs_for(strategy)
     res={"symbol":symbol,"strategy":strategy,"group_id":int(group_id or 0),"windows":[], "models": []}
     try:
@@ -266,16 +334,30 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         _safe_print(f"✅ train_one_model {symbol}-{strategy}-g{group_id}")
 
         # 데이터
-        df=get_kline_by_strategy(symbol,strategy)
+        # 우선순위: precomputed df(단기 기준) → 전략별 개별 수집
+        df = None
+        if pre_feat is not None or pre_lbl is not None:
+            try:
+                df = get_kline_by_strategy(symbol, "단기")
+            except Exception:
+                df = None
+        if df is None:
+            df=get_kline_by_strategy(symbol,strategy)
         if df is None or df.empty: _log_skip(symbol,strategy,"데이터 없음"); return res
+
         cfg=STRATEGY_CONFIG.get(strategy,{})
         _limit=int(cfg.get("limit",300)); _min_required=max(60,int(_limit*0.90))
         _attrs=getattr(df,"attrs",{}) if df is not None else {}
         augment_needed=bool(_attrs.get("augment_needed", len(df)<_limit))
         enough_for_training=bool(_attrs.get("enough_for_training", len(df)>=_min_required))
 
-        # 피처
-        feat=compute_features(symbol, df, strategy)
+        # 피처: 사전계산 우선 사용
+        if isinstance(pre_feat, pd.DataFrame):
+            feat = pre_feat
+        elif isinstance(pre_feat, dict) and pre_feat.get(strategy, None) is not None:
+            feat = pre_feat[strategy]
+        else:
+            feat=compute_features(symbol, df, strategy)
         if feat is None or getattr(feat,"empty",True): _log_skip(symbol,strategy,"피처 없음"); return res
 
         # 클래스 경계
@@ -286,8 +368,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         set_NUM_CLASSES(len(class_ranges))
         logger.log_class_ranges(symbol, strategy, group_id=group_id, class_ranges=class_ranges, note="train_one_model")
 
-        # 라벨 (-1 = 경계 근접 샘플 → 제외)
-        gains, labels, class_ranges_used = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=group_id)
+        # 라벨: 사전계산 우선 사용
+        if isinstance(pre_lbl, tuple) and len(pre_lbl)==3:
+            gains, labels, class_ranges_used = pre_lbl
+        elif isinstance(pre_lbl, dict) and pre_lbl.get(strategy, None) is not None:
+            gains, labels, class_ranges_used = pre_lbl[strategy]
+        else:
+            gains, labels, class_ranges_used = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=group_id)
         if (not isinstance(labels, np.ndarray)) or labels.size == 0:
             _log_skip(symbol,strategy,"라벨 없음"); return res
 
@@ -322,7 +409,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 yi = i + window - 1
                 if yi<0 or yi>=len(labels): continue
                 lab = int(labels[yi])
-                if lab < 0:    # 경계 근접/불확실 → 학습 제외
+                if lab < 0:
                     continue
                 X_raw.append(fv[i:i+window])
                 y.append(lab)
@@ -352,7 +439,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             else:
                 train_idx, val_idx = tr_idx, val_idx
 
-            # 최종 분할 가드
             if len(train_idx)==0 or len(val_idx)==0:
                 _log_skip(symbol,strategy,f"분할 실패(w={window})"); continue
 
@@ -365,7 +451,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 _log_skip(symbol,strategy,f"분할 후 단일 클래스(w={window})"); _release_memory(X_raw,y,train_idx,val_idx,scaler); continue
 
             local_epochs=_epochs_for(strategy)
-            if len(train_X)<200: local_epochs=max(8, int(round(local_epochs*0.7)))
+            if len(train_X)<200: local_epochs=max(6, int(round(local_epochs*0.7)))
             try:
                 if len(train_X)<200:
                     train_X,train_y=balance_classes(train_X,train_y,num_classes=len(class_ranges))
@@ -399,10 +485,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             w=torch.tensor(w_full,dtype=torch.float32,device=DEVICE)
 
             priors=np.bincount(train_y, minlength=len(class_ranges)).astype(np.float32)
-            priors=priors/max(1.0,float(priors.sum())); priors[priors<=0]=1e-6
+            priors=priors/max(1.0,float(priors.sum())); priors[priors]<=0]=1e-6
             priors_t=torch.tensor(priors,dtype=torch.float32,device=DEVICE)
 
-            # DataLoaders  (num_workers=0, pin_memory=False 권장)
+            # DataLoaders
             def _make_train_loader():
                 base_ds=TensorDataset(torch.tensor(train_X, dtype=torch.float32), torch.tensor(train_y, dtype=torch.long))
                 if SMART_TRAIN:
@@ -426,7 +512,22 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             # 모델 3종 학습
             for model_type in ["lstm","cnn_lstm","transformer"]:
                 base=get_model(model_type,input_size=feat_dim,output_size=len(class_ranges)).to(DEVICE)
-                model=base; opt=torch.optim.Adam(model.parameters(), lr=1e-3)
+                model=base
+
+                # 🔹 중·장기 파인튜닝 경로: 단기→중기→장기 백본 승계 + 부분동결 시도
+                if strategy != "단기":
+                    prev_strat = "단기" if strategy=="중기" else "중기"
+                    prev_path = _find_prev_model_for(symbol, prev_strat)
+                    if prev_path and _load_for_finetune is not None:
+                        try:
+                            _load_for_finetune(model, prev_path, strict=False)  # head는 자동 맞춤(유틸 쪽에서 처리 예정)
+                            freeze_backbone(model)
+                            unfreeze_last_k_layers(model, k=1)  # 마지막 블록만 미세학습
+                            _safe_print(f"[FT] loaded {prev_path} → freeze backbone, tune last layers")
+                        except Exception as e:
+                            _safe_print(f"[FT warn] {e}")
+
+                opt=torch.optim.Adam(model.parameters(), lr=1e-3)
                 crit=FocalLoss(gamma=FOCAL_GAMMA, weight=w)
                 scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=2, min_lr=1e-5) if SMART_TRAIN else None
                 patience=EARLY_STOP_PATIENCE; min_delta=EARLY_STOP_MIN_DELTA
@@ -560,12 +661,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                                       "loss_sum":float(loss_sum),"pt":wpath,"meta":mpath,"passed":True})
                 _safe_print(f"🟩 DONE w={window} {model_type} acc={acc:.4f} f1={f1_val:.4f} val_loss={val_loss:.5f} (no gate)")
 
-                # 모델 단위 메모리 정리
                 _release_memory(model, base, opt, crit, scheduler)
                 _release_memory(preds, lbls)
                 if DEVICE.type=="cuda": _safe_empty_cache()
 
-            # 윈도우 단위 메모리 정리
             _release_memory(train_loader, val_loader, vds)
             _release_memory(train_X, val_X, train_y, val_y, X_raw, y, train_idx, val_idx, scaler)
             if DEVICE.type=="cuda": _safe_empty_cache()
@@ -575,7 +674,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         res["ok"]=bool(res.get("models"))
         _safe_print(f"[RESULT] {symbol}-{strategy}-g{group_id} ok={res['ok']}")
 
-        # 🔥 학습 완료 직후 자동 예측 트리거 (심볼-전략 단위)
+        # 🔥 학습 완료 직후 자동 예측 트리거
         try:
             pl_clear_stale(lock_key=(symbol, strategy))
             pl_wait_free(max_wait_sec=10, lock_key=(symbol, strategy))
@@ -584,9 +683,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         except Exception as e:
             _safe_print(f"[AUTO-PREDICT FAIL] {symbol}-{strategy} → {e}")
 
-        # 함수 종료 직전 정리
         _release_memory(feat, features_only, df)
-
         return res
 
     except Exception as e:
@@ -600,7 +697,14 @@ _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = False
 _SYMBOL_RETRY_LIMIT = int(os.getenv("SYMBOL_RETRY_LIMIT","1"))
 
 def _train_full_symbol(symbol:str, stop_event: Optional[threading.Event] = None) -> Tuple[bool, Dict[str, Any]]:
+    """
+    단기→중기→장기 순으로 학습.
+    여기서 단 1회 df/피처/라벨을 준비해 각 전략에 패스다운(있으면 사용, 없으면 폴백).
+    """
     strategies=["단기","중기","장기"]; detail={}; any_saved=False
+    # 사전계산 블록(없으면 폴백)
+    base_df, pre_feats, pre_lbls = _build_precomputed(symbol)
+
     for strategy in strategies:
         if stop_event is not None and stop_event.is_set(): return any_saved, detail
         try:
@@ -619,7 +723,10 @@ def _train_full_symbol(symbol:str, stop_event: Optional[threading.Event] = None)
                     detail[strategy][gid]=False; continue
                 attempts=(_SHORT_RETRY if strategy=="단기" else 1); ok_once=False
                 for _ in range(attempts):
-                    res=train_one_model(symbol,strategy,group_id=gid, max_epochs=_epochs_for(strategy), stop_event=stop_event)
+                    pf = pre_feats.get(strategy) if isinstance(pre_feats, dict) else None
+                    pl = pre_lbls.get(strategy)  if isinstance(pre_lbls, dict) else None
+                    res=train_one_model(symbol,strategy,group_id=gid, max_epochs=_epochs_for(strategy),
+                                        stop_event=stop_event, pre_feat=pf, pre_lbl=pl)
                     if bool(res and isinstance(res,dict) and res.get("models")):
                         ok_once=True; any_saved=True; break
                 detail[strategy][gid]=ok_once
@@ -689,11 +796,6 @@ def _run_smoke_predict(predict_fn, symbol: str):
 
 def _safe_predict_with_timeout(predict_fn, symbol: str, strategy: str, source: str = "group_end",
                                model_type: str | None = None, timeout: float = PREDICT_TIMEOUT_SEC) -> bool:
-    """
-    predict() 호출을 타임아웃으로 보호.
-    - 호출 전: 해당 (symbol,strategy) 락의 stale만 정리, 살아있는 락은 대기(wait)만 함.
-    - 타임아웃 시 False 반환.
-    """
     try: pl_clear_stale(lock_key=(symbol, strategy))
     except Exception: pass
     try: pl_wait_free(max_wait_sec=int(max(1, timeout/2)), lock_key=(symbol, strategy))
@@ -785,7 +887,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                         try: mark_group_predicted()
                         except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
 
-                # 🔒 그룹 루프가 끝날 때마다 예측 게이트 닫기
                 try: close_predict_gate(note=f"train:group{idx+1}_end")
                 except Exception as e: _safe_print(f"[gate close warn] {e}")
 
