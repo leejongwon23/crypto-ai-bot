@@ -11,11 +11,8 @@ import numpy as np, pandas as pd, torch, torch.nn.functional as F
 import gc
 from sklearn.preprocessing import MinMaxScaler
 
-# robust imports
-try:
-    from data.utils import get_kline_by_strategy, compute_features
-except Exception:
-    from utils import get_kline_by_strategy, compute_features
+# 경로 고정: data.utils 만 사용
+from data.utils import get_kline_by_strategy, compute_features
 
 __all__ = [
     "predict","is_predict_gate_open","open_predict_gate","close_predict_gate",
@@ -60,7 +57,7 @@ def _now_kst(): return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def is_predict_gate_open():
     try:
-        if os.getenv("FORCE_PREDICT_CLOSE","0")=="1": return False
+        if os.getenv("FORCE_PREDICT_CLOSE","1")=="1": return False
         if os.path.exists(PREDICT_BLOCK): return False
         if os.path.exists(PREDICT_GATE):
             with open(PREDICT_GATE,"r",encoding="utf-8") as f: o=json.load(f)
@@ -505,7 +502,7 @@ def _soft_abstain(symbol,strategy,*,reason,meta_choice="abstain",regime="unknown
         note={"reason":reason,"abstain_prob_min":float(ABSTAIN_PROB_MIN),"max_calib_prob":None,"meta_choice":meta_choice,"regime":regime}
         # 1) 기존 상세 보류 기록
         log_prediction(symbol=symbol,strategy=strategy,direction="예측보류",entry_price=cur,target_price=cur,model="meta",model_name=str(meta_choice),predicted_class=-1,label=-1,note=json.dumps(note,ensure_ascii=False),top_k=[],success=False,reason=reason,rate=0.0,expected_return=0.0,position="neutral",return_value=0.0,source=source,group_id=group_id,feature_vector=(torch.tensor(X_last,dtype=torch.float32).numpy() if X_last is not None else None),regime=regime,meta_choice="abstain",raw_prob=None,calib_prob=None,calib_ver=get_calibration_version(),class_return_min=0.0,class_return_max=0.0,class_return_text="")
-        # 2) 관우 뷰 노출용 요약 행 추가(관측 쿼리: direction LIKE '예측%')
+        # 2) 관우 뷰 노출용 요약 행 추가
         log_prediction(symbol=symbol,strategy=strategy,direction="예측(보류)",entry_price=cur,target_price=cur,model="meta",model_name=str(meta_choice),predicted_class=-1,label=-1,note=json.dumps({"reason":reason,"summary":True},ensure_ascii=False),top_k=[],success=False,reason=reason,rate=0.0,expected_return=0.0,position="neutral",return_value=0.0,source=source,group_id=group_id,feature_vector=None,regime=regime,meta_choice="abstain",raw_prob=None,calib_prob=None,calib_ver=get_calibration_version(),class_return_min=0.0,class_return_max=0.0,class_return_text="")
     except Exception as e: print(f"[soft_abstain 예외] {e}")
     print(f"[predict] abstain {symbol}-{strategy} :: {reason}")
