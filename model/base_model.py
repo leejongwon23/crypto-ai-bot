@@ -1,4 +1,4 @@
-# === model/base_model.py (patched) ===
+# === model/base_model.py (speed-tune ready) ===
 import os
 import torch
 import torch.nn as nn
@@ -296,7 +296,7 @@ class CNNLSTMPricePredictor(TBPTTMixin, nn.Module):
         self.res_proj = nn.Linear(H, lstm_hidden_size)
         self.act = nn.GELU()
         self.fc2 = nn.Linear(lstm_hidden_size, lstm_hidden_size // 2)
-        self.fc_logits = nn.Linear(lstm_hidden_size // 2, output_size)
+        self.fc_logits = nn.Linear(lmstm_hidden_size // 2 if 'lmstm_hidden_size' in globals() else lstm_hidden_size // 2, output_size)
 
         _init_lstm_forget_bias(self.lstm)
         self.apply(_init_module)
@@ -423,7 +423,7 @@ class TransformerPricePredictor(TBPTTMixin, nn.Module):
             return self.decoder(x)
 
 # =========================
-# XGBoost Wrapper (optional) - 안정적 출력 처리
+# XGBoost Wrapper (optional)
 # =========================
 class XGBoostWrapper:
     def __init__(self, model_path):
@@ -437,25 +437,21 @@ class XGBoostWrapper:
         probs = self.model.predict(dmatrix)
         if isinstance(probs, np.ndarray):
             if probs.ndim == 1:
-                # binary or raw score -> threshold 0.5
                 try:
-                    # if values in [0,1] assume probs
                     if probs.max() <= 1.0 and probs.min() >= 0.0:
                         return (probs > 0.5).astype(np.int64)
-                    # otherwise argmax over single dim not possible -> convert sign
                     return (probs > 0).astype(np.int64)
                 except Exception:
                     return np.argmax(np.vstack([1-probs, probs]).T, axis=1)
             elif probs.ndim == 2:
                 return np.argmax(probs, axis=1)
-        # fallback: flatten and argmax
         try:
             return np.argmax(np.array(probs), axis=1)
         except Exception:
             return np.asarray(probs).reshape(-1).astype(np.int64)
 
 # =========================
-# AutoEncoder (SSL/유틸) - 입력 형태 유연화
+# AutoEncoder (SSL/유틸)
 # =========================
 class AutoEncoder(nn.Module):
     def __init__(self, input_size, hidden_size=64):
@@ -489,7 +485,6 @@ class AutoEncoder(nn.Module):
             flat = x
         else:
             flat = x.view(x.size(0), -1)
-        # if shape doesn't match input_size, try to trim/pad
         if flat.size(1) != self.input_size:
             if flat.size(1) > self.input_size:
                 flat = flat[:, :self.input_size]
@@ -498,7 +493,6 @@ class AutoEncoder(nn.Module):
                 flat = torch.cat([flat, pad], dim=1)
         encoded = self.encoder(flat)
         decoded = self.decoder(encoded)
-        # restore to [B,1,input_size] to be compatible
         decoded = decoded.unsqueeze(1)
         return decoded
 
@@ -528,14 +522,12 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
             else:
                 print(f"[info] features dim {feat_dim} < FEATURE_INPUT_SIZE {FEATURE_INPUT_SIZE} → use meta size")
         else:
-            # explicit info removed for noise, but keep a short print
             print(f"[info] input_size fixed to FEATURE_INPUT_SIZE={FEATURE_INPUT_SIZE}")
 
     if input_size < FEATURE_INPUT_SIZE:
         print(f"[info] input_size pad 적용: {input_size} → {FEATURE_INPUT_SIZE}")
         input_size = FEATURE_INPUT_SIZE
 
-    # ✅ XGBoost는 옵션 의존성 → 미설치/미지정 시 안전 대체
     if model_type == "xgboost":
         if not _HAS_XGB or not model_path:
             print("[⚠️ get_model] XGBoost 사용 불가(미설치 또는 경로 없음). cnn_lstm 대체.")
@@ -543,7 +535,6 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
 
     model_cls = MODEL_CLASSES.get(model_type, CNNLSTMPricePredictor)
 
-    # ✅ 모델 생성 (예외 시 안전 폴백)
     try:
         if model_type == "xgboost":
             model = model_cls(model_path=model_path)
@@ -554,4 +545,41 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
         print(f"[Fallback] input_size={FEATURE_INPUT_SIZE}로 재시도")
         model = CNNLSTMPricePredictor(input_size=FEATURE_INPUT_SIZE, output_size=output_size)
 
+    return model
+
+# =========================
+# ❗ 파인튜닝 유틸: 백본 동결/해제
+# =========================
+_HEADS_BY_TYPE = {
+    LSTMPricePredictor:  ["fc_logits", "fc2", "fc1", "res_proj"],
+    CNNLSTMPricePredictor: ["fc_logits", "fc2", "fc1", "res_proj"],
+    TransformerPricePredictor: ["fc_logits", "fc1", "res_proj"]
+}
+
+def _mark_requires_grad(model: nn.Module, names_keep_on: set[str]):
+    for n, p in model.named_parameters():
+        p.requires_grad = (n.split('.')[0] in names_keep_on)
+
+def freeze_backbone(model: nn.Module):
+    """
+    헤드만 학습하도록 백본을 모두 동결.
+    """
+    keep = set()
+    for cls, heads in _HEADS_BY_TYPE.items():
+        if isinstance(model, cls):
+            keep = set(heads)
+            break
+    _mark_requires_grad(model, keep)
+    return model
+
+def unfreeze_last_k_layers(model: nn.Module, k: int = 1):
+    """
+    마지막 k개의 헤드 계층을 추가로 학습 가능하게 설정.
+    """
+    for cls, heads in _HEADS_BY_TYPE.items():
+        if isinstance(model, cls):
+            k = int(max(1, min(len(heads), k)))
+            keep = set(heads[:k])  # heads는 [fc_logits, fc2, fc1, res_proj] 순
+            _mark_requires_grad(model, keep)
+            return model
     return model
