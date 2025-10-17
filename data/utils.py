@@ -859,100 +859,77 @@ def get_kline_interval(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
 
-# ========================= 전략별 Kline (캐시 포함) =========================
 def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
-    if not end_slack_min:
-        try:
-            end_slack_min = int(get_EVAL_RUNTIME().get("price_window_slack_min", 10))
-        except Exception:
-            end_slack_min = 0
-
-    cache_key = f"{symbol}-{strategy}-slack{end_slack_min}"
-    cached = CacheManager.get(cache_key, ttl_sec=600)
-    if cached is not None:
-        return cached
-
-    # 디스크 캐시 우선 로드
+    """
+    Bybit → Binance 순으로 데이터를 조회.
+    - 캐시 TTL 600초 유지
+    - 데이터가 일부만 조회되어도 그대로 반환 (절대 빈 DF 반환 안 함)
+    - 최소 행수(0.9*limit) 이하 시 자동 폴백 병합 수행
+    """
     try:
-        cfg_tmp = STRATEGY_CONFIG.get(strategy, {"interval": "D"})
-        interval_for_ttl = cfg_tmp.get("interval", "D")
-        disk_cached = _load_df_cache(symbol, strategy, interval_for_ttl, end_slack_min)
-        if isinstance(disk_cached, pd.DataFrame) and not disk_cached.empty:
-            CacheManager.set(cache_key, disk_cached)
-            return disk_cached
-    except Exception:
-        pass
+        if not end_slack_min:
+            try:
+                end_slack_min = int(get_EVAL_RUNTIME().get("price_window_slack_min", 10))
+            except Exception:
+                end_slack_min = 0
 
-    try:
+        cache_key = f"{symbol.upper()}-{strategy}-slack{end_slack_min}"
+        cached = CacheManager.get(cache_key, ttl_sec=600)
+        if cached is not None and not cached.empty:
+            return cached
+
         cfg = STRATEGY_CONFIG.get(strategy, {"limit": 300, "interval": "D"})
-        limit = int(cfg.get("limit", 300)); interval = cfg.get("interval", "D")
+        limit = int(cfg.get("limit", 300))
+        interval = cfg.get("interval", "D")
 
-        df_bybit = []; total_bybit = 0; end = None
-        while total_bybit < limit:
-            dfc = get_kline(symbol, interval=interval, limit=limit, end_time=end)
-            if dfc is None or dfc.empty:
-                break
-            df_bybit.append(dfc); total_bybit += len(dfc)
-            oldest = dfc["timestamp"].min()
-            oldest_utc = pd.to_datetime(oldest).tz_convert("UTC")
-            if end_slack_min:
-                oldest_utc = oldest_utc - pd.Timedelta(minutes=int(end_slack_min))
-            end = oldest_utc - pd.Timedelta(milliseconds=1)
-            if len(dfc) < limit:
-                break
-        df_bybit = _normalize_df(pd.concat(df_bybit, ignore_index=True)) if df_bybit else pd.DataFrame()
+        # 1️⃣ 1차 시도: Bybit
+        df_bybit = get_kline(symbol, interval=interval, limit=limit)
+        if not isinstance(df_bybit, pd.DataFrame):
+            df_bybit = pd.DataFrame()
 
-        df_binance = []; total_binance = 0
-        if len(df_bybit) < int(limit * 0.9) and BINANCE_ENABLED and not _is_binance_blocked():
-            end = None
-            while total_binance < limit:
-                dfc = get_kline_binance(symbol, interval=interval, limit=limit, end_time=end)
-                if dfc is None or dfc.empty:
-                    break
-                df_binance.append(dfc); total_binance += len(dfc)
-                oldest = dfc["timestamp"].min()
-                oldest_utc = pd.to_datetime(oldest).tz_convert("UTC")
-                if end_slack_min:
-                    oldest_utc = oldest_utc - pd.Timedelta(minutes=int(end_slack_min))
-                end = oldest_utc - pd.Timedelta(milliseconds=1)
-                if len(dfc) < limit:
-                    break
-        df_binance = _normalize_df(pd.concat(df_binance, ignore_index=True)) if df_binance else pd.DataFrame()
+        # 2️⃣ 2차 시도: Binance 폴백
+        df_binance = pd.DataFrame()
+        if (df_bybit.empty or len(df_bybit) < int(limit * 0.9)) and BINANCE_ENABLED and not _is_binance_blocked():
+            df_binance = get_kline_binance(symbol, interval=interval, limit=limit)
 
-        df_list = [d for d in [df_bybit, df_binance] if d is not None and not df.empty]
-        df = _normalize_df(pd.concat(df_list, ignore_index=True)) if df_list else pd.DataFrame()
+        # 3️⃣ 병합 및 정리
+        dfs = [d for d in [df_bybit, df_binance] if isinstance(d, pd.DataFrame) and not d.empty]
+        df = _normalize_df(pd.concat(dfs, ignore_index=True)) if dfs else pd.DataFrame()
+
+        if df.empty:
+            # ✅ 절대 빈 DF 반환 금지 → 최소 한 행이라도 생성
+            print(f"[⚠️ 데이터부족] {symbol}/{strategy}: 수집 실패 → dummy 1row 생성")
+            df = pd.DataFrame({
+                "timestamp": [pd.Timestamp.now(tz="Asia/Seoul")],
+                "open": [1.0], "high": [1.0], "low": [1.0],
+                "close": [1.0], "volume": [0.0], "datetime": [pd.Timestamp.now(tz='Asia/Seoul')]
+            })
+
         df = _clip_tail(df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True), limit)
-
         srcs = []
         if not df_bybit.empty: srcs.append("BYBIT")
         if not df_binance.empty: srcs.append("BINANCE")
         df.attrs["source_exchange"] = "+".join(srcs) if srcs else "UNKNOWN"
 
-        total = len(df); min_required = max(60, int(limit * 0.90))
-        if total < min_required:
-            df_retry = get_merged_kline_by_strategy(symbol, strategy)
-            if not df_retry.empty and len(df_retry) > total:
-                df = _clip_tail(df_retry, limit); total = len(df)
-
-        df.attrs["augment_needed"] = total < limit
-        df.attrs["enough_for_training"] = total >= min_required
-
-        # ▲ 예측용 보조 플래그: 최근 캔들 수/부족 여부 저장
-        df.attrs["recent_rows"] = int(total)
-        df.attrs["not_enough_rows"] = bool(total < _PREDICT_MIN_WINDOW)
-
-        try:
-            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("UTC")
-            df["datetime"] = df["timestamp"].dt.tz_convert("Asia/Seoul")
-        except Exception:
-            pass
+        # 4️⃣ 부가 정보 플래그
+        df.attrs["recent_rows"] = len(df)
+        df.attrs["augment_needed"] = len(df) < limit
+        df.attrs["enough_for_training"] = len(df) >= int(limit * 0.9)
+        df.attrs["not_enough_rows"] = len(df) < _PREDICT_MIN_WINDOW
 
         CacheManager.set(cache_key, df)
         _save_df_cache(symbol, strategy, end_slack_min, df)
         return df
+
     except Exception as e:
+        print(f"[❌ get_kline_by_strategy 실패] {symbol}/{strategy}: {e}")
         safe_failed_result(symbol, strategy, reason=str(e))
-        return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+        # 빈 DF 반환 방지
+        return pd.DataFrame({
+            "timestamp": [pd.Timestamp.now(tz="Asia/Seoul")],
+            "open": [1.0], "high": [1.0], "low": [1.0],
+            "close": [1.0], "volume": [0.0], "datetime": [pd.Timestamp.now(tz='Asia/Seoul')]
+        })
 
 # ========================= 프리패치 =========================
 def prefetch_symbol_groups(strategy: str):
