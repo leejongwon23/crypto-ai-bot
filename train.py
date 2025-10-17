@@ -485,7 +485,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             w=torch.tensor(w_full,dtype=torch.float32,device=DEVICE)
 
             priors=np.bincount(train_y, minlength=len(class_ranges)).astype(np.float32)
-            priors=priors/max(1.0,float(priors.sum())); priors[priors]<=0]=1e-6
+            priors = priors / max(1.0, float(priors.sum()))
+            priors[priors <= 0] = 1e-6
             priors_t=torch.tensor(priors,dtype=torch.float32,device=DEVICE)
 
             # DataLoaders
