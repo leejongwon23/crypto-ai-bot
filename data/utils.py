@@ -694,7 +694,9 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                         empty_resp_count += 1
                         continue
                     if isinstance(raw[0], (list, tuple)) and len(raw[0]) >= 6:
-                        df_chunk = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"][:len(raw[0])])
+                        df_chunk = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume, turnover"][:6])
+                        # 위 컬럼명이 API 형식에 따라 다를 수 있어 안전 처리
+                        df_chunk.columns = ["timestamp","open","high","low","close","volume"]
                     else:
                         df_chunk = pd.DataFrame(raw)
                     df_chunk = _normalize_df(df_chunk)
@@ -712,7 +714,7 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                     break
                 if success:
                     break
-            except RequestException as e:
+            except RequestException:
                 time.sleep(1); continue
             except Exception:
                 time.sleep(0.5); continue
@@ -917,7 +919,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
                     break
         df_binance = _normalize_df(pd.concat(df_binance, ignore_index=True)) if df_binance else pd.DataFrame()
 
-        df_list = [d for d in [df_bybit, df_binance] if d is not None and not d.empty]
+        df_list = [d for d in [df_bybit, df_binance] if d is not None and not df.empty]
         df = _normalize_df(pd.concat(df_list, ignore_index=True)) if df_list else pd.DataFrame()
         df = _clip_tail(df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True), limit)
 
@@ -1513,4 +1515,270 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         return X, y
 
     except Exception as e:
+        return _dummy(symbol_name)
+
+# ========================= 증강 관련 함수 =========================
+def augment_jitter(seq: np.ndarray, sigma_min: float = 0.0005, sigma_max: float = 0.002) -> np.ndarray:
+    seq = np.asarray(seq, dtype=np.float32)
+    if seq.size == 0: return seq.copy()
+    sigma = float(np.random.uniform(sigma_min, sigma_max))
+    noise = np.random.normal(loc=0.0, scale=sigma, size=seq.shape).astype(np.float32)
+    aug = seq * (1.0 + noise)
+    return aug.astype(np.float32)
+
+def augment_time_shift(seq: np.ndarray, max_shift: int = 2) -> np.ndarray:
+    seq = np.asarray(seq, dtype=np.float32)
+    if seq.ndim != 2 or seq.shape[0] <= 1 or max_shift <= 0: return seq.copy()
+    shift = int(np.random.randint(-max_shift, max_shift + 1))
+    if shift == 0: return seq.copy()
+    w, f = seq.shape
+    if shift > 0:
+        pad = np.repeat(seq[0:1, :], shift, axis=0)
+        new = np.vstack([pad, seq[:w - shift, :]])
+    else:
+        s = -shift
+        pad = np.repeat(seq[-1:, :], s, axis=0)
+        new = np.vstack([seq[s:, :], pad])
+    if new.shape[0] != w:
+        if new.shape[0] > w: new = new[:w, :]
+        else:
+            extra = np.repeat(seq[-1:, :], w - new.shape[0], axis=0)
+            new = np.vstack([new, extra])
+    return new.astype(np.float32)
+
+def augment_for_min_count(X: np.ndarray, y: np.ndarray, target_count: int) -> Tuple[np.ndarray, np.ndarray]:
+    if X is None or y is None: return X, y
+    X = np.array(X, dtype=np.float32); y = np.array(y, dtype=np.int64)
+    unique, counts = np.unique(y, return_counts=True)
+    class_counts = dict(zip(unique.tolist(), counts.tolist()))
+    to_add, to_add_labels = [], []
+    cap_total = max(X.shape[0] * 3, target_count * len(unique))
+
+    for cls in unique:
+        cur = class_counts.get(int(cls), 0)
+        if cur >= target_count: continue
+        need = target_count - cur
+        idxs = np.where(y == cls)[0]
+        if idxs.size == 0: continue
+        gen = 0; attempts = 0
+        while gen < need and (len(to_add) + X.shape[0]) < cap_total:
+            attempts += 1
+            src_idx = int(np.random.choice(idxs))
+            base = X[src_idx]
+            if np.random.rand() < 0.6:
+                aug = augment_jitter(base)
+            else:
+                aug = augment_time_shift(base, max_shift=2)
+                aug = augment_jitter(aug, sigma_min=0.0003, sigma_max=0.0015)
+            to_add.append(aug); to_add_labels.append(int(cls)); gen += 1
+            if attempts > need * 10: break
+
+    if to_add:
+        X_new = np.concatenate([X, np.stack(to_add, axis=0)], axis=0)
+        y_new = np.concatenate([y, np.array(to_add_labels, dtype=np.int64)], axis=0)
+        return X_new, y_new
+    return X, y
+
+# =============== 중복 창 컷(간단 해시) ===============
+def _drop_duplicate_windows(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    if X is None or len(X) == 0: return X, np.arange(len(X))
+    seen = {}
+    keep_idx = []
+    for i in range(len(X)):
+        h = hashlib.sha256(X[i].astype(np.float32).tobytes()).hexdigest()[:16]
+        if h in seen: continue
+        seen[h] = i; keep_idx.append(i)
+    return X[keep_idx], np.array(keep_idx, dtype=np.int64)
+
+# ========================= 데이터셋 생성 =========================
+def create_dataset(features, window=10, strategy="단기", input_size=None):
+    import pandas as _pd
+    from config import MIN_FEATURES
+
+    def _dummy(symbol_name):
+        from config import MIN_FEATURES as _MINF
+        safe_failed_result(symbol_name, strategy, reason="create_dataset 입력 feature 부족/실패")
+        X = np.zeros((1, window, input_size if input_size else _MINF), dtype=np.float32)
+        y = np.zeros((1,), dtype=np.int64)
+        return X, y
+
+    symbol_name = "UNKNOWN"
+    if isinstance(features, list) and features and isinstance(features[0], dict) and "symbol" in features[0]:
+        symbol_name = features[0]["symbol"]
+
+    if not isinstance(features, list) or len(features) <= window:
+        safe_failed_result(symbol_name, strategy, reason="not_enough_rows<window")
+        return _dummy(symbol_name)
+
+    try:
+        df = _pd.DataFrame(features)
+        df["timestamp"] = _parse_ts_series(df.get("timestamp"))
+        df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+        df = df.drop(columns=["strategy"], errors="ignore")
+
+        num_cols = [c for c in df.columns if c != "timestamp"]
+        for c in num_cols:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df[num_cols] = _downcast_numeric(df[num_cols])
+
+        feature_cols = [c for c in df.columns if c != "timestamp"]
+        if not feature_cols:
+            return _dummy(symbol_name)
+
+        scaler = MinMaxScaler()
+        scaled = scaler.fit_transform(df[feature_cols].astype(np.float32))
+        df_s = _pd.DataFrame(scaled.astype(np.float32), columns=feature_cols)
+        df_s["timestamp"] = df["timestamp"].values
+
+        raw_records = df.to_dict(orient="records")
+        input_cols = [c for c in df_s.columns if c != "timestamp"]
+
+        target_input = input_size if input_size else max(MIN_FEATURES, len(input_cols))
+        if len(input_cols) < target_input:
+            for i in range(len(input_cols), target_input):
+                padc = f"pad_{i}"
+                df_s[padc] = np.float32(0.0); input_cols.append(padc)
+        elif len(input_cols) > target_input:
+            keep = set(input_cols[:target_input])
+            df_s = df_s.drop(columns=[c for c in input_cols if c not in keep], errors="ignore")
+            input_cols = [c for c in input_cols if c in keep]
+
+        strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
+        lookahead = strategy_minutes.get(strategy, 1440)
+
+        samples, signed_vals = [], []
+        for i in range(window, len(df_s)):
+            seq = df_s.iloc[i - window:i]
+            base_raw = raw_records[i]
+            try:
+                entry_time = pd.to_datetime(base_raw.get("timestamp"), errors="coerce", utc=True).tz_convert("Asia/Seoul")
+            except Exception:
+                continue
+            entry_price = float(base_raw.get("close", 0.0))
+            if pd.isnull(entry_time) or entry_price <= 0: continue
+            try:
+                fut_raw = [
+                    r for r in raw_records[i + 1:]
+                    if (pd.to_datetime(r.get("timestamp", None), utc=True) - entry_time) <= _pd.Timedelta(minutes=lookahead)
+                ]
+            except Exception: continue
+
+            if len(seq) != window or not fut_raw: continue
+
+            v_highs = [float(r.get("high", r.get("close", entry_price))) for r in fut_raw if float(r.get("high", r.get("close", entry_price))) > 0]
+            v_lows  = [float(r.get("low",  r.get("close", entry_price)))  for r in fut_raw if float(r.get("low",  r.get("close", entry_price)))  > 0]
+
+            if not v_highs and not v_lows: continue
+
+            max_future = max(v_highs) if v_highs else entry_price
+            min_future = min(v_lows)  if v_lows  else entry_price
+            ret_up = (max_future - entry_price) / (entry_price + 1e-6)
+            ret_dn = (min_future - entry_price) / (entry_price + 1e-6)
+            signed_ret = ret_up if abs(ret_up) >= abs(ret_dn) else ret_dn
+            signed_vals.append(float(signed_ret))
+
+            sample = [[float(seq.iloc[j].get(c, 0.0)) for c in input_cols] for j in range(window)]
+            samples.append(sample)
+
+        if samples and signed_vals:
+            ranges = cfg_get_class_ranges(symbol=symbol_name, strategy=strategy)
+            y = _label_with_edges(np.asarray(signed_vals, dtype=np.float64), ranges)
+            X = np.array(samples, dtype=np.float32)
+            if len(X) != len(y):
+                m = min(len(X), len(y)); X = X[:m]; y = y[:m]
+            X.attrs = {"class_ranges": ranges, "class_groups": cfg_get_class_groups(len(ranges), 5)}
+
+            # --- 중복 창 컷 ---
+            X_dedup, keep_idx = _drop_duplicate_windows(X)
+            if len(keep_idx) < len(y):
+                y = y[keep_idx]; X = X_dedup
+
+            # --- 경계 보강(±ε) 오버샘플 ---
+            try:
+                eps_bp = int(os.getenv("BOUNDARY_EPS_BP", "30"))  # 30bp = 0.3%
+                eps = eps_bp / 10000.0
+                stops = np.array([b for (_, b) in ranges[:-1]], dtype=np.float64)
+                vals = np.asarray(signed_vals[:len(y)], dtype=np.float64)
+                close_to_edge = np.any(np.abs(vals[:, None] - stops[None, :]) <= eps, axis=1)
+                idx_edge = np.where(close_to_edge)[0]
+                if idx_edge.size > 0:
+                    dup = min(len(idx_edge), max(1, len(y)//20))  # 전체의 ~5% 이내
+                    X = np.concatenate([X, X[idx_edge[:dup]]], axis=0)
+                    y = np.concatenate([y, y[idx_edge[:dup]]], axis=0)
+            except Exception:
+                pass
+
+            # --- 레짐×변동성 버킷 균형(옵션) ---
+            try:
+                if int(os.getenv("BALANCE_BY_BUCKETS", "0")) == 1:
+                    vol = pd.to_numeric(df.get("vol_regime", pd.Series([1]*len(df))), errors="coerce").fillna(1).astype(int).values
+                    trd = pd.to_numeric(df.get("trend_regime", pd.Series([1]*len(df))), errors="coerce").fillna(1).astype(int).values
+                    start = len(vol) - len(y)
+                    start = max(0, start)
+                    bucket = (vol[start:start+len(y)] * 3 + trd[start:start+len(y)]).astype(int)
+                    uniq_b, cnts = np.unique(bucket, return_counts=True)
+                    target = int(np.median(cnts)) if len(cnts)>0 else None
+                    if target and target>0:
+                        sel_idx = []
+                        for b in uniq_b:
+                            idxs = np.where(bucket == b)[0]
+                            if len(idxs) <= target:
+                                sel_idx.extend(idxs.tolist())
+                            else:
+                                sel_idx.extend(np.random.choice(idxs, size=target, replace=False).tolist())
+                        sel_idx = np.array(sorted(sel_idx))
+                        X = X[sel_idx]; y = y[sel_idx]
+            except Exception:
+                pass
+
+            # --- 소수클래스 증강 ---
+            try:
+                if int(os.getenv("AUG_ENABLE","1")) == 1:
+                    uniq, cnts = np.unique(y, return_counts=True)
+                    if cnts.size > 0:
+                        max_cnt = int(np.max(cnts))
+                        total = len(y)
+                        if total > 0 and (np.max(cnts) / float(total)) >= 0.5:
+                            X, y = augment_for_min_count(X, y, target_count=max_cnt)
+            except Exception:
+                pass
+
+            return X, y
+
+        # Fallback: 단순 수익률
+        closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float32)
+        if len(closes) <= window + 1: return _dummy(symbol_name)
+        pct = np.diff(closes) / (closes[:-1] + 1e-6)
+        fb_samples, fb_vals = [], []
+        for i in range(window, len(df) - 1):
+            seq_rows = df_s.iloc[i - window:i]
+            sample = [[float(seq_rows.iloc[j].get(c, 0.0)) for c in input_cols] for j in range(window)]
+            fb_samples.append(sample)
+            fb_vals.append(float(pct[i] if i < len(pct) else 0.0))
+        if not fb_samples: return _dummy(symbol_name)
+
+        ranges = cfg_get_class_ranges(symbol=symbol_name, strategy=strategy)
+        y = _label_with_edges(np.asarray(fb_vals, dtype=np.float64), ranges)
+        X = np.array(fb_samples, dtype=np.float32)
+        if len(X) != len(y):
+            m = min(len(X), len(y)); X = X[:m]; y = y[:m]
+        X.attrs = {"class_ranges": ranges, "class_groups": cfg_get_class_groups(len(ranges), 5)}
+
+        # 중복컷 + 소수클래스 증강(동일 로직)
+        X_dedup, keep_idx = _drop_duplicate_windows(X)
+        if len(keep_idx) < len(y):
+            y = y[keep_idx]; X = X_dedup
+        try:
+            if int(os.getenv("AUG_ENABLE","1")) == 1:
+                uniq, cnts = np.unique(y, return_counts=True)
+                if cnts.size > 0:
+                    max_cnt = int(np.max(cnts))
+                    total = len(y)
+                    if total > 0 and (np.max(cnts) / float(total)) >= 0.5:
+                        X, y = augment_for_min_count(X, y, target_count=max_cnt)
+        except Exception:
+            pass
+        return X, y
+
+    except Exception:
         return _dummy(symbol_name)
