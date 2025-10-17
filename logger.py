@@ -1,24 +1,21 @@
-# === logger.py (v2025-09-17 final: 확장 스키마/락/로테이션/집계 포함 + 8번 요약 옵션) ===
+# === logger.py (v2025-10-17 safe-degrade: ENOSPC/readonly 감지, DB/파일 쓰기 폴백) ===
 import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil, re
 import sqlite3
 from collections import defaultdict, deque
-import threading, time  # 동시성/재시도
+import threading, time
 from typing import Optional, Any, Dict
-# per-class F1 출력용
 from sklearn.metrics import classification_report
 
 # -------------------------
-# 로그 레벨/샘플링 유틸 (NEW)
+# 로그 레벨/샘플링 유틸
 # -------------------------
 LOGGER_DEBUG = os.getenv("LOGGER_DEBUG", "0") == "1"
 _once_printed = set()
 
 def _print_once(tag: str, msg: str):
-    """같은 tag는 1회만 INFO로 출력. 이후에는 LOGGER_DEBUG=1일 때만 DEBUG로 출력."""
     try:
         if tag not in _once_printed:
-            _once_printed.add(tag)
-            print(msg)
+            _once_printed.add(tag); print(msg)
         elif LOGGER_DEBUG:
             print("[DBG] " + msg)
     except Exception:
@@ -27,10 +24,6 @@ def _print_once(tag: str, msg: str):
 _cache_hit_counts = defaultdict(int)
 _CACHE_HIT_LOG_SAMPLE = max(1, int(os.getenv("CACHE_HIT_LOG_SAMPLE", "50")))
 def log_cache_hit(name: str):
-    """
-    캐시 HIT 로그 샘플링: 첫 1회, 그리고 N회마다 한 번만 출력.
-    샘플링 주기 환경변수 CACHE_HIT_LOG_SAMPLE(기본 50).
-    """
     try:
         _cache_hit_counts[name] += 1
         c = _cache_hit_counts[name]
@@ -40,43 +33,66 @@ def log_cache_hit(name: str):
         pass
 
 # -------------------------
-# 8번: 경계 요약 로깅 옵션 (NEW)
+# 경계 요약 로깅 옵션
 # -------------------------
-LOG_BOUNDARY_SUMMARY = os.getenv("LOG_BOUNDARY_SUMMARY", "0") == "1"  # 1이면 요약모드
+LOG_BOUNDARY_SUMMARY = os.getenv("LOG_BOUNDARY_SUMMARY", "0") == "1"
 LOG_BOUNDARY_TOPK    = max(1, int(os.getenv("LOG_BOUNDARY_TOPK", "20")))
-LOG_BOUNDARY_BUCKET  = float(os.getenv("LOG_BOUNDARY_BUCKET", "0.01"))  # 1% 단위 기본
+LOG_BOUNDARY_BUCKET  = float(os.getenv("LOG_BOUNDARY_BUCKET", "0.01"))
 
 def _bucketize(v: float, step: float) -> tuple:
-    """
-    값 v를 step 단위 버킷으로 스냅. (하한, 상한) 튜플 반환.
-    예: step=0.01, v=0.053 → (0.05, 0.06)
-    """
     try:
         import math
         base = math.floor(v / step) * step
-        lo = round(base, 6)
-        hi = round(base + step, 6)
+        lo = round(base, 6); hi = round(base + step, 6)
         return (lo, hi)
     except Exception:
         return (v, v)
 
 # -------------------------
-# 기본 경로/디렉토리
+# 기본 경로/디렉토리 + 파일시스템 상태 감지
 # -------------------------
 DIR = "/persistent"
 LOG_DIR = os.path.join(DIR, "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
-
-# prediction_log는 루트 경로로 통일
 PREDICTION_LOG = f"{DIR}/prediction_log.csv"
 WRONG = f"{DIR}/wrong_predictions.csv"
 EVAL_RESULT = f"{LOG_DIR}/evaluation_result.csv"
-
-# 학습 로그 파일명
 TRAIN_LOG = f"{LOG_DIR}/train_log.csv"
 AUDIT_LOG = f"{LOG_DIR}/evaluation_audit.csv"
 
-# 공용 헤더(기존 + 확장 컬럼)
+def _fs_has_space(path: str, min_bytes: int = 1_048_576) -> bool:
+    try:
+        s = os.statvfs(os.path.dirname(path) or "/")
+        return (s.f_bavail * s.f_frsize) >= max(0, int(min_bytes))
+    except Exception:
+        return True  # 보수적으로 true
+
+def _fs_writable(dir_path: str) -> bool:
+    try:
+        os.makedirs(dir_path, exist_ok=True)
+        test_path = os.path.join(dir_path, ".writetest.tmp")
+        with open(test_path, "w") as f:
+            f.write("1")
+        os.remove(test_path)
+        return True
+    except Exception:
+        return False
+
+# 전역 플래그: 읽기전용/용량부족 시 파일/DB 쓰기 비활성화
+_READONLY_FS = not _fs_writable(LOG_DIR) or not _fs_has_space(LOG_DIR, 512*1024)
+if _READONLY_FS:
+    _print_once("readonlyfs", "🛑 [logger] storage read-only 또는 free space 부족 → 모든 파일/DB 쓰기 안전 강하")
+
+# 디렉토리 생성 시도(실패해도 진행)
+try:
+    if not _READONLY_FS:
+        os.makedirs(LOG_DIR, exist_ok=True)
+except Exception as e:
+    _READONLY_FS = True
+    _print_once("mkdir_fail", f"🛑 [logger] 로그 디렉토리 생성 실패 → read-only 강하: {e}")
+
+# -------------------------
+# 공용 헤더
+# -------------------------
 BASE_PRED_HEADERS = [
     "timestamp","symbol","strategy","direction",
     "entry_price","target_price",
@@ -88,11 +104,11 @@ BASE_PRED_HEADERS = [
 EXTRA_PRED_HEADERS = ["regime","meta_choice","raw_prob","calib_prob","calib_ver"]
 CLASS_RANGE_HEADERS = ["class_return_min","class_return_max","class_return_text"]
 NOTE_EXTRACT_HEADERS = ["position","hint_allow_long","hint_allow_short","hint_slope","used_minret_filter","explore_used","hint_ma_fast","hint_ma_slow"]
+PREDICTION_HEADERS = BASE_PRED_HEADERS + EXTRA_PRED_HEADERS + ["feature_vector"] + CLASS_RANGE_HEADERS + NOTE_EXTRACT_HEADERS + [
+    # tail detail fields used by predict.py note
+    "expected_return_mid","raw_prob_pred","calib_prob_pred","meta_choice_detail"
+]
 
-PREDICTION_HEADERS = BASE_PRED_HEADERS + EXTRA_PRED_HEADERS + ["feature_vector"] + CLASS_RANGE_HEADERS + NOTE_EXTRACT_HEADERS
-
-# ✅ 학습 로그 확장 헤더
-#    - 세 번째 지표는 실제로 train.py에서 'val_loss'를 기록하므로 컬럼명을 'val_loss'로 정정
 TRAIN_HEADERS = [
     "timestamp","symbol","strategy","model",
     "val_acc","val_f1","val_loss",
@@ -101,24 +117,21 @@ TRAIN_HEADERS = [
     "note","source_exchange","status"
 ]
 
-# 청크 크기 기본값
 CHUNK = 50_000
-
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 # -------------------------
-# (NEW) 간단 파일락 유틸 (멀티프로세스 동시쓰기 보호)
+# 간단 파일락 (read-only면 비활성)
 # -------------------------
 _PRED_LOCK_PATH = PREDICTION_LOG + ".lock"
-_LOCK_STALE_SEC = 120  # 고아 락 정리 기준
+_LOCK_STALE_SEC = 120
 
 class _FileLock:
     def __init__(self, path: str, timeout: float = 10.0, poll: float = 0.05):
-        self.path = path
-        self.timeout = float(timeout)
-        self.poll = float(poll)
-
+        self.path = path; self.timeout = float(timeout); self.poll = float(poll)
     def __enter__(self):
+        if _READONLY_FS:  # 잠금 불필요
+            return self
         deadline = time.time() + self.timeout
         while True:
             try:
@@ -126,12 +139,9 @@ class _FileLock:
                     try:
                         mtime = os.path.getmtime(self.path)
                         if (time.time() - mtime) > _LOCK_STALE_SEC:
-                            try:
-                                os.remove(self.path)
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
+                            try: os.remove(self.path)
+                            except Exception: pass
+                    except Exception: pass
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(f"pid={os.getpid()} ts={time.time()}\n")
@@ -141,34 +151,22 @@ class _FileLock:
                     try:
                         mtime = os.path.getmtime(self.path)
                         if (time.time() - mtime) > _LOCK_STALE_SEC:
-                            try:
-                                os.remove(self.path)
-                            except Exception:
-                                pass
-                            continue
-                    except Exception:
-                        pass
+                            try: os.remove(self.path); continue
+                            except Exception: pass
+                    except Exception: pass
                     raise TimeoutError(f"lock timeout: {self.path}")
                 time.sleep(self.poll)
         return self
-
     def __exit__(self, exc_type, exc, tb):
+        if _READONLY_FS: return
         try:
-            if os.path.exists(self.path):
-                os.remove(self.path)
-        except Exception:
-            pass
+            if os.path.exists(self.path): os.remove(self.path)
+        except Exception: pass
 
 # -------------------------
-# (NEW) 연속 실패 집계기 (폭주 방지)
+# 연속 실패 집계기
 # -------------------------
 class _ConsecutiveFailAggregator:
-    """
-    동일 (symbol,strategy,group_id,model)의 '연속 실패'를 메모리에서 집계해
-    N회마다 1줄 요약만 남김. 성공이 끼어들면 즉시 플러시 후 초기화.
-    - FAIL_SUMMARY_THRESHOLD: 요약 주기 (기본 5회)
-    - FAIL_SUMMARY_WINDOW  : 동일 키 유지 허용 시간(초, 기본 900초). 초과 시 자동 리셋.
-    """
     TH = max(2, int(os.getenv("FAIL_SUMMARY_THRESHOLD", "5")))
     WINDOW = max(60, int(os.getenv("FAIL_SUMMARY_WINDOW", "900")))
     _state = defaultdict(lambda: {"cnt":0, "first_ts":0.0, "last_ts":0.0, "last_reason":""})
@@ -176,51 +174,40 @@ class _ConsecutiveFailAggregator:
     @classmethod
     def _flush(cls, key, where="periodic"):
         st = cls._state.get(key)
-        if not st or st["cnt"] <= 0:
-            return
+        if not st or st["cnt"] <= 0: return
         sym, strat, gid, model = key
         msg = f"[연속실패요약/{where}] {sym}-{strat}-g{gid} {model} ×{st['cnt']} (last_reason={st['last_reason']})"
-        try:
-            os.makedirs(os.path.dirname(AUDIT_LOG), exist_ok=True)
-            with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
-                w = csv.DictWriter(f, fieldnames=["timestamp","symbol","strategy","status","reason"])
-                if f.tell() == 0:
-                    w.writeheader()
-                w.writerow({
-                    "timestamp": now_kst().isoformat(),
-                    "symbol": sym, "strategy": strat,
-                    "status": f"consecutive_fail_{st['cnt']}",
-                    "reason": st["last_reason"]
-                })
-        except Exception:
-            pass
+        # 파일쓰기 불가 시 콘솔만
+        if not _READONLY_FS:
+            try:
+                os.makedirs(os.path.dirname(AUDIT_LOG), exist_ok=True)
+                with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
+                    w = csv.DictWriter(f, fieldnames=["timestamp","symbol","strategy","status","reason"])
+                    if f.tell() == 0: w.writeheader()
+                    w.writerow({
+                        "timestamp": now_kst().isoformat(),
+                        "symbol": sym, "strategy": strat,
+                        "status": f"consecutive_fail_{st['cnt']}",
+                        "reason": st["last_reason"]
+                    })
+            except Exception:
+                pass
         _print_once(f"cfail:{sym}:{strat}:{gid}:{model}", "🔻 " + msg)
-        # 리셋
         cls._state.pop(key, None)
 
     @classmethod
     def add(cls, key, success: bool, reason: str = ""):
         now = time.time()
         st = cls._state[key]
-        # 오래된 키 정리
         if st["last_ts"] and now - st["last_ts"] > cls.WINDOW:
-            cls._flush(key, "stale")
-            st = cls._state[key]  # 새 상태
+            cls._flush(key, "stale"); st = cls._state[key]
         if success:
-            # 성공 → 지금까지의 실패 요약만 남기고 리셋
-            if st["cnt"] > 0:
-                cls._flush(key, "recovered")
-            cls._state.pop(key, None)
-            return
-        # 실패 누적
+            if st["cnt"] > 0: cls._flush(key, "recovered")
+            cls._state.pop(key, None); return
         st["cnt"] = int(st["cnt"]) + 1
-        st["last_reason"] = (reason or "")[:200]
-        st["last_ts"] = now
-        if st["first_ts"] == 0.0:
-            st["first_ts"] = now
-        # 임계치마다 1회 요약
-        if st["cnt"] % cls.TH == 0:
-            cls._flush(key, "periodic")
+        st["last_reason"] = (reason or "")[:200]; st["last_ts"] = now
+        if st["first_ts"] == 0.0: st["first_ts"] = now
+        if st["cnt"] % cls.TH == 0: cls._flush(key, "periodic")
 
 # -------------------------
 # 안전한 로그 파일 보장
@@ -229,13 +216,13 @@ def _read_csv_header(path):
     try:
         with open(path, "r", encoding="utf-8-sig") as f:
             first = f.readline().strip()
-        if not first:
-            return []
+        if not first: return []
         return [h.strip() for h in first.split(",")]
     except Exception:
         return []
 
 def ensure_prediction_log_exists():
+    if _READONLY_FS: return
     try:
         os.makedirs(os.path.dirname(PREDICTION_LOG), exist_ok=True)
         if not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0:
@@ -246,12 +233,10 @@ def ensure_prediction_log_exists():
             existing = _read_csv_header(PREDICTION_LOG)
             if existing != PREDICTION_HEADERS:
                 bak = PREDICTION_LOG + ".bak"
-                try:
-                    os.replace(PREDICTION_LOG, bak)
+                try: os.replace(PREDICTION_LOG, bak)
                 except Exception:
-                    # fallback: copy then truncate
-                    shutil.copyfile(PREDICTION_LOG, bak)
-                    open(PREDICTION_LOG, "w", encoding="utf-8-sig").close()
+                    try: shutil.copyfile(PREDICTION_LOG, bak); open(PREDICTION_LOG, "w", encoding="utf-8-sig").close()
+                    except Exception: return
                 with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as out, \
                      open(bak, "r", encoding="utf-8-sig") as src:
                     w = csv.writer(out); w.writerow(PREDICTION_HEADERS)
@@ -265,8 +250,8 @@ def ensure_prediction_log_exists():
     except Exception as e:
         print(f"[⚠️ ensure_prediction_log_exists] 예외: {e}")
 
-# ✅ train.py가 호출하는 보조 보장 함수 (헤더 자동 마이그레이션 포함)
 def ensure_train_log_exists():
+    if _READONLY_FS: return
     try:
         os.makedirs(os.path.dirname(TRAIN_LOG), exist_ok=True)
         if not os.path.exists(TRAIN_LOG) or os.path.getsize(TRAIN_LOG) == 0:
@@ -277,11 +262,10 @@ def ensure_train_log_exists():
             existing = _read_csv_header(TRAIN_LOG)
             if existing != TRAIN_HEADERS:
                 bak = TRAIN_LOG + ".bak"
-                try:
-                    os.replace(TRAIN_LOG, bak)
+                try: os.replace(TRAIN_LOG, bak)
                 except Exception:
-                    shutil.copyfile(TRAIN_LOG, bak)
-                    open(TRAIN_LOG, "w", encoding="utf-8-sig").close()
+                    try: shutil.copyfile(TRAIN_LOG, bak); open(TRAIN_LOG, "w", encoding="utf-8-sig").close()
+                    except Exception: return
                 with open(TRAIN_LOG, "w", newline="", encoding="utf-8-sig") as out, \
                      open(bak, "r", encoding="utf-8-sig") as src:
                     w = csv.writer(out); w.writerow(TRAIN_HEADERS)
@@ -290,7 +274,6 @@ def ensure_train_log_exists():
                     except StopIteration: old_header = []
                     for row in reader:
                         mapped = {h:row[i] for i,h in enumerate(old_header)} if old_header else {}
-                        # 이전 버전의 "loss" 또는 "train_loss_sum" 필드를 새 "val_loss"로 안전 매핑
                         val_loss_val = mapped.get("val_loss", mapped.get("loss", mapped.get("train_loss_sum","")))
                         new_row = [
                             mapped.get("timestamp",""), mapped.get("symbol",""), mapped.get("strategy",""), mapped.get("model",""),
@@ -304,23 +287,20 @@ def ensure_train_log_exists():
         print(f"[⚠️ ensure_train_log_exists] 예외: {e}")
 
 # -------------------------
-# (NEW) 용량 기반 로그 로테이션
+# 로그 로테이션 (읽기전용이면 skip)
 # -------------------------
 def rotate_prediction_log_if_needed(max_mb: int = 200, backups: int = 3):
+    if _READONLY_FS: return
     try:
-        if not os.path.exists(PREDICTION_LOG):
-            return
+        if not os.path.exists(PREDICTION_LOG): return
         size_mb = os.path.getsize(PREDICTION_LOG) / (1024 * 1024)
-        if size_mb < max_mb:
-            return
-        # rotate: shift existing files up by one
+        if size_mb < max_mb: return
         for i in range(backups, 0, -1):
             dst = f"{PREDICTION_LOG}.{i}"
             src = f"{PREDICTION_LOG}.{i-1}" if i-1 > 0 else PREDICTION_LOG
             if os.path.exists(src):
                 try:
-                    if os.path.exists(dst):
-                        os.remove(dst)
+                    if os.path.exists(dst): os.remove(dst)
                     shutil.move(src, dst)
                 except Exception:
                     pass
@@ -330,18 +310,15 @@ def rotate_prediction_log_if_needed(max_mb: int = 200, backups: int = 3):
         print(f"[logger] rotate error: {e}")
 
 # -------------------------
-# feature hash 유틸
+# feature hash
 # -------------------------
 def get_feature_hash(feature_row) -> str:
     try:
         import numpy as _np
-        if feature_row is None:
-            return "none"
+        if feature_row is None: return "none"
         if "torch" in str(type(feature_row)):
-            try:
-                feature_row = feature_row.detach().cpu().numpy()
-            except Exception:
-                pass
+            try: feature_row = feature_row.detach().cpu().numpy()
+            except Exception: pass
         if isinstance(feature_row, _np.ndarray):
             arr = feature_row.flatten().astype(float)
         elif isinstance(feature_row, (list, tuple)):
@@ -355,11 +332,12 @@ def get_feature_hash(feature_row) -> str:
         return "hash_error"
 
 # -------------------------
-# SQLite: 모델 성공/실패 집계
+# SQLite: 모델 성공/실패 집계 (I/O 에러 시 메모리로 강하)
 # -------------------------
 _db_conn = None
 _DB_PATH = os.path.join(LOG_DIR, "failure_patterns.db")
 _db_lock = threading.RLock()
+_DB_ENABLED = os.getenv("LOG_DISABLE_SQL", "0") != "1" and not _READONLY_FS
 
 def _apply_sqlite_pragmas(conn):
     try:
@@ -378,72 +356,62 @@ def _connect_sqlite():
     return conn
 
 def get_db_connection():
-    global _db_conn
+    global _db_conn, _DB_ENABLED
+    if not _DB_ENABLED:
+        return None
     with _db_lock:
         if _db_conn is None:
             try:
                 _db_conn = _connect_sqlite()
-                # quick sanity check
                 try:
-                    cur = _db_conn.cursor()
-                    cur.execute("SELECT 1;")
-                    cur.close()
+                    cur = _db_conn.cursor(); cur.execute("SELECT 1;"); cur.close()
                 except Exception:
-                    try:
-                        _db_conn.close()
-                    except Exception:
-                        pass
+                    try: _db_conn.close()
+                    except Exception: pass
                     _db_conn = _connect_sqlite()
                 print("[✅ logger.py DB connection 생성 완료]")
             except Exception as e:
                 print(f"[오류] logger.py DB connection 생성 실패 → {e}")
                 _db_conn = None
+                _DB_ENABLED = False
         return _db_conn
 
 def _sqlite_exec_with_retry(sql, params=(), retries=5, sleep_base=0.2, commit=False):
+    if not _DB_ENABLED:
+        raise sqlite3.OperationalError("db disabled")
     last_err = None
     for attempt in range(1, retries + 1):
         try:
             with _db_lock:
                 conn = get_db_connection()
                 if conn is None:
-                    conn = _connect_sqlite()
-                    globals()['_db_conn'] = conn
+                    raise sqlite3.OperationalError("db unavailable")
                 cur = conn.cursor()
                 cur.execute(sql, params)
-                if commit:
-                    conn.commit()
-                try:
-                    rows = cur.fetchall()
-                except sqlite3.ProgrammingError:
-                    rows = None
+                if commit: conn.commit()
+                try: rows = cur.fetchall()
+                except sqlite3.ProgrammingError: rows = None
                 cur.close()
                 return rows
         except sqlite3.OperationalError as e:
-            msg = str(e).lower()
-            last_err = e
-            if ("database is locked" in msg) or ("disk i/o error" in msg) or ("database is busy" in msg):
-                with _db_lock:
-                    try:
-                        if globals().get("_db_conn"):
-                            try:
-                                globals()["_db_conn"].close()
-                            except Exception:
-                                pass
-                        globals()["_db_conn"] = _connect_sqlite()
-                    except Exception as ce:
-                        last_err = ce
-                time.sleep(sleep_base * attempt)
-                continue
+            msg = str(e).lower(); last_err = e
+            transient = ("database is locked" in msg) or ("disk i/o error" in msg) or ("database is busy" in msg)
+            if transient:
+                # I/O 에러가 반복되면 DB 완전 비활성화
+                if "disk i/o error" in msg or "no space left" in msg:
+                    print("[🛑 logger.db] disk I/O 오류 감지 → DB 기능 비활성화")
+                    globals()["_DB_ENABLED"] = False
+                    return None
+                time.sleep(sleep_base * attempt); continue
             else:
                 raise
         except Exception as e:
             last_err = e
-            time.sleep(sleep_base * attempt)
-            continue
+            time.sleep(sleep_base * attempt); continue
     raise last_err if last_err else RuntimeError("sqlite exec failed")
 
 def ensure_success_db():
+    if not _DB_ENABLED: return
     try:
         _sqlite_exec_with_retry("""
             CREATE TABLE IF NOT EXISTS model_success (
@@ -457,8 +425,12 @@ def ensure_success_db():
         """, params=(), retries=5, commit=True)
     except Exception as e:
         print(f"[오류] ensure_success_db 실패 → {e}")
+        globals()["_DB_ENABLED"] = False  # 더 이상 재시도 안 함
 
 def update_model_success(s, t, m, success):
+    if not _DB_ENABLED: 
+        _print_once("db_disabled_warn", "ℹ️ model_success 집계는 현재 메모리/콘솔만 기록")
+        return
     try:
         _sqlite_exec_with_retry("""
             INSERT INTO model_success (symbol, strategy, model, success, fail)
@@ -470,29 +442,29 @@ def update_model_success(s, t, m, success):
         print(f"[✅ update_model_success] {s}-{t}-{m} 기록 ({'성공' if success else '실패'})")
     except Exception as e:
         print(f"[오류] update_model_success 실패 → {e}")
+        globals()["_DB_ENABLED"] = False
 
 def get_model_success_rate(s, t, m):
+    if not _DB_ENABLED: return 0.0
     try:
         rows = _sqlite_exec_with_retry("""
             SELECT success, fail FROM model_success
             WHERE symbol=? AND strategy=? AND model=?
         """, params=(s, t or "알수없음", m), retries=5, commit=False)
         row = rows[0] if rows else None
-        if row is None:
-            return 0.0
-        success_cnt, fail_cnt = row
-        total = success_cnt + fail_cnt
+        if row is None: return 0.0
+        success_cnt, fail_cnt = row; total = success_cnt + fail_cnt
         return (success_cnt / total) if total > 0 else 0.0
     except Exception as e:
-        print(f"[오류] get_model_success_rate 실패 → {e}")
-        return 0.0
+        print(f"[오류] get_model_success_rate 실패 → {e}"); return 0.0
 
 # -------------------------
 # failure_db 초기화
 # -------------------------
 try:
     from failure_db import ensure_failure_db as _ensure_failure_db_once
-    _ensure_failure_db_once()
+    if not _READONLY_FS:
+        _ensure_failure_db_once()
     print("[logger] failure_db initialized (schema ready)")
 except Exception as _e:
     print(f"[logger] failure_db init failed: {_e}")
@@ -507,8 +479,7 @@ ensure_train_log_exists()
 # -------------------------
 def load_failure_count():
     path = os.path.join(LOG_DIR, "failure_count.csv")
-    if not os.path.exists(path):
-        return {}
+    if not os.path.exists(path): return {}
     try:
         with open(path, "r", encoding="utf-8-sig") as f:
             return {f"{r['symbol']}-{r['strategy']}": int(r["failures"]) for r in csv.DictReader(f)}
@@ -517,21 +488,17 @@ def load_failure_count():
 
 def _normalize_status(df: pd.DataFrame) -> pd.DataFrame:
     if "status" in df.columns:
-        df["status"] = df["status"].astype(str).str.lower().map(lambda x: "success" if x == "success" else "fail")
-        return df
+        df["status"] = df["status"].astype(str).str.lower().map(lambda x: "success" if x == "success" else "fail"); return df
     if "success" in df.columns:
         s = df["success"].map(lambda x: str(x).strip().lower() in ["true","1","yes","y"])
-        df["status"] = s.map(lambda b: "success" if b else "fail")
-        return df
-    df["status"] = ""
-    return df
+        df["status"] = s.map(lambda b: "success" if b else "fail"); return df
+    df["status"] = ""; return df
 
 # -------------------------
-# 메모리 안전 집계 (청크 기반)
+# 메모리 안전 집계
 # -------------------------
 def get_meta_success_rate(strategy, min_samples: int = 1):
-    if not os.path.exists(PREDICTION_LOG):
-        return 0.0
+    if not os.path.exists(PREDICTION_LOG): return 0.0
     usecols = ["timestamp","strategy","model","status","success"]
     succ = total = 0
     for chunk in pd.read_csv(
@@ -543,8 +510,7 @@ def get_meta_success_rate(strategy, min_samples: int = 1):
             chunk = chunk[chunk["model"] == "meta"]
         if "strategy" in chunk.columns:
             chunk = chunk[chunk["strategy"] == strategy]
-        if chunk.empty:
-            continue
+        if chunk.empty: continue
         if "status" in chunk.columns and chunk["status"].notna().any():
             mask = chunk["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
             chunk = chunk[mask]
@@ -553,13 +519,11 @@ def get_meta_success_rate(strategy, min_samples: int = 1):
         elif "success" in chunk.columns:
             s = chunk["success"].astype(str).str.lower().isin(["true","1","success","v_success"])
             succ += int(s.sum()); total += int(len(chunk))
-    if total < max(1, min_samples):
-        return 0.0
+    if total < max(1, min_samples): return 0.0
     return float(succ / total)
 
 def get_strategy_eval_count(strategy: str):
-    if not os.path.exists(PREDICTION_LOG):
-        return 0
+    if not os.path.exists(PREDICTION_LOG): return 0
     usecols = ["strategy","status","success"]
     count = 0
     for chunk in pd.read_csv(
@@ -569,8 +533,7 @@ def get_strategy_eval_count(strategy: str):
     ):
         if "strategy" in chunk.columns:
             chunk = chunk[chunk["strategy"] == strategy]
-        if chunk.empty:
-            continue
+        if chunk.empty: continue
         if "status" in chunk.columns and chunk["status"].notna().any():
             mask = chunk["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
             count += int(mask.sum())
@@ -579,8 +542,7 @@ def get_strategy_eval_count(strategy: str):
     return int(count)
 
 def get_actual_success_rate(strategy, min_samples: int = 1):
-    if not os.path.exists(PREDICTION_LOG):
-        return 0.0
+    if not os.path.exists(PREDICTION_LOG): return 0.0
     usecols = ["strategy","status","success"]
     succ = total = 0
     for chunk in pd.read_csv(
@@ -590,8 +552,7 @@ def get_actual_success_rate(strategy, min_samples: int = 1):
     ):
         if "strategy" in chunk.columns:
             chunk = chunk[chunk["strategy"] == strategy]
-        if chunk.empty:
-            continue
+        if chunk.empty: continue
         if "status" in chunk.columns and chunk["status"].notna().any():
             mask = chunk["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
             s = chunk["status"].astype(str).str.lower().isin(["success","v_success"])
@@ -599,12 +560,11 @@ def get_actual_success_rate(strategy, min_samples: int = 1):
         elif "success" in chunk.columns:
             s = chunk["success"].astype(str).str.lower().isin(["true","1","success","v_success"])
             succ += int(s.sum()); total += int(len(chunk))
-    if total < max(1, min_samples):
-        return 0.0
+    if total < max(1, min_samples): return 0.0
     return round(succ / total, 4)
 
 # -------------------------
-# 감사용 감사 로그
+# 감사 로그
 # -------------------------
 def log_audit_prediction(s, t, status, reason):
     row = {
@@ -614,42 +574,35 @@ def log_audit_prediction(s, t, status, reason):
         "status": str(status),
         "reason": str(reason)
     }
+    if _READONLY_FS:
+        print(f"[AUDIT][console] {json.dumps(row, ensure_ascii=False)}"); return
     try:
         os.makedirs(os.path.dirname(AUDIT_LOG), exist_ok=True)
         with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=row.keys())
-            if f.tell() == 0:
-                w.writeheader()
+            if f.tell() == 0: w.writeheader()
             w.writerow(row)
     except:
         pass
 
 # -------------------------
-# 예측 로그 (확장 인자 지원 + 자동 컬럼맞춤 + 파일락)
+# 예측 로그
 # -------------------------
 def _align_row_to_header(row, header):
-    if len(row) < len(header):
-        row = row + [""] * (len(header) - len(row))
-    elif len(row) > len(header):
-        row = row[:len(header)]
+    if len(row) < len(header): row = row + [""] * (len(header) - len(row))
+    elif len(row) > len(header): row = row[:len(header)]
     return row
 
 def _clean_str(x):
     s = str(x).strip() if x is not None else ""
-    if s.lower() in {"", "unknown", "none", "nan", "null"}:
-        return ""
-    return s
+    return "" if s.lower() in {"","unknown","none","nan","null"} else s
 
 def _normalize_model_fields(model, model_name, symbol, strategy):
-    m = _clean_str(model)
-    mn = _clean_str(model_name)
-    if not m and mn:
-        m = mn
-    if not mn and m:
-        mn = m
+    m = _clean_str(model); mn = _clean_str(model_name)
+    if not m and mn: m = mn
+    if not mn and m: mn = m
     if not m and not mn:
-        base = f"auto_{symbol}_{strategy}"
-        m = mn = base
+        base = f"auto_{symbol}_{strategy}"; m = mn = base
     return m, mn
 
 def _extract_from_note(note_str: str):
@@ -663,18 +616,13 @@ def _extract_from_note(note_str: str):
             for k in list(fields.keys()):
                 if k in obj:
                     v = obj.get(k)
-                    if isinstance(v, bool):
-                        fields[k] = int(v)
-                    else:
-                        fields[k] = v if (v is not None) else ""
+                    if isinstance(v, bool): fields[k] = int(v)
+                    else: fields[k] = v if (v is not None) else ""
             if not fields.get("explore_used"):
-                mc = obj.get("meta_choice", "")
-                fields["explore_used"] = 1 if ("explore" in str(mc)) else 0
+                mc = obj.get("meta_choice", ""); fields["explore_used"] = 1 if ("explore" in str(mc)) else 0
     except Exception:
         pass
     return fields
-
-# 🔧 logger.py: log_prediction 함수만 교체
 
 def log_prediction(
     symbol, strategy, direction=None, entry_price=0, target_price=0,
@@ -685,15 +633,14 @@ def log_prediction(
     source_exchange="BYBIT", regime=None, meta_choice=None,
     raw_prob=None, calib_prob=None, calib_ver=None,
     class_return_min=None, class_return_max=None, class_return_text=None,
-    # ▼ 추가: predict.py 호환용
     expected_return=None,
     **kwargs
 ):
-    """예측 로그에 모델별 클래스, 예상수익률, 확률, 메타선택 정보를 모두 기록"""
     from datetime import datetime as _dt
-    ensure_prediction_log_exists()
+    if not _READONLY_FS:
+        ensure_prediction_log_exists()
 
-    # ▶ expected_return → rate로 안전 매핑
+    # expected_return → rate 매핑
     if rate is None:
         rate = expected_return if expected_return is not None else 0.0
 
@@ -706,7 +653,7 @@ def log_prediction(
     target_price = float(target_price or 0.0)
     model, model_name = _normalize_model_fields(model, model_name, symbol, strategy)
 
-    # note 안에 포함된 상세 예측 정보 추출
+    # note detail
     try:
         note_obj = json.loads(note) if isinstance(note, str) else {}
     except Exception:
@@ -721,12 +668,9 @@ def log_prediction(
     try:
         if feature_vector is not None:
             import numpy as np
-            if isinstance(feature_vector, np.ndarray):
-                v = feature_vector.flatten().tolist()
-            elif isinstance(feature_vector, (list, tuple)):
-                v = feature_vector
-            else:
-                v = []
+            if isinstance(feature_vector, np.ndarray): v = feature_vector.flatten().tolist()
+            elif isinstance(feature_vector, (list, tuple)): v = feature_vector
+            else: v = []
             fv_serial = json.dumps(v if len(v) <= 64 else {"head": v[:8], "tail": v[-8:]}, ensure_ascii=False)
     except Exception:
         fv_serial = ""
@@ -742,25 +686,28 @@ def log_prediction(
         expected_return_mid, raw_prob_pred, calib_prob_pred, meta_choice_detail
     ]
 
-    with _FileLock(_PRED_LOCK_PATH, timeout=10.0):
-        rotate_prediction_log_if_needed()
-        write_header = not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0
-        with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.writer(f)
-            if write_header:
-                w.writerow(PREDICTION_HEADERS)
-            w.writerow(_align_row_to_header(row, PREDICTION_HEADERS))
+    # 파일 쓰기 가능하면 CSV 기록, 아니면 콘솔 JSON 라인 폴백
+    if _READONLY_FS or not _fs_has_space(PREDICTION_LOG, 256*1024):
+        payload = dict(zip(PREDICTION_HEADERS, _align_row_to_header(row, PREDICTION_HEADERS)))
+        print(f"[PREDICT][console] {json.dumps(payload, ensure_ascii=False)}")
+    else:
+        with _FileLock(_PRED_LOCK_PATH, timeout=10.0):
+            rotate_prediction_log_if_needed()
+            write_header = not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0
+            with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                if write_header: w.writerow(PREDICTION_HEADERS)
+                w.writerow(_align_row_to_header(row, PREDICTION_HEADERS))
 
-        if success:
-            _print_once(f"pred_ok:{symbol}:{strategy}:{model_name}",
-                        f"[✅ 예측 OK] {symbol}-{strategy} class={predicted_class} rate={rate:.4f} prob={raw_prob_pred} src={source_exchange}")
-        else:
-            _ConsecutiveFailAggregator.add((symbol, strategy, group_id or 0, model_name), False, reason)
+    if success:
+        _print_once(f"pred_ok:{symbol}:{strategy}:{model_name}",
+                    f"[✅ 예측 OK] {symbol}-{strategy} class={predicted_class} rate={rate:.4f} prob={raw_prob_pred} src={source_exchange}")
+    else:
+        _ConsecutiveFailAggregator.add((symbol, strategy, group_id or 0, model_name), False, reason)
 
 # -------------------------
 # 학습 로그
 # -------------------------
-# note 문자열에서 엔진/윈도/캡/데이터 플래그를 최대한 추출
 _note_re_engine   = re.compile(r"engine=([a-zA-Z_]+)")
 _note_re_window   = re.compile(r"window=(\d+)")
 _note_re_cap      = re.compile(r"cap=(\d+)")
@@ -787,17 +734,15 @@ def log_training_result(
     y_true=None, y_pred=None, num_classes=None
 ):
     LOG_FILE = TRAIN_LOG
-    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     now = datetime.datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
 
-    # 확장 필드 파싱
     extras = _parse_train_note(note)
 
     row = [
         now, str(symbol), str(strategy), str(model or ""),
         float(accuracy) if accuracy is not None else "",
         float(f1) if f1 is not None else "",
-        float(loss) if loss is not None else "",  # ← 컬럼명은 TRAIN_HEADERS의 'val_loss'
+        float(loss) if loss is not None else "",
         extras.get("engine",""), extras.get("window",""), extras.get("recent_cap",""),
         extras.get("rows",""), extras.get("limit",""), extras.get("min",""),
         extras.get("augment_needed",""), extras.get("enough_for_training",""),
@@ -805,15 +750,15 @@ def log_training_result(
         str(status or "success")
     ]
     try:
-        write_header = not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0
-        if write_header:
-            ensure_train_log_exists()
-        with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.writer(f)
-            if write_header:
-                w.writerow(TRAIN_HEADERS)
-            w.writerow(_align_row_to_header(row, TRAIN_HEADERS))
-        # F1=0 연속 경고 최소화: 심볼/전략별로 1회만 INFO, 이후는 임계치마다 요약
+        if _READONLY_FS:
+            print(f"[TRAIN][console] {json.dumps(dict(zip(TRAIN_HEADERS, _align_row_to_header(row, TRAIN_HEADERS))), ensure_ascii=False)}")
+        else:
+            write_header = not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0
+            if write_header: ensure_train_log_exists()
+            with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                if write_header: w.writerow(TRAIN_HEADERS)
+                w.writerow(_align_row_to_header(row, TRAIN_HEADERS))
         _f1_key = (str(symbol), str(strategy))
         if not hasattr(log_training_result, "_f1_zero"):
             log_training_result._f1_zero = defaultdict(int)
@@ -825,7 +770,6 @@ def log_training_result(
             elif n % int(os.getenv('F1_ZERO_WARN_EVERY','5')) == 0:
                 print(f"🟠 [요약] F1=0.0 연속 {n}회 → {symbol}-{strategy} {model}")
         else:
-            # 정상 회복 시 1회 알림 후 카운터 리셋
             if getattr(log_training_result, "_f1_zero", {}).get(_f1_key, 0) > 0:
                 print(f"[✅ 복구] {symbol}-{strategy} {model} F1 회복 → {float(f1):.4f}")
             log_training_result._f1_zero[_f1_key] = 0
@@ -834,35 +778,28 @@ def log_training_result(
     except Exception as e:
         print(f"[⚠️ 학습 로그 기록 실패] {e}")
 
-    # 이동평균 F1 & per-class F1/coverage (콘솔 출력 + 커버리지 로그)
     try:
-        N = int(os.getenv("LOG_F1_MA_N", "20"))
-        df_ma = pd.read_csv(LOG_FILE, encoding="utf-8-sig")
-        if "val_f1" in df_ma.columns:
-            sub = df_ma[df_ma.get("strategy","") == strategy].tail(max(1, N))
-            if not sub.empty:
-                ma_f1 = float(pd.to_numeric(sub["val_f1"], errors="coerce").dropna().mean()) if "val_f1" in sub else float("nan")
-                if ma_f1 == ma_f1:
-                    print(f"[📊 이동평균 F1] 전략={strategy} 최근{len(sub)}회 → {ma_f1:.4f}")
+        if not _READONLY_FS and os.path.exists(LOG_FILE):
+            N = int(os.getenv("LOG_F1_MA_N", "20"))
+            df_ma = pd.read_csv(LOG_FILE, encoding="utf-8-sig")
+            if "val_f1" in df_ma.columns:
+                sub = df_ma[df_ma.get("strategy","") == strategy].tail(max(1, N))
+                if not sub.empty:
+                    ma_f1 = float(pd.to_numeric(sub["val_f1"], errors="coerce").dropna().mean()) if "val_f1" in sub else float("nan")
+                    if ma_f1 == ma_f1:
+                        print(f"[📊 이동평균 F1] 전략={strategy} 최근{len(sub)}회 → {ma_f1:.4f}")
     except Exception:
         pass
 
-    # ▶ per-class F1 및 coverage 신호 (y_true/y_pred가 주어질 때)
     if y_true is not None and y_pred is not None:
         try:
             rep = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
             per_cls = {k: v["f1-score"] for k, v in rep.items() if k.isdigit()}
             print(f"[📊 per-class F1] {symbol}-{strategy} {model} → {json.dumps(per_cls, ensure_ascii=False)}")
-
             counts = {int(k): int(v["support"]) for k, v in rep.items() if k.isdigit()}
-            # 커버리지(검증라벨 분포) 로깅 – 의사결정 신호로 활용
-            log_eval_coverage(
-                symbol=symbol,
-                strategy=strategy,
-                counts=counts,
-                num_classes=(num_classes if num_classes is not None else len(per_cls)),
-                note="train_end"
-            )
+            log_eval_coverage(symbol=symbol, strategy=strategy, counts=counts,
+                              num_classes=(num_classes if num_classes is not None else len(per_cls)),
+                              note="train_end")
         except Exception as e:
             print(f"[⚠️ per-class F1/coverage 계산 실패] {e}")
 
@@ -870,83 +807,67 @@ def log_training_result(
 # 수익률 클래스 경계 로그
 # -------------------------
 def log_class_ranges(symbol, strategy, group_id=None, class_ranges=None, note=""):
-    import csv, os, math
+    import csv, os
     path = os.path.join(LOG_DIR, "class_ranges.csv")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     now = now_kst().isoformat()
-
     class_ranges = class_ranges or []
 
-    # ---- (NEW) 요약 모드: 중앙값을 LOG_BOUNDARY_BUCKET 단위로 버킷 집계 ----
     if LOG_BOUNDARY_SUMMARY and class_ranges:
-        # 버킷 집계
-        bucket = max(LOG_BOUNDARY_BUCKET, 1e-9)
-        agg = {}
+        bucket = max(LOG_BOUNDARY_BUCKET, 1e-9); agg = {}
         for rng in class_ranges:
             try:
-                lo, hi = float(rng[0]), float(rng[1])
-                mid = (lo + hi) / 2.0
-            except Exception:
-                continue
+                lo, hi = float(rng[0]), float(rng[1]); mid = (lo + hi) / 2.0
+            except Exception: continue
             blo, bhi = _bucketize(mid, bucket)
-            key = (blo, bhi)
-            d = agg.setdefault(key, {"cnt":0, "min":lo, "max":hi, "sum_mid":0.0})
-            d["cnt"] += 1
-            d["min"] = min(d["min"], lo)
-            d["max"] = max(d["max"], hi)
-            d["sum_mid"] += mid
+            d = agg.setdefault((blo, bhi), {"cnt":0, "min":lo, "max":hi, "sum_mid":0.0})
+            d["cnt"] += 1; d["min"] = min(d["min"], lo); d["max"] = max(d["max"], hi); d["sum_mid"] += mid
 
         rows = []
         for (blo, bhi), d in agg.items():
             mean_mid = d["sum_mid"] / max(1, d["cnt"])
             rows.append({
-                "timestamp": now,
-                "symbol": str(symbol),
-                "strategy": str(strategy),
+                "timestamp": now, "symbol": str(symbol), "strategy": str(strategy),
                 "group_id": int(group_id) if group_id is not None else 0,
-                "bucket_lo": float(blo),
-                "bucket_hi": float(bhi),
-                "count": int(d["cnt"]),
-                "min": float(d["min"]),
-                "max": float(d["max"]),
-                "mean_mid": float(round(mean_mid, 6)),
-                "note": str(note or "")
+                "bucket_lo": float(blo), "bucket_hi": float(bhi),
+                "count": int(d["cnt"]), "min": float(d["min"]), "max": float(d["max"]),
+                "mean_mid": float(round(mean_mid, 6)), "note": str(note or "")
             })
-
-        # 상위 TOPK(빈도 우선, 동률은 |mean_mid| 큰 순)
         rows.sort(key=lambda r: (r["count"], abs(r["mean_mid"])), reverse=True)
         top_rows = rows[:LOG_BOUNDARY_TOPK]
 
         sum_path = os.path.join(LOG_DIR, "class_ranges_summary.csv")
-        write_header = not os.path.exists(sum_path)
-        try:
-            with open(sum_path, "a", newline="", encoding="utf-8-sig") as f:
-                w = csv.DictWriter(f, fieldnames=[
-                    "timestamp","symbol","strategy","group_id",
-                    "bucket_lo","bucket_hi","count","min","max","mean_mid","note"
-                ])
-                if write_header:
-                    w.writeheader()
-                for r in top_rows:
-                    w.writerow(r)
-            _print_once(f"class_ranges_sum:{symbol}:{strategy}",
-                        f"[📐 클래스경계 요약] {symbol}-{strategy}-g{group_id} → buckets={len(rows)} topk={len(top_rows)} (step={bucket})")
-        except Exception as e:
-            print(f"[⚠️ 클래스경계 요약 로그 실패] {e}")
+        if _READONLY_FS:
+            print(f"[CLASSRANGE_SUM][console] {json.dumps({'rows':top_rows}, ensure_ascii=False)}")
+        else:
+            write_header = not os.path.exists(sum_path)
+            try:
+                with open(sum_path, "a", newline="", encoding="utf-8-sig") as f:
+                    w = csv.DictWriter(f, fieldnames=[
+                        "timestamp","symbol","strategy","group_id",
+                        "bucket_lo","bucket_hi","count","min","max","mean_mid","note"
+                    ])
+                    if write_header: w.writeheader()
+                    for r in top_rows: w.writerow(r)
+                _print_once(f"class_ranges_sum:{symbol}:{strategy}",
+                            f"[📐 클래스경계 요약] {symbol}-{strategy}-g{group_id} → buckets={len(rows)} topk={len(top_rows)} (step={bucket})")
+            except Exception as e:
+                print(f"[⚠️ 클래스경계 요약 로그 실패] {e}")
 
-        # 요약 모드시 상세 CSV는 **헤더만 보장 + 마커 한 줄**(폭주 방지)
-        write_header_detail = not os.path.exists(path)
-        try:
-            with open(path, "a", newline="", encoding="utf-8-sig") as f:
-                w = csv.writer(f)
-                if write_header_detail:
-                    w.writerow(["timestamp","symbol","strategy","group_id","idx","low","high","note"])
-                w.writerow([now, symbol, strategy, int(group_id) if group_id is not None else 0, -1, "", "", f"summary_only step={bucket} topk={LOG_BOUNDARY_TOPK}"])
-        except Exception as e:
-            print(f"[⚠️ 클래스경계(요약마커) 기록 실패] {e}")
-        return  # 상세 기록 종료
+        if not _READONLY_FS:
+            write_header_detail = not os.path.exists(path)
+            try:
+                with open(path, "a", newline="", encoding="utf-8-sig") as f:
+                    w = csv.writer(f)
+                    if write_header_detail: w.writerow(["timestamp","symbol","strategy","group_id","idx","low","high","note"])
+                    w.writerow([now, symbol, strategy, int(group_id) if group_id is not None else 0, -1, "", "", f"summary_only step={bucket} topk={LOG_BOUNDARY_TOPK}"])
+            except Exception as e:
+                print(f"[⚠️ 클래스경계(요약마커) 기록 실패] {e}")
+        return
 
-    # ---- (기존 상세 기록 경로) ----
+    if _READONLY_FS:
+        print(f"[CLASSRANGE][console] {json.dumps({'timestamp':now,'symbol':symbol,'strategy':strategy,'group_id':group_id,'ranges':class_ranges}, ensure_ascii=False)}")
+        return
+
     write_header = not os.path.exists(path)
     try:
         with open(path, "a", newline="", encoding="utf-8-sig") as f:
@@ -954,10 +875,8 @@ def log_class_ranges(symbol, strategy, group_id=None, class_ranges=None, note=""
             if write_header:
                 w.writerow(["timestamp","symbol","strategy","group_id","idx","low","high","note"])
             for i, rng in enumerate(class_ranges):
-                try:
-                    lo, hi = (float(rng[0]), float(rng[1]))
-                except Exception:
-                    lo, hi = (None, None)
+                try: lo, hi = (float(rng[0]), float(rng[1]))
+                except Exception: lo, hi = (None, None)
                 w.writerow([now, symbol, strategy, int(group_id) if group_id is not None else 0, i, lo, hi, str(note or "")])
         _print_once(f"class_ranges:{symbol}:{strategy}", f"[📐 클래스경계 로그] {symbol}-{strategy}-g{group_id} → {len(class_ranges)}개 기록")
     except Exception as e:
@@ -968,9 +887,7 @@ def log_class_ranges(symbol, strategy, group_id=None, class_ranges=None, note=""
 # -------------------------
 def log_return_distribution(symbol, strategy, group_id=None, horizon_hours=None, summary: dict=None, note=""):
     path = os.path.join(LOG_DIR, "return_distribution.csv")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     now = now_kst().isoformat()
-
     s = summary or {}
     row = [
         now, str(symbol), str(strategy),
@@ -981,7 +898,9 @@ def log_return_distribution(symbol, strategy, group_id=None, horizon_hours=None,
         float(s.get("p99", 0.0)), float(s.get("max", 0.0)), int(s.get("count", 0)),
         str(note or "")
     ]
-
+    if _READONLY_FS:
+        print(f"[RETDIST][console] {json.dumps(dict(zip(['timestamp','symbol','strategy','group_id','horizon_hours','min','p25','p50','p75','p90','p95','p99','max','count','note'], row)), ensure_ascii=False)}")
+        return
     write_header = not os.path.exists(path)
     try:
         with open(path, "a", newline="", encoding="utf-8-sig") as f:
@@ -997,33 +916,22 @@ def log_return_distribution(symbol, strategy, group_id=None, horizon_hours=None,
 # -------------------------
 # 라벨 분포 로그
 # -------------------------
-def log_label_distribution(
-    symbol, strategy, group_id=None,
-    counts: dict=None, total: int=None, n_unique: int=None, entropy: float=None,
-    labels=None, note=""
-):
+def log_label_distribution(symbol, strategy, group_id=None, counts: dict=None, total: int=None, n_unique: int=None, entropy: float=None, labels=None, note=""):
     import json, math
-
     path = os.path.join(LOG_DIR, "label_distribution.csv")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     now = now_kst().isoformat()
 
     if counts is None:
         from collections import Counter
-        try:
-            labels_list = list(map(int, list(labels or [])))
-        except Exception:
-            labels_list = []
-        cnt = Counter(labels_list)
-        total_calc = sum(cnt.values())
+        try: labels_list = list(map(int, list(labels or [])))
+        except Exception: labels_list = []
+        cnt = Counter(labels_list); total_calc = sum(cnt.values())
         probs = [c/total_calc for c in cnt.values()] if total_calc > 0 else []
         entropy_calc = -sum(p*math.log(p + 1e-12) for p in probs) if probs else 0.0
         counts = {int(k): int(v) for k, v in sorted(cnt.items())}
-        total = total_calc
-        n_unique = len(cnt)
-        entropy = round(float(entropy_calc), 6)
+        total = total_calc; n_unique = len(cnt); entropy = round(float(entropy_calc), 6)
     else:
-        counts = {int(k): int(v) for k, v in sorted(counts.items())}
+        counts = {int(k): int(v) for k, v in sorted((counts or {}).items())}
         total = int(total if total is not None else sum(counts.values()))
         n_unique = int(n_unique if n_unique is not None else len(counts))
         if entropy is None:
@@ -1035,12 +943,13 @@ def log_label_distribution(
     row = [
         now, str(symbol), str(strategy),
         int(group_id) if group_id is not None else 0,
-        int(total),
-        json.dumps(counts, ensure_ascii=False),
-        int(n_unique),
-        float(entropy),
-        str(note or "")
+        int(total), json.dumps(counts, ensure_ascii=False),
+        int(n_unique), float(entropy), str(note or "")
     ]
+
+    if _READONLY_FS:
+        print(f"[LABELDIST][console] {json.dumps(dict(zip(['timestamp','symbol','strategy','group_id','total','counts_json','n_unique','entropy','note'], row)), ensure_ascii=False)}")
+        return
 
     write_header = not os.path.exists(path)
     try:
@@ -1054,73 +963,64 @@ def log_label_distribution(
         print(f"[⚠️ 라벨분포 로그 실패] {e}")
 
 # -------------------------
-# (NEW) 검증 클래스 커버 경고 + 단일 클래스 예측 경고
+# 검증 커버리지 로그
 # -------------------------
 def log_eval_coverage(symbol: str, strategy: str, counts: dict, num_classes: int, note: str = ""):
     path = os.path.join(LOG_DIR, "validation_coverage.csv")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     now = now_kst().isoformat()
-
     counts = {int(k): int(v) for k, v in sorted((counts or {}).items())}
     covered = sum(1 for v in counts.values() if int(v) > 0)
     total = int(sum(counts.values()))
     coverage = (covered / max(1, int(num_classes))) if num_classes else 0.0
 
-    write_header = not os.path.exists(path)
-    try:
-        with open(path, "a", newline="", encoding="utf-8-sig") as f:
-            # 🔧 FIX: DictWriter에는 dict를 넘겨야 함
-            fieldnames = ["timestamp","symbol","strategy","num_classes","covered","coverage","total","counts_json","note"]
-            w = csv.DictWriter(f, fieldnames=fieldnames)
-            if write_header:
-                w.writeheader()
-            w.writerow({
-                "timestamp": now,
-                "symbol": symbol,
-                "strategy": strategy,
-                "num_classes": int(num_classes),
-                "covered": int(covered),
-                "coverage": float(round(coverage,4)),
-                "total": int(total),
-                "counts_json": json.dumps(counts, ensure_ascii=False),
-                "note": str(note or "")
-            })
-        if covered <= 1:
-            print(f"🔴 [경고] 검증 라벨 단일 클래스 감지 → {symbol}-{strategy} (covered={covered}/{num_classes})")
-        elif coverage < 0.6:
-            print(f"🟠 [주의] 검증 클래스 커버 낮음 → {symbol}-{strategy} (coverage={coverage:.2f})")
-    except Exception as e:
-        print(f"[⚠️ validation_coverage 로그 실패] {e}")
+    if _READONLY_FS:
+        out = {
+            "timestamp": now, "symbol": symbol, "strategy": strategy,
+            "num_classes": int(num_classes), "covered": int(covered),
+            "coverage": float(round(coverage,4)), "total": int(total),
+            "counts_json": json.dumps(counts, ensure_ascii=False), "note": str(note or "")
+        }
+        print(f"[VALCOV][console] {json.dumps(out, ensure_ascii=False)}")
+    else:
+        write_header = not os.path.exists(path)
+        try:
+            with open(path, "a", newline="", encoding="utf-8-sig") as f:
+                fieldnames = ["timestamp","symbol","strategy","num_classes","covered","coverage","total","counts_json","note"]
+                w = csv.DictWriter(f, fieldnames=fieldnames)
+                if write_header: w.writeheader()
+                w.writerow({
+                    "timestamp": now, "symbol": symbol, "strategy": strategy,
+                    "num_classes": int(num_classes), "covered": int(covered),
+                    "coverage": float(round(coverage,4)), "total": int(total),
+                    "counts_json": json.dumps(counts, ensure_ascii=False), "note": str(note or "")
+                })
+        except Exception as e:
+            print(f"[⚠️ validation_coverage 로그 실패] {e}")
+
+    if covered <= 1:
+        print(f"🔴 [경고] 검증 라벨 단일 클래스 감지 → {symbol}-{strategy} (covered={covered}/{num_classes})")
+    elif coverage < 0.6:
+        print(f"🟠 [주의] 검증 클래스 커버 낮음 → {symbol}-{strategy} (coverage={coverage:.2f})")
 
 def alert_if_single_class_prediction(symbol: str, strategy: str, lookback_days: int = 3, min_rows: int = 100):
     try:
-        ensure_prediction_log_exists()
-        if not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0:
+        if _READONLY_FS or not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0:
             return False
         cutoff = now_kst() - datetime.timedelta(days=int(lookback_days))
         uniq = set(); total = 0
         usecols = ["timestamp","symbol","strategy","predicted_class"]
         for chunk in pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", usecols=[c for c in usecols if c in PREDICTION_HEADERS], chunksize=CHUNK):
-            if "timestamp" not in chunk.columns or "predicted_class" not in chunk.columns:
-                continue
+            if "timestamp" not in chunk.columns or "predicted_class" not in chunk.columns: continue
             ts = pd.to_datetime(chunk["timestamp"], errors="coerce")
-            try:
-                ts = ts.dt.tz_localize("Asia/Seoul")
+            try: ts = ts.dt.tz_localize("Asia/Seoul")
             except Exception:
-                try:
-                    ts = ts.dt.tz_convert("Asia/Seoul")
-                except Exception:
-                    pass
+                try: ts = ts.dt.tz_convert("Asia/Seoul")
+                except Exception: pass
             sub = chunk[(chunk.get("symbol","")==symbol) & (chunk.get("strategy","")==strategy)]
-            if sub.empty:
-                continue
-            # 안전 정렬: sub 인덱스에 맞춰 ts도 슬라이스 후 컷오프
-            ts_sub = ts.loc[sub.index]
-            sub = sub.loc[ts_sub >= cutoff]
-
+            if sub.empty: continue
+            ts_sub = ts.loc[sub.index]; sub = sub.loc[ts_sub >= cutoff]
             pcs = pd.to_numeric(sub["predicted_class"], errors="coerce").dropna().astype(int)
-            uniq.update(pcs.unique().tolist())
-            total += int(len(pcs))
+            uniq.update(pcs.unique().tolist()); total += int(len(pcs))
         if total >= int(min_rows) and len(uniq) <= 1:
             print(f"🔴 [경고] 최근 예측이 사실상 단일 클래스 → {symbol}-{strategy} (rows={total}, uniq={len(uniq)})")
             log_audit_prediction(symbol, strategy, "single_class_pred", f"rows={total}, uniq={len(uniq)}")
@@ -1134,109 +1034,72 @@ def alert_if_single_class_prediction(symbol: str, strategy: str, lookback_days: 
 # 정렬 키
 # -------------------------
 def _model_sort_key(r):
-    return (
-        str(r.get("symbol", "")),
-        str(r.get("strategy", "")),
-        str(r.get("model", "")),
-        int(r.get("group_id", 0)),
-    )
+    return (str(r.get("symbol","")), str(r.get("strategy","")), str(r.get("model","")), int(r.get("group_id",0)))
 
 # -------------------------
-# 모델 인벤토리 조회 ('.pt' + '.ptz' + '.safetensors' 지원)
+# 모델 인벤토리 조회
 # -------------------------
 def get_available_models(symbol: str = None, strategy: str = None):
     try:
         model_dir = "/persistent/models"
-        if not os.path.isdir(model_dir):
-            return []
-        out = []
-        exts = (".pt", ".ptz", ".safetensors")
-
+        if not os.path.isdir(model_dir): return []
+        out = []; exts = (".pt", ".ptz", ".safetensors")
         def _stem_meta(path: str) -> str:
             b = os.path.basename(path)
             for e in exts:
                 if b.endswith(e):
                     return os.path.join(os.path.dirname(path), b[: -len(e)] + ".meta.json")
-            # fallback: 그대로 .meta.json
             return path + ".meta.json"
-
         for fn in os.listdir(model_dir):
-            if not fn.endswith(exts):
-                continue
-            pt_path = os.path.join(model_dir, fn)
-            meta_path = _stem_meta(pt_path)
-            if not os.path.exists(meta_path):
-                continue
+            if not fn.endswith(exts): continue
+            pt_path = os.path.join(model_dir, fn); meta_path = _stem_meta(pt_path)
+            if not os.path.exists(meta_path): continue
             try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-            except Exception:
-                meta = {}
+                with open(meta_path, "r", encoding="utf-8") as f: meta = json.load(f)
+            except Exception: meta = {}
             sym = meta.get("symbol") or fn.split("_", 1)[0]
             strat = meta.get("strategy") or ("단기" if "_단기_" in fn else "중기" if "_중기_" in fn else "장기" if "_장기_" in fn else "")
-            if symbol and sym != symbol:
-                continue
-            if strategy and strat != strategy:
-                continue
+            if symbol and sym != symbol: continue
+            if strategy and strat != strategy: continue
             out.append({
-                "pt_file": fn,
-                "meta_file": os.path.basename(meta_path),
-                "symbol": sym,
-                "strategy": strat,
-                "model": meta.get("model", ""),
-                "group_id": meta.get("group_id", 0),
-                "num_classes": meta.get("num_classes", 0),
+                "pt_file": fn, "meta_file": os.path.basename(meta_path),
+                "symbol": sym, "strategy": strat, "model": meta.get("model",""),
+                "group_id": meta.get("group_id",0), "num_classes": meta.get("num_classes",0),
                 "val_f1": float(meta.get("metrics", {}).get("val_f1", 0.0)),
-                "timestamp": meta.get("timestamp", "")
+                "timestamp": meta.get("timestamp","")
             })
-        out.sort(key=_model_sort_key)
-        return out
+        out.sort(key=_model_sort_key); return out
     except Exception as e:
-        print(f"[오류] get_available_models 실패 → {e}")
-        return []
+        print(f"[오류] get_available_models 실패 → {e}"); return []
 
 # -------------------------
-# 최근 예측 통계 내보내기 (청크 누산)
+# 최근 예측 통계 내보내기
 # -------------------------
 def export_recent_model_stats(days: int = 7, out_path: str = None):
     try:
-        ensure_prediction_log_exists()
-        path = PREDICTION_LOG
         if out_path is None:
             os.makedirs(LOG_DIR, exist_ok=True)
             out_path = os.path.join(LOG_DIR, "recent_model_stats.csv")
-
-        if not os.path.exists(path) or os.path.getsize(path) == 0:
+        if not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0:
             pd.DataFrame(columns=["symbol","strategy","model","total","success","fail","success_rate","last_ts"]).to_csv(out_path, index=False, encoding="utf-8-sig")
             return out_path
-
         cutoff = now_kst() - datetime.timedelta(days=int(days))
-
         agg = {}
-
         usecols = ["timestamp","symbol","strategy","model","status","success"]
         for chunk in pd.read_csv(
-            path, encoding="utf-8-sig",
+            PREDICTION_LOG, encoding="utf-8-sig",
             usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success"]],
             chunksize=CHUNK
         ):
             if "timestamp" in chunk.columns:
                 ts = pd.to_datetime(chunk["timestamp"], errors="coerce")
-                try:
-                    ts = ts.dt.tz_localize("Asia/Seoul")
+                try: ts = ts.dt.tz_localize("Asia/Seoul")
                 except Exception:
-                    try:
-                        ts = ts.dt.tz_convert("Asia/Seoul")
-                    except Exception:
-                        pass
-                chunk = chunk.loc[ts >= cutoff]
-                chunk = chunk.assign(_ts=ts)
-            else:
-                continue
-
-            if chunk.empty or "model" not in chunk.columns:
-                continue
-
+                    try: ts = ts.dt.tz_convert("Asia/Seoul")
+                    except Exception: pass
+                chunk = chunk.loc[ts >= cutoff]; chunk = chunk.assign(_ts=ts)
+            else: continue
+            if chunk.empty or "model" not in chunk.columns: continue
             succ_mask = None
             if "status" in chunk.columns and chunk["status"].notna().any():
                 ok_mask = chunk["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
@@ -1244,34 +1107,22 @@ def export_recent_model_stats(days: int = 7, out_path: str = None):
                 chunk = chunk[ok_mask]
             elif "success" in chunk.columns:
                 succ_mask = chunk["success"].astype(str).str.lower().isin(["true","1","success","v_success"])
-            else:
-                continue
-
-            if chunk.empty:
-                continue
-
+            else: continue
+            if chunk.empty: continue
             chunk = chunk.assign(_succ=succ_mask.astype(bool))
-
             for (sym, strat, mdl), sub in chunk.groupby(["symbol","strategy","model"], dropna=False):
                 key = (str(sym), str(strat), str(mdl))
                 d = agg.setdefault(key, {"success":0, "total":0, "last_ts":None})
-                d["success"] += int(sub["_succ"].sum())
-                d["total"]   += int(len(sub))
+                d["success"] += int(sub["_succ"].sum()); d["total"] += int(len(sub))
                 last_ts = pd.to_datetime(sub["_ts"].max(), errors="coerce")
                 if d["last_ts"] is None or (pd.notna(last_ts) and last_ts > d["last_ts"]):
                     d["last_ts"] = last_ts
-
         rows = []
         for (sym,strat,mdl), d in agg.items():
             total = int(d["total"]); succ = int(d["success"])
             rate = (succ/total) if total>0 else 0.0
             last_ts = d["last_ts"].isoformat() if d["last_ts"] is not None else ""
-            rows.append({
-                "symbol": sym, "strategy": strat, "model": mdl,
-                "total": total, "success": succ, "fail": total - succ,
-                "success_rate": round(rate, 4), "last_ts": last_ts
-            })
-
+            rows.append({"symbol": sym, "strategy": strat, "model": mdl, "total": total, "success": succ, "fail": total - succ, "success_rate": round(rate, 4), "last_ts": last_ts})
         df_out = pd.DataFrame(rows, columns=["symbol","strategy","model","total","success","fail","success_rate","last_ts"])
         df_out = df_out.sort_values(["symbol","strategy","model","last_ts"])
         df_out.to_csv(out_path, index=False, encoding="utf-8-sig")
@@ -1280,22 +1131,18 @@ def export_recent_model_stats(days: int = 7, out_path: str = None):
     except Exception as e:
         print(f"[⚠️ export_recent_model_stats 실패] {e}")
         try:
-            pd.DataFrame(columns=["symbol","strategy","model","total","success","fail","success_rate","last_ts"]).to_csv(
-                out_path or os.path.join(LOG_DIR, "recent_model_stats.csv"), index=False, encoding="utf-8-sig")
-        except Exception:
-            pass
+            if out_path is None: out_path = os.path.join(LOG_DIR, "recent_model_stats.csv")
+            pd.DataFrame(columns=["symbol","strategy","model","total","success","fail","success_rate","last_ts"]).to_csv(out_path, index=False, encoding="utf-8-sig")
+        except Exception: pass
         return out_path or os.path.join(LOG_DIR, "recent_model_stats.csv")
 
-# === logger.py (patched: group_trigger 포함 관우요약 정상화) ===
-# 기존 내용 동일 — 마지막 부분만 수정
-# ...
 # ============================================================
-# (UPDATED) 관우 요약 로그 생성기 — group_trigger 포함 버전
+# 관우 요약 로그 생성기 — group_trigger 포함
 # ============================================================
 def flush_gwanwoo_summary():
     """
     관우(시각화) 로그용 summary.csv 생성.
-    자동예측(group_trigger 등) 포함.
+    자동예측(group_trigger 등) 포함. 저장 불가 시 콘솔 폴백.
     """
     base_dir = "/persistent"
     paths = {
@@ -1307,7 +1154,7 @@ def flush_gwanwoo_summary():
 
     records = []
 
-    # 1️⃣ prediction_result.json
+    # 1) prediction_result.json
     try:
         if os.path.exists(paths["pred_json"]):
             with open(paths["pred_json"], "r", encoding="utf-8") as f:
@@ -1327,7 +1174,7 @@ def flush_gwanwoo_summary():
     except Exception as e:
         print(f"[⚠️ 관우요약] prediction_result.json 읽기 실패: {e}")
 
-    # 2️⃣ evaluation_result.csv
+    # 2) evaluation_result.csv
     try:
         if os.path.exists(paths["eval_csv"]):
             df = pd.read_csv(paths["eval_csv"], encoding="utf-8-sig")
@@ -1337,13 +1184,12 @@ def flush_gwanwoo_summary():
     except Exception as e:
         print(f"[⚠️ 관우요약] evaluation_result.csv 읽기 실패: {e}")
 
-    # 3️⃣ prediction_log.csv — group_trigger 포함
+    # 3) prediction_log.csv
     try:
         if os.path.exists(paths["pred_csv"]):
             df = pd.read_csv(paths["pred_csv"], encoding="utf-8-sig")
             if not df.empty:
                 df["source"] = df.get("source", "")
-                # 자동예측 + 수동예측 모두 허용
                 allowed = {"manual","api","group_trigger","group_trigger_retry","train_end","변동성"}
                 df = df[df["source"].isin(allowed)] if "source" in df.columns else df
                 keep = [c for c in ["timestamp","symbol","strategy","predicted_class",
@@ -1353,18 +1199,26 @@ def flush_gwanwoo_summary():
         print(f"[⚠️ 관우요약] prediction_log.csv 읽기 실패: {e}")
 
     if not records:
-        print("[⚠️ 관우요약] 데이터 없음 → summary 비움")
-        with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
-            csv.writer(f).writerow(["timestamp","symbol","strategy","predicted_class",
-                                    "expected_return","prob","model","source"])
+        msg_hdr = ["timestamp","symbol","strategy","predicted_class","expected_return","prob","model","source"]
+        if _READONLY_FS:
+            print(f"[GWANWOO_SUM][console] []")
+            return out_path
+        try:
+            with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
+                csv.writer(f).writerow(msg_hdr)
+        except Exception as e:
+            print(f"[⚠️ 관우요약] summary 헤더 생성 실패: {e}")
         return out_path
 
     df_out = pd.DataFrame(records)
-    # 결측치 보완
     for col in ["expected_return","prob","model","predicted_class","source"]:
-        if col not in df_out.columns:
-            df_out[col] = ""
+        if col not in df_out.columns: df_out[col] = ""
     df_out = df_out.fillna("")
-    df_out.to_csv(out_path, index=False, encoding="utf-8-sig")
-    print(f"[✅ 관우요약] {len(df_out)}행 생성: {out_path}")
+
+    if _READONLY_FS or not _fs_has_space(out_path, 256*1024):
+        print(f"[GWANWOO_SUM][console] {df_out.to_json(orient='records', force_ascii=False)}")
+    else:
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        df_out.to_csv(out_path, index=False, encoding="utf-8-sig")
+        print(f"[✅ 관우요약] {len(df_out)}행 생성: {out_path}")
     return out_path
