@@ -159,6 +159,12 @@ _default_config = {
         "EXIT_GUARD_MIN_ER": 0.01,
         "CALIB_NAN_MODE": "abstain"
     },
+
+    # === IO 경로(관우·예측 단일 진실원) ===
+    "IO": {
+        "predict_out": "/data/guanwu/incoming",  # 예측 저장
+        "guanwu_in":   "/data/guanwu/incoming"   # 관우 감시
+    },
 }
 
 STRATEGY_CONFIG = {
@@ -285,6 +291,11 @@ def get_SCHED():    return _config.get("SCHED", _default_config["SCHED"])
 def get_PATTERN():  return _config.get("PATTERN", _default_config["PATTERN"])
 def get_BLEND():    return _config.get("BLEND", _default_config["BLEND"])
 def get_PUBLISH():  return _config.get("PUBLISH", _default_config["PUBLISH"])
+
+# IO 경로 getter
+def get_IO():                 return _config.get("IO", _default_config["IO"])
+def get_PREDICT_OUT_DIR():    return os.getenv("PREDICT_OUTPUT_DIR", get_IO().get("predict_out"))
+def get_GUANWU_IN_DIR():      return os.getenv("GUANWU_INPUT_DIR",   get_IO().get("guanwu_in"))
 
 def _env_bool(v): return str(v).strip().lower() not in {"0","false","no","off","none",""}
 
@@ -973,4 +984,5 @@ __all__ = [
     "get_EVAL_RUNTIME", "strategy_horizon_hours", "compute_eval_due_at",
     "get_DATA", "get_DATA_RUNTIME", "get_CLASS_ENFORCE", "get_CV_CONFIG",
     "get_ONCHAIN", "get_GUARD",
-    ]
+    "get_IO", "get_PREDICT_OUT_DIR", "get_GUANWU_IN_DIR",
+        ]
