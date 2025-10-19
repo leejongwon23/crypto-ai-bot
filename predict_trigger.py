@@ -1,19 +1,25 @@
-# === predict_trigger.py (FINAL — lock-aware, retry-on-unlock, stale-safe, log-throttled,
-# 그룹 미완료 시 '완료된 심볼'만 예측 진행 + train.py 연동 run_after_training 포함, 누락 없음) ===
-import os, time, glob, traceback, datetime
+# === predict_trigger.py (FINAL, Guanwu 동기화 포함) ===
+import os, time, glob, traceback, datetime, shutil
 from collections import Counter, defaultdict
 import numpy as np
 import pandas as pd
 import pytz
 
-# ──────────────────────────────────────────────────────────────
-# 데이터 소스 (패키지/루트 폴백)
-# ──────────────────────────────────────────────────────────────
+# ── 설정 경로: config 사용 ─────────────────────────────────────
+try:
+    from config import get_GUANWU_IN_DIR
+except Exception:
+    def get_GUANWU_IN_DIR(): return "/data/guanwu/incoming"
+
+# 예측 로그 단일 경로(환경변수로도 덮어쓰기 가능)
+PREDICTION_LOG_PATH = os.getenv("PREDICTION_LOG_PATH", "/persistent/prediction_log.csv")
+
+# ── 데이터 소스 (패키지/루트 폴백) ────────────────────────────
 try:
     from data.utils import get_ALL_SYMBOLS, get_kline_by_strategy
 except Exception:
     try:
-        from utils import get_ALL_SYMBOLS, get_kline_by_strategy  # 루트 폴백
+        from utils import get_ALL_SYMBOLS, get_kline_by_strategy
     except Exception as _e:
         def get_ALL_SYMBOLS():
             print(f"[경고] get_ALL_SYMBOLS 임포트 실패: {_e}")
@@ -91,7 +97,7 @@ try:
 except Exception:
     __is_open = None
 
-# (옵션) 중앙 락 유틸 사용: 있으면 우선 사용
+# (옵션) 중앙 락 유틸 사용
 _lock_api = {"is_locked": None, "clear_stale": None, "wait_until_free": None, "ttl": None}
 try:
     from predict_lock import is_predict_running as _is_locked
@@ -101,7 +107,7 @@ try:
     _lock_api.update(is_locked=_is_locked, clear_stale=_clear_stale,
                      wait_until_free=_wait_until_free, ttl=int(_LOCK_TTL))
 except Exception:
-    pass  # 파일기반 폴백 사용
+    pass
 
 # 그룹 오더 매니저
 _GOM = None
@@ -130,9 +136,27 @@ def _get_current_group_symbols():
     except Exception:
         return None
 
-# ──────────────────────────────────────────────────────────────
-# 설정
-# ──────────────────────────────────────────────────────────────
+# ── 경로 동기화(관우) ─────────────────────────────────────────
+def _sync_ganwu_log():
+    try:
+        src = PREDICTION_LOG_PATH
+        dst_dir = get_GUANWU_IN_DIR() or ""
+        if not dst_dir:
+            return
+        os.makedirs(dst_dir, exist_ok=True)
+        dst = os.path.join(dst_dir, "prediction_log.csv")
+        # 동일 경로면 스킵
+        if os.path.abspath(src) == os.path.abspath(dst):
+            return
+        if not os.path.exists(src):
+            return
+        # 소스가 더 최신이면 복사
+        if (not os.path.exists(dst)) or (os.path.getmtime(src) >= os.path.getmtime(dst)):
+            shutil.copy2(src, dst)
+    except Exception as e:
+        print(f"[관우동기화 경고] {e}")
+
+# ── 설정 ──────────────────────────────────────────────────────
 TRIGGER_COOLDOWN = {"단기": 3600, "중기": 10800, "장기": 21600}
 MAX_LOOKBACK = int(os.getenv("TRIGGER_MAX_LOOKBACK", "180"))
 RECENT_DAYS_FOR_FREQ = max(1, int(os.getenv("TRIGGER_FREQ_DAYS", "3")))
@@ -148,9 +172,7 @@ STARTUP_WAIT_FOR_GATE_OPEN_SEC   = int(os.getenv("STARTUP_WAIT_FOR_GATE_OPEN_SEC
 PAIR_WAIT_FOR_GATE_OPEN_SEC      = int(os.getenv("PAIR_WAIT_FOR_GATE_OPEN_SEC", "120"))
 RETRY_ON_TIMEOUT                 = int(os.getenv("RETRY_ON_TIMEOUT", "1")) == 1
 TIMEOUT_RETRY_ONCE_EXTRA_SEC     = float(os.getenv("TIMEOUT_RETRY_ONCE_EXTRA_SEC", "20"))
-# 쓰로틀: 바쁜상태/타임아웃 로그 최소 간격
 THROTTLE_BUSY_LOG_SEC            = int(os.getenv("THROTTLE_BUSY_LOG_SEC", "15"))
-# 페어별 백오프(타임아웃/락실패 반복 방지)
 PAIR_BACKOFF_BASE_SEC            = int(os.getenv("PAIR_BACKOFF_BASE_SEC", "60"))
 PAIR_BACKOFF_MAX_SEC             = int(os.getenv("PAIR_BACKOFF_MAX_SEC", "600"))
 
@@ -159,14 +181,12 @@ REQUIRE_GROUP_COMPLETE = int(os.getenv("REQUIRE_GROUP_COMPLETE", "0"))
 
 last_trigger_time = {}
 _last_busy_log_at = 0.0
-_pair_backoff_until = defaultdict(float)   # key -> unix ts
-_pair_backoff_step  = defaultdict(int)     # key -> step
+_pair_backoff_until = defaultdict(float)
+_pair_backoff_step  = defaultdict(int)
 
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-# ──────────────────────────────────────────────────────────────
-# 게이트/락 관리 (파일 폴백 포함)
-# ──────────────────────────────────────────────────────────────
+# ── 게이트/락 관리 ────────────────────────────────────────────
 def _gate_closed() -> bool:
     try:
         if os.path.exists(GROUP_TRAIN_LOCK):
@@ -174,20 +194,17 @@ def _gate_closed() -> bool:
         if os.path.exists(PREDICT_BLOCK):
             return True
         if __is_open is not None:
-            # predict.py 게이트 API가 있으면 신뢰
             return (not bool(__is_open()))
     except Exception:
         pass
     return False
 
 def _predict_busy() -> bool:
-    # 중앙 락 API가 있으면 우선
     if callable(_lock_api["is_locked"]):
         try:
             return bool(_lock_api["is_locked"]())
         except Exception:
             pass
-    # 파일 폴백
     try:
         return os.path.exists(PREDICT_RUN_LOCK)
     except Exception:
@@ -203,7 +220,6 @@ def _is_stale_lock(path: str, ttl_sec: int) -> bool:
         return False
 
 def _clear_stale_predict_lock(ttl_sec: int):
-    # 중앙 락 API가 있으면 우선
     if callable(_lock_api["clear_stale"]):
         try:
             _lock_api["clear_stale"]()
@@ -218,34 +234,23 @@ def _clear_stale_predict_lock(ttl_sec: int):
         print(f"[LOCK] stale cleanup error: {e}")
 
 def _wait_for_gate_open(max_wait_sec: int) -> bool:
-    """게이트/락이 열릴 때까지 최대 max_wait_sec 동안 대기."""
     start = time.time()
     while time.time() - start < max_wait_sec:
-        # 1) stale 정리(안전)
         _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
-
-        # 2) 전역 유지보수 락이면 즉시 포기
         if _LOCK_PATH and os.path.exists(_LOCK_PATH):
             return False
-
-        # 3) 게이트가 열려 있고, 예측 락도 비어있으면 통과
         if (not _gate_closed()) and (not _predict_busy()):
             return True
-
-        # 4) 중앙 wait API 있으면 활용(짧게 대기)
         if callable(_lock_api["wait_until_free"]):
             try:
                 if _lock_api["wait_until_free"](max_wait_sec=1):
-                    # 락은 비었으나 게이트가 닫혀있을 수 있음 — 루프 재평가
                     pass
             except Exception:
                 pass
         time.sleep(max(0.05, RETRY_AFTER_TRAIN_SLEEP_SEC))
     return False
 
-# ──────────────────────────────────────────────────────────────
-# 그룹 완성 검사/페어 선택
-# ──────────────────────────────────────────────────────────────
+# ── 그룹/페어 유틸 ────────────────────────────────────────────
 def _missing_pairs(symbols):
     miss = []
     for sym in symbols:
@@ -263,9 +268,7 @@ def _available_pairs(symbols):
 def _is_group_complete_for_all_strategies(symbols) -> bool:
     return len(_missing_pairs(symbols)) == 0
 
-# ──────────────────────────────────────────────────────────────
-# 전조 조건
-# ──────────────────────────────────────────────────────────────
+# ── 전조 조건 ─────────────────────────────────────────────────
 def _has_cols(df: pd.DataFrame, cols) -> bool:
     return isinstance(df, pd.DataFrame) and set(cols).issubset(set(df.columns))
 
@@ -312,11 +315,8 @@ def check_pre_burst_conditions(df, strategy):
 def check_model_quality(symbol, strategy):
     return _has_model_for(symbol, strategy)
 
-# ──────────────────────────────────────────────────────────────
-# 내부: 예측 실행(타임아웃/재시도 포함)
-# ──────────────────────────────────────────────────────────────
+# ── 예측 래퍼 ─────────────────────────────────────────────────
 def _invoke_predict(_predict, symbol, strategy, source, timeout_sec: float) -> bool:
-    """timeout 지원 래퍼 (train 제공 함수가 있으면 사용)"""
     if _safe_predict_with_timeout:
         ok = _safe_predict_with_timeout(
             predict_fn=_predict,
@@ -341,7 +341,6 @@ def _invoke_predict(_predict, symbol, strategy, source, timeout_sec: float) -> b
         return True
 
 def _retry_after_training(_predict, symbol, strategy, first_err: Exception | str = None) -> bool:
-    """훈련락/게이트 해제까지 기다렸다가 1회 재시도"""
     why = f"timeout/lock; first_err={first_err}" if first_err else "timeout/lock"
     log_audit(symbol, strategy, "트리거재시도대기", why)
     ok = _wait_for_gate_open(RETRY_AFTER_TRAIN_MAX_WAIT_SEC)
@@ -352,6 +351,7 @@ def _retry_after_training(_predict, symbol, strategy, first_err: Exception | str
         ok2 = _invoke_predict(_predict, symbol, strategy, "group_trigger_retry", max(PREDICT_TIMEOUT_SEC, TIMEOUT_RETRY_ONCE_EXTRA_SEC))
         if ok2:
             log_audit(symbol, strategy, "트리거예측(재시도성공)", "훈련락 해제 후 성공")
+            _sync_ganwu_log()
         else:
             log_audit(symbol, strategy, "트리거예측(재시도실패)", "재시도 실패")
         return bool(ok2)
@@ -359,20 +359,26 @@ def _retry_after_training(_predict, symbol, strategy, first_err: Exception | str
         log_audit(symbol, strategy, "트리거예측(재시도예외)", f"{e}")
         return False
 
-# ──────────────────────────────────────────────────────────────
-# 트리거 실행 루프
-# ──────────────────────────────────────────────────────────────
+# ── 트리거 실행 루프 ─────────────────────────────────────────
 def run():
     global _last_busy_log_at
 
-    # 전역 강제 락: 즉시 스킵
     if _LOCK_PATH and os.path.exists(_LOCK_PATH):
         print(f"[트리거] 전역 락 감지({_LOCK_PATH}) → 전체 스킵 @ {now_kst().isoformat()}")
         return
 
     _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
 
-    # 시작 시 게이트 닫힘/바쁨이면 일정 시간 대기
+    try:
+        ensure_prediction_log_exists(PREDICTION_LOG_PATH)
+    except TypeError:
+        # 구버전 시그니처 호환
+        ensure_prediction_log_exists()
+    except Exception as e:
+        print(f"[경고] prediction_log 보장 실패: {e}")
+
+    _sync_ganwu_log()
+
     if _gate_closed() or _predict_busy():
         print(f"[트리거] 시작 시 게이트 닫힘/예측중 → 최대 {STARTUP_WAIT_FOR_GATE_OPEN_SEC}s 대기")
         opened = _wait_for_gate_open(STARTUP_WAIT_FOR_GATE_OPEN_SEC)
@@ -388,11 +394,6 @@ def run():
         return
 
     try:
-        ensure_prediction_log_exists()
-    except Exception as e:
-        print(f"[경고] prediction_log 보장 실패: {e}")
-
-    try:
         all_symbols = list(dict.fromkeys(get_ALL_SYMBOLS()))
     except Exception as e:
         print(f"[경고] 심볼 로드 실패: {e}")
@@ -403,8 +404,6 @@ def run():
         symset = set(group_syms)
         symbols = [s for s in all_symbols if s in symset]
         print(f"[그룹제한] 현재 그룹 심볼 {len(symbols)}/{len(all_symbols)}개 대상으로 실행")
-
-        # 🔧 패치: 그룹 미완료라도 '완료된 심볼'만 예측 진행
         if REQUIRE_GROUP_COMPLETE and not _is_group_complete_for_all_strategies(symbols):
             miss = _missing_pairs(symbols)
             print(f"[경고] 그룹 일부 미완료(누락 {len(miss)}) → 완료된 심볼만 예측 진행")
@@ -427,7 +426,6 @@ def run():
             print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
             return
 
-        # 페어별 백오프 적용
         key = f"{symbol}_{strategy}"
         nowu = time.time()
         if nowu < _pair_backoff_until[key]:
@@ -435,14 +433,12 @@ def run():
 
         _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
 
-        # 실행 중 전역 락/게이트 닫힘 → 대기
         if _LOCK_PATH and os.path.exists(_LOCK_PATH):
             print(f"[트리거] 실행 중 전역 락 감지 → 중단")
             print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
             return
 
         if _gate_closed() or _predict_busy():
-            # 로그 쓰로틀
             if (nowu - _last_busy_log_at) >= THROTTLE_BUSY_LOG_SEC:
                 print(f"[트리거] 게이트 닫힘/예측중 → 최대 {PAIR_WAIT_FOR_GATE_OPEN_SEC}s 대기 후 재시도")
                 _last_busy_log_at = nowu
@@ -486,13 +482,12 @@ def run():
 
                 if ok:
                     last_trigger_time[key] = nowt
-                    # 성공 시 백오프 해제/초기화
                     _pair_backoff_until.pop(key, None)
                     _pair_backoff_step.pop(key, None)
                     log_audit(symbol, strategy, "트리거예측", "조건 만족으로 실행")
                     triggered += 1
+                    _sync_ganwu_log()
                 else:
-                    # 실패 시 페어 백오프(지수 증가, 상한 있음)
                     step = _pair_backoff_step[key] = min(_pair_backoff_step[key] + 1, 8)
                     wait_sec = min(PAIR_BACKOFF_BASE_SEC * (2 ** (step - 1)), PAIR_BACKOFF_MAX_SEC)
                     _pair_backoff_until[key] = time.time() + wait_sec
@@ -506,11 +501,9 @@ def run():
 
     print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
 
-# ──────────────────────────────────────────────────────────────
-# 최근 클래스 빈도
-# ──────────────────────────────────────────────────────────────
+# ── 최근 클래스 빈도 ──────────────────────────────────────────
 def get_recent_class_frequencies(strategy=None, recent_days=RECENT_DAYS_FOR_FREQ):
-    path = "/persistent/prediction_log.csv"
+    path = PREDICTION_LOG_PATH
     if (not os.path.exists(path)) or (os.path.getsize(path) == 0):
         return Counter()
 
@@ -559,18 +552,8 @@ def get_recent_class_frequencies(strategy=None, recent_days=RECENT_DAYS_FOR_FREQ
         print(f"[⚠️ get_recent_class_frequencies 예외] {e}")
         return Counter()
 
-# ──────────────────────────────────────────────────────────────
-# 확률 보정
-# ──────────────────────────────────────────────────────────────
+# ── 확률 보정 ─────────────────────────────────────────────────
 def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict = None, alpha=0.10, beta=0.10):
-    """
-    probs           : (C,) or (1,C) 확률 벡터
-    recent_freq     : 최근 예측된 클래스 빈도 Counter
-    class_counts    : (선택) 학습시 클래스 샘플 수 {cls: count}
-    alpha           : 최근 과다선택된 클래스 패널티 강도
-    beta            : 데이터 희소클래스 보정 강도
-    반환            : 정규화된 (C,) 벡터
-    """
     p = np.asarray(probs, dtype=np.float64)
     if p.ndim == 2:
         p = p[0]
@@ -583,7 +566,6 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
 
     num_classes = len(p)
 
-    # 최근 빈도 기반 가중치 (많이 나왔던 클래스 패널티)
     total_recent = float(sum(recent_freq.values()))
     if total_recent <= 0:
         recent_weights = np.ones(num_classes, dtype=np.float64)
@@ -594,7 +576,6 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
         ], dtype=np.float64)
         recent_weights = np.clip(recent_weights, 0.5, 1.5)
 
-    # (선택) 클래스 데이터 수 기반 희소성 보정
     if class_counts and isinstance(class_counts, dict):
         counts = np.array([float(class_counts.get(i, 0.0)) for i in range(num_classes)], dtype=np.float64)
         counts = np.where(np.isfinite(counts), counts, 0.0)
@@ -614,12 +595,11 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
         return np.ones_like(p) / max(1, len(p))
     return (p_adj / s).astype(np.float64)
 
-# ──────────────────────────────────────────────────────────────
-# 학습 직후 단일 페어 트리거 — train.py에서 직접 호출
-# ──────────────────────────────────────────────────────────────
+# ── 학습 직후 단일 페어 트리거 ────────────────────────────────
 def run_after_training(symbol: str, strategy: str) -> bool:
-    """train.py가 학습 완료 후 즉시 호출 (게이트/락/재시도 포함)"""
     try:
+        ensure_prediction_log_exists(PREDICTION_LOG_PATH)
+    except TypeError:
         ensure_prediction_log_exists()
     except Exception:
         pass
@@ -646,6 +626,7 @@ def run_after_training(symbol: str, strategy: str) -> bool:
         ok = _invoke_predict(_predict, symbol, strategy, "train_end", max(10.0, PREDICT_TIMEOUT_SEC))
         if ok:
             log_audit(symbol, strategy, "학습후트리거", "즉시성공")
+            _sync_ganwu_log()
             return True
         else:
             first_err = "timeout/failed"
@@ -654,13 +635,14 @@ def run_after_training(symbol: str, strategy: str) -> bool:
 
     try:
         ok2 = _retry_after_training(_predict, symbol, strategy, first_err=first_err)
+        if ok2:
+            _sync_ganwu_log()
         return bool(ok2)
     except Exception as e:
         log_audit(symbol, strategy, "학습후트리거에러", f"{e}")
         return False
 
 
-# (선택) 직접 실행 테스트용
 if __name__ == "__main__":
     try:
         run()
