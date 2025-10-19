@@ -4,8 +4,8 @@ import json, os
 CONFIG_PATH = "/persistent/config.json"
 
 _default_config = {
-    "NUM_CLASSES": 10,          # 동적 힌트(최소 권고치) — 실제 n은 데이터가 결정
-    "MAX_CLASSES": 12,          # 상한
+    "NUM_CLASSES": 10,
+    "MAX_CLASSES": 12,
     "FEATURE_INPUT_SIZE": 24,
     "FAIL_AUGMENT_RATIO": 3,
     "MIN_FEATURES": 5,
@@ -17,7 +17,12 @@ _default_config = {
 
     "SSL_CACHE_DIR": "/persistent/ssl_models",
 
-    # DATA: 거래소 병합/정합
+    # === 관우·예측 경로 단일화 ===
+    # ENV로 덮어쓰기 가능: PREDICTION_LOG_PATH, GANWU_PATH, PREDICT_OUTPUT_DIR, GUANWU_INPUT_DIR
+    "PREDICTION_LOG_PATH": "/data/guanwu/incoming/prediction_log.csv",
+    "GANWU_PATH": "/data/guanwu/incoming",
+
+    # DATA
     "DATA": {
         "merge_enabled": True,
         "sources": ["bybit", "binance"],
@@ -27,20 +32,13 @@ _default_config = {
         "dedup": {"enabled": True, "keep": "last"}
     },
 
-    # 클래스 일관성 정책 (강제 고정 n_override는 기본 None → 동적)
     "CLASS_ENFORCE": {
         "same_across_groups": True,
         "same_across_symbols": True,
         "n_override": None
     },
 
-    # 전략별 기본 그룹 크기(모델 당 클래스 수) 권장값
-    # ENV로 덮어쓰기 가능: GROUP_SIZE_SHORT / GROUP_SIZE_MID / GROUP_SIZE_LONG
-    "GROUP_SIZE": {
-        "단기": 3,
-        "중기": 2,
-        "장기": 2
-    },
+    "GROUP_SIZE": {"단기": 3, "중기": 2, "장기": 2},
 
     "REGIME": {
         "enabled": False,
@@ -80,34 +78,21 @@ _default_config = {
 
     "QUALITY": {"VAL_F1_MIN": 0.20, "VAL_ACC_MIN": 0.20},
 
-    # 클래스 경계/병합 파라미터
     "CLASS_BIN": {
-        "method": "fixed_step",     # "quantile" | "fixed_step" | "linear"
+        "method": "fixed_step",
         "strict": True,
         "zero_band_eps": 0.0020,
         "min_width": 0.0010,
         "max_width": 0.03,
         "step_pct": 0.0030,
-        "merge_sparse": {
-            "enabled": True,
-            "min_ratio": 0.01,
-            "min_count_floor": 20,
-            "prefer": "denser"
-        },
-        # ▼ 비용선/패스/실효기대수익
+        "merge_sparse": {"enabled": True, "min_ratio": 0.01, "min_count_floor": 20, "prefer": "denser"},
         "no_trade_floor_abs": 0.01,
         "add_abstain_class": True,
         "abstain_expand_eps": 0.0005,
         "expected_return_mode": "truncated_mid"
     },
 
-    # 교차검증/가드
-    "CV_CONFIG": {
-        "folds": 5,
-        "min_per_class": 3,
-        "fallback_reduce_folds": True,
-        "fallback_stratified": True
-    },
+    "CV_CONFIG": {"folds": 5, "min_per_class": 3, "fallback_reduce_folds": True, "fallback_stratified": True},
 
     "TRAIN": {
         "early_stop": {"patience": 4, "min_delta": 0.0005, "warmup_epochs": 2},
@@ -151,19 +136,10 @@ _default_config = {
         "zscore_window": 96
     },
 
-    # === Guards & meta thresholds (예측 파이프라인 공통 사용) ===
-    "GUARD": {
-        "PROFIT_MIN": 0.01,
-        "ABSTAIN_MIN_META": 0.25,
-        "REALITY_GUARD_VOL_MULT": 5.0,
-        "EXIT_GUARD_MIN_ER": 0.01,
-        "CALIB_NAN_MODE": "abstain"
-    },
-
-    # === IO 경로(관우·예측 단일 진실원) ===
+    # IO 경로(관우·예측 단일 진실원)
     "IO": {
-        "predict_out": "/data/guanwu/incoming",  # 예측 저장
-        "guanwu_in":   "/data/guanwu/incoming"   # 관우 감시
+        "predict_out": "/data/guanwu/incoming",
+        "guanwu_in":   "/data/guanwu/incoming"
     },
 }
 
@@ -173,7 +149,6 @@ STRATEGY_CONFIG = {
     "장기": {"interval": "D",   "limit": 1200, "binance_interval": "1d"},
 }
 
-# 더 보수적인 수익률 상/하한(클래스 폭 비정상 확대 방지)
 _STRATEGY_RETURN_CAP_POS_MAX = {"단기": 0.06, "중기": 0.20, "장기": 0.50}
 _STRATEGY_RETURN_CAP_NEG_MIN = {"단기": -0.06, "중기": -0.20, "장기": -0.50}
 
@@ -253,10 +228,9 @@ def get_SYMBOL_GROUPS():
     group_size = _config.get("SYMBOL_GROUP_SIZE", _default_config["SYMBOL_GROUP_SIZE"])
     return [symbols[i:i+group_size] for i in range(0, len(symbols), group_size)]
 
-# === 전략별 그룹 크기(모델 당 클래스 수) ===
+# === 전략별 그룹 크기 ===
 def _group_size_env_or_default(strategy: str) -> int:
     m = dict(_config.get("GROUP_SIZE", {}))
-    # ENV 오버라이드
     gs_env = {
         "단기": os.getenv("GROUP_SIZE_SHORT"),
         "중기": os.getenv("GROUP_SIZE_MID"),
@@ -268,7 +242,6 @@ def _group_size_env_or_default(strategy: str) -> int:
     return max(2, int(m.get(strategy, 5)))
 
 def get_class_groups(num_classes=None, group_size=None):
-    """전략별 권장 그룹크기를 기본값으로 사용."""
     if num_classes is None or num_classes < 2: num_classes = get_NUM_CLASSES()
     if group_size is None: group_size = _group_size_env_or_default(os.getenv("CURRENT_STRATEGY", "중기"))
     if group_size < 2: group_size = 2
@@ -292,10 +265,17 @@ def get_PATTERN():  return _config.get("PATTERN", _default_config["PATTERN"])
 def get_BLEND():    return _config.get("BLEND", _default_config["BLEND"])
 def get_PUBLISH():  return _config.get("PUBLISH", _default_config["PUBLISH"])
 
-# IO 경로 getter
-def get_IO():                 return _config.get("IO", _default_config["IO"])
-def get_PREDICT_OUT_DIR():    return os.getenv("PREDICT_OUTPUT_DIR", get_IO().get("predict_out"))
-def get_GUANWU_IN_DIR():      return os.getenv("GUANWU_INPUT_DIR",   get_IO().get("guanwu_in"))
+# IO/경로 getter
+def get_IO():              return _config.get("IO", _default_config["IO"])
+def get_PREDICT_OUT_DIR(): return os.getenv("PREDICT_OUTPUT_DIR", get_IO().get("predict_out"))
+def get_GUANWU_IN_DIR():   return os.getenv("GUANWU_INPUT_DIR",   get_IO().get("guanwu_in"))
+
+# 관우·예측 로그 경로 getter(명시적)
+def get_PREDICTION_LOG_PATH():
+    return os.getenv("PREDICTION_LOG_PATH", _config.get("PREDICTION_LOG_PATH", _default_config["PREDICTION_LOG_PATH"]))
+
+def get_GANWU_PATH():
+    return os.getenv("GANWU_PATH", _config.get("GANWU_PATH", _default_config["GANWU_PATH"]))
 
 def _env_bool(v): return str(v).strip().lower() not in {"0","false","no","off","none",""}
 
@@ -365,7 +345,6 @@ def get_GUARD() -> dict:
         v2 = str(v).strip().lower()
         if v2 in {"abstain","drop"}:
             base["CALIB_NAN_MODE"] = v2
-    # PREDICT_MIN_RETURN 동기화
     try:
         pmr = float(os.getenv("PREDICT_MIN_RETURN", str(base.get("PROFIT_MIN", 0.01))))
         if "GUARD_PROFIT_MIN" not in os.environ:
@@ -374,7 +353,6 @@ def get_GUARD() -> dict:
         pass
     return base
 
-# 헬퍼들
 def _round2(x: float) -> float: return round(float(x), _ROUNDS_DECIMALS)
 
 def _cap_by_strategy(x: float, strategy: str) -> float:
@@ -550,7 +528,6 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
     return rs
 
 def _split_wide_bins_by_quantiles(ranges, rets_signed, max_width):
-    """너무 넓은 구간을 데이터 분위수로 자동 세분화 (상한: CLASS_BIN.max_width)."""
     import numpy as np
     if not ranges or rets_signed is None or rets_signed.size == 0: return ranges
     rs = []
@@ -571,9 +548,7 @@ def _split_wide_bins_by_quantiles(ranges, rets_signed, max_width):
     if get_CLASS_BIN().get("strict", True): rs = _strictify(rs)
     return rs
 
-# ===== 비용선 하드컷 & 패스 구간 =====
 def _insert_cut(ranges, cut_val):
-    """ranges(정렬된 (lo,hi))를 cut_val에서 분할. 필요할 때만 자름."""
     out = []
     for (lo, hi) in ranges:
         lo_f, hi_f = float(lo), float(hi)
@@ -585,22 +560,15 @@ def _insert_cut(ranges, cut_val):
     return _fix_monotonic(out)
 
 def _apply_trade_floor_cuts(ranges):
-    """
-    1) ±no_trade_floor_abs에서 하드컷(클래스가 비용선을 넘나들지 않게)
-    2) add_abstain_class=True면 [-floor, +floor] 하나의 '패스' 버킷으로 통합
-    """
     conf = get_CLASS_BIN()
     floor = float(conf.get("no_trade_floor_abs", 0.01))
     expand = float(conf.get("abstain_expand_eps", 0.0005))
     add_abstain = bool(conf.get("add_abstain_class", True))
     if not ranges or floor <= 0:
         return ranges
-
     rs = list(ranges)
     rs = _insert_cut(rs, -floor)
     rs = _insert_cut(rs, +floor)
-
-    # 중앙 패스 버킷 구성(여유폭 포함)
     floor_lo = _round2(-floor - expand)
     floor_hi = _round2(+floor + expand)
     new_rs, merged_center = [], False
@@ -614,7 +582,6 @@ def _apply_trade_floor_cuts(ranges):
                 new_rs[-1] = (min(prev_lo, lo), max(prev_hi, hi))
         else:
             new_rs.append((lo, hi))
-
     new_rs = _fix_monotonic(new_rs)
     new_rs = _ensure_zero_band(new_rs)
     if get_CLASS_BIN().get("strict", True):
@@ -633,35 +600,22 @@ def get_class_return_range(class_id: int, symbol: str, strategy: str):
     return ranges[class_id]
 
 def class_to_expected_return(class_id: int, symbol: str, strategy: str):
-    """
-    expected_return_mode == "truncated_mid":
-      - 클래스 구간을 no-trade 영역(±floor) 기준으로 절단한 뒤의 중앙값 사용
-      - 완전히 no-trade 내부면 0.0
-    """
     r_min, r_max = get_class_return_range(class_id, symbol, strategy)
     conf = get_CLASS_BIN()
     mode = str(conf.get("expected_return_mode", "truncated_mid")).lower()
     if mode == "mid":
         val = (r_min + r_max) / 2.0
         return _cap_by_strategy(val, strategy)
-
     floor = float(conf.get("no_trade_floor_abs", 0.01))
     lo, hi = float(r_min), float(r_max)
-
-    # 클래스가 완전히 no-trade 안이면 0
-    if -floor <= lo and hi <= floor:
-        return 0.0
-
-    # no-trade 부분 절단
+    if -floor <= lo and hi <= floor: return 0.0
     if lo < -floor < hi:
         if abs(hi - (-floor)) >= abs((-floor) - lo): lo = -floor
         else: hi = -floor
     if lo < floor < hi:
         if abs(hi - floor) >= abs(floor - lo): lo = floor
         else: hi = floor
-
-    if hi <= lo:
-        return 0.0
+    if hi <= lo: return 0.0
     val = (lo + hi) / 2.0
     return _cap_by_strategy(val, strategy)
 
@@ -674,7 +628,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     method_req = (os.getenv("CLASS_BIN_METHOD") or method or BIN_CONF.get("method") or "fixed_step").lower()
     max_width = float(BIN_CONF.get("max_width", 0.03))
 
-    # n_override: ENV가 지정된 경우에만 사용(기본 동적)
     ce = get_CLASS_ENFORCE()
     n_override = ce.get("n_override", None)
     try:
@@ -682,7 +635,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     except Exception:
         n_override = None
 
-    # 그룹 크기 기본값 보정
     if group_size is None and strategy is not None:
         group_size = _group_size_env_or_default(strategy)
     if group_size is None: group_size = 5
@@ -701,7 +653,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         if reason: _log(f"[⚠️ 균등 분할 클래스 사용] 사유: {reason}")
         ranges = _fix_monotonic(ranges); ranges = _ensure_zero_band(ranges)
         if BIN_CONF.get("strict", True): ranges = _strictify(ranges)
-        # 비용선 하드컷
         ranges = _apply_trade_floor_cuts(ranges)
         if len(ranges) > MAX_CLASSES: ranges = _merge_smallest_adjacent(ranges, MAX_CLASSES)
         return ranges
@@ -731,10 +682,8 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         if len(fixed) > MAX_CLASSES: fixed = _merge_smallest_adjacent(fixed, MAX_CLASSES)
         if not fixed or len(fixed) < 2:
             return compute_equal_ranges(get_NUM_CLASSES(), reason="fixed_step 최종 경계 부족")
-        # 넓은 구간 자동 분할
         if rets_for_merge is not None and rets_for_merge.size > 0 and max_width > 0:
             fixed = _split_wide_bins_by_quantiles(fixed, rets_for_merge, max_width)
-        # 비용선 하드컷
         fixed = _apply_trade_floor_cuts(fixed)
         return fixed
 
@@ -752,7 +701,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
 
             n_cls = _choose_n_classes(rets_signed, max_classes=int(_config.get("MAX_CLASSES", 12)),
                                       hint_min=int(_config.get("NUM_CLASSES", 10)))
-            # ENV로 지정한 경우에만 강제(기본 동적)
             if isinstance(n_override, int) and n_override >= 2:
                 n_cls = n_override
 
@@ -771,23 +719,14 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
 
             fixed = _fix_monotonic(cooked); fixed = _ensure_zero_band(fixed)
             if BIN_CONF.get("strict", True): fixed = _strictify(fixed)
-
-            # 넓은 구간 자동 분할(최대 폭 가드)
             if max_width > 0:
                 fixed = _split_wide_bins_by_quantiles(fixed, rets_signed, max_width)
-
-            # 희귀 구간 병합
             fixed = _merge_sparse_bins_by_hist(fixed, rets_signed, int(_config.get("MAX_CLASSES", 12)), BIN_CONF)
-
             if len(fixed) > int(_config.get("MAX_CLASSES", 12)):
                 fixed = _merge_smallest_adjacent(fixed, int(_config.get("MAX_CLASSES", 12)))
-
             if not fixed or len(fixed) < 2:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="최종 경계 부족(가드)")
-
-            # 비용선 하드컷 & 패스 구간 반영
             fixed = _apply_trade_floor_cuts(fixed)
-
             return fixed
         except Exception as e:
             return compute_equal_ranges(get_NUM_CLASSES(), reason=f"예외 발생: {e}")
@@ -810,7 +749,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     if symbol is not None and strategy is not None:
         _ranges_cache[(symbol, strategy)] = all_ranges
 
-    # 디버그 프린트
     try:
         if symbol is not None and strategy is not None and not _quiet():
             import numpy as np
@@ -844,8 +782,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
 
     if group_id is None:
         return all_ranges
-
-    # 그룹 슬라이스: 전략별 권장 그룹크기 사용
     start = int(group_id) * int(group_size)
     end   = start + int(group_size)
     if start >= len(all_ranges): return []
@@ -877,14 +813,12 @@ def get_PREDICT_MIN_RETURN(): return PREDICT_MIN_RETURN
 def get_DISPLAY_MIN_RETURN(): return DISPLAY_MIN_RETURN
 def get_SSL_CACHE_DIR():      return os.getenv("SSL_CACHE_DIR", _config.get("SSL_CACHE_DIR", _default_config["SSL_CACHE_DIR"]))
 
-# ENV override 노출
 _DFLT_STEP = str(_config.get("CLASS_BIN", {}).get("step_pct", 0.0030))
 DYN_CLASS_STEP = float(os.getenv("CLASS_BIN_STEP", os.getenv("DYN_CLASS_STEP", _DFLT_STEP)))
 BOUNDARY_BAND = float(os.getenv("BOUNDARY_BAND", "0.0020"))
 CV_FOLDS   = int(os.getenv("CV_FOLDS", "5"))
 CV_GATE_F1 = float(os.getenv("CV_GATE_F1", "0.50"))
 
-# PUBLISH 런타임 오버라이드
 def _publish_from_env(base: dict) -> dict:
     d = dict(base or {})
     def _b(k, env, cast):
@@ -956,7 +890,6 @@ def compute_eval_due_at(now_utc, strategy: str):
     from datetime import timedelta
     return now_utc + timedelta(hours=strategy_horizon_hours(strategy))
 
-# 전역 캐시
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 NUM_CLASSES        = get_NUM_CLASSES()
 FAIL_AUGMENT_RATIO = get_FAIL_AUGMENT_RATIO()
@@ -985,4 +918,5 @@ __all__ = [
     "get_DATA", "get_DATA_RUNTIME", "get_CLASS_ENFORCE", "get_CV_CONFIG",
     "get_ONCHAIN", "get_GUARD",
     "get_IO", "get_PREDICT_OUT_DIR", "get_GUANWU_IN_DIR",
-        ]
+    "get_PREDICTION_LOG_PATH", "get_GANWU_PATH",
+            ]
