@@ -18,9 +18,10 @@ _default_config = {
     "SSL_CACHE_DIR": "/persistent/ssl_models",
 
     # === 관우·예측 경로 단일화 ===
-    # ENV로 덮어쓰기 가능: PREDICTION_LOG_PATH, GANWU_PATH, PREDICT_OUTPUT_DIR, GUANWU_INPUT_DIR
+    # ENV로 덮어쓰기 가능: PREDICTION_LOG_PATH, GANWU_PATH, PREDICT_OUTPUT_DIR, GUANWU_INPUT_DIR, TRAIN_LOG_PATH
     "PREDICTION_LOG_PATH": "/data/guanwu/incoming/prediction_log.csv",
     "GANWU_PATH": "/data/guanwu/incoming",
+    "TRAIN_LOG_PATH": "/data/guanwu/incoming/train_log.csv",
 
     # DATA
     "DATA": {
@@ -285,6 +286,9 @@ def get_PREDICTION_LOG_PATH():
 
 def get_GANWU_PATH():
     return os.getenv("GANWU_PATH", _config.get("GANWU_PATH", _default_config["GANWU_PATH"]))
+
+def get_TRAIN_LOG_PATH():
+    return os.getenv("TRAIN_LOG_PATH", _config.get("TRAIN_LOG_PATH", _default_config["TRAIN_LOG_PATH"]))
 
 def _env_bool(v): return str(v).strip().lower() not in {"0","false","no","off","none",""}
 
@@ -925,5 +929,5 @@ __all__ = [
     "get_DATA", "get_DATA_RUNTIME", "get_CLASS_ENFORCE", "get_CV_CONFIG",
     "get_ONCHAIN", "get_GUARD",
     "get_IO", "get_PREDICT_OUT_DIR", "get_GUANWU_IN_DIR",
-    "get_PREDICTION_LOG_PATH", "get_GANWU_PATH",
-            ]
+    "get_PREDICTION_LOG_PATH", "get_GANWU_PATH", "get_TRAIN_LOG_PATH",
+                                           ]
