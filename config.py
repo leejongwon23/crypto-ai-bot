@@ -136,6 +136,15 @@ _default_config = {
         "zscore_window": 96
     },
 
+    # 실행 가드 기본값(ENV로 덮어쓰기 가능)
+    "GUARD": {
+        "PROFIT_MIN": 0.01,
+        "ABSTAIN_MIN_META": 0.0,
+        "REALITY_GUARD_VOL_MULT": 1.0,
+        "EXIT_GUARD_MIN_ER": 0.0,
+        "CALIB_NAN_MODE": "abstain"
+    },
+
     # IO 경로(관우·예측 단일 진실원)
     "IO": {
         "predict_out": "/data/guanwu/incoming",
@@ -206,7 +215,7 @@ try:
     _log("[config] ENABLE_BINANCE=1 (fallback ready)" if _ENABLE_BINANCE == 1
          else "[config] ENABLE_BINANCE=0 (fallback disabled)")
 except Exception:
-    pass
+    _ENABLE_BINANCE = 1
 
 # Getter/Setter
 def set_NUM_CLASSES(n):
@@ -452,7 +461,6 @@ def _choose_n_classes(rets_signed, max_classes, hint_min=4):
     else:
         h = 2.0 * iqr * (N ** (-1.0/3.0))
         est = int(round(data_range / max(h, 1e-12)))
-    base_hint = int(_config.get("NUM_CLASSES", 10))
     lower = max(4, hint_min)
     n_cls = max(lower, min(est, max_classes))
     return int(n_cls)
@@ -493,7 +501,6 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
         return ee
 
     def _counts(rr):
-        import numpy as np
         edges = _rebuild_edges(rr)
         hist, _ = np.histogram(rets_signed, bins=np.array(edges, dtype=float))
         return hist
