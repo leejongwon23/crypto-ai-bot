@@ -1406,3 +1406,21 @@ __all__ = [
     # 기타
     "get_price_source","enough_for_training","not_enough_for_predict","_self_check",
              ]
+# === 초기화 문제 해결용 추가 코드 ===
+
+def clear_all_caches():
+    """캐시를 전부 비우는 함수 (초기화용)"""
+    try:
+        from cache import CacheManager
+        CacheManager.clear()
+    except Exception:
+        pass
+
+# 다른 파일들이 _feature_cache 라는 이름을 찾을 때 에러 안 나게 호환용 클래스
+class _CompatFeatureCache:
+    @staticmethod
+    def clear():
+        clear_all_caches()
+
+# 예전 코드에서 불러도 작동하도록 이 이름 등록
+_feature_cache = _CompatFeatureCache
