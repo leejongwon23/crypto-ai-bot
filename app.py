@@ -18,6 +18,7 @@ from train import train_symbol_group_loop  # compatibility
 import maintenance_fix_meta
 # 🔧 확장 스키마/보장 유틸: 헤더 상수까지 직접 사용
 from logger import ensure_prediction_log_exists, ensure_train_log_exists, PREDICTION_HEADERS, TRAIN_HEADERS
+from config import get_TRAIN_LOG_PATH
 
 # integrity guard optional
 try:
@@ -812,10 +813,17 @@ def train_now():
 @app.route("/train-log")
 def train_log():
     try:
-        if not os.path.exists(LOG_FILE): return "학습 로그 없음"
-        df = pd.read_csv(LOG_FILE, encoding="utf-8-sig", on_bad_lines="skip")
-        if df.empty or df.shape[1] == 0: return "학습 기록 없음"
-        return "<pre>" + df.to_csv(index=False) + "</pre>"
+        log_path = get_TRAIN_LOG_PATH()
+        if not os.path.exists(log_path):
+            return f"학습 로그 없음<br><small>경로: <code>{log_path}</code></small>"
+        df = pd.read_csv(log_path, encoding="utf-8-sig", on_bad_lines="skip")
+        if df.empty or df.shape[1] == 0:
+            return f"학습 기록 없음<br><small>경로: <code>{log_path}</code></small>"
+        html = df.tail(200).to_html(index=False, border=1, justify='center')
+        return (
+            f"<b>📘 학습 로그 (최근 200행)</b><br>"
+            f"<small>경로: <code>{log_path}</code></small><br><br>{html}"
+        )
     except Exception as e:
         return f"읽기 오류: {e}", 500
 
