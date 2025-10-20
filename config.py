@@ -1,7 +1,53 @@
 # config.py — Dynamic classing w/ safety rails: min/max width, zero band, sparse merge, CV guards
-import json, os
+import json, os, errno
 
-CONFIG_PATH = "/persistent/config.json"
+# ===== robust config path =====
+_DEF_CONFIG_PATH = "/persistent/config.json"
+_ENV_CONFIG_PATH = os.getenv("CONFIG_PATH", _DEF_CONFIG_PATH)
+
+def _writable_dir(p):
+    try:
+        d = os.path.dirname(p) or "."
+        os.makedirs(d, exist_ok=True)
+        test = os.path.join(d, ".cfg_write_test")
+        with open(test, "w") as f: f.write("ok")
+        try: f.flush(); os.fsync(f.fileno())
+        except Exception: pass
+        os.remove(test)
+        return True
+    except Exception:
+        return False
+
+# /persistent 가 불가하면 /tmp 로 폴백
+CONFIG_PATH = _ENV_CONFIG_PATH if _writable_dir(_ENV_CONFIG_PATH) else "/tmp/config.json"
+
+# ===== in-memory fallbacks =====
+_CONFIG_READONLY = False  # 디스크 기록 불가 시 True
+def is_config_readonly(): return _CONFIG_READONLY
+
+def _safe_write_json(path: str, obj: dict) -> bool:
+    global _CONFIG_READONLY
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+            try: f.flush(); os.fsync(f.fileno())
+            except Exception: pass
+        os.replace(tmp, path)
+        try:
+            dfd = os.open(os.path.dirname(path), os.O_RDONLY)
+            try: os.fsync(dfd)
+            finally: os.close(dfd)
+        except Exception:
+            pass
+        return True
+    except OSError as e:
+        if e.errno in (errno.ENOSPC, errno.EDQUOT):  # 공간 부족 또는 쿼터 초과
+            _CONFIG_READONLY = True
+        return False
+    except Exception:
+        return False
 
 _default_config = {
     "NUM_CLASSES": 10,
@@ -18,7 +64,6 @@ _default_config = {
     "SSL_CACHE_DIR": "/persistent/ssl_models",
 
     # === 관우·예측 경로 단일화 ===
-    # ENV로 덮어쓰기 가능: PREDICTION_LOG_PATH, GANWU_PATH, PREDICT_OUTPUT_DIR, GUANWU_INPUT_DIR, TRAIN_LOG_PATH
     "PREDICTION_LOG_PATH": "/data/guanwu/incoming/prediction_log.csv",
     "GANWU_PATH": "/data/guanwu/incoming",
     "TRAIN_LOG_PATH": "/data/guanwu/incoming/train_log.csv",
@@ -194,21 +239,19 @@ if os.path.exists(CONFIG_PATH):
     except Exception as e:
         _log(f"[⚠️ config.py] config.json 로드 실패 → 기본값 사용: {e}")
 else:
-    try:
-        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(_default_config, f, ensure_ascii=False, indent=2)
+    # 기록 실패해도 앱 계속 실행
+    if _safe_write_json(CONFIG_PATH, _default_config):
         _log("[ℹ️ config.py] 기본 config.json 생성")
-    except Exception as e:
-        _log(f"[⚠️ config.py] 기본 config.json 생성 실패: {e}")
+    else:
+        _log("[⚠️ config.py] 디스크 기록 불가 → 메모리 기본설정으로 계속 실행")
+        _config = _default_config.copy()
 
 def save_config():
-    try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(_config, f, ensure_ascii=False, indent=2)
-        _log("[✅ config.py] config.json 저장 완료")
-    except Exception as e:
-        _log(f"[⚠️ config.py] config.json 저장 실패 → {e}")
+    if _CONFIG_READONLY:
+        _log("[⚠️ config.py] read-only 모드 → 저장 생략")
+        return
+    if not _safe_write_json(CONFIG_PATH, _config):
+        _log("[⚠️ config.py] config.json 저장 실패 → 메모리 유지, 예외 미전파")
 
 # Binance 폴백 상태 로그
 try:
@@ -289,6 +332,10 @@ def get_GANWU_PATH():
 
 def get_TRAIN_LOG_PATH():
     return os.getenv("TRAIN_LOG_PATH", _config.get("TRAIN_LOG_PATH", _default_config["TRAIN_LOG_PATH"]))
+
+# 디스크 캐시 강제 off 노출(환경에서 제어)
+def is_disk_cache_off() -> bool:
+    return str(os.getenv("DISK_CACHE_OFF", "0")).strip().lower() in {"1","true","yes","on"}
 
 def _env_bool(v): return str(v).strip().lower() not in {"0","false","no","off","none",""}
 
@@ -930,4 +977,5 @@ __all__ = [
     "get_ONCHAIN", "get_GUARD",
     "get_IO", "get_PREDICT_OUT_DIR", "get_GUANWU_IN_DIR",
     "get_PREDICTION_LOG_PATH", "get_GANWU_PATH", "get_TRAIN_LOG_PATH",
-                                           ]
+    "is_config_readonly", "is_disk_cache_off",
+        ]
