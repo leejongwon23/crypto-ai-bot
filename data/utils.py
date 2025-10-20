@@ -126,27 +126,39 @@ def clear_price_cache(symbol: Optional[str] = None, strategy: Optional[str] = No
 try:
     from features.market import get_market_context_df as _get_market_ctx
 except Exception:
-    def _get_market_ctx(ts: pd.Series, strategy: str, symbol: Optional[str] = None) -> pd.DataFrame:
-        return pd.DataFrame(columns=["timestamp"])
+    try:
+        from market import get_market_context_df as _get_market_ctx
+    except Exception:
+        def _get_market_ctx(ts: pd.Series, strategy: str, symbol: Optional[str] = None) -> pd.DataFrame:
+            return pd.DataFrame(columns=["timestamp"])
 
 try:
     from features.correlations import get_rolling_corr_df as _get_corr_ctx
 except Exception:
-    def _get_corr_ctx(symbol: str, ts: pd.Series, strategy: str) -> pd.DataFrame:
-        return pd.DataFrame(columns=["timestamp"])
+    try:
+        from correlations import get_rolling_corr_df as _get_corr_ctx
+    except Exception:
+        def _get_corr_ctx(symbol: str, ts: pd.Series, strategy: str) -> pd.DataFrame:
+            return pd.DataFrame(columns=["timestamp"])
 
 try:
     from features.regime import get_regime_tags_df as _get_ext_regime_ctx
 except Exception:
-    def _get_ext_regime_ctx(ts: pd.Series, strategy: str) -> pd.DataFrame:
-        return pd.DataFrame(columns=["timestamp"])
+    try:
+        from regime import get_regime_tags_df as _get_ext_regime_ctx
+    except Exception:
+        def _get_ext_regime_ctx(ts: pd.Series, strategy: str) -> pd.DataFrame:
+            return pd.DataFrame(columns=["timestamp"])
 
 # ✅ 추가: 온체인 컨텍스트 (없으면 안전 무시)
 try:
     from features.onchain import get_onchain_context_df as _get_onchain_ctx
 except Exception:
-    def _get_onchain_ctx(ts: pd.Series, strategy: str, symbol: Optional[str] = None) -> pd.DataFrame:
-        return pd.DataFrame(columns=["timestamp"])
+    try:
+        from onchain import get_onchain_context_df as _get_onchain_ctx
+    except Exception:
+        def _get_onchain_ctx(ts: pd.Series, strategy: str, symbol: Optional[str] = None) -> pd.DataFrame:
+            return pd.DataFrame(columns=["timestamp"])
 
 def _guess_tolerance_by_strategy(strategy: str) -> pd.Timedelta:
     iv = {"단기": pd.Timedelta(hours=2), "중기": pd.Timedelta(hours=12), "장기": pd.Timedelta(hours=12)}
