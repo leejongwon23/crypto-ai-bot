@@ -5,6 +5,7 @@ from collections import defaultdict, deque
 import threading, time
 from typing import Optional, Any, Dict
 from sklearn.metrics import classification_report
+from config import get_TRAIN_LOG_PATH, get_PREDICTION_LOG_PATH  # ⬅ 추가
 
 # -------------------------
 # 로그 레벨/샘플링 유틸
@@ -53,10 +54,10 @@ def _bucketize(v: float, step: float) -> tuple:
 # -------------------------
 DIR = "/persistent"
 LOG_DIR = os.path.join(DIR, "logs")
-PREDICTION_LOG = f"{DIR}/prediction_log.csv"
+PREDICTION_LOG = get_PREDICTION_LOG_PATH()  # ⬅ 변경
 WRONG = f"{DIR}/wrong_predictions.csv"
 EVAL_RESULT = f"{LOG_DIR}/evaluation_result.csv"
-TRAIN_LOG = f"{LOG_DIR}/train_log.csv"
+TRAIN_LOG = get_TRAIN_LOG_PATH()            # ⬅ 변경
 AUDIT_LOG = f"{LOG_DIR}/evaluation_audit.csv"
 
 def _fs_has_space(path: str, min_bytes: int = 1_048_576) -> bool:
@@ -438,7 +439,7 @@ def update_model_success(s, t, m, success):
             ON CONFLICT(symbol, strategy, model) DO UPDATE SET
                 success = success + excluded.success,
                 fail = fail  + excluded.fail
-        """, params=(s, t or "알수없음", m, int(success), int(not success)), retries=7, commit=True)
+        """, params=(s, t or "알수없음", m, int(success), int(!success)), retries=7, commit=True)
         print(f"[✅ update_model_success] {s}-{t}-{m} 기록 ({'성공' if success else '실패'})")
     except Exception as e:
         print(f"[오류] update_model_success 실패 → {e}")
