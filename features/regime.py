@@ -4,6 +4,15 @@ import numpy as np
 import pandas as pd
 import os
 
+# 유틸 임포트 폴백
+try:
+    from data.utils import get_kline_by_strategy as _get_k
+except Exception:
+    try:
+        from utils import get_kline_by_strategy as _get_k
+    except Exception:
+        _get_k = None  # 런타임 폴백
+
 # 프로젝트 설정(백분위/윈도우) 사용
 try:
     from config import get_REGIME
@@ -18,12 +27,9 @@ except Exception:
         }
 
 def _parse_ts(ts):
-    ts = pd.to_datetime(ts, errors="coerce")
+    ts = pd.to_datetime(ts, errors="coerce", utc=True)
     try:
-        if getattr(ts.dt, "tz", None) is None:
-            ts = ts.dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
-        else:
-            ts = ts.dt.tz_convert("Asia/Seoul")
+        ts = ts.tz_convert("Asia/Seoul")
     except Exception:
         pass
     return ts
@@ -41,7 +47,7 @@ def _ema(x: pd.Series, span: int):
     return x.ewm(span=span, adjust=False).mean()
 
 def _safe_close(df):
-    if df is None or df.empty or "close" not in df or "timestamp" not in df:
+    if df is None or df.empty or ("close" not in df.columns) or ("timestamp" not in df.columns):
         return pd.Series([], dtype=float)
     s = pd.to_numeric(df["close"], errors="coerce").astype(float)
     s.index = _parse_ts(df["timestamp"])
@@ -63,9 +69,11 @@ def get_regime_tags_df(ts: pd.Series, strategy: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["timestamp","vol_regime","trend_regime","regime_tag"])
 
     # 대표시장: BTCUSDT 기준으로 레짐 산출
+    if _get_k is None:
+        return pd.DataFrame({"timestamp": idx, "vol_regime": 1, "trend_regime": 1, "regime_tag": 4})
+
     try:
-        from data.utils import get_kline_by_strategy as _k
-        df_btc = _k("BTCUSDT", strategy)
+        df_btc = _get_k("BTCUSDT", strategy)
     except Exception:
         df_btc = pd.DataFrame(columns=["timestamp","open","high","low","close","volume"])
 
@@ -73,8 +81,7 @@ def get_regime_tags_df(ts: pd.Series, strategy: str) -> pd.DataFrame:
     if close.empty:
         return pd.DataFrame({"timestamp": idx, "vol_regime": 1, "trend_regime": 1, "regime_tag": 4})
 
-    # 보조 시계열
-    # high/low 가 없다면 close 로 대체
+    # 보조 시계열: high/low 없으면 close로 대체
     try:
         high = pd.to_numeric(df_btc["high"], errors="coerce"); high.index = _parse_ts(df_btc["timestamp"])
         low  = pd.to_numeric(df_btc["low"],  errors="coerce"); low.index  = _parse_ts(df_btc["timestamp"])
@@ -91,13 +98,14 @@ def get_regime_tags_df(ts: pd.Series, strategy: str) -> pd.DataFrame:
 
     # 변동성: ATR을 백분위로 3단계
     atr = _atr(high, low, close, window=atr_win).fillna(method="ffill").fillna(0.0)
-    thr_hi = float(atr.quantile(p_hi)) if np.isfinite(atr.quantile(p_hi)) else float(atr.median())
-    thr_lo = float(atr.quantile(p_lo)) if np.isfinite(atr.quantile(p_lo)) else float(atr.median())
+    q_hi = atr.quantile(p_hi)
+    q_lo = atr.quantile(p_lo)
+    thr_hi = float(q_hi) if np.isfinite(q_hi) else float(atr.median())
+    thr_lo = float(q_lo) if np.isfinite(q_lo) else float(atr.median())
     vol_regime = np.where(atr >= thr_hi, 2, np.where(atr <= thr_lo, 0, 1)).astype(int)
 
     # 추세: EMA(trend_win) 기울기 기반 3단계
     ema = _ema(close, trend_win)
-    # 정규화된 기울기(가격 대비 변화율)
     slope = pd.Series(np.gradient(ema.values), index=ema.index) / (close.rolling(20, min_periods=5).mean() + 1e-12)
     s_hi = float(np.nanpercentile(slope, 66))
     s_lo = float(np.nanpercentile(slope, 33))
