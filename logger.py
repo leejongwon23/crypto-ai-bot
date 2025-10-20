@@ -454,7 +454,7 @@ def get_model_success_rate(s, t, m):
         success_cnt, fail_cnt = row; total = success_cnt + fail_cnt
         return (success_cnt / total) if total > 0 else 0.0
     except Exception as e:
-        print(f"[오류] get_model_success_rate 실패 → {e}"); return 0.0
+        print(f"[오류] get_model_success_rate 실패] {e}"); return 0.0
 
 # -------------------------
 # failure_db 초기화
