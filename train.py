@@ -403,8 +403,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         mask_cnt=int((labels<0).sum())
         _safe_print(f"[LABELS] total={len(labels)} masked={mask_cnt} ({mask_cnt/max(1,len(labels)):.2%}) BOUNDARY_BAND=±{BOUNDARY_BAND}")
 
-        # 특징행렬
-        features_only=feat.drop(columns=["timestamp","strategy"],errors="ignore").replace([np.inf,-np.inf], np.nan).fillna(0.0)
+        # 특징행렬: 숫자 컬럼만 사용하도록 강화
+        drop_cols = [c for c in ("timestamp","strategy","symbol") if c in feat.columns]
+        feat_num = feat.drop(columns=drop_cols, errors="ignore").select_dtypes(include=[np.number])
+        features_only = feat_num.replace([np.inf,-np.inf], np.nan).fillna(0.0)
         feat_dim = int(getattr(features_only,"shape",[0,FEATURE_INPUT_SIZE])[1]) or int(FEATURE_INPUT_SIZE)
         if len(features_only)>_MAX_ROWS_FOR_TRAIN or len(labels)>_MAX_ROWS_FOR_TRAIN:
             cut=min(_MAX_ROWS_FOR_TRAIN,len(features_only),len(labels))
@@ -691,13 +693,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 # === Feature Importance 계산·저장(디스크 여유 없으면 자동 스킵) ===
                 try:
                     if IMPORTANCE_ENABLE:
-                        # val 세트를 사용. 이름은 features_only 컬럼.
                         X_val_t = torch.tensor(val_X, dtype=torch.float32, device="cpu")
                         y_val_t = torch.tensor(val_y, dtype=torch.long, device="cpu")
                         fi = compute_feature_importance(
                             model.to("cpu"),
                             X_val=X_val_t, y_val=y_val_t,
-                            feature_names=list(features_only.columns.drop(labels=["timestamp","strategy"], errors="ignore")),
+                            feature_names=list(features_only.columns),
                             max_seconds=30
                         )
                         try:
