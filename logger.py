@@ -5,7 +5,7 @@ from collections import defaultdict, deque
 import threading, time
 from typing import Optional, Any, Dict
 from sklearn.metrics import classification_report
-from config import get_TRAIN_LOG_PATH, get_PREDICTION_LOG_PATH  # ⬅ 추가
+from config import get_TRAIN_LOG_PATH, get_PREDICTION_LOG_PATH  # 경로 단일화
 
 # -------------------------
 # 로그 레벨/샘플링 유틸
@@ -54,10 +54,10 @@ def _bucketize(v: float, step: float) -> tuple:
 # -------------------------
 DIR = "/persistent"
 LOG_DIR = os.path.join(DIR, "logs")
-PREDICTION_LOG = get_PREDICTION_LOG_PATH()  # ⬅ 변경
+PREDICTION_LOG = get_PREDICTION_LOG_PATH()
 WRONG = f"{DIR}/wrong_predictions.csv"
 EVAL_RESULT = f"{LOG_DIR}/evaluation_result.csv"
-TRAIN_LOG = get_TRAIN_LOG_PATH()            # ⬅ 변경
+TRAIN_LOG = get_TRAIN_LOG_PATH()
 AUDIT_LOG = f"{LOG_DIR}/evaluation_audit.csv"
 
 def _fs_has_space(path: str, min_bytes: int = 1_048_576) -> bool:
@@ -106,7 +106,6 @@ EXTRA_PRED_HEADERS = ["regime","meta_choice","raw_prob","calib_prob","calib_ver"
 CLASS_RANGE_HEADERS = ["class_return_min","class_return_max","class_return_text"]
 NOTE_EXTRACT_HEADERS = ["position","hint_allow_long","hint_allow_short","hint_slope","used_minret_filter","explore_used","hint_ma_fast","hint_ma_slow"]
 PREDICTION_HEADERS = BASE_PRED_HEADERS + EXTRA_PRED_HEADERS + ["feature_vector"] + CLASS_RANGE_HEADERS + NOTE_EXTRACT_HEADERS + [
-    # tail detail fields used by predict.py note
     "expected_return_mid","raw_prob_pred","calib_prob_pred","meta_choice_detail"
 ]
 
@@ -178,7 +177,6 @@ class _ConsecutiveFailAggregator:
         if not st or st["cnt"] <= 0: return
         sym, strat, gid, model = key
         msg = f"[연속실패요약/{where}] {sym}-{strat}-g{gid} {model} ×{st['cnt']} (last_reason={st['last_reason']})"
-        # 파일쓰기 불가 시 콘솔만
         if not _READONLY_FS:
             try:
                 os.makedirs(os.path.dirname(AUDIT_LOG), exist_ok=True)
@@ -398,7 +396,6 @@ def _sqlite_exec_with_retry(sql, params=(), retries=5, sleep_base=0.2, commit=Fa
             msg = str(e).lower(); last_err = e
             transient = ("database is locked" in msg) or ("disk i/o error" in msg) or ("database is busy" in msg)
             if transient:
-                # I/O 에러가 반복되면 DB 완전 비활성화
                 if "disk i/o error" in msg or "no space left" in msg:
                     print("[🛑 logger.db] disk I/O 오류 감지 → DB 기능 비활성화")
                     globals()["_DB_ENABLED"] = False
@@ -426,10 +423,10 @@ def ensure_success_db():
         """, params=(), retries=5, commit=True)
     except Exception as e:
         print(f"[오류] ensure_success_db 실패 → {e}")
-        globals()["_DB_ENABLED"] = False  # 더 이상 재시도 안 함
+        globals()["_DB_ENABLED"] = False
 
 def update_model_success(s, t, m, success):
-    if not _DB_ENABLED: 
+    if not _DB_ENABLED:
         _print_once("db_disabled_warn", "ℹ️ model_success 집계는 현재 메모리/콘솔만 기록")
         return
     try:
@@ -439,7 +436,7 @@ def update_model_success(s, t, m, success):
             ON CONFLICT(symbol, strategy, model) DO UPDATE SET
                 success = success + excluded.success,
                 fail = fail  + excluded.fail
-        """, params=(s, t or "알수없음", m, int(success), int(!success)), retries=7, commit=True)
+        """, params=(s, t or "알수없음", m, int(success), int(not success)), retries=7, commit=True)
         print(f"[✅ update_model_success] {s}-{t}-{m} 기록 ({'성공' if success else '실패'})")
     except Exception as e:
         print(f"[오류] update_model_success 실패 → {e}")
@@ -641,7 +638,6 @@ def log_prediction(
     if not _READONLY_FS:
         ensure_prediction_log_exists()
 
-    # expected_return → rate 매핑
     if rate is None:
         rate = expected_return if expected_return is not None else 0.0
 
@@ -654,7 +650,6 @@ def log_prediction(
     target_price = float(target_price or 0.0)
     model, model_name = _normalize_model_fields(model, model_name, symbol, strategy)
 
-    # note detail
     try:
         note_obj = json.loads(note) if isinstance(note, str) else {}
     except Exception:
@@ -664,7 +659,6 @@ def log_prediction(
     calib_prob_pred = note_obj.get("calib_prob_pred", "")
     meta_choice_detail = note_obj.get("meta_choice", "")
 
-    # feature_vector 직렬화
     fv_serial = ""
     try:
         if feature_vector is not None:
@@ -687,7 +681,6 @@ def log_prediction(
         expected_return_mid, raw_prob_pred, calib_prob_pred, meta_choice_detail
     ]
 
-    # 파일 쓰기 가능하면 CSV 기록, 아니면 콘솔 JSON 라인 폴백
     if _READONLY_FS or not _fs_has_space(PREDICTION_LOG, 256*1024):
         payload = dict(zip(PREDICTION_HEADERS, _align_row_to_header(row, PREDICTION_HEADERS)))
         print(f"[PREDICT][console] {json.dumps(payload, ensure_ascii=False)}")
@@ -1145,13 +1138,16 @@ def flush_gwanwoo_summary():
     관우(시각화) 로그용 summary.csv 생성.
     자동예측(group_trigger 등) 포함. 저장 불가 시 콘솔 폴백.
     """
-    base_dir = "/persistent"
+    from config import get_GANWU_PATH, get_PREDICTION_LOG_PATH
+    gw_dir = get_GANWU_PATH()                         # /data/guanwu/incoming
+    pred_csv_path = get_PREDICTION_LOG_PATH()         # /data/guanwu/incoming/prediction_log.csv
+
     paths = {
-        "pred_json": os.path.join(base_dir, "prediction_result.json"),
-        "eval_csv": os.path.join(base_dir, "logs", "evaluation_result.csv"),
-        "pred_csv": os.path.join(base_dir, "prediction_log.csv"),
+        "pred_json": os.path.join(gw_dir, "prediction_result.json"),
+        "eval_csv": os.path.join(gw_dir, "evaluation_result.csv"),
+        "pred_csv": pred_csv_path,
     }
-    out_path = os.path.join(base_dir, "logs", "gwanwoo_summary.csv")
+    out_path = os.path.join(gw_dir, "gwanwoo_summary.csv")
 
     records = []
 
