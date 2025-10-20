@@ -1004,7 +1004,8 @@ def compute_features_multi(symbol: str, df_base: pd.DataFrame) -> Dict[str, Opti
             else:
                 out[strat] = None
         except Exception:
-            out[strat] = None
+            out_strat = None
+            out[strat] = out_strat
     return out
 
 # ========================= 증강/중복 컷 =========================
@@ -1265,3 +1266,143 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
     except Exception:
         safe_failed_result(symbol_name, strategy, reason="create_dataset 예외")
         return _dummy(symbol_name)
+
+# ========================= 추론/데이터셋 헬퍼 =========================
+def _select_feature_columns(feat_df: pd.DataFrame) -> List[str]:
+    if feat_df is None or feat_df.empty: return []
+    cols = [c for c in feat_df.columns if c != "timestamp"]
+    # 시간 순으로 의미 있는 피처 우선
+    pri = ["open","high","low","close","volume","rsi","macd","macd_signal","macd_hist","ema20","ema50","ema100","ema200",
+           "bb_width","bb_percent_b","atr","stoch_k","stoch_d","williams_r","volatility","roc","vwap","trend_score"]
+    ordered = [c for c in pri if c in cols]
+    rest = [c for c in cols if c not in ordered]
+    return ordered + sorted(rest)
+
+def get_feature_window_for_inference(symbol: str, strategy: str, window: int, input_size: Optional[int] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+    df_price = get_kline_by_strategy(symbol, strategy)
+    feat = compute_features(symbol, df_price, strategy)
+    meta = {"recent_rows": int(getattr(feat, "attrs", {}).get("recent_rows", len(df_price))) if isinstance(feat, pd.DataFrame) else 0}
+    if not isinstance(feat, pd.DataFrame) or feat.empty or len(feat) < window:
+        meta["not_enough_rows"] = True
+        X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
+        return X, meta
+    cols = _select_feature_columns(feat)
+    mat = feat[cols].tail(window).to_numpy(dtype=np.float32)
+    # 패딩 또는 자르기
+    F = input_size if input_size else max(MIN_FEATURES, mat.shape[1])
+    if mat.shape[1] < F:
+        pad = np.zeros((mat.shape[0], F - mat.shape[1]), dtype=np.float32)
+        mat = np.concatenate([mat, pad], axis=1)
+    elif mat.shape[1] > F:
+        mat = mat[:, :F]
+    X = mat[np.newaxis, :, :].astype(np.float32)
+    X.setflags(write=False)
+    meta["input_size"] = F; meta["window"] = window
+    return X, meta
+
+def get_inference_batch(symbols: List[str], strategy: str, window: int, input_size: Optional[int] = None) -> Dict[str, Tuple[np.ndarray, Dict[str, Any]]]:
+    out = {}
+    for s in symbols:
+        try:
+            X, meta = get_feature_window_for_inference(s, strategy, window, input_size)
+            out[s] = (X, meta)
+        except Exception as e:
+            safe_failed_result(s, strategy, reason=f"infer_window 실패: {e}")
+            X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
+            out[s] = (X, {"error": str(e), "window": window, "input_size": X.shape[-1]})
+    return out
+
+# ========================= 디스크 I/O 유틸 =========================
+_IO_DIR = _ensure_dir(os.getenv("FEATURE_DUMP_DIR", "/persistent/feat"), "/tmp")
+
+def dump_features(symbol: str, strategy: str, df_feat: pd.DataFrame) -> Optional[str]:
+    try:
+        if df_feat is None or df_feat.empty: return None
+        ts_max = _parse_ts_series(df_feat["timestamp"]).max()
+        fn = f"{symbol}_{strategy}_{int(pd.Timestamp(ts_max).timestamp())}.parquet"
+        path = os.path.join(_IO_DIR, fn)
+        df_feat.to_parquet(path, index=False)
+        return path
+    except Exception as e:
+        print(f"[⚠️ dump_features 실패] {e}")
+        return None
+
+def load_latest_features(symbol: str, strategy: str) -> Optional[pd.DataFrame]:
+    try:
+        pats = glob.glob(os.path.join(_IO_DIR, f"{symbol}_{strategy}_*.parquet"))
+        if not pats: return None
+        pats.sort(reverse=True)
+        return pd.read_parquet(pats[0])
+    except Exception:
+        return None
+
+# ========================= 공개 API =========================
+def build_training_dataset(symbol: str, strategy: str, window: int, input_size: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    df_price = get_kline_by_strategy(symbol, strategy)
+    feat_df = compute_features(symbol, df_price, strategy)
+    if not isinstance(feat_df, pd.DataFrame) or feat_df.empty:
+        X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
+        y = np.zeros((1,), dtype=np.int64)
+        return X, y, {"error": "no_features"}
+    # 모델 학습용 리스트 레코드로 변환
+    records = feat_df.copy()
+    records["symbol"] = symbol
+    recs = records.to_dict(orient="records")
+    X, y = create_dataset(recs, window=window, strategy=strategy, input_size=input_size)
+    meta = {"n": int(len(y)), "F": int(X.shape[-1])}
+    return X, y, meta
+
+def get_price_source(symbol: str, strategy: str) -> str:
+    df = get_kline_by_strategy(symbol, strategy)
+    return getattr(df, "attrs", {}).get("source_exchange", "UNKNOWN")
+
+def enough_for_training(symbol: str, strategy: str) -> bool:
+    df = get_kline_by_strategy(symbol, strategy)
+    return bool(getattr(df, "attrs", {}).get("enough_for_training", False))
+
+def not_enough_for_predict(symbol: str, strategy: str) -> bool:
+    df = get_kline_by_strategy(symbol, strategy)
+    return bool(getattr(df, "attrs", {}).get("not_enough_rows", False))
+
+# ========================= 정합성 체크 =========================
+def _self_check(symbol: str = "BTCUSDT") -> Dict[str, Any]:
+    out = {}
+    for strat in ("단기","중기","장기"):
+        try:
+            dfp = get_kline_by_strategy(symbol, strat)
+            feat = compute_features(symbol, dfp, strat)
+            ok = isinstance(feat, pd.DataFrame) and not feat.empty
+            X, meta = get_feature_window_for_inference(symbol, strat, window=max(10, _PREDICT_MIN_WINDOW))
+            out[strat] = {
+                "price_rows": int(len(dfp)),
+                "feat_rows": int(len(feat)) if ok else 0,
+                "win_shape": tuple(X.shape),
+                "src": getattr(dfp, "attrs", {}).get("source_exchange", "UNKNOWN"),
+                "ok": ok and X.shape[1] >= _PREDICT_MIN_WINDOW
+            }
+        except Exception as e:
+            out[strat] = {"error": str(e)}
+    return out
+
+# ========================= 내보내기 =========================
+__all__ = [
+    # 캐시/상태
+    "clear_price_cache","CacheManager",
+    # 심볼/그룹
+    "get_ALL_SYMBOLS","get_SYMBOL_GROUPS","should_train_symbol","mark_symbol_trained","ready_for_group_predict",
+    "mark_group_predicted","get_current_group_index","get_current_group_symbols","reset_group_order",
+    "rebuild_symbol_groups","group_all_complete",
+    # 수집
+    "get_kline","get_kline_binance","get_kline_by_strategy","get_merged_kline_by_strategy","get_kline_interval",
+    "get_realtime_prices",
+    # 피처
+    "compute_features","compute_features_multi","future_gains","future_gains_by_hours",
+    # 데이터셋
+    "create_dataset","augment_jitter","augment_time_shift","augment_for_min_count",
+    # 추론 헬퍼
+    "get_feature_window_for_inference","get_inference_batch",
+    # I/O
+    "dump_features","load_latest_features",
+    # 기타
+    "get_price_source","enough_for_training","not_enough_for_predict","_self_check",
+             ]
