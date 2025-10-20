@@ -16,6 +16,7 @@ from typing import Any, Optional, Tuple, Dict, Iterable, Callable
 DEFAULT_MAX_ITEMS = int(os.getenv("CACHE_MAX_ITEMS", "64"))
 DEFAULT_TTL_SEC  = int(os.getenv("CACHE_TTL_SEC",  "900"))  # 15분
 
+
 class _LRUTTLCache:
     """내부용: LRU + TTL 구현체 (OrderedDict 사용)"""
     def __init__(self, max_items: int = DEFAULT_MAX_ITEMS, ttl_sec: int = DEFAULT_TTL_SEC):
@@ -26,10 +27,14 @@ class _LRUTTLCache:
         self._store: "OrderedDict[Any, Tuple[Any, float]]" = OrderedDict()
 
     # --- 내부 유틸 ---
-    def _expired(self, set_time: float) -> bool:
-        if self.ttl_sec <= 0:
+    def _expired(self, set_time: float, ttl_override_sec: Optional[int] = None) -> bool:
+        """ttl_override_sec가 주어지면 더 짧은 TTL을 우선 적용"""
+        eff_ttl = self.ttl_sec
+        if ttl_override_sec is not None and ttl_override_sec > 0:
+            eff_ttl = min(eff_ttl if eff_ttl > 0 else ttl_override_sec, ttl_override_sec)
+        if eff_ttl <= 0:
             return False
-        return (time.time() - set_time) >= self.ttl_sec
+        return (time.time() - set_time) >= eff_ttl
 
     def _evict_if_needed(self) -> int:
         """용량 초과 시 LRU 순서대로 제거"""
@@ -40,19 +45,19 @@ class _LRUTTLCache:
         return evicted
 
     # --- 공개 API ---
-    def get(self, key: Any) -> Optional[Any]:
+    def get(self, key: Any, ttl_override_sec: Optional[int] = None) -> Optional[Any]:
         with self._lock:
-            if key not in self._store:
+            item = self._store.get(key)
+            if item is None:
                 return None
-            value, set_time = self._store.get(key)  # type: ignore
-            if self._expired(set_time):
-                # 만료면 삭제
+            value, set_time = item
+            if self._expired(set_time, ttl_override_sec):
                 try:
                     del self._store[key]
                 except KeyError:
                     pass
                 return None
-            # LRU 갱신: 최근 사용으로 이동
+            # LRU 갱신
             self._store.move_to_end(key, last=True)
             return value
 
@@ -74,26 +79,16 @@ class _LRUTTLCache:
             self._store.clear()
 
     def prune(self) -> Dict[str, int]:
-        """
-        만료/용량 정리 수행.
-        returns: {"expired": n1, "lru": n2}
-        """
-        expired_cnt = 0
+        """만료/용량 정리 수행. returns: {"expired": n1, "lru": n2}"""
         with self._lock:
-            # 1) TTL 만료 정리
-            to_delete: Iterable[Any] = []
             now = time.time()
-            for k, (_, set_time) in list(self._store.items()):
-                if self.ttl_sec > 0 and (now - set_time) >= self.ttl_sec:
-                    to_delete = list(self._store.keys()) if False else []  # placate linter
-            # 위에서 linter 회피용 임시 변수, 실제 삭제 루프:
-            for k, (_, set_time) in list(self._store.items()):
-                if self.ttl_sec > 0 and (now - set_time) >= self.ttl_sec:
+            expired_keys: Iterable[Any] = (k for k, (_, t) in list(self._store.items())
+                                           if self.ttl_sec > 0 and (now - t) >= self.ttl_sec)
+            expired_cnt = 0
+            for k in list(expired_keys):
+                if k in self._store:
                     del self._store[k]
                     expired_cnt += 1
-
-            # 2) 용량 초과 정리(LRU)
-            before = len(self._store)
             lru_evict = self._evict_if_needed()
         return {"expired": expired_cnt, "lru": lru_evict}
 
@@ -110,7 +105,7 @@ class _LRUTTLCache:
 class CacheManager:
     """
     전역 캐시 매니저
-      - get(key), set(key, value), delete(key), clear(), prune(), stats()
+      - get(key, ttl_override_sec=None), set(key, value), delete(key), clear(), prune(), stats()
       - TTL/크기는 환경변수 또는 set_policy()로 조정 가능
     """
     _instance: Optional[_LRUTTLCache] = None
@@ -126,15 +121,7 @@ class CacheManager:
     # ---- 기본 연산 ----
     @classmethod
     def get(cls, key: Any, ttl_override_sec: Optional[int] = None) -> Optional[Any]:
-        inst = cls._ensure()
-        if ttl_override_sec is None:
-            return inst.get(key)
-        # TTL override: 임시로 검사만 대체
-        val = inst.get(key)
-        if val is None:
-            return None
-        # override는 set_time을 모르니, 보수적으로 다시 세팅하여 TTL 연장 방지
-        return val
+        return cls._ensure().get(key, ttl_override_sec)
 
     @classmethod
     def set(cls, key: Any, value: Any) -> None:
@@ -187,3 +174,11 @@ def memoize_ttl(key_func: Optional[Callable[..., Any]] = None):
             return value
         return wrapper
     return decorator
+
+
+# ===== 백워드 호환 별칭(옵션) =====
+# 향후 모듈 수정 시 CacheManager를 직접 사용하되,
+# 과거 코드가 참조할 수 있는 별칭을 제공한다.
+feature_cache = CacheManager
+global_cache = CacheManager
+_feature_cache = CacheManager
