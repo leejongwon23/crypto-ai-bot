@@ -17,6 +17,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from collections import Counter
 import hashlib
 import random
+
 # 🔽 기존 라인 삭제
 # from labels import make_labels as _make_labels
 
@@ -46,9 +47,27 @@ BINANCE_ENABLED = int(os.getenv("ENABLE_BINANCE", "1"))
 # 예측용 최소 윈도우(부족 시 not_enough_rows=True로 플래그) — predict.py에서 스킵
 _PREDICT_MIN_WINDOW = int(os.getenv("PREDICT_WINDOW", "10"))
 
+# ========================= 디렉터리 안전 생성(ENOSPC 폴백) =========================
+def _ensure_dir(path: str, fallback: str) -> str:
+    try:
+        os.makedirs(path, exist_ok=True)
+        return path
+    except OSError as e:
+        if getattr(e, "errno", None) == 28:  # No space left on device
+            fb = os.path.join(fallback, os.path.basename(path).strip("/") or "dir")
+            try:
+                os.makedirs(fb, exist_ok=True)
+                print(f"[⚠️ ENOSPC] '{path}' → '{fb}'로 폴백")
+                return fb
+            except Exception as e2:
+                print(f"[❌ 폴백 실패] {fb}: {e2}")
+        else:
+            print(f"[⚠️ 디렉터리 생성 실패] {path}: {e}")
+    return path  # 마지막 시도로 원경로 유지
+
 # ========================= 디스크 캐시 설정 =========================
 _CACHE_DIR = os.getenv("PRICE_CACHE_DIR", "/persistent/cache")
-os.makedirs(_CACHE_DIR, exist_ok=True)
+_CACHE_DIR = _ensure_dir(_CACHE_DIR, "/tmp")
 
 def _cache_key(symbol: str, strategy: str, slack: int) -> str:
     return f"{symbol}__{strategy}__slack{int(slack)}.pkl"
@@ -84,6 +103,11 @@ def _save_df_cache(symbol: str, strategy: str, slack: int, df: pd.DataFrame):
     try:
         with open(_cache_path(symbol, strategy, slack), "wb") as f:
             pickle.dump(df, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except OSError as e:
+        if getattr(e, "errno", None) == 28:
+            print(f"[⚠️ ENOSPC] 캐시 저장 생략({_CACHE_DIR})")
+        else:
+            print(f"[⚠️ 캐시 저장 실패] {e}")
     except Exception:
         pass
 
@@ -260,12 +284,12 @@ def get_ALL_SYMBOLS(): return list(SYMBOLS)
 def get_SYMBOL_GROUPS(): return list(SYMBOL_GROUPS)
 
 # ========================= 그룹 순서 제어(지속성) =========================
-_STATE_DIR = "/persistent/state"
+_STATE_DIR = _ensure_dir("/persistent/state", "/tmp")
 _STATE_PATH = os.path.join(_STATE_DIR, "group_order.json")
 _STATE_BAK  = _STATE_PATH + ".bak"
 
 # 🔒 예측 게이트 상태 확인(읽기 전용)
-_RUN_DIR = "/persistent/run"
+_RUN_DIR = _ensure_dir("/persistent/run", "/tmp")
 _PREDICT_GATE = os.path.join(_RUN_DIR, "predict_gate.json")
 def _is_predict_gate_open() -> bool:
     try:
@@ -278,17 +302,30 @@ def _is_predict_gate_open() -> bool:
         return False
 
 def _atomic_write_json(path: str, obj: dict):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-        try: f.flush(); os.fsync(f.fileno())
-        except Exception: pass
-    os.replace(tmp, path)
     try:
-        dfd = os.open(os.path.dirname(path), os.O_RDONLY)
-        try: os.fsync(dfd)
-        finally: os.close(dfd)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except OSError as e:
+        if getattr(e, "errno", None) == 28:
+            print(f"[⚠️ ENOSPC] JSON 저장 생략({path})")
+            return
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+            try: f.flush(); os.fsync(f.fileno())
+            except Exception: pass
+        os.replace(tmp, path)
+        try:
+            dfd = os.open(os.path.dirname(path), os.O_RDONLY)
+            try: os.fsync(dfd)
+            finally: os.close(dfd)
+        except Exception:
+            pass
+    except OSError as e:
+        if getattr(e, "errno", None) == 28:
+            print(f"[⚠️ ENOSPC] JSON 저장 생략({path})")
+        else:
+            print(f"[⚠️ JSON 저장 실패] {path}: {e}")
     except Exception:
         pass
 
@@ -706,7 +743,6 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                         continue
                     if isinstance(raw[0], (list, tuple)) and len(raw[0]) >= 6:
                         df_chunk = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume, turnover"][:6])
-                        # 위 컬럼명이 API 형식에 따라 다를 수 있어 안전 처리
                         df_chunk.columns = ["timestamp","open","high","low","close","volume"]
                     else:
                         df_chunk = pd.DataFrame(raw)
@@ -863,7 +899,6 @@ def get_kline_interval(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     try:
         df_bybit = get_kline(symbol, interval=interval, limit=limit)
         if (df_bybit is None or df_bybit.empty) and not _is_binance_blocked():
-            # 단순 폴백(가능한 근접 주기)
             df_bin = get_kline_binance(symbol, interval=interval, limit=limit)
             return _normalize_df(df_bin)
         return _normalize_df(df_bybit)
@@ -908,7 +943,6 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
         df = _normalize_df(pd.concat(dfs, ignore_index=True)) if dfs else pd.DataFrame()
 
         if df.empty:
-            # ✅ 절대 빈 DF 반환 금지 → 최소 한 행이라도 생성
             print(f"[⚠️ 데이터부족] {symbol}/{strategy}: 수집 실패 → dummy 1row 생성")
             df = pd.DataFrame({
                 "timestamp": [pd.Timestamp.now(tz="Asia/Seoul")],
@@ -935,7 +969,6 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
     except Exception as e:
         print(f"[❌ get_kline_by_strategy 실패] {symbol}/{strategy}: {e}")
         safe_failed_result(symbol, strategy, reason=str(e))
-        # 빈 DF 반환 방지
         return pd.DataFrame({
             "timestamp": [pd.Timestamp.now(tz="Asia/Seoul")],
             "open": [1.0], "high": [1.0], "low": [1.0],
@@ -1065,20 +1098,14 @@ def _compute_feature_block(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def _mtf_plan(strategy: str):
-    """
-    반환: (base_iv, aux_list)
-    """
     plan = {
-        "단기": ("60",  ["240", "D"]),   # 1h base + 4h, 1d
-        "중기": ("240", ["D", "3D"]),   # 4h base + 1d, 3d(합성)
-        "장기": ("D",   ["W", "720"]),  # 1d base + 1w, 12h(보조)
+        "단기": ("60",  ["240", "D"]),
+        "중기": ("240", ["D", "3D"]),
+        "장기": ("D",   ["W", "720"]),
     }
     return plan.get(strategy, ("240", ["D"]))
 
 def _synthesize_multi(df_base: pd.DataFrame, target_iv: str) -> pd.DataFrame:
-    """
-    지원하지 않는 주기는 베이스에서 resample로 합성
-    """
     if df_base is None or df_base.empty: return pd.DataFrame()
     df = df_base.copy()
     df["timestamp"] = _parse_ts_series(df["timestamp"]).dt.tz_convert("UTC")
@@ -1102,10 +1129,7 @@ def _synthesize_multi(df_base: pd.DataFrame, target_iv: str) -> pd.DataFrame:
 
 def _compute_mtf_features(symbol: str, strategy: str, df_base: pd.DataFrame) -> pd.DataFrame:
     base_iv, aux_ivs = _mtf_plan(strategy)
-
-    # 베이스 수집(요청된 df가 해당 인터벌이 아니면 새로 수집)
     df_b = df_base.copy()
-    # 보조 타임프레임 수집/합성
     ctx_blocks = []
     for iv in aux_ivs:
         if iv in ("3D","2D"):
@@ -1117,11 +1141,9 @@ def _compute_mtf_features(symbol: str, strategy: str, df_base: pd.DataFrame) -> 
         feat = feat[["timestamp","close","rsi","macd","macd_signal","bb_width","atr","ema20","ema50","ema100","ema200","stoch_k","stoch_d","williams_r","roc","trend_score","vwap"]]
         ctx_blocks.append(_prefix_cols(feat, f"f{iv}"))
 
-    # 베이스 피처
     base_feat = _compute_feature_block(df_b)
     base_feat = base_feat[["timestamp","open","high","low","close","volume","rsi","macd","macd_signal","macd_hist","bb_up","bb_dn","bb_sd","bb_width","bb_percent_b","volatility","ema20","ema50","ema100","ema200","trend_score","roc","atr","stoch_k","stoch_d","williams_r","vwap"]]
 
-    # asof 병합
     merged = _merge_asof_all(base_feat, ctx_blocks, strategy)
     return merged
 
@@ -1131,14 +1153,12 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     if cached is not None:
         return cached
 
-    # 입력 점검
     if df is None or df.empty or not isinstance(df, pd.DataFrame):
         safe_failed_result(symbol, strategy, reason="입력DataFrame empty")
         dummy = pd.DataFrame()
         dummy.attrs["not_enough_rows"] = True
         return dummy
 
-    # 윈도우 부족 시 바로 플래그 반환 (predict.py가 스킵)
     if len(df) < _PREDICT_MIN_WINDOW:
         dummy = pd.DataFrame()
         dummy.attrs["not_enough_rows"] = True
@@ -1165,10 +1185,8 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         return dummy
 
     try:
-        # ============ MTF 피처화 ============ #
         feat = _compute_mtf_features(symbol, strategy, df)
 
-        # (내부 레짐)
         regime_cfg = get_REGIME()
         if regime_cfg.get("enabled", False):
             try:
@@ -1188,20 +1206,18 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
             except Exception:
                 pass
 
-        # (3단계) 외부 시장 컨텍스트 병합
         try:
             ts = _parse_ts_series(feat["timestamp"])
             ctx_list = [
                 _get_market_ctx(ts, strategy, symbol),
                 _get_corr_ctx(symbol, ts, strategy),
                 _get_ext_regime_ctx(ts, strategy),
-                _get_onchain_ctx(ts, strategy, symbol),  # ✅ 온체인 컨텍스트 병합
+                _get_onchain_ctx(ts, strategy, symbol),
             ]
             feat = _merge_asof_all(feat, ctx_list, strategy)
         except Exception:
             pass
 
-        # 필수 컬럼 보정
         must_have = [
             "rsi","macd","macd_signal","macd_hist",
             "ema20","ema50","ema100","ema200",
@@ -1210,7 +1226,6 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         ]
         _ensure_columns(feat, must_have)
 
-        # ✅ NaN/Inf 정규화 (훈련과 동일)
         feat.replace([np.inf, -np.inf], 0, inplace=True)
         feat.fillna(0, inplace=True)
 
@@ -1251,7 +1266,6 @@ def compute_features_multi(symbol: str, df_base: pd.DataFrame) -> Dict[str, Opti
     """
     out: Dict[str, Optional[pd.DataFrame]] = {"단기": None, "중기": None, "장기": None}
 
-    # 단기: 주어진 df_base 사용
     try:
         if isinstance(df_base, pd.DataFrame) and not df_base.empty:
             f_short = compute_features(symbol, df_base, "단기")
@@ -1259,7 +1273,6 @@ def compute_features_multi(symbol: str, df_base: pd.DataFrame) -> Dict[str, Opti
     except Exception:
         out["단기"] = None
 
-    # 중기/장기: 전략별로 수집 후 계산
     for strat in ("중기", "장기"):
         try:
             df_s = get_kline_by_strategy(symbol, strat)
@@ -1445,27 +1458,24 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                 m = min(len(X), len(y)); X = X[:m]; y = y[:m]
             X.attrs = {"class_ranges": ranges, "class_groups": cfg_get_class_groups(len(ranges), 5)}
 
-            # --- 중복 창 컷 ---
             X_dedup, keep_idx = _drop_duplicate_windows(X)
             if len(keep_idx) < len(y):
                 y = y[keep_idx]; X = X_dedup
 
-            # --- 경계 보강(±ε) 오버샘플 ---
             try:
-                eps_bp = int(os.getenv("BOUNDARY_EPS_BP", "30"))  # 30bp = 0.3%
+                eps_bp = int(os.getenv("BOUNDARY_EPS_BP", "30"))
                 eps = eps_bp / 10000.0
                 stops = np.array([b for (_, b) in ranges[:-1]], dtype=np.float64)
                 vals = np.asarray(signed_vals[:len(y)], dtype=np.float64)
                 close_to_edge = np.any(np.abs(vals[:, None] - stops[None, :]) <= eps, axis=1)
                 idx_edge = np.where(close_to_edge)[0]
                 if idx_edge.size > 0:
-                    dup = min(len(idx_edge), max(1, len(y)//20))  # 전체의 ~5% 이내
+                    dup = min(len(idx_edge), max(1, len(y)//20))
                     X = np.concatenate([X, X[idx_edge[:dup]]], axis=0)
                     y = np.concatenate([y, y[idx_edge[:dup]]], axis=0)
             except Exception:
                 pass
 
-            # --- 레짐×변동성 버킷 균형(옵션) ---
             try:
                 if int(os.getenv("BALANCE_BY_BUCKETS", "0")) == 1:
                     vol = pd.to_numeric(df.get("vol_regime", pd.Series([1]*len(df))), errors="coerce").fillna(1).astype(int).values
@@ -1488,7 +1498,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             except Exception:
                 pass
 
-            # --- 소수클래스 증강 ---
             try:
                 if int(os.getenv("AUG_ENABLE","1")) == 1:
                     uniq, cnts = np.unique(y, return_counts=True)
@@ -1502,7 +1511,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
             return X, y
 
-        # Fallback: 단순 수익률
         closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float32)
         if len(closes) <= window + 1: return _dummy(symbol_name)
         pct = np.diff(closes) / (closes[:-1] + 1e-6)
@@ -1521,7 +1529,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             m = min(len(X), len(y)); X = X[:m]; y = y[:m]
         X.attrs = {"class_ranges": ranges, "class_groups": cfg_get_class_groups(len(ranges), 5)}
 
-        # 중복컷 + 소수클래스 증강(동일 로직)
         X_dedup, keep_idx = _drop_duplicate_windows(X)
         if len(keep_idx) < len(y):
             y = y[keep_idx]; X = X_dedup
@@ -1622,28 +1629,23 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         y = np.zeros((1,), dtype=np.int64)
         return X, y
 
-    # 0) 입력 점검
     if not isinstance(features, list) or len(features) <= window:
         return _dummy("UNKNOWN")
 
-    # 1) DataFrame 화
     df = _pd.DataFrame(features)
     df["timestamp"] = _parse_ts_series(df.get("timestamp"))
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
     df = df.drop(columns=["strategy"], errors="ignore")
 
-    # 심볼 추출
     symbol_name = "UNKNOWN"
     if len(features) and isinstance(features[0], dict) and "symbol" in features[0]:
         symbol_name = str(features[0]["symbol"]).upper()
 
-    # 숫자 보정
     num_cols = [c for c in df.columns if c != "timestamp"]
     for c in num_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df[num_cols] = _downcast_numeric(df[num_cols])
 
-    # 2) 가격 DF 구성 → 공식 라벨러 호출
     price_cols = ["timestamp","close","high","low"]
     for c in price_cols:
         if c not in df.columns:
@@ -1654,12 +1656,11 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         symbol=symbol_name,
         strategy=strategy,
         group_id=None,
-    )  # labels_full은 -1 포함 가능
+    )
 
     if labels_full is None or len(labels_full) != len(df):
         return _dummy(symbol_name)
 
-    # 3) 입력 피처 스케일링
     feature_cols = [c for c in df.columns if c != "timestamp"]
     if not feature_cols:
         return _dummy(symbol_name)
@@ -1680,9 +1681,8 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         df_s = df_s.drop(columns=[c for c in input_cols if c not in keep], errors="ignore")
         input_cols = [c for c in input_cols if c in keep]
 
-    # 4) 슬라이딩 윈도우 생성 + 라벨 정렬
     samples = []
-    y_seq = labels_full[window:len(df_s)]  # 윈도우 끝 시점의 라벨을 사용
+    y_seq = labels_full[window:len(df_s)]
     for i in range(window, len(df_s)):
         seq = df_s.iloc[i - window:i]
         if len(seq) != window:
@@ -1696,18 +1696,15 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
     X = np.array(samples, dtype=np.float32)
     y = np.array(y_seq[:len(X)], dtype=np.int64)
 
-    # 5) 경계마스킹 처리: -1 제거
     keep = np.where(y >= 0)[0]
     if keep.size == 0:
         return _dummy(symbol_name)
     X, y = X[keep], y[keep]
 
-    # 6) 중복 창 제거
     X_dedup, keep_idx = _drop_duplicate_windows(X)
     if len(keep_idx) < len(y):
         y = y[keep_idx]; X = X_dedup
 
-    # 7) 소수클래스 증강(옵션)
     try:
         if int(os.getenv("AUG_ENABLE","1")) == 1 and len(y) > 0:
             uniq, cnts = np.unique(y, return_counts=True)
@@ -1719,6 +1716,5 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
     except Exception:
         pass
 
-    # 메타 정보
     X.attrs = {"class_ranges": class_ranges, "class_groups": cfg_get_class_groups(len(class_ranges), 5)}
     return X, y
