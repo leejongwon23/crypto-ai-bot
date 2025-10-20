@@ -328,7 +328,7 @@ def _async_emergency_purge():
 threading.Thread(target=_async_emergency_purge, daemon=True).start()
 
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
-LOG_FILE          = os.path.join(LOG_DIR, "train_log.csv")
+LOG_FILE          = get_TRAIN_LOG_PATH()  # ← 변경: 설정 경로 사용
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 AUDIT_LOG         = os.path.join(LOG_DIR, "evaluation_audit.csv")
 MESSAGE_LOG       = os.path.join(LOG_DIR, "message_log.csv")
