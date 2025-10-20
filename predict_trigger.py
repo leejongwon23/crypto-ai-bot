@@ -1,4 +1,4 @@
-# === predict_trigger.py (FINAL, Guanwu 동기화 포함) ===
+# === predict_trigger.py (FINAL v1.1: 그룹 완주 후에만 예측) ===
 import os, time, glob, traceback, datetime, shutil
 from collections import Counter, defaultdict
 import numpy as np
@@ -145,12 +145,10 @@ def _sync_ganwu_log():
             return
         os.makedirs(dst_dir, exist_ok=True)
         dst = os.path.join(dst_dir, "prediction_log.csv")
-        # 동일 경로면 스킵
         if os.path.abspath(src) == os.path.abspath(dst):
             return
         if not os.path.exists(src):
             return
-        # 소스가 더 최신이면 복사
         if (not os.path.exists(dst)) or (os.path.getmtime(src) >= os.path.getmtime(dst)):
             shutil.copy2(src, dst)
     except Exception as e:
@@ -176,8 +174,8 @@ THROTTLE_BUSY_LOG_SEC            = int(os.getenv("THROTTLE_BUSY_LOG_SEC", "15"))
 PAIR_BACKOFF_BASE_SEC            = int(os.getenv("PAIR_BACKOFF_BASE_SEC", "60"))
 PAIR_BACKOFF_MAX_SEC             = int(os.getenv("PAIR_BACKOFF_MAX_SEC", "600"))
 
-# 그룹 완료 모드
-REQUIRE_GROUP_COMPLETE = int(os.getenv("REQUIRE_GROUP_COMPLETE", "0"))
+# 그룹 완료 모드: 기본값을 1로 상향(그룹 완주 전 예측 금지)
+REQUIRE_GROUP_COMPLETE = int(os.getenv("REQUIRE_GROUP_COMPLETE", "1"))
 
 last_trigger_time = {}
 _last_busy_log_at = 0.0
@@ -372,7 +370,6 @@ def run():
     try:
         ensure_prediction_log_exists(PREDICTION_LOG_PATH)
     except TypeError:
-        # 구버전 시그니처 호환
         ensure_prediction_log_exists()
     except Exception as e:
         print(f"[경고] prediction_log 보장 실패: {e}")
@@ -404,14 +401,12 @@ def run():
         symset = set(group_syms)
         symbols = [s for s in all_symbols if s in symset]
         print(f"[그룹제한] 현재 그룹 심볼 {len(symbols)}/{len(all_symbols)}개 대상으로 실행")
+
+        # ✅ 변경: 그룹 완주가 아니면 이 그룹 전체에 대한 예측을 전면 차단
         if REQUIRE_GROUP_COMPLETE and not _is_group_complete_for_all_strategies(symbols):
             miss = _missing_pairs(symbols)
-            print(f"[경고] 그룹 일부 미완료(누락 {len(miss)}) → 완료된 심볼만 예측 진행")
-            missing_syms = {s for s, _ in miss}
-            symbols = [s for s in symbols if s not in missing_syms]
-            if not symbols:
-                print("[차단] 예측 가능한 심볼 없음 → 스킵")
-                return
+            print(f"[차단] 그룹 미완료(누락 {len(miss)}) → 예측 전면 스킵")
+            return
     else:
         symbols = all_symbols
 
@@ -603,6 +598,14 @@ def run_after_training(symbol: str, strategy: str) -> bool:
         ensure_prediction_log_exists()
     except Exception:
         pass
+
+    # ✅ 추가: 그룹 완주 전이면 학습후 트리거도 금지
+    group_syms = _get_current_group_symbols()
+    if isinstance(group_syms, (list, tuple)) and len(group_syms) > 0 and REQUIRE_GROUP_COMPLETE:
+        if not _is_group_complete_for_all_strategies(list(group_syms)):
+            log_audit(symbol, strategy, "학습후트리거스킵", "그룹 미완료")
+            print(f"[스킵] 그룹 미완료로 {symbol}-{strategy} 학습후트리거 차단")
+            return False
 
     if _LOCK_PATH and os.path.exists(_LOCK_PATH):
         log_audit(symbol, strategy, "학습후트리거스킵", "전역락")
