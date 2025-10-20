@@ -5,6 +5,11 @@ import threading
 import gc
 from datetime import datetime, timedelta
 
+# --- emergency SAFE_MODE kill-switch (no-op) ---
+SAFE_MODE = os.getenv("SAFE_MODE", "0") == "1"
+if SAFE_MODE:
+    print("[safe_cleanup] SAFE_MODE=1 → cleanup 기능 전면 비활성화")
+
 # ========= ENV helpers =========
 def _env_float(key: str, default: float) -> float:
     try:
@@ -217,6 +222,8 @@ def _cleanup_ssl_models_impl(keep_per_key, soft_cap_gb, deleted_log):
       - 심볼×전략별 최신 keep_per_key개만 유지
       - 폴더 전체 용량이 soft_cap_gb 초과 시, 가장 오래된 파일부터 추가 삭제
     """
+    if SAFE_MODE:
+        return
     try:
         import re
         os.makedirs(SSL_DIR, exist_ok=True)
@@ -265,6 +272,8 @@ def cleanup_ssl_models(keep_per_key=None, soft_cap_gb=None, deleted_log=None):
     """
     외부 호출용 래퍼. 인자 생략 시 환경변수/기본값 사용.
     """
+    if SAFE_MODE:
+        return []  # no-op
     if keep_per_key is None:
         keep_per_key = SSL_KEEP_PER_KEY
     if soft_cap_gb is None:
@@ -462,6 +471,8 @@ def emergency_purge(target_gb=None):
     - 🔒 어떤 경우에도 .lock/LOCK_DIR 은 삭제하지 않음
     - target_gb 미지정: max(SOFT_CAP_GB, HARD_CAP_GB - MIN_FREE_GB)
     """
+    if SAFE_MODE:
+        return  # no-op
     _ensure_dirs()
     deleted = []
     target = target_gb or max(SOFT_CAP_GB, HARD_CAP_GB - MIN_FREE_GB)
@@ -508,10 +519,15 @@ def emergency_purge(target_gb=None):
 
 def run_emergency_purge():
     """앱에서 한 줄로 호출하기 위한 래퍼"""
+    if SAFE_MODE:
+        return 0  # no-op
     emergency_purge()
+    return 0
 
 # ========= 일반 주기 정리 =========
 def auto_delete_old_logs():
+    if SAFE_MODE:
+        return  # no-op
     _ensure_dirs()
 
     if _locked_by_runtime():
@@ -569,6 +585,8 @@ def auto_delete_old_logs():
             print(f"[🧹 삭제 완료] 총 {len(deleted)}개 파일 정리(로그 기록 생략)")
 
 def cleanup_logs_and_models():
+    if SAFE_MODE:
+        return  # no-op
     auto_delete_old_logs()
 
 # ====== 경량/주기 실행 유틸 ======
@@ -582,6 +600,8 @@ def _log(msg: str):
         print(f"[safe_cleanup] {msg}")
 
 def _light_cleanup():
+    if SAFE_MODE:
+        return  # no-op
     try:
         from cache import CacheManager
         try:
@@ -607,6 +627,12 @@ def _light_cleanup():
         _log(f"ssl light cleanup skip: {e}")
 
 def start_cleanup_scheduler(daemon: bool = True) -> threading.Thread:
+    if SAFE_MODE:
+        _log("SAFE_MODE=1 → scheduler 시작 안 함")
+        # 더미 스레드 핸들 반환
+        t = threading.Thread(target=lambda: None, name="safe-cleanup-scheduler-dummy", daemon=daemon)
+        return t
+
     def _loop():
         if RUN_ON_START:
             _log("초기 1회 실행")
@@ -621,7 +647,12 @@ def start_cleanup_scheduler(daemon: bool = True) -> threading.Thread:
     return t
 
 def trigger_light_cleanup():
+    if SAFE_MODE:
+        return  # no-op
     _light_cleanup()
 
 if __name__ == "__main__":
-    start_cleanup_scheduler(daemon=False)
+    if SAFE_MODE:
+        print("[safe_cleanup] SAFE_MODE=1 → 메인 진입 무시")
+    else:
+        start_cleanup_scheduler(daemon=False)
