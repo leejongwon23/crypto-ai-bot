@@ -64,9 +64,10 @@ _default_config = {
     "SSL_CACHE_DIR": "/persistent/ssl_models",
 
     # === 관우·예측 경로 단일화 ===
-    "PREDICTION_LOG_PATH": "/data/guanwu/incoming/prediction_log.csv",
+    # 기본값을 /persistent로 정렬. 필요 시 ENV로 덮어씀.
+    "PREDICTION_LOG_PATH": "/persistent/prediction_log.csv",
     "GANWU_PATH": "/data/guanwu/incoming",
-    "TRAIN_LOG_PATH": "/data/guanwu/incoming/train_log.csv",
+    "TRAIN_LOG_PATH": "/persistent/logs/train_log.csv",
 
     # DATA
     "DATA": {
@@ -978,4 +979,4 @@ __all__ = [
     "get_IO", "get_PREDICT_OUT_DIR", "get_GUANWU_IN_DIR",
     "get_PREDICTION_LOG_PATH", "get_GANWU_PATH", "get_TRAIN_LOG_PATH",
     "is_config_readonly", "is_disk_cache_off",
-        ]
+    ]
