@@ -8,6 +8,15 @@ import pandas as pd
 _DEF_WIN = int(os.getenv("CORR_WIN", "96"))   # 캔들 기준 윈도우(기본 96개)
 _MINP    = lambda w: max(10, w // 5)
 
+# --------- 유틸 임포트(폴백 포함) ---------
+try:
+    from data.utils import get_kline_by_strategy as _get_k
+except Exception:
+    try:
+        from utils import get_kline_by_strategy as _get_k
+    except Exception:
+        _get_k = None  # 런타임 폴백
+
 # --------- 저수준 계산 유틸 ---------
 def _align(a: pd.Series, b: pd.Series):
     s = pd.concat([a, b], axis=1).dropna()
@@ -53,25 +62,26 @@ def get_rolling_corr_df(symbol: str, ts: pd.Series, strategy: str) -> pd.DataFra
     데이터가 부족하면 0으로 채움.
     """
     # ts 표준화
-    ts = pd.to_datetime(ts, errors="coerce")
-    if getattr(ts.dt, "tz", None) is None:
-        ts = ts.dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
-    else:
-        ts = ts.dt.tz_convert("Asia/Seoul")
+    ts = pd.to_datetime(ts, errors="coerce", utc=True)
+    ts = ts.tz_convert("Asia/Seoul")
     ts = ts.dropna()
     if ts.empty:
         return pd.DataFrame(columns=["timestamp"])
 
     idx = pd.DatetimeIndex(ts)
 
-    # 가격 불러오기 (우리 프로젝트 유틸)
+    # 가격 불러오기
+    if _get_k is None:
+        return pd.DataFrame({"timestamp": idx}).assign(
+            corr_btc=0.0, beta_btc_roll=0.0, beta_btc_ewma=0.0, beta_btc_rls=0.0,
+            corr_eth=0.0, beta_eth_roll=0.0, beta_eth_ewma=0.0, beta_eth_rls=0.0
+        )
+
     try:
-        from data.utils import get_kline_by_strategy as _get_k
-        df_a   = _get_kline_by_strategy(symbol, strategy)
-        df_btc = _get_kline_by_strategy("BTCUSDT", strategy)
-        df_eth = _get_kline_by_strategy("ETHUSDT", strategy)
+        df_a   = _get_k(symbol, strategy)
+        df_btc = _get_k("BTCUSDT", strategy)
+        df_eth = _get_k("ETHUSDT", strategy)
     except Exception:
-        # 없어도 안전 반환
         return pd.DataFrame({"timestamp": idx}).assign(
             corr_btc=0.0, beta_btc_roll=0.0, beta_btc_ewma=0.0, beta_btc_rls=0.0,
             corr_eth=0.0, beta_eth_roll=0.0, beta_eth_ewma=0.0, beta_eth_rls=0.0
@@ -81,7 +91,7 @@ def get_rolling_corr_df(symbol: str, ts: pd.Series, strategy: str) -> pd.DataFra
         if df is None or df.empty or "close" not in df.columns or "timestamp" not in df.columns:
             return pd.Series(0.0, index=idx)
         s = pd.to_numeric(df["close"], errors="coerce").astype(float)
-        s.index = pd.to_datetime(df["timestamp"], errors="coerce")
+        s.index = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
         s = s[~s.index.duplicated(keep="last")].sort_index()
         return s.reindex(idx).ffill().fillna(method="bfill")
 
