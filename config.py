@@ -66,7 +66,7 @@ _default_config = {
     # === 관우·예측 경로 단일화 ===
     # 기본값을 /persistent로 정렬. 필요 시 ENV로 덮어씀.
     "PREDICTION_LOG_PATH": "/persistent/prediction_log.csv",
-    "GANWU_PATH": "/data/guanwu/incoming",
+    "GANWU_PATH": "/persistent/guanwu/incoming",
     "TRAIN_LOG_PATH": "/persistent/logs/train_log.csv",
 
     # DATA
@@ -194,8 +194,8 @@ _default_config = {
 
     # IO 경로(관우·예측 단일 진실원)
     "IO": {
-        "predict_out": "/data/guanwu/incoming",
-        "guanwu_in":   "/data/guanwu/incoming"
+        "predict_out": "/persistent/guanwu/incoming",
+        "guanwu_in":   "/persistent/guanwu/incoming"
     },
 }
 
