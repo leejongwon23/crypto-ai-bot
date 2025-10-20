@@ -106,10 +106,52 @@ except Exception:
 from feature_importance import compute_feature_importance, save_feature_importance  # (유지)
 from failure_db import insert_failure_record, ensure_failure_db
 import logger
+# ==== [ADD] train 로그 경로/헤더 보장(경고만) ====
+import csv
 from config import (
     get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges, set_NUM_CLASSES,
-    STRATEGY_CONFIG, get_QUALITY, get_LOSS, BOUNDARY_BAND
+    STRATEGY_CONFIG, get_QUALITY, get_LOSS, BOUNDARY_BAND, get_TRAIN_LOG_PATH
 )
+try:
+    from logger import TRAIN_HEADERS
+except Exception:
+    TRAIN_HEADERS = ["timestamp","symbol","strategy","model","accuracy","f1","loss","note","status","source_exchange","y_true","y_pred","num_classes"]
+
+LOG_DIR = "/persistent/logs"; os.makedirs(LOG_DIR, exist_ok=True)
+TRAIN_LOG = get_TRAIN_LOG_PATH()
+try: os.makedirs(os.path.dirname(TRAIN_LOG), exist_ok=True)
+except Exception: pass
+
+def _ensure_train_log():
+    try:
+        if not os.path.exists(TRAIN_LOG):
+            with open(TRAIN_LOG, "w", encoding="utf-8-sig", newline="") as f:
+                csv.writer(f).writerow(TRAIN_HEADERS)
+    except Exception as e:
+        print(f"[경고] train_log 초기화 실패: {e}")
+
+def _append_train_log(row: dict):
+    try:
+        _ensure_train_log()
+        with open(TRAIN_LOG, "a", encoding="utf-8-sig", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=TRAIN_HEADERS, extrasaction="ignore")
+            w.writerow(row)
+    except Exception as e:
+        print(f"[경고] train_log 기록 실패: {e}")
+
+# logger.log_training_result 패치: 원래 호출 + 파일 기록(예외는 경고)
+if not getattr(logger, "_patched_train_log", False):
+    _orig_ltr = getattr(logger, "log_training_result", None)
+    def _log_training_result_patched(*args, **kw):
+        if callable(_orig_ltr):
+            try: _orig_ltr(*args, **kw)
+            except Exception as e: print(f"[경고] logger.log_training_result 실패: {e}")
+        row = dict(kw)
+        row.setdefault("timestamp", datetime.now(pytz.timezone("Asia/Seoul")).isoformat())
+        _append_train_log(row)
+    logger.log_training_result = _log_training_result_patched
+    logger._patched_train_log = True
+# ====================================================
 
 # ✅ 예측 게이트: 안전 임포트(없으면 no-op)
 try:
