@@ -1,4 +1,4 @@
-# app.py — patched (train API safe wrappers + robust checks + log schema align + predict-lock stale GC)
+# app.py — FINAL (train→next-group 파이프라인, 부팅시 필수 경로·빈 로그 보장, 예측락 stale GC)
 from flask import Flask, jsonify, request, Response
 from recommend import main
 import train, os, threading, datetime, pytz, traceback, sys, shutil, re, time
@@ -6,7 +6,7 @@ import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram_bot import send_message
 from predict_trigger import run as trigger_run
-from predict_trigger import _is_group_complete_for_all_strategies, _get_current_group_symbols  # ✅ 추가
+from predict_trigger import _is_group_complete_for_all_strategies, _get_current_group_symbols
 from data.utils import SYMBOLS, get_kline_by_strategy
 from data.utils import (
     ready_for_group_predict, mark_group_predicted, group_all_complete,
@@ -17,9 +17,8 @@ from wrong_data_loader import load_training_prediction_data
 from predict import evaluate_predictions
 from train import train_symbol_group_loop  # compatibility
 import maintenance_fix_meta
-# 🔧 확장 스키마/보장 유틸: 헤더 상수까지 직접 사용
 from logger import ensure_prediction_log_exists, ensure_train_log_exists, PREDICTION_HEADERS, TRAIN_HEADERS
-from logger import log_audit_prediction as log_audit  # ✅ 추가
+from logger import log_audit_prediction as log_audit
 from config import get_TRAIN_LOG_PATH
 
 # integrity guard optional
@@ -31,13 +30,12 @@ except Exception as e:
 
 from diag_e2e import run as diag_e2e_run
 
-# cleanup modules (best-effort import)
+# cleanup modules
 try:
     from scheduler_cleanup import start_cleanup_scheduler
     import safe_cleanup
     import scheduler_cleanup as _cleanup_mod
 except Exception:
-    # best-effort fallback: try to add parent dir and retry
     try:
         sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         from scheduler_cleanup import start_cleanup_scheduler
@@ -48,7 +46,7 @@ except Exception:
         safe_cleanup = type("sc", (), {"get_directory_size_gb": lambda p: 0, "HARD_CAP_GB": 9.6, "run_emergency_purge": lambda: None, "cleanup_logs_and_models": lambda: None})
         _cleanup_mod = safe_cleanup
 
-# ✅ predict-lock(Stale GC) 안전 임포트
+# predict-lock stale GC
 try:
     import predict_lock as _pl
     _pl_clear = getattr(_pl, "clear_stale_predict_lock", lambda: None)
@@ -56,7 +54,7 @@ except Exception:
     _pl = None
     _pl_clear = lambda: None
 
-# predict gate safe imports
+# predict gate
 try:
     from predict import open_predict_gate, close_predict_gate, predict
 except Exception:
@@ -93,7 +91,7 @@ LOCK_DIR   = getattr(safe_cleanup, "LOCK_DIR", os.path.join(PERSIST_DIR, "locks"
 LOCK_PATH  = getattr(safe_cleanup, "LOCK_PATH", os.path.join(LOCK_DIR, "train_or_predict.lock"))
 os.makedirs(LOCK_DIR, exist_ok=True)
 
-# ── BOOT: orphan 전역락 제거 + 예측락 stale GC
+# BOOT: orphan 전역락 제거 + 예측락 stale GC
 if os.path.exists(LOCK_PATH):
     try:
         os.remove(LOCK_PATH)
@@ -126,7 +124,7 @@ def _release_global_lock():
         print(f"[LOCK] remove failed: {e}"); sys.stdout.flush()
     return False
 
-# ===== safe wrappers for train module APIs =====
+# ===== train API safe wrappers =====
 def _is_training() -> bool:
     try:
         return bool(getattr(train, "is_loop_running", lambda: False)())
@@ -144,7 +142,6 @@ def _start_train_loop_safe(force_restart=False, sleep_sec=0):
                 return True
             except Exception:
                 return False
-    # fallback attempts
     for name in ("start_train_loop", "start_loop", "start"):
         fn2 = getattr(train, name, None)
         if callable(fn2):
@@ -166,7 +163,6 @@ def _stop_train_loop_safe(timeout=30):
                 return True
             except Exception:
                 return False
-    # fallback
     fn2 = getattr(train, "request_stop", None)
     if callable(fn2):
         try:
@@ -195,7 +191,6 @@ def _train_models_safe(symbols):
         except Exception as e:
             print(f"[TRAIN] train_models failed: {e}")
             return False
-    # fallback: train_symbol_group_loop if exists
     fn2 = getattr(train, "train_symbol_group_loop", None)
     if callable(fn2):
         try:
@@ -206,40 +201,30 @@ def _train_models_safe(symbols):
     return False
 
 def _await_models_visible(symbols, timeout_sec=20, poll_sec=0.5):
-    # prefer train-provided awaiter
     fn = getattr(train, "_await_models_visible", None)
     if callable(fn):
         try:
             return fn(symbols, timeout_sec=timeout_sec)
         except Exception:
             pass
-    # fallback: naive wait with polling for model files presence (top-level + nested)
     exts = (".pt", ".ptz", ".safetensors")
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         found = set()
         try:
             if os.path.isdir(MODEL_DIR):
-                # 1) top-level files
-                try:
-                    for f in os.listdir(MODEL_DIR):
-                        for s in symbols:
-                            if f.startswith(f"{s}_") and f.endswith(exts):
-                                found.add(s)
-                except Exception:
-                    pass
-                # 2) nested: {MODEL_DIR}/{symbol}/{strategy}/*
+                for f in os.listdir(MODEL_DIR):
+                    for s in symbols:
+                        if f.startswith(f"{s}_") and f.endswith(exts):
+                            found.add(s)
                 for s in symbols:
                     sdir = os.path.join(MODEL_DIR, s)
                     if os.path.isdir(sdir):
                         for strat in ("단기", "중기", "장기"):
                             d = os.path.join(sdir, strat)
                             if os.path.isdir(d):
-                                try:
-                                    if any(name.endswith(exts) for name in os.listdir(d)):
-                                        found.add(s)
-                                except Exception:
-                                    pass
+                                if any(name.endswith(exts) for name in os.listdir(d)):
+                                    found.add(s)
         except Exception:
             pass
         if found:
@@ -254,26 +239,17 @@ def _has_model_for(symbol, strategy):
             return bool(fn(symbol, strategy))
         except Exception:
             pass
-    # fallback: top-level + nested
     try:
         exts = (".pt", ".ptz", ".safetensors")
         pref = f"{symbol}_{strategy}_"
         if os.path.isdir(MODEL_DIR):
-            # top-level
-            try:
-                for f in os.listdir(MODEL_DIR):
-                    if f.startswith(pref) and f.endswith(exts):
-                        return True
-            except Exception:
-                pass
-            # nested
+            for f in os.listdir(MODEL_DIR):
+                if f.startswith(pref) and f.endswith(exts):
+                    return True
             d = os.path.join(MODEL_DIR, symbol, strategy)
             if os.path.isdir(d):
-                try:
-                    if any(name.endswith(exts) for name in os.listdir(d)):
-                        return True
-                except Exception:
-                    pass
+                if any(name.endswith(exts) for name in os.listdir(d)):
+                    return True
     except Exception:
         pass
     return False
@@ -286,13 +262,11 @@ def _quarantine_wipe_persistent():
     keep_names = {os.path.basename(LOCK_DIR)}
     moved = []
     for name in list(os.listdir(PERSIST_DIR)):
-        if name in keep_names:
-            continue
+        if name in keep_names: continue
         src = os.path.join(PERSIST_DIR, name)
         dst = os.path.join(trash_dir, name)
         try:
-            shutil.move(src, dst)
-            moved.append(name)
+            shutil.move(src, dst); moved.append(name)
         except Exception as e:
             print(f"⚠️ [QWIPE] move 실패: {src} -> {dst} ({e})")
     for d in ["logs", "models", "ssl_models"]:
@@ -330,7 +304,7 @@ def _async_emergency_purge():
 threading.Thread(target=_async_emergency_purge, daemon=True).start()
 
 PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
-LOG_FILE          = get_TRAIN_LOG_PATH()  # ← 변경: 설정 경로 사용
+LOG_FILE          = get_TRAIN_LOG_PATH()
 WRONG_PREDICTIONS = os.path.join(PERSIST_DIR, "wrong_predictions.csv")
 AUDIT_LOG         = os.path.join(LOG_DIR, "evaluation_audit.csv")
 MESSAGE_LOG       = os.path.join(LOG_DIR, "message_log.csv")
@@ -345,8 +319,8 @@ ensure_prediction_log_exists()
 
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
-# 환경 플래그: 그룹 완주 후에만 예측 허용
-REQUIRE_GROUP_COMPLETE = int(os.getenv("REQUIRE_GROUP_COMPLETE", "1"))  # ✅ 추가
+# 그룹 완주 후에만 예측 허용
+REQUIRE_GROUP_COMPLETE = int(os.getenv("REQUIRE_GROUP_COMPLETE", "1"))
 
 # scheduler
 _sched = None
@@ -357,22 +331,18 @@ def start_scheduler():
         return
     if os.path.exists(LOCK_PATH):
         print("⏸️ 리셋 락 감지 → 스케줄러 시작 지연"); sys.stdout.flush()
-
-        # ⏳ 락 해제 감시 후 자동 시작 (지수 백오프 최대 60s)
         def _deferred():
             backoff = 1.0
             while os.path.exists(LOCK_PATH):
                 time.sleep(backoff)
                 backoff = min(backoff * 2.0, 60.0)
             try:
-                start_scheduler()
-                print("▶️ 지연 후 스케줄러 시작"); sys.stdout.flush()
+                start_scheduler(); print("▶️ 지연 후 스케줄러 시작"); sys.stdout.flush()
             except Exception as e:
                 print(f"❌ 지연 시작 실패: {e}")
         threading.Thread(target=_deferred, daemon=True).start()
         return
 
-    # 스케줄 시작 전 1회 예측락 정리
     try:
         _pl_clear(); print("[SCHED] predict lock stale-GC pre-start")
     except Exception as e:
@@ -409,7 +379,6 @@ def start_scheduler():
             misfire_grace_time=90,
         )
 
-    # 🔁 예측락 정리 주기잡 (5분)
     def _pred_lock_gc():
         try:
             _pl_clear()
@@ -431,7 +400,6 @@ def start_scheduler():
             if _is_training() or os.path.exists(LOCK_PATH):
                 print("[PREDICT] skip: training/lock active"); sys.stdout.flush()
                 return
-            # 실행 직전 정리
             _pl_clear()
             print("[PREDICT] trigger_run start"); sys.stdout.flush()
             _safe_open_gate("sched_trigger")
@@ -440,7 +408,6 @@ def start_scheduler():
             except Exception as e:
                 print(f"[PREDICT] ❌ trigger_run 실패: {e}")
                 try:
-                    # 예외 시에도 실패 레코드 남김
                     from predict import failed_result
                     failed_result("ALL", "auto", reason=str(e), source="sched_trigger")
                 except Exception:
@@ -541,7 +508,15 @@ def _init_background_once():
             from failure_db import ensure_failure_db
             print(">>> 서버 실행 준비")
             ensure_failure_db(); print("✅ failure_patterns DB 초기화 완료")
-            # 부팅 직후 1회 더 정리
+
+            # 필수 경로 및 빈 로그 보장
+            for p in ["/persistent/importances", "/persistent/guanwu/incoming", "/persistent/logs"]:
+                os.makedirs(p, exist_ok=True)
+            try: ensure_train_log_exists()
+            except Exception: pass
+            try: ensure_prediction_log_exists()
+            except Exception: pass
+
             _pl_clear()
             print("[pipeline] serialized: train -> predict -> next-group"); sys.stdout.flush()
 
@@ -549,9 +524,9 @@ def _init_background_once():
             _safe_close_gate("init_train_start")
             if autostart:
                 started = _start_train_loop_safe(force_restart=False, sleep_sec=0)
-                print("✅ 학습 루프 스레드 시작 (APP_AUTOSTART_TRAIN!=0)" if started else "⚠️ 학습 루프 시작 실패 또는 이미 실행 중")
+                print("✅ 학습 루프 스레드 시작" if started else "⚠️ 학습 루프 시작 실패 또는 이미 실행 중")
             else:
-                print("⏸️ 학습 루프 자동 시작 안함 (APP_AUTOSTART_TRAIN=0)")
+                print("⏸️ 학습 루프 자동 시작 안함")
 
             start_cleanup_scheduler()
             print("✅ cleanup 스케줄러 시작")
@@ -569,7 +544,7 @@ def _init_background_once():
                 send_message("[시작] YOPO 서버 실행됨")
                 print("✅ Telegram 알림 발송 완료")
             except FileExistsError:
-                print("ℹ️ 부팅 알림 생략(동일 DEPLOY_ID에서 이미 발송)")
+                print("ℹ️ 부팅 알림 생략")
             except Exception as e:
                 print(f"⚠️ Telegram 발송 실패: {e}")
 
@@ -588,23 +563,19 @@ else:
         if not _INIT_DONE:
             _init_background_once()
 
-# predict after training helper  ✅ 그룹 완주 가드 추가
+# 학습 직후 예측: 그룹 완주 가드
 def _predict_after_training(symbols, source_note):
     if not symbols:
         return
-
-    # ✅ 그룹 완주 검증: REQUIRE_GROUP_COMPLETE=1일 때만 강제 차단
     try:
         if REQUIRE_GROUP_COMPLETE == 1:
             group_syms = _get_current_group_symbols()
             if isinstance(group_syms, (list, tuple)) and len(group_syms) > 0:
                 if not _is_group_complete_for_all_strategies(list(group_syms)):
-                    print(f"[APP-PRED] 🚫 그룹 미완료 상태 → 예측 차단 ({source_note})"); sys.stdout.flush()
+                    print(f"[APP-PRED] 🚫 그룹 미완료 → 예측 차단 ({source_note})"); sys.stdout.flush()
                     for sym in sorted(set(symbols)):
-                        try:
-                            log_audit(sym, "ALL", "학습후예측스킵", "그룹 미완료(REQUIRE_GROUP_COMPLETE=1)")
-                        except Exception:
-                            pass
+                        try: log_audit(sym, "ALL", "학습후예측스킵", "그룹 미완료(REQUIRE_GROUP_COMPLETE=1)")
+                        except Exception: pass
                     return
     except Exception as e:
         print(f"[APP-PRED] 그룹완료검증 실패: {e}")
@@ -636,21 +607,19 @@ def _predict_after_training(symbols, source_note):
                     try:
                         result = predict(sym, strat, source=source_note, model_type=None)
                         if not isinstance(result, dict):
-                            print(f"[APP-PRED] ⚠️ 비정상 반환({type(result)}), 강제 failed_result 기록"); sys.stdout.flush()
+                            print(f"[APP-PRED] ⚠️ invalid return"); sys.stdout.flush()
                             try:
                                 from predict import failed_result
                                 failed_result(sym, strat, reason="invalid_return", source="app_predict")
-                            except Exception:
-                                pass
+                            except Exception: pass
                         else:
-                            print(f"[APP-PRED] ✅ 예측 완료: {sym}-{strat} result={result.get('reason','ok')}"); sys.stdout.flush()
+                            print(f"[APP-PRED] ✅ {sym}-{strat} ok: {result.get('reason','ok')}"); sys.stdout.flush()
                     except Exception as e:
-                        print(f"[APP-PRED] ❌ 예측 중 오류: {e}"); sys.stdout.flush()
+                        print(f"[APP-PRED] ❌ 예측 오류: {e}"); sys.stdout.flush()
                         try:
                             from predict import failed_result
                             failed_result(sym, strat, reason=str(e), source="app_predict")
-                        except Exception:
-                            pass
+                        except Exception: pass
                 except Exception as e:
                     print(f"[APP-PRED] {sym}-{strat} 실패: {e}"); sys.stdout.flush()
     finally:
@@ -663,7 +632,6 @@ def index(): return "Yopo server is running"
 @app.route("/ping")
 def ping(): return "pong"
 
-# 수동 예측락 정리 API
 @app.route("/admin/clear-predict-lock", methods=["POST","GET"])
 def clear_predict_lock_admin():
     try:
@@ -706,7 +674,6 @@ def yopo_health():
             else:
                 pred["volatility"] = False
             try:
-                # 우리 스키마는 return_value임. 없으면 rate로 대체.
                 pred["return"] = pd.to_numeric(pred.get("return_value", pred.get("rate", pd.Series(dtype=float))), errors="coerce").fillna(0.0)
             except Exception:
                 pred["return"] = 0.0
@@ -757,7 +724,7 @@ def yopo_health():
                     status_icon = '✅' if s in ['success','v_success'] else '❌' if s in ['fail','v_fail'] else '⏳' if s in ['pending','v_pending'] else '🛑'
                     rows.append(f"<tr><td>{r.get('timestamp','')}</td><td>{r.get('symbol','')}</td><td>{r.get('direction','')}</td><td>{rtn_pct}</td><td>{status_icon}</td></tr>")
                 table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>심볼</th><th>방향</th><th>수익률</th><th>상태</th></tr>" + "".join(rows) + "</table>"
-            last_train = train_log_df['timestamp'].iloc[-1] if (not train_log_df.empty and 'timestamp' in train_log_df) else '없음'
+            last_train = train_log_q['timestamp'].iloc[-1] if (not train_log_q.empty and 'timestamp' in train_log_q) else '없음'
             last_pred  = pred['timestamp'].iloc[-1]  if (not pred.empty and 'timestamp' in pred)  else '없음'
             last_audit = audit['timestamp'].iloc[-1] if (not audit.empty and 'timestamp' in audit) else '없음'
             info_html = f"""<div style='border:1px solid #aaa;margin:16px 0;padding:10px;font-family:monospace;background:#f8f8f8;'>
@@ -825,10 +792,8 @@ def train_now():
         force = request.args.get("force", "0") == "1"
         _safe_close_gate("train_now_start")
         started = _start_train_loop_safe(force_restart=force, sleep_sec=0)
-        if started:
-            return "✅ 전체 그룹 학습 루프 시작됨 (백그라운드)"
-        else:
-            return "⏳ 이미 실행 중 (재가동 생략)" if not force else "⏳ 재가동 시도했으나 기존 루프 유지됨"
+        if started: return "✅ 전체 그룹 학습 루프 시작됨 (백그라운드)"
+        return "⏳ 이미 실행 중 (재가동 생략)" if not force else "⏳ 재가동 시도했으나 기존 루프 유지됨"
     except Exception as e:
         return f"학습 실패: {e}", 500
 
@@ -842,20 +807,14 @@ def train_log():
         if df.empty or df.shape[1] == 0:
             return f"학습 기록 없음<br><small>경로: <code>{log_path}</code></small>"
         html = df.tail(200).to_html(index=False, border=1, justify='center')
-        return (
-            f"<b>📘 학습 로그 (최근 200행)</b><br>"
-            f"<small>경로: <code>{log_path}</code></small><br><br>{html}"
-        )
+        return f"<b>📘 학습 로그 (최근 200행)</b><br><small>경로: <code>{log_path}</code></small><br><br>{html}"
     except Exception as e:
         return f"읽기 오류: {e}", 500
 
 @app.route("/models")
 def list_models():
     try:
-        if os.path.exists(MODEL_DIR):
-            files = os.listdir(MODEL_DIR)
-        else:
-            files = []
+        files = os.listdir(MODEL_DIR) if os.path.exists(MODEL_DIR) else []
         return "<pre>" + "\n".join(files) + "</pre>" if files else "models 폴더 비어 있음"
     except Exception as e:
         return f"오류: {e}", 500
@@ -896,14 +855,10 @@ def check_eval_log():
         html = "<table border='1'><tr><th>시각</th><th>심볼</th><th>전략</th><th>모델</th><th>예측</th><th>수익률</th><th>상태</th><th>사유</th></tr>"
         for _, r in latest.iterrows():
             icon = status_icon(r.get("status",""))
-            # ✅ 우리 스키마 호환
             rv = r.get('return_value', None)
-            if pd.isna(rv) or rv is None:
-                rv = r.get('rate', 0)
-            try:
-                rv = float(rv)
-            except Exception:
-                rv = 0.0
+            if pd.isna(rv) or rv is None: rv = r.get('rate', 0)
+            try: rv = float(rv)
+            except Exception: rv = 0.0
             html += f"<tr><td>{r.get('timestamp','')}</td><td>{r.get('symbol','')}</td><td>{r.get('strategy','')}</td><td>{r.get('model','')}</td><td>{r.get('direction','')}</td><td>{rv:.4f}</td><td>{icon}</td><td>{r.get('reason','')}</td></tr>"
         html += "</table>"
         return html
@@ -920,8 +875,7 @@ def train_symbols():
                 if not force_flag:
                     return False, ("🚫 이미 메인 학습 루프 실행 중 (force=1 또는 force=true 로 강제 교체 가능)", 409)
                 try:
-                    _request_stop_safe()
-                    _stop_train_loop_safe(timeout=45)
+                    _request_stop_safe(); _stop_train_loop_safe(timeout=45)
                 except Exception:
                     pass
             return True, None
@@ -931,8 +885,7 @@ def train_symbols():
             if group_idx < 0 or group_idx >= len(SYMBOL_GROUPS):
                 return f"❌ 잘못된 그룹 번호: {group_idx}", 400
             ok, resp = _ensure_single_loop(force)
-            if not ok:
-                return resp
+            if not ok: return resp
             group_symbols = SYMBOL_GROUPS[group_idx]
             print(f"🚀 그룹 학습 요청됨 → 그룹 #{group_idx} | 심볼: {group_symbols}")
             _safe_close_gate("train_group_start")
@@ -940,15 +893,12 @@ def train_symbols():
                 try:
                     _train_models_safe(group_symbols)
                     if not group_all_complete():
-                        print("[GROUP-AFTER] 미완료: group_all_complete()=False → 예측 생략")
-                        return
+                        print("[GROUP-AFTER] 미완료: group_all_complete()=False → 예측 생략"); return
                     if not ready_for_group_predict():
-                        print("[GROUP-AFTER] 미완료: ready_for_group_predict()=False → 예측 생략")
-                        return
+                        print("[GROUP-AFTER] 미완료: ready_for_group_predict()=False → 예측 생략"); return
                     _predict_after_training(group_symbols, source_note=f"group{group_idx}_after_train")
                     try:
-                        mark_group_predicted()
-                        print("[GROUP-AFTER] mark_group_predicted() 호출 완료")
+                        mark_group_predicted(); print("[GROUP-AFTER] mark_group_predicted() 호출 완료")
                     except Exception as e:
                         print(f"[GROUP-AFTER] mark_group_predicted 예외: {e}")
                 finally:
@@ -962,8 +912,7 @@ def train_symbols():
             if not isinstance(symbols, list) or not symbols:
                 return "❌ 유효하지 않은 symbols 리스트", 400
             ok, resp = _ensure_single_loop(force)
-            if not ok:
-                return resp
+            if not ok: return resp
             _safe_close_gate("train_selected_start")
             def _worker():
                 try:
@@ -999,13 +948,9 @@ def reset_all(key=None):
         seconds = max(30, int(seconds))
         def _kill():
             print(f"🛑 [WATCHDOG] reset watchdog fired after {seconds}s → os._exit(0)"); sys.stdout.flush()
-            try:
-                _release_global_lock()
-            finally:
-                os._exit(0)
-        t = threading.Timer(seconds, _kill)
-        t.daemon = True
-        t.start()
+            try: _release_global_lock()
+            finally: os._exit(0)
+        t = threading.Timer(seconds, _kill); t.daemon = True; t.start()
         return t
     def _do_reset_work():
         stop_timeout = int(os.getenv("RESET_STOP_TIMEOUT", "12"))
@@ -1019,17 +964,8 @@ def reset_all(key=None):
             import importlib
             _acquire_global_lock()
             _stop_all_aux_schedulers()
-            # 예측락 선정리
             _pl_clear()
-            BASE = BASE_DIR
-            PERSIST = PERSIST_DIR
-            LOGS = LOG_DIR
-            MODELS = MODEL_DIR
-            PRED_LOG = PREDICTION_LOG
-            WRONG = WRONG_PREDICTIONS
-            AUDIT = AUDIT_LOG
-            MSG = MESSAGE_LOG
-            FAIL = FAILURE_LOG
+            PERSIST = PERSIST_DIR; LOGS = LOG_DIR; MODELS = MODEL_DIR
             def clear_csv(f, headers):
                 os.makedirs(os.path.dirname(f), exist_ok=True)
                 with open(f, "w", newline="", encoding="utf-8-sig") as wf:
@@ -1038,8 +974,7 @@ def reset_all(key=None):
             try:
                 if hasattr(train, "request_stop"):
                     _request_stop_safe()
-            except Exception:
-                pass
+            except Exception: pass
             stopped = False
             try:
                 print(f"[RESET] 학습 루프 정지 시도(timeout={stop_timeout}s)"); sys.stdout.flush()
@@ -1058,64 +993,45 @@ def reset_all(key=None):
                 print(f"[RESET] 정지 대기 시작… 최대 {max_wait}s (폴링 {poll_sec}s)"); sys.stdout.flush()
                 while time.time() - t0 < max_wait:
                     try:
-                        running = _is_training()
-                        if not running:
-                            stopped = True
-                            break
-                    except Exception:
-                        pass
+                        if not _is_training(): stopped = True; break
+                    except Exception: pass
                     try:
-                        if _stop_train_loop_safe(timeout=2):
-                            stopped = True
-                            break
-                    except Exception:
-                        pass
+                        if _stop_train_loop_safe(timeout=2): stopped = True; break
+                    except Exception: pass
                     time.sleep(poll_sec)
                 print(f"[RESET] 정지 대기 완료 → stopped={stopped}"); sys.stdout.flush()
             if not stopped:
-                print("🛑 [RESET] 루프가 종료되지 않음 → QWIPE 후 하드 종료(os._exit)"); sys.stdout.flush()
-                try:
-                    _quarantine_wipe_persistent()
-                except Exception as e:
-                    print(f"⚠️ [RESET] QWIPE 실패: {e}")
-                try:
-                    _release_global_lock()
+                print("🛑 [RESET] 루프 미종료 → QWIPE 후 하드 종료"); sys.stdout.flush()
+                try: _quarantine_wipe_persistent()
+                except Exception as e: print(f"⚠️ [RESET] QWIPE 실패: {e}")
+                try: _release_global_lock()
                 finally:
-                    try:
-                        _wd.cancel()
-                    except Exception:
-                        pass
+                    try: _wd.cancel()
+                    except Exception: pass
                     os._exit(0)
             try:
-                done_path = os.path.join(PERSIST, "train_done.json")
+                done_path = os.path.join(PERSIST_DIR, "train_done.json")
                 if os.path.exists(done_path): os.remove(done_path)
-            except Exception:
-                pass
+            except Exception: pass
             try:
-                for d in [MODELS, LOGS, os.path.join(PERSIST, "ssl_models")]:
-                    if os.path.exists(d):
-                        shutil.rmtree(d, ignore_errors=True)
+                for d in [MODELS, LOGS, os.path.join(PERSIST_DIR, "ssl_models")]:
+                    if os.path.exists(d): shutil.rmtree(d, ignore_errors=True)
                     os.makedirs(d, exist_ok=True)
                 keep = {os.path.basename(LOCK_DIR)}
-                for name in list(os.listdir(PERSIST)):
-                    p = os.path.join(PERSIST, name)
-                    if name in keep:
-                        continue
+                for name in list(os.listdir(PERSIST_DIR)):
+                    p = os.path.join(PERSIST_DIR, name)
+                    if name in keep: continue
                     if os.path.isdir(p):
-                        if name not in {"logs", "models", "ssl_models"}:
-                            shutil.rmtree(p, ignore_errors=True)
+                        if name not in {"logs", "models", "ssl_models"}: shutil.rmtree(p, ignore_errors=True)
                     else:
-                        try:
-                            os.remove(p)
-                        except Exception:
-                            pass
-                suspect_prefixes = ("prediction_log", "eval", "message_log", "train_log",
-                                    "wrong_predictions", "evaluation_audit", "failure_count",
-                                    "diag", "e2e", "guan", "관우")
-                for root, dirs, files in os.walk(PERSIST, topdown=False):
+                        try: os.remove(p)
+                        except Exception: pass
+                suspect_prefixes = ("prediction_log","eval","message_log","train_log","wrong_predictions",
+                                    "evaluation_audit","failure_count","diag","e2e","guan","관우")
+                for root, dirs, files in os.walk(PERSIST_DIR, topdown=False):
                     for f in files:
                         low = f.lower()
-                        if low.endswith((".csv", ".db", ".json", ".txt")) or low.startswith(suspect_prefixes):
+                        if low.endswith((".csv",".db",".json",".txt")) or low.startswith(suspect_prefixes):
                             try: os.remove(os.path.join(root, f))
                             except Exception: pass
                     for d in dirs:
@@ -1130,31 +1046,26 @@ def reset_all(key=None):
             try: _feature_cache.clear()
             except Exception: pass
             try:
-                # ✅ 확장 스키마로 재생성/초기화
                 ensure_prediction_log_exists()
                 ensure_train_log_exists()
-                clear_csv(WRONG, PREDICTION_HEADERS)
-                clear_csv(AUDIT, ["timestamp","symbol","strategy","status","reason"])
-                clear_csv(MESSAGE_LOG, ["timestamp","symbol","strategy","message"])
-                clear_csv(FAILURE_LOG, ["symbol","strategy","failures"])
+                clear_csv(os.path.join(PERSIST_DIR, "wrong_predictions.csv"), PREDICTION_HEADERS)
+                clear_csv(os.path.join(LOG_DIR, "evaluation_audit.csv"), ["timestamp","symbol","strategy","status","reason"])
+                clear_csv(os.path.join(LOG_DIR, "message_log.csv"), ["timestamp","symbol","strategy","message"])
+                clear_csv(os.path.join(LOG_DIR, "failure_count.csv"), ["symbol","strategy","failures"])
             except Exception as e:
                 print(f"⚠️ [RESET] 로그 재생성 예외: {e}"); sys.stdout.flush()
             try:
-                import diag_e2e as _diag_mod
-                import importlib as _imp
+                import diag_e2e as _diag_mod, importlib as _imp
                 _imp.reload(_diag_mod)
-            except Exception:
-                pass
+            except Exception: pass
             try:
                 maintenance_fix_meta.fix_all_meta_json()
             except Exception as e:
                 print(f"[RESET] meta 보정 실패: {e}")
-            print("🔚 [RESET] 정리 완료 → 프로세스 종료(os._exit)로 재부팅 진행"); sys.stdout.flush()
+            print("🔚 [RESET] 정리 완료 → 프로세스 종료(os._exit)"); sys.stdout.flush()
             _release_global_lock()
-            try:
-                _wd.cancel()
-            except Exception:
-                pass
+            try: _wd.cancel()
+            except Exception: pass
             os._exit(0)
         except Exception as e:
             print(f"❌ [RESET] 백그라운드 초기화 예외: {e}"); sys.stdout.flush()
@@ -1171,7 +1082,6 @@ def reset_all(key=None):
 @app.route("/force-fix-prediction-log")
 def force_fix_prediction_log():
     try:
-        # ensure_*는 이미 임포트됨
         if os.path.exists(PREDICTION_LOG):
             os.remove(PREDICTION_LOG)
         ensure_prediction_log_exists()
@@ -1180,11 +1090,10 @@ def force_fix_prediction_log():
     except Exception as e:
         return f"⚠️ 오류: {e}", 500
 
-# === 즉시 전체 예측: 학습 일시정지 → 예측 → 학습 재개 ===
+# 즉시 전체 예측: 학습 일시정지 → 예측 → 학습 재개
 @app.route("/predict-now", methods=["POST","GET"])
 def predict_now():
     try:
-        # 1) 학습 중이면 정지
         was_running = _is_training()
         if was_running:
             print("[PREDICT-NOW] training detected → stopping..."); sys.stdout.flush()
@@ -1194,14 +1103,12 @@ def predict_now():
             if not stopped:
                 return "❌ 학습 정지 실패로 예측 취소됨", 423
 
-        # 2) 예측 준비
         if os.path.exists(LOCK_PATH):
             try: os.remove(LOCK_PATH)
             except Exception: pass
         _pl_clear()
         _safe_open_gate("predict_now")
 
-        # 3) 이미 학습된 모델만 전 전략 예측
         total, done, skipped = 0, 0, 0
         try:
             for sym in SYMBOLS:
@@ -1229,20 +1136,15 @@ def predict_now():
         finally:
             _safe_close_gate("predict_now_end")
 
-        # 4) 학습 재개
         resumed = False
         if was_running:
             resumed = _start_train_loop_safe(force_restart=False, sleep_sec=0)
             print(f"[PREDICT-NOW] training resumed={resumed}"); sys.stdout.flush()
 
-        return (
-            f"✅ 예측 완료 | 총:{total} 성공:{done} 스킵:{skipped} | "
-            f"학습정지:{'예' if was_running else '아니오'} → 재개:{'예' if resumed else '아니오'}"
-        )
+        return f"✅ 예측 완료 | 총:{total} 성공:{done} 스킵:{skipped} | 학습정지:{'예' if was_running else '아니오'} → 재개:{'예' if resumed else '아니오'}"
     except Exception as e:
         traceback.print_exc()
         return f"❌ 오류: {e}", 500
-
 
 
 if __name__ == "__main__":
