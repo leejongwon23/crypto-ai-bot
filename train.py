@@ -1,4 +1,4 @@
-# train.py — SPEED v2.0 (전략간 피처/라벨 1회화 + 중·장기 파인튜닝 경로, 폴백 안전)
+# train.py — SPEED v2.1 (GROUP_ACTIVE 마커: 그룹 경계 전용)
 # -*- coding: utf-8 -*-
 import os, time, glob, shutil, json, random, traceback, threading, gc, csv
 from datetime import datetime
@@ -262,6 +262,26 @@ PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC","180"))
 
 # === 중요도 저장 플래그 ===
 IMPORTANCE_ENABLE = os.getenv("IMPORTANCE_ENABLE", "1") == "1"
+
+# === [NEW] GROUP_ACTIVE 마커 ===
+PERSIST_DIR = "/persistent"
+GROUP_ACTIVE_PATH = os.path.join(PERSIST_DIR, "GROUP_ACTIVE")
+def _set_group_active(active: bool, group_idx: int | None = None, symbols: list | None = None):
+    try:
+        if active:
+            with open(GROUP_ACTIVE_PATH, "w", encoding="utf-8") as f:
+                ts = datetime.utcnow().isoformat()
+                syms = ",".join(symbols or [])
+                f.write(f"ts={ts}\n")
+                if group_idx is not None:
+                    f.write(f"group={int(group_idx)}\n")
+                f.write(f"symbols={syms}\n")
+        else:
+            if os.path.exists(GROUP_ACTIVE_PATH):
+                os.remove(GROUP_ACTIVE_PATH)
+    except Exception as e:
+        try: print(f"[GROUP_ACTIVE warn] {e}", flush=True)
+        except: pass
 
 def _maybe_insert_failure(payload:dict, feature_vector:Optional[List[Any]] = None):
     try:
@@ -906,6 +926,10 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                 if stop_event is not None and stop_event.is_set(): break
                 _safe_print(f"🚀 [group] {idx+1}/{len(groups)} → {group}")
 
+                # === 그룹 시작: GROUP_ACTIVE 생성 ===
+                try: _set_group_active(True, group_idx=idx, symbols=group)
+                except Exception as e: _safe_print(f"[GROUP_ACTIVE set warn] {e}")
+
                 completed_syms, partial_syms = train_models(group, stop_event=stop_event, ignore_should=force_full_pass)
                 if stop_event is not None and stop_event.is_set(): break
 
@@ -963,6 +987,10 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
 
                 try: close_predict_gate(note=f"train:group{idx+1}_end")
                 except Exception as e: _safe_print(f"[gate close warn] {e}")
+
+                # === 그룹 종료: GROUP_ACTIVE 삭제 ===
+                try: _set_group_active(False)
+                except Exception as e: _safe_print(f"[GROUP_ACTIVE clear warn] {e}")
 
                 if sleep_sec>0:
                     for _ in range(sleep_sec):
@@ -1045,6 +1073,10 @@ def train_group(group_id: int | None = None) -> dict:
     symbols = get_current_group_symbols() if group_id is None else (SYMBOL_GROUPS[idx] if 0 <= idx < len(SYMBOL_GROUPS) else [])
     out = {"group_index": idx, "symbols": symbols, "results": {}}
 
+    # === 그룹 시작: GROUP_ACTIVE 생성 ===
+    try: _set_group_active(True, group_idx=idx, symbols=symbols)
+    except Exception as e: _safe_print(f"[GROUP_ACTIVE set warn] {e}")
+
     completed, partial = train_models(symbols, stop_event=None, ignore_should=False)
     out["completed"] = completed; out["partial"] = partial
 
@@ -1077,6 +1109,11 @@ def train_group(group_id: int | None = None) -> dict:
                 pass
             try: close_predict_gate(note=f"train_group:idx{idx}_end")
             except Exception: pass
+
+    # === 그룹 종료: GROUP_ACTIVE 삭제 ===
+    try: _set_group_active(False)
+    except Exception as e: _safe_print(f"[GROUP_ACTIVE clear warn] {e}")
+
     return out
 
 def train_all() -> dict:
