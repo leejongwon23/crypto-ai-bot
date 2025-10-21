@@ -1,4 +1,4 @@
-# === predict_trigger.py (FINAL v1.1: 그룹 완주 후에만 예측) ===
+# === predict_trigger.py (FINAL v1.2: 그룹 완주 후에만 예측 + GROUP_ACTIVE 차단) ===
 import os, time, glob, traceback, datetime, shutil
 from collections import Counter, defaultdict
 import numpy as np
@@ -360,6 +360,12 @@ def _retry_after_training(_predict, symbol, strategy, first_err: Exception | str
 # ── 트리거 실행 루프 ─────────────────────────────────────────
 def run():
     global _last_busy_log_at
+
+    # === 그룹 학습 중이면 트리거 차단 ===
+    GROUP_ACTIVE_PATH = "/persistent/GROUP_ACTIVE"
+    if os.path.exists(GROUP_ACTIVE_PATH):
+        print(f"[트리거차단] 현재 그룹 학습 중 → {GROUP_ACTIVE_PATH} 존재. 트리거 전체 스킵.")
+        return
 
     if _LOCK_PATH and os.path.exists(_LOCK_PATH):
         print(f"[트리거] 전역 락 감지({_LOCK_PATH}) → 전체 스킵 @ {now_kst().isoformat()}")
