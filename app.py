@@ -6,6 +6,7 @@ import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram_bot import send_message
 from predict_trigger import run as trigger_run
+from predict_trigger import _is_group_complete_for_all_strategies, _get_current_group_symbols  # ✅ 추가
 from data.utils import SYMBOLS, get_kline_by_strategy
 from data.utils import (
     ready_for_group_predict, mark_group_predicted, group_all_complete,
@@ -18,6 +19,7 @@ from train import train_symbol_group_loop  # compatibility
 import maintenance_fix_meta
 # 🔧 확장 스키마/보장 유틸: 헤더 상수까지 직접 사용
 from logger import ensure_prediction_log_exists, ensure_train_log_exists, PREDICTION_HEADERS, TRAIN_HEADERS
+from logger import log_audit_prediction as log_audit  # ✅ 추가
 from config import get_TRAIN_LOG_PATH
 
 # integrity guard optional
@@ -343,6 +345,9 @@ ensure_prediction_log_exists()
 
 now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
+# 환경 플래그: 그룹 완주 후에만 예측 허용
+REQUIRE_GROUP_COMPLETE = int(os.getenv("REQUIRE_GROUP_COMPLETE", "1"))  # ✅ 추가
+
 # scheduler
 _sched = None
 def start_scheduler():
@@ -583,10 +588,27 @@ else:
         if not _INIT_DONE:
             _init_background_once()
 
-# predict after training helper  ✅ 반환 검증 + 실패 기록 보장
+# predict after training helper  ✅ 그룹 완주 가드 추가
 def _predict_after_training(symbols, source_note):
     if not symbols:
         return
+
+    # ✅ 그룹 완주 검증: REQUIRE_GROUP_COMPLETE=1일 때만 강제 차단
+    try:
+        if REQUIRE_GROUP_COMPLETE == 1:
+            group_syms = _get_current_group_symbols()
+            if isinstance(group_syms, (list, tuple)) and len(group_syms) > 0:
+                if not _is_group_complete_for_all_strategies(list(group_syms)):
+                    print(f"[APP-PRED] 🚫 그룹 미완료 상태 → 예측 차단 ({source_note})"); sys.stdout.flush()
+                    for sym in sorted(set(symbols)):
+                        try:
+                            log_audit(sym, "ALL", "학습후예측스킵", "그룹 미완료(REQUIRE_GROUP_COMPLETE=1)")
+                        except Exception:
+                            pass
+                    return
+    except Exception as e:
+        print(f"[APP-PRED] 그룹완료검증 실패: {e}")
+
     try:
         await_sec = int(os.getenv("PREDICT_MODEL_AWAIT_SEC","60"))
     except Exception:
@@ -765,7 +787,7 @@ def yopo_health():
 def diag_e2e():
     try:
         group = int(request.args.get("group", "-1"))
-        view = request.args.get("view", "json").lower()
+        view = request.get("view", "json").lower() if hasattr(request, "get") else request.args.get("view", "json").lower()
         cumulative = request.args.get("cum", "0") == "1"
         symbols = request.args.get("symbols")
         out = diag_e2e_run(group=group, view=view, cumulative=cumulative, symbols=symbols)
