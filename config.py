@@ -69,6 +69,12 @@ _default_config = {
     "GANWU_PATH": "/persistent/guanwu/incoming",
     "TRAIN_LOG_PATH": "/persistent/logs/train_log.csv",
 
+    # ===== 파이프라인 게이트 =====
+    # 그룹 5심볼 × (단/중/장) 완주 후에만 예측 허용
+    "REQUIRE_GROUP_COMPLETE": 1,          # env REQUIRE_GROUP_COMPLETE 로 오버라이드 가능 (1/0, true/false)
+    # 실수 방지를 위한 보조 스위치: 심볼 1개 학습 완료 직후 자동예측 금지
+    "AUTOPREDICT_ON_SYMBOL_DONE": 0,      # env AUTOPREDICT_ON_SYMBOL_DONE 로 오버라이드 (1=허용, 기본 0=금지)
+
     # DATA
     "DATA": {
         "merge_enabled": True,
@@ -319,6 +325,27 @@ def get_PATTERN():  return _config.get("PATTERN", _default_config["PATTERN"])
 def get_BLEND():    return _config.get("BLEND", _default_config["BLEND"])
 def get_PUBLISH():  return _config.get("PUBLISH", _default_config["PUBLISH"])
 
+# ===== 파이프라인 게이트 Getter =====
+def _env_bool(v): return str(v).strip().lower() not in {"0","false","no","off","none",""}
+
+def get_REQUIRE_GROUP_COMPLETE() -> int:
+    v = os.getenv("REQUIRE_GROUP_COMPLETE", None)
+    if v is not None:
+        return 1 if _env_bool(v) else 0
+    try:
+        return int(_config.get("REQUIRE_GROUP_COMPLETE", _default_config["REQUIRE_GROUP_COMPLETE"]))
+    except Exception:
+        return 1
+
+def get_AUTOPREDICT_ON_SYMBOL_DONE() -> int:
+    v = os.getenv("AUTOPREDICT_ON_SYMBOL_DONE", None)
+    if v is not None:
+        return 1 if _env_bool(v) else 0
+    try:
+        return int(_config.get("AUTOPREDICT_ON_SYMBOL_DONE", _default_config["AUTOPREDICT_ON_SYMBOL_DONE"]))
+    except Exception:
+        return 0
+
 # IO/경로 getter
 def get_IO():              return _config.get("IO", _default_config["IO"])
 def get_PREDICT_OUT_DIR(): return os.getenv("PREDICT_OUTPUT_DIR", get_IO().get("predict_out"))
@@ -337,8 +364,6 @@ def get_TRAIN_LOG_PATH():
 # 디스크 캐시 강제 off 노출(환경에서 제어)
 def is_disk_cache_off() -> bool:
     return str(os.getenv("DISK_CACHE_OFF", "0")).strip().lower() in {"1","true","yes","on"}
-
-def _env_bool(v): return str(v).strip().lower() not in {"0","false","no","off","none",""}
 
 def get_CLASS_ENFORCE() -> dict:
     base = dict(_config.get("CLASS_ENFORCE", _default_config["CLASS_ENFORCE"]))
@@ -979,4 +1004,5 @@ __all__ = [
     "get_IO", "get_PREDICT_OUT_DIR", "get_GUANWU_IN_DIR",
     "get_PREDICTION_LOG_PATH", "get_GANWU_PATH", "get_TRAIN_LOG_PATH",
     "is_config_readonly", "is_disk_cache_off",
+    "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
     ]
