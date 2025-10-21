@@ -1,4 +1,4 @@
-# app.py — FINAL (train→next-group 파이프라인, 부팅시 필수 경로·빈 로그 보장, 예측락 stale GC)
+# app.py — FINAL v2.1 (train→next-group 파이프라인, 부팅시 필수 경로·빈 로그 보장, 예측락 stale GC, 그룹학습 락)
 from flask import Flask, jsonify, request, Response
 from recommend import main
 import train, os, threading, datetime, pytz, traceback, sys, shutil, re, time
@@ -83,6 +83,12 @@ LOG_DIR    = os.path.join(PERSIST_DIR, "logs")
 MODEL_DIR  = os.path.join(PERSIST_DIR, "models")
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
+
+# [ADD] 그룹잠금 전용 폴더 및 락 파일
+RUN_DIR    = os.path.join(PERSIST_DIR, "run")
+os.makedirs(RUN_DIR, exist_ok=True)
+GROUP_TRAIN_LOCK = os.path.join(RUN_DIR, "group_training.lock")
+
 DEPLOY_ID  = os.getenv("RENDER_RELEASE_ID") or os.getenv("RENDER_GIT_COMMIT") or os.getenv("RENDER_SERVICE_ID") or "local"
 BOOT_MARK  = os.path.join(PERSIST_DIR, f".boot_notice_{DEPLOY_ID}")
 
@@ -95,7 +101,6 @@ os.makedirs(LOCK_DIR, exist_ok=True)
 GROUP_ACTIVE_PATH = os.path.join(PERSIST_DIR, "GROUP_ACTIVE")
 
 def _set_group_active(active: bool, group_idx: int | None = None, symbols: list | None = None):
-    """그룹 경계에서만 호출. 파일 존재=학습 중 그룹 활성."""
     try:
         if active:
             with open(GROUP_ACTIVE_PATH, "w", encoding="utf-8") as f:
@@ -130,6 +135,14 @@ try:
     _pl_clear(); print("[BOOT] predict lock stale-GC done")
 except Exception as e:
     print(f"[BOOT] predict lock GC failed: {e}")
+
+# [ADD] BOOT: 남은 그룹학습 락 제거
+try:
+    if os.path.exists(GROUP_TRAIN_LOCK):
+        os.remove(GROUP_TRAIN_LOCK)
+        print("[BOOT] stale GROUP_TRAIN_LOCK removed"); sys.stdout.flush()
+except Exception as e:
+    print(f"[BOOT] GROUP_TRAIN_LOCK cleanup failed: {e}"); sys.stdout.flush()
 
 def _acquire_global_lock():
     try:
@@ -385,8 +398,8 @@ def start_scheduler():
     def 평가작업(strategy):
         def wrapped():
             try:
-                if _is_training() or os.path.exists(LOCK_PATH):
-                    print(f"[EVAL] skip: training/lock active (strategy={strategy})"); sys.stdout.flush()
+                if _is_training() or os.path.exists(LOCK_PATH) or _is_group_active_file() or os.path.exists(GROUP_TRAIN_LOCK):
+                    print(f"[EVAL] skip: training/lock/group-active (strategy={strategy})"); sys.stdout.flush()
                     return
                 ts = now_kst().strftime("%Y-%m-%d %H:%M:%S")
                 print(f"[EVAL][{ts}] 전략={strategy} 시작"); sys.stdout.flush()
@@ -425,8 +438,8 @@ def start_scheduler():
 
     def _predict_job():
         try:
-            if _is_training() or os.path.exists(LOCK_PATH):
-                print("[PREDICT] skip: training/lock active"); sys.stdout.flush()
+            if _is_training() or os.path.exists(LOCK_PATH) or _is_group_active_file() or os.path.exists(GROUP_TRAIN_LOCK):
+                print("[PREDICT] skip: training/lock/group-active"); sys.stdout.flush()
                 return
             _pl_clear()
             print("[PREDICT] trigger_run start"); sys.stdout.flush()
@@ -538,7 +551,7 @@ def _init_background_once():
             ensure_failure_db(); print("✅ failure_patterns DB 초기화 완료")
 
             # 필수 경로 및 빈 로그 보장
-            for p in ["/persistent/importances", "/persistent/guanwu/incoming", "/persistent/logs"]:
+            for p in ["/persistent/importances", "/persistent/guanwu/incoming", "/persistent/logs", "/persistent/run"]:
                 os.makedirs(p, exist_ok=True)
             try: ensure_train_log_exists()
             except Exception: pass
@@ -798,8 +811,8 @@ def diag_e2e():
 @app.route("/run")
 def run():
     try:
-        if os.path.exists(LOCK_PATH) or _is_training():
-            return "⏸️ 학습/초기화 진행 중: 예측 시작 차단됨", 423
+        if os.path.exists(LOCK_PATH) or _is_training() or _is_group_active_file() or os.path.exists(GROUP_TRAIN_LOCK):
+            return "⏸️ 학습/초기화/그룹학습 진행 중: 예측 시작 차단됨", 423
         print("[RUN] 전략별 예측 실행"); sys.stdout.flush()
         _pl_clear()
         _safe_open_gate("route_run")
@@ -898,6 +911,7 @@ def train_symbols():
     try:
         if os.path.exists(LOCK_PATH):
             return f"⏸️ 초기화 중: 그룹/선택 학습 시작 차단됨", 423
+
         def _ensure_single_loop(force_flag: bool):
             if _is_training():
                 if not force_flag:
@@ -907,6 +921,7 @@ def train_symbols():
                 except Exception:
                     pass
             return True, None
+
         if request.method == "GET":
             group_idx = int(request.args.get("group", -1))
             force = request.args.get("force", "0") == "1"
@@ -916,28 +931,39 @@ def train_symbols():
             if not ok: return resp
             group_symbols = SYMBOL_GROUPS[group_idx]
             print(f"🚀 그룹 학습 요청됨 → 그룹 #{group_idx} | 심볼: {group_symbols}")
-            # 그룹 시작: 게이트 닫기 + GROUP_ACTIVE 생성
+            # 그룹 시작: 게이트 닫기 + GROUP_ACTIVE 생성 + 그룹학습 락 생성
             _safe_close_gate("train_group_start")
             _set_group_active(True, group_idx=group_idx, symbols=group_symbols)
+            try:
+                with open(GROUP_TRAIN_LOCK, "w", encoding="utf-8") as f:
+                    f.write(f"group={group_idx} started={datetime.datetime.utcnow().isoformat()}\n")
+                print("[GROUP-LOCK] created"); sys.stdout.flush()
+            except Exception as e:
+                print(f"[GROUP-LOCK] create failed: {e}"); sys.stdout.flush()
 
             def _worker():
                 try:
                     _train_models_safe(group_symbols)
-                    # 그룹 완주 확인 실패 시 GROUP_ACTIVE 유지
                     if not group_all_complete():
                         print("[GROUP-AFTER] 미완료: group_all_complete()=False → 예측 생략"); return
                     if not ready_for_group_predict():
                         print("[GROUP-AFTER] 미완료: ready_for_group_predict()=False → 예측 생략"); return
-                    # 그룹 종료: 예측 트리거(게이트는 _predict_after_training에서 open) + GROUP_ACTIVE 제거
                     _predict_after_training(group_symbols, source_note=f"group{group_idx}_after_train")
                     try:
                         mark_group_predicted(); print("[GROUP-AFTER] mark_group_predicted() 호출 완료")
                     except Exception as e:
                         print(f"[GROUP-AFTER] mark_group_predicted 예외: {e}")
                 finally:
-                    # 종료 시점에만 GROUP_ACTIVE 삭제
+                    # 종료 시점에만 GROUP_ACTIVE 삭제 + 그룹학습 락 제거
                     if group_all_complete() and ready_for_group_predict():
                         _set_group_active(False)
+                    try:
+                        if os.path.exists(GROUP_TRAIN_LOCK):
+                            os.remove(GROUP_TRAIN_LOCK)
+                            print("[GROUP-LOCK] removed"); sys.stdout.flush()
+                    except Exception as e:
+                        print(f"[GROUP-LOCK] remove failed: {e}"); sys.stdout.flush()
+
             threading.Thread(target=_worker, daemon=True).start()
             return f"✅ 그룹 #{group_idx} 학습 시작됨 (완료 검증 통과 시 학습 직후 예측, 이후 mark_group_predicted)"
         else:
@@ -948,7 +974,7 @@ def train_symbols():
                 return "❌ 유효하지 않은 symbols 리스트", 400
             ok, resp = _ensure_single_loop(force)
             if not ok: return resp
-            # 선택 학습은 그룹 경계 아님 → GROUP_ACTIVE 비조작
+            # 선택 학습은 그룹 경계 아님 → GROUP_ACTIVE 비조작, 그룹 락 비사용
             _safe_close_gate("train_selected_start")
             def _worker():
                 try:
@@ -1058,7 +1084,13 @@ def reset_all(key=None):
                     p = os.path.join(PERSIST_DIR, name)
                     if name in keep: continue
                     if os.path.isdir(p):
-                        if name not in {"logs", "models", "ssl_models"}: shutil.rmtree(p, ignore_errors=True)
+                        if name not in {"logs", "models", "ssl_models", "run"}: shutil.rmtree(p, ignore_errors=True)
+                        if name == "run":
+                            try:
+                                for f in os.listdir(p):
+                                    try: os.remove(os.path.join(p, f))
+                                    except Exception: pass
+                            except Exception: pass
                     else:
                         try: os.remove(p)
                         except Exception: pass
@@ -1139,9 +1171,8 @@ def predict_now():
             if not stopped:
                 return "❌ 학습 정지 실패로 예측 취소됨", 423
 
-        if os.path.exists(LOCK_PATH):
-            try: os.remove(LOCK_PATH)
-            except Exception: pass
+        if os.path.exists(LOCK_PATH) or _is_group_active_file() or os.path.exists(GROUP_TRAIN_LOCK):
+            return "⏸️ 초기화/그룹학습 중: 예측 시작 차단됨", 423
         _pl_clear()
         _safe_open_gate("predict_now")
 
