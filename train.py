@@ -1,4 +1,4 @@
-# train.py — SPEED v2.1 (GROUP_ACTIVE 마커: 그룹 경계 전용)
+# train.py — SPEED v2.2 (GROUP_ACTIVE + GROUP_TRAIN_LOCK: 그룹 경계 전용, 그룹 진행 중 자동예측 차단)
 # -*- coding: utf-8 -*-
 import os, time, glob, shutil, json, random, traceback, threading, gc, csv
 from datetime import datetime
@@ -263,9 +263,15 @@ PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC","180"))
 # === 중요도 저장 플래그 ===
 IMPORTANCE_ENABLE = os.getenv("IMPORTANCE_ENABLE", "1") == "1"
 
-# === [NEW] GROUP_ACTIVE 마커 ===
+# === GROUP_ACTIVE + GROUP_TRAIN_LOCK ===
 PERSIST_DIR = "/persistent"
 GROUP_ACTIVE_PATH = os.path.join(PERSIST_DIR, "GROUP_ACTIVE")
+
+# [ADD] 그룹 학습 락 폴더/파일 (app.py와 동일 키)
+RUN_DIR = os.path.join(PERSIST_DIR, "run")
+os.makedirs(RUN_DIR, exist_ok=True)
+GROUP_TRAIN_LOCK = os.path.join(RUN_DIR, "group_training.lock")
+
 def _set_group_active(active: bool, group_idx: int | None = None, symbols: list | None = None):
     try:
         if active:
@@ -282,6 +288,28 @@ def _set_group_active(active: bool, group_idx: int | None = None, symbols: list 
     except Exception as e:
         try: print(f"[GROUP_ACTIVE warn] {e}", flush=True)
         except: pass
+
+def _set_group_train_lock(active: bool, group_idx: int | None = None, symbols: list | None = None):
+    try:
+        if active:
+            with open(GROUP_TRAIN_LOCK, "w", encoding="utf-8") as f:
+                f.write(f"group={int(group_idx) if group_idx is not None else -1}\n")
+                f.write(f"ts={datetime.utcnow().isoformat()}\n")
+                f.write(f"symbols={','.join(symbols or [])}\n")
+        else:
+            if os.path.exists(GROUP_TRAIN_LOCK):
+                os.remove(GROUP_TRAIN_LOCK)
+    except Exception as e:
+        try: print(f"[GROUP_LOCK warn] {e}", flush=True)
+        except: pass
+
+def _is_group_active_file() -> bool:
+    try: return os.path.exists(GROUP_ACTIVE_PATH)
+    except Exception: return False
+
+def _is_group_lock_file() -> bool:
+    try: return os.path.exists(GROUP_TRAIN_LOCK)
+    except Exception: return False
 
 def _maybe_insert_failure(payload:dict, feature_vector:Optional[List[Any]] = None):
     try:
@@ -736,7 +764,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                             save_feature_importance(fi, symbol, strategy, model_type, method="permutation")
                         except OSError as e:
                             import errno
-                            if getattr(e, "errno", None) == errno.ENOSPC:
+                            if getattr(e, "errno", None) == errno.Enospc:
                                 _safe_print("[경고] 디스크 부족으로 feature importance 저장 스킵")
                             else:
                                 _safe_print(f"[경고] feature importance 저장 실패: {e}")
@@ -759,14 +787,18 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         res["ok"]=bool(res.get("models"))
         _safe_print(f"[RESULT] {symbol}-{strategy}-g{group_id} ok={res['ok']}")
 
-        # 🔥 학습 완료 직후 자동 예측 트리거
-        try:
-            pl_clear_stale(lock_key=(symbol, strategy))
-            pl_wait_free(max_wait_sec=10, lock_key=(symbol, strategy))
-            run_after_training(symbol, strategy)
-            _safe_print(f"[AUTO-PREDICT] triggered after training {symbol}-{strategy}")
-        except Exception as e:
-            _safe_print(f"[AUTO-PREDICT FAIL] {symbol}-{strategy} → {e}")
+        # 🔒 그룹 진행 중 자동예측 차단
+        if _is_group_active_file() or _is_group_lock_file():
+            _safe_print(f"[AUTO-PREDICT SKIP] group-active/lock → skip {symbol}-{strategy}")
+        else:
+            # 학습 완료 직후 자동 예측 트리거
+            try:
+                pl_clear_stale(lock_key=(symbol, strategy))
+                pl_wait_free(max_wait_sec=10, lock_key=(symbol, strategy))
+                run_after_training(symbol, strategy)
+                _safe_print(f"[AUTO-PREDICT] triggered after training {symbol}-{strategy}")
+            except Exception as e:
+                _safe_print(f"[AUTO-PREDICT FAIL] {symbol}-{strategy} → {e}")
 
         # 관우 요약 갱신
         try:
@@ -926,9 +958,12 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                 if stop_event is not None and stop_event.is_set(): break
                 _safe_print(f"🚀 [group] {idx+1}/{len(groups)} → {group}")
 
-                # === 그룹 시작: GROUP_ACTIVE 생성 ===
-                try: _set_group_active(True, group_idx=idx, symbols=group)
-                except Exception as e: _safe_print(f"[GROUP_ACTIVE set warn] {e}")
+                # === 그룹 시작: GROUP_ACTIVE + GROUP_TRAIN_LOCK 생성 ===
+                try:
+                    _set_group_active(True, group_idx=idx, symbols=group)
+                    _set_group_train_lock(True, group_idx=idx, symbols=group)
+                except Exception as e:
+                    _safe_print(f"[GROUP mark warn] {e}")
 
                 completed_syms, partial_syms = train_models(group, stop_event=stop_event, ignore_should=force_full_pass)
                 if stop_event is not None and stop_event.is_set(): break
@@ -988,9 +1023,12 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                 try: close_predict_gate(note=f"train:group{idx+1}_end")
                 except Exception as e: _safe_print(f"[gate close warn] {e}")
 
-                # === 그룹 종료: GROUP_ACTIVE 삭제 ===
-                try: _set_group_active(False)
-                except Exception as e: _safe_print(f"[GROUP_ACTIVE clear warn] {e}")
+                # === 그룹 종료: GROUP_ACTIVE + GROUP_TRAIN_LOCK 삭제 ===
+                try:
+                    _set_group_active(False)
+                    _set_group_train_lock(False)
+                except Exception as e:
+                    _safe_print(f"[GROUP clear warn] {e}")
 
                 if sleep_sec>0:
                     for _ in range(sleep_sec):
@@ -1058,12 +1096,14 @@ def train_symbol(symbol: str, strategy: str, group_id: int | None = None) -> dic
     try:
         if res.get("models"):
             mark_symbol_trained(symbol)
-            try:
-                from predict import predict
-                _safe_predict_with_timeout(predict_fn=predict, symbol=symbol, strategy=strategy,
-                                           source="train_symbol", model_type=None, timeout=PREDICT_TIMEOUT_SEC)
-            except Exception:
-                pass
+            # 그룹 경계 외 개별 학습 시에만 즉시 예측 허용
+            if not (_is_group_active_file() or _is_group_lock_file()):
+                try:
+                    from predict import predict
+                    _safe_predict_with_timeout(predict_fn=predict, symbol=symbol, strategy=strategy,
+                                               source="train_symbol", model_type=None, timeout=PREDICT_TIMEOUT_SEC)
+                except Exception:
+                    pass
     except Exception:
         pass
     return res
@@ -1073,9 +1113,12 @@ def train_group(group_id: int | None = None) -> dict:
     symbols = get_current_group_symbols() if group_id is None else (SYMBOL_GROUPS[idx] if 0 <= idx < len(SYMBOL_GROUPS) else [])
     out = {"group_index": idx, "symbols": symbols, "results": {}}
 
-    # === 그룹 시작: GROUP_ACTIVE 생성 ===
-    try: _set_group_active(True, group_idx=idx, symbols=symbols)
-    except Exception as e: _safe_print(f"[GROUP_ACTIVE set warn] {e}")
+    # === 그룹 시작: GROUP_ACTIVE + GROUP_TRAIN_LOCK 생성 ===
+    try:
+        _set_group_active(True, group_idx=idx, symbols=symbols)
+        _set_group_train_lock(True, group_idx=idx, symbols=symbols)
+    except Exception as e:
+        _safe_print(f"[GROUP mark warn] {e}")
 
     completed, partial = train_models(symbols, stop_event=None, ignore_should=False)
     out["completed"] = completed; out["partial"] = partial
@@ -1110,9 +1153,12 @@ def train_group(group_id: int | None = None) -> dict:
             try: close_predict_gate(note=f"train_group:idx{idx}_end")
             except Exception: pass
 
-    # === 그룹 종료: GROUP_ACTIVE 삭제 ===
-    try: _set_group_active(False)
-    except Exception as e: _safe_print(f"[GROUP_ACTIVE clear warn] {e}")
+    # === 그룹 종료: GROUP_ACTIVE + GROUP_TRAIN_LOCK 삭제 ===
+    try:
+        _set_group_active(False)
+        _set_group_train_lock(False)
+    except Exception as e:
+        _safe_print(f"[GROUP clear warn] {e}")
 
     return out
 
