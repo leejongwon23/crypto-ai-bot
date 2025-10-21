@@ -1,4 +1,4 @@
-# scheduler_cleanup.py — light-first, collision-safe cleanup scheduler (patched: stale predict-lock GC)
+# scheduler_cleanup.py — light-first, collision-safe cleanup scheduler (patched: stale predict-lock GC API 정합)
 # - 학습/예측 타이트 구간에서는 '가벼운 모드'만 실행하거나 스킵
 # - 무거운 정리는 한가할 때만 (학습/락/게이트 닫힘/예측락 등 없을 때)
 # - app.py 에서 start_cleanup_scheduler(), stop_cleanup_scheduler() 사용
@@ -16,22 +16,21 @@ try:
 except Exception:
     def _is_training(): return False
 
-# ✅ 선택 의존: predict_lock (stale일 때만 정리)
+# ✅ 선택 의존: predict_lock (stale만 정리) — 프로젝트 표준 API에 맞춤
 try:
     import predict_lock as _pl
-    _pl_clear = getattr(_pl, "clear", None)                  # clear(force=..., stale_sec=..., tag=...)
-    _pl_is_stale = getattr(_pl, "_is_stale", None)           # _is_stale(stale_sec=...)
+    _pl_clear_stale = getattr(_pl, "clear_stale_predict_lock", None)  # no-arg 또는 내부 TTL 사용
 except Exception:
-    _pl, _pl_clear, _pl_is_stale = None, None, None
+    _pl, _pl_clear_stale = None, None
 
 def _clear_stale_predict_lock(tag="cleanup"):
-    """예측락을 무조건 지우지 말고, stale일 때만 안전하게 정리."""
+    """예측락을 무조건 지우지 말고, predict_lock의 stale 정리 API만 호출."""
     try:
-        if _pl_clear is None or _pl_is_stale is None:
+        if _pl_clear_stale is None:
             return
-        # stale이면만 강제 제거
-        if _pl_is_stale(stale_sec=int(os.getenv("PREDICT_LOCK_STALE_SEC", "60"))):
-            _pl_clear(force=True, stale_sec=0, tag=tag)
+        # 내부에서 stale 판단을 수행. 필요 시 tag를 로깅용 환경에 남김.
+        os.environ["PREDICT_LOCK_GC_TAG"] = str(tag)
+        _pl_clear_stale()
     except Exception:
         # 어떤 이유로든 실패해도 정리 루틴은 계속 진행
         pass
@@ -47,12 +46,22 @@ LOCK_DIR  = getattr(safe_cleanup, "LOCK_DIR", "/persistent/locks")
 LOCK_PATH = getattr(safe_cleanup, "LOCK_PATH", os.path.join(LOCK_DIR, "train_or_predict.lock"))
 
 # 튜너블 파라미터 (환경변수로 오버라이드 가능)
-CLEAN_INTERVAL_MIN   = int(os.getenv("CLEAN_INTERVAL_MIN", "30"))  # 기본 30분
-LIGHT_ONLY_IF_BUSY   = os.getenv("CLEAN_LIGHT_ONLY_IF_BUSY", "1") == "1"
-HEAVY_ALLOW_IF_IDLE  = os.getenv("CLEAN_HEAVY_ALLOW_IF_IDLE", "1") == "1"
-HEAVY_MIN_GAP_MIN    = int(os.getenv("CLEAN_HEAVY_MIN_GAP_MIN", "180"))  # 무거운 정리 최소 간격(3h)
+def _env_int(k, d): 
+    try: return int(os.getenv(k, str(d)))
+    except Exception: return d
+def _env_float(k, d): 
+    try: return float(os.getenv(k, str(d)))
+    except Exception: return d
+def _env_bool(k, d): 
+    v = os.getenv(k, None)
+    return d if v is None else str(v).strip().lower() in {"1","true","y","yes","on"}
+
+CLEAN_INTERVAL_MIN   = _env_int("CLEAN_INTERVAL_MIN", 30)  # 기본 30분
+LIGHT_ONLY_IF_BUSY   = _env_bool("CLEAN_LIGHT_ONLY_IF_BUSY", True)
+HEAVY_ALLOW_IF_IDLE  = _env_bool("CLEAN_HEAVY_ALLOW_IF_IDLE", True)
+HEAVY_MIN_GAP_MIN    = _env_int("CLEAN_HEAVY_MIN_GAP_MIN", 180)  # 무거운 정리 최소 간격(3h)
 DISK_HARDCAP_GB      = float(getattr(safe_cleanup, "HARD_CAP_GB", 9.6))
-DISK_SOFTCAP_GB      = float(os.getenv("CLEAN_SOFTCAP_GB", "8.0"))      # 소프트 캡(넘으면 heavy 고려)
+DISK_SOFTCAP_GB      = _env_float("CLEAN_SOFTCAP_GB", 8.0)      # 소프트 캡(넘으면 heavy 고려)
 
 _tz = pytz.timezone("Asia/Seoul")
 _now = lambda: datetime.datetime.now(_tz)
