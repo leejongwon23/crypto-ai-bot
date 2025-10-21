@@ -91,6 +91,34 @@ LOCK_DIR   = getattr(safe_cleanup, "LOCK_DIR", os.path.join(PERSIST_DIR, "locks"
 LOCK_PATH  = getattr(safe_cleanup, "LOCK_PATH", os.path.join(LOCK_DIR, "train_or_predict.lock"))
 os.makedirs(LOCK_DIR, exist_ok=True)
 
+# === GROUP_ACTIVE 마커 경로 ===
+GROUP_ACTIVE_PATH = os.path.join(PERSIST_DIR, "GROUP_ACTIVE")
+
+def _set_group_active(active: bool, group_idx: int | None = None, symbols: list | None = None):
+    """그룹 경계에서만 호출. 파일 존재=학습 중 그룹 활성."""
+    try:
+        if active:
+            with open(GROUP_ACTIVE_PATH, "w", encoding="utf-8") as f:
+                ts = datetime.datetime.utcnow().isoformat()
+                syms = ",".join(symbols or [])
+                f.write(f"ts={ts}\n")
+                if group_idx is not None:
+                    f.write(f"group={group_idx}\n")
+                f.write(f"symbols={syms}\n")
+            print(f"[GROUP_ACTIVE] set group={group_idx} symbols={symbols}"); sys.stdout.flush()
+        else:
+            if os.path.exists(GROUP_ACTIVE_PATH):
+                os.remove(GROUP_ACTIVE_PATH)
+                print("[GROUP_ACTIVE] cleared"); sys.stdout.flush()
+    except Exception as e:
+        print(f"[GROUP_ACTIVE] set/clear err: {e}"); sys.stdout.flush()
+
+def _is_group_active_file() -> bool:
+    try:
+        return os.path.exists(GROUP_ACTIVE_PATH)
+    except Exception:
+        return False
+
 # BOOT: orphan 전역락 제거 + 예측락 stale GC
 if os.path.exists(LOCK_PATH):
     try:
@@ -888,21 +916,28 @@ def train_symbols():
             if not ok: return resp
             group_symbols = SYMBOL_GROUPS[group_idx]
             print(f"🚀 그룹 학습 요청됨 → 그룹 #{group_idx} | 심볼: {group_symbols}")
+            # 그룹 시작: 게이트 닫기 + GROUP_ACTIVE 생성
             _safe_close_gate("train_group_start")
+            _set_group_active(True, group_idx=group_idx, symbols=group_symbols)
+
             def _worker():
                 try:
                     _train_models_safe(group_symbols)
+                    # 그룹 완주 확인 실패 시 GROUP_ACTIVE 유지
                     if not group_all_complete():
                         print("[GROUP-AFTER] 미완료: group_all_complete()=False → 예측 생략"); return
                     if not ready_for_group_predict():
                         print("[GROUP-AFTER] 미완료: ready_for_group_predict()=False → 예측 생략"); return
+                    # 그룹 종료: 예측 트리거(게이트는 _predict_after_training에서 open) + GROUP_ACTIVE 제거
                     _predict_after_training(group_symbols, source_note=f"group{group_idx}_after_train")
                     try:
                         mark_group_predicted(); print("[GROUP-AFTER] mark_group_predicted() 호출 완료")
                     except Exception as e:
                         print(f"[GROUP-AFTER] mark_group_predicted 예외: {e}")
                 finally:
-                    pass
+                    # 종료 시점에만 GROUP_ACTIVE 삭제
+                    if group_all_complete() and ready_for_group_predict():
+                        _set_group_active(False)
             threading.Thread(target=_worker, daemon=True).start()
             return f"✅ 그룹 #{group_idx} 학습 시작됨 (완료 검증 통과 시 학습 직후 예측, 이후 mark_group_predicted)"
         else:
@@ -913,6 +948,7 @@ def train_symbols():
                 return "❌ 유효하지 않은 symbols 리스트", 400
             ok, resp = _ensure_single_loop(force)
             if not ok: return resp
+            # 선택 학습은 그룹 경계 아님 → GROUP_ACTIVE 비조작
             _safe_close_gate("train_selected_start")
             def _worker():
                 try:
