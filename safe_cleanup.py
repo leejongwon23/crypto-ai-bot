@@ -1,4 +1,4 @@
-# safe_cleanup.py (LOCK-SAFE FINAL — 절대 .lock 삭제/접근 금지 + 10GB 서버 최적화)
+# safe_cleanup.py (LOCK-SAFE FINAL — 절대 .lock/state 삭제 금지 + 10GB 서버 최적화)
 import os
 import time
 import threading
@@ -37,6 +37,10 @@ LOG_DIR = os.path.join(ROOT_DIR, "logs")
 MODEL_DIR = os.path.join(ROOT_DIR, "models")
 SSL_DIR = os.path.join(ROOT_DIR, "ssl_models")
 LOCK_DIR = os.path.join(ROOT_DIR, "locks")
+STATE_DIR = os.path.join(ROOT_DIR, "state")  # ✅ 보호 대상
+IMPORTANCES_DIR = os.path.join(ROOT_DIR, "importances")  # ✅ 정리 후 보장
+GUANWU_IN_DIR = os.path.join(ROOT_DIR, "guanwu", "incoming")  # ✅ 정리 후 보장
+GW_SUMMARY_CSV = os.path.join(GUANWU_IN_DIR, "gwanwoo_summary.csv")  # ✅ 없으면 헤더 생성
 DELETED_LOG_PATH = os.path.join(LOG_DIR, "deleted_log.txt")
 
 # ====== 정책(10GB 환경 기본값) + ✅ SAFE_* 환경변수로 덮어쓰기 ======
@@ -79,6 +83,7 @@ ROOT_CSVS = [
 ]
 
 LOCK_SUFFIX = ".lock"
+PROTECT_DIRS = {os.path.abspath(LOCK_DIR), os.path.abspath(STATE_DIR)}  # ✅ 보호 디렉터리 집합
 
 # ----------------- 공통 유틸 -----------------
 def _size_bytes(path: str) -> int:
@@ -92,11 +97,12 @@ def get_directory_size_gb(path):
         return 0.0
     total = 0
     for dirpath, _, filenames in os.walk(path):
-        # 🔒 LOCK 디렉터리는 아예 순회 제외
-        if os.path.abspath(dirpath).startswith(os.path.abspath(LOCK_DIR)):
+        # 🔒 LOCK/STATE 디렉터리는 아예 순회 제외
+        ab = os.path.abspath(dirpath)
+        if any(ab.startswith(p) for p in PROTECT_DIRS):
             continue
         for f in filenames:
-            # 🔒 어떤 경로라도 *.lock 은 용량 계산 대상에서도 제외(안전)
+            # 🔒 어떤 경로라도 *.lock 은 용량 계산 대상에서 제외
             if f.endswith(LOCK_SUFFIX):
                 continue
             fp = os.path.join(dirpath, f)
@@ -108,8 +114,9 @@ def _human_gb(v): return f"{v:.2f}GB"
 
 def _list_files(dir_path):
     try:
-        # 🔒 LOCK_DIR 은 호출선에서 절대 넘기지 않지만, 혹시 넘어와도 반환을 비움
-        if os.path.abspath(dir_path).startswith(os.path.abspath(LOCK_DIR)):
+        ab = os.path.abspath(dir_path)
+        # 🔒 보호 디렉터리는 반환 비움
+        if any(ab.startswith(p) for p in PROTECT_DIRS):
             return []
         return [os.path.join(dir_path, f) for f in os.listdir(dir_path)]
     except Exception:
@@ -120,6 +127,21 @@ def _ensure_dirs():
     os.makedirs(MODEL_DIR, exist_ok=True)
     os.makedirs(SSL_DIR, exist_ok=True)
     os.makedirs(LOCK_DIR, exist_ok=True)
+    os.makedirs(STATE_DIR, exist_ok=True)         # ✅ 존재 보장
+    os.makedirs(IMPORTANCES_DIR, exist_ok=True)   # ✅ 존재 보장
+    os.makedirs(GUANWU_IN_DIR, exist_ok=True)     # ✅ 존재 보장
+
+def _ensure_gwanwoo_summary_csv():
+    """관우 요약 CSV가 없으면 헤더만 생성."""
+    try:
+        if not os.path.exists(GW_SUMMARY_CSV):
+            os.makedirs(GUANWU_IN_DIR, exist_ok=True)
+            with open(GW_SUMMARY_CSV, "w", encoding="utf-8-sig") as f:
+                # 컬럼은 사용처가 없으므로 최소 공통 헤더로 초기화
+                f.write("timestamp,symbol,strategy,summary\n")
+            print(f"[init] gwanwoo_summary.csv created with header at {GW_SUMMARY_CSV}")
+    except Exception as e:
+        print(f"[init] gwanwoo_summary.csv init failed: {e}")
 
 def _is_within(child: str, parent: str) -> bool:
     try:
@@ -130,13 +152,14 @@ def _is_within(child: str, parent: str) -> bool:
         return False
 
 def _is_lock_file(path: str) -> bool:
-    """어떤 경로라도 .lock 파일 또는 LOCK_DIR 내부는 무조건 보호."""
+    """어떤 경로라도 .lock 파일 또는 보호 디렉터리 내부는 무조건 보호."""
     try:
         if not isinstance(path, str):
             return False
         if path.endswith(LOCK_SUFFIX):
             return True
-        return _is_within(path, LOCK_DIR)
+        ab = os.path.abspath(path)
+        return any(ab.startswith(p) for p in PROTECT_DIRS)
     except Exception:
         return False
 
@@ -154,7 +177,7 @@ def _is_model_file(path: str) -> bool:
 def _should_delete_file(fname: str) -> bool:
     """
     기존 규칙 + (NEW) models/ 안의 모델 확장자는 접두사 없이도 정리 대상으로 인정.
-    단, 🔒 락 파일/디렉터리는 절대 삭제하지 않음.
+    단, 🔒 락/상태 디렉터리는 절대 삭제하지 않음.
     """
     if _is_lock_file(fname):
         return False
@@ -178,7 +201,7 @@ def _is_recent(path: str, hours: float) -> bool:
 def _rollover_csv(path: str, max_mb: int, backups: int):
     if not os.path.isfile(path):
         return []
-    # 🔒 혹시 CSV 경로가 잘못 들어와도 .lock 은 무조건 제외
+    # 🔒 혹시 CSV 경로가 잘못 들어와도 .lock/STATE 는 무조건 제외
     if _is_lock_file(path):
         return []
     size_mb = _size_bytes(path) / (1024 ** 2)
@@ -202,7 +225,7 @@ def _rollover_csv(path: str, max_mb: int, backups: int):
 
 def _delete_file(path: str, deleted_log: list):
     try:
-        # 🔒 락 파일/폴더는 절대 삭제 금지
+        # 🔒 보호 파일/폴더는 절대 삭제 금지
         if _is_lock_file(path):
             return
         if DRYRUN:
@@ -468,7 +491,7 @@ def emergency_purge(target_gb=None):
     - 접두사/보호시간 무시
     - ssl_models → models → logs 순서
     - 오래된 파일부터 삭제
-    - 🔒 어떤 경우에도 .lock/LOCK_DIR 은 삭제하지 않음
+    - 🔒 어떤 경우에도 .lock/LOCK_DIR/STATE_DIR 은 삭제하지 않음
     - target_gb 미지정: max(SOFT_CAP_GB, HARD_CAP_GB - MIN_FREE_GB)
     """
     if SAFE_MODE:
@@ -492,7 +515,7 @@ def emergency_purge(target_gb=None):
         items.sort(key=lambda x: x[0])  # 오래된 것 먼저
         return [p for _, p in items]
 
-    print("[🆘 EMERGENCY] 즉시 강제 정리 시작 (락 보호 유지)")
+    print("[🆘 EMERGENCY] 즉시 강제 정리 시작 (락/상태 보호 유지)")
     ordered_dirs = [SSL_DIR, MODEL_DIR, LOG_DIR]
     candidates = []
     for d in ordered_dirs:
@@ -516,6 +539,10 @@ def emergency_purge(target_gb=None):
         except Exception as e:
             print(f"[⚠️ EMERGENCY 로그 기록 실패] → {e}")
             print(f"[🆘 EMERGENCY] 총 {len(deleted)}개 파일 삭제(로그 기록 생략)")
+
+    # ✅ 정리 후 필수 경로/요약 보장
+    _ensure_dirs()
+    _ensure_gwanwoo_summary_csv()
 
 def run_emergency_purge():
     """앱에서 한 줄로 호출하기 위한 래퍼"""
@@ -583,6 +610,10 @@ def auto_delete_old_logs():
         except Exception as e:
             print(f"[⚠️ 삭제 로그 기록 실패] → {e}")
             print(f"[🧹 삭제 완료] 총 {len(deleted)}개 파일 정리(로그 기록 생략)")
+
+    # ✅ 정리 후 필수 경로/요약 보장
+    _ensure_dirs()
+    _ensure_gwanwoo_summary_csv()
 
 def cleanup_logs_and_models():
     if SAFE_MODE:
