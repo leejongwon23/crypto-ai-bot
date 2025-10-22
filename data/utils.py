@@ -24,6 +24,9 @@ from config import (
     get_NUM_CLASSES as cfg_get_NUM_CLASSES,
     get_EVAL_RUNTIME,
     MIN_FEATURES,
+    # === CHANGE === CV, 경계 밴드 가져오기
+    get_CV_CONFIG,
+    BOUNDARY_BAND,
 )
 
 BASE_URL = "https://api.bybit.com"
@@ -799,7 +802,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
         for c in ["open", "high", "low", "close", "volume"]:
             df[c] = pd.to_numeric(df.get(c, np.nan), errors="coerce")
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
-        df.dropna(subset=["timestamp", "open", "high", "low", "close", "volume"], inplace=True)
+        df.dropna(subset=["timestamp", "open", "high", "low", "volume", "close"], inplace=True)
 
         # 시간 정렬과 연속구간 보장
         if not df.empty:
@@ -994,7 +997,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     if "datetime" in df.columns: df["timestamp"] = df["datetime"]
     elif "timestamp" not in df.columns: df["timestamp"] = pd.to_datetime("now", utc=True).tz_convert("Asia/Seoul")
     df["strategy"] = strategy
-    for c in ["open","high","low","close","volume"]:
+    for c in ["open","high","low","close","volume"]]:
         if c not in df.columns: df[c] = 0.0
     df = df[["timestamp","open","high","low","close","volume"]]
     if len(df) < 20:
@@ -1272,19 +1275,47 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             y = y[keep_idx]
             X = X_dedup
 
-        # 경계 보강
+        # === CHANGE === 1) 클래스 다양성 폴백(uniq<3 → 퍼센타일 리라벨)
         try:
-            eps_bp = int(os.getenv("BOUNDARY_EPS_BP", "30"))
-            if class_ranges_used is not None and len(class_ranges_used) > 1 and eps_bp > 0:
-                eps = eps_bp / 10000.0
+            uniq = np.unique(y)
+            if uniq.size < 3:
+                # 가능한 값 시퀀스 확보
+                vals = None
+                if "signed_vals" in locals() and len(signed_vals) >= len(y):
+                    vals = np.asarray(signed_vals[: len(y)], dtype=np.float64)
+                else:
+                    closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float64)
+                    if len(closes) > window + 1:
+                        pct = np.diff(closes) / (closes[:-1] + 1e-6)
+                        vals = np.asarray(pct[-len(y):], dtype=np.float64)
+                if vals is not None and vals.size == len(y):
+                    n_bins = int(cfg_get_NUM_CLASSES()) or 8
+                    qs = np.quantile(vals, np.linspace(0, 1, n_bins + 1))
+                    # 경계쌍으로 변환
+                    relabel_ranges = [(float(qs[i]), float(qs[i+1])) for i in range(n_bins)]
+                    y_new = _label_with_edges(vals, relabel_ranges)
+                    if np.unique(y_new).size >= 3:
+                        y = y_new
+                        class_ranges_used = relabel_ranges
+        except Exception:
+            pass
+
+        # === CHANGE === 2) 경계 근접 보강 — BOUNDARY_BAND 연동 + env 오버라이드
+        try:
+            eps_bp_env = os.getenv("BOUNDARY_EPS_BP", None)
+            if eps_bp_env is not None:
+                eps = max(0.0, float(eps_bp_env) / 10000.0)
+            else:
+                eps = float(BOUNDARY_BAND)  # config.py의 BOUNDARY_BAND 사용
+            if class_ranges_used is not None and len(class_ranges_used) > 1 and eps > 0:
                 stops = np.array([b for (_, b) in class_ranges_used[:-1]], dtype=np.float64)
                 vals = None
                 if "signed_vals" in locals() and len(signed_vals) >= len(y):
                     vals = np.asarray(signed_vals[: len(y)], dtype=np.float64)
-                if vals is None:
+                else:
                     closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float64)
                     pct = np.diff(closes) / (closes[:-1] + 1e-6)
-                    vals = np.asarray(pct[-len(y) :], dtype=np.float64)
+                    vals = np.asarray(pct[-len(y):], dtype=np.float64)
                 near = np.any(np.abs(vals[:, None] - stops[None, :]) <= eps, axis=1)
                 idx_edge = np.where(near)[0]
                 if idx_edge.size > 0:
@@ -1294,7 +1325,18 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         except Exception:
             pass
 
-        # 소수 클래스 증강
+        # === CHANGE === 3) 클래스 최소 샘플 보장(CV min_per_class) — 증강 기반 보완
+        try:
+            cv_cfg = get_CV_CONFIG()
+            min_per_class = int(cv_cfg.get("min_per_class", 3))
+            if min_per_class > 0:
+                uniq, cnts = np.unique(y, return_counts=True)
+                if uniq.size > 0 and np.any(cnts < min_per_class):
+                    X, y = augment_for_min_count(X, y, target_count=min_per_class)
+        except Exception:
+            pass
+
+        # 추가적으로 심각한 쏠림이면 상한까지 보강(기존 로직 유지)
         try:
             if int(os.getenv("AUG_ENABLE", "1")) == 1 and len(y) > 0:
                 uniq, cnts = np.unique(y, return_counts=True)
