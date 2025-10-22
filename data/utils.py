@@ -745,52 +745,108 @@ def get_kline_interval(symbol: str, interval: str, limit: int) -> pd.DataFrame:
         return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
 
 def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
+    """거래소 통합 수집 → 정규화 → 슬랙 컷 → 연속구간 보장 → 한도(limit) 정확히 맞춤."""
     try:
+        # 슬랙 기본값
         if not end_slack_min:
-            try: end_slack_min = int(get_EVAL_RUNTIME().get("price_window_slack_min", 10))
-            except Exception: end_slack_min = 0
-        cfg = STRATEGY_CONFIG.get(strategy, {"limit": 300, "interval": "D"})
-        limit = int(cfg.get("limit", 300)); interval = cfg.get("interval", "D")
+            try:
+                end_slack_min = int(get_EVAL_RUNTIME().get("price_window_slack_min", 10))
+            except Exception:
+                end_slack_min = 0
 
+        # 전략 파라미터
+        cfg = STRATEGY_CONFIG.get(strategy, {"limit": 300, "interval": "D"})
+        limit = int(cfg.get("limit", 300))
+        interval = cfg.get("interval", "D")
+
+        # 메모리/디스크 캐시
         cache_key = f"{symbol.upper()}-{strategy}-slack{end_slack_min}"
         cached = CacheManager.get(cache_key, ttl_sec=600)
-        if cached is not None and not cached.empty: return cached
-        # 디스크 캐시 조회
+        if isinstance(cached, pd.DataFrame) and not cached.empty:
+            return cached
         cached_disk = _load_df_cache(symbol, strategy, interval, end_slack_min)
         if isinstance(cached_disk, pd.DataFrame) and not cached_disk.empty:
             CacheManager.set(cache_key, cached_disk)
             return cached_disk
 
+        # 원천 수집
         df_bybit = get_kline(symbol, interval=interval, limit=limit)
-        if not isinstance(df_bybit, pd.DataFrame): df_bybit = pd.DataFrame()
+        if not isinstance(df_bybit, pd.DataFrame):
+            df_bybit = pd.DataFrame()
         df_binance = pd.DataFrame()
         if (df_bybit.empty or len(df_bybit) < int(limit * 0.9)) and BINANCE_ENABLED and not _is_binance_blocked():
             df_binance = get_kline_binance(symbol, interval=interval, limit=limit)
+
+        # 병합·정규화
         dfs = [d for d in [df_bybit, df_binance] if isinstance(d, pd.DataFrame) and not d.empty]
         df = _normalize_df(pd.concat(dfs, ignore_index=True)) if dfs else pd.DataFrame()
+
+        # 최소 보정
         if df.empty:
-            print(f"[⚠️ 데이터부족] {symbol}/{strategy} → dummy 1row")
             now = pd.Timestamp.now(tz="Asia/Seoul")
-            df = pd.DataFrame({"timestamp":[now],"open":[1.0],"high":[1.0],"low":[1.0],"close":[1.0],"volume":[0.0],"datetime":[now]})
-            df.attrs["source_exchange"] = "DUMMY"  # 추적 편의
-        df = _clip_tail(df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True), limit)
-        srcs = []; 
-        if not df_bybit.empty: srcs.append("BYBIT")
-        if not df_binance.empty: srcs.append("BINANCE")
-        if "source_exchange" not in df.attrs or df.attrs["source_exchange"] == "":
+            df = pd.DataFrame(
+                {"timestamp": [now], "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [0.0], "datetime": [now]}
+            )
+            df.attrs["source_exchange"] = "DUMMY"
+
+        # 슬랙 컷: 최신 n분 제거
+        if end_slack_min > 0 and "timestamp" in df.columns and not df.empty:
+            ts = _parse_ts_series(df["timestamp"])
+            cutoff = ts.max() - pd.Timedelta(minutes=int(end_slack_min))
+            df = df.loc[ts <= cutoff].copy()
+
+        # 숫자 컬럼 보정 및 NaN/inf 제거
+        for c in ["open", "high", "low", "close", "volume"]:
+            df[c] = pd.to_numeric(df.get(c, np.nan), errors="coerce")
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df.dropna(subset=["timestamp", "open", "high", "low", "close", "volume"], inplace=True)
+
+        # 시간 정렬과 연속구간 보장
+        if not df.empty:
+            df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
+        # limit 정확히 맞추기
+        if len(df) > limit:
+            df = df.iloc[-limit:].reset_index(drop=True)
+
+        # 연속성 체크 후 파손 구간 제거
+        if not df.empty:
+            ts = _parse_ts_series(df["timestamp"])
+            diffs = ts.diff().dt.total_seconds().fillna(0)
+            # 음수 이동 제거
+            df = df.loc[diffs >= 0].reset_index(drop=True)
+
+        # 메타 정보
+        srcs = []
+        if not df_bybit.empty:
+            srcs.append("BYBIT")
+        if not df_binance.empty:
+            srcs.append("BINANCE")
+        if "source_exchange" not in df.attrs or not df.attrs["source_exchange"]:
             df.attrs["source_exchange"] = "+".join(srcs) if srcs else "UNKNOWN"
-        df.attrs["recent_rows"] = len(df)
+
+        df.attrs["recent_rows"] = int(len(df))
         df.attrs["augment_needed"] = len(df) < limit
         df.attrs["enough_for_training"] = len(df) >= int(limit * 0.9)
         df.attrs["not_enough_rows"] = len(df) < _PREDICT_MIN_WINDOW
-        CacheManager.set(cache_key, df); _save_df_cache(symbol, strategy, end_slack_min, df)
+
+        # 캐시 저장
+        CacheManager.set(cache_key, df)
+        _save_df_cache(symbol, strategy, end_slack_min, df)
         return df
+
     except Exception as e:
         print(f"[❌ get_kline_by_strategy 실패] {symbol}/{strategy}: {e}")
         safe_failed_result(symbol, strategy, reason=str(e))
         now = pd.Timestamp.now(tz="Asia/Seoul")
-        df = pd.DataFrame({"timestamp":[now],"open":[1.0],"high":[1.0],"low":[1.0],"close":[1.0],"volume":[0.0],"datetime":[now]})
+        df = pd.DataFrame(
+            {"timestamp": [now], "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [0.0], "datetime": [now]}
+        )
         df.attrs["source_exchange"] = "DUMMY"
+        df.attrs["recent_rows"] = 1
+        df.attrs["augment_needed"] = True
+        df.attrs["enough_for_training"] = False
+        df.attrs["not_enough_rows"] = True
         return df
 
 # ========================= 프리패치/티커 =========================
@@ -1072,7 +1128,9 @@ def _drop_duplicate_windows(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return X[keep_idx], np.array(keep_idx, dtype=np.int64)
 
 # ========================= 데이터셋 생성(라벨→서명수익→diff) =========================
+
 def create_dataset(features, window=10, strategy="단기", input_size=None):
+    """피처 리스트 → 스케일 → 윈도우 → 라벨. close/high/low 유효성과 최신 구간 길이 검증 강화."""
     import pandas as _pd
 
     def _dummy(symbol_name):
@@ -1080,7 +1138,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         y = np.zeros((1,), dtype=np.int64)
         return X, y
 
-    # 입력 검증 및 정리
     symbol_name = "UNKNOWN"
     if isinstance(features, list) and features and isinstance(features[0], dict) and "symbol" in features[0]:
         symbol_name = str(features[0]["symbol"]).upper()
@@ -1093,170 +1150,161 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         df["timestamp"] = _parse_ts_series(df.get("timestamp"))
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         df = df.drop(columns=["strategy"], errors="ignore")
-        # 숫자화
-        num_cols = [c for c in df.columns if c != "timestamp"]
-        for c in num_cols: df[c] = pd.to_numeric(df[c], errors="coerce")
-        df[num_cols] = _downcast_numeric(df[num_cols])
 
-        # 스케일링 입력 컬럼
+        # 라벨용 컬럼 유효성 체크
+        for c in ["close", "high", "low"]:
+            df[c] = pd.to_numeric(df.get(c, np.nan), errors="coerce")
+        df[["close", "high", "low"]] = df[["close", "high", "low"]].ffill()
+        df = df.dropna(subset=["close", "high", "low"])
+
+        # 스케일링 대상 숫자화
         feature_cols = [c for c in df.columns if c != "timestamp"]
-        if not feature_cols: return _dummy(symbol_name)
-        scaler = MinMaxScaler(); scaled = scaler.fit_transform(df[feature_cols].astype(np.float32))
+        for c in feature_cols:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df.dropna(subset=feature_cols)
+
+        if len(df) <= window:
+            safe_failed_result(symbol_name, strategy, reason="after_clean_rows<window")
+            return _dummy(symbol_name)
+
+        scaler = MinMaxScaler()
+        scaled = scaler.fit_transform(df[feature_cols].astype(np.float32))
         df_s = _pd.DataFrame(scaled.astype(np.float32), columns=feature_cols)
         df_s["timestamp"] = df["timestamp"].values
         input_cols = [c for c in df_s.columns if c != "timestamp"]
 
-        # 입력 차원 맞춤
+        # 입력 차원 정합
         target_input = input_size if input_size else max(MIN_FEATURES, len(input_cols))
         if len(input_cols) < target_input:
             for i in range(len(input_cols), target_input):
-                padc = f"pad_{i}"; df_s[padc] = np.float32(0.0); input_cols.append(padc)
+                padc = f"pad_{i}"
+                df_s[padc] = np.float32(0.0)
+                input_cols.append(padc)
         elif len(input_cols) > target_input:
-            keep = set(input_cols[:target_input])
-            df_s = df_s.drop(columns=[c for c in input_cols if c not in keep], errors="ignore")
-            input_cols = [c for c in input_cols if c in keep]
+            keep = input_cols[:target_input]
+            df_s = df_s[keep + ["timestamp"]]
+            input_cols = keep
 
-        # -------- 1) 정식 라벨 경로(_make_labels) --------
-        y_seq = None; class_ranges_used = None
+        # 정식 라벨 시도
+        y_seq = None
+        class_ranges_used = None
         if _make_labels is not None:
-            for c in ["close","high","low"]:
-                if c not in df.columns: df[c] = np.nan
-            # 결측 보강 후 라벨 생성
-            df[["close","high","low"]] = df[["close","high","low"]].ffill().dropna()
             _, labels_full, class_ranges = _make_labels(
-                df[["timestamp","close","high","low"]].rename(columns={"timestamp":"timestamp"}),
-                symbol=symbol_name, strategy=strategy, group_id=None,
+                df[["timestamp", "close", "high", "low"]].rename(columns={"timestamp": "timestamp"}),
+                symbol=symbol_name,
+                strategy=strategy,
+                group_id=None,
             )
             if labels_full is not None and len(labels_full) == len(df):
                 y_seq = labels_full[window:len(df)]
                 class_ranges_used = class_ranges
 
+        # 윈도우 생성
         samples = []
         for i in range(window, len(df_s)):
-            seq = df_s.iloc[i - window:i]
-            if len(seq) != window: continue
+            seq = df_s.iloc[i - window : i]
+            if len(seq) != window:
+                continue
             samples.append([[float(seq.iloc[j].get(c, 0.0)) for c in input_cols] for j in range(window)])
 
         if samples and y_seq is not None:
             X = np.array(samples, dtype=np.float32)
-            y = np.array(y_seq[:len(X)], dtype=np.int64)
+            y = np.array(y_seq[: len(X)], dtype=np.int64)
             keep = np.where(y >= 0)[0]
-            if keep.size == 0: return _dummy(symbol_name)
+            if keep.size == 0:
+                return _dummy(symbol_name)
             X, y = X[keep], y[keep]
         else:
-            # -------- 2) 서명수익 기반 라벨(최대 상승 vs 하락) --------
-            raw_records = df.to_dict(orient="records")
-            strategy_minutes = {"단기": 240, "중기": 1440, "장기": 10080}
-            lookahead = strategy_minutes.get(strategy, 1440)
-            signed_vals = []
-            samples = []
+            # 백업 라벨: 서명수익 → 없으면 diff
+            raw = df.to_dict(orient="records")
+            lookahead = {"단기": 240, "중기": 1440, "장기": 10080}.get(strategy, 1440)
+            signed_vals, samples = [], []
             for i in range(window, len(df_s)):
-                seq = df_s.iloc[i - window:i]
-                base_raw = raw_records[i]
-                try:
-                    entry_time = pd.to_datetime(base_raw.get("timestamp"), errors="coerce", utc=True).tz_convert("Asia/Seoul")
-                except Exception:
+                seq = df_s.iloc[i - window : i]
+                base = raw[i]
+                t0 = pd.to_datetime(base.get("timestamp"), errors="coerce", utc=True).tz_convert("Asia/Seoul")
+                p0 = float(base.get("close", 0.0))
+                if pd.isnull(t0) or p0 <= 0:
                     continue
-                entry_price = float(base_raw.get("close", 0.0))
-                if pd.isnull(entry_time) or entry_price <= 0: continue
-                try:
-                    fut_raw = [r for r in raw_records[i+1:] if (pd.to_datetime(r.get("timestamp", None), utc=True) - entry_time) <= _pd.Timedelta(minutes=lookahead)]
-                except Exception: continue
-                if len(seq) != window or not fut_raw: continue
-                v_highs = [float(r.get("high", r.get("close", entry_price))) for r in fut_raw if float(r.get("high", r.get("close", entry_price))) > 0]
-                v_lows  = [float(r.get("low",  r.get("close", entry_price)))  for r in fut_raw if float(r.get("low",  r.get("close", entry_price)))  > 0]
-                if not v_highs and not v_lows: continue
-                max_future = max(v_highs) if v_highs else entry_price
-                min_future = min(v_lows)  if v_lows  else entry_price
-                ret_up = (max_future - entry_price) / (entry_price + 1e-6)
-                ret_dn = (min_future - entry_price) / (entry_price + 1e-6)
-                signed_ret = ret_up if abs(ret_up) >= abs(ret_dn) else ret_dn
-                signed_vals.append(float(signed_ret))
+                fut = [r for r in raw[i + 1 :] if (pd.to_datetime(r.get("timestamp"), utc=True) - t0) <= _pd.Timedelta(minutes=lookahead)]
+                if len(seq) != window or not fut:
+                    continue
+                v_high = [float(r.get("high", r.get("close", p0))) for r in fut if float(r.get("high", r.get("close", p0))) > 0]
+                v_low = [float(r.get("low", r.get("close", p0))) for r in fut if float(r.get("low", r.get("close", p0))) > 0]
+                if not v_high and not v_low:
+                    continue
+                up = (max(v_high) - p0) / (p0 + 1e-6) if v_high else 0.0
+                dn = (min(v_low) - p0) / (p0 + 1e-6) if v_low else 0.0
+                signed_vals.append(float(up if abs(up) >= abs(dn) else dn))
                 samples.append([[float(seq.iloc[j].get(c, 0.0)) for c in input_cols] for j in range(window)])
+
             if samples and signed_vals:
                 ranges = cfg_get_class_ranges(symbol=symbol_name, strategy=strategy)
                 class_ranges_used = ranges
                 y = _label_with_edges(np.asarray(signed_vals, dtype=np.float64), ranges)
                 X = np.array(samples, dtype=np.float32)
             else:
-                # -------- 3) diff 기반 임시 라벨 --------
                 closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float32)
-                if len(closes) <= window + 1: return _dummy(symbol_name)
+                if len(closes) <= window + 1:
+                    return _dummy(symbol_name)
                 pct = np.diff(closes) / (closes[:-1] + 1e-6)
                 fb_samples, fb_vals = [], []
                 for i in range(window, len(df) - 1):
-                    seq_rows = df_s.iloc[i - window:i]
+                    seq_rows = df_s.iloc[i - window : i]
                     fb_samples.append([[float(seq_rows.iloc[j].get(c, 0.0)) for c in input_cols] for j in range(window)])
                     fb_vals.append(float(pct[i] if i < len(pct) else 0.0))
-                if not fb_samples: return _dummy(symbol_name)
+                if not fb_samples:
+                    return _dummy(symbol_name)
                 ranges = cfg_get_class_ranges(symbol=symbol_name, strategy=strategy)
                 class_ranges_used = ranges
                 y = _label_with_edges(np.asarray(fb_vals, dtype=np.float64), ranges)
                 X = np.array(fb_samples, dtype=np.float32)
 
-        # 길이 보정
-        if 'X' not in locals() or 'y' not in locals() or len(X) == 0 or len(y) == 0:
+        # 길이 일치
+        m = min(len(X), len(y))
+        if m == 0:
             return _dummy(symbol_name)
-        if len(X) != len(y):
-            m = min(len(X), len(y)); X = X[:m]; y = y[:m]
+        X, y = X[:m], y[:m]
 
         # 중복 제거
         X_dedup, keep_idx = _drop_duplicate_windows(X)
-        if len(keep_idx) < len(y): y = y[keep_idx]; X = X_dedup
+        if len(keep_idx) < len(y):
+            y = y[keep_idx]
+            X = X_dedup
 
-        # 경계 근접 샘플 가중 복제
+        # 경계 보강
         try:
             eps_bp = int(os.getenv("BOUNDARY_EPS_BP", "30"))
             if class_ranges_used is not None and len(class_ranges_used) > 1 and eps_bp > 0:
                 eps = eps_bp / 10000.0
                 stops = np.array([b for (_, b) in class_ranges_used[:-1]], dtype=np.float64)
-                if 'signed_vals' in locals() and len(signed_vals) >= len(y):
-                    vals = np.asarray(signed_vals[:len(y)], dtype=np.float64)
-                else:
+                vals = None
+                if "signed_vals" in locals() and len(signed_vals) >= len(y):
+                    vals = np.asarray(signed_vals[: len(y)], dtype=np.float64)
+                if vals is None:
                     closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float64)
                     pct = np.diff(closes) / (closes[:-1] + 1e-6)
-                    vals = np.asarray(pct[-len(y):], dtype=np.float64)
-                close_to_edge = np.any(np.abs(vals[:, None] - stops[None, :]) <= eps, axis=1)
-                idx_edge = np.where(close_to_edge)[0]
+                    vals = np.asarray(pct[-len(y) :], dtype=np.float64)
+                near = np.any(np.abs(vals[:, None] - stops[None, :]) <= eps, axis=1)
+                idx_edge = np.where(near)[0]
                 if idx_edge.size > 0:
-                    dup = min(len(idx_edge), max(1, len(y)//20))
+                    dup = min(len(idx_edge), max(1, len(y) // 20))
                     X = np.concatenate([X, X[idx_edge[:dup]]], axis=0)
                     y = np.concatenate([y, y[idx_edge[:dup]]], axis=0)
-        except Exception: pass
+        except Exception:
+            pass
 
-        # 버킷 균형(옵션) — 상위 파이프라인에서 vol_regime/trend_regime 제공 시에만 작동
+        # 소수 클래스 증강
         try:
-            if int(os.getenv("BALANCE_BY_BUCKETS", "0")) == 1 and "vol_regime" in df.columns and "trend_regime" in df.columns:
-                vol = pd.to_numeric(df["vol_regime"], errors="coerce").fillna(1).astype(int).values
-                trd = pd.to_numeric(df["trend_regime"], errors="coerce").fillna(1).astype(int).values
-                start = max(0, len(vol) - len(y))
-                bucket = (vol[start:start+len(y)] * 3 + trd[start:start+len(y)]).astype(int)
-                uniq_b, cnts = np.unique(bucket, return_counts=True)
-                target = int(np.median(cnts)) if len(cnts)>0 else None
-                if target and target>0:
-                    sel_idx = []
-                    for b in uniq_b:
-                        idxs = np.where(bucket == b)[0]
-                        if len(idxs) <= target: sel_idx.extend(idxs.tolist())
-                        else: sel_idx.extend(np.random.choice(idxs, size=target, replace=False).tolist())
-                    sel_idx = np.array(sorted(sel_idx))
-                    X = X[sel_idx]; y = y[sel_idx]
-        except Exception: pass
-
-        # 소수 클래스 증강(옵션)
-        try:
-            if int(os.getenv("AUG_ENABLE","1")) == 1 and len(y) > 0:
+            if int(os.getenv("AUG_ENABLE", "1")) == 1 and len(y) > 0:
                 uniq, cnts = np.unique(y, return_counts=True)
                 if cnts.size > 0 and (np.max(cnts) / float(len(y))) >= 0.5:
                     X, y = augment_for_min_count(X, y, target_count=int(np.max(cnts)))
-        except Exception: pass
+        except Exception:
+            pass
 
-        # 최종 메타
-        class_ranges_final = (
-            class_ranges_used
-            if class_ranges_used is not None
-            else cfg_get_class_ranges(symbol=symbol_name, strategy=strategy)
-        )
+        # 메타
+        class_ranges_final = class_ranges_used or cfg_get_class_ranges(symbol=symbol_name, strategy=strategy)
         X.attrs = {
             "class_ranges": class_ranges_final,
             "class_groups": cfg_get_class_groups(len(class_ranges_final), 5),
@@ -1266,7 +1314,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
     except Exception:
         safe_failed_result(symbol_name, strategy, reason="create_dataset 예외")
         return _dummy(symbol_name)
-
 # ========================= 추론/데이터셋 헬퍼 =========================
 def _select_feature_columns(feat_df: pd.DataFrame) -> List[str]:
     if feat_df is None or feat_df.empty: return []
