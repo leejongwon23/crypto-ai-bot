@@ -409,7 +409,6 @@ def _find_prev_model_for(symbol: str, prev_strategy: str) -> Optional[str]:
     except Exception:
         return None
 
-# ---------- 핵심: 단일 그룹 학습 ----------
 def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] = None,
                     stop_event: Optional[threading.Event] = None,
                     pre_feat: Optional[pd.DataFrame] = None,
@@ -498,8 +497,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 yi = i + window - 1
                 if yi<0 or yi>=len(labels): continue
                 lab_g = int(labels[yi])
-                if lab_g < 0 or lab_g not in keep_set:
-                    continue
+                if lab_g < 0 or lab_g not in keep_set: continue
                 lab = to_local[lab_g]
                 X_raw.append(fv[i:i+window]); y.append(lab)
 
@@ -716,6 +714,31 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     f1_val=0.0
                 val_loss=float(val_loss_sum/max(1,n_val))
 
+                # === bin 메타 계산 추가 ===
+                try:
+                    # class_ranges는 로컬 그룹 기준. 전체 경계로 에지 구성
+                    full_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
+                    bin_edges = [float(lo) for (lo, _) in full_ranges] + [float(full_ranges[-1][1])]
+                    bin_spans = [float(hi-lo) for (lo, hi) in full_ranges]
+                    # 검증 분할 라벨 분포로 카운트 집계(로컬 라벨 기준)
+                    cnt_local = np.bincount(val_y, minlength=len(full_ranges))
+                    # 전체 길이에 맞추되 로컬→글로벌 매핑 반영
+                    counts_map = np.zeros(len(full_ranges), dtype=int)
+                    for g, l in to_local.items():
+                        if g < len(counts_map) and l < len(cnt_local):
+                            counts_map[g] = int(cnt_local[l])
+                    bin_counts = counts_map.tolist()
+                except Exception:
+                    bin_edges, bin_spans, bin_counts = [], [], []
+
+                bin_cfg = {
+                    "TARGET_BINS": int(os.getenv("TARGET_BINS", "8")),
+                    "OUTLIER_Q_LOW": float(os.getenv("OUTLIER_Q_LOW", "0.01")),
+                    "OUTLIER_Q_HIGH": float(os.getenv("OUTLIER_Q_HIGH", "0.99")),
+                    "MAX_BIN_SPAN_PCT": float(os.getenv("MAX_BIN_SPAN_PCT", "8.0")),
+                    "MIN_BIN_COUNT_FRAC": float(os.getenv("MIN_BIN_COUNT_FRAC", "0.05")),
+                }
+
                 # 메타/저장
                 stem=os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_w{int(window)}_group{int(group_id) if group_id is not None else 0}_cls{int(len(class_ranges))}")
                 meta={"symbol":symbol,"strategy":strategy,"model":model_type,"group_id":int(group_id or 0),
@@ -730,7 +753,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                       "boundary_band": float(BOUNDARY_BAND),
                       "cs_argmax":{"enabled":bool(COST_SENSITIVE_ARGMAX),"beta":float(CS_ARG_BETA)},
                       "eval_gate":"none",
-                      "passed": 1}
+                      "passed": 1,
+                      # [ADD]
+                      "bin_edges": bin_edges,
+                      "bin_counts": bin_counts,
+                      "bin_spans": bin_spans,
+                      "bin_cfg": bin_cfg}
                 wpath,mpath=_save_model_and_meta(model, stem+".pt", meta)
 
                 # 캐시 제거
@@ -791,7 +819,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         if _is_group_active_file() or _is_group_lock_file():
             _safe_print(f"[AUTO-PREDICT SKIP] group-active/lock → skip {symbol}-{strategy}")
         else:
-            # 학습 완료 직후 자동 예측 트리거
             try:
                 pl_clear_stale(lock_key=(symbol, strategy))
                 pl_wait_free(max_wait_sec=10, lock_key=(symbol, strategy))
@@ -800,7 +827,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             except Exception as e:
                 _safe_print(f"[AUTO-PREDICT FAIL] {symbol}-{strategy} → {e}")
 
-        # 관우 요약 갱신
         try:
             from logger import flush_gwanwoo_summary
             flush_gwanwoo_summary()
@@ -813,6 +839,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
     except Exception as e:
         _safe_print(f"[EXC] train_one_model {symbol}-{strategy}-g{group_id} → {e}\n{traceback.format_exc()}")
         _log_fail(symbol,strategy,str(e)); return res
+
 
 # ---------- 심볼 전체/그룹 순서 ----------
 _ENFORCE_FULL_STRATEGY = False
