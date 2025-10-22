@@ -64,16 +64,13 @@ _default_config = {
     "SSL_CACHE_DIR": "/persistent/ssl_models",
 
     # === 관우·예측 경로 단일화 ===
-    # 기본값을 /persistent로 정렬. 필요 시 ENV로 덮어씀.
     "PREDICTION_LOG_PATH": "/persistent/prediction_log.csv",
     "GANWU_PATH": "/persistent/guanwu/incoming",
     "TRAIN_LOG_PATH": "/persistent/logs/train_log.csv",
 
     # ===== 파이프라인 게이트 =====
-    # 그룹 5심볼 × (단/중/장) 완주 후에만 예측 허용
-    "REQUIRE_GROUP_COMPLETE": 1,          # env REQUIRE_GROUP_COMPLETE 로 오버라이드 가능 (1/0, true/false)
-    # 실수 방지를 위한 보조 스위치: 심볼 1개 학습 완료 직후 자동예측 금지
-    "AUTOPREDICT_ON_SYMBOL_DONE": 0,      # env AUTOPREDICT_ON_SYMBOL_DONE 로 오버라이드 (1=허용, 기본 0=금지)
+    "REQUIRE_GROUP_COMPLETE": 1,
+    "AUTOPREDICT_ON_SYMBOL_DONE": 0,
 
     # DATA
     "DATA": {
@@ -131,6 +128,7 @@ _default_config = {
 
     "QUALITY": {"VAL_F1_MIN": 0.20, "VAL_ACC_MIN": 0.20},
 
+    # === 동적 클래스 설정 기본값 ===
     "CLASS_BIN": {
         "method": "fixed_step",
         "strict": True,
@@ -143,6 +141,15 @@ _default_config = {
         "add_abstain_class": True,
         "abstain_expand_eps": 0.0005,
         "expected_return_mode": "truncated_mid"
+    },
+
+    # === 빈 분포 메타(이번 변경 핵심 상수) ===
+    "BIN_META": {
+        "TARGET_BINS": 8,            # 목표 bin 개수
+        "OUTLIER_Q_LOW": 0.01,       # 하위 1% 클리핑
+        "OUTLIER_Q_HIGH": 0.99,      # 상위 1% 클리핑
+        "MAX_BIN_SPAN_PCT": 0.08,    # 단일 bin 폭 상한(8%)
+        "MIN_BIN_COUNT_FRAC": 0.05   # 최소 샘플 비율(5%)
     },
 
     "CV_CONFIG": {"folds": 5, "min_per_class": 3, "fallback_reduce_folds": True, "fallback_stratified": True},
@@ -189,7 +196,7 @@ _default_config = {
         "zscore_window": 96
     },
 
-    # 실행 가드 기본값(ENV로 덮어쓰기 가능)
+    # 실행 가드 기본값
     "GUARD": {
         "PROFIT_MIN": 0.01,
         "ABSTAIN_MIN_META": 0.0,
@@ -198,7 +205,7 @@ _default_config = {
         "CALIB_NAN_MODE": "abstain"
     },
 
-    # IO 경로(관우·예측 단일 진실원)
+    # IO 경로
     "IO": {
         "predict_out": "/persistent/guanwu/incoming",
         "guanwu_in":   "/persistent/guanwu/incoming"
@@ -246,7 +253,6 @@ if os.path.exists(CONFIG_PATH):
     except Exception as e:
         _log(f"[⚠️ config.py] config.json 로드 실패 → 기본값 사용: {e}")
 else:
-    # 기록 실패해도 앱 계속 실행
     if _safe_write_json(CONFIG_PATH, _default_config):
         _log("[ℹ️ config.py] 기본 config.json 생성")
     else:
@@ -324,6 +330,7 @@ def get_SCHED():    return _config.get("SCHED", _default_config["SCHED"])
 def get_PATTERN():  return _config.get("PATTERN", _default_config["PATTERN"])
 def get_BLEND():    return _config.get("BLEND", _default_config["BLEND"])
 def get_PUBLISH():  return _config.get("PUBLISH", _default_config["PUBLISH"])
+def get_BIN_META(): return _config.get("BIN_META", _default_config["BIN_META"])
 
 # ===== 파이프라인 게이트 Getter =====
 def _env_bool(v): return str(v).strip().lower() not in {"0","false","no","off","none",""}
@@ -351,7 +358,7 @@ def get_IO():              return _config.get("IO", _default_config["IO"])
 def get_PREDICT_OUT_DIR(): return os.getenv("PREDICT_OUTPUT_DIR", get_IO().get("predict_out"))
 def get_GUANWU_IN_DIR():   return os.getenv("GUANWU_INPUT_DIR",   get_IO().get("guanwu_in"))
 
-# 관우·예측 로그 경로 getter(명시적)
+# 관우·예측 로그 경로 getter
 def get_PREDICTION_LOG_PATH():
     return os.getenv("PREDICTION_LOG_PATH", _config.get("PREDICTION_LOG_PATH", _default_config["PREDICTION_LOG_PATH"]))
 
@@ -361,7 +368,7 @@ def get_GANWU_PATH():
 def get_TRAIN_LOG_PATH():
     return os.getenv("TRAIN_LOG_PATH", _config.get("TRAIN_LOG_PATH", _default_config["TRAIN_LOG_PATH"]))
 
-# 디스크 캐시 강제 off 노출(환경에서 제어)
+# 디스크 캐시 강제 off
 def is_disk_cache_off() -> bool:
     return str(os.getenv("DISK_CACHE_OFF", "0")).strip().lower() in {"1","true","yes","on"}
 
@@ -1005,4 +1012,5 @@ __all__ = [
     "get_PREDICTION_LOG_PATH", "get_GANWU_PATH", "get_TRAIN_LOG_PATH",
     "is_config_readonly", "is_disk_cache_off",
     "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
+    "get_BIN_META",
     ]
