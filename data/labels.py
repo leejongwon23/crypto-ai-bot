@@ -28,10 +28,16 @@ _MAX_BIN_SPAN_PCT = float(os.getenv("MAX_BIN_SPAN_PCT", str(_BIN_META.get("MAX_B
 # 최소 샘플 비율(희소 bin 병합 기준)
 _MIN_BIN_COUNT_FRAC = float(os.getenv("MIN_BIN_COUNT_FRAC", str(_BIN_META.get("MIN_BIN_COUNT_FRAC", 0.05))))
 
-# 추가 메타(지배적 bin 제어, 센터 밴드 상한) — 기본값 보수적
+# 추가 메타(지배적 bin 제어, 센터 밴드 상한)
 _DOMINANT_MAX_FRAC = float(os.getenv("DOMINANT_MAX_FRAC", str(_BIN_META.get("DOMINANT_MAX_FRAC", 0.35))))
 _DOMINANT_MAX_ITERS = int(os.getenv("DOMINANT_MAX_ITERS", str(_BIN_META.get("DOMINANT_MAX_ITERS", 6))))
-_CENTER_SPAN_MAX_PCT = float(os.getenv("CENTER_SPAN_MAX_PCT", str(_BIN_META.get("CENTER_SPAN_MAX_PCT", 1.0))))  # 1% (=0.01)
+
+# === CHANGE === 기본 센터 밴드 상한을 1.0% → 0.5%로 보수화(단기 중립 쏠림 해소)
+_CENTER_SPAN_MAX_PCT = float(os.getenv("CENTER_SPAN_MAX_PCT", str(_BIN_META.get("CENTER_SPAN_MAX_PCT", 0.5))))  # 0.5% (=0.005)
+
+# === CHANGE === CLASS_BIN에서 zero-band(0 중심 초미세 구간) 힌트 사용(있으면 우선)
+_CLASS_BIN_META: Dict = dict(get_CLASS_BIN() or {})
+_ZERO_BAND_PCT_HINT = float(_CLASS_BIN_META.get("ZERO_BAND_PCT", _CENTER_SPAN_MAX_PCT))  # 없으면 센터 상한과 동일 사용
 
 # 라벨 안정화 상수(로컬)
 _MIN_CLASS_FRAC = 0.01
@@ -172,6 +178,24 @@ def _merge_sparse_bins(edges: np.ndarray, counts: np.ndarray, min_count: int) ->
                         c[i+1] += c[i]; del c[i]; del e[i+1]; changed = True; break
     return np.array(e, dtype=float), np.array(c, dtype=int)
 
+# === CHANGE === 0을 포함하는 중앙 bin의 최대 폭을 ZERO_BAND_PCT_HINT로 강제 축소
+def _enforce_zero_band(edges: np.ndarray, zero_band_pct: float) -> np.ndarray:
+    """0을 포함하는 bin의 폭을 zero_band_pct(%) 이하로 강제. 필요 시 균등분할."""
+    if edges.size < 3:
+        return edges.astype(float)
+    e = edges.astype(float).copy()
+    zmax = max(0.0, float(zero_band_pct)) / 100.0
+    for i in range(e.size - 1):
+        lo, hi = float(e[i]), float(e[i+1])
+        if lo < 0.0 <= hi:
+            span = hi - lo
+            if zmax > 0 and span > zmax:
+                m = int(np.ceil(span / zmax))
+                sub = np.linspace(lo, hi, m + 1)
+                e = np.concatenate([e[:i], sub, e[i+2:]]).astype(float)
+            break
+    return _dedupe_edges(e)
+
 def _limit_dominant_bins(edges: np.ndarray, x_clip: np.ndarray,
                          max_frac: float, max_iters: int,
                          center_span_max_pct: float) -> np.ndarray:
@@ -205,7 +229,6 @@ def _limit_dominant_bins(edges: np.ndarray, x_clip: np.ndarray,
             if lo < 0.0 <= hi:
                 span = hi - lo
                 if center_max > 0 and span > center_max:
-                    # 중앙을 기준으로 작은 균등분할로 쪼갬
                     m = int(np.ceil(span / center_max))
                     sub = np.linspace(lo, hi, m + 1)
                     e = np.concatenate([e[:i], sub, e[i+2:]]).astype(float)
@@ -222,7 +245,6 @@ def _limit_dominant_bins(edges: np.ndarray, x_clip: np.ndarray,
         lo, hi = float(e[i]), float(e[i+1])
         sub = x_clip[(x_clip >= lo) & (x_clip <= hi)]
         if sub.size < 4 or not np.isfinite(sub).any():
-            # 데이터가 너무 적으면 폭 기준으로 분할
             mid = (lo + hi) / 2.0
         else:
             mid = float(np.quantile(sub, 0.5))  # 중앙값 분할
@@ -230,12 +252,7 @@ def _limit_dominant_bins(edges: np.ndarray, x_clip: np.ndarray,
         if not np.isfinite(mid) or mid <= lo or mid >= hi:
             mid = (lo + hi) / 2.0
 
-        # 과폭 보호도 유지
-        if (hi - lo) > max_span:
-            # 이미 _split_wide_bins에서 처리하지만 안전망
-            pass
-
-        # 엣지 삽입
+        # 과폭 보호도 유지 (별도 스텝에서 처리)
         e = np.insert(e, i + 1, mid).astype(float)
         it += 1
 
@@ -243,7 +260,7 @@ def _limit_dominant_bins(edges: np.ndarray, x_clip: np.ndarray,
 
 
 def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """edges, counts, spans_pct 생성 + 과폭 분할 + 희소 병합 + 지배적 분할."""
+    """edges, counts, spans_pct 생성 + 과폭 분할 + 희소 병합 + 지배적 분할 + zero-band 강제."""
     x = np.asarray(gains, dtype=float)
     x = x[np.isfinite(x)]
     if x.size == 0:
@@ -274,6 +291,9 @@ def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.nda
         max_iters=int(_DOMINANT_MAX_ITERS),
         center_span_max_pct=float(_CENTER_SPAN_MAX_PCT),
     )
+
+    # === CHANGE === 4.5) zero-band(0 중심) 초미세 구간 강제(있으면 사용)
+    edges = _enforce_zero_band(edges, _ZERO_BAND_PCT_HINT)
 
     # 5) 최종 산출
     spans_pct = np.diff(edges) * 100.0
@@ -338,13 +358,14 @@ def _bin_with_boundary_mask(
         uniq = _coverage(labels)
         logger.warning("labels: boundary mask disabled to recover coverage (uniq=%d) %s/%s", uniq, symbol, strategy)
 
-    # 5) ✅ ADAPTIVE REBIN
+    # 5) ✅ ADAPTIVE REBIN (+ 강화 폴백)
     k = edges.size - 1
     n = gains.size
     req_min = max(_MIN_CLASS_ABS, int(np.ceil(_MIN_CLASS_FRAC * max(1, n))))
     trigger = (uniq <= 2) or _needs_rebin(labels, k, n)
     if trigger and k >= 3 and n > 0:
         try:
+            # 5.1 1차: 동일 k로 재분할
             edges2, _, _ = _build_bins(gains, k)
             labels_dyn = _vector_bin(gains, edges2)
             uniq_dyn = _coverage(labels_dyn)
@@ -354,6 +375,19 @@ def _bin_with_boundary_mask(
                 logger.info("labels: ADAPTIVE_REBIN applied (uniq %d→%d, min_req=%d) %s/%s",
                             uniq, uniq_dyn, req_min, symbol, strategy)
                 return labels_dyn.astype(np.int64), edges2.astype(float)
+
+            # === CHANGE === 5.2 2차: k를 줄여서라도(병합) 최소 클래스 카운트를 확보
+            for k2 in range(max(3, k - 1), 2, -1):
+                edges3, _, _ = _build_bins(gains, k2)
+                labels_dyn2 = _vector_bin(gains, edges3)
+                uniq_dyn2 = _coverage(labels_dyn2)
+                vals2, cnts2 = np.unique(labels_dyn2, return_counts=True)
+                ok_min2 = (cnts2[cnts2 > 0].min() >= req_min) if cnts2.size > 0 else False
+                if uniq_dyn2 >= 3 and ok_min2:
+                    logger.info("labels: FALLBACK_REBIN (k=%d) applied (uniq=%d, min_ok=%s) %s/%s",
+                                k2, uniq_dyn2, ok_min2, symbol, strategy)
+                    return labels_dyn2.astype(np.int64), edges3.astype(float)
+
         except Exception as e:
             logger.warning("labels: adaptive rebin failed: %s", e)
 
