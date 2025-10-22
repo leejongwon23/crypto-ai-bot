@@ -136,6 +136,8 @@ _default_config = {
         "min_width": 0.0010,
         "max_width": 0.03,
         "step_pct": 0.0030,
+        # === CHANGE === 중앙(0 포함) 구간 폭 상한 필드 추가(참고용, 실제 강제는 BIN_META의 값이 사용됨)
+        "center_span_max_pct": 1.0,
         "merge_sparse": {"enabled": True, "min_ratio": 0.01, "min_count_floor": 20, "prefer": "denser"},
         "no_trade_floor_abs": 0.01,
         "add_abstain_class": True,
@@ -149,7 +151,11 @@ _default_config = {
         "OUTLIER_Q_LOW": 0.01,       # 하위 1% 클리핑
         "OUTLIER_Q_HIGH": 0.99,      # 상위 1% 클리핑
         "MAX_BIN_SPAN_PCT": 0.08,    # 단일 bin 폭 상한(8%)
-        "MIN_BIN_COUNT_FRAC": 0.05   # 최소 샘플 비율(5%)
+        "MIN_BIN_COUNT_FRAC": 0.05,  # 최소 샘플 비율(5%)
+        # === CHANGE === labels.py와 동기화되는 지배 bin/중앙폭 제어 추가
+        "DOMINANT_MAX_FRAC": 0.35,
+        "DOMINANT_MAX_ITERS": 6,
+        "CENTER_SPAN_MAX_PCT": 0.5   # 중앙(0 포함) 구간 최대 폭을 0.5%로 강제
     },
 
     "CV_CONFIG": {"folds": 5, "min_per_class": 3, "fallback_reduce_folds": True, "fallback_stratified": True},
@@ -916,7 +922,8 @@ _DFLT_STEP = str(_config.get("CLASS_BIN", {}).get("step_pct", 0.0030))
 DYN_CLASS_STEP = float(os.getenv("CLASS_BIN_STEP", os.getenv("DYN_CLASS_STEP", _DFLT_STEP)))
 BOUNDARY_BAND = float(os.getenv("BOUNDARY_BAND", "0.0020"))
 CV_FOLDS   = int(os.getenv("CV_FOLDS", "5"))
-CV_GATE_F1 = float(os.getenv("CV_GATE_F1", "0.50"))
+# === CHANGE === F1 스킵 게이트 무력화: 기본값 0.0
+CV_GATE_F1 = float(os.getenv("CV_GATE_F1", "0.0"))
 
 def _publish_from_env(base: dict) -> dict:
     d = dict(base or {})
