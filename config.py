@@ -745,6 +745,7 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         ranges = _fix_monotonic(ranges); ranges = _ensure_zero_band(ranges)
         if BIN_CONF.get("strict", True): ranges = _strictify(ranges)
         ranges = _apply_trade_floor_cuts(ranges)
+        # 최종 캡 재적용
         if len(ranges) > MAX_CLASSES: ranges = _merge_smallest_adjacent(ranges, MAX_CLASSES)
         return ranges
 
@@ -776,6 +777,9 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         if rets_for_merge is not None and rets_for_merge.size > 0 and max_width > 0:
             fixed = _split_wide_bins_by_quantiles(fixed, rets_for_merge, max_width)
         fixed = _apply_trade_floor_cuts(fixed)
+        # ★ 최종 캡 재적용 + 하한 가드
+        if len(fixed) > MAX_CLASSES: fixed = _merge_smallest_adjacent(fixed, MAX_CLASSES)
+        if len(fixed) < 2: fixed = compute_equal_ranges(get_NUM_CLASSES(), reason="fixed_step post-floor<2")
         return fixed
 
     def compute_ranges_from_kline():
@@ -818,6 +822,10 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             if not fixed or len(fixed) < 2:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="최종 경계 부족(가드)")
             fixed = _apply_trade_floor_cuts(fixed)
+            # ★ 최종 캡 재적용 + 하한 가드
+            MAXC = int(_config.get("MAX_CLASSES", 12))
+            if len(fixed) > MAXC: fixed = _merge_smallest_adjacent(fixed, MAXC)
+            if len(fixed) < 2: fixed = compute_equal_ranges(get_NUM_CLASSES(), reason="post-floor<2")
             return fixed
         except Exception as e:
             return compute_equal_ranges(get_NUM_CLASSES(), reason=f"예외 발생: {e}")
