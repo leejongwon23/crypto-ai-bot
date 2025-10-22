@@ -443,13 +443,30 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             feat=compute_features(symbol, df, strategy)
         if feat is None or getattr(feat,"empty",True): _log_skip(symbol,strategy,"피처 없음"); return res
 
-        # 라벨: 글로벌 기준
-        if isinstance(pre_lbl, tuple) and len(pre_lbl)==3:
-            gains, labels, class_ranges_used_global = pre_lbl
+        # 라벨: 글로벌 기준 (가변 반환 대응: 3 or 4)
+        bin_info = None
+        if isinstance(pre_lbl, tuple) and len(pre_lbl) in (3,4):
+            if len(pre_lbl) == 4:
+                gains, labels, class_ranges_used_global, bin_info = pre_lbl
+            else:
+                gains, labels, class_ranges_used_global = pre_lbl
         elif isinstance(pre_lbl, dict) and pre_lbl.get(strategy, None) is not None:
-            gains, labels, class_ranges_used_global = pre_lbl[strategy]
+            val = pre_lbl[strategy]
+            if isinstance(val, (list, tuple)) and len(val) in (3,4):
+                if len(val) == 4:
+                    gains, labels, class_ranges_used_global, bin_info = val
+                else:
+                    gains, labels, class_ranges_used_global = val
+            else:
+                _log_skip(symbol,strategy,"사전 라벨 구조 오류"); return res
         else:
-            gains, labels, class_ranges_used_global = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=None)
+            res_labels = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=None)
+            if isinstance(res_labels, (list, tuple)) and len(res_labels) == 4:
+                gains, labels, class_ranges_used_global, bin_info = res_labels
+            elif isinstance(res_labels, (list, tuple)) and len(res_labels) == 3:
+                gains, labels, class_ranges_used_global = res_labels
+            else:
+                _log_skip(symbol,strategy,"라벨 생성 실패"); return res
 
         if (not isinstance(labels, np.ndarray)) or labels.size == 0:
             _log_skip(symbol,strategy,"라벨 없음"); return res
@@ -714,20 +731,32 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     f1_val=0.0
                 val_loss=float(val_loss_sum/max(1,n_val))
 
-                # === bin 메타 계산 추가 ===
+                # === bin 메타 계산: bin_info 우선 사용 ===
                 try:
-                    # class_ranges는 로컬 그룹 기준. 전체 경계로 에지 구성
-                    full_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
-                    bin_edges = [float(lo) for (lo, _) in full_ranges] + [float(full_ranges[-1][1])]
-                    bin_spans = [float(hi-lo) for (lo, hi) in full_ranges]
-                    # 검증 분할 라벨 분포로 카운트 집계(로컬 라벨 기준)
-                    cnt_local = np.bincount(val_y, minlength=len(full_ranges))
-                    # 전체 길이에 맞추되 로컬→글로벌 매핑 반영
-                    counts_map = np.zeros(len(full_ranges), dtype=int)
-                    for g, l in to_local.items():
-                        if g < len(counts_map) and l < len(cnt_local):
-                            counts_map[g] = int(cnt_local[l])
-                    bin_counts = counts_map.tolist()
+                    if isinstance(bin_info, dict) and "bin_edges" in bin_info:
+                        bin_edges = [float(x) for x in bin_info.get("bin_edges", [])]
+                        bin_spans = []
+                        if bin_edges and len(bin_edges) >= 2:
+                            bin_spans = [float(bin_edges[i+1]-bin_edges[i]) for i in range(len(bin_edges)-1)]
+                        # 검증 분할 라벨 분포로 카운트 집계(로컬 라벨 기준 → 글로벌로 업맵)
+                        full_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
+                        cnt_local = np.bincount(val_y, minlength=len(class_ranges))
+                        counts_map = np.zeros(len(full_ranges), dtype=int)
+                        for g, l in to_local.items():
+                            if g < len(counts_map) and l < len(cnt_local):
+                                counts_map[g] = int(cnt_local[l])
+                        bin_counts = counts_map.tolist()
+                    else:
+                        # 기존 방식
+                        full_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
+                        bin_edges = [float(lo) for (lo, _) in full_ranges] + [float(full_ranges[-1][1])]
+                        bin_spans = [float(hi-lo) for (lo, hi) in full_ranges]
+                        cnt_local = np.bincount(val_y, minlength=len(full_ranges))
+                        counts_map = np.zeros(len(full_ranges), dtype=int)
+                        for g, l in to_local.items():
+                            if g < len(counts_map) and l < len(cnt_local):
+                                counts_map[g] = int(cnt_local[l])
+                        bin_counts = counts_map.tolist()
                 except Exception:
                     bin_edges, bin_spans, bin_counts = [], [], []
 
