@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 
 from config import (
-    # 기존 import 유지
     BOUNDARY_BAND,
     _strategy_horizon_hours,
     _future_extreme_signed_returns,
@@ -199,11 +198,12 @@ def _bin_with_boundary_mask(
     edges: np.ndarray,
     symbol: str,
     strategy: str,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     n = gains.shape[0]
     if edges is None or edges.size < 2:
-        logger.warning("labels: empty edges for %s/%s -> all masked", symbol, strategy)
-        return np.full(n, -1, dtype=np.int64)
+        logger.warning("labels: empty edges for %s/%s -> safe fallback", symbol, strategy)
+        safe_edges = np.array([-1e-6, 0.0, 1e-6], dtype=float)
+        return np.full(n, -1, dtype=np.int64), safe_edges
 
     gains = np.nan_to_num(gains, nan=0.0, posinf=0.0, neginf=0.0, copy=False).astype(np.float32)
 
@@ -248,29 +248,26 @@ def _bin_with_boundary_mask(
         uniq = _coverage(labels)
         logger.warning("labels: boundary mask disabled to recover coverage (uniq=%d) %s/%s", uniq, symbol, strategy)
 
-    # 5) ✅ ADAPTIVE REBIN: 유효 클래스<=2 또는 최소샘플 미달
+    # 5) ✅ ADAPTIVE REBIN
     k = edges.size - 1
     n = gains.size
     req_min = max(_MIN_CLASS_ABS, int(np.ceil(_MIN_CLASS_FRAC * max(1, n))))
     trigger = (uniq <= 2) or _needs_rebin(labels, k, n)
     if trigger and k >= 3 and n > 0:
         try:
-            # 재계산은 동일 규칙으로 edges 재산출
             edges2, _, _ = _build_bins(gains, k)
             labels_dyn = _vector_bin(gains, edges2)
             uniq_dyn = _coverage(labels_dyn)
             vals, cnts = np.unique(labels_dyn, return_counts=True)
             ok_min = (cnts[cnts > 0].min() >= req_min) if cnts.size > 0 else False
             if (uniq_dyn > uniq) or ok_min:
-                labels = labels_dyn
                 logger.info("labels: ADAPTIVE_REBIN applied (uniq %d→%d, min_req=%d) %s/%s",
                             uniq, uniq_dyn, req_min, symbol, strategy)
-                # 최신 edges를 반환 경로에서 쓰도록 상위에서 edges2를 사용하도록 처리는 호출부에서 수행
-                return labels, edges2  # 특별 반환
+                return labels_dyn.astype(np.int64), edges2.astype(float)
         except Exception as e:
             logger.warning("labels: adaptive rebin failed: %s", e)
 
-    return labels, edges
+    return labels.astype(np.int64), edges.astype(float)
 
 
 # -----------------------------
@@ -291,21 +288,11 @@ def make_labels(
         bin_counts:  int64   (C,)
         bin_spans:   float64 (C,)  # 절대 %
     """
-    # 1) 타겟 수익률
     gains = signed_future_return(df, strategy)  # (N,)
-
-    # 2) 엣지 계산(균등빈 + 과폭 분할 + 희소 병합)
-    edges, counts, spans = _build_bins(gains, _TARGET_BINS)
-
-    # 3) 라벨링 + 경계마스크(+필요 시 adaptive rebin)
+    edges, _, _ = _build_bins(gains, _TARGET_BINS)
     labels, edges_final = _bin_with_boundary_mask(gains, edges, symbol, strategy)
-    if isinstance(labels, tuple):
-        # 안전: 위에서 특별 반환 형태가 왔을 때 정리
-        labels, edges_final = labels
 
     class_ranges = [(float(edges_final[i]), float(edges_final[i+1])) for i in range(edges_final.size - 1)]
-
-    # counts, spans는 edges 기준 재계산하여 일관성 보장
     edges_count = edges_final.copy(); edges_count[-1] += _EDGE_EPS
     bin_counts, _ = np.histogram(np.clip(gains, edges_final[0], edges_final[-1]), bins=edges_count)
     bin_spans = np.diff(edges_final) * 100.0
@@ -329,10 +316,8 @@ def make_labels_for_horizon(
     gains = signed_future_return_by_hours(df, horizon_hours=int(horizon_hours))
     strategy = _strategy_from_hours(int(horizon_hours))
 
-    edges, counts, spans = _build_bins(gains, _TARGET_BINS)
+    edges, _, _ = _build_bins(gains, _TARGET_BINS)
     labels, edges_final = _bin_with_boundary_mask(gains, edges, symbol, strategy)
-    if isinstance(labels, tuple):
-        labels, edges_final = labels
 
     class_ranges = [(float(edges_final[i]), float(edges_final[i+1])) for i in range(edges_final.size - 1)]
     edges_count = edges_final.copy(); edges_count[-1] += _EDGE_EPS
