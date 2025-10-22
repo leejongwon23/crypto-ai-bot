@@ -1,4 +1,4 @@
-# YOPO v1.6 — model_weight_loader.py (LRU+TTL 캐시, VRAM 누수 차단 완전본)
+# YOPO v1.7 — model_weight_loader.py (LRU+TTL 캐시, VRAM 누수 차단, bin_edges 강제)
 import os
 import json
 import glob
@@ -34,8 +34,8 @@ _TTL = int(os.getenv("MODEL_CACHE_TTL_SEC", "900"))  # 15분
 _MAX_BYTES = int(os.getenv("MODEL_CACHE_MAX_BYTES", "536870912"))  # 512MB
 
 _cache_lock = threading.Lock()
-# value: {"state":state_dict, "ts":float, "ttl":int, "bytes":int}
-_model_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+# value: {"state":state_dict, "meta":dict, "ts":float, "ttl":int, "bytes":int}
+_model_cache: "OrderedDict[str, Dict[str, Any]] = OrderedDict()"
 _cache_bytes = 0
 
 # ===== 유틸 =====
@@ -128,21 +128,36 @@ def _resolve_meta(weight_path: str) -> Optional[str]:
         print(f"[⚠️ META 탐색 실패] {weight_path} → {e}")
     return None
 
-def _preflight(weight_path: str, model_type: str = "unknown", input_size: Optional[int] = None) -> Tuple[bool, str]:
-    if not _is_weight_file(weight_path):
-        return False, "weight_missing"
-    meta_path = _resolve_meta(weight_path)
-    if not meta_path or not os.path.isfile(meta_path):
-        return False, "meta_missing"
+def _load_meta_dict(weight_path: str) -> Dict[str, Any]:
+    """연결된 meta.json을 로드. 실패 시 {}."""
     try:
-        meta = _load_meta(weight_path, default={}) if os.path.samefile(_meta_path_for(weight_path), meta_path) else json.load(open(meta_path, "r", encoding="utf-8"))
+        meta_path = _resolve_meta(weight_path)
+        if not meta_path:
+            return {}
+        # weight와 1:1 매칭인 경우는 정책 로더 사용
+        if os.path.samefile(_meta_path_for(weight_path), meta_path):
+            return _load_meta(weight_path, default={})
+        # 아니면 직접 읽기
+        with open(meta_path, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
-        meta = {}
+        return {}
+
+def _preflight(weight_path: str, model_type: str = "unknown", input_size: Optional[int] = None) -> Tuple[bool, str, Dict[str, Any]]:
+    if not _is_weight_file(weight_path):
+        return False, "weight_missing", {}
+    meta = _load_meta_dict(weight_path)
+    if not meta:
+        return False, "meta_missing", {}
     if input_size is not None:
         mi = meta.get("input_size")
         if mi not in (None, input_size):
-            return False, f"input_size_mismatch(meta={mi}, in={input_size})"
-    return True, "ok"
+            return False, f"input_size_mismatch(meta={mi}, in={input_size})", meta
+    # [강제] bin_edges 존재 여부 검사
+    be = meta.get("bin_edges", None)
+    if not isinstance(be, list) or len(be) < 2:
+        return False, "bin_edges_missing", meta
+    return True, "ok", meta
 
 def _find_weight_candidates(symbol: str, strategy: str, model_type: str) -> List[str]:
     patt = os.path.join(MODEL_DIR, "**", f"{symbol}_{strategy}_{model_type}*")
@@ -176,7 +191,7 @@ def find_models_fuzzy(symbol: str, strategy: str) -> List[Dict[str, str]]:
 
 def locate_best_weight(symbol: str, strategy: str, model_type: str) -> Optional[str]:
     for w in _find_weight_candidates(symbol, strategy, model_type):
-        ok, _ = _preflight(w, model_type=model_type, input_size=None)
+        ok, _, _ = _preflight(w, model_type=model_type, input_size=None)
         if ok:
             return w
     return None
@@ -289,29 +304,44 @@ def get_model_weight(model_type: str, strategy: str, symbol: str = "ALL", min_sa
     return 0.2
 
 # ===== 공개 로더(API) =====
+def _attach_bin_info(model_obj: torch.nn.Module, meta: Dict[str, Any]) -> None:
+    """meta의 bin 정보를 모델 객체 속성에 주입."""
+    try:
+        setattr(model_obj, "bin_edges", meta.get("bin_edges", []))
+        setattr(model_obj, "bin_counts", meta.get("bin_counts", []))
+        setattr(model_obj, "bin_spans", meta.get("bin_spans", []))
+        setattr(model_obj, "bin_cfg", meta.get("bin_cfg", {}))
+    except Exception:
+        pass
+
 def load_model_cached(pt_path: str, model_obj: torch.nn.Module, ttl_sec: int = _TTL) -> Optional[torch.nn.Module]:
-    """정책 로더 + LRU+TTL 캐시. 항상 CPU 텐서로 저장해 VRAM 누수 차단."""
+    """정책 로더 + LRU+TTL 캐시. 항상 CPU 텐서로 저장해 VRAM 누수 차단.
+    추가: meta.bin_edges 강제 검사 및 모델 객체에 bin 정보 주입.
+    """
     global _cache_bytes
     if not pt_path or not os.path.exists(pt_path):
         print(f"[❌ load_model_cached] 파일 없음: {pt_path}")
         return None
 
-    ok, why = _preflight(pt_path, model_type=_infer_model_type_from_fname(pt_path), input_size=None)
+    ok, why, meta_pf = _preflight(pt_path, model_type=_infer_model_type_from_fname(pt_path), input_size=None)
     if not ok:
-        print(f"[❌ load_model_cached 사전점검 실패] {pt_path} → {why}")
+        # bin_edges 누락 시 명시적 비활성 처리
+        if why == "bin_edges_missing":
+            print(f"[❌ load_model_cached] meta.bin_edges 누락 → 예측 비활성: {pt_path}")
+        else:
+            print(f"[❌ load_model_cached 사전점검 실패] {pt_path} → {why}")
         return None
 
     with _cache_lock:
         ent = _model_cache.get(pt_path)
         if ent and (_now() - ent["ts"]) <= ent["ttl"]:
-            # LRU 갱신
-            _model_cache.move_to_end(pt_path)
+            _model_cache.move_to_end(pt_path)  # LRU 갱신
             try:
                 model_obj.load_state_dict(ent["state"], strict=False)
+                _attach_bin_info(model_obj, ent.get("meta", {}))
                 model_obj.eval()
                 return model_obj
             except Exception as e:
-                # 손상 캐시 제거 후 디스크 재시도
                 _model_cache.pop(pt_path, None)
                 _cache_bytes -= ent.get("bytes", 0)
                 print(f"[⚠️ 캐시 로드 실패, 디스크 재시도] {pt_path} → {e}")
@@ -324,12 +354,28 @@ def load_model_cached(pt_path: str, model_obj: torch.nn.Module, ttl_sec: int = _
             return None
         state = _ensure_cpu_state(state)
         size_b = _obj_bytes(state)
+
+        # 디스크 메타 확정 획득
+        meta = meta_pf if meta_pf else _load_meta_dict(pt_path)
+        be = meta.get("bin_edges", [])
+        if not isinstance(be, list) or len(be) < 2:
+            print(f"[❌ meta.bin_edges 누락 → 예측 비활성] {pt_path}")
+            return None
+
         with _cache_lock:
             _evict_if_needed(extra_bytes=size_b)
-            _model_cache[pt_path] = {"state": dict(state), "ts": _now(), "ttl": int(ttl_sec), "bytes": int(size_b)}
+            _model_cache[pt_path] = {
+                "state": dict(state),
+                "meta": dict(meta),
+                "ts": _now(),
+                "ttl": int(ttl_sec),
+                "bytes": int(size_b),
+            }
             _model_cache.move_to_end(pt_path)
             _cache_bytes += int(size_b)
+
         model_obj.load_state_dict(state, strict=False)
+        _attach_bin_info(model_obj, meta)
         model_obj.eval()
         print(f"[✅ 모델 로드 완료] {pt_path}")
         return model_obj
