@@ -997,7 +997,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
     if "datetime" in df.columns: df["timestamp"] = df["datetime"]
     elif "timestamp" not in df.columns: df["timestamp"] = pd.to_datetime("now", utc=True).tz_convert("Asia/Seoul")
     df["strategy"] = strategy
-    for c in ["open","high","low","close","volume"]]:
+    for c in ["open","high","low","close","volume"]:
         if c not in df.columns: df[c] = 0.0
     df = df[["timestamp","open","high","low","close","volume"]]
     if len(df) < 20:
