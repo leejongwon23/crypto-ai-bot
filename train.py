@@ -567,17 +567,32 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             feat=compute_features(symbol, df, strategy)
         if feat is None or getattr(feat,"empty",True): _log_skip(symbol,strategy,"피처 없음"); return res
 
-        # 라벨: 글로벌 기준 (가변 반환 대응: 3 or 4)
+        # 라벨: 글로벌 기준 (가변 반환 대응: 3 or 4 or 6)
         bin_info = None
-        if isinstance(pre_lbl, tuple) and len(pre_lbl) in (3,4):
-            if len(pre_lbl) == 4:
+        if isinstance(pre_lbl, tuple) and len(pre_lbl) in (3,4,6):
+            # 직접 튜플이 들어온 경우
+            if len(pre_lbl) == 6:
+                gains, labels, class_ranges_used_global, be, bc, bs = pre_lbl
+                bin_info = {
+                    "bin_edges": be.tolist() if hasattr(be,"tolist") else list(be),
+                    "bin_counts": bc.tolist() if hasattr(bc,"tolist") else list(bc),
+                    "bin_spans": bs.tolist() if hasattr(bs,"tolist") else list(bs),
+                }
+            elif len(pre_lbl) == 4:
                 gains, labels, class_ranges_used_global, bin_info = pre_lbl
-            else:
+            else:  # len == 3
                 gains, labels, class_ranges_used_global = pre_lbl
         elif isinstance(pre_lbl, dict) and pre_lbl.get(strategy, None) is not None:
             val = pre_lbl[strategy]
-            if isinstance(val, (list, tuple)) and len(val) in (3,4):
-                if len(val) == 4:
+            if isinstance(val, (list, tuple)) and len(val) in (3,4,6):
+                if len(val) == 6:
+                    gains, labels, class_ranges_used_global, be, bc, bs = val
+                    bin_info = {
+                        "bin_edges": be.tolist() if hasattr(be,"tolist") else list(be),
+                        "bin_counts": bc.tolist() if hasattr(bc,"tolist") else list(bc),
+                        "bin_spans": bs.tolist() if hasattr(bs,"tolist") else list(bs),
+                    }
+                elif len(val) == 4:
                     gains, labels, class_ranges_used_global, bin_info = val
                 else:
                     gains, labels, class_ranges_used_global = val
@@ -585,10 +600,18 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 _log_skip(symbol,strategy,"사전 라벨 구조 오류"); return res
         else:
             res_labels = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=None)
-            if isinstance(res_labels, (list, tuple)) and len(res_labels) == 4:
-                gains, labels, class_ranges_used_global, bin_info = res_labels
-            elif isinstance(res_labels, (list, tuple)) and len(res_labels) == 3:
-                gains, labels, class_ranges_used_global = res_labels
+            if isinstance(res_labels, (list, tuple)) and len(res_labels) in (3,4,6):
+                if len(res_labels) == 6:
+                    gains, labels, class_ranges_used_global, be, bc, bs = res_labels
+                    bin_info = {
+                        "bin_edges": be.tolist() if hasattr(be,"tolist") else list(be),
+                        "bin_counts": bc.tolist() if hasattr(bc,"tolist") else list(bc),
+                        "bin_spans": bs.tolist() if hasattr(bs,"tolist") else list(bs),
+                    }
+                elif len(res_labels) == 4:
+                    gains, labels, class_ranges_used_global, bin_info = res_labels
+                else:
+                    gains, labels, class_ranges_used_global = res_labels
             else:
                 _log_skip(symbol,strategy,"라벨 생성 실패"); return res
 
@@ -603,8 +626,15 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         if uniq0 <= 1:
             _safe_print(f"[LABEL RETRY] uniq<=1 → rebuild via make_labels() once ({symbol}-{strategy})")
             res_try = _rebuild_labels_once(df=df, symbol=symbol, strategy=strategy)
-            if isinstance(res_try, (list, tuple)) and len(res_try) in (3,4):
-                if len(res_try) == 4:
+            if isinstance(res_try, (list, tuple)) and len(res_try) in (3,4,6):
+                if len(res_try) == 6:
+                    gains2, labels2, class_ranges2, be2, bc2, bs2 = res_try
+                    bin_info2 = {
+                        "bin_edges": be2.tolist() if hasattr(be2,"tolist") else list(be2),
+                        "bin_counts": bc2.tolist() if hasattr(bc2,"tolist") else list(bc2),
+                        "bin_spans": bs2.tolist() if hasattr(bs2,"tolist") else list(bs2),
+                    }
+                elif len(res_try) == 4:
                     gains2, labels2, class_ranges2, bin_info2 = res_try
                 else:
                     gains2, labels2, class_ranges2 = res_try
@@ -896,8 +926,8 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 try:
                     if isinstance(bin_info, dict) and "bin_edges" in bin_info:
                         bin_edges = [float(x) for x in bin_info.get("bin_edges", [])]
-                        bin_spans = []
-                        if bin_edges and len(bin_edges) >= 2:
+                        bin_spans = bin_info.get("bin_spans", [])
+                        if bin_edges and (not bin_spans or len(bin_spans) != len(bin_edges)-1):
                             bin_spans = [float(bin_edges[i+1]-bin_edges[i]) for i in range(len(bin_edges)-1)]
                         # 검증 분할 라벨 분포로 카운트 집계(로컬 라벨 기준 → 글로벌로 업맵)
                         full_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
