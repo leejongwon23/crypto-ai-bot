@@ -1,3 +1,5 @@
+# labels.py  (final)
+
 from __future__ import annotations
 
 import logging
@@ -11,8 +13,8 @@ from config import (
     BOUNDARY_BAND,
     _strategy_horizon_hours,
     _future_extreme_signed_returns,
-    get_BIN_META,            # NEW
-    get_CLASS_BIN,           # NEW (zero-band 참고)
+    get_BIN_META,
+    get_CLASS_BIN,
 )
 
 logger = logging.getLogger(__name__)
@@ -20,10 +22,10 @@ logger = logging.getLogger(__name__)
 # ===== 설정: config 우선, env는 보조 =====
 _BIN_META = dict(get_BIN_META() or {})
 _TARGET_BINS = int(os.getenv("TARGET_BINS", str(_BIN_META.get("TARGET_BINS", 8))))
-_OUT_Q_LOW = float(os.getenv("OUTLIER_Q_LOW", str(_BIN_META.get("OUTLIER_Q_LOW", 0.01))))     # 1%
-_OUT_Q_HIGH = float(os.getenv("OUTLIER_Q_HIGH", str(_BIN_META.get("OUTLIER_Q_HIGH", 0.99))))  # 99%
+_OUT_Q_LOW = float(os.getenv("OUTLIER_Q_LOW", str(_BIN_META.get("OUTLIER_Q_LOW", 0.01))))
+_OUT_Q_HIGH = float(os.getenv("OUTLIER_Q_HIGH", str(_BIN_META.get("OUTLIER_Q_HIGH", 0.99))))
 
-# 단일 bin 폭 상한(절대 %). 예: 8.0 => 8%
+# 단일 bin 폭 상한(절대 %)
 _MAX_BIN_SPAN_PCT = float(os.getenv("MAX_BIN_SPAN_PCT", str(_BIN_META.get("MAX_BIN_SPAN_PCT", 8.0))))
 # 최소 샘플 비율(희소 bin 병합 기준)
 _MIN_BIN_COUNT_FRAC = float(os.getenv("MIN_BIN_COUNT_FRAC", str(_BIN_META.get("MIN_BIN_COUNT_FRAC", 0.05))))
@@ -32,17 +34,17 @@ _MIN_BIN_COUNT_FRAC = float(os.getenv("MIN_BIN_COUNT_FRAC", str(_BIN_META.get("M
 _DOMINANT_MAX_FRAC = float(os.getenv("DOMINANT_MAX_FRAC", str(_BIN_META.get("DOMINANT_MAX_FRAC", 0.35))))
 _DOMINANT_MAX_ITERS = int(os.getenv("DOMINANT_MAX_ITERS", str(_BIN_META.get("DOMINANT_MAX_ITERS", 6))))
 
-# === CHANGE === 기본 센터 밴드 상한을 1.0% → 0.5%로 보수화(단기 중립 쏠림 해소)
-_CENTER_SPAN_MAX_PCT = float(os.getenv("CENTER_SPAN_MAX_PCT", str(_BIN_META.get("CENTER_SPAN_MAX_PCT", 0.5))))  # 0.5% (=0.005)
+# 중앙 밴드 상한(%) — 기본 0.5%
+_CENTER_SPAN_MAX_PCT = float(os.getenv("CENTER_SPAN_MAX_PCT", str(_BIN_META.get("CENTER_SPAN_MAX_PCT", 0.5))))
 
-# === CHANGE === CLASS_BIN에서 zero-band(0 중심 초미세 구간) 힌트 사용(있으면 우선)
+# CLASS_BIN zero-band 힌트
 _CLASS_BIN_META: Dict = dict(get_CLASS_BIN() or {})
-_ZERO_BAND_PCT_HINT = float(_CLASS_BIN_META.get("ZERO_BAND_PCT", _CENTER_SPAN_MAX_PCT))  # 없으면 센터 상한과 동일 사용
+_ZERO_BAND_PCT_HINT = float(_CLASS_BIN_META.get("ZERO_BAND_PCT", _CENTER_SPAN_MAX_PCT))
 
-# === CHANGE === 아주 작은 수익률은 학습 제외(기본 0.3%)
+# 아주 작은 수익률은 학습 제외(기본 ±0.3%)
 _MIN_GAIN_FOR_TRAIN = float(os.getenv("MIN_GAIN_FOR_TRAIN", "0.003"))
 
-# 라벨 안정화 상수(로컬)
+# 라벨 안정화 상수
 _MIN_CLASS_FRAC = 0.01
 _MIN_CLASS_ABS = 8
 _Q_EPS = 1e-9
@@ -64,8 +66,6 @@ def _to_series_ts_kst(ts_like) -> pd.Series:
 # -----------------------------
 # Strategy/Horizon helpers
 # -----------------------------
-_HOURS2STRATEGY = [(4, "단기"), (24, "중기"), (168, "장기")]
-
 def _strategy_from_hours(hours: int) -> str:
     h = int(max(1, hours))
     if h <= 4: return "단기"
@@ -90,14 +90,17 @@ def signed_future_return_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.nd
     if both is None or both.size < 2 * n:
         return np.zeros(n, dtype=np.float32)
 
-    dn = both[:n]   # <= 0
-    up = both[n:]   # >= 0
+    dn = both[:n]
+    up = both[n:]
     gains = np.where(np.abs(up) >= np.abs(dn), up, dn).astype(np.float32)
     gains = np.nan_to_num(gains, nan=0.0, posinf=0.0, neginf=0.0, copy=False).astype(np.float32)
-    if np.all(gains == gains[0]):
+
+    # 완전 상수열 보호
+    if gains.size and np.all(gains == gains[0]):
         idx = np.arange(n, dtype=np.float32)
         gains = gains + (idx - idx.mean()) * 1e-8
     return gains
+
 
 def signed_future_return(df: pd.DataFrame, strategy: str) -> np.ndarray:
     horizon_hours = _strategy_horizon_hours(strategy)
@@ -108,7 +111,6 @@ def signed_future_return(df: pd.DataFrame, strategy: str) -> np.ndarray:
 # Helpers
 # -----------------------------
 def _vector_bin(gains: np.ndarray, edges: np.ndarray) -> np.ndarray:
-    """마지막 엣지만 우측 포함되도록 처리."""
     e = edges.astype(float).copy()
     e[-1] = e[-1] + _EDGE_EPS
     bins = np.searchsorted(e, gains, side="right") - 1
@@ -145,7 +147,6 @@ def _equal_freq_edges(g: np.ndarray, k: int) -> np.ndarray:
     return _dedupe_edges(cuts)
 
 def _split_wide_bins(edges: np.ndarray, max_span_pct: float) -> np.ndarray:
-    """각 bin 절대폭(% 기준)이 상한 초과 시 내부 균등분할."""
     max_span = max_span_pct / 100.0
     e = edges.tolist()
     i = 0
@@ -156,7 +157,7 @@ def _split_wide_bins(edges: np.ndarray, max_span_pct: float) -> np.ndarray:
             m = int(np.ceil(span / max_span))
             sub = np.linspace(lo, hi, m + 1).tolist()
             e = e[:i] + sub + e[i+2:]
-            i += m  # 새로 만든 마지막 구간으로 이동
+            i += m
         else:
             i += 1
     return _dedupe_edges(np.array(e, dtype=float))
@@ -169,7 +170,6 @@ def _merge_sparse_bins(edges: np.ndarray, counts: np.ndarray, min_count: int) ->
         changed = False
         for i in range(len(c)):
             if c[i] < min_count:
-                # 이웃 중 더 큰 쪽에 병합
                 if i == 0:
                     c[i+1] += c[i]; del c[i]; del e[i+1]; changed = True; break
                 elif i == len(c) - 1:
@@ -181,9 +181,7 @@ def _merge_sparse_bins(edges: np.ndarray, counts: np.ndarray, min_count: int) ->
                         c[i+1] += c[i]; del c[i]; del e[i+1]; changed = True; break
     return np.array(e, dtype=float), np.array(c, dtype=int)
 
-# === CHANGE === 0을 포함하는 중앙 bin의 최대 폭을 ZERO_BAND_PCT_HINT로 강제 축소
 def _enforce_zero_band(edges: np.ndarray, zero_band_pct: float) -> np.ndarray:
-    """0을 포함하는 bin의 폭을 zero_band_pct(%) 이하로 강제. 필요 시 균등분할."""
     if edges.size < 3:
         return edges.astype(float)
     e = edges.astype(float).copy()
@@ -202,33 +200,18 @@ def _enforce_zero_band(edges: np.ndarray, zero_band_pct: float) -> np.ndarray:
 def _limit_dominant_bins(edges: np.ndarray, x_clip: np.ndarray,
                          max_frac: float, max_iters: int,
                          center_span_max_pct: float) -> np.ndarray:
-    """
-    한 bin이 표본의 max_frac 초과를 차지하면 해당 bin을 국소적으로 분할.
-    중앙 구간(0 교차) 폭은 center_span_max_pct(%) 이하로 강제 축소.
-    """
     if edges.size < 3 or x_clip.size == 0:
         return edges.astype(float)
 
     it = 0
     e = edges.astype(float).copy()
-    max_span = _MAX_BIN_SPAN_PCT / 100.0
     center_max = max(0.0, center_span_max_pct) / 100.0
 
     while it < max_iters:
-        # 카운트
-        e_cnt = e.copy(); e_cnt[-1] += _EDGE_EPS
-        counts, _ = np.histogram(x_clip, bins=e_cnt)
-        n = int(x_clip.size)
-        if n <= 0: break
-        fracs = counts / float(n)
-        worst_idx = int(np.argmax(fracs)) if fracs.size > 0 else -1
-        worst_frac = float(fracs[worst_idx]) if worst_idx >= 0 else 0.0
-
-        # 중앙 구간 폭 제한
+        # 중앙 구간 폭 제한(선적용)
         changed_center = False
         for i in range(e.size - 1):
             lo, hi = float(e[i]), float(e[i+1])
-            # 0을 포함하는 중앙 bin인지 확인
             if lo < 0.0 <= hi:
                 span = hi - lo
                 if center_max > 0 and span > center_max:
@@ -241,21 +224,28 @@ def _limit_dominant_bins(edges: np.ndarray, x_clip: np.ndarray,
             it += 1
             continue
 
-        # 지배적 bin 분할
+        # 카운트 기반 지배적 bin 탐지
+        e_cnt = e.copy(); e_cnt[-1] += _EDGE_EPS
+        counts, _ = np.histogram(x_clip, bins=e_cnt)
+        n = int(x_clip.size)
+        if n <= 0: break
+        fracs = counts / float(n)
+        worst_idx = int(np.argmax(fracs)) if fracs.size > 0 else -1
+        worst_frac = float(fracs[worst_idx]) if worst_idx >= 0 else 0.0
+
         if worst_frac <= max_frac:
             break
+
         i = worst_idx
         lo, hi = float(e[i]), float(e[i+1])
         sub = x_clip[(x_clip >= lo) & (x_clip <= hi)]
         if sub.size < 4 or not np.isfinite(sub).any():
             mid = (lo + hi) / 2.0
         else:
-            mid = float(np.quantile(sub, 0.5))  # 중앙값 분할
-
+            mid = float(np.quantile(sub, 0.5))
         if not np.isfinite(mid) or mid <= lo or mid >= hi:
             mid = (lo + hi) / 2.0
 
-        # 과폭 보호도 유지 (별도 스텝에서 처리)
         e = np.insert(e, i + 1, mid).astype(float)
         it += 1
 
@@ -263,7 +253,6 @@ def _limit_dominant_bins(edges: np.ndarray, x_clip: np.ndarray,
 
 
 def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """edges, counts, spans_pct 생성 + 과폭 분할 + 희소 병합 + 지배적 분할 + zero-band 강제."""
     x = np.asarray(gains, dtype=float)
     x = x[np.isfinite(x)]
     if x.size == 0:
@@ -272,22 +261,22 @@ def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.nda
         spans = np.diff(edges) * 100.0
         return edges, counts, spans
 
-    x_clip, lo_q, hi_q = _clip_outliers(x)
+    x_clip, _, _ = _clip_outliers(x)
     k = max(2, int(target_bins))
     edges = _equal_freq_edges(x_clip, k)
 
-    # 1) 과폭 bin 분할
+    # 과폭 분할
     edges = _split_wide_bins(edges, _MAX_BIN_SPAN_PCT)
 
-    # 2) 카운트
+    # 카운트
     edges_count = edges.copy(); edges_count[-1] += _EDGE_EPS
     counts, _ = np.histogram(x_clip, bins=edges_count)
 
-    # 3) 희소 bin 병합
+    # 희소 병합
     min_count = max(1, int(np.ceil(_MIN_BIN_COUNT_FRAC * x_clip.size)))
     edges, counts = _merge_sparse_bins(edges, counts, min_count)
 
-    # 4) 지배적 bin 반복 분할 + 중앙 폭 제한
+    # 지배적 분할 + 중앙 폭 제한
     edges = _limit_dominant_bins(
         edges, x_clip,
         max_frac=float(_DOMINANT_MAX_FRAC),
@@ -295,10 +284,9 @@ def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.nda
         center_span_max_pct=float(_CENTER_SPAN_MAX_PCT),
     )
 
-    # === CHANGE === 4.5) zero-band(0 중심) 초미세 구간 강제(있으면 사용)
+    # zero-band 초미세 강제
     edges = _enforce_zero_band(edges, _ZERO_BAND_PCT_HINT)
 
-    # 5) 최종 산출
     spans_pct = np.diff(edges) * 100.0
     return edges.astype(float), counts.astype(int), spans_pct.astype(float)
 
@@ -342,17 +330,12 @@ def _bin_with_boundary_mask(
     def _masked_ratio(x: np.ndarray) -> float:
         return float((x == -1).sum()) / float(max(1, x.size))
 
-    if _masked_ratio(labels) > 0.60:
-        cand = _apply_mask(float(BOUNDARY_BAND) * 0.5)
-        if _masked_ratio(cand) < _masked_ratio(labels):
-            labels = cand
-            logger.info("labels: mask ratio reduced to %.4f (%s/%s)", float(BOUNDARY_BAND) * 0.5, symbol, strategy)
-
-    if _masked_ratio(labels) > 0.60:
-        cand = _apply_mask(float(BOUNDARY_BAND) * 0.25)
-        if _masked_ratio(cand) < _masked_ratio(labels):
-            labels = cand
-            logger.info("labels: mask ratio reduced to %.4f (%s/%s)", float(BOUNDARY_BAND) * 0.25, symbol, strategy)
+    for shrink in (0.5, 0.25):
+        if _masked_ratio(labels) > 0.60:
+            cand = _apply_mask(float(BOUNDARY_BAND) * shrink)
+            if _masked_ratio(cand) < _masked_ratio(labels):
+                labels = cand
+                logger.info("labels: mask ratio reduced to %.4f (%s/%s)", float(BOUNDARY_BAND) * shrink, symbol, strategy)
 
     # 4) 커버리지 점검. 최악이면 마스킹 해제
     uniq = _coverage(labels)
@@ -361,40 +344,67 @@ def _bin_with_boundary_mask(
         uniq = _coverage(labels)
         logger.warning("labels: boundary mask disabled to recover coverage (uniq=%d) %s/%s", uniq, symbol, strategy)
 
-    # 5) ✅ ADAPTIVE REBIN (+ 강화 폴백)
+    # 5) ADAPTIVE REBIN
     k = edges.size - 1
     n = gains.size
     req_min = max(_MIN_CLASS_ABS, int(np.ceil(_MIN_CLASS_FRAC * max(1, n))))
     trigger = (uniq <= 2) or _needs_rebin(labels, k, n)
     if trigger and k >= 3 and n > 0:
         try:
-            # 5.1 1차: 동일 k로 재분할
+            # 5.1 동일 k로 재분할
             edges2, _, _ = _build_bins(gains, k)
             labels_dyn = _vector_bin(gains, edges2)
             uniq_dyn = _coverage(labels_dyn)
-            vals, cnts = np.unique(labels_dyn, return_counts=True)
+            _, cnts = np.unique(labels_dyn, return_counts=True)
             ok_min = (cnts[cnts > 0].min() >= req_min) if cnts.size > 0 else False
             if (uniq_dyn > uniq) or ok_min:
                 logger.info("labels: ADAPTIVE_REBIN applied (uniq %d→%d, min_req=%d) %s/%s",
                             uniq, uniq_dyn, req_min, symbol, strategy)
                 return labels_dyn.astype(np.int64), edges2.astype(float)
 
-            # === CHANGE === 5.2 2차: k를 줄여서라도(병합) 최소 클래스 카운트를 확보
+            # 5.2 k 축소 폴백
             for k2 in range(max(3, k - 1), 2, -1):
                 edges3, _, _ = _build_bins(gains, k2)
                 labels_dyn2 = _vector_bin(gains, edges3)
                 uniq_dyn2 = _coverage(labels_dyn2)
-                vals2, cnts2 = np.unique(labels_dyn2, return_counts=True)
+                _, cnts2 = np.unique(labels_dyn2, return_counts=True)
                 ok_min2 = (cnts2[cnts2 > 0].min() >= req_min) if cnts2.size > 0 else False
                 if uniq_dyn2 >= 3 and ok_min2:
                     logger.info("labels: FALLBACK_REBIN (k=%d) applied (uniq=%d, min_ok=%s) %s/%s",
                                 k2, uniq_dyn2, ok_min2, symbol, strategy)
                     return labels_dyn2.astype(np.int64), edges3.astype(float)
-
         except Exception as e:
             logger.warning("labels: adaptive rebin failed: %s", e)
 
     return labels.astype(np.int64), edges.astype(float)
+
+
+# ----- 최종 안전장치: 최소 2 클래스 보장 ---------------------------------
+def _ensure_min_two_classes(gains: np.ndarray, labels: np.ndarray, edges: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    small mask 적용 등으로 한 클래스만 남는 경우를 최종 복구.
+    1) 전체 표본으로 재분할 시도
+    2) 그래도 실패하면 sign 기반 2분할 폴백
+    """
+    if _coverage(labels) >= 2:
+        return labels, edges
+
+    # 1) 전체 표본으로 재분할
+    try:
+        e2, _, _ = _build_bins(gains, max(2, min(6, edges.size - 1)))
+        l2 = _vector_bin(gains, e2)
+        if _coverage(l2) >= 2:
+            logger.warning("labels: final recovery by rebuild (classes=%d)", _coverage(l2))
+            return l2.astype(np.int64), e2.astype(float)
+    except Exception:
+        pass
+
+    # 2) sign 기반 2분할 폴백
+    eps = 1e-6
+    e3 = np.array([-eps, 0.0, eps], dtype=float)
+    l3 = _vector_bin(gains, e3)
+    logger.warning("labels: final emergency fallback to sign split (2 classes)")
+    return l3.astype(np.int64), e3.astype(float)
 
 
 # -----------------------------
@@ -417,7 +427,7 @@ def make_labels(
     """
     gains = signed_future_return(df, strategy)  # (N,)
 
-    # === CHANGE === 엣지는 작은 수익률을 제외한 표본으로 계산
+    # 엣지는 작은 수익률을 제외한 표본으로 계산
     mask_for_edges = np.abs(gains) >= _MIN_GAIN_FOR_TRAIN
     if mask_for_edges.any():
         edges, _, _ = _build_bins(gains[mask_for_edges], _TARGET_BINS)
@@ -428,10 +438,13 @@ def make_labels(
 
     labels, edges_final = _bin_with_boundary_mask(gains, edges, symbol, strategy)
 
-    # === CHANGE === 아주 작은 수익률은 학습 제외(-1 라벨)
+    # 아주 작은 수익률은 학습 제외(-1 라벨)
     small_mask = np.abs(gains) < _MIN_GAIN_FOR_TRAIN
     if small_mask.any():
         labels[small_mask] = -1
+
+    # ✅ 최소 2 클래스 보장(최종 안전장치)
+    labels, edges_final = _ensure_min_two_classes(gains, labels, edges_final)
 
     class_ranges = [(float(edges_final[i]), float(edges_final[i+1])) for i in range(edges_final.size - 1)]
     edges_count = edges_final.copy(); edges_count[-1] += _EDGE_EPS
@@ -457,7 +470,7 @@ def make_labels_for_horizon(
     gains = signed_future_return_by_hours(df, horizon_hours=int(horizon_hours))
     strategy = _strategy_from_hours(int(horizon_hours))
 
-    # === CHANGE === 엣지는 작은 수익률을 제외한 표본으로 계산
+    # 엣지는 작은 수익률을 제외한 표본으로 계산
     mask_for_edges = np.abs(gains) >= _MIN_GAIN_FOR_TRAIN
     if mask_for_edges.any():
         edges, _, _ = _build_bins(gains[mask_for_edges], _TARGET_BINS)
@@ -469,10 +482,13 @@ def make_labels_for_horizon(
 
     labels, edges_final = _bin_with_boundary_mask(gains, edges, symbol, strategy)
 
-    # === CHANGE === 아주 작은 수익률은 학습 제외(-1 라벨)
+    # 아주 작은 수익률은 학습 제외(-1)
     small_mask = np.abs(gains) < _MIN_GAIN_FOR_TRAIN
     if small_mask.any():
         labels[small_mask] = -1
+
+    # ✅ 최소 2 클래스 보장
+    labels, edges_final = _ensure_min_two_classes(gains, labels, edges_final)
 
     class_ranges = [(float(edges_final[i]), float(edges_final[i+1])) for i in range(edges_final.size - 1)]
     edges_count = edges_final.copy(); edges_count[-1] += _EDGE_EPS
