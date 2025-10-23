@@ -39,6 +39,9 @@ _CENTER_SPAN_MAX_PCT = float(os.getenv("CENTER_SPAN_MAX_PCT", str(_BIN_META.get(
 _CLASS_BIN_META: Dict = dict(get_CLASS_BIN() or {})
 _ZERO_BAND_PCT_HINT = float(_CLASS_BIN_META.get("ZERO_BAND_PCT", _CENTER_SPAN_MAX_PCT))  # 없으면 센터 상한과 동일 사용
 
+# === CHANGE === 아주 작은 수익률은 학습 제외(기본 0.3%)
+_MIN_GAIN_FOR_TRAIN = float(os.getenv("MIN_GAIN_FOR_TRAIN", "0.003"))
+
 # 라벨 안정화 상수(로컬)
 _MIN_CLASS_FRAC = 0.01
 _MIN_CLASS_ABS = 8
@@ -413,8 +416,22 @@ def make_labels(
         bin_spans:   float64 (C,)  # 절대 %
     """
     gains = signed_future_return(df, strategy)  # (N,)
-    edges, _, _ = _build_bins(gains, _TARGET_BINS)
+
+    # === CHANGE === 엣지는 작은 수익률을 제외한 표본으로 계산
+    mask_for_edges = np.abs(gains) >= _MIN_GAIN_FOR_TRAIN
+    if mask_for_edges.any():
+        edges, _, _ = _build_bins(gains[mask_for_edges], _TARGET_BINS)
+        logger.info("labels: build edges with min_gain=%.4f -> kept %d/%d", _MIN_GAIN_FOR_TRAIN, int(mask_for_edges.sum()), int(gains.size))
+    else:
+        edges, _, _ = _build_bins(gains, _TARGET_BINS)
+        logger.warning("labels: all gains < min_gain(%.4f). fallback to full sample", _MIN_GAIN_FOR_TRAIN)
+
     labels, edges_final = _bin_with_boundary_mask(gains, edges, symbol, strategy)
+
+    # === CHANGE === 아주 작은 수익률은 학습 제외(-1 라벨)
+    small_mask = np.abs(gains) < _MIN_GAIN_FOR_TRAIN
+    if small_mask.any():
+        labels[small_mask] = -1
 
     class_ranges = [(float(edges_final[i]), float(edges_final[i+1])) for i in range(edges_final.size - 1)]
     edges_count = edges_final.copy(); edges_count[-1] += _EDGE_EPS
@@ -440,8 +457,22 @@ def make_labels_for_horizon(
     gains = signed_future_return_by_hours(df, horizon_hours=int(horizon_hours))
     strategy = _strategy_from_hours(int(horizon_hours))
 
-    edges, _, _ = _build_bins(gains, _TARGET_BINS)
+    # === CHANGE === 엣지는 작은 수익률을 제외한 표본으로 계산
+    mask_for_edges = np.abs(gains) >= _MIN_GAIN_FOR_TRAIN
+    if mask_for_edges.any():
+        edges, _, _ = _build_bins(gains[mask_for_edges], _TARGET_BINS)
+        logger.info("labels(h=%s): build edges with min_gain=%.4f -> kept %d/%d",
+                    strategy, _MIN_GAIN_FOR_TRAIN, int(mask_for_edges.sum()), int(gains.size))
+    else:
+        edges, _, _ = _build_bins(gains, _TARGET_BINS)
+        logger.warning("labels(h=%s): all gains < min_gain(%.4f). fallback to full sample", strategy, _MIN_GAIN_FOR_TRAIN)
+
     labels, edges_final = _bin_with_boundary_mask(gains, edges, symbol, strategy)
+
+    # === CHANGE === 아주 작은 수익률은 학습 제외(-1 라벨)
+    small_mask = np.abs(gains) < _MIN_GAIN_FOR_TRAIN
+    if small_mask.any():
+        labels[small_mask] = -1
 
     class_ranges = [(float(edges_final[i]), float(edges_final[i+1])) for i in range(edges_final.size - 1)]
     edges_count = edges_final.copy(); edges_count[-1] += _EDGE_EPS
