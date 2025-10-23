@@ -425,6 +425,82 @@ def _rebuild_labels_once(df: pd.DataFrame, symbol: str, strategy: str):
     except Exception:
         return None
 
+# === [ADD] 최소 2클래스 확보 보조 ===
+def _expand_to_neighbor_classes(gidx: List[int], present_g: set[int]) -> List[int]:
+    """그룹 내에서 관측되지 않은 경우, 이웃 bin을 1~2개 확장."""
+    if not gidx: return gidx
+    # 이미 2개 이상 있으면 그대로
+    if len(present_g & set(gidx)) >= 2:
+        return gidx
+    # 왼/오 이웃 한 칸씩 확장 시도
+    all_g = sorted(gidx)
+    cand = set(all_g)
+    # 좌우 한 칸씩
+    cand.add(max(min(all_g)-1, min(all_g)))  # 왼쪽 경계 보정
+    cand.add(min(max(all_g)+1, max(all_g)))
+    return sorted(list(set([x for x in cand if x >= min(all_g) - 1])))
+
+def _rebuild_samples_with_keepset(fv: np.ndarray, labels: np.ndarray, window: int,
+                                  keep_set: set[int], to_local: Dict[int,int]) -> Tuple[np.ndarray, np.ndarray]:
+    X_raw, y = [], []
+    n = len(fv)
+    for i in range(n - window):
+        yi = i + window - 1
+        if yi < 0 or yi >= len(labels): continue
+        lab_g = int(labels[yi])
+        if (lab_g < 0) or (lab_g not in keep_set): continue
+        lab = to_local.get(lab_g, None)
+        if lab is None: continue
+        X_raw.append(fv[i:i + window]); y.append(lab)
+    if not X_raw: return np.empty((0, window, fv.shape[1]), dtype=np.float32), np.empty((0,), dtype=np.int64)
+    return np.array(X_raw, dtype=np.float32), np.array(y, dtype=np.int64)
+
+def _synthesize_minority_if_needed(X_raw: np.ndarray, y: np.ndarray, num_classes: int) -> Tuple[np.ndarray, np.ndarray, bool]:
+    """최후의 보루: 단일 클래스일 때 극소량 합성 표본 추가."""
+    if X_raw.size == 0 or len(np.unique(y)) >= 2: 
+        return X_raw, y, False
+    cls = int(np.unique(y)[0])
+    other = 0 if cls != 0 else (1 if num_classes > 1 else None)
+    if other is None: 
+        return X_raw, y, False
+    k = max(4, int(0.02 * len(y)))  # 전체의 2% 혹은 최소 4개
+    idx = np.random.choice(len(y), size=min(k, len(y)), replace=True)
+    X_syn = X_raw[idx].copy()
+    # 미세 잡음 주입
+    noise = (np.random.randn(*X_syn.shape).astype(np.float32)) * 1e-3
+    X_syn = X_syn + noise
+    y_syn = np.full((len(idx),), other, dtype=np.int64)
+    X_new = np.concatenate([X_raw, X_syn], axis=0)
+    y_new = np.concatenate([y, y_syn], axis=0)
+    return X_new, y_new, True
+
+def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
+    """검증셋이 단일 클래스면 학습셋에서 소수 클래스를 1~2개 이동."""
+    vy = y[val_idx]
+    if len(np.unique(vy)) >= min_classes:
+        return train_idx, val_idx, False
+    ty = y[train_idx]
+    classes = np.unique(y)
+    if len(classes) < min_classes:
+        return train_idx, val_idx, False
+    # 찾기: val에 없는 클래스를 train에서 1~2개 추출
+    want = [c for c in classes if c not in set(vy)]
+    moved = False
+    for c in want[:2]:
+        cand = np.where(ty == c)[0]
+        if len(cand) == 0: 
+            continue
+        take = cand[0]
+        # 글로벌 인덱스 찾기
+        g_take = train_idx[take]
+        train_idx = np.delete(train_idx, take)
+        val_idx = np.append(val_idx, g_take)
+        moved = True
+        vy = y[val_idx]
+        if len(np.unique(vy)) >= min_classes:
+            break
+    return train_idx, val_idx, moved
+
 def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] = None,
                     stop_event: Optional[threading.Event] = None,
                     pre_feat: Optional[pd.DataFrame] = None,
@@ -548,25 +624,34 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         for window in top_windows:
             window=min(window, max(6,len(features_only)-1))
 
-            # 샘플 생성
+            # 샘플 생성 (1차)
             fv=features_only.values.astype(np.float32)
-            X_raw, y = [], []
-            for i in range(len(fv)-window):
-                yi = i + window - 1
-                if yi<0 or yi>=len(labels): continue
-                lab_g = int(labels[yi])
-                if lab_g < 0 or lab_g not in keep_set: continue
-                lab = to_local[lab_g]
-                X_raw.append(fv[i:i+window]); y.append(lab)
+            X_raw, y = _rebuild_samples_with_keepset(fv, labels, window, keep_set, to_local)
 
-            if not X_raw or not y:
+            # [보강] 최소 2클래스 확보: 이웃 bin 확장 재생성 → 합성 minority
+            repaired_info = {"neighbor_expansion": False, "synthetic_labels": False}
+            if X_raw.size == 0 or len(np.unique(y)) < 2:
+                # 이웃 bin 확장
+                present_global = set([int(l) for l in labels[labels>=0].tolist()])
+                gidx2 = _expand_to_neighbor_classes(list(gidx), present_global)
+                keep_set2 = set(gidx2)
+                to_local2 = {g:i for i,g in enumerate(sorted(list(keep_set2)))}
+                X_raw2, y2 = _rebuild_samples_with_keepset(fv, labels, window, keep_set2, to_local2)
+                if X_raw2.size and len(np.unique(y2)) >= 2:
+                    X_raw, y = X_raw2, y2
+                    class_ranges = [all_ranges_full[i] for i in sorted(list(keep_set2))]
+                    set_NUM_CLASSES(len(class_ranges))
+                    repaired_info["neighbor_expansion"] = True
+                # 합성 minority
+            if X_raw.size and len(np.unique(y)) < 2:
+                X_raw, y, syn = _synthesize_minority_if_needed(X_raw, y, num_classes=len(class_ranges))
+                repaired_info["synthetic_labels"] = syn
+
+            if not X_raw.size or not y.size:
                 _log_skip(symbol,strategy,f"유효 라벨 샘플 없음(w={window})"); continue
-            X_raw=np.array(X_raw,dtype=np.float32)
-            y=np.array(y,dtype=np.int64)
-
             if y.min()<0: _log_skip(symbol,strategy,f"음수 라벨 유입 감지(w={window})"); continue
             if len(X_raw)<10: _log_skip(symbol,strategy,f"샘플 부족(w={window})"); continue
-            if len(np.unique(y))<2: _log_skip(symbol,strategy,f"라벨 단일 클래스(w={window})"); continue
+            if len(np.unique(y))<2: _log_skip(symbol,strategy,f"라벨 단일 클래스(보정 실패)(w={window})"); continue
 
             set_NUM_CLASSES(len(class_ranges))
 
@@ -584,6 +669,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
 
             if len(train_idx)==0 or len(val_idx)==0:
                 _log_skip(symbol,strategy,f"분할 실패(w={window})"); continue
+
+            # [보강] 검증셋 2클래스 보장
+            train_idx, val_idx, moved = _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2)
+            if len(train_idx)==0 or len(val_idx)==0:
+                _log_skip(symbol,strategy,f"분할 후 크기 오류(w={window})"); continue
 
             scaler=MinMaxScaler()
             Xtr_flat=X_raw[train_idx].reshape(-1, feat_dim); scaler.fit(Xtr_flat)
@@ -825,6 +915,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                       "eval_gate":"none",
                       "passed": 1,
                       # [ADD]
+                      "label_repair": repaired_info,
                       "bin_edges": bin_edges,
                       "bin_counts": bin_counts,
                       "bin_spans": bin_spans,
