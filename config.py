@@ -145,6 +145,8 @@ _default_config = {
         "expected_return_mode": "truncated_mid"
     },
 
+   # ... (위쪽 동일)
+
     # === 빈 분포 메타(이번 변경 핵심 상수) ===
     "BIN_META": {
         "TARGET_BINS": 8,            # 목표 bin 개수
@@ -155,8 +157,9 @@ _default_config = {
         # === CHANGE === labels.py와 동기화되는 지배 bin/중앙폭 제어 추가
         "DOMINANT_MAX_FRAC": 0.35,
         "DOMINANT_MAX_ITERS": 6,
-        "CENTER_SPAN_MAX_PCT": 0.5   # 중앙(0 포함) 구간 최대 폭을 0.5%로 강제
+        "CENTER_SPAN_MAX_PCT": 0.3   # ✅ 중앙(0 포함) 구간 최대 폭을 0.3%로 강제 (기존 0.5%)
     },
+
 
     "CV_CONFIG": {"folds": 5, "min_per_class": 3, "fallback_reduce_folds": True, "fallback_stratified": True},
 
