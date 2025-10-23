@@ -1,4 +1,4 @@
-# train.py — SPEED v2.2 (GROUP_ACTIVE + GROUP_TRAIN_LOCK: 그룹 경계 전용, 그룹 진행 중 자동예측 차단)
+# train.py — SPEED v2.3 FINAL (GROUP_ACTIVE + GROUP_TRAIN_LOCK, 라벨/분포 복구 강화, 로그스키마 정합)
 # -*- coding: utf-8 -*-
 import os, time, glob, shutil, json, random, traceback, threading, gc, csv
 from datetime import datetime
@@ -108,10 +108,21 @@ from config import (
 )
 
 # ==== [ADD] train 로그 경로/헤더 보장 ====
+# 운영 CSV 스키마(사용자 제공)와 정합되도록 확장
+DEFAULT_TRAIN_HEADERS = [
+    "timestamp","symbol","strategy","model",
+    "val_acc","val_f1","val_loss","engine","window","recent_cap",
+    "rows","limit","min","augment_needed","enough_for_training",
+    "note","source_exchange","status",
+    # 여분(옵셔널)
+    "accuracy","f1","loss","y_true","y_pred","num_classes"
+]
 try:
     from logger import TRAIN_HEADERS
+    # logger가 다른 스키마를 노출하면 합집합으로 보장
+    TRAIN_HEADERS = list(dict.fromkeys(list(TRAIN_HEADERS) + DEFAULT_TRAIN_HEADERS))
 except Exception:
-    TRAIN_HEADERS = ["timestamp","symbol","strategy","model","accuracy","f1","loss","note","status","source_exchange","y_true","y_pred","num_classes"]
+    TRAIN_HEADERS = DEFAULT_TRAIN_HEADERS
 
 LOG_DIR = "/persistent/logs"; os.makedirs(LOG_DIR, exist_ok=True)
 TRAIN_LOG = get_TRAIN_LOG_PATH()
@@ -126,12 +137,28 @@ def _ensure_train_log():
     except Exception as e:
         print(f"[경고] train_log 초기화 실패: {e}")
 
+def _normalize_train_row(row: dict) -> dict:
+    """사용자 CSV 스키마에 최대한 맞춰 필드 매핑/보정"""
+    r = {k: row.get(k, None) for k in TRAIN_HEADERS}
+    # 기존 키 -> 새 키 매핑
+    if r.get("val_acc") is None and row.get("accuracy") is not None:
+        r["val_acc"] = row.get("accuracy")
+    if r.get("val_f1") is None and row.get("f1") is not None:
+        r["val_f1"] = row.get("f1")
+    if r.get("val_loss") is None and row.get("loss") is not None:
+        r["val_loss"] = row.get("loss")
+    # 기본값 보정
+    r.setdefault("engine", row.get("engine", "manual"))
+    r.setdefault("source_exchange", row.get("source_exchange", "BYBIT"))
+    # 숫자/불리언 문자열화 최소화(그대로 기록)
+    return r
+
 def _append_train_log(row: dict):
     try:
         _ensure_train_log()
         with open(TRAIN_LOG, "a", encoding="utf-8-sig", newline="") as f:
             w = csv.DictWriter(f, fieldnames=TRAIN_HEADERS, extrasaction="ignore")
-            w.writerow(row)
+            w.writerow(_normalize_train_row(row))
     except Exception as e:
         print(f"[경고] train_log 기록 실패: {e}")
 
@@ -355,11 +382,27 @@ def coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, max_w
     return train_idx, val_idx
 
 def _log_skip(symbol,strategy,reason):
-    logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note=reason,status="skipped")
+    logger.log_training_result(
+        symbol, strategy, model="all",
+        accuracy=0.0, f1=0.0, loss=0.0,
+        val_acc=0.0, val_f1=0.0, val_loss=0.0,
+        engine="manual", window=None, recent_cap=None,
+        rows=None, limit=None, min=None,
+        augment_needed=None, enough_for_training=None,
+        note=reason, source_exchange="BYBIT", status="skipped"
+    )
     _maybe_insert_failure({"symbol":symbol,"strategy":strategy,"model":"all","predicted_class":-1,"success":False,"rate":0.0,"reason":reason},feature_vector=[])
 
 def _log_fail(symbol,strategy,reason):
-    logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note=reason, status="failed")
+    logger.log_training_result(
+        symbol, strategy, model="all",
+        accuracy=0.0, f1=0.0, loss=0.0,
+        val_acc=0.0, val_f1=0.0, val_loss=0.0,
+        engine="manual", window=None, recent_cap=None,
+        rows=None, limit=None, min=None,
+        augment_needed=None, enough_for_training=None,
+        note=reason, source_exchange="BYBIT", status="failed"
+    )
     _maybe_insert_failure({"symbol":symbol,"strategy":strategy,"model":"all","predicted_class":-1,"success":False,"rate":0.0,"reason":reason},feature_vector=[])
 
 def _has_any_model_for_symbol(symbol: str) -> bool:
@@ -418,25 +461,19 @@ def _uniq_nonneg(labels: np.ndarray) -> int:
         return 0
 
 def _rebuild_labels_once(df: pd.DataFrame, symbol: str, strategy: str):
-    """라벨 재시도(1회). make_labels() 재호출 후, 유효 클래스 수가 증가하면 교체."""
     try:
-        res2 = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=None)
-        return res2
+        return make_labels(df=df, symbol=symbol, strategy=strategy, group_id=None)
     except Exception:
         return None
 
 # === [ADD] 최소 2클래스 확보 보조 ===
 def _expand_to_neighbor_classes(gidx: List[int], present_g: set[int]) -> List[int]:
-    """그룹 내에서 관측되지 않은 경우, 이웃 bin을 1~2개 확장."""
     if not gidx: return gidx
-    # 이미 2개 이상 있으면 그대로
     if len(present_g & set(gidx)) >= 2:
         return gidx
-    # 왼/오 이웃 한 칸씩 확장 시도
     all_g = sorted(gidx)
     cand = set(all_g)
-    # 좌우 한 칸씩
-    cand.add(max(min(all_g)-1, min(all_g)))  # 왼쪽 경계 보정
+    cand.add(max(min(all_g)-1, min(all_g)))
     cand.add(min(max(all_g)+1, max(all_g)))
     return sorted(list(set([x for x in cand if x >= min(all_g) - 1])))
 
@@ -456,17 +493,15 @@ def _rebuild_samples_with_keepset(fv: np.ndarray, labels: np.ndarray, window: in
     return np.array(X_raw, dtype=np.float32), np.array(y, dtype=np.int64)
 
 def _synthesize_minority_if_needed(X_raw: np.ndarray, y: np.ndarray, num_classes: int) -> Tuple[np.ndarray, np.ndarray, bool]:
-    """최후의 보루: 단일 클래스일 때 극소량 합성 표본 추가."""
     if X_raw.size == 0 or len(np.unique(y)) >= 2: 
         return X_raw, y, False
     cls = int(np.unique(y)[0])
     other = 0 if cls != 0 else (1 if num_classes > 1 else None)
     if other is None: 
         return X_raw, y, False
-    k = max(4, int(0.02 * len(y)))  # 전체의 2% 혹은 최소 4개
+    k = max(4, int(0.02 * len(y)))
     idx = np.random.choice(len(y), size=min(k, len(y)), replace=True)
     X_syn = X_raw[idx].copy()
-    # 미세 잡음 주입
     noise = (np.random.randn(*X_syn.shape).astype(np.float32)) * 1e-3
     X_syn = X_syn + noise
     y_syn = np.full((len(idx),), other, dtype=np.int64)
@@ -475,7 +510,6 @@ def _synthesize_minority_if_needed(X_raw: np.ndarray, y: np.ndarray, num_classes
     return X_new, y_new, True
 
 def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
-    """검증셋이 단일 클래스면 학습셋에서 소수 클래스를 1~2개 이동."""
     vy = y[val_idx]
     if len(np.unique(vy)) >= min_classes:
         return train_idx, val_idx, False
@@ -483,7 +517,6 @@ def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
     classes = np.unique(y)
     if len(classes) < min_classes:
         return train_idx, val_idx, False
-    # 찾기: val에 없는 클래스를 train에서 1~2개 추출
     want = [c for c in classes if c not in set(vy)]
     moved = False
     for c in want[:2]:
@@ -491,7 +524,6 @@ def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
         if len(cand) == 0: 
             continue
         take = cand[0]
-        # 글로벌 인덱스 찾기
         g_take = train_idx[take]
         train_idx = np.delete(train_idx, take)
         val_idx = np.append(val_idx, g_take)
@@ -631,7 +663,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             # [보강] 최소 2클래스 확보: 이웃 bin 확장 재생성 → 합성 minority
             repaired_info = {"neighbor_expansion": False, "synthetic_labels": False}
             if X_raw.size == 0 or len(np.unique(y)) < 2:
-                # 이웃 bin 확장
                 present_global = set([int(l) for l in labels[labels>=0].tolist()])
                 gidx2 = _expand_to_neighbor_classes(list(gidx), present_global)
                 keep_set2 = set(gidx2)
@@ -642,7 +673,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     class_ranges = [all_ranges_full[i] for i in sorted(list(keep_set2))]
                     set_NUM_CLASSES(len(class_ranges))
                     repaired_info["neighbor_expansion"] = True
-                # 합성 minority
             if X_raw.size and len(np.unique(y)) < 2:
                 X_raw, y, syn = _synthesize_minority_if_needed(X_raw, y, num_classes=len(class_ranges))
                 repaired_info["synthetic_labels"] = syn
@@ -929,7 +959,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 except: pass
 
                 logger.log_training_result(
-                    symbol, strategy, model=os.path.basename(wpath), accuracy=acc, f1=f1_val, loss=val_loss,
+                    symbol, strategy,
+                    model=os.path.basename(wpath),
+                    accuracy=acc, f1=f1_val, loss=val_loss,
+                    val_acc=acc, val_f1=f1_val, val_loss=val_loss,
+                    engine="manual", window=int(window), recent_cap=int(len(features_only)),
+                    rows=int(len(df)), limit=int(_limit), min=int(_min_required),
+                    augment_needed=bool(augment_needed), enough_for_training=bool(enough_for_training),
                     note=(f"train_one_model(window={window}, cap={len(features_only)}, engine=manual)"),
                     source_exchange="BYBIT", status="success",
                     y_true=lbls, y_pred=preds, num_classes=len(class_ranges)
@@ -1017,7 +1053,11 @@ def _train_full_symbol(symbol:str, stop_event: Optional[threading.Event] = None)
         try:
             cr=get_class_ranges(symbol=symbol,strategy=strategy)
             if not cr:
-                logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note="클래스 경계 없음",status="skipped")
+                logger.log_training_result(symbol,strategy,model="all",
+                    accuracy=0.0,f1=0.0,loss=0.0,val_acc=0.0,val_f1=0.0,val_loss=0.0,
+                    engine="manual",window=None,recent_cap=None,rows=None,limit=None,min=None,
+                    augment_needed=None,enough_for_training=None,
+                    note="클래스 경계 없음",status="skipped",source_exchange="BYBIT")
                 detail[strategy]={-1:False}
                 continue
             num_classes=len(cr); groups=get_class_groups(num_classes=num_classes); max_gid=len(groups)-1
@@ -1026,7 +1066,11 @@ def _train_full_symbol(symbol:str, stop_event: Optional[threading.Event] = None)
                 if stop_event is not None and stop_event.is_set(): return any_saved, detail
                 gr=get_class_ranges(symbol=symbol,strategy=strategy,group_id=gid)
                 if not gr or len(gr)<2:
-                    logger.log_training_result(symbol,strategy,model=f"group{gid}",accuracy=0.0,f1=0.0,loss=0.0,note=f"스킵: group_id={gid}, cls<2",status="skipped")
+                    logger.log_training_result(symbol,strategy,model=f"group{gid}",
+                        accuracy=0.0,f1=0.0,loss=0.0,val_acc=0.0,val_f1=0.0,val_loss=0.0,
+                        engine="manual",window=None,recent_cap=None,rows=None,limit=None,min=None,
+                        augment_needed=None,enough_for_training=None,
+                        note=f"스킵: group_id={gid}, cls<2",status="skipped",source_exchange="BYBIT")
                     detail[strategy][gid]=False; continue
                 attempts=(_SHORT_RETRY if strategy=="단기" else 1); ok_once=False
                 for _ in range(attempts):
@@ -1039,7 +1083,11 @@ def _train_full_symbol(symbol:str, stop_event: Optional[threading.Event] = None)
                 detail[strategy][gid]=ok_once
                 time.sleep(0.01)
         except Exception as e:
-            logger.log_training_result(symbol,strategy,model="all",accuracy=0.0,f1=0.0,loss=0.0,note=f"전략 실패: {e}",status="failed")
+            logger.log_training_result(symbol,strategy,model="all",
+                accuracy=0.0,f1=0.0,loss=0.0,val_acc=0.0,val_f1=0.0,val_loss=0.0,
+                engine="manual",window=None,recent_cap=None,rows=None,limit=None,min=None,
+                augment_needed=None,enough_for_training=None,
+                note=f"전략 실패: {e}",status="failed",source_exchange="BYBIT")
             detail[strategy]={-1:False}
     return any_saved, detail
 
