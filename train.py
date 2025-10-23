@@ -409,6 +409,22 @@ def _find_prev_model_for(symbol: str, prev_strategy: str) -> Optional[str]:
     except Exception:
         return None
 
+# === [ADD] 라벨 유효성/재시도 유틸 ===
+def _uniq_nonneg(labels: np.ndarray) -> int:
+    try:
+        v = labels[np.asarray(labels) >= 0]
+        return int(np.unique(v).size) if v.size else 0
+    except Exception:
+        return 0
+
+def _rebuild_labels_once(df: pd.DataFrame, symbol: str, strategy: str):
+    """라벨 재시도(1회). make_labels() 재호출 후, 유효 클래스 수가 증가하면 교체."""
+    try:
+        res2 = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=None)
+        return res2
+    except Exception:
+        return None
+
 def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] = None,
                     stop_event: Optional[threading.Event] = None,
                     pre_feat: Optional[pd.DataFrame] = None,
@@ -470,6 +486,31 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
 
         if (not isinstance(labels, np.ndarray)) or labels.size == 0:
             _log_skip(symbol,strategy,"라벨 없음"); return res
+
+        # === [ADD] 유효 클래스 부족 시 1회 재라벨링 시도 ===
+        try:
+            uniq0 = _uniq_nonneg(labels)
+        except Exception:
+            uniq0 = 0
+        if uniq0 <= 1:
+            _safe_print(f"[LABEL RETRY] uniq<=1 → rebuild via make_labels() once ({symbol}-{strategy})")
+            res_try = _rebuild_labels_once(df=df, symbol=symbol, strategy=strategy)
+            if isinstance(res_try, (list, tuple)) and len(res_try) in (3,4):
+                if len(res_try) == 4:
+                    gains2, labels2, class_ranges2, bin_info2 = res_try
+                else:
+                    gains2, labels2, class_ranges2 = res_try
+                    bin_info2 = bin_info
+                uniq1 = _uniq_nonneg(labels2)
+                if uniq1 > uniq0 and uniq1 >= 2:
+                    gains, labels = gains2, labels2
+                    class_ranges_used_global = class_ranges2
+                    bin_info = bin_info2
+                    _safe_print(f"[LABEL RETRY OK] uniq {uniq0}→{uniq1}")
+                else:
+                    _safe_print(f"[LABEL RETRY NO-IMPROVE] uniq {uniq0}→{uniq1}")
+            else:
+                _safe_print("[LABEL RETRY FAIL] make_labels() second call failed")
 
         # --------- 그룹 로컬 재매핑 ---------
         all_ranges_full = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
