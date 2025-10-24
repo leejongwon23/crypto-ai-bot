@@ -1,4 +1,4 @@
-# app.py — FINAL v2.2
+# app.py — FINAL v2.2a (dirs auto-heal)
 # (train→predict→next-group 파이프라인, 부팅시 필수 경로/빈 로그 보장, 예측락 stale GC, 그룹학습 락/게이트)
 
 from flask import Flask, jsonify, request, Response
@@ -29,16 +29,21 @@ LOG_DIR     = os.path.join(PERSIST_DIR, "logs")
 MODEL_DIR   = os.path.join(PERSIST_DIR, "models")
 RUN_DIR     = os.path.join(PERSIST_DIR, "run")
 
-# --- 필수 폴더 자동 생성(중복 호출 제거) ---
-for p in [
+# --- ✨ 필수 폴더 자동 생성 유틸 (부팅/리셋/조기QWIPE 후 재사용) ---
+NEEDED_DIRS = [
     f"{PERSIST_DIR}/importances",
     f"{PERSIST_DIR}/guanwu/incoming",
     LOG_DIR,
     MODEL_DIR,
     RUN_DIR,
     "/tmp/importances",
-]:
-    os.makedirs(p, exist_ok=True)
+]
+def ensure_dirs():
+    for p in NEEDED_DIRS:
+        os.makedirs(p, exist_ok=True)
+
+# 모듈 로드 시 1회 보장
+ensure_dirs()
 
 # integrity guard optional
 try:
@@ -317,8 +322,8 @@ def _quarantine_wipe_persistent():
             shutil.move(src, dst); moved.append(name)
         except Exception as e:
             print(f"⚠️ [QWIPE] move 실패: {src} -> {dst} ({e})")
-    for d in ["logs", "models", "ssl_models"]:
-        os.makedirs(os.path.join(PERSIST_DIR, d), exist_ok=True)
+    # ✅ 핵심: 바로 재생성(학습/특징중요도 저장 중에도 디렉터리 존재 보장)
+    ensure_dirs()
     print(f"🧨 [QWIPE] moved_to_trash={moved} trash_dir={trash_dir}"); sys.stdout.flush()
     return trash_dir
 
@@ -1054,6 +1059,7 @@ def reset_all(key=None):
                 try:
                     print("[RESET] 빠른 정지 실패 → 조기 QWIPE 수행"); sys.stdout.flush()
                     _quarantine_wipe_persistent()
+                    ensure_dirs()  # ✅ 조기 QWIPE 직후 즉시 복구
                 except Exception as e:
                     print(f"⚠️ [RESET] 조기 QWIPE 실패: {e}"); sys.stdout.flush()
             if not stopped:
@@ -1070,7 +1076,9 @@ def reset_all(key=None):
                 print(f"[RESET] 정지 대기 완료 → stopped={stopped}"); sys.stdout.flush()
             if not stopped:
                 print("🛑 [RESET] 루프 미종료 → QWIPE 후 하드 종료"); sys.stdout.flush()
-                try: _quarantine_wipe_persistent()
+                try:
+                    _quarantine_wipe_persistent()
+                    ensure_dirs()
                 except Exception as e: print(f"⚠️ [RESET] QWIPE 실패: {e}")
                 try: _release_global_lock()
                 finally:
@@ -1113,6 +1121,8 @@ def reset_all(key=None):
                         if low.startswith(suspect_prefixes) or ("관우" in d):
                             try: shutil.rmtree(os.path.join(root, d), ignore_errors=True)
                             except Exception: pass
+                # ✅ 풀와이프 이후에도 필수 경로 복구
+                ensure_dirs()
             except Exception as e:
                 print(f"⚠️ [RESET] 풀와이프 예외: {e}"); sys.stdout.flush()
             try: _kline_cache.clear()
