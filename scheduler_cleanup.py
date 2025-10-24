@@ -1,10 +1,6 @@
-# scheduler_cleanup.py — light-first, collision-safe cleanup scheduler (patched: stale predict-lock GC API 정합)
-# - 학습/예측 타이트 구간에서는 '가벼운 모드'만 실행하거나 스킵
-# - 무거운 정리는 한가할 때만 (학습/락/게이트 닫힘/예측락 등 없을 때)
-# - app.py 에서 start_cleanup_scheduler(), stop_cleanup_scheduler() 사용
-
+# scheduler_cleanup.py — light-first, collision-safe cleanup scheduler
+# (patched: predict_lock GC API 정합 + start-immediate 옵션 + 안전 로그)
 import os, sys, time, threading, datetime, pytz, traceback
-from apscheduler.schedulers.background import BackgroundScheduler
 
 # 필수 의존: safe_cleanup(이미 프로젝트에 존재)
 import safe_cleanup
@@ -28,11 +24,9 @@ def _clear_stale_predict_lock(tag="cleanup"):
     try:
         if _pl_clear_stale is None:
             return
-        # 내부에서 stale 판단을 수행. 필요 시 tag를 로깅용 환경에 남김.
-        os.environ["PREDICT_LOCK_GC_TAG"] = str(tag)
+        os.environ["PREDICT_LOCK_GC_TAG"] = str(tag)  # 로깅 힌트
         _pl_clear_stale()
     except Exception:
-        # 어떤 이유로든 실패해도 정리 루틴은 계속 진행
         pass
 
 # 예측 게이트/락 경로 (predict.py와 합)
@@ -46,22 +40,23 @@ LOCK_DIR  = getattr(safe_cleanup, "LOCK_DIR", "/persistent/locks")
 LOCK_PATH = getattr(safe_cleanup, "LOCK_PATH", os.path.join(LOCK_DIR, "train_or_predict.lock"))
 
 # 튜너블 파라미터 (환경변수로 오버라이드 가능)
-def _env_int(k, d): 
+def _env_int(k, d):
     try: return int(os.getenv(k, str(d)))
     except Exception: return d
-def _env_float(k, d): 
+def _env_float(k, d):
     try: return float(os.getenv(k, str(d)))
     except Exception: return d
-def _env_bool(k, d): 
+def _env_bool(k, d):
     v = os.getenv(k, None)
     return d if v is None else str(v).strip().lower() in {"1","true","y","yes","on"}
 
-CLEAN_INTERVAL_MIN   = _env_int("CLEAN_INTERVAL_MIN", 30)  # 기본 30분
+CLEAN_INTERVAL_MIN   = _env_int("CLEAN_INTERVAL_MIN", 30)  # 기본 30분(최소 5분 보장)
 LIGHT_ONLY_IF_BUSY   = _env_bool("CLEAN_LIGHT_ONLY_IF_BUSY", True)
 HEAVY_ALLOW_IF_IDLE  = _env_bool("CLEAN_HEAVY_ALLOW_IF_IDLE", True)
 HEAVY_MIN_GAP_MIN    = _env_int("CLEAN_HEAVY_MIN_GAP_MIN", 180)  # 무거운 정리 최소 간격(3h)
 DISK_HARDCAP_GB      = float(getattr(safe_cleanup, "HARD_CAP_GB", 9.6))
 DISK_SOFTCAP_GB      = _env_float("CLEAN_SOFTCAP_GB", 8.0)      # 소프트 캡(넘으면 heavy 고려)
+RUN_ON_START         = _env_bool("CLEAN_RUN_ON_START", True)     # 시작 즉시 1회 라이트 실행
 
 _tz = pytz.timezone("Asia/Seoul")
 _now = lambda: datetime.datetime.now(_tz)
@@ -160,15 +155,14 @@ def _cleanup_job():
         # 틱 시작 시, stale 예측락만 정리 (정상 락은 유지)
         _clear_stale_predict_lock(tag="tick")
 
-        busy = _is_training() or _is_predict_busy()
-        print(f"[CLEANUP] tick busy={busy} used={used:.2f}GB "
+        used_str = f"{used:.2f}GB" if used >= 0 else "unknown"
+        print(f"[CLEANUP] tick busy={_is_training() or _is_predict_busy()} used={used_str} "
               f"(soft={DISK_SOFTCAP_GB:.2f} hard={DISK_HARDCAP_GB:.2f})")
         sys.stdout.flush()
 
         # 하드캡 초과면 즉시 비상 정리
         try:
-            if used >= DISK_HARDCAP_GB:
-                # EMERGENCY 직전에도 stale 예측락만 정리(충돌 방지)
+            if used >= 0 and used >= DISK_HARDCAP_GB:
                 _clear_stale_predict_lock(tag="emergency")
                 print("[CLEANUP] EMERGENCY: hard cap exceeded -> run_emergency_purge()")
                 sys.stdout.flush()
@@ -177,6 +171,7 @@ def _cleanup_job():
         except Exception:
             pass
 
+        busy = _is_training() or _is_predict_busy()
         if busy:
             if LIGHT_ONLY_IF_BUSY:
                 _run_light()
@@ -198,6 +193,21 @@ def start_cleanup_scheduler():
         print("[CLEANUP] scheduler already running")
         sys.stdout.flush()
         return
+
+    # apscheduler 의존성 없을 때 안전 탈출
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+    except Exception as e:
+        print(f"[CLEANUP] apscheduler not available: {e}")
+        sys.stdout.flush()
+        return
+
+    if RUN_ON_START:
+        try:
+            _clear_stale_predict_lock(tag="start")
+            _run_light()
+        except Exception:
+            pass
 
     sched = BackgroundScheduler(
         timezone=_tz,
