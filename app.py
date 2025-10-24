@@ -20,6 +20,10 @@ import maintenance_fix_meta
 from logger import ensure_prediction_log_exists, ensure_train_log_exists, PREDICTION_HEADERS, TRAIN_HEADERS
 from logger import log_audit_prediction as log_audit
 from config import get_TRAIN_LOG_PATH
+# --- 필수 폴더 자동 생성 (누락 방지용) ---
+os.makedirs("/persistent/importances", exist_ok=True)
+os.makedirs("/persistent/guanwu/incoming", exist_ok=True)
+os.makedirs("/tmp/importances", exist_ok=True)
 
 # integrity guard optional
 try:
