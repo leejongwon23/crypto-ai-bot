@@ -1,4 +1,4 @@
-# labels.py  (patched-final)
+# labels.py  (patched-final, collapse-edges fallback 포함)
 
 from __future__ import annotations
 
@@ -527,6 +527,11 @@ def make_labels(
         edges, _, _ = _build_bins(gains, _TARGET_BINS)
         logger.warning("labels: all gains < min_gain(%.4f). fallback to full sample", min_gain)
 
+    # ✅ 엣지가 사실상 붕괴(모두 같은 구간)되면 2클래스 보장용 폴백
+    if np.allclose(np.diff(edges), 0, atol=1e-9):
+        edges = np.array([-1e-6, 0.0, 1e-6], dtype=float)
+        logger.warning("labels: edges collapsed → fallback to sign-split edges")
+
     labels, edges_final = _bin_with_boundary_mask(gains, edges, symbol, strategy)
 
     # 아주 작은 수익률은 학습 제외(-1 라벨)
@@ -584,11 +589,15 @@ def make_labels_for_horizon(
     mask_for_edges = np.abs(gains) >= min_gain
     if mask_for_edges.any():
         edges, _, _ = _build_bins(gains[mask_for_edges], _TARGET_BINS)
-        logger.info("labels(h=%s): build edges with min_gain=%.4f -> kept %d/%d",
-                    strategy, min_gain, int(mask_for_edges.sum()), int(gains.size))
+        logger.info("labels(h=%s): build edges with min_gain=%.4f -> kept %d/%d", strategy, min_gain, int(mask_for_edges.sum()), int(gains.size))
     else:
         edges, _, _ = _build_bins(gains, _TARGET_BINS)
         logger.warning("labels(h=%s): all gains < min_gain(%.4f). fallback to full sample", strategy, min_gain)
+
+    # ✅ 엣지 붕괴 시 즉시 폴백 (항상 2클래스 이상)
+    if np.allclose(np.diff(edges), 0, atol=1e-9):
+        edges = np.array([-1e-6, 0.0, 1e-6], dtype=float)
+        logger.warning("labels(h=%s): edges collapsed → fallback to sign-split edges", strategy)
 
     labels, edges_final = _bin_with_boundary_mask(gains, edges, symbol, strategy)
 
@@ -603,8 +612,7 @@ def make_labels_for_horizon(
     # 필요시 min_gain 완화 1회
     if _coverage(labels) < 2 and min_gain > _MIN_GAIN_LOWER_BOUND:
         min_gain2 = max(_MIN_GAIN_LOWER_BOUND, min_gain * 0.5)
-        logger.warning("labels(h=%s): coverage poor -> relaxing min_gain %.4f → %.4f and rebuilding",
-                       strategy, min_gain, min_gain2)
+        logger.warning("labels(h=%s): coverage poor -> relaxing min_gain %.4f → %.4f and rebuilding", strategy, min_gain, min_gain2)
         mask_for_edges = np.abs(gains) >= min_gain2
         if mask_for_edges.any():
             edges2, _, _ = _build_bins(gains[mask_for_edges], _TARGET_BINS)
