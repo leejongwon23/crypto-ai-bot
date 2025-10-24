@@ -436,7 +436,7 @@ def update_model_success(s, t, m, success):
             ON CONFLICT(symbol, strategy, model) DO UPDATE SET
                 success = success + excluded.success,
                 fail = fail  + excluded.fail
-        """, params=(s, t or "알수없음", m, int(success), int(not success)), retries=7, commit=True)
+        """, params=(s, t or "알수없음", m, int(success), int(!success)), retries=7, commit=True)
         print(f"[✅ update_model_success] {s}-{t}-{m} 기록 ({'성공' if success else '실패'})")
     except Exception as e:
         print(f"[오류] update_model_success 실패 → {e}")
@@ -722,21 +722,41 @@ def _parse_train_note(note: str):
         "augment_needed": aug, "enough_for_training": enough
     }
 
+def _first_non_none(*vals):
+    for v in vals:
+        if v is not None and v != "":
+            return v
+    return None
+
 def log_training_result(
-    symbol, strategy, model="", accuracy=0.0, f1=0.0, loss=0.0,
+    symbol, strategy, model="",
+    accuracy=None, f1=None, loss=None,
     note="", source_exchange="BYBIT", status="success",
-    y_true=None, y_pred=None, num_classes=None
+    y_true=None, y_pred=None, num_classes=None,
+    **kwargs
 ):
     LOG_FILE = TRAIN_LOG
     now = datetime.datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
 
     extras = _parse_train_note(note)
 
+    # ---- Backward/Forward compatibility ----
+    # 우선순위: 새 인자(val_acc/val_f1/val_loss) > 기존 인자(accuracy/f1/loss) > 0.0
+    try:
+        val_acc  = _first_non_none(kwargs.get("val_acc"), accuracy)
+        val_f1   = _first_non_none(kwargs.get("val_f1"),  f1)
+        val_loss = _first_non_none(kwargs.get("val_loss"), loss)
+        # 숫자 캐스팅(빈 문자열/None 안전)
+        val_acc  = float(val_acc)  if val_acc  is not None and str(val_acc)  != "" else 0.0
+        val_f1   = float(val_f1)   if val_f1   is not None and str(val_f1)   != "" else 0.0
+        val_loss = float(val_loss) if val_loss is not None and str(val_loss) != "" else 0.0
+    except Exception:
+        # 예외 시에도 절대 크래시하지 않도록 기본값
+        val_acc, val_f1, val_loss = 0.0, 0.0, 0.0
+
     row = [
         now, str(symbol), str(strategy), str(model or ""),
-        float(accuracy) if accuracy is not None else "",
-        float(f1) if f1 is not None else "",
-        float(loss) if loss is not None else "",
+        val_acc, val_f1, val_loss,
         extras.get("engine",""), extras.get("window",""), extras.get("recent_cap",""),
         extras.get("rows",""), extras.get("limit",""), extras.get("min",""),
         extras.get("augment_needed",""), extras.get("enough_for_training",""),
@@ -756,7 +776,7 @@ def log_training_result(
         _f1_key = (str(symbol), str(strategy))
         if not hasattr(log_training_result, "_f1_zero"):
             log_training_result._f1_zero = defaultdict(int)
-        if float(f1 or 0.0) <= 0.0:
+        if float(val_f1 or 0.0) <= 0.0:
             log_training_result._f1_zero[_f1_key] += 1
             n = log_training_result._f1_zero[_f1_key]
             if n == 1:
@@ -765,10 +785,10 @@ def log_training_result(
                 print(f"🟠 [요약] F1=0.0 연속 {n}회 → {symbol}-{strategy} {model}")
         else:
             if getattr(log_training_result, "_f1_zero", {}).get(_f1_key, 0) > 0:
-                print(f"[✅ 복구] {symbol}-{strategy} {model} F1 회복 → {float(f1):.4f}")
+                print(f"[✅ 복구] {symbol}-{strategy} {model} F1 회복 → {float(val_f1):.4f}")
             log_training_result._f1_zero[_f1_key] = 0
         _print_once(f"trainlog:{symbol}:{strategy}:{model}",
-                    f"[✅ 학습 로그 기록] {symbol}-{strategy} {model} val_f1={float(f1 or 0.0):.4f} status={status}")
+                    f"[✅ 학습 로그 기록] {symbol}-{strategy} {model} val_f1={float(val_f1 or 0.0):.4f} status={status}")
     except Exception as e:
         print(f"[⚠️ 학습 로그 기록 실패] {e}")
 
