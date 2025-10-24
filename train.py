@@ -1,4 +1,4 @@
-# train.py — SPEED v2.3 FINAL (GROUP_ACTIVE + GROUP_TRAIN_LOCK, 라벨/분포 복구 강화, 로그스키마 정합)
+# train.py — SPEED v2.4 FINAL (NO-SKIP AUTO-TRAIN, GROUP_ACTIVE + GROUP_TRAIN_LOCK, 라벨/분포 복구 강화, 로그스키마 정합)
 # -*- coding: utf-8 -*-
 import os, time, glob, shutil, json, random, traceback, threading, gc, csv
 from datetime import datetime
@@ -1075,6 +1075,9 @@ _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = False
 _SYMBOL_RETRY_LIMIT = int(os.getenv("SYMBOL_RETRY_LIMIT","1"))
 
 def _train_full_symbol(symbol:str, stop_event: Optional[threading.Event] = None) -> Tuple[bool, Dict[str, Any]]:
+    """
+    🔄 변경 포인트: 그룹 내 cls<2라도 'skip'하지 않고 무조건 train 시도.
+    """
     strategies=["단기","중기","장기"]; detail={}; any_saved=False
     base_df, pre_feats, pre_lbls = _build_precomputed(symbol)
 
@@ -1082,26 +1085,18 @@ def _train_full_symbol(symbol:str, stop_event: Optional[threading.Event] = None)
         if stop_event is not None and stop_event.is_set(): return any_saved, detail
         try:
             cr=get_class_ranges(symbol=symbol,strategy=strategy)
-            if not cr:
-                logger.log_training_result(symbol,strategy,model="all",
-                    accuracy=0.0,f1=0.0,loss=0.0,val_acc=0.0,val_f1=0.0,val_loss=0.0,
-                    engine="manual",window=None,recent_cap=None,rows=None,limit=None,min=None,
-                    augment_needed=None,enough_for_training=None,
-                    note="클래스 경계 없음",status="skipped",source_exchange="BYBIT")
-                detail[strategy]={-1:False}
-                continue
-            num_classes=len(cr); groups=get_class_groups(num_classes=num_classes); max_gid=len(groups)-1
+            # 없어도 최소 2클래스 기준으로 그룹 분해하여 시도
+            num_classes=len(cr) if cr else 0
+            groups=get_class_groups(num_classes=max(2,num_classes))
+            max_gid=len(groups)-1
             detail[strategy]={}
             for gid in range(max_gid+1):
                 if stop_event is not None and stop_event.is_set(): return any_saved, detail
+                # 이전: cls<2면 skipped → 이제 강행
                 gr=get_class_ranges(symbol=symbol,strategy=strategy,group_id=gid)
                 if not gr or len(gr)<2:
-                    logger.log_training_result(symbol,strategy,model=f"group{gid}",
-                        accuracy=0.0,f1=0.0,loss=0.0,val_acc=0.0,val_f1=0.0,val_loss=0.0,
-                        engine="manual",window=None,recent_cap=None,rows=None,limit=None,min=None,
-                        augment_needed=None,enough_for_training=None,
-                        note=f"스킵: group_id={gid}, cls<2",status="skipped",source_exchange="BYBIT")
-                    detail[strategy][gid]=False; continue
+                    _safe_print(f"[FORCE-TRAIN] {symbol}-{strategy}-g{gid}: cls<2 → 학습 강행")
+
                 attempts=(_SHORT_RETRY if strategy=="단기" else 1); ok_once=False
                 for _ in range(attempts):
                     pf = pre_feats.get(strategy) if isinstance(pre_feats, dict) else None
@@ -1156,6 +1151,7 @@ def _scan_symbols_from_model_dir() -> List[str]:
     try:
         for p in glob.glob(os.path.join(MODEL_DIR, f"*_*_*.*")):
             b=os.path.basename(p); import re
+        # match 심볼
             m=re.match(r"^([A-Z0-9]+)_[^_]+_", b)
             if m: syms.add(m.group(1))
         for d in glob.glob(os.path.join(MODEL_DIR, "*")):
