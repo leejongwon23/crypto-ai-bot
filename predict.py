@@ -1,10 +1,11 @@
-# === predict.py (YOPO v1.5 — 예측 정상화 완전판, 메모리 누수/초과 패치 적용, 통합본) ===
+# === predict.py (YOPO v1.5 — 예측 정상화 완전판, 메모리 누수/초과 패치 적용, 통합본 + 하이브리드 유사도×확률) ===
 # 핵심 수정
 # ① get_model_predictions(): 로더 실패시 다중 폴백( model_io → torch.load → state_dict 주입 )
 #    + 윈도우/모델 루프마다 즉시 메모리 해제(model.cpu(); del) + 캐시 비움
 # ② predict(): gate/group_active 사유 출력 + 락 스테일 정리 + finally에서 대형 객체/캐시 일괄 정리
 # ③ evaluate_predictions(): 종료 시 메모리 정리 강화
 # ④ 관우로그 표시 보강: _soft_abstain 시 기존 "예측보류" 로그와 함께 "예측(보류)" 요약행 추가 기록
+# ⑤ [NEW] 하이브리드: 보정확률(calib_probs)과 패턴 유사도 기반 클래스분포(sim_probs)를 가중 결합하여 최종 후보 선정
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob, inspect, threading
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -382,6 +383,68 @@ def _infer_group_id(symbol: str, strategy: str) -> int:
     except Exception:
         return 0
 
+# === [NEW] 하이브리드 유사도 유틸리티 =====================================
+from sklearn.metrics.pairwise import cosine_similarity
+
+def _compute_similarity_class_probs(current_vec: np.ndarray,
+                                    lib_vecs: np.ndarray | None,
+                                    lib_labels: np.ndarray | None,
+                                    num_classes: int,
+                                    top_k: int = 200):
+    """
+    current_vec과 라이브러리(lib_vecs, lib_labels)로부터
+    '클래스별 유사도 기반 분포'를 계산한다.
+    - labels는 [0..num_classes-1] 가정. 범위를 벗어나면 자동 클램프.
+    - 반환: (sim_probs, info_dict)
+    """
+    try:
+        if lib_vecs is None or lib_labels is None or len(lib_vecs) == 0:
+            sim_probs = np.ones(num_classes, dtype=float) / float(num_classes)
+            return sim_probs, {"m": 0, "w_sim": 0.0}
+        # 차원 보정
+        lib_vecs = np.asarray(lib_vecs, dtype=float)
+        lib_labels = np.asarray(lib_labels)
+        d = lib_vecs.shape[1]
+        v = np.asarray(current_vec, dtype=float).reshape(1, -1)
+        if v.shape[1] != d:
+            # 피처 차원 다르면 안전한 fallback: 균등분포
+            sim_probs = np.ones(num_classes, dtype=float) / float(num_classes)
+            return sim_probs, {"m": 0, "w_sim": 0.0}
+
+        sims = cosine_similarity(lib_vecs, v).ravel()
+        k = int(min(max(10, top_k), len(sims)))  # 최소 10개는 보되 상한은 top_k
+        idx = np.argsort(-sims)[:k]
+        m = len(idx)
+        # 표본 개수에 따른 유사도 가중치 자동 조정
+        if m < 20: w_sim = 0.2
+        elif m < 80: w_sim = 0.5
+        else: w_sim = 0.6
+
+        s = sims[idx]
+        # 음수를 피하고 가중합 안정화
+        s = s - s.min() + 1e-6
+        w = s / (s.sum() + 1e-12)
+
+        sim_probs = np.zeros(num_classes, dtype=float)
+        for weight, lab in zip(w, lib_labels[idx]):
+            try:
+                ci = int(lab)
+            except Exception:
+                continue
+            ci = max(0, min(num_classes - 1, ci))
+            sim_probs[ci] += float(weight)
+        sim_probs = np.nan_to_num(sim_probs, nan=0.0, posinf=0.0, neginf=0.0)
+        sim_sum = sim_probs.sum()
+        if sim_sum <= 0:
+            sim_probs = np.ones(num_classes, dtype=float) / float(num_classes)
+        else:
+            sim_probs = sim_probs / sim_sum
+        return sim_probs, {"m": m, "w_sim": w_sim}
+    except Exception:
+        sim_probs = np.ones(num_classes, dtype=float) / float(num_classes)
+        return sim_probs, {"m": 0, "w_sim": 0.0}
+# ====================================================================
+
 # === 모델 탐색 ===
 def get_available_models(symbol, strategy):
     try:
@@ -752,6 +815,14 @@ def predict(symbol,strategy,source="일반",model_type=None):
     _hb_thread=threading.Thread(target=_predict_hb_loop,args=(_hb_stop,_hb_tag,lock_path),daemon=True); _hb_thread.start()
 
     df=feat=X=outs=allpreds=None
+    # [NEW] 패턴 라이브러리 사전 로딩(없으면 조용히 패스)
+    lib_vecs=lib_labels=None
+    try:
+        from evo_meta_dataset import load_pattern_library
+        lib_vecs, lib_labels = load_pattern_library(symbol, strategy)  # (N, D), (N,)
+    except Exception:
+        lib_vecs = None; lib_labels = None
+
     try:
         try: ensure_prediction_log_exists()
         except Exception as _e: print(f"[헤더보장 실패] {_e}")
@@ -814,26 +885,67 @@ def predict(symbol,strategy,source="일반",model_type=None):
             if ADJUST_WITH_DIVERSITY: return adjust_probs_with_diversity(probs,recent,class_counts=None,alpha=0.10,beta=0.10)
             return np.asarray(probs,dtype=float)
 
+        # === [NEW] 하이브리드: 확률(calib_probs) × 유사도(sim_probs) 결합 ==========================
+        # 라이브러리 없으면 w_sim=0.0 → 확률 단독과 동일 동작
+        sim_cache = {}
         if final_cls is None:
             best_i,best_score,best_pred=-1,-1.0,None; scores=[]
+            current_vec = X[-1]
             for i,m in enumerate(outs):
                 adj=_maybe_adjust(m["calib_probs"],rec_freq)
-                mask=np.zeros_like(adj,dtype=float)
-                for ci in range(len(adj)):
+                num_classes = len(adj)
+
+                # (1) 유사도 기반 클래스 분포
+                if num_classes not in sim_cache:
+                    sim_probs, info = _compute_similarity_class_probs(current_vec, lib_vecs, lib_labels, num_classes=num_classes, top_k=200)
+                    sim_cache[num_classes] = (sim_probs, info)
+                else:
+                    sim_probs, info = sim_cache[num_classes]
+
+                w_sim = float(info.get("w_sim", 0.0))
+                w_prob = 1.0 - w_sim
+
+                # (2) 결합 분포
+                hybrid = w_prob*adj + w_sim*sim_probs
+                hybrid = np.nan_to_num(hybrid, nan=0.0, posinf=0.0, neginf=0.0)
+                if hybrid.sum() > 0:
+                    hybrid = hybrid / hybrid.sum()
+                else:
+                    hybrid = adj  # 안전장치
+
+                # (3) 최소 기대수익/포지션 힌트 마스크
+                mask=np.zeros_like(hybrid,dtype=float)
+                for ci in range(num_classes):
                     try:
                         lo,hi=_class_range_by_meta_or_cfg(ci,m.get("meta"),symbol,strategy)
                         if _meets_minret_with_hint(lo,hi,allow_long,allow_short,MIN_RET_THRESHOLD): mask[ci]=1.0
                     except Exception: pass
-                filt=adj*mask
-                if filt.sum()>0:
-                    filt=filt/filt.sum(); pred=int(np.argmax(filt)); p=float(filt[pred]); fused=True
+                filt = hybrid * mask
+                fused = False
+                if filt.sum() > 0:
+                    filt = filt / filt.sum(); pred=int(np.argmax(filt)); p=float(filt[pred]); fused=True
                 else:
-                    pred=int(np.argmax(adj)); p=float(adj[pred]); fused=False
-                m.update({"adjusted_probs":adj,"filtered_probs":(filt if fused else None),
-                          "candidate_pred":pred,"success_score":p,"filtered_used":fused})
+                    pred=int(np.argmax(hybrid)); p=float(hybrid[pred])
+
+                # 메타정보 저장
+                m.update({
+                    "adjusted_probs": adj,
+                    "sim_probs": sim_probs,
+                    "hybrid_probs": hybrid,
+                    "filtered_probs": (filt if fused else None),
+                    "candidate_pred": pred,
+                    "success_score": p,
+                    "filtered_used": fused,
+                    "hybrid_w_sim": w_sim,
+                    "hybrid_w_prob": w_prob,
+                    "sim_topk": int(info.get("m", 0))
+                })
+
                 scores.append((i,p,pred))
                 if p>best_score:
                     best_i,best_score,best_pred=i,p,pred; used_minret=fused
+
+            # 탐험(ε) 적용
             if len(scores)>=2:
                 ss=sorted(scores,key=lambda x:x[1],reverse=True); top1,top2=ss[0],ss[1]; gap=float(top1[1]-top2[1])
                 st=_load_json(EXP_STATE,{}).get(f"{symbol}|{strategy}",{}); last=max([v.get("last_explore_ts",0.0) for v in st.values()],default=0.0) if st else 0.0
@@ -855,6 +967,7 @@ def predict(symbol,strategy,source="일반",model_type=None):
                 if "best_single_explore" in meta_choice: rec["n_explore"]+=1; rec["last_explore_ts"]=float(time.time())
                 st[key][chosen.get("model_path","")]=rec; _save_json(EXP_STATE,st)
             except Exception: pass
+        # ==========================================================================================
 
         # 임계/리얼리티 가드
         try:
@@ -862,12 +975,13 @@ def predict(symbol,strategy,source="일반",model_type=None):
             if not _meets_minret_with_hint(cmin_sel,cmax_sel,allow_long,allow_short,MIN_RET_THRESHOLD):
                 best_m,best_sc,best_cls=None,-1.0,None
                 for m in outs:
-                    adj=m.get("adjusted_probs",m["calib_probs"])
-                    for ci in range(len(adj)):
+                    # 하이브리드 분포가 있으면 우선 사용
+                    base_probs = m.get("hybrid_probs", m.get("adjusted_probs", m["calib_probs"]))
+                    for ci in range(len(base_probs)):
                         try: lo,hi=_class_range_by_meta_or_cfg(ci,m.get("meta"),symbol,strategy)
                         except Exception: continue
                         if not _meets_minret_with_hint(lo,hi,allow_long,allow_short,MIN_RET_THRESHOLD): continue
-                        sc=float(adj[ci])
+                        sc=float(base_probs[ci])
                         if sc>best_sc: best_sc,best_m,best_cls=sc,m,int(ci)
                 if best_cls is not None:
                     final_cls=best_cls; chosen=best_m; used_minret=True
@@ -896,7 +1010,9 @@ def predict(symbol,strategy,source="일반",model_type=None):
         class_text=f"{float(lo_sel)*100:.2f}% ~ {float(hi_sel)*100:.2f}%"
         current=float(df.iloc[-1]["close"]); entry=current
         def _topk(p,k=3): return [int(i) for i in np.argsort(p)[::-1][:k]]
-        topk=_topk((chosen or outs[0])["calib_probs"]) if (chosen or outs) else []
+        # top-k는 하이브리드 분포 우선
+        chosen_probs_for_topk = (chosen.get("hybrid_probs") if isinstance(chosen,dict) and "hybrid_probs" in chosen else (chosen or outs[0])["calib_probs"])
+        topk=_topk(chosen_probs_for_topk) if (chosen or outs) else []
         raw_pred = float(np.nan_to_num((chosen or outs[0])["raw_probs"][final_cls],nan=0.0,posinf=0.0,neginf=0.0)) if (chosen or outs) else None
         calib_pred = float(np.nan_to_num((chosen or outs[0])["calib_probs"][final_cls],nan=0.0,posinf=0.0,neginf=0.0)) if (chosen or outs) else None
 
@@ -905,7 +1021,15 @@ def predict(symbol,strategy,source="일반",model_type=None):
               "explore_used":("best_single_explore" in str(meta_choice)),"class_range_lo":float(lo_sel),"class_range_hi":float(hi_sel),
               "expected_return_mid":float(exp_ret),"position":pos_sel,"hint_allow_long":allow_long,"hint_allow_short":allow_short,
               "hint_ma_fast":hint.get("ma_fast"),"hint_ma_slow":hint.get("ma_slow"),"hint_slope":hint.get("slope"),
-              "reality_guard":{"enabled":bool(RG_ENABLE),"vol_mult":float(RG_VOL_MULT),"method":RG_VOL_METHOD}}
+              "reality_guard":{"enabled":bool(RG_ENABLE),"vol_mult":float(RG_VOL_MULT),"method":RG_VOL_METHOD},
+              # [NEW] 하이브리드 디버그
+              "hybrid": {
+                  "used": bool(isinstance(chosen,dict) and "hybrid_probs" in chosen),
+                  "w_sim": float(chosen.get("hybrid_w_sim", 0.0)) if isinstance(chosen,dict) else 0.0,
+                  "w_prob": float(chosen.get("hybrid_w_prob", 1.0)) if isinstance(chosen,dict) else 1.0,
+                  "sim_topk": int(chosen.get("sim_topk", 0)) if isinstance(chosen,dict) else 0
+              }
+        }
 
         ensure_prediction_log_exists()
         log_prediction(symbol=symbol,strategy=strategy,direction="예측",entry_price=entry,target_price=entry*(1+exp_ret),model="meta",
@@ -920,17 +1044,19 @@ def predict(symbol,strategy,source="일반",model_type=None):
         try:
             for m in outs:
                 if chosen and m.get("model_path")==chosen.get("model_path"): continue
-                adj=m.get("adjusted_probs",m["calib_probs"]); filt=m.get("filtered_probs",None)
+                # 섀도우는 하이브리드 있으면 우선 사용
+                src_probs = m.get("hybrid_probs", m.get("adjusted_probs", m["calib_probs"]))
+                filt=m.get("filtered_probs",None)
                 if filt is not None and np.sum(filt)>0:
                     pred_i=int(np.argmax(filt)); src=filt
                 else:
-                    mask=np.zeros_like(adj,dtype=float)
-                    for ci in range(len(adj)):
+                    mask=np.zeros_like(src_probs,dtype=float)
+                    for ci in range(len(src_probs)):
                         try:
                             lo_i,hi_i=_class_range_by_meta_or_cfg(ci,m.get("meta"),symbol,strategy)
                             if _meets_minret_with_hint(lo_i,hi_i,allow_long,allow_short,MIN_RET_THRESHOLD): mask[ci]=1.0
                         except Exception: pass
-                    adj2=adj*mask
+                    adj2=src_probs*mask
                     if np.sum(adj2)==0: continue
                     adj2=adj2/np.sum(adj2); pred_i=int(np.argmax(adj2)); src=adj2
                 lo_i,hi_i=_class_range_by_meta_or_cfg(pred_i,m.get("meta"),symbol,strategy)
@@ -943,7 +1069,8 @@ def predict(symbol,strategy,source="일반",model_type=None):
                         "model_type":_norm_model_type(m.get("model_type","")),"val_f1":(None if m.get("val_f1") is None else float(m.get("val_f1"))),
                         "calib_ver":get_calibration_version(),"min_return_threshold":float(MIN_RET_THRESHOLD),
                         "class_range_lo":float(lo_i),"class_range_hi":float(hi_i),"expected_return_mid":float(exp_i),
-                        "position":pos_i,"hint_allow_long":allow_long,"hint_allow_short":allow_short}
+                        "position":pos_i,"hint_allow_long":allow_long,"hint_allow_short":allow_short,
+                        "hybrid":{"used": bool("hybrid_probs" in m), "w_sim": float(m.get("hybrid_w_sim",0.0)), "w_prob": float(m.get("hybrid_w_prob",1.0)), "sim_topk": int(m.get("sim_topk",0))}}
                 log_prediction(symbol=symbol,strategy=strategy,direction="예측(섀도우)",entry_price=entry,target_price=entry*(1+exp_i),
                                model=_norm_model_type(m.get("model_type","")),model_name=os.path.basename(m.get("model_path","")),
                                predicted_class=pred_i,label=pred_i,note=json.dumps(note_s,ensure_ascii=False),top_k=top_i,success=False,reason="shadow",
@@ -964,7 +1091,7 @@ def predict(symbol,strategy,source="일반",model_type=None):
         _release_predict_lock(lock_path)
         # 예측 종료 시 대형 객체/캐시 정리 강화
         try:
-            _release_memory(df, feat, X, outs, allpreds)
+            _release_memory(df, feat, X, outs, allpreds, lib_vecs, lib_labels)
         finally:
             gc.collect(); _safe_empty_cache()
 
