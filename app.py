@@ -1,4 +1,6 @@
-# app.py — FINAL v2.1 (train→next-group 파이프라인, 부팅시 필수 경로·빈 로그 보장, 예측락 stale GC, 그룹학습 락)
+# app.py — FINAL v2.2
+# (train→predict→next-group 파이프라인, 부팅시 필수 경로/빈 로그 보장, 예측락 stale GC, 그룹학습 락/게이트)
+
 from flask import Flask, jsonify, request, Response
 from recommend import main
 import train, os, threading, datetime, pytz, traceback, sys, shutil, re, time
@@ -20,10 +22,23 @@ import maintenance_fix_meta
 from logger import ensure_prediction_log_exists, ensure_train_log_exists, PREDICTION_HEADERS, TRAIN_HEADERS
 from logger import log_audit_prediction as log_audit
 from config import get_TRAIN_LOG_PATH
-# --- 필수 폴더 자동 생성 (누락 방지용) ---
-os.makedirs("/persistent/importances", exist_ok=True)
-os.makedirs("/persistent/guanwu/incoming", exist_ok=True)
-os.makedirs("/tmp/importances", exist_ok=True)
+
+# === 공통 경로/디렉토리 ===
+PERSIST_DIR = "/persistent"
+LOG_DIR     = os.path.join(PERSIST_DIR, "logs")
+MODEL_DIR   = os.path.join(PERSIST_DIR, "models")
+RUN_DIR     = os.path.join(PERSIST_DIR, "run")
+
+# --- 필수 폴더 자동 생성(중복 호출 제거) ---
+for p in [
+    f"{PERSIST_DIR}/importances",
+    f"{PERSIST_DIR}/guanwu/incoming",
+    LOG_DIR,
+    MODEL_DIR,
+    RUN_DIR,
+    "/tmp/importances",
+]:
+    os.makedirs(p, exist_ok=True)
 
 # integrity guard optional
 try:
@@ -80,17 +95,7 @@ def _safe_close_gate(note: str = ""):
     except Exception as e:
         print(f"[gate] close err: {e}"); sys.stdout.flush()
 
-# paths
-BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-PERSIST_DIR= "/persistent"
-LOG_DIR    = os.path.join(PERSIST_DIR, "logs")
-MODEL_DIR  = os.path.join(PERSIST_DIR, "models")
-os.makedirs(LOG_DIR, exist_ok=True)
-os.makedirs(MODEL_DIR, exist_ok=True)
-
-# [ADD] 그룹잠금 전용 폴더 및 락 파일
-RUN_DIR    = os.path.join(PERSIST_DIR, "run")
-os.makedirs(RUN_DIR, exist_ok=True)
+# [ADD] 그룹잠금 전용 파일
 GROUP_TRAIN_LOCK = os.path.join(RUN_DIR, "group_training.lock")
 
 DEPLOY_ID  = os.getenv("RENDER_RELEASE_ID") or os.getenv("RENDER_GIT_COMMIT") or os.getenv("RENDER_SERVICE_ID") or "local"
@@ -128,7 +133,7 @@ def _is_group_active_file() -> bool:
     except Exception:
         return False
 
-# BOOT: orphan 전역락 제거 + 예측락 stale GC
+# BOOT: orphan 전역락 제거 + 예측락 stale GC + 그룹학습락 제거
 if os.path.exists(LOCK_PATH):
     try:
         os.remove(LOCK_PATH)
@@ -139,8 +144,6 @@ try:
     _pl_clear(); print("[BOOT] predict lock stale-GC done")
 except Exception as e:
     print(f"[BOOT] predict lock GC failed: {e}")
-
-# [ADD] BOOT: 남은 그룹학습 락 제거
 try:
     if os.path.exists(GROUP_TRAIN_LOCK):
         os.remove(GROUP_TRAIN_LOCK)
@@ -554,9 +557,7 @@ def _init_background_once():
             print(">>> 서버 실행 준비")
             ensure_failure_db(); print("✅ failure_patterns DB 초기화 완료")
 
-            # 필수 경로 및 빈 로그 보장
-            for p in ["/persistent/importances", "/persistent/guanwu/incoming", "/persistent/logs", "/persistent/run"]:
-                os.makedirs(p, exist_ok=True)
+            # 필수 경로 및 빈 로그 보장(폴더는 이미 생성됨)
             try: ensure_train_log_exists()
             except Exception: pass
             try: ensure_prediction_log_exists()
@@ -799,7 +800,8 @@ def yopo_health():
 def diag_e2e():
     try:
         group = int(request.args.get("group", "-1"))
-        view = request.get("view", "json").lower() if hasattr(request, "get") else request.args.get("view", "json").lower()
+        # 🔧 FIX: request.get → request.args.get
+        view = request.args.get("view", "json").lower()
         cumulative = request.args.get("cum", "0") == "1"
         symbols = request.args.get("symbols")
         out = diag_e2e_run(group=group, view=view, cumulative=cumulative, symbols=symbols)
