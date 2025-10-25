@@ -462,7 +462,7 @@ def get_available_models(symbol, strategy):
         ]
         def _resolve_meta_abs(weight_abs):
             base = _stem(weight_abs)
-            m1 = f"{base}.meta.json}"
+            m1 = f"{base}.meta.json"
             # 오타 방지: 실제 존재 체크
             m1 = f"{_stem(weight_abs)}.meta.json"
             if os.path.exists(m1):
