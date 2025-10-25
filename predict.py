@@ -6,6 +6,7 @@
 # ③ evaluate_predictions(): 종료 시 메모리 정리 강화
 # ④ 관우로그 표시 보강: _soft_abstain 시 기존 "예측보류" 로그와 함께 "예측(보류)" 요약행 추가 기록
 # ⑤ [NEW] 하이브리드: 보정확률(calib_probs)과 패턴 유사도 기반 클래스분포(sim_probs)를 가중 결합하여 최종 후보 선정
+# ⑥ [옵션 추가] FORCE_PUBLISH_ON_ABSTAIN=1 이면 Exit/Reality 가드로 보류 직전 "보수적 강제발행" 수행
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob, inspect, threading
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -162,7 +163,7 @@ def _predict_hb_loop(stop_evt:threading.Event,tag:str,lock_path:str):
                 print(note); sys.stdout.flush(); last_note=note
         except Exception:
             pass
-        stop_evt.wait(max(1,PREDICT_HEARTBEAT_SEC))
+        stop_evt.wait(max(1,PREDICT_HEARTBEART_SEC if (PREDICT_HEARTBEAT_SEC:=int(os.getenv('PREDICT_HEARTBEAT_SEC','3'))) else 3))
 
 # -------------------- 외부 컴포넌트 풀백 --------------------
 try:
@@ -263,6 +264,9 @@ RG_LOOKBACK_MID=int(os.getenv("RG_LOOKBACK_MID","96"))
 RG_LOOKBACK_LONG=int(os.getenv("RG_LOOKBACK_LONG","336"))
 RG_VOL_METHOD=os.getenv("RG_VOL_METHOD","std").lower()
 RG_MIN_ABS_MID_FOR_VOLCHECK=float(os.getenv("RG_MIN_ABS_MID_FOR_VOLCHECK","0.004"))
+
+# [NEW] 강제 발행 옵션 (보류 직전 보수적 publish)
+FORCE_PUBLISH_ON_ABSTAIN = os.getenv("FORCE_PUBLISH_ON_ABSTAIN","0") == "1"
 
 # -------------------- 유틸리티 --------------------
 def _norm_model_type(mt:str)->str:
@@ -458,10 +462,12 @@ def get_available_models(symbol, strategy):
         ]
         def _resolve_meta_abs(weight_abs):
             base = _stem(weight_abs)
-            m1 = f"{base}.meta.json"
+            m1 = f"{base}.meta.json}"
+            # 오타 방지: 실제 존재 체크
+            m1 = f"{_stem(weight_abs)}.meta.json"
             if os.path.exists(m1):
                 return m1
-            cand = glob.glob(os.path.join(MODEL_DIR, f"**/{os.path.basename(base)}.meta.json"), recursive=True)
+            cand = glob.glob(os.path.join(MODEL_DIR, f"**/{os.path.basename(_stem(weight_abs))}.meta.json"), recursive=True)
             return cand[0] if cand else None
 
         for pattern in search_patterns:
@@ -791,6 +797,58 @@ def get_model_predictions(symbol,strategy,models,df,feat_scaled,window_list,rece
             continue
     return outs,allpreds
 
+# -------------------- [NEW] 보수적 강제발행 선택기 --------------------
+def _choose_conservative_prediction(outs, symbol, strategy, allow_long, allow_short, min_thr):
+    """
+    outs: get_model_predictions()가 만든 모델별 후보 리스트
+    규칙:
+      1) 각 모델의 hybrid_probs(없으면 adjusted/calib)에서
+         '최소수익+포지션 힌트'를 통과하는 클래스 중 확률 최대 선택
+      2) 1번이 전혀 없으면, 힌트를 크게 어기지 않는 선에서 |expected_return| 최대 클래스를 선택
+    반환: (chosen_model_dict, chosen_class_id) or (None, None)
+    """
+    try:
+        best = (None, None, -1.0)  # (m, cls, score)
+        # 1) 필터 통과 버전
+        for m in outs:
+            probs = m.get("hybrid_probs", m.get("adjusted_probs", m.get("calib_probs")))
+            if probs is None: continue
+            probs = np.asarray(probs, dtype=float)
+            mask = np.zeros_like(probs, dtype=float)
+            for ci in range(len(probs)):
+                try:
+                    lo,hi=_class_range_by_meta_or_cfg(ci,m.get("meta"),symbol,strategy)
+                    if _meets_minret_with_hint(lo,hi,allow_long,allow_short,min_thr): mask[ci]=1.0
+                except Exception: pass
+            cand = probs * mask
+            if cand.sum() > 0:
+                cand = cand / cand.sum()
+                ci = int(np.argmax(cand)); sc = float(cand[ci])
+                if sc > best[2]:
+                    best = (m, ci, sc)
+        if best[0] is not None:
+            return best[0], best[1]
+
+        # 2) 필터 전혀 통과 못 하면, 기대수익 절댓값 최대(힌트 우선) 고르기
+        best = (None, None, -1.0)
+        for m in outs:
+            probs = m.get("hybrid_probs", m.get("adjusted_probs", m.get("calib_probs")))
+            if probs is None: continue
+            for ci in range(len(probs)):
+                try:
+                    lo,hi=_class_range_by_meta_or_cfg(ci,m.get("meta"),symbol,strategy)
+                    pos=_position_from_range(lo,hi)
+                    # 힌트를 크게 어기지 않도록 우선순위 가중치
+                    hint_bonus = 1.0 if ((pos=="long" and allow_long) or (pos=="short" and allow_short) or pos=="neutral") else 0.5
+                    mid=abs((float(lo)+float(hi))/2.0)*hint_bonus
+                    if mid > best[2]:
+                        best = (m, ci, mid)
+                except Exception:
+                    continue
+        return (best[0], best[1]) if best[0] is not None else (None, None)
+    except Exception:
+        return (None, None)
+
 # -------------------- 메인 predict --------------------
 def predict(symbol,strategy,source="일반",model_type=None):
     # 게이트/그룹 가드
@@ -975,7 +1033,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
             if not _meets_minret_with_hint(cmin_sel,cmax_sel,allow_long,allow_short,MIN_RET_THRESHOLD):
                 best_m,best_sc,best_cls=None,-1.0,None
                 for m in outs:
-                    # 하이브리드 분포가 있으면 우선 사용
                     base_probs = m.get("hybrid_probs", m.get("adjusted_probs", m["calib_probs"]))
                     for ci in range(len(base_probs)):
                         try: lo,hi=_class_range_by_meta_or_cfg(ci,m.get("meta"),symbol,strategy)
@@ -987,21 +1044,39 @@ def predict(symbol,strategy,source="일반",model_type=None):
                     final_cls=best_cls; chosen=best_m; used_minret=True
         except Exception as e: print(f"[임계 가드 예외] {e}")
 
+        # === ExitGuard: 보류 직전 강제발행 우회 ===
         try:
             lo_sel,hi_sel=_class_range_by_meta_or_cfg(final_cls,(chosen or {}).get("meta"),symbol,strategy)
             exp_ret=(float(lo_sel)+float(hi_sel))/2.0
             ok,why=_exit_guard_check(lo_sel,hi_sel,exp_ret)
             if not ok:
-                return _soft_abstain(symbol,strategy,reason=why,meta_choice=str(meta_choice),regime=regime,X_last=X[-1],group_id=(chosen.get("group_id") if isinstance(chosen,dict) else None),df=df,source="보류")
+                if FORCE_PUBLISH_ON_ABSTAIN:
+                    alt_m, alt_c = _choose_conservative_prediction(outs, symbol, strategy, allow_long, allow_short, MIN_RET_THRESHOLD)
+                    if alt_m is not None:
+                        chosen, final_cls = alt_m, int(alt_c)
+                        meta_choice = f"force_publish_exit_guard({why})"
+                    else:
+                        return _soft_abstain(symbol,strategy,reason=why,meta_choice=str(meta_choice),regime=regime,X_last=X[-1],group_id=(chosen.get("group_id") if isinstance(chosen,dict) else None),df=df,source="보류")
+                else:
+                    return _soft_abstain(symbol,strategy,reason=why,meta_choice=str(meta_choice),regime=regime,X_last=X[-1],group_id=(chosen.get("group_id") if isinstance(chosen,dict) else None),df=df,source="보류")
         except Exception as e: print(f"[출구 가드 예외] {e}")
 
+        # === RealityGuard: 보류 직전 강제발행 우회 ===
         try:
             lo_sel,hi_sel=_class_range_by_meta_or_cfg(final_cls,(chosen or {}).get("meta"),symbol,strategy)
             exp_ret=(float(lo_sel)+float(hi_sel))/2.0
             if RG_ENABLE:
                 ok,why=_reality_guard_check(df,strategy,hint,lo_sel,hi_sel,exp_ret)
                 if not ok:
-                    return _soft_abstain(symbol,strategy,reason=why,meta_choice=str(meta_choice),regime=regime,X_last=X[-1],group_id=(chosen.get("group_id") if isinstance(chosen,dict) else None),df=df,source="보류")
+                    if FORCE_PUBLISH_ON_ABSTAIN:
+                        alt_m, alt_c = _choose_conservative_prediction(outs, symbol, strategy, allow_long, allow_short, MIN_RET_THRESHOLD)
+                        if alt_m is not None:
+                            chosen, final_cls = alt_m, int(alt_c)
+                            meta_choice = f"force_publish_reality_guard({why})"
+                        else:
+                            return _soft_abstain(symbol,strategy,reason=why,meta_choice=str(meta_choice),regime=regime,X_last=X[-1],group_id=(chosen.get("group_id") if isinstance(chosen,dict) else None),df=df,source="보류")
+                    else:
+                        return _soft_abstain(symbol,strategy,reason=why,meta_choice=str(meta_choice),regime=regime,X_last=X[-1],group_id=(chosen.get("group_id") if isinstance(chosen,dict) else None),df=df,source="보류")
         except Exception as e: print(f"[RealityGuard 예외] {e}")
 
         lo_sel,hi_sel=_class_range_by_meta_or_cfg(final_cls,(chosen or {}).get("meta"),symbol,strategy)
@@ -1010,7 +1085,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
         class_text=f"{float(lo_sel)*100:.2f}% ~ {float(hi_sel)*100:.2f}%"
         current=float(df.iloc[-1]["close"]); entry=current
         def _topk(p,k=3): return [int(i) for i in np.argsort(p)[::-1][:k]]
-        # top-k는 하이브리드 분포 우선
         chosen_probs_for_topk = (chosen.get("hybrid_probs") if isinstance(chosen,dict) and "hybrid_probs" in chosen else (chosen or outs[0])["calib_probs"])
         topk=_topk(chosen_probs_for_topk) if (chosen or outs) else []
         raw_pred = float(np.nan_to_num((chosen or outs[0])["raw_probs"][final_cls],nan=0.0,posinf=0.0,neginf=0.0)) if (chosen or outs) else None
@@ -1022,7 +1096,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
               "expected_return_mid":float(exp_ret),"position":pos_sel,"hint_allow_long":allow_long,"hint_allow_short":allow_short,
               "hint_ma_fast":hint.get("ma_fast"),"hint_ma_slow":hint.get("ma_slow"),"hint_slope":hint.get("slope"),
               "reality_guard":{"enabled":bool(RG_ENABLE),"vol_mult":float(RG_VOL_MULT),"method":RG_VOL_METHOD},
-              # [NEW] 하이브리드 디버그
               "hybrid": {
                   "used": bool(isinstance(chosen,dict) and "hybrid_probs" in chosen),
                   "w_sim": float(chosen.get("hybrid_w_sim", 0.0)) if isinstance(chosen,dict) else 0.0,
@@ -1044,7 +1117,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
         try:
             for m in outs:
                 if chosen and m.get("model_path")==chosen.get("model_path"): continue
-                # 섀도우는 하이브리드 있으면 우선 사용
                 src_probs = m.get("hybrid_probs", m.get("adjusted_probs", m["calib_probs"]))
                 filt=m.get("filtered_probs",None)
                 if filt is not None and np.sum(filt)>0:
