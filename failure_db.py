@@ -404,3 +404,21 @@ def insert_failure_record(record: Dict[str, Any],
     except Exception as e:
         print(f"[failure_db] insert_failure_record 예외: {e}")
         return False
+
+def classify_failure(symbol, strategy, feature_vec, regime):
+    # ① 유사도 비교 (패턴 라이브러리 or 실패DB)
+    sim = compute_similarity(feature_vec, recent_failures[symbol][strategy])
+    
+    # ② 시장 상태 기반
+    vol = current_volatility(symbol)
+    if vol > 3 * median_volatility: return "noise"
+    if sim < 0.8: return "evo"     # 새로운 실패 → 진화 대상
+    if sim >= 0.8: return "recur"  # 비슷한 실패 → 반복
+    
+def insert_failure_record(...):
+    level = classify_failure(symbol, strategy, feature_vector, regime)
+    if level == "noise":
+        return  # 노이즈는 바로 버림
+    if level == "recur":
+        deduplicate_recent_failures(symbol, strategy, feature_vector)
+    save_failure(symbol, strategy, feature_vector, level)
