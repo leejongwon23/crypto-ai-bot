@@ -495,6 +495,21 @@ def run_failure_training(max_targets: int = MAX_TARGETS, lookback_days: int = LO
     _save_state({"last_run_ts": _now_kst().isoformat()})
     return summary
 
+# --- backward-compatible alias (train.py에서 FL.run(...)을 기대) ---
+def run(limit: int | None = None,
+        lookback_days: int | None = None,
+        max_targets: int | None = None):
+    """
+    기존 호출 호환용 래퍼.
+    limit 파라미터는 쓰지 않지만 시그니처만 맞춰서 무시하고,
+    lookback/max_targets가 오면 그대로 반영합니다.
+    """
+    if lookback_days is None:
+        lookback_days = LOOKBACK_DAYS_DEFAULT
+    if max_targets is None:
+        max_targets = MAX_TARGETS
+    return run_failure_training(max_targets=max_targets, lookback_days=lookback_days)
+
 if __name__ == "__main__":
     out = run_failure_training()
     print(out)
