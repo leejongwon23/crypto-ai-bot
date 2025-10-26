@@ -855,7 +855,7 @@ def log_class_ranges(symbol, strategy, group_id=None, class_ranges=None, note=""
         else:
             write_header = not os.path.exists(sum_path)
             try:
-                with open(sum_path, "a", newline="", encoding="utf-8-sig") as f):
+                with open(sum_path, "a", newline="", encoding="utf-8-sig") as f:
                     w = csv.DictWriter(f, fieldnames=[
                         "timestamp","symbol","strategy","group_id",
                         "bucket_lo","bucket_hi","count","min","max","mean_mid","note"
