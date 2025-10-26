@@ -383,5 +383,11 @@ def run_failure_training():
     # 마지막 실행 시각 업데이트(쿨다운 기준)
     _save_state({"last_run_ts": _now_kst().isoformat()})
 
+# 파일 맨 아래에
+def retrain_failures(limit: int | None = None,
+                     lookback_days: int | None = None,
+                     max_targets: int | None = None):
+    return run_failure_training()
+
 if __name__ == "__main__":
     run_failure_training()
