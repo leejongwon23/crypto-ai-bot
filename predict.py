@@ -7,6 +7,7 @@
 # ④ 관우로그 표시 보강: _soft_abstain 시 기존 "예측보류" 로그와 함께 "예측(보류)" 요약행 추가 기록
 # ⑤ [NEW] 하이브리드: 보정확률(calib_probs)과 패턴 유사도 기반 클래스분포(sim_probs)를 가중 결합하여 최종 후보 선정
 # ⑥ [옵션 추가] FORCE_PUBLISH_ON_ABSTAIN=1 이면 Exit/Reality 가드로 보류 직전 "보수적 강제발행" 수행
+# ⑦ [NEW] evaluate_predictions()가 실행될 때마다 /persistent/logs/evaluation_result.csv (최근 100건) 자동 갱신
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob, inspect, threading
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -163,7 +164,9 @@ def _predict_hb_loop(stop_evt:threading.Event,tag:str,lock_path:str):
                 print(note); sys.stdout.flush(); last_note=note
         except Exception:
             pass
-        stop_evt.wait(max(1,PREDICT_HEARTBEART_SEC if (PREDICT_HEARTBEAT_SEC:=int(os.getenv('PREDICT_HEARTBEAT_SEC','3'))) else 3))
+        # ✅ 오타 수정: HEARTBEART → HEARTBEAT, 그리고 안전 대기
+        hb = int(os.getenv('PREDICT_HEARTBEAT_SEC','3'))
+        stop_evt.wait(max(1, hb))
 
 # -------------------- 외부 컴포넌트 풀백 --------------------
 try:
@@ -398,8 +401,6 @@ def _compute_similarity_class_probs(current_vec: np.ndarray,
     """
     current_vec과 라이브러리(lib_vecs, lib_labels)로부터
     '클래스별 유사도 기반 분포'를 계산한다.
-    - labels는 [0..num_classes-1] 가정. 범위를 벗어나면 자동 클램프.
-    - 반환: (sim_probs, info_dict)
     """
     try:
         if lib_vecs is None or lib_labels is None or len(lib_vecs) == 0:
@@ -411,21 +412,18 @@ def _compute_similarity_class_probs(current_vec: np.ndarray,
         d = lib_vecs.shape[1]
         v = np.asarray(current_vec, dtype=float).reshape(1, -1)
         if v.shape[1] != d:
-            # 피처 차원 다르면 안전한 fallback: 균등분포
             sim_probs = np.ones(num_classes, dtype=float) / float(num_classes)
             return sim_probs, {"m": 0, "w_sim": 0.0}
 
         sims = cosine_similarity(lib_vecs, v).ravel()
-        k = int(min(max(10, top_k), len(sims)))  # 최소 10개는 보되 상한은 top_k
+        k = int(min(max(10, top_k), len(sims)))  # 최소 10개, 최대 top_k
         idx = np.argsort(-sims)[:k]
         m = len(idx)
-        # 표본 개수에 따른 유사도 가중치 자동 조정
         if m < 20: w_sim = 0.2
         elif m < 80: w_sim = 0.5
         else: w_sim = 0.6
 
         s = sims[idx]
-        # 음수를 피하고 가중합 안정화
         s = s - s.min() + 1e-6
         w = s / (s.sum() + 1e-12)
 
@@ -463,7 +461,6 @@ def get_available_models(symbol, strategy):
         def _resolve_meta_abs(weight_abs):
             base = _stem(weight_abs)
             m1 = f"{base}.meta.json"
-            # 오타 방지: 실제 존재 체크
             m1 = f"{_stem(weight_abs)}.meta.json"
             if os.path.exists(m1):
                 return m1
@@ -801,11 +798,6 @@ def get_model_predictions(symbol,strategy,models,df,feat_scaled,window_list,rece
 def _choose_conservative_prediction(outs, symbol, strategy, allow_long, allow_short, min_thr):
     """
     outs: get_model_predictions()가 만든 모델별 후보 리스트
-    규칙:
-      1) 각 모델의 hybrid_probs(없으면 adjusted/calib)에서
-         '최소수익+포지션 힌트'를 통과하는 클래스 중 확률 최대 선택
-      2) 1번이 전혀 없으면, 힌트를 크게 어기지 않는 선에서 |expected_return| 최대 클래스를 선택
-    반환: (chosen_model_dict, chosen_class_id) or (None, None)
     """
     try:
         best = (None, None, -1.0)  # (m, cls, score)
@@ -838,7 +830,6 @@ def _choose_conservative_prediction(outs, symbol, strategy, allow_long, allow_sh
                 try:
                     lo,hi=_class_range_by_meta_or_cfg(ci,m.get("meta"),symbol,strategy)
                     pos=_position_from_range(lo,hi)
-                    # 힌트를 크게 어기지 않도록 우선순위 가중치
                     hint_bonus = 1.0 if ((pos=="long" and allow_long) or (pos=="short" and allow_short) or pos=="neutral") else 0.5
                     mid=abs((float(lo)+float(hi))/2.0)*hint_bonus
                     if mid > best[2]:
@@ -944,7 +935,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
             return np.asarray(probs,dtype=float)
 
         # === [NEW] 하이브리드: 확률(calib_probs) × 유사도(sim_probs) 결합 ==========================
-        # 라이브러리 없으면 w_sim=0.0 → 확률 단독과 동일 동작
         sim_cache = {}
         if final_cls is None:
             best_i,best_score,best_pred=-1,-1.0,None; scores=[]
@@ -953,7 +943,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
                 adj=_maybe_adjust(m["calib_probs"],rec_freq)
                 num_classes = len(adj)
 
-                # (1) 유사도 기반 클래스 분포
                 if num_classes not in sim_cache:
                     sim_probs, info = _compute_similarity_class_probs(current_vec, lib_vecs, lib_labels, num_classes=num_classes, top_k=200)
                     sim_cache[num_classes] = (sim_probs, info)
@@ -963,15 +952,13 @@ def predict(symbol,strategy,source="일반",model_type=None):
                 w_sim = float(info.get("w_sim", 0.0))
                 w_prob = 1.0 - w_sim
 
-                # (2) 결합 분포
                 hybrid = w_prob*adj + w_sim*sim_probs
                 hybrid = np.nan_to_num(hybrid, nan=0.0, posinf=0.0, neginf=0.0)
                 if hybrid.sum() > 0:
                     hybrid = hybrid / hybrid.sum()
                 else:
-                    hybrid = adj  # 안전장치
+                    hybrid = adj
 
-                # (3) 최소 기대수익/포지션 힌트 마스크
                 mask=np.zeros_like(hybrid,dtype=float)
                 for ci in range(num_classes):
                     try:
@@ -985,7 +972,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
                 else:
                     pred=int(np.argmax(hybrid)); p=float(hybrid[pred])
 
-                # 메타정보 저장
                 m.update({
                     "adjusted_probs": adj,
                     "sim_probs": sim_probs,
@@ -1003,7 +989,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
                 if p>best_score:
                     best_i,best_score,best_pred=i,p,pred; used_minret=fused
 
-            # 탐험(ε) 적용
             if len(scores)>=2:
                 ss=sorted(scores,key=lambda x:x[1],reverse=True); top1,top2=ss[0],ss[1]; gap=float(top1[1]-top2[1])
                 st=_load_json(EXP_STATE,{}).get(f"{symbol}|{strategy}",{}); last=max([v.get("last_explore_ts",0.0) for v in st.values()],default=0.0) if st else 0.0
@@ -1208,7 +1193,7 @@ def evaluate_predictions(get_price_fn):
                         except Exception: entry=0.0
                         if entry<=0 or label==-1:
                             r.update({"status":"invalid","reason":"invalid_entry_or_label","return":0.0,"return_value":0.0})
-                            if not check_failure_exists(r): insert_failure_record(r,feature_vector=None)
+                            if not check_failure_exists(r): insert_failure_record(r)
                             w_all.writerow({k:r.get(k,"") for k in fields})
                             if not wrong_written:
                                 wrong_writer=csv.DictWriter(f_wrong,fieldnames=sorted(r.keys())); wrong_writer.writeheader(); wrong_written=True
@@ -1267,7 +1252,7 @@ def evaluate_predictions(get_price_fn):
                         r.update({"status":status,"reason":f"[pred_class={pred_cls}] gain={gain:.3f} (cls_min={cmin}, cls_max={cmax})","return":round(gain,5),"return_value":round(gain,5),"group_id":gid})
                         log_prediction(symbol=sym,strategy=strat,direction=f"평가:{status}",entry_price=entry,target_price=entry*(1+gain),timestamp=_now_kst().isoformat(),model=model,predicted_class=pred_cls,success=(status in ["success","v_success"]),reason=r["reason"],rate=gain,expected_return=gain,position=("long" if cmax>0 else "short" if cmin<0 else "neutral"),return_value=gain,volatility=("v_" in status),source="평가",label=label,group_id=gid)
                         if status in ["fail","v_fail"]:
-                            if not check_failure_exists(r): insert_failure_record(r,feature_vector=None)
+                            if not check_failure_exists(r): insert_failure_record(r)
                         if model=="meta": update_model_success(sym,strat,model,status in ["success","v_success"])
                         w_all.writerow({k:r.get(k,"") for k in fields})
                         if not eval_written:
@@ -1284,6 +1269,23 @@ def evaluate_predictions(get_price_fn):
                             wrong_writer=csv.DictWriter(f_wrong,fieldnames=sorted(r.keys())); wrong_writer.writeheader(); wrong_written=True
                         wrong_writer.writerow({k:r.get(k,"") for k in r.keys()})
             shutil.move(tmp,P); print("[✅ 평가 완료] 스트리밍 재작성 성공")
+
+            # --- ✅ 추가: 최근 평가 100건 집계 파일 갱신 ---
+            try:
+                import pandas as _pd, os as _os
+                _agg_path = "/persistent/logs/evaluation_result.csv"  # 화면/관우가 읽는 고정 파일
+                _df_today = _pd.read_csv(EVAL, encoding="utf-8-sig") if _os.path.exists(EVAL) else _pd.DataFrame()
+                _df_old = _pd.read_csv(_agg_path, encoding="utf-8-sig") if _os.path.exists(_agg_path) else _pd.DataFrame()
+                _df_all = _pd.concat([_df_old, _df_today], ignore_index=True)
+                if "timestamp" in _df_all.columns:
+                    _df_all["timestamp"] = _pd.to_datetime(_df_all["timestamp"], errors="coerce")
+                    _df_all = _df_all.sort_values("timestamp", ascending=False)
+                _df_all = _df_all.head(100)
+                _df_all.to_csv(_agg_path, index=False, encoding="utf-8-sig")
+                print(f"[✅ 평가 집계 갱신] {_agg_path} rows={len(_df_all)}")
+            except Exception as _e:
+                print(f"[⚠️ 평가 집계 갱신 실패] {_e}")
+
     except FileNotFoundError:
         print(f"[정보] {P} 없음 → 평가 스킵")
     except Exception as e:
