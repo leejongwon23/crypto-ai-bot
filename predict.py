@@ -1,4 +1,4 @@
-# === predict.py (YOPO v1.5 — 예측 정상화 완전판, 메모리 누수/초과 패치 적용, 통합본 + 하이브리드 유사도×확률) ===
+# === predict.py (YOPO v1.6 — 예측 정상화 완전판, 메모리 누수/초과 패치 적용, 통합본 + 하이브리드 유사도×확률 + 섀도우 평가큐 통합) ===
 # 핵심 수정
 # ① get_model_predictions(): 로더 실패시 다중 폴백( model_io → torch.load → state_dict 주입 )
 #    + 윈도우/모델 루프마다 즉시 메모리 해제(model.cpu(); del) + 캐시 비움
@@ -8,6 +8,7 @@
 # ⑤ [NEW] 하이브리드: 보정확률(calib_probs)과 패턴 유사도 기반 클래스분포(sim_probs)를 가중 결합하여 최종 후보 선정
 # ⑥ [옵션 추가] FORCE_PUBLISH_ON_ABSTAIN=1 이면 Exit/Reality 가드로 보류 직전 "보수적 강제발행" 수행
 # ⑦ [NEW] evaluate_predictions()가 실행될 때마다 /persistent/logs/evaluation_result.csv (최근 100건) 자동 갱신
+# ⑧ [NEW in v1.6] 섀도우("예측(섀도우)")도 평가 큐에 확실히 포함되도록 조건 보강
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob, inspect, threading
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -1146,7 +1147,7 @@ def predict(symbol,strategy,source="일반",model_type=None):
         try: _hb_stop.set(); _hb_thread.join(timeout=2)
         except Exception: pass
         _release_predict_lock(lock_path)
-        # 예측 종료 시 대형 객체/캐시 정리 강화
+        # 예측 종료 시 대형 객체/캐시 일괄 정리
         try:
             _release_memory(df, feat, X, outs, allpreds, lib_vecs, lib_labels)
         finally:
@@ -1177,7 +1178,8 @@ def evaluate_predictions(get_price_fn):
                 eval_written=False; wrong_written=False
                 for r in rd:
                     try:
-                        if r.get("status") not in [None,"","pending","v_pending"]:
+                        # v1.6 변경: 섀도우("예측(섀도우)")는 평가 큐에서 제외하지 않음
+                        if r.get("status") not in [None,"","pending","v_pending"] and "섀도우" not in str(r.get("direction","")):
                             w_all.writerow({k:r.get(k,"") for k in fields}); continue
                         sym=r.get("symbol","UNKNOWN"); strat=r.get("strategy","알수없음"); model=r.get("model","unknown")
                         try: gid=int(float(r.get("group_id",0)))
