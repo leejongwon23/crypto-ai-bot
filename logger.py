@@ -855,7 +855,7 @@ def log_class_ranges(symbol, strategy, group_id=None, class_ranges=None, note=""
         else:
             write_header = not os.path.exists(sum_path)
             try:
-                with open(sum_path, "a", newline="", encoding="utf-8-sig") as f:
+                with open(sum_path, "a", newline="", encoding="utf-8-sig") as f):
                     w = csv.DictWriter(f, fieldnames=[
                         "timestamp","symbol","strategy","group_id",
                         "bucket_lo","bucket_hi","count","min","max","mean_mid","note"
@@ -1160,15 +1160,24 @@ def flush_gwanwoo_summary():
     """
     from config import get_GANWU_PATH, get_PREDICTION_LOG_PATH
     gw_dir = get_GANWU_PATH()                         # /data/guanwu/incoming
-    pred_csv_path = get_PREDICTION_LOG_PATH()         # /data/guanwu/incoming/prediction_log.csv
 
+    # --- (1) 경로 통합: 평가/예측 경로 정확화 ---
+    # 평가 결과는 시스템 표준 로그 위치(/persistent/logs)를 사용
     paths = {
         "pred_json": os.path.join(gw_dir, "prediction_result.json"),
-        "eval_csv": os.path.join(gw_dir, "evaluation_result.csv"),
-        "pred_csv": pred_csv_path,
+        "eval_csv": EVAL_RESULT,  # <-- 핵심 수정: 관우폴더가 아니라 표준 로그 경로에서 읽음
     }
-    out_path = os.path.join(gw_dir, "gwanwoo_summary.csv")
 
+    # 예측 로그는 존재하는 첫 후보를 사용 (안정화)
+    pred_csv_candidates = [
+        PREDICTION_LOG,                                      # 표준 위치
+        os.path.join(gw_dir, "prediction_log.csv"),         # 관우 폴더 복제본(있으면)
+        get_PREDICTION_LOG_PATH()                           # config 반환
+    ]
+    pred_csv_path = next((p for p in pred_csv_candidates if isinstance(p, str) and os.path.exists(p)), pred_csv_candidates[0])
+    paths["pred_csv"] = pred_csv_path
+
+    out_path = os.path.join(gw_dir, "gwanwoo_summary.csv")
     records = []
 
     # 1) prediction_result.json
@@ -1191,7 +1200,7 @@ def flush_gwanwoo_summary():
     except Exception as e:
         print(f"[⚠️ 관우요약] prediction_result.json 읽기 실패: {e}")
 
-    # 2) evaluation_result.csv
+    # 2) evaluation_result.csv  (표준 경로에서 수집)
     try:
         if os.path.exists(paths["eval_csv"]):
             df = pd.read_csv(paths["eval_csv"], encoding="utf-8-sig")
@@ -1201,26 +1210,33 @@ def flush_gwanwoo_summary():
     except Exception as e:
         print(f"[⚠️ 관우요약] evaluation_result.csv 읽기 실패: {e}")
 
-    # 3) prediction_log.csv
+    # 3) prediction_log.csv  (광범위 수집: allowlist → blacklist)
     try:
         if os.path.exists(paths["pred_csv"]):
             df = pd.read_csv(paths["pred_csv"], encoding="utf-8-sig")
             if not df.empty:
-                df["source"] = df.get("source", "")
-                allowed = {"manual","api","group_trigger","group_trigger_retry","train_end","변동성"}
-                df = df[df["source"].isin(allowed)] if "source" in df.columns else df
+                src_col = "source" if "source" in df.columns else None
+                if src_col:
+                    # 이전: 특정 소스만 허용 → 실제 예측 누락
+                    # 변경: 디버그성만 제외하고 전부 포함
+                    blacklist = {"debug","dry_run"}
+                    df = df[~df[src_col].astype(str).isin(blacklist)]
                 keep = [c for c in ["timestamp","symbol","strategy","predicted_class",
                                     "rate","raw_prob","calib_prob","success","reason","source"] if c in df.columns]
-                records.extend(df[keep].to_dict("records"))
+                if keep:
+                    records.extend(df[keep].to_dict("records"))
+                else:
+                    records.extend(df.to_dict("records"))
     except Exception as e:
         print(f"[⚠️ 관우요약] prediction_log.csv 읽기 실패: {e}")
 
     if not records:
         msg_hdr = ["timestamp","symbol","strategy","predicted_class","expected_return","prob","model","source"]
-        if _READONLY_FS:
+        if _READONLY_FS or not _fs_has_space(out_path, 256*1024):
             print(f"[GWANWOO_SUM][console] []")
             return out_path
         try:
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
             with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
                 csv.writer(f).writerow(msg_hdr)
         except Exception as e:
@@ -1235,7 +1251,10 @@ def flush_gwanwoo_summary():
     if _READONLY_FS or not _fs_has_space(out_path, 256*1024):
         print(f"[GWANWOO_SUM][console] {df_out.to_json(orient='records', force_ascii=False)}")
     else:
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        try:
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        except Exception:
+            pass
         df_out.to_csv(out_path, index=False, encoding="utf-8-sig")
         print(f"[✅ 관우요약] {len(df_out)}행 생성: {out_path}")
     return out_path
