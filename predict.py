@@ -9,6 +9,7 @@
 # ⑥ [옵션 추가] FORCE_PUBLISH_ON_ABSTAIN=1 이면 Exit/Reality 가드로 보류 직전 "보수적 강제발행" 수행
 # ⑦ [NEW] evaluate_predictions()가 실행될 때마다 /persistent/logs/evaluation_result.csv (최근 100건) 자동 갱신
 # ⑧ [NEW in v1.6] 섀도우("예측(섀도우)")도 평가 큐에 확실히 포함되도록 조건 보강
+# ⑨ [NEW in v1.6.1] 모델 디렉터리 다중 스캔 + 절대경로 사용 + 탐색 진단로그 출력 (no_valid_model 방지)
 
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob, inspect, threading
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
@@ -129,7 +130,7 @@ def _is_stale_lock(path:str,ttl_sec:int)->bool:
 def _clear_stale_lock(path:str,ttl_sec:int,tag:str=""):
     try:
         if os.path.exists(path) and _is_stale_lock(path,ttl_sec):
-            os.remove(path); print(f"[LOCK] stale predict lock removed ({os.path.basename(path)}) > {ttl_sec}s {tag}"); sys.stdout.flush()
+            os.remove(path); print(f"[LOCK] stale predict lock removed ({os.path.basename(path)}) > {ttl_sec}s {tag}")
     except Exception:
         pass
 
@@ -162,10 +163,9 @@ def _predict_hb_loop(stop_evt:threading.Event,tag:str,lock_path:str):
             lock=os.path.exists(lock_path)
             note=f"[HB] predict alive ({tag}) gate={gate} lock={'1' if lock else '0'} ts={_now_kst().strftime('%H:%M:%S')}"
             if note!=last_note:
-                print(note); sys.stdout.flush(); last_note=note
+                print(note); last_note=note
         except Exception:
             pass
-        # ✅ 오타 수정: HEARTBEART → HEARTBEAT, 그리고 안전 대기
         hb = int(os.getenv('PREDICT_HEARTBEAT_SEC','3'))
         stop_evt.wait(max(1, hb))
 
@@ -242,7 +242,25 @@ from config import (
 )
 
 DEVICE=torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MODEL_DIR="/persistent/models"
+
+# -------------------- [NEW] 모델 경로 다중 스캔 설정 --------------------
+# 기본값: 환경변수 MODEL_DIR 우선, 그 다음 여러 폴더를 순차 스캔
+_DEFAULT_MODEL_ROOTS = [
+    os.getenv("MODEL_DIR", "/persistent/models"),
+    "/persistent/models",
+    "./models",
+    "/mnt/data/models",
+    "/workspace/models",
+    "/data/models",
+]
+# 중복 제거 + 문자열만 필터
+MODEL_DIRS = []
+for p in _DEFAULT_MODEL_ROOTS:
+    if isinstance(p,str) and p not in MODEL_DIRS:
+        MODEL_DIRS.append(p)
+# (과거 코드 호환) 가장 첫 경로를 'MODEL_DIR'로 유지
+MODEL_DIR = MODEL_DIRS[0] if MODEL_DIRS else "/persistent/models"
+
 PREDICTION_LOG_PATH="/persistent/prediction_log.csv"
 NUM_CLASSES=get_NUM_CLASSES()
 FEATURE_INPUT_SIZE=get_FEATURE_INPUT_SIZE()
@@ -345,26 +363,22 @@ def _stem(fn):
         if fn.endswith(e): return fn[:-len(e)]
     return os.path.splitext(fn)[0]
 
-def _resolve_meta(weight_base):
-    base=_stem(weight_base)
-    cand=os.path.join(MODEL_DIR,f"{base}.meta.json")
-    if os.path.exists(cand): return cand
-    ms=sorted(glob.glob(os.path.join(MODEL_DIR,f"{base}_*.meta.json")))
-    if ms: return ms[0]
+# -------------------- [NEW] 메타파일 해석/탐색 (다중 루트) --------------------
+def _resolve_meta_from_any_root(weight_abs:str)->str|None:
     try:
-        p=base.split("_")
-        if len(p)>=3:
-            sym,strat,mtype=p[0],p[1],p[2]
-            cand2=os.path.join(MODEL_DIR,sym,strat,f"{mtype}.meta.json")
-            if os.path.exists(cand2): return cand2
+        base = _stem(weight_abs)
+        # 1) 같은 디렉터리
+        m1 = f"{base}.meta.json"
+        if os.path.exists(m1): return m1
+        # 2) 모든 루트에서 이름으로 재탐색
+        target = os.path.basename(_stem(weight_abs))
+        for root in MODEL_DIRS:
+            pattern = os.path.join(root, "**", f"{target}.meta.json")
+            cands = glob.glob(pattern, recursive=True)
+            if cands: return cands[0]
+        return None
     except Exception:
-        pass
-    return None
-
-def _glob_many(stem):
-    out=[]
-    for e in _KNOWN_EXTS: out.extend(glob.glob(f"{stem}{e}"))
-    return out
+        return None
 
 def _parse_group_cls_from_filename(path:str):
     try:
@@ -399,15 +413,10 @@ def _compute_similarity_class_probs(current_vec: np.ndarray,
                                     lib_labels: np.ndarray | None,
                                     num_classes: int,
                                     top_k: int = 200):
-    """
-    current_vec과 라이브러리(lib_vecs, lib_labels)로부터
-    '클래스별 유사도 기반 분포'를 계산한다.
-    """
     try:
         if lib_vecs is None or lib_labels is None or len(lib_vecs) == 0:
             sim_probs = np.ones(num_classes, dtype=float) / float(num_classes)
             return sim_probs, {"m": 0, "w_sim": 0.0}
-        # 차원 보정
         lib_vecs = np.asarray(lib_vecs, dtype=float)
         lib_labels = np.asarray(lib_labels)
         d = lib_vecs.shape[1]
@@ -417,7 +426,7 @@ def _compute_similarity_class_probs(current_vec: np.ndarray,
             return sim_probs, {"m": 0, "w_sim": 0.0}
 
         sims = cosine_similarity(lib_vecs, v).ravel()
-        k = int(min(max(10, top_k), len(sims)))  # 최소 10개, 최대 top_k
+        k = int(min(max(10, top_k), len(sims)))
         idx = np.argsort(-sims)[:k]
         m = len(idx)
         if m < 20: w_sim = 0.2
@@ -430,10 +439,8 @@ def _compute_similarity_class_probs(current_vec: np.ndarray,
 
         sim_probs = np.zeros(num_classes, dtype=float)
         for weight, lab in zip(w, lib_labels[idx]):
-            try:
-                ci = int(lab)
-            except Exception:
-                continue
+            try: ci = int(lab)
+            except Exception: continue
             ci = max(0, min(num_classes - 1, ci))
             sim_probs[ci] += float(weight)
         sim_probs = np.nan_to_num(sim_probs, nan=0.0, posinf=0.0, neginf=0.0)
@@ -448,104 +455,135 @@ def _compute_similarity_class_probs(current_vec: np.ndarray,
         return sim_probs, {"m": 0, "w_sim": 0.0}
 # ====================================================================
 
-# === 모델 탐색 ===
+# === [NEW] 모델 탐색 (다중 루트 + 절대경로 + 진단 로그) ===
 def get_available_models(symbol, strategy):
+    diag = {"symbol": symbol, "strategy": strategy, "roots": [], "found": []}
     try:
-        if not os.path.isdir(MODEL_DIR):
-            return []
         results = []
-        search_patterns = [
-            os.path.join(MODEL_DIR, f"{symbol}_{strategy}_*"),
-            os.path.join(MODEL_DIR, symbol, strategy, "*"),
-            os.path.join(MODEL_DIR, symbol, f"{strategy}_*"),
-        ]
-        def _resolve_meta_abs(weight_abs):
-            base = _stem(weight_abs)
-            m1 = f"{base}.meta.json"
-            m1 = f"{_stem(weight_abs)}.meta.json"
-            if os.path.exists(m1):
-                return m1
-            cand = glob.glob(os.path.join(MODEL_DIR, f"**/{os.path.basename(_stem(weight_abs))}.meta.json"), recursive=True)
-            return cand[0] if cand else None
+        for root in MODEL_DIRS:
+            root_info = {"root": root, "exists": bool(os.path.isdir(root)), "matches": 0}
+            if not root_info["exists"]:
+                diag["roots"].append(root_info); continue
 
-        for pattern in search_patterns:
-            for ext in _KNOWN_EXTS:
-                for w in glob.glob(f"{pattern}*{ext}", recursive=True):  # ✅ 뒤꼬리 파일까지 탐색
-                    if not os.path.isfile(w):
-                        continue
-                    meta_path = _resolve_meta_abs(w)
+            search_patterns = [
+                os.path.join(root, f"{symbol}_{strategy}_*"),
+                os.path.join(root, symbol, strategy, "*"),
+                os.path.join(root, symbol, f"{strategy}_*"),
+            ]
+
+            for pattern in search_patterns:
+                for ext in _KNOWN_EXTS:
+                    for w in glob.glob(f"{pattern}*{ext}", recursive=True):
+                        if not os.path.isfile(w): continue
+                        meta_path = _resolve_meta_from_any_root(w)
+                        if not meta_path:
+                            meta_tmp = {
+                                "symbol": symbol, "strategy": strategy,
+                                "group_id": _infer_group_id(symbol, strategy),
+                                "input_size": FEATURE_INPUT_SIZE, "num_classes": NUM_CLASSES,
+                                "created_at": time.time(),
+                            }
+                            meta_path = _stem(w) + ".meta.json"
+                            try:
+                                with open(meta_path, "w", encoding="utf-8") as f:
+                                    json.dump(meta_tmp, f, ensure_ascii=False, indent=2)
+                            except Exception:
+                                continue
+                        try:
+                            with open(meta_path, "r", encoding="utf-8") as mf:
+                                meta = json.load(mf)
+                        except Exception:
+                            continue
+
+                        fname_grp, _ = _parse_group_cls_from_filename(w)
+                        gid = meta.get("group_id")
+                        if fname_grp is not None:
+                            gid = int(fname_grp)
+                        elif gid is None or not str(gid).isdigit():
+                            gid = _infer_group_id(symbol, strategy)
+                        gid = max(0, min(7, int(gid)))
+                        meta["group_id"] = gid
+
+                        results.append({
+                            "pt_abs": w,             # 절대 경로 사용
+                            "meta_path": meta_path,  # 메타 절대경로
+                            "group_id": gid,
+                            "root": root
+                        })
+                        root_info["matches"] += 1
+            diag["roots"].append(root_info)
+
+        # 루트 전체에서도 못 찾으면: 최신 3개 아무 모델이나 보정하여 후보로
+        if not results:
+            for root in MODEL_DIRS:
+                if not os.path.isdir(root): continue
+                all_candidates = []
+                for ext in _KNOWN_EXTS:
+                    all_candidates += glob.glob(os.path.join(root, f"**/*{ext}"), recursive=True)
+                if not all_candidates: continue
+                all_candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                for w in all_candidates[:3]:
+                    meta_path = _resolve_meta_from_any_root(w)
                     if not meta_path:
                         meta_tmp = {
-                            "symbol": symbol,
-                            "strategy": strategy,
+                            "symbol": symbol, "strategy": strategy,
                             "group_id": _infer_group_id(symbol, strategy),
-                            "input_size": FEATURE_INPUT_SIZE,
-                            "num_classes": NUM_CLASSES,
+                            "input_size": FEATURE_INPUT_SIZE, "num_classes": NUM_CLASSES,
                             "created_at": time.time(),
                         }
                         meta_path = _stem(w) + ".meta.json"
-                        with open(meta_path, "w", encoding="utf-8") as f:
-                            json.dump(meta_tmp, f, ensure_ascii=False, indent=2)
-                    try:
-                        with open(meta_path, "r", encoding="utf-8") as mf:
-                            meta = json.load(mf)
-                    except Exception:
-                        continue
-                    fname_grp, _ = _parse_group_cls_from_filename(w)
-                    gid = meta.get("group_id")
-                    if fname_grp is not None:
-                        gid = int(fname_grp)
-                    elif gid is None or not str(gid).isdigit():
-                        gid = _infer_group_id(symbol, strategy)
-                    gid = max(0, min(7, int(gid)))
-                    meta["group_id"] = gid
+                        try:
+                            with open(meta_path, "w", encoding="utf-8") as f:
+                                json.dump(meta_tmp, f, ensure_ascii=False, indent=2)
+                        except Exception:
+                            continue
                     results.append({
-                        "pt_file": os.path.relpath(w, MODEL_DIR),
-                        "meta_path": meta_path,
-                        "group_id": gid
+                        "pt_abs": w, "meta_path": meta_path,
+                        "group_id": _infer_group_id(symbol, strategy),
+                        "root": root
                     })
 
-        if not results:
-            all_candidates = []
-            for ext in _KNOWN_EXTS:
-                all_candidates += glob.glob(os.path.join(MODEL_DIR, f"**/*{ext}"), recursive=True)
-            if not all_candidates:
-                return []
-            all_candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-            top = all_candidates[:3]
-            for w in top:
-                meta_path = _resolve_meta_abs(w)
-                if not meta_path:
-                    meta_tmp = {
-                        "symbol": symbol,
-                        "strategy": strategy,
-                        "group_id": _infer_group_id(symbol, strategy),
-                        "input_size": FEATURE_INPUT_SIZE,
-                        "num_classes": NUM_CLASSES,
-                        "created_at": time.time(),
-                    }
-                    meta_path = _stem(w) + ".meta.json"
-                    with open(meta_path, "w", encoding="utf-8") as f:
-                        json.dump(meta_tmp, f, ensure_ascii=False, indent=2)
-                results.append({
-                    "pt_file": os.path.relpath(w, MODEL_DIR),
-                    "meta_path": meta_path,
-                    "group_id": _infer_group_id(symbol, strategy)
-                })
-
+        # 중복 제거(절대경로 기준) + 최신순 정렬
         seen = set(); uniq = []
         for it in results:
-            if it["pt_file"] not in seen:
-                seen.add(it["pt_file"]); uniq.append(it)
-        uniq.sort(key=lambda x: os.path.getmtime(os.path.join(MODEL_DIR, x["pt_file"])), reverse=True)
+            key = it["pt_abs"]
+            if key not in seen:
+                seen.add(key); uniq.append(it)
+        try:
+            uniq.sort(key=lambda x: os.path.getmtime(x["pt_abs"]), reverse=True)
+        except Exception:
+            pass
+
+        # 진단 정보 저장
+        for it in uniq:
+            try:
+                diag["found"].append({"pt_abs": it["pt_abs"], "meta": it["meta_path"], "group_id": it["group_id"], "root": it.get("root")})
+            except Exception:
+                pass
+        try:
+            os.makedirs("/persistent/logs", exist_ok=True)
+            diag_path = "/persistent/logs/model_discovery_diag.json"
+            payload = _load_json(diag_path, [])
+            payload = payload[-200:] + [diag]  # 최근 200건만 유지
+            _save_json(diag_path, payload)
+        except Exception:
+            pass
 
         if not uniq:
-            print(f"[⚠️ 모델 탐색 실패] {symbol}-{strategy} → 빈 목록")
+            print(f"[⚠️ 모델 탐색 실패] {symbol}-{strategy} → 빈 목록 (roots={MODEL_DIRS})")
         else:
-            print(f"[✅ 모델 탐색 성공] {symbol}-{strategy} → {len(uniq)}개 모델 발견")
+            print(f"[✅ 모델 탐색 성공] {symbol}-{strategy} → {len(uniq)}개 모델 발견 (first_root={uniq[0].get('root')})")
         return uniq
     except Exception as e:
         print(f"[get_available_models 오류] {e}")
+        try:
+            os.makedirs("/persistent/logs", exist_ok=True)
+            diag["error"] = str(e)
+            payload = _load_json("/persistent/logs/model_discovery_diag.json", [])
+            payload = payload[-200:] + [diag]
+            _save_json("/persistent/logs/model_discovery_diag.json", payload)
+        except Exception:
+            pass
         return []
 
 # === 실패/보류 결과 ===
@@ -567,9 +605,7 @@ def _soft_abstain(symbol,strategy,*,reason,meta_choice="abstain",regime="unknown
         ensure_prediction_log_exists()
         cur=float((df["close"].iloc[-1] if df is not None and len(df) else 0.0))
         note={"reason":reason,"abstain_prob_min":float(ABSTAIN_PROB_MIN),"max_calib_prob":None,"meta_choice":meta_choice,"regime":regime}
-        # 1) 기존 상세 보류 기록
         log_prediction(symbol=symbol,strategy=strategy,direction="예측보류",entry_price=cur,target_price=cur,model="meta",model_name=str(meta_choice),predicted_class=-1,label=-1,note=json.dumps(note,ensure_ascii=False),top_k=[],success=False,reason=reason,rate=0.0,expected_return=0.0,position="neutral",return_value=0.0,source=source,group_id=group_id,feature_vector=(torch.tensor(X_last,dtype=torch.float32).numpy() if X_last is not None else None),regime=regime,meta_choice="abstain",raw_prob=None,calib_prob=None,calib_ver=get_calibration_version(),class_return_min=0.0,class_return_max=0.0,class_return_text="")
-        # 2) 관우 뷰 노출용 요약 행 추가
         log_prediction(symbol=symbol,strategy=strategy,direction="예측(보류)",entry_price=cur,target_price=cur,model="meta",model_name=str(meta_choice),predicted_class=-1,label=-1,note=json.dumps({"reason":reason,"summary":True},ensure_ascii=False),top_k=[],success=False,reason=reason,rate=0.0,expected_return=0.0,position="neutral",return_value=0.0,source=source,group_id=group_id,feature_vector=None,regime=regime,meta_choice="abstain",raw_prob=None,calib_prob=None,calib_ver=get_calibration_version(),class_return_min=0.0,class_return_max=0.0,class_return_text="")
     except Exception as e: print(f"[soft_abstain 예외] {e}")
     print(f"[predict] abstain {symbol}-{strategy} :: {reason}")
@@ -669,18 +705,12 @@ def get_model_predictions(symbol,strategy,models,df,feat_scaled,window_list,rece
     outs=[]; allpreds=[]
     for info in models:
         try:
-            pt=info.get("pt_file"); meta_path=info.get("meta_path")
-            if not pt or not meta_path: continue
-            model_path=os.path.join(MODEL_DIR,pt)
-            if os.path.exists(model_path) is False:
-                try:
-                    p=_stem(pt).split("_")
-                    if len(p)>=3:
-                        sym,strat,mtype=p[0],p[1],p[2]
-                        for e in _KNOWN_EXTS:
-                            alt=os.path.join(MODEL_DIR,sym,strat,f"{mtype}{e}")
-                            if os.path.exists(alt): model_path=alt; break
-                except Exception: pass
+            model_path = info.get("pt_abs")  # 절대 경로 직접 사용
+            meta_path = info.get("meta_path")
+            if not model_path or not meta_path: continue
+            if not os.path.exists(model_path):
+                print(f"[⚠️ 모델 파일 소실] {model_path}")
+                continue
             with open(meta_path,"r",encoding="utf-8") as mf: meta=json.load(mf)
 
             fname_grp,_fname_cls=_parse_group_cls_from_filename(model_path)
@@ -782,7 +812,6 @@ def get_model_predictions(symbol,strategy,models,df,feat_scaled,window_list,rece
                 "model_symbol":symbol,"symbol":symbol,"strategy":strategy
             })
 
-            # 모델별 루프 끝 메모리 정리
             try:
                 del preds_c_list, preds_r_list, calib_stack, raw_stack
             except Exception:
@@ -797,12 +826,8 @@ def get_model_predictions(symbol,strategy,models,df,feat_scaled,window_list,rece
 
 # -------------------- [NEW] 보수적 강제발행 선택기 --------------------
 def _choose_conservative_prediction(outs, symbol, strategy, allow_long, allow_short, min_thr):
-    """
-    outs: get_model_predictions()가 만든 모델별 후보 리스트
-    """
     try:
-        best = (None, None, -1.0)  # (m, cls, score)
-        # 1) 필터 통과 버전
+        best = (None, None, -1.0)
         for m in outs:
             probs = m.get("hybrid_probs", m.get("adjusted_probs", m.get("calib_probs")))
             if probs is None: continue
@@ -822,7 +847,6 @@ def _choose_conservative_prediction(outs, symbol, strategy, allow_long, allow_sh
         if best[0] is not None:
             return best[0], best[1]
 
-        # 2) 필터 전혀 통과 못 하면, 기대수익 절댓값 최대(힌트 우선) 고르기
         best = (None, None, -1.0)
         for m in outs:
             probs = m.get("hybrid_probs", m.get("adjusted_probs", m.get("calib_probs")))
@@ -865,11 +889,10 @@ def predict(symbol,strategy,source="일반",model_type=None):
     _hb_thread=threading.Thread(target=_predict_hb_loop,args=(_hb_stop,_hb_tag,lock_path),daemon=True); _hb_thread.start()
 
     df=feat=X=outs=allpreds=None
-    # [NEW] 패턴 라이브러리 사전 로딩(없으면 조용히 패스)
     lib_vecs=lib_labels=None
     try:
         from evo_meta_dataset import load_pattern_library
-        lib_vecs, lib_labels = load_pattern_library(symbol, strategy)  # (N, D), (N,)
+        lib_vecs, lib_labels = load_pattern_library(symbol, strategy)
     except Exception:
         lib_vecs = None; lib_labels = None
 
@@ -887,7 +910,7 @@ def predict(symbol,strategy,source="일반",model_type=None):
             return failed_result(symbol or "None",strategy or "None",reason="invalid_symbol_strategy",source=source,X_input=None)
 
         regime=detect_regime(symbol,strategy,now=_now_kst()); _=get_calibration_version()
-        print(f"[predict] start {symbol}-{strategy} regime={regime} source={source}"); sys.stdout.flush()
+        print(f"[predict] start {symbol}-{strategy} regime={regime} source={source}")
 
         windows=find_best_windows(symbol,strategy)
         if not windows:
@@ -921,7 +944,7 @@ def predict(symbol,strategy,source="일반",model_type=None):
         hint=_position_hint_from_market(df); allow_long,allow_short=bool(hint["allow_long"]),bool(hint["allow_short"])
         final_cls=None; meta_choice="best_single"; chosen=None; used_minret=False
 
-        if _glob_many(os.path.join(MODEL_DIR,"evo_meta_learner")):
+        if glob.glob(os.path.join(MODEL_DIR, "evo_meta_learner*")):
             try:
                 from evo_meta_learner import predict_evo_meta
                 if callable(predict_evo_meta):
@@ -935,7 +958,7 @@ def predict(symbol,strategy,source="일반",model_type=None):
             if ADJUST_WITH_DIVERSITY: return adjust_probs_with_diversity(probs,recent,class_counts=None,alpha=0.10,beta=0.10)
             return np.asarray(probs,dtype=float)
 
-        # === [NEW] 하이브리드: 확률(calib_probs) × 유사도(sim_probs) 결합 ==========================
+        # === 하이브리드: 확률 × 유사도 결합 ===
         sim_cache = {}
         if final_cls is None:
             best_i,best_score,best_pred=-1,-1.0,None; scores=[]
@@ -1011,7 +1034,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
                 if "best_single_explore" in meta_choice: rec["n_explore"]+=1; rec["last_explore_ts"]=float(time.time())
                 st[key][chosen.get("model_path","")]=rec; _save_json(EXP_STATE,st)
             except Exception: pass
-        # ==========================================================================================
 
         # 임계/리얼리티 가드
         try:
@@ -1147,7 +1169,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
         try: _hb_stop.set(); _hb_thread.join(timeout=2)
         except Exception: pass
         _release_predict_lock(lock_path)
-        # 예측 종료 시 대형 객체/캐시 일괄 정리
         try:
             _release_memory(df, feat, X, outs, allpreds, lib_vecs, lib_labels)
         finally:
@@ -1178,7 +1199,6 @@ def evaluate_predictions(get_price_fn):
                 eval_written=False; wrong_written=False
                 for r in rd:
                     try:
-                        # v1.6 변경: 섀도우("예측(섀도우)")는 평가 큐에서 제외하지 않음
                         if r.get("status") not in [None,"","pending","v_pending"] and "섀도우" not in str(r.get("direction","")):
                             w_all.writerow({k:r.get(k,"") for k in fields}); continue
                         sym=r.get("symbol","UNKNOWN"); strat=r.get("strategy","알수없음"); model=r.get("model","unknown")
@@ -1259,23 +1279,23 @@ def evaluate_predictions(get_price_fn):
                         w_all.writerow({k:r.get(k,"") for k in fields})
                         if not eval_written:
                             eval_writer=csv.DictWriter(f_eval,fieldnames=sorted(r.keys())); eval_writer.writeheader(); eval_written=True
-                        eval_writer.writerow({k:r.get(k,"") for k in r.keys()})
+                        eval_writer.writerow({k:r.get(k,"") for k in r.keys()] )
                         if status in ["fail","v_fail"]:
                             if not wrong_written:
                                 wrong_writer=csv.DictWriter(f_wrong,fieldnames=sorted(r.keys())); wrong_writer.writeheader(); wrong_written=True
-                            wrong_writer.writerow({k:r.get(k,"") for k in r.keys()})
+                            wrong_writer.writerow({k:r.get(k,"") for k in r.keys()] )
                     except Exception as e:
                         r.update({"status":"invalid","reason":f"exception:{e}","return":0.0,"return_value":0.0})
                         w_all.writerow({k:r.get(k,"") for k in fields})
                         if not wrong_written:
                             wrong_writer=csv.DictWriter(f_wrong,fieldnames=sorted(r.keys())); wrong_writer.writeheader(); wrong_written=True
-                        wrong_writer.writerow({k:r.get(k,"") for k in r.keys()})
+                        wrong_writer.writerow({k:r.get(k,"") for k in r.keys()] )
             shutil.move(tmp,P); print("[✅ 평가 완료] 스트리밍 재작성 성공")
 
             # --- ✅ 추가: 최근 평가 100건 집계 파일 갱신 ---
             try:
                 import pandas as _pd, os as _os
-                _agg_path = "/persistent/logs/evaluation_result.csv"  # 화면/관우가 읽는 고정 파일
+                _agg_path = "/persistent/logs/evaluation_result.csv"
                 _df_today = _pd.read_csv(EVAL, encoding="utf-8-sig") if _os.path.exists(EVAL) else _pd.DataFrame()
                 _df_old = _pd.read_csv(_agg_path, encoding="utf-8-sig") if _os.path.exists(_agg_path) else _pd.DataFrame()
                 _df_all = _pd.concat([_df_old, _df_today], ignore_index=True)
