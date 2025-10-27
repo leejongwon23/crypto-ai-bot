@@ -456,31 +456,48 @@ def _compute_similarity_class_probs(current_vec: np.ndarray,
 # ====================================================================
 
 # === [NEW] 모델 탐색 (다중 루트 + 절대경로 + 진단 로그) ===
+# === [FIXED v1.6.2] get_available_models(): 모델 탐색 완전 보강 ===
 def get_available_models(symbol, strategy):
+    """
+    [YOPO v1.6.2]
+    모델 파일을 다중 경로와 다양한 이름 패턴으로 탐색.
+    - ADA/XRP 등의 group/class가 붙은 파일명도 모두 탐색
+    - .pt / .ptz / .safetensors 확장자 자동 인식
+    - meta 파일 자동 생성 및 절대경로 저장
+    - 탐색 로그 /persistent/logs/model_discovery_diag.json 에 누적
+    """
     diag = {"symbol": symbol, "strategy": strategy, "roots": [], "found": []}
     try:
         results = []
         for root in MODEL_DIRS:
-            root_info = {"root": root, "exists": bool(os.path.isdir(root)), "matches": 0}
+            root_info = {"root": root, "exists": os.path.isdir(root), "matches": 0}
             if not root_info["exists"]:
-                diag["roots"].append(root_info); continue
+                diag["roots"].append(root_info)
+                continue
 
+            # ✅ 패턴 확장 (기존보다 훨씬 유연하게 탐색)
             search_patterns = [
-                os.path.join(root, f"{symbol}_{strategy}_*"),
-                os.path.join(root, symbol, strategy, "*"),
-                os.path.join(root, symbol, f"{strategy}_*"),
+                os.path.join(root, f"{symbol}_{strategy}_*.*"),          # 기본
+                os.path.join(root, f"{symbol}_*{strategy}_*.*"),         # 중간에 strategy 포함
+                os.path.join(root, f"{symbol}_{strategy}_*_*.*"),        # group/class 이름 있는 파일
+                os.path.join(root, symbol, strategy, "*"),               # 하위폴더 구조
+                os.path.join(root, symbol, f"{strategy}_*"),             # symbol/strategy_형식
+                os.path.join(root, "**", f"{symbol}_{strategy}_*.*"),    # 깊은 폴더
             ]
 
             for pattern in search_patterns:
-                for ext in _KNOWN_EXTS:
-                    for w in glob.glob(f"{pattern}*{ext}", recursive=True):
-                        if not os.path.isfile(w): continue
+                for ext in [".pt", ".ptz", ".safetensors"]:
+                    for w in glob.glob(f"{pattern}{ext}", recursive=True):
+                        if not os.path.isfile(w):
+                            continue
                         meta_path = _resolve_meta_from_any_root(w)
                         if not meta_path:
+                            # 메타파일 자동 생성
                             meta_tmp = {
                                 "symbol": symbol, "strategy": strategy,
                                 "group_id": _infer_group_id(symbol, strategy),
-                                "input_size": FEATURE_INPUT_SIZE, "num_classes": NUM_CLASSES,
+                                "input_size": FEATURE_INPUT_SIZE,
+                                "num_classes": NUM_CLASSES,
                                 "created_at": time.time(),
                             }
                             meta_path = _stem(w) + ".meta.json"
@@ -495,34 +512,28 @@ def get_available_models(symbol, strategy):
                         except Exception:
                             continue
 
-                        fname_grp, _ = _parse_group_cls_from_filename(w)
-                        gid = meta.get("group_id")
-                        if fname_grp is not None:
-                            gid = int(fname_grp)
-                        elif gid is None or not str(gid).isdigit():
-                            gid = _infer_group_id(symbol, strategy)
-                        gid = max(0, min(7, int(gid)))
-                        meta["group_id"] = gid
-
+                        gid = meta.get("group_id", _infer_group_id(symbol, strategy))
                         results.append({
-                            "pt_abs": w,             # 절대 경로 사용
-                            "meta_path": meta_path,  # 메타 절대경로
+                            "pt_abs": os.path.abspath(w),
+                            "meta_path": os.path.abspath(meta_path),
                             "group_id": gid,
                             "root": root
                         })
                         root_info["matches"] += 1
             diag["roots"].append(root_info)
 
-        # 루트 전체에서도 못 찾으면: 최신 3개 아무 모델이나 보정하여 후보로
+        # ✅ 아무것도 없을 때: 최근 파일 3개라도 후보로 사용
         if not results:
             for root in MODEL_DIRS:
-                if not os.path.isdir(root): continue
-                all_candidates = []
-                for ext in _KNOWN_EXTS:
-                    all_candidates += glob.glob(os.path.join(root, f"**/*{ext}"), recursive=True)
-                if not all_candidates: continue
-                all_candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-                for w in all_candidates[:3]:
+                if not os.path.isdir(root):
+                    continue
+                cands = []
+                for ext in [".pt", ".ptz", ".safetensors"]:
+                    cands += glob.glob(os.path.join(root, f"**/*{ext}"), recursive=True)
+                if not cands:
+                    continue
+                cands.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                for w in cands[:3]:
                     meta_path = _resolve_meta_from_any_root(w)
                     if not meta_path:
                         meta_tmp = {
@@ -538,42 +549,42 @@ def get_available_models(symbol, strategy):
                         except Exception:
                             continue
                     results.append({
-                        "pt_abs": w, "meta_path": meta_path,
+                        "pt_abs": os.path.abspath(w),
+                        "meta_path": os.path.abspath(meta_path),
                         "group_id": _infer_group_id(symbol, strategy),
                         "root": root
                     })
 
-        # 중복 제거(절대경로 기준) + 최신순 정렬
-        seen = set(); uniq = []
-        for it in results:
-            key = it["pt_abs"]
-            if key not in seen:
-                seen.add(key); uniq.append(it)
+        # ✅ 중복 제거 + 최신순 정렬
+        seen, uniq = set(), []
+        for r in results:
+            if r["pt_abs"] not in seen:
+                uniq.append(r)
+                seen.add(r["pt_abs"])
         try:
             uniq.sort(key=lambda x: os.path.getmtime(x["pt_abs"]), reverse=True)
         except Exception:
             pass
 
-        # 진단 정보 저장
-        for it in uniq:
-            try:
-                diag["found"].append({"pt_abs": it["pt_abs"], "meta": it["meta_path"], "group_id": it["group_id"], "root": it.get("root")})
-            except Exception:
-                pass
+        # ✅ 진단로그 저장
         try:
             os.makedirs("/persistent/logs", exist_ok=True)
+            diag["found"] = [{"pt_abs": it["pt_abs"], "meta": it["meta_path"], "root": it["root"]}
+                             for it in uniq]
             diag_path = "/persistent/logs/model_discovery_diag.json"
             payload = _load_json(diag_path, [])
-            payload = payload[-200:] + [diag]  # 최근 200건만 유지
+            payload = payload[-200:] + [diag]
             _save_json(diag_path, payload)
         except Exception:
             pass
 
         if not uniq:
-            print(f"[⚠️ 모델 탐색 실패] {symbol}-{strategy} → 빈 목록 (roots={MODEL_DIRS})")
+            print(f"[⚠️ 모델 탐색 실패] {symbol}-{strategy} → 모델 없음")
         else:
-            print(f"[✅ 모델 탐색 성공] {symbol}-{strategy} → {len(uniq)}개 모델 발견 (first_root={uniq[0].get('root')})")
+            print(f"[✅ 모델 탐색 성공] {symbol}-{strategy} → {len(uniq)}개 모델 발견 (첫 root={uniq[0].get('root')})")
+
         return uniq
+
     except Exception as e:
         print(f"[get_available_models 오류] {e}")
         try:
@@ -585,7 +596,6 @@ def get_available_models(symbol, strategy):
         except Exception:
             pass
         return []
-
 # === 실패/보류 결과 ===
 def failed_result(symbol,strategy,model_type="unknown",reason="",source="일반",X_input=None):
     t=_now_kst().strftime("%Y-%m-%d %H:%M:%S")
