@@ -1,4 +1,10 @@
-# YOPO v1.7 — model_weight_loader.py (LRU+TTL 캐시, VRAM 누수 차단, bin_edges 강제)
+# YOPO v1.7.1 — model_weight_loader.py
+# (LRU+TTL 캐시, VRAM 누수 차단, meta.bin_edges 자동보정 기본 허용)
+# - 변경점
+#   1) _preflight(): meta.bin_edges 누락 시 자동 보정(기본 허용, 환경변수로 엄격 모드 가능)
+#   2) _fill_meta_bin_edges(): class_ranges → edges, 또는 num_classes 기반 균등 분할 생성
+#   3) load_model_cached(): 보정된 meta를 모델 객체에 주입
+
 import os
 import json
 import glob
@@ -33,9 +39,15 @@ _MAX_ITEMS = int(os.getenv("MODEL_CACHE_MAX_ITEMS", "32"))
 _TTL = int(os.getenv("MODEL_CACHE_TTL_SEC", "900"))  # 15분
 _MAX_BYTES = int(os.getenv("MODEL_CACHE_MAX_BYTES", "536870912"))  # 512MB
 
+# meta.bin_edges 엄격 여부 (1=필수, 0=자동보정 허용[기본])
+_REQUIRE_BIN_EDGES_STRICT = os.getenv("REQUIRE_BIN_EDGES_STRICT", "0").strip() == "1"
+# 자동보정 생성 시 기본 구간 폭 (num_classes 기반 균등분할용)
+_DEFAULT_EDGE_MIN = float(os.getenv("DEFAULT_EDGE_MIN", "-0.05"))
+_DEFAULT_EDGE_MAX = float(os.getenv("DEFAULT_EDGE_MAX", "0.05"))
+
 _cache_lock = threading.Lock()
 # value: {"state":state_dict, "meta":dict, "ts":float, "ttl":int, "bytes":int}
-_model_cache: "OrderedDict[str, Dict[str, Any]] = OrderedDict()"
+_model_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _cache_bytes = 0
 
 # ===== 유틸 =====
@@ -135,13 +147,77 @@ def _load_meta_dict(weight_path: str) -> Dict[str, Any]:
         if not meta_path:
             return {}
         # weight와 1:1 매칭인 경우는 정책 로더 사용
-        if os.path.samefile(_meta_path_for(weight_path), meta_path):
-            return _load_meta(weight_path, default={})
+        try:
+            if os.path.samefile(_meta_path_for(weight_path), meta_path):
+                return _load_meta(weight_path, default={})
+        except Exception:
+            pass
         # 아니면 직접 읽기
         with open(meta_path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
+
+def _safe_write_meta(weight_path: str, meta: Dict[str, Any]) -> None:
+    """보정된 meta를 원래 경로(.meta.json)에 덮어쓰기."""
+    try:
+        meta_path = _resolve_meta(weight_path) or _meta_path_for(weight_path)
+        os.makedirs(os.path.dirname(meta_path), exist_ok=True)
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[⚠️ meta 저장 실패] {weight_path} → {e}")
+
+def _fill_meta_bin_edges(weight_path: str, meta: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    """
+    bin_edges 누락 시 합리적인 기본값을 생성해 meta에 주입.
+    우선순위:
+      1) class_ranges로부터 경계 추정 (연속/겹침 허용, 정렬 후 경계화)
+      2) num_classes 기반 균등 분할 (DEFAULT_EDGE_MIN~DEFAULT_EDGE_MAX)
+      3) 최후: 2구간 [-0.01, 0.01]
+    반환: (meta_updated, was_modified)
+    """
+    try:
+        be = meta.get("bin_edges", None)
+        if isinstance(be, list) and len(be) >= 2:
+            return meta, False
+
+        # 1) class_ranges 기반
+        cr = meta.get("class_ranges")
+        if isinstance(cr, list) and len(cr) >= 1 and all(isinstance(x, (list, tuple)) and len(x) == 2 for x in cr):
+            try:
+                # 경계 리스트 구성: 모든 lo, 마지막 hi
+                lows = [float(lo) for lo, _ in cr]
+                his = [float(hi) for _, hi in cr]
+                # 경계 후보 = lows + [max_hi]
+                edges = sorted(set(lows + [max(his)]))
+                if len(edges) >= 2:
+                    meta["bin_edges"] = edges
+                    return meta, True
+            except Exception:
+                pass
+
+        # 2) num_classes 기반 균등 분할
+        ncls = meta.get("num_classes", None)
+        try:
+            n = int(ncls) if ncls is not None else None
+        except Exception:
+            n = None
+        if n is not None and n >= 1:
+            import numpy as _np
+            edges = _np.linspace(_DEFAULT_EDGE_MIN, _DEFAULT_EDGE_MAX, num=int(n) + 1, dtype=float).tolist()
+            meta["bin_edges"] = edges
+            return meta, True
+
+        # 3) 최후: 2구간
+        meta["bin_edges"] = [-0.01, 0.01]
+        return meta, True
+    except Exception:
+        try:
+            meta["bin_edges"] = [-0.01, 0.01]
+            return meta, True
+        except Exception:
+            return meta, False
 
 def _preflight(weight_path: str, model_type: str = "unknown", input_size: Optional[int] = None) -> Tuple[bool, str, Dict[str, Any]]:
     if not _is_weight_file(weight_path):
@@ -149,14 +225,25 @@ def _preflight(weight_path: str, model_type: str = "unknown", input_size: Option
     meta = _load_meta_dict(weight_path)
     if not meta:
         return False, "meta_missing", {}
+
     if input_size is not None:
         mi = meta.get("input_size")
         if mi not in (None, input_size):
             return False, f"input_size_mismatch(meta={mi}, in={input_size})", meta
-    # [강제] bin_edges 존재 여부 검사
+
+    # bin_edges 강제/자동보정
     be = meta.get("bin_edges", None)
-    if not isinstance(be, list) or len(be) < 2:
-        return False, "bin_edges_missing", meta
+    if not (isinstance(be, list) and len(be) >= 2):
+        if _REQUIRE_BIN_EDGES_STRICT:
+            return False, "bin_edges_missing", meta
+        # 자동 보정 허용
+        meta, fixed = _fill_meta_bin_edges(weight_path, meta)
+        if fixed:
+            _safe_write_meta(weight_path, meta)
+            return True, "ok_autofixed", meta
+        else:
+            return False, "bin_edges_autofix_failed", meta
+
     return True, "ok", meta
 
 def _find_weight_candidates(symbol: str, strategy: str, model_type: str) -> List[str]:
@@ -316,7 +403,7 @@ def _attach_bin_info(model_obj: torch.nn.Module, meta: Dict[str, Any]) -> None:
 
 def load_model_cached(pt_path: str, model_obj: torch.nn.Module, ttl_sec: int = _TTL) -> Optional[torch.nn.Module]:
     """정책 로더 + LRU+TTL 캐시. 항상 CPU 텐서로 저장해 VRAM 누수 차단.
-    추가: meta.bin_edges 강제 검사 및 모델 객체에 bin 정보 주입.
+    추가: meta.bin_edges 자동 보정/주입(기본 허용, STRICT=1이면 차단).
     """
     global _cache_bytes
     if not pt_path or not os.path.exists(pt_path):
@@ -325,12 +412,13 @@ def load_model_cached(pt_path: str, model_obj: torch.nn.Module, ttl_sec: int = _
 
     ok, why, meta_pf = _preflight(pt_path, model_type=_infer_model_type_from_fname(pt_path), input_size=None)
     if not ok:
-        # bin_edges 누락 시 명시적 비활성 처리
         if why == "bin_edges_missing":
             print(f"[❌ load_model_cached] meta.bin_edges 누락 → 예측 비활성: {pt_path}")
         else:
             print(f"[❌ load_model_cached 사전점검 실패] {pt_path} → {why}")
         return None
+    if why.startswith("ok"):
+        pass  # ok / ok_autofixed 모두 허용
 
     with _cache_lock:
         ent = _model_cache.get(pt_path)
@@ -355,11 +443,11 @@ def load_model_cached(pt_path: str, model_obj: torch.nn.Module, ttl_sec: int = _
         state = _ensure_cpu_state(state)
         size_b = _obj_bytes(state)
 
-        # 디스크 메타 확정 획득
+        # 디스크 메타 확정 획득 (preflight 보정 반영)
         meta = meta_pf if meta_pf else _load_meta_dict(pt_path)
         be = meta.get("bin_edges", [])
-        if not isinstance(be, list) or len(be) < 2:
-            print(f"[❌ meta.bin_edges 누락 → 예측 비활성] {pt_path}")
+        if _REQUIRE_BIN_EDGES_STRICT and not (isinstance(be, list) and len(be) >= 2):
+            print(f"[❌ meta.bin_edges 누락(STRICT) → 예측 비활성] {pt_path}")
             return None
 
         with _cache_lock:
