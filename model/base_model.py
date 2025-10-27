@@ -1,4 +1,4 @@
-# === model/base_model.py (speed-tune ready) ===
+# === model/base_model.py (speed-tune ready, fixed) ===
 import os
 import torch
 import torch.nn as nn
@@ -296,7 +296,8 @@ class CNNLSTMPricePredictor(TBPTTMixin, nn.Module):
         self.res_proj = nn.Linear(H, lstm_hidden_size)
         self.act = nn.GELU()
         self.fc2 = nn.Linear(lstm_hidden_size, lstm_hidden_size // 2)
-        self.fc_logits = nn.Linear(lmstm_hidden_size // 2 if 'lmstm_hidden_size' in globals() else lstm_hidden_size // 2, output_size)
+        # ✅ 오타 수정: lmstm_hidden_size → lstm_hidden_size
+        self.fc_logits = nn.Linear(lstm_hidden_size // 2, output_size)
 
         _init_lstm_forget_bias(self.lstm)
         self.apply(_init_module)
@@ -508,6 +509,16 @@ MODEL_CLASSES = {
     "autoencoder": AutoEncoder
 }
 
+def _normalize_model_type(mt: str) -> str:
+    s = str(mt or "cnn_lstm").strip().lower()
+    # 간단 별칭 정규화
+    if s in ("xgb",): s = "xgboost"
+    if s in ("cnn-lstm", "cnn+lstm"): s = "cnn_lstm"
+    if s not in MODEL_CLASSES and s != "xgboost":
+        # 알 수 없는 타입이면 기본 cnn_lstm
+        s = "cnn_lstm"
+    return s
+
 def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_path=None, features=None):
     if output_size is None:
         output_size = get_NUM_CLASSES()
@@ -528,15 +539,17 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
         print(f"[info] input_size pad 적용: {input_size} → {FEATURE_INPUT_SIZE}")
         input_size = FEATURE_INPUT_SIZE
 
-    if model_type == "xgboost":
+    mt = _normalize_model_type(model_type)
+
+    if mt == "xgboost":
         if not _HAS_XGB or not model_path:
             print("[⚠️ get_model] XGBoost 사용 불가(미설치 또는 경로 없음). cnn_lstm 대체.")
-            model_type = "cnn_lstm"
+            mt = "cnn_lstm"
 
-    model_cls = MODEL_CLASSES.get(model_type, CNNLSTMPricePredictor)
+    model_cls = MODEL_CLASSES.get(mt, CNNLSTMPricePredictor)
 
     try:
-        if model_type == "xgboost":
+        if mt == "xgboost":
             model = model_cls(model_path=model_path)
         else:
             model = model_cls(input_size=input_size, output_size=output_size)
