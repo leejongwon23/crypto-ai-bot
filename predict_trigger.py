@@ -1,4 +1,4 @@
-# === predict_trigger.py (FINAL v1.2: 그룹 완주 후에만 예측 + GROUP_ACTIVE 차단) ===
+# === predict_trigger.py (FINAL v1.3 — 모델다중루트 정합 + 그룹액티브 경로보강 + 게이트우회토큰) ===
 import os, time, glob, traceback, datetime, shutil
 from collections import Counter, defaultdict
 import numpy as np
@@ -11,10 +11,10 @@ try:
 except Exception:
     def get_GUANWU_IN_DIR(): return "/data/guanwu/incoming"
 
-# 예측 로그 단일 경로(환경변수로도 덮어쓰기 가능)
+# 예측 로그 경로
 PREDICTION_LOG_PATH = os.getenv("PREDICTION_LOG_PATH", "/persistent/prediction_log.csv")
 
-# ── 데이터 소스 (패키지/루트 폴백) ────────────────────────────
+# ── 데이터 소스 ───────────────────────────────────────────────
 try:
     from data.utils import get_ALL_SYMBOLS, get_kline_by_strategy
 except Exception:
@@ -28,7 +28,6 @@ except Exception:
             print(f"[경고] get_kline_by_strategy 임포트 실패: {symbol}-{strategy} / {_e}")
             return None
 
-# 로깅 보장
 from logger import log_audit_prediction as log_audit, ensure_prediction_log_exists
 
 # 전역 리셋/정리 락
@@ -43,22 +42,51 @@ PREDICT_BLOCK    = "/persistent/predict.block"
 PREDICT_RUN_LOCK = "/persistent/run/predict_running.lock"
 GROUP_TRAIN_LOCK = "/persistent/run/group_training.lock"
 
-# 모델 경로
-MODEL_DIR   = "/persistent/models"
-_KNOWN_EXTS = (".pt", ".ptz", ".safetensors")
+# === 모델 경로: predict.py(v1.6.2)와 정합 ===
+_DEFAULT_MODEL_ROOTS = [
+    os.getenv("MODEL_DIR", "/persistent/models"),
+    "/persistent/models",
+    "./models",
+    "/mnt/data/models",
+    "/workspace/models",
+    "/data/models",
+]
+MODEL_DIRS = []
+for p in _DEFAULT_MODEL_ROOTS:
+    if isinstance(p, str) and p not in MODEL_DIRS:
+        MODEL_DIRS.append(p)
 
-# 전략 집합
+_KNOWN_EXTS = (".pt", ".ptz", ".safetensors")
 STRATEGIES  = ["단기", "중기", "장기"]
 
 def _has_model_for(symbol: str, strategy: str) -> bool:
+    """predict.py의 get_available_models 탐색정책에 맞춰 재귀/다중루트로 모델 존재만 빠르게 체크"""
     try:
-        for e in _KNOWN_EXTS:
-            if glob.glob(os.path.join(MODEL_DIR, f"{symbol}_{strategy}_*{e}")):
-                return True
-        d = os.path.join(MODEL_DIR, symbol, strategy)
-        if os.path.isdir(d):
-            for e in _KNOWN_EXTS:
-                if glob.glob(os.path.join(d, f"*{e}")):
+        patts = [
+            f"{symbol}_{strategy}_*",
+            f"{symbol}_*{strategy}_*",
+            f"{symbol}_{strategy}_*_*",
+        ]
+        for root in MODEL_DIRS:
+            if not os.path.isdir(root):
+                continue
+            # flat & recursive 둘 다
+            for patt in patts:
+                for ext in _KNOWN_EXTS:
+                    if glob.glob(os.path.join(root, f"{patt}{ext}")):
+                        return True
+                    # recursive
+                    if glob.glob(os.path.join(root, "**", f"{patt}{ext}"), recursive=True):
+                        return True
+            # 하위 폴더 구조도 점검
+            base1 = os.path.join(root, symbol, strategy)
+            if os.path.isdir(base1):
+                for ext in _KNOWN_EXTS:
+                    if glob.glob(os.path.join(base1, f"*{ext}")):
+                        return True
+            base2 = os.path.join(root, symbol, f"{strategy}_*")
+            for ext in _KNOWN_EXTS:
+                if glob.glob(f"{base2}{ext}"):
                     return True
     except Exception:
         pass
@@ -68,14 +96,12 @@ def _has_model_for(symbol: str, strategy: str) -> bool:
 try:
     from regime_detector import detect_regime
 except Exception:
-    def detect_regime(symbol, strategy, now=None):
-        return "unknown"
+    def detect_regime(symbol, strategy, now=None): return "unknown"
 
 try:
     from calibration import get_calibration_version
 except Exception:
-    def get_calibration_version():
-        return "none"
+    def get_calibration_version(): return "none"
 
 # (옵션) 예측 호출 래퍼 — train.py 제공 함수 우선 사용
 _safe_predict_with_timeout = None
@@ -130,9 +156,7 @@ def _get_current_group_symbols():
             syms = gom.get_group_symbols(gom.current_group_index())
         else:
             return None
-        if not syms:
-            return None
-        return list(dict.fromkeys(syms))
+        return list(dict.fromkeys(syms)) or None
     except Exception:
         return None
 
@@ -141,13 +165,11 @@ def _sync_ganwu_log():
     try:
         src = PREDICTION_LOG_PATH
         dst_dir = get_GUANWU_IN_DIR() or ""
-        if not dst_dir:
+        if not dst_dir or not os.path.exists(src):
             return
         os.makedirs(dst_dir, exist_ok=True)
         dst = os.path.join(dst_dir, "prediction_log.csv")
         if os.path.abspath(src) == os.path.abspath(dst):
-            return
-        if not os.path.exists(src):
             return
         if (not os.path.exists(dst)) or (os.path.getmtime(src) >= os.path.getmtime(dst)):
             shutil.copy2(src, dst)
@@ -163,7 +185,7 @@ TRIGGER_MAX_PER_RUN = max(1, int(os.getenv("TRIGGER_MAX_PER_RUN", "999")))
 PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC", "30"))
 PREDICT_LOCK_STALE_TRIGGER_SEC = int(os.getenv("PREDICT_LOCK_STALE_TRIGGER_SEC", "600"))
 
-# ✅ 재시도/대기/쓰로틀 설정
+# ✅ 재시도/대기/쓰로틀
 RETRY_AFTER_TRAIN_MAX_WAIT_SEC   = int(os.getenv("RETRY_AFTER_TRAIN_MAX_WAIT_SEC", "900"))
 RETRY_AFTER_TRAIN_SLEEP_SEC      = float(os.getenv("RETRY_AFTER_TRAIN_SLEEP_SEC", "1.0"))
 STARTUP_WAIT_FOR_GATE_OPEN_SEC   = int(os.getenv("STARTUP_WAIT_FOR_GATE_OPEN_SEC", "600"))
@@ -174,7 +196,7 @@ THROTTLE_BUSY_LOG_SEC            = int(os.getenv("THROTTLE_BUSY_LOG_SEC", "15"))
 PAIR_BACKOFF_BASE_SEC            = int(os.getenv("PAIR_BACKOFF_BASE_SEC", "60"))
 PAIR_BACKOFF_MAX_SEC             = int(os.getenv("PAIR_BACKOFF_MAX_SEC", "600"))
 
-# 그룹 완료 모드: 기본값을 1로 상향(그룹 완주 전 예측 금지)
+# 그룹 완주 요구
 REQUIRE_GROUP_COMPLETE = int(os.getenv("REQUIRE_GROUP_COMPLETE", "1"))
 
 last_trigger_time = {}
@@ -212,16 +234,14 @@ def _is_stale_lock(path: str, ttl_sec: int) -> bool:
     try:
         if not os.path.exists(path):
             return False
-        mtime = os.path.getmtime(path)
-        return (time.time() - float(mtime)) > max(30, int(ttl_sec))
+        return (time.time() - float(os.path.getmtime(path))) > max(30, int(ttl_sec))
     except Exception:
         return False
 
 def _clear_stale_predict_lock(ttl_sec: int):
     if callable(_lock_api["clear_stale"]):
         try:
-            _lock_api["clear_stale"]()
-            return
+            _lock_api["clear_stale"](); return
         except Exception:
             pass
     try:
@@ -235,14 +255,14 @@ def _wait_for_gate_open(max_wait_sec: int) -> bool:
     start = time.time()
     while time.time() - start < max_wait_sec:
         _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
+        # 전역 락이 있으면 즉시 중단
         if _LOCK_PATH and os.path.exists(_LOCK_PATH):
             return False
         if (not _gate_closed()) and (not _predict_busy()):
             return True
         if callable(_lock_api["wait_until_free"]):
             try:
-                if _lock_api["wait_until_free"](max_wait_sec=1):
-                    pass
+                _lock_api["wait_until_free"](max_wait_sec=1)
             except Exception:
                 pass
         time.sleep(max(0.05, RETRY_AFTER_TRAIN_SLEEP_SEC))
@@ -315,6 +335,8 @@ def check_model_quality(symbol, strategy):
 
 # ── 예측 래퍼 ─────────────────────────────────────────────────
 def _invoke_predict(_predict, symbol, strategy, source, timeout_sec: float) -> bool:
+    # 게이트 우회 토큰 포함
+    source = f"그룹직후:{source}"
     if _safe_predict_with_timeout:
         ok = _safe_predict_with_timeout(
             predict_fn=_predict,
@@ -323,8 +345,7 @@ def _invoke_predict(_predict, symbol, strategy, source, timeout_sec: float) -> b
             source=source,
             model_type=None,
             timeout=timeout_sec,
-        )
-        return bool(ok)
+        ); return bool(ok)
     elif _safe_predict_sync:
         _safe_predict_sync(
             predict_fn=_predict,
@@ -332,11 +353,9 @@ def _invoke_predict(_predict, symbol, strategy, source, timeout_sec: float) -> b
             strategy=strategy,
             source=source,
             model_type=None,
-        )
-        return True
+        ); return True
     else:
-        _predict(symbol, strategy, source=source)
-        return True
+        _predict(symbol, strategy, source=source); return True
 
 def _retry_after_training(_predict, symbol, strategy, first_err: Exception | str = None) -> bool:
     why = f"timeout/lock; first_err={first_err}" if first_err else "timeout/lock"
@@ -361,10 +380,11 @@ def _retry_after_training(_predict, symbol, strategy, first_err: Exception | str
 def run():
     global _last_busy_log_at
 
-    # === 그룹 학습 중이면 트리거 차단 ===
-    GROUP_ACTIVE_PATH = "/persistent/GROUP_ACTIVE"
-    if os.path.exists(GROUP_ACTIVE_PATH):
-        print(f"[트리거차단] 현재 그룹 학습 중 → {GROUP_ACTIVE_PATH} 존재. 트리거 전체 스킵.")
+    # === 그룹 학습 중이면 트리거 차단 (두 경로 모두 체크) ===
+    GROUP_ACTIVE_A = "/persistent/GROUP_ACTIVE"
+    GROUP_ACTIVE_B = "/persistent/run/group_predict.active"
+    if os.path.exists(GROUP_ACTIVE_A) or os.path.exists(GROUP_ACTIVE_B):
+        print(f"[트리거차단] 현재 그룹 학습 중 → {GROUP_ACTIVE_A} or {GROUP_ACTIVE_B} 존재. 트리거 전체 스킵.")
         return
 
     if _LOCK_PATH and os.path.exists(_LOCK_PATH):
@@ -408,7 +428,7 @@ def run():
         symbols = [s for s in all_symbols if s in symset]
         print(f"[그룹제한] 현재 그룹 심볼 {len(symbols)}/{len(all_symbols)}개 대상으로 실행")
 
-        # ✅ 변경: 그룹 완주가 아니면 이 그룹 전체에 대한 예측을 전면 차단
+        # 그룹 완주가 아니면 전면 차단
         if REQUIRE_GROUP_COMPLETE and not _is_group_complete_for_all_strategies(symbols):
             miss = _missing_pairs(symbols)
             print(f"[차단] 그룹 미완료(누락 {len(miss)}) → 예측 전면 스킵")
@@ -605,7 +625,7 @@ def run_after_training(symbol: str, strategy: str) -> bool:
     except Exception:
         pass
 
-    # ✅ 추가: 그룹 완주 전이면 학습후 트리거도 금지
+    # 그룹 완주 전이면 학습후 트리거도 금지
     group_syms = _get_current_group_symbols()
     if isinstance(group_syms, (list, tuple)) and len(group_syms) > 0 and REQUIRE_GROUP_COMPLETE:
         if not _is_group_complete_for_all_strategies(list(group_syms)):
