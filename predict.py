@@ -470,7 +470,7 @@ def get_available_models(symbol, strategy):
 
         for pattern in search_patterns:
             for ext in _KNOWN_EXTS:
-                for w in glob.glob(f"{pattern}{ext}", recursive=True):
+                for w in glob.glob(f"{pattern}*{ext}", recursive=True):  # ✅ 뒤꼬리 파일까지 탐색
                     if not os.path.isfile(w):
                         continue
                     meta_path = _resolve_meta_abs(w)
