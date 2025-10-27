@@ -1283,7 +1283,7 @@ def evaluate_predictions(get_price_fn):
                         if status in ["fail","v_fail"]:
                             if not wrong_written:
                                 wrong_writer=csv.DictWriter(f_wrong,fieldnames=sorted(r.keys())); wrong_writer.writeheader(); wrong_written=True
-                            wrong_writer.writerow({k:r.get(k,"") for k in r.keys()] )
+                            wrong_writer.writerow({k: r.get(k, "") for k in r.keys()})
                     except Exception as e:
                         r.update({"status":"invalid","reason":f"exception:{e}","return":0.0,"return_value":0.0})
                         w_all.writerow({k:r.get(k,"") for k in fields})
