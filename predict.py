@@ -24,6 +24,27 @@ __all__ = [
     "run_evaluation_once","run_evaluation_loop"
 ]
 
+# ✅ 자동 게이트 오픈 기능 (부팅 후 항상 예측 가능)
+def _ensure_gate_open_on_boot():
+    """재부팅 후에도 predict_gate.json이 항상 열린 상태로 자동 복원"""
+    try:
+        if os.path.exists("/persistent/predict.block"):
+            os.remove("/persistent/predict.block")
+        state = {}
+        gate_file = "/persistent/run/predict_gate.json"
+        if os.path.exists(gate_file):
+            with open(gate_file, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        if not state.get("open", False):
+            with open(gate_file, "w", encoding="utf-8") as f:
+                json.dump({"open": True, "opened_at": datetime.datetime.now(pytz.timezone("Asia/Seoul")).isoformat(),
+                           "note": "auto_open_on_boot"}, f, ensure_ascii=False)
+            print("[AUTO] 예측 게이트 자동 오픈 완료")
+    except Exception as e:
+        print(f"[AUTO-GATE ERROR] 게이트 자동 오픈 실패: {e}")
+
+# 부팅 시 자동 실행
+_ensure_gate_open_on_boot()
 # -------------------- 공용 메모리 정리 헬퍼 --------------------
 def _safe_empty_cache():
     try:
