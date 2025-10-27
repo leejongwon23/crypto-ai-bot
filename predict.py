@@ -1279,7 +1279,7 @@ def evaluate_predictions(get_price_fn):
                         w_all.writerow({k:r.get(k,"") for k in fields})
                         if not eval_written:
                             eval_writer=csv.DictWriter(f_eval,fieldnames=sorted(r.keys())); eval_writer.writeheader(); eval_written=True
-                        eval_writer.writerow({k:r.get(k,"") for k in r.keys()] )
+                        eval_writer.writerow({k: r.get(k, "") for k in r.keys()})
                         if status in ["fail","v_fail"]:
                             if not wrong_written:
                                 wrong_writer=csv.DictWriter(f_wrong,fieldnames=sorted(r.keys())); wrong_writer.writeheader(); wrong_written=True
