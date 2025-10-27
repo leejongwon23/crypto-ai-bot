@@ -1289,7 +1289,7 @@ def evaluate_predictions(get_price_fn):
                         w_all.writerow({k:r.get(k,"") for k in fields})
                         if not wrong_written:
                             wrong_writer=csv.DictWriter(f_wrong,fieldnames=sorted(r.keys())); wrong_writer.writeheader(); wrong_written=True
-                        wrong_writer.writerow({k:r.get(k,"") for k in r.keys()] )
+                        wrong_writer.writerow({k: r.get(k, "") for k in r.keys()})
             shutil.move(tmp,P); print("[✅ 평가 완료] 스트리밍 재작성 성공")
 
             # --- ✅ 추가: 최근 평가 100건 집계 파일 갱신 ---
