@@ -1,4 +1,4 @@
-# === diag_e2e.py (관우 v2.7 — 모델별 예상수익률·확률·포지션 표기 추가, .ptz 및 대소문자 보강) ===
+# === diag_e2e.py (관우 v2.7.2 — 성공률 분모 정정: 성공/(성공+실패), 헤더 스타일 오타 수정, 안정성 보강) ===
 import os, json, traceback, re
 import pandas as pd
 import pytz
@@ -329,25 +329,38 @@ def _build_snapshot(symbols_filter=None):
             nvol = df_ss[~df_ss["is_vol"]] if not df_ss.empty else pd.DataFrame()
             vol  = df_ss[df_ss["is_vol"]]  if not df_ss.empty else pd.DataFrame()
 
+            # ⬇⬇ 수정 핵심: 성공률 = 성공 / (성공 + 실패)  (대기/오류 제외)
+            n_succ = _stat_count(nvol, "success")
+            n_fail = _stat_count(nvol, "fail")
+            n_total = len(nvol)
+            n_sf_denom = max(1, n_succ + n_fail)
+
             summary_n = {
-                "succ": _stat_count(nvol, "success"),
-                "fail": _stat_count(nvol, "fail"),
+                "succ": n_succ,
+                "fail": n_fail,
                 "pending": _stat_count(nvol, "pending"),
                 "failed": _stat_count(nvol, "failed"),
-                "total": len(nvol),
-                "avg_return": float(nvol["_return_val"].mean()) if not nvol.empty else 0.0
+                "total": n_total,
+                "avg_return": float(nvol["_return_val"].mean()) if not nvol.empty else 0.0,
+                "succ_rate": n_succ / n_sf_denom,   # ✅ 수정: 분모 (성공+실패)
+                "sf_denominator": n_sf_denom
             }
-            t = max(1, summary_n["total"]); summary_n["succ_rate"] = summary_n["succ"]/t
+
+            v_succ = _stat_count(vol, "v_success")
+            v_fail = _stat_count(vol, "v_fail")
+            v_total = len(vol)
+            v_sf_denom = max(1, v_succ + v_fail)
 
             summary_v = {
-                "succ": _stat_count(vol, "v_success"),
-                "fail": _stat_count(vol, "v_fail"),
+                "succ": v_succ,
+                "fail": v_fail,
                 "pending": _stat_count(vol, "pending"),
                 "failed": _stat_count(vol, "failed"),
-                "total": len(vol),
-                "avg_return": float(vol["_return_val"].mean()) if not vol.empty else 0.0
+                "total": v_total,
+                "avg_return": float(vol["_return_val"].mean()) if not vol.empty else 0.0,
+                "succ_rate": v_succ / v_sf_denom,   # ✅ 수정: 분모 (성공+실패)
+                "sf_denominator": v_sf_denom
             }
-            tv = max(1, summary_v["total"]); summary_v["succ_rate"] = summary_v["succ"]/tv
 
             # 모델별 상세(인벤토리 + 예측로그)
             models_detail = []
@@ -382,7 +395,7 @@ def _build_snapshot(symbols_filter=None):
                     for k in ["predicted_class","class","pred_class","label"]:
                         if k in dfm.columns:
                             v = last.get(k, None)
-                            if pd.notna(v):
+                            if v is not None and str(v).strip() != "" and str(v).lower() != "nan":
                                 latest_cls = str(int(v)) if str(v).isdigit() else str(v)
                                 break
 
@@ -428,6 +441,7 @@ def _build_snapshot(symbols_filter=None):
 
                 latest = _latest_for_model(df_model)
 
+                # 훈련 f1 보강(메타/파일→학습로그 역보강)
                 val_f1 = None
                 if inv_item and inv_item.get("val_f1") is not None:
                     val_f1 = float(inv_item["val_f1"])
@@ -446,12 +460,17 @@ def _build_snapshot(symbols_filter=None):
                     else:
                         status = "TRAINED_NO_PRED"
 
+                # 성공/실패 세기 (변동성 접두 포함)
+                succ_cnt = _stat_count(df_model, "success") + _stat_count(df_model, "v_success")
+                fail_cnt = _stat_count(df_model, "fail") + _stat_count(df_model, "v_fail")
+                sf_denom = max(1, succ_cnt + fail_cnt)
+
                 md = {
                     "model": mt,
                     "status": status,
                     "val_f1": val_f1,
-                    "succ": _stat_count(df_model, "success") + _stat_count(df_model, "v_success"),
-                    "fail": _stat_count(df_model, "fail") + _stat_count(df_model, "v_fail"),
+                    "succ": succ_cnt,
+                    "fail": fail_cnt,
                     "total": int(len(df_model)),
                     "latest_class": latest["cls"],
                     "latest_return": latest["rate"],            # 숫자값
@@ -460,7 +479,7 @@ def _build_snapshot(symbols_filter=None):
                     "latest_prob_src": latest["prob_src"],
                     "latest_position": latest["position"],
                 }
-                denom = max(1, md["total"]); md["succ_rate"] = md["succ"] / denom
+                md["succ_rate"] = succ_cnt / sf_denom  # ✅ 모델 단위도 동일 기준
                 models_detail.append(md)
 
                 inv_row = {
@@ -561,15 +580,17 @@ def _build_snapshot(symbols_filter=None):
                         "succ": summary_n["succ"], "fail": summary_n["fail"],
                         "pending": summary_n["pending"], "failed": summary_n["failed"],
                         "total": summary_n["total"],
-                        "succ_rate": summary_n["succ_rate"],
+                        "succ_rate": summary_n["succ_rate"],      # ✅ 성공/(성공+실패)
                         "avg_return": summary_n["avg_return"],
+                        "sf_denominator": summary_n["sf_denominator"]
                     },
                     "volatility": {
                         "succ": summary_v["succ"], "fail": summary_v["fail"],
                         "pending": summary_v["pending"], "failed": summary_v["failed"],
                         "total": summary_v["total"],
-                        "succ_rate": summary_v["succ_rate"],
+                        "succ_rate": summary_v["succ_rate"],      # ✅ 성공/(성공+실패)
                         "avg_return": summary_v["avg_return"],
+                        "sf_denominator": summary_v["sf_denominator"]
                     },
                     "by_model": models_detail,
                     "meta_choice": meta_choice,
@@ -608,7 +629,10 @@ def _build_snapshot(symbols_filter=None):
             n = blk["prediction"]["normal"]; v = blk["prediction"]["volatility"]
             total_normal_succ += n["succ"]; total_normal_fail += n["fail"]
             total_vol_succ += v["succ"]; total_vol_fail += v["fail"]
-            if _grade_rate(n["succ_rate"]) == "err" and n["total"] >= 10:
+            # 경고 조건: 성공+실패 분모 기준으로 10건 이상일 때 낮은 성공률 경고
+            n_denom = max(1, n.get("succ",0)+n.get("fail",0))
+            v_denom = max(1, v.get("succ",0)+v.get("fail",0))
+            if _grade_rate(n["succ_rate"]) == "err" and n_denom >= 10:
                 problems.append(f"{s['symbol']} {strat}: 일반 성공률 낮음({int(n['succ_rate']*100)}%)")
             if blk["evaluation"]["delay_min"] > 0:
                 problems.append(f"{s['symbol']} {strat}: 평가 지연({blk['evaluation']['delay_min']}분)")
@@ -689,7 +713,7 @@ def _render_html(snapshot):
 <div class="sticky-top mono">
   <div><b>YOPO 통합 점검</b> <span class="kicker">— 시스템 상태를 한 눈에</span></div>
   <div class="small">생성시각 {snapshot.get('time','')}</div>
-  <div style="margin-top:6px)">
+  <div style="margin-top:6px;">
     <span class="badge {status_class}">{status_text}</span>
     <span class="pill">일반 성공률 {_pct(sm.get('normal_success_rate',0))}</span>
     <span class="pill">변동성 성공률 {_pct(sm.get('vol_success_rate',0))}</span>
@@ -747,9 +771,9 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow'));
                     "<table><tr><th>구분</th><th>성공</th><th>실패</th><th>대기</th><th>기록오류</th>"
                     "<th>총건수</th><th>성공률</th><th>평균수익</th></tr>"
                     f"<tr><td>일반</td><td>{n['succ']}</td><td>{n['fail']}</td><td>{n['pending']}</td><td>{n['failed']}</td>"
-                    f"<td>{n['total']}</td><td>{_pct(n['succ_rate'])}</td><td>{_pct(n['avg_return'])}</td></tr>"
+                    f"<td>{n['total']}</td><td>{_pct(n['succ_rate'])} ({n['succ']}/{n['sf_denominator']})</td><td>{_pct(n['avg_return'])}</td></tr>"
                     f"<tr><td>변동성</td><td>{v['succ']}</td><td>{v['fail']}</td><td>{v['pending']}</td><td>{v['failed']}</td>"
-                    f"<td>{v['total']}</td><td>{_pct(v['succ_rate'])}</td><td>{_pct(v['avg_return'])}</td></tr>"
+                    f"<td>{v['total']}</td><td>{_pct(v['succ_rate'])} ({v['succ']}/{v['sf_denominator']})</td><td>{_pct(v['avg_return'])}</td></tr>"
                     f"<tr><td><b>누적</b></td><td><b>{cum['succ']}</b></td><td><b>{cum['fail']}</b></td>"
                     f"<td>{cum['pending']}</td><td>{cum['failed']}</td>"
                     f"<td><b>{cum['total']}</b></td>"
