@@ -1,4 +1,4 @@
-# === diag_e2e.py (관우 v2.7.2 — 성공률 분모 정정: 성공/(성공+실패), 헤더 스타일 오타 수정, 안정성 보강) ===
+# === diag_e2e.py (관우 v2.7.3 — 성공률 분모 정정 유지 + 심볼별 목록 초기화 보강) ===
 import os, json, traceback, re
 import pandas as pd
 import pytz
@@ -301,6 +301,10 @@ def _build_snapshot(symbols_filter=None):
         df_ps = df_pred[df_pred["symbol"] == sym] if "symbol" in df_pred.columns else pd.DataFrame()
         sym_block["fail_summary"] = _summarize_fail_patterns(df_ps)
 
+        # ✅ 심볼 단위에서 명시 초기화(보강)
+        models_detail = []
+        inventory_rows = []
+
         for strat in STRATEGIES:
             last_train_ts = train_last_map.get((sym, strat), pd.NaT)
             df_ss = df_ps[df_ps["strategy"] == strat] if not df_ps.empty else pd.DataFrame()
@@ -329,7 +333,7 @@ def _build_snapshot(symbols_filter=None):
             nvol = df_ss[~df_ss["is_vol"]] if not df_ss.empty else pd.DataFrame()
             vol  = df_ss[df_ss["is_vol"]]  if not df_ss.empty else pd.DataFrame()
 
-            # ⬇⬇ 수정 핵심: 성공률 = 성공 / (성공 + 실패)  (대기/오류 제외)
+            # ⬇⬇ 성공률 = 성공 / (성공 + 실패)
             n_succ = _stat_count(nvol, "success")
             n_fail = _stat_count(nvol, "fail")
             n_total = len(nvol)
@@ -342,7 +346,7 @@ def _build_snapshot(symbols_filter=None):
                 "failed": _stat_count(nvol, "failed"),
                 "total": n_total,
                 "avg_return": float(nvol["_return_val"].mean()) if not nvol.empty else 0.0,
-                "succ_rate": n_succ / n_sf_denom,   # ✅ 수정: 분모 (성공+실패)
+                "succ_rate": n_succ / n_sf_denom,   # ✅ 분모 (성공+실패)
                 "sf_denominator": n_sf_denom
             }
 
@@ -358,7 +362,7 @@ def _build_snapshot(symbols_filter=None):
                 "failed": _stat_count(vol, "failed"),
                 "total": v_total,
                 "avg_return": float(vol["_return_val"].mean()) if not vol.empty else 0.0,
-                "succ_rate": v_succ / v_sf_denom,   # ✅ 수정: 분모 (성공+실패)
+                "succ_rate": v_succ / v_sf_denom,   # ✅ 분모 (성공+실패)
                 "sf_denominator": v_sf_denom
             }
 
