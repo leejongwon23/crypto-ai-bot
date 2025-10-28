@@ -1,16 +1,16 @@
-# === diag_e2e.py (관우 v2.7.3 — 성공률 분모 정정 유지 + 심볼별 목록 초기화 보강) ===
 import os, json, traceback, re
 import pandas as pd
 import pytz
-from collections import defaultdict, Counter
+from collections import Counter
 from datetime import datetime
 
-PERSIST_DIR   = "/persistent"
-LOG_DIR       = os.path.join(PERSIST_DIR, "logs")
-MODEL_DIR     = os.path.join(PERSIST_DIR, "models")
-PREDICTION_LOG= os.path.join(PERSIST_DIR, "prediction_log.csv")
-TRAIN_LOG     = os.path.join(LOG_DIR, "train_log.csv")              # ← 원본 경로 유지
-AUDIT_LOG     = os.path.join(LOG_DIR, "evaluation_audit.csv")
+# ===== 경로 (원본 유지) =====
+PERSIST_DIR    = "/persistent"
+LOG_DIR        = os.path.join(PERSIST_DIR, "logs")
+MODEL_DIR      = os.path.join(PERSIST_DIR, "models")
+PREDICTION_LOG = os.path.join(PERSIST_DIR, "prediction_log.csv")
+TRAIN_LOG      = os.path.join(LOG_DIR, "train_log.csv")            # ← 원본 경로 유지
+AUDIT_LOG      = os.path.join(LOG_DIR, "evaluation_audit.csv")
 
 KST = pytz.timezone("Asia/Seoul")
 now_kst = lambda: pd.Timestamp.now(tz="Asia/Seoul")
@@ -42,7 +42,7 @@ def _to_kst(ts):
     try:
         t = pd.to_datetime(ts, errors="coerce")
         if pd.isna(t): return None
-        if t.tzinfo is None: t = t.tz_localize("Asia/Seoul")
+        if getattr(t, "tzinfo", None) is None: t = t.tz_localize("Asia/Seoul")
         else: t = t.tz_convert("Asia/Seoul")
         return t
     except Exception:
@@ -72,8 +72,8 @@ def _eval_deadline(pred_ts, strategy):
     horizon_h = EVAL_HORIZON_HOURS.get(strategy, 6)
     return pred_ts + pd.Timedelta(hours=horizon_h)
 
-def _grade_rate(rate):
-    try: r = float(rate)
+def _grade_rate(r):
+    try: r = float(r)
     except: r = 0.0
     if r >= 0.60: return "ok"
     if r >= 0.40: return "warn"
@@ -84,10 +84,6 @@ def _delay_badge(delay_min):
     if delay_min <= 30: return "warn"
     return "err"
 
-def _num(x, default=0.0):
-    try: return float(x)
-    except: return default
-
 def _num_or_none(x):
     try:
         v = float(x)
@@ -95,6 +91,22 @@ def _num_or_none(x):
         return v
     except:
         return None
+
+# --- 공통: 성공/실패 집계( status 없으면 success 사용 ) ---
+def _succ_fail_from_df(df: pd.DataFrame, success_labels=("success", "v_success"), fail_labels=("fail", "v_fail")):
+    if df is None or df.empty: return 0, 0
+    cols = set(df.columns.astype(str))
+    if "status" in cols:
+        s = df["status"].astype(str).str.lower()
+        succ = int(s.isin([x.lower() for x in success_labels]).sum())
+        fail = int(s.isin([x.lower() for x in fail_labels]).sum())
+        return succ, fail
+    if "success" in cols:
+        v = df["success"].astype(str).str.strip().str.lower()
+        succ = int(v.isin(["true", "1", "yes", "y", "success", "v_success"]).sum())
+        fail = int(v.isin(["false", "0", "no", "n"]).sum())
+        return succ, fail
+    return 0, 0
 
 # ===================== 인벤토리 스캔(.pt | .ptz | .meta.json) =====================
 _NAME_RE = re.compile(
@@ -105,7 +117,6 @@ _NAME_RE = re.compile(
 
 def _parse_filename_base(fname):
     base = os.path.basename(fname)
-    # .pt, .ptz, .meta.json 모두 제거
     base = re.sub(r"\.(pt|ptz|meta\.json)$", "", base, flags=re.IGNORECASE)
     m = _NAME_RE.match(base)
     if not m: return None
@@ -113,22 +124,17 @@ def _parse_filename_base(fname):
     return {
         "symbol": d["sym"],
         "strategy": d["strat"],
-        "model": d["model"].lower(),  # 정규화
+        "model": d["model"].lower(),
         "group_id": int(d["gid"]) if d.get("gid") else 0,
         "num_classes": int(d["ncls"]) if d.get("ncls") else None,
         "base": base
     }
 
 def _list_inventory():
-    """
-    models 디렉토리에서 *.pt, *.ptz, *.meta.json 스캔해 합침.
-    - key: (symbol, strategy, model)
-    - has_pt / has_meta / val_f1 / saved_at(메타 timestamp) / group_id / num_classes
-    """
     inv = {}
     if not os.path.isdir(MODEL_DIR): return inv
 
-    # 1) 메타부터 스캔
+    # 1) 메타 먼저
     for fn in os.listdir(MODEL_DIR):
         if not fn.lower().endswith(".meta.json"): continue
         meta_path = os.path.join(MODEL_DIR, fn)
@@ -154,13 +160,13 @@ def _list_inventory():
             ts_kst = _to_kst(ts_raw)
             val["saved_at"] = ts_kst.isoformat() if ts_kst else None
             val["num_classes"] = val["num_classes"] or meta.get("num_classes")
-            if isinstance(val["num_classes"], str) and val["num_classes"].isdigit():
+            if isinstance(val["num_classes"], str) and str(val["num_classes"]).isdigit():
                 val["num_classes"] = int(val["num_classes"])
         except Exception:
             pass
         inv[key] = val
 
-    # 2) pt | ptz 스캔
+    # 2) pt/ptz
     for fn in os.listdir(MODEL_DIR):
         lfn = fn.lower()
         if not (lfn.endswith(".pt") or lfn.endswith(".ptz")): continue
@@ -187,7 +193,7 @@ def _summarize_fail_patterns(df_pred_sym):
         if "status" in df.columns:
             df = df[df["status"].isin(["fail","v_fail"])]
         elif "success" in df.columns:
-            df = df[df["success"].astype(str).str.lower().isin(["false","0","no"])]
+            df = df[df["success"].astype(str).str.lower().isin(["false","0","no","n"])]
         else:
             return []
         if df.empty: return []
@@ -202,13 +208,9 @@ def _expected_tuples(symbols):
     return {(s, st, mt) for s in symbols for st in STRATEGIES for mt in MODEL_TYPES}
 
 def _progress(inv_map, symbols):
-    have = set([k for k in inv_map.keys()])  # (sym, strat, model)
+    have = set([k for k in inv_map.keys()])
     need = _expected_tuples(symbols)
-    return {
-        "expected": len(need),
-        "have": len(need & have),
-        "missing": sorted(list(need - have))
-    }
+    return {"expected": len(need), "have": len(need & have), "missing": sorted(list(need - have))}
 
 # ===================== 스냅샷 집계 =====================
 def _build_snapshot(symbols_filter=None):
@@ -216,7 +218,7 @@ def _build_snapshot(symbols_filter=None):
     df_train = _safe_read_csv(TRAIN_LOG)
     _        = _safe_read_csv(AUDIT_LOG)   # (옵션)
 
-    # 타임스템프 KST 통일
+    # 타임스탬프 KST 통일
     if "timestamp" in df_pred.columns:
         df_pred["timestamp"] = _normalize_ts_series_kst(df_pred["timestamp"])
     else:
@@ -230,7 +232,7 @@ def _build_snapshot(symbols_filter=None):
     inv = _list_inventory()  # key=(sym,strat,model) → dict
     inv_keys = set(inv.keys())
 
-    # 심볼 목록 결정
+    # 심볼 목록
     if symbols_filter:
         symbols = [s.strip() for s in symbols_filter.split(",") if s.strip()]
     elif DATA_SYMBOLS:
@@ -245,9 +247,8 @@ def _build_snapshot(symbols_filter=None):
             symbols |= set(df_train["symbol"].dropna().astype(str).tolist())
         symbols = sorted([s for s in symbols if s and s != "nan"])
 
-    # 학습로그: 최근 f1/최근 학습시각
-    train_last_map = {}
-    train_f1_map   = {}
+    # 학습로그 요약
+    train_last_map, train_f1_map = {}, {}
     if not df_train.empty:
         try:
             df_train = df_train.sort_values("timestamp")
@@ -267,43 +268,29 @@ def _build_snapshot(symbols_filter=None):
         except Exception:
             pass
 
-    snapshot = {
-        "time": now_kst().isoformat(),
-        "symbols": [],
-        "progress": _progress(inv, symbols),
-    }
+    snapshot = {"time": now_kst().isoformat(), "symbols": [], "progress": _progress(inv, symbols)}
 
-    # === RealityGuard 표시 텍스트 생성기 ===
+    # === RealityGuard 텍스트 ===
     def _rg_text_from_row(row):
         try:
-            mu = row.get("rg_mu", None)
-            lo = row.get("rg_lo", None)
-            hi = row.get("rg_hi", None)
-            if mu is None and lo is None and hi is None:
-                return None  # RG 정보 없음
+            mu = row.get("rg_mu", None); lo = row.get("rg_lo", None); hi = row.get("rg_hi", None)
             def f(v):
                 try: return float(v)
                 except: return None
             mu, lo, hi = f(mu), f(lo), f(hi)
-            if lo is not None and hi is not None and mu is not None:
-                return f"{lo*100:.2f}% ~ {hi*100:.2f}% (μ {mu*100:.2f}%)"
-            if lo is not None and hi is not None:
-                return f"{lo*100:.2f}% ~ {hi*100:.2f}%"
-            if mu is not None:
-                return f"μ {mu*100:.2f}%"
+            if mu is None and lo is None and hi is None: return None
+            if lo is not None and hi is not None and mu is not None: return f"{lo*100:.2f}% ~ {hi*100:.2f}% (μ {mu*100:.2f}%)"
+            if lo is not None and hi is not None: return f"{lo*100:.2f}% ~ {hi*100:.2f}%"
+            if mu is not None: return f"μ {mu*100:.2f}%"
             return None
         except Exception:
             return None
 
-    # 심볼 단위 집계
+    # 심볼 단위
     for sym in symbols:
         sym_block = {"symbol": sym, "strategies": {}, "fail_summary": []}
         df_ps = df_pred[df_pred["symbol"] == sym] if "symbol" in df_pred.columns else pd.DataFrame()
         sym_block["fail_summary"] = _summarize_fail_patterns(df_ps)
-
-        # ✅ 심볼 단위에서 명시 초기화(보강)
-        models_detail = []
-        inventory_rows = []
 
         for strat in STRATEGIES:
             last_train_ts = train_last_map.get((sym, strat), pd.NaT)
@@ -311,182 +298,133 @@ def _build_snapshot(symbols_filter=None):
 
             def _stat_count(df, label):
                 if df.empty or "status" not in df.columns: return 0
-                return int((df["status"] == label).sum())
+                return int((df["status"].astype(str).str.lower() == label).sum())
 
             if not df_ss.empty:
                 df_ss = df_ss.copy()
                 if "status" in df_ss.columns:
-                    df_ss["is_vol"] = df_ss["status"].astype(str).str.startswith("v_")
+                    df_ss["is_vol"] = df_ss["status"].astype(str).str.lower().str.startswith("v_")
                 elif "volatility" in df_ss.columns:
                     df_ss["is_vol"] = df_ss["volatility"].astype(str).str.lower().isin(["1","true"])
                 else:
                     df_ss["is_vol"] = False
                 ret_series = None
-                for col in ["return","return_value","rate"]:
+                for col in ["rate","return","return_value"]:
                     if col in df_ss.columns:
-                        ret_series = pd.to_numeric(df_ss[col], errors="coerce")
-                        break
-                if ret_series is None:
-                    ret_series = pd.Series(0.0, index=df_ss.index)
+                        ret_series = pd.to_numeric(df_ss[col], errors="coerce"); break
+                if ret_series is None: ret_series = pd.Series(0.0, index=df_ss.index)
                 df_ss["_return_val"] = ret_series.fillna(0.0)
 
             nvol = df_ss[~df_ss["is_vol"]] if not df_ss.empty else pd.DataFrame()
             vol  = df_ss[df_ss["is_vol"]]  if not df_ss.empty else pd.DataFrame()
 
-            # ⬇⬇ 성공률 = 성공 / (성공 + 실패)
-            n_succ = _stat_count(nvol, "success")
-            n_fail = _stat_count(nvol, "fail")
+            # 성공률 = 성공 / (성공 + 실패)
+            # status 우선, 없으면 success 폴백
+            if "status" in nvol.columns:
+                n_succ, n_fail = _stat_count(nvol, "success"), _stat_count(nvol, "fail")
+            else:
+                n_succ, n_fail = _succ_fail_from_df(nvol, ("success",), ("fail",))
             n_total = len(nvol)
             n_sf_denom = max(1, n_succ + n_fail)
-
             summary_n = {
-                "succ": n_succ,
-                "fail": n_fail,
+                "succ": n_succ, "fail": n_fail,
                 "pending": _stat_count(nvol, "pending"),
                 "failed": _stat_count(nvol, "failed"),
                 "total": n_total,
                 "avg_return": float(nvol["_return_val"].mean()) if not nvol.empty else 0.0,
-                "succ_rate": n_succ / n_sf_denom,   # ✅ 분모 (성공+실패)
+                "succ_rate": n_succ / n_sf_denom,
                 "sf_denominator": n_sf_denom
             }
 
-            v_succ = _stat_count(vol, "v_success")
-            v_fail = _stat_count(vol, "v_fail")
+            if "status" in vol.columns:
+                v_succ, v_fail = _stat_count(vol, "v_success"), _stat_count(vol, "v_fail")
+            else:
+                v_succ, v_fail = _succ_fail_from_df(vol, ("v_success",), ("v_fail",))
             v_total = len(vol)
             v_sf_denom = max(1, v_succ + v_fail)
-
             summary_v = {
-                "succ": v_succ,
-                "fail": v_fail,
+                "succ": v_succ, "fail": v_fail,
                 "pending": _stat_count(vol, "pending"),
                 "failed": _stat_count(vol, "failed"),
                 "total": v_total,
                 "avg_return": float(vol["_return_val"].mean()) if not vol.empty else 0.0,
-                "succ_rate": v_succ / v_sf_denom,   # ✅ 분모 (성공+실패)
+                "succ_rate": v_succ / v_sf_denom,
                 "sf_denominator": v_sf_denom
             }
 
-            # 모델별 상세(인벤토리 + 예측로그)
+            # 모델별 상세
             models_detail = []
             inventory_rows = []
             for mt in MODEL_TYPES:
                 key = (sym, strat, mt)
                 inv_item = inv.get(key)
-                # 대소문자 무시 contains
                 if not df_ss.empty and "model" in df_ss.columns:
                     df_model = df_ss[df_ss["model"].astype(str).str.contains(mt, case=False, na=False)]
                 else:
                     df_model = pd.DataFrame()
 
-                # 최신 클래스/수익률/확률/포지션/RealityGuard 텍스트
                 def _latest_for_model(dfm):
                     if dfm.empty:
-                        return {
-                            "cls": "-",
-                            "rate": None,
-                            "rg_text": "",
-                            "class_text": None,
-                            "prob": None,
-                            "prob_src": None,
-                            "position": None
-                        }
+                        return {"cls": "-", "rate": None, "rg_text": "", "class_text": None, "prob": None, "prob_src": None, "position": None}
                     try: dfm = dfm.sort_values("timestamp")
                     except Exception: pass
                     last = dfm.iloc[-1]
-
-                    # 클래스
                     latest_cls = "-"
                     for k in ["predicted_class","class","pred_class","label"]:
                         if k in dfm.columns:
                             v = last.get(k, None)
-                            if v is not None and str(v).strip() != "" and str(v).lower() != "nan":
-                                latest_cls = str(int(v)) if str(v).isdigit() else str(v)
-                                break
-
-                    # 예상 수익률
+                            if v is not None and str(v).strip() not in ["","nan","none","None"]:
+                                latest_cls = str(int(v)) if str(v).isdigit() else str(v); break
                     latest_rate = None
-                    if "rate" in dfm.columns: latest_rate = _num_or_none(last.get("rate"))
-                    elif "return" in dfm.columns: latest_rate = _num_or_none(last.get("return"))
-                    elif "return_value" in dfm.columns: latest_rate = _num_or_none(last.get("return_value"))
-
-                    # 구간 텍스트
+                    for col in ["rate","return","return_value"]:
+                        if col in dfm.columns:
+                            latest_rate = _num_or_none(last.get(col)); break
                     class_text = None
                     if "class_return_text" in dfm.columns:
-                        try:
-                            txt = str(last.get("class_return_text","")).strip()
-                            if txt: class_text = txt
-                        except Exception:
-                            pass
-
-                    # 확률
+                        txt = str(last.get("class_return_text","")).strip()
+                        if txt: class_text = txt
                     prob = None; prob_src = None
-                    cp = last.get("calib_prob", None)
-                    rp = last.get("raw_prob", None)
-                    if cp is not None and str(cp)!="nan":
-                        prob = _num_or_none(cp); prob_src = "calib"
-                    elif rp is not None and str(rp)!="nan":
-                        prob = _num_or_none(rp); prob_src = "raw"
-
-                    # 포지션
-                    pos = last.get("position", None)
-                    pos = str(pos) if pos is not None and str(pos).strip() not in ["nan","None",""] else None
-
-                    # RealityGuard 우선 텍스트
+                    cp = last.get("calib_prob", None); rp = last.get("raw_prob", None)
+                    if cp is not None and str(cp)!="nan": prob = _num_or_none(cp); prob_src = "calib"
+                    elif rp is not None and str(rp)!="nan": prob = _num_or_none(rp); prob_src = "raw"
+                    pos = last.get("position", None); pos = str(pos) if pos not in [None,"","nan","None"] else None
                     rg_text = _rg_text_from_row(last)
-                    return {
-                        "cls": latest_cls,
-                        "rate": latest_rate,
-                        "rg_text": rg_text,
-                        "class_text": class_text,
-                        "prob": prob,
-                        "prob_src": prob_src,
-                        "position": pos
-                    }
+                    return {"cls": latest_cls, "rate": latest_rate, "rg_text": rg_text, "class_text": class_text, "prob": prob, "prob_src": prob_src, "position": pos}
 
                 latest = _latest_for_model(df_model)
 
-                # 훈련 f1 보강(메타/파일→학습로그 역보강)
                 val_f1 = None
-                if inv_item and inv_item.get("val_f1") is not None:
-                    val_f1 = float(inv_item["val_f1"])
-                elif (sym, strat, mt) in train_f1_map:
-                    val_f1 = float(train_f1_map[(sym, strat, mt)])
+                if inv_item and inv_item.get("val_f1") is not None: val_f1 = float(inv_item["val_f1"])
+                elif (sym, strat, mt) in train_f1_map: val_f1 = float(train_f1_map[(sym, strat, mt)])
 
                 if inv_item is None:
                     status = "MISSING"
                 else:
-                    has_pt   = inv_item.get("has_pt", False)
-                    has_meta = inv_item.get("has_meta", False)
-                    if not has_meta and has_pt:
-                        status = "ERROR_META"
-                    elif df_model is not None and len(df_model) > 0:
-                        status = "PREDICTED"
-                    else:
-                        status = "TRAINED_NO_PRED"
+                    has_pt = inv_item.get("has_pt", False); has_meta = inv_item.get("has_meta", False)
+                    if not has_meta and has_pt: status = "ERROR_META"
+                    elif df_model is not None and len(df_model) > 0: status = "PREDICTED"
+                    else: status = "TRAINED_NO_PRED"
 
-                # 성공/실패 세기 (변동성 접두 포함)
-                succ_cnt = _stat_count(df_model, "success") + _stat_count(df_model, "v_success")
-                fail_cnt = _stat_count(df_model, "fail") + _stat_count(df_model, "v_fail")
-                sf_denom = max(1, succ_cnt + fail_cnt)
+                m_succ = _stat_count(df_model, "success") + _stat_count(df_model, "v_success")
+                m_fail = _stat_count(df_model, "fail") + _stat_count(df_model, "v_fail")
+                if m_succ + m_fail == 0:
+                    # status가 없을 때 success 폴백
+                    m_succ, m_fail = _succ_fail_from_df(df_model)
+                sf_denom = max(1, m_succ + m_fail)
 
                 md = {
-                    "model": mt,
-                    "status": status,
-                    "val_f1": val_f1,
-                    "succ": succ_cnt,
-                    "fail": fail_cnt,
-                    "total": int(len(df_model)),
+                    "model": mt, "status": status, "val_f1": val_f1,
+                    "succ": m_succ, "fail": m_fail, "total": int(len(df_model)),
                     "latest_class": latest["cls"],
-                    "latest_return": latest["rate"],            # 숫자값
-                    "latest_return_text": latest["rg_text"] or latest["class_text"],  # 표시용(우선 RG)
-                    "latest_prob": latest["prob"],
-                    "latest_prob_src": latest["prob_src"],
+                    "latest_return": latest["rate"],
+                    "latest_return_text": latest["rg_text"] or latest["class_text"],
+                    "latest_prob": latest["prob"], "latest_prob_src": latest["prob_src"],
                     "latest_position": latest["position"],
+                    "succ_rate": m_succ / sf_denom
                 }
-                md["succ_rate"] = succ_cnt / sf_denom  # ✅ 모델 단위도 동일 기준
                 models_detail.append(md)
 
-                inv_row = {
+                inventory_rows.append({
                     "model": mt,
                     "has_pt": bool(inv_item and inv_item.get("has_pt")),
                     "has_meta": bool(inv_item and inv_item.get("has_meta")),
@@ -495,8 +433,7 @@ def _build_snapshot(symbols_filter=None):
                     "pt_file": inv_item.get("pt_file") if inv_item else None,
                     "meta_file": inv_item.get("meta_file") if inv_item else None,
                     "status": status
-                }
-                inventory_rows.append(inv_row)
+                })
 
             last_pred_ts_raw = df_ss["timestamp"].max() if "timestamp" in df_ss.columns and not df_ss.empty else pd.NaT
             last_pred_ts = _to_kst(last_pred_ts_raw)
@@ -522,7 +459,6 @@ def _build_snapshot(symbols_filter=None):
                 now = now_kst()
                 delayed_min = int(max(0, (now - eval_due) / pd.Timedelta(minutes=1))) if now > eval_due else 0
 
-            # 메타 선택 표시(note JSON에서 추출) — 대소문자 무시
             meta_choice = "-"
             try:
                 if not df_ss.empty and "model" in df_ss.columns:
@@ -536,40 +472,44 @@ def _build_snapshot(symbols_filter=None):
             except Exception:
                 pass
 
-            strat_problems = []
-            strat_notes = []
+            strat_problems, strat_notes = [], []
             inv_count = sum(1 for mt in MODEL_TYPES if (sym, strat, mt) in inv)
-            if inv_count == 0:
-                strat_problems.append("모델 파일 없음")
+            if inv_count == 0: strat_problems.append("모델 파일 없음")
             for mt in MODEL_TYPES:
                 item = inv.get((sym, strat, mt))
                 if item and item.get("has_pt") and not item.get("has_meta"):
                     strat_problems.append(f"{mt} 메타 누락")
             if df_ss.empty:
-                if inv_count > 0 or pd.notna(last_train_ts):
-                    strat_notes.append("예측 대기(훈련 완료)")
-                else:
-                    strat_problems.append("예측 기록 없음")
-            if delayed_min > 0:
-                strat_problems.append(f"평가 지연 {delayed_min}분")
-            if pd.isna(last_train_ts):
-                strat_notes.append("최근 학습 기록 없음")
+                if inv_count > 0 or pd.notna(last_train_ts): strat_notes.append("예측 대기(훈련 완료)")
+                else: strat_problems.append("예측 기록 없음")
+            if delayed_min > 0: strat_problems.append(f"평가 지연 {delayed_min}분")
+            if pd.isna(last_train_ts): strat_notes.append("최근 학습 기록 없음")
 
-            recent_fail = df_ss[df_ss["status"].isin(["fail","v_fail"])] if "status" in df_ss.columns else pd.DataFrame()
+            recent_fail = None
+            if "status" in df_ss.columns:
+                recent_fail = df_ss[df_ss["status"].isin(["fail","v_fail"])]
+            elif "success" in df_ss.columns:
+                v = df_ss["success"].astype(str).str.lower()
+                recent_fail = df_ss[v.isin(["false","0","no","n"])]
+            recent_fail = recent_fail if isinstance(recent_fail, pd.DataFrame) else pd.DataFrame()
+
             recent_fail_n = int(len(recent_fail)); reflected = 0
             if recent_fail_n > 0 and "timestamp" in df_ss.columns:
                 last_fail_time = _to_kst(recent_fail["timestamp"].max())
                 after = df_ss[df_ss["timestamp"] > last_fail_time] if last_fail_time is not None else pd.DataFrame()
-                reflected = int((after["status"].isin(["success","v_success"])).sum()) if "status" in after.columns else 0
-            reflect_ratio = (reflected / max(1, recent_fail_n)) if recent_fail_n>0 else None
+                if "status" in after.columns:
+                    reflected = int((after["status"].isin(["success","v_success"])).sum())
+                elif "success" in after.columns:
+                    vv = after["success"].astype(str).str.lower()
+                    reflected = int(vv.isin(["true","1","yes","y","success"]).sum())
 
-            # === 누적(일반+변동성) 집계 ===
-            cum_succ    = summary_n["succ"] + summary_v["succ"]
-            cum_fail    = summary_n["fail"] + summary_v["fail"]
+            # 누적
+            cum_succ = summary_n["succ"] + summary_v["succ"]
+            cum_fail = summary_n["fail"] + summary_v["fail"]
             cum_pending = summary_n["pending"] + summary_v["pending"]
-            cum_failed  = summary_n["failed"] + summary_v["failed"]
-            cum_total   = (summary_n["total"] + summary_v["total"])
-            denom_sf    = max(1, (cum_succ + cum_fail))  # 성공률 분모: 성공+실패
+            cum_failed  = summary_n["failed"]  + summary_v["failed"]
+            cum_total   = summary_n["total"]  + summary_v["total"]
+            denom_sf    = max(1, (cum_succ + cum_fail))
             cum_rate    = cum_succ / denom_sf
 
             sym_block["strategies"][strat] = {
@@ -583,28 +523,21 @@ def _build_snapshot(symbols_filter=None):
                     "normal": {
                         "succ": summary_n["succ"], "fail": summary_n["fail"],
                         "pending": summary_n["pending"], "failed": summary_n["failed"],
-                        "total": summary_n["total"],
-                        "succ_rate": summary_n["succ_rate"],      # ✅ 성공/(성공+실패)
-                        "avg_return": summary_n["avg_return"],
-                        "sf_denominator": summary_n["sf_denominator"]
+                        "total": summary_n["total"], "succ_rate": summary_n["succ_rate"],
+                        "avg_return": summary_n["avg_return"], "sf_denominator": summary_n["sf_denominator"]
                     },
                     "volatility": {
                         "succ": summary_v["succ"], "fail": summary_v["fail"],
                         "pending": summary_v["pending"], "failed": summary_v["failed"],
-                        "total": summary_v["total"],
-                        "succ_rate": summary_v["succ_rate"],      # ✅ 성공/(성공+실패)
-                        "avg_return": summary_v["avg_return"],
-                        "sf_denominator": summary_v["sf_denominator"]
+                        "total": summary_v["total"], "succ_rate": summary_v["succ_rate"],
+                        "avg_return": summary_v["avg_return"], "sf_denominator": summary_v["sf_denominator"]
                     },
                     "by_model": models_detail,
                     "meta_choice": meta_choice,
                     "cumulative": {
-                        "succ": cum_succ,
-                        "fail": cum_fail,
-                        "pending": cum_pending,
-                        "failed": cum_failed,
-                        "total": cum_total,
-                        "succ_rate": cum_rate,
+                        "succ": cum_succ, "fail": cum_fail,
+                        "pending": cum_pending, "failed": cum_failed,
+                        "total": cum_total, "succ_rate": cum_rate,
                         "sf_denominator": denom_sf
                     }
                 },
@@ -617,7 +550,7 @@ def _build_snapshot(symbols_filter=None):
                 "failure_learning": {
                     "recent_fail": recent_fail_n,
                     "reflected_count_after": reflected,
-                    "reflect_ratio": reflect_ratio
+                    "reflect_ratio": (reflected / max(1, recent_fail_n)) if recent_fail_n>0 else None
                 },
                 "problems": strat_problems,
                 "notes": strat_notes
@@ -633,7 +566,6 @@ def _build_snapshot(symbols_filter=None):
             n = blk["prediction"]["normal"]; v = blk["prediction"]["volatility"]
             total_normal_succ += n["succ"]; total_normal_fail += n["fail"]
             total_vol_succ += v["succ"]; total_vol_fail += v["fail"]
-            # 경고 조건: 성공+실패 분모 기준으로 10건 이상일 때 낮은 성공률 경고
             n_denom = max(1, n.get("succ",0)+n.get("fail",0))
             v_denom = max(1, v.get("succ",0)+v.get("fail",0))
             if _grade_rate(n["succ_rate"]) == "err" and n_denom >= 10:
@@ -648,7 +580,7 @@ def _build_snapshot(symbols_filter=None):
         "normal_success_rate": _rate(total_normal_succ, total_normal_fail),
         "vol_success_rate": _rate(total_vol_succ, total_vol_fail),
         "symbols_count": len(snapshot["symbols"]),
-        "models_count": len(inv),
+        "models_count": len(inv),                     # ← inv 재사용(원본 의도)
         "problems": problems,
         "progress": snapshot["progress"]
     }
@@ -791,7 +723,6 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow'));
                                f"<span class='badge {cum_cls}'>누적 {_pct(cum['succ_rate'])} ({cum['succ']}/{cum['sf_denominator']})</span>"
                                f"</div>")
 
-                # 모델별 상세(예측 요약)
                 rows = []
                 for md in by_model:
                     val_f1_val = md.get("val_f1", None)
@@ -824,7 +755,6 @@ window.addEventListener('DOMContentLoaded', () => switchView('flow'));
                                  "<th>최근 클래스</th><th>구간(RG/클래스)</th><th>예상수익률</th><th>확률</th><th>포지션</th></tr>"
                                  + "".join(rows) + "</table></div></details>")
 
-                # 파일 인벤토리
                 inv_rows_html = []
                 for r in inv_rows:
                     f1txt = "-" if r.get("val_f1") is None else f"{float(r['val_f1']):.3f}"
