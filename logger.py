@@ -436,7 +436,7 @@ def update_model_success(s, t, m, success):
             ON CONFLICT(symbol, strategy, model) DO UPDATE SET
                 success = success + excluded.success,
                 fail = fail  + excluded.fail
-        """, params=(s, t or "알수없음", m, int(success), int(!success)), retries=7, commit=True)
+        """, params=(s, t or "알수없음", m, int(success), int(0 if success else 1)), retries=7, commit=True)
         print(f"[✅ update_model_success] {s}-{t}-{m} 기록 ({'성공' if success else '실패'})")
     except Exception as e:
         print(f"[오류] update_model_success 실패 → {e}")
