@@ -212,6 +212,18 @@ def _progress(inv_map, symbols):
     need = _expected_tuples(symbols)
     return {"expected": len(need), "have": len(need & have), "missing": sorted(list(need - have))}
 
+# === 모델명 정규화(섞임 방지) ===
+def _norm_model_name(s: str) -> str | None:
+    if s is None: return None
+    t = str(s).strip().lower()
+    # 가장 긴 토큰부터 매칭
+    if "cnn_lstm" in t: return "cnn_lstm"
+    if "transformer" in t: return "transformer"
+    # 'lstm'이 'cnn_lstm'에 포함되므로 마지막에 처리
+    if re.search(r"(?:^|[^a-z])lstm(?:[^a-z]|$)", t): return "lstm"
+    if t == "meta": return "meta"
+    return None
+
 # ===================== 스냅샷 집계 =====================
 def _build_snapshot(symbols_filter=None):
     df_pred  = _safe_read_csv(PREDICTION_LOG)
@@ -296,6 +308,13 @@ def _build_snapshot(symbols_filter=None):
             last_train_ts = train_last_map.get((sym, strat), pd.NaT)
             df_ss = df_ps[df_ps["strategy"] == strat] if not df_ps.empty else pd.DataFrame()
 
+            # === 모델명 정규화 컬럼 추가(섞임 방지 핵심) ===
+            if not df_ss.empty and "model" in df_ss.columns:
+                df_ss = df_ss.copy()
+                df_ss["model_norm"] = df_ss["model"].apply(_norm_model_name)
+            else:
+                df_ss["model_norm"] = None
+
             def _stat_count(df, label):
                 if df.empty or "status" not in df.columns: return 0
                 return int((df["status"].astype(str).str.lower() == label).sum())
@@ -319,7 +338,6 @@ def _build_snapshot(symbols_filter=None):
             vol  = df_ss[df_ss["is_vol"]]  if not df_ss.empty else pd.DataFrame()
 
             # 성공률 = 성공 / (성공 + 실패)
-            # status 우선, 없으면 success 폴백
             if "status" in nvol.columns:
                 n_succ, n_fail = _stat_count(nvol, "success"), _stat_count(nvol, "fail")
             else:
@@ -358,8 +376,8 @@ def _build_snapshot(symbols_filter=None):
             for mt in MODEL_TYPES:
                 key = (sym, strat, mt)
                 inv_item = inv.get(key)
-                if not df_ss.empty and "model" in df_ss.columns:
-                    df_model = df_ss[df_ss["model"].astype(str).str.contains(mt, case=False, na=False)]
+                if not df_ss.empty and "model_norm" in df_ss.columns:
+                    df_model = df_ss[df_ss["model_norm"] == mt]
                 else:
                     df_model = pd.DataFrame()
 
@@ -408,7 +426,6 @@ def _build_snapshot(symbols_filter=None):
                 m_succ = _stat_count(df_model, "success") + _stat_count(df_model, "v_success")
                 m_fail = _stat_count(df_model, "fail") + _stat_count(df_model, "v_fail")
                 if m_succ + m_fail == 0:
-                    # status가 없을 때 success 폴백
                     m_succ, m_fail = _succ_fail_from_df(df_model)
                 sf_denom = max(1, m_succ + m_fail)
 
@@ -461,8 +478,8 @@ def _build_snapshot(symbols_filter=None):
 
             meta_choice = "-"
             try:
-                if not df_ss.empty and "model" in df_ss.columns:
-                    df_meta = df_ss[df_ss["model"].astype(str).str.lower() == "meta"]
+                if not df_ss.empty and "model_norm" in df_ss.columns:
+                    df_meta = df_ss[df_ss["model_norm"] == "meta"]
                 else:
                     df_meta = pd.DataFrame()
                 if not df_meta.empty and "note" in df_meta.columns:
