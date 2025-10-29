@@ -542,6 +542,108 @@ def load_for_finetune(
     }
 
 
+# === NEW: 엄격 매칭 유틸리티 (선택/검증 전용, 기존 로더 무변경) =================
+def is_checkpoint_compatible(
+    meta: Dict[str, Any],
+    *,
+    symbol: str,
+    horizon: str,   # "단기" | "중기" | "장기" 등 프로젝트 표기
+    model: str,     # "lstm" | "cnn_lstm" | "transformer" 등
+) -> bool:
+    """
+    사이드카 메타 기준으로 정확 일치 여부를 판단.
+    필수 키: symbol, horizon, model  (대소문자/공백 보정 포함)
+    """
+    try:
+        def norm(x: Any) -> str:
+            return str(x).strip().lower()
+        return (
+            norm(meta.get("symbol"))  == norm(symbol)
+            and norm(meta.get("horizon")) == norm(horizon)
+            and norm(meta.get("model"))   == norm(model)
+        )
+    except Exception:
+        return False
+
+
+def _safe_get_created_at(meta: Dict[str, Any]) -> float:
+    v = meta.get("created_at")
+    try:
+        return float(v)
+    except Exception:
+        return 0.0
+
+
+def resolve_checkpoint_strict(
+    search_dirs: List[str] | Tuple[str, ...],
+    *,
+    symbol: str,
+    horizon: str,
+    model: str,
+    exts: set[str] = SUPPORTED_EXTS,
+) -> Tuple[Optional[str], str]:
+    """
+    주어진 디렉터리 집합에서 사이드카 메타를 이용해
+    (symbol, horizon, model) 완전 일치하는 ckpt만 선택.
+    - 메타 누락/해시 불일치/키 불완전 → 후보 제외
+    - 다수 후보면 created_at(메타) → 파일 mtime 순으로 최신 선택
+    반환: (path or None, reason_code)
+      reason_code ∈ {"ok", "not_found", "no_meta", "hash_mismatch"}
+      (여러 사유가 섞일 수 있으나 최종 우선순위의 사유만 표기)
+    """
+    candidates: List[Tuple[str, Dict[str, Any]]] = []
+    seen_no_meta = False
+    seen_hash_miss = False
+
+    for d in search_dirs:
+        if not d or not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            p = os.path.join(d, name)
+            if not os.path.isfile(p) or _ext(p) not in exts:
+                continue
+            mpath = _meta_path_for(p)
+            if not os.path.isfile(mpath):
+                seen_no_meta = True
+                continue
+            try:
+                with open(mpath, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                if not isinstance(meta, dict):
+                    continue
+            except Exception:
+                continue
+
+            if not is_checkpoint_compatible(meta, symbol=symbol, horizon=horizon, model=model):
+                continue
+
+            # 파일 해시 일치성 확인(무결성 보장)
+            try:
+                file_sha1 = meta.get("file_sha1") or ""
+                if file_sha1:
+                    cur_sha1 = _compute_sha1_of_file(p)
+                    if not cur_sha1 or cur_sha1 != file_sha1:
+                        seen_hash_miss = True
+                        continue
+            except Exception:
+                seen_hash_miss = True
+                continue
+
+            candidates.append((p, meta))
+
+    if not candidates:
+        if seen_hash_miss:
+            return None, "hash_mismatch"
+        if seen_no_meta:
+            return None, "no_meta"
+        return None, "not_found"
+
+    # 최신 우선: created_at(desc) → 파일 mtime(desc)
+    candidates.sort(key=lambda pm: (_safe_get_created_at(pm[1]), os.path.getmtime(pm[0])), reverse=True)
+    return candidates[0][0], "ok"
+# === NEW END ================================================================
+
+
 __all__ = [
     "ModelLoadError",
     "save_model",
@@ -552,4 +654,7 @@ __all__ = [
     "convert_pt_to_ptz",
     "convert_ptz_to_pt",
     "load_for_finetune",
-]
+    # NEW helpers
+    "is_checkpoint_compatible",
+    "resolve_checkpoint_strict",
+            ]
