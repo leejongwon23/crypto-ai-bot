@@ -223,28 +223,39 @@ if _raw_load_model is None:
     except Exception:
         _raw_load_model=None
 
-def load_model_any(path,model=None,**kwargs):
-    ttl=kwargs.pop("ttl_sec",PREDICT_MODEL_LOADER_TTL)
+def load_model_any(path, model=None, **kwargs):
+    ttl = kwargs.pop("ttl_sec", PREDICT_MODEL_LOADER_TTL)
     if _raw_load_model is not None:
         try:
-            sig=inspect.signature(_raw_load_model); params=list(sig.parameters.values())
-            if len(params)>=2:
-                try: return _raw_load_model(path,model,ttl_sec=ttl,**kwargs)
-                except TypeError: return _raw_load_model(path,model,**kwargs)
-            else: return _raw_load_model(path)
-        except Exception:
-            pass
+            sig = inspect.signature(_raw_load_model)
+            params = list(sig.parameters.values())
+            if len(params) >= 2:
+                try:
+                    return _raw_load_model(path, model, ttl_sec=ttl, **kwargs)
+                except TypeError:
+                    return _raw_load_model(path, model, **kwargs)
+            else:
+                return _raw_load_model(path)
+        except Exception as e:
+            print(f"[load_model_any: primary loader failed] {e}")
+
     # 1차 실패 → torch.load 직접
     try:
-        sd=torch.load(path,map_location="cpu")
-        if isinstance(sd,dict) and model is not None:
+        sd = torch.load(path, map_location="cpu")
+        if isinstance(sd, dict) and model is not None:
             try:
-                model.load_state_dict(sd,strict=False); model.eval(); return model
-            except Exception:
+                model.load_state_dict(sd, strict=False)
+                model.eval()
+                return model
+            except Exception as e:
+                print(f"[load_model_any: state_dict load failed] {e}")
+                # ✅ 폴백: dict 그대로 반환
                 return sd
         return sd
-    except Exception:
-        return None
+    except Exception as e:
+        print(f"[load_model_any: torch.load 실패, 경로={path}] {e}")
+        # ✅ 마지막 폴백 — 실패해도 None 대신 원본 모델 반환 (skip 방지)
+        return model
 
 from logger import log_prediction, update_model_success, PREDICTION_HEADERS, ensure_prediction_log_exists
 from failure_db import insert_failure_record, ensure_failure_db
