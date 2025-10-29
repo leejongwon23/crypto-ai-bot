@@ -624,11 +624,65 @@ def _soft_abstain(symbol,strategy,*,reason,meta_choice="abstain",regime="unknown
         ensure_prediction_log_exists()
         cur=float((df["close"].iloc[-1] if df is not None and len(df) else 0.0))
         note={"reason":reason,"abstain_prob_min":float(ABSTAIN_PROB_MIN),"max_calib_prob":None,"meta_choice":meta_choice,"regime":regime}
-        log_prediction(symbol=symbol,strategy=strategy,direction="예측보류",entry_price=cur,target_price=cur,model="meta",model_name=str(meta_choice),predicted_class=-1,label=-1,note=json.dumps(note,ensure_ascii=False),top_k=[],success=False,reason=reason,rate=0.0,expected_return=0.0,position="neutral",return_value=0.0,source=source,group_id=group_id,feature_vector=(torch.tensor(X_last,dtype=torch.float32).numpy() if X_last is not None else None),regime=regime,meta_choice="abstain",raw_prob=None,calib_prob=None,calib_ver=get_calibration_version(),class_return_min=0.0,class_return_max=0.0,class_return_text="")
-        log_prediction(symbol=symbol,strategy=strategy,direction="예측(보류)",entry_price=cur,target_price=cur,model="meta",model_name=str(meta_choice),predicted_class=-1,label=-1,note=json.dumps({"reason":reason,"summary":True},ensure_ascii=False),top_k=[],success=False,reason=reason,rate=0.0,expected_return=0.0,position="neutral",return_value=0.0,source=source,group_id=group_id,feature_vector=None,regime=regime,meta_choice="abstain",raw_prob=None,calib_prob=None,calib_ver=get_calibration_version(),class_return_min=0.0,class_return_max=0.0,class_return_text="")
-    except Exception as e: print(f"[soft_abstain 예외] {e}")
+
+        # 기존: 예측보류만 로그됨 → [FIX] 실제 예측까지 같이 표기
+        log_prediction(
+            symbol=symbol, strategy=strategy, direction="예측보류",
+            entry_price=cur, target_price=cur, model="meta", model_name=str(meta_choice),
+            predicted_class=-1, label=-1, note=json.dumps(note, ensure_ascii=False),
+            top_k=[], success=False, reason=reason, rate=0.0, expected_return=0.0,
+            position="neutral", return_value=0.0, source=source, group_id=group_id,
+            feature_vector=(torch.tensor(X_last, dtype=torch.float32).numpy() if X_last is not None else None),
+            regime=regime, meta_choice="abstain", raw_prob=None, calib_prob=None,
+            calib_ver=get_calibration_version(), class_return_min=0.0,
+            class_return_max=0.0, class_return_text=""
+        )
+
+        # ✅ [FIX] 관우로그 예측행 추가: 보류 중이라도 실제 입력이 있으면 "예측"도 함께 기록
+        if X_last is not None and df is not None and len(df) > 0:
+            try:
+                entry = float(df["close"].iloc[-1])
+                log_prediction(
+                    symbol=symbol, strategy=strategy, direction="예측",
+                    entry_price=entry, target_price=entry,
+                    model="meta", model_name=f"{meta_choice}(soft_abstain)",
+                    predicted_class=-1, label=-1,
+                    note=json.dumps({"reason": reason, "info": "보류 중 예측행 병행 기록"}, ensure_ascii=False),
+                    top_k=[], success=False, reason=reason, rate=0.0, expected_return=0.0,
+                    position="neutral", return_value=0.0, source=f"{source}_보류중예측",
+                    group_id=group_id,
+                    feature_vector=torch.tensor(X_last, dtype=torch.float32).numpy(),
+                    regime=regime, meta_choice="abstain",
+                    raw_prob=None, calib_prob=None, calib_ver=get_calibration_version(),
+                    class_return_min=0.0, class_return_max=0.0, class_return_text=""
+                )
+            except Exception as e:
+                print(f"[soft_abstain 추가 예측행 기록 오류] {e}")
+
+        # 기존 요약 행 그대로 유지
+        log_prediction(
+            symbol=symbol, strategy=strategy, direction="예측(보류)",
+            entry_price=cur, target_price=cur, model="meta", model_name=str(meta_choice),
+            predicted_class=-1, label=-1,
+            note=json.dumps({"reason":reason,"summary":True}, ensure_ascii=False),
+            top_k=[], success=False, reason=reason, rate=0.0, expected_return=0.0,
+            position="neutral", return_value=0.0, source=source, group_id=group_id,
+            feature_vector=None, regime=regime, meta_choice="abstain",
+            raw_prob=None, calib_prob=None, calib_ver=get_calibration_version(),
+            class_return_min=0.0, class_return_max=0.0, class_return_text=""
+        )
+
+    except Exception as e:
+        print(f"[soft_abstain 예외] {e}")
+
     print(f"[predict] abstain {symbol}-{strategy} :: {reason}")
-    return {"symbol":symbol,"strategy":strategy,"model":"meta","class":-1,"expected_return":0.0,"class_return_min":0.0,"class_return_max":0.0,"class_return_text":"","position":"neutral","timestamp":_now_kst().isoformat(),"source":source,"regime":regime,"reason":reason,"success":False,"predicted_class":-1,"label":-1}
+    return {
+        "symbol":symbol,"strategy":strategy,"model":"meta","class":-1,
+        "expected_return":0.0,"class_return_min":0.0,"class_return_max":0.0,
+        "class_return_text":"","position":"neutral",
+        "timestamp":_now_kst().isoformat(),"source":source,"regime":regime,
+        "reason":reason,"success":False,"predicted_class":-1,"label":-1
+                }
 
 # === 보조 ===
 def _acquire_predict_lock_with_retry(path:str,max_wait_sec:int):
