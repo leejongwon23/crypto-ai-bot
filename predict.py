@@ -317,16 +317,7 @@ def _norm_model_type(mt:str)->str:
     if "cnn" in s: return "CNN_LSTM"
     return "LSTM"
 
-def _ranges_from_meta(meta):
-    try:
-        cr=meta.get("class_ranges",None)
-        if isinstance(cr,list) and len(cr)>=2 and all(isinstance(x,(list,tuple)) and len(x)==2 for x in cr):
-            return [(float(a),float(b)) for a,b in cr]
-    except Exception:
-        pass
-    return None
-
-# -------------------- 백분율 자동보정 (핵심 추가) --------------------
+# -------------------- 백분율 자동보정 + 메타 검증 (핵심 추가) --------------------
 def _sanitize_range(lo: float, hi: float) -> tuple[float, float]:
     """
     클래스 수익률 구간의 단위를 자동 교정한다.
@@ -343,16 +334,66 @@ def _sanitize_range(lo: float, hi: float) -> tuple[float, float]:
     except Exception:
         # 변환 실패 시 안전하게 0.0으로 폴백
         return float(lo or 0.0), float(hi or 0.0)
-        
+
+def _ranges_from_meta(meta):
+    """원시 meta → list[(lo,hi)] (보정 전)"""
+    try:
+        cr=meta.get("class_ranges",None)
+        if isinstance(cr,list) and len(cr)>=2 and all(isinstance(x,(list,tuple)) and len(x)==2 for x in cr):
+            return [(float(a),float(b)) for a,b in cr]
+    except Exception:
+        pass
+    return None
+
+def _validate_meta_class_ranges(meta, *,num_classes:int, symbol:str, strategy:str):
+    """
+    메타의 class_ranges가 '전 클래스 동일/비정상'인 경우 감지하여 무효화.
+    반환: 정상 리스트(보정 적용됨) 또는 None
+    """
+    raw = _ranges_from_meta(meta) if isinstance(meta, dict) else None
+    if not raw: return None
+
+    # 1) 단위 보정
+    cr = [_sanitize_range(a,b) for (a,b) in raw]
+
+    # 2) 기본 형태 검사
+    if len(cr) < max(2, min(num_classes, 3)):  # 클래스 수에 한참 못 미치면 무효
+        return None
+
+    # 3) 전 클래스 동일/폭 0 검사
+    uniq = set((round(lo,6), round(hi,6)) for (lo,hi) in cr)
+    if len(uniq) <= 1:  # 모든 클래스가 동일한 구간
+        print(f"[메타무시] {symbol}-{strategy} meta.class_ranges 전 클래스 동일 → config 사용")
+        return None
+    if any((hi - lo) <= 0 for (lo,hi) in cr):
+        print(f"[메타무시] {symbol}-{strategy} meta.class_ranges hi<=lo 존재 → config 사용")
+        return None
+
+    # 4) 과도한 비현실 폭/중앙값(안전한 일반 규칙) → 메타 무시
+    #    (전략별 세밀한 임계는 config가 담당하므로 여기선 상식적 필터만)
+    mids = [abs((lo+hi)/2.0) for (lo,hi) in cr]
+    widths = [abs(hi-lo) for (lo,hi) in cr]
+    # 폭이 너무 큰 값이 과반이면 이상치로 간주 (예: ±0.3 이상이 다수)
+    if sum(w > 0.4 for w in widths) >= max(2, len(widths)//2):
+        print(f"[메타무시] {symbol}-{strategy} meta.class_ranges 폭 과다(과반) → config 사용")
+        return None
+    # 중앙값이 말이 안될 정도로 큰 값이 다수(예: 0.25 이상이 과반)
+    if sum(m > 0.25 for m in mids) >= max(2, len(mids)//2):
+        print(f"[메타무시] {symbol}-{strategy} meta.class_ranges 중앙값 과다(과반) → config 사용")
+        return None
+
+    # 5) 유효
+    return cr
+
 def _class_range_by_meta_or_cfg(cls_id:int,meta,symbol:str,strategy:str):
-    """⚙️ 클래스별 수익률 구간 로딩 + 백분율 자동보정 포함"""
-    cr=_ranges_from_meta(meta) if isinstance(meta,dict) else None
+    """⚙️ 클래스별 수익률 구간 로딩 + 백분율 자동보정 포함 + 메타 유효성 검증"""
+    cr_valid = _validate_meta_class_ranges(meta, num_classes=NUM_CLASSES, symbol=symbol, strategy=strategy) if isinstance(meta,dict) else None
     if STRICT_SAME_BOUNDS:
-        if not (cr and 0<=int(cls_id)<len(cr)): raise RuntimeError("no_class_ranges_in_meta")
-        lo, hi = cr[int(cls_id)]
+        if not (cr_valid and 0<=int(cls_id)<len(cr_valid)): raise RuntimeError("no_class_ranges_in_meta")
+        lo, hi = cr_valid[int(cls_id)]
         return _sanitize_range(lo, hi)
-    if cr and 0<=int(cls_id)<len(cr):
-        lo, hi = cr[int(cls_id)]
+    if cr_valid and 0<=int(cls_id)<len(cr_valid):
+        lo, hi = cr_valid[int(cls_id)]
     else:
         lo, hi = get_class_return_range(int(cls_id),symbol,strategy)
     return _sanitize_range(lo, hi)
