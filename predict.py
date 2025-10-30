@@ -326,12 +326,30 @@ def _ranges_from_meta(meta):
         pass
     return None
 
+# -------------------- 백분율 자동보정 (핵심 추가) --------------------
+def _sanitize_range(lo: float, hi: float) -> tuple[float, float]:
+    """클래스 수익률 구간이 0.2(20%) 이상이면 자동으로 100으로 나눠 교정"""
+    try:
+        lo_f, hi_f = float(lo), float(hi)
+        if abs(lo_f) > 0.2 or abs(hi_f) > 0.2:
+            lo_f /= 100.0
+            hi_f /= 100.0
+        return lo_f, hi_f
+    except Exception:
+        return float(lo or 0.0), float(hi or 0.0)
+
 def _class_range_by_meta_or_cfg(cls_id:int,meta,symbol:str,strategy:str):
+    """⚙️ 클래스별 수익률 구간 로딩 + 백분율 자동보정 포함"""
     cr=_ranges_from_meta(meta) if isinstance(meta,dict) else None
     if STRICT_SAME_BOUNDS:
         if not (cr and 0<=int(cls_id)<len(cr)): raise RuntimeError("no_class_ranges_in_meta")
-        return cr[int(cls_id)]
-    return cr[int(cls_id)] if (cr and 0<=int(cls_id)<len(cr)) else get_class_return_range(int(cls_id),symbol,strategy)
+        lo, hi = cr[int(cls_id)]
+        return _sanitize_range(lo, hi)
+    if cr and 0<=int(cls_id)<len(cr):
+        lo, hi = cr[int(cls_id)]
+    else:
+        lo, hi = get_class_return_range(int(cls_id),symbol,strategy)
+    return _sanitize_range(lo, hi)
 
 def _position_from_range(lo:float,hi:float)->str:
     try:
