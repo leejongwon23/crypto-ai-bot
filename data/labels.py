@@ -632,7 +632,7 @@ def make_labels(
     """
     Returns:
         gains:       float32 (N,)
-        labels:      int64   (N,)  (-1 or 0..C-1)
+        labels:      int64   (N,)  (0..C-1)  # -1 없음
         class_ranges:List[(lo, hi)]
         bin_edges:   float64 (C+1,)
         bin_counts:  int64   (C,)
@@ -640,39 +640,19 @@ def make_labels(
     """
     gains = signed_future_return(df, strategy)  # (N,)
 
-    # 라벨 생성용 동적 min_gain (커버리지 악화 시 완화)
-    min_gain = float(_MIN_GAIN_FOR_TRAIN)
+    # 항상 '현재 표본'으로 엣지 재계산 (저장 불사용)
+    edges, _, _ = _build_bins(gains, _TARGET_BINS)
 
-    # 엣지는 작은 수익률을 제외한 표본을 기본으로 계산 → 그리고 "영구 저장/재사용"
-    mask_for_edges = np.abs(gains) >= min_gain
-    base_for_edges = gains[mask_for_edges] if mask_for_edges.any() else gains
-    edges = _get_stable_edges_for(symbol, strategy, base_for_edges)
-
-    # ✅ 엣지가 사실상 붕괴되면 2클래스 보장용 폴백
-    if np.allclose(np.diff(edges), 0, atol=1e-9):
-        edges = np.array([-1e-6, 0.0, 1e-6], dtype=float)
-        logger.warning("labels: stored edges collapsed → fallback to sign-split edges")
-
-    labels, edges_used = _bin_with_boundary_mask(gains, edges, symbol, strategy)
-
-    # 아주 작은 수익률은 학습 제외(-1 라벨)
-    small_mask = np.abs(gains) < min_gain
-    if small_mask.any():
-        labels[small_mask] = -1
-
-    # ✅ 최소 2 클래스 보장(및 sign-aware 시도)
-    labels, edges_used = _ensure_min_two_classes(gains, labels, edges_used)
-
-    # 필요하면 저장된 엣지를 1회 자동 갱신
-    edges_final = _maybe_refresh_edges(symbol, strategy, gains, labels, edges_used)
+    # 경계 마스킹/(-1) 없이 전 표본 라벨링
+    labels = _vector_bin(gains, edges)
 
     # class_ranges / counts / spans 계산
-    class_ranges = [(float(edges_final[i]), float(edges_final[i+1])) for i in range(edges_final.size - 1)]
-    edges_count = edges_final.copy(); edges_count[-1] += _EDGE_EPS
-    bin_counts, _ = np.histogram(np.clip(gains, edges_final[0], edges_final[-1]), bins=edges_count)
-    bin_spans = np.diff(edges_final) * 100.0
+    class_ranges = [(float(edges[i]), float(edges[i+1])) for i in range(edges.size - 1)]
+    edges_count = edges.copy(); edges_count[-1] += _EDGE_EPS
+    bin_counts, _ = np.histogram(np.clip(gains, edges[0], edges[-1]), bins=edges_count)
+    bin_spans = np.diff(edges) * 100.0
 
-    return gains.astype(np.float32), labels.astype(np.int64), class_ranges, edges_final, bin_counts.astype(int), bin_spans.astype(float)
+    return gains.astype(np.float32), labels.astype(np.int64), class_ranges, edges.astype(float), bin_counts.astype(int), bin_spans.astype(float)
 
 
 # -----------------------------
@@ -687,42 +667,23 @@ def make_labels_for_horizon(
     """
     Returns:
         gains, labels, class_ranges, mapped_strategy, bin_edges, bin_counts, bin_spans
+        (labels: 0..C-1, -1 없음)
     """
     gains = signed_future_return_by_hours(df, horizon_hours=int(horizon_hours))
     strategy = _strategy_from_hours(int(horizon_hours))
 
-    # 라벨 생성용 동적 min_gain
-    min_gain = float(_MIN_GAIN_FOR_TRAIN)
+    # 항상 '현재 표본'으로 엣지 재계산
+    edges, _, _ = _build_bins(gains, _TARGET_BINS)
 
-    # 엣지: 저장 우선, 없으면 생성 후 저장
-    mask_for_edges = np.abs(gains) >= min_gain
-    base_for_edges = gains[mask_for_edges] if mask_for_edges.any() else gains
-    edges = _get_stable_edges_for(symbol, strategy, base_for_edges)
+    # 경계 마스킹/(-1) 없이 전 표본 라벨링
+    labels = _vector_bin(gains, edges)
 
-    # ✅ 엣지 붕괴 시 즉시 폴백 (항상 2클래스 이상)
-    if np.allclose(np.diff(edges), 0, atol=1e-9):
-        edges = np.array([-1e-6, 0.0, 1e-6], dtype=float)
-        logger.warning("labels(h=%s): stored edges collapsed → fallback to sign-split edges", strategy)
+    class_ranges = [(float(edges[i]), float(edges[i+1])) for i in range(edges.size - 1)]
+    edges_count = edges.copy(); edges_count[-1] += _EDGE_EPS
+    bin_counts, _ = np.histogram(np.clip(gains, edges[0], edges[-1]), bins=edges_count)
+    bin_spans = np.diff(edges) * 100.0
 
-    labels, edges_used = _bin_with_boundary_mask(gains, edges, symbol, strategy)
-
-    # 아주 작은 수익률은 학습 제외(-1)
-    small_mask = np.abs(gains) < min_gain
-    if small_mask.any():
-        labels[small_mask] = -1
-
-    # ✅ 최소 2 클래스 보장(+ sign-aware)
-    labels, edges_used = _ensure_min_two_classes(gains, labels, edges_used)
-
-    # 필요하면 저장 엣지 1회 갱신
-    edges_final = _maybe_refresh_edges(symbol, strategy, gains, labels, edges_used)
-
-    class_ranges = [(float(edges_final[i]), float(edges_final[i+1])) for i in range(edges_final.size - 1)]
-    edges_count = edges_final.copy(); edges_count[-1] += _EDGE_EPS
-    bin_counts, _ = np.histogram(np.clip(gains, edges_final[0], edges_final[-1]), bins=edges_count)
-    bin_spans = np.diff(edges_final) * 100.0
-
-    return gains.astype(np.float32), labels.astype(np.int64), class_ranges, strategy, edges_final, bin_counts.astype(int), bin_spans.astype(float)
+    return gains.astype(np.float32), labels.astype(np.int64), class_ranges, strategy, edges.astype(float), bin_counts.astype(int), bin_spans.astype(float)
 
 
 def make_all_horizon_labels(
