@@ -1,9 +1,10 @@
-# labels.py  (patched-final + unit-fix, collapse-edges fallback 포함)
-
 from __future__ import annotations
 
+import json
 import logging
 import os
+import hashlib
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -40,6 +41,10 @@ _CENTER_SPAN_MAX_PCT = float(os.getenv("CENTER_SPAN_MAX_PCT", str(_BIN_META.get(
 # CLASS_BIN zero-band 힌트
 _CLASS_BIN_META: Dict = dict(get_CLASS_BIN() or {})
 _ZERO_BAND_PCT_HINT = float(_CLASS_BIN_META.get("ZERO_BAND_PCT", _CENTER_SPAN_MAX_PCT))
+
+# === [NEW] 퍼시스턴트 저장소(엣지 고정) ===
+_EDGES_DIR = Path(os.getenv("LABEL_EDGES_DIR", "/persistent/label_edges")).resolve()
+_EDGES_DIR.mkdir(parents=True, exist_ok=True)
 
 # === [NEW] 퍼센트/비율 자동 보정 ===
 def _as_ratio(x: float) -> float:
@@ -320,9 +325,58 @@ def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.nda
     return edges.astype(float), counts.astype(int), spans_pct.astype(float)
 
 
-# -----------------------------
+# ============================
+# [NEW] Stable Edge Store I/O
+# ============================
+def _edge_key(symbol: str, strategy: str) -> str:
+    return f"{symbol.strip().upper()}__{strategy.strip()}"
+
+def _edge_path(symbol: str, strategy: str) -> Path:
+    key = _edge_key(symbol, strategy)
+    return _EDGES_DIR / f"{key}.json"
+
+def _hash_array(a: np.ndarray) -> str:
+    try:
+        b = np.ascontiguousarray(a.astype(np.float64)).tobytes()
+        return hashlib.md5(b).hexdigest()
+    except Exception:
+        return "na"
+
+def _save_edges(symbol: str, strategy: str, edges: np.ndarray, meta: dict) -> None:
+    p = _edge_path(symbol, strategy)
+    data = {
+        "symbol": symbol,
+        "strategy": strategy,
+        "edges": list(map(float, edges.tolist())),
+        "edges_hash": _hash_array(edges),
+        "meta": meta or {},
+    }
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info("labels: edges saved -> %s (%s/%s)", str(p), symbol, strategy)
+    except Exception as e:
+        logger.warning("labels: failed to save edges (%s): %s", str(p), e)
+
+def _load_edges(symbol: str, strategy: str) -> np.ndarray | None:
+    p = _edge_path(symbol, strategy)
+    if not p.exists():
+        return None
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        e = np.array(data.get("edges", []), dtype=float)
+        if e.size >= 2:
+            return _dedupe_edges(e)
+    except Exception as e:
+        logger.warning("labels: failed to load edges (%s): %s", str(p), e)
+    return None
+
+
+# ============================
 # Core binning with boundary mask + ADAPTIVE REBIN
-# -----------------------------
+# ============================
 def _bin_with_boundary_mask(
     gains: np.ndarray,
     edges: np.ndarray,
@@ -373,7 +427,7 @@ def _bin_with_boundary_mask(
         uniq = _coverage(labels)
         logger.warning("labels: boundary mask disabled to recover coverage (uniq=%d) %s/%s", uniq, symbol, strategy)
 
-    # 5) ADAPTIVE REBIN
+    # 5) ADAPTIVE REBIN (동일 세션 내 최종 복구용)
     k = edges.size - 1
     n = gains.size
     req_min = max(_MIN_CLASS_ABS, int(np.ceil(_MIN_CLASS_FRAC * max(1, n))))
@@ -507,6 +561,65 @@ def _ensure_min_two_classes(gains: np.ndarray, labels: np.ndarray, edges: np.nda
     return l4.astype(np.int64), e4.astype(float)
 
 
+# ============================
+# [NEW] Stable edges selector
+# ============================
+def _get_stable_edges_for(symbol: str, strategy: str, gains_for_edges: np.ndarray) -> np.ndarray:
+    """
+    1) 저장된 엣지가 있으면 그대로 사용
+    2) 없으면 현재 표본으로 생성 후 저장
+    3) 저장된 엣지로 커버리지/희소성 문제가 심하면 '1회' 재계산 후 저장 갱신
+    """
+    # 1) load
+    stored = _load_edges(symbol, strategy)
+    if stored is not None and stored.size >= 2:
+        return stored
+
+    # 2) build & save
+    edges, _, _ = _build_bins(gains_for_edges, _TARGET_BINS)
+    if np.allclose(np.diff(edges), 0, atol=1e-9):
+        edges = np.array([-1e-6, 0.0, 1e-6], dtype=float)
+        logger.warning("labels: edges collapsed at first build → sign-split")
+    _save_edges(symbol, strategy, edges, meta={"reason": "first_build"})
+    return edges
+
+
+def _maybe_refresh_edges(symbol: str, strategy: str,
+                         gains: np.ndarray, labels: np.ndarray, edges: np.ndarray) -> np.ndarray:
+    """
+    저장 엣지 사용 후 라벨링 결과가 너무 나쁘면 1회 재계산하고 저장 갱신.
+    """
+    k = edges.size - 1
+    n = int(gains.size)
+    if n <= 0 or k < 2:
+        return edges
+
+    req_min = max(_MIN_CLASS_ABS, int(np.ceil(_MIN_CLASS_FRAC * n)))
+    cov = _coverage(labels)
+    vals, cnts = np.unique(labels[labels >= 0], return_counts=True) if (labels >= 0).any() else (np.array([]), np.array([]))
+    min_ok = (cnts.min() >= req_min) if cnts.size > 0 else False
+
+    if cov >= 3 and min_ok:
+        return edges  # 충분히 양호
+
+    # 1회 재계산
+    edges2, _, _ = _build_bins(gains, max(3, _TARGET_BINS))
+    if np.allclose(np.diff(edges2), 0, atol=1e-9):
+        edges2 = np.array([-1e-6, 0.0, 1e-6], dtype=float)
+
+    labels2 = _vector_bin(gains, edges2)
+    cov2 = _coverage(labels2)
+    vals2, cnts2 = np.unique(labels2[labels2 >= 0], return_counts=True) if (labels2 >= 0).any() else (np.array([]), np.array([]))
+    min_ok2 = (cnts2.min() >= req_min) if cnts2.size > 0 else False
+
+    if (cov2 > cov) or min_ok2:
+        _save_edges(symbol, strategy, edges2, meta={"reason": "refresh"})
+        logger.info("labels: edges refreshed (%s/%s) cov %d→%d", symbol, strategy, cov, cov2)
+        return edges2
+
+    return edges
+
+
 # -----------------------------
 # Public API (strategy-based)
 # -----------------------------
@@ -530,21 +643,17 @@ def make_labels(
     # 라벨 생성용 동적 min_gain (커버리지 악화 시 완화)
     min_gain = float(_MIN_GAIN_FOR_TRAIN)
 
-    # 엣지는 작은 수익률을 제외한 표본으로 계산
+    # 엣지는 작은 수익률을 제외한 표본을 기본으로 계산 → 그리고 "영구 저장/재사용"
     mask_for_edges = np.abs(gains) >= min_gain
-    if mask_for_edges.any():
-        edges, _, _ = _build_bins(gains[mask_for_edges], _TARGET_BINS)
-        logger.info("labels: build edges with min_gain=%.6f -> kept %d/%d", min_gain, int(mask_for_edges.sum()), int(gains.size))
-    else:
-        edges, _, _ = _build_bins(gains, _TARGET_BINS)
-        logger.warning("labels: all gains < min_gain(%.6f). fallback to full sample", min_gain)
+    base_for_edges = gains[mask_for_edges] if mask_for_edges.any() else gains
+    edges = _get_stable_edges_for(symbol, strategy, base_for_edges)
 
-    # ✅ 엣지가 사실상 붕괴(모두 같은 구간)되면 2클래스 보장용 폴백
+    # ✅ 엣지가 사실상 붕괴되면 2클래스 보장용 폴백
     if np.allclose(np.diff(edges), 0, atol=1e-9):
         edges = np.array([-1e-6, 0.0, 1e-6], dtype=float)
-        logger.warning("labels: edges collapsed → fallback to sign-split edges")
+        logger.warning("labels: stored edges collapsed → fallback to sign-split edges")
 
-    labels, edges_final = _bin_with_boundary_mask(gains, edges, symbol, strategy)
+    labels, edges_used = _bin_with_boundary_mask(gains, edges, symbol, strategy)
 
     # 아주 작은 수익률은 학습 제외(-1 라벨)
     small_mask = np.abs(gains) < min_gain
@@ -552,24 +661,12 @@ def make_labels(
         labels[small_mask] = -1
 
     # ✅ 최소 2 클래스 보장(및 sign-aware 시도)
-    labels, edges_final = _ensure_min_two_classes(gains, labels, edges_final)
+    labels, edges_used = _ensure_min_two_classes(gains, labels, edges_used)
 
-    # 커버리지·희소성 재검사: 필요시 min_gain 완화하여 재계산 1회
-    if _coverage(labels) < 2 and min_gain > _MIN_GAIN_LOWER_BOUND:
-        min_gain2 = max(_MIN_GAIN_LOWER_BOUND, min_gain * 0.5)
-        logger.warning("labels: coverage poor -> relaxing min_gain %.6f → %.6f and rebuilding", min_gain, min_gain2)
-        mask_for_edges = np.abs(gains) >= min_gain2
-        if mask_for_edges.any():
-            edges2, _, _ = _build_bins(gains[mask_for_edges], _TARGET_BINS)
-        else:
-            edges2, _, _ = _build_bins(gains, _TARGET_BINS)
-        labels2, edges2 = _bin_with_boundary_mask(gains, edges2, symbol, strategy)
-        small_mask2 = np.abs(gains) < min_gain2
-        if small_mask2.any():
-            labels2[small_mask2] = -1
-        labels2, edges2 = _ensure_min_two_classes(gains, labels2, edges2)
-        labels, edges_final = labels2, edges2
+    # 필요하면 저장된 엣지를 1회 자동 갱신
+    edges_final = _maybe_refresh_edges(symbol, strategy, gains, labels, edges_used)
 
+    # class_ranges / counts / spans 계산
     class_ranges = [(float(edges_final[i]), float(edges_final[i+1])) for i in range(edges_final.size - 1)]
     edges_count = edges_final.copy(); edges_count[-1] += _EDGE_EPS
     bin_counts, _ = np.histogram(np.clip(gains, edges_final[0], edges_final[-1]), bins=edges_count)
@@ -597,21 +694,17 @@ def make_labels_for_horizon(
     # 라벨 생성용 동적 min_gain
     min_gain = float(_MIN_GAIN_FOR_TRAIN)
 
-    # 엣지는 작은 수익률을 제외한 표본으로 계산
+    # 엣지: 저장 우선, 없으면 생성 후 저장
     mask_for_edges = np.abs(gains) >= min_gain
-    if mask_for_edges.any():
-        edges, _, _ = _build_bins(gains[mask_for_edges], _TARGET_BINS)
-        logger.info("labels(h=%s): build edges with min_gain=%.6f -> kept %d/%d", strategy, min_gain, int(mask_for_edges.sum()), int(gains.size))
-    else:
-        edges, _, _ = _build_bins(gains, _TARGET_BINS)
-        logger.warning("labels(h=%s): all gains < min_gain(%.6f). fallback to full sample", strategy, min_gain)
+    base_for_edges = gains[mask_for_edges] if mask_for_edges.any() else gains
+    edges = _get_stable_edges_for(symbol, strategy, base_for_edges)
 
     # ✅ 엣지 붕괴 시 즉시 폴백 (항상 2클래스 이상)
     if np.allclose(np.diff(edges), 0, atol=1e-9):
         edges = np.array([-1e-6, 0.0, 1e-6], dtype=float)
-        logger.warning("labels(h=%s): edges collapsed → fallback to sign-split edges", strategy)
+        logger.warning("labels(h=%s): stored edges collapsed → fallback to sign-split edges", strategy)
 
-    labels, edges_final = _bin_with_boundary_mask(gains, edges, symbol, strategy)
+    labels, edges_used = _bin_with_boundary_mask(gains, edges, symbol, strategy)
 
     # 아주 작은 수익률은 학습 제외(-1)
     small_mask = np.abs(gains) < min_gain
@@ -619,23 +712,10 @@ def make_labels_for_horizon(
         labels[small_mask] = -1
 
     # ✅ 최소 2 클래스 보장(+ sign-aware)
-    labels, edges_final = _ensure_min_two_classes(gains, labels, edges_final)
+    labels, edges_used = _ensure_min_two_classes(gains, labels, edges_used)
 
-    # 필요시 min_gain 완화 1회
-    if _coverage(labels) < 2 and min_gain > _MIN_GAIN_LOWER_BOUND:
-        min_gain2 = max(_MIN_GAIN_LOWER_BOUND, min_gain * 0.5)
-        logger.warning("labels(h=%s): coverage poor -> relaxing min_gain %.6f → %.6f and rebuilding", strategy, min_gain, min_gain2)
-        mask_for_edges = np.abs(gains) >= min_gain2
-        if mask_for_edges.any():
-            edges2, _, _ = _build_bins(gains[mask_for_edges], _TARGET_BINS)
-        else:
-            edges2, _, _ = _build_bins(gains, _TARGET_BINS)
-        labels2, edges2 = _bin_with_boundary_mask(gains, edges2, symbol, strategy)
-        small_mask2 = np.abs(gains) < min_gain2
-        if small_mask2.any():
-            labels2[small_mask2] = -1
-        labels2, edges2 = _ensure_min_two_classes(gains, labels2, edges2)
-        labels, edges_final = labels2, edges2
+    # 필요하면 저장 엣지 1회 갱신
+    edges_final = _maybe_refresh_edges(symbol, strategy, gains, labels, edges_used)
 
     class_ranges = [(float(edges_final[i]), float(edges_final[i+1])) for i in range(edges_final.size - 1)]
     edges_count = edges_final.copy(); edges_count[-1] += _EDGE_EPS
