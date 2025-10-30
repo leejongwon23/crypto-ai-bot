@@ -1,4 +1,4 @@
-# labels.py  (patched-final, collapse-edges fallback 포함)
+# labels.py  (patched-final + unit-fix, collapse-edges fallback 포함)
 
 from __future__ import annotations
 
@@ -41,8 +41,18 @@ _CENTER_SPAN_MAX_PCT = float(os.getenv("CENTER_SPAN_MAX_PCT", str(_BIN_META.get(
 _CLASS_BIN_META: Dict = dict(get_CLASS_BIN() or {})
 _ZERO_BAND_PCT_HINT = float(_CLASS_BIN_META.get("ZERO_BAND_PCT", _CENTER_SPAN_MAX_PCT))
 
+# === [NEW] 퍼센트/비율 자동 보정 ===
+def _as_ratio(x: float) -> float:
+    """값이 1.0 이상이면 퍼센트(%)로 보고 100으로 나눠 비율로 변환."""
+    try:
+        xv = float(x)
+    except Exception:
+        return 0.0
+    return xv / 100.0 if xv >= 1.0 else xv
+
 # 아주 작은 수익률은 학습 제외(기본 ±0.3%)
-_MIN_GAIN_FOR_TRAIN = float(os.getenv("MIN_GAIN_FOR_TRAIN", "0.003"))
+_RAW_MIN_GAIN_FOR_TRAIN = float(os.getenv("MIN_GAIN_FOR_TRAIN", "0.003"))
+_MIN_GAIN_FOR_TRAIN = _as_ratio(_RAW_MIN_GAIN_FOR_TRAIN)
 
 # 라벨 안정화 상수
 _MIN_CLASS_FRAC = 0.01
@@ -51,9 +61,11 @@ _Q_EPS = 1e-9
 _EDGE_EPS = 1e-12
 
 # 커버리지 회복을 위한 동적 완화 한계
-_MIN_GAIN_LOWER_BOUND = float(os.getenv("MIN_GAIN_LOWER_BOUND", "0.0005"))  # 5bp
-_JITTER_EPS = float(os.getenv("GAINS_JITTER_EPS", "1e-8"))
+_RAW_MIN_GAIN_LOWER_BOUND = float(os.getenv("MIN_GAIN_LOWER_BOUND", "0.0005"))  # 5bp 혹은 0.05%로 들어와도 자동 보정
+_MIN_GAIN_LOWER_BOUND = _as_ratio(_RAW_MIN_GAIN_LOWER_BOUND)
 
+# 미세 잡음
+_JITTER_EPS = float(os.getenv("GAINS_JITTER_EPS", "1e-8"))
 
 # -----------------------------
 # Timezone helper (KST unified)
@@ -92,6 +104,7 @@ def signed_future_return_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.nd
     both = _future_extreme_signed_returns(df, horizon_hours=int(horizon_hours))
     n = len(df)
     if both is None or both.size < 2 * n:
+        logger.warning("labels: _future_extreme_signed_returns returned invalid size for h=%s", horizon_hours)
         return np.zeros(n, dtype=np.float32)
 
     dn = both[:n]
@@ -103,6 +116,7 @@ def signed_future_return_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.nd
     if gains.size and (np.allclose(gains, gains[0]) or np.nanstd(gains) < 1e-10):
         idx = np.arange(n, dtype=np.float32)
         gains = gains + (idx - idx.mean()) * _JITTER_EPS
+        logger.info("labels: gains variance tiny (h=%s) -> jitter injected", horizon_hours)
     return gains
 
 
@@ -206,9 +220,7 @@ def _ensure_zero_edge(edges: np.ndarray) -> np.ndarray:
     e = edges.astype(float).copy()
     if e.size < 2: return e
     if np.min(e) < 0.0 and np.max(e) > 0.0:
-        # 이미 0이 내부에 있으면 스킵
         if not np.any(np.isclose(e, 0.0, atol=_Q_EPS)):
-            # 0이 범위 밖이면 스킵
             if e[0] < 0.0 < e[-1]:
                 e = np.sort(np.append(e, 0.0)).astype(float)
     return _dedupe_edges(e)
@@ -522,10 +534,10 @@ def make_labels(
     mask_for_edges = np.abs(gains) >= min_gain
     if mask_for_edges.any():
         edges, _, _ = _build_bins(gains[mask_for_edges], _TARGET_BINS)
-        logger.info("labels: build edges with min_gain=%.4f -> kept %d/%d", min_gain, int(mask_for_edges.sum()), int(gains.size))
+        logger.info("labels: build edges with min_gain=%.6f -> kept %d/%d", min_gain, int(mask_for_edges.sum()), int(gains.size))
     else:
         edges, _, _ = _build_bins(gains, _TARGET_BINS)
-        logger.warning("labels: all gains < min_gain(%.4f). fallback to full sample", min_gain)
+        logger.warning("labels: all gains < min_gain(%.6f). fallback to full sample", min_gain)
 
     # ✅ 엣지가 사실상 붕괴(모두 같은 구간)되면 2클래스 보장용 폴백
     if np.allclose(np.diff(edges), 0, atol=1e-9):
@@ -545,7 +557,7 @@ def make_labels(
     # 커버리지·희소성 재검사: 필요시 min_gain 완화하여 재계산 1회
     if _coverage(labels) < 2 and min_gain > _MIN_GAIN_LOWER_BOUND:
         min_gain2 = max(_MIN_GAIN_LOWER_BOUND, min_gain * 0.5)
-        logger.warning("labels: coverage poor -> relaxing min_gain %.4f → %.4f and rebuilding", min_gain, min_gain2)
+        logger.warning("labels: coverage poor -> relaxing min_gain %.6f → %.6f and rebuilding", min_gain, min_gain2)
         mask_for_edges = np.abs(gains) >= min_gain2
         if mask_for_edges.any():
             edges2, _, _ = _build_bins(gains[mask_for_edges], _TARGET_BINS)
@@ -589,10 +601,10 @@ def make_labels_for_horizon(
     mask_for_edges = np.abs(gains) >= min_gain
     if mask_for_edges.any():
         edges, _, _ = _build_bins(gains[mask_for_edges], _TARGET_BINS)
-        logger.info("labels(h=%s): build edges with min_gain=%.4f -> kept %d/%d", strategy, min_gain, int(mask_for_edges.sum()), int(gains.size))
+        logger.info("labels(h=%s): build edges with min_gain=%.6f -> kept %d/%d", strategy, min_gain, int(mask_for_edges.sum()), int(gains.size))
     else:
         edges, _, _ = _build_bins(gains, _TARGET_BINS)
-        logger.warning("labels(h=%s): all gains < min_gain(%.4f). fallback to full sample", strategy, min_gain)
+        logger.warning("labels(h=%s): all gains < min_gain(%.6f). fallback to full sample", strategy, min_gain)
 
     # ✅ 엣지 붕괴 시 즉시 폴백 (항상 2클래스 이상)
     if np.allclose(np.diff(edges), 0, atol=1e-9):
@@ -612,7 +624,7 @@ def make_labels_for_horizon(
     # 필요시 min_gain 완화 1회
     if _coverage(labels) < 2 and min_gain > _MIN_GAIN_LOWER_BOUND:
         min_gain2 = max(_MIN_GAIN_LOWER_BOUND, min_gain * 0.5)
-        logger.warning("labels(h=%s): coverage poor -> relaxing min_gain %.4f → %.4f and rebuilding", strategy, min_gain, min_gain2)
+        logger.warning("labels(h=%s): coverage poor -> relaxing min_gain %.6f → %.6f and rebuilding", strategy, min_gain, min_gain2)
         mask_for_edges = np.abs(gains) >= min_gain2
         if mask_for_edges.any():
             edges2, _, _ = _build_bins(gains[mask_for_edges], _TARGET_BINS)
