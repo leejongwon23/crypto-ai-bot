@@ -1,5 +1,5 @@
 # config.py — Dynamic classing w/ safety rails: min/max width, zero band, sparse merge, CV guards
-import json, os, errno
+import json, os, errno, copy
 
 # ===== robust config path =====
 _DEF_CONFIG_PATH = "/persistent/config.json"
@@ -235,8 +235,11 @@ _ROUNDS_DECIMALS = 4
 _EPS_ZERO_BAND   = _default_config["CLASS_BIN"]["zero_band_eps"]
 _DISPLAY_MIN_RET = 1e-4
 
-_config = _default_config.copy()
+# ✅ 기본값 공유 방지: deepcopy
+_config = copy.deepcopy(_default_config)
 _dynamic_num_classes = None
+
+# (symbol,strategy)별 계산 결과 캐시 — ✅ 불변형으로 저장(tuple of tuples)
 _ranges_cache = {}
 
 def _quiet(): return os.getenv("QUIET_CONFIG_LOG", "0") == "1"
@@ -256,7 +259,7 @@ def _deep_merge(dst: dict, src: dict):
 if os.path.exists(CONFIG_PATH):
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f: _loaded = json.load(f)
-        _config = _loaded if isinstance(_loaded, dict) else _default_config.copy()
+        _config = _loaded if isinstance(_loaded, dict) else copy.deepcopy(_default_config)
         _deep_merge(_config, _default_config)
         _log("[✅ config.py] config.json 로드/보강 완료")
     except Exception as e:
@@ -266,7 +269,7 @@ else:
         _log("[ℹ️ config.py] 기본 config.json 생성")
     else:
         _log("[⚠️ config.py] 디스크 기록 불가 → 메모리 기본설정으로 계속 실행")
-        _config = _default_config.copy()
+        _config = copy.deepcopy(_default_config)
 
 def save_config():
     if _CONFIG_READONLY:
@@ -293,14 +296,17 @@ def set_NUM_CLASSES(n):
 def get_NUM_CLASSES():
     return _dynamic_num_classes if _dynamic_num_classes is not None else _config.get("NUM_CLASSES", _default_config["NUM_CLASSES"])
 
-def get_FEATURE_INPUT_SIZE(): return _config.get("FEATURE_INPUT_SIZE", _default_config["FEATURE_INPUT_SIZE"])
-def get_FAIL_AUGMENT_RATIO(): return _config.get("FAIL_AUGMENT_RATIO", _default_config["FAIL_AUGMENT_RATIO"])
-def get_MIN_FEATURES():       return _config.get("MIN_FEATURES", _default_config["MIN_FEATURES"])
-def get_SYMBOLS():            return _config.get("SYMBOLS", _default_config["SYMBOLS"])
+def get_FEATURE_INPUT_SIZE(): return int(_config.get("FEATURE_INPUT_SIZE", _default_config["FEATURE_INPUT_SIZE"]))
+def get_FAIL_AUGMENT_RATIO(): return int(_config.get("FAIL_AUGMENT_RATIO", _default_config["FAIL_AUGMENT_RATIO"]))
+def get_MIN_FEATURES():       return int(_config.get("MIN_FEATURES", _default_config["MIN_FEATURES"]))
+
+def get_SYMBOLS():
+    vals = _config.get("SYMBOLS", _default_config["SYMBOLS"])
+    return list(vals)[:]  # ✅ 리스트 사본
 
 def get_SYMBOL_GROUPS():
     symbols = get_SYMBOLS()
-    group_size = _config.get("SYMBOL_GROUP_SIZE", _default_config["SYMBOL_GROUP_SIZE"])
+    group_size = int(_config.get("SYMBOL_GROUP_SIZE", _default_config["SYMBOL_GROUP_SIZE"]))
     return [symbols[i:i+group_size] for i in range(0, len(symbols), group_size)]
 
 # === 전략별 그룹 크기 ===
@@ -322,24 +328,24 @@ def get_class_groups(num_classes=None, group_size=None):
     if group_size < 2: group_size = 2
     groups = [list(range(num_classes))] if num_classes <= group_size else [list(range(i, min(i + group_size, num_classes))) for i in range(0, num_classes, group_size)]
     _log(f"[📊 클래스 분포 그룹] 총={num_classes}, 그룹크기={group_size}, 그룹수={len(groups)}")
-    return groups
+    return copy.deepcopy(groups)  # ✅ 사본
 
-# 신규 옵션 Getter
-def get_REGIME():   return _config.get("REGIME", _default_config["REGIME"])
-def get_CALIB():    return _config.get("CALIB", _default_config["CALIB"])
-def get_LOSS():     return _config.get("LOSS", _default_config["LOSS"])
-def get_AUG():      return _config.get("AUG", _default_config["AUG"])
-def get_EVAL():     return _config.get("EVAL", _default_config["EVAL"])
-def get_FAILLEARN():return _config.get("FAILLEARN", _default_config["FAILLEARN"])
-def get_QUALITY():  return _config.get("QUALITY", _default_config["QUALITY"])
-def get_CLASS_BIN():return _config.get("CLASS_BIN", _default_config["CLASS_BIN"])
-def get_TRAIN():    return _config.get("TRAIN", _default_config["TRAIN"])
-def get_ENSEMBLE(): return _config.get("ENSEMBLE", _default_config["ENSEMBLE"])
-def get_SCHED():    return _config.get("SCHED", _default_config["SCHED"])
-def get_PATTERN():  return _config.get("PATTERN", _default_config["PATTERN"])
-def get_BLEND():    return _config.get("BLEND", _default_config["BLEND"])
-def get_PUBLISH():  return _config.get("PUBLISH", _default_config["PUBLISH"])
-def get_BIN_META(): return _config.get("BIN_META", _default_config["BIN_META"])
+# 신규 옵션 Getter (모두 deepcopy로 반환)
+def get_REGIME():   return copy.deepcopy(_config.get("REGIME", _default_config["REGIME"]))
+def get_CALIB():    return copy.deepcopy(_config.get("CALIB", _default_config["CALIB"]))
+def get_LOSS():     return copy.deepcopy(_config.get("LOSS", _default_config["LOSS"]))
+def get_AUG():      return copy.deepcopy(_config.get("AUG", _default_config["AUG"]))
+def get_EVAL():     return copy.deepcopy(_config.get("EVAL", _default_config["EVAL"]))
+def get_FAILLEARN():return copy.deepcopy(_config.get("FAILLEARN", _default_config["FAILLEARN"]))
+def get_QUALITY():  return copy.deepcopy(_config.get("QUALITY", _default_config["QUALITY"]))
+def get_CLASS_BIN():return copy.deepcopy(_config.get("CLASS_BIN", _default_config["CLASS_BIN"]))
+def get_TRAIN():    return copy.deepcopy(_config.get("TRAIN", _default_config["TRAIN"]))
+def get_ENSEMBLE(): return copy.deepcopy(_config.get("ENSEMBLE", _default_config["ENSEMBLE"]))
+def get_SCHED():    return copy.deepcopy(_config.get("SCHED", _default_config["SCHED"]))
+def get_PATTERN():  return copy.deepcopy(_config.get("PATTERN", _default_config["PATTERN"]))
+def get_BLEND():    return copy.deepcopy(_config.get("BLEND", _default_config["BLEND"]))
+def get_PUBLISH():  return copy.deepcopy(_config.get("PUBLISH", _default_config["PUBLISH"]))
+def get_BIN_META(): return copy.deepcopy(_config.get("BIN_META", _default_config["BIN_META"]))
 
 # ===== 파이프라인 게이트 Getter =====
 def _env_bool(v): return str(v).strip().lower() not in {"0","false","no","off","none",""}
@@ -363,7 +369,7 @@ def get_AUTOPREDICT_ON_SYMBOL_DONE() -> int:
         return 0
 
 # IO/경로 getter
-def get_IO():              return _config.get("IO", _default_config["IO"])
+def get_IO():              return copy.deepcopy(_config.get("IO", _default_config["IO"]))
 def get_PREDICT_OUT_DIR(): return os.getenv("PREDICT_OUTPUT_DIR", get_IO().get("predict_out"))
 def get_GUANWU_IN_DIR():   return os.getenv("GUANWU_INPUT_DIR",   get_IO().get("guanwu_in"))
 
@@ -391,10 +397,10 @@ def get_CLASS_ENFORCE() -> dict:
     if s1 is not None: base["same_across_groups"] = _env_bool(s1)
     s2 = os.getenv("CLASS_SAME_ACROSS_SYMBOLS", None)
     if s2 is not None: base["same_across_symbols"] = _env_bool(s2)
-    return base
+    return copy.deepcopy(base)  # ✅ 사본
 
 def _data_from_env(base: dict) -> dict:
-    d = dict(base or {})
+    d = copy.deepcopy(base or {})
     v = os.getenv("ENABLE_DATA_MERGE", None)
     if v is not None: d["merge_enabled"] = _env_bool(v)
     pv = os.getenv("DATA_PREFER", None)
@@ -409,7 +415,7 @@ def _data_from_env(base: dict) -> dict:
         except Exception: pass
     return d
 
-def get_DATA() -> dict:         return _config.get("DATA", _default_config["DATA"])
+def get_DATA() -> dict:         return copy.deepcopy(_config.get("DATA", _default_config["DATA"]))
 def get_DATA_RUNTIME() -> dict: return _data_from_env(get_DATA())
 
 def get_CV_CONFIG() -> dict:
@@ -426,9 +432,9 @@ def get_CV_CONFIG() -> dict:
     if fr is not None: base["fallback_reduce_folds"] = _env_bool(fr)
     fs = os.getenv("CV_FALLBACK_STRATIFIED", None)
     if fs is not None: base["fallback_stratified"] = _env_bool(fs)
-    return base
+    return copy.deepcopy(base)
 
-def get_ONCHAIN() -> dict: return _config.get("ONCHAIN", _default_config["ONCHAIN"])
+def get_ONCHAIN() -> dict: return copy.deepcopy(_config.get("ONCHAIN", _default_config["ONCHAIN"]))
 
 # ===== GUARD 런타임 오버라이드 =====
 def get_GUARD() -> dict:
@@ -453,7 +459,7 @@ def get_GUARD() -> dict:
             base["PROFIT_MIN"] = pmr
     except Exception:
         pass
-    return base
+    return copy.deepcopy(base)
 
 def _round2(x: float) -> float: return round(float(x), _ROUNDS_DECIMALS)
 
@@ -693,11 +699,14 @@ def get_class_return_range(class_id: int, symbol: str, strategy: str):
     ranges = _ranges_cache.get(key)
     if ranges is None:
         ranges = get_class_ranges(symbol=symbol, strategy=strategy)
-        _ranges_cache[key] = ranges
+        # ranges는 deepcopy 리스트. 캐시에 불변형으로 저장
+        _ranges_cache[key] = tuple((float(a), float(b)) for (a, b) in ranges)
+        ranges = _ranges_cache[key]
     n = len(ranges)
     if not (0 <= class_id < n):
         raise ValueError(f"class_id {class_id} 범위 오류 (0~{n-1})")
-    return ranges[class_id]
+    lo, hi = ranges[class_id]
+    return (float(lo), float(hi))
 
 def class_to_expected_return(class_id: int, symbol: str, strategy: str):
     r_min, r_max = get_class_return_range(class_id, symbol, strategy)
@@ -754,7 +763,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         ranges = _fix_monotonic(ranges); ranges = _ensure_zero_band(ranges)
         if BIN_CONF.get("strict", True): ranges = _strictify(ranges)
         ranges = _apply_trade_floor_cuts(ranges)
-        # 최종 캡 재적용
         if len(ranges) > MAX_CLASSES: ranges = _merge_smallest_adjacent(ranges, MAX_CLASSES)
         return ranges
 
@@ -786,7 +794,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         if rets_for_merge is not None and rets_for_merge.size > 0 and max_width > 0:
             fixed = _split_wide_bins_by_quantiles(fixed, rets_for_merge, max_width)
         fixed = _apply_trade_floor_cuts(fixed)
-        # ★ 최종 캡 재적용 + 하한 가드
         if len(fixed) > MAX_CLASSES: fixed = _merge_smallest_adjacent(fixed, MAX_CLASSES)
         if len(fixed) < 2: fixed = compute_equal_ranges(get_NUM_CLASSES(), reason="fixed_step post-floor<2")
         return fixed
@@ -831,7 +838,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             if not fixed or len(fixed) < 2:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="최종 경계 부족(가드)")
             fixed = _apply_trade_floor_cuts(fixed)
-            # ★ 최종 캡 재적용 + 하한 가드
             MAXC = int(_config.get("MAX_CLASSES", 12))
             if len(fixed) > MAXC: fixed = _merge_smallest_adjacent(fixed, MAXC)
             if len(fixed) < 2: fixed = compute_equal_ranges(get_NUM_CLASSES(), reason="post-floor<2")
@@ -854,9 +860,11 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     else:
         all_ranges = compute_ranges_from_kline()
 
+    # ✅ 캐시에 불변형으로 저장
     if symbol is not None and strategy is not None:
-        _ranges_cache[(symbol, strategy)] = all_ranges
+        _ranges_cache[(symbol, strategy)] = tuple((float(a), float(b)) for (a, b) in all_ranges)
 
+    # 디버그 로그 (변경 없음)
     try:
         if symbol is not None and strategy is not None and not _quiet():
             import numpy as np
@@ -888,12 +896,13 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     except Exception:
         pass
 
+    # 그룹 잘라 반환(사본)
     if group_id is None:
-        return all_ranges
+        return copy.deepcopy(all_ranges)
     start = int(group_id) * int(group_size)
     end   = start + int(group_size)
     if start >= len(all_ranges): return []
-    return all_ranges[start:end]
+    return copy.deepcopy(all_ranges[start:end])
 
 # ENV 기반 러닝 파라미터
 def _get_int(name, default):
@@ -929,7 +938,7 @@ CV_FOLDS   = int(os.getenv("CV_FOLDS", "5"))
 CV_GATE_F1 = float(os.getenv("CV_GATE_F1", "0.0"))
 
 def _publish_from_env(base: dict) -> dict:
-    d = dict(base or {})
+    d = copy.deepcopy(base or {})
     def _b(k, env, cast):
         v = os.getenv(env, None)
         if v is None: return
@@ -975,7 +984,7 @@ def passes_publish_filter(*, meta_confidence=None, recent_success_rate=None,
     return (True, "ok", thr)
 
 def _eval_from_env(base: dict) -> dict:
-    d = dict(base or {})
+    d = copy.deepcopy(base or {})
     def _b(k, env, cast):
         v = os.getenv(env, None)
         if v is None: return
@@ -1031,4 +1040,4 @@ __all__ = [
     "is_config_readonly", "is_disk_cache_off",
     "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
     "get_BIN_META",
-    ]
+        ]
