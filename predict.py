@@ -328,16 +328,22 @@ def _ranges_from_meta(meta):
 
 # -------------------- 백분율 자동보정 (핵심 추가) --------------------
 def _sanitize_range(lo: float, hi: float) -> tuple[float, float]:
-    """클래스 수익률 구간이 0.2(20%) 이상이면 자동으로 100으로 나눠 교정"""
+    """
+    클래스 수익률 구간의 단위를 자동 교정한다.
+    - 입력이 '분수(소수)' 형태(예: 0.04 = 4%)면 그대로 둔다.
+    - 입력이 '퍼센트' 형태(예: 4, 8 = 4%, 8%)로 보이면 100으로 나눠 분수로 변환한다.
+      ▶ 기준: 절대값이 1(=100%)을 초과하면 퍼센트로 간주하여 100으로 나눔.
+    """
     try:
         lo_f, hi_f = float(lo), float(hi)
-        if abs(lo_f) > 0.2 or abs(hi_f) > 0.2:
+        if abs(lo_f) > 1 or abs(hi_f) > 1:
             lo_f /= 100.0
             hi_f /= 100.0
         return lo_f, hi_f
     except Exception:
+        # 변환 실패 시 안전하게 0.0으로 폴백
         return float(lo or 0.0), float(hi or 0.0)
-
+        
 def _class_range_by_meta_or_cfg(cls_id:int,meta,symbol:str,strategy:str):
     """⚙️ 클래스별 수익률 구간 로딩 + 백분율 자동보정 포함"""
     cr=_ranges_from_meta(meta) if isinstance(meta,dict) else None
