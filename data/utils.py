@@ -888,6 +888,23 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
         df.attrs["not_enough_rows"] = True
         return df
 
+# === CHANGE: 최소 수집량 보장 ===
+if len(df) < limit:
+    print(f"[⚠️ 데이터 부족 보완] {symbol}-{strategy} ({len(df)}/{limit}) → 폴백 채움")
+    try:
+        add_bin = get_kline_binance(symbol, interval=interval, limit=limit)
+        if isinstance(add_bin, pd.DataFrame) and not add_bin.empty:
+            df = _normalize_df(pd.concat([df, add_bin], ignore_index=True))
+    except Exception:
+        pass
+    # 그래도 부족하면 마지막 캔들 복제
+    if len(df) < limit and not df.empty:
+        need = limit - len(df)
+        pad = df.tail(1).copy()
+        pad = pd.concat([pad]*need, ignore_index=True)
+        df = pd.concat([df, pad], ignore_index=True)
+    df = _clip_tail(df, limit)
+
 # ========================= 프리패치/티커 =========================
 def prefetch_symbol_groups(strategy: str):
     for group in SYMBOL_GROUPS:
