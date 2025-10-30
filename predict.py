@@ -1337,9 +1337,14 @@ def evaluate_predictions(get_price_fn):
                                 wrong_writer.writerow({k:r.get(k,"") for k in r.keys()}); continue
                         actual_max=float(fut["high"].max()); gain=(actual_max-entry)/(entry+1e-12)
                         if pred_cls>=0:
-                            try: cmin,cmax=get_class_return_range(pred_cls,sym,strat)
-                            except Exception: cmin,cmax=(0.0,0.0)
-                        else: cmin,cmax=(0.0,0.0)
+                            try:
+                                cmin,cmax=get_class_return_range(pred_cls,sym,strat)
+                                # ✅ 백분율/분수 혼선 방지: 평가단에서도 보정
+                                cmin,cmax=_sanitize_range(cmin,cmax)
+                            except Exception:
+                                cmin,cmax=(0.0,0.0)
+                        else:
+                            cmin,cmax=(0.0,0.0)
                         reached=gain>=cmin
                         if _now_kst()<deadline and reached:
                             status="v_success" if str(r.get("volatility","")).strip().lower() in ["1","true"] else "success"
@@ -1403,7 +1408,7 @@ def evaluate_predictions(get_price_fn):
     finally:
         _release_memory()
         gc.collect(); _safe_empty_cache()
-
+            
 # -------------------- 실행 헬퍼 --------------------
 def _get_price_df_for_eval(symbol,strategy): return get_kline_by_strategy(symbol,strategy)
 def run_evaluation_once(): evaluate_predictions(_get_price_df_for_eval)
