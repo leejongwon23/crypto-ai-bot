@@ -1544,9 +1544,15 @@ __all__ = [
 
 def clear_all_caches():
     """캐시를 전부 비우는 함수 (초기화용)"""
+    # 1) 이 모듈의 캐시 먼저 정리
     try:
-        from cache import CacheManager
         CacheManager.clear()
+    except Exception:
+        pass
+    # 2) 외부 cache 모듈 호환
+    try:
+        from cache import CacheManager as ExtCacheManager
+        ExtCacheManager.clear()
     except Exception:
         pass
 
