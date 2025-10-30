@@ -1,9 +1,10 @@
-# YOPO v1.7.1 — model_weight_loader.py
-# (LRU+TTL 캐시, VRAM 누수 차단, meta.bin_edges 자동보정 기본 허용)
-# - 변경점
-#   1) _preflight(): meta.bin_edges 누락 시 자동 보정(기본 허용, 환경변수로 엄격 모드 가능)
-#   2) _fill_meta_bin_edges(): class_ranges → edges, 또는 num_classes 기반 균등 분할 생성
-#   3) load_model_cached(): 보정된 meta를 모델 객체에 주입
+# YOPO v1.7.2 — model_weight_loader.py
+# (LRU+TTL 캐시, VRAM 누수 차단, meta.bin_edges 자동보정 + class_ranges 정규화 주입)
+# - 변경점 (v1.7.2)
+#   1) _sanitize_range(), _normalize_class_ranges(): meta.class_ranges를 분수(±1==±100%)로 정규화
+#   2) _preflight(): bin_edges 자동보정 + class_ranges 정규화 반영
+#   3) _attach_bin_info(): class_ranges/num_classes/meta 전체를 모델 객체 속성으로 주입
+#   4) 반환 시그니처는 유지(return model_obj)해 predict.py와 완전 호환
 
 import os
 import json
@@ -168,6 +169,35 @@ def _safe_write_meta(weight_path: str, meta: Dict[str, Any]) -> None:
     except Exception as e:
         print(f"[⚠️ meta 저장 실패] {weight_path} → {e}")
 
+# ===== 클래스 구간 정규화/보정 =====
+def _sanitize_range(lo: float, hi: float) -> Tuple[float, float]:
+    """절대값이 1을 넘으면 퍼센트로 간주하여 100으로 나눔."""
+    try:
+        lo_f, hi_f = float(lo), float(hi)
+        if abs(lo_f) > 1 or abs(hi_f) > 1:
+            lo_f /= 100.0
+            hi_f /= 100.0
+        return lo_f, hi_f
+    except Exception:
+        return float(lo or 0.0), float(hi or 0.0)
+
+def _normalize_class_ranges(meta: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    """meta.class_ranges를 분수 기준으로 정규화."""
+    try:
+        cr = meta.get("class_ranges", None)
+        if not (isinstance(cr, list) and all(isinstance(x, (list, tuple)) and len(x) == 2 for x in cr or [])):
+            return meta, False
+        fixed: List[List[float]] = []
+        for lo, hi in cr:
+            s_lo, s_hi = _sanitize_range(lo, hi)
+            fixed.append([float(s_lo), float(s_hi)])
+        if fixed != cr:
+            meta["class_ranges"] = fixed
+            return meta, True
+        return meta, False
+    except Exception:
+        return meta, False
+
 def _fill_meta_bin_edges(weight_path: str, meta: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
     """
     bin_edges 누락 시 합리적인 기본값을 생성해 meta에 주입.
@@ -186,10 +216,8 @@ def _fill_meta_bin_edges(weight_path: str, meta: Dict[str, Any]) -> Tuple[Dict[s
         cr = meta.get("class_ranges")
         if isinstance(cr, list) and len(cr) >= 1 and all(isinstance(x, (list, tuple)) and len(x) == 2 for x in cr):
             try:
-                # 경계 리스트 구성: 모든 lo, 마지막 hi
                 lows = [float(lo) for lo, _ in cr]
                 his = [float(hi) for _, hi in cr]
-                # 경계 후보 = lows + [max_hi]
                 edges = sorted(set(lows + [max(his)]))
                 if len(edges) >= 2:
                     meta["bin_edges"] = edges
@@ -230,6 +258,9 @@ def _preflight(weight_path: str, model_type: str = "unknown", input_size: Option
         mi = meta.get("input_size")
         if mi not in (None, input_size):
             return False, f"input_size_mismatch(meta={mi}, in={input_size})", meta
+
+    # class_ranges 정규화
+    meta, _ = _normalize_class_ranges(meta)
 
     # bin_edges 강제/자동보정
     be = meta.get("bin_edges", None)
@@ -392,18 +423,25 @@ def get_model_weight(model_type: str, strategy: str, symbol: str = "ALL", min_sa
 
 # ===== 공개 로더(API) =====
 def _attach_bin_info(model_obj: torch.nn.Module, meta: Dict[str, Any]) -> None:
-    """meta의 bin 정보를 모델 객체 속성에 주입."""
+    """meta 정보를 모델 객체 속성에 주입 (predict.py 호환을 위해 class_ranges 포함)."""
     try:
+        # bin 정보
         setattr(model_obj, "bin_edges", meta.get("bin_edges", []))
         setattr(model_obj, "bin_counts", meta.get("bin_counts", []))
         setattr(model_obj, "bin_spans", meta.get("bin_spans", []))
         setattr(model_obj, "bin_cfg", meta.get("bin_cfg", {}))
+        # 클래스 구간/개수
+        setattr(model_obj, "class_ranges", meta.get("class_ranges", []))
+        setattr(model_obj, "num_classes", meta.get("num_classes", None))
+        # 원본 메타 전체 접근도 제공
+        setattr(model_obj, "meta", dict(meta))
     except Exception:
         pass
 
 def load_model_cached(pt_path: str, model_obj: torch.nn.Module, ttl_sec: int = _TTL) -> Optional[torch.nn.Module]:
     """정책 로더 + LRU+TTL 캐시. 항상 CPU 텐서로 저장해 VRAM 누수 차단.
-    추가: meta.bin_edges 자동 보정/주입(기본 허용, STRICT=1이면 차단).
+    추가: meta.bin_edges 자동 보정 + class_ranges 정규화 후 모델 객체에 주입.
+    반환: model_obj (predict.py의 기존 시그니처와 100% 호환)
     """
     global _cache_bytes
     if not pt_path or not os.path.exists(pt_path):
@@ -417,8 +455,8 @@ def load_model_cached(pt_path: str, model_obj: torch.nn.Module, ttl_sec: int = _
         else:
             print(f"[❌ load_model_cached 사전점검 실패] {pt_path} → {why}")
         return None
-    if why.startswith("ok"):
-        pass  # ok / ok_autofixed 모두 허용
+    # ok / ok_autofixed 모두 허용
+    meta_final = meta_pf if meta_pf else _load_meta_dict(pt_path)
 
     with _cache_lock:
         ent = _model_cache.get(pt_path)
@@ -443,9 +481,8 @@ def load_model_cached(pt_path: str, model_obj: torch.nn.Module, ttl_sec: int = _
         state = _ensure_cpu_state(state)
         size_b = _obj_bytes(state)
 
-        # 디스크 메타 확정 획득 (preflight 보정 반영)
-        meta = meta_pf if meta_pf else _load_meta_dict(pt_path)
-        be = meta.get("bin_edges", [])
+        # STRICT 모드일 경우 bin_edges 재확인
+        be = meta_final.get("bin_edges", [])
         if _REQUIRE_BIN_EDGES_STRICT and not (isinstance(be, list) and len(be) >= 2):
             print(f"[❌ meta.bin_edges 누락(STRICT) → 예측 비활성] {pt_path}")
             return None
@@ -454,7 +491,7 @@ def load_model_cached(pt_path: str, model_obj: torch.nn.Module, ttl_sec: int = _
             _evict_if_needed(extra_bytes=size_b)
             _model_cache[pt_path] = {
                 "state": dict(state),
-                "meta": dict(meta),
+                "meta": dict(meta_final),
                 "ts": _now(),
                 "ttl": int(ttl_sec),
                 "bytes": int(size_b),
@@ -463,7 +500,7 @@ def load_model_cached(pt_path: str, model_obj: torch.nn.Module, ttl_sec: int = _
             _cache_bytes += int(size_b)
 
         model_obj.load_state_dict(state, strict=False)
-        _attach_bin_info(model_obj, meta)
+        _attach_bin_info(model_obj, meta_final)
         model_obj.eval()
         print(f"[✅ 모델 로드 완료] {pt_path}")
         return model_obj
