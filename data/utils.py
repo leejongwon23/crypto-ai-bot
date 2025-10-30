@@ -8,6 +8,23 @@ from requests.exceptions import HTTPError, RequestException
 from typing import List, Dict, Any, Optional, Tuple
 from collections import Counter
 
+# === CHANGE [utils: quick label check] ===
+def _count_valid_labels_for_df(df: pd.DataFrame, symbol: str, strategy: str) -> int:
+    """
+    Bybit만으로 라벨이 0개인지 빠르게 확인하기 위한 헬퍼.
+    labels.make_labels가 있으면 실제 라벨 개수를, 없으면 -1을 반환.
+    """
+    try:
+        if _make_labels is None or df is None or df.empty:
+            return -1
+        base = df[["timestamp", "close", "high", "low"]].copy()
+        # timestamp 보정(있어도 안전)
+        base["timestamp"] = _parse_ts_series(base["timestamp"])
+        _, labels, *_ = _make_labels(base, symbol=symbol, strategy=strategy, group_id=None)
+        return int(np.sum(labels >= 0))
+    except Exception:
+        return -1
+
 # labels import 호환
 try:
     from data.labels import make_labels as _make_labels
@@ -748,7 +765,12 @@ def get_kline_interval(symbol: str, interval: str, limit: int) -> pd.DataFrame:
         return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
 
 def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
-    """거래소 통합 수집 → 정규화 → 슬랙 컷 → 연속구간 보장 → 한도(limit) 정확히 맞춤."""
+    """
+    거래소 통합 수집 → 정규화 → 슬랙 컷 → 연속구간 보장 → 한도(limit) 정확히 맞춤.
+    + 추가 규칙(요청사항 반영):
+      1) Bybit만으로 라벨이 0개일 경우 → Binance를 강제 병합 후 재구성.
+      2) 장기(주봉/일봉 기반)인데 Bybit 캔들이 부족하면 → 조건 없이 Binance 병합.
+    """
     try:
         # 슬랙 기본값
         if not end_slack_min:
@@ -772,19 +794,36 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
             CacheManager.set(cache_key, cached_disk)
             return cached_disk
 
-        # 원천 수집
+        # 1) 원천 수집(Bybit 우선)
         df_bybit = get_kline(symbol, interval=interval, limit=limit)
         if not isinstance(df_bybit, pd.DataFrame):
             df_bybit = pd.DataFrame()
+
+        # 2) 장기일 때 무조건 Binance 병합 트리거
+        force_long_merge = (strategy == "장기") and (len(df_bybit) < limit)
         df_binance = pd.DataFrame()
-        if (df_bybit.empty or len(df_bybit) < int(limit * 0.9)) and BINANCE_ENABLED and not _is_binance_blocked():
+
+        # 3) 기본 병합 조건(부족 시) 또는 장기 강제 병합
+        if (df_bybit.empty or len(df_bybit) < int(limit * 0.9) or force_long_merge) and BINANCE_ENABLED and not _is_binance_blocked():
             df_binance = get_kline_binance(symbol, interval=interval, limit=limit)
 
-        # 병합·정규화
+        # 4) 1차 병합
         dfs = [d for d in [df_bybit, df_binance] if isinstance(d, pd.DataFrame) and not d.empty]
         df = _normalize_df(pd.concat(dfs, ignore_index=True)) if dfs else pd.DataFrame()
 
-        # 최소 보정
+        # 5) Bybit만으로 충분해 보이지만, 라벨이 0개라면 Binance를 추가 병합
+        if (df_binance is None or df_binance.empty) and (not df_bybit.empty) and BINANCE_ENABLED and not _is_binance_blocked():
+            # 빠른 라벨 개수 점검(가능하면)
+            valid_cnt = _count_valid_labels_for_df(df_bybit, symbol, strategy)
+            if valid_cnt == 0:
+                try:
+                    add_bin = get_kline_binance(symbol, interval=interval, limit=limit)
+                    if isinstance(add_bin, pd.DataFrame) and not add_bin.empty:
+                        df = _normalize_df(pd.concat([df_bybit, add_bin], ignore_index=True))
+                except Exception:
+                    pass
+
+        # 6) 최소 보정(완전 빈 경우 더미 1행)
         if df.empty:
             now = pd.Timestamp.now(tz="Asia/Seoul")
             df = pd.DataFrame(
@@ -792,39 +831,36 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
             )
             df.attrs["source_exchange"] = "DUMMY"
 
-        # 슬랙 컷: 최신 n분 제거
+        # 7) 슬랙 컷: 최신 n분 제거
         if end_slack_min > 0 and "timestamp" in df.columns and not df.empty:
             ts = _parse_ts_series(df["timestamp"])
             cutoff = ts.max() - pd.Timedelta(minutes=int(end_slack_min))
             df = df.loc[ts <= cutoff].copy()
 
-        # 숫자 컬럼 보정 및 NaN/inf 제거
+        # 8) 숫자 컬럼 보정 및 NaN/inf 제거
         for c in ["open", "high", "low", "close", "volume"]:
             df[c] = pd.to_numeric(df.get(c, np.nan), errors="coerce")
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.dropna(subset=["timestamp", "open", "high", "low", "volume", "close"], inplace=True)
 
-        # 시간 정렬과 연속구간 보장
+        # 9) 시간 정렬과 연속구간 보장
         if not df.empty:
             df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
-        # limit 정확히 맞추기
+        # 10) limit 정확히 맞추기
         if len(df) > limit:
             df = df.iloc[-limit:].reset_index(drop=True)
 
-        # 연속성 체크 후 파손 구간 제거
+        # 11) 연속성 체크 후 파손 구간 제거
         if not df.empty:
             ts = _parse_ts_series(df["timestamp"])
             diffs = ts.diff().dt.total_seconds().fillna(0)
-            # 음수 이동 제거
             df = df.loc[diffs >= 0].reset_index(drop=True)
 
-        # 메타 정보
+        # 12) 메타 정보
         srcs = []
-        if not df_bybit.empty:
-            srcs.append("BYBIT")
-        if not df_binance.empty:
-            srcs.append("BINANCE")
+        if not df_bybit.empty:   srcs.append("BYBIT")
+        if 'df_binance' in locals() and isinstance(df_binance, pd.DataFrame) and not df_binance.empty: srcs.append("BINANCE")
         if "source_exchange" not in df.attrs or not df.attrs["source_exchange"]:
             df.attrs["source_exchange"] = "+".join(srcs) if srcs else "UNKNOWN"
 
@@ -833,7 +869,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
         df.attrs["enough_for_training"] = len(df) >= int(limit * 0.9)
         df.attrs["not_enough_rows"] = len(df) < _PREDICT_MIN_WINDOW
 
-        # 캐시 저장
+        # 13) 캐시 저장
         CacheManager.set(cache_key, df)
         _save_df_cache(symbol, strategy, end_slack_min, df)
         return df
