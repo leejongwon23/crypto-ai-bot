@@ -1,12 +1,3 @@
-# === predict.py (YOPO v1.6.3 — 3% 상한 제거 + 소프트 가드 적용) ===
-# 핵심
-# ① ExitGuard: 클래스 폭(max_width≈3%) 하드차단 제거, 최소 기대수익(≈1%)만 유지
-# ② RealityGuard: 변동성 대비 과장(overclaim) 시
-#    - 신뢰도 p<0.45 → 보류
-#    - 0.45≤p<0.60 → 보수적 대안 클래스 강제 선택(가능하면)
-#    - p≥0.60 → 통과(경고만 기록)
-# ③ 나머지 로직/인터페이스 동일 (하위 호환)
-
 import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob, inspect, threading
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
 import gc
@@ -41,6 +32,7 @@ def _ensure_gate_open_on_boot():
 
 # 부팅 시 자동 실행
 _ensure_gate_open_on_boot()
+
 # -------------------- 공용 메모리 정리 헬퍼 --------------------
 def _safe_empty_cache():
     try:
@@ -67,9 +59,11 @@ PREDICT_BLOCK="/persistent/predict.block"
 GROUP_ACTIVE=os.path.join(RUN_DIR,"group_predict.active")
 GROUP_ACTIVE_STALE_SEC=int(os.getenv("GROUP_ACTIVE_STALE_SEC","600"))
 
+def _clean(s:str)->str:
+    s=(s or "None")
+    return "".join(ch if ch.isalnum() or ch in ("-","_") else "_" for ch in s)
+
 def _lock_path_for(symbol:str,strategy:str)->str:
-    def _clean(s:str)->str:
-        s=(s or "None"); return "".join(ch if ch.isalnum() or ch in ("-","_") else "_" for ch in s)
     return os.path.join(RUN_DIR,f"predict_{_clean(symbol)}_{_clean(strategy)}.lock")
 
 PREDICT_LOCK_TTL=int(os.getenv("PREDICT_LOCK_TTL","600"))
@@ -79,7 +73,8 @@ def _now_kst(): return datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 def is_predict_gate_open():
     try:
-        if os.getenv("FORCE_PREDICT_CLOSE","1")=="1": return False
+        # ⛔ 기본 닫힘 이슈 방지: 미설정 시 열림
+        if os.getenv("FORCE_PREDICT_CLOSE","0")=="1": return False
         if os.path.exists(PREDICT_BLOCK): return False
         if os.path.exists(PREDICT_GATE):
             with open(PREDICT_GATE,"r",encoding="utf-8") as f: o=json.load(f)
@@ -620,12 +615,14 @@ def failed_result(symbol,strategy,model_type="unknown",reason="",source="일반"
     return res
 
 def _soft_abstain(symbol,strategy,*,reason,meta_choice="abstain",regime="unknown",X_last=None,group_id=None,df=None,source="보류"):
+    """⚠️ HOTFIX: '예측' 행 추가 기록 제거 (predicted_class=-1 로 인한 평가오염 방지)
+       → '예측보류' + '예측(보류)'만 기록"""
     try:
         ensure_prediction_log_exists()
         cur=float((df["close"].iloc[-1] if df is not None and len(df) else 0.0))
         note={"reason":reason,"abstain_prob_min":float(ABSTAIN_PROB_MIN),"max_calib_prob":None,"meta_choice":meta_choice,"regime":regime}
 
-        # 기존: 예측보류만 로그됨 → [FIX] 실제 예측까지 같이 표기
+        # 1) 상세 보류 행
         log_prediction(
             symbol=symbol, strategy=strategy, direction="예측보류",
             entry_price=cur, target_price=cur, model="meta", model_name=str(meta_choice),
@@ -638,28 +635,7 @@ def _soft_abstain(symbol,strategy,*,reason,meta_choice="abstain",regime="unknown
             class_return_max=0.0, class_return_text=""
         )
 
-        # ✅ [FIX] 관우로그 예측행 추가: 보류 중이라도 실제 입력이 있으면 "예측"도 함께 기록
-        if X_last is not None and df is not None and len(df) > 0:
-            try:
-                entry = float(df["close"].iloc[-1])
-                log_prediction(
-                    symbol=symbol, strategy=strategy, direction="예측",
-                    entry_price=entry, target_price=entry,
-                    model="meta", model_name=f"{meta_choice}(soft_abstain)",
-                    predicted_class=-1, label=-1,
-                    note=json.dumps({"reason": reason, "info": "보류 중 예측행 병행 기록"}, ensure_ascii=False),
-                    top_k=[], success=False, reason=reason, rate=0.0, expected_return=0.0,
-                    position="neutral", return_value=0.0, source=f"{source}_보류중예측",
-                    group_id=group_id,
-                    feature_vector=torch.tensor(X_last, dtype=torch.float32).numpy(),
-                    regime=regime, meta_choice="abstain",
-                    raw_prob=None, calib_prob=None, calib_ver=get_calibration_version(),
-                    class_return_min=0.0, class_return_max=0.0, class_return_text=""
-                )
-            except Exception as e:
-                print(f"[soft_abstain 추가 예측행 기록 오류] {e}")
-
-        # 기존 요약 행 그대로 유지
+        # 2) 요약 보류 행
         log_prediction(
             symbol=symbol, strategy=strategy, direction="예측(보류)",
             entry_price=cur, target_price=cur, model="meta", model_name=str(meta_choice),
@@ -682,7 +658,7 @@ def _soft_abstain(symbol,strategy,*,reason,meta_choice="abstain",regime="unknown
         "class_return_text":"","position":"neutral",
         "timestamp":_now_kst().isoformat(),"source":source,"regime":regime,
         "reason":reason,"success":False,"predicted_class":-1,"label":-1
-                }
+    }
 
 # === 보조 ===
 def _acquire_predict_lock_with_retry(path:str,max_wait_sec:int):
@@ -737,7 +713,7 @@ def _recent_volatility(df:pd.DataFrame,strategy:str)->float:
         return max(0.0,vol)
     except Exception: return 0.0
 
-# (기존) RealityGuard 체크: 과장이면 False 반환하던 것을 그대로 유지(판정만)
+# (기존) RealityGuard 체크
 def _reality_guard_check(df,strategy,hint,lo_sel,hi_sel,exp_mid)->tuple[bool,str]:
     try:
         pos=_position_from_range(lo_sel,hi_sel)
@@ -757,7 +733,6 @@ def _exit_guard_check(lo_sel:float,hi_sel:float,exp_ret:float)->tuple[bool,str]:
         min_er=float(pub_conf.get("min_expected_return",0.01))
         if abs(float(exp_ret))<(min_er*0.5):
             return False,f"exit_guard_min_expected_return(mid={float(exp_ret):.4f}, min={min_er:.4f})"
-        # 폭(width) 상한 검사는 제거
         return True,"ok"
     except Exception as e:
         return True,f"exit_guard_exception:{e}"
@@ -939,7 +914,7 @@ def _apply_soft_guard(df, strategy, outs, chosen, final_cls, allow_long, allow_s
     RealityGuard 과장 상황에서 신뢰도(success_score)에 따라:
       - p < 0.45 → abstain
       - 0.45 ≤ p < 0.60 → 보수적 대안 클래스 선택 시도
-      - p ≥ 0.60 → 그대로 진행(경고 기록용 flag 반환)
+      - p ≥ 0.60 → 그대로 진행(경고만 기록)
     return: (action, chosen, final_cls, tag)
       action ∈ {"ok","conservative","abstain"}
       tag: 기록용 이유 문자열
@@ -949,7 +924,6 @@ def _apply_soft_guard(df, strategy, outs, chosen, final_cls, allow_long, allow_s
         exp_mid = (float(lo_sel)+float(hi_sel))/2.0
         vol = _recent_volatility(df, strategy)
         p = float(chosen.get("success_score", 0.0))
-        # 과장 상황 확정(호출부에서 이미 판정) 기준으로 분기
         if p < 0.45:
             return "abstain", chosen, final_cls, f"soft_abstain(p={p:.2f}, mid={exp_mid:.4f}, vol={vol:.4f})"
         if p < 0.60:
@@ -1125,15 +1099,15 @@ def predict(symbol,strategy,source="일반",model_type=None):
                     cands.sort(key=lambda x:x[1],reverse=True)
                     if cands and cands[0][0]!=top1[0]:
                         best_i=cands[0][0]; best_pred=outs[best_i]["candidate_pred"]; meta_choice="best_single_explore"
-            final_cls=int(best_pred); chosen=outs[best_i]
-            if meta_choice!="best_single_explore": meta_choice=os.path.basename(chosen["model_path"])
-            try:
-                st=_load_json(EXP_STATE,{}); key=f"{symbol}|{strategy}"
-                rec=st.setdefault(key,{}).setdefault(chosen.get("model_path",""),{"n":0,"n_explore":0,"last_explore_ts":0.0})
-                rec["n"]+=1
-                if "best_single_explore" in meta_choice: rec["n_explore"]+=1; rec["last_explore_ts"]=float(time.time())
-                st[key][chosen.get("model_path","")]=rec; _save_json(EXP_STATE,st)
-            except Exception: pass
+        final_cls=int(best_pred); chosen=outs[best_i]
+        if meta_choice!="best_single_explore": meta_choice=os.path.basename(chosen["model_path"])
+        try:
+            st=_load_json(EXP_STATE,{}); key=f"{symbol}|{strategy}"
+            rec=st.setdefault(key,{}).setdefault(chosen.get("model_path",""),{"n":0,"n_explore":0,"last_explore_ts":0.0})
+            rec["n"]+=1
+            if "best_single_explore" in meta_choice: rec["n_explore"]+=1; rec["last_explore_ts"]=float(time.time())
+            st[key][chosen.get("model_path","")]=rec; _save_json(EXP_STATE,st)
+        except Exception: pass
 
         # 임계(최소 기대수익) 가드
         try:
@@ -1152,7 +1126,7 @@ def predict(symbol,strategy,source="일반",model_type=None):
                     final_cls=best_cls; chosen=best_m; used_minret=True
         except Exception as e: print(f"[임계 가드 예외] {e}")
 
-        # === ExitGuard: (폭 상한 삭제) 최소 기대수익만 유지 ===
+        # === ExitGuard
         try:
             lo_sel,hi_sel=_class_range_by_meta_or_cfg(final_cls,(chosen or {}).get("meta"),symbol,strategy)
             exp_ret=(float(lo_sel)+float(hi_sel))/2.0
@@ -1169,7 +1143,7 @@ def predict(symbol,strategy,source="일반",model_type=None):
                     return _soft_abstain(symbol,strategy,reason=why,meta_choice=str(meta_choice),regime=regime,X_last=X[-1],group_id=(chosen.get("group_id") if isinstance(chosen,dict) else None),df=df,source="보류")
         except Exception as e: print(f"[출구 가드 예외] {e}")
 
-        # === RealityGuard: 하드차단 → 소프트 가드로 전환 ===
+        # === RealityGuard → Soft
         try:
             lo_sel,hi_sel=_class_range_by_meta_or_cfg(final_cls,(chosen or {}).get("meta"),symbol,strategy)
             exp_ret=(float(lo_sel)+float(hi_sel))/2.0
@@ -1183,7 +1157,6 @@ def predict(symbol,strategy,source="일반",model_type=None):
                         chosen, final_cls = new_chosen, int(new_cls)
                         meta_choice = f"soft_guard_conservative({why})"
                     else:
-                        # ok: 경고만 남기고 그대로 진행
                         meta_choice = f"{meta_choice}|soft_guard_ok"
         except Exception as e: print(f"[RealityGuard 예외] {e}")
 
@@ -1262,7 +1235,7 @@ def predict(symbol,strategy,source="일반",model_type=None):
     finally:
         try: _hb_stop.set(); _hb_thread.join(timeout=2)
         except Exception: pass
-        _release_predict_lock(lock_path)
+        _release_predict_lock(_lock_path_for(symbol or "None",strategy or "None"))
         try:
             _release_memory(df, feat, X, outs, allpreds, lib_vecs, lib_labels)
         finally:
