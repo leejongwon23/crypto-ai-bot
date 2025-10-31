@@ -22,25 +22,44 @@ logger = logging.getLogger(__name__)
 
 # ===== 설정: config 우선, env는 보조 =====
 _BIN_META = dict(get_BIN_META() or {})
+
+def _as_ratio(x: float) -> float:
+    """0.003(비율) 또는 0.3(%) 형태가 들어와도 항상 비율[0~1]로 정규화"""
+    try:
+        xv = float(x)
+    except Exception:
+        return 0.0
+    return xv / 100.0 if xv >= 1.0 else xv
+
+def _as_percent(x: float) -> float:
+    """0.08(비율) 또는 8.0(%) 형태가 들어와도 항상 '퍼센트 수치'로 정규화 (예: 8.0)"""
+    try:
+        xv = float(x)
+    except Exception:
+        return 0.0
+    return xv * 100.0 if 0.0 < xv < 1.0 else xv
+
+# ---- BIN META 읽기 (env → config 우선순위, 단위 정규화 포함) ----
 _TARGET_BINS = int(os.getenv("TARGET_BINS", str(_BIN_META.get("TARGET_BINS", 8))))
 _OUT_Q_LOW = float(os.getenv("OUTLIER_Q_LOW", str(_BIN_META.get("OUTLIER_Q_LOW", 0.01))))
 _OUT_Q_HIGH = float(os.getenv("OUTLIER_Q_HIGH", str(_BIN_META.get("OUTLIER_Q_HIGH", 0.99))))
 
 # 단일 bin 폭 상한(절대 %)
-_MAX_BIN_SPAN_PCT = float(os.getenv("MAX_BIN_SPAN_PCT", str(_BIN_META.get("MAX_BIN_SPAN_PCT", 8.0))))
-# 최소 샘플 비율(희소 bin 병합 기준)
+_MAX_BIN_SPAN_PCT = _as_percent(float(os.getenv("MAX_BIN_SPAN_PCT", str(_BIN_META.get("MAX_BIN_SPAN_PCT", 8.0)))))
+
+# 최소 샘플 비율(희소 bin 병합 기준, [0~1])
 _MIN_BIN_COUNT_FRAC = float(os.getenv("MIN_BIN_COUNT_FRAC", str(_BIN_META.get("MIN_BIN_COUNT_FRAC", 0.05))))
 
 # 추가 메타(지배적 bin 제어, 센터 밴드 상한)
 _DOMINANT_MAX_FRAC = float(os.getenv("DOMINANT_MAX_FRAC", str(_BIN_META.get("DOMINANT_MAX_FRAC", 0.35))))
 _DOMINANT_MAX_ITERS = int(os.getenv("DOMINANT_MAX_ITERS", str(_BIN_META.get("DOMINANT_MAX_ITERS", 6))))
 
-# 중앙 밴드 상한(%) — 기본 0.5%
-_CENTER_SPAN_MAX_PCT = float(os.getenv("CENTER_SPAN_MAX_PCT", str(_BIN_META.get("CENTER_SPAN_MAX_PCT", 0.5))))
+# 중앙 밴드 상한(%) — config에는 0.3(%) 또는 0.003(비율) 등 혼재 가능 → %로 정규화
+_CENTER_SPAN_MAX_PCT = _as_percent(float(os.getenv("CENTER_SPAN_MAX_PCT", str(_BIN_META.get("CENTER_SPAN_MAX_PCT", 0.5)))))
 
-# CLASS_BIN zero-band 힌트
+# CLASS_BIN zero-band 힌트(없으면 중앙폭 상한과 동일 취급) → %로 정규화
 _CLASS_BIN_META: Dict = dict(get_CLASS_BIN() or {})
-_ZERO_BAND_PCT_HINT = float(_CLASS_BIN_META.get("ZERO_BAND_PCT", _CENTER_SPAN_MAX_PCT))
+_ZERO_BAND_PCT_HINT = _as_percent(float(_CLASS_BIN_META.get("ZERO_BAND_PCT", _CENTER_SPAN_MAX_PCT)))
 
 # === 퍼시스턴트 저장소(엣지/라벨 고정) ===
 _EDGES_DIR = Path(os.getenv("LABEL_EDGES_DIR", "/persistent/label_edges")).resolve()
@@ -48,14 +67,6 @@ _EDGES_DIR.mkdir(parents=True, exist_ok=True)
 
 _LABELS_DIR = Path(os.getenv("LABEL_TABLE_DIR", "/persistent/labels")).resolve()
 _LABELS_DIR.mkdir(parents=True, exist_ok=True)
-
-# === 퍼센트/비율 자동 보정 ===
-def _as_ratio(x: float) -> float:
-    try:
-        xv = float(x)
-    except Exception:
-        return 0.0
-    return xv / 100.0 if xv >= 1.0 else xv
 
 # 아주 작은 수익률은 학습 제외(기본 ±0.3%) — (참고 상수, 본 파일의 라벨링은 전체 표본 사용)
 _RAW_MIN_GAIN_FOR_TRAIN = float(os.getenv("MIN_GAIN_FOR_TRAIN", "0.003"))
@@ -163,6 +174,7 @@ def _equal_freq_edges(g: np.ndarray, k: int) -> np.ndarray:
     return _dedupe_edges(cuts)
 
 def _split_wide_bins(edges: np.ndarray, max_span_pct: float) -> np.ndarray:
+    # max_span_pct는 '퍼센트 수치' (예: 8.0 = 8%) 기준
     max_span = max_span_pct / 100.0
     e = edges.tolist()
     i = 0
@@ -198,6 +210,7 @@ def _merge_sparse_bins(edges: np.ndarray, counts: np.ndarray, min_count: int) ->
     return np.array(e, dtype=float), np.array(c, dtype=int)
 
 def _enforce_zero_band(edges: np.ndarray, zero_band_pct: float) -> np.ndarray:
+    # zero_band_pct는 '퍼센트 수치' (예: 0.3 = 0.3%) 기준
     if edges.size < 3:
         return edges.astype(float)
     e = edges.astype(float).copy()
@@ -230,6 +243,7 @@ def _limit_dominant_bins(edges: np.ndarray, x_clip: np.ndarray,
 
     it = 0
     e = edges.astype(float).copy()
+    # center_span_max_pct는 '퍼센트 수치' 기준
     center_max = max(0.0, center_span_max_pct) / 100.0
 
     while it < max_iters:
@@ -289,7 +303,7 @@ def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.nda
     k = max(2, int(target_bins))
     edges = _equal_freq_edges(x_clip, k)
 
-    # 과폭 분할
+    # 과폭 분할 (MAX_BIN_SPAN_PCT는 % 수치)
     edges = _split_wide_bins(edges, _MAX_BIN_SPAN_PCT)
 
     # 카운트
@@ -300,7 +314,7 @@ def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.nda
     min_count = max(1, int(np.ceil(_MIN_BIN_COUNT_FRAC * x_clip.size)))
     edges, counts = _merge_sparse_bins(edges, counts, min_count)
 
-    # 지배적 분할 + 중앙 폭 제한
+    # 지배적 분할 + 중앙 폭 제한 (CENTER_SPAN_MAX_PCT는 % 수치)
     edges = _limit_dominant_bins(
         edges, x_clip,
         max_frac=float(_DOMINANT_MAX_FRAC),
@@ -308,7 +322,7 @@ def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.nda
         center_span_max_pct=float(_CENTER_SPAN_MAX_PCT),
     )
 
-    # zero-band 보정 + 0 경계 보장
+    # zero-band 보정 + 0 경계 보장 (ZERO_BAND_PCT_HINT는 % 수치)
     edges = _enforce_zero_band(edges, _ZERO_BAND_PCT_HINT)
     edges = _ensure_zero_edge(edges)
 
@@ -475,6 +489,8 @@ def make_labels_for_horizon(
         (labels: 0..C-1, -1 없음)
     """
     # 1) 수익률 & 전략 매핑
+    gains = signed_future_return_by_hours(df, symbol=horizon_hours)  # <-- 오타 방지: 파라미터명 점검
+    # ^ 위 한 줄은 원본 유지 시 버그 가능. 아래로 교정
     gains = signed_future_return_by_hours(df, horizon_hours=int(horizon_hours))
     strategy = _strategy_from_hours(int(horizon_hours))
 
