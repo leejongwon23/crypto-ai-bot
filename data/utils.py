@@ -929,8 +929,8 @@ def _macd_parts(close: pd.Series, span_fast=12, span_slow=26, span_sig=9):
     return macd, signal, hist
 
 def _bbands(close: pd.Series, window=20):
-    ma = close.rolling(window=window, min_periods=1).mean()
-    sd = close.rolling(window=window, min_periods=1).std()
+    ma = close.rolling(window=20, min_periods=1).mean()
+    sd = close.rolling(window=20, min_periods=1).std()
     upper = ma + 2*sd
     lower = ma - 2*sd
     width = (upper - lower) / (ma + 1e-6)
