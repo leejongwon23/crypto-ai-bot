@@ -384,6 +384,10 @@ def _labels_path(symbol: str, strategy: str) -> Path:
     key = _edge_key(symbol, strategy)
     return _LABELS_DIR / f"{key}.parquet"
 
+def _labels_csv_path(symbol: str, strategy: str) -> Path:
+    key = _edge_key(symbol, strategy)
+    return _LABELS_DIR / f"{key}.csv"
+
 def _counts_dict(arr: np.ndarray) -> Dict[int, int]:
     if arr.size == 0:
         return {}
@@ -400,35 +404,49 @@ def _save_label_table(
     counts: np.ndarray,
     spans_pct: np.ndarray,
 ) -> None:
-    """라벨 테이블과 메타를 파일로 고정 저장"""
-    try:
-        ts = _to_series_ts_kst(df["timestamp"]) if "timestamp" in df.columns else pd.Series(pd.NaT, index=range(len(gains)))
-        out = pd.DataFrame({
-            "ts": ts,
-            "symbol": symbol,
-            "strategy": strategy,
-            "class_id": labels.astype(np.int64),
-            "signed_gain": gains.astype(np.float32),
-        })
-        p = _labels_path(symbol, strategy)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        out.to_parquet(p, index=False)
-        logger.info("labels: table saved -> %s (%s/%s) rows=%d", str(p), symbol, strategy, len(out))
+    """라벨 테이블과 메타를 파일로 고정 저장 (Parquet 우선, 실패 시 CSV 폴백)"""
+    ts = _to_series_ts_kst(df["timestamp"]) if "timestamp" in df.columns else pd.Series(pd.NaT, index=range(len(gains)))
+    out = pd.DataFrame({
+        "ts": ts,
+        "symbol": symbol,
+        "strategy": strategy,
+        "class_id": labels.astype(np.int64),
+        "signed_gain": gains.astype(np.float32),
+    })
+    p_parquet = _labels_path(symbol, strategy)
+    p_csv = _labels_csv_path(symbol, strategy)
+    p_parquet.parent.mkdir(parents=True, exist_ok=True)
 
-        # 메타 로그(요약)
-        meta = {
-            "symbol": symbol,
-            "strategy": strategy,
-            "NUM_CLASSES": int(max(0, edges.size - 1)),
-            "class_counts_label_freeze": _counts_dict(labels),
-            "edges": list(map(float, edges.tolist())),
-            "edges_hash": _hash_array(edges),
-            "bin_counts": list(map(int, counts.tolist())) if counts is not None else [],
-            "bin_spans_pct": list(map(float, spans_pct.tolist())) if spans_pct is not None else [],
-        }
-        _save_edges(symbol, strategy, edges, meta=meta)  # 경계 JSON에도 메타 함께 반영
+    # 1) Parquet 저장 시도
+    try:
+        out.to_parquet(p_parquet, index=False)
+        logger.info("labels: table saved -> %s (%s/%s) rows=%d", str(p_parquet), symbol, strategy, len(out))
     except Exception as e:
-        logger.warning("labels: failed to save label table (%s/%s): %s", symbol, strategy, e)
+        # 2) CSV 폴백
+        try:
+            out.to_csv(p_csv, index=False)
+            logger.warning(
+                "labels: failed to save label table (%s/%s) to Parquet (%s): %s -> fallback to CSV (%s) rows=%d",
+                symbol, strategy, str(p_parquet), e, str(p_csv), len(out)
+            )
+        except Exception as e2:
+            logger.warning(
+                "labels: failed to save label table (%s/%s) to CSV (%s) as well: %s",
+                symbol, strategy, str(p_csv), e2
+            )
+
+    # 메타 로그(요약) + 엣지 JSON 저장
+    meta = {
+        "symbol": symbol,
+        "strategy": strategy,
+        "NUM_CLASSES": int(max(0, edges.size - 1)),
+        "class_counts_label_freeze": _counts_dict(labels),
+        "edges": list(map(float, edges.tolist())),
+        "edges_hash": _hash_array(edges),
+        "bin_counts": list(map(int, counts.tolist())) if counts is not None else [],
+        "bin_spans_pct": list(map(float, spans_pct.tolist())) if spans_pct is not None else [],
+    }
+    _save_edges(symbol, strategy, edges, meta=meta)  # 경계 JSON에도 메타 함께 반영
 
 # ============================
 # Public API (strategy-based)
@@ -463,7 +481,7 @@ def make_labels(
     bin_counts, _ = np.histogram(np.clip(gains, edges[0], edges[-1]), bins=edges_count)
     bin_spans = np.diff(edges) * 100.0
 
-    # 5) 라벨/엣지 고정 저장(Parquet + JSON)
+    # 5) 라벨/엣지 고정 저장(Parquet 우선 저장, 실패 시 CSV 폴백) + 경계 JSON
     _save_label_table(df, symbol, strategy, gains, labels, edges, bin_counts, bin_spans)
 
     # 6) 로그 요약
@@ -489,8 +507,6 @@ def make_labels_for_horizon(
         (labels: 0..C-1, -1 없음)
     """
     # 1) 수익률 & 전략 매핑
-    gains = signed_future_return_by_hours(df, symbol=horizon_hours)  # <-- 오타 방지: 파라미터명 점검
-    # ^ 위 한 줄은 원본 유지 시 버그 가능. 아래로 교정
     gains = signed_future_return_by_hours(df, horizon_hours=int(horizon_hours))
     strategy = _strategy_from_hours(int(horizon_hours))
 
@@ -506,7 +522,7 @@ def make_labels_for_horizon(
     bin_counts, _ = np.histogram(np.clip(gains, edges[0], edges[-1]), bins=edges_count)
     bin_spans = np.diff(edges) * 100.0
 
-    # 5) 저장
+    # 5) 저장 (Parquet 우선, 실패 시 CSV 폴백)
     _save_label_table(df, symbol, strategy, gains, labels, edges, bin_counts, bin_spans)
 
     # 6) 로그 요약
