@@ -193,7 +193,7 @@ _default_config = {
         "timebase": "utc",
         "check_interval_min": 2,
         "grace_min": 5,
-        "price_window_slack_min": 10,
+        "price_window_slack_min": 20,  # 10 → 20 (슬랙 확장)
         "max_backfill_hours": 48
     },
 
@@ -221,10 +221,11 @@ _default_config = {
     },
 }
 
+# === STRATEGY_CONFIG (안정 한도로 조정) ===
 STRATEGY_CONFIG = {
-    "단기": {"interval": "240", "limit": 1200, "binance_interval": "4h"},
-    "중기": {"interval": "D",   "limit": 1200, "binance_interval": "1d"},
-    "장기": {"interval": "D",   "limit": 1200, "binance_interval": "1d"},
+    "단기": {"interval": "240", "limit": 800, "binance_interval": "4h"},  # 1200 → 800
+    "중기": {"interval": "D",   "limit": 500, "binance_interval": "1d"},  # 1200 → 500
+    "장기": {"interval": "D",   "limit": 400, "binance_interval": "1d"},  # 1200 → 400
 }
 
 _STRATEGY_RETURN_CAP_POS_MAX = {"단기": 0.06, "중기": 0.20, "장기": 0.50}
@@ -1040,4 +1041,4 @@ __all__ = [
     "is_config_readonly", "is_disk_cache_off",
     "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
     "get_BIN_META",
-        ]
+]
