@@ -1,4 +1,4 @@
-# train.py — SPEED v2.4 FINAL (NO-SKIP AUTO-TRAIN, GROUP_ACTIVE + GROUP_TRAIN_LOCK, 라벨/분포 복구 강화, 로그스키마 정합)
+# train.py — SPEED v2.5 FINAL (NO-SKIP AUTO-TRAIN, GROUP_ACTIVE + GROUP_TRAIN_LOCK, 라벨/분포 복구 강화, 로그스키마 정합 + 5종 진단로그)
 # -*- coding: utf-8 -*-
 import os, time, glob, shutil, json, random, traceback, threading, gc, csv
 from datetime import datetime
@@ -108,18 +108,19 @@ from config import (
 )
 
 # ==== [ADD] train 로그 경로/헤더 보장 ====
-# 운영 CSV 스키마(사용자 제공)와 정합되도록 확장
+# 운영 CSV 스키마(사용자 제공)와 정합되도록 확장 + 진단 5종 필드 추가
 DEFAULT_TRAIN_HEADERS = [
     "timestamp","symbol","strategy","model",
     "val_acc","val_f1","val_loss","engine","window","recent_cap",
     "rows","limit","min","augment_needed","enough_for_training",
     "note","source_exchange","status",
     # 여분(옵셔널)
-    "accuracy","f1","loss","y_true","y_pred","num_classes"
+    "accuracy","f1","loss","y_true","y_pred","num_classes",
+    # === 진단 5종 ===
+    "NUM_CLASSES","class_counts_label_freeze","usable_samples","class_counts_after_assemble","batch_stratified_ok"
 ]
 try:
     from logger import TRAIN_HEADERS
-    # logger가 다른 스키마를 노출하면 합집합으로 보장
     TRAIN_HEADERS = list(dict.fromkeys(list(TRAIN_HEADERS) + DEFAULT_TRAIN_HEADERS))
 except Exception:
     TRAIN_HEADERS = DEFAULT_TRAIN_HEADERS
@@ -150,7 +151,6 @@ def _normalize_train_row(row: dict) -> dict:
     # 기본값 보정
     r.setdefault("engine", row.get("engine", "manual"))
     r.setdefault("source_exchange", row.get("source_exchange", "BYBIT"))
-    # 숫자/불리언 문자열화 최소화(그대로 기록)
     return r
 
 def _append_train_log(row: dict):
@@ -570,7 +570,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         # 라벨: 글로벌 기준 (가변 반환 대응: 3 or 4 or 6)
         bin_info = None
         if isinstance(pre_lbl, tuple) and len(pre_lbl) in (3,4,6):
-            # 직접 튜플이 들어온 경우
             if len(pre_lbl) == 6:
                 gains, labels, class_ranges_used_global, be, bc, bs = pre_lbl
                 bin_info = {
@@ -580,7 +579,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 }
             elif len(pre_lbl) == 4:
                 gains, labels, class_ranges_used_global, bin_info = pre_lbl
-            else:  # len == 3
+            else:
                 gains, labels, class_ranges_used_global = pre_lbl
         elif isinstance(pre_lbl, dict) and pre_lbl.get(strategy, None) is not None:
             val = pre_lbl[strategy]
@@ -660,9 +659,13 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         to_local = {g:i for i, g in enumerate(gidx)}
         # -----------------------------------
 
-        # 마스크/분포 진단
+        # 마스크/분포 진단(라벨 프리즈 단계 분포)
         mask_cnt=int((labels<0).sum())
         _safe_print(f"[LABELS] total={len(labels)} masked={mask_cnt} ({mask_cnt/max(1,len(labels)):.2%}) BOUNDARY_BAND=±{BOUNDARY_BAND}")
+        try:
+            cnt_before = np.bincount(labels[labels>=0], minlength=len(all_ranges_full)).astype(int).tolist()
+        except Exception:
+            cnt_before = []
 
         # 특징행렬 정제
         drop_cols = [c for c in ("timestamp","strategy","symbol") if c in feat.columns]
@@ -707,8 +710,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 X_raw, y, syn = _synthesize_minority_if_needed(X_raw, y, num_classes=len(class_ranges))
                 repaired_info["synthetic_labels"] = syn
 
-            if not X_raw.size or not y.size:
+            # === usable_samples 기준 스킵 ===
+            usable_samples = int(len(y))
+            if usable_samples == 0:
                 _log_skip(symbol,strategy,f"유효 라벨 샘플 없음(w={window})"); continue
+
             if y.min()<0: _log_skip(symbol,strategy,f"음수 라벨 유입 감지(w={window})"); continue
             if len(X_raw)<10: _log_skip(symbol,strategy,f"샘플 부족(w={window})"); continue
             if len(np.unique(y))<2: _log_skip(symbol,strategy,f"라벨 단일 클래스(보정 실패)(w={window})"); continue
@@ -734,6 +740,34 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             train_idx, val_idx, moved = _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2)
             if len(train_idx)==0 or len(val_idx)==0:
                 _log_skip(symbol,strategy,f"분할 후 크기 오류(w={window})"); continue
+
+            # === 진단 5종 중 나머지 2개 계산 ===
+            try:
+                cnt_after = np.bincount(y, minlength=len(class_ranges)).astype(int).tolist()
+            except Exception:
+                cnt_after = []
+            batch_stratified_ok = bool(strat_ok)
+
+            # === 윈도우 시작 1회 진단 로그 ===
+            try:
+                logger.log_training_result(
+                    symbol, strategy, model="all",
+                    accuracy=None, f1=None, loss=None,
+                    val_acc=None, val_f1=None, val_loss=None,
+                    engine="manual", window=int(window), recent_cap=int(len(features_only)),
+                    rows=int(len(df)), limit=int(STRATEGY_CONFIG.get(strategy,{}).get("limit",300)), min=int(max(60,int(STRATEGY_CONFIG.get(strategy,{}).get("limit",300)*0.90))),
+                    augment_needed=bool(augment_needed), enough_for_training=bool(enough_for_training),
+                    note="prep(stats)",
+                    source_exchange="BYBIT", status="prep",
+                    # === 5종 ===
+                    NUM_CLASSES=int(len(class_ranges)),
+                    class_counts_label_freeze=cnt_before,
+                    usable_samples=usable_samples,
+                    class_counts_after_assemble=cnt_after,
+                    batch_stratified_ok=batch_stratified_ok
+                )
+            except Exception:
+                pass
 
             scaler=MinMaxScaler()
             Xtr_flat=X_raw[train_idx].reshape(-1, feat_dim); scaler.fit(Xtr_flat)
@@ -973,7 +1007,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                       "boundary_band": float(BOUNDARY_BAND),
                       "cs_argmax":{"enabled":bool(COST_SENSITIVE_ARGMAX),"beta":float(CS_ARG_BETA)},
                       "eval_gate":"none",
-                      "passed": 1,
                       # [ADD]
                       "label_repair": repaired_info,
                       "bin_edges": bin_edges,
@@ -988,18 +1021,29 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     DataCacheManager.delete(f"{symbol}-{strategy}-features")
                 except: pass
 
-                logger.log_training_result(
-                    symbol, strategy,
-                    model=os.path.basename(wpath),
-                    accuracy=acc, f1=f1_val, loss=val_loss,
-                    val_acc=acc, val_f1=f1_val, val_loss=val_loss,
-                    engine="manual", window=int(window), recent_cap=int(len(features_only)),
-                    rows=int(len(df)), limit=int(_limit), min=int(_min_required),
-                    augment_needed=bool(augment_needed), enough_for_training=bool(enough_for_training),
-                    note=(f"train_one_model(window={window}, cap={len(features_only)}, engine=manual)"),
-                    source_exchange="BYBIT", status="success",
-                    y_true=lbls, y_pred=preds, num_classes=len(class_ranges)
-                )
+                # === 성공 로그(진단 5종 포함) ===
+                try:
+                    logger.log_training_result(
+                        symbol, strategy,
+                        model=os.path.basename(wpath),
+                        accuracy=acc, f1=f1_val, loss=val_loss,
+                        val_acc=acc, val_f1=f1_val, val_loss=val_loss,
+                        engine="manual", window=int(window), recent_cap=int(len(features_only)),
+                        rows=int(len(df)), limit=int(_limit), min=int(_min_required),
+                        augment_needed=bool(augment_needed), enough_for_training=bool(enough_for_training),
+                        note=(f"train_one_model(window={window}, cap={len(features_only)}, engine=manual)"),
+                        source_exchange="BYBIT", status="success",
+                        y_true=lbls, y_pred=preds, num_classes=len(class_ranges),
+                        # === 5종 ===
+                        NUM_CLASSES=int(len(class_ranges)),
+                        class_counts_label_freeze=cnt_before,
+                        usable_samples=usable_samples,
+                        class_counts_after_assemble=cnt_after,
+                        batch_stratified_ok=batch_stratified_ok
+                    )
+                except Exception:
+                    pass
+
                 res["models"].append({"window":int(window),"type":model_type,"acc":acc,"f1":f1_val, "val_loss":val_loss,
                                       "loss_sum":float(loss_sum),"pt":wpath,"meta":mpath,"passed":True})
                 _safe_print(f"🟩 DONE w={window} {model_type} acc={acc:.4f} f1={f1_val:.4f} val_loss={val_loss:.5f} (no gate)")
