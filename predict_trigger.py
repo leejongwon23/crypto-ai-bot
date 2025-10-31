@@ -1,18 +1,25 @@
-# === predict_trigger.py (FINAL v1.3 — 모델다중루트 정합 + 그룹액티브 경로보강 + 게이트우회토큰) ===
+# === predict_trigger.py (FINAL v1.4 — config 정합/동적 게이트 + 모델다중루트 + 그룹완주 보강) ===
 import os, time, glob, traceback, datetime, shutil
 from collections import Counter, defaultdict
 import numpy as np
 import pandas as pd
 import pytz
 
-# ── 설정 경로: config 사용 ─────────────────────────────────────
+# ── config 경로/게터 사용 ─────────────────────────────────────
 try:
-    from config import get_GUANWU_IN_DIR
+    from config import (
+        get_GUANWU_IN_DIR,
+        get_PREDICTION_LOG_PATH,
+        get_REQUIRE_GROUP_COMPLETE,
+    )
 except Exception:
     def get_GUANWU_IN_DIR(): return "/data/guanwu/incoming"
+    def get_PREDICTION_LOG_PATH(): return os.getenv("PREDICTION_LOG_PATH", "/persistent/prediction_log.csv")
+    def get_REQUIRE_GROUP_COMPLETE(): 
+        v = os.getenv("REQUIRE_GROUP_COMPLETE", "1").strip().lower()
+        return 0 if v in {"0","false","no","off"} else 1
 
-# 예측 로그 경로
-PREDICTION_LOG_PATH = os.getenv("PREDICTION_LOG_PATH", "/persistent/prediction_log.csv")
+PREDICTION_LOG_PATH = get_PREDICTION_LOG_PATH()
 
 # ── 데이터 소스 ───────────────────────────────────────────────
 try:
@@ -42,7 +49,7 @@ PREDICT_BLOCK    = "/persistent/predict.block"
 PREDICT_RUN_LOCK = "/persistent/run/predict_running.lock"
 GROUP_TRAIN_LOCK = "/persistent/run/group_training.lock"
 
-# === 모델 경로: predict.py(v1.6.2)와 정합 ===
+# === 모델 경로: predict.py와 정합 ===
 _DEFAULT_MODEL_ROOTS = [
     os.getenv("MODEL_DIR", "/persistent/models"),
     "/persistent/models",
@@ -60,7 +67,7 @@ _KNOWN_EXTS = (".pt", ".ptz", ".safetensors")
 STRATEGIES  = ["단기", "중기", "장기"]
 
 def _has_model_for(symbol: str, strategy: str) -> bool:
-    """predict.py의 get_available_models 탐색정책에 맞춰 재귀/다중루트로 모델 존재만 빠르게 체크"""
+    """predict.py의 탐색정책에 맞춰 재귀/다중루트로 모델 존재만 빠르게 체크"""
     try:
         patts = [
             f"{symbol}_{strategy}_*",
@@ -70,15 +77,12 @@ def _has_model_for(symbol: str, strategy: str) -> bool:
         for root in MODEL_DIRS:
             if not os.path.isdir(root):
                 continue
-            # flat & recursive 둘 다
             for patt in patts:
                 for ext in _KNOWN_EXTS:
                     if glob.glob(os.path.join(root, f"{patt}{ext}")):
                         return True
-                    # recursive
                     if glob.glob(os.path.join(root, "**", f"{patt}{ext}"), recursive=True):
                         return True
-            # 하위 폴더 구조도 점검
             base1 = os.path.join(root, symbol, strategy)
             if os.path.isdir(base1):
                 for ext in _KNOWN_EXTS:
@@ -196,9 +200,6 @@ THROTTLE_BUSY_LOG_SEC            = int(os.getenv("THROTTLE_BUSY_LOG_SEC", "15"))
 PAIR_BACKOFF_BASE_SEC            = int(os.getenv("PAIR_BACKOFF_BASE_SEC", "60"))
 PAIR_BACKOFF_MAX_SEC             = int(os.getenv("PAIR_BACKOFF_MAX_SEC", "600"))
 
-# 그룹 완주 요구
-REQUIRE_GROUP_COMPLETE = int(os.getenv("REQUIRE_GROUP_COMPLETE", "1"))
-
 last_trigger_time = {}
 _last_busy_log_at = 0.0
 _pair_backoff_until = defaultdict(float)
@@ -255,7 +256,6 @@ def _wait_for_gate_open(max_wait_sec: int) -> bool:
     start = time.time()
     while time.time() - start < max_wait_sec:
         _clear_stale_predict_lock(PREDICT_LOCK_STALE_TRIGGER_SEC)
-        # 전역 락이 있으면 즉시 중단
         if _LOCK_PATH and os.path.exists(_LOCK_PATH):
             return False
         if (not _gate_closed()) and (not _predict_busy()):
@@ -428,8 +428,8 @@ def run():
         symbols = [s for s in all_symbols if s in symset]
         print(f"[그룹제한] 현재 그룹 심볼 {len(symbols)}/{len(all_symbols)}개 대상으로 실행")
 
-        # 그룹 완주가 아니면 전면 차단
-        if REQUIRE_GROUP_COMPLETE and not _is_group_complete_for_all_strategies(symbols):
+        # 그룹 완주가 아니면 전면 차단 (동적 게터 사용)
+        if int(get_REQUIRE_GROUP_COMPLETE()) and not _is_group_complete_for_all_strategies(symbols):
             miss = _missing_pairs(symbols)
             print(f"[차단] 그룹 미완료(누락 {len(miss)}) → 예측 전면 스킵")
             return
@@ -573,7 +573,7 @@ def get_recent_class_frequencies(strategy=None, recent_days=RECENT_DAYS_FOR_FREQ
         print(f"[⚠️ get_recent_class_frequencies 예외] {e}")
         return Counter()
 
-# ── 확률 보정 ─────────────────────────────────────────────────
+# ── 확률 보정(미사용: 필요 시 외부에서 호출) ───────────────────
 def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict = None, alpha=0.10, beta=0.10):
     p = np.asarray(probs, dtype=np.float64)
     if p.ndim == 2:
@@ -625,9 +625,9 @@ def run_after_training(symbol: str, strategy: str) -> bool:
     except Exception:
         pass
 
-    # 그룹 완주 전이면 학습후 트리거도 금지
+    # 그룹 완주 전이면 학습후 트리거도 금지 (동적 게터)
     group_syms = _get_current_group_symbols()
-    if isinstance(group_syms, (list, tuple)) and len(group_syms) > 0 and REQUIRE_GROUP_COMPLETE:
+    if isinstance(group_syms, (list, tuple)) and len(group_syms) > 0 and int(get_REQUIRE_GROUP_COMPLETE()):
         if not _is_group_complete_for_all_strategies(list(group_syms)):
             log_audit(symbol, strategy, "학습후트리거스킵", "그룹 미완료")
             print(f"[스킵] 그룹 미완료로 {symbol}-{strategy} 학습후트리거 차단")
