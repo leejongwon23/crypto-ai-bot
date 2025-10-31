@@ -223,9 +223,9 @@ _default_config = {
 
 # === STRATEGY_CONFIG (안정 한도로 조정) ===
 STRATEGY_CONFIG = {
-    "단기": {"interval": "240", "limit": 800, "binance_interval": "4h"},  # 1200 → 800
+    "단기": {"interval": "240", "limit": 1000, "binance_interval": "4h"},  # 1200 → 800
     "중기": {"interval": "D",   "limit": 500, "binance_interval": "1d"},  # 1200 → 500
-    "장기": {"interval": "D",   "limit": 400, "binance_interval": "1d"},  # 1200 → 400
+    "장기": {"interval": "D",   "limit": 500, "binance_interval": "1d"},  # 1200 → 400
 }
 
 _STRATEGY_RETURN_CAP_POS_MAX = {"단기": 0.06, "중기": 0.20, "장기": 0.50}
