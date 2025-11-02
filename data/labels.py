@@ -319,7 +319,7 @@ def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.nda
         edges, x_clip,
         max_frac=float(_DOMINANT_MAX_FRAC),
         max_iters=int(_DOMINANT_MAX_ITERS),
-        center_span_max_pct=float(_ CENTER_SPAN_MAX_PCT),
+        center_span_max_pct=float(_CENTER_SPAN_MAX_PCT),  # ← 오타 수정
     )
 
     # zero-band 보정 + 0 경계 보장 (ZERO_BAND_PCT_HINT는 % 수치)
@@ -404,9 +404,11 @@ def _save_label_table(
     counts: np.ndarray,
     spans_pct: np.ndarray,
     extra_cols: Dict[str, np.ndarray] | None = None,
+    extra_meta: Dict | None = None,
 ) -> None:
     """라벨 테이블과 메타를 파일로 고정 저장 (Parquet 우선, 실패 시 CSV 폴백)
-       extra_cols: 보조 컬럼(예: 손절 경유 플래그들)"""
+       extra_cols: 보조 컬럼(예: 손절 경유 플래그들)
+       extra_meta: 경계 JSON에 추가로 함께 저장할 메타(예: class_stop_frac 등)"""
     ts = _to_series_ts_kst(df["timestamp"]) if "timestamp" in df.columns else pd.Series(pd.NaT, index=range(len(gains)))
     out = pd.DataFrame({
         "ts": ts,
@@ -456,7 +458,64 @@ def _save_label_table(
         "bin_counts": list(map(int, counts.tolist())) if counts is not None else [],
         "bin_spans_pct": list(map(float, spans_pct.tolist())) if spans_pct is not None else [],
     }
+    if isinstance(extra_meta, dict) and extra_meta:
+        try:
+            meta.update(extra_meta)
+        except Exception:
+            pass
     _save_edges(symbol, strategy, edges, meta=meta)  # 경계 JSON에도 메타 함께 반영
+
+# ============================
+# 내부 유틸: 클래스별 손절 경유 비율 집계
+# ============================
+def _compute_class_stop_frac(
+    labels: np.ndarray,
+    edges: np.ndarray,
+    up: np.ndarray,
+    dn: np.ndarray,
+    stoploss_abs: float = 0.02,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    각 클래스 c에 대해:
+      - mid = (lo+hi)/2
+      - mid>0 (롱 성향): 손절경유 = (dn <= -SL)
+      - mid<0 (숏 성향): 손절경유 = (up >=  SL)
+      - mid≈0 (중립): 손절경유 = (dn <= -SL) OR (up >= SL)
+    반환:
+      class_stop_frac: (C,) 각 클래스 내 손절경유 비율
+      class_stop_n:    (C,) 각 클래스 내 표본 수
+    """
+    C = max(0, edges.size - 1)
+    if C <= 0 or labels.size == 0:
+        return np.zeros(0, dtype=float), np.zeros(0, dtype=int)
+
+    class_stop_frac = np.zeros(C, dtype=float)
+    class_stop_n = np.zeros(C, dtype=int)
+
+    # 클래스 미드사인 미리 계산
+    mids = np.array([(float(edges[i]) + float(edges[i+1])) / 2.0 for i in range(C)], dtype=float)
+
+    up = np.asarray(up, dtype=float)
+    dn = np.asarray(dn, dtype=float)
+    labs = np.asarray(labels, dtype=int)
+
+    for c in range(C):
+        idx = (labs == c)
+        n = int(np.sum(idx))
+        class_stop_n[c] = n
+        if n == 0:
+            class_stop_frac[c] = 0.0
+            continue
+        mid = mids[c]
+        if mid > 0.0:          # 롱 성향 클래스
+            stop_hit = (dn[idx] <= -abs(stoploss_abs))
+        elif mid < 0.0:        # 숏 성향 클래스
+            stop_hit = (up[idx] >=  abs(stoploss_abs))
+        else:                   # 중립 클래스
+            stop_hit = (dn[idx] <= -abs(stoploss_abs)) | (up[idx] >= abs(stoploss_abs))
+        class_stop_frac[c] = float(np.mean(stop_hit.astype(np.float32)))
+
+    return class_stop_frac, class_stop_n
 
 # ============================
 # Public API (strategy-based)
@@ -480,14 +539,15 @@ def make_labels(
     gains = signed_future_return(df, strategy)  # (N,)
 
     # 1-추가) 손절 경유 보조 플래그(±2%) — 라벨엔 반영하지 않음, 테이블에만 저장
+    extra_cols = None
+    up = dn = None
+    sl = 0.02
     try:
         horizon_hours = _strategy_horizon_hours(strategy)
         both = _future_extreme_signed_returns(df, horizon_hours=int(horizon_hours))
         n = len(df)
         dn = both[:n] if both is not None and both.size >= 2 * n else np.zeros(n, dtype=np.float32)
         up = both[n:] if both is not None and both.size >= 2 * n else np.zeros(n, dtype=np.float32)
-        # 손절 기준(절대 %): 롱 손절은 -2%, 숏 손절은 +2% → 플래그는 방향 독립으로 둘 다 기록
-        sl = 0.02
         up_ge_2pct = (np.asarray(up) >= sl)
         dn_le_m2pct = (np.asarray(dn) <= -sl)
         conflict_2pct = up_ge_2pct & dn_le_m2pct
@@ -506,14 +566,28 @@ def make_labels(
     # 3) 전 표본 라벨링(경계 마스킹 없음, -1 없음)
     labels = _vector_bin(gains, edges)
 
+    # 3-추가) 클래스별 손절 경유 비율 집계 → 메타로 저장
+    extra_meta = {}
+    try:
+        if up is not None and dn is not None:
+            class_stop_frac, class_stop_n = _compute_class_stop_frac(labels, edges, up, dn, stoploss_abs=sl)
+            extra_meta.update({
+                "stoploss_threshold_abs": float(sl),
+                "class_stop_frac": list(map(float, class_stop_frac.tolist())),
+                "class_stop_n": list(map(int, class_stop_n.tolist())),
+                "class_mid": [float((edges[i]+edges[i+1])/2.0) for i in range(max(0, edges.size-1))],
+            })
+    except Exception as e:
+        logger.warning("labels: class_stop_frac compute failed (%s/%s): %s", symbol, strategy, e)
+
     # 4) class_ranges / counts / spans
     class_ranges = [(float(edges[i]), float(edges[i+1])) for i in range(edges.size - 1)]
     edges_count = edges.copy(); edges_count[-1] += _EDGE_EPS
     bin_counts, _ = np.histogram(np.clip(gains, edges[0], edges[-1]), bins=edges_count)
     bin_spans = np.diff(edges) * 100.0
 
-    # 5) 라벨/엣지 고정 저장(Parquet 우선 저장, 실패 시 CSV 폴백) + 경계 JSON
-    _save_label_table(df, symbol, strategy, gains, labels, edges, bin_counts, bin_spans, extra_cols=extra_cols)
+    # 5) 라벨/엣지 고정 저장(Parquet 우선 저장, 실패 시 CSV 폴백) + 경계 JSON(+extra_meta)
+    _save_label_table(df, symbol, strategy, gains, labels, edges, bin_counts, bin_spans, extra_cols=extra_cols, extra_meta=extra_meta)
 
     # 6) 로그 요약
     logger.info(
@@ -542,12 +616,14 @@ def make_labels_for_horizon(
     strategy = _strategy_from_hours(int(horizon_hours))
 
     # 1-추가) 손절 경유 보조 플래그(±2%) — 라벨엔 반영하지 않음
+    extra_cols = None
+    up = dn = None
+    sl = 0.02
     try:
         both = _future_extreme_signed_returns(df, horizon_hours=int(horizon_hours))
         n = len(df)
         dn = both[:n] if both is not None and both.size >= 2 * n else np.zeros(n, dtype=np.float32)
         up = both[n:] if both is not None and both.size >= 2 * n else np.zeros(n, dtype=np.float32)
-        sl = 0.02
         up_ge_2pct = (np.asarray(up) >= sl)
         dn_le_m2pct = (np.asarray(dn) <= -sl)
         conflict_2pct = up_ge_2pct & dn_le_m2pct
@@ -566,14 +642,28 @@ def make_labels_for_horizon(
     # 3) 전 표본 라벨링
     labels = _vector_bin(gains, edges)
 
+    # 3-추가) 클래스별 손절 경유 비율 집계 → 메타로 저장
+    extra_meta = {}
+    try:
+        if up is not None and dn is not None:
+            class_stop_frac, class_stop_n = _compute_class_stop_frac(labels, edges, up, dn, stoploss_abs=sl)
+            extra_meta.update({
+                "stoploss_threshold_abs": float(sl),
+                "class_stop_frac": list(map(float, class_stop_frac.tolist())),
+                "class_stop_n": list(map(int, class_stop_n.tolist())),
+                "class_mid": [float((edges[i]+edges[i+1])/2.0) for i in range(max(0, edges.size-1))],
+            })
+    except Exception as e:
+        logger.warning("labels(h=%s): class_stop_frac compute failed (%s/%s): %s", horizon_hours, symbol, strategy, e)
+
     # 4) class_ranges / counts / spans
     class_ranges = [(float(edges[i]), float(edges[i+1])) for i in range(edges.size - 1)]
     edges_count = edges.copy(); edges_count[-1] += _EDGE_EPS
     bin_counts, _ = np.histogram(np.clip(gains, edges[0], edges[-1]), bins=edges_count)
     bin_spans = np.diff(edges) * 100.0
 
-    # 5) 저장 (Parquet 우선, 실패 시 CSV 폴백)
-    _save_label_table(df, symbol, strategy, gains, labels, edges, bin_counts, bin_spans, extra_cols=extra_cols)
+    # 5) 저장 (Parquet 우선, 실패 시 CSV 폴백) + 경계 JSON(+extra_meta)
+    _save_label_table(df, symbol, strategy, gains, labels, edges, bin_counts, bin_spans, extra_cols=extra_cols, extra_meta=extra_meta)
 
     # 6) 로그 요약
     logger.info(
