@@ -319,7 +319,7 @@ def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.nda
         edges, x_clip,
         max_frac=float(_DOMINANT_MAX_FRAC),
         max_iters=int(_DOMINANT_MAX_ITERS),
-        center_span_max_pct=float(_CENTER_SPAN_MAX_PCT),
+        center_span_max_pct=float(_ CENTER_SPAN_MAX_PCT),
     )
 
     # zero-band 보정 + 0 경계 보장 (ZERO_BAND_PCT_HINT는 % 수치)
@@ -403,8 +403,10 @@ def _save_label_table(
     edges: np.ndarray,
     counts: np.ndarray,
     spans_pct: np.ndarray,
+    extra_cols: Dict[str, np.ndarray] | None = None,
 ) -> None:
-    """라벨 테이블과 메타를 파일로 고정 저장 (Parquet 우선, 실패 시 CSV 폴백)"""
+    """라벨 테이블과 메타를 파일로 고정 저장 (Parquet 우선, 실패 시 CSV 폴백)
+       extra_cols: 보조 컬럼(예: 손절 경유 플래그들)"""
     ts = _to_series_ts_kst(df["timestamp"]) if "timestamp" in df.columns else pd.Series(pd.NaT, index=range(len(gains)))
     out = pd.DataFrame({
         "ts": ts,
@@ -413,6 +415,14 @@ def _save_label_table(
         "class_id": labels.astype(np.int64),
         "signed_gain": gains.astype(np.float32),
     })
+    if extra_cols:
+        for k, v in extra_cols.items():
+            try:
+                out[k] = np.asarray(v)
+            except Exception:
+                # 길이 불일치나 타입 오류는 경고만 남기고 무시
+                logger.warning("labels: failed to attach extra column '%s'", k)
+
     p_parquet = _labels_path(symbol, strategy)
     p_csv = _labels_csv_path(symbol, strategy)
     p_parquet.parent.mkdir(parents=True, exist_ok=True)
@@ -466,8 +476,29 @@ def make_labels(
         bin_counts:  int64   (C,)
         bin_spans:   float64 (C,)  # 절대 %
     """
-    # 1) 수익률 계산
+    # 1) 수익률 계산(분포용): '가장 크게 움직인 방향'의 서명 수익률
     gains = signed_future_return(df, strategy)  # (N,)
+
+    # 1-추가) 손절 경유 보조 플래그(±2%) — 라벨엔 반영하지 않음, 테이블에만 저장
+    try:
+        horizon_hours = _strategy_horizon_hours(strategy)
+        both = _future_extreme_signed_returns(df, horizon_hours=int(horizon_hours))
+        n = len(df)
+        dn = both[:n] if both is not None and both.size >= 2 * n else np.zeros(n, dtype=np.float32)
+        up = both[n:] if both is not None and both.size >= 2 * n else np.zeros(n, dtype=np.float32)
+        # 손절 기준(절대 %): 롱 손절은 -2%, 숏 손절은 +2% → 플래그는 방향 독립으로 둘 다 기록
+        sl = 0.02
+        up_ge_2pct = (np.asarray(up) >= sl)
+        dn_le_m2pct = (np.asarray(dn) <= -sl)
+        conflict_2pct = up_ge_2pct & dn_le_m2pct
+        extra_cols = {
+            "up_ge_2pct": up_ge_2pct.astype(np.int8),
+            "dn_le_-2pct": dn_le_m2pct.astype(np.int8),
+            "conflict_2pct": conflict_2pct.astype(np.int8),
+        }
+    except Exception as e:
+        logger.warning("labels: extra risk flags failed (%s/%s): %s", symbol, strategy, e)
+        extra_cols = None
 
     # 2) 현재 표본으로 엣지 생성(라벨 고정용) → 저장
     edges, counts0, spans0 = _build_bins(gains, _TARGET_BINS)
@@ -482,7 +513,7 @@ def make_labels(
     bin_spans = np.diff(edges) * 100.0
 
     # 5) 라벨/엣지 고정 저장(Parquet 우선 저장, 실패 시 CSV 폴백) + 경계 JSON
-    _save_label_table(df, symbol, strategy, gains, labels, edges, bin_counts, bin_spans)
+    _save_label_table(df, symbol, strategy, gains, labels, edges, bin_counts, bin_spans, extra_cols=extra_cols)
 
     # 6) 로그 요약
     logger.info(
@@ -510,6 +541,25 @@ def make_labels_for_horizon(
     gains = signed_future_return_by_hours(df, horizon_hours=int(horizon_hours))
     strategy = _strategy_from_hours(int(horizon_hours))
 
+    # 1-추가) 손절 경유 보조 플래그(±2%) — 라벨엔 반영하지 않음
+    try:
+        both = _future_extreme_signed_returns(df, horizon_hours=int(horizon_hours))
+        n = len(df)
+        dn = both[:n] if both is not None and both.size >= 2 * n else np.zeros(n, dtype=np.float32)
+        up = both[n:] if both is not None and both.size >= 2 * n else np.zeros(n, dtype=np.float32)
+        sl = 0.02
+        up_ge_2pct = (np.asarray(up) >= sl)
+        dn_le_m2pct = (np.asarray(dn) <= -sl)
+        conflict_2pct = up_ge_2pct & dn_le_m2pct
+        extra_cols = {
+            "up_ge_2pct": up_ge_2pct.astype(np.int8),
+            "dn_le_-2pct": dn_le_m2pct.astype(np.int8),
+            "conflict_2pct": conflict_2pct.astype(np.int8),
+        }
+    except Exception as e:
+        logger.warning("labels(h=%s): extra risk flags failed (%s/%s): %s", horizon_hours, symbol, strategy, e)
+        extra_cols = None
+
     # 2) 현재 표본으로 엣지 생성(라벨 고정용) → 저장
     edges, counts0, spans0 = _build_bins(gains, _TARGET_BINS)
 
@@ -523,7 +573,7 @@ def make_labels_for_horizon(
     bin_spans = np.diff(edges) * 100.0
 
     # 5) 저장 (Parquet 우선, 실패 시 CSV 폴백)
-    _save_label_table(df, symbol, strategy, gains, labels, edges, bin_counts, bin_spans)
+    _save_label_table(df, symbol, strategy, gains, labels, edges, bin_counts, bin_spans, extra_cols=extra_cols)
 
     # 6) 로그 요약
     logger.info(
