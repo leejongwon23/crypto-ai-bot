@@ -1578,6 +1578,51 @@ def _self_check(symbol: str = "BTCUSDT") -> Dict[str, Any]:
             out[strat] = {"error": str(e)}
     return out
 
+def future_up_down_by_hours(df: pd.DataFrame, horizon_hours: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    각 캔들에서 지정된 시간(horizon_hours) 동안
+    고가(high)와 저가(low)를 모두 계산해서 상승률(up)과 하락률(down)을 동시에 구한다.
+    """
+    if df is None or len(df) == 0 or "timestamp" not in df.columns:
+        return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.float32)
+
+    ts = _parse_ts_series(df["timestamp"])
+    close = pd.to_numeric(df["close"], errors="coerce").astype(np.float32).values
+    high  = pd.to_numeric(df["high"], errors="coerce").astype(np.float32).values
+    low   = pd.to_numeric(df["low"],  errors="coerce").astype(np.float32).values
+
+    up = np.zeros(len(df), dtype=np.float32)
+    down = np.zeros(len(df), dtype=np.float32)
+    H = pd.Timedelta(hours=int(horizon_hours))
+    j0 = 0
+
+    for i in range(len(df)):
+        t0 = ts.iloc[i]
+        t1 = t0 + H
+        j = max(j0, i)
+        mx = high[i]
+        mn = low[i]
+        while j < len(df) and ts.iloc[j] <= t1:
+            if high[j] > mx: mx = high[j]
+            if low[j]  < mn: mn = low[j]
+            j += 1
+        j0 = max(j - 1, i)
+        base = close[i] if close[i] > 0 else (close[i] + 1e-6)
+        up[i]   = float((mx - base) / (base + 1e-12))
+        down[i] = float((mn - base) / (base + 1e-12))
+
+    return up.astype(np.float32), down.astype(np.float32)
+
+
+def future_up_down(df: pd.DataFrame, strategy: str) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    전략별 시간창에 따라 (up, down) 수익률을 반환한다.
+    단기=4h, 중기=24h, 장기=168h.
+    """
+    hours = {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
+    return future_up_down_by_hours(df, hours)
+
+# ========================= 내보내기 =========================
 # ========================= 내보내기 =========================
 __all__ = [
     # 캐시/상태
@@ -1591,6 +1636,7 @@ __all__ = [
     "get_realtime_prices",
     # 피처
     "compute_features","compute_features_multi","future_gains","future_gains_by_hours",
+    "future_up_down","future_up_down_by_hours",
     # 데이터셋
     "create_dataset","augment_jitter","augment_time_shift","augment_for_min_count",
     # 추론 헬퍼
@@ -1599,7 +1645,8 @@ __all__ = [
     "dump_features","load_latest_features",
     # 기타
     "get_price_source","enough_for_training","not_enough_for_predict","_self_check",
-             ]
+]
+    
 # === 초기화 문제 해결용 추가 코드 ===
 
 def clear_all_caches():
