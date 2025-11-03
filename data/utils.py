@@ -710,85 +710,130 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
     if empty_resp_count >= max_retry * 2: _block_bybit_for(int(os.getenv("BYBIT_BACKOFF_SEC", "900")))
     return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
 
-# Binance
 def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
     real_symbol = SYMBOL_MAP["binance"].get(symbol, symbol)
     _bin_iv = None
     for _, cfg in STRATEGY_CONFIG.items():
-        if cfg.get("interval") == interval: _bin_iv = cfg.get("binance_interval"); break
-    if _bin_iv is None: _bin_iv = {"240":"4h","D":"1d","2D":"2d","60":"1h"}.get(interval, "1h")
+        if cfg.get("interval") == interval:
+            _bin_iv = cfg.get("binance_interval")
+            break
+    if _bin_iv is None:
+        _bin_iv = {"240": "4h", "D": "1d", "2D": "2d", "60": "1h"}.get(interval, "1h")
 
     if not BINANCE_ENABLED:
-        return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
 
-    # === CHANGE: 차단 중일 때도 프로브 시점이 되면 소량 프로빙 허용 ===
+    # === 변경 포인트: 차단 중이어도 '프로브 시점'이면 조금만 시도 ===
     probing = False
     if _is_binance_blocked():
         probe_at = _get_binance_probe_at()
         if probe_at is None or time.time() < probe_at:
             print("[⛔ Binance 차단 중 → 이번엔 스킵]")
-            return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
         else:
-            # 프로빙 시점 도달 → 제한된 소량 요청으로 차단 해제 여부 확인
+            # 프로브 시점 도달 → 소량만
             probing = True
             limit = min(int(limit), 10)
 
-    target_rows = int(limit); collected, total, last_oldest = [], 0, None
+    target_rows = int(limit)
+    collected, total, last_oldest = [], 0, None
 
     while total < target_rows:
         success = False
         for _ in range(max_retry):
             try:
-                rows_needed = target_rows - total; req = min(1000, rows_needed)
+                rows_needed = target_rows - total
+                req = min(1000, rows_needed)
                 params = {"symbol": real_symbol, "interval": _bin_iv, "limit": req}
-                if end_time is not None: params["endTime"] = int(end_time.timestamp() * 1000)
-                res = requests.get(f"{BINANCE_BASE_URL}/fapi/v1/klines", params=params, timeout=10, headers=REQUEST_HEADERS)
+                if end_time is not None:
+                    params["endTime"] = int(end_time.timestamp() * 1000)
+
+                res = requests.get(
+                    f"{BINANCE_BASE_URL}/fapi/v1/klines",
+                    params=params,
+                    timeout=10,
+                    headers=REQUEST_HEADERS,
+                )
                 try:
                     res.raise_for_status()
                 except HTTPError as he:
                     sc = getattr(he.response, "status_code", None)
-                    # === 핵심 수정: 418뿐만 아니라 451(지역/법적 제한), 429(과호출)도 명시적으로 '차단'으로 본다 ===
-                    if sc in (418, 451, 429):
-                        print(f"[⚠️ Binance HTTP {sc}] {he}")
-                        # 451은 길게 묶일 가능성 높으니 기본 600s, 나머지는 300s
-                        base_block = 600 if sc == 451 else 300
-                        _block_binance_for(base_block)
+                    if sc == 418:
+                        # 👉 진짜 IP 차단 케이스만 백오프
+                        _block_binance_for(300)
+                        print("[⚠️ Binance 418] 차단 연장됨")
                         return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
-                    # 그 외 상태코드는 상위로 던짐
+                    if sc == 451:
+                        # 👉 여기 핵심: 451은 '이번 요청만 실패'로 끝. 전체를 차단하지 않는다.
+                        print("[⚠️ Binance 451] 이번 요청만 실패로 처리 (전역 차단 안 함)")
+                        return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+                    # 그 외는 기존대로
+                    print(f"[⚠️ Binance HTTP {sc}] {he}")
                     raise
+
                 raw = res.json()
-                if not raw: break
+                if not raw:
+                    break
+
                 if isinstance(raw[0], (list, tuple)) and len(raw[0]) >= 6:
-                    df_chunk = pd.DataFrame(raw, columns=[
-                        "timestamp","open","high","low","close","volume",
-                        "close_time","quote_asset_volume","trades","taker_base_vol","taker_quote_vol","ignore"
-                    ])
+                    df_chunk = pd.DataFrame(
+                        raw,
+                        columns=[
+                            "timestamp",
+                            "open",
+                            "high",
+                            "low",
+                            "close",
+                            "volume",
+                            "close_time",
+                            "quote_asset_volume",
+                            "trades",
+                            "taker_base_vol",
+                            "taker_quote_vol",
+                            "ignore",
+                        ],
+                    )
                 else:
                     df_chunk = pd.DataFrame(raw)
+
                 df_chunk = _normalize_df(df_chunk)
-                if df_chunk.empty: break
-                collected.append(df_chunk); total += len(df_chunk); success = True
-                if total >= target_rows: break
+                if df_chunk.empty:
+                    break
+
+                collected.append(df_chunk)
+                total += len(df_chunk)
+                success = True
+
+                if total >= target_rows:
+                    break
+
                 oldest_ts = df_chunk["timestamp"].min()
                 if last_oldest is not None and pd.to_datetime(oldest_ts) >= pd.to_datetime(last_oldest):
                     oldest_ts = pd.to_datetime(oldest_ts) - pd.Timedelta(minutes=1)
                 last_oldest = oldest_ts
                 end_time = pd.to_datetime(oldest_ts).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
-                time.sleep(0.3); break
+                time.sleep(0.3)
+                break
             except RequestException:
-                time.sleep(1); continue
+                time.sleep(1)
+                continue
             except Exception:
-                time.sleep(0.5); continue
-        if not success: break
+                time.sleep(0.5)
+                continue
+        if not success:
+            break
 
     if collected:
-        # 프로빙 성공 시 차단 해제
+        # 프로빙이었는데 성공했다 → 차단 해제
         if probing:
             _reset_binance_block()
-        df = _normalize_df(pd.concat(collected, ignore_index=True)); df.attrs["source_exchange"] = "BINANCE"; return df
+        df = _normalize_df(pd.concat(collected, ignore_index=True))
+        df.attrs["source_exchange"] = "BINANCE"
+        return df
 
-    # 프로빙 실패나 기타 실패 시 빈 DF
-    return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+    # 여기까지 왔으면 그냥 빈 DF
+    return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
+
 
 # ========================= 통합 수집 + 병합 =========================
 def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
@@ -832,28 +877,17 @@ def get_kline_interval(symbol: str, interval: str, limit: int) -> pd.DataFrame:
         return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
 
 def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
-    """
-    거래소 통합 수집 → 정규화 → 슬랙 컷 → 연속구간 보장 → 한도(limit) 정확히 맞춤.
-    + 추가 규칙(변경 요점):
-      1) Binance 418/451/429 차단은 지수 백오프 + 프로빙 복구.
-      2) **마지막 캔들 복제 패딩 제거** (실데이터 부족 시 그대로 부족 상태로 반환).
-      3) **슬랙 컷은 2줄 이상 있을 때만 적용** (1줄만 있는 걸 잘라서 0줄 되는 것 방지).
-      4) **두 거래소가 모두 0줄일 때는 이유를 한 줄로 찍어줌**.
-    """
     try:
-        # 0) 슬랙 기본값
         if not end_slack_min:
             try:
                 end_slack_min = int(get_EVAL_RUNTIME().get("price_window_slack_min", 10))
             except Exception:
                 end_slack_min = 0
 
-        # 1) 전략 파라미터
         cfg = STRATEGY_CONFIG.get(strategy, {"limit": 300, "interval": "D"})
         limit = int(cfg.get("limit", 300))
         interval = cfg.get("interval", "D")
 
-        # 2) 메모리/디스크 캐시
         cache_key = f"{symbol.upper()}-{strategy}-slack{end_slack_min}"
         cached = CacheManager.get(cache_key, ttl_sec=600)
         if isinstance(cached, pd.DataFrame) and not cached.empty:
@@ -863,24 +897,20 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
             CacheManager.set(cache_key, cached_disk)
             return cached_disk
 
-        # 3) 원천 수집(Bybit 우선)
         df_bybit = get_kline(symbol, interval=interval, limit=limit)
         if not isinstance(df_bybit, pd.DataFrame):
             df_bybit = pd.DataFrame()
 
-        # 4) 장기일 때 병합 트리거
         force_long_merge = (strategy == "장기") and (len(df_bybit) < limit)
         df_binance = pd.DataFrame()
 
-        # 5) 기본 병합 조건(부족 시) 또는 장기 강제 병합
         if (df_bybit.empty or len(df_bybit) < int(limit * 0.9) or force_long_merge) and BINANCE_ENABLED:
             df_binance = get_kline_binance(symbol, interval=interval, limit=limit)
 
-        # 6) 1차 병합
         dfs = [d for d in [df_bybit, df_binance] if isinstance(d, pd.DataFrame) and not d.empty]
         df = _normalize_df(pd.concat(dfs, ignore_index=True)) if dfs else pd.DataFrame()
 
-        # 7) Bybit만 충분해 보여도 라벨 0개면 Binance 추가 병합 시도(가능할 때)
+        # bybit만 있어도 라벨 0개면 binance 한 번 더
         if (df_binance is None or df_binance.empty) and (not df_bybit.empty) and BINANCE_ENABLED:
             valid_cnt = _count_valid_labels_for_df(df_bybit, symbol, strategy)
             if valid_cnt == 0 and not _is_binance_blocked():
@@ -891,7 +921,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
                 except Exception:
                     pass
 
-        # 7.5) 두 거래소가 모두 0줄인 경우 → 왜 그런지 찍어주기
+        # ❗ 여기서 두 쪽 다 0줄일 때는 캐시하지 말고 그냥 빈 DF만 리턴
         if df.empty:
             print(
                 f"[❗수집실패] {symbol}-{strategy} → bybit_empty={df_bybit.empty} "
@@ -904,33 +934,27 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
             out.attrs["enough_for_training"] = False
             out.attrs["not_enough_rows"] = True
             _log_fetch_summary(symbol, strategy, limit, len(df_bybit), len(df_binance), out.attrs["source_exchange"])
-            CacheManager.set(cache_key, out)
-            _save_df_cache(symbol, strategy, end_slack_min, out)
-            return out
+            return out   # ← 캐시에 안 넣는다
 
-        # 9) 슬랙 컷 — ✅ 데이터가 2줄 이상 있을 때만 자른다
+        # 이하 부분은 네 원래 코드랑 동일
         if end_slack_min > 0 and "timestamp" in df.columns and len(df) > 2:
             ts = _parse_ts_series(df["timestamp"])
             cutoff = ts.max() - pd.Timedelta(minutes=int(end_slack_min))
             df = df.loc[ts <= cutoff].copy()
         elif end_slack_min > 0 and len(df) <= 2:
-            # 슬랙 자르면 0줄 되는 상황이면 그냥 안 자름
             print(f"[슬랙스킵] {symbol}-{strategy} rows={len(df)} slack_min={end_slack_min}")
 
-        # 10) 숫자 보정/결측 제거
         for c in ["open", "high", "low", "close", "volume"]:
             df[c] = pd.to_numeric(df.get(c, np.nan), errors="coerce")
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.dropna(subset=["timestamp", "open", "high", "low", "volume", "close"], inplace=True)
 
-        # 11) 정렬·중복 제거·연속성 확보
         if not df.empty:
             df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
             ts = _parse_ts_series(df["timestamp"])
             diffs = ts.diff().dt.total_seconds().fillna(0)
             df = df.loc[diffs >= 0].reset_index(drop=True)
 
-        # 11.5) ✅ **패딩 제거**: 부족하면 '부족한 상태'로 그대로 반환 (복제 금지)
         bybit_rows = len(df_bybit) if isinstance(df_bybit, pd.DataFrame) else 0
         binance_rows = len(df_binance) if isinstance(df_binance, pd.DataFrame) else 0
         if len(df) < limit:
@@ -938,10 +962,11 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
 
         df = _clip_tail(df, limit)
 
-        # 12) 메타 정보
         srcs = []
-        if not df_bybit.empty: srcs.append("BYBIT")
-        if isinstance(df_binance, pd.DataFrame) and not df_binance.empty: srcs.append("BINANCE")
+        if not df_bybit.empty:
+            srcs.append("BYBIT")
+        if isinstance(df_binance, pd.DataFrame) and not df_binance.empty:
+            srcs.append("BINANCE")
         if "source_exchange" not in df.attrs or not df.attrs.get("source_exchange"):
             df.attrs["source_exchange"] = "+".join(srcs) if srcs else "UNKNOWN"
 
@@ -950,10 +975,9 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
         df.attrs["enough_for_training"] = len(df) >= int(limit * 0.9)
         df.attrs["not_enough_rows"] = len(df) < _PREDICT_MIN_WINDOW
 
-        # === CHANGE: 수집 요약 로그 ===
         _log_fetch_summary(symbol, strategy, limit, bybit_rows, binance_rows, df.attrs["source_exchange"])
 
-        # 13) 캐시 저장 후 반환
+        # ✅ 여기서는 정상 데이터니까 캐시에 저장
         CacheManager.set(cache_key, df)
         _save_df_cache(symbol, strategy, end_slack_min, df)
         return df
@@ -961,7 +985,6 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
     except Exception as e:
         print(f"[❌ get_kline_by_strategy 실패] {symbol}/{strategy}: {e}")
         safe_failed_result(symbol, strategy, reason=str(e))
-        # 예외 시에도 가짜 데이터 생성 금지 → 빈 DF 반환
         out = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
         out.attrs["source_exchange"] = "ERROR"
         out.attrs["recent_rows"] = 0
@@ -969,6 +992,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
         out.attrs["enough_for_training"] = False
         out.attrs["not_enough_rows"] = True
         return out
+
 
 # ========================= 프리패치/티커 =========================
 def prefetch_symbol_groups(strategy: str):
