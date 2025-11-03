@@ -411,8 +411,8 @@ def get_current_group_symbols() -> List[str]: return GROUP_MGR.current_group()
 def reset_group_order(start_index: int = 0) -> None: GROUP_MGR.reset(start_index)
 def rebuild_symbol_groups(symbols: Optional[List[str]] = None, group_size: int = 5) -> None: GROUP_MGR.rebuild_groups(symbols, group_size)
 def group_all_complete() -> bool:
-    i = GROUP_MGR.current_index(); group = set(GROUP_MGR.current_group()); done = GROUP_MGR.trained.get(i, set())
-    return (len(group) > 0) and group.issubset(done)
+    i = GROUP_MGR.current_index(); group = set(GROUP_MGR.current_group()); done = self_trained = GROUP_MGR.trained.get(i, set())
+    return (len(group) > 0) and group.issubset(self_trained)
 
 def _models_exist(model_dir="/persistent/models"):
     try:
@@ -746,12 +746,15 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
                 try:
                     res.raise_for_status()
                 except HTTPError as he:
-                    if getattr(he.response, "status_code", None) == 418:
-                        # 418 → 차단 연장(지수 백오프)
-                        _block_binance_for(300)
-                        print("[⚠️ Binance 418] 차단 연장됨")
+                    sc = getattr(he.response, "status_code", None)
+                    # === 핵심 수정: 418뿐만 아니라 451(지역/법적 제한), 429(과호출)도 명시적으로 '차단'으로 본다 ===
+                    if sc in (418, 451, 429):
+                        print(f"[⚠️ Binance HTTP {sc}] {he}")
+                        # 451은 길게 묶일 가능성 높으니 기본 600s, 나머지는 300s
+                        base_block = 600 if sc == 451 else 300
+                        _block_binance_for(base_block)
                         return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
-                    print(f"[⚠️ Binance HTTP {getattr(he.response,'status_code',0)}] {he}")
+                    # 그 외 상태코드는 상위로 던짐
                     raise
                 raw = res.json()
                 if not raw: break
@@ -784,7 +787,7 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
             _reset_binance_block()
         df = _normalize_df(pd.concat(collected, ignore_index=True)); df.attrs["source_exchange"] = "BINANCE"; return df
 
-    # 프로빙 실패 시에는 위에서 이미 차단 연장됨(418) 또는 빈 DF
+    # 프로빙 실패나 기타 실패 시 빈 DF
     return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
 
 # ========================= 통합 수집 + 병합 =========================
@@ -832,7 +835,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
     """
     거래소 통합 수집 → 정규화 → 슬랙 컷 → 연속구간 보장 → 한도(limit) 정확히 맞춤.
     + 추가 규칙(변경 요점):
-      1) Binance 418 차단은 지수 백오프 + 프로빙 복구.
+      1) Binance 418/451/429 차단은 지수 백오프 + 프로빙 복구.
       2) **마지막 캔들 복제 패딩 제거** (실데이터 부족 시 그대로 부족 상태로 반환).
       3) **슬랙 컷은 2줄 이상 있을 때만 적용** (1줄만 있는 걸 잘라서 0줄 되는 것 방지).
       4) **두 거래소가 모두 0줄일 때는 이유를 한 줄로 찍어줌**.
@@ -1116,7 +1119,7 @@ def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_feat
         if c not in df.columns: df[c] = 0.0
     df = df[["timestamp","open","high","low","close","volume"]]
     if len(df) < 20:
-        safe_failed_result(symbol, strategy, reason=f"row 부족 {len(df)}")
+        safe_failed_result(symbol, strategy, reason="row 부족 {len(df)}")
         dummy = pd.DataFrame(); dummy.attrs["not_enough_rows"] = True; dummy.attrs["recent_rows"] = int(len(df)); return dummy
     try:
         feat = _compute_mtf_features(symbol, strategy, df)
