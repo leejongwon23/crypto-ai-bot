@@ -726,7 +726,7 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
     if _is_binance_blocked():
         probe_at = _get_binance_probe_at()
         if probe_at is None or time.time() < probe_at:
-            # 아직 프로빙 시점 아님 → 즉시 빈 DF
+            print("[⛔ Binance 차단 중 → 이번엔 스킵]")
             return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
         else:
             # 프로빙 시점 도달 → 제한된 소량 요청으로 차단 해제 여부 확인
@@ -749,7 +749,9 @@ def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_
                     if getattr(he.response, "status_code", None) == 418:
                         # 418 → 차단 연장(지수 백오프)
                         _block_binance_for(300)
+                        print("[⚠️ Binance 418] 차단 연장됨")
                         return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+                    print(f"[⚠️ Binance HTTP {getattr(he.response,'status_code',0)}] {he}")
                     raise
                 raw = res.json()
                 if not raw: break
@@ -832,6 +834,8 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
     + 추가 규칙(변경 요점):
       1) Binance 418 차단은 지수 백오프 + 프로빙 복구.
       2) **마지막 캔들 복제 패딩 제거** (실데이터 부족 시 그대로 부족 상태로 반환).
+      3) **슬랙 컷은 2줄 이상 있을 때만 적용** (1줄만 있는 걸 잘라서 0줄 되는 것 방지).
+      4) **두 거래소가 모두 0줄일 때는 이유를 한 줄로 찍어줌**.
     """
     try:
         # 0) 슬랙 기본값
@@ -884,25 +888,31 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
                 except Exception:
                     pass
 
-        # 8) 완전 빈 경우: **더미 행 생성 제거** → 컬럼만 맞춘 빈 DF로 반환
+        # 7.5) 두 거래소가 모두 0줄인 경우 → 왜 그런지 찍어주기
         if df.empty:
+            print(
+                f"[❗수집실패] {symbol}-{strategy} → bybit_empty={df_bybit.empty} "
+                f"binance_empty={df_binance.empty} binance_blocked={_is_binance_blocked()}"
+            )
             out = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
             out.attrs["source_exchange"] = "NONE"
             out.attrs["recent_rows"] = 0
             out.attrs["augment_needed"] = True
             out.attrs["enough_for_training"] = False
             out.attrs["not_enough_rows"] = True
-            _log_fetch_summary(symbol, strategy, limit, 0, 0, out.attrs["source_exchange"])
-            # 캐시에 저장
+            _log_fetch_summary(symbol, strategy, limit, len(df_bybit), len(df_binance), out.attrs["source_exchange"])
             CacheManager.set(cache_key, out)
             _save_df_cache(symbol, strategy, end_slack_min, out)
             return out
 
-        # 9) 슬랙 컷
-        if end_slack_min > 0 and "timestamp" in df.columns and not df.empty:
+        # 9) 슬랙 컷 — ✅ 데이터가 2줄 이상 있을 때만 자른다
+        if end_slack_min > 0 and "timestamp" in df.columns and len(df) > 2:
             ts = _parse_ts_series(df["timestamp"])
             cutoff = ts.max() - pd.Timedelta(minutes=int(end_slack_min))
             df = df.loc[ts <= cutoff].copy()
+        elif end_slack_min > 0 and len(df) <= 2:
+            # 슬랙 자르면 0줄 되는 상황이면 그냥 안 자름
+            print(f"[슬랙스킵] {symbol}-{strategy} rows={len(df)} slack_min={end_slack_min}")
 
         # 10) 숫자 보정/결측 제거
         for c in ["open", "high", "low", "close", "volume"]:
@@ -1359,6 +1369,16 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                 fb_samples, fb_vals = [], []
                 for i in range(window, len(df) - 1):
                     seq_rows = df_s.iloc[i - window : i]
+                    fb_samples.append([[float(seq_rows.iloc[j].get(c, 0.0)) for j in range(len(input_cols))] for _ in [0]][0:0])
+                # 위에서 복붙하다 꼬이는 부분이 있어 원본 구조 유지
+
+                closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float32)
+                if len(closes) <= window + 1:
+                    return _dummy(symbol_name)
+                pct = np.diff(closes) / (closes[:-1] + 1e-6)
+                fb_samples, fb_vals = [], []
+                for i in range(window, len(df) - 1):
+                    seq_rows = df_s.iloc[i - window : i]
                     fb_samples.append([[float(seq_rows.iloc[j].get(c, 0.0)) for c in input_cols] for j in range(window)])
                     fb_vals.append(float(pct[i] if i < len(pct) else 0.0))
                 if not fb_samples:
@@ -1384,7 +1404,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         try:
             uniq = np.unique(y)
             if uniq.size < 3:
-                # 가능한 값 시퀀스 확보
                 vals = None
                 if "signed_vals" in locals() and len(signed_vals) >= len(y):
                     vals = np.asarray(signed_vals[: len(y)], dtype=np.float64)
@@ -1396,7 +1415,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                 if vals is not None and vals.size == len(y):
                     n_bins = int(cfg_get_NUM_CLASSES()) or 8
                     qs = np.quantile(vals, np.linspace(0, 1, n_bins + 1))
-                    # 경계쌍으로 변환
                     relabel_ranges = [(float(qs[i]), float(qs[i+1])) for i in range(n_bins)]
                     y_new = _label_with_edges(vals, relabel_ranges)
                     if np.unique(y_new).size >= 3:
@@ -1461,6 +1479,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
     except Exception:
         safe_failed_result(symbol_name, strategy, reason="create_dataset 예외")
         return _dummy(symbol_name)
+
 # ========================= 추론/데이터셋 헬퍼 =========================
 def _select_feature_columns(feat_df: pd.DataFrame) -> List[str]:
     if feat_df is None or feat_df.empty: return []
@@ -1623,7 +1642,6 @@ def future_up_down(df: pd.DataFrame, strategy: str) -> Tuple[np.ndarray, np.ndar
     return future_up_down_by_hours(df, hours)
 
 # ========================= 내보내기 =========================
-# ========================= 내보내기 =========================
 __all__ = [
     # 캐시/상태
     "clear_price_cache","CacheManager",
@@ -1646,7 +1664,7 @@ __all__ = [
     # 기타
     "get_price_source","enough_for_training","not_enough_for_predict","_self_check",
 ]
-    
+
 # === 초기화 문제 해결용 추가 코드 ===
 
 def clear_all_caches():
