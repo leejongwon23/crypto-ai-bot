@@ -667,6 +667,29 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         except Exception:
             cnt_before = []
 
+        # === ★ NEW: LabelStats를 train-log에 직출(웹에서 바로 보임) ===
+        try:
+            n_bins = int(len(all_ranges_full))
+            empty_idx = [i for i, c in enumerate(cnt_before) if int(c) == 0] if cnt_before else []
+            num_classes_effective = int(np.unique(labels[labels >= 0]).size) if labels.size else 0
+            logger.log_training_result(
+                symbol, strategy, model="all",
+                accuracy=None, f1=None, loss=None,
+                val_acc=None, val_f1=None, val_loss=None,
+                engine="manual", window=None, recent_cap=None,
+                rows=int(len(df)), limit=int(STRATEGY_CONFIG.get(strategy,{}).get("limit",300)),
+                min=int(max(60,int(STRATEGY_CONFIG.get(strategy,{}).get("limit",300)*0.90))),
+                augment_needed=bool(augment_needed), enough_for_training=bool(enough_for_training),
+                note=f"[LabelStats] bins={n_bins}, empty={len(empty_idx)}, classes={num_classes_effective}, empty_idx={empty_idx[:8]}",
+                source_exchange="BYBIT", status="info",
+                # 표준 칼럼에도 함께 넣어 둠
+                NUM_CLASSES=int(n_bins),
+                class_counts_label_freeze=cnt_before
+            )
+        except Exception:
+            pass
+        # === ★ NEW 끝 ===
+
         # 특징행렬 정제
         drop_cols = [c for c in ("timestamp","strategy","symbol") if c in feat.columns]
         feat_num = feat.drop(columns=drop_cols, errors="ignore").select_dtypes(include=[np.number])
