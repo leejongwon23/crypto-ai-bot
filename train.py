@@ -1,4 +1,4 @@
-# train.py — SPEED v2.5 FINAL (NO-SKIP AUTO-TRAIN, GROUP_ACTIVE + GROUP_TRAIN_LOCK, 라벨/분포 복구 강화, 로그스키마 정합 + 5종 진단로그)
+# train.py — SPEED v2.6 FINAL (NO-SKIP AUTO-TRAIN 강화판, 희소구간 강제학습, GROUP_ACTIVE + GROUP_TRAIN_LOCK, 라벨/분포 복구 강화, 로그스키마 정합 + 5종 진단로그)
 # -*- coding: utf-8 -*-
 import os, time, glob, shutil, json, random, traceback, threading, gc, csv
 from datetime import datetime
@@ -733,14 +733,20 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 X_raw, y, syn = _synthesize_minority_if_needed(X_raw, y, num_classes=len(class_ranges))
                 repaired_info["synthetic_labels"] = syn
 
-            # === usable_samples 기준 스킵 ===
+            # === usable_samples 기준 (무스킵 정책) ===
             usable_samples = int(len(y))
+            note_msg = ""
             if usable_samples == 0:
-                _log_skip(symbol,strategy,f"유효 라벨 샘플 없음(w={window})"); continue
+                _log_skip(symbol,strategy,f"유효 라벨 샘플 없음(w={window})")
+                continue
+            if y.min() < 0:
+                _log_skip(symbol,strategy,f"음수 라벨 유입 감지(w={window})")
+                continue
 
-            if y.min()<0: _log_skip(symbol,strategy,f"음수 라벨 유입 감지(w={window})"); continue
-            if len(X_raw)<10: _log_skip(symbol,strategy,f"샘플 부족(w={window})"); continue
-            if len(np.unique(y))<2: _log_skip(symbol,strategy,f"라벨 단일 클래스(보정 실패)(w={window})"); continue
+            # 희소 학습 경고(로그만, 학습 강행)
+            if usable_samples < 20:
+                note_msg = f"⚠️ 희소 학습 (샘플 {usable_samples})"
+                _safe_print(f"[WARN] {symbol}-{strategy}-w{window}: {note_msg}")
 
             set_NUM_CLASSES(len(class_ranges))
 
@@ -752,17 +758,36 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     tr_idx, val_idx = next(splitter.split(X_raw, y)); strat_ok=True
             except: strat_ok=False
             if not strat_ok:
-                train_idx, val_idx = coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, num_classes=len(class_ranges))
+                try:
+                    train_idx, val_idx = coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, num_classes=len(class_ranges))
+                except Exception:
+                    # 미니멀 분할 폴백: 1개면 train=val=[0], 2개면 1/1
+                    n=len(y)
+                    if n<=1:
+                        train_idx=np.array([0],dtype=int); val_idx=np.array([0],dtype=int)
+                    else:
+                        train_idx=np.arange(0, n-1, dtype=int); val_idx=np.array([n-1], dtype=int)
             else:
                 train_idx, val_idx = tr_idx, val_idx
 
-            if len(train_idx)==0 or len(val_idx)==0:
-                _log_skip(symbol,strategy,f"분할 실패(w={window})"); continue
+            # 분할 실패/빈 분할 방지: 미니멀 분할 재보정
+            if len(train_idx)==0 and len(val_idx)==0:
+                n=len(y)
+                if n<=1:
+                    train_idx=np.array([0],dtype=int); val_idx=np.array([0],dtype=int)
+                else:
+                    train_idx=np.arange(0, n-1, dtype=int); val_idx=np.array([n-1], dtype=int)
+            elif len(train_idx)==0:
+                # 하나를 train으로 이동
+                val_take = int(val_idx[0])
+                train_idx = np.array([val_take], dtype=int)
+                val_idx = np.array([val_idx[-1]], dtype=int)
+            elif len(val_idx)==0:
+                val_idx = np.array([train_idx[-1]], dtype=int)
+                train_idx = train_idx[:-1] if len(train_idx)>1 else train_idx
 
-            # [보강] 검증셋 2클래스 보장
-            train_idx, val_idx, moved = _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2)
-            if len(train_idx)==0 or len(val_idx)==0:
-                _log_skip(symbol,strategy,f"분할 후 크기 오류(w={window})"); continue
+            # [보강] 검증셋 2클래스 보장(가능하면), 불가해도 강행
+            train_idx, val_idx, _ = _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2)
 
             # === 진단 5종 중 나머지 2개 계산 ===
             try:
@@ -773,6 +798,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
 
             # === 윈도우 시작 1회 진단 로그 ===
             try:
+                base_note = "prep(stats)"
+                if note_msg:
+                    base_note += f" | {note_msg}"
                 logger.log_training_result(
                     symbol, strategy, model="all",
                     accuracy=None, f1=None, loss=None,
@@ -780,7 +808,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     engine="manual", window=int(window), recent_cap=int(len(features_only)),
                     rows=int(len(df)), limit=int(STRATEGY_CONFIG.get(strategy,{}).get("limit",300)), min=int(max(60,int(STRATEGY_CONFIG.get(strategy,{}).get("limit",300)*0.90))),
                     augment_needed=bool(augment_needed), enough_for_training=bool(enough_for_training),
-                    note="prep(stats)",
+                    note=base_note,
                     source_exchange="BYBIT", status="prep",
                     # === 5종 ===
                     NUM_CLASSES=int(len(class_ranges)),
@@ -797,8 +825,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             train_X=scaler.transform(Xtr_flat).reshape(len(train_idx),window,feat_dim)
             val_X  =scaler.transform(X_raw[val_idx].reshape(-1,feat_dim)).reshape(len(val_idx),window,feat_dim)
             train_y, val_y = y[train_idx], y[val_idx]
-            if len(np.unique(train_y))<2 or len(np.unique(val_y))<2:
-                _log_skip(symbol,strategy,f"분할 후 단일 클래스(w={window})"); _release_memory(X_raw,y,train_idx,val_idx,scaler); continue
+            # (중요) 여기서는 단일 클래스여도 강행. 기존 스킵 조건 제거.
 
             local_epochs=_epochs_for(strategy)
             if len(train_X)<200: local_epochs=max(6, int(round(local_epochs*0.7)))
@@ -1046,6 +1073,9 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
 
                 # === 성공 로그(진단 5종 포함) ===
                 try:
+                    final_note = f"train_one_model(window={window}, cap={len(features_only)}, engine=manual)"
+                    if note_msg:
+                        final_note += f" | {note_msg}"
                     logger.log_training_result(
                         symbol, strategy,
                         model=os.path.basename(wpath),
@@ -1054,7 +1084,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                         engine="manual", window=int(window), recent_cap=int(len(features_only)),
                         rows=int(len(df)), limit=int(_limit), min=int(_min_required),
                         augment_needed=bool(augment_needed), enough_for_training=bool(enough_for_training),
-                        note=(f"train_one_model(window={window}, cap={len(features_only)}, engine=manual)"),
+                        note=final_note,
                         source_exchange="BYBIT", status="success",
                         y_true=lbls, y_pred=preds, num_classes=len(class_ranges),
                         # === 5종 ===
