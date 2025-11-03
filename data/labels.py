@@ -47,14 +47,14 @@ _OUT_Q_HIGH = float(os.getenv("OUTLIER_Q_HIGH", str(_BIN_META.get("OUTLIER_Q_HIG
 # 단일 bin 폭 상한(절대 %)
 _MAX_BIN_SPAN_PCT = _as_percent(float(os.getenv("MAX_BIN_SPAN_PCT", str(_BIN_META.get("MAX_BIN_SPAN_PCT", 8.0)))))
 
-# 최소 샘플 비율(희소 bin 병합 기준, [0~1])
+# 최소 샘플 비율(과거 로직 잔존용; 본 개정본에서는 임의 병합을 하지 않으므로 사용하지 않음)
 _MIN_BIN_COUNT_FRAC = float(os.getenv("MIN_BIN_COUNT_FRAC", str(_BIN_META.get("MIN_BIN_COUNT_FRAC", 0.05))))
 
 # 추가 메타(지배적 bin 제어, 센터 밴드 상한)
 _DOMINANT_MAX_FRAC = float(os.getenv("DOMINANT_MAX_FRAC", str(_BIN_META.get("DOMINANT_MAX_FRAC", 0.35))))
 _DOMINANT_MAX_ITERS = int(os.getenv("DOMINANT_MAX_ITERS", str(_BIN_META.get("DOMINANT_MAX_ITERS", 6))))
 
-# 중앙 밴드 상한(%) — config에는 0.3(%) 또는 0.003(비율) 등 혼재 가능 → %로 정규화
+# 중앙 밴드 상한(%) — config 혼재 단위 → %로 정규화
 _CENTER_SPAN_MAX_PCT = _as_percent(float(os.getenv("CENTER_SPAN_MAX_PCT", str(_BIN_META.get("CENTER_SPAN_MAX_PCT", 0.5)))))
 
 # CLASS_BIN zero-band 힌트(없으면 중앙폭 상한과 동일 취급) → %로 정규화
@@ -190,24 +190,35 @@ def _split_wide_bins(edges: np.ndarray, max_span_pct: float) -> np.ndarray:
             i += 1
     return _dedupe_edges(np.array(e, dtype=float))
 
-def _merge_sparse_bins(edges: np.ndarray, counts: np.ndarray, min_count: int) -> Tuple[np.ndarray, np.ndarray]:
-    e = edges.astype(float).tolist()
-    c = counts.astype(int).tolist()
-    changed = True
-    while changed and len(e) > 2:
-        changed = False
-        for i in range(len(c)):
-            if c[i] < min_count:
-                if i == 0:
-                    c[i+1] += c[i]; del c[i]; del e[i+1]; changed = True; break
-                elif i == len(c) - 1:
-                    c[i-1] += c[i]; del c[i]; del e[i]; changed = True; break
-                else:
-                    if c[i-1] >= c[i+1]:
-                        c[i-1] += c[i]; del c[i]; del e[i]; changed = True; break
-                    else:
-                        c[i+1] += c[i]; del c[i]; del e[i+1]; changed = True; break
-    return np.array(e, dtype=float), np.array(c, dtype=int)
+def _drop_empty_bins(edges: np.ndarray, counts: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    ✅ 임의 병합 금지 정책:
+    - 카운트가 0인 bin만 제거하여 엣지를 정리한다.
+    - 카운트>0 bin은 소수라도 유지한다.
+    """
+    if edges.size < 2 or counts.size != edges.size - 1:
+        return edges.astype(float), counts.astype(int) if counts is not None else np.zeros(0, dtype=int)
+
+    keep_mask = counts.astype(int) > 0
+    if np.all(keep_mask):
+        return edges.astype(float), counts.astype(int)
+
+    # edges: [e0, e1, e2, e3, ...] / counts: [c0, c1, c2, ...]
+    # c_i == 0 인 간격 [e_i, e_{i+1}] 을 삭제 → e_{i+1} 제거
+    new_edges = [float(edges[0])]
+    new_counts = []
+    for i, cnt in enumerate(counts):
+        if int(cnt) > 0:
+            new_edges.append(float(edges[i+1]))
+            new_counts.append(int(cnt))
+        else:
+            # 빈 구간은 스킵(엣지 상단을 건너뜀)
+            pass
+
+    if len(new_edges) < 2:  # 모든 구간이 비었을 때는 원본 유지(최소 형태)
+        return edges.astype(float), counts.astype(int)
+
+    return _dedupe_edges(np.array(new_edges, dtype=float)), np.array(new_counts, dtype=int)
 
 def _enforce_zero_band(edges: np.ndarray, zero_band_pct: float) -> np.ndarray:
     # zero_band_pct는 '퍼센트 수치' (예: 0.3 = 0.3%) 기준
@@ -291,6 +302,14 @@ def _limit_dominant_bins(edges: np.ndarray, x_clip: np.ndarray,
     return _dedupe_edges(e)
 
 def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    ✅ 핵심 변경점
+    - 동적 등빈분할 기반으로 엣지 생성
+    - 과폭 분할 보정
+    - ✅ **빈 bin(카운트 0)만 제거** (임의 병합 금지)
+    - 지배적 bin 분할 + 중앙폭 제한
+    - zero-band 보정 + 0 경계 보장
+    """
     x = np.asarray(gains, dtype=float)
     x = x[np.isfinite(x)]
     if x.size == 0:
@@ -299,34 +318,40 @@ def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.nda
         spans = np.diff(edges) * 100.0
         return edges, counts, spans
 
+    # 1) 이상치 클리핑
     x_clip, _, _ = _clip_outliers(x)
+
+    # 2) 초기 등빈 엣지
     k = max(2, int(target_bins))
     edges = _equal_freq_edges(x_clip, k)
 
-    # 과폭 분할 (MAX_BIN_SPAN_PCT는 % 수치)
+    # 3) 과폭 분할 보정
     edges = _split_wide_bins(edges, _MAX_BIN_SPAN_PCT)
 
-    # 카운트
+    # 4) 현재 카운트 측정
     edges_count = edges.copy(); edges_count[-1] += _EDGE_EPS
     counts, _ = np.histogram(x_clip, bins=edges_count)
 
-    # 희소 병합
-    min_count = max(1, int(np.ceil(_MIN_BIN_COUNT_FRAC * x_clip.size)))
-    edges, counts = _merge_sparse_bins(edges, counts, min_count)
+    # 5) ✅ 빈 bin만 제거 (임의 병합 금지)
+    edges, counts = _drop_empty_bins(edges, counts)
 
-    # 지배적 분할 + 중앙 폭 제한 (CENTER_SPAN_MAX_PCT는 % 수치)
+    # 6) 지배적 bin 분할 + 중앙 폭 제한
     edges = _limit_dominant_bins(
         edges, x_clip,
         max_frac=float(_DOMINANT_MAX_FRAC),
         max_iters=int(_DOMINANT_MAX_ITERS),
-        center_span_max_pct=float(_CENTER_SPAN_MAX_PCT),  # ← 오타 수정
+        center_span_max_pct=float(_CENTER_SPAN_MAX_PCT),
     )
 
-    # zero-band 보정 + 0 경계 보장 (ZERO_BAND_PCT_HINT는 % 수치)
+    # 7) zero-band 보정 + 0 경계 보장
     edges = _enforce_zero_band(edges, _ZERO_BAND_PCT_HINT)
     edges = _ensure_zero_edge(edges)
 
+    # 8) 최종 카운트/스팬 재계산
+    edges_count = edges.copy(); edges_count[-1] += _EDGE_EPS
+    counts, _ = np.histogram(x_clip, bins=edges_count)
     spans_pct = np.diff(edges) * 100.0
+
     return edges.astype(float), counts.astype(int), spans_pct.astype(float)
 
 # ============================
@@ -589,10 +614,12 @@ def make_labels(
     # 5) 라벨/엣지 고정 저장(Parquet 우선 저장, 실패 시 CSV 폴백) + 경계 JSON(+extra_meta)
     _save_label_table(df, symbol, strategy, gains, labels, edges, bin_counts, bin_spans, extra_cols=extra_cols, extra_meta=extra_meta)
 
-    # 6) 로그 요약
+    # 6) 로그 요약 (체크리스트 스타일)
+    empty_bins = int(np.sum(bin_counts == 0))
+    num_classes = int(edges.size - 1)
     logger.info(
-        "labels: freeze %s/%s NUM_CLASSES=%d counts=%s",
-        symbol, strategy, int(edges.size - 1), _counts_dict(labels)
+        "labels: freeze %s/%s bins(fd)=%d, empty=%d -> NUM_CLASSES=%d counts=%s",
+        symbol, strategy, int(_TARGET_BINS), empty_bins, num_classes, _counts_dict(labels)
     )
 
     return gains.astype(np.float32), labels.astype(np.int64), class_ranges, edges.astype(float), bin_counts.astype(int), bin_spans.astype(float)
@@ -665,10 +692,12 @@ def make_labels_for_horizon(
     # 5) 저장 (Parquet 우선, 실패 시 CSV 폴백) + 경계 JSON(+extra_meta)
     _save_label_table(df, symbol, strategy, gains, labels, edges, bin_counts, bin_spans, extra_cols=extra_cols, extra_meta=extra_meta)
 
-    # 6) 로그 요약
+    # 6) 로그 요약 (체크리스트 스타일)
+    empty_bins = int(np.sum(bin_counts == 0))
+    num_classes = int(edges.size - 1)
     logger.info(
-        "labels(h=%s): freeze %s/%s NUM_CLASSES=%d counts=%s",
-        horizon_hours, symbol, strategy, int(edges.size - 1), _counts_dict(labels)
+        "labels(h=%s): freeze %s/%s bins(fd)=%d, empty=%d -> NUM_CLASSES=%d counts=%s",
+        horizon_hours, symbol, strategy, int(_TARGET_BINS), empty_bins, num_classes, _counts_dict(labels)
     )
 
     return gains.astype(np.float32), labels.astype(np.int64), class_ranges, strategy, edges.astype(float), bin_counts.astype(int), bin_spans.astype(float)
