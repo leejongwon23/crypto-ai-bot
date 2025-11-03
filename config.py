@@ -145,8 +145,6 @@ _default_config = {
         "expected_return_mode": "truncated_mid"
     },
 
-   # ... (위쪽 동일)
-
     # === 빈 분포 메타(이번 변경 핵심 상수) ===
     "BIN_META": {
         "TARGET_BINS": 8,            # 목표 bin 개수
@@ -157,9 +155,8 @@ _default_config = {
         # === CHANGE === labels.py와 동기화되는 지배 bin/중앙폭 제어 추가
         "DOMINANT_MAX_FRAC": 0.35,
         "DOMINANT_MAX_ITERS": 6,
-        "CENTER_SPAN_MAX_PCT": 0.3   # ✅ 중앙(0 포함) 구간 최대 폭을 0.3%로 강제 (기존 0.5%)
+        "CENTER_SPAN_MAX_PCT": 0.3   # ✅ 중앙(0 포함) 구간 최대 폭을 0.3%로 강제
     },
-
 
     "CV_CONFIG": {"folds": 5, "min_per_class": 3, "fallback_reduce_folds": True, "fallback_stratified": True},
 
@@ -223,9 +220,9 @@ _default_config = {
 
 # === STRATEGY_CONFIG (안정 한도로 조정) ===
 STRATEGY_CONFIG = {
-    "단기": {"interval": "240", "limit": 1000, "binance_interval": "4h"},  # 1200 → 800
-    "중기": {"interval": "D",   "limit": 500, "binance_interval": "1d"},  # 1200 → 500
-    "장기": {"interval": "D",   "limit": 500, "binance_interval": "1d"},  # 1200 → 400
+    "단기": {"interval": "240", "limit": 1000, "binance_interval": "4h"},
+    "중기": {"interval": "D",   "limit": 500, "binance_interval": "1d"},
+    "장기": {"interval": "D",   "limit": 500, "binance_interval": "1d"},
 }
 
 _STRATEGY_RETURN_CAP_POS_MAX = {"단기": 0.06, "중기": 0.20, "장기": 0.50}
@@ -303,7 +300,7 @@ def get_MIN_FEATURES():       return int(_config.get("MIN_FEATURES", _default_co
 
 def get_SYMBOLS():
     vals = _config.get("SYMBOLS", _default_config["SYMBOLS"])
-    return list(vals)[:]  # ✅ 리스트 사본
+    return list(vals)[:]
 
 def get_SYMBOL_GROUPS():
     symbols = get_SYMBOLS()
@@ -329,9 +326,9 @@ def get_class_groups(num_classes=None, group_size=None):
     if group_size < 2: group_size = 2
     groups = [list(range(num_classes))] if num_classes <= group_size else [list(range(i, min(i + group_size, num_classes))) for i in range(0, num_classes, group_size)]
     _log(f"[📊 클래스 분포 그룹] 총={num_classes}, 그룹크기={group_size}, 그룹수={len(groups)}")
-    return copy.deepcopy(groups)  # ✅ 사본
+    return copy.deepcopy(groups)
 
-# 신규 옵션 Getter (모두 deepcopy로 반환)
+# 신규 옵션 Getter
 def get_REGIME():   return copy.deepcopy(_config.get("REGIME", _default_config["REGIME"]))
 def get_CALIB():    return copy.deepcopy(_config.get("CALIB", _default_config["CALIB"]))
 def get_LOSS():     return copy.deepcopy(_config.get("LOSS", _default_config["LOSS"]))
@@ -374,7 +371,6 @@ def get_IO():              return copy.deepcopy(_config.get("IO", _default_confi
 def get_PREDICT_OUT_DIR(): return os.getenv("PREDICT_OUTPUT_DIR", get_IO().get("predict_out"))
 def get_GUANWU_IN_DIR():   return os.getenv("GUANWU_INPUT_DIR",   get_IO().get("guanwu_in"))
 
-# 관우·예측 로그 경로 getter
 def get_PREDICTION_LOG_PATH():
     return os.getenv("PREDICTION_LOG_PATH", _config.get("PREDICTION_LOG_PATH", _default_config["PREDICTION_LOG_PATH"]))
 
@@ -384,7 +380,6 @@ def get_GANWU_PATH():
 def get_TRAIN_LOG_PATH():
     return os.getenv("TRAIN_LOG_PATH", _config.get("TRAIN_LOG_PATH", _default_config["TRAIN_LOG_PATH"]))
 
-# 디스크 캐시 강제 off
 def is_disk_cache_off() -> bool:
     return str(os.getenv("DISK_CACHE_OFF", "0")).strip().lower() in {"1","true","yes","on"}
 
@@ -398,7 +393,7 @@ def get_CLASS_ENFORCE() -> dict:
     if s1 is not None: base["same_across_groups"] = _env_bool(s1)
     s2 = os.getenv("CLASS_SAME_ACROSS_SYMBOLS", None)
     if s2 is not None: base["same_across_symbols"] = _env_bool(s2)
-    return copy.deepcopy(base)  # ✅ 사본
+    return copy.deepcopy(base)
 
 def _data_from_env(base: dict) -> dict:
     d = copy.deepcopy(base or {})
@@ -520,34 +515,53 @@ def _strictify(ranges):
 def _strategy_horizon_hours(strategy: str) -> int:
     return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
 
+# ✅ 여기부터가 문제였던 함수의 교체본
 def _future_extreme_signed_returns(df, horizon_hours: int):
+    """
+    미래 수익률을 '시간으로 무한정 훑는' 대신
+    캔들 개수를 추정해서 그 개수만큼만 본다.
+
+    예)
+    - 4h 봉 + horizon=4h  → 딱 1봉
+    - 1d 봉 + horizon=24h → 딱 1봉
+    - 1d 봉 + horizon=168h → 딱 7봉
+
+    이렇게 해야 장기가 1년치 고가/저가를 끌어오는 일이 사라짐.
+    """
     import numpy as np, pandas as pd
+
     if df is None or len(df) == 0 or "timestamp" not in df.columns or "close" not in df.columns:
         return np.zeros(0, dtype=np.float32)
+
     ts = pd.to_datetime(df["timestamp"], errors="coerce")
-    if getattr(ts.dt, "tz", None) is None: ts = ts.dt.tz_localize("Asia/Seoul")
-    else: ts = ts.dt.tz_convert("Asia/Seoul")
     close = pd.to_numeric(df["close"], errors="coerce").ffill().bfill().astype(float).values
     high  = pd.to_numeric(df["high"] if "high" in df.columns else df["close"], errors="coerce").ffill().bfill().astype(float).values
     low   = pd.to_numeric(df["low"]  if "low"  in df.columns else df["close"], errors="coerce").ffill().bfill().astype(float).values
-    horizon = pd.Timedelta(hours=int(horizon_hours))
-    up = np.zeros(len(df), dtype=np.float32); dn = np.zeros(len(df), dtype=np.float32)
-    j_up = j_dn = 0
+
+    # 1) 캔들 평균 간격(시간) 추정
+    if len(ts) > 1:
+        total_h = (ts.iloc[-1] - ts.iloc[0]).total_seconds() / 3600.0
+        avg_interval_h = max(0.5, total_h / (len(ts) - 1))  # 최소 0.5h
+    else:
+        avg_interval_h = 1.0
+
+    # 2) horizon_hours → 몇 봉 볼지 환산
+    lookahead_n = int(max(1, round(float(horizon_hours) / float(avg_interval_h))))
+
+    up = np.zeros(len(df), dtype=np.float32)
+    dn = np.zeros(len(df), dtype=np.float32)
+
     for i in range(len(df)):
-        t1 = ts.iloc[i] + horizon
-        j = max(j_up, i); max_h = high[i]
-        while j < len(df) and ts.iloc[j] < t1:
-            if high[j] > max_h: max_h = high[j]
-            j += 1
-        j_up = max(j_up, i)
-        base = close[i] if close[i] > 0 else (close[i] + 1e-6)
-        up[i] = float((max_h - base) / (base + 1e-12))
-        k = max(j_dn, i); min_l = low[i]
-        while k < len(df) and ts.iloc[k] < t1:
-            if low[k] < min_l: min_l = low[k]
-            k += 1
-        j_dn = max(j_dn, i)
-        dn[i] = float((min_l - base) / (base + 1e-12))
+        j_end = min(len(df), i + lookahead_n)
+        base = close[i] if close[i] != 0 else 1e-8
+
+        # 해당 구간에서 실제로 관측된 최댓값/최솟값만 사용
+        max_h = float(np.nanmax(high[i:j_end]))
+        min_l = float(np.nanmin(low[i:j_end]))
+
+        up[i] = (max_h - base) / base
+        dn[i] = (min_l - base) / base
+
     return np.concatenate([dn, up]).astype(np.float32)
 
 def _choose_n_classes(rets_signed, max_classes, hint_min=4):
@@ -700,7 +714,6 @@ def get_class_return_range(class_id: int, symbol: str, strategy: str):
     ranges = _ranges_cache.get(key)
     if ranges is None:
         ranges = get_class_ranges(symbol=symbol, strategy=strategy)
-        # ranges는 deepcopy 리스트. 캐시에 불변형으로 저장
         _ranges_cache[key] = tuple((float(a), float(b)) for (a, b) in ranges)
         ranges = _ranges_cache[key]
     n = len(ranges)
@@ -861,11 +874,9 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     else:
         all_ranges = compute_ranges_from_kline()
 
-    # ✅ 캐시에 불변형으로 저장
     if symbol is not None and strategy is not None:
         _ranges_cache[(symbol, strategy)] = tuple((float(a), float(b)) for (a, b) in all_ranges)
 
-    # 디버그 로그 (변경 없음)
     try:
         if symbol is not None and strategy is not None and not _quiet():
             import numpy as np
@@ -897,7 +908,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     except Exception:
         pass
 
-    # 그룹 잘라 반환(사본)
     if group_id is None:
         return copy.deepcopy(all_ranges)
     start = int(group_id) * int(group_size)
@@ -905,7 +915,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     if start >= len(all_ranges): return []
     return copy.deepcopy(all_ranges[start:end])
 
-# ENV 기반 러닝 파라미터
 def _get_int(name, default):
     try: return int(os.getenv(name, str(default)))
     except Exception: return int(default)
@@ -935,7 +944,6 @@ _DFLT_STEP = str(_config.get("CLASS_BIN", {}).get("step_pct", 0.0030))
 DYN_CLASS_STEP = float(os.getenv("CLASS_BIN_STEP", os.getenv("DYN_CLASS_STEP", _DFLT_STEP)))
 BOUNDARY_BAND = float(os.getenv("BOUNDARY_BAND", "0.0020"))
 CV_FOLDS   = int(os.getenv("CV_FOLDS", "5"))
-# === CHANGE === F1 스킵 게이트 무력화: 기본값 0.0
 CV_GATE_F1 = float(os.getenv("CV_GATE_F1", "0.0"))
 
 def _publish_from_env(base: dict) -> dict:
@@ -1041,4 +1049,4 @@ __all__ = [
     "is_config_readonly", "is_disk_cache_off",
     "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
     "get_BIN_META",
-]
+                                         ]
