@@ -107,6 +107,33 @@ from config import (
     STRATEGY_CONFIG, get_QUALITY, get_LOSS, BOUNDARY_BAND, get_TRAIN_LOG_PATH
 )
 
+# ================================================
+# ⚠️ 여기서부터 경로를 전부 "안전 경로"로 바꿈
+# 기본은 /tmp/persistent 밑으로 저장. 환경변수 PERSIST_DIR 있으면 그거 씀.
+# ================================================
+BASE_PERSIST_DIR = os.getenv("PERSIST_DIR", "/tmp/persistent")
+try:
+    os.makedirs(BASE_PERSIST_DIR, exist_ok=True)
+except Exception:
+    # 최후 폴백
+    BASE_PERSIST_DIR = "/tmp/persistent-fallback"
+    os.makedirs(BASE_PERSIST_DIR, exist_ok=True)
+
+LOG_DIR = os.getenv("LOG_DIR", os.path.join(BASE_PERSIST_DIR, "logs"))
+os.makedirs(LOG_DIR, exist_ok=True)
+
+MODEL_DIR = os.getenv("MODEL_DIR", os.path.join(BASE_PERSIST_DIR, "models"))
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+# run/ 락파일 위치도 안전 경로로
+RUN_DIR = os.getenv("RUN_DIR", os.path.join(BASE_PERSIST_DIR, "run"))
+os.makedirs(RUN_DIR, exist_ok=True)
+
+# GROUP_ACTIVE 도 여기로
+GROUP_ACTIVE_PATH = os.path.join(BASE_PERSIST_DIR, "GROUP_ACTIVE")
+PERSIST_DIR = BASE_PERSIST_DIR  # 아래 코드들이 쓰는 이름 그대로 둠
+# ================================================
+
 # ==== [ADD] train 로그 경로/헤더 보장 ====
 # 운영 CSV 스키마(사용자 제공)와 정합되도록 확장 + 진단 5종 필드 추가
 DEFAULT_TRAIN_HEADERS = [
@@ -125,10 +152,18 @@ try:
 except Exception:
     TRAIN_HEADERS = DEFAULT_TRAIN_HEADERS
 
-LOG_DIR = "/persistent/logs"; os.makedirs(LOG_DIR, exist_ok=True)
-TRAIN_LOG = get_TRAIN_LOG_PATH()
-try: os.makedirs(os.path.dirname(TRAIN_LOG), exist_ok=True)
-except Exception: pass
+# config 가 /persistent/... 를 돌려줘도 여기서 안전폴더로 치환
+_raw_train_log_path = get_TRAIN_LOG_PATH()
+if _raw_train_log_path.startswith("/persistent"):
+    TRAIN_LOG = os.path.join(BASE_PERSIST_DIR, os.path.relpath(_raw_train_log_path, "/persistent"))
+else:
+    TRAIN_LOG = _raw_train_log_path
+try:
+    os.makedirs(os.path.dirname(TRAIN_LOG), exist_ok=True)
+except Exception:
+    # 마지막 폴백: BASE_PERSIST_DIR 밑에 두기
+    TRAIN_LOG = os.path.join(BASE_PERSIST_DIR, "train_log.csv")
+    os.makedirs(os.path.dirname(TRAIN_LOG), exist_ok=True)
 
 def _ensure_train_log():
     try:
@@ -237,7 +272,7 @@ except Exception:
 
 # ---------- 전역 상수 ----------
 DEVICE=torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MODEL_DIR="/persistent/models"; os.makedirs(MODEL_DIR,exist_ok=True)
+# MODEL_DIR 은 위에서 안전경로로 이미 만들었음
 NUM_CLASSES=get_NUM_CLASSES()
 FEATURE_INPUT_SIZE=get_FEATURE_INPUT_SIZE()
 
@@ -291,12 +326,7 @@ PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC","180"))
 IMPORTANCE_ENABLE = os.getenv("IMPORTANCE_ENABLE", "1") == "1"
 
 # === GROUP_ACTIVE + GROUP_TRAIN_LOCK ===
-PERSIST_DIR = "/persistent"
-GROUP_ACTIVE_PATH = os.path.join(PERSIST_DIR, "GROUP_ACTIVE")
-
-# [ADD] 그룹 학습 락 폴더/파일 (app.py와 동일 키)
-RUN_DIR = os.path.join(PERSIST_DIR, "run")
-os.makedirs(RUN_DIR, exist_ok=True)
+# PERSIST_DIR, RUN_DIR 은 위에서 이미 안전하게 만들었음
 GROUP_TRAIN_LOCK = os.path.join(RUN_DIR, "group_training.lock")
 
 def _set_group_active(active: bool, group_idx: int | None = None, symbols: list | None = None):
@@ -667,7 +697,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         except Exception:
             cnt_before = []
 
-        # === ★ NEW: LabelStats를 train-log에 직출(웹에서 바로 보임) ===
+        # ★ LabelStats 로그
         try:
             n_bins = int(len(all_ranges_full))
             empty_idx = [i for i, c in enumerate(cnt_before) if int(c) == 0] if cnt_before else []
@@ -682,13 +712,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 augment_needed=bool(augment_needed), enough_for_training=bool(enough_for_training),
                 note=f"[LabelStats] bins={n_bins}, empty={len(empty_idx)}, classes={num_classes_effective}, empty_idx={empty_idx[:8]}",
                 source_exchange="BYBIT", status="info",
-                # 표준 칼럼에도 함께 넣어 둠
                 NUM_CLASSES=int(n_bins),
                 class_counts_label_freeze=cnt_before
             )
         except Exception:
             pass
-        # === ★ NEW 끝 ===
 
         # 특징행렬 정제
         drop_cols = [c for c in ("timestamp","strategy","symbol") if c in feat.columns]
@@ -733,7 +761,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 X_raw, y, syn = _synthesize_minority_if_needed(X_raw, y, num_classes=len(class_ranges))
                 repaired_info["synthetic_labels"] = syn
 
-            # === usable_samples 기준 (무스킵 정책) ===
             usable_samples = int(len(y))
             note_msg = ""
             if usable_samples == 0:
@@ -743,14 +770,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 _log_skip(symbol,strategy,f"음수 라벨 유입 감지(w={window})")
                 continue
 
-            # 희소 학습 경고(로그만, 학습 강행)
             if usable_samples < 20:
                 note_msg = f"⚠️ 희소 학습 (샘플 {usable_samples})"
                 _safe_print(f"[WARN] {symbol}-{strategy}-w{window}: {note_msg}")
 
             set_NUM_CLASSES(len(class_ranges))
 
-            # split
             strat_ok=False
             try:
                 if len(y)>=40 and len(np.unique(y))>=2:
@@ -761,7 +786,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 try:
                     train_idx, val_idx = coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, num_classes=len(class_ranges))
                 except Exception:
-                    # 미니멀 분할 폴백: 1개면 train=val=[0], 2개면 1/1
                     n=len(y)
                     if n<=1:
                         train_idx=np.array([0],dtype=int); val_idx=np.array([0],dtype=int)
@@ -770,7 +794,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             else:
                 train_idx, val_idx = tr_idx, val_idx
 
-            # 분할 실패/빈 분할 방지: 미니멀 분할 재보정
             if len(train_idx)==0 and len(val_idx)==0:
                 n=len(y)
                 if n<=1:
@@ -778,7 +801,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 else:
                     train_idx=np.arange(0, n-1, dtype=int); val_idx=np.array([n-1], dtype=int)
             elif len(train_idx)==0:
-                # 하나를 train으로 이동
                 val_take = int(val_idx[0])
                 train_idx = np.array([val_take], dtype=int)
                 val_idx = np.array([val_idx[-1]], dtype=int)
@@ -786,17 +808,14 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                 val_idx = np.array([train_idx[-1]], dtype=int)
                 train_idx = train_idx[:-1] if len(train_idx)>1 else train_idx
 
-            # [보강] 검증셋 2클래스 보장(가능하면), 불가해도 강행
             train_idx, val_idx, _ = _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2)
 
-            # === 진단 5종 중 나머지 2개 계산 ===
             try:
                 cnt_after = np.bincount(y, minlength=len(class_ranges)).astype(int).tolist()
             except Exception:
                 cnt_after = []
             batch_stratified_ok = bool(strat_ok)
 
-            # === 윈도우 시작 1회 진단 로그 ===
             try:
                 base_note = "prep(stats)"
                 if note_msg:
@@ -810,7 +829,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     augment_needed=bool(augment_needed), enough_for_training=bool(enough_for_training),
                     note=base_note,
                     source_exchange="BYBIT", status="prep",
-                    # === 5종 ===
                     NUM_CLASSES=int(len(class_ranges)),
                     class_counts_label_freeze=cnt_before,
                     usable_samples=usable_samples,
@@ -825,7 +843,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             train_X=scaler.transform(Xtr_flat).reshape(len(train_idx),window,feat_dim)
             val_X  =scaler.transform(X_raw[val_idx].reshape(-1,feat_dim)).reshape(len(val_idx),window,feat_dim)
             train_y, val_y = y[train_idx], y[val_idx]
-            # (중요) 여기서는 단일 클래스여도 강행. 기존 스킵 조건 제거.
 
             local_epochs=_epochs_for(strategy)
             if len(train_X)<200: local_epochs=max(6, int(round(local_epochs*0.7)))
@@ -834,7 +851,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     train_X,train_y=balance_classes(train_X,train_y,num_classes=len(class_ranges))
             except Exception as e: _safe_print(f"[balance warn] {e}")
 
-            # class weight
             try:
                 loss_cfg = get_LOSS()
                 cw_cfg = loss_cfg.get("class_weight", {}) if isinstance(loss_cfg, dict) else {}
@@ -866,7 +882,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             priors[priors <= 0] = 1e-6
             priors_t=torch.tensor(priors,dtype=torch.float32,device=DEVICE)
 
-            # DataLoaders
             def _make_train_loader():
                 base_ds=TensorDataset(torch.tensor(train_X, dtype=torch.float32), torch.tensor(train_y, dtype=torch.long))
                 if SMART_TRAIN:
@@ -887,12 +902,10 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
 
             scaler_amp = torch.cuda.amp.GradScaler(enabled=(USE_AMP and DEVICE.type=="cuda"))
 
-            # 모델 3종 학습
             for model_type in ["lstm","cnn_lstm","transformer"]:
                 base=get_model(model_type,input_size=feat_dim,output_size=len(class_ranges)).to(DEVICE)
                 model=base
 
-                # 중·장기 파인튜닝
                 if strategy != "단기":
                     prev_strat = "단기" if strategy=="중기" else "중기"
                     prev_path = _find_prev_model_for(symbol, prev_strat)
@@ -932,7 +945,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                         loss_sum += float(loss.item())
                         _release_memory(xb,yb,loss,logits)
 
-                    # val f1
                     model.eval(); preds=[]; lbls=[]
                     with torch.no_grad():
                         for xb,yb in val_loader:
@@ -973,7 +985,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     except: pass
                 _release_memory(best_state)
 
-                # 평가/저장
                 model.eval(); preds=[]; lbls=[]; val_loss_sum=0.0; n_val=0
                 crit_eval=nn.CrossEntropyLoss(weight=w)
                 with torch.no_grad():
@@ -1006,14 +1017,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     f1_val=0.0
                 val_loss=float(val_loss_sum/max(1,n_val))
 
-                # === bin 메타 계산: bin_info 우선 사용 ===
                 try:
                     if isinstance(bin_info, dict) and "bin_edges" in bin_info:
                         bin_edges = [float(x) for x in bin_info.get("bin_edges", [])]
                         bin_spans = bin_info.get("bin_spans", [])
                         if bin_edges and (not bin_spans or len(bin_spans) != len(bin_edges)-1):
                             bin_spans = [float(bin_edges[i+1]-bin_edges[i]) for i in range(len(bin_edges)-1)]
-                        # 검증 분할 라벨 분포로 카운트 집계(로컬 라벨 기준 → 글로벌로 업맵)
                         full_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
                         cnt_local = np.bincount(val_y, minlength=len(class_ranges))
                         counts_map = np.zeros(len(full_ranges), dtype=int)
@@ -1022,7 +1031,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                                 counts_map[g] = int(cnt_local[l])
                         bin_counts = counts_map.tolist()
                     else:
-                        # 기존 방식
                         full_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
                         bin_edges = [float(lo) for (lo, _) in full_ranges] + [float(full_ranges[-1][1])]
                         bin_spans = [float(hi-lo) for (lo, hi) in full_ranges]
@@ -1043,7 +1051,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                     "MIN_BIN_COUNT_FRAC": float(os.getenv("MIN_BIN_COUNT_FRAC", "0.05")),
                 }
 
-                # 메타/저장
                 stem=os.path.join(MODEL_DIR, f"{symbol}_{strategy}_{model_type}_w{int(window)}_group{int(group_id) if group_id is not None else 0}_cls{int(len(class_ranges))}")
                 meta={"symbol":symbol,"strategy":strategy,"model":model_type,"group_id":int(group_id or 0),
                       "num_classes":int(len(class_ranges)),
@@ -1057,7 +1064,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                       "boundary_band": float(BOUNDARY_BAND),
                       "cs_argmax":{"enabled":bool(COST_SENSITIVE_ARGMAX),"beta":float(CS_ARG_BETA)},
                       "eval_gate":"none",
-                      # [ADD]
                       "label_repair": repaired_info,
                       "bin_edges": bin_edges,
                       "bin_counts": bin_counts,
@@ -1065,13 +1071,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                       "bin_cfg": bin_cfg}
                 wpath,mpath=_save_model_and_meta(model, stem+".pt", meta)
 
-                # 캐시 제거
                 try:
                     DataCacheManager.delete(f"{symbol}-{strategy}")
                     DataCacheManager.delete(f"{symbol}-{strategy}-features")
                 except: pass
 
-                # === 성공 로그(진단 5종 포함) ===
                 try:
                     final_note = f"train_one_model(window={window}, cap={len(features_only)}, engine=manual)"
                     if note_msg:
@@ -1087,7 +1091,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                         note=final_note,
                         source_exchange="BYBIT", status="success",
                         y_true=lbls, y_pred=preds, num_classes=len(class_ranges),
-                        # === 5종 ===
                         NUM_CLASSES=int(len(class_ranges)),
                         class_counts_label_freeze=cnt_before,
                         usable_samples=usable_samples,
@@ -1101,7 +1104,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
                                       "loss_sum":float(loss_sum),"pt":wpath,"meta":mpath,"passed":True})
                 _safe_print(f"🟩 DONE w={window} {model_type} acc={acc:.4f} f1={f1_val:.4f} val_loss={val_loss:.5f} (no gate)")
 
-                # 중요도 저장
                 try:
                     if IMPORTANCE_ENABLE:
                         X_val_t = torch.tensor(val_X, dtype=torch.float32, device="cpu")
@@ -1139,7 +1141,6 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         res["ok"]=bool(res.get("models"))
         _safe_print(f"[RESULT] {symbol}-{strategy}-g{group_id} ok={res['ok']}")
 
-        # 🔒 그룹 진행 중 자동예측 차단
         if _is_group_active_file() or _is_group_lock_file():
             _safe_print(f"[AUTO-PREDICT SKIP] group-active/lock → skip {symbol}-{strategy}")
         else:
@@ -1172,9 +1173,6 @@ _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = False
 _SYMBOL_RETRY_LIMIT = int(os.getenv("SYMBOL_RETRY_LIMIT","1"))
 
 def _train_full_symbol(symbol:str, stop_event: Optional[threading.Event] = None) -> Tuple[bool, Dict[str, Any]]:
-    """
-    🔄 변경 포인트: 그룹 내 cls<2라도 'skip'하지 않고 무조건 train 시도.
-    """
     strategies=["단기","중기","장기"]; detail={}; any_saved=False
     base_df, pre_feats, pre_lbls = _build_precomputed(symbol)
 
@@ -1182,14 +1180,12 @@ def _train_full_symbol(symbol:str, stop_event: Optional[threading.Event] = None)
         if stop_event is not None and stop_event.is_set(): return any_saved, detail
         try:
             cr=get_class_ranges(symbol=symbol,strategy=strategy)
-            # 없어도 최소 2클래스 기준으로 그룹 분해하여 시도
             num_classes=len(cr) if cr else 0
             groups=get_class_groups(num_classes=max(2,num_classes))
             max_gid=len(groups)-1
             detail[strategy]={}
             for gid in range(max_gid+1):
                 if stop_event is not None and stop_event.is_set(): return any_saved, detail
-                # 이전: cls<2면 skipped → 이제 강행
                 gr=get_class_ranges(symbol=symbol,strategy=strategy,group_id=gid)
                 if not gr or len(gr)<2:
                     _safe_print(f"[FORCE-TRAIN] {symbol}-{strategy}-g{gid}: cls<2 → 학습 강행")
@@ -1242,13 +1238,11 @@ def train_models(symbol_list, stop_event: Optional[threading.Event] = None, igno
             partial_symbols.append(symbol)
     return completed_symbols, partial_symbols
 
-# ---------- 그룹 루프 및 예측 ----------
 def _scan_symbols_from_model_dir() -> List[str]:
     syms=set()
     try:
         for p in glob.glob(os.path.join(MODEL_DIR, f"*_*_*.*")):
             b=os.path.basename(p); import re
-        # match 심볼
             m=re.match(r"^([A-Z0-9]+)_[^_]+_", b)
             if m: syms.add(m.group(1))
         for d in glob.glob(os.path.join(MODEL_DIR, "*")):
@@ -1317,7 +1311,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                 if stop_event is not None and stop_event.is_set(): break
                 _safe_print(f"🚀 [group] {idx+1}/{len(groups)} → {group}")
 
-                # === 그룹 시작: GROUP_ACTIVE + GROUP_TRAIN_LOCK 생성 ===
                 try:
                     _set_group_active(True, group_idx=idx, symbols=group)
                     _set_group_train_lock(True, group_idx=idx, symbols=group)
@@ -1372,7 +1365,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                         try: mark_group_predicted()
                         except Exception as e: _safe_print(f"[mark_group_predicted err] {e}")
 
-                # 그룹 종료 요약
                 try:
                     from logger import flush_gwanwoo_summary
                     flush_gwanwoo_summary()
@@ -1382,7 +1374,6 @@ def train_symbol_group_loop(sleep_sec:int=0, stop_event: Optional[threading.Even
                 try: close_predict_gate(note=f"train:group{idx+1}_end")
                 except Exception as e: _safe_print(f"[gate close warn] {e}")
 
-                # === 그룹 종료: GROUP_ACTIVE + GROUP_TRAIN_LOCK 삭제 ===
                 try:
                     _set_group_active(False)
                     _set_group_train_lock(False)
@@ -1455,7 +1446,6 @@ def train_symbol(symbol: str, strategy: str, group_id: int | None = None) -> dic
     try:
         if res.get("models"):
             mark_symbol_trained(symbol)
-            # 그룹 경계 외 개별 학습 시에만 즉시 예측 허용
             if not (_is_group_active_file() or _is_group_lock_file()):
                 try:
                     from predict import predict
@@ -1472,7 +1462,6 @@ def train_group(group_id: int | None = None) -> dict:
     symbols = get_current_group_symbols() if group_id is None else (SYMBOL_GROUPS[idx] if 0 <= idx < len(SYMBOL_GROUPS) else [])
     out = {"group_index": idx, "symbols": symbols, "results": {}}
 
-    # === 그룹 시작: GROUP_ACTIVE + GROUP_TRAIN_LOCK 생성 ===
     try:
         _set_group_active(True, group_idx=idx, symbols=symbols)
         _set_group_train_lock(True, group_idx=idx, symbols=symbols)
@@ -1512,7 +1501,6 @@ def train_group(group_id: int | None = None) -> dict:
             try: close_predict_gate(note=f"train_group:idx{idx}_end")
             except Exception: pass
 
-    # === 그룹 종료: GROUP_ACTIVE + GROUP_TRAIN_LOCK 삭제 ===
     try:
         _set_group_active(False)
         _set_group_train_lock(False)
