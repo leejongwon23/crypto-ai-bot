@@ -241,10 +241,10 @@ except Exception:
         def forward(self, logits, targets):
             return self.ce(logits, targets)
 
-# [풀백] data.labels → labels
+# [풀백] data.labels → labels (Render용 엄격 fallback)
 try:
     from data.labels import make_labels, make_all_horizon_labels
-except Exception:
+except ModuleNotFoundError:
     from labels import make_labels, make_all_horizon_labels
 
 try:
