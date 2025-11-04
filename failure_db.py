@@ -1,4 +1,4 @@
-# === failure_db.py (v2025-10-26, 안정판) =====================================
+# === failure_db.py (v2025-10-26, 환경경로 반영판) =============================
 # 실패 레코드 표준화 + CSV/SQLite 동시 기록 + 중복/폭주 방지 + 가벼운 분류태깅
 #
 # ✅ 핵심
@@ -8,7 +8,7 @@
 # - 폭주가드(샘플링): 전략·시간창별 상한(단기/중기/장기 다르게) 초과 시 일부 드랍
 # - 실패유형 태깅: negative_label, nan_label, prob_nan, class_out_of_range, bounds_mismatch, recur/evo/noise
 # - 최근 패턴 유사도(코사인)로 recur/evo 라벨 부여(간단·경량)
-# - 경보: 심각 사유는 콘솔 + /persistent/logs/alerts.log 기록
+# - 경보: 심각 사유는 콘솔 + alerts.log 기록
 #
 # 🔧 환경변수(선택):
 #   FAIL_WIN_MINUTES=360            # 샘플링 윈도우(분)
@@ -39,15 +39,53 @@ try:
 except Exception:
     pytz = None
 
-# ------------------------------ 경로/상수 ------------------------------
-DIR = "/persistent"
-LOG_DIR = os.path.join(DIR, "logs")
+# ----------------------------------------------------------
+# config 기반 경로 가져오기 (없으면 기존 /persistent로 폴백)
+# ----------------------------------------------------------
+_DEFAULT_DIR = "/persistent"
+_DEFAULT_LOG_DIR = os.path.join(_DEFAULT_DIR, "logs")
+
+try:
+    # 이 함수들이 config에 없을 수도 있으니 개별 try/except로 감싼다
+    from config import (
+        get_FAILURE_DB_PATH,
+        get_WRONG_PREDICTIONS_PATH,
+        get_ALERT_LOG_PATH,
+    )
+except Exception:
+    # 가져오지 못해도 아래에서 폴백하니까 그냥 넘어감
+    get_FAILURE_DB_PATH = None
+    get_WRONG_PREDICTIONS_PATH = None
+    get_ALERT_LOG_PATH = None
+
+# wrong_predictions.csv (CSV 원본)
+if callable(get_WRONG_PREDICTIONS_PATH):
+    WRONG_CSV = get_WRONG_PREDICTIONS_PATH()
+else:
+    WRONG_CSV = os.getenv("WRONG_PREDICTIONS_PATH", os.path.join(_DEFAULT_DIR, "wrong_predictions.csv"))
+
+# SQLite DB 경로
+if callable(get_FAILURE_DB_PATH):
+    DB_PATH = get_FAILURE_DB_PATH()
+else:
+    DB_PATH = os.getenv("FAILURE_DB_PATH", os.path.join(_DEFAULT_LOG_DIR, "failure_records.db"))
+
+# LOG_DIR 는 DB가 있는 디렉토리로 맞춰두면 안전
+LOG_DIR = os.path.dirname(DB_PATH) if DB_PATH else _DEFAULT_LOG_DIR
+
+# alerts.log
+if callable(get_ALERT_LOG_PATH):
+    ALERT_LOG = get_ALERT_LOG_PATH()
+else:
+    ALERT_LOG = os.getenv("ALERT_LOG_PATH", os.path.join(LOG_DIR, "alerts.log"))
+
+# 디렉토리 보장
 os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(os.path.dirname(WRONG_CSV), exist_ok=True)
 
-WRONG_CSV = os.path.join(DIR, "wrong_predictions.csv")       # 로더가 읽는 표준 경로
-DB_PATH   = os.path.join(LOG_DIR, "failure_records.db")      # 요약/조회용 SQLite
-ALERT_LOG = os.path.join(LOG_DIR, "alerts.log")
-
+# ----------------------------------------------------------
+# CSV 표준 헤더
+# ----------------------------------------------------------
 WRONG_HEADERS = [
     "timestamp","symbol","strategy","predicted_class","label",
     "model","group_id","entry_price","target_price","return_value",
@@ -215,6 +253,7 @@ def ensure_failure_db():
 def _emit_alert(msg: str):
     try:
         print(f"🔴 [ALERT] {msg}")
+        os.makedirs(os.path.dirname(ALERT_LOG), exist_ok=True)
         with open(ALERT_LOG, "a", encoding="utf-8") as f:
             f.write(f"{_now_kst_iso()} {msg}\n")
     except Exception:
@@ -258,7 +297,6 @@ def check_failure_exists(row: Dict[str, Any]) -> bool:
         if pd.isna(ts):
             return False
         if ts.tzinfo is None:
-            # CSV엔 naive가 많으니 KST로 간주
             ts = ts.tz_localize("Asia/Seoul")
         else:
             ts = ts.tz_convert("Asia/Seoul")
@@ -290,7 +328,7 @@ def check_failure_exists(row: Dict[str, Any]) -> bool:
         if hit:
             return True
 
-        # 2) CSV 최근 부분 스캔(꼬리 일부만)
+        # 2) CSV 최근 부분 스캔
         if os.path.exists(WRONG_CSV):
             try:
                 tail_rows = 20000
@@ -304,7 +342,6 @@ def check_failure_exists(row: Dict[str, Any]) -> bool:
                     return False
 
                 t = pd.to_datetime(df["timestamp"], errors="coerce")
-                # Naive → KST로 취급
                 t = t.dt.tz_localize("Asia/Seoul", nonexistent="NaT", ambiguous="NaT")
                 m = (t >= pd.to_datetime(ts_min)) & (t <= pd.to_datetime(ts_max))
                 df = df[m]
@@ -370,9 +407,8 @@ def _similarity_level(symbol: str, strategy: str, feature_vec: np.ndarray) -> Tu
     try:
         recent = _read_recent_failures_for(symbol, strategy, limit=2000)
         if recent.empty or feature_vec.size == 0:
-            return ("evo", 0.0)  # 비교불가 시 보수적으로 evo 취급
+            return ("evo", 0.0)
 
-        # 벡터 풀 만들기
         feats: List[np.ndarray] = []
         for v in recent["feature_vector"].tolist():
             feats.append(_parse_feature_vector(v))
@@ -380,7 +416,6 @@ def _similarity_level(symbol: str, strategy: str, feature_vec: np.ndarray) -> Tu
         if not feats:
             return ("evo", 0.0)
 
-        # 상위 TOP-K만 간단 스캔
         sims: List[float] = []
         step = max(1, len(feats) // max(1, FAIL_SIM_TOPK))
         for i in range(0, len(feats), step):
@@ -430,11 +465,9 @@ def _auto_failure_reason(rec: Dict[str, Any]) -> str:
         return "unknown"
 
 def _compute_train_weight(strategy: str, level: str, ts: datetime.datetime) -> float:
-    # 간단한 시간감쇠(최근일수록 가중)
     base = BASE_WEIGHT.get(strategy, BASE_WEIGHT["장기"]).get(level, 0.0)
-    # 최근 30일 기준 exp 감쇠
     try:
-        age_days = 0.0  # 지금은 즉시기록이므로 0
+        age_days = 0.0
         tau = 30.0
         decay = math.exp(-age_days / tau)
     except Exception:
@@ -455,7 +488,7 @@ def _append_wrong_csv_row(row: Dict[str, Any], max_retries: int = 5, sleep_sec: 
     while True:
         try:
             try:
-                import fcntl  # 유닉스 계열 락
+                import fcntl
                 with open(WRONG_CSV, "a", newline="", encoding="utf-8-sig") as f:
                     try:
                         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
@@ -468,7 +501,6 @@ def _append_wrong_csv_row(row: Dict[str, Any], max_retries: int = 5, sleep_sec: 
                     except Exception:
                         pass
             except Exception:
-                # 윈도우 등 fcntl 미지원시
                 with open(WRONG_CSV, "a", newline="", encoding="utf-8-sig") as f:
                     w = csv.DictWriter(f, fieldnames=WRONG_HEADERS)
                     w.writerow({k: row.get(k, "") for k in WRONG_HEADERS})
@@ -506,7 +538,6 @@ def insert_failure_record(record: Dict[str, Any],
             except Exception: fv = []
         fh = feature_hash or rec.get("feature_hash") or (_sha1_of_list(fv) if isinstance(fv,(list,tuple,np.ndarray)) else "none")
 
-        # 기본 row 구성
         row = {
             "timestamp": ts_iso, "symbol": sym, "strategy": strat,
             "predicted_class": pcls if pcls != "" else -1,
@@ -530,49 +561,41 @@ def insert_failure_record(record: Dict[str, Any],
             "source_exchange": rec.get("source_exchange","BYBIT"),
         }
 
-        # 자동 사유(비었으면 채움)
         auto_reason = _auto_failure_reason({**rec, **row})
         if not str(row["reason"]).strip():
             row["reason"] = auto_reason
 
-        # 0) 중복가드
         if check_failure_exists({**rec, **row}):
             return False
 
-        # 1) 유사도 기반 분류(recur/evo/noise)
         feat_vec = _parse_feature_vector(row["feature_vector"])
         level, sim = _similarity_level(sym, strat, feat_vec)
 
-        # 추가적인 noise 판정: 수익률 진폭이 너무 작을 때
         if level != "recur" and _is_noise_by_return(row.get("return_value", "")):
             level = "noise"
 
         row["failure_level"] = level
         row["train_weight"]  = _compute_train_weight(strat, level, _now_kst())
 
-        # 2) 폭주가드(샘플링): noise 는 기본적으로 버림, recur/evo 만 샘플링 창 상한 적용
         if level == "noise":
-            # 노이즈는 기록하지 않음 (로그만 남김)
             print(f"[failure_db] skip noise {sym}-{strat} pcls={row['predicted_class']} sim={sim:.3f}")
             return False
 
         if not _within_sampling_cap(sym, strat, _now_kst()):
-            # 상한 초과 시, recur는 더 쉽게 드랍, evo는 가급적 보존
             if level == "recur":
                 print(f"[failure_db] drop(recur-cap) {sym}-{strat} pcls={row['predicted_class']}")
                 return False
-            # evo는 50% 확률로 보존(완전 차단 방지)
             if np.random.random() < 0.5:
                 print(f"[failure_db] drop(evo-sample) {sym}-{strat} pcls={row['predicted_class']}")
                 return False
 
-        # 3) CSV 기록
+        # CSV
         try:
             _append_wrong_csv_row(row)
         except Exception as e:
             print(f"[failure_db] CSV 기록 실패: {e}")
 
-        # 4) SQLite 요약 기록(중복 무시)
+        # SQLite
         try:
             max_trials = 5
             for k in range(max_trials):
@@ -601,7 +624,6 @@ def insert_failure_record(record: Dict[str, Any],
         except Exception as e:
             print(f"[failure_db] sqlite 기록 실패: {e}")
 
-        # 5) 심각 사유 경보
         if row["reason"] in ["negative_label","nan_label","prob_nan","class_out_of_range","bounds_mismatch"]:
             _emit_alert(f"{row['symbol']}-{row['strategy']} reason={row['reason']} pcls={row['predicted_class']} label={row['label']}")
 
@@ -610,7 +632,7 @@ def insert_failure_record(record: Dict[str, Any],
         print(f"[failure_db] insert_failure_record 예외: {e}")
         return False
 
-# ------------------------------ 모듈 테스트(직접 실행) ------------------------------
+# ------------------------------ 모듈 테스트 ------------------------------
 if __name__ == "__main__":
     ensure_failure_db()
     demo = {
