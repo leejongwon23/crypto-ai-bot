@@ -1,30 +1,12 @@
-# === failure_db.py (v2025-10-26, 환경경로 반영판) =============================
+# === failure_db.py (v2025-11-04, import-safe, 경로 자동 폴백) ==================
 # 실패 레코드 표준화 + CSV/SQLite 동시 기록 + 중복/폭주 방지 + 가벼운 분류태깅
 #
-# ✅ 핵심
-# - wrong_predictions.csv 최소 스키마 보장(로더 호환)
-# - SQLite 요약 테이블(failures) 동시 기록 / 중복키로 재기록 방지
-# - 중복가드: feature_hash + (±90분, symbol, strategy, predicted_class)
-# - 폭주가드(샘플링): 전략·시간창별 상한(단기/중기/장기 다르게) 초과 시 일부 드랍
-# - 실패유형 태깅: negative_label, nan_label, prob_nan, class_out_of_range, bounds_mismatch, recur/evo/noise
-# - 최근 패턴 유사도(코사인)로 recur/evo 라벨 부여(간단·경량)
-# - 경보: 심각 사유는 콘솔 + alerts.log 기록
-#
-# 🔧 환경변수(선택):
-#   FAIL_WIN_MINUTES=360            # 샘플링 윈도우(분)
-#   FAIL_CAP_SHORT=40               # 단기(윈도우 내 최대 기록 수/심볼-전략)
-#   FAIL_CAP_MID=20                 # 중기
-#   FAIL_CAP_LONG=10                # 장기
-#   FAIL_SIM_TOPK=200               # 유사도 계산 시 참조 상한
-#   FAIL_SIM_RECUR=0.92             # recur 판정 임계치
-#   FAIL_SIM_EVO=0.75               # evo 하한(이상은 evo, 그 미만은 noise 후보)
-#   FAIL_NOISE_MIN_RET=0.001        # noise 판정용 |return_value| 하한
-#
-# 외부에서 사용하는 공개 함수(기존 호환):
-#   ensure_failure_db()
-#   check_failure_exists(row: dict) -> bool
-#   load_existing_failure_hashes() -> set
-#   insert_failure_record(record, feature_hash=None, label=None, feature_vector=None, context=None) -> bool
+# 📌 이번 수정 포인트
+# 1) 모듈 import 시점에 /persistent 를 만들지 않는다 ← 지금 서버 죽은 이유
+# 2) 실제로 기록할 때만, 쓰기 가능한 디렉터리를 고른다
+#    - 환경변수: APP_DATA_DIR, APP_PERSIST_DIR 우선
+#    - 안 되면 /persistent, /data, 현재경로, /tmp/appdata 순서로 시도
+# 3) 쓰기 불가면 콘솔로만 남기고 진행(앱이 안 죽게)
 # ============================================================================
 
 from __future__ import annotations
@@ -39,61 +21,73 @@ try:
 except Exception:
     pytz = None
 
-# ----------------------------------------------------------
-# config 기반 경로 가져오기 (없으면 기존 /persistent로 폴백)
-# ----------------------------------------------------------
-_DEFAULT_DIR = "/persistent"
-_DEFAULT_LOG_DIR = os.path.join(_DEFAULT_DIR, "logs")
+# ------------------------------------------------------------
+# 경로 선택 유틸 (가장 먼저 쓰기 되는 곳을 고른다)
+# ------------------------------------------------------------
+def _pick_writable_base() -> str:
+    """
+    가능한 경로들을 위에서부터 차례로 시도해서
+    mkdir 이 되는 첫 경로를 반환한다.
+    """
+    candidates = [
+        os.getenv("APP_DATA_DIR"),
+        os.getenv("APP_PERSIST_DIR"),
+        "/persistent",
+        "/data",
+        os.getcwd(),
+        "/tmp/appdata",
+    ]
+    for c in candidates:
+        if not c:
+            continue
+        try:
+            os.makedirs(c, exist_ok=True)
+            test = os.path.join(c, ".writetest")
+            with open(test, "w") as f:
+                f.write("1")
+            os.remove(test)
+            return c
+        except Exception:
+            continue
+    # 진짜 전부 실패하면 /tmp 로 고정
+    fallback = "/tmp/appdata"
+    try:
+        os.makedirs(fallback, exist_ok=True)
+    except Exception:
+        pass
+    return fallback
 
-try:
-    # 이 함수들이 config에 없을 수도 있으니 개별 try/except로 감싼다
-    from config import (
-        get_FAILURE_DB_PATH,
-        get_WRONG_PREDICTIONS_PATH,
-        get_ALERT_LOG_PATH,
-    )
-except Exception:
-    # 가져오지 못해도 아래에서 폴백하니까 그냥 넘어감
-    get_FAILURE_DB_PATH = None
-    get_WRONG_PREDICTIONS_PATH = None
-    get_ALERT_LOG_PATH = None
+# import 시점에는 "경로 결정"만 하고, 디렉터리 강제 생성은 안 한다.
+_BASE_DIR_CAND = _pick_writable_base()
 
-# wrong_predictions.csv (CSV 원본)
-if callable(get_WRONG_PREDICTIONS_PATH):
-    WRONG_CSV = get_WRONG_PREDICTIONS_PATH()
-else:
-    WRONG_CSV = os.getenv("WRONG_PREDICTIONS_PATH", os.path.join(_DEFAULT_DIR, "wrong_predictions.csv"))
+def _get_dir() -> str:
+    # 나중에라도 다시 쓸 수 있게 함수로 뺐다
+    return _BASE_DIR_CAND
 
-# SQLite DB 경로
-if callable(get_FAILURE_DB_PATH):
-    DB_PATH = get_FAILURE_DB_PATH()
-else:
-    DB_PATH = os.getenv("FAILURE_DB_PATH", os.path.join(_DEFAULT_LOG_DIR, "failure_records.db"))
+def _get_log_dir() -> str:
+    return os.path.join(_get_dir(), "logs")
 
-# LOG_DIR 는 DB가 있는 디렉토리로 맞춰두면 안전
-LOG_DIR = os.path.dirname(DB_PATH) if DB_PATH else _DEFAULT_LOG_DIR
+def _ensure_dir(path: str):
+    try:
+        os.makedirs(path, exist_ok=True)
+        return True
+    except Exception:
+        return False
 
-# alerts.log
-if callable(get_ALERT_LOG_PATH):
-    ALERT_LOG = get_ALERT_LOG_PATH()
-else:
-    ALERT_LOG = os.getenv("ALERT_LOG_PATH", os.path.join(LOG_DIR, "alerts.log"))
+# 실제로 쓸 파일 경로들 (문자열만 정의)
+DIR      = _get_dir()
+LOG_DIR  = _get_log_dir()
+WRONG_CSV = os.path.join(DIR, "wrong_predictions.csv")      # 로더가 읽는 표준 경로
+DB_PATH   = os.path.join(LOG_DIR, "failure_records.db")     # 요약/조회용 SQLite
+ALERT_LOG = os.path.join(LOG_DIR, "alerts.log")
 
-# 디렉토리 보장
-os.makedirs(LOG_DIR, exist_ok=True)
-os.makedirs(os.path.dirname(WRONG_CSV), exist_ok=True)
-
-# ----------------------------------------------------------
-# CSV 표준 헤더
-# ----------------------------------------------------------
 WRONG_HEADERS = [
     "timestamp","symbol","strategy","predicted_class","label",
     "model","group_id","entry_price","target_price","return_value",
     "reason","context","note","regime","meta_choice",
     "raw_prob","calib_prob","calib_ver",
     "feature_hash","feature_vector","source","source_exchange",
-    # 확장 필드(있어도 무방):
-    "failure_level","train_weight"
+    "failure_level","train_weight",
 ]
 
 # 샘플링/유사도/노이즈 파라미터(환경변수 지원)
@@ -114,7 +108,9 @@ BASE_WEIGHT = {
     "장기": {"recur": 0.4, "evo": 1.0, "noise": 0.0},
 }
 
-# ------------------------------ 시간 유틸 ------------------------------
+# ------------------------------------------------------------
+# 시간 유틸
+# ------------------------------------------------------------
 def _now_kst() -> datetime.datetime:
     tz = pytz.timezone("Asia/Seoul") if pytz else None
     return datetime.datetime.now(tz) if tz else datetime.datetime.now()
@@ -122,7 +118,9 @@ def _now_kst() -> datetime.datetime:
 def _now_kst_iso() -> str:
     return _now_kst().isoformat()
 
-# ------------------------------ 해시/안전 변환 ------------------------------
+# ------------------------------------------------------------
+# 해시/안전 변환
+# ------------------------------------------------------------
 def _sha1_of_list(v: Iterable[float]) -> str:
     try:
         xs = [round(float(x), 4) for x in v]
@@ -175,7 +173,6 @@ def _candidate_hash(record: Dict[str, Any]) -> str:
         except Exception:
             arr = []
         return _sha1_of_list(arr)
-    # 문자열 JSON이면 파싱 시도
     if isinstance(fv, str) and fv.strip().startswith("["):
         try:
             arr = np.array(json.loads(fv), dtype=float).reshape(-1)
@@ -184,15 +181,17 @@ def _candidate_hash(record: Dict[str, Any]) -> str:
             pass
     return "none"
 
-# ------------------------------ 파일/DB 보장 ------------------------------
+# ------------------------------------------------------------
+# 파일/DB 보장 (이제 여기에서만 디렉터리 만든다)
+# ------------------------------------------------------------
+_db_lock = threading.RLock()
+_db = None
+
 def _ensure_wrong_csv():
-    os.makedirs(os.path.dirname(WRONG_CSV), exist_ok=True)
+    _ensure_dir(os.path.dirname(WRONG_CSV))
     if not os.path.exists(WRONG_CSV) or os.path.getsize(WRONG_CSV) == 0:
         with open(WRONG_CSV, "w", newline="", encoding="utf-8-sig") as f:
             csv.writer(f).writerow(WRONG_HEADERS)
-
-_db_lock = threading.RLock()
-_db = None
 
 def _apply_sqlite_pragmas(conn):
     try:
@@ -205,7 +204,7 @@ def _apply_sqlite_pragmas(conn):
         pass
 
 def _connect_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    _ensure_dir(os.path.dirname(DB_PATH))
     conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     _apply_sqlite_pragmas(conn)
     return conn
@@ -247,21 +246,26 @@ def ensure_failure_db():
             conn.commit()
             c.close()
     except Exception as e:
+        # 여기서도 에러가 나도 앱이 죽지 않게
         print(f"[failure_db] ensure_failure_db 예외: {e}")
 
-# ------------------------------ 경보 ------------------------------
+# ------------------------------------------------------------
+# 경보
+# ------------------------------------------------------------
 def _emit_alert(msg: str):
     try:
+        _ensure_dir(os.path.dirname(ALERT_LOG))
         print(f"🔴 [ALERT] {msg}")
-        os.makedirs(os.path.dirname(ALERT_LOG), exist_ok=True)
         with open(ALERT_LOG, "a", encoding="utf-8") as f:
             f.write(f"{_now_kst_iso()} {msg}\n")
     except Exception:
+        # 쓰기 못하면 그냥 콘솔만
         pass
 
-# ------------------------------ 리더/헬퍼 ------------------------------
+# ------------------------------------------------------------
+# 리더/헬퍼
+# ------------------------------------------------------------
 def _read_recent_failures_for(symbol: str, strategy: str, limit: int = 2000) -> pd.DataFrame:
-    """same sym/strategy 최근 실패 일부만 로드(가벼운 유사도/샘플링용)"""
     if not os.path.exists(WRONG_CSV):
         return pd.DataFrame()
     use = ["timestamp","symbol","strategy","feature_hash","feature_vector","predicted_class","reason","return_value"]
@@ -287,7 +291,9 @@ def load_existing_failure_hashes() -> set:
         pass
     return hashes
 
-# ------------------------------ 중복/폭주 가드 ------------------------------
+# ------------------------------------------------------------
+# 중복/폭주 가드
+# ------------------------------------------------------------
 def check_failure_exists(row: Dict[str, Any]) -> bool:
     """최근(±90분) 동일 키의 실패 레코드 존재 여부"""
     try:
@@ -309,7 +315,6 @@ def check_failure_exists(row: Dict[str, Any]) -> bool:
         pcls = _safe_int(row.get("predicted_class"), default="")
         fh = _candidate_hash(row)
 
-        # 1) SQLite 조회
         with _db_lock:
             conn = _get_db()
             c = conn.cursor()
@@ -328,7 +333,6 @@ def check_failure_exists(row: Dict[str, Any]) -> bool:
         if hit:
             return True
 
-        # 2) CSV 최근 부분 스캔
         if os.path.exists(WRONG_CSV):
             try:
                 tail_rows = 20000
@@ -371,10 +375,9 @@ def _strategy_cap(strategy: str) -> int:
         return FAIL_CAP_SHORT
     if strategy == "중기":
         return FAIL_CAP_MID
-    return FAIL_CAP_LONG  # 장기 및 기타
+    return FAIL_CAP_LONG
 
 def _within_sampling_cap(symbol: str, strategy: str, now_ts: datetime.datetime) -> bool:
-    """윈도우(FAIL_WIN_MINUTES) 안에서 동일 심볼·전략의 실패 개수가 CAP 이하인지 확인"""
     df = _read_recent_failures_for(symbol, strategy, limit=5000)
     if df.empty:
         return True
@@ -384,7 +387,9 @@ def _within_sampling_cap(symbol: str, strategy: str, now_ts: datetime.datetime) 
     cnt = int((df["timestamp"] >= cutoff).sum())
     return cnt < cap
 
-# ------------------------------ 유사도/분류 ------------------------------
+# ------------------------------------------------------------
+# 유사도/분류
+# ------------------------------------------------------------
 def _parse_feature_vector(v_any) -> np.ndarray:
     if isinstance(v_any, (list, tuple, np.ndarray)):
         try: return np.asarray(v_any, dtype=float).reshape(-1)
@@ -403,7 +408,6 @@ def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 def _similarity_level(symbol: str, strategy: str, feature_vec: np.ndarray) -> Tuple[str, float]:
-    """최근 실패들과 코사인 유사도 기반으로 recur/evo/noise 중 분류"""
     try:
         recent = _read_recent_failures_for(symbol, strategy, limit=2000)
         if recent.empty or feature_vec.size == 0:
@@ -454,7 +458,6 @@ def _auto_failure_reason(rec: Dict[str, Any]) -> str:
                 return False
         if _is_bad(rp) or _is_bad(cp):
             return "prob_nan"
-
         rs = str(rec.get("reason","")).strip().lower()
         if "class_out_of_range" in rs:
             return "class_out_of_range"
@@ -481,7 +484,9 @@ def _is_noise_by_return(rv: Any) -> bool:
     except Exception:
         return False
 
-# ------------------------------ CSV append (락/재시도) ------------------------------
+# ------------------------------------------------------------
+# CSV append (락/재시도)
+# ------------------------------------------------------------
 def _append_wrong_csv_row(row: Dict[str, Any], max_retries: int = 5, sleep_sec: float = 0.05):
     _ensure_wrong_csv()
     attempt = 0
@@ -511,7 +516,9 @@ def _append_wrong_csv_row(row: Dict[str, Any], max_retries: int = 5, sleep_sec: 
                 raise
             time.sleep(sleep_sec)
 
-# ------------------------------ 메인 API ------------------------------
+# ------------------------------------------------------------
+# 메인 API
+# ------------------------------------------------------------
 def insert_failure_record(record: Dict[str, Any],
                           feature_hash: Optional[str] = None,
                           label: Optional[int] = None,
@@ -519,8 +526,8 @@ def insert_failure_record(record: Dict[str, Any],
                           context: Optional[str] = None) -> bool:
     """
     예측 실패/평가 실패 등 한 건을 기록.
-    - 중복·폭주 가드를 통과해야 CSV/SQLite에 반영됨.
-    - 반환값: 실제로 기록했으면 True, 스킵/오류면 False
+    import 시점이 아니라 실제 호출 시에만 경로를 만지므로
+    읽기전용 루트에서도 앱이 안 죽는다.
     """
     try:
         ensure_failure_db()
@@ -589,13 +596,13 @@ def insert_failure_record(record: Dict[str, Any],
                 print(f"[failure_db] drop(evo-sample) {sym}-{strat} pcls={row['predicted_class']}")
                 return False
 
-        # CSV
+        # 3) CSV 기록 (쓰기 안 되면 여기서만 에러, 앱은 살려둔다)
         try:
             _append_wrong_csv_row(row)
         except Exception as e:
             print(f"[failure_db] CSV 기록 실패: {e}")
 
-        # SQLite
+        # 4) SQLite 기록
         try:
             max_trials = 5
             for k in range(max_trials):
@@ -632,7 +639,9 @@ def insert_failure_record(record: Dict[str, Any],
         print(f"[failure_db] insert_failure_record 예외: {e}")
         return False
 
-# ------------------------------ 모듈 테스트 ------------------------------
+# ------------------------------------------------------------
+# 모듈 테스트
+# ------------------------------------------------------------
 if __name__ == "__main__":
     ensure_failure_db()
     demo = {
