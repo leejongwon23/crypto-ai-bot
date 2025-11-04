@@ -32,7 +32,8 @@ try:
     from logger import (
         ensure_prediction_log_exists,     # prediction_log 보장
         get_meta_success_rate,            # 메타(선택)만 성공률 집계 — 청크 기반
-        get_strategy_eval_count           # 메타+섀도우 평가 완료 건수 — 청크 기반
+        get_strategy_eval_count,          # 메타+섀도우 평가 완료 건수 — 청크 기반
+        get_PREDICTION_LOG_PATH           # 경로가 있으면 재사용
     )
 except Exception:
     def ensure_prediction_log_exists():
@@ -41,6 +42,8 @@ except Exception:
         return 0.0
     def get_strategy_eval_count(strategy):
         return 0
+    def get_PREDICTION_LOG_PATH():
+        return os.path.join("/tmp/appdata", "prediction_log.csv")
 
 # telegram bot 폴백
 try:
@@ -48,6 +51,12 @@ try:
 except Exception:
     def send_message(msg):
         print(f"[TELEGRAM MISSING] {msg}")
+
+# === 공통 기본 경로 (render처럼 /persistent 못 쓰는 환경 대비) ===
+BASE_DIR = os.getenv("APP_DATA_DIR", "/tmp/appdata")
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+MODEL_DIR = os.getenv("MODEL_DIR", "/tmp/appdata/models")
+os.makedirs(LOG_DIR, exist_ok=True)
 
 # === 설정 (환경변수로도 조절 가능) ===
 MIN_SUCCESS_RATE = float(os.getenv("RECO_MIN_SUCCESS_RATE", "0.65"))
@@ -63,11 +72,13 @@ now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 # 전략별 변동성 기준
 STRATEGY_VOL = {"단기": VOL_RT_단기, "중기": VOL_RT_중기, "장기": VOL_RT_장기}
 
-# 로그 경로
-AUDIT_LOG = "/persistent/logs/prediction_audit.csv"
-FAILURE_LOG = "/persistent/logs/failure_count.csv"
-PREDICTION_LOG = "/persistent/prediction_log.csv"  # 루트 경로로 통일
-os.makedirs("/persistent/logs", exist_ok=True)
+# 로그 경로 (★ /persistent 제거, 환경변수/기본경로로 통일)
+AUDIT_LOG = os.path.join(LOG_DIR, "prediction_audit.csv")
+FAILURE_LOG = os.path.join(LOG_DIR, "failure_count.csv")
+try:
+    PREDICTION_LOG = get_PREDICTION_LOG_PATH()
+except Exception:
+    PREDICTION_LOG = os.path.join(BASE_DIR, "prediction_log.csv")
 
 # ──────────────────────────────────────────────────────────────
 # 성공률 필터 (성공률 ≥65% + 최소 10회 평가 완료)
@@ -127,10 +138,11 @@ def format_message(data):
     return message
 
 # ──────────────────────────────────────────────────────────────
-# 감사 로그 기록(원래 그대로 유지)
+# 감사 로그 기록(원래 그대로 유지, 경로만 바뀜)
 # ──────────────────────────────────────────────────────────────
 def log_audit(symbol, strategy, result, status):
     try:
+        os.makedirs(LOG_DIR, exist_ok=True)
         with open(AUDIT_LOG, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=["timestamp", "symbol", "strategy", "result", "status"])
             if f.tell() == 0:
@@ -146,7 +158,7 @@ def log_audit(symbol, strategy, result, status):
         print(f"[log_audit 오류] {e}")
 
 # ──────────────────────────────────────────────────────────────
-# 실패 카운트 로드/저장 (원본 유지)
+# 실패 카운트 로드/저장 (원본 유지, 경로만 바뀜)
 # ──────────────────────────────────────────────────────────────
 def load_failure_count():
     if not os.path.exists(FAILURE_LOG):
@@ -160,6 +172,7 @@ def load_failure_count():
 
 def save_failure_count(fmap):
     try:
+        os.makedirs(LOG_DIR, exist_ok=True)
         with open(FAILURE_LOG, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=["symbol", "strategy", "failures"])
             w.writeheader()
@@ -233,12 +246,12 @@ def _get_latest_price(symbol, strategy):
 # ──────────────────────────────────────────────────────────────
 def _build_model_index():
     """
-    /persistent/models
+    MODEL_DIR
       ├─ <files...>
       └─ <SYMBOL>/<STRATEGY>/<files...>
     를 모두 스캔하여 상대경로 세트로 반환.
     """
-    model_dir = "/persistent/models"
+    model_dir = MODEL_DIR
     idx = set()
     try:
         if not os.path.isdir(model_dir):
