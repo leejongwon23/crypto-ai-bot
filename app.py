@@ -1,4 +1,4 @@
-# app.py — FINAL v2.2b (dirs auto-heal, PERSIST_DIR env)
+# app.py — FINAL v2.2c (dirs auto-heal, PERSIST_DIR/PERSISTENT_DIR env)
 # (train→predict→next-group 파이프라인, 부팅시 필수 경로/빈 로그 보장, 예측락 stale GC, 그룹학습 락/게이트)
 
 from flask import Flask, jsonify, request, Response
@@ -25,8 +25,13 @@ from config import get_TRAIN_LOG_PATH
 
 # === 공통 경로/디렉토리 ===
 # NOTE: Render에서는 /persistent 쓰면 Permission denied가 뜨므로 기본값을 /tmp/persistent 로 둔다.
-#       로컬/자체 서버에서 예전처럼 /persistent 쓰고 싶으면 PERSIST_DIR=/persistent 로 환경변수만 주면 된다.
-PERSIST_DIR = os.getenv("PERSIST_DIR", "/tmp/persistent")
+#       로컬/자체 서버에서 예전처럼 /persistent 쓰고 싶으면
+#       PERSIST_DIR=/persistent 또는 PERSISTENT_DIR=/persistent 로 환경변수만 주면 된다.
+PERSIST_DIR = (
+    os.getenv("PERSIST_DIR")
+    or os.getenv("PERSISTENT_DIR")
+    or "/tmp/persistent"
+)
 LOG_DIR     = os.path.join(PERSIST_DIR, "logs")
 MODEL_DIR   = os.path.join(PERSIST_DIR, "models")
 RUN_DIR     = os.path.join(PERSIST_DIR, "run")
