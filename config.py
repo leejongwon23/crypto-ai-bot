@@ -1,8 +1,15 @@
 # config.py — Dynamic classing w/ safety rails: min/max width, zero band, sparse merge, CV guards
 import json, os, errno, copy
 
+# ===== persistent root (모든 경로의 뿌리) =====
+PERSISTENT_DIR = os.getenv("PERSISTENT_DIR", "/persistent").rstrip("/")
+
+def _jp(*parts):
+    return os.path.join(PERSISTENT_DIR, *parts)
+
 # ===== robust config path =====
-_DEF_CONFIG_PATH = "/persistent/config.json"
+# 기본은 <PERSISTENT_DIR>/config.json, 필요하면 CONFIG_PATH로 덮어쓰기
+_DEF_CONFIG_PATH = _jp("config.json")
 _ENV_CONFIG_PATH = os.getenv("CONFIG_PATH", _DEF_CONFIG_PATH)
 
 def _writable_dir(p):
@@ -10,15 +17,18 @@ def _writable_dir(p):
         d = os.path.dirname(p) or "."
         os.makedirs(d, exist_ok=True)
         test = os.path.join(d, ".cfg_write_test")
-        with open(test, "w") as f: f.write("ok")
-        try: f.flush(); os.fsync(f.fileno())
-        except Exception: pass
+        with open(test, "w") as f:
+            f.write("ok")
+            try:
+                f.flush(); os.fsync(f.fileno())
+            except Exception:
+                pass
         os.remove(test)
         return True
     except Exception:
         return False
 
-# /persistent 가 불가하면 /tmp 로 폴백
+# <PERSISTENT_DIR>가 불가하면 /tmp 로 폴백
 CONFIG_PATH = _ENV_CONFIG_PATH if _writable_dir(_ENV_CONFIG_PATH) else "/tmp/config.json"
 
 # ===== in-memory fallbacks =====
@@ -32,23 +42,30 @@ def _safe_write_json(path: str, obj: dict) -> bool:
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(obj, f, ensure_ascii=False, indent=2)
-            try: f.flush(); os.fsync(f.fileno())
-            except Exception: pass
+            try:
+                f.flush(); os.fsync(f.fileno())
+            except Exception:
+                pass
         os.replace(tmp, path)
+        # 디렉터리까지 fsync 시도
         try:
             dfd = os.open(os.path.dirname(path), os.O_RDONLY)
-            try: os.fsync(dfd)
-            finally: os.close(dfd)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
         except Exception:
             pass
         return True
     except OSError as e:
-        if e.errno in (errno.ENOSPC, errno.EDQUOT):  # 공간 부족 또는 쿼터 초과
+        # 공간 부족 / 쿼터 초과면 읽기전용 모드로
+        if e.errno in (errno.ENOSPC, errno.EDQUOT):
             _CONFIG_READONLY = True
         return False
     except Exception:
         return False
 
+# ===== 기본 설정 =====
 _default_config = {
     "NUM_CLASSES": 10,
     "MAX_CLASSES": 12,
@@ -61,12 +78,13 @@ _default_config = {
     "PATTERN": {"K": 200},
     "BLEND":   {"alpha": 0.6, "beta": 0.2, "gamma": 0.2, "enabled": True},
 
-    "SSL_CACHE_DIR": "/persistent/ssl_models",
+    # ✅ 전부 PERSISTENT_DIR 기준
+    "SSL_CACHE_DIR": _jp("ssl_models"),
 
     # === 관우·예측 경로 단일화 ===
-    "PREDICTION_LOG_PATH": "/persistent/prediction_log.csv",
-    "GANWU_PATH": "/persistent/guanwu/incoming",
-    "TRAIN_LOG_PATH": "/persistent/logs/train_log.csv",
+    "PREDICTION_LOG_PATH": _jp("prediction_log.csv"),
+    "GANWU_PATH": _jp("guanwu", "incoming"),
+    "TRAIN_LOG_PATH": _jp("logs", "train_log.csv"),
 
     # ===== 파이프라인 게이트 =====
     "REQUIRE_GROUP_COMPLETE": 1,
@@ -107,7 +125,7 @@ _default_config = {
         "min_samples": 200,
         "refresh_hours": 12,
         "per_model": True,
-        "save_dir": "/persistent/calibration",
+        "save_dir": _jp("calibration"),
         "fallback_identity": True
     },
 
@@ -123,8 +141,13 @@ _default_config = {
 
     "EVAL": {"macro_f1": True, "topk": [1, 3], "use_cost_sensitive_argmax": True},
 
-    "FAILLEARN": {"enabled": False, "cooldown_min": 60, "max_samples": 1000,
-                  "class_weight_boost": 1.5, "min_return_abs": 0.003},
+    "FAILLEARN": {
+        "enabled": False,
+        "cooldown_min": 60,
+        "max_samples": 1000,
+        "class_weight_boost": 1.5,
+        "min_return_abs": 0.003
+    },
 
     "QUALITY": {"VAL_F1_MIN": 0.20, "VAL_ACC_MIN": 0.20},
 
@@ -147,18 +170,23 @@ _default_config = {
 
     # === 빈 분포 메타(이번 변경 핵심 상수) ===
     "BIN_META": {
-        "TARGET_BINS": 8,            # 목표 bin 개수
-        "OUTLIER_Q_LOW": 0.01,       # 하위 1% 클리핑
-        "OUTLIER_Q_HIGH": 0.99,      # 상위 1% 클리핑
-        "MAX_BIN_SPAN_PCT": 0.08,    # 단일 bin 폭 상한(8%)
-        "MIN_BIN_COUNT_FRAC": 0.05,  # 최소 샘플 비율(5%)
+        "TARGET_BINS": 8,
+        "OUTLIER_Q_LOW": 0.01,
+        "OUTLIER_Q_HIGH": 0.99,
+        "MAX_BIN_SPAN_PCT": 0.08,
+        "MIN_BIN_COUNT_FRAC": 0.05,
         # === CHANGE === labels.py와 동기화되는 지배 bin/중앙폭 제어 추가
         "DOMINANT_MAX_FRAC": 0.35,
         "DOMINANT_MAX_ITERS": 6,
         "CENTER_SPAN_MAX_PCT": 0.3   # ✅ 중앙(0 포함) 구간 최대 폭을 0.3%로 강제
     },
 
-    "CV_CONFIG": {"folds": 5, "min_per_class": 3, "fallback_reduce_folds": True, "fallback_stratified": True},
+    "CV_CONFIG": {
+        "folds": 5,
+        "min_per_class": 3,
+        "fallback_reduce_folds": True,
+        "fallback_stratified": True
+    },
 
     "TRAIN": {
         "early_stop": {"patience": 4, "min_delta": 0.0005, "warmup_epochs": 2},
@@ -190,14 +218,14 @@ _default_config = {
         "timebase": "utc",
         "check_interval_min": 2,
         "grace_min": 5,
-        "price_window_slack_min": 20,  # 10 → 20 (슬랙 확장)
+        "price_window_slack_min": 20,
         "max_backfill_hours": 48
     },
 
     "ONCHAIN": {
         "enabled": False,
-        "dir": "/persistent/onchain",
-        "features": ["active_address","tx_count","exchange_inflow","exchange_outflow"],
+        "dir": _jp("onchain"),
+        "features": ["active_address", "tx_count", "exchange_inflow", "exchange_outflow"],
         "fill": {"method": "ffill", "max_gap": 6},
         "zscore_window": 96
     },
@@ -213,8 +241,8 @@ _default_config = {
 
     # IO 경로
     "IO": {
-        "predict_out": "/persistent/guanwu/incoming",
-        "guanwu_in":   "/persistent/guanwu/incoming"
+        "predict_out": _jp("guanwu", "incoming"),
+        "guanwu_in":  _jp("guanwu", "incoming")
     },
 }
 
@@ -243,20 +271,24 @@ _ranges_cache = {}
 def _quiet(): return os.getenv("QUIET_CONFIG_LOG", "0") == "1"
 def _log(msg):
     if not _quiet():
-        try: print(msg)
-        except Exception: pass
+        try:
+            print(msg)
+        except Exception:
+            pass
 
 def _deep_merge(dst: dict, src: dict):
     for k, v in src.items():
         if isinstance(v, dict) and isinstance(dst.get(k), dict):
             _deep_merge(dst[k], v)
         else:
-            if k not in dst: dst[k] = v
+            if k not in dst:
+                dst[k] = v
 
-# config.json 로드/생성
+# ===== config.json 로드/생성 =====
 if os.path.exists(CONFIG_PATH):
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f: _loaded = json.load(f)
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            _loaded = json.load(f)
         _config = _loaded if isinstance(_loaded, dict) else copy.deepcopy(_default_config)
         _deep_merge(_config, _default_config)
         _log("[✅ config.py] config.json 로드/보강 완료")
@@ -279,20 +311,29 @@ def save_config():
 # Binance 폴백 상태 로그
 try:
     _ENABLE_BINANCE = int(os.getenv("ENABLE_BINANCE", "1"))
-    _log("[config] ENABLE_BINANCE=1 (fallback ready)" if _ENABLE_BINANCE == 1
-         else "[config] ENABLE_BINANCE=0 (fallback disabled)")
+    _log(
+        "[config] ENABLE_BINANCE=1 (fallback ready)"
+        if _ENABLE_BINANCE == 1
+        else "[config] ENABLE_BINANCE=0 (fallback disabled)"
+    )
 except Exception:
     _ENABLE_BINANCE = 1
 
-# Getter/Setter
+# ===== Getter/Setter =====
 def set_NUM_CLASSES(n):
     global _dynamic_num_classes, NUM_CLASSES
     _dynamic_num_classes = int(n)
-    try: NUM_CLASSES = _dynamic_num_classes
-    except Exception: pass
+    try:
+        NUM_CLASSES = _dynamic_num_classes
+    except Exception:
+        pass
 
 def get_NUM_CLASSES():
-    return _dynamic_num_classes if _dynamic_num_classes is not None else _config.get("NUM_CLASSES", _default_config["NUM_CLASSES"])
+    return (
+        _dynamic_num_classes
+        if _dynamic_num_classes is not None
+        else _config.get("NUM_CLASSES", _default_config["NUM_CLASSES"])
+    )
 
 def get_FEATURE_INPUT_SIZE(): return int(_config.get("FEATURE_INPUT_SIZE", _default_config["FEATURE_INPUT_SIZE"]))
 def get_FAIL_AUGMENT_RATIO(): return int(_config.get("FAIL_AUGMENT_RATIO", _default_config["FAIL_AUGMENT_RATIO"]))
@@ -305,7 +346,7 @@ def get_SYMBOLS():
 def get_SYMBOL_GROUPS():
     symbols = get_SYMBOLS()
     group_size = int(_config.get("SYMBOL_GROUP_SIZE", _default_config["SYMBOL_GROUP_SIZE"]))
-    return [symbols[i:i+group_size] for i in range(0, len(symbols), group_size)]
+    return [symbols[i:i + group_size] for i in range(0, len(symbols), group_size)]
 
 # === 전략별 그룹 크기 ===
 def _group_size_env_or_default(strategy: str) -> int:
@@ -316,15 +357,26 @@ def _group_size_env_or_default(strategy: str) -> int:
         "장기": os.getenv("GROUP_SIZE_LONG"),
     }.get(strategy)
     if gs_env is not None:
-        try: return max(2, int(gs_env))
-        except Exception: pass
+        try:
+            return max(2, int(gs_env))
+        except Exception:
+            pass
     return max(2, int(m.get(strategy, 5)))
 
 def get_class_groups(num_classes=None, group_size=None):
-    if num_classes is None or num_classes < 2: num_classes = get_NUM_CLASSES()
-    if group_size is None: group_size = _group_size_env_or_default(os.getenv("CURRENT_STRATEGY", "중기"))
-    if group_size < 2: group_size = 2
-    groups = [list(range(num_classes))] if num_classes <= group_size else [list(range(i, min(i + group_size, num_classes))) for i in range(0, num_classes, group_size)]
+    if num_classes is None or num_classes < 2:
+        num_classes = get_NUM_CLASSES()
+    if group_size is None:
+        group_size = _group_size_env_or_default(os.getenv("CURRENT_STRATEGY", "중기"))
+    if group_size < 2:
+        group_size = 2
+    if num_classes <= group_size:
+        groups = [list(range(num_classes))]
+    else:
+        groups = [
+            list(range(i, min(i + group_size, num_classes)))
+            for i in range(0, num_classes, group_size)
+        ]
     _log(f"[📊 클래스 분포 그룹] 총={num_classes}, 그룹크기={group_size}, 그룹수={len(groups)}")
     return copy.deepcopy(groups)
 
@@ -346,7 +398,7 @@ def get_PUBLISH():  return copy.deepcopy(_config.get("PUBLISH", _default_config[
 def get_BIN_META(): return copy.deepcopy(_config.get("BIN_META", _default_config["BIN_META"]))
 
 # ===== 파이프라인 게이트 Getter =====
-def _env_bool(v): return str(v).strip().lower() not in {"0","false","no","off","none",""}
+def _env_bool(v): return str(v).strip().lower() not in {"0", "false", "no", "off", "none"}
 
 def get_REQUIRE_GROUP_COMPLETE() -> int:
     v = os.getenv("REQUIRE_GROUP_COMPLETE", None)
@@ -372,7 +424,10 @@ def get_PREDICT_OUT_DIR(): return os.getenv("PREDICT_OUTPUT_DIR", get_IO().get("
 def get_GUANWU_IN_DIR():   return os.getenv("GUANWU_INPUT_DIR",   get_IO().get("guanwu_in"))
 
 def get_PREDICTION_LOG_PATH():
-    return os.getenv("PREDICTION_LOG_PATH", _config.get("PREDICTION_LOG_PATH", _default_config["PREDICTION_LOG_PATH"]))
+    return os.getenv(
+        "PREDICTION_LOG_PATH",
+        _config.get("PREDICTION_LOG_PATH", _default_config["PREDICTION_LOG_PATH"])
+    )
 
 def get_GANWU_PATH():
     return os.getenv("GANWU_PATH", _config.get("GANWU_PATH", _default_config["GANWU_PATH"]))
@@ -381,34 +436,44 @@ def get_TRAIN_LOG_PATH():
     return os.getenv("TRAIN_LOG_PATH", _config.get("TRAIN_LOG_PATH", _default_config["TRAIN_LOG_PATH"]))
 
 def is_disk_cache_off() -> bool:
-    return str(os.getenv("DISK_CACHE_OFF", "0")).strip().lower() in {"1","true","yes","on"}
+    return str(os.getenv("DISK_CACHE_OFF", "0")).strip().lower() in {"1", "true", "yes", "on"}
 
 def get_CLASS_ENFORCE() -> dict:
     base = dict(_config.get("CLASS_ENFORCE", _default_config["CLASS_ENFORCE"]))
     ov = os.getenv("CLASS_N_OVERRIDE", None)
     if ov is not None:
-        try: base["n_override"] = int(ov)
-        except Exception: pass
+        try:
+            base["n_override"] = int(ov)
+        except Exception:
+            pass
     s1 = os.getenv("CLASS_SAME_ACROSS_GROUPS", None)
-    if s1 is not None: base["same_across_groups"] = _env_bool(s1)
+    if s1 is not None:
+        base["same_across_groups"] = _env_bool(s1)
     s2 = os.getenv("CLASS_SAME_ACROSS_SYMBOLS", None)
-    if s2 is not None: base["same_across_symbols"] = _env_bool(s2)
+    if s2 is not None:
+        base["same_across_symbols"] = _env_bool(s2)
     return copy.deepcopy(base)
 
 def _data_from_env(base: dict) -> dict:
     d = copy.deepcopy(base or {})
     v = os.getenv("ENABLE_DATA_MERGE", None)
-    if v is not None: d["merge_enabled"] = _env_bool(v)
+    if v is not None:
+        d["merge_enabled"] = _env_bool(v)
     pv = os.getenv("DATA_PREFER", None)
-    if pv is not None: d["prefer"] = str(pv).strip().lower()
+    if pv is not None:
+        d["prefer"] = str(pv).strip().lower()
     tol = os.getenv("DATA_ALIGN_TOL_SEC", None)
     if tol is not None:
-        try: d.setdefault("align", {})["tolerance_sec"] = int(tol)
-        except Exception: pass
+        try:
+            d.setdefault("align", {})["tolerance_sec"] = int(tol)
+        except Exception:
+            pass
     fg = os.getenv("DATA_FILL_MAX_GAP", None)
     if fg is not None:
-        try: d.setdefault("fill", {})["max_gap"] = int(fg)
-        except Exception: pass
+        try:
+            d.setdefault("fill", {})["max_gap"] = int(fg)
+        except Exception:
+            pass
     return d
 
 def get_DATA() -> dict:         return copy.deepcopy(_config.get("DATA", _default_config["DATA"]))
@@ -418,16 +483,22 @@ def get_CV_CONFIG() -> dict:
     base = dict(_config.get("CV_CONFIG", _default_config["CV_CONFIG"]))
     f = os.getenv("CV_FOLDS", None)
     if f is not None:
-        try: base["folds"] = int(f)
-        except Exception: pass
+        try:
+            base["folds"] = int(f)
+        except Exception:
+            pass
     mpc = os.getenv("CV_MIN_PER_CLASS", None)
     if mpc is not None:
-        try: base["min_per_class"] = int(mpc)
-        except Exception: pass
+        try:
+            base["min_per_class"] = int(mpc)
+        except Exception:
+            pass
     fr = os.getenv("CV_FALLBACK_REDUCE_FOLDS", None)
-    if fr is not None: base["fallback_reduce_folds"] = _env_bool(fr)
+    if fr is not None:
+        base["fallback_reduce_folds"] = _env_bool(fr)
     fs = os.getenv("CV_FALLBACK_STRATIFIED", None)
-    if fs is not None: base["fallback_stratified"] = _env_bool(fs)
+    if fs is not None:
+        base["fallback_stratified"] = _env_bool(fs)
     return copy.deepcopy(base)
 
 def get_ONCHAIN() -> dict: return copy.deepcopy(_config.get("ONCHAIN", _default_config["ONCHAIN"]))
@@ -437,9 +508,12 @@ def get_GUARD() -> dict:
     base = dict(_config.get("GUARD", _default_config["GUARD"]))
     def _ov(name, env, cast):
         v = os.getenv(env, None)
-        if v is None: return
-        try: base[name] = cast(v)
-        except Exception: pass
+        if v is None:
+            return
+        try:
+            base[name] = cast(v)
+        except Exception:
+            pass
     _ov("PROFIT_MIN", "GUARD_PROFIT_MIN", float)
     _ov("ABSTAIN_MIN_META", "ABSTAIN_MIN_META", float)
     _ov("REALITY_GUARD_VOL_MULT", "REALITY_GUARD_VOL_MULT", float)
@@ -447,8 +521,9 @@ def get_GUARD() -> dict:
     v = os.getenv("CALIB_NAN_MODE", None)
     if v is not None:
         v2 = str(v).strip().lower()
-        if v2 in {"abstain","drop"}:
+        if v2 in {"abstain", "drop"}:
             base["CALIB_NAN_MODE"] = v2
+    # 예측 최소수익률을 동시에 오버라이드
     try:
         pmr = float(os.getenv("PREDICT_MIN_RETURN", str(base.get("PROFIT_MIN", 0.01))))
         if "GUARD_PROFIT_MIN" not in os.environ:
@@ -462,12 +537,15 @@ def _round2(x: float) -> float: return round(float(x), _ROUNDS_DECIMALS)
 def _cap_by_strategy(x: float, strategy: str) -> float:
     pos_cap = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy)
     neg_cap = _STRATEGY_RETURN_CAP_NEG_MIN.get(strategy)
-    if x > 0 and pos_cap is not None: return min(x, pos_cap)
-    if x < 0 and neg_cap is not None: return max(x, neg_cap)
+    if x > 0 and pos_cap is not None:
+        return min(x, pos_cap)
+    if x < 0 and neg_cap is not None:
+        return max(x, neg_cap)
     return x
 
 def _enforce_min_width(low: float, high: float):
-    if (high - low) < _MIN_RANGE_WIDTH: high = low + _MIN_RANGE_WIDTH
+    if (high - low) < _MIN_RANGE_WIDTH:
+        high = low + _MIN_RANGE_WIDTH
     return low, high
 
 def _fix_monotonic(ranges):
@@ -477,23 +555,25 @@ def _fix_monotonic(ranges):
             lo = prev_hi
             lo, hi = _enforce_min_width(lo, hi)
         lo, hi = _round2(lo), _round2(hi)
-        if hi <= lo: hi = _round2(lo + _MIN_RANGE_WIDTH)
+        if hi <= lo:
+            hi = _round2(lo + _MIN_RANGE_WIDTH)
         fixed.append((lo, hi))
         prev_hi = hi
     return fixed
 
 def _ensure_zero_band(ranges):
-    crosses = [i for i,(lo,hi) in enumerate(ranges) if lo < 0.0 <= hi]
+    crosses = [i for i, (lo, hi) in enumerate(ranges) if lo < 0.0 <= hi]
     if crosses:
         i = crosses[0]
         lo, hi = ranges[i]
-        if (hi - lo) < max(_MIN_RANGE_WIDTH, _EPS_ZERO_BAND*2):
+        if (hi - lo) < max(_MIN_RANGE_WIDTH, _EPS_ZERO_BAND * 2):
             lo, hi = min(lo, -_EPS_ZERO_BAND), max(hi, _EPS_ZERO_BAND)
             ranges[i] = (_round2(lo), _round2(hi))
         return ranges
-    left_idx  = max([i for i,(lo,hi) in enumerate(ranges) if hi <= 0.0], default=None)
-    right_idx = min([i for i,(lo,hi) in enumerate(ranges) if lo >  0.0], default=None)
-    if left_idx is None or right_idx is None: return ranges
+    left_idx  = max([i for i, (lo, hi) in enumerate(ranges) if hi <= 0.0], default=None)
+    right_idx = min([i for i, (lo, hi) in enumerate(ranges) if lo > 0.0], default=None)
+    if left_idx is None or right_idx is None:
+        return ranges
     lo_l, hi_l = ranges[left_idx]
     lo_r, hi_r = ranges[right_idx]
     ranges[left_idx]  = (_round2(lo_l), _round2(-_EPS_ZERO_BAND))
@@ -502,32 +582,25 @@ def _ensure_zero_band(ranges):
     return _fix_monotonic(ranges)
 
 def _strictify(ranges):
-    if not ranges: return []
+    if not ranges:
+        return []
     fixed, lo = [], float(ranges[0][0])
     for _, hi in ranges:
         hi = float(hi)
-        if hi <= lo: hi = lo + _MIN_RANGE_WIDTH
+        if hi <= lo:
+            hi = lo + _MIN_RANGE_WIDTH
         lo_r, hi_r = _round2(lo), _round2(hi)
-        if hi_r <= lo_r: hi_r = _round2(lo_r + _MIN_RANGE_WIDTH)
-        fixed.append((lo_r, hi_r)); lo = hi_r
+        if hi_r <= lo_r:
+            hi_r = _round2(lo_r + _MIN_RANGE_WIDTH)
+        fixed.append((lo_r, hi_r))
+        lo = hi_r
     return fixed
 
 def _strategy_horizon_hours(strategy: str) -> int:
     return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
 
-# ✅ 여기부터가 문제였던 함수의 교체본
+# ✅ horizon 기반 수익률 추출
 def _future_extreme_signed_returns(df, horizon_hours: int):
-    """
-    미래 수익률을 '시간으로 무한정 훑는' 대신
-    캔들 개수를 추정해서 그 개수만큼만 본다.
-
-    예)
-    - 4h 봉 + horizon=4h  → 딱 1봉
-    - 1d 봉 + horizon=24h → 딱 1봉
-    - 1d 봉 + horizon=168h → 딱 7봉
-
-    이렇게 해야 장기가 1년치 고가/저가를 끌어오는 일이 사라짐.
-    """
     import numpy as np, pandas as pd
 
     if df is None or len(df) == 0 or "timestamp" not in df.columns or "close" not in df.columns:
@@ -538,14 +611,12 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
     high  = pd.to_numeric(df["high"] if "high" in df.columns else df["close"], errors="coerce").ffill().bfill().astype(float).values
     low   = pd.to_numeric(df["low"]  if "low"  in df.columns else df["close"], errors="coerce").ffill().bfill().astype(float).values
 
-    # 1) 캔들 평균 간격(시간) 추정
     if len(ts) > 1:
         total_h = (ts.iloc[-1] - ts.iloc[0]).total_seconds() / 3600.0
-        avg_interval_h = max(0.5, total_h / (len(ts) - 1))  # 최소 0.5h
+        avg_interval_h = max(0.5, total_h / (len(ts) - 1))
     else:
         avg_interval_h = 1.0
 
-    # 2) horizon_hours → 몇 봉 볼지 환산
     lookahead_n = int(max(1, round(float(horizon_hours) / float(avg_interval_h))))
 
     up = np.zeros(len(df), dtype=np.float32)
@@ -554,11 +625,8 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
     for i in range(len(df)):
         j_end = min(len(df), i + lookahead_n)
         base = close[i] if close[i] != 0 else 1e-8
-
-        # 해당 구간에서 실제로 관측된 최댓값/최솟값만 사용
         max_h = float(np.nanmax(high[i:j_end]))
         min_l = float(np.nanmin(low[i:j_end]))
-
         up[i] = (max_h - base) / base
         dn[i] = (min_l - base) / base
 
@@ -567,11 +635,13 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
 def _choose_n_classes(rets_signed, max_classes, hint_min=4):
     import numpy as np
     N = int(rets_signed.size)
-    if N <= 1: return max(4, hint_min)
+    if N <= 1:
+        return max(4, hint_min)
     q25, q75 = np.quantile(rets_signed, [0.25, 0.75]); iqr = float(q75 - q25)
     data_min, data_max = float(np.min(rets_signed)), float(np.max(rets_signed))
     data_range = max(1e-12, data_max - data_min)
-    if iqr <= 1e-12: est = int(round(np.sqrt(N)))
+    if iqr <= 1e-12:
+        est = int(round(np.sqrt(N)))
     else:
         h = 2.0 * iqr * (N ** (-1.0/3.0))
         est = int(round(data_range / max(h, 1e-12)))
@@ -580,29 +650,36 @@ def _choose_n_classes(rets_signed, max_classes, hint_min=4):
     return int(n_cls)
 
 def _merge_smallest_adjacent(ranges, max_classes):
-    if not ranges or len(ranges) <= max_classes: return ranges
+    if not ranges or len(ranges) <= max_classes:
+        return ranges
     import numpy as np
     rs = list(ranges)
     while len(rs) > max_classes:
         widths = np.array([hi - lo for (lo, hi) in rs], dtype=float)
         idx = int(np.argmin(widths))
-        if idx == 0: rs[0] = (rs[0][0], rs[1][1]); del rs[1]
-        elif idx == len(rs) - 1: rs[-2] = (rs[-2][0], rs[-1][1]); del rs[-1]
+        if idx == 0:
+            rs[0] = (rs[0][0], rs[1][1]); del rs[1]
+        elif idx == len(rs) - 1:
+            rs[-2] = (rs[-2][0], rs[-1][1]); del rs[-1]
         else:
             left_w  = rs[idx][0] - rs[idx-1][0] if idx-1 >= 0 else float("inf")
             right_w = rs[idx+1][1] - rs[idx][1] if idx+1 < len(rs) else float("inf")
-            if left_w <= right_w: rs[idx-1] = (rs[idx-1][0], rs[idx][1]); del rs[idx]
-            else: rs[idx] = (rs[idx][0], rs[idx+1][1]); del rs[idx+1]
+            if left_w <= right_w:
+                rs[idx-1] = (rs[idx-1][0], rs[idx][1]); del rs[idx]
+            else:
+                rs[idx] = (rs[idx][0], rs[idx+1][1]); del rs[idx+1]
     return rs
 
 def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
     import numpy as np
-    if not ranges or rets_signed is None or rets_signed.size == 0: return ranges
+    if not ranges or rets_signed is None or rets_signed.size == 0:
+        return ranges
     opt = (bin_conf or {}).get("merge_sparse", {})
     env_enabled = os.getenv("MERGE_SPARSE_ENABLED", None)
     if env_enabled is not None:
-        opt = dict(opt or {}); opt["enabled"] = str(env_enabled).strip().lower() not in {"0","false","no"}
-    if not opt or not opt.get("enabled", False): return ranges
+        opt = dict(opt or {}); opt["enabled"] = str(env_enabled).strip().lower() not in {"0", "false", "no"}
+    if not opt or not opt.get("enabled", False):
+        return ranges
     env_ratio = os.getenv("MERGE_SPARSE_MIN_RATIO", None)
     env_floor = os.getenv("MERGE_SPARSE_MIN_FLOOR", None)
     total = int(rets_signed.size)
@@ -611,7 +688,8 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
     prefer = str(opt.get("prefer", "denser")).lower()
 
     def _rebuild_edges(rr):
-        ee = [rr[0][0]] + [hi for (_, hi) in rr]; ee[-1] = float(ee[-1]) + 1e-12
+        ee = [rr[0][0]] + [hi for (_, hi) in rr]
+        ee[-1] = float(ee[-1]) + 1e-12
         return ee
 
     def _counts(rr):
@@ -622,20 +700,28 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
     rs = list(ranges); changed = True
     while changed:
         changed = False
-        if len(rs) <= 2: break
+        if len(rs) <= 2:
+            break
         counts = _counts(rs)
         thresh = max(int(total * min_ratio), min_floor)
         sparse_idxs = [i for i, c in enumerate(counts) if c < thresh]
-        if not sparse_idxs: break
+        if not sparse_idxs:
+            break
         i = int(sorted(sparse_idxs, key=lambda k: counts[k])[0])
-        if prefer == "left" and i > 0: j = i - 1
-        elif prefer == "right" and i < len(rs) - 1: j = i + 1
+        if prefer == "left" and i > 0:
+            j = i - 1
+        elif prefer == "right" and i < len(rs) - 1:
+            j = i + 1
         else:
             left_ok, right_ok = i - 1 >= 0, i + 1 < len(rs)
-            if left_ok and right_ok: j = i - 1 if counts[i - 1] >= counts[i + 1] else i + 1
-            elif left_ok: j = i - 1
-            elif right_ok: j = i + 1
-            else: break
+            if left_ok and right_ok:
+                j = i - 1 if counts[i - 1] >= counts[i + 1] else i + 1
+            elif left_ok:
+                j = i - 1
+            elif right_ok:
+                j = i + 1
+            else:
+                break
         lo, hi = min(rs[i][0], rs[j][0]), max(rs[i][1], rs[j][1])
         rs[min(i, j)] = (float(lo), float(hi)); del rs[max(i, j)]
         changed = True
@@ -644,13 +730,16 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
 
     rs = [(float(lo), float(hi)) for (lo, hi) in rs]
     rs = _fix_monotonic(rs); rs = _ensure_zero_band(rs)
-    if get_CLASS_BIN().get("strict", True): rs = _strictify(rs)
-    if len(rs) > max_classes: rs = _merge_smallest_adjacent(rs, max_classes)
+    if get_CLASS_BIN().get("strict", True):
+        rs = _strictify(rs)
+    if len(rs) > max_classes:
+        rs = _merge_smallest_adjacent(rs, max_classes)
     return rs
 
 def _split_wide_bins_by_quantiles(ranges, rets_signed, max_width):
     import numpy as np
-    if not ranges or rets_signed is None or rets_signed.size == 0: return ranges
+    if not ranges or rets_signed is None or rets_signed.size == 0:
+        return ranges
     rs = []
     for (lo, hi) in ranges:
         if (hi - lo) <= max_width:
@@ -659,14 +748,16 @@ def _split_wide_bins_by_quantiles(ranges, rets_signed, max_width):
         sub = rets_signed[(rets_signed >= lo) & (rets_signed <= hi)]
         if sub.size < 2:
             rs.append((_round2(lo), _round2(hi))); continue
-        sub_edges = np.quantile(sub, np.linspace(0, 1, k+1))
+        sub_edges = np.quantile(sub, np.linspace(0, 1, k + 1))
         sub_edges[0], sub_edges[-1] = float(lo), float(hi)
         for i in range(k):
-            s_lo, s_hi = float(sub_edges[i]), float(sub_edges[i+1])
-            if s_hi - s_lo <= 0: s_hi = s_lo + _MIN_RANGE_WIDTH
+            s_lo, s_hi = float(sub_edges[i]), float(sub_edges[i + 1])
+            if s_hi - s_lo <= 0:
+                s_hi = s_lo + _MIN_RANGE_WIDTH
             rs.append((_round2(s_lo), _round2(s_hi)))
     rs = _fix_monotonic(rs); rs = _ensure_zero_band(rs)
-    if get_CLASS_BIN().get("strict", True): rs = _strictify(rs)
+    if get_CLASS_BIN().get("strict", True):
+        rs = _strictify(rs)
     return rs
 
 def _insert_cut(ranges, cut_val):
@@ -731,22 +822,27 @@ def class_to_expected_return(class_id: int, symbol: str, strategy: str):
         return _cap_by_strategy(val, strategy)
     floor = float(conf.get("no_trade_floor_abs", 0.01))
     lo, hi = float(r_min), float(r_max)
-    if -floor <= lo and hi <= floor: return 0.0
+    if -floor <= lo and hi <= floor:
+        return 0.0
     if lo < -floor < hi:
-        if abs(hi - (-floor)) >= abs((-floor) - lo): lo = -floor
-        else: hi = -floor
+        if abs(hi - (-floor)) >= abs((-floor) - lo):
+            lo = -floor
+        else:
+            hi = -floor
     if lo < floor < hi:
-        if abs(hi - floor) >= abs(floor - lo): lo = floor
-        else: hi = floor
-    if hi <= lo: return 0.0
+        if abs(hi - floor) >= abs(floor - lo):
+            lo = floor
+        else:
+            hi = floor
+    if hi <= lo:
+        return 0.0
     val = (lo + hi) / 2.0
     return _cap_by_strategy(val, strategy)
 
 def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, group_size=None, df_price=None):
     """
-    원래는 이 안에서 data.utils.get_kline_by_strategy(...)로 데이터를 가져왔는데,
-    이제는 외부에서 df를 넘겨주는 경우에만 수익률 기반 bin을 만들고,
-    df가 없으면 안전한 균등분할로 떨어지게 한다.
+    df_price가 있으면 수익률 기반 bin,
+    없으면 안전한 균등분할로.
     """
     import numpy as np
 
@@ -758,13 +854,15 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     ce = get_CLASS_ENFORCE()
     n_override = ce.get("n_override", None)
     try:
-        if n_override is not None: n_override = int(n_override)
+        if n_override is not None:
+            n_override = int(n_override)
     except Exception:
         n_override = None
 
     if group_size is None and strategy is not None:
         group_size = _group_size_env_or_default(strategy)
-    if group_size is None: group_size = 5
+    if group_size is None:
+        group_size = 5
 
     def compute_equal_ranges(n_cls, reason=""):
         n_cls = max(4, int(n_cls))
@@ -777,17 +875,21 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             lo, hi = _enforce_min_width(lo, hi)
             lo, hi = _cap_by_strategy(lo, strategy), _cap_by_strategy(hi, strategy)
             ranges.append((_round2(lo), _round2(hi)))
-        if reason: _log(f"[⚠️ 균등 분할 클래스 사용] 사유: {reason}")
+        if reason:
+            _log(f"[⚠️ 균등 분할 클래스 사용] 사유: {reason}")
         ranges = _fix_monotonic(ranges); ranges = _ensure_zero_band(ranges)
-        if BIN_CONF.get("strict", True): ranges = _strictify(ranges)
+        if BIN_CONF.get("strict", True):
+            ranges = _strictify(ranges)
         ranges = _apply_trade_floor_cuts(ranges)
-        if len(ranges) > MAX_CLASSES: ranges = _merge_smallest_adjacent(ranges, MAX_CLASSES)
+        if len(ranges) > MAX_CLASSES:
+            ranges = _merge_smallest_adjacent(ranges, MAX_CLASSES)
         return ranges
 
     def compute_fixed_step_ranges(rets_for_merge):
         env_step = os.getenv("CLASS_BIN_STEP") or os.getenv("DYN_CLASS_STEP")
         step = float(env_step) if env_step is not None else float(BIN_CONF.get("step_pct", 0.0030))
-        if step <= 0: step = 0.0030
+        if step <= 0:
+            step = 0.0030
         neg = _STRATEGY_RETURN_CAP_NEG_MIN.get(strategy, -0.5)
         pos = _STRATEGY_RETURN_CAP_POS_MAX.get(strategy,  0.5)
         edges, val = [], float(neg)
@@ -803,18 +905,22 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             lo, hi = _enforce_min_width(lo, hi)
             cooked.append((_round2(lo), _round2(hi)))
         fixed = _fix_monotonic(cooked); fixed = _ensure_zero_band(fixed)
-        if BIN_CONF.get("strict", True): fixed = _strictify(fixed)
+        if BIN_CONF.get("strict", True):
+            fixed = _strictify(fixed)
         # df 있을 때만 merge/split
         if rets_for_merge is not None and rets_for_merge.size > 0:
             fixed = _merge_sparse_bins_by_hist(fixed, rets_for_merge, MAX_CLASSES, BIN_CONF)
-        if len(fixed) > MAX_CLASSES: fixed = _merge_smallest_adjacent(fixed, MAX_CLASSES)
+        if len(fixed) > MAX_CLASSES:
+            fixed = _merge_smallest_adjacent(fixed, MAX_CLASSES)
         if not fixed or len(fixed) < 2:
             return compute_equal_ranges(get_NUM_CLASSES(), reason="fixed_step 최종 경계 부족")
         if rets_for_merge is not None and rets_for_merge.size > 0 and max_width > 0:
             fixed = _split_wide_bins_by_quantiles(fixed, rets_for_merge, max_width)
         fixed = _apply_trade_floor_cuts(fixed)
-        if len(fixed) > MAX_CLASSES: fixed = _merge_smallest_adjacent(fixed, MAX_CLASSES)
-        if len(fixed) < 2: fixed = compute_equal_ranges(get_NUM_CLASSES(), reason="fixed_step post-floor<2")
+        if len(fixed) > MAX_CLASSES:
+            fixed = _merge_smallest_adjacent(fixed, MAX_CLASSES)
+        if len(fixed) < 2:
+            fixed = compute_equal_ranges(get_NUM_CLASSES(), reason="fixed_step post-floor<2")
         return fixed
 
     def compute_ranges_from_df(df_price_local):
@@ -828,8 +934,11 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="수익률 샘플 부족")
             rets_signed = (np.array([_cap_by_strategy(float(r), strategy) for r in rets_signed], dtype=np.float32))
 
-            n_cls = _choose_n_classes(rets_signed, max_classes=int(_config.get("MAX_CLASSES", 12)),
-                                      hint_min=int(_config.get("NUM_CLASSES", 10)))
+            n_cls = _choose_n_classes(
+                rets_signed,
+                max_classes=int(_config.get("MAX_CLASSES", 12)),
+                hint_min=int(_config.get("NUM_CLASSES", 10))
+            )
             if isinstance(n_override, int) and n_override >= 2:
                 n_cls = n_override
 
@@ -847,7 +956,8 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
                 cooked.append((_round2(lo), _round2(hi)))
 
             fixed = _fix_monotonic(cooked); fixed = _ensure_zero_band(fixed)
-            if BIN_CONF.get("strict", True): fixed = _strictify(fixed)
+            if BIN_CONF.get("strict", True):
+                fixed = _strictify(fixed)
             if max_width > 0:
                 fixed = _split_wide_bins_by_quantiles(fixed, rets_signed, max_width)
             fixed = _merge_sparse_bins_by_hist(fixed, rets_signed, int(_config.get("MAX_CLASSES", 12)), BIN_CONF)
@@ -857,23 +967,26 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="최종 경계 부족(가드)")
             fixed = _apply_trade_floor_cuts(fixed)
             MAXC = int(_config.get("MAX_CLASSES", 12))
-            if len(fixed) > MAXC: fixed = _merge_smallest_adjacent(fixed, MAXC)
-            if len(fixed) < 2: fixed = compute_equal_ranges(get_NUM_CLASSES(), reason="post-floor<2")
+            if len(fixed) > MAXC:
+                fixed = _merge_smallest_adjacent(fixed, MAXC)
+            if len(fixed) < 2:
+                fixed = compute_equal_ranges(get_NUM_CLASSES(), reason="post-floor<2")
             return fixed
         except Exception as e:
             return compute_equal_ranges(get_NUM_CLASSES(), reason=f"예외 발생: {e}")
 
     # === 실제 분기 ===
     if method_req == "fixed_step":
-        # df 있으면 그걸로 분포 기반 merge, 없으면 순수 fixed_step
         if df_price is not None:
-            rets_for_merge = _future_extreme_signed_returns(df_price, horizon_hours=_strategy_horizon_hours(strategy))
+            rets_for_merge = _future_extreme_signed_returns(
+                df_price,
+                horizon_hours=_strategy_horizon_hours(strategy)
+            )
             rets_for_merge = rets_for_merge[np.isfinite(rets_for_merge)]
         else:
             rets_for_merge = None
         all_ranges = compute_fixed_step_ranges(rets_for_merge)
     else:
-        # quantile 등은 df 없으면 동작이 애매하므로 균등분할로
         if df_price is not None:
             all_ranges = compute_ranges_from_df(df_price)
         else:
@@ -883,7 +996,7 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     if symbol is not None and strategy is not None:
         _ranges_cache[(symbol, strategy)] = tuple((float(a), float(b)) for (a, b) in all_ranges)
 
-    # 디버그 로그는 df 있을 때만 (이전 코드 스타일 유지)
+    # 디버그 로그
     try:
         if symbol is not None and strategy is not None and not _quiet() and df_price is not None:
             horizon_hours = _strategy_horizon_hours(strategy)
@@ -915,16 +1028,21 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         return copy.deepcopy(all_ranges)
     start = int(group_id) * int(group_size)
     end   = start + int(group_size)
-    if start >= len(all_ranges): return []
+    if start >= len(all_ranges):
+        return []
     return copy.deepcopy(all_ranges[start:end])
 
 def _get_int(name, default):
-    try: return int(os.getenv(name, str(default)))
-    except Exception: return int(default)
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return int(default)
 
 def _get_float(name, default):
-    try: return float(os.getenv(name, str(default)))
-    except Exception: return float(default)
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return float(default)
 
 CPU_THREADS        = _get_int("OMP_NUM_THREADS", 4)
 TRAIN_NUM_WORKERS  = _get_int("TRAIN_NUM_WORKERS", 2)
@@ -953,17 +1071,20 @@ def _publish_from_env(base: dict) -> dict:
     d = copy.deepcopy(base or {})
     def _b(k, env, cast):
         v = os.getenv(env, None)
-        if v is None: return
-        try: d[k] = cast(v)
-        except Exception: pass
-    _b("enabled", "PUBLISH_ENABLED", lambda x: str(x).strip() not in {"0","false","False"})
+        if v is None:
+            return
+        try:
+            d[k] = cast(v)
+        except Exception:
+            pass
+    _b("enabled", "PUBLISH_ENABLED", lambda x: str(x).strip() not in {"0", "false", "False"})
     _b("recent_window", "PUBLISH_RECENT_WINDOW", int)
     _b("recent_success_min", "PUBLISH_RECENT_SUCCESS_MIN", float)
     _b("min_expected_return", "PUBLISH_MIN_EXPECTED_RETURN", float)
     _b("abstain_prob_min", "PUBLISH_ABSTAIN_PROB_MIN", float)
     _b("min_meta_confidence", "PUBLISH_MIN_META_CONFIDENCE", float)
-    _b("allow_shadow", "PUBLISH_ALLOW_SHADOW", lambda x: str(x).strip() not in {"0","false","False"})
-    _b("always_log", "PUBLISH_ALWAYS_LOG", lambda x: str(x).strip() not in {"0","false","False"})
+    _b("allow_shadow", "PUBLISH_ALLOW_SHADOW", lambda x: str(x).strip() not in {"0", "false", "False"})
+    _b("always_log", "PUBLISH_ALWAYS_LOG", lambda x: str(x).strip() not in {"0", "false", "False"})
     return d
 
 def get_PUBLISH_RUNTIME() -> dict:
@@ -983,8 +1104,10 @@ def passes_publish_filter(*, meta_confidence=None, recent_success_rate=None,
         "allow_shadow": bool(cfg.get("allow_shadow", True)),
         "always_log": bool(cfg.get("always_log", True)),
     }
-    if not thr["enabled"]: return (False, "publish_disabled", thr)
-    if shadow and not thr["allow_shadow"]: return (False, "shadow_not_allowed", thr)
+    if not thr["enabled"]:
+        return (False, "publish_disabled", thr)
+    if shadow and not thr["allow_shadow"]:
+        return (False, "shadow_not_allowed", thr)
     if expected_return is not None and abs(float(expected_return)) < thr["min_expected_return"]:
         return (False, "min_expected_return_not_met", thr)
     if calib_prob is not None and float(calib_prob) < thr["abstain_prob_min"]:
@@ -999,9 +1122,12 @@ def _eval_from_env(base: dict) -> dict:
     d = copy.deepcopy(base or {})
     def _b(k, env, cast):
         v = os.getenv(env, None)
-        if v is None: return
-        try: d[k] = cast(v)
-        except Exception: pass
+        if v is None:
+            return
+        try:
+            d[k] = cast(v)
+        except Exception:
+            pass
     _b("timebase", "EVAL_TIMEBASE", str)
     _b("check_interval_min", "EVAL_CHECK_INTERVAL_MIN", int)
     _b("grace_min", "EVAL_GRACE_MIN", int)
@@ -1027,6 +1153,7 @@ MIN_FEATURES       = get_MIN_FEATURES()
 CALIB              = get_CALIB()
 
 __all__ = [
+    "PERSISTENT_DIR",  # ✅ 추가
     "STRATEGY_CONFIG",
     "get_NUM_CLASSES", "set_NUM_CLASSES",
     "get_FEATURE_INPUT_SIZE",
