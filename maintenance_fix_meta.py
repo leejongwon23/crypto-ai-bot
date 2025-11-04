@@ -1,4 +1,4 @@
-# maintenance_fix_meta.py (FINAL, passed 주입 포함)
+# maintenance_fix_meta.py (FINAL v2.1 — PERSIST_DIR/PERSISTENT_DIR 호환 + passed 주입 포함)
 import os
 import json
 import re
@@ -15,8 +15,12 @@ NUM_CLASSES = get_NUM_CLASSES()
 FEATURE_INPUT_SIZE = get_FEATURE_INPUT_SIZE()
 
 # ✅ 여기만 바꿈: /persistent 바로 못 만들면 환경변수 → /tmp 순서로 폴백
-PERSISTENT_DIR = os.getenv("PERSISTENT_DIR", "/persistent")
-MODEL_DIR = os.path.join(PERSISTENT_DIR, "models")
+PERSIST_DIR = (
+    os.getenv("PERSIST_DIR")
+    or os.getenv("PERSISTENT_DIR")
+    or "/tmp/persistent"
+)
+MODEL_DIR = os.path.join(PERSIST_DIR, "models")
 try:
     os.makedirs(MODEL_DIR, exist_ok=True)  # ← 안전 보강: 디렉터리 보장
 except PermissionError:
