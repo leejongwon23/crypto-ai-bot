@@ -8,9 +8,9 @@ APScheduler==3.6.3
 pytz>=2023.3
 gunicorn
 
-# ✅ torch CPU 전용 (Render가 Python 3.13에서 설치할 수 있는 버전으로 변경)
+# ✅ torch CPU 전용 (PyPI 기본 저장소는 그대로 두고, torch만 추가 저장소에서 받기)
 torch==2.5.0
---index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
 
 # ✅ 시각화
 matplotlib
