@@ -62,11 +62,30 @@ _CLASS_BIN_META: Dict = dict(get_CLASS_BIN() or {})
 _ZERO_BAND_PCT_HINT = _as_percent(float(_CLASS_BIN_META.get("ZERO_BAND_PCT", _CENTER_SPAN_MAX_PCT)))
 
 # === 퍼시스턴트 저장소(엣지/라벨 고정) ===
-_EDGES_DIR = Path(os.getenv("LABEL_EDGES_DIR", "/persistent/label_edges")).resolve()
-_EDGES_DIR.mkdir(parents=True, exist_ok=True)
+# 여기서 /persistent 못 만들면 /tmp/... 로 자동 폴백하도록 바꿨다.
+def _ensure_dir_with_fallback(primary: str, fallback: str) -> Path:
+    p_primary = Path(primary).resolve()
+    try:
+        p_primary.mkdir(parents=True, exist_ok=True)
+        return p_primary
+    except Exception as e:
+        # 권한 같은 걸로 실패하면 /tmp 쪽으로 떨어진다.
+        logger.warning("labels: can't create %s (%s) -> fallback to %s", primary, e, fallback)
+        p_fallback = Path(fallback).resolve()
+        p_fallback.mkdir(parents=True, exist_ok=True)
+        return p_fallback
 
-_LABELS_DIR = Path(os.getenv("LABEL_TABLE_DIR", "/persistent/labels")).resolve()
-_LABELS_DIR.mkdir(parents=True, exist_ok=True)
+_PERSIST_BASE = os.getenv("PERSIST_DIR", "/persistent")
+
+_EDGES_DIR = _ensure_dir_with_fallback(
+    os.getenv("LABEL_EDGES_DIR", f"{_PERSIST_BASE}/label_edges"),
+    "/tmp/label_edges",
+)
+
+_LABELS_DIR = _ensure_dir_with_fallback(
+    os.getenv("LABEL_TABLE_DIR", f"{_PERSIST_BASE}/labels"),
+    "/tmp/labels",
+)
 
 # 아주 작은 수익률은 학습 제외(기본 ±0.3%) — (참고 상수, 본 파일의 라벨링은 전체 표본 사용)
 _RAW_MIN_GAIN_FOR_TRAIN = float(os.getenv("MIN_GAIN_FOR_TRAIN", "0.003"))
