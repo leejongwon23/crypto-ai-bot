@@ -742,9 +742,13 @@ def class_to_expected_return(class_id: int, symbol: str, strategy: str):
     val = (lo + hi) / 2.0
     return _cap_by_strategy(val, strategy)
 
-def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, group_size=None):
+def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, group_size=None, df_price=None):
+    """
+    원래는 이 안에서 data.utils.get_kline_by_strategy(...)로 데이터를 가져왔는데,
+    이제는 외부에서 df를 넘겨주는 경우에만 수익률 기반 bin을 만들고,
+    df가 없으면 안전한 균등분할로 떨어지게 한다.
+    """
     import numpy as np
-    from data.utils import get_kline_by_strategy
 
     MAX_CLASSES = int(_config.get("MAX_CLASSES", _default_config["MAX_CLASSES"]))
     BIN_CONF = get_CLASS_BIN()
@@ -800,6 +804,7 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             cooked.append((_round2(lo), _round2(hi)))
         fixed = _fix_monotonic(cooked); fixed = _ensure_zero_band(fixed)
         if BIN_CONF.get("strict", True): fixed = _strictify(fixed)
+        # df 있을 때만 merge/split
         if rets_for_merge is not None and rets_for_merge.size > 0:
             fixed = _merge_sparse_bins_by_hist(fixed, rets_for_merge, MAX_CLASSES, BIN_CONF)
         if len(fixed) > MAX_CLASSES: fixed = _merge_smallest_adjacent(fixed, MAX_CLASSES)
@@ -812,13 +817,12 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         if len(fixed) < 2: fixed = compute_equal_ranges(get_NUM_CLASSES(), reason="fixed_step post-floor<2")
         return fixed
 
-    def compute_ranges_from_kline():
+    def compute_ranges_from_df(df_price_local):
         try:
-            df_price = get_kline_by_strategy(symbol, strategy)
-            if df_price is None or len(df_price) < 30 or "close" not in df_price:
+            if df_price_local is None or len(df_price_local) < 30 or "close" not in df_price_local:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="가격 데이터 부족")
             horizon_hours = _strategy_horizon_hours(strategy)
-            rets_signed = _future_extreme_signed_returns(df_price, horizon_hours=horizon_hours)
+            rets_signed = _future_extreme_signed_returns(df_price_local, horizon_hours=horizon_hours)
             rets_signed = rets_signed[np.isfinite(rets_signed)]
             if rets_signed.size < 10:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="수익률 샘플 부족")
@@ -859,55 +863,54 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
         except Exception as e:
             return compute_equal_ranges(get_NUM_CLASSES(), reason=f"예외 발생: {e}")
 
+    # === 실제 분기 ===
     if method_req == "fixed_step":
-        try:
-            from data.utils import get_kline_by_strategy as _dbg_k
-            df_dbg = _dbg_k(symbol, strategy)
-            if df_dbg is not None and len(df_dbg) >= 2 and "close" in df_dbg:
-                rets_for_merge = _future_extreme_signed_returns(df_dbg, horizon_hours=_strategy_horizon_hours(strategy))
-                rets_for_merge = rets_for_merge[np.isfinite(rets_for_merge)]
-            else:
-                rets_for_merge = None
-        except Exception:
+        # df 있으면 그걸로 분포 기반 merge, 없으면 순수 fixed_step
+        if df_price is not None:
+            rets_for_merge = _future_extreme_signed_returns(df_price, horizon_hours=_strategy_horizon_hours(strategy))
+            rets_for_merge = rets_for_merge[np.isfinite(rets_for_merge)]
+        else:
             rets_for_merge = None
         all_ranges = compute_fixed_step_ranges(rets_for_merge)
     else:
-        all_ranges = compute_ranges_from_kline()
+        # quantile 등은 df 없으면 동작이 애매하므로 균등분할로
+        if df_price is not None:
+            all_ranges = compute_ranges_from_df(df_price)
+        else:
+            all_ranges = compute_equal_ranges(get_NUM_CLASSES(), reason="df 미제공 → 균등분할")
 
+    # 캐시 저장
     if symbol is not None and strategy is not None:
         _ranges_cache[(symbol, strategy)] = tuple((float(a), float(b)) for (a, b) in all_ranges)
 
+    # 디버그 로그는 df 있을 때만 (이전 코드 스타일 유지)
     try:
-        if symbol is not None and strategy is not None and not _quiet():
-            import numpy as np
-            from data.utils import get_kline_by_strategy as _get_kline_dbg
-            df_price_dbg = _get_kline_dbg(symbol, strategy)
-            if df_price_dbg is not None and len(df_price_dbg) >= 2 and "close" in df_price_dbg:
-                horizon_hours = _strategy_horizon_hours(strategy)
-                rets_dbg = _future_extreme_signed_returns(df_price_dbg, horizon_hours=horizon_hours)
-                rets_dbg = rets_dbg[np.isfinite(rets_dbg)]
-                if rets_dbg.size > 0:
-                    rets_dbg = np.array([_cap_by_strategy(float(r), strategy) for r in rets_dbg], dtype=np.float32)
-                    qs = np.quantile(rets_dbg, [0.00, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 1.00])
-                    def _r2(z): return round(float(z), _ROUNDS_DECIMALS)
-                    print(f"[📈 수익률분포(±)] {symbol}-{strategy} min={_r2(qs[0])}, p25={_r2(qs[1])}, p50={_r2(qs[2])}, p75={_r2(qs[3])}, p90={_r2(qs[4])}, p95={_r2(qs[5])}, p99={_r2(qs[6])}, max={_r2(qs[7])}")
-                    print(f"[📏 클래스경계 로그] {symbol}-{strategy} → {len(all_ranges)}개")
-                    print(f"[📏 경계 리스트] {symbol}-{strategy} → {all_ranges}")
-                    edges = [all_ranges[0][0]] + [hi for (_, hi) in all_ranges]
-                    edges[-1] = float(edges[-1]) + 1e-9
-                    hist, _ = np.histogram(rets_dbg, bins=edges)
-                    print(f"[📐 클래스 분포] {symbol}-{strategy} count={int(hist.sum())} → {hist.tolist()}")
-            else:
-                print(f"[ℹ️ 수익률분포 스킵] {symbol}-{strategy} → 데이터 부족")
+        if symbol is not None and strategy is not None and not _quiet() and df_price is not None:
+            horizon_hours = _strategy_horizon_hours(strategy)
+            rets_dbg = _future_extreme_signed_returns(df_price, horizon_hours=horizon_hours)
+            rets_dbg = rets_dbg[np.isfinite(rets_dbg)]
+            if rets_dbg.size > 0:
+                rets_dbg = np.array([_cap_by_strategy(float(r), strategy) for r in rets_dbg], dtype=np.float32)
+                qs = np.quantile(rets_dbg, [0.00, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 1.00])
+                def _r2(z): return round(float(z), _ROUNDS_DECIMALS)
+                print(f"[📈 수익률분포(±)] {symbol}-{strategy} min={_r2(qs[0])}, p25={_r2(qs[1])}, p50={_r2(qs[2])}, p75={_r2(qs[3])}, p90={_r2(qs[4])}, p95={_r2(qs[5])}, p99={_r2(qs[6])}, max={_r2(qs[7])}")
+                print(f"[📏 클래스경계 로그] {symbol}-{strategy} → {len(all_ranges)}개")
+                print(f"[📏 경계 리스트] {symbol}-{strategy} → {all_ranges}")
+                edges = [all_ranges[0][0]] + [hi for (_, hi) in all_ranges]
+                edges[-1] = float(edges[-1]) + 1e-9
+                hist, _ = np.histogram(rets_dbg, bins=edges)
+                print(f"[📐 클래스 분포] {symbol}-{strategy} count={int(hist.sum())} → {hist.tolist()}")
     except Exception as _e:
         _log(f"[⚠️ 디버그 로그 실패] {symbol}-{strategy} → {_e}")
 
+    # 계산된 bin 수를 NUM_CLASSES에 반영
     try:
         if isinstance(all_ranges, list) and len(all_ranges) >= 2:
             set_NUM_CLASSES(len(all_ranges))
     except Exception:
         pass
 
+    # group_id가 있으면 해당 부분만
     if group_id is None:
         return copy.deepcopy(all_ranges)
     start = int(group_id) * int(group_size)
@@ -1049,4 +1052,4 @@ __all__ = [
     "is_config_readonly", "is_disk_cache_off",
     "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
     "get_BIN_META",
-                                         ]
+    ]
