@@ -2,7 +2,24 @@
 import json, os, errno, copy
 
 # ===== persistent root (모든 경로의 뿌리) =====
-PERSISTENT_DIR = os.getenv("PERSISTENT_DIR", "/persistent").rstrip("/")
+# NOTE:
+#   - 원본은 PERSISTENT_DIR만 봤는데, 호스팅 환경에 따라 /persistent가 안 될 수 있어서
+#     PERSIST_DIR → PERSISTENT_DIR → /persistent 순으로 보고, 안 되면 /tmp로 폴백한다.
+def _ensure_dir_with_fallback(primary: str, fallback: str) -> str:
+    try:
+        os.makedirs(primary, exist_ok=True)
+        return primary
+    except Exception as e:
+        try:
+            print(f"[⚠️ 디렉터리 생성 실패] {primary}: {e} → fallback to {fallback}")
+        except Exception:
+            pass
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
+
+# 우선순위: PERSIST_DIR > PERSISTENT_DIR > /persistent
+_PERSIST_ENV = os.getenv("PERSIST_DIR") or os.getenv("PERSISTENT_DIR") or "/persistent"
+PERSISTENT_DIR = _ensure_dir_with_fallback(_PERSIST_ENV.rstrip("/"), "/tmp")
 
 def _jp(*parts):
     return os.path.join(PERSISTENT_DIR, *parts)
@@ -620,7 +637,7 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
     lookahead_n = int(max(1, round(float(horizon_hours) / float(avg_interval_h))))
 
     up = np.zeros(len(df), dtype=np.float32)
-    dn = np.zeros(len(df), dtype=np.float32)
+    down = np.zeros(len(df), dtype=np.float32)
 
     for i in range(len(df)):
         j_end = min(len(df), i + lookahead_n)
@@ -628,9 +645,9 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
         max_h = float(np.nanmax(high[i:j_end]))
         min_l = float(np.nanmin(low[i:j_end]))
         up[i] = (max_h - base) / base
-        dn[i] = (min_l - base) / base
+        down[i] = (min_l - base) / base
 
-    return np.concatenate([dn, up]).astype(np.float32)
+    return np.concatenate([down, up]).astype(np.float32)
 
 def _choose_n_classes(rets_signed, max_classes, hint_min=4):
     import numpy as np
@@ -1179,4 +1196,4 @@ __all__ = [
     "is_config_readonly", "is_disk_cache_off",
     "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
     "get_BIN_META",
-    ]
+]
