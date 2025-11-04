@@ -4,15 +4,12 @@ import gc
 from sklearn.preprocessing import MinMaxScaler
 
 # =========================================================
-# 🔐 Render 등 쓰기 제한 환경 대응용 루트 디렉터리
-# 환경변수 PERSISTENT_DIR 이 있으면 그걸 쓰고,
-# 없으면 /opt/render/project/src/persistent 아래에 저장한다.
-# (Render는 여기엔 쓰기가 된다)
+# 🔐 쓰기 가능한 루트 디렉터리
+# - 환경변수 PERSISTENT_DIR 있으면 그걸 쓰고
+# - 없으면 /persistent 를 기본으로 쓴다
+#   (config.py와 동일한 기본값으로 맞춰서 경로 일관성 유지)
 # =========================================================
-PERSISTENT_ROOT = os.getenv(
-    "PERSISTENT_DIR",
-    "/opt/render/project/src/persistent"
-)
+PERSISTENT_ROOT = os.getenv("PERSISTENT_DIR", "/persistent")
 os.makedirs(PERSISTENT_ROOT, exist_ok=True)
 
 def _p(*parts: str) -> str:
@@ -996,6 +993,7 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
                         if isinstance(obj, dict):
                             try:
                                 model.load_state_dict(obj, strict=False)
+                                model.eval()
                                 loaded = model
                             except Exception:
                                 loaded = None
