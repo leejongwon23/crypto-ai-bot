@@ -1,4 +1,4 @@
-# === logger.py (v2025-10-17 safe-degrade: ENOSPC/readonly 감지, DB/파일 쓰기 폴백) ===
+# === logger.py (v2025-10-17 safe-degrade: ENOSPC/readonly 감지, DB/파일 쓰기 폴백 + PERSISTENT_DIR 적용) ===
 import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil, re
 import sqlite3
 from collections import defaultdict, deque
@@ -6,6 +6,11 @@ import threading, time
 from typing import Optional, Any, Dict
 from sklearn.metrics import classification_report
 from config import get_TRAIN_LOG_PATH, get_PREDICTION_LOG_PATH  # 경로 단일화
+
+# ------------------------------------------------------------------------------------
+# 환경변수 기반 루트 디렉토리 (/persistent → PERSISTENT_DIR 로 치환)
+# ------------------------------------------------------------------------------------
+PERSISTENT_ROOT = os.getenv("PERSISTENT_DIR", "/persistent")
 
 # -------------------------
 # 로그 레벨/샘플링 유틸
@@ -52,13 +57,13 @@ def _bucketize(v: float, step: float) -> tuple:
 # -------------------------
 # 기본 경로/디렉토리 + 파일시스템 상태 감지
 # -------------------------
-DIR = "/persistent"
+DIR = PERSISTENT_ROOT
 LOG_DIR = os.path.join(DIR, "logs")
 PREDICTION_LOG = get_PREDICTION_LOG_PATH()
-WRONG = f"{DIR}/wrong_predictions.csv"
-EVAL_RESULT = f"{LOG_DIR}/evaluation_result.csv"
+WRONG = os.path.join(DIR, "wrong_predictions.csv")
+EVAL_RESULT = os.path.join(LOG_DIR, "evaluation_result.csv")
 TRAIN_LOG = get_TRAIN_LOG_PATH()
-AUDIT_LOG = f"{LOG_DIR}/evaluation_audit.csv"
+AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
 
 def _fs_has_space(path: str, min_bytes: int = 1_048_576) -> bool:
     try:
@@ -785,7 +790,7 @@ def log_training_result(
                 print(f"🟠 [요약] F1=0.0 연속 {n}회 → {symbol}-{strategy} {model}")
         else:
             if getattr(log_training_result, "_f1_zero", {}).get(_f1_key, 0) > 0:
-                print(f"[✅ 복구] {symbol}-{strategy} {model} F1 회복 → {float(val_f1):.4f}")
+                print(f"[✅ 복구] {symbol}-{strategy} {model} F1 회복 → {float(val_f1 or 0.0):.4f}")
             log_training_result._f1_zero[_f1_key] = 0
         _print_once(f"trainlog:{symbol}:{strategy}:{model}",
                     f"[✅ 학습 로그 기록] {symbol}-{strategy} {model} val_f1={float(val_f1 or 0.0):.4f} status={status}")
@@ -1055,7 +1060,7 @@ def _model_sort_key(r):
 # -------------------------
 def get_available_models(symbol: str = None, strategy: str = None):
     try:
-        model_dir = "/persistent/models"
+        model_dir = os.path.join(PERSISTENT_ROOT, "models")
         if not os.path.isdir(model_dir): return []
         out = []; exts = (".pt", ".ptz", ".safetensors")
         def _stem_meta(path: str) -> str:
