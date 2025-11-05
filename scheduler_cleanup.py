@@ -1,5 +1,5 @@
 # scheduler_cleanup.py — light-first, collision-safe cleanup scheduler
-# (FINAL v1.2) 
+# (FINAL v1.3 env-aware)
 # - predict_lock GC API 정합 유지(정상 락은 절대 건드리지 않음, stale만 정리)
 # - start-immediate(부팅 즉시 라이트 1회) 옵션
 # - 학습/예측/글로벌락 충돌 회피
@@ -10,6 +10,18 @@ import os, sys, time, threading, datetime, pytz, traceback
 
 # 필수 의존: safe_cleanup (프로젝트 내 제공)
 import safe_cleanup
+
+# ===== 공통 베이스 경로 (app.py / safe_cleanup.py 와 동일 우선순위) =====
+# 1) PERSIST_DIR
+# 2) PERSISTENT_DIR
+# 3) PERSIST_ROOT
+# 4) 없으면 /tmp/persistent
+BASE_DIR = (
+    os.getenv("PERSIST_DIR")
+    or os.getenv("PERSISTENT_DIR")
+    or os.getenv("PERSIST_ROOT")
+    or "/tmp/persistent"
+)
 
 # 선택 의존: train 상태질의 (없으면 항상 False)
 try:
@@ -35,14 +47,14 @@ def _clear_stale_predict_lock(tag="cleanup"):
     except Exception:
         pass
 
-# 예측 게이트/락 경로 (predict.py와 합)
-RUN_DIR        = "/persistent/run"
+# 예측 게이트/락 경로 (app.py/basics와 일치하도록 BASE_DIR 사용)
+RUN_DIR        = os.path.join(BASE_DIR, "run")
 PREDICT_LOCK   = os.path.join(RUN_DIR, "predict_running.lock")
-PREDICT_BLOCK  = "/persistent/predict.block"
+PREDICT_BLOCK  = os.path.join(BASE_DIR, "predict.block")
 PREDICT_GATE   = os.path.join(RUN_DIR, "predict_gate.json")
 
-# 전역 락 (app.py/safe_cleanup 공유)
-LOCK_DIR  = getattr(safe_cleanup, "LOCK_DIR", "/persistent/locks")
+# 전역 락 (safe_cleanup 이 이미 올바른 LOCK_DIR/LOCK_PATH를 잡아놓음)
+LOCK_DIR  = getattr(safe_cleanup, "LOCK_DIR", os.path.join(BASE_DIR, "locks"))
 LOCK_PATH = getattr(safe_cleanup, "LOCK_PATH", os.path.join(LOCK_DIR, "train_or_predict.lock"))
 
 # 튜너블 파라미터 (ENV로 오버라이드)
@@ -114,9 +126,9 @@ def _should_run_heavy() -> bool:
     gap_min = (time.time() - _last_heavy_ts()) / 60.0
     if gap_min < HEAVY_MIN_GAP_MIN:
         return False
-    # 용량 체크
+    # 용량 체크 (BASE_DIR 기준)
     try:
-        used = safe_cleanup.get_directory_size_gb("/persistent")
+        used = safe_cleanup.get_directory_size_gb(BASE_DIR)
         if used >= DISK_SOFTCAP_GB:
             return True
     except Exception:
@@ -154,7 +166,7 @@ def _cleanup_job():
     """
     with _lock:
         try:
-            used = safe_cleanup.get_directory_size_gb("/persistent")
+            used = safe_cleanup.get_directory_size_gb(BASE_DIR)
         except Exception:
             used = -1.0
 
