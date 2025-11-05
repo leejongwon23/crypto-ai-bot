@@ -31,8 +31,17 @@ def _env_bool(key: str, default: bool) -> bool:
         return bool(default)
     return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
 
-# ====== 기본 경로 (env 있으면 사용, 없으면 기본) ======
-ROOT_DIR = os.getenv("PERSIST_ROOT", "/persistent")
+# ====== 기본 경로 (app.py와 동일한 우선순위) ======
+# 1) PERSIST_DIR
+# 2) PERSISTENT_DIR
+# 3) PERSIST_ROOT (예전 이름)
+# 4) 없으면 /tmp/persistent 로 폴백
+ROOT_DIR = (
+    os.getenv("PERSIST_DIR")
+    or os.getenv("PERSISTENT_DIR")
+    or os.getenv("PERSIST_ROOT")
+    or "/tmp/persistent"
+)
 LOG_DIR = os.path.join(ROOT_DIR, "logs")
 MODEL_DIR = os.path.join(ROOT_DIR, "models")
 SSL_DIR = os.path.join(ROOT_DIR, "ssl_models")
