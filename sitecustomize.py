@@ -1,15 +1,29 @@
-# === sitecustomize.py (YOPO v1.0 — 경로자동변환 완성판) ===
-# Render / Local 환경 어디서든 /persistent 경로를 안전하게 /opt/render/project/src/persistent 로 자동 변경
-# 이제 모든 코드에서 경로를 일일이 수정할 필요 없음 👍
+# === sitecustomize.py (YOPO v1.1 — 경로자동변환 + 기본폴더 보장) ===
+# 목적:
+# 1) 코드 어디에서든 /persistent/... 라고 쓰면 실제로는 BASE/... 으로 가게 한다
+# 2) 그리고 그 BASE랑 우리가 자주 쓰는 하위폴더를 미리 만들어둔다
+#    → "No such file or directory: '/persistent/...csv'" 이런 거 안 나게
 
 import os, builtins, os.path, shutil
 
-# ✅ Render 환경변수에서 설정된 저장 경로 우선 사용
+# ✅ Render / 로컬에서 덮어쓸 수 있는 기본 루트
 BASE = (
     os.getenv("PERSIST_DIR")
     or os.getenv("PERSISTENT_DIR")
-    or "/tmp/persistent"   # 없을 때 대비 기본값
+    or "/tmp/persistent"   # 아무것도 없을 때 마지막 기본값
 )
+
+# ✅ 여기서 한 번 실제 디렉터리를 만들어둔다
+#    (파일 열 때마다 매번 실패하는 것보다 한번 만드는 게 낫다)
+try:
+    os.makedirs(BASE, exist_ok=True)
+    # 우리가 자주 쓰는 서브디렉터리도 같이 만들어둠
+    for sub in ("logs", "state", "locks", "importances", "guanwu/incoming"):
+        os.makedirs(os.path.join(BASE, sub), exist_ok=True)
+except Exception:
+    # 만들어도 되고, 못 만들어도 서비스는 계속 되게 조용히 지나감
+    pass
+
 
 def _fix(path):
     """모든 경로에서 /persistent → 환경변수 기반 BASE로 자동 변환"""
