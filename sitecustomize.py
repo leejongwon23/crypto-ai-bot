@@ -1,11 +1,13 @@
-# === sitecustomize.py (YOPO v1.2 — 경로자동변환 + 기본폴더/기본파일 보장 + replace/rename 패치) ===
-# 역할:
-# 1) 코드 어디서든 "/persistent/..." 를 쓰면 실제로는 BASE로 보냄
-# 2) BASE랑 우리가 자주 쓰는 하위 폴더를 미리 만들어둠
-# 3) os.replace / os.rename 까지 패치해서 JSON 저장도 안 터지게 함
-# 4) 초기화 시 자주 참조하는 CSV는 빈 파일이라도 만들어둠
+# === sitecustomize.py (YOPO v1.3 — 경로자동변환 강화판) ===
+# 하는 일:
+# 1) 코드 어디서든 "/persistent/..." 쓰면 실제로는 BASE로 보냄
+# 2) BASE 하위 폴더 미리 만들어둠
+# 3) os.open 계열, shutil 계열, os.replace/rename 전부 패치
+# 4) pathlib.Path.open 도 패치  ← 새로 추가
+# 5) sqlite3.connect 도 패치    ← 새로 추가
+# 6) 자주 쓰는 CSV는 빈 파일이라도 미리 만들어둠
 
-import os, builtins, os.path, shutil
+import os, builtins, os.path, shutil, sqlite3, pathlib
 
 # ✅ 실제로 저장할 루트
 BASE = (
@@ -26,16 +28,15 @@ try:
         "ssl_models",
         "models",
         "run",
+        "failure_db",      # ← sqlite가 여기 쓸 수도 있으니까 만들어둔다
     ):
         os.makedirs(os.path.join(BASE, sub), exist_ok=True)
 except Exception:
-    # 여기서 죽어도 전체 앱은 계속 가야 함
     pass
 
 
 def _fix(path):
     """모든 경로에서 /persistent → BASE로 자동 변환"""
-    import pathlib
     if isinstance(path, pathlib.Path):
         path = str(path)
     if isinstance(path, str) and path.startswith("/persistent"):
@@ -43,7 +44,7 @@ def _fix(path):
     return path
 
 
-# ✅ 원본 함수 백업
+# === 원본 함수 백업 ===
 _orig_open      = builtins.open
 _orig_exists    = os.path.exists
 _orig_isdir     = os.path.isdir
@@ -55,6 +56,12 @@ _orig_rmdir     = os.rmdir
 _orig_rmtree    = shutil.rmtree
 _orig_replace   = getattr(os, "replace", None)
 _orig_rename    = getattr(os, "rename", None)
+
+# pathlib 원본
+_OrigPathOpen = pathlib.Path.open
+
+# sqlite 원본
+_orig_sqlite_connect = sqlite3.connect
 
 
 def _ensure_parent(path: str):
@@ -71,7 +78,6 @@ def _ensure_parent(path: str):
 
 # === 패치 함수들 ===
 def open_patched(path, *a, **kw):
-    # 쓰기 모드면 부모 디렉터리 먼저 만든다
     mode = kw.get("mode") or (a[0] if a else "r")
     fixed = _fix(path)
     if any(m in mode for m in ("w", "a", "x", "+")):
@@ -104,7 +110,6 @@ def rmtree_patched(path, *a, **kw):
     return _orig_rmtree(_fix(path), *a, **kw)
 
 def replace_patched(src, dst, *a, **kw):
-    # config.py 같은 데서 tmp -> real 바꿀 때 여기로 들어옴
     if _orig_replace is None:
         raise AttributeError("os.replace not available")
     dst_fixed = _ensure_parent(dst)
@@ -115,6 +120,27 @@ def rename_patched(src, dst, *a, **kw):
         raise AttributeError("os.rename not available")
     dst_fixed = _ensure_parent(dst)
     return _orig_rename(_fix(src), dst_fixed, *a, **kw)
+
+
+# === pathlib.Path.open 패치 (중요) ===
+def path_open_patched(self, *a, **kw):
+    fixed = _fix(str(self))
+    # 쓰기모드면 부모부터
+    mode = kw.get("mode") or (a[0] if a else "r")
+    if any(m in mode for m in ("w", "a", "x", "+")):
+        _ensure_parent(fixed)
+    return _orig_open(fixed, *a, **kw)
+pathlib.Path.open = path_open_patched
+
+
+# === sqlite3.connect 패치 (중요) ===
+def sqlite_connect_patched(db, *a, **kw):
+    # db 가 /persistent 로 시작하면 BASE로 돌려보내기
+    if isinstance(db, str) and db.startswith("/persistent"):
+        db = _ensure_parent(db)
+        db = _fix(db)
+    return _orig_sqlite_connect(db, *a, **kw)
+sqlite3.connect = sqlite_connect_patched
 
 
 # === 전역 덮어쓰기 ===
@@ -142,7 +168,6 @@ for fname in (
     fpath = os.path.join(BASE, fname)
     try:
         if not os.path.exists(fpath):
-            # 헤더는 logger가 나중에 다시 보정하니까 지금은 그냥 빈 파일만
             _ensure_parent(fpath)
             with open(fpath, "w", encoding="utf-8-sig") as wf:
                 wf.write("")
