@@ -29,6 +29,7 @@ try:
     ):
         os.makedirs(os.path.join(BASE, sub), exist_ok=True)
 except Exception:
+    # 여기서 죽어도 전체 앱은 계속 가야 함
     pass
 
 
@@ -56,9 +57,26 @@ _orig_replace   = getattr(os, "replace", None)
 _orig_rename    = getattr(os, "rename", None)
 
 
+def _ensure_parent(path: str):
+    """/persistent/... 를 BASE로 바꾼 뒤 부모 폴더가 없으면 만든다."""
+    path = _fix(path)
+    parent = os.path.dirname(path)
+    if parent and not os.path.exists(parent):
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except Exception:
+            pass
+    return path
+
+
 # === 패치 함수들 ===
 def open_patched(path, *a, **kw):
-    return _orig_open(_fix(path), *a, **kw)
+    # 쓰기 모드면 부모 디렉터리 먼저 만든다
+    mode = kw.get("mode") or (a[0] if a else "r")
+    fixed = _fix(path)
+    if any(m in mode for m in ("w", "a", "x", "+")):
+        _ensure_parent(fixed)
+    return _orig_open(fixed, *a, **kw)
 
 def exists_patched(path):
     return _orig_exists(_fix(path))
@@ -73,7 +91,8 @@ def listdir_patched(path):
     return _orig_listdir(_fix(path))
 
 def move_patched(src, dst, *a, **kw):
-    return _orig_move(_fix(src), _fix(dst), *a, **kw)
+    dst_fixed = _ensure_parent(dst)
+    return _orig_move(_fix(src), dst_fixed, *a, **kw)
 
 def remove_patched(path, *a, **kw):
     return _orig_remove(_fix(path), *a, **kw)
@@ -85,15 +104,17 @@ def rmtree_patched(path, *a, **kw):
     return _orig_rmtree(_fix(path), *a, **kw)
 
 def replace_patched(src, dst, *a, **kw):
-    # config.py가 JSON을 tmp로 저장하고 os.replace로 바꾸는 부분을 여기서 잡는다
+    # config.py 같은 데서 tmp -> real 바꿀 때 여기로 들어옴
     if _orig_replace is None:
         raise AttributeError("os.replace not available")
-    return _orig_replace(_fix(src), _fix(dst), *a, **kw)
+    dst_fixed = _ensure_parent(dst)
+    return _orig_replace(_fix(src), dst_fixed, *a, **kw)
 
 def rename_patched(src, dst, *a, **kw):
     if _orig_rename is None:
         raise AttributeError("os.rename not available")
-    return _orig_rename(_fix(src), _fix(dst), *a, **kw)
+    dst_fixed = _ensure_parent(dst)
+    return _orig_rename(_fix(src), dst_fixed, *a, **kw)
 
 
 # === 전역 덮어쓰기 ===
@@ -122,6 +143,7 @@ for fname in (
     try:
         if not os.path.exists(fpath):
             # 헤더는 logger가 나중에 다시 보정하니까 지금은 그냥 빈 파일만
+            _ensure_parent(fpath)
             with open(fpath, "w", encoding="utf-8-sig") as wf:
                 wf.write("")
     except Exception:
