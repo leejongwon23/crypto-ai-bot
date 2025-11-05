@@ -36,6 +36,12 @@ PERSIST_DIR = (
 LOG_DIR     = os.path.join(PERSIST_DIR, "logs")
 MODEL_DIR   = os.path.join(PERSIST_DIR, "models")
 RUN_DIR     = os.path.join(PERSIST_DIR, "run")
+os.makedirs(PERSIST_DIR, exist_ok=True)
+for name in ("wrong_predictions.csv", "prediction_log.csv", "train_log.csv"):
+    path = os.path.join(PERSIST_DIR, name)
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8-sig") as f:
+            f.write("")
 
 # --- ✨ 필수 폴더 자동 생성 유틸 (부팅/리셋/조기QWIPE 후 재사용) ---
 NEEDED_DIRS = [
