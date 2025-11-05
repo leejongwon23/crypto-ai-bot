@@ -1,32 +1,39 @@
-# === sitecustomize.py (YOPO v1.1 — 경로자동변환 + 기본폴더 보장) ===
-# 목적:
-# 1) 코드 어디에서든 /persistent/... 라고 쓰면 실제로는 BASE/... 으로 가게 한다
-# 2) 그리고 그 BASE랑 우리가 자주 쓰는 하위폴더를 미리 만들어둔다
-#    → "No such file or directory: '/persistent/...csv'" 이런 거 안 나게
+# === sitecustomize.py (YOPO v1.2 — 경로자동변환 + 기본폴더/기본파일 보장 + replace/rename 패치) ===
+# 역할:
+# 1) 코드 어디서든 "/persistent/..." 를 쓰면 실제로는 BASE로 보냄
+# 2) BASE랑 우리가 자주 쓰는 하위 폴더를 미리 만들어둠
+# 3) os.replace / os.rename 까지 패치해서 JSON 저장도 안 터지게 함
+# 4) 초기화 시 자주 참조하는 CSV는 빈 파일이라도 만들어둠
 
 import os, builtins, os.path, shutil
 
-# ✅ Render / 로컬에서 덮어쓸 수 있는 기본 루트
+# ✅ 실제로 저장할 루트
 BASE = (
     os.getenv("PERSIST_DIR")
     or os.getenv("PERSISTENT_DIR")
-    or "/tmp/persistent"   # 아무것도 없을 때 마지막 기본값
+    or "/tmp/persistent"   # 최후 기본값
 )
 
-# ✅ 여기서 한 번 실제 디렉터리를 만들어둔다
-#    (파일 열 때마다 매번 실패하는 것보다 한번 만드는 게 낫다)
+# ✅ 1) 루트랑 자주 쓰는 디렉터리 먼저 만들어두기
 try:
     os.makedirs(BASE, exist_ok=True)
-    # 우리가 자주 쓰는 서브디렉터리도 같이 만들어둠
-    for sub in ("logs", "state", "locks", "importances", "guanwu/incoming"):
+    for sub in (
+        "logs",
+        "state",
+        "locks",
+        "importances",
+        "guanwu/incoming",
+        "ssl_models",
+        "models",
+        "run",
+    ):
         os.makedirs(os.path.join(BASE, sub), exist_ok=True)
 except Exception:
-    # 만들어도 되고, 못 만들어도 서비스는 계속 되게 조용히 지나감
     pass
 
 
 def _fix(path):
-    """모든 경로에서 /persistent → 환경변수 기반 BASE로 자동 변환"""
+    """모든 경로에서 /persistent → BASE로 자동 변환"""
     import pathlib
     if isinstance(path, pathlib.Path):
         path = str(path)
@@ -34,7 +41,8 @@ def _fix(path):
         return path.replace("/persistent", BASE, 1)
     return path
 
-# 원본 함수 백업
+
+# ✅ 원본 함수 백업
 _orig_open      = builtins.open
 _orig_exists    = os.path.exists
 _orig_isdir     = os.path.isdir
@@ -44,6 +52,9 @@ _orig_move      = shutil.move
 _orig_remove    = os.remove
 _orig_rmdir     = os.rmdir
 _orig_rmtree    = shutil.rmtree
+_orig_replace   = getattr(os, "replace", None)
+_orig_rename    = getattr(os, "rename", None)
+
 
 # === 패치 함수들 ===
 def open_patched(path, *a, **kw):
@@ -73,6 +84,18 @@ def rmdir_patched(path, *a, **kw):
 def rmtree_patched(path, *a, **kw):
     return _orig_rmtree(_fix(path), *a, **kw)
 
+def replace_patched(src, dst, *a, **kw):
+    # config.py가 JSON을 tmp로 저장하고 os.replace로 바꾸는 부분을 여기서 잡는다
+    if _orig_replace is None:
+        raise AttributeError("os.replace not available")
+    return _orig_replace(_fix(src), _fix(dst), *a, **kw)
+
+def rename_patched(src, dst, *a, **kw):
+    if _orig_rename is None:
+        raise AttributeError("os.rename not available")
+    return _orig_rename(_fix(src), _fix(dst), *a, **kw)
+
+
 # === 전역 덮어쓰기 ===
 builtins.open   = open_patched
 os.path.exists  = exists_patched
@@ -83,5 +106,25 @@ shutil.move     = move_patched
 os.remove       = remove_patched
 os.rmdir        = rmdir_patched
 shutil.rmtree   = rmtree_patched
+if _orig_replace is not None:
+    os.replace  = replace_patched
+if _orig_rename is not None:
+    os.rename   = rename_patched
+
+
+# ✅ 2) 자주 터지는 CSV는 여기서 미리 "빈 파일"이라도 만들어 놓자
+for fname in (
+    "wrong_predictions.csv",
+    "prediction_log.csv",
+    "train_log.csv",
+):
+    fpath = os.path.join(BASE, fname)
+    try:
+        if not os.path.exists(fpath):
+            # 헤더는 logger가 나중에 다시 보정하니까 지금은 그냥 빈 파일만
+            with open(fpath, "w", encoding="utf-8-sig") as wf:
+                wf.write("")
+    except Exception:
+        pass
 
 print(f"[sitecustomize] 경로자동변환 활성화됨 → BASE={BASE}")
