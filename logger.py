@@ -6,7 +6,23 @@ import threading, time
 from typing import Optional, Any, Dict
 from sklearn.metrics import classification_report
 from config import get_TRAIN_LOG_PATH, get_PREDICTION_LOG_PATH  # 경로 단일화
+import os
 
+BASE = (
+    os.getenv("PERSIST_DIR")
+    or os.getenv("PERSISTENT_DIR")
+    or "/opt/render/project/src/persistent"
+)
+
+# 폴더 먼저 만들기
+os.makedirs(BASE, exist_ok=True)
+os.makedirs(os.path.join(BASE, "logs"), exist_ok=True)
+
+# 문제되던 그 파일 미리 하나 만들어두기
+wrong_path = os.path.join(BASE, "wrong_predictions.csv")
+if not os.path.exists(wrong_path):
+    with open(wrong_path, "w", encoding="utf-8-sig") as f:
+        f.write("")   # 그냥 빈 파일
 # ------------------------------------------------------------------------------------
 # 환경변수 기반 루트 디렉토리 (/persistent → PERSISTENT_DIR 로 치환)
 # ------------------------------------------------------------------------------------
