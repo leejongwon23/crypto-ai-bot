@@ -1,32 +1,55 @@
-# === logger.py (v2025-10-17 safe-degrade: ENOSPC/readonly 감지, DB/파일 쓰기 폴백 + PERSISTENT_DIR 적용) ===
-import os, csv, json, datetime, pandas as pd, pytz, hashlib, shutil, re
+# === logger.py (v2025-11-05 FINAL — BASE 통합, /persistent 제거, 부팅시 파일 보장) ===
+import os
+import csv
+import json
+import datetime
+import pandas as pd
+import pytz
+import hashlib
+import shutil
+import re
 import sqlite3
 from collections import defaultdict, deque
-import threading, time
+import threading
+import time
 from typing import Optional, Any, Dict
 from sklearn.metrics import classification_report
 from config import get_TRAIN_LOG_PATH, get_PREDICTION_LOG_PATH  # 경로 단일화
-import os
 
+# ─────────────────────────────────────
+# 0) BASE 경로 통일
+#    - 이제부터는 /persistent 직접 쓰지 말고 여기로만 온다.
+#    - sitecustomize가 있어도 여기서 한 번 더 안전하게 만들어준다.
+# ─────────────────────────────────────
 BASE = (
     os.getenv("PERSIST_DIR")
     or os.getenv("PERSISTENT_DIR")
     or "/opt/render/project/src/persistent"
 )
 
-# 폴더 먼저 만들기
-os.makedirs(BASE, exist_ok=True)
-os.makedirs(os.path.join(BASE, "logs"), exist_ok=True)
+# 필수 폴더/파일 미리 만들어두기
+try:
+    os.makedirs(BASE, exist_ok=True)
+    os.makedirs(os.path.join(BASE, "logs"), exist_ok=True)
+    wrong_path_boot = os.path.join(BASE, "wrong_predictions.csv")
+    if not os.path.exists(wrong_path_boot):
+        with open(wrong_path_boot, "w", encoding="utf-8-sig") as f:
+            f.write("")
+except Exception:
+    # 여긴 로거라 최대한 안 죽고 넘어가야 한다
+    pass
 
-# 문제되던 그 파일 미리 하나 만들어두기
-wrong_path = os.path.join(BASE, "wrong_predictions.csv")
-if not os.path.exists(wrong_path):
-    with open(wrong_path, "w", encoding="utf-8-sig") as f:
-        f.write("")   # 그냥 빈 파일
-# ------------------------------------------------------------------------------------
-# 환경변수 기반 루트 디렉토리 (/persistent → PERSISTENT_DIR 로 치환)
-# ------------------------------------------------------------------------------------
-PERSISTENT_ROOT = os.getenv("PERSISTENT_DIR", "/persistent")
+# ─────────────────────────────────────
+# 1) 루트/로그 경로 실제로 여기만 보게 하기
+# ─────────────────────────────────────
+PERSISTENT_ROOT = BASE  # ← 핵심: 예전처럼 /persistent 고정 아님
+DIR = PERSISTENT_ROOT
+LOG_DIR = os.path.join(DIR, "logs")
+PREDICTION_LOG = get_PREDICTION_LOG_PATH()
+WRONG = os.path.join(DIR, "wrong_predictions.csv")
+EVAL_RESULT = os.path.join(LOG_DIR, "evaluation_result.csv")
+TRAIN_LOG = get_TRAIN_LOG_PATH()
+AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
 
 # -------------------------
 # 로그 레벨/샘플링 유틸
@@ -71,16 +94,8 @@ def _bucketize(v: float, step: float) -> tuple:
         return (v, v)
 
 # -------------------------
-# 기본 경로/디렉토리 + 파일시스템 상태 감지
+# 파일시스템 상태 감지
 # -------------------------
-DIR = PERSISTENT_ROOT
-LOG_DIR = os.path.join(DIR, "logs")
-PREDICTION_LOG = get_PREDICTION_LOG_PATH()
-WRONG = os.path.join(DIR, "wrong_predictions.csv")
-EVAL_RESULT = os.path.join(LOG_DIR, "evaluation_result.csv")
-TRAIN_LOG = get_TRAIN_LOG_PATH()
-AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
-
 def _fs_has_space(path: str, min_bytes: int = 1_048_576) -> bool:
     try:
         s = os.statvfs(os.path.dirname(path) or "/")
@@ -691,6 +706,9 @@ def log_prediction(
     except Exception:
         fv_serial = ""
 
+    # note에서 추가 필드 뽑기
+    note_ex = _extract_from_note(note)
+
     row = [
         now, symbol, strategy, direction, entry_price, target_price,
         model, predicted_class, top_k_str, note, str(success), reason,
@@ -698,7 +716,9 @@ def log_prediction(
         source, volatility, source_exchange, regime, meta_choice,
         raw_prob, calib_prob, calib_ver, fv_serial,
         class_return_min, class_return_max, class_return_text,
-        "", "", "", "", "", "", "", "",
+        note_ex.get("position",""), note_ex.get("hint_allow_long",""), note_ex.get("hint_allow_short",""),
+        note_ex.get("hint_slope",""), note_ex.get("used_minret_filter",""), note_ex.get("explore_used",""),
+        note_ex.get("hint_ma_fast",""), note_ex.get("hint_ma_slow",""),
         expected_return_mid, raw_prob_pred, calib_prob_pred, meta_choice_detail
     ]
 
@@ -716,7 +736,7 @@ def log_prediction(
 
     if success:
         _print_once(f"pred_ok:{symbol}:{strategy}:{model_name}",
-                    f"[✅ 예측 OK] {symbol}-{strategy} class={predicted_class} rate={rate:.4f} prob={raw_prob_pred} src={source_exchange}")
+                    f"[✅ 예측 OK] {symbol}-{strategy} class={predicted_class} rate={rate:.4f} src={source_exchange}")
     else:
         _ConsecutiveFailAggregator.add((symbol, strategy, group_id or 0, model_name), False, reason)
 
@@ -761,18 +781,14 @@ def log_training_result(
 
     extras = _parse_train_note(note)
 
-    # ---- Backward/Forward compatibility ----
-    # 우선순위: 새 인자(val_acc/val_f1/val_loss) > 기존 인자(accuracy/f1/loss) > 0.0
     try:
         val_acc  = _first_non_none(kwargs.get("val_acc"), accuracy)
         val_f1   = _first_non_none(kwargs.get("val_f1"),  f1)
         val_loss = _first_non_none(kwargs.get("val_loss"), loss)
-        # 숫자 캐스팅(빈 문자열/None 안전)
         val_acc  = float(val_acc)  if val_acc  is not None and str(val_acc)  != "" else 0.0
         val_f1   = float(val_f1)   if val_f1   is not None and str(val_f1)   != "" else 0.0
         val_loss = float(val_loss) if val_loss is not None and str(val_loss) != "" else 0.0
     except Exception:
-        # 예외 시에도 절대 크래시하지 않도록 기본값
         val_acc, val_f1, val_loss = 0.0, 0.0, 0.0
 
     row = [
@@ -1183,17 +1199,17 @@ def flush_gwanwoo_summary():
     gw_dir = get_GANWU_PATH()                         # /data/guanwu/incoming
 
     # --- (1) 경로 통합: 평가/예측 경로 정확화 ---
-    # 평가 결과는 시스템 표준 로그 위치(/persistent/logs)를 사용
+    # 평가 결과는 시스템 표준 로그 위치(/persistent/logs → 지금은 BASE/logs)를 사용
     paths = {
         "pred_json": os.path.join(gw_dir, "prediction_result.json"),
-        "eval_csv": EVAL_RESULT,  # <-- 핵심 수정: 관우폴더가 아니라 표준 로그 경로에서 읽음
+        "eval_csv": EVAL_RESULT,  # 표준 로그 경로에서 읽음
     }
 
-    # 예측 로그는 존재하는 첫 후보를 사용 (안정화)
+    # 예측 로그는 존재하는 첫 후보를 사용
     pred_csv_candidates = [
-        PREDICTION_LOG,                                      # 표준 위치
-        os.path.join(gw_dir, "prediction_log.csv"),         # 관우 폴더 복제본(있으면)
-        get_PREDICTION_LOG_PATH()                           # config 반환
+        PREDICTION_LOG,
+        os.path.join(gw_dir, "prediction_log.csv"),
+        get_PREDICTION_LOG_PATH()
     ]
     pred_csv_path = next((p for p in pred_csv_candidates if isinstance(p, str) and os.path.exists(p)), pred_csv_candidates[0])
     paths["pred_csv"] = pred_csv_path
@@ -1221,7 +1237,7 @@ def flush_gwanwoo_summary():
     except Exception as e:
         print(f"[⚠️ 관우요약] prediction_result.json 읽기 실패: {e}")
 
-    # 2) evaluation_result.csv  (표준 경로에서 수집)
+    # 2) evaluation_result.csv
     try:
         if os.path.exists(paths["eval_csv"]):
             df = pd.read_csv(paths["eval_csv"], encoding="utf-8-sig")
@@ -1231,15 +1247,13 @@ def flush_gwanwoo_summary():
     except Exception as e:
         print(f"[⚠️ 관우요약] evaluation_result.csv 읽기 실패: {e}")
 
-    # 3) prediction_log.csv  (광범위 수집: allowlist → blacklist)
+    # 3) prediction_log.csv
     try:
         if os.path.exists(paths["pred_csv"]):
             df = pd.read_csv(paths["pred_csv"], encoding="utf-8-sig")
             if not df.empty:
                 src_col = "source" if "source" in df.columns else None
                 if src_col:
-                    # 이전: 특정 소스만 허용 → 실제 예측 누락
-                    # 변경: 디버그성만 제외하고 전부 포함
                     blacklist = {"debug","dry_run"}
                     df = df[~df[src_col].astype(str).isin(blacklist)]
                 keep = [c for c in ["timestamp","symbol","strategy","predicted_class",
