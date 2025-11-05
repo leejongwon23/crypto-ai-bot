@@ -1,4 +1,4 @@
-# app.py — FINAL v2.2c (dirs auto-heal, PERSIST_DIR/PERSISTENT_DIR env)
+# app.py — FINAL v2.2d (dirs auto-heal, PERSIST_DIR/PERSISTENT_DIR env, lock-dir PermissionError fallback)
 # (train→predict→next-group 파이프라인, 부팅시 필수 경로/빈 로그 보장, 예측락 stale GC, 그룹학습 락/게이트)
 
 from flask import Flask, jsonify, request, Response
@@ -113,10 +113,17 @@ GROUP_TRAIN_LOCK = os.path.join(RUN_DIR, "group_training.lock")
 DEPLOY_ID  = os.getenv("RENDER_RELEASE_ID") or os.getenv("RENDER_GIT_COMMIT") or os.getenv("RENDER_SERVICE_ID") or "local"
 BOOT_MARK  = os.path.join(PERSIST_DIR, f".boot_notice_{DEPLOY_ID}")
 
-# locks
-LOCK_DIR   = getattr(safe_cleanup, "LOCK_DIR", os.path.join(PERSIST_DIR, "locks"))
+# locks — 여기만 PermissionError 대비로 바뀜
+_lock_dir_candidate = getattr(safe_cleanup, "LOCK_DIR", os.path.join(PERSIST_DIR, "locks"))
+try:
+    os.makedirs(_lock_dir_candidate, exist_ok=True)
+    LOCK_DIR = _lock_dir_candidate
+except PermissionError:
+    # Render에서 /persistent 쪽이 막혀 있을 때 여기로 폴백
+    LOCK_DIR = os.path.join(PERSIST_DIR, "locks_local")
+    os.makedirs(LOCK_DIR, exist_ok=True)
+# safe_cleanup에 LOCK_PATH가 있으면 그걸 쓰고, 아니면 우리가 방금 확정한 LOCK_DIR을 쓴다.
 LOCK_PATH  = getattr(safe_cleanup, "LOCK_PATH", os.path.join(LOCK_DIR, "train_or_predict.lock"))
-os.makedirs(LOCK_DIR, exist_ok=True)
 
 # === GROUP_ACTIVE 마커 경로 ===
 GROUP_ACTIVE_PATH = os.path.join(PERSIST_DIR, "GROUP_ACTIVE")
