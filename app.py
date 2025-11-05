@@ -1,6 +1,7 @@
 # app.py — FINAL v2.2d (dirs auto-heal, PERSIST_DIR/PERSISTENT_DIR env, lock-dir PermissionError fallback)
 # (train→predict→next-group 파이프라인, 부팅시 필수 경로/빈 로그 보장, 예측락 stale GC, 그룹학습 락/게이트)
 
+import sitecustomize  # 경로 자동변환 강제 로드
 from flask import Flask, jsonify, request, Response
 from recommend import main
 import train, os, threading, datetime, pytz, traceback, sys, shutil, re, time
