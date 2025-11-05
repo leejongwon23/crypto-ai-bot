@@ -2,9 +2,9 @@
 # 하는 일:
 # 1) 코드 어디서든 "/persistent/..." 쓰면 실제로는 BASE로 보냄
 # 2) BASE 하위 폴더 미리 만들어둠
-# 3) os.open 계열, shutil 계열, os.replace/rename 전부 패치
-# 4) pathlib.Path.open 도 패치  ← 새로 추가
-# 5) sqlite3.connect 도 패치    ← 새로 추가
+# 3) os/open/shutil/rename/replace 전부 패치
+# 4) pathlib.Path.open 도 패치
+# 5) sqlite3.connect 도 패치
 # 6) 자주 쓰는 CSV는 빈 파일이라도 미리 만들어둠
 
 import os, builtins, os.path, shutil, sqlite3, pathlib
@@ -28,7 +28,7 @@ try:
         "ssl_models",
         "models",
         "run",
-        "failure_db",      # ← sqlite가 여기 쓸 수도 있으니까 만들어둔다
+        "failure_db",  # sqlite가 여기 쓸 수도 있으니까
     ):
         os.makedirs(os.path.join(BASE, sub), exist_ok=True)
 except Exception:
@@ -57,10 +57,8 @@ _orig_rmtree    = shutil.rmtree
 _orig_replace   = getattr(os, "replace", None)
 _orig_rename    = getattr(os, "rename", None)
 
-# pathlib 원본
+# pathlib / sqlite 원본
 _OrigPathOpen = pathlib.Path.open
-
-# sqlite 원본
 _orig_sqlite_connect = sqlite3.connect
 
 
@@ -68,9 +66,9 @@ def _ensure_parent(path: str):
     """/persistent/... 를 BASE로 바꾼 뒤 부모 폴더가 없으면 만든다."""
     path = _fix(path)
     parent = os.path.dirname(path)
-    if parent and not os.path.exists(parent):
+    if parent and not _orig_exists(parent):
         try:
-            os.makedirs(parent, exist_ok=True)
+            _orig_makedirs(parent, exist_ok=True)
         except Exception:
             pass
     return path
@@ -125,21 +123,22 @@ def rename_patched(src, dst, *a, **kw):
 # === pathlib.Path.open 패치 (중요) ===
 def path_open_patched(self, *a, **kw):
     fixed = _fix(str(self))
-    # 쓰기모드면 부모부터
     mode = kw.get("mode") or (a[0] if a else "r")
     if any(m in mode for m in ("w", "a", "x", "+")):
         _ensure_parent(fixed)
+    # pathlib.Path.open 원래 기능 대신 우리가 고친 경로로 열기
     return _orig_open(fixed, *a, **kw)
+
 pathlib.Path.open = path_open_patched
 
 
 # === sqlite3.connect 패치 (중요) ===
 def sqlite_connect_patched(db, *a, **kw):
-    # db 가 /persistent 로 시작하면 BASE로 돌려보내기
+    # 메모리 DB나 상대경로는 건드리지 말기
     if isinstance(db, str) and db.startswith("/persistent"):
-        db = _ensure_parent(db)
-        db = _fix(db)
+        db = _ensure_parent(db)  # 디렉터리 보장 + /persistent → BASE
     return _orig_sqlite_connect(db, *a, **kw)
+
 sqlite3.connect = sqlite_connect_patched
 
 
@@ -167,9 +166,9 @@ for fname in (
 ):
     fpath = os.path.join(BASE, fname)
     try:
-        if not os.path.exists(fpath):
+        if not _orig_exists(fpath):
             _ensure_parent(fpath)
-            with open(fpath, "w", encoding="utf-8-sig") as wf:
+            with _orig_open(fpath, "w", encoding="utf-8-sig") as wf:
                 wf.write("")
     except Exception:
         pass
