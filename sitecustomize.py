@@ -1,4 +1,4 @@
-# === sitecustomize.py (YOPO v1.5 — /persistent 전면 가로채기 + 중복실행 방지) ===
+# === sitecustomize.py (YOPO v1.6 — /persistent 전면 가로채기 + 중복실행 방지 + fd 안전모드) ===
 # 하는 일:
 # 1) 코드 어디서든 "/persistent/..." 쓰면 실제로는 BASE로 보냄
 # 2) BASE 하위 폴더 미리 만들어둠
@@ -48,7 +48,12 @@ except Exception:
 
 
 def _fix(path):
-    """모든 경로에서 /persistent → BASE로 자동 변환"""
+    """모든 경로에서 /persistent → BASE로 자동 변환
+    ⚠️ fd(숫자)나 None 이 들어오면 건드리지 않고 그대로 돌려보낸다.
+    """
+    # gunicorn 같은 애들은 fd(int)를 직접 open 하므로 숫자는 무시해야 한다
+    if isinstance(path, (int, float)) or path is None:
+        return path
     if isinstance(path, pathlib.Path):
         path = str(path)
     if not isinstance(path, str):
@@ -74,13 +79,17 @@ _orig_replace       = getattr(os, "replace", None)
 _orig_rename        = getattr(os, "rename", None)
 
 # pathlib / sqlite 원본
-_OrigPathOpen       = pathlib.Path.open
+_OrigPathOpen        = pathlib.Path.open
 _orig_sqlite_connect = sqlite3.connect
 
 
-def _ensure_parent(path: str):
-    """/persistent/... 를 BASE로 바꾼 뒤 부모 폴더가 없으면 만든다."""
+def _ensure_parent(path):
+    """/persistent/... 를 BASE로 바꾼 뒤 부모 폴더가 없으면 만든다.
+    문자열이 아니면(parent를 만들 수 없으니) 그냥 돌려보낸다.
+    """
     path = _fix(path)
+    if not isinstance(path, str):
+        return path
     parent = os.path.dirname(path)
     if parent and not _orig_exists(parent):
         try:
@@ -92,17 +101,22 @@ def _ensure_parent(path: str):
 
 # === 공통 오픈 패치 ===
 def open_patched(path, *a, **kw):
+    # 숫자 fd면 건드리지 말고 원래 open 써라
+    if isinstance(path, (int, float)) or path is None:
+        return _orig_open(path, *a, **kw)
     mode = kw.get("mode") or (a[0] if a else "r")
     fixed = _fix(path)
-    if any(m in mode for m in ("w", "a", "x", "+")):
+    if any(m in mode for m in ("w", "a", "x", "+")) and isinstance(fixed, str):
         _ensure_parent(fixed)
     return _orig_open(fixed, *a, **kw)
 
 
 def io_open_patched(path, *a, **kw):
+    if isinstance(path, (int, float)) or path is None:
+        return _orig_io_open(path, *a, **kw)
     mode = kw.get("mode") or (a[0] if a else "r")
     fixed = _fix(path)
-    if any(m in mode for m in ("w", "a", "x", "+")):
+    if any(m in mode for m in ("w", "a", "x", "+")) and isinstance(fixed, str):
         _ensure_parent(fixed)
     return _orig_io_open(fixed, *a, **kw)
 
@@ -149,7 +163,7 @@ def rename_patched(src, dst, *a, **kw):
 def path_open_patched(self, *a, **kw):
     fixed = _fix(str(self))
     mode = kw.get("mode") or (a[0] if a else "r")
-    if any(m in mode for m in ("w", "a", "x", "+")):
+    if any(m in mode for m in ("w", "a", "x", "+")) and isinstance(fixed, str):
         _ensure_parent(fixed)
     return _orig_open(fixed, *a, **kw)
 
