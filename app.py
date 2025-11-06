@@ -52,6 +52,9 @@ NEEDED_DIRS = [
     MODEL_DIR,
     RUN_DIR,
     "/tmp/importances",
+
+    # 👇 옛날 코드가 하드코딩으로 쓰는 경로도 같이 만들어서 로그 경고 제거
+    "/persistent/importances",
 ]
 def ensure_dirs():
     for p in NEEDED_DIRS:
