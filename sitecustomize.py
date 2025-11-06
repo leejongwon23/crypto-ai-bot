@@ -1,30 +1,24 @@
-# === sitecustomize.py (YOPO v1.7 — /persistent 전면 가로채기 + 중복실행 시 조용히 패스 + fd 안전모드) ===
-# 하는 일:
-# 1) 코드 어디서든 "/persistent/..." 쓰면 실제로는 BASE로 보냄
-# 2) BASE 하위 폴더 미리 만들어둠
-# 3) os/open/io.open/shutil/... 전부 패치
-# 4) pathlib.Path.open, sqlite3.connect 도 패치
-# 5) 자주 쓰는 CSV는 빈 파일이라도 미리 만들어둠
+# === sitecustomize.py (YOPO v1.7 — /persistent 전면 가로채기 + 중복실행 안전 + fd 안전모드) ===
+# "/persistent/..." 로 접근하는 걸 전부 실제 저장소(BASE)로 보냄
+# gunicorn 같은 서버가 fd(숫자)로 open 해도 안 터지게 함
+# 워커가 import를 다시 해도 죽이지 않고 조용히 넘어감
 
 import os, builtins, os.path, shutil, sqlite3, pathlib, io
 
-# === 0) 중복 실행 방지 (워커에서는 죽이지 말고 조용히 끝낸다) ===
-if os.environ.get("_YOPO_SITE_CUSTOMIZE_LOADED") == "1":
-    # 이미 한 번 적용된 환경이면 그냥 나가기 (죽이지 않음!)
-    # gunicorn 워커가 다시 import 할 때 여기로 들어온다
-    print("[sitecustomize] already loaded in this process")
-else:
+loaded = os.environ.get("_YOPO_SITE_CUSTOMIZE_LOADED") == "1"
+
+# ✅ 실제로 저장할 루트
+BASE = (
+    os.getenv("PERSIST_DIR")
+    or os.getenv("PERSISTENT_DIR")
+    or "/tmp/persistent"
+)
+os.environ["PERSIST_DIR"] = BASE
+
+if not loaded:
+    # 첫 번째 import일 때만 디렉터리 만들고 패치 적용
     os.environ["_YOPO_SITE_CUSTOMIZE_LOADED"] = "1"
 
-    # ✅ 실제로 저장할 루트
-    BASE = (
-        os.getenv("PERSIST_DIR")
-        or os.getenv("PERSISTENT_DIR")
-        or "/tmp/persistent"   # 최후 기본값
-    )
-    os.environ["PERSIST_DIR"] = BASE
-
-    # ✅ 자주 쓰는 디렉터리 미리 생성
     try:
         os.makedirs(BASE, exist_ok=True)
         for sub in (
@@ -43,9 +37,7 @@ else:
         pass
 
     def _fix(path):
-        """모든 경로에서 /persistent → BASE로 자동 변환.
-        숫자(fd)나 None 들어오면 그대로 둔다.
-        """
+        # 숫자 fd, None, 이상한 타입은 그대로 둔다
         if isinstance(path, (int, float)) or path is None:
             return path
         if isinstance(path, pathlib.Path):
@@ -56,7 +48,6 @@ else:
             return path.replace("/persistent", BASE, 1)
         return path
 
-    # 원본 백업
     _orig_open          = builtins.open
     _orig_io_open       = io.open
     _orig_exists        = os.path.exists
@@ -84,7 +75,6 @@ else:
                 pass
         return path
 
-    # === open 패치 (fd 안전) ===
     def open_patched(path, *a, **kw):
         if isinstance(path, (int, float)) or path is None:
             return _orig_open(path, *a, **kw)
@@ -140,7 +130,6 @@ else:
         dst_fixed = _ensure_parent(dst)
         return _orig_rename(_fix(src), dst_fixed, *a, **kw)
 
-    # pathlib.Path.open 패치
     def path_open_patched(self, *a, **kw):
         fixed = _fix(str(self))
         mode = kw.get("mode") or (a[0] if a else "r")
@@ -149,7 +138,6 @@ else:
         return _orig_open(fixed, *a, **kw)
     pathlib.Path.open = path_open_patched
 
-    # sqlite 패치
     def sqlite_connect_patched(db, *a, **kw):
         if isinstance(db, str) and db.startswith("/persistent"):
             db = _ensure_parent(db)
@@ -157,7 +145,6 @@ else:
         return _orig_sqlite_connect(db, *a, **kw)
     sqlite3.connect = sqlite_connect_patched
 
-    # 전역 덮어쓰기
     builtins.open   = open_patched
     io.open         = io_open_patched
     os.path.exists  = exists_patched
@@ -173,12 +160,7 @@ else:
     if _orig_rename is not None:
         os.rename   = rename_patched
 
-    # ✅ 자주 터지는 CSV 미리 생성
-    for fname in (
-        "wrong_predictions.csv",
-        "prediction_log.csv",
-        "train_log.csv",
-    ):
+    for fname in ("wrong_predictions.csv", "prediction_log.csv", "train_log.csv"):
         fpath = os.path.join(BASE, fname)
         try:
             if not _orig_exists(fpath):
@@ -188,7 +170,7 @@ else:
         except Exception:
             pass
 
-    print(
-        "[sitecustomize] 경로자동변환 활성화됨 → "
-        f"BASE={BASE} PERSIST_DIR={os.getenv('PERSIST_DIR')} cwd={os.getcwd()}"
-    )
+    print(f"[sitecustomize] 경로자동변환 활성화됨 → BASE={BASE} PERSIST_DIR={os.getenv('PERSIST_DIR')} cwd={os.getcwd()}")
+else:
+    # 두 번째 import부터는 여기만 찍힘
+    print("[sitecustomize] already loaded (worker)")
