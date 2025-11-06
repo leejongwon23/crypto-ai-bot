@@ -103,6 +103,8 @@ except Exception:
 from feature_importance import compute_feature_importance, save_feature_importance
 from failure_db import insert_failure_record, ensure_failure_db
 import logger
+from logger import log_prediction, ensure_prediction_log_exists  # <<< [ADD] 운영로그 찍기용
+ensure_prediction_log_exists()  # <<< prediction_log.csv 없으면 만들어 둔다
 from config import (
     get_NUM_CLASSES, get_FEATURE_INPUT_SIZE, get_class_groups, get_class_ranges, set_NUM_CLASSES,
     STRATEGY_CONFIG, get_QUALITY, get_LOSS, BOUNDARY_BAND, get_TRAIN_LOG_PATH
@@ -134,6 +136,69 @@ os.makedirs(RUN_DIR, exist_ok=True)
 GROUP_ACTIVE_PATH = os.path.join(BASE_PERSIST_DIR, "GROUP_ACTIVE")
 PERSIST_DIR = BASE_PERSIST_DIR  # 아래 코드들이 쓰는 이름 그대로 둠
 # ================================================
+
+# ==== [ADD] 학습 때 캔들 수익분포 운영로그로 남기는 함수 ====
+def log_return_distribution_for_train(symbol: str, strategy: str, df: pd.DataFrame, max_rows: int = 1000):
+    """
+    학습 때 불러온 캔들(df)로 '고가/저가 기준 수익률 분포'를 계산해서
+    prediction_log.csv 에 한 줄로 남긴다.
+    """
+    try:
+        if df is None or df.empty:
+            return
+
+        df_use = df.tail(max_rows).copy()
+        bins = [-0.05, -0.03, -0.02, -0.01, 0.0, 0.01, 0.02, 0.03, 0.05, 999]  # 대략 -5%~+5% 구간
+        labels = [f"{bins[i]:.3f}~{bins[i+1]:.3f}" for i in range(len(bins) - 1)]
+        hist = {lab: 0 for lab in labels}
+
+        for _, row in df_use.iterrows():
+            try:
+                base = float(row["close"])
+                high_ = float(row["high"])
+                low_  = float(row["low"])
+            except Exception:
+                continue
+
+            up_ret = (high_ - base) / (base + 1e-12)
+            dn_ret = (low_  - base) / (base + 1e-12)
+
+            for val in (up_ret, dn_ret):
+                for i in range(len(bins) - 1):
+                    if bins[i] <= val < bins[i+1]:
+                        hist[labels[i]] += 1
+                        break
+
+        # 운영로그에 남기기
+        log_prediction(
+            symbol=symbol,
+            strategy=strategy,
+            direction="학습수익분포",
+            entry_price=0.0,
+            target_price=0.0,
+            model="trainer",
+            model_name="trainer",
+            predicted_class=-1,
+            label=-1,
+            note=json.dumps({
+                "sample_size": int(len(df_use)),
+                "bins": hist,
+            }, ensure_ascii=False),
+            top_k=[],
+            success=True,
+            reason="train_return_distribution",
+            rate=0.0,
+            expected_return=0.0,
+            position="neutral",
+            return_value=0.0,
+            source="train",
+        )
+    except Exception as e:
+        # 분포 찍는다고 학습이 죽으면 안 되니까 조용히 패스
+        try:
+            print(f"[train.return-dist warn] {e}", flush=True)
+        except Exception:
+            pass
 
 # ==== [ADD] train 로그 경로/헤더 보장 ====
 # 운영 CSV 스키마(사용자 제공)와 정합되도록 확장 + 진단 5종 필드 추가
@@ -570,7 +635,11 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             except Exception: df = None
         if df is None:
             df=get_kline_by_strategy(symbol,strategy)
-        if df is None or df.empty: _log_skip(symbol,strategy,"데이터 없음"); return res
+        if df is None or df.empty:
+            _log_skip(symbol,strategy,"데이터 없음"); return res
+
+        # <<< 여기서 학습용 캔들 수익분포를 운영로그에 남김
+        log_return_distribution_for_train(symbol, strategy, df)
 
         cfg=STRATEGY_CONFIG.get(strategy,{})
         _limit=int(cfg.get("limit",300)); _min_required=max(60,int(_limit*0.90))
