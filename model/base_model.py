@@ -1,4 +1,4 @@
-# === model/base_model.py (speed-tune ready, fixed) ===
+# === model/base_model.py (speed-tune ready, fixed + output-size helper) ===
 import os
 import torch
 import torch.nn as nn
@@ -520,6 +520,7 @@ def _normalize_model_type(mt: str) -> str:
     return s
 
 def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_path=None, features=None):
+    # 👇 이 호출에서 오는 output_size가 “이번 학습은 N클래스다”에 해당
     if output_size is None:
         output_size = get_NUM_CLASSES()
 
@@ -552,6 +553,7 @@ def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_pa
         if mt == "xgboost":
             model = model_cls(model_path=model_path)
         else:
+            # 여기서 반드시 output_size로 마지막 헤드를 만든다
             model = model_cls(input_size=input_size, output_size=output_size)
     except Exception as e:
         print(f"[⚠️ get_model 예외] {e}")
@@ -595,4 +597,31 @@ def unfreeze_last_k_layers(model: nn.Module, k: int = 1):
             keep = set(heads[:k])  # heads는 [fc_logits, fc2, fc1, res_proj] 순
             _mark_requires_grad(model, keep)
             return model
+    return model
+
+# =========================
+# 🔧 헤드 출력 크기 강제 맞추기 (predict 쪽에서 메타보고 재조정할 때 사용)
+# =========================
+def set_model_output_size(model: nn.Module, output_size: int) -> nn.Module:
+    """
+    이미 만들어진 모델의 마지막 분류 헤드를 주어진 output_size로 갈아끼운다.
+    - 학습 시점에는 train.py가 get_model(..., output_size=N)으로 생성하므로 거의 안 쓰임
+    - 예측 시점에 '이 모델은 12클래스였다'는 메타를 보고 맞춰야 할 때 사용
+    """
+    if not isinstance(output_size, int) or output_size <= 0:
+        return model
+
+    if isinstance(model, LSTMPricePredictor):
+        in_f = model.fc_logits.in_features
+        model.fc_logits = nn.Linear(in_f, output_size)
+        _init_module(model.fc_logits)
+    elif isinstance(model, CNNLSTMPricePredictor):
+        in_f = model.fc_logits.in_features
+        model.fc_logits = nn.Linear(in_f, output_size)
+        _init_module(model.fc_logits)
+    elif isinstance(model, TransformerPricePredictor) and model.mode == "classification":
+        in_f = model.fc_logits.in_features
+        model.fc_logits = nn.Linear(in_f, output_size)
+        _init_module(model.fc_logits)
+    # AutoEncoder, XGBoostWrapper 등은 여기서 안 건드림
     return model
