@@ -405,7 +405,7 @@ GROUP_MGR = GroupOrderManager(SYMBOL_GROUPS)
 def should_train_symbol(symbol: str) -> bool: return GROUP_MGR.should_train(symbol)
 def mark_symbol_trained(symbol: str) -> None: GROUP_MGR.mark_symbol_trained(symbol)
 def ready_for_group_predict() -> bool: return GROUP_MGR.ready_for_group_predict()
-def mark_group_predicted() -> None: GROUP_MGR.mark_group_predicted()
+def mark_group_predicted() -> None: return GROUP_MGR.mark_group_predicted()
 def get_current_group_index() -> int: return GROUP_MGR.current_index()
 def get_current_group_symbols() -> List[str]: return GROUP_MGR.current_group()
 def reset_group_order(start_index: int = 0) -> None: GROUP_MGR.reset(start_index)
@@ -1290,6 +1290,11 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         safe_failed_result(symbol_name, strategy, reason="not_enough_rows<window")
         return _dummy(symbol_name)
 
+    # 🔽 라벨러가 돌려줄 수 있는 메타 기본값 준비
+    edges = None
+    bin_counts = None
+    bin_spans = None
+
     try:
         df = _pd.DataFrame(features)
         df["timestamp"] = _parse_ts_series(df.get("timestamp"))
@@ -1334,7 +1339,15 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         y_seq = None
         class_ranges_used = None
         if _make_labels is not None:
-            _, labels_full, class_ranges = _make_labels(
+            # ✅ 새 labels.py 시그니처에 맞게 전체 반환값 받기
+            (
+                _gains_from_labeler,
+                labels_full,
+                class_ranges,
+                edges,
+                bin_counts,
+                bin_spans,
+            ) = _make_labels(
                 df[["timestamp", "close", "high", "low"]].rename(columns={"timestamp": "timestamp"}),
                 symbol=symbol_name,
                 strategy=strategy,
@@ -1495,12 +1508,27 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         except Exception:
             pass
 
-        # 메타
+        # === 여기서부터 메타 고정 ===
         class_ranges_final = class_ranges_used or cfg_get_class_ranges(symbol=symbol_name, strategy=strategy)
+        num_classes_final = len(class_ranges_final)
+
         X.attrs = {
+            "num_classes": int(num_classes_final),
             "class_ranges": class_ranges_final,
-            "class_groups": cfg_get_class_groups(len(class_ranges_final), 5),
+            "class_groups": cfg_get_class_groups(num_classes_final, 5),
+            "allow_trainer_class_collapse": False,  # ✅ train 단계에서 2클래스로 줄이지 마
         }
+        # 라벨러가 edges 등을 줬으면 같이 심어둔다
+        try:
+            if edges is not None:
+                X.attrs["bin_edges"] = [float(e) for e in edges]
+            if bin_counts is not None:
+                X.attrs["bin_counts"] = [int(c) for c in bin_counts]
+            if bin_spans is not None:
+                X.attrs["bin_spans_pct"] = [float(s) for s in bin_spans]
+        except Exception:
+            pass
+
         return X, y
 
     except Exception:
@@ -1589,7 +1617,13 @@ def build_training_dataset(symbol: str, strategy: str, window: int, input_size: 
     records["symbol"] = symbol
     recs = records.to_dict(orient="records")
     X, y = create_dataset(recs, window=window, strategy=strategy, input_size=input_size)
-    meta = {"n": int(len(y)), "F": int(X.shape[-1])}
+    meta: Dict[str, Any] = {
+        "n": int(len(y)),
+        "F": int(X.shape[-1]),
+    }
+    # ✅ create_dataset가 넣어둔 라벨 메타 그대로 밖으로
+    for k, v in getattr(X, "attrs", {}).items():
+        meta[k] = v
     return X, y, meta
 
 def get_price_source(symbol: str, strategy: str) -> str:
