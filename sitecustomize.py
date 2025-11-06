@@ -1,4 +1,4 @@
-# === sitecustomize.py (YOPO v1.4 — /persistent 전면 가로채기판) ===
+# === sitecustomize.py (YOPO v1.5 — /persistent 전면 가로채기 + 중복실행 방지) ===
 # 하는 일:
 # 1) 코드 어디서든 "/persistent/..." 쓰면 실제로는 BASE로 보냄
 # 2) BASE 하위 폴더 미리 만들어둠
@@ -6,8 +6,17 @@
 # 4) pathlib.Path.open 도 패치
 # 5) sqlite3.connect 도 패치
 # 6) 자주 쓰는 CSV는 빈 파일이라도 미리 만들어둠
+#
+# ⚠️ 중요: 이 파일이 실제로 'import' 되어야만 작동함.
+#          실행 로그에 [sitecustomize] 라는 문구가 안 보이면, 이 파일 위치를 옮겨야 함.
 
 import os, builtins, os.path, shutil, sqlite3, pathlib, io
+
+# === 0) 중복 실행 방지 ===
+if os.environ.get("_YOPO_SITE_CUSTOMIZE_LOADED") == "1":
+    # 이미 한 번 적용됐으면 다시 하지 않음
+    raise SystemExit
+os.environ["_YOPO_SITE_CUSTOMIZE_LOADED"] = "1"
 
 # ✅ 실제로 저장할 루트
 BASE = (
@@ -42,8 +51,10 @@ def _fix(path):
     """모든 경로에서 /persistent → BASE로 자동 변환"""
     if isinstance(path, pathlib.Path):
         path = str(path)
-    if isinstance(path, str) and path.startswith("/persistent"):
-        # 앞부분 한 번만 교체
+    if not isinstance(path, str):
+        return path
+    # "/persistent" 또는 "/persistent/..." 로 시작하면 BASE로 교체
+    if path.startswith("/persistent"):
         return path.replace("/persistent", BASE, 1)
     return path
 
@@ -81,7 +92,6 @@ def _ensure_parent(path: str):
 
 # === 공통 오픈 패치 ===
 def open_patched(path, *a, **kw):
-    # mode 감지
     mode = kw.get("mode") or (a[0] if a else "r")
     fixed = _fix(path)
     if any(m in mode for m in ("w", "a", "x", "+")):
@@ -89,7 +99,6 @@ def open_patched(path, *a, **kw):
     return _orig_open(fixed, *a, **kw)
 
 
-# io.open 을 쓰는 애들도 다 이걸 타게 한다
 def io_open_patched(path, *a, **kw):
     mode = kw.get("mode") or (a[0] if a else "r")
     fixed = _fix(path)
@@ -142,7 +151,6 @@ def path_open_patched(self, *a, **kw):
     mode = kw.get("mode") or (a[0] if a else "r")
     if any(m in mode for m in ("w", "a", "x", "+")):
         _ensure_parent(fixed)
-    # pathlib.Path.open 원래 기능 대신 우리가 고친 경로로 열기
     return _orig_open(fixed, *a, **kw)
 
 pathlib.Path.open = path_open_patched
@@ -191,4 +199,8 @@ for fname in (
     except Exception:
         pass
 
-print(f"[sitecustomize] 경로자동변환 활성화됨 → BASE={BASE}")
+# ✅ 디버깅용 출력 — 이게 로그에 안 보이면 이 파일이 '실행 안 된 것'
+print(
+    "[sitecustomize] 경로자동변환 활성화됨 → "
+    f"BASE={BASE} PERSIST_DIR={os.getenv('PERSIST_DIR')} cwd={os.getcwd()}"
+)
