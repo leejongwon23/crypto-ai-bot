@@ -1028,37 +1028,43 @@ def meta_fix_now():
     except Exception as e:
         return f"⚠️ 실패: {e}", 500
 
-# 🔴 여기서부터 수정된 reset-all 전체버전
+# 🔴 reset-all 라우트 (봇 차단 + 풀초기화)
 @app.route("/reset-all", methods=["GET","POST"])
 @app.route("/reset-all/<key>", methods=["GET","POST"])
 def reset_all(key=None):
-    # 1) 인증
+    # 0) 카카오톡/페북 미리보기 같은 봇은 차단
+    ua_raw = request.headers.get("User-Agent", "")
+    ua = ua_raw.lower()
+    if "facebookexternalhit" in ua or "kakaotalk-scrap" in ua:
+        # 사람이 누른 게 아니고, 미리보기 봇이 URL 읽은 거면 여기서 컷
+        return "❌ bot blocked", 403
+
+    # 1) 인증키 체크
     req_key = key or request.args.get("key") or (request.json.get("key") if request.is_json else None)
     if req_key != "3572":
         print(f"[RESET] 인증 실패 from {request.remote_addr} path={request.path}"); sys.stdout.flush()
         return "❌ 인증 실패", 403
 
-    ua = request.headers.get("User-Agent", "-")
     ip = request.headers.get("X-Forwarded-For", request.remote_addr)
-    print(f"[RESET] 요청 수신 from {ip} UA={ua}"); sys.stdout.flush()
+    print(f"[RESET] 요청 수신 from {ip} UA={ua_raw}"); sys.stdout.flush()
 
-    # 예측 게이트 닫기
+    # 예측 게이트 닫기 (리셋 중엔 예측 금지)
     _safe_close_gate("reset_enter")
 
     def _do_reset_work():
         """
-        초기화 시 모든 학습/예측/메타/로그를 지우고,
-        필수 폴더와 빈 로그만 다시 만들고,
-        프로세스를 종료해서 다음 부팅 때 그룹학습이 처음부터 시작되게 한다.
+        - 돌아가던 학습/스케줄러 전부 멈추고
+        - persistent 안에 있던 모델/로그/상태 싹 비우고
+        - 필수 폴더랑 빈 로그만 다시 만들고
+        - 프로세스 종료해서 다음 부팅 때 처음 그룹부터 다시 학습하게 하는 흐름
         """
-        # 환경 파라미터
         stop_timeout = int(os.getenv("RESET_STOP_TIMEOUT", "12"))
         max_wait     = int(os.getenv("RESET_MAX_WAIT_SEC", "120"))
         poll_sec     = max(1, int(os.getenv("RESET_POLL_SEC", "2")))
         watchdog_sec = int(os.getenv("RESET_WATCHDOG_SEC", str(stop_timeout + max_wait + 30)))
         qwipe_early  = os.getenv("RESET_QWIPE_EARLY", "1") == "1"
 
-        # 죽었을 때를 대비한 감시
+        # 타임아웃 대비용
         def _arm_reset_watchdog(seconds: int):
             seconds = max(30, int(seconds))
             def _kill():
@@ -1067,26 +1073,26 @@ def reset_all(key=None):
                     _release_global_lock()
                 finally:
                     os._exit(0)
-            t = threading.Timer(seconds, _kill); t.daemon = True; t.start()
+            t = threading.Timer(seconds, _kill)
+            t.daemon = True
+            t.start()
             return t
 
         _wd = _arm_reset_watchdog(watchdog_sec)
 
         try:
             from data.utils import _kline_cache, _feature_cache
-            # 1. 전역락 획득
+
+            # 1. 전역락 잡기
             _acquire_global_lock()
 
-            # 2. 스케줄러/클린업 전부 멈춤
+            # 2. 스케줄러/클린업 다 멈추기
             _stop_all_aux_schedulers()
             _pl_clear()
 
-            PERSIST = PERSIST_DIR
-            LOGS    = LOG_DIR
-            MODELS  = MODEL_DIR
-
-            # 3. 학습 루프 정지 시도
             print("[RESET] 백그라운드 초기화 시작"); sys.stdout.flush()
+
+            # 3. 학습 루프 중지 시도
             try:
                 if hasattr(train, "request_stop"):
                     _request_stop_safe()
@@ -1102,7 +1108,7 @@ def reset_all(key=None):
 
             print(f"[RESET] stop_train_loop 결과: {stopped}"); sys.stdout.flush()
 
-            # 3-1. 안 멈췄는데 조기 QWIPE 허용이면 먼저 날림
+            # 3-1. 안 멈췄으면 바로 QWIPE 해서라도 멈추게
             if (not stopped) and qwipe_early:
                 try:
                     print("[RESET] 빠른 정지 실패 → 조기 QWIPE 수행"); sys.stdout.flush()
@@ -1111,7 +1117,7 @@ def reset_all(key=None):
                 except Exception as e:
                     print(f"⚠️ [RESET] 조기 QWIPE 실패: {e}"); sys.stdout.flush()
 
-            # 3-2. 여전히 안 멈추면 조금 더 기다림
+            # 3-2. 그래도 안 멈추면 조금 더 기다리기
             if not stopped:
                 t0 = time.time()
                 print(f"[RESET] 정지 대기 시작… 최대 {max_wait}s (폴링 {poll_sec}s)"); sys.stdout.flush()
@@ -1131,7 +1137,7 @@ def reset_all(key=None):
                     time.sleep(poll_sec)
                 print(f"[RESET] 정지 대기 완료 → stopped={stopped}"); sys.stdout.flush()
 
-            # 4. 여기까지 와도 안 멈추면 하드하게 비우고 종료
+            # 4. 여기까지 했는데도 안 멈추면: 싹 옮기고 종료
             if not stopped:
                 print("🛑 [RESET] 루프 미종료 → QWIPE 후 하드 종료"); sys.stdout.flush()
                 try:
@@ -1146,9 +1152,9 @@ def reset_all(key=None):
                     except Exception: pass
                     os._exit(0)
 
-            # 5. 깨끗한 풀와이프 (== 모든 정보 삭제)
+            # 5. 정상적으로 멈췄으면 이제 진짜 풀와이프
             try:
-                # 학습 완료 마커 있으면 제거 → 부팅 후 처음부터 다시
+                # 학습 완료 마커 삭제 → 부팅 후 처음부터
                 try:
                     done_path = os.path.join(PERSIST_DIR, "train_done.json")
                     if os.path.exists(done_path):
@@ -1156,13 +1162,13 @@ def reset_all(key=None):
                 except Exception:
                     pass
 
-                # models / logs / ssl_models 다시 만들기 위해 먼저 지움
-                for d in [MODELS, LOGS, os.path.join(PERSIST_DIR, "ssl_models")]:
+                # 모델/로그 폴더 싹 지우고 다시 만들기
+                for d in [MODEL_DIR, LOG_DIR, os.path.join(PERSIST_DIR, "ssl_models")]:
                     if os.path.exists(d):
                         shutil.rmtree(d, ignore_errors=True)
                     os.makedirs(d, exist_ok=True)
 
-                # PERSIST_DIR 안의 나머지 것도 싹 비우기 (락 디렉토리만 보호)
+                # PERSIST_DIR 안 나머지도 지우기 (락 폴더만 살리기)
                 keep = {os.path.basename(LOCK_DIR)}
                 for name in list(os.listdir(PERSIST_DIR)):
                     p = os.path.join(PERSIST_DIR, name)
@@ -1176,12 +1182,12 @@ def reset_all(key=None):
                         except Exception:
                             pass
 
-                # 필수 폴더/빈 로그 다시 생성 → 부팅 후 바로 학습 가능
+                # 필수 디렉토리/로그 다시 생성
                 ensure_dirs()
                 ensure_prediction_log_exists()
                 ensure_train_log_exists()
 
-                # wrong_predictions, 평가로그도 비어있는 형태로 다시 만듦
+                # 부가 로그들도 빈 상태로 생성
                 def clear_csv(f, headers):
                     os.makedirs(os.path.dirname(f), exist_ok=True)
                     with open(f, "w", newline="", encoding="utf-8-sig") as wf:
@@ -1204,9 +1210,6 @@ def reset_all(key=None):
             try: _feature_cache.clear()
             except Exception: pass
 
-            # ❗중요: 여기서는 meta를 다시 채우지 않는다.
-            # 다음 부팅 시 train 루프가 알아서 1그룹부터 순서대로 돌게 된다.
-
             print("🔚 [RESET] 정리 완료 → 프로세스 종료(os._exit)"); sys.stdout.flush()
             _release_global_lock()
             try: _wd.cancel()
@@ -1218,6 +1221,7 @@ def reset_all(key=None):
         finally:
             _release_global_lock()
 
+    # 비동기로 리셋 작업 돌리고 바로 응답
     threading.Thread(target=_do_reset_work, daemon=True).start()
 
     return Response(
