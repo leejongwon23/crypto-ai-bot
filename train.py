@@ -141,7 +141,7 @@ PERSIST_DIR = BASE_PERSIST_DIR  # 아래 코드들이 쓰는 이름 그대로 �
 def log_return_distribution_for_train(symbol: str, strategy: str, df: pd.DataFrame, max_rows: int = 1000):
     """
     학습 때 불러온 캔들(df)로 '고가/저가 기준 수익률 분포'를 계산해서
-    prediction_log.csv 에 한 줄로 남긴다.
+    prediction_log.csv 에 한 줄로 남기고, 콘솔에도 찍는다.
     """
     try:
         if df is None or df.empty:
@@ -169,7 +169,18 @@ def log_return_distribution_for_train(symbol: str, strategy: str, df: pd.DataFra
                         hist[labels[i]] += 1
                         break
 
-        # 운영로그에 남기기
+        # <<< [PRINT ADDED FOR CONSOLE] 여기서 바로 보이게 찍어줌
+        try:
+            print(f"[수익분포: {symbol}-{strategy}] sample={len(df_use)}", flush=True)
+            for k in labels:
+                v = hist.get(k, 0)
+                if v > 0:
+                    print(f"  {k} : {v}", flush=True)
+            # 빈 구간도 보고 싶으면 위 if v>0 조건을 없애면 됨
+        except Exception:
+            pass
+
+        # 운영로그에 남기기 (원래 있던 부분)
         log_prediction(
             symbol=symbol,
             strategy=strategy,
@@ -638,7 +649,7 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
         if df is None or df.empty:
             _log_skip(symbol,strategy,"데이터 없음"); return res
 
-        # <<< 여기서 학습용 캔들 수익분포를 운영로그에 남김
+        # <<< 여기서 학습용 캔들 수익분포를 운영로그 + 콘솔에 남김
         log_return_distribution_for_train(symbol, strategy, df)
 
         cfg=STRATEGY_CONFIG.get(strategy,{})
