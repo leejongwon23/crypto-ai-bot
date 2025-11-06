@@ -1,5 +1,6 @@
 # train.py — SPEED v2.6 FINAL (NO-SKIP AUTO-TRAIN 강화판, 희소구간 강제학습, GROUP_ACTIVE + GROUP_TRAIN_LOCK, 라벨/분포 복구 강화, 로그스키마 정합 + 5종 진단로그)
 # -*- coding: utf-8 -*-
+import sitecustomize
 import os, time, glob, shutil, json, random, traceback, threading, gc, csv
 from datetime import datetime
 from typing import Optional, List, Tuple, Dict, Any
