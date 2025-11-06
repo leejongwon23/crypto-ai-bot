@@ -1,4 +1,5 @@
 # === logger.py (v2025-11-05 FINAL — BASE 통합, /persistent 제거, 부팅시 파일 보장) ===
+import sitecustomize
 import os
 import csv
 import json
