@@ -492,15 +492,21 @@ def _save_label_table(
             )
 
     # 메타 로그(요약) + 엣지 JSON 저장
+    num_classes = int(max(0, edges.size - 1))
+    class_ranges = [(float(edges[i]), float(edges[i+1])) for i in range(num_classes)]
     meta = {
         "symbol": symbol,
         "strategy": strategy,
-        "NUM_CLASSES": int(max(0, edges.size - 1)),
+        "NUM_CLASSES": num_classes,
         "class_counts_label_freeze": _counts_dict(labels),
         "edges": list(map(float, edges.tolist())),
         "edges_hash": _hash_array(edges),
         "bin_counts": list(map(int, counts.tolist())) if counts is not None else [],
         "bin_spans_pct": list(map(float, spans_pct.tolist())) if spans_pct is not None else [],
+        # ✅ 여기 추가된 부분: trainer가 줄이지 말라는 힌트
+        "dynamic_classes": True,
+        "allow_trainer_class_collapse": False,
+        "class_ranges": class_ranges,
     }
     if isinstance(extra_meta, dict) and extra_meta:
         try:
