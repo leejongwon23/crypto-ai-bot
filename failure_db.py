@@ -1,12 +1,11 @@
-# === failure_db.py (v2025-11-04, import-safe, 경로 자동 폴백) ==================
+# === failure_db.py (v2025-11-06, import-safe, 경로 완전 지연 생성) ==================
 # 실패 레코드 표준화 + CSV/SQLite 동시 기록 + 중복/폭주 방지 + 가벼운 분류태깅
 #
 # 📌 이번 수정 포인트
-# 1) 모듈 import 시점에 /persistent 를 만들지 않는다 ← 지금 서버 죽은 이유
-# 2) 실제로 기록할 때만, 쓰기 가능한 디렉터리를 고른다
-#    - 환경변수: APP_DATA_DIR, APP_PERSIST_DIR 우선
-#    - 안 되면 /persistent, /data, 현재경로, /tmp/appdata 순서로 시도
-# 3) 쓰기 불가면 콘솔로만 남기고 진행(앱이 안 죽게)
+# 1) 모듈 import 시점에는 디렉터리/파일을 만들지 않는다 (mkdir, 파일쓰기 전부 지연)
+# 2) 실제로 기록(append)하거나 DB를 처음 사용할 때만 디렉터리를 만든다
+# 3) logger.py가 import 시점에 ensure_failure_db()를 불러도 CSV는 안 만들어진다
+# 4) 쓰기 불가면 콘솔로만 남기고 진행(앱이 안 죽게)
 # ============================================================================
 
 from __future__ import annotations
@@ -24,12 +23,9 @@ except Exception:
 
 # ------------------------------------------------------------
 # 경로 선택 유틸 (가장 먼저 쓰기 되는 곳을 고른다)
+#   ⚠️ 여기서는 실제로 mkdir 하지 않는다. "후보 문자열"만 정한다.
 # ------------------------------------------------------------
 def _pick_writable_base() -> str:
-    """
-    가능한 경로들을 위에서부터 차례로 시도해서
-    mkdir 이 되는 첫 경로를 반환한다.
-    """
     candidates = [
         os.getenv("APP_DATA_DIR"),
         os.getenv("APP_PERSIST_DIR"),
@@ -39,30 +35,14 @@ def _pick_writable_base() -> str:
         "/tmp/appdata",
     ]
     for c in candidates:
-        if not c:
-            continue
-        try:
-            os.makedirs(c, exist_ok=True)
-            test = os.path.join(c, ".writetest")
-            with open(test, "w") as f:
-                f.write("1")
-            os.remove(test)
+        if c:
             return c
-        except Exception:
-            continue
-    # 진짜 전부 실패하면 /tmp 로 고정
-    fallback = "/tmp/appdata"
-    try:
-        os.makedirs(fallback, exist_ok=True)
-    except Exception:
-        pass
-    return fallback
+    return "/tmp/appdata"
 
-# import 시점에는 "경로 결정"만 하고, 디렉터리 강제 생성은 안 한다.
+# import 시점에는 "경로 문자열"만 갖고 있는다
 _BASE_DIR_CAND = _pick_writable_base()
 
 def _get_dir() -> str:
-    # 나중에라도 다시 쓸 수 있게 함수로 뺐다
     return _BASE_DIR_CAND
 
 def _get_log_dir() -> str:
@@ -75,9 +55,9 @@ def _ensure_dir(path: str):
     except Exception:
         return False
 
-# 실제로 쓸 파일 경로들 (문자열만 정의)
-DIR      = _get_dir()
-LOG_DIR  = _get_log_dir()
+# 실제로 쓸 파일 경로들 (문자열만 정의, 지금은 안 만든다)
+DIR       = _get_dir()
+LOG_DIR   = _get_log_dir()
 WRONG_CSV = os.path.join(DIR, "wrong_predictions.csv")      # 로더가 읽는 표준 경로
 DB_PATH   = os.path.join(LOG_DIR, "failure_records.db")     # 요약/조회용 SQLite
 ALERT_LOG = os.path.join(LOG_DIR, "alerts.log")
@@ -183,7 +163,7 @@ def _candidate_hash(record: Dict[str, Any]) -> str:
     return "none"
 
 # ------------------------------------------------------------
-# 파일/DB 보장 (이제 여기에서만 디렉터리 만든다)
+# 파일/DB 보장 (여기서부터 실제로 만든다)
 # ------------------------------------------------------------
 _db_lock = threading.RLock()
 _db = None
@@ -218,8 +198,10 @@ def _get_db():
         return _db
 
 def ensure_failure_db():
-    """CSV 헤더와 SQLite 테이블을 보장"""
-    _ensure_wrong_csv()
+    """
+    CSV는 만들지 않고, SQLite 스키마만 보장한다.
+    (logger.py가 import 시점에 호출해도 파일이 생기지 않도록 분리)
+    """
     try:
         with _db_lock:
             conn = _get_db()
@@ -247,7 +229,6 @@ def ensure_failure_db():
             conn.commit()
             c.close()
     except Exception as e:
-        # 여기서도 에러가 나도 앱이 죽지 않게
         print(f"[failure_db] ensure_failure_db 예외: {e}")
 
 # ------------------------------------------------------------
@@ -260,7 +241,6 @@ def _emit_alert(msg: str):
         with open(ALERT_LOG, "a", encoding="utf-8") as f:
             f.write(f"{_now_kst_iso()} {msg}\n")
     except Exception:
-        # 쓰기 못하면 그냥 콘솔만
         pass
 
 # ------------------------------------------------------------
@@ -319,16 +299,34 @@ def check_failure_exists(row: Dict[str, Any]) -> bool:
         with _db_lock:
             conn = _get_db()
             c = conn.cursor()
-            c.execute("""
-                SELECT 1 FROM failures
-                 WHERE symbol=? AND strategy=?
-                   AND ts BETWEEN ? AND ?
-                   AND (? = '' OR predicted_class = ?)
-                   AND (? = 'none' OR feature_hash = ?)
-                 LIMIT 1;
-            """, (sym, strat, ts_min, ts_max,
-                  "" if pcls == "" else None, pcls if pcls != "" else None,
-                  fh, fh))
+            # 파라미터를 빈문자/None으로 꼬이게 넣지 말고 분기해서 만든다
+            if pcls == "" and (fh is None or fh == "none"):
+                c.execute("""
+                    SELECT 1 FROM failures
+                     WHERE symbol=? AND strategy=? AND ts BETWEEN ? AND ?
+                     LIMIT 1;
+                """, (sym, strat, ts_min, ts_max))
+            elif pcls == "":
+                c.execute("""
+                    SELECT 1 FROM failures
+                     WHERE symbol=? AND strategy=? AND ts BETWEEN ? AND ?
+                       AND feature_hash=?
+                     LIMIT 1;
+                """, (sym, strat, ts_min, ts_max, fh))
+            elif fh is None or fh == "none":
+                c.execute("""
+                    SELECT 1 FROM failures
+                     WHERE symbol=? AND strategy=? AND ts BETWEEN ? AND ?
+                       AND predicted_class=?
+                     LIMIT 1;
+                """, (sym, strat, ts_min, ts_max, pcls))
+            else:
+                c.execute("""
+                    SELECT 1 FROM failures
+                     WHERE symbol=? AND strategy=? AND ts BETWEEN ? AND ?
+                       AND predicted_class=? AND feature_hash=?
+                     LIMIT 1;
+                """, (sym, strat, ts_min, ts_max, pcls, fh))
             hit = c.fetchone()
             c.close()
         if hit:
@@ -597,7 +595,7 @@ def insert_failure_record(record: Dict[str, Any],
                 print(f"[failure_db] drop(evo-sample) {sym}-{strat} pcls={row['predicted_class']}")
                 return False
 
-        # 3) CSV 기록 (쓰기 안 되면 여기서만 에러, 앱은 살려둔다)
+        # 3) CSV 기록
         try:
             _append_wrong_csv_row(row)
         except Exception as e:
