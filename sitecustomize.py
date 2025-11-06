@@ -1,13 +1,13 @@
-# === sitecustomize.py (YOPO v1.3 — 경로자동변환 강화판) ===
+# === sitecustomize.py (YOPO v1.4 — /persistent 전면 가로채기판) ===
 # 하는 일:
 # 1) 코드 어디서든 "/persistent/..." 쓰면 실제로는 BASE로 보냄
 # 2) BASE 하위 폴더 미리 만들어둠
-# 3) os/open/shutil/rename/replace 전부 패치
+# 3) os/open/io.open/shutil/rename/replace 전부 패치
 # 4) pathlib.Path.open 도 패치
 # 5) sqlite3.connect 도 패치
 # 6) 자주 쓰는 CSV는 빈 파일이라도 미리 만들어둠
 
-import os, builtins, os.path, shutil, sqlite3, pathlib
+import os, builtins, os.path, shutil, sqlite3, pathlib, io
 
 # ✅ 실제로 저장할 루트
 BASE = (
@@ -15,6 +15,9 @@ BASE = (
     or os.getenv("PERSISTENT_DIR")
     or "/tmp/persistent"   # 최후 기본값
 )
+
+# 환경변수에 다시 꽂아두면 뒤에서 import되는 모듈들도 이 값을 그대로 쓴다
+os.environ["PERSIST_DIR"] = BASE
 
 # ✅ 1) 루트랑 자주 쓰는 디렉터리 먼저 만들어두기
 try:
@@ -40,25 +43,27 @@ def _fix(path):
     if isinstance(path, pathlib.Path):
         path = str(path)
     if isinstance(path, str) and path.startswith("/persistent"):
+        # 앞부분 한 번만 교체
         return path.replace("/persistent", BASE, 1)
     return path
 
 
 # === 원본 함수 백업 ===
-_orig_open      = builtins.open
-_orig_exists    = os.path.exists
-_orig_isdir     = os.path.isdir
-_orig_makedirs  = os.makedirs
-_orig_listdir   = os.listdir
-_orig_move      = shutil.move
-_orig_remove    = os.remove
-_orig_rmdir     = os.rmdir
-_orig_rmtree    = shutil.rmtree
-_orig_replace   = getattr(os, "replace", None)
-_orig_rename    = getattr(os, "rename", None)
+_orig_open          = builtins.open
+_orig_io_open       = io.open
+_orig_exists        = os.path.exists
+_orig_isdir         = os.path.isdir
+_orig_makedirs      = os.makedirs
+_orig_listdir       = os.listdir
+_orig_move          = shutil.move
+_orig_remove        = os.remove
+_orig_rmdir         = os.rmdir
+_orig_rmtree        = shutil.rmtree
+_orig_replace       = getattr(os, "replace", None)
+_orig_rename        = getattr(os, "rename", None)
 
 # pathlib / sqlite 원본
-_OrigPathOpen = pathlib.Path.open
+_OrigPathOpen       = pathlib.Path.open
 _orig_sqlite_connect = sqlite3.connect
 
 
@@ -74,13 +79,24 @@ def _ensure_parent(path: str):
     return path
 
 
-# === 패치 함수들 ===
+# === 공통 오픈 패치 ===
 def open_patched(path, *a, **kw):
+    # mode 감지
     mode = kw.get("mode") or (a[0] if a else "r")
     fixed = _fix(path)
     if any(m in mode for m in ("w", "a", "x", "+")):
         _ensure_parent(fixed)
     return _orig_open(fixed, *a, **kw)
+
+
+# io.open 을 쓰는 애들도 다 이걸 타게 한다
+def io_open_patched(path, *a, **kw):
+    mode = kw.get("mode") or (a[0] if a else "r")
+    fixed = _fix(path)
+    if any(m in mode for m in ("w", "a", "x", "+")):
+        _ensure_parent(fixed)
+    return _orig_io_open(fixed, *a, **kw)
+
 
 def exists_patched(path):
     return _orig_exists(_fix(path))
@@ -137,6 +153,7 @@ def sqlite_connect_patched(db, *a, **kw):
     # 메모리 DB나 상대경로는 건드리지 말기
     if isinstance(db, str) and db.startswith("/persistent"):
         db = _ensure_parent(db)  # 디렉터리 보장 + /persistent → BASE
+        db = _fix(db)
     return _orig_sqlite_connect(db, *a, **kw)
 
 sqlite3.connect = sqlite_connect_patched
@@ -144,6 +161,7 @@ sqlite3.connect = sqlite_connect_patched
 
 # === 전역 덮어쓰기 ===
 builtins.open   = open_patched
+io.open         = io_open_patched
 os.path.exists  = exists_patched
 os.path.isdir   = isdir_patched
 os.makedirs     = makedirs_patched
