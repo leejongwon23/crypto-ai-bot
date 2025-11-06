@@ -121,9 +121,6 @@ def _safe_close_gate(note: str = ""):
 # [ADD] 그룹잠금 전용 파일
 GROUP_TRAIN_LOCK = os.path.join(RUN_DIR, "group_training.lock")
 
-DEPLOY_ID  = os.getenv("RENDER_RELEASE_ID") or os.getenv("RENDER_GIT_COMMIT") or os.getenv("RENDER_SERVICE_ID") or "local"
-BOOT_MARK  = os.path.join(PERSIST_DIR, f".boot_notice_{DEPLOY_ID}")
-
 # locks — 여기만 PermissionError 대비로 바뀜
 _lock_dir_candidate = getattr(safe_cleanup, "LOCK_DIR", os.path.join(PERSIST_DIR, "locks"))
 try:
@@ -614,13 +611,10 @@ def _init_background_once():
             threading.Thread(target=maintenance_fix_meta.fix_all_meta_json, daemon=True).start()
             print("✅ maintenance_fix_meta 초기 실행 트리거")
 
+            # 🔔 여기서 항상 텔레그램 알림 보냄
             try:
-                fd = os.open(BOOT_MARK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(fd)
                 send_message("[시작] YOPO 서버 실행됨")
                 print("✅ Telegram 알림 발송 완료")
-            except FileExistsError:
-                print("ℹ️ 부팅 알림 생략")
             except Exception as e:
                 print(f"⚠️ Telegram 발송 실패: {e}")
 
@@ -800,7 +794,7 @@ def yopo_health():
                     status_icon = '✅' if s in ['success','v_success'] else '❌' if s in ['fail','v_fail'] else '⏳' if s in ['pending','v_pending'] else '🛑'
                     rows.append(f"<tr><td>{r.get('timestamp','')}</td><td>{r.get('symbol','')}</td><td>{r.get('direction','')}</td><td>{rtn_pct}</td><td>{status_icon}</td></tr>")
                 table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>심볼</th><th>방향</th><th>수익률</th><th>상태</th></tr>" + "".join(rows) + "</table>"
-            last_train = train_log_q['timestamp'].iloc[-1] if (not train_log_q.empty and 'timestamp' in train_log_q) else '없음'
+            last_train = train_log_df['timestamp'].iloc[-1] if (not train_log_df.empty and 'timestamp' in train_log_df) else '없음'
             last_pred  = pred['timestamp'].iloc[-1]  if (not pred.empty and 'timestamp' in pred)  else '없음'
             last_audit = audit['timestamp'].iloc[-1] if (not audit.empty and 'timestamp' in audit) else '없음'
             info_html = f"""<div style='border:1px solid #aaa;margin:16px 0;padding:10px;font-family:monospace;background:#f8f8f8;'>
