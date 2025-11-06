@@ -124,6 +124,24 @@ def _strategy_from_hours(hours: int) -> str:
     if h <= 24: return "중기"
     return "장기"
 
+# ✅ 여기 추가: 들어오는 이름이 엉켜있어도 순수 전략명만 뽑는다.
+def _normalize_strategy_name(strategy: str) -> str:
+    """
+    예)
+    - 'BTCUSDT-장기' -> '장기'
+    - 'BTCUSDT-중기-g0' -> '중기'
+    - '단기' -> '단기'
+    """
+    s = str(strategy).strip()
+    if "단기" in s:
+        return "단기"
+    if "중기" in s:
+        return "중기"
+    if "장기" in s:
+        return "장기"
+    # 그래도 못 찾으면 원본 리턴
+    return s
+
 # -----------------------------
 # Target construction
 # -----------------------------
@@ -155,7 +173,9 @@ def signed_future_return_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.nd
     return gains
 
 def signed_future_return(df: pd.DataFrame, strategy: str) -> np.ndarray:
-    horizon_hours = _strategy_horizon_hours(strategy)
+    # ✅ 여기서도 반드시 순수 전략명으로 바꾼다.
+    pure_strategy = _normalize_strategy_name(strategy)
+    horizon_hours = _strategy_horizon_hours(pure_strategy)
     return signed_future_return_by_hours(df, horizon_hours=horizon_hours)
 
 # -----------------------------
@@ -377,7 +397,9 @@ def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.nda
 # Stable Edge Store I/O
 # ============================
 def _edge_key(symbol: str, strategy: str) -> str:
-    return f"{symbol.strip().upper()}__{strategy.strip()}"
+    # ✅ 여기서도 꼭 순수 전략명으로!
+    pure_strategy = _normalize_strategy_name(strategy)
+    return f"{symbol.strip().upper()}__{pure_strategy.strip()}"
 
 def _edge_path(symbol: str, strategy: str) -> Path:
     key = _edge_key(symbol, strategy)
@@ -391,10 +413,12 @@ def _hash_array(a: np.ndarray) -> str:
         return "na"
 
 def _save_edges(symbol: str, strategy: str, edges: np.ndarray, meta: dict) -> None:
-    p = _edge_path(symbol, strategy)
+    # 저장할 때도 순수 전략명으로 저장
+    pure_strategy = _normalize_strategy_name(strategy)
+    p = _edge_path(symbol, pure_strategy)
     data = {
         "symbol": symbol,
-        "strategy": strategy,
+        "strategy": pure_strategy,
         "edges": list(map(float, edges.tolist())),
         "edges_hash": _hash_array(edges),
         "meta": meta or {},
@@ -403,12 +427,13 @@ def _save_edges(symbol: str, strategy: str, edges: np.ndarray, meta: dict) -> No
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        logger.info("labels: edges saved -> %s (%s/%s)", str(p), symbol, strategy)
+        logger.info("labels: edges saved -> %s (%s/%s)", str(p), symbol, pure_strategy)
     except Exception as e:
         logger.warning("labels: failed to save edges (%s): %s", str(p), e)
 
 def _load_edges(symbol: str, strategy: str) -> np.ndarray | None:
-    p = _edge_path(symbol, strategy)
+    pure_strategy = _normalize_strategy_name(strategy)
+    p = _edge_path(symbol, pure_strategy)
     if not p.exists():
         return None
     try:
@@ -453,11 +478,13 @@ def _save_label_table(
     """라벨 테이블과 메타를 파일로 고정 저장 (Parquet 우선, 실패 시 CSV 폴백)
        extra_cols: 보조 컬럼(예: 손절 경유 플래그들)
        extra_meta: 경계 JSON에 추가로 함께 저장할 메타(예: class_stop_frac 등)"""
+    pure_strategy = _normalize_strategy_name(strategy)
+
     ts = _to_series_ts_kst(df["timestamp"]) if "timestamp" in df.columns else pd.Series(pd.NaT, index=range(len(gains)))
     out = pd.DataFrame({
         "ts": ts,
         "symbol": symbol,
-        "strategy": strategy,
+        "strategy": pure_strategy,
         "class_id": labels.astype(np.int64),
         "signed_gain": gains.astype(np.float32),
     })
@@ -469,26 +496,26 @@ def _save_label_table(
                 # 길이 불일치나 타입 오류는 경고만 남기고 무시
                 logger.warning("labels: failed to attach extra column '%s'", k)
 
-    p_parquet = _labels_path(symbol, strategy)
-    p_csv = _labels_csv_path(symbol, strategy)
+    p_parquet = _labels_path(symbol, pure_strategy)
+    p_csv = _labels_csv_path(symbol, pure_strategy)
     p_parquet.parent.mkdir(parents=True, exist_ok=True)
 
     # 1) Parquet 저장 시도
     try:
         out.to_parquet(p_parquet, index=False)
-        logger.info("labels: table saved -> %s (%s/%s) rows=%d", str(p_parquet), symbol, strategy, len(out))
+        logger.info("labels: table saved -> %s (%s/%s) rows=%d", str(p_parquet), symbol, pure_strategy, len(out))
     except Exception as e:
         # 2) CSV 폴백
         try:
             out.to_csv(p_csv, index=False)
             logger.warning(
                 "labels: failed to save label table (%s/%s) to Parquet (%s): %s -> fallback to CSV (%s) rows=%d",
-                symbol, strategy, str(p_parquet), e, str(p_csv), len(out)
+                symbol, pure_strategy, str(p_parquet), e, str(p_csv), len(out)
             )
         except Exception as e2:
             logger.warning(
                 "labels: failed to save label table (%s/%s) to CSV (%s) as well: %s",
-                symbol, strategy, str(p_csv), e2
+                symbol, pure_strategy, str(p_csv), e2
             )
 
     # 메타 로그(요약) + 엣지 JSON 저장
@@ -496,7 +523,7 @@ def _save_label_table(
     class_ranges = [(float(edges[i]), float(edges[i+1])) for i in range(num_classes)]
     meta = {
         "symbol": symbol,
-        "strategy": strategy,
+        "strategy": pure_strategy,
         "NUM_CLASSES": num_classes,
         "class_counts_label_freeze": _counts_dict(labels),
         "edges": list(map(float, edges.tolist())),
@@ -513,7 +540,7 @@ def _save_label_table(
             meta.update(extra_meta)
         except Exception:
             pass
-    _save_edges(symbol, strategy, edges, meta=meta)  # 경계 JSON에도 메타 함께 반영
+    _save_edges(symbol, pure_strategy, edges, meta=meta)  # 경계 JSON에도 메타 함께 반영
 
 # ============================
 # 내부 유틸: 클래스별 손절 경유 비율 집계
@@ -585,15 +612,18 @@ def make_labels(
         bin_counts:  int64   (C,)
         bin_spans:   float64 (C,)  # 절대 %
     """
+    # 1) 전략명 정규화
+    pure_strategy = _normalize_strategy_name(strategy)
+
     # 1) 수익률 계산(분포용): '가장 크게 움직인 방향'의 서명 수익률
-    gains = signed_future_return(df, strategy)  # (N,)
+    gains = signed_future_return(df, pure_strategy)  # (N,)
 
     # 1-추가) 손절 경유 보조 플래그(±2%) — 라벨엔 반영하지 않음, 테이블에만 저장
     extra_cols = None
     up = dn = None
     sl = 0.02
     try:
-        horizon_hours = _strategy_horizon_hours(strategy)
+        horizon_hours = _strategy_horizon_hours(pure_strategy)
         both = _future_extreme_signed_returns(df, horizon_hours=int(horizon_hours))
         n = len(df)
         dn = both[:n] if both is not None and both.size >= 2 * n else np.zeros(n, dtype=np.float32)
@@ -607,7 +637,7 @@ def make_labels(
             "conflict_2pct": conflict_2pct.astype(np.int8),
         }
     except Exception as e:
-        logger.warning("labels: extra risk flags failed (%s/%s): %s", symbol, strategy, e)
+        logger.warning("labels: extra risk flags failed (%s/%s): %s", symbol, pure_strategy, e)
         extra_cols = None
 
     # 2) 현재 표본으로 엣지 생성(라벨 고정용) → 저장
@@ -628,7 +658,7 @@ def make_labels(
                 "class_mid": [float((edges[i]+edges[i+1])/2.0) for i in range(max(0, edges.size-1))],
             })
     except Exception as e:
-        logger.warning("labels: class_stop_frac compute failed (%s/%s): %s", symbol, strategy, e)
+        logger.warning("labels: class_stop_frac compute failed (%s/%s): %s", symbol, pure_strategy, e)
 
     # 4) class_ranges / counts / spans
     class_ranges = [(float(edges[i]), float(edges[i+1])) for i in range(edges.size - 1)]
@@ -637,14 +667,14 @@ def make_labels(
     bin_spans = np.diff(edges) * 100.0
 
     # 5) 라벨/엣지 고정 저장(Parquet 우선 저장, 실패 시 CSV 폴백) + 경계 JSON(+extra_meta)
-    _save_label_table(df, symbol, strategy, gains, labels, edges, bin_counts, bin_spans, extra_cols=extra_cols, extra_meta=extra_meta)
+    _save_label_table(df, symbol, pure_strategy, gains, labels, edges, bin_counts, bin_spans, extra_cols=extra_cols, extra_meta=extra_meta)
 
     # 6) 로그 요약 (체크리스트 스타일)
     empty_bins = int(np.sum(bin_counts == 0))
     num_classes = int(edges.size - 1)
     logger.info(
         "labels: freeze %s/%s bins(fd)=%d, empty=%d -> NUM_CLASSES=%d counts=%s",
-        symbol, strategy, int(_TARGET_BINS), empty_bins, num_classes, _counts_dict(labels)
+        symbol, pure_strategy, int(_TARGET_BINS), empty_bins, num_classes, _counts_dict(labels)
     )
 
     return gains.astype(np.float32), labels.astype(np.int64), class_ranges, edges.astype(float), bin_counts.astype(int), bin_spans.astype(float)
