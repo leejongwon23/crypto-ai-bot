@@ -1,4 +1,4 @@
-# === logger.py (v2025-11-05 FINAL — BASE 통합, /persistent 제거, 부팅시 파일 보장) ===
+# === logger.py (v2025-11-05 FINAL — BASE 통합, /persistent 제거, 부팅시 파일 보장 최소화) ===
 import sitecustomize
 import os
 import csv
@@ -28,16 +28,12 @@ BASE = (
     or "/opt/render/project/src/persistent"
 )
 
-# 필수 폴더/파일 미리 만들어두기
+# 디렉터리까지만 만들고, 파일은 여기서 "절대" 안 만든다
 try:
     os.makedirs(BASE, exist_ok=True)
     os.makedirs(os.path.join(BASE, "logs"), exist_ok=True)
-    wrong_path_boot = os.path.join(BASE, "wrong_predictions.csv")
-    if not os.path.exists(wrong_path_boot):
-        with open(wrong_path_boot, "w", encoding="utf-8-sig") as f:
-            f.write("")
 except Exception:
-    # 여긴 로거라 최대한 안 죽고 넘어가야 한다
+    # 로거는 최대한 안 죽고 넘어가야 한다
     pass
 
 # ─────────────────────────────────────
@@ -47,7 +43,7 @@ PERSISTENT_ROOT = BASE  # ← 핵심: 예전처럼 /persistent 고정 아님
 DIR = PERSISTENT_ROOT
 LOG_DIR = os.path.join(DIR, "logs")
 PREDICTION_LOG = get_PREDICTION_LOG_PATH()
-WRONG = os.path.join(DIR, "wrong_predictions.csv")
+WRONG = os.path.join(DIR, "wrong_predictions.csv")  # 실제로는 쓰는 쪽에서 만들 것
 EVAL_RESULT = os.path.join(LOG_DIR, "evaluation_result.csv")
 TRAIN_LOG = get_TRAIN_LOG_PATH()
 AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
@@ -499,7 +495,14 @@ def get_model_success_rate(s, t, m):
 try:
     from failure_db import ensure_failure_db as _ensure_failure_db_once
     if not _READONLY_FS:
-        _ensure_failure_db_once()
+        try:
+            _ensure_failure_db_once()
+        except FileNotFoundError as fe:
+            # 여기서 /persistent/wrong_predictions.csv 이런 거 찾다가 터지는 케이스만 부드럽게 넘긴다
+            if "wrong_predictions.csv" in str(fe):
+                print("[logger] failure_db init skipped (missing wrong_predictions.csv — caller에서 생성돼야 함)")
+            else:
+                raise
     print("[logger] failure_db initialized (schema ready)")
 except Exception as _e:
     print(f"[logger] failure_db init failed: {_e}")
