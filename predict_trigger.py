@@ -1,4 +1,4 @@
-# === predict_trigger.py (FINAL v1.4 — config 정합/동적 게이트 + 모델다중루트 + 그룹완주 보강) ===
+# === predict_trigger.py (FINAL v1.4+patch — config 정합/동적 게이트 + 모델다중루트 + 그룹완주 보강) ===
 import sitecustomize
 import os, time, glob, traceback, datetime, shutil
 from collections import Counter, defaultdict
@@ -16,9 +16,9 @@ try:
 except Exception:
     def get_GUANWU_IN_DIR(): return "/data/guanwu/incoming"
     def get_PREDICTION_LOG_PATH(): return os.getenv("PREDICTION_LOG_PATH", "/persistent/prediction_log.csv")
-    def get_REQUIRE_GROUP_COMPLETE(): 
+    def get_REQUIRE_GROUP_COMPLETE():
         v = os.getenv("REQUIRE_GROUP_COMPLETE", "1").strip().lower()
-        return 0 if v in {"0","false","no","off"} else 1
+        return 0 if v in {"0", "false", "no", "off"} else 1
 
 PREDICTION_LOG_PATH = get_PREDICTION_LOG_PATH()
 
@@ -576,6 +576,11 @@ def get_recent_class_frequencies(strategy=None, recent_days=RECENT_DAYS_FOR_FREQ
 
 # ── 확률 보정(미사용: 필요 시 외부에서 호출) ───────────────────
 def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict = None, alpha=0.10, beta=0.10):
+    """
+    probs: 모델이 뱉은 확률벡터 (길이 = 현재 예측에 사용된 num_classes)
+    recent_freq: prediction_log에서 읽어온 Counter
+    → recent_freq에 더 큰 class index가 있어도 여기서 잘라서 맞춰준다.
+    """
     p = np.asarray(probs, dtype=np.float64)
     if p.ndim == 2:
         p = p[0]
@@ -587,6 +592,14 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
     p = p / s0
 
     num_classes = len(p)
+
+    # 🔐 여기서 길이 맞춤: 예측이 12클래스인데 로그에 15번까지 찍혀 있어도 0~11만 봄
+    if isinstance(recent_freq, Counter):
+        recent_freq = Counter({i: int(recent_freq.get(i, 0)) for i in range(num_classes)})
+    elif isinstance(recent_freq, dict):
+        recent_freq = Counter({i: int(recent_freq.get(i, 0)) for i in range(num_classes)})
+    else:
+        recent_freq = Counter()
 
     total_recent = float(sum(recent_freq.values()))
     if total_recent <= 0:
