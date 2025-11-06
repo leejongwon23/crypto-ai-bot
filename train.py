@@ -390,7 +390,7 @@ def _save_model_and_meta(model:nn.Module,path_pt:str,meta:dict):
     weight=_stem(path_pt)+".ptz"
     save_model(weight, model.state_dict())
     meta_path = _stem(path_pt)+".meta.json"
-    with open(meta_path,"w",encoding="utf-8") as f: json.dump(meta,f,ensure_ascii=False,separators=(",",":"))
+    with open(meta_path,"w",encoding="utf-8") as f: json.dump(meta,f,ensure_ascii=False,indent=None,separators=(",",":"))
     return weight, meta_path
 
 def coverage_split_indices(y, val_frac=0.20, min_coverage=0.60, stride=50, max_windows=200, num_classes=None):
@@ -499,14 +499,12 @@ def _rebuild_labels_once(df: pd.DataFrame, symbol: str, strategy: str):
 
 # === [ADD] 최소 2클래스 확보 보조 ===
 def _expand_to_neighbor_classes(gidx: List[int], present_g: set[int]) -> List[int]:
-    if not gidx: return gidx
-    if len(present_g & set(gidx)) >= 2:
-        return gidx
-    all_g = sorted(gidx)
-    cand = set(all_g)
-    cand.add(max(min(all_g)-1, min(all_g)))
-    cand.add(min(max(all_g)+1, max(all_g)))
-    return sorted(list(set([x for x in cand if x >= min(all_g) - 1])))
+    """
+    원래 버전: 현재 그룹에 실제로 존재하는 클래스가 1개뿐이면 양옆 bin을 끌어와서 2개 이상으로 맞췄음.
+    지금 버전: 희소클래스 자체가 의미 있는 케이스이므로 '확장'하지 않고 원래 gidx 그대로 쓴다.
+    즉, 그룹 설계대로 간다.
+    """
+    return gidx
 
 def _rebuild_samples_with_keepset(fv: np.ndarray, labels: np.ndarray, window: int,
                                   keep_set: set[int], to_local: Dict[int,int]) -> Tuple[np.ndarray, np.ndarray]:
@@ -524,21 +522,12 @@ def _rebuild_samples_with_keepset(fv: np.ndarray, labels: np.ndarray, window: in
     return np.array(X_raw, dtype=np.float32), np.array(y, dtype=np.int64)
 
 def _synthesize_minority_if_needed(X_raw: np.ndarray, y: np.ndarray, num_classes: int) -> Tuple[np.ndarray, np.ndarray, bool]:
-    if X_raw.size == 0 or len(np.unique(y)) >= 2: 
-        return X_raw, y, False
-    cls = int(np.unique(y)[0])
-    other = 0 if cls != 0 else (1 if num_classes > 1 else None)
-    if other is None: 
-        return X_raw, y, False
-    k = max(4, int(0.02 * len(y)))
-    idx = np.random.choice(len(y), size=min(k, len(y)), replace=True)
-    X_syn = X_raw[idx].copy()
-    noise = (np.random.randn(*X_syn.shape).astype(np.float32)) * 1e-3
-    X_syn = X_syn + noise
-    y_syn = np.full((len(idx),), other, dtype=np.int64)
-    X_new = np.concatenate([X_raw, X_syn], axis=0)
-    y_new = np.concatenate([y, y_syn], axis=0)
-    return X_new, y_new, True
+    """
+    원래 버전: 클래스가 하나만 남으면 synthetic 시퀀스를 만들어서 최소 2개 클래스로 맞춤.
+    지금 버전: '클래스가 하나만 있는 것 자체가 시장구간의 정보'라고 보는 설정이므로 절대 synthetic을 추가하지 않는다.
+    그대로 돌려보내고, 세 번째 리턴값도 False로.
+    """
+    return X_raw, y, False
 
 def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
     vy = y[val_idx]
@@ -748,17 +737,12 @@ def train_one_model(symbol, strategy, group_id=None, max_epochs: Optional[int] =
             # [보강] 최소 2클래스 확보: 이웃 bin 확장 재생성 → 합성 minority
             repaired_info = {"neighbor_expansion": False, "synthetic_labels": False}
             if X_raw.size == 0 or len(np.unique(y)) < 2:
-                present_global = set([int(l) for l in labels[labels>=0].tolist()])
-                gidx2 = _expand_to_neighbor_classes(list(gidx), present_global)
-                keep_set2 = set(gidx2)
-                to_local2 = {g:i for i,g in enumerate(sorted(list(keep_set2)))}
-                X_raw2, y2 = _rebuild_samples_with_keepset(fv, labels, window, keep_set2, to_local2)
-                if X_raw2.size and len(np.unique(y2)) >= 2:
-                    X_raw, y = X_raw2, y2
-                    class_ranges = [all_ranges_full[i] for i in sorted(list(keep_set2))]
-                    set_NUM_CLASSES(len(class_ranges))
-                    repaired_info["neighbor_expansion"] = True
+                # 여기서도 이젠 확장 안 함 (위에서 _expand_to_neighbor_classes 가 no-op이므로)
+                # 희소클래스 그대로 유지
+                repaired_info["neighbor_expansion"] = False
+
             if X_raw.size and len(np.unique(y)) < 2:
+                # 여기도 synthetic 안 만듦
                 X_raw, y, syn = _synthesize_minority_if_needed(X_raw, y, num_classes=len(class_ranges))
                 repaired_info["synthetic_labels"] = syn
 
