@@ -9,6 +9,7 @@
 # 3) 쓰기 불가면 콘솔로만 남기고 진행(앱이 안 죽게)
 # ============================================================================
 
+import sitecustomize
 from __future__ import annotations
 import os, csv, json, math, hashlib, time, threading, datetime, sqlite3
 from typing import Any, Dict, Optional, Iterable, Tuple, List
