@@ -1,6 +1,7 @@
 flask
 requests
 pandas
+pyarrow
 numpy==1.26.4
 scikit-learn
 python-telegram-bot==13.15
