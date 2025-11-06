@@ -1,4 +1,5 @@
 # === predict_trigger.py (FINAL v1.4 — config 정합/동적 게이트 + 모델다중루트 + 그룹완주 보강) ===
+import sitecustomize
 import os, time, glob, traceback, datetime, shutil
 from collections import Counter, defaultdict
 import numpy as np
