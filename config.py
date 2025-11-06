@@ -1,4 +1,5 @@
 # config.py — Dynamic classing w/ safety rails: min/max width, zero band, sparse merge, CV guards
+import sitecustomize
 import json, os, errno, copy
 
 # ===== persistent root (모든 경로의 뿌리) =====
