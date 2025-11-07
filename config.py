@@ -621,24 +621,38 @@ def _strategy_horizon_hours(strategy: str) -> int:
     return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
 
 # ✅ horizon 기반 수익률 추출
-def _future_extreme_signed_returns(df, horizon_hours: int):
-    import numpy as np, pandas as pd
+def _future_extreme_signed_returns(df, horizon_hours: int, strategy: str = None):
+    """
+    전략별 horizon을 시간단위가 아니라 '캔들 개수 단위'로 보정한 수익률 계산.
+    단기=4시간 뒤, 중기=1일봉 1개 뒤, 장기=1주(7일) 뒤 기준으로.
+    """
+    import numpy as np
+    import pandas as pd
 
     if df is None or len(df) == 0 or "timestamp" not in df.columns or "close" not in df.columns:
         return np.zeros(0, dtype=np.float32)
 
     ts = pd.to_datetime(df["timestamp"], errors="coerce")
     close = pd.to_numeric(df["close"], errors="coerce").ffill().bfill().astype(float).values
-    high  = pd.to_numeric(df["high"] if "high" in df.columns else df["close"], errors="coerce").ffill().bfill().astype(float).values
-    low   = pd.to_numeric(df["low"]  if "low"  in df.columns else df["close"], errors="coerce").ffill().bfill().astype(float).values
+    high  = pd.to_numeric(df.get("high", df["close"]), errors="coerce").ffill().bfill().astype(float).values
+    low   = pd.to_numeric(df.get("low", df["close"]), errors="coerce").ffill().bfill().astype(float).values
 
+    # 평균 캔들 간격 계산
     if len(ts) > 1:
         total_h = (ts.iloc[-1] - ts.iloc[0]).total_seconds() / 3600.0
-        avg_interval_h = max(0.5, total_h / (len(ts) - 1))
+        avg_interval_h = max(0.1, total_h / (len(ts) - 1))
     else:
         avg_interval_h = 1.0
 
-    lookahead_n = int(max(1, round(float(horizon_hours) / float(avg_interval_h))))
+    # ✅ 전략별 실제 캔들 단위 보정
+    if strategy == "단기":
+        lookahead_n = 1  # 4시간 뒤 (4h 캔들 1개)
+    elif strategy == "중기":
+        lookahead_n = 1  # 일봉 1개 뒤까지만 (24h)
+    elif strategy == "장기":
+        lookahead_n = 7  # 일봉 7개 (1주)
+    else:
+        lookahead_n = int(max(1, round(horizon_hours / avg_interval_h)))
 
     up = np.zeros(len(df), dtype=np.float32)
     down = np.zeros(len(df), dtype=np.float32)
@@ -651,7 +665,9 @@ def _future_extreme_signed_returns(df, horizon_hours: int):
         up[i] = (max_h - base) / base
         down[i] = (min_l - base) / base
 
+    # up과 down을 합쳐서 반환
     return np.concatenate([down, up]).astype(np.float32)
+
 
 def _choose_n_classes(rets_signed, max_classes, hint_min=4):
     import numpy as np
