@@ -118,9 +118,11 @@ _default_config = {
         "dedup": {"enabled": True, "keep": "last"}
     },
 
+    # 🔴 여기 원래 True/True 였던 것 ↓↓↓
     "CLASS_ENFORCE": {
-        "same_across_groups": True,
-        "same_across_symbols": True,
+        # 심볼마다 다르게, 그룹마다 다르게 쓰게 바꿈
+        "same_across_groups": False,
+        "same_across_symbols": False,
         "n_override": None
     },
 
@@ -179,7 +181,8 @@ _default_config = {
         "step_pct": 0.0030,
         # === CHANGE === 중앙(0 포함) 구간 폭 상한 필드 추가(참고용, 실제 강제는 BIN_META의 값이 사용됨)
         "center_span_max_pct": 1.0,
-        "merge_sparse": {"enabled": True, "min_ratio": 0.01, "min_count_floor": 20, "prefer": "denser"},
+        # 🔴 이거 기본을 False로 내려서 얇은 데이터가 함부로 합쳐지지 않게 함
+        "merge_sparse": {"enabled": False, "min_ratio": 0.01, "min_count_floor": 20, "prefer": "denser"},
         "no_trade_floor_abs": 0.01,
         "add_abstain_class": True,
         "abstain_expand_eps": 0.0005,
@@ -400,7 +403,7 @@ def get_class_groups(num_classes=None, group_size=None):
 
 # 신규 옵션 Getter
 def get_REGIME():   return copy.deepcopy(_config.get("REGIME", _default_config["REGIME"]))
-def get_CALIB():    return copy.deepcopy(_config.get("CALIB", _default_config["CALIB"]))
+def get_CALIB():    return	copy.deepcopy(_config.get("CALIB", _default_config["CALIB"]))
 def get_LOSS():     return copy.deepcopy(_config.get("LOSS", _default_config["LOSS"]))
 def get_AUG():      return copy.deepcopy(_config.get("AUG", _default_config["AUG"]))
 def get_EVAL():     return copy.deepcopy(_config.get("EVAL", _default_config["EVAL"]))
@@ -693,6 +696,7 @@ def _merge_sparse_bins_by_hist(ranges, rets_signed, max_classes, bin_conf):
     if not ranges or rets_signed is None or rets_signed.size == 0:
         return ranges
     opt = (bin_conf or {}).get("merge_sparse", {})
+    # env로 다시 켤 수는 있음
     env_enabled = os.getenv("MERGE_SPARSE_ENABLED", None)
     if env_enabled is not None:
         opt = dict(opt or {}); opt["enabled"] = str(env_enabled).strip().lower() not in {"0", "false", "no"}
@@ -1197,4 +1201,4 @@ __all__ = [
     "is_config_readonly", "is_disk_cache_off",
     "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
     "get_BIN_META",
-]
+    ]
