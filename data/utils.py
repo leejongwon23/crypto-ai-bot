@@ -1273,7 +1273,6 @@ def _drop_duplicate_windows(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return X[keep_idx], np.array(keep_idx, dtype=np.int64)
 
 # ========================= 데이터셋 생성(라벨→서명수익→diff) =========================
-
 def create_dataset(features, window=10, strategy="단기", input_size=None):
     """피처 리스트 → 스케일 → 윈도우 → 라벨. close/high/low 유효성과 최신 구간 길이 검증 강화."""
     import pandas as _pd
@@ -1339,7 +1338,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         y_seq = None
         class_ranges_used = None
         if _make_labels is not None:
-            # ✅ 새 labels.py 시그니처에 맞게 전체 반환값 받기
             (
                 _gains_from_labeler,
                 labels_full,
@@ -1440,36 +1438,13 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             y = y[keep_idx]
             X = X_dedup
 
-        # === CHANGE === 1) 클래스 다양성 폴백(uniq<3 → 퍼센타일 리라벨)
-        try:
-            uniq = np.unique(y)
-            if uniq.size < 3:
-                vals = None
-                if "signed_vals" in locals() and len(signed_vals) >= len(y):
-                    vals = np.asarray(signed_vals[: len(y)], dtype=np.float64)
-                else:
-                    closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float64)
-                    if len(closes) > window + 1:
-                        pct = np.diff(closes) / (closes[:-1] + 1e-6)
-                        vals = np.asarray(pct[-len(y):], dtype=np.float64)
-                if vals is not None and vals.size == len(y):
-                    n_bins = int(cfg_get_NUM_CLASSES()) or 8
-                    qs = np.quantile(vals, np.linspace(0, 1, n_bins + 1))
-                    relabel_ranges = [(float(qs[i]), float(qs[i+1])) for i in range(n_bins)]
-                    y_new = _label_with_edges(vals, relabel_ranges)
-                    if np.unique(y_new).size >= 3:
-                        y = y_new
-                        class_ranges_used = relabel_ranges
-        except Exception:
-            pass
-
         # === CHANGE === 2) 경계 근접 보강 — BOUNDARY_BAND 연동 + env 오버라이드
         try:
             eps_bp_env = os.getenv("BOUNDARY_EPS_BP", None)
             if eps_bp_env is not None:
                 eps = max(0.0, float(eps_bp_env) / 10000.0)
             else:
-                eps = float(BOUNDARY_BAND)  # config.py의 BOUNDARY_BAND 사용
+                eps = float(BOUNDARY_BAND)
             if class_ranges_used is not None and len(class_ranges_used) > 1 and eps > 0:
                 stops = np.array([b for (_, b) in class_ranges_used[:-1]], dtype=np.float64)
                 vals = None
