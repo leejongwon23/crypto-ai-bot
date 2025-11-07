@@ -1003,12 +1003,18 @@ def train_one_model(
                 _safe_print("[LABEL RETRY FAIL] make_labels() second call failed")
 
         # --------- 그룹 로컬 재매핑 (전체 클래스 사용) ---------
-        all_ranges_full = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
-        # ✅ 여기서 그룹 쪼개기 끈다. 전체 bin 그대로 사용.
-        gidx = list(range(len(all_ranges_full)))
+        if "class_ranges_used_global" in locals() and class_ranges_used_global is not None:
+            # ✅ labels.py에서 만든 실제 bin을 그대로 씀
+            class_ranges = class_ranges_used_global
+        else:
+            # ⚙️ 못 받았으면 config에서 다시 불러옴
+            class_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
+
+        gidx = list(range(len(class_ranges)))
         keep_set = set(gidx)
-        class_ranges = all_ranges_full
         to_local = {g: i for i, g in enumerate(gidx)}
+        # -----------------------------------
+
         # -----------------------------------
 
         # 마스크/분포 진단
