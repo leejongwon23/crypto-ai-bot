@@ -11,9 +11,9 @@ import numpy as np
 import pandas as pd
 
 from config import (
-    BOUNDARY_BAND,  # (현재 파일에선 사용하지 않지만 호환 유지)
-    _strategy_horizon_hours,          # 시간기반 쓰는 애들은 그대로 두고
-    _future_extreme_signed_returns,   # 시간기반 버전도 그대로 둔다
+    BOUNDARY_BAND,
+    _strategy_horizon_hours,          # config에 있는 전략별 시간도 그대로 가져온다
+    _future_extreme_signed_returns,
     get_BIN_META,
     get_CLASS_BIN,
 )
@@ -50,13 +50,15 @@ _CENTER_SPAN_MAX_PCT = _as_percent(float(os.getenv("CENTER_SPAN_MAX_PCT", str(_B
 _CLASS_BIN_META: Dict = dict(get_CLASS_BIN() or {})
 _ZERO_BAND_PCT_HINT = _as_percent(float(_CLASS_BIN_META.get("ZERO_BAND_PCT", _CENTER_SPAN_MAX_PCT)))
 
-# 최소 라벨 개수는 무조건 지킨다
 _MIN_LABEL_CLASSES = int(os.getenv("MIN_LABEL_CLASSES", "4"))
 
-# ✅ 네가 요구한 “전략별 캔들단위” 설정
-LABEL_SHORT_CANDLES = int(os.getenv("LABEL_SHORT_CANDLES", "1"))   # 단기
-LABEL_MID_CANDLES   = int(os.getenv("LABEL_MID_CANDLES", "2"))     # 중기
-LABEL_LONG_CANDLES  = int(os.getenv("LABEL_LONG_CANDLES", "7"))    # 장기
+# 네가 싫어한 그 “2캔들, 7캔들” 고정은 지운다.
+# 기본 전략 시간(단기=4h, 중기=24h, 장기=168h)을 여기서 박아둔다.
+_DEFAULT_STRATEGY_HOURS = {
+    "단기": 4,          # 4시간 뒤
+    "중기": 24,         # 1일 뒤
+    "장기": 24 * 7,     # 1주일 뒤
+}
 
 # 저장 경로
 def _ensure_dir_with_fallback(primary: str, fallback: str) -> Path:
@@ -109,12 +111,6 @@ def _to_series_ts_kst(ts_like) -> pd.Series:
 # -----------------------------
 # Strategy/Horizon helpers
 # -----------------------------
-def _strategy_from_hours(hours: int) -> str:
-    h = int(max(1, hours))
-    if h <= 4: return "단기"
-    if h <= 24: return "중기"
-    return "장기"
-
 def _normalize_strategy_name(strategy: str) -> str:
     s = str(strategy).strip()
     if "단기" in s:
@@ -125,16 +121,46 @@ def _normalize_strategy_name(strategy: str) -> str:
         return "장기"
     return s
 
-# ✅ 전략 → 캔들수
-def _strategy_horizon_candles(strategy: str) -> int:
+def _strategy_hours_from_config_or_default(strategy: str) -> int:
+    """
+    1) config._strategy_horizon_hours 에 있으면 그걸 쓰고
+    2) 없으면 우리가 위에 박아둔 기본값(4h/24h/168h)을 쓴다.
+    """
     s = _normalize_strategy_name(strategy)
-    if s == "단기":
-        return max(1, LABEL_SHORT_CANDLES)
-    if s == "중기":
-        return max(1, LABEL_MID_CANDLES)
-    if s == "장기":
-        return max(1, LABEL_LONG_CANDLES)
-    return 1
+    # config에 dict로 들어온 경우
+    if isinstance(_strategy_horizon_hours, dict):
+        h = _strategy_horizon_hours.get(s)
+        if h:
+            return int(h)
+    # config에 없으면 기본
+    return int(_DEFAULT_STRATEGY_HOURS.get(s, 4))
+
+def _infer_candle_minutes(df: pd.DataFrame) -> float:
+    """
+    실제 df의 캔들 간격(분)을 추정한다.
+    이걸로 '몇 캔들 뒤'를 계산할 거라서 아주 중요.
+    """
+    if df is None or len(df) < 2 or "timestamp" not in df.columns:
+        return 60.0  # 모르면 1시간봉으로 본다
+    ts = pd.to_datetime(df["timestamp"], errors="coerce")
+    dt = ts.sort_values().diff().dt.total_seconds().dropna()
+    if dt.size == 0:
+        return 60.0
+    med_min = float(np.median(dt)) / 60.0
+    if med_min <= 0:
+        return 60.0
+    return med_min
+
+def _strategy_horizon_candles_from_hours(df: pd.DataFrame, strategy: str) -> int:
+    """
+    전략의 '시간'을 실제 df 캔들 간격으로 나눠서 '캔들 수'로 바꾼다.
+    이렇게 해야 1일봉일 때 중기는 1캔들, 장기는 7캔들이 된다.
+    """
+    hours = _strategy_hours_from_config_or_default(strategy)
+    candle_min = _infer_candle_minutes(df)
+    need_minutes = hours * 60.0
+    candles = int(round(need_minutes / candle_min))
+    return max(1, candles)
 
 # ✅ 캔들 개수로 미래 up/dn
 def _future_extreme_signed_returns_by_candles(df: pd.DataFrame, horizon_candles: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -161,38 +187,16 @@ def _future_extreme_signed_returns_by_candles(df: pd.DataFrame, horizon_candles:
     return up.astype(np.float32), dn.astype(np.float32)
 
 # -----------------------------
-# 시간기반 (다른 데서 쓸 수 있으니 유지)
+# 전략별 수익률 만들기 (여기가 진짜 핵심)
 # -----------------------------
-def signed_future_return_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
-    if (
-        df is None
-        or len(df) == 0
-        or "timestamp" not in df.columns
-        or "close" not in df.columns
-    ):
-        return np.zeros(0, dtype=np.float32)
-
-    both = _future_extreme_signed_returns(df, horizon_hours=int(horizon_hours))
-    n = len(df)
-    if both is None or both.size < 2 * n:
-        logger.warning("labels: _future_extreme_signed_returns returned invalid size for h=%s", horizon_hours)
-        return np.zeros(n, dtype=np.float32)
-
-    dn = both[:n]
-    up = both[n:]
-    gains = np.where(np.abs(up) >= np.abs(dn), up, dn).astype(np.float32)
-    gains = np.nan_to_num(gains, nan=0.0, posinf=0.0, neginf=0.0, copy=False).astype(np.float32)
-
-    if gains.size and (np.allclose(gains, gains[0]) or np.nanstd(gains) < 1e-10):
-        idx = np.arange(n, dtype=np.float32)
-        gains = gains + (idx - idx.mean()) * _JITTER_EPS
-        logger.info("labels: gains variance tiny (h=%s) -> jitter injected", horizon_hours)
-    return gains
-
-# ✅ 여기서부터는 전략 라벨은 전부 캔들 기준으로
 def signed_future_return(df: pd.DataFrame, strategy: str) -> np.ndarray:
+    """
+    단기=4h, 중기=1d, 장기=1w 로 '시간'을 먼저 정하고,
+    그걸 df의 실제 캔들 간격으로 나눠서 '캔들 수'로 바꾼 다음에 계산한다.
+    이렇게 해야 네가 말한 '1일봉인데 왜 2개로 갔냐'가 안 생긴다.
+    """
     pure_strategy = _normalize_strategy_name(strategy)
-    horizon_candles = _strategy_horizon_candles(pure_strategy)
+    horizon_candles = _strategy_horizon_candles_from_hours(df, pure_strategy)
     up, dn = _future_extreme_signed_returns_by_candles(df, horizon_candles)
     n = len(df)
     if up.size < n or dn.size < n:
@@ -202,11 +206,11 @@ def signed_future_return(df: pd.DataFrame, strategy: str) -> np.ndarray:
     if gains.size and (np.allclose(gains, gains[0]) or np.nanstd(gains) < 1e-10):
         idx = np.arange(n, dtype=np.float32)
         gains = gains + (idx - idx.mean()) * _JITTER_EPS
-        logger.info("labels: gains variance tiny (candle-based) -> jitter injected")
+        logger.info("labels: gains variance tiny -> jitter injected (%s)", pure_strategy)
     return gains
 
 # -----------------------------
-# Helpers
+# 이하 bin 만드는 부분은 네 원래 코드랑 똑같이 둔다
 # -----------------------------
 def _vector_bin(gains: np.ndarray, edges: np.ndarray) -> np.ndarray:
     e = edges.astype(float).copy()
@@ -529,9 +533,9 @@ def _save_label_table(
         "bin_spans_pct": list(map(float, spans_pct.tolist())) if spans_pct is not None else [],
         "dynamic_classes": True,
         "allow_trainer_class_collapse": False,
-        # ✅ 여기 두 줄이 지금 중요한 힌트
         "trainer_should_use_exact_num_classes": True,
-        "candle_horizon_used": int(_strategy_horizon_candles(pure_strategy)),
+        # 실제 몇 캔들 뒤를 봤는지 남겨서 train이 헷갈리지 않게 한다
+        "candle_horizon_used": int(_strategy_horizon_candles_from_hours(df, pure_strategy)),
         "class_ranges": class_ranges,
     }
     if group_id is not None:
@@ -598,11 +602,14 @@ def make_labels(
 
     gains = signed_future_return(df, pure_strategy)
 
-    extra_cols = {}
-    horizon_candles = _strategy_horizon_candles(pure_strategy)
+    # extra cols도 실제로 사용한 horizon에 맞춘다
+    horizon_candles = _strategy_horizon_candles_from_hours(df, pure_strategy)
     up_c, dn_c = _future_extreme_signed_returns_by_candles(df, horizon_candles)
-    extra_cols["future_up"] = up_c
-    extra_cols["future_dn"] = dn_c
+
+    extra_cols = {
+        "future_up": up_c,
+        "future_dn": dn_c,
+    }
     sl = 0.02
     extra_cols["up_ge_2pct"] = (up_c >= sl).astype(np.int8)
     extra_cols["dn_le_-2pct"] = (dn_c <= -sl).astype(np.int8)
@@ -646,10 +653,9 @@ def make_labels(
     empty_bins = int(np.sum(bin_counts == 0))
     num_classes = int(edges.size - 1)
     logger.info(
-        "labels: freeze %s/%s candle_h=%d bins(fd)=%d, empty=%d -> NUM_CLASSES=%d counts=%s",
+        "labels: freeze %s/%s bins(fd)=%d, empty=%d -> NUM_CLASSES=%d counts=%s",
         symbol,
         pure_strategy,
-        int(horizon_candles),
         int(_TARGET_BINS),
         empty_bins,
         num_classes,
@@ -666,9 +672,9 @@ def make_labels(
         bin_spans.astype(float),
     )
 
-# -----------------------------
-# Public API (explicit horizons — 그대로)
-# -----------------------------
+# ============================
+# Public API (explicit horizons) — 필요하면 그대로
+# ============================
 def make_labels_for_horizon(
     df: pd.DataFrame,
     symbol: str,
@@ -676,7 +682,7 @@ def make_labels_for_horizon(
     group_id: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[tuple[float, float]], str, np.ndarray, np.ndarray, np.ndarray]:
     gains = signed_future_return_by_hours(df, horizon_hours=int(horizon_hours))
-    strategy = _strategy_from_hours(int(horizon_hours))
+    strategy = "단기" if horizon_hours <= 4 else ("중기" if horizon_hours <= 24 else "장기")
 
     extra_cols = {}
     sl = 0.02
