@@ -874,11 +874,9 @@ def train_one_model(
         _safe_print(f"✅ train_one_model {symbol}-{strategy}-g{group_id}")
 
         # ===== 데이터 =====
-        # 1순위: 위에서 전략별로 준비해 온 df
         if df_hint is not None:
             df = df_hint
         else:
-            # 2순위: 이 전략 이름으로 직접 가져오기
             try:
                 df = get_kline_by_strategy(symbol, strategy)
             except Exception:
@@ -962,7 +960,7 @@ def train_one_model(
             _log_skip(symbol, strategy, "라벨 없음")
             return res
 
-        # 유효 클래스 너무 적으면 1회 재라벨
+        # ===== 라벨이 너무 한쪽만 나오면 1번 다시 만든다 =====
         try:
             uniq0 = _uniq_nonneg(labels)
         except Exception:
@@ -976,15 +974,9 @@ def train_one_model(
                 if len(res_try) == 6:
                     gains2, labels2, class_ranges2, be2, bc2, bs2 = res_try
                     bin_info2 = {
-                        "bin_edges": be2.tolist()
-                        if hasattr(be2, "tolist")
-                        else list(be2),
-                        "bin_counts": bc2.tolist()
-                        if hasattr(bc2, "tolist")
-                        else list(bc2),
-                        "bin_spans": bs2.tolist()
-                        if hasattr(bs2, "tolist")
-                        else list(bs2),
+                        "bin_edges": be2.tolist() if hasattr(be2, "tolist") else list(be2),
+                        "bin_counts": bc2.tolist() if hasattr(bc2, "tolist") else list(bc2),
+                        "bin_spans": bs2.tolist() if hasattr(bs2, "tolist") else list(bs2),
                     }
                 elif len(res_try) == 4:
                     gains2, labels2, class_ranges2, bin_info2 = res_try
@@ -1002,31 +994,27 @@ def train_one_model(
             else:
                 _safe_print("[LABEL RETRY FAIL] make_labels() second call failed")
 
-        # --------- 그룹 로컬 재매핑 (전체 클래스 사용) ---------
+        # ===== 여기서 실제로 쓸 클래스 구간 결정 =====
         if "class_ranges_used_global" in locals() and class_ranges_used_global is not None:
-            # ✅ labels.py에서 만든 실제 bin을 그대로 씀
+            # labels.py에서 실제로 만든 bin이 있으면 그걸 그대로 쓴다
             class_ranges = class_ranges_used_global
         else:
-            # ⚙️ 못 받았으면 config에서 다시 불러옴
+            # 없으면 config에서 전체 구간 다시 가져온다
             class_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
 
         gidx = list(range(len(class_ranges)))
         keep_set = set(gidx)
         to_local = {g: i for i, g in enumerate(gidx)}
-        # -----------------------------------
 
-        # -----------------------------------
-
-        # 마스크/분포 진단
+        # ===== 라벨 분포 진단 =====
         mask_cnt = int((labels < 0).sum())
         _safe_print(
             f"[LABELS] total={len(labels)} masked={mask_cnt} ({mask_cnt/max(1,len(labels)):.2%}) BOUNDARY_BAND=±{BOUNDARY_BAND}"
         )
         try:
+            # 여기서 길이는 class_ranges 기준이어야 함
             cnt_before = (
-                np.bincount(
-                    labels[labels >= 0], minlength=len(all_ranges_full)
-                )
+                np.bincount(labels[labels >= 0], minlength=len(class_ranges))
                 .astype(int)
                 .tolist()
             )
@@ -1034,7 +1022,7 @@ def train_one_model(
             cnt_before = []
 
         try:
-            n_bins = int(len(all_ranges_full))
+            n_bins = int(len(class_ranges))
             empty_idx = (
                 [i for i, c in enumerate(cnt_before) if int(c) == 0]
                 if cnt_before
@@ -1077,25 +1065,21 @@ def train_one_model(
         except Exception:
             pass
 
-        # 특징행렬 정제
+        # ===== 특징행렬 정제 =====
         drop_cols = [c for c in ("timestamp", "strategy", "symbol") if c in feat.columns]
         feat_num = (
             feat.drop(columns=drop_cols, errors="ignore")
             .select_dtypes(include=[np.number])
         )
-        features_only = (
-            feat_num.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        )
-        feat_dim = int(
-            getattr(features_only, "shape", [0, FEATURE_INPUT_SIZE])[1]
-        ) or int(FEATURE_INPUT_SIZE)
-        if (
-            len(features_only) > _MAX_ROWS_FOR_TRAIN
-            or len(labels) > _MAX_ROWS_FOR_TRAIN
-        ):
+        features_only = feat_num.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        feat_dim = int(getattr(features_only, "shape", [0, FEATURE_INPUT_SIZE])[1]) or int(FEATURE_INPUT_SIZE)
+        if len(features_only) > _MAX_ROWS_FOR_TRAIN or len(labels) > _MAX_ROWS_FOR_TRAIN:
             cut = min(_MAX_ROWS_FOR_TRAIN, len(features_only), len(labels))
             features_only = features_only.iloc[-cut:, :]
             labels = labels[-cut:]
+        ...
+        # (밑부분은 네가 준 코드 그대로 두면 됨)
+
 
         # 윈도우 후보
         try:
