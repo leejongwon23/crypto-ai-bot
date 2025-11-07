@@ -1274,7 +1274,8 @@ def _drop_duplicate_windows(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 
 # ========================= 데이터셋 생성(라벨→서명수익→diff) =========================
 def create_dataset(features, window=10, strategy="단기", input_size=None):
-    """피처 리스트 → 스케일 → 윈도우 → 라벨. close/high/low 유효성과 최신 구간 길이 검증 강화."""
+    """피처 리스트 → 스케일 → 윈도우 → 라벨. 
+    ✅ 수정판: labels.py 라벨만 사용, 예비(lookahead/pct) 라벨 완전 제거"""
     import pandas as _pd
 
     def _dummy(symbol_name):
@@ -1334,26 +1335,35 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             df_s = df_s[keep + ["timestamp"]]
             input_cols = keep
 
-        # 정식 라벨 시도
+        # ✅ 정식 라벨 시도 (labels.py 라벨만 사용)
         y_seq = None
         class_ranges_used = None
         if _make_labels is not None:
-            (
-                _gains_from_labeler,
-                labels_full,
-                class_ranges,
-                edges,
-                bin_counts,
-                bin_spans,
-            ) = _make_labels(
-                df[["timestamp", "close", "high", "low"]].rename(columns={"timestamp": "timestamp"}),
-                symbol=symbol_name,
-                strategy=strategy,
-                group_id=None,
-            )
-            if labels_full is not None and len(labels_full) == len(df):
-                y_seq = labels_full[window:len(df)]
-                class_ranges_used = class_ranges
+            try:
+                (
+                    _gains_from_labeler,
+                    labels_full,
+                    class_ranges,
+                    edges,
+                    bin_counts,
+                    bin_spans,
+                ) = _make_labels(
+                    df[["timestamp", "close", "high", "low"]],
+                    symbol=symbol_name,
+                    strategy=strategy,
+                    group_id=None,
+                )
+                if labels_full is not None and len(labels_full) == len(df):
+                    y_seq = labels_full[window:len(df)]
+                    class_ranges_used = class_ranges
+            except Exception as e:
+                safe_failed_result(symbol_name, strategy, reason=f"make_labels 실패: {e}")
+                return _dummy(symbol_name)
+
+        # ✅ 라벨이 없으면 예비계산 안 하고 바로 중단
+        if y_seq is None or len(y_seq) == 0:
+            safe_failed_result(symbol_name, strategy, reason="labels_empty_skip_backup")
+            return _dummy(symbol_name)
 
         # 윈도우 생성
         samples = []
@@ -1363,68 +1373,16 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                 continue
             samples.append([[float(seq.iloc[j].get(c, 0.0)) for c in input_cols] for j in range(window)])
 
-        if samples and y_seq is not None:
-            X = np.array(samples, dtype=np.float32)
-            y = np.array(y_seq[: len(X)], dtype=np.int64)
-            keep = np.where(y >= 0)[0]
-            if keep.size == 0:
-                return _dummy(symbol_name)
-            X, y = X[keep], y[keep]
-        else:
-            # 백업 라벨: 서명수익 → 없으면 diff
-            raw = df.to_dict(orient="records")
-            lookahead = {"단기": 240, "중기": 1440, "장기": 10080}.get(strategy, 1440)
-            signed_vals, samples = [], []
-            for i in range(window, len(df_s)):
-                seq = df_s.iloc[i - window : i]
-                base = raw[i]
-                t0 = pd.to_datetime(base.get("timestamp"), errors="coerce", utc=True).tz_convert("Asia/Seoul")
-                p0 = float(base.get("close", 0.0))
-                if pd.isnull(t0) or p0 <= 0:
-                    continue
-                fut = [r for r in raw[i + 1 :] if (pd.to_datetime(r.get("timestamp"), utc=True) - t0) <= _pd.Timedelta(minutes=lookahead)]
-                if len(seq) != window or not fut:
-                    continue
-                v_high = [float(r.get("high", r.get("close", p0))) for r in fut if float(r.get("high", r.get("close", p0))) > 0]
-                v_low = [float(r.get("low", r.get("close", p0))) for r in fut if float(r.get("low", r.get("close", p0))) > 0]
-                if not v_high and not v_low:
-                    continue
-                up = (max(v_high) - p0) / (p0 + 1e-6) if v_high else 0.0
-                dn = (min(v_low) - p0) / (p0 + 1e-6) if v_low else 0.0
-                signed_vals.append(float(up if abs(up) >= abs(dn) else dn))
-                samples.append([[float(seq.iloc[j].get(c, 0.0)) for c in input_cols] for j in range(window)])
+        if not samples:
+            safe_failed_result(symbol_name, strategy, reason="no_valid_samples")
+            return _dummy(symbol_name)
 
-            if samples and signed_vals:
-                ranges = cfg_get_class_ranges(symbol=symbol_name, strategy=strategy)
-                class_ranges_used = ranges
-                y = _label_with_edges(np.asarray(signed_vals, dtype=np.float64), ranges)
-                X = np.array(samples, dtype=np.float32)
-            else:
-                closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float32)
-                if len(closes) <= window + 1:
-                    return _dummy(symbol_name)
-                pct = np.diff(closes) / (closes[:-1] + 1e-6)
-                fb_samples, fb_vals = [], []
-                for i in range(window, len(df) - 1):
-                    seq_rows = df_s.iloc[i - window : i]
-                    fb_samples.append([[float(seq_rows.iloc[j].get(c, 0.0)) for j in range(len(input_cols))] for _ in [0]][0:0])
-                # 위에서 복붙하다 꼬이는 부분이 있어 원본 구조 유지
-
-                closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float32)
-                if len(closes) <= window + 1:
-                    return _dummy(symbol_name)
-                pct = np.diff(closes) / (closes[:-1] + 1e-6)
-                fb_samples, fb_vals = [], []
-                for i in range(window, len(df) - 1):
-                    seq_rows = df_s.iloc[i - window : i]
-                    fb_samples.append([[float(seq_rows.iloc[j].get(c, 0.0)) for c in input_cols] for j in range(window)])
-                    fb_vals.append(float(pct[i] if i < len(pct) else 0.0))
-                if not fb_samples:
-                    return _dummy(symbol_name)
-                ranges = cfg_get_class_ranges(symbol=symbol_name, strategy=strategy)
-                class_ranges_used = ranges
-                y = _label_with_edges(np.asarray(fb_vals, dtype=np.float64), ranges)
-                X = np.array(fb_samples, dtype=np.float32)
+        X = np.array(samples, dtype=np.float32)
+        y = np.array(y_seq[: len(X)], dtype=np.int64)
+        keep = np.where(y >= 0)[0]
+        if keep.size == 0:
+            return _dummy(symbol_name)
+        X, y = X[keep], y[keep]
 
         # 길이 일치
         m = min(len(X), len(y))
@@ -1438,7 +1396,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             y = y[keep_idx]
             X = X_dedup
 
-        # === CHANGE === 2) 경계 근접 보강 — BOUNDARY_BAND 연동 + env 오버라이드
+        # === CHANGE === 2) 경계 근접 보강 — BOUNDARY_BAND 연동
         try:
             eps_bp_env = os.getenv("BOUNDARY_EPS_BP", None)
             if eps_bp_env is not None:
@@ -1447,13 +1405,9 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
                 eps = float(BOUNDARY_BAND)
             if class_ranges_used is not None and len(class_ranges_used) > 1 and eps > 0:
                 stops = np.array([b for (_, b) in class_ranges_used[:-1]], dtype=np.float64)
-                vals = None
-                if "signed_vals" in locals() and len(signed_vals) >= len(y):
-                    vals = np.asarray(signed_vals[: len(y)], dtype=np.float64)
-                else:
-                    closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float64)
-                    pct = np.diff(closes) / (closes[:-1] + 1e-6)
-                    vals = np.asarray(pct[-len(y):], dtype=np.float64)
+                closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float64)
+                pct = np.diff(closes) / (closes[:-1] + 1e-6)
+                vals = np.asarray(pct[-len(y):], dtype=np.float64)
                 near = np.any(np.abs(vals[:, None] - stops[None, :]) <= eps, axis=1)
                 idx_edge = np.where(near)[0]
                 if idx_edge.size > 0:
@@ -1463,7 +1417,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         except Exception:
             pass
 
-        # === CHANGE === 3) 클래스 최소 샘플 보장(CV min_per_class) — 증강 기반 보완
+        # === CHANGE === 3) 클래스 최소 샘플 보장(CV min_per_class)
         try:
             cv_cfg = get_CV_CONFIG()
             min_per_class = int(cv_cfg.get("min_per_class", 3))
@@ -1474,16 +1428,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         except Exception:
             pass
 
-        # 추가적으로 심각한 쏠림이면 상한까지 보강(기존 로직 유지)
-        try:
-            if int(os.getenv("AUG_ENABLE", "1")) == 1 and len(y) > 0:
-                uniq, cnts = np.unique(y, return_counts=True)
-                if cnts.size > 0 and (np.max(cnts) / float(len(y))) >= 0.5:
-                    X, y = augment_for_min_count(X, y, target_count=int(np.max(cnts)))
-        except Exception:
-            pass
-
-        # === 여기서부터 메타 고정 ===
+        # === 메타 고정 ===
         class_ranges_final = class_ranges_used or cfg_get_class_ranges(symbol=symbol_name, strategy=strategy)
         num_classes_final = len(class_ranges_final)
 
@@ -1491,9 +1436,8 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             "num_classes": int(num_classes_final),
             "class_ranges": class_ranges_final,
             "class_groups": cfg_get_class_groups(num_classes_final, 5),
-            "allow_trainer_class_collapse": False,  # ✅ train 단계에서 2클래스로 줄이지 마
+            "allow_trainer_class_collapse": False,
         }
-        # 라벨러가 edges 등을 줬으면 같이 심어둔다
         try:
             if edges is not None:
                 X.attrs["bin_edges"] = [float(e) for e in edges]
@@ -1506,9 +1450,10 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
         return X, y
 
-    except Exception:
-        safe_failed_result(symbol_name, strategy, reason="create_dataset 예외")
+    except Exception as e:
+        safe_failed_result(symbol_name, strategy, reason=f"create_dataset 예외: {e}")
         return _dummy(symbol_name)
+
 
 # ========================= 추론/데이터셋 헬퍼 =========================
 def _select_feature_columns(feat_df: pd.DataFrame) -> List[str]:
