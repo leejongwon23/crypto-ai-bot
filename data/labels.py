@@ -12,8 +12,8 @@ import pandas as pd
 
 from config import (
     BOUNDARY_BAND,  # (현재 파일에선 사용하지 않지만 호환 유지)
-    _strategy_horizon_hours,
-    _future_extreme_signed_returns,
+    _strategy_horizon_hours,          # horizon용 기존 함수는 그대로 두고
+    _future_extreme_signed_returns,   # horizon 버전도 그대로 둔다 (호환)
     get_BIN_META,
     get_CLASS_BIN,
 )
@@ -63,6 +63,12 @@ _ZERO_BAND_PCT_HINT = _as_percent(float(_CLASS_BIN_META.get("ZERO_BAND_PCT", _CE
 
 # ✅ 여기 핵심: 라벨이 아무리 줄어도 이 개수 이하는 안 떨어지게
 _MIN_LABEL_CLASSES = int(os.getenv("MIN_LABEL_CLASSES", "4"))
+
+# ✅ 전략별 “미래로 볼 캔들 수” — 이게 이번에 네가 요구한 부분
+#    필요하면 env에서 덮어써도 되고, 여기 숫자 직접 바꿔도 된다.
+LABEL_SHORT_CANDLES = int(os.getenv("LABEL_SHORT_CANDLES", "1"))   # 단기: 바로 다음 캔들
+LABEL_MID_CANDLES   = int(os.getenv("LABEL_MID_CANDLES", "2"))     # 중기: 2캔들(원하면 3으로)
+LABEL_LONG_CANDLES  = int(os.getenv("LABEL_LONG_CANDLES", "7"))    # 장기: 대충 1주일치 정도
 
 # === 퍼시스턴트 저장소(엣지/라벨 고정) ===
 def _ensure_dir_with_fallback(primary: str, fallback: str) -> Path:
@@ -131,8 +137,43 @@ def _normalize_strategy_name(strategy: str) -> str:
         return "장기"
     return s
 
+# ✅ 전략 → 캔들수
+def _strategy_horizon_candles(strategy: str) -> int:
+    s = _normalize_strategy_name(strategy)
+    if s == "단기":
+        return max(1, LABEL_SHORT_CANDLES)
+    if s == "중기":
+        return max(1, LABEL_MID_CANDLES)
+    if s == "장기":
+        return max(1, LABEL_LONG_CANDLES)
+    return 1
+
+# ✅ “캔들 개수로” 미래 up/dn 계산
+def _future_extreme_signed_returns_by_candles(df: pd.DataFrame, horizon_candles: int) -> Tuple[np.ndarray, np.ndarray]:
+    n = len(df)
+    if n == 0:
+        return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.float32)
+
+    close = pd.to_numeric(df.get("close"), errors="coerce").to_numpy(dtype=np.float32)
+    high  = pd.to_numeric(df.get("high", df.get("close")), errors="coerce").to_numpy(dtype=np.float32)
+    low   = pd.to_numeric(df.get("low",  df.get("close")), errors="coerce").to_numpy(dtype=np.float32)
+
+    up = np.zeros(n, dtype=np.float32)
+    dn = np.zeros(n, dtype=np.float32)
+    H = int(max(1, horizon_candles))
+
+    for i in range(n):
+        j_end = min(n, i + H)
+        base = close[i] if close[i] > 0 else 1e-6
+        fut_high = float(np.max(high[i:j_end]))
+        fut_low  = float(np.min(low[i:j_end]))
+        up[i] = (fut_high - base) / (base + 1e-12)
+        dn[i] = (fut_low  - base) / (base + 1e-12)
+
+    return up.astype(np.float32), dn.astype(np.float32)
+
 # -----------------------------
-# Target construction
+# Target construction (시간기반 — 이건 다른 함수에서 쓸 수도 있으니 놔둔다)
 # -----------------------------
 def signed_future_return_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
     if (
@@ -160,10 +201,21 @@ def signed_future_return_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.nd
         logger.info("labels: gains variance tiny (h=%s) -> jitter injected", horizon_hours)
     return gains
 
+# ✅ 여기! 이제 전략별 라벨 계산은 전부 “캔들 기준”으로 간다.
 def signed_future_return(df: pd.DataFrame, strategy: str) -> np.ndarray:
     pure_strategy = _normalize_strategy_name(strategy)
-    horizon_hours = _strategy_horizon_hours(pure_strategy)
-    return signed_future_return_by_hours(df, horizon_hours=horizon_hours)
+    horizon_candles = _strategy_horizon_candles(pure_strategy)
+    up, dn = _future_extreme_signed_returns_by_candles(df, horizon_candles)
+    n = len(df)
+    if up.size < n or dn.size < n:
+        return np.zeros(n, dtype=np.float32)
+    gains = np.where(np.abs(up) >= np.abs(dn), up, dn).astype(np.float32)
+    gains = np.nan_to_num(gains, nan=0.0, posinf=0.0, neginf=0.0, copy=False).astype(np.float32)
+    if gains.size and (np.allclose(gains, gains[0]) or np.nanstd(gains) < 1e-10):
+        idx = np.arange(n, dtype=np.float32)
+        gains = gains + (idx - idx.mean()) * _JITTER_EPS
+        logger.info("labels: gains variance tiny (candle-based) -> jitter injected")
+    return gains
 
 # -----------------------------
 # Helpers
@@ -444,7 +496,7 @@ def _save_label_table(
     counts: np.ndarray,
     spans_pct: np.ndarray,
     extra_cols: Dict[str, np.ndarray] | None = None,
-    extra_meta: Dict | None = None,
+    extra_meta: Dict[str, object] | None = None,
     group_id: int | None = None,
 ) -> None:
     pure_strategy = _normalize_strategy_name(strategy)
@@ -530,8 +582,6 @@ def _compute_class_stop_frac(
     class_stop_frac = np.zeros(C, dtype=float)
     class_stop_n = np.zeros(C, dtype=int)
 
-    mids = np.array([(float(edges[i]) + float(edges[i+1]) / 2.0) for i in range(C)], dtype=float)
-    # 위 줄은 원래 mid가 필요해서 남겨두지만 실제 stop 계산에는 아래 mid 로직이 적용됨
     mids = np.array([(float(edges[i]) + float(edges[i+1])) / 2.0 for i in range(C)], dtype=float)
 
     up = np.asarray(up, dtype=float)
@@ -567,36 +617,25 @@ def make_labels(
 ) -> tuple[np.ndarray, np.ndarray, list[tuple[float, float]], np.ndarray, np.ndarray, np.ndarray]:
     """
     매 호출마다:
-      1) 데이터에서 up/dn 다시 뽑고
-      2) 가장 큰 방향 수익률로 gains 만들고
-      3) 그걸로 새 bin 생성하고
-      4) 라벨 저장
+      1) 이 전략에 맞는 캔들 수로 up/dn 계산하고
+      2) 거기서 나온 gains로 이번 전략만의 분포를 만들고
+      3) 그걸 파일에 저장한다.
+    그래서 단기/중기 분포가 같을 일이 없어야 한다.
     """
     pure_strategy = _normalize_strategy_name(strategy)
 
-    # 1) 수익률
+    # 1) 수익률 — 캔들 기준
     gains = signed_future_return(df, pure_strategy)
 
-    # 1-보조: up/dn 원본도 같이 가져와서 테이블에 박아둔다
+    # 1-보조) extra 컬럼도 캔들 기준으로 맞춰서 저장한다 (여기서 시간을 안 쓴다)
     extra_cols = {}
-    up = dn = None
+    up_c, dn_c = _future_extreme_signed_returns_by_candles(df, _strategy_horizon_candles(pure_strategy))
+    extra_cols["future_up"] = up_c
+    extra_cols["future_dn"] = dn_c
     sl = 0.02
-    try:
-        horizon_hours = _strategy_horizon_hours(pure_strategy)
-        both = _future_extreme_signed_returns(df, horizon_hours=int(horizon_hours))
-        n = len(df)
-        dn = both[:n] if both is not None and both.size >= 2 * n else np.zeros(n, dtype=np.float32)
-        up = both[n:] if both is not None and both.size >= 2 * n else np.zeros(n, dtype=np.float32)
-
-        extra_cols["future_up"] = np.asarray(up, dtype=np.float32)
-        extra_cols["future_dn"] = np.asarray(dn, dtype=np.float32)
-
-        extra_cols["up_ge_2pct"] = (np.asarray(up) >= sl).astype(np.int8)
-        extra_cols["dn_le_-2pct"] = (np.asarray(dn) <= -sl).astype(np.int8)
-        extra_cols["conflict_2pct"] = ((np.asarray(up) >= sl) & (np.asarray(dn) <= -sl)).astype(np.int8)
-    except Exception as e:
-        logger.warning("labels: extra risk flags failed (%s/%s): %s", symbol, pure_strategy, e)
-        extra_cols = None
+    extra_cols["up_ge_2pct"] = (up_c >= sl).astype(np.int8)
+    extra_cols["dn_le_-2pct"] = (dn_c <= -sl).astype(np.int8)
+    extra_cols["conflict_2pct"] = ((up_c >= sl) & (dn_c <= -sl)).astype(np.int8)
 
     # 2) 이번 데이터로 새 분포 생성 (여기서 이미 최소클래스 강제됨)
     edges, bin_counts, bin_spans = _build_bins(gains, _TARGET_BINS)
@@ -604,27 +643,26 @@ def make_labels(
     # 3) 라벨링
     labels = _vector_bin(gains, edges)
 
-    # 4) 손절 경유 메타
+    # 4) 손절 경유 메타 (이것도 방금 캔들기준 up/dn을 써서 만든다)
     extra_meta = {}
     try:
-        if extra_cols is not None and "future_up" in extra_cols and "future_dn" in extra_cols:
-            class_stop_frac, class_stop_n = _compute_class_stop_frac(
-                labels,
-                edges,
-                extra_cols["future_up"],
-                extra_cols["future_dn"],
-                stoploss_abs=sl,
-            )
-            extra_meta.update({
-                "stoploss_threshold_abs": float(sl),
-                "class_stop_frac": list(map(float, class_stop_frac.tolist())),
-                "class_stop_n": list(map(int, class_stop_n.tolist())),
-                "class_mid": [float((edges[i] + edges[i+1]) / 2.0) for i in range(max(0, edges.size - 1))],
-            })
+        class_stop_frac, class_stop_n = _compute_class_stop_frac(
+            labels,
+            edges,
+            up_c,
+            dn_c,
+            stoploss_abs=sl,
+        )
+        extra_meta.update({
+            "stoploss_threshold_abs": float(sl),
+            "class_stop_frac": list(map(float, class_stop_frac.tolist())),
+            "class_stop_n": list(map(int, class_stop_n.tolist())),
+            "class_mid": [float((edges[i] + edges[i+1]) / 2.0) for i in range(max(0, edges.size - 1))],
+        })
     except Exception as e:
         logger.warning("labels: class_stop_frac compute failed (%s/%s): %s", symbol, pure_strategy, e)
 
-    # 5) 저장 (항상 이번 분포로 덮어씀)
+    # 5) 저장 (항상 이번 분포로 덮어씀 → 매 학습마다 새 분포)
     _save_label_table(
         df,
         symbol,
@@ -642,7 +680,7 @@ def make_labels(
     empty_bins = int(np.sum(bin_counts == 0))
     num_classes = int(edges.size - 1)
     logger.info(
-        "labels: freeze %s/%s bins(fd)=%d, empty=%d -> NUM_CLASSES=%d counts=%s (rebuild=True)",
+        "labels: freeze %s/%s bins(fd)=%d, empty=%d -> NUM_CLASSES=%d counts=%s (rebuild=True, candle-based)",
         symbol,
         pure_strategy,
         int(_TARGET_BINS),
@@ -670,6 +708,7 @@ def make_labels_for_horizon(
     horizon_hours: int,
     group_id: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[tuple[float, float]], str, np.ndarray, np.ndarray, np.ndarray]:
+    # 이 함수는 “h시간 뒤” 버전이니까 기존대로 시간기준 유지
     gains = signed_future_return_by_hours(df, horizon_hours=int(horizon_hours))
     strategy = _strategy_from_hours(int(horizon_hours))
 
@@ -681,7 +720,6 @@ def make_labels_for_horizon(
         n = len(df)
         dn = both[:n] if both is not None and both.size >= 2 * n else np.zeros(n, dtype=np.float32)
         up = both[n:] if both is not None and both.size >= 2 * n else np.zeros(n, dtype=np.float32)
-
         extra_cols["future_up"] = np.asarray(up, dtype=np.float32)
         extra_cols["future_dn"] = np.asarray(dn, dtype=np.float32)
         extra_cols["up_ge_2pct"] = (np.asarray(up) >= sl).astype(np.int8)
