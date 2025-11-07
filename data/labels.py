@@ -61,6 +61,9 @@ _CENTER_SPAN_MAX_PCT = _as_percent(float(os.getenv("CENTER_SPAN_MAX_PCT", str(_B
 _CLASS_BIN_META: Dict = dict(get_CLASS_BIN() or {})
 _ZERO_BAND_PCT_HINT = _as_percent(float(_CLASS_BIN_META.get("ZERO_BAND_PCT", _CENTER_SPAN_MAX_PCT)))
 
+# ✅ 여기 핵심: 라벨이 아무리 줄어도 이 개수 이하는 안 떨어지게
+_MIN_LABEL_CLASSES = int(os.getenv("MIN_LABEL_CLASSES", "4"))
+
 # === 퍼시스턴트 저장소(엣지/라벨 고정) ===
 def _ensure_dir_with_fallback(primary: str, fallback: str) -> Path:
     p_primary = Path(primary).resolve()
@@ -304,6 +307,37 @@ def _limit_dominant_bins(edges: np.ndarray, x_clip: np.ndarray,
 
     return _dedupe_edges(e)
 
+def _ensure_min_classes(edges: np.ndarray, x_clip: np.ndarray, min_classes: int,
+                        zero_band_pct: float) -> np.ndarray:
+    """
+    최종적으로 bin 수가 너무 줄어들었을 때(예: 데이터 좁아서 2칸만 남음) 다시 최소개수로 재구성.
+    """
+    cur = int(max(0, edges.size - 1))
+    if cur >= max(2, min_classes):
+        return edges.astype(float)
+
+    # 데이터가 완전히 한 점에 몰렸을 때를 대비
+    if x_clip.size == 0:
+        base_edges = np.array([-0.01, -0.003, 0.003, 0.01, 0.03], dtype=float)
+        if base_edges.size - 1 >= min_classes:
+            return base_edges[: min_classes + 1]
+        # 그래도 모자라면 균등분할
+        return np.linspace(-0.03, 0.03, min_classes + 1).astype(float)
+
+    lo = float(np.min(x_clip))
+    hi = float(np.max(x_clip))
+    if not np.isfinite(lo):
+        lo = -0.01
+    if not np.isfinite(hi):
+        hi = 0.01
+    if hi <= lo:
+        hi = lo + 0.0001
+
+    new_edges = np.linspace(lo, hi, int(min_classes) + 1).astype(float)
+    new_edges = _enforce_zero_band(new_edges, zero_band_pct)
+    new_edges = _ensure_zero_edge(new_edges)
+    return _dedupe_edges(new_edges)
+
 def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     매 호출마다 새 분포 생성
@@ -311,7 +345,8 @@ def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.nda
     x = np.asarray(gains, dtype=float)
     x = x[np.isfinite(x)]
     if x.size == 0:
-        edges = np.array([-0.05, -0.02, -0.005, 0.005, 0.02, 0.05], dtype=float)
+        # 데이터가 아예 없을 때도 최소클래스는 지켜주자
+        edges = np.linspace(-0.03, 0.03, _MIN_LABEL_CLASSES + 1).astype(float)
         counts = np.zeros(edges.size - 1, dtype=int)
         spans = np.diff(edges) * 100.0
         return edges, counts, spans
@@ -336,6 +371,10 @@ def _build_bins(gains: np.ndarray, target_bins: int) -> Tuple[np.ndarray, np.nda
     edges = _enforce_zero_band(edges, _ZERO_BAND_PCT_HINT)
     edges = _ensure_zero_edge(edges)
 
+    # ✅ 여기서 최소클래스 강제
+    edges = _ensure_min_classes(edges, x_clip, _MIN_LABEL_CLASSES, _ZERO_BAND_PCT_HINT)
+
+    # ✅ 최소클래스로 바뀌었으니 다시 count / span 계산
     edges_count = edges.copy(); edges_count[-1] += _EDGE_EPS
     counts, _ = np.histogram(x_clip, bins=edges_count)
     spans_pct = np.diff(edges) * 100.0
@@ -491,6 +530,8 @@ def _compute_class_stop_frac(
     class_stop_frac = np.zeros(C, dtype=float)
     class_stop_n = np.zeros(C, dtype=int)
 
+    mids = np.array([(float(edges[i]) + float(edges[i+1]) / 2.0) for i in range(C)], dtype=float)
+    # 위 줄은 원래 mid가 필요해서 남겨두지만 실제 stop 계산에는 아래 mid 로직이 적용됨
     mids = np.array([(float(edges[i]) + float(edges[i+1])) / 2.0 for i in range(C)], dtype=float)
 
     up = np.asarray(up, dtype=float)
@@ -557,7 +598,7 @@ def make_labels(
         logger.warning("labels: extra risk flags failed (%s/%s): %s", symbol, pure_strategy, e)
         extra_cols = None
 
-    # 2) 이번 데이터로 새 분포 생성
+    # 2) 이번 데이터로 새 분포 생성 (여기서 이미 최소클래스 강제됨)
     edges, bin_counts, bin_spans = _build_bins(gains, _TARGET_BINS)
 
     # 3) 라벨링
