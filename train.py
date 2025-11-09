@@ -2252,20 +2252,27 @@ def start_train_loop(force_restart: bool = False, sleep_sec: int = 0):
 def stop_train_loop(timeout: int | float | None = 30):
     global _TRAIN_LOOP_THREAD, _TRAIN_LOOP_STOP
     with _TRAIN_LOOP_LOCK:
+        # 이미 루프가 없으면 그대로 종료
         if _TRAIN_LOOP_THREAD is None or not _TRAIN_LOOP_THREAD.is_alive():
             _safe_print("ℹ️ no loop")
             return True
         if _TRAIN_LOOP_STOP is None:
             _safe_print("⚠️ no stop event")
             return False
+
+        # 멈추기 요청
         _TRAIN_LOOP_STOP.set()
         _TRAIN_LOOP_THREAD.join(timeout=timeout)
+
+        # ⛔️ 수정 핵심: 아직 멈추지 않았으면 절대 QWIPE 하지 않는다
         if _TRAIN_LOOP_THREAD.is_alive():
-            _safe_print("⚠️ stop timeout")
+            _safe_print("⚠️ stop timeout — 학습이 완전히 멈추지 않음 → 초기화(QWIPE) 생략")
             return False
+
+        # 완전히 멈춘 경우에만 종료 처리
         _TRAIN_LOOP_THREAD = None
         _TRAIN_LOOP_STOP = None
-        _safe_print("✅ loop stopped")
+        _safe_print("✅ loop stopped (safe state)")
         return True
 
 def request_stop() -> bool:
