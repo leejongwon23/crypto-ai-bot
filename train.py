@@ -1207,7 +1207,14 @@ def train_one_model(
             model_type = getattr(model, "model_type", None) or model.__class__.__name__.lower()
 
             # 손실
-            loss_name = (get_LOSS() or "").lower()
+            loss_cfg = get_LOSS()
+
+    # 만약 딕셔너리(상자) 형태라면 안에 있는 'name'을 꺼내서 사용
+    if isinstance(loss_cfg, dict):
+        loss_name = (loss_cfg.get("name") or "").lower()
+    else:
+        # 그냥 글자라면 그대로 소문자로 바꿔서 사용
+        loss_name = (loss_cfg or "").lower()
             if loss_name == "focal":
                 criterion = FocalLoss(gamma=FOCAL_GAMMA).to(DEVICE)
             else:
