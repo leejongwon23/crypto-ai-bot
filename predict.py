@@ -1166,6 +1166,7 @@ def _apply_soft_guard(df, strategy, outs, chosen, final_cls, allow_long, allow_s
         return "ok", chosen, final_cls, f"soft_guard_exception:{e}"
 
 # -------------------- 메인 predict --------------------
+
 def predict(symbol, strategy, source="일반", model_type=None):
     # 게이트/그룹 가드
     if _group_active() and not _bypass_gate_for_source(source):
@@ -1231,6 +1232,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
 
         # 시세/피처
         df = get_kline_by_strategy(symbol, strategy)
+
+        # ★ 운영 수익분포 로그 찍기 (학습이랑 동일 함수 사용)
+        log_return_distribution_for_run(symbol, strategy, df)
+
         if df is None or len(df) < max(windows) + 1:
             return _soft_abstain(symbol, strategy, reason="df_short", meta_choice="abstain", regime=regime, df=df) if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="df_short", source=source, X_input=None)
         feat = compute_features(symbol, df, strategy)
@@ -1282,7 +1287,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 return adjust_probs_with_diversity(probs, recent, class_counts=None, alpha=0.10, beta=0.10)
             return np.asarray(probs, dtype=float)
 
-        from sklearn.metrics.pairwise import cosine_similarity  # ensure import in scope
         sim_cache = {}
         if final_cls is None:
             best_i, best_score, best_pred = -1, -1.0, None
@@ -1545,10 +1549,21 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[섀도우 로깅 예외] {e}")
 
-        return {"symbol": symbol, "strategy": strategy, "model": "meta", "class": final_cls,
-                "expected_return": float(exp_ret), "class_return_min": float(lo_sel), "class_return_max": float(hi_sel),
-                "class_return_text": class_text, "position": pos_sel, "timestamp": _now_kst().isoformat(),
-                "source": source, "regime": regime, "reason": ("진화형 메타 최종 선택" if meta_choice == "evo_meta_learner" else f"선택 모델: {meta_choice}")}
+        return {
+            "symbol": symbol,
+            "strategy": strategy,
+            "model": "meta",
+            "class": final_cls,
+            "expected_return": float(exp_ret),
+            "class_return_min": float(lo_sel),
+            "class_return_max": float(hi_sel),
+            "class_return_text": class_text,
+            "position": pos_sel,
+            "timestamp": _now_kst().isoformat(),
+            "source": source,
+            "regime": regime,
+            "reason": ("진화형 메타 최종 선택" if meta_choice == "evo_meta_learner" else f"선택 모델: {meta_choice}"),
+        }
 
     finally:
         try:
@@ -1562,8 +1577,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         finally:
             gc.collect()
             _safe_empty_cache()
-
-
 # -------------------- 평가 루프 --------------------
 def evaluate_predictions(get_price_fn):
     from failure_db import check_failure_exists
