@@ -1227,7 +1227,7 @@ def train_one_model(
                 weight_decay=float(os.getenv("TRAIN_WD", "1e-4")),
             )
 
-            scaler = torch.cuda.amp.GradScaler(enabled=USE_AMP)
+            scaler = torch.amp.GradScaler(device=device_type) if USE_AMP else None
 
             best_f1 = -1.0
             best_state = None
@@ -1247,7 +1247,7 @@ def train_one_model(
 
                     optimizer.zero_grad(set_to_none=True)
 
-                    with torch.cuda.amp.autocast(enabled=USE_AMP):
+                    with torch.amp.autocast(device_type=device_type, enabled=USE_AMP):
                         logits = model(xb)
                         loss = criterion(logits, yb)
 
@@ -1269,7 +1269,7 @@ def train_one_model(
                     for xb, yb in val_loader:
                         xb = xb.to(DEVICE, non_blocking=True)
                         yb = yb.to(DEVICE, non_blocking=True)
-                        with torch.cuda.amp.autocast(enabled=USE_AMP):
+                        with torch.amp.autocast(device_type=device_type, enabled=USE_AMP):
                             logits = model(xb)
                             loss = criterion(logits, yb)
                         val_loss += float(loss.item())
