@@ -1207,7 +1207,6 @@ def train_one_model(
             model_type = getattr(model, "model_type", None) or model.__class__.__name__.lower()
 
             # 손실
-            # 손실
             loss_cfg = get_LOSS()
 
             # 만약 딕셔너리(상자) 형태라면 안에 있는 'name'을 꺼내서 사용
