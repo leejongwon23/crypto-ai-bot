@@ -519,7 +519,16 @@ def _normalize_model_type(mt: str) -> str:
         s = "cnn_lstm"
     return s
 
-def get_model(model_type="cnn_lstm", input_size=None, output_size=None, model_path=None, features=None):
+def get_model(model_type="cnn_lstm", input_size=None, output_size=None,
+              model_path=None, features=None, num_classes=None):
+    """
+    모델 객체를 생성하는 함수.
+    train.py 에서 num_classes 로 전달해도 호환되도록 수정됨.
+    """
+    # 🔹 호환 처리: num_classes -> output_size 로 자동 대체
+    if output_size is None and num_classes is not None:
+        output_size = num_classes
+
     # 👇 이 호출에서 오는 output_size가 “이번 학습은 N클래스다”에 해당
     if output_size is None:
         output_size = get_NUM_CLASSES()
