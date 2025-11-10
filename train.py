@@ -197,62 +197,36 @@ PERSIST_DIR = BASE_PERSIST_DIR  # 아래 코드들이 쓰는 이름 그대로 �
 # ================================================
 
 # ==== [ADD] 학습 때 캔들 수익분포 운영로그로 남기는 함수 ====
-def log_return_distribution_for_train(
-    symbol: str, strategy: str, df: pd.DataFrame, max_rows: int = 1000
-):
+def log_return_distribution_for_train(symbol: str, strategy: str, df: pd.DataFrame, max_rows: int = 1000):
     """
-    학습 때 불러온 캔들로 수익률 분포를 계산해서 운영로그에 남긴다.
-    - 캔들 수가 아니라 '실제로 집계한 수익률 개수'를 sample로 찍는다.
-    - 과도한 값은 [-5%, +5%]로 잘라서 0.05~999 같은 구간이 안 나오게 한다.
+    학습 때 사용한 캔들의 수익률 분포를 운영로그와 '똑같은 방식'으로 남긴다.
+    즉, 공통 함수만 쓴다.
     """
     try:
         if df is None or df.empty:
             return
 
-        df_use = df.tail(max_rows).copy()
-
-        import numpy as np
-
-        # 1) 구간을 닫힌 형태로 고정 (-5% ~ +5%, 1% 간격 같은 느낌)
-        edges = np.arange(-0.05, 0.050001, 0.01)  # -0.05, -0.04, ..., 0.04, 0.05
-        # 2) 수익률들을 여기다 모을 리스트
-        rets = []
-
-        for _, row in df_use.iterrows():
-            try:
-                base = float(row["close"])
-                high_ = float(row["high"])
-                low_ = float(row["low"])
-            except Exception:
-                continue
-
-            up_ret = (high_ - base) / (base + 1e-12)
-            dn_ret = (low_ - base) / (base + 1e-12)
-
-            # 3) 비정상적으로 큰 값은 잘라서 넣는다
-            up_ret = max(-0.05, min(0.05, up_ret))
-            dn_ret = max(-0.05, min(0.05, dn_ret))
-
-            rets.append(up_ret)
-            rets.append(dn_ret)
+        # 1) 공통함수로 수익률 전부 뽑기
+        rets = extract_candle_returns(df, max_rows=max_rows)
 
         if not rets:
             return
 
-        rets = np.array(rets, dtype=float)
+        # 2) 공통함수로 히스토그램 만들기
+        hist_info = make_return_histogram(rets, bins=20)
 
-        hist, _ = np.histogram(rets, bins=edges)
-
-        sample_size = int(len(rets))   # ← 진짜로 세어 넣은 개수
-        print(f"[수익분포: {symbol}-{strategy}] sample={sample_size}", flush=True)
-        for i in range(len(hist)):
+        # 3) 콘솔에도 찍어주고
+        print(f"[수익분포: {symbol}-{strategy}] sample={len(rets)}", flush=True)
+        edges = hist_info["bin_edges"]
+        counts = hist_info["bin_counts"]
+        for i, cnt in enumerate(counts):
+            if cnt == 0:
+                continue
             lo = edges[i]
-            hi = edges[i + 1]
-            cnt = int(hist[i])
-            if cnt > 0:
-                print(f"  {lo:.3f}~{hi:.3f} : {cnt}", flush=True)
+            hi = edges[i+1]
+            print(f"  {lo:.4f} ~ {hi:.4f} : {cnt}", flush=True)
 
-        # 운영로그 파일에도 동일하게 남기기
+        # 4) 운영로그(csv)에도 남기기
         log_prediction(
             symbol=symbol,
             strategy=strategy,
@@ -265,9 +239,9 @@ def log_return_distribution_for_train(
             label=-1,
             note=json.dumps(
                 {
-                    "sample_size": sample_size,
-                    "bin_edges": [float(x) for x in edges.tolist()],
-                    "bin_counts": [int(x) for x in hist.tolist()],
+                    "sample_size": len(rets),
+                    "bin_edges": hist_info["bin_edges"],
+                    "bin_counts": hist_info["bin_counts"],
                 },
                 ensure_ascii=False,
             ),
@@ -281,10 +255,7 @@ def log_return_distribution_for_train(
             source="train",
         )
     except Exception as e:
-        try:
-            print(f"[train.return-dist warn] {e}", flush=True)
-        except Exception:
-            pass
+        print(f"[train.return-dist warn] {e}", flush=True)
 
 # ==== [ADD] train 로그 경로/헤더 보장 ====
 DEFAULT_TRAIN_HEADERS = [
