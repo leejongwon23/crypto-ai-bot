@@ -1476,7 +1476,7 @@ def train_one_model(
             # 피처 중요도 옵션
             if IMPORTANCE_ENABLE:
                 try:
-                    fi = compute_feature_importance(model, features_only, window=window, device=DEVICE)
+                    fi = compute_feature_importance(model, features_only,device=DEVICE)
                     save_feature_importance(
                         fi,
                         symbol=symbol,
