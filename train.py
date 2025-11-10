@@ -11,6 +11,12 @@ from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import StratifiedShuffleSplit
 from collections import Counter
+from logger import (
+    log_prediction,
+    ensure_prediction_log_exists,
+    extract_candle_returns,      # ← 방금 만든 거
+    make_return_histogram,       # ← 방금 만든 거
+)
 
 # ---------- 공용 메모리 유틸 ----------
 def _safe_empty_cache():
