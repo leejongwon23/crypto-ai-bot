@@ -843,8 +843,14 @@ def train_one_model(
 ) -> Dict[str, Any]:
     """
     한 심볼-전략-그룹에 대해 실제로 모델을 1개 이상 학습해서 저장하는 함수.
-    (아래는 'model_type' 미정의로 터지던 부분을 포함해서 전체 다시 정리한 버전)
+    (device_type 누락되는 거 고친 버전)
     """
+    # ─── 여기가 문제였음: 함수 안에서 바로 정리 ───
+    HAS_CUDA = torch.cuda.is_available()
+    device_type = "cuda" if HAS_CUDA else "cpu"
+    # 전역 USE_AMP 값이 있더라도 GPU 없으면 끈다
+    use_amp_here = (os.getenv("USE_AMP", "1") == "1") and HAS_CUDA
+
     if max_epochs is None:
         max_epochs = _epochs_for(strategy)
 
@@ -899,7 +905,6 @@ def train_one_model(
         # ===== 3. 라벨 만들기 / 재사용 =====
         bin_info = None
         if isinstance(pre_lbl, tuple) and len(pre_lbl) in (3, 4, 6):
-            # (gains, labels, class_ranges, ...) 형태 그대로 전달된 케이스
             if len(pre_lbl) == 6:
                 gains, labels, class_ranges_used_global, be, bc, bs = pre_lbl
                 bin_info = {
@@ -1035,7 +1040,7 @@ def train_one_model(
         except Exception:
             pass
 
-        # ===== 7. 피처 정제/윈도우 후보 =====
+        # ===== 7. 피처 정제 =====
         drop_cols = [c for c in ("timestamp", "strategy", "symbol") if c in feat.columns]
         feat_num = feat.drop(columns=drop_cols, errors="ignore").select_dtypes(include=[np.number])
         features_only = feat_num.replace([np.inf, -np.inf], np.nan).fillna(0.0)
@@ -1046,7 +1051,7 @@ def train_one_model(
             features_only = features_only.iloc[-cut:, :]
             labels = labels[-cut:]
 
-        # 윈도우 후보
+        # ===== 8. 윈도우 후보 =====
         try:
             top_windows = find_best_windows(
                 symbol,
@@ -1076,7 +1081,7 @@ def train_one_model(
         ] or [20]
         _safe_print(f"[WINDOWS] {top_windows}")
 
-        # ===== 8. 윈도우별 학습 =====
+        # ===== 9. 윈도우별 학습 =====
         for window in top_windows:
             if stop_event is not None and stop_event.is_set():
                 break
@@ -1203,31 +1208,27 @@ def train_one_model(
                 input_size=feat_dim,
             ).to(DEVICE)
 
-            # <<< 여기서 무조건 model_type을 만든다 >>>
             model_type = getattr(model, "model_type", None) or model.__class__.__name__.lower()
 
-            # 손실
             loss_cfg = get_LOSS()
-
-            # 만약 딕셔너리(상자) 형태라면 안에 있는 'name'을 꺼내서 사용
             if isinstance(loss_cfg, dict):
                 loss_name = (loss_cfg.get("name") or "").lower()
             else:
-                # 그냥 글자라면 그대로 소문자로 바꿔서 사용
                 loss_name = (loss_cfg or "").lower()
 
             if loss_name == "focal":
                 criterion = FocalLoss(gamma=FOCAL_GAMMA).to(DEVICE)
             else:
                 criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTH).to(DEVICE)
-            
+
             optimizer = torch.optim.AdamW(
                 model.parameters(),
                 lr=float(os.getenv("TRAIN_LR", "1e-3")),
                 weight_decay=float(os.getenv("TRAIN_WD", "1e-4")),
             )
 
-            scaler = torch.amp.GradScaler(device=device_type) if USE_AMP else None
+            # 여기서도 AMP 켜고 끄기 확정
+            scaler = torch.amp.GradScaler(device=device_type) if use_amp_here else None
 
             best_f1 = -1.0
             best_state = None
@@ -1247,16 +1248,23 @@ def train_one_model(
 
                     optimizer.zero_grad(set_to_none=True)
 
-                    with torch.amp.autocast(device_type=device_type, enabled=USE_AMP):
+                    if use_amp_here:
+                        with torch.amp.autocast(device_type=device_type, enabled=True):
+                            logits = model(xb)
+                            loss = criterion(logits, yb)
+                        scaler.scale(loss).backward()
+                        if GRAD_CLIP > 0:
+                            scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
                         logits = model(xb)
                         loss = criterion(logits, yb)
-
-                    scaler.scale(loss).backward()
-                    if GRAD_CLIP > 0:
-                        scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
-                    scaler.step(optimizer)
-                    scaler.update()
+                        loss.backward()
+                        if GRAD_CLIP > 0:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+                        optimizer.step()
 
                     running_loss += float(loss.item())
 
@@ -1269,7 +1277,11 @@ def train_one_model(
                     for xb, yb in val_loader:
                         xb = xb.to(DEVICE, non_blocking=True)
                         yb = yb.to(DEVICE, non_blocking=True)
-                        with torch.amp.autocast(device_type=device_type, enabled=USE_AMP):
+                        if use_amp_here:
+                            with torch.amp.autocast(device_type=device_type, enabled=True):
+                                logits = model(xb)
+                                loss = criterion(logits, yb)
+                        else:
                             logits = model(xb)
                             loss = criterion(logits, yb)
                         val_loss += float(loss.item())
@@ -1494,7 +1506,6 @@ def train_one_model(
         _safe_print(f"[EXC] train_one_model {symbol}-{strategy}-g{group_id} → {e}\n{traceback.format_exc()}")
         _log_fail(symbol, strategy, str(e))
         return res
-
 
 _ENFORCE_FULL_STRATEGY = False
 _STRICT_HALT_ON_INCOMPLETE = False
