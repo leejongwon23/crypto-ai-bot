@@ -26,6 +26,7 @@ def _safe_empty_cache():
     except Exception:
         pass
 
+
 def _release_memory(*objs):
     for o in objs:
         try:
@@ -35,10 +36,12 @@ def _release_memory(*objs):
     gc.collect()
     _safe_empty_cache()
 
+
 # ---------- 기본 환경/시드 ----------
 def _set_default_thread_env(n: str, v: int):
     if os.getenv(n) is None:
         os.environ[n] = str(v)
+
 
 for _n in (
     "OMP_NUM_THREADS",
@@ -70,6 +73,7 @@ try:
 except:
     pass
 
+
 def set_global_seed(s: int = 20240101):
     os.environ["PYTHONHASHSEED"] = str(s)
     random.seed(s)
@@ -82,6 +86,7 @@ def set_global_seed(s: int = 20240101):
         torch.backends.cudnn.benchmark = False
     except:
         pass
+
 
 set_global_seed(int(os.getenv("GLOBAL_SEED", "20240101")))
 
@@ -223,7 +228,7 @@ def log_return_distribution_for_train(symbol: str, strategy: str, df: pd.DataFra
             if cnt == 0:
                 continue
             lo = edges[i]
-            hi = edges[i+1]
+            hi = edges[i + 1]
             print(f"  {lo:.4f} ~ {hi:.4f} : {cnt}", flush=True)
 
         # 4) 운영로그(csv)에도 남기기
@@ -256,6 +261,7 @@ def log_return_distribution_for_train(symbol: str, strategy: str, df: pd.DataFra
         )
     except Exception as e:
         print(f"[train.return-dist warn] {e}", flush=True)
+
 
 # ==== [ADD] train 로그 경로/헤더 보장 ====
 DEFAULT_TRAIN_HEADERS = [
@@ -311,6 +317,7 @@ except Exception:
     TRAIN_LOG = os.path.join(BASE_PERSIST_DIR, "train_log.csv")
     os.makedirs(os.path.dirname(TRAIN_LOG), exist_ok=True)
 
+
 def _ensure_train_log():
     try:
         if not os.path.exists(TRAIN_LOG):
@@ -318,6 +325,7 @@ def _ensure_train_log():
                 csv.writer(f).writerow(TRAIN_HEADERS)
     except Exception as e:
         print(f"[경고] train_log 초기화 실패: {e}")
+
 
 def _normalize_train_row(row: dict) -> dict:
     r = {k: row.get(k, None) for k in TRAIN_HEADERS}
@@ -331,6 +339,7 @@ def _normalize_train_row(row: dict) -> dict:
     r.setdefault("source_exchange", row.get("source_exchange", "BYBIT"))
     return r
 
+
 def _append_train_log(row: dict):
     try:
         _ensure_train_log()
@@ -341,6 +350,7 @@ def _append_train_log(row: dict):
             w.writerow(_normalize_train_row(row))
     except Exception as e:
         print(f"[경고] train_log 기록 실패: {e}")
+
 
 if not getattr(logger, "_patched_train_log", False):
     _orig_ltr = getattr(logger, "log_training_result", None)
@@ -446,12 +456,15 @@ EARLY_STOP_MIN_DELTA = float(os.getenv("EARLY_STOP_MIN_DELTA", "0.0001"))
 USE_AMP = os.getenv("USE_AMP", "1") == "1"
 TRAIN_CUDA_EMPTY_EVERY_EP = os.getenv("TRAIN_CUDA_EMPTY_EVERY_EP", "1") == "1"
 
+
 def _as_bool_env(name: str, default: bool) -> bool:
     v = os.getenv(name)
     return default if v is None else v.strip().lower() in ("1", "true", "yes", "on")
 
+
 COST_SENSITIVE_ARGMAX = _as_bool_env("COST_SENSITIVE_ARGMAX", True)
 CS_ARG_BETA = float(os.getenv("CS_ARG_BETA", "1.0"))
+
 
 def _epochs_for(strategy: str) -> int:
     if strategy == "단기":
@@ -462,10 +475,12 @@ def _epochs_for(strategy: str) -> int:
         return int(os.getenv("EPOCHS_LONG", "12"))
     return 24
 
+
 EVAL_MIN_F1_SHORT = float(os.getenv("EVAL_MIN_F1_SHORT", "0.10"))
 EVAL_MIN_F1_MID = float(os.getenv("EVAL_MIN_F1_MID", "0.50"))
 EVAL_MIN_F1_LONG = float(os.getenv("EVAL_MIN_F1_LONG", "0.45"))
 _SHORT_RETRY = int(os.getenv("SHORT_STRATEGY_RETRY", "3"))
+
 
 def _min_f1_for(strategy: str) -> float:
     return (
@@ -473,6 +488,7 @@ def _min_f1_for(strategy: str) -> float:
         if strategy == "단기"
         else (EVAL_MIN_F1_MID if strategy == "중기" else EVAL_MIN_F1_LONG)
     )
+
 
 now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
 
@@ -484,6 +500,7 @@ PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC", "180"))
 IMPORTANCE_ENABLE = os.getenv("IMPORTANCE_ENABLE", "1") == "1"
 
 GROUP_TRAIN_LOCK = os.path.join(RUN_DIR, "group_training.lock")
+
 
 def _set_group_active(active: bool, group_idx: int | None = None, symbols: list | None = None):
     try:
@@ -504,6 +521,7 @@ def _set_group_active(active: bool, group_idx: int | None = None, symbols: list 
         except:
             pass
 
+
 def _set_group_train_lock(active: bool, group_idx: int | None = None, symbols: list | None = None):
     try:
         if active:
@@ -520,17 +538,20 @@ def _set_group_train_lock(active: bool, group_idx: int | None = None, symbols: l
         except:
             pass
 
+
 def _is_group_active_file() -> bool:
     try:
         return os.path.exists(GROUP_ACTIVE_PATH)
     except Exception:
         return False
 
+
 def _is_group_lock_file() -> bool:
     try:
         return os.path.exists(GROUP_TRAIN_LOCK)
     except Exception:
         return False
+
 
 def _maybe_insert_failure(payload: dict, feature_vector: Optional[List[Any]] = None):
     try:
@@ -543,14 +564,17 @@ def _maybe_insert_failure(payload: dict, feature_vector: Optional[List[Any]] = N
         except:
             pass
 
+
 def _safe_print(msg):
     try:
         print(msg, flush=True)
     except:
         pass
 
+
 def _stem(p: str) -> str:
     return os.path.splitext(p)[0]
+
 
 def _save_model_and_meta(model: nn.Module, path_pt: str, meta: dict):
     os.makedirs(os.path.dirname(path_pt), exist_ok=True)
@@ -560,6 +584,7 @@ def _save_model_and_meta(model: nn.Module, path_pt: str, meta: dict):
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=None, separators=(",", ":"))
     return weight, meta_path
+
 
 def coverage_split_indices(
     y,
@@ -606,6 +631,7 @@ def coverage_split_indices(
     )
     return train_idx, val_idx
 
+
 def _log_skip(symbol, strategy, reason):
     logger.log_training_result(
         symbol,
@@ -641,6 +667,7 @@ def _log_skip(symbol, strategy, reason):
         },
         feature_vector=[],
     )
+
 
 def _log_fail(symbol, strategy, reason):
     logger.log_training_result(
@@ -678,6 +705,7 @@ def _log_fail(symbol, strategy, reason):
         feature_vector=[],
     )
 
+
 def _has_any_model_for_symbol(symbol: str) -> bool:
     exts = (".ptz", ".safetensors", ".pt")
     try:
@@ -692,6 +720,7 @@ def _has_any_model_for_symbol(symbol: str) -> bool:
     except:
         return False
 
+
 def _has_model_for(symbol: str, strategy: str) -> bool:
     exts = (".ptz", ".safetensors", ".pt")
     try:
@@ -705,6 +734,7 @@ def _has_model_for(symbol: str, strategy: str) -> bool:
         )
     except:
         return False
+
 
 # ---------- 전략 간 피처/라벨 패스다운 (수정본) ----------
 def _build_precomputed(symbol: str) -> tuple[Dict[str, Optional[pd.DataFrame]], Dict[str, Any], Dict[str, Any]]:
@@ -744,6 +774,7 @@ def _build_precomputed(symbol: str) -> tuple[Dict[str, Optional[pd.DataFrame]], 
 
     return dfs, feats, pre_lbl
 
+
 def _find_prev_model_for(symbol: str, prev_strategy: str) -> Optional[str]:
     try:
         candidates = []
@@ -759,6 +790,7 @@ def _find_prev_model_for(symbol: str, prev_strategy: str) -> Optional[str]:
     except Exception:
         return None
 
+
 # === [ADD] 라벨 유효성/재시도 유틸 ===
 def _uniq_nonneg(labels: np.ndarray) -> int:
     try:
@@ -767,11 +799,13 @@ def _uniq_nonneg(labels: np.ndarray) -> int:
     except Exception:
         return 0
 
+
 def _rebuild_labels_once(df: pd.DataFrame, symbol: str, strategy: str):
     try:
         return make_labels(df=df, symbol=symbol, strategy=strategy, group_id=None)
     except Exception:
         return None
+
 
 def _rebuild_samples_with_keepset(
     fv: np.ndarray,
@@ -792,7 +826,7 @@ def _rebuild_samples_with_keepset(
         lab = to_local.get(lab_g, None)
         if lab is None:
             continue
-        X_raw.append(fv[i : i + window])
+        X_raw.append(fv[i: i + window])
         y.append(lab)
     if not X_raw:
         return (
@@ -801,11 +835,13 @@ def _rebuild_samples_with_keepset(
         )
     return np.array(X_raw, dtype=np.float32), np.array(y, dtype=np.int64)
 
+
 def _synthesize_minority_if_needed(
     X_raw: np.ndarray, y: np.ndarray, num_classes: int
 ) -> Tuple[np.ndarray, np.ndarray, bool]:
     # 지금 버전: 합성 안 한다
     return X_raw, y, False
+
 
 def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
     vy = y[val_idx]
@@ -830,6 +866,7 @@ def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
         if len(np.unique(vy)) >= min_classes:
             break
     return train_idx, val_idx, moved
+
 
 def train_one_model(
     symbol,
@@ -1185,11 +1222,13 @@ def train_one_model(
                 torch.from_numpy(X_val).to(torch.float32),
                 torch.from_numpy(y_val).to(torch.long),
             )
+
+            # 여기 들여쓰기 네가 까먹었다고 했던 부분
             train_loader = DataLoader(
                 train_ds,
                 batch_size=32,              # 한 번에 32개씩 처리
                 shuffle=True,               # 학습은 섞기
-                num_workers=0,              # Render 환경은 0이 안전
+                num_workers=0,              # Render/제한 환경은 0이 안전
                 pin_memory=False,
                 persistent_workers=False,
             )
@@ -1202,6 +1241,7 @@ def train_one_model(
                 pin_memory=False,
                 persistent_workers=False,
             )
+
             # ===== 모델/손실/옵티마 =====
             model = get_model(
                 num_classes=len(class_ranges),
@@ -1476,7 +1516,7 @@ def train_one_model(
             # 피처 중요도 옵션
             if IMPORTANCE_ENABLE:
                 try:
-                    fi = compute_feature_importance(model, features_only,device=DEVICE)
+                    fi = compute_feature_importance(model, features_only, device=DEVICE)
                     save_feature_importance(
                         fi,
                         symbol=symbol,
@@ -1507,10 +1547,12 @@ def train_one_model(
         _log_fail(symbol, strategy, str(e))
         return res
 
+
 _ENFORCE_FULL_STRATEGY = False
 _STRICT_HALT_ON_INCOMPLETE = False
 _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = False
 _SYMBOL_RETRY_LIMIT = int(os.getenv("SYMBOL_RETRY_LIMIT", "1"))
+
 
 def _train_full_symbol(
     symbol: str, stop_event: Optional[threading.Event] = None
@@ -1591,6 +1633,7 @@ def _train_full_symbol(
             detail[strategy] = {-1: False}
     return any_saved, detail
 
+
 def train_models(
     symbol_list, stop_event: Optional[threading.Event] = None, ignore_should: bool = False
 ):
@@ -1631,6 +1674,7 @@ def train_models(
             partial_symbols.append(symbol)
     return completed_symbols, partial_symbols
 
+
 def _scan_symbols_from_model_dir() -> List[str]:
     syms = set()
     try:
@@ -1646,6 +1690,7 @@ def _scan_symbols_from_model_dir() -> List[str]:
         pass
     return sorted(syms)
 
+
 def _pick_smoke_symbol(candidates: List[str]) -> Optional[str]:
     cand = [s for s in candidates if _has_any_model_for_symbol(s)]
     if cand:
@@ -1653,6 +1698,7 @@ def _pick_smoke_symbol(candidates: List[str]) -> Optional[str]:
     pool = _scan_symbols_from_model_dir()
     pool = [s for s in pool if _has_any_model_for_symbol(s)]
     return pool[0] if pool else None
+
 
 def _run_smoke_predict(predict_fn, symbol: str):
     ok_any = False
@@ -1664,6 +1710,7 @@ def _run_smoke_predict(predict_fn, symbol: str):
             except Exception as e:
                 _safe_print(f"[SMOKE fail] {symbol}-{strat}: {e}")
     return ok_any
+
 
 def _safe_predict_with_timeout(
     predict_fn,
@@ -1700,6 +1747,7 @@ def _safe_predict_with_timeout(
     if err[0] is not None:
         raise err[0]
     return ok[0]
+
 
 def train_symbol_group_loop(
     sleep_sec: int = 0, stop_event: Optional[threading.Event] = None
@@ -1847,9 +1895,11 @@ def train_symbol_group_loop(
         _safe_print("💓 heartbeat")
         time.sleep(max(1, int(os.getenv("TRAIN_LOOP_IDLE_SEC", "3"))))
 
+
 _TRAIN_LOOP_THREAD: Optional[threading.Thread] = None
 _TRAIN_LOOP_STOP: Optional[threading.Event] = None
 _TRAIN_LOOP_LOCK = threading.Lock()
+
 
 def start_train_loop(force_restart: bool = False, sleep_sec: int = 0):
     global _TRAIN_LOOP_THREAD, _TRAIN_LOOP_STOP
@@ -1873,6 +1923,7 @@ def start_train_loop(force_restart: bool = False, sleep_sec: int = 0):
         _TRAIN_LOOP_THREAD.start()
         _safe_print("✅ train loop started")
         return True
+
 
 def stop_train_loop(timeout: int | float | None = 30):
     global _TRAIN_LOOP_THREAD, _TRAIN_LOOP_STOP
@@ -1900,6 +1951,7 @@ def stop_train_loop(timeout: int | float | None = 30):
         _safe_print("✅ loop stopped (safe state)")
         return True
 
+
 def request_stop() -> bool:
     global _TRAIN_LOOP_STOP
     with _TRAIN_LOOP_LOCK:
@@ -1908,11 +1960,13 @@ def request_stop() -> bool:
         _TRAIN_LOOP_STOP.set()
         return True
 
+
 def is_loop_running() -> bool:
     with _TRAIN_LOOP_LOCK:
         return bool(
             _TRAIN_LOOP_THREAD is not None and _TRAIN_LOOP_THREAD.is_alive()
         )
+
 
 def train_symbol(symbol: str, strategy: str, group_id: int | None = None) -> dict:
     res = train_one_model(symbol=symbol, strategy=strategy, group_id=group_id)
@@ -1936,6 +1990,7 @@ def train_symbol(symbol: str, strategy: str, group_id: int | None = None) -> dic
     except Exception:
         pass
     return res
+
 
 def train_group(group_id: int | None = None) -> dict:
     idx = get_current_group_index() if group_id is None else int(group_id)
@@ -2007,12 +2062,14 @@ def train_group(group_id: int | None = None) -> dict:
 
     return out
 
+
 def train_all() -> dict:
     summary = {"groups": []}
     for gid, group in enumerate(SYMBOL_GROUPS):
         res = train_group(group_id=gid)
         summary["groups"].append(res)
     return summary
+
 
 def continue_from_failure(limit: int = 50) -> dict:
     tried = []
@@ -2033,6 +2090,7 @@ def continue_from_failure(limit: int = 50) -> dict:
         except Exception as e2:
             err = f"{err} | {e2}"
     return {"ok": ok, "tried": tried, "error": err}
+
 
 if __name__ == "__main__":
     try:
