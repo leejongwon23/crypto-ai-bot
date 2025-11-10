@@ -1297,3 +1297,59 @@ def flush_gwanwoo_summary():
         df_out.to_csv(out_path, index=False, encoding="utf-8-sig")
         print(f"[✅ 관우요약] {len(df_out)}행 생성: {out_path}")
     return out_path
+
+# logger.py 안에 추가할 코드
+
+import numpy as np
+
+def extract_candle_returns(df, max_rows: int = 1000):
+    """
+    캔들 df에서 high/low 기준 수익률을 전부 뽑아서 리스트로 돌려준다.
+    여기서는 '안 자른다'가 핵심이다. (±5% 이런 거 없음)
+    """
+    if df is None or df.empty:
+        return []
+
+    df_use = df.tail(max_rows).copy()
+    rets = []
+
+    for _, row in df_use.iterrows():
+        try:
+            base = float(row["close"])
+            high_ = float(row["high"])
+            low_ = float(row["low"])
+        except Exception:
+            continue
+
+        if base <= 0:
+            continue
+
+        up_ret = (high_ - base) / base   # 위로 간 수익률
+        dn_ret = (low_ - base) / base    # 아래로 간 수익률
+
+        rets.append(up_ret)
+        rets.append(dn_ret)
+
+    return rets
+
+
+def make_return_histogram(returns: list[float], bins: int = 20):
+    """
+    수익률 리스트를 받아서 히스토그램(구간, 개수)으로 바꿔준다.
+    여기서도 자르지 않는다.
+    """
+    if not returns:
+        return {
+            "bin_edges": [],
+            "bin_counts": [],
+        }
+
+    arr = np.array(returns, dtype=float)
+
+    # 자동으로 20구간 정도로 자름 (원하면 숫자 바꿔도 됨)
+    counts, edges = np.histogram(arr, bins=bins)
+
+    return {
+        "bin_edges": edges.tolist(),
+        "bin_counts": counts.astype(int).tolist(),
+    }
