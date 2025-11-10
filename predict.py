@@ -3,7 +3,11 @@ import os, sys, json, datetime, pytz, random, time, tempfile, shutil, csv, glob,
 import numpy as np, pandas as pd, torch, torch.nn.functional as F
 import gc
 from sklearn.preprocessing import MinMaxScaler
-
+from logger import (
+    log_prediction,
+    extract_candle_returns,
+    make_return_histogram,
+)
 # =========================================================
 # 🔐 쓰기 가능한 루트 디렉터리
 # - 환경변수 PERSISTENT_DIR 있으면 그걸 쓰고
@@ -1899,6 +1903,47 @@ def _stoploss_risk_guard(symbol: str, strategy: str, final_cls: int,
         # 실패 시엔 가드 패스 (보수적으로 통과)
         return True, f"stoploss_risk_guard_exception:{e}", None, None
 
+def log_return_distribution_for_run(symbol: str, strategy: str, df):
+    """
+    예측 시점의 캔들 df로 수익률 분포를 계산해서 운영로그에 남긴다.
+    학습 때랑 똑같은 공통 함수를 쓴다.
+    """
+    if df is None or df.empty:
+        return
+
+    rets = extract_candle_returns(df, max_rows=1000)
+    if not rets:
+        return
+
+    hist = make_return_histogram(rets, bins=20)
+
+    log_prediction(
+        symbol=symbol,
+        strategy=strategy,
+        direction="운영수익분포",
+        entry_price=0.0,
+        target_price=0.0,
+        model="predictor",
+        model_name="predictor",
+        predicted_class=-1,
+        label=-1,
+        note=json.dumps(
+            {
+                "sample_size": len(rets),
+                "bin_edges": hist["bin_edges"],
+                "bin_counts": hist["bin_counts"],
+            },
+            ensure_ascii=False,
+        ),
+        top_k=[],
+        success=True,
+        reason="run_return_distribution",
+        rate=0.0,
+        expected_return=0.0,
+        position="neutral",
+        return_value=0.0,
+        source="run",
+    )
 
 if __name__ == "__main__":
     res = predict("BTCUSDT", "단기", source="테스트")
