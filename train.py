@@ -1220,7 +1220,6 @@ def train_one_model(
             model = get_model(
                 num_classes=len(class_ranges),
                 input_size=feat_dim,
-                window=window,
             ).to(DEVICE)
 
             # <<< 여기서 무조건 model_type을 만든다 >>>
