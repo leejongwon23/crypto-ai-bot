@@ -1186,22 +1186,22 @@ def train_one_model(
                 torch.from_numpy(y_val).to(torch.long),
             )
             train_loader = DataLoader(
-            train_ds,
-            batch_size=32,              # 🔹한 번에 32개씩 처리
-            shuffle=True,               # 🔹학습은 셔플 켜기
-            num_workers=0,              # 🔹Render 서버 환경은 워커 0이 안전
-            pin_memory=False,           # 🔹GPU 캐싱 안 씀
-            persistent_workers=False,   # 🔹워커 유지 안 함
-        )
+                train_ds,
+                batch_size=32,              # 한 번에 32개씩 처리
+                shuffle=True,               # 학습은 섞기
+                num_workers=0,              # Render 환경은 0이 안전
+                pin_memory=False,
+                persistent_workers=False,
+            )
 
-        val_loader = DataLoader(
-            val_ds,
-            batch_size=32,              # 🔹검증도 32개 단위
-            shuffle=False,              # 🔹검증은 순서 유지
-            num_workers=0,              # 🔹CPU만 사용
-            pin_memory=False,           # 🔹안전 모드
-            persistent_workers=False,   # 🔹워커 유지 안 함
-        )
+            val_loader = DataLoader(
+                val_ds,
+                batch_size=32,
+                shuffle=False,              # 검증은 순서 유지
+                num_workers=0,
+                pin_memory=False,
+                persistent_workers=False,
+            )
             # ===== 모델/손실/옵티마 =====
             model = get_model(
                 num_classes=len(class_ranges),
