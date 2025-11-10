@@ -457,17 +457,9 @@ def _validate_meta_class_ranges(meta, *, num_classes: int, symbol: str, strategy
     return cr
 
 def _class_range_by_meta_or_cfg(cls_id: int, meta, symbol: str, strategy: str):
-    """⚙️ 클래스별 수익률 구간 로딩 + 백분율 자동보정 포함 + 메타 유효성 검증"""
-    cr_valid = _validate_meta_class_ranges(meta, num_classes=NUM_CLASSES, symbol=symbol, strategy=strategy) if isinstance(meta, dict) else None
-    if STRICT_SAME_BOUNDS:
-        if not (cr_valid and 0 <= int(cls_id) < len(cr_valid)):
-            raise RuntimeError("no_class_ranges_in_meta")
-        lo, hi = cr_valid[int(cls_id)]
-        return _sanitize_range(lo, hi)
-    if cr_valid and 0 <= int(cls_id) < len(cr_valid):
-        lo, hi = cr_valid[int(cls_id)]
-    else:
-        lo, hi = get_class_return_range(int(cls_id), symbol, strategy)
+    # meta에 있는 거 보지 말고
+    # 학습이랑 같은 config 값만 쓰기
+    lo, hi = get_class_return_range(int(cls_id), symbol, strategy)
     return _sanitize_range(lo, hi)
 
 def _position_from_range(lo: float, hi: float) -> str:
