@@ -1191,23 +1191,12 @@ def _choose_conservative_prediction(outs, symbol, strategy, allow_long, allow_sh
 # 소프트 가드
 # =========================================================
 def _apply_soft_guard(df, strategy, outs, chosen, final_cls, allow_long, allow_short, min_thr):
-    try:
-        lo_sel, hi_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), chosen.get("symbol", ""), chosen.get("strategy", ""))
-        exp_mid = (float(lo_sel) + float(hi_sel)) / 2.0
-        vol = _recent_volatility(df, strategy)
-        p = float(chosen.get("success_score", 0.0))
-        if p < 0.45:
-            return "abstain", chosen, final_cls, f"soft_abstain(p={p:.2f}, mid={exp_mid:.4f}, vol={vol:.4f})"
-        if p < 0.60:
-            alt_m, alt_c = _choose_conservative_prediction(outs, chosen.get("symbol", ""), chosen.get("strategy", ""), allow_long, allow_short, min_thr)
-            if alt_m is not None:
-                return "conservative", alt_m, int(alt_c), f"soft_conservative(p={p:.2f}, mid={exp_mid:.4f}, vol={vol:.4f})"
-            else:
-                return "abstain", chosen, final_cls, f"soft_abstain_no_alt(p={p:.2f}, mid={exp_mid:.4f}, vol={vol:.4f})"
-        return "ok", chosen, final_cls, f"soft_pass(p={p:.2f}, mid={exp_mid:.4f}, vol={vol:.4f})"
-    except Exception as e:
-        return "ok", chosen, final_cls, f"soft_guard_exception:{e}"
-
+    """
+    🟢 가드 비활성화 버전
+    - 예측이 정상이라는 가정하에 소프트가드는 통과만 시킨다.
+    - log용 메시지만 남긴다.
+    """
+    return "ok", chosen, final_cls, "soft_guard_disabled"
 # =========================================================
 # 메인 predict
 # =========================================================
@@ -1237,6 +1226,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
     df = feat = X = outs = allpreds = None
     lib_vecs = lib_labels = None
     try:
+        # 패턴 라이브러리 로드 (없어도 됨)
         try:
             from evo_meta_dataset import load_pattern_library
             lib_vecs, lib_labels = load_pattern_library(symbol, strategy)
@@ -1244,10 +1234,13 @@ def predict(symbol, strategy, source="일반", model_type=None):
             lib_vecs = None
             lib_labels = None
 
+        # 로그 준비
         try:
             ensure_prediction_log_exists()
         except Exception as _e:
             print(f"[헤더보장 실패] {_e}")
+
+        # 메타 예측기 있으면 임포트
         try:
             from evo_meta_learner import predict_evo_meta
         except Exception:
@@ -1266,10 +1259,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
         _ = get_calibration_version()
         print(f"[predict] start {symbol}-{strategy} regime={regime} source={source}")
 
+        # 1) 윈도우 선택
         windows = find_best_windows(symbol, strategy)
         if not windows:
             return _soft_abstain(symbol, strategy, reason="window_list_none", meta_choice="abstain", regime=regime, df=None) if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="window_list_none", source=source, X_input=None)
 
+        # 2) 캔들/피처 준비
         df = get_kline_by_strategy(symbol, strategy)
         log_return_distribution_for_run(symbol, strategy, df)
 
@@ -1285,28 +1280,34 @@ def predict(symbol, strategy, source="일반", model_type=None):
         if X.shape[0] < max(windows):
             return _soft_abstain(symbol, strategy, reason="insufficient_recent_rows", meta_choice="abstain", regime=regime, df=df) if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="insufficient_recent_rows", source=source, X_input=None)
 
+        # 3) 모델 찾기
         models = get_available_models(symbol, strategy)
         if not models:
             return _soft_abstain(symbol, strategy, reason="no_models", meta_choice="abstain", regime=regime, X_last=X[-1], df=df) if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="no_models", source=source, X_input=X[-1])
 
+        # 최근 분포
         rec_freq = get_recent_class_frequencies(strategy)
         feat_row = torch.tensor(X[-1], dtype=torch.float32)
 
+        # 4) 모델 추론
         outs, allpreds = get_model_predictions(symbol, strategy, models, df, X, windows, rec_freq, regime=regime)
         if not outs:
             return _soft_abstain(symbol, strategy, reason="no_valid_model", meta_choice="abstain", regime=regime, X_last=X[-1], df=df) if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="no_valid_model", source=source, X_input=X[-1])
 
-        # ★ 여기서 시장컨텍스트/최근 성공률 한 번만 읽어놓고 밑에서 모든 모델에 공통으로 반영
+        # 시장 컨텍스트 / 성공률
         market_ctx = _load_market_context(symbol, strategy)
         recent_succ_w = _get_recent_success_weight(symbol, strategy)
 
+        # 방향 힌트
         hint = _position_hint_from_market(df)
         allow_long, allow_short = bool(hint["allow_long"]), bool(hint["allow_short"])
+
         final_cls = None
         meta_choice = "best_single"
         chosen = None
         used_minret = False
 
+        # (선택) 진화형 메타
         if glob.glob(os.path.join(MODEL_DIR, "evo_meta_learner*")):
             try:
                 from evo_meta_learner import predict_evo_meta
@@ -1324,6 +1325,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 return adjust_probs_with_diversity(probs, recent, class_counts=None, alpha=0.10, beta=0.10)
             return np.asarray(probs, dtype=float)
 
+        # 5) 여러 모델 중 최종 선택
         sim_cache = {}
         if final_cls is None:
             best_i, best_score, best_pred = -1, -1.0, None
@@ -1333,8 +1335,12 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 adj = _maybe_adjust(m["calib_probs"], rec_freq)
                 num_classes = len(adj)
 
+                # 유사도 기반 보조확률
                 if num_classes not in sim_cache:
-                    sim_probs, info = _compute_similarity_class_probs(current_vec, lib_vecs, lib_labels, num_classes=num_classes, top_k=200)
+                    sim_probs, info = _compute_similarity_class_probs(
+                        current_vec, lib_vecs, lib_labels,
+                        num_classes=num_classes, top_k=200
+                    )
                     sim_cache[num_classes] = (sim_probs, info)
                 else:
                     sim_probs, info = sim_cache[num_classes]
@@ -1349,6 +1355,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 else:
                     hybrid = adj
 
+                # 1% 미만 필터
                 mask = np.zeros_like(hybrid, dtype=float)
                 for ci in range(num_classes):
                     try:
@@ -1368,7 +1375,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     pred = int(np.argmax(hybrid))
                     p = float(hybrid[pred])
 
-                # ★ 여기서 성공률/시장위험 반영
+                # 시장위험 / 최근성공률 보정
                 risk_penalty = 1.0 - min(0.3, float(market_ctx.get("risk", 0.0)))
                 p = p * (0.7 + 0.3 * recent_succ_w) * risk_penalty
 
@@ -1392,6 +1399,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     best_i, best_score, best_pred = i, p, pred
                     used_minret = fused
 
+            # 근접하면 살짝 탐색
             if len(scores) >= 2:
                 ss = sorted(scores, key=lambda x: x[1], reverse=True)
                 top1, top2 = ss[0], ss[1]
@@ -1417,6 +1425,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
         chosen = outs[best_i]
         if meta_choice != "best_single_explore":
             meta_choice = os.path.basename(chosen["model_path"])
+
+        # 탐색상태 기록
         try:
             st = _load_json(EXP_STATE, {})
             key = f"{symbol}|{strategy}"
@@ -1430,6 +1440,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception:
             pass
 
+        # 1% 미만 필터 다시 한 번
         try:
             cmin_sel, cmax_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
             if not _meets_minret_with_hint(cmin_sel, cmax_sel, allow_long, allow_short, MIN_RET_THRESHOLD):
@@ -1444,7 +1455,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         if not _meets_minret_with_hint(lo, hi, allow_long, allow_short, MIN_RET_THRESHOLD):
                             continue
                         sc = float(base_probs[ci])
-                        # 여기도 성공률 가중 반영
                         sc = sc * (0.7 + 0.3 * recent_succ_w)
                         if sc > best_sc:
                             best_sc, best_m, best_cls = sc, m, int(ci)
@@ -1455,6 +1465,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[임계 가드 예외] {e}")
 
+        # stoploss risk guard는 그대로 둔다
         try:
             ok_sl, why_sl, alt_m, alt_c = _stoploss_risk_guard(
                 symbol, strategy, final_cls, outs, allow_long, allow_short, MIN_RET_THRESHOLD
@@ -1473,6 +1484,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[StopLossRiskGuard 예외] {e}")
 
+        # exit guard도 그대로 둔다
         try:
             lo_sel, hi_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
             exp_ret = (float(lo_sel) + float(hi_sel)) / 2.0
@@ -1484,62 +1496,129 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         chosen, final_cls = alt_m, int(alt_c)
                         meta_choice = f"force_publish_exit_guard({why})"
                     else:
-                        return _soft_abstain(symbol, strategy, reason=why, meta_choice=str(meta_choice), regime=regime, X_last=X[-1], group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None), df=df, source="보류")
+                        return _soft_abstain(
+                            symbol, strategy, reason=why, meta_choice=str(meta_choice),
+                            regime=regime, X_last=X[-1],
+                            group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None),
+                            df=df, source="보류"
+                        )
                 else:
-                    return _soft_abstain(symbol, strategy, reason=why, meta_choice=str(meta_choice), regime=regime, X_last=X[-1], group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None), df=df, source="보류")
+                    return _soft_abstain(
+                        symbol, strategy, reason=why, meta_choice=str(meta_choice),
+                        regime=regime, X_last=X[-1],
+                        group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None),
+                        df=df, source="보류"
+                    )
         except Exception as e:
             print(f"[출구 가드 예외] {e}")
 
+        # 🔕 여기 리얼리티 가드만 잠깐 꺼둔다
         try:
             lo_sel, hi_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
             exp_ret = (float(lo_sel) + float(hi_sel)) / 2.0
-            if RG_ENABLE:
-                ok, why = _reality_guard_check(df, strategy, hint, lo_sel, hi_sel, exp_ret)
-                if not ok:
-                    action, new_chosen, new_cls, tag = _apply_soft_guard(df, strategy, outs, chosen, final_cls, allow_long, allow_short, MIN_RET_THRESHOLD)
-                    if action == "abstain":
-                        return _soft_abstain(symbol, strategy, reason=f"{why}|{tag}", meta_choice=str(meta_choice), regime=regime, X_last=X[-1], group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None), df=df, source="보류")
-                    if action == "conservative":
-                        chosen, final_cls = new_chosen, int(new_cls)
-                        meta_choice = f"soft_guard_conservative({why})"
-                    else:
-                        meta_choice = f"{meta_choice}|soft_guard_ok"
+
+            # if RG_ENABLE:
+            #     ok, why = _reality_guard_check(df, strategy, hint, lo_sel, hi_sel, exp_ret)
+            #     if not ok:
+            #         action, new_chosen, new_cls, tag = _apply_soft_guard(
+            #             df, strategy, outs, chosen, final_cls,
+            #             allow_long, allow_short, MIN_RET_THRESHOLD
+            #         )
+            #         if action == "abstain":
+            #             return _soft_abstain(
+            #                 symbol, strategy,
+            #                 reason=f"{why}|{tag}",
+            #                 meta_choice=str(meta_choice),
+            #                 regime=regime,
+            #                 X_last=X[-1],
+            #                 group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None),
+            #                 df=df,
+            #                 source="보류"
+            #             )
+            #         if action == "conservative":
+            #             chosen, final_cls = new_chosen, int(new_cls)
+            #             meta_choice = f"soft_guard_conservative({why})"
+            #         else:
+            #             meta_choice = f"{meta_choice}|soft_guard_ok"
         except Exception as e:
             print(f"[RealityGuard 예외] {e}")
 
+        # 최종 로그/리턴
         lo_sel, hi_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
         exp_ret = (float(lo_sel) + float(hi_sel)) / 2.0
         pos_sel = _position_from_range(lo_sel, hi_sel)
         class_text = f"{float(lo_sel)*100:.2f}% ~ {float(hi_sel)*100:.2f}%"
         current = float(df.iloc[-1]["close"])
         entry = current
+
         def _topk(p, k=3): return [int(i) for i in np.argsort(p)[::-1][:k]]
-        chosen_probs_for_topk = (chosen.get("hybrid_probs") if isinstance(chosen, dict) and "hybrid_probs" in chosen else (chosen or outs[0])["calib_probs"])
+
+        chosen_probs_for_topk = (
+            chosen.get("hybrid_probs")
+            if isinstance(chosen, dict) and "hybrid_probs" in chosen
+            else (chosen or outs[0])["calib_probs"]
+        )
         topk = _topk(chosen_probs_for_topk) if (chosen or outs) else []
         raw_pred = float(np.nan_to_num((chosen or outs[0])["raw_probs"][final_cls], nan=0.0, posinf=0.0, neginf=0.0)) if (chosen or outs) else None
         calib_pred = float(np.nan_to_num((chosen or outs[0])["calib_probs"][final_cls], nan=0.0, posinf=0.0, neginf=0.0)) if (chosen or outs) else None
 
-        note = {"regime": regime, "meta_choice": meta_choice, "raw_prob_pred": raw_pred, "calib_prob_pred": calib_pred, "calib_ver": get_calibration_version(),
-                "min_return_threshold": float(MIN_RET_THRESHOLD), "used_minret_filter": bool(used_minret),
-                "explore_used": ("best_single_explore" in str(meta_choice)), "class_range_lo": float(lo_sel), "class_range_hi": float(hi_sel),
-                "expected_return_mid": float(exp_ret), "position": pos_sel, "hint_allow_long": allow_long, "hint_allow_short": allow_short,
-                "hint_ma_fast": hint.get("ma_fast"), "hint_ma_slow": hint.get("ma_slow"), "hint_slope": hint.get("slope"),
-                "reality_guard": {"enabled": bool(RG_ENABLE), "vol_mult": float(RG_VOL_MULT), "method": RG_VOL_METHOD},
-                "soft_guard": ("applied" if "soft_guard" in str(meta_choice) else "none"),
-                "market_ctx": market_ctx,
-                "recent_success_weight": recent_succ_w
+        note = {
+            "regime": regime,
+            "meta_choice": meta_choice,
+            "raw_prob_pred": raw_pred,
+            "calib_prob_pred": calib_pred,
+            "calib_ver": get_calibration_version(),
+            "min_return_threshold": float(MIN_RET_THRESHOLD),
+            "used_minret_filter": bool(used_minret),
+            "explore_used": ("best_single_explore" in str(meta_choice)),
+            "class_range_lo": float(lo_sel),
+            "class_range_hi": float(hi_sel),
+            "expected_return_mid": float(exp_ret),
+            "position": pos_sel,
+            "hint_allow_long": allow_long,
+            "hint_allow_short": allow_short,
+            "hint_ma_fast": hint.get("ma_fast"),
+            "hint_ma_slow": hint.get("ma_slow"),
+            "hint_slope": hint.get("slope"),
+            "reality_guard": {"enabled": bool(RG_ENABLE), "vol_mult": float(RG_VOL_MULT), "method": RG_VOL_METHOD},
+            "soft_guard": "disabled_reality_guard",
+            "market_ctx": market_ctx,
+            "recent_success_weight": recent_succ_w
         }
 
         ensure_prediction_log_exists()
-        log_prediction(symbol=symbol, strategy=strategy, direction="예측", entry_price=entry, target_price=entry * (1 + exp_ret), model="meta",
-                       model_name=("evo_meta_learner" if meta_choice == "evo_meta_learner" else str(meta_choice)),
-                       predicted_class=final_cls, label=final_cls, note=json.dumps(note, ensure_ascii=False), top_k=topk, success=False, reason="predicted",
-                       rate=float(exp_ret), expected_return=float(exp_ret), position=pos_sel, return_value=0.0, source=("진화형" if meta_choice == "evo_meta_learner" else "기본"),
-                       group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None),
-                       feature_vector=torch.tensor(X[-1], dtype=torch.float32).numpy(), regime=regime, meta_choice=meta_choice,
-                       raw_prob=raw_pred, calib_prob=calib_pred, calib_ver=get_calibration_version(),
-                       class_return_min=float(lo_sel), class_return_max=float(hi_sel), class_return_text=class_text)
+        log_prediction(
+            symbol=symbol,
+            strategy=strategy,
+            direction="예측",
+            entry_price=entry,
+            target_price=entry * (1 + exp_ret),
+            model="meta",
+            model_name=("evo_meta_learner" if meta_choice == "evo_meta_learner" else str(meta_choice)),
+            predicted_class=final_cls,
+            label=final_cls,
+            note=json.dumps(note, ensure_ascii=False),
+            top_k=topk,
+            success=False,
+            reason="predicted",
+            rate=float(exp_ret),
+            expected_return=float(exp_ret),
+            position=pos_sel,
+            return_value=0.0,
+            source=("진화형" if meta_choice == "evo_meta_learner" else "기본"),
+            group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None),
+            feature_vector=torch.tensor(X[-1], dtype=torch.float32).numpy(),
+            regime=regime,
+            meta_choice=meta_choice,
+            raw_prob=raw_pred,
+            calib_prob=calib_pred,
+            calib_ver=get_calibration_version(),
+            class_return_min=float(lo_sel),
+            class_return_max=float(hi_sel),
+            class_return_text=class_text
+        )
 
+        # 섀도우 로깅 그대로
         try:
             for m in outs:
                 if chosen and m.get("model_path") == chosen.get("model_path"):
@@ -1571,18 +1650,38 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 class_text_i = f"{float(lo_i)*100:.2f}% ~ {float(hi_i)*100:.2f}%"
                 raw_i = float(np.nan_to_num(m["raw_probs"][pred_i], nan=0.0, posinf=0.0, neginf=0.0))
                 calib_i = float(np.nan_to_num(m["calib_probs"][pred_i], nan=0.0, posinf=0.0, neginf=0.0))
-                note_s = {"regime": regime, "shadow": True, "model_path": os.path.basename(m.get("model_path", "")),
-                          "model_type": _norm_model_type(m.get("model_type", "")), "val_f1": (None if m.get("val_f1") is None else float(m.get("val_f1"))),
-                          "calib_ver": get_calibration_version(), "min_return_threshold": float(MIN_RET_THRESHOLD),
-                          "class_range_lo": float(lo_i), "class_range_hi": float(hi_i), "expected_return_mid": float(exp_i),
-                          "position": pos_i, "hint_allow_long": allow_long, "hint_allow_short": allow_short}
-                log_prediction(symbol=symbol, strategy=strategy, direction="예측(섀도우)", entry_price=entry, target_price=entry * (1 + exp_i),
-                               model=_norm_model_type(m.get("model_type", "")), model_name=os.path.basename(m.get("model_path", "")),
-                               predicted_class=pred_i, label=pred_i, note=json.dumps(note_s, ensure_ascii=False), top_k=top_i, success=False, reason="shadow",
-                               rate=float(exp_i), expected_return=float(exp_i), position=pos_i, return_value=0.0, source="섀도우", group_id=m.get("group_id", 0),
-                               feature_vector=torch.tensor(X[-1], dtype=torch.float32).numpy(), regime=regime, meta_choice="shadow",
-                               raw_prob=raw_i, calib_prob=calib_i, calib_ver=get_calibration_version(),
-                               class_return_min=float(lo_i), class_return_max=float(hi_i), class_return_text=class_text_i)
+                note_s = {
+                    "regime": regime,
+                    "shadow": True,
+                    "model_path": os.path.basename(m.get("model_path", "")),
+                    "model_type": _norm_model_type(m.get("model_type", "")),
+                    "val_f1": (None if m.get("val_f1") is None else float(m.get("val_f1"))),
+                    "calib_ver": get_calibration_version(),
+                    "min_return_threshold": float(MIN_RET_THRESHOLD),
+                    "class_range_lo": float(lo_i),
+                    "class_range_hi": float(hi_i),
+                    "expected_return_mid": float(exp_i),
+                    "position": pos_i,
+                    "hint_allow_long": allow_long,
+                    "hint_allow_short": allow_short
+                }
+                log_prediction(
+                    symbol=symbol, strategy=strategy, direction="예측(섀도우)",
+                    entry_price=entry, target_price=entry * (1 + exp_i),
+                    model=_norm_model_type(m.get("model_type", "")),
+                    model_name=os.path.basename(m.get("model_path", "")),
+                    predicted_class=pred_i, label=pred_i,
+                    note=json.dumps(note_s, ensure_ascii=False),
+                    top_k=top_i, success=False, reason="shadow",
+                    rate=float(exp_i), expected_return=float(exp_i),
+                    position=pos_i, return_value=0.0, source="섀도우",
+                    group_id=m.get("group_id", 0),
+                    feature_vector=torch.tensor(X[-1], dtype=torch.float32).numpy(),
+                    regime=regime, meta_choice="shadow",
+                    raw_prob=raw_i, calib_prob=calib_i, calib_ver=get_calibration_version(),
+                    class_return_min=float(lo_i), class_return_max=float(hi_i),
+                    class_return_text=class_text_i
+                )
         except Exception as e:
             print(f"[섀도우 로깅 예외] {e}")
 
@@ -1614,7 +1713,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         finally:
             gc.collect()
             _safe_empty_cache()
-
 # =========================================================
 # 평가 루프 (네 원본 그대로)
 # =========================================================
