@@ -1,15 +1,19 @@
-# === failure_db.py (v2025-11-06, import-safe, 경로 완전 지연 생성) ==================
-# 실패 레코드 표준화 + CSV/SQLite 동시 기록 + 중복/폭주 방지 + 가벼운 분류태깅
+# === failure_db.py (v2025-11-11, meta-extended, import-safe) ==================
+# 실패 레코드 표준화 + CSV/SQLite 동시 기록 + 중복/폭주 방지 + 메타/상태 스냅샷 확장
 #
-# 📌 이번 수정 포인트
-# 1) 모듈 import 시점에는 디렉터리/파일을 만들지 않는다 (mkdir, 파일쓰기 전부 지연)
-# 2) 실제로 기록(append)하거나 DB를 처음 사용할 때만 디렉터리를 만든다
-# 3) logger.py가 import 시점에 ensure_failure_db()를 불러도 CSV는 안 만들어진다
-# 4) 쓰기 불가면 콘솔로만 남기고 진행(앱이 안 죽게)
+# 변경 요약
+# 1) predict.py / meta_learning.py 가 내려주는 메타 정보(meta_choice, note JSON, picked_model,
+#    realtime_state 등)를 안 잃어버리고 CSV/DB에 보관하도록 필드 3개 추가:
+#       - state_snapshot
+#       - meta_detail
+#       - picked_model
+#    (CSV 끝에 추가했으므로 기존 로더는 앞부분만 읽어도 됨)
+# 2) SQLite 테이블도 위 필드를 받을 수 있게 확장. import 시점에는 여전히 파일을 만들지 않음.
+# 3) 기록 불가 시 콘솔 출력 후 진행(앱 크래시 방지) 기조는 유지.
 # ============================================================================
 
 from __future__ import annotations
-import sitecustomize
+import sitecustomize  # noqa: F401
 import os, csv, json, math, hashlib, time, threading, datetime, sqlite3
 from typing import Any, Dict, Optional, Iterable, Tuple, List
 
@@ -22,8 +26,7 @@ except Exception:
     pytz = None
 
 # ------------------------------------------------------------
-# 경로 선택 유틸 (가장 먼저 쓰기 되는 곳을 고른다)
-#   ⚠️ 여기서는 실제로 mkdir 하지 않는다. "후보 문자열"만 정한다.
+# 경로 유틸 (지연생성)
 # ------------------------------------------------------------
 def _pick_writable_base() -> str:
     candidates = [
@@ -39,7 +42,6 @@ def _pick_writable_base() -> str:
             return c
     return "/tmp/appdata"
 
-# import 시점에는 "경로 문자열"만 갖고 있는다
 _BASE_DIR_CAND = _pick_writable_base()
 
 def _get_dir() -> str:
@@ -55,13 +57,13 @@ def _ensure_dir(path: str):
     except Exception:
         return False
 
-# 실제로 쓸 파일 경로들 (문자열만 정의, 지금은 안 만든다)
 DIR       = _get_dir()
 LOG_DIR   = _get_log_dir()
-WRONG_CSV = os.path.join(DIR, "wrong_predictions.csv")      # 로더가 읽는 표준 경로
-DB_PATH   = os.path.join(LOG_DIR, "failure_records.db")     # 요약/조회용 SQLite
+WRONG_CSV = os.path.join(DIR, "wrong_predictions.csv")
+DB_PATH   = os.path.join(LOG_DIR, "failure_records.db")
 ALERT_LOG = os.path.join(LOG_DIR, "alerts.log")
 
+# 기존 표준 헤더 + 메타/상태 확장 3개
 WRONG_HEADERS = [
     "timestamp","symbol","strategy","predicted_class","label",
     "model","group_id","entry_price","target_price","return_value",
@@ -69,9 +71,13 @@ WRONG_HEADERS = [
     "raw_prob","calib_prob","calib_ver",
     "feature_hash","feature_vector","source","source_exchange",
     "failure_level","train_weight",
+    # --- v2025-11-11 확장 ---
+    "state_snapshot",   # 실시간 지표/시장상황 스냅샷(JSON str)
+    "meta_detail",      # meta_predict 가 내려준 detail/note 전부
+    "picked_model",     # 어떤 베이스 모델을 최종으로 골랐는지
 ]
 
-# 샘플링/유사도/노이즈 파라미터(환경변수 지원)
+# 샘플링/유사도 파라미터
 FAIL_WIN_MINUTES = int(os.getenv("FAIL_WIN_MINUTES", "360"))
 FAIL_CAP_SHORT   = int(os.getenv("FAIL_CAP_SHORT", "40"))
 FAIL_CAP_MID     = int(os.getenv("FAIL_CAP_MID", "20"))
@@ -82,7 +88,6 @@ FAIL_SIM_RECUR   = float(os.getenv("FAIL_SIM_RECUR", "0.92"))
 FAIL_SIM_EVO     = float(os.getenv("FAIL_SIM_EVO", "0.75"))
 FAIL_NOISE_MIN_RET = float(os.getenv("FAIL_NOISE_MIN_RET", "0.001"))
 
-# 학습가중치(전략별/유형별 기본값)
 BASE_WEIGHT = {
     "단기": {"recur": 0.8, "evo": 1.0, "noise": 0.0},
     "중기": {"recur": 0.6, "evo": 1.0, "noise": 0.0},
@@ -163,7 +168,7 @@ def _candidate_hash(record: Dict[str, Any]) -> str:
     return "none"
 
 # ------------------------------------------------------------
-# 파일/DB 보장 (여기서부터 실제로 만든다)
+# DB 보장 영역 (지연)
 # ------------------------------------------------------------
 _db_lock = threading.RLock()
 _db = None
@@ -197,6 +202,28 @@ def _get_db():
             _db = _connect_db()
         return _db
 
+def _ensure_extra_columns(cur):
+    """
+    이미 테이블이 있을 수도 있어서, 새 컬럼은 가능한 한 부드럽게 붙인다.
+    실패해도 앱이 죽지 않게 예외 무시.
+    """
+    try:
+        cur.execute("ALTER TABLE failures ADD COLUMN meta_choice TEXT;")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE failures ADD COLUMN note TEXT;")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE failures ADD COLUMN state_snapshot TEXT;")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE failures ADD COLUMN picked_model TEXT;")
+    except Exception:
+        pass
+
 def ensure_failure_db():
     """
     CSV는 만들지 않고, SQLite 스키마만 보장한다.
@@ -225,6 +252,7 @@ def ensure_failure_db():
                     UNIQUE(ts, symbol, strategy, predicted_class, feature_hash)
                 );
             """)
+            _ensure_extra_columns(c)
             c.execute("CREATE INDEX IF NOT EXISTS idx_failures_ss ON failures(symbol,strategy);")
             conn.commit()
             c.close()
@@ -299,7 +327,6 @@ def check_failure_exists(row: Dict[str, Any]) -> bool:
         with _db_lock:
             conn = _get_db()
             c = conn.cursor()
-            # 파라미터를 빈문자/None으로 꼬이게 넣지 말고 분기해서 만든다
             if pcls == "" and (fh is None or fh == "none"):
                 c.execute("""
                     SELECT 1 FROM failures
@@ -339,28 +366,22 @@ def check_failure_exists(row: Dict[str, Any]) -> bool:
                 df = pd.read_csv(WRONG_CSV, encoding="utf-8-sig", usecols=lambda c: c in use)
                 if len(df) > tail_rows:
                     df = df.tail(tail_rows)
-
                 df = df[(df["symbol"] == sym) & (df["strategy"] == strat)].copy()
                 if df.empty:
                     return False
-
                 t = pd.to_datetime(df["timestamp"], errors="coerce")
                 t = t.dt.tz_localize("Asia/Seoul", nonexistent="NaT", ambiguous="NaT")
                 m = (t >= pd.to_datetime(ts_min)) & (t <= pd.to_datetime(ts_max))
                 df = df[m]
-
                 if df.empty:
                     return False
-
                 if fh != "none" and "feature_hash" in df.columns:
                     if (df["feature_hash"].astype(str) == fh).any():
                         return True
-
                 if pcls != "" and "predicted_class" in df.columns:
                     pc = pd.to_numeric(df["predicted_class"], errors="coerce")
                     if (pc == int(pcls)).any():
                         return True
-
                 return False
             except Exception:
                 return False
@@ -411,25 +432,21 @@ def _similarity_level(symbol: str, strategy: str, feature_vec: np.ndarray) -> Tu
         recent = _read_recent_failures_for(symbol, strategy, limit=2000)
         if recent.empty or feature_vec.size == 0:
             return ("evo", 0.0)
-
         feats: List[np.ndarray] = []
         for v in recent["feature_vector"].tolist():
             feats.append(_parse_feature_vector(v))
         feats = [f for f in feats if f.size == feature_vec.size and f.size > 0]
         if not feats:
             return ("evo", 0.0)
-
         sims: List[float] = []
         step = max(1, len(feats) // max(1, FAIL_SIM_TOPK))
         for i in range(0, len(feats), step):
             sims.append(_cosine_sim(feature_vec, feats[i]))
             if len(sims) >= FAIL_SIM_TOPK:
                 break
-
         if not sims:
             return ("evo", 0.0)
         best = max(sims)
-
         if best >= FAIL_SIM_RECUR:
             return ("recur", best)
         if best >= FAIL_SIM_EVO:
@@ -484,7 +501,7 @@ def _is_noise_by_return(rv: Any) -> bool:
         return False
 
 # ------------------------------------------------------------
-# CSV append (락/재시도)
+# CSV append
 # ------------------------------------------------------------
 def _append_wrong_csv_row(row: Dict[str, Any], max_retries: int = 5, sleep_sec: float = 0.05):
     _ensure_wrong_csv()
@@ -525,8 +542,7 @@ def insert_failure_record(record: Dict[str, Any],
                           context: Optional[str] = None) -> bool:
     """
     예측 실패/평가 실패 등 한 건을 기록.
-    import 시점이 아니라 실제 호출 시에만 경로를 만지므로
-    읽기전용 루트에서도 앱이 안 죽는다.
+    meta_predict / predict 가 내려준 JSON note / detail / picked_model 도 최대한 보존한다.
     """
     try:
         ensure_failure_db()
@@ -544,6 +560,17 @@ def insert_failure_record(record: Dict[str, Any],
             except Exception: fv = []
         fh = feature_hash or rec.get("feature_hash") or (_sha1_of_list(fv) if isinstance(fv,(list,tuple,np.ndarray)) else "none")
 
+        # 메타/상태 필드 모으기
+        state_snapshot = (
+            rec.get("state_snapshot") or
+            rec.get("realtime_state") or
+            rec.get("indicators") or
+            ""
+        )
+        meta_detail = rec.get("meta_detail") or rec.get("meta_note") or rec.get("detail") or rec.get("meta_json") or ""
+        picked_model = rec.get("picked_model") or ""
+
+        # CSV row 구성
         row = {
             "timestamp": ts_iso, "symbol": sym, "strategy": strat,
             "predicted_class": pcls if pcls != "" else -1,
@@ -565,6 +592,9 @@ def insert_failure_record(record: Dict[str, Any],
             "feature_vector": json.dumps(fv, ensure_ascii=False) if isinstance(fv,(list,tuple,np.ndarray)) else (fv or ""),
             "source": rec.get("source",""),
             "source_exchange": rec.get("source_exchange","BYBIT"),
+            "state_snapshot": json.dumps(state_snapshot, ensure_ascii=False) if isinstance(state_snapshot, (dict, list)) else (state_snapshot or ""),
+            "meta_detail": json.dumps(meta_detail, ensure_ascii=False) if isinstance(meta_detail, (dict, list)) else (meta_detail or ""),
+            "picked_model": json.dumps(picked_model, ensure_ascii=False) if isinstance(picked_model, (dict, list)) else (picked_model or ""),
         }
 
         auto_reason = _auto_failure_reason({**rec, **row})
@@ -611,8 +641,10 @@ def insert_failure_record(record: Dict[str, Any],
                         c = conn.cursor()
                         c.execute("""
                             INSERT OR IGNORE INTO failures
-                            (ts,symbol,strategy,predicted_class,label,model,group_id,reason,context,regime,raw_prob,calib_prob,feature_hash)
-                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            (ts,symbol,strategy,predicted_class,label,model,group_id,
+                             reason,context,regime,raw_prob,calib_prob,feature_hash,
+                             meta_choice,note,state_snapshot,picked_model)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
                         """, (row["timestamp"], row["symbol"], row["strategy"],
                               None if row["predicted_class"]=="" else row["predicted_class"],
                               None if row["label"]=="" else row["label"],
@@ -620,7 +652,11 @@ def insert_failure_record(record: Dict[str, Any],
                               row["reason"], row["context"], row["regime"],
                               None if row["raw_prob"]=="" else row["raw_prob"],
                               None if row["calib_prob"]=="" else row["calib_prob"],
-                              row["feature_hash"]))
+                              row["feature_hash"],
+                              row["meta_choice"],
+                              row["note"],
+                              row["state_snapshot"],
+                              row["picked_model"]))
                         conn.commit(); c.close()
                     break
                 except sqlite3.OperationalError as oe:
@@ -639,7 +675,7 @@ def insert_failure_record(record: Dict[str, Any],
         return False
 
 # ------------------------------------------------------------
-# 모듈 테스트
+# 테스트
 # ------------------------------------------------------------
 if __name__ == "__main__":
     ensure_failure_db()
@@ -658,13 +694,16 @@ if __name__ == "__main__":
         "context": "evaluation",
         "note": "",
         "regime": "unknown",
-        "meta_choice": "test",
+        "meta_choice": "meta:rule_fallback",
         "raw_prob": 0.21,
         "calib_prob": 0.19,
         "calib_ver": "v1",
         "feature_vector": [0.1, 0.2, 0.3, 0.4],
-        "source": "평가",
+        "source": "evaluation",
         "source_exchange": "BYBIT",
+        "state_snapshot": {"rsi": 46, "vol": 0.003, "btc_dom": 54.1},
+        "meta_detail": {"entropy": 0.41, "picked": 2},
+        "picked_model": {"model_path": "/models/lstm.bin", "group_id": 2},
     }
     ok = insert_failure_record(demo)
     print("inserted:", ok)
