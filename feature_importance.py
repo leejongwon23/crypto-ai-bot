@@ -7,7 +7,9 @@ import torch
 import numpy as np
 import pandas as pd
 
-PERSIST_DIR = "/persistent"
+# 여기만 바꿨어 👇
+PERSIST_DIR = "/opt/render/project/src/persistent"
+
 DEFAULT_IMPORTANCE_DIR = os.path.join(PERSIST_DIR, "importances")
 FALLBACK_IMPORTANCE_DIR = os.environ.get("TMPDIR", "/tmp") + "/importances"
 DISABLE_IMPORTANCE_SAVE = os.environ.get("DISABLE_IMPORTANCE_SAVE", "0") == "1"
@@ -17,6 +19,7 @@ _cached_disabled = False
 
 
 def _ensure_dir(path: str) -> str | None:
+    """디렉토리 생성. ENOSPC면 None 반환. 그 외 오류는 조용히 포기."""
     try:
         os.makedirs(path, exist_ok=True)
         return path
@@ -27,24 +30,27 @@ def _ensure_dir(path: str) -> str | None:
 
 
 def _get_importance_dir() -> str | None:
-    """우선순위: /persistent → /tmp → 없으면 비활성화"""
+    """우선순위: /opt/render/project/src/persistent → /tmp → 없으면 비활성화"""
     global _cached_dir, _cached_disabled
     if _cached_disabled or DISABLE_IMPORTANCE_SAVE:
         return None
     if _cached_dir:
         return _cached_dir
 
+    # 1) persistent 밑에
     d1 = _ensure_dir(DEFAULT_IMPORTANCE_DIR)
     if d1:
         _cached_dir = d1
         return d1
 
+    # 2) /tmp
     d2 = _ensure_dir(FALLBACK_IMPORTANCE_DIR)
     if d2:
         _cached_dir = d2
         print(f"[feature_importance] 저장 경로를 임시로 전환: {d2}")
         return d2
 
+    # 3) 실패 → 비활성화
     _cached_disabled = True
     print("[feature_importance] 경고: 저장 비활성화(디스크 여유 없음)")
     return None
@@ -68,6 +74,9 @@ def compute_feature_importance(
     max_seconds: float = 30.0,
     print_every: int = 20,
 ):
+    """
+    permutation 기반 중요도. 시간 예산 초과 시 조기 종료.
+    """
     # 1) 입력 정리
     if isinstance(X_val, pd.DataFrame):
         feature_names = list(X_val.columns)
@@ -113,6 +122,7 @@ def compute_feature_importance(
     importances = np.zeros(n_feat, dtype=float)
 
     for i in range(n_feat):
+        # 시간 예산 체크
         if (time.time() - start) > float(max_seconds):
             print(f"[feature_importance] 시간예산 초과 → {i}/{n_feat}에서 중단")
             break
@@ -240,6 +250,7 @@ def drop_low_importance_features(
         c for c in df.columns if c not in drop_cols and c not in ["timestamp", "strategy"]
     ]
 
+    # 최소 피처 수 보장
     if len(remaining_cols) < min_features:
         for i in range(len(remaining_cols), min_features):
             pad_col = f"pad_{i}"
