@@ -1,4 +1,4 @@
-# === feature_importance.py (디스크 부족 내성, train.py 호환, 안전 저장 완성본) ===
+# === feature_importance.py (디스크 부족 내성, train.py 호환, 안전 저장) ===
 import os
 import json
 import time
@@ -17,7 +17,6 @@ _cached_disabled = False
 
 
 def _ensure_dir(path: str) -> str | None:
-    """디렉토리 생성. ENOSPC면 None 반환. 그 외 오류는 조용히 포기."""
     try:
         os.makedirs(path, exist_ok=True)
         return path
@@ -28,7 +27,7 @@ def _ensure_dir(path: str) -> str | None:
 
 
 def _get_importance_dir() -> str | None:
-    """우선순위: /persistent → /tmp. 둘 다 실패 시 None."""
+    """우선순위: /persistent → /tmp → 없으면 비활성화"""
     global _cached_dir, _cached_disabled
     if _cached_disabled or DISABLE_IMPORTANCE_SAVE:
         return None
@@ -69,10 +68,7 @@ def compute_feature_importance(
     max_seconds: float = 30.0,
     print_every: int = 20,
 ):
-    """
-    permutation 기반 중요도 계산.
-    train.py 호환 버전: pandas/ndarray 입력 가능 + device 지원
-    """
+    # 1) 입력 정리
     if isinstance(X_val, pd.DataFrame):
         feature_names = list(X_val.columns)
         X_np = X_val.values.astype(np.float32)
@@ -83,10 +79,12 @@ def compute_feature_importance(
             X_np = X_np[:, None, :]
         X_val = torch.from_numpy(X_np)
 
+    # 2) device
     if device is not None:
         X_val = X_val.to(device)
         model = model.to(device)
 
+    # 3) y
     if y_val is None:
         y_val = torch.zeros(X_val.shape[0], dtype=torch.long, device=X_val.device)
     else:
@@ -99,9 +97,11 @@ def compute_feature_importance(
 
     n_feat = int(X_val.shape[2])
     names = _ensure_feature_names(feature_names, n_feat)
+
     model.eval()
     start = time.time()
 
+    # 기준 loss
     try:
         logits = model(X_val)
         y_val = y_val.view(-1).long()
@@ -120,8 +120,11 @@ def compute_feature_importance(
             X_perm = X_val.clone()
             perm_idx = torch.randperm(X_val.shape[0], device=X_val.device)
             X_perm[:, :, i] = X_perm[perm_idx, :, i]
-            loss = torch.nn.CrossEntropyLoss()(model(X_perm), y_val).item()
+
+            logits_perm = model(X_perm)
+            loss = torch.nn.CrossEntropyLoss()(logits_perm, y_val).item()
             importances[i] = float(loss - baseline_loss)
+
             if print_every and (i % max(1, int(print_every)) == 0):
                 print(f"[imp] {i+1}/{n_feat} Δ={importances[i]:.6f}")
         except Exception as e:
@@ -132,7 +135,14 @@ def compute_feature_importance(
 
 
 def compute_permutation_importance(model, X_val, y_val, feature_names, **kwargs):
-    return compute_feature_importance(model, X_val, y_val, feature_names, method="permutation", **kwargs)
+    return compute_feature_importance(
+        model,
+        X_val,
+        y_val,
+        feature_names,
+        method="permutation",
+        **kwargs,
+    )
 
 
 def _safe_write_json(path: str, obj) -> bool:
@@ -164,16 +174,19 @@ def save_feature_importance(
     importances,
     symbol,
     strategy,
-    model_type,
+    model_type=None,
     method: str = "baseline",
-    **kwargs,  # ← 여기가 추가됨! window 같은 인자 자동 무시
+    **kwargs,  # 호출부에서 window 같은 거 넣어도 무시
 ):
     """
-    디스크 부족 시 /tmp로 자동 폴백. train.py의 추가 인자(window 등)도 무시.
+    train 쪽에서 model_type 안 줘도 깨지지 않게 한 버전.
     """
     if DISABLE_IMPORTANCE_SAVE:
         print("[feature_importance] 저장 비활성화(환경변수)")
         return False
+
+    if model_type is None:
+        model_type = "default"
 
     out_dir = _get_importance_dir()
     if not out_dir:
@@ -186,13 +199,17 @@ def save_feature_importance(
 
     imp = {str(k): float(v) for k, v in (importances or {}).items()}
     ok_json = _safe_write_json(path_json, imp)
-    df = pd.DataFrame(imp.items(), columns=["feature", "importance"]).sort_values(by="importance", ascending=False)
+
+    df = pd.DataFrame(imp.items(), columns=["feature", "importance"]).sort_values(
+        by="importance", ascending=False
+    )
     ok_csv = _safe_write_csv(path_csv, df)
 
     if ok_json and ok_csv:
         print(f"[feature_importance] 저장 완료: {path_json}, {path_csv}")
         return True
 
+    # 한 번 더 /tmp
     if out_dir != FALLBACK_IMPORTANCE_DIR:
         fb_dir = _ensure_dir(FALLBACK_IMPORTANCE_DIR)
         if fb_dir:
@@ -216,8 +233,12 @@ def drop_low_importance_features(
     min_features: int = 5,
 ) -> pd.DataFrame:
     importances = importances or {}
-    drop_cols = [col for col, imp in importances.items() if (imp is not None and float(imp) < threshold)]
-    remaining_cols = [c for c in df.columns if c not in drop_cols and c not in ["timestamp", "strategy"]]
+    drop_cols = [
+        col for col, imp in importances.items() if (imp is not None and float(imp) < threshold)
+    ]
+    remaining_cols = [
+        c for c in df.columns if c not in drop_cols and c not in ["timestamp", "strategy"]
+    ]
 
     if len(remaining_cols) < min_features:
         for i in range(len(remaining_cols), min_features):
