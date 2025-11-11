@@ -329,6 +329,19 @@ def _has_model_for(symbol, strategy):
         pass
     return False
 
+# ✅ 여기 추가: 학습 직전에 거래소에서 최신 캔들 무조건 땡겨오게 하는 헬퍼
+def _warmup_latest_klines(symbols):
+    print("[APP] 최신 캔들 재수집 시작")
+    for sym in symbols:
+        for strat in ["단기", "중기", "장기"]:
+            try:
+                # force_refresh=True 로 캐시 말고 거래소에서 다시 받게 강제
+                get_kline_by_strategy(sym, strat, force_refresh=True)
+            except Exception as e:
+                print(f"[APP] {sym}-{strat} 수집 실패: {e}")
+    print("[APP] 최신 캔들 재수집 완료")
+    sys.stdout.flush()
+
 # quarantine wipe helper
 def _quarantine_wipe_persistent():
     ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
@@ -793,7 +806,7 @@ def yopo_health():
                     s = str(r.get('status',''))
                     status_icon = '✅' if s in ['success','v_success'] else '❌' if s in ['fail','v_fail'] else '⏳' if s in ['pending','v_pending'] else '🛑'
                     rows.append(f"<tr><td>{r.get('timestamp','')}</td><td>{r.get('symbol','')}</td><td>{r.get('direction','')}</td><td>{rtn_pct}</td><td>{status_icon}</td></tr>")
-                table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>심볼</th><th>방향</th><th>수익률</th><th>상태</th></tr>" + "".join(rows) + "</table>"
+                table = "<table border='1' style='margin-top:4px'><tr><th>시각</th><th>심볼</th><th>전략</th><th>방향</th><th>수익률</th><th>상태</th></tr>" + "".join(rows) + "</table>"
             last_train = train_log_df['timestamp'].iloc[-1] if (not train_log_df.empty and 'timestamp' in train_log_df) else '없음'
             last_pred  = pred['timestamp'].iloc[-1]  if (not pred.empty and 'timestamp' in pred)  else '없음'
             last_audit = audit['timestamp'].iloc[-1] if (not audit.empty and 'timestamp' in audit) else '없음'
@@ -961,6 +974,8 @@ def train_symbols():
             if not ok: return resp
             group_symbols = SYMBOL_GROUPS[group_idx]
             print(f"🚀 그룹 학습 요청됨 → 그룹 #{group_idx} | 심볼: {group_symbols}")
+            # ✅ 학습 시작하기 전에 최신 캔들 강제 수집
+            _warmup_latest_klines(group_symbols)
             # 그룹 시작: 게이트 닫기 + GROUP_ACTIVE 생성 + 그룹학습 락 생성
             _safe_close_gate("train_group_start")
             _set_group_active(True, group_idx=group_idx, symbols=group_symbols)
@@ -1004,6 +1019,8 @@ def train_symbols():
                 return "❌ 유효하지 않은 symbols 리스트", 400
             ok, resp = _ensure_single_loop(force)
             if not ok: return resp
+            # ✅ 선택 학습도 마찬가지로 시작 전에 최신 캔들 강제 수집
+            _warmup_latest_klines(symbols)
             # 선택 학습은 그룹 경계 아님 → GROUP_ACTIVE 비조작, 그룹 락 비사용
             _safe_close_gate("train_selected_start")
             def _worker():
