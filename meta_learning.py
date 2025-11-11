@@ -1,11 +1,19 @@
-# meta_learning.py (YOPO v1.6 — 메타러너 표준화/심볼-전략 일치 가드/로그 강화)
+# meta_learning.py (YOPO v1.7 — 하이브리드 진화판 연동 / 심볼-전략 일치 가드 강화 / 예측기와 동일 구간보정)
 # ------------------------------------------------------------------
 # 변경 요약
-# 1) _filter_groups_by_symbol_strategy(): groups_outputs에서 symbol/horizon 불일치 제거
-# 2) get_meta_prediction(): meta_choice="predicted" 표준 로그 + 안정화 유지
-# 3) meta_predict(): 집계 전 필터 적용, 반환에 meta_choice/picked_model 포함,
-#    log_prediction에 model_name="meta:<mode>", note에 상세 JSON 기록
-# 4) 나머지 MAML/스태킹/CI/폭보정/마스킹 로직은 v1.5와 호환
+# 1) predict.py 가 뿌려주는 필드(hybrid_probs, adjusted_probs, filtered_probs, success_score 등)를
+#    그대로 우선 사용하도록 집계부를 확장함. → "확률 + 유사도"가 여기서도 그대로 이어짐.
+# 2) class_ranges 단위가 퍼센트로 들어오는 경우를 predict.py 와 같은 방식으로 자동 보정(_sanitize_range)
+#    해서 "0.04 = 4%" / "4 = 4%" 혼선을 제거함.
+# 3) meta_state.class_ranges 를 보정한 뒤 힌트/최소수익률 필터에 사용하도록 일원화.
+# 4) symbol / strategy 불일치 후보 제거는 유지하되, 제거된 수와 이유를 log note 에 남김.
+# 5) log_prediction 의 model_name 은 "meta:<mode>" 로 통일해서 1번 파일 로그와 나중에 조인하기 쉽게 함.
+#
+# 이 파일은 1번 predict.py 에서 만든 “하이브리드 예측 결과 목록”을
+# 2차로 다시 고르는 두뇌 역할을 하는 거라서,
+# - 가능한 한 입력을 버리지 말고
+# - 위험/힌트/최소수익률을 여기에 모아서
+# - 최종 1개 클래스를 확정하는 데 집중하도록 만들어져 있음.
 
 from __future__ import annotations
 import os, math, json
@@ -55,6 +63,32 @@ CLAMP_MAX_WIDTH = float(os.getenv("CLAMP_MAX_WIDTH", "0.10"))
 META_CI_Z = float(os.getenv("META_CI_Z", "1.64"))
 META_MIN_N = int(os.getenv("META_MIN_N", "30"))
 CALIB_NAN_MODE = os.getenv("CALIB_NAN_MODE", "abstain").lower()  # "abstain" | "drop"
+
+# =========================================================
+# 🔁 predict.py 와 동일한 구간/단위 보정
+# =========================================================
+def _sanitize_range(lo: float, hi: float) -> Tuple[float, float]:
+    """
+    1번 predict.py 와 동일한 규칙:
+    - 구간 절대값이 1을 넘으면 퍼센트로 보고 100으로 나눔
+    - 실패하면 0.0으로 폴백
+    """
+    try:
+        lo_f, hi_f = float(lo), float(hi)
+        if abs(lo_f) > 1 or abs(hi_f) > 1:
+            lo_f /= 100.0
+            hi_f /= 100.0
+        return lo_f, hi_f
+    except Exception:
+        return float(lo or 0.0), float(hi or 0.0)
+
+def _sanitize_class_ranges(ranges: Optional[List[Tuple[float, float]]]) -> Optional[List[Tuple[float, float]]]:
+    if not ranges:
+        return None
+    out = []
+    for a, b in ranges:
+        out.append(_sanitize_range(a, b))
+    return out
 
 # ======================= (A) MAML (유지) =======================
 if _TORCH_OK:
@@ -147,7 +181,6 @@ def load_meta_learner():
 def _safe_log_prediction(**kwargs):
     try:
         from logger import log_prediction  # 선택적 의존
-        # 수치 필드 안전화
         for k in ("rate", "return_value", "entry_price", "target_price"):
             if k in kwargs:
                 kwargs[k] = float(np.nan_to_num(kwargs[k], nan=0.0, posinf=0.0, neginf=0.0))
@@ -179,6 +212,9 @@ def _normalize_safe(v: np.ndarray) -> np.ndarray:
     return v / s
 
 def _to_probs(x: Any, C_expected: Optional[int] = None) -> Optional[np.ndarray]:
+    """
+    predict.py 가 넘길 수 있는 여러 형태(dict, list, np.array)를 모두 수용
+    """
     try:
         if x is None:
             return None
@@ -191,10 +227,7 @@ def _to_probs(x: Any, C_expected: Optional[int] = None) -> Optional[np.ndarray]:
             vec = np.zeros(C, dtype=np.float64)
             for k, v in x.items():
                 ki = int(k)
-                try:
-                    vec[ki] = float(v)
-                except Exception:
-                    vec[ki] = 0.0
+                vec[ki] = float(v)
             return _normalize_safe(vec)
         arr = np.array(x, dtype=np.float64).reshape(-1)
         if C_expected is not None and arr.size != C_expected:
@@ -207,12 +240,30 @@ def _entropy(p: np.ndarray) -> float:
     p = np.clip(np.asarray(p, dtype=np.float64), 1e-12, 1.0)
     return float(-(p * np.log(p)).sum())
 
+# ------------ 핵심: 그룹 출력에서 “가장 정보가 많은 확률” 고르기 ------------
+def _pick_best_probs_from_group(g: Dict, C_guess: int) -> Optional[np.ndarray]:
+    """
+    predict.py 에서 하나의 모델에 대해 이런 필드를 줄 수 있음:
+      - hybrid_probs (유사도+다양성 보정까지 된 최종형)
+      - adjusted_probs (최근 클래스 빈도 보정형)
+      - calib_probs / probs
+      - filtered_probs
+    여기서는 위 순서대로 가장 ‘진화된’ 확률을 우선 사용한다.
+    """
+    for key in ("hybrid_probs", "filtered_probs", "adjusted_probs", "calib_probs", "probs"):
+        if key in g and g[key] is not None:
+            arr = _to_probs(g[key], C_guess)
+            if arr is not None:
+                return arr
+    # 전부 실패하면 None
+    return None
+
 # -------------- NaN/Inf 제거 + 단일 선택 집계 --------------
 def _aggregate_pick_maxprob(groups_outputs: List[Dict]) -> Tuple[np.ndarray, Dict]:
     detail: Dict[str, Any] = {"picked": None, "candidates": []}
     C_guess = None
     for g in groups_outputs:
-        arr = _to_probs(g.get("probs"), None)
+        arr = _pick_best_probs_from_group(g, None)
         if arr is not None:
             C_guess = arr.size
             break
@@ -221,7 +272,7 @@ def _aggregate_pick_maxprob(groups_outputs: List[Dict]) -> Tuple[np.ndarray, Dic
 
     candidates = []
     for idx, g in enumerate(groups_outputs):
-        arr = _to_probs(g.get("probs"), C_guess)
+        arr = _pick_best_probs_from_group(g, C_guess)
         if arr is None:
             continue
         if not np.all(np.isfinite(arr)) or np.any(arr < 0) or float(arr.sum()) <= 0:
@@ -230,18 +281,22 @@ def _aggregate_pick_maxprob(groups_outputs: List[Dict]) -> Tuple[np.ndarray, Dic
         maxp = float(arr.max())
         val_f1 = float(g.get("val_f1")) if g.get("val_f1") is not None else float("-inf")
         val_loss = float(g.get("val_loss")) if g.get("val_loss") is not None else float("+inf")
-        candidates.append((idx, arr, maxp, val_f1, val_loss, g))
+        # predict.py 가 success_score 를 줬다면 그걸 1순위로 본다
+        succ_sc = float(g.get("success_score", maxp))
+        candidates.append((idx, arr, succ_sc, maxp, val_f1, val_loss, g))
 
     if not candidates:
         uniform = np.ones(C_guess, dtype=np.float64) / C_guess
         detail.update({"no_valid_model": True, "probs_stack_shape": [0, C_guess]})
         return uniform.astype(np.float32), detail
 
-    candidates.sort(key=lambda t: (-t[2], -t[3], t[4], t[0]))
-    best_idx, best_arr, best_maxp, best_f1, best_loss, best_g = candidates[0]
+    # success_score → maxp → f1 → loss 순으로 정렬
+    candidates.sort(key=lambda t: (-t[2], -t[3], -t[4], t[5], t[0]))
+    best_idx, best_arr, best_succ, best_maxp, best_f1, best_loss, best_g = candidates[0]
     detail.update({
         "picked": int(best_idx),
         "picked_max_prob": float(best_maxp),
+        "picked_success_score": float(best_succ),
         "picked_val_f1": float(best_f1) if np.isfinite(best_f1) else None,
         "picked_val_loss": float(best_loss) if np.isfinite(best_loss) else None,
         "picked_model_path": best_g.get("model_path"),
@@ -263,8 +318,7 @@ def _aggregate_base_outputs(
 
     C_guess = None
     for g in groups_outputs:
-        p = g.get("probs")
-        arr = _to_probs(p, None)
+        arr = _pick_best_probs_from_group(g, None)
         if arr is not None:
             C_guess = arr.size
             break
@@ -273,7 +327,7 @@ def _aggregate_base_outputs(
 
     probs_mat = []
     for g in groups_outputs:
-        arr = _to_probs(g.get("probs"), C_guess)
+        arr = _pick_best_probs_from_group(g, C_guess)
         if arr is None:
             continue
         if not np.all(np.isfinite(arr)) or np.any(arr < 0) or float(arr.sum()) <= 0:
@@ -419,7 +473,8 @@ def _mask_by_hint_and_minret(
     out = scores.astype(np.float64).copy()
     for c in range(C):
         try:
-            lo, hi = class_ranges[c]
+            lo_raw, hi_raw = class_ranges[c]
+            lo, hi = _sanitize_range(lo_raw, hi_raw)
             mid = 0.5 * (float(lo) + float(hi))
             pos = _position_from_range(lo, hi)
             if abs(mid) < float(min_return_thr):
@@ -441,9 +496,7 @@ def _mask_by_hint_and_minret(
 # ========== (E) 단독 유틸: 성공률/수익률 고려 최종 클래스 산출 ==========
 def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None):
     """
-    기본 유틸: 성공률/수익률 고려 스코어로 최종 클래스 산출.
-    과도 abstain 방지. 항상 int 반환.
-    정상 선택 시 model_name/meta_choice="predicted"로 로그 남김.
+    predict.py 에서 fallback 으로 부를 수도 있는 기본 메타 선택기.
     """
     if not model_outputs_list:
         raise ValueError("❌ get_meta_prediction: 모델 출력 없음")
@@ -470,9 +523,12 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
         avg_softmax = _normalize_safe(np.mean(softmax_list, axis=0))
 
     meta_info = meta_info or {}
+    # 여기서도 class_ranges 단위 보정
+    cr_raw = meta_info.get("class_ranges", None)
+    class_ranges = _sanitize_class_ranges(cr_raw)
+
     success_rate_dict = dict(meta_info.get("success_rate", {}))
     expected_return_dict = dict(meta_info.get("expected_return", {}))
-    class_ranges = meta_info.get("class_ranges", None)
 
     counts = _extract_counts(meta_info)
     if success_rate_dict:
@@ -498,7 +554,6 @@ def get_meta_prediction(model_outputs_list, feature_tensor=None, meta_info=None)
     scores = _nan_guard(scores)
     final_pred_class = int(np.argmax(scores))
 
-    # === 표준 표기 로그(meta_choice="predicted") ===
     try:
         _safe_log_prediction(
             symbol=meta_info.get("symbol","-"),
@@ -545,7 +600,7 @@ def _maybe_evo_decide(
     try:
         probs_list = []
         for g in groups_outputs:
-            arr = _to_probs(g.get("probs"), len(agg_probs))
+            arr = _pick_best_probs_from_group(g, len(agg_probs))
             if arr is not None:
                 probs_list.append(_normalize_safe(arr))
         if not probs_list:
@@ -565,15 +620,17 @@ def _maybe_evo_decide(
 
 # ===== (G0) 심볼/전략 일치 필터 =====
 def _filter_groups_by_symbol_strategy(groups_outputs: List[Dict], symbol: str, horizon: str) -> List[Dict]:
-    """symbol/horizon이 다른 후보 제거. 불명확하면 통과."""
     out = []
+    removed = 0
     for g in groups_outputs:
         s_ok = (str(g.get("symbol","")).upper() == str(symbol).upper()) if g.get("symbol") else True
         h_ok = (str(g.get("strategy","")) == str(horizon)) if g.get("strategy") else True
         if s_ok and h_ok:
             out.append(g)
-    if len(out) != len(groups_outputs):
-        print(f"[META] symbol/strategy 불일치 {len(groups_outputs)-len(out)}개 제거 → {len(out)}개 유지")
+        else:
+            removed += 1
+    if removed > 0:
+        print(f"[META] symbol/strategy 불일치 {removed}개 제거 → {len(out)}개 유지")
     return out
 
 # ========== (G) 단일 진입점: meta_predict(...) ==========
@@ -595,27 +652,34 @@ def meta_predict(
     meta_state = meta_state or {}
 
     # (G0) 심볼/전략 일치 필터
+    raw_len = len(groups_outputs)
     groups_outputs = _filter_groups_by_symbol_strategy(groups_outputs, symbol, horizon)
     if not groups_outputs:
         if log:
-            _safe_log_prediction(symbol=symbol, strategy=horizon, direction="메타예측",
-                                 model="meta", model_name="meta:none",
-                                 predicted_class=-1, label=-1,
-                                 note="{}", success=False, reason="no_groups_after_filter",
-                                 rate=0.0, return_value=0.0, source=source, group_id=0,
-                                 entry_price=0, target_price=0, volatility=False)
+            _safe_log_prediction(
+                symbol=symbol, strategy=horizon, direction="메타예측",
+                model="meta", model_name="meta:none",
+                predicted_class=-1, label=-1,
+                note=json.dumps({"filtered_all": True, "raw_len": raw_len}, ensure_ascii=False),
+                success=False, reason="no_groups_after_filter",
+                rate=0.0, return_value=0.0, source=source, group_id=0,
+                entry_price=0, target_price=0, volatility=False
+            )
         return {"class": -1, "probs": [], "confidence": 0.0, "margin": 0.0,
-                "entropy": 0.0, "mode": "none", "detail": {"filtered_all": True},
+                "entropy": 0.0, "mode": "none", "detail": {"filtered_all": True, "raw_len": raw_len},
                 "no_valid_model": True, "meta_choice": "none"}
+
+    # meta_state 에 있는 class_ranges 단위 보정
+    class_ranges = _sanitize_class_ranges(meta_state.get("class_ranges", None))
 
     class_success_raw = dict(meta_state.get("success_rate", {}))
     expected_return_raw = dict(meta_state.get("expected_return", {}))
-    class_ranges = meta_state.get("class_ranges", None)
 
     allow_long = bool((position_hint or {}).get("allow_long", True))
     allow_short = bool((position_hint or {}).get("allow_short", True))
     min_thr = float(min_return_thr if min_return_thr is not None else max(META_MIN_RETURN, _RET_TH))
 
+    # 1차 집계
     agg_probs, detail = _aggregate_base_outputs(groups_outputs, class_success_raw, mode=agg_mode)
     used_mode = agg_mode
     final_class = int(np.argmax(agg_probs))
@@ -625,6 +689,7 @@ def meta_predict(
     class_success_ci = _adjust_success_rates_with_ci(class_success_raw, counts) if class_success_raw else {}
     expected_return_scaled = _width_scaled_er(expected_return_raw, class_ranges, CLAMP_MAX_WIDTH) if expected_return_raw else {}
 
+    # 힌트/최소수익률 1차 필터
     probs_masked, mask_reasons_p = _mask_by_hint_and_minret(
         agg_probs, class_ranges,
         allow_long=allow_long, allow_short=allow_short, min_return_thr=min_thr
@@ -636,6 +701,7 @@ def meta_predict(
         detail.setdefault("filters", {})["prob_mask"] = {"_fallback": "all_zero → ignore_mask"}
         agg_probs = _normalize_safe(agg_probs)
 
+    # evo 메타 우선 시도
     evo_choice: Optional[int] = None
     if use_evo_meta and not no_valid_model:
         evo_choice = _maybe_evo_decide(groups_outputs, agg_probs, expected_return_scaled)
@@ -643,13 +709,14 @@ def meta_predict(
             used_mode = "evo_meta"
             final_class = int(evo_choice)
 
+    # 스태킹 시도 (evo에 안 걸렸을 때만)
     if use_stacking and used_mode != "evo_meta" and not no_valid_model:
         try:
             clf = load_meta_learner()
             if clf is not None:
                 X_stack = np.concatenate(
-                    [_normalize_safe(_to_probs(g.get("probs"), len(agg_probs))) for g in groups_outputs
-                     if _to_probs(g.get("probs"), len(agg_probs)) is not None],
+                    [_normalize_safe(_pick_best_probs_from_group(g, len(agg_probs))) for g in groups_outputs
+                     if _pick_best_probs_from_group(g, len(agg_probs)) is not None],
                     axis=0
                 ).reshape(1, -1)
                 stacked_pred = clf.predict(X_stack)[0]
@@ -670,6 +737,7 @@ def meta_predict(
     margin = float(top1p - float(np.partition(agg_probs, -2)[-2]) if len(agg_probs) >= 2 else top1p)
     ent = _entropy(agg_probs)
 
+    # 성공률/ER 반영한 2차 점수
     scores = agg_probs.astype(np.float64).copy()
     C = len(scores)
     all_er_below = True
@@ -729,7 +797,7 @@ def meta_predict(
         final_class = int(np.argmax(agg_probs))
         used_mode += "+idx_guard"
 
-    # (G1) 가능하면 pick된 베이스 모델 정보도 추출
+    # (G1) pick된 원본 모델 정보
     picked_model = {}
     try:
         if isinstance(detail.get("picked"), int):
@@ -760,9 +828,9 @@ def meta_predict(
     if log:
         er_cho = 0.0
         try:
-            cr = meta_state.get("class_ranges")
-            if cr and 0 <= result["class"] < len(cr):
-                lo, hi = cr[result["class"]]
+            if class_ranges and 0 <= result["class"] < len(class_ranges):
+                lo, hi = class_ranges[result["class"]]
+                lo, hi = _sanitize_range(lo, hi)
                 er_cho = 0.5 * (float(lo) + float(hi))
         except Exception:
             pass
@@ -784,6 +852,7 @@ def meta_predict(
             "minER": float(min_thr),
             "no_valid": bool(no_valid_model),
             "picked_model": picked_model or None,
+            "filtered_from": raw_len,
         }
         _safe_log_prediction(
             symbol=symbol,
@@ -810,18 +879,12 @@ def meta_predict(
           f"entropy={result['entropy']:.3f} no_valid={no_valid_model}")
     return result
 
-# ========== (H) 후보 선택기: calib_prob 1순위, |ER_mid| 동률 정렬 ==========
+# ========== (H) 후보 선택기 ==========
 def select(candidates: List[Dict[str, Any]],
            profit_min: float = META_MIN_RETURN) -> Dict[str, Any]:
     """
     입력: 후보 dict 리스트.
       필수키: 'calib_prob' (float), 'expected_return_mid' (float)
-      선택키: 임의(모델경로 등). 반환에 candidate_rank, meta_prob 포함.
-    규칙:
-      1) calib_prob NaN/None → 제외. (CALIB_NAN_MODE=='abstain'이면 전체 보류)
-      2) abs(expected_return_mid) < profit_min → 제외.
-      3) 정렬키: (-calib_prob, -abs(expected_return_mid)).
-      4) 1등 반환. 동점 다수면 입력 순서 빠른 것.
     """
     if not candidates:
         return {"abstain": True, "reason": "no_candidates"}
@@ -839,7 +902,7 @@ def select(candidates: List[Dict[str, Any]],
         if not np.isfinite(cp):
             if CALIB_NAN_MODE == "abstain":
                 return {"abstain": True, "reason": "calib_prob_nan"}
-            else:  # drop
+            else:
                 continue
         if abs(er) < float(profit_min):
             continue
