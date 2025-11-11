@@ -1,4 +1,4 @@
-# app.py — FINAL v2.2e (reset-all 강제 풀초기화 버전)
+# app.py — FINAL v2.2f (reset-all 강제 풀초기화 버전, kline warmup fix)
 # (dirs auto-heal, PERSIST_DIR/PERSISTENT_DIR env, lock-dir PermissionError fallback)
 # (train→predict→next-group 파이프라인, 부팅시 필수 경로/빈 로그 보장, 예측락 stale GC, 그룹학습 락/게이트)
 
@@ -11,7 +11,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from telegram_bot import send_message
 from predict_trigger import run as trigger_run
 from predict_trigger import _is_group_complete_for_all_strategies, _get_current_group_symbols
-from data.utils import SYMBOLS, get_kline_by_strategy
+from data.utils import SYMBOLS, get_kline_by_strategy, CacheManager
 from data.utils import (
     ready_for_group_predict, mark_group_predicted, group_all_complete,
     get_current_group_symbols, SYMBOL_GROUPS
@@ -329,14 +329,20 @@ def _has_model_for(symbol, strategy):
         pass
     return False
 
-# ✅ 여기 추가: 학습 직전에 거래소에서 최신 캔들 무조건 땡겨오게 하는 헬퍼
+# ✅ 여기 수정: 학습 직전에 거래소에서 최신 캔들 무조건 땡겨오게 하는 헬퍼 (캐시 먼저 삭제 후 정상 호출)
 def _warmup_latest_klines(symbols):
     print("[APP] 최신 캔들 재수집 시작")
     for sym in symbols:
         for strat in ["단기", "중기", "장기"]:
             try:
-                # force_refresh=True 로 캐시 말고 거래소에서 다시 받게 강제
-                get_kline_by_strategy(sym, strat, force_refresh=True)
+                # 캐시키 패턴과 맞춰서 먼저 삭제
+                try:
+                    cache_key = f"{sym.upper()}-{strat}-slack0"
+                    CacheManager.delete(cache_key)
+                except Exception:
+                    pass
+                # 실제 새 데이터 가져오기
+                get_kline_by_strategy(sym, strat, end_slack_min=0)
             except Exception as e:
                 print(f"[APP] {sym}-{strat} 수집 실패: {e}")
     print("[APP] 최신 캔들 재수집 완료")
