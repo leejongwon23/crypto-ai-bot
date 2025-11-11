@@ -876,7 +876,8 @@ def get_kline_interval(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
 
-def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
+# ✅✅✅ 여기부터가 이번에 추가한 “강제 새로받기” 스위치 부분이야
+def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, force_refresh: bool = False):
     try:
         if not end_slack_min:
             try:
@@ -889,13 +890,29 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
         interval = cfg.get("interval", "D")
 
         cache_key = f"{symbol.upper()}-{strategy}-slack{end_slack_min}"
+
+        # 🔴 명시적으로 새로 받아오라고 한 경우: 메모리/디스크 캐시 다 비운다
+        if force_refresh:
+            try:
+                CacheManager.delete(cache_key)
+            except Exception:
+                pass
+            try:
+                clear_price_cache(symbol=symbol.upper(), strategy=strategy)
+            except Exception:
+                pass
+
+        # (여기부터는 기존 로직 유지)
         cached = CacheManager.get(cache_key, ttl_sec=600)
-        if isinstance(cached, pd.DataFrame) and not cached.empty:
+        if (not force_refresh) and isinstance(cached, pd.DataFrame) and not cached.empty:
             return cached
-        cached_disk = _load_df_cache(symbol, strategy, interval, end_slack_min)
-        if isinstance(cached_disk, pd.DataFrame) and not cached_disk.empty:
-            CacheManager.set(cache_key, cached_disk)
-            return cached_disk
+
+        cached_disk = None
+        if not force_refresh:
+            cached_disk = _load_df_cache(symbol, strategy, interval, end_slack_min)
+            if isinstance(cached_disk, pd.DataFrame) and not cached_disk.empty:
+                CacheManager.set(cache_key, cached_disk)
+                return cached_disk
 
         df_bybit = get_kline(symbol, interval=interval, limit=limit)
         if not isinstance(df_bybit, pd.DataFrame):
@@ -921,7 +938,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
                 except Exception:
                     pass
 
-        # ❗ 여기서 두 쪽 다 0줄일 때는 캐시하지 말고 그냥 빈 DF만 리턴
+        # ❗ 두 쪽 다 0줄이면 캐시하지 않고 바로 반환
         if df.empty:
             print(
                 f"[❗수집실패] {symbol}-{strategy} → bybit_empty={df_bybit.empty} "
@@ -934,9 +951,9 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
             out.attrs["enough_for_training"] = False
             out.attrs["not_enough_rows"] = True
             _log_fetch_summary(symbol, strategy, limit, len(df_bybit), len(df_binance), out.attrs["source_exchange"])
-            return out   # ← 캐시에 안 넣는다
+            return out
 
-        # 이하 부분은 네 원래 코드랑 동일
+        # 이하 기존 정리
         if end_slack_min > 0 and "timestamp" in df.columns and len(df) > 2:
             ts = _parse_ts_series(df["timestamp"])
             cutoff = ts.max() - pd.Timedelta(minutes=int(end_slack_min))
@@ -977,7 +994,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0):
 
         _log_fetch_summary(symbol, strategy, limit, bybit_rows, binance_rows, df.attrs["source_exchange"])
 
-        # ✅ 여기서는 정상 데이터니까 캐시에 저장
+        # ✅ 여기서는 정상 데이터니까 캐시에 저장 (force_refresh로 들어왔어도 최신 걸 다시 저장)
         CacheManager.set(cache_key, df)
         _save_df_cache(symbol, strategy, end_slack_min, df)
         return df
@@ -1526,7 +1543,8 @@ def load_latest_features(symbol: str, strategy: str) -> Optional[pd.DataFrame]:
 
 # ========================= 공개 API =========================
 def build_training_dataset(symbol: str, strategy: str, window: int, input_size: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
-    df_price = get_kline_by_strategy(symbol, strategy)
+    # 🔴 학습용 데이터는 항상 최신으로 강제할 수 있게 하려면 여기에서도 force_refresh를 True로 줄 수 있음
+    df_price = get_kline_by_strategy(symbol, strategy, force_refresh=False)
     feat_df = compute_features(symbol, df_price, strategy)
     if not isinstance(feat_df, pd.DataFrame) or feat_df.empty:
         X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
