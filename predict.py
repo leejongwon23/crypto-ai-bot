@@ -10,18 +10,14 @@ from logger import (
 )
 # =========================================================
 # 🔐 쓰기 가능한 루트 디렉터리
-# - 환경변수 PERSISTENT_DIR 있으면 그걸 쓰고
-# - 없으면 /persistent 를 기본으로 쓴다
-#   (config.py와 동일한 기본값으로 맞춰서 경로 일관성 유지)
 # =========================================================
 PERSISTENT_ROOT = os.getenv("PERSISTENT_DIR", "/persistent")
 os.makedirs(PERSISTENT_ROOT, exist_ok=True)
 
 def _p(*parts: str) -> str:
-    """persistent 루트 아래의 경로를 만들어 준다"""
     return os.path.join(PERSISTENT_ROOT, *parts)
 
-# 경로 고정: data.utils 만 사용
+# 경로 고정
 from data.utils import get_kline_by_strategy, compute_features
 
 __all__ = [
@@ -29,11 +25,11 @@ __all__ = [
     "run_evaluation_once", "run_evaluation_loop"
 ]
 
-# ✅ 자동 게이트 오픈 기능 (부팅 후 항상 예측 가능)
+# =========================================================
+# ✅ 부팅 시 게이트 자동 오픈
+# =========================================================
 def _ensure_gate_open_on_boot():
-    """재부팅 후에도 predict_gate.json이 항상 열린 상태로 자동 복원"""
     try:
-        # 예전 경로: /persistent/predict.block
         block_path = _p("predict.block")
         run_dir = _p("run")
         os.makedirs(run_dir, exist_ok=True)
@@ -64,10 +60,11 @@ def _ensure_gate_open_on_boot():
     except Exception as e:
         print(f"[AUTO-GATE ERROR] 게이트 자동 오픈 실패: {e}")
 
-# 부팅 시 자동 실행
 _ensure_gate_open_on_boot()
 
-# -------------------- 공용 메모리 정리 헬퍼 --------------------
+# =========================================================
+# 공용 메모리 정리
+# =========================================================
 def _safe_empty_cache():
     try:
         if torch.cuda.is_available():
@@ -86,7 +83,9 @@ def _release_memory(*objs):
         gc.collect()
         _safe_empty_cache()
 
-# -------------------- 런타임 경로/게이트 --------------------
+# =========================================================
+# 런타임 경로/게이트
+# =========================================================
 RUN_DIR = _p("run")
 os.makedirs(RUN_DIR, exist_ok=True)
 PREDICT_GATE = os.path.join(RUN_DIR, "predict_gate.json")
@@ -109,7 +108,6 @@ def _now_kst():
 
 def is_predict_gate_open():
     try:
-        # ⛔ 기본 닫힘 이슈 방지: 미설정 시 열림
         if os.getenv("FORCE_PREDICT_CLOSE", "0") == "1":
             return False
         if os.path.exists(PREDICT_BLOCK):
@@ -248,7 +246,9 @@ def _predict_hb_loop(stop_evt: threading.Event, tag: str, lock_path: str):
         hb = int(os.getenv('PREDICT_HEARTBEAT_SEC', '3'))
         stop_evt.wait(max(1, hb))
 
-# -------------------- 외부 컴포넌트 풀백 --------------------
+# =========================================================
+# 외부 컴포넌트 폴백
+# =========================================================
 try:
     from window_optimizer import find_best_windows
 except Exception:
@@ -303,7 +303,6 @@ def load_model_any(path, model=None, **kwargs):
         except Exception as e:
             print(f"[load_model_any: primary loader failed] {e}")
 
-    # 1차 실패 → torch.load 직접
     try:
         sd = torch.load(path, map_location="cpu")
         if isinstance(sd, dict) and model is not None:
@@ -313,12 +312,10 @@ def load_model_any(path, model=None, **kwargs):
                 return model
             except Exception as e:
                 print(f"[load_model_any: state_dict load failed] {e}")
-                # ✅ 폴백: dict 그대로 반환
                 return sd
         return sd
     except Exception as e:
         print(f"[load_model_any: torch.load 실패, 경로={path}] {e}")
-        # ✅ 마지막 폴백 — 실패해도 None 대신 원본 모델 반환 (skip 방지)
         return model
 
 from logger import log_prediction, update_model_success, PREDICTION_HEADERS, ensure_prediction_log_exists
@@ -335,7 +332,9 @@ from config import (
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# -------------------- [NEW] 모델 경로 다중 스캔 설정 --------------------
+# =========================================================
+# 모델 경로 다중 스캔 설정
+# =========================================================
 _DEFAULT_MODEL_ROOTS = [
     os.getenv("MODEL_DIR", _p("models")),
     _p("models"),
@@ -376,10 +375,49 @@ RG_LOOKBACK_LONG = int(os.getenv("RG_LOOKBACK_LONG", "336"))
 RG_VOL_METHOD = os.getenv("RG_VOL_METHOD", "std").lower()
 RG_MIN_ABS_MID_FOR_VOLCHECK = float(os.getenv("RG_MIN_ABS_MID_FOR_VOLCHECK", "0.004"))
 
-# [NEW] 강제 발행 옵션 (보류 직전 보수적 publish)
 FORCE_PUBLISH_ON_ABSTAIN = os.getenv("FORCE_PUBLISH_ON_ABSTAIN", "0") == "1"
 
-# -------------------- 유틸리티 --------------------
+# =========================================================
+# 📍 (추가) 시장 컨텍스트 / 최근 성공률
+# =========================================================
+def _load_market_context(symbol: str, strategy: str) -> dict:
+    """
+    외부에서 실시간 시장요약을 뿌려주는 경우를 위한 약한 훅.
+    없으면 기본 0 들고 간다.
+    """
+    base = {"dominance": 0.0, "volume_bias": 0.0, "risk": 0.0}
+    try:
+        ctx_path = _p("run", "market_ctx", f"{symbol.upper()}__{strategy}.json")
+        if os.path.exists(ctx_path):
+            with open(ctx_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for k in ("dominance", "volume_bias", "risk"):
+                if k in data:
+                    base[k] = float(data[k])
+    except Exception:
+        pass
+    base["risk"] = float(base.get("risk", 0.0))
+    return base
+
+def _get_recent_success_weight(symbol: str, strategy: str) -> float:
+    """
+    logger 쪽에 최근 성공률 함수가 있으면 그걸 쓰고,
+    없으면 0.5로.
+    반환은 0.3~1.0 사이로 잘라서 너무 안 흔들리게.
+    """
+    base = 0.5
+    try:
+        import logger as _lg
+        if hasattr(_lg, "get_recent_success_rate"):
+            sr = float(_lg.get_recent_success_rate(symbol, strategy, window=10))
+            base = max(0.0, min(1.0, sr))
+    except Exception:
+        pass
+    return 0.3 + 0.7 * base
+
+# =========================================================
+# 유틸리티
+# =========================================================
 def _norm_model_type(mt: str) -> str:
     s = str(mt or "").lower()
     if "transformer" in s:
@@ -388,14 +426,7 @@ def _norm_model_type(mt: str) -> str:
         return "CNN_LSTM"
     return "LSTM"
 
-# -------------------- 백분율 자동보정 + 메타 검증 (핵심 추가) --------------------
 def _sanitize_range(lo: float, hi: float) -> tuple[float, float]:
-    """
-    클래스 수익률 구간의 단위를 자동 교정한다.
-    - 입력이 '분수(소수)' 형태(예: 0.04 = 4%)면 그대로 둔다.
-    - 입력이 '퍼센트' 형태(예: 4, 8 = 4%, 8%)로 보이면 100으로 나눠 분수로 변환한다.
-      ▶ 기준: 절대값이 1(=100%)을 초과하면 퍼센트로 간주하여 100으로 나눔.
-    """
     try:
         lo_f, hi_f = float(lo), float(hi)
         if abs(lo_f) > 1 or abs(hi_f) > 1:
@@ -403,11 +434,9 @@ def _sanitize_range(lo: float, hi: float) -> tuple[float, float]:
             hi_f /= 100.0
         return lo_f, hi_f
     except Exception:
-        # 변환 실패 시 안전하게 0.0으로 폴백
         return float(lo or 0.0), float(hi or 0.0)
 
 def _ranges_from_meta(meta):
-    """원시 meta → list[(lo,hi)] (보정 전)"""
     try:
         cr = meta.get("class_ranges", None)
         if isinstance(cr, list) and len(cr) >= 2 and all(isinstance(x, (list, tuple)) and len(x) == 2 for x in cr):
@@ -417,48 +446,30 @@ def _ranges_from_meta(meta):
     return None
 
 def _validate_meta_class_ranges(meta, *, num_classes: int, symbol: str, strategy: str):
-    """
-    메타의 class_ranges가 '전 클래스 동일/비정상'인 경우 감지하여 무효화.
-    반환: 정상 리스트(보정 적용됨) 또는 None
-    """
     raw = _ranges_from_meta(meta) if isinstance(meta, dict) else None
     if not raw:
         return None
-
-    # 1) 단위 보정
     cr = [_sanitize_range(a, b) for (a, b) in raw]
-
-    # 2) 기본 형태 검사
-    if len(cr) < max(2, min(num_classes, 3)):  # 클래스 수에 한참 못 미치면 무효
+    if len(cr) < max(2, min(num_classes, 3)):
         return None
-
-    # 3) 전 클래스 동일/폭 0 검사
     uniq = set((round(lo, 6), round(hi, 6)) for (lo, hi) in cr)
-    if len(uniq) <= 1:  # 모든 클래스가 동일한 구간
+    if len(uniq) <= 1:
         print(f"[메타무시] {symbol}-{strategy} meta.class_ranges 전 클래스 동일 → config 사용")
         return None
     if any((hi - lo) <= 0 for (lo, hi) in cr):
         print(f"[메타무시] {symbol}-{strategy} meta.class_ranges hi<=lo 존재 → config 사용")
         return None
-
-    # 4) 과도한 비현실 폭/중앙값(안전한 일반 규칙) → 메타 무시
     mids = [abs((lo + hi) / 2.0) for (lo, hi) in cr]
     widths = [abs(hi - lo) for (lo, hi) in cr]
-    # 폭이 너무 큰 값이 과반이면 이상치로 간주 (예: ±0.3 이상이 다수)
     if sum(w > 0.4 for w in widths) >= max(2, len(widths) // 2):
         print(f"[메타무시] {symbol}-{strategy} meta.class_ranges 폭 과다(과반) → config 사용")
         return None
-    # 중앙값이 말이 안될 정도로 큰 값이 다수(예: 0.25 이상이 과반)
     if sum(m > 0.25 for m in mids) >= max(2, len(mids) // 2):
         print(f"[메타무시] {symbol}-{strategy} meta.class_ranges 중앙값 과다(과반) → config 사용")
         return None
-
-    # 5) 유효
     return cr
 
 def _class_range_by_meta_or_cfg(cls_id: int, meta, symbol: str, strategy: str):
-    # meta에 있는 거 보지 말고
-    # 학습이랑 같은 config 값만 쓰기
     lo, hi = get_class_return_range(int(cls_id), symbol, strategy)
     return _sanitize_range(lo, hi)
 
@@ -502,6 +513,7 @@ def _save_json(p, obj):
     except Exception:
         pass
 
+# ✅ 원본에 있던 해시 유틸 복원
 def _feature_hash(row):
     try:
         import hashlib
@@ -525,7 +537,6 @@ def _stem(fn):
             return fn[:-len(e)]
     return os.path.splitext(fn)[0]
 
-# -------------------- [NEW] 메타파일 해석/탐색 (다중 루트) --------------------
 def _resolve_meta_from_any_root(weight_abs: str) -> str | None:
     try:
         base = _stem(weight_abs)
@@ -570,7 +581,9 @@ def _infer_group_id(symbol: str, strategy: str) -> int:
     except Exception:
         return 0
 
-# === 하이브리드 유사도 유틸 =====================================
+# =========================================================
+# 유사도 기반 하이브리드
+# =========================================================
 from sklearn.metrics.pairwise import cosine_similarity
 
 def _compute_similarity_class_probs(current_vec: np.ndarray,
@@ -624,7 +637,9 @@ def _compute_similarity_class_probs(current_vec: np.ndarray,
         sim_probs = np.ones(num_classes, dtype=float) / float(num_classes)
         return sim_probs, {"m": 0, "w_sim": 0.0}
 
-# === 모델 탐색 (다중 루트 + 절대경로 + 진단 로그) ===
+# =========================================================
+# 모델 탐색 (네 원본 그대로)
+# =========================================================
 def get_available_models(symbol, strategy):
     diag = {"symbol": symbol, "strategy": strategy, "roots": [], "found": []}
     try:
@@ -752,7 +767,9 @@ def get_available_models(symbol, strategy):
             pass
         return []
 
-# === 실패/보류 결과 ===
+# =========================================================
+# 실패/보류 결과
+# =========================================================
 def failed_result(symbol, strategy, model_type="unknown", reason="", source="일반", X_input=None):
     t = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[predict] skip {symbol}-{strategy} :: {reason}")
@@ -770,14 +787,11 @@ def failed_result(symbol, strategy, model_type="unknown", reason="", source="일
     return res
 
 def _soft_abstain(symbol, strategy, *, reason, meta_choice="abstain", regime="unknown", X_last=None, group_id=None, df=None, source="보류"):
-    """⚠️ HOTFIX: '예측' 행 추가 기록 제거 (predicted_class=-1 로 인한 평가오염 방지)
-       → '예측보류' + '예측(보류)'만 기록"""
     try:
         ensure_prediction_log_exists()
         cur = float((df["close"].iloc[-1] if df is not None and len(df) else 0.0))
         note = {"reason": reason, "abstain_prob_min": float(ABSTAIN_PROB_MIN), "max_calib_prob": None, "meta_choice": meta_choice, "regime": regime}
 
-        # 1) 상세 보류 행
         log_prediction(
             symbol=symbol, strategy=strategy, direction="예측보류",
             entry_price=cur, target_price=cur, model="meta", model_name=str(meta_choice),
@@ -790,7 +804,6 @@ def _soft_abstain(symbol, strategy, *, reason, meta_choice="abstain", regime="un
             class_return_max=0.0, class_return_text=""
         )
 
-        # 2) 요약 보류 행
         log_prediction(
             symbol=symbol, strategy=strategy, direction="예측(보류)",
             entry_price=cur, target_price=cur, model="meta", model_name=str(meta_choice),
@@ -815,7 +828,9 @@ def _soft_abstain(symbol, strategy, *, reason, meta_choice="abstain", regime="un
         "reason": reason, "success": False, "predicted_class": -1, "label": -1
     }
 
-# === 보조 ===
+# =========================================================
+# 보조
+# =========================================================
 def _acquire_predict_lock_with_retry(path: str, max_wait_sec: int):
     deadline = time.time() + max(1, int(max_wait_sec))
     while time.time() < deadline:
@@ -885,7 +900,6 @@ def _recent_volatility(df: pd.DataFrame, strategy: str) -> float:
     except Exception:
         return 0.0
 
-# (기존) RealityGuard 체크
 def _reality_guard_check(df, strategy, hint, lo_sel, hi_sel, exp_mid) -> tuple[bool, str]:
     try:
         pos = _position_from_range(lo_sel, hi_sel)
@@ -902,7 +916,6 @@ def _reality_guard_check(df, strategy, hint, lo_sel, hi_sel, exp_mid) -> tuple[b
     except Exception as e:
         return True, f"rg_exception:{e}"
 
-# === ExitGuard: 3% 폭 상한 삭제(하드차단 제거), 최소 기대수익만 검사 ===
 def _exit_guard_check(lo_sel: float, hi_sel: float, exp_ret: float) -> tuple[bool, str]:
     try:
         pub_conf = get_PUBLISH_RUNTIME()
@@ -913,7 +926,9 @@ def _exit_guard_check(lo_sel: float, hi_sel: float, exp_ret: float) -> tuple[boo
     except Exception as e:
         return True, f"exit_guard_exception:{e}"
 
-# -------------------- 윈도우 앙상블 --------------------
+# =========================================================
+# 윈도우 앙상블
+# =========================================================
 def _combine_windows(calib_stack: np.ndarray, raw_stack: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     mean_c = calib_stack.mean(axis=0)
     mean_r = raw_stack.mean(axis=0)
@@ -933,7 +948,9 @@ def _combine_windows(calib_stack: np.ndarray, raw_stack: np.ndarray) -> tuple[np
     rr = rr / (rr.sum() + 1e-12)
     return cc.astype(float), rr.astype(float)
 
-# -------------------- 모델 추론 루틴 --------------------
+# =========================================================
+# 모델 추론 루틴 (네 원본 방식 + 유지)
+# =========================================================
 def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list, recent_freq, regime="unknown"):
     outs = []
     allpreds = []
@@ -1083,7 +1100,9 @@ def get_model_predictions(symbol, strategy, models, df, feat_scaled, window_list
             continue
     return outs, allpreds
 
-# -------------------- [NEW] 보수적 강제발행 선택기 --------------------
+# =========================================================
+# 보수적 강제발행 선택기
+# =========================================================
 def _choose_conservative_prediction(outs, symbol, strategy, allow_long, allow_short, min_thr):
     try:
         best = (None, None, -1.0)
@@ -1129,17 +1148,10 @@ def _choose_conservative_prediction(outs, symbol, strategy, allow_long, allow_sh
     except Exception:
         return (None, None)
 
-# -------------------- [NEW] 소프트 가드 실행기 --------------------
+# =========================================================
+# 소프트 가드
+# =========================================================
 def _apply_soft_guard(df, strategy, outs, chosen, final_cls, allow_long, allow_short, min_thr):
-    """
-    RealityGuard 과장 상황에서 신뢰도(success_score)에 따라:
-      - p < 0.45 → abstain
-      - 0.45 ≤ p < 0.60 → 보수적 대안 클래스 선택 시도
-      - p ≥ 0.60 → 그대로 진행(경고만 기록)
-    return: (action, chosen, final_cls, tag)
-      action ∈ {"ok","conservative","abstain"}
-      tag: 기록용 이유 문자열
-    """
     try:
         lo_sel, hi_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), chosen.get("symbol", ""), chosen.get("strategy", ""))
         exp_mid = (float(lo_sel) + float(hi_sel)) / 2.0
@@ -1157,10 +1169,10 @@ def _apply_soft_guard(df, strategy, outs, chosen, final_cls, allow_long, allow_s
     except Exception as e:
         return "ok", chosen, final_cls, f"soft_guard_exception:{e}"
 
-# -------------------- 메인 predict --------------------
-
+# =========================================================
+# 메인 predict
+# =========================================================
 def predict(symbol, strategy, source="일반", model_type=None):
-    # 게이트/그룹 가드
     if _group_active() and not _bypass_gate_for_source(source):
         print(f"[predict] blocked by group_active (source={source})")
         return failed_result(symbol or "None", strategy or "None", reason="group_predict_active", source=source, X_input=None)
@@ -1186,7 +1198,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
     df = feat = X = outs = allpreds = None
     lib_vecs = lib_labels = None
     try:
-        # 패턴 라이브러리(유사도 하이브리드용) 로딩
         try:
             from evo_meta_dataset import load_pattern_library
             lib_vecs, lib_labels = load_pattern_library(symbol, strategy)
@@ -1194,7 +1205,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             lib_vecs = None
             lib_labels = None
 
-        # 로깅/메타러너 import
         try:
             ensure_prediction_log_exists()
         except Exception as _e:
@@ -1217,15 +1227,11 @@ def predict(symbol, strategy, source="일반", model_type=None):
         _ = get_calibration_version()
         print(f"[predict] start {symbol}-{strategy} regime={regime} source={source}")
 
-        # 윈도우 탐색
         windows = find_best_windows(symbol, strategy)
         if not windows:
             return _soft_abstain(symbol, strategy, reason="window_list_none", meta_choice="abstain", regime=regime, df=None) if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="window_list_none", source=source, X_input=None)
 
-        # 시세/피처
         df = get_kline_by_strategy(symbol, strategy)
-
-        # ★ 운영 수익분포 로그 찍기 (학습이랑 동일 함수 사용)
         log_return_distribution_for_run(symbol, strategy, df)
 
         if df is None or len(df) < max(windows) + 1:
@@ -1240,7 +1246,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         if X.shape[0] < max(windows):
             return _soft_abstain(symbol, strategy, reason="insufficient_recent_rows", meta_choice="abstain", regime=regime, df=df) if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="insufficient_recent_rows", source=source, X_input=None)
 
-        # 가중치 탐색/로딩 + 모델 추론
         models = get_available_models(symbol, strategy)
         if not models:
             return _soft_abstain(symbol, strategy, reason="no_models", meta_choice="abstain", regime=regime, X_last=X[-1], df=df) if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="no_models", source=source, X_input=X[-1])
@@ -1252,7 +1257,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
         if not outs:
             return _soft_abstain(symbol, strategy, reason="no_valid_model", meta_choice="abstain", regime=regime, X_last=X[-1], df=df) if PREDICT_SOFT_ABORT else failed_result(symbol, strategy, reason="no_valid_model", source=source, X_input=X[-1])
 
-        # 하이브리드 결합 + 후보 선택
+        # ★ 여기서 시장컨텍스트/최근 성공률 한 번만 읽어놓고 밑에서 모든 모델에 공통으로 반영
+        market_ctx = _load_market_context(symbol, strategy)
+        recent_succ_w = _get_recent_success_weight(symbol, strategy)
+
         hint = _position_hint_from_market(df)
         allow_long, allow_short = bool(hint["allow_long"]), bool(hint["allow_short"])
         final_cls = None
@@ -1260,7 +1268,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         chosen = None
         used_minret = False
 
-        # (선택) 진화형 메타우선
         if glob.glob(os.path.join(MODEL_DIR, "evo_meta_learner*")):
             try:
                 from evo_meta_learner import predict_evo_meta
@@ -1273,7 +1280,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
             except Exception as e:
                 print(f"[evo_meta 예외] {e}")
 
-        # 표준 하이브리드 (확률 + 유사도)
         def _maybe_adjust(probs, recent):
             if ADJUST_WITH_DIVERSITY:
                 return adjust_probs_with_diversity(probs, recent, class_counts=None, alpha=0.10, beta=0.10)
@@ -1323,6 +1329,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     pred = int(np.argmax(hybrid))
                     p = float(hybrid[pred])
 
+                # ★ 여기서 성공률/시장위험 반영
+                risk_penalty = 1.0 - min(0.3, float(market_ctx.get("risk", 0.0)))
+                p = p * (0.7 + 0.3 * recent_succ_w) * risk_penalty
+
                 m.update({
                     "adjusted_probs": adj,
                     "sim_probs": sim_probs,
@@ -1343,7 +1353,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     best_i, best_score, best_pred = i, p, pred
                     used_minret = fused
 
-            # 탐험(near gap)
             if len(scores) >= 2:
                 ss = sorted(scores, key=lambda x: x[1], reverse=True)
                 top1, top2 = ss[0], ss[1]
@@ -1382,7 +1391,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception:
             pass
 
-        # === 임계(최소 기대수익) 가드 ===
         try:
             cmin_sel, cmax_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
             if not _meets_minret_with_hint(cmin_sel, cmax_sel, allow_long, allow_short, MIN_RET_THRESHOLD):
@@ -1397,6 +1405,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         if not _meets_minret_with_hint(lo, hi, allow_long, allow_short, MIN_RET_THRESHOLD):
                             continue
                         sc = float(base_probs[ci])
+                        # 여기도 성공률 가중 반영
+                        sc = sc * (0.7 + 0.3 * recent_succ_w)
                         if sc > best_sc:
                             best_sc, best_m, best_cls = sc, m, int(ci)
                 if best_cls is not None:
@@ -1406,7 +1416,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[임계 가드 예외] {e}")
 
-        # === (NEW) 손절 경유 위험 가드: ExitGuard '직전' ===
         try:
             ok_sl, why_sl, alt_m, alt_c = _stoploss_risk_guard(
                 symbol, strategy, final_cls, outs, allow_long, allow_short, MIN_RET_THRESHOLD
@@ -1424,9 +1433,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     )
         except Exception as e:
             print(f"[StopLossRiskGuard 예외] {e}")
-        # === 손절 경유 위험 가드 끝 ===
 
-        # === ExitGuard (기존 로직) ===
         try:
             lo_sel, hi_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
             exp_ret = (float(lo_sel) + float(hi_sel)) / 2.0
@@ -1444,7 +1451,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[출구 가드 예외] {e}")
 
-        # === RealityGuard → Soft (기존 로직) ===
         try:
             lo_sel, hi_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
             exp_ret = (float(lo_sel) + float(hi_sel)) / 2.0
@@ -1462,7 +1468,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         except Exception as e:
             print(f"[RealityGuard 예외] {e}")
 
-        # === 로그/반환 ===
         lo_sel, hi_sel = _class_range_by_meta_or_cfg(final_cls, (chosen or {}).get("meta"), symbol, strategy)
         exp_ret = (float(lo_sel) + float(hi_sel)) / 2.0
         pos_sel = _position_from_range(lo_sel, hi_sel)
@@ -1481,7 +1486,9 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 "expected_return_mid": float(exp_ret), "position": pos_sel, "hint_allow_long": allow_long, "hint_allow_short": allow_short,
                 "hint_ma_fast": hint.get("ma_fast"), "hint_ma_slow": hint.get("ma_slow"), "hint_slope": hint.get("slope"),
                 "reality_guard": {"enabled": bool(RG_ENABLE), "vol_mult": float(RG_VOL_MULT), "method": RG_VOL_METHOD},
-                "soft_guard": ("applied" if "soft_guard" in str(meta_choice) else "none")
+                "soft_guard": ("applied" if "soft_guard" in str(meta_choice) else "none"),
+                "market_ctx": market_ctx,
+                "recent_success_weight": recent_succ_w
         }
 
         ensure_prediction_log_exists()
@@ -1494,7 +1501,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                        raw_prob=raw_pred, calib_prob=calib_pred, calib_ver=get_calibration_version(),
                        class_return_min=float(lo_sel), class_return_max=float(hi_sel), class_return_text=class_text)
 
-        # 섀도우 로깅 (기존)
         try:
             for m in outs:
                 if chosen and m.get("model_path") == chosen.get("model_path"):
@@ -1569,7 +1575,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
         finally:
             gc.collect()
             _safe_empty_cache()
-# -------------------- 평가 루프 --------------------
+
+# =========================================================
+# 평가 루프 (네 원본 그대로)
+# =========================================================
 def evaluate_predictions(get_price_fn):
     from failure_db import check_failure_exists
     ensure_failure_db()
@@ -1686,7 +1695,6 @@ def evaluate_predictions(get_price_fn):
                         if pred_cls >= 0:
                             try:
                                 cmin, cmax = get_class_return_range(pred_cls, sym, strat)
-                                # ✅ 백분율/분수 혼선 방지: 평가단에서도 보정
                                 cmin, cmax = _sanitize_range(cmin, cmax)
                             except Exception:
                                 cmin, cmax = (0.0, 0.0)
@@ -1743,7 +1751,6 @@ def evaluate_predictions(get_price_fn):
             shutil.move(tmp, P)
             print("[✅ 평가 완료] 스트리밍 재작성 성공")
 
-            # --- 최근 평가 100건 집계 파일 갱신 ---
             try:
                 import pandas as _pd, os as _os
                 _agg_path = _p("logs", "evaluation_result.csv")
@@ -1773,7 +1780,9 @@ def evaluate_predictions(get_price_fn):
         gc.collect()
         _safe_empty_cache()
 
-# -------------------- 실행 헬퍼 --------------------
+# =========================================================
+# 실행 헬퍼
+# =========================================================
 def _get_price_df_for_eval(symbol, strategy): return get_kline_by_strategy(symbol, strategy)
 def run_evaluation_once(): evaluate_predictions(_get_price_df_for_eval)
 def run_evaluation_loop(interval_minutes=None):
@@ -1791,12 +1800,6 @@ def run_evaluation_loop(interval_minutes=None):
         time.sleep(iv * 60)
 
 def _load_label_stats(symbol: str, strategy: str):
-    """
-    /persistent/labels/{SYMBOL}__{STRATEGY}.parquet(.csv) 에 저장된
-    extra_cols(up_ge_2pct, dn_le_-2pct, conflict_2pct) 를 이용해
-    '클래스별 손절경유 위험도'를 계산한다.
-    파일이 없거나 칼럼이 없으면 빈 통계(0) 반환.
-    """
     try:
         key = f"{symbol.strip().upper()}__{strategy.strip()}"
         base = _p("labels", key)
@@ -1817,7 +1820,6 @@ def _load_label_stats(symbol: str, strategy: str):
         g = df.groupby("class_id", dropna=False)
         cnt = g.size().to_dict()
 
-        # 비율 계산(분모 0 방지)
         def _rate(series):
             n = float(len(series))
             return float(series.sum()) / n if n > 0 else 0.0
@@ -1851,13 +1853,6 @@ def _load_label_stats(symbol: str, strategy: str):
 
 def _stoploss_risk_guard(symbol: str, strategy: str, final_cls: int,
                          outs, allow_long: bool, allow_short: bool, min_thr: float):
-    """
-    라벨 테이블의 conflict_2pct / up_ge_2pct / dn_le_-2pct 통계를 이용해
-    선택된 클래스(final_cls)가 '손절 경유 위험'이 과도하면
-    - 대안 클래스(보수적) 재선택 시도 → 성공 시 (ok=False, why='conservative', alt_m, alt_c)
-    - 대안 없음 → abstain 권고 → (ok=False, why='abstain', None, None)
-    정상 통과면 (ok=True, 'ok', None, None)
-    """
     try:
         SL_RISK_MAX = float(os.getenv("SL_RISK_MAX", "0.40"))
         SL_RISK_SIDE_MAX = float(os.getenv("SL_RISK_SIDE_MAX", "0.35"))
@@ -1867,24 +1862,20 @@ def _stoploss_risk_guard(symbol: str, strategy: str, final_cls: int,
         stats = _load_label_stats(symbol, strategy)
         cls_n = int(stats["class_count"].get(int(final_cls), 0))
 
-        # 표본이 적으면 임계 조금 완화
         relax = SL_LOW_SAMPLE_RELAX if cls_n < SL_MIN_CLASS_SAMPLES else 0.0
         side_thr = min(0.95, SL_RISK_SIDE_MAX + relax)
         mix_thr = min(0.95, SL_RISK_MAX + relax)
 
-        # 선택 클래스의 방향
         try:
             lo_sel, hi_sel = _class_range_by_meta_or_cfg(int(final_cls), None, symbol, strategy)
             pos = _position_from_range(lo_sel, hi_sel)
         except Exception:
             pos = "neutral"
 
-        # 방향별 위험도 취합
         r_conf = float(stats["risk_conflict"].get(int(final_cls), 0.0))
         r_long = float(stats["risk_long"].get(int(final_cls), 0.0))
         r_short = float(stats["risk_short"].get(int(final_cls), 0.0))
 
-        # 과다 위험 판정
         too_mixed = (r_conf >= mix_thr)
         too_side = ((pos == "long" and r_long >= side_thr) or
                     (pos == "short" and r_short >= side_thr))
@@ -1892,7 +1883,6 @@ def _stoploss_risk_guard(symbol: str, strategy: str, final_cls: int,
         if not (too_mixed or too_side):
             return True, "ok", None, None
 
-        # 보수적 재선택 시도
         alt_m, alt_c = _choose_conservative_prediction(
             outs, symbol, strategy, allow_long, allow_short, min_thr
         )
@@ -1900,28 +1890,19 @@ def _stoploss_risk_guard(symbol: str, strategy: str, final_cls: int,
             why = f"stoploss_risk_conservative(r_conf={r_conf:.2f}, r_long={r_long:.2f}, r_short={r_short:.2f}, pos={pos})"
             return False, why, alt_m, int(alt_c)
 
-        # 대안도 없으면 abstain 권고
         why = f"stoploss_risk_abstain(r_conf={r_conf:.2f}, r_long={r_long:.2f}, r_short={r_short:.2f}, pos={pos})"
         return False, why, None, None
 
     except Exception as e:
-        # 실패 시엔 가드 패스 (보수적으로 통과)
         return True, f"stoploss_risk_guard_exception:{e}", None, None
 
 def log_return_distribution_for_run(symbol: str, strategy: str, df):
-    """
-    예측 시점의 캔들 df로 수익률 분포를 계산해서 운영로그에 남긴다.
-    학습 때랑 똑같은 공통 함수를 쓴다.
-    """
     if df is None or df.empty:
         return
-
     rets = extract_candle_returns(df, max_rows=1000)
     if not rets:
         return
-
     hist = make_return_histogram(rets, bins=20)
-
     log_prediction(
         symbol=symbol,
         strategy=strategy,
