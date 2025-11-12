@@ -72,7 +72,7 @@ CLEAN_INTERVAL_MIN   = _env_int("CLEAN_INTERVAL_MIN", 30)   # 기본 30분(최�
 LIGHT_ONLY_IF_BUSY   = _env_bool("CLEAN_LIGHT_ONLY_IF_BUSY", True)
 HEAVY_ALLOW_IF_IDLE  = _env_bool("CLEAN_HEAVY_ALLOW_IF_IDLE", True)
 HEAVY_MIN_GAP_MIN    = _env_int("CLEAN_HEAVY_MIN_GAP_MIN", 180)  # heavy 최소 간격 3h
-DISK_HARDCAP_GB      = float(getattr(safe_cleanup, "HARD_CAP_GB", 9.6))
+DISK_HARDCAP_GB      = float(getattr(safe_cleanup, "HARD_CAP_GB", 4.0))
 DISK_SOFTCAP_GB      = _env_float("CLEAN_SOFTCAP_GB", 8.0)       # soft cap 넘으면 heavy 고려
 RUN_ON_START         = _env_bool("CLEAN_RUN_ON_START", True)     # 시작 즉시 light 1회
 
