@@ -463,12 +463,14 @@ def run():
     if isinstance(group_syms, (list, tuple)) and len(group_syms) > 0:
         symset = set(group_syms)
         symbols = [s for s in all_symbols if s in symset]
-        print(f("[그룹제한] 현재 그룹 심볼 {len(symbols)}/{len(all_symbols)}개 대상으로 실행"))
+        # [FIX] 문자열 포맷팅 오타 수정 (f("...") → print("..."))
+        print(f"[그룹제한] 현재 그룹 심볼 {len(symbols)}/{len(all_symbols)}개 대상으로 실행")
 
         # 그룹이 아직 다 안 끝났으면 여기서도 바로 차단
         if int(get_REQUIRE_GROUP_COMPLETE()) and not _is_group_complete_for_all_strategies(symbols):
             miss = _missing_pairs(symbols)
-            print(f"[차단] 그룹 미완료(누락 {len(miss)}) → 예측 전면 스킵")
+            # [HARD-GATE] 누락이 1개라도 있으면 전면 차단
+            print(f"[차단] 그룹 미완료(누락 {len(miss)}쌍) → 예측 전면 스킵: {miss[:5]}{' ...' if len(miss)>5 else ''}")
             return
     else:
         symbols = all_symbols
@@ -514,6 +516,13 @@ def run():
             cooldown = TRIGGER_COOLDOWN.get(strategy, 3600)
             if nowt - last_trigger_time.get(key, 0) < cooldown:
                 continue
+
+            # [SAFETY] 그룹 제한이 걸린 상태에선 루프 안에서도 재확인
+            if isinstance(group_syms, (list, tuple)) and len(group_syms) > 0 and int(get_REQUIRE_GROUP_COMPLETE()):
+                if not _is_group_complete_for_all_strategies(symbols):
+                    # 그룹 중 일부만 끝난 타이밍에 들어오면 즉시 중단
+                    print(f"[차단] 루프중 재확인: 그룹 미완료 → 중단")
+                    return
 
             if not check_model_quality(symbol, strategy):
                 continue
