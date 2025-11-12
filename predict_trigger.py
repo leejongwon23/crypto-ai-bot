@@ -210,16 +210,43 @@ now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 
 # ── 게이트/락 관리 ────────────────────────────────────────────
 def _gate_closed() -> bool:
+    """
+    예측 게이트가 닫혀 있는지 확인.
+    - 학습 쪽은 PERSIST_DIR 기반으로 파일을 만들 수 있으니 둘 다 본다.
+    """
+    base = os.getenv("PERSIST_DIR", "/persistent")
+
+    # 학습 중임을 나타낼 수 있는 모든 후보 경로
+    busy_flags = [
+        os.path.join(base, "GROUP_ACTIVE"),
+        os.path.join(base, "run", "group_training.lock"),
+        os.path.join(base, "run", "group_predict.active"),
+        "/persistent/GROUP_ACTIVE",               # 구버전 호환
+        "/persistent/run/group_training.lock",    # 구버전 호환
+        "/persistent/run/group_predict.active",   # 구버전 호환
+    ]
+
     try:
-        if os.path.exists(GROUP_TRAIN_LOCK):
+        # 1) 학습/그룹 락이 하나라도 있으면 닫힘
+        for p in busy_flags:
+            if os.path.exists(p):
+                return True
+
+        # 2) 예측 막는 전역 플래그
+        block1 = os.path.join(base, "predict.block")
+        if os.path.exists(block1):
             return True
-        if os.path.exists(PREDICT_BLOCK):
+        if os.path.exists("/persistent/predict.block"):
             return True
+
+        # 3) predict 모듈이 제공하는 게이트가 있으면 그걸 따른다
         if __is_open is not None:
             return (not bool(__is_open()))
     except Exception:
         pass
+
     return False
+
 
 def _predict_busy() -> bool:
     if callable(_lock_api["is_locked"]):
@@ -381,12 +408,20 @@ def _retry_after_training(_predict, symbol, strategy, first_err: Exception | str
 def run():
     global _last_busy_log_at
 
-    # === 그룹 학습 중이면 트리거 차단 (두 경로 모두 체크) ===
-    GROUP_ACTIVE_A = "/persistent/GROUP_ACTIVE"
-    GROUP_ACTIVE_B = "/persistent/run/group_predict.active"
-    if os.path.exists(GROUP_ACTIVE_A) or os.path.exists(GROUP_ACTIVE_B):
-        print(f"[트리거차단] 현재 그룹 학습 중 → {GROUP_ACTIVE_A} or {GROUP_ACTIVE_B} 존재. 트리거 전체 스킵.")
-        return
+    base = os.getenv("PERSIST_DIR", "/persistent")
+    # 여기도 학습 중이면 무조건 스킵
+    busy_flags = [
+        os.path.join(base, "GROUP_ACTIVE"),
+        os.path.join(base, "run", "group_training.lock"),
+        os.path.join(base, "run", "group_predict.active"),
+        "/persistent/GROUP_ACTIVE",                # 구버전 호환
+        "/persistent/run/group_training.lock",
+        "/persistent/run/group_predict.active",
+    ]
+    for p in busy_flags:
+        if os.path.exists(p):
+            print(f"[트리거차단] 현재 그룹/학습 작업 중 → {p} 존재. 트리거 전체 스킵.")
+            return
 
     if _LOCK_PATH and os.path.exists(_LOCK_PATH):
         print(f"[트리거] 전역 락 감지({_LOCK_PATH}) → 전체 스킵 @ {now_kst().isoformat()}")
@@ -403,6 +438,7 @@ def run():
 
     _sync_ganwu_log()
 
+    # 시작 시에도 게이트 닫혀 있으면 기다렸다가, 그래도 안 열리면 그냥 나간다
     if _gate_closed() or _predict_busy():
         print(f"[트리거] 시작 시 게이트 닫힘/예측중 → 최대 {STARTUP_WAIT_FOR_GATE_OPEN_SEC}s 대기")
         opened = _wait_for_gate_open(STARTUP_WAIT_FOR_GATE_OPEN_SEC)
@@ -427,9 +463,9 @@ def run():
     if isinstance(group_syms, (list, tuple)) and len(group_syms) > 0:
         symset = set(group_syms)
         symbols = [s for s in all_symbols if s in symset]
-        print(f"[그룹제한] 현재 그룹 심볼 {len(symbols)}/{len(all_symbols)}개 대상으로 실행")
+        print(f("[그룹제한] 현재 그룹 심볼 {len(symbols)}/{len(all_symbols)}개 대상으로 실행"))
 
-        # 그룹 완주가 아니면 전면 차단 (동적 게터 사용)
+        # 그룹이 아직 다 안 끝났으면 여기서도 바로 차단
         if int(get_REQUIRE_GROUP_COMPLETE()) and not _is_group_complete_for_all_strategies(symbols):
             miss = _missing_pairs(symbols)
             print(f"[차단] 그룹 미완료(누락 {len(miss)}) → 예측 전면 스킵")
@@ -460,6 +496,7 @@ def run():
             print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
             return
 
+        # 루프 안에서도 다시 한 번 게이트/학습중 체크
         if _gate_closed() or _predict_busy():
             if (nowu - _last_busy_log_at) >= THROTTLE_BUSY_LOG_SEC:
                 print(f"[트리거] 게이트 닫힘/예측중 → 최대 {PAIR_WAIT_FOR_GATE_OPEN_SEC}s 대기 후 재시도")
@@ -522,6 +559,7 @@ def run():
             log_audit(symbol, strategy or "알수없음", "트리거오류", str(e))
 
     print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
+
 
 # ── 최근 클래스 빈도 ──────────────────────────────────────────
 def get_recent_class_frequencies(strategy=None, recent_days=RECENT_DAYS_FOR_FREQ):
@@ -632,6 +670,24 @@ def adjust_probs_with_diversity(probs, recent_freq: Counter, class_counts: dict 
 
 # ── 학습 직후 단일 페어 트리거 ────────────────────────────────
 def run_after_training(symbol: str, strategy: str) -> bool:
+    """
+    학습 끝난 직후에 한 쌍만 예측하려고 할 때 호출되는 경로.
+    → 지금은 '그룹이 아직 다 안 끝났거나' '학습 락이 살아 있으면' 바로 스킵.
+    """
+    base = os.getenv("PERSIST_DIR", "/persistent")
+    busy_flags = [
+        os.path.join(base, "GROUP_ACTIVE"),
+        os.path.join(base, "run", "group_training.lock"),
+        os.path.join(base, "run", "group_predict.active"),
+        "/persistent/GROUP_ACTIVE",
+        "/persistent/run/group_training.lock",
+        "/persistent/run/group_predict.active",
+    ]
+    for p in busy_flags:
+        if os.path.exists(p):
+            log_audit(symbol, strategy, "학습후트리거스킵", f"학습중플래그({p})")
+            return False
+
     try:
         ensure_prediction_log_exists(PREDICTION_LOG_PATH)
     except TypeError:
@@ -639,7 +695,7 @@ def run_after_training(symbol: str, strategy: str) -> bool:
     except Exception:
         pass
 
-    # 그룹 완주 전이면 학습후 트리거도 금지 (동적 게터)
+    # 그룹 완주 전이면 여기서도 차단
     group_syms = _get_current_group_symbols()
     if isinstance(group_syms, (list, tuple)) and len(group_syms) > 0 and int(get_REQUIRE_GROUP_COMPLETE()):
         if not _is_group_complete_for_all_strategies(list(group_syms)):
@@ -684,6 +740,7 @@ def run_after_training(symbol: str, strategy: str) -> bool:
     except Exception as e:
         log_audit(symbol, strategy, "학습후트리거에러", f"{e}")
         return False
+
 
 
 if __name__ == "__main__":
