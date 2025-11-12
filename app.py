@@ -654,39 +654,67 @@ else:
 
 # 학습 직후 예측: 그룹 완주 가드
 def _predict_after_training(symbols, source_note):
+    """
+    학습이 끝난 뒤 바로 예측을 붙일 때 쓰는 헬퍼.
+    → 하지만 학습 마커/락이 아직 살아 있으면 바로 예측하지 말고 스킵한다.
+    """
     if not symbols:
         return
+
+    # 학습 중 여부를 PERSIST_DIR 기준으로 다시 한 번 강하게 확인
+    busy_flags = [
+        GROUP_ACTIVE_PATH,                              # PERSIST_DIR/GROUP_ACTIVE
+        os.path.join(RUN_DIR, "group_training.lock"),   # PERSIST_DIR/run/group_training.lock
+        os.path.join(RUN_DIR, "group_predict.active"),  # 혹시 있을 옛날 마커
+    ]
+    for p in busy_flags:
+        if os.path.exists(p):
+            print(f"[APP-PRED] 🚫 학습/그룹 락 감지({p}) → 예측 전체 스킵 ({source_note})")
+            for sym in sorted(set(symbols)):
+                try:
+                    log_audit(sym, "ALL", "학습후예측스킵", f"학습락존재:{os.path.basename(p)}")
+                except Exception:
+                    pass
+            return
+
+    # 그룹 완주 옵션이 켜져 있으면 여기서도 검사
     try:
         if REQUIRE_GROUP_COMPLETE == 1:
             group_syms = _get_current_group_symbols()
             if isinstance(group_syms, (list, tuple)) and len(group_syms) > 0:
                 if not _is_group_complete_for_all_strategies(list(group_syms)):
-                    print(f"[APP-PRED] 🚫 그룹 미완료 → 예측 차단 ({source_note})"); sys.stdout.flush()
+                    print(f"[APP-PRED] 🚫 그룹 미완료 → 예측 스킵 ({source_note})")
                     for sym in sorted(set(symbols)):
-                        try: log_audit(sym, "ALL", "학습후예측스킵", "그룹 미완료(REQUIRE_GROUP_COMPLETE=1)")
-                        except Exception: pass
+                        try:
+                            log_audit(sym, "ALL", "학습후예측스킵", "그룹미완료(REQUIRE_GROUP_COMPLETE=1)")
+                        except Exception:
+                            pass
                     return
     except Exception as e:
         print(f"[APP-PRED] 그룹완료검증 실패: {e}")
 
+    # 모델 파일이 실제로 보일 때까지 잠깐 기다림
     try:
         await_sec = int(os.getenv("PREDICT_MODEL_AWAIT_SEC","60"))
     except Exception:
         await_sec = 60
-    vis = _await_models_visible(symbols, timeout_sec=await_sec)
-    if not vis:
+    visible_syms = _await_models_visible(symbols, timeout_sec=await_sec)
+    if not visible_syms:
         print(f"[APP-PRED] 모델 가시화 실패 → 예측 생략 candidates={sorted(set(symbols))}")
         return
+
+    # 혹시 남아 있는 전역락 제거
     if os.path.exists(LOCK_PATH):
         try:
             os.remove(LOCK_PATH)
             print("[APP-PRED] cleared stale lock before predict"); sys.stdout.flush()
         except Exception as e:
             print(f"[APP-PRED] lock remove failed: {e}"); sys.stdout.flush()
+
     _pl_clear()
     _safe_open_gate(source_note)
     try:
-        for sym in sorted(set(vis)):
+        for sym in sorted(set(visible_syms)):
             for strat in ["단기","중기","장기"]:
                 try:
                     if not _has_model_for(sym, strat):
@@ -700,7 +728,8 @@ def _predict_after_training(symbols, source_note):
                             try:
                                 from predict import failed_result
                                 failed_result(sym, strat, reason="invalid_return", source="app_predict")
-                            except Exception: pass
+                            except Exception:
+                                pass
                         else:
                             print(f"[APP-PRED] ✅ {sym}-{strat} ok: {result.get('reason','ok')}"); sys.stdout.flush()
                     except Exception as e:
@@ -708,11 +737,13 @@ def _predict_after_training(symbols, source_note):
                         try:
                             from predict import failed_result
                             failed_result(sym, strat, reason=str(e), source="app_predict")
-                        except Exception: pass
+                        except Exception:
+                            pass
                 except Exception as e:
                     print(f"[APP-PRED] {sym}-{strat} 실패: {e}"); sys.stdout.flush()
     finally:
         _safe_close_gate(source_note + "_end")
+
 
 # routes
 @app.route("/")
