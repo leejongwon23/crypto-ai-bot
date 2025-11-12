@@ -1,9 +1,16 @@
 # data_augmentation.py — 증강/클래스균형 + (옵션) 패턴유사도 보류까지 "한 파일"로 통합
-
 from __future__ import annotations
 import numpy as np
 from collections import Counter
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, List
+
+# (옵션) torch 샘플러 지원  # ✅ 추가
+try:
+    import torch
+    from torch.utils.data import WeightedRandomSampler
+except Exception:
+    torch = None
+    WeightedRandomSampler = None
 
 # ─────────────────────────────────────────────────────────────
 # (옵션) 데이터 접근: predict 단계 유사도 보류용
@@ -64,7 +71,7 @@ def augment_batch(X_batch: np.ndarray,
     if arr.ndim == 2:
         arr = arr[np.newaxis, ...]
 
-    outs = []
+    outs: List[np.ndarray] = []
     for x in arr:
         xa = x.copy()
         try:
@@ -110,6 +117,7 @@ def balance_classes(X: np.ndarray,
     - 소수 클래스만 적당히 오버샘플
     - 과도 증폭 방지: 상위 75퍼센타일 캡 + 배수 상한(2~6배)
     - 원본 분포를 크게 훼손하지 않도록 경미 변형 위주
+    - ⚠️ '라벨 병합/축소'는 하지 않음 (YOPO 철학 준수)
     """
     if X is None or y is None or len(X) == 0 or len(y) == 0:
         raise ValueError("balance_classes 중단: X 또는 y 비어있음")
@@ -118,6 +126,7 @@ def balance_classes(X: np.ndarray,
     X = np.asarray(X, dtype=np.float32)
     y = np.asarray(y).astype(np.int64)
 
+    # 기대 형태: (N, window, feat)
     if X.ndim != 3 or y.ndim != 1 or len(X) != len(y):
         return X, y
 
@@ -169,6 +178,66 @@ def balance_classes(X: np.ndarray,
     print(f"[📊 최종 클래스 분포] {dict(Counter(y_out.tolist()))}")
     print(f"[✅ balance_classes 완료] 총 샘플수: {len(y_out)} (캡={cap})")
     return X_out, y_out
+
+# ─────────────────────────────────────────────────────────────
+# ✅ 학습용 클래스 가중치 & 샘플러 (라벨 병합 없이 보정)
+# ─────────────────────────────────────────────────────────────
+def compute_class_weights(y: np.ndarray,
+                          num_classes: Optional[int] = None,
+                          method: str = "effective",
+                          beta: float = 0.999) -> np.ndarray:
+    """
+    method:
+      - "inverse":  weight_c = 1 / count_c
+      - "effective": weight_c = (1 - beta) / (1 - beta**count_c)  (Cui et al., 2019)
+    반환: shape=(num_classes,) float32
+    """
+    y = np.asarray(y).astype(np.int64)
+    if y.size == 0:
+        return np.zeros((0,), dtype=np.float32)
+    if num_classes is None:
+        num_classes = int(np.max(y)) + 1
+    counts = np.bincount(y, minlength=num_classes).astype(np.float64)
+    counts[counts <= 0] = 1.0
+
+    if method == "inverse":
+        w = 1.0 / counts
+    else:  # effective
+        beta = float(beta)
+        w = (1.0 - beta) / (1.0 - np.power(beta, counts))
+    w = w / (w.mean() + 1e-12)
+    return w.astype(np.float32)
+
+def make_sample_weights(y: np.ndarray, class_weights: np.ndarray) -> np.ndarray:
+    """
+    각 샘플별 weight = class_weights[y_i]
+    """
+    y = np.asarray(y).astype(np.int64)
+    w = np.asarray(class_weights, dtype=np.float32)
+    if y.size == 0 or w.size == 0:
+        return np.zeros((0,), dtype=np.float32)
+    w = w / (w.mean() + 1e-12)
+    return w[y]
+
+def make_weighted_sampler(y: np.ndarray,
+                          class_weights: Optional[np.ndarray] = None,
+                          method: str = "effective",
+                          beta: float = 0.999,
+                          replacement: bool = True):
+    """
+    PyTorch WeightedRandomSampler 생성 (가능할 때만).
+    - torch 미설치/불가 시 None 반환
+    """
+    if torch is None or WeightedRandomSampler is None:
+        return None
+    y = np.asarray(y).astype(np.int64)
+    if y.size == 0:
+        return None
+    if class_weights is None:
+        class_weights = compute_class_weights(y, method=method, beta=beta)
+    sample_w = make_sample_weights(y, class_weights)
+    tens = torch.as_tensor(sample_w, dtype=torch.float32)
+    return WeightedRandomSampler(weights=tens, num_samples=len(tens), replacement=replacement)
 
 # ─────────────────────────────────────────────────────────────
 # (옵션) 코사인 유사도 기반 보류 Guard — predict에서 필요 시 사용
