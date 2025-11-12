@@ -1748,7 +1748,6 @@ def _safe_predict_with_timeout(
         raise err[0]
     return ok[0]
 
-
 def train_symbol_group_loop(
     sleep_sec: int = 0, stop_event: Optional[threading.Event] = None
 ):
@@ -1784,35 +1783,31 @@ def train_symbol_group_loop(
                 except Exception as e:
                     _safe_print(f"[GROUP mark warn] {e}")
 
+                # 1) 이 그룹 학습부터
                 completed_syms, partial_syms = train_models(
                     group, stop_event=stop_event, ignore_should=force_full_pass
                 )
                 if stop_event is not None and stop_event.is_set():
                     break
 
-                gate_ok = True
+                # 2) 예측 게이트 확인
                 try:
                     gate_ok = ready_for_group_predict()
                 except Exception as e:
-                    _safe_print(f"[PREDICT-GATE warn] {e} -> 게이트 무시하고 진행")
+                    _safe_print(f"[PREDICT-GATE warn] {e} -> 게이트 실패로 간주하고 예측 생략")
+                    gate_ok = False
 
-                if (not gate_ok) and (not PREDICT_FORCE_AFTER_GROUP):
+                if not gate_ok:
                     _safe_print(
-                        f"[PREDICT-BLOCK] group{idx+1} ready_for_group_predict()==False (강제 실행 비활성)"
+                        f"[PREDICT-SKIP] group{idx+1}: ready_for_group_predict()==False → 학습만 하고 예측은 안 함"
                     )
                 else:
-                    if (not gate_ok) and PREDICT_FORCE_AFTER_GROUP:
-                        _safe_print(
-                            f"[PREDICT-OVERRIDE] group{idx+1} 게이트 False지만 강제 실행"
-                        )
-
+                    # 3) 게이트가 True인 경우에만 예측 실행
                     ran_any = False
                     for symbol in group:
                         for strategy in ["단기", "중기", "장기"]:
                             if not _has_model_for(symbol, strategy):
-                                _safe_print(
-                                    f"[PREDICT-SKIP] {symbol}-{strategy}: 모델 없음"
-                                )
+                                _safe_print(f"[PREDICT-SKIP] {symbol}-{strategy}: 모델 없음")
                                 continue
                             try:
                                 ok = _safe_predict_with_timeout(
@@ -1830,10 +1825,9 @@ def train_symbol_group_loop(
                                         f"[PREDICT TIMEOUT] {symbol}-{strategy} (> {PREDICT_TIMEOUT_SEC}s)"
                                     )
                             except Exception as e:
-                                _safe_print(
-                                    f"[PREDICT FAIL] {symbol}-{strategy}: {e}"
-                                )
+                                _safe_print(f"[PREDICT FAIL] {symbol}-{strategy}: {e}")
 
+                    # 하나도 실행이 안 됐을 때만 스모크
                     if not ran_any:
                         cand_symbol = _pick_smoke_symbol(group)
                         if cand_symbol:
@@ -1849,14 +1843,15 @@ def train_symbol_group_loop(
                         except Exception as e:
                             _safe_print(f"[mark_group_predicted err] {e}")
 
+                # 4) 그룹 단위 정리
                 try:
                     from logger import flush_gwanwoo_summary
-
                     flush_gwanwoo_summary()
                 except Exception:
                     pass
 
                 try:
+                    # 예측을 했든 안 했든 여기선 게이트만 닫아준다
                     close_predict_gate(note=f"train:group{idx+1}_end")
                 except Exception as e:
                     _safe_print(f"[gate close warn] {e}")
@@ -1867,6 +1862,7 @@ def train_symbol_group_loop(
                 except Exception as e:
                     _safe_print(f"[GROUP clear warn] {e}")
 
+                # 그룹 사이 휴식
                 if sleep_sec > 0:
                     for _ in range(sleep_sec):
                         if stop_event is not None and stop_event.is_set():
@@ -1878,7 +1874,6 @@ def train_symbol_group_loop(
             _safe_print("✅ group pass done")
             try:
                 from logger import flush_gwanwoo_summary
-
                 flush_gwanwoo_summary()
             except Exception:
                 pass
@@ -1972,11 +1967,18 @@ def train_symbol(symbol: str, strategy: str, group_id: int | None = None) -> dic
     res = train_one_model(symbol=symbol, strategy=strategy, group_id=group_id)
     try:
         if res.get("models"):
+            # 학습 완료 표시는 그대로
             mark_symbol_trained(symbol)
-            if not (_is_group_active_file() or _is_group_lock_file()):
+
+            # ✅ 바로 예측하지 말고, 게이트가 열려 있을 때만 예측
+            try:
+                gate_ok = ready_for_group_predict()
+            except Exception:
+                gate_ok = False
+
+            if gate_ok and not (_is_group_active_file() or _is_group_lock_file()):
                 try:
                     from predict import predict
-
                     _safe_predict_with_timeout(
                         predict_fn=predict,
                         symbol=symbol,
@@ -1986,7 +1988,12 @@ def train_symbol(symbol: str, strategy: str, group_id: int | None = None) -> dic
                         timeout=PREDICT_TIMEOUT_SEC,
                     )
                 except Exception:
+                    # 예측 실패해도 학습은 성공이므로 조용히 패스
                     pass
+            else:
+                _safe_print(
+                    f"[PREDICT-SKIP] {symbol}-{strategy}: 게이트 닫힘이거나 그룹 학습 중이라 예측 생략"
+                )
     except Exception:
         pass
     return res
@@ -2013,10 +2020,12 @@ def train_group(group_id: int | None = None) -> dict:
     out["completed"] = completed
     out["partial"] = partial
 
+    # 🔒 여기서도 게이트가 True일 때만 예측
     try:
         gate_ok = ready_for_group_predict()
     except Exception:
-        gate_ok = True
+        gate_ok = False
+
     if gate_ok:
         try:
             from predict import predict
@@ -2045,7 +2054,6 @@ def train_group(group_id: int | None = None) -> dict:
         finally:
             try:
                 from logger import flush_gwanwoo_summary
-
                 flush_gwanwoo_summary()
             except Exception:
                 pass
@@ -2053,6 +2061,8 @@ def train_group(group_id: int | None = None) -> dict:
                 close_predict_gate(note=f"train_group:idx{idx}_end")
             except Exception:
                 pass
+    else:
+        _safe_print(f"[PREDICT-SKIP] train_group idx={idx}: 게이트가 False라 예측은 생략")
 
     try:
         _set_group_active(False)
