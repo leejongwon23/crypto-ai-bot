@@ -37,6 +37,7 @@ def _as_percent(x: float) -> float:
         return 0.0
     return xv * 100.0 if 0.0 < xv < 1.0 else xv
 
+# 기본 목표 bin 수(환경/설정 우선), 단 실제 사용은 아래 _auto_target_bins로 동적 적용
 _TARGET_BINS = int(os.getenv("TARGET_BINS", str(_BIN_META.get("TARGET_BINS", 8))))
 _OUT_Q_LOW = float(os.getenv("OUTLIER_Q_LOW", str(_BIN_META.get("OUTLIER_Q_LOW", 0.01))))
 _OUT_Q_HIGH = float(os.getenv("OUTLIER_Q_HIGH", str(_BIN_META.get("OUTLIER_Q_HIGH", 0.99))))
@@ -548,6 +549,30 @@ def _compute_class_stop_frac(
 
     return class_stop_frac, class_stop_n
 
+# ============================================
+# 🔧 데이터 길이에 따라 클래스 수 자동 조정
+# ============================================
+def _auto_target_bins(df_len: int) -> int:
+    """
+    데이터(행) 개수에 따라 사용할 target_bins를 자동 결정.
+    - 최소 8, 최대 32
+    - 데이터가 많을수록 더 세밀하게 분할
+    - 환경변수/설정에 TARGET_BINS가 강제 지정되면 그 값이 '최소' 기준이 됨
+    """
+    base_min = max(8, int(_TARGET_BINS))  # 설정값이 더 크면 그걸 하한으로 삼음
+    if df_len <= 300:
+        return max(base_min, 8)
+    elif df_len <= 600:
+        return max(base_min, 10)
+    elif df_len <= 1000:
+        return max(base_min, 14)
+    elif df_len <= 2000:
+        return max(base_min, 18)
+    elif df_len <= 4000:
+        return max(base_min, 24)
+    else:
+        return max(base_min, 32)
+
 # ============================
 # Public API (strategy-based)
 # ============================
@@ -563,9 +588,12 @@ def make_labels(
     horizon_candles = _strategy_horizon_candles_from_hours(df, pure_strategy)
     up_c, dn_c = _future_extreme_signed_returns_by_candles(df, horizon_candles)
 
-    # 2) 분포는 둘 다 넣어서 만든다 (이게 너가 말한 부분)
+    # 2) 분포는 dn+up 모두 넣어서 만든다
     dist_for_bins = np.concatenate([dn_c, up_c], axis=0)
-    edges, bin_counts, bin_spans = _build_bins(dist_for_bins, _TARGET_BINS)
+
+    # 🔸 df 길이에 맞춰 target_bins 동적 결정
+    dynamic_bins = _auto_target_bins(len(df))
+    edges, bin_counts, bin_spans = _build_bins(dist_for_bins, dynamic_bins)
 
     # 3) 실제 라벨로는 그 캔들이 더 크게 움직인 쪽을 쓴다
     gains = _pick_per_candle_gain(up_c, dn_c)
@@ -596,6 +624,7 @@ def make_labels(
             "class_stop_frac": list(map(float, class_stop_frac.tolist())),
             "class_stop_n": list(map(int, class_stop_n.tolist())),
             "class_mid": [float((edges[i] + edges[i+1]) / 2.0) for i in range(max(0, edges.size - 1))],
+            "target_bins_used": int(dynamic_bins),
         })
     except Exception as e:
         logger.warning("labels: class_stop_frac compute failed (%s/%s): %s", symbol, pure_strategy, e)
@@ -617,10 +646,11 @@ def make_labels(
     empty_bins = int(np.sum(bin_counts == 0))
     num_classes = int(edges.size - 1)
     logger.info(
-        "labels: freeze %s/%s bins(fd)=%d, empty=%d -> NUM_CLASSES=%d counts=%s",
+        "labels: freeze %s/%s bins(request=%d,used=%d) empty=%d -> NUM_CLASSES=%d counts=%s",
         symbol,
         pure_strategy,
         int(_TARGET_BINS),
+        int(dynamic_bins),
         empty_bins,
         num_classes,
         _counts_dict(labels),
@@ -657,7 +687,10 @@ def make_labels_for_horizon(
 
     # 1) 분포는 둘 다 넣어서
     dist_for_bins = np.concatenate([dn, up], axis=0)
-    edges, bin_counts, bin_spans = _build_bins(dist_for_bins, _TARGET_BINS)
+
+    # 🔸 df 길이에 맞춰 target_bins 동적 결정
+    dynamic_bins = _auto_target_bins(len(df))
+    edges, bin_counts, bin_spans = _build_bins(dist_for_bins, dynamic_bins)
 
     # 2) 라벨은 더 크게 움직인 쪽
     gains = _pick_per_candle_gain(up, dn)
@@ -689,6 +722,7 @@ def make_labels_for_horizon(
             "class_stop_frac": list(map(float, class_stop_frac.tolist())),
             "class_stop_n": list(map(int, class_stop_n.tolist())),
             "class_mid": [float((edges[i] + edges[i+1]) / 2.0) for i in range(max(0, edges.size - 1))],
+            "target_bins_used": int(dynamic_bins),
         })
     except Exception as e:
         logger.warning("labels(h=%s): class_stop_frac compute failed (%s/%s): %s", horizon_hours, symbol, strategy, e)
@@ -710,11 +744,12 @@ def make_labels_for_horizon(
     empty_bins = int(np.sum(bin_counts == 0))
     num_classes = int(edges.size - 1)
     logger.info(
-        "labels(h=%s): freeze %s/%s bins(fd)=%d, empty=%d -> NUM_CLASSES=%d counts=%s",
+        "labels(h=%s): freeze %s/%s bins(request=%d,used=%d) empty=%d -> NUM_CLASSES=%d counts=%s",
         horizon_hours,
         symbol,
         strategy,
         int(_TARGET_BINS),
+        int(dynamic_bins),
         empty_bins,
         num_classes,
         _counts_dict(labels),
