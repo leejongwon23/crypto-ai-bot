@@ -285,18 +285,43 @@ class GroupOrderManager:
         self.last_predicted_idx = -1
         self._load()
     def _load(self):
+        """기존 그룹(SYMBOL_GROUPS)을 그대로 사용하고, 인덱스/훈련상태만 복구한다."""
         try:
+            # state 디렉터리 보장
             os.makedirs(_STATE_DIR, exist_ok=True)
-            target = _STATE_PATH if os.path.isfile(_STATE_PATH) else (_STATE_BAK if os.path.isfile(_STATE_BAK) else None)
-            if target:
-                st = json.load(open(target, "r", encoding="utf-8"))
-                saved_syms = st.get("symbols", [])
-                saved_groups = _compute_groups(saved_syms, 5) if saved_syms else st.get("groups", [])
-                if saved_groups: self.groups = saved_groups[:8]
-                self.idx = int(st.get("idx", 0))
-                self.trained = {int(k): set(v) for k, v in st.get("trained", {}).items()}
-                self.last_predicted_idx = int(st.get("last_predicted_idx", -1))
-                print(f"[🧭 그룹상태 로드] idx={self.idx}, last_predicted_idx={self.last_predicted_idx}")
+
+            # state 파일 또는 백업 파일이 있는지 확인
+            target = (
+                _STATE_PATH
+                if os.path.isfile(_STATE_PATH)
+                else (_STATE_BAK if os.path.isfile(_STATE_BAK) else None)
+            )
+
+            # state 파일 없으면 (즉, 최초 실행이면) 그냥 종료 → 코드에 정의된 그룹 사용
+            if not target:
+                return
+
+            # JSON 읽기
+            with open(target, "r", encoding="utf-8") as f:
+                st = json.load(f)
+
+            # ❗❗ 핵심 수정 포인트:  
+            # 저장된 groups/symbols 를 절대 로드하지 않고  
+            # 코드에 정의된 SYMBOL_GROUPS 를 항상 기준으로 사용한다.
+            # 즉, 파일에서는 'idx, trained, last_predicted_idx' 만 복구.
+            self.idx = int(st.get("idx", 0))
+            self.trained = {int(k): set(v) for k, v in st.get("trained", {}).items()}
+            self.last_predicted_idx = int(st.get("last_predicted_idx", -1))
+
+            # idx 값이 그룹 개수 범위를 넘지 않도록 보정
+            self.idx = self.current_index()
+
+            print(
+                f"[🧭 그룹상태 로드] idx={self.idx}, "
+                f"last_predicted_idx={self.last_predicted_idx}, "
+                f"groups_len={len(self.groups)}"
+            )
+
         except Exception as e:
             print(f"[⚠️ 그룹상태 로드 실패] {e}")
     def _save(self):
