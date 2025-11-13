@@ -1169,10 +1169,15 @@ def _compute_mtf_features(symbol: str, strategy: str, df_base: pd.DataFrame) -> 
     base_feat = base_feat[["timestamp","open","high","low","close","volume","rsi","macd","macd_signal","macd_hist","bb_up","bb_dn","bb_sd","bb_width","bb_percent_b","volatility","ema20","ema50","ema100","ema200","trend_score","roc","atr","stoch_k","stoch_d","williams_r","vwap"]]
     return _merge_asof_all(base_feat, ctx_blocks, strategy)
 
-def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_features: list = None, fallback_input_size: int = None) -> pd.DataFrame:
+def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_features: list = None, fallback_input_size: int = None, force_refresh: bool = False) -> pd.DataFrame:
+    """
+    symbol/strategy별 피처 계산.
+    force_refresh=True 이면 10분 캐시를 무시하고 항상 새로 계산한다.
+    """
     cache_key = f"{symbol}-{strategy}-features"
     cached = CacheManager.get(cache_key, ttl_sec=600)
-    if cached is not None: return cached
+    if (not force_refresh) and (cached is not None):
+        return cached
     if df is None or df.empty or not isinstance(df, pd.DataFrame):
         safe_failed_result(symbol, strategy, reason="입력DataFrame empty"); dummy = pd.DataFrame(); dummy.attrs["not_enough_rows"] = True; return dummy
     if len(df) < _PREDICT_MIN_WINDOW:
@@ -1568,9 +1573,13 @@ def load_latest_features(symbol: str, strategy: str) -> Optional[pd.DataFrame]:
 
 # ========================= 공개 API =========================
 def build_training_dataset(symbol: str, strategy: str, window: int, input_size: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
-    # 🔴 학습용 데이터는 항상 최신으로 강제할 수 있게 하려면 여기에서도 force_refresh를 True로 줄 수 있음
-    df_price = get_kline_by_strategy(symbol, strategy, force_refresh=False)
-    feat_df = compute_features(symbol, df_price, strategy)
+    """
+    학습용 데이터셋 생성:
+    - 항상 최신 캔들을 기준으로 학습하기 위해 force_refresh=True 로 강제 새 수집.
+    - 피처도 force_refresh=True 로 새로 계산.
+    """
+    df_price = get_kline_by_strategy(symbol, strategy, force_refresh=True)
+    feat_df = compute_features(symbol, df_price, strategy, force_refresh=True)
     if not isinstance(feat_df, pd.DataFrame) or feat_df.empty:
         X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
         y = np.zeros((1,), dtype=np.int64)
