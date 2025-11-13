@@ -12,7 +12,7 @@ import pandas as pd
 
 from config import (
     BOUNDARY_BAND,
-    _strategy_horizon_hours,  # 남겨둠: 호환용
+    _strategy_horizon_hours,  # 남겨둠: 전략별 시간(h) 설정
     _future_extreme_signed_returns,
     get_BIN_META,
     get_CLASS_BIN,
@@ -53,6 +53,7 @@ _ZERO_BAND_PCT_HINT = _as_percent(float(_CLASS_BIN_META.get("ZERO_BAND_PCT", _CE
 
 _MIN_LABEL_CLASSES = int(os.getenv("MIN_LABEL_CLASSES", "4"))
 
+# 전략별 기본 horizon (시간 기준, 바 없으면 이걸 사용)
 _DEFAULT_STRATEGY_HOURS = {
     "단기": 4,
     "중기": 24,
@@ -70,6 +71,8 @@ def _ensure_dir_with_fallback(primary: str, fallback: str) -> Path:
         p_fallback.mkdir(parents=True, exist_ok=True)
         return p_fallback
 
+# NOTE: predict.py는 PERSISTENT_DIR, 여기서는 PERSIST_DIR을 쓰지만
+# 기본값이 둘 다 "/persistent" 라서 경로는 일치함.
 _PERSIST_BASE = os.getenv("PERSIST_DIR", "/persistent")
 
 _EDGES_DIR = _ensure_dir_with_fallback(
@@ -119,16 +122,55 @@ def _normalize_strategy_name(strategy: str) -> str:
         return "장기"
     return s
 
-# 전략 → 캔들 수 (여기선 1,1,7로 고정)
+def _infer_bar_hours_from_df(df: pd.DataFrame) -> float:
+    """
+    DF의 timestamp 간격을 보고 한 캔들이 몇 시간인지 추정.
+    - 실패하면 1시간으로 가정.
+    """
+    try:
+        if "timestamp" not in df.columns or len(df) < 2:
+            return 1.0
+        ts = _to_series_ts_kst(df["timestamp"])
+        ts = ts.sort_values()
+        diffs = ts.diff().dropna()
+        if diffs.empty:
+            return 1.0
+        med = diffs.median()
+        h = med.total_seconds() / 3600.0
+        if not np.isfinite(h) or h <= 0:
+            return 1.0
+        return float(h)
+    except Exception:
+        return 1.0
+
+# 전략 → "몇 캔들"을 볼지 결정 (4h/24h/168h 같은 시간 기준을 캔들 개수로 변환)
 def _strategy_horizon_candles_from_hours(df: pd.DataFrame, strategy: str) -> int:
+    """
+    예:
+    - 캔들 간격이 1h이고, 전략이 '단기'(4h)면 → 4 캔들
+    - 캔들 간격이 4h이고, 전략이 '단기'(4h)면 → 1 캔들
+    - 캔들 간격이 1h이고, 전략이 '장기'(168h)면 → 168 캔들
+    """
     s = _normalize_strategy_name(strategy)
-    if s == "단기":
-        return 1
-    if s == "중기":
-        return 1
-    if s == "장기":
-        return 7
-    return 1
+
+    # 1) 기본 horizon 시간(시간 단위)을 config에서 우선 가져오고, 없으면 DEFAULT 사용
+    base_hours = _DEFAULT_STRATEGY_HOURS.get(s, _DEFAULT_STRATEGY_HOURS["단기"])
+    try:
+        if isinstance(_strategy_horizon_hours, dict):
+            base_hours = int(_strategy_horizon_hours.get(s, base_hours))
+    except Exception:
+        pass
+
+    # 2) 캔들 한 개가 몇 시간인지 추정
+    bar_hours = _infer_bar_hours_from_df(df)
+
+    # 3) "몇 캔들" 볼지 계산 (최소 1)
+    try:
+        H = int(round(float(base_hours) / float(bar_hours)))
+    except Exception:
+        H = 1
+    H = max(1, H)
+    return H
 
 # 캔들 개수로 미래 up/dn 계산
 def _future_extreme_signed_returns_by_candles(df: pd.DataFrame, horizon_candles: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -584,18 +626,20 @@ def make_labels(
 ) -> tuple[np.ndarray, np.ndarray, list[tuple[float, float]], np.ndarray, np.ndarray, np.ndarray]:
     pure_strategy = _normalize_strategy_name(strategy)
 
-    # 1) 캔들 수 결정하고 up/dn 둘 다 만든다
+    # 1) 전략에 맞는 horizon 캔들 수 결정 (4h/24h/168h → 캔들 개수로 변환)
     horizon_candles = _strategy_horizon_candles_from_hours(df, pure_strategy)
+
+    # 2) 해당 horizon 동안의 future up/dn 계산
     up_c, dn_c = _future_extreme_signed_returns_by_candles(df, horizon_candles)
 
-    # 2) 분포는 dn+up 모두 넣어서 만든다
+    # 3) 분포는 dn+up 모두 넣어서 만든다
     dist_for_bins = np.concatenate([dn_c, up_c], axis=0)
 
     # 🔸 df 길이에 맞춰 target_bins 동적 결정
     dynamic_bins = _auto_target_bins(len(df))
     edges, bin_counts, bin_spans = _build_bins(dist_for_bins, dynamic_bins)
 
-    # 3) 실제 라벨로는 그 캔들이 더 크게 움직인 쪽을 쓴다
+    # 4) 실제 라벨로는 그 캔들이 더 크게 움직인 쪽을 쓴다
     gains = _pick_per_candle_gain(up_c, dn_c)
     labels = _vector_bin(gains, edges)
 
