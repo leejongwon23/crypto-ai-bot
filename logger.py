@@ -1298,45 +1298,126 @@ def flush_gwanwoo_summary():
         print(f"[✅ 관우요약] {len(df_out)}행 생성: {out_path}")
     return out_path
 
-# logger.py 안에 추가할 코드
-
+# ============================================================
+# 수익률 분포 추출/히스토그램 (labels.py 수식과 최대한 통일)
+# ============================================================
 import numpy as np
 
-def extract_candle_returns(df, max_rows: int = 1000):
+# labels.py 의 helper 를 가져와서,
+# 운영 로그 수익률 계산을 학습 라벨 분포와 맞춘다.
+try:
+    from labels import (
+        _strategy_horizon_candles_from_hours as _lbl_strategy_horizon_candles_from_hours,
+        _future_extreme_signed_returns_by_candles as _lbl_future_extreme_signed_returns_by_candles,
+        _infer_bar_hours_from_df as _lbl_infer_bar_hours_from_df,
+    )
+except Exception:
+    _lbl_strategy_horizon_candles_from_hours = None
+    _lbl_future_extreme_signed_returns_by_candles = None
+    _lbl_infer_bar_hours_from_df = None
+
+def extract_candle_returns(
+    df,
+    max_rows: int = 1000,
+    strategy: str | None = None,
+    horizon_hours: int | None = None,
+):
     """
-    캔들 df에서 high/low 기준 수익률을 전부 뽑아서 리스트로 돌려준다.
-    여기서는 '안 자른다'가 핵심이다. (±5% 이런 거 없음)
+    학습 labels.py 와 최대한 동일한 방식으로 '미래 구간 수익률'을 추출한다.
+
+    - 기본 아이디어 (labels.py 와 동일):
+      1) df 의 timestamp 간격으로 bar_hours 추정
+      2) 전략(strategy) 또는 horizon_hours 에 따라 horizon_candles 계산
+      3) 해당 horizon 동안의 future high/low 수익률(up/dn)을 계산
+      4) 분포용 값은 [dn, up] 을 모두 이어붙인 배열 (labels 의 dist_for_bins 과 동일 개념)
+
+    - strategy / horizon_hours 를 안 넘기면:
+      → 예전 방식(각 캔들의 high/low vs close)을 fallback 으로 사용.
+        (기존 호출 방식 유지: extract_candle_returns(df, max_rows=1000))
     """
-    if df is None or df.empty:
+    if df is None or getattr(df, "empty", True):
         return []
 
-    df_use = df.tail(max_rows).copy()
-    rets = []
+    try:
+        df_use = df.tail(max_rows).copy()
+    except Exception:
+        df_use = df
 
+    # --- 1) labels 기반: 학습 공식과 동일한 미래 구간 수익률 ---
+    try:
+        if _lbl_future_extreme_signed_returns_by_candles is not None:
+            horizon_candles = None
+
+            # (a) strategy 기준 (단기/중기/장기)
+            if strategy is not None and _lbl_strategy_horizon_candles_from_hours is not None:
+                try:
+                    horizon_candles = int(
+                        max(1, _lbl_strategy_horizon_candles_from_hours(df_use, strategy))
+                    )
+                except Exception:
+                    horizon_candles = None
+
+            # (b) strategy 없고 horizon_hours 직접 넘어온 경우
+            if horizon_candles is None and horizon_hours is not None:
+                bar_h = 1.0
+                if _lbl_infer_bar_hours_from_df is not None:
+                    try:
+                        bar_h = float(_lbl_infer_bar_hours_from_df(df_use))
+                    except Exception:
+                        bar_h = 1.0
+                else:
+                    # labels helper 를 못쓰는 경우, 단순 시간차로 추정
+                    try:
+                        ts = pd.to_datetime(df_use["timestamp"], errors="coerce").sort_values()
+                        diffs = ts.diff().dropna()
+                        bar_h = float(diffs.median().total_seconds() / 3600.0) if not diffs.empty else 1.0
+                    except Exception:
+                        bar_h = 1.0
+
+                if not (bar_h > 0 and np.isfinite(bar_h)):
+                    bar_h = 1.0
+                horizon_candles = max(1, int(round(float(horizon_hours) / bar_h)))
+
+            if horizon_candles is None:
+                # 정보가 전혀 없으면 최소 1캔들
+                horizon_candles = 1
+
+            up_c, dn_c = _lbl_future_extreme_signed_returns_by_candles(df_use, int(horizon_candles))
+            dist = np.concatenate([dn_c, up_c], axis=0).astype(float)
+            dist = dist[np.isfinite(dist)]
+            return dist.tolist()
+    except Exception as e:
+        print(f"[logger.extract_candle_returns] labels 기반 계산 실패 → fallback 사용 ({e})")
+
+    # --- 2) fallback: 기존 per-candle high/low 방식 (과거 코드 유지) ---
+    rets: list[float] = []
     for _, row in df_use.iterrows():
         try:
             base = float(row["close"])
-            high_ = float(row["high"])
-            low_ = float(row["low"])
+            high_ = float(row.get("high", row["close"]))
+            low_ = float(row.get("low", row["close"]))
         except Exception:
             continue
 
-        if base <= 0:
+        if not np.isfinite(base) or base <= 0:
             continue
 
         up_ret = (high_ - base) / base   # 위로 간 수익률
         dn_ret = (low_ - base) / base    # 아래로 간 수익률
 
-        rets.append(up_ret)
-        rets.append(dn_ret)
+        if np.isfinite(up_ret):
+            rets.append(float(up_ret))
+        if np.isfinite(dn_ret):
+            rets.append(float(dn_ret))
 
     return rets
-
 
 def make_return_histogram(returns: list[float], bins: int = 20):
     """
     수익률 리스트를 받아서 히스토그램(구간, 개수)으로 바꿔준다.
-    여기서도 자르지 않는다.
+    - labels.py 의 dist_for_bins (dn+up) 을 그대로 넣어주면,
+      여기서는 단순히 구간만 나누는 역할만 한다.
+    - returns 가 비어있으면 빈 결과 반환.
     """
     if not returns:
         return {
@@ -1344,12 +1425,20 @@ def make_return_histogram(returns: list[float], bins: int = 20):
             "bin_counts": [],
         }
 
-    arr = np.array(returns, dtype=float)
+    arr = np.asarray(returns, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return {
+            "bin_edges": [],
+            "bin_counts": [],
+        }
 
-    # 자동으로 20구간 정도로 자름 (원하면 숫자 바꿔도 됨)
-    counts, edges = np.histogram(arr, bins=bins)
+    try:
+        counts, edges = np.histogram(arr, bins=int(max(2, bins)))
+    except Exception:
+        counts, edges = np.histogram(arr, bins=20)
 
     return {
-        "bin_edges": edges.tolist(),
+        "bin_edges": edges.astype(float).tolist(),
         "bin_counts": counts.astype(int).tolist(),
-    }
+        }
