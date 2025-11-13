@@ -877,7 +877,6 @@ def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
             break
     return train_idx, val_idx, moved
 
-
 def train_one_model(
     symbol,
     strategy,
@@ -886,16 +885,14 @@ def train_one_model(
     stop_event: Optional[threading.Event] = None,
     pre_feat: Optional[pd.DataFrame] = None,
     pre_lbl: Optional[tuple] = None,
-    df_hint: Optional[pd.DataFrame] = None,  # ✅ 전략별로 미리 뽑아온 df
+    df_hint: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
     """
     한 심볼-전략-그룹에 대해 실제로 모델을 1개 이상 학습해서 저장하는 함수.
     (device_type 누락되는 거 고친 버전)
     """
-    # ─── 여기가 문제였음: 함수 안에서 바로 정리 ───
     HAS_CUDA = torch.cuda.is_available()
     device_type = "cuda" if HAS_CUDA else "cpu"
-    # 전역 USE_AMP 값이 있더라도 GPU 없으면 끈다
     use_amp_here = (os.getenv("USE_AMP", "1") == "1") and HAS_CUDA
 
     if max_epochs is None:
@@ -926,10 +923,8 @@ def train_one_model(
             _log_skip(symbol, strategy, "데이터 없음")
             return res
 
-        # 학습 시 수익률 분포 운영로그
         log_return_distribution_for_train(symbol, strategy, df)
 
-        # 전략별 기준치
         cfg = STRATEGY_CONFIG.get(strategy, {})
         _limit = int(cfg.get("limit", 300))
         _min_required = max(60, int(_limit * 0.90))
@@ -937,7 +932,7 @@ def train_one_model(
         augment_needed = bool(_attrs.get("augment_needed", len(df) < _limit))
         enough_for_training = bool(_attrs.get("enough_for_training", len(df) >= _min_required))
 
-        # ===== 2. 피처 만들기 / 재사용 =====
+        # ===== 2. 피처 만들기 =====
         if isinstance(pre_feat, pd.DataFrame):
             feat = pre_feat
         elif isinstance(pre_feat, dict) and pre_feat.get(strategy, None) is not None:
@@ -949,9 +944,10 @@ def train_one_model(
             _log_skip(symbol, strategy, "피처 없음")
             return res
 
-        # ===== 3. 라벨 만들기 / 재사용 =====
+        # ===== 3. 라벨 만들기 =====
         bin_info = None
         if isinstance(pre_lbl, tuple) and len(pre_lbl) in (3, 4, 6):
+            # 기존 처리 그대로 유지
             if len(pre_lbl) == 6:
                 gains, labels, class_ranges_used_global, be, bc, bs = pre_lbl
                 bin_info = {
@@ -1002,7 +998,7 @@ def train_one_model(
             _log_skip(symbol, strategy, "라벨 없음")
             return res
 
-        # ===== 4. 라벨 편향 교정 1회 =====
+        # ===== 4. 라벨 RETRY =====
         uniq0 = _uniq_nonneg(labels)
         if uniq0 <= 1:
             _safe_print(f"[LABEL RETRY] uniq<=1 → rebuild via make_labels() once ({symbol}-{strategy})")
@@ -1039,10 +1035,11 @@ def train_one_model(
         keep_set = set(gidx)
         to_local = {g: i for i, g in enumerate(gidx)}
 
-        # ===== 6. 라벨/수익분포 로그 =====
+        # ===== 6. 로그 출력 =====
         mask_cnt = int((labels < 0).sum())
         _safe_print(
-            f"[LABELS] total={len(labels)} masked={mask_cnt} ({mask_cnt/max(1,len(labels)):.2%}) BOUNDARY_BAND=±{BOUNDARY_BAND}"
+            f"[LABELS] total={len(labels)} masked={mask_cnt} ({mask_cnt/max(1,len(labels)):.2%}) "
+            f"BOUNDARY_BAND=±{BOUNDARY_BAND}"
         )
         try:
             cnt_before = np.bincount(labels[labels >= 0], minlength=len(class_ranges)).astype(int).tolist()
@@ -1073,8 +1070,8 @@ def train_one_model(
                 window=None,
                 recent_cap=None,
                 rows=int(len(df)),
-                limit=int(STRATEGY_CONFIG.get(strategy, {}).get("limit", 300)),
-                min=int(max(60, int(STRATEGY_CONFIG.get(strategy, {}).get("limit", 300) * 0.90))),
+                limit=int(_limit),
+                min=int(_min_required),
                 augment_needed=bool(augment_needed),
                 enough_for_training=bool(enough_for_training),
                 note=f"[LabelStats] bins={len(class_ranges)}, empty={len(empty_idx)}, classes={num_classes_effective}, empty_idx={empty_idx[:8]}"
@@ -1101,8 +1098,7 @@ def train_one_model(
         # ===== 8. 윈도우 후보 =====
         try:
             top_windows = find_best_windows(
-                symbol,
-                strategy,
+                symbol, strategy,
                 window_list=[16, 20, 24, 28, 32],
                 top_k=3,
                 group_id=group_id,
@@ -1110,17 +1106,15 @@ def train_one_model(
         except Exception:
             try:
                 top_windows = [
-                    int(
-                        find_best_window(
-                            symbol,
-                            strategy,
-                            window_list=[16, 20, 24, 28, 32],
-                            group_id=group_id,
-                        )
-                    )
+                    int(find_best_window(
+                        symbol, strategy,
+                        window_list=[16, 20, 24, 28, 32],
+                        group_id=group_id,
+                    ))
                 ]
             except Exception:
                 top_windows = [20]
+
         top_windows = [
             int(max(5, w))
             for w in top_windows
@@ -1177,8 +1171,7 @@ def train_one_model(
             if not strat_ok:
                 try:
                     train_idx, val_idx = coverage_split_indices(
-                        y,
-                        val_frac=0.20,
+                        y, val_frac=0.20,
                         min_coverage=0.60,
                         stride=50,
                         num_classes=len(class_ranges),
@@ -1224,14 +1217,25 @@ def train_one_model(
             X_val = X_raw[val_idx]
             y_val = y[val_idx]
 
-            # -------------------- [ADD] 희소 클래스 보정 (훈련 세트만) --------------------
+            # ─────────────── [ADD] 희소 클래스 보정 ───────────────
             if BALANCE_CLASSES_FLAG:
                 try:
-                    X_train, y_train = balance_classes(X_train, y_train)  # 라벨 병합 없음
+                    X_train, y_train = balance_classes(X_train, y_train)
                     _safe_print(f"[BALANCE] applied: train={len(y_train)}, val={len(y_val)}")
                 except Exception as e:
                     _safe_print(f"[BALANCE skip] {e}")
-            # 선택: 가중 샘플러
+
+            # ─────────────── [ADD] 증강 후 클래스 분포 출력 ───────────────
+            try:
+                from collections import Counter
+                cls_dist = Counter(y_train.tolist())
+                _safe_print("[BALANCE RESULT] 클래스별 샘플 수:")
+                for cls_id in sorted(cls_dist.keys()):
+                    _safe_print(f"  - class {cls_id}: {cls_dist[cls_id]}개")
+            except Exception as e:
+                _safe_print(f"[BALANCE RESULT skip] {e}")
+            # ────────────────────────────────────────────────────────
+
             sampler = None
             if WEIGHTED_SAMPLER_FLAG:
                 try:
@@ -1241,7 +1245,6 @@ def train_one_model(
                         _safe_print("[SAMPLER] WeightedRandomSampler enabled")
                 except Exception as e:
                     _safe_print(f"[SAMPLER skip] {e}")
-            # -------------------------------------------------------------------------
 
             train_ds = TensorDataset(
                 torch.from_numpy(X_train).to(torch.float32),
@@ -1252,13 +1255,12 @@ def train_one_model(
                 torch.from_numpy(y_val).to(torch.long),
             )
 
-            # 여기 들여쓰기 네가 까먹었다고 했던 부분
             train_loader = DataLoader(
                 train_ds,
-                batch_size=32,              # 한 번에 32개씩 처리
-                shuffle=(sampler is None),  # 샘플러 쓰면 shuffle=False
-                sampler=sampler,            # [ADD]
-                num_workers=0,              # Render/제한 환경은 0이 안전
+                batch_size=32,
+                shuffle=(sampler is None),
+                sampler=sampler,
+                num_workers=0,
                 pin_memory=False,
                 persistent_workers=False,
             )
@@ -1266,7 +1268,7 @@ def train_one_model(
             val_loader = DataLoader(
                 val_ds,
                 batch_size=32,
-                shuffle=False,              # 검증은 순서 유지
+                shuffle=False,
                 num_workers=0,
                 pin_memory=False,
                 persistent_workers=False,
@@ -1297,7 +1299,6 @@ def train_one_model(
                 weight_decay=float(os.getenv("TRAIN_WD", "1e-4")),
             )
 
-            # 여기서도 AMP 켜고 끄기 확정
             scaler = torch.amp.GradScaler(device=device_type) if use_amp_here else None
 
             best_f1 = -1.0
@@ -1411,7 +1412,6 @@ def train_one_model(
                 _log_fail(symbol, strategy, "학습 실패(best_state 없음)")
                 continue
 
-            # best로 롤백
             model.load_state_dict(best_state["model"])
             acc = best_state["acc"]
             f1_val = best_state["f1"]
@@ -1420,7 +1420,7 @@ def train_one_model(
             lbls = best_state["lbls"]
             val_y = best_state["val_y"]
 
-            # ===== bin 정보 정리 & 저장 =====
+            # ===== bin 정보 정리 및 저장 =====
             try:
                 if isinstance(bin_info, dict) and "bin_edges" in bin_info:
                     bin_edges = [float(x) for x in bin_info.get("bin_edges", [])]
@@ -1499,7 +1499,6 @@ def train_one_model(
             }
             wpath, mpath = _save_model_and_meta(model, stem + ".pt", meta)
 
-            # ===== 학습로그(success) =====
             try:
                 final_note = f"train_one_model(window={window}, cap={len(features_only)}, engine=manual)"
                 if note_msg:
@@ -1539,11 +1538,9 @@ def train_one_model(
             except Exception:
                 pass
 
-            # 결과에 기록
             res["windows"].append(int(window))
             res["models"].append(os.path.basename(wpath))
 
-            # 피처 중요도 옵션
             if IMPORTANCE_ENABLE:
                 try:
                     fi = compute_feature_importance(model, features_only, device=DEVICE)
@@ -1557,7 +1554,6 @@ def train_one_model(
                 except Exception as e:
                     _safe_print(f"[FI warn] {e}")
 
-            # 메모리 정리
             _release_memory(
                 train_ds,
                 val_ds,
