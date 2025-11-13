@@ -174,6 +174,17 @@ from config import (
     get_TRAIN_LOG_PATH,
 )
 
+# ===================== [ADD] 클래스 불균형 보정 유틸 =====================
+# YOPO 철학 준수: 라벨 "병합" 없음. 오로지 학습 데이터에서 소수 클래스만 살짝 늘리거나(오버샘플) 가중 샘플링.
+try:
+    from data_augmentation import balance_classes, compute_class_weights, make_weighted_sampler
+except Exception:
+    # 안전 폴백: 아무 것도 하지 않음
+    def balance_classes(X, y, *a, **k): return (X, y)
+    def compute_class_weights(y, *a, **k): return np.ones((int(np.max(y))+1 if len(y)>0 else 0,), dtype=np.float32)
+    def make_weighted_sampler(*a, **k): return None
+# ======================================================================
+
 # ================================================
 # ⚠️ 여기서부터 경로를 전부 "안전 경로"로 바꿈
 # 기본은 /tmp/persistent 밑으로 저장. 환경변수 PERSIST_DIR 있으면 그거 씀.
@@ -384,12 +395,7 @@ except Exception:
     def run_after_training(symbol, strategy, *a, **k):
         return False
 
-# [가드] data_augmentation (없으면 원본 그대로 통과)
-try:
-    from data_augmentation import balance_classes
-except Exception:
-    def balance_classes(X: np.ndarray, y: np.ndarray, num_classes: int):
-        return X, y
+# [가드] data_augmentation (없으면 원본 그대로 통과)  # (위에서 임포트 추가됨)
 
 # [가드] focal_loss (없으면 CE Loss 대체)
 try:
@@ -456,6 +462,10 @@ EARLY_STOP_MIN_DELTA = float(os.getenv("EARLY_STOP_MIN_DELTA", "0.0001"))
 USE_AMP = os.getenv("USE_AMP", "1") == "1"
 TRAIN_CUDA_EMPTY_EVERY_EP = os.getenv("TRAIN_CUDA_EMPTY_EVERY_EP", "1") == "1"
 
+# ===== [ADD] 클래스 불균형 제어용 ENV =====
+BALANCE_CLASSES_FLAG = os.getenv("BALANCE_CLASSES", "1") == "1"      # 기본 ON
+WEIGHTED_SAMPLER_FLAG = os.getenv("WEIGHTED_SAMPLER", "0") == "1"    # 기본 OFF
+# ===================================================================
 
 def _as_bool_env(name: str, default: bool) -> bool:
     v = os.getenv(name)
@@ -1214,6 +1224,25 @@ def train_one_model(
             X_val = X_raw[val_idx]
             y_val = y[val_idx]
 
+            # -------------------- [ADD] 희소 클래스 보정 (훈련 세트만) --------------------
+            if BALANCE_CLASSES_FLAG:
+                try:
+                    X_train, y_train = balance_classes(X_train, y_train)  # 라벨 병합 없음
+                    _safe_print(f"[BALANCE] applied: train={len(y_train)}, val={len(y_val)}")
+                except Exception as e:
+                    _safe_print(f"[BALANCE skip] {e}")
+            # 선택: 가중 샘플러
+            sampler = None
+            if WEIGHTED_SAMPLER_FLAG:
+                try:
+                    w_cls = compute_class_weights(y_train, method="effective", beta=0.999)
+                    sampler = make_weighted_sampler(y_train, class_weights=w_cls, replacement=True)
+                    if sampler is not None:
+                        _safe_print("[SAMPLER] WeightedRandomSampler enabled")
+                except Exception as e:
+                    _safe_print(f"[SAMPLER skip] {e}")
+            # -------------------------------------------------------------------------
+
             train_ds = TensorDataset(
                 torch.from_numpy(X_train).to(torch.float32),
                 torch.from_numpy(y_train).to(torch.long),
@@ -1227,7 +1256,8 @@ def train_one_model(
             train_loader = DataLoader(
                 train_ds,
                 batch_size=32,              # 한 번에 32개씩 처리
-                shuffle=True,               # 학습은 섞기
+                shuffle=(sampler is None),  # 샘플러 쓰면 shuffle=False
+                sampler=sampler,            # [ADD]
                 num_workers=0,              # Render/제한 환경은 0이 안전
                 pin_memory=False,
                 persistent_workers=False,
