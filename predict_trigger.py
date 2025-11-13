@@ -140,30 +140,56 @@ try:
 except Exception:
     pass
 
-# 그룹 오더 매니저
-_GOM = None
+# ── 그룹 상태: utils 의 GroupOrderManager 래퍼 사용 ─────────────
+_get_group_symbols = None
+_is_group_all_complete = None
 try:
-    from group_order import GroupOrderManager as _GOM
+    from data.utils import get_current_group_symbols as _get_group_symbols, group_all_complete as _is_group_all_complete
 except Exception:
     try:
-        from data.group_order import GroupOrderManager as _GOM
+        from utils import get_current_group_symbols as _get_group_symbols, group_all_complete as _is_group_all_complete
     except Exception:
-        _GOM = None
+        _get_group_symbols = None
+        _is_group_all_complete = None
 
 def _get_current_group_symbols():
-    if _GOM is None:
+    """
+    현재 그룹 심볼 목록을 utils.GroupOrderManager 에서 그대로 가져온다.
+    (정의된 그룹 순서 + 현재 인덱스 기준)
+    """
+    if not callable(_get_group_symbols):
         return None
     try:
-        gom = _GOM()
-        if hasattr(gom, "get_current_group_symbols"):
-            syms = gom.get_current_group_symbols()
-        elif hasattr(gom, "current_group_index") and hasattr(gom, "get_group_symbols"):
-            syms = gom.get_group_symbols(gom.current_group_index())
-        else:
-            return None
-        return list(dict.fromkeys(syms)) or None
+        syms = _get_group_symbols()
+        if isinstance(syms, (list, tuple)):
+            # 중복 제거 + 순서 유지
+            return list(dict.fromkeys(syms))
     except Exception:
-        return None
+        pass
+    return None
+
+def _is_group_training_complete(symbols=None) -> bool:
+    """
+    '이번 그룹 5심볼이 모두 학습 완료되었는지' 여부.
+    1순위: utils.group_all_complete() 값 사용
+    2순위: 심볼별 모델 존재 여부(_is_group_complete_for_all_strategies)로 보조 체크
+    """
+    # 1) GroupOrderManager 상태 우선
+    if callable(_is_group_all_complete):
+        try:
+            if bool(_is_group_all_complete()):
+                return True
+        except Exception:
+            pass
+
+    # 2) 심볼 리스트가 있다면 모델 존재 기준으로라도 방어
+    if symbols:
+        try:
+            return _is_group_complete_for_all_strategies(symbols)
+        except Exception:
+            pass
+
+    return False
 
 # ── 경로 동기화(관우) ─────────────────────────────────────────
 def _sync_ganwu_log():
@@ -467,11 +493,11 @@ def run():
         print(f"[그룹제한] 현재 그룹 심볼 {len(symbols)}/{len(all_symbols)}개 대상으로 실행")
 
         # 그룹이 아직 다 안 끝났으면 여기서도 바로 차단
-        if int(get_REQUIRE_GROUP_COMPLETE()) and not _is_group_complete_for_all_strategies(symbols):
-            miss = _missing_pairs(symbols)
-            # [HARD-GATE] 누락이 1개라도 있으면 전면 차단
-            print(f"[차단] 그룹 미완료(누락 {len(miss)}쌍) → 예측 전면 스킵: {miss[:5]}{' ...' if len(miss)>5 else ''}")
-            return
+        if int(get_REQUIRE_GROUP_COMPLETE()):
+            if not _is_group_training_complete(symbols):
+                miss = _missing_pairs(symbols)
+                print(f"[차단] 그룹 미완료(누락 {len(miss)}쌍) → 예측 전면 스킵: {miss[:5]}{' ...' if len(miss)>5 else ''}")
+                return
     else:
         symbols = all_symbols
 
@@ -519,9 +545,10 @@ def run():
 
             # [SAFETY] 그룹 제한이 걸린 상태에선 루프 안에서도 재확인
             if isinstance(group_syms, (list, tuple)) and len(group_syms) > 0 and int(get_REQUIRE_GROUP_COMPLETE()):
-                if not _is_group_complete_for_all_strategies(symbols):
+                if not _is_group_training_complete(symbols):
                     # 그룹 중 일부만 끝난 타이밍에 들어오면 즉시 중단
                     print(f"[차단] 루프중 재확인: 그룹 미완료 → 중단")
+                    print(f"🔁 이번 트리거 루프에서 예측 실행된 개수: {triggered}")
                     return
 
             if not check_model_quality(symbol, strategy):
@@ -707,7 +734,7 @@ def run_after_training(symbol: str, strategy: str) -> bool:
     # 그룹 완주 전이면 여기서도 차단
     group_syms = _get_current_group_symbols()
     if isinstance(group_syms, (list, tuple)) and len(group_syms) > 0 and int(get_REQUIRE_GROUP_COMPLETE()):
-        if not _is_group_complete_for_all_strategies(list(group_syms)):
+        if not _is_group_training_complete(list(group_syms)):
             log_audit(symbol, strategy, "학습후트리거스킵", "그룹 미완료")
             print(f"[스킵] 그룹 미완료로 {symbol}-{strategy} 학습후트리거 차단")
             return False
