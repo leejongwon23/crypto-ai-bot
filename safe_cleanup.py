@@ -461,7 +461,7 @@ def _limit_models_per_key(deleted_log):
             for wpath in data["weights"].values():
                 _delete_file(wpath, deleted_log)
             if data["meta"]:
-                _delete_file(data["meta"], deleted_log)
+                _delete_file(data["meta"])
 
 def _vacuum_sqlite():
     targets = []
@@ -631,7 +631,7 @@ def cleanup_logs_and_models():
 
 # ====== 경량/주기 실행 유틸 ======
 # minutes → seconds (render.yaml에서 SAFE_CLEANUP_INTERVAL_MIN 사용)
-INTERVAL_SEC = _env_int("SAFE_CLEANUP_INTERVAL_MIN", 5) * 60
+INTERVAL_SEC = _env_int("SAFE_CLEANUP_INTERVAL_MIN", 15) * 60  # 🔁 기본 5분 → 15분으로 여유 확대
 RUN_ON_START = _env_bool("SAFE_CLEANUP_RUN_ON_START", True)
 _VERBOSE = _env_bool("SAFE_CLEANUP_VERBOSE", True)
 
