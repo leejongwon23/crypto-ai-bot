@@ -1310,11 +1310,15 @@ try:
         _strategy_horizon_candles_from_hours as _lbl_strategy_horizon_candles_from_hours,
         _future_extreme_signed_returns_by_candles as _lbl_future_extreme_signed_returns_by_candles,
         _infer_bar_hours_from_df as _lbl_infer_bar_hours_from_df,
+        _build_bins as _lbl_build_bins,
+        _auto_target_bins as _lbl_auto_target_bins,
     )
 except Exception:
     _lbl_strategy_horizon_candles_from_hours = None
     _lbl_future_extreme_signed_returns_by_candles = None
     _lbl_infer_bar_hours_from_df = None
+    _lbl_build_bins = None
+    _lbl_auto_target_bins = None
 
 def extract_candle_returns(
     df,
@@ -1416,7 +1420,8 @@ def make_return_histogram(returns: list[float], bins: int = 20):
     """
     수익률 리스트를 받아서 히스토그램(구간, 개수)으로 바꿔준다.
     - labels.py 의 dist_for_bins (dn+up) 을 그대로 넣어주면,
-      여기서는 단순히 구간만 나누는 역할만 한다.
+      여기서는 labels._build_bins 를 최대한 재사용해서
+      '학습 라벨 분포와 동일한 방식'으로 bin 경계를 만든다.
     - returns 가 비어있으면 빈 결과 반환.
     """
     if not returns:
@@ -1433,6 +1438,22 @@ def make_return_histogram(returns: list[float], bins: int = 20):
             "bin_counts": [],
         }
 
+    # 1) labels.py 의 _build_bins / _auto_target_bins 를 사용할 수 있으면 그대로 사용
+    if _lbl_build_bins is not None and _lbl_auto_target_bins is not None:
+        try:
+            # dist_for_bins 는 [dn, up] 을 이어붙인 배열이므로,
+            # 대략적인 df 길이는 len(returns) 의 절반으로 추정한다.
+            approx_df_len = max(1, int(round(arr.size / 2.0)))
+            dynamic_bins = int(_lbl_auto_target_bins(approx_df_len))
+            edges, counts, _spans = _lbl_build_bins(arr, dynamic_bins)
+            return {
+                "bin_edges": edges.astype(float).tolist(),
+                "bin_counts": counts.astype(int).tolist(),
+            }
+        except Exception as e:
+            print(f"[logger.make_return_histogram] labels._build_bins 사용 실패 → fallback 사용 ({e})")
+
+    # 2) fallback: 기존의 단순 np.histogram 방식 (호환용)
     try:
         counts, edges = np.histogram(arr, bins=int(max(2, bins)))
     except Exception:
@@ -1441,4 +1462,4 @@ def make_return_histogram(returns: list[float], bins: int = 20):
     return {
         "bin_edges": edges.astype(float).tolist(),
         "bin_counts": counts.astype(int).tolist(),
-        }
+    }
