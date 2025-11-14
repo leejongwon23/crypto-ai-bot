@@ -503,7 +503,7 @@ try:
                 print("[logger] failure_db init skipped (missing wrong_predictions.csv — caller에서 생성돼야 함)")
             else:
                 raise
-    print("[logger] failure_db initialized (schema ready)")
+    print("[logger] failure_db initialized (schema ready]")
 except Exception as _e:
     print(f"[logger] failure_db init failed: {_e}")
 
@@ -1312,6 +1312,7 @@ try:
         _infer_bar_hours_from_df as _lbl_infer_bar_hours_from_df,
         _build_bins as _lbl_build_bins,
         _auto_target_bins as _lbl_auto_target_bins,
+        compute_label_returns as _lbl_compute_label_returns,
     )
 except Exception:
     _lbl_strategy_horizon_candles_from_hours = None
@@ -1319,25 +1320,26 @@ except Exception:
     _lbl_infer_bar_hours_from_df = None
     _lbl_build_bins = None
     _lbl_auto_target_bins = None
+    _lbl_compute_label_returns = None
 
 def extract_candle_returns(
     df,
     max_rows: int = 1000,
     strategy: str | None = None,
     horizon_hours: int | None = None,
+    symbol: str | None = None,
 ):
     """
     학습 labels.py 와 최대한 동일한 방식으로 '미래 구간 수익률'을 추출한다.
 
     - 기본 아이디어 (labels.py 와 동일):
-      1) df 의 timestamp 간격으로 bar_hours 추정
-      2) 전략(strategy) 또는 horizon_hours 에 따라 horizon_candles 계산
-      3) 해당 horizon 동안의 future high/low 수익률(up/dn)을 계산
-      4) 분포용 값은 [dn, up] 을 모두 이어붙인 배열 (labels 의 dist_for_bins 과 동일 개념)
+      1) 전략(strategy)에 맞는 horizon 을 캔들 개수로 변환
+      2) 해당 horizon 동안의 future high/low 수익률(up/dn)을 계산
+      3) 분포용 값은 [dn, up] 을 모두 이어붙인 배열
+         → labels.make_labels() 의 dist_for_bins 와 완전히 같은 개념
 
     - strategy / horizon_hours 를 안 넘기면:
       → 예전 방식(각 캔들의 high/low vs close)을 fallback 으로 사용.
-        (기존 호출 방식 유지: extract_candle_returns(df, max_rows=1000))
     """
     if df is None or getattr(df, "empty", True):
         return []
@@ -1347,7 +1349,21 @@ def extract_candle_returns(
     except Exception:
         df_use = df
 
-    # --- 1) labels 기반: 학습 공식과 동일한 미래 구간 수익률 ---
+    # --- 1) labels.compute_label_returns 기반: 학습 라벨과 완전 동일한 수익률 정의 ---
+    try:
+        if _lbl_compute_label_returns is not None and strategy is not None:
+            gains, up_c, dn_c, _dyn_bins = _lbl_compute_label_returns(
+                df_use,
+                symbol or "UNKNOWN",
+                strategy,
+            )
+            dist = np.concatenate([dn_c, up_c], axis=0).astype(float)
+            dist = dist[np.isfinite(dist)]
+            return dist.tolist()
+    except Exception as e:
+        print(f"[logger.extract_candle_returns] compute_label_returns 기반 계산 실패 → labels helper fallback 사용 ({e})")
+
+    # --- 2) labels helper 기반: 미래 구간(high/low) 수익률 (이전 코드 유지) ---
     try:
         if _lbl_future_extreme_signed_returns_by_candles is not None:
             horizon_candles = None
@@ -1393,7 +1409,7 @@ def extract_candle_returns(
     except Exception as e:
         print(f"[logger.extract_candle_returns] labels 기반 계산 실패 → fallback 사용 ({e})")
 
-    # --- 2) fallback: 기존 per-candle high/low 방식 (과거 코드 유지) ---
+    # --- 3) 완전 fallback: 기존 per-candle high/low 방식 (과거 코드 유지) ---
     rets: list[float] = []
     for _, row in df_use.iterrows():
         try:
