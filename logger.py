@@ -1435,8 +1435,7 @@ def extract_candle_returns(
 def make_return_histogram(returns: list[float], bins: int = 20):
     """
     수익률 리스트를 받아서 히스토그램(구간, 개수)으로 바꿔준다.
-    - labels.py 의 dist_for_bins (dn+up) 을 그대로 넣어주면,
-      여기서는 labels._build_bins 를 최대한 재사용해서
+    - labels.py 의 _build_bins / _auto_target_bins 를 사용할 수 있으면 최대한 재사용해서
       '학습 라벨 분포와 동일한 방식'으로 bin 경계를 만든다.
     - returns 가 비어있으면 빈 결과 반환.
     """
@@ -1458,9 +1457,13 @@ def make_return_histogram(returns: list[float], bins: int = 20):
     if _lbl_build_bins is not None and _lbl_auto_target_bins is not None:
         try:
             # dist_for_bins 는 [dn, up] 을 이어붙인 배열이므로,
-            # 대략적인 df 길이는 len(returns) 의 절반으로 추정한다.
-            approx_df_len = max(1, int(round(arr.size / 2.0)))
-            dynamic_bins = int(_lbl_auto_target_bins(approx_df_len))
+            # labels 쪽에서는 "샘플 수 N" 을 기준으로 bin 개수를 정한다.
+            # 여기서는 dist 길이(arr.size)를 그대로 넘기되,
+            # 최소 2개 이상 bin 을 보장한다.
+            approx_n = max(1, int(arr.size))
+            dynamic_bins = int(_lbl_auto_target_bins(approx_n))
+            dynamic_bins = max(2, int(dynamic_bins))
+
             edges, counts, _spans = _lbl_build_bins(arr, dynamic_bins)
             return {
                 "bin_edges": edges.astype(float).tolist(),
@@ -1479,3 +1482,4 @@ def make_return_histogram(returns: list[float], bins: int = 20):
         "bin_edges": edges.astype(float).tolist(),
         "bin_counts": counts.astype(int).tolist(),
     }
+
