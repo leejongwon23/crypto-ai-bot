@@ -615,6 +615,36 @@ def _auto_target_bins(df_len: int) -> int:
     else:
         return max(base_min, 32)
 
+# ============================================
+# 🔹 공통 수익률 계산 함수 (라벨·로그에서 함께 사용)
+# ============================================
+def compute_label_returns(
+    df: pd.DataFrame,
+    symbol: str,
+    strategy: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """
+    - 전략별 horizon(4h/24h/168h 등)을 캔들 개수로 바꾼 뒤
+    - 그 구간 내 high/low 기준 future up/dn을 계산하고
+    - 각 캔들당 '더 크게 움직인 방향' 수익률(gain)을 돌려준다.
+
+    logger.extract_candle_returns 같은 데서 이 함수를 쓰면
+    학습 라벨과 완전히 같은 방식으로 수익률을 계산하게 된다.
+    """
+    pure_strategy = _normalize_strategy_name(strategy)
+    horizon_candles = _strategy_horizon_candles_from_hours(df, pure_strategy)
+
+    # 미래 구간 내 최대상승/최대하락
+    up_c, dn_c = _future_extreme_signed_returns_by_candles(df, horizon_candles)
+
+    # 라벨/분포 공통 기준이 되는 per-candle 수익률
+    gains = _pick_per_candle_gain(up_c, dn_c)
+
+    # df 길이에 맞춰 bin 개수 결정(라벨용)
+    dynamic_bins = _auto_target_bins(len(df))
+
+    return gains.astype(np.float32), up_c.astype(np.float32), dn_c.astype(np.float32), int(dynamic_bins)
+
 # ============================
 # Public API (strategy-based)
 # ============================
@@ -626,21 +656,16 @@ def make_labels(
 ) -> tuple[np.ndarray, np.ndarray, list[tuple[float, float]], np.ndarray, np.ndarray, np.ndarray]:
     pure_strategy = _normalize_strategy_name(strategy)
 
-    # 1) 전략에 맞는 horizon 캔들 수 결정 (4h/24h/168h → 캔들 개수로 변환)
-    horizon_candles = _strategy_horizon_candles_from_hours(df, pure_strategy)
+    # 1) 공통 함수로 라벨 기준 수익률 계산
+    gains, up_c, dn_c, dynamic_bins = compute_label_returns(df, symbol, pure_strategy)
 
-    # 2) 해당 horizon 동안의 future up/dn 계산
-    up_c, dn_c = _future_extreme_signed_returns_by_candles(df, horizon_candles)
-
-    # 3) 분포는 dn+up 모두 넣어서 만든다
+    # 2) 분포는 dn+up 모두 넣어서 만든다
     dist_for_bins = np.concatenate([dn_c, up_c], axis=0)
 
-    # 🔸 df 길이에 맞춰 target_bins 동적 결정
-    dynamic_bins = _auto_target_bins(len(df))
+    # 🔸 df 길이에 맞춰 target_bins 동적 결정 (compute_label_returns에서 얻은 값 사용)
     edges, bin_counts, bin_spans = _build_bins(dist_for_bins, dynamic_bins)
 
-    # 4) 실제 라벨로는 그 캔들이 더 크게 움직인 쪽을 쓴다
-    gains = _pick_per_candle_gain(up_c, dn_c)
+    # 3) 실제 라벨 index
     labels = _vector_bin(gains, edges)
 
     # extra columns
