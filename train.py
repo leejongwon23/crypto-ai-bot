@@ -223,7 +223,8 @@ def log_return_distribution_for_train(symbol: str, strategy: str, df: pd.DataFra
             return
 
         # 1) 공통함수로 수익률 전부 뽑기
-        rets = extract_candle_returns(df, max_rows=max_rows)
+        # ✅ 전략까지 같이 넘겨서, labels / 운영로그와 완전히 동일한 방식으로 계산
+        rets = extract_candle_returns(df, max_rows=max_rows, strategy=strategy)
 
         if not rets:
             return
@@ -847,7 +848,9 @@ def _rebuild_samples_with_keepset(
 
 
 def _synthesize_minority_if_needed(
-    X_raw: np.ndarray, y: np.ndarray, num_classes: int
+    X_raw: np.ndarray,
+    y: np.ndarray,
+    num_classes: int
 ) -> Tuple[np.ndarray, np.ndarray, bool]:
     # 지금 버전: 합성 안 한다
     return X_raw, y, False
@@ -2035,7 +2038,7 @@ def train_group(group_id: int | None = None) -> dict:
     out = {"group_index": idx, "symbols": symbols, "results": {}}
 
     try:
-        _set_group_active(True, group_idx=idx, symbols=symbols)
+        _set_group_active(True)
         _set_group_train_lock(True, group_idx=idx, symbols=symbols)
     except Exception as e:
         _safe_print(f"[GROUP mark warn] {e}")
