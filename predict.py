@@ -128,21 +128,15 @@ def _bypass_gate_for_source(source: str) -> bool:
     return any(t and t in s for t in [x.strip() for x in bl.split(",") if x.strip()])
 
 def _group_active() -> bool:
+    """
+    그룹 학습 중인지 여부만 확인한다.
+    - train.py에서 GROUP_ACTIVE 파일을 만들면 -> True (학습 중)
+    - train.py에서 파일을 지우기 전까지는 계속 True 유지
+    """
     try:
-        if not os.path.exists(GROUP_ACTIVE):
-            return False
-        try:
-            mtime = os.path.getmtime(GROUP_ACTIVE)
-            if (time.time() - mtime) > max(60, GROUP_ACTIVE_STALE_SEC):
-                os.remove(GROUP_ACTIVE)
-                print(f"[group_active] stale file removed ({int(time.time()-mtime)}s old)")
-                return False
-        except Exception:
-            pass
-        return True
+        return os.path.exists(GROUP_ACTIVE)
     except Exception:
         return False
-
 def open_predict_gate(note=""):
     try:
         with open(PREDICT_GATE, "w", encoding="utf-8") as f:
