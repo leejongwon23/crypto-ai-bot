@@ -1,5 +1,5 @@
 # ================================================
-# labels.py — YOPO RAW 기반 수익률 라벨링 (완전 정통 설계판)
+# labels.py — YOPO RAW 기반 수익률 라벨링 (H 고정 정상화 버전)
 # ================================================
 from __future__ import annotations
 
@@ -42,8 +42,14 @@ def _as_percent(x: float) -> float:
     return xv * 100.0 if 0.0 < xv < 1.0 else xv
 
 _TARGET_BINS = int(os.getenv("TARGET_BINS", str(_BIN_META.get("TARGET_BINS", 8))))
-
 _MIN_LABEL_CLASSES = int(os.getenv("MIN_LABEL_CLASSES", "4"))
+
+# 🔥 전략별 H 고정 (핵심 수정)
+_FIXED_H = {
+    "단기": 1,   # 4시간봉 → t+1캔들
+    "중기": 1,   # 1일봉 → t+1캔들
+    "장기": 7,   # 1일봉 → t+7캔들
+}
 
 _DEFAULT_STRATEGY_HOURS = {
     "단기": 4,
@@ -76,7 +82,7 @@ _RAW_MIN_GAIN_FOR_TRAIN = float(os.getenv("MIN_GAIN_FOR_TRAIN", "0.003"))
 _MIN_GAIN_FOR_TRAIN = _as_ratio(_RAW_MIN_GAIN_FOR_TRAIN)
 
 # ============================================================
-# 공통 헬퍼
+# 시간/전략 헬퍼
 # ============================================================
 def _to_series_ts_kst(ts_like) -> pd.Series:
     ts = pd.to_datetime(ts_like, errors="coerce")
@@ -93,36 +99,15 @@ def _normalize_strategy_name(strategy: str) -> str:
     if "장기" in s: return "장기"
     return s
 
-def _infer_bar_hours_from_df(df: pd.DataFrame) -> float:
-    try:
-        if "timestamp" not in df.columns or len(df) < 2:
-            return 1.0
-        ts = _to_series_ts_kst(df["timestamp"])
-        diffs = ts.diff().dropna()
-        if diffs.empty:
-            return 1.0
-        med = diffs.median()
-        h = med.total_seconds() / 3600.0
-        return 1.0 if not np.isfinite(h) or h <= 0 else float(h)
-    except Exception:
-        return 1.0
+# 🔥 (핵심수정) 전략별 H를 무조건 고정값으로 반환
+def _get_fixed_horizon_candles(strategy: str) -> int:
+    pure = _normalize_strategy_name(strategy)
+    return int(_FIXED_H.get(pure, 1))
 
-def _strategy_horizon_candles_from_hours(df: pd.DataFrame, strategy: str) -> int:
-    s = _normalize_strategy_name(strategy)
-    base_hours = _DEFAULT_STRATEGY_HOURS.get(s, 4)
-    try:
-        if isinstance(_strategy_horizon_hours, dict):
-            base_hours = int(_strategy_horizon_hours.get(s, base_hours))
-    except Exception:
-        pass
-    bar_h = _infer_bar_hours_from_df(df)
-    try:
-        H = int(round(float(base_hours) / float(bar_h)))
-    except Exception:
-        H = 1
-    return max(1, H)
-
-def _future_extreme_signed_returns_by_candles(df: pd.DataFrame, horizon_candles: int):
+# ============================================================
+# 미래 수익률(H개 캔들 동안 high/low)
+# ============================================================
+def _future_extreme_signed_returns_by_candles(df: pd.DataFrame, H: int):
     n = len(df)
     if n == 0:
         return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.float32)
@@ -133,7 +118,7 @@ def _future_extreme_signed_returns_by_candles(df: pd.DataFrame, horizon_candles:
 
     up = np.zeros(n, dtype=np.float32)
     dn = np.zeros(n, dtype=np.float32)
-    H = int(max(1, horizon_candles))
+    H = max(1, int(H))
 
     for i in range(n):
         j = min(n, i + H)
@@ -144,30 +129,23 @@ def _future_extreme_signed_returns_by_candles(df: pd.DataFrame, horizon_candles:
     return up, dn
 
 # ============================================================
-# YOPO RAW 기반 gain 선택 (라벨용)
+# RAW gain 선택
 # ============================================================
 def _pick_per_candle_gain(up: np.ndarray, dn: np.ndarray) -> np.ndarray:
     return np.where(np.abs(up) >= np.abs(dn), up, dn).astype(np.float32)
 
 # ============================================================
-# 🔥 여기서부터 핵심 수정: RAW 기반 bin 생성
+# RAW bin 생성
 # ============================================================
 def _raw_bins(dist: np.ndarray, target_bins: int) -> np.ndarray:
-    """
-    dist 전체(= raw dn+up 배열)를 기반으로
-    min ~ max 를 target_bins 등분하여 edges 생성.
-    """
     if dist.size == 0:
         return np.linspace(-0.01, 0.01, target_bins + 1).astype(float)
-
     lo = float(np.min(dist))
     hi = float(np.max(dist))
-
     if not np.isfinite(lo): lo = -0.01
     if not np.isfinite(hi): hi = 0.01
     if hi <= lo:
         hi = lo + 1e-6
-
     return np.linspace(lo, hi, target_bins + 1).astype(float)
 
 def _vector_bin(gains: np.ndarray, edges: np.ndarray) -> np.ndarray:
@@ -177,7 +155,7 @@ def _vector_bin(gains: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return np.clip(bins, 0, edges.size - 2).astype(np.int64)
 
 # ============================================================
-# target bin 수 자동 결정 유지
+# target bin 수
 # ============================================================
 def _auto_target_bins(df_len: int) -> int:
     if df_len <= 300:  return max(8, _TARGET_BINS)
@@ -188,18 +166,18 @@ def _auto_target_bins(df_len: int) -> int:
     return max(32, _TARGET_BINS)
 
 # ============================================================
-# 공통 수익률 계산
+# 수익률 계산 (핵심 수정)
 # ============================================================
 def compute_label_returns(df: pd.DataFrame, symbol: str, strategy: str):
     pure = _normalize_strategy_name(strategy)
-    H = _strategy_horizon_candles_from_hours(df, pure)
+    H = _get_fixed_horizon_candles(pure)   # 🔥 전략별 H 고정 적용
     up, dn = _future_extreme_signed_returns_by_candles(df, H)
     gains = _pick_per_candle_gain(up, dn)
     target = _auto_target_bins(len(df))
     return gains, up, dn, target
 
 # ============================================================
-# 저장 헬퍼 (기존 동일)
+# 저장 헬퍼들 (그대로 유지)
 # ============================================================
 def _edge_key(symbol: str, strategy: str) -> str:
     return f"{symbol.upper()}__{_normalize_strategy_name(strategy)}"
@@ -237,7 +215,7 @@ def _labels_csv_path(symbol, strategy):
     return _LABELS_DIR / f"{_edge_key(symbol, strategy)}.csv"
 
 # ============================================================
-# 라벨 테이블 저장 (기본 유지)
+# 라벨 저장
 # ============================================================
 def _save_label_table(df, symbol, strategy, gains, labels, edges, counts,
                       spans, extra_cols=None, extra_meta=None, group_id=None):
@@ -286,30 +264,24 @@ def _save_label_table(df, symbol, strategy, gains, labels, edges, counts,
     _save_edges(symbol, pure, edges, meta)
 
 # ============================================================
-# make_labels (핵심 함수)
+# make_labels
 # ============================================================
 def make_labels(df, symbol, strategy, group_id=None):
     pure = _normalize_strategy_name(strategy)
 
-    # 1) raw gains 계산
     gains, up_c, dn_c, target_bins = compute_label_returns(df, symbol, pure)
 
-    # 2) 분포 raw 기반
     dist = np.concatenate([dn_c, up_c], axis=0)
 
-    # 3) 🔥 RAW bin 생성
     edges = _raw_bins(dist, target_bins)
 
-    # 4) 라벨링
     labels = _vector_bin(gains, edges)
 
-    # counts 계산
     edges2 = edges.copy()
     edges2[-1] += 1e-12
     bin_counts, _ = np.histogram(dist, bins=edges2)
     spans = np.diff(edges) * 100.0
 
-    # extra cols
     sl = 0.02
     extra_cols = {
         "future_up": up_c,
@@ -340,7 +312,7 @@ def make_labels(df, symbol, strategy, group_id=None):
     )
 
 # ============================================================
-# make_labels_for_horizon (기존 유지, RAW 방식 통일)
+# make_labels_for_horizon (RAW 통일)
 # ============================================================
 def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
     n = len(df)
@@ -395,7 +367,7 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
     )
 
 # ============================================================
-# make_all_horizon_labels (그대로 유지, RAW로 일관)
+# make_all_horizon_labels
 # ============================================================
 def make_all_horizon_labels(df, symbol, horizons=None, group_id=None):
     if horizons is None:
