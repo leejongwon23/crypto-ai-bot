@@ -428,7 +428,7 @@ def get_SYMBOL_GROUPS(): return list(SYMBOL_GROUPS)
 
 GROUP_MGR = GroupOrderManager(SYMBOL_GROUPS)
 def should_train_symbol(symbol: str) -> bool: return GROUP_MGR.should_train(symbol)
-def mark_symbol_trained(symbol: str) -> None: GROUP_MGR.mark_symbol_trained(symbol)
+def mark_symbol_trained(symbol: str) -> None: return GROUP_MGR.mark_symbol_trained(symbol)
 def ready_for_group_predict() -> bool: return GROUP_MGR.ready_for_group_predict()
 def mark_group_predicted() -> None: return GROUP_MGR.mark_group_predicted()
 def get_current_group_index() -> int: return GROUP_MGR.current_index()
@@ -930,12 +930,30 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
         # (여기부터는 기존 로직 유지)
         cached = CacheManager.get(cache_key, ttl_sec=600)
         if (not force_refresh) and isinstance(cached, pd.DataFrame) and not cached.empty:
+            # ✅ 메모리 캐시에서 가져온 경우도 FETCH 로그에 남기기
+            try:
+                bybit_rows_cached = int(getattr(cached, "attrs", {}).get("bybit_rows", 0))
+                binance_rows_cached = int(getattr(cached, "attrs", {}).get("binance_rows", 0))
+            except Exception:
+                bybit_rows_cached = 0
+                binance_rows_cached = 0
+            src_cached = getattr(cached, "attrs", {}).get("source_exchange", "UNKNOWN")
+            _log_fetch_summary(symbol, strategy, limit, bybit_rows_cached, binance_rows_cached, f"{src_cached}+MEM")
             return cached
 
         cached_disk = None
         if not force_refresh:
             cached_disk = _load_df_cache(symbol, strategy, interval, end_slack_min)
             if isinstance(cached_disk, pd.DataFrame) and not cached_disk.empty:
+                # ✅ 디스크 캐시 사용도 로그에 남기기
+                try:
+                    bybit_rows_cached = int(getattr(cached_disk, "attrs", {}).get("bybit_rows", 0))
+                    binance_rows_cached = int(getattr(cached_disk, "attrs", {}).get("binance_rows", 0))
+                except Exception:
+                    bybit_rows_cached = 0
+                    binance_rows_cached = 0
+                src_cached = getattr(cached_disk, "attrs", {}).get("source_exchange", "UNKNOWN")
+                _log_fetch_summary(symbol, strategy, limit, bybit_rows_cached, binance_rows_cached, f"{src_cached}+DISK")
                 CacheManager.set(cache_key, cached_disk)
                 return cached_disk
 
@@ -1012,6 +1030,8 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
         if "source_exchange" not in df.attrs or not df.attrs.get("source_exchange"):
             df.attrs["source_exchange"] = "+".join(srcs) if srcs else "UNKNOWN"
 
+        df.attrs["bybit_rows"] = int(bybit_rows)
+        df.attrs["binance_rows"] = int(binance_rows)
         df.attrs["recent_rows"] = int(len(df))
         df.attrs["augment_needed"] = len(df) < limit
         df.attrs["enough_for_training"] = len(df) >= int(limit * 0.9)
