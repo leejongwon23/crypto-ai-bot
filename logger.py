@@ -738,9 +738,29 @@ def log_prediction(
                 if write_header: w.writerow(PREDICTION_HEADERS)
                 w.writerow(_align_row_to_header(row, PREDICTION_HEADERS))
 
+    # ✅ 여기부터 출력 문구 분리 (핵심 수정)
     if success:
-        _print_once(f"pred_ok:{symbol}:{strategy}:{model_name}",
-                    f"[✅ 예측 OK] {symbol}-{strategy} class={predicted_class} rate={rate:.4f} src={source_exchange}")
+        # 학습용 수익률 분포(log_return_distribution → source="train", model="trainer", reason="train_return_distribution")
+        src_lower = str(source or "").lower()
+        mdl_lower = str(model or "").lower()
+        rsn_lower = str(reason or "").lower()
+
+        is_train_dist = (
+            "train" in src_lower
+            or mdl_lower == "trainer"
+            or rsn_lower == "train_return_distribution"
+        )
+
+        if is_train_dist:
+            _print_once(
+                f"train_ret_dist:{symbol}:{strategy}:{model_name}",
+                f"[✅ 수익분포 로그] {symbol}-{strategy} ({model_name}) — 학습용 수익률 분포만 기록 (실제 매매 예측 아님)"
+            )
+        else:
+            _print_once(
+                f"pred_ok:{symbol}:{strategy}:{model_name}",
+                f"[✅ 예측 OK] {symbol}-{strategy} class={predicted_class} rate={rate:.4f} src={source_exchange}"
+            )
     else:
         _ConsecutiveFailAggregator.add((symbol, strategy, group_id or 0, model_name), False, reason)
 
@@ -1482,4 +1502,3 @@ def make_return_histogram(returns: list[float], bins: int = 20):
         "bin_edges": edges.astype(float).tolist(),
         "bin_counts": counts.astype(int).tolist(),
     }
-
