@@ -1801,7 +1801,24 @@ def train_symbol_group_loop(
                 logger.ensure_prediction_log_exists()
 
             groups = [list(g) for g in SYMBOL_GROUPS]
-            for idx, group in enumerate(groups):
+            if not groups:
+                _safe_print("[group] SYMBOL_GROUPS 비어 있음 → 대기")
+            else:
+                # ✅ 현재 그룹 index 에 맞춰 한 그룹만 처리
+                try:
+                    cur_idx = get_current_group_index()
+                except Exception:
+                    cur_idx = 0
+                try:
+                    cur_idx = int(cur_idx)
+                except Exception:
+                    cur_idx = 0
+                if cur_idx < 0 or cur_idx >= len(groups):
+                    cur_idx = 0
+
+                idx = cur_idx
+                group = groups[idx]
+
                 if stop_event is not None and stop_event.is_set():
                     break
                 _safe_print(f"🚀 [group] {idx+1}/{len(groups)} → {group}")
