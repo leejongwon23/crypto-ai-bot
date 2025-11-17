@@ -8,8 +8,15 @@ from logger import (
     extract_candle_returns,
     make_return_histogram,
 )
-# ✅ 학습과 동일한 수익률 계산을 위해 labels 의 compute_label_returns 사용
-from labels import compute_label_returns
+
+# ✅ 학습 쪽 수익률 계산 함수 (labels 위치에 따라 안전하게 임포트)
+try:
+    from data.labels import compute_label_returns
+except Exception:
+    try:
+        from labels import compute_label_returns
+    except Exception:
+        compute_label_returns = None  # 없으면 폴백만 사용
 
 # =========================================================
 # 🔐 쓰기 가능한 루트 디렉터리
@@ -2513,13 +2520,16 @@ def _stoploss_risk_guard(symbol: str, strategy: str, final_cls: int,
         return True, f"stoploss_risk_guard_exception:{e}", None, None
 
 # =========================================================
-# ✅ 여기만 수정: 전략별 수익률분포 로그
+# ✅ 여기 수정: 운영 수익률 분포 로그 (학습 라벨 경계 기준 + 폴백)
 # =========================================================
 def log_return_distribution_for_run(symbol: str, strategy: str, df):
     """
     운영로그용 수익률 분포를 '학습 때 만든 라벨 경계(label_edges)' 기준으로 기록한다.
-    1순위: /persistent/label_edges/{SYMBOL}__{전략}.json 의 edges 사용
-    2순위: 없으면 기존 extract_candle_returns + make_return_histogram 방식 사용
+
+    우선순위:
+      1️⃣ /persistent/label_edges/{SYMBOL}__{전략}.json 의 edges + labels.compute_label_returns 사용
+      2️⃣ labels 를 사용할 수 없거나 edges 가 없으면
+         → 기존 extract_candle_returns + make_return_histogram 방식으로 폴백
     """
     if df is None or df.empty:
         return
@@ -2528,7 +2538,7 @@ def log_return_distribution_for_run(symbol: str, strategy: str, df):
         sym = str(symbol or "").upper()
         strat = str(strategy or "")
 
-        # label_edges 디렉터리 (labels.py 와 동일 규칙)
+        # labels.py 와 동일 규칙의 label_edges 디렉터리
         edges_dir = os.getenv("LABEL_EDGES_DIR", os.path.join(PERSISTENT_ROOT, "label_edges"))
         os.makedirs(edges_dir, exist_ok=True)
         key = f"{sym}__{strat}"
@@ -2544,23 +2554,31 @@ def log_return_distribution_for_run(symbol: str, strategy: str, df):
                 print(f"[log_return_distribution_for_run] label_edges 로드 실패: {e}")
                 edges = []
 
-        if edges:
-            # 학습과 동일한 방식으로 수익률(gains) 계산
-            gains, up_c, dn_c, _target_bins = compute_label_returns(df, sym, strat)
+        hist = None
+        sample_size = 0
 
-            edges_arr = np.asarray(edges, dtype=float)
-            edges2 = edges_arr.copy()
-            edges2[-1] += 1e-12
+        # 1️⃣ 학습식과 똑같이: compute_label_returns + label_edges
+        if edges and callable(compute_label_returns):
+            try:
+                gains, up_c, dn_c, _target_bins = compute_label_returns(df, sym, strat)
 
-            # gains 를 학습 시 edges 기준으로 다시 histogram
-            bin_counts, _ = np.histogram(gains, bins=edges2)
+                edges_arr = np.asarray(edges, dtype=float)
+                edges2 = edges_arr.copy()
+                edges2[-1] += 1e-12
 
-            hist = {
-                "bin_edges": edges_arr.tolist(),
-                "bin_counts": bin_counts.astype(int).tolist(),
-            }
-        else:
-            # 학습 라벨 경계가 없으면 기존 방식으로 fallback
+                bin_counts, _ = np.histogram(gains, bins=edges2)
+
+                hist = {
+                    "bin_edges": edges_arr.tolist(),
+                    "bin_counts": bin_counts.astype(int).tolist(),
+                }
+                sample_size = int(len(gains))
+            except Exception as e:
+                print(f"[log_return_distribution_for_run] compute_label_returns 사용 중 예외 → 폴백 사용: {e}")
+                hist = None
+
+        # 2️⃣ 위에서 실패했거나 edges/함수가 없으면 → 기존 방식 그대로 폴백
+        if hist is None:
             rets = extract_candle_returns(
                 df,
                 max_rows=1000,
@@ -2570,6 +2588,7 @@ def log_return_distribution_for_run(symbol: str, strategy: str, df):
             if not rets:
                 return
             hist = make_return_histogram(rets, bins=20)
+            sample_size = int(len(rets))
 
         log_prediction(
             symbol=symbol,
@@ -2583,9 +2602,7 @@ def log_return_distribution_for_run(symbol: str, strategy: str, df):
             label=-1,
             note=json.dumps(
                 {
-                    "sample_size": (
-                        int(len(gains)) if edges else len(hist.get("bin_counts", []))
-                    ),
+                    "sample_size": sample_size,
                     "bin_edges": hist["bin_edges"],
                     "bin_counts": hist["bin_counts"],
                 },
