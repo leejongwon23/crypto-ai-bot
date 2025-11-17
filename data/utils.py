@@ -219,7 +219,8 @@ except Exception:
     STRATEGY_CONFIG = {
         "단기": {"interval": "240", "limit": 1000, "binance_interval": "4h"},
         "중기": {"interval": "D", "limit": 500, "binance_interval": "1d"},
-        "장기": {"interval": "D", "limit": 500, "binance_interval": "1d"},
+        # ✅ 장기: 주봉 1개 기준, limit=1000은 "상한" (거래소가 줄 수 있는 최대치만 사용)
+        "장기": {"interval": "W", "limit": 1000, "binance_interval": "1w"},
     }
     def get_REGIME():
         return {"enabled": False, "atr_window": 14, "trend_window": 50, "vol_high_pct": 0.9, "vol_low_pct": 0.5}
