@@ -137,6 +137,7 @@ def _group_active() -> bool:
         return os.path.exists(GROUP_ACTIVE)
     except Exception:
         return False
+
 def open_predict_gate(note=""):
     try:
         with open(PREDICT_GATE, "w", encoding="utf-8") as f:
@@ -751,8 +752,8 @@ def get_available_models(symbol, strategy):
                         try:
                             with open(meta_path, "w", encoding="utf-8") as f:
                                 json.dump(meta_tmp, f, ensure_ascii=False, indent=2)
-                            except Exception:
-                                continue
+                        except Exception:
+                            continue
                     results.append({
                         "pt_abs": os.path.abspath(w),
                         "meta_path": os.path.abspath(meta_path),
@@ -1191,6 +1192,7 @@ def _apply_soft_guard(df, strategy, outs, chosen, final_cls, allow_long, allow_s
     - log용 메시지만 남긴다.
     """
     return "ok", chosen, final_cls, "soft_guard_disabled"
+
 # =========================================================
 # 메인 predict
 # =========================================================
@@ -1979,6 +1981,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         finally:
             gc.collect()
             _safe_empty_cache()
+
 # =========================================================
 # 평가 루프 (네 원본 그대로)
 # =========================================================
@@ -2506,12 +2509,29 @@ def _stoploss_risk_guard(symbol: str, strategy: str, final_cls: int,
     except Exception as e:
         return True, f"stoploss_risk_guard_exception:{e}", None, None
 
+# =========================================================
+# ✅ 여기만 수정: 전략별 수익률분포 로그
+# =========================================================
 def log_return_distribution_for_run(symbol: str, strategy: str, df):
+    """
+    운영로그용 수익률 분포를 '전략(단기/중기/장기)'에 맞게 계산해서 남긴다.
+    - 학습 쪽과 동일한 규칙으로 extract_candle_returns 를 호출하도록 수정.
+    """
     if df is None or df.empty:
         return
-    rets = extract_candle_returns(df, max_rows=1000)
+
+    # 전략·심볼 정보를 함께 넘겨서,
+    # 중기/장기도 서로 다른 horizon 으로 수익률 구간이 계산되도록 맞춘다.
+    rets = extract_candle_returns(
+        df,
+        max_rows=1000,
+        symbol=str(symbol or "").upper(),
+        strategy=strategy,
+    )
+
     if not rets:
         return
+
     hist = make_return_histogram(rets, bins=20)
     log_prediction(
         symbol=symbol,
