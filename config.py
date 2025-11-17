@@ -623,8 +623,11 @@ def _strategy_horizon_hours(strategy: str) -> int:
 # ✅ horizon 기반 수익률 추출
 def _future_extreme_signed_returns(df, horizon_hours: int, strategy: str = None):
     """
-    전략별 horizon을 시간단위가 아니라 '캔들 개수 단위'로 보정한 수익률 계산.
-    단기=4시간 뒤, 중기=1일봉 1개 뒤, 장기=1주(7일) 뒤 기준으로.
+    전략별 horizon을 '캔들 개수 단위'로 보정한 수익률 계산.
+    - 단기: 4시간봉 1개 (lookahead_n = 1)
+    - 중기: 일봉 1개 (lookahead_n = 1)
+    - 장기: 일봉 7개 (lookahead_n = 7)
+    strategy가 주어지지 않은 경우에만 horizon_hours/평균간격으로 lookahead_n 계산.
     """
     import numpy as np
     import pandas as pd
@@ -644,14 +647,15 @@ def _future_extreme_signed_returns(df, horizon_hours: int, strategy: str = None)
     else:
         avg_interval_h = 1.0
 
-    # ✅ 전략별 실제 캔들 단위 보정
+    # ✅ 전략별 실제 캔들 단위 보정 (strategy 우선)
     if strategy == "단기":
         lookahead_n = 1  # 4시간 뒤 (4h 캔들 1개)
     elif strategy == "중기":
-        lookahead_n = 1  # 일봉 1개 뒤까지만 (24h)
+        lookahead_n = 1  # 일봉 1개 뒤
     elif strategy == "장기":
         lookahead_n = 7  # 일봉 7개 (1주)
     else:
+        # strategy가 None 등인 경우 horizon_hours 기준으로 보정
         lookahead_n = int(max(1, round(horizon_hours / avg_interval_h)))
 
     up = np.zeros(len(df), dtype=np.float32)
@@ -665,7 +669,7 @@ def _future_extreme_signed_returns(df, horizon_hours: int, strategy: str = None)
         up[i] = (max_h - base) / base
         down[i] = (min_l - base) / base
 
-    # up과 down을 합쳐서 반환
+    # up과 down을 합쳐서 반환 (± 수익률 분포)
     return np.concatenate([down, up]).astype(np.float32)
 
 
@@ -966,7 +970,12 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
             if df_price_local is None or len(df_price_local) < 30 or "close" not in df_price_local:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="가격 데이터 부족")
             horizon_hours = _strategy_horizon_hours(strategy)
-            rets_signed = _future_extreme_signed_returns(df_price_local, horizon_hours=horizon_hours)
+            # ✅ strategy를 명시적으로 전달하여 전략별 horizon 차이가 확실히 반영되도록 수정
+            rets_signed = _future_extreme_signed_returns(
+                df_price_local,
+                horizon_hours=horizon_hours,
+                strategy=strategy,
+            )
             rets_signed = rets_signed[np.isfinite(rets_signed)]
             if rets_signed.size < 10:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="수익률 샘플 부족")
@@ -1016,9 +1025,11 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     # === 실제 분기 ===
     if method_req == "fixed_step":
         if df_price is not None:
+            # ✅ strategy 명시 전달
             rets_for_merge = _future_extreme_signed_returns(
                 df_price,
-                horizon_hours=_strategy_horizon_hours(strategy)
+                horizon_hours=_strategy_horizon_hours(strategy),
+                strategy=strategy,
             )
             rets_for_merge = rets_for_merge[np.isfinite(rets_for_merge)]
         else:
@@ -1038,7 +1049,12 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
     try:
         if symbol is not None and strategy is not None and not _quiet() and df_price is not None:
             horizon_hours = _strategy_horizon_hours(strategy)
-            rets_dbg = _future_extreme_signed_returns(df_price, horizon_hours=horizon_hours)
+            # ✅ 디버그용 분포도 동일하게 strategy 전달
+            rets_dbg = _future_extreme_signed_returns(
+                df_price,
+                horizon_hours=horizon_hours,
+                strategy=strategy,
+            )
             rets_dbg = rets_dbg[np.isfinite(rets_dbg)]
             if rets_dbg.size > 0:
                 rets_dbg = np.array([_cap_by_strategy(float(r), strategy) for r in rets_dbg], dtype=np.float32)
@@ -1046,7 +1062,6 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
                 def _r2(z): return round(float(z), _ROUNDS_DECIMALS)
                 print(f"[📈 수익률분포(±)] {symbol}-{strategy} min={_r2(qs[0])}, p25={_r2(qs[1])}, p50={_r2(qs[2])}, p75={_r2(qs[3])}, p90={_r2(qs[4])}, p95={_r2(qs[5])}, p99={_r2(qs[6])}, max={_r2(qs[7])}")
                 print(f"[📏 클래스경계 로그] {symbol}-{strategy} → {len(all_ranges)}개")
-                print(f"[📏 경계 리스트] {symbol}-{strategy} → {all_ranges}")
                 edges = [all_ranges[0][0]] + [hi for (_, hi) in all_ranges]
                 edges[-1] = float(edges[-1]) + 1e-9
                 hist, _ = np.histogram(rets_dbg, bins=edges)
@@ -1217,4 +1232,4 @@ __all__ = [
     "is_config_readonly", "is_disk_cache_off",
     "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
     "get_BIN_META",
-    ]
+        ]
