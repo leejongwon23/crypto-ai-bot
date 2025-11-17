@@ -45,10 +45,13 @@ _TARGET_BINS = int(os.getenv("TARGET_BINS", str(_BIN_META.get("TARGET_BINS", 8))
 _MIN_LABEL_CLASSES = int(os.getenv("MIN_LABEL_CLASSES", "4"))
 
 # 🔥 전략별 H 고정 (핵심 수정)
+# - 단기: 4h 캔들 1개
+# - 중기: 1d 캔들 1개
+# - 장기: 주봉(1w) 캔들 1개  ← 여기 7 → 1 로 변경
 _FIXED_H = {
     "단기": 1,   # 4시간봉 → t+1캔들
     "중기": 1,   # 1일봉 → t+1캔들
-    "장기": 7,   # 1일봉 → t+7캔들
+    "장기": 1,   # 주봉(1w) → t+1캔들
 }
 
 _DEFAULT_STRATEGY_HOURS = {
