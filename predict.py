@@ -8,6 +8,9 @@ from logger import (
     extract_candle_returns,
     make_return_histogram,
 )
+# ✅ 학습과 동일한 수익률 계산을 위해 labels 의 compute_label_returns 사용
+from labels import compute_label_returns
+
 # =========================================================
 # 🔐 쓰기 가능한 루트 디렉터리
 # =========================================================
@@ -2514,52 +2517,91 @@ def _stoploss_risk_guard(symbol: str, strategy: str, final_cls: int,
 # =========================================================
 def log_return_distribution_for_run(symbol: str, strategy: str, df):
     """
-    운영로그용 수익률 분포를 '전략(단기/중기/장기)'에 맞게 계산해서 남긴다.
-    - 학습 쪽과 동일한 규칙으로 extract_candle_returns 를 호출하도록 수정.
+    운영로그용 수익률 분포를 '학습 때 만든 라벨 경계(label_edges)' 기준으로 기록한다.
+    1순위: /persistent/label_edges/{SYMBOL}__{전략}.json 의 edges 사용
+    2순위: 없으면 기존 extract_candle_returns + make_return_histogram 방식 사용
     """
     if df is None or df.empty:
         return
 
-    # 전략·심볼 정보를 함께 넘겨서,
-    # 중기/장기도 서로 다른 horizon 으로 수익률 구간이 계산되도록 맞춘다.
-    rets = extract_candle_returns(
-        df,
-        max_rows=1000,
-        symbol=str(symbol or "").upper(),
-        strategy=strategy,
-    )
+    try:
+        sym = str(symbol or "").upper()
+        strat = str(strategy or "")
 
-    if not rets:
-        return
+        # label_edges 디렉터리 (labels.py 와 동일 규칙)
+        edges_dir = os.getenv("LABEL_EDGES_DIR", os.path.join(PERSISTENT_ROOT, "label_edges"))
+        os.makedirs(edges_dir, exist_ok=True)
+        key = f"{sym}__{strat}"
+        lp = os.path.join(edges_dir, f"{key}.json")
 
-    hist = make_return_histogram(rets, bins=20)
-    log_prediction(
-        symbol=symbol,
-        strategy=strategy,
-        direction="운영수익분포",
-        entry_price=0.0,
-        target_price=0.0,
-        model="predictor",
-        model_name="predictor",
-        predicted_class=-1,
-        label=-1,
-        note=json.dumps(
-            {
-                "sample_size": len(rets),
-                "bin_edges": hist["bin_edges"],
-                "bin_counts": hist["bin_counts"],
-            },
-            ensure_ascii=False,
-        ),
-        top_k=[],
-        success=True,
-        reason="run_return_distribution",
-        rate=0.0,
-        expected_return=0.0,
-        position="neutral",
-        return_value=0.0,
-        source="run",
-    )
+        edges = []
+        if os.path.exists(lp):
+            try:
+                with open(lp, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                edges = data.get("edges") or []
+            except Exception as e:
+                print(f"[log_return_distribution_for_run] label_edges 로드 실패: {e}")
+                edges = []
+
+        if edges:
+            # 학습과 동일한 방식으로 수익률(gains) 계산
+            gains, up_c, dn_c, _target_bins = compute_label_returns(df, sym, strat)
+
+            edges_arr = np.asarray(edges, dtype=float)
+            edges2 = edges_arr.copy()
+            edges2[-1] += 1e-12
+
+            # gains 를 학습 시 edges 기준으로 다시 histogram
+            bin_counts, _ = np.histogram(gains, bins=edges2)
+
+            hist = {
+                "bin_edges": edges_arr.tolist(),
+                "bin_counts": bin_counts.astype(int).tolist(),
+            }
+        else:
+            # 학습 라벨 경계가 없으면 기존 방식으로 fallback
+            rets = extract_candle_returns(
+                df,
+                max_rows=1000,
+                symbol=sym,
+                strategy=strategy,
+            )
+            if not rets:
+                return
+            hist = make_return_histogram(rets, bins=20)
+
+        log_prediction(
+            symbol=symbol,
+            strategy=strategy,
+            direction="운영수익분포",
+            entry_price=0.0,
+            target_price=0.0,
+            model="predictor",
+            model_name="predictor",
+            predicted_class=-1,
+            label=-1,
+            note=json.dumps(
+                {
+                    "sample_size": (
+                        int(len(gains)) if edges else len(hist.get("bin_counts", []))
+                    ),
+                    "bin_edges": hist["bin_edges"],
+                    "bin_counts": hist["bin_counts"],
+                },
+                ensure_ascii=False,
+            ),
+            top_k=[],
+            success=True,
+            reason="run_return_distribution",
+            rate=0.0,
+            expected_return=0.0,
+            position="neutral",
+            return_value=0.0,
+            source="run",
+        )
+    except Exception as e:
+        print(f"[log_return_distribution_for_run 예외] {e}")
 
 if __name__ == "__main__":
     res = predict("BTCUSDT", "단기", source="테스트")
