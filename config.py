@@ -268,10 +268,13 @@ _default_config = {
 }
 
 # === STRATEGY_CONFIG (안정 한도로 조정) ===
+# limit=1000 은 "최대 1000개까지 요청"이라는 의미라,
+# 거래소가 더 적게 줄 경우 그만큼만 받아온다.
 STRATEGY_CONFIG = {
     "단기": {"interval": "240", "limit": 1000, "binance_interval": "4h"},
     "중기": {"interval": "D",   "limit": 1000, "binance_interval": "1d"},
-    "장기": {"interval": "D",   "limit": 1000, "binance_interval": "1d"},
+    # 장기: 주봉(1w) 기준, 최대 1000개 요청 (실제로는 거래소가 줄 수 있는 만큼만 수집)
+    "장기": {"interval": "W",   "limit": 1000, "binance_interval": "1w"},
 }
 
 _STRATEGY_RETURN_CAP_POS_MAX = {"단기": 0.06, "중기": 0.20, "장기": 0.50}
@@ -617,16 +620,40 @@ def _strictify(ranges):
         lo = hi_r
     return fixed
 
+# ✅ 전략별 horizon(시간)을 STRATEGY_CONFIG의 interval 기준으로 계산
 def _strategy_horizon_hours(strategy: str) -> int:
-    return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
+    """
+    각 전략의 '캔들 1개' 를 기준으로 horizon_hours를 계산.
+    - 단기: interval "240" → 4시간
+    - 중기: interval "D"   → 24시간
+    - 장기: interval "W"   → 168시간 (주봉 1개)
+    """
+    cfg = STRATEGY_CONFIG.get(strategy, {})
+    interval = str(cfg.get("interval", "D")).upper()
+
+    # 숫자면 분 단위로 보고 시간으로 변환 (예: "240" → 4h)
+    if interval.isdigit():
+        try:
+            minutes = int(interval)
+            return max(1, int(round(minutes / 60.0)))
+        except Exception:
+            return 24
+
+    if interval in {"D", "1D"}:
+        return 24
+    if interval in {"W", "1W"}:
+        return 24 * 7
+
+    # 알 수 없는 경우 기본 24h
+    return 24
 
 # ✅ horizon 기반 수익률 추출
 def _future_extreme_signed_returns(df, horizon_hours: int, strategy: str = None):
     """
     전략별 horizon을 '캔들 개수 단위'로 보정한 수익률 계산.
     - 단기: 4시간봉 1개 (lookahead_n = 1)
-    - 중기: 일봉 1개 (lookahead_n = 1)
-    - 장기: 일봉 7개 (lookahead_n = 7)
+    - 중기: 일봉 1개   (lookahead_n = 1)
+    - 장기: 주봉 1개   (lookahead_n = 1)
     strategy가 주어지지 않은 경우에만 horizon_hours/평균간격으로 lookahead_n 계산.
     """
     import numpy as np
@@ -649,11 +676,11 @@ def _future_extreme_signed_returns(df, horizon_hours: int, strategy: str = None)
 
     # ✅ 전략별 실제 캔들 단위 보정 (strategy 우선)
     if strategy == "단기":
-        lookahead_n = 1  # 4시간 뒤 (4h 캔들 1개)
+        lookahead_n = 1  # 4시간봉 1개
     elif strategy == "중기":
-        lookahead_n = 1  # 일봉 1개 뒤
+        lookahead_n = 1  # 일봉 1개
     elif strategy == "장기":
-        lookahead_n = 7  # 일봉 7개 (1주)
+        lookahead_n = 1  # 주봉 1개
     else:
         # strategy가 None 등인 경우 horizon_hours 기준으로 보정
         lookahead_n = int(max(1, round(horizon_hours / avg_interval_h)))
@@ -1192,8 +1219,9 @@ def get_EVAL_RUNTIME() -> dict:
     base = _config.get("EVAL_RUNTIME", _default_config["EVAL_RUNTIME"])
     return _eval_from_env(base)
 
+# public API: 전략 horizon 시간은 내부 함수 재사용
 def strategy_horizon_hours(strategy: str) -> int:
-    return {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
+    return _strategy_horizon_hours(strategy)
 
 def compute_eval_due_at(now_utc, strategy: str):
     from datetime import timedelta
@@ -1232,4 +1260,4 @@ __all__ = [
     "is_config_readonly", "is_disk_cache_off",
     "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
     "get_BIN_META",
-        ]
+            ]
