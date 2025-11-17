@@ -751,8 +751,8 @@ def get_available_models(symbol, strategy):
                         try:
                             with open(meta_path, "w", encoding="utf-8") as f:
                                 json.dump(meta_tmp, f, ensure_ascii=False, indent=2)
-                        except Exception:
-                            continue
+                            except Exception:
+                                continue
                     results.append({
                         "pt_abs": os.path.abspath(w),
                         "meta_path": os.path.abspath(meta_path),
@@ -2106,7 +2106,7 @@ def evaluate_predictions(get_price_fn):
                         reached = gain >= cmin
                         if _now_kst() < deadline and reached:
                             status = "v_success" if str(r.get("volatility", "")).strip().lower() in ["1", "true"] else "success"
-                            r.update({"status": status, "reason": f"[조기성공 pred_class={pred_cls}] gain={gain:.3f} (cls_min={cmin}, cls_max={cmax})", "return": round(gain, 5), "return_value": round(gain, 5), "group_id": gid})
+                            r.update({"status": status, "reason": f"[조기성공 pred_class={pred_cls}] gain={gain:.3f} (cls_min={cmin}, cls_max={cmax})", "return": 0.0, "return_value": 0.0})
                             log_prediction(symbol=sym, strategy=strat, direction=f"평가:{status}", entry_price=entry, target_price=entry * (1 + gain), timestamp=_now_kst().isoformat(), model=model, predicted_class=pred_cls, success=True, reason=r["reason"], rate=gain, expected_return=gain, position=("long" if cmax > 0 else "short" if cmin < 0 else "neutral"), return_value=gain, volatility=(status == "v_success"), source="평가", label=label, group_id=gid)
                             if model == "meta":
                                 update_model_success(sym, strat, model, True)
@@ -2118,13 +2118,13 @@ def evaluate_predictions(get_price_fn):
                             eval_writer.writerow({k: r.get(k, "") for k in r.keys()})
                             continue
                         if _now_kst() < deadline and not reached:
-                            r.update({"status": "pending", "reason": "⏳ 평가 대기 중", "return": round(gain, 5), "return_value": round(gain, 5)})
+                            r.update({"status": "pending", "reason": "⏳ 평가 대기 중", "return": 0.0, "return_value": 0.0})
                             w_all.writerow({k: r.get(k, "") for k in fields})
                             continue
                         status = "success" if reached else "fail"
                         if str(r.get("volatility", "")).strip().lower() in ["1", "true"]:
                             status = "v_success" if status == "success" else "v_fail"
-                        r.update({"status": status, "reason": f"[pred_class={pred_cls}] gain={gain:.3f} (cls_min={cmin}, cls_max={cmax})", "return": round(gain, 5), "return_value": round(gain, 5), "group_id": gid})
+                        r.update({"status": status, "reason": f"[pred_class={pred_cls}] gain={gain:.3f} (cls_min={cmin}, cls_max={cmax})", "return": 0.0, "return_value": 0.0})
                         log_prediction(symbol=sym, strategy=strat, direction=f"평가:{status}", entry_price=entry, target_price=entry * (1 + gain), timestamp=_now_kst().isoformat(), model=model, predicted_class=pred_cls, success=(status in ["success", "v_success"]), reason=r["reason"], rate=gain, expected_return=gain, position=("long" if cmax > 0 else "short" if cmin < 0 else "neutral"), return_value=gain, volatility=("v_" in status), source="평가", label=label, group_id=gid)
                         if status in ["fail", "v_fail"]:
                             if not check_failure_exists(r):
