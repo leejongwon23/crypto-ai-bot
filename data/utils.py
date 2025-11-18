@@ -1351,7 +1351,6 @@ def _drop_duplicate_windows(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         seen[h] = i; keep_idx.append(i)
     return X[keep_idx], np.array(keep_idx, dtype=np.int64)
 
-# ========================= 데이터셋 생성(라벨→서명수익→diff) =========================
 def create_dataset(features, window=10, strategy="단기", input_size=None):
     """
     피처 리스트 → 스케일 → 윈도우 → 라벨.
@@ -1426,10 +1425,13 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         input_cols = keep
 
     # =======================
-    # 3) ★★★ 정식 YOPO 라벨 계산 (labels.make_labels) — 핵심 ★★★
+    # 3) ★ 정식 YOPO 라벨 계산 (labels.make_labels) ★
     # =======================
     y_seq = None
     class_ranges_used = None
+    edges = None
+    bin_counts = None
+    bin_spans = None
 
     try:
         (
@@ -1536,12 +1538,12 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
     # 8) 메타 정보 부착
     # =======================
     class_ranges_final = class_ranges_used
-    num_classes_final = len(class_ranges_final)
+    num_classes_final = len(class_ranges_final) if class_ranges_final is not None else 0
 
     X.attrs = {
         "num_classes": int(num_classes_final),
         "class_ranges": class_ranges_final,
-        "class_groups": cfg_get_class_groups(num_classes_final, 5),
+        "class_groups": cfg_get_class_groups(num_classes_final, 5) if num_classes_final > 0 else [],
         "allow_trainer_class_collapse": False,
     }
 
@@ -1556,7 +1558,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         pass
 
     return X, y
-
     except Exception as e:
         safe_failed_result(symbol_name, strategy, reason=f"create_dataset 예외: {e}")
         return _dummy(symbol_name)
