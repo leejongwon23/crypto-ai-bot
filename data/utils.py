@@ -1699,7 +1699,7 @@ __all__ = [
     "get_realtime_prices",
     # 피처
     "compute_features","compute_features_multi","future_gains","future_gains_by_hours",
-    "future_up_down","future_up_down_by_hours",
+    "future_up_down"
     # 데이터셋
     "create_dataset","augment_jitter","augment_time_shift","augment_for_min_count",
     # 추론 헬퍼
