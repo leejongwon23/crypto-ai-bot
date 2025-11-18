@@ -1558,9 +1558,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         pass
 
     return X, y
-    except Exception as e:
-        safe_failed_result(symbol_name, strategy, reason=f"create_dataset 예외: {e}")
-        return _dummy(symbol_name)
+    
 
 
 # ========================= 추론/데이터셋 헬퍼 =========================
