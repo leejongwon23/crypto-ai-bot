@@ -1127,7 +1127,7 @@ def reset_all(key=None):
     # 리셋 중 예측 막기
     _safe_close_gate("reset_enter")
 
-   def _do_reset_work():
+    def _do_reset_work():
         stop_timeout = int(os.getenv("RESET_STOP_TIMEOUT", "12"))
         max_wait     = int(os.getenv("RESET_MAX_WAIT_SEC", "120"))
         poll_sec     = max(1, int(os.getenv("RESET_POLL_SEC", "2")))
@@ -1155,18 +1155,39 @@ def reset_all(key=None):
         except Exception:
             pass
 
+        # 3-0. 빠른 정지 시도
         print(f"[RESET] 학습 루프 정지 시도(timeout={stop_timeout}s)"); sys.stdout.flush()
         stopped = _stop_train_loop_safe(timeout=stop_timeout)
         print(f"[RESET] stop_train_loop 결과: {stopped}"); sys.stdout.flush()
 
-        # 3-1. 그래도 안 멈추면 즉시 QWIPE 1회만 실행
-        if not stopped:
+        # 3-1. 그래도 안 멈추면, 옵션에 따라 조기 QWIPE
+        if (not stopped) and qwipe_early:
             print("[RESET] 학습루프 멈춤 실패 → QWIPE 강제 1회 실행"); sys.stdout.flush()
             try:
                 _quarantine_wipe_persistent()
                 ensure_dirs()
             except Exception as e:
                 print(f"[RESET] QWIPE 실패: {e}")
+
+        # 3-2. max_wait 만큼 추가 대기
+        if not stopped:
+            t0 = time.time()
+            print(f"[RESET] 정지 대기 시작… 최대 {max_wait}s (폴링 {poll_sec}s)"); sys.stdout.flush()
+            while time.time() - t0 < max_wait:
+                try:
+                    if not _is_training():
+                        stopped = True
+                        break
+                except Exception:
+                    pass
+                try:
+                    if _stop_train_loop_safe(timeout=2):
+                        stopped = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(poll_sec)
+            print(f"[RESET] 정지 대기 완료 → stopped={stopped}"); sys.stdout.flush()
 
         # 4. PERSIST_DIR 완전 초기화
         try:
@@ -1179,14 +1200,16 @@ def reset_all(key=None):
             # 남은 파일 중 LOCK_DIR 제외하고 모두 삭제
             keep = {os.path.basename(LOCK_DIR)}
             for name in list(os.listdir(PERSIST_DIR)):
-                if name in keep: 
+                if name in keep:
                     continue
                 p = os.path.join(PERSIST_DIR, name)
                 if os.path.isdir(p):
                     shutil.rmtree(p, ignore_errors=True)
                 else:
-                    try: os.remove(p)
-                    except Exception: pass
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
 
             # 필수 폴더/로그 다시 생성
             ensure_dirs()
@@ -1194,13 +1217,17 @@ def reset_all(key=None):
             ensure_train_log_exists()
 
         except Exception as e:
-            print(f"[RESET] 풀와이프 예외: {e}")    
+            print(f"[RESET] 풀와이프 예외: {e}"); sys.stdout.flush()
 
         # 5. 캐시 비우기
-        try: _kline_cache.clear()
-        except Exception: pass
-        try: _feature_cache.clear()
-        except Exception: pass
+        try:
+            _kline_cache.clear()
+        except Exception:
+            pass
+        try:
+            _feature_cache.clear()
+        except Exception:
+            pass
 
         # 6. cleanup + scheduler 재시작
         try:
@@ -1217,13 +1244,12 @@ def reset_all(key=None):
         try:
             _safe_close_gate("reset_done_reopen")
             started = _start_train_loop_safe(force_restart=True, sleep_sec=0)
-            print(f"[RESET] 학습 재시작 결과: {started}")
+            print(f"[RESET] 학습 재시작 결과: {started}"); sys.stdout.flush()
         except Exception as e:
             print(f"[RESET] 학습 재시작 실패: {e}")
 
         print("🔚 [RESET] 정리 + 재시작 완료"); sys.stdout.flush()
         _release_global_lock()
-
 
     threading.Thread(target=_do_reset_work, daemon=True).start()
 
@@ -1232,6 +1258,7 @@ def reset_all(key=None):
         "로그에서 [RESET] 태그를 확인하세요.",
         mimetype="text/plain; charset=utf-8"
     )
+
 
 @app.route("/force-fix-prediction_log")
 @app.route("/force-fix-prediction-log")
