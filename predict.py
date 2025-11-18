@@ -2620,6 +2620,77 @@ def log_return_distribution_for_run(symbol: str, strategy: str, df):
     except Exception as e:
         print(f"[log_return_distribution_for_run 예외] {e}")
 
+def _stoploss_touch_guard(df, symbol, strategy, final_cls, lo_sel, hi_sel,
+                          sl_ratio=0.03, lookback=30):
+    """
+    예측한 수익구간(lo_sel~hi_sel)에 도달하기 전에
+    손절 -3% 또는 +3% 를 먼저 터치할 위험이 높으면 → Risk Warning.
+
+    🟢 작동 방식 (초등학생도 이해 쉽게)
+    1) 현재가격을 기준으로 SL 가격 2개 계산:
+       - 롱일 때: 손절 = 현재가격*(1 - 0.03)
+       - 숏일 때: 손절 = 현재가격*(1 + 0.03)
+
+    2) 최근 30개 캔들 중:
+       “목표에 닿기 전에 SL 먼저 닿은 경우”가 많으면 위험 판정.
+
+    반환값:
+      (ok, reason, risk_ratio)
+      ok = True → 사용 가능
+      ok = False → SL 위험 때문에 사용 불가
+    """
+
+    try:
+        if df is None or len(df) < lookback + 5:
+            return True, "insufficient_df_for_sl_guard", 0.0
+
+        close = float(df["close"].iloc[-1])
+        high = df["high"].astype(float).values
+        low = df["low"].astype(float).values
+
+        # 예상 방향 판단
+        pos = "long" if hi_sel > 0 else ("short" if lo_sel < 0 else "neutral")
+
+        # 손절 가격 계산
+        if pos == "long":
+            sl_price = close * (1 - sl_ratio)
+            tp_price = close * (1 + hi_sel)
+        elif pos == "short":
+            sl_price = close * (1 + sl_ratio)
+            tp_price = close * (1 + lo_sel)
+        else:
+            return True, "neutral_position_no_sl_guard", 0.0
+
+        # 최근 캔들로 위험도 계산
+        recent_high = high[-lookback:]
+        recent_low = low[-lookback:]
+
+        sl_first_count = 0
+        samples = 0
+
+        for h, l in zip(recent_high, recent_low):
+            samples += 1
+            # 롱일 때: low <= SL 먼저 닿음 → SL 위험
+            if pos == "long":
+                if l <= sl_price:
+                    sl_first_count += 1
+            # 숏일 때: high >= SL 먼저 닿음 → SL 위험
+            else:
+                if h >= sl_price:
+                    sl_first_count += 1
+
+        risk_ratio = sl_first_count / max(1, samples)
+
+        # 위험 기준 (경험적으로 35% 이상이면 매우 위험)
+        if risk_ratio >= 0.35:
+            return False, f"stoploss_touch_risk_high({risk_ratio:.2f})", risk_ratio
+
+        return True, "ok", risk_ratio
+
+    except Exception as e:
+        return True, f"sl_guard_exception:{e}", 0.0
+
+
 if __name__ == "__main__":
     res = predict("BTCUSDT", "단기", source="테스트")
     print(res)
