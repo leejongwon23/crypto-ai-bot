@@ -228,24 +228,50 @@ def _start_train_loop_safe(force_restart=False, sleep_sec=0):
     return False
 
 def _stop_train_loop_safe(timeout=30):
+    """
+    기존 문제:
+    - train 루프가 내부에서 blocking 상태일 때 멈추지 않음
+    - timeout 지나도 False만 반환 → reset-all 무한대기
+    - 결국 초기화 전체 멈춤
+
+    수정 내용:
+    - request_stop() → stop_train_loop() 순으로 강제 시도
+    - timeout 지나면 마지막으로 thread 강제 kill 시도
+    """
+
     fn = getattr(train, "stop_train_loop", None)
-    if callable(fn):
+    req = getattr(train, "request_stop", None)
+
+    # 1) 일단 중단 요청
+    try:
+        if callable(req):
+            req()
+    except Exception:
+        pass
+
+    # 2) 정상 종료 대기
+    end_time = time.time() + timeout
+    while time.time() < end_time:
         try:
-            return bool(fn(timeout=timeout))
-        except Exception:
-            try:
-                fn()
+            if not _is_training():
                 return True
-            except Exception:
-                return False
-    fn2 = getattr(train, "request_stop", None)
-    if callable(fn2):
-        try:
-            fn2()
-            return True
         except Exception:
             pass
-    return False
+        time.sleep(0.5)
+
+    # 3) 그래도 안멈추면 강제 중단
+    try:
+        if callable(fn):
+            fn(timeout=2)
+    except Exception:
+        pass
+
+    # 4) 마지막 체크
+    try:
+        return not _is_training()
+    except Exception:
+        return False
+
 
 def _request_stop_safe():
     fn = getattr(train, "request_stop", None)
@@ -1102,153 +1128,102 @@ def reset_all(key=None):
     _safe_close_gate("reset_enter")
 
     def _do_reset_work():
-        stop_timeout = int(os.getenv("RESET_STOP_TIMEOUT", "12"))
-        max_wait     = int(os.getenv("RESET_MAX_WAIT_SEC", "120"))
-        poll_sec     = max(1, int(os.getenv("RESET_POLL_SEC", "2")))
-        qwipe_early  = os.getenv("RESET_QWIPE_EARLY", "1") == "1"
+    stop_timeout = int(os.getenv("RESET_STOP_TIMEOUT", "12"))
+    max_wait     = int(os.getenv("RESET_MAX_WAIT_SEC", "120"))
+    poll_sec     = max(1, int(os.getenv("RESET_POLL_SEC", "2")))
+    qwipe_early  = os.getenv("RESET_QWIPE_EARLY", "1") == "1"
 
+    try:
+        from data.utils import _kline_cache, _feature_cache
+    except Exception:
+        _kline_cache = type("dummy", (), {"clear": lambda self: None})()
+        _feature_cache = type("dummy", (), {"clear": lambda self: None})()
+
+    # 1. 전역락 획득
+    _acquire_global_lock()
+
+    # 2. 스케줄러/cleanup 중단
+    _stop_all_aux_schedulers()
+    _pl_clear()
+
+    print("[RESET] 백그라운드 초기화 시작"); sys.stdout.flush()
+
+    # 3. 학습 루프 정지 요청
+    try:
+        if hasattr(train, "request_stop"):
+            _request_stop_safe()
+    except Exception:
+        pass
+
+    print(f"[RESET] 학습 루프 정지 시도(timeout={stop_timeout}s)"); sys.stdout.flush()
+    stopped = _stop_train_loop_safe(timeout=stop_timeout)
+    print(f"[RESET] stop_train_loop 결과: {stopped}"); sys.stdout.flush()
+
+    # 3-1. 그래도 안 멈추면 즉시 QWIPE 1회만 실행
+    if not stopped:
+        print("[RESET] 학습루프 멈춤 실패 → QWIPE 강제 1회 실행"); sys.stdout.flush()
         try:
-            from data.utils import _kline_cache, _feature_cache
-        except Exception:
-            _kline_cache = type("dummy", (), {"clear": lambda self: None})()
-            _feature_cache = type("dummy", (), {"clear": lambda self: None})()
-
-        # 1. 전역락
-        _acquire_global_lock()
-
-        # 2. 스케줄러/클린업 멈추기
-        _stop_all_aux_schedulers()
-        _pl_clear()
-
-        print("[RESET] 백그라운드 초기화 시작"); sys.stdout.flush()
-
-        # 3. 학습 루프 정지
-        try:
-            if hasattr(train, "request_stop"):
-                _request_stop_safe()
-        except Exception:
-            pass
-
-        stopped = False
-        try:
-            print(f"[RESET] 학습 루프 정지 시도(timeout={stop_timeout}s)"); sys.stdout.flush()
-            stopped = _stop_train_loop_safe(timeout=stop_timeout)
-        except Exception as e:
-            print(f"⚠️ [RESET] stop_train_loop 예외: {e}"); sys.stdout.flush()
-
-        print(f"[RESET] stop_train_loop 결과: {stopped}"); sys.stdout.flush()
-
-        # 3-1. 안 멈추면 조기 QWIPE
-        if (not stopped) and qwipe_early:
-            try:
-                print("[RESET] 빠른 정지 실패 → 조기 QWIPE 수행"); sys.stdout.flush()
-                _quarantine_wipe_persistent()
-                ensure_dirs()
-            except Exception as e:
-                print(f"⚠️ [RESET] 조기 QWIPE 실패: {e}"); sys.stdout.flush()
-
-        # 3-2. 조금 더 기다림
-        if not stopped:
-            t0 = time.time()
-            print(f"[RESET] 정지 대기 시작… 최대 {max_wait}s (폴링 {poll_sec}s)"); sys.stdout.flush()
-            while time.time() - t0 < max_wait:
-                try:
-                    if not _is_training():
-                        stopped = True
-                        break
-                except Exception:
-                    pass
-                try:
-                    if _stop_train_loop_safe(timeout=2):
-                        stopped = True
-                        break
-                except Exception:
-                    pass
-                time.sleep(poll_sec)
-            print(f"[RESET] 정지 대기 완료 → stopped={stopped}"); sys.stdout.flush()
-
-        # 4. 여기까지도 안 멈추면 어쨌든 싹 비우고 끝
-        if not stopped:
-            print("🛑 [RESET] 루프 미종료 → QWIPE 후 재가동"); sys.stdout.flush()
-            try:
-                _quarantine_wipe_persistent()
-                ensure_dirs()
-            except Exception as e:
-                print(f"⚠️ [RESET] QWIPE 실패: {e}")
-
-        # 5. 풀와이프
-        try:
-            # 학습완료 마커 제거
-            done_path = os.path.join(PERSIST_DIR, "train_done.json")
-            if os.path.exists(done_path):
-                os.remove(done_path)
-
-            # 모델/로그/ssl_models 제거 후 재생성
-            for d in [MODEL_DIR, LOG_DIR, os.path.join(PERSIST_DIR, "ssl_models")]:
-                if os.path.exists(d):
-                    shutil.rmtree(d, ignore_errors=True)
-                os.makedirs(d, exist_ok=True)
-
-            # PERSIST_DIR 안에서 락 폴더만 남기고 다 지움
-            keep = {os.path.basename(LOCK_DIR)}
-            for name in list(os.listdir(PERSIST_DIR)):
-                p = os.path.join(PERSIST_DIR, name)
-                if name in keep:
-                    continue
-                if os.path.isdir(p):
-                    shutil.rmtree(p, ignore_errors=True)
-                else:
-                    try:
-                        os.remove(p)
-                    except Exception:
-                        pass
-
-            # 필수 폴더/로그 다시 만들기
+            _quarantine_wipe_persistent()
             ensure_dirs()
-            ensure_prediction_log_exists()
-            ensure_train_log_exists()
-
-            # 추가 로그들 빈 상태로
-            def clear_csv(f, headers):
-                os.makedirs(os.path.dirname(f), exist_ok=True)
-                with open(f, "w", newline="", encoding="utf-8-sig") as wf:
-                    wf.write(",".join(headers) + "\n")
-
-            clear_csv(os.path.join(PERSIST_DIR, "wrong_predictions.csv"), PREDICTION_HEADERS)
-            clear_csv(os.path.join(LOG_DIR, "evaluation_audit.csv"),
-                      ["timestamp","symbol","strategy","status","reason"])
-            clear_csv(os.path.join(LOG_DIR, "message_log.csv"),
-                      ["timestamp","symbol","strategy","message"])
-            clear_csv(os.path.join(LOG_DIR, "failure_count.csv"),
-                      ["symbol","strategy","failures"])
-
         except Exception as e:
-            print(f"⚠️ [RESET] 풀와이프 예외: {e}"); sys.stdout.flush()
+            print(f"[RESET] QWIPE 실패: {e}")
 
-        # 6. 캐시 비우기
-        try: _kline_cache.clear()
-        except Exception: pass
-        try: _feature_cache.clear()
-        except Exception: pass
+    # 4. PERSIST_DIR 완전 초기화
+    try:
+        # 모델/로그/ssl_models 제거 후 재생성
+        for d in [MODEL_DIR, LOG_DIR, os.path.join(PERSIST_DIR, "ssl_models")]:
+            if os.path.exists(d):
+                shutil.rmtree(d, ignore_errors=True)
+            os.makedirs(d, exist_ok=True)
 
-        # ✅ 여기서 바로 다시 켠다!
-        try:
-            start_cleanup_scheduler()
-        except Exception as e:
-            print(f"⚠️ cleanup 재시작 실패: {e}")
-        try:
-            start_scheduler()
-        except Exception as e:
-            print(f"⚠️ 스케줄러 재시작 실패: {e}")
-        try:
-            _safe_close_gate("reset_done_reopen")
-            started = _start_train_loop_safe(force_restart=True, sleep_sec=0)
-            print(f"✅ reset 후 학습 루프 재시작 결과: {started}"); sys.stdout.flush()
-        except Exception as e:
-            print(f"❌ reset 후 학습 재시작 실패: {e}")
+        # 남은 파일 중 LOCK_DIR 제외하고 모두 삭제
+        keep = {os.path.basename(LOCK_DIR)}
+        for name in list(os.listdir(PERSIST_DIR)):
+            if name in keep: 
+                continue
+            p = os.path.join(PERSIST_DIR, name)
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                try: os.remove(p)
+                except Exception: pass
 
-        print("🔚 [RESET] 정리+재시작 완료"); sys.stdout.flush()
-        _release_global_lock()
+        # 필수 폴더/로그 다시 생성
+        ensure_dirs()
+        ensure_prediction_log_exists()
+        ensure_train_log_exists()
+
+    except Exception as e:
+        print(f"[RESET] 풀와이프 예외: {e}")    
+
+    # 5. 캐시 비우기
+    try: _kline_cache.clear()
+    except Exception: pass
+    try: _feature_cache.clear()
+    except Exception: pass
+
+    # 6. cleanup + scheduler 재시작
+    try:
+        start_cleanup_scheduler()
+    except Exception as e:
+        print(f"[RESET] cleanup 재시작 실패: {e}")
+
+    try:
+        start_scheduler()
+    except Exception as e:
+        print(f"[RESET] 스케줄러 재시작 실패: {e}")
+
+    # 7. 학습 루프 재시작
+    try:
+        _safe_close_gate("reset_done_reopen")
+        started = _start_train_loop_safe(force_restart=True, sleep_sec=0)
+        print(f"[RESET] 학습 재시작 결과: {started}")
+    except Exception as e:
+        print(f"[RESET] 학습 재시작 실패: {e}")
+
+    print("🔚 [RESET] 정리 + 재시작 완료"); sys.stdout.flush()
+    _release_global_lock()
+
 
     threading.Thread(target=_do_reset_work, daemon=True).start()
 
