@@ -559,27 +559,38 @@ def get_btc_dominance():
     except Exception:
         return BTC_DOMINANCE_CACHE["value"]
 
+
 def future_gains_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
     if df is None or len(df) == 0 or "timestamp" not in df.columns:
         return np.zeros(0 if df is None else len(df), dtype=np.float32)
+
     ts = _parse_ts_series(df["timestamp"])
     close = pd.to_numeric(df["close"], errors="coerce").astype(np.float32).values
-    high  = pd.to_numeric((df["high"] if "high" in df.columns else df["close"]), errors="coerce").astype(np.float32).values
+    high  = pd.to_numeric(df.get("high", df["close"]), errors="coerce").astype(np.float32).values
+
     out = np.zeros(len(df), dtype=np.float32)
-    H = pd.Timedelta(hours=int(horizon_hours)); j0 = 0
+    H = pd.Timedelta(hours=int(horizon_hours))
+
+    j0 = 0
     for i in range(len(df)):
-        t0 = ts.iloc[i]; t1 = t0 + H
-        j = max(j0, i); mx = high[i]
+        t0 = ts.iloc(i)
+        t1 = t0 + H
+        j = max(j0, i)
+        mx = high[i]
+
         while j < len(df) and ts.iloc[j] <= t1:
-            if high[j] > mx: mx = high[j]
+            if high[j] > mx:
+                mx = high[j]
             j += 1
         j0 = max(j - 1, i)
+
         base = close[i] if close[i] > 0 else (close[i] + 1e-6)
         out[i] = float((mx - base) / (base + 1e-12))
     return out.astype(np.float32)
-
+    
 def future_gains(df: pd.DataFrame, strategy: str) -> np.ndarray:
-    return future_gains_by_hours(df, {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24))
+    horizon = {"단기": 4, "중기": 24, "장기": 168}.get(strategy, 24)
+    return future_gains_by_hours(df, horizon)
 
 def _downcast_numeric(df: pd.DataFrame, prefer_float32: bool = True) -> pd.DataFrame:
     if df is None or df.empty: return df
@@ -1342,8 +1353,10 @@ def _drop_duplicate_windows(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 
 # ========================= 데이터셋 생성(라벨→서명수익→diff) =========================
 def create_dataset(features, window=10, strategy="단기", input_size=None):
-    """피처 리스트 → 스케일 → 윈도우 → 라벨. 
-    ✅ 수정판: labels.py 라벨만 사용, 예비(lookahead/pct) 라벨 완전 제거"""
+    """
+    피처 리스트 → 스케일 → 윈도우 → 라벨.
+    YOPO 라벨 시스템과 100% 동일하게 labels.py의 make_labels만 사용.
+    """
     import pandas as _pd
 
     def _dummy(symbol_name):
@@ -1351,31 +1364,33 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         y = np.zeros((1,), dtype=np.int64)
         return X, y
 
+    # =======================
+    # 0) 기본 준비
+    # =======================
     symbol_name = "UNKNOWN"
     if isinstance(features, list) and features and isinstance(features[0], dict) and "symbol" in features[0]:
         symbol_name = str(features[0]["symbol"]).upper()
+
     if not isinstance(features, list) or len(features) <= window:
         safe_failed_result(symbol_name, strategy, reason="not_enough_rows<window")
         return _dummy(symbol_name)
 
-    # 🔽 라벨러가 돌려줄 수 있는 메타 기본값 준비
-    edges = None
-    bin_counts = None
-    bin_spans = None
-
+    # =======================
+    # 1) DataFrame 정리
+    # =======================
     try:
         df = _pd.DataFrame(features)
         df["timestamp"] = _parse_ts_series(df.get("timestamp"))
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         df = df.drop(columns=["strategy"], errors="ignore")
 
-        # 라벨용 컬럼 유효성 체크
+        # 라벨용 컬럼 보정
         for c in ["close", "high", "low"]:
             df[c] = pd.to_numeric(df.get(c, np.nan), errors="coerce")
         df[["close", "high", "low"]] = df[["close", "high", "low"]].ffill()
         df = df.dropna(subset=["close", "high", "low"])
 
-        # 스케일링 대상 숫자화
+        # 스케일링할 숫자화
         feature_cols = [c for c in df.columns if c != "timestamp"]
         for c in feature_cols:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -1385,138 +1400,162 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             safe_failed_result(symbol_name, strategy, reason="after_clean_rows<window")
             return _dummy(symbol_name)
 
-        scaler = MinMaxScaler()
-        scaled = scaler.fit_transform(df[feature_cols].astype(np.float32))
-        df_s = _pd.DataFrame(scaled.astype(np.float32), columns=feature_cols)
-        df_s["timestamp"] = df["timestamp"].values
-        input_cols = [c for c in df_s.columns if c != "timestamp"]
+    except Exception as e:
+        safe_failed_result(symbol_name, strategy, reason=f"df_preprocess_error: {e}")
+        return _dummy(symbol_name)
 
-        # 입력 차원 정합
-        target_input = input_size if input_size else max(MIN_FEATURES, len(input_cols))
-        if len(input_cols) < target_input:
-            for i in range(len(input_cols), target_input):
-                padc = f"pad_{i}"
-                df_s[padc] = np.float32(0.0)
-                input_cols.append(padc)
-        elif len(input_cols) > target_input:
-            keep = input_cols[:target_input]
-            df_s = df_s[keep + ["timestamp"]]
-            input_cols = keep
+    # =======================
+    # 2) 스케일링
+    # =======================
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(df[feature_cols].astype(np.float32))
+    df_s = _pd.DataFrame(scaled.astype(np.float32), columns=feature_cols)
+    df_s["timestamp"] = df["timestamp"].values
+    input_cols = [c for c in df_s.columns if c != "timestamp"]
 
-        # ✅ 정식 라벨 시도 (labels.py 라벨만 사용)
-        y_seq = None
-        class_ranges_used = None
-        if _make_labels is not None:
-            try:
-                (
-                    _gains_from_labeler,
-                    labels_full,
-                    class_ranges,
-                    edges,
-                    bin_counts,
-                    bin_spans,
-                ) = _make_labels(
-                    df[["timestamp", "close", "high", "low"]],
-                    symbol=symbol_name,
-                    strategy=strategy,
-                    group_id=None,
-                )
-                if labels_full is not None and len(labels_full) == len(df):
-                    y_seq = labels_full[window:len(df)]
-                    class_ranges_used = class_ranges
-            except Exception as e:
-                safe_failed_result(symbol_name, strategy, reason=f"make_labels 실패: {e}")
-                return _dummy(symbol_name)
+    # 입력 차원 맞추기
+    target_input = input_size if input_size else max(MIN_FEATURES, len(input_cols))
+    if len(input_cols) < target_input:
+        for i in range(len(input_cols), target_input):
+            padc = f"pad_{i}"
+            df_s[padc] = np.float32(0.0)
+            input_cols.append(padc)
+    elif len(input_cols) > target_input:
+        keep = input_cols[:target_input]
+        df_s = df_s[keep + ["timestamp"]]
+        input_cols = keep
 
-        # ✅ 라벨이 없으면 예비계산 안 하고 바로 중단
-        if y_seq is None or len(y_seq) == 0:
-            safe_failed_result(symbol_name, strategy, reason="labels_empty_skip_backup")
-            return _dummy(symbol_name)
+    # =======================
+    # 3) ★★★ 정식 YOPO 라벨 계산 (labels.make_labels) — 핵심 ★★★
+    # =======================
+    y_seq = None
+    class_ranges_used = None
 
-        # 윈도우 생성
-        samples = []
-        for i in range(window, len(df_s)):
-            seq = df_s.iloc[i - window : i]
-            if len(seq) != window:
-                continue
-            samples.append([[float(seq.iloc[j].get(c, 0.0)) for c in input_cols] for j in range(window)])
+    try:
+        (
+            _gains_from_labeler,
+            labels_full,
+            class_ranges,
+            edges,
+            bin_counts,
+            bin_spans,
+        ) = _make_labels(
+            df[["timestamp", "close", "high", "low"]],
+            symbol=symbol_name,
+            strategy=strategy,
+            group_id=None,
+        )
 
-        if not samples:
-            safe_failed_result(symbol_name, strategy, reason="no_valid_samples")
-            return _dummy(symbol_name)
+        # 라벨 길이 검증
+        if labels_full is not None and len(labels_full) == len(df):
+            # 윈도우 offset 적용 (window 이후부터 y 등록)
+            y_seq = labels_full[window:len(df)]
+            class_ranges_used = class_ranges
 
-        X = np.array(samples, dtype=np.float32)
-        y = np.array(y_seq[: len(X)], dtype=np.int64)
-        keep = np.where(y >= 0)[0]
-        if keep.size == 0:
-            return _dummy(symbol_name)
-        X, y = X[keep], y[keep]
+    except Exception as e:
+        safe_failed_result(symbol_name, strategy, reason=f"make_labels 실패: {e}")
+        return _dummy(symbol_name)
 
-        # 길이 일치
-        m = min(len(X), len(y))
-        if m == 0:
-            return _dummy(symbol_name)
-        X, y = X[:m], y[:m]
+    # 라벨 없으면 즉시 종료
+    if y_seq is None or len(y_seq) == 0:
+        safe_failed_result(symbol_name, strategy, reason="labels_empty_skip_backup")
+        return _dummy(symbol_name)
 
-        # 중복 제거
-        X_dedup, keep_idx = _drop_duplicate_windows(X)
-        if len(keep_idx) < len(y):
-            y = y[keep_idx]
-            X = X_dedup
+    # =======================
+    # 4) 윈도우 생성
+    # =======================
+    samples = []
+    for i in range(window, len(df_s)):
+        seq = df_s.iloc[i - window : i]
+        if len(seq) != window:
+            continue
+        samples.append([[float(seq.iloc[j].get(c, 0.0)) for c in input_cols] for j in range(window)])
 
-        # === CHANGE === 2) 경계 근접 보강 — BOUNDARY_BAND 연동
-        try:
-            eps_bp_env = os.getenv("BOUNDARY_EPS_BP", None)
-            if eps_bp_env is not None:
-                eps = max(0.0, float(eps_bp_env) / 10000.0)
-            else:
-                eps = float(BOUNDARY_BAND)
-            if class_ranges_used is not None and len(class_ranges_used) > 1 and eps > 0:
-                stops = np.array([b for (_, b) in class_ranges_used[:-1]], dtype=np.float64)
-                closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float64)
-                pct = np.diff(closes) / (closes[:-1] + 1e-6)
-                vals = np.asarray(pct[-len(y):], dtype=np.float64)
-                near = np.any(np.abs(vals[:, None] - stops[None, :]) <= eps, axis=1)
-                idx_edge = np.where(near)[0]
-                if idx_edge.size > 0:
-                    dup = min(len(idx_edge), max(1, len(y) // 20))
-                    X = np.concatenate([X, X[idx_edge[:dup]]], axis=0)
-                    y = np.concatenate([y, y[idx_edge[:dup]]], axis=0)
-        except Exception:
-            pass
+    if not samples:
+        safe_failed_result(symbol_name, strategy, reason="no_valid_samples")
+        return _dummy(symbol_name)
 
-        # === CHANGE === 3) 클래스 최소 샘플 보장(CV min_per_class)
-        try:
-            cv_cfg = get_CV_CONFIG()
-            min_per_class = int(cv_cfg.get("min_per_class", 3))
-            if min_per_class > 0:
-                uniq, cnts = np.unique(y, return_counts=True)
-                if uniq.size > 0 and np.any(cnts < min_per_class):
-                    X, y = augment_for_min_count(X, y, target_count=min_per_class)
-        except Exception:
-            pass
+    X = np.array(samples, dtype=np.float32)
+    y = np.array(y_seq[: len(X)], dtype=np.int64)
 
-        # === 메타 고정 ===
-        class_ranges_final = class_ranges_used or cfg_get_class_ranges(symbol=symbol_name, strategy=strategy)
-        num_classes_final = len(class_ranges_final)
+    # 음수 라벨 제거
+    keep = np.where(y >= 0)[0]
+    if keep.size == 0:
+        return _dummy(symbol_name)
+    X, y = X[keep], y[keep]
 
-        X.attrs = {
-            "num_classes": int(num_classes_final),
-            "class_ranges": class_ranges_final,
-            "class_groups": cfg_get_class_groups(num_classes_final, 5),
-            "allow_trainer_class_collapse": False,
-        }
-        try:
-            if edges is not None:
-                X.attrs["bin_edges"] = [float(e) for e in edges]
-            if bin_counts is not None:
-                X.attrs["bin_counts"] = [int(c) for c in bin_counts]
-            if bin_spans is not None:
-                X.attrs["bin_spans_pct"] = [float(s) for s in bin_spans]
-        except Exception:
-            pass
+    # 길이 동기화
+    m = min(len(X), len(y))
+    if m == 0:
+        return _dummy(symbol_name)
+    X, y = X[:m], y[:m]
 
-        return X, y
+    # =======================
+    # 5) 중복 윈도우 제거
+    # =======================
+    X_dedup, keep_idx = _drop_duplicate_windows(X)
+    if len(keep_idx) < len(y):
+        y = y[keep_idx]
+        X = X_dedup
+
+    # =======================
+    # 6) 경계 근접 보강 (BOUNDARY_BAND)
+    # =======================
+    try:
+        eps_bp_env = os.getenv("BOUNDARY_EPS_BP", None)
+        eps = max(0.0, float(eps_bp_env) / 10000.0) if eps_bp_env is not None else float(BOUNDARY_BAND)
+
+        if class_ranges_used is not None and len(class_ranges_used) > 1 and eps > 0:
+            stops = np.array([b for (_, b) in class_ranges_used[:-1]], dtype=np.float64)
+            closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float64)
+            pct = np.diff(closes) / (closes[:-1] + 1e-6)
+            vals = np.asarray(pct[-len(y):], dtype=np.float64)
+            near = np.any(np.abs(vals[:, None] - stops[None, :]) <= eps, axis=1)
+            idx_edge = np.where(near)[0]
+            if idx_edge.size > 0:
+                dup = min(len(idx_edge), max(1, len(y) // 20))
+                X = np.concatenate([X, X[idx_edge[:dup]]], axis=0)
+                y = np.concatenate([y, y[idx_edge[:dup]]], axis=0)
+    except Exception:
+        pass
+
+    # =======================
+    # 7) 클래스 최소 개수 보장 보강
+    # =======================
+    try:
+        cv_cfg = get_CV_CONFIG()
+        min_per_class = int(cv_cfg.get("min_per_class", 3))
+        if min_per_class > 0:
+            uniq, cnts = np.unique(y, return_counts=True)
+            if uniq.size > 0 and np.any(cnts < min_per_class):
+                X, y = augment_for_min_count(X, y, target_count=min_per_class)
+    except Exception:
+        pass
+
+    # =======================
+    # 8) 메타 정보 부착
+    # =======================
+    class_ranges_final = class_ranges_used
+    num_classes_final = len(class_ranges_final)
+
+    X.attrs = {
+        "num_classes": int(num_classes_final),
+        "class_ranges": class_ranges_final,
+        "class_groups": cfg_get_class_groups(num_classes_final, 5),
+        "allow_trainer_class_collapse": False,
+    }
+
+    try:
+        if edges is not None:
+            X.attrs["bin_edges"] = [float(e) for e in edges]
+        if bin_counts is not None:
+            X.attrs["bin_counts"] = [int(c) for c in bin_counts]
+        if bin_spans is not None:
+            X.attrs["bin_spans_pct"] = [float(s) for s in bin_spans]
+    except Exception:
+        pass
+
+    return X, y
 
     except Exception as e:
         safe_failed_result(symbol_name, strategy, reason=f"create_dataset 예외: {e}")
@@ -1654,14 +1693,12 @@ def _self_check(symbol: str = "BTCUSDT") -> Dict[str, Any]:
 
 def future_up_down_fixed(df: pd.DataFrame, strategy: str):
     """
-    YOPO 라벨 설계와 100% 동일하게:
-    단기 = 1 캔들(4h)
-    중기 = 1 캔들(1d)
-    장기 = 1 캔들(1w)
-    각 캔들 '1개'의 high/low 범위만 보고 수익률 계산한다.
+    YOPO 라벨 방식과 100% 동일:
+    단기=1캔들(4h)
+    중기=1캔들(1d)
+    장기=1캔들(1w)
     """
-    # 전략 → 캔들 1개 고정
-    H = 1  # 단기/중기/장기 모두 1개
+    H = 1  # 캔들 개수 고정
 
     n = len(df)
     if n == 0:
@@ -1677,8 +1714,9 @@ def future_up_down_fixed(df: pd.DataFrame, strategy: str):
     for i in range(n):
         j = min(n, i + H)
         base = close[i] if close[i] > 0 else 1e-6
+
         up[i] = (float(np.max(high[i:j])) - base) / (base + 1e-12)
-        dn[i] = (float(np.min(low[i:j])) - base) / (base + 1e-12)
+        dn[i] = (float(np.min(low[i:j]))  - base) / (base + 1e-12)
 
     return up, dn
 
