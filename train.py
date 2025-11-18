@@ -911,6 +911,10 @@ def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
             break
     return train_idx, val_idx, moved
 
+# ============================================
+# 🔥 하이브리드 학습용으로 완전히 수정된 train_one_model()
+# ============================================
+
 def train_one_model(
     symbol,
     strategy,
@@ -921,14 +925,13 @@ def train_one_model(
     pre_lbl: Optional[tuple] = None,
     df_hint: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
-    """
-    한 심볼-전략-그룹에 대해 실제로 모델을 1개 이상 학습해서 저장하는 함수.
-    (device_type 누락되는 거 고친 버전)
-    """
+
+    ###############################################
+    # 0) 공통 초기화
+    ###############################################
     HAS_CUDA = torch.cuda.is_available()
     device_type = "cuda" if HAS_CUDA else "cpu"
     use_amp_here = (os.getenv("USE_AMP", "1") == "1") and HAS_CUDA
-
     if max_epochs is None:
         max_epochs = _epochs_for(strategy)
 
@@ -942,9 +945,11 @@ def train_one_model(
 
     try:
         ensure_failure_db()
-        _safe_print(f"✅ train_one_model {symbol}-{strategy}-g{group_id}")
+        _safe_print(f"🔥 [HYBRID] train_one_model {symbol}-{strategy}-g{group_id}")
 
-        # ===== 1. 데이터 불러오기 =====
+        ###############################################
+        # 1) 데이터 불러오기 (원본 그대로)
+        ###############################################
         if df_hint is not None:
             df = df_hint
         else:
@@ -957,16 +962,10 @@ def train_one_model(
             _log_skip(symbol, strategy, "데이터 없음")
             return res
 
+        # (운영로그용) 수익분포 기록
         log_return_distribution_for_train(symbol, strategy, df)
 
-        cfg = STRATEGY_CONFIG.get(strategy, {})
-        _limit = int(cfg.get("limit", 300))
-        _min_required = max(60, int(_limit * 0.90))
-        _attrs = getattr(df, "attrs", {}) if df is not None else {}
-        augment_needed = bool(_attrs.get("augment_needed", len(df) < _limit))
-        enough_for_training = bool(_attrs.get("enough_for_training", len(df) >= _min_required))
-
-        # ===== 2. 피처 만들기 =====
+        # 피처 생성도 원본 유지
         if isinstance(pre_feat, pd.DataFrame):
             feat = pre_feat
         elif isinstance(pre_feat, dict) and pre_feat.get(strategy, None) is not None:
@@ -978,632 +977,215 @@ def train_one_model(
             _log_skip(symbol, strategy, "피처 없음")
             return res
 
-        # ===== 3. 라벨 만들기 =====
-        bin_info = None
-        if isinstance(pre_lbl, tuple) and len(pre_lbl) in (3, 4, 6):
-            # 기존 처리 그대로 유지
-            if len(pre_lbl) == 6:
-                gains, labels, class_ranges_used_global, be, bc, bs = pre_lbl
-                bin_info = {
-                    "bin_edges": be.tolist() if hasattr(be, "tolist") else list(be),
-                    "bin_counts": bc.tolist() if hasattr(bc, "tolist") else list(bc),
-                    "bin_spans": bs.tolist() if hasattr(bs, "tolist") else list(bs),
-                }
-            elif len(pre_lbl) == 4:
-                gains, labels, class_ranges_used_global, bin_info = pre_lbl
-            else:
-                gains, labels, class_ranges_used_global = pre_lbl
-        elif isinstance(pre_lbl, dict) and pre_lbl.get(strategy, None) is not None:
-            val = pre_lbl[strategy]
-            if isinstance(val, (list, tuple)) and len(val) in (3, 4, 6):
-                if len(val) == 6:
-                    gains, labels, class_ranges_used_global, be, bc, bs = val
-                    bin_info = {
-                        "bin_edges": be.tolist() if hasattr(be, "tolist") else list(be),
-                        "bin_counts": bc.tolist() if hasattr(bc, "tolist") else list(bc),
-                        "bin_spans": bs.tolist() if hasattr(bs, "tolist") else list(bs),
-                    }
-                elif len(val) == 4:
-                    gains, labels, class_ranges_used_global, bin_info = val
-                else:
-                    gains, labels, class_ranges_used_global = val
-            else:
-                _log_skip(symbol, strategy, "사전 라벨 구조 오류")
-                return res
-        else:
-            res_labels = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=None)
-            if isinstance(res_labels, (list, tuple)) and len(res_labels) in (3, 4, 6):
-                if len(res_labels) == 6:
-                    gains, labels, class_ranges_used_global, be, bc, bs = res_labels
-                    bin_info = {
-                        "bin_edges": be.tolist() if hasattr(be, "tolist") else list(be),
-                        "bin_counts": bc.tolist() if hasattr(bc, "tolist") else list(bc),
-                        "bin_spans": bs.tolist() if hasattr(bs, "tolist") else list(bs),
-                    }
-                elif len(res_labels) == 4:
-                    gains, labels, class_ranges_used_global, bin_info = res_labels
-                else:
-                    gains, labels, class_ranges_used_global = res_labels
-            else:
-                _log_skip(symbol, strategy, "라벨 생성 실패")
-                return res
+        ###############################################
+        # 2) 라벨(= 미래수익률) 생성 – 원본 labels.py 그대로
+        ###############################################
+        res_labels = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=None)
 
-        if (not isinstance(labels, np.ndarray)) or labels.size == 0:
-            _log_skip(symbol, strategy, "라벨 없음")
+        # YOPO labels 구조: (gains, labels, class_ranges, edges…)
+        if isinstance(res_labels, (list, tuple)):
+            gains = res_labels[0]
+            labels = res_labels[1]
+            class_ranges = res_labels[2]
+        else:
+            _log_skip(symbol, strategy, "라벨 생성 실패")
             return res
 
-        # ===== 4. 라벨 RETRY =====
-        uniq0 = _uniq_nonneg(labels)
-        if uniq0 <= 1:
-            _safe_print(f"[LABEL RETRY] uniq<=1 → rebuild via make_labels() once ({symbol}-{strategy})")
-            res_try = _rebuild_labels_once(df=df, symbol=symbol, strategy=strategy)
-            if isinstance(res_try, (list, tuple)) and len(res_try) in (3, 4, 6):
-                if len(res_try) == 6:
-                    gains2, labels2, class_ranges2, be2, bc2, bs2 = res_try
-                    bin_info2 = {
-                        "bin_edges": be2.tolist() if hasattr(be2, "tolist") else list(be2),
-                        "bin_counts": bc2.tolist() if hasattr(bc2, "tolist") else list(bc2),
-                        "bin_spans": bs2.tolist() if hasattr(bs2, "tolist") else list(bs2),
-                    }
-                elif len(res_try) == 4:
-                    gains2, labels2, class_ranges2, bin_info2 = res_try
-                else:
-                    gains2, labels2, class_ranges2 = res_try
-                    bin_info2 = bin_info
-                uniq1 = _uniq_nonneg(labels2)
-                if uniq1 > uniq0 and uniq1 >= 2:
-                    gains, labels = gains2, labels2
-                    class_ranges_used_global = class_ranges2
-                    bin_info = bin_info2
-                    _safe_print(f"[LABEL RETRY OK] uniq {uniq0}→{uniq1}")
-                else:
-                    _safe_print(f"[LABEL RETRY NO-IMPROVE] uniq {uniq0}→{uniq1}")
+        if (not isinstance(gains, np.ndarray)) or gains.size == 0:
+            _log_skip(symbol, strategy, "gains 없음")
+            return res
 
-        # ===== 5. 실제 클래스 구간 =====
-        if "class_ranges_used_global" in locals() and class_ranges_used_global is not None:
-            class_ranges = class_ranges_used_global
-        else:
-            class_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
+        ###############################################
+        # 3) 하이브리드 학습 핵심:
+        #   - 모델은 “미래 수익률 숫자(gains)”만 예측한다.
+        #   - 클래스는 나중에 bin_edges로 매핑.
+        ###############################################
 
-        gidx = list(range(len(class_ranges)))
-        keep_set = set(gidx)
-        to_local = {g: i for i, g in enumerate(gidx)}
-
-        # ===== 6. 로그 출력 =====
-        mask_cnt = int((labels < 0).sum())
-        _safe_print(
-            f"[LABELS] total={len(labels)} masked={mask_cnt} ({mask_cnt/max(1,len(labels)):.2%}) "
-            f"BOUNDARY_BAND=±{BOUNDARY_BAND}"
-        )
-        try:
-            cnt_before = np.bincount(labels[labels >= 0], minlength=len(class_ranges)).astype(int).tolist()
-        except Exception:
-            cnt_before = []
-
-        num_classes_effective = int(np.unique(labels[labels >= 0]).size) if labels.size else 0
-        empty_idx = [i for i, c in enumerate(cnt_before) if int(c) == 0]
-
-        return_note = ""
-        if isinstance(bin_info, dict):
-            edges = bin_info.get("bin_edges", [])
-            counts = bin_info.get("bin_counts", [])
-            return_note = f" ; [ReturnDist] edges={edges[:20]}, counts={counts[:20]}"
-
-        try:
-            logger.log_training_result(
-                symbol,
-                strategy,
-                model="all",
-                accuracy=None,
-                f1=None,
-                loss=None,
-                val_acc=None,
-                val_f1=None,
-                val_loss=None,
-                engine="manual",
-                window=None,
-                recent_cap=None,
-                rows=int(len(df)),
-                limit=int(_limit),
-                min=int(_min_required),
-                augment_needed=bool(augment_needed),
-                enough_for_training=bool(enough_for_training),
-                note=f"[LabelStats] bins={len(class_ranges)}, empty={len(empty_idx)}, classes={num_classes_effective}, empty_idx={empty_idx[:8]}"
-                     + return_note,
-                source_exchange="BYBIT",
-                status="info",
-                NUM_CLASSES=int(len(class_ranges)),
-                class_counts_label_freeze=cnt_before,
-            )
-        except Exception:
-            pass
-
-        # ===== 7. 피처 정제 =====
+        # 피처 정리
         drop_cols = [c for c in ("timestamp", "strategy", "symbol") if c in feat.columns]
         feat_num = feat.drop(columns=drop_cols, errors="ignore").select_dtypes(include=[np.number])
         features_only = feat_num.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        feat_dim = int(getattr(features_only, "shape", [0, FEATURE_INPUT_SIZE])[1]) or int(FEATURE_INPUT_SIZE)
+        feat_dim = features_only.shape[1]
 
-        if len(features_only) > _MAX_ROWS_FOR_TRAIN or len(labels) > _MAX_ROWS_FOR_TRAIN:
-            cut = min(_MAX_ROWS_FOR_TRAIN, len(features_only), len(labels))
-            features_only = features_only.iloc[-cut:, :]
-            labels = labels[-cut:]
-
-        # ===== 8. 윈도우 후보 =====
+        # 윈도우
         try:
             top_windows = find_best_windows(
                 symbol, strategy,
                 window_list=[16, 20, 24, 28, 32],
-                top_k=3,
+                top_k=2,
                 group_id=group_id,
             )
-        except Exception:
-            try:
-                top_windows = [
-                    int(find_best_window(
-                        symbol, strategy,
-                        window_list=[16, 20, 24, 28, 32],
-                        group_id=group_id,
-                    ))
-                ]
-            except Exception:
-                top_windows = [20]
+        except:
+            top_windows = [20]
 
-        top_windows = [
-            int(max(5, w))
-            for w in top_windows
-            if isinstance(w, (int, float)) and w == w
-        ] or [20]
-        _safe_print(f"[WINDOWS] {top_windows}")
+        ###############################################
+        # 4) 숫자 예측 → bin 매핑 보조함수
+        ###############################################
+        def _map_return_to_class(value: float, ranges: List[Tuple[float, float]]) -> int:
+            for i, (lo, hi) in enumerate(ranges):
+                if lo <= value < hi:
+                    return i
+            return len(ranges) - 1
 
-        # ===== 9. 윈도우별 학습 =====
+        ###############################################
+        # 5) 윈도우별 학습 루프
+        ###############################################
         for window in top_windows:
-            if stop_event is not None and stop_event.is_set():
-                break
 
-            window = min(window, max(6, len(features_only) - 1))
             fv = features_only.values.astype(np.float32)
-            X_raw, y = _rebuild_samples_with_keepset(fv, labels, window, keep_set, to_local)
 
-            repaired_info = {
-                "neighbor_expansion": False,
-                "synthetic_labels": False,
-            }
+            # X_raw: 윈도우 슬라이딩
+            X_raw, y_raw = [], []
+            gv = gains.astype(np.float32)
 
-            if X_raw.size and len(np.unique(y)) < 2:
-                X_raw, y, syn = _synthesize_minority_if_needed(X_raw, y, num_classes=len(class_ranges))
-                repaired_info["synthetic_labels"] = syn
+            for i in range(len(fv) - window):
+                X_raw.append(fv[i:i+window])
+                y_raw.append(gv[i+window-1])
 
-            usable_samples = int(len(y))
-            note_msg = ""
-            if usable_samples == 0:
-                _log_skip(symbol, strategy, f"유효 라벨 샘플 없음(w={window})")
+            if not X_raw:
+                _log_skip(symbol, strategy, "유효 샘플(수익률) 없음")
                 continue
-            if y.min() < 0:
-                _log_skip(symbol, strategy, f"음수 라벨 유입 감지(w={window})")
-                continue
-            if usable_samples < 20:
-                note_msg = f"⚠️ 희소 학습 (샘플 {usable_samples})"
-                _safe_print(f"[WARN] {symbol}-{strategy}-w{window}: {note_msg}")
 
-            set_NUM_CLASSES(len(class_ranges))
+            X_raw = np.asarray(X_raw, dtype=np.float32)
+            y_raw = np.asarray(y_raw, dtype=np.float32)
 
-            # ===== train/val split =====
-            strat_ok = False
-            try:
-                if len(y) >= 40 and len(np.unique(y)) >= 2:
-                    splitter = StratifiedShuffleSplit(
-                        n_splits=1,
-                        test_size=0.20,
-                        random_state=int(os.getenv("GLOBAL_SEED", "20240101")),
-                    )
-                    tr_idx, val_idx = next(splitter.split(X_raw, y))
-                    strat_ok = True
-            except Exception:
-                strat_ok = False
+            # split
+            n = len(y_raw)
+            val_len = max(1, int(n * 0.2))
+            train_idx = np.arange(0, n-val_len)
+            val_idx = np.arange(n-val_len, n)
 
-            if not strat_ok:
-                try:
-                    train_idx, val_idx = coverage_split_indices(
-                        y, val_frac=0.20,
-                        min_coverage=0.60,
-                        stride=50,
-                        num_classes=len(class_ranges),
-                    )
-                except Exception:
-                    n = len(y)
-                    if n <= 1:
-                        train_idx = np.array([0], dtype=int)
-                        val_idx = np.array([0], dtype=int)
-                    else:
-                        train_idx = np.arange(0, n - 1, dtype=int)
-                        val_idx = np.array([n - 1], dtype=int)
-            else:
-                train_idx, val_idx = tr_idx, val_idx
-
-            if len(train_idx) == 0 and len(val_idx) == 0:
-                n = len(y)
-                if n <= 1:
-                    train_idx = np.array([0], dtype=int)
-                    val_idx = np.array([0], dtype=int)
-                else:
-                    train_idx = np.arange(0, n - 1, dtype=int)
-                    val_idx = np.array([n - 1], dtype=int)
-            elif len(train_idx) == 0:
-                val_take = int(val_idx[0])
-                train_idx = np.array([val_take], dtype=int)
-                val_idx = np.array([val_idx[-1]], dtype=int)
-            elif len(val_idx) == 0:
-                val_idx = np.array([train_idx[-1]], dtype=int)
-                train_idx = train_idx[:-1] if len(train_idx) > 1 else train_idx
-
-            train_idx, val_idx, _ = _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2)
-
-            try:
-                cnt_after = np.bincount(y, minlength=len(class_ranges)).astype(int).tolist()
-            except Exception:
-                cnt_after = []
-            batch_stratified_ok = bool(strat_ok)
-
-            # ===== 데이터로더 준비 =====
             X_train = X_raw[train_idx]
-            y_train = y[train_idx]
+            y_train = y_raw[train_idx]
             X_val = X_raw[val_idx]
-            y_val = y[val_idx]
+            y_val = y_raw[val_idx]
 
-            # ─────────────── [ADD] 희소 클래스 보정 ───────────────
-            if BALANCE_CLASSES_FLAG:
-                try:
-                    X_train, y_train = balance_classes(X_train, y_train)
-                    _safe_print(f"[BALANCE] applied: train={len(y_train)}, val={len(y_val)}")
-                except Exception as e:
-                    _safe_print(f"[BALANCE skip] {e}")
-
-            # ─────────────── [ADD] 증강 후 클래스 분포 출력 ───────────────
-            try:
-                from collections import Counter
-                cls_dist = Counter(y_train.tolist())
-                _safe_print("[BALANCE RESULT] 클래스별 샘플 수:")
-                for cls_id in sorted(cls_dist.keys()):
-                    _safe_print(f"  - class {cls_id}: {cls_dist[cls_id]}개")
-            except Exception as e:
-                _safe_print(f"[BALANCE RESULT skip] {e}")
-            # ────────────────────────────────────────────────────────
-
-            sampler = None
-            if WEIGHTED_SAMPLER_FLAG:
-                try:
-                    w_cls = compute_class_weights(y_train, method="effective", beta=0.999)
-                    sampler = make_weighted_sampler(y_train, class_weights=w_cls, replacement=True)
-                    if sampler is not None:
-                        _safe_print("[SAMPLER] WeightedRandomSampler enabled")
-                except Exception as e:
-                    _safe_print(f"[SAMPLER skip] {e}")
-
+            # TensorDataset
             train_ds = TensorDataset(
-                torch.from_numpy(X_train).to(torch.float32),
-                torch.from_numpy(y_train).to(torch.long),
+                torch.from_numpy(X_train),
+                torch.from_numpy(y_train).unsqueeze(1),
             )
             val_ds = TensorDataset(
-                torch.from_numpy(X_val).to(torch.float32),
-                torch.from_numpy(y_val).to(torch.long),
+                torch.from_numpy(X_val),
+                torch.from_numpy(y_val).unsqueeze(1),
             )
 
-            train_loader = DataLoader(
-                train_ds,
-                batch_size=32,
-                shuffle=(sampler is None),
-                sampler=sampler,
-                num_workers=0,
-                pin_memory=False,
-                persistent_workers=False,
-            )
+            train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
+            val_loader = DataLoader(val_ds, batch_size=32, shuffle=False)
 
-            val_loader = DataLoader(
-                val_ds,
-                batch_size=32,
-                shuffle=False,
-                num_workers=0,
-                pin_memory=False,
-                persistent_workers=False,
-            )
-
-            # ===== 모델/손실/옵티마 =====
-            model = get_model(
-                num_classes=len(class_ranges),
-                input_size=feat_dim,
+            ###############################################
+            # 6) 모델 정의 – "출력 1개짜리 회귀 모델" 강제
+            #    (기존 YOPO backbone은 그대로 사용)
+            ###############################################
+            base_model = get_model(
+                num_classes=1,   # ← 회귀: 출력 1개
+                input_size=feat_dim
             ).to(DEVICE)
 
-            model_type = getattr(model, "model_type", None) or model.__class__.__name__.lower()
+            criterion = nn.HuberLoss()  # 안정적
+            optimizer = torch.optim.AdamW(base_model.parameters(), lr=1e-3)
 
-            loss_cfg = get_LOSS()
-            if isinstance(loss_cfg, dict):
-                loss_name = (loss_cfg.get("name") or "").lower()
-            else:
-                loss_name = (loss_cfg or "").lower()
-
-            if loss_name == "focal":
-                criterion = FocalLoss(gamma=FOCAL_GAMMA).to(DEVICE)
-            else:
-                criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTH).to(DEVICE)
-
-            optimizer = torch.optim.AdamW(
-                model.parameters(),
-                lr=float(os.getenv("TRAIN_LR", "1e-3")),
-                weight_decay=float(os.getenv("TRAIN_WD", "1e-4")),
-            )
-
-            scaler = torch.amp.GradScaler(device=device_type) if use_amp_here else None
-
-            best_f1 = -1.0
+            best_loss = 999999.0
             best_state = None
-            no_improve = 0
-            loss_sum = 0.0
 
-            # ===== 학습 루프 =====
-            for epoch in range(max_epochs):
-                if stop_event is not None and stop_event.is_set():
-                    break
+            ###############################################
+            # 7) 학습 루프
+            ###############################################
+            for ep in range(max_epochs):
 
-                model.train()
-                running_loss = 0.0
+                base_model.train()
+                run_loss = 0.0
+
                 for xb, yb in train_loader:
-                    xb = xb.to(DEVICE, non_blocking=True)
-                    yb = yb.to(DEVICE, non_blocking=True)
+                    xb = xb.to(DEVICE)
+                    yb = yb.to(DEVICE)
 
-                    optimizer.zero_grad(set_to_none=True)
-
-                    if use_amp_here:
-                        with torch.amp.autocast(device_type=device_type, enabled=True):
-                            logits = model(xb)
-                            loss = criterion(logits, yb)
-                        scaler.scale(loss).backward()
-                        if GRAD_CLIP > 0:
-                            scaler.unscale_(optimizer)
-                            torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
-                        scaler.step(optimizer)
-                        scaler.update()
-                    else:
-                        logits = model(xb)
-                        loss = criterion(logits, yb)
-                        loss.backward()
-                        if GRAD_CLIP > 0:
-                            torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
-                        optimizer.step()
-
-                    running_loss += float(loss.item())
+                    optimizer.zero_grad()
+                    pred = base_model(xb)            # shape [B,1]
+                    loss = criterion(pred, yb)       # 회귀 손실
+                    loss.backward()
+                    optimizer.step()
+                    run_loss += float(loss.item())
 
                 # ===== 검증 =====
-                model.eval()
-                all_preds = []
-                all_lbls = []
+                base_model.eval()
                 val_loss = 0.0
+                preds_list = []
+                lbls_list = []
+
                 with torch.no_grad():
                     for xb, yb in val_loader:
-                        xb = xb.to(DEVICE, non_blocking=True)
-                        yb = yb.to(DEVICE, non_blocking=True)
-                        if use_amp_here:
-                            with torch.amp.autocast(device_type=device_type, enabled=True):
-                                logits = model(xb)
-                                loss = criterion(logits, yb)
-                        else:
-                            logits = model(xb)
-                            loss = criterion(logits, yb)
+                        xb = xb.to(DEVICE)
+                        yb = yb.to(DEVICE)
+                        pred = base_model(xb)
+                        loss = criterion(pred, yb)
                         val_loss += float(loss.item())
-                        preds = torch.argmax(logits, dim=1)
-                        all_preds.append(preds.cpu().numpy())
-                        all_lbls.append(yb.cpu().numpy())
+                        preds_list.append(pred.cpu().numpy())
+                        lbls_list.append(yb.cpu().numpy())
 
-                if all_preds:
-                    preds = np.concatenate(all_preds, axis=0)
-                    lbls = np.concatenate(all_lbls, axis=0)
-                    try:
-                        acc = accuracy_score(lbls, preds)
-                    except Exception:
-                        acc = 0.0
-                    try:
-                        f1_val = f1_score(lbls, preds, average="macro", zero_division=0)
-                    except Exception:
-                        f1_val = 0.0
-                else:
-                    preds = np.zeros(0, dtype=np.int64)
-                    lbls = np.zeros(0, dtype=np.int64)
-                    acc = 0.0
-                    f1_val = 0.0
-
-                loss_sum = float(running_loss)
                 val_loss = float(val_loss)
 
+                # 최적 상태 저장
+                if val_loss < best_loss:
+                    best_loss = val_loss
+                    best_state = base_model.state_dict()
+
                 _safe_print(
-                    f"[EPOCH {epoch+1}/{max_epochs}] {symbol}-{strategy}-w{window} "
-                    f"loss={running_loss:.4f} val_loss={val_loss:.4f} acc={acc:.4f} f1={f1_val:.4f}"
+                    f"[HYBRID][EPOCH {ep+1}/{max_epochs}] "
+                    f"{symbol}-{strategy}-w{window} loss={run_loss:.4f} val={val_loss:.4f}"
                 )
 
-                # early stopping
-                if f1_val > best_f1 + EARLY_STOP_MIN_DELTA:
-                    best_f1 = f1_val
-                    best_state = {
-                        "model": model.state_dict(),
-                        "acc": acc,
-                        "f1": f1_val,
-                        "val_loss": val_loss,
-                        "preds": preds,
-                        "lbls": lbls,
-                        "val_y": y_val,
-                    }
-                    no_improve = 0
-                else:
-                    no_improve += 1
-
-                if no_improve >= EARLY_STOP_PATIENCE:
-                    _safe_print(f"[EARLY STOP] {symbol}-{strategy}-w{window} no_improve={no_improve}")
-                    break
-
-                if TRAIN_CUDA_EMPTY_EVERY_EP:
-                    _safe_empty_cache()
-
             if best_state is None:
-                _log_fail(symbol, strategy, "학습 실패(best_state 없음)")
+                _log_fail(symbol, strategy, "회귀 학습 실패")
                 continue
 
-            model.load_state_dict(best_state["model"])
-            acc = best_state["acc"]
-            f1_val = best_state["f1"]
-            val_loss = best_state["val_loss"]
-            preds = best_state["preds"]
-            lbls = best_state["lbls"]
-            val_y = best_state["val_y"]
+            base_model.load_state_dict(best_state)
 
-            # ===== bin 정보 정리 및 저장 =====
-            try:
-                if isinstance(bin_info, dict) and "bin_edges" in bin_info:
-                    bin_edges = [float(x) for x in bin_info.get("bin_edges", [])]
-                    bin_spans = bin_info.get("bin_spans", [])
-                    if bin_edges and (not bin_spans or len(bin_spans) != len(bin_edges) - 1):
-                        bin_spans = [
-                            float(bin_edges[i + 1] - bin_edges[i])
-                            for i in range(len(bin_edges) - 1)
-                        ]
-                    full_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
-                    cnt_local = np.bincount(val_y, minlength=len(class_ranges))
-                    counts_map = np.zeros(len(full_ranges), dtype=int)
-                    for g, l in to_local.items():
-                        if g < len(counts_map) and l < len(cnt_local):
-                            counts_map[g] = int(cnt_local[l])
-                    bin_counts = counts_map.tolist()
-                else:
-                    full_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
-                    bin_edges = [float(lo) for (lo, _) in full_ranges] + [float(full_ranges[-1][1])]
-                    bin_spans = [float(hi - lo) for (lo, hi) in full_ranges]
-                    cnt_local = np.bincount(val_y, minlength=len(full_ranges))
-                    counts_map = np.zeros(len(full_ranges), dtype=int)
-                    for g, l in to_local.items():
-                        if g < len(counts_map) and l < len(cnt_local):
-                            counts_map[g] = int(cnt_local[l])
-                    bin_counts = counts_map.tolist()
-            except Exception:
-                bin_edges, bin_spans, bin_counts = [], [], []
+            ###############################################
+            # 8) 숫자 예측 → 클래스 매핑으로 복구
+            ###############################################
+            # val 시 예측 숫자들을 클래스 번호로 변환
+            preds = np.concatenate(preds_list, axis=0).flatten()
+            lbls = np.concatenate(lbls_list, axis=0).flatten()
 
-            bin_cfg = {
-                "TARGET_BINS": int(os.getenv("TARGET_BINS", "8")),
-                "OUTLIER_Q_LOW": float(os.getenv("OUTLIER_Q_LOW", "0.01")),
-                "OUTLIER_Q_HIGH": float(os.getenv("OUTLIER_Q_HIGH", "0.99")),
-                "MAX_BIN_SPAN_PCT": float(os.getenv("MAX_BIN_SPAN_PCT", "8.0")),
-                "MIN_BIN_COUNT_FRAC": float(os.getenv("MIN_BIN_COUNT_FRAC", "0.05")),
-            }
+            final_preds = [
+                _map_return_to_class(float(v), class_ranges) for v in preds
+            ]
+            final_lbls = [
+                _map_return_to_class(float(v), class_ranges) for v in lbls
+            ]
 
+            f1_val = f1_score(final_lbls, final_preds, average="macro", zero_division=0)
+
+            ###############################################
+            # 9) 저장
+            ###############################################
+            model_type = getattr(base_model, "model_type", "hybrid_regressor")
             stem = os.path.join(
                 MODEL_DIR,
-                f"{symbol}_{strategy}_{model_type}_w{int(window)}_group{int(group_id) if group_id is not None else 0}_cls{int(len(class_ranges))}",
+                f"{symbol}_{strategy}_{model_type}_w{int(window)}_group{int(group_id)}"
             )
+
             meta = {
                 "symbol": symbol,
                 "strategy": strategy,
+                "group_id": int(group_id),
                 "model": model_type,
-                "group_id": int(group_id or 0),
-                "num_classes": int(len(class_ranges)),
-                "class_ranges": [[float(lo), float(hi)] for (lo, hi) in class_ranges],
-                "input_size": int(feat_dim),
-                "metrics": {
-                    "val_acc": acc,
-                    "val_f1": f1_val,
-                    "val_loss": val_loss,
-                },
-                "timestamp": now_kst().isoformat(),
-                "model_name": os.path.basename(stem) + ".ptz",
+                "class_ranges": [[float(lo), float(hi)] for (lo,hi) in class_ranges],
+                "val_f1": float(f1_val),
                 "window": int(window),
-                "recent_cap": int(len(features_only)),
-                "engine": "manual",
-                "data_flags": {
-                    "rows": int(len(df)),
-                    "limit": int(_limit),
-                    "min": int(_min_required),
-                    "augment_needed": bool(augment_needed),
-                    "enough_for_training": bool(enough_for_training),
-                },
-                "train_loss_sum": float(loss_sum),
-                "boundary_band": float(BOUNDARY_BAND),
-                "cs_argmax": {"enabled": bool(COST_SENSITIVE_ARGMAX), "beta": float(CS_ARG_BETA)},
-                "eval_gate": "none",
-                "label_repair": repaired_info,
-                "bin_edges": bin_edges,
-                "bin_counts": bin_counts,
-                "bin_spans": bin_spans,
-                "bin_cfg": bin_cfg,
+                "timestamp": now_kst().isoformat(),
             }
-            wpath, mpath = _save_model_and_meta(model, stem + ".pt", meta)
 
-            try:
-                final_note = f"train_one_model(window={window}, cap={len(features_only)}, engine=manual)"
-                if note_msg:
-                    final_note += f" | {note_msg}"
-                final_note = final_note + return_note
-
-                logger.log_training_result(
-                    symbol,
-                    strategy,
-                    model=os.path.basename(wpath),
-                    accuracy=acc,
-                    f1=f1_val,
-                    loss=val_loss,
-                    val_acc=acc,
-                    val_f1=f1_val,
-                    val_loss=val_loss,
-                    engine="manual",
-                    window=int(window),
-                    recent_cap=int(len(features_only)),
-                    rows=int(len(df)),
-                    limit=int(_limit),
-                    min=int(_min_required),
-                    augment_needed=bool(augment_needed),
-                    enough_for_training=bool(enough_for_training),
-                    note=final_note,
-                    source_exchange="BYBIT",
-                    status="success",
-                    y_true=lbls.tolist() if isinstance(lbls, np.ndarray) else lbls,
-                    y_pred=preds.tolist() if isinstance(preds, np.ndarray) else preds,
-                    num_classes=len(class_ranges),
-                    NUM_CLASSES=int(len(class_ranges)),
-                    class_counts_label_freeze=cnt_before,
-                    usable_samples=usable_samples,
-                    class_counts_after_assemble=cnt_after,
-                    batch_stratified_ok=batch_stratified_ok,
-                )
-            except Exception:
-                pass
+            wpath, mpath = _save_model_and_meta(base_model, stem + ".pt", meta)
 
             res["windows"].append(int(window))
             res["models"].append(os.path.basename(wpath))
 
-            if IMPORTANCE_ENABLE:
-                try:
-                    fi = compute_feature_importance(model, features_only, device=DEVICE)
-                    save_feature_importance(
-                        fi,
-                        symbol=symbol,
-                        strategy=strategy,
-                        window=window,
-                        model_name=os.path.basename(wpath),
-                    )
-                except Exception as e:
-                    _safe_print(f"[FI warn] {e}")
-
-            _release_memory(
-                train_ds,
-                val_ds,
-                train_loader,
-                val_loader,
-                X_train,
-                X_val,
-                y_train,
-                y_val,
-                model,
-            )
-
         return res
 
     except Exception as e:
-        _safe_print(f"[EXC] train_one_model {symbol}-{strategy}-g{group_id} → {e}\n{traceback.format_exc()}")
+        _safe_print(f"[HYBRID ERROR] {e}")
         _log_fail(symbol, strategy, str(e))
         return res
 
