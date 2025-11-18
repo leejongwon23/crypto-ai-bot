@@ -817,34 +817,65 @@ def _rebuild_labels_once(df: pd.DataFrame, symbol: str, strategy: str):
     except Exception:
         return None
 
-
 def _rebuild_samples_with_keepset(
     fv: np.ndarray,
     labels: np.ndarray,
     window: int,
     keep_set: set[int],
     to_local: Dict[int, int],
+    min_samples: int = 8,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    원본 개선 버전:
+    - 샘플 수 너무 적은 클래스 자동 제거 (min_samples)
+    - 나머지만 local-class 로 매핑하여 학습 가능하게 만듦
+    """
+
+    # 1) 클래스 분포 파악
+    from collections import Counter
+    cnt = Counter(labels.tolist())
+    valid = [c for c, v in cnt.items() if v >= min_samples]
+
+    # 2) 학습 가능한 클래스가 2개 미만이면 학습 자체가 불가 → 원본 그대로 반환
+    if len(valid) < 2:
+        return np.empty((0, 0, 0), np.float32), np.empty((0,), np.int64)
+
+    # 3) 유효 클래스만 허용
+    keep_set = set(valid)
+
+    # 4) 로컬 맵핑 재구성
+    to_local = {cls: i for i, cls in enumerate(sorted(valid))}
+
+    # ===== X_raw / y 재구성 =====
     X_raw, y = [], []
     n = len(fv)
+
     for i in range(n - window):
         yi = i + window - 1
         if yi < 0 or yi >= len(labels):
             continue
+
         lab_g = int(labels[yi])
-        if (lab_g < 0) or (lab_g not in keep_set):
+        if lab_g not in keep_set:
             continue
-        lab = to_local.get(lab_g, None)
-        if lab is None:
+
+        lab_local = to_local.get(lab_g, None)
+        if lab_local is None:
             continue
-        X_raw.append(fv[i: i + window])
-        y.append(lab)
+
+        X_raw.append(fv[i:i+window])
+        y.append(lab_local)
+
     if not X_raw:
         return (
             np.empty((0, window, fv.shape[1]), dtype=np.float32),
             np.empty((0,), dtype=np.int64),
         )
-    return np.array(X_raw, dtype=np.float32), np.array(y, dtype=np.int64)
+
+    return (
+        np.asarray(X_raw, dtype=np.float32),
+        np.asarray(y, dtype=np.int64),
+    )
 
 
 def _synthesize_minority_if_needed(
@@ -2146,6 +2177,60 @@ def continue_from_failure(limit: int = 50) -> dict:
         except Exception as e2:
             err = f"{err} | {e2}"
     return {"ok": ok, "tried": tried, "error": err}
+
+def _apply_real_balance(X_train: np.ndarray, y_train: np.ndarray,
+                        min_count: int = 12) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    YOPO 학습 안정화를 위한 '진짜' 클래스 균형 함수.
+    - 너무 적은 클래스(샘플 < min_count)는 자동 제외
+    - 남은 클래스는 최소 min_count까지 오버샘플링
+    """
+    if len(y_train) == 0:
+        return X_train, y_train
+
+    # 클래스 분포 계산
+    from collections import Counter
+    cnt = Counter(y_train.tolist())
+
+    # 1) 너무 적은 클래스 제거
+    valid_classes = [c for c, v in cnt.items() if v >= min_count]
+    if len(valid_classes) < 2:
+        # 학습 가능한 최소 클래스가 안 되면 원본 유지
+        return X_train, y_train
+
+    # 2) 유효한 클래스만 남기기
+    mask = np.isin(y_train, valid_classes)
+    X_filtered = X_train[mask]
+    y_filtered = y_train[mask]
+
+    # 3) 최소 샘플 수까지 오버샘플
+    X_bal, y_bal = [], []
+    max_count = max([cnt[c] for c in valid_classes])
+
+    for cls in valid_classes:
+        idx = np.where(y_filtered == cls)[0]
+        cur = len(idx)
+
+        if cur == 0:
+            continue
+
+        # 필요한 만큼 반복해서 붙여넣기 (오버샘플링)
+        reps = max_count // cur
+        rem = max_count % cur
+
+        X_bal.append(np.repeat(X_filtered[idx], reps, axis=0))
+        y_bal.append(np.repeat(y_filtered[idx], reps, axis=0))
+
+        if rem > 0:
+            extra = np.random.choice(idx, rem, replace=True)
+            X_bal.append(X_filtered[extra])
+            y_bal.append(y_filtered[extra])
+
+    X_bal = np.concatenate(X_bal, axis=0)
+    y_bal = np.concatenate(y_bal, axis=0)
+
+    return X_bal.astype(np.float32), y_bal.astype(np.int64)
+
 
 
 if __name__ == "__main__":
