@@ -332,7 +332,8 @@ def make_labels(df, symbol, strategy, group_id=None):
 
     gains, up_c, dn_c, target_bins = compute_label_returns(df, symbol, pure)
 
-    dist = np.concatenate([dn_c, up_c], axis=0)
+    # 🔥 dist를 gains 기준으로 통일 → 운영로그/학습로그 동일한 bin/edges
+    dist = gains.copy()
 
     edges = _raw_bins(dist, target_bins)
 
@@ -385,11 +386,14 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
         dn = np.asarray(both[:n], dtype=np.float32)
         up = np.asarray(both[n:], dtype=np.float32)
 
-    dist = np.concatenate([dn, up], axis=0)
+    # 🔥 horizon 버전도 dist를 gains 기준으로 통일
     target_bins = _auto_target_bins(len(df))
-    edges = _raw_bins(dist, target_bins)
 
     gains = _pick_per_candle_gain(up, dn)
+    dist = gains.copy()
+
+    edges = _raw_bins(dist, target_bins)
+
     labels = _vector_bin(gains, edges)
 
     edges2 = edges.copy()
