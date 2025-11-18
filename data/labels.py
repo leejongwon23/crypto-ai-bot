@@ -1,5 +1,5 @@
 # ================================================
-# labels.py — YOPO RAW 기반 수익률 라벨링 (H 고정 정상화 버전)
+# labels.py — YOPO RAW 기반 수익률 라벨링 (H 고정 + 동적 엣지 튜닝 버전)
 # ================================================
 from __future__ import annotations
 
@@ -44,10 +44,14 @@ def _as_percent(x: float) -> float:
 _TARGET_BINS = int(os.getenv("TARGET_BINS", str(_BIN_META.get("TARGET_BINS", 8))))
 _MIN_LABEL_CLASSES = int(os.getenv("MIN_LABEL_CLASSES", "4"))
 
+# ✅ 한 클래스당 최소 패턴 수(샘플 수) 기준
+#   - 데이터가 충분하면 각 클래스에 최소 이 정도는 들어가도록 엣지를 자름
+_MIN_SAMPLES_PER_CLASS = int(os.getenv("MIN_SAMPLES_PER_CLASS", "50"))
+
 # 🔥 전략별 H 고정 (핵심 수정)
 # - 단기: 4h 캔들 1개
 # - 중기: 1d 캔들 1개
-# - 장기: 주봉(1w) 캔들 1개  ← 여기 7 → 1 로 변경
+# - 장기: 주봉(1w) 캔들 1개
 _FIXED_H = {
     "단기": 1,   # 4시간봉 → t+1캔들
     "중기": 1,   # 1일봉 → t+1캔들
@@ -138,18 +142,72 @@ def _pick_per_candle_gain(up: np.ndarray, dn: np.ndarray) -> np.ndarray:
     return np.where(np.abs(up) >= np.abs(dn), up, dn).astype(np.float32)
 
 # ============================================================
-# RAW bin 생성
+# RAW bin 생성 (🔥 동적 엣지 튜닝 버전)
 # ============================================================
 def _raw_bins(dist: np.ndarray, target_bins: int) -> np.ndarray:
+    """
+    동적 분포 기반 엣지 계산:
+    - 클래스 개수(target_bins)는 최대한 유지
+    - 한 클래스당 최소 샘플 수(_MIN_SAMPLES_PER_CLASS)를 고려해 bin 수 자동 조정
+    - 분위수(quantile) 기반이라 극단 구간이 3%~28% 같은 미친 폭으로 커지지 않음
+    """
+    # 유효 값만 사용
+    if dist is None:
+        return np.linspace(-0.01, 0.01, target_bins + 1).astype(float)
+
+    dist = np.asarray(dist, dtype=float)
+    dist = dist[np.isfinite(dist)]
     if dist.size == 0:
         return np.linspace(-0.01, 0.01, target_bins + 1).astype(float)
+
+    n = dist.size
     lo = float(np.min(dist))
     hi = float(np.max(dist))
-    if not np.isfinite(lo): lo = -0.01
-    if not np.isfinite(hi): hi = 0.01
+    if not np.isfinite(lo):
+        lo = -0.01
+    if not np.isfinite(hi):
+        hi = 0.01
     if hi <= lo:
         hi = lo + 1e-6
-    return np.linspace(lo, hi, target_bins + 1).astype(float)
+
+    # 데이터 양이 적으면 어차피 세분화가 안 되므로 균등 분할로 빠르게 리턴
+    if n < _MIN_SAMPLES_PER_CLASS * 2:
+        return np.linspace(lo, hi, max(_MIN_LABEL_CLASSES, min(target_bins, 4)) + 1).astype(float)
+
+    # 데이터가 허용하는 최대 bin 수 (각 bin에 최소 샘플 수를 갖도록)
+    max_bins_by_samples = max(1, n // max(1, _MIN_SAMPLES_PER_CLASS))
+
+    # 실제 사용할 bin 수
+    # - 너무 많지도 않고
+    # - 최소 클래스 수는 지키면서
+    bins = int(min(target_bins, max_bins_by_samples))
+    bins = int(max(_MIN_LABEL_CLASSES, bins))
+
+    if bins <= 1:
+        # 어쩔 수 없이 1개 bin 수준이면 최소 2개로 쪼개 준다
+        return np.linspace(lo, hi, 2 + 1).astype(float)
+
+    # 분위수(quantile) 기반 엣지 계산
+    # 예: bins=14 → q = [0, 1/14, 2/14, ..., 1]
+    qs = np.linspace(0.0, 1.0, bins + 1)
+    try:
+        edges = np.quantile(dist, qs)
+    except Exception:
+        # quantile 실패시 기존 균등 분할로 fallback
+        return np.linspace(lo, hi, bins + 1).astype(float)
+
+    edges = np.asarray(edges, dtype=float)
+
+    # 단조 증가(겹치지 않도록) 보장
+    for i in range(1, edges.size):
+        if edges[i] <= edges[i - 1]:
+            edges[i] = edges[i - 1] + 1e-9
+
+    # 안전장치: 전체 범위는 원래 lo~hi 를 벗어나지 않게 클램프
+    edges[0] = min(edges[0], lo)
+    edges[-1] = max(edges[-1], hi)
+
+    return edges
 
 def _vector_bin(gains: np.ndarray, edges: np.ndarray) -> np.ndarray:
     e = edges.copy()
