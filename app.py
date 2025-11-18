@@ -1127,102 +1127,102 @@ def reset_all(key=None):
     # 리셋 중 예측 막기
     _safe_close_gate("reset_enter")
 
-    def _do_reset_work():
-    stop_timeout = int(os.getenv("RESET_STOP_TIMEOUT", "12"))
-    max_wait     = int(os.getenv("RESET_MAX_WAIT_SEC", "120"))
-    poll_sec     = max(1, int(os.getenv("RESET_POLL_SEC", "2")))
-    qwipe_early  = os.getenv("RESET_QWIPE_EARLY", "1") == "1"
+   def _do_reset_work():
+        stop_timeout = int(os.getenv("RESET_STOP_TIMEOUT", "12"))
+        max_wait     = int(os.getenv("RESET_MAX_WAIT_SEC", "120"))
+        poll_sec     = max(1, int(os.getenv("RESET_POLL_SEC", "2")))
+        qwipe_early  = os.getenv("RESET_QWIPE_EARLY", "1") == "1"
 
-    try:
-        from data.utils import _kline_cache, _feature_cache
-    except Exception:
-        _kline_cache = type("dummy", (), {"clear": lambda self: None})()
-        _feature_cache = type("dummy", (), {"clear": lambda self: None})()
-
-    # 1. 전역락 획득
-    _acquire_global_lock()
-
-    # 2. 스케줄러/cleanup 중단
-    _stop_all_aux_schedulers()
-    _pl_clear()
-
-    print("[RESET] 백그라운드 초기화 시작"); sys.stdout.flush()
-
-    # 3. 학습 루프 정지 요청
-    try:
-        if hasattr(train, "request_stop"):
-            _request_stop_safe()
-    except Exception:
-        pass
-
-    print(f"[RESET] 학습 루프 정지 시도(timeout={stop_timeout}s)"); sys.stdout.flush()
-    stopped = _stop_train_loop_safe(timeout=stop_timeout)
-    print(f"[RESET] stop_train_loop 결과: {stopped}"); sys.stdout.flush()
-
-    # 3-1. 그래도 안 멈추면 즉시 QWIPE 1회만 실행
-    if not stopped:
-        print("[RESET] 학습루프 멈춤 실패 → QWIPE 강제 1회 실행"); sys.stdout.flush()
         try:
-            _quarantine_wipe_persistent()
+            from data.utils import _kline_cache, _feature_cache
+        except Exception:
+            _kline_cache = type("dummy", (), {"clear": lambda self: None})()
+            _feature_cache = type("dummy", (), {"clear": lambda self: None})()
+
+        # 1. 전역락 획득
+        _acquire_global_lock()
+
+        # 2. 스케줄러/cleanup 중단
+        _stop_all_aux_schedulers()
+        _pl_clear()
+
+        print("[RESET] 백그라운드 초기화 시작"); sys.stdout.flush()
+
+        # 3. 학습 루프 정지 요청
+        try:
+            if hasattr(train, "request_stop"):
+                _request_stop_safe()
+        except Exception:
+            pass
+
+        print(f"[RESET] 학습 루프 정지 시도(timeout={stop_timeout}s)"); sys.stdout.flush()
+        stopped = _stop_train_loop_safe(timeout=stop_timeout)
+        print(f"[RESET] stop_train_loop 결과: {stopped}"); sys.stdout.flush()
+
+        # 3-1. 그래도 안 멈추면 즉시 QWIPE 1회만 실행
+        if not stopped:
+            print("[RESET] 학습루프 멈춤 실패 → QWIPE 강제 1회 실행"); sys.stdout.flush()
+            try:
+                _quarantine_wipe_persistent()
+                ensure_dirs()
+            except Exception as e:
+                print(f"[RESET] QWIPE 실패: {e}")
+
+        # 4. PERSIST_DIR 완전 초기화
+        try:
+            # 모델/로그/ssl_models 제거 후 재생성
+            for d in [MODEL_DIR, LOG_DIR, os.path.join(PERSIST_DIR, "ssl_models")]:
+                if os.path.exists(d):
+                    shutil.rmtree(d, ignore_errors=True)
+                os.makedirs(d, exist_ok=True)
+
+            # 남은 파일 중 LOCK_DIR 제외하고 모두 삭제
+            keep = {os.path.basename(LOCK_DIR)}
+            for name in list(os.listdir(PERSIST_DIR)):
+                if name in keep: 
+                    continue
+                p = os.path.join(PERSIST_DIR, name)
+                if os.path.isdir(p):
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    try: os.remove(p)
+                    except Exception: pass
+
+            # 필수 폴더/로그 다시 생성
             ensure_dirs()
+            ensure_prediction_log_exists()
+            ensure_train_log_exists()
+
         except Exception as e:
-            print(f"[RESET] QWIPE 실패: {e}")
+            print(f"[RESET] 풀와이프 예외: {e}")    
 
-    # 4. PERSIST_DIR 완전 초기화
-    try:
-        # 모델/로그/ssl_models 제거 후 재생성
-        for d in [MODEL_DIR, LOG_DIR, os.path.join(PERSIST_DIR, "ssl_models")]:
-            if os.path.exists(d):
-                shutil.rmtree(d, ignore_errors=True)
-            os.makedirs(d, exist_ok=True)
+        # 5. 캐시 비우기
+        try: _kline_cache.clear()
+        except Exception: pass
+        try: _feature_cache.clear()
+        except Exception: pass
 
-        # 남은 파일 중 LOCK_DIR 제외하고 모두 삭제
-        keep = {os.path.basename(LOCK_DIR)}
-        for name in list(os.listdir(PERSIST_DIR)):
-            if name in keep: 
-                continue
-            p = os.path.join(PERSIST_DIR, name)
-            if os.path.isdir(p):
-                shutil.rmtree(p, ignore_errors=True)
-            else:
-                try: os.remove(p)
-                except Exception: pass
+        # 6. cleanup + scheduler 재시작
+        try:
+            start_cleanup_scheduler()
+        except Exception as e:
+            print(f"[RESET] cleanup 재시작 실패: {e}")
 
-        # 필수 폴더/로그 다시 생성
-        ensure_dirs()
-        ensure_prediction_log_exists()
-        ensure_train_log_exists()
+        try:
+            start_scheduler()
+        except Exception as e:
+            print(f"[RESET] 스케줄러 재시작 실패: {e}")
 
-    except Exception as e:
-        print(f"[RESET] 풀와이프 예외: {e}")    
+        # 7. 학습 루프 재시작
+        try:
+            _safe_close_gate("reset_done_reopen")
+            started = _start_train_loop_safe(force_restart=True, sleep_sec=0)
+            print(f"[RESET] 학습 재시작 결과: {started}")
+        except Exception as e:
+            print(f"[RESET] 학습 재시작 실패: {e}")
 
-    # 5. 캐시 비우기
-    try: _kline_cache.clear()
-    except Exception: pass
-    try: _feature_cache.clear()
-    except Exception: pass
-
-    # 6. cleanup + scheduler 재시작
-    try:
-        start_cleanup_scheduler()
-    except Exception as e:
-        print(f"[RESET] cleanup 재시작 실패: {e}")
-
-    try:
-        start_scheduler()
-    except Exception as e:
-        print(f"[RESET] 스케줄러 재시작 실패: {e}")
-
-    # 7. 학습 루프 재시작
-    try:
-        _safe_close_gate("reset_done_reopen")
-        started = _start_train_loop_safe(force_restart=True, sleep_sec=0)
-        print(f"[RESET] 학습 재시작 결과: {started}")
-    except Exception as e:
-        print(f"[RESET] 학습 재시작 실패: {e}")
-
-    print("🔚 [RESET] 정리 + 재시작 완료"); sys.stdout.flush()
-    _release_global_lock()
+        print("🔚 [RESET] 정리 + 재시작 완료"); sys.stdout.flush()
+        _release_global_lock()
 
 
     threading.Thread(target=_do_reset_work, daemon=True).start()
