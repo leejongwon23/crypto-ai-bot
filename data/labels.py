@@ -387,8 +387,8 @@ def make_labels(df, symbol, strategy, group_id=None):
 
     gains, up_c, dn_c, target_bins = compute_label_returns(df, symbol, pure)
 
-    # 🔥 dist를 gains 기준으로 통일
-    dist = gains.copy()
+    # 🔥 dist: 고가/저가 둘 다 사용 (up+dn 전체 분포)
+    dist = np.concatenate([dn_c, up_c]).astype(np.float32)
 
     # 🔥 핵심: 전략별 고정 C0~C5 경계 사용
     edges = _fixed_edges_for_strategy(dist, pure)
@@ -461,7 +461,9 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
     strategy = "단기" if horizon_hours <= 4 else ("중기" if horizon_hours <= 24 else "장기")
 
     gains = _pick_per_candle_gain(up, dn)
-    dist = gains.copy()
+
+    # 🔥 dist: horizon 버전도 고가/저가 둘 다 사용
+    dist = np.concatenate([dn, up]).astype(np.float32)
 
     edges = _fixed_edges_for_strategy(dist, strategy)
 
