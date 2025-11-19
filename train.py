@@ -466,6 +466,11 @@ TRAIN_CUDA_EMPTY_EVERY_EP = os.getenv("TRAIN_CUDA_EMPTY_EVERY_EP", "1") == "1"
 # ===== [ADD] 클래스 불균형 제어용 ENV =====
 BALANCE_CLASSES_FLAG = os.getenv("BALANCE_CLASSES", "1") == "1"      # 기본 ON
 WEIGHTED_SAMPLER_FLAG = os.getenv("WEIGHTED_SAMPLER", "0") == "1"    # 기본 OFF
+
+# ===== [ADD] 전략별 최소 학습 샘플 개수 (검증 강화) =====
+MIN_TRAIN_SAMPLES_SHORT = int(os.getenv("MIN_TRAIN_SAMPLES_SHORT", "60"))
+MIN_TRAIN_SAMPLES_MID = int(os.getenv("MIN_TRAIN_SAMPLES_MID", "60"))
+MIN_TRAIN_SAMPLES_LONG = int(os.getenv("MIN_TRAIN_SAMPLES_LONG", "60"))
 # ===================================================================
 
 def _as_bool_env(name: str, default: bool) -> bool:
@@ -509,6 +514,20 @@ def _min_f1_for(strategy: str) -> float:
         if strategy == "단기"
         else (EVAL_MIN_F1_MID if strategy == "중기" else EVAL_MIN_F1_LONG)
     )
+
+
+def _min_train_samples_for(strategy: str) -> int:
+    """
+    전략별 최소 학습 샘플 개수.
+    이 값보다 적으면 그 윈도우는 아예 학습하지 않고 SKIP 처리한다.
+    """
+    if strategy == "단기":
+        return MIN_TRAIN_SAMPLES_SHORT
+    if strategy == "중기":
+        return MIN_TRAIN_SAMPLES_MID
+    if strategy == "장기":
+        return MIN_TRAIN_SAMPLES_LONG
+    return MIN_TRAIN_SAMPLES_SHORT
 
 
 now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
@@ -654,16 +673,17 @@ def coverage_split_indices(
 
 
 def _log_skip(symbol, strategy, reason):
+    # ✅ 진짜 모델처럼 보이지 않도록 diag_* + None 메트릭으로 기록
     logger.log_training_result(
         symbol,
         strategy,
-        model="all",
-        accuracy=0.0,
-        f1=0.0,
-        loss=0.0,
-        val_acc=0.0,
-        val_f1=0.0,
-        val_loss=0.0,
+        model="diag_skip",
+        accuracy=None,
+        f1=None,
+        loss=None,
+        val_acc=None,
+        val_f1=None,
+        val_loss=None,
         engine="manual",
         window=None,
         recent_cap=None,
@@ -680,7 +700,7 @@ def _log_skip(symbol, strategy, reason):
         {
             "symbol": symbol,
             "strategy": strategy,
-            "model": "all",
+            "model": "diag_skip",
             "predicted_class": -1,
             "success": False,
             "rate": 0.0,
@@ -691,16 +711,17 @@ def _log_skip(symbol, strategy, reason):
 
 
 def _log_fail(symbol, strategy, reason):
+    # ✅ 진짜 모델처럼 보이지 않도록 diag_* + None 메트릭으로 기록
     logger.log_training_result(
         symbol,
         strategy,
-        model="all",
-        accuracy=0.0,
-        f1=0.0,
-        loss=0.0,
-        val_acc=0.0,
-        val_f1=0.0,
-        val_loss=0.0,
+        model="diag_fail",
+        accuracy=None,
+        f1=None,
+        loss=None,
+        val_acc=None,
+        val_f1=None,
+        val_loss=None,
         engine="manual",
         window=None,
         recent_cap=None,
@@ -717,7 +738,7 @@ def _log_fail(symbol, strategy, reason):
         {
             "symbol": symbol,
             "strategy": strategy,
-            "model": "all",
+            "model": "diag_fail",
             "predicted_class": -1,
             "success": False,
             "rate": 0.0,
@@ -793,7 +814,7 @@ def _build_precomputed(symbol: str) -> tuple[Dict[str, Optional[pd.DataFrame]], 
         except Exception:
             pre_lbl[strat] = None
 
-    return dfs, feats, pre_lbl
+    return dfs,_feats,pre_lbl
 
 
 def _find_prev_model_for(symbol: str, prev_strategy: str) -> Optional[str]:
@@ -1152,10 +1173,11 @@ def train_one_model(
             return_note = f" ; [ReturnDist] edges={edges[:20]}, counts={counts[:20]}"
 
         try:
+            # ✅ 여기서는 진단용 info 로그이므로 model=diag_info, 메트릭은 전부 None
             logger.log_training_result(
                 symbol,
                 strategy,
-                model="all",
+                model="diag_info",
                 accuracy=None,
                 f1=None,
                 loss=None,
@@ -1250,12 +1272,19 @@ def train_one_model(
 
             usable_samples = int(len(y))
             note_msg = ""
-            if usable_samples == 0:
-                _log_skip(symbol, strategy, f"유효 라벨 샘플 없음(w={window})")
+
+            # ✅ 여기서 "검증 최소수" 강화: 전략별 최소 샘플보다 적거나, 클래스수가 2개 미만이면 아예 학습하지 않음
+            min_train_samples = _min_train_samples_for(strategy)
+            num_unique_classes_local = int(len(np.unique(y))) if len(y) else 0
+            if usable_samples == 0 or num_unique_classes_local < 2 or usable_samples < min_train_samples:
+                reason = (
+                    f"학습 샘플 부족: usable={usable_samples}, "
+                    f"uniq={num_unique_classes_local}, min={min_train_samples}"
+                )
+                _safe_print(f"[SKIP TRAIN] {symbol}-{strategy}-w{window}: {reason}")
+                _log_skip(symbol, strategy, reason + f" (w={window})")
                 continue
-            if y.min() < 0:
-                _log_skip(symbol, strategy, f"음수 라벨 유입 감지(w={window})")
-                continue
+
             if usable_samples < 20:
                 note_msg = f"⚠️ 희소 학습 (샘플 {usable_samples})"
                 _safe_print(f"[WARN] {symbol}-{strategy}-w{window}: {note_msg}")
@@ -1478,6 +1507,7 @@ def train_one_model(
                     except Exception:
                         acc = 0.0
                     try:
+                        # ✅ 항상 macro F1 (클래스별 F1 평균)
                         f1_val = f1_score(lbls, preds, average="macro", zero_division=0)
                     except Exception:
                         f1_val = 0.0
@@ -1608,7 +1638,7 @@ def train_one_model(
                 "bin_spans": bin_spans,
                 "bin_cfg": bin_cfg,
             }
-            wpath, mpath = _save_model_and_meta(model, stem + ".pt", meta)
+            wpath, mpath = _save_model_and_meta(model, stem + ".pt")
 
             try:
                 final_note = f"train_one_model(window={window}, cap={len(features_only)}, engine=manual)"
@@ -1747,13 +1777,13 @@ def _train_full_symbol(
             logger.log_training_result(
                 symbol,
                 strategy,
-                model="all",
-                accuracy=0.0,
-                f1=0.0,
-                loss=0.0,
-                val_acc=0.0,
-                val_f1=0.0,
-                val_loss=0.0,
+                model="diag_fail",
+                accuracy=None,
+                f1=None,
+                loss=None,
+                val_acc=None,
+                val_f1=None,
+                val_loss=None,
                 engine="manual",
                 window=None,
                 recent_cap=None,
