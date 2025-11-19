@@ -831,68 +831,51 @@ def _rebuild_samples_with_keepset(
     fv: np.ndarray,
     labels: np.ndarray,
     window: int,
-    keep_set: set[int] | None,
+    keep_set: set[int],
+    to_local: Dict[int, int],
     min_samples: int = 8,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    그룹 정보(keep_set)를 이용해서 시계열 샘플을 다시 만드는 함수.
+    그룹 클래스만 사용해서 시계열 샘플을 다시 만드는 함수.
 
-    - labels 는 "전역 클래스 인덱스"(0~NUM_CLASSES-1)를 그대로 유지한다.
-    - keep_set 이 주어지면 그 클래스들 위주로 샘플을 골라오되,
-      너무 적은 클래스(샘플 < min_samples)는 자동으로 약하게 반영.
-    - 최소 2개 이상의 클래스가 실제로 남아 있지 않으면 빈 배열을 반환한다.
+    - labels 는 "전역 클래스 인덱스"(0~전체 클래스-1) 기준
+    - keep_set 은 "이번 그룹에 포함된 전역 클래스들" 집합
+    - 이 안에서 min_samples 미만인 클래스는 버리고,
+      나머지만 0~(k-1) 로 다시 매핑해서 X,y 생성.
     """
     from collections import Counter
 
     # 방어 코드: 입력이 비었으면 바로 종료
     if fv is None or labels is None or len(fv) == 0 or len(labels) == 0:
         return (
-            np.empty(
-                (0, window, fv.shape[1] if fv is not None and fv.ndim == 2 else 0),
-                dtype=np.float32,
-            ),
+            np.empty((0, window, fv.shape[1] if fv is not None and fv.ndim == 2 else 0), dtype=np.float32),
             np.empty((0,), dtype=np.int64),
         )
 
-    labels = np.asarray(labels).astype(int)
-
-    # 1) 전체 라벨 분포 (전역 클래스 기준)
+    # 1) 전체 라벨 분포 계산 (전역 클래스 기준)
     cnt = Counter(int(l) for l in labels.tolist() if int(l) >= 0)
 
-    # 2) 이번 그룹에서 우선 보고 싶은 클래스 집합
-    base_keep = set(int(c) for c in (keep_set or set(cnt.keys())))
-    # 실제로 데이터가 있는 클래스만 남긴다
-    base_keep = {c for c in base_keep if cnt.get(c, 0) > 0}
+    # 2) 이번 그룹에 해당하는 클래스만 기준으로 유효 클래스 선정
+    base_keep = set(int(c) for c in (keep_set or set()))
+    if not base_keep:
+        # 혹시 keep_set 이 비어 있으면, 관측된 모든 클래스를 후보로 사용
+        base_keep = set(cnt.keys())
 
-    if len(base_keep) == 0:
+    # min_samples 이상 가진 클래스만 "이번 학습에서 실제로 사용할 클래스"
+    valid = [c for c in sorted(base_keep) if cnt.get(c, 0) >= min_samples]
+
+    # 학습 가능한 클래스가 2개 미만이면 학습 불가 → 빈 배열 리턴
+    if len(valid) < 2:
         return (
-            np.empty(
-                (0, window, fv.shape[1] if fv is not None and fv.ndim == 2 else 0),
-                dtype=np.float32,
-            ),
+            np.empty((0, window, fv.shape[1] if fv is not None and fv.ndim == 2 else 0), dtype=np.float32),
             np.empty((0,), dtype=np.int64),
         )
 
-    # 3) 샘플이 min_samples 이상인 클래스 위주로 우선 사용
-    strong = [c for c in sorted(base_keep) if cnt.get(c, 0) >= min_samples]
+    # 3) 최종 사용 클래스 집합 & 로컬 매핑 (전역 → 0~k-1)
+    eff_keep = set(valid)
+    local_map: Dict[int, int] = {cls: i for i, cls in enumerate(valid)}
 
-    if len(strong) >= 2:
-        eff_keep = set(strong)
-    else:
-        # min_samples 를 만족하는 클래스가 2개 미만이면
-        # 일단 base_keep 에 있는 모든 클래스를 사용해서 6칸 구조를 유지
-        eff_keep = set(base_keep)
-        if len(eff_keep) < 2:
-            # 정말로 클래스가 1개뿐이면 학습 불가
-            return (
-                np.empty(
-                    (0, window, fv.shape[1] if fv is not None and fv.ndim == 2 else 0),
-                    dtype=np.float32,
-                ),
-                np.empty((0,), dtype=np.int64),
-            )
-
-    # 4) 시계열 윈도우를 돌면서 X,y 구성 (라벨은 전역 인덱스를 그대로 사용)
+    # 4) 시계열 윈도우를 돌면서 X,y 구성
     X_raw: list[np.ndarray] = []
     y_out: list[int] = []
     n = len(fv)
@@ -902,21 +885,22 @@ def _rebuild_samples_with_keepset(
         if yi < 0 or yi >= len(labels):
             continue
 
-        lab_g = int(labels[yi])  # 전역 클래스 인덱스(C0~C5)
+        lab_g = int(labels[yi])  # 전역 클래스 인덱스
         if lab_g < 0:
             continue
         if lab_g not in eff_keep:
             continue
 
+        lab_local = local_map.get(lab_g, None)
+        if lab_local is None:
+            continue
+
         X_raw.append(fv[i : i + window])
-        y_out.append(lab_g)
+        y_out.append(lab_local)
 
     if not X_raw:
         return (
-            np.empty(
-                (0, window, fv.shape[1] if fv is not None and fv.ndim == 2 else 0),
-                dtype=np.float32,
-            ),
+            np.empty((0, window, fv.shape[1] if fv is not None and fv.ndim == 2 else 0), dtype=np.float32),
             np.empty((0,), dtype=np.int64),
         )
 
@@ -924,7 +908,7 @@ def _rebuild_samples_with_keepset(
         np.asarray(X_raw, dtype=np.float32),
         np.asarray(y_out, dtype=np.int64),
     )
-    
+
 def _synthesize_minority_if_needed(
     X_raw: np.ndarray,
     y: np.ndarray,
@@ -957,7 +941,7 @@ def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
         if len(np.unique(vy)) >= min_classes:
             break
     return train_idx, val_idx, moved
-    
+
 def train_one_model(
     symbol,
     strategy,
@@ -1107,7 +1091,7 @@ def train_one_model(
                     _safe_print(f"[LABEL RETRY NO-IMPROVE] uniq {uniq0}→{uniq1}")
 
         # ===== 5. 실제 클래스 구간 (★ 그룹 반영 핵심) =====
-        # 5-1) 전체(전역) 클래스 구간 (C0~C5)
+        # 5-1) 전체(전역) 클래스 구간
         if "class_ranges_used_global" in locals() and class_ranges_used_global is not None:
             full_ranges = class_ranges_used_global
         else:
@@ -1116,7 +1100,7 @@ def train_one_model(
         num_total_classes = len(full_ranges) if full_ranges is not None else 0
 
         # 5-2) 그룹별 클래스 인덱스 (전역 인덱스 리스트)
-        from config import get_class_groups
+        from config import get_class_groups  # 이미 상단에서 임포트되어 있지만, 안전을 위해 재확인
 
         if num_total_classes > 0:
             groups = get_class_groups(num_classes=max(2, num_total_classes)) or []
@@ -1135,19 +1119,15 @@ def train_one_model(
             # 그룹 개념이 없으면 전체 클래스 사용
             cls_in_group = list(range(num_total_classes))
 
-        if num_total_classes <= 0:
-            _log_skip(symbol, strategy, f"전역 클래스 정보 없음")
-            return res
-
         if not cls_in_group:
             _log_skip(symbol, strategy, f"그룹 내 클래스 없음(group_id={group_id})")
             return res
 
-        # 5-3) 이번 학습에 사용할 "클래스 구간"은 전역 6칸 전체
-        #      → 모델 출력은 항상 C0~C5 전체를 본다.
-        class_ranges = full_ranges or []
-        #      대신 keep_set 으로 "이 그룹에서 우선 보고 싶은 칸"을 지정
-        keep_set = set(cls_in_group) if cls_in_group else set(range(num_total_classes))
+        # 5-3) 이번 학습에 사용할 "로컬 클래스 구간" (그룹에 해당하는 구간만)
+        class_ranges = [full_ranges[c] for c in cls_in_group]
+        # 전역 → 로컬 인덱스 매핑 (예: 전역 0,1 → 로컬 0,1 / 전역 2,3 → 로컬 0,1 ...)
+        keep_set = set(cls_in_group)
+        to_local = {g: i for i, g in enumerate(sorted(cls_in_group))}
 
         # ===== 6. 로그 출력 =====
         mask_cnt = int((labels < 0).sum())
@@ -1156,7 +1136,7 @@ def train_one_model(
             f"BOUNDARY_BAND=±{BOUNDARY_BAND}"
         )
         try:
-            # 전역 기준 분포
+            # 전역 기준 분포 (full_ranges 크기만큼)
             cnt_before = np.bincount(labels[labels >= 0],
                                      minlength=num_total_classes).astype(int).tolist()
         except Exception:
@@ -1190,7 +1170,7 @@ def train_one_model(
                 min=int(_min_required),
                 augment_needed=bool(augment_needed),
                 enough_for_training=bool(enough_for_training),
-                note=f"[LabelStats] bins_total={num_total_classes}, bins_group={len(cls_in_group)}, empty={len(empty_idx)}, "
+                note=f"[LabelStats] bins_total={num_total_classes}, bins_group={len(class_ranges)}, empty={len(empty_idx)}, "
                      f"classes={num_classes_effective}, empty_idx={empty_idx[:8]}"
                      + return_note,
                 source_exchange="BYBIT",
@@ -1247,13 +1227,13 @@ def train_one_model(
             window = min(window, max(6, len(features_only) - 1))
             fv = features_only.values.astype(np.float32)
 
-            # ★ 여기서 그룹 정보(keep_set)를 사용하지만,
-            #   y 라벨은 전역 6클래스를 그대로 유지한다.
+            # ★ 여기서 그룹 정보(keep_set, to_local)를 사용해서 그룹 클래스만 학습
             X_raw, y = _rebuild_samples_with_keepset(
                 fv=fv,
                 labels=labels,
                 window=window,
                 keep_set=keep_set,
+                to_local=to_local,
                 min_samples=8,
             )
 
@@ -1280,7 +1260,7 @@ def train_one_model(
                 note_msg = f"⚠️ 희소 학습 (샘플 {usable_samples})"
                 _safe_print(f"[WARN] {symbol}-{strategy}-w{window}: {note_msg}")
 
-            # 이번 학습에서 사용하는 클래스 수 = 전역 6클래스 전체
+            # 이번 학습에서 사용하는 클래스 수 = 그룹 내 클래스 수
             set_NUM_CLASSES(len(class_ranges))
 
             # ===== train/val split =====
@@ -1335,7 +1315,7 @@ def train_one_model(
             train_idx, val_idx, _ = _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2)
 
             try:
-                # 전역 6클래스 기준 분포
+                # y 는 "그룹 로컬 클래스" 기준
                 cnt_after = np.bincount(y, minlength=len(class_ranges)).astype(int).tolist()
             except Exception:
                 cnt_after = []
@@ -1406,7 +1386,7 @@ def train_one_model(
 
             # ===== 모델/손실/옵티마 =====
             model = get_model(
-                num_classes=len(class_ranges),  # 이제 전역 6클래스 전체
+                num_classes=len(class_ranges),  # 그룹 내 클래스 수만큼 출력
                 input_size=feat_dim,
             ).to(DEVICE)
 
@@ -1550,12 +1530,8 @@ def train_one_model(
             lbls = best_state["lbls"]
             val_y = best_state["val_y"]
 
-            # ===== bin 정보 정리 및 저장 (전역 6클래스 기준) =====
+            # ===== bin 정보 정리 및 저장 =====
             try:
-                full_ranges_for_bins = full_ranges or get_class_ranges(
-                    symbol=symbol, strategy=strategy, group_id=None
-                )
-
                 if isinstance(bin_info, dict) and "bin_edges" in bin_info:
                     bin_edges = [float(x) for x in bin_info.get("bin_edges", [])]
                     bin_spans = bin_info.get("bin_spans", [])
@@ -1564,14 +1540,24 @@ def train_one_model(
                             float(bin_edges[i + 1] - bin_edges[i])
                             for i in range(len(bin_edges) - 1)
                         ]
+                    full_ranges_for_bins = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
+                    # val_y 는 "그룹 로컬" 기준 → 그룹 크기만큼만 필요
+                    cnt_local = np.bincount(val_y, minlength=len(class_ranges)).astype(int)
+                    counts_map = np.zeros(len(full_ranges_for_bins), dtype=int)
+                    for g, l in to_local.items():
+                        if g < len(counts_map) and l < len(cnt_local):
+                            counts_map[g] = int(cnt_local[l])
+                    bin_counts = counts_map.tolist()
                 else:
-                    bin_edges = [float(lo) for (lo, _) in full_ranges_for_bins] + [
-                        float(full_ranges_for_bins[-1][1])
-                    ]
+                    full_ranges_for_bins = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
+                    bin_edges = [float(lo) for (lo, _) in full_ranges_for_bins] + [float(full_ranges_for_bins[-1][1])]
                     bin_spans = [float(hi - lo) for (lo, hi) in full_ranges_for_bins]
-
-                cnt_global = np.bincount(val_y, minlength=len(full_ranges_for_bins)).astype(int)
-                bin_counts = cnt_global.tolist()
+                    cnt_local = np.bincount(val_y, minlength=len(class_ranges)).astype(int)
+                    counts_map = np.zeros(len(full_ranges_for_bins), dtype=int)
+                    for g, l in to_local.items():
+                        if g < len(counts_map) and l < len(cnt_local):
+                            counts_map[g] = int(cnt_local[l])
+                    bin_counts = counts_map.tolist()
             except Exception:
                 bin_edges, bin_spans, bin_counts = [], [], []
 
@@ -1592,7 +1578,7 @@ def train_one_model(
                 "strategy": strategy,
                 "model": model_type,
                 "group_id": int(group_id or 0),
-                "num_classes": int(len(class_ranges)),  # 전역 6클래스 수
+                "num_classes": int(len(class_ranges)),  # 이번 그룹에서 실제 사용한 클래스 수
                 "class_ranges": [[float(lo), float(hi)] for (lo, hi) in class_ranges],
                 "input_size": int(feat_dim),
                 "metrics": {
