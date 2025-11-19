@@ -128,9 +128,6 @@ _default_config = {
 
     "GROUP_SIZE": {"단기": 3, "중기": 2, "장기": 2},
 
-    # ✅ 방법 B용: 전략별 클래스 그룹 최대 개수
-    "MAX_CLASS_GROUPS": {"단기": 3, "중기": 3, "장기": 3},
-
     "REGIME": {
         "enabled": False,
         "lookback": 200,
@@ -390,52 +387,13 @@ def _group_size_env_or_default(strategy: str) -> int:
             pass
     return max(2, int(m.get(strategy, 5)))
 
-# === 전략별 최대 그룹 개수 (방법 B 핵심) ===
-def _max_groups_env_or_default(strategy: str) -> int:
-    """
-    - 우선순위:
-      1) ENV: CLASS_MAX_GROUPS_SHORT/MID/LONG
-      2) config.json: MAX_CLASS_GROUPS[strategy]
-      3) default: 3
-    """
-    cfg = dict(_config.get("MAX_CLASS_GROUPS", _default_config.get("MAX_CLASS_GROUPS", {})))
-    env_map = {
-        "단기": os.getenv("CLASS_MAX_GROUPS_SHORT"),
-        "중기": os.getenv("CLASS_MAX_GROUPS_MID"),
-        "장기": os.getenv("CLASS_MAX_GROUPS_LONG"),
-    }
-    v_env = env_map.get(strategy)
-    if v_env is not None:
-        try:
-            return max(1, int(v_env))
-        except Exception:
-            pass
-    v_cfg = cfg.get(strategy)
-    if v_cfg is not None:
-        try:
-            return max(1, int(v_cfg))
-        except Exception:
-            pass
-    return 3  # 기본은 3그룹 이하
-
 def get_class_groups(num_classes=None, group_size=None):
-    """
-    클래스 ID(0~num_classes-1)를 '그룹'으로 묶는 함수.
-    - 기본: group_size 기준으로 잘라서 그룹 생성
-    - B 방식: 그룹 개수가 너무 많으면(> max_groups),
-              전체를 max_groups 개로 다시 균등 분할
-    """
     if num_classes is None or num_classes < 2:
         num_classes = get_NUM_CLASSES()
-
-    strategy = os.getenv("CURRENT_STRATEGY", "중기")
-
     if group_size is None:
-        group_size = _group_size_env_or_default(strategy)
+        group_size = _group_size_env_or_default(os.getenv("CURRENT_STRATEGY", "중기"))
     if group_size < 2:
         group_size = 2
-
-    # 1차: 기존 방식대로 group_size 단위로 자르기
     if num_classes <= group_size:
         groups = [list(range(num_classes))]
     else:
@@ -443,28 +401,7 @@ def get_class_groups(num_classes=None, group_size=None):
             list(range(i, min(i + group_size, num_classes)))
             for i in range(0, num_classes, group_size)
         ]
-
-    # 2차: 그룹 수가 너무 많으면(예: 6, 7...) → max_groups 개로 재분할
-    max_groups = _max_groups_env_or_default(strategy)
-    if max_groups is not None and max_groups >= 1 and len(groups) > max_groups:
-        base = num_classes // max_groups
-        rem = num_classes % max_groups
-        new_groups = []
-        start = 0
-        for gi in range(max_groups):
-            size = base + (1 if gi < rem else 0)
-            if size <= 0:
-                continue
-            end = min(num_classes, start + size)
-            if start >= end:
-                break
-            new_groups.append(list(range(start, end)))
-            start = end
-        if new_groups:
-            groups = new_groups
-
-    lens = [len(g) for g in groups]
-    _log(f"[📊 클래스 분포 그룹] 총={num_classes}, 그룹수={len(groups)}, 그룹길이={lens}")
+    _log(f"[📊 클래스 분포 그룹] 총={num_classes}, 그룹크기={group_size}, 그룹수={len(groups)}")
     return copy.deepcopy(groups)
 
 # 신규 옵션 Getter
@@ -1323,4 +1260,4 @@ __all__ = [
     "is_config_readonly", "is_disk_cache_off",
     "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
     "get_BIN_META",
-]
+                           ]
