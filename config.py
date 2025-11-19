@@ -85,9 +85,8 @@ def _safe_write_json(path: str, obj: dict) -> bool:
 
 # ===== 기본 설정 =====
 _default_config = {
-    # 🔽🔽🔽 여기서 기본 클래스 개수를 10 → 6, 최대 12 → 6 로 축소
-    "NUM_CLASSES": 6,
-    "MAX_CLASSES": 6,
+    "NUM_CLASSES": 10,
+    "MAX_CLASSES": 12,
     "FEATURE_INPUT_SIZE": 24,
     "FAIL_AUGMENT_RATIO": 3,
     "MIN_FEATURES": 5,
@@ -192,8 +191,7 @@ _default_config = {
 
     # === 빈 분포 메타(이번 변경 핵심 상수) ===
     "BIN_META": {
-        # 🔽🔽🔽 목표 bin 수도 8 → 6 으로 줄여서, 전반적인 클래스 개수가 6~7개 수준에서 머물도록 유도
-        "TARGET_BINS": 6,
+        "TARGET_BINS": 8,
         "OUTLIER_Q_LOW": 0.01,
         "OUTLIER_Q_HIGH": 0.99,
         "MAX_BIN_SPAN_PCT": 0.08,
@@ -317,20 +315,10 @@ if os.path.exists(CONFIG_PATH):
             _loaded = json.load(f)
         _config = _loaded if isinstance(_loaded, dict) else copy.deepcopy(_default_config)
         _deep_merge(_config, _default_config)
-        # 🔒 YOPO: 클래스 개수 6개로 고정 강제
-        try:
-            _config["NUM_CLASSES"] = 6
-            _config["MAX_CLASSES"] = 6
-            bm = dict(_config.get("BIN_META", {}) or {})
-            bm["TARGET_BINS"] = 6
-            _config["BIN_META"] = bm
-        except Exception:
-            pass
-        _log("[✅ config.py] config.json 로드/보강 완료 (NUM_CLASSES=6, MAX_CLASSES=6 강제)")
+        _log("[✅ config.py] config.json 로드/보강 완료")
     except Exception as e:
         _log(f"[⚠️ config.py] config.json 로드 실패 → 기본값 사용: {e}")
 else:
-    # 기본 config.json 생성 시점부터 이미 NUM_CLASSES/MAX_CLASSES=6
     if _safe_write_json(CONFIG_PATH, _default_config):
         _log("[ℹ️ config.py] 기본 config.json 생성")
     else:
@@ -1022,8 +1010,8 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
 
             n_cls = _choose_n_classes(
                 rets_signed,
-                max_classes=int(_config.get("MAX_CLASSES", _default_config["MAX_CLASSES"])),
-                hint_min=int(_config.get("NUM_CLASSES", _default_config["NUM_CLASSES"]))
+                max_classes=int(_config.get("MAX_CLASSES", 12)),
+                hint_min=int(_config.get("NUM_CLASSES", 10))
             )
             if isinstance(n_override, int) and n_override >= 2:
                 n_cls = n_override
@@ -1046,13 +1034,13 @@ def get_class_ranges(symbol=None, strategy=None, method=None, group_id=None, gro
                 fixed = _strictify(fixed)
             if max_width > 0:
                 fixed = _split_wide_bins_by_quantiles(fixed, rets_signed, max_width)
-            fixed = _merge_sparse_bins_by_hist(fixed, rets_signed, int(_config.get("MAX_CLASSES", _default_config["MAX_CLASSES"])), BIN_CONF)
-            if len(fixed) > int(_config.get("MAX_CLASSES", _default_config["MAX_CLASSES"])):
-                fixed = _merge_smallest_adjacent(fixed, int(_config.get("MAX_CLASSES", _default_config["MAX_CLASSES"])))
+            fixed = _merge_sparse_bins_by_hist(fixed, rets_signed, int(_config.get("MAX_CLASSES", 12)), BIN_CONF)
+            if len(fixed) > int(_config.get("MAX_CLASSES", 12)):
+                fixed = _merge_smallest_adjacent(fixed, int(_config.get("MAX_CLASSES", 12)))
             if not fixed or len(fixed) < 2:
                 return compute_equal_ranges(get_NUM_CLASSES(), reason="최종 경계 부족(가드)")
             fixed = _apply_trade_floor_cuts(fixed)
-            MAXC = int(_config.get("MAX_CLASSES", _default_config["MAX_CLASSES"]))
+            MAXC = int(_config.get("MAX_CLASSES", 12))
             if len(fixed) > MAXC:
                 fixed = _merge_smallest_adjacent(fixed, MAXC)
             if len(fixed) < 2:
