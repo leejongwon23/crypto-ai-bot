@@ -1,5 +1,5 @@
 # ================================================
-# labels.py — YOPO RAW 기반 수익률 라벨링 (H 고정 + 6클래스 고정 버전)
+# labels.py — YOPO RAW 기반 수익률 라벨링 (H 고정 + 동적 엣지 튜닝 버전)
 # ================================================
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from config import (
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------
-# 공통 설정 (기존 유지)
+# 공통 설정 (config와 동기화)
 # --------------------------------------------
 _BIN_META = dict(get_BIN_META() or {})
 
@@ -41,16 +41,19 @@ def _as_percent(x: float) -> float:
         return 0.0
     return xv * 100.0 if 0.0 < xv < 1.0 else xv
 
-# ✅ config.BIN_META에서 넘어온 목표 bin 수 (과거 호환용)
-_TARGET_BINS = int(os.getenv("TARGET_BINS", str(_BIN_META.get("TARGET_BINS", 8))))
-_MIN_LABEL_CLASSES = int(os.getenv("MIN_LABEL_CLASSES", "4"))
+# ✅ config.BIN_META에서 넘어온 목표 bin 수 (기본 6개)
+_TARGET_BINS = int(os.getenv("TARGET_BINS", str(_BIN_META.get("TARGET_BINS", 6))))
+# ✅ 최소 클래스 개수도 BIN_META에 있을 경우 따라가고, 없으면 4
+_MIN_LABEL_CLASSES = int(
+    os.getenv(
+        "MIN_LABEL_CLASSES",
+        str(_BIN_META.get("MIN_LABEL_CLASSES", 4))
+    )
+)
 
-# ✅ 한 클래스당 최소 패턴 수(샘플 수) 기준 (참고용)
+# ✅ 한 클래스당 최소 패턴 수(샘플 수) 기준
+#   - 데이터가 충분하면 각 클래스에 최소 이 정도는 들어가도록 엣지를 자름
 _MIN_SAMPLES_PER_CLASS = int(os.getenv("MIN_SAMPLES_PER_CLASS", "50"))
-
-# ✅ 전체 라벨 클래스 개수 "완전 고정"
-#   - 기본값 6 (환경변수 FIXED_NUM_CLASSES 로 조정 가능)
-_FIXED_NUM_CLASSES = int(os.getenv("FIXED_NUM_CLASSES", "6"))
 
 # 🔥 전략별 H 고정 (핵심 수정)
 # - 단기: 4h 캔들 1개
@@ -146,27 +149,23 @@ def _pick_per_candle_gain(up: np.ndarray, dn: np.ndarray) -> np.ndarray:
     return np.where(np.abs(up) >= np.abs(dn), up, dn).astype(np.float32)
 
 # ============================================================
-# RAW bin 생성 (🔥 6클래스 고정 버전)
+# RAW bin 생성 (🔥 동적 엣지 튜닝 버전)
 # ============================================================
 def _raw_bins(dist: np.ndarray, target_bins: int) -> np.ndarray:
     """
-    동적 분포 기반 엣지 계산 (⚙️ 클래스 개수는 고정):
-    - 항상 `_FIXED_NUM_CLASSES` 개의 클래스를 만들도록 강제
-    - 분위수(quantile) 기반이라 극단 구간이 이상하게 넓어지는 걸 방지
+    동적 분포 기반 엣지 계산:
+    - target_bins는 "최대로" 생각하고
+    - 한 bin당 최소 샘플 수(_MIN_SAMPLES_PER_CLASS)를 고려해 실제 bin 수는 자동 조정
+    - 분위수(quantile) 기반이라 극단 구간이 3%~28% 같은 미친 폭으로 커지지 않음
     """
-    # 사용할 bin 개수는 무조건 고정값으로
-    bins = int(_FIXED_NUM_CLASSES)
-    if bins < 2:
-        bins = 2
-
-    # 값이 없으면 작은 범위로 기본 엣지 생성
+    # 유효 값만 사용
     if dist is None:
-        return np.linspace(-0.01, 0.01, bins + 1).astype(float)
+        return np.linspace(-0.01, 0.01, target_bins + 1).astype(float)
 
     dist = np.asarray(dist, dtype=float)
     dist = dist[np.isfinite(dist)]
     if dist.size == 0:
-        return np.linspace(-0.01, 0.01, bins + 1).astype(float)
+        return np.linspace(-0.01, 0.01, target_bins + 1).astype(float)
 
     n = dist.size
     lo = float(np.min(dist))
@@ -178,13 +177,32 @@ def _raw_bins(dist: np.ndarray, target_bins: int) -> np.ndarray:
     if hi <= lo:
         hi = lo + 1e-6
 
-    # 🎯 bin 개수는 데이터량과 상관없이 고정
+    # 데이터 양이 적으면 어차피 세분화가 안 되므로 균등 분할로 빠르게 리턴
+    if n < _MIN_SAMPLES_PER_CLASS * 2:
+        bins_small = max(_MIN_LABEL_CLASSES, min(target_bins, 4))
+        return np.linspace(lo, hi, bins_small + 1).astype(float)
+
+    # 데이터가 허용하는 최대 bin 수 (각 bin에 최소 샘플 수를 갖도록)
+    max_bins_by_samples = max(1, n // max(1, _MIN_SAMPLES_PER_CLASS))
+
+    # 실제 사용할 bin 수
+    # - 너무 많지도 않고
+    # - 최소 클래스 수는 지키면서
+    # - config에서 지정한 _TARGET_BINS (기본 6)를 상한으로 사용
+    bins = int(min(target_bins, _TARGET_BINS, max_bins_by_samples))
+    bins = int(max(_MIN_LABEL_CLASSES, bins))
+
+    if bins <= 1:
+        # 어쩔 수 없이 1개 bin 수준이면 최소 2개로 쪼개 준다
+        return np.linspace(lo, hi, 2 + 1).astype(float)
+
+    # 분위수(quantile) 기반 엣지 계산
     qs = np.linspace(0.0, 1.0, bins + 1)
     try:
         edges = np.quantile(dist, qs)
     except Exception:
-        # quantile 실패시 균등 분할로 fallback
-        edges = np.linspace(lo, hi, bins + 1)
+        # quantile 실패시 기존 균등 분할로 fallback
+        return np.linspace(lo, hi, bins + 1).astype(float)
 
     edges = np.asarray(edges, dtype=float)
 
@@ -193,7 +211,7 @@ def _raw_bins(dist: np.ndarray, target_bins: int) -> np.ndarray:
         if edges[i] <= edges[i - 1]:
             edges[i] = edges[i - 1] + 1e-9
 
-    # 안전장치: 전체 범위는 원래 lo~hi 를 크게 벗어나지 않게 클램프
+    # 안전장치: 전체 범위는 원래 lo~hi 를 벗어나지 않게 클램프
     edges[0] = min(edges[0], lo)
     edges[-1] = max(edges[-1], hi)
 
@@ -210,10 +228,23 @@ def _vector_bin(gains: np.ndarray, edges: np.ndarray) -> np.ndarray:
 # ============================================================
 def _auto_target_bins(df_len: int) -> int:
     """
-    🔒 이제부터는 데이터 길이(df_len)와 무관하게
-    항상 고정된 클래스 개수(_FIXED_NUM_CLASSES)를 사용한다.
+    ⚙️ 이제는 "무조건 많이"가 아니라:
+      - 라벨 최소 개수(_MIN_LABEL_CLASSES, 기본 4개)는 유지
+      - 한 bin당 최소 샘플 수(_MIN_SAMPLES_PER_CLASS)를 만족
+      - 전체 bin 수 상한은 _TARGET_BINS (config.BIN_META.TARGET_BINS, 기본 6)
+    이렇게 해서 전체 클래스 수가 대략 4~6개 사이에 머물도록 강제한다.
     """
-    return int(_FIXED_NUM_CLASSES)
+    if df_len <= 0:
+        return _MIN_LABEL_CLASSES
+
+    # 데이터가 너무 적으면: 최소 클래스 개수만 유지
+    if df_len < _MIN_SAMPLES_PER_CLASS * 2:
+        return max(_MIN_LABEL_CLASSES, 2)
+
+    max_bins_by_samples = max(1, df_len // max(1, _MIN_SAMPLES_PER_CLASS))
+    bins = min(max_bins_by_samples, _TARGET_BINS)
+    bins = max(_MIN_LABEL_CLASSES, bins)
+    return int(bins)
 
 # ============================================================
 # 수익률 계산 (핵심 수정)
@@ -346,7 +377,7 @@ def make_labels(df, symbol, strategy, group_id=None):
         gains, labels,
         edges, bin_counts, spans,
         extra_cols=extra_cols,
-        extra_meta={"target_bins_used": target_bins},
+        extra_meta={"target_bins_used": int(target_bins)},
         group_id=group_id,
     )
 
@@ -420,7 +451,7 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
         df, symbol, strategy, gains, labels,
         edges, counts, spans,
         extra_cols=extra_cols,
-        extra_meta={"target_bins_used": target_bins},
+        extra_meta={"target_bins_used": int(target_bins)},
         group_id=group_id,
     )
 
