@@ -41,6 +41,7 @@ def _as_percent(x: float) -> float:
         return 0.0
     return xv * 100.0 if 0.0 < xv < 1.0 else xv
 
+# ✅ config.BIN_META에서 넘어온 목표 bin 수 (이제 기본 6개)
 _TARGET_BINS = int(os.getenv("TARGET_BINS", str(_BIN_META.get("TARGET_BINS", 8))))
 _MIN_LABEL_CLASSES = int(os.getenv("MIN_LABEL_CLASSES", "4"))
 
@@ -147,8 +148,8 @@ def _pick_per_candle_gain(up: np.ndarray, dn: np.ndarray) -> np.ndarray:
 def _raw_bins(dist: np.ndarray, target_bins: int) -> np.ndarray:
     """
     동적 분포 기반 엣지 계산:
-    - 클래스 개수(target_bins)는 최대한 유지
-    - 한 클래스당 최소 샘플 수(_MIN_SAMPLES_PER_CLASS)를 고려해 bin 수 자동 조정
+    - target_bins는 "최대로" 생각하고
+    - 한 bin당 최소 샘플 수(_MIN_SAMPLES_PER_CLASS)를 고려해 실제 bin 수는 자동 조정
     - 분위수(quantile) 기반이라 극단 구간이 3%~28% 같은 미친 폭으로 커지지 않음
     """
     # 유효 값만 사용
@@ -172,7 +173,8 @@ def _raw_bins(dist: np.ndarray, target_bins: int) -> np.ndarray:
 
     # 데이터 양이 적으면 어차피 세분화가 안 되므로 균등 분할로 빠르게 리턴
     if n < _MIN_SAMPLES_PER_CLASS * 2:
-        return np.linspace(lo, hi, max(_MIN_LABEL_CLASSES, min(target_bins, 4)) + 1).astype(float)
+        bins_small = max(_MIN_LABEL_CLASSES, min(target_bins, 4))
+        return np.linspace(lo, hi, bins_small + 1).astype(float)
 
     # 데이터가 허용하는 최대 bin 수 (각 bin에 최소 샘플 수를 갖도록)
     max_bins_by_samples = max(1, n // max(1, _MIN_SAMPLES_PER_CLASS))
@@ -180,7 +182,8 @@ def _raw_bins(dist: np.ndarray, target_bins: int) -> np.ndarray:
     # 실제 사용할 bin 수
     # - 너무 많지도 않고
     # - 최소 클래스 수는 지키면서
-    bins = int(min(target_bins, max_bins_by_samples))
+    # - config에서 지정한 _TARGET_BINS (기본 6)를 상한으로 사용
+    bins = int(min(target_bins, _TARGET_BINS, max_bins_by_samples))
     bins = int(max(_MIN_LABEL_CLASSES, bins))
 
     if bins <= 1:
@@ -188,7 +191,6 @@ def _raw_bins(dist: np.ndarray, target_bins: int) -> np.ndarray:
         return np.linspace(lo, hi, 2 + 1).astype(float)
 
     # 분위수(quantile) 기반 엣지 계산
-    # 예: bins=14 → q = [0, 1/14, 2/14, ..., 1]
     qs = np.linspace(0.0, 1.0, bins + 1)
     try:
         edges = np.quantile(dist, qs)
@@ -219,12 +221,24 @@ def _vector_bin(gains: np.ndarray, edges: np.ndarray) -> np.ndarray:
 # target bin 수
 # ============================================================
 def _auto_target_bins(df_len: int) -> int:
-    if df_len <= 300:  return max(8, _TARGET_BINS)
-    if df_len <= 600:  return max(10, _TARGET_BINS)
-    if df_len <= 1000: return max(14, _TARGET_BINS)
-    if df_len <= 2000: return max(18, _TARGET_BINS)
-    if df_len <= 4000: return max(24, _TARGET_BINS)
-    return max(32, _TARGET_BINS)
+    """
+    ⚙️ 이제는 "무조건 많이"가 아니라:
+      - 라벨 최소 개수(_MIN_LABEL_CLASSES, 기본 4개)는 유지
+      - 한 bin당 최소 샘플 수(_MIN_SAMPLES_PER_CLASS)를 만족
+      - 전체 bin 수 상한은 _TARGET_BINS (config.BIN_META.TARGET_BINS, 기본 6)
+    이렇게 해서 전체 클래스 수가 대략 4~6개 사이에 머물도록 강제한다.
+    """
+    if df_len <= 0:
+        return _MIN_LABEL_CLASSES
+
+    # 데이터가 너무 적으면: 최소 클래스 개수만 유지
+    if df_len < _MIN_SAMPLES_PER_CLASS * 2:
+        return max(_MIN_LABEL_CLASSES, 2)
+
+    max_bins_by_samples = max(1, df_len // max(1, _MIN_SAMPLES_PER_CLASS))
+    bins = min(max_bins_by_samples, _TARGET_BINS)
+    bins = max(_MIN_LABEL_CLASSES, bins)
+    return int(bins)
 
 # ============================================================
 # 수익률 계산 (핵심 수정)
@@ -361,6 +375,23 @@ def make_labels(df, symbol, strategy, group_id=None):
         group_id=group_id,
     )
 
+    # 🔍 디버그 로그: 실제 클래스 개수/분포 확인용
+    try:
+        num_classes = int(edges.size - 1)
+        if spans.size > 0:
+            span_min = float(spans.min())
+            span_max = float(spans.max())
+        else:
+            span_min = span_max = 0.0
+        logger.info(
+            "[labels] %s-%s raw N=%d target_bins=%d actual_bins=%d "
+            "counts=%s span_min=%.4f span_max=%.4f",
+            symbol, pure, len(df), int(target_bins), num_classes,
+            bin_counts.tolist(), span_min, span_max,
+        )
+    except Exception:
+        pass
+
     class_ranges = [(float(edges[i]), float(edges[i+1]))
                     for i in range(edges.size - 1)]
 
@@ -417,6 +448,24 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
         extra_meta={"target_bins_used": target_bins},
         group_id=group_id,
     )
+
+    # 🔍 디버그 로그: horizon 기준 라벨 구조도 확인
+    try:
+        num_classes = int(edges.size - 1)
+        if spans.size > 0:
+            span_min = float(spans.min())
+            span_max = float(spans.max())
+        else:
+            span_min = span_max = 0.0
+        logger.info(
+            "[labels-h] %s-%s(h=%dh) raw N=%d target_bins=%d actual_bins=%d "
+            "counts=%s span_min=%.4f span_max=%.4f",
+            symbol, strategy, int(horizon_hours), len(df),
+            int(target_bins), num_classes,
+            counts.tolist(), span_min, span_max,
+        )
+    except Exception:
+        pass
 
     class_ranges = [(float(edges[i]), float(edges[i+1]))
                     for i in range(edges.size - 1)]
