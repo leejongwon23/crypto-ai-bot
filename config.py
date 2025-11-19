@@ -85,8 +85,9 @@ def _safe_write_json(path: str, obj: dict) -> bool:
 
 # ===== 기본 설정 =====
 _default_config = {
-    "NUM_CLASSES": 10,
-    "MAX_CLASSES": 12,
+    # 🔽🔽🔽 여기서 기본 클래스 개수를 10 → 6, 최대 12 → 7 로 축소
+    "NUM_CLASSES": 6,
+    "MAX_CLASSES": 7,
     "FEATURE_INPUT_SIZE": 24,
     "FAIL_AUGMENT_RATIO": 3,
     "MIN_FEATURES": 5,
@@ -191,7 +192,8 @@ _default_config = {
 
     # === 빈 분포 메타(이번 변경 핵심 상수) ===
     "BIN_META": {
-        "TARGET_BINS": 8,
+        # 🔽🔽🔽 목표 bin 수도 8 → 6 으로 줄여서, 전반적인 클래스 개수가 6~7개 수준에서 머물도록 유도
+        "TARGET_BINS": 6,
         "OUTLIER_Q_LOW": 0.01,
         "OUTLIER_Q_HIGH": 0.99,
         "MAX_BIN_SPAN_PCT": 0.08,
@@ -1260,4 +1262,4 @@ __all__ = [
     "is_config_readonly", "is_disk_cache_off",
     "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
     "get_BIN_META",
-                           ]
+        ]
