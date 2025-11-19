@@ -466,11 +466,6 @@ TRAIN_CUDA_EMPTY_EVERY_EP = os.getenv("TRAIN_CUDA_EMPTY_EVERY_EP", "1") == "1"
 # ===== [ADD] 클래스 불균형 제어용 ENV =====
 BALANCE_CLASSES_FLAG = os.getenv("BALANCE_CLASSES", "1") == "1"      # 기본 ON
 WEIGHTED_SAMPLER_FLAG = os.getenv("WEIGHTED_SAMPLER", "0") == "1"    # 기본 OFF
-
-# === [NEW] 극단 그룹 강화를 위한 추가 환경변수 ===
-REAL_BALANCE_ENABLE = os.getenv("REAL_BALANCE_ENABLE", "1") == "1"   # 기본 ON
-REAL_BALANCE_MIN_COUNT = int(os.getenv("REAL_BALANCE_MIN_COUNT", "12"))
-MIN_SAMPLES_PER_CLASS = int(os.getenv("MIN_SAMPLES_PER_CLASS", "4"))
 # ===================================================================
 
 def _as_bool_env(name: str, default: bool) -> bool:
@@ -1239,7 +1234,7 @@ def train_one_model(
                 window=window,
                 keep_set=keep_set,
                 to_local=to_local,
-                min_samples=MIN_SAMPLES_PER_CLASS,
+                min_samples=8,
             )
 
             repaired_info = {
@@ -1339,16 +1334,6 @@ def train_one_model(
                     _safe_print(f"[BALANCE] applied: train={len(y_train)}, val={len(y_val)}")
                 except Exception as e:
                     _safe_print(f"[BALANCE skip] {e}")
-
-            # === [NEW] 극단 그룹용 '진짜' 균형 적용 ===
-            if REAL_BALANCE_ENABLE:
-                try:
-                    X_train, y_train = _apply_real_balance(
-                        X_train, y_train, min_count=REAL_BALANCE_MIN_COUNT
-                    )
-                    _safe_print(f"[REAL BALANCE] applied: train={len(y_train)}, min_count={REAL_BALANCE_MIN_COUNT}")
-                except Exception as e:
-                    _safe_print(f"[REAL BALANCE skip] {e}")
 
             # ─────────────── [ADD] 증강 후 클래스 분포 출력 ───────────────
             try:
