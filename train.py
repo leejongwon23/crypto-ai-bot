@@ -1,4 +1,4 @@
-# train.py — SPEED v2.6 FINAL (전략별 DF/라벨 분리 적용판, 그룹쪼개기 잠시 OFF, 캔들수익분포 로그 유지)
+# train.py — SPEED v2.6 FINAL (희소클래스 제거 없이 그룹 클래스 전부 학습 버전)
 # -*- coding: utf-8 -*-
 import sitecustomize
 import os, time, glob, shutil, json, random, traceback, threading, gc, csv, re
@@ -175,7 +175,7 @@ from config import (
 )
 
 # ===================== [ADD] 클래스 불균형 보정 유틸 =====================
-# YOPO 철학 준수: 라벨 "병합" 없음. 오로지 학습 데이터에서 소수 클래스만 살짝 늘리거나(오버샘플) 가중 샘플링.
+# YOPO 철학: 라벨 "병합/삭제" 없음. 희소 클래스도 그대로 유지.
 try:
     from data_augmentation import balance_classes, compute_class_weights, make_weighted_sampler
 except Exception:
@@ -223,7 +223,6 @@ def log_return_distribution_for_train(symbol: str, strategy: str, df: pd.DataFra
             return
 
         # 1) 공통함수로 수익률 전부 뽑기
-        # ✅ 전략까지 같이 넘겨서, labels / 운영로그와 완전히 동일한 방식으로 계산
         rets = extract_candle_returns(df, max_rows=max_rows, strategy=strategy)
 
         if not rets:
@@ -464,13 +463,8 @@ USE_AMP = os.getenv("USE_AMP", "1") == "1"
 TRAIN_CUDA_EMPTY_EVERY_EP = os.getenv("TRAIN_CUDA_EMPTY_EVERY_EP", "1") == "1"
 
 # ===== [ADD] 클래스 불균형 제어용 ENV =====
-BALANCE_CLASSES_FLAG = os.getenv("BALANCE_CLASSES", "1") == "1"      # 기본 ON
+BALANCE_CLASSES_FLAG = os.getenv("BALANCE_CLASSES", "1") == "1"      # 기본 ON (증강/리샘플용)
 WEIGHTED_SAMPLER_FLAG = os.getenv("WEIGHTED_SAMPLER", "0") == "1"    # 기본 OFF
-
-# ===== [ADD] 전략별 최소 학습 샘플 개수 (검증 강화) =====
-MIN_TRAIN_SAMPLES_SHORT = int(os.getenv("MIN_TRAIN_SAMPLES_SHORT", "60"))
-MIN_TRAIN_SAMPLES_MID = int(os.getenv("MIN_TRAIN_SAMPLES_MID", "60"))
-MIN_TRAIN_SAMPLES_LONG = int(os.getenv("MIN_TRAIN_SAMPLES_LONG", "60"))
 # ===================================================================
 
 def _as_bool_env(name: str, default: bool) -> bool:
@@ -514,20 +508,6 @@ def _min_f1_for(strategy: str) -> float:
         if strategy == "단기"
         else (EVAL_MIN_F1_MID if strategy == "중기" else EVAL_MIN_F1_LONG)
     )
-
-
-def _min_train_samples_for(strategy: str) -> int:
-    """
-    전략별 최소 학습 샘플 개수.
-    이 값보다 적으면 그 윈도우는 아예 학습하지 않고 SKIP 처리한다.
-    """
-    if strategy == "단기":
-        return MIN_TRAIN_SAMPLES_SHORT
-    if strategy == "중기":
-        return MIN_TRAIN_SAMPLES_MID
-    if strategy == "장기":
-        return MIN_TRAIN_SAMPLES_LONG
-    return MIN_TRAIN_SAMPLES_SHORT
 
 
 now_kst = lambda: datetime.now(pytz.timezone("Asia/Seoul"))
@@ -673,17 +653,16 @@ def coverage_split_indices(
 
 
 def _log_skip(symbol, strategy, reason):
-    # ✅ 진짜 모델처럼 보이지 않도록 diag_* + None 메트릭으로 기록
     logger.log_training_result(
         symbol,
         strategy,
-        model="diag_skip",
-        accuracy=None,
-        f1=None,
-        loss=None,
-        val_acc=None,
-        val_f1=None,
-        val_loss=None,
+        model="all",
+        accuracy=0.0,
+        f1=0.0,
+        loss=0.0,
+        val_acc=0.0,
+        val_f1=0.0,
+        val_loss=0.0,
         engine="manual",
         window=None,
         recent_cap=None,
@@ -700,7 +679,7 @@ def _log_skip(symbol, strategy, reason):
         {
             "symbol": symbol,
             "strategy": strategy,
-            "model": "diag_skip",
+            "model": "all",
             "predicted_class": -1,
             "success": False,
             "rate": 0.0,
@@ -711,17 +690,16 @@ def _log_skip(symbol, strategy, reason):
 
 
 def _log_fail(symbol, strategy, reason):
-    # ✅ 진짜 모델처럼 보이지 않도록 diag_* + None 메트릭으로 기록
     logger.log_training_result(
         symbol,
         strategy,
-        model="diag_fail",
-        accuracy=None,
-        f1=None,
-        loss=None,
-        val_acc=None,
-        val_f1=None,
-        val_loss=None,
+        model="all",
+        accuracy=0.0,
+        f1=0.0,
+        loss=0.0,
+        val_acc=0.0,
+        val_f1=0.0,
+        val_loss=0.0,
         engine="manual",
         window=None,
         recent_cap=None,
@@ -738,7 +716,7 @@ def _log_fail(symbol, strategy, reason):
         {
             "symbol": symbol,
             "strategy": strategy,
-            "model": "diag_fail",
+            "model": "all",
             "predicted_class": -1,
             "success": False,
             "rate": 0.0,
@@ -814,7 +792,7 @@ def _build_precomputed(symbol: str) -> tuple[Dict[str, Optional[pd.DataFrame]], 
         except Exception:
             pre_lbl[strat] = None
 
-    return dfs,_feats,pre_lbl
+    return dfs, feats, pre_lbl
 
 
 def _find_prev_model_for(symbol: str, prev_strategy: str) -> Optional[str]:
@@ -848,68 +826,68 @@ def _rebuild_labels_once(df: pd.DataFrame, symbol: str, strategy: str):
     except Exception:
         return None
 
+
 def _rebuild_samples_with_keepset(
     fv: np.ndarray,
     labels: np.ndarray,
     window: int,
     keep_set: set[int],
     to_local: Dict[int, int],
-    min_samples: int = 8,
+    min_samples: int = 1,  # ← 형식만 남기고, "클래스 컷"에는 쓰지 않는다
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    그룹 클래스만 사용해서 시계열 샘플을 다시 만드는 함수.
+    그룹에 속한 클래스는 '전부' 그대로 쓰는 시계열 샘플 재구성 함수.
 
-    - labels 는 "전역 클래스 인덱스"(0~전체 클래스-1) 기준
-    - keep_set 은 "이번 그룹에 포함된 전역 클래스들" 집합
-    - 이 안에서 min_samples 미만인 클래스는 버리고,
-      나머지만 0~(k-1) 로 다시 매핑해서 X,y 생성.
+    - labels: 전역 클래스 인덱스(0~전체-1)
+    - keep_set: 이번 그룹에 해당하는 전역 클래스 집합
+    - to_local: (필요시) 전역→로컬 매핑(지금은 local_map 새로 구성하므로 필수는 아님)
+
+    ❗ 중요한 점:
+    - '샘플이 적다'는 이유로 특정 클래스를 잘라내지 않는다.
+    - 단지 이번 그룹에 속하지 않는 클래스만 제외.
+    - 나중에 전체 샘플이 0개면 그때만 학습 스킵.
     """
-    from collections import Counter
-
     # 방어 코드: 입력이 비었으면 바로 종료
     if fv is None or labels is None or len(fv) == 0 or len(labels) == 0:
+        feat_dim = fv.shape[1] if fv is not None and fv.ndim == 2 else 0
         return (
-            np.empty((0, window, fv.shape[1] if fv is not None and fv.ndim == 2 else 0), dtype=np.float32),
+            np.empty((0, window, feat_dim), dtype=np.float32),
             np.empty((0,), dtype=np.int64),
         )
 
-    # 1) 전체 라벨 분포 계산 (전역 클래스 기준)
-    cnt = Counter(int(l) for l in labels.tolist() if int(l) >= 0)
-
-    # 2) 이번 그룹에 해당하는 클래스만 기준으로 유효 클래스 선정
-    base_keep = set(int(c) for c in (keep_set or set()))
-    if not base_keep:
-        # 혹시 keep_set 이 비어 있으면, 관측된 모든 클래스를 후보로 사용
-        base_keep = set(cnt.keys())
-
-    # min_samples 이상 가진 클래스만 "이번 학습에서 실제로 사용할 클래스"
-    valid = [c for c in sorted(base_keep) if cnt.get(c, 0) >= min_samples]
-
-    # 학습 가능한 클래스가 2개 미만이면 학습 불가 → 빈 배열 리턴
-    if len(valid) < 2:
-        return (
-            np.empty((0, window, fv.shape[1] if fv is not None and fv.ndim == 2 else 0), dtype=np.float32),
-            np.empty((0,), dtype=np.int64),
-        )
-
-    # 3) 최종 사용 클래스 집합 & 로컬 매핑 (전역 → 0~k-1)
-    eff_keep = set(valid)
-    local_map: Dict[int, int] = {cls: i for i, cls in enumerate(valid)}
-
-    # 4) 시계열 윈도우를 돌면서 X,y 구성
-    X_raw: list[np.ndarray] = []
-    y_out: list[int] = []
     n = len(fv)
 
+    # 이번 그룹에 사용할 전역 클래스 집합
+    base_keep: set[int] = set(int(c) for c in (keep_set or set()))
+    if not base_keep:
+        # 혹시라도 비어 있으면, 관측된 모든 클래스를 후보로 사용
+        base_keep = set(int(l) for l in labels.tolist() if int(l) >= 0)
+
+    if not base_keep:
+        feat_dim = fv.shape[1] if fv is not None and fv.ndim == 2 else 0
+        return (
+            np.empty((0, window, feat_dim), dtype=np.float32),
+            np.empty((0,), dtype=np.int64),
+        )
+
+    # 전역 → 로컬 인덱스 매핑 (정렬된 순서로 0~k-1)
+    sorted_keep = sorted(base_keep)
+    local_map: Dict[int, int] = {g: i for i, g in enumerate(sorted_keep)}
+
+    X_raw: list[np.ndarray] = []
+    y_out: list[int] = []
+
+    # 윈도우 단위로 샘플 생성
     for i in range(n - window):
         yi = i + window - 1
         if yi < 0 or yi >= len(labels):
             continue
 
-        lab_g = int(labels[yi])  # 전역 클래스 인덱스
+        lab_g = int(labels[yi])
         if lab_g < 0:
             continue
-        if lab_g not in eff_keep:
+        if lab_g not in base_keep:
+            # 이번 그룹에 속하지 않는 클래스는 제외
             continue
 
         lab_local = local_map.get(lab_g, None)
@@ -920,22 +898,24 @@ def _rebuild_samples_with_keepset(
         y_out.append(lab_local)
 
     if not X_raw:
+        feat_dim = fv.shape[1] if fv is not None and fv.ndim == 2 else 0
         return (
-            np.empty((0, window, fv.shape[1] if fv is not None and fv.ndim == 2 else 0), dtype=np.float32),
+            np.empty((0, window, feat_dim), dtype=np.float32),
             np.empty((0,), dtype=np.int64),
         )
 
-    return (
-        np.asarray(X_raw, dtype=np.float32),
-        np.asarray(y_out, dtype=np.int64),
-    )
+    X_arr = np.asarray(X_raw, dtype=np.float32)
+    y_arr = np.asarray(y_out, dtype=np.int64)
+
+    return X_arr, y_arr
+
 
 def _synthesize_minority_if_needed(
     X_raw: np.ndarray,
     y: np.ndarray,
     num_classes: int
 ) -> Tuple[np.ndarray, np.ndarray, bool]:
-    # 지금 버전: 합성 안 한다
+    # 지금 버전: 합성 안 한다 (형식 유지용)
     return X_raw, y, False
 
 
@@ -962,6 +942,7 @@ def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
         if len(np.unique(vy)) >= min_classes:
             break
     return train_idx, val_idx, moved
+
 
 def train_one_model(
     symbol,
@@ -1033,7 +1014,6 @@ def train_one_model(
         # ===== 3. 라벨 만들기 =====
         bin_info = None
         if isinstance(pre_lbl, tuple) and len(pre_lbl) in (3, 4, 6):
-            # 기존 처리 그대로 유지
             if len(pre_lbl) == 6:
                 gains, labels, class_ranges_used_global, be, bc, bs = pre_lbl
                 bin_info = {
@@ -1121,7 +1101,7 @@ def train_one_model(
         num_total_classes = len(full_ranges) if full_ranges is not None else 0
 
         # 5-2) 그룹별 클래스 인덱스 (전역 인덱스 리스트)
-        from config import get_class_groups  # 이미 상단에서 임포트되어 있지만, 안전을 위해 재확인
+        from config import get_class_groups
 
         if num_total_classes > 0:
             groups = get_class_groups(num_classes=max(2, num_total_classes)) or []
@@ -1146,7 +1126,6 @@ def train_one_model(
 
         # 5-3) 이번 학습에 사용할 "로컬 클래스 구간" (그룹에 해당하는 구간만)
         class_ranges = [full_ranges[c] for c in cls_in_group]
-        # 전역 → 로컬 인덱스 매핑 (예: 전역 0,1 → 로컬 0,1 / 전역 2,3 → 로컬 0,1 ...)
         keep_set = set(cls_in_group)
         to_local = {g: i for i, g in enumerate(sorted(cls_in_group))}
 
@@ -1173,11 +1152,10 @@ def train_one_model(
             return_note = f" ; [ReturnDist] edges={edges[:20]}, counts={counts[:20]}"
 
         try:
-            # ✅ 여기서는 진단용 info 로그이므로 model=diag_info, 메트릭은 전부 None
             logger.log_training_result(
                 symbol,
                 strategy,
-                model="diag_info",
+                model="all",
                 accuracy=None,
                 f1=None,
                 loss=None,
@@ -1256,7 +1234,7 @@ def train_one_model(
                 window=window,
                 keep_set=keep_set,
                 to_local=to_local,
-                min_samples=8,
+                min_samples=1,  # ← 더 이상 컷 기준으로 쓰지 않음
             )
 
             repaired_info = {
@@ -1265,6 +1243,7 @@ def train_one_model(
             }
 
             if X_raw.size and len(np.unique(y)) < 2:
+                # 클래스가 1개뿐이어도 일단 그대로 진행 (단, 나중에 샘플 0이면 스킵)
                 X_raw, y, syn = _synthesize_minority_if_needed(
                     X_raw, y, num_classes=len(class_ranges)
                 )
@@ -1272,19 +1251,12 @@ def train_one_model(
 
             usable_samples = int(len(y))
             note_msg = ""
-
-            # ✅ 여기서 "검증 최소수" 강화: 전략별 최소 샘플보다 적거나, 클래스수가 2개 미만이면 아예 학습하지 않음
-            min_train_samples = _min_train_samples_for(strategy)
-            num_unique_classes_local = int(len(np.unique(y))) if len(y) else 0
-            if usable_samples == 0 or num_unique_classes_local < 2 or usable_samples < min_train_samples:
-                reason = (
-                    f"학습 샘플 부족: usable={usable_samples}, "
-                    f"uniq={num_unique_classes_local}, min={min_train_samples}"
-                )
-                _safe_print(f"[SKIP TRAIN] {symbol}-{strategy}-w{window}: {reason}")
-                _log_skip(symbol, strategy, reason + f" (w={window})")
+            if usable_samples == 0:
+                _log_skip(symbol, strategy, f"유효 라벨 샘플 없음(w={window})")
                 continue
-
+            if y.min() < 0:
+                _log_skip(symbol, strategy, f"음수 라벨 유입 감지(w={window})")
+                continue
             if usable_samples < 20:
                 note_msg = f"⚠️ 희소 학습 (샘플 {usable_samples})"
                 _safe_print(f"[WARN] {symbol}-{strategy}-w{window}: {note_msg}")
@@ -1357,6 +1329,8 @@ def train_one_model(
             y_val = y[val_idx]
 
             # ─────────────── [ADD] 희소 클래스 보정 ───────────────
+            # 여기서는 '클래스 삭제'가 아니라, data_augmentation 쪽에서
+            # 리샘플/증강으로만 균형 조정한다.
             if BALANCE_CLASSES_FLAG:
                 try:
                     X_train, y_train = balance_classes(X_train, y_train)
@@ -1366,8 +1340,8 @@ def train_one_model(
 
             # ─────────────── [ADD] 증강 후 클래스 분포 출력 ───────────────
             try:
-                from collections import Counter
-                cls_dist = Counter(y_train.tolist())
+                from collections import Counter as _Ctr
+                cls_dist = _Ctr(y_train.tolist())
                 _safe_print("[BALANCE RESULT] 클래스별 샘플 수:")
                 for cls_id in sorted(cls_dist.keys()):
                     _safe_print(f"  - class {cls_id}: {cls_dist[cls_id]}개")
@@ -1507,7 +1481,6 @@ def train_one_model(
                     except Exception:
                         acc = 0.0
                     try:
-                        # ✅ 항상 macro F1 (클래스별 F1 평균)
                         f1_val = f1_score(lbls, preds, average="macro", zero_division=0)
                     except Exception:
                         f1_val = 0.0
@@ -1638,7 +1611,7 @@ def train_one_model(
                 "bin_spans": bin_spans,
                 "bin_cfg": bin_cfg,
             }
-            wpath, mpath = _save_model_and_meta(model, stem + ".pt")
+            wpath, mpath = _save_model_and_meta(model, stem + ".pt", meta)
 
             try:
                 final_note = f"train_one_model(window={window}, cap={len(features_only)}, engine=manual)"
@@ -1777,13 +1750,13 @@ def _train_full_symbol(
             logger.log_training_result(
                 symbol,
                 strategy,
-                model="diag_fail",
-                accuracy=None,
-                f1=None,
-                loss=None,
-                val_acc=None,
-                val_f1=None,
-                val_loss=None,
+                model="all",
+                accuracy=0.0,
+                f1=0.0,
+                loss=0.0,
+                val_acc=0.0,
+                val_f1=0.0,
+                val_loss=0.0,
                 engine="manual",
                 window=None,
                 recent_cap=None,
@@ -1913,6 +1886,7 @@ def _safe_predict_with_timeout(
     if err[0] is not None:
         raise err[0]
     return ok[0]
+
 
 def train_symbol_group_loop(
     sleep_sec: int = 0, stop_event: Optional[threading.Event] = None
@@ -2284,58 +2258,16 @@ def continue_from_failure(limit: int = 50) -> dict:
             err = f"{err} | {e2}"
     return {"ok": ok, "tried": tried, "error": err}
 
+
 def _apply_real_balance(X_train: np.ndarray, y_train: np.ndarray,
                         min_count: int = 12) -> Tuple[np.ndarray, np.ndarray]:
     """
-    YOPO 학습 안정화를 위한 '진짜' 클래스 균형 함수.
-    - 너무 적은 클래스(샘플 < min_count)는 자동 제외
-    - 남은 클래스는 최소 min_count까지 오버샘플링
+    (현재 미사용) YOPO 학습 안정화를 위한 '진짜' 클래스 균형 함수 틀.
+    - 여기서는 호출하지 않는다. 희소 클래스 삭제 방지를 위해 비활성 유지.
     """
     if len(y_train) == 0:
         return X_train, y_train
-
-    # 클래스 분포 계산
-    from collections import Counter
-    cnt = Counter(y_train.tolist())
-
-    # 1) 너무 적은 클래스 제거
-    valid_classes = [c for c, v in cnt.items() if v >= min_count]
-    if len(valid_classes) < 2:
-        # 학습 가능한 최소 클래스가 안 되면 원본 유지
-        return X_train, y_train
-
-    # 2) 유효한 클래스만 남기기
-    mask = np.isin(y_train, valid_classes)
-    X_filtered = X_train[mask]
-    y_filtered = y_train[mask]
-
-    # 3) 최소 샘플 수까지 오버샘플
-    X_bal, y_bal = [], []
-    max_count = max([cnt[c] for c in valid_classes])
-
-    for cls in valid_classes:
-        idx = np.where(y_filtered == cls)[0]
-        cur = len(idx)
-
-        if cur == 0:
-            continue
-
-        # 필요한 만큼 반복해서 붙여넣기 (오버샘플링)
-        reps = max_count // cur
-        rem = max_count % cur
-
-        X_bal.append(np.repeat(X_filtered[idx], reps, axis=0))
-        y_bal.append(np.repeat(y_filtered[idx], reps, axis=0))
-
-        if rem > 0:
-            extra = np.random.choice(idx, rem, replace=True)
-            X_bal.append(X_filtered[extra])
-            y_bal.append(y_filtered[extra])
-
-    X_bal = np.concatenate(X_bal, axis=0)
-    y_bal = np.concatenate(y_bal, axis=0)
-
-    return X_bal.astype(np.float32), y_bal.astype(np.int64)
+    return X_train.astype(np.float32), y_train.astype(np.int64)
 
 
 
