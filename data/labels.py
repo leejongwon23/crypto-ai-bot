@@ -1,7 +1,5 @@
 # ================================================
-# labels.py — YOPO RAW 기반 수익률 라벨링
-#  - 전략별 H 고정 (단기/중기/장기 = 각 1캔들)
-#  - C0~C5 고정 6클래스 구조 적용
+# labels.py — YOPO RAW 기반 수익률 라벨링 (H 고정 + 동적 엣지 튜닝 버전)
 # ================================================
 from __future__ import annotations
 
@@ -25,7 +23,7 @@ from config import (
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------
-# 공통 설정 (config와 동기화)
+# 공통 설정 (기존 유지)
 # --------------------------------------------
 _BIN_META = dict(get_BIN_META() or {})
 
@@ -43,17 +41,11 @@ def _as_percent(x: float) -> float:
         return 0.0
     return xv * 100.0 if 0.0 < xv < 1.0 else xv
 
-# ✅ config.BIN_META에서 넘어온 목표 bin 수 (기본 6개)
-_TARGET_BINS = int(os.getenv("TARGET_BINS", str(_BIN_META.get("TARGET_BINS", 6))))
-# ✅ 최소 클래스 개수도 BIN_META에 있을 경우 따라가고, 없으면 4
-_MIN_LABEL_CLASSES = int(
-    os.getenv(
-        "MIN_LABEL_CLASSES",
-        str(_BIN_META.get("MIN_LABEL_CLASSES", 4))
-    )
-)
+_TARGET_BINS = int(os.getenv("TARGET_BINS", str(_BIN_META.get("TARGET_BINS", 8))))
+_MIN_LABEL_CLASSES = int(os.getenv("MIN_LABEL_CLASSES", "4"))
 
 # ✅ 한 클래스당 최소 패턴 수(샘플 수) 기준
+#   - 데이터가 충분하면 각 클래스에 최소 이 정도는 들어가도록 엣지를 자름
 _MIN_SAMPLES_PER_CLASS = int(os.getenv("MIN_SAMPLES_PER_CLASS", "50"))
 
 # 🔥 전략별 H 고정 (핵심 수정)
@@ -150,14 +142,16 @@ def _pick_per_candle_gain(up: np.ndarray, dn: np.ndarray) -> np.ndarray:
     return np.where(np.abs(up) >= np.abs(dn), up, dn).astype(np.float32)
 
 # ============================================================
-# (참고용) RAW bin 생성 — 동적 버전 (지금은 안 씀)
+# RAW bin 생성 (🔥 동적 엣지 튜닝 버전)
 # ============================================================
 def _raw_bins(dist: np.ndarray, target_bins: int) -> np.ndarray:
     """
-    [참고] 예전 동적 분포 기반 엣지 계산 함수.
-    지금은 C0~C5 고정 6클래스를 쓰기 때문에
-    실제 make_labels에서는 이 함수를 사용하지 않는다.
+    동적 분포 기반 엣지 계산:
+    - 클래스 개수(target_bins)는 최대한 유지
+    - 한 클래스당 최소 샘플 수(_MIN_SAMPLES_PER_CLASS)를 고려해 bin 수 자동 조정
+    - 분위수(quantile) 기반이라 극단 구간이 3%~28% 같은 미친 폭으로 커지지 않음
     """
+    # 유효 값만 사용
     if dist is None:
         return np.linspace(-0.01, 0.01, target_bins + 1).astype(float)
 
@@ -176,29 +170,40 @@ def _raw_bins(dist: np.ndarray, target_bins: int) -> np.ndarray:
     if hi <= lo:
         hi = lo + 1e-6
 
+    # 데이터 양이 적으면 어차피 세분화가 안 되므로 균등 분할로 빠르게 리턴
     if n < _MIN_SAMPLES_PER_CLASS * 2:
-        bins_small = max(_MIN_LABEL_CLASSES, min(target_bins, 4))
-        return np.linspace(lo, hi, bins_small + 1).astype(float)
+        return np.linspace(lo, hi, max(_MIN_LABEL_CLASSES, min(target_bins, 4)) + 1).astype(float)
 
+    # 데이터가 허용하는 최대 bin 수 (각 bin에 최소 샘플 수를 갖도록)
     max_bins_by_samples = max(1, n // max(1, _MIN_SAMPLES_PER_CLASS))
-    bins = int(min(target_bins, _TARGET_BINS, max_bins_by_samples))
+
+    # 실제 사용할 bin 수
+    # - 너무 많지도 않고
+    # - 최소 클래스 수는 지키면서
+    bins = int(min(target_bins, max_bins_by_samples))
     bins = int(max(_MIN_LABEL_CLASSES, bins))
 
     if bins <= 1:
+        # 어쩔 수 없이 1개 bin 수준이면 최소 2개로 쪼개 준다
         return np.linspace(lo, hi, 2 + 1).astype(float)
 
+    # 분위수(quantile) 기반 엣지 계산
+    # 예: bins=14 → q = [0, 1/14, 2/14, ..., 1]
     qs = np.linspace(0.0, 1.0, bins + 1)
     try:
         edges = np.quantile(dist, qs)
     except Exception:
+        # quantile 실패시 기존 균등 분할로 fallback
         return np.linspace(lo, hi, bins + 1).astype(float)
 
     edges = np.asarray(edges, dtype=float)
 
+    # 단조 증가(겹치지 않도록) 보장
     for i in range(1, edges.size):
         if edges[i] <= edges[i - 1]:
             edges[i] = edges[i - 1] + 1e-9
 
+    # 안전장치: 전체 범위는 원래 lo~hi 를 벗어나지 않게 클램프
     edges[0] = min(edges[0], lo)
     edges[-1] = max(edges[-1], hi)
 
@@ -211,85 +216,25 @@ def _vector_bin(gains: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return np.clip(bins, 0, edges.size - 2).astype(np.int64)
 
 # ============================================================
-# target bin 수 (지금은 6고정 구조라 참고용)
+# target bin 수
 # ============================================================
 def _auto_target_bins(df_len: int) -> int:
-    if df_len <= 0:
-        return _MIN_LABEL_CLASSES
-
-    if df_len < _MIN_SAMPLES_PER_CLASS * 2:
-        return max(_MIN_LABEL_CLASSES, 2)
-
-    max_bins_by_samples = max(1, df_len // max(1, _MIN_SAMPLES_PER_CLASS))
-    bins = min(max_bins_by_samples, _TARGET_BINS)
-    bins = max(_MIN_LABEL_CLASSES, bins)
-    return int(bins)
+    if df_len <= 300:  return max(8, _TARGET_BINS)
+    if df_len <= 600:  return max(10, _TARGET_BINS)
+    if df_len <= 1000: return max(14, _TARGET_BINS)
+    if df_len <= 2000: return max(18, _TARGET_BINS)
+    if df_len <= 4000: return max(24, _TARGET_BINS)
+    return max(32, _TARGET_BINS)
 
 # ============================================================
-# 전략별 고정 6클래스 경계 정의 (C0~C5)
-# ============================================================
-# C0: 큰 손실
-# C1: 보통 손실
-# C2: 애매(소폭 손실~소폭 수익)
-# C3: 보통 수익
-# C4: 큰 수익
-# C5: 아주 큰 수익
-_FIXED_CLASS_THRESHOLDS = {
-    # 단기: 변동성 작다고 보고 좁게
-    "단기": np.array([-0.06, -0.02, 0.02, 0.05, 0.10], dtype=float),
-    # 중기: 변동 더 크다고 보고 약간 넓게
-    "중기": np.array([-0.08, -0.03, 0.03, 0.07, 0.15], dtype=float),
-    # 장기: 변동 가장 크다고 보고 더 넓게
-    "장기": np.array([-0.10, -0.04, 0.04, 0.10, 0.25], dtype=float),
-}
-
-def _fixed_edges_for_strategy(dist: np.ndarray, strategy: str) -> np.ndarray:
-    """
-    전략별로 C0~C5 고정 6클래스 경계를 만든다.
-    - dist의 실제 min/max를 보고 양 끝을 살짝 확장
-    - 중간 5개 경계는 _FIXED_CLASS_THRESHOLDS를 그대로 사용
-    """
-    pure = _normalize_strategy_name(strategy)
-    th = _FIXED_CLASS_THRESHOLDS.get(pure, _FIXED_CLASS_THRESHOLDS["중기"])
-
-    if dist is None or dist.size == 0:
-        lo = min(th[0] * 1.5, -0.01)
-        hi = max(th[-1] * 1.5, 0.01)
-    else:
-        dist = np.asarray(dist, dtype=float)
-        dist = dist[np.isfinite(dist)]
-        if dist.size == 0:
-            lo = min(th[0] * 1.5, -0.01)
-            hi = max(th[-1] * 1.5, 0.01)
-        else:
-            lo = float(np.min(dist))
-            hi = float(np.max(dist))
-            if not np.isfinite(lo):
-                lo = min(th[0] * 1.5, -0.01)
-            if not np.isfinite(hi):
-                hi = max(th[-1] * 1.5, 0.01)
-
-    lo = min(lo, th[0] - 1e-6)
-    hi = max(hi, th[-1] + 1e-6)
-
-    edges = np.concatenate(([lo], th, [hi])).astype(float)
-
-    for i in range(1, edges.size):
-        if edges[i] <= edges[i - 1]:
-            edges[i] = edges[i - 1] + 1e-6
-
-    return edges
-
-# ============================================================
-# 수익률 계산 (H 고정)
+# 수익률 계산 (핵심 수정)
 # ============================================================
 def compute_label_returns(df: pd.DataFrame, symbol: str, strategy: str):
     pure = _normalize_strategy_name(strategy)
-    H = _get_fixed_horizon_candles(pure)
+    H = _get_fixed_horizon_candles(pure)   # 🔥 전략별 H 고정 적용
     up, dn = _future_extreme_signed_returns_by_candles(df, H)
     gains = _pick_per_candle_gain(up, dn)
-    # target_bins는 이제 6클래스 구조에서 크게 의미 없지만, 메타 정보용으로 유지
-    target = 6
+    target = _auto_target_bins(len(df))
     return gains, up, dn, target
 
 # ============================================================
@@ -380,18 +325,16 @@ def _save_label_table(df, symbol, strategy, gains, labels, edges, counts,
     _save_edges(symbol, pure, edges, meta)
 
 # ============================================================
-# make_labels — 전략별 C0~C5 고정 6클래스 라벨 생성
+# make_labels
 # ============================================================
 def make_labels(df, symbol, strategy, group_id=None):
     pure = _normalize_strategy_name(strategy)
 
     gains, up_c, dn_c, target_bins = compute_label_returns(df, symbol, pure)
 
-    # 🔥 dist: 고가/저가 둘 다 사용 (up+dn 전체 분포)
-    dist = np.concatenate([dn_c, up_c]).astype(np.float32)
+    dist = np.concatenate([dn_c, up_c], axis=0)
 
-    # 🔥 핵심: 전략별 고정 C0~C5 경계 사용
-    edges = _fixed_edges_for_strategy(dist, pure)
+    edges = _raw_bins(dist, target_bins)
 
     labels = _vector_bin(gains, edges)
 
@@ -413,25 +356,9 @@ def make_labels(df, symbol, strategy, group_id=None):
         gains, labels,
         edges, bin_counts, spans,
         extra_cols=extra_cols,
-        extra_meta={"target_bins_used": int(target_bins)},
+        extra_meta={"target_bins_used": target_bins},
         group_id=group_id,
     )
-
-    try:
-        num_classes = int(edges.size - 1)
-        if spans.size > 0:
-            span_min = float(spans.min())
-            span_max = float(spans.max())
-        else:
-            span_min = span_max = 0.0
-        logger.info(
-            "[labels] %s-%s raw N=%d target_bins=%d actual_bins=%d "
-            "counts=%s span_min=%.4f span_max=%.4f",
-            symbol, pure, len(df), int(target_bins), num_classes,
-            bin_counts.tolist(), span_min, span_max,
-        )
-    except Exception:
-        pass
 
     class_ranges = [(float(edges[i]), float(edges[i+1]))
                     for i in range(edges.size - 1)]
@@ -446,7 +373,7 @@ def make_labels(df, symbol, strategy, group_id=None):
     )
 
 # ============================================================
-# make_labels_for_horizon (horizon_hours 기준 버전도 고정 6클래스 사용)
+# make_labels_for_horizon (RAW 통일)
 # ============================================================
 def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
     n = len(df)
@@ -458,21 +385,19 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
         dn = np.asarray(both[:n], dtype=np.float32)
         up = np.asarray(both[n:], dtype=np.float32)
 
-    strategy = "단기" if horizon_hours <= 4 else ("중기" if horizon_hours <= 24 else "장기")
+    dist = np.concatenate([dn, up], axis=0)
+    target_bins = _auto_target_bins(len(df))
+    edges = _raw_bins(dist, target_bins)
 
     gains = _pick_per_candle_gain(up, dn)
-
-    # 🔥 dist: horizon 버전도 고가/저가 둘 다 사용
-    dist = np.concatenate([dn, up]).astype(np.float32)
-
-    edges = _fixed_edges_for_strategy(dist, strategy)
-
     labels = _vector_bin(gains, edges)
 
     edges2 = edges.copy()
     edges2[-1] += 1e-12
     counts, _ = np.histogram(dist, bins=edges2)
     spans = np.diff(edges) * 100.0
+
+    strategy = "단기" if horizon_hours <= 4 else ("중기" if horizon_hours <= 24 else "장기")
 
     extra_cols = {
         "future_up": up,
@@ -485,26 +410,9 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
         df, symbol, strategy, gains, labels,
         edges, counts, spans,
         extra_cols=extra_cols,
-        extra_meta={"target_bins_used": 6},
+        extra_meta={"target_bins_used": target_bins},
         group_id=group_id,
     )
-
-    try:
-        num_classes = int(edges.size - 1)
-        if spans.size > 0:
-            span_min = float(spans.min())
-            span_max = float(spans.max())
-        else:
-            span_min = span_max = 0.0
-        logger.info(
-            "[labels-h] %s-%s(h=%dh) raw N=%d target_bins=%d actual_bins=%d "
-            "counts=%s span_min=%.4f span_max=%.4f",
-            symbol, strategy, int(horizon_hours), len(df),
-            6, num_classes,
-            counts.tolist(), span_min, span_max,
-        )
-    except Exception:
-        pass
 
     class_ranges = [(float(edges[i]), float(edges[i+1]))
                     for i in range(edges.size - 1)]
