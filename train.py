@@ -457,7 +457,7 @@ SMART_TRAIN = os.getenv("SMART_TRAIN", "1") == "1"
 LABEL_SMOOTH = float(os.getenv("LABEL_SMOOTH", "0.05"))
 GRAD_CLIP = float(os.getenv("GRAD_CLIP_NORM", "1.0"))
 FOCAL_GAMMA = float(os.getenv("FOCAL_GAMMA", "2.0"))
-EARLY_STOP_PATIENCE = int(os.getenv("EARLY_STOP_PATIENCE", "2"))
+EARLY_STOP_PATIENCE = int(os.getenv("EARLY_STOP_PATIENCE", "4"))
 EARLY_STOP_MIN_DELTA = float(os.getenv("EARLY_STOP_MIN_DELTA", "0.0001"))
 
 USE_AMP = os.getenv("USE_AMP", "1") == "1"
@@ -478,13 +478,23 @@ CS_ARG_BETA = float(os.getenv("CS_ARG_BETA", "1.0"))
 
 
 def _epochs_for(strategy: str) -> int:
+    """
+    전략별 기본 학습 에포크 수
+    - 단기: 조금 더 많이
+    - 중기: 단기보다는 적게, 장기보다는 많게
+    - 장기: 기존 수준 유지
+    """
     if strategy == "단기":
-        return int(os.getenv("EPOCHS_SHORT", "24"))
+        # 기존 24 → 기본 36 (env 로 덮어쓸 수 있음)
+        return int(os.getenv("EPOCHS_SHORT", "36"))
     if strategy == "중기":
-        return int(os.getenv("EPOCHS_MID", "12"))
+        # 기존 12 → 기본 24
+        return int(os.getenv("EPOCHS_MID", "24"))
     if strategy == "장기":
+        # 장기는 현재도 성능이 잘 나오므로 그대로 유지
         return int(os.getenv("EPOCHS_LONG", "12"))
-    return 24
+    return int(os.getenv("EPOCHS_DEFAULT", "24"))
+
 
 
 EVAL_MIN_F1_SHORT = float(os.getenv("EVAL_MIN_F1_SHORT", "0.10"))
