@@ -573,7 +573,8 @@ def future_gains_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
 
     j0 = 0
     for i in range(len(df)):
-        t0 = ts.iloc(i)
+        # ✅ 버그 수정: ts.iloc(i) → ts.iloc[i]
+        t0 = ts.iloc[i]
         t1 = t0 + H
         j = max(j0, i)
         mx = high[i]
@@ -1662,8 +1663,22 @@ def get_price_source(symbol: str, strategy: str) -> str:
     return getattr(df, "attrs", {}).get("source_exchange", "UNKNOWN")
 
 def enough_for_training(symbol: str, strategy: str) -> bool:
-    df = get_kline_by_strategy(symbol, strategy)
-    return bool(getattr(df, "attrs", {}).get("enough_for_training", False))
+    """
+    학습 가능 여부 판정:
+    - 항상 최신 캔들(force_refresh=True) 기준으로 본다.
+    - not_enough_rows면 무조건 False.
+    - attrs.enough_for_training 또는 길이>=_PREDICT_MIN_WINDOW면 True.
+    """
+    df = get_kline_by_strategy(symbol, strategy, force_refresh=True)
+    attrs = getattr(df, "attrs", {})
+    if attrs.get("not_enough_rows", False):
+        return False
+    if attrs.get("enough_for_training", False):
+        return True
+    try:
+        return len(df) >= _PREDICT_MIN_WINDOW
+    except Exception:
+        return False
 
 def not_enough_for_predict(symbol: str, strategy: str) -> bool:
     df = get_kline_by_strategy(symbol, strategy)
