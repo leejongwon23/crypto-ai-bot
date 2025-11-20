@@ -8,6 +8,13 @@ from requests.exceptions import HTTPError, RequestException
 from typing import List, Dict, Any, Optional, Tuple
 from collections import Counter
 
+# === CHANGE: 중계데이터 설정 (config.py 연동) ===
+try:
+    from config import OHLCV_PROVIDER, OHLCV_DATA_DIR
+except Exception:
+    OHLCV_PROVIDER = os.getenv("OHLCV_PROVIDER", "INTERMEDIATE")
+    OHLCV_DATA_DIR = os.getenv("OHLCV_DATA_DIR", "/persistent/ohlcv")
+
 # === CHANGE [utils: quick label check] ===
 def _count_valid_labels_for_df(df: pd.DataFrame, symbol: str, strategy: str) -> int:
     """
@@ -487,12 +494,11 @@ def _auto_reset_group_state_if_needed():
             print(f"[⚠️ AUTO-RESET 실패] {e}")
 _auto_reset_group_state_if_needed()
 
-# ========================= 캐시/백오프 =========================
+# ========================= 캐시/백오프 (현재는 거의 미사용, 호환용 유지) =========================
 def _binance_blocked_until(): return CacheManager.get("binance_blocked_until")
 def _is_binance_blocked(): 
     u = _binance_blocked_until(); return u is not None and time.time() < u
 
-# === CHANGE: 지수 백오프 + 프로빙 시점 ===
 def _get_binance_block_attempts():
     return int(CacheManager.get("binance_block_attempts") or 0)
 
@@ -506,28 +512,27 @@ def _set_binance_probe_at(t: float):
     CacheManager.set("binance_probe_at", float(t))
 
 def _block_binance_for(initial_seconds=300):
-    # 시도 회수 증가 -> 지수 백오프(5m → 10m → 20m → 최대 30m)
+    # 중계데이터 사용으로 실제 HTTP 차단은 없지만, 이전 코드와의 호환을 위해 남겨둠.
     attempts = _get_binance_block_attempts() + 1
     _set_binance_block_attempts(attempts)
     backoff = min(1800, max(300, initial_seconds) * (2 ** (attempts - 1)))
     now = time.time()
     CacheManager.set("binance_blocked_until", now + backoff)
-    # 차단 중에도 1/3 지점에서 소량 프로브 시도
     _set_binance_probe_at(now + max(60, backoff / 3.0))
-    print(f"[🚫 Binance 차단] backoff={int(backoff)}s attempts={attempts}")
+    print(f"[🚫 Binance 차단(호환)] backoff={int(backoff)}s attempts={attempts}")
 
 def _reset_binance_block():
     CacheManager.delete("binance_blocked_until")
     CacheManager.delete("binance_probe_at")
     _set_binance_block_attempts(0)
-    print("[✅ Binance 차단 해제]")
+    print("[✅ Binance 차단 해제(호환)]")
 
 def _bybit_blocked_until(): return CacheManager.get("bybit_blocked_until")
 def _is_bybit_blocked():
     u = _bybit_blocked_until(); return u is not None and time.time() < u
 def _block_bybit_for(seconds=900):
     CacheManager.set("bybit_blocked_until", time.time() + seconds)
-    print(f"[🚫 Bybit 차단] {seconds}s")
+    print(f"[🚫 Bybit 차단(호환)] {seconds}s")
 
 # ========================= 실패 로깅 경량 헬퍼 =========================
 def safe_failed_result(symbol, strategy, reason=""):
@@ -573,7 +578,6 @@ def future_gains_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
 
     j0 = 0
     for i in range(len(df)):
-        # ✅ 버그 수정: ts.iloc(i) → ts.iloc[i]
         t0 = ts.iloc[i]
         t1 = t0 + H
         j = max(j0, i)
@@ -655,7 +659,7 @@ def _log_fetch_summary(symbol: str, strategy: str, limit: int, rows_bybit: int, 
     print(f"[FETCH] {symbol}-{strategy} limit={limit} bybit={rows_bybit} binance={rows_binance} src={src} "
           f"| block(bybit={bi_block}:{max(0,bi_until_s)}s, binance={bn_block}:{max(0,bn_until_s)}s)")
 
-# ========================= 거래소/수집 =========================
+# ========================= 거래소/수집 (HTTP 제거, 중계데이터 전용) =========================
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     cols = ["timestamp","open","high","low","close","volume","datetime"]
     if df is None: return pd.DataFrame(columns=cols)
@@ -697,228 +701,162 @@ def _clip_tail(df: pd.DataFrame, limit: int) -> pd.DataFrame:
     if not mask.all(): df = df[mask].reset_index(drop=True)
     return df
 
-# Bybit
+# === CHANGE: 중계데이터 파일 찾기 ===
+def _find_ohlcv_paths(symbol: str, interval: str) -> List[str]:
+    """
+    OHLCV_DATA_DIR 안에서 심볼/인터벌에 해당하는 파일을 찾는다.
+    지원 패턴 예:
+      - {DIR}/{SYMBOL}_{INTERVAL}.parquet / .pq / .csv / .csv.gz
+      - {DIR}/{SYMBOL}/{SYMBOL}_{INTERVAL}.parquet / .csv / .csv.gz
+    """
+    sym = symbol.upper()
+    iv = str(interval)
+    base = OHLCV_DATA_DIR
+
+    patterns = [
+        os.path.join(base, f"{sym}_{iv}.parquet"),
+        os.path.join(base, f"{sym}_{iv}.pq"),
+        os.path.join(base, f"{sym}_{iv}.csv"),
+        os.path.join(base, f"{sym}_{iv}.csv.gz"),
+        os.path.join(base, sym, f"{sym}_{iv}.parquet"),
+        os.path.join(base, sym, f"{sym}_{iv}.pq"),
+        os.path.join(base, sym, f"{sym}_{iv}.csv"),
+        os.path.join(base, sym, f"{sym}_{iv}.csv.gz"),
+        os.path.join(base, sym, f"*_{iv}.parquet"),
+        os.path.join(base, sym, f"*_{iv}.csv"),
+        os.path.join(base, sym, f"*_{iv}.csv.gz"),
+    ]
+
+    files: List[str] = []
+    for pat in patterns:
+        try:
+            for p in sorted(glob.glob(pat)):
+                if p not in files:
+                    files.append(p)
+        except Exception:
+            continue
+    return files
+
+def _load_local_ohlcv(symbol: str, interval: str, limit: int, end_time=None, source_tag: Optional[str] = None) -> pd.DataFrame:
+    """
+    거래소 HTTP를 전혀 사용하지 않고,
+    OHLCV_DATA_DIR 에 저장된 CSV/Parquet 파일에서만 캔들을 읽어온다.
+    """
+    paths = _find_ohlcv_paths(symbol, interval)
+    if not paths:
+        print(f"[⚠️ OHLCV 파일 없음] symbol={symbol} interval={interval} dir={OHLCV_DATA_DIR}")
+        out = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+        out.attrs["source_exchange"] = source_tag or f"PROVIDER:{OHLCV_PROVIDER}"
+        out.attrs["recent_rows"] = 0
+        out.attrs["not_enough_rows"] = True
+        return out
+
+    chunks = []
+    for p in paths:
+        try:
+            if p.endswith((".parquet", ".pq")):
+                df = pd.read_parquet(p)
+            else:
+                df = pd.read_csv(p)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                chunks.append(df)
+        except Exception as e:
+            print(f"[⚠️ OHLCV 로드 실패] {p}: {e}")
+
+    if not chunks:
+        out = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+        out.attrs["source_exchange"] = source_tag or f"PROVIDER:{OHLCV_PROVIDER}"
+        out.attrs["recent_rows"] = 0
+        out.attrs["not_enough_rows"] = True
+        return out
+
+    df_raw = pd.concat(chunks, ignore_index=True)
+    df = _normalize_df(df_raw)
+
+    # end_time 이전까지만 사용 (옵션)
+    if end_time is not None and not df.empty:
+        ts = _parse_ts_series(df["timestamp"])
+        try:
+            cutoff = pd.to_datetime(end_time)
+            if getattr(cutoff, "tzinfo", None) is None:
+                cutoff = cutoff.tz_localize("UTC").tz_convert("Asia/Seoul")
+            else:
+                cutoff = cutoff.tz_convert("Asia/Seoul")
+            df = df.loc[ts <= cutoff].copy()
+        except Exception:
+            pass
+
+    if limit is not None and limit > 0:
+        df = _clip_tail(df, int(limit))
+
+    df.attrs["source_exchange"] = source_tag or f"PROVIDER:{OHLCV_PROVIDER}"
+    df.attrs["recent_rows"] = int(len(df))
+    df.attrs["not_enough_rows"] = len(df) == 0
+    return df
+
+# === CHANGE: Bybit/ Binance HTTP 완전 제거 ===
 def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
-    if _is_bybit_blocked():
-        print("[⛔ Bybit 비활성화]"); return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
-    real_symbol = SYMBOL_MAP["bybit"].get(symbol, symbol)
-    target_rows = int(limit); collected, total, last_oldest = [], 0, None
-    interval = _map_bybit_interval(interval); iv_minutes = _bybit_interval_minutes(interval)
-    start_ms = None
-    if end_time is None:
-        lookback_ms = int(target_rows * iv_minutes * 60 * 1000)
-        now_ms = int(pd.Timestamp.utcnow().timestamp() * 1000)
-        start_ms = max(0, now_ms - lookback_ms)
-    empty_resp_count = 0
-    while total < target_rows:
-        success = False
-        for _ in range(max_retry):
-            try:
-                rows_needed = target_rows - total; req = min(1000, rows_needed)
-                for category in ("linear","spot"):
-                    params = {"category": category, "symbol": real_symbol, "interval": interval, "limit": req}
-                    if end_time is not None: params["end"] = int(end_time.timestamp() * 1000)
-                    elif start_ms is not None: params["start"] = start_ms
-                    res = requests.get(f"{BASE_URL}/v5/market/kline", params=params, timeout=10, headers=REQUEST_HEADERS)
-                    res.raise_for_status(); data = res.json()
-                    raw = (data or {}).get("result", {}).get("list", [])
-                    if not raw:
-                        empty_resp_count += 1; continue
-                    if isinstance(raw[0], (list, tuple)) and len(raw[0]) >= 6:
-                        df_chunk = pd.DataFrame(raw, columns=["timestamp","open","high","low","close","volume"])
-                    else:
-                        df_chunk = pd.DataFrame(raw)
-                    df_chunk = _normalize_df(df_chunk)
-                    if df_chunk.empty: continue
-                    collected.append(df_chunk); total += len(df_chunk); success = True
-                    oldest_ts = df_chunk["timestamp"].min()
-                    if last_oldest is not None and pd.to_datetime(oldest_ts) >= pd.to_datetime(last_oldest):
-                        oldest_ts = pd.to_datetime(oldest_ts) - pd.Timedelta(minutes=1)
-                    last_oldest = oldest_ts
-                    end_time = pd.to_datetime(oldest_ts).tz_convert("UTC") - pd.Timedelta(milliseconds=1)
-                    time.sleep(0.2); break
-                if success: break
-            except RequestException:
-                time.sleep(1); continue
-            except Exception:
-                time.sleep(0.5); continue
-        if not success: break
-    if collected:
-        df = _normalize_df(pd.concat(collected, ignore_index=True)); df.attrs["source_exchange"] = "BYBIT"; return df
-    if empty_resp_count >= max_retry * 2: _block_bybit_for(int(os.getenv("BYBIT_BACKOFF_SEC", "900")))
-    return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+    """
+    ✅ 변경 후:
+    - 더 이상 Bybit HTTP를 호출하지 않는다.
+    - OHLCV_DATA_DIR 안의 중계데이터 파일에서만 캔들을 읽어온다.
+    """
+    real_interval = _map_bybit_interval(interval)
+    return _load_local_ohlcv(symbol, real_interval, limit, end_time=end_time, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
 
 def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
-    real_symbol = SYMBOL_MAP["binance"].get(symbol, symbol)
-    _bin_iv = None
-    for _, cfg in STRATEGY_CONFIG.items():
-        if cfg.get("interval") == interval:
-            _bin_iv = cfg.get("binance_interval")
-            break
-    if _bin_iv is None:
-        _bin_iv = {"240": "4h", "D": "1d", "2D": "2d", "60": "1h"}.get(interval, "1h")
-
-    if not BINANCE_ENABLED:
-        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
-
-    # === 변경 포인트: 차단 중이어도 '프로브 시점'이면 조금만 시도 ===
-    probing = False
-    if _is_binance_blocked():
-        probe_at = _get_binance_probe_at()
-        if probe_at is None or time.time() < probe_at:
-            print("[⛔ Binance 차단 중 → 이번엔 스킵]")
-            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
-        else:
-            # 프로브 시점 도달 → 소량만
-            probing = True
-            limit = min(int(limit), 10)
-
-    target_rows = int(limit)
-    collected, total, last_oldest = [], 0, None
-
-    while total < target_rows:
-        success = False
-        for _ in range(max_retry):
-            try:
-                rows_needed = target_rows - total
-                req = min(1000, rows_needed)
-                params = {"symbol": real_symbol, "interval": _bin_iv, "limit": req}
-                if end_time is not None:
-                    params["endTime"] = int(end_time.timestamp() * 1000)
-
-                res = requests.get(
-                    f"{BINANCE_BASE_URL}/fapi/v1/klines",
-                    params=params,
-                    timeout=10,
-                    headers=REQUEST_HEADERS,
-                )
-                try:
-                    res.raise_for_status()
-                except HTTPError as he:
-                    sc = getattr(he.response, "status_code", None)
-                    if sc == 418:
-                        # 👉 진짜 IP 차단 케이스만 백오프
-                        _block_binance_for(300)
-                        print("[⚠️ Binance 418] 차단 연장됨")
-                        return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
-                    if sc == 451:
-                        # 👉 여기 핵심: 451은 '이번 요청만 실패'로 끝. 전체를 차단하지 않는다.
-                        print("[⚠️ Binance 451] 이번 요청만 실패로 처리 (전역 차단 안 함)")
-                        return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
-                    # 그 외는 기존대로
-                    print(f"[⚠️ Binance HTTP {sc}] {he}")
-                    raise
-
-                raw = res.json()
-                if not raw:
-                    break
-
-                if isinstance(raw[0], (list, tuple)) and len(raw[0]) >= 6:
-                    df_chunk = pd.DataFrame(
-                        raw,
-                        columns=[
-                            "timestamp",
-                            "open",
-                            "high",
-                            "low",
-                            "close",
-                            "volume",
-                            "close_time",
-                            "quote_asset_volume",
-                            "trades",
-                            "taker_base_vol",
-                            "taker_quote_vol",
-                            "ignore",
-                        ],
-                    )
-                else:
-                    df_chunk = pd.DataFrame(raw)
-
-                df_chunk = _normalize_df(df_chunk)
-                if df_chunk.empty:
-                    break
-
-                collected.append(df_chunk)
-                total += len(df_chunk)
-                success = True
-
-                if total >= target_rows:
-                    break
-
-                oldest_ts = df_chunk["timestamp"].min()
-                if last_oldest is not None and pd.to_datetime(oldest_ts) >= pd.to_datetime(last_oldest):
-                    oldest_ts = pd.to_datetime(oldest_ts) - pd.Timedelta(minutes=1)
-                last_oldest = oldest_ts
-                end_time = pd.to_datetime(oldest_ts).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
-                time.sleep(0.3)
-                break
-            except RequestException:
-                time.sleep(1)
-                continue
-            except Exception:
-                time.sleep(0.5)
-                continue
-        if not success:
-            break
-
-    if collected:
-        # 프로빙이었는데 성공했다 → 차단 해제
-        if probing:
-            _reset_binance_block()
-        df = _normalize_df(pd.concat(collected, ignore_index=True))
-        df.attrs["source_exchange"] = "BINANCE"
-        return df
-
-    # 여기까지 왔으면 그냥 빈 DF
-    return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
-
+    """
+    ✅ 변경 후:
+    - Binance HTTP도 전혀 사용하지 않는다.
+    - get_kline 과 동일하게 중계데이터 파일에서 읽는다.
+    (함수 이름은 train/predict 호환을 위해 유지)
+    """
+    real_interval = str(interval)
+    return _load_local_ohlcv(symbol, real_interval, limit, end_time=end_time, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
 
 # ========================= 통합 수집 + 병합 =========================
 def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
+    """
+    ✅ 변경 후:
+    - Bybit + Binance HTTP 병합 로직 제거.
+    - STRATEGY_CONFIG 의 interval/limit 에 맞춰
+      OHLCV_DATA_DIR 의 파일에서만 읽어와 normalize.
+    """
     config = STRATEGY_CONFIG.get(strategy)
-    if not config: return pd.DataFrame()
-    interval = config["interval"]; base_limit = int(config["limit"]); max_total = base_limit
-    def fetch_until_target(fetch_func):
-        total = []; end = None; cnt = 0; max_rep = 10
-        while cnt < max_total and len(total) < max_rep:
-            dfc = fetch_func(symbol, interval=interval, limit=base_limit, end_time=end)
-            if dfc is None or dfc.empty: break
-            total.append(dfc); cnt += len(dfc)
-            if len(dfc) < base_limit: break
-            oldest = dfc["timestamp"].min()
-            end = pd.to_datetime(oldest).tz_convert("Asia/Seoul") - pd.Timedelta(milliseconds=1)
-        return _normalize_df(pd.concat(total, ignore_index=True)) if total else pd.DataFrame()
-    df_bybit = fetch_until_target(get_kline)
-    df_binance = fetch_until_target(get_kline_binance) if len(df_bybit) < base_limit and BINANCE_ENABLED and not _is_binance_blocked() else pd.DataFrame()
-    df_all = _normalize_df(pd.concat([df_bybit, df_binance], ignore_index=True)) if (not df_bybit.empty or not df_binance.empty) else pd.DataFrame()
-    if df_all.empty: return pd.DataFrame()
-    df_all = _clip_tail(df_all.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True), base_limit)
-    srcs = []; 
-    if not df_bybit.empty: srcs.append("BYBIT")
-    if not df_binance.empty: srcs.append("BINANCE")
-    df_all.attrs["source_exchange"] = "+".join(srcs) if srcs else "UNKNOWN"
-    for c in ["timestamp","open","high","low","close","volume"]:
-        if c not in df_all.columns:
-            df_all[c] = 0.0 if c != "timestamp" else pd.Timestamp.now(tz="Asia/Seoul")
+    if not config:
+        return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+
+    interval = config["interval"]
+    base_limit = int(config["limit"])
+
+    df_all = _load_local_ohlcv(symbol, interval, base_limit, end_time=None, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
+    if df_all is None or df_all.empty:
+        return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+
+    df_all = _clip_tail(
+        df_all.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True),
+        base_limit,
+    )
     df_all.attrs["augment_needed"] = len(df_all) < base_limit
+    if "source_exchange" not in getattr(df_all, "attrs", {}):
+        df_all.attrs["source_exchange"] = f"PROVIDER:{OHLCV_PROVIDER}"
     return df_all
 
 # =============== 임의 인터벌 수집기(MTF) ===============
 def get_kline_interval(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     try:
-        df_bybit = get_kline(symbol, interval=interval, limit=limit)
-        if (df_bybit is None or df_bybit.empty) and not _is_binance_blocked():
-            df_bin = get_kline_binance(symbol, interval=interval, limit=limit)
-            return _normalize_df(df_bin)
-        return _normalize_df(df_bybit)
+        df = _load_local_ohlcv(symbol, interval, limit, end_time=None, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
+        return df
     except Exception:
         return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
 
 def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, force_refresh: bool = False):
     """
-    ✔ 2번 아이디어 반영
-        - 더 깊게(limit*3) 수집
-        - 1000개 샘플링 (단, 1000 미만도 절대 버리지 않음)
+    ✔ 변경 후 (중계데이터 전용):
+        - 거래소 HTTP 전혀 사용 안 함.
+        - STRATEGY_CONFIG 기준 interval/limit*3 만큼
+          OHLCV_DATA_DIR 에서만 읽어서 사용.
+        - 1000개 샘플링 / 부족한 경우 그대로 사용 로직은 유지.
     """
     try:
         # -----------------------------
@@ -934,7 +872,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
         limit = int(cfg.get("limit", 300))
         interval = cfg.get("interval", "D")
 
-        # ✔ 핵심 변경: limit_for_fetch = limit * 3
+        # ✔ 핵심 변경: limit_for_fetch = limit * 3 (최대 3000)
         limit_for_fetch = min(limit * 3, 3000)
 
         cache_key = f"{symbol.upper()}-{strategy}-slack{end_slack_min}"
@@ -966,19 +904,11 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
                 return disk
 
         # -----------------------------
-        # 4) 3배 깊게 수집
+        # 4) 중계데이터에서 3배 깊게 수집
         # -----------------------------
-        df_bybit = get_kline(symbol, interval=interval, limit=limit_for_fetch)
-        if not isinstance(df_bybit, pd.DataFrame):
-            df_bybit = pd.DataFrame()
-
-        df_bin = pd.DataFrame()
-        need_bin = (df_bybit.empty or len(df_bybit) < int(limit * 0.9))
-        if need_bin and BINANCE_ENABLED:
-            df_bin = get_kline_binance(symbol, interval=interval, limit=limit_for_fetch)
-
-        dfs = [d for d in [df_bybit, df_bin] if isinstance(d, pd.DataFrame) and not d.empty]
-        df = _normalize_df(pd.concat(dfs, ignore_index=True)) if dfs else pd.DataFrame()
+        df = _load_local_ohlcv(symbol, interval, limit_for_fetch, end_time=None, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
+        if not isinstance(df, pd.DataFrame):
+            df = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
 
         # -----------------------------
         # 5) 슬랙 컷
@@ -990,7 +920,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
 
         if df.empty:
             out = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
-            out.attrs["source_exchange"] = "NONE"
+            out.attrs["source_exchange"] = f"PROVIDER:{OHLCV_PROVIDER}"
             out.attrs["recent_rows"] = 0
             out.attrs["not_enough_rows"] = True
             return out
@@ -1004,22 +934,17 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
         # 7) ✔ 1000개 샘플링 / 부족한 경우 그대로 사용
         # -----------------------------
         n = len(df)
-
         window = _PREDICT_MIN_WINDOW  # 최소 10개
 
         if n >= 1000:
-            # 균등 샘플링 (메모리 부담 최소)
             idx = np.linspace(0, n - 1, 1000).astype(int)
             df = df.iloc[idx].reset_index(drop=True)
-
         elif window <= n < 1000:
-            # 있는 만큼 그대로 (절대 버리지 않음)
             df = df.copy().reset_index(drop=True)
-
         else:
-            # window 미만 → 학습 불가
             df = df.copy()
             df.attrs["not_enough_rows"] = True
+            df.attrs["recent_rows"] = int(len(df))
             return df
 
         # -----------------------------
@@ -1028,6 +953,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
         df.attrs["recent_rows"] = len(df)
         df.attrs["enough_for_training"] = len(df) >= window
         df.attrs["not_enough_rows"] = len(df) < window
+        df.attrs["source_exchange"] = f"PROVIDER:{OHLCV_PROVIDER}"
 
         # -----------------------------
         # 9) 캐시 저장
@@ -1041,6 +967,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
         print(f"[❌ get_kline_by_strategy 실패] {symbol}/{strategy}: {e}")
         out = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
         out.attrs["not_enough_rows"] = True
+        out.attrs["source_exchange"] = f"PROVIDER:{OHLCV_PROVIDER}"
         return out
 
 # ========================= 프리패치/티커 =========================
