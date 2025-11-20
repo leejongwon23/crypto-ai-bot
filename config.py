@@ -202,6 +202,16 @@ _default_config = {
         "CENTER_SPAN_MAX_PCT": 0.3   # ✅ 중앙(0 포함) 구간 최대 폭을 0.3%로 강제
     },
 
+    # === 희소 클래스 병합 기준 (아이디어 A용 설정) ===
+    "SPARSE_CLASS": {
+        # 한 클래스에 이 값보다 샘플이 적으면 "너무 희소" 후보
+        "MIN_SAMPLES_PER_CLASS": 12,
+        # 병합을 하더라도 전체 클래스 개수는 이 값 밑으로는 떨어뜨리지 않음
+        "MIN_CLASSES_AFTER_MERGE": 8,
+        # 같은 구간을 여러 번 우겨 넣지 않도록, 양옆 병합 반복 최대 횟수
+        "MAX_MERGE_PASSES": 2
+    },
+
     "CV_CONFIG": {
         "folds": 5,
         "min_per_class": 3,
@@ -420,6 +430,7 @@ def get_PATTERN():  return copy.deepcopy(_config.get("PATTERN", _default_config[
 def get_BLEND():    return copy.deepcopy(_config.get("BLEND", _default_config["BLEND"]))
 def get_PUBLISH():  return copy.deepcopy(_config.get("PUBLISH", _default_config["PUBLISH"]))
 def get_BIN_META(): return copy.deepcopy(_config.get("BIN_META", _default_config["BIN_META"]))
+def get_SPARSE_CLASS(): return copy.deepcopy(_config.get("SPARSE_CLASS", _default_config.get("SPARSE_CLASS", {})))
 
 # ===== 파이프라인 게이트 Getter =====
 def _env_bool(v): return str(v).strip().lower() not in {"0", "false", "no", "off", "none"}
@@ -1259,5 +1270,5 @@ __all__ = [
     "get_PREDICTION_LOG_PATH", "get_GANWU_PATH", "get_TRAIN_LOG_PATH",
     "is_config_readonly", "is_disk_cache_off",
     "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
-    "get_BIN_META",
+    "get_BIN_META", "get_SPARSE_CLASS",
     ]
