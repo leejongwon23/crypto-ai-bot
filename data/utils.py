@@ -1209,10 +1209,30 @@ def _compute_mtf_features(symbol: str, strategy: str, df_base: pd.DataFrame) -> 
         d = _synthesize_multi(df_b, iv) if iv in ("3D","2D") else get_kline_interval(symbol, iv, limit=max(200, len(df_b)))
         if d is None or d.empty: continue
         feat = _compute_feature_block(d)
-        feat = feat[["timestamp","close","rsi","macd","macd_signal","bb_width","atr","ema20","ema50","ema100","ema200","stoch_k","stoch_d","williams_r","roc","trend_score","vwap"]]
+        # ✔ 3번 아이디어 피처까지 포함 (MTF 컨텍스트에도 적용)
+        feat = feat[[
+            "timestamp",
+            "close",
+            "rsi","macd","macd_signal","bb_width","atr",
+            "ema20","ema50","ema100","ema200",
+            "stoch_k","stoch_d","williams_r","roc",
+            "trend_score","vwap",
+            "upper_wick","lower_wick","body_size","wick_ratio","vol_ratio","fake_high","fake_low",
+        ]]
         ctx_blocks.append(_prefix_cols(feat, f"f{iv}"))
     base_feat = _compute_feature_block(df_b)
-    base_feat = base_feat[["timestamp","open","high","low","close","volume","rsi","macd","macd_signal","macd_hist","bb_up","bb_dn","bb_sd","bb_width","bb_percent_b","volatility","ema20","ema50","ema100","ema200","trend_score","roc","atr","stoch_k","stoch_d","williams_r","vwap"]]
+    # ✔ 베이스 피처에도 새 피처 반영
+    base_feat = base_feat[[
+        "timestamp",
+        "open","high","low","close","volume",
+        "rsi","macd","macd_signal","macd_hist",
+        "bb_up","bb_dn","bb_sd","bb_width","bb_percent_b",
+        "volatility",
+        "ema20","ema50","ema100","ema200",
+        "trend_score",
+        "roc","atr","stoch_k","stoch_d","williams_r","vwap",
+        "upper_wick","lower_wick","body_size","wick_ratio","vol_ratio","fake_high","fake_low",
+    ]]
     return _merge_asof_all(base_feat, ctx_blocks, strategy)
 
 def compute_features(symbol: str, df: pd.DataFrame, strategy: str, required_features: list = None, fallback_input_size: int = None, force_refresh: bool = False) -> pd.DataFrame:
@@ -1580,8 +1600,16 @@ def _select_feature_columns(feat_df: pd.DataFrame) -> List[str]:
     if feat_df is None or feat_df.empty: return []
     cols = [c for c in feat_df.columns if c != "timestamp"]
     # 시간 순으로 의미 있는 피처 우선
-    pri = ["open","high","low","close","volume","rsi","macd","macd_signal","macd_hist","ema20","ema50","ema100","ema200",
-           "bb_width","bb_percent_b","atr","stoch_k","stoch_d","williams_r","volatility","roc","vwap","trend_score"]
+    pri = [
+        "open","high","low","close","volume",
+        "rsi","macd","macd_signal","macd_hist",
+        "ema20","ema50","ema100","ema200",
+        "bb_width","bb_percent_b",
+        "atr","stoch_k","stoch_d","williams_r",
+        "volatility","roc","vwap","trend_score",
+        # ✔ 3번 아이디어 피처를 우선 리스트에 포함
+        "upper_wick","lower_wick","body_size","wick_ratio","vol_ratio","fake_high","fake_low",
+    ]
     ordered = [c for c in pri if c in cols]
     rest = [c for c in cols if c not in ordered]
     return ordered + sorted(rest)
