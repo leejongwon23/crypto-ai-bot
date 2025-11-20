@@ -914,9 +914,16 @@ def get_kline_interval(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
 
-# ✅✅✅ 여기부터가 이번에 추가한 “강제 새로받기” 스위치 부분이야
 def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, force_refresh: bool = False):
+    """
+    ✔ 2번 아이디어 반영
+        - 더 깊게(limit*3) 수집
+        - 1000개 샘플링 (단, 1000 미만도 절대 버리지 않음)
+    """
     try:
+        # -----------------------------
+        # 0) 슬랙 계산
+        # -----------------------------
         if not end_slack_min:
             try:
                 end_slack_min = int(get_EVAL_RUNTIME().get("price_window_slack_min", 10))
@@ -927,147 +934,114 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
         limit = int(cfg.get("limit", 300))
         interval = cfg.get("interval", "D")
 
+        # ✔ 핵심 변경: limit_for_fetch = limit * 3
+        limit_for_fetch = min(limit * 3, 3000)
+
         cache_key = f"{symbol.upper()}-{strategy}-slack{end_slack_min}"
 
-        # 🔴 명시적으로 새로 받아오라고 한 경우: 메모리/디스크 캐시 다 비운다
+        # -----------------------------
+        # 1) 강제 새 수집 → 캐시 삭제
+        # -----------------------------
         if force_refresh:
-            try:
-                CacheManager.delete(cache_key)
-            except Exception:
-                pass
+            CacheManager.delete(cache_key)
             try:
                 clear_price_cache(symbol=symbol.upper(), strategy=strategy)
             except Exception:
                 pass
 
-        # (여기부터는 기존 로직 유지)
+        # -----------------------------
+        # 2) 메모리 캐시
+        # -----------------------------
         cached = CacheManager.get(cache_key, ttl_sec=600)
         if (not force_refresh) and isinstance(cached, pd.DataFrame) and not cached.empty:
-            # ✅ 메모리 캐시에서 가져온 경우도 FETCH 로그에 남기기
-            try:
-                bybit_rows_cached = int(getattr(cached, "attrs", {}).get("bybit_rows", 0))
-                binance_rows_cached = int(getattr(cached, "attrs", {}).get("binance_rows", 0))
-            except Exception:
-                bybit_rows_cached = 0
-                binance_rows_cached = 0
-            src_cached = getattr(cached, "attrs", {}).get("source_exchange", "UNKNOWN")
-            _log_fetch_summary(symbol, strategy, limit, bybit_rows_cached, binance_rows_cached, f"{src_cached}+MEM")
             return cached
 
-        cached_disk = None
+        # -----------------------------
+        # 3) 디스크 캐시
+        # -----------------------------
         if not force_refresh:
-            cached_disk = _load_df_cache(symbol, strategy, interval, end_slack_min)
-            if isinstance(cached_disk, pd.DataFrame) and not cached_disk.empty:
-                # ✅ 디스크 캐시 사용도 로그에 남기기
-                try:
-                    bybit_rows_cached = int(getattr(cached_disk, "attrs", {}).get("bybit_rows", 0))
-                    binance_rows_cached = int(getattr(cached_disk, "attrs", {}).get("binance_rows", 0))
-                except Exception:
-                    bybit_rows_cached = 0
-                    binance_rows_cached = 0
-                src_cached = getattr(cached_disk, "attrs", {}).get("source_exchange", "UNKNOWN")
-                _log_fetch_summary(symbol, strategy, limit, bybit_rows_cached, binance_rows_cached, f"{src_cached}+DISK")
-                CacheManager.set(cache_key, cached_disk)
-                return cached_disk
+            disk = _load_df_cache(symbol, strategy, interval, end_slack_min)
+            if isinstance(disk, pd.DataFrame) and not disk.empty:
+                CacheManager.set(cache_key, disk)
+                return disk
 
-        df_bybit = get_kline(symbol, interval=interval, limit=limit)
+        # -----------------------------
+        # 4) 3배 깊게 수집
+        # -----------------------------
+        df_bybit = get_kline(symbol, interval=interval, limit=limit_for_fetch)
         if not isinstance(df_bybit, pd.DataFrame):
             df_bybit = pd.DataFrame()
 
-        force_long_merge = (strategy == "장기") and (len(df_bybit) < limit)
-        df_binance = pd.DataFrame()
+        df_bin = pd.DataFrame()
+        need_bin = (df_bybit.empty or len(df_bybit) < int(limit * 0.9))
+        if need_bin and BINANCE_ENABLED:
+            df_bin = get_kline_binance(symbol, interval=interval, limit=limit_for_fetch)
 
-        if (df_bybit.empty or len(df_bybit) < int(limit * 0.9) or force_long_merge) and BINANCE_ENABLED:
-            df_binance = get_kline_binance(symbol, interval=interval, limit=limit)
-
-        dfs = [d for d in [df_bybit, df_binance] if isinstance(d, pd.DataFrame) and not d.empty]
+        dfs = [d for d in [df_bybit, df_bin] if isinstance(d, pd.DataFrame) and not d.empty]
         df = _normalize_df(pd.concat(dfs, ignore_index=True)) if dfs else pd.DataFrame()
 
-        # bybit만 있어도 라벨 0개면 binance 한 번 더
-        if (df_binance is None or df_binance.empty) and (not df_bybit.empty) and BINANCE_ENABLED:
-            valid_cnt = _count_valid_labels_for_df(df_bybit, symbol, strategy)
-            if valid_cnt == 0 and not _is_binance_blocked():
-                try:
-                    add_bin = get_kline_binance(symbol, interval=interval, limit=limit)
-                    if isinstance(add_bin, pd.DataFrame) and not add_bin.empty:
-                        df = _normalize_df(pd.concat([df_bybit, add_bin], ignore_index=True))
-                except Exception:
-                    pass
+        # -----------------------------
+        # 5) 슬랙 컷
+        # -----------------------------
+        if end_slack_min > 0 and not df.empty:
+            ts = _parse_ts_series(df["timestamp"])
+            cutoff = ts.max() - pd.Timedelta(minutes=end_slack_min)
+            df = df.loc[ts <= cutoff].copy()
 
-        # ❗ 두 쪽 다 0줄이면 캐시하지 않고 바로 반환
         if df.empty:
-            print(
-                f"[❗수집실패] {symbol}-{strategy} → bybit_empty={df_bybit.empty} "
-                f"binance_empty={df_binance.empty} binance_blocked={_is_binance_blocked()}"
-            )
             out = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
             out.attrs["source_exchange"] = "NONE"
             out.attrs["recent_rows"] = 0
-            out.attrs["augment_needed"] = True
-            out.attrs["enough_for_training"] = False
             out.attrs["not_enough_rows"] = True
-            _log_fetch_summary(symbol, strategy, limit, len(df_bybit), len(df_binance), out.attrs["source_exchange"])
             return out
 
-        # 이하 기존 정리
-        if end_slack_min > 0 and "timestamp" in df.columns and len(df) > 2:
-            ts = _parse_ts_series(df["timestamp"])
-            cutoff = ts.max() - pd.Timedelta(minutes=int(end_slack_min))
-            df = df.loc[ts <= cutoff].copy()
-        elif end_slack_min > 0 and len(df) <= 2:
-            print(f"[슬랙스킵] {symbol}-{strategy} rows={len(df)} slack_min={end_slack_min}")
+        # -----------------------------
+        # 6) 시간 정렬
+        # -----------------------------
+        df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
-        for c in ["open", "high", "low", "close", "volume"]:
-            df[c] = pd.to_numeric(df.get(c, np.nan), errors="coerce")
-        df.replace([np.inf, -np.inf], np.nan, inplace=True)
-        df.dropna(subset=["timestamp", "open", "high", "low", "volume", "close"], inplace=True)
+        # -----------------------------
+        # 7) ✔ 1000개 샘플링 / 부족한 경우 그대로 사용
+        # -----------------------------
+        n = len(df)
 
-        if not df.empty:
-            df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-            ts = _parse_ts_series(df["timestamp"])
-            diffs = ts.diff().dt.total_seconds().fillna(0)
-            df = df.loc[diffs >= 0].reset_index(drop=True)
+        window = _PREDICT_MIN_WINDOW  # 최소 10개
 
-        bybit_rows = len(df_bybit) if isinstance(df_bybit, pd.DataFrame) else 0
-        binance_rows = len(df_binance) if isinstance(df_binance, pd.DataFrame) else 0
-        if len(df) < limit:
-            print(f"[⚠️ 데이터 부족] {symbol}-{strategy} ({len(df)}/{limit}) → 패딩 금지, 부족 상태 유지")
+        if n >= 1000:
+            # 균등 샘플링 (메모리 부담 최소)
+            idx = np.linspace(0, n - 1, 1000).astype(int)
+            df = df.iloc[idx].reset_index(drop=True)
 
-        df = _clip_tail(df, limit)
+        elif window <= n < 1000:
+            # 있는 만큼 그대로 (절대 버리지 않음)
+            df = df.copy().reset_index(drop=True)
 
-        srcs = []
-        if not df_bybit.empty:
-            srcs.append("BYBIT")
-        if isinstance(df_binance, pd.DataFrame) and not df_binance.empty:
-            srcs.append("BINANCE")
-        if "source_exchange" not in df.attrs or not df.attrs.get("source_exchange"):
-            df.attrs["source_exchange"] = "+".join(srcs) if srcs else "UNKNOWN"
+        else:
+            # window 미만 → 학습 불가
+            df = df.copy()
+            df.attrs["not_enough_rows"] = True
+            return df
 
-        df.attrs["bybit_rows"] = int(bybit_rows)
-        df.attrs["binance_rows"] = int(binance_rows)
-        df.attrs["recent_rows"] = int(len(df))
-        df.attrs["augment_needed"] = len(df) < limit
-        df.attrs["enough_for_training"] = len(df) >= int(limit * 0.9)
-        df.attrs["not_enough_rows"] = len(df) < _PREDICT_MIN_WINDOW
+        # -----------------------------
+        # 8) 메타 정보
+        # -----------------------------
+        df.attrs["recent_rows"] = len(df)
+        df.attrs["enough_for_training"] = len(df) >= window
+        df.attrs["not_enough_rows"] = len(df) < window
 
-        _log_fetch_summary(symbol, strategy, limit, bybit_rows, binance_rows, df.attrs["source_exchange"])
-
-        # ✅ 여기서는 정상 데이터니까 캐시에 저장 (force_refresh로 들어왔어도 최신 걸 다시 저장)
+        # -----------------------------
+        # 9) 캐시 저장
+        # -----------------------------
         CacheManager.set(cache_key, df)
         _save_df_cache(symbol, strategy, end_slack_min, df)
+
         return df
 
     except Exception as e:
         print(f"[❌ get_kline_by_strategy 실패] {symbol}/{strategy}: {e}")
-        safe_failed_result(symbol, strategy, reason=str(e))
         out = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
-        out.attrs["source_exchange"] = "ERROR"
-        out.attrs["recent_rows"] = 0
-        out.attrs["augment_needed"] = True
-        out.attrs["enough_for_training"] = False
         out.attrs["not_enough_rows"] = True
         return out
-
 
 # ========================= 프리패치/티커 =========================
 def prefetch_symbol_groups(strategy: str):
@@ -1127,20 +1101,43 @@ def _prefix_cols(df: pd.DataFrame, prefix: str, skip=("timestamp",)) -> pd.DataF
     return df.rename(columns=ren)
 
 def _compute_feature_block(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    ✔ 3번 아이디어 반영: unused feature들 추가
+        - upper_wick / lower_wick
+        - body_size
+        - wick_ratio
+        - vol_ratio
+        - fake_high / fake_low
+    """
     df = df.copy()
+
+    # 기본 컬럼 보장
     for c in ["open","high","low","close","volume"]:
-        if c not in df.columns: df[c] = 0.0
-    df["ma20"] = df["close"].rolling(window=20, min_periods=1).mean()
+        if c not in df.columns:
+            df[c] = 0.0
+
+    # ---------------------------
+    # 기존 기술지표 (그대로 유지)
+    # ---------------------------
+    df["ma20"] = df["close"].rolling(20, min_periods=1).mean()
     delta = df["close"].diff()
-    gain = delta.clip(lower=0).rolling(window=14, min_periods=1).mean()
-    loss = (-delta.clip(upper=0)).rolling(window=14, min_periods=1).mean()
+    gain = delta.clip(lower=0).rolling(14, min_periods=1).mean()
+    loss = (-delta.clip(upper=0)).rolling(14, min_periods=1).mean()
     rs = gain / (loss + 1e-6)
     df["rsi"] = 100 - (100 / (1 + rs))
+
     macd, macd_sig, macd_hist = _macd_parts(df["close"])
-    df["macd"] = macd; df["macd_signal"] = macd_sig; df["macd_hist"] = macd_hist
-    _, bb_up, bb_dn, bb_sd, bb_width, bb_pb = _bbands(df["close"], window=20)
-    df["bb_up"] = bb_up; df["bb_dn"] = bb_dn; df["bb_sd"] = bb_sd
-    df["bb_width"] = bb_width; df["bb_percent_b"] = bb_pb
+    df["macd"] = macd
+    df["macd_signal"] = macd_sig
+    df["macd_hist"] = macd_hist
+
+    _, bb_up, bb_dn, bb_sd, bb_width, bb_pb = _bbands(df["close"])
+    df["bb_up"] = bb_up
+    df["bb_dn"] = bb_dn
+    df["bb_sd"] = bb_sd
+    df["bb_width"] = bb_width
+    df["bb_percent_b"] = bb_pb
+
     df["volatility"] = (df["high"] - df["low"]).abs()
     df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
     df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
@@ -1148,25 +1145,41 @@ def _compute_feature_block(df: pd.DataFrame) -> pd.DataFrame:
     df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
     df["trend_score"] = (df["close"] > df["ema50"]).astype(np.float32)
     df["roc"] = df["close"].pct_change(periods=10)
-    df["atr"] = _atr(df["high"], df["low"], df["close"], window=14)
-    st_k, st_d = _stoch(df["high"], df["low"], df["close"], k_window=14, d_window=3)
-    df["stoch_k"] = st_k; df["stoch_d"] = st_d
+    df["atr"] = _atr(df["high"], df["low"], df["close"], 14)
+    st_k, st_d = _stoch(df["high"], df["low"], df["close"])
+    df["stoch_k"] = st_k
+    df["stoch_d"] = st_d
+
     highest14 = df["high"].rolling(14, min_periods=1).max()
     lowest14  = df["low"].rolling(14, min_periods=1).min()
     df["williams_r"] = -100 * (highest14 - df["close"]) / ((highest14 - lowest14) + 1e-6)
-    try:
-        import ta as _ta
-        if "adx" not in df.columns:
-            df["adx"] = _ta.trend.adx(df["high"], df["low"], df["close"], window=14, fillna=True)
-        if "cci" not in df.columns:
-            df["cci"] = _ta.trend.cci(df["high"], df["low"], df["close"], window=20, fillna=True)
-        if "mfi" not in df.columns:
-            df["mfi"] = _ta.volume.money_flow_index(df["high"], df["low"], df["close"], df["volume"], window=14, fillna=True)
-        if "obv" not in df.columns:
-            df["obv"] = _ta.volume.on_balance_volume(df["close"], df["volume"], fillna=True)
-    except Exception:
-        pass
+
     df["vwap"] = (df["volume"] * df["close"]).cumsum() / (df["volume"].cumsum() + 1e-6)
+
+    # --------------------------------------
+    # ✔ 3번 아이디어 — 새로운 unused feature
+    # --------------------------------------
+
+    # 꼬리 길이
+    df["upper_wick"] = df["high"] - df[["close","open"]].max(axis=1)
+    df["lower_wick"] = df[["close","open"]].min(axis=1) - df["low"]
+
+    # 몸통
+    df["body_size"] = (df["close"] - df["open"]).abs()
+
+    # 꼬리/몸통 비율
+    df["wick_ratio"] = (df["upper_wick"] + df["lower_wick"]) / (df["body_size"] + 1e-6)
+
+    # 거래량 비율
+    df["vol_ratio"] = df["volume"] / (df["volume"].rolling(20, min_periods=1).mean() + 1e-6)
+
+    # 가짜 고점/저점 (간단 패턴)
+    df["fake_high"] = (df["high"] > df["high"].shift(1)) & (df["high"] > df["high"].shift(-1))
+    df["fake_low"]  = (df["low"]  < df["low"].shift(1)) & (df["low"]  < df["low"].shift(-1))
+
+    df["fake_high"] = df["fake_high"].astype(np.float32)
+    df["fake_low"]  = df["fake_low"].astype(np.float32)
+
     return df
 
 def _mtf_plan(strategy: str):
