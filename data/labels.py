@@ -1,5 +1,5 @@
 # ================================================
-# labels.py — YOPO RAW 기반 수익률 라벨링 (H 고정 + 동적 엣지 튜닝 버전)
+# labels.py — YOPO RAW 기반 수익률 라벨링 (H 고정 + 동적 엣지 튜닝 + 희소 클래스 병합 버전)
 # ================================================
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from config import (
     _future_extreme_signed_returns,
     get_BIN_META,
     get_CLASS_BIN,
+    get_SPARSE_CLASS,  # 🔥 아이디어 A 설정
 )
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,12 @@ _MIN_LABEL_CLASSES = int(os.getenv("MIN_LABEL_CLASSES", "4"))
 # ✅ 한 클래스당 최소 패턴 수(샘플 수) 기준
 #   - 데이터가 충분하면 각 클래스에 최소 이 정도는 들어가도록 엣지를 자름
 _MIN_SAMPLES_PER_CLASS = int(os.getenv("MIN_SAMPLES_PER_CLASS", "50"))
+
+# 🔥 SPARSE_CLASS(아이디어 A) 설정: 희소 클래스 병합용
+_SPARSE_CLASS_CONF = dict(get_SPARSE_CLASS() or {})
+_SC_MIN_SAMPLES = int(_SPARSE_CLASS_CONF.get("MIN_SAMPLES_PER_CLASS", 12))
+_SC_MIN_CLASSES = int(_SPARSE_CLASS_CONF.get("MIN_CLASSES_AFTER_MERGE", 8))
+_SC_MAX_PASSES = int(_SPARSE_CLASS_CONF.get("MAX_MERGE_PASSES", 2))
 
 # 🔥 전략별 H 고정 (핵심 수정)
 # - 단기: 4h 캔들 1개
@@ -216,6 +223,120 @@ def _vector_bin(gains: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return np.clip(bins, 0, edges.size - 2).astype(np.int64)
 
 # ============================================================
+# 희소 클래스 병합 (아이디어 A)
+# ============================================================
+def _merge_sparse_bins(edges: np.ndarray, dist: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    아이디어 A:
+    - 샘플이 거의 없는 bin만 이웃 bin과 합친다.
+    - 전체 bin 개수는 SPARSE_CLASS.MIN_CLASSES_AFTER_MERGE 밑으로 떨어지지 않게 제한.
+    - SPARSE_CLASS.MAX_MERGE_PASSES 만큼만 반복.
+    반환: (새 edges, 새 bin_counts)
+    """
+    try:
+        edges = np.asarray(edges, dtype=float)
+        if edges.size < 3:
+            return edges, np.zeros(max(0, edges.size - 1), dtype=int)
+
+        dist = np.asarray(dist, dtype=float)
+        dist = dist[np.isfinite(dist)]
+        if dist.size == 0:
+            return edges, np.zeros(edges.size - 1, dtype=int)
+
+        # 초기 bin 카운트 계산
+        e2 = edges.copy()
+        e2[-1] += 1e-12
+        counts, _ = np.histogram(dist, bins=e2)
+        counts = counts.astype(int)
+
+        total = int(counts.sum())
+        if total <= 0:
+            return edges, counts
+
+        min_samples = max(1, _SC_MIN_SAMPLES)
+        min_classes = max(1, _SC_MIN_CLASSES)
+        max_passes = max(0, _SC_MAX_PASSES)
+
+        # 이미 충분히 bin 수가 적으면 더 줄이지 않는다.
+        if counts.size <= min_classes or max_passes == 0:
+            return edges, counts
+
+        e = edges.copy()
+        c = counts.copy()
+
+        for _ in range(max_passes):
+            if c.size <= min_classes:
+                break
+
+            # 희소 bin 인덱스: 샘플 수가 기준 미만인 bin
+            sparse_idx = np.where(c < min_samples)[0]
+            if sparse_idx.size == 0:
+                break
+
+            # 가장 빈약한 bin부터 처리
+            sparse_idx = list(sorted(sparse_idx, key=lambda i: c[i]))
+            changed = False
+
+            for idx in sparse_idx:
+                if c.size <= min_classes:
+                    break
+                if idx >= c.size:
+                    continue
+                if c[idx] >= min_samples:
+                    continue
+
+                left_ok = idx - 1 >= 0
+                right_ok = idx + 1 < c.size
+                if not left_ok and not right_ok:
+                    continue
+
+                # 양쪽 다 있으면 더 "두꺼운" 쪽으로 합치기
+                if left_ok and right_ok:
+                    if c[idx - 1] >= c[idx + 1]:
+                        nbr = idx - 1
+                    else:
+                        nbr = idx + 1
+                elif left_ok:
+                    nbr = idx - 1
+                else:
+                    nbr = idx + 1
+
+                # 실제 병합 수행 (인접 bin만)
+                if nbr == idx - 1:
+                    # 왼쪽과 병합: 경계 e[idx] 제거, c[nbr] += c[idx]
+                    c[nbr] = c[nbr] + c[idx]
+                    c = np.delete(c, idx)
+                    e = np.delete(e, idx)
+                elif nbr == idx + 1:
+                    # 오른쪽과 병합: 경계 e[idx+1] 제거, c[idx] += c[nbr]
+                    c[idx] = c[idx] + c[nbr]
+                    c = np.delete(c, nbr)
+                    e = np.delete(e, nbr)
+                else:
+                    # 논리상 올 일 없음
+                    continue
+
+                changed = True
+
+            if not changed:
+                break
+
+        # 안전검사
+        if e.size != c.size + 1:
+            # 뭔가 꼬였으면 원본 유지 (라벨-경계 불일치 방지)
+            logger.warning("merge_sparse_bins: edge/count size mismatch → 원본 유지")
+            return edges, counts
+
+        return e, c
+    except Exception as ex:
+        logger.warning("merge_sparse_bins failed: %s", ex)
+        # 실패 시 원본 그대로 반환
+        e2 = edges.copy()
+        e2[-1] += 1e-12
+        counts, _ = np.histogram(dist, bins=e2)
+        return edges, counts.astype(int)
+
+# ============================================================
 # target bin 수
 # ============================================================
 def _auto_target_bins(df_len: int) -> int:
@@ -332,12 +453,19 @@ def make_labels(df, symbol, strategy, group_id=None):
 
     gains, up_c, dn_c, target_bins = compute_label_returns(df, symbol, pure)
 
+    # 분포: up/dn 합친 전체 분포 기준
     dist = np.concatenate([dn_c, up_c], axis=0)
 
+    # 1차: 동적 RAW bin 생성
     edges = _raw_bins(dist, target_bins)
 
+    # 2차: 희소 bin 병합 (아이디어 A)
+    edges, bin_counts = _merge_sparse_bins(edges, dist)
+
+    # 병합된 경계를 기준으로 최종 라벨링
     labels = _vector_bin(gains, edges)
 
+    # 최종 bin 분포/폭 재계산
     edges2 = edges.copy()
     edges2[-1] += 1e-12
     bin_counts, _ = np.histogram(dist, bins=edges2)
@@ -387,14 +515,19 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
 
     dist = np.concatenate([dn, up], axis=0)
     target_bins = _auto_target_bins(len(df))
+
+    # 1차: RAW bin
     edges = _raw_bins(dist, target_bins)
+
+    # 2차: 희소 bin 병합
+    edges, bin_counts = _merge_sparse_bins(edges, dist)
 
     gains = _pick_per_candle_gain(up, dn)
     labels = _vector_bin(gains, edges)
 
     edges2 = edges.copy()
     edges2[-1] += 1e-12
-    counts, _ = np.histogram(dist, bins=edges2)
+    bin_counts, _ = np.histogram(dist, bins=edges2)
     spans = np.diff(edges) * 100.0
 
     strategy = "단기" if horizon_hours <= 4 else ("중기" if horizon_hours <= 24 else "장기")
@@ -408,7 +541,7 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
 
     _save_label_table(
         df, symbol, strategy, gains, labels,
-        edges, counts, spans,
+        edges, bin_counts, spans,
         extra_cols=extra_cols,
         extra_meta={"target_bins_used": target_bins},
         group_id=group_id,
@@ -423,7 +556,7 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
         class_ranges,
         strategy,
         edges.astype(float),
-        counts.astype(int),
+        bin_counts.astype(int),
         spans.astype(float),
     )
 
