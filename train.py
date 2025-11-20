@@ -465,6 +465,10 @@ TRAIN_CUDA_EMPTY_EVERY_EP = os.getenv("TRAIN_CUDA_EMPTY_EVERY_EP", "1") == "1"
 # ===== [ADD] 클래스 불균형 제어용 ENV =====
 BALANCE_CLASSES_FLAG = os.getenv("BALANCE_CLASSES", "1") == "1"      # 기본 ON (증강/리샘플용)
 WEIGHTED_SAMPLER_FLAG = os.getenv("WEIGHTED_SAMPLER", "0") == "1"    # 기본 OFF
+
+# ★ 희소 클래스 보강용 ENV (삭제 없음, 단순 복사)
+MIN_CLASS_SAMPLES = int(os.getenv("MIN_CLASS_SAMPLES", "4"))   # 각 클래스 최소 유지 샘플 수
+MAX_CLASS_UPSAMPLE = int(os.getenv("MAX_CLASS_UPSAMPLE", "64"))  # 전체 데이터가 너무 비대해지는 것 방지용 상한
 # ===================================================================
 
 def _as_bool_env(name: str, default: bool) -> bool:
@@ -915,8 +919,80 @@ def _synthesize_minority_if_needed(
     y: np.ndarray,
     num_classes: int
 ) -> Tuple[np.ndarray, np.ndarray, bool]:
-    # 지금 버전: 합성 안 한다 (형식 유지용)
-    return X_raw, y, False
+    """
+    희소 클래스를 '삭제'하지 않고, 단순 복사(오버샘플)로만 최소 개수까지 보강하는 함수.
+
+    - 어떤 클래스가 1~몇 개밖에 없어도 절대 버리지 않는다.
+    - 각 클래스 샘플 수가 MIN_CLASS_SAMPLES 보다 작으면, 그 클래스 샘플을 복사해서 늘린다.
+    - 전체 샘플 수가 MAX_CLASS_UPSAMPLE 를 크게 넘지 않도록 안전장치도 둔다.
+    """
+    if X_raw is None or y is None or len(y) == 0 or num_classes <= 0:
+        return X_raw, y, False
+
+    y = np.asarray(y, dtype=np.int64)
+    X_raw = np.asarray(X_raw, dtype=np.float32)
+
+    # 잘못된 라벨은 건드리지 않는다
+    if y.min() < 0:
+        return X_raw, y, False
+
+    # 클래스별 개수
+    counts = np.bincount(y, minlength=num_classes).astype(int)
+    if counts.sum() <= 0:
+        return X_raw, y, False
+
+    # 이미 충분히 많은 데이터면 굳이 안 건드림
+    if counts.min() >= MIN_CLASS_SAMPLES:
+        return X_raw, y, False
+
+    rng = np.random.default_rng(int(os.getenv("GLOBAL_SEED", "20240101")))
+    X_list = [X_raw]
+    y_list = [y]
+    changed = False
+
+    for cls_id, cnt in enumerate(counts):
+        if cnt <= 0:
+            # 실제로 한 번도 등장하지 않은 클래스는 어쩔 수 없음 (데이터가 0이니까 보강 불가)
+            continue
+        if cnt >= MIN_CLASS_SAMPLES:
+            continue
+
+        # 이 클래스에 해당하는 인덱스
+        idx = np.where(y == cls_id)[0]
+        if idx.size == 0:
+            continue
+
+        # 얼마나 더 채울지
+        need = MIN_CLASS_SAMPLES - cnt
+        # 전체 길이 상한 보호
+        max_extra = max(0, MAX_CLASS_UPSAMPLE - len(y))
+        if max_extra <= 0:
+            break
+        need = min(need, max_extra)
+        if need <= 0:
+            continue
+
+        # 동일 샘플을 랜덤 복사
+        dup_idx = rng.choice(idx, size=need, replace=True)
+        X_extra = X_raw[dup_idx]
+        y_extra = y[dup_idx]
+
+        X_list.append(X_extra)
+        y_list.append(y_extra)
+        changed = True
+
+    if not changed:
+        return X_raw, y, False
+
+    X_new = np.concatenate(X_list, axis=0)
+    y_new = np.concatenate(y_list, axis=0)
+
+    # 섞어서 순서 편향 제거
+    perm = rng.permutation(len(y_new))
+    X_new = X_new[perm]
+    y_new = y_new[perm]
+
+    return X_new.astype(np.float32), y_new.astype(np.int64), True
 
 
 def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
@@ -1242,8 +1318,8 @@ def train_one_model(
                 "synthetic_labels": False,
             }
 
-            if X_raw.size and len(np.unique(y)) < 2:
-                # 클래스가 1개뿐이어도 일단 그대로 진행 (단, 나중에 샘플 0이면 스킵)
+            # ★ 희소 클래스 보강: 삭제가 아니라 "복사"로만 채운다
+            if X_raw.size:
                 X_raw, y, syn = _synthesize_minority_if_needed(
                     X_raw, y, num_classes=len(class_ranges)
                 )
