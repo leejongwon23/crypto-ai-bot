@@ -3,21 +3,24 @@
 _kline_cache = {}
 
 import os, time, json, pickle, requests, pandas as pd, numpy as np, pytz, glob, hashlib, random
-from io import StringIO
+from io import StringIO, BytesIO
 from sklearn.preprocessing import MinMaxScaler
 from requests.exceptions import HTTPError, RequestException
 from typing import List, Dict, Any, Optional, Tuple
 from collections import Counter
+import zipfile
+from datetime import datetime, timedelta
 
 # === CHANGE: 중계데이터 설정 (config.py 연동) ===
 try:
     from config import OHLCV_PROVIDER, OHLCV_DATA_DIR
 except Exception:
-    OHLCV_PROVIDER = os.getenv("OHLCV_PROVIDER", "INTERMEDIATE")
+    # ✅ 기본값을 BINANCE_VISION 으로 변경 (거래소 REST 대신 바이낸스 히스토리 센터 사용)
+    OHLCV_PROVIDER = os.getenv("OHLCV_PROVIDER", "BINANCE_VISION")
     OHLCV_DATA_DIR = os.getenv("OHLCV_DATA_DIR", "/persistent/ohlcv")
 
 # ✅ PROVIDER 모드 & 중계 서버 설정 (환경변수 기반)
-OHLCV_PROVIDER = str(OHLCV_PROVIDER or "INTERMEDIATE").upper()
+OHLCV_PROVIDER = str(OHLCV_PROVIDER or "BINANCE_VISION").upper()
 OHLCV_RELAY_BASE_URL = os.getenv("OHLCV_RELAY_BASE_URL", "")  # 예: "https://your-relay.example.com"
 OHLCV_RELAY_PATH = os.getenv("OHLCV_RELAY_PATH", "/ohlcv")    # 예: "/ohlcv"
 OHLCV_RELAY_TIMEOUT = float(os.getenv("OHLCV_RELAY_TIMEOUT", "8"))
@@ -829,18 +832,159 @@ def _load_local_ohlcv(symbol: str, interval: str, limit: int, end_time=None, sou
     df.attrs["not_enough_rows"] = len(df) == 0
     return df
 
+# === NEW: Binance Data Mirror (data.binance.vision) ===
+
+def _binance_vision_interval(iv: str) -> str:
+    """
+    YOPO 내부 interval → Binance Vision timeframe 매핑
+      - '60'  → '1h'
+      - '240' → '4h'
+      - 'D'   → '1d'
+      - 'W'   → '1w'
+    """
+    iv = str(iv).lower()
+    mapping = {
+        "60": "1h", "1h": "1h",
+        "120": "2h", "2h": "2h",
+        "240": "4h", "4h": "4h",
+        "360": "6h", "6h": "6h",
+        "720": "12h", "12h": "12h",
+        "d": "1d", "1d": "1d",
+        "w": "1w", "1w": "1w",
+    }
+    return mapping.get(iv, iv)
+
+def _estimate_days_for_limit(timeframe: str, limit: int) -> int:
+    """
+    필요한 캔들 수(limit)를 맞추기 위해 대략 몇 일치 zip 을 읽을지 추정.
+    너무 과도하게 읽지 않도록 상한을 둔다.
+    """
+    candles_per_day = {
+        "1h": 24,
+        "2h": 12,
+        "4h": 6,
+        "6h": 4,
+        "12h": 2,
+        "1d": 1,
+        # 1w 는 주 1캔들이라 7일로 환산
+        "1w": 1/7,
+    }
+    tf = timeframe
+    per = candles_per_day.get(tf, 24.0)
+    if per <= 0:
+        per = 24.0
+    if tf == "1w":
+        days = int(limit * 7) + 14
+    else:
+        days = int(limit / per) + 2
+    # 최소 30일, 최대 5년(≈1825일) 제한
+    days = max(30, days)
+    days = min(days, 1825)
+    return days
+
+def _load_binance_vision_ohlcv(symbol: str, interval: str, limit: int, end_time=None, source_tag: Optional[str] = None) -> pd.DataFrame:
+    """
+    Binance 공식 무료 히스토리 센터(data.binance.vision)에 바로 붙어서
+    선물 UM daily klines zip 파일을 HTTP로 읽어온 뒤,
+    메모리에서만 처리한다. 디스크에 대량 저장 X.
+
+    예시 URL (실제 존재하는 형태):
+      https://data.binance.vision/data/futures/um/daily/klines/BTCUSDT/1h/BTCUSDT-1h-2023-10-27.zip
+    1
+    """
+    tf = _binance_vision_interval(interval)
+    sym = symbol.upper()
+    base_url = "https://data.binance.vision"
+    rows_target = int(limit or 300)
+    if rows_target <= 0:
+        rows_target = 300
+
+    # end_time 기준 날짜 결정
+    if end_time is not None:
+        try:
+            dt = pd.to_datetime(end_time)
+            if getattr(dt, "tzinfo", None) is not None:
+                dt = dt.tz_convert("UTC")
+            else:
+                dt = dt.tz_localize("UTC")
+            end_date = dt.date()
+        except Exception:
+            end_date = datetime.utcnow().date()
+    else:
+        end_date = datetime.utcnow().date()
+
+    max_days = _estimate_days_for_limit(tf, rows_target)
+    frames: List[pd.DataFrame] = []
+    total_rows = 0
+    miss_streak = 0
+
+    for offset in range(max_days):
+        day = end_date - timedelta(days=offset)
+        day_str = day.strftime("%Y-%m-%d")
+        url = (
+            f"{base_url}/data/futures/um/daily/klines/"
+            f"{sym}/{tf}/{sym}-{tf}-{day_str}.zip"
+        )
+        try:
+            resp = requests.get(url, timeout=OHLCV_RELAY_TIMEOUT, headers=REQUEST_HEADERS)
+            if resp.status_code != 200:
+                miss_streak += 1
+                # 연속 7일 이상 못 찾았고, 이미 데이터가 조금이라도 있으면 중단
+                if miss_streak >= 7 and frames:
+                    break
+                continue
+            miss_streak = 0
+            with zipfile.ZipFile(BytesIO(resp.content)) as zf:
+                csv_names = [n for n in zf.namelist() if n.endswith(".csv")]
+                if not csv_names:
+                    continue
+                with zf.open(csv_names[0]) as fp:
+                    df_day = pd.read_csv(fp, header=None)
+            if isinstance(df_day, pd.DataFrame) and not df_day.empty:
+                frames.append(df_day)
+                total_rows += len(df_day)
+                if total_rows >= rows_target * 2:
+                    # 여유 있게 2배까지 읽은 후 컷
+                    break
+        except Exception as e:
+            print(f"[⚠️ BINANCE_VISION 로드 실패] {url}: {e}")
+            continue
+
+    if not frames:
+        out = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+        out.attrs["source_exchange"] = source_tag or "BINANCE_VISION"
+        out.attrs["recent_rows"] = 0
+        out.attrs["not_enough_rows"] = True
+        return out
+
+    raw = pd.concat(frames, ignore_index=True)
+    df = _normalize_df(raw)
+
+    if end_time is not None and not df.empty:
+        ts = _parse_ts_series(df["timestamp"])
+        try:
+            cutoff = pd.to_datetime(end_time)
+            if getattr(cutoff, "tzinfo", None) is None:
+                cutoff = cutoff.tz_localize("UTC").tz_convert("Asia/Seoul")
+            else:
+                cutoff = cutoff.tz_convert("Asia/Seoul")
+            df = df.loc[ts <= cutoff].copy()
+        except Exception:
+            pass
+
+    if rows_target is not None and rows_target > 0:
+        df = _clip_tail(df, int(rows_target))
+
+    df.attrs["source_exchange"] = source_tag or "BINANCE_VISION"
+    df.attrs["recent_rows"] = int(len(df))
+    df.attrs["not_enough_rows"] = len(df) == 0
+    return df
+
 # === NEW: RELAY HTTP 호출 ===
 def _fetch_relay_ohlcv(symbol: str, interval: str, limit: int, end_time=None) -> pd.DataFrame:
     """
-    중계데이터 서버에서 직접 OHLCV를 받아오는 함수 (HTTP).
-
-    ⚠ 여기 안의 URL/파라미터는 '템플릿'이야.
-      실제 중계업체 스펙에 맞게:
-        - OHLCV_RELAY_BASE_URL
-        - OHLCV_RELAY_PATH
-        - params 이름들
-        - 응답 컬럼명
-      만 맞춰주면 됨.
+    중계데이터 서버에서 직접 OHLCV를 받아오는 함수 (HTTP, 커스텀 릴레이 용).
+    OHLCV_RELAY_BASE_URL 이 설정되어 있을 때만 사용한다.
     """
     if not OHLCV_RELAY_BASE_URL:
         raise RuntimeError("OHLCV_RELAY_BASE_URL 환경변수가 설정되지 않았습니다.")
@@ -867,7 +1011,6 @@ def _fetch_relay_ohlcv(symbol: str, interval: str, limit: int, end_time=None) ->
 
     headers = {"User-Agent": REQUEST_HEADERS["User-Agent"]}
     if OHLCV_RELAY_API_KEY:
-        # 필요시 Authorization 헤더로 전달
         headers["Authorization"] = f"Bearer {OHLCV_RELAY_API_KEY}"
 
     resp = requests.get(url, params=params, headers=headers, timeout=OHLCV_RELAY_TIMEOUT)
@@ -893,6 +1036,10 @@ def _fetch_relay_ohlcv(symbol: str, interval: str, limit: int, end_time=None) ->
         return pd.read_csv(StringIO(text))
 
 def _load_http_ohlcv(symbol: str, interval: str, limit: int, end_time=None, source_tag: Optional[str] = None) -> pd.DataFrame:
+    """
+    커스텀 HTTP 중계 서버(사용자가 직접 만든 API)를 위한 로더.
+    OHLCV_RELAY_BASE_URL 이 지정된 경우에만 의미가 있다.
+    """
     try:
         raw = _fetch_relay_ohlcv(symbol, interval, limit, end_time=end_time)
     except Exception as e:
@@ -925,33 +1072,39 @@ def _load_http_ohlcv(symbol: str, interval: str, limit: int, end_time=None, sour
     df.attrs["not_enough_rows"] = len(df) == 0
     return df
 
-# === NEW: 공통 로더 (PROVIDER 모드에 따라 HTTP/LOCAL 선택) ===
+# === NEW: 공통 로더 (PROVIDER 모드에 따라 HTTP/LOCAL/BINANCE_VISION 선택) ===
 def _load_ohlcv(symbol: str, interval: str, limit: int, end_time=None, source_tag: Optional[str] = None) -> pd.DataFrame:
     """
     OHLCV_PROVIDER 모드에 따라:
-      - RELAY/INTERMEDIATE/HTTP → 중계 HTTP 호출
+      - BINANCE_VISION / BINANCE_MIRROR / VISION → Binance Data Mirror (data.binance.vision)
+      - RELAY / INTERMEDIATE / HTTP / PROVIDER → 사용자 정의 HTTP 릴레이
       - LOCAL → 로컬 파일
+      - 기타 → BINANCE_VISION 시도 후 실패 시 LOCAL 폴백
     """
     mode = (OHLCV_PROVIDER or "").upper()
-    if mode in ("RELAY", "INTERMEDIATE", "HTTP", "PROVIDER"):
+
+    if mode in ("BINANCE_VISION", "BINANCE_MIRROR", "VISION"):
+        return _load_binance_vision_ohlcv(symbol, interval, limit, end_time=end_time, source_tag=source_tag)
+    elif mode in ("RELAY", "INTERMEDIATE", "HTTP", "PROVIDER"):
         return _load_http_ohlcv(symbol, interval, limit, end_time=end_time, source_tag=source_tag)
     elif mode == "LOCAL":
         return _load_local_ohlcv(symbol, interval, limit, end_time=end_time, source_tag=source_tag)
     else:
-        # 알 수 없는 모드는 안전하게 RELAY 시도 후 실패 시 로컬로 폴백
+        # 알 수 없는 모드는 안전하게 BINANCE_VISION 시도 후 실패 시 로컬로 폴백
         try:
-            return _load_http_ohlcv(symbol, interval, limit, end_time=end_time, source_tag=source_tag)
+            return _load_binance_vision_ohlcv(symbol, interval, limit, end_time=end_time, source_tag=source_tag)
         except Exception:
             return _load_local_ohlcv(symbol, interval, limit, end_time=end_time, source_tag=source_tag)
 
-# === CHANGE: Bybit/ Binance HTTP 완전 제거 → 중계/로컬 전용 ===
+# === CHANGE: Bybit/ Binance HTTP 완전 제거 → 중계/로컬/바이낸스 비전 전용 ===
 def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
     """
     ✅ 변경 후:
     - 더 이상 Bybit HTTP를 호출하지 않는다.
     - OHLCV_PROVIDER 모드에 따라:
-      - RELAY/INTERMEDIATE/HTTP → 중계서버에서 가져오기
-      - LOCAL → OHLCV_DATA_DIR 파일에서만 읽기
+      - BINANCE_VISION/BINANCE_MIRROR/VISION → Binance Data Mirror
+      - RELAY/INTERMEDIATE/HTTP/PROVIDER → 사용자 릴레이
+      - LOCAL → OHLCV_DATA_DIR 파일
     """
     real_interval = _map_bybit_interval(interval)
     return _load_ohlcv(symbol, real_interval, limit, end_time=end_time, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
@@ -959,8 +1112,8 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
 def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
     """
     ✅ 변경 후:
-    - Binance HTTP도 전혀 사용하지 않는다.
-    - get_kline 과 동일하게 중계/로컬에서만 읽는다.
+    - Binance REST HTTP도 전혀 사용하지 않는다.
+    - get_kline 과 동일하게 중계/로컬/Binance Vision 에서만 읽는다.
     (함수 이름은 train/predict 호환을 위해 유지)
     """
     real_interval = str(interval)
@@ -973,7 +1126,7 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
     - Bybit + Binance HTTP 병합 로직 제거.
     - STRATEGY_CONFIG 의 interval/limit 에 맞춰
       OHLCV_PROVIDER 모드에 따라
-      중계서버 또는 로컬 파일에서만 읽어와 normalize.
+      Binance Vision / 중계서버 / 로컬 파일에서만 읽어와 normalize.
     """
     config = STRATEGY_CONFIG.get(strategy)
     if not config:
@@ -1005,10 +1158,10 @@ def get_kline_interval(symbol: str, interval: str, limit: int) -> pd.DataFrame:
 
 def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, force_refresh: bool = False):
     """
-    ✔ 변경 후 (중계데이터 전용 + 로컬백업):
-        - 거래소 HTTP 전혀 사용 안 함.
+    ✔ 변경 후 (Binance Vision / 중계데이터 전용 + 로컬백업):
+        - 거래소 REST HTTP 전혀 사용 안 함.
         - STRATEGY_CONFIG 기준 interval/limit*3 만큼
-          OHLCV_PROVIDER 모드에 따라 중계/로컬에서만 읽어서 사용.
+          OHLCV_PROVIDER 모드에 따라 Binance Vision/중계/로컬에서만 읽어서 사용.
         - 1000개 샘플링 / 부족한 경우 그대로 사용 로직은 유지.
     """
     try:
@@ -1057,7 +1210,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
                 return disk
 
         # -----------------------------
-        # 4) 중계/로컬에서 3배 깊게 수집
+        # 4) Binance Vision/중계/로컬에서 3배 깊게 수집
         # -----------------------------
         df = _load_ohlcv(symbol, interval, limit_for_fetch, end_time=None, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
         if not isinstance(df, pd.DataFrame):
@@ -1746,7 +1899,7 @@ def load_latest_features(symbol: str, strategy: str) -> Optional[pd.DataFrame]:
 def build_training_dataset(symbol: str, strategy: str, window: int, input_size: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """
     학습용 데이터셋 생성:
-    - 항상 최신 캔들을 기준으로 학습하기 위해 force_refresh=True 로 강제 새 수집.
+    - 항상 최신 (Binance Vision 기준 최신 zip) 캔들을 기준으로 학습하기 위해 force_refresh=True 로 강제 새 수집.
     - 피처도 force_refresh=True 로 새로 계산.
     """
     df_price = get_kline_by_strategy(symbol, strategy, force_refresh=True)
