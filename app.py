@@ -969,19 +969,22 @@ def list_models():
 @app.route("/check-log-full", methods=["GET"])
 def check_log_full():
     """
-    📌 예측로그를 사람이 이해할 수 있도록
-    한국어로 완전 해석해서 보여주는 리포트 라우트.
+    📌 예측 + 평가 + 실패학습 상태를
+    한눈에, 한국어로 쉽게 보여주는 리포트 라우트.
 
-    - 최근 100개 예측(row)을 읽어옴
-    - 심볼/전략별 그룹화
-    - 선택 모델, 수익률 구간, 방향까지 설명
-    - shadow 모델도 모두 정리
-    - guard / 필터 이유까지 모두 한국어로 해설
+    - prediction_log.csv 최근 100개 로드
+    - 심볼/전략별로 묶어서
+        · 예측 내용
+        · 평가 상태(대기/성공/실패, 남은 시간)
+        · 실제 수익률
+        · 최근 성공률
+        · 실패 시 실패학습(failure_db 반영 여부)
+      를 카드 형식으로 출력
     """
     import pandas as pd
-    from config import get_class_return_range
-    from datetime import datetime
-    import json, numpy as np
+    from datetime import datetime, timedelta
+    import pytz, json, numpy as np
+    from failure_db import check_failure_exists
 
     try:
         df = pd.read_csv(PREDICTION_LOG_PATH, encoding="utf-8-sig")
@@ -991,9 +994,10 @@ def check_log_full():
     if df.empty:
         return "<h2>⚠️ 예측 기록이 없습니다.</h2>"
 
+    # timestamp 정리
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
 
-    # 최근 100개만
+    # 최근 100개만 사용
     df = df.sort_values("timestamp", ascending=False).head(100)
 
     # 심볼-전략 단위 그룹핑
@@ -1005,64 +1009,155 @@ def check_log_full():
         grouped.setdefault(key, [])
         grouped[key].append(r)
 
+    # KST now
+    KST = pytz.timezone("Asia/Seoul")
+    now_kst = datetime.now(KST)
+
     html = """
     <html>
     <head>
         <meta charset="utf-8">
         <style>
-            body { font-family: Arial; padding:20px; background:#fafafa;}
-            h2 { color:#333; border-bottom:1px solid #999; padding-bottom:5px;}
-            .card {background:white; padding:15px; margin-bottom:15px; border-radius:8px;
-                   box-shadow:0 2px 5px rgba(0,0,0,0.1);}
-            .success {color:green; font-weight:bold;}
-            .fail {color:red; font-weight:bold;}
+            body { font-family: Arial, sans-serif; padding:20px; background:#f4f6fb;}
+            h1 { color:#222; }
+            h2 { color:#333; border-bottom:1px solid #ccc; padding-bottom:6px; margin-top:25px;}
+            .summary-card {
+                background:#ffffff;
+                padding:12px 15px;
+                margin:10px 0 15px 0;
+                border-radius:8px;
+                border-left:5px solid #4a90e2;
+                box-shadow:0 1px 3px rgba(0,0,0,0.08);
+                font-size:13px;
+            }
+            .card {
+                background:white; padding:14px 15px; margin-bottom:10px; border-radius:8px;
+                box-shadow:0 1px 4px rgba(0,0,0,0.08);
+                font-size:13px;
+                line-height:1.5;
+            }
+            .success {color:#0a7b27; font-weight:bold;}
+            .fail {color:#c62828; font-weight:bold;}
             .pending {color:#d47f00; font-weight:bold;}
             .shadow {color:#666;}
-            .meta {color:#0054b3; font-weight:bold;}
+            .meta {color:#0054b3; font-weight:bold; margin-bottom:6px;}
+            .badge {
+                display:inline-block;
+                padding:2px 6px;
+                border-radius:6px;
+                font-size:11px;
+                margin-right:4px;
+            }
+            .badge-main { background:#e3f2fd; color:#1565c0; }
+            .badge-shadow { background:#eeeeee; color:#555555; }
+            .badge-dist { background:#f3e5f5; color:#6a1b9a; }
+            .badge-eval { background:#e8f5e9; color:#2e7d32; }
+            .row-line { margin:2px 0; }
+            .key { display:inline-block; width:110px; color:#555; }
+            .value { color:#222; }
         </style>
     </head>
     <body>
-    <h1>📘 YOPO — 예측 리포트 (최근 100개)</h1>
+    <h1>📘 YOPO — 예측·평가 통합 리포트 (최근 100개)</h1>
+    <p style="font-size:12px;color:#555;">각 카드 = 한 번의 예측입니다. 상태, 평가까지 남은 시간, 실제 수익률, 실패학습 반영 여부를 모두 한눈에 볼 수 있습니다.</p>
     """
 
     # -------------------------------
-    #  각 심볼/전략별로 HTML 생성
+    #  각 심볼/전략별 HTML 생성
     # -------------------------------
     for key, rows in grouped.items():
         sym, strat = key.split("__", 1)
+        gdf = pd.DataFrame(rows)
+
+        # 상태 집계
+        status_col = gdf.get("status")
+        if status_col is not None:
+            succ_mask = status_col.isin(["success", "v_success"])
+            fail_mask = status_col.isin(["fail", "v_fail"])
+            pending_mask = status_col.isna() | status_col.eq("pending")
+
+            n_succ = int(succ_mask.sum())
+            n_fail = int(fail_mask.sum())
+            n_pending = int(pending_mask.sum())
+            n_eval = n_succ + n_fail
+            success_rate = (n_succ / n_eval * 100.0) if n_eval > 0 else None
+        else:
+            n_succ = n_fail = n_pending = 0
+            success_rate = None
+
         html += f"<h2>🔹 {sym} — {strat}</h2>"
 
+        # 그룹 요약 카드
+        html += "<div class='summary-card'>"
+        html += "<div class='row-line'><span class='key'>최근 예측 수</span>"
+        html += f"<span class='value'>{len(rows)}건</span></div>"
+
+        html += "<div class='row-line'><span class='key'>평가 완료</span>"
+        html += f"<span class='value'>성공 {n_succ}건 / 실패 {n_fail}건</span></div>"
+
+        html += "<div class='row-line'><span class='key'>대기 중</span>"
+        html += f"<span class='value'>{n_pending}건</span></div>"
+
+        html += "<div class='row-line'><span class='key'>최근 성공률</span>"
+        if success_rate is None:
+            html += "<span class='value'>평가 완료된 예측이 아직 부족합니다.</span></div>"
+        else:
+            html += f"<span class='value'>{success_rate:.1f}% (평가된 {n_eval}건 기준)</span></div>"
+
+        html += "</div>"
+
+        # 개별 예측 카드들
         for r in rows:
+            direction = str(r.get("direction", "예측"))
+            if "운영수익분포" in direction:
+                # 운영 수익분포는 간단 배지로만 표시
+                html += "<div class='card'>"
+                html += "<span class='badge badge-dist'>운영 수익률 분포 로그</span>"
+                html += f"<div class='row-line'><span class='key'>시간</span><span class='value'>{r.get('timestamp')}</span></div>"
+                html += "<div class='row-line'><span class='value'>※ 이 행은 캔들 수익률 분포 기록용이며, 예측/평가와 직접적인 성공률 계산에는 사용되지 않습니다.</span></div>"
+                html += "</div>"
+                continue
 
-            direction = r.get("direction", "예측")
+            # 기본 정보
             cls_id = int(r.get("predicted_class", -1))
-            lo, hi = float(r.get("class_return_min", 0.0)), float(r.get("class_return_max", 0.0))
-            expected = float(r.get("expected_return", 0.0))
+            lo = float(r.get("class_return_min", 0.0) or 0.0)
+            hi = float(r.get("class_return_max", 0.0) or 0.0)
+            expected = float(r.get("expected_return", 0.0) or 0.0)
+            pos = r.get("position", "neutral")
+            model_name = r.get("model_name", "")
 
-            # note(메타러너 선택 이유)
+            # note(메타러너 선택 이유 + 부가정보)
             try:
                 note = json.loads(r.get("note", "{}"))
-            except:
+            except Exception:
                 note = {}
 
             regime = note.get("regime", "unknown")
-            meta_choice = note.get("meta_choice", r.get("model_name", ""))
+            meta_choice = note.get("meta_choice", model_name or "")
 
             raw_prob = note.get("raw_prob_pred", r.get("raw_prob"))
             calib_prob = note.get("calib_prob_pred", r.get("calib_prob"))
-            used_minret = note.get("used_minret_filter", False)
+            used_minret = bool(note.get("used_minret_filter", False))
+            explore_used = bool(note.get("explore_used", False))
 
-            status = r.get("status", "pending")
-            if "shadow" in str(direction):
-                tag_status = "<span class='shadow'>섀도우</span>"
-            elif status in ["success", "v_success"]:
-                tag_status = "<span class='success'>성공</span>"
-            elif status in ["fail", "v_fail"]:
-                tag_status = "<span class='fail'>실패</span>"
-            elif status == "pending":
-                tag_status = "<span class='pending'>대기중</span>"
+            status = str(r.get("status", "pending") or "pending")
+
+            # 상태 태그
+            if "shadow" in direction:
+                tag_status = "<span class='shadow'>섀도우 예측</span>"
+                badge_type = "badge-shadow"
             else:
-                tag_status = status
+                badge_type = "badge-main"
+                if status in ["success", "v_success"]:
+                    tag_status = "<span class='success'>성공 (평가 완료)</span>"
+                elif status in ["fail", "v_fail"]:
+                    tag_status = "<span class='fail'>실패 (평가 완료)</span>"
+                elif status == "pending":
+                    tag_status = "<span class='pending'>대기중</span>"
+                elif status == "invalid":
+                    tag_status = "<span class='fail'>무효 (데이터 이상)</span>"
+                else:
+                    tag_status = status
 
             # 수익률 구간 텍스트
             class_txt = f"{lo*100:.2f}% ~ {hi*100:.2f}%"
@@ -1072,56 +1167,132 @@ def check_log_full():
             if isinstance(topk, str) and topk.startswith("["):
                 try:
                     topk = json.loads(topk)
-                except:
+                except Exception:
                     topk = []
             elif not isinstance(topk, list):
                 topk = []
 
+            # 평가 마감 시간/남은 시간 계산
+            ts = r.get("timestamp")
+            eta_text = "시간 정보 없음"
+            horizon_text = ""
+            try:
+                ts_dt = pd.to_datetime(ts, errors="coerce")
+                if ts_dt is not None and not pd.isna(ts_dt):
+                    if ts_dt.tzinfo is None:
+                        ts_dt = KST.localize(ts_dt)
+                    else:
+                        ts_dt = ts_dt.tz_convert(KST)
+
+                    hours_map = {"단기": 4, "중기": 24, "장기": 168}
+                    h = hours_map.get(str(strat), hours_map.get(str(r.get("strategy", "")), 6))
+                    deadline = ts_dt + timedelta(hours=h)
+
+                    # 남은 시간
+                    remaining = (deadline - now_kst).total_seconds() / 3600.0
+                    if remaining > 0:
+                        eta_text = f"평가 마감까지 약 {remaining:.1f}시간 남음"
+                    else:
+                        eta_text = "평가 마감 시간 지남"
+
+                    horizon_text = f"{strat} 평가 기준: 예측 시점 기준 약 {h}시간 뒤까지 수익 도달 여부 확인"
+            except Exception:
+                pass
+
+            # 실제 수익률(평가 결과)
+            try:
+                real_ret = float(r.get("return", r.get("return_value", 0.0)) or 0.0)
+            except Exception:
+                real_ret = 0.0
+
+            # 실패학습(failure_db) 반영 여부
+            failure_learn_text = "해당 없음"
+            if status in ["fail", "v_fail"] and "shadow" not in direction:
+                try:
+                    in_failure_db = check_failure_exists(dict(r))
+                    if in_failure_db:
+                        failure_learn_text = "❗ 실패 패턴 DB에 이미 기록됨 (실패학습 대상)"
+                    else:
+                        failure_learn_text = "⚠ 아직 실패 패턴 DB에 기록되지 않음 (실패학습 대상 후보)"
+                except Exception:
+                    failure_learn_text = "⚠ 실패학습 상태 확인 중 오류 발생"
+
             html += "<div class='card'>"
 
-            # 제목줄
-            html += f"<div class='meta'>[{tag_status}] {direction}</div>"
+            # 상단 메타/배지
+            html += f"<div class='meta'><span class='badge {badge_type}'>{direction}</span> {tag_status}</div>"
 
-            html += f"""
-            <p><b>• 예측 클래스:</b> {cls_id} ({class_txt})</p>
-            <p><b>• 예상 수익률:</b> {expected*100:.2f}%</p>
-            <p><b>• 예측 방향:</b> {r.get("position")}</p>
-            <p><b>• 사용 모델:</b> {meta_choice}</p>
-            """
+            # 예측 정보
+            html += f"<div class='row-line'><span class='key'>예측 클래스</span><span class='value'>{cls_id} ({class_txt})</span></div>"
+            html += f"<div class='row-line'><span class='key'>예상 수익률</span><span class='value'>{expected*100:.2f}%</span></div>"
+            html += f"<div class='row-line'><span class='key'>예측 방향</span><span class='value'>{pos}</span></div>"
+            html += f"<div class='row-line'><span class='key'>선택 모델</span><span class='value'>{meta_choice}</span></div>"
 
-            # 확률
-            html += "<p><b>• 확률 관련:</b><br>"
+            # 확률 정보
+            html += "<div class='row-line'><span class='key'>확률</span><span class='value'>"
+            parts = []
             if raw_prob is not None:
-                html += f" - raw prob: {raw_prob:.4f}<br>"
+                parts.append(f"raw {raw_prob:.4f}")
             if calib_prob is not None:
-                html += f" - calibrated prob: {calib_prob:.4f}<br>"
-            html += f" - top_k classes: {topk}</p>"
+                parts.append(f"calib {calib_prob:.4f}")
+            if parts:
+                html += " / ".join(parts)
+            else:
+                html += "정보 없음"
+            html += "</span></div>"
 
-            # 메타러너 해설
-            html += "<p><b>• 선택 이유(메타러너):</b><br>"
-            html += f" - regime: {regime}<br>"
+            html += f"<div class='row-line'><span class='key'>상위 클래스</span><span class='value'>{topk}</span></div>"
+
+            # 메타러너/필터 설명
+            meta_desc = []
+            meta_desc.append(f"시장 상태(regime) = {regime}")
             if used_minret:
-                html += f" - 1% 미만 수익구간 제거 필터 작동 → 통과한 클래스 선택<br>"
-            if note.get("explore_used", False):
-                html += f" - 확률차 근접 → 탐색(explore) 모드 사용<br>"
-            html += "</p>"
+                meta_desc.append("1% 미만 수익구간 제거 필터 통과한 클래스만 사용")
+            if explore_used:
+                meta_desc.append("상위 모델 간 점수 차이 작아서 탐색(explore) 모드 사용")
+            if not meta_desc:
+                meta_desc.append("특별한 추가 조건 없이 기본 확률/가드 기반 선택")
+            html += f"<div class='row-line'><span class='key'>선택 이유</span><span class='value'>{'<br>'.join(meta_desc)}</span></div>"
 
-            # 필터/가드 설명
-            html += "<p><b>• 가드/필터 해설:</b><br>"
-            html += f" - Profit filter(1%): {'통과' if abs(expected)>=0.01 else '미달 → 보류'}<br>"
-            html += f" - RealityGuard: {'비활성(soft-pass)' }<br>"
-            html += f" - ExitGuard: {'통과' if abs(expected)>=0.005 else '약함'}<br>"
-            html += "</p>"
+            # 가드/필터 요약
+            profit_pass = "통과" if abs(expected) >= 0.01 else "미달(1% 미만)"
+            html += "<div class='row-line'><span class='key'>가드 요약</span><span class='value'>"
+            html += f"Profit Filter(±1%): {profit_pass}, ExitGuard: {'통과' if abs(expected) >= 0.005 else '약함'}, RealityGuard: 현재 soft-pass(사실상 off)"
+            html += "</span></div>"
 
-            # 이유(reason)
-            html += f"<p><b>• 내역:</b> {r.get('reason')}</p>"
+            # 평가 상태/남은 시간
+            html += "<div class='row-line'><span class='key'>평가 상태</span><span class='value'>"
+            if "shadow" in direction:
+                html += "섀도우 예측은 참고용이며, 메인 예측의 성공/실패와 별도로 분석됩니다."
+            else:
+                if status in ["success", "v_success"]:
+                    html += f"평가 완료 — 성공 (실제 수익률: {real_ret*100:.2f}%)"
+                elif status in ["fail", "v_fail"]:
+                    html += f"평가 완료 — 실패 (실제 수익률: {real_ret*100:.2f}%)"
+                elif status == "pending":
+                    html += f"평가 대기 중 — {eta_text}"
+                elif status == "invalid":
+                    html += "무효 — 데이터 이상 또는 평가 불가"
+                else:
+                    html += f"{status} — {eta_text}"
+            html += "</span></div>"
 
-            html += f"<p><b>• 시간:</b> {r.get('timestamp')}</p>"
+            if horizon_text:
+                html += f"<div class='row-line'><span class='key'>평가 기준</span><span class='value'>{horizon_text}</span></div>"
+
+            # 실패학습 상태
+            if "shadow" not in direction and status in ["fail", "v_fail"]:
+                html += f"<div class='row-line'><span class='key'>실패학습</span><span class='value'>{failure_learn_text}</span></div>"
+
+            # 이유 + 시간
+            html += f"<div class='row-line'><span class='key'>내역</span><span class='value'>{r.get('reason')}</span></div>"
+            html += f"<div class='row-line'><span class='key'>예측 시각</span><span class='value'>{r.get('timestamp')}</span></div>"
 
             html += "</div>"
 
     html += "</body></html>"
     return html
+
 @app.route("/check-log")
 def check_log():
     try:
