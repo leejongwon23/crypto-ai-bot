@@ -3,6 +3,7 @@
 _kline_cache = {}
 
 import os, time, json, pickle, requests, pandas as pd, numpy as np, pytz, glob, hashlib, random
+from io import StringIO
 from sklearn.preprocessing import MinMaxScaler
 from requests.exceptions import HTTPError, RequestException
 from typing import List, Dict, Any, Optional, Tuple
@@ -14,6 +15,13 @@ try:
 except Exception:
     OHLCV_PROVIDER = os.getenv("OHLCV_PROVIDER", "INTERMEDIATE")
     OHLCV_DATA_DIR = os.getenv("OHLCV_DATA_DIR", "/persistent/ohlcv")
+
+# ✅ PROVIDER 모드 & 중계 서버 설정 (환경변수 기반)
+OHLCV_PROVIDER = str(OHLCV_PROVIDER or "INTERMEDIATE").upper()
+OHLCV_RELAY_BASE_URL = os.getenv("OHLCV_RELAY_BASE_URL", "")  # 예: "https://your-relay.example.com"
+OHLCV_RELAY_PATH = os.getenv("OHLCV_RELAY_PATH", "/ohlcv")    # 예: "/ohlcv"
+OHLCV_RELAY_TIMEOUT = float(os.getenv("OHLCV_RELAY_TIMEOUT", "8"))
+OHLCV_RELAY_API_KEY = os.getenv("OHLCV_RELAY_API_KEY", "")
 
 # === CHANGE [utils: quick label check] ===
 def _count_valid_labels_for_df(df: pd.DataFrame, symbol: str, strategy: str) -> int:
@@ -313,8 +321,8 @@ class GroupOrderManager:
             with open(target, "r", encoding="utf-8") as f:
                 st = json.load(f)
 
-            # ❗❗ 핵심 수정 포인트:  
-            # 저장된 groups/symbols 를 절대 로드하지 않고  
+            # ❗❗ 핵심 수정 포인트:
+            # 저장된 groups/symbols 를 절대 로드하지 않고
             # 코드에 정의된 SYMBOL_GROUPS 를 항상 기준으로 사용한다.
             # 즉, 파일에서는 'idx, trained, last_predicted_idx' 만 복구.
             self.idx = int(st.get("idx", 0))
@@ -564,7 +572,6 @@ def get_btc_dominance():
     except Exception:
         return BTC_DOMINANCE_CACHE["value"]
 
-
 def future_gains_by_hours(df: pd.DataFrame, horizon_hours: int) -> np.ndarray:
     if df is None or len(df) == 0 or "timestamp" not in df.columns:
         return np.zeros(0 if df is None else len(df), dtype=np.float32)
@@ -659,7 +666,7 @@ def _log_fetch_summary(symbol: str, strategy: str, limit: int, rows_bybit: int, 
     print(f"[FETCH] {symbol}-{strategy} limit={limit} bybit={rows_bybit} binance={rows_binance} src={src} "
           f"| block(bybit={bi_block}:{max(0,bi_until_s)}s, binance={bn_block}:{max(0,bn_until_s)}s)")
 
-# ========================= 거래소/수집 (HTTP 제거, 중계데이터 전용) =========================
+# ========================= 거래소/수집 (중계 HTTP + 로컬 백업) =========================
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     cols = ["timestamp","open","high","low","close","volume","datetime"]
     if df is None: return pd.DataFrame(columns=cols)
@@ -740,34 +747,20 @@ def _interval_aliases(iv: str) -> List[str]:
             out.append(k)
     return out
 
-# === CHANGE: 중계데이터 파일 찾기 ===
+# === LOCAL: 중계데이터 파일 찾기 (백업/테스트용) ===
 def _find_ohlcv_paths(symbol: str, interval: str) -> List[str]:
-    """
-    OHLCV_DATA_DIR 안에서 심볼/인터벌에 해당하는 파일을 찾는다.
-    지원 패턴 예:
-      - {DIR}/{SYMBOL}_{INTERVAL}.parquet / .pq / .csv / .csv.gz
-      - {DIR}/{SYMBOL}/{SYMBOL}_{INTERVAL}.parquet / .csv / .csv.gz
-      - {DIR}/{SYMBOL}/*_{INTERVAL}.parquet / .csv / .csv.gz
-    + INTERVAL alias 를 자동으로 함께 검색(e.g. W <-> 1w, D <-> 1d, 240 <-> 4h ...)
-    """
     sym = symbol.upper()
     base = OHLCV_DATA_DIR
-
-    # 실제 interval과 alias를 모두 검색
     iv_list = _interval_aliases(str(interval))
-
     files: List[str] = []
     exts = [".parquet", ".pq", ".csv", ".csv.gz"]
 
     for iv in iv_list:
-        # 1) 루트 디렉터리 바로 아래
         for ext in exts:
             patterns = [
                 os.path.join(base, f"{sym}_{iv}{ext}"),
             ]
-            # 2) 서브디렉터리 {SYM}/ 아래
             patterns.append(os.path.join(base, sym, f"{sym}_{iv}{ext}"))
-            # 3) 서브디렉터리 {SYM}/ 아래에서 *_{iv}.* 패턴
             if ext in (".parquet", ".csv", ".csv.gz"):
                 patterns.append(os.path.join(base, sym, f"*_{iv}{ext}"))
 
@@ -778,23 +771,18 @@ def _find_ohlcv_paths(symbol: str, interval: str) -> List[str]:
                             files.append(p)
                 except Exception:
                     continue
-
-    # 필요한 경우, 최후 수단으로 한 단계 깊은 재귀 검색도 추가 가능 (성능 고려)
-    # 예: /persistent/ohlcv/**/{SYM}_*.{ext}
-    # 여기서는 alias 문제 해결이 목적이라 기본 패턴만 사용.
-
     return files
 
 def _load_local_ohlcv(symbol: str, interval: str, limit: int, end_time=None, source_tag: Optional[str] = None) -> pd.DataFrame:
     """
-    거래소 HTTP를 전혀 사용하지 않고,
-    OHLCV_DATA_DIR 에 저장된 CSV/Parquet 파일에서만 캔들을 읽어온다.
+    LOCAL 모드에서만 사용:
+      - OHLCV_DATA_DIR 에 저장된 CSV/Parquet 파일에서 캔들을 읽어온다.
     """
     paths = _find_ohlcv_paths(symbol, interval)
     if not paths:
         print(f"[⚠️ OHLCV 파일 없음] symbol={symbol} interval={interval} dir={OHLCV_DATA_DIR}")
         out = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
-        out.attrs["source_exchange"] = source_tag or f"PROVIDER:{OHLCV_PROVIDER}"
+        out.attrs["source_exchange"] = source_tag or f"LOCAL:{OHLCV_DATA_DIR}"
         out.attrs["recent_rows"] = 0
         out.attrs["not_enough_rows"] = True
         return out
@@ -813,7 +801,7 @@ def _load_local_ohlcv(symbol: str, interval: str, limit: int, end_time=None, sou
 
     if not chunks:
         out = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
-        out.attrs["source_exchange"] = source_tag or f"PROVIDER:{OHLCV_PROVIDER}"
+        out.attrs["source_exchange"] = source_tag or f"LOCAL:{OHLCV_DATA_DIR}"
         out.attrs["recent_rows"] = 0
         out.attrs["not_enough_rows"] = True
         return out
@@ -821,7 +809,102 @@ def _load_local_ohlcv(symbol: str, interval: str, limit: int, end_time=None, sou
     df_raw = pd.concat(chunks, ignore_index=True)
     df = _normalize_df(df_raw)
 
-    # end_time 이전까지만 사용 (옵션)
+    if end_time is not None and not df.empty:
+        ts = _parse_ts_series(df["timestamp"])
+        try:
+            cutoff = pd.to_datetime(end_time)
+            if getattr(cutoff, "tzinfo", None) is None:
+                cutoff = cutoff.tz_localize("UTC").tz_convert("Asia/Seoul")
+            else:
+                cutoff = cutoff.tz_convert("Asia/Seoul")
+            df = df.loc[ts <= cutoff].copy()
+        except Exception:
+            pass
+
+    if limit is not None and limit > 0:
+        df = _clip_tail(df, int(limit))
+
+    df.attrs["source_exchange"] = source_tag or f"LOCAL:{OHLCV_DATA_DIR}"
+    df.attrs["recent_rows"] = int(len(df))
+    df.attrs["not_enough_rows"] = len(df) == 0
+    return df
+
+# === NEW: RELAY HTTP 호출 ===
+def _fetch_relay_ohlcv(symbol: str, interval: str, limit: int, end_time=None) -> pd.DataFrame:
+    """
+    중계데이터 서버에서 직접 OHLCV를 받아오는 함수 (HTTP).
+
+    ⚠ 여기 안의 URL/파라미터는 '템플릿'이야.
+      실제 중계업체 스펙에 맞게:
+        - OHLCV_RELAY_BASE_URL
+        - OHLCV_RELAY_PATH
+        - params 이름들
+        - 응답 컬럼명
+      만 맞춰주면 됨.
+    """
+    if not OHLCV_RELAY_BASE_URL:
+        raise RuntimeError("OHLCV_RELAY_BASE_URL 환경변수가 설정되지 않았습니다.")
+
+    url = OHLCV_RELAY_BASE_URL.rstrip("/") + OHLCV_RELAY_PATH
+
+    params: Dict[str, Any] = {
+        "symbol": symbol.upper(),          # 필요시 중계 스펙에 맞게 변경
+        "interval": str(interval),         # 예: "1d", "4h", "1w" 등
+        "limit": int(limit),
+    }
+
+    if end_time is not None:
+        try:
+            ts = pd.to_datetime(end_time)
+            if getattr(ts, "tzinfo", None) is None:
+                ts = ts.tz_localize("UTC").tz_convert("Asia/Seoul")
+            else:
+                ts = ts.tz_convert("Asia/Seoul")
+            # 예시: UNIX 초단위 타임스탬프로 보내기
+            params["end_time"] = int(ts.timestamp())
+        except Exception:
+            pass
+
+    headers = {"User-Agent": REQUEST_HEADERS["User-Agent"]}
+    if OHLCV_RELAY_API_KEY:
+        # 필요시 Authorization 헤더로 전달
+        headers["Authorization"] = f"Bearer {OHLCV_RELAY_API_KEY}"
+
+    resp = requests.get(url, params=params, headers=headers, timeout=OHLCV_RELAY_TIMEOUT)
+    resp.raise_for_status()
+
+    ctype = (resp.headers.get("content-type") or "").lower()
+    text = resp.text
+
+    # 1) JSON 응답 (가장 일반적인 형태)
+    if "json" in ctype:
+        data = resp.json()
+        return pd.DataFrame(data)
+
+    # 2) CSV 응답
+    if "csv" in ctype or text.lstrip().startswith("timestamp"):
+        return pd.read_csv(StringIO(text))
+
+    # 3) 헤더가 애매한 경우, JSON → 실패 시 CSV 순서로 시도
+    try:
+        data = resp.json()
+        return pd.DataFrame(data)
+    except Exception:
+        return pd.read_csv(StringIO(text))
+
+def _load_http_ohlcv(symbol: str, interval: str, limit: int, end_time=None, source_tag: Optional[str] = None) -> pd.DataFrame:
+    try:
+        raw = _fetch_relay_ohlcv(symbol, interval, limit, end_time=end_time)
+    except Exception as e:
+        print(f"[⚠️ RELAY OHLCV 실패] symbol={symbol} interval={interval}: {e}")
+        out = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+        out.attrs["source_exchange"] = source_tag or "RELAY_ERROR"
+        out.attrs["recent_rows"] = 0
+        out.attrs["not_enough_rows"] = True
+        return out
+
+    df = _normalize_df(raw)
+
     if end_time is not None and not df.empty:
         ts = _parse_ts_series(df["timestamp"])
         try:
@@ -842,25 +925,46 @@ def _load_local_ohlcv(symbol: str, interval: str, limit: int, end_time=None, sou
     df.attrs["not_enough_rows"] = len(df) == 0
     return df
 
-# === CHANGE: Bybit/ Binance HTTP 완전 제거 ===
+# === NEW: 공통 로더 (PROVIDER 모드에 따라 HTTP/LOCAL 선택) ===
+def _load_ohlcv(symbol: str, interval: str, limit: int, end_time=None, source_tag: Optional[str] = None) -> pd.DataFrame:
+    """
+    OHLCV_PROVIDER 모드에 따라:
+      - RELAY/INTERMEDIATE/HTTP → 중계 HTTP 호출
+      - LOCAL → 로컬 파일
+    """
+    mode = (OHLCV_PROVIDER or "").upper()
+    if mode in ("RELAY", "INTERMEDIATE", "HTTP", "PROVIDER"):
+        return _load_http_ohlcv(symbol, interval, limit, end_time=end_time, source_tag=source_tag)
+    elif mode == "LOCAL":
+        return _load_local_ohlcv(symbol, interval, limit, end_time=end_time, source_tag=source_tag)
+    else:
+        # 알 수 없는 모드는 안전하게 RELAY 시도 후 실패 시 로컬로 폴백
+        try:
+            return _load_http_ohlcv(symbol, interval, limit, end_time=end_time, source_tag=source_tag)
+        except Exception:
+            return _load_local_ohlcv(symbol, interval, limit, end_time=end_time, source_tag=source_tag)
+
+# === CHANGE: Bybit/ Binance HTTP 완전 제거 → 중계/로컬 전용 ===
 def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
     """
     ✅ 변경 후:
     - 더 이상 Bybit HTTP를 호출하지 않는다.
-    - OHLCV_DATA_DIR 안의 중계데이터 파일에서만 캔들을 읽어온다.
+    - OHLCV_PROVIDER 모드에 따라:
+      - RELAY/INTERMEDIATE/HTTP → 중계서버에서 가져오기
+      - LOCAL → OHLCV_DATA_DIR 파일에서만 읽기
     """
     real_interval = _map_bybit_interval(interval)
-    return _load_local_ohlcv(symbol, real_interval, limit, end_time=end_time, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
+    return _load_ohlcv(symbol, real_interval, limit, end_time=end_time, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
 
 def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
     """
     ✅ 변경 후:
     - Binance HTTP도 전혀 사용하지 않는다.
-    - get_kline 과 동일하게 중계데이터 파일에서 읽는다.
+    - get_kline 과 동일하게 중계/로컬에서만 읽는다.
     (함수 이름은 train/predict 호환을 위해 유지)
     """
     real_interval = str(interval)
-    return _load_local_ohlcv(symbol, real_interval, limit, end_time=end_time, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
+    return _load_ohlcv(symbol, real_interval, limit, end_time=end_time, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
 
 # ========================= 통합 수집 + 병합 =========================
 def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
@@ -868,7 +972,8 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
     ✅ 변경 후:
     - Bybit + Binance HTTP 병합 로직 제거.
     - STRATEGY_CONFIG 의 interval/limit 에 맞춰
-      OHLCV_DATA_DIR 의 파일에서만 읽어와 normalize.
+      OHLCV_PROVIDER 모드에 따라
+      중계서버 또는 로컬 파일에서만 읽어와 normalize.
     """
     config = STRATEGY_CONFIG.get(strategy)
     if not config:
@@ -877,7 +982,7 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
     interval = config["interval"]
     base_limit = int(config["limit"])
 
-    df_all = _load_local_ohlcv(symbol, interval, base_limit, end_time=None, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
+    df_all = _load_ohlcv(symbol, interval, base_limit, end_time=None, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
     if df_all is None or df_all.empty:
         return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
 
@@ -893,17 +998,17 @@ def get_merged_kline_by_strategy(symbol: str, strategy: str) -> pd.DataFrame:
 # =============== 임의 인터벌 수집기(MTF) ===============
 def get_kline_interval(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     try:
-        df = _load_local_ohlcv(symbol, interval, limit, end_time=None, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
+        df = _load_ohlcv(symbol, interval, limit, end_time=None, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
         return df
     except Exception:
         return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
 
 def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, force_refresh: bool = False):
     """
-    ✔ 변경 후 (중계데이터 전용):
+    ✔ 변경 후 (중계데이터 전용 + 로컬백업):
         - 거래소 HTTP 전혀 사용 안 함.
         - STRATEGY_CONFIG 기준 interval/limit*3 만큼
-          OHLCV_DATA_DIR 에서만 읽어서 사용.
+          OHLCV_PROVIDER 모드에 따라 중계/로컬에서만 읽어서 사용.
         - 1000개 샘플링 / 부족한 경우 그대로 사용 로직은 유지.
     """
     try:
@@ -952,9 +1057,9 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
                 return disk
 
         # -----------------------------
-        # 4) 중계데이터에서 3배 깊게 수집
+        # 4) 중계/로컬에서 3배 깊게 수집
         # -----------------------------
-        df = _load_local_ohlcv(symbol, interval, limit_for_fetch, end_time=None, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
+        df = _load_ohlcv(symbol, interval, limit_for_fetch, end_time=None, source_tag=f"PROVIDER:{OHLCV_PROVIDER}")
         if not isinstance(df, pd.DataFrame):
             df = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
 
@@ -1184,7 +1289,6 @@ def _compute_mtf_features(symbol: str, strategy: str, df_base: pd.DataFrame) -> 
         d = _synthesize_multi(df_b, iv) if iv in ("3D","2D") else get_kline_interval(symbol, iv, limit=max(200, len(df_b)))
         if d is None or d.empty: continue
         feat = _compute_feature_block(d)
-        # ✔ 3번 아이디어 피처까지 포함 (MTF 컨텍스트에도 적용)
         feat = feat[[
             "timestamp",
             "close",
@@ -1196,7 +1300,6 @@ def _compute_mtf_features(symbol: str, strategy: str, df_base: pd.DataFrame) -> 
         ]]
         ctx_blocks.append(_prefix_cols(feat, f"f{iv}"))
     base_feat = _compute_feature_block(df_b)
-    # ✔ 베이스 피처에도 새 피처 반영
     base_feat = base_feat[[
         "timestamp",
         "open","high","low","close","volume",
@@ -1457,9 +1560,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             group_id=None,
         )
 
-        # 라벨 길이 검증
         if labels_full is not None and len(labels_full) == len(df):
-            # 윈도우 offset 적용 (window 이후부터 y 등록)
             y_seq = labels_full[window:len(df)]
             class_ranges_used = class_ranges
 
@@ -1467,7 +1568,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         safe_failed_result(symbol_name, strategy, reason=f"make_labels 실패: {e}")
         return _dummy(symbol_name)
 
-    # 라벨 없으면 즉시 종료
     if y_seq is None or len(y_seq) == 0:
         safe_failed_result(symbol_name, strategy, reason="labels_empty_skip_backup")
         return _dummy(symbol_name)
@@ -1489,13 +1589,11 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
     X = np.array(samples, dtype=np.float32)
     y = np.array(y_seq[: len(X)], dtype=np.int64)
 
-    # 음수 라벨 제거
     keep = np.where(y >= 0)[0]
     if keep.size == 0:
         return _dummy(symbol_name)
     X, y = X[keep], y[keep]
 
-    # 길이 동기화
     m = min(len(X), len(y))
     if m == 0:
         return _dummy(symbol_name)
@@ -1574,7 +1672,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 def _select_feature_columns(feat_df: pd.DataFrame) -> List[str]:
     if feat_df is None or feat_df.empty: return []
     cols = [c for c in feat_df.columns if c != "timestamp"]
-    # 시간 순으로 의미 있는 피처 우선
     pri = [
         "open","high","low","close","volume",
         "rsi","macd","macd_signal","macd_hist",
@@ -1582,7 +1679,6 @@ def _select_feature_columns(feat_df: pd.DataFrame) -> List[str]:
         "bb_width","bb_percent_b",
         "atr","stoch_k","stoch_d","williams_r",
         "volatility","roc","vwap","trend_score",
-        # ✔ 3번 아이디어 피처를 우선 리스트에 포함
         "upper_wick","lower_wick","body_size","wick_ratio","vol_ratio","fake_high","fake_low",
     ]
     ordered = [c for c in pri if c in cols]
@@ -1599,7 +1695,6 @@ def get_feature_window_for_inference(symbol: str, strategy: str, window: int, in
         return X, meta
     cols = _select_feature_columns(feat)
     mat = feat[cols].tail(window).to_numpy(dtype=np.float32)
-    # 패딩 또는 자르기
     F = input_size if input_size else max(MIN_FEATURES, mat.shape[1])
     if mat.shape[1] < F:
         pad = np.zeros((mat.shape[0], F - mat.shape[1]), dtype=np.float32)
@@ -1660,7 +1755,6 @@ def build_training_dataset(symbol: str, strategy: str, window: int, input_size: 
         X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
         y = np.zeros((1,), dtype=np.int64)
         return X, y, {"error": "no_features"}
-    # 모델 학습용 리스트 레코드로 변환
     records = feat_df.copy()
     records["symbol"] = symbol
     recs = records.to_dict(orient="records")
@@ -1669,7 +1763,6 @@ def build_training_dataset(symbol: str, strategy: str, window: int, input_size: 
         "n": int(len(y)),
         "F": int(X.shape[-1]),
     }
-    # ✅ create_dataset가 넣어둔 라벨 메타 그대로 밖으로
     for k, v in getattr(X, "attrs", {}).items():
         meta[k] = v
     return X, y, meta
