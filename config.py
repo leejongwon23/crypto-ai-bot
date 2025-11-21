@@ -109,29 +109,13 @@ _default_config = {
     "AUTOPREDICT_ON_SYMBOL_DONE": 0,
 
     # DATA
-    # ※ 더 이상 거래소(bybit/binance) 직접 호출 전제 X
-    #    → 외부 OHLCV 중계 데이터(vendor)에서 읽어오는 전제로 단순화
     "DATA": {
-        "merge_enabled": False,
-        "sources": ["ohlcv_vendor"],  # 과거 ["bybit", "binance"] 사용하던 자리
-        "prefer": "vendor_only",
+        "merge_enabled": True,
+        "sources": ["bybit", "binance"],
+        "prefer": "binance_if_overlap",
         "align": {"method": "timestamp", "tolerance_sec": 60},
         "fill":  {"method": "ffill", "max_gap": 2},
         "dedup": {"enabled": True, "keep": "last"}
-    },
-
-    # ✅ OHLCV 중계 데이터 제공자 기본 설정
-    # - provider:    어떤 타입의 공급자인지 (예: external_csv, http_api 등)
-    # - base_dir:    CSV 등을 쌓아둘 루트 디렉터리
-    # - file_pattern: utils.py에서 사용할 파일 이름 패턴
-    # - spot_as_futures: 현물 캔들을 선물 패턴 학습용으로 그대로 쓸지 여부
-    "OHLCV": {
-        "provider": "external_csv",
-        "base_dir": _jp("ohlcv"),
-        "file_pattern": "{symbol}_{interval}.csv",
-        "timestamp_col": "timestamp",
-        "price_cols": ["open", "high", "low", "close", "volume"],
-        "spot_as_futures": True
     },
 
     # 🔴 여기 원래 True/True 였던 것 ↓↓↓
@@ -300,7 +284,6 @@ STRATEGY_CONFIG = {
     "단기": {"interval": "240", "limit": 1000, "binance_interval": "4h"},
     "중기": {"interval": "D",   "limit": 1000, "binance_interval": "1d"},
     # 장기: 주봉(1w) 기준, 최대 1000개 요청 (실제로는 거래소가 줄 수 있는 만큼만 수집)
-    # ⚠️ binance_interval 필드는 과거 호환용으로만 유지, 중계데이터 모드에서는 utils.py에서 무시 가능
     "장기": {"interval": "W",   "limit": 1000, "binance_interval": "1w"},
 }
 
@@ -360,16 +343,15 @@ def save_config():
         _log("[⚠️ config.py] config.json 저장 실패 → 메모리 유지, 예외 미전파")
 
 # Binance 폴백 상태 로그
-# ※ 이제는 기본값을 0으로 내려서 "거래소 HTTP 폴백 OFF" 상태가 기본
 try:
-    _ENABLE_BINANCE = int(os.getenv("ENABLE_BINANCE", "0"))
+    _ENABLE_BINANCE = int(os.getenv("ENABLE_BINANCE", "1"))
     _log(
-        "[config] ENABLE_BINANCE=1 (legacy exchange fallback ON)"
+        "[config] ENABLE_BINANCE=1 (fallback ready)"
         if _ENABLE_BINANCE == 1
-        else "[config] ENABLE_BINANCE=0 (exchange HTTP off; using external OHLCV)"
+        else "[config] ENABLE_BINANCE=0 (fallback disabled)"
     )
 except Exception:
-    _ENABLE_BINANCE = 0
+    _ENABLE_BINANCE = 1
 
 # ===== Getter/Setter =====
 def set_NUM_CLASSES(n):
@@ -449,19 +431,6 @@ def get_BLEND():    return copy.deepcopy(_config.get("BLEND", _default_config["B
 def get_PUBLISH():  return copy.deepcopy(_config.get("PUBLISH", _default_config["PUBLISH"]))
 def get_BIN_META(): return copy.deepcopy(_config.get("BIN_META", _default_config["BIN_META"]))
 def get_SPARSE_CLASS(): return copy.deepcopy(_config.get("SPARSE_CLASS", _default_config.get("SPARSE_CLASS", {})))
-
-# OHLCV 벤더 설정 Getter
-def get_OHLCV() -> dict:
-    return copy.deepcopy(_config.get("OHLCV", _default_config["OHLCV"]))
-
-def get_OHLCV_BASE_DIR() -> str:
-    cfg = get_OHLCV()
-    return cfg.get("base_dir", _jp("ohlcv"))
-
-# ==== OHLCV 런타임 전역 (utils.py 호환용) ====
-_OHLCV_CFG = get_OHLCV()
-OHLCV_PROVIDER = _OHLCV_CFG.get("provider", "external_csv")
-OHLCV_DATA_DIR = _OHLCV_CFG.get("base_dir", get_OHLCV_BASE_DIR())
 
 # ===== 파이프라인 게이트 Getter =====
 def _env_bool(v): return str(v).strip().lower() not in {"0", "false", "no", "off", "none"}
@@ -673,7 +642,7 @@ def _strategy_horizon_hours(strategy: str) -> int:
     cfg = STRATEGY_CONFIG.get(strategy, {})
     interval = str(cfg.get("interval", "D")).upper()
 
-    # 숫자면 분 단위로 보고 시간으로 변환 (예: "240" → 4시간)
+    # 숫자면 분 단위로 보고 시간으로 변환 (예: "240" → 4h)
     if interval.isdigit():
         try:
             minutes = int(interval)
@@ -707,7 +676,7 @@ def _future_extreme_signed_returns(df, horizon_hours: int, strategy: str = None)
     ts = pd.to_datetime(df["timestamp"], errors="coerce")
     close = pd.to_numeric(df["close"], errors="coerce").ffill().bfill().astype(float).values
     high  = pd.to_numeric(df.get("high", df["close"]), errors="coerce").ffill().bfill().astype(float).values
-    low   = pd.to_numeric(df.get("low",  df["close"]), errors="coerce").ffill().bfill().astype(float).values
+    low   = pd.to_numeric(df.get("low", df["close"]), errors="coerce").ffill().bfill().astype(float).values
 
     # 평균 캔들 간격 계산
     if len(ts) > 1:
@@ -1302,6 +1271,4 @@ __all__ = [
     "is_config_readonly", "is_disk_cache_off",
     "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
     "get_BIN_META", "get_SPARSE_CLASS",
-    "get_OHLCV", "get_OHLCV_BASE_DIR",
-    "OHLCV_PROVIDER", "OHLCV_DATA_DIR",
-    ]
+            ]
