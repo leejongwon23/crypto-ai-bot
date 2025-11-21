@@ -701,6 +701,45 @@ def _clip_tail(df: pd.DataFrame, limit: int) -> pd.DataFrame:
     if not mask.all(): df = df[mask].reset_index(drop=True)
     return df
 
+# === NEW: 인터벌 별 alias 매핑 (파일명 호환) ===
+def _interval_aliases(iv: str) -> List[str]:
+    """
+    예:
+      - 'W'  → ['W', '1w', '1W']
+      - 'D'  → ['D', '1d', '1D']
+      - '240'→ ['240', '4h', '4H']
+      - '120'→ ['120', '2h', '2H']
+      - '60' → ['60', '1h', '1H']
+      - '720'→ ['720', '12h', '12H']
+    실제 중계데이터 파일이 어떤 인터벌 표기를 쓰든 최대한 자동으로 매칭되게 함.
+    """
+    iv = str(iv)
+    alias_map: Dict[str, List[str]] = {
+        "W":   ["1w", "1W"],
+        "1w":  ["W", "1W"],
+        "D":   ["1d", "1D"],
+        "1d":  ["D", "1D"],
+        "240": ["4h", "4H"],
+        "4h":  ["240", "4H"],
+        "120": ["2h", "2H"],
+        "2h":  ["120", "2H"],
+        "60":  ["1h", "1H"],
+        "1h":  ["60", "1H"],
+        "720": ["12h", "12H"],
+        "12h": ["720", "12H"],
+    }
+    out = [iv]
+    for k, v in alias_map.items():
+        if iv == k and v:
+            for a in v:
+                if a not in out:
+                    out.append(a)
+    # 역방향도 커버 (iv가 alias일 때 원래 키를 찾을 수 있도록)
+    for k, v in alias_map.items():
+        if iv in v and k not in out:
+            out.append(k)
+    return out
+
 # === CHANGE: 중계데이터 파일 찾기 ===
 def _find_ohlcv_paths(symbol: str, interval: str) -> List[str]:
     """
@@ -708,33 +747,42 @@ def _find_ohlcv_paths(symbol: str, interval: str) -> List[str]:
     지원 패턴 예:
       - {DIR}/{SYMBOL}_{INTERVAL}.parquet / .pq / .csv / .csv.gz
       - {DIR}/{SYMBOL}/{SYMBOL}_{INTERVAL}.parquet / .csv / .csv.gz
+      - {DIR}/{SYMBOL}/*_{INTERVAL}.parquet / .csv / .csv.gz
+    + INTERVAL alias 를 자동으로 함께 검색(e.g. W <-> 1w, D <-> 1d, 240 <-> 4h ...)
     """
     sym = symbol.upper()
-    iv = str(interval)
     base = OHLCV_DATA_DIR
 
-    patterns = [
-        os.path.join(base, f"{sym}_{iv}.parquet"),
-        os.path.join(base, f"{sym}_{iv}.pq"),
-        os.path.join(base, f"{sym}_{iv}.csv"),
-        os.path.join(base, f"{sym}_{iv}.csv.gz"),
-        os.path.join(base, sym, f"{sym}_{iv}.parquet"),
-        os.path.join(base, sym, f"{sym}_{iv}.pq"),
-        os.path.join(base, sym, f"{sym}_{iv}.csv"),
-        os.path.join(base, sym, f"{sym}_{iv}.csv.gz"),
-        os.path.join(base, sym, f"*_{iv}.parquet"),
-        os.path.join(base, sym, f"*_{iv}.csv"),
-        os.path.join(base, sym, f"*_{iv}.csv.gz"),
-    ]
+    # 실제 interval과 alias를 모두 검색
+    iv_list = _interval_aliases(str(interval))
 
     files: List[str] = []
-    for pat in patterns:
-        try:
-            for p in sorted(glob.glob(pat)):
-                if p not in files:
-                    files.append(p)
-        except Exception:
-            continue
+    exts = [".parquet", ".pq", ".csv", ".csv.gz"]
+
+    for iv in iv_list:
+        # 1) 루트 디렉터리 바로 아래
+        for ext in exts:
+            patterns = [
+                os.path.join(base, f"{sym}_{iv}{ext}"),
+            ]
+            # 2) 서브디렉터리 {SYM}/ 아래
+            patterns.append(os.path.join(base, sym, f"{sym}_{iv}{ext}"))
+            # 3) 서브디렉터리 {SYM}/ 아래에서 *_{iv}.* 패턴
+            if ext in (".parquet", ".csv", ".csv.gz"):
+                patterns.append(os.path.join(base, sym, f"*_{iv}{ext}"))
+
+            for pat in patterns:
+                try:
+                    for p in sorted(glob.glob(pat)):
+                        if p not in files:
+                            files.append(p)
+                except Exception:
+                    continue
+
+    # 필요한 경우, 최후 수단으로 한 단계 깊은 재귀 검색도 추가 가능 (성능 고려)
+    # 예: /persistent/ohlcv/**/{SYM}_*.{ext}
+    # 여기서는 alias 문제 해결이 목적이라 기본 패턴만 사용.
+
     return files
 
 def _load_local_ohlcv(symbol: str, interval: str, limit: int, end_time=None, source_tag: Optional[str] = None) -> pd.DataFrame:
