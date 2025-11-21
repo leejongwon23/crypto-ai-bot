@@ -458,6 +458,11 @@ def get_OHLCV_BASE_DIR() -> str:
     cfg = get_OHLCV()
     return cfg.get("base_dir", _jp("ohlcv"))
 
+# ==== OHLCV 런타임 전역 (utils.py 호환용) ====
+_OHLCV_CFG = get_OHLCV()
+OHLCV_PROVIDER = _OHLCV_CFG.get("provider", "external_csv")
+OHLCV_DATA_DIR = _OHLCV_CFG.get("base_dir", get_OHLCV_BASE_DIR())
+
 # ===== 파이프라인 게이트 Getter =====
 def _env_bool(v): return str(v).strip().lower() not in {"0", "false", "no", "off", "none"}
 
@@ -668,7 +673,7 @@ def _strategy_horizon_hours(strategy: str) -> int:
     cfg = STRATEGY_CONFIG.get(strategy, {})
     interval = str(cfg.get("interval", "D")).upper()
 
-    # 숫자면 분 단위로 보고 시간으로 변환 (예: "240" → 4h)
+    # 숫자면 분 단위로 보고 시간으로 변환 (예: "240" → 4시간)
     if interval.isdigit():
         try:
             minutes = int(interval)
@@ -702,7 +707,7 @@ def _future_extreme_signed_returns(df, horizon_hours: int, strategy: str = None)
     ts = pd.to_datetime(df["timestamp"], errors="coerce")
     close = pd.to_numeric(df["close"], errors="coerce").ffill().bfill().astype(float).values
     high  = pd.to_numeric(df.get("high", df["close"]), errors="coerce").ffill().bfill().astype(float).values
-    low   = pd.to_numeric(df.get("low", df["close"]), errors="coerce").ffill().bfill().astype(float).values
+    low   = pd.to_numeric(df.get("low",  df["close"]), errors="coerce").ffill().bfill().astype(float).values
 
     # 평균 캔들 간격 계산
     if len(ts) > 1:
@@ -1298,4 +1303,5 @@ __all__ = [
     "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
     "get_BIN_META", "get_SPARSE_CLASS",
     "get_OHLCV", "get_OHLCV_BASE_DIR",
-                ]
+    "OHLCV_PROVIDER", "OHLCV_DATA_DIR",
+    ]
