@@ -966,15 +966,162 @@ def list_models():
     except Exception as e:
         return f"오류: {e}", 500
 
-@app.route("/check-log-full")
+@app.route("/check-log-full", methods=["GET"])
 def check_log_full():
-    try:
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
-        latest = df.sort_values(by="timestamp", ascending=False).head(100)
-        return jsonify(latest.to_dict(orient="records"))
-    except Exception as e:
-        return jsonify({"error": str(e)})
+    """
+    📌 예측로그를 사람이 이해할 수 있도록
+    한국어로 완전 해석해서 보여주는 리포트 라우트.
 
+    - 최근 100개 예측(row)을 읽어옴
+    - 심볼/전략별 그룹화
+    - 선택 모델, 수익률 구간, 방향까지 설명
+    - shadow 모델도 모두 정리
+    - guard / 필터 이유까지 모두 한국어로 해설
+    """
+    import pandas as pd
+    from config import get_class_return_range
+    from datetime import datetime
+    import json, numpy as np
+
+    try:
+        df = pd.read_csv(PREDICTION_LOG_PATH, encoding="utf-8-sig")
+    except Exception:
+        return "<h2>⚠️ prediction_log.csv 파일이 없습니다.</h2>"
+
+    if df.empty:
+        return "<h2>⚠️ 예측 기록이 없습니다.</h2>"
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+
+    # 최근 100개만
+    df = df.sort_values("timestamp", ascending=False).head(100)
+
+    # 심볼-전략 단위 그룹핑
+    grouped = {}
+    for _, r in df.iterrows():
+        sym = str(r.get("symbol", "NONE"))
+        strat = str(r.get("strategy", "NONE"))
+        key = f"{sym}__{strat}"
+        grouped.setdefault(key, [])
+        grouped[key].append(r)
+
+    html = """
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            body { font-family: Arial; padding:20px; background:#fafafa;}
+            h2 { color:#333; border-bottom:1px solid #999; padding-bottom:5px;}
+            .card {background:white; padding:15px; margin-bottom:15px; border-radius:8px;
+                   box-shadow:0 2px 5px rgba(0,0,0,0.1);}
+            .success {color:green; font-weight:bold;}
+            .fail {color:red; font-weight:bold;}
+            .pending {color:#d47f00; font-weight:bold;}
+            .shadow {color:#666;}
+            .meta {color:#0054b3; font-weight:bold;}
+        </style>
+    </head>
+    <body>
+    <h1>📘 YOPO — 예측 리포트 (최근 100개)</h1>
+    """
+
+    # -------------------------------
+    #  각 심볼/전략별로 HTML 생성
+    # -------------------------------
+    for key, rows in grouped.items():
+        sym, strat = key.split("__", 1)
+        html += f"<h2>🔹 {sym} — {strat}</h2>"
+
+        for r in rows:
+
+            direction = r.get("direction", "예측")
+            cls_id = int(r.get("predicted_class", -1))
+            lo, hi = float(r.get("class_return_min", 0.0)), float(r.get("class_return_max", 0.0))
+            expected = float(r.get("expected_return", 0.0))
+
+            # note(메타러너 선택 이유)
+            try:
+                note = json.loads(r.get("note", "{}"))
+            except:
+                note = {}
+
+            regime = note.get("regime", "unknown")
+            meta_choice = note.get("meta_choice", r.get("model_name", ""))
+
+            raw_prob = note.get("raw_prob_pred", r.get("raw_prob"))
+            calib_prob = note.get("calib_prob_pred", r.get("calib_prob"))
+            used_minret = note.get("used_minret_filter", False)
+
+            status = r.get("status", "pending")
+            if "shadow" in str(direction):
+                tag_status = "<span class='shadow'>섀도우</span>"
+            elif status in ["success", "v_success"]:
+                tag_status = "<span class='success'>성공</span>"
+            elif status in ["fail", "v_fail"]:
+                tag_status = "<span class='fail'>실패</span>"
+            elif status == "pending":
+                tag_status = "<span class='pending'>대기중</span>"
+            else:
+                tag_status = status
+
+            # 수익률 구간 텍스트
+            class_txt = f"{lo*100:.2f}% ~ {hi*100:.2f}%"
+
+            # top_k
+            topk = r.get("top_k", "")
+            if isinstance(topk, str) and topk.startswith("["):
+                try:
+                    topk = json.loads(topk)
+                except:
+                    topk = []
+            elif not isinstance(topk, list):
+                topk = []
+
+            html += "<div class='card'>"
+
+            # 제목줄
+            html += f"<div class='meta'>[{tag_status}] {direction}</div>"
+
+            html += f"""
+            <p><b>• 예측 클래스:</b> {cls_id} ({class_txt})</p>
+            <p><b>• 예상 수익률:</b> {expected*100:.2f}%</p>
+            <p><b>• 예측 방향:</b> {r.get("position")}</p>
+            <p><b>• 사용 모델:</b> {meta_choice}</p>
+            """
+
+            # 확률
+            html += "<p><b>• 확률 관련:</b><br>"
+            if raw_prob is not None:
+                html += f" - raw prob: {raw_prob:.4f}<br>"
+            if calib_prob is not None:
+                html += f" - calibrated prob: {calib_prob:.4f}<br>"
+            html += f" - top_k classes: {topk}</p>"
+
+            # 메타러너 해설
+            html += "<p><b>• 선택 이유(메타러너):</b><br>"
+            html += f" - regime: {regime}<br>"
+            if used_minret:
+                html += f" - 1% 미만 수익구간 제거 필터 작동 → 통과한 클래스 선택<br>"
+            if note.get("explore_used", False):
+                html += f" - 확률차 근접 → 탐색(explore) 모드 사용<br>"
+            html += "</p>"
+
+            # 필터/가드 설명
+            html += "<p><b>• 가드/필터 해설:</b><br>"
+            html += f" - Profit filter(1%): {'통과' if abs(expected)>=0.01 else '미달 → 보류'}<br>"
+            html += f" - RealityGuard: {'비활성(soft-pass)' }<br>"
+            html += f" - ExitGuard: {'통과' if abs(expected)>=0.005 else '약함'}<br>"
+            html += "</p>"
+
+            # 이유(reason)
+            html += f"<p><b>• 내역:</b> {r.get('reason')}</p>"
+
+            html += f"<p><b>• 시간:</b> {r.get('timestamp')}</p>"
+
+            html += "</div>"
+
+    html += "</body></html>"
+    return html
 @app.route("/check-log")
 def check_log():
     try:
