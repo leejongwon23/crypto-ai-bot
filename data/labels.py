@@ -123,6 +123,12 @@ def _get_fixed_horizon_candles(strategy: str) -> int:
 # 미래 수익률(H개 캔들 동안 high/low)
 # ============================================================
 def _future_extreme_signed_returns_by_candles(df: pd.DataFrame, H: int):
+    """
+    각 시점 i에서,
+    - 진입 기준: close[i]
+    - 미래 구간: i 이후 H개 캔들 (i+1 ~ i+H)
+      → 현재 캔들(high/low)은 '미래'에서 제외 (근본 버그 수정 포인트)
+    """
     n = len(df)
     if n == 0:
         return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.float32)
@@ -136,10 +142,23 @@ def _future_extreme_signed_returns_by_candles(df: pd.DataFrame, H: int):
     H = max(1, int(H))
 
     for i in range(n):
-        j = min(n, i + H)
+        # 🔥 i 이후 H개 캔들만 사용 (i+1 ~ i+H)
+        start = i + 1
+        end = min(n, i + 1 + H)  # 파이썬 슬라이스 end는 exclusive
+
+        # 미래 캔들이 하나도 없으면 0으로 처리
+        if start >= end:
+            up[i] = 0.0
+            dn[i] = 0.0
+            continue
+
         base = close[i] if close[i] > 0 else 1e-6
-        up[i] = (float(np.max(high[i:j])) - base) / (base + 1e-12)
-        dn[i] = (float(np.min(low[i:j])) - base) / (base + 1e-12)
+
+        future_high = float(np.max(high[start:end]))
+        future_low  = float(np.min(low[start:end]))
+
+        up[i] = (future_high - base) / (base + 1e-12)
+        dn[i] = (future_low  - base) / (base + 1e-12)
 
     return up, dn
 
@@ -362,7 +381,7 @@ def _auto_target_bins(df_len: int) -> int:
 # ============================================================
 def compute_label_returns(df: pd.DataFrame, symbol: str, strategy: str):
     pure = _normalize_strategy_name(strategy)
-    H = _get_fixed_horizon_candles(pure)   # 🔥 전략별 H 고정 적용
+    H = _get_fixed_horizon_candles(pure)   # 🔥 전략별 H 고정 적용 (단기/중기/장기 모두 1캔들)
     up, dn = _future_extreme_signed_returns_by_candles(df, H)
     gains = _pick_per_candle_gain(up, dn)
     target = _auto_target_bins(len(df))
