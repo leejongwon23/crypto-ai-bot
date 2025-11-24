@@ -56,6 +56,10 @@ _SC_MIN_SAMPLES = int(_SPARSE_CLASS_CONF.get("MIN_SAMPLES_PER_CLASS", 12))
 _SC_MIN_CLASSES = int(_SPARSE_CLASS_CONF.get("MIN_CLASSES_AFTER_MERGE", 8))
 _SC_MAX_PASSES = int(_SPARSE_CLASS_CONF.get("MAX_MERGE_PASSES", 2))
 
+# 🔥 극단 꼬리(trim) 비율 (분포 엣지 계산용)
+# - 예: 0.005 → 하위 0.5%, 상위 0.5% 정도만 "구간 계산"에서 잠깐 제외
+_TAIL_TRIM_FRAC = float(os.getenv("LABEL_TAIL_TRIM_FRAC", "0.005"))
+
 # 🔥 전략별 H 고정 (핵심 수정)
 # - 단기: 4h 캔들 1개
 # - 중기: 1d 캔들 1개
@@ -169,7 +173,7 @@ def _pick_per_candle_gain(up: np.ndarray, dn: np.ndarray) -> np.ndarray:
     return np.where(np.abs(up) >= np.abs(dn), up, dn).astype(np.float32)
 
 # ============================================================
-# RAW bin 생성 (🔥 동적 엣지 튜닝 버전)
+# RAW bin 생성 (🔥 동적 엣지 튜닝 + 꼬리 정리 버전)
 # ============================================================
 def _raw_bins(dist: np.ndarray, target_bins: int) -> np.ndarray:
     """
@@ -177,6 +181,7 @@ def _raw_bins(dist: np.ndarray, target_bins: int) -> np.ndarray:
     - 클래스 개수(target_bins)는 최대한 유지
     - 한 클래스당 최소 샘플 수(_MIN_SAMPLES_PER_CLASS)를 고려해 bin 수 자동 조정
     - 분위수(quantile) 기반이라 극단 구간이 3%~28% 같은 미친 폭으로 커지지 않음
+    - 추가: 상/하위 극단 꼬리를 소량(trim)해서, 비정상 값이 전체 구간을 찢어먹지 않게 함
     """
     # 유효 값만 사용
     if dist is None:
@@ -188,6 +193,26 @@ def _raw_bins(dist: np.ndarray, target_bins: int) -> np.ndarray:
         return np.linspace(-0.01, 0.01, target_bins + 1).astype(float)
 
     n = dist.size
+
+    # 🔥 극단 꼬리 소량 제거 (구간 계산용)
+    # - LABEL_TAIL_TRIM_FRAC 비율(예: 0.005 → 상/하위 0.5%)만 잠깐 제외
+    # - 남는 샘플이 너무 적으면(절반 이하 등) 그냥 원본 그대로 사용
+    if _TAIL_TRIM_FRAC > 0.0 and n >= 100:
+        try:
+            q_low, q_high = np.quantile(
+                dist,
+                [_TAIL_TRIM_FRAC, 1.0 - _TAIL_TRIM_FRAC]
+            )
+            mask = (dist >= q_low) & (dist <= q_high)
+            trimmed = dist[mask]
+            # 최소 유지 조건: 전체의 70% 이상, 그리고 최소 샘플 수 확보
+            if trimmed.size >= max(_MIN_LABEL_CLASSES * 2, int(0.7 * n)):
+                dist = trimmed
+                n = dist.size
+        except Exception:
+            # quantile 계산 실패 시 trimming 생략
+            pass
+
     lo = float(np.min(dist))
     hi = float(np.max(dist))
     if not np.isfinite(lo):
@@ -270,7 +295,8 @@ def _merge_sparse_bins(edges: np.ndarray, values: np.ndarray) -> Tuple[np.ndarra
         values = np.asarray(values, dtype=float)
         values = values[np.isfinite(values)]
         if values.size == 0:
-            return edges, np.zeros(edges.size - 1, dtype=int)
+            # 🔧 버그 수정: dtype 위치 잘못되어 있던 부분 정리
+            return edges, np.zeros(max(0, edges.size - 1), dtype=int)
 
         # 초기 bin 카운트 계산 (라벨 기준 분포)
         e2 = edges.copy()
@@ -485,7 +511,7 @@ def make_labels(df, symbol, strategy, group_id=None):
     # 분포: up/dn 합친 전체 분포 기준으로 1차 엣지 생성
     dist = np.concatenate([dn_c, up_c], axis=0)
 
-    # 1차: 동적 RAW bin 생성
+    # 1차: 동적 RAW bin 생성 (꼬리 정리 + quantile 기반)
     edges = _raw_bins(dist, target_bins)
 
     # 2차: 희소 bin 병합 (아이디어 A)
@@ -548,7 +574,7 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
     dist = np.concatenate([dn, up], axis=0)
     target_bins = _auto_target_bins(len(df))
 
-    # 1차: RAW bin
+    # 1차: RAW bin (꼬리 정리 + quantile 기반)
     edges = _raw_bins(dist, target_bins)
 
     # gains 먼저 계산
