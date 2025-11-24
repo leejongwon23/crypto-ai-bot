@@ -20,7 +20,9 @@ from config import (
     get_BIN_META,
     get_CLASS_BIN,
     get_SPARSE_CLASS,  # 🔥 아이디어 A 설정
+    TRAIN_ZERO_BAND_ABS,  # 🔥 학습용 0% 근처 절대 수익률 밴드
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -528,12 +530,18 @@ def make_labels(df, symbol, strategy, group_id=None):
     bin_counts, _ = np.histogram(gains, bins=edges2)
     spans = np.diff(edges) * 100.0
 
+    # 🔥 학습에서만 버릴 중앙(0% 근처) 마스크
+    #  - |gain| < TRAIN_ZERO_BAND_ABS → train_mask = 0  (학습에서 제외)
+    #  - 나머지 → train_mask = 1      (학습에 사용)
+    train_mask = (np.abs(gains) >= float(TRAIN_ZERO_BAND_ABS)).astype(np.int8)
+
     sl = 0.02
     extra_cols = {
         "future_up": up_c,
         "future_dn": dn_c,
         "up_ge_2pct": (up_c >= sl).astype(np.int8),
         "dn_le_-2pct": (dn_c <= -sl).astype(np.int8),
+        "train_mask": train_mask,  # 🔥 학습용 마스크 추가
     }
 
     _save_label_table(
@@ -556,6 +564,7 @@ def make_labels(df, symbol, strategy, group_id=None):
         bin_counts.astype(int),
         spans.astype(float),
     )
+
 
 # ============================================================
 # make_labels_for_horizon (RAW 통일)
@@ -592,11 +601,15 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
 
     strategy = "단기" if horizon_hours <= 4 else ("중기" if horizon_hours <= 24 else "장기")
 
+    # 🔥 학습에서만 버릴 중앙(0% 근처) 마스크
+    train_mask = (np.abs(gains) >= float(TRAIN_ZERO_BAND_ABS)).astype(np.int8)
+
     extra_cols = {
         "future_up": up,
         "future_dn": dn,
         "up_ge_2pct": (up >= 0.02).astype(np.int8),
         "dn_le_-2pct": (dn <= -0.02).astype(np.int8),
+        "train_mask": train_mask,  # 🔥 학습용 마스크 추가
     }
 
     _save_label_table(
@@ -619,6 +632,7 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
         bin_counts.astype(int),
         spans.astype(float),
     )
+
 
 # ============================================================
 # make_all_horizon_labels
