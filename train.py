@@ -1034,6 +1034,17 @@ def train_one_model(
     한 심볼-전략-그룹에 대해 실제로 모델을 1개 이상 학습해서 저장하는 함수.
     (device_type 누락되는 거 고친 버전 + 그룹별 클래스 제대로 분리한 버전)
     """
+    # ▷ NEAR_ZERO_BAND(0% 근처 수익률 구간) 기준 값 가져오기
+    #   - config에 NEAR_ZERO_BAND가 있으면 그 값을 우선 사용
+    #   - 없으면 환경변수 NEAR_ZERO_BAND → 마지막으로는 0.0
+    try:
+        from config import NEAR_ZERO_BAND as _NEAR_ZERO_BAND  # type: ignore
+    except Exception:
+        try:
+            _NEAR_ZERO_BAND = float(os.getenv("NEAR_ZERO_BAND", "0.0"))
+        except Exception:
+            _NEAR_ZERO_BAND = 0.0
+
     HAS_CUDA = torch.cuda.is_available()
     device_type = "cuda" if HAS_CUDA else "cpu"
     use_amp_here = (os.getenv("USE_AMP", "1") == "1") and HAS_CUDA
@@ -1177,7 +1188,7 @@ def train_one_model(
         num_total_classes = len(full_ranges) if full_ranges is not None else 0
 
         # 5-2) 그룹별 클래스 인덱스 (전역 인덱스 리스트)
-        from config import get_class_groups
+        from config import get_class_groups  # 재임포트 안전
 
         if num_total_classes > 0:
             groups = get_class_groups(num_classes=max(2, num_total_classes)) or []
@@ -1205,16 +1216,43 @@ def train_one_model(
         keep_set = set(cls_in_group)
         to_local = {g: i for i, g in enumerate(sorted(cls_in_group))}
 
-        # ===== 6. 로그 출력 =====
+        # ===== 6. 라벨/분포 로그 출력 =====
         mask_cnt = int((labels < 0).sum())
+
+        # ▷ NEAR_ZERO_BAND 기준으로 0% 근처 수익률 개수 계산
+        nz_band = float(abs(_NEAR_ZERO_BAND)) if _NEAR_ZERO_BAND is not None else 0.0
+        if nz_band <= 0.0:
+            # 설정이 0이면, 최소한 BOUNDARY_BAND라도 같이 찍어줌
+            try:
+                nz_band = float(abs(BOUNDARY_BAND))
+            except Exception:
+                nz_band = 0.0
+
+        if nz_band > 0.0:
+            near_zero_mask = np.abs(np.asarray(gains, dtype=np.float32)) <= nz_band
+            near_zero_cnt = int(near_zero_mask.sum())
+            near_zero_ratio = near_zero_cnt / max(1, len(gains))
+        else:
+            near_zero_cnt = 0
+            near_zero_ratio = 0.0
+
+        total_labels = max(1, len(labels))
+        mask_ratio = mask_cnt / total_labels
+
         _safe_print(
-            f"[LABELS] total={len(labels)} masked={mask_cnt} ({mask_cnt/max(1,len(labels)):.2%}) "
-            f"BOUNDARY_BAND=±{BOUNDARY_BAND}"
+            f"[LABELS] total={len(labels)} "
+            f"masked={mask_cnt} ({mask_ratio:.2%}) "
+            f"BOUNDARY_BAND=±{BOUNDARY_BAND} "
+            f"NEAR_ZERO_BAND=±{nz_band:.4f} "
+            f"near_zero={near_zero_cnt} ({near_zero_ratio:.2%})"
         )
+
         try:
             # 전역 기준 분포 (full_ranges 크기만큼)
-            cnt_before = np.bincount(labels[labels >= 0],
-                                     minlength=num_total_classes).astype(int).tolist()
+            cnt_before = np.bincount(
+                labels[labels >= 0],
+                minlength=num_total_classes
+            ).astype(int).tolist()
         except Exception:
             cnt_before = []
 
@@ -1225,7 +1263,9 @@ def train_one_model(
         if isinstance(bin_info, dict):
             edges = bin_info.get("bin_edges", [])
             counts = bin_info.get("bin_counts", [])
-            return_note = f" ; [ReturnDist] edges={edges[:20]}, counts={counts[:20]}"
+            return_note = (
+                f" ; [ReturnDist] edges={edges[:20]}, counts={counts[:20]}"
+            )
 
         try:
             logger.log_training_result(
@@ -1246,9 +1286,14 @@ def train_one_model(
                 min=int(_min_required),
                 augment_needed=bool(augment_needed),
                 enough_for_training=bool(enough_for_training),
-                note=f"[LabelStats] bins_total={num_total_classes}, bins_group={len(class_ranges)}, empty={len(empty_idx)}, "
-                     f"classes={num_classes_effective}, empty_idx={empty_idx[:8]}"
-                     + return_note,
+                note=(
+                    f"[LabelStats] bins_total={num_total_classes}, "
+                    f"bins_group={len(class_ranges)}, empty={len(empty_idx)}, "
+                    f"classes={num_classes_effective}, empty_idx={empty_idx[:8]}, "
+                    f"masked={mask_cnt}, near_zero={near_zero_cnt}, "
+                    f"NEAR_ZERO_BAND=±{nz_band:.4f}"
+                    + return_note
+                ),
                 source_exchange="BYBIT",
                 status="info",
                 NUM_CLASSES=int(num_total_classes),
@@ -1405,8 +1450,6 @@ def train_one_model(
             y_val = y[val_idx]
 
             # ─────────────── [ADD] 희소 클래스 보정 ───────────────
-            # 여기서는 '클래스 삭제'가 아니라, data_augmentation 쪽에서
-            # 리샘플/증강으로만 균형 조정한다.
             if BALANCE_CLASSES_FLAG:
                 try:
                     X_train, y_train = balance_classes(X_train, y_train)
@@ -1620,7 +1663,6 @@ def train_one_model(
                             for i in range(len(bin_edges) - 1)
                         ]
                     full_ranges_for_bins = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
-                    # val_y 는 "그룹 로컬" 기준 → 그룹 크기만큼만 필요
                     cnt_local = np.bincount(val_y, minlength=len(class_ranges)).astype(int)
                     counts_map = np.zeros(len(full_ranges_for_bins), dtype=int)
                     for g, l in to_local.items():
@@ -1657,7 +1699,7 @@ def train_one_model(
                 "strategy": strategy,
                 "model": model_type,
                 "group_id": int(group_id or 0),
-                "num_classes": int(len(class_ranges)),  # 이번 그룹에서 실제 사용한 클래스 수
+                "num_classes": int(len(class_ranges)),
                 "class_ranges": [[float(lo), float(hi)] for (lo, hi) in class_ranges],
                 "input_size": int(feat_dim),
                 "metrics": {
@@ -1686,6 +1728,8 @@ def train_one_model(
                 "bin_counts": bin_counts,
                 "bin_spans": bin_spans,
                 "bin_cfg": bin_cfg,
+                "near_zero_band": float(nz_band),
+                "near_zero_count": int(near_zero_cnt),
             }
             wpath, mpath = _save_model_and_meta(model, stem + ".pt", meta)
 
@@ -1724,6 +1768,10 @@ def train_one_model(
                     usable_samples=usable_samples,
                     class_counts_after_assemble=cnt_after,
                     batch_stratified_ok=batch_stratified_ok,
+                    # 추가: near-zero 통계도 로그에 포함
+                    near_zero_band=float(nz_band),
+                    near_zero_count=int(near_zero_cnt),
+                    masked_count=int(mask_cnt),
                 )
             except Exception:
                 pass
@@ -1762,6 +1810,7 @@ def train_one_model(
         _safe_print(f"[EXC] train_one_model {symbol}-{strategy}-g{group_id} → {e}\n{traceback.format_exc()}")
         _log_fail(symbol, strategy, str(e))
         return res
+
 
 _ENFORCE_FULL_STRATEGY = False
 _STRICT_HALT_ON_INCOMPLETE = False
