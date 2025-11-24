@@ -1155,8 +1155,15 @@ def get_SSL_CACHE_DIR():      return os.getenv("SSL_CACHE_DIR", _config.get("SSL
 _DFLT_STEP = str(_config.get("CLASS_BIN", {}).get("step_pct", 0.0030))
 DYN_CLASS_STEP = float(os.getenv("CLASS_BIN_STEP", os.getenv("DYN_CLASS_STEP", _DFLT_STEP)))
 BOUNDARY_BAND = float(os.getenv("BOUNDARY_BAND", "0.0020"))
+
+# ✅ 학습용 0% 근처 버리는 절대 수익률 밴드 (예: 0.002 = ±0.2%)
+#    - 기본값은 CLASS_BIN.zero_band_eps와 동일
+_TRAIN_ZERO_DEFAULT = _default_config["CLASS_BIN"].get("zero_band_eps", 0.0020)
+TRAIN_ZERO_BAND_ABS = float(os.getenv("TRAIN_ZERO_BAND_ABS", str(_TRAIN_ZERO_DEFAULT)))
+
 CV_FOLDS   = int(os.getenv("CV_FOLDS", "5"))
 CV_GATE_F1 = float(os.getenv("CV_GATE_F1", "0.0"))
+
 
 def _publish_from_env(base: dict) -> dict:
     d = copy.deepcopy(base or {})
@@ -1262,7 +1269,8 @@ __all__ = [
     "get_SSL_CACHE_DIR",
     "FEATURE_INPUT_SIZE", "NUM_CLASSES", "FAIL_AUGMENT_RATIO", "MIN_FEATURES",
     "CALIB",
-    "DYN_CLASS_STEP", "BOUNDARY_BAND", "CV_FOLDS", "CV_GATE_F1",
+    "DYN_CLASS_STEP", "BOUNDARY_BAND", "TRAIN_ZERO_BAND_ABS",
+    "CV_FOLDS", "CV_GATE_F1",
     "get_EVAL_RUNTIME", "strategy_horizon_hours", "compute_eval_due_at",
     "get_DATA", "get_DATA_RUNTIME", "get_CLASS_ENFORCE", "get_CV_CONFIG",
     "get_ONCHAIN", "get_GUARD",
@@ -1271,4 +1279,4 @@ __all__ = [
     "is_config_readonly", "is_disk_cache_off",
     "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
     "get_BIN_META", "get_SPARSE_CLASS",
-            ]
+]
