@@ -128,6 +128,20 @@ _default_config = {
 
     "GROUP_SIZE": {"단기": 3, "중기": 2, "장기": 2},
 
+    # === window 자동 탐색 설정 (1번 아이디어용) ===
+    #  - 각 전략별 window 후보 리스트
+    #  - AUTO_WINDOW_SEARCH 가 True 이면 train.py 에서
+    #    이 후보들을 순회하면서 성능이 가장 좋은 window를 선택하게 할 수 있다.
+    "WINDOW_CANDIDATES": {
+        "단기": [16, 24, 32],
+        "중기": [24, 32, 40],
+        "장기": [16, 20, 24],
+    },
+    #  - ON/OFF 스위치 (지금은 기본 ON)
+    "AUTO_WINDOW_SEARCH": True,
+    #  - 각 window 후보마다 “이 정도 샘플은 있어야 쓸만하다” 임계값
+    "MIN_SAMPLES_PER_WINDOW": 300,
+
     "REGIME": {
         "enabled": False,
         "lookback": 200,
@@ -416,7 +430,7 @@ def get_class_groups(num_classes=None, group_size=None):
 
 # 신규 옵션 Getter
 def get_REGIME():   return copy.deepcopy(_config.get("REGIME", _default_config["REGIME"]))
-def get_CALIB():    return	copy.deepcopy(_config.get("CALIB", _default_config["CALIB"]))
+def get_CALIB():    return copy.deepcopy(_config.get("CALIB", _default_config["CALIB"]))
 def get_LOSS():     return copy.deepcopy(_config.get("LOSS", _default_config["LOSS"]))
 def get_AUG():      return copy.deepcopy(_config.get("AUG", _default_config["AUG"]))
 def get_EVAL():     return copy.deepcopy(_config.get("EVAL", _default_config["EVAL"]))
@@ -431,6 +445,28 @@ def get_BLEND():    return copy.deepcopy(_config.get("BLEND", _default_config["B
 def get_PUBLISH():  return copy.deepcopy(_config.get("PUBLISH", _default_config["PUBLISH"]))
 def get_BIN_META(): return copy.deepcopy(_config.get("BIN_META", _default_config["BIN_META"]))
 def get_SPARSE_CLASS(): return copy.deepcopy(_config.get("SPARSE_CLASS", _default_config.get("SPARSE_CLASS", {})))
+
+# ✅ window 자동 탐색용 Getter 들
+def get_WINDOW_CANDIDATES() -> dict:
+    """
+    전략별 window 후보들을 반환.
+    예) {"단기":[16,24,32], "중기":[24,32,40], "장기":[16,20,24]}
+    """
+    base = _config.get("WINDOW_CANDIDATES", _default_config["WINDOW_CANDIDATES"])
+    return copy.deepcopy(base)
+
+def get_AUTO_WINDOW_SEARCH() -> bool:
+    """
+    True 이면 train.py 에서 window 자동 탐색 로직을 켬.
+    """
+    val = _config.get("AUTO_WINDOW_SEARCH", _default_config["AUTO_WINDOW_SEARCH"])
+    return bool(val)
+
+def get_MIN_SAMPLES_PER_WINDOW() -> int:
+    """
+    각 window 후보마다 “이 정도 샘플은 있어야 유효하다” 기준값.
+    """
+    return int(_config.get("MIN_SAMPLES_PER_WINDOW", _default_config["MIN_SAMPLES_PER_WINDOW"]))
 
 # ===== 파이프라인 게이트 Getter =====
 def _env_bool(v): return str(v).strip().lower() not in {"0", "false", "no", "off", "none"}
@@ -1279,4 +1315,6 @@ __all__ = [
     "is_config_readonly", "is_disk_cache_off",
     "get_REQUIRE_GROUP_COMPLETE", "get_AUTOPREDICT_ON_SYMBOL_DONE",
     "get_BIN_META", "get_SPARSE_CLASS",
-]
+    # ✅ window 자동탐색 관련 공개 API
+    "get_WINDOW_CANDIDATES", "get_AUTO_WINDOW_SEARCH", "get_MIN_SAMPLES_PER_WINDOW",
+            ]
