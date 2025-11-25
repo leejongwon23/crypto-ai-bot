@@ -935,7 +935,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
         interval = cfg.get("interval", "D")
 
         # ✔ 핵심 변경: limit_for_fetch = limit * 3
-        limit_for_fetch = min(limit * 3, 3000)
+        limit_for_fetch = 2000
 
         cache_key = f"{symbol.upper()}-{strategy}-slack{end_slack_min}"
 
