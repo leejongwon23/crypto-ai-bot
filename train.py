@@ -1032,7 +1032,7 @@ def train_one_model(
 ) -> Dict[str, Any]:
     """
     한 심볼-전략-그룹에 대해 실제로 모델을 1개 이상 학습해서 저장하는 함수.
-    (device_type 누락되는 거 고친 버전 + 그룹별 클래스 제대로 분리한 버전)
+    (device_type 누락되는 거 고친 버전 + 그룹별 클래스 제대로 분리한 버전 + window 후보 성능 비교/최적화 버전)
     """
     # ▷ NEAR_ZERO_BAND(0% 근처 수익률 구간) 기준 값 가져오기
     #   - config에 NEAR_ZERO_BAND가 있으면 그 값을 우선 사용
@@ -1052,12 +1052,16 @@ def train_one_model(
     if max_epochs is None:
         max_epochs = _epochs_for(strategy)
 
-    res = {
+    res: Dict[str, Any] = {
         "symbol": symbol,
         "strategy": strategy,
         "group_id": int(group_id or 0),
         "windows": [],
         "models": [],
+        # ★ window 최적화 결과를 리턴에도 남김
+        "best_window": None,
+        "best_f1": None,
+        "best_acc": None,
     }
 
     try:
@@ -1079,7 +1083,7 @@ def train_one_model(
 
         log_return_distribution_for_train(symbol, strategy, df)
 
-        cfg = STRATEGY_CONFIG.get(strategy, {})
+        cfg = STRATEGY_CONFIG.get(strategy, {})  # ← 여기서 전략별 설정 사용
         _limit = int(cfg.get("limit", 300))
         _min_required = max(60, int(_limit * 0.90))
         _attrs = getattr(df, "attrs", {}) if df is not None else {}
@@ -1313,32 +1317,55 @@ def train_one_model(
             features_only = features_only.iloc[-cut:, :]
             labels = labels[-cut:]
 
-        # ===== 8. 윈도우 후보 =====
+        # ===== 8. 윈도우 후보 (config 기반 + window_optimizer) =====
+        base_windows = [16, 20, 24, 28, 32]
+        try:
+            cfg_windows = cfg.get("windows") or cfg.get("window_list")
+            if isinstance(cfg_windows, (list, tuple)) and cfg_windows:
+                base_windows = [
+                    int(w) for w in cfg_windows
+                    if isinstance(w, (int, float)) and w == w
+                ]
+        except Exception:
+            pass
+
+        if not base_windows:
+            base_windows = [16, 20, 24, 28, 32]
+
         try:
             top_windows = find_best_windows(
-                symbol, strategy,
-                window_list=[16, 20, 24, 28, 32],
+                symbol,
+                strategy,
+                window_list=base_windows,
                 top_k=3,
                 group_id=group_id,
             )
         except Exception:
             try:
                 top_windows = [
-                    int(find_best_window(
-                        symbol, strategy,
-                        window_list=[16, 20, 24, 28, 32],
-                        group_id=group_id,
-                    ))
+                    int(
+                        find_best_window(
+                            symbol,
+                            strategy,
+                            window_list=base_windows,
+                            group_id=group_id,
+                        )
+                    )
                 ]
             except Exception:
-                top_windows = [20]
+                top_windows = base_windows[:1]
 
         top_windows = [
             int(max(5, w))
             for w in top_windows
             if isinstance(w, (int, float)) and w == w
-        ] or [20]
-        _safe_print(f"[WINDOWS] {top_windows}")
+        ] or [base_windows[0]]
+        _safe_print(f"[WINDOWS] candidates(base={base_windows}) → top={top_windows}")
+
+        # ★ 윈도우 전체 중 "최고" 성능 추적
+        best_window_overall: Optional[int] = None
+        best_f1_overall: float = -1.0
+        best_acc_overall: float = 0.0
 
         # ===== 9. 윈도우별 학습 =====
         for window in top_windows:
@@ -1402,7 +1429,8 @@ def train_one_model(
             if not strat_ok:
                 try:
                     train_idx, val_idx = coverage_split_indices(
-                        y, val_frac=0.20,
+                        y,
+                        val_frac=0.20,
                         min_coverage=0.60,
                         stride=50,
                         num_classes=len(class_ranges),
@@ -1434,7 +1462,9 @@ def train_one_model(
                 val_idx = np.array([train_idx[-1]], dtype=int)
                 train_idx = train_idx[:-1] if len(train_idx) > 1 else train_idx
 
-            train_idx, val_idx, _ = _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2)
+            train_idx, val_idx, _ = _ensure_val_has_two_classes(
+                train_idx, val_idx, y, min_classes=2
+            )
 
             try:
                 # y 는 "그룹 로컬 클래스" 기준
@@ -1471,8 +1501,12 @@ def train_one_model(
             sampler = None
             if WEIGHTED_SAMPLER_FLAG:
                 try:
-                    w_cls = compute_class_weights(y_train, method="effective", beta=0.999)
-                    sampler = make_weighted_sampler(y_train, class_weights=w_cls, replacement=True)
+                    w_cls = compute_class_weights(
+                        y_train, method="effective", beta=0.999
+                    )
+                    sampler = make_weighted_sampler(
+                        y_train, class_weights=w_cls, replacement=True
+                    )
                     if sampler is not None:
                         _safe_print("[SAMPLER] WeightedRandomSampler enabled")
                 except Exception as e:
@@ -1573,8 +1607,8 @@ def train_one_model(
 
                 # ===== 검증 =====
                 model.eval()
-                all_preds = []
-                all_lbls = []
+                all_preds: List[np.ndarray] = []
+                all_lbls: List[np.ndarray] = []
                 val_loss = 0.0
                 with torch.no_grad():
                     for xb, yb in val_loader:
@@ -1600,7 +1634,9 @@ def train_one_model(
                     except Exception:
                         acc = 0.0
                     try:
-                        f1_val = f1_score(lbls, preds, average="macro", zero_division=0)
+                        f1_val = f1_score(
+                            lbls, preds, average="macro", zero_division=0
+                        )
                     except Exception:
                         f1_val = 0.0
                 else:
@@ -1634,7 +1670,9 @@ def train_one_model(
                     no_improve += 1
 
                 if no_improve >= EARLY_STOP_PATIENCE:
-                    _safe_print(f"[EARLY STOP] {symbol}-{strategy}-w{window} no_improve={no_improve}")
+                    _safe_print(
+                        f"[EARLY STOP] {symbol}-{strategy}-w{window} no_improve={no_improve}"
+                    )
                     break
 
                 if TRAIN_CUDA_EMPTY_EVERY_EP:
@@ -1652,6 +1690,17 @@ def train_one_model(
             lbls = best_state["lbls"]
             val_y = best_state["val_y"]
 
+            # ★ 윈도우 전체 중 best 업데이트
+            try:
+                if f1_val > best_f1_overall or (
+                    f1_val == best_f1_overall and acc > best_acc_overall
+                ):
+                    best_f1_overall = float(f1_val)
+                    best_acc_overall = float(acc)
+                    best_window_overall = int(window)
+            except Exception:
+                pass
+
             # ===== bin 정보 정리 및 저장 =====
             try:
                 if isinstance(bin_info, dict) and "bin_edges" in bin_info:
@@ -1662,18 +1711,30 @@ def train_one_model(
                             float(bin_edges[i + 1] - bin_edges[i])
                             for i in range(len(bin_edges) - 1)
                         ]
-                    full_ranges_for_bins = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
-                    cnt_local = np.bincount(val_y, minlength=len(class_ranges)).astype(int)
+                    full_ranges_for_bins = get_class_ranges(
+                        symbol=symbol, strategy=strategy, group_id=None
+                    )
+                    cnt_local = np.bincount(
+                        val_y, minlength=len(class_ranges)
+                    ).astype(int)
                     counts_map = np.zeros(len(full_ranges_for_bins), dtype=int)
                     for g, l in to_local.items():
                         if g < len(counts_map) and l < len(cnt_local):
                             counts_map[g] = int(cnt_local[l])
                     bin_counts = counts_map.tolist()
                 else:
-                    full_ranges_for_bins = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
-                    bin_edges = [float(lo) for (lo, _) in full_ranges_for_bins] + [float(full_ranges_for_bins[-1][1])]
-                    bin_spans = [float(hi - lo) for (lo, hi) in full_ranges_for_bins]
-                    cnt_local = np.bincount(val_y, minlength=len(class_ranges)).astype(int)
+                    full_ranges_for_bins = get_class_ranges(
+                        symbol=symbol, strategy=strategy, group_id=None
+                    )
+                    bin_edges = [float(lo) for (lo, _) in full_ranges_for_bins] + [
+                        float(full_ranges_for_bins[-1][1])
+                    ]
+                    bin_spans = [
+                        float(hi - lo) for (lo, hi) in full_ranges_for_bins
+                    ]
+                    cnt_local = np.bincount(
+                        val_y, minlength=len(class_ranges)
+                    ).astype(int)
                     counts_map = np.zeros(len(full_ranges_for_bins), dtype=int)
                     for g, l in to_local.items():
                         if g < len(counts_map) and l < len(cnt_local):
@@ -1700,7 +1761,9 @@ def train_one_model(
                 "model": model_type,
                 "group_id": int(group_id or 0),
                 "num_classes": int(len(class_ranges)),
-                "class_ranges": [[float(lo), float(hi)] for (lo, hi) in class_ranges],
+                "class_ranges": [
+                    [float(lo), float(hi)] for (lo, hi) in class_ranges
+                ],
                 "input_size": int(feat_dim),
                 "metrics": {
                     "val_acc": acc,
@@ -1721,7 +1784,10 @@ def train_one_model(
                 },
                 "train_loss_sum": float(loss_sum),
                 "boundary_band": float(BOUNDARY_BAND),
-                "cs_argmax": {"enabled": bool(COST_SENSITIVE_ARGMAX), "beta": float(CS_ARG_BETA)},
+                "cs_argmax": {
+                    "enabled": bool(COST_SENSITIVE_ARGMAX),
+                    "beta": float(CS_ARG_BETA),
+                },
                 "eval_gate": "none",
                 "label_repair": repaired_info,
                 "bin_edges": bin_edges,
@@ -1760,8 +1826,12 @@ def train_one_model(
                     note=final_note,
                     source_exchange="BYBIT",
                     status="success",
-                    y_true=lbls.tolist() if isinstance(lbls, np.ndarray) else lbls,
-                    y_pred=preds.tolist() if isinstance(preds, np.ndarray) else preds,
+                    y_true=lbls.tolist()
+                    if isinstance(lbls, np.ndarray)
+                    else lbls,
+                    y_pred=preds.tolist()
+                    if isinstance(preds, np.ndarray)
+                    else preds,
                     num_classes=len(class_ranges),
                     NUM_CLASSES=int(num_total_classes),
                     class_counts_label_freeze=cnt_before,
@@ -1781,7 +1851,9 @@ def train_one_model(
 
             if IMPORTANCE_ENABLE:
                 try:
-                    fi = compute_feature_importance(model, features_only, device=DEVICE)
+                    fi = compute_feature_importance(
+                        model, features_only, device=DEVICE
+                    )
                     save_feature_importance(
                         fi,
                         symbol=symbol,
@@ -1804,13 +1876,54 @@ def train_one_model(
                 model,
             )
 
+        # ===== 10. 전체 window 중 BEST 한 번 더 요약 로그 =====
+        try:
+            if best_window_overall is not None:
+                _safe_print(
+                    f"[WINDOW BEST] {symbol}-{strategy}-g{group_id} "
+                    f"best_window={best_window_overall} "
+                    f"f1={best_f1_overall:.4f} acc={best_acc_overall:.4f}"
+                )
+                logger.log_training_result(
+                    symbol,
+                    strategy,
+                    model="best_window",
+                    accuracy=best_acc_overall,
+                    f1=best_f1_overall,
+                    loss=None,
+                    val_acc=best_acc_overall,
+                    val_f1=best_f1_overall,
+                    val_loss=None,
+                    engine="manual",
+                    window=int(best_window_overall),
+                    recent_cap=int(len(features_only)),
+                    rows=None,
+                    limit=None,
+                    min=None,
+                    augment_needed=None,
+                    enough_for_training=None,
+                    note=(
+                        f"[WindowBest] window={best_window_overall} "
+                        f"f1={best_f1_overall:.4f} acc={best_acc_overall:.4f}"
+                    ),
+                    source_exchange="BYBIT",
+                    status="best",
+                )
+                # 리턴값에도 반영
+                res["best_window"] = int(best_window_overall)
+                res["best_f1"] = float(best_f1_overall)
+                res["best_acc"] = float(best_acc_overall)
+        except Exception:
+            pass
+
         return res
 
     except Exception as e:
-        _safe_print(f"[EXC] train_one_model {symbol}-{strategy}-g{group_id} → {e}\n{traceback.format_exc()}")
+        _safe_print(
+            f"[EXC] train_one_model {symbol}-{strategy}-g{group_id} → {e}\n{traceback.format_exc()}"
+        )
         _log_fail(symbol, strategy, str(e))
         return res
-
 
 _ENFORCE_FULL_STRATEGY = False
 _STRICT_HALT_ON_INCOMPLETE = False
