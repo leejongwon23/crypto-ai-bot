@@ -1,4 +1,4 @@
-# === logger.py (v2025-11-05 FINAL — BASE 통합, /persistent 제거, 부팅시 파일 보장 최소화) ===
+# === logger.py (v2025-11-05 + meta/hold 확장본) ===
 import sitecustomize
 import os
 import csv
@@ -147,9 +147,22 @@ BASE_PRED_HEADERS = [
 EXTRA_PRED_HEADERS = ["regime","meta_choice","raw_prob","calib_prob","calib_ver"]
 CLASS_RANGE_HEADERS = ["class_return_min","class_return_max","class_return_text"]
 NOTE_EXTRACT_HEADERS = ["position","hint_allow_long","hint_allow_short","hint_slope","used_minret_filter","explore_used","hint_ma_fast","hint_ma_slow"]
-PREDICTION_HEADERS = BASE_PRED_HEADERS + EXTRA_PRED_HEADERS + ["feature_vector"] + CLASS_RANGE_HEADERS + NOTE_EXTRACT_HEADERS + [
-    "expected_return_mid","raw_prob_pred","calib_prob_pred","meta_choice_detail"
+
+# 🔹 여기서 메타/섀도우/보류용 헤더를 추가
+META_HOLD_HEADERS = [
+    "expected_return_mid","raw_prob_pred","calib_prob_pred","meta_choice_detail",
+    "chosen_model","chosen_class","shadow_models","shadow_classes",
+    "hold_type","hold_reason","meta_score",
 ]
+
+PREDICTION_HEADERS = (
+    BASE_PRED_HEADERS
+    + EXTRA_PRED_HEADERS
+    + ["feature_vector"]
+    + CLASS_RANGE_HEADERS
+    + NOTE_EXTRACT_HEADERS
+    + META_HOLD_HEADERS
+)
 
 TRAIN_HEADERS = [
     "timestamp","symbol","strategy","model",
@@ -481,7 +494,7 @@ def update_model_success(s, t, m, success):
         """, params=(s, t or "알수없음", m, int(success), int(0 if success else 1)), retries=7, commit=True)
         print(f"[✅ update_model_success] {s}-{t}-{m} 기록 ({'성공' if success else '실패'})")
     except Exception as e:
-        print(f"[오류] update_model_success 실패 → {e}")
+        print(f"[오류] update_model_success 실패] {e}")
         globals()["_DB_ENABLED"] = False
 
 def get_model_success_rate(s, t, m):
@@ -688,6 +701,11 @@ def log_prediction(
     raw_prob=None, calib_prob=None, calib_ver=None,
     class_return_min=None, class_return_max=None, class_return_text=None,
     expected_return=None,
+    # 🔹 메타/섀도우/보류 상세 필드 추가
+    chosen_model=None, chosen_class=None,
+    shadow_models=None, shadow_classes=None,
+    hold_type=None, hold_reason=None,
+    meta_score=None,
     **kwargs
 ):
     from datetime import datetime as _dt
@@ -729,6 +747,17 @@ def log_prediction(
     # note에서 추가 필드 뽑기
     note_ex = _extract_from_note(note)
 
+    # shadow_* 를 문자열로 정리
+    if isinstance(shadow_models, (list, tuple, set)):
+        shadow_models_str = "|".join(map(str, shadow_models))
+    else:
+        shadow_models_str = "" if shadow_models is None else str(shadow_models)
+
+    if isinstance(shadow_classes, (list, tuple, set)):
+        shadow_classes_str = "|".join(map(str, shadow_classes))
+    else:
+        shadow_classes_str = "" if shadow_classes is None else str(shadow_classes)
+
     row = [
         now, symbol, strategy, direction, entry_price, target_price,
         model, predicted_class, top_k_str, note, str(success), reason,
@@ -739,7 +768,10 @@ def log_prediction(
         note_ex.get("position",""), note_ex.get("hint_allow_long",""), note_ex.get("hint_allow_short",""),
         note_ex.get("hint_slope",""), note_ex.get("used_minret_filter",""), note_ex.get("explore_used",""),
         note_ex.get("hint_ma_fast",""), note_ex.get("hint_ma_slow",""),
-        expected_return_mid, raw_prob_pred, calib_prob_pred, meta_choice_detail
+        expected_return_mid, raw_prob_pred, calib_prob_pred, meta_choice_detail,
+        chosen_model or "", chosen_class if chosen_class is not None else "",
+        shadow_models_str, shadow_classes_str,
+        hold_type or "", hold_reason or "", meta_score if meta_score is not None else "",
     ]
 
     if _READONLY_FS or not _fs_has_space(PREDICTION_LOG, 256*1024):
@@ -754,7 +786,7 @@ def log_prediction(
                 if write_header: w.writerow(PREDICTION_HEADERS)
                 w.writerow(_align_row_to_header(row, PREDICTION_HEADERS))
 
-    # ✅ 여기부터 출력 문구 분리 (핵심 수정)
+    # ✅ 여기부터 출력 문구 분리 (핵심 수정 아님, 그대로 유지)
     if success:
         # 학습용 수익률 분포(log_return_distribution → source="train", model="trainer", reason="train_return_distribution")
         src_lower = str(source or "").lower()
