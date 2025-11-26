@@ -741,7 +741,7 @@ def _predict_after_training(symbols, source_note):
     _safe_open_gate(source_note)
     try:
         for sym in sorted(set(visible_syms)):
-            for strat in ["단기","중기","장기"]:
+            for strat in ["단기", "중기", "장기"]:
                 try:
                     if not _has_model_for(sym, strat):
                         print(f"[APP-PRED] skip {sym}-{strat}: model missing")
@@ -972,6 +972,11 @@ def check_log_full():
     📌 예측 + 평가 + 실패학습 상태를
     한눈에, 한국어로 쉽게 보여주는 리포트 라우트.
     (prediction_log.csv 최근 100건 기준)
+
+    - 카드 1개 = 예측 1건
+    - META / SHADOW / 일반 구분
+    - 메타가 고른 모델, 예측 클래스, 예상 수익률
+    - 보류/대기라면 이유 + 평가 주기(30분) + 다음 평가 예상 시각 안내
     """
     import pandas as pd
     from datetime import datetime, timedelta
@@ -997,20 +1002,32 @@ def check_log_full():
         df = df[df["timestamp"].notna()]
         df = df.sort_values("timestamp", ascending=False).head(100)
     else:
-        # timestamp 없으면 앞 100행만
         df = df.head(100)
 
-    # 심볼-전략 단위 그룹핑
+    # 심볼-전략 단위 그룹핑 (실제 예측이 찍힌 심볼만 대상)
     grouped = {}
     for _, r in df.iterrows():
         sym = str(r.get("symbol", "NONE"))
         strat = str(r.get("strategy", "NONE"))
+        if sym == "NONE" or strat == "NONE":
+            continue
         key = f"{sym}__{strat}"
         grouped.setdefault(key, [])
         grouped[key].append(r)
 
     KST = pytz.timezone("Asia/Seoul")
-    now_kst = datetime.now(KST)
+    now = datetime.now(KST)
+
+    # 다음 평가 예상 시각 (30분 주기)
+    minute = now.minute
+    if minute < 30:
+        next_min = 30
+        extra_hour = 0
+    else:
+        next_min = 0
+        extra_hour = 1
+    next_eval = now.replace(minute=next_min, second=0, microsecond=0) + timedelta(hours=extra_hour if next_min == 0 else 0)
+    next_eval_str = next_eval.strftime("%Y-%m-%d %H:%M")
 
     # 공통 HTML 스타일
     html = """
@@ -1061,8 +1078,14 @@ def check_log_full():
     </head>
     <body>
     <h1>📘 YOPO — 예측·평가 통합 리포트 (최근 100개)</h1>
-    <p style="font-size:12px;color:#555;">기준 시각: %s</p>
-    """ % now_kst.strftime("%Y-%m-%d %H:%M:%S")
+    <p style="font-size:12px;color:#555;">
+        기준 시각: %s<br>
+        ▶ 각 카드 = 예측 1건입니다.<br>
+        ▶ META = 메타러너가 실제로 선택한 예측,<br>
+        ▶ SHADOW = 선택되지 않은 섀도우 예측입니다.<br>
+        ▶ 평가는 30분마다 자동 실행 (다음 평가 예상: %s KST)
+    </p>
+    """ % (now.strftime("%Y-%m-%d %H:%M:%S"), next_eval_str)
 
     # -------------------------------
     # 심볼/전략별 카드 출력
@@ -1076,7 +1099,7 @@ def check_log_full():
             status_col = status_col.astype(str)
             succ_mask = status_col.isin(["success","v_success"])
             fail_mask = status_col.isin(["fail","v_fail"])
-            pending_mask = status_col.isna() | status_col.eq("pending") | status_col.eq("v_pending")
+            pending_mask = status_col.isna() | status_col.eq("pending") | status_col.eq("v_pending") | status_col.eq("")
         else:
             succ_mask = fail_mask = pending_mask = pd.Series([], dtype=bool)
 
@@ -1119,7 +1142,16 @@ def check_log_full():
                 rv = 0.0
             rv_pct = rv * 100.0
 
-            # 메타/섀도우 판별 (컬럼 있으면 사용, 없으면 추정)
+            # 예측 클래스(여러 컬럼 후보 중에서 첫 번째로 발견된 것 사용)
+            pred_class_val = None
+            for cname in ["pred_class", "pred_label", "class", "target_class", "bucket", "bin_index"]:
+                if cname in r.index:
+                    val = r.get(cname, None)
+                    if val is not None and str(val) not in ["", "nan", "None"]:
+                        pred_class_val = val
+                        break
+
+            # 메타/섀도우 판별
             is_meta = False
             is_shadow = False
             if "is_meta" in r.index:
@@ -1133,7 +1165,7 @@ def check_log_full():
                 except Exception:
                     is_shadow = str(r.get("is_shadow", "")).lower() in ["1","true","yes","y"]
             if not ("is_meta" in r.index or "is_shadow" in r.index):
-                # 컬럼이 없으면 source나 model_text로 대강 추정
+                # 컬럼이 없으면 source나 reason으로 아주 대략 섀도우 추정
                 is_shadow = "shadow" in str(src).lower()
 
             # 변동성 예측 여부
@@ -1151,15 +1183,41 @@ def check_log_full():
             if status in ["success","v_success"]:
                 status_class = "success"
                 status_icon = "✅"
+                eval_text = "평가 완료 (성공)"
             elif status in ["fail","v_fail"]:
                 status_class = "fail"
                 status_icon = "❌"
+                eval_text = "평가 완료 (실패)"
             elif status in ["pending","v_pending",""]:
                 status_class = "pending"
                 status_icon = "⏳"
+                eval_text = f"평가 대기 중 (30분마다 자동 평가 · 다음: {next_eval_str} KST)"
             else:
                 status_class = "pending"
                 status_icon = "❓"
+                eval_text = "기타 상태"
+
+            # 보류/Abstain 여부(텍스트 기준)
+            is_abstain = ("abstain" in reason.lower()) or ("보류" in reason)
+
+            # 메타 선택 이유(있으면 별도 필드 우선, 없으면 reason 재사용)
+            meta_reason = None
+            for cname in ["meta_reason", "meta_note"]:
+                if cname in r.index:
+                    mv = r.get(cname, None)
+                    if mv is not None and str(mv).strip() != "":
+                        meta_reason = str(mv)
+                        break
+            if meta_reason is None:
+                meta_reason = reason if is_meta else None
+
+            # 예측 타입 텍스트
+            if is_meta:
+                pred_type = "메타 선택"
+            elif is_shadow:
+                pred_type = "섀도우"
+            else:
+                pred_type = "일반"
 
             html += "<div class='card'>"
 
@@ -1173,17 +1231,29 @@ def check_log_full():
                 html += "<span class='badge badge-dist'>변동성</span>"
             if fail_pat:
                 html += "<span class='badge badge-failpat'>실패패턴 기록됨</span>"
-            html += f"<span class='{status_class}' style='margin-left:6px;'>{status_icon} {status}</span>"
+            html += f"<span class='{status_class}' style='margin-left:6px;'>{status_icon} {status or 'status 없음'}</span>"
             html += "</div>"
 
             # 본문
             html += f"<div class='row-line'><span class='key'>시각</span><span class='value'>{ts}</span></div>"
+            html += f"<div class='row-line'><span class='key'>예측 타입</span><span class='value'>{pred_type}</span></div>"
             html += f"<div class='row-line'><span class='key'>모델</span><span class='value'>{model or '-'}</span></div>"
             html += f"<div class='row-line'><span class='key'>방향</span><span class='value'>{direction or '-'}</span></div>"
+            html += f"<div class='row-line'><span class='key'>예측 클래스</span><span class='value'>{pred_class_val if pred_class_val is not None else '-'}</span></div>"
             html += f"<div class='row-line'><span class='key'>예상 수익률</span><span class='value'>{rv_pct:.2f}%</span></div>"
+            html += f"<div class='row-line'><span class='key'>평가 상태</span><span class='value'>{eval_text}</span></div>"
+
+            if is_abstain:
+                html += f"<div class='row-line'><span class='key'>보류 여부</span><span class='value'>예 (조건 미충족으로 메타가 보류)</span></div>"
+            else:
+                html += f"<div class='row-line'><span class='key'>보류 여부</span><span class='value'>아니오</span></div>"
+
             if src:
                 html += f"<div class='row-line'><span class='key'>source</span><span class='value'>{src}</span></div>"
-            if reason:
+
+            if meta_reason:
+                html += f"<div class='row-line'><span class='key'>메타 선택 이유</span><span class='value'>{meta_reason}</span></div>"
+            elif reason:
                 html += f"<div class='row-line'><span class='key'>사유</span><span class='value'>{reason}</span></div>"
 
             html += "</div>"
