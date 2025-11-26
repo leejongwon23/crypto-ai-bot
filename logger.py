@@ -275,34 +275,56 @@ def _read_csv_header(path):
     except Exception:  
         return []  
   
-def ensure_prediction_log_exists():  
-    if _READONLY_FS: return  
-    try:  
-        os.makedirs(os.path.dirname(PREDICTION_LOG), exist_ok=True)  
-        if not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0:  
-            with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:  
-                csv.writer(f).writerow(PREDICTION_HEADERS)  
-            print("[✅ ensure_prediction_log_exists] prediction_log.csv 생성(확장 스키마)")  
-        else:  
-            existing = _read_csv_header(PREDICTION_LOG)  
-            if existing != PREDICTION_HEADERS:  
-                bak = PREDICTION_LOG + ".bak"  
-                try: os.replace(PREDICTION_LOG, bak)  
-                except Exception:  
-                    try: shutil.copyfile(PREDICTION_LOG, bak); open(PREDICTION_LOG, "w", encoding="utf-8-sig").close()  
-                    except Exception: return  
-                with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as out, \  
-                     open(bak, "r", encoding="utf-8-sig") as src:  
-                    w = csv.writer(out); w.writerow(PREDICTION_HEADERS)  
-                    reader = csv.reader(src)  
-                    try: next(reader)  
-                    except StopIteration: reader = []  
-                    for row in reader:  
-                        row = (row + [""] * len(PREDICTION_HEADERS))[:len(PREDICTION_HEADERS)]  
-                        w.writerow(row)  
-                print("[✅ ensure_prediction_log_exists] 기존 파일 헤더 보정(확장) 완료")  
-    except Exception as e:  
-        print(f"[⚠️ ensure_prediction_log_exists] 예외: {e}")  
+def ensure_prediction_log_exists():
+    if _READONLY_FS:
+        return
+    try:
+        os.makedirs(os.path.dirname(PREDICTION_LOG), exist_ok=True)
+
+        # 새로 만들기 또는 빈 파일이면 헤더 생성
+        if not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0:
+            with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
+                csv.writer(f).writerow(PREDICTION_HEADERS)
+            print("[✅ ensure_prediction_log_exists] prediction_log.csv 생성(확장 스키마)")
+        else:
+            # 기존 헤더 확인 후 다르면 보정
+            existing = _read_csv_header(PREDICTION_LOG)
+            if existing != PREDICTION_HEADERS:
+                bak = PREDICTION_LOG + ".bak"
+
+                # 안전 백업
+                try:
+                    os.replace(PREDICTION_LOG, bak)
+                except Exception:
+                    try:
+                        shutil.copyfile(PREDICTION_LOG, bak)
+                        open(PREDICTION_LOG, "w", encoding="utf-8-sig").close()
+                    except Exception:
+                        return
+
+                # ❗ 여기 문법 오류 있었던 부분 — 백슬래시 공백 제거 후 정상화
+                with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as out, \
+                     open(bak, "r", encoding="utf-8-sig") as src:
+
+                    w = csv.writer(out)
+                    w.writerow(PREDICTION_HEADERS)
+
+                    reader = csv.reader(src)
+                    try:
+                        next(reader)  # 기존 헤더 스킵
+                    except StopIteration:
+                        reader = []
+
+                    # 기존 데이터 재적재
+                    for row in reader:
+                        row = (row + [""] * len(PREDICTION_HEADERS))[:len(PREDICTION_HEADERS)]
+                        w.writerow(row)
+
+                print("[✅ ensure_prediction_log_exists] 기존 파일 헤더 보정(확장) 완료")
+
+    except Exception as e:
+        print(f"[⚠️ ensure_prediction_log_exists] 예외: {e}")
+
   
 def ensure_train_log_exists():  
     if _READONLY_FS: return  
