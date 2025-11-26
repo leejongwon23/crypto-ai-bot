@@ -1549,7 +1549,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     best_i, best_score, best_pred = i, p, pred
                     used_minret = fused
 
-            # 점수 차이가 작으면 탐색(epislon-explore) 조금
+            # 점수 차이가 작으면 탐색(epsilon-explore) 조금
             if len(scores) >= 2:
                 ss = sorted(scores, key=lambda x: x[1], reverse=True)
                 top1, top2 = ss[0], ss[1]
@@ -1755,6 +1755,38 @@ def predict(symbol, strategy, source="일반", model_type=None):
         def _topk(p, k=3):
             return [int(i) for i in np.argsort(p)[::-1][:k]]
 
+        # 👉 하이브리드/유사도 확률 벡터 꺼내기
+        hybrid_vec = None
+        sim_vec = None
+        adj_vec = None
+        filt_vec = None
+        if isinstance(chosen, dict):
+            if "hybrid_probs" in chosen:
+                hybrid_vec = np.asarray(chosen["hybrid_probs"], dtype=float)
+            elif "adjusted_probs" in chosen:
+                hybrid_vec = np.asarray(chosen["adjusted_probs"], dtype=float)
+            else:
+                hybrid_vec = np.asarray(chosen["calib_probs"], dtype=float)
+
+            if "sim_probs" in chosen and chosen["sim_probs"] is not None:
+                sim_vec = np.asarray(chosen["sim_probs"], dtype=float)
+            if "adjusted_probs" in chosen and chosen["adjusted_probs"] is not None:
+                adj_vec = np.asarray(chosen["adjusted_probs"], dtype=float)
+            if "filtered_probs" in chosen and chosen["filtered_probs"] is not None:
+                filt_vec = np.asarray(chosen["filtered_probs"], dtype=float)
+
+        def _topk_probs(vec, k=3):
+            if vec is None:
+                return []
+            v = np.asarray(vec, dtype=float)
+            if v.ndim != 1 or v.size == 0:
+                return []
+            idx = np.argsort(v)[::-1][:k]
+            return [
+                {"class": int(i), "prob": float(v[i])}
+                for i in idx
+            ]
+
         chosen_probs_for_topk = (
             chosen.get("hybrid_probs")
             if isinstance(chosen, dict) and "hybrid_probs" in chosen
@@ -1772,6 +1804,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             nan=0.0, posinf=0.0, neginf=0.0
         )) if (chosen or outs) else None
 
+        # ✅ 하이브리드 선택 사유/내부값을 note에 추가
         note = {
             "regime": regime,
             "meta_choice": meta_choice,
@@ -1798,6 +1831,33 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "soft_guard": "disabled_reality_guard",
             "market_ctx": market_ctx,
             "recent_success_weight": recent_succ_w,
+
+            # 🔽 여기부터 하이브리드/유사도 디버그용 상세 정보
+            "hybrid_w_sim": float(
+                chosen.get("hybrid_w_sim", 0.0)
+            ) if isinstance(chosen, dict) else 0.0,
+            "hybrid_w_prob": float(
+                chosen.get("hybrid_w_prob", 1.0 - float(chosen.get("hybrid_w_sim", 0.0)))
+            ) if isinstance(chosen, dict) else 1.0,
+            "sim_topk": int(
+                chosen.get("sim_topk", 0)
+            ) if isinstance(chosen, dict) else 0,
+            "hybrid_probs_top3": _topk_probs(hybrid_vec, k=3),
+            "sim_probs_top3": _topk_probs(sim_vec, k=3),
+            "adjusted_probs_top3": _topk_probs(adj_vec, k=3),
+            "filtered_probs_top3": _topk_probs(filt_vec, k=3),
+            "chosen_model_path": (
+                chosen.get("model_path") if isinstance(chosen, dict) else None
+            ),
+            "chosen_model_type": (
+                _norm_model_type(chosen.get("model_type", ""))
+                if isinstance(chosen, dict) else None
+            ),
+            "chosen_reason": (
+                "evo_meta_learner"
+                if meta_choice == "evo_meta_learner"
+                else "하이브리드 확률 + 유사도 + 최근 성공률/리스크 점수가 가장 높은 모델이라 선택"
+            ),
         }
 
         ensure_prediction_log_exists()
@@ -1991,8 +2051,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
         finally:
             gc.collect()
             _safe_empty_cache()
-
-
 
 # =========================================================
 # 평가 루프 (네 원본 그대로)
