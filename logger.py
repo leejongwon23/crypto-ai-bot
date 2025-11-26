@@ -90,6 +90,15 @@ def _bucketize(v: float, step: float) -> tuple:
     except Exception:
         return (v, v)
 
+# 🔹 로그 분석 시 무시할 source 값들(훈련용/디버그)
+LOG_SOURCE_BLACKLIST = {
+    "debug",
+    "dry_run",
+    "train",
+    "train_return_distribution",
+    "train_dist",
+}
+
 # -------------------------
 # 파일시스템 상태 감지
 # -------------------------
@@ -537,13 +546,16 @@ def _normalize_status(df: pd.DataFrame) -> pd.DataFrame:
 # -------------------------
 def get_meta_success_rate(strategy, min_samples: int = 1):
     if not os.path.exists(PREDICTION_LOG): return 0.0
-    usecols = ["timestamp","strategy","model","status","success"]
+    usecols = ["timestamp","strategy","model","status","success","source"]
     succ = total = 0
     for chunk in pd.read_csv(
         PREDICTION_LOG, encoding="utf-8-sig",
-        usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success"]],
+        usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success","source"]],
         chunksize=CHUNK
     ):
+        # source 필터 (훈련/디버그 제외)
+        if "source" in chunk.columns:
+            chunk = chunk[~chunk["source"].astype(str).isin(LOG_SOURCE_BLACKLIST)]
         if "model" in chunk.columns:
             chunk = chunk[chunk["model"] == "meta"]
         if "strategy" in chunk.columns:
@@ -562,13 +574,15 @@ def get_meta_success_rate(strategy, min_samples: int = 1):
 
 def get_strategy_eval_count(strategy: str):
     if not os.path.exists(PREDICTION_LOG): return 0
-    usecols = ["strategy","status","success"]
+    usecols = ["strategy","status","success","source"]
     count = 0
     for chunk in pd.read_csv(
         PREDICTION_LOG, encoding="utf-8-sig",
-        usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success"]],
+        usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success","source"]],
         chunksize=CHUNK
     ):
+        if "source" in chunk.columns:
+            chunk = chunk[~chunk["source"].astype(str).isin(LOG_SOURCE_BLACKLIST)]
         if "strategy" in chunk.columns:
             chunk = chunk[chunk["strategy"] == strategy]
         if chunk.empty: continue
@@ -581,13 +595,15 @@ def get_strategy_eval_count(strategy: str):
 
 def get_actual_success_rate(strategy, min_samples: int = 1):
     if not os.path.exists(PREDICTION_LOG): return 0.0
-    usecols = ["strategy","status","success"]
+    usecols = ["strategy","status","success","source"]
     succ = total = 0
     for chunk in pd.read_csv(
         PREDICTION_LOG, encoding="utf-8-sig",
-        usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success"]],
+        usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success","source"]],
         chunksize=CHUNK
     ):
+        if "source" in chunk.columns:
+            chunk = chunk[~chunk["source"].astype(str).isin(LOG_SOURCE_BLACKLIST)]
         if "strategy" in chunk.columns:
             chunk = chunk[chunk["strategy"] == strategy]
         if chunk.empty: continue
@@ -1083,8 +1099,11 @@ def alert_if_single_class_prediction(symbol: str, strategy: str, lookback_days: 
             return False
         cutoff = now_kst() - datetime.timedelta(days=int(lookback_days))
         uniq = set(); total = 0
-        usecols = ["timestamp","symbol","strategy","predicted_class"]
-        for chunk in pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", usecols=[c for c in usecols if c in PREDICTION_HEADERS], chunksize=CHUNK):
+        usecols = ["timestamp","symbol","strategy","predicted_class","source"]
+        for chunk in pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["source"]], chunksize=CHUNK):
+            # source 필터
+            if "source" in chunk.columns:
+                chunk = chunk[~chunk["source"].astype(str).isin(LOG_SOURCE_BLACKLIST)]
             if "timestamp" not in chunk.columns or "predicted_class" not in chunk.columns: continue
             ts = pd.to_datetime(chunk["timestamp"], errors="coerce")
             try: ts = ts.dt.tz_localize("Asia/Seoul")
@@ -1160,12 +1179,15 @@ def export_recent_model_stats(days: int = 7, out_path: str = None):
             return out_path
         cutoff = now_kst() - datetime.timedelta(days=int(days))
         agg = {}
-        usecols = ["timestamp","symbol","strategy","model","status","success"]
+        usecols = ["timestamp","symbol","strategy","model","status","success","source"]
         for chunk in pd.read_csv(
             PREDICTION_LOG, encoding="utf-8-sig",
-            usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success"]],
+            usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success","source"]],
             chunksize=CHUNK
         ):
+            # source 필터: 훈련/디버그 제외
+            if "source" in chunk.columns:
+                chunk = chunk[~chunk["source"].astype(str).isin(LOG_SOURCE_BLACKLIST)]
             if "timestamp" in chunk.columns:
                 ts = pd.to_datetime(chunk["timestamp"], errors="coerce")
                 try: ts = ts.dt.tz_localize("Asia/Seoul")
@@ -1278,8 +1300,8 @@ def flush_gwanwoo_summary():
             if not df.empty:
                 src_col = "source" if "source" in df.columns else None
                 if src_col:
-                    blacklist = {"debug","dry_run"}
-                    df = df[~df[src_col].astype(str).isin(blacklist)]
+                    # 훈련/디버그 소스 제외
+                    df = df[~df[src_col].astype(str).isin(LOG_SOURCE_BLACKLIST)]
                 keep = [c for c in ["timestamp","symbol","strategy","predicted_class",
                                     "rate","raw_prob","calib_prob","success","reason","source"] if c in df.columns]
                 if keep:
