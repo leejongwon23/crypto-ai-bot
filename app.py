@@ -1208,11 +1208,12 @@ def _render_prediction_eval_dashboard_simple():
     - 예측이 잘 찍히는지
     - 평가가 잘 되어 성공/실패로 끝났는지
     - 성공/실패/보류 사유가 무엇인지
-    를 한눈에 보여주는 HTML을 만든다.
+    - 하이브리드/유사도 기반 선택 사유( note JSON )까지 같이 보여준다.
     """
     import pandas as pd
     from datetime import datetime, timedelta
     import pytz
+    import json
 
     # 1) prediction_log 로딩
     try:
@@ -1455,6 +1456,79 @@ def _render_prediction_eval_dashboard_simple():
         else:
             pred_type = "일반 예측"
 
+        # 🔍 하이브리드 / 유사도 note JSON 파싱
+        hybrid_info_html = ""
+        try:
+            raw_note = r.get("note", None)
+            note_obj = None
+            if raw_note not in [None, "", "nan", "None"]:
+                if isinstance(raw_note, str):
+                    # JSON 문자열로 저장된 경우
+                    try:
+                        note_obj = json.loads(raw_note)
+                    except Exception:
+                        # 이미 dict의 str()로 저장된 경우에도 대비
+                        note_obj = None
+                elif isinstance(raw_note, dict):
+                    note_obj = raw_note
+
+            if isinstance(note_obj, dict):
+                pieces = []
+
+                w_sim = note_obj.get("hybrid_w_sim")
+                w_prob = note_obj.get("hybrid_w_prob")
+                if (w_sim is not None) or (w_prob is not None):
+                    try:
+                        w_sim_f = float(w_sim) if w_sim is not None else None
+                    except Exception:
+                        w_sim_f = w_sim
+                    try:
+                        w_prob_f = float(w_prob) if w_prob is not None else None
+                    except Exception:
+                        w_prob_f = w_prob
+                    pieces.append(
+                        f"가중치(prob={w_prob_f:.2f} / sim={w_sim_f:.2f})"
+                        if isinstance(w_sim_f, float) and isinstance(w_prob_f, float)
+                        else f"가중치(prob={w_prob_f}, sim={w_sim_f})"
+                    )
+
+                sim_topk = note_obj.get("sim_topk")
+                if sim_topk:
+                    pieces.append(f"유사도 top-k: {sim_topk}")
+
+                hy_top3 = note_obj.get("hybrid_probs_top3") or note_obj.get("hybrid_top3")
+                if hy_top3:
+                    pieces.append(f"하이브리드 상위3: {hy_top3}")
+
+                sim_top3 = note_obj.get("sim_probs_top3")
+                if sim_top3:
+                    pieces.append(f"유사도 상위3: {sim_top3}")
+
+                adj_top3 = note_obj.get("adjusted_probs_top3")
+                if adj_top3:
+                    pieces.append(f"가드 적용 후 상위3: {adj_top3}")
+
+                filt_top3 = note_obj.get("filtered_probs_top3")
+                if filt_top3:
+                    pieces.append(f"필터(±1% 이상) 후 상위3: {filt_top3}")
+
+                chosen_model = note_obj.get("chosen_model")
+                if chosen_model:
+                    pieces.append(f"선택된 모델: {chosen_model}")
+
+                chosen_reason = note_obj.get("chosen_reason")
+                if chosen_reason:
+                    pieces.append(f"선택 사유: {chosen_reason}")
+
+                # 아무 필드도 못 뽑았으면 전체 note를 백업으로 보여줌
+                if not pieces and note_obj:
+                    pieces.append(str(note_obj))
+
+                if pieces:
+                    hybrid_info_html = " / ".join(pieces)
+        except Exception:
+            hybrid_info_html = ""
+
         html += "<div class='card'>"
 
         # 상단 뱃지들
@@ -1509,7 +1583,7 @@ def _render_prediction_eval_dashboard_simple():
                 f"<span class='value'>{src}</span></div>"
             )
 
-        # 사유(성공/실패/보류 이유)
+        # 메타/사유
         if meta_reason:
             html += (
                 f"<div class='row-line'><span class='key'>메타 선택 이유</span>"
@@ -1521,11 +1595,17 @@ def _render_prediction_eval_dashboard_simple():
                 f"<span class='value'>{reason}</span></div>"
             )
 
+        # 🔍 하이브리드/유사도 상세 정보
+        if hybrid_info_html:
+            html += (
+                f"<div class='row-line'><span class='key'>하이브리드/유사도</span>"
+                f"<span class='value'>{hybrid_info_html}</span></div>"
+            )
+
         html += "</div>"
 
     html += "</body></html>"
     return html
-
 
 # =========================
 # 통합 대시보드 라우트
