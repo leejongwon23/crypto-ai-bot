@@ -971,16 +971,20 @@ def check_log_full():
     """
     📌 예측 + 평가 + 실패학습 상태를
     한눈에, 한국어로 쉽게 보여주는 리포트 라우트.
+    (prediction_log.csv 최근 100건 기준)
     """
-
     import pandas as pd
     from datetime import datetime, timedelta
     import pytz, json, numpy as np
-    from failure_db import check_failure_exists
-
-    # 🔥 FIX: 잘못된 변수명(PREDICTION_LOG_PATH) → 올바른 PREDICTION_LOG 로 변경
     try:
-        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig")
+        from failure_db import check_failure_exists
+    except Exception:
+        def check_failure_exists(*args, **kwargs):
+            return False
+
+    # prediction_log 로딩
+    try:
+        df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
     except Exception:
         return "<h2>⚠️ prediction_log.csv 파일이 없습니다.</h2>"
 
@@ -988,10 +992,13 @@ def check_log_full():
         return "<h2>⚠️ 예측 기록이 없습니다.</h2>"
 
     # timestamp 정리
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-
-    # 최근 100개만 사용
-    df = df.sort_values("timestamp", ascending=False).head(100)
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df = df[df["timestamp"].notna()]
+        df = df.sort_values("timestamp", ascending=False).head(100)
+    else:
+        # timestamp 없으면 앞 100행만
+        df = df.head(100)
 
     # 심볼-전략 단위 그룹핑
     grouped = {}
@@ -1005,10 +1012,12 @@ def check_log_full():
     KST = pytz.timezone("Asia/Seoul")
     now_kst = datetime.now(KST)
 
+    # 공통 HTML 스타일
     html = """
     <html>
     <head>
         <meta charset="utf-8">
+        <title>YOPO 예측·평가 리포트</title>
         <style>
             body { font-family: Arial, sans-serif; padding:20px; background:#f4f6fb;}
             h1 { color:#222; }
@@ -1023,9 +1032,9 @@ def check_log_full():
                 font-size:13px;
             }
             .card {
-                background:white; padding:14px 15px; margin-bottom:10px; border-radius:8px;
-                box-shadow:0 1px 4px rgba(0,0,0,0.08);
-                font-size:13px;
+                background:white; padding:10px 12px; margin-bottom:8px; border-radius:8px;
+                box-shadow:0 1px 3px rgba(0,0,0,0.06);
+                font-size:12px;
                 line-height:1.5;
             }
             .success {color:#0a7b27; font-weight:bold;}
@@ -1037,13 +1046,14 @@ def check_log_full():
                 display:inline-block;
                 padding:2px 6px;
                 border-radius:6px;
-                font-size:11px;
+                font-size:10px;
                 margin-right:4px;
             }
             .badge-main { background:#e3f2fd; color:#1565c0; }
             .badge-shadow { background:#eeeeee; color:#555555; }
             .badge-dist { background:#f3e5f5; color:#6a1b9a; }
             .badge-eval { background:#e8f5e9; color:#2e7d32; }
+            .badge-failpat { background:#ffebee; color:#c62828; }
             .row-line { margin:2px 0; }
             .key { display:inline-block; width:110px; color:#555; }
             .value { color:#222; }
@@ -1051,7 +1061,8 @@ def check_log_full():
     </head>
     <body>
     <h1>📘 YOPO — 예측·평가 통합 리포트 (최근 100개)</h1>
-    """
+    <p style="font-size:12px;color:#555;">기준 시각: %s</p>
+    """ % now_kst.strftime("%Y-%m-%d %H:%M:%S")
 
     # -------------------------------
     # 심볼/전략별 카드 출력
@@ -1061,9 +1072,13 @@ def check_log_full():
         gdf = pd.DataFrame(rows)
 
         status_col = gdf.get("status")
-        succ_mask = status_col.isin(["success","v_success"]) if status_col is not None else []
-        fail_mask = status_col.isin(["fail","v_fail"]) if status_col is not None else []
-        pending_mask = status_col.isna() | status_col.eq("pending") if status_col is not None else []
+        if status_col is not None:
+            status_col = status_col.astype(str)
+            succ_mask = status_col.isin(["success","v_success"])
+            fail_mask = status_col.isin(["fail","v_fail"])
+            pending_mask = status_col.isna() | status_col.eq("pending") | status_col.eq("v_pending")
+        else:
+            succ_mask = fail_mask = pending_mask = pd.Series([], dtype=bool)
 
         n_succ = int(succ_mask.sum()) if len(succ_mask) else 0
         n_fail = int(fail_mask.sum()) if len(fail_mask) else 0
@@ -1082,13 +1097,100 @@ def check_log_full():
             html += f"<div class='row-line'><span class='key'>최근 성공률</span><span class='value'>{success_rate:.1f}%</span></div>"
         html += "</div>"
 
-        # 카드 반복
-        for r in rows:
-            # (생략) → 나머지는 그대로 복사됨
-            pass
+        # 개별 예측 카드 (시간 내림차순)
+        sorted_rows = sorted(rows, key=lambda r: r.get("timestamp", ""), reverse=True)
+        for r in sorted_rows:
+            ts = r.get("timestamp", "")
+            model = r.get("model", "")
+            direction = r.get("direction", "")
+            status = str(r.get("status", "") or "")
+            reason = str(r.get("reason", "") or "")
+            src = r.get("source", "")
+
+            # expected_return / rate / return_value 중 하나 사용
+            rv = r.get("return_value", None)
+            if rv is None or (isinstance(rv, float) and pd.isna(rv)):
+                rv = r.get("rate", None)
+            if rv is None or (isinstance(rv, float) and pd.isna(rv)):
+                rv = r.get("expected_return", 0)
+            try:
+                rv = float(rv)
+            except Exception:
+                rv = 0.0
+            rv_pct = rv * 100.0
+
+            # 메타/섀도우 판별 (컬럼 있으면 사용, 없으면 추정)
+            is_meta = False
+            is_shadow = False
+            if "is_meta" in r.index:
+                try:
+                    is_meta = bool(int(r.get("is_meta", 0)))
+                except Exception:
+                    is_meta = str(r.get("is_meta", "")).lower() in ["1","true","yes","y"]
+            if "is_shadow" in r.index:
+                try:
+                    is_shadow = bool(int(r.get("is_shadow", 0)))
+                except Exception:
+                    is_shadow = str(r.get("is_shadow", "")).lower() in ["1","true","yes","y"]
+            if not ("is_meta" in r.index or "is_shadow" in r.index):
+                # 컬럼이 없으면 source나 model_text로 대강 추정
+                is_shadow = "shadow" in str(src).lower()
+
+            # 변동성 예측 여부
+            is_vol = status.startswith("v_")
+
+            # 실패패턴 존재 여부 (가능하면 체크, 실패해도 무시)
+            fail_pat = False
+            try:
+                if status in ["fail","v_fail"]:
+                    fail_pat = bool(check_failure_exists(sym, strat))
+            except Exception:
+                fail_pat = False
+
+            # 상태 스타일/아이콘
+            if status in ["success","v_success"]:
+                status_class = "success"
+                status_icon = "✅"
+            elif status in ["fail","v_fail"]:
+                status_class = "fail"
+                status_icon = "❌"
+            elif status in ["pending","v_pending",""]:
+                status_class = "pending"
+                status_icon = "⏳"
+            else:
+                status_class = "pending"
+                status_icon = "❓"
+
+            html += "<div class='card'>"
+
+            # 상단 라벨
+            html += "<div style='margin-bottom:4px;'>"
+            if is_meta:
+                html += "<span class='badge badge-main'>META</span>"
+            if is_shadow:
+                html += "<span class='badge badge-shadow'>SHADOW</span>"
+            if is_vol:
+                html += "<span class='badge badge-dist'>변동성</span>"
+            if fail_pat:
+                html += "<span class='badge badge-failpat'>실패패턴 기록됨</span>"
+            html += f"<span class='{status_class}' style='margin-left:6px;'>{status_icon} {status}</span>"
+            html += "</div>"
+
+            # 본문
+            html += f"<div class='row-line'><span class='key'>시각</span><span class='value'>{ts}</span></div>"
+            html += f"<div class='row-line'><span class='key'>모델</span><span class='value'>{model or '-'}</span></div>"
+            html += f"<div class='row-line'><span class='key'>방향</span><span class='value'>{direction or '-'}</span></div>"
+            html += f"<div class='row-line'><span class='key'>예상 수익률</span><span class='value'>{rv_pct:.2f}%</span></div>"
+            if src:
+                html += f"<div class='row-line'><span class='key'>source</span><span class='value'>{src}</span></div>"
+            if reason:
+                html += f"<div class='row-line'><span class='key'>사유</span><span class='value'>{reason}</span></div>"
+
+            html += "</div>"
 
     html += "</body></html>"
     return html
+
 @app.route("/check-log")
 def check_log():
     try:
