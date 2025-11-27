@@ -2581,10 +2581,14 @@ def _stoploss_risk_guard(symbol: str, strategy: str, final_cls: int,
 
 # =========================================================
 # ✅ 여기 수정: 운영 수익률 분포 로그 (학습 라벨 경계 기준 + 폴백)
+#    → prediction_log.csv 를 더 이상 오염시키지 않고
+#       /persistent/logs/run_return_distribution.csv 로 분리 저장
 # =========================================================
 def log_return_distribution_for_run(symbol: str, strategy: str, df):
     """
-    운영로그용 수익률 분포를 '학습 때 만든 라벨 경계(label_edges)' 기준으로 기록한다.
+    운영로그용 수익률 분포를 '학습 때 만든 라벨 경계(label_edges)' 기준으로 계산하되,
+    이제는 prediction_log.csv 에 쓰지 않고
+    /persistent/logs/run_return_distribution.csv 에만 저장한다.
 
     우선순위:
       1️⃣ /persistent/label_edges/{SYMBOL}__{전략}.json 의 edges + labels.compute_label_returns 사용
@@ -2624,7 +2628,7 @@ def log_return_distribution_for_run(symbol: str, strategy: str, df):
 
                 edges_arr = np.asarray(edges, dtype=float)
                 edges2 = edges_arr.copy()
-                edges2[-1] += 1e-12
+                edges2[-1] += 1e-12  # 마지막 경계에 아주 작은 값 추가
 
                 bin_counts, _ = np.histogram(gains, bins=edges2)
 
@@ -2650,35 +2654,31 @@ def log_return_distribution_for_run(symbol: str, strategy: str, df):
             hist = make_return_histogram(rets, bins=20)
             sample_size = int(len(rets))
 
-        log_prediction(
-            symbol=symbol,
-            strategy=strategy,
-            direction="운영수익분포",
-            entry_price=0.0,
-            target_price=0.0,
-            model="predictor",
-            model_name="predictor",
-            predicted_class=-1,
-            label=-1,
-            note=json.dumps(
-                {
-                    "sample_size": sample_size,
-                    "bin_edges": hist["bin_edges"],
-                    "bin_counts": hist["bin_counts"],
-                },
-                ensure_ascii=False,
-            ),
-            top_k=[],
-            success=True,
-            reason="run_return_distribution",
-            rate=0.0,
-            expected_return=0.0,
-            position="neutral",
-            return_value=0.0,
-            source="run",
-        )
+        # ✅ 여기부터는 prediction_log.csv 에 쓰지 않고
+        #    별도 CSV: /persistent/logs/run_return_distribution.csv 로만 저장
+        logs_dir = _p("logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        out_path = os.path.join(logs_dir, "run_return_distribution.csv")
+
+        row = {
+            "timestamp": _now_kst().isoformat(),
+            "symbol": sym,
+            "strategy": strat,
+            "sample_size": sample_size,
+            "bin_edges_json": json.dumps(hist["bin_edges"], ensure_ascii=False),
+            "bin_counts_json": json.dumps(hist["bin_counts"], ensure_ascii=False),
+        }
+
+        file_exists = os.path.exists(out_path)
+        with open(out_path, "a", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+
     except Exception as e:
         print(f"[log_return_distribution_for_run 예외] {e}")
+
 
 def _stoploss_touch_guard(df, symbol, strategy, final_cls, lo_sel, hi_sel,
                           sl_ratio=0.03, lookback=30):
