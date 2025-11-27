@@ -1752,7 +1752,6 @@ def train_now():
     except Exception as e:
         return f"학습 실패: {e}", 500
 
-
 @app.route("/train-log")
 def train_log():
     """
@@ -1760,8 +1759,11 @@ def train_log():
 
     - 최근 학습 기록을 카드 + 표 형태로 보여준다.
     - accuracy / f1 / loss 가 어떤 의미인지 한글로 간단히 설명한다.
+    - 심볼·전략별 클래스 개수, 수익률 구간, 분포/이상 여부까지 한눈에 본다.
     """
     try:
+        import ast, json
+
         log_path = get_TRAIN_LOG_PATH()
         if not os.path.exists(log_path):
             return (
@@ -1801,7 +1803,186 @@ def train_log():
             for s, cnt in recent["status"].value_counts().items():
                 status_counts[str(s)] = int(cnt)
 
-        # 표시할 컬럼 선택
+        # ===== 클래스/수익률 분포 요약 준비 =====
+        def _parse_list_value(v):
+            # 문자열로 저장된 "[..]" / JSON / "1,2,3" 등을 튼튼하게 리스트로 변환
+            if v is None:
+                return []
+            if isinstance(v, (list, tuple)):
+                return list(v)
+            s = str(v).strip()
+            if s == "" or s.lower() in ["nan", "none", "null"]:
+                return []
+            try:
+                return list(ast.literal_eval(s))
+            except Exception:
+                pass
+            try:
+                return list(json.loads(s))
+            except Exception:
+                pass
+            try:
+                import re as _re
+
+                parts = [p for p in _re.split(r"[,\s]+", s) if p]
+                return [float(p) for p in parts]
+            except Exception:
+                return []
+
+        has_symbol_strat = {"symbol", "strategy"}.issubset(set(recent.columns))
+        # 로그에 어떤 이름으로 들어왔는지 최대한 유연하게 찾기
+        col_bins = None
+        col_edges = None
+        col_counts = None
+        for cand in ["class_bins", "bins"]:
+            if cand in recent.columns:
+                col_bins = cand
+                break
+        for cand in ["class_edges", "edges"]:
+            if cand in recent.columns:
+                col_edges = cand
+                break
+        for cand in ["class_counts", "counts"]:
+            if cand in recent.columns:
+                col_counts = cand
+                break
+
+        class_cards_html = ""
+        if has_symbol_strat and (col_edges or col_counts or col_bins):
+            # 심볼·전략별로 "마지막 1줄"만 뽑아서 분포 요약
+            if "timestamp" in recent.columns:
+                tmp = recent.sort_values("timestamp")
+            else:
+                tmp = recent.copy()
+            grp_last = (
+                tmp.groupby(["symbol", "strategy"], as_index=False)
+                .tail(1)
+                .reset_index(drop=True)
+            )
+
+            rows_html = []
+            for _, r in grp_last.iterrows():
+                sym = str(r.get("symbol", ""))
+                strat = str(r.get("strategy", ""))
+                bins_val = _parse_list_value(r.get(col_bins)) if col_bins else []
+                edges_val = _parse_list_value(r.get(col_edges)) if col_edges else []
+                counts_val = _parse_list_value(r.get(col_counts)) if col_counts else []
+
+                # 클래스 개수 추정
+                num_classes = None
+                if "num_classes" in r and not pd.isna(r["num_classes"]):
+                    try:
+                        num_classes = int(r["num_classes"])
+                    except Exception:
+                        num_classes = None
+                if num_classes is None:
+                    # counts 길이, bins 길이 중 하나 사용
+                    if counts_val:
+                        num_classes = len(counts_val)
+                    elif bins_val:
+                        num_classes = len(bins_val)
+                    else:
+                        num_classes = 0
+
+                # 구간/카운트 매칭
+                intervals = []
+                if edges_val and counts_val and len(edges_val) == len(counts_val) + 1:
+                    for i, c in enumerate(counts_val):
+                        try:
+                            lo = float(edges_val[i]) * 100.0
+                            hi = float(edges_val[i + 1]) * 100.0
+                            intervals.append(
+                                {
+                                    "idx": i,
+                                    "range": f"{lo:.2f}% ~ {hi:.2f}%",
+                                    "count": int(c),
+                                }
+                            )
+                        except Exception:
+                            intervals.append(
+                                {
+                                    "idx": i,
+                                    "range": "구간 정보 오류",
+                                    "count": int(c) if c is not None else 0,
+                                }
+                            )
+                elif counts_val:
+                    for i, c in enumerate(counts_val):
+                        intervals.append(
+                            {
+                                "idx": i,
+                                "range": "구간 정보 없음",
+                                "count": int(c) if c is not None else 0,
+                            }
+                        )
+
+                total_cnt = sum(int(x["count"]) for x in intervals) if intervals else 0
+
+                # 이상 여부 판별 (아주 간단한 기준)
+                issues = []
+                if num_classes == 0 or total_cnt == 0:
+                    issues.append("학습에 사용된 데이터가 거의 없습니다.")
+                if 0 < num_classes <= 2:
+                    issues.append("클래스 개수가 2개 이하입니다.")
+                if total_cnt > 0 and intervals:
+                    # 너무 적은 클래스(전체의 2% 미만 또는 3개 이하)가 있는지
+                    sparse_found = False
+                    for x in intervals:
+                        c = x["count"]
+                        if c <= 3 or (c / total_cnt) < 0.02:
+                            sparse_found = True
+                            break
+                    if sparse_found:
+                        issues.append("거의 비어 있는 희소 클래스가 있습니다.")
+
+                if not issues and num_classes > 0 and total_cnt > 0:
+                    issue_text = "정상 (클래스 개수와 분포가 무난합니다.)"
+                elif not issues:
+                    issue_text = "정보 부족으로 상태를 판단할 수 없습니다."
+                else:
+                    issue_text = " / ".join(issues)
+
+                # 테이블 HTML 구성
+                if intervals:
+                    rows_tr = []
+                    for x in intervals:
+                        rows_tr.append(
+                            f"<tr><td>{x['idx']}</td><td>{x['range']}</td><td>{x['count']}</td></tr>"
+                        )
+                    dist_table = (
+                        "<table border='1' style='border-collapse:collapse;font-size:11px;margin-top:4px;'>"
+                        "<tr><th>클래스 번호</th><th>수익률 구간</th><th>데이터 개수</th></tr>"
+                        + "".join(rows_tr)
+                        + "</table>"
+                    )
+                else:
+                    dist_table = (
+                        "<div style='font-size:11px;color:#666;margin-top:4px;'>"
+                        "클래스/수익률 분포 정보가 로그에 없습니다."
+                        "</div>"
+                    )
+
+                rows_html.append(
+                    f"""
+<div style='border:1px solid #ddd;border-radius:8px;padding:8px 10px;margin-bottom:8px;background:#ffffff;'>
+  <div style='font-weight:bold;margin-bottom:4px;'>
+    심볼: {sym} / 전략: {strat}
+  </div>
+  <div style='font-size:12px;margin-bottom:2px;'>
+    클래스 개수: <b>{num_classes}</b>개 · 총 데이터: <b>{total_cnt}</b>개
+  </div>
+  <div style='font-size:12px;color:#b71c1c;margin-bottom:4px;'>
+    {issue_text}
+  </div>
+  {dist_table}
+</div>
+"""
+                )
+
+            if rows_html:
+                class_cards_html = "".join(rows_html)
+
+        # 표시할 컬럼 선택 (기존 로직 유지)
         preferred_cols = [
             "timestamp",
             "symbol",
@@ -1832,10 +2013,18 @@ def train_log():
             for key in ["success", "warn", "warning", "error", "fail"]:
                 if key in status_counts:
                     status_summary.append(f"{key}: {status_counts[key]}건")
-            others = {k: v for k, v in status_counts.items() if k not in ["success", "warn", "warning", "error", "fail"]}
+            others = {
+                k: v
+                for k, v in status_counts.items()
+                if k not in ["success", "warn", "warning", "error", "fail"]
+            }
             if others:
-                status_summary.append("기타: " + ", ".join(f"{k}={v}건" for k, v in others.items()))
-        status_summary_text = " / ".join(status_summary) if status_summary else "기록된 상태 값이 없습니다."
+                status_summary.append(
+                    "기타: " + ", ".join(f"{k}={v}건" for k, v in others.items())
+                )
+        status_summary_text = (
+            " / ".join(status_summary) if status_summary else "기록된 상태 값이 없습니다."
+        )
 
         html = f"""
 <html>
@@ -1898,7 +2087,8 @@ def train_log():
     <div class="small-note">
         이 페이지는 <b>모델이 학습될 때마다 남기는 기록표</b>입니다.<br>
         한 줄이 <b>1번 학습 시도</b>이고, 어떤 심볼·전략에 대해
-        <code>정확도(acc)</code>, <code>F1</code>, <code>loss</code>가 어떻게 나왔는지 보여줍니다.
+        <code>정확도(acc)</code>, <code>F1</code>, <code>loss</code>가 어떻게 나왔는지 보여줍니다.<br>
+        아래쪽에서는 심볼·전략별 <b>클래스 개수와 수익률 구간 분포</b>도 함께 볼 수 있습니다.
     </div>
 </div>
 
@@ -1923,18 +2113,47 @@ def train_log():
         · <code>fail / error</code> → 학습이 도중에 실패했거나 결과가 깨진 상태
     </div>
 </div>
+"""
 
+        # 3️⃣ 클래스/수익률 구간 카드
+        if class_cards_html:
+            html += f"""
 <div class="card">
-    <div class="card-title">3️⃣ 최근 200회 학습 상태 요약</div>
+    <div class="card-title">3️⃣ 심볼·전략별 클래스·수익률 구간 요약</div>
+    <div class="small-note" style="margin-bottom:6px;">
+        · 각 박스는 <b>한 심볼 + 한 전략(단기/중기/장기)</b>을 뜻합니다.<br>
+        · "클래스 번호" 0,1,2,… 마다 <b>수익률 구간</b>과 <b>데이터 개수</b>를 보여줍니다.<br>
+        · "희소 클래스"가 많으면, 해당 구간은 거의 경험이 없어 학습이 불안정할 수 있습니다.
+    </div>
+    {class_cards_html}
+</div>
+"""
+        else:
+            html += """
+<div class="card">
+    <div class="card-title">3️⃣ 심볼·전략별 클래스·수익률 구간 요약</div>
+    <div class="small-note">
+        현재 학습 로그에는 <code>class_edges / class_counts / bins</code> 와 같은
+        클래스·수익률 분포 정보가 없어서, 이 요약을 만들 수 없습니다.<br>
+        추후 이 컬럼들이 train_log.csv에 기록되면, 여기에서
+        <b>클래스 개수 / 수익률 구간 / 희소 클래스 여부</b>를 한 번에 볼 수 있습니다.
+    </div>
+</div>
+"""
+
+        # 4️⃣ 상태 요약
+        html += f"""
+<div class="card">
+    <div class="card-title">4️⃣ 최근 200회 학습 상태 요약</div>
     <div>{status_summary_text}</div>
     <div class="small-note" style="margin-top:6px;">
-        초보자는 대략 <b>success가 대부분</b>이고, 가끔 warn이 있는 정도면 정상이라고 보면 됩니다.<br>
+        대략 <b>success가 대부분</b>이고, 가끔 warn이 있는 정도면 정상이라고 보면 됩니다.<br>
         error / fail이 많다면 <code>message</code> 컬럼을 눌러 어떤 에러인지 확인해 주세요.
     </div>
 </div>
 
 <div class="card">
-    <div class="card-title">4️⃣ 자세한 표 (최근 200행)</div>
+    <div class="card-title">5️⃣ 자세한 표 (최근 200행)</div>
     <div class="small-note" style="margin-bottom:6px;">
         주요 컬럼 설명:<br>
         · <code>timestamp</code> : 학습이 끝난 시각<br>
@@ -1962,7 +2181,6 @@ def train_log():
         return html
     except Exception as e:
         return f"읽기 오류: {e}", 500
-
 
 @app.route("/models")
 def list_models():
