@@ -326,41 +326,63 @@ def ensure_prediction_log_exists():
         print(f"[⚠️ ensure_prediction_log_exists] 예외: {e}")
 
   
-def ensure_train_log_exists():  
-    if _READONLY_FS: return  
-    try:  
-        os.makedirs(os.path.dirname(TRAIN_LOG), exist_ok=True)  
-        if not os.path.exists(TRAIN_LOG) or os.path.getsize(TRAIN_LOG) == 0:  
-            with open(TRAIN_LOG, "w", newline="", encoding="utf-8-sig") as f:  
-                csv.writer(f).writerow(TRAIN_HEADERS)  
-            print("[✅ ensure_train_log_exists] train_log.csv 생성(확장 스키마)")  
-        else:  
-            existing = _read_csv_header(TRAIN_LOG)  
-            if existing != TRAIN_HEADERS:  
-                bak = TRAIN_LOG + ".bak"  
-                try: os.replace(TRAIN_LOG, bak)  
-                except Exception:  
-                    try: shutil.copyfile(TRAIN_LOG, bak); open(TRAIN_LOG, "w", encoding="utf-8-sig").close()  
-                    except Exception: return  
-                with open(TRAIN_LOG, "w", newline="", encoding="utf-8-sig") as out, \  
-                     open(bak, "r", encoding="utf-8-sig") as src:  
-                    w = csv.writer(out); w.writerow(TRAIN_HEADERS)  
-                    reader = csv.reader(src)  
-                    try: old_header = next(reader)  
-                    except StopIteration: old_header = []  
-                    for row in reader:  
-                        mapped = {h:row[i] for i,h in enumerate(old_header)} if old_header else {}  
-                        val_loss_val = mapped.get("val_loss", mapped.get("loss", mapped.get("train_loss_sum","")))  
-                        new_row = [  
-                            mapped.get("timestamp",""), mapped.get("symbol",""), mapped.get("strategy",""), mapped.get("model",""),  
-                            mapped.get("accuracy", mapped.get("val_acc","")), mapped.get("f1", mapped.get("val_f1","")), val_loss_val,  
-                            "", "", "", "", "", "", "", "",  
-                            mapped.get("note",""), mapped.get("source_exchange",""), mapped.get("status",""),  
-                        ]  
-                        w.writerow(new_row[:len(TRAIN_HEADERS)])  
-                print("[✅ ensure_train_log_exists] train_log.csv 헤더 보정(확장) 완료")  
-    except Exception as e:  
-        print(f"[⚠️ ensure_train_log_exists] 예외: {e}")  
+def ensure_train_log_exists():
+    if _READONLY_FS:
+        return
+    try:
+        os.makedirs(os.path.dirname(TRAIN_LOG), exist_ok=True)
+
+        # 새 파일 또는 빈 파일 → 헤더 생성
+        if not os.path.exists(TRAIN_LOG) or os.path.getsize(TRAIN_LOG) == 0:
+            with open(TRAIN_LOG, "w", newline="", encoding="utf-8-sig") as f:
+                csv.writer(f).writerow(TRAIN_HEADERS)
+            print("[✅ ensure_train_log_exists] train_log.csv 생성(확장 스키마)")
+
+        else:
+            # 기존 헤더와 비교
+            existing = _read_csv_header(TRAIN_LOG)
+            if existing != TRAIN_HEADERS:
+                bak = TRAIN_LOG + ".bak"
+
+                # 안전 백업
+                try:
+                    os.replace(TRAIN_LOG, bak)
+                except Exception:
+                    try:
+                        shutil.copyfile(TRAIN_LOG, bak)
+                        open(TRAIN_LOG, "w", encoding="utf-8-sig").close()
+                    except Exception:
+                        return
+
+                # 🟢 여기 문법 오류 있었던 줄 — 백슬래시 뒤 공백 제거
+                with open(TRAIN_LOG, "w", newline="", encoding="utf-8-sig") as out, \
+                     open(bak, "r", encoding="utf-8-sig") as src:
+
+                    w = csv.writer(out)
+                    w.writerow(TRAIN_HEADERS)
+
+                    reader = csv.reader(src)
+                    try:
+                        old_header = next(reader)
+                    except StopIteration:
+                        old_header = []
+
+                    for row in reader:
+                        mapped = {h: row[i] for i, h in enumerate(old_header)} if old_header else {}
+                        val_loss_val = mapped.get("val_loss", mapped.get("loss", mapped.get("train_loss_sum", "")))
+                        new_row = [
+                            mapped.get("timestamp",""), mapped.get("symbol",""), mapped.get("strategy",""), mapped.get("model",""),
+                            mapped.get("accuracy", mapped.get("val_acc","")), mapped.get("f1", mapped.get("val_f1","")), val_loss_val,
+                            "", "", "", "", "", "", "", "",
+                            mapped.get("note",""), mapped.get("source_exchange",""), mapped.get("status",""),
+                        ]
+                        w.writerow(new_row[:len(TRAIN_HEADERS)])
+
+                print("[✅ ensure_train_log_exists] train_log.csv 헤더 보정(확장) 완료")
+
+    except Exception as e:
+        print(f"[⚠️ ensure_train_log_exists] 예외: {e}")
+
   
 # -------------------------  
 # 로그 로테이션 (읽기전용이면 skip)  
