@@ -274,7 +274,6 @@ def log_return_distribution_for_train(symbol: str, strategy: str, df: pd.DataFra
     except Exception as e:
         print(f"[train.return-dist warn] {e}", flush=True)
 
-
 # ==== [ADD] train 로그 경로/헤더 보장 ====
 DEFAULT_TRAIN_HEADERS = [
     "timestamp",
@@ -316,10 +315,16 @@ DEFAULT_TRAIN_HEADERS = [
     "bin_edges",
     "bin_counts",
     "bin_spans",
+    # 🔥 프론트에서 찾는 이름들(호환용)
+    "class_edges",    # = bin_edges
+    "class_counts",   # = bin_counts
+    "bins",           # = len(bin_edges) - 1
 ]
+
 try:
     from logger import TRAIN_HEADERS
 
+    # logger 쪽 기본 헤더와 우리가 추가한 헤더를 합침(중복 제거)
     TRAIN_HEADERS = list(dict.fromkeys(list(TRAIN_HEADERS) + DEFAULT_TRAIN_HEADERS))
 except Exception:
     TRAIN_HEADERS = DEFAULT_TRAIN_HEADERS
@@ -348,15 +353,36 @@ def _ensure_train_log():
 
 
 def _normalize_train_row(row: dict) -> dict:
+    # 모든 헤더에 대해 기본값 채우기
     r = {k: row.get(k, None) for k in TRAIN_HEADERS}
+
+    # 옛날 키 이름과 호환
     if r.get("val_acc") is None and row.get("accuracy") is not None:
         r["val_acc"] = row.get("accuracy")
     if r.get("val_f1") is None and row.get("f1") is not None:
         r["val_f1"] = row.get("f1")
     if r.get("val_loss") is None and row.get("loss") is not None:
         r["val_loss"] = row.get("loss")
+
     r.setdefault("engine", row.get("engine", "manual"))
     r.setdefault("source_exchange", row.get("source_exchange", "BYBIT"))
+
+    # 수익률 구간 호환 필드 채우기
+    # - bin_edges/bin_counts 가 있으면 class_edges/class_counts/bins 도 같이 채워줌
+    be = row.get("bin_edges") or r.get("bin_edges")
+    bc = row.get("bin_counts") or r.get("bin_counts")
+
+    if be is not None and r.get("class_edges") is None:
+        r["class_edges"] = be
+    if bc is not None and r.get("class_counts") is None:
+        r["class_counts"] = bc
+    if r.get("bins") is None:
+        try:
+            if isinstance(be, (list, tuple)) and len(be) >= 2:
+                r["bins"] = len(be) - 1
+        except Exception:
+            pass
+
     return r
 
 
@@ -372,15 +398,20 @@ def _append_train_log(row: dict):
         print(f"[경고] train_log 기록 실패: {e}")
 
 
+# logger.log_training_result 를 패치해서
+# → 원래 로깅 + train_log.csv 에 한 줄 더 쓰도록
 if not getattr(logger, "_patched_train_log", False):
     _orig_ltr = getattr(logger, "log_training_result", None)
 
     def _log_training_result_patched(*args, **kw):
+        # 1) 원래 logger 로깅 먼저 시도
         if callable(_orig_ltr):
             try:
                 _orig_ltr(*args, **kw)
             except Exception as e:
                 print(f"[경고] logger.log_training_result 실패: {e}")
+
+        # 2) train_log.csv 에도 기록
         row = dict(kw)
         row.setdefault(
             "timestamp", datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
