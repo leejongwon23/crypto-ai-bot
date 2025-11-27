@@ -118,6 +118,7 @@ except Exception:
         mark_group_predicted,
         reset_group_order,
         CacheManager as DataCacheManager,
+        compute_features_multi,
     )
 
     # 선택적 신규 API 폴백
@@ -307,6 +308,14 @@ DEFAULT_TRAIN_HEADERS = [
     "usable_samples",
     "class_counts_after_assemble",
     "batch_stratified_ok",
+    # === 수익률/클래스 구간 요약 추가 ===
+    "near_zero_band",
+    "near_zero_count",
+    "masked_count",
+    "class_ranges",
+    "bin_edges",
+    "bin_counts",
+    "bin_spans",
 ]
 try:
     from logger import TRAIN_HEADERS
@@ -1247,7 +1256,7 @@ def train_one_model(
             f"[LABELS] total={len(labels)} "
             f"masked={mask_cnt} ({mask_ratio:.2%}) "
             f"BOUNDARY_BAND=±{BOUNDARY_BAND} "
-            f"NEAR_ZERO_BAND=±{nz_band:.4f} "
+            f"NEAR_ZERO_BAND=±{nz_band} "
             f"near_zero={near_zero_cnt} ({near_zero_ratio:.2%})"
         )
 
@@ -1295,7 +1304,7 @@ def train_one_model(
                     f"bins_group={len(class_ranges)}, empty={len(empty_idx)}, "
                     f"classes={num_classes_effective}, empty_idx={empty_idx[:8]}, "
                     f"masked={mask_cnt}, near_zero={near_zero_cnt}, "
-                    f"NEAR_ZERO_BAND=±{nz_band:.4f}"
+                    f"NEAR_ZERO_BAND=±{nz_band}"
                     + return_note
                 ),
                 source_exchange="BYBIT",
@@ -1800,10 +1809,26 @@ def train_one_model(
             wpath, mpath = _save_model_and_meta(model, stem + ".pt", meta)
 
             try:
-                final_note = f"train_one_model(window={window}, cap={len(features_only)}, engine=manual)"
+                # 한글 요약 note: 이 한 줄만 봐도 상태를 바로 이해할 수 있게
+                summary_parts = [
+                    f"[학습요약] {symbol}-{strategy}",
+                    f"윈도우={int(window)}",
+                    f"클래스={len(class_ranges)}개",
+                    f"샘플={usable_samples}개",
+                    f"정확도={acc:.4f}",
+                    f"F1={f1_val:.4f}",
+                ]
                 if note_msg:
-                    final_note += f" | {note_msg}"
-                final_note = final_note + return_note
+                    summary_parts.append(note_msg)
+                if bin_edges and bin_counts:
+                    try:
+                        nz_ratio_pct = near_zero_ratio * 100.0
+                    except Exception:
+                        nz_ratio_pct = 0.0
+                    summary_parts.append(
+                        f"수익률구간={len(bin_edges)-1}개, 0%근처(±{nz_band:.4f}) 비중≈{nz_ratio_pct:.1f}%"
+                    )
+                final_note = " | ".join(summary_parts) + return_note
 
                 logger.log_training_result(
                     symbol,
@@ -1838,6 +1863,13 @@ def train_one_model(
                     usable_samples=usable_samples,
                     class_counts_after_assemble=cnt_after,
                     batch_stratified_ok=batch_stratified_ok,
+                    # 추가: 클래스/수익률 구간도 로그에 포함
+                    class_ranges=[
+                        [float(lo), float(hi)] for (lo, hi) in class_ranges
+                    ],
+                    bin_edges=bin_edges,
+                    bin_counts=bin_counts,
+                    bin_spans=bin_spans,
                     # 추가: near-zero 통계도 로그에 포함
                     near_zero_band=float(nz_band),
                     near_zero_count=int(near_zero_cnt),
