@@ -757,6 +757,7 @@ def log_prediction(
     if not _READONLY_FS:  
         ensure_prediction_log_exists()  
   
+    # rate 기본값: expected_return 우선, 없으면 0.0  
     if rate is None:  
         rate = expected_return if expected_return is not None else 0.0  
   
@@ -804,6 +805,16 @@ def log_prediction(
     else:  
         shadow_classes_str = "" if shadow_classes is None else str(shadow_classes)  
   
+    # 🔍 여기서 학습 수익분포 로그 여부를 먼저 판별  
+    src_lower = str(source or "").lower()  
+    mdl_lower = str(model or "").lower()  
+    rsn_lower = str(reason or "").lower()  
+    is_train_dist = (  
+        "train" in src_lower  
+        or mdl_lower == "trainer"  
+        or rsn_lower == "train_return_distribution"  
+    )  
+  
     row = [  
         now, symbol, strategy, direction, entry_price, target_price,  
         model, predicted_class, top_k_str, note, str(success), reason,  
@@ -821,31 +832,30 @@ def log_prediction(
         meta_reason,  
     ]  
   
+    aligned = _align_row_to_header(row, PREDICTION_HEADERS)  
+    payload = dict(zip(PREDICTION_HEADERS, aligned))  
+  
+    # 🔒 파일/콘솔 기록 분기  
     if _READONLY_FS or not _fs_has_space(PREDICTION_LOG, 256*1024):  
-        payload = dict(zip(PREDICTION_HEADERS, _align_row_to_header(row, PREDICTION_HEADERS)))  
-        print(f"[PREDICT][console] {json.dumps(payload, ensure_ascii=False)}")  
+        # 저장 불가 시 콘솔 출력만  
+        tag = "PREDICT/TRAIN_DIST" if is_train_dist else "PREDICT"  
+        print(f"[{tag}][console] {json.dumps(payload, ensure_ascii=False)}")  
     else:  
-        with _FileLock(_PRED_LOCK_PATH, timeout=10.0):  
-            rotate_prediction_log_if_needed()  
-            write_header = not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0  
-            with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:  
-                w = csv.writer(f)  
-                if write_header: w.writerow(PREDICTION_HEADERS)  
-                w.writerow(_align_row_to_header(row, PREDICTION_HEADERS))  
+        # ✅ 핵심 수정: 학습 수익분포(is_train_dist=True)는 prediction_log.csv에 쓰지 않는다  
+        if is_train_dist:  
+            # prediction_log에는 남기지 않고 콘솔만  
+            print(f"[PREDICT/TRAIN_DIST][console] {json.dumps(payload, ensure_ascii=False)}")  
+        else:  
+            with _FileLock(_PRED_LOCK_PATH, timeout=10.0):  
+                rotate_prediction_log_if_needed()  
+                write_header = not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0  
+                with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:  
+                    w = csv.writer(f)  
+                    if write_header: w.writerow(PREDICTION_HEADERS)  
+                    w.writerow(aligned)  
   
-    # ✅ 여기부터 출력 문구 분리 (핵심 수정 아님, 그대로 유지)  
+    # ✅ 여기부터 출력 문구 (성공/실패 요약)  
     if success:  
-        # 학습용 수익률 분포(log_return_distribution → source="train", model="trainer", reason="train_return_distribution")  
-        src_lower = str(source or "").lower()  
-        mdl_lower = str(model or "").lower()  
-        rsn_lower = str(reason or "").lower()  
-  
-        is_train_dist = (  
-            "train" in src_lower  
-            or mdl_lower == "trainer"  
-            or rsn_lower == "train_return_distribution"  
-        )  
-  
         if is_train_dist:  
             _print_once(  
                 f"train_ret_dist:{symbol}:{strategy}:{model_name}",  
@@ -1264,7 +1274,7 @@ def export_recent_model_stats(days: int = 7, out_path: str = None):
             usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success","source"]],  
             chunksize=CHUNK  
         ):  
-            # source 필터: 훈련/디버그 제외  
+            # source 필터: 훈련/디버그 소스 제외  
             if "source" in chunk.columns:  
                 chunk = chunk[~chunk["source"].astype(str).isin(LOG_SOURCE_BLACKLIST)]  
             if "timestamp" in chunk.columns:  
@@ -1602,4 +1612,4 @@ def make_return_histogram(returns: list[float], bins: int = 20):
     return {  
         "bin_edges": edges.astype(float).tolist(),  
         "bin_counts": counts.astype(int).tolist(),  
-        }
+        }  
