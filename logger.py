@@ -898,119 +898,122 @@ def _first_non_none(*vals):
             return v  
     return None  
   
-def log_training_result(  
-    symbol, strategy, model="",  
-    accuracy=None, f1=None, loss=None,  
-    note="", source_exchange="BYBIT", status="success",  
-    y_true=None, y_pred=None, num_classes=None,  
-    **kwargs  
-):  
-    LOG_FILE = TRAIN_LOG  
-    now = datetime.datetime.now(pytz.timezone("Asia/Seoul")).isoformat()  
-  
-    extras = _parse_train_note(note)  
-  
-    # ── 1) 숫자 값 정리 (val_acc / val_f1 / val_loss) ─────────────────
-    try:  
-        val_acc  = _first_non_none(kwargs.get("val_acc"), accuracy)  
-        val_f1   = _first_non_none(kwargs.get("val_f1"),  f1)  
-        val_loss = _first_non_none(kwargs.get("val_loss"), loss)  
-        val_acc  = float(val_acc)  if val_acc  is not None and str(val_acc)  != "" else 0.0  
-        val_f1   = float(val_f1)   if val_f1   is not None and str(val_f1)   != "" else 0.0  
-        val_loss = float(val_loss) if val_loss is not None and str(val_loss) != "" else 0.0  
-    except Exception:  
-        val_acc, val_f1, val_loss = 0.0, 0.0, 0.0  
-  
-    # ── 2) train_log.csv 에 들어갈 한 줄 ────────────────────────────────
-    row = [  
-        now, str(symbol), str(strategy), str(model or ""),  
-        val_acc, val_f1, val_loss,  
-        extras.get("engine",""), extras.get("window",""), extras.get("recent_cap",""),  
-        extras.get("rows",""), extras.get("limit",""), extras.get("min",""),  
-        extras.get("augment_needed",""), extras.get("enough_for_training",""),  
-        str(note or ""), str(source_exchange or "BYBIT"),  
-        str(status or "success")  
-    ]  
-  
-    # ── 3) train_log.csv 기록 + F1=0 경고 ───────────────────────────────
-    try:  
-        if _READONLY_FS:  
-            print(f"[TRAIN][console] {json.dumps(dict(zip(TRAIN_HEADERS, _align_row_to_header(row, TRAIN_HEADERS))), ensure_ascii=False)}")  
-        else:  
-            write_header = not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0  
-            if write_header:  
-                ensure_train_log_exists()  
-            with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:  
-                w = csv.writer(f)  
-                if write_header:  
-                    w.writerow(TRAIN_HEADERS)  
-                w.writerow(_align_row_to_header(row, TRAIN_HEADERS))  
-  
-        _f1_key = (str(symbol), str(strategy))  
-        if not hasattr(log_training_result, "_f1_zero"):  
-            log_training_result._f1_zero = defaultdict(int)  
-  
-        if float(val_f1 or 0.0) <= 0.0:  
-            log_training_result._f1_zero[_f1_key] += 1  
-            n = log_training_result._f1_zero[_f1_key]  
-            if n == 1:  
-                print(f"🟠 [경고] F1=0.0 발생 → {symbol}-{strategy} {model} (1회)")  
-            elif n % int(os.getenv('F1_ZERO_WARN_EVERY','5')) == 0:  
-                print(f"🟠 [요약] F1=0.0 연속 {n}회 → {symbol}-{strategy} {model}")  
-        else:  
-            if getattr(log_training_result, "_f1_zero", {}).get(_f1_key, 0) > 0:  
-                print(f"[✅ 복구] {symbol}-{strategy} {model} F1 회복 → {float(val_f1 or 0.0):.4f}")  
-            log_training_result._f1_zero[_f1_key] = 0  
-  
-        _print_once(  
-            f"trainlog:{symbol}:{strategy}:{model}",  
-            f"[✅ 학습 로그 기록] {symbol}-{strategy} {model} val_f1={float(val_f1 or 0.0):.4f} status={status}"  
-        )  
-    except Exception as e:  
-        print(f"[⚠️ 학습 로그 기록 실패] {e}")  
-  
-    # ── 4) 🔴 핵심 추가: 한눈에 보는 대시보드(train_dashboard.csv) 갱신 ──
-    #   → 여기서 symbol/strategy/model 의 최신 상태를 모아서
-    #     /logs/train_dashboard.csv 에 요약 1줄로 정리
-    try:  
-        if not _READONLY_FS:  
-            update_train_dashboard(str(symbol), str(strategy), str(model or ""))  
-    except Exception as e:  
-        print(f"[⚠️ train_dashboard 업데이트 실패] {e}")  
-  
-    # ── 5) 전략별 이동평균 F1 (기존 기능 유지) ──────────────────────────
-    try:  
-        if not _READONLY_FS and os.path.exists(LOG_FILE):  
-            N = int(os.getenv("LOG_F1_MA_N", "20"))  
-            df_ma = pd.read_csv(LOG_FILE, encoding="utf-8-sig")  
-            if "val_f1" in df_ma.columns:  
-                sub = df_ma[df_ma.get("strategy","") == strategy].tail(max(1, N))  
-                if not sub.empty:  
-                    ma_f1 = float(pd.to_numeric(sub["val_f1"], errors="coerce").dropna().mean()) if "val_f1" in sub else float("nan")  
-                    if ma_f1 == ma_f1:  
-                        print(f"[📊 이동평균 F1] 전략={strategy} 최근{len(sub)}회 → {ma_f1:.4f}")  
-    except Exception:  
-        pass  
-  
-    # ── 6) per-class F1 + 검증 커버리지 (기존 기능 유지) ────────────────
-    if y_true is not None and y_pred is not None:  
-        try:  
-            rep = classification_report(y_true, y_pred, output_dict=True, zero_division=0)  
-            per_cls = {k: v["f1-score"] for k, v in rep.items() if k.isdigit()}  
-            print(f"[📊 per-class F1] {symbol}-{strategy} {model} → {json.dumps(per_cls, ensure_ascii=False)}")  
-  
-            counts = {int(k): int(v["support"]) for k, v in rep.items() if k.isdigit()}  
-            log_eval_coverage(  
-                symbol=symbol,  
-                strategy=strategy,  
-                counts=counts,  
-                num_classes=(num_classes if num_classes is not None else len(per_cls)),  
-                note="train_end"  
-            )  
-        except Exception as e:  
-            print(f"[⚠️ per-class F1/coverage 계산 실패] {e}")  
+def log_training_result(
+    symbol, strategy, model="",
+    accuracy=None, f1=None, loss=None,
+    note="", source_exchange="BYBIT", status="success",
+    y_true=None, y_pred=None, num_classes=None,
 
-  
+    # 🔥 train.py 에서 전달할 추가 수익률/클래스 정보
+    class_edges=None,        # 리스트
+    class_counts=None,       # 리스트
+    class_ranges=None,       # 리스트[(lo,hi),...]
+    bin_spans=None,          # 리스트
+    near_zero_band=None,     # float
+    near_zero_count=None,    # int
+
+    **kwargs
+):
+    LOG_FILE = TRAIN_LOG
+    now = datetime.datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
+
+    extras = _parse_train_note(note)
+
+    # ───────────────────────────────
+    # 1) 숫자 값 정리
+    # ───────────────────────────────
+    try:
+        val_acc  = _first_non_none(kwargs.get("val_acc"), accuracy)
+        val_f1   = _first_non_none(kwargs.get("val_f1"),  f1)
+        val_loss = _first_non_none(kwargs.get("val_loss"), loss)
+        val_acc  = float(val_acc)  if val_acc  not in [None,""] else 0.0
+        val_f1   = float(val_f1)   if val_f1   not in [None,""] else 0.0
+        val_loss = float(val_loss) if val_loss not in [None,""] else 0.0
+    except Exception:
+        val_acc, val_f1, val_loss = 0.0, 0.0, 0.0
+
+    # ───────────────────────────────
+    # 2) 기존 기본 컬럼 + 수익률/클래스 요약 컬럼 추가
+    # ───────────────────────────────
+    row_dict = {
+        "timestamp": now,
+        "symbol": str(symbol),
+        "strategy": str(strategy),
+        "model": str(model or ""),
+        "val_acc": val_acc,
+        "val_f1": val_f1,
+        "val_loss": val_loss,
+
+        "engine": extras.get("engine",""),
+        "window": extras.get("window",""),
+        "recent_cap": extras.get("recent_cap",""),
+        "rows": extras.get("rows",""),
+        "limit": extras.get("limit",""),
+        "min": extras.get("min",""),
+        "augment_needed": extras.get("augment_needed",""),
+        "enough_for_training": extras.get("enough_for_training",""),
+        "note": str(note or ""),
+        "source_exchange": str(source_exchange or "BYBIT"),
+        "status": str(status or "success"),
+
+        # 🔥 아래부터 추가된 “수익률/클래스 전체요약”
+        "class_edges": json.dumps(class_edges or [], ensure_ascii=False),
+        "class_counts": json.dumps(class_counts or [], ensure_ascii=False),
+        "class_ranges": json.dumps(class_ranges or [], ensure_ascii=False),
+        "bin_spans": json.dumps(bin_spans or [], ensure_ascii=False),
+        "near_zero_band": float(near_zero_band or 0.0),
+        "near_zero_count": int(near_zero_count or 0),
+    }
+
+    # ───────────────────────────────
+    # 3) CSV에 추가
+    # ───────────────────────────────
+    try:
+        if _READONLY_FS:
+            print("[TRAIN][console]", json.dumps(row_dict, ensure_ascii=False))
+        else:
+            write_header = not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0
+            if write_header:
+                # 새 확장 헤더
+                headers = TRAIN_HEADERS + [
+                    "class_edges","class_counts","class_ranges",
+                    "bin_spans","near_zero_band","near_zero_count"
+                ]
+                with open(LOG_FILE, "w", newline="", encoding="utf-8-sig") as f:
+                    csv.DictWriter(f, fieldnames=headers).writeheader()
+
+            # 기존 파일 헤더
+            headers = _read_csv_header(LOG_FILE)
+            with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
+                w = csv.DictWriter(f, fieldnames=headers)
+                w.writerow(row_dict)
+
+        # ──────────────────────
+        # 4) F1=0 경고 유지
+        # ──────────────────────
+        _f1_key = (str(symbol), str(strategy))
+        if not hasattr(log_training_result, "_f1_zero"):
+            log_training_result._f1_zero = defaultdict(int)
+
+        if val_f1 <= 0.0:
+            log_training_result._f1_zero[_f1_key] += 1
+            n = log_training_result._f1_zero[_f1_key]
+            if n == 1:
+                print(f"🟠 [경고] F1=0.0 발생 → {symbol}-{strategy} {model} (1회)")
+            elif n % int(os.getenv('F1_ZERO_WARN_EVERY','5')) == 0:
+                print(f"🟠 [요약] F1=0.0 연속 {n}회 → {symbol}-{strategy} {model}")
+        else:
+            if log_training_result._f1_zero.get(_f1_key, 0) > 0:
+                print(f"[✅ 복구] {symbol}-{strategy} {model} F1 회복 → {val_f1:.4f}")
+            log_training_result._f1_zero[_f1_key] = 0
+
+        _print_once(
+            f"trainlog:{symbol}:{strategy}:{model}",
+            f"[✅ 학습 로그 기록] {symbol}-{strategy} {model} val_f1={val_f1:.4f} status={status}"
+        )
+
+    except Exception as e:
+        print(f"[⚠️ 학습 로그 기록 실패] {e}")
 # -------------------------  
 # 수익률 클래스 경계 로그  
 # -------------------------  
