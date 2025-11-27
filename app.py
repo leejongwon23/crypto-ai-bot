@@ -552,6 +552,46 @@ now_kst = lambda: datetime.datetime.now(pytz.timezone("Asia/Seoul"))
 REQUIRE_GROUP_COMPLETE = int(os.getenv("REQUIRE_GROUP_COMPLETE", "1"))
 
 
+# === prediction_log 전용 필터 ===
+def _filter_prediction_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    prediction_log.csv 안에 섞여 있는
+    - 학습용 로그(model='trainer')
+    - source 가 train* 로 시작하는 행
+    을 화면/리포트에서 완전히 제거한다.
+    """
+    try:
+        if df is None or df.empty:
+            return df
+        mask = pd.Series(True, index=df.index)
+
+        if "model" in df.columns:
+            mask &= df["model"].astype(str) != "trainer"
+
+        if "source" in df.columns:
+            s = df["source"].astype(str).str.lower()
+            train_like = s.str.startswith("train")
+            train_extra = s.isin(
+                [
+                    "trainer",
+                    "train_return_distribution",
+                    "train_dist",
+                    "train_eval",
+                    "train_bins",
+                ]
+            )
+            mask &= ~(train_like | train_extra)
+
+        # 전략 컬럼이 있으면 단기/중기/장기 만 남기기
+        if "strategy" in df.columns:
+            strat_s = df["strategy"].astype(str)
+            mask &= strat_s.isin(["단기", "중기", "장기"])
+
+        return df[mask]
+    except Exception:
+        return df
+
+
 # === scheduler ===
 _sched = None
 
@@ -984,6 +1024,9 @@ def yopo_health():
             logs[name] = pd.read_csv(path, encoding="utf-8-sig", on_bad_lines="skip")
             if "timestamp" in logs[name].columns:
                 logs[name] = logs[name][logs[name]["timestamp"].notna()]
+            # 🔍 prediction_log는 여기서도 학습용 행 제외
+            if name == "pred":
+                logs[name] = _filter_prediction_rows(logs[name])
         except Exception:
             logs[name] = pd.DataFrame()
 
@@ -1127,12 +1170,14 @@ def yopo_health():
                     rows.append(
                         f"<tr><td>{r.get('timestamp','')}</td>"
                         f"<td>{r.get('symbol','')}</td>"
+                        f"<td>{r.get('strategy','')}</td>"
                         f"<td>{r.get('direction','')}</td>"
                         f"<td>{rtn_pct}</td><td>{status_icon}</td></tr>"
                     )
                 table = (
                     "<table border='1' style='margin-top:4px'>"
-                    "<tr><th>시각</th><th>심볼</th><th>전략</th><th>방향</th><th>수익률</th><th>상태</th></tr>"
+                    "<tr><th>시각</th><th>심볼</th><th>전략</th>"
+                    "<th>방향</th><th>수익률</th><th>상태</th></tr>"
                     + "".join(rows)
                     + "</table>"
                 )
@@ -1220,6 +1265,9 @@ def _render_prediction_eval_dashboard_simple():
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
     except Exception:
         return "<h2>⚠️ prediction_log.csv 파일이 없습니다.</h2>"
+
+    # 🔍 학습용 trainer 행, train* source 행 제거
+    df = _filter_prediction_rows(df)
 
     if df.empty:
         return "<h2>⚠️ 예측 기록이 없습니다.</h2>"
@@ -1607,6 +1655,7 @@ def _render_prediction_eval_dashboard_simple():
     html += "</body></html>"
     return html
 
+
 # =========================
 # 통합 대시보드 라우트
 # =========================
@@ -1706,18 +1755,211 @@ def train_now():
 
 @app.route("/train-log")
 def train_log():
+    """
+    📈 학습 로그 보기 (사람이 읽기 쉬운 버전)
+
+    - 최근 학습 기록을 카드 + 표 형태로 보여준다.
+    - accuracy / f1 / loss 가 어떤 의미인지 한글로 간단히 설명한다.
+    """
     try:
         log_path = get_TRAIN_LOG_PATH()
         if not os.path.exists(log_path):
-            return f"학습 로그 없음<br><small>경로: <code>{log_path}</code></small>"
+            return (
+                "<html><head><meta charset='utf-8'><title>YOPO 학습 로그</title></head>"
+                f"<body>학습 로그 없음<br><small>경로: <code>{log_path}</code></small></body></html>"
+            )
+
         df = pd.read_csv(log_path, encoding="utf-8-sig", on_bad_lines="skip")
         if df.empty or df.shape[1] == 0:
-            return f"학습 기록 없음<br><small>경로: <code>{log_path}</code></small>"
-        html = df.tail(200).to_html(index=False, border=1, justify="center")
-        return (
-            "<b>📘 학습 로그 (최근 200행)</b><br>"
-            f"<small>경로: <code>{log_path}</code></small><br><br>{html}"
+            return (
+                "<html><head><meta charset='utf-8'><title>YOPO 학습 로그</title></head>"
+                f"<body>학습 기록 없음<br><small>경로: <code>{log_path}</code></small></body></html>"
+            )
+
+        # 최근 200행만 사용
+        recent = df.tail(200).copy()
+
+        # 숫자 컬럼 정리
+        for col in ["val_acc", "val_f1", "val_loss", "train_loss"]:
+            if col in recent.columns:
+                recent[col] = pd.to_numeric(recent[col], errors="coerce")
+
+        # 최근 한 줄 정보
+        last_row = recent.iloc[-1]
+        last_ts = str(last_row.get("timestamp", "알 수 없음"))
+        last_symbol = str(last_row.get("symbol", "알 수 없음"))
+        last_strategy = str(last_row.get("strategy", "알 수 없음"))
+        last_model = str(last_row.get("model_type", last_row.get("model", "알 수 없음")))
+        last_acc = float(last_row.get("val_acc")) if "val_acc" in recent.columns else None
+        last_f1 = float(last_row.get("val_f1")) if "val_f1" in recent.columns else None
+        last_loss = float(last_row.get("val_loss")) if "val_loss" in recent.columns else None
+        last_status = str(last_row.get("status", "없음"))
+
+        # status 집계
+        status_counts = {}
+        if "status" in recent.columns:
+            for s, cnt in recent["status"].value_counts().items():
+                status_counts[str(s)] = int(cnt)
+
+        # 표시할 컬럼 선택
+        preferred_cols = [
+            "timestamp",
+            "symbol",
+            "strategy",
+            "group",
+            "window",
+            "model_type",
+            "val_acc",
+            "val_f1",
+            "val_loss",
+            "status",
+            "message",
+        ]
+        cols_present = [c for c in preferred_cols if c in recent.columns]
+        if not cols_present:
+            cols_present = list(recent.columns)
+
+        table_html = recent[cols_present].to_html(
+            index=False,
+            border=0,
+            justify="center",
+            classes="train-table",
         )
+
+        # 상태 요약 문구
+        status_summary = []
+        if status_counts:
+            for key in ["success", "warn", "warning", "error", "fail"]:
+                if key in status_counts:
+                    status_summary.append(f"{key}: {status_counts[key]}건")
+            others = {k: v for k, v in status_counts.items() if k not in ["success", "warn", "warning", "error", "fail"]}
+            if others:
+                status_summary.append("기타: " + ", ".join(f"{k}={v}건" for k, v in others.items()))
+        status_summary_text = " / ".join(status_summary) if status_summary else "기록된 상태 값이 없습니다."
+
+        html = f"""
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>YOPO 학습 로그 (쉬운 버전)</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            background:#f4f6fb;
+            padding:20px;
+            font-size:14px;
+        }}
+        h1 {{ color:#222; }}
+        .card {{
+            background:#ffffff;
+            padding:14px 18px;
+            margin-bottom:16px;
+            border-radius:10px;
+            box-shadow:0 1px 4px rgba(0,0,0,0.08);
+            line-height:1.6;
+        }}
+        .card-title {{
+            font-weight:bold;
+            margin-bottom:6px;
+        }}
+        .small-note {{
+            font-size:12px;
+            color:#555;
+        }}
+        .train-table {{
+            border-collapse:collapse;
+            width:100%;
+            font-size:12px;
+        }}
+        .train-table th, .train-table td {{
+            border:1px solid #ddd;
+            padding:4px 6px;
+            text-align:center;
+        }}
+        .train-table th {{
+            background:#eef2fb;
+        }}
+        .status-success {{ color:#0a7b27; font-weight:bold; }}
+        .status-fail {{ color:#c62828; font-weight:bold; }}
+        .status-warn {{ color:#d47f00; font-weight:bold; }}
+        code {{
+            background:#eee;
+            padding:2px 4px;
+            border-radius:4px;
+            font-size:12px;
+        }}
+    </style>
+</head>
+<body>
+<h1>📘 YOPO — 학습 로그 (최근 200행)</h1>
+
+<div class="card">
+    <div class="card-title">1️⃣ 이 화면이 의미하는 것</div>
+    <div class="small-note">
+        이 페이지는 <b>모델이 학습될 때마다 남기는 기록표</b>입니다.<br>
+        한 줄이 <b>1번 학습 시도</b>이고, 어떤 심볼·전략에 대해
+        <code>정확도(acc)</code>, <code>F1</code>, <code>loss</code>가 어떻게 나왔는지 보여줍니다.
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">2️⃣ 최근 학습 한 줄 요약</div>
+    <div>최근 학습 시각: <b>{last_ts}</b></div>
+    <div>심볼 / 전략: <b>{last_symbol} / {last_strategy}</b></div>
+    <div>모델 종류: <b>{last_model}</b></div>"""
+
+        if last_acc is not None:
+            html += f"<div>검증 정확도(accuracy): <b>{last_acc:.4f}</b></div>"
+        if last_f1 is not None:
+            html += f"<div>검증 F1 점수: <b>{last_f1:.4f}</b></div>"
+        if last_loss is not None:
+            html += f"<div>검증 loss: <b>{last_loss:.4f}</b> (낮을수록 좋음)</div>"
+
+        html += f"""
+    <div>상태(status): <b>{last_status}</b></div>
+    <div class="small-note" style="margin-top:6px;">
+        · <code>success</code> → 정상적으로 학습이 끝난 상태<br>
+        · <code>warn / warning</code> → 값이 조금 이상하거나 경고가 있었음<br>
+        · <code>fail / error</code> → 학습이 도중에 실패했거나 결과가 깨진 상태
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">3️⃣ 최근 200회 학습 상태 요약</div>
+    <div>{status_summary_text}</div>
+    <div class="small-note" style="margin-top:6px;">
+        초보자는 대략 <b>success가 대부분</b>이고, 가끔 warn이 있는 정도면 정상이라고 보면 됩니다.<br>
+        error / fail이 많다면 <code>message</code> 컬럼을 눌러 어떤 에러인지 확인해 주세요.
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">4️⃣ 자세한 표 (최근 200행)</div>
+    <div class="small-note" style="margin-bottom:6px;">
+        주요 컬럼 설명:<br>
+        · <code>timestamp</code> : 학습이 끝난 시각<br>
+        · <code>symbol</code> : 코인 심볼 (예: BTCUSDT)<br>
+        · <code>strategy</code> : 단기 / 중기 / 장기<br>
+        · <code>window</code> : 한 번에 보는 캔들 개수 (예: w32 → 32개)<br>
+        · <code>val_acc / val_f1</code> : 검증 데이터에서의 정확도 / F1 점수<br>
+        · <code>val_loss</code> : 검증 손실값 (작을수록 좋음)<br>
+        · <code>status</code> : success / warn / fail 등 상태 표시<br>
+        · <code>message</code> : 에러나 경고가 있을 때 구체적인 이유
+    </div>
+    {table_html}
+    <div class="small-note" style="margin-top:6px;">
+        표를 아래로 스크롤하면서, 특정 심볼이나 전략이 유난히 <code>fail</code>이 많은지 확인해 주세요.
+    </div>
+</div>
+
+<div class="small-note" style="margin-top:12px;">
+    로그 파일 경로: <code>{log_path}</code>
+</div>
+
+</body>
+</html>
+"""
+        return html
     except Exception as e:
         return f"읽기 오류: {e}", 500
 
@@ -1737,6 +1979,7 @@ def check_log():
         if not os.path.exists(PREDICTION_LOG):
             return jsonify({"error": "prediction_log.csv 없음"})
         df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
+        df = _filter_prediction_rows(df)
         if "timestamp" not in df:
             return jsonify([])
         df = df[df["timestamp"].notna()]
