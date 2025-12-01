@@ -1490,19 +1490,84 @@ def get_train_log_cards(max_cards: int = 200):
     """
     /train-log 화면용 헬퍼.
 
-    - logs/train_dashboard.csv 를 읽어서
-    - 심볼·전략별로 '최근 한 줄'을 가져온 뒤
-    - 카드 한 장에 들어갈 정보를 딕셔너리로 만들어 리스트로 반환한다.
-
-    이 함수만 사용하면, 프론트에서는:
-
-      for card in get_train_log_cards():
-          # card['symbol'], card['strategy'], card['health_text'], ...
-          # 를 써서, 심볼·전략별 카드 UI를 바로 만들 수 있다.
+    1순위: logs/train_dashboard.csv 사용
+    2순위: 만약 이 파일이 없거나 비어 있으면,
+           persistent/logs/train_log.csv 를 직접 읽어서
+           심볼·전략별 '최근 한 줄'만 카드로 만든다.
     """
-    path = os.path.join(LOG_DIR, "train_dashboard.csv")
-    df = _safe_read_df(path)
+    dash_path = os.path.join(LOG_DIR, "train_dashboard.csv")
+    raw_path = TRAIN_LOG
+
+    # 1) 대시보드 우선
+    df = _safe_read_df(dash_path)
+
+    # 2) fallback: train_dashboard 가 비어 있으면 train_log.csv 직접 사용
     if df.empty:
+        raw = _safe_read_df(raw_path)
+        if raw.empty:
+            # 진짜로 학습 로그 자체가 없을 때만 "기록 없음"
+            return []
+
+        raw = raw.copy()
+
+        # 옛날 헤더 지원 (accuracy / f1 / loss → val_acc / val_f1 / val_loss)
+        if "val_acc" not in raw.columns and "accuracy" in raw.columns:
+            raw["val_acc"] = raw["accuracy"]
+        if "val_f1" not in raw.columns and "f1" in raw.columns:
+            raw["val_f1"] = raw["f1"]
+        if "val_loss" not in raw.columns and "loss" in raw.columns:
+            raw["val_loss"] = raw["loss"]
+
+        # 카드에서 쓰는 최소 컬럼들만 뽑아서 가짜 대시보드 DataFrame 구성
+        df = pd.DataFrame()
+        df["timestamp"] = raw.get("timestamp", "")
+        df["symbol"] = raw.get("symbol", "")
+        df["strategy"] = raw.get("strategy", "")
+        df["model"] = raw.get("model", "")
+
+        df["val_acc"] = raw.get("val_acc", 0.0)
+        df["val_f1"] = raw.get("val_f1", 0.0)
+        df["val_loss"] = raw.get("val_loss", 0.0)
+
+        # 데이터 개수는 rows(원본 샘플 수) 기준으로 보여주기
+        df["label_total"] = raw.get("rows", 0)
+        df["label_classes"] = 0
+        df["label_entropy"] = 0.0
+        df["label_counts_json"] = ""
+
+        # 증강/충분 여부 그대로 가져오기 (없으면 공백)
+        df["enough_for_training"] = raw.get("enough_for_training", "")
+        df["augment_needed"] = raw.get("augment_needed", "")
+
+        # 수익률/커버리지 관련 정보는 아직 없으므로 0/공백으로 채운다
+        df["ret_min"] = 0.0
+        df["ret_p25"] = 0.0
+        df["ret_p50"] = 0.0
+        df["ret_p75"] = 0.0
+        df["ret_p90"] = 0.0
+        df["ret_p95"] = 0.0
+        df["ret_p99"] = 0.0
+        df["ret_max"] = 0.0
+        df["ret_count"] = 0
+
+        df["val_num_classes"] = 0
+        df["val_covered"] = 0
+        df["val_coverage"] = 0.0
+
+        df["class_ranges_text"] = ""
+
+        df["status"] = raw.get("status", "success")
+        df["note"] = raw.get("note", "")
+
+        # health 칼럼이 없으면 status 기준으로 간단히 지정
+        if "health" in raw.columns:
+            df["health"] = raw.get("health")
+        else:
+            df["health"] = df["status"].fillna("unknown")
+
+    # 여기부터는 "df" 가 train_dashboard 이든, train_log 에서 만든 가짜 대시보드이든
+    # 동일한 형식이라고 보고 카드로 변환한다.
+    if df.empty or "symbol" not in df.columns or "strategy" not in df.columns:
         return []
 
     df = df.copy()
@@ -1511,62 +1576,47 @@ def get_train_log_cards(max_cards: int = 200):
         df = df.sort_values("timestamp")
 
     cards = []
-
-    # 심볼·전략별로 그룹핑해서, 각 그룹의 마지막(최신) 한 줄만 카드로 만든다.
-    if not {"symbol", "strategy"}.issubset(df.columns):
-        return []
-
     for (sym, strat), g in df.groupby(["symbol", "strategy"], dropna=False):
         if g.empty:
             continue
         last = g.iloc[-1]
 
-        try:
-            val_acc = float(last.get("val_acc", 0.0) or 0.0)
-        except Exception:
-            val_acc = 0.0
-        try:
-            val_f1 = float(last.get("val_f1", 0.0) or 0.0)
-        except Exception:
-            val_f1 = 0.0
-        try:
-            val_loss = float(last.get("val_loss", 0.0) or 0.0)
-        except Exception:
-            val_loss = 0.0
+        # --- 수치값 안전 변환 ---
+        def _f(row, key, default=0.0):
+            try:
+                return float(row.get(key, default) or default)
+            except Exception:
+                return float(default)
 
-        try:
-            label_total = int(last.get("label_total", 0) or 0)
-        except Exception:
-            label_total = 0
-        try:
-            label_classes = int(last.get("label_classes", 0) or 0)
-        except Exception:
-            label_classes = 0
+        def _i(row, key, default=0):
+            try:
+                return int(row.get(key, default) or default)
+            except Exception:
+                return int(default)
 
-        try:
-            val_num_classes = int(last.get("val_num_classes", 0) or 0)
-        except Exception:
-            val_num_classes = 0
-        try:
-            val_covered = int(last.get("val_covered", 0) or 0)
-        except Exception:
-            val_covered = 0
-        try:
-            val_coverage = float(last.get("val_coverage", 0.0) or 0.0)
-        except Exception:
-            val_coverage = 0.0
+        val_acc = _f(last, "val_acc", 0.0)
+        val_f1 = _f(last, "val_f1", 0.0)
+        val_loss = _f(last, "val_loss", 0.0)
+
+        label_total = _i(last, "label_total", 0)
+        label_classes = _i(last, "label_classes", 0)
+
+        val_num_classes = _i(last, "val_num_classes", 0)
+        val_covered = _i(last, "val_covered", 0)
+        val_coverage = _f(last, "val_coverage", 0.0)
 
         all_classes_covered = bool(val_num_classes > 0 and val_covered >= val_num_classes)
 
         health = str(last.get("health", "OK") or "OK")
         status = str(last.get("status", "") or "")
 
+        # 건강 상태 텍스트
         if health == "OK":
             health_text = "✅ 정상 학습"
         else:
             health_text = f"⚠️ 문제 있음 ({health})"
 
-        # 데이터/클래스 요약 문장
+        # 데이터 요약
         if label_total > 0 and label_classes > 0:
             data_summary = f"데이터 {label_total}개 / 클래스 {label_classes}개"
         elif label_total > 0:
@@ -1574,20 +1624,19 @@ def get_train_log_cards(max_cards: int = 200):
         else:
             data_summary = "데이터 정보 없음"
 
-        # 충분 여부/증강 여부
         enough_for_training = str(last.get("enough_for_training", "") or "")
         augment_needed = str(last.get("augment_needed", "") or "")
 
-        # 수익률 요약 텍스트
+        # 수익률 요약
         try:
-            ret_min = float(last.get("ret_min", 0.0) or 0.0)
-            ret_p50 = float(last.get("ret_p50", 0.0) or 0.0)
-            ret_max = float(last.get("ret_max", 0.0) or 0.0)
+            ret_min = _f(last, "ret_min", 0.0)
+            ret_p50 = _f(last, "ret_p50", 0.0)
+            ret_max = _f(last, "ret_max", 0.0)
             ret_summary_text = f"{ret_min*100:.2f}% ~ {ret_max*100:.2f}% (중앙값 {ret_p50*100:.2f}%)"
         except Exception:
             ret_summary_text = "수익률 분포 정보 없음"
 
-        # 커버리지 요약 텍스트
+        # 커버리지 요약
         if val_num_classes > 0:
             coverage_summary = f"검증 커버리지 {val_coverage*100:.1f}% ({val_covered}/{val_num_classes} 클래스)"
         else:
