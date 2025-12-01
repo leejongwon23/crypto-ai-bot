@@ -311,7 +311,6 @@ def ensure_prediction_log_exists():
                     except Exception:
                         return
 
-                # ❗ 여기 문법 오류 있었던 부분 — 백슬래시 공백 제거 후 정상화
                 with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as out, \
                      open(bak, "r", encoding="utf-8-sig") as src:
 
@@ -364,7 +363,6 @@ def ensure_train_log_exists():
                     except Exception:
                         return
 
-                # 🟢 여기 문법 오류 있었던 줄 — 백슬래시 뒤 공백 제거
                 with open(TRAIN_LOG, "w", newline="", encoding="utf-8-sig") as out, \
                      open(bak, "r", encoding="utf-8-sig") as src:
 
@@ -1484,6 +1482,160 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
         )
     except Exception as e:
         print(f"[⚠️ train_dashboard 저장 실패] {e}")
+
+
+# 🔥🔥🔥 여기부터 추가: /train-log 카드용 요약 함수 🔥🔥🔥
+
+def get_train_log_cards(max_cards: int = 200):
+    """
+    /train-log 화면용 헬퍼.
+
+    - logs/train_dashboard.csv 를 읽어서
+    - 심볼·전략별로 '최근 한 줄'을 가져온 뒤
+    - 카드 한 장에 들어갈 정보를 딕셔너리로 만들어 리스트로 반환한다.
+
+    이 함수만 사용하면, 프론트에서는:
+
+      for card in get_train_log_cards():
+          # card['symbol'], card['strategy'], card['health_text'], ...
+          # 를 써서, 심볼·전략별 카드 UI를 바로 만들 수 있다.
+    """
+    path = os.path.join(LOG_DIR, "train_dashboard.csv")
+    df = _safe_read_df(path)
+    if df.empty:
+        return []
+
+    df = df.copy()
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df = df.sort_values("timestamp")
+
+    cards = []
+
+    # 심볼·전략별로 그룹핑해서, 각 그룹의 마지막(최신) 한 줄만 카드로 만든다.
+    if not {"symbol", "strategy"}.issubset(df.columns):
+        return []
+
+    for (sym, strat), g in df.groupby(["symbol", "strategy"], dropna=False):
+        if g.empty:
+            continue
+        last = g.iloc[-1]
+
+        try:
+            val_acc = float(last.get("val_acc", 0.0) or 0.0)
+        except Exception:
+            val_acc = 0.0
+        try:
+            val_f1 = float(last.get("val_f1", 0.0) or 0.0)
+        except Exception:
+            val_f1 = 0.0
+        try:
+            val_loss = float(last.get("val_loss", 0.0) or 0.0)
+        except Exception:
+            val_loss = 0.0
+
+        try:
+            label_total = int(last.get("label_total", 0) or 0)
+        except Exception:
+            label_total = 0
+        try:
+            label_classes = int(last.get("label_classes", 0) or 0)
+        except Exception:
+            label_classes = 0
+
+        try:
+            val_num_classes = int(last.get("val_num_classes", 0) or 0)
+        except Exception:
+            val_num_classes = 0
+        try:
+            val_covered = int(last.get("val_covered", 0) or 0)
+        except Exception:
+            val_covered = 0
+        try:
+            val_coverage = float(last.get("val_coverage", 0.0) or 0.0)
+        except Exception:
+            val_coverage = 0.0
+
+        all_classes_covered = bool(val_num_classes > 0 and val_covered >= val_num_classes)
+
+        health = str(last.get("health", "OK") or "OK")
+        status = str(last.get("status", "") or "")
+
+        if health == "OK":
+            health_text = "✅ 정상 학습"
+        else:
+            health_text = f"⚠️ 문제 있음 ({health})"
+
+        # 데이터/클래스 요약 문장
+        if label_total > 0 and label_classes > 0:
+            data_summary = f"데이터 {label_total}개 / 클래스 {label_classes}개"
+        elif label_total > 0:
+            data_summary = f"데이터 {label_total}개"
+        else:
+            data_summary = "데이터 정보 없음"
+
+        # 충분 여부/증강 여부
+        enough_for_training = str(last.get("enough_for_training", "") or "")
+        augment_needed = str(last.get("augment_needed", "") or "")
+
+        # 수익률 요약 텍스트
+        try:
+            ret_min = float(last.get("ret_min", 0.0) or 0.0)
+            ret_p50 = float(last.get("ret_p50", 0.0) or 0.0)
+            ret_max = float(last.get("ret_max", 0.0) or 0.0)
+            ret_summary_text = f"{ret_min*100:.2f}% ~ {ret_max*100:.2f}% (중앙값 {ret_p50*100:.2f}%)"
+        except Exception:
+            ret_summary_text = "수익률 분포 정보 없음"
+
+        # 커버리지 요약 텍스트
+        if val_num_classes > 0:
+            coverage_summary = f"검증 커버리지 {val_coverage*100:.1f}% ({val_covered}/{val_num_classes} 클래스)"
+        else:
+            coverage_summary = "검증 커버리지 정보 없음"
+
+        class_ranges_text = str(last.get("class_ranges_text", "") or "")
+
+        card = {
+            "symbol": str(sym),
+            "strategy": str(strat),
+            "model": str(last.get("model", "") or ""),
+
+            "health": health,
+            "health_text": health_text,
+            "status": status,
+
+            "val_acc": val_acc,
+            "val_f1": val_f1,
+            "val_loss": val_loss,
+
+            "label_total": label_total,
+            "label_classes": label_classes,
+            "data_summary": data_summary,
+
+            "enough_for_training": enough_for_training,
+            "augment_needed": augment_needed,
+
+            "val_num_classes": val_num_classes,
+            "val_covered": val_covered,
+            "val_coverage": val_coverage,
+            "coverage_summary": coverage_summary,
+            "all_classes_covered": all_classes_covered,
+
+            "class_ranges_text": class_ranges_text,
+            "ret_summary_text": ret_summary_text,
+
+            "timestamp": str(last.get("timestamp", "")),
+            "note": str(last.get("note", "") or ""),
+        }
+
+        cards.append(card)
+
+    # 정렬 + 개수 제한
+    cards = sorted(cards, key=lambda c: (c["symbol"], c["strategy"], c["timestamp"]))
+    if max_cards is not None and len(cards) > max_cards:
+        cards = cards[-max_cards:]
+
+    return cards
 
 
 # -------------------------
