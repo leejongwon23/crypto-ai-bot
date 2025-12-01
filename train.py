@@ -1137,7 +1137,6 @@ def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
             break
     return train_idx, val_idx, moved
 
-
 def train_one_model(
     symbol,
     strategy,
@@ -1917,6 +1916,27 @@ def train_one_model(
             }
             wpath, mpath = _save_model_and_meta(model, stem + ".pt", meta)
 
+            # ==== 🔁 여기서부터: logger 로 넘길 값들을 JSON 문자열로 변환 ====
+            try:
+                class_ranges_for_log = [
+                    [float(lo), float(hi)] for (lo, hi) in class_ranges
+                ]
+            except Exception:
+                class_ranges_for_log = class_ranges
+
+            def _to_json_safe(obj):
+                try:
+                    return json.dumps(obj, ensure_ascii=False)
+                except Exception:
+                    return str(obj)
+
+            class_ranges_json = _to_json_safe(class_ranges_for_log)
+            bin_edges_json = _to_json_safe(bin_edges)
+            bin_counts_json = _to_json_safe(bin_counts)
+            bin_spans_json = _to_json_safe(bin_spans)
+            bins_value = len(bin_edges) if isinstance(bin_edges, (list, tuple)) else None
+            # ============================================================
+
             try:
                 # 한글 요약 note: 이 한 줄만 봐도 상태를 바로 이해할 수 있게
                 summary_parts = [
@@ -1972,13 +1992,15 @@ def train_one_model(
                     usable_samples=usable_samples,
                     class_counts_after_assemble=cnt_after,
                     batch_stratified_ok=batch_stratified_ok,
-                    # 추가: 클래스/수익률 구간도 로그에 포함
-                    class_ranges=[
-                        [float(lo), float(hi)] for (lo, hi) in class_ranges
-                    ],
-                    bin_edges=bin_edges,
-                    bin_counts=bin_counts,
-                    bin_spans=bin_spans,
+                    # 추가: 클래스/수익률 구간도 로그에 포함 (JSON 문자열)
+                    class_ranges=class_ranges_json,
+                    bin_edges=bin_edges_json,
+                    bin_counts=bin_counts_json,
+                    bin_spans=bin_spans_json,
+                    # 🔁 프론트 호환용 별칭 필드도 같이 기록
+                    class_edges=bin_edges_json,
+                    class_counts=bin_counts_json,
+                    bins=bins_value,
                     # 추가: near-zero 통계도 로그에 포함
                     near_zero_band=float(nz_band),
                     near_zero_count=int(near_zero_cnt),
@@ -2065,6 +2087,7 @@ def train_one_model(
         )
         _log_fail(symbol, strategy, str(e))
         return res
+
 
 _ENFORCE_FULL_STRATEGY = False
 _STRICT_HALT_ON_INCOMPLETE = False
