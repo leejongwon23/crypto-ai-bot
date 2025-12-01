@@ -19,6 +19,8 @@ import shutil
 import re
 import time
 import pandas as pd
+from logger import (..., get_train_log_cards, TRAIN_LOG)
+
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram_bot import send_message
@@ -1755,217 +1757,164 @@ def train_now():
 @app.route("/train-log")
 def train_log():
     """
-    📈 학습 로그 보기 (업데이트된 완전판)
+    📈 학습 로그 보기 (카드형 쉬운 버전)
 
-    - UI 구성(설명/디자인/테이블 구조)은 기존 너가 만든 설계 100% 유지
-    - 데이터 처리 엔진만 최신 YOPO 구조에 맞게 완전히 교체
-    - info(0,0,0) 제거 → 실제 학습만 반영
-    - prediction_log 기반 수익률 분포 정확하게 매칭
-    - class_edges / class_counts / bins 최신 구조 대응
-    - 클래스 개수/구간/데이터 수 정상 표시
-    - 단기/중기/장기 각각 분포 정상 반영
+    - logger.update_train_dashboard() 가 만든 logs/train_dashboard.csv 를 기반으로
+    - logger.get_train_log_cards() 결과를 카드 형태로 보여준다
+    - 처음 보는 사람도 “어느 심볼이 얼마나 잘 학습됐는지” 한눈에 이해할 수 있게 설계
     """
     try:
-        import ast, json
+        from logger import get_train_log_cards, TRAIN_LOG
+        import os
 
-        log_path = get_TRAIN_LOG_PATH()
-        if not os.path.exists(log_path):
-            return (
-                "<html><head><meta charset='utf-8'><title>YOPO 학습 로그</title></head>"
-                f"<body>학습 로그 없음<br><small>경로: <code>{log_path}</code></small></body></html>"
-            )
+        # 1) 카드 데이터 불러오기
+        cards = get_train_log_cards(max_cards=200)
 
-        df = pd.read_csv(log_path, encoding="utf-8-sig", on_bad_lines="skip")
-        if df.empty or df.shape[1] == 0:
-            return (
-                "<html><head><meta charset='utf-8'><title>YOPO 학습 로그</title></head>"
-                f"<body>학습 기록 없음<br><small>경로: <code>{log_path}</code></small></body></html>"
-            )
+        # 로그 파일 경로 (표시용)
+        log_path = TRAIN_LOG if isinstance(TRAIN_LOG, str) else ""
 
-        # -------------------------
-        # ① info 행(0,0,0) 제거 → 실제 학습행만 사용
-        # -------------------------
-        valid_mask = df["status"].astype(str).isin(["success", "best", "warn", "warning"])
-        recent = df[valid_mask].tail(200).copy()
-        if recent.empty:
-            recent = df.tail(200).copy()
+        # 카드가 하나도 없을 때
+        if not cards:
+            return f"""
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>YOPO 학습 로그</title>
+</head>
+<body style="font-family:Arial, sans-serif;background:#f4f6fb;padding:20px;font-size:14px;">
+    <h1>📘 YOPO — 학습 로그</h1>
+    <div style="background:#fff;padding:14px 18px;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,0.08);">
+        <div style="font-weight:bold;margin-bottom:6px;">아직 정식 학습 기록이 없습니다.</div>
+        <div style="font-size:13px;color:#555;">
+            학습이 한 번이라도 끝나면, 이 화면에
+            <b>“심볼·전략별 학습 요약 카드”</b>가 자동으로 생깁니다.<br>
+            <small>기록 파일: <code>{log_path}</code></small>
+        </div>
+    </div>
+</body>
+</html>
+"""
 
-        # 숫자 컬럼 정리
-        for col in ["val_acc", "val_f1", "val_loss", "train_loss"]:
-            if col in recent.columns:
-                recent[col] = pd.to_numeric(recent[col], errors="coerce")
+        # 2) 전체 요약(몇 개 심볼/전략, 몇 개 OK/문제 있음)
+        total_cards = len(cards)
+        ok_cards = sum(1 for c in cards if str(c.get("health", "")).upper() == "OK")
+        bad_cards = total_cards - ok_cards
 
-        # 최근 학습 1줄
-        last_row = recent.iloc[-1]
-        last_ts = str(last_row.get("timestamp", "알 수 없음"))
-        last_symbol = str(last_row.get("symbol", "알 수 없음"))
-        last_strategy = str(last_row.get("strategy", "알 수 없음"))
-        last_model = str(last_row.get("model_type", last_row.get("model", "알 수 없음")))
-        last_acc = float(last_row.get("val_acc")) if "val_acc" in recent.columns else None
-        last_f1 = float(last_row.get("val_f1")) if "val_f1" in recent.columns else None
-        last_loss = float(last_row.get("val_loss")) if "val_loss" in recent.columns else None
-        last_status = str(last_row.get("status", "없음"))
-
-        # 상태 집계
-        status_counts = {}
-        if "status" in recent.columns:
-            for s, cnt in recent["status"].value_counts().items():
-                status_counts[str(s)] = int(cnt)
-
-        # ======================================================
-        # ② prediction_log 기반으로 최신 수익률 분포 로딩
-        # ======================================================
+        # 최근 학습 1줄 (timestamp 기준 마지막 카드)
+        # timestamp 가 비어 있으면 그냥 리스트 마지막 사용
+        last_card = None
         try:
-            pred_df = pd.read_csv(PREDICTION_LOG, encoding="utf-8-sig", on_bad_lines="skip")
-            pred_df = pred_df[pred_df["reason"] == "train_return_distribution"]
+            cards_sorted = sorted(
+                cards,
+                key=lambda c: str(c.get("timestamp", "")) or ""
+            )
+            last_card = cards_sorted[-1] if cards_sorted else None
         except Exception:
-            pred_df = pd.DataFrame()
+            last_card = cards[-1]
 
-        dist_map = {}
-        if not pred_df.empty:
-            pred_df = pred_df.sort_values("timestamp")
-            for _, row in pred_df.iterrows():
-                sym = str(row.get("symbol", ""))
-                strat = str(row.get("strategy", ""))
-                try:
-                    info = json.loads(row.get("note", "{}"))
-                except Exception:
-                    info = {}
-                dist_map[(sym, strat)] = info
+        if last_card:
+            last_sym = last_card.get("symbol", "알 수 없음")
+            last_strat = last_card.get("strategy", "알 수 없음")
+            last_model = last_card.get("model", "")
+            last_ts = last_card.get("timestamp", "알 수 없음")
+            last_acc = float(last_card.get("val_acc", 0.0) or 0.0)
+            last_f1 = float(last_card.get("val_f1", 0.0) or 0.0)
+            last_loss = float(last_card.get("val_loss", 0.0) or 0.0)
+            last_health_text = last_card.get("health_text", "상태 정보 없음")
+        else:
+            last_sym = last_strat = last_model = last_ts = "알 수 없음"
+            last_acc = last_f1 = last_loss = 0.0
+            last_health_text = "상태 정보 없음"
 
-        # ======================================================
-        # ③ 기존 UI를 유지한 상태로, dist_map 데이터로 클래스/분포 출력
-        # ======================================================
-        def _parse_list_value(v):
-            if v is None:
-                return []
-            if isinstance(v, (list, tuple)):
-                return list(v)
-            s = str(v).strip()
-            if s == "" or s.lower() in ["nan", "none", "null"]:
-                return []
-            try:
-                return list(ast.literal_eval(s))
-            except Exception:
-                pass
-            try:
-                return list(json.loads(s))
-            except Exception:
-                pass
-            try:
-                parts = [p for p in re.split(r"[,\s]+", s) if p]
-                return [float(p) for p in parts]
-            except Exception:
-                return []
+        # 3) 카드 HTML 만들기
+        card_blocks = []
+        for c in cards:
+            sym = c.get("symbol", "")
+            strat = c.get("strategy", "")
+            model = c.get("model", "")
 
-        class_cards_html = ""
+            health_text = c.get("health_text", "상태 정보 없음")
+            status = c.get("status", "")
 
-        # prediction_log 기반 분포 사용
-        if dist_map:
-            for (sym, strat), dist in dist_map.items():
-                edges = dist.get("bin_edges", [])
-                counts = dist.get("bin_counts", [])
-                sample = dist.get("sample_size", 0)
+            val_acc = float(c.get("val_acc", 0.0) or 0.0)
+            val_f1 = float(c.get("val_f1", 0.0) or 0.0)
+            val_loss = float(c.get("val_loss", 0.0) or 0.0)
 
-                num_classes = len(counts)
-                total_cnt = sum(counts)
+            data_summary = c.get("data_summary", "")
+            ret_summary = c.get("ret_summary_text", "수익률 분포 정보 없음")
+            coverage_summary = c.get("coverage_summary", "검증 커버리지 정보 없음")
+            class_ranges_text = c.get("class_ranges_text", "")
 
-                intervals = []
-                if edges and counts and len(edges) == len(counts) + 1:
-                    for i, c in enumerate(counts):
-                        lo = edges[i] * 100
-                        hi = edges[i + 1] * 100
-                        intervals.append({
-                            "idx": i,
-                            "range": f"{lo:.2f}% ~ {hi:.2f}%",
-                            "count": int(c)
-                        })
-                else:
-                    for i, c in enumerate(counts):
-                        intervals.append({
-                            "idx": i,
-                            "range": "구간 정보 없음",
-                            "count": int(c)
-                        })
+            enough = str(c.get("enough_for_training", "") or "")
+            augment = str(c.get("augment_needed", "") or "")
 
-                issues = []
-                if num_classes == 0 or total_cnt == 0:
-                    issues.append("학습 데이터가 거의 없습니다.")
-                if num_classes <= 2:
-                    issues.append("클래스 개수가 2개 이하입니다.")
-                sparse_found = any(c <= 3 or (total_cnt > 0 and c / total_cnt < 0.02) for c in counts)
-                if sparse_found:
-                    issues.append("희소 클래스가 있습니다.")
+            ts = c.get("timestamp", "")
+            note = c.get("note", "")
 
-                if not issues and total_cnt > 0:
-                    issue_text = "정상 (클래스·분포 무난)"
-                else:
-                    issue_text = " / ".join(issues) if issues else "판단 불가"
+            # 학습 준비/증강 문장
+            extra_lines = []
+            if enough == "1":
+                extra_lines.append("✅ 학습에 사용할 데이터 양이 충분합니다.")
+            elif enough != "":
+                extra_lines.append("⚠️ 데이터가 충분하지 않을 수 있습니다.")
 
-                # HTML 구성 (기존 UI 그대로 유지)
-                rows = "".join(
-                    f"<tr><td>{x['idx']}</td><td>{x['range']}</td><td>{x['count']}</td></tr>"
-                    for x in intervals
+            if augment == "1":
+                extra_lines.append("ℹ️ 희소 클래스를 보완하기 위해 증강 데이터를 사용했습니다.")
+
+            extra_html = "<br>".join(extra_lines) if extra_lines else "추가 설명 없음"
+
+            # 클래스 구간 텍스트를 사람이 보기 좋게 줄바꿈
+            if class_ranges_text:
+                cr_html = "<br>".join(
+                    [p.strip() for p in class_ranges_text.split("|") if p.strip()]
                 )
-                dist_table = (
-                    "<table border='1' style='border-collapse:collapse;font-size:11px;margin-top:4px;'>"
-                    "<tr><th>클래스 번호</th><th>수익률 구간</th><th>데이터 개수</th></tr>"
-                    f"{rows}</table>"
-                )
+            else:
+                cr_html = "클래스별 수익률 구간 정보 없음"
 
-                class_cards_html += f"""
-<div style='border:1px solid #ddd;border-radius:8px;padding:8px 10px;margin-bottom:8px;background:#ffffff;'>
-  <div style='font-weight:bold;margin-bottom:4px;'>
-    심볼: {sym} / 전략: {strat}
+            block = f"""
+<div style="border:1px solid #ddd;border-radius:8px;padding:10px 12px;margin-bottom:10px;background:#ffffff;">
+  <div style="font-weight:bold;margin-bottom:4px;">
+    {sym} · {strat}
+    <span style="font-size:11px;color:#777;">(모델: {model or '알 수 없음'})</span>
   </div>
-  <div style='font-size:12px;margin-bottom:2px;'>
-    클래스 개수: <b>{num_classes}</b>개 · 총 데이터: <b>{total_cnt}</b>개
+  <div style="font-size:12px;margin-bottom:2px;">
+    ● 성능 요약: 정확도 <b>{val_acc:.4f}</b> / F1 <b>{val_f1:.4f}</b> / loss <b>{val_loss:.4f}</b>
   </div>
-  <div style='font-size:12px;color:#b71c1c;margin-bottom:4px;'>
-    {issue_text}
+  <div style="font-size:12px;margin-bottom:2px;">
+    ● 데이터 요약: {data_summary}
   </div>
-  {dist_table}
+  <div style="font-size:12px;margin-bottom:2px;">
+    ● 수익률 분포: {ret_summary}
+  </div>
+  <div style="font-size:12px;margin-bottom:2px;">
+    ● 검증 커버리지: {coverage_summary}
+  </div>
+  <div style="font-size:12px;margin-bottom:2px;color:#b71c1c;">
+    ● 건강 상태: {health_text} {(' (status=' + status + ')') if status else ''}
+  </div>
+  <div style="font-size:12px;margin-top:4px;">
+    ● 클래스별 수익률 구간:<br>
+    <span style="font-size:11px;color:#333;">{cr_html}</span>
+  </div>
+  <div style="font-size:11px;color:#555;margin-top:4px;">
+    ● 추가 설명: {extra_html}
+  </div>
+  <div style="font-size:11px;color:#777;margin-top:2px;">
+    마지막 학습 시간: {ts or '알 수 없음'}
+  </div>
+  {"<div style='font-size:11px;color:#777;margin-top:2px;'>비고: " + note + "</div>" if note else ""}
 </div>
-                """
+"""
+            card_blocks.append(block)
 
-        # ======================================================
-        # ④ 표 컬럼 구성 (네가 만든 UI 그대로 유지)
-        # ======================================================
-        preferred_cols = [
-            "timestamp","symbol","strategy","group","window","model_type",
-            "val_acc","val_f1","val_loss","status","message"
-        ]
-        cols_present = [c for c in preferred_cols if c in recent.columns]
-        if not cols_present:
-            cols_present = list(recent.columns)
+        class_cards_html = "\n".join(card_blocks)
 
-        table_html = recent[cols_present].to_html(
-            index=False,
-            border=0,
-            justify="center",
-            classes="train-table",
-        )
-
-        # 상태 요약
-        status_summary = []
-        if status_counts:
-            for key in ["success","warn","warning","error","fail"]:
-                if key in status_counts:
-                    status_summary.append(f"{key}: {status_counts[key]}건")
-            others = {k:v for k,v in status_counts.items()
-                      if k not in ["success","warn","warning","error","fail"]}
-            if others:
-                status_summary.append("기타: "+", ".join(f"{k}={v}건" for k,v in others.items()))
-        status_summary_text = " / ".join(status_summary) if status_summary else "기록 없음"
-
-        # ======================================================
-        # ⑤ HTML 출력 (UI 완전 유지)
-        # ======================================================
+        # 4) 최종 HTML 렌더
         html = f"""
 <html>
 <head>
     <meta charset="utf-8">
-    <title>YOPO 학습 로그 (쉬운 버전)</title>
+    <title>YOPO 학습 로그 (쉬운 카드 버전)</title>
     <style>
         body {{
             font-family: Arial, sans-serif;
@@ -1982,63 +1931,37 @@ def train_log():
             box-shadow:0 1px 4px rgba(0,0,0,0.08);
             line-height:1.6;
         }}
-        .train-table {{
-            border-collapse:collapse;
-            width:100%;
-            font-size:12px;
-        }}
-        .train-table th, .train-table td {{
-            border:1px solid #ddd;
-            padding:4px 6px;
-            text-align:center;
-        }}
-        .train-table th {{
-            background:#eef2fb;
-        }}
     </style>
 </head>
 <body>
-<h1>📘 YOPO — 학습 로그 (최근 200행)</h1>
+<h1>📘 YOPO — 학습 로그 (카드 요약)</h1>
 
 <div class="card">
-    <div class="card-title">2️⃣ 최근 학습 한 줄 요약</div>
-    <div>최근 학습 시각: <b>{last_ts}</b></div>
-    <div>심볼 / 전략: <b>{last_symbol} / {last_strategy}</b></div>
-    <div>모델 종류: <b>{last_model}</b></div>"""
-
-        if last_acc is not None:
-            html += f"<div>검증 정확도: <b>{last_acc:.4f}</b></div>"
-        if last_f1 is not None:
-            html += f"<div>F1 점수: <b>{last_f1:.4f}</b></div>"
-        if last_loss is not None:
-            html += f"<div>검증 loss: <b>{last_loss:.4f}</b></div>"
-
-        html += f"""
-    <div>상태(status): <b>{last_status}</b></div>
+    <div style="font-weight:bold;margin-bottom:6px;">1️⃣ 전체 현황 한눈에 보기</div>
+    <div>현재 <b>{total_cards}</b>개 심볼·전략 조합의 학습 기록이 있습니다.</div>
+    <div>그 중 <b>{ok_cards}</b>개는 <span style="color:#2e7d32;">정상(OK)</span>, <b>{bad_cards}</b>개는 <span style="color:#b71c1c;">추가 점검이 필요</span>합니다.</div>
+    <div style="font-size:12px;color:#666;margin-top:4px;">
+        (기록 파일: <code>{log_path}</code>)
+    </div>
 </div>
-"""
 
-        # 3️⃣ 클래스/구간 카드
-        html += f"""
 <div class="card">
-    <div class="card-title">3️⃣ 심볼·전략별 클래스·수익률 구간 요약</div>
-    {class_cards_html if class_cards_html else "<div>분포 정보 없음</div>"}
+    <div style="font-weight:bold;margin-bottom:6px;">2️⃣ 가장 최근 학습 한 번 요약</div>
+    <div>시간: <b>{last_ts}</b></div>
+    <div>심볼 / 전략: <b>{last_sym} / {last_strat}</b></div>
+    <div>모델: <b>{last_model or "알 수 없음"}</b></div>
+    <div>검증 정확도: <b>{last_acc:.4f}</b> · F1: <b>{last_f1:.4f}</b> · loss: <b>{last_loss:.4f}</b></div>
+    <div>상태: {last_health_text}</div>
 </div>
-"""
 
-        # 상태 요약
-        html += f"""
 <div class="card">
-    <div class="card-title">4️⃣ 최근 200회 학습 상태 요약</div>
-    <div>{status_summary_text}</div>
-</div>
-"""
-
-        # 표
-        html += f"""
-<div class="card">
-    <div class="card-title">5️⃣ 자세한 표 (최근 200행)</div>
-    {table_html}
+    <div style="font-weight:bold;margin-bottom:6px;">3️⃣ 심볼·전략별 학습 카드</div>
+    <div style="font-size:13px;color:#555;margin-bottom:6px;">
+        아래 카드를 하나씩 읽으면, 각 심볼이<br>
+        "데이터가 얼마나 있는지 / 수익률 분포가 어떤지 / 검증이 잘 되는지"<br>
+        를 직관적으로 볼 수 있습니다.
+    </div>
+    {class_cards_html}
 </div>
 
 </body>
@@ -2048,6 +1971,7 @@ def train_log():
 
     except Exception as e:
         return f"읽기 오류: {e}", 500
+
 
 
 @app.route("/models")
