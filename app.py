@@ -19,7 +19,7 @@ import shutil
 import re
 import time
 import pandas as pd
-from logger import (..., get_train_log_cards, TRAIN_LOG)
+from logger import get_train_log_cards, TRAIN_LOG
 
 
 from apscheduler.schedulers.background import BackgroundScheduler
