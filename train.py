@@ -274,7 +274,6 @@ def log_return_distribution_for_train(symbol: str, strategy: str, df: pd.DataFra
     except Exception as e:
         print(f"[train.return-dist warn] {e}", flush=True)
 
-# ==== [ADD] train 로그 경로/헤더 보장 ====
 DEFAULT_TRAIN_HEADERS = [
     "timestamp",
     "symbol",
@@ -294,20 +293,23 @@ DEFAULT_TRAIN_HEADERS = [
     "note",
     "source_exchange",
     "status",
-    # 여분(옵셔널)
+
+    # 추가 메트릭
     "accuracy",
     "f1",
     "loss",
     "y_true",
     "y_pred",
     "num_classes",
+
     # === 진단 5종 ===
     "NUM_CLASSES",
     "class_counts_label_freeze",
     "usable_samples",
     "class_counts_after_assemble",
     "batch_stratified_ok",
-    # === 수익률/클래스 구간 요약 추가 ===
+
+    # === 수익률/클래스 구간 요약 ===
     "near_zero_band",
     "near_zero_count",
     "masked_count",
@@ -315,11 +317,22 @@ DEFAULT_TRAIN_HEADERS = [
     "bin_edges",
     "bin_counts",
     "bin_spans",
-    # 🔥 프론트에서 찾는 이름들(호환용)
-    "class_edges",    # = bin_edges
-    "class_counts",   # = bin_counts
-    "bins",           # = len(bin_edges) - 1
+
+    # 🔥 프론트엔드 호환 필드
+    "class_edges",      # = bin_edges
+    "class_counts",     # = bin_counts
+    "bins",             # = len(bin_edges) - 1
+
+    # 🔥 학습로그 카드 UI용 필수 6개
+    "ui_data_summary",
+    "ui_dist_summary",
+    "ui_class_range_summary",
+    "ui_class_count_summary",
+    "ui_usable_summary",
+    "ui_performance_summary",
 ]
+
+
 
 try:
     from logger import TRAIN_HEADERS
