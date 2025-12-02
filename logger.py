@@ -1485,7 +1485,6 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
 
 
 # 🔥🔥🔥 여기부터 추가: /train-log 카드용 요약 함수 🔥🔥🔥
-
 def get_train_log_cards(max_cards: int = 200):
     """
     /train-log 화면용 헬퍼.
@@ -1494,6 +1493,14 @@ def get_train_log_cards(max_cards: int = 200):
     2순위: 만약 이 파일이 없거나 비어 있으면,
            persistent/logs/train_log.csv 를 직접 읽어서
            심볼·전략별 '최근 한 줄'만 카드로 만든다.
+
+    카드 한 장을 보면
+      - 최근 학습이 잘 됐는지 (health_text)
+      - 정답률 / F1 / loss 가 어느 정도인지
+      - 데이터가 얼마나 들어갔는지
+      - 수익률 분포 범위가 어느 정도인지
+      - 검증 커버리지가 괜찮은지
+    를 “처음 보는 사람도 이해할 수 있게” 한글로 설명해 준다.
     """
     dash_path = os.path.join(LOG_DIR, "train_dashboard.csv")
     raw_path = TRAIN_LOG
@@ -1556,6 +1563,10 @@ def get_train_log_cards(max_cards: int = 200):
 
         df["class_ranges_text"] = ""
 
+        # near-zero 대역 정보가 있으면 그대로 가져오고, 없으면 0으로
+        df["near_zero_band"] = raw.get("near_zero_band", 0.0)
+        df["near_zero_count"] = raw.get("near_zero_count", 0)
+
         df["status"] = raw.get("status", "success")
         df["note"] = raw.get("note", "")
 
@@ -1576,6 +1587,7 @@ def get_train_log_cards(max_cards: int = 200):
         df = df.sort_values("timestamp")
 
     cards = []
+
     for (sym, strat), g in df.groupby(["symbol", "strategy"], dropna=False):
         if g.empty:
             continue
@@ -1584,13 +1596,19 @@ def get_train_log_cards(max_cards: int = 200):
         # --- 수치값 안전 변환 ---
         def _f(row, key, default=0.0):
             try:
-                return float(row.get(key, default) or default)
+                val = row.get(key, default)
+                if val in ["", None]:
+                    return float(default)
+                return float(val)
             except Exception:
                 return float(default)
 
         def _i(row, key, default=0):
             try:
-                return int(row.get(key, default) or default)
+                val = row.get(key, default)
+                if val in ["", None]:
+                    return int(default)
+                return int(val)
             except Exception:
                 return int(default)
 
@@ -1605,76 +1623,185 @@ def get_train_log_cards(max_cards: int = 200):
         val_covered = _i(last, "val_covered", 0)
         val_coverage = _f(last, "val_coverage", 0.0)
 
+        near_zero_band = _f(last, "near_zero_band", 0.0)
+        near_zero_count = _i(last, "near_zero_count", 0)
+
         all_classes_covered = bool(val_num_classes > 0 and val_covered >= val_num_classes)
 
         health = str(last.get("health", "OK") or "OK")
         status = str(last.get("status", "") or "")
 
-        # 건강 상태 텍스트
-        if health == "OK":
-            health_text = "✅ 정상 학습"
-        else:
-            health_text = f"⚠️ 문제 있음 ({health})"
-
-        # 데이터 요약
-        if label_total > 0 and label_classes > 0:
-            data_summary = f"데이터 {label_total}개 / 클래스 {label_classes}개"
-        elif label_total > 0:
-            data_summary = f"데이터 {label_total}개"
-        else:
-            data_summary = "데이터 정보 없음"
-
         enough_for_training = str(last.get("enough_for_training", "") or "")
         augment_needed = str(last.get("augment_needed", "") or "")
 
-        # 수익률 요약
+        # -----------------------------
+        # 1) 건강 상태 텍스트 (완전 한글)
+        # -----------------------------
+        if health == "OK":
+            # 완전히 처음 보는 사람 기준 설명
+            health_text = "✅ 정상 학습: 데이터와 모델에 큰 문제 없이 학습이 잘 끝났어요."
+        else:
+            # health 에는 STATUS_FAIL;F1_ZERO;LOW_COVERAGE 같은 코드가 들어있음
+            human_reasons = []
+            if "STATUS_FAIL" in health:
+                human_reasons.append("학습 과정에서 오류나 실패가 있었어요.")
+            if "F1_ZERO" in health:
+                human_reasons.append("모델이 정답 패턴을 거의 못 찾고 있어요(F1=0).")
+            if "LABEL_SINGLE_CLASS" in health:
+                human_reasons.append("라벨이 한 종류만 있어서 구분 학습이 불가능해요.")
+            if "LOW_COVERAGE" in health:
+                human_reasons.append("검증에서 일부 클래스만 등장해서 성능을 믿기 어려워요.")
+
+            if not human_reasons:
+                human_reasons.append("상세 원인은 health 코드에 들어 있어요.")
+
+            health_text = "⚠️ 문제 있는 학습: " + " ".join(human_reasons)
+
+        # -----------------------------
+        # 2) 정답률 / F1 / loss 설명
+        # -----------------------------
+        # (소수 → 퍼센트로 바꿔서, '무엇을 의미하는지'까지 설명)
+        acc_text = f"정답률(accuracy): {val_acc*100:.1f}% — 전체 예측 중 정답으로 맞춘 비율이에요."
+        f1_text = f"F1 점수: {val_f1*100:.1f}% — 정답률과 재현율을 합쳐서 '패턴을 제대로 배우고 있는지' 보는 지표예요."
+        loss_text = f"손실(loss): {val_loss:.4f} — 낮을수록 좋고, 0에 가까울수록 모델이 더 안정적으로 학습된 거예요."
+
+        # -----------------------------
+        # 3) 데이터 요약 (샘플 수 / 클래스 수)
+        # -----------------------------
+        if label_total > 0 and label_classes > 0:
+            data_summary = f"학습에 사용한 데이터: 총 {label_total}개, 구분한 수익률 구간(클래스): {label_classes}개."
+        elif label_total > 0:
+            data_summary = f"학습에 사용한 데이터: 총 {label_total}개 (클래스 개수 정보는 아직 없어요)."
+        else:
+            data_summary = "학습에 사용된 데이터 양 정보를 아직 찾지 못했어요."
+
+        # 증강/충분 여부 한글 설명
+        extra_data_info = []
+        if enough_for_training not in ["", "0", "False", "false", "NO", "no"]:
+            extra_data_info.append("✔ 이 정도 데이터로도 학습하기에 '충분'하다고 판단했어요.")
+        else:
+            extra_data_info.append("⚠ 데이터 양이 충분하지 않을 수 있어서, 결과를 신중하게 봐야 해요.")
+
+        if augment_needed not in ["", "0", "False", "false", "NO", "no"]:
+            extra_data_info.append("✔ 부족한 구간은 '데이터 증강'으로 채워줬어요.")
+        else:
+            extra_data_info.append("ℹ 이번 학습에서는 별도의 데이터 증강은 사용하지 않았어요.")
+
+        data_detail_text = " ".join(extra_data_info)
+
+        # -----------------------------
+        # 4) 수익률 요약 (전체 범위 설명)
+        # -----------------------------
         try:
             ret_min = _f(last, "ret_min", 0.0)
             ret_p50 = _f(last, "ret_p50", 0.0)
             ret_max = _f(last, "ret_max", 0.0)
-            ret_summary_text = f"{ret_min*100:.2f}% ~ {ret_max*100:.2f}% (중앙값 {ret_p50*100:.2f}%)"
+            ret_summary_text = (
+                f"수익률 분포: 최소 {ret_min*100:.2f}% ~ 최대 {ret_max*100:.2f}%, "
+                f"중앙값은 {ret_p50*100:.2f}% 근처예요."
+            )
         except Exception:
-            ret_summary_text = "수익률 분포 정보 없음"
+            ret_summary_text = "수익률 분포 정보는 아직 정리되지 않았어요."
 
-        # 커버리지 요약
+        # 0% 근처 데이터(near_zero_band)가 있으면 추가 설명
+        if near_zero_band > 0 and near_zero_count > 0:
+            ret_summary_text += f" 0% ±{near_zero_band*100:.2f}% 구간에 데이터 {near_zero_count}개가 모여 있어요."
+
+        # -----------------------------
+        # 5) 검증 커버리지 요약
+        # -----------------------------
         if val_num_classes > 0:
-            coverage_summary = f"검증 커버리지 {val_coverage*100:.1f}% ({val_covered}/{val_num_classes} 클래스)"
+            coverage_summary = (
+                f"검증 커버리지: 전체 {val_num_classes}개 구간 중 "
+                f"{val_covered}개 구간이 실제 검증 데이터에 등장했어요 "
+                f"({val_coverage*100:.1f}%)."
+            )
         else:
-            coverage_summary = "검증 커버리지 정보 없음"
+            coverage_summary = "검증에서 각 수익률 구간이 얼마나 나왔는지는 아직 집계되지 않았어요."
 
+        # -----------------------------
+        # 6) 클래스별 수익률 구간 텍스트
+        # -----------------------------
         class_ranges_text = str(last.get("class_ranges_text", "") or "")
+        if class_ranges_text:
+            # 예: "C1: -1.23% ~ -0.50% | C2: -0.50% ~ 0.10% | ..."
+            class_ranges_text_human = (
+                "각 클래스별 수익률 구간: "
+                + class_ranges_text
+            )
+        else:
+            class_ranges_text_human = ""
+
+        # -----------------------------
+        # 7) 완전 초보용 한 줄 요약
+        # -----------------------------
+        # “이 카드 하나만 보고도 감 잡게”
+        beginner_summary = []
+
+        if health == "OK":
+            beginner_summary.append("👉 요약: 이 심볼/전략은 일단 '학습은 정상적으로 끝났고' 기본 성능도 무난한 편이에요.")
+        else:
+            beginner_summary.append("👉 요약: 이 심볼/전략은 학습 과정이나 데이터 쪽에 한 번 더 점검이 필요한 상태예요.")
+
+        if val_acc >= 0.6 and val_f1 >= 0.4:
+            beginner_summary.append("정답률과 패턴 인식(F1)도 어느 정도는 올라온 상태라, 이후 예측 결과를 보면서 튜닝하면 좋아요.")
+        elif val_acc == 0.0 and val_f1 == 0.0:
+            beginner_summary.append("정답률 / F1 이 거의 0이라, 라벨링이나 데이터 분포를 먼저 확인해보는 게 좋아요.")
+        else:
+            beginner_summary.append("성능이 애매한 구간이라, 데이터 양과 라벨 분포, 수익률 구간이 고르게 분포했는지 함께 보는 게 좋아요.")
+
+        beginner_summary_text = " ".join(beginner_summary)
 
         card = {
             "symbol": str(sym),
             "strategy": str(strat),
             "model": str(last.get("model", "") or ""),
 
+            # 상태/건강도
             "health": health,
             "health_text": health_text,
             "status": status,
 
+            # 원시 지표 값
             "val_acc": val_acc,
             "val_f1": val_f1,
             "val_loss": val_loss,
 
+            # 원시 데이터 요약
             "label_total": label_total,
             "label_classes": label_classes,
             "data_summary": data_summary,
+            "data_detail_text": data_detail_text,   # 🔹 새로 추가: 데이터 충분/증강 여부 한글 설명
 
             "enough_for_training": enough_for_training,
             "augment_needed": augment_needed,
 
+            # 검증 커버리지
             "val_num_classes": val_num_classes,
             "val_covered": val_covered,
             "val_coverage": val_coverage,
             "coverage_summary": coverage_summary,
             "all_classes_covered": all_classes_covered,
 
-            "class_ranges_text": class_ranges_text,
+            # 수익률/클래스 구간
+            "class_ranges_text": class_ranges_text_human,
             "ret_summary_text": ret_summary_text,
 
+            # near-zero 정보도 카드에 포함
+            "near_zero_band": near_zero_band,
+            "near_zero_count": near_zero_count,
+
+            # 시간 / 메모
             "timestamp": str(last.get("timestamp", "")),
             "note": str(last.get("note", "") or ""),
+
+            # 지표 설명용 텍스트들 (UI에서 그대로 문장으로 뿌리면 됨)
+            "acc_text": acc_text,
+            "f1_text": f1_text,
+            "loss_text": loss_text,
+
+            # 완전 초보용 한 줄 요약
+            "beginner_summary_text": beginner_summary_text,
         }
 
         cards.append(card)
