@@ -494,79 +494,88 @@ if not getattr(logger, "_patched_train_log", False):
     _orig_ltr = getattr(logger, "log_training_result", None)
 
     def _log_training_result_patched(*args, **kw):
-        """
-        logger.log_training_result 를 가로채서:
-        1) 원래 logger 로깅 실행
-        2) train_log.csv 에 기록할 row 에
-           - 사람이 보기 쉬운 한글 요약 필드( ui_* )를 추가한 뒤
-           - _append_train_log(row) 로 저장
-        """
-        # 1) 원래 logger 로깅 먼저 시도
-        if callable(_orig_ltr):
-            try:
-                _orig_ltr(*args, **kw)
-            except Exception as e:
-                print(f"[경고] logger.log_training_result 실패: {e}")
+    """
+    logger.log_training_result 를 가로채서:
+    1) 원래 logger 로깅 실행
+    2) train_log.csv 에 기록할 row 생성
+       - bin_edges / bin_counts / class_ranges 등 JSON 문자열도 리스트로 복원
+       - ui_* 요약 필드 생성
+    """
+    # 1) 원래 logger 호출
+    if callable(_orig_ltr):
+        try:
+            _orig_ltr(*args, **kw)
+        except Exception as e:
+            print(f"[경고] logger.log_training_result 실패: {e}")
 
-        # 2) train_log.csv 에도 기록할 row 만들기
-        row = dict(kw)
-        row.setdefault(
-            "timestamp", datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
+    row = dict(kw)
+    row.setdefault(
+        "timestamp", datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
+    )
+
+    # ------------------------------
+    # JSON 문자열 → 리스트 자동 복원
+    # ------------------------------
+    import json as _json
+
+    def _restore(v):
+        if isinstance(v, str):
+            try:
+                return _json.loads(v)
+            except:
+                return None
+        return v
+
+    # bin / 클래스 관련 값들 복원
+    row["bin_edges"]  = _restore(row.get("bin_edges"))
+    row["bin_counts"] = _restore(row.get("bin_counts"))
+    row["bin_spans"]  = _restore(row.get("bin_spans"))
+    row["class_ranges"] = _restore(row.get("class_ranges"))
+    row["class_edges"]  = row.get("bin_edges")
+    row["class_counts"] = row.get("bin_counts")
+
+    # bins 계산
+    try:
+        be = row.get("bin_edges")
+        if isinstance(be, list) and len(be) >= 2:
+            row["bins"] = len(be) - 1
+        else:
+            row["bins"] = None
+    except:
+        row["bins"] = None
+
+    # ------------------------------
+    # ui_* 요약 필드 생성
+    # ------------------------------
+    try:
+        be = row.get("bin_edges") or []
+        bc = row.get("bin_counts") or []
+        cr = row.get("class_ranges") or []
+        rows_used = row.get("rows") or 0
+        usable = row.get("usable_samples") or 0
+
+        acc_val = row.get("val_acc", row.get("accuracy", 0.0))
+        f1_val  = row.get("val_f1",  row.get("f1", 0.0))
+
+        summary = make_training_summary_fields(
+            rows=int(rows_used),
+            bin_edges=be,
+            bin_counts=bc,
+            class_ranges=cr,
+            usable_samples=int(usable),
+            acc=float(acc_val or 0),
+            f1=float(f1_val or 0),
         )
 
-        # 🔥 [추가] UI용 쉬운 요약 필드 생성
-        try:
-            import json as _json
+        row.update(summary)
+    except Exception as e:
+        print(f"[train_log summary warn] {e}", flush=True)
 
-            # (1) 기본 값 꺼내기
-            rows = row.get("rows") or 0
-            usable_samples = row.get("usable_samples") or 0
+    # ------------------------------
+    # CSV 기록
+    # ------------------------------
+    _append_train_log(row)
 
-            # acc / f1 은 val_* 우선, 없으면 accuracy/f1 사용
-            acc_val = row.get("val_acc", row.get("accuracy", 0.0))
-            f1_val = row.get("val_f1", row.get("f1", 0.0))
-
-            # (2) bin_edges / bin_counts / class_ranges 는
-            #     - JSON 문자열일 수도 있고
-            #     - 리스트일 수도 있어서 둘 다 처리
-            raw_edges = row.get("bin_edges") or row.get("class_edges")
-            raw_counts = row.get("bin_counts") or row.get("class_counts")
-            raw_ranges = row.get("class_ranges")
-
-            def _maybe_load(v):
-                if isinstance(v, str):
-                    try:
-                        return _json.loads(v)
-                    except Exception:
-                        return []
-                return v if isinstance(v, (list, tuple)) else []
-
-            bin_edges = _maybe_load(raw_edges)
-            bin_counts = _maybe_load(raw_counts)
-            class_ranges = _maybe_load(raw_ranges)
-
-            # (3) 요약 필드 만들기
-            summary = make_training_summary_fields(
-                rows=int(rows or 0),
-                bin_edges=bin_edges or [],
-                bin_counts=bin_counts or [],
-                class_ranges=class_ranges or [],
-                usable_samples=int(usable_samples or 0),
-                acc=float(acc_val or 0.0),
-                f1=float(f1_val or 0.0),
-            )
-
-            # (4) row 에 요약 필드 추가
-            row.update(summary)
-
-        except Exception as e:
-            try:
-                print(f"[train_log summary warn] {e}", flush=True)
-            except:
-                pass
-
-        # 3) 실제 csv 기록
-        _append_train_log(row)
 
     logger.log_training_result = _log_training_result_patched
     logger._patched_train_log = True
@@ -2036,6 +2045,7 @@ _STRICT_HALT_ON_INCOMPLETE = False
 _REQUIRE_AT_LEAST_ONE_MODEL_PER_GROUP = False
 _SYMBOL_RETRY_LIMIT = int(os.getenv("SYMBOL_RETRY_LIMIT", "1"))
 
+
 def make_training_summary_fields(
     rows, 
     bin_edges, 
@@ -2045,13 +2055,14 @@ def make_training_summary_fields(
     acc, 
     f1
 ):
-    """UI가 읽을 수 있는 쉬운 설명을 자동으로 생성"""
-    # 1) 데이터 요약
+    """웹 UI가 읽을 수 있는 매우 쉬운 요약본문 생성"""
+
+    # (1) 데이터 개수
     data_summary = f"학습에 사용된 데이터: 총 {rows}개"
 
-    # 2) 수익률 분포 요약
+    # (2) 수익률 구간 요약
     try:
-        if bin_edges and isinstance(bin_edges, list):
+        if isinstance(bin_edges, list) and len(bin_edges) >= 2:
             lo = float(bin_edges[0])
             hi = float(bin_edges[-1])
             dist_summary = f"수익률 분포: 최소 {lo:.4f} ~ 최대 {hi:.4f}"
@@ -2060,9 +2071,9 @@ def make_training_summary_fields(
     except:
         dist_summary = "수익률 분포 정보 없음"
 
-    # 3) 클래스별 구간 요약
+    # (3) 클래스별 구간 요약
     try:
-        if class_ranges and isinstance(class_ranges, list):
+        if isinstance(class_ranges, list) and class_ranges:
             cr = "; ".join([f"{float(lo):.4f}~{float(hi):.4f}" for lo, hi in class_ranges])
             class_range_summary = f"클래스별 수익률 구간: {cr}"
         else:
@@ -2070,14 +2081,14 @@ def make_training_summary_fields(
     except:
         class_range_summary = "클래스별 구간 정보 없음"
 
-    # 4) 클래스 개수
+    # (4) 클래스 개수
     num_classes = len(class_ranges) if class_ranges else 0
     class_count_summary = f"클래스 개수: {num_classes}개"
 
-    # 5) usable 샘플
+    # (5) 실제 usable 샘플 수
     usable_summary = f"실제 학습에 사용한 샘플: {usable_samples}개"
 
-    # 6) 성능
+    # (6) 모델 성능
     perf_summary = f"정확도 {acc:.4f}, F1 {f1:.4f}"
 
     return {
