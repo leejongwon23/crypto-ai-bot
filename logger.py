@@ -1312,82 +1312,115 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
 
     out_path = os.path.join(LOG_DIR, "train_dashboard.csv")
 
-    # ── 1) train_log 에서 최신 한 줄 가져오기 ─────────────────────────
+    # ── 1) train_log 에서 최신 한 줄 가져오기 (symbol+strategy 기준) ───────────────
     train_df = _safe_read_df(TRAIN_LOG)
-    trow = _get_last_row(train_df, {"symbol": symbol, "strategy": strategy, "model": model})
+    trow = None
+
+    if not train_df.empty and {"symbol", "strategy"}.issubset(train_df.columns):
+        sub = train_df.copy()
+        # 문자열 비교를 위해 캐스팅
+        sub["symbol"] = sub["symbol"].astype(str)
+        sub["strategy"] = sub["strategy"].astype(str)
+        sub = sub[(sub["symbol"] == symbol) & (sub["strategy"] == strategy)]
+        if not sub.empty:
+            if "timestamp" in sub.columns:
+                sub["timestamp"] = pd.to_datetime(sub["timestamp"], errors="coerce")
+                sub = sub.sort_values("timestamp")
+            trow = sub.tail(1).to_dict("records")[0]
+
+    # fallback: 혹시 위에서 못 찾으면 기존 로직으로 한 번 더 시도
     if trow is None:
-        # 혹시 model 컬럼이 비어있거나 다른 형식일 때 대비해서 fallback
+        trow = _get_last_row(train_df, {"symbol": symbol, "strategy": strategy, "model": model})
+    if trow is None:
         trow = _get_last_row(train_df, {"symbol": symbol, "strategy": strategy})
 
-    val_acc = float(trow.get("val_acc", 0.0)) if trow else 0.0
-    val_f1  = float(trow.get("val_f1", 0.0)) if trow else 0.0
-    val_loss = float(trow.get("val_loss", 0.0)) if trow else 0.0
+    # trow 가 끝까지 없으면, 요약만 비워두고 종료
+    if trow is None:
+        return
 
-    data_rows          = trow.get("rows", "") if trow else ""
-    data_limit         = trow.get("limit", "") if trow else ""
-    data_min           = trow.get("min", "") if trow else ""
-    augment_needed     = trow.get("augment_needed", "") if trow else ""
-    enough_for_training = trow.get("enough_for_training", "") if trow else ""
-    train_status       = (trow.get("status", "") if trow else "") or "unknown"
-    train_note         = trow.get("note", "") if trow else ""
-    train_engine       = trow.get("engine", "") if trow else ""
-    train_window       = trow.get("window", "") if trow else ""
-    train_recent_cap   = trow.get("recent_cap", "") if trow else ""
+    def _safe_float(row, key, default=0.0):
+        try:
+            val = row.get(key, default)
+            if val in ["", None]:
+                return float(default)
+            return float(val)
+        except Exception:
+            return float(default)
+
+    def _safe_int(row, key, default=0):
+        try:
+            val = row.get(key, default)
+            if val in ["", None]:
+                return int(default)
+            return int(val)
+        except Exception:
+            return int(default)
+
+    val_acc = _safe_float(trow, "val_acc", 0.0)
+    val_f1  = _safe_float(trow, "val_f1", 0.0)
+    val_loss = _safe_float(trow, "val_loss", 0.0)
+
+    data_rows          = trow.get("rows", "")
+    data_limit         = trow.get("limit", "")
+    data_min           = trow.get("min", "")
+    augment_needed     = trow.get("augment_needed", "")
+    enough_for_training = trow.get("enough_for_training", "")
+    train_status       = (trow.get("status", "") or "unknown")
+    train_note         = trow.get("note", "")
+    train_engine       = trow.get("engine", "")
+    train_window       = trow.get("window", "")
+    train_recent_cap   = trow.get("recent_cap", "")
+
+    # near-zero 정보도 요약에 포함
+    near_zero_band = _safe_float(trow, "near_zero_band", 0.0)
+    near_zero_count = _safe_int(trow, "near_zero_count", 0)
 
     # ── 2) 라벨 분포 (label_distribution.csv) ──────────────────────────
     label_path = os.path.join(LOG_DIR, "label_distribution.csv")
     ldf = _safe_read_df(label_path)
     lrow = _get_last_row(ldf, {"symbol": symbol, "strategy": strategy})
 
-    label_total   = int(lrow.get("total", 0)) if lrow else 0
-    label_classes = int(lrow.get("n_unique", 0)) if lrow else 0
+    label_total   = _safe_int(lrow or {}, "total", 0)
+    label_classes = _safe_int(lrow or {}, "n_unique", 0)
     try:
-        label_entropy = float(lrow.get("entropy", 0.0)) if lrow else 0.0
+        label_entropy = _safe_float(lrow or {}, "entropy", 0.0)
     except Exception:
         label_entropy = 0.0
-    label_counts_json = lrow.get("counts_json", "") if lrow else ""
+    label_counts_json = (lrow or {}).get("counts_json", "")
 
     # ── 3) 수익률 분포 (return_distribution.csv) ──────────────────────
     ret_path = os.path.join(LOG_DIR, "return_distribution.csv")
     rdf = _safe_read_df(ret_path)
     rrow = _get_last_row(rdf, {"symbol": symbol, "strategy": strategy})
 
-    def _safe_float(row, key, default=0.0):
-        try:
-            return float(row.get(key, default)) if row else float(default)
-        except Exception:
-            return float(default)
-
-    ret_min  = _safe_float(rrow, "min", 0.0)
-    ret_p25  = _safe_float(rrow, "p25", 0.0)
-    ret_p50  = _safe_float(rrow, "p50", 0.0)
-    ret_p75  = _safe_float(rrow, "p75", 0.0)
-    ret_p90  = _safe_float(rrow, "p90", 0.0)
-    ret_p95  = _safe_float(rrow, "p95", 0.0)
-    ret_p99  = _safe_float(rrow, "p99", 0.0)
-    ret_max  = _safe_float(rrow, "max", 0.0)
-    ret_count = int(rrow.get("count", 0)) if rrow else 0
+    ret_min   = _safe_float(rrow or {}, "min", 0.0)
+    ret_p25   = _safe_float(rrow or {}, "p25", 0.0)
+    ret_p50   = _safe_float(rrow or {}, "p50", 0.0)
+    ret_p75   = _safe_float(rrow or {}, "p75", 0.0)
+    ret_p90   = _safe_float(rrow or {}, "p90", 0.0)
+    ret_p95   = _safe_float(rrow or {}, "p95", 0.0)
+    ret_p99   = _safe_float(rrow or {}, "p99", 0.0)
+    ret_max   = _safe_float(rrow or {}, "max", 0.0)
+    ret_count = _safe_int(rrow or {}, "count", 0)
 
     # ── 4) 검증 커버리지 (validation_coverage.csv) ────────────────────
     cov_path = os.path.join(LOG_DIR, "validation_coverage.csv")
     cvdf = _safe_read_df(cov_path)
     cvrow = _get_last_row(cvdf, {"symbol": symbol, "strategy": strategy})
 
-    val_num_classes = int(cvrow.get("num_classes", 0)) if cvrow else 0
-    val_covered     = int(cvrow.get("covered", 0)) if cvrow else 0
+    val_num_classes = _safe_int(cvrow or {}, "num_classes", 0)
+    val_covered     = _safe_int(cvrow or {}, "covered", 0)
     try:
-        val_coverage    = float(cvrow.get("coverage", 0.0)) if cvrow else 0.0
+        val_coverage    = _safe_float(cvrow or {}, "coverage", 0.0)
     except Exception:
         val_coverage = 0.0
 
     # ── 5) 클래스별 수익률 구간 (class_ranges.csv) ─────────────────────
-    #     → C1: -1.23% ~ -0.50% | C2: -0.50% ~ 0.10% | ... 이런 식 텍스트
     cr_path = os.path.join(LOG_DIR, "class_ranges.csv")
     crdf = _safe_read_df(cr_path)
     class_ranges_text = ""
     if not crdf.empty and {"symbol","strategy","idx","low","high"}.issubset(set(crdf.columns)):
         sub = crdf[(crdf["symbol"] == symbol) & (crdf["strategy"] == strategy)]
-        # idx >= 0 인 실제 클래스만 (요약마커 idx=-1 제외)
         sub = sub[pd.to_numeric(sub["idx"], errors="coerce").fillna(-1) >= 0]
         parts = []
         for _, row in sub.sort_values("idx").iterrows():
@@ -1397,7 +1430,7 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
                 hi = float(row["high"])
             except Exception:
                 continue
-            cls_no = idx + 1  # 사람 눈에는 1번, 2번 ...
+            cls_no = idx + 1
             parts.append(f"C{cls_no}: {lo*100:.2f}% ~ {hi*100:.2f}%")
         class_ranges_text = " | ".join(parts)
 
@@ -1407,13 +1440,10 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
 
     if st_lower not in {"success", "ok"}:
         problems.append("STATUS_FAIL")
-
     if val_f1 <= 0.0:
         problems.append("F1_ZERO")
-
     if label_classes <= 1 and label_total > 0:
         problems.append("LABEL_SINGLE_CLASS")
-
     if val_num_classes > 0 and val_coverage < 0.6:
         problems.append("LOW_COVERAGE")
 
@@ -1462,6 +1492,10 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
         "status": train_status,
         "note": train_note,
         "health": health,
+
+        # 🔹 near-zero 정보도 대시보드에 포함
+        "near_zero_band": near_zero_band,
+        "near_zero_count": near_zero_count,
     }
 
     # ── 8) train_dashboard.csv 에 병합 저장 ────────────────────────────
@@ -1589,6 +1623,12 @@ def get_train_log_cards(max_cards: int = 200):
     cards = []
 
     for (sym, strat), g in df.groupby(["symbol", "strategy"], dropna=False):
+        # 🔴 symbol 또는 strategy 가 nan / 빈문자 / none 이면 카드에서 제외
+        sym_str = str(sym or "").strip()
+        strat_str = str(strat or "").strip()
+        if sym_str.lower() in {"", "nan", "none", "null"} or strat_str.lower() in {"", "nan", "none", "null"}:
+            continue
+
         if g.empty:
             continue
         last = g.iloc[-1]
@@ -1638,10 +1678,8 @@ def get_train_log_cards(max_cards: int = 200):
         # 1) 건강 상태 텍스트 (완전 한글)
         # -----------------------------
         if health == "OK":
-            # 완전히 처음 보는 사람 기준 설명
             health_text = "✅ 정상 학습: 데이터와 모델에 큰 문제 없이 학습이 잘 끝났어요."
         else:
-            # health 에는 STATUS_FAIL;F1_ZERO;LOW_COVERAGE 같은 코드가 들어있음
             human_reasons = []
             if "STATUS_FAIL" in health:
                 human_reasons.append("학습 과정에서 오류나 실패가 있었어요.")
@@ -1660,7 +1698,6 @@ def get_train_log_cards(max_cards: int = 200):
         # -----------------------------
         # 2) 정답률 / F1 / loss 설명
         # -----------------------------
-        # (소수 → 퍼센트로 바꿔서, '무엇을 의미하는지'까지 설명)
         acc_text = f"정답률(accuracy): {val_acc*100:.1f}% — 전체 예측 중 정답으로 맞춘 비율이에요."
         f1_text = f"F1 점수: {val_f1*100:.1f}% — 정답률과 재현율을 합쳐서 '패턴을 제대로 배우고 있는지' 보는 지표예요."
         loss_text = f"손실(loss): {val_loss:.4f} — 낮을수록 좋고, 0에 가까울수록 모델이 더 안정적으로 학습된 거예요."
@@ -1675,7 +1712,6 @@ def get_train_log_cards(max_cards: int = 200):
         else:
             data_summary = "학습에 사용된 데이터 양 정보를 아직 찾지 못했어요."
 
-        # 증강/충분 여부 한글 설명
         extra_data_info = []
         if enough_for_training not in ["", "0", "False", "false", "NO", "no"]:
             extra_data_info.append("✔ 이 정도 데이터로도 학습하기에 '충분'하다고 판단했어요.")
@@ -1703,7 +1739,6 @@ def get_train_log_cards(max_cards: int = 200):
         except Exception:
             ret_summary_text = "수익률 분포 정보는 아직 정리되지 않았어요."
 
-        # 0% 근처 데이터(near_zero_band)가 있으면 추가 설명
         if near_zero_band > 0 and near_zero_count > 0:
             ret_summary_text += f" 0% ±{near_zero_band*100:.2f}% 구간에 데이터 {near_zero_count}개가 모여 있어요."
 
@@ -1724,20 +1759,14 @@ def get_train_log_cards(max_cards: int = 200):
         # -----------------------------
         class_ranges_text = str(last.get("class_ranges_text", "") or "")
         if class_ranges_text:
-            # 예: "C1: -1.23% ~ -0.50% | C2: -0.50% ~ 0.10% | ..."
-            class_ranges_text_human = (
-                "각 클래스별 수익률 구간: "
-                + class_ranges_text
-            )
+            class_ranges_text_human = "각 클래스별 수익률 구간: " + class_ranges_text
         else:
             class_ranges_text_human = ""
 
         # -----------------------------
         # 7) 완전 초보용 한 줄 요약
         # -----------------------------
-        # “이 카드 하나만 보고도 감 잡게”
         beginner_summary = []
-
         if health == "OK":
             beginner_summary.append("👉 요약: 이 심볼/전략은 일단 '학습은 정상적으로 끝났고' 기본 성능도 무난한 편이에요.")
         else:
@@ -1753,60 +1782,50 @@ def get_train_log_cards(max_cards: int = 200):
         beginner_summary_text = " ".join(beginner_summary)
 
         card = {
-            "symbol": str(sym),
-            "strategy": str(strat),
+            "symbol": sym_str,
+            "strategy": strat_str,
             "model": str(last.get("model", "") or ""),
 
-            # 상태/건강도
             "health": health,
             "health_text": health_text,
             "status": status,
 
-            # 원시 지표 값
             "val_acc": val_acc,
             "val_f1": val_f1,
             "val_loss": val_loss,
 
-            # 원시 데이터 요약
             "label_total": label_total,
             "label_classes": label_classes,
             "data_summary": data_summary,
-            "data_detail_text": data_detail_text,   # 🔹 새로 추가: 데이터 충분/증강 여부 한글 설명
+            "data_detail_text": data_detail_text,
 
             "enough_for_training": enough_for_training,
             "augment_needed": augment_needed,
 
-            # 검증 커버리지
             "val_num_classes": val_num_classes,
             "val_covered": val_covered,
             "val_coverage": val_coverage,
             "coverage_summary": coverage_summary,
             "all_classes_covered": all_classes_covered,
 
-            # 수익률/클래스 구간
             "class_ranges_text": class_ranges_text_human,
             "ret_summary_text": ret_summary_text,
 
-            # near-zero 정보도 카드에 포함
             "near_zero_band": near_zero_band,
             "near_zero_count": near_zero_count,
 
-            # 시간 / 메모
             "timestamp": str(last.get("timestamp", "")),
             "note": str(last.get("note", "") or ""),
 
-            # 지표 설명용 텍스트들 (UI에서 그대로 문장으로 뿌리면 됨)
             "acc_text": acc_text,
             "f1_text": f1_text,
             "loss_text": loss_text,
 
-            # 완전 초보용 한 줄 요약
             "beginner_summary_text": beginner_summary_text,
         }
 
         cards.append(card)
 
-    # 정렬 + 개수 제한
     cards = sorted(cards, key=lambda c: (c["symbol"], c["strategy"], c["timestamp"]))
     if max_cards is not None and len(cards) > max_cards:
         cards = cards[-max_cards:]
