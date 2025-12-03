@@ -2113,14 +2113,51 @@ def train_one_model(
                 model,
             )
 
-        # ===== 10. 전체 window 중 BEST 한 번 더 요약 로그 =====
+                # ===== 10. 전체 window 중 BEST 한 번 더 요약 로그 (수정본) =====
         try:
-            if best_window_overall is not None:
+            if best_window_overall is not None and best_state is not None:
                 _safe_print(
                     f"[WINDOW BEST] {symbol}-{strategy}-g{group_id} "
                     f"best_window={best_window_overall} "
                     f"f1={best_f1_overall:.4f} acc={best_acc_overall:.4f}"
                 )
+
+                # ✔ 데이터/분포/near-zero 정보는 마지막 window와 동일하게 사용
+                #   (클래스 구간/분포는 window에 따라 거의 안 바뀜)
+                best_rows = int(len(df))
+                best_limit = int(_limit)
+                best_min_required = int(_min_required)
+                best_augment_needed = bool(augment_needed)
+                best_enough_for_training = bool(enough_for_training)
+
+                # 분포/클래스 JSON (위에서 success 로그에 쓰던 그대로 재사용)
+                best_class_ranges_json = class_ranges_json
+                best_bin_edges_json = bin_edges_json
+                best_bin_counts_json = bin_counts_json
+                best_bin_spans_json = bin_spans_json
+                best_bins_value = bins_value
+
+                # 베스트 window의 y_true / y_pred (health 쪽에서 다시 계산할 때 필요)
+                best_lbls = best_state.get("lbls", np.zeros(0, dtype=np.int64))
+                best_preds = best_state.get("preds", np.zeros(0, dtype=np.int64))
+
+                try:
+                    best_y_true = best_lbls.tolist()
+                except Exception:
+                    best_y_true = best_lbls
+                try:
+                    best_y_pred = best_preds.tolist()
+                except Exception:
+                    best_y_pred = best_preds
+
+                summary_parts = [
+                    f"[WindowBest] window={int(best_window_overall)}",
+                    f"f1={best_f1_overall:.4f}",
+                    f"acc={best_acc_overall:.4f}",
+                    f"rows={best_rows}",
+                ]
+                final_note = " | ".join(summary_parts)
+
                 logger.log_training_result(
                     symbol,
                     strategy,
@@ -2134,18 +2171,35 @@ def train_one_model(
                     engine="manual",
                     window=int(best_window_overall),
                     recent_cap=int(len(features_only)),
-                    rows=None,
-                    limit=None,
-                    min=None,
-                    augment_needed=None,
-                    enough_for_training=None,
-                    note=(
-                        f"[WindowBest] window={best_window_overall} "
-                        f"f1={best_f1_overall:.4f} acc={best_acc_overall:.4f}"
-                    ),
+
+                    # 🔥 여기부터가 핵심: /train-log 카드가 필요로 하는 필드들
+                    rows=best_rows,
+                    limit=best_limit,
+                    min=best_min_required,
+                    augment_needed=best_augment_needed,
+                    enough_for_training=best_enough_for_training,
+                    note=final_note,
                     source_exchange="BYBIT",
                     status="best",
+
+                    # 분포/클래스/near-zero 정보
+                    NUM_CLASSES=int(num_total_classes),
+                    class_ranges=best_class_ranges_json,
+                    bin_edges=best_bin_edges_json,
+                    bin_counts=best_bin_counts_json,
+                    bin_spans=best_bin_spans_json,
+                    class_edges=best_bin_edges_json,
+                    class_counts=best_bin_counts_json,
+                    bins=best_bins_value,
+                    near_zero_band=float(nz_band),
+                    near_zero_count=int(near_zero_cnt),
+                    masked_count=int(mask_cnt),
+
+                    # health 쪽에서 다시 계산할 수 있도록 정답/예측도 같이 남김
+                    y_true=best_y_true,
+                    y_pred=best_y_pred,
                 )
+
                 # 리턴값에도 반영
                 res["best_window"] = int(best_window_overall)
                 res["best_f1"] = float(best_f1_overall)
@@ -2153,14 +2207,6 @@ def train_one_model(
         except Exception:
             pass
 
-        return res
-
-    except Exception as e:
-        _safe_print(
-            f"[EXC] train_one_model {symbol}-{strategy}-g{group_id} → {e}\n{traceback.format_exc()}"
-        )
-        _log_fail(symbol, strategy, str(e))
-        return res
 
 
 _ENFORCE_FULL_STRATEGY = False
