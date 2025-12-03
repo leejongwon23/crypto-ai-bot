@@ -494,91 +494,91 @@ if not getattr(logger, "_patched_train_log", False):
     _orig_ltr = getattr(logger, "log_training_result", None)
 
     def _log_training_result_patched(*args, **kw):
-    """
-    logger.log_training_result 를 가로채서:
-    1) 원래 logger 로깅 실행
-    2) train_log.csv 에 기록할 row 생성
-       - bin_edges / bin_counts / class_ranges 등 JSON 문자열도 리스트로 복원
-       - ui_* 요약 필드 생성
-    """
-    # 1) 원래 logger 호출
-    if callable(_orig_ltr):
-        try:
-            _orig_ltr(*args, **kw)
-        except Exception as e:
-            print(f"[경고] logger.log_training_result 실패: {e}")
-
-    row = dict(kw)
-    row.setdefault(
-        "timestamp", datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
-    )
-
-    # ------------------------------
-    # JSON 문자열 → 리스트 자동 복원
-    # ------------------------------
-    import json as _json
-
-    def _restore(v):
-        if isinstance(v, str):
+        """
+        logger.log_training_result 를 가로채서:
+        1) 원래 logger 로깅 실행
+        2) train_log.csv 에 기록할 row 생성
+           - bin_edges / bin_counts / class_ranges 등 JSON 문자열도 리스트로 복원
+           - ui_* 요약 필드 생성
+        """
+        # 1) 원래 logger 호출
+        if callable(_orig_ltr):
             try:
-                return _json.loads(v)
-            except:
-                return None
-        return v
+                _orig_ltr(*args, **kw)
+            except Exception as e:
+                print(f"[경고] logger.log_training_result 실패: {e}")
 
-    # bin / 클래스 관련 값들 복원
-    row["bin_edges"]  = _restore(row.get("bin_edges"))
-    row["bin_counts"] = _restore(row.get("bin_counts"))
-    row["bin_spans"]  = _restore(row.get("bin_spans"))
-    row["class_ranges"] = _restore(row.get("class_ranges"))
-    row["class_edges"]  = row.get("bin_edges")
-    row["class_counts"] = row.get("bin_counts")
-
-    # bins 계산
-    try:
-        be = row.get("bin_edges")
-        if isinstance(be, list) and len(be) >= 2:
-            row["bins"] = len(be) - 1
-        else:
-            row["bins"] = None
-    except:
-        row["bins"] = None
-
-    # ------------------------------
-    # ui_* 요약 필드 생성
-    # ------------------------------
-    try:
-        be = row.get("bin_edges") or []
-        bc = row.get("bin_counts") or []
-        cr = row.get("class_ranges") or []
-        rows_used = row.get("rows") or 0
-        usable = row.get("usable_samples") or 0
-
-        acc_val = row.get("val_acc", row.get("accuracy", 0.0))
-        f1_val  = row.get("val_f1",  row.get("f1", 0.0))
-
-        summary = make_training_summary_fields(
-            rows=int(rows_used),
-            bin_edges=be,
-            bin_counts=bc,
-            class_ranges=cr,
-            usable_samples=int(usable),
-            acc=float(acc_val or 0),
-            f1=float(f1_val or 0),
+        row = dict(kw)
+        row.setdefault(
+            "timestamp", datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
         )
 
-        row.update(summary)
-    except Exception as e:
-        print(f"[train_log summary warn] {e}", flush=True)
+        # ------------------------------
+        # JSON 문자열 → 리스트 자동 복원
+        # ------------------------------
+        import json as _json
 
-    # ------------------------------
-    # CSV 기록
-    # ------------------------------
-    _append_train_log(row)
+        def _restore(v):
+            if isinstance(v, str):
+                try:
+                    return _json.loads(v)
+                except:
+                    return None
+            return v
 
+        # bin / 클래스 관련 값들 복원
+        row["bin_edges"] = _restore(row.get("bin_edges"))
+        row["bin_counts"] = _restore(row.get("bin_counts"))
+        row["bin_spans"] = _restore(row.get("bin_spans"))
+        row["class_ranges"] = _restore(row.get("class_ranges"))
+        row["class_edges"] = row.get("bin_edges")
+        row["class_counts"] = row.get("bin_counts")
+
+        # bins 계산
+        try:
+            be = row.get("bin_edges")
+            if isinstance(be, list) and len(be) >= 2:
+                row["bins"] = len(be) - 1
+            else:
+                row["bins"] = None
+        except:
+            row["bins"] = None
+
+        # ------------------------------
+        # ui_* 요약 필드 생성
+        # ------------------------------
+        try:
+            be = row.get("bin_edges") or []
+            bc = row.get("bin_counts") or []
+            cr = row.get("class_ranges") or []
+            rows_used = row.get("rows") or 0
+            usable = row.get("usable_samples") or 0
+
+            acc_val = row.get("val_acc", row.get("accuracy", 0.0))
+            f1_val = row.get("val_f1", row.get("f1", 0.0))
+
+            summary = make_training_summary_fields(
+                rows=int(rows_used),
+                bin_edges=be,
+                bin_counts=bc,
+                class_ranges=cr,
+                usable_samples=int(usable),
+                acc=float(acc_val or 0),
+                f1=float(f1_val or 0),
+            )
+
+            row.update(summary)
+        except Exception as e:
+            print(f"[train_log summary warn] {e}", flush=True)
+
+        # ------------------------------
+        # CSV 기록
+        # ------------------------------
+        _append_train_log(row)
 
     logger.log_training_result = _log_training_result_patched
     logger._patched_train_log = True
+
 
 
 # ✅ 예측 게이트: 안전 임포트(없으면 no-op)
