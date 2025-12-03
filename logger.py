@@ -1674,6 +1674,9 @@ def get_train_log_cards(max_cards: int = 200):
         near_zero_count = _i(last, "near_zero_count", 0)
 
         data_rows_raw = str(last.get("data_rows", last.get("rows", "")) or "").strip()
+        # 'nan', 'NaN', 'None', 'null' 같은 값은 "정보 없음"으로 처리
+        if data_rows_raw.lower() in {"nan", "none", "null"}:
+            data_rows_raw = ""
 
         all_classes_covered = bool(val_num_classes > 0 and val_covered >= val_num_classes)
 
@@ -1752,7 +1755,15 @@ def get_train_log_cards(max_cards: int = 200):
                 f"({val_coverage*100:.1f}%)."
             )
         else:
-            coverage_summary = "검증에서 각 수익률 구간이 얼마나 나왔는지는 아직 집계되지 않았어요."
+            # 아직 validation_coverage.csv 로 집계된 검증 커버리지는 없지만,
+            # 최소한 "라벨이 몇 개의 수익률 구간으로 나뉘어 있는지"는 알려준다.
+            if label_classes > 0:
+                coverage_summary = (
+                    f"검증 커버리지는 따로 집계되지 않았지만, "
+                    f"현재 라벨링된 수익률 구간은 총 {label_classes}개예요."
+                )
+            else:
+                coverage_summary = "검증에서 각 수익률 구간이 얼마나 나왔는지는 아직 집계되지 않았어요."
 
         # 6) 클래스별 수익률 구간 텍스트 (이미 update_train_dashboard 에서 텍스트로 만들어둔 것 사용)
         class_ranges_text = str(last.get("class_ranges_text", "") or "")
@@ -2063,12 +2074,12 @@ try:
         compute_label_returns as _lbl_compute_label_returns,
     )
 except Exception:
-    _lbl_strategy_horizon_candles_from_hours = None
-    _lbl_future_extreme_signed_returns_by_candles = None
-    _lbl_infer_bar_hours_from_df = None
-    _lbl_build_bins = None
-    _lbl_auto_target_bins = None
-    _lbl_compute_label_returns = None
+        _lbl_strategy_horizon_candles_from_hours = None
+        _lbl_future_extreme_signed_returns_by_candles = None
+        _lbl_infer_bar_hours_from_df = None
+        _lbl_build_bins = None
+        _lbl_auto_target_bins = None
+        _lbl_compute_label_returns = None
 
 def extract_candle_returns(
     df,
@@ -2229,4 +2240,4 @@ def make_return_histogram(returns: list[float], bins: int = 20):
     return {
         "bin_edges": edges.astype(float).tolist(),
         "bin_counts": counts.astype(int).tolist(),
-    }
+        }
