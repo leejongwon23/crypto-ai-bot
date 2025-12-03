@@ -508,7 +508,23 @@ if not getattr(logger, "_patched_train_log", False):
             except Exception as e:
                 print(f"[경고] logger.log_training_result 실패: {e}")
 
+        # 🔥 여기서 위치 인자에서 symbol, strategy, model 복구
+        symbol = args[0] if len(args) > 0 else kw.get("symbol")
+        strategy = args[1] if len(args) > 1 else kw.get("strategy")
+        model_name = args[2] if len(args) > 2 else kw.get("model")
+
+        # 기존 kw 기반 row
         row = dict(kw)
+
+        # 위치 인자가 있으면 덮어써서 확실히 넣어줌
+        if symbol is not None:
+            row["symbol"] = symbol
+        if strategy is not None:
+            row["strategy"] = strategy
+        # model 은 이미 kw 에 있을 수 있으니 없을 때만 채움
+        if model_name is not None and "model" not in row:
+            row["model"] = model_name
+
         row.setdefault(
             "timestamp", datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
         )
@@ -578,7 +594,6 @@ if not getattr(logger, "_patched_train_log", False):
 
     logger.log_training_result = _log_training_result_patched
     logger._patched_train_log = True
-
 
 
 # ✅ 예측 게이트: 안전 임포트(없으면 no-op)
