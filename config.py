@@ -916,6 +916,27 @@ def _apply_trade_floor_cuts(ranges):
         new_rs = _strictify(new_rs)
     return new_rs
 
+def get_LOSS():
+    """
+    LOSS 설정은 절대 None이 되면 안 된다.
+    config.json이 비었거나 ENV override가 깨져도
+    최소한 {"name": "ce"} 형태의 dict를 반환하도록 안전가드 추가.
+    """
+    base = _config.get("LOSS", None)
+
+    # 1) None이거나 dict가 아닐 경우 → 강제 기본값 제공
+    if base is None or not isinstance(base, dict):
+        return {"name": "ce", "use_focal": False}
+
+    # 2) name 필드가 없거나 None → 기본값 채워넣기
+    name = base.get("name", None)
+    if name is None:
+        base["name"] = "ce"
+
+    # 3) 최종적으로 완전한 dict 반환
+    return copy.deepcopy(base)
+
+
 def get_class_return_range(class_id: int, symbol: str, strategy: str):
     key = (symbol, strategy)
     ranges = _ranges_cache.get(key)
@@ -928,6 +949,7 @@ def get_class_return_range(class_id: int, symbol: str, strategy: str):
         raise ValueError(f"class_id {class_id} 범위 오류 (0~{n-1})")
     lo, hi = ranges[class_id]
     return (float(lo), float(hi))
+    
 
 def class_to_expected_return(class_id: int, symbol: str, strategy: str):
     r_min, r_max = get_class_return_range(class_id, symbol, strategy)
