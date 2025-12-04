@@ -1754,6 +1754,7 @@ def train_now():
     except Exception as e:
         return f"학습 실패: {e}", 500
 
+
 @app.route("/train-log")
 def train_log():
     """
@@ -1837,7 +1838,7 @@ def train_log():
 
             ts = c.get("timestamp", "알 수 없음")
 
-            data_summary = c.get("data_summary", "")
+            data_summary = c.get("data_summary", "데이터 정보 없음")
             ret_summary = c.get("ret_summary_text", "수익률 분포 정보 없음")
             coverage_summary = c.get("coverage_summary", "검증 커버리지 정보 없음")
 
@@ -1946,8 +1947,6 @@ def train_log():
 
     except Exception as e:
         return f"읽기 오류: {e}", 500
-
-
 
 
 @app.route("/models")
