@@ -493,7 +493,7 @@ def _append_train_log(row: dict):
 if not getattr(logger, "_patched_train_log", False):
     _orig_ltr = getattr(logger, "log_training_result", None)
 
-    def _log_training_result_patched(*args, **kw):
+   def _log_training_result_patched(*args, **kw):
         """
         logger.log_training_result 를 가로채서:
         1) 원래 logger 로깅 실행
@@ -511,36 +511,91 @@ if not getattr(logger, "_patched_train_log", False):
         # 🔥 여기서 위치 인자에서 symbol, strategy, model 복구
         symbol = args[0] if len(args) > 0 else kw.get("symbol")
         strategy = args[1] if len(args) > 1 else kw.get("strategy")
-        model_name = args[2] if len(args) > 2 else kw.get("model")
+        model = args[2] if len(args) > 2 else kw.get("model", "")
+        result_dict = None
 
-        # 기존 kw 기반 row
-        row = dict(kw)
+        # kw 안에 dict 형태 결과가 있을 수도 있음
+        if "result" in kw and isinstance(kw["result"], dict):
+            result_dict = kw["result"]
 
-        # 위치 인자가 있으면 덮어써서 확실히 넣어줌
-        if symbol is not None:
-            row["symbol"] = symbol
-        if strategy is not None:
-            row["strategy"] = strategy
-        # model 은 이미 kw 에 있을 수 있으니 없을 때만 채움
-        if model_name is not None and "model" not in row:
-            row["model"] = model_name
+        # row 기본 구조
+        row: Dict[str, Any] = {
+            "timestamp": datetime.now(pytz.timezone("Asia/Seoul")).isoformat(),
+            "symbol": symbol,
+            "strategy": strategy,
+            "model": model,
+            "status": kw.get("status", ""),
+            "window": kw.get("window", ""),
+            "group": kw.get("group", ""),
+            "epoch": kw.get("epoch", ""),
+            "val_acc": kw.get("val_acc", ""),
+            "val_f1": kw.get("val_f1", ""),
+            "val_loss": kw.get("val_loss", ""),
+            "train_loss": kw.get("train_loss", ""),
+            "notes": kw.get("notes", ""),
+            # 분포/라벨 관련 필드 (있으면 채움)
+            "label_total": "",
+            "label_masked": "",
+            "label_masked_ratio": "",
+            "near_zero": "",
+            "near_zero_band": "",
+            "boundary_band": "",
+            "bin_edges": "",
+            "bin_counts": "",
+            "bin_spans": "",
+            "class_ranges": "",
+            "val_coverage": "",
+            # UI 요약용 필드
+            "ui_status": "",
+            "ui_data_amount": "",
+            "ui_return_summary": "",
+            "ui_coverage_summary": "",
+        }
 
-        row.setdefault(
-            "timestamp", datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
-        )
+        # result_dict 에 들어 있는 값 우선 반영
+        if isinstance(result_dict, dict):
+            for k, v in result_dict.items():
+                if k in row:
+                    row[k] = v
 
-        # ------------------------------
-        # JSON 문자열 → 리스트 자동 복원
-        # ------------------------------
-        import json as _json
+        # kw 에 직접 들어온 값도 row 에 덮어쓰기
+        for k in [
+            "status",
+            "window",
+            "group",
+            "epoch",
+            "val_acc",
+            "val_f1",
+            "val_loss",
+            "train_loss",
+            "notes",
+            "label_total",
+            "label_masked",
+            "label_masked_ratio",
+            "near_zero",
+            "near_zero_band",
+            "boundary_band",
+            "bin_edges",
+            "bin_counts",
+            "bin_spans",
+            "class_ranges",
+            "val_coverage",
+        ]:
+            if k in kw and kw[k] not in (None, ""):
+                row[k] = kw[k]
 
-        def _restore(v):
-            if isinstance(v, str):
+        # JSON 문자열로 들어올 수 있는 필드 복원
+        def _restore(val):
+            if val in (None, "", "null"):
+                return None
+            if isinstance(val, (list, dict)):
+                return val
+            if isinstance(val, str):
                 try:
-                    return _json.loads(v)
-                except:
+                    return json.loads(val)
+                except Exception:
                     return None
-            return v
+            return val
 
         # bin / 클래스 관련 값들 복원
         row["bin_edges"] = _restore(row.get("bin_edges"))
@@ -553,27 +608,88 @@ if not getattr(logger, "_patched_train_log", False):
         # bins 계산
         try:
             be = row.get("bin_edges")
-            if isinstance(be, list) and len(be) >= 2:
+            bc = row.get("bin_counts")
+            if isinstance(be, list) and len(be) > 1:
                 row["bins"] = len(be) - 1
+            elif isinstance(bc, list):
+                row["bins"] = len(bc)
             else:
-                row["bins"] = None
-        except:
-            row["bins"] = None
+                row["bins"] = ""
+        except Exception:
+            row["bins"] = ""
 
-        # ------------------------------
-        # ui_* 요약 필드 생성
-        # ------------------------------
+        # UI 요약 필드 생성
         try:
+            total = int(row.get("label_total") or 0)
+            masked = int(row.get("label_masked") or 0)
+            near_zero = int(row.get("near_zero") or 0)
+            near_zero_band = row.get("near_zero_band") or ""
+            boundary_band = row.get("boundary_band") or ""
+            val_acc = row.get("val_acc") or 0
+            val_f1 = row.get("val_f1") or 0
+            status = row.get("status") or ""
             be = row.get("bin_edges") or []
             bc = row.get("bin_counts") or []
             cr = row.get("class_ranges") or []
-            rows_used = row.get("rows") or 0
-            usable = row.get("usable_samples") or 0
+            cov = row.get("val_coverage") or {}
 
-            acc_val = row.get("val_acc", row.get("accuracy", 0.0))
-            f1_val = row.get("val_f1", row.get("f1", 0.0))
+            # 상태 요약
+            if status in ("success", "best"):
+                ui_status = f"⚪ 정상 학습 진행 ({status})"
+            elif status in ("info",):
+                ui_status = f"ℹ️ 참고용 로그 ({status})"
+            elif status in ("warn", "warning"):
+                ui_status = f"🟠 경고 상태 ({status})"
+            elif status in ("error", "fail", "failed"):
+                ui_status = f"🔴 오류/실패 ({status})"
+            else:
+                ui_status = f"상태: {status or '미상'}"
 
-            summary = make_training_summary_fields(
+            # 데이터 양 요약
+            if total > 0:
+                ui_data = f"학습에 사용한 데이터: 총 {total}개 (마스킹 {masked}개, near-zero {near_zero}개)"
+            else:
+                ui_data = "학습에 사용된 데이터 양 정보를 아직 찾지 못했어요."
+
+            # 수익률 요약
+            ui_return = "수익률 분포 정보가 아직 정리되지 않았어요."
+            if isinstance(be, list) and len(be) >= 2:
+                try:
+                    min_r = be[0]
+                    max_r = be[-1]
+                    mid_r = (min_r + max_r) / 2.0
+                    ui_return = (
+                        f"수익률 분포: 최소 {min_r:.4f} ~ 최대 {max_r:.4f}, "
+                        f"중앙값은 {mid_r:.4f} 근처예요."
+                    )
+                except Exception:
+                    pass
+
+            if near_zero_band:
+                ui_return += f" 0% 근처 구간({near_zero_band})에 {near_zero}개가 모여 있어요."
+
+            # 커버리지 요약
+            ui_cov = "검증 커버리지가 아직 집계되지 않았어요."
+            try:
+                if isinstance(cov, dict) and cov:
+                    total_val = int(cov.get("total", 0))
+                    covered = int(cov.get("covered", 0))
+                    if total_val > 0:
+                        ratio = covered / total_val
+                        ui_cov = f"검증 커버리지: {covered}/{total_val} ({ratio:.2%}) 구간이 실제로 등장했어요."
+            except Exception:
+                pass
+
+            row["ui_status"] = ui_status
+            row["ui_data_amount"] = ui_data
+            row["ui_return_summary"] = ui_return
+            row["ui_coverage_summary"] = ui_cov
+
+            # 요약 필드에 쓰기 좋은 요약 숫자들
+            rows_used = total - masked
+            usable = max(rows_used - near_zero, 0)
+
+            summary = _make_train_log_summary_fields(
                 rows=int(rows_used),
                 bin_edges=be,
                 bin_counts=bc,
@@ -591,6 +707,21 @@ if not getattr(logger, "_patched_train_log", False):
         # CSV 기록
         # ------------------------------
         _append_train_log(row)
+
+        # ------------------------------
+        # train_dashboard 갱신 (요약뷰용)
+        # ------------------------------
+        try:
+            logger.update_train_dashboard(
+                symbol=row.get("symbol"),
+                strategy=row.get("strategy"),
+                model=row.get("model", "")
+            )
+        except Exception as e:
+            print(f"[경고] train_dashboard 업데이트 실패: {e}", flush=True)
+
+    logger.log_training_result = _log_training_result_patched
+
 
     logger.log_training_result = _log_training_result_patched
     logger._patched_train_log = True
