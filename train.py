@@ -493,7 +493,12 @@ def _append_train_log(row: dict):
 if not getattr(logger, "_patched_train_log", False):
     _orig_ltr = getattr(logger, "log_training_result", None)
 
-   def _log_training_result_patched(*args, **kw):
+  # logger.log_training_result 를 패치해서
+# → 원래 로깅 + train_log.csv 에 한 줄 더 쓰도록
+if not getattr(logger, "_patched_train_log", False):
+    _orig_ltr = getattr(logger, "log_training_result", None)
+
+    def _log_training_result_patched(*args, **kw):
         """
         logger.log_training_result 를 가로채서:
         1) 원래 logger 로깅 실행
@@ -508,7 +513,7 @@ if not getattr(logger, "_patched_train_log", False):
             except Exception as e:
                 print(f"[경고] logger.log_training_result 실패: {e}")
 
-        # 🔥 여기서 위치 인자에서 symbol, strategy, model 복구
+        # 🔥 위치 인자에서 symbol, strategy, model 복구
         symbol = args[0] if len(args) > 0 else kw.get("symbol")
         strategy = args[1] if len(args) > 1 else kw.get("strategy")
         model = args[2] if len(args) > 2 else kw.get("model", "")
@@ -545,7 +550,7 @@ if not getattr(logger, "_patched_train_log", False):
             "bin_spans": "",
             "class_ranges": "",
             "val_coverage": "",
-            # UI 요약용 필드
+            # UI 요약용 필드 (구형)
             "ui_status": "",
             "ui_data_amount": "",
             "ui_return_summary": "",
@@ -685,18 +690,18 @@ if not getattr(logger, "_patched_train_log", False):
             row["ui_return_summary"] = ui_return
             row["ui_coverage_summary"] = ui_cov
 
-            # 요약 필드에 쓰기 좋은 요약 숫자들
+            # ==== 새 train_log UI 카드용 요약 필드 (간단·한눈에) ====
             rows_used = total - masked
             usable = max(rows_used - near_zero, 0)
 
-            summary = _make_train_log_summary_fields(
+            summary = make_training_summary_fields(
                 rows=int(rows_used),
                 bin_edges=be,
                 bin_counts=bc,
                 class_ranges=cr,
                 usable_samples=int(usable),
-                acc=float(acc_val or 0),
-                f1=float(f1_val or 0),
+                acc=float(val_acc or 0),
+                f1=float(val_f1 or 0),
             )
 
             row.update(summary)
@@ -721,10 +726,8 @@ if not getattr(logger, "_patched_train_log", False):
             print(f"[경고] train_dashboard 업데이트 실패: {e}", flush=True)
 
     logger.log_training_result = _log_training_result_patched
-
-
-    logger.log_training_result = _log_training_result_patched
     logger._patched_train_log = True
+
 
 
 # ✅ 예측 게이트: 안전 임포트(없으면 no-op)
