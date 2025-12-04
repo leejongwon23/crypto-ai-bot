@@ -1,274 +1,228 @@
-# === visualization.py (관우 리포트: skipped 카운트 포함) ===
+# === visualization.py — YOPO 학습로그 카드 UI (심볼×전략 1카드 출력) ===
 import pandas as pd
-import matplotlib.pyplot as plt
-import io, base64, numpy as np
+import numpy as np
+import json
+import os
 from datetime import datetime
 import pytz
-import os
 from matplotlib import font_manager
 
-# ✅ 한글 + 이모지 폰트
+# ----------------------------------------
+# 폰트 설정 (한글 + 이모지)
+# ----------------------------------------
 font_paths = [
     os.path.join("fonts", "NanumGothic-Regular.ttf"),
-    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"
+    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
 ]
 valid_fonts = []
 for fp in font_paths:
     if os.path.exists(fp):
         font_manager.fontManager.addfont(fp)
         valid_fonts.append(font_manager.FontProperties(fname=fp).get_name())
-plt.rcParams['font.family'] = valid_fonts or ['sans-serif']
-plt.rcParams['axes.unicode_minus'] = False
+import matplotlib.pyplot as plt
 
-# ✅ 경로 통일: prediction_log는 루트
-PREDICTION_LOG = "/persistent/prediction_log.csv"
-AUDIT_LOG = "/persistent/logs/evaluation_audit.csv"
+plt.rcParams["font.family"] = valid_fonts or ["sans-serif"]
+plt.rcParams["axes.unicode_minus"] = False
 
-# ----------------------------
-# 로드 + TZ 정규화
-# ----------------------------
-def load_df(path):
-    df = pd.read_csv(path)
+
+# ----------------------------------------
+# 기본 경로
+# ----------------------------------------
+TRAIN_LOG = "/persistent/train_log.csv"
+
+
+# ----------------------------------------
+# 유틸: HTML 카드 wrapper
+# ----------------------------------------
+def _wrap_card(html_inner):
+    return f"""
+<div style='width:98%;padding:18px;margin:12px;border:1px solid #ccc;border-radius:12px;
+            background:#fafafa;font-size:15px;line-height:1.5'>
+{html_inner}
+</div>
+"""
+
+
+# ----------------------------------------
+# MAIN: 심볼 + 전략 기반 카드 생성
+# ----------------------------------------
+def generate_card(symbol: str, strategy: str, df):
+    """
+    df = train_log 전체
+    symbol & strategy 에 해당하는 마지막 학습 기록 1개 뽑아서 카드 생성
+    """
+    d = df[(df["symbol"] == symbol) & (df["strategy"] == strategy)]
+    if d.empty:
+        return _wrap_card(f"<h3>❌ {symbol}-{strategy} 기록 없음</h3>")
+
+    row = d.sort_values("timestamp").iloc[-1]
+
+    # ----------------------------------------
+    # ① 건강 상태
+    # ----------------------------------------
+    status = row.get("status", "")
+    model_file = row.get("model", "")
+    tstamp = row.get("timestamp", "")
+    health = f"🟢 정상" if status == "success" else (
+        "🟡 경고" if status in ("warn", "warning") else "🔴 오류"
+    )
+
+    part1 = f"""
+<h2>📦 {symbol} · {strategy}</h2>
+<b>건강 상태:</b> {health} (status={status})<br>
+<b>모델:</b> {model_file}<br>
+<b>마지막 학습:</b> {tstamp}<br>
+"""
+
+    # ----------------------------------------
+    # ② 전체 성능
+    # ----------------------------------------
+    acc = float(row.get("val_acc") or 0)
+    f1 = float(row.get("val_f1") or 0)
+    loss = float(row.get("val_loss") or 0)
+
+    comment = (
+        "👍 잘 맞추고 있어요." if f1 >= 0.6 else (
+            "🙂 중간 정도 성능이에요." if f1 >= 0.4 else
+            "⚠️ 개선이 필요해요."
+        )
+    )
+
+    part2 = f"""
+<h3>🎯 전체 학습 성능</h3>
+정확도: <b>{acc:.4f}</b><br>
+F1 점수: <b>{f1:.4f}</b><br>
+Loss: <b>{loss:.4f}</b><br>
+👉 {comment}
+"""
+
+    # ----------------------------------------
+    # ③ 데이터 / 라벨 상태
+    # ----------------------------------------
+    total = int(row.get("label_total") or 0)
+    masked = int(row.get("label_masked") or 0)
+    near_zero = int(row.get("near_zero") or 0)
+    nz_band = row.get("near_zero_band") or ""
+
+    part3 = f"""
+<h3>🧪 데이터 / 라벨 상태</h3>
+전체 라벨: {total}개<br>
+마스킹 라벨: {masked}개<br>
+0% 근처(near-zero): {near_zero}개 (구간: {nz_band})<br>
+"""
+
+    # ----------------------------------------
+    # ④ 클래스 요약
+    # ----------------------------------------
+    class_ranges = row.get("class_ranges") or []
+    if isinstance(class_ranges, str):
+        try:
+            class_ranges = json.loads(class_ranges)
+        except:
+            class_ranges = []
+
+    num_classes = len(class_ranges)
+
+    class_counts = row.get("class_counts") or []
+    if isinstance(class_counts, str):
+        try:
+            class_counts = json.loads(class_counts)
+        except:
+            class_counts = []
+
+    participated = sum([1 for v in class_counts if v > 0])
+    skipped = num_classes - participated
+
+    part4 = f"""
+<h3>📊 클래스 요약</h3>
+클래스 개수: {num_classes}개<br>
+참여 클래스: {participated}/{num_classes}<br>
+빠진 클래스: {skipped}개<br>
+"""
+
+    # ----------------------------------------
+    # ⑤ 클래스별 상세 표
+    #    (클래스 F1 은 train_log 에 없으므로 이후 1번 보강 필요)
+    # ----------------------------------------
+    table_rows = ""
+    for i in range(num_classes):
+        lo, hi = class_ranges[i]
+        cnt = class_counts[i] if i < len(class_counts) else 0
+        participate = "✅" if cnt > 0 else "❌"
+
+        # F1 per class (아직 없음 → 0.00으로 표시, train.py 보강 후 채워짐)
+        f1_c = 0.0
+
+        memo = "샘플 적음" if cnt <= 3 else ""
+
+        table_rows += f"""
+<tr>
+<td>{i}</td>
+<td>{lo:.4f} ~ {hi:.4f}</td>
+<td>{cnt}</td>
+<td>{participate}</td>
+<td>{f1_c:.2f}</td>
+<td>{memo}</td>
+</tr>
+"""
+
+    part5 = f"""
+<h3>📘 클래스 상세</h3>
+<table border="1" cellspacing="0" cellpadding="4" style="width:98%;font-size:13px">
+<tr>
+<th>클래스</th>
+<th>수익률 구간</th>
+<th>데이터 수</th>
+<th>참여 여부</th>
+<th>F1</th>
+<th>메모</th>
+</tr>
+{table_rows}
+</table>
+"""
+
+    # ----------------------------------------
+    # ⑥ 이상 징후 요약
+    # ----------------------------------------
+    alerts = []
+    if max(class_counts) > total * 0.25:
+        alerts.append("특정 구간에 데이터가 많이 몰려 있음")
+
+    if min([c for c in class_counts if c > 0] or [99]) <= 2:
+        alerts.append("샘플 매우 적은 클래스 존재(신뢰 낮음)")
+
+    if not alerts:
+        alerts.append("큰 이상 없음")
+
+    part6 = f"""
+<h3>⚠️ 이상 징후 요약</h3>
+{"<br>".join(alerts)}
+"""
+
+    # === 완성 ===
+    full = part1 + part2 + part3 + part4 + part5 + part6
+    return _wrap_card(full)
+
+
+# ----------------------------------------
+# 전체 리포트: 심볼×전략 전체 카드 출력
+# ----------------------------------------
+def generate_visual_report():
+    try:
+        df = pd.read_csv(TRAIN_LOG)
+    except Exception:
+        return "<h3>train_log.csv 없음</h3>"
+
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        try:
-            # tz 없는 경우 UTC로 보고 KST로 변환
-            if df["timestamp"].dt.tz is None:
-                df["timestamp"] = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert("Asia/Seoul")
-            else:
-                df["timestamp"] = df["timestamp"].dt.tz_convert("Asia/Seoul")
-        except Exception:
-            # 혼합형 대비: 개별 변환 실패는 NaT 처리
-            df["timestamp"] = pd.to_datetime(df["timestamp"].astype(str), errors="coerce")
-    return df
 
-def plot_to_html(fig, title):
-    try:
-        buf = io.BytesIO()
-        fig.tight_layout()
-        fig.savefig(buf, format="png")
-        plt.close(fig)
-        buf.seek(0)
-        encoded = base64.b64encode(buf.read()).decode()
-        return f"""<div style='width:48%;margin:1%;'>
-<h4>{title}</h4>
-<img src='data:image/png;base64,{encoded}' style='max-width:100%;height:auto'/>
-</div>"""
-    except Exception as e:
-        return f"<p>{title} 시각화 실패: {e}</p>"
+    html = "<h1>📘 YOPO 학습 리포트</h1>"
 
-# ----------------------------
-# 진행률 집계: 'predicted' + 'skipped' 모두 카운트
-# - status 컬럼 우선 사용
-# - 없으면 direction 매핑으로 대체
-# ----------------------------
-_STATUS_DONE = {"success", "fail", "v_success", "v_fail", "skipped"}
-_STATUS_TOTAL = {"predicted", "skipped", "success", "fail", "v_success", "v_fail", "pending"}
+    symbols = df["symbol"].dropna().unique().tolist()
+    strategies = ["단기", "중기", "장기"]
 
-def _progress_counts(df_pred, strategy):
-    # strategy 컬럼이 없거나 해당 전략 데이터가 없으면 0으로 반환
-    if "strategy" not in df_pred.columns:
-        return 0, 0, 0, 0
+    for s in symbols:
+        for strat in strategies:
+            html += generate_card(s, strat, df)
 
-    df = df_pred[df_pred["strategy"] == strategy].copy()
-    if df.empty:
-        return 0, 0, 0, 0
-
-    n_pred = n_skip = done = total = 0
-
-    if "status" in df.columns:
-        s = df["status"].astype(str).str.lower()
-        n_pred = int((s == "predicted").sum())
-        n_skip = int((s == "skipped").sum())
-        total = int(s.isin(_STATUS_TOTAL).sum())
-        # 예측 발생도 완료로 간주
-        done = int(s.isin(_STATUS_DONE).sum() + (s == "predicted").sum())
-    elif "direction" in df.columns:
-        # direction 기반 대체: 예측 → predicted, 예측보류 → skipped
-        d = df["direction"].astype(str)
-        n_pred = int((d == "예측").sum())
-        n_skip = int((d == "예측보류").sum())
-        total = int(((d == "예측") | (d == "예측보류")).sum())
-        done = total  # 둘 다 완료 처리
-    else:
-        # 둘 다 없으면 진행률 집계 불가
-        return 0, 0, 0, 0
-
-    return n_pred, n_skip, done, total
-
-def generate_visuals_for_strategy(strategy):
-    html = f"<h2>📊 {strategy} 전략 분석</h2><div style='display:flex;flex-wrap:wrap;'>"
-    try:
-        df_pred = load_df(PREDICTION_LOG)
-    except Exception as e:
-        return f"<p>prediction_log.csv 로드 실패: {e}</p></div>"
-    try:
-        df_audit = load_df(AUDIT_LOG)
-    except Exception as e:
-        df_audit = pd.DataFrame()
-        html += f"<p>audit_log.csv 로드 실패: {e}</p>"
-
-    # 0) 진행률 카드: predicted + skipped 모두 집계
-    try:
-        n_pred, n_skip, done, total = _progress_counts(df_pred, strategy)
-        html += (
-            f"<div style='width:98%;margin:1%;padding:12px;border:1px solid #ddd;border-radius:8px;'>"
-            f"<b>진행</b> "
-            f"<span>predicted={n_pred}, skipped={n_skip}</span> "
-            f"<span style='margin-left:12px;'>완료 {done}/{total}</span>"
-            f"</div>"
-        )
-    except Exception as e:
-        html += f"<p>진행률 계산 오류: {e}</p>"
-
-    # 1) 최근 성공률 추이
-    try:
-        need = {"strategy", "timestamp", "status"}
-        if need.issubset(df_pred.columns):
-            df = df_pred[df_pred["strategy"] == strategy].copy()
-            if not df.empty:
-                df["date"] = df["timestamp"].dt.date
-                df["result"] = df["status"].astype(str).str.lower().map(
-                    {"success": 1, "v_success": 1, "fail": 0, "v_fail": 0}
-                )
-                mask = df["status"].astype(str).str.lower().isin(
-                    ["success", "fail", "v_success", "v_fail"]
-                )
-                sr = df[mask].groupby("date")["result"].mean().reset_index()
-                if not sr.empty:
-                    fig, ax = plt.subplots(figsize=(5, 2))
-                    ax.plot(sr["date"], sr["result"])
-                    ax.set_title("📈 최근 성공률 추이")
-                    html += plot_to_html(fig, "📈 최근 성공률 추이")
-    except Exception as e:
-        html += f"<p>1번 오류: {e}</p>"
-
-    # 2) 예측 vs 실제 수익률
-    try:
-        if not df_audit.empty and {"predicted_return", "actual_return", "strategy"}.issubset(df_audit.columns):
-            df = df_audit[df_audit["strategy"] == strategy].copy()
-            if not df.empty:
-                fig, ax = plt.subplots(figsize=(5, 2))
-                ax.scatter(df["predicted_return"], df["actual_return"], alpha=0.5)
-                ax.set_xlabel("예측 수익률")
-                ax.set_ylabel("실제 수익률")
-                ax.set_title("🎯 예측 vs 실제 수익률")
-                html += plot_to_html(fig, "🎯 예측 vs 실제 수익률")
-    except Exception as e:
-        html += f"<p>2번 오류: {e}</p>"
-
-    # 3) 오답학습 전후 정확도
-    try:
-        need_cols = {"accuracy_before", "accuracy_after", "strategy", "timestamp"}
-        if not df_audit.empty and need_cols.issubset(df_audit.columns):
-            df = df_audit.dropna(subset=["accuracy_before", "accuracy_after"]).copy()
-            df = df[df["strategy"] == strategy]
-            if not df.empty:
-                df["accuracy_before"] = pd.to_numeric(df["accuracy_before"], errors="coerce")
-                df["accuracy_after"] = pd.to_numeric(df["accuracy_after"], errors="coerce")
-                fig, ax = plt.subplots(figsize=(5, 2))
-                ax.plot(df["timestamp"], df["accuracy_before"], label="Before")
-                ax.plot(df["timestamp"], df["accuracy_after"], label="After")
-                if ax.get_legend_handles_labels()[1]:
-                    ax.legend()
-                ax.set_title("📚 오답학습 전후 정확도 변화")
-                html += plot_to_html(fig, "📚 오답학습 전후 정확도 변화")
-    except Exception as e:
-        html += f"<p>3번 오류: {e}</p>"
-
-    # 4) 최근 예측 히트맵
-    try:
-        need = {"strategy", "timestamp", "status", "symbol"}
-        if need.issubset(df_pred.columns):
-            df = df_pred[df_pred["strategy"] == strategy].copy()
-            mask = df["status"].astype(str).str.lower().isin(
-                ["success", "fail", "v_success", "v_fail"]
-            )
-            df = df[mask]
-            if not df.empty:
-                df["result"] = df["status"].astype(str).str.lower().map(
-                    {"success": 1, "v_success": 1, "fail": 0, "v_fail": 0}
-                )
-                df = df.sort_values("timestamp", ascending=False).head(20)
-                pivot = df.pivot(index="symbol", columns="timestamp", values="result")
-                fig, ax = plt.subplots(figsize=(5, 2))
-                data = pivot.fillna(0).values if not pivot.empty else np.zeros((1, 1))
-                ax.imshow(data, cmap="Greens", aspect="auto")
-                ax.set_title("🧩 최근 예측 히트맵")
-                ax.set_yticks([])
-                ax.set_xticks([])
-                html += plot_to_html(fig, "🧩 최근 예측 히트맵")
-    except Exception as e:
-        html += f"<p>4번 오류: {e}</p>"
-
-    # 5) 누적 수익률 추적
-    try:
-        if not df_audit.empty and {"actual_return", "timestamp", "strategy"}.issubset(df_audit.columns):
-            df = df_audit[df_audit["strategy"] == strategy].dropna(subset=["actual_return"]).copy()
-            if not df.empty:
-                df = df.sort_values("timestamp")
-                df["date"] = df["timestamp"].dt.date
-                df["cum_return"] = df["actual_return"].cumsum()
-                fig, ax = plt.subplots(figsize=(5, 2))
-                ax.plot(df["date"], df["cum_return"])
-                ax.set_title("💰 누적 수익률 추적")
-                html += plot_to_html(fig, "💰 누적 수익률 추적")
-    except Exception as e:
-        html += f"<p>5번 오류: {e}</p>"
-
-    # 6) 모델별 성공률 변화
-    try:
-        need = {"strategy", "timestamp", "status", "model"}
-        if need.issubset(df_pred.columns):
-            df = df_pred[df_pred["strategy"] == strategy].copy()
-            mask = df["status"].astype(str).str.lower().isin(
-                ["success", "fail", "v_success", "v_fail"]
-            )
-            df = df[mask & df["model"].notna()]
-            if not df.empty:
-                df["result"] = df["status"].astype(str).str.lower().map(
-                    {"success": 1, "v_success": 1, "fail": 0, "v_fail": 0}
-                )
-                df["date"] = df["timestamp"].dt.date
-                group = df.groupby(["model", "date"])["result"].mean().reset_index()
-                if not group.empty:
-                    fig, ax = plt.subplots(figsize=(5, 2))
-                    for m in group["model"].unique():
-                        temp = group[group["model"] == m]
-                        ax.plot(temp["date"], temp["result"], label=m)
-                    ax.set_title("🧠 모델별 성공률 변화")
-                    if ax.get_legend_handles_labels()[1]:
-                        ax.legend()
-                    html += plot_to_html(fig, "🧠 모델별 성공률 변화")
-    except Exception as e:
-        html += f"<p>6번 오류: {e}</p>"
-
-    # 7) 변동성 예측 vs 실제
-    try:
-        need_cols = {"predicted_volatility", "actual_volatility", "timestamp", "strategy"}
-        if not df_audit.empty and need_cols.issubset(df_audit.columns):
-            df = df_audit[df_audit["strategy"] == strategy].dropna(
-                subset=["predicted_volatility", "actual_volatility"]
-            ).copy()
-            if not df.empty:
-                df["predicted_volatility"] = pd.to_numeric(df["predicted_volatility"], errors="coerce")
-                df["actual_volatility"] = pd.to_numeric(df["actual_volatility"], errors="coerce")
-                fig, ax = plt.subplots(figsize=(5, 2))
-                ax.plot(df["timestamp"], df["predicted_volatility"], label="예측 변동성")
-                ax.plot(df["timestamp"], df["actual_volatility"], label="실제 변동성")
-                if ax.get_legend_handles_labels()[1]:
-                    ax.legend()
-                ax.set_title("🌪️ 변동성 예측 vs 실제 변동성")
-                html += plot_to_html(fig, "🌪️ 변동성 예측 vs 실제 변동성")
-    except Exception as e:
-        html += f"<p>7번 오류: {e}</p>"
-
-    html += "</div>"
     return html
-
-def generate_visual_report():
-    return (
-        generate_visuals_for_strategy("단기")
-        + generate_visuals_for_strategy("중기")
-        + generate_visuals_for_strategy("장기")
-    )
