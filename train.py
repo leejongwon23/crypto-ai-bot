@@ -1322,13 +1322,13 @@ def train_one_model(
         # 3) 라벨
         # =================================================
         bin_info = None
-        if isinstance(pre_lbl, tuple) and len(pre_lbl) in (3,4,6):
+        if isinstance(pre_lbl, tuple) and len(pre_lbl) in (3, 4, 6):
             if len(pre_lbl) == 6:
                 gains, labels, class_ranges_used_global, be, bc, bs = pre_lbl
                 bin_info = {
-                    "bin_edges": be.tolist() if hasattr(be,"tolist") else list(be),
-                    "bin_counts": bc.tolist() if hasattr(bc,"tolist") else list(bc),
-                    "bin_spans": bs.tolist() if hasattr(bs,"tolist") else list(bs),
+                    "bin_edges": be.tolist() if hasattr(be, "tolist") else list(be),
+                    "bin_counts": bc.tolist() if hasattr(bc, "tolist") else list(bc),
+                    "bin_spans": bs.tolist() if hasattr(bs, "tolist") else list(bs),
                 }
             elif len(pre_lbl) == 4:
                 gains, labels, class_ranges_used_global, bin_info = pre_lbl
@@ -1336,41 +1336,41 @@ def train_one_model(
                 gains, labels, class_ranges_used_global = pre_lbl
         elif isinstance(pre_lbl, dict) and pre_lbl.get(strategy, None) is not None:
             val = pre_lbl[strategy]
-            if isinstance(val, (list,tuple)) and len(val) in (3,4,6):
-                if len(val)==6:
+            if isinstance(val, (list, tuple)) and len(val) in (3, 4, 6):
+                if len(val) == 6:
                     gains, labels, class_ranges_used_global, be, bc, bs = val
                     bin_info = {
-                        "bin_edges": be.tolist() if hasattr(be,"tolist") else list(be),
-                        "bin_counts": bc.tolist() if hasattr(bc,"tolist") else list(bc),
-                        "bin_spans": bs.tolist() if hasattr(bs,"tolist") else list(bs),
+                        "bin_edges": be.tolist() if hasattr(be, "tolist") else list(be),
+                        "bin_counts": bc.tolist() if hasattr(bc, "tolist") else list(bc),
+                        "bin_spans": bs.tolist() if hasattr(bs, "tolist") else list(bs),
                     }
-                elif len(val)==4:
+                elif len(val) == 4:
                     gains, labels, class_ranges_used_global, bin_info = val
                 else:
                     gains, labels, class_ranges_used_global = val
             else:
-                _log_skip(symbol,strategy,"사전 라벨 구조 오류")
+                _log_skip(symbol, strategy, "사전 라벨 구조 오류")
                 return res
         else:
             res_labels = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=None)
-            if isinstance(res_labels,(list,tuple)) and len(res_labels) in (3,4,6):
-                if len(res_labels)==6:
+            if isinstance(res_labels, (list, tuple)) and len(res_labels) in (3, 4, 6):
+                if len(res_labels) == 6:
                     gains, labels, class_ranges_used_global, be, bc, bs = res_labels
                     bin_info = {
-                        "bin_edges": be.tolist() if hasattr(be,"tolist") else list(be),
-                        "bin_counts": bc.tolist() if hasattr(bc,"tolist") else list(bc),
-                        "bin_spans": bs.tolist() if hasattr(bs,"tolist") else list(bs),
+                        "bin_edges": be.tolist() if hasattr(be, "tolist") else list(be),
+                        "bin_counts": bc.tolist() if hasattr(bc, "tolist") else list(bc),
+                        "bin_spans": bs.tolist() if hasattr(bs, "tolist") else list(bs),
                     }
-                elif len(res_labels)==4:
+                elif len(res_labels) == 4:
                     gains, labels, class_ranges_used_global, bin_info = res_labels
                 else:
                     gains, labels, class_ranges_used_global = res_labels
             else:
-                _log_skip(symbol,strategy,"라벨 생성 실패")
+                _log_skip(symbol, strategy, "라벨 생성 실패")
                 return res
 
-        if (not isinstance(labels,np.ndarray)) or labels.size==0:
-            _log_skip(symbol,strategy,"라벨 없음")
+        if (not isinstance(labels, np.ndarray)) or labels.size == 0:
+            _log_skip(symbol, strategy, "라벨 없음")
             return res
 
         # =================================================
@@ -1380,15 +1380,15 @@ def train_one_model(
         if uniq0 <= 1:
             _safe_print(f"[LABEL RETRY] uniq<=1 → rebuild({symbol}-{strategy})")
             res_try = _rebuild_labels_once(df=df, symbol=symbol, strategy=strategy)
-            if isinstance(res_try,(list,tuple)) and len(res_try) in (3,4,6):
-                if len(res_try)==6:
+            if isinstance(res_try, (list, tuple)) and len(res_try) in (3, 4, 6):
+                if len(res_try) == 6:
                     gains2, labels2, class_ranges2, be2, bc2, bs2 = res_try
                     bin_info2 = {
-                        "bin_edges": be2.tolist() if hasattr(be2,"tolist") else list(be2),
-                        "bin_counts": bc2.tolist() if hasattr(bc2,"tolist") else list(bc2),
-                        "bin_spans": bs2.tolist() if hasattr(bs2,"tolist") else list(bs2),
+                        "bin_edges": be2.tolist() if hasattr(be2, "tolist") else list(be2),
+                        "bin_counts": bc2.tolist() if hasattr(bc2, "tolist") else list(bc2),
+                        "bin_spans": bs2.tolist() if hasattr(bs2, "tolist") else list(bs2),
                     }
-                elif len(res_try)==4:
+                elif len(res_try) == 4:
                     gains2, labels2, class_ranges2, bin_info2 = res_try
                 else:
                     gains2, labels2, class_ranges2 = res_try
@@ -1414,40 +1414,43 @@ def train_one_model(
         num_total_classes = len(full_ranges) if full_ranges else 0
         from config import get_class_groups
 
-        if num_total_classes>0:
-            groups = get_class_groups(num_classes=max(2,num_total_classes)) or []
+        if num_total_classes > 0:
+            groups = get_class_groups(num_classes=max(2, num_total_classes)) or []
         else:
             groups = []
 
         if group_id is not None and groups:
             gid = int(group_id) if str(group_id).isdigit() else 0
-            if gid<0 or gid>=len(groups): gid=0
+            if gid < 0 or gid >= len(groups):
+                gid = 0
             cls_in_group = list(groups[gid])
         else:
             cls_in_group = list(range(num_total_classes))
 
         if not cls_in_group:
-            _log_skip(symbol,strategy,f"그룹 내 클래스 없음(group_id={group_id})")
+            _log_skip(symbol, strategy, f"그룹 내 클래스 없음(group_id={group_id})")
             return res
 
         class_ranges = [full_ranges[c] for c in cls_in_group]
         keep_set = set(cls_in_group)
-        to_local = {g:i for i,g in enumerate(sorted(cls_in_group))}
+        to_local = {g: i for i, g in enumerate(sorted(cls_in_group))}
 
         # =================================================
         # 6) LABEL 로그
         # =================================================
-        mask_cnt = int((labels<0).sum())
+        mask_cnt = int((labels < 0).sum())
 
         nz_band = float(abs(_NEAR_ZERO_BAND)) if _NEAR_ZERO_BAND is not None else 0.0
-        if nz_band<=0.0:
-            try: nz_band = float(abs(BOUNDARY_BAND))
-            except: nz_band = 0.0
+        if nz_band <= 0.0:
+            try:
+                nz_band = float(abs(BOUNDARY_BAND))
+            except:
+                nz_band = 0.0
 
-        if nz_band>0:
-            near_zero_mask = np.abs(np.asarray(gains,dtype=np.float32)) <= nz_band
+        if nz_band > 0:
+            near_zero_mask = np.abs(np.asarray(gains, dtype=np.float32)) <= nz_band
             near_zero_cnt = int(near_zero_mask.sum())
-            near_zero_ratio = near_zero_cnt / max(1,len(gains))
+            near_zero_ratio = near_zero_cnt / max(1, len(gains))
         else:
             near_zero_cnt = 0
             near_zero_ratio = 0.0
@@ -1461,16 +1464,16 @@ def train_one_model(
         )
 
         try:
-            cnt_before = np.bincount(labels[labels>=0], minlength=num_total_classes).astype(int).tolist()
+            cnt_before = np.bincount(labels[labels >= 0], minlength=num_total_classes).astype(int).tolist()
         except:
             cnt_before = []
 
-        num_classes_effective = int(np.unique(labels[labels>=0]).size) if labels.size else 0
-        empty_idx = [i for i,c in enumerate(cnt_before) if c==0]
+        num_classes_effective = int(np.unique(labels[labels >= 0]).size) if labels.size else 0
+        empty_idx = [i for i, c in enumerate(cnt_before) if c == 0]
 
         return_note = ""
-        if isinstance(bin_info,dict):
-            return_note = f" ; [ReturnDist] edges={bin_info.get('bin_edges',[])[:20]}, counts={bin_info.get('bin_counts',[])[:20]}"
+        if isinstance(bin_info, dict):
+            return_note = f" ; [ReturnDist] edges={bin_info.get('bin_edges', [])[:20]}, counts={bin_info.get('bin_counts', [])[:20]}"
 
         try:
             logger.log_training_result(
@@ -1504,29 +1507,29 @@ def train_one_model(
         # =================================================
         # 7) 피처 정제
         # =================================================
-        drop_cols = [c for c in ("timestamp","strategy","symbol") if c in feat.columns]
+        drop_cols = [c for c in ("timestamp", "strategy", "symbol") if c in feat.columns]
         feat_num = feat.drop(columns=drop_cols, errors="ignore").select_dtypes(include=[np.number])
-        features_only = feat_num.replace([np.inf,-np.inf],np.nan).fillna(0.0)
+        features_only = feat_num.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         feat_dim = int(features_only.shape[1]) if features_only.shape[1] else int(FEATURE_INPUT_SIZE)
 
-        if len(features_only)>_MAX_ROWS_FOR_TRAIN or len(labels)>_MAX_ROWS_FOR_TRAIN:
+        if len(features_only) > _MAX_ROWS_FOR_TRAIN or len(labels) > _MAX_ROWS_FOR_TRAIN:
             cut = min(_MAX_ROWS_FOR_TRAIN, len(features_only), len(labels))
-            features_only = features_only.iloc[-cut:,:]
+            features_only = features_only.iloc[-cut:, :]
             labels = labels[-cut:]
 
         # =================================================
         # 8) 윈도우 후보
         # =================================================
-        base_windows = [16,20,24,28,32]
+        base_windows = [16, 20, 24, 28, 32]
         try:
             cfg_windows = cfg.get("windows") or cfg.get("window_list")
-            if isinstance(cfg_windows,(list,tuple)) and cfg_windows:
-                base_windows = [int(w) for w in cfg_windows if isinstance(w,(int,float))]
+            if isinstance(cfg_windows, (list, tuple)) and cfg_windows:
+                base_windows = [int(w) for w in cfg_windows if isinstance(w, (int, float))]
         except:
             pass
 
         if not base_windows:
-            base_windows=[16,20,24,28,32]
+            base_windows = [16, 20, 24, 28, 32]
 
         try:
             top_windows = find_best_windows(
@@ -1537,13 +1540,13 @@ def train_one_model(
             )
         except:
             try:
-                top_windows = [int(find_best_window(symbol,strategy,window_list=base_windows,group_id=group_id))]
+                top_windows = [int(find_best_window(symbol, strategy, window_list=base_windows, group_id=group_id))]
             except:
                 top_windows = base_windows[:1]
 
         top_windows = [
-            int(max(5,w)) for w in top_windows
-            if isinstance(w,(int,float))
+            int(max(5, w)) for w in top_windows
+            if isinstance(w, (int, float))
         ] or [base_windows[0]]
 
         _safe_print(f"[WINDOWS] candidates(base={base_windows}) → top={top_windows}")
@@ -1551,10 +1554,10 @@ def train_one_model(
         best_window_overall = None
         best_f1_overall = -1.0
         best_acc_overall = 0.0
-        global_class_ranges_json = None
-        global_bin_edges_json = None
-        global_bin_counts_json = None
-        global_bin_spans_json = None
+        global_class_ranges_val = None
+        global_bin_edges_val = None
+        global_bin_counts_val = None
+        global_bin_spans_val = None
         global_bins_value = None
 
         # =================================================
@@ -1564,10 +1567,10 @@ def train_one_model(
             if stop_event and stop_event.is_set():
                 break
 
-            window = min(window, max(6, len(features_only)-1))
+            window = min(window, max(6, len(features_only) - 1))
             fv = features_only.values.astype(np.float32)
 
-            X_raw,y = _rebuild_samples_with_keepset(
+            X_raw, y = _rebuild_samples_with_keepset(
                 fv=fv,
                 labels=labels,
                 window=window,
@@ -1576,33 +1579,33 @@ def train_one_model(
                 min_samples=1,
             )
 
-            repaired_info = {"synthetic_labels":False}
+            repaired_info = {"synthetic_labels": False}
 
             if X_raw.size:
-                X_raw,y,syn = _synthesize_minority_if_needed(X_raw,y,len(class_ranges))
-                repaired_info["synthetic_labels"]=syn
+                X_raw, y, syn = _synthesize_minority_if_needed(X_raw, y, len(class_ranges))
+                repaired_info["synthetic_labels"] = syn
 
             usable_samples = int(len(y))
-            if usable_samples==0:
-                _log_skip(symbol,strategy,f"유효 라벨 없음(w={window})")
+            if usable_samples == 0:
+                _log_skip(symbol, strategy, f"유효 라벨 없음(w={window})")
                 continue
-            if y.min()<0:
-                _log_skip(symbol,strategy,f"음수 라벨(w={window})")
+            if y.min() < 0:
+                _log_skip(symbol, strategy, f"음수 라벨(w={window})")
                 continue
 
             set_NUM_CLASSES(len(class_ranges))
 
-            strat_ok=False
+            strat_ok = False
             try:
-                if len(y)>=40 and len(np.unique(y))>=2:
-                    splitter=StratifiedShuffleSplit(
+                if len(y) >= 40 and len(np.unique(y)) >= 2:
+                    splitter = StratifiedShuffleSplit(
                         n_splits=1, test_size=0.20,
-                        random_state=int(os.getenv("GLOBAL_SEED","20240101"))
+                        random_state=int(os.getenv("GLOBAL_SEED", "20240101"))
                     )
-                    tr_idx, val_idx = next(splitter.split(X_raw,y))
-                    strat_ok=True
+                    tr_idx, val_idx = next(splitter.split(X_raw, y))
+                    strat_ok = True
             except:
-                strat_ok=False
+                strat_ok = False
 
             if not strat_ok:
                 try:
@@ -1611,42 +1614,42 @@ def train_one_model(
                         stride=50, num_classes=len(class_ranges),
                     )
                 except:
-                    n=len(y)
-                    if n<=1:
-                        train_idx=np.array([0])
-                        val_idx=np.array([0])
+                    n = len(y)
+                    if n <= 1:
+                        train_idx = np.array([0])
+                        val_idx = np.array([0])
                     else:
-                        train_idx=np.arange(0,n-1)
-                        val_idx=np.array([n-1])
+                        train_idx = np.arange(0, n - 1)
+                        val_idx = np.array([n - 1])
             else:
-                train_idx,val_idx = tr_idx,val_idx
+                train_idx, val_idx = tr_idx, val_idx
 
-            train_idx,val_idx,_ = _ensure_val_has_two_classes(train_idx,val_idx,y,2)
+            train_idx, val_idx, _ = _ensure_val_has_two_classes(train_idx, val_idx, y, 2)
 
             try:
                 cnt_after = np.bincount(y, minlength=len(class_ranges)).astype(int).tolist()
             except:
-                cnt_after=[]
+                cnt_after = []
 
             batch_stratified_ok = strat_ok
 
             X_train, y_train = X_raw[train_idx], y[train_idx]
-            X_val,   y_val   = X_raw[val_idx],   y[val_idx]
+            X_val, y_val = X_raw[val_idx], y[val_idx]
 
             # ========= balance =========
             if BALANCE_CLASSES_FLAG:
                 try:
-                    X_train,y_train = balance_classes(X_train,y_train)
+                    X_train, y_train = balance_classes(X_train, y_train)
                 except:
                     pass
 
-            sampler=None
+            sampler = None
             if WEIGHTED_SAMPLER_FLAG:
                 try:
-                    w_cls = compute_class_weights(y_train,method="effective",beta=0.999)
-                    sampler = make_weighted_sampler(y_train,class_weights=w_cls,replacement=True)
+                    w_cls = compute_class_weights(y_train, method="effective", beta=0.999)
+                    sampler = make_weighted_sampler(y_train, class_weights=w_cls, replacement=True)
                 except:
-                    sampler=None
+                    sampler = None
 
             train_ds = TensorDataset(
                 torch.from_numpy(X_train).float(),
@@ -1657,9 +1660,21 @@ def train_one_model(
                 torch.from_numpy(y_val).long(),
             )
 
-            train_loader = DataLoader(train_ds,batch_size=32,shuffle=(sampler is None),
-                sampler=sampler,num_workers=0,pin_memory=False)
-            val_loader = DataLoader(val_ds,batch_size=32,shuffle=False,num_workers=0,pin_memory=False)
+            train_loader = DataLoader(
+                train_ds,
+                batch_size=32,
+                shuffle=(sampler is None),
+                sampler=sampler,
+                num_workers=0,
+                pin_memory=False,
+            )
+            val_loader = DataLoader(
+                val_ds,
+                batch_size=32,
+                shuffle=False,
+                num_workers=0,
+                pin_memory=False,
+            )
 
             # ========= 모델 =========
             model = get_model(
@@ -1667,123 +1682,126 @@ def train_one_model(
                 input_size=feat_dim,
             ).to(DEVICE)
 
-            model_type = getattr(model,"model_type",None) or model.__class__.__name__.lower()
+            model_type = getattr(model, "model_type", None) or model.__class__.__name__.lower()
 
             loss_cfg = get_LOSS()
-            loss_name = (loss_cfg.get("name") if isinstance(loss_cfg,dict) else loss_cfg or "").lower()
+            loss_name = (loss_cfg.get("name") if isinstance(loss_cfg, dict) else loss_cfg or "").lower()
 
-            if loss_name=="focal":
+            if loss_name == "focal":
                 criterion = FocalLoss(gamma=FOCAL_GAMMA).to(DEVICE)
             else:
                 criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTH).to(DEVICE)
 
             optimizer = torch.optim.AdamW(
                 model.parameters(),
-                lr=float(os.getenv("TRAIN_LR","1e-3")),
-                weight_decay=float(os.getenv("TRAIN_WD","1e-4")),
+                lr=float(os.getenv("TRAIN_LR", "1e-3")),
+                weight_decay=float(os.getenv("TRAIN_WD", "1e-4")),
             )
 
             scaler = torch.amp.GradScaler(device=device_type) if use_amp_here else None
 
             best_f1 = -1.0
             best_state = None
-            no_improve=0
-            loss_sum=0.0
+            no_improve = 0
+            loss_sum = 0.0
 
             # =================================================
             # EPOCH LOOP
             # =================================================
             for epoch in range(max_epochs):
-                if stop_event and stop_event.is_set(): break
+                if stop_event and stop_event.is_set():
+                    break
 
                 model.train()
-                running_loss=0.0
-                for xb,yb in train_loader:
-                    xb=xb.to(DEVICE)
-                    yb=yb.to(DEVICE)
+                running_loss = 0.0
+                for xb, yb in train_loader:
+                    xb = xb.to(DEVICE)
+                    yb = yb.to(DEVICE)
                     optimizer.zero_grad(set_to_none=True)
 
                     if use_amp_here:
-                        with torch.amp.autocast(device_type=device_type,enabled=True):
-                            logits=model(xb)
-                            loss=criterion(logits,yb)
+                        with torch.amp.autocast(device_type=device_type, enabled=True):
+                            logits = model(xb)
+                            loss = criterion(logits, yb)
                         scaler.scale(loss).backward()
-                        if GRAD_CLIP>0:
+                        if GRAD_CLIP > 0:
                             scaler.unscale_(optimizer)
-                            torch.nn.utils.clip_grad_norm_(model.parameters(),GRAD_CLIP)
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
                         scaler.step(optimizer)
                         scaler.update()
                     else:
-                        logits=model(xb)
-                        loss=criterion(logits,yb)
+                        logits = model(xb)
+                        loss = criterion(logits, yb)
                         loss.backward()
-                        if GRAD_CLIP>0:
-                            torch.nn.utils.clip_grad_norm_(model.parameters(),GRAD_CLIP)
+                        if GRAD_CLIP > 0:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
                         optimizer.step()
 
-                    running_loss+=float(loss.item())
+                    running_loss += float(loss.item())
 
                 model.eval()
-                all_preds=[]
-                all_lbls=[]
-                val_loss=0.0
+                all_preds = []
+                all_lbls = []
+                val_loss = 0.0
                 with torch.no_grad():
-                    for xb,yb in val_loader:
-                        xb=xb.to(DEVICE)
-                        yb=yb.to(DEVICE)
+                    for xb, yb in val_loader:
+                        xb = xb.to(DEVICE)
+                        yb = yb.to(DEVICE)
                         if use_amp_here:
-                            with torch.amp.autocast(device_type=device_type,enabled=True):
-                                logits=model(xb)
-                                loss=criterion(logits,yb)
+                            with torch.amp.autocast(device_type=device_type, enabled=True):
+                                logits = model(xb)
+                                loss = criterion(logits, yb)
                         else:
-                            logits=model(xb)
-                            loss=criterion(logits,yb)
-                        val_loss+=float(loss.item())
-                        preds=torch.argmax(logits,dim=1)
+                            logits = model(xb)
+                            loss = criterion(logits, yb)
+                        val_loss += float(loss.item())
+                        preds = torch.argmax(logits, dim=1)
                         all_preds.append(preds.cpu().numpy())
                         all_lbls.append(yb.cpu().numpy())
 
                 if all_preds:
-                    preds=np.concatenate(all_preds)
-                    lbls=np.concatenate(all_lbls)
-                    try: acc=accuracy_score(lbls,preds)
-                    except: acc=0.0
+                    preds = np.concatenate(all_preds)
+                    lbls = np.concatenate(all_lbls)
                     try:
-                        f1_val=f1_score(lbls,preds,average="macro",zero_division=0)
+                        acc = accuracy_score(lbls, preds)
                     except:
-                        f1_val=0.0
+                        acc = 0.0
+                    try:
+                        f1_val = f1_score(lbls, preds, average="macro", zero_division=0)
+                    except:
+                        f1_val = 0.0
                 else:
-                    preds=np.zeros(0,dtype=np.int64)
-                    lbls=np.zeros(0,dtype=np.int64)
-                    acc=0.0
-                    f1_val=0.0
+                    preds = np.zeros(0, dtype=np.int64)
+                    lbls = np.zeros(0, dtype=np.int64)
+                    acc = 0.0
+                    f1_val = 0.0
 
-                loss_sum=float(running_loss)
-                val_loss=float(val_loss)
+                loss_sum = float(running_loss)
+                val_loss = float(val_loss)
 
                 _safe_print(f"[EPOCH {epoch+1}/{max_epochs}] {symbol}-{strategy}-w{window} loss={running_loss:.4f} val_loss={val_loss:.4f} acc={acc:.4f} f1={f1_val:.4f}")
 
                 if f1_val > best_f1 + EARLY_STOP_MIN_DELTA:
-                    best_f1=f1_val
-                    best_state={
-                        "model":model.state_dict(),
-                        "acc":acc,
-                        "f1":f1_val,
-                        "val_loss":val_loss,
-                        "preds":preds,
-                        "lbls":lbls,
-                        "val_y":y_val,
+                    best_f1 = f1_val
+                    best_state = {
+                        "model": model.state_dict(),
+                        "acc": acc,
+                        "f1": f1_val,
+                        "val_loss": val_loss,
+                        "preds": preds,
+                        "lbls": lbls,
+                        "val_y": y_val,
                     }
-                    no_improve=0
+                    no_improve = 0
                 else:
-                    no_improve+=1
+                    no_improve += 1
 
-                if no_improve>=EARLY_STOP_PATIENCE:
+                if no_improve >= EARLY_STOP_PATIENCE:
                     _safe_print(f"[EARLY STOP] {symbol}-{strategy}-w{window}")
                     break
 
             if best_state is None:
-                _log_fail(symbol,strategy,"학습 실패(best_state 없음)")
+                _log_fail(symbol, strategy, "학습 실패(best_state 없음)")
                 continue
 
             model.load_state_dict(best_state["model"])
@@ -1799,103 +1817,104 @@ def train_one_model(
                 if f1_val > best_f1_overall or (
                     f1_val == best_f1_overall and acc > best_acc_overall
                 ):
-                    best_f1_overall=float(f1_val)
-                    best_acc_overall=float(acc)
-                    best_window_overall=int(window)
+                    best_f1_overall = float(f1_val)
+                    best_acc_overall = float(acc)
+                    best_window_overall = int(window)
             except:
                 pass
 
             # ========== bin 정보 ================
             try:
-                if isinstance(bin_info,dict) and "bin_edges" in bin_info:
-                    bin_edges=[float(x) for x in bin_info["bin_edges"]]
-                    bin_spans=bin_info["bin_spans"]
-                    if not bin_spans or len(bin_spans)!=len(bin_edges)-1:
-                        bin_spans=[
-                            float(bin_edges[i+1]-bin_edges[i])
-                            for i in range(len(bin_edges)-1)
+                if isinstance(bin_info, dict) and "bin_edges" in bin_info:
+                    bin_edges = [float(x) for x in bin_info["bin_edges"]]
+                    bin_spans = bin_info["bin_spans"]
+                    if not bin_spans or len(bin_spans) != len(bin_edges) - 1:
+                        bin_spans = [
+                            float(bin_edges[i + 1] - bin_edges[i])
+                            for i in range(len(bin_edges) - 1)
                         ]
-                    full_ranges_for_bins=get_class_ranges(symbol=symbol,strategy=strategy,group_id=None)
-                    cnt_local=np.bincount(val_y, minlength=len(class_ranges)).astype(int)
-                    counts_map=np.zeros(len(full_ranges_for_bins),dtype=int)
-                    for g,l in to_local.items():
+                    full_ranges_for_bins = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
+                    cnt_local = np.bincount(val_y, minlength=len(class_ranges)).astype(int)
+                    counts_map = np.zeros(len(full_ranges_for_bins), dtype=int)
+                    for g, l in to_local.items():
                         if g < len(counts_map) and l < len(cnt_local):
-                            counts_map[g]=int(cnt_local[l])
-                    bin_counts=counts_map.tolist()
+                            counts_map[g] = int(cnt_local[l])
+                    bin_counts = counts_map.tolist()
                 else:
-                    full_ranges_for_bins=get_class_ranges(symbol=symbol,strategy=strategy,group_id=None)
-                    bin_edges=[float(lo) for (lo,_) in full_ranges_for_bins] + [float(full_ranges_for_bins[-1][1])]
-                    bin_spans=[float(hi-lo) for (lo,hi) in full_ranges_for_bins]
-                    cnt_local=np.bincount(val_y,minlength=len(class_ranges)).astype(int)
-                    counts_map=np.zeros(len(full_ranges_for_bins),dtype=int)
-                    for g,l in to_local.items():
-                        if g<len(counts_map) and l<len(cnt_local):
-                            counts_map[g]=int(cnt_local[l])
-                    bin_counts=counts_map.tolist()
+                    full_ranges_for_bins = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
+                    bin_edges = [float(lo) for (lo, _) in full_ranges_for_bins] + [float(full_ranges_for_bins[-1][1])]
+                    bin_spans = [float(hi - lo) for (lo, hi) in full_ranges_for_bins]
+                    cnt_local = np.bincount(val_y, minlength=len(class_ranges)).astype(int)
+                    counts_map = np.zeros(len(full_ranges_for_bins), dtype=int)
+                    for g, l in to_local.items():
+                        if g < len(counts_map) and l < len(cnt_local):
+                            counts_map[g] = int(cnt_local[l])
+                    bin_counts = counts_map.tolist()
             except:
-                bin_edges,bin_spans,bin_counts=[],[],[]
+                bin_edges, bin_spans, bin_counts = [], [], []
 
-            bin_cfg={
-                "TARGET_BINS":int(os.getenv("TARGET_BINS","8")),
-                "OUTLIER_Q_LOW":float(os.getenv("OUTLIER_Q_LOW","0.01")),
-                "OUTLIER_Q_HIGH":float(os.getenv("OUTLIER_Q_HIGH","0.99")),
-                "MAX_BIN_SPAN_PCT":float(os.getenv("MAX_BIN_SPAN_PCT","8.0")),
-                "MIN_BIN_COUNT_FRAC":float(os.getenv("MIN_BIN_COUNT_FRAC","0.05")),
+            bin_cfg = {
+                "TARGET_BINS": int(os.getenv("TARGET_BINS", "8")),
+                "OUTLIER_Q_LOW": float(os.getenv("OUTLIER_Q_LOW", "0.01")),
+                "OUTLIER_Q_HIGH": float(os.getenv("OUTLIER_Q_HIGH", "0.99")),
+                "MAX_BIN_SPAN_PCT": float(os.getenv("MAX_BIN_SPAN_PCT", "8.0")),
+                "MIN_BIN_COUNT_FRAC": float(os.getenv("MIN_BIN_COUNT_FRAC", "0.05")),
             }
 
-            stem=os.path.join(
+            stem = os.path.join(
                 MODEL_DIR,
                 f"{symbol}_{strategy}_{model_type}_w{int(window)}_group{int(group_id) if group_id is not None else 0}_cls{len(class_ranges)}",
             )
 
-            meta={
-                "symbol":symbol,
-                "strategy":strategy,
-                "model":model_type,
-                "group_id":int(group_id or 0),
-                "num_classes":len(class_ranges),
-                "class_ranges":[[float(lo),float(hi)] for (lo,hi) in class_ranges],
-                "input_size":int(feat_dim),
-                "metrics":{"val_acc":acc,"val_f1":f1_val,"val_loss":val_loss},
-                "timestamp":now_kst().isoformat(),
-                "model_name":os.path.basename(stem)+".ptz",
-                "window":int(window),
-                "recent_cap":int(len(features_only)),
-                "engine":"manual",
-                "data_flags":{
-                    "rows":int(len(df)),
-                    "limit":int(_limit),
-                    "min":int(_min_required),
-                    "augment_needed":bool(augment_needed),
-                    "enough_for_training":bool(enough_for_training),
+            meta = {
+                "symbol": symbol,
+                "strategy": strategy,
+                "model": model_type,
+                "group_id": int(group_id or 0),
+                "num_classes": len(class_ranges),
+                "class_ranges": [[float(lo), float(hi)] for (lo, hi) in class_ranges],
+                "input_size": int(feat_dim),
+                "metrics": {"val_acc": acc, "val_f1": f1_val, "val_loss": val_loss},
+                "timestamp": now_kst().isoformat(),
+                "model_name": os.path.basename(stem) + ".ptz",
+                "window": int(window),
+                "recent_cap": int(len(features_only)),
+                "engine": "manual",
+                "data_flags": {
+                    "rows": int(len(df)),
+                    "limit": int(_limit),
+                    "min": int(_min_required),
+                    "augment_needed": bool(augment_needed),
+                    "enough_for_training": bool(enough_for_training),
                 },
-                "train_loss_sum":float(loss_sum),
-                "boundary_band":float(BOUNDARY_BAND),
-                "cs_argmax":{"enabled":bool(COST_SENSITIVE_ARGMAX),"beta":float(CS_ARG_BETA)},
-                "eval_gate":"none",
-                "label_repair":repaired_info,
-                "bin_edges":bin_edges,
-                "bin_counts":bin_counts,
-                "bin_spans":bin_spans,
-                "bin_cfg":bin_cfg,
-                "near_zero_band":float(nz_band),
-                "near_zero_count":int(near_zero_cnt),
+                "train_loss_sum": float(loss_sum),
+                "boundary_band": float(BOUNDARY_BAND),
+                "cs_argmax": {"enabled": bool(COST_SENSITIVE_ARGMAX), "beta": float(CS_ARG_BETA)},
+                "eval_gate": "none",
+                "label_repair": repaired_info,
+                "bin_edges": bin_edges,
+                "bin_counts": bin_counts,
+                "bin_spans": bin_spans,
+                "bin_cfg": bin_cfg,
+                "near_zero_band": float(nz_band),
+                "near_zero_count": int(near_zero_cnt),
             }
 
-            wpath,mpath = _save_model_and_meta(model, stem+".pt", meta)
+            wpath, mpath = _save_model_and_meta(model, stem + ".pt", meta)
 
-            def _to_json_safe(o):
-                try: return json.dumps(o,ensure_ascii=False)
-                except: return str(o)
-
-            class_ranges_json=_to_json_safe(class_ranges)
-            bin_edges_json=_to_json_safe(bin_edges)
-            bin_counts_json=_to_json_safe(bin_counts)
-            bin_spans_json=_to_json_safe(bin_spans)
-            bins_value=len(bin_edges) if isinstance(bin_edges,(list,tuple)) else None
+            # ✅ JSON 문자열 대신, 리스트 그대로 사용
+            class_ranges_safe = [[float(lo), float(hi)] for (lo, hi) in class_ranges]
+            bin_edges_safe = list(bin_edges) if isinstance(bin_edges, (list, tuple)) else []
+            bin_counts_safe = list(bin_counts) if isinstance(bin_counts, (list, tuple)) else []
+            bin_spans_safe = list(bin_spans) if isinstance(bin_spans, (list, tuple)) else []
+            bins_value = (
+                len(bin_edges_safe) - 1
+                if isinstance(bin_edges_safe, list) and len(bin_edges_safe) >= 2
+                else None
+            )
 
             try:
-                summary_parts=[
+                summary_parts = [
                     f"[학습요약] {symbol}-{strategy}",
                     f"윈도우={int(window)}",
                     f"클래스={len(class_ranges)}개",
@@ -1903,17 +1922,19 @@ def train_one_model(
                     f"정확도={acc:.4f}",
                     f"F1={f1_val:.4f}",
                 ]
-                if bin_edges and bin_counts:
-                    nz_ratio_pct=near_zero_ratio*100.0
-                    summary_parts.append(f"수익률구간={len(bin_edges)-1}개, 0%근처(±{nz_band:.4f})≈{nz_ratio_pct:.1f}%")
+                if bin_edges_safe and bin_counts_safe:
+                    nz_ratio_pct = near_zero_ratio * 100.0
+                    summary_parts.append(
+                        f"수익률구간={len(bin_edges_safe)-1}개, 0%근처(±{nz_band:.4f})≈{nz_ratio_pct:.1f}%"
+                    )
 
-                final_note=" | ".join(summary_parts)+return_note
+                final_note = " | ".join(summary_parts) + return_note
 
                 logger.log_training_result(
-                    symbol,strategy,
+                    symbol, strategy,
                     model=os.path.basename(wpath),
-                    accuracy=acc,f1=f1_val,loss=val_loss,
-                    val_acc=acc,val_f1=f1_val,val_loss=val_loss,
+                    accuracy=acc, f1=f1_val, loss=val_loss,
+                    val_acc=acc, val_f1=f1_val, val_loss=val_loss,
                     engine="manual",
                     window=int(window),
                     recent_cap=int(len(features_only)),
@@ -1925,20 +1946,20 @@ def train_one_model(
                     note=final_note,
                     source_exchange="BYBIT",
                     status="success",
-                    y_true=lbls.tolist() if isinstance(lbls,np.ndarray) else lbls,
-                    y_pred=preds.tolist() if isinstance(preds,np.ndarray) else preds,
+                    y_true=lbls.tolist() if isinstance(lbls, np.ndarray) else lbls,
+                    y_pred=preds.tolist() if isinstance(preds, np.ndarray) else preds,
                     num_classes=len(class_ranges),
                     NUM_CLASSES=int(num_total_classes),
                     class_counts_label_freeze=cnt_before,
                     usable_samples=usable_samples,
                     class_counts_after_assemble=cnt_after,
                     batch_stratified_ok=batch_stratified_ok,
-                    class_ranges=class_ranges_json,
-                    bin_edges=bin_edges_json,
-                    bin_counts=bin_counts_json,
-                    bin_spans=bin_spans_json,
-                    class_edges=bin_edges_json,
-                    class_counts=bin_counts_json,
+                    class_ranges=class_ranges_safe,
+                    bin_edges=bin_edges_safe,
+                    bin_counts=bin_counts_safe,
+                    bin_spans=bin_spans_safe,
+                    class_edges=bin_edges_safe,
+                    class_counts=bin_counts_safe,
                     bins=bins_value,
                     near_zero_band=float(nz_band),
                     near_zero_count=int(near_zero_cnt),
@@ -1950,23 +1971,30 @@ def train_one_model(
             res["windows"].append(int(window))
             res["models"].append(os.path.basename(wpath))
 
-            global_class_ranges_json = class_ranges_json
-            global_bin_edges_json   = bin_edges_json
-            global_bin_counts_json  = bin_counts_json
-            global_bin_spans_json   = bin_spans_json
-            global_bins_value       = bins_value
+            # 전역 best-window 요약용 값도 "리스트 그대로" 저장
+            global_class_ranges_val = class_ranges_safe
+            global_bin_edges_val = bin_edges_safe
+            global_bin_counts_val = bin_counts_safe
+            global_bin_spans_val = bin_spans_safe
+            global_bins_value = bins_value
 
             if IMPORTANCE_ENABLE:
                 try:
-                    fi = compute_feature_importance(model,features_only,device=DEVICE)
-                    save_feature_importance(fi,symbol=symbol,strategy=strategy,window=window,model_name=os.path.basename(wpath))
+                    fi = compute_feature_importance(model, features_only, device=DEVICE)
+                    save_feature_importance(
+                        fi,
+                        symbol=symbol,
+                        strategy=strategy,
+                        window=window,
+                        model_name=os.path.basename(wpath),
+                    )
                 except:
                     pass
 
-            _release_memory(train_ds,val_ds,train_loader,val_loader,X_train,X_val,y_train,y_val,model)
+            _release_memory(train_ds, val_ds, train_loader, val_loader, X_train, X_val, y_train, y_val, model)
 
         # ============================================================
-        # 10) 전체 window 중 BEST 한 번 더 요약 로그 ( ← ★ 여기 들여쓰기 복구됨 ★ )
+        # 10) 전체 window 중 BEST 한 번 더 요약 로그
         # ============================================================
         try:
             if best_window_overall is not None and best_state is not None:
@@ -1982,30 +2010,28 @@ def train_one_model(
                 best_augment_needed = bool(augment_needed)
                 best_enough_for_training = bool(enough_for_training)
 
-                best_class_ranges_json = global_class_ranges_json
-                best_bin_edges_json   = global_bin_edges_json
-                best_bin_counts_json  = global_bin_counts_json
-                best_bin_spans_json   = global_bin_spans_json
-                best_bins_value       = global_bins_value
-
                 best_lbls = best_state.get("lbls", np.zeros(0))
                 best_preds = best_state.get("preds", np.zeros(0))
 
-                try:    best_y_true = best_lbls.tolist()
-                except: best_y_true = best_lbls
-                try:    best_y_pred = best_preds.tolist()
-                except: best_y_pred = best_preds
+                try:
+                    best_y_true = best_lbls.tolist()
+                except:
+                    best_y_true = best_lbls
+                try:
+                    best_y_pred = best_preds.tolist()
+                except:
+                    best_y_pred = best_preds
 
-                summary_parts=[
+                summary_parts = [
                     f"[WindowBest] window={int(best_window_overall)}",
                     f"f1={best_f1_overall:.4f}",
                     f"acc={best_acc_overall:.4f}",
                     f"rows={best_rows}",
                 ]
-                final_note=" | ".join(summary_parts)
+                final_note = " | ".join(summary_parts)
 
                 logger.log_training_result(
-                    symbol,strategy,
+                    symbol, strategy,
                     model="best_window",
                     accuracy=best_acc_overall,
                     f1=best_f1_overall,
@@ -2025,13 +2051,13 @@ def train_one_model(
                     source_exchange="BYBIT",
                     status="best",
                     NUM_CLASSES=int(num_total_classes),
-                    class_ranges=best_class_ranges_json,
-                    bin_edges=best_bin_edges_json,
-                    bin_counts=best_bin_counts_json,
-                    bin_spans=best_bin_spans_json,
-                    class_edges=best_bin_edges_json,
-                    class_counts=best_bin_counts_json,
-                    bins=best_bins_value,
+                    class_ranges=global_class_ranges_val,
+                    bin_edges=global_bin_edges_val,
+                    bin_counts=global_bin_counts_val,
+                    bin_spans=global_bin_spans_val,
+                    class_edges=global_bin_edges_val,
+                    class_counts=global_bin_counts_val,
+                    bins=global_bins_value,
                     near_zero_band=float(nz_band),
                     near_zero_count=int(near_zero_cnt),
                     masked_count=int(mask_cnt),
@@ -2039,9 +2065,9 @@ def train_one_model(
                     y_pred=best_y_pred,
                 )
 
-                res["best_window"]=int(best_window_overall)
-                res["best_f1"]=float(best_f1_overall)
-                res["best_acc"]=float(best_acc_overall)
+                res["best_window"] = int(best_window_overall)
+                res["best_f1"] = float(best_f1_overall)
+                res["best_acc"] = float(best_acc_overall)
 
         except Exception as e:
             _safe_print(f"[BEST WINDOW LOG WARN] {e}")
@@ -2051,8 +2077,6 @@ def train_one_model(
     except Exception as e:
         _safe_print(f"[train_one_model ERR] {symbol}-{strategy}: {e}")
         return res
-
-
 
 
 _ENFORCE_FULL_STRATEGY = False
