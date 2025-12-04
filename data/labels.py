@@ -1,6 +1,6 @@
 # ================================================
 # labels.py — YOPO RAW 기반 수익률 라벨링
-#            (H 고정 + 동적 엣지 튜닝 + 희소 클래스 병합 버전)
+#            (H 고정 + 동적 엣지 튜닝 + 희소 클래스 병합 옵션 버전)
 # ================================================
 from __future__ import annotations
 
@@ -57,6 +57,16 @@ _SPARSE_CLASS_CONF = dict(get_SPARSE_CLASS() or {})
 _SC_MIN_SAMPLES = int(_SPARSE_CLASS_CONF.get("MIN_SAMPLES_PER_CLASS", 12))
 _SC_MIN_CLASSES = int(_SPARSE_CLASS_CONF.get("MIN_CLASSES_AFTER_MERGE", 8))
 _SC_MAX_PASSES = int(_SPARSE_CLASS_CONF.get("MAX_MERGE_PASSES", 2))
+
+# 🔥 희소 bin 병합 사용 여부 (기본 OFF)
+#   - 0 (기본): bin 병합 하지 않음 → 클래스 개수 그대로 유지
+#   - 1       : 아이디어 A 병합 켬  → 실험용
+MERGE_SPARSE_LABEL_BINS = os.getenv("MERGE_SPARSE_LABEL_BINS", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 # 🔥 극단 꼬리(trim) 비율 (분포 엣지 계산용)
 # - 예: 0.005 → 하위 0.5%, 상위 0.5% 정도만 "구간 계산"에서 잠깐 제외
@@ -274,19 +284,15 @@ def _vector_bin(gains: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return np.clip(bins, 0, edges.size - 2).astype(np.int64)
 
 # ============================================================
-# 희소 클래스 병합 (아이디어 A)
+# 희소 클래스 병합 (아이디어 A) — 옵션
 # ============================================================
 def _merge_sparse_bins(edges: np.ndarray, values: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
     아이디어 A:
     - 한 "클래스"에 들어온 샘플 수가 너무 적으면,
       바로 이웃 bin과 합쳐서 극단 꼬리를 줄인다.
-    - 기준:
-        * MIN_SAMPLES_PER_CLASS (예: 12개 미만)
-        * 전체 bin 개수는 MIN_CLASSES_AFTER_MERGE(예: 8개) 밑으로는
-          절대 떨어지지 않게 제한.
-        * MAX_MERGE_PASSES 번까지만 반복.
-    - values: 실제 라벨링에 쓰인 수익률들 (보통 gains)
+    - 기본은 MERGE_SPARSE_LABEL_BINS=0 으로 꺼져 있고,
+      1로 켠 경우에만 실제 병합에 사용한다.
     반환: (새 edges, 새 bin_counts)
     """
     try:
@@ -297,7 +303,6 @@ def _merge_sparse_bins(edges: np.ndarray, values: np.ndarray) -> Tuple[np.ndarra
         values = np.asarray(values, dtype=float)
         values = values[np.isfinite(values)]
         if values.size == 0:
-            # 🔧 버그 수정: dtype 위치 잘못되어 있던 부분 정리
             return edges, np.zeros(max(0, edges.size - 1), dtype=int)
 
         # 초기 bin 카운트 계산 (라벨 기준 분포)
@@ -516,12 +521,11 @@ def make_labels(df, symbol, strategy, group_id=None):
     # 1차: 동적 RAW bin 생성 (꼬리 정리 + quantile 기반)
     edges = _raw_bins(dist, target_bins)
 
-    # 2차: 희소 bin 병합 (아이디어 A)
-    #  👉 "클래스 샘플 수" 기준으로 병합해야 하므로,
-    #     실제 라벨에 쓰이는 gains 분포를 사용.
-    edges, bin_counts = _merge_sparse_bins(edges, gains)
+    # 2차: 희소 bin 병합 (아이디어 A) — 옵션
+    if MERGE_SPARSE_LABEL_BINS:
+        edges, _ = _merge_sparse_bins(edges, gains)
 
-    # 병합된 경계를 기준으로 최종 라벨링
+    # 병합(또는 원본) 경계를 기준으로 최종 라벨링
     labels = _vector_bin(gains, edges)
 
     # 최종 bin 분포/폭 재계산 (gains 기준)
@@ -589,8 +593,9 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
     # gains 먼저 계산
     gains = _pick_per_candle_gain(up, dn)
 
-    # 2차: 희소 bin 병합 (gains 기준)
-    edges, bin_counts = _merge_sparse_bins(edges, gains)
+    # 2차: 희소 bin 병합 (gains 기준) — 옵션
+    if MERGE_SPARSE_LABEL_BINS:
+        edges, _ = _merge_sparse_bins(edges, gains)
 
     labels = _vector_bin(gains, edges)
 
