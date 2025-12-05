@@ -924,6 +924,12 @@ def log_training_result(
     bin_spans=None,          # 리스트
     near_zero_band=None,     # float
     near_zero_count=None,    # int
+    
+    # ✅ [추가됨] 클래스별 상세 성적
+    per_class_f1=None,       # 리스트 (클래스별 F1)
+    masked_count=None,       # int
+    NUM_CLASSES=None,        # int
+    usable_samples=None,     # int
 
     **kwargs
 ):
@@ -974,7 +980,13 @@ def log_training_result(
         "class_counts": json.dumps(class_counts or [], ensure_ascii=False),
         "class_ranges": json.dumps(class_ranges or [], ensure_ascii=False),
         "bin_spans": json.dumps(bin_spans or [], ensure_ascii=False),
-        "per_class_f1": json.dumps(kwargs.get("per_class_f1") or [], ensure_ascii=False),  # <--- 이거 한 줄 추가
+        
+        # ✅ [추가됨] 클래스별 F1 및 상세 정보 저장
+        "per_class_f1": json.dumps(per_class_f1 or [], ensure_ascii=False),
+        "masked_count": int(masked_count or 0),
+        "NUM_CLASSES": int(NUM_CLASSES or 0),
+        "usable_samples": int(usable_samples or kwargs.get("rows", 0)),
+        
         "near_zero_band": float(near_zero_band or 0.0),
         "near_zero_count": int(near_zero_count or 0),
     }
@@ -986,48 +998,38 @@ def log_training_result(
         if _READONLY_FS:
             print("[TRAIN][console]", json.dumps(row_dict, ensure_ascii=False))
         else:
-            write_header = not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0
-            if write_header:
-                # 🔹 항상 확장 헤더로 생성
-                headers = TRAIN_HEADERS
-                with open(LOG_FILE, "w", newline="", encoding="utf-8-sig") as f:
-                    csv.DictWriter(f, fieldnames=headers).writeheader()
-
-            # 기존 파일 헤더
-            headers = _read_csv_header(LOG_FILE)
+            ensure_train_log_exists()
             with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
-                # 🔹 혹시 기존 헤더가 일부 필드만 있어도, 공통 필드에 맞춰 작성
-                if headers and headers != TRAIN_HEADERS:
-                    fieldnames = headers
-                else:
-                    fieldnames = TRAIN_HEADERS
-                w = csv.DictWriter(f, fieldnames=fieldnames)
-                # DictWriter는 fieldnames에 없는 key는 자동으로 버림
+                # extrasaction='ignore' 덕분에 헤더에 없는 키가 있어도 에러 안 남
+                w = csv.DictWriter(f, fieldnames=TRAIN_HEADERS, extrasaction='ignore')
                 w.writerow(row_dict)
 
-        # ──────────────────────
-        # 4) F1=0 경고 유지
-        # ──────────────────────
-        _f1_key = (str(symbol), str(strategy))
-        if not hasattr(log_training_result, "_f1_zero"):
-            log_training_result._f1_zero = defaultdict(int)
+            # ──────────────────────
+            # 4) F1=0 경고 유지
+            # ──────────────────────
+            _f1_key = (str(symbol), str(strategy))
+            if not hasattr(log_training_result, "_f1_zero"):
+                log_training_result._f1_zero = defaultdict(int)
 
-        if val_f1 <= 0.0:
-            log_training_result._f1_zero[_f1_key] += 1
-            n = log_training_result._f1_zero[_f1_key]
-            if n == 1:
-                print(f"🟠 [경고] F1=0.0 발생 → {symbol}-{strategy} {model} (1회)")
-            elif n % int(os.getenv('F1_ZERO_WARN_EVERY','5')) == 0:
-                print(f"🟠 [요약] F1=0.0 연속 {n}회 → {symbol}-{strategy} {model}")
-        else:
-            if log_training_result._f1_zero.get(_f1_key, 0) > 0:
-                print(f"[✅ 복구] {symbol}-{strategy} {model} F1 회복 → {val_f1:.4f}")
-            log_training_result._f1_zero[_f1_key] = 0
+            if val_f1 <= 0.0:
+                log_training_result._f1_zero[_f1_key] += 1
+                n = log_training_result._f1_zero[_f1_key]
+                if n == 1:
+                    print(f"🟠 [경고] F1=0.0 발생 → {symbol}-{strategy} {model} (1회)")
+                elif n % int(os.getenv('F1_ZERO_WARN_EVERY','5')) == 0:
+                    print(f"🟠 [요약] F1=0.0 연속 {n}회 → {symbol}-{strategy} {model}")
+            else:
+                if log_training_result._f1_zero.get(_f1_key, 0) > 0:
+                    print(f"[✅ 복구] {symbol}-{strategy} {model} F1 회복 → {val_f1:.4f}")
+                log_training_result._f1_zero[_f1_key] = 0
 
-        _print_once(
-            f"trainlog:{symbol}:{strategy}:{model}",
-            f"[✅ 학습 로그 기록] {symbol}-{strategy} {model} val_f1={val_f1:.4f} status={status}"
-        )
+            _print_once(
+                f"trainlog:{symbol}:{strategy}:{model}",
+                f"[✅ 학습 로그 기록] {symbol}-{strategy} {model} val_f1={val_f1:.4f} status={status}"
+            )
+            
+            # 대시보드 업데이트 (호환성 유지)
+            update_train_dashboard(symbol, strategy, model)
 
     except Exception as e:
         print(f"[⚠️ 학습 로그 기록 실패] {e}")
