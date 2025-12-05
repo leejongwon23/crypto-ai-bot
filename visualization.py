@@ -63,9 +63,12 @@ def generate_card(symbol: str, strategy: str, df):
     status = row.get("status", "")
     model_file = row.get("model", "")
     tstamp = row.get("timestamp", "")
-    health = f"🟢 정상" if status == "success" else (
-        "🟡 경고" if status in ("warn", "warning") else "🔴 오류"
-    )
+
+    health = "🔴 오류"
+    if status == "success":
+        health = "🟢 정상"
+    elif status in ("warn", "warning", "info"):
+        health = "🟡 경고"
 
     part1 = f"""
 <h2>📦 {symbol} · {strategy}</h2>
@@ -77,16 +80,24 @@ def generate_card(symbol: str, strategy: str, df):
     # ----------------------------------------
     # ② 전체 성능
     # ----------------------------------------
-    acc = float(row.get("val_acc") or 0)
-    f1 = float(row.get("val_f1") or 0)
-    loss = float(row.get("val_loss") or 0)
+    def _safe_float(v, default=0.0):
+        try:
+            if v is None or pd.isna(v):
+                return default
+            return float(v)
+        except Exception:
+            return default
 
-    comment = (
-        "👍 잘 맞추고 있어요." if f1 >= 0.6 else (
-            "🙂 중간 정도 성능이에요." if f1 >= 0.4 else
-            "⚠️ 개선이 필요해요."
-        )
-    )
+    acc = _safe_float(row.get("val_acc"), 0.0)
+    f1 = _safe_float(row.get("val_f1"), 0.0)
+    loss = _safe_float(row.get("val_loss"), 0.0)
+
+    if f1 >= 0.6:
+        comment = "👍 잘 맞추고 있어요."
+    elif f1 >= 0.4:
+        comment = "🙂 중간 정도 성능이에요."
+    else:
+        comment = "⚠️ 개선이 필요해요."
 
     part2 = f"""
 <h3>🎯 전체 학습 성능</h3>
@@ -98,15 +109,45 @@ Loss: <b>{loss:.4f}</b><br>
 
     # ----------------------------------------
     # ③ 데이터 / 라벨 상태
+    #    (train.py 에서 기록한 usable_samples, masked_count, near_zero_count, near_zero_band 사용)
     # ----------------------------------------
-    total = int(row.get("label_total") or 0)
-    masked = int(row.get("label_masked") or 0)
-    near_zero = int(row.get("near_zero") or 0)
-    nz_band = row.get("near_zero_band") or ""
+    def _safe_int(v, default=0):
+        try:
+            if v is None or pd.isna(v):
+                return default
+            return int(v)
+        except Exception:
+            return default
+
+    total = _safe_int(row.get("usable_samples") if "usable_samples" in row.index else None, 0)
+    if total == 0:
+        # usable_samples 가 없으면 class_counts 합으로 대체
+        cc_raw = row.get("class_counts")
+        if isinstance(cc_raw, str):
+            try:
+                cc_raw = json.loads(cc_raw)
+            except Exception:
+                cc_raw = []
+        if cc_raw is None or (isinstance(cc_raw, float) and pd.isna(cc_raw)):
+            cc_raw = []
+        if isinstance(cc_raw, list):
+            total = sum(_safe_int(x, 0) for x in cc_raw)
+
+    masked = _safe_int(
+        row.get("masked_count") if "masked_count" in row.index else row.get("label_masked"),
+        0,
+    )
+    near_zero = _safe_int(
+        row.get("near_zero_count") if "near_zero_count" in row.index else row.get("near_zero"),
+        0,
+    )
+    nz_band = row.get("near_zero_band")
+    if nz_band is None or (isinstance(nz_band, float) and pd.isna(nz_band)):
+        nz_band = ""
 
     part3 = f"""
 <h3>🧪 데이터 / 라벨 상태</h3>
-전체 라벨: {total}개<br>
+전체 라벨(유효 샘플): {total}개<br>
 마스킹 라벨: {masked}개<br>
 0% 근처(near-zero): {near_zero}개 (구간: {nz_band})<br>
 """
@@ -118,20 +159,26 @@ Loss: <b>{loss:.4f}</b><br>
     if isinstance(class_ranges, str):
         try:
             class_ranges = json.loads(class_ranges)
-        except:
+        except Exception:
             class_ranges = []
-
+    if class_ranges is None or (isinstance(class_ranges, float) and pd.isna(class_ranges)):
+        class_ranges = []
     num_classes = len(class_ranges)
 
     class_counts = row.get("class_counts") or []
     if isinstance(class_counts, str):
         try:
             class_counts = json.loads(class_counts)
-        except:
+        except Exception:
             class_counts = []
+    if class_counts is None or (isinstance(class_counts, float) and pd.isna(class_counts)):
+        class_counts = []
+    # 길이 맞추기
+    if num_classes and len(class_counts) < num_classes:
+        class_counts = class_counts + [0] * (num_classes - len(class_counts))
 
-    participated = sum([1 for v in class_counts if v > 0])
-    skipped = num_classes - participated
+    participated = sum(1 for v in class_counts if v > 0)
+    skipped = max(0, num_classes - participated)
 
     part4 = f"""
 <h3>📊 클래스 요약</h3>
@@ -141,19 +188,44 @@ Loss: <b>{loss:.4f}</b><br>
 """
 
     # ----------------------------------------
-    # ⑤ 클래스별 상세 표
-    #    (클래스 F1 은 train_log 에 없으므로 이후 1번 보강 필요)
+    # ⑤ per-class F1 + 상세 표
+    #    (train.py 에서 per_class_f1 리스트를 그대로 기록해둔 컬럼 사용)
     # ----------------------------------------
+    per_class_f1 = row.get("per_class_f1") or []
+    if isinstance(per_class_f1, str):
+        try:
+            per_class_f1 = json.loads(per_class_f1)
+        except Exception:
+            per_class_f1 = []
+    if per_class_f1 is None or (isinstance(per_class_f1, float) and pd.isna(per_class_f1)):
+        per_class_f1 = []
+    if num_classes and len(per_class_f1) < num_classes:
+        per_class_f1 = per_class_f1 + [0.0] * (num_classes - len(per_class_f1))
+
     table_rows = ""
     for i in range(num_classes):
-        lo, hi = class_ranges[i]
+        try:
+            lo, hi = class_ranges[i]
+        except Exception:
+            lo, hi = 0.0, 0.0
         cnt = class_counts[i] if i < len(class_counts) else 0
         participate = "✅" if cnt > 0 else "❌"
 
-        # F1 per class (아직 없음 → 0.00으로 표시, train.py 보강 후 채워짐)
         f1_c = 0.0
+        if i < len(per_class_f1):
+            try:
+                f1_c = float(per_class_f1[i])
+            except Exception:
+                f1_c = 0.0
 
-        memo = "샘플 적음" if cnt <= 3 else ""
+        if cnt == 0:
+            memo = "학습에 참여하지 않음"
+        elif cnt <= 3:
+            memo = "샘플 매우 적음"
+        elif f1_c < 0.2:
+            memo = "예측력이 매우 낮음"
+        else:
+            memo = ""
 
         table_rows += f"""
 <tr>
@@ -185,11 +257,15 @@ Loss: <b>{loss:.4f}</b><br>
     # ⑥ 이상 징후 요약
     # ----------------------------------------
     alerts = []
-    if max(class_counts) > total * 0.25:
-        alerts.append("특정 구간에 데이터가 많이 몰려 있음")
 
-    if min([c for c in class_counts if c > 0] or [99]) <= 2:
-        alerts.append("샘플 매우 적은 클래스 존재(신뢰 낮음)")
+    if class_counts:
+        # 한 구간에 25% 이상 몰리면 경고
+        if total > 0 and max(class_counts) > total * 0.25:
+            alerts.append("특정 구간에 데이터가 많이 몰려 있음")
+
+        non_zero = [c for c in class_counts if c > 0]
+        if non_zero and min(non_zero) <= 2:
+            alerts.append("샘플 매우 적은 클래스 존재(신뢰 낮음)")
 
     if not alerts:
         alerts.append("큰 이상 없음")
@@ -226,3 +302,22 @@ def generate_visual_report():
             html += generate_card(s, strat, df)
 
     return html
+
+def generate_visuals_for_strategy(symbol: str, strategy: str) -> str:
+    """
+    app.py 에서 사용하는 단일 심볼·전략용 리포트.
+    - train_log.csv 전체를 읽고
+    - 해당 symbol, strategy 의 마지막 기록 1개를 카드로 보여준다.
+    """
+    try:
+        df = pd.read_csv(TRAIN_LOG)
+    except Exception:
+        return "<h3>train_log.csv 없음</h3>"
+
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+
+    html = f"<h1>📘 {symbol} · {strategy} 학습 리포트</h1>"
+    html += generate_card(symbol, strategy, df)
+    return html
+
