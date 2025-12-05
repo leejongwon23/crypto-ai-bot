@@ -1904,11 +1904,17 @@ def train_one_model(
                         f1_val = f1_score(lbls, preds, average="macro", zero_division=0)
                     except:
                         f1_val = 0.0
+                    # ✅ 클래스별 F1 (per-class F1) 계산
+                    try:
+                        per_class_f1 = f1_score(lbls, preds, average=None, zero_division=0).tolist()
+                    except:
+                        per_class_f1 = []
                 else:
                     preds = np.zeros(0, dtype=np.int64)
                     lbls = np.zeros(0, dtype=np.int64)
                     acc = 0.0
                     f1_val = 0.0
+                    per_class_f1 = []
 
                 loss_sum = float(running_loss)
                 val_loss = float(val_loss)
@@ -1925,6 +1931,7 @@ def train_one_model(
                         "preds": preds,
                         "lbls": lbls,
                         "val_y": y_val,
+                        "per_class_f1": per_class_f1,  # ✅ BEST에 per-class F1 함께 저장
                     }
                     no_improve = 0
                 else:
@@ -1945,6 +1952,7 @@ def train_one_model(
             preds = best_state["preds"]
             lbls = best_state["lbls"]
             val_y = best_state["val_y"]
+            per_class_f1 = best_state.get("per_class_f1", [])
 
             # BEST 윈도우 전체 비교 저장
             try:
@@ -2008,7 +2016,12 @@ def train_one_model(
                 "num_classes": len(class_ranges),
                 "class_ranges": [[float(lo), float(hi)] for (lo, hi) in class_ranges],
                 "input_size": int(feat_dim),
-                "metrics": {"val_acc": acc, "val_f1": f1_val, "val_loss": val_loss},
+                "metrics": {
+                    "val_acc": acc,
+                    "val_f1": f1_val,
+                    "val_loss": val_loss,
+                    "per_class_f1": per_class_f1,  # ✅ 메타에도 저장
+                },
                 "timestamp": now_kst().isoformat(),
                 "model_name": os.path.basename(stem) + ".ptz",
                 "window": int(window),
@@ -2098,6 +2111,7 @@ def train_one_model(
                     near_zero_band=float(nz_band),
                     near_zero_count=int(near_zero_cnt),
                     masked_count=int(mask_cnt),
+                    per_class_f1=per_class_f1,  # ✅ 여기서 학습로그로 전달
                 )
             except:
                 pass
@@ -2146,6 +2160,7 @@ def train_one_model(
 
                 best_lbls = best_state.get("lbls", np.zeros(0))
                 best_preds = best_state.get("preds", np.zeros(0))
+                best_per_class_f1 = best_state.get("per_class_f1", [])
 
                 try:
                     best_y_true = best_lbls.tolist()
@@ -2197,6 +2212,7 @@ def train_one_model(
                     masked_count=int(mask_cnt),
                     y_true=best_y_true,
                     y_pred=best_y_pred,
+                    per_class_f1=best_per_class_f1,  # ✅ BEST 요약에도 포함
                 )
 
                 res["best_window"] = int(best_window_overall)
