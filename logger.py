@@ -335,6 +335,7 @@ def ensure_prediction_log_exists():
         print(f"[⚠️ ensure_prediction_log_exists] 예외: {e}")
 
 
+
 def ensure_train_log_exists():
     if _READONLY_FS:
         return
@@ -382,20 +383,28 @@ def ensure_train_log_exists():
 
                         # 🔹 예전 로그 → 새 확장 헤더로 이관 (새 필드는 공백)
                         base_row = [
-                            mapped.get("timestamp",""), mapped.get("symbol",""), mapped.get("strategy",""), mapped.get("model",""),
-                            mapped.get("accuracy", mapped.get("val_acc","")), mapped.get("f1", mapped.get("val_f1","")), val_loss_val,
+                            mapped.get("timestamp",""),
+                            mapped.get("symbol",""),
+                            mapped.get("strategy",""),
+                            mapped.get("model",""),
+                            mapped.get("accuracy", mapped.get("val_acc","")),
+                            mapped.get("f1",       mapped.get("val_f1","")),
+                            val_loss_val,
                             "", "", "", "", "", "", "", "",
-                            mapped.get("note",""), mapped.get("source_exchange",""), mapped.get("status",""),
+                            mapped.get("note",""),
+                            mapped.get("source_exchange",""),
+                            mapped.get("status",""),
                         ]
-                        extra_row = ["","","","","",""]   # class_edges ~ near_zero_count
+                        # 🔸 여기! 확장 헤더 수 만큼 빈 칸 7개
+                        extra_row = ["", "", "", "", "", "", ""]  # class_edges ~ per_class_f1
                         new_row = base_row + extra_row
+
                         w.writerow(dict(zip(TRAIN_HEADERS, new_row[:len(TRAIN_HEADERS)])))
 
                 print("[✅ ensure_train_log_exists] train_log.csv 헤더 보정(확장) 완료")
 
     except Exception as e:
         print(f"[⚠️ ensure_train_log_exists] 예외: {e}")
-
 
 # -------------------------
 # 로그 로테이션 (읽기전용이면 skip)
