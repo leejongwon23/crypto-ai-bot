@@ -1315,12 +1315,21 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
     # 1) train_log에서 최신 한 줄 찾기
     train_df = _safe_read_df(TRAIN_LOG)
     trow = None
-    if not train_df.empty:
-        sub = train_df[(train_df["symbol"] == symbol) & (train_df["strategy"] == strategy)]
-        if not sub.empty:
-            sub["timestamp"] = pd.to_datetime(sub["timestamp"], errors="coerce")
-            sub = sub.sort_values("timestamp")
-            trow = sub.tail(1).to_dict("records")[0]
+
+    # 🔒 필수: 비어있거나 symbol/strategy/timestamp 가 없으면 그대로 종료
+    if train_df is None or train_df.empty:
+        return
+
+    required_cols = {"symbol", "strategy", "timestamp"}
+    if not required_cols.issubset(train_df.columns):
+        return
+
+    sub = train_df[(train_df["symbol"] == symbol) & (train_df["strategy"] == strategy)]
+    if not sub.empty:
+        sub = sub.copy()
+        sub["timestamp"] = pd.to_datetime(sub["timestamp"], errors="coerce")
+        sub = sub.sort_values("timestamp")
+        trow = sub.tail(1).to_dict("records")[0]
 
     if trow is None:
         return
@@ -1352,7 +1361,10 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
     # 3) 라벨 분포 계산 (label_distribution.csv → 없으면 class_counts 기반 복구)
     # ------------------------------------------------------
     label_df = _safe_read_df(os.path.join(LOG_DIR, "label_distribution.csv"))
-    lrow = _get_last_row(label_df, {"symbol": symbol, "strategy": strategy})
+    if not label_df.empty and {"symbol", "strategy"}.issubset(label_df.columns):
+        lrow = _get_last_row(label_df, {"symbol": symbol, "strategy": strategy})
+    else:
+        lrow = None
 
     if lrow:
         label_total   = _i(lrow.get("total"), 0)
@@ -1385,9 +1397,12 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
     # 4) 수익률 클래스 구간 (class_ranges.csv → edges fallback)
     # ------------------------------------------------------
     class_ranges_df = _safe_read_df(os.path.join(LOG_DIR, "class_ranges.csv"))
-    cr_sub = class_ranges_df[
-        (class_ranges_df["symbol"] == symbol) & (class_ranges_df["strategy"] == strategy)
-    ]
+    if not class_ranges_df.empty and {"symbol", "strategy", "idx", "low", "high"}.issubset(class_ranges_df.columns):
+        cr_sub = class_ranges_df[
+            (class_ranges_df["symbol"] == symbol) & (class_ranges_df["strategy"] == strategy)
+        ]
+    else:
+        cr_sub = pd.DataFrame()
 
     class_ranges_text = ""
     if not cr_sub.empty:
@@ -2188,4 +2203,4 @@ def make_return_histogram(returns: list[float], bins: int = 20):
     return {
         "bin_edges": edges.astype(float).tolist(),
         "bin_counts": counts.astype(int).tolist(),
-        }
+                }
