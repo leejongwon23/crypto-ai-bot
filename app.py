@@ -1760,9 +1760,15 @@ def train_log():
     """
     📈 학습 로그 보기 (아주 쉬운 버전)
 
-    - 각 심볼/전략이 얼마나 잘 학습되었는지
-    - 정확도 / F1 / loss 를
-    카드처럼 쉽게 보여준다.
+    우리가 원하는 것:
+      - 심볼 / 전략별로 카드 하나
+      - 그 카드 안에
+        · 클래스 수
+        · 클래스마다 수익률 구간
+        · 클래스마다 학습 성능
+        · 데이터 분포
+        · 전체 문제 있는지 여부
+      를 한 번에 쉽게 보여준다.
     """
     try:
         # logger.py 에서 만든 카드 데이터 불러오기
@@ -1783,7 +1789,7 @@ def train_log():
         <div style="font-weight:bold;margin-bottom:6px;">아직 저장된 학습 결과가 없습니다.</div>
         <div style="font-size:13px;color:#555;">
             ▶ 학습이 한 번이라도 끝나면 이 화면에<br>
-            &nbsp;&nbsp;&nbsp;심볼별 카드가 자동으로 생깁니다.<br><br>
+            &nbsp;&nbsp;&nbsp;심볼·전략별 카드가 자동으로 생깁니다.<br><br>
             <small>기록 파일 위치: <code>{log_path}</code></small>
         </div>
     </div>
@@ -1822,7 +1828,8 @@ def train_log():
         last_loss = _to_float(last.get("val_loss", 0.0))
         last_health_text = last.get("health_text", "상태 정보 없음")
 
-        # 4) 카드 하나씩 HTML 만들기 (아주 단순한 문장만 사용)
+        # 4) 카드 하나씩 HTML 만들기
+        #    여기서 심볼·전략별로 우리가 보고 싶은 내용을 전부 담는다.
         card_blocks = []
         for c in cards:
             sym = c.get("symbol", "")
@@ -1838,9 +1845,49 @@ def train_log():
 
             ts = c.get("timestamp", "알 수 없음")
 
+            # ✅ 데이터 요약(전체 데이터 양)
             data_summary = c.get("data_summary", "데이터 정보 없음")
+
+            # ✅ 수익률 분포(요약)
             ret_summary = c.get("ret_summary_text", "수익률 분포 정보 없음")
+
+            # ✅ 검증 커버리지(검증이 얼마나 넓게 되었는지)
             coverage_summary = c.get("coverage_summary", "검증 커버리지 정보 없음")
+
+            # ✅ 클래스 관련 정보 (logger.py에서 만들어줬다고 가정하되, 없으면 기본 문장으로 표시)
+            n_classes = (
+                c.get("n_classes")
+                or c.get("num_classes")
+                or c.get("class_count")
+            )
+            if n_classes is None:
+                n_classes_text = "클래스 수 정보 없음"
+            else:
+                n_classes_text = f"{int(n_classes)}개 클래스"
+
+            # 각 클래스의 수익률 구간 요약 (예: "클래스0: -3%~-1%, 클래스1: -1%~0%, ...")
+            class_ranges_text = c.get(
+                "class_ranges_text",
+                "각 클래스의 수익률 구간 정보 없음",
+            )
+
+            # 각 클래스의 성능 요약 (예: "클래스0 F1=0.42, 클래스1 F1=0.51, ...")
+            per_class_perf_text = c.get(
+                "per_class_perf_text",
+                "클래스별 학습 성능 정보 없음",
+            )
+
+            # 각 클래스의 데이터 개수 분포 (예: "클래스0: 120개, 클래스1: 230개, ...")
+            class_counts_text = c.get(
+                "class_counts_text",
+                "클래스별 데이터 개수 정보 없음",
+            )
+
+            # 전체 문제 여부 한 줄 요약 (예: "모든 클래스가 충분히 학습됨", "희소 클래스 존재, 데이터 보충 필요" 등)
+            problem_summary = c.get(
+                "problem_summary",
+                "추가 점검 필요 여부: 별도 표시 없음",
+            )
 
             block = f"""
 <div style="border:1px solid #ddd;border-radius:8px;padding:10px 12px;margin-bottom:10px;background:#ffffff;">
@@ -1850,9 +1897,10 @@ def train_log():
   </div>
 
   <div style="font-size:12px;margin-bottom:4px;">
-    ● 이 조합의 학습 결과입니다.
+    ● 이 카드 하나가 <b>“심볼 + 전략”</b> 한 조합의 학습 결과입니다.
   </div>
 
+  <!-- 기본 성능 -->
   <div style="font-size:12px;margin-bottom:2px;">
     ▷ 정확도(정답 잘 맞춘 비율): <b>{acc:.4f}</b>
   </div>
@@ -1863,18 +1911,39 @@ def train_log():
     ▷ loss(작을수록 좋음): <b>{loss:.4f}</b>
   </div>
 
-  <div style="font-size:12px;margin-bottom:2px;color:#b71c1c;">
+  <!-- 상태 -->
+  <div style="font-size:12px;margin-bottom:4px;color:#b71c1c;">
     ● 상태 요약: {health_text} {(' (status=' + status + ')') if status else ''}
   </div>
 
+  <!-- 우리가 보고 싶은 핵심 정보들 -->
+  <div style="font-size:11px;margin-top:4px;color:#333;">
+    ● 클래스 수: {n_classes_text}
+  </div>
+  <div style="font-size:11px;margin-top:2px;color:#333;">
+    ● 각 클래스 수익률 구간: {class_ranges_text}
+  </div>
+  <div style="font-size:11px;margin-top:2px;color:#333;">
+    ● 클래스별 학습 성능(F1 등): {per_class_perf_text}
+  </div>
+  <div style="font-size:11px;margin-top:2px;color:#333;">
+    ● 클래스별 데이터 분포: {class_counts_text}
+  </div>
+
+  <!-- 기존 요약 정보들도 그대로 노출 -->
   <div style="font-size:11px;margin-top:4px;color:#333;">
     ● 데이터 양: {data_summary}
   </div>
   <div style="font-size:11px;margin-top:2px;color:#333;">
-    ● 수익률 분포: {ret_summary}
+    ● 수익률 분포(요약): {ret_summary}
   </div>
   <div style="font-size:11px;margin-top:2px;color:#333;">
-    ● 검증 커버리지: {coverage_summary}
+    ● 검증 커버리지(검증이 얼마나 넓게 되었는지): {coverage_summary}
+  </div>
+
+  <!-- 전체 문제 여부 한 줄 -->
+  <div style="font-size:11px;margin-top:4px;color:#d32f2f;">
+    ● 전체 문제 여부: {problem_summary}
   </div>
 
   <div style="font-size:11px;color:#777;margin-top:4px;">
@@ -1935,7 +2004,8 @@ def train_log():
     <div style="font-weight:bold;margin-bottom:6px;">3️⃣ 심볼·전략별 자세한 카드</div>
     <div style="font-size:13px;color:#555;margin-bottom:6px;">
         각 카드 하나가 “심볼 + 전략(단기/중기/장기)”의 학습 결과입니다.<br>
-        위에서부터 차근차근 읽으면 어느 부분이 좋은지, 어느 부분을 더 키워야 할지 쉽게 볼 수 있습니다.
+        ● 클래스 수 / 수익률 구간 / 클래스별 성능 / 데이터 분포 / 문제 여부를<br>
+        &nbsp;&nbsp;&nbsp;한 눈에 쉽게 볼 수 있도록 정리했습니다.
     </div>
     {class_cards_html}
 </div>
