@@ -323,6 +323,9 @@ DEFAULT_TRAIN_HEADERS = [
     "class_counts",     # = bin_counts
     "bins",             # = len(bin_edges) - 1
 
+    # 🔥 per-class 성능 저장용
+    "per_class_f1",
+
     # 🔥 학습로그 카드 UI용 필수 6개
     "ui_data_summary",
     "ui_dist_summary",
@@ -331,7 +334,6 @@ DEFAULT_TRAIN_HEADERS = [
     "ui_usable_summary",
     "ui_performance_summary",
 ]
-
 
 
 try:
@@ -488,12 +490,8 @@ def _append_train_log(row: dict):
     except Exception as e:
         print(f"[경고] train_log 기록 실패: {e}")
 
-# logger.log_training_result 를 패치해서
-# → 원래 로깅 + train_log.csv 에 한 줄 더 쓰도록
-if not getattr(logger, "_patched_train_log", False):
-    _orig_ltr = getattr(logger, "log_training_result", None)
 
-  # logger.log_training_result 를 패치해서
+# logger.log_training_result 를 패치해서
 # → 원래 로깅 + train_log.csv 에 한 줄 더 쓰도록
 if not getattr(logger, "_patched_train_log", False):
     _orig_ltr = getattr(logger, "log_training_result", None)
@@ -504,7 +502,7 @@ if not getattr(logger, "_patched_train_log", False):
         1) 원래 logger 로깅 실행
         2) train_log.csv 에 기록할 row 생성
            - bin_edges / bin_counts / class_ranges 등 JSON 문자열도 리스트로 복원
-           - ui_* 요약 필드 생성
+           - ui_* 요약 필드 + 클래스 개수/성능/데이터 분포까지 채움
         """
         # 1) 원래 logger 호출
         if callable(_orig_ltr):
@@ -538,18 +536,45 @@ if not getattr(logger, "_patched_train_log", False):
             "val_loss": kw.get("val_loss", ""),
             "train_loss": kw.get("train_loss", ""),
             "notes": kw.get("notes", ""),
-            # 분포/라벨 관련 필드 (있으면 채움)
+
+            # 데이터 양 / 설정
+            "rows": "",
+            "limit": "",
+            "min": "",
+            "augment_needed": "",
+            "enough_for_training": "",
+
+            # 라벨/분포 관련
             "label_total": "",
             "label_masked": "",
             "label_masked_ratio": "",
             "near_zero": "",
             "near_zero_band": "",
+            "near_zero_count": "",
             "boundary_band": "",
+            "masked_count": "",
             "bin_edges": "",
             "bin_counts": "",
             "bin_spans": "",
             "class_ranges": "",
+            "class_edges": "",
+            "class_counts": "",
+            "bins": "",
             "val_coverage": "",
+
+            # 클래스 메타
+            "num_classes": "",
+            "NUM_CLASSES": kw.get("NUM_CLASSES", ""),
+
+            # 기타 진단값 (이미 헤더에 있음)
+            "usable_samples": "",
+            "class_counts_label_freeze": "",
+            "class_counts_after_assemble": "",
+            "batch_stratified_ok": "",
+
+            # per-class 성능
+            "per_class_f1": "",
+
             # UI 요약용 필드 (구형)
             "ui_status": "",
             "ui_data_amount": "",
@@ -574,17 +599,34 @@ if not getattr(logger, "_patched_train_log", False):
             "val_loss",
             "train_loss",
             "notes",
+            "rows",
+            "limit",
+            "min",
+            "augment_needed",
+            "enough_for_training",
             "label_total",
             "label_masked",
             "label_masked_ratio",
             "near_zero",
             "near_zero_band",
+            "near_zero_count",
             "boundary_band",
+            "masked_count",
             "bin_edges",
             "bin_counts",
             "bin_spans",
             "class_ranges",
+            "class_edges",
+            "class_counts",
+            "bins",
             "val_coverage",
+            "num_classes",
+            "NUM_CLASSES",
+            "usable_samples",
+            "class_counts_label_freeze",
+            "class_counts_after_assemble",
+            "batch_stratified_ok",
+            "per_class_f1",
         ]:
             if k in kw and kw[k] not in (None, ""):
                 row[k] = kw[k]
@@ -607,8 +649,10 @@ if not getattr(logger, "_patched_train_log", False):
         row["bin_counts"] = _restore(row.get("bin_counts"))
         row["bin_spans"] = _restore(row.get("bin_spans"))
         row["class_ranges"] = _restore(row.get("class_ranges"))
-        row["class_edges"] = row.get("bin_edges")
-        row["class_counts"] = row.get("bin_counts")
+        # class_counts 는 bin_counts 로 대체 가능
+        row["class_counts"] = _restore(row.get("class_counts") or row.get("bin_counts"))
+        row["class_edges"] = row.get("class_edges") or row.get("bin_edges")
+        row["per_class_f1"] = _restore(row.get("per_class_f1"))
 
         # bins 계산
         try:
@@ -618,29 +662,49 @@ if not getattr(logger, "_patched_train_log", False):
                 row["bins"] = len(be) - 1
             elif isinstance(bc, list):
                 row["bins"] = len(bc)
-            else:
-                row["bins"] = ""
         except Exception:
-            row["bins"] = ""
+            pass
+
+        # num_classes 없으면 추론해 채움
+        try:
+            if not row.get("num_classes"):
+                num_classes = 0
+                cr = row.get("class_ranges")
+                be2 = row.get("bin_edges")
+                cc2 = row.get("class_counts")
+
+                if isinstance(cr, list) and cr:
+                    num_classes = len(cr)
+                elif isinstance(be2, list) and len(be2) >= 2:
+                    num_classes = len(be2) - 1
+                elif isinstance(cc2, list) and cc2:
+                    num_classes = len(cc2)
+
+                if num_classes:
+                    row["num_classes"] = int(num_classes)
+        except Exception:
+            pass
 
         # UI 요약 필드 생성
         try:
-            total = int(row.get("label_total") or 0)
-            masked = int(row.get("label_masked") or 0)
-            near_zero = int(row.get("near_zero") or 0)
+            # total 은 label_total 이 있으면 우선, 없으면 rows 사용
+            total = int(row.get("label_total") or row.get("rows") or 0)
+            masked = int(row.get("label_masked") or row.get("masked_count") or 0)
+            near_zero = int(row.get("near_zero") or row.get("near_zero_count") or 0)
             near_zero_band = row.get("near_zero_band") or ""
             boundary_band = row.get("boundary_band") or ""
-            val_acc = row.get("val_acc") or 0
-            val_f1 = row.get("val_f1") or 0
+            val_acc = float(row.get("val_acc") or 0)
+            val_f1 = float(row.get("val_f1") or 0)
             status = row.get("status") or ""
             be = row.get("bin_edges") or []
             bc = row.get("bin_counts") or []
             cr = row.get("class_ranges") or []
             cov = row.get("val_coverage") or {}
+            usable = int(row.get("usable_samples") or 0)
 
             # 상태 요약
             if status in ("success", "best"):
-                ui_status = f"⚪ 정상 학습 진행 ({status})"
+                ui_status = f"✅ 정상 학습: 데이터와 모델에 큰 문제 없이 학습이 잘 끝났어요. (status={status})"
             elif status in ("info",):
                 ui_status = f"ℹ️ 참고용 로그 ({status})"
             elif status in ("warn", "warning"):
@@ -651,8 +715,12 @@ if not getattr(logger, "_patched_train_log", False):
                 ui_status = f"상태: {status or '미상'}"
 
             # 데이터 양 요약
+            if total <= 0:
+                total = int(row.get("rows") or 0)
+            rows_used = max(total - masked, 0)
+
             if total > 0:
-                ui_data = f"학습에 사용한 데이터: 총 {total}개 (마스킹 {masked}개, near-zero {near_zero}개)"
+                ui_data = f"학습에 사용한 데이터: 총 {total}개"
             else:
                 ui_data = "학습에 사용된 데이터 양 정보를 아직 찾지 못했어요."
 
@@ -691,8 +759,9 @@ if not getattr(logger, "_patched_train_log", False):
             row["ui_coverage_summary"] = ui_cov
 
             # ==== 새 train_log UI 카드용 요약 필드 (간단·한눈에) ====
-            rows_used = total - masked
-            usable = max(rows_used - near_zero, 0)
+            if usable <= 0:
+                # usable_samples 안 들어왔으면 rows_used - near_zero 로 추정
+                usable = max(rows_used - near_zero, 0)
 
             summary = make_training_summary_fields(
                 rows=int(rows_used),
@@ -700,8 +769,8 @@ if not getattr(logger, "_patched_train_log", False):
                 bin_counts=bc,
                 class_ranges=cr,
                 usable_samples=int(usable),
-                acc=float(val_acc or 0),
-                f1=float(val_f1 or 0),
+                acc=float(val_acc),
+                f1=float(val_f1),
             )
 
             row.update(summary)
@@ -727,7 +796,6 @@ if not getattr(logger, "_patched_train_log", False):
 
     logger.log_training_result = _log_training_result_patched
     logger._patched_train_log = True
-
 
 
 # ✅ 예측 게이트: 안전 임포트(없으면 no-op)
