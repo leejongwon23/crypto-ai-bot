@@ -176,6 +176,7 @@ TRAIN_BASE_HEADERS = [
 TRAIN_EXTRA_HEADERS = [
     "class_edges","class_counts","class_ranges",
     "bin_spans","near_zero_band","near_zero_count",
+    "per_class_f1",  # <--- 이거 한 줄 추가
 ]
 
 # 🔹 실제 CSV에서 사용할 전체 헤더
@@ -973,6 +974,7 @@ def log_training_result(
         "class_counts": json.dumps(class_counts or [], ensure_ascii=False),
         "class_ranges": json.dumps(class_ranges or [], ensure_ascii=False),
         "bin_spans": json.dumps(bin_spans or [], ensure_ascii=False),
+        "per_class_f1": json.dumps(kwargs.get("per_class_f1") or [], ensure_ascii=False),  # <--- 이거 한 줄 추가
         "near_zero_band": float(near_zero_band or 0.0),
         "near_zero_count": int(near_zero_count or 0),
     }
