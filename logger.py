@@ -948,20 +948,121 @@ def log_training_result(
     extras = _parse_train_note(note)
 
     # ───────────────────────────────
-    # 1) 숫자 값 정리
+    # 1) 숫자 값 정리 (acc / f1 / loss)
     # ───────────────────────────────
     try:
         val_acc  = _first_non_none(kwargs.get("val_acc"), accuracy)
         val_f1   = _first_non_none(kwargs.get("val_f1"),  f1)
         val_loss = _first_non_none(kwargs.get("val_loss"), loss)
-        val_acc  = float(val_acc)  if val_acc  not in [None,""] else 0.0
-        val_f1   = float(val_f1)   if val_f1   not in [None,""] else 0.0
-        val_loss = float(val_loss) if val_loss not in [None,""] else 0.0
+        val_acc  = float(val_acc)  if val_acc  not in [None, ""] else 0.0
+        val_f1   = float(val_f1)   if val_f1   not in [None, ""] else 0.0
+        val_loss = float(val_loss) if val_loss not in [None, ""] else 0.0
     except Exception:
         val_acc, val_f1, val_loss = 0.0, 0.0, 0.0
 
     # ───────────────────────────────
-    # 2) 기존 기본 컬럼 + 수익률/클래스 요약 컬럼 추가
+    # 2) 라벨/클래스 요약 계산
+    # ───────────────────────────────
+    # 2-1) 총 샘플 수(label_total)
+    total_samples = 0
+    try:
+        if usable_samples not in [None, "", "nan"]:
+            total_samples = int(usable_samples)
+        elif extras.get("rows") not in [None, "", "nan"]:
+            total_samples = int(extras.get("rows"))
+        elif y_true is not None:
+            try:
+                total_samples = int(len(y_true))
+            except Exception:
+                total_samples = 0
+    except Exception:
+        total_samples = 0
+
+    # 2-2) 클래스 수(label_classes)
+    n_classes = 0
+    try:
+        if NUM_CLASSES not in [None, 0]:
+            n_classes = int(NUM_CLASSES)
+        elif num_classes not in [None, 0]:
+            n_classes = int(num_classes)
+        elif isinstance(class_counts, (list, tuple)) and len(class_counts) > 0:
+            n_classes = int(len(class_counts))
+        elif isinstance(class_edges, (list, tuple)) and len(class_edges) > 1:
+            # 엣지 n개면 구간은 n-1개
+            n_classes = int(len(class_edges) - 1)
+    except Exception:
+        n_classes = 0
+
+    # 2-3) 클래스 분포 엔트로피(label_entropy)
+    label_entropy = 0.0
+    try:
+        if isinstance(class_counts, (list, tuple)) and len(class_counts) > 0:
+            import math
+            total_cnt = float(sum(class_counts))
+            if total_cnt > 0:
+                probs = [c / total_cnt for c in class_counts if c is not None and c > 0]
+                if probs:
+                    label_entropy = -sum(p * math.log(p + 1e-12, 2) for p in probs)
+    except Exception:
+        label_entropy = 0.0
+
+    # 2-4) 사람 눈에 보기 쉬운 수익률 구간 텍스트(class_ranges_text)
+    class_ranges_text = ""
+    try:
+        # 클래스가 2개 이상일 때만 의미 있게 표시
+        if n_classes > 1 and isinstance(class_ranges, (list, tuple)) and len(class_ranges) > 0:
+            pieces = []
+            for idx, rng in enumerate(class_ranges):
+                try:
+                    lo, hi = rng
+                    lo_pct = float(lo) * 100.0
+                    hi_pct = float(hi) * 100.0
+                    pieces.append(f"C{idx}: {lo_pct:.2f}% ~ {hi_pct:.2f}%")
+                except Exception:
+                    continue
+            if pieces:
+                class_ranges_text = ", ".join(pieces)
+    except Exception:
+        class_ranges_text = ""
+
+    # 2-5) 클래스 카운트 JSON (클래스별 데이터 개수)
+    try:
+        label_counts_json = json.dumps(class_counts or [], ensure_ascii=False)
+    except Exception:
+        label_counts_json = "[]"
+
+    # ───────────────────────────────
+    # 3) health 코드 생성 (상태 요약)
+    # ───────────────────────────────
+    health_flags = []
+
+    try:
+        # status가 success가 아니면 STATUS_FAIL 플래그
+        if str(status).lower() not in ["success", "ok"]:
+            health_flags.append("STATUS_FAIL")
+
+        # F1이 0이면 F1_ZERO 플래그
+        if val_f1 <= 0.0:
+            health_flags.append("F1_ZERO")
+
+        # 클래스가 1개 이하면 LABEL_SINGLE_CLASS
+        if n_classes <= 1:
+            health_flags.append("LABEL_SINGLE_CLASS")
+
+        # 샘플 수가 너무 작으면 LOW_DATA (엄청 작은 값만 경고)
+        if total_samples > 0 and total_samples < 50:
+            health_flags.append("LOW_DATA")
+    except Exception:
+        pass
+
+    if not health_flags:
+        health = "OK"
+    else:
+        # 중복 제거 + 안정적인 정렬
+        health = "|".join(sorted(set(health_flags)))
+
+    # ───────────────────────────────
+    # 4) CSV에 쓸 row_dict 구성
     # ───────────────────────────────
     row_dict = {
         "timestamp": now,
@@ -972,37 +1073,53 @@ def log_training_result(
         "val_f1": val_f1,
         "val_loss": val_loss,
 
-        "engine": extras.get("engine",""),
-        "window": extras.get("window",""),
-        "recent_cap": extras.get("recent_cap",""),
-        "rows": extras.get("rows",""),
-        "limit": extras.get("limit",""),
-        "min": extras.get("min",""),
-        "augment_needed": extras.get("augment_needed",""),
-        "enough_for_training": extras.get("enough_for_training",""),
+        "engine": extras.get("engine", ""),
+        "window": extras.get("window", ""),
+        "recent_cap": extras.get("recent_cap", ""),
+        "rows": extras.get("rows", ""),
+        "limit": extras.get("limit", ""),
+        "min": extras.get("min", ""),
+        "augment_needed": extras.get("augment_needed", ""),
+        "enough_for_training": extras.get("enough_for_training", ""),
         "note": str(note or ""),
         "source_exchange": str(source_exchange or "BYBIT"),
         "status": str(status or "success"),
 
-
-        # 🔥 아래부터 추가된 “수익률/클래스 전체요약”
+        # 🔥 수익률/클래스 원본 정보 (번호/경계/카운트 등)
         "class_edges": json.dumps(class_edges or [], ensure_ascii=False),
         "class_counts": json.dumps(class_counts or [], ensure_ascii=False),
         "class_ranges": json.dumps(class_ranges or [], ensure_ascii=False),
         "bin_spans": json.dumps(bin_spans or [], ensure_ascii=False),
-        
-        # ✅ [추가됨] 클래스별 F1 및 상세 정보 저장
+
+        # ✅ 클래스별 성능/마스크 정보
         "per_class_f1": json.dumps(per_class_f1 or [], ensure_ascii=False),
         "masked_count": int(masked_count or 0),
         "NUM_CLASSES": int(NUM_CLASSES or 0),
-        "usable_samples": int(usable_samples or kwargs.get("rows", 0)),
-        
+        "usable_samples": int(usable_samples or extras.get("rows") or 0),
+
         "near_zero_band": float(near_zero_band or 0.0),
         "near_zero_count": int(near_zero_count or 0),
+
+        # ✅ 여기부터 /train-log 카드에서 바로 쓰는 요약값들
+        "label_total": int(total_samples or 0),
+        "label_classes": int(n_classes or 0),
+        "label_entropy": float(label_entropy or 0.0),
+        "label_counts_json": label_counts_json,
+
+        # 검증 커버리지는 아직 따로 집계가 없으니 0으로 명시 (거짓말 금지)
+        "val_num_classes": 0,
+        "val_covered": 0,
+        "val_coverage": 0.0,
+
+        # 사람이 바로 읽을 수 있는 구간 텍스트
+        "class_ranges_text": class_ranges_text,
+
+        # 건강 상태 코드
+        "health": health,
     }
 
     # ───────────────────────────────
-    # 3) CSV에 추가
+    # 5) CSV에 추가 + F1=0 경고 출력 + 대시보드 업데이트
     # ───────────────────────────────
     try:
         if _READONLY_FS:
@@ -1015,7 +1132,7 @@ def log_training_result(
                 w.writerow(row_dict)
 
             # ──────────────────────
-            # 4) F1=0 경고 유지
+            # 6) F1=0 경고 유지
             # ──────────────────────
             _f1_key = (str(symbol), str(strategy))
             if not hasattr(log_training_result, "_f1_zero"):
@@ -1026,7 +1143,7 @@ def log_training_result(
                 n = log_training_result._f1_zero[_f1_key]
                 if n == 1:
                     print(f"🟠 [경고] F1=0.0 발생 → {symbol}-{strategy} {model} (1회)")
-                elif n % int(os.getenv('F1_ZERO_WARN_EVERY','5')) == 0:
+                elif n % int(os.getenv('F1_ZERO_WARN_EVERY', '5')) == 0:
                     print(f"🟠 [요약] F1=0.0 연속 {n}회 → {symbol}-{strategy} {model}")
             else:
                 if log_training_result._f1_zero.get(_f1_key, 0) > 0:
@@ -1037,7 +1154,7 @@ def log_training_result(
                 f"trainlog:{symbol}:{strategy}:{model}",
                 f"[✅ 학습 로그 기록] {symbol}-{strategy} {model} val_f1={val_f1:.4f} status={status}"
             )
-            
+
             # 대시보드 업데이트 (호환성 유지)
             update_train_dashboard(symbol, strategy, model)
 
