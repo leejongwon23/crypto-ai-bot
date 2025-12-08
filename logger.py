@@ -984,6 +984,7 @@ def log_training_result(
         "source_exchange": str(source_exchange or "BYBIT"),
         "status": str(status or "success"),
 
+
         # 🔥 아래부터 추가된 “수익률/클래스 전체요약”
         "class_edges": json.dumps(class_edges or [], ensure_ascii=False),
         "class_counts": json.dumps(class_counts or [], ensure_ascii=False),
