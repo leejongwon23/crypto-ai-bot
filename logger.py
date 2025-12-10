@@ -948,21 +948,53 @@ def log_training_result(
     extras = _parse_train_note(note)
 
     # ───────────────────────────────
+    # 0) 안전 변환 헬퍼
+    # ───────────────────────────────
+    def _safe_float(x, default=0.0):
+        try:
+            if x is None:
+                return float(default)
+            if isinstance(x, str):
+                s = x.strip()
+                if s == "" or s.lower() in {"nan", "none", "null"}:
+                    return float(default)
+                return float(s)
+            return float(x)
+        except Exception:
+            return float(default)
+
+    def _safe_int(x, default=0):
+        try:
+            if x is None:
+                return int(default)
+            if isinstance(x, str):
+                s = x.strip()
+                if s == "" or s.lower() in {"nan", "none", "null"}:
+                    return int(default)
+                return int(float(s))
+            return int(x)
+        except Exception:
+            return int(default)
+
+    # ───────────────────────────────
     # 1) 숫자 값 정리
     # ───────────────────────────────
     try:
         val_acc  = _first_non_none(kwargs.get("val_acc"), accuracy)
         val_f1   = _first_non_none(kwargs.get("val_f1"),  f1)
         val_loss = _first_non_none(kwargs.get("val_loss"), loss)
-        val_acc  = float(val_acc)  if val_acc  not in [None,""] else 0.0
-        val_f1   = float(val_f1)   if val_f1   not in [None,""] else 0.0
-        val_loss = float(val_loss) if val_loss not in [None,""] else 0.0
+        val_acc  = _safe_float(val_acc, 0.0)
+        val_f1   = _safe_float(val_f1, 0.0)
+        val_loss = _safe_float(val_loss, 0.0)
     except Exception:
         val_acc, val_f1, val_loss = 0.0, 0.0, 0.0
 
+    # usable_samples 기본값: 파싱된 rows를 최대한 활용
+    if usable_samples is None:
+        usable_samples = extras.get("rows", 0)
+
     # ───────────────────────────────
     # 2) CSV에 기록할 전체 row 구성
-    #    → 학습로그 카드에 필요한 모든 정보 포함
     # ───────────────────────────────
     row_dict = {
         "timestamp": now,
@@ -996,16 +1028,16 @@ def log_training_result(
         "class_ranges": json.dumps(class_ranges or [], ensure_ascii=False),
         "bin_spans": json.dumps(bin_spans or [], ensure_ascii=False),
 
-        "near_zero_band": float(near_zero_band or 0.0),
-        "near_zero_count": int(near_zero_count or 0),
+        "near_zero_band": _safe_float(near_zero_band, 0.0),
+        "near_zero_count": _safe_int(near_zero_count, 0),
 
         # 🔥 클래스 총 개수 + 학습에 실제 등장한 클래스
-        "NUM_CLASSES": int(NUM_CLASSES or 0),
-        "usable_samples": int(usable_samples or extras.get("rows", 0)),
+        "NUM_CLASSES": _safe_int(NUM_CLASSES, 0),
+        "usable_samples": _safe_int(usable_samples, 0),
 
         # 🔥 클래스별 F1
         "per_class_f1": json.dumps(per_class_f1 or [], ensure_ascii=False),
-        "masked_count": int(masked_count or 0),
+        "masked_count": _safe_int(masked_count, 0),
     }
 
     # ───────────────────────────────
