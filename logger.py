@@ -1074,11 +1074,12 @@ def log_training_result(
             f"[📘 기록됨] {symbol}-{strategy} {model} val_f1={val_f1:.4f} status={status}"
         )
 
-        # 🔥 대시보드 업데이트
+        # 🔥 학습 한 번 끝날 때마다 대시보드 갱신
         update_train_dashboard(symbol, strategy, model)
 
     except Exception as e:
         print(f"[⚠️ 학습 로그 기록 실패] {e}")
+
 
 # -------------------------
 # 수익률 클래스 경계 로그
@@ -1470,6 +1471,40 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
         class_ranges_text = ""
 
     # ------------------------------------------------------
+    # 4.5) 수익률 분포(return_distribution.csv) 요약
+    # ------------------------------------------------------
+    ret_min = ret_p25 = ret_p50 = ret_p75 = ret_p90 = ret_p95 = ret_p99 = ret_max = 0.0
+    ret_count = 0
+    ret_df = _safe_read_df(os.path.join(LOG_DIR, "return_distribution.csv"))
+    if not ret_df.empty and {"symbol", "strategy"}.issubset(ret_df.columns):
+        rsub = ret_df[(ret_df["symbol"] == symbol) & (ret_df["strategy"] == strategy)]
+        if not rsub.empty:
+            rlast = rsub.tail(1).iloc[0]
+            ret_min   = _f(rlast.get("min"), 0.0)
+            ret_p25   = _f(rlast.get("p25"), 0.0)
+            ret_p50   = _f(rlast.get("p50"), 0.0)
+            ret_p75   = _f(rlast.get("p75"), 0.0)
+            ret_p90   = _f(rlast.get("p90"), 0.0)
+            ret_p95   = _f(rlast.get("p95"), 0.0)
+            ret_p99   = _f(rlast.get("p99"), 0.0)
+            ret_max   = _f(rlast.get("max"), 0.0)
+            ret_count = _i(rlast.get("count"), 0)
+
+    # ------------------------------------------------------
+    # 4.6) 검증 커버리지(validation_coverage.csv)
+    # ------------------------------------------------------
+    val_num_classes = val_covered = 0
+    val_coverage = 0.0
+    cov_df = _safe_read_df(os.path.join(LOG_DIR, "validation_coverage.csv"))
+    if not cov_df.empty and {"symbol", "strategy"}.issubset(cov_df.columns):
+        csub = cov_df[(cov_df["symbol"] == symbol) & (cov_df["strategy"] == strategy)]
+        if not csub.empty:
+            clast = csub.tail(1).iloc[0]
+            val_num_classes = _i(clast.get("num_classes"), 0)
+            val_covered     = _i(clast.get("covered"), 0)
+            val_coverage    = _f(clast.get("coverage"), 0.0)
+
+    # ------------------------------------------------------
     # 5) NaN 원인 분석
     # ------------------------------------------------------
     nan_reasons = []
@@ -1513,6 +1548,30 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
 
         "class_ranges_text": class_ranges_text,
 
+        # 🔥 train_log 에서 직접 들고 오는 값들
+        "near_zero_band": _f(trow.get("near_zero_band"), 0.0),
+        "near_zero_count": _i(trow.get("near_zero_count"), 0),
+
+        "data_rows": trow.get("rows", ""),
+        "enough_for_training": trow.get("enough_for_training", ""),
+        "augment_needed": trow.get("augment_needed", ""),
+
+        # 🔥 return_distribution 요약
+        "ret_min": ret_min,
+        "ret_p25": ret_p25,
+        "ret_p50": ret_p50,
+        "ret_p75": ret_p75,
+        "ret_p90": ret_p90,
+        "ret_p95": ret_p95,
+        "ret_p99": ret_p99,
+        "ret_max": ret_max,
+        "ret_count": ret_count,
+
+        # 🔥 validation_coverage 요약
+        "val_num_classes": val_num_classes,
+        "val_covered": val_covered,
+        "val_coverage": val_coverage,
+
         "status": trow.get("status",""),
         "note": trow.get("note",""),
         "health": health,
@@ -1535,6 +1594,7 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
     df_new = pd.concat([df_old, pd.DataFrame([summary_row])], ignore_index=True)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     df_new.to_csv(out_path, index=False, encoding="utf-8-sig")
+
 
 # 🔥🔥🔥 여기부터 추가: /train-log 카드용 요약 함수 🔥🔥🔥
 def get_train_log_cards(max_cards: int = 200):
