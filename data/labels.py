@@ -64,16 +64,15 @@ MERGE_SPARSE_LABEL_BINS = os.getenv("MERGE_SPARSE_LABEL_BINS", "0").strip().lowe
 _TAIL_TRIM_FRAC = float(os.getenv("LABEL_TAIL_TRIM_FRAC", "0.005"))
 
 # ============================================================
-# 🔥 (핵심 수정) 전략별 미래 구간 H 복구
+# ✅ (핵심 수정) "캔들 1개 내부 high/low" 기준으로 통일
 # ------------------------------------------------------------
-# 단기: 미래 1개 4h 캔들
-# 중기: 미래 1일 → 6개 4h 캔들
-# 장기: 미래 1주 → 42개 4h 캔들
+# - 단기/중기/장기 모두 H=1
+# - 미래 여러 캔들 극단값(42개 중 max/min) 금지
 # ============================================================
 _FIXED_H = {
     "단기": 1,
-    "중기": 6,     # ← 복구
-    "장기": 42,    # ← 복구
+    "중기": 1,
+    "장기": 1,
 }
 
 _DEFAULT_STRATEGY_HOURS = {
@@ -125,20 +124,23 @@ def _normalize_strategy_name(strategy: str) -> str:
     return s
 
 # ============================================================
-# 미래 구간 H 반환 — (수정 적용 완료)
+# 미래 구간 H 반환 — (✅ 통일: 항상 1캔들)
 # ============================================================
 def _get_fixed_horizon_candles(strategy: str) -> int:
     pure = _normalize_strategy_name(strategy)
     return int(_FIXED_H.get(pure, 1))
 
 # ============================================================
-# 미래 수익률 계산 (🔥 NaN / 0 base 처리 버그 수정)
+# ✅ 수익률 계산 (캔들 1개 내부 high/low) — 괴물값(600%/1000%) 원천 차단
+# ------------------------------------------------------------
+# 기존: (i+1 ~ i+H) 미래 구간 전체에서 max/min
+# 변경: (i ~ i+1) "현재 캔들"의 high/low만 사용
 # ============================================================
 def _future_extreme_signed_returns_by_candles(df: pd.DataFrame, H: int):
     """
     각 시작 캔들 i 에 대해:
     - base = 해당 시점 close (유효할 때만)
-    - 미래 H개 구간의 high/low 를 보고 최대 상승/최대 하락 비율 계산
+    - ✅ 현재 캔들 1개에서 high/low 사용
     - close/high/low 가 NaN 이거나 base <= 0 이면 → up/dn = 0 처리
     """
     n = len(df)
@@ -151,42 +153,37 @@ def _future_extreme_signed_returns_by_candles(df: pd.DataFrame, H: int):
 
     up = np.zeros(n, dtype=np.float32)
     dn = np.zeros(n, dtype=np.float32)
-    H = max(1, int(H))
+
+    # ✅ 무조건 1캔들
+    H = 1
 
     for i in range(n):
-        start = i + 1
-        end = min(n, i + 1 + H)
-
-        if start >= end:
-            # 미래 캔들이 없으면 변화 없음
-            continue
-
         base = close[i]
 
-        # 🔥 base 가 NaN 이거나 0/음수면 → 해당 지점은 학습에서 의미 없는 캔들로 보고 0 처리
+        # base NaN/0/음수면 skip (0 유지)
         if not np.isfinite(base) or base <= 0:
             continue
 
-        window_high = high[start:end]
-        window_low = low[start:end]
+        # 현재 캔들 범위만 사용: [i, i+1)
+        j = min(n, i + H)
+        window_high = high[i:j]
+        window_low  = low[i:j]
 
-        # NaN 제거 후 유효 값만 사용
         valid_high = window_high[np.isfinite(window_high)]
-        valid_low = window_low[np.isfinite(window_low)]
+        valid_low  = window_low[np.isfinite(window_low)]
 
         if valid_high.size == 0 or valid_low.size == 0:
-            # 미래 구간이 온통 NaN이면 변화 없음
             continue
 
         future_high = float(valid_high.max())
-        future_low = float(valid_low.min())
+        future_low  = float(valid_low.min())
 
         if not np.isfinite(future_high) or not np.isfinite(future_low):
             continue
 
         base_safe = base + 1e-12
         up[i] = float((future_high - base) / base_safe)
-        dn[i] = float((future_low - base) / base_safe)
+        dn[i] = float((future_low  - base) / base_safe)
 
     return up.astype(np.float32), dn.astype(np.float32)
 
@@ -373,7 +370,7 @@ def _auto_target_bins(df_len: int) -> int:
 # ============================================================
 def compute_label_returns(df: pd.DataFrame, symbol: str, strategy: str):
     pure = _normalize_strategy_name(strategy)
-    H = _get_fixed_horizon_candles(pure)
+    H = _get_fixed_horizon_candles(pure)  # ✅ 이제 항상 1
     up, dn = _future_extreme_signed_returns_by_candles(df, H)
     gains = _pick_per_candle_gain(up, dn)
     target = _auto_target_bins(len(df))
@@ -518,7 +515,7 @@ def make_labels(df, symbol, strategy, group_id=None):
     )
 
 # ============================================================
-# make_labels_for_horizon (RAW용)
+# make_labels_for_horizon (RAW용)  — (기존 유지)
 # ============================================================
 def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
     n = len(df)
