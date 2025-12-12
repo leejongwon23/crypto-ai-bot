@@ -132,16 +132,22 @@ def _get_fixed_horizon_candles(strategy: str) -> int:
     return int(_FIXED_H.get(pure, 1))
 
 # ============================================================
-# 미래 수익률 계산
+# 미래 수익률 계산 (🔥 NaN / 0 base 처리 버그 수정)
 # ============================================================
 def _future_extreme_signed_returns_by_candles(df: pd.DataFrame, H: int):
+    """
+    각 시작 캔들 i 에 대해:
+    - base = 해당 시점 close (유효할 때만)
+    - 미래 H개 구간의 high/low 를 보고 최대 상승/최대 하락 비율 계산
+    - close/high/low 가 NaN 이거나 base <= 0 이면 → up/dn = 0 처리
+    """
     n = len(df)
     if n == 0:
         return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.float32)
 
-    close = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float32)
-    high  = pd.to_numeric(df.get("high", df["close"]), errors="coerce").to_numpy(dtype=np.float32)
-    low   = pd.to_numeric(df.get("low",  df["close"]), errors="coerce").to_numpy(dtype=np.float32)
+    close = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float64)
+    high  = pd.to_numeric(df.get("high", df["close"]), errors="coerce").to_numpy(dtype=np.float64)
+    low   = pd.to_numeric(df.get("low",  df["close"]), errors="coerce").to_numpy(dtype=np.float64)
 
     up = np.zeros(n, dtype=np.float32)
     dn = np.zeros(n, dtype=np.float32)
@@ -152,17 +158,37 @@ def _future_extreme_signed_returns_by_candles(df: pd.DataFrame, H: int):
         end = min(n, i + 1 + H)
 
         if start >= end:
-            up[i], dn[i] = 0.0, 0.0
+            # 미래 캔들이 없으면 변화 없음
             continue
 
-        base = close[i] if close[i] > 0 else 1e-6
-        future_high = float(np.max(high[start:end]))
-        future_low  = float(np.min(low[start:end]))
+        base = close[i]
 
-        up[i] = (future_high - base) / (base + 1e-12)
-        dn[i] = (future_low  - base) / (base + 1e-12)
+        # 🔥 base 가 NaN 이거나 0/음수면 → 해당 지점은 학습에서 의미 없는 캔들로 보고 0 처리
+        if not np.isfinite(base) or base <= 0:
+            continue
 
-    return up, dn
+        window_high = high[start:end]
+        window_low = low[start:end]
+
+        # NaN 제거 후 유효 값만 사용
+        valid_high = window_high[np.isfinite(window_high)]
+        valid_low = window_low[np.isfinite(window_low)]
+
+        if valid_high.size == 0 or valid_low.size == 0:
+            # 미래 구간이 온통 NaN이면 변화 없음
+            continue
+
+        future_high = float(valid_high.max())
+        future_low = float(valid_low.min())
+
+        if not np.isfinite(future_high) or not np.isfinite(future_low):
+            continue
+
+        base_safe = base + 1e-12
+        up[i] = float((future_high - base) / base_safe)
+        dn[i] = float((future_low - base) / base_safe)
+
+    return up.astype(np.float32), dn.astype(np.float32)
 
 # ============================================================
 # RAW gain 선택
