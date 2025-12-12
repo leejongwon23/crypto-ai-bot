@@ -1388,7 +1388,7 @@ def _drop_duplicate_windows(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 def create_dataset(features, window=10, strategy="단기", input_size=None):
     """
     피처 리스트 → 스케일 → 윈도우 → 라벨.
-    YOPO 라벨 시스템과 100% 동일하게 labels.py의 make_labels만 사용.
+    ✅ 라벨은 반드시 '원본 가격(close_raw/high_raw/low_raw)'로만 계산한다.
     """
     import pandas as _pd
 
@@ -1417,14 +1417,18 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         df = df.drop(columns=["strategy"], errors="ignore")
 
-        # 라벨용 컬럼 보정
-        for c in ["close", "high", "low"]:
-            df[c] = pd.to_numeric(df.get(c, np.nan), errors="coerce")
-        df[["close", "high", "low"]] = df[["close", "high", "low"]].ffill()
-        df = df.dropna(subset=["close", "high", "low"])
+        # ✅ 라벨용 원본 가격 컬럼 확보 (없으면 close/high/low를 fallback)
+        if "close_raw" not in df.columns: df["close_raw"] = df.get("close", np.nan)
+        if "high_raw"  not in df.columns: df["high_raw"]  = df.get("high",  np.nan)
+        if "low_raw"   not in df.columns: df["low_raw"]   = df.get("low",   np.nan)
 
-        # 스케일링할 숫자화
-        feature_cols = [c for c in df.columns if c != "timestamp"]
+        for c in ["close_raw", "high_raw", "low_raw"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df[["close_raw", "high_raw", "low_raw"]] = df[["close_raw", "high_raw", "low_raw"]].ffill()
+        df = df.dropna(subset=["close_raw", "high_raw", "low_raw"])
+
+        # ✅ 스케일링 대상은 '입력 피처'만 (raw 가격은 절대 스케일/학습입력에 포함하지 않음)
+        feature_cols = [c for c in df.columns if c not in ("timestamp", "close_raw", "high_raw", "low_raw")]
         for c in feature_cols:
             df[c] = pd.to_numeric(df[c], errors="coerce")
         df = df.dropna(subset=feature_cols)
@@ -1438,7 +1442,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         return _dummy(symbol_name)
 
     # =======================
-    # 2) 스케일링
+    # 2) 스케일링 (입력 피처만)
     # =======================
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(df[feature_cols].astype(np.float32))
@@ -1459,7 +1463,7 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         input_cols = keep
 
     # =======================
-    # 3) ★ 정식 YOPO 라벨 계산 (labels.make_labels) ★
+    # 3) ✅ 정식 YOPO 라벨 계산 (원본 가격만 사용)
     # =======================
     y_seq = None
     class_ranges_used = None
@@ -1468,6 +1472,9 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
     bin_spans = None
 
     try:
+        price_for_label = df[["timestamp", "close_raw", "high_raw", "low_raw"]].copy()
+        price_for_label = price_for_label.rename(columns={"close_raw": "close", "high_raw": "high", "low_raw": "low"})
+
         (
             _gains_from_labeler,
             labels_full,
@@ -1476,15 +1483,13 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
             bin_counts,
             bin_spans,
         ) = _make_labels(
-            df[["timestamp", "close", "high", "low"]],
+            price_for_label,
             symbol=symbol_name,
             strategy=strategy,
             group_id=None,
         )
 
-        # 라벨 길이 검증
         if labels_full is not None and len(labels_full) == len(df):
-            # 윈도우 offset 적용 (window 이후부터 y 등록)
             y_seq = labels_full[window:len(df)]
             class_ranges_used = class_ranges
 
@@ -1492,7 +1497,6 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         safe_failed_result(symbol_name, strategy, reason=f"make_labels 실패: {e}")
         return _dummy(symbol_name)
 
-    # 라벨 없으면 즉시 종료
     if y_seq is None or len(y_seq) == 0:
         safe_failed_result(symbol_name, strategy, reason="labels_empty_skip_backup")
         return _dummy(symbol_name)
@@ -1543,15 +1547,18 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
 
         if class_ranges_used is not None and len(class_ranges_used) > 1 and eps > 0:
             stops = np.array([b for (_, b) in class_ranges_used[:-1]], dtype=np.float64)
-            closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float64)
-            pct = np.diff(closes) / (closes[:-1] + 1e-6)
-            vals = np.asarray(pct[-len(y):], dtype=np.float64)
-            near = np.any(np.abs(vals[:, None] - stops[None, :]) <= eps, axis=1)
-            idx_edge = np.where(near)[0]
-            if idx_edge.size > 0:
-                dup = min(len(idx_edge), max(1, len(y) // 20))
-                X = np.concatenate([X, X[idx_edge[:dup]]], axis=0)
-                y = np.concatenate([y, y[idx_edge[:dup]]], axis=0)
+
+            # ✅ raw close로만 경계 체크
+            closes = pd.to_numeric(df["close_raw"], errors="coerce").to_numpy(dtype=np.float64)
+            if len(closes) >= 2:
+                pct = np.diff(closes) / (closes[:-1] + 1e-6)
+                vals = np.asarray(pct[-len(y):], dtype=np.float64)
+                near = np.any(np.abs(vals[:, None] - stops[None, :]) <= eps, axis=1)
+                idx_edge = np.where(near)[0]
+                if idx_edge.size > 0:
+                    dup = min(len(idx_edge), max(1, len(y) // 20))
+                    X = np.concatenate([X, X[idx_edge[:dup]]], axis=0)
+                    y = np.concatenate([y, y[idx_edge[:dup]]], axis=0)
     except Exception:
         pass
 
@@ -1569,30 +1576,33 @@ def create_dataset(features, window=10, strategy="단기", input_size=None):
         pass
 
     # =======================
-    # 8) 메타 정보 부착
+    # 8) 메타 정보 (X에 attrs 붙이되, 실패해도 학습은 계속)
     # =======================
     class_ranges_final = class_ranges_used
     num_classes_final = len(class_ranges_final) if class_ranges_final is not None else 0
 
-    X.attrs = {
+    meta_attrs = {
         "num_classes": int(num_classes_final),
         "class_ranges": class_ranges_final,
         "class_groups": cfg_get_class_groups(num_classes_final, 5) if num_classes_final > 0 else [],
         "allow_trainer_class_collapse": False,
     }
-
     try:
         if edges is not None:
-            X.attrs["bin_edges"] = [float(e) for e in edges]
+            meta_attrs["bin_edges"] = [float(e) for e in edges]
         if bin_counts is not None:
-            X.attrs["bin_counts"] = [int(c) for c in bin_counts]
+            meta_attrs["bin_counts"] = [int(c) for c in bin_counts]
         if bin_spans is not None:
-            X.attrs["bin_spans_pct"] = [float(s) for s in bin_spans]
+            meta_attrs["bin_spans_pct"] = [float(s) for s in bin_spans]
+    except Exception:
+        pass
+
+    try:
+        setattr(X, "attrs", meta_attrs)
     except Exception:
         pass
 
     return X, y
-    
 
 
 # ========================= 추론/데이터셋 헬퍼 =========================
@@ -1678,26 +1688,56 @@ def build_training_dataset(symbol: str, strategy: str, window: int, input_size: 
     학습용 데이터셋 생성:
     - 항상 최신 캔들을 기준으로 학습하기 위해 force_refresh=True 로 강제 새 수집.
     - 피처도 force_refresh=True 로 새로 계산.
+    ✅ 라벨은 반드시 df_price(원본 가격) 기준으로 계산되도록 close_raw/high_raw/low_raw를 주입한다.
     """
     df_price = get_kline_by_strategy(symbol, strategy, force_refresh=True)
     feat_df = compute_features(symbol, df_price, strategy, force_refresh=True)
+
     if not isinstance(feat_df, pd.DataFrame) or feat_df.empty:
         X = np.zeros((1, window, input_size if input_size else MIN_FEATURES), dtype=np.float32)
         y = np.zeros((1,), dtype=np.int64)
         return X, y, {"error": "no_features"}
+
+    # ✅ 원본 가격(라벨용) 준비
+    price_base = df_price[["timestamp", "close", "high", "low"]].copy() if isinstance(df_price, pd.DataFrame) else pd.DataFrame()
+    if not price_base.empty:
+        price_base["timestamp"] = _parse_ts_series(price_base["timestamp"])
+        price_base = price_base.dropna(subset=["timestamp"]).sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
+        for c in ["close", "high", "low"]:
+            price_base[c] = pd.to_numeric(price_base[c], errors="coerce")
+        price_base = price_base.dropna(subset=["close", "high", "low"])
+
+    # ✅ feat_df timestamp 정리
+    records_df = feat_df.copy()
+    records_df["timestamp"] = _parse_ts_series(records_df["timestamp"])
+    records_df = records_df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
+    # ✅ timestamp로 원본 가격을 asof로 붙이기 (라벨용 raw 컬럼)
+    if not price_base.empty:
+        merged = pd.merge_asof(
+            records_df.sort_values("timestamp"),
+            price_base.rename(columns={"close": "close_raw", "high": "high_raw", "low": "low_raw"}).sort_values("timestamp"),
+            on="timestamp",
+            direction="backward",
+            tolerance=_guess_tolerance_by_strategy(strategy),
+        )
+        records_df = merged
+
     # 모델 학습용 리스트 레코드로 변환
-    records = feat_df.copy()
-    records["symbol"] = symbol
-    recs = records.to_dict(orient="records")
+    records_df["symbol"] = symbol
+    recs = records_df.to_dict(orient="records")
+
     X, y = create_dataset(recs, window=window, strategy=strategy, input_size=input_size)
+
     meta: Dict[str, Any] = {
         "n": int(len(y)),
         "F": int(X.shape[-1]),
     }
-    # ✅ create_dataset가 넣어둔 라벨 메타 그대로 밖으로
     for k, v in getattr(X, "attrs", {}).items():
         meta[k] = v
+
     return X, y, meta
+
 
 def get_price_source(symbol: str, strategy: str) -> str:
     df = get_kline_by_strategy(symbol, strategy)
