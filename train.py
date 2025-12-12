@@ -503,7 +503,6 @@ def _normalize_train_row(row: dict) -> dict:
     return r
 
 
-
 def _append_train_log(row: dict):
     try:
         _ensure_train_log()
@@ -522,258 +521,260 @@ if not getattr(logger, "_patched_train_log", False):
     _orig_ltr = getattr(logger, "log_training_result", None)
 
     def _log_training_result_patched(*args, **kw):
-    """
-    logger.log_training_result 를 가로채서:
-    1) 원래 logger 로깅 실행
-    2) train_log.csv 에 기록할 row 생성
-       - 핵심: note(운영로그 요약)를 train_log.csv에 100% 반영
-       - 리스트/딕트는 CSV에 안전하게 JSON 문자열로 저장
-       - ui_* 요약 필드 + 클래스/분포/성능까지 채움
-    """
-    # 1) 원래 logger 호출
-    if callable(_orig_ltr):
-        try:
-            _orig_ltr(*args, **kw)
-        except Exception as e:
-            print(f"[경고] logger.log_training_result 실패: {e}", flush=True)
+        """
+        logger.log_training_result 를 가로채서:
+        1) 원래 logger 로깅 실행
+        2) train_log.csv 에 기록할 row 생성
+           - 핵심: note(운영로그 요약)를 train_log.csv에 100% 반영
+           - 리스트/딕트는 CSV에 안전하게 JSON 문자열로 저장
+           - ui_* 요약 필드 + 클래스/분포/성능까지 채움
+        """
 
-    # 2) symbol/strategy/model 복구
-    symbol = args[0] if len(args) > 0 else kw.get("symbol")
-    strategy = args[1] if len(args) > 1 else kw.get("strategy")
-    model = args[2] if len(args) > 2 else kw.get("model", "")
-
-    # kw 안에 result dict가 들어오는 경우 우선 흡수
-    result_dict = None
-    if "result" in kw and isinstance(kw["result"], dict):
-        result_dict = kw["result"]
-
-    # ---- CSV 저장용 row 기본틀 (중요: note 포함) ----
-    row: Dict[str, Any] = {
-        "timestamp": datetime.now(pytz.timezone("Asia/Seoul")).isoformat(),
-        "symbol": symbol,
-        "strategy": strategy,
-        "model": model,
-
-        # ✅ 핵심(운영로그 요약) - 이게 빠지면 “원하는 로그”가 절대 안 됨
-        "note": kw.get("note", ""),      # <-- 반드시 존재해야 함
-        "notes": kw.get("notes", ""),    # 호환(추가 메모용)
-
-        "status": kw.get("status", ""),
-        "window": kw.get("window", ""),
-        "group": kw.get("group", ""),
-        "epoch": kw.get("epoch", ""),
-
-        "val_acc": kw.get("val_acc", ""),
-        "val_f1": kw.get("val_f1", ""),
-        "val_loss": kw.get("val_loss", ""),
-        "train_loss": kw.get("train_loss", ""),
-
-        # 운영/설정 메타
-        "engine": kw.get("engine", "manual"),
-        "source_exchange": kw.get("source_exchange", "BYBIT"),
-        "rows": kw.get("rows", ""),
-        "limit": kw.get("limit", ""),
-        "min": kw.get("min", ""),
-        "augment_needed": kw.get("augment_needed", ""),
-        "enough_for_training": kw.get("enough_for_training", ""),
-
-        # 라벨/분포
-        "label_total": kw.get("label_total", ""),
-        "label_masked": kw.get("label_masked", ""),
-        "label_masked_ratio": kw.get("label_masked_ratio", ""),
-        "near_zero": kw.get("near_zero", ""),
-        "near_zero_band": kw.get("near_zero_band", ""),
-        "near_zero_count": kw.get("near_zero_count", ""),
-        "boundary_band": kw.get("boundary_band", ""),
-        "masked_count": kw.get("masked_count", ""),
-        "bin_edges": kw.get("bin_edges", ""),
-        "bin_counts": kw.get("bin_counts", ""),
-        "bin_spans": kw.get("bin_spans", ""),
-        "class_ranges": kw.get("class_ranges", ""),
-        "class_edges": kw.get("class_edges", ""),
-        "class_counts": kw.get("class_counts", ""),
-        "bins": kw.get("bins", ""),
-        "val_coverage": kw.get("val_coverage", ""),
-
-        # 클래스 메타/진단
-        "num_classes": kw.get("num_classes", ""),
-        "NUM_CLASSES": kw.get("NUM_CLASSES", ""),
-        "usable_samples": kw.get("usable_samples", ""),
-        "class_counts_label_freeze": kw.get("class_counts_label_freeze", ""),
-        "class_counts_after_assemble": kw.get("class_counts_after_assemble", ""),
-        "batch_stratified_ok": kw.get("batch_stratified_ok", ""),
-
-        # per-class 성능
-        "per_class_f1": kw.get("per_class_f1", ""),
-
-        # 구형 UI 요약(호환)
-        "ui_status": kw.get("ui_status", ""),
-        "ui_data_amount": kw.get("ui_data_amount", ""),
-        "ui_return_summary": kw.get("ui_return_summary", ""),
-        "ui_coverage_summary": kw.get("ui_coverage_summary", ""),
-
-        # 신 UI 요약(카드용)
-        "ui_data_summary": kw.get("ui_data_summary", ""),
-        "ui_dist_summary": kw.get("ui_dist_summary", ""),
-        "ui_class_range_summary": kw.get("ui_class_range_summary", ""),
-        "ui_class_count_summary": kw.get("ui_class_count_summary", ""),
-        "ui_usable_summary": kw.get("ui_usable_summary", ""),
-        "ui_performance_summary": kw.get("ui_performance_summary", ""),
-    }
-
-    # 3) result_dict 우선 반영
-    if isinstance(result_dict, dict):
-        for k, v in result_dict.items():
-            if k in row:
-                row[k] = v
-
-    # 4) kw 값으로 덮어쓰기(빈값 제외)
-    for k, v in kw.items():
-        if k in row and v not in (None, ""):
-            row[k] = v
-
-    # 5) CSV 안전 변환: list/dict는 JSON 문자열로
-    def _jsonify_if_needed(v):
-        if v is None:
-            return None
-        if isinstance(v, (dict, list, tuple)):
+        # 1) 원래 logger 호출
+        if callable(_orig_ltr):
             try:
-                return json.dumps(v, ensure_ascii=False)
-            except Exception:
-                return str(v)
-        return v
+                _orig_ltr(*args, **kw)
+            except Exception as e:
+                print(f"[경고] logger.log_training_result 실패: {e}", flush=True)
 
-    # 복원(문자열 JSON -> python), 그 다음 다시 저장용으로 stringify
-    def _restore_json(val):
-        if val in (None, "", "null"):
-            return None
-        if isinstance(val, (list, dict)):
-            return val
-        if isinstance(val, str):
-            s = val.strip()
-            if (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
-                try:
-                    return json.loads(s)
-                except Exception:
-                    return val
-        return val
+        # 2) symbol/strategy/model 복구
+        symbol = args[0] if len(args) > 0 else kw.get("symbol")
+        strategy = args[1] if len(args) > 1 else kw.get("strategy")
+        model = args[2] if len(args) > 2 else kw.get("model", "")
 
-    # JSON일 수 있는 필드 복원
-    for k in ("bin_edges", "bin_counts", "bin_spans", "class_ranges", "class_edges", "class_counts", "val_coverage", "per_class_f1"):
-        row[k] = _restore_json(row.get(k))
+        # kw 안에 result dict가 들어오는 경우 우선 흡수
+        result_dict = None
+        if "result" in kw and isinstance(kw["result"], dict):
+            result_dict = kw["result"]
 
-    # bins 계산(없으면)
-    try:
-        be = row.get("bin_edges")
-        bc = row.get("bin_counts")
-        if row.get("bins") in (None, "", 0):
-            if isinstance(be, list) and len(be) >= 2:
-                row["bins"] = len(be) - 1
-            elif isinstance(bc, list):
-                row["bins"] = len(bc)
-    except Exception:
-        pass
+        # ---- CSV 저장용 row 기본틀 (중요: note 포함) ----
+        row: Dict[str, Any] = {
+            "timestamp": datetime.now(pytz.timezone("Asia/Seoul")).isoformat(),
+            "symbol": symbol,
+            "strategy": strategy,
+            "model": model,
 
-    # num_classes 계산(없으면)
-    try:
-        if row.get("num_classes") in (None, "", 0):
-            cr = row.get("class_ranges")
-            be2 = row.get("bin_edges")
-            cc2 = row.get("class_counts")
-            if isinstance(cr, list) and cr:
-                row["num_classes"] = int(len(cr))
-            elif isinstance(be2, list) and len(be2) >= 2:
-                row["num_classes"] = int(len(be2) - 1)
-            elif isinstance(cc2, list) and cc2:
-                row["num_classes"] = int(len(cc2))
-    except Exception:
-        pass
+            # ✅ 핵심(운영로그 요약) - 이게 빠지면 “원하는 로그”가 절대 안 됨
+            "note": kw.get("note", ""),      # <-- 반드시 존재해야 함
+            "notes": kw.get("notes", ""),    # 호환(추가 메모용)
 
-    # 6) UI 요약 자동 생성(없을 때만)
-    try:
-        status = (row.get("status") or "").strip()
-        if not row.get("ui_status"):
-            if status in ("success", "best"):
-                row["ui_status"] = f"✅ 정상 학습 (status={status})"
-            elif status in ("info",):
-                row["ui_status"] = f"ℹ️ 참고용 로그 (status={status})"
-            elif status in ("warn", "warning"):
-                row["ui_status"] = f"🟠 경고 (status={status})"
-            elif status in ("error", "fail", "failed"):
-                row["ui_status"] = f"🔴 실패/오류 (status={status})"
-            else:
-                row["ui_status"] = f"상태: {status or '미상'}"
+            "status": kw.get("status", ""),
+            "window": kw.get("window", ""),
+            "group": kw.get("group", ""),
+            "epoch": kw.get("epoch", ""),
 
-        # 신 UI 요약 6종이 비어있으면 만들어 채움
-        need_new_ui = any(not row.get(k) for k in (
-            "ui_data_summary","ui_dist_summary","ui_class_range_summary",
-            "ui_class_count_summary","ui_usable_summary","ui_performance_summary"
-        ))
+            "val_acc": kw.get("val_acc", ""),
+            "val_f1": kw.get("val_f1", ""),
+            "val_loss": kw.get("val_loss", ""),
+            "train_loss": kw.get("train_loss", ""),
 
-        if need_new_ui:
-            # rows/usable/acc/f1 기본값
-            rows = int(row.get("rows") or 0)
-            usable = int(row.get("usable_samples") or 0)
-            acc = float(row.get("val_acc") or row.get("accuracy") or 0.0)
-            f1v = float(row.get("val_f1") or row.get("f1") or 0.0)
-            be = row.get("bin_edges") or []
-            bc = row.get("bin_counts") or []
-            cr = row.get("class_ranges") or []
+            # 운영/설정 메타
+            "engine": kw.get("engine", "manual"),
+            "source_exchange": kw.get("source_exchange", "BYBIT"),
+            "rows": kw.get("rows", ""),
+            "limit": kw.get("limit", ""),
+            "min": kw.get("min", ""),
+            "augment_needed": kw.get("augment_needed", ""),
+            "enough_for_training": kw.get("enough_for_training", ""),
 
-            summary = make_training_summary_fields(
-                rows=rows,
-                bin_edges=be if isinstance(be, list) else [],
-                bin_counts=bc if isinstance(bc, list) else [],
-                class_ranges=cr if isinstance(cr, list) else [],
-                usable_samples=usable,
-                acc=acc,
-                f1=f1v,
-            )
-            for k, v in summary.items():
-                if not row.get(k):
+            # 라벨/분포
+            "label_total": kw.get("label_total", ""),
+            "label_masked": kw.get("label_masked", ""),
+            "label_masked_ratio": kw.get("label_masked_ratio", ""),
+            "near_zero": kw.get("near_zero", ""),
+            "near_zero_band": kw.get("near_zero_band", ""),
+            "near_zero_count": kw.get("near_zero_count", ""),
+            "boundary_band": kw.get("boundary_band", ""),
+            "masked_count": kw.get("masked_count", ""),
+            "bin_edges": kw.get("bin_edges", ""),
+            "bin_counts": kw.get("bin_counts", ""),
+            "bin_spans": kw.get("bin_spans", ""),
+            "class_ranges": kw.get("class_ranges", ""),
+            "class_edges": kw.get("class_edges", ""),
+            "class_counts": kw.get("class_counts", ""),
+            "bins": kw.get("bins", ""),
+            "val_coverage": kw.get("val_coverage", ""),
+
+            # 클래스 메타/진단
+            "num_classes": kw.get("num_classes", ""),
+            "NUM_CLASSES": kw.get("NUM_CLASSES", ""),
+            "usable_samples": kw.get("usable_samples", ""),
+            "class_counts_label_freeze": kw.get("class_counts_label_freeze", ""),
+            "class_counts_after_assemble": kw.get("class_counts_after_assemble", ""),
+            "batch_stratified_ok": kw.get("batch_stratified_ok", ""),
+
+            # per-class 성능
+            "per_class_f1": kw.get("per_class_f1", ""),
+
+            # 구형 UI 요약(호환)
+            "ui_status": kw.get("ui_status", ""),
+            "ui_data_amount": kw.get("ui_data_amount", ""),
+            "ui_return_summary": kw.get("ui_return_summary", ""),
+            "ui_coverage_summary": kw.get("ui_coverage_summary", ""),
+
+            # 신 UI 요약(카드용)
+            "ui_data_summary": kw.get("ui_data_summary", ""),
+            "ui_dist_summary": kw.get("ui_dist_summary", ""),
+            "ui_class_range_summary": kw.get("ui_class_range_summary", ""),
+            "ui_class_count_summary": kw.get("ui_class_count_summary", ""),
+            "ui_usable_summary": kw.get("ui_usable_summary", ""),
+            "ui_performance_summary": kw.get("ui_performance_summary", ""),
+        }
+
+        # 3) result_dict 우선 반영
+        if isinstance(result_dict, dict):
+            for k, v in result_dict.items():
+                if k in row:
                     row[k] = v
 
-        # 구형 UI 호환 필드도 최소 채움
-        if not row.get("ui_data_amount"):
-            rows = row.get("rows")
-            row["ui_data_amount"] = f"학습 데이터: {rows}개" if rows not in (None, "", 0) else "학습 데이터 정보 없음"
-        if not row.get("ui_return_summary"):
+        # 4) kw 값으로 덮어쓰기(빈값 제외)
+        for k, v in kw.items():
+            if k in row and v not in (None, ""):
+                row[k] = v
+
+        # 5) CSV 안전 변환: list/dict는 JSON 문자열로
+        def _jsonify_if_needed(v):
+            if v is None:
+                return None
+            if isinstance(v, (dict, list, tuple)):
+                try:
+                    return json.dumps(v, ensure_ascii=False)
+                except Exception:
+                    return str(v)
+            return v
+
+        # 복원(문자열 JSON -> python), 그 다음 다시 저장용으로 stringify
+        def _restore_json(val):
+            if val in (None, "", "null"):
+                return None
+            if isinstance(val, (list, dict)):
+                return val
+            if isinstance(val, str):
+                s = val.strip()
+                if (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
+                    try:
+                        return json.loads(s)
+                    except Exception:
+                        return val
+            return val
+
+        # JSON일 수 있는 필드 복원
+        for k in ("bin_edges", "bin_counts", "bin_spans", "class_ranges", "class_edges", "class_counts", "val_coverage", "per_class_f1"):
+            row[k] = _restore_json(row.get(k))
+
+        # bins 계산(없으면)
+        try:
             be = row.get("bin_edges")
-            if isinstance(be, list) and len(be) >= 2:
-                row["ui_return_summary"] = f"수익률 범위: {float(be[0]):.4f} ~ {float(be[-1]):.4f}"
-            else:
-                row["ui_return_summary"] = "수익률 분포 정보 없음"
-        if not row.get("ui_coverage_summary"):
-            cov = row.get("val_coverage")
-            if isinstance(cov, dict) and cov.get("total"):
-                covered = int(cov.get("covered", 0))
-                total = int(cov.get("total", 0))
-                row["ui_coverage_summary"] = f"검증 커버리지: {covered}/{total}"
-            else:
-                row["ui_coverage_summary"] = "검증 커버리지 정보 없음"
-    except Exception as e:
-        print(f"[train_log summary warn] {e}", flush=True)
+            bc = row.get("bin_counts")
+            if row.get("bins") in (None, "", 0):
+                if isinstance(be, list) and len(be) >= 2:
+                    row["bins"] = len(be) - 1
+                elif isinstance(bc, list):
+                    row["bins"] = len(bc)
+        except Exception:
+            pass
 
-    # 7) 최종 CSV 저장용 stringify(리스트/딕트 -> JSON 문자열)
-    for k in list(row.keys()):
-        row[k] = _jsonify_if_needed(row[k])
+        # num_classes 계산(없으면)
+        try:
+            if row.get("num_classes") in (None, "", 0):
+                cr = row.get("class_ranges")
+                be2 = row.get("bin_edges")
+                cc2 = row.get("class_counts")
+                if isinstance(cr, list) and cr:
+                    row["num_classes"] = int(len(cr))
+                elif isinstance(be2, list) and len(be2) >= 2:
+                    row["num_classes"] = int(len(be2) - 1)
+                elif isinstance(cc2, list) and cc2:
+                    row["num_classes"] = int(len(cc2))
+        except Exception:
+            pass
 
-    # 8) 기록
-    _append_train_log(row)
+        # 6) UI 요약 자동 생성(없을 때만)
+        try:
+            status = (row.get("status") or "").strip()
+            if not row.get("ui_status"):
+                if status in ("success", "best"):
+                    row["ui_status"] = f"✅ 정상 학습 (status={status})"
+                elif status in ("info",):
+                    row["ui_status"] = f"ℹ️ 참고용 로그 (status={status})"
+                elif status in ("warn", "warning"):
+                    row["ui_status"] = f"🟠 경고 (status={status})"
+                elif status in ("error", "fail", "failed"):
+                    row["ui_status"] = f"🔴 실패/오류 (status={status})"
+                else:
+                    row["ui_status"] = f"상태: {status or '미상'}"
 
-    # 9) 대시보드 갱신(있으면)
-    try:
-        logger.update_train_dashboard(
-            symbol=row.get("symbol"),
-            strategy=row.get("strategy"),
-            model=row.get("model", "")
-        )
-    except Exception as e:
-        print(f"[경고] train_dashboard 업데이트 실패: {e}", flush=True)
+            # 신 UI 요약 6종이 비어있으면 만들어 채움
+            need_new_ui = any(not row.get(k) for k in (
+                "ui_data_summary", "ui_dist_summary", "ui_class_range_summary",
+                "ui_class_count_summary", "ui_usable_summary", "ui_performance_summary"
+            ))
 
+            if need_new_ui:
+                # rows/usable/acc/f1 기본값
+                rows = int(row.get("rows") or 0)
+                usable = int(row.get("usable_samples") or 0)
+                acc = float(row.get("val_acc") or row.get("accuracy") or 0.0)
+                f1v = float(row.get("val_f1") or row.get("f1") or 0.0)
+                be = row.get("bin_edges") or []
+                bc = row.get("bin_counts") or []
+                cr = row.get("class_ranges") or []
 
+                summary = make_training_summary_fields(
+                    rows=rows,
+                    bin_edges=be if isinstance(be, list) else [],
+                    bin_counts=bc if isinstance(bc, list) else [],
+                    class_ranges=cr if isinstance(cr, list) else [],
+                    usable_samples=usable,
+                    acc=acc,
+                    f1=f1v,
+                )
+                for k, v in summary.items():
+                    if not row.get(k):
+                        row[k] = v
+
+            # 구형 UI 호환 필드도 최소 채움
+            if not row.get("ui_data_amount"):
+                rows_v = row.get("rows")
+                row["ui_data_amount"] = f"학습 데이터: {rows_v}개" if rows_v not in (None, "", 0) else "학습 데이터 정보 없음"
+            if not row.get("ui_return_summary"):
+                be = row.get("bin_edges")
+                if isinstance(be, list) and len(be) >= 2:
+                    row["ui_return_summary"] = f"수익률 범위: {float(be[0]):.4f} ~ {float(be[-1]):.4f}"
+                else:
+                    row["ui_return_summary"] = "수익률 분포 정보 없음"
+            if not row.get("ui_coverage_summary"):
+                cov = row.get("val_coverage")
+                if isinstance(cov, dict) and cov.get("total"):
+                    covered = int(cov.get("covered", 0))
+                    total = int(cov.get("total", 0))
+                    row["ui_coverage_summary"] = f"검증 커버리지: {covered}/{total}"
+                else:
+                    row["ui_coverage_summary"] = "검증 커버리지 정보 없음"
+        except Exception as e:
+            print(f"[train_log summary warn] {e}", flush=True)
+
+        # 7) 최종 CSV 저장용 stringify(리스트/딕트 -> JSON 문자열)
+        for k in list(row.keys()):
+            row[k] = _jsonify_if_needed(row[k])
+
+        # 8) 기록
+        _append_train_log(row)
+
+        # 9) 대시보드 갱신(있으면)
+        try:
+            logger.update_train_dashboard(
+                symbol=row.get("symbol"),
+                strategy=row.get("strategy"),
+                model=row.get("model", "")
+            )
+        except Exception as e:
+            print(f"[경고] train_dashboard 업데이트 실패: {e}", flush=True)
+
+    # ✅ 패치 적용은 "함수 바깥"에서 해야 함 (여기 중요)
     logger.log_training_result = _log_training_result_patched
     logger._patched_train_log = True
+
 
 
 # ✅ 예측 게이트: 안전 임포트(없으면 no-op)
