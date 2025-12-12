@@ -294,6 +294,12 @@ DEFAULT_TRAIN_HEADERS = [
     "source_exchange",
     "status",
 
+    # ✅ train.py 패치가 실제로 쓰는 필드 (누락되면 CSV에 안 써짐)
+    "group",
+    "epoch",
+    "train_loss",
+    "notes",
+
     # 추가 메트릭
     "accuracy",
     "f1",
@@ -301,6 +307,14 @@ DEFAULT_TRAIN_HEADERS = [
     "y_true",
     "y_pred",
     "num_classes",
+
+    # ✅ 라벨/분포 관련 (패치가 채우는 키)
+    "label_total",
+    "label_masked",
+    "label_masked_ratio",
+    "near_zero",
+    "boundary_band",
+    "val_coverage",
 
     # === 진단 5종 ===
     "NUM_CLASSES",
@@ -333,7 +347,14 @@ DEFAULT_TRAIN_HEADERS = [
     "ui_class_count_summary",
     "ui_usable_summary",
     "ui_performance_summary",
+
+    # ✅ _log_training_result_patched()가 실제로 채우는 "구형 UI 요약"
+    "ui_status",
+    "ui_data_amount",
+    "ui_return_summary",
+    "ui_coverage_summary",
 ]
+
 
 
 try:
@@ -457,8 +478,11 @@ def _normalize_train_row(row: dict) -> dict:
     if r.get("val_loss") is None and row.get("loss") is not None:
         r["val_loss"] = row.get("loss")
 
-    r.setdefault("engine", row.get("engine", "manual"))
-    r.setdefault("source_exchange", row.get("source_exchange", "BYBIT"))
+    # ✅ setdefault는 값이 None이면 안 채워지는 문제가 있어서 직접 보정
+    if r.get("engine") in (None, ""):
+        r["engine"] = row.get("engine", "manual")
+    if r.get("source_exchange") in (None, ""):
+        r["source_exchange"] = row.get("source_exchange", "BYBIT")
 
     # 수익률 구간 호환 필드 채우기
     # - bin_edges/bin_counts 가 있으면 class_edges/class_counts/bins 도 같이 채워줌
@@ -477,6 +501,7 @@ def _normalize_train_row(row: dict) -> dict:
             pass
 
     return r
+
 
 
 def _append_train_log(row: dict):
@@ -1458,7 +1483,7 @@ def train_one_model(
         try:
             _NEAR_ZERO_BAND = float(os.getenv("NEAR_ZERO_BAND", "0.0"))
         except Exception:
-            _NEEAR_ZERO_BAND = 0.0
+            _NEAR_ZERO_BAND = 0.0
 
     HAS_CUDA = torch.cuda.is_available()
     device_type = "cuda" if HAS_CUDA else "cpu"
