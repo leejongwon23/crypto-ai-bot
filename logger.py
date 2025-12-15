@@ -176,8 +176,10 @@ TRAIN_BASE_HEADERS = [
 TRAIN_EXTRA_HEADERS = [
     "class_edges","class_counts","class_ranges",
     "bin_spans","near_zero_band","near_zero_count",
-    "per_class_f1",  # <--- 이거 한 줄 추가
+    "NUM_CLASSES","usable_samples","masked_count",
+    "per_class_f1",
 ]
+
 
 # 🔹 실제 CSV에서 사용할 전체 헤더
 TRAIN_HEADERS = TRAIN_BASE_HEADERS + TRAIN_EXTRA_HEADERS
@@ -396,7 +398,7 @@ def ensure_train_log_exists():
                             mapped.get("status",""),
                         ]
                         # 🔸 여기! 확장 헤더 수 만큼 빈 칸 7개
-                        extra_row = ["", "", "", "", "", "", ""]  # class_edges ~ per_class_f1
+                        extra_row = [""] * len(TRAIN_EXTRA_HEADERS)  # class_edges ~ per_class_f1 (+ 확장)
                         new_row = base_row + extra_row
 
                         w.writerow(dict(zip(TRAIN_HEADERS, new_row[:len(TRAIN_HEADERS)])))
