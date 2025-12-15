@@ -46,6 +46,21 @@ _REQUIRE_BIN_EDGES_STRICT = os.getenv("REQUIRE_BIN_EDGES_STRICT", "0").strip() =
 _DEFAULT_EDGE_MIN = float(os.getenv("DEFAULT_EDGE_MIN", "-0.05"))
 _DEFAULT_EDGE_MAX = float(os.getenv("DEFAULT_EDGE_MAX", "0.05"))
 
+# ===== 운영 로그 레벨 제어 =====
+# OP_LOG_LEVEL = ERROR / WARN / INFO / DEBUG
+# 기본값: WARN (운영용 최소 로그)
+_OP_LOG_LEVEL = os.getenv("OP_LOG_LEVEL", "WARN").strip().upper()
+_LOG_RANK = {"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3}
+_MIN_RANK = _LOG_RANK.get(_OP_LOG_LEVEL, 1)
+
+def _log(level: str, msg: str) -> None:
+    try:
+        lv = (level or "INFO").strip().upper()
+        if _LOG_RANK.get(lv, 2) <= _MIN_RANK:
+            print(msg)
+    except Exception:
+        pass
+
 _cache_lock = threading.Lock()
 # value: {"state":state_dict, "meta":dict, "ts":float, "ttl":int, "bytes":int}
 _model_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
@@ -138,22 +153,18 @@ def _resolve_meta(weight_path: str) -> Optional[str]:
         if root_cands:
             return root_cands[0]
     except Exception as e:
-        print(f"[⚠️ META 탐색 실패] {weight_path} → {e}")
+        _log("DEBUG", f"[⚠️ META 탐색 실패] {weight_path} → {e}")
     return None
 
 def _load_meta_dict(weight_path: str) -> Dict[str, Any]:
-    """연결된 meta.json을 로드. 실패 시 {}."""
+    """연결된 meta.json을 로드. 실패 시 {}.
+    ✅ 운영로그 최소화를 위해 model_io.load_meta() 호출을 피하고, 여기서 직접 읽는다.
+       (model_io 내부의 '손상 감지/재생성/가중치 미발견' 류 print를 원천 차단)
+    """
     try:
         meta_path = _resolve_meta(weight_path)
         if not meta_path:
             return {}
-        # weight와 1:1 매칭인 경우는 정책 로더 사용
-        try:
-            if os.path.samefile(_meta_path_for(weight_path), meta_path):
-                return _load_meta(weight_path, default={})
-        except Exception:
-            pass
-        # 아니면 직접 읽기
         with open(meta_path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
@@ -167,7 +178,7 @@ def _safe_write_meta(weight_path: str, meta: Dict[str, Any]) -> None:
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"[⚠️ meta 저장 실패] {weight_path} → {e}")
+        _log("WARN", f"[⚠️ meta 저장 실패] {weight_path} → {e}")
 
 # ===== 클래스 구간 정규화/보정 =====
 def _sanitize_range(lo: float, hi: float) -> Tuple[float, float]:
@@ -304,7 +315,7 @@ def find_models_fuzzy(symbol: str, strategy: str) -> List[Dict[str, str]]:
                 })
         out.sort(key=lambda x: os.path.getmtime(os.path.join(MODEL_DIR, x["pt_file"])), reverse=True)
     except Exception as e:
-        print(f"[⚠️ find_models_fuzzy 실패] {symbol}-{strategy} → {e}")
+        _log("DEBUG", f"[⚠️ find_models_fuzzy 실패] {symbol}-{strategy} → {e}")
     return out
 
 def locate_best_weight(symbol: str, strategy: str, model_type: str) -> Optional[str]:
@@ -322,12 +333,12 @@ def _load_all_eval_logs() -> pd.DataFrame:
         try:
             frames.append(pd.read_csv(fp, encoding="utf-8-sig"))
         except Exception as e:
-            print(f"[⚠️ 평가 파일 읽기 실패] {fp} → {e}")
+            _log("DEBUG", f"[⚠️ 평가 파일 읽기 실패] {fp} → {e}")
     if os.path.exists(EVAL_RESULT_SINGLE):
         try:
             frames.append(pd.read_csv(EVAL_RESULT_SINGLE, encoding="utf-8-sig"))
         except Exception as e:
-            print(f"[⚠️ 단일 평가 파일 읽기 실패] {EVAL_RESULT_SINGLE} → {e}")
+            _log("DEBUG", f"[⚠️ 단일 평가 파일 읽기 실패] {EVAL_RESULT_SINGLE} → {e}")
     if not frames:
         return pd.DataFrame()
     try:
@@ -339,7 +350,7 @@ def _load_all_eval_logs() -> pd.DataFrame:
             df = df.drop_duplicates()
         return df
     except Exception as e:
-        print(f"[⚠️ 평가 로그 병합 실패] → {e}")
+        _log("WARN", f"[⚠️ 평가 로그 병합 실패] → {e}")
         return pd.DataFrame()
 
 def _symbol_from_meta_path(meta_path: str) -> Optional[str]:
@@ -365,17 +376,17 @@ def get_model_weight(model_type: str, strategy: str, symbol: str = "ALL", min_sa
         meta_files = glob.glob(os.path.join(MODEL_DIR, f"*_{strategy}_{model_type}*.meta.json"))
 
     if not meta_files:
-        print(f"[⚠️ meta 파일 없음] symbol={symbol}, strategy={strategy}, type={model_type} → weight=0.2")
+        _log("DEBUG", f"[⚠️ meta 파일 없음] symbol={symbol}, strategy={strategy}, type={model_type} → weight=0.2")
         return 0.2
 
     df_all = _load_all_eval_logs()
     if df_all.empty:
-        print("[INFO] 평가 데이터 없음 → cold-start weight=0.2")
+        _log("DEBUG", "[INFO] 평가 데이터 없음 → cold-start weight=0.2")
         return 0.2
 
     need_cols = {"model", "strategy", "symbol", "status"}
     if not need_cols.issubset(df_all.columns):
-        print("[INFO] 평가 로그 컬럼 부족 → cold-start weight=0.2")
+        _log("DEBUG", "[INFO] 평가 로그 컬럼 부족 → cold-start weight=0.2")
         return 0.2
 
     for meta_path in meta_files:
@@ -387,12 +398,12 @@ def get_model_weight(model_type: str, strategy: str, symbol: str = "ALL", min_sa
         meta_symbol = meta.get("symbol") or _symbol_from_meta_path(meta_path)
 
         if input_size is not None and meta.get("input_size") not in (None, input_size):
-            print(f"[⚠️ input_size 불일치] meta={meta.get('input_size')} vs input={input_size} → weight=0.2")
+            _log("DEBUG", f"[⚠️ input_size 불일치] meta={meta.get('input_size')} vs input={input_size} → weight=0.2")
             return 0.2
 
         base = meta_path.replace(".meta.json", "")
         if not any(os.path.exists(base + ext) for ext in SUPPORTED_WEIGHTS):
-            print(f"[⚠️ 모델 파일 없음] {base}.[pt|ptz|safetensors] → weight=0.2")
+            _log("DEBUG", f"[⚠️ 모델 파일 없음] {base}.[pt|ptz|safetensors] → weight=0.2")
             return 0.2
 
         df = df_all[
@@ -404,21 +415,21 @@ def get_model_weight(model_type: str, strategy: str, symbol: str = "ALL", min_sa
 
         n = len(df)
         if n < min_samples:
-            print(f"[INFO] 평가 샘플 부족 (len={n} < {min_samples}) → weight=0.2")
+            _log("DEBUG", f"[INFO] 평가 샘플 부족 (len={n} < {min_samples}) → weight=0.2")
             return 0.2
 
         sr = (df["status"].isin(["success", "v_success"])).mean()
         if sr >= 0.7:
-            print(f"[INFO] success_rate={sr:.4f} → weight=1.0")
+            _log("DEBUG", f"[INFO] success_rate={sr:.4f} → weight=1.0")
             return 1.0
         if sr < 0.3:
-            print(f"[INFO] success_rate={sr:.4f} → weight=0.0")
+            _log("DEBUG", f"[INFO] success_rate={sr:.4f} → weight=0.0")
             return 0.0
         w = max(0.0, round((sr - 0.3) / 0.4, 4))
-        print(f"[INFO] success_rate={sr:.4f}, weight={w}")
+        _log("DEBUG", f"[INFO] success_rate={sr:.4f}, weight={w}")
         return w
 
-    print("[INFO] 조건 충족 모델 없음 → weight=0.2")
+    _log("DEBUG", "[INFO] 조건 충족 모델 없음 → weight=0.2")
     return 0.2
 
 # ===== 공개 로더(API) =====
@@ -445,15 +456,16 @@ def load_model_cached(pt_path: str, model_obj: torch.nn.Module, ttl_sec: int = _
     """
     global _cache_bytes
     if not pt_path or not os.path.exists(pt_path):
-        print(f"[❌ load_model_cached] 파일 없음: {pt_path}")
+        _log("ERROR", f"[❌ load_model_cached] 파일 없음: {pt_path}")
         return None
 
     ok, why, meta_pf = _preflight(pt_path, model_type=_infer_model_type_from_fname(pt_path), input_size=None)
     if not ok:
+        # 운영에서는 한 줄만
         if why == "bin_edges_missing":
-            print(f"[❌ load_model_cached] meta.bin_edges 누락 → 예측 비활성: {pt_path}")
+            _log("WARN", f"[❌ load_model_cached] bin_edges 누락 → 예측 비활성: {pt_path}")
         else:
-            print(f"[❌ load_model_cached 사전점검 실패] {pt_path} → {why}")
+            _log("WARN", f"[❌ load_model_cached 사전점검 실패] {pt_path} → {why}")
         return None
     # ok / ok_autofixed 모두 허용
     meta_final = meta_pf if meta_pf else _load_meta_dict(pt_path)
@@ -470,13 +482,13 @@ def load_model_cached(pt_path: str, model_obj: torch.nn.Module, ttl_sec: int = _
             except Exception as e:
                 _model_cache.pop(pt_path, None)
                 _cache_bytes -= ent.get("bytes", 0)
-                print(f"[⚠️ 캐시 로드 실패, 디스크 재시도] {pt_path} → {e}")
+                _log("WARN", f"[⚠️ 캐시 로드 실패, 디스크 재시도] {pt_path} → {e}")
 
     try:
         loaded = _load_with_policy(pt_path, model=model_obj, map_location="cpu", strict=False)
         state = loaded.state_dict() if hasattr(loaded, "state_dict") else None
         if not state:
-            print(f"[❌ 로더 반환 state_dict 없음] {pt_path}")
+            _log("ERROR", f"[❌ 로더 반환 state_dict 없음] {pt_path}")
             return None
         state = _ensure_cpu_state(state)
         size_b = _obj_bytes(state)
@@ -484,7 +496,7 @@ def load_model_cached(pt_path: str, model_obj: torch.nn.Module, ttl_sec: int = _
         # STRICT 모드일 경우 bin_edges 재확인
         be = meta_final.get("bin_edges", [])
         if _REQUIRE_BIN_EDGES_STRICT and not (isinstance(be, list) and len(be) >= 2):
-            print(f"[❌ meta.bin_edges 누락(STRICT) → 예측 비활성] {pt_path}")
+            _log("WARN", f"[❌ meta.bin_edges 누락(STRICT) → 예측 비활성] {pt_path}")
             return None
 
         with _cache_lock:
@@ -502,12 +514,12 @@ def load_model_cached(pt_path: str, model_obj: torch.nn.Module, ttl_sec: int = _
         model_obj.load_state_dict(state, strict=False)
         _attach_bin_info(model_obj, meta_final)
         model_obj.eval()
-        print(f"[✅ 모델 로드 완료] {pt_path}")
+        _log("INFO", f"[✅ 모델 로드 완료] {pt_path}")
         return model_obj
     except ModelLoadError as e:
-        print(f"[❌ ModelLoadError] {pt_path} → {e.reason}")
+        _log("WARN", f"[❌ ModelLoadError] {pt_path} → {e.reason}")
     except Exception as e:
-        print(f"[❌ load_model_cached 오류] {pt_path} → {e}")
+        _log("WARN", f"[❌ load_model_cached 오류] {pt_path} → {e}")
     return None
 
 # ===== 기타 유틸 =====
@@ -518,7 +530,7 @@ def model_exists(symbol: str, strategy: str) -> bool:
                 if file.startswith(f"{symbol}_{strategy}_") and file.lower().endswith(SUPPORTED_WEIGHTS):
                     return True
     except Exception as e:
-        print(f"[오류] 모델 존재 확인 실패: {e}")
+        _log("WARN", f"[오류] 모델 존재 확인 실패: {e}")
     return False
 
 def count_models_per_strategy() -> Dict[str, int]:
@@ -534,7 +546,7 @@ def count_models_per_strategy() -> Dict[str, int]:
                     if strat in counts:
                         counts[strat] += 1
     except Exception as e:
-        print(f"[오류] 모델 수 계산 실패: {e}")
+        _log("WARN", f"[오류] 모델 수 계산 실패: {e}")
     return counts
 
 def get_similar_symbol(symbol: str) -> list:
