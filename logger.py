@@ -1,4 +1,4 @@
-# === logger.py (v2025-11-05 + meta/hold 확장본) ===
+# === logger.py (v2025-11-05 + meta/hold 확장본 + QUIET MODE 추가) ===
 import sitecustomize
 import os
 import csv
@@ -17,10 +17,55 @@ from typing import Optional, Any, Dict
 from sklearn.metrics import classification_report
 from config import get_TRAIN_LOG_PATH, get_PREDICTION_LOG_PATH  # 경로 단일화
 
+# ==========================================================
+# ✅ 운영로그 너무 많을 때만 "조용히" 만드는 옵션
+# - LOGGER_MODE=quiet  → logger.py 내부 print 대부분 숨김(경고/오류/핵심만 표시)
+# - 기본값(normal)     → 예전처럼 그대로 출력
+# ==========================================================
+import builtins as _builtins
+
+LOGGER_MODE = os.getenv("LOGGER_MODE", "normal").strip().lower()  # normal | quiet
+
+# quiet 모드에서 "살릴" 로그 키워드(핵심/경고/오류/완료)
+_QUIET_KEEP_TOKENS = (
+    "🛑", "⚠️", "🔴", "🟠",  # 위험/경고
+    "[오류]", "[경고]",      # 한글 태그
+    "[✅", "✅",             # 완료/성공
+    "failure_db init failed",
+    "storage read-only",
+    "free space 부족",
+    "single_class",
+    "LABEL_SINGLE_CLASS",
+    "STATUS_FAIL",
+    "F1_ZERO",
+)
+
+def _logger_print(*args, **kwargs):
+    """
+    logger.py 내부 print만 조용히 필터링.
+    - normal: 그대로 출력
+    - quiet : 중요한 것만 출력
+    """
+    try:
+        if LOGGER_MODE != "quiet":
+            return _builtins.print(*args, **kwargs)
+
+        msg = " ".join([str(a) for a in args])
+        # 너무 긴 JSON payload는 quiet에서 기본 숨김 (경고성/에러성 아니면)
+        if any(tok in msg for tok in _QUIET_KEEP_TOKENS):
+            return _builtins.print(*args, **kwargs)
+
+        # 기본은 숨김
+        return
+    except Exception:
+        # print 자체가 죽으면 로거가 더 위험해지니 그냥 무시
+        return
+
+# ✅ 이 파일(logger.py) 안에서 호출되는 print는 전부 여기로 들어옴
+print = _logger_print
+
 # ─────────────────────────────────────
 # 0) BASE 경로 통일
-#    - 이제부터는 /persistent 직접 쓰지 말고 여기로만 온다.
-#    - sitecustomize가 있어도 여기서 한 번 더 안전하게 만들어준다.
 # ─────────────────────────────────────
 BASE = (
     os.getenv("PERSIST_DIR")
@@ -180,7 +225,6 @@ TRAIN_EXTRA_HEADERS = [
     "per_class_f1",
 ]
 
-
 # 🔹 실제 CSV에서 사용할 전체 헤더
 TRAIN_HEADERS = TRAIN_BASE_HEADERS + TRAIN_EXTRA_HEADERS
 
@@ -336,8 +380,6 @@ def ensure_prediction_log_exists():
     except Exception as e:
         print(f"[⚠️ ensure_prediction_log_exists] 예외: {e}")
 
-
-
 def ensure_train_log_exists():
     if _READONLY_FS:
         return
@@ -397,8 +439,7 @@ def ensure_train_log_exists():
                             mapped.get("source_exchange",""),
                             mapped.get("status",""),
                         ]
-                        # 🔸 여기! 확장 헤더 수 만큼 빈 칸 7개
-                        extra_row = [""] * len(TRAIN_EXTRA_HEADERS)  # class_edges ~ per_class_f1 (+ 확장)
+                        extra_row = [""] * len(TRAIN_EXTRA_HEADERS)
                         new_row = base_row + extra_row
 
                         w.writerow(dict(zip(TRAIN_HEADERS, new_row[:len(TRAIN_HEADERS)])))
@@ -427,7 +468,7 @@ def rotate_prediction_log_if_needed(max_mb: int = 200, backups: int = 3):
                 except Exception:
                     pass
         ensure_prediction_log_exists()
-        print(f"[logger] 🔁 rotate: {size_mb:.1}MB → rotated with {backups} backups")
+        print(f"[logger] 🔁 rotate: {size_mb:.1f}MB → rotated with {backups} backups")
     except Exception as e:
         print(f"[logger] rotate error: {e}")
 
@@ -588,7 +629,6 @@ try:
         try:
             _ensure_failure_db_once()
         except FileNotFoundError as fe:
-            # 여기서 /persistent/wrong_predictions.csv 이런 거 찾다가 터지는 케이스만 부드럽게 넘긴다
             if "wrong_predictions.csv" in str(fe):
                 print("[logger] failure_db init skipped (missing wrong_predictions.csv — caller에서 생성돼야 함)")
             else:
@@ -634,7 +674,6 @@ def get_meta_success_rate(strategy, min_samples: int = 1):
         usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success","source"]],
         chunksize=CHUNK
     ):
-        # source 필터 (훈련/디버그 제외)
         if "source" in chunk.columns:
             chunk = chunk[~chunk["source"].astype(str).isin(LOG_SOURCE_BLACKLIST)]
         if "model" in chunk.columns:
@@ -769,7 +808,6 @@ def log_prediction(
     raw_prob=None, calib_prob=None, calib_ver=None,
     class_return_min=None, class_return_max=None, class_return_text=None,
     expected_return=None,
-    # 🔹 메타/섀도우/보류 상세 필드 추가
     chosen_model=None, chosen_class=None,
     shadow_models=None, shadow_classes=None,
     hold_type=None, hold_reason=None,
@@ -781,7 +819,6 @@ def log_prediction(
     if not _READONLY_FS:
         ensure_prediction_log_exists()
 
-    # rate 기본값: expected_return 우선, 없으면 0.0
     if rate is None:
         rate = expected_return if expected_return is not None else 0.0
 
@@ -815,10 +852,8 @@ def log_prediction(
     except Exception:
         fv_serial = ""
 
-    # note에서 추가 필드 뽑기
     note_ex = _extract_from_note(note)
 
-    # shadow_* 를 문자열로 정리
     if isinstance(shadow_models, (list, tuple, set)):
         shadow_models_str = "|".join(map(str, shadow_models))
     else:
@@ -829,7 +864,6 @@ def log_prediction(
     else:
         shadow_classes_str = "" if shadow_classes is None else str(shadow_classes)
 
-    # 🔍 여기서 학습 수익분포 로그 여부를 먼저 판별
     src_lower = str(source or "").lower()
     mdl_lower = str(model or "").lower()
     rsn_lower = str(reason or "").lower()
@@ -859,15 +893,11 @@ def log_prediction(
     aligned = _align_row_to_header(row, PREDICTION_HEADERS)
     payload = dict(zip(PREDICTION_HEADERS, aligned))
 
-    # 🔒 파일/콘솔 기록 분기
     if _READONLY_FS or not _fs_has_space(PREDICTION_LOG, 256*1024):
-        # 저장 불가 시 콘솔 출력만
         tag = "PREDICT/TRAIN_DIST" if is_train_dist else "PREDICT"
         print(f"[{tag}][console] {json.dumps(payload, ensure_ascii=False)}")
     else:
-        # ✅ 핵심 수정: 학습 수익분포(is_train_dist=True)는 prediction_log.csv에 쓰지 않는다
         if is_train_dist:
-            # prediction_log에는 남기지 않고 콘솔만
             print(f"[PREDICT/TRAIN_DIST][console] {json.dumps(payload, ensure_ascii=False)}")
         else:
             with _FileLock(_PRED_LOCK_PATH, timeout=10.0):
@@ -878,7 +908,6 @@ def log_prediction(
                     if write_header: w.writerow(PREDICTION_HEADERS)
                     w.writerow(aligned)
 
-    # ✅ 여기부터 출력 문구 (성공/실패 요약)
     if success:
         if is_train_dist:
             _print_once(
@@ -927,21 +956,16 @@ def log_training_result(
     accuracy=None, f1=None, loss=None,
     note="", source_exchange="BYBIT", status="success",
     y_true=None, y_pred=None, num_classes=None,
-
-    # 🔥 train.py 에서 전달되는 수익률/클래스 정보
-    class_edges=None,        # 리스트
-    class_counts=None,       # 리스트
-    class_ranges=None,       # 리스트[(lo,hi),...]
-    bin_spans=None,          # 리스트
-    near_zero_band=None,     # float
-    near_zero_count=None,    # int
-
-    # 🔥 클래스별 성능
-    per_class_f1=None,       # 리스트
-    masked_count=None,       # int
-    NUM_CLASSES=None,        # int
-    usable_samples=None,     # int
-
+    class_edges=None,
+    class_counts=None,
+    class_ranges=None,
+    bin_spans=None,
+    near_zero_band=None,
+    near_zero_count=None,
+    per_class_f1=None,
+    masked_count=None,
+    NUM_CLASSES=None,
+    usable_samples=None,
     **kwargs
 ):
     LOG_FILE = TRAIN_LOG
@@ -949,9 +973,6 @@ def log_training_result(
 
     extras = _parse_train_note(note)
 
-    # ───────────────────────────────
-    # 0) 안전 변환 헬퍼
-    # ───────────────────────────────
     def _safe_float(x, default=0.0):
         try:
             if x is None:
@@ -978,9 +999,6 @@ def log_training_result(
         except Exception:
             return int(default)
 
-    # ───────────────────────────────
-    # 1) 숫자 값 정리
-    # ───────────────────────────────
     try:
         val_acc  = _first_non_none(kwargs.get("val_acc"), accuracy)
         val_f1   = _first_non_none(kwargs.get("val_f1"),  f1)
@@ -991,60 +1009,40 @@ def log_training_result(
     except Exception:
         val_acc, val_f1, val_loss = 0.0, 0.0, 0.0
 
-    # usable_samples 기본값: 파싱된 rows를 최대한 활용
     if usable_samples is None:
         usable_samples = extras.get("rows", 0)
 
-    # ───────────────────────────────
-    # 2) CSV에 기록할 전체 row 구성
-    # ───────────────────────────────
     row_dict = {
         "timestamp": now,
         "symbol": str(symbol),
         "strategy": str(strategy),
         "model": str(model or ""),
-
-        # 기본 성능
         "val_acc": val_acc,
         "val_f1": val_f1,
         "val_loss": val_loss,
-
-        # 학습 정보
         "engine": extras.get("engine",""),
         "window": extras.get("window",""),
         "recent_cap": extras.get("recent_cap",""),
         "rows": extras.get("rows",""),
         "limit": extras.get("limit",""),
         "min": extras.get("min",""),
-
         "augment_needed": extras.get("augment_needed",""),
         "enough_for_training": extras.get("enough_for_training",""),
         "note": str(note or ""),
-
         "source_exchange": str(source_exchange or "BYBIT"),
         "status": str(status or "success"),
-
-        # 🔥 수익률/클래스 관련 핵심 값
         "class_edges": json.dumps(class_edges or [], ensure_ascii=False),
         "class_counts": json.dumps(class_counts or [], ensure_ascii=False),
         "class_ranges": json.dumps(class_ranges or [], ensure_ascii=False),
         "bin_spans": json.dumps(bin_spans or [], ensure_ascii=False),
-
         "near_zero_band": _safe_float(near_zero_band, 0.0),
         "near_zero_count": _safe_int(near_zero_count, 0),
-
-        # 🔥 클래스 총 개수 + 학습에 실제 등장한 클래스
         "NUM_CLASSES": _safe_int(NUM_CLASSES, 0),
         "usable_samples": _safe_int(usable_samples, 0),
-
-        # 🔥 클래스별 F1
         "per_class_f1": json.dumps(per_class_f1 or [], ensure_ascii=False),
         "masked_count": _safe_int(masked_count, 0),
     }
 
-    # ───────────────────────────────
-    # 3) CSV 기록
-    # ───────────────────────────────
     try:
         ensure_train_log_exists()
 
@@ -1052,9 +1050,6 @@ def log_training_result(
             writer = csv.DictWriter(f, fieldnames=TRAIN_HEADERS, extrasaction="ignore")
             writer.writerow(row_dict)
 
-        # ──────────────────────
-        # 4) F1 경고 출력 (기존 유지)
-        # ──────────────────────
         _f1_key = (str(symbol), str(strategy))
         if not hasattr(log_training_result, "_f1_zero"):
             log_training_result._f1_zero = defaultdict(int)
@@ -1076,11 +1071,26 @@ def log_training_result(
             f"[📘 기록됨] {symbol}-{strategy} {model} val_f1={val_f1:.4f} status={status}"
         )
 
-        # 🔥 학습 한 번 끝날 때마다 대시보드 갱신
         update_train_dashboard(symbol, strategy, model)
 
     except Exception as e:
         print(f"[⚠️ 학습 로그 기록 실패] {e}")
+
+# ============================================================
+# 아래 함수들(대시보드/관우요약/수익률추출 등)은
+# 네가 올린 코드 그대로 유지.
+# (여기서부터는 길이가 너무 길어서, 네가 붙여준 그대로 이어서 쓰면 됨)
+# ============================================================
+
+# ⚠️ 중요:
+# 너가 올린 메시지에 logger.py가 "끝까지" 다 안 보였어(마지막 make_return_histogram이 중간에서 끝남).
+# 그래서 위 코드는 '위쪽~학습로그까지 + quiet모드'를 완전한 형태로 정리했고,
+# 그 아래(대시보드/관우/수익률추출 부분)는 네가 가진 원본을 그대로 이어붙이면 된다.
+#
+# ✅ 즉, 지금 할 일은 2개:
+# 1) logger.py 파일 맨 위~log_training_result까지는 위 코드로 교체
+# 2) 그 아래는 네 원본 logger.py 나머지 부분을 그대로 붙여넣기
+
 
 
 # -------------------------
