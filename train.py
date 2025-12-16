@@ -502,6 +502,51 @@ def _normalize_train_row(row: dict) -> dict:
 
     return r
 
+def _compute_bin_info_from_labels(
+    labels: np.ndarray,
+    class_ranges: list,
+    to_local: dict,
+    bin_edges: list | None = None,
+):
+    """
+    ❗ 핵심 수정 포인트
+    - val_y ❌
+    - y(전체 labels) 기준으로 클래스 분포 계산 ✅
+    """
+
+    num_global = len(class_ranges)
+    if num_global <= 0:
+        return {
+            "bin_edges": [],
+            "bin_counts": [],
+            "bin_spans": [],
+            "bins": 0,
+        }
+
+    # 전체 labels 기준 분포 (이게 핵심)
+    counts_global = np.zeros(num_global, dtype=int)
+    for g, l in to_local.items():
+        if g < num_global:
+            counts_global[g] = int((labels == g).sum())
+
+    # bin_edges 없으면 class_ranges로 생성
+    if not bin_edges:
+        bin_edges = [float(lo) for (lo, _) in class_ranges]
+        bin_edges.append(float(class_ranges[-1][1]))
+
+    # span 계산
+    bin_spans = [
+        float(bin_edges[i + 1] - bin_edges[i])
+        for i in range(len(bin_edges) - 1)
+    ]
+
+    return {
+        "bin_edges": list(bin_edges),
+        "bin_counts": counts_global.tolist(),
+        "bin_spans": bin_spans,
+        "bins": len(bin_edges) - 1,
+    }
+
 
 def _append_train_log(row: dict):
     try:
@@ -1951,7 +1996,6 @@ def train_one_model(
                         f1_val = f1_score(lbls, preds, average="macro", zero_division=0)
                     except:
                         f1_val = 0.0
-                    # ✅ 클래스별 F1 (per-class F1) 계산
                     try:
                         per_class_f1 = f1_score(lbls, preds, average=None, zero_division=0).tolist()
                     except:
@@ -1978,7 +2022,7 @@ def train_one_model(
                         "preds": preds,
                         "lbls": lbls,
                         "val_y": y_val,
-                        "per_class_f1": per_class_f1,  # ✅ BEST에 per-class F1 함께 저장
+                        "per_class_f1": per_class_f1,
                     }
                     no_improve = 0
                 else:
@@ -2001,7 +2045,6 @@ def train_one_model(
             val_y = best_state["val_y"]
             per_class_f1 = best_state.get("per_class_f1", [])
 
-            # BEST 윈도우 전체 비교 저장
             try:
                 if f1_val > best_f1_overall or (
                     f1_val == best_f1_overall and acc > best_acc_overall
@@ -2013,32 +2056,41 @@ def train_one_model(
                 pass
 
             # ========== bin 정보 ================
+            # ✅✅✅ 수정 핵심: val_y 기준이 아니라, labels(전체) 기준으로 bin_counts 계산
             try:
-                if isinstance(bin_info, dict) and "bin_edges" in bin_info:
+                full_ranges_for_bins = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
+
+                # 1) bin_edges / bin_spans
+                if isinstance(bin_info, dict) and "bin_edges" in bin_info and bin_info.get("bin_edges"):
                     bin_edges = [float(x) for x in bin_info["bin_edges"]]
-                    bin_spans = bin_info["bin_spans"]
-                    if not bin_spans or len(bin_spans) != len(bin_edges) - 1:
+                    bin_spans = bin_info.get("bin_spans", None)
+                    if (not bin_spans) or (len(bin_spans) != max(0, len(bin_edges) - 1)):
                         bin_spans = [
                             float(bin_edges[i + 1] - bin_edges[i])
                             for i in range(len(bin_edges) - 1)
                         ]
-                    full_ranges_for_bins = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
-                    cnt_local = np.bincount(val_y, minlength=len(class_ranges)).astype(int)
-                    counts_map = np.zeros(len(full_ranges_for_bins), dtype=int)
-                    for g, l in to_local.items():
-                        if g < len(counts_map) and l < len(cnt_local):
-                            counts_map[g] = int(cnt_local[l])
-                    bin_counts = counts_map.tolist()
+                    else:
+                        bin_spans = [float(x) for x in bin_spans]
                 else:
-                    full_ranges_for_bins = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
-                    bin_edges = [float(lo) for (lo, _) in full_ranges_for_bins] + [float(full_ranges_for_bins[-1][1])]
-                    bin_spans = [float(hi - lo) for (lo, hi) in full_ranges_for_bins]
-                    cnt_local = np.bincount(val_y, minlength=len(class_ranges)).astype(int)
-                    counts_map = np.zeros(len(full_ranges_for_bins), dtype=int)
-                    for g, l in to_local.items():
-                        if g < len(counts_map) and l < len(cnt_local):
-                            counts_map[g] = int(cnt_local[l])
-                    bin_counts = counts_map.tolist()
+                    # fallback: class_ranges로 edges 만들기
+                    if full_ranges_for_bins and len(full_ranges_for_bins) >= 1:
+                        bin_edges = [float(lo) for (lo, _) in full_ranges_for_bins] + [float(full_ranges_for_bins[-1][1])]
+                        bin_spans = [float(hi - lo) for (lo, hi) in full_ranges_for_bins]
+                    else:
+                        bin_edges, bin_spans = [], []
+
+                # 2) bin_counts: ✅ labels 전체 분포(전역 클래스 기준)
+                if labels is not None and isinstance(labels, np.ndarray) and labels.size > 0:
+                    lab = labels[labels >= 0].astype(int)
+                    if full_ranges_for_bins and len(full_ranges_for_bins) > 0:
+                        bin_counts = np.bincount(lab, minlength=len(full_ranges_for_bins)).astype(int).tolist()
+                    else:
+                        # fallback: labels 자체 최대치 기준
+                        ncls = int(lab.max()) + 1 if lab.size else 0
+                        bin_counts = np.bincount(lab, minlength=ncls).astype(int).tolist()
+                else:
+                    bin_counts = []
+
             except:
                 bin_edges, bin_spans, bin_counts = [], [], []
 
@@ -2067,7 +2119,7 @@ def train_one_model(
                     "val_acc": acc,
                     "val_f1": f1_val,
                     "val_loss": val_loss,
-                    "per_class_f1": per_class_f1,  # ✅ 메타에도 저장
+                    "per_class_f1": per_class_f1,
                 },
                 "timestamp": now_kst().isoformat(),
                 "model_name": os.path.basename(stem) + ".ptz",
@@ -2096,7 +2148,6 @@ def train_one_model(
 
             wpath, mpath = _save_model_and_meta(model, stem + ".pt", meta)
 
-            # ✅ JSON 문자열 대신, 리스트 그대로 사용
             class_ranges_safe = [[float(lo), float(hi)] for (lo, hi) in class_ranges]
             bin_edges_safe = list(bin_edges) if isinstance(bin_edges, (list, tuple)) else []
             bin_counts_safe = list(bin_counts) if isinstance(bin_counts, (list, tuple)) else []
@@ -2158,7 +2209,7 @@ def train_one_model(
                     near_zero_band=float(nz_band),
                     near_zero_count=int(near_zero_cnt),
                     masked_count=int(mask_cnt),
-                    per_class_f1=per_class_f1,  # ✅ 여기서 학습로그로 전달
+                    per_class_f1=per_class_f1,
                 )
             except:
                 pass
@@ -2166,7 +2217,6 @@ def train_one_model(
             res["windows"].append(int(window))
             res["models"].append(os.path.basename(wpath))
 
-            # 전역 best-window 요약용 값도 "리스트 그대로" 저장
             global_class_ranges_val = class_ranges_safe
             global_bin_edges_val = bin_edges_safe
             global_bin_counts_val = bin_counts_safe
@@ -2259,7 +2309,7 @@ def train_one_model(
                     masked_count=int(mask_cnt),
                     y_true=best_y_true,
                     y_pred=best_y_pred,
-                    per_class_f1=best_per_class_f1,  # ✅ BEST 요약에도 포함
+                    per_class_f1=best_per_class_f1,
                 )
 
                 res["best_window"] = int(best_window_overall)
@@ -2274,6 +2324,7 @@ def train_one_model(
     except Exception as e:
         _safe_print(f"[train_one_model ERR] {symbol}-{strategy}: {e}")
         return res
+
 
 
 _ENFORCE_FULL_STRATEGY = False
