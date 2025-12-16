@@ -470,29 +470,45 @@ def make_labels(df, symbol, strategy, group_id=None):
     pure = _normalize_strategy_name(strategy)
 
     gains, up_c, dn_c, target_bins = compute_label_returns(df, symbol, pure)
+
+    # ✅ 학습 기준 마스크 (0% 근처 제외)
+    train_mask = (np.abs(gains) >= float(TRAIN_ZERO_BAND_ABS))
+
+    # ✅ bins(edges)는 "학습에 실제로 쓰는 분포"로만 만든다
     dist = np.concatenate([dn_c, up_c], axis=0)
+    dist_for_bins = dist[np.isfinite(dist)]
+    dist_for_bins = dist_for_bins[np.abs(dist_for_bins) >= float(TRAIN_ZERO_BAND_ABS)]
 
-    edges = _raw_bins(dist, target_bins)
+    # fallback: 너무 적으면 원래 dist 사용
+    if dist_for_bins.size < max(100, _MIN_SAMPLES_PER_CLASS * 2):
+        dist_for_bins = dist[np.isfinite(dist)]
 
+    edges = _raw_bins(dist_for_bins, target_bins)
+
+    # ✅ 희소 병합도 "학습에 들어가는 gains" 기준으로
     if MERGE_SPARSE_LABEL_BINS:
-        edges, _ = _merge_sparse_bins(edges, gains)
+        edges, _ = _merge_sparse_bins(edges, gains[train_mask])
 
-    labels = _vector_bin(gains, edges)
+    labels = _vector_bin(gains, edges).astype(np.int64)
 
+    # ✅ 학습 제외 샘플은 라벨 -1로 명확히 표시
+    labels[~train_mask] = -1
+
+    # ✅ bin_counts도 "학습 샘플" 기준으로 집계
     edges2 = edges.copy()
     edges2[-1] += 1e-12
-    bin_counts, _ = np.histogram(gains, bins=edges2)
+    bin_counts, _ = np.histogram(gains[train_mask], bins=edges2)
+
     spans = np.diff(edges) * 100.0
 
-    train_mask = (np.abs(gains) >= float(TRAIN_ZERO_BAND_ABS)).astype(np.int8)
-
+    # 기존 extra_cols 유지
     sl = 0.02
     extra_cols = {
         "future_up": up_c,
         "future_dn": dn_c,
         "up_ge_2pct": (up_c >= sl).astype(np.int8),
         "dn_le_-2pct": (dn_c <= -sl).astype(np.int8),
-        "train_mask": train_mask,
+        "train_mask": train_mask.astype(np.int8),
     }
 
     _save_label_table(
@@ -514,12 +530,14 @@ def make_labels(df, symbol, strategy, group_id=None):
         spans.astype(float),
     )
 
+
 # ============================================================
 # make_labels_for_horizon (RAW용)  — (기존 유지)
 # ============================================================
 def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
     n = len(df)
     both = _future_extreme_signed_returns(df, horizon_hours=horizon_hours)
+
     if both is None:
         dn = np.zeros(n, dtype=np.float32)
         up = np.zeros(n, dtype=np.float32)
@@ -530,29 +548,45 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
     dist = np.concatenate([dn, up], axis=0)
     target_bins = _auto_target_bins(len(df))
 
-    edges = _raw_bins(dist, target_bins)
     gains = _pick_per_candle_gain(up, dn)
 
+    # ✅ 학습 기준 마스크
+    train_mask = (np.abs(gains) >= float(TRAIN_ZERO_BAND_ABS))
+
+    # ✅ bins(edges)는 "학습 분포"로만 만든다
+    dist_for_bins = dist[np.isfinite(dist)]
+    dist_for_bins = dist_for_bins[np.abs(dist_for_bins) >= float(TRAIN_ZERO_BAND_ABS)]
+
+    # fallback: 너무 적으면 원래 dist 사용
+    if dist_for_bins.size < max(100, _MIN_SAMPLES_PER_CLASS * 2):
+        dist_for_bins = dist[np.isfinite(dist)]
+
+    edges = _raw_bins(dist_for_bins, target_bins)
+
+    # ✅ 희소 병합도 학습 gains 기준
     if MERGE_SPARSE_LABEL_BINS:
-        edges, _ = _merge_sparse_bins(edges, gains)
+        edges, _ = _merge_sparse_bins(edges, gains[train_mask])
 
-    labels = _vector_bin(gains, edges)
+    labels = _vector_bin(gains, edges).astype(np.int64)
 
+    # ✅ 학습 제외 샘플은 -1
+    labels[~train_mask] = -1
+
+    # ✅ bin_counts도 학습 샘플 기준
     edges2 = edges.copy()
     edges2[-1] += 1e-12
-    bin_counts, _ = np.histogram(gains, bins=edges2)
+    bin_counts, _ = np.histogram(gains[train_mask], bins=edges2)
+
     spans = np.diff(edges) * 100.0
 
     strategy = "단기" if horizon_hours <= 4 else ("중기" if horizon_hours <= 24 else "장기")
-
-    train_mask = (np.abs(gains) >= float(TRAIN_ZERO_BAND_ABS)).astype(np.int8)
 
     extra_cols = {
         "future_up": up,
         "future_dn": dn,
         "up_ge_2pct": (up >= 0.02).astype(np.int8),
         "dn_le_-2pct": (dn <= -0.02).astype(np.int8),
-        "train_mask": train_mask,
+        "train_mask": train_mask.astype(np.int8),
     }
 
     _save_label_table(
@@ -574,6 +608,7 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
         bin_counts.astype(int),
         spans.astype(float),
     )
+
 
 # ============================================================
 # make_all_horizon_labels
