@@ -1349,10 +1349,11 @@ def _get_last_row(df: pd.DataFrame, filt: dict):
 def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
     """
     모든 학습 관련 정보를 통합한 1줄 요약 레코드를 생성한다.
-    - class_counts / class_edges / label_distribution가 없으면 직접 계산
-    - NaN 원인을 자동 분석해 "health" 필드와 사람이 읽을 수 있는 문제 설명 추가
+    - 거짓표시 방지:
+      (1) NUM_CLASSES와 class_edges 길이가 안 맞으면 edges 텍스트를 잘라서 일치시킴
+      (2) return_distribution count=0이면 min/max/p50을 0으로 '가짜 표시'하지 않도록 비움 처리
+      (3) label_classes<=1이면 class_ranges_text를 무조건 비움
     """
-
     symbol = str(symbol)
     strategy = str(strategy)
     model = str(model or "")
@@ -1364,9 +1365,6 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
 
     # 1) train_log에서 최신 한 줄 찾기
     train_df = _safe_read_df(TRAIN_LOG)
-    trow = None
-
-    # 🔒 필수: 비어있거나 symbol/strategy/timestamp 가 없으면 그대로 종료
     if train_df is None or train_df.empty:
         return
 
@@ -1375,224 +1373,250 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
         return
 
     sub = train_df[(train_df["symbol"] == symbol) & (train_df["strategy"] == strategy)]
-    if not sub.empty:
-        sub = sub.copy()
-        sub["timestamp"] = pd.to_datetime(sub["timestamp"], errors="coerce")
-        sub = sub.sort_values("timestamp")
-        trow = sub.tail(1).to_dict("records")[0]
-
-    if trow is None:
+    if sub.empty:
         return
 
-    # ------------------------------------------------------
-    # 2) 기본 메트릭 변환
-    # ------------------------------------------------------
-    def _f(x, default=0.0):
-        try:
-            if x in ["", None, "nan", "NaN"]:
-                return float(default)
-            return float(x)
-        except:
-            return float(default)
+    sub = sub.copy()
+    sub["timestamp"] = pd.to_datetime(sub["timestamp"], errors="coerce")
+    sub = sub.sort_values("timestamp")
+    trow = sub.tail(1).to_dict("records")[0]
 
-    def _i(x, default=0):
+    # -----------------------
+    # 유틸
+    # -----------------------
+    def _f(x, default=None):
         try:
-            if x in ["", None, "nan", "NaN"]:
-                return int(default)
+            if x in ["", None, "nan", "NaN", "None", "null"]:
+                return default
+            v = float(x)
+            if not np.isfinite(v):
+                return default
+            return v
+        except Exception:
+            return default
+
+    def _i(x, default=None):
+        try:
+            if x in ["", None, "nan", "NaN", "None", "null"]:
+                return default
             return int(float(x))
-        except:
-            return int(default)
+        except Exception:
+            return default
 
-    val_acc  = _f(trow.get("val_acc"), 0.0)
-    val_f1   = _f(trow.get("val_f1"), 0.0)
-    val_loss = _f(trow.get("val_loss"), 0.0)
+    # 2) 기본 메트릭
+    val_acc  = _f(trow.get("val_acc"), None)
+    val_f1   = _f(trow.get("val_f1"), None)
+    val_loss = _f(trow.get("val_loss"), None)
 
-    # ------------------------------------------------------
-    # 3) 라벨 분포 계산 (label_distribution.csv → 없으면 class_counts 기반 복구)
-    # ------------------------------------------------------
+    # 실제 학습 클래스 수(가장 믿을만한 후보)
+    real_num_classes = _i(trow.get("NUM_CLASSES"), None)
+    if real_num_classes is None:
+        real_num_classes = _i(trow.get("num_classes"), None)
+
+    # -----------------------
+    # 3) 라벨 분포(label_distribution.csv)
+    # -----------------------
+    label_total = None
+    label_classes = None
+    label_counts_json = ""
+    label_entropy = None
+
     label_df = _safe_read_df(os.path.join(LOG_DIR, "label_distribution.csv"))
+    lrow = None
     if not label_df.empty and {"symbol", "strategy"}.issubset(label_df.columns):
         lrow = _get_last_row(label_df, {"symbol": symbol, "strategy": strategy})
-    else:
-        lrow = None
 
     if lrow:
-        label_total   = _i(lrow.get("total"), 0)
-        label_classes = _i(lrow.get("n_unique"), 0)
-        label_counts_json = lrow.get("counts_json", "")
-        try:
-            label_entropy = _f(lrow.get("entropy"), 0.0)
-        except:
-            label_entropy = 0.0
-    else:
-        # fallback: train_log의 class_counts로 복구
+        label_total = _i(lrow.get("total"), None)
+        label_classes = _i(lrow.get("n_unique"), None)
+        label_counts_json = str(lrow.get("counts_json", "") or "")
+        label_entropy = _f(lrow.get("entropy"), None)
+
+    # fallback: train_log의 class_counts
+    if label_classes is None or label_total is None:
         counts_raw = trow.get("class_counts", "")
+        counts = {}
         try:
-            counts_parsed = json.loads(counts_raw)
+            counts_parsed = json.loads(counts_raw) if isinstance(counts_raw, str) else counts_raw
             if isinstance(counts_parsed, list):
                 counts = {i: int(c) for i, c in enumerate(counts_parsed)}
             elif isinstance(counts_parsed, dict):
                 counts = {int(k): int(v) for k, v in counts_parsed.items()}
-            else:
-                counts = {}
-        except:
+        except Exception:
             counts = {}
 
-        label_total = sum(counts.values())
-        label_classes = sum(1 for v in counts.values() if v > 0)
-        label_counts_json = json.dumps(counts, ensure_ascii=False)
-        label_entropy = 0.0
+        if counts:
+            label_total = int(sum(counts.values()))
+            label_classes = int(sum(1 for v in counts.values() if int(v) > 0))
+            label_counts_json = json.dumps(counts, ensure_ascii=False)
 
-    # ------------------------------------------------------
-    # 4) 수익률 클래스 구간 (class_ranges.csv → edges fallback)
-    # ------------------------------------------------------
+    if label_total is None:
+        label_total = _i(trow.get("usable_samples"), 0) or 0
+    if label_classes is None:
+        label_classes = 0
+
+    # -----------------------
+    # 4) 클래스 구간 텍스트 (거짓표시 방지 핵심)
+    # -----------------------
+    class_ranges_text = ""
+
+    # (A) class_ranges.csv가 있으면 그걸 쓰되,
+    #     real_num_classes가 있으면 그 개수만큼만 잘라서 사용
     class_ranges_df = _safe_read_df(os.path.join(LOG_DIR, "class_ranges.csv"))
+    cr_sub = pd.DataFrame()
     if not class_ranges_df.empty and {"symbol", "strategy", "idx", "low", "high"}.issubset(class_ranges_df.columns):
         cr_sub = class_ranges_df[
             (class_ranges_df["symbol"] == symbol) & (class_ranges_df["strategy"] == strategy)
-        ]
-    else:
-        cr_sub = pd.DataFrame()
+        ].copy()
 
-    class_ranges_text = ""
     if not cr_sub.empty:
-        cr_sub = cr_sub[pd.to_numeric(cr_sub["idx"], errors="coerce") >= 0]
+        cr_sub["idx"] = pd.to_numeric(cr_sub["idx"], errors="coerce")
+        cr_sub = cr_sub[cr_sub["idx"] >= 0].sort_values("idx")
+        if real_num_classes is not None and real_num_classes > 0:
+            cr_sub = cr_sub.head(int(real_num_classes))
+
         parts = []
-        for _, r in cr_sub.sort_values("idx").iterrows():
-            lo, hi = float(r["low"]), float(r["high"])
-            idx = int(r["idx"]) + 1
-            parts.append(f"C{idx}: {lo*100:.2f}% ~ {hi*100:.2f}%")
+        for _, r in cr_sub.iterrows():
+            try:
+                lo, hi = float(r["low"]), float(r["high"])
+                idx = int(r["idx"]) + 1
+                parts.append(f"C{idx}: {lo*100:.2f}% ~ {hi*100:.2f}%")
+            except Exception:
+                continue
         class_ranges_text = " | ".join(parts)
 
-    # fallback: class_edges
+    # (B) fallback: class_edges
     if not class_ranges_text:
         edges_raw = trow.get("class_edges", "")
         try:
-            edges = json.loads(edges_raw)
+            edges = json.loads(edges_raw) if isinstance(edges_raw, str) else edges_raw
             if isinstance(edges, list) and len(edges) >= 2:
+                # real_num_classes가 있으면 edges를 그 개수+1까지만 자른다
+                if real_num_classes is not None and real_num_classes > 0:
+                    need = int(real_num_classes) + 1
+                    if len(edges) >= need:
+                        edges = edges[:need]
+
                 parts = []
-                for i in range(len(edges)-1):
-                    lo, hi = float(edges[i]), float(edges[i+1])
+                for i in range(len(edges) - 1):
+                    lo, hi = float(edges[i]), float(edges[i + 1])
                     parts.append(f"C{i+1}: {lo*100:.2f}% ~ {hi*100:.2f}%")
                 class_ranges_text = " | ".join(parts)
-        except:
+        except Exception:
             pass
 
-    # 데이터 없거나, 라벨이 1개면 클래스 구간 비움(잘못된 14개 출력 방지)
-    if label_classes <= 1:
+    # ✅ 라벨이 1개 이하이면 "구간 텍스트"는 무조건 비움
+    if int(label_classes) <= 1:
         class_ranges_text = ""
 
-    # ------------------------------------------------------
-    # 4.5) 수익률 분포(return_distribution.csv) 요약
-    # ------------------------------------------------------
-    ret_min = ret_p25 = ret_p50 = ret_p75 = ret_p90 = ret_p95 = ret_p99 = ret_max = 0.0
+    # -----------------------
+    # 4.5) 수익률 분포(return_distribution.csv) - 거짓 0.00 표시 방지
+    # -----------------------
+    ret_min = ret_p25 = ret_p50 = ret_p75 = ret_p90 = ret_p95 = ret_p99 = ret_max = None
     ret_count = 0
+
     ret_df = _safe_read_df(os.path.join(LOG_DIR, "return_distribution.csv"))
     if not ret_df.empty and {"symbol", "strategy"}.issubset(ret_df.columns):
         rsub = ret_df[(ret_df["symbol"] == symbol) & (ret_df["strategy"] == strategy)]
         if not rsub.empty:
             rlast = rsub.tail(1).iloc[0]
-            ret_min   = _f(rlast.get("min"), 0.0)
-            ret_p25   = _f(rlast.get("p25"), 0.0)
-            ret_p50   = _f(rlast.get("p50"), 0.0)
-            ret_p75   = _f(rlast.get("p75"), 0.0)
-            ret_p90   = _f(rlast.get("p90"), 0.0)
-            ret_p95   = _f(rlast.get("p95"), 0.0)
-            ret_p99   = _f(rlast.get("p99"), 0.0)
-            ret_max   = _f(rlast.get("max"), 0.0)
-            ret_count = _i(rlast.get("count"), 0)
+            ret_count = _i(rlast.get("count"), 0) or 0
 
-    # ------------------------------------------------------
+            # count가 0이면 값은 비워둔다(0.00%로 가짜 표시 금지)
+            if ret_count > 0:
+                ret_min = _f(rlast.get("min"), None)
+                ret_p25 = _f(rlast.get("p25"), None)
+                ret_p50 = _f(rlast.get("p50"), None)
+                ret_p75 = _f(rlast.get("p75"), None)
+                ret_p90 = _f(rlast.get("p90"), None)
+                ret_p95 = _f(rlast.get("p95"), None)
+                ret_p99 = _f(rlast.get("p99"), None)
+                ret_max = _f(rlast.get("max"), None)
+
+    # -----------------------
     # 4.6) 검증 커버리지(validation_coverage.csv)
-    # ------------------------------------------------------
+    # -----------------------
     val_num_classes = val_covered = 0
     val_coverage = 0.0
+
     cov_df = _safe_read_df(os.path.join(LOG_DIR, "validation_coverage.csv"))
     if not cov_df.empty and {"symbol", "strategy"}.issubset(cov_df.columns):
         csub = cov_df[(cov_df["symbol"] == symbol) & (cov_df["strategy"] == strategy)]
         if not csub.empty:
             clast = csub.tail(1).iloc[0]
-            val_num_classes = _i(clast.get("num_classes"), 0)
-            val_covered     = _i(clast.get("covered"), 0)
-            val_coverage    = _f(clast.get("coverage"), 0.0)
+            val_num_classes = _i(clast.get("num_classes"), 0) or 0
+            val_covered     = _i(clast.get("covered"), 0) or 0
+            val_coverage    = _f(clast.get("coverage"), 0.0) or 0.0
 
-    # ------------------------------------------------------
-    # 5) NaN 원인 분석
-    # ------------------------------------------------------
+    # -----------------------
+    # 5) health 판정 (그대로)
+    # -----------------------
     nan_reasons = []
-    if val_acc == 0 and val_f1 == 0 and str(trow.get("status", "")).lower() != "success":
+    status_str = str(trow.get("status", "") or "")
+    if (val_acc is None or val_f1 is None) and status_str.lower() != "success":
         nan_reasons.append("학습 도중 오류가 발생했거나 데이터가 부족해 성능이 계산되지 않았어요.")
-
-    if label_classes <= 1 and label_total > 0:
+    if int(label_classes) <= 1 and int(label_total) > 0:
         nan_reasons.append("라벨이 한 종류라서 모델이 구분 학습을 할 수 없어요.")
 
-    # ------------------------------------------------------
-    # 6) health 자동 판정
-    # ------------------------------------------------------
     health_codes = []
-
-    if str(trow.get("status","")).lower() not in {"success","ok"}:
+    if status_str.lower() not in {"success", "ok"}:
         health_codes.append("STATUS_FAIL")
-    if val_f1 <= 0:
+    if (val_f1 is None) or (val_f1 <= 0):
         health_codes.append("F1_ZERO")
-    if label_classes <= 1 and label_total > 0:
+    if int(label_classes) <= 1 and int(label_total) > 0:
         health_codes.append("LABEL_SINGLE_CLASS")
 
     health = "OK" if not health_codes else ";".join(health_codes)
 
-    # ------------------------------------------------------
-    # 7) 최종 한 줄 요약 생성
-    # ------------------------------------------------------
+    # -----------------------
+    # 7) 저장 row
+    # -----------------------
     summary_row = {
         "timestamp": now_kst().isoformat(),
         "symbol": symbol,
         "strategy": strategy,
         "model": model,
 
-        "val_acc": val_acc,
-        "val_f1": val_f1,
-        "val_loss": val_loss,
+        "val_acc": 0.0 if val_acc is None else float(val_acc),
+        "val_f1": 0.0 if val_f1 is None else float(val_f1),
+        "val_loss": "" if val_loss is None else float(val_loss),  # ✅ loss는 없으면 빈값(가짜 0 금지)
 
-        "label_total": label_total,
-        "label_classes": label_classes,
-        "label_entropy": label_entropy,
+        "label_total": int(label_total),
+        "label_classes": int(label_classes),
+        "label_entropy": 0.0 if label_entropy is None else float(label_entropy),
         "label_counts_json": label_counts_json,
 
         "class_ranges_text": class_ranges_text,
 
-        # 🔥 train_log 에서 직접 들고 오는 값들
-        "near_zero_band": _f(trow.get("near_zero_band"), 0.0),
-        "near_zero_count": _i(trow.get("near_zero_count"), 0),
+        "near_zero_band": float(_f(trow.get("near_zero_band"), 0.0) or 0.0),
+        "near_zero_count": int(_i(trow.get("near_zero_count"), 0) or 0),
 
         "data_rows": trow.get("rows", ""),
         "enough_for_training": trow.get("enough_for_training", ""),
         "augment_needed": trow.get("augment_needed", ""),
 
-        # 🔥 return_distribution 요약
-        "ret_min": ret_min,
-        "ret_p25": ret_p25,
-        "ret_p50": ret_p50,
-        "ret_p75": ret_p75,
-        "ret_p90": ret_p90,
-        "ret_p95": ret_p95,
-        "ret_p99": ret_p99,
-        "ret_max": ret_max,
-        "ret_count": ret_count,
+        # ✅ return_distribution 값: 없으면 빈값
+        "ret_min": "" if ret_min is None else float(ret_min),
+        "ret_p25": "" if ret_p25 is None else float(ret_p25),
+        "ret_p50": "" if ret_p50 is None else float(ret_p50),
+        "ret_p75": "" if ret_p75 is None else float(ret_p75),
+        "ret_p90": "" if ret_p90 is None else float(ret_p90),
+        "ret_p95": "" if ret_p95 is None else float(ret_p95),
+        "ret_p99": "" if ret_p99 is None else float(ret_p99),
+        "ret_max": "" if ret_max is None else float(ret_max),
+        "ret_count": int(ret_count),
 
-        # 🔥 validation_coverage 요약
-        "val_num_classes": val_num_classes,
-        "val_covered": val_covered,
-        "val_coverage": val_coverage,
+        "val_num_classes": int(val_num_classes),
+        "val_covered": int(val_covered),
+        "val_coverage": float(val_coverage),
 
-        "status": trow.get("status",""),
-        "note": trow.get("note",""),
+        "status": status_str,
+        "note": trow.get("note", ""),
         "health": health,
         "nan_reasons": " | ".join(nan_reasons),
     }
 
-    # ------------------------------------------------------
-    # 8) 저장
-    # ------------------------------------------------------
+    # 8) 저장(기존 유지)
     df_old = _safe_read_df(out_path)
     if not df_old.empty:
         df_old = df_old[
@@ -1606,6 +1630,7 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
     df_new = pd.concat([df_old, pd.DataFrame([summary_row])], ignore_index=True)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     df_new.to_csv(out_path, index=False, encoding="utf-8-sig")
+
 
 
 # 🔥🔥🔥 여기부터 추가: /train-log 카드용 요약 함수 🔥🔥🔥
