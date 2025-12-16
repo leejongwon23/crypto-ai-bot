@@ -1716,12 +1716,18 @@ def get_train_log_cards(max_cards: int = 200):
             except Exception:
                 return float(default)
 
+        # ✅ FIX: "12.0" 같은 값도 안전하게 int로 변환
         def _i(row, key, default=0):
             try:
                 val = row.get(key, default)
                 if val in ["", None, "nan", "NaN"]:
                     return int(default)
-                return int(val)
+                if isinstance(val, str):
+                    s = val.strip()
+                    if s == "" or s.lower() in {"nan", "none", "null"}:
+                        return int(default)
+                    return int(float(s))
+                return int(float(val))
             except Exception:
                 return int(default)
 
@@ -1745,7 +1751,6 @@ def get_train_log_cards(max_cards: int = 200):
 
         # 🔹 원본 rows (캔들 개수) 표시용
         data_rows_raw = str(last.get("data_rows", last.get("rows", "")) or "").strip()
-        # 'nan', 'NaN', 'None', 'null' 같은 값은 "정보 없음"으로 처리
         if data_rows_raw.lower() in {"nan", "none", "null"}:
             data_rows_raw = ""
 
@@ -1824,8 +1829,6 @@ def get_train_log_cards(max_cards: int = 200):
                 f"({val_coverage*100:.1f}%)."
             )
         else:
-            # 아직 validation_coverage.csv 로 집계된 검증 커버리지는 없지만,
-            # 최소한 "라벨이 몇 개의 수익률 구간으로 나뉘어 있는지"는 알려준다.
             if label_classes > 0:
                 coverage_summary = (
                     f"검증 커버리지는 따로 집계되지 않았지만, "
@@ -1837,8 +1840,6 @@ def get_train_log_cards(max_cards: int = 200):
         # 6) 클래스별 수익률 구간 텍스트
         class_ranges_text = str(last.get("class_ranges_text", "") or "")
 
-        # 라벨 클래스가 1개 이하라면, 구간 텍스트를 비워서
-        # "클래스는 1개인데 C1~C14" 같은 이상한 상황을 막는다.
         if label_classes <= 1:
             class_ranges_text_human = ""
         elif class_ranges_text:
@@ -1875,12 +1876,11 @@ def get_train_log_cards(max_cards: int = 200):
             "val_f1": val_f1,
             "val_loss": val_loss,
 
-            # 🔹 데이터/클래스 요약 (여기 값으로 "클래스 수" / "데이터 분포"를 뽑아 쓸 수 있음)
             "label_total": label_total,
             "label_classes": label_classes,
-            "label_counts_json": label_counts_json,  # 클래스별 데이터 개수 JSON
-            "num_classes": label_classes,            # 템플릿이 다른 이름을 쓸 수도 있어서 같이 넣어줌
-            "class_count": label_classes,            # ditto
+            "label_counts_json": label_counts_json,
+            "num_classes": label_classes,
+            "class_count": label_classes,
 
             "data_summary": data_summary,
             "data_detail_text": data_detail_text,
@@ -1917,6 +1917,7 @@ def get_train_log_cards(max_cards: int = 200):
         cards = cards[-max_cards:]
 
     return cards
+
 
 # -------------------------
 # 정렬 키
