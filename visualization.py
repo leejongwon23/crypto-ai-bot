@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 import pytz
 from matplotlib import font_manager
+from config import get_TRAIN_LOG_PATH  # ✅ 추가: 경로 단일화
 
 # ----------------------------------------
 # 폰트 설정 (한글 + 이모지)
@@ -28,7 +29,7 @@ plt.rcParams["axes.unicode_minus"] = False
 # ----------------------------------------
 # 기본 경로
 # ----------------------------------------
-TRAIN_LOG = "/persistent/train_log.csv"
+TRAIN_LOG = get_TRAIN_LOG_PATH()  # ✅ 수정: 하드코딩 제거 (/persistent/... 제거)
 
 
 # ----------------------------------------
@@ -320,4 +321,3 @@ def generate_visuals_for_strategy(symbol: str, strategy: str) -> str:
     html = f"<h1>📘 {symbol} · {strategy} 학습 리포트</h1>"
     html += generate_card(symbol, strategy, df)
     return html
-
