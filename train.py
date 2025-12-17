@@ -4,6 +4,7 @@ import sitecustomize
 import os, time, glob, shutil, json, random, traceback, threading, gc, csv, re
 from datetime import datetime
 from typing import Optional, List, Tuple, Dict, Any
+from logger import ensure_train_log_exists
 
 import numpy as np, pandas as pd, pytz, torch, torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
@@ -381,89 +382,15 @@ except Exception:
 
 def _ensure_train_log():
     """
-    - 파일이 없으면: 최신 TRAIN_HEADERS 로 새로 생성
-    - 파일이 있되, 예전 헤더(분포 컬럼 없음)이면:
-      → 백업(.bak) 만들고, 헤더를 TRAIN_HEADERS 기준으로 업그레이드
+    ✅ train.py에서는 헤더를 '절대' 새로 만들지 않는다.
+    ✅ 오직 logger.py의 ensure_train_log_exists()만 사용한다.
+    (헤더 충돌로 인한 무한 업그레이드 + 데이터 유실 방지)
     """
     try:
-        # 1) 파일이 아예 없으면 최신 헤더로 생성
-        if not os.path.exists(TRAIN_LOG):
-            with open(TRAIN_LOG, "w", encoding="utf-8-sig", newline="") as f:
-                csv.writer(f).writerow(TRAIN_HEADERS)
-            return
-
-        # 2) 파일이 있는데, 헤더가 비었으면 다시 작성
-        with open(TRAIN_LOG, "r", encoding="utf-8-sig") as f:
-            first_line = f.readline()
-
-        if not first_line:
-            with open(TRAIN_LOG, "w", encoding="utf-8-sig", newline="") as f:
-                csv.writer(f).writerow(TRAIN_HEADERS)
-            return
-
-        # 3) 기존 헤더 파싱
-        try:
-            reader = csv.reader([first_line])
-            old_headers = next(reader)
-        except Exception:
-            old_headers = []
-
-        # 이미 충분히 최신이면 아무 것도 안 함
-        important_new_cols = [
-            "class_edges",
-            "class_counts",
-            "bins",
-            "bin_edges",
-            "bin_counts",
-            "bin_spans",
-            "near_zero_band",
-            "near_zero_count",
-            "masked_count",
-            "NUM_CLASSES",
-            "class_counts_label_freeze",
-            "usable_samples",
-            "class_counts_after_assemble",
-            "batch_stratified_ok",
-        ]
-        need_upgrade = any(col not in old_headers for col in important_new_cols)
-
-        if not need_upgrade:
-            return
-
-        # 4) 업그레이드: pandas 로 전체 읽어서, 누락 컬럼 추가 후 저장
-        try:
-            df = pd.read_csv(TRAIN_LOG, encoding="utf-8-sig")
-        except Exception:
-            # 읽기 실패하면, 기존 파일은 백업해 두고 새로 생성
-            backup_path = TRAIN_LOG + ".bak"
-            try:
-                shutil.move(TRAIN_LOG, backup_path)
-            except Exception:
-                pass
-            with open(TRAIN_LOG, "w", encoding="utf-8-sig", newline="") as f:
-                csv.writer(f).writerow(TRAIN_HEADERS)
-            print("[train_log] 기존 파일 손상 → 새 train_log.csv 생성", flush=True)
-            return
-
-        # df에 TRAIN_HEADERS 에 있는 모든 컬럼을 보장
-        for col in TRAIN_HEADERS:
-            if col not in df.columns:
-                df[col] = None
-
-        # 컬럼 순서는 TRAIN_HEADERS 순서로 맞춤
-        df = df[TRAIN_HEADERS]
-
-        backup_path = TRAIN_LOG + ".bak"
-        try:
-            shutil.move(TRAIN_LOG, backup_path)
-        except Exception:
-            pass
-
-        df.to_csv(TRAIN_LOG, index=False, encoding="utf-8-sig")
-        print(f"[train_log] 헤더 업그레이드 완료 → backup={backup_path}", flush=True)
-
+        ensure_train_log_exists()  # logger.py 함수
     except Exception as e:
         print(f"[경고] train_log 초기화/업그레이드 실패: {e}", flush=True)
+
 
 
 def _normalize_train_row(row: dict) -> dict:
