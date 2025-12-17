@@ -381,71 +381,74 @@ def ensure_prediction_log_exists():
     except Exception as e:
         print(f"[⚠️ ensure_prediction_log_exists] 예외: {e}")
 
+
 def ensure_train_log_exists():
-    if _READONLY_FS:
-        return
+    """
+    ✅ 핵심 목표
+    - train_log.csv 가 없으면: 최신 TRAIN_HEADERS로 생성
+    - 헤더가 다르면: 백업 후 "기존 데이터 최대 보존"하면서 헤더만 업그레이드
+      (절대 빈칸으로 밀어버리지 않음)
+    """
     try:
         os.makedirs(os.path.dirname(TRAIN_LOG), exist_ok=True)
 
-        # 새 파일 또는 빈 파일 → 헤더 생성
+        # 1) 없으면 생성
         if not os.path.exists(TRAIN_LOG) or os.path.getsize(TRAIN_LOG) == 0:
             with open(TRAIN_LOG, "w", newline="", encoding="utf-8-sig") as f:
-                # 🔹 처음부터 확장 헤더로 생성
-                csv.writer(f).writerow(TRAIN_HEADERS)
+                w = csv.DictWriter(f, fieldnames=TRAIN_HEADERS)
+                w.writeheader()
             print("[✅ ensure_train_log_exists] train_log.csv 생성(확장 스키마)")
+            return
 
-        else:
-            # 기존 헤더와 비교
-            existing = _read_csv_header(TRAIN_LOG)
-            if existing != TRAIN_HEADERS:
-                bak = TRAIN_LOG + ".bak"
+        existing = _read_csv_header(TRAIN_LOG)
+        if existing == TRAIN_HEADERS:
+            return  # 이미 정상이면 아무것도 안 함
 
-                # 안전 백업
-                try:
-                    os.replace(TRAIN_LOG, bak)
-                except Exception:
-                    try:
-                        shutil.copyfile(TRAIN_LOG, bak)
-                        open(TRAIN_LOG, "w", encoding="utf-8-sig").close()
-                    except Exception:
-                        return
+        # 2) 헤더가 다르면: 백업 + 보존 업그레이드
+        bak = TRAIN_LOG + ".bak"
+        try:
+            os.replace(TRAIN_LOG, bak)
+        except Exception:
+            shutil.copyfile(TRAIN_LOG, bak)
 
-                with open(TRAIN_LOG, "w", newline="", encoding="utf-8-sig") as out, \
-                     open(bak, "r", encoding="utf-8-sig") as src:
+        with open(bak, "r", encoding="utf-8-sig", newline="") as src, \
+             open(TRAIN_LOG, "w", encoding="utf-8-sig", newline="") as out:
 
-                    w = csv.DictWriter(out, fieldnames=TRAIN_HEADERS)
-                    w.writeheader()
+            reader = csv.DictReader(src)
+            old_fields = reader.fieldnames or []
 
-                    reader = csv.reader(src)
-                    try:
-                        old_header = next(reader)
-                    except StopIteration:
-                        old_header = []
+            writer = csv.DictWriter(out, fieldnames=TRAIN_HEADERS)
+            writer.writeheader()
 
-                    for row in reader:
-                        mapped = {h: row[i] for i, h in enumerate(old_header)} if old_header else {}
-                        val_loss_val = mapped.get("val_loss", mapped.get("loss", mapped.get("train_loss_sum", "")))
+            for old_row in reader:
+                old_row = old_row or {}
 
-                        # 🔹 예전 로그 → 새 확장 헤더로 이관 (새 필드는 공백)
-                        base_row = [
-                            mapped.get("timestamp",""),
-                            mapped.get("symbol",""),
-                            mapped.get("strategy",""),
-                            mapped.get("model",""),
-                            mapped.get("accuracy", mapped.get("val_acc","")),
-                            mapped.get("f1",       mapped.get("val_f1","")),
-                            val_loss_val,
-                            "", "", "", "", "", "", "", "",
-                            mapped.get("note",""),
-                            mapped.get("source_exchange",""),
-                            mapped.get("status",""),
-                        ]
-                        extra_row = [""] * len(TRAIN_EXTRA_HEADERS)
-                        new_row = base_row + extra_row
+                # ✅ 구버전 키 호환 매핑 (있으면 살려서 넣기)
+                # - accuracy/f1/loss → val_acc/val_f1/val_loss
+                if (not old_row.get("val_acc")) and old_row.get("accuracy") not in (None, ""):
+                    old_row["val_acc"] = old_row.get("accuracy")
+                if (not old_row.get("val_f1")) and old_row.get("f1") not in (None, ""):
+                    old_row["val_f1"] = old_row.get("f1")
+                if (not old_row.get("val_loss")):
+                    v = old_row.get("val_loss")
+                    if v in (None, ""):
+                        v = old_row.get("loss")
+                    if v in (None, ""):
+                        v = old_row.get("train_loss_sum")
+                    if v not in (None, ""):
+                        old_row["val_loss"] = v
 
-                        w.writerow(dict(zip(TRAIN_HEADERS, new_row[:len(TRAIN_HEADERS)])))
+                # ✅ 핵심: "새 헤더" 기준으로 최대 보존 복사
+                new_row = {}
+                for h in TRAIN_HEADERS:
+                    if h in old_row and old_row[h] not in (None, ""):
+                        new_row[h] = old_row[h]
+                    else:
+                        new_row[h] = ""  # 없으면 빈칸
 
-                print("[✅ ensure_train_log_exists] train_log.csv 헤더 보정(확장) 완료")
+                writer.writerow(new_row)
+
+        print(f"[train_log] 헤더 업그레이드 완료 → backup={bak}")
 
     except Exception as e:
         print(f"[⚠️ ensure_train_log_exists] 예외: {e}")
