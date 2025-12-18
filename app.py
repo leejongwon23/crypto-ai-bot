@@ -50,14 +50,15 @@ from config import get_TRAIN_LOG_PATH
 
 
 # === 공통 경로/디렉토리 ===
-# NOTE: Render에서는 /persistent 쓰면 Permission denied가 뜨므로 기본값을 /tmp/persistent 로 둔다.
-# 로컬/자체 서버에서 예전처럼 /persistent 쓰고 싶으면
+# NOTE: Render에서는 /persistent 쓰면 Permission denied가 뜨므로 기본값을 /opt/render/project/src/persistent 로 둔다.
+# 로컬/자체 서버에서 예전처럼 바꾸고 싶으면
 # PERSIST_DIR=/persistent 또는 PERSISTENT_DIR=/persistent 로 환경변수만 주면 된다.
 
+# ✅ FIX 1) PERSIST_DIR 기본값 통일 (/tmp/persistent → /opt/render/project/src/persistent)
 PERSIST_DIR = (
     os.getenv("PERSIST_DIR")
     or os.getenv("PERSISTENT_DIR")
-    or "/tmp/persistent"
+    or "/opt/render/project/src/persistent"
 )
 LOG_DIR = os.path.join(PERSIST_DIR, "logs")
 MODEL_DIR = os.path.join(PERSIST_DIR, "models")
@@ -65,12 +66,8 @@ RUN_DIR = os.path.join(PERSIST_DIR, "run")
 
 os.makedirs(PERSIST_DIR, exist_ok=True)
 
-# 예전 하드코딩 로그 파일들 미리 생성
-for name in ("wrong_predictions.csv", "prediction_log.csv", "train_log.csv"):
-    path = os.path.join(PERSIST_DIR, name)
-    if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8-sig") as f:
-            f.write("")
+# ✅ FIX 2) 옛날 방식(빈 로그파일 미리 생성) 제거
+# - logger.ensure_* 가 올바른 경로/헤더로 생성해야 하므로 app.py에서 빈 파일을 만들지 않는다.
 
 
 # --- ✨ 필수 폴더 자동 생성 유틸 (부팅/리셋/조기 QWIPE 후 재사용) ---
@@ -1421,7 +1418,6 @@ def _render_prediction_eval_dashboard_simple():
         reason = str(r.get("reason", "") or "")
         src = str(r.get("source", "") or "")
 
-        # expected_return / rate / return_value 중 하나 사용
         rv = r.get("return_value", None)
         if rv is None or (isinstance(rv, float) and pd.isna(rv)):
             rv = r.get("rate", None)
@@ -1433,14 +1429,12 @@ def _render_prediction_eval_dashboard_simple():
             rv = 0.0
         rv_pct = rv * 100.0
 
-        # 예측 클래스
         pred_class_val = None
         for cname in ["pred_class", "pred_label", "class", "target_class", "bucket", "bin_index"]:
             if cname in r and r[cname] not in [None, "", "nan", "None"]:
                 pred_class_val = r[cname]
                 break
 
-        # 메타/섀도우
         is_meta = False
         is_shadow = False
         if "is_meta" in r:
@@ -1454,13 +1448,10 @@ def _render_prediction_eval_dashboard_simple():
             except Exception:
                 is_shadow = str(r.get("is_shadow", "")).lower() in ["1", "true", "yes", "y"]
         if not ("is_meta" in r or "is_shadow" in r):
-            # 컬럼이 없으면 source에 shadow라는 단어가 있는지로만 대략 추정
             is_shadow = "shadow" in src.lower()
 
-        # 변동성 예측 여부
         is_vol = status.startswith("v_")
 
-        # 실패패턴 존재 여부
         fail_pat = False
         try:
             if status in ["fail", "v_fail"]:
@@ -1468,7 +1459,6 @@ def _render_prediction_eval_dashboard_simple():
         except Exception:
             fail_pat = False
 
-        # 상태 스타일/아이콘/텍스트
         if status in ["success", "v_success"]:
             status_class = "success"
             status_icon = "✅"
@@ -1486,10 +1476,8 @@ def _render_prediction_eval_dashboard_simple():
             status_icon = "❓"
             eval_text = "기타 상태"
 
-        # 보류(Abstain) 여부
         is_abstain = ("abstain" in reason.lower()) or ("보류" in reason)
 
-        # 메타 선택 이유
         meta_reason = None
         for cname in ["meta_reason", "meta_note"]:
             if cname in r and r[cname] not in [None, "", "nan", "None"]:
@@ -1498,7 +1486,6 @@ def _render_prediction_eval_dashboard_simple():
         if meta_reason is None and is_meta:
             meta_reason = reason or None
 
-        # 예측 타입 텍스트
         if is_meta:
             pred_type = "메타가 실제로 선택한 예측"
         elif is_shadow:
@@ -1506,18 +1493,15 @@ def _render_prediction_eval_dashboard_simple():
         else:
             pred_type = "일반 예측"
 
-        # 🔍 하이브리드 / 유사도 note JSON 파싱
         hybrid_info_html = ""
         try:
             raw_note = r.get("note", None)
             note_obj = None
             if raw_note not in [None, "", "nan", "None"]:
                 if isinstance(raw_note, str):
-                    # JSON 문자열로 저장된 경우
                     try:
                         note_obj = json.loads(raw_note)
                     except Exception:
-                        # 이미 dict의 str()로 저장된 경우에도 대비
                         note_obj = None
                 elif isinstance(raw_note, dict):
                     note_obj = raw_note
@@ -1570,7 +1554,6 @@ def _render_prediction_eval_dashboard_simple():
                 if chosen_reason:
                     pieces.append(f"선택 사유: {chosen_reason}")
 
-                # 아무 필드도 못 뽑았으면 전체 note를 백업으로 보여줌
                 if not pieces and note_obj:
                     pieces.append(str(note_obj))
 
@@ -1580,8 +1563,6 @@ def _render_prediction_eval_dashboard_simple():
             hybrid_info_html = ""
 
         html += "<div class='card'>"
-
-        # 상단 뱃지들
         html += "<div style='margin-bottom:4px;'>"
         if is_meta:
             html += "<span class='badge badge-main'>META</span>"
@@ -1594,7 +1575,6 @@ def _render_prediction_eval_dashboard_simple():
         html += f"<span class='{status_class}' style='margin-left:6px;'>{status_icon} {status or 'status 없음'}</span>"
         html += "</div>"
 
-        # 본문 정보
         html += f"<div class='row-line'><span class='key'>시각</span><span class='value'>{ts}</span></div>"
         html += (
             f"<div class='row-line'><span class='key'>심볼 / 전략</span>"
@@ -1633,7 +1613,6 @@ def _render_prediction_eval_dashboard_simple():
                 f"<span class='value'>{src}</span></div>"
             )
 
-        # 메타/사유
         if meta_reason:
             html += (
                 f"<div class='row-line'><span class='key'>메타 선택 이유</span>"
@@ -1645,7 +1624,6 @@ def _render_prediction_eval_dashboard_simple():
                 f"<span class='value'>{reason}</span></div>"
             )
 
-        # 🔍 하이브리드/유사도 상세 정보
         if hybrid_info_html:
             html += (
                 f"<div class='row-line'><span class='key'>하이브리드/유사도</span>"
@@ -1658,19 +1636,8 @@ def _render_prediction_eval_dashboard_simple():
     return html
 
 
-# =========================
-# 통합 대시보드 라우트
-# =========================
 @app.route("/check-log-full", methods=["GET"])
 def check_log_full():
-    """
-    📌 예측 + 평가 상태를 한눈에 보는 통합 리포트.
-    - prediction_log.csv 최근 100건 기준
-    - 예측이 잘 찍히는지
-    - 평가가 잘 되어 성공/실패/보류로 끝나는지
-    - 성공/실패/보류 사유가 무엇인지
-    를 한 화면에서 확인할 수 있다.
-    """
     try:
         html = _render_prediction_eval_dashboard_simple()
         return Response(html, mimetype="text/html; charset=utf-8")
@@ -1680,10 +1647,6 @@ def check_log_full():
 
 @app.route("/check-eval-log", methods=["GET"])
 def check_eval_log():
-    """
-    예전 /check-eval-log 링크를 위한 호환용 라우트.
-    이제는 /check-log-full 과 같은 통합 대시보드를 그대로 보여준다.
-    """
     try:
         html = _render_prediction_eval_dashboard_simple()
         return Response(html, mimetype="text/html; charset=utf-8")
@@ -1759,23 +1722,13 @@ def train_now():
 def train_log():
     """
     📈 학습 로그 보기 (아주 쉬운 버전)
-
-    우리가 원하는 것:
-      - 심볼 / 전략별로 카드 하나
-      - 그 카드 안에
-        · 클래스 수
-        · 클래스마다 수익률 구간
-        · 클래스마다 학습 성능
-        · 데이터 분포
-        · 전체 문제 있는지 여부
-      를 한 번에 쉽게 보여준다.
     """
     try:
-        # logger.py 에서 만든 카드 데이터 불러오기
         cards = get_train_log_cards(max_cards=200)
-        log_path = TRAIN_LOG if isinstance(TRAIN_LOG, str) else ""
 
-        # 1) 아직 학습 기록이 전혀 없는 경우
+        # ✅ FIX 3) 화면에 표시하는 경로도 무조건 get_TRAIN_LOG_PATH()
+        log_path = get_TRAIN_LOG_PATH()
+
         if not cards:
             return f"""
 <html>
@@ -1797,12 +1750,10 @@ def train_log():
 </html>
 """
 
-        # 2) 전체 개수/OK 개수/점검 필요 개수
         total_cards = len(cards)
         ok_cards = sum(1 for c in cards if str(c.get("health", "")).upper() == "OK")
         bad_cards = total_cards - ok_cards
 
-        # 3) 가장 최근 학습 1건 요약
         try:
             cards_sorted = sorted(
                 cards,
@@ -1828,8 +1779,6 @@ def train_log():
         last_loss = _to_float(last.get("val_loss", 0.0))
         last_health_text = last.get("health_text", "상태 정보 없음")
 
-        # 4) 카드 하나씩 HTML 만들기
-        #    여기서 심볼·전략별로 우리가 보고 싶은 내용을 전부 담는다.
         card_blocks = []
         for c in cards:
             sym = c.get("symbol", "")
@@ -1842,19 +1791,12 @@ def train_log():
 
             health_text = c.get("health_text", "상태 정보 없음")
             status = c.get("status", "")
-
             ts = c.get("timestamp", "알 수 없음")
 
-            # ✅ 데이터 요약(전체 데이터 양)
             data_summary = c.get("data_summary", "데이터 정보 없음")
-
-            # ✅ 수익률 분포(요약)
             ret_summary = c.get("ret_summary_text", "수익률 분포 정보 없음")
-
-            # ✅ 검증 커버리지(검증이 얼마나 넓게 되었는지)
             coverage_summary = c.get("coverage_summary", "검증 커버리지 정보 없음")
 
-            # ✅ 클래스 관련 정보 (logger.py에서 만들어줬다고 가정하되, 없으면 기본 문장으로 표시)
             n_classes = (
                 c.get("n_classes")
                 or c.get("num_classes")
@@ -1865,25 +1807,18 @@ def train_log():
             else:
                 n_classes_text = f"{int(n_classes)}개 클래스"
 
-            # 각 클래스의 수익률 구간 요약 (예: "클래스0: -3%~-1%, 클래스1: -1%~0%, ...")
             class_ranges_text = c.get(
                 "class_ranges_text",
                 "각 클래스의 수익률 구간 정보 없음",
             )
-
-            # 각 클래스의 성능 요약 (예: "클래스0 F1=0.42, 클래스1 F1=0.51, ...")
             per_class_perf_text = c.get(
                 "per_class_perf_text",
                 "클래스별 학습 성능 정보 없음",
             )
-
-            # 각 클래스의 데이터 개수 분포 (예: "클래스0: 120개, 클래스1: 230개, ...")
             class_counts_text = c.get(
                 "class_counts_text",
                 "클래스별 데이터 개수 정보 없음",
             )
-
-            # 전체 문제 여부 한 줄 요약 (예: "모든 클래스가 충분히 학습됨", "희소 클래스 존재, 데이터 보충 필요" 등)
             problem_summary = c.get(
                 "problem_summary",
                 "추가 점검 필요 여부: 별도 표시 없음",
@@ -1900,23 +1835,20 @@ def train_log():
     ● 이 카드 하나가 <b>“심볼 + 전략”</b> 한 조합의 학습 결과입니다.
   </div>
 
-  <!-- 기본 성능 -->
   <div style="font-size:12px;margin-bottom:2px;">
-    ▷ 정확도(정답 잘 맞춘 비율): <b>{acc:.4f}</b>
+    ▷ 정확도: <b>{acc:.4f}</b>
   </div>
   <div style="font-size:12px;margin-bottom:2px;">
-    ▷ F1 점수(정답·오답 균형): <b>{f1:.4f}</b>
+    ▷ F1: <b>{f1:.4f}</b>
   </div>
   <div style="font-size:12px;margin-bottom:6px;">
-    ▷ loss(작을수록 좋음): <b>{loss:.4f}</b>
+    ▷ loss: <b>{loss:.4f}</b>
   </div>
 
-  <!-- 상태 -->
   <div style="font-size:12px;margin-bottom:4px;color:#b71c1c;">
     ● 상태 요약: {health_text} {(' (status=' + status + ')') if status else ''}
   </div>
 
-  <!-- 우리가 보고 싶은 핵심 정보들 -->
   <div style="font-size:11px;margin-top:4px;color:#333;">
     ● 클래스 수: {n_classes_text}
   </div>
@@ -1930,7 +1862,6 @@ def train_log():
     ● 클래스별 데이터 분포: {class_counts_text}
   </div>
 
-  <!-- 기존 요약 정보들도 그대로 노출 -->
   <div style="font-size:11px;margin-top:4px;color:#333;">
     ● 데이터 양: {data_summary}
   </div>
@@ -1938,10 +1869,9 @@ def train_log():
     ● 수익률 분포(요약): {ret_summary}
   </div>
   <div style="font-size:11px;margin-top:2px;color:#333;">
-    ● 검증 커버리지(검증이 얼마나 넓게 되었는지): {coverage_summary}
+    ● 검증 커버리지: {coverage_summary}
   </div>
 
-  <!-- 전체 문제 여부 한 줄 -->
   <div style="font-size:11px;margin-top:4px;color:#d32f2f;">
     ● 전체 문제 여부: {problem_summary}
   </div>
@@ -1955,7 +1885,6 @@ def train_log():
 
         class_cards_html = "\n".join(card_blocks)
 
-        # 5) 최종 HTML
         html = f"""
 <html>
 <head>
@@ -2003,9 +1932,7 @@ def train_log():
 <div class="card">
     <div style="font-weight:bold;margin-bottom:6px;">3️⃣ 심볼·전략별 자세한 카드</div>
     <div style="font-size:13px;color:#555;margin-bottom:6px;">
-        각 카드 하나가 “심볼 + 전략(단기/중기/장기)”의 학습 결과입니다.<br>
-        ● 클래스 수 / 수익률 구간 / 클래스별 성능 / 데이터 분포 / 문제 여부를<br>
-        &nbsp;&nbsp;&nbsp;한 눈에 쉽게 볼 수 있도록 정리했습니다.
+        각 카드 하나가 “심볼 + 전략(단기/중기/장기)”의 학습 결과입니다.
     </div>
     {class_cards_html}
 </div>
@@ -2074,9 +2001,7 @@ def train_symbols():
                 return resp
             group_symbols = SYMBOL_GROUPS[group_idx]
             print(f"🚀 그룹 학습 요청됨 → 그룹 #{group_idx} | 심볼: {group_symbols}")
-            # ✅ 학습 시작하기 전에 최신 캔들 강제 수집
             _warmup_latest_klines(group_symbols)
-            # 그룹 시작: 게이트 닫기 + GROUP_ACTIVE 생성 + 그룹학습 락 생성
             _safe_close_gate("train_group_start")
             _set_group_active(True, group_idx=group_idx, symbols=group_symbols)
             try:
@@ -2106,7 +2031,6 @@ def train_symbols():
                     except Exception as e:
                         print(f"[GROUP-AFTER] mark_group_predicted 예외: {e}")
                 finally:
-                    # 종료 시점에만 GROUP_ACTIVE 삭제 + 그룹학습 락 제거
                     if group_all_complete() and ready_for_group_predict():
                         _set_group_active(False)
                     try:
@@ -2132,9 +2056,7 @@ def train_symbols():
             ok, resp = _ensure_single_loop(force)
             if not ok:
                 return resp
-            # ✅ 선택 학습도 마찬가지로 시작 전에 최신 캔들 강제 수집
             _warmup_latest_klines(symbols)
-            # 선택 학습은 그룹 경계 아님 → GROUP_ACTIVE 비조작, 그룹 락 비사용
             _safe_close_gate("train_selected_start")
 
             def _worker_sel():
@@ -2164,13 +2086,11 @@ def meta_fix_now():
 @app.route("/reset-all", methods=["GET", "POST"])
 @app.route("/reset-all/<key>", methods=["GET", "POST"])
 def reset_all(key=None):
-    # 0) 카카오톡/페북 미리보기 같은 봇은 차단
     ua_raw = request.headers.get("User-Agent", "")
     ua = ua_raw.lower()
     if "facebookexternalhit" in ua or "kakaotalk-scrap" in ua:
         return "❌ bot blocked", 403
 
-    # 1) 인증키 체크
     req_key = key or request.args.get("key") or (request.json.get("key") if request.is_json else None)
     if req_key != "3572":
         print(f"[RESET] 인증 실패 from {request.remote_addr} path={request.path}")
@@ -2181,7 +2101,6 @@ def reset_all(key=None):
     print(f"[RESET] 요청 수신 from {ip} UA={ua_raw}")
     sys.stdout.flush()
 
-    # 리셋 중 예측 막기
     _safe_close_gate("reset_enter")
 
     def _do_reset_work():
@@ -2196,31 +2115,25 @@ def reset_all(key=None):
             _kline_cache = type("dummy", (), {"clear": lambda self: None})()
             _feature_cache = type("dummy", (), {"clear": lambda self: None})()
 
-        # 1. 전역락 획득
         _acquire_global_lock()
-
-        # 2. 스케줄러/cleanup 중단
         _stop_all_aux_schedulers()
         _pl_clear()
 
         print("[RESET] 백그라운드 초기화 시작")
         sys.stdout.flush()
 
-        # 3. 학습 루프 정지 요청
         try:
             if hasattr(train, "request_stop"):
                 _request_stop_safe()
         except Exception:
             pass
 
-        # 3-0. 빠른 정지 시도
         print(f"[RESET] 학습 루프 정지 시도(timeout={stop_timeout}s)")
         sys.stdout.flush()
         stopped = _stop_train_loop_safe(timeout=stop_timeout)
         print(f"[RESET] stop_train_loop 결과: {stopped}")
         sys.stdout.flush()
 
-        # 3-1. 그래도 안 멈추면, 옵션에 따라 조기 QWIPE
         if (not stopped) and qwipe_early:
             print("[RESET] 학습루프 멈춤 실패 → QWIPE 강제 1회 실행")
             sys.stdout.flush()
@@ -2230,7 +2143,6 @@ def reset_all(key=None):
             except Exception as e:
                 print(f"[RESET] QWIPE 실패: {e}")
 
-        # 3-2. max_wait 만큼 추가 대기
         if not stopped:
             t0 = time.time()
             print(f"[RESET] 정지 대기 시작… 최대 {max_wait}s (폴링 {poll_sec}s)")
@@ -2252,15 +2164,12 @@ def reset_all(key=None):
             print(f"[RESET] 정지 대기 완료 → stopped={stopped}")
             sys.stdout.flush()
 
-        # 4. PERSIST_DIR 완전 초기화
         try:
-            # 모델/로그/ssl_models 제거 후 재생성
             for d in [MODEL_DIR, LOG_DIR, os.path.join(PERSIST_DIR, "ssl_models")]:
                 if os.path.exists(d):
                     shutil.rmtree(d, ignore_errors=True)
                 os.makedirs(d, exist_ok=True)
 
-            # 남은 파일 중 LOCK_DIR 제외하고 모두 삭제
             keep = {os.path.basename(LOCK_DIR)}
             for name in list(os.listdir(PERSIST_DIR)):
                 if name in keep:
@@ -2274,7 +2183,6 @@ def reset_all(key=None):
                     except Exception:
                         pass
 
-            # 필수 폴더/로그 다시 생성
             ensure_dirs()
             ensure_prediction_log_exists()
             ensure_train_log_exists()
@@ -2282,7 +2190,6 @@ def reset_all(key=None):
             print(f"[RESET] 풀와이프 예외: {e}")
             sys.stdout.flush()
 
-        # 5. 캐시 비우기
         try:
             _kline_cache.clear()
         except Exception:
@@ -2292,7 +2199,6 @@ def reset_all(key=None):
         except Exception:
             pass
 
-        # 6. cleanup + scheduler 재시작
         try:
             start_cleanup_scheduler()
         except Exception as e:
@@ -2303,7 +2209,6 @@ def reset_all(key=None):
         except Exception as e:
             print(f"[RESET] 스케줄러 재시작 실패: {e}")
 
-        # 7. 학습 루프 재시작
         try:
             _safe_close_gate("reset_done_reopen")
             started = _start_train_loop_safe(force_restart=True, sleep_sec=0)
@@ -2339,7 +2244,6 @@ def force_fix_prediction_log():
         return f"⚠️ 오류: {e}", 500
 
 
-# 즉시 전체 예측: 학습 일시정지 → 예측 → 학습 재개
 @app.route("/predict-now", methods=["POST", "GET"])
 def predict_now():
     try:
