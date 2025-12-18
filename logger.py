@@ -150,10 +150,11 @@ LOG_SOURCE_BLACKLIST = {
 # -------------------------
 def _fs_has_space(path: str, min_bytes: int = 1_048_576) -> bool:
     try:
-        s = os.statvfs(os.path.dirname(path) or "/")
+        base = os.path.dirname(path) or "/"
+        s = os.statvfs(base)
         return (s.f_bavail * s.f_frsize) >= max(0, int(min_bytes))
     except Exception:
-        return True  # 보수적으로 true
+        return True
 
 def _fs_writable(dir_path: str) -> bool:
     try:
@@ -166,18 +167,34 @@ def _fs_writable(dir_path: str) -> bool:
     except Exception:
         return False
 
-# 전역 플래그: 읽기전용/용량부족 시 파일/DB 쓰기 비활성화
-_READONLY_FS = not _fs_writable(LOG_DIR) or not _fs_has_space(LOG_DIR, 512*1024)
+# ✅ 각 로그 파일이 "실제로 쓰이는 위치" 기준으로 read-only 판단
+_LOGDIR = LOG_DIR
+_TRAINDIR = os.path.dirname(TRAIN_LOG) if isinstance(TRAIN_LOG, str) else LOG_DIR
+_PREDDIR  = os.path.dirname(PREDICTION_LOG) if isinstance(PREDICTION_LOG, str) else LOG_DIR
+
+_READONLY_LOGDIR  = (not _fs_writable(_LOGDIR))  or (not _fs_has_space(_LOGDIR,  512*1024))
+_READONLY_TRAIN   = (not _fs_writable(_TRAINDIR)) or (not _fs_has_space(_TRAINDIR, 512*1024))
+_READONLY_PRED    = (not _fs_writable(_PREDDIR))  or (not _fs_has_space(_PREDDIR,  512*1024))
+
+# ✅ 기존 호환: "전체 read-only"는 세 개 중 하나라도 막히면 True
+_READONLY_FS = _READONLY_LOGDIR or _READONLY_TRAIN or _READONLY_PRED
+
 if _READONLY_FS:
-    _print_once("readonlyfs", "🛑 [logger] storage read-only 또는 free space 부족 → 모든 파일/DB 쓰기 안전 강하")
+    _print_once(
+        "readonlyfs",
+        "🛑 [logger] storage read-only 또는 free space 부족 → 일부/전체 파일 쓰기 차단"
+        f" (LOG_DIR={int(_READONLY_LOGDIR)}, TRAIN_DIR={int(_READONLY_TRAIN)}, PRED_DIR={int(_READONLY_PRED)})"
+    )
 
 # 디렉토리 생성 시도(실패해도 진행)
 try:
-    if not _READONLY_FS:
+    if not _READONLY_LOGDIR:
         os.makedirs(LOG_DIR, exist_ok=True)
 except Exception as e:
+    _READONLY_LOGDIR = True
     _READONLY_FS = True
-    _print_once("mkdir_fail", f"🛑 [logger] 로그 디렉토리 생성 실패 → read-only 강하: {e}")
+    _print_once("mkdir_fail", f"🛑 [logger] LOG_DIR 생성 실패 → read-only 강하: {e}")
+
 
 # -------------------------
 # 공용 헤더
@@ -390,7 +407,7 @@ def ensure_train_log_exists():
       (절대 빈칸으로 밀어버리지 않음)
     """
     # ✅ 추가: read-only면 절대 건드리지 않음
-    if _READONLY_FS:
+    if _READONLY_TRAIN:
         return
 
     try:
@@ -994,7 +1011,7 @@ def log_training_result(
     """
 
     # ✅ 추가: read-only면 절대 기록 시도하지 않음 (콘솔만 하려면 여기서 print로 바꿔도 됨)
-    if _READONLY_FS:
+    if _READONLY_TRAIN:
         return
 
     LOG_FILE = TRAIN_LOG
