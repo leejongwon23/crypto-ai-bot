@@ -972,113 +972,139 @@ def log_training_result(
     usable_samples=None,
     **kwargs
 ):
+    """
+    ✅ 학습 로그의 '진실성'을 보장하는 단일 진입점
+    - 성능이 계산 안 되면 절대 success 로 기록하지 않음
+    - 단일 클래스면 무조건 status=fail
+    - F1=0 은 명확히 기록
+    """
+
     LOG_FILE = TRAIN_LOG
     now = datetime.datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
 
     extras = _parse_train_note(note)
 
-    def _safe_float(x, default=0.0):
+    def _sf(x):
         try:
-            if x is None:
-                return float(default)
-            if isinstance(x, str):
-                s = x.strip()
-                if s == "" or s.lower() in {"nan", "none", "null"}:
-                    return float(default)
-                return float(s)
-            return float(x)
+            if x in [None, "", "nan", "NaN", "None", "null"]:
+                return None
+            v = float(x)
+            return v if np.isfinite(v) else None
         except Exception:
-            return float(default)
+            return None
 
-    def _safe_int(x, default=0):
+    def _si(x):
         try:
-            if x is None:
-                return int(default)
-            if isinstance(x, str):
-                s = x.strip()
-                if s == "" or s.lower() in {"nan", "none", "null"}:
-                    return int(default)
-                return int(float(s))
-            return int(x)
+            if x in [None, "", "nan", "NaN", "None", "null"]:
+                return None
+            return int(float(x))
         except Exception:
-            return int(default)
+            return None
 
-    try:
-        val_acc  = _first_non_none(kwargs.get("val_acc"), accuracy)
-        val_f1   = _first_non_none(kwargs.get("val_f1"),  f1)
-        val_loss = _first_non_none(kwargs.get("val_loss"), loss)
-        val_acc  = _safe_float(val_acc, 0.0)
-        val_f1   = _safe_float(val_f1, 0.0)
-        val_loss = _safe_float(val_loss, 0.0)
-    except Exception:
-        val_acc, val_f1, val_loss = 0.0, 0.0, 0.0
+    # -------------------------
+    # 1) 성능 값 정규화
+    # -------------------------
+    val_acc  = _sf(kwargs.get("val_acc", accuracy))
+    val_f1   = _sf(kwargs.get("val_f1",  f1))
+    val_loss = _sf(kwargs.get("val_loss", loss))
 
+    # -------------------------
+    # 2) 클래스 수 판단 (가장 중요)
+    # -------------------------
+    real_num_classes = (
+        _si(NUM_CLASSES)
+        or _si(num_classes)
+        or (len(class_counts) if isinstance(class_counts, (list, dict)) else None)
+    )
+
+    # -------------------------
+    # 3) 상태(status) 강제 판정
+    # -------------------------
+    final_status = str(status or "").lower()
+
+    # (A) 성능 자체가 없으면 실패
+    if val_acc is None or val_f1 is None:
+        final_status = "fail"
+
+    # (B) 단일 클래스면 무조건 실패
+    if real_num_classes is not None and real_num_classes <= 1:
+        final_status = "fail"
+
+    # (C) F1 = 0 은 실패
+    if val_f1 is not None and val_f1 <= 0.0:
+        final_status = "fail"
+
+    if final_status not in {"success", "ok"}:
+        final_status = "fail"
+
+    # -------------------------
+    # 4) usable_samples 보정
+    # -------------------------
     if usable_samples is None:
-        usable_samples = extras.get("rows", 0)
+        usable_samples = _si(extras.get("rows")) or 0
 
-    row_dict = {
+    # -------------------------
+    # 5) 로그 row 구성 (거짓값 금지)
+    # -------------------------
+    row = {
         "timestamp": now,
         "symbol": str(symbol),
         "strategy": str(strategy),
         "model": str(model or ""),
-        "val_acc": val_acc,
-        "val_f1": val_f1,
-        "val_loss": val_loss,
+
+        "val_acc": 0.0 if val_acc is None else float(val_acc),
+        "val_f1":  0.0 if val_f1  is None else float(val_f1),
+        "val_loss": "" if val_loss is None else float(val_loss),
+
         "engine": extras.get("engine",""),
         "window": extras.get("window",""),
         "recent_cap": extras.get("recent_cap",""),
+
         "rows": extras.get("rows",""),
         "limit": extras.get("limit",""),
         "min": extras.get("min",""),
         "augment_needed": extras.get("augment_needed",""),
         "enough_for_training": extras.get("enough_for_training",""),
+
         "note": str(note or ""),
         "source_exchange": str(source_exchange or "BYBIT"),
-        "status": str(status or "success"),
+        "status": final_status,
+
         "class_edges": json.dumps(class_edges or [], ensure_ascii=False),
         "class_counts": json.dumps(class_counts or [], ensure_ascii=False),
         "class_ranges": json.dumps(class_ranges or [], ensure_ascii=False),
         "bin_spans": json.dumps(bin_spans or [], ensure_ascii=False),
-        "near_zero_band": _safe_float(near_zero_band, 0.0),
-        "near_zero_count": _safe_int(near_zero_count, 0),
-        "NUM_CLASSES": _safe_int(NUM_CLASSES, 0),
-        "usable_samples": _safe_int(usable_samples, 0),
+
+        "near_zero_band": _sf(near_zero_band) or 0.0,
+        "near_zero_count": _si(near_zero_count) or 0,
+
+        "NUM_CLASSES": _si(real_num_classes) or 0,
+        "usable_samples": int(usable_samples),
+
         "per_class_f1": json.dumps(per_class_f1 or [], ensure_ascii=False),
-        "masked_count": _safe_int(masked_count, 0),
+        "masked_count": _si(masked_count) or 0,
     }
 
+    # -------------------------
+    # 6) 기록
+    # -------------------------
     try:
         ensure_train_log_exists()
-
         with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=TRAIN_HEADERS, extrasaction="ignore")
-            writer.writerow(row_dict)
-
-        _f1_key = (str(symbol), str(strategy))
-        if not hasattr(log_training_result, "_f1_zero"):
-            log_training_result._f1_zero = defaultdict(int)
-
-        if val_f1 <= 0.0:
-            log_training_result._f1_zero[_f1_key] += 1
-            n = log_training_result._f1_zero[_f1_key]
-            if n == 1:
-                print(f"🟠 [경고] F1=0.0 발생 → {symbol}-{strategy} {model} (1회)")
-            elif n % int(os.getenv("F1_ZERO_WARN_EVERY", "5")) == 0:
-                print(f"🟠 [요약] F1=0.0 연속 {n}회 → {symbol}-{strategy} {model}")
-        else:
-            if log_training_result._f1_zero.get(_f1_key, 0) > 0:
-                print(f"[✅ 복구] {symbol}-{strategy} {model} F1 회복 → {val_f1:.4f}")
-            log_training_result._f1_zero[_f1_key] = 0
+            w = csv.DictWriter(f, fieldnames=TRAIN_HEADERS, extrasaction="ignore")
+            w.writerow(row)
 
         _print_once(
             f"trainlog:{symbol}:{strategy}:{model}",
-            f"[📘 기록됨] {symbol}-{strategy} {model} val_f1={val_f1:.4f} status={status}"
+            f"[📘 학습기록] {symbol}-{strategy} {model} "
+            f"acc={row['val_acc']} f1={row['val_f1']} status={final_status}"
         )
 
         update_train_dashboard(symbol, strategy, model)
 
     except Exception as e:
-        print(f"[⚠️ 학습 로그 기록 실패] {e}")
+        print(f"[🛑 학습 로그 기록 실패] {e}")
+
 
 # ============================================================
 # 아래 함수들(대시보드/관우요약/수익률추출 등)은
