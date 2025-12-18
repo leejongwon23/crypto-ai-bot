@@ -14,11 +14,10 @@ import numpy as np
 import pandas as pd
 
 from config import (
-    BOUNDARY_BAND,
-    _strategy_horizon_hours,
+    # ✅ config.py의 persistent root를 그대로 사용 (핵심)
+    PERSISTENT_DIR,
     _future_extreme_signed_returns,
     get_BIN_META,
-    get_CLASS_BIN,
     get_SPARSE_CLASS,
     TRAIN_ZERO_BAND_ABS,
 )
@@ -67,7 +66,7 @@ _TAIL_TRIM_FRAC = float(os.getenv("LABEL_TAIL_TRIM_FRAC", "0.005"))
 # ✅ (핵심 수정) "캔들 1개 내부 high/low" 기준으로 통일
 # ------------------------------------------------------------
 # - 단기/중기/장기 모두 H=1
-# - 미래 여러 캔들 극단값(42개 중 max/min) 금지
+# - 미래 여러 캔들 극단값 금지
 # ============================================================
 _FIXED_H = {
     "단기": 1,
@@ -91,7 +90,13 @@ def _ensure_dir_with_fallback(primary: str, fallback: str) -> Path:
         p_fallback.mkdir(parents=True, exist_ok=True)
         return p_fallback
 
-_PERSIST_BASE = os.getenv("PERSIST_DIR", "/persistent")
+# ============================================================
+# ✅ 저장 경로 통일 (config.py의 PERSISTENT_DIR 기준)
+# ------------------------------------------------------------
+# - 이제 labels.py가 /persistent 같은 하드코딩을 안 함
+# - config.py가 결정한 실제 writable 경로(/tmp 폴백 포함)를 그대로 따른다
+# ============================================================
+_PERSIST_BASE = str(PERSISTENT_DIR)
 
 _EDGES_DIR = _ensure_dir_with_fallback(
     os.getenv("LABEL_EDGES_DIR", f"{_PERSIST_BASE}/label_edges"),
@@ -131,17 +136,13 @@ def _get_fixed_horizon_candles(strategy: str) -> int:
     return int(_FIXED_H.get(pure, 1))
 
 # ============================================================
-# ✅ 수익률 계산 (캔들 1개 내부 high/low) — 괴물값(600%/1000%) 원천 차단
-# ------------------------------------------------------------
-# 기존: (i+1 ~ i+H) 미래 구간 전체에서 max/min
-# 변경: (i ~ i+1) "현재 캔들"의 high/low만 사용
+# ✅ 수익률 계산 (캔들 1개 내부 high/low)
 # ============================================================
 def _future_extreme_signed_returns_by_candles(df: pd.DataFrame, H: int):
     """
     각 시작 캔들 i 에 대해:
-    - base = 해당 시점 close (유효할 때만)
+    - base = 해당 시점 close
     - ✅ 현재 캔들 1개에서 high/low 사용
-    - close/high/low 가 NaN 이거나 base <= 0 이면 → up/dn = 0 처리
     """
     n = len(df)
     if n == 0:
@@ -159,12 +160,9 @@ def _future_extreme_signed_returns_by_candles(df: pd.DataFrame, H: int):
 
     for i in range(n):
         base = close[i]
-
-        # base NaN/0/음수면 skip (0 유지)
         if not np.isfinite(base) or base <= 0:
             continue
 
-        # 현재 캔들 범위만 사용: [i, i+1)
         j = min(n, i + H)
         window_high = high[i:j]
         window_low  = low[i:j]
@@ -370,7 +368,7 @@ def _auto_target_bins(df_len: int) -> int:
 # ============================================================
 def compute_label_returns(df: pd.DataFrame, symbol: str, strategy: str):
     pure = _normalize_strategy_name(strategy)
-    H = _get_fixed_horizon_candles(pure)  # ✅ 이제 항상 1
+    H = _get_fixed_horizon_candles(pure)  # ✅ 항상 1
     up, dn = _future_extreme_signed_returns_by_candles(df, H)
     gains = _pick_per_candle_gain(up, dn)
     target = _auto_target_bins(len(df))
@@ -501,7 +499,6 @@ def make_labels(df, symbol, strategy, group_id=None):
 
     spans = np.diff(edges) * 100.0
 
-    # 기존 extra_cols 유지
     sl = 0.02
     extra_cols = {
         "future_up": up_c,
@@ -529,7 +526,6 @@ def make_labels(df, symbol, strategy, group_id=None):
         bin_counts.astype(int),
         spans.astype(float),
     )
-
 
 # ============================================================
 # make_labels_for_horizon (RAW용)  — (기존 유지)
@@ -608,7 +604,6 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
         bin_counts.astype(int),
         spans.astype(float),
     )
-
 
 # ============================================================
 # make_all_horizon_labels
