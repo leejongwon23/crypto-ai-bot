@@ -366,32 +366,24 @@ try:
 except Exception:
     TRAIN_HEADERS = DEFAULT_TRAIN_HEADERS
 
-_raw_train_log_path = get_TRAIN_LOG_PATH()
-if _raw_train_log_path.startswith("/persistent"):
-    TRAIN_LOG = os.path.join(
-        BASE_PERSIST_DIR, os.path.relpath(_raw_train_log_path, "/persistent")
-    )
-else:
-    TRAIN_LOG = _raw_train_log_path
+# ✅✅✅ 핵심 수정: train_log 경로는 절대 재작성하지 말고, config.get_TRAIN_LOG_PATH() 그대로 쓴다.
+# (여기서 /persistent → /tmp/persistent 로 바꾸면, app.py가 읽는 로그와 갈라져서 "학습로그 반영 안됨"이 발생함)
+TRAIN_LOG = get_TRAIN_LOG_PATH()
 try:
     os.makedirs(os.path.dirname(TRAIN_LOG), exist_ok=True)
 except Exception:
-    TRAIN_LOG = os.path.join(BASE_PERSIST_DIR, "train_log.csv")
-    os.makedirs(os.path.dirname(TRAIN_LOG), exist_ok=True)
-
+    # 최후 폴백만 허용 (그래도 가능한 get_TRAIN_LOG_PATH 디렉토리를 살린다)
+    TRAIN_LOG = get_TRAIN_LOG_PATH()
 
 def _ensure_train_log():
     """
     ✅ train.py에서는 헤더를 '절대' 새로 만들지 않는다.
     ✅ 오직 logger.py의 ensure_train_log_exists()만 사용한다.
-    (헤더 충돌로 인한 무한 업그레이드 + 데이터 유실 방지)
     """
     try:
         ensure_train_log_exists()  # logger.py 함수
     except Exception as e:
         print(f"[경고] train_log 초기화/업그레이드 실패: {e}", flush=True)
-
-
 
 def _normalize_train_row(row: dict) -> dict:
     # 모든 헤더에 대해 기본값 채우기
@@ -405,14 +397,13 @@ def _normalize_train_row(row: dict) -> dict:
     if r.get("val_loss") is None and row.get("loss") is not None:
         r["val_loss"] = row.get("loss")
 
-    # ✅ setdefault는 값이 None이면 안 채워지는 문제가 있어서 직접 보정
+    # 값이 None이면 setdefault가 안 먹는 문제 방지
     if r.get("engine") in (None, ""):
         r["engine"] = row.get("engine", "manual")
     if r.get("source_exchange") in (None, ""):
         r["source_exchange"] = row.get("source_exchange", "BYBIT")
 
     # 수익률 구간 호환 필드 채우기
-    # - bin_edges/bin_counts 가 있으면 class_edges/class_counts/bins 도 같이 채워줌
     be = row.get("bin_edges") or r.get("bin_edges")
     bc = row.get("bin_counts") or r.get("bin_counts")
 
@@ -476,15 +467,23 @@ def _compute_bin_info_from_labels(
 
 
 def _append_train_log(row: dict):
+    """
+    ✅✅✅ 핵심: TRAIN_LOG(=get_TRAIN_LOG_PATH())에만 기록한다.
+    """
     try:
         _ensure_train_log()
-        with open(TRAIN_LOG, "a", encoding="utf-8-sig", newline="") as f:
-            w = csv.DictWriter(
-                f, fieldnames=TRAIN_HEADERS, extrasaction="ignore"
-            )
+        # 혹시라도 다른 코드가 TRAIN_LOG를 바꿨을 수 있으니, 마지막에 한 번 더 고정
+        _path = get_TRAIN_LOG_PATH()
+        try:
+            os.makedirs(os.path.dirname(_path), exist_ok=True)
+        except Exception:
+            pass
+
+        with open(_path, "a", encoding="utf-8-sig", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=TRAIN_HEADERS, extrasaction="ignore")
             w.writerow(_normalize_train_row(row))
     except Exception as e:
-        print(f"[경고] train_log 기록 실패: {e}")
+        print(f"[경고] train_log 기록 실패: {e}", flush=True)
 
 
 # logger.log_training_result 를 패치해서
