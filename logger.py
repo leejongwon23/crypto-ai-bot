@@ -389,6 +389,10 @@ def ensure_train_log_exists():
     - 헤더가 다르면: 백업 후 "기존 데이터 최대 보존"하면서 헤더만 업그레이드
       (절대 빈칸으로 밀어버리지 않음)
     """
+    # ✅ 추가: read-only면 절대 건드리지 않음
+    if _READONLY_FS:
+        return
+
     try:
         os.makedirs(os.path.dirname(TRAIN_LOG), exist_ok=True)
 
@@ -452,6 +456,7 @@ def ensure_train_log_exists():
 
     except Exception as e:
         print(f"[⚠️ ensure_train_log_exists] 예외: {e}")
+
 
 # -------------------------
 # 로그 로테이션 (읽기전용이면 skip)
@@ -936,18 +941,27 @@ _note_re_flags    = re.compile(r"data_flags=\{?rows:(\d+),\s*limit:(\d+),\s*min:
 
 def _parse_train_note(note: str):
     s = str(note or "")
-    eng = (_note_re_engine.search(s) or [None, ""])[1]
-    win = (_note_re_window.search(s) or [None, ""])[1]
-    cap = (_note_re_cap.search(s) or [None, ""])[1]
+
+    m = _note_re_engine.search(s)
+    eng = m.group(1) if m else ""
+
+    m = _note_re_window.search(s)
+    win = m.group(1) if m else ""
+
+    m = _note_re_cap.search(s)
+    cap = m.group(1) if m else ""
+
     mfl = _note_re_flags.search(s)
     rows = limit = minv = aug = enough = ""
     if mfl:
         rows, limit, minv, aug, enough = mfl.groups()
+
     return {
         "engine": eng, "window": win, "recent_cap": cap,
         "rows": rows, "limit": limit, "min": minv,
         "augment_needed": aug, "enough_for_training": enough
     }
+
 
 def _first_non_none(*vals):
     for v in vals:
@@ -978,6 +992,10 @@ def log_training_result(
     - 단일 클래스면 무조건 status=fail
     - F1=0 은 명확히 기록
     """
+
+    # ✅ 추가: read-only면 절대 기록 시도하지 않음 (콘솔만 하려면 여기서 print로 바꿔도 됨)
+    if _READONLY_FS:
+        return
 
     LOG_FILE = TRAIN_LOG
     now = datetime.datetime.now(pytz.timezone("Asia/Seoul")).isoformat()
@@ -1104,6 +1122,7 @@ def log_training_result(
 
     except Exception as e:
         print(f"[🛑 학습 로그 기록 실패] {e}")
+
 
 
 # ============================================================
