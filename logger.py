@@ -81,17 +81,17 @@ try:
 except Exception:
     # 로거는 최대한 안 죽고 넘어가야 한다
     pass
-
+    
 # ─────────────────────────────────────
 # 1) 루트/로그 경로 실제로 여기만 보게 하기
 # ─────────────────────────────────────
 PERSISTENT_ROOT = BASE  # ← 핵심: 예전처럼 /persistent 고정 아님
 DIR = PERSISTENT_ROOT
 LOG_DIR = os.path.join(DIR, "logs")
-PREDICTION_LOG = get_PREDICTION_LOG_PATH()
+PREDICTION_LOG = str(get_PREDICTION_LOG_PATH())   # ✅ FIX (1)
 WRONG = os.path.join(DIR, "wrong_predictions.csv")  # 실제로는 쓰는 쪽에서 만들 것
 EVAL_RESULT = os.path.join(LOG_DIR, "evaluation_result.csv")
-TRAIN_LOG = get_TRAIN_LOG_PATH()
+TRAIN_LOG = str(get_TRAIN_LOG_PATH())             # ✅ FIX (1)
 AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
 
 # -------------------------
@@ -159,7 +159,7 @@ def _fs_has_space(path: str, min_bytes: int = 1_048_576) -> bool:
 def _fs_writable(dir_path: str) -> bool:
     try:
         os.makedirs(dir_path, exist_ok=True)
-        test_path = os.path.join(dir_path, ".writetest.tmp")
+        test_path = os.path.join(dir_path, f".writetest.{os.getpid()}.tmp")
         with open(test_path, "w") as f:
             f.write("1")
         os.remove(test_path)
