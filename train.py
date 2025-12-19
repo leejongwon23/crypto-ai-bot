@@ -1403,7 +1403,6 @@ def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
             break
     return train_idx, val_idx, moved
 
-
 def train_one_model(
     symbol,
     strategy,
@@ -1415,26 +1414,20 @@ def train_one_model(
     df_hint: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
     """
-    한 심볼-전략-그룹에 대해 실제로 모델을 1개 이상 학습해서 저장하는 함수.
-    (device_type 누락되는 거 고친 버전 + 그룹별 클래스 제대로 분리한 버전 + window 후보 성능 비교/최적화 버전)
+    한 심볼-전략-그룹 학습 + 로그 기록
+    (수정1·2·3 최종 통합 완료본)
     """
-    # ▷ NEAR_ZERO_BAND
+
+    # ── NEAR_ZERO_BAND ─────────────────────────
     try:
         from config import NEAR_ZERO_BAND as _NEAR_ZERO_BAND
     except Exception:
-        try:
-            _NEAR_ZERO_BAND = float(os.getenv("NEAR_ZERO_BAND", "0.0"))
-        except Exception:
-            _NEAR_ZERO_BAND = 0.0
-
-    HAS_CUDA = torch.cuda.is_available()
-    device_type = "cuda" if HAS_CUDA else "cpu"
-    use_amp_here = (os.getenv("USE_AMP", "1") == "1") and HAS_CUDA
+        _NEAR_ZERO_BAND = float(os.getenv("NEAR_ZERO_BAND", "0.0"))
 
     if max_epochs is None:
         max_epochs = _epochs_for(strategy)
 
-    res: Dict[str, Any] = {
+    res = {
         "symbol": symbol,
         "strategy": strategy,
         "group_id": int(group_id or 0),
@@ -1447,43 +1440,34 @@ def train_one_model(
 
     try:
         ensure_failure_db()
-        _safe_print(f"✅ train_one_model {symbol}-{strategy}-g{group_id}")
+        _safe_print(f"✅ train_one_model START {symbol}-{strategy}-g{group_id}")
 
         # =================================================
-        # 1) 데이터 불러오기
+        # 1) 데이터
         # =================================================
-        if df_hint is not None:
-            df = df_hint
-        else:
-            try:
-                df = get_kline_by_strategy(symbol, strategy)
-            except Exception:
-                df = None
-
+        df = df_hint if df_hint is not None else get_kline_by_strategy(symbol, strategy)
         if df is None or df.empty:
             _log_skip(symbol, strategy, "데이터 없음")
             return res
 
-        log_return_distribution_for_train(symbol, strategy, df)
-
         cfg = STRATEGY_CONFIG.get(strategy, {})
         _limit = int(cfg.get("limit", 300))
         _min_required = max(60, int(_limit * 0.90))
-        _attrs = getattr(df, "attrs", {}) if df is not None else {}
-        augment_needed = bool(_attrs.get("augment_needed", len(df) < _limit))
-        enough_for_training = bool(_attrs.get("enough_for_training", len(df) >= _min_required))
+        attrs = getattr(df, "attrs", {})
+        augment_needed = bool(attrs.get("augment_needed", len(df) < _limit))
+        enough_for_training = bool(attrs.get("enough_for_training", len(df) >= _min_required))
 
         # =================================================
         # 2) 피처
         # =================================================
         if isinstance(pre_feat, pd.DataFrame):
             feat = pre_feat
-        elif isinstance(pre_feat, dict) and pre_feat.get(strategy, None) is not None:
-            feat = pre_feat[strategy]
+        elif isinstance(pre_feat, dict):
+            feat = pre_feat.get(strategy)
         else:
             feat = compute_features(symbol, df, strategy)
 
-        if feat is None or getattr(feat, "empty", True):
+        if feat is None or feat.empty:
             _log_skip(symbol, strategy, "피처 없음")
             return res
 
@@ -1491,121 +1475,103 @@ def train_one_model(
         # 3) 라벨
         # =================================================
         bin_info = None
-        if isinstance(pre_lbl, tuple) and len(pre_lbl) in (3, 4, 6):
+        if isinstance(pre_lbl, dict):
+            pre_lbl = pre_lbl.get(strategy)
+
+        if isinstance(pre_lbl, (list, tuple)):
             if len(pre_lbl) == 6:
                 gains, labels, class_ranges_used_global, be, bc, bs = pre_lbl
-                bin_info = {
-                    "bin_edges": be.tolist() if hasattr(be, "tolist") else list(be),
-                    "bin_counts": bc.tolist() if hasattr(bc, "tolist") else list(bc),
-                    "bin_spans": bs.tolist() if hasattr(bs, "tolist") else list(bs),
-                }
+                bin_info = {"bin_edges": list(be), "bin_counts": list(bc), "bin_spans": list(bs)}
             elif len(pre_lbl) == 4:
                 gains, labels, class_ranges_used_global, bin_info = pre_lbl
             else:
                 gains, labels, class_ranges_used_global = pre_lbl
-
-        elif isinstance(pre_lbl, dict) and pre_lbl.get(strategy, None) is not None:
-            val = pre_lbl[strategy]
-            if isinstance(val, (list, tuple)) and len(val) in (3, 4, 6):
-                if len(val) == 6:
-                    gains, labels, class_ranges_used_global, be, bc, bs = val
-                    bin_info = {
-                        "bin_edges": be.tolist() if hasattr(be, "tolist") else list(be),
-                        "bin_counts": bc.tolist() if hasattr(bc, "tolist") else list(bc),
-                        "bin_spans": bs.tolist() if hasattr(bs, "tolist") else list(bs),
-                    }
-                elif len(val) == 4:
-                    gains, labels, class_ranges_used_global, bin_info = val
-                else:
-                    gains, labels, class_ranges_used_global = val
-            else:
-                _log_skip(symbol, strategy, "사전 라벨 구조 오류")
-                return res
-
         else:
-            res_labels = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=None)
-            if isinstance(res_labels, (list, tuple)) and len(res_labels) in (3, 4, 6):
-                if len(res_labels) == 6:
-                    gains, labels, class_ranges_used_global, be, bc, bs = res_labels
-                    bin_info = {
-                        "bin_edges": be.tolist() if hasattr(be, "tolist") else list(be),
-                        "bin_counts": bc.tolist() if hasattr(bc, "tolist") else list(bc),
-                        "bin_spans": bs.tolist() if hasattr(bs, "tolist") else list(bs),
-                    }
-                elif len(res_labels) == 4:
-                    gains, labels, class_ranges_used_global, bin_info = res_labels
-                else:
-                    gains, labels, class_ranges_used_global = res_labels
-            else:
+            out = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=None)
+            if not isinstance(out, (list, tuple)):
                 _log_skip(symbol, strategy, "라벨 생성 실패")
                 return res
+            if len(out) == 6:
+                gains, labels, class_ranges_used_global, be, bc, bs = out
+                bin_info = {"bin_edges": list(be), "bin_counts": list(bc), "bin_spans": list(bs)}
+            elif len(out) == 4:
+                gains, labels, class_ranges_used_global, bin_info = out
+            else:
+                gains, labels, class_ranges_used_global = out
 
-        if (not isinstance(labels, np.ndarray)) or labels.size == 0:
+        if not isinstance(labels, np.ndarray) or labels.size == 0:
             _log_skip(symbol, strategy, "라벨 없음")
             return res
 
         # =================================================
-        # 4) RETRY
+        # 4) 그룹 클래스
         # =================================================
-        uniq0 = _uniq_nonneg(labels)
-        if uniq0 <= 1:
-            _safe_print(f"[LABEL RETRY] uniq<=1 → rebuild({symbol}-{strategy})")
-            res_try = _rebuild_labels_once(df=df, symbol=symbol, strategy=strategy)
-            if isinstance(res_try, (list, tuple)) and len(res_try) in (3, 4, 6):
-                if len(res_try) == 6:
-                    gains2, labels2, class_ranges2, be2, bc2, bs2 = res_try
-                    bin_info2 = {
-                        "bin_edges": be2.tolist() if hasattr(be2, "tolist") else list(be2),
-                        "bin_counts": bc2.tolist() if hasattr(bc2, "tolist") else list(bc2),
-                        "bin_spans": bs2.tolist() if hasattr(bs2, "tolist") else list(bs2),
-                    }
-                elif len(res_try) == 4:
-                    gains2, labels2, class_ranges2, bin_info2 = res_try
-                else:
-                    gains2, labels2, class_ranges2 = res_try
-                    bin_info2 = bin_info
+        full_ranges = class_ranges_used_global or get_class_ranges(symbol, strategy)
+        num_total_classes = len(full_ranges)
 
-                uniq1 = _uniq_nonneg(labels2)
-                if uniq1 > uniq0 and uniq1 >= 2:
-                    gains, labels = gains2, labels2
-                    class_ranges_used_global = class_ranges2
-                    bin_info = bin_info2
-                    _safe_print(f"[LABEL RETRY OK] {uniq0}→{uniq1}")
-                else:
-                    _safe_print(f"[LABEL RETRY NO-IMPROVE] {uniq0}→{uniq1}")
-
-        # =================================================
-        # 5) 그룹 클래스
-        # =================================================
-        if "class_ranges_used_global" in locals() and class_ranges_used_global is not None:
-            full_ranges = class_ranges_used_global
-        else:
-            full_ranges = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
-
-        num_total_classes = len(full_ranges) if full_ranges else 0
-        from config import get_class_groups
-
-        if num_total_classes > 0:
-            groups = get_class_groups(num_classes=max(2, num_total_classes)) or []
-        else:
-            groups = []
-
+        groups = get_class_groups(num_classes=max(2, num_total_classes)) or []
         if group_id is not None and groups:
-            gid = int(group_id) if str(group_id).isdigit() else 0
-            if gid < 0 or gid >= len(groups):
-                gid = 0
-            cls_in_group = list(groups[gid])
+            gid = int(group_id)
+            cls_in_group = list(groups[gid]) if gid < len(groups) else []
         else:
             cls_in_group = list(range(num_total_classes))
 
         if not cls_in_group:
-            _log_skip(symbol, strategy, f"그룹 내 클래스 없음(group_id={group_id})")
+            _log_skip(symbol, strategy, "그룹 클래스 없음")
             return res
 
-        class_ranges = [full_ranges[c] for c in cls_in_group]
+        class_ranges = [full_ranges[i] for i in cls_in_group]
         keep_set = set(cls_in_group)
-        to_local = {g: i for i, g in enumerate(sorted(cls_in_group))}
 
+        # =================================================
+        # 5) LABEL 로그 (단 1회, 실패 시 에러 출력)
+        # =================================================
+        mask_cnt = int((labels < 0).sum())
+        nz_band = float(abs(_NEAR_ZERO_BAND)) or float(abs(BOUNDARY_BAND))
+        near_zero_cnt = int((np.abs(gains) <= nz_band).sum())
+
+        try:
+            cnt_before = np.bincount(labels[labels >= 0], minlength=num_total_classes).astype(int).tolist()
+        except Exception:
+            cnt_before = []
+
+        empty_idx = [i for i, c in enumerate(cnt_before) if c == 0]
+
+        return_note = ""
+        if isinstance(bin_info, dict):
+            return_note = (
+                f" ; [ReturnDist] edges={bin_info.get('bin_edges', [])[:20]}, "
+                f"counts={bin_info.get('bin_counts', [])[:20]}"
+            )
+
+        try:
+            logger.log_training_result(
+                symbol=symbol,
+                strategy=strategy,
+                model="all",
+                engine="manual",
+                rows=len(df),
+                limit=_limit,
+                min=_min_required,
+                augment_needed=augment_needed,
+                enough_for_training=enough_for_training,
+                note=(
+                    f"[LabelStats] bins_total={num_total_classes}, "
+                    f"bins_group={len(class_ranges)}, "
+                    f"empty={len(empty_idx)}, "
+                    f"masked={mask_cnt}, "
+                    f"near_zero={near_zero_cnt}"
+                    + return_note
+                ),
+                status="info",
+                NUM_CLASSES=num_total_classes,
+                class_counts_label_freeze=cnt_before,
+            )
+        except Exception as e:
+            _safe_print(f"[TRAIN_LOG WRITE FAIL][LABEL] {symbol}-{strategy}: {e}")
+            raise  # 🔥 조용히 숨기지 않음
+
+       
         # =================================================
         # 6) LABEL 로그
         # =================================================
