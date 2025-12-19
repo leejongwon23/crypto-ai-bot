@@ -1403,6 +1403,7 @@ def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
             break
     return train_idx, val_idx, moved
 
+
 def train_one_model(
     symbol,
     strategy,
@@ -1523,6 +1524,10 @@ def train_one_model(
         class_ranges = [full_ranges[i] for i in cls_in_group]
         keep_set = set(cls_in_group)
 
+        # ✅ [필수 누락 복구] to_local이 원본 코드에는 없는데, 9)에서 사용함
+        #    전역 클래스 id -> 로컬 클래스 id 매핑
+        to_local = {int(g): i for i, g in enumerate(cls_in_group)}
+
         # =================================================
         # 5) LABEL 로그 (단 1회, 실패 시 에러 출력)
         # =================================================
@@ -1571,7 +1576,6 @@ def train_one_model(
             _safe_print(f"[TRAIN_LOG WRITE FAIL][LABEL] {symbol}-{strategy}: {e}")
             raise  # 🔥 조용히 숨기지 않음
 
-       
         # =================================================
         # 6) LABEL 로그
         # =================================================
@@ -1656,8 +1660,6 @@ def train_one_model(
         except Exception as e:
             _safe_print(f"[TRAIN_LOG WRITE FAIL] {symbol}-{strategy}: {e}")
 
-    
-      
         # =================================================
         # 7) 피처 정제
         # =================================================
@@ -1713,6 +1715,13 @@ def train_one_model(
         global_bin_counts_val = None
         global_bin_spans_val = None
         global_bins_value = None
+
+        # ✅ [필수 누락 복구] 원본 코드에서 device_type/use_amp_here가 정의되지 않았는데 scaler에서 씀
+        try:
+            device_type = "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            device_type = "cpu"
+        use_amp_here = bool(USE_AMP and device_type == "cuda")
 
         # =================================================
         # 9) 윈도우별 학습
@@ -1984,7 +1993,7 @@ def train_one_model(
                 pass
 
             # ========== bin 정보 ================
-            # ✅✅✅ 수정 핵심: val_y 기준이 아니라, labels(전체) 기준으로 bin_counts 계산
+            # ✅✅✅ 수정3 핵심: val_y 기준이 아니라, labels(전체) 기준으로 bin_counts 계산
             try:
                 full_ranges_for_bins = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
 
@@ -2007,13 +2016,12 @@ def train_one_model(
                     else:
                         bin_edges, bin_spans = [], []
 
-                # 2) bin_counts: ✅ labels 전체 분포(전역 클래스 기준)
+                # 2) bin_counts: ✅ labels 전체 분포(전역 클래스 기준)  ← 여기서 val_y 절대 사용 안 함
                 if labels is not None and isinstance(labels, np.ndarray) and labels.size > 0:
                     lab = labels[labels >= 0].astype(int)
                     if full_ranges_for_bins and len(full_ranges_for_bins) > 0:
                         bin_counts = np.bincount(lab, minlength=len(full_ranges_for_bins)).astype(int).tolist()
                     else:
-                        # fallback: labels 자체 최대치 기준
                         ncls = int(lab.max()) + 1 if lab.size else 0
                         bin_counts = np.bincount(lab, minlength=ncls).astype(int).tolist()
                 else:
@@ -2252,7 +2260,6 @@ def train_one_model(
     except Exception as e:
         _safe_print(f"[train_one_model ERR] {symbol}-{strategy}: {e}")
         return res
-
 
 
 _ENFORCE_FULL_STRATEGY = False
