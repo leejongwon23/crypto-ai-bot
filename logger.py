@@ -2292,12 +2292,14 @@ try:
         compute_label_returns as _lbl_compute_label_returns,
     )
 except Exception:
-        _lbl_strategy_horizon_candles_from_hours = None
-        _lbl_future_extreme_signed_returns_by_candles = None
-        _lbl_infer_bar_hours_from_df = None
-        _lbl_build_bins = None
-        _lbl_auto_target_bins = None
-        _lbl_compute_label_returns = None
+    # ✅ (중요) 여기 들여쓰기 틀리면 서버가 시작도 못 함(IndentationError)
+    _lbl_strategy_horizon_candles_from_hours = None
+    _lbl_future_extreme_signed_returns_by_candles = None
+    _lbl_infer_bar_hours_from_df = None
+    _lbl_build_bins = None
+    _lbl_auto_target_bins = None
+    _lbl_compute_label_returns = None
+
 
 def extract_candle_returns(
     df,
@@ -2309,24 +2311,31 @@ def extract_candle_returns(
     """
     학습 labels.py 와 최대한 동일한 방식으로 '미래 구간 수익률'을 추출한다.
 
-    - 기본 아이디어 (labels.py 와 동일):
-      1) 전략(strategy)에 맞는 horizon 을 캔들 개수로 변환
-      2) 해당 horizon 동안의 future high/low 수익률(up/dn)을 계산
-      3) 분포용 값은 [dn, up] 을 모두 이어붙인 배열
-         → labels.make_labels() 의 dist_for_bins 와 완전히 같은 개념
+    우선순위:
+    1) labels.compute_label_returns() (가능하면 이게 1순위: 학습과 완전 동일)
+    2) labels helper 기반 미래 high/low 수익률
+    3) 완전 fallback: 각 캔들에서 high/low vs close
 
-    - strategy / horizon_hours 를 안 넘기면:
-      → 예전 방식(각 캔들의 high/low vs close)을 fallback 으로 사용.
+    반환:
+    - 분포용 값(dist): [dn_returns..., up_returns...] 형태로 이어붙인 리스트
     """
     if df is None or getattr(df, "empty", True):
         return []
 
+    # max_rows 안전 처리 (음수/0 방지)
     try:
-        df_use = df.tail(max_rows).copy()
+        mr = int(max_rows)
+        if mr <= 0:
+            mr = 1000
+    except Exception:
+        mr = 1000
+
+    try:
+        df_use = df.tail(mr).copy()
     except Exception:
         df_use = df
 
-    # --- 1) labels.compute_label_returns 기반: 학습 라벨과 완전 동일한 수익률 정의 ---
+    # --- 1) labels.compute_label_returns 기반 (학습과 동일) ---
     try:
         if _lbl_compute_label_returns is not None and strategy is not None:
             gains, up_c, dn_c, _dyn_bins = _lbl_compute_label_returns(
@@ -2334,27 +2343,30 @@ def extract_candle_returns(
                 symbol or "UNKNOWN",
                 strategy,
             )
-            dist = np.concatenate([dn_c, up_c], axis=0).astype(float)
+            try:
+                dist = np.concatenate([dn_c, up_c], axis=0).astype(float)
+            except Exception:
+                # dn_c/up_c가 list일 수도 있으니 안전 처리
+                dist = np.array(list(dn_c) + list(up_c), dtype=float)
+
             dist = dist[np.isfinite(dist)]
             return dist.tolist()
     except Exception as e:
-        print(f"[logger.extract_candle_returns] compute_label_returns 기반 계산 실패 → labels helper fallback 사용 ({e})")
+        print(f"[logger.extract_candle_returns] compute_label_returns 실패 → helper fallback ({e})")
 
-    # --- 2) labels helper 기반: 미래 구간(high/low) 수익률 (이전 코드 유지) ---
+    # --- 2) labels helper 기반 미래 구간(high/low) 수익률 ---
     try:
         if _lbl_future_extreme_signed_returns_by_candles is not None:
             horizon_candles = None
 
-            # (a) strategy 기준 (단기/중기/장기)
+            # (a) strategy 기준 horizon 계산
             if strategy is not None and _lbl_strategy_horizon_candles_from_hours is not None:
                 try:
-                    horizon_candles = int(
-                        max(1, _lbl_strategy_horizon_candles_from_hours(df_use, strategy))
-                    )
+                    horizon_candles = int(max(1, _lbl_strategy_horizon_candles_from_hours(df_use, strategy)))
                 except Exception:
                     horizon_candles = None
 
-            # (b) strategy 없고 horizon_hours 직접 넘어온 경우
+            # (b) horizon_hours 직접 지정된 경우
             if horizon_candles is None and horizon_hours is not None:
                 bar_h = 1.0
                 if _lbl_infer_bar_hours_from_df is not None:
@@ -2363,7 +2375,7 @@ def extract_candle_returns(
                     except Exception:
                         bar_h = 1.0
                 else:
-                    # labels helper 를 못쓰는 경우, 단순 시간차로 추정
+                    # timestamp 기반으로 간격 추정
                     try:
                         ts = pd.to_datetime(df_use["timestamp"], errors="coerce").sort_values()
                         diffs = ts.diff().dropna()
@@ -2373,22 +2385,31 @@ def extract_candle_returns(
 
                 if not (bar_h > 0 and np.isfinite(bar_h)):
                     bar_h = 1.0
+
                 horizon_candles = max(1, int(round(float(horizon_hours) / bar_h)))
 
             if horizon_candles is None:
-                # 정보가 전혀 없으면 최소 1캔들
                 horizon_candles = 1
 
             up_c, dn_c = _lbl_future_extreme_signed_returns_by_candles(df_use, int(horizon_candles))
-            dist = np.concatenate([dn_c, up_c], axis=0).astype(float)
+            try:
+                dist = np.concatenate([dn_c, up_c], axis=0).astype(float)
+            except Exception:
+                dist = np.array(list(dn_c) + list(up_c), dtype=float)
+
             dist = dist[np.isfinite(dist)]
             return dist.tolist()
     except Exception as e:
-        print(f"[logger.extract_candle_returns] labels 기반 계산 실패 → fallback 사용 ({e})")
+        print(f"[logger.extract_candle_returns] labels helper 실패 → fallback 사용 ({e})")
 
-    # --- 3) 완전 fallback: 기존 per-candle high/low 방식 (과거 코드 유지) ---
+    # --- 3) 완전 fallback: per-candle high/low vs close ---
     rets: list[float] = []
-    for _, row in df_use.iterrows():
+    try:
+        iter_rows = df_use.iterrows()
+    except Exception:
+        return []
+
+    for _, row in iter_rows:
         try:
             base = float(row["close"])
             high_ = float(row.get("high", row["close"]))
@@ -2399,8 +2420,8 @@ def extract_candle_returns(
         if not np.isfinite(base) or base <= 0:
             continue
 
-        up_ret = (high_ - base) / base   # 위로 간 수익률
-        dn_ret = (low_ - base) / base    # 아래로 간 수익률
+        up_ret = (high_ - base) / base
+        dn_ret = (low_ - base) / base
 
         if np.isfinite(up_ret):
             rets.append(float(up_ret))
@@ -2409,53 +2430,62 @@ def extract_candle_returns(
 
     return rets
 
+
 def make_return_histogram(returns: list[float], bins: int = 20):
     """
-    수익률 리스트를 받아서 히스토그램(구간, 개수)으로 바꿔준다.
-    - labels.py 의 _build_bins / _auto_target_bins 를 사용할 수 있으면 최대한 재사용해서
-      '학습 라벨 분포와 동일한 방식'으로 bin 경계를 만든다.
-    - returns 가 비어있으면 빈 결과 반환.
+    수익률 리스트를 받아 히스토그램(구간, 개수)을 만든다.
+
+    우선순위:
+    1) labels._auto_target_bins + labels._build_bins 사용 가능하면 그 방식(학습과 유사)
+    2) fallback: np.histogram
+
+    반환:
+    {
+      "bin_edges": [...],
+      "bin_counts": [...]
+    }
     """
     if not returns:
-        return {
-            "bin_edges": [],
-            "bin_counts": [],
-        }
+        return {"bin_edges": [], "bin_counts": []}
 
-    arr = np.asarray(returns, dtype=float)
-    arr = arr[np.isfinite(arr)]
+    try:
+        arr = np.asarray(returns, dtype=float)
+        arr = arr[np.isfinite(arr)]
+    except Exception:
+        return {"bin_edges": [], "bin_counts": []}
+
     if arr.size == 0:
-        return {
-            "bin_edges": [],
-            "bin_counts": [],
-        }
+        return {"bin_edges": [], "bin_counts": []}
 
-    # 1) labels.py 의 _build_bins / _auto_target_bins 를 사용할 수 있으면 그대로 사용
+    # 1) labels 방식 우선
     if _lbl_build_bins is not None and _lbl_auto_target_bins is not None:
         try:
-            # dist_for_bins 는 [dn, up] 을 이어붙인 배열이므로,
-            # labels 쪽에서는 "샘플 수 N" 을 기준으로 bin 개수를 정한다.
-            # 여기서는 dist 길이(arr.size)를 그대로 넘기되,
-            # 최소 2개 이상 bin 을 보장한다.
             approx_n = max(1, int(arr.size))
             dynamic_bins = int(_lbl_auto_target_bins(approx_n))
             dynamic_bins = max(2, int(dynamic_bins))
 
             edges, counts, _spans = _lbl_build_bins(arr, dynamic_bins)
             return {
-                "bin_edges": edges.astype(float).tolist(),
-                "bin_counts": counts.astype(int).tolist(),
+                "bin_edges": np.asarray(edges, dtype=float).tolist(),
+                "bin_counts": np.asarray(counts, dtype=int).tolist(),
             }
         except Exception as e:
-            print(f"[logger.make_return_histogram] labels._build_bins 사용 실패 → fallback 사용 ({e})")
+            print(f"[logger.make_return_histogram] labels bins 실패 → np.histogram fallback ({e})")
 
-    # 2) fallback: 기존의 단순 np.histogram 방식 (호환용)
+    # 2) fallback
     try:
-        counts, edges = np.histogram(arr, bins=int(max(2, bins)))
+        b = int(bins)
+        if b < 2:
+            b = 20
+    except Exception:
+        b = 20
+
+    try:
+        counts, edges = np.histogram(arr, bins=b)
     except Exception:
         counts, edges = np.histogram(arr, bins=20)
 
     return {
-        "bin_edges": edges.astype(float).tolist(),
-        "bin_counts": counts.astype(int).tolist(),
-                }
+        "bin_edges": np.asarray(edges, dtype=float).tolist(),
+        "bin_counts": np.asarray(counts, dtype=int).tolist(),
+    }
