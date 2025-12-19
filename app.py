@@ -1721,44 +1721,83 @@ def train_now():
 @app.route("/train-log")
 def train_log():
     """
-    📈 학습 로그 보기 (아주 쉬운 버전)
+    📈 학습 로그 보기 (아주 쉬운 버전 + ✅디버그 박스 추가)
+    - 운영로그가 아니라 train_log.csv를 읽어 카드로 보여준다.
+    - 지금처럼 0/nan이면 '기록/경로/파일종류'가 틀린지부터 화면에서 확정한다.
     """
     try:
-        cards = get_train_log_cards(max_cards=200)
-
-        # ✅ FIX 3) 화면에 표시하는 경로도 무조건 get_TRAIN_LOG_PATH()
+        # ✅ FIX: 항상 이 경로가 “진짜 train_log.csv”인지 화면에서 확인 가능하게 만든다
         log_path = get_TRAIN_LOG_PATH()
+
+        # --- DEBUG INFO (파일을 못 열어도 화면에서 확인 가능) ---
+        dbg_exists = os.path.exists(log_path)
+        dbg_size = os.path.getsize(log_path) if dbg_exists else 0
+        try:
+            dbg_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(log_path), pytz.timezone("Asia/Seoul"))
+            dbg_mtime_s = dbg_mtime.strftime("%Y-%m-%d %H:%M:%S %Z")
+        except Exception:
+            dbg_mtime_s = "알 수 없음"
+
+        head_line = ""
+        head_hint = ""
+        if dbg_exists:
+            try:
+                with open(log_path, "r", encoding="utf-8-sig", errors="ignore") as f:
+                    head_line = (f.readline() or "").strip()
+            except Exception as e:
+                head_line = f"(헤더 읽기 실패: {e})"
+
+            # ✅ 헤더로 파일 종류 추정 (추측이 아니라 “문자열 포함 여부”)
+            hl = head_line.lower()
+            if ("entry_price" in hl) or ("target_price" in hl) or ("direction" in hl) or ("predicted_class" in hl):
+                head_hint = "⚠️ 경고: 이 헤더는 train_log가 아니라 prediction_log/예측로그 계열처럼 보입니다. (경로 함수가 꼬였을 가능성 큼)"
+            elif ("val_acc" in hl) or ("val_f1" in hl) or ("val_loss" in hl):
+                head_hint = "✅ 이 헤더는 train_log(학습로그) 계열처럼 보입니다."
+            else:
+                head_hint = "⚠️ 판단 보류: 헤더가 기대한 train_log 형태가 아닐 수 있습니다."
+
+        debug_box = f"""
+<div style="background:#fff3cd;border:1px solid #ffeeba;padding:10px 12px;border-radius:10px;margin-bottom:12px;font-family:monospace;">
+  <div style="font-weight:bold;margin-bottom:6px;">🧪 train_log 디버그 (파일을 못 열어도 화면에서 확인 가능)</div>
+  <div>path: <code>{log_path}</code></div>
+  <div>exists: <b>{'YES' if dbg_exists else 'NO'}</b> / size: <b>{dbg_size}</b> bytes / mtime: <b>{dbg_mtime_s}</b></div>
+  <div>header: <code style="display:block;white-space:pre-wrap;">{head_line if head_line else '(없음)'}</code></div>
+  <div style="margin-top:6px;color:#8a6d3b;"><b>{head_hint}</b></div>
+</div>
+"""
+
+        # 로그 파일 보장
+        try:
+            ensure_train_log_exists()
+        except Exception:
+            pass
+
+        # --- 원래 카드 로딩 ---
+        cards = get_train_log_cards(max_cards=200)
 
         if not cards:
             return f"""
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>YOPO 학습 로그</title>
-</head>
+<html><head><meta charset="utf-8"><title>YOPO 학습 로그</title></head>
 <body style="font-family:Arial, sans-serif;background:#f4f6fb;padding:20px;font-size:14px;">
-    <h1>📘 YOPO — 학습 로그</h1>
-    <div style="background:#fff;padding:14px 18px;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,0.08);">
-        <div style="font-weight:bold;margin-bottom:6px;">아직 저장된 학습 결과가 없습니다.</div>
-        <div style="font-size:13px;color:#555;">
-            ▶ 학습이 한 번이라도 끝나면 이 화면에<br>
-            &nbsp;&nbsp;&nbsp;심볼·전략별 카드가 자동으로 생깁니다.<br><br>
-            <small>기록 파일 위치: <code>{log_path}</code></small>
-        </div>
+  <h1>📘 YOPO — 학습 로그</h1>
+  {debug_box}
+  <div style="background:#fff;padding:14px 18px;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,0.08);">
+    <div style="font-weight:bold;margin-bottom:6px;">아직 저장된 학습 결과가 없습니다.</div>
+    <div style="font-size:13px;color:#555;">
+      ▶ 운영로그에 학습이 떠도, <b>train_log.csv에 기록이 안 되면</b> 여기엔 안 나옵니다.<br><br>
+      <small>기록 파일 위치: <code>{log_path}</code></small>
     </div>
-</body>
-</html>
+  </div>
+</body></html>
 """
 
+        # --- 이하: 기존 화면 로직 유지 (너의 코드 그대로) ---
         total_cards = len(cards)
         ok_cards = sum(1 for c in cards if str(c.get("health", "")).upper() == "OK")
         bad_cards = total_cards - ok_cards
 
         try:
-            cards_sorted = sorted(
-                cards,
-                key=lambda c: str(c.get("timestamp", "")) or ""
-            )
+            cards_sorted = sorted(cards, key=lambda c: str(c.get("timestamp", "")) or "")
             last = cards_sorted[-1]
         except Exception:
             last = cards[-1]
@@ -1797,32 +1836,16 @@ def train_log():
             ret_summary = c.get("ret_summary_text", "수익률 분포 정보 없음")
             coverage_summary = c.get("coverage_summary", "검증 커버리지 정보 없음")
 
-            n_classes = (
-                c.get("n_classes")
-                or c.get("num_classes")
-                or c.get("class_count")
-            )
+            n_classes = (c.get("n_classes") or c.get("num_classes") or c.get("class_count"))
             if n_classes is None:
                 n_classes_text = "클래스 수 정보 없음"
             else:
                 n_classes_text = f"{int(n_classes)}개 클래스"
 
-            class_ranges_text = c.get(
-                "class_ranges_text",
-                "각 클래스의 수익률 구간 정보 없음",
-            )
-            per_class_perf_text = c.get(
-                "per_class_perf_text",
-                "클래스별 학습 성능 정보 없음",
-            )
-            class_counts_text = c.get(
-                "class_counts_text",
-                "클래스별 데이터 개수 정보 없음",
-            )
-            problem_summary = c.get(
-                "problem_summary",
-                "추가 점검 필요 여부: 별도 표시 없음",
-            )
+            class_ranges_text = c.get("class_ranges_text", "각 클래스의 수익률 구간 정보 없음")
+            per_class_perf_text = c.get("per_class_perf_text", "클래스별 학습 성능 정보 없음")
+            class_counts_text = c.get("class_counts_text", "클래스별 데이터 개수 정보 없음")
+            problem_summary = c.get("problem_summary", "추가 점검 필요 여부: 별도 표시 없음")
 
             block = f"""
 <div style="border:1px solid #ddd;border-radius:8px;padding:10px 12px;margin-bottom:10px;background:#ffffff;">
@@ -1835,50 +1858,26 @@ def train_log():
     ● 이 카드 하나가 <b>“심볼 + 전략”</b> 한 조합의 학습 결과입니다.
   </div>
 
-  <div style="font-size:12px;margin-bottom:2px;">
-    ▷ 정확도: <b>{acc:.4f}</b>
-  </div>
-  <div style="font-size:12px;margin-bottom:2px;">
-    ▷ F1: <b>{f1:.4f}</b>
-  </div>
-  <div style="font-size:12px;margin-bottom:6px;">
-    ▷ loss: <b>{loss:.4f}</b>
-  </div>
+  <div style="font-size:12px;margin-bottom:2px;">▷ 정확도: <b>{acc:.4f}</b></div>
+  <div style="font-size:12px;margin-bottom:2px;">▷ F1: <b>{f1:.4f}</b></div>
+  <div style="font-size:12px;margin-bottom:6px;">▷ loss: <b>{loss:.4f}</b></div>
 
   <div style="font-size:12px;margin-bottom:4px;color:#b71c1c;">
     ● 상태 요약: {health_text} {(' (status=' + status + ')') if status else ''}
   </div>
 
-  <div style="font-size:11px;margin-top:4px;color:#333;">
-    ● 클래스 수: {n_classes_text}
-  </div>
-  <div style="font-size:11px;margin-top:2px;color:#333;">
-    ● 각 클래스 수익률 구간: {class_ranges_text}
-  </div>
-  <div style="font-size:11px;margin-top:2px;color:#333;">
-    ● 클래스별 학습 성능(F1 등): {per_class_perf_text}
-  </div>
-  <div style="font-size:11px;margin-top:2px;color:#333;">
-    ● 클래스별 데이터 분포: {class_counts_text}
-  </div>
+  <div style="font-size:11px;margin-top:4px;color:#333;">● 클래스 수: {n_classes_text}</div>
+  <div style="font-size:11px;margin-top:2px;color:#333;">● 각 클래스 수익률 구간: {class_ranges_text}</div>
+  <div style="font-size:11px;margin-top:2px;color:#333;">● 클래스별 학습 성능(F1 등): {per_class_perf_text}</div>
+  <div style="font-size:11px;margin-top:2px;color:#333;">● 클래스별 데이터 분포: {class_counts_text}</div>
 
-  <div style="font-size:11px;margin-top:4px;color:#333;">
-    ● 데이터 양: {data_summary}
-  </div>
-  <div style="font-size:11px;margin-top:2px;color:#333;">
-    ● 수익률 분포(요약): {ret_summary}
-  </div>
-  <div style="font-size:11px;margin-top:2px;color:#333;">
-    ● 검증 커버리지: {coverage_summary}
-  </div>
+  <div style="font-size:11px;margin-top:4px;color:#333;">● 데이터 양: {data_summary}</div>
+  <div style="font-size:11px;margin-top:2px;color:#333;">● 수익률 분포(요약): {ret_summary}</div>
+  <div style="font-size:11px;margin-top:2px;color:#333;">● 검증 커버리지: {coverage_summary}</div>
 
-  <div style="font-size:11px;margin-top:4px;color:#d32f2f;">
-    ● 전체 문제 여부: {problem_summary}
-  </div>
+  <div style="font-size:11px;margin-top:4px;color:#d32f2f;">● 전체 문제 여부: {problem_summary}</div>
 
-  <div style="font-size:11px;color:#777;margin-top:4px;">
-    마지막 학습 시간: {ts}
-  </div>
+  <div style="font-size:11px;color:#777;margin-top:4px;">마지막 학습 시간: {ts}</div>
 </div>
 """
             card_blocks.append(block)
@@ -1888,53 +1887,51 @@ def train_log():
         html = f"""
 <html>
 <head>
-    <meta charset="utf-8">
-    <title>YOPO 학습 로그 (아주 쉬운 버전)</title>
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            background:#f4f6fb;
-            padding:20px;
-            font-size:14px;
-        }}
-        h1 {{ color:#222; }}
-        .card {{
-            background:#ffffff;
-            padding:14px 18px;
-            margin-bottom:16px;
-            border-radius:10px;
-            box-shadow:0 1px 4px rgba(0,0,0,0.08);
-            line-height:1.6;
-        }}
-    </style>
+  <meta charset="utf-8">
+  <title>YOPO 학습 로그 (아주 쉬운 버전)</title>
+  <style>
+    body {{
+      font-family: Arial, sans-serif;
+      background:#f4f6fb;
+      padding:20px;
+      font-size:14px;
+    }}
+    h1 {{ color:#222; }}
+    .card {{
+      background:#ffffff;
+      padding:14px 18px;
+      margin-bottom:16px;
+      border-radius:10px;
+      box-shadow:0 1px 4px rgba(0,0,0,0.08);
+      line-height:1.6;
+    }}
+  </style>
 </head>
 <body>
 <h1>📘 YOPO — 학습 로그 (쉽게 보기)</h1>
+{debug_box}
 
 <div class="card">
-    <div style="font-weight:bold;margin-bottom:6px;">1️⃣ 지금까지 학습된 전체 요약</div>
-    <div>· 총 <b>{total_cards}</b>개 심볼·전략 조합이 학습되었습니다.</div>
-    <div>· 이 중 <b>{ok_cards}</b>개는 <span style="color:#2e7d32;">정상(OK)</span>, <b>{bad_cards}</b>개는 <span style="color:#b71c1c;">추가 확인 필요</span>입니다.</div>
-    <div style="font-size:12px;color:#666;margin-top:4px;">
-        기록 파일: <code>{log_path}</code>
-    </div>
+  <div style="font-weight:bold;margin-bottom:6px;">1️⃣ 지금까지 학습된 전체 요약</div>
+  <div>· 총 <b>{total_cards}</b>개 심볼·전략 조합이 학습되었습니다.</div>
+  <div>· 이 중 <b>{ok_cards}</b>개는 <span style="color:#2e7d32;">정상(OK)</span>,
+      <b>{bad_cards}</b>개는 <span style="color:#b71c1c;">추가 확인 필요</span>입니다.</div>
+  <div style="font-size:12px;color:#666;margin-top:4px;">기록 파일: <code>{log_path}</code></div>
 </div>
 
 <div class="card">
-    <div style="font-weight:bold;margin-bottom:6px;">2️⃣ 가장 최근에 끝난 학습 한 줄 요약</div>
-    <div>· 시간: <b>{last_ts}</b></div>
-    <div>· 심볼 / 전략: <b>{last_sym} / {last_strat}</b></div>
-    <div>· 모델: <b>{last_model}</b></div>
-    <div>· 정확도: <b>{last_acc:.4f}</b> / F1: <b>{last_f1:.4f}</b> / loss: <b>{last_loss:.4f}</b></div>
-    <div>· 상태: {last_health_text}</div>
+  <div style="font-weight:bold;margin-bottom:6px;">2️⃣ 가장 최근에 끝난 학습 한 줄 요약</div>
+  <div>· 시간: <b>{last_ts}</b></div>
+  <div>· 심볼 / 전략: <b>{last_sym} / {last_strat}</b></div>
+  <div>· 모델: <b>{last_model}</b></div>
+  <div>· 정확도: <b>{last_acc:.4f}</b> / F1: <b>{last_f1:.4f}</b> / loss: <b>{last_loss:.4f}</b></div>
+  <div>· 상태: {last_health_text}</div>
 </div>
 
 <div class="card">
-    <div style="font-weight:bold;margin-bottom:6px;">3️⃣ 심볼·전략별 자세한 카드</div>
-    <div style="font-size:13px;color:#555;margin-bottom:6px;">
-        각 카드 하나가 “심볼 + 전략(단기/중기/장기)”의 학습 결과입니다.
-    </div>
-    {class_cards_html}
+  <div style="font-weight:bold;margin-bottom:6px;">3️⃣ 심볼·전략별 자세한 카드</div>
+  <div style="font-size:13px;color:#555;margin-bottom:6px;">각 카드 하나가 “심볼 + 전략(단기/중기/장기)”의 학습 결과입니다.</div>
+  {class_cards_html}
 </div>
 
 </body>
