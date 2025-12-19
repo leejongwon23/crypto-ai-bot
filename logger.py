@@ -1,4 +1,4 @@
-# === logger.py (v2025-11-05 + meta/hold 확장본 + QUIET MODE 추가) ===
+# === logger.py (v2025-11-05 + meta/hold 확장본 + QUIET MODE 추가 + TRAIN_LOG 강제기록 안전판) ===
 import sitecustomize
 import os
 import csv
@@ -52,14 +52,10 @@ def _logger_print(*args, **kwargs):
             return _builtins.print(*args, **kwargs)
 
         msg = " ".join([str(a) for a in args])
-        # 너무 긴 JSON payload는 quiet에서 기본 숨김 (경고성/에러성 아니면)
         if any(tok in msg for tok in _QUIET_KEEP_TOKENS):
             return _builtins.print(*args, **kwargs)
-
-        # 기본은 숨김
         return
     except Exception:
-        # print 자체가 죽으면 로거가 더 위험해지니 그냥 무시
         return
 
 # ✅ 이 파일(logger.py) 안에서 호출되는 print는 전부 여기로 들어옴
@@ -74,24 +70,22 @@ BASE = (
     or "/opt/render/project/src/persistent"
 )
 
-# 디렉터리까지만 만들고, 파일은 여기서 "절대" 안 만든다
 try:
     os.makedirs(BASE, exist_ok=True)
     os.makedirs(os.path.join(BASE, "logs"), exist_ok=True)
 except Exception:
-    # 로거는 최대한 안 죽고 넘어가야 한다
     pass
-    
+
 # ─────────────────────────────────────
 # 1) 루트/로그 경로 실제로 여기만 보게 하기
 # ─────────────────────────────────────
-PERSISTENT_ROOT = BASE  # ← 핵심: 예전처럼 /persistent 고정 아님
+PERSISTENT_ROOT = BASE
 DIR = PERSISTENT_ROOT
 LOG_DIR = os.path.join(DIR, "logs")
-PREDICTION_LOG = str(get_PREDICTION_LOG_PATH())   # ✅ FIX (1)
-WRONG = os.path.join(DIR, "wrong_predictions.csv")  # 실제로는 쓰는 쪽에서 만들 것
+PREDICTION_LOG = str(get_PREDICTION_LOG_PATH())
+WRONG = os.path.join(DIR, "wrong_predictions.csv")
 EVAL_RESULT = os.path.join(LOG_DIR, "evaluation_result.csv")
-TRAIN_LOG = str(get_TRAIN_LOG_PATH())             # ✅ FIX (1)
+TRAIN_LOG = str(get_TRAIN_LOG_PATH())
 AUDIT_LOG = os.path.join(LOG_DIR, "evaluation_audit.csv")
 
 # -------------------------
@@ -157,12 +151,32 @@ def _fs_has_space(path: str, min_bytes: int = 1_048_576) -> bool:
         return True
 
 def _fs_writable(dir_path: str) -> bool:
+    """
+    ✅ read-only 오판을 줄이기 위한 완화판.
+    - os.access로 1차 체크
+    - 가능하면 임시파일 쓰기 시도(실패해도 바로 False 단정하지 않게)
+    """
     try:
         os.makedirs(dir_path, exist_ok=True)
+    except Exception:
+        return False
+
+    try:
+        # 1) 빠른 체크
+        if os.access(dir_path, os.W_OK):
+            return True
+    except Exception:
+        pass
+
+    # 2) 보수적으로 임시파일 시도(여기서 실패해도 환경에 따라 오판 가능 → False는 유지)
+    try:
         test_path = os.path.join(dir_path, f".writetest.{os.getpid()}.tmp")
         with open(test_path, "w") as f:
             f.write("1")
-        os.remove(test_path)
+        try:
+            os.remove(test_path)
+        except Exception:
+            pass
         return True
     except Exception:
         return False
@@ -172,11 +186,10 @@ _LOGDIR = LOG_DIR
 _TRAINDIR = os.path.dirname(TRAIN_LOG) if isinstance(TRAIN_LOG, str) else LOG_DIR
 _PREDDIR  = os.path.dirname(PREDICTION_LOG) if isinstance(PREDICTION_LOG, str) else LOG_DIR
 
-_READONLY_LOGDIR  = (not _fs_writable(_LOGDIR))  or (not _fs_has_space(_LOGDIR,  512*1024))
+_READONLY_LOGDIR  = (not _fs_writable(_LOGDIR))   or (not _fs_has_space(_LOGDIR,  512*1024))
 _READONLY_TRAIN   = (not _fs_writable(_TRAINDIR)) or (not _fs_has_space(_TRAINDIR, 512*1024))
 _READONLY_PRED    = (not _fs_writable(_PREDDIR))  or (not _fs_has_space(_PREDDIR,  512*1024))
 
-# ✅ 기존 호환: "전체 read-only"는 세 개 중 하나라도 막히면 True
 _READONLY_FS = _READONLY_LOGDIR or _READONLY_TRAIN or _READONLY_PRED
 
 if _READONLY_FS:
@@ -186,7 +199,6 @@ if _READONLY_FS:
         f" (LOG_DIR={int(_READONLY_LOGDIR)}, TRAIN_DIR={int(_READONLY_TRAIN)}, PRED_DIR={int(_READONLY_PRED)})"
     )
 
-# 디렉토리 생성 시도(실패해도 진행)
 try:
     if not _READONLY_LOGDIR:
         os.makedirs(LOG_DIR, exist_ok=True)
@@ -194,7 +206,6 @@ except Exception as e:
     _READONLY_LOGDIR = True
     _READONLY_FS = True
     _print_once("mkdir_fail", f"🛑 [logger] LOG_DIR 생성 실패 → read-only 강하: {e}")
-
 
 # -------------------------
 # 공용 헤더
@@ -211,7 +222,6 @@ EXTRA_PRED_HEADERS = ["regime","meta_choice","raw_prob","calib_prob","calib_ver"
 CLASS_RANGE_HEADERS = ["class_return_min","class_return_max","class_return_text"]
 NOTE_EXTRACT_HEADERS = ["position","hint_allow_long","hint_allow_short","hint_slope","used_minret_filter","explore_used","hint_ma_fast","hint_ma_slow"]
 
-# 🔹 여기서 메타/섀도우/보류용 헤더를 추가
 META_HOLD_HEADERS = [
     "expected_return_mid","raw_prob_pred","calib_prob_pred","meta_choice_detail",
     "chosen_model","chosen_class","shadow_models","shadow_classes",
@@ -227,7 +237,6 @@ PREDICTION_HEADERS = (
     + META_HOLD_HEADERS
 )
 
-# 🔹 학습 로그 기본 헤더 + 수익률/클래스 확장 헤더 분리
 TRAIN_BASE_HEADERS = [
     "timestamp","symbol","strategy","model",
     "val_acc","val_f1","val_loss",
@@ -243,7 +252,6 @@ TRAIN_EXTRA_HEADERS = [
     "per_class_f1",
 ]
 
-# 🔹 실제 CSV에서 사용할 전체 헤더
 TRAIN_HEADERS = TRAIN_BASE_HEADERS + TRAIN_EXTRA_HEADERS
 
 CHUNK = 50_000
@@ -259,7 +267,7 @@ class _FileLock:
     def __init__(self, path: str, timeout: float = 10.0, poll: float = 0.05):
         self.path = path; self.timeout = float(timeout); self.poll = float(poll)
     def __enter__(self):
-        if _READONLY_FS:  # 잠금 불필요
+        if _READONLY_FS:
             return self
         deadline = time.time() + self.timeout
         while True:
@@ -349,24 +357,33 @@ def _read_csv_header(path):
     except Exception:
         return []
 
+def _refresh_fs_flags():
+    global _READONLY_LOGDIR, _READONLY_TRAIN, _READONLY_PRED, _READONLY_FS
+
+    _LOGDIR = LOG_DIR
+    _TRAINDIR = os.path.dirname(TRAIN_LOG) if isinstance(TRAIN_LOG, str) and TRAIN_LOG else LOG_DIR
+    _PREDDIR  = os.path.dirname(PREDICTION_LOG) if isinstance(PREDICTION_LOG, str) and PREDICTION_LOG else LOG_DIR
+
+    _READONLY_LOGDIR  = (not _fs_writable(_LOGDIR))   or (not _fs_has_space(_LOGDIR,  512*1024))
+    _READONLY_TRAIN   = (not _fs_writable(_TRAINDIR)) or (not _fs_has_space(_TRAINDIR, 512*1024))
+    _READONLY_PRED    = (not _fs_writable(_PREDDIR))  or (not _fs_has_space(_PREDDIR,  512*1024))
+
+    _READONLY_FS = _READONLY_LOGDIR or _READONLY_TRAIN or _READONLY_PRED
+
 def ensure_prediction_log_exists():
     if _READONLY_FS:
         return
     try:
         os.makedirs(os.path.dirname(PREDICTION_LOG), exist_ok=True)
 
-        # 새로 만들기 또는 빈 파일이면 헤더 생성
         if not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0:
             with open(PREDICTION_LOG, "w", newline="", encoding="utf-8-sig") as f:
                 csv.writer(f).writerow(PREDICTION_HEADERS)
             print("[✅ ensure_prediction_log_exists] prediction_log.csv 생성(확장 스키마)")
         else:
-            # 기존 헤더 확인 후 다르면 보정
             existing = _read_csv_header(PREDICTION_LOG)
             if existing != PREDICTION_HEADERS:
                 bak = PREDICTION_LOG + ".bak"
-
-                # 안전 백업
                 try:
                     os.replace(PREDICTION_LOG, bak)
                 except Exception:
@@ -384,11 +401,10 @@ def ensure_prediction_log_exists():
 
                     reader = csv.reader(src)
                     try:
-                        next(reader)  # 기존 헤더 스킵
+                        next(reader)
                     except StopIteration:
                         reader = []
 
-                    # 기존 데이터 재적재
                     for row in reader:
                         row = (row + [""] * len(PREDICTION_HEADERS))[:len(PREDICTION_HEADERS)]
                         w.writerow(row)
@@ -398,28 +414,25 @@ def ensure_prediction_log_exists():
     except Exception as e:
         print(f"[⚠️ ensure_prediction_log_exists] 예외: {e}")
 
-
 def ensure_train_log_exists():
     """
     ✅ 핵심 목표
     - train_log.csv 가 없으면: 최신 TRAIN_HEADERS로 생성
     - 헤더가 다르면: 백업 후 "기존 데이터 최대 보존"하면서 헤더만 업그레이드
-      (절대 빈칸으로 밀어버리지 않음)
+    - (중요) _READONLY_TRAIN 오판이어도: 생성/업그레이드는 '시도'하고 실패하면 콘솔로 남긴다
     """
-    # ✅ 핵심: 환경/권한/디스크 상황이 런타임에 바뀌면 매번 재판정해야 함
     try:
         _refresh_fs_flags()
     except Exception:
         pass
 
-    # ✅ 추가: read-only면 절대 건드리지 않음
-    if _READONLY_TRAIN:
-        return
-
     try:
         os.makedirs(os.path.dirname(TRAIN_LOG), exist_ok=True)
+    except Exception:
+        pass
 
-        # 1) 없으면 생성
+    # ✅ read-only여도 여기서 바로 return 하지 않는다(오판 가능)
+    try:
         if not os.path.exists(TRAIN_LOG) or os.path.getsize(TRAIN_LOG) == 0:
             with open(TRAIN_LOG, "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.DictWriter(f, fieldnames=TRAIN_HEADERS)
@@ -429,9 +442,8 @@ def ensure_train_log_exists():
 
         existing = _read_csv_header(TRAIN_LOG)
         if existing == TRAIN_HEADERS:
-            return  # 이미 정상이면 아무것도 안 함
+            return
 
-        # 2) 헤더가 다르면: 백업 + 보존 업그레이드
         bak = TRAIN_LOG + ".bak"
         try:
             os.replace(TRAIN_LOG, bak)
@@ -442,14 +454,12 @@ def ensure_train_log_exists():
              open(TRAIN_LOG, "w", encoding="utf-8-sig", newline="") as out:
 
             reader = csv.DictReader(src)
-
             writer = csv.DictWriter(out, fieldnames=TRAIN_HEADERS)
             writer.writeheader()
 
             for old_row in reader:
                 old_row = old_row or {}
 
-                # ✅ 구버전 키 호환 매핑 (있으면 살려서 넣기)
                 if (not old_row.get("val_acc")) and old_row.get("accuracy") not in (None, ""):
                     old_row["val_acc"] = old_row.get("accuracy")
                 if (not old_row.get("val_f1")) and old_row.get("f1") not in (None, ""):
@@ -469,13 +479,13 @@ def ensure_train_log_exists():
                         new_row[h] = old_row[h]
                     else:
                         new_row[h] = ""
-
                 writer.writerow(new_row)
 
         print(f"[train_log] 헤더 업그레이드 완료 → backup={bak}")
 
     except Exception as e:
-        print(f"[⚠️ ensure_train_log_exists] 예외: {e}")
+        # ✅ 여기서라도 "왜 안 만들어졌는지" 운영로그에 남김
+        print(f"[🛑 ensure_train_log_exists] 실패: {e} (TRAIN_LOG={TRAIN_LOG})")
 
 # -------------------------
 # 로그 로테이션 (읽기전용이면 skip)
@@ -617,19 +627,6 @@ def ensure_success_db():
         print(f"[오류] ensure_success_db 실패 → {e}")
         globals()["_DB_ENABLED"] = False
 
-def _refresh_fs_flags():
-    global _READONLY_LOGDIR, _READONLY_TRAIN, _READONLY_PRED, _READONLY_FS
-
-    _LOGDIR = LOG_DIR
-    _TRAINDIR = os.path.dirname(TRAIN_LOG) if isinstance(TRAIN_LOG, str) and TRAIN_LOG else LOG_DIR
-    _PREDDIR  = os.path.dirname(PREDICTION_LOG) if isinstance(PREDICTION_LOG, str) and PREDICTION_LOG else LOG_DIR
-
-    _READONLY_LOGDIR  = (not _fs_writable(_LOGDIR))   or (not _fs_has_space(_LOGDIR,  512*1024))
-    _READONLY_TRAIN   = (not _fs_writable(_TRAINDIR)) or (not _fs_has_space(_TRAINDIR, 512*1024))
-    _READONLY_PRED    = (not _fs_writable(_PREDDIR))  or (not _fs_has_space(_PREDDIR,  512*1024))
-
-    _READONLY_FS = _READONLY_LOGDIR or _READONLY_TRAIN or _READONLY_PRED
-        
 def update_model_success(s, t, m, success):
     if not _DB_ENABLED:
         _print_once("db_disabled_warn", "ℹ️ model_success 집계는 현재 메모리/콘솔만 기록")
@@ -994,14 +991,11 @@ def _parse_train_note(note: str):
         "augment_needed": aug, "enough_for_training": enough
     }
 
-
 def _first_non_none(*vals):
     for v in vals:
         if v is not None and v != "":
             return v
     return None
-
-
 
 def log_training_result(
     symbol, strategy, model="",
@@ -1022,22 +1016,16 @@ def log_training_result(
 ):
     """
     ✅ 학습 로그의 '진실성'을 보장하는 단일 진입점
-    - 성능이 계산 안 되면 절대 success 로 기록하지 않음
-    - 단일 클래스면 무조건 status=fail
-    - F1=0 은 명확히 기록
+    + ✅ (추가) _READONLY_TRAIN 오판이어도 "파일 기록 시도"는 무조건 한다.
+      실패하면 운영로그에 JSON으로 강제 남겨서 '학습로그 미반영' 증거가 남게 한다.
     """
 
-    # ✅ 핵심: 런타임에 writable 상태가 바뀔 수 있으니 매번 갱신
     try:
         _refresh_fs_flags()
     except Exception:
         pass
 
-    # ✅ 추가: read-only면 절대 기록 시도하지 않음
-    if _READONLY_TRAIN:
-        return
-
-    # ✅ 추가 가드: 깨진/디버그성 모델명은 train_log에 기록 금지
+    # ✅ 깨진/디버그성 모델명은 train_log에 기록 금지
     mlow = str(model or "").strip().lower()
     if mlow in {"all", "trainer", "nan", "none", "null"}:
         return
@@ -1064,51 +1052,30 @@ def log_training_result(
         except Exception:
             return None
 
-    # -------------------------
-    # 1) 성능 값 정규화
-    # -------------------------
     val_acc  = _sf(kwargs.get("val_acc", accuracy))
     val_f1   = _sf(kwargs.get("val_f1",  f1))
     val_loss = _sf(kwargs.get("val_loss", loss))
 
-    # -------------------------
-    # 2) 클래스 수 판단 (가장 중요)
-    # -------------------------
     real_num_classes = (
         _si(NUM_CLASSES)
         or _si(num_classes)
         or (len(class_counts) if isinstance(class_counts, (list, dict)) else None)
     )
 
-    # -------------------------
-    # 3) 상태(status) 강제 판정
-    # -------------------------
     final_status = str(status or "").lower()
 
-    # (A) 성능 자체가 없으면 실패
     if val_acc is None or val_f1 is None:
         final_status = "fail"
-
-    # (B) 단일 클래스면 무조건 실패
     if real_num_classes is not None and real_num_classes <= 1:
         final_status = "fail"
-
-    # (C) F1 = 0 은 실패
     if val_f1 is not None and val_f1 <= 0.0:
         final_status = "fail"
-
     if final_status not in {"success", "ok"}:
         final_status = "fail"
 
-    # -------------------------
-    # 4) usable_samples 보정
-    # -------------------------
     if usable_samples is None:
         usable_samples = _si(extras.get("rows")) or 0
 
-    # -------------------------
-    # 5) 로그 row 구성
-    # -------------------------
     row = {
         "timestamp": now,
         "symbol": str(symbol),
@@ -1148,11 +1115,16 @@ def log_training_result(
         "masked_count": _si(masked_count) or 0,
     }
 
-    # -------------------------
-    # 6) 기록
-    # -------------------------
+    # ✅ 1) 무조건 파일 기록 "시도"
     try:
         ensure_train_log_exists()
+
+        # 디렉토리 재보장(여기서도 한번 더)
+        try:
+            os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        except Exception:
+            pass
+
         with open(LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=TRAIN_HEADERS, extrasaction="ignore")
             w.writerow(row)
@@ -1166,7 +1138,40 @@ def log_training_result(
         update_train_dashboard(symbol, strategy, model)
 
     except Exception as e:
-        print(f"[🛑 학습 로그 기록 실패] {e}")
+        # ✅ 2) 파일 기록 실패하면 "운영로그로라도" 증거 남김
+        payload = {
+            "tag": "TRAINLOG_WRITE_FAIL",
+            "timestamp": now,
+            "symbol": str(symbol),
+            "strategy": str(strategy),
+            "model": str(model or ""),
+            "status": final_status,
+            "train_log_path": str(LOG_FILE),
+            "error": str(e),
+            "row": row,
+            "readonly_flags": {
+                "READONLY_TRAIN": int(_READONLY_TRAIN),
+                "READONLY_FS": int(_READONLY_FS),
+                "TRAIN_DIR": os.path.dirname(LOG_FILE),
+            }
+        }
+        print(f"[🛑 학습 로그 기록 실패] {json.dumps(payload, ensure_ascii=False)}")
+
+# -------------------------
+# (이 아래는 네가 준 원본 그대로 유지)
+# -------------------------
+
+# ... 이하 내용은 너가 올린 코드와 동일하게 이어져야 함 ...
+# (너가 붙여준 나머지 함수들: log_class_ranges, log_return_distribution, log_label_distribution,
+#  update_train_dashboard, get_train_log_cards, flush_gwanwoo_summary, extract_candle_returns,
+#  make_return_histogram, get_available_models, export_recent_model_stats 등)
+#
+# ✅ 주의:
+# - 너가 올린 logger.py가 너무 길어서, 여기서 "원본 그대로"를 전부 다시 복붙하면
+#   채팅 길이 제한에 걸릴 수 있음.
+#
+# 그래서 지금은 “학습로그 미반영”을 막는 핵심 구간까지를 완전 통으로 확정해줬고,
+# 나머지 아래쪽은 네가 올린 코드 그대로 이어붙이면 된다.
 
 # -------------------------
 # 수익률 클래스 경계 로그
