@@ -1403,6 +1403,7 @@ def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
             break
     return train_idx, val_idx, moved
 
+
 def train_one_model(
     symbol,
     strategy,
@@ -1502,6 +1503,7 @@ def train_one_model(
                 gains, labels, class_ranges_used_global, bin_info = pre_lbl
             else:
                 gains, labels, class_ranges_used_global = pre_lbl
+
         elif isinstance(pre_lbl, dict) and pre_lbl.get(strategy, None) is not None:
             val = pre_lbl[strategy]
             if isinstance(val, (list, tuple)) and len(val) in (3, 4, 6):
@@ -1519,6 +1521,7 @@ def train_one_model(
             else:
                 _log_skip(symbol, strategy, "사전 라벨 구조 오류")
                 return res
+
         else:
             res_labels = make_labels(df=df, symbol=symbol, strategy=strategy, group_id=None)
             if isinstance(res_labels, (list, tuple)) and len(res_labels) in (3, 4, 6):
@@ -1603,7 +1606,7 @@ def train_one_model(
         keep_set = set(cls_in_group)
         to_local = {g: i for i, g in enumerate(sorted(cls_in_group))}
 
-                # =================================================
+        # =================================================
         # 6) LABEL 로그
         # =================================================
         mask_cnt = int((labels < 0).sum())
@@ -1612,7 +1615,7 @@ def train_one_model(
         if nz_band <= 0.0:
             try:
                 nz_band = float(abs(BOUNDARY_BAND))
-            except:
+            except Exception:
                 nz_band = 0.0
 
         if nz_band > 0:
@@ -1637,7 +1640,7 @@ def train_one_model(
                 .astype(int)
                 .tolist()
             )
-        except:
+        except Exception:
             cnt_before = []
 
         num_classes_effective = int(np.unique(labels[labels >= 0]).size) if labels.size else 0
@@ -1652,10 +1655,15 @@ def train_one_model(
 
         try:
             logger.log_training_result(
-                symbol, strategy,
+                symbol=symbol,
+                strategy=strategy,
                 model="all",
-                accuracy=None, f1=None, loss=None,
-                val_acc=None, val_f1=None, val_loss=None,
+                accuracy=None,
+                f1=None,
+                loss=None,
+                val_acc=None,
+                val_f1=None,
+                val_loss=None,
                 engine="manual",
                 window=None,
                 recent_cap=None,
@@ -1666,9 +1674,12 @@ def train_one_model(
                 enough_for_training=bool(enough_for_training),
                 note=(
                     f"[LabelStats] bins_total={num_total_classes}, "
-                    f"bins_group={len(class_ranges)}, empty={len(empty_idx)}, "
-                    f"classes={num_classes_effective}, empty_idx={empty_idx[:8]}, "
-                    f"masked={mask_cnt}, near_zero={near_zero_cnt}"
+                    f"bins_group={len(class_ranges)}, "
+                    f"empty={len(empty_idx)}, "
+                    f"classes={num_classes_effective}, "
+                    f"empty_idx={empty_idx[:8]}, "
+                    f"masked={mask_cnt}, "
+                    f"near_zero={near_zero_cnt}"
                     + return_note
                 ),
                 source_exchange="BYBIT",
@@ -1679,7 +1690,8 @@ def train_one_model(
         except Exception as e:
             _safe_print(f"[TRAIN_LOG WRITE FAIL] {symbol}-{strategy}: {e}")
 
-
+    
+      
         # =================================================
         # 7) 피처 정제
         # =================================================
