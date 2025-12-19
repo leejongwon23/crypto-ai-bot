@@ -188,31 +188,47 @@ except Exception:
 # ======================================================================
 
 # ================================================
-# ⚠️ 여기서부터 경로를 전부 "안전 경로"로 바꿈
-# 기본은 /tmp/persistent 밑으로 저장. 환경변수 PERSIST_DIR 있으면 그거 씀.
+# ✅ 경로 통일(핵심)
+# - train_log.csv가 있는 "persistent"를 기준으로 logs/models/run 모두 고정
+# - /tmp/persistent 같은 다른 루트로 갈라지지 않게 막음
 # ================================================
-BASE_PERSIST_DIR = os.getenv("PERSIST_DIR", "/tmp/persistent")
+TRAIN_LOG = get_TRAIN_LOG_PATH()  # /persistent/logs/train_log.csv 같은 "진짜" 경로
+
+# train_log.csv -> .../persistent/logs/train_log.csv
+# BASE는 .../persistent
+_base_from_trainlog = os.path.dirname(os.path.dirname(TRAIN_LOG))
+
+BASE_PERSIST_DIR = (
+    os.getenv("PERSIST_DIR")
+    or os.getenv("PERSISTENT_DIR")
+    or _base_from_trainlog
+)
+
 try:
     os.makedirs(BASE_PERSIST_DIR, exist_ok=True)
 except Exception:
-    # 최후 폴백
-    BASE_PERSIST_DIR = "/tmp/persistent-fallback"
-    os.makedirs(BASE_PERSIST_DIR, exist_ok=True)
+    pass
 
-LOG_DIR = os.getenv("LOG_DIR", os.path.join(BASE_PERSIST_DIR, "logs"))
-os.makedirs(LOG_DIR, exist_ok=True)
+# logs는 train_log.csv가 있는 폴더로 고정
+LOG_DIR = os.path.dirname(TRAIN_LOG)
+try:
+    os.makedirs(LOG_DIR, exist_ok=True)
+except Exception:
+    pass
 
 MODEL_DIR = os.getenv("MODEL_DIR", os.path.join(BASE_PERSIST_DIR, "models"))
-os.makedirs(MODEL_DIR, exist_ok=True)
+RUN_DIR   = os.getenv("RUN_DIR",   os.path.join(BASE_PERSIST_DIR, "run"))
 
-# run/ 락파일 위치도 안전 경로로
-RUN_DIR = os.getenv("RUN_DIR", os.path.join(BASE_PERSIST_DIR, "run"))
-os.makedirs(RUN_DIR, exist_ok=True)
+for _d in (MODEL_DIR, RUN_DIR):
+    try:
+        os.makedirs(_d, exist_ok=True)
+    except Exception:
+        pass
 
-# GROUP_ACTIVE 도 여기로
 GROUP_ACTIVE_PATH = os.path.join(BASE_PERSIST_DIR, "GROUP_ACTIVE")
-PERSIST_DIR = BASE_PERSIST_DIR  # 아래 코드들이 쓰는 이름 그대로 둠
+PERSIST_DIR = BASE_PERSIST_DIR
 # ================================================
+
 
 # ==== [ADD] 학습 때 캔들 수익분포 운영로그로 남기는 함수 ====
 def log_return_distribution_for_train(symbol: str, strategy: str, df: pd.DataFrame, max_rows: int = 1000):
@@ -479,7 +495,7 @@ def _append_train_log(row: dict):
         except Exception:
             pass
 
-        with open(_path, "a", encoding="utf-8-sig", newline="") as f:
+        with open(TRAIN_LOG, "a", encoding="utf-8-sig", newline="") as f:
             w = csv.DictWriter(f, fieldnames=TRAIN_HEADERS, extrasaction="ignore")
             w.writerow(_normalize_train_row(row))
     except Exception as e:
@@ -1587,7 +1603,7 @@ def train_one_model(
         keep_set = set(cls_in_group)
         to_local = {g: i for i, g in enumerate(sorted(cls_in_group))}
 
-        # =================================================
+                # =================================================
         # 6) LABEL 로그
         # =================================================
         mask_cnt = int((labels < 0).sum())
@@ -1616,7 +1632,11 @@ def train_one_model(
         )
 
         try:
-            cnt_before = np.bincount(labels[labels >= 0], minlength=num_total_classes).astype(int).tolist()
+            cnt_before = (
+                np.bincount(labels[labels >= 0], minlength=num_total_classes)
+                .astype(int)
+                .tolist()
+            )
         except:
             cnt_before = []
 
@@ -1625,7 +1645,10 @@ def train_one_model(
 
         return_note = ""
         if isinstance(bin_info, dict):
-            return_note = f" ; [ReturnDist] edges={bin_info.get('bin_edges', [])[:20]}, counts={bin_info.get('bin_counts', [])[:20]}"
+            return_note = (
+                f" ; [ReturnDist] edges={bin_info.get('bin_edges', [])[:20]}, "
+                f"counts={bin_info.get('bin_counts', [])[:20]}"
+            )
 
         try:
             logger.log_training_result(
@@ -1653,8 +1676,9 @@ def train_one_model(
                 NUM_CLASSES=int(num_total_classes),
                 class_counts_label_freeze=cnt_before,
             )
-        except:
-            pass
+        except Exception as e:
+            _safe_print(f"[TRAIN_LOG WRITE FAIL] {symbol}-{strategy}: {e}")
+
 
         # =================================================
         # 7) 피처 정제
