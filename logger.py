@@ -406,6 +406,12 @@ def ensure_train_log_exists():
     - 헤더가 다르면: 백업 후 "기존 데이터 최대 보존"하면서 헤더만 업그레이드
       (절대 빈칸으로 밀어버리지 않음)
     """
+    # ✅ 핵심: 환경/권한/디스크 상황이 런타임에 바뀌면 매번 재판정해야 함
+    try:
+        _refresh_fs_flags()
+    except Exception:
+        pass
+
     # ✅ 추가: read-only면 절대 건드리지 않음
     if _READONLY_TRAIN:
         return
@@ -436,7 +442,6 @@ def ensure_train_log_exists():
              open(TRAIN_LOG, "w", encoding="utf-8-sig", newline="") as out:
 
             reader = csv.DictReader(src)
-            old_fields = reader.fieldnames or []
 
             writer = csv.DictWriter(out, fieldnames=TRAIN_HEADERS)
             writer.writeheader()
@@ -445,7 +450,6 @@ def ensure_train_log_exists():
                 old_row = old_row or {}
 
                 # ✅ 구버전 키 호환 매핑 (있으면 살려서 넣기)
-                # - accuracy/f1/loss → val_acc/val_f1/val_loss
                 if (not old_row.get("val_acc")) and old_row.get("accuracy") not in (None, ""):
                     old_row["val_acc"] = old_row.get("accuracy")
                 if (not old_row.get("val_f1")) and old_row.get("f1") not in (None, ""):
@@ -459,13 +463,12 @@ def ensure_train_log_exists():
                     if v not in (None, ""):
                         old_row["val_loss"] = v
 
-                # ✅ 핵심: "새 헤더" 기준으로 최대 보존 복사
                 new_row = {}
                 for h in TRAIN_HEADERS:
                     if h in old_row and old_row[h] not in (None, ""):
                         new_row[h] = old_row[h]
                     else:
-                        new_row[h] = ""  # 없으면 빈칸
+                        new_row[h] = ""
 
                 writer.writerow(new_row)
 
@@ -473,7 +476,6 @@ def ensure_train_log_exists():
 
     except Exception as e:
         print(f"[⚠️ ensure_train_log_exists] 예외: {e}")
-
 
 # -------------------------
 # 로그 로테이션 (읽기전용이면 skip)
@@ -615,6 +617,19 @@ def ensure_success_db():
         print(f"[오류] ensure_success_db 실패 → {e}")
         globals()["_DB_ENABLED"] = False
 
+def _refresh_fs_flags():
+    global _READONLY_LOGDIR, _READONLY_TRAIN, _READONLY_PRED, _READONLY_FS
+
+    _LOGDIR = LOG_DIR
+    _TRAINDIR = os.path.dirname(TRAIN_LOG) if isinstance(TRAIN_LOG, str) and TRAIN_LOG else LOG_DIR
+    _PREDDIR  = os.path.dirname(PREDICTION_LOG) if isinstance(PREDICTION_LOG, str) and PREDICTION_LOG else LOG_DIR
+
+    _READONLY_LOGDIR  = (not _fs_writable(_LOGDIR))   or (not _fs_has_space(_LOGDIR,  512*1024))
+    _READONLY_TRAIN   = (not _fs_writable(_TRAINDIR)) or (not _fs_has_space(_TRAINDIR, 512*1024))
+    _READONLY_PRED    = (not _fs_writable(_PREDDIR))  or (not _fs_has_space(_PREDDIR,  512*1024))
+
+    _READONLY_FS = _READONLY_LOGDIR or _READONLY_TRAIN or _READONLY_PRED
+        
 def update_model_success(s, t, m, success):
     if not _DB_ENABLED:
         _print_once("db_disabled_warn", "ℹ️ model_success 집계는 현재 메모리/콘솔만 기록")
@@ -987,6 +1002,7 @@ def _first_non_none(*vals):
     return None
 
 
+
 def log_training_result(
     symbol, strategy, model="",
     accuracy=None, f1=None, loss=None,
@@ -1010,6 +1026,12 @@ def log_training_result(
     - 단일 클래스면 무조건 status=fail
     - F1=0 은 명확히 기록
     """
+
+    # ✅ 핵심: 런타임에 writable 상태가 바뀔 수 있으니 매번 갱신
+    try:
+        _refresh_fs_flags()
+    except Exception:
+        pass
 
     # ✅ 추가: read-only면 절대 기록 시도하지 않음
     if _READONLY_TRAIN:
@@ -1085,7 +1107,7 @@ def log_training_result(
         usable_samples = _si(extras.get("rows")) or 0
 
     # -------------------------
-    # 5) 로그 row 구성 (거짓값 금지)
+    # 5) 로그 row 구성
     # -------------------------
     row = {
         "timestamp": now,
@@ -1145,8 +1167,6 @@ def log_training_result(
 
     except Exception as e:
         print(f"[🛑 학습 로그 기록 실패] {e}")
-
-
 
 # -------------------------
 # 수익률 클래스 경계 로그
