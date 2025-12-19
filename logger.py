@@ -986,6 +986,7 @@ def _first_non_none(*vals):
             return v
     return None
 
+
 def log_training_result(
     symbol, strategy, model="",
     accuracy=None, f1=None, loss=None,
@@ -1010,8 +1011,13 @@ def log_training_result(
     - F1=0 은 명확히 기록
     """
 
-    # ✅ 추가: read-only면 절대 기록 시도하지 않음 (콘솔만 하려면 여기서 print로 바꿔도 됨)
+    # ✅ 추가: read-only면 절대 기록 시도하지 않음
     if _READONLY_TRAIN:
+        return
+
+    # ✅ 추가 가드: 깨진/디버그성 모델명은 train_log에 기록 금지
+    mlow = str(model or "").strip().lower()
+    if mlow in {"all", "trainer", "nan", "none", "null"}:
         return
 
     LOG_FILE = TRAIN_LOG
@@ -1139,23 +1145,6 @@ def log_training_result(
 
     except Exception as e:
         print(f"[🛑 학습 로그 기록 실패] {e}")
-
-
-
-# ============================================================
-# 아래 함수들(대시보드/관우요약/수익률추출 등)은
-# 네가 올린 코드 그대로 유지.
-# (여기서부터는 길이가 너무 길어서, 네가 붙여준 그대로 이어서 쓰면 됨)
-# ============================================================
-
-# ⚠️ 중요:
-# 너가 올린 메시지에 logger.py가 "끝까지" 다 안 보였어(마지막 make_return_histogram이 중간에서 끝남).
-# 그래서 위 코드는 '위쪽~학습로그까지 + quiet모드'를 완전한 형태로 정리했고,
-# 그 아래(대시보드/관우/수익률추출 부분)는 네가 가진 원본을 그대로 이어붙이면 된다.
-#
-# ✅ 즉, 지금 할 일은 2개:
-# 1) logger.py 파일 맨 위~log_training_result까지는 위 코드로 교체
-# 2) 그 아래는 네 원본 logger.py 나머지 부분을 그대로 붙여넣기
 
 
 
@@ -1444,8 +1433,28 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
 
     sub = sub.copy()
     sub["timestamp"] = pd.to_datetime(sub["timestamp"], errors="coerce")
+    sub = sub.dropna(subset=["timestamp"])
     sub = sub.sort_values("timestamp")
-    trow = sub.tail(1).to_dict("records")[0]
+
+    # ✅ 1) 깨진/디버그성 model 제거 (model=all 같은 것 방지)
+    BAD_MODELS = {"all", "trainer", "none", "nan", "null", ""}
+    if "model" in sub.columns:
+        sub["_m"] = sub["model"].astype(str).str.strip().str.lower()
+        sub = sub[~sub["_m"].isin(BAD_MODELS)].copy()
+
+    if sub.empty:
+        return
+
+    # ✅ 2) 성공(success/ok) 행이 있으면 “성공 중 가장 최신” 우선
+    if "status" in sub.columns:
+        st = sub["status"].astype(str).str.lower()
+        ok = sub[st.isin(["success", "ok"])].copy()
+        if not ok.empty:
+            trow = ok.tail(1).to_dict("records")[0]
+        else:
+            trow = sub.tail(1).to_dict("records")[0]
+    else:
+        trow = sub.tail(1).to_dict("records")[0]
 
     # -----------------------
     # 유틸
@@ -1645,7 +1654,7 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
 
         "val_acc": 0.0 if val_acc is None else float(val_acc),
         "val_f1": 0.0 if val_f1 is None else float(val_f1),
-        "val_loss": "" if val_loss is None else float(val_loss),  # ✅ loss는 없으면 빈값(가짜 0 금지)
+        "val_loss": "" if val_loss is None else float(val_loss),
 
         "label_total": int(label_total),
         "label_classes": int(label_classes),
@@ -1730,6 +1739,15 @@ def get_train_log_cards(max_cards: int = 200):
         if "val_loss" not in raw.columns and "loss" in raw.columns:
             raw["val_loss"] = raw["loss"]
 
+        # ✅ fallback도 깨진 model(all/trainer/none 등) 제외
+        if "model" in raw.columns:
+            bad = {"all", "trainer", "none", "nan", "null", ""}
+            raw["_m"] = raw["model"].astype(str).str.strip().str.lower()
+            raw = raw[~raw["_m"].isin(bad)].copy()
+
+        if raw.empty:
+            return []
+
         df = pd.DataFrame()
         df["timestamp"] = raw.get("timestamp", "")
         df["symbol"] = raw.get("symbol", "")
@@ -1738,25 +1756,27 @@ def get_train_log_cards(max_cards: int = 200):
 
         df["val_acc"] = raw.get("val_acc", 0.0)
         df["val_f1"] = raw.get("val_f1", 0.0)
-        df["val_loss"] = raw.get("val_loss", 0.0)
+        df["val_loss"] = raw.get("val_loss", "")
 
+        # label_total은 rows로 대충 채우되(표시용), classes는 모르면 0
         df["label_total"] = raw.get("rows", 0)
         df["label_classes"] = 0
-        df["label_entropy"] = 0.0
+        df["label_entropy"] = ""
         df["label_counts_json"] = ""
 
         df["enough_for_training"] = raw.get("enough_for_training", "")
         df["augment_needed"] = raw.get("augment_needed", "")
 
-        df["ret_min"] = 0.0
-        df["ret_p25"] = 0.0
-        df["ret_p50"] = 0.0
-        df["ret_p75"] = 0.0
-        df["ret_p90"] = 0.0
-        df["ret_p95"] = 0.0
-        df["ret_p99"] = 0.0
-        df["ret_max"] = 0.0
-        df["ret_count"] = 0
+        # ✅ 핵심: fallback에서 수익률 요약값을 0.0으로 “거짓” 채우지 말고 빈값
+        df["ret_min"] = ""
+        df["ret_p25"] = ""
+        df["ret_p50"] = ""
+        df["ret_p75"] = ""
+        df["ret_p90"] = ""
+        df["ret_p95"] = ""
+        df["ret_p99"] = ""
+        df["ret_max"] = ""
+        df["ret_count"] = ""
 
         df["val_num_classes"] = 0
         df["val_covered"] = 0
@@ -1767,7 +1787,8 @@ def get_train_log_cards(max_cards: int = 200):
         df["near_zero_band"] = raw.get("near_zero_band", 0.0)
         df["near_zero_count"] = raw.get("near_zero_count", 0)
 
-        df["status"] = raw.get("status", "success")
+        # ✅ 핵심: status 기본값을 success로 “거짓” 주지 말고 unknown
+        df["status"] = raw.get("status", "unknown")
         df["note"] = raw.get("note", "")
 
         if "health" in raw.columns:
@@ -1824,9 +1845,15 @@ def get_train_log_cards(max_cards: int = 200):
 
         val_acc = _f(last, "val_acc", 0.0)
         val_f1 = _f(last, "val_f1", 0.0)
-        val_loss = _f(last, "val_loss", 0.0)
+        val_loss = last.get("val_loss", "")
+        try:
+            if val_loss in ["", None, "nan", "NaN"]:
+                val_loss = 0.0
+            val_loss = float(val_loss)
+        except Exception:
+            val_loss = 0.0
 
-        # 🔹 라벨/클래스 관련 값들 (클래스 수/분포 표시에 사용)
+        # 🔹 라벨/클래스 관련 값들
         label_total = _i(last, "label_total", 0)
         label_classes = _i(last, "label_classes", 0)
         label_counts_json = str(last.get("label_counts_json", "") or "")
@@ -1840,7 +1867,7 @@ def get_train_log_cards(max_cards: int = 200):
         near_zero_band = _f(last, "near_zero_band", 0.0)
         near_zero_count = _i(last, "near_zero_count", 0)
 
-        # 🔹 원본 rows (캔들 개수) 표시용
+        # 🔹 원본 rows 표시용
         data_rows_raw = str(last.get("data_rows", last.get("rows", "")) or "").strip()
         if data_rows_raw.lower() in {"nan", "none", "null"}:
             data_rows_raw = ""
@@ -1874,7 +1901,7 @@ def get_train_log_cards(max_cards: int = 200):
         f1_text = f"F1 점수: {val_f1*100:.1f}% — 정답률과 재현율을 합쳐서 '패턴을 제대로 배우고 있는지' 보는 지표예요."
         loss_text = f"손실(loss): {val_loss:.4f} — 낮을수록 좋고, 0에 가까울수록 모델이 더 안정적으로 학습된 거예요."
 
-        # 3) 데이터 요약 (label_total + rows 둘 다 사용)
+        # 3) 데이터 요약
         if label_total > 0 and label_classes > 0:
             data_summary = f"학습에 사용한 데이터: 총 {label_total}개, 구분한 수익률 구간(클래스): {label_classes}개."
         elif label_total > 0:
@@ -1897,14 +1924,17 @@ def get_train_log_cards(max_cards: int = 200):
 
         data_detail_text = " ".join(extra_data_info)
 
-        # 4) 수익률 요약
+        # 4) 수익률 요약 (빈값이면 “없음” 처리)
+        ret_min = last.get("ret_min", "")
+        ret_p50 = last.get("ret_p50", "")
+        ret_max = last.get("ret_max", "")
         try:
-            ret_min = _f(last, "ret_min", 0.0)
-            ret_p50 = _f(last, "ret_p50", 0.0)
-            ret_max = _f(last, "ret_max", 0.0)
+            if ret_min in ["", None, "nan", "NaN"] or ret_p50 in ["", None, "nan", "NaN"] or ret_max in ["", None, "nan", "NaN"]:
+                raise ValueError("empty")
+            ret_min_f = float(ret_min); ret_p50_f = float(ret_p50); ret_max_f = float(ret_max)
             ret_summary_text = (
-                f"수익률 분포: 최소 {ret_min*100:.2f}% ~ 최대 {ret_max*100:.2f}%, "
-                f"중앙값은 {ret_p50*100:.2f}% 근처예요."
+                f"수익률 분포: 최소 {ret_min_f*100:.2f}% ~ 최대 {ret_max_f*100:.2f}%, "
+                f"중앙값은 {ret_p50_f*100:.2f}% 근처예요."
             )
         except Exception:
             ret_summary_text = "수익률 분포 정보는 아직 정리되지 않았어요."
@@ -1930,7 +1960,6 @@ def get_train_log_cards(max_cards: int = 200):
 
         # 6) 클래스별 수익률 구간 텍스트
         class_ranges_text = str(last.get("class_ranges_text", "") or "")
-
         if label_classes <= 1:
             class_ranges_text_human = ""
         elif class_ranges_text:
@@ -1938,7 +1967,7 @@ def get_train_log_cards(max_cards: int = 200):
         else:
             class_ranges_text_human = ""
 
-        # 7) 완전 초보용 한 줄 요약
+        # 7) 초보용 요약
         beginner_summary = []
         if health == "OK":
             beginner_summary.append("👉 요약: 이 심볼/전략은 일단 '학습은 정상적으로 끝났고' 기본 성능도 무난한 편이에요.")
@@ -2008,6 +2037,7 @@ def get_train_log_cards(max_cards: int = 200):
         cards = cards[-max_cards:]
 
     return cards
+
 
 
 # -------------------------
