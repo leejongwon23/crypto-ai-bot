@@ -391,16 +391,19 @@ except Exception:
     # 최후 폴백만 허용 (그래도 가능한 get_TRAIN_LOG_PATH 디렉토리를 살린다)
     TRAIN_LOG = get_TRAIN_LOG_PATH()
 
+
 def _ensure_train_log():
     """
-    ✅ train.py에서는 헤더를 '절대' 새로 만들지 않는다.
+    ✅ train.py에서는 헤더를 '직접' 새로 만들지 않는다.
     ✅ 오직 logger.py의 ensure_train_log_exists()만 사용한다.
     """
     try:
-        ensure_train_log_exists()  # logger.py 함수
+        ensure_train_log_exists()
     except Exception as e:
-        print(f"[경고] train_log 초기화/업그레이드 실패: {e}", flush=True)
-
+        # 🔥 로그가 안 쌓이는 핵심 원인일 수 있으니 "무조건" 화면에 보이게 남긴다
+        print(f"[FATAL] ensure_train_log_exists() failed: {e}", flush=True)
+        raise
+        
 def _normalize_train_row(row: dict) -> dict:
     # 모든 헤더에 대해 기본값 채우기
     r = {k: row.get(k, None) for k in TRAIN_HEADERS}
@@ -484,28 +487,32 @@ def _compute_bin_info_from_labels(
 
 def _append_train_log(row: dict):
     """
-    ✅✅✅ 핵심: TRAIN_LOG(=get_TRAIN_LOG_PATH())에만 기록한다.
+    ✅✅✅ 핵심: 무조건 get_TRAIN_LOG_PATH()로만 기록한다.
+    - TRAIN_LOG 전역변수 값이 뭐였든 상관 없이 "항상" 같은 파일로 간다.
     """
     try:
         _ensure_train_log()
-        # 혹시라도 다른 코드가 TRAIN_LOG를 바꿨을 수 있으니, 마지막에 한 번 더 고정
+
         _path = get_TRAIN_LOG_PATH()
         try:
             os.makedirs(os.path.dirname(_path), exist_ok=True)
         except Exception:
             pass
 
-        with open(TRAIN_LOG, "a", encoding="utf-8-sig", newline="") as f:
+        with open(_path, "a", encoding="utf-8-sig", newline="") as f:
             w = csv.DictWriter(f, fieldnames=TRAIN_HEADERS, extrasaction="ignore")
             w.writerow(_normalize_train_row(row))
+
+        # ✅ 디버그: 실제로 어디에 썼는지 확실히 찍어준다(지금 단계에선 필수)
+        try:
+            print(f"[TRAIN_LOG APPEND OK] path={_path} symbol={row.get('symbol')} strategy={row.get('strategy')} status={row.get('status')}", flush=True)
+        except Exception:
+            pass
+
     except Exception as e:
-        print(f"[경고] train_log 기록 실패: {e}", flush=True)
-
-
-# logger.log_training_result 를 패치해서
-# → 원래 로깅 + train_log.csv 에 한 줄 더 쓰도록
-if not getattr(logger, "_patched_train_log", False):
-    _orig_ltr = getattr(logger, "log_training_result", None)
+        # 🔥 조용히 넘어가면 "헤더만 있고 내용 없음" 상태가 계속됨
+        print(f"[FATAL] train_log append failed: {e}", flush=True)
+        raise
 
     def _log_training_result_patched(*args, **kw):
         """
