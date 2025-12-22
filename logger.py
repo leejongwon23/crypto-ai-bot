@@ -1158,22 +1158,6 @@ def log_training_result(
         print(f"[🛑 학습 로그 기록 실패] {json.dumps(payload, ensure_ascii=False)}")
 
 # -------------------------
-# (이 아래는 네가 준 원본 그대로 유지)
-# -------------------------
-
-# ... 이하 내용은 너가 올린 코드와 동일하게 이어져야 함 ...
-# (너가 붙여준 나머지 함수들: log_class_ranges, log_return_distribution, log_label_distribution,
-#  update_train_dashboard, get_train_log_cards, flush_gwanwoo_summary, extract_candle_returns,
-#  make_return_histogram, get_available_models, export_recent_model_stats 등)
-#
-# ✅ 주의:
-# - 너가 올린 logger.py가 너무 길어서, 여기서 "원본 그대로"를 전부 다시 복붙하면
-#   채팅 길이 제한에 걸릴 수 있음.
-#
-# 그래서 지금은 “학습로그 미반영”을 막는 핵심 구간까지를 완전 통으로 확정해줬고,
-# 나머지 아래쪽은 네가 올린 코드 그대로 이어붙이면 된다.
-
-# -------------------------
 # 수익률 클래스 경계 로그
 # -------------------------
 def log_class_ranges(symbol, strategy, group_id=None, class_ranges=None, note=""):
@@ -1425,7 +1409,6 @@ def _get_last_row(df: pd.DataFrame, filt: dict):
         return None
     return df.tail(1).to_dict("records")[0]
 
-
 def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
     """
     모든 학습 관련 정보를 통합한 1줄 요약 레코드를 생성한다.
@@ -1481,9 +1464,6 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
     else:
         trow = sub.tail(1).to_dict("records")[0]
 
-    # -----------------------
-    # 유틸
-    # -----------------------
     def _f(x, default=None):
         try:
             if x in ["", None, "nan", "NaN", "None", "null"]:
@@ -1503,19 +1483,15 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
         except Exception:
             return default
 
-    # 2) 기본 메트릭
     val_acc  = _f(trow.get("val_acc"), None)
     val_f1   = _f(trow.get("val_f1"), None)
     val_loss = _f(trow.get("val_loss"), None)
 
-    # 실제 학습 클래스 수(가장 믿을만한 후보)
     real_num_classes = _i(trow.get("NUM_CLASSES"), None)
     if real_num_classes is None:
         real_num_classes = _i(trow.get("num_classes"), None)
 
-    # -----------------------
     # 3) 라벨 분포(label_distribution.csv)
-    # -----------------------
     label_total = None
     label_classes = None
     label_counts_json = ""
@@ -1555,13 +1531,9 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
     if label_classes is None:
         label_classes = 0
 
-    # -----------------------
     # 4) 클래스 구간 텍스트 (거짓표시 방지 핵심)
-    # -----------------------
     class_ranges_text = ""
 
-    # (A) class_ranges.csv가 있으면 그걸 쓰되,
-    #     real_num_classes가 있으면 그 개수만큼만 잘라서 사용
     class_ranges_df = _safe_read_df(os.path.join(LOG_DIR, "class_ranges.csv"))
     cr_sub = pd.DataFrame()
     if not class_ranges_df.empty and {"symbol", "strategy", "idx", "low", "high"}.issubset(class_ranges_df.columns):
@@ -1585,13 +1557,11 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
                 continue
         class_ranges_text = " | ".join(parts)
 
-    # (B) fallback: class_edges
     if not class_ranges_text:
         edges_raw = trow.get("class_edges", "")
         try:
             edges = json.loads(edges_raw) if isinstance(edges_raw, str) else edges_raw
             if isinstance(edges, list) and len(edges) >= 2:
-                # real_num_classes가 있으면 edges를 그 개수+1까지만 자른다
                 if real_num_classes is not None and real_num_classes > 0:
                     need = int(real_num_classes) + 1
                     if len(edges) >= need:
@@ -1605,13 +1575,10 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
         except Exception:
             pass
 
-    # ✅ 라벨이 1개 이하이면 "구간 텍스트"는 무조건 비움
     if int(label_classes) <= 1:
         class_ranges_text = ""
 
-    # -----------------------
     # 4.5) 수익률 분포(return_distribution.csv) - 거짓 0.00 표시 방지
-    # -----------------------
     ret_min = ret_p25 = ret_p50 = ret_p75 = ret_p90 = ret_p95 = ret_p99 = ret_max = None
     ret_count = 0
 
@@ -1622,7 +1589,6 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
             rlast = rsub.tail(1).iloc[0]
             ret_count = _i(rlast.get("count"), 0) or 0
 
-            # count가 0이면 값은 비워둔다(0.00%로 가짜 표시 금지)
             if ret_count > 0:
                 ret_min = _f(rlast.get("min"), None)
                 ret_p25 = _f(rlast.get("p25"), None)
@@ -1633,9 +1599,7 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
                 ret_p99 = _f(rlast.get("p99"), None)
                 ret_max = _f(rlast.get("max"), None)
 
-    # -----------------------
     # 4.6) 검증 커버리지(validation_coverage.csv)
-    # -----------------------
     val_num_classes = val_covered = 0
     val_coverage = 0.0
 
@@ -1648,9 +1612,6 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
             val_covered     = _i(clast.get("covered"), 0) or 0
             val_coverage    = _f(clast.get("coverage"), 0.0) or 0.0
 
-    # -----------------------
-    # 5) health 판정 (그대로)
-    # -----------------------
     nan_reasons = []
     status_str = str(trow.get("status", "") or "")
     if (val_acc is None or val_f1 is None) and status_str.lower() != "success":
@@ -1668,9 +1629,6 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
 
     health = "OK" if not health_codes else ";".join(health_codes)
 
-    # -----------------------
-    # 7) 저장 row
-    # -----------------------
     summary_row = {
         "timestamp": now_kst().isoformat(),
         "symbol": symbol,
@@ -1695,7 +1653,6 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
         "enough_for_training": trow.get("enough_for_training", ""),
         "augment_needed": trow.get("augment_needed", ""),
 
-        # ✅ return_distribution 값: 없으면 빈값
         "ret_min": "" if ret_min is None else float(ret_min),
         "ret_p25": "" if ret_p25 is None else float(ret_p25),
         "ret_p50": "" if ret_p50 is None else float(ret_p50),
@@ -1716,7 +1673,6 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
         "nan_reasons": " | ".join(nan_reasons),
     }
 
-    # 8) 저장(기존 유지)
     df_old = _safe_read_df(out_path)
     if not df_old.empty:
         df_old = df_old[
@@ -1731,9 +1687,6 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     df_new.to_csv(out_path, index=False, encoding="utf-8-sig")
 
-
-
-# 🔥🔥🔥 여기부터 추가: /train-log 카드용 요약 함수 🔥🔥🔥
 def get_train_log_cards(max_cards: int = 200):
     """
     /train-log 화면용 헬퍼.
@@ -1746,10 +1699,8 @@ def get_train_log_cards(max_cards: int = 200):
     dash_path = os.path.join(LOG_DIR, "train_dashboard.csv")
     raw_path = TRAIN_LOG
 
-    # 1) 대시보드 우선
     df = _safe_read_df(dash_path)
 
-    # 2) fallback: train_dashboard 가 비어 있으면 train_log.csv 직접 사용
     if df.empty:
         raw = _safe_read_df(raw_path)
         if raw.empty:
@@ -1764,7 +1715,6 @@ def get_train_log_cards(max_cards: int = 200):
         if "val_loss" not in raw.columns and "loss" in raw.columns:
             raw["val_loss"] = raw["loss"]
 
-        # ✅ fallback도 깨진 model(all/trainer/none 등) 제외
         if "model" in raw.columns:
             bad = {"all", "trainer", "none", "nan", "null", ""}
             raw["_m"] = raw["model"].astype(str).str.strip().str.lower()
@@ -1783,7 +1733,6 @@ def get_train_log_cards(max_cards: int = 200):
         df["val_f1"] = raw.get("val_f1", 0.0)
         df["val_loss"] = raw.get("val_loss", "")
 
-        # label_total은 rows로 대충 채우되(표시용), classes는 모르면 0
         df["label_total"] = raw.get("rows", 0)
         df["label_classes"] = 0
         df["label_entropy"] = ""
@@ -1792,7 +1741,6 @@ def get_train_log_cards(max_cards: int = 200):
         df["enough_for_training"] = raw.get("enough_for_training", "")
         df["augment_needed"] = raw.get("augment_needed", "")
 
-        # ✅ 핵심: fallback에서 수익률 요약값을 0.0으로 “거짓” 채우지 말고 빈값
         df["ret_min"] = ""
         df["ret_p25"] = ""
         df["ret_p50"] = ""
@@ -1812,7 +1760,6 @@ def get_train_log_cards(max_cards: int = 200):
         df["near_zero_band"] = raw.get("near_zero_band", 0.0)
         df["near_zero_count"] = raw.get("near_zero_count", 0)
 
-        # ✅ 핵심: status 기본값을 success로 “거짓” 주지 말고 unknown
         df["status"] = raw.get("status", "unknown")
         df["note"] = raw.get("note", "")
 
@@ -1821,7 +1768,6 @@ def get_train_log_cards(max_cards: int = 200):
         else:
             df["health"] = df["status"].fillna("unknown")
 
-        # rows 컬럼 그대로 들고 오기 (데이터 양 표시에 쓸 것)
         df["data_rows"] = raw.get("rows", "")
 
     if df.empty or "symbol" not in df.columns or "strategy" not in df.columns:
@@ -1853,7 +1799,6 @@ def get_train_log_cards(max_cards: int = 200):
             except Exception:
                 return float(default)
 
-        # ✅ FIX: "12.0" 같은 값도 안전하게 int로 변환
         def _i(row, key, default=0):
             try:
                 val = row.get(key, default)
@@ -1878,21 +1823,17 @@ def get_train_log_cards(max_cards: int = 200):
         except Exception:
             val_loss = 0.0
 
-        # 🔹 라벨/클래스 관련 값들
         label_total = _i(last, "label_total", 0)
         label_classes = _i(last, "label_classes", 0)
         label_counts_json = str(last.get("label_counts_json", "") or "")
 
-        # 🔹 검증 커버리지 관련
         val_num_classes = _i(last, "val_num_classes", 0)
         val_covered = _i(last, "val_covered", 0)
         val_coverage = _f(last, "val_coverage", 0.0)
 
-        # 🔹 near-zero 수익률 구간
         near_zero_band = _f(last, "near_zero_band", 0.0)
         near_zero_count = _i(last, "near_zero_count", 0)
 
-        # 🔹 원본 rows 표시용
         data_rows_raw = str(last.get("data_rows", last.get("rows", "")) or "").strip()
         if data_rows_raw.lower() in {"nan", "none", "null"}:
             data_rows_raw = ""
@@ -1903,7 +1844,6 @@ def get_train_log_cards(max_cards: int = 200):
         enough_for_training = str(last.get("enough_for_training", "") or "")
         augment_needed = str(last.get("augment_needed", "") or "")
 
-        # 1) 건강 상태 텍스트
         if health == "OK":
             health_text = "✅ 정상 학습: 데이터와 모델에 큰 문제 없이 학습이 잘 끝났어요."
         else:
@@ -1921,12 +1861,10 @@ def get_train_log_cards(max_cards: int = 200):
 
             health_text = "⚠️ 문제 있는 학습: " + " ".join(human_reasons)
 
-        # 2) accuracy / F1 / loss 설명
         acc_text = f"정답률(accuracy): {val_acc*100:.1f}% — 전체 예측 중 정답으로 맞춘 비율이에요."
         f1_text = f"F1 점수: {val_f1*100:.1f}% — 정답률과 재현율을 합쳐서 '패턴을 제대로 배우고 있는지' 보는 지표예요."
         loss_text = f"손실(loss): {val_loss:.4f} — 낮을수록 좋고, 0에 가까울수록 모델이 더 안정적으로 학습된 거예요."
 
-        # 3) 데이터 요약
         if label_total > 0 and label_classes > 0:
             data_summary = f"학습에 사용한 데이터: 총 {label_total}개, 구분한 수익률 구간(클래스): {label_classes}개."
         elif label_total > 0:
@@ -1949,7 +1887,6 @@ def get_train_log_cards(max_cards: int = 200):
 
         data_detail_text = " ".join(extra_data_info)
 
-        # 4) 수익률 요약 (빈값이면 “없음” 처리)
         ret_min = last.get("ret_min", "")
         ret_p50 = last.get("ret_p50", "")
         ret_max = last.get("ret_max", "")
@@ -1967,7 +1904,6 @@ def get_train_log_cards(max_cards: int = 200):
         if near_zero_band > 0 and near_zero_count > 0:
             ret_summary_text += f" 0% ±{near_zero_band*100:.2f}% 구간에 데이터 {near_zero_count}개가 모여 있어요."
 
-        # 5) 검증 커버리지 요약
         if val_num_classes > 0:
             coverage_summary = (
                 f"검증 커버리지: 전체 {val_num_classes}개 구간 중 "
@@ -1983,7 +1919,6 @@ def get_train_log_cards(max_cards: int = 200):
             else:
                 coverage_summary = "검증에서 각 수익률 구간이 얼마나 나왔는지는 아직 집계되지 않았어요."
 
-        # 6) 클래스별 수익률 구간 텍스트
         class_ranges_text = str(last.get("class_ranges_text", "") or "")
         if label_classes <= 1:
             class_ranges_text_human = ""
@@ -1992,7 +1927,6 @@ def get_train_log_cards(max_cards: int = 200):
         else:
             class_ranges_text_human = ""
 
-        # 7) 초보용 요약
         beginner_summary = []
         if health == "OK":
             beginner_summary.append("👉 요약: 이 심볼/전략은 일단 '학습은 정상적으로 끝났고' 기본 성능도 무난한 편이에요.")
@@ -2063,8 +1997,6 @@ def get_train_log_cards(max_cards: int = 200):
 
     return cards
 
-
-
 # -------------------------
 # 정렬 키
 # -------------------------
@@ -2126,7 +2058,6 @@ def export_recent_model_stats(days: int = 7, out_path: str = None):
             usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success","source"]],
             chunksize=CHUNK
         ):
-            # source 필터: 훈련/디버그 소스 제외
             if "source" in chunk.columns:
                 chunk = chunk[~chunk["source"].astype(str).isin(LOG_SOURCE_BLACKLIST)]
             if "timestamp" in chunk.columns:
@@ -2185,14 +2116,11 @@ def flush_gwanwoo_summary():
     from config import get_GANWU_PATH, get_PREDICTION_LOG_PATH
     gw_dir = get_GANWU_PATH()                         # /data/guanwu/incoming
 
-    # --- (1) 경로 통합: 평가/예측 경로 정확화 ---
-    # 평가 결과는 시스템 표준 로그 위치(/persistent/logs → 지금은 BASE/logs)를 사용
     paths = {
         "pred_json": os.path.join(gw_dir, "prediction_result.json"),
-        "eval_csv": EVAL_RESULT,  # 표준 로그 경로에서 읽음
+        "eval_csv": EVAL_RESULT,
     }
 
-    # 예측 로그는 존재하는 첫 후보를 사용
     pred_csv_candidates = [
         PREDICTION_LOG,
         os.path.join(gw_dir, "prediction_log.csv"),
@@ -2204,7 +2132,6 @@ def flush_gwanwoo_summary():
     out_path = os.path.join(gw_dir, "gwanwoo_summary.csv")
     records = []
 
-    # 1) prediction_result.json
     try:
         if os.path.exists(paths["pred_json"]):
             with open(paths["pred_json"], "r", encoding="utf-8") as f:
@@ -2224,7 +2151,6 @@ def flush_gwanwoo_summary():
     except Exception as e:
         print(f"[⚠️ 관우요약] prediction_result.json 읽기 실패: {e}")
 
-    # 2) evaluation_result.csv
     try:
         if os.path.exists(paths["eval_csv"]):
             df = pd.read_csv(paths["eval_csv"], encoding="utf-8-sig")
@@ -2234,14 +2160,12 @@ def flush_gwanwoo_summary():
     except Exception as e:
         print(f"[⚠️ 관우요약] evaluation_result.csv 읽기 실패: {e}")
 
-    # 3) prediction_log.csv
     try:
         if os.path.exists(paths["pred_csv"]):
             df = pd.read_csv(paths["pred_csv"], encoding="utf-8-sig")
             if not df.empty:
                 src_col = "source" if "source" in df.columns else None
                 if src_col:
-                    # 훈련/디버그 소스 제외
                     df = df[~df[src_col].astype(str).isin(LOG_SOURCE_BLACKLIST)]
                 keep = [c for c in ["timestamp","symbol","strategy","predicted_class",
                                     "rate","raw_prob","calib_prob","success","reason","source"] if c in df.columns]
@@ -2285,8 +2209,6 @@ def flush_gwanwoo_summary():
 # 수익률 분포 추출/히스토그램 (labels.py 수식과 최대한 통일)
 # ============================================================
 
-# labels.py 의 helper 를 가져와서,
-# 운영 로그 수익률 계산을 학습 라벨 분포와 맞춘다.
 try:
     from labels import (
         _strategy_horizon_candles_from_hours as _lbl_strategy_horizon_candles_from_hours,
@@ -2297,14 +2219,12 @@ try:
         compute_label_returns as _lbl_compute_label_returns,
     )
 except Exception:
-    # ✅ (중요) 여기 들여쓰기 틀리면 서버가 시작도 못 함(IndentationError)
     _lbl_strategy_horizon_candles_from_hours = None
     _lbl_future_extreme_signed_returns_by_candles = None
     _lbl_infer_bar_hours_from_df = None
     _lbl_build_bins = None
     _lbl_auto_target_bins = None
     _lbl_compute_label_returns = None
-
 
 def extract_candle_returns(
     df,
@@ -2327,7 +2247,6 @@ def extract_candle_returns(
     if df is None or getattr(df, "empty", True):
         return []
 
-    # max_rows 안전 처리 (음수/0 방지)
     try:
         mr = int(max_rows)
         if mr <= 0:
@@ -2340,7 +2259,6 @@ def extract_candle_returns(
     except Exception:
         df_use = df
 
-    # --- 1) labels.compute_label_returns 기반 (학습과 동일) ---
     try:
         if _lbl_compute_label_returns is not None and strategy is not None:
             gains, up_c, dn_c, _dyn_bins = _lbl_compute_label_returns(
@@ -2351,7 +2269,6 @@ def extract_candle_returns(
             try:
                 dist = np.concatenate([dn_c, up_c], axis=0).astype(float)
             except Exception:
-                # dn_c/up_c가 list일 수도 있으니 안전 처리
                 dist = np.array(list(dn_c) + list(up_c), dtype=float)
 
             dist = dist[np.isfinite(dist)]
@@ -2359,19 +2276,16 @@ def extract_candle_returns(
     except Exception as e:
         print(f"[logger.extract_candle_returns] compute_label_returns 실패 → helper fallback ({e})")
 
-    # --- 2) labels helper 기반 미래 구간(high/low) 수익률 ---
     try:
         if _lbl_future_extreme_signed_returns_by_candles is not None:
             horizon_candles = None
 
-            # (a) strategy 기준 horizon 계산
             if strategy is not None and _lbl_strategy_horizon_candles_from_hours is not None:
                 try:
                     horizon_candles = int(max(1, _lbl_strategy_horizon_candles_from_hours(df_use, strategy)))
                 except Exception:
                     horizon_candles = None
 
-            # (b) horizon_hours 직접 지정된 경우
             if horizon_candles is None and horizon_hours is not None:
                 bar_h = 1.0
                 if _lbl_infer_bar_hours_from_df is not None:
@@ -2380,7 +2294,6 @@ def extract_candle_returns(
                     except Exception:
                         bar_h = 1.0
                 else:
-                    # timestamp 기반으로 간격 추정
                     try:
                         ts = pd.to_datetime(df_use["timestamp"], errors="coerce").sort_values()
                         diffs = ts.diff().dropna()
@@ -2407,7 +2320,6 @@ def extract_candle_returns(
     except Exception as e:
         print(f"[logger.extract_candle_returns] labels helper 실패 → fallback 사용 ({e})")
 
-    # --- 3) 완전 fallback: per-candle high/low vs close ---
     rets: list[float] = []
     try:
         iter_rows = df_use.iterrows()
@@ -2435,7 +2347,6 @@ def extract_candle_returns(
 
     return rets
 
-
 def make_return_histogram(returns: list[float], bins: int = 20):
     """
     수익률 리스트를 받아 히스토그램(구간, 개수)을 만든다.
@@ -2462,7 +2373,6 @@ def make_return_histogram(returns: list[float], bins: int = 20):
     if arr.size == 0:
         return {"bin_edges": [], "bin_counts": []}
 
-    # 1) labels 방식 우선
     if _lbl_build_bins is not None and _lbl_auto_target_bins is not None:
         try:
             approx_n = max(1, int(arr.size))
@@ -2477,7 +2387,6 @@ def make_return_histogram(returns: list[float], bins: int = 20):
         except Exception as e:
             print(f"[logger.make_return_histogram] labels bins 실패 → np.histogram fallback ({e})")
 
-    # 2) fallback
     try:
         b = int(bins)
         if b < 2:
