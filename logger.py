@@ -1422,7 +1422,9 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
     strategy = str(strategy)
     model = str(model or "")
 
-    if _READONLY_FS:
+    # ✅ FIX 1) FS 전체가 아니라 "TRAIN/LOG 기준"으로만 차단
+    # - prediction 쪽만 막혀도(_READONLY_PRED) train_dashboard는 써야 한다
+    if _READONLY_TRAIN or _READONLY_LOGDIR:
         return
 
     out_path = os.path.join(LOG_DIR, "train_dashboard.csv")
@@ -1713,8 +1715,24 @@ def update_train_dashboard(symbol: str, strategy: str, model: str = ""):
 
     df_new = pd.concat([df_old, pd.DataFrame([summary_row])], ignore_index=True)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    df_new.to_csv(out_path, index=False, encoding="utf-8-sig")
 
+    # ✅ FIX 2) 저장 실패 시 콘솔에 "증거 로그" 남기기
+    try:
+        df_new.to_csv(out_path, index=False, encoding="utf-8-sig")
+    except Exception as e:
+        payload = {
+            "tag": "TRAIN_DASHBOARD_WRITE_FAIL",
+            "timestamp": now_kst().isoformat(),
+            "out_path": out_path,
+            "error": str(e),
+            "readonly_flags": {
+                "READONLY_LOGDIR": int(_READONLY_LOGDIR),
+                "READONLY_TRAIN": int(_READONLY_TRAIN),
+                "READONLY_PRED": int(_READONLY_PRED),
+                "READONLY_FS": int(_READONLY_FS),
+            }
+        }
+        print(f"[🛑 train_dashboard 저장 실패] {json.dumps(payload, ensure_ascii=False)}")
 
 
 # 🔥🔥🔥 여기부터 추가: /train-log 카드용 요약 함수 🔥🔥🔥
@@ -2046,7 +2064,6 @@ def get_train_log_cards(max_cards: int = 200):
         cards = cards[-max_cards:]
 
     return cards
-
 
 
 # -------------------------
