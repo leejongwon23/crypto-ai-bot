@@ -963,6 +963,7 @@ def coverage_split_indices(
     y = np.asarray(y).astype(int)
     n = len(y)
     val_len = max(1, int(round(n * val_frac)))
+
     if num_classes is None:
         uniq = np.unique(y)
         num_classes = (
@@ -970,32 +971,45 @@ def coverage_split_indices(
             if (uniq.size and uniq.min() >= 0)
             else len(uniq)
         )
+
     tried = 0
     best = None
     end = n
+
     while end - val_len >= 0 and tried < max_windows:
         start = end - val_len
         yv = y[start:end]
         cnt = Counter(yv.tolist())
-        coverage = len([1 for v in cnt.values() if v > 0]) / max(1, num_classes)
+        covered = len([1 for v in cnt.values() if v > 0])
+        coverage = covered / max(1, int(num_classes))
+
         if best is None or coverage > best[0]:
-            best = (coverage, start, end, cnt)
+            best = (coverage, start, end, cnt, covered)
+
         if coverage >= float(min_coverage):
             break
+
         end -= int(max(1, stride))
         tried += 1
+
     if best is None:
         start, end = max(0, n - val_len), n
         cnt = Counter(y[start:end].tolist())
-        coverage = len(cnt) / max(1, num_classes)
+        covered = len(cnt)
+        coverage = covered / max(1, int(num_classes))
     else:
-        coverage, start, end, cnt = best
+        coverage, start, end, cnt, covered = best
+
     val_idx = np.arange(start, end)
     train_idx = np.concatenate([np.arange(0, start), np.arange(end, n)], axis=0)
+
+    # ✅ 원하는 출력 포맷으로 변경
     _safe_print(
-        f"[VAL COVER] {len(cnt)}/{num_classes} ({coverage:.2f}) window={start}:{end} size={len(val_idx)}"
+        f"[VAL][COVER] num_classes={int(num_classes)} covered={int(covered)} coverage={coverage*100:.1f}%"
     )
+
     return train_idx, val_idx
+
 
 
 def _log_skip(symbol, strategy, reason):
@@ -1375,6 +1389,7 @@ def train_one_model(
     """
     한 심볼-전략-그룹 학습 + 로그 기록
     (수정1·2·3 최종 통합 완료본)
+    + ✅ 운영로그 포맷([TRAIN][START] ... [TRAIN][END]) 추가본
     """
 
     # ── NEAR_ZERO_BAND ─────────────────────────
@@ -1397,6 +1412,16 @@ def train_one_model(
         "best_acc": None,
     }
 
+    def _pct(x: float) -> str:
+        try:
+            return f"{float(x)*100:.2f}%"
+        except Exception:
+            return "0.00%"
+
+    def _fmt_range_line(i: int, lo: float, hi: float) -> str:
+        # 예: "  C01: -3.21% ~ -2.10%"
+        return f"  C{i:02d}: {_pct(lo)} ~ {_pct(hi)}"
+
     try:
         ensure_failure_db()
         _safe_print(f"✅ train_one_model START {symbol}-{strategy}-g{group_id}")
@@ -1415,6 +1440,30 @@ def train_one_model(
         attrs = getattr(df, "attrs", {})
         augment_needed = bool(attrs.get("augment_needed", len(df) < _limit))
         enough_for_training = bool(attrs.get("enough_for_training", len(df) >= _min_required))
+
+        # ✅ [TRAIN][START] 운영로그 (원하는 포맷)
+        rows_total = int(len(df))
+        used_rows = int(min(rows_total, int(_MAX_ROWS_FOR_TRAIN)))
+        # bar는 "추측 금지": df.attrs/cfg/env에서만 가져옴
+        bar = (
+            attrs.get("bar")
+            or attrs.get("interval")
+            or cfg.get("bar")
+            or cfg.get("interval")
+            or os.getenv("BAR")
+            or os.getenv("TIMEFRAME")
+            or "unknown"
+        )
+        # H도 코드 근거가 없으면 추측 금지 → attrs/env에서만
+        H = attrs.get("H") or attrs.get("horizon") or os.getenv("H") or 1
+        try:
+            H = int(H)
+        except Exception:
+            H = 1
+
+        _safe_print(
+            f"[TRAIN][START] {symbol}-{strategy}  rows={rows_total} used={used_rows}  bar={bar}  H={H}"
+        )
 
         # =================================================
         # 2) 피처
@@ -1535,7 +1584,7 @@ def train_one_model(
             raise  # 🔥 조용히 숨기지 않음
 
         # =================================================
-        # 6) LABEL 로그
+        # 6) LABEL 로그 (기존 유지)
         # =================================================
         mask_cnt = int((labels < 0).sum())
 
@@ -1617,6 +1666,25 @@ def train_one_model(
             )
         except Exception as e:
             _safe_print(f"[TRAIN_LOG WRITE FAIL] {symbol}-{strategy}: {e}")
+
+        # ✅✅✅ 원하는 운영로그 포맷의 LABEL 블록 추가(딱 1번)
+        # - [LABEL][INFO], [LABEL][COUNTS], [LABEL][RANGES]
+        try:
+            counts_dict = {int(i): int(v) for i, v in enumerate(cnt_before)} if isinstance(cnt_before, list) else {}
+        except Exception:
+            counts_dict = {}
+
+        _safe_print(
+            f"[LABEL][INFO]  NUM_CLASSES={int(num_total_classes)}  usable={int((labels >= 0).sum())}  "
+            f"masked(near0)={int(mask_cnt)}  zero_band={_pct(float(nz_band))}"
+        )
+        _safe_print(f"[LABEL][COUNTS]  {counts_dict}")
+        _safe_print("[LABEL][RANGES]")
+        try:
+            for i, (lo, hi) in enumerate(full_ranges, start=1):
+                _safe_print(_fmt_range_line(i, float(lo), float(hi)))
+        except Exception:
+            pass
 
         # =================================================
         # 7) 피처 정제
@@ -1905,7 +1973,10 @@ def train_one_model(
                 loss_sum = float(running_loss)
                 val_loss = float(val_loss)
 
-                _safe_print(f"[EPOCH {epoch+1}/{max_epochs}] {symbol}-{strategy}-w{window} loss={running_loss:.4f} val_loss={val_loss:.4f} acc={acc:.4f} f1={f1_val:.4f}")
+                _safe_print(
+                    f"[EPOCH {epoch+1}/{max_epochs}] {symbol}-{strategy}-w{window} "
+                    f"loss={running_loss:.4f} val_loss={val_loss:.4f} acc={acc:.4f} f1={f1_val:.4f}"
+                )
 
                 if f1_val > best_f1 + EARLY_STOP_MIN_DELTA:
                     best_f1 = f1_val
@@ -1939,6 +2010,13 @@ def train_one_model(
             lbls = best_state["lbls"]
             val_y = best_state["val_y"]
             per_class_f1 = best_state.get("per_class_f1", [])
+
+            # ✅✅✅ 원하는 운영로그 포맷: [VAL][PER_CLASS_F1]
+            try:
+                _pcf = {int(i): float(v) for i, v in enumerate(per_class_f1)} if isinstance(per_class_f1, list) else {}
+            except Exception:
+                _pcf = {}
+            _safe_print(f"[VAL][PER_CLASS_F1] {_pcf}")
 
             try:
                 if f1_val > best_f1_overall or (
@@ -2210,6 +2288,15 @@ def train_one_model(
                 res["best_f1"] = float(best_f1_overall)
                 res["best_acc"] = float(best_acc_overall)
 
+                # ✅✅✅ 원하는 운영로그 포맷: [TRAIN][END]
+                _safe_print(
+                    f"[TRAIN][END] {symbol}-{strategy}  "
+                    f"val_acc={float(best_acc_overall):.2f}  "
+                    f"val_f1={float(best_f1_overall):.2f}  "
+                    f"val_loss={float(best_state.get('val_loss', 0.0) or 0.0):.4f}  "
+                    f"status=success"
+                )
+
         except Exception as e:
             _safe_print(f"[BEST WINDOW LOG WARN] {e}")
 
@@ -2217,7 +2304,15 @@ def train_one_model(
 
     except Exception as e:
         _safe_print(f"[train_one_model ERR] {symbol}-{strategy}: {e}")
+        # ✅ 실패도 [TRAIN][END] 형태로 남김
+        try:
+            _safe_print(
+                f"[TRAIN][END] {symbol}-{strategy}  val_acc=0.00  val_f1=0.00  val_loss=0.0000  status=failed"
+            )
+        except Exception:
+            pass
         return res
+
 
 
 _ENFORCE_FULL_STRATEGY = False
