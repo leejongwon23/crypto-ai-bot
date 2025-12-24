@@ -257,12 +257,16 @@ def _vector_bin(gains: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return np.clip(bins, 0, edges.size - 2).astype(np.int64)
 
 # ============================================================
-# ✅ (핵심 추가) 숏/롱 분리 bin 생성 + 1% 미만 클래스 생성 금지
+# ✅ (의도대로 수정) 롱/숏 분리 + 중앙(1% 미만)도 "클래스"로 학습
+# ------------------------------------------------------------
+# - 중앙: abs(return) < floor → "NO_TRADE" 클래스로 따로 생성/학습
+# - 숏: gains < -floor → 숏 bins
+# - 롱: gains > +floor → 롱 bins
 # ============================================================
 def _get_no_trade_floor_abs() -> float:
     """
-    YOPO 규칙: abs(return) < 1% 는 예측도/학습도 의미없음.
-    config.CLASS_BIN.no_trade_floor_abs (기본 0.01)를 사용.
+    기본은 1% (0.01).
+    '학습에서 버리는 컷'이 아니라, '중앙 NO_TRADE 클래스 경계'로 사용.
     """
     try:
         cb = dict(get_CLASS_BIN() or {})
@@ -275,6 +279,7 @@ def _split_edges_short_long(gains: np.ndarray, floor: float, target_bins: int) -
     - 숏: gains <= -floor
     - 롱: gains >= +floor
     각각 따로 quantile edges 생성.
+    (중앙 구간은 여기서 edges를 만들지 않고, 별도 '중앙 클래스 1개'로 둔다)
     """
     g = np.asarray(gains, dtype=float)
     g = g[np.isfinite(g)]
@@ -289,29 +294,16 @@ def _split_edges_short_long(gains: np.ndarray, floor: float, target_bins: int) -
     if neg is None and pos is None:
         return np.array([], dtype=float), np.array([], dtype=float)
 
-    # ✅ 한쪽만 있을 때도 floor 클램프 후 단조 증가 유지 보정
     if neg is None:
         bins_pos = max(_MIN_LABEL_CLASSES, target_bins)
         edges_pos = _raw_bins(pos, bins_pos)
-
-        edges_pos = np.asarray(edges_pos, dtype=float)
-        if edges_pos.size >= 2:
-            edges_pos[0] = max(float(edges_pos[0]), float(floor))
-            for i in range(1, edges_pos.size):
-                if edges_pos[i] <= edges_pos[i - 1]:
-                    edges_pos[i] = edges_pos[i - 1] + 1e-9
+        edges_pos[0] = max(float(edges_pos[0]), floor)
         return np.array([], dtype=float), edges_pos
 
     if pos is None:
         bins_neg = max(_MIN_LABEL_CLASSES, target_bins)
         edges_neg = _raw_bins(neg, bins_neg)
-
-        edges_neg = np.asarray(edges_neg, dtype=float)
-        if edges_neg.size >= 2:
-            edges_neg[-1] = min(float(edges_neg[-1]), float(-floor))
-            for i in range(1, edges_neg.size):
-                if edges_neg[i] <= edges_neg[i - 1]:
-                    edges_neg[i] = edges_neg[i - 1] + 1e-9
+        edges_neg[-1] = min(float(edges_neg[-1]), -floor)
         return edges_neg, np.array([], dtype=float)
 
     total = neg.size + pos.size
@@ -324,11 +316,10 @@ def _split_edges_short_long(gains: np.ndarray, floor: float, target_bins: int) -
     edges_neg = _raw_bins(neg, bins_neg)
     edges_pos = _raw_bins(pos, bins_pos)
 
-    # 끝/시작을 floor에 맞춰 깔끔하게
+    # 경계 정리
     edges_neg[-1] = -floor
     edges_pos[0]  =  floor
 
-    # 단조 증가 보정
     for i in range(1, edges_neg.size):
         if edges_neg[i] <= edges_neg[i - 1]:
             edges_neg[i] = edges_neg[i - 1] + 1e-9
@@ -338,28 +329,46 @@ def _split_edges_short_long(gains: np.ndarray, floor: float, target_bins: int) -
 
     return edges_neg.astype(float), edges_pos.astype(float)
 
-def _bin_split_short_long(gains: np.ndarray, edges_neg: np.ndarray, edges_pos: np.ndarray, floor: float) -> np.ndarray:
+def _bin_split_short_long_with_center(
+    gains: np.ndarray,
+    edges_neg: np.ndarray,
+    edges_pos: np.ndarray,
+    floor: float
+) -> np.ndarray:
     """
-    숏/롱 각각 binning 후,
-    - 숏 라벨: 0..(nneg-1)
-    - 롱 라벨: nneg..(nneg+npos-1)
-    - abs(return)<floor 는 -1
+    ✅ 의도대로: 중앙(abs < floor)도 클래스(1개)로 학습
+
+    라벨 구조:
+    - 숏 bins: 0 .. nneg-1
+    - 중앙 NO_TRADE: nneg
+    - 롱 bins: nneg+1 .. nneg+npos
     """
     g = np.asarray(gains, dtype=float)
     labels = np.full(g.shape[0], -1, dtype=np.int64)
 
     nneg = int(max(0, edges_neg.size - 1))
     npos = int(max(0, edges_pos.size - 1))
+    center_id = nneg  # 중앙 클래스는 항상 1개
 
+    finite = np.isfinite(g)
+    if not np.any(finite):
+        return labels
+
+    # 중앙(노트레이드) 먼저 채움
+    mcenter = finite & (np.abs(g) < floor)
+    labels[mcenter] = center_id
+
+    # 숏
     if nneg > 0:
-        mneg = np.isfinite(g) & (g <= -floor)
+        mneg = finite & (g <= -floor)
         if np.any(mneg):
             labels[mneg] = _vector_bin(g[mneg].astype(np.float32), edges_neg.astype(float))
 
+    # 롱
     if npos > 0:
-        mpos = np.isfinite(g) & (g >= floor)
+        mpos = finite & (g >= floor)
         if np.any(mpos):
-            labels[mpos] = _vector_bin(g[mpos].astype(np.float32), edges_pos.astype(float)) + nneg
+            labels[mpos] = _vector_bin(g[mpos].astype(np.float32), edges_pos.astype(float)) + (center_id + 1)
 
     return labels
 
@@ -561,7 +570,6 @@ def _save_label_table(df, symbol, strategy, gains, labels, class_ranges, counts,
     if group_id is not None:
         meta["group_id"] = group_id
 
-    # edges는 메타용(보기/디버그용)으로만 저장
     if edges_meta is None:
         edges_meta = []
     _save_edges(symbol, pure, edges_meta, meta)
@@ -574,56 +582,62 @@ def make_labels(df, symbol, strategy, group_id=None):
 
     gains, up_c, dn_c, target_bins = compute_label_returns(df, symbol, pure)
 
-    # ✅ YOPO 규칙: 1% 미만(숏/롱 모두) 학습/예측 의미없음 → 학습에서 제거
+    # ✅ floor_abs = "중앙 NO_TRADE 클래스 경계" (학습 제외 컷이 아님)
     floor_abs = float(os.getenv("LABEL_NO_TRADE_FLOOR_ABS", str(_get_no_trade_floor_abs())))
 
-    # ✅ 학습 제외 밴드: 0% 근처 제외 + 1% 노트레이드 컷 중 더 큰 값 적용
-    hard_min_abs = float(max(float(TRAIN_ZERO_BAND_ABS), float(floor_abs)))
+    # ✅ 학습 제외는 NaN/Inf만 (의도: 1% 미만도 학습시킴)
+    train_mask = np.isfinite(gains)
 
-    train_mask = (np.isfinite(gains) & (np.abs(gains) >= hard_min_abs))
-
-    # ✅ 숏/롱 분리해서 edges 생성 (중앙(±1%) 클래스 자체를 생성하지 않음)
+    # ✅ 숏/롱 edges 생성
     edges_neg, edges_pos = _split_edges_short_long(gains, floor_abs, target_bins)
 
-    # 희소 병합 옵션: 숏/롱 각각 따로 적용 (학습샘플 기준)
+    # 희소 병합 옵션: 숏/롱 각각 따로 적용
     if MERGE_SPARSE_LABEL_BINS:
         if edges_neg.size >= 3:
             edges_neg, _ = _merge_sparse_bins(edges_neg, gains[train_mask & (gains <= -floor_abs)])
         if edges_pos.size >= 3:
             edges_pos, _ = _merge_sparse_bins(edges_pos, gains[train_mask & (gains >=  floor_abs)])
 
-    labels = _bin_split_short_long(gains, edges_neg, edges_pos, floor_abs).astype(np.int64)
+    # ✅ 중앙(1% 미만)도 클래스 1개로 라벨링
+    labels = _bin_split_short_long_with_center(gains, edges_neg, edges_pos, floor_abs).astype(np.int64)
 
-    # ✅ 학습 제외 샘플은 -1로 명확히 표시 (0 근처/1% 미만 모두 포함)
+    # ✅ 비정상 값만 -1
     labels[~train_mask] = -1
 
-    # class_ranges 생성 (중앙 구간 없음)
+    # class_ranges 생성: [숏 bins...] + [중앙(-floor,+floor)] + [롱 bins...]
     class_ranges: List[Tuple[float, float]] = []
     if edges_neg.size >= 2:
         for i in range(edges_neg.size - 1):
             class_ranges.append((float(edges_neg[i]), float(edges_neg[i + 1])))
+
+    # 중앙 클래스 1개
+    class_ranges.append((float(-floor_abs), float(floor_abs)))
+
     if edges_pos.size >= 2:
         for i in range(edges_pos.size - 1):
             class_ranges.append((float(edges_pos[i]), float(edges_pos[i + 1])))
 
-    # bin_counts도 학습 샘플 기준
+    # counts: 숏 + 중앙 + 롱 (학습 샘플 기준)
     counts = np.zeros(len(class_ranges), dtype=int)
-    if len(class_ranges) > 0:
-        # 숏 counts
-        if edges_neg.size >= 2:
-            e2 = edges_neg.copy()
-            e2[-1] += 1e-12
-            cneg, _ = np.histogram(gains[train_mask & (gains <= -floor_abs)], bins=e2)
-            counts[:len(cneg)] = cneg.astype(int)
-        # 롱 counts
-        if edges_pos.size >= 2:
-            e2 = edges_pos.copy()
-            e2[-1] += 1e-12
-            cpos, _ = np.histogram(gains[train_mask & (gains >=  floor_abs)], bins=e2)
-            start = (edges_neg.size - 1) if edges_neg.size >= 2 else 0
-            counts[start:start + len(cpos)] = cpos.astype(int)
+    # 숏
+    if edges_neg.size >= 2:
+        e2 = edges_neg.copy()
+        e2[-1] += 1e-12
+        cneg, _ = np.histogram(gains[train_mask & (gains <= -floor_abs)], bins=e2)
+        counts[:len(cneg)] = cneg.astype(int)
 
-    # spans(%)도 class_ranges 기반
+    # 중앙
+    center_idx = (edges_neg.size - 1) if edges_neg.size >= 2 else 0
+    counts[center_idx] = int(np.sum(train_mask & (np.abs(gains) < floor_abs)))
+
+    # 롱
+    if edges_pos.size >= 2:
+        e2 = edges_pos.copy()
+        e2[-1] += 1e-12
+        cpos, _ = np.histogram(gains[train_mask & (gains >= floor_abs)], bins=e2)
+        start = center_idx + 1
+        counts[start:start + len(cpos)] = cpos.astype(int)
+
     spans = np.array([(hi - lo) * 100.0 for (lo, hi) in class_ranges], dtype=float)
 
     sl = 0.02
@@ -636,11 +650,11 @@ def make_labels(df, symbol, strategy, group_id=None):
         "no_trade_floor_abs": np.full(len(df), float(floor_abs), dtype=np.float32),
     }
 
-    # edges_meta는 보기용으로 저장 (숏/롱 분리 형태를 그대로 남김)
     edges_meta = {
         "floor_abs": float(floor_abs),
-        "hard_min_abs": float(hard_min_abs),
+        "center_class_enabled": True,
         "edges_short": list(map(float, edges_neg.tolist())) if isinstance(edges_neg, np.ndarray) else [],
+        "center_range": [float(-floor_abs), float(floor_abs)],
         "edges_long":  list(map(float, edges_pos.tolist())) if isinstance(edges_pos, np.ndarray) else [],
     }
 
@@ -659,28 +673,32 @@ def make_labels(df, symbol, strategy, group_id=None):
         gains.astype(np.float32),
         labels.astype(np.int64),
         class_ranges,
-        edges_meta,                 # ✅ 이제 edges 대신 meta(dict)를 반환(로그/저장용)
+        edges_meta,
         counts.astype(int),
         spans.astype(float),
     )
 
 # ============================================================
-# make_labels_for_horizon (RAW용)  — (✅ 1캔들 통일 적용)
+# make_labels_for_horizon (RAW용)  — (기존 유지 + 동일 정책 적용)
 # ============================================================
 def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
     n = len(df)
+    both = _future_extreme_signed_returns(df, horizon_hours=horizon_hours)
 
-    # ✅ 기존 _future_extreme_signed_returns(여러 캔들 극단) 대신
-    # ✅ 1캔들(high/low) 방식으로 통일
-    up, dn = _future_extreme_signed_returns_by_candles(df, H=1)
+    if both is None:
+        dn = np.zeros(n, dtype=np.float32)
+        up = np.zeros(n, dtype=np.float32)
+    else:
+        dn = np.asarray(both[:n], dtype=np.float32)
+        up = np.asarray(both[n:], dtype=np.float32)
 
     target_bins = _auto_target_bins(len(df))
     gains = _pick_per_candle_gain(up, dn)
 
-    # ✅ horizon 라벨도 동일하게 1% 컷 강제 적용
     floor_abs = float(os.getenv("LABEL_NO_TRADE_FLOOR_ABS", str(_get_no_trade_floor_abs())))
-    hard_min_abs = float(max(float(TRAIN_ZERO_BAND_ABS), float(floor_abs)))
-    train_mask = (np.isfinite(gains) & (np.abs(gains) >= hard_min_abs))
+
+    # ✅ 1% 미만도 학습: NaN/Inf만 제외
+    train_mask = np.isfinite(gains)
 
     edges_neg, edges_pos = _split_edges_short_long(gains, floor_abs, target_bins)
 
@@ -690,30 +708,37 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
         if edges_pos.size >= 3:
             edges_pos, _ = _merge_sparse_bins(edges_pos, gains[train_mask & (gains >=  floor_abs)])
 
-    labels = _bin_split_short_long(gains, edges_neg, edges_pos, floor_abs).astype(np.int64)
+    labels = _bin_split_short_long_with_center(gains, edges_neg, edges_pos, floor_abs).astype(np.int64)
     labels[~train_mask] = -1
 
     class_ranges: List[Tuple[float, float]] = []
     if edges_neg.size >= 2:
         for i in range(edges_neg.size - 1):
             class_ranges.append((float(edges_neg[i]), float(edges_neg[i + 1])))
+
+    class_ranges.append((float(-floor_abs), float(floor_abs)))
+
     if edges_pos.size >= 2:
         for i in range(edges_pos.size - 1):
             class_ranges.append((float(edges_pos[i]), float(edges_pos[i + 1])))
 
     counts = np.zeros(len(class_ranges), dtype=int)
-    if len(class_ranges) > 0:
-        if edges_neg.size >= 2:
-            e2 = edges_neg.copy()
-            e2[-1] += 1e-12
-            cneg, _ = np.histogram(gains[train_mask & (gains <= -floor_abs)], bins=e2)
-            counts[:len(cneg)] = cneg.astype(int)
-        if edges_pos.size >= 2:
-            e2 = edges_pos.copy()
-            e2[-1] += 1e-12
-            cpos, _ = np.histogram(gains[train_mask & (gains >=  floor_abs)], bins=e2)
-            start = (edges_neg.size - 1) if edges_neg.size >= 2 else 0
-            counts[start:start + len(cpos)] = cpos.astype(int)
+
+    if edges_neg.size >= 2:
+        e2 = edges_neg.copy()
+        e2[-1] += 1e-12
+        cneg, _ = np.histogram(gains[train_mask & (gains <= -floor_abs)], bins=e2)
+        counts[:len(cneg)] = cneg.astype(int)
+
+    center_idx = (edges_neg.size - 1) if edges_neg.size >= 2 else 0
+    counts[center_idx] = int(np.sum(train_mask & (np.abs(gains) < floor_abs)))
+
+    if edges_pos.size >= 2:
+        e2 = edges_pos.copy()
+        e2[-1] += 1e-12
+        cpos, _ = np.histogram(gains[train_mask & (gains >= floor_abs)], bins=e2)
+        start = center_idx + 1
+        counts[start:start + len(cpos)] = cpos.astype(int)
 
     spans = np.array([(hi - lo) * 100.0 for (lo, hi) in class_ranges], dtype=float)
 
@@ -730,8 +755,9 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
 
     edges_meta = {
         "floor_abs": float(floor_abs),
-        "hard_min_abs": float(hard_min_abs),
+        "center_class_enabled": True,
         "edges_short": list(map(float, edges_neg.tolist())) if isinstance(edges_neg, np.ndarray) else [],
+        "center_range": [float(-floor_abs), float(floor_abs)],
         "edges_long":  list(map(float, edges_pos.tolist())) if isinstance(edges_pos, np.ndarray) else [],
     }
 
