@@ -286,20 +286,32 @@ def _split_edges_short_long(gains: np.ndarray, floor: float, target_bins: int) -
     if pos.size < max(50, _MIN_SAMPLES_PER_CLASS * 2):
         pos = None
 
-    # bins 배분: 데이터 비율대로 (최소 2, 최대 target_bins-2 등 가드)
     if neg is None and pos is None:
         return np.array([], dtype=float), np.array([], dtype=float)
 
+    # ✅ 한쪽만 있을 때도 floor 클램프 후 단조 증가 유지 보정
     if neg is None:
         bins_pos = max(_MIN_LABEL_CLASSES, target_bins)
         edges_pos = _raw_bins(pos, bins_pos)
-        edges_pos[0] = max(float(edges_pos[0]), floor)
+
+        edges_pos = np.asarray(edges_pos, dtype=float)
+        if edges_pos.size >= 2:
+            edges_pos[0] = max(float(edges_pos[0]), float(floor))
+            for i in range(1, edges_pos.size):
+                if edges_pos[i] <= edges_pos[i - 1]:
+                    edges_pos[i] = edges_pos[i - 1] + 1e-9
         return np.array([], dtype=float), edges_pos
 
     if pos is None:
         bins_neg = max(_MIN_LABEL_CLASSES, target_bins)
         edges_neg = _raw_bins(neg, bins_neg)
-        edges_neg[-1] = min(float(edges_neg[-1]), -floor)
+
+        edges_neg = np.asarray(edges_neg, dtype=float)
+        if edges_neg.size >= 2:
+            edges_neg[-1] = min(float(edges_neg[-1]), float(-floor))
+            for i in range(1, edges_neg.size):
+                if edges_neg[i] <= edges_neg[i - 1]:
+                    edges_neg[i] = edges_neg[i - 1] + 1e-9
         return edges_neg, np.array([], dtype=float)
 
     total = neg.size + pos.size
@@ -653,18 +665,14 @@ def make_labels(df, symbol, strategy, group_id=None):
     )
 
 # ============================================================
-# make_labels_for_horizon (RAW용)  — (기존 유지)
+# make_labels_for_horizon (RAW용)  — (✅ 1캔들 통일 적용)
 # ============================================================
 def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
     n = len(df)
-    both = _future_extreme_signed_returns(df, horizon_hours=horizon_hours)
 
-    if both is None:
-        dn = np.zeros(n, dtype=np.float32)
-        up = np.zeros(n, dtype=np.float32)
-    else:
-        dn = np.asarray(both[:n], dtype=np.float32)
-        up = np.asarray(both[n:], dtype=np.float32)
+    # ✅ 기존 _future_extreme_signed_returns(여러 캔들 극단) 대신
+    # ✅ 1캔들(high/low) 방식으로 통일
+    up, dn = _future_extreme_signed_returns_by_candles(df, H=1)
 
     target_bins = _auto_target_bins(len(df))
     gains = _pick_per_candle_gain(up, dn)
