@@ -258,10 +258,6 @@ def _vector_bin(gains: np.ndarray, edges: np.ndarray) -> np.ndarray:
 
 # ============================================================
 # ✅ (의도대로 수정) 롱/숏 분리 + 중앙(1% 미만)도 "클래스"로 학습
-# ------------------------------------------------------------
-# - 중앙: abs(return) < floor → "NO_TRADE" 클래스로 따로 생성/학습
-# - 숏: gains < -floor → 숏 bins
-# - 롱: gains > +floor → 롱 bins
 # ============================================================
 def _get_no_trade_floor_abs() -> float:
     """
@@ -504,13 +500,29 @@ def _hash_array(a: np.ndarray) -> str:
     except:
         return "na"
 
-def _save_edges(symbol, strategy, edges, meta):
+# ============================================================
+# ✅ FIX: edges.json의 "edges"는 반드시 숫자 리스트여야 함
+# - 기존: dict(edges_meta)를 edges에 그대로 넣어서 예측에서 터짐
+# - 수정: edges는 float 리스트(모노토닉), 구조 dict는 meta에 넣음
+# ============================================================
+def _save_edges(symbol, strategy, edges_list, meta):
     p = _edge_path(symbol, strategy)
+
+    # edges_list를 "무조건" list[float]로 정규화
+    try:
+        if edges_list is None:
+            edges_list = []
+        if isinstance(edges_list, np.ndarray):
+            edges_list = edges_list.tolist()
+        edges_list = [float(x) for x in list(edges_list)]
+    except Exception:
+        edges_list = []
+
     data = {
         "symbol": symbol,
         "strategy": strategy,
-        "edges": list(map(float, edges.tolist())) if isinstance(edges, np.ndarray) else edges,
-        "edges_hash": _hash_array(edges) if isinstance(edges, np.ndarray) else "na",
+        "edges": edges_list,
+        "edges_hash": _hash_array(np.asarray(edges_list, dtype=np.float64)) if len(edges_list) > 0 else "na",
         "meta": meta or {},
     }
     try:
@@ -531,7 +543,7 @@ def _labels_csv_path(symbol, strategy):
 # ============================================================
 def _save_label_table(df, symbol, strategy, gains, labels, class_ranges, counts,
                       spans, extra_cols=None, extra_meta=None, group_id=None,
-                      edges_meta=None):
+                      edges_list=None, edges_meta=None):
 
     pure = _normalize_strategy_name(strategy)
     ts = _to_series_ts_kst(df["timestamp"]) if "timestamp" in df else pd.Series(pd.NaT)
@@ -570,9 +582,58 @@ def _save_label_table(df, symbol, strategy, gains, labels, class_ranges, counts,
     if group_id is not None:
         meta["group_id"] = group_id
 
+    # ✅ 구조 dict(edges_short/center/edges_long)는 meta에 넣어둠 (예측에서 참고 가능)
     if edges_meta is None:
-        edges_meta = []
-    _save_edges(symbol, pure, edges_meta, meta)
+        edges_meta = {}
+    meta["edges_meta"] = edges_meta
+
+    # ✅ 예측 호환: edges는 list[float] 저장
+    if edges_list is None:
+        edges_list = []
+    _save_edges(symbol, pure, edges_list, meta)
+
+# ============================================================
+# ✅ 예측용 단일 edges 리스트 만들기 (모노토닉 경계)
+# - 숏 edges ... (-floor)
+# - 중앙 경계: +floor
+# - 롱 edges ... (>= +floor)
+# ============================================================
+def _build_monotonic_edges_for_prediction(edges_neg: np.ndarray, edges_pos: np.ndarray, floor_abs: float) -> List[float]:
+    out: List[float] = []
+    try:
+        nneg = int(edges_neg.size) if isinstance(edges_neg, np.ndarray) else 0
+        npos = int(edges_pos.size) if isinstance(edges_pos, np.ndarray) else 0
+
+        if nneg >= 2:
+            out.extend([float(x) for x in edges_neg.tolist()])
+        else:
+            # 숏이 없으면 중앙 시작 경계는 -floor
+            out.append(float(-floor_abs))
+
+        # 중앙 상단 경계 +floor를 추가 (중복이면 스킵)
+        if len(out) == 0 or float(out[-1]) < float(floor_abs) - 1e-15:
+            out.append(float(floor_abs))
+        else:
+            # out[-1]이 -floor라면 반드시 +floor는 들어가야 함
+            if abs(float(out[-1]) - float(floor_abs)) > 1e-15:
+                out.append(float(floor_abs))
+
+        if npos >= 2:
+            pos_list = [float(x) for x in edges_pos.tolist()]
+            # edges_pos[0] == +floor 이므로 중복 방지
+            if len(pos_list) > 0 and len(out) > 0 and abs(pos_list[0] - out[-1]) < 1e-12:
+                pos_list = pos_list[1:]
+            out.extend(pos_list)
+
+        # 단조 증가 보장 (혹시라도 같거나 역전이면 미세 증가)
+        for i in range(1, len(out)):
+            if out[i] <= out[i - 1]:
+                out[i] = out[i - 1] + 1e-9
+
+        return out
+    except Exception:
+        # 최후 안전: 최소 경계라도 반환
+        return [float(-floor_abs), float(floor_abs)]
 
 # ============================================================
 # make_labels
@@ -650,6 +711,7 @@ def make_labels(df, symbol, strategy, group_id=None):
         "no_trade_floor_abs": np.full(len(df), float(floor_abs), dtype=np.float32),
     }
 
+    # ✅ 구조 정보는 meta로만 저장 (예측 호환을 위해 edges 필드는 list[float]로 저장)
     edges_meta = {
         "floor_abs": float(floor_abs),
         "center_class_enabled": True,
@@ -657,6 +719,9 @@ def make_labels(df, symbol, strategy, group_id=None):
         "center_range": [float(-floor_abs), float(floor_abs)],
         "edges_long":  list(map(float, edges_pos.tolist())) if isinstance(edges_pos, np.ndarray) else [],
     }
+
+    # ✅ 예측 호환 edges 리스트 생성
+    edges_list = _build_monotonic_edges_for_prediction(edges_neg, edges_pos, floor_abs)
 
     _save_label_table(
         df, symbol, pure,
@@ -666,6 +731,7 @@ def make_labels(df, symbol, strategy, group_id=None):
         extra_cols=extra_cols,
         extra_meta={"target_bins_used": target_bins},
         group_id=group_id,
+        edges_list=edges_list,
         edges_meta=edges_meta,
     )
 
@@ -761,6 +827,9 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
         "edges_long":  list(map(float, edges_pos.tolist())) if isinstance(edges_pos, np.ndarray) else [],
     }
 
+    # ✅ 예측 호환 edges 리스트 생성
+    edges_list = _build_monotonic_edges_for_prediction(edges_neg, edges_pos, floor_abs)
+
     _save_label_table(
         df, symbol, strategy, gains, labels,
         class_ranges,
@@ -768,6 +837,7 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
         extra_cols=extra_cols,
         extra_meta={"target_bins_used": target_bins},
         group_id=group_id,
+        edges_list=edges_list,
         edges_meta=edges_meta,
     )
 
