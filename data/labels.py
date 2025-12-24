@@ -20,6 +20,7 @@ from config import (
     get_BIN_META,
     get_SPARSE_CLASS,
     TRAIN_ZERO_BAND_ABS,
+    get_CLASS_BIN,   # ✅ 추가: 1% 노트레이드 컷 가져오기
 )
 
 logger = logging.getLogger(__name__)
@@ -92,9 +93,6 @@ def _ensure_dir_with_fallback(primary: str, fallback: str) -> Path:
 
 # ============================================================
 # ✅ 저장 경로 통일 (config.py의 PERSISTENT_DIR 기준)
-# ------------------------------------------------------------
-# - 이제 labels.py가 /persistent 같은 하드코딩을 안 함
-# - config.py가 결정한 실제 writable 경로(/tmp 폴백 포함)를 그대로 따른다
 # ============================================================
 _PERSIST_BASE = str(PERSISTENT_DIR)
 
@@ -259,6 +257,101 @@ def _vector_bin(gains: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return np.clip(bins, 0, edges.size - 2).astype(np.int64)
 
 # ============================================================
+# ✅ (핵심 추가) 숏/롱 분리 bin 생성 + 1% 미만 클래스 생성 금지
+# ============================================================
+def _get_no_trade_floor_abs() -> float:
+    """
+    YOPO 규칙: abs(return) < 1% 는 예측도/학습도 의미없음.
+    config.CLASS_BIN.no_trade_floor_abs (기본 0.01)를 사용.
+    """
+    try:
+        cb = dict(get_CLASS_BIN() or {})
+        return float(cb.get("no_trade_floor_abs", 0.01))
+    except Exception:
+        return 0.01
+
+def _split_edges_short_long(gains: np.ndarray, floor: float, target_bins: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    - 숏: gains <= -floor
+    - 롱: gains >= +floor
+    각각 따로 quantile edges 생성.
+    """
+    g = np.asarray(gains, dtype=float)
+    g = g[np.isfinite(g)]
+    neg = g[g <= -floor]
+    pos = g[g >=  floor]
+
+    if neg.size < max(50, _MIN_SAMPLES_PER_CLASS * 2):
+        neg = None
+    if pos.size < max(50, _MIN_SAMPLES_PER_CLASS * 2):
+        pos = None
+
+    # bins 배분: 데이터 비율대로 (최소 2, 최대 target_bins-2 등 가드)
+    if neg is None and pos is None:
+        return np.array([], dtype=float), np.array([], dtype=float)
+
+    if neg is None:
+        bins_pos = max(_MIN_LABEL_CLASSES, target_bins)
+        edges_pos = _raw_bins(pos, bins_pos)
+        edges_pos[0] = max(float(edges_pos[0]), floor)
+        return np.array([], dtype=float), edges_pos
+
+    if pos is None:
+        bins_neg = max(_MIN_LABEL_CLASSES, target_bins)
+        edges_neg = _raw_bins(neg, bins_neg)
+        edges_neg[-1] = min(float(edges_neg[-1]), -floor)
+        return edges_neg, np.array([], dtype=float)
+
+    total = neg.size + pos.size
+    frac_neg = neg.size / max(1, total)
+    bins_neg = int(round(target_bins * frac_neg))
+    bins_pos = target_bins - bins_neg
+    bins_neg = max(_MIN_LABEL_CLASSES, min(target_bins - _MIN_LABEL_CLASSES, bins_neg))
+    bins_pos = max(_MIN_LABEL_CLASSES, target_bins - bins_neg)
+
+    edges_neg = _raw_bins(neg, bins_neg)
+    edges_pos = _raw_bins(pos, bins_pos)
+
+    # 끝/시작을 floor에 맞춰 깔끔하게
+    edges_neg[-1] = -floor
+    edges_pos[0]  =  floor
+
+    # 단조 증가 보정
+    for i in range(1, edges_neg.size):
+        if edges_neg[i] <= edges_neg[i - 1]:
+            edges_neg[i] = edges_neg[i - 1] + 1e-9
+    for i in range(1, edges_pos.size):
+        if edges_pos[i] <= edges_pos[i - 1]:
+            edges_pos[i] = edges_pos[i - 1] + 1e-9
+
+    return edges_neg.astype(float), edges_pos.astype(float)
+
+def _bin_split_short_long(gains: np.ndarray, edges_neg: np.ndarray, edges_pos: np.ndarray, floor: float) -> np.ndarray:
+    """
+    숏/롱 각각 binning 후,
+    - 숏 라벨: 0..(nneg-1)
+    - 롱 라벨: nneg..(nneg+npos-1)
+    - abs(return)<floor 는 -1
+    """
+    g = np.asarray(gains, dtype=float)
+    labels = np.full(g.shape[0], -1, dtype=np.int64)
+
+    nneg = int(max(0, edges_neg.size - 1))
+    npos = int(max(0, edges_pos.size - 1))
+
+    if nneg > 0:
+        mneg = np.isfinite(g) & (g <= -floor)
+        if np.any(mneg):
+            labels[mneg] = _vector_bin(g[mneg].astype(np.float32), edges_neg.astype(float))
+
+    if npos > 0:
+        mpos = np.isfinite(g) & (g >= floor)
+        if np.any(mpos):
+            labels[mpos] = _vector_bin(g[mpos].astype(np.float32), edges_pos.astype(float)) + nneg
+
+    return labels
+
+# ============================================================
 # 희소 bin 병합 (옵션)
 # ============================================================
 def _merge_sparse_bins(edges: np.ndarray, values: np.ndarray):
@@ -395,8 +488,8 @@ def _save_edges(symbol, strategy, edges, meta):
     data = {
         "symbol": symbol,
         "strategy": strategy,
-        "edges": list(map(float, edges.tolist())),
-        "edges_hash": _hash_array(edges),
+        "edges": list(map(float, edges.tolist())) if isinstance(edges, np.ndarray) else edges,
+        "edges_hash": _hash_array(edges) if isinstance(edges, np.ndarray) else "na",
         "meta": meta or {},
     }
     try:
@@ -415,8 +508,9 @@ def _labels_csv_path(symbol, strategy):
 # ============================================================
 # 라벨 테이블 저장
 # ============================================================
-def _save_label_table(df, symbol, strategy, gains, labels, edges, counts,
-                      spans, extra_cols=None, extra_meta=None, group_id=None):
+def _save_label_table(df, symbol, strategy, gains, labels, class_ranges, counts,
+                      spans, extra_cols=None, extra_meta=None, group_id=None,
+                      edges_meta=None):
 
     pure = _normalize_strategy_name(strategy)
     ts = _to_series_ts_kst(df["timestamp"]) if "timestamp" in df else pd.Series(pd.NaT)
@@ -443,14 +537,10 @@ def _save_label_table(df, symbol, strategy, gains, labels, edges, counts,
     except Exception:
         out.to_csv(p_csv, index=False)
 
-    class_ranges = [(float(edges[i]), float(edges[i+1])) for i in range(edges.size - 1)]
-
     meta = {
         "symbol": symbol,
         "strategy": pure,
-        "NUM_CLASSES": int(edges.size - 1),
-        "edges": list(map(float, edges.tolist())),
-        "edges_hash": _hash_array(edges),
+        "NUM_CLASSES": int(len(class_ranges)),
         "class_ranges": class_ranges,
         "bin_counts": list(map(int, counts)),
     }
@@ -459,7 +549,10 @@ def _save_label_table(df, symbol, strategy, gains, labels, edges, counts,
     if group_id is not None:
         meta["group_id"] = group_id
 
-    _save_edges(symbol, pure, edges, meta)
+    # edges는 메타용(보기/디버그용)으로만 저장
+    if edges_meta is None:
+        edges_meta = []
+    _save_edges(symbol, pure, edges_meta, meta)
 
 # ============================================================
 # make_labels
@@ -469,35 +562,57 @@ def make_labels(df, symbol, strategy, group_id=None):
 
     gains, up_c, dn_c, target_bins = compute_label_returns(df, symbol, pure)
 
-    # ✅ 학습 기준 마스크 (0% 근처 제외)
-    train_mask = (np.abs(gains) >= float(TRAIN_ZERO_BAND_ABS))
+    # ✅ YOPO 규칙: 1% 미만(숏/롱 모두) 학습/예측 의미없음 → 학습에서 제거
+    floor_abs = float(os.getenv("LABEL_NO_TRADE_FLOOR_ABS", str(_get_no_trade_floor_abs())))
 
-    # ✅ bins(edges)는 "학습에 실제로 쓰는 분포"로만 만든다
-    dist = np.concatenate([dn_c, up_c], axis=0)
-    dist_for_bins = dist[np.isfinite(dist)]
-    dist_for_bins = dist_for_bins[np.abs(dist_for_bins) >= float(TRAIN_ZERO_BAND_ABS)]
+    # ✅ 학습 제외 밴드: 0% 근처 제외 + 1% 노트레이드 컷 중 더 큰 값 적용
+    hard_min_abs = float(max(float(TRAIN_ZERO_BAND_ABS), float(floor_abs)))
 
-    # fallback: 너무 적으면 원래 dist 사용
-    if dist_for_bins.size < max(100, _MIN_SAMPLES_PER_CLASS * 2):
-        dist_for_bins = dist[np.isfinite(dist)]
+    train_mask = (np.isfinite(gains) & (np.abs(gains) >= hard_min_abs))
 
-    edges = _raw_bins(dist_for_bins, target_bins)
+    # ✅ 숏/롱 분리해서 edges 생성 (중앙(±1%) 클래스 자체를 생성하지 않음)
+    edges_neg, edges_pos = _split_edges_short_long(gains, floor_abs, target_bins)
 
-    # ✅ 희소 병합도 "학습에 들어가는 gains" 기준으로
+    # 희소 병합 옵션: 숏/롱 각각 따로 적용 (학습샘플 기준)
     if MERGE_SPARSE_LABEL_BINS:
-        edges, _ = _merge_sparse_bins(edges, gains[train_mask])
+        if edges_neg.size >= 3:
+            edges_neg, _ = _merge_sparse_bins(edges_neg, gains[train_mask & (gains <= -floor_abs)])
+        if edges_pos.size >= 3:
+            edges_pos, _ = _merge_sparse_bins(edges_pos, gains[train_mask & (gains >=  floor_abs)])
 
-    labels = _vector_bin(gains, edges).astype(np.int64)
+    labels = _bin_split_short_long(gains, edges_neg, edges_pos, floor_abs).astype(np.int64)
 
-    # ✅ 학습 제외 샘플은 라벨 -1로 명확히 표시
+    # ✅ 학습 제외 샘플은 -1로 명확히 표시 (0 근처/1% 미만 모두 포함)
     labels[~train_mask] = -1
 
-    # ✅ bin_counts도 "학습 샘플" 기준으로 집계
-    edges2 = edges.copy()
-    edges2[-1] += 1e-12
-    bin_counts, _ = np.histogram(gains[train_mask], bins=edges2)
+    # class_ranges 생성 (중앙 구간 없음)
+    class_ranges: List[Tuple[float, float]] = []
+    if edges_neg.size >= 2:
+        for i in range(edges_neg.size - 1):
+            class_ranges.append((float(edges_neg[i]), float(edges_neg[i + 1])))
+    if edges_pos.size >= 2:
+        for i in range(edges_pos.size - 1):
+            class_ranges.append((float(edges_pos[i]), float(edges_pos[i + 1])))
 
-    spans = np.diff(edges) * 100.0
+    # bin_counts도 학습 샘플 기준
+    counts = np.zeros(len(class_ranges), dtype=int)
+    if len(class_ranges) > 0:
+        # 숏 counts
+        if edges_neg.size >= 2:
+            e2 = edges_neg.copy()
+            e2[-1] += 1e-12
+            cneg, _ = np.histogram(gains[train_mask & (gains <= -floor_abs)], bins=e2)
+            counts[:len(cneg)] = cneg.astype(int)
+        # 롱 counts
+        if edges_pos.size >= 2:
+            e2 = edges_pos.copy()
+            e2[-1] += 1e-12
+            cpos, _ = np.histogram(gains[train_mask & (gains >=  floor_abs)], bins=e2)
+            start = (edges_neg.size - 1) if edges_neg.size >= 2 else 0
+            counts[start:start + len(cpos)] = cpos.astype(int)
+
+    # spans(%)도 class_ranges 기반
+    spans = np.array([(hi - lo) * 100.0 for (lo, hi) in class_ranges], dtype=float)
 
     sl = 0.02
     extra_cols = {
@@ -506,24 +621,34 @@ def make_labels(df, symbol, strategy, group_id=None):
         "up_ge_2pct": (up_c >= sl).astype(np.int8),
         "dn_le_-2pct": (dn_c <= -sl).astype(np.int8),
         "train_mask": train_mask.astype(np.int8),
+        "no_trade_floor_abs": np.full(len(df), float(floor_abs), dtype=np.float32),
+    }
+
+    # edges_meta는 보기용으로 저장 (숏/롱 분리 형태를 그대로 남김)
+    edges_meta = {
+        "floor_abs": float(floor_abs),
+        "hard_min_abs": float(hard_min_abs),
+        "edges_short": list(map(float, edges_neg.tolist())) if isinstance(edges_neg, np.ndarray) else [],
+        "edges_long":  list(map(float, edges_pos.tolist())) if isinstance(edges_pos, np.ndarray) else [],
     }
 
     _save_label_table(
         df, symbol, pure,
-        gains, labels, edges, bin_counts, spans,
+        gains, labels,
+        class_ranges,
+        counts, spans,
         extra_cols=extra_cols,
         extra_meta={"target_bins_used": target_bins},
         group_id=group_id,
+        edges_meta=edges_meta,
     )
-
-    class_ranges = [(float(edges[i]), float(edges[i+1])) for i in range(edges.size - 1)]
 
     return (
         gains.astype(np.float32),
         labels.astype(np.int64),
         class_ranges,
-        edges.astype(float),
-        bin_counts.astype(int),
+        edges_meta,                 # ✅ 이제 edges 대신 meta(dict)를 반환(로그/저장용)
+        counts.astype(int),
         spans.astype(float),
     )
 
@@ -541,39 +666,48 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
         dn = np.asarray(both[:n], dtype=np.float32)
         up = np.asarray(both[n:], dtype=np.float32)
 
-    dist = np.concatenate([dn, up], axis=0)
     target_bins = _auto_target_bins(len(df))
-
     gains = _pick_per_candle_gain(up, dn)
 
-    # ✅ 학습 기준 마스크
-    train_mask = (np.abs(gains) >= float(TRAIN_ZERO_BAND_ABS))
+    # ✅ horizon 라벨도 동일하게 1% 컷 강제 적용
+    floor_abs = float(os.getenv("LABEL_NO_TRADE_FLOOR_ABS", str(_get_no_trade_floor_abs())))
+    hard_min_abs = float(max(float(TRAIN_ZERO_BAND_ABS), float(floor_abs)))
+    train_mask = (np.isfinite(gains) & (np.abs(gains) >= hard_min_abs))
 
-    # ✅ bins(edges)는 "학습 분포"로만 만든다
-    dist_for_bins = dist[np.isfinite(dist)]
-    dist_for_bins = dist_for_bins[np.abs(dist_for_bins) >= float(TRAIN_ZERO_BAND_ABS)]
+    edges_neg, edges_pos = _split_edges_short_long(gains, floor_abs, target_bins)
 
-    # fallback: 너무 적으면 원래 dist 사용
-    if dist_for_bins.size < max(100, _MIN_SAMPLES_PER_CLASS * 2):
-        dist_for_bins = dist[np.isfinite(dist)]
-
-    edges = _raw_bins(dist_for_bins, target_bins)
-
-    # ✅ 희소 병합도 학습 gains 기준
     if MERGE_SPARSE_LABEL_BINS:
-        edges, _ = _merge_sparse_bins(edges, gains[train_mask])
+        if edges_neg.size >= 3:
+            edges_neg, _ = _merge_sparse_bins(edges_neg, gains[train_mask & (gains <= -floor_abs)])
+        if edges_pos.size >= 3:
+            edges_pos, _ = _merge_sparse_bins(edges_pos, gains[train_mask & (gains >=  floor_abs)])
 
-    labels = _vector_bin(gains, edges).astype(np.int64)
-
-    # ✅ 학습 제외 샘플은 -1
+    labels = _bin_split_short_long(gains, edges_neg, edges_pos, floor_abs).astype(np.int64)
     labels[~train_mask] = -1
 
-    # ✅ bin_counts도 학습 샘플 기준
-    edges2 = edges.copy()
-    edges2[-1] += 1e-12
-    bin_counts, _ = np.histogram(gains[train_mask], bins=edges2)
+    class_ranges: List[Tuple[float, float]] = []
+    if edges_neg.size >= 2:
+        for i in range(edges_neg.size - 1):
+            class_ranges.append((float(edges_neg[i]), float(edges_neg[i + 1])))
+    if edges_pos.size >= 2:
+        for i in range(edges_pos.size - 1):
+            class_ranges.append((float(edges_pos[i]), float(edges_pos[i + 1])))
 
-    spans = np.diff(edges) * 100.0
+    counts = np.zeros(len(class_ranges), dtype=int)
+    if len(class_ranges) > 0:
+        if edges_neg.size >= 2:
+            e2 = edges_neg.copy()
+            e2[-1] += 1e-12
+            cneg, _ = np.histogram(gains[train_mask & (gains <= -floor_abs)], bins=e2)
+            counts[:len(cneg)] = cneg.astype(int)
+        if edges_pos.size >= 2:
+            e2 = edges_pos.copy()
+            e2[-1] += 1e-12
+            cpos, _ = np.histogram(gains[train_mask & (gains >=  floor_abs)], bins=e2)
+            start = (edges_neg.size - 1) if edges_neg.size >= 2 else 0
+            counts[start:start + len(cpos)] = cpos.astype(int)
+
+    spans = np.array([(hi - lo) * 100.0 for (lo, hi) in class_ranges], dtype=float)
 
     strategy = "단기" if horizon_hours <= 4 else ("중기" if horizon_hours <= 24 else "장기")
 
@@ -583,25 +717,33 @@ def make_labels_for_horizon(df, symbol, horizon_hours, group_id=None):
         "up_ge_2pct": (up >= 0.02).astype(np.int8),
         "dn_le_-2pct": (dn <= -0.02).astype(np.int8),
         "train_mask": train_mask.astype(np.int8),
+        "no_trade_floor_abs": np.full(len(df), float(floor_abs), dtype=np.float32),
+    }
+
+    edges_meta = {
+        "floor_abs": float(floor_abs),
+        "hard_min_abs": float(hard_min_abs),
+        "edges_short": list(map(float, edges_neg.tolist())) if isinstance(edges_neg, np.ndarray) else [],
+        "edges_long":  list(map(float, edges_pos.tolist())) if isinstance(edges_pos, np.ndarray) else [],
     }
 
     _save_label_table(
         df, symbol, strategy, gains, labels,
-        edges, bin_counts, spans,
+        class_ranges,
+        counts, spans,
         extra_cols=extra_cols,
         extra_meta={"target_bins_used": target_bins},
         group_id=group_id,
+        edges_meta=edges_meta,
     )
-
-    class_ranges = [(float(edges[i]), float(edges[i+1])) for i in range(edges.size - 1)]
 
     return (
         gains.astype(np.float32),
         labels.astype(np.int64),
         class_ranges,
         strategy,
-        edges.astype(float),
-        bin_counts.astype(int),
+        edges_meta,
+        counts.astype(int),
         spans.astype(float),
     )
 
@@ -614,13 +756,13 @@ def make_all_horizon_labels(df, symbol, horizons=None, group_id=None):
 
     out = {}
     for h in horizons:
-        gains, labels, ranges, strat, edges, counts, spans = \
+        gains, labels, ranges, strat, edges_meta, counts, spans = \
             make_labels_for_horizon(df, symbol, h, group_id)
         key = (
             f"{h}h" if h < 24 else
             ("1d" if h == 24 else
              (f"{h//24}d" if h < 168 else "7d"))
         )
-        out[key] = (gains, labels, ranges, edges, counts, spans)
+        out[key] = (gains, labels, ranges, edges_meta, counts, spans)
 
     return out
