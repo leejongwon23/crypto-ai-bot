@@ -372,8 +372,6 @@ DEFAULT_TRAIN_HEADERS = [
     "ui_coverage_summary",
 ]
 
-
-
 try:
     from logger import TRAIN_HEADERS
 
@@ -383,12 +381,10 @@ except Exception:
     TRAIN_HEADERS = DEFAULT_TRAIN_HEADERS
 
 # ✅✅✅ 핵심 수정: train_log 경로는 절대 재작성하지 말고, config.get_TRAIN_LOG_PATH() 그대로 쓴다.
-# (여기서 /persistent → /tmp/persistent 로 바꾸면, app.py가 읽는 로그와 갈라져서 "학습로그 반영 안됨"이 발생함)
 TRAIN_LOG = get_TRAIN_LOG_PATH()
 try:
     os.makedirs(os.path.dirname(TRAIN_LOG), exist_ok=True)
 except Exception:
-    # 최후 폴백만 허용 (그래도 가능한 get_TRAIN_LOG_PATH 디렉토리를 살린다)
     TRAIN_LOG = get_TRAIN_LOG_PATH()
 
 
@@ -400,10 +396,10 @@ def _ensure_train_log():
     try:
         ensure_train_log_exists()
     except Exception as e:
-        # 🔥 로그가 안 쌓이는 핵심 원인일 수 있으니 "무조건" 화면에 보이게 남긴다
         print(f"[FATAL] ensure_train_log_exists() failed: {e}", flush=True)
         raise
-        
+
+
 def _normalize_train_row(row: dict) -> dict:
     # 모든 헤더에 대해 기본값 채우기
     r = {k: row.get(k, None) for k in TRAIN_HEADERS}
@@ -416,13 +412,11 @@ def _normalize_train_row(row: dict) -> dict:
     if r.get("val_loss") is None and row.get("loss") is not None:
         r["val_loss"] = row.get("loss")
 
-    # 값이 None이면 setdefault가 안 먹는 문제 방지
     if r.get("engine") in (None, ""):
         r["engine"] = row.get("engine", "manual")
     if r.get("source_exchange") in (None, ""):
         r["source_exchange"] = row.get("source_exchange", "BYBIT")
 
-    # 수익률 구간 호환 필드 채우기
     be = row.get("bin_edges") or r.get("bin_edges")
     bc = row.get("bin_counts") or r.get("bin_counts")
 
@@ -439,6 +433,7 @@ def _normalize_train_row(row: dict) -> dict:
 
     return r
 
+
 def _compute_bin_info_from_labels(
     labels: np.ndarray,
     class_ranges: list,
@@ -446,36 +441,22 @@ def _compute_bin_info_from_labels(
     bin_edges: list | None = None,
 ):
     """
-    ❗ 핵심 수정 포인트
-    - val_y ❌
     - y(전체 labels) 기준으로 클래스 분포 계산 ✅
     """
-
     num_global = len(class_ranges)
     if num_global <= 0:
-        return {
-            "bin_edges": [],
-            "bin_counts": [],
-            "bin_spans": [],
-            "bins": 0,
-        }
+        return {"bin_edges": [], "bin_counts": [], "bin_spans": [], "bins": 0}
 
-    # 전체 labels 기준 분포 (이게 핵심)
     counts_global = np.zeros(num_global, dtype=int)
     for g, l in to_local.items():
         if g < num_global:
             counts_global[g] = int((labels == g).sum())
 
-    # bin_edges 없으면 class_ranges로 생성
     if not bin_edges:
         bin_edges = [float(lo) for (lo, _) in class_ranges]
         bin_edges.append(float(class_ranges[-1][1]))
 
-    # span 계산
-    bin_spans = [
-        float(bin_edges[i + 1] - bin_edges[i])
-        for i in range(len(bin_edges) - 1)
-    ]
+    bin_spans = [float(bin_edges[i + 1] - bin_edges[i]) for i in range(len(bin_edges) - 1)]
 
     return {
         "bin_edges": list(bin_edges),
@@ -488,7 +469,6 @@ def _compute_bin_info_from_labels(
 def _append_train_log(row: dict):
     """
     ✅✅✅ 핵심: 무조건 get_TRAIN_LOG_PATH()로만 기록한다.
-    - TRAIN_LOG 전역변수 값이 뭐였든 상관 없이 "항상" 같은 파일로 간다.
     """
     try:
         _ensure_train_log()
@@ -503,272 +483,257 @@ def _append_train_log(row: dict):
             w = csv.DictWriter(f, fieldnames=TRAIN_HEADERS, extrasaction="ignore")
             w.writerow(_normalize_train_row(row))
 
-        # ✅ 디버그: 실제로 어디에 썼는지 확실히 찍어준다(지금 단계에선 필수)
         try:
             print(f"[TRAIN_LOG APPEND OK] path={_path} symbol={row.get('symbol')} strategy={row.get('strategy')} status={row.get('status')}", flush=True)
         except Exception:
             pass
 
     except Exception as e:
-        # 🔥 조용히 넘어가면 "헤더만 있고 내용 없음" 상태가 계속됨
         print(f"[FATAL] train_log append failed: {e}", flush=True)
         raise
 
-    def _log_training_result_patched(*args, **kw):
-        """
-        logger.log_training_result 를 가로채서:
-        1) 원래 logger 로깅 실행
-        2) train_log.csv 에 기록할 row 생성
-           - 핵심: note(운영로그 요약)를 train_log.csv에 100% 반영
-           - 리스트/딕트는 CSV에 안전하게 JSON 문자열로 저장
-           - ui_* 요약 필드 + 클래스/분포/성능까지 채움
-        """
 
-        # 1) 원래 logger 호출
-        if callable(_orig_ltr):
-            try:
-                _orig_ltr(*args, **kw)
-            except Exception as e:
-                print(f"[경고] logger.log_training_result 실패: {e}", flush=True)
+# =========================================================
+# ✅✅✅ [핵심 수정] logger 패치는 "전역에서 1번만" 적용되어야 한다
+# - 원래 함수 백업(_orig_ltr) 없으면 패치 함수가 깨짐
+# - 패치 적용 코드가 함수 안(들여쓰기)으로 들어가면 적용이 불안정함
+# =========================================================
 
-        # 2) symbol/strategy/model 복구
-        symbol = args[0] if len(args) > 0 else kw.get("symbol")
-        strategy = args[1] if len(args) > 1 else kw.get("strategy")
-        model = args[2] if len(args) > 2 else kw.get("model", "")
+# 1) 원본 백업 (딱 1번)
+if not hasattr(logger, "_orig_log_training_result"):
+    logger._orig_log_training_result = logger.log_training_result
 
-        # kw 안에 result dict가 들어오는 경우 우선 흡수
-        result_dict = None
-        if "result" in kw and isinstance(kw["result"], dict):
-            result_dict = kw["result"]
+_orig_ltr = logger._orig_log_training_result
 
-        # ---- CSV 저장용 row 기본틀 (중요: note 포함) ----
-        row: Dict[str, Any] = {
-            "timestamp": datetime.now(pytz.timezone("Asia/Seoul")).isoformat(),
-            "symbol": symbol,
-            "strategy": strategy,
-            "model": model,
 
-            # ✅ 핵심(운영로그 요약) - 이게 빠지면 “원하는 로그”가 절대 안 됨
-            "note": kw.get("note", ""),      # <-- 반드시 존재해야 함
-            "notes": kw.get("notes", ""),    # 호환(추가 메모용)
+def _log_training_result_patched(*args, **kw):
+    """
+    logger.log_training_result 를 가로채서:
+    1) 원래 logger 로깅 실행
+    2) train_log.csv 에 기록할 row 생성(운영로그 요약 + 분포/구간/성능 포함)
+    """
+    # 1) 원래 logger 호출
+    if callable(_orig_ltr):
+        try:
+            _orig_ltr(*args, **kw)
+        except Exception as e:
+            print(f"[경고] logger.log_training_result 실패: {e}", flush=True)
 
-            "status": kw.get("status", ""),
-            "window": kw.get("window", ""),
-            "group": kw.get("group", ""),
-            "epoch": kw.get("epoch", ""),
+    # 2) symbol/strategy/model 복구
+    symbol = args[0] if len(args) > 0 else kw.get("symbol")
+    strategy = args[1] if len(args) > 1 else kw.get("strategy")
+    model = args[2] if len(args) > 2 else kw.get("model", "")
 
-            "val_acc": kw.get("val_acc", ""),
-            "val_f1": kw.get("val_f1", ""),
-            "val_loss": kw.get("val_loss", ""),
-            "train_loss": kw.get("train_loss", ""),
+    result_dict = None
+    if "result" in kw and isinstance(kw["result"], dict):
+        result_dict = kw["result"]
 
-            # 운영/설정 메타
-            "engine": kw.get("engine", "manual"),
-            "source_exchange": kw.get("source_exchange", "BYBIT"),
-            "rows": kw.get("rows", ""),
-            "limit": kw.get("limit", ""),
-            "min": kw.get("min", ""),
-            "augment_needed": kw.get("augment_needed", ""),
-            "enough_for_training": kw.get("enough_for_training", ""),
+    row: Dict[str, Any] = {
+        "timestamp": datetime.now(pytz.timezone("Asia/Seoul")).isoformat(),
+        "symbol": symbol,
+        "strategy": strategy,
+        "model": model,
 
-            # 라벨/분포
-            "label_total": kw.get("label_total", ""),
-            "label_masked": kw.get("label_masked", ""),
-            "label_masked_ratio": kw.get("label_masked_ratio", ""),
-            "near_zero": kw.get("near_zero", ""),
-            "near_zero_band": kw.get("near_zero_band", ""),
-            "near_zero_count": kw.get("near_zero_count", ""),
-            "boundary_band": kw.get("boundary_band", ""),
-            "masked_count": kw.get("masked_count", ""),
-            "bin_edges": kw.get("bin_edges", ""),
-            "bin_counts": kw.get("bin_counts", ""),
-            "bin_spans": kw.get("bin_spans", ""),
-            "class_ranges": kw.get("class_ranges", ""),
-            "class_edges": kw.get("class_edges", ""),
-            "class_counts": kw.get("class_counts", ""),
-            "bins": kw.get("bins", ""),
-            "val_coverage": kw.get("val_coverage", ""),
+        "note": kw.get("note", ""),
+        "notes": kw.get("notes", ""),
 
-            # 클래스 메타/진단
-            "num_classes": kw.get("num_classes", ""),
-            "NUM_CLASSES": kw.get("NUM_CLASSES", ""),
-            "usable_samples": kw.get("usable_samples", ""),
-            "class_counts_label_freeze": kw.get("class_counts_label_freeze", ""),
-            "class_counts_after_assemble": kw.get("class_counts_after_assemble", ""),
-            "batch_stratified_ok": kw.get("batch_stratified_ok", ""),
+        "status": kw.get("status", ""),
+        "window": kw.get("window", ""),
+        "group": kw.get("group", ""),
+        "epoch": kw.get("epoch", ""),
 
-            # per-class 성능
-            "per_class_f1": kw.get("per_class_f1", ""),
+        "val_acc": kw.get("val_acc", ""),
+        "val_f1": kw.get("val_f1", ""),
+        "val_loss": kw.get("val_loss", ""),
+        "train_loss": kw.get("train_loss", ""),
 
-            # 구형 UI 요약(호환)
-            "ui_status": kw.get("ui_status", ""),
-            "ui_data_amount": kw.get("ui_data_amount", ""),
-            "ui_return_summary": kw.get("ui_return_summary", ""),
-            "ui_coverage_summary": kw.get("ui_coverage_summary", ""),
+        "engine": kw.get("engine", "manual"),
+        "source_exchange": kw.get("source_exchange", "BYBIT"),
+        "rows": kw.get("rows", ""),
+        "limit": kw.get("limit", ""),
+        "min": kw.get("min", ""),
+        "augment_needed": kw.get("augment_needed", ""),
+        "enough_for_training": kw.get("enough_for_training", ""),
 
-            # 신 UI 요약(카드용)
-            "ui_data_summary": kw.get("ui_data_summary", ""),
-            "ui_dist_summary": kw.get("ui_dist_summary", ""),
-            "ui_class_range_summary": kw.get("ui_class_range_summary", ""),
-            "ui_class_count_summary": kw.get("ui_class_count_summary", ""),
-            "ui_usable_summary": kw.get("ui_usable_summary", ""),
-            "ui_performance_summary": kw.get("ui_performance_summary", ""),
-        }
+        "label_total": kw.get("label_total", ""),
+        "label_masked": kw.get("label_masked", ""),
+        "label_masked_ratio": kw.get("label_masked_ratio", ""),
+        "near_zero": kw.get("near_zero", ""),
+        "near_zero_band": kw.get("near_zero_band", ""),
+        "near_zero_count": kw.get("near_zero_count", ""),
+        "boundary_band": kw.get("boundary_band", ""),
+        "masked_count": kw.get("masked_count", ""),
+        "bin_edges": kw.get("bin_edges", ""),
+        "bin_counts": kw.get("bin_counts", ""),
+        "bin_spans": kw.get("bin_spans", ""),
+        "class_ranges": kw.get("class_ranges", ""),
+        "class_edges": kw.get("class_edges", ""),
+        "class_counts": kw.get("class_counts", ""),
+        "bins": kw.get("bins", ""),
+        "val_coverage": kw.get("val_coverage", ""),
 
-        # 3) result_dict 우선 반영
-        if isinstance(result_dict, dict):
-            for k, v in result_dict.items():
-                if k in row:
-                    row[k] = v
+        "num_classes": kw.get("num_classes", ""),
+        "NUM_CLASSES": kw.get("NUM_CLASSES", ""),
+        "usable_samples": kw.get("usable_samples", ""),
+        "class_counts_label_freeze": kw.get("class_counts_label_freeze", ""),
+        "class_counts_after_assemble": kw.get("class_counts_after_assemble", ""),
+        "batch_stratified_ok": kw.get("batch_stratified_ok", ""),
 
-        # 4) kw 값으로 덮어쓰기(빈값 제외)
-        for k, v in kw.items():
-            if k in row and v not in (None, ""):
+        "per_class_f1": kw.get("per_class_f1", ""),
+
+        "ui_status": kw.get("ui_status", ""),
+        "ui_data_amount": kw.get("ui_data_amount", ""),
+        "ui_return_summary": kw.get("ui_return_summary", ""),
+        "ui_coverage_summary": kw.get("ui_coverage_summary", ""),
+
+        "ui_data_summary": kw.get("ui_data_summary", ""),
+        "ui_dist_summary": kw.get("ui_dist_summary", ""),
+        "ui_class_range_summary": kw.get("ui_class_range_summary", ""),
+        "ui_class_count_summary": kw.get("ui_class_count_summary", ""),
+        "ui_usable_summary": kw.get("ui_usable_summary", ""),
+        "ui_performance_summary": kw.get("ui_performance_summary", ""),
+    }
+
+    if isinstance(result_dict, dict):
+        for k, v in result_dict.items():
+            if k in row:
                 row[k] = v
 
-        # 5) CSV 안전 변환: list/dict는 JSON 문자열로
-        def _jsonify_if_needed(v):
-            if v is None:
-                return None
-            if isinstance(v, (dict, list, tuple)):
-                try:
-                    return json.dumps(v, ensure_ascii=False)
-                except Exception:
-                    return str(v)
-            return v
+    for k, v in kw.items():
+        if k in row and v not in (None, ""):
+            row[k] = v
 
-        # 복원(문자열 JSON -> python), 그 다음 다시 저장용으로 stringify
-        def _restore_json(val):
-            if val in (None, "", "null"):
-                return None
-            if isinstance(val, (list, dict)):
-                return val
-            if isinstance(val, str):
-                s = val.strip()
-                if (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
-                    try:
-                        return json.loads(s)
-                    except Exception:
-                        return val
+    def _jsonify_if_needed(v):
+        if v is None:
+            return None
+        if isinstance(v, (dict, list, tuple)):
+            try:
+                return json.dumps(v, ensure_ascii=False)
+            except Exception:
+                return str(v)
+        return v
+
+    def _restore_json(val):
+        if val in (None, "", "null"):
+            return None
+        if isinstance(val, (list, dict)):
             return val
+        if isinstance(val, str):
+            s = val.strip()
+            if (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
+                try:
+                    return json.loads(s)
+                except Exception:
+                    return val
+        return val
 
-        # JSON일 수 있는 필드 복원
-        for k in ("bin_edges", "bin_counts", "bin_spans", "class_ranges", "class_edges", "class_counts", "val_coverage", "per_class_f1"):
-            row[k] = _restore_json(row.get(k))
+    for k in ("bin_edges", "bin_counts", "bin_spans", "class_ranges", "class_edges", "class_counts", "val_coverage", "per_class_f1"):
+        row[k] = _restore_json(row.get(k))
 
-        # bins 계산(없으면)
-        try:
-            be = row.get("bin_edges")
-            bc = row.get("bin_counts")
-            if row.get("bins") in (None, "", 0):
-                if isinstance(be, list) and len(be) >= 2:
-                    row["bins"] = len(be) - 1
-                elif isinstance(bc, list):
-                    row["bins"] = len(bc)
-        except Exception:
-            pass
+    try:
+        be = row.get("bin_edges")
+        bc = row.get("bin_counts")
+        if row.get("bins") in (None, "", 0):
+            if isinstance(be, list) and len(be) >= 2:
+                row["bins"] = len(be) - 1
+            elif isinstance(bc, list):
+                row["bins"] = len(bc)
+    except Exception:
+        pass
 
-        # num_classes 계산(없으면)
-        try:
-            if row.get("num_classes") in (None, "", 0):
-                cr = row.get("class_ranges")
-                be2 = row.get("bin_edges")
-                cc2 = row.get("class_counts")
-                if isinstance(cr, list) and cr:
-                    row["num_classes"] = int(len(cr))
-                elif isinstance(be2, list) and len(be2) >= 2:
-                    row["num_classes"] = int(len(be2) - 1)
-                elif isinstance(cc2, list) and cc2:
-                    row["num_classes"] = int(len(cc2))
-        except Exception:
-            pass
+    try:
+        if row.get("num_classes") in (None, "", 0):
+            cr = row.get("class_ranges")
+            be2 = row.get("bin_edges")
+            cc2 = row.get("class_counts")
+            if isinstance(cr, list) and cr:
+                row["num_classes"] = int(len(cr))
+            elif isinstance(be2, list) and len(be2) >= 2:
+                row["num_classes"] = int(len(be2) - 1)
+            elif isinstance(cc2, list) and cc2:
+                row["num_classes"] = int(len(cc2))
+    except Exception:
+        pass
 
-        # 6) UI 요약 자동 생성(없을 때만)
-        try:
-            status = (row.get("status") or "").strip()
-            if not row.get("ui_status"):
-                if status in ("success", "best"):
-                    row["ui_status"] = f"✅ 정상 학습 (status={status})"
-                elif status in ("info",):
-                    row["ui_status"] = f"ℹ️ 참고용 로그 (status={status})"
-                elif status in ("warn", "warning"):
-                    row["ui_status"] = f"🟠 경고 (status={status})"
-                elif status in ("error", "fail", "failed"):
-                    row["ui_status"] = f"🔴 실패/오류 (status={status})"
-                else:
-                    row["ui_status"] = f"상태: {status or '미상'}"
+    try:
+        status = (row.get("status") or "").strip()
+        if not row.get("ui_status"):
+            if status in ("success", "best"):
+                row["ui_status"] = f"✅ 정상 학습 (status={status})"
+            elif status in ("info",):
+                row["ui_status"] = f"ℹ️ 참고용 로그 (status={status})"
+            elif status in ("warn", "warning"):
+                row["ui_status"] = f"🟠 경고 (status={status})"
+            elif status in ("error", "fail", "failed"):
+                row["ui_status"] = f"🔴 실패/오류 (status={status})"
+            else:
+                row["ui_status"] = f"상태: {status or '미상'}"
 
-            # 신 UI 요약 6종이 비어있으면 만들어 채움
-            need_new_ui = any(not row.get(k) for k in (
-                "ui_data_summary", "ui_dist_summary", "ui_class_range_summary",
-                "ui_class_count_summary", "ui_usable_summary", "ui_performance_summary"
-            ))
+        need_new_ui = any(not row.get(k) for k in (
+            "ui_data_summary", "ui_dist_summary", "ui_class_range_summary",
+            "ui_class_count_summary", "ui_usable_summary", "ui_performance_summary"
+        ))
 
-            if need_new_ui:
-                # rows/usable/acc/f1 기본값
-                rows = int(row.get("rows") or 0)
-                usable = int(row.get("usable_samples") or 0)
-                acc = float(row.get("val_acc") or row.get("accuracy") or 0.0)
-                f1v = float(row.get("val_f1") or row.get("f1") or 0.0)
-                be = row.get("bin_edges") or []
-                bc = row.get("bin_counts") or []
-                cr = row.get("class_ranges") or []
+        if need_new_ui:
+            rows = int(row.get("rows") or 0)
+            usable = int(row.get("usable_samples") or 0)
+            acc = float(row.get("val_acc") or row.get("accuracy") or 0.0)
+            f1v = float(row.get("val_f1") or row.get("f1") or 0.0)
+            be = row.get("bin_edges") or []
+            bc = row.get("bin_counts") or []
+            cr = row.get("class_ranges") or []
 
-                summary = make_training_summary_fields(
-                    rows=rows,
-                    bin_edges=be if isinstance(be, list) else [],
-                    bin_counts=bc if isinstance(bc, list) else [],
-                    class_ranges=cr if isinstance(cr, list) else [],
-                    usable_samples=usable,
-                    acc=acc,
-                    f1=f1v,
-                )
-                for k, v in summary.items():
-                    if not row.get(k):
-                        row[k] = v
-
-            # 구형 UI 호환 필드도 최소 채움
-            if not row.get("ui_data_amount"):
-                rows_v = row.get("rows")
-                row["ui_data_amount"] = f"학습 데이터: {rows_v}개" if rows_v not in (None, "", 0) else "학습 데이터 정보 없음"
-            if not row.get("ui_return_summary"):
-                be = row.get("bin_edges")
-                if isinstance(be, list) and len(be) >= 2:
-                    row["ui_return_summary"] = f"수익률 범위: {float(be[0]):.4f} ~ {float(be[-1]):.4f}"
-                else:
-                    row["ui_return_summary"] = "수익률 분포 정보 없음"
-            if not row.get("ui_coverage_summary"):
-                cov = row.get("val_coverage")
-                if isinstance(cov, dict) and cov.get("total"):
-                    covered = int(cov.get("covered", 0))
-                    total = int(cov.get("total", 0))
-                    row["ui_coverage_summary"] = f"검증 커버리지: {covered}/{total}"
-                else:
-                    row["ui_coverage_summary"] = "검증 커버리지 정보 없음"
-        except Exception as e:
-            print(f"[train_log summary warn] {e}", flush=True)
-
-        # 7) 최종 CSV 저장용 stringify(리스트/딕트 -> JSON 문자열)
-        for k in list(row.keys()):
-            row[k] = _jsonify_if_needed(row[k])
-
-        # 8) 기록
-        _append_train_log(row)
-
-        # 9) 대시보드 갱신(있으면)
-        try:
-            logger.update_train_dashboard(
-                symbol=row.get("symbol"),
-                strategy=row.get("strategy"),
-                model=row.get("model", "")
+            summary = make_training_summary_fields(
+                rows=rows,
+                bin_edges=be if isinstance(be, list) else [],
+                bin_counts=bc if isinstance(bc, list) else [],
+                class_ranges=cr if isinstance(cr, list) else [],
+                usable_samples=usable,
+                acc=acc,
+                f1=f1v,
             )
-        except Exception as e:
-            print(f"[경고] train_dashboard 업데이트 실패: {e}", flush=True)
+            for k, v in summary.items():
+                if not row.get(k):
+                    row[k] = v
 
-    # ✅ 패치 적용은 "함수 바깥"에서 해야 함 (여기 중요)
-    logger.log_training_result = _log_training_result_patched
-    logger._patched_train_log = True
+        if not row.get("ui_data_amount"):
+            rows_v = row.get("rows")
+            row["ui_data_amount"] = f"학습 데이터: {rows_v}개" if rows_v not in (None, "", 0) else "학습 데이터 정보 없음"
+        if not row.get("ui_return_summary"):
+            be = row.get("bin_edges")
+            if isinstance(be, list) and len(be) >= 2:
+                row["ui_return_summary"] = f"수익률 범위: {float(be[0]):.4f} ~ {float(be[-1]):.4f}"
+            else:
+                row["ui_return_summary"] = "수익률 분포 정보 없음"
+        if not row.get("ui_coverage_summary"):
+            cov = row.get("val_coverage")
+            if isinstance(cov, dict) and cov.get("total"):
+                covered = int(cov.get("covered", 0))
+                total = int(cov.get("total", 0))
+                row["ui_coverage_summary"] = f"검증 커버리지: {covered}/{total}"
+            else:
+                row["ui_coverage_summary"] = "검증 커버리지 정보 없음"
+    except Exception as e:
+        print(f"[train_log summary warn] {e}", flush=True)
 
+    for k in list(row.keys()):
+        row[k] = _jsonify_if_needed(row[k])
+
+    _append_train_log(row)
+
+    try:
+        logger.update_train_dashboard(
+            symbol=row.get("symbol"),
+            strategy=row.get("strategy"),
+            model=row.get("model", "")
+        )
+    except Exception as e:
+        print(f"[경고] train_dashboard 업데이트 실패: {e}", flush=True)
+
+
+# ✅ 패치 적용은 여기서 "전역 1번"만
+logger.log_training_result = _log_training_result_patched
+logger._patched_train_log = True
 
 
 # ✅ 예측 게이트: 안전 임포트(없으면 no-op)
@@ -784,8 +749,6 @@ try:
 except Exception:
     def run_after_training(symbol, strategy, *a, **k):
         return False
-
-# [가드] data_augmentation (없으면 원본 그대로 통과)  # (위에서 임포트 추가됨)
 
 # [가드] focal_loss (없으면 CE Loss 대체)
 try:
@@ -853,12 +816,11 @@ USE_AMP = os.getenv("USE_AMP", "1") == "1"
 TRAIN_CUDA_EMPTY_EVERY_EP = os.getenv("TRAIN_CUDA_EMPTY_EVERY_EP", "1") == "1"
 
 # ===== [ADD] 클래스 불균형 제어용 ENV =====
-BALANCE_CLASSES_FLAG = os.getenv("BALANCE_CLASSES", "1") == "1"      # 기본 ON (증강/리샘플용)
-WEIGHTED_SAMPLER_FLAG = os.getenv("WEIGHTED_SAMPLER", "0") == "1"    # 기본 OFF
+BALANCE_CLASSES_FLAG = os.getenv("BALANCE_CLASSES", "1") == "1"
+WEIGHTED_SAMPLER_FLAG = os.getenv("WEIGHTED_SAMPLER", "0") == "1"
 
-# ★ 희소 클래스 보강용 ENV (삭제 없음, 단순 복사)
-MIN_CLASS_SAMPLES = int(os.getenv("MIN_CLASS_SAMPLES", "4"))   # 각 클래스 최소 유지 샘플 수
-MAX_CLASS_UPSAMPLE = int(os.getenv("MAX_CLASS_UPSAMPLE", "64"))  # 전체 데이터가 너무 비대해지는 것 방지용 상한
+MIN_CLASS_SAMPLES = int(os.getenv("MIN_CLASS_SAMPLES", "4"))
+MAX_CLASS_UPSAMPLE = int(os.getenv("MAX_CLASS_UPSAMPLE", "64"))
 # ===================================================================
 
 def _as_bool_env(name: str, default: bool) -> bool:
@@ -871,23 +833,13 @@ CS_ARG_BETA = float(os.getenv("CS_ARG_BETA", "1.0"))
 
 
 def _epochs_for(strategy: str) -> int:
-    """
-    전략별 기본 학습 에포크 수
-    - 단기: 조금 더 많이
-    - 중기: 단기보다는 적게, 장기보다는 많게
-    - 장기: 기존 수준 유지
-    """
     if strategy == "단기":
-        # 기존 24 → 기본 36 (env 로 덮어쓸 수 있음)
         return int(os.getenv("EPOCHS_SHORT", "36"))
     if strategy == "중기":
-        # 기존 12 → 기본 24
         return int(os.getenv("EPOCHS_MID", "24"))
     if strategy == "장기":
-        # 장기는 현재도 성능이 잘 나오므로 그대로 유지
         return int(os.getenv("EPOCHS_LONG", "12"))
     return int(os.getenv("EPOCHS_DEFAULT", "24"))
-
 
 
 EVAL_MIN_F1_SHORT = float(os.getenv("EVAL_MIN_F1_SHORT", "0.10"))
@@ -914,7 +866,6 @@ PREDICT_TIMEOUT_SEC = float(os.getenv("PREDICT_TIMEOUT_SEC", "180"))
 IMPORTANCE_ENABLE = os.getenv("IMPORTANCE_ENABLE", "1") == "1"
 
 GROUP_TRAIN_LOCK = os.path.join(RUN_DIR, "group_training.lock")
-
 
 
 def _set_group_active(active: bool, group_idx: int | None = None, symbols: list | None = None):
