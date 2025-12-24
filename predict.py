@@ -476,46 +476,75 @@ def _validate_meta_class_ranges(meta, *, num_classes: int, symbol: str, strategy
 
 def _class_range_by_meta_or_cfg(cls_id: int, meta, symbol: str, strategy: str):
     """
-    클래스별 수익률 구간을 결정할 때, 학습 시점의 동적 경계까지 반영하도록 수정된 버전.
-    우선순위:
-      1️⃣ 모델(meta.json)에 class_ranges가 있으면 그걸 최우선으로 사용
-      2️⃣ labels.py가 생성한 동적 경계파일(/persistent/label_edges/...)을 사용
-      3️⃣ 위 두 개 다 없을 경우 config.py 기본 구간으로 fallback
+    ✅ YOPO 최종 규칙 (2번 수정):
+    클래스별 수익률 구간 결정 우선순위 (label_edges 100% 최우선)
+
+    1️⃣ /persistent/label_edges/{SYMBOL}__{전략}.json  (edges)  ← 최우선
+    2️⃣ 모델 meta.json 의 class_ranges
+    3️⃣ config.py 기본 구간 fallback
     """
     cid = int(cls_id)
 
-    # 1️⃣ 모델 메타정보에서 class_ranges가 있으면 최우선 사용
+    # ---------------------------------------------------------
+    # 1️⃣ label_edges.json 최우선 (100% 신뢰)
+    # ---------------------------------------------------------
+    try:
+        sym = str(symbol or "").strip().upper()
+        strat = str(strategy or "").strip()
+        key = f"{sym}__{strat}"
+
+        edges_dir = os.getenv("LABEL_EDGES_DIR", os.path.join(PERSISTENT_ROOT, "label_edges"))
+        lp = os.path.join(edges_dir, f"{key}.json")
+
+        if os.path.exists(lp):
+            with open(lp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            edges = data.get("edges") or []
+
+            # edges 유효성 체크 (최소 cid+2 필요)
+            if isinstance(edges, list) and len(edges) >= (cid + 2):
+                lo = float(edges[cid])
+                hi = float(edges[cid + 1])
+
+                # 혹시 %로 저장된 경우 대비
+                lo, hi = _sanitize_range(lo, hi)
+
+                # hi<=lo면 이상값 → 그래도 "윈도우 보강"으로 아주 작은 폭을 확보
+                if hi <= lo:
+                    hi = lo + 1e-9
+
+                return (lo, hi)
+    except Exception as e:
+        print(f"[class_range/label_edges 예외] {e}")
+
+    # ---------------------------------------------------------
+    # 2️⃣ meta.class_ranges (label_edges 없을 때만)
+    # ---------------------------------------------------------
     try:
         if isinstance(meta, dict):
             cr = meta.get("class_ranges")
             if isinstance(cr, list) and cid < len(cr):
                 lo, hi = cr[cid]
-                return _sanitize_range(lo, hi)
+                lo, hi = _sanitize_range(lo, hi)
+                if float(hi) <= float(lo):
+                    hi = float(lo) + 1e-9
+                return (float(lo), float(hi))
     except Exception as e:
         print(f"[class_range/meta 예외] {e}")
 
-    # 2️⃣ labels.py가 만든 동적 라벨 경계 사용
-    try:
-        key = f"{symbol.strip().upper()}__{strategy.strip()}"
-        lp = os.path.join(PERSISTENT_ROOT, "label_edges", f"{key}.json")
-        if os.path.exists(lp):
-            with open(lp, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            edges = data.get("edges") or []
-            if edges and (cid + 1) < len(edges):
-                lo = float(edges[cid])
-                hi = float(edges[cid + 1])
-                return _sanitize_range(lo, hi)
-    except Exception as e:
-        print(f"[class_range/label_edges 예외] {e}")
-
+    # ---------------------------------------------------------
     # 3️⃣ 마지막 fallback: config.py 기본 구간
+    # ---------------------------------------------------------
     try:
         lo, hi = get_class_return_range(cid, symbol, strategy)
-        return _sanitize_range(lo, hi)
+        lo, hi = _sanitize_range(lo, hi)
+        if float(hi) <= float(lo):
+            hi = float(lo) + 1e-9
+        return (float(lo), float(hi))
     except Exception as e:
         print(f"[class_range/config 예외] {e}")
         return (0.0, 0.0)
+
 
 def _position_from_range(lo: float, hi: float) -> str:
     try:
