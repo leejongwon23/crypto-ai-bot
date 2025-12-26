@@ -140,13 +140,27 @@ def _bypass_gate_for_source(source: str) -> bool:
 def _group_active() -> bool:
     """
     그룹 학습 중인지 여부만 확인한다.
-    - train.py에서 GROUP_ACTIVE 파일을 만들면 -> True (학습 중)
-    - train.py에서 파일을 지우기 전까지는 계속 True 유지
+    - group_predict.active 가 '너무 오래된 파일'이면 stale 로 보고 삭제한다.
     """
     try:
-        return os.path.exists(GROUP_ACTIVE)
+        if not os.path.exists(GROUP_ACTIVE):
+            return False
+
+        # ✅ stale 자동 제거 (핵심)
+        try:
+            age = time.time() - float(os.path.getmtime(GROUP_ACTIVE))
+            if age > max(30, int(GROUP_ACTIVE_STALE_SEC)):
+                os.remove(GROUP_ACTIVE)
+                print(f"[GROUP_ACTIVE] stale removed (> {GROUP_ACTIVE_STALE_SEC}s): {GROUP_ACTIVE}")
+                return False
+        except Exception:
+            # mtime 읽기 실패 등은 그냥 '활성'로 취급
+            pass
+
+        return True
     except Exception:
         return False
+
 
 def open_predict_gate(note=""):
     try:
