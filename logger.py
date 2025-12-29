@@ -853,45 +853,114 @@ def log_prediction(
     meta_reason=None,
     **kwargs
 ):
+    """
+    ✅ FIX 목적
+    1) predicted_class가 None/빈값이면 chosen_class로 자동 대체
+    2) rate가 None이면 expected_return → note.expected_return_mid 순으로 자동 채움
+    3) train_dist(학습용 분포 로그)는 연속실패 집계에서 제외
+    """
+
     from datetime import datetime as _dt
-    if not _READONLY_FS:
-        ensure_prediction_log_exists()
+    import json
 
+    # (1) note 파싱(실패해도 빈 dict로)
+    try:
+        note_obj = json.loads(note) if isinstance(note, str) else {}
+        if not isinstance(note_obj, dict):
+            note_obj = {}
+    except Exception:
+        note_obj = {}
+
+    def _is_blank(v) -> bool:
+        if v is None:
+            return True
+        s = str(v).strip().lower()
+        return s in {"", "none", "nan", "null", "unknown", "-"}
+
+    # (2) predicted_class 보정
+    if _is_blank(predicted_class):
+        if not _is_blank(chosen_class):
+            predicted_class = chosen_class
+        else:
+            nc = note_obj.get("chosen_class", None)
+            if not _is_blank(nc):
+                predicted_class = nc
+
+    # (3) rate 보정: rate → expected_return → note.expected_return_mid
     if rate is None:
-        rate = expected_return if expected_return is not None else 0.0
+        if expected_return is not None:
+            rate = expected_return
+        else:
+            erm = note_obj.get("expected_return_mid", None)
+            try:
+                rate = float(erm) if (erm is not None and str(erm).strip() != "") else None
+            except Exception:
+                rate = None
+    if rate is None:
+        rate = 0.0
+    try:
+        rate = float(rate)
+    except Exception:
+        rate = 0.0
 
-    now = _dt.now(pytz.timezone("Asia/Seoul")).isoformat() if timestamp is None else timestamp
+    # (4) meta_choice/meta_reason 보강(비어있을 때만)
+    if _is_blank(meta_choice):
+        mc = note_obj.get("meta_choice", None)
+        if not _is_blank(mc):
+            meta_choice = mc
+    if _is_blank(meta_reason):
+        mr = note_obj.get("meta_reason", None)
+        if not _is_blank(mr):
+            meta_reason = mr
+
+    # (5) timestamp 기본값
+    try:
+        now = now_kst().isoformat() if timestamp is None else timestamp
+    except Exception:
+        now = _dt.now().isoformat() if timestamp is None else timestamp
+
+    # (6) 기타 필드 정리(기존 로직 최대한 존중: 숫자형 안전변환)
+    try:
+        entry_price = float(entry_price or 0.0)
+    except Exception:
+        entry_price = 0.0
+    try:
+        target_price = float(target_price or 0.0)
+    except Exception:
+        target_price = 0.0
+    try:
+        return_value = 0.0 if return_value is None else float(return_value)
+    except Exception:
+        return_value = 0.0
+
     top_k_str = ",".join(map(str, top_k)) if top_k else ""
     reason = (reason or "").strip()
     meta_reason = (meta_reason or "").strip()
-    rate = float(rate)
-    return_value = 0.0 if return_value is None else float(return_value)
-    entry_price = float(entry_price or 0.0)
-    target_price = float(target_price or 0.0)
-    model, model_name = _normalize_model_fields(model, model_name, symbol, strategy)
 
-    try:
-        note_obj = json.loads(note) if isinstance(note, str) else {}
-    except Exception:
-        note_obj = {}
+    # (7) train_dist 판별: source/model/reason 중 하나라도 학습용이면 제외
+    src_lower = str(source or "").lower()
+    mdl_lower = str(model or "").lower()
+    rsn_lower = str(reason or "").lower()
+    is_train_dist = (
+        "train" in src_lower
+        or "train_return_distribution" in src_lower
+        or "train_dist" in src_lower
+        or rsn_lower == "train_return_distribution"
+        or "train_return_distribution" in rsn_lower
+        or mdl_lower == "trainer"
+    )
+
+    # (8) CSV 기록은 "네 기존 logger.py의 방식"을 그대로 쓰는게 정답이라
+    #     여기선 기존에 존재하는 ensure_prediction_log_exists / _FileLock / rotate_prediction_log_if_needed
+    #     / PREDICTION_HEADERS / _align_row_to_header / _READONLY_FS 를 그대로 사용한다는 전제로 작성.
+
+    if not _READONLY_FS:
+        ensure_prediction_log_exists()
+
+    # note에서 뽑아 쓰는 기존 확장 필드가 있으면 최대한 유지
     expected_return_mid = note_obj.get("expected_return_mid", "")
-    raw_prob_pred = note_obj.get("raw_prob_pred", "")
-    calib_prob_pred = note_obj.get("calib_prob_pred", "")
-    meta_choice_detail = note_obj.get("meta_choice", "")
 
-    fv_serial = ""
-    try:
-        if feature_vector is not None:
-            import numpy as np
-            if isinstance(feature_vector, np.ndarray): v = feature_vector.flatten().tolist()
-            elif isinstance(feature_vector, (list, tuple)): v = feature_vector
-            else: v = []
-            fv_serial = json.dumps(v if len(v) <= 64 else {"head": v[:8], "tail": v[-8:]}, ensure_ascii=False)
-    except Exception:
-        fv_serial = ""
-
-    note_ex = _extract_from_note(note)
-
+    # shadow 문자열 처리(원래 파일에 있던 규칙이 있다면 그걸 써도 됨)
     if isinstance(shadow_models, (list, tuple, set)):
         shadow_models_str = "|".join(map(str, shadow_models))
     else:
@@ -902,63 +971,89 @@ def log_prediction(
     else:
         shadow_classes_str = "" if shadow_classes is None else str(shadow_classes)
 
-    src_lower = str(source or "").lower()
-    mdl_lower = str(model or "").lower()
-    rsn_lower = str(reason or "").lower()
-    is_train_dist = (
-        "train" in src_lower
-        or mdl_lower == "trainer"
-        or rsn_lower == "train_return_distribution"
-    )
+    # feature_vector 직렬화(원래 함수가 있으면 그걸 쓰는 편이 더 좋음)
+    fv_serial = ""
+    try:
+        if feature_vector is not None:
+            import numpy as np
+            if isinstance(feature_vector, np.ndarray):
+                v = feature_vector.flatten().tolist()
+            elif isinstance(feature_vector, (list, tuple)):
+                v = list(feature_vector)
+            else:
+                v = []
+            fv_serial = json.dumps(v if len(v) <= 64 else {"head": v[:8], "tail": v[-8:]}, ensure_ascii=False)
+    except Exception:
+        fv_serial = ""
 
+    # note 확장 필드 추출 함수가 기존에 있으면 사용
+    try:
+        note_ex = _extract_from_note(note)
+    except Exception:
+        note_ex = {}
+
+    # row 구성: 기존 헤더 순서에 맞춰야 한다(너 파일의 PREDICTION_HEADERS 기준)
     row = [
-        now, symbol, strategy, direction, entry_price, target_price,
-        model, predicted_class, top_k_str, note, str(success), reason,
-        rate, return_value, label, group_id, model_symbol, model_name,
-        source, volatility, source_exchange, regime, meta_choice,
-        raw_prob, calib_prob, calib_ver, fv_serial,
+        now, symbol, strategy, direction,
+        entry_price, target_price,
+        model, predicted_class if predicted_class is not None else "",
+        top_k_str, note,
+        str(bool(success)), reason,
+        rate, return_value,
+        label, group_id, model_symbol, model_name,
+        source, volatility, source_exchange,
+        regime, meta_choice,
+        raw_prob, calib_prob, calib_ver,
+        fv_serial,
         class_return_min, class_return_max, class_return_text,
-        note_ex.get("position",""), note_ex.get("hint_allow_long",""), note_ex.get("hint_allow_short",""),
-        note_ex.get("hint_slope",""), note_ex.get("used_minret_filter",""), note_ex.get("explore_used",""),
-        note_ex.get("hint_ma_fast",""), note_ex.get("hint_ma_slow",""),
-        expected_return_mid, raw_prob_pred, calib_prob_pred, meta_choice_detail,
-        chosen_model or "", chosen_class if chosen_class is not None else "",
-        shadow_models_str, shadow_classes_str,
-        hold_type or "", hold_reason or "", meta_score if meta_score is not None else "",
+        note_ex.get("position",""),
+        note_ex.get("hint_allow_long",""),
+        note_ex.get("hint_allow_short",""),
+        note_ex.get("hint_slope",""),
+        note_ex.get("used_minret_filter",""),
+        note_ex.get("explore_used",""),
+        note_ex.get("hint_ma_fast",""),
+        note_ex.get("hint_ma_slow",""),
+        expected_return_mid,
+        note_obj.get("raw_prob_pred",""),
+        note_obj.get("calib_prob_pred",""),
+        note_obj.get("meta_choice",""),
+        chosen_model or "",
+        chosen_class if chosen_class is not None else "",
+        shadow_models_str,
+        shadow_classes_str,
+        hold_type or "",
+        hold_reason or "",
+        meta_score if meta_score is not None else "",
         meta_reason,
     ]
 
     aligned = _align_row_to_header(row, PREDICTION_HEADERS)
-    payload = dict(zip(PREDICTION_HEADERS, aligned))
 
-    if _READONLY_FS or not _fs_has_space(PREDICTION_LOG, 256*1024):
+    if _READONLY_FS or (not _fs_has_space(PREDICTION_LOG, 256*1024)):
         tag = "PREDICT/TRAIN_DIST" if is_train_dist else "PREDICT"
-        print(f"[{tag}][console] {json.dumps(payload, ensure_ascii=False)}")
+        try:
+            payload = dict(zip(PREDICTION_HEADERS, aligned))
+            print(f"[{tag}][console] {json.dumps(payload, ensure_ascii=False)}")
+        except Exception:
+            print(f"[{tag}][console] row_write_failed")
     else:
-        if is_train_dist:
-            print(f"[PREDICT/TRAIN_DIST][console] {json.dumps(payload, ensure_ascii=False)}")
-        else:
-            with _FileLock(_PRED_LOCK_PATH, timeout=10.0):
-                rotate_prediction_log_if_needed()
-                write_header = not os.path.exists(PREDICTION_LOG) or os.path.getsize(PREDICTION_LOG) == 0
-                with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
-                    w = csv.writer(f)
-                    if write_header: w.writerow(PREDICTION_HEADERS)
-                    w.writerow(aligned)
+        with _FileLock(_PRED_LOCK_PATH, timeout=10.0):
+            rotate_prediction_log_if_needed()
+            write_header = (not os.path.exists(PREDICTION_LOG)) or (os.path.getsize(PREDICTION_LOG) == 0)
+            with open(PREDICTION_LOG, "a", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                if write_header:
+                    w.writerow(PREDICTION_HEADERS)
+                w.writerow(aligned)
 
-    if success:
-        if is_train_dist:
-            _print_once(
-                f"train_ret_dist:{symbol}:{strategy}:{model_name}",
-                f"[✅ 수익분포 로그] {symbol}-{strategy} ({model_name}) — 학습용 수익률 분포만 기록 (실제 매매 예측 아님)"
-            )
-        else:
-            _print_once(
-                f"pred_ok:{symbol}:{strategy}:{model_name}",
-                f"[✅ 예측 OK] {symbol}-{strategy} class={predicted_class} rate={rate:.4f} src={source_exchange}"
-            )
-    else:
-        _ConsecutiveFailAggregator.add((symbol, strategy, group_id or 0, model_name), False, reason)
+    # (9) 연속실패 집계: ✅ train_dist는 제외
+    if (not success) and (not is_train_dist):
+        try:
+            _ConsecutiveFailAggregator.add((symbol, strategy, group_id or 0, model_name or str(model)), False, reason)
+        except Exception:
+            pass
+
 
 # -------------------------
 # 학습 로그
