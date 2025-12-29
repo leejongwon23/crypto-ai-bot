@@ -916,9 +916,8 @@ def get_kline_interval(symbol: str, interval: str, limit: int) -> pd.DataFrame:
 
 def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, force_refresh: bool = False):
     """
-    ✔ 2번 아이디어 반영
-        - 더 깊게(limit*3) 수집
-        - 1000개 샘플링 (단, 1000 미만도 절대 버리지 않음)
+    ✔ 장기(주봉)는 모든 코인에 대해 Binance를 항상 병합
+    ✔ 2000 depth 수집 후 1000개 샘플링
     """
     try:
         # -----------------------------
@@ -934,9 +933,8 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
         limit = int(cfg.get("limit", 300))
         interval = cfg.get("interval", "D")
 
-        # ✔ 핵심 변경: limit_for_fetch = limit * 3
+        # ✔ 깊게 수집
         limit_for_fetch = 2000
-
         cache_key = f"{symbol.upper()}-{strategy}-slack{end_slack_min}"
 
         # -----------------------------
@@ -966,18 +964,23 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
                 return disk
 
         # -----------------------------
-        # 4) 3배 깊게 수집
+        # 4) 캔들 수집 (핵심 수정 구간)
         # -----------------------------
         df_bybit = get_kline(symbol, interval=interval, limit=limit_for_fetch)
         if not isinstance(df_bybit, pd.DataFrame):
             df_bybit = pd.DataFrame()
 
         df_bin = pd.DataFrame()
-        need_bin = (df_bybit.empty or len(df_bybit) < int(limit * 0.9))
-        if need_bin and BINANCE_ENABLED:
-            df_bin = get_kline_binance(symbol, interval=interval, limit=limit_for_fetch)
 
-        dfs = [d for d in [df_bybit, df_bin] if isinstance(d, pd.DataFrame) and not d.empty]
+        # ✅ 핵심: 장기(주봉)는 모든 코인에 대해 Binance 항상 병합
+        if strategy == "장기" and BINANCE_ENABLED:
+            df_bin = get_kline_binance(symbol, interval=interval, limit=limit_for_fetch)
+        else:
+            need_bin = (df_bybit.empty or len(df_bybit) < int(limit * 0.9))
+            if need_bin and BINANCE_ENABLED:
+                df_bin = get_kline_binance(symbol, interval=interval, limit=limit_for_fetch)
+
+        dfs = [d for d in (df_bybit, df_bin) if isinstance(d, pd.DataFrame) and not d.empty]
         df = _normalize_df(pd.concat(dfs, ignore_index=True)) if dfs else pd.DataFrame()
 
         # -----------------------------
@@ -990,35 +993,30 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
 
         if df.empty:
             out = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
-            out.attrs["source_exchange"] = "NONE"
-            out.attrs["recent_rows"] = 0
             out.attrs["not_enough_rows"] = True
             return out
 
         # -----------------------------
-        # 6) 시간 정렬
+        # 6) 정렬 및 중복 제거
         # -----------------------------
-        df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+        df = (
+            df.drop_duplicates(subset=["timestamp"])
+              .sort_values("timestamp")
+              .reset_index(drop=True)
+        )
 
         # -----------------------------
-        # 7) ✔ 1000개 샘플링 / 부족한 경우 그대로 사용
+        # 7) 1000개 샘플링
         # -----------------------------
         n = len(df)
-
-        window = _PREDICT_MIN_WINDOW  # 최소 10개
+        window = _PREDICT_MIN_WINDOW
 
         if n >= 1000:
-            # 균등 샘플링 (메모리 부담 최소)
             idx = np.linspace(0, n - 1, 1000).astype(int)
             df = df.iloc[idx].reset_index(drop=True)
-
-        elif window <= n < 1000:
-            # 있는 만큼 그대로 (절대 버리지 않음)
+        elif n >= window:
             df = df.copy().reset_index(drop=True)
-
         else:
-            # window 미만 → 학습 불가
-            df = df.copy()
             df.attrs["not_enough_rows"] = True
             return df
 
@@ -1042,6 +1040,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
         out = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
         out.attrs["not_enough_rows"] = True
         return out
+
 
 # ========================= 프리패치/티커 =========================
 def prefetch_symbol_groups(strategy: str):
