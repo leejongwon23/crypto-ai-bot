@@ -934,15 +934,12 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
                 end_slack_min = 0
 
         cfg = STRATEGY_CONFIG.get(strategy, {"limit": 300, "interval": "D"})
-        limit = int(cfg.get("limit", 300))              # "목표"는 1000(설정값)
+        limit = int(cfg.get("limit", 300))              # 목표 1000
         interval = cfg.get("interval", "D")
 
         # ✔ 깊게 수집(고정 2000)
         limit_for_fetch = 2000
 
-        # ✅ 장기 1000 형태 강제 옵션 (기본 ON: 1)
-        # - 1: 부족하면 1000개로 패딩(반복)해서 형태 맞춤
-        # - 0: 부족하면 있는 만큼만 사용 (원본 유지)
         PAD_LONG_TO_1000 = os.getenv("PAD_LONG_TO_1000", "1") == "1"
 
         cache_key = f"{symbol.upper()}-{strategy}-slack{end_slack_min}"
@@ -962,11 +959,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
         # -----------------------------
         cached = CacheManager.get(cache_key, ttl_sec=600)
         if (not force_refresh) and isinstance(cached, pd.DataFrame) and not cached.empty:
-            # 캐시라도 "현재 상태"가 보이게 최소 로그
-            try:
-                print(f"[KLINE/CACHE] {symbol}-{strategy} interval={interval} rows={len(cached)} slack={end_slack_min}m")
-            except Exception:
-                pass
+            print(f"[KLINE/CACHE] {symbol}-{strategy} interval={interval} rows={len(cached)} slack={end_slack_min}m")
             return cached
 
         # -----------------------------
@@ -976,16 +969,17 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
             disk = _load_df_cache(symbol, strategy, interval, end_slack_min)
             if isinstance(disk, pd.DataFrame) and not disk.empty:
                 CacheManager.set(cache_key, disk)
-                try:
-                    print(f"[KLINE/DISK] {symbol}-{strategy} interval={interval} rows={len(disk)} slack={end_slack_min}m")
-                except Exception:
-                    pass
+                print(f"[KLINE/DISK] {symbol}-{strategy} interval={interval} rows={len(disk)} slack={end_slack_min}m")
                 return disk
 
         # -----------------------------
         # 4) 캔들 수집 (핵심)
         # -----------------------------
-        print(f"[KLINE/START] {symbol}-{strategy} interval={interval} target(limit)={limit} fetch_depth={limit_for_fetch} slack={end_slack_min}m force_refresh={force_refresh}")
+        print(
+            f"[KLINE/START] {symbol}-{strategy} interval={interval} "
+            f"target(limit)={limit} fetch_depth={limit_for_fetch} "
+            f"slack={end_slack_min}m force_refresh={force_refresh}"
+        )
 
         df_bybit = get_kline(symbol, interval=interval, limit=limit_for_fetch)
         if not isinstance(df_bybit, pd.DataFrame):
@@ -993,7 +987,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
 
         df_bin = pd.DataFrame()
 
-        # ✅ 핵심: 장기(주봉)는 모든 코인에 대해 Binance 항상 병합
+        # 장기(주봉)는 항상 Binance 병합
         if strategy == "장기" and BINANCE_ENABLED:
             df_bin = get_kline_binance(symbol, interval=interval, limit=limit_for_fetch)
         else:
@@ -1004,45 +998,45 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
         rows_bybit = int(len(df_bybit)) if isinstance(df_bybit, pd.DataFrame) else 0
         rows_bin   = int(len(df_bin))   if isinstance(df_bin, pd.DataFrame) else 0
 
-        # 수집 요약 로그(차단 상태 포함)
-        try:
-            _log_fetch_summary(symbol, strategy, limit_for_fetch, rows_bybit, rows_bin, src="RAW_FETCH")
-        except Exception:
-            print(f"[FETCH] {symbol}-{strategy} depth={limit_for_fetch} bybit={rows_bybit} binance={rows_bin} src=RAW_FETCH")
+        print(
+            f"[KLINE/FETCH] {symbol}-{strategy} depth={limit_for_fetch} "
+            f"bybit={rows_bybit} binance={rows_bin}"
+        )
 
-        # 각 소스의 시간 범위도 찍어준다
         def _ts_range(df_):
             try:
                 if not isinstance(df_, pd.DataFrame) or df_.empty:
                     return ("-", "-")
                 ts_ = _parse_ts_series(df_["timestamp"])
-                a = ts_.min()
-                b = ts_.max()
-                return (str(a), str(b))
+                return (str(ts_.min()), str(ts_.max()))
             except Exception:
                 return ("?", "?")
 
         by_a, by_b = _ts_range(df_bybit)
         bn_a, bn_b = _ts_range(df_bin)
-        print(f"[KLINE/RAW_RANGE] {symbol}-{strategy} BYBIT={rows_bybit} ({by_a} ~ {by_b}) | BINANCE={rows_bin} ({bn_a} ~ {bn_b})")
+        print(
+            f"[KLINE/RAW_RANGE] {symbol}-{strategy} "
+            f"BYBIT={rows_bybit} ({by_a} ~ {by_b}) | "
+            f"BINANCE={rows_bin} ({bn_a} ~ {bn_b})"
+        )
 
-        # 병합
+        # -----------------------------
+        # 5) 병합
+        # -----------------------------
         dfs = [d for d in (df_bybit, df_bin) if isinstance(d, pd.DataFrame) and not d.empty]
-        df = _normalize_df(pd.concat(dfs, ignore_index=True)) if dfs else pd.DataFrame()
-
-        if df.empty:
-            print(f"[KLINE/EMPTY] {symbol}-{strategy} merged_rows=0 (BYBIT={rows_bybit}, BINANCE={rows_bin})")
+        if not dfs:
+            print(f"[KLINE/EMPTY] {symbol}-{strategy} merged_rows=0")
             out = pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
             out.attrs["not_enough_rows"] = True
             out.attrs["recent_rows"] = 0
             out.attrs["source_exchange"] = "NONE"
             return out
 
-        merged_rows = int(len(df))
-        print(f"[KLINE/MERGED] {symbol}-{strategy} merged_rows={merged_rows} (BYBIT={rows_bybit}, BINANCE={rows_bin})")
+        df = _normalize_df(pd.concat(dfs, ignore_index=True))
+        print(f"[KLINE/MERGED] {symbol}-{strategy} merged_rows={len(df)}")
 
         # -----------------------------
-        # 5) 슬랙 컷
+        # 6) 슬랙 컷
         # -----------------------------
         before_slack = int(len(df))
         if end_slack_min > 0 and not df.empty:
@@ -1060,7 +1054,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
             return out
 
         # -----------------------------
-        # 6) 정렬 및 중복 제거
+        # 7) 정렬/중복 제거
         # -----------------------------
         before_dedup = int(len(df))
         df = (
@@ -1071,107 +1065,81 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
         after_dedup = int(len(df))
         print(f"[KLINE/DEDUP] {symbol}-{strategy} before={before_dedup} after={after_dedup}")
 
-        # 시간 범위/기간(주봉이면 몇 주치인지) 로그
+        # 기간 로그
         try:
             ts2 = _parse_ts_series(df["timestamp"])
             span_days = (ts2.max() - ts2.min()).days if ts2.notna().any() else 0
             approx_weeks = int(span_days / 7) if span_days > 0 else 0
-            print(f"[KLINE/SPAN] {symbol}-{strategy} span_days≈{span_days} (~{approx_weeks}w) rows={len(df)} interval={interval}")
+            print(
+                f"[KLINE/SPAN] {symbol}-{strategy} span_days≈{span_days} "
+                f"(~{approx_weeks}w) rows={len(df)} interval={interval}"
+            )
         except Exception:
             pass
 
         # -----------------------------
-        # 7) 1000개 샘플링 (핵심)
+        # 8) 1000개 샘플링 (핵심)
         # -----------------------------
         n = int(len(df))
-        window = _PREDICT_MIN_WINDOW
-
-        # ✅ 여기서 '왜 1000이 안 되는지'를 명확히 찍는다
         if n >= 1000:
             idx = np.linspace(0, n - 1, 1000).astype(int)
             df = df.iloc[idx].reset_index(drop=True)
             print(f"[KLINE/SAMPLE] {symbol}-{strategy} n={n} -> sampled=1000 (depth={limit_for_fetch})")
         else:
-            # 주봉 1000개는 역사 길이가 부족하면 불가능 → 로그로 원인 표시
-            print(f"[KLINE/WARN] {symbol}-{strategy} merged_n={n} (<1000). interval={interval}. "
-                  f"주봉은 '존재하는 주 수'가 부족하면 1000개가 원천적으로 안 나올 수 있음.")
+            print(
+                f"[KLINE/WARN] {symbol}-{strategy} merged_n={n} (<1000). "
+                f"interval={interval} (역사 길이 부족 가능)"
+            )
 
-            # ✅ 운영이 멈추지 않게 형태를 맞추고 싶으면 PAD
             if strategy == "장기" and interval == "W" and PAD_LONG_TO_1000 and n > 0:
-                # 가장 오래된 구간을 반복해서 앞쪽을 채움(형태만 맞춤)
                 need = 1000 - n
                 rep = int(np.ceil(need / n))
                 pad_df = pd.concat([df.iloc[:n].copy() for _ in range(rep)], ignore_index=True)
                 pad_df = pad_df.iloc[:need].copy()
-
-                # timestamp는 충돌/역전 방지 위해 "가짜로 과거로" 밀어넣음(정렬 깨지지 않게)
                 try:
                     ts = _parse_ts_series(df["timestamp"])
                     earliest = ts.min()
-                    # pad는 earliest보다 더 과거로 1분씩 계속 감소
-                    pad_df["timestamp"] = [earliest - pd.Timedelta(minutes=(need - i)) for i in range(need)]
+                    pad_df["timestamp"] = [
+                        earliest - pd.Timedelta(minutes=(need - i)) for i in range(need)
+                    ]
                     pad_df["datetime"] = pad_df["timestamp"]
                 except Exception:
                     pass
-
                 df = pd.concat([pad_df, df], ignore_index=True)
                 df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-
-                # 혹시 중복 제거로 다시 줄었으면 다시 맞춤
-                if len(df) < 1000:
-                    # 마지막 수단: 그냥 tail을 반복(형태 유지 목적)
-                    while len(df) < 1000:
-                        take = min(len(df), 1000 - len(df))
-                        df = pd.concat([df, df.tail(take).copy()], ignore_index=True)
-
-                # 최종 1000으로 맞추기
                 if len(df) > 1000:
                     df = df.iloc[-1000:].reset_index(drop=True)
-
                 df.attrs["padded_to_1000"] = True
                 df.attrs["pad_reason"] = "WEEKLY_HISTORY_INSUFFICIENT"
-                print(f"[KLINE/PAD_TO_1000] {symbol}-{strategy} n={n} -> padded=1000 (repeat oldest). "
-                      f"PAD_LONG_TO_1000=1")
-            else:
-                # 패딩 안 하면 있는 만큼만 사용
-                df = df.copy().reset_index(drop=True)
+                print(f"[KLINE/PAD_TO_1000] {symbol}-{strategy} padded to 1000")
 
-        # window 미만이면 학습/예측 불가
-        if len(df) < window:
+        if len(df) < _PREDICT_MIN_WINDOW:
             df.attrs["not_enough_rows"] = True
-            print(f"[KLINE/NOT_ENOUGH] {symbol}-{strategy} final_rows={len(df)} < window={window}")
+            print(f"[KLINE/NOT_ENOUGH] {symbol}-{strategy} final_rows={len(df)}")
             return df
 
         # -----------------------------
-        # 8) 메타 정보
+        # 9) 메타/캐시
         # -----------------------------
         df.attrs["recent_rows"] = int(len(df))
-        df.attrs["enough_for_training"] = bool(len(df) >= window)
-        df.attrs["not_enough_rows"] = bool(len(df) < window)
-
-        # 소스 표시
+        df.attrs["enough_for_training"] = bool(len(df) >= _PREDICT_MIN_WINDOW)
+        df.attrs["not_enough_rows"] = False
         srcs = []
-        if rows_bybit > 0:
-            srcs.append("BYBIT")
-        if rows_bin > 0:
-            srcs.append("BINANCE")
+        if rows_bybit > 0: srcs.append("BYBIT")
+        if rows_bin > 0: srcs.append("BINANCE")
         df.attrs["source_exchange"] = "+".join(srcs) if srcs else "UNKNOWN"
 
-        # 최종 로그
         try:
             tsf = _parse_ts_series(df["timestamp"])
-            print(f"[KLINE/FINAL] {symbol}-{strategy} final_rows={len(df)} "
-                  f"range=({tsf.min()} ~ {tsf.max()}) source={df.attrs.get('source_exchange')} "
-                  f"padded={bool(df.attrs.get('padded_to_1000', False))}")
+            print(
+                f"[KLINE/FINAL] {symbol}-{strategy} final_rows={len(df)} "
+                f"range=({tsf.min()} ~ {tsf.max()}) source={df.attrs['source_exchange']}"
+            )
         except Exception:
-            print(f"[KLINE/FINAL] {symbol}-{strategy} final_rows={len(df)} source={df.attrs.get('source_exchange')}")
+            print(f"[KLINE/FINAL] {symbol}-{strategy} final_rows={len(df)}")
 
-        # -----------------------------
-        # 9) 캐시 저장
-        # -----------------------------
         CacheManager.set(cache_key, df)
         _save_df_cache(symbol, strategy, end_slack_min, df)
-
         return df
 
     except Exception as e:
@@ -1180,6 +1148,7 @@ def get_kline_by_strategy(symbol: str, strategy: str, end_slack_min: int = 0, fo
         out.attrs["not_enough_rows"] = True
         out.attrs["recent_rows"] = 0
         return out
+
 
 
 # ========================= 프리패치/티커 =========================
