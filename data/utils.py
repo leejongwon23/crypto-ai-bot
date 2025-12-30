@@ -699,54 +699,123 @@ def _clip_tail(df: pd.DataFrame, limit: int) -> pd.DataFrame:
 
 # Bybit
 def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
+    """
+    ✅ FIX 핵심:
+    - Bybit에 'start'를 강제로 넣지 않는다 (빈 응답 유발 가능)
+    - 항상 최신부터 받고(end 없음), 이후 end로만 과거로 페이징한다
+    - 빈 응답 몇 번 나왔다고 바로 Bybit를 15분 차단하지 않는다
+      (차단은 HTTP 에러/레이트리밋 등 '확실한 실패' 위주로)
+    """
     if _is_bybit_blocked():
-        print("[⛔ Bybit 비활성화]"); return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+        print("[⛔ Bybit 비활성화]"); 
+        return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+
     real_symbol = SYMBOL_MAP["bybit"].get(symbol, symbol)
-    target_rows = int(limit); collected, total, last_oldest = [], 0, None
-    interval = _map_bybit_interval(interval); iv_minutes = _bybit_interval_minutes(interval)
-    start_ms = None
-    if end_time is None:
-        lookback_ms = int(target_rows * iv_minutes * 60 * 1000)
-        now_ms = int(pd.Timestamp.utcnow().timestamp() * 1000)
-        start_ms = max(0, now_ms - lookback_ms)
+    target_rows = int(limit)
+    collected, total, last_oldest = [], 0, None
+
+    interval = _map_bybit_interval(interval)
+
+    # 빈 응답 카운트는 하되, 이걸로 즉시 장기 차단하지 않음
     empty_resp_count = 0
+    hard_fail_count = 0
+
+    # end_time이 None이면 "최신부터" 받는다
     while total < target_rows:
         success = False
+
         for _ in range(max_retry):
             try:
-                rows_needed = target_rows - total; req = min(1000, rows_needed)
-                for category in ("linear","spot"):
-                    params = {"category": category, "symbol": real_symbol, "interval": interval, "limit": req}
-                    if end_time is not None: params["end"] = int(end_time.timestamp() * 1000)
-                    elif start_ms is not None: params["start"] = start_ms
-                    res = requests.get(f"{BASE_URL}/v5/market/kline", params=params, timeout=10, headers=REQUEST_HEADERS)
-                    res.raise_for_status(); data = res.json()
+                rows_needed = target_rows - total
+                req = min(1000, rows_needed)
+
+                # category는 기존대로 linear → spot 순서로 시도
+                for category in ("linear", "spot"):
+                    params = {
+                        "category": category,
+                        "symbol": real_symbol,
+                        "interval": interval,
+                        "limit": req,
+                    }
+
+                    # ✅ end로만 과거 페이징
+                    if end_time is not None:
+                        params["end"] = int(end_time.timestamp() * 1000)
+
+                    res = requests.get(
+                        f"{BASE_URL}/v5/market/kline",
+                        params=params,
+                        timeout=10,
+                        headers=REQUEST_HEADERS,
+                    )
+
+                    # HTTP 에러면 "확실한 실패"
+                    try:
+                        res.raise_for_status()
+                    except Exception:
+                        hard_fail_count += 1
+                        time.sleep(1)
+                        continue
+
+                    data = res.json() if res is not None else {}
                     raw = (data or {}).get("result", {}).get("list", [])
+
                     if not raw:
-                        empty_resp_count += 1; continue
+                        empty_resp_count += 1
+                        continue
+
+                    # list 포맷 대응
                     if isinstance(raw[0], (list, tuple)) and len(raw[0]) >= 6:
                         df_chunk = pd.DataFrame(raw, columns=["timestamp","open","high","low","close","volume"])
                     else:
                         df_chunk = pd.DataFrame(raw)
+
                     df_chunk = _normalize_df(df_chunk)
-                    if df_chunk.empty: continue
-                    collected.append(df_chunk); total += len(df_chunk); success = True
+                    if df_chunk.empty:
+                        empty_resp_count += 1
+                        continue
+
+                    collected.append(df_chunk)
+                    total += len(df_chunk)
+                    success = True
+
+                    # 다음 페이지(end) = 이번 chunk의 가장 과거 - 1ms
                     oldest_ts = df_chunk["timestamp"].min()
                     if last_oldest is not None and pd.to_datetime(oldest_ts) >= pd.to_datetime(last_oldest):
                         oldest_ts = pd.to_datetime(oldest_ts) - pd.Timedelta(minutes=1)
                     last_oldest = oldest_ts
                     end_time = pd.to_datetime(oldest_ts).tz_convert("UTC") - pd.Timedelta(milliseconds=1)
-                    time.sleep(0.2); break
-                if success: break
+
+                    time.sleep(0.2)
+                    break  # category loop 종료
+
+                if success:
+                    break  # retry loop 종료
+
             except RequestException:
-                time.sleep(1); continue
+                hard_fail_count += 1
+                time.sleep(1)
+                continue
             except Exception:
-                time.sleep(0.5); continue
-        if not success: break
+                hard_fail_count += 1
+                time.sleep(0.5)
+                continue
+
+        if not success:
+            break
+
     if collected:
-        df = _normalize_df(pd.concat(collected, ignore_index=True)); df.attrs["source_exchange"] = "BYBIT"; return df
-    if empty_resp_count >= max_retry * 2: _block_bybit_for(int(os.getenv("BYBIT_BACKOFF_SEC", "900")))
+        df = _normalize_df(pd.concat(collected, ignore_index=True))
+        df.attrs["source_exchange"] = "BYBIT"
+        return df
+
+    # ✅ 차단은 "확실한 실패"가 누적될 때만 (빈응답만으로는 차단 X)
+    # 필요 시 환경변수로 조정 가능
+    if hard_fail_count >= max(2, max_retry):
+        _block_bybit_for(int(os.getenv("BYBIT_BACKOFF_SEC", "900")))
+
     return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+
 
 def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
     real_symbol = SYMBOL_MAP["binance"].get(symbol, symbol)
