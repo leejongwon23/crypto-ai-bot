@@ -700,36 +700,40 @@ def _clip_tail(df: pd.DataFrame, limit: int) -> pd.DataFrame:
 # Bybit
 def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
     """
-    ✅ FIX 핵심:
-    - Bybit에 'start'를 강제로 넣지 않는다 (빈 응답 유발 가능)
-    - 항상 최신부터 받고(end 없음), 이후 end로만 과거로 페이징한다
-    - 빈 응답 몇 번 나왔다고 바로 Bybit를 15분 차단하지 않는다
-      (차단은 HTTP 에러/레이트리밋 등 '확실한 실패' 위주로)
+    ✅ 목적: Bybit 캔들이 안 올 때 "왜 안 오는지"를 운영로그에 100% 남긴다.
+    - HTTP status / 응답 retCode / retMsg / 응답 일부(짧게) 출력
+    - start 미사용, end로만 과거 페이징
+    - 빈 응답만으로 즉시 차단하지 않음 (확실한 실패 위주)
     """
     if _is_bybit_blocked():
-        print("[⛔ Bybit 비활성화]"); 
+        print("[⛔ Bybit 비활성화]")
         return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+
+    BYBIT_DEBUG = os.getenv("BYBIT_DEBUG", "0") == "1"
 
     real_symbol = SYMBOL_MAP["bybit"].get(symbol, symbol)
     target_rows = int(limit)
     collected, total, last_oldest = [], 0, None
-
     interval = _map_bybit_interval(interval)
 
-    # 빈 응답 카운트는 하되, 이걸로 즉시 장기 차단하지 않음
     empty_resp_count = 0
     hard_fail_count = 0
 
-    # end_time이 None이면 "최신부터" 받는다
+    def _short(s: str, n: int = 180) -> str:
+        try:
+            s = str(s)
+            return s if len(s) <= n else s[:n] + "..."
+        except Exception:
+            return "<unprintable>"
+
     while total < target_rows:
         success = False
 
-        for _ in range(max_retry):
+        for r in range(max_retry):
             try:
                 rows_needed = target_rows - total
                 req = min(1000, rows_needed)
 
-                # category는 기존대로 linear → spot 순서로 시도
                 for category in ("linear", "spot"):
                     params = {
                         "category": category,
@@ -737,34 +741,85 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                         "interval": interval,
                         "limit": req,
                     }
-
-                    # ✅ end로만 과거 페이징
                     if end_time is not None:
                         params["end"] = int(end_time.timestamp() * 1000)
 
-                    res = requests.get(
-                        f"{BASE_URL}/v5/market/kline",
-                        params=params,
-                        timeout=10,
-                        headers=REQUEST_HEADERS,
-                    )
+                    url = f"{BASE_URL}/v5/market/kline"
 
-                    # HTTP 에러면 "확실한 실패"
+                    res = None
                     try:
-                        res.raise_for_status()
-                    except Exception:
+                        res = requests.get(url, params=params, timeout=10, headers=REQUEST_HEADERS)
+                    except Exception as e:
                         hard_fail_count += 1
+                        print(f"[BYBIT][REQ_FAIL] {symbol} {category} interval={interval} retry={r+1}/{max_retry} err={e}")
                         time.sleep(1)
                         continue
 
-                    data = res.json() if res is not None else {}
-                    raw = (data or {}).get("result", {}).get("list", [])
+                    sc = getattr(res, "status_code", None)
 
-                    if not raw:
-                        empty_resp_count += 1
+                    # HTTP 레벨 에러 출력
+                    if sc is None or sc >= 400:
+                        hard_fail_count += 1
+                        body = ""
+                        try:
+                            body = res.text
+                        except Exception:
+                            body = "<no body>"
+                        print(
+                            f"[BYBIT][HTTP_FAIL] {symbol} {category} interval={interval} "
+                            f"status={sc} params={params} body={_short(body)}"
+                        )
+                        time.sleep(1)
                         continue
 
-                    # list 포맷 대응
+                    # JSON 파싱 + retCode/retMsg 출력
+                    data = {}
+                    try:
+                        data = res.json() if res is not None else {}
+                    except Exception as e:
+                        hard_fail_count += 1
+                        txt = ""
+                        try:
+                            txt = res.text
+                        except Exception:
+                            txt = "<no body>"
+                        print(
+                            f"[BYBIT][JSON_FAIL] {symbol} {category} interval={interval} "
+                            f"status={sc} params={params} err={e} body={_short(txt)}"
+                        )
+                        time.sleep(1)
+                        continue
+
+                    retCode = (data or {}).get("retCode", None)
+                    retMsg  = (data or {}).get("retMsg", None)
+
+                    if BYBIT_DEBUG:
+                        print(
+                            f"[BYBIT][RESP_META] {symbol} {category} interval={interval} "
+                            f"status={sc} retCode={retCode} retMsg={retMsg}"
+                        )
+
+                    # ✅ retCode가 0이 아니면 "왜 실패인지"를 확실히 남긴다
+                    if retCode not in (0, "0", None):
+                        hard_fail_count += 1
+                        print(
+                            f"[BYBIT][RET_FAIL] {symbol} {category} interval={interval} "
+                            f"retCode={retCode} retMsg={retMsg} params={params}"
+                        )
+                        time.sleep(1)
+                        continue
+
+                    raw = (data or {}).get("result", {}).get("list", [])
+
+                    # ✅ 빈 응답도 이유로 출력
+                    if not raw:
+                        empty_resp_count += 1
+                        print(
+                            f"[BYBIT][EMPTY] {symbol} {category} interval={interval} "
+                            f"retCode={retCode} retMsg={retMsg} params={params}"
+                        )
+                        continue
+
                     if isinstance(raw[0], (list, tuple)) and len(raw[0]) >= 6:
                         df_chunk = pd.DataFrame(raw, columns=["timestamp","open","high","low","close","volume"])
                     else:
@@ -773,31 +828,37 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
                     df_chunk = _normalize_df(df_chunk)
                     if df_chunk.empty:
                         empty_resp_count += 1
+                        print(f"[BYBIT][EMPTY_NORM] {symbol} {category} interval={interval} normalized_empty=True")
                         continue
 
                     collected.append(df_chunk)
                     total += len(df_chunk)
                     success = True
 
-                    # 다음 페이지(end) = 이번 chunk의 가장 과거 - 1ms
                     oldest_ts = df_chunk["timestamp"].min()
                     if last_oldest is not None and pd.to_datetime(oldest_ts) >= pd.to_datetime(last_oldest):
                         oldest_ts = pd.to_datetime(oldest_ts) - pd.Timedelta(minutes=1)
                     last_oldest = oldest_ts
                     end_time = pd.to_datetime(oldest_ts).tz_convert("UTC") - pd.Timedelta(milliseconds=1)
 
+                    if BYBIT_DEBUG:
+                        newest_ts = df_chunk["timestamp"].max()
+                        print(f"[BYBIT][OK] {symbol} {category} got={len(df_chunk)} total={total}/{target_rows} range=({oldest_ts}~{newest_ts})")
+
                     time.sleep(0.2)
-                    break  # category loop 종료
+                    break  # category loop
 
                 if success:
-                    break  # retry loop 종료
+                    break  # retry loop
 
-            except RequestException:
+            except RequestException as e:
                 hard_fail_count += 1
+                print(f"[BYBIT][REQ_EXC] {symbol} err={e}")
                 time.sleep(1)
                 continue
-            except Exception:
+            except Exception as e:
                 hard_fail_count += 1
+                print(f"[BYBIT][EXC] {symbol} err={e}")
                 time.sleep(0.5)
                 continue
 
@@ -809,12 +870,13 @@ def get_kline(symbol: str, interval: str = "60", limit: int = 300, max_retry: in
         df.attrs["source_exchange"] = "BYBIT"
         return df
 
-    # ✅ 차단은 "확실한 실패"가 누적될 때만 (빈응답만으로는 차단 X)
-    # 필요 시 환경변수로 조정 가능
+    # ✅ 차단은 "확실한 실패" 누적일 때만
     if hard_fail_count >= max(2, max_retry):
         _block_bybit_for(int(os.getenv("BYBIT_BACKOFF_SEC", "900")))
 
+    print(f"[BYBIT][FAIL_SUMMARY] {symbol} interval={interval} empty={empty_resp_count} hard_fail={hard_fail_count}")
     return pd.DataFrame(columns=["timestamp","open","high","low","close","volume","datetime"])
+
 
 
 def get_kline_binance(symbol: str, interval: str = "240", limit: int = 300, max_retry: int = 2, end_time=None) -> pd.DataFrame:
