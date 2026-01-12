@@ -731,27 +731,39 @@ def get_available_models(symbol, strategy):
     diag = {"symbol": symbol, "strategy": strategy, "roots": [], "found": []}
     try:
         results = []
+
+        # ✅ 확장자 목록(고정)
+        exts = [".pt", ".ptz", ".safetensors"]
+
         for root in MODEL_DIRS:
             root_info = {"root": root, "exists": os.path.isdir(root), "matches": 0}
             if not root_info["exists"]:
                 diag["roots"].append(root_info)
                 continue
 
+            # ✅ 여기서 중요한 변경:
+            # - 패턴에 확장자/ *.* 를 넣지 않는다.
+            # - 마지막에 ext를 붙여 glob 한다.
             search_patterns = [
-                os.path.join(root, f"{symbol}_{strategy}_*.*"),
-                os.path.join(root, f"{symbol}_*{strategy}_*.*"),
-                os.path.join(root, f"{symbol}_{strategy}_*_*.*"),
+                os.path.join(root, f"{symbol}_{strategy}_*"),
+                os.path.join(root, f"{symbol}_*{strategy}_*"),
+                os.path.join(root, f"{symbol}_{strategy}_*_*"),
                 os.path.join(root, symbol, strategy, "*"),
                 os.path.join(root, symbol, f"{strategy}_*"),
-                os.path.join(root, "**", f"{symbol}_{strategy}_*.*"),
+                os.path.join(root, "**", f"{symbol}_{strategy}_*"),
             ]
 
             for pattern in search_patterns:
-                for ext in [".pt", ".ptz", ".safetensors"]:
+                for ext in exts:
+                    # ✅ pattern이 이미 * 로 끝나는 형태도 있고, 폴더/* 형태도 있음
+                    #    어떤 경우든 ext만 뒤에 붙이면 정상 매칭됨
                     for w in glob.glob(f"{pattern}{ext}", recursive=True):
                         if not os.path.isfile(w):
                             continue
+
                         meta_path = _resolve_meta_from_any_root(w)
+
+                        # meta 없으면 생성(기존 동작 유지)
                         if not meta_path:
                             meta_tmp = {
                                 "symbol": symbol, "strategy": strategy,
@@ -766,6 +778,7 @@ def get_available_models(symbol, strategy):
                                     json.dump(meta_tmp, f, ensure_ascii=False, indent=2)
                             except Exception:
                                 continue
+
                         try:
                             with open(meta_path, "r", encoding="utf-8") as mf:
                                 meta = json.load(mf)
@@ -773,6 +786,7 @@ def get_available_models(symbol, strategy):
                             continue
 
                         gid = meta.get("group_id", _infer_group_id(symbol, strategy))
+
                         results.append({
                             "pt_abs": os.path.abspath(w),
                             "meta_path": os.path.abspath(meta_path),
@@ -780,14 +794,16 @@ def get_available_models(symbol, strategy):
                             "root": root
                         })
                         root_info["matches"] += 1
+
             diag["roots"].append(root_info)
 
+        # ✅ 여전히 못 찾으면: "최근 모델 3개" 폴백(기존 유지)
         if not results:
             for root in MODEL_DIRS:
                 if not os.path.isdir(root):
                     continue
                 cands = []
-                for ext in [".pt", ".ptz", ".safetensors"]:
+                for ext in exts:
                     cands += glob.glob(os.path.join(root, f"**/*{ext}"), recursive=True)
                 if not cands:
                     continue
@@ -798,7 +814,8 @@ def get_available_models(symbol, strategy):
                         meta_tmp = {
                             "symbol": symbol, "strategy": strategy,
                             "group_id": _infer_group_id(symbol, strategy),
-                            "input_size": FEATURE_INPUT_SIZE, "num_classes": NUM_CLASSES,
+                            "input_size": FEATURE_INPUT_SIZE,
+                            "num_classes": NUM_CLASSES,
                             "created_at": time.time(),
                         }
                         meta_path = _stem(w) + ".meta.json"
@@ -814,16 +831,19 @@ def get_available_models(symbol, strategy):
                         "root": root
                     })
 
+        # ✅ 중복 제거 + 최신순 정렬
         seen, uniq = set(), []
         for r in results:
             if r["pt_abs"] not in seen:
                 uniq.append(r)
                 seen.add(r["pt_abs"])
+
         try:
             uniq.sort(key=lambda x: os.path.getmtime(x["pt_abs"]), reverse=True)
         except Exception:
             pass
 
+        # ✅ 진단 로그 저장(기존 유지)
         try:
             os.makedirs(_p("logs"), exist_ok=True)
             diag["found"] = [{"pt_abs": it["pt_abs"], "meta": it["meta_path"], "root": it["root"]}
@@ -853,6 +873,7 @@ def get_available_models(symbol, strategy):
         except Exception:
             pass
         return []
+
 
 # =========================================================
 # 실패/보류 결과
