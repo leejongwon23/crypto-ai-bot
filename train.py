@@ -1375,6 +1375,7 @@ def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
             break
     return train_idx, val_idx, moved
 
+
 def train_one_model(
     symbol,
     strategy,
@@ -1393,6 +1394,10 @@ def train_one_model(
     ✅ 추가(최소 수정):
     - get_model(model_type=...) 지원 시 3모델 모두 학습
     - 미지원 시 기존처럼 1모델만 학습(원본 유지)
+
+    ✅ 이번 패치 핵심:
+    - [CLASS_GROUP] 로그로 "이번 gid가 학습하는 전역 클래스 목록"을 콘솔+train_log.csv에 남김
+    - LabelStats info 로그에 group 값을 같이 저장
     """
 
     # ── NEAR_ZERO_BAND ─────────────────────────
@@ -1413,7 +1418,6 @@ def train_one_model(
         "best_window": None,
         "best_f1": None,
         "best_acc": None,
-        # ✅ 어떤 모델 타입이 실제로 학습/저장됐는지 확인용(원본엔 없던 키, 있어도 기존 로직에 영향 없음)
         "trained_model_types": [],
     }
 
@@ -1426,8 +1430,6 @@ def train_one_model(
     def _fmt_range_line(i: int, lo: float, hi: float) -> str:
         return f"  C{i:02d}: {_pct(lo)} ~ {_pct(hi)}"
 
-    # ✅ (추가) model_type 지원 여부를 “실행 중”에 판단해서,
-    #    지원하면 3개 돌리고, 지원 안 하면 원래처럼 1개만 돈다.
     def _try_build_model(num_classes: int, input_size: int, model_type: Optional[str]):
         try:
             if model_type is None:
@@ -1541,14 +1543,41 @@ def train_one_model(
             _log_skip(symbol, strategy, "그룹 클래스 없음")
             return res
 
+        # ✅✅✅ 핵심: "이번 gid가 학습하는 전역 클래스 목록"을 확실히 찍는다(콘솔 + train_log.csv)
+        try:
+            _safe_print(
+                f"[CLASS_GROUP] gid={int(group_id or 0)} total_classes={int(num_total_classes)} "
+                f"classes_global={list(cls_in_group)} (len={len(cls_in_group)})"
+            )
+        except Exception:
+            pass
+
+        try:
+            logger.log_training_result(
+                symbol=symbol,
+                strategy=strategy,
+                model="all",
+                engine="manual",
+                rows=len(df),
+                limit=_limit,
+                min=_min_required,
+                augment_needed=augment_needed,
+                enough_for_training=enough_for_training,
+                note=f"[ClassGroup] gid={int(group_id or 0)} classes_global={list(cls_in_group)}",
+                status="info",
+                group=int(group_id or 0),
+                NUM_CLASSES=int(num_total_classes),
+            )
+        except Exception:
+            pass
+
         class_ranges = [full_ranges[i] for i in cls_in_group]
         keep_set = set(cls_in_group)
 
-        # ✅ to_local (원본에서 이미 복구해 둔 부분 유지)
         to_local = {int(g): i for i, g in enumerate(cls_in_group)}
 
         # =================================================
-        # 5) LABEL 로그(원본 유지)
+        # 5) LABEL 로그(원본 유지 + group 추가)
         # =================================================
         mask_cnt = int((labels < 0).sum())
         nz_band = float(abs(_NEAR_ZERO_BAND)) or float(abs(BOUNDARY_BAND))
@@ -1590,13 +1619,15 @@ def train_one_model(
                 status="info",
                 NUM_CLASSES=num_total_classes,
                 class_counts_label_freeze=cnt_before,
+                # ✅ [ADD]
+                group=int(group_id or 0),
             )
         except Exception as e:
             _safe_print(f"[TRAIN_LOG WRITE FAIL][LABEL] {symbol}-{strategy}: {e}")
             raise
 
         # =================================================
-        # 6) LABEL 콘솔 블록(원본 유지)
+        # 6) LABEL 콘솔 블록(원본 유지 + group 추가)
         # =================================================
         mask_cnt = int((labels < 0).sum())
 
@@ -1675,6 +1706,8 @@ def train_one_model(
                 status="info",
                 NUM_CLASSES=int(num_total_classes),
                 class_counts_label_freeze=cnt_before,
+                # ✅ [ADD]
+                group=int(group_id or 0),
             )
         except Exception as e:
             _safe_print(f"[TRAIN_LOG WRITE FAIL] {symbol}-{strategy}: {e}")
@@ -1717,7 +1750,7 @@ def train_one_model(
             cfg_windows = cfg.get("windows") or cfg.get("window_list")
             if isinstance(cfg_windows, (list, tuple)) and cfg_windows:
                 base_windows = [int(w) for w in cfg_windows if isinstance(w, (int, float))]
-        except:
+        except Exception:
             pass
 
         if not base_windows:
@@ -1730,10 +1763,10 @@ def train_one_model(
                 top_k=3,
                 group_id=group_id,
             )
-        except:
+        except Exception:
             try:
                 top_windows = [int(find_best_window(symbol, strategy, window_list=base_windows, group_id=group_id))]
-            except:
+            except Exception:
                 top_windows = base_windows[:1]
 
         top_windows = [
@@ -1758,7 +1791,6 @@ def train_one_model(
             device_type = "cpu"
         use_amp_here = bool(USE_AMP and device_type == "cuda")
 
-        # ✅ (추가) 3모델 후보. model_type 미지원이면 자동으로 1회 학습으로 돌아간다.
         model_types_to_try = ["lstm", "cnnlstm", "transformer"]
         model_type_supported = None  # None=미판단, True/False=판단됨
 
@@ -1806,7 +1838,7 @@ def train_one_model(
                     )
                     tr_idx, val_idx = next(splitter.split(X_raw, y))
                     strat_ok = True
-            except:
+            except Exception:
                 strat_ok = False
 
             if not strat_ok:
@@ -1815,7 +1847,7 @@ def train_one_model(
                         y, val_frac=0.20, min_coverage=0.60,
                         stride=50, num_classes=len(class_ranges),
                     )
-                except:
+                except Exception:
                     n = len(y)
                     if n <= 1:
                         train_idx = np.array([0])
@@ -1830,7 +1862,7 @@ def train_one_model(
 
             try:
                 cnt_after = np.bincount(y, minlength=len(class_ranges)).astype(int).tolist()
-            except:
+            except Exception:
                 cnt_after = []
 
             batch_stratified_ok = strat_ok
@@ -1841,7 +1873,7 @@ def train_one_model(
             if BALANCE_CLASSES_FLAG:
                 try:
                     X_train, y_train = balance_classes(X_train, y_train)
-                except:
+                except Exception:
                     pass
 
             sampler = None
@@ -1849,7 +1881,7 @@ def train_one_model(
                 try:
                     w_cls = compute_class_weights(y_train, method="effective", beta=0.999)
                     sampler = make_weighted_sampler(y_train, class_weights=w_cls, replacement=True)
-                except:
+                except Exception:
                     sampler = None
 
             train_ds = TensorDataset(
@@ -1877,18 +1909,12 @@ def train_one_model(
                 pin_memory=False,
             )
 
-            # =================================================
-            # ✅ (핵심 최소 수정) 모델 학습을 "모델 타입 루프"로 감싼다.
-            # - model_type 지원이면 3번 돈다
-            # - 미지원이면 1번만 돈다(기존과 동일)
-            # =================================================
             loop_types = model_types_to_try if (model_type_supported in (None, True)) else [None]
 
             for req_type in loop_types:
                 if stop_event and stop_event.is_set():
                     break
 
-                # (1) 모델 생성
                 model = None
                 if req_type is None:
                     model = _try_build_model(num_classes=len(class_ranges), input_size=feat_dim, model_type=None)
@@ -1896,24 +1922,21 @@ def train_one_model(
                     model = _try_build_model(num_classes=len(class_ranges), input_size=feat_dim, model_type=req_type)
 
                 if model is None:
-                    # model_type 인자를 get_model이 못 받는 경우 → 기존 방식(1번만 학습)으로 전환
                     if model_type_supported is None:
                         model_type_supported = False
                     if req_type is not None:
                         _safe_print(f"[MODEL-SKIP] get_model(model_type='{req_type}') unsupported → fallback to single-model")
-                    # fallback: 기존 방식으로 한 번만
                     model = _try_build_model(num_classes=len(class_ranges), input_size=feat_dim, model_type=None)
                     if model is None:
                         _log_fail(symbol, strategy, "모델 생성 실패")
                         break
-                    req_type = None  # 실제 요청 타입은 없음(기본 모델)
+                    req_type = None
                 else:
                     if model_type_supported is None:
                         model_type_supported = True
 
                 model_type = getattr(model, "model_type", None) or model.__class__.__name__.lower()
 
-                # loss/opt
                 loss_cfg = get_LOSS()
                 loss_name = (loss_cfg.get("name") if isinstance(loss_cfg, dict) else loss_cfg or "").lower()
 
@@ -1935,9 +1958,6 @@ def train_one_model(
                 no_improve = 0
                 loss_sum = 0.0
 
-                # =================================================
-                # EPOCH LOOP
-                # =================================================
                 for epoch in range(max_epochs):
                     if stop_event and stop_event.is_set():
                         break
@@ -1994,15 +2014,15 @@ def train_one_model(
                         lbls = np.concatenate(all_lbls)
                         try:
                             acc = accuracy_score(lbls, preds)
-                        except:
+                        except Exception:
                             acc = 0.0
                         try:
                             f1_val = f1_score(lbls, preds, average="macro", zero_division=0)
-                        except:
+                        except Exception:
                             f1_val = 0.0
                         try:
                             per_class_f1 = f1_score(lbls, preds, average=None, zero_division=0).tolist()
-                        except:
+                        except Exception:
                             per_class_f1 = []
                     else:
                         preds = np.zeros(0, dtype=np.int64)
@@ -2014,7 +2034,6 @@ def train_one_model(
                     loss_sum = float(running_loss)
                     val_loss = float(val_loss)
 
-                    # ✅ 모델 타입도 같이 찍어줌(원본 포맷 유지 + 정보 추가)
                     _safe_print(
                         f"[EPOCH {epoch+1}/{max_epochs}] {symbol}-{strategy}-{model_type}-w{window} "
                         f"loss={running_loss:.4f} val_loss={val_loss:.4f} acc={acc:.4f} f1={f1_val:.4f}"
@@ -2043,7 +2062,6 @@ def train_one_model(
                 if best_state is None:
                     _log_fail(symbol, strategy, f"학습 실패(best_state 없음) model={model_type}")
                     _release_memory(model)
-                    # model_type 지원이면 다음 모델로 넘어가고, 미지원이면 여기서 사실상 끝
                     if model_type_supported is False:
                         break
                     continue
@@ -2069,10 +2087,9 @@ def train_one_model(
                         best_f1_overall = float(f1_val)
                         best_acc_overall = float(acc)
                         best_window_overall = int(window)
-                except:
+                except Exception:
                     pass
 
-                # ========== bin 정보 (원본 유지) ================
                 try:
                     full_ranges_for_bins = get_class_ranges(symbol=symbol, strategy=strategy, group_id=None)
 
@@ -2103,7 +2120,7 @@ def train_one_model(
                     else:
                         bin_counts = []
 
-                except:
+                except Exception:
                     bin_edges, bin_spans, bin_counts = [], [], []
 
                 bin_cfg = {
@@ -2223,8 +2240,9 @@ def train_one_model(
                         near_zero_count=int(near_zero_cnt),
                         masked_count=int(mask_cnt),
                         per_class_f1=per_class_f1,
+                        group=int(group_id or 0),
                     )
-                except:
+                except Exception:
                     pass
 
                 res["windows"].append(int(window))
@@ -2247,12 +2265,11 @@ def train_one_model(
                             window=window,
                             model_name=os.path.basename(wpath),
                         )
-                    except:
+                    except Exception:
                         pass
 
                 _release_memory(model)
 
-                # ✅ model_type 미지원 fallback이면 1개만 하고 모델 루프 종료
                 if model_type_supported is False:
                     break
 
@@ -2262,8 +2279,6 @@ def train_one_model(
         # 10) BEST 요약 로그 (원본 유지)
         # ============================================================
         try:
-            # best_state는 “마지막 모델 루프”의 best_state를 가리킬 수 있으니,
-            # 원본 로깅 형태는 유지하되, 값이 없으면 보호
             if best_window_overall is not None:
                 _safe_print(
                     f"[WINDOW BEST] {symbol}-{strategy}-g{group_id} "
@@ -2316,6 +2331,7 @@ def train_one_model(
                     near_zero_band=float(nz_band),
                     near_zero_count=int(near_zero_cnt),
                     masked_count=int(mask_cnt),
+                    group=int(group_id or 0),
                 )
 
                 res["best_window"] = int(best_window_overall)
