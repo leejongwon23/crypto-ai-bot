@@ -1375,7 +1375,6 @@ def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
             break
     return train_idx, val_idx, moved
 
-
 def train_one_model(
     symbol,
     strategy,
@@ -1395,8 +1394,10 @@ def train_one_model(
     - get_model(model_type=...) 지원 시 3모델 모두 학습
     - 미지원 시 기존처럼 1모델만 학습(원본 유지)
 
-    ✅ 이번 패치 핵심:
-    - [CLASS_GROUP] 로그로 "이번 gid가 학습하는 전역 클래스 목록"을 콘솔+train_log.csv에 남김
+    ✅ 이번 패치 핵심(최종):
+    - (중요) 클래스는 "항상 전체 클래스"를 학습에 포함한다.
+      (group_id는 '심볼 그룹'을 뜻하므로, '클래스 그룹'으로 쓰면 안 됨)
+    - [CLASS_GROUP] 로그는 남기되, 학습 데이터 필터링에는 쓰지 않는다.
     - LabelStats info 로그에 group 값을 같이 저장
     """
 
@@ -1527,23 +1528,20 @@ def train_one_model(
             return res
 
         # =================================================
-        # 4) 그룹 클래스
+        # 4) 그룹 클래스  (✅ 수정 핵심: 항상 전체 클래스 학습)
         # =================================================
         full_ranges = class_ranges_used_global or get_class_ranges(symbol, strategy)
         num_total_classes = len(full_ranges)
 
-        groups = get_class_groups(num_classes=max(2, num_total_classes)) or []
-        if group_id is not None and groups:
-            gid = int(group_id)
-            cls_in_group = list(groups[gid]) if gid < len(groups) else []
-        else:
-            cls_in_group = list(range(num_total_classes))
+        # 원인: group_id를 "클래스 그룹"으로 사용하면서 일부 클래스만 학습됨.
+        # 해결: 학습에서는 무조건 전체 클래스를 사용한다.
+        cls_in_group = list(range(num_total_classes))
 
         if not cls_in_group:
             _log_skip(symbol, strategy, "그룹 클래스 없음")
             return res
 
-        # ✅✅✅ 핵심: "이번 gid가 학습하는 전역 클래스 목록"을 확실히 찍는다(콘솔 + train_log.csv)
+        # ✅ 로그는 남기되(디버깅용), 학습 필터링에는 쓰지 않는다.
         try:
             _safe_print(
                 f"[CLASS_GROUP] gid={int(group_id or 0)} total_classes={int(num_total_classes)} "
@@ -1563,7 +1561,7 @@ def train_one_model(
                 min=_min_required,
                 augment_needed=augment_needed,
                 enough_for_training=enough_for_training,
-                note=f"[ClassGroup] gid={int(group_id or 0)} classes_global={list(cls_in_group)}",
+                note=f"[ClassGroup-FIXED] gid={int(group_id or 0)} classes_global=ALL({num_total_classes})",
                 status="info",
                 group=int(group_id or 0),
                 NUM_CLASSES=int(num_total_classes),
@@ -1571,10 +1569,9 @@ def train_one_model(
         except Exception:
             pass
 
-        class_ranges = [full_ranges[i] for i in cls_in_group]
-        keep_set = set(cls_in_group)
-
-        to_local = {int(g): i for i, g in enumerate(cls_in_group)}
+        class_ranges = full_ranges[:]  # ✅ 전체 클래스 범위
+        keep_set = set(cls_in_group)   # ✅ 전체 클래스 유지
+        to_local = {int(g): int(g) for g in cls_in_group}  # ✅ 전역=로컬 동일 매핑
 
         # =================================================
         # 5) LABEL 로그(원본 유지 + group 추가)
@@ -1619,7 +1616,6 @@ def train_one_model(
                 status="info",
                 NUM_CLASSES=num_total_classes,
                 class_counts_label_freeze=cnt_before,
-                # ✅ [ADD]
                 group=int(group_id or 0),
             )
         except Exception as e:
@@ -1706,7 +1702,6 @@ def train_one_model(
                 status="info",
                 NUM_CLASSES=int(num_total_classes),
                 class_counts_label_freeze=cnt_before,
-                # ✅ [ADD]
                 group=int(group_id or 0),
             )
         except Exception as e:
@@ -1827,7 +1822,8 @@ def train_one_model(
                 _log_skip(symbol, strategy, f"음수 라벨(w={window})")
                 continue
 
-            set_NUM_CLASSES(len(class_ranges))
+            # ✅ 전체 클래스 수로 고정
+            set_NUM_CLASSES(num_total_classes)
 
             strat_ok = False
             try:
@@ -1845,7 +1841,7 @@ def train_one_model(
                 try:
                     train_idx, val_idx = coverage_split_indices(
                         y, val_frac=0.20, min_coverage=0.60,
-                        stride=50, num_classes=len(class_ranges),
+                        stride=50, num_classes=num_total_classes,
                     )
                 except Exception:
                     n = len(y)
@@ -1861,7 +1857,7 @@ def train_one_model(
             train_idx, val_idx, _ = _ensure_val_has_two_classes(train_idx, val_idx, y, 2)
 
             try:
-                cnt_after = np.bincount(y, minlength=len(class_ranges)).astype(int).tolist()
+                cnt_after = np.bincount(y, minlength=num_total_classes).astype(int).tolist()
             except Exception:
                 cnt_after = []
 
@@ -1917,16 +1913,16 @@ def train_one_model(
 
                 model = None
                 if req_type is None:
-                    model = _try_build_model(num_classes=len(class_ranges), input_size=feat_dim, model_type=None)
+                    model = _try_build_model(num_classes=num_total_classes, input_size=feat_dim, model_type=None)
                 else:
-                    model = _try_build_model(num_classes=len(class_ranges), input_size=feat_dim, model_type=req_type)
+                    model = _try_build_model(num_classes=num_total_classes, input_size=feat_dim, model_type=req_type)
 
                 if model is None:
                     if model_type_supported is None:
                         model_type_supported = False
                     if req_type is not None:
                         _safe_print(f"[MODEL-SKIP] get_model(model_type='{req_type}') unsupported → fallback to single-model")
-                    model = _try_build_model(num_classes=len(class_ranges), input_size=feat_dim, model_type=None)
+                    model = _try_build_model(num_classes=num_total_classes, input_size=feat_dim, model_type=None)
                     if model is None:
                         _log_fail(symbol, strategy, "모델 생성 실패")
                         break
@@ -2141,7 +2137,7 @@ def train_one_model(
                     "strategy": strategy,
                     "model": model_type,
                     "group_id": int(group_id or 0),
-                    "num_classes": len(class_ranges),
+                    "num_classes": num_total_classes,
                     "class_ranges": [[float(lo), float(hi)] for (lo, hi) in class_ranges],
                     "input_size": int(feat_dim),
                     "metrics": {
@@ -2191,7 +2187,7 @@ def train_one_model(
                     summary_parts = [
                         f"[학습요약] {symbol}-{strategy}",
                         f"윈도우={int(window)}",
-                        f"클래스={len(class_ranges)}개",
+                        f"클래스={num_total_classes}개",
                         f"샘플={usable_samples}개",
                         f"정확도={acc:.4f}",
                         f"F1={f1_val:.4f}",
@@ -2223,7 +2219,7 @@ def train_one_model(
                         status="success",
                         y_true=lbls.tolist() if isinstance(lbls, np.ndarray) else lbls,
                         y_pred=preds.tolist() if isinstance(preds, np.ndarray) else preds,
-                        num_classes=len(class_ranges),
+                        num_classes=num_total_classes,
                         NUM_CLASSES=int(num_total_classes),
                         class_counts_label_freeze=cnt_before,
                         usable_samples=usable_samples,
