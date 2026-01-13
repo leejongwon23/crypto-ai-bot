@@ -2422,15 +2422,14 @@ def make_training_summary_fields(
         "ui_performance_summary": perf_summary,
     }
 
-
 def _train_full_symbol(
     symbol: str, stop_event: Optional[threading.Event] = None
 ) -> Tuple[bool, Dict[str, Any]]:
     """
-    ✅ 수정 포인트
-    - train_one_model()이 3모델을 모두 시도하므로,
-      여기서는 "저장된 모델이 1개라도 있으면 ok_once=True"로 처리(기존과 동일)
-    - detail에 모델 타입도 같이 남김(어떤 모델이 실제로 저장됐는지 확인용)
+    ✅ 핵심 수정:
+    - 예전처럼 gid(클래스 그룹) 루프를 돌지 않는다.
+    - 전략(단기/중기/장기)당 1번만 train_one_model을 호출한다.
+    - train_one_model 내부가 "전체 클래스" 학습을 하므로, 이게 정답.
     """
     strategies = ["단기", "중기", "장기"]
     detail = {}
@@ -2441,45 +2440,38 @@ def _train_full_symbol(
     for strategy in strategies:
         if stop_event is not None and stop_event.is_set():
             return any_saved, detail
+
         try:
-            cr = get_class_ranges(symbol=symbol, strategy=strategy)
-            num_classes = len(cr) if cr else 0
-            groups = get_class_groups(num_classes=max(2, num_classes))
-            max_gid = len(groups) - 1
             detail[strategy] = {}
 
-            for gid in range(max_gid + 1):
-                if stop_event is not None and stop_event.is_set():
-                    return any_saved, detail
+            attempts = _SHORT_RETRY if strategy == "단기" else 1
+            ok_once = False
+            trained_types = []
 
-                attempts = _SHORT_RETRY if strategy == "단기" else 1
-                ok_once = False
-                trained_types = []
+            for _ in range(attempts):
+                pf = pre_feats.get(strategy) if isinstance(pre_feats, dict) else None
+                pl = pre_lbls.get(strategy) if isinstance(pre_lbls, dict) else None
+                df_hint = pre_dfs.get(strategy) if isinstance(pre_dfs, dict) else None
 
-                for _ in range(attempts):
-                    pf = pre_feats.get(strategy) if isinstance(pre_feats, dict) else None
-                    pl = pre_lbls.get(strategy) if isinstance(pre_lbls, dict) else None
-                    df_hint = pre_dfs.get(strategy) if isinstance(pre_dfs, dict) else None
+                res = train_one_model(
+                    symbol,
+                    strategy,
+                    group_id=0,  # ✅ 고정(의미 없는 값). 내부에서 전체 클래스 학습
+                    max_epochs=_epochs_for(strategy),
+                    stop_event=stop_event,
+                    pre_feat=pf,
+                    pre_lbl=pl,
+                    df_hint=df_hint,
+                )
 
-                    res = train_one_model(
-                        symbol,
-                        strategy,
-                        group_id=gid,
-                        max_epochs=_epochs_for(strategy),
-                        stop_event=stop_event,
-                        pre_feat=pf,
-                        pre_lbl=pl,
-                        df_hint=df_hint,
-                    )
+                if bool(res and isinstance(res, dict) and res.get("models")):
+                    ok_once = True
+                    any_saved = True
+                    trained_types = list(res.get("trained_model_types") or [])
+                    break
 
-                    if bool(res and isinstance(res, dict) and res.get("models")):
-                        ok_once = True
-                        any_saved = True
-                        trained_types = list(res.get("trained_model_types") or [])
-                        break
-
-                detail[strategy][gid] = {"ok": ok_once, "trained_model_types": trained_types}
-                time.sleep(0.01)
+            detail[strategy][0] = {"ok": ok_once, "trained_model_types": trained_types}
+            time.sleep(0.01)
 
         except Exception as e:
             logger.log_training_result(
@@ -2507,6 +2499,7 @@ def _train_full_symbol(
             detail[strategy] = {-1: {"ok": False, "trained_model_types": []}}
 
     return any_saved, detail
+
 
 
 def train_models(
