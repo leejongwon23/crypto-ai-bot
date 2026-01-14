@@ -951,7 +951,6 @@ def _save_model_and_meta(model: nn.Module, path_pt: str, meta: dict):
         json.dump(meta, f, ensure_ascii=False, indent=None, separators=(",", ":"))
     return weight, meta_path
 
-
 def coverage_split_indices(
     y,
     val_frac=0.20,
@@ -960,17 +959,28 @@ def coverage_split_indices(
     max_windows=200,
     num_classes=None,
 ):
+    """
+    ✅ 수정 핵심
+    - 커버리지 판단을 '실제로 등장한 클래스 수(effective)' 기준으로 계산한다.
+    - num_classes(전체 클래스)와 별개로 val 커버리지는 effective를 기준으로 보는 게 현실적이다.
+    """
     y = np.asarray(y).astype(int)
     n = len(y)
     val_len = max(1, int(round(n * val_frac)))
 
+    # 전체 클래스(메타 기록용)
     if num_classes is None:
-        uniq = np.unique(y)
+        uniq_all = np.unique(y)
         num_classes = (
-            max(len(uniq), int(uniq.max()) + 1)
-            if (uniq.size and uniq.min() >= 0)
-            else len(uniq)
+            max(len(uniq_all), int(uniq_all.max()) + 1)
+            if (uniq_all.size and uniq_all.min() >= 0)
+            else len(uniq_all)
         )
+
+    # ✅ 실제 등장 클래스 수(effective)
+    uniq_eff = np.unique(y)
+    eff_classes = int(len(uniq_eff)) if uniq_eff.size else 0
+    eff_classes = max(1, eff_classes)
 
     tried = 0
     best = None
@@ -980,8 +990,10 @@ def coverage_split_indices(
         start = end - val_len
         yv = y[start:end]
         cnt = Counter(yv.tolist())
+
         covered = len([1 for v in cnt.values() if v > 0])
-        coverage = covered / max(1, int(num_classes))
+        # ✅ effective 기준으로 커버리지 계산
+        coverage = covered / float(eff_classes)
 
         if best is None or coverage > best[0]:
             best = (coverage, start, end, cnt, covered)
@@ -996,16 +1008,17 @@ def coverage_split_indices(
         start, end = max(0, n - val_len), n
         cnt = Counter(y[start:end].tolist())
         covered = len(cnt)
-        coverage = covered / max(1, int(num_classes))
+        coverage = covered / float(eff_classes)
     else:
         coverage, start, end, cnt, covered = best
 
     val_idx = np.arange(start, end)
     train_idx = np.concatenate([np.arange(0, start), np.arange(end, n)], axis=0)
 
-    # ✅ 원하는 출력 포맷으로 변경
+    # ✅ 로그는 둘 다 남김(전체/실제)
     _safe_print(
-        f"[VAL][COVER] num_classes={int(num_classes)} covered={int(covered)} coverage={coverage*100:.1f}%"
+        f"[VAL][COVER] total_classes={int(num_classes)} eff_classes={int(eff_classes)} "
+        f"covered={int(covered)} coverage={coverage*100:.1f}%"
     )
 
     return train_idx, val_idx
@@ -1350,30 +1363,48 @@ def _synthesize_minority_if_needed(
 
     return X_new.astype(np.float32), y_new.astype(np.int64), True
 
-
 def _ensure_val_has_two_classes(train_idx, val_idx, y, min_classes=2):
+    """
+    ✅ 수정 핵심
+    - val에 최소 2개 클래스가 들어가도록 보정한다.
+    - 가능한 범위에서 train→val로 샘플을 조금 이동.
+    """
+    y = np.asarray(y).astype(int)
+
+    if len(val_idx) == 0 or len(train_idx) == 0:
+        return train_idx, val_idx, False
+
     vy = y[val_idx]
     if len(np.unique(vy)) >= min_classes:
         return train_idx, val_idx, False
+
     ty = y[train_idx]
-    classes = np.unique(y)
-    if len(classes) < min_classes:
+    uniq_all = np.unique(y)
+    if len(uniq_all) < min_classes:
         return train_idx, val_idx, False
-    want = [c for c in classes if c not in set(vy)]
+
+    have = set(np.unique(vy).tolist())
+    want = [c for c in uniq_all.tolist() if c not in have]
+
     moved = False
-    for c in want[:2]:
+    # 필요한 클래스들을 하나씩 val로 이동
+    for c in want:
         cand = np.where(ty == c)[0]
-        if len(cand) == 0:
+        if cand.size == 0:
             continue
-        take = cand[0]
-        g_take = train_idx[take]
-        train_idx = np.delete(train_idx, take)
-        val_idx = np.append(val_idx, g_take)
+        take_local = int(cand[0])            # train_idx 내 위치
+        take_global = int(train_idx[take_local])
+
+        train_idx = np.delete(train_idx, take_local)
+        val_idx = np.append(val_idx, take_global)
         moved = True
+
         vy = y[val_idx]
         if len(np.unique(vy)) >= min_classes:
             break
+
     return train_idx, val_idx, moved
+
 
 def train_one_model(
     symbol,
@@ -1399,6 +1430,10 @@ def train_one_model(
       (group_id는 '심볼 그룹'을 뜻하므로, '클래스 그룹'으로 쓰면 안 됨)
     - [CLASS_GROUP] 로그는 남기되, 학습 데이터 필터링에는 쓰지 않는다.
     - LabelStats info 로그에 group 값을 같이 저장
+
+    ✅ 이번 추가 패치(1번에서 끝내기):
+    - (핵심1) f1_score 계산 시 labels=range(num_total_classes) 강제 → per_class_f1 길이/인덱스 꼬임 제거
+    - (핵심2) CrossEntropyLoss에 class_weight 적용 → 샘플러만 쓰던 불균형 보정 보강(라벨 병합/삭제 없음)
     """
 
     # ── NEAR_ZERO_BAND ─────────────────────────
@@ -1533,15 +1568,12 @@ def train_one_model(
         full_ranges = class_ranges_used_global or get_class_ranges(symbol, strategy)
         num_total_classes = len(full_ranges)
 
-        # 원인: group_id를 "클래스 그룹"으로 사용하면서 일부 클래스만 학습됨.
-        # 해결: 학습에서는 무조건 전체 클래스를 사용한다.
         cls_in_group = list(range(num_total_classes))
 
         if not cls_in_group:
             _log_skip(symbol, strategy, "그룹 클래스 없음")
             return res
 
-        # ✅ 로그는 남기되(디버깅용), 학습 필터링에는 쓰지 않는다.
         try:
             _safe_print(
                 f"[CLASS_GROUP] gid={int(group_id or 0)} total_classes={int(num_total_classes)} "
@@ -1569,9 +1601,9 @@ def train_one_model(
         except Exception:
             pass
 
-        class_ranges = full_ranges[:]  # ✅ 전체 클래스 범위
-        keep_set = set(cls_in_group)   # ✅ 전체 클래스 유지
-        to_local = {int(g): int(g) for g in cls_in_group}  # ✅ 전역=로컬 동일 매핑
+        class_ranges = full_ranges[:]
+        keep_set = set(cls_in_group)
+        to_local = {int(g): int(g) for g in cls_in_group}
 
         # =================================================
         # 5) LABEL 로그(원본 유지 + group 추가)
@@ -1872,10 +1904,29 @@ def train_one_model(
                 except Exception:
                     pass
 
+            # ✅ 추가 패치: Loss용 class weights는 항상 준비(샘플러와 별개)
+            w_cls_for_loss = None
+            try:
+                w_tmp = compute_class_weights(y_train, method="effective", beta=0.999)
+                if isinstance(w_tmp, np.ndarray) and w_tmp.size > 0:
+                    # 항상 num_total_classes 길이로 맞춤
+                    if int(w_tmp.shape[0]) != int(num_total_classes):
+                        w_pad = np.ones((int(num_total_classes),), dtype=np.float32)
+                        m = min(int(w_tmp.shape[0]), int(num_total_classes))
+                        w_pad[:m] = w_tmp[:m].astype(np.float32)
+                        w_tmp = w_pad
+                    w_cls_for_loss = w_tmp.astype(np.float32)
+            except Exception:
+                w_cls_for_loss = None
+
             sampler = None
             if WEIGHTED_SAMPLER_FLAG:
                 try:
-                    w_cls = compute_class_weights(y_train, method="effective", beta=0.999)
+                    # sampler는 기존대로 사용 (가능하면 w_cls_for_loss 그대로 재사용)
+                    if w_cls_for_loss is None:
+                        w_cls = compute_class_weights(y_train, method="effective", beta=0.999)
+                    else:
+                        w_cls = w_cls_for_loss
                     sampler = make_weighted_sampler(y_train, class_weights=w_cls, replacement=True)
                 except Exception:
                     sampler = None
@@ -1936,10 +1987,21 @@ def train_one_model(
                 loss_cfg = get_LOSS()
                 loss_name = (loss_cfg.get("name") if isinstance(loss_cfg, dict) else loss_cfg or "").lower()
 
+                # ✅ 추가 패치: CrossEntropyLoss에 class weight 적용
+                w_tensor = None
+                try:
+                    if w_cls_for_loss is not None and torch is not None:
+                        w_tensor = torch.tensor(w_cls_for_loss, dtype=torch.float32, device=DEVICE)
+                except Exception:
+                    w_tensor = None
+
                 if loss_name == "focal":
                     criterion = FocalLoss(gamma=FOCAL_GAMMA).to(DEVICE)
                 else:
-                    criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTH).to(DEVICE)
+                    criterion = nn.CrossEntropyLoss(
+                        weight=w_tensor,
+                        label_smoothing=LABEL_SMOOTH
+                    ).to(DEVICE)
 
                 optimizer = torch.optim.AdamW(
                     model.parameters(),
@@ -1953,6 +2015,9 @@ def train_one_model(
                 best_state = None
                 no_improve = 0
                 loss_sum = 0.0
+
+                # ✅ 추가 패치: f1 계산 기준 라벨 고정
+                full_label_list = list(range(int(num_total_classes)))
 
                 for epoch in range(max_epochs):
                     if stop_event and stop_event.is_set():
@@ -2013,19 +2078,26 @@ def train_one_model(
                         except Exception:
                             acc = 0.0
                         try:
-                            f1_val = f1_score(lbls, preds, average="macro", zero_division=0)
+                            # ✅ macro도 labels 고정
+                            f1_val = f1_score(lbls, preds, average="macro", labels=full_label_list, zero_division=0)
                         except Exception:
                             f1_val = 0.0
                         try:
-                            per_class_f1 = f1_score(lbls, preds, average=None, zero_division=0).tolist()
+                            # ✅ per-class 길이 항상 num_total_classes
+                            per_class_f1 = f1_score(
+                                lbls, preds,
+                                average=None,
+                                labels=full_label_list,
+                                zero_division=0
+                            ).tolist()
                         except Exception:
-                            per_class_f1 = []
+                            per_class_f1 = [0.0 for _ in full_label_list]
                     else:
                         preds = np.zeros(0, dtype=np.int64)
                         lbls = np.zeros(0, dtype=np.int64)
                         acc = 0.0
                         f1_val = 0.0
-                        per_class_f1 = []
+                        per_class_f1 = [0.0 for _ in full_label_list]
 
                     loss_sum = float(running_loss)
                     val_loss = float(val_loss)
@@ -2355,6 +2427,7 @@ def train_one_model(
         except Exception:
             pass
         return res
+
 
 
 
