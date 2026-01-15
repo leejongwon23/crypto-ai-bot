@@ -1623,7 +1623,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         input_size=feat_dim
                     ))
                     cmin, cmax = _class_range_by_meta_or_cfg(
-                        pred, (chosen or {}).get("meta"),
+                        pred, None,  # ✅ chosen 없음 → meta는 None로
                         symbol, strategy
                     )
                     if _meets_minret_with_hint(
@@ -1642,6 +1642,32 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     alpha=0.10, beta=0.10
                 )
             return np.asarray(probs, dtype=float)
+
+        # ✅ (핵심 수정) evo_meta_learner가 final_cls를 정했으면
+        #    best_pred/best_i 없이도 chosen을 안정적으로 선택해야 한다.
+        if final_cls is not None and str(meta_choice) == "evo_meta_learner":
+            best_i = 0
+            best_score = -1.0
+            for i, m in enumerate(outs):
+                try:
+                    base_probs = m.get("hybrid_probs", m.get("adjusted_probs", m.get("calib_probs")))
+                    if base_probs is None:
+                        base_probs = m.get("calib_probs")
+                    v = np.asarray(base_probs, dtype=float)
+                    if v.ndim != 1 or v.size == 0:
+                        continue
+                    ci = int(final_cls)
+                    if ci < 0 or ci >= v.size:
+                        continue
+                    sc = float(v[ci])
+                    if sc > best_score:
+                        best_score = sc
+                        best_i = i
+                except Exception:
+                    continue
+
+            chosen = outs[best_i]
+            used_minret = True  # evo_meta는 위에서 minret 통과한 상태로만 final_cls 세팅됨
 
         # 12) 여러 모델 중 최종 선택 (유사도+성공률+리스크)
         sim_cache = {}
@@ -1754,10 +1780,10 @@ def predict(symbol, strategy, source="일반", model_type=None):
                         best_pred = outs[best_i]["candidate_pred"]
                         meta_choice = "best_single_explore"
 
-        final_cls = int(best_pred)
-        chosen = outs[best_i]
-        if meta_choice != "best_single_explore":
-            meta_choice = os.path.basename(chosen["model_path"])
+            final_cls = int(best_pred)
+            chosen = outs[best_i]
+            if meta_choice != "best_single_explore":
+                meta_choice = os.path.basename(chosen["model_path"])
 
         # 13) 탐색 상태 기록
         try:
@@ -1902,18 +1928,6 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 symbol, strategy
             )
             exp_ret = (float(lo_sel) + float(hi_sel)) / 2.0
-            # if RG_ENABLE:
-            #     ok, why = _reality_guard_check(
-            #         df, strategy, hint,
-            #         lo_sel, hi_sel, exp_ret
-            #     )
-            #     action, new_chosen, new_cls, tag = _apply_soft_guard(
-            #         df, strategy,
-            #         outs, chosen, final_cls,
-            #         allow_long, allow_short,
-            #         MIN_RET_THRESHOLD
-            #     )
-            #     ...
         except Exception as e:
             print(f"[RealityGuard 예외] {e}")
 
@@ -1958,10 +1972,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             if v.ndim != 1 or v.size == 0:
                 return []
             idx = np.argsort(v)[::-1][:k]
-            return [
-                {"class": int(i), "prob": float(v[i])}
-                for i in idx
-            ]
+            return [{"class": int(i), "prob": float(v[i])} for i in idx]
 
         chosen_probs_for_topk = (
             chosen.get("hybrid_probs")
@@ -1999,36 +2010,19 @@ def predict(symbol, strategy, source="일반", model_type=None):
             "hint_ma_fast": hint.get("ma_fast"),
             "hint_ma_slow": hint.get("ma_slow"),
             "hint_slope": hint.get("slope"),
-            "reality_guard": {
-                "enabled": bool(RG_ENABLE),
-                "vol_mult": float(RG_VOL_MULT),
-                "method": RG_VOL_METHOD,
-            },
+            "reality_guard": {"enabled": bool(RG_ENABLE), "vol_mult": float(RG_VOL_MULT), "method": RG_VOL_METHOD},
             "soft_guard": "disabled_reality_guard",
             "market_ctx": market_ctx,
             "recent_success_weight": recent_succ_w,
-
-            # 🔽 여기부터 하이브리드/유사도 디버그용 상세 정보
-            "hybrid_w_sim": float(
-                chosen.get("hybrid_w_sim", 0.0)
-            ) if isinstance(chosen, dict) else 0.0,
-            "hybrid_w_prob": float(
-                chosen.get("hybrid_w_prob", 1.0 - float(chosen.get("hybrid_w_sim", 0.0)))
-            ) if isinstance(chosen, dict) else 1.0,
-            "sim_topk": int(
-                chosen.get("sim_topk", 0)
-            ) if isinstance(chosen, dict) else 0,
+            "hybrid_w_sim": float(chosen.get("hybrid_w_sim", 0.0)) if isinstance(chosen, dict) else 0.0,
+            "hybrid_w_prob": float(chosen.get("hybrid_w_prob", 1.0)) if isinstance(chosen, dict) else 1.0,
+            "sim_topk": int(chosen.get("sim_topk", 0)) if isinstance(chosen, dict) else 0,
             "hybrid_probs_top3": _topk_probs(hybrid_vec, k=3),
             "sim_probs_top3": _topk_probs(sim_vec, k=3),
             "adjusted_probs_top3": _topk_probs(adj_vec, k=3),
             "filtered_probs_top3": _topk_probs(filt_vec, k=3),
-            "chosen_model_path": (
-                chosen.get("model_path") if isinstance(chosen, dict) else None
-            ),
-            "chosen_model_type": (
-                _norm_model_type(chosen.get("model_type", ""))
-                if isinstance(chosen, dict) else None
-            ),
+            "chosen_model_path": (chosen.get("model_path") if isinstance(chosen, dict) else None),
+            "chosen_model_type": (_norm_model_type(chosen.get("model_type", "")) if isinstance(chosen, dict) else None),
             "chosen_reason": (
                 "evo_meta_learner"
                 if meta_choice == "evo_meta_learner"
@@ -2044,11 +2038,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
             entry_price=entry,
             target_price=entry * (1 + exp_ret),
             model="meta",
-            model_name=(
-                "evo_meta_learner"
-                if meta_choice == "evo_meta_learner"
-                else str(meta_choice)
-            ),
+            model_name=("evo_meta_learner" if meta_choice == "evo_meta_learner" else str(meta_choice)),
             predicted_class=final_cls,
             label=final_cls,
             note=json.dumps(note, ensure_ascii=False),
@@ -2059,15 +2049,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
             expected_return=float(exp_ret),
             position=pos_sel,
             return_value=0.0,
-            source=(
-                "진화형"
-                if meta_choice == "evo_meta_learner"
-                else "기본"
-            ),
-            group_id=(
-                chosen.get("group_id")
-                if isinstance(chosen, dict) else None
-            ),
+            source=("진화형" if meta_choice == "evo_meta_learner" else "기본"),
+            group_id=(chosen.get("group_id") if isinstance(chosen, dict) else None),
             feature_vector=torch.tensor(X[-1], dtype=torch.float32).numpy(),
             regime=regime,
             meta_choice=meta_choice,
@@ -2085,10 +2068,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                 if chosen and m.get("model_path") == chosen.get("model_path"):
                     continue
 
-                src_probs = m.get(
-                    "hybrid_probs",
-                    m.get("adjusted_probs", m["calib_probs"])
-                )
+                src_probs = m.get("hybrid_probs", m.get("adjusted_probs", m["calib_probs"]))
                 filt = m.get("filtered_probs", None)
 
                 if filt is not None and np.sum(filt) > 0:
@@ -2098,15 +2078,8 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     mask = np.zeros_like(src_probs, dtype=float)
                     for ci in range(len(src_probs)):
                         try:
-                            lo_i, hi_i = _class_range_by_meta_or_cfg(
-                                ci, m.get("meta"),
-                                symbol, strategy
-                            )
-                            if _meets_minret_with_hint(
-                                lo_i, hi_i,
-                                allow_long, allow_short,
-                                MIN_RET_THRESHOLD
-                            ):
+                            lo_i, hi_i = _class_range_by_meta_or_cfg(ci, m.get("meta"), symbol, strategy)
+                            if _meets_minret_with_hint(lo_i, hi_i, allow_long, allow_short, MIN_RET_THRESHOLD):
                                 mask[ci] = 1.0
                         except Exception:
                             pass
@@ -2117,36 +2090,20 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     pred_i = int(np.argmax(adj2))
                     src = adj2
 
-                lo_i, hi_i = _class_range_by_meta_or_cfg(
-                    pred_i, m.get("meta"),
-                    symbol, strategy
-                )
+                lo_i, hi_i = _class_range_by_meta_or_cfg(pred_i, m.get("meta"), symbol, strategy)
                 exp_i = (float(lo_i) + float(hi_i)) / 2.0
                 pos_i = _position_from_range(lo_i, hi_i)
                 top_i = [int(i) for i in np.argsort(src)[::-1][:3]]
                 class_text_i = f"{float(lo_i)*100:.2f}% ~ {float(hi_i)*100:.2f}%"
-                raw_i = float(np.nan_to_num(
-                    m["raw_probs"][pred_i],
-                    nan=0.0, posinf=0.0, neginf=0.0
-                ))
-                calib_i = float(np.nan_to_num(
-                    m["calib_probs"][pred_i],
-                    nan=0.0, posinf=0.0, neginf=0.0
-                ))
+                raw_i = float(np.nan_to_num(m["raw_probs"][pred_i], nan=0.0, posinf=0.0, neginf=0.0))
+                calib_i = float(np.nan_to_num(m["calib_probs"][pred_i], nan=0.0, posinf=0.0, neginf=0.0))
 
                 note_s = {
                     "regime": regime,
                     "shadow": True,
-                    "model_path": os.path.basename(
-                        m.get("model_path", "")
-                    ),
-                    "model_type": _norm_model_type(
-                        m.get("model_type", "")
-                    ),
-                    "val_f1": (
-                        None if m.get("val_f1") is None
-                        else float(m.get("val_f1"))
-                    ),
+                    "model_path": os.path.basename(m.get("model_path", "")),
+                    "model_type": _norm_model_type(m.get("model_type", "")),
+                    "val_f1": (None if m.get("val_f1") is None else float(m.get("val_f1"))),
                     "calib_ver": get_calibration_version(),
                     "min_return_threshold": float(MIN_RET_THRESHOLD),
                     "class_range_lo": float(lo_i),
@@ -2164,9 +2121,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     entry_price=entry,
                     target_price=entry * (1 + exp_i),
                     model=_norm_model_type(m.get("model_type", "")),
-                    model_name=os.path.basename(
-                        m.get("model_path", "")
-                    ),
+                    model_name=os.path.basename(m.get("model_path", "")),
                     predicted_class=pred_i,
                     label=pred_i,
                     note=json.dumps(note_s, ensure_ascii=False),
@@ -2179,9 +2134,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
                     return_value=0.0,
                     source="섀도우",
                     group_id=m.get("group_id", 0),
-                    feature_vector=torch.tensor(
-                        X[-1], dtype=torch.float32
-                    ).numpy(),
+                    feature_vector=torch.tensor(X[-1], dtype=torch.float32).numpy(),
                     regime=regime,
                     meta_choice="shadow",
                     raw_prob=raw_i,
@@ -2227,6 +2180,7 @@ def predict(symbol, strategy, source="일반", model_type=None):
         finally:
             gc.collect()
             _safe_empty_cache()
+
 
 # =========================================================
 # 평가 루프 (네 원본 그대로)
