@@ -371,6 +371,12 @@ def _refresh_fs_flags():
     _READONLY_FS = _READONLY_LOGDIR or _READONLY_TRAIN or _READONLY_PRED
 
 def ensure_prediction_log_exists():
+    # ✅ (FIX) 매번 FS 상태 갱신해서 read-only 오판 지속 방지
+    try:
+        _refresh_fs_flags()
+    except Exception:
+        pass
+
     if _READONLY_FS:
         return
     try:
@@ -413,6 +419,7 @@ def ensure_prediction_log_exists():
 
     except Exception as e:
         print(f"[⚠️ ensure_prediction_log_exists] 예외: {e}")
+
 
 def ensure_train_log_exists():
     """
@@ -486,6 +493,38 @@ def ensure_train_log_exists():
     except Exception as e:
         # ✅ 여기서라도 "왜 안 만들어졌는지" 운영로그에 남김
         print(f"[🛑 ensure_train_log_exists] 실패: {e} (TRAIN_LOG={TRAIN_LOG})")
+
+def _get_existing_cols(path: str, wanted: list[str]) -> list[str]:
+    """
+    CSV의 실제 헤더를 확인해서 '존재하는 컬럼만' 반환.
+    usecols 폭발(ValueError) 방지용.
+    """
+    try:
+        header = _read_csv_header(path)
+        if not header:
+            return []
+        hs = set([h.strip() for h in header])
+        return [c for c in wanted if c in hs]
+    except Exception:
+        return []
+
+def _safe_read_csv_in_chunks(path: str, wanted_cols: list[str], chunksize: int = CHUNK):
+    """
+    안전한 chunk reader:
+    - 헤더에 존재하는 컬럼만 usecols로 넣는다
+    - 그래도 실패하면 try/except로 빈 generator 처리
+    """
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return
+        cols = _get_existing_cols(path, wanted_cols)
+        if not cols:
+            return
+        for chunk in pd.read_csv(path, encoding="utf-8-sig", usecols=cols, chunksize=chunksize):
+            yield chunk
+    except Exception:
+        return
+
 
 # -------------------------
 # 로그 로테이션 (읽기전용이면 skip)
@@ -704,52 +743,65 @@ def _normalize_status(df: pd.DataFrame) -> pd.DataFrame:
 # 메모리 안전 집계
 # -------------------------
 def get_meta_success_rate(strategy, min_samples: int = 1):
-    if not os.path.exists(PREDICTION_LOG): return 0.0
-    usecols = ["timestamp","strategy","model","status","success","source"]
+    if not os.path.exists(PREDICTION_LOG): 
+        return 0.0
+
+    wanted = ["timestamp","strategy","model","status","success","source"]
     succ = total = 0
-    for chunk in pd.read_csv(
-        PREDICTION_LOG, encoding="utf-8-sig",
-        usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success","source"]],
-        chunksize=CHUNK
-    ):
-        if "source" in chunk.columns:
-            chunk = chunk[~chunk["source"].astype(str).isin(LOG_SOURCE_BLACKLIST)]
-        if "model" in chunk.columns:
-            chunk = chunk[chunk["model"] == "meta"]
-        if "strategy" in chunk.columns:
-            chunk = chunk[chunk["strategy"] == strategy]
-        if chunk.empty: continue
-        if "status" in chunk.columns and chunk["status"].notna().any():
-            mask = chunk["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
-            chunk = chunk[mask]
-            s = chunk["status"].astype(str).str.lower().isin(["success","v_success"])
-            succ += int(s.sum()); total += int(len(chunk))
-        elif "success" in chunk.columns:
-            s = chunk["success"].astype(str).str.lower().isin(["true","1","success","v_success"])
-            succ += int(s.sum()); total += int(len(chunk))
-    if total < max(1, min_samples): return 0.0
+
+    for chunk in _safe_read_csv_in_chunks(PREDICTION_LOG, wanted, chunksize=CHUNK) or []:
+        try:
+            if "source" in chunk.columns:
+                chunk = chunk[~chunk["source"].astype(str).isin(LOG_SOURCE_BLACKLIST)]
+            if "model" in chunk.columns:
+                chunk = chunk[chunk["model"] == "meta"]
+            if "strategy" in chunk.columns:
+                chunk = chunk[chunk["strategy"] == strategy]
+            if chunk.empty:
+                continue
+
+            if "status" in chunk.columns and chunk["status"].notna().any():
+                mask = chunk["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
+                chunk = chunk[mask]
+                s = chunk["status"].astype(str).str.lower().isin(["success","v_success"])
+                succ += int(s.sum()); total += int(len(chunk))
+            elif "success" in chunk.columns:
+                s = chunk["success"].astype(str).str.lower().isin(["true","1","success","v_success"])
+                succ += int(s.sum()); total += int(len(chunk))
+        except Exception:
+            continue
+
+    if total < max(1, int(min_samples)):
+        return 0.0
     return float(succ / total)
 
+
 def get_strategy_eval_count(strategy: str):
-    if not os.path.exists(PREDICTION_LOG): return 0
-    usecols = ["strategy","status","success","source"]
+    if not os.path.exists(PREDICTION_LOG):
+        return 0
+
+    wanted = ["strategy","status","success","source"]
     count = 0
-    for chunk in pd.read_csv(
-        PREDICTION_LOG, encoding="utf-8-sig",
-        usecols=[c for c in usecols if c in PREDICTION_HEADERS or c in ["status","success","source"]],
-        chunksize=CHUNK
-    ):
-        if "source" in chunk.columns:
-            chunk = chunk[~chunk["source"].astype(str).isin(LOG_SOURCE_BLACKLIST)]
-        if "strategy" in chunk.columns:
-            chunk = chunk[chunk["strategy"] == strategy]
-        if chunk.empty: continue
-        if "status" in chunk.columns and chunk["status"].notna().any():
-            mask = chunk["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
-            count += int(mask.sum())
-        elif "success" in chunk.columns:
-            count += int(len(chunk))
+
+    for chunk in _safe_read_csv_in_chunks(PREDICTION_LOG, wanted, chunksize=CHUNK) or []:
+        try:
+            if "source" in chunk.columns:
+                chunk = chunk[~chunk["source"].astype(str).isin(LOG_SOURCE_BLACKLIST)]
+            if "strategy" in chunk.columns:
+                chunk = chunk[chunk["strategy"] == strategy]
+            if chunk.empty:
+                continue
+
+            if "status" in chunk.columns and chunk["status"].notna().any():
+                mask = chunk["status"].astype(str).str.lower().isin(["success","fail","v_success","v_fail"])
+                count += int(mask.sum())
+            elif "success" in chunk.columns:
+                count += int(len(chunk))
+        except Exception:
+            continue
+
     return int(count)
+
 
 def get_actual_success_rate(strategy, min_samples: int = 1):
     if not os.path.exists(PREDICTION_LOG): return 0.0
@@ -1017,7 +1069,7 @@ def log_prediction(
         expected_return_mid,
         note_obj.get("raw_prob_pred",""),
         note_obj.get("calib_prob_pred",""),
-        note_obj.get("meta_choice",""),
+        note_obj.get("meta_choice_detail",""),
         chosen_model or "",
         chosen_class if chosen_class is not None else "",
         shadow_models_str,
