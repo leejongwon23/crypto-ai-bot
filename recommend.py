@@ -242,6 +242,42 @@ def _get_latest_price(symbol, strategy):
         return 0.0
 
 # ──────────────────────────────────────────────────────────────
+# ✅ 핵심 수정: 보류/실패 결과를 "0으로 채워서 추천"하지 않도록 차단
+# ──────────────────────────────────────────────────────────────
+def _is_actionable_prediction(res: dict) -> (bool, str):
+    """
+    ✅ 추천으로 보낼만한 '정상 예측'만 통과
+    - expected_return 없거나 None이면: 보류/실패로 보고 제외
+    - class 없으면 제외
+    - reason/source에 보류/abstain/failed 류가 있으면 제외
+    """
+    if not isinstance(res, dict):
+        return False, "not_dict"
+
+    r_reason = str(res.get("reason", "") or "").strip().lower()
+    r_source = str(res.get("source", "") or "").strip().lower()
+
+    # 보류/실패 느낌 키워드 (predict.py의 soft_abstain/failed_result 계열 방어)
+    bad_kw = ["abstain", "보류", "hold", "failed", "fail", "error", "locked", "closed", "timeout"]
+    if any(k in r_reason for k in bad_kw) or any(k in r_source for k in bad_kw):
+        return False, f"non_actionable_reason:{res.get('reason')}"
+
+    if "expected_return" not in res or res.get("expected_return") is None:
+        return False, "missing_expected_return"
+
+    if "class" not in res or res.get("class") is None:
+        return False, "missing_class"
+
+    try:
+        er = float(res.get("expected_return"))
+        if math.isnan(er) or math.isinf(er):
+            return False, "invalid_expected_return"
+    except Exception:
+        return False, "invalid_expected_return_cast"
+
+    return True, "ok"
+
+# ──────────────────────────────────────────────────────────────
 # (신규) 모델 파일 인벤토리 캐시 — 하위 디렉토리까지 일괄 수집(일관화)
 # ──────────────────────────────────────────────────────────────
 def _build_model_index():
@@ -307,9 +343,14 @@ def run_prediction(symbol, strategy, source="변동성", allow_send=True, _model
             log_audit(symbol, strategy, None, "predict() 결과 없음/형식오류")
             return None
 
+        ok, why = _is_actionable_prediction(res)
+        if not ok:
+            log_audit(symbol, strategy, res, f"추천 제외({why})")
+            return None
+
         # 메시지용 필드 보강 — 메타 성공률만
         meta_rate = float(get_meta_success_rate(strategy, min_samples=MIN_SAMPLES) or 0.0)
-        expected_ret = float(res.get("expected_return", 0.0))
+        expected_ret = float(res.get("expected_return"))
         entry_price = _get_latest_price(symbol, strategy)
         direction = "롱" if expected_ret >= 0 else "숏"
 
@@ -381,9 +422,14 @@ def run_prediction_loop(strategy, symbols, source="일반", allow_prediction=Tru
                 log_audit(symbol, strategy, None, "predict() 결과 없음/형식오류")
                 continue
 
+            ok, why = _is_actionable_prediction(res)
+            if not ok:
+                log_audit(symbol, strategy, res, f"추천 제외({why})")
+                continue
+
             # 텔레그램 메시지용 필드 보강 — 메타 성공률만
             meta_rate = float(get_meta_success_rate(strategy, min_samples=MIN_SAMPLES) or 0.0)
-            expected_ret = float(res.get("expected_return", 0.0))
+            expected_ret = float(res.get("expected_return"))
             entry_price = _get_latest_price(symbol, strategy)
             direction = "롱" if expected_ret >= 0 else "숏"
 
