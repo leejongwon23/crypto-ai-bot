@@ -161,6 +161,33 @@ def _group_active() -> bool:
     except Exception:
         return False
 
+def _log_prediction_safe(**kwargs):
+    """
+    logger.log_prediction 시그니처가 환경마다 다를 수 있어서,
+    '받는 인자만' 골라 넣어 TypeError를 원천 차단한다.
+    """
+    try:
+        sig = inspect.signature(log_prediction)
+        params = sig.parameters
+
+        # **kwargs를 받는 logger면 그냥 그대로 통과
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return log_prediction(**kwargs)
+
+        allowed = set(params.keys())
+        filtered = {k: v for k, v in kwargs.items() if k in allowed}
+        return log_prediction(**filtered)
+
+    except Exception as e:
+        # 여기서 죽으면 로깅이 전체를 막으면 안 됨
+        print(f"[log_prediction_safe 예외] {e}")
+        try:
+            return log_prediction(**kwargs)  # 마지막 시도
+        except Exception as e2:
+            print(f"[log_prediction_safe 최종 실패] {e2}")
+            return None
+
+
 
 def open_predict_gate(note=""):
     try:
@@ -881,47 +908,130 @@ def get_available_models(symbol, strategy):
 def failed_result(symbol, strategy, model_type="unknown", reason="", source="일반", X_input=None):
     t = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[predict] skip {symbol}-{strategy} :: {reason}")
-    res = {"symbol": symbol, "strategy": strategy, "success": False, "reason": reason, "model": str(model_type or "unknown"), "rate": 0.0, "class": -1, "timestamp": t, "source": source, "predicted_class": -1, "label": -1}
+
+    res = {
+        "symbol": symbol, "strategy": strategy,
+        "success": False, "reason": reason,
+        "model": str(model_type or "unknown"),
+        "rate": 0.0, "class": -1,
+        "timestamp": t, "source": source,
+        "predicted_class": -1, "label": -1
+    }
+
+    # ✅ 예측로그에 "일관된 값"으로 기록
+    # - status: skip
+    # - hold_flag: 0
+    # - meta_reason: reason
     try:
         ensure_prediction_log_exists()
-        log_prediction(symbol=symbol, strategy=strategy, direction="예측실패", entry_price=0, target_price=0, model=str(model_type or "unknown"), success=False, reason=reason, rate=0.0, expected_return=0.0, position="neutral", timestamp=t, return_value=0.0, volatility=True, source=source, predicted_class=-1, label=-1, class_return_min=0.0, class_return_max=0.0, class_return_text="")
+
+        note = {
+            "status": "skip",
+            "hold_flag": 0,
+            "meta_reason": str(reason or ""),
+            "source": str(source or ""),
+        }
+
+        _log_prediction_safe(
+            symbol=symbol,
+            strategy=strategy,
+            direction="예측실패",
+            entry_price=0,
+            target_price=0,
+            model=str(model_type or "unknown"),
+            model_name=str(model_type or "unknown"),
+            success=False,
+            reason=reason,
+            rate=0.0,
+            expected_return=0.0,
+            position="neutral",
+            timestamp=t,
+            return_value=0.0,
+            volatility=True,
+            source=source,
+            predicted_class=-1,
+            label=-1,
+            class_return_min=0.0,
+            class_return_max=0.0,
+            class_return_text="",
+            note=json.dumps(note, ensure_ascii=False),
+
+            # ✅ logger가 받으면 컬럼 채우고, 못 받으면 _log_prediction_safe가 버림
+            status="skip",
+            hold_flag=0,
+            meta_reason=str(reason or ""),
+        )
+
     except Exception as e:
         print(f"[failed_result log_prediction 오류] {e}")
+
+    # failure_db는 기존 유지
     try:
         if X_input is not None:
             insert_failure_record(res, feature_vector=np.array(X_input).flatten().tolist(), context="prediction")
     except Exception as e:
         print(f"[failed_result insert_failure_record 오류] {e}")
+
     return res
 
-def _soft_abstain(symbol, strategy, *, reason, meta_choice="abstain", regime="unknown", X_last=None, group_id=None, df=None, source="보류"):
+def _soft_abstain(symbol, strategy, *, reason, meta_choice="abstain", regime="unknown",
+                  X_last=None, group_id=None, df=None, source="보류"):
+    """
+    ✅ 보류/홀드 기록을 '예측로그에 안정적으로 남기기' 위한 함수
+    - status: hold
+    - hold_flag: 1
+    - meta_reason: reason
+    """
     try:
         ensure_prediction_log_exists()
         cur = float((df["close"].iloc[-1] if df is not None and len(df) else 0.0))
-        note = {"reason": reason, "abstain_prob_min": float(ABSTAIN_PROB_MIN), "max_calib_prob": None, "meta_choice": meta_choice, "regime": regime}
 
-        log_prediction(
+        note_full = {
+            "status": "hold",
+            "hold_flag": 1,
+            "meta_reason": str(reason or ""),
+            "abstain_prob_min": float(ABSTAIN_PROB_MIN),
+            "meta_choice": str(meta_choice),
+            "regime": str(regime),
+        }
+
+        # ✅ 1) 상세 보류 로그
+        _log_prediction_safe(
             symbol=symbol, strategy=strategy, direction="예측보류",
-            entry_price=cur, target_price=cur, model="meta", model_name=str(meta_choice),
-            predicted_class=-1, label=-1, note=json.dumps(note, ensure_ascii=False),
+            entry_price=cur, target_price=cur,
+            model="meta", model_name=str(meta_choice),
+            predicted_class=-1, label=-1,
+            note=json.dumps(note_full, ensure_ascii=False),
             top_k=[], success=False, reason=reason, rate=0.0, expected_return=0.0,
             position="neutral", return_value=0.0, source=source, group_id=group_id,
             feature_vector=(torch.tensor(X_last, dtype=torch.float32).numpy() if X_last is not None else None),
             regime=regime, meta_choice="abstain", raw_prob=None, calib_prob=None,
             calib_ver=get_calibration_version(), class_return_min=0.0,
-            class_return_max=0.0, class_return_text=""
+            class_return_max=0.0, class_return_text="",
+
+            # ✅ 컬럼용(받으면 쓰고, 못 받으면 버림)
+            status="hold",
+            hold_flag=1,
+            meta_reason=str(reason or ""),
         )
 
-        log_prediction(
+        # ✅ 2) 요약 라인(운영용)
+        note_summary = {"status": "hold", "hold_flag": 1, "meta_reason": str(reason or ""), "summary": True}
+        _log_prediction_safe(
             symbol=symbol, strategy=strategy, direction="예측(보류)",
-            entry_price=cur, target_price=cur, model="meta", model_name=str(meta_choice),
+            entry_price=cur, target_price=cur,
+            model="meta", model_name=str(meta_choice),
             predicted_class=-1, label=-1,
-            note=json.dumps({"reason": reason, "summary": True}, ensure_ascii=False),
+            note=json.dumps(note_summary, ensure_ascii=False),
             top_k=[], success=False, reason=reason, rate=0.0, expected_return=0.0,
             position="neutral", return_value=0.0, source=source, group_id=group_id,
             feature_vector=None, regime=regime, meta_choice="abstain",
             raw_prob=None, calib_prob=None, calib_ver=get_calibration_version(),
-            class_return_min=0.0, class_return_max=0.0, class_return_text=""
+            class_return_min=0.0, class_return_max=0.0, class_return_text="",
+
+            status="hold",
+            hold_flag=1,
+            meta_reason=str(reason or ""),
         )
 
     except Exception as e:
@@ -935,6 +1045,8 @@ def _soft_abstain(symbol, strategy, *, reason, meta_choice="abstain", regime="un
         "timestamp": _now_kst().isoformat(), "source": source, "regime": regime,
         "reason": reason, "success": False, "predicted_class": -1, "label": -1
     }
+
+
 
 # =========================================================
 # 보조
