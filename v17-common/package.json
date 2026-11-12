@@ -1,0 +1,9 @@
+{
+  "name":"btc-eth-v17-canonical-cloud",
+  "version":"1.0.0",
+  "private":true,
+  "type":"module",
+  "scripts":{"start":"node server.mjs","test":"node --test"},
+  "engines":{"node":">=20"},
+  "dependencies":{"pg":"^8.13.1"}
+}
