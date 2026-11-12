@@ -15,7 +15,7 @@ export function makeOAuth({origin,pool,ownerSecret}) {
  const htmlEscape=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  const eq=(a,b)=>{const x=Buffer.from(String(a)),y=Buffer.from(String(b));return x.length===y.length&&crypto.timingSafeEqual(x,y)};
  const sendJSON=(res,code,body,headers={})=>{res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...headers});res.end(JSON.stringify(body));};
- const sendHTML=(res,code,body)=>{res.writeHead(code,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",'X-Content-Type-Options':'nosniff'});res.end(body);};
+ const sendHTML=(res,code,body)=>{res.writeHead(code,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://chatgpt.com https://chat.openai.com; base-uri 'none'; frame-ancestors 'none'",'X-Content-Type-Options':'nosniff'});res.end(body);};
  const err=(res,status,code,desc)=>sendJSON(res,status,{error:code,error_description:desc});
  const url=req=>new URL(req.url,origin);
  async function body(req){let n=0,buf=[];for await(const b of req){n+=b.length;if(n>8192)throw Error('request too large');buf.push(b);}const raw=Buffer.concat(buf).toString('utf8');if(String(req.headers['content-type']).includes('application/json'))return JSON.parse(raw);return Object.fromEntries(new URLSearchParams(raw));}
