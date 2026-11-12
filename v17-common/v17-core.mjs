@@ -2,9 +2,17 @@ import crypto from 'node:crypto';
 import {POLICY_TEXT,POLICY_SHA256,POLICY_BYTES,POLICY_LINES} from './policy-v17.mjs';
 
 export const OFFICIAL_POLICY={name:'MASTER PROMPT V1.7 FINAL',sha256:POLICY_SHA256,bytes:POLICY_BYTES,lines:POLICY_LINES};
-export const VERSION='V17_VERBATIM_AI_OFFICIAL_REGISTRY_1.0.1';
+export const VERSION='V17_VERBATIM_AI_OFFICIAL_REGISTRY_1.0.2_AUTO_SWITCH';
 const STATES=new Set(['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','TP3_DONE','STOPPED','CANCELLED','REDESIGNED_CANCELLED','EARLY_EXIT','REVERSE_EXIT','UNVERIFIED']);
 const TERMINAL=new Set(['TP3_DONE','STOPPED','CANCELLED','REDESIGNED_CANCELLED','EARLY_EXIT','REVERSE_EXIT']);
+const ENTERED_STATES=new Set(['NEW_ENTRY','ENTERED','TP1','TP2']);
+// Separate immutable issued prices from the last valid, effective-at revision.
+export function effectivePlanOf(row){
+ const o=row?.original||row;
+ const p=row?.effectivePlan;
+ if(!p)return {stop:o.stop,tp1:o.tp1,tp2:o.tp2,tp3:o.tp3};
+ return {stop:p.stop,tp1:p.tp1,tp2:p.tp2,tp3:p.tp3};
+}
 const DIRECTIONS=['BTC_LONG','BTC_SHORT','ETH_LONG','ETH_SHORT'];
 const ALTERNATIVES=['A','B','C','D','E'];
 export const STEPS=Array.from({length:16},(_,i)=>i+1);
@@ -78,10 +86,11 @@ export function assessSnapshotEvidence(raw,{previousSnapshot=null,ledger=[],carr
    }
    if(knownContinuous&&['NEW_ENTRY','ENTERED','TP1','TP2'].includes(sig.status)&&
       ms(pathStart)>=ms(sig.verifiedUntil||orig.issuedAt)&&Number.isFinite(high)&&Number.isFinite(low)){
-     const hitStop=orig.direction==='SHORT'?high>=orig.stop:low<=orig.stop;
-     const hitTP1=orig.direction==='SHORT'?low<=orig.tp1:high>=orig.tp1;
-     const hitTP2=orig.direction==='SHORT'?low<=orig.tp2:high>=orig.tp2;
-     const hitTP3=orig.direction==='SHORT'?low<=orig.tp3:high>=orig.tp3;
+     const plan=effectivePlanOf(sig);
+     const hitStop=orig.direction==='SHORT'?high>=plan.stop:low<=plan.stop;
+     const hitTP1=orig.direction==='SHORT'?low<=plan.tp1:high>=plan.tp1;
+     const hitTP2=orig.direction==='SHORT'?low<=plan.tp2:high>=plan.tp2;
+     const hitTP3=orig.direction==='SHORT'?low<=plan.tp3:high>=plan.tp3;
      if(hitStop&&hitTP1)ambiguousSignals.push(sig.id);
      else if(hitStop)requiredExitSignals.push({id:sig.id,kind:'STOPPED'});
      else if(hitTP3)requiredExitSignals.push({id:sig.id,kind:'TP3_DONE'});
@@ -116,7 +125,7 @@ export function assessSnapshotEvidence(raw,{previousSnapshot=null,ledger=[],carr
  }
  return {snapshotSha256:snapshot.sha256,perSymbol,warnings,hasMaterialWarnings:warnings.length>0};
 }
-export function ledgerHash(rows){return digest(rows.map(r=>({id:r.id,symbol:r.symbol,original:r.original,status:r.status,verifiedUntil:r.verifiedUntil||null,version:r.version??0})).sort((a,b)=>a.id.localeCompare(b.id)));}
+export function ledgerHash(rows){return digest(rows.map(r=>({id:r.id,symbol:r.symbol,original:r.original,status:r.status,verifiedUntil:r.verifiedUntil||null,version:r.version??0,...(r.effectivePlan?{effectivePlan:r.effectivePlan,planEffectiveAt:r.planEffectiveAt||null}:{})})).sort((a,b)=>a.id.localeCompare(b.id)));}
 export const sourcePolicy=()=>({ ...OFFICIAL_POLICY,text:POLICY_TEXT });
 export function prepare({raw,session='OFFICIAL_V17',ledger=[],saved=null,previousSnapshot=null,carriedUncertaintyBySymbol={}}){
  const snapshot=validateSnapshot(raw),id=sessionId(session),beforeLedgerSha256=ledgerHash(ledger);
@@ -130,6 +139,7 @@ export function prepare({raw,session='OFFICIAL_V17',ledger=[],saved=null,previou
   requiredDirections:DIRECTIONS,requiredAlternatives:ALTERNATIVES,requiredSteps:STEPS,requiredClauses:CLAUSES,
   next:'After complete V1.7 analysis call publish_official_v17_analysis with exact prompt sha, snapshot and ledger hashes, decisionKey and structured decision. If the installed plugin has not refreshed its tools list, use existing register_formal_btc_eth_signal with signal={kind:V17_OFFICIAL_SUBMISSION,raw,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis}. Never present an unpublished preliminary candidate as official.',
   noOutcomeIfDataMissing:'Unknown historical trade outcome must be reported separately from the current market decision. If present market evidence is insufficient use HOLD; never fabricate prices or a closed/flat account.',
+  autoSwitchExecution:'At each new snapshot compare KEEP, PENDING REDESIGN, SAME_DIRECTION_ADD_ON, OPPOSITE_PENDING, EARLY_EXIT/REVERSE_EXIT, and REVISION. Separate parentSignalId metadata required. An opposite pending touch needs prior opposing exits before entered; it never silently opens a simultaneous opposite trade. Newly revised stop/TP values take effect only prospectively; original v0 preserved.',
   gapAwareSwitch:'If a historical PENDING trade has a real unresolved price gap, current LONG/SHORT decision must still be independently assessed. A new formal plan may only be published atomically with an auditable UNVERIFIED quarantine of the old PENDING record (or after it was already quarantined), explicit old ID risk disclosure, and no confirmed competing live position. This is analytical signal registration, NOT proof the exchange account is flat.'}};
 }
 function err(s){throw Error(s);}
@@ -178,10 +188,21 @@ export function checkEvent(evt,ledger){
   assert(['NEW_ENTRY','ENTERED','TP1','TP2'].includes(signal.status),'REVISION_REQUIRES_ENTERED_SIGNAL');
   assert(evt.plan&&typeof evt.plan==='object','REVISION_PLAN_REQUIRED');
   for(const k of ['stop','tp1','tp2','tp3']) assert(finite(evt.plan[k]),'REVISION_PRICE_MISSING_'+k);
-  if(signal.original.direction==='LONG')assert(evt.plan.stop>=signal.original.stop,'LONG_PROTECTIVE_STOP_MAY_NOT_WIDEN');
-  else assert(evt.plan.stop<=signal.original.stop,'SHORT_PROTECTIVE_STOP_MAY_NOT_WIDEN');
-  assert(has(evt.structureEvidence)&&has(evt.flowEvidence)&&has(evt.priorVersionNote),'REVISION_REQUIRES_REASON_AND_VERSION_EVIDENCE');
-  return true;
+  const prior=effectivePlanOf(signal),dir=signal.original.direction,entry=signal.original.direction==='LONG'?signal.original.entryHigh:signal.original.entryLow;
+  if(dir==='LONG')assert(evt.plan.stop>=prior.stop,'LONG_PROTECTIVE_STOP_MAY_NOT_WIDEN');
+  else assert(evt.plan.stop<=prior.stop,'SHORT_PROTECTIVE_STOP_MAY_NOT_WIDEN');
+   // A revision must never reclassify a previously hit TP or synthesize an immediately-hit target.
+   assert(finite(evt.observedPrice)&&evt.observedPrice>0,'REVISION_CURRENT_MARKET_PRICE_REQUIRED');
+   const target=[evt.plan.tp1,evt.plan.tp2,evt.plan.tp3],achieved=signal.status==='TP2'?2:signal.status==='TP1'?1:0;
+  if(dir==='LONG')assert(entry<target[0]&&target[0]<target[1]&&target[1]<target[2],'REVISION_LONG_TARGET_ORDER_INVALID');
+   else assert(entry>target[0]&&target[0]>target[1]&&target[1]>target[2],'REVISION_SHORT_TARGET_ORDER_INVALID');
+   const oldTargets=[prior.tp1,prior.tp2,prior.tp3];
+   for(let i=0;i<achieved;i++)assert(target[i]===oldTargets[i],'ACHIEVED_TARGET_MUST_NOT_CHANGE');
+   for(let i=achieved;i<3;i++)
+    assert(dir==='LONG'?target[i]>evt.observedPrice:target[i]<evt.observedPrice,'REVISION_FUTURE_TARGET_ALREADY_CROSSED');
+   assert(dir==='LONG'?evt.plan.stop<evt.observedPrice:evt.plan.stop>evt.observedPrice,'REVISION_STOP_ALREADY_CROSSED');
+   assert(has(evt.structureEvidence)&&has(evt.flowEvidence)&&has(evt.priorVersionNote),'REVISION_REQUIRES_REASON_AND_VERSION_EVIDENCE');
+   return true;
  }
  assert(STATES.has(evt.kind)&&evt.kind!=='NEW_ENTRY','EVENT_KIND_INVALID');
  const from=signal.status;
@@ -189,6 +210,18 @@ export function checkEvent(evt,ledger){
  assert((transitions[from]||[]).includes(evt.kind),'INVALID_STATUS_TRANSITION_'+from+'_TO_'+evt.kind);
  if(['ENTERED','TP1','TP2','TP3_DONE','STOPPED'].includes(evt.kind))assert(has(evt.pricePathEvidence),'PRICE_PATH_EVIDENCE_REQUIRED');
  if(['CANCELLED','REDESIGNED_CANCELLED','EARLY_EXIT','REVERSE_EXIT'].includes(evt.kind))assert(has(evt.strongCounterEvidence),'CANCELLATION_OR_EXIT_REQUIRES_POLICY_EVIDENCE');
+ if(['EARLY_EXIT','REVERSE_EXIT'].includes(evt.kind)){
+  assert(has(evt.structureEvidence)&&has(evt.flowEvidence)&&has(evt.contextEvidence),
+   'DISCRETIONARY_EXIT_REQUIRES_STRUCTURE_FLOW_AND_CONTEXT');
+  if(evt.realizedPnlPct!==undefined||evt.exitPrice!==undefined){
+   assert(finite(evt.exitPrice)&&has(evt.exitPriceEvidence)&&finite(evt.realizedPnlPct)&&
+     finite(evt.verifiedEntryPrice)&&evt.verifiedEntryPrice>0&&has(evt.entryPriceEvidence),
+    'EXIT_PRICE_AND_PNL_REQUIRE_VERIFIED_EVIDENCE');
+   const expected=(signal.original.direction==='LONG'?evt.exitPrice-evt.verifiedEntryPrice:
+     evt.verifiedEntryPrice-evt.exitPrice)/evt.verifiedEntryPrice*100;
+   assert(Math.abs(expected-evt.realizedPnlPct)<0.0001,'EXIT_PNL_MUST_MATCH_VERIFIED_ENTRY_AND_EXIT');
+  }else assert(evt.outcomeUnverified===true,'EXIT_WITHOUT_PRICE_MUST_DECLARE_UNVERIFIED_PNL');
+ }
   if(from==='UNVERIFIED'&&evt.kind!=='UNVERIFIED')
    assert(has(evt.gapResolutionEvidence),'UNKNOWN_OLD_STATE_CANNOT_BE_RESOLVED_WITHOUT_PRICE_PATH');
   if(evt.kind==='UNVERIFIED'){
@@ -288,33 +321,55 @@ export function validateOfficialSubmission(args,ledger,previousSnapshot=null,car
     'GAP_EVENT_REQUIRES_MISSING_PRICE_PATH_'+sym);
   }
  }
-  // Validate quarantine and transitions before creating a competing current plan.
-  // A position already proven ENTERED cannot be assumed closed merely because
-  // a later candle series is missing. It requires a separately verified exit.
+  // A current signal can be additional exposure alongside a confirmed same-direction
+  // entered trade, or an opposite PENDING switch candidate alongside it. Neither
+  // case silently closes the prior trade. Pending-to-pending redesign still
+  // requires explicit termination or documented historical quarantine.
   for(const sym of ['BTC','ETH']){
-   const next=news.filter(s=>s.symbol===sym+'USDT');
+   const next=news.filter(x=>x.symbol===sym+'USDT');
    if(!next.length)continue;
    assert(next.length<=1,'MULTIPLE_NEW_PLANS_SAME_SYMBOL_FORBIDDEN_'+sym);
-   const q=evidenceQuality.perSymbol[sym];
+   const candidate=next[0],q=evidenceQuality.perSymbol[sym];
    const snapshotAt=sym==='BTC'?shot.btcTime:shot.ethTime;
-   const earlier=ledger.filter(s=>s.symbol===sym+'USDT'&&!TERMINAL.has(s.status));
+   const earlier=ledger.filter(x=>x.symbol===sym+'USDT'&&!TERMINAL.has(x.status));
+   const activeEntered=earlier.filter(x=>ENTERED_STATES.has(x.status)&&!events.some(e=>e.id===x.id&&
+     ['STOPPED','TP3_DONE','EARLY_EXIT','REVERSE_EXIT'].includes(e.kind)&&ms(e.at)<=ms(candidate.issuedAt)));
+   if(activeEntered.length){
+    const parent=activeEntered.find(x=>x.id===candidate.parentSignalId);
+    assert(parent,'CONFIRMED_OLD_ENTRY_CANNOT_BE_IGNORED_NO_PARENT_'+sym);
+    const opposite=parent.original.direction!==candidate.direction;
+    assert(candidate.relationToExisting===(opposite?'OPPOSITE_PENDING':'SAME_DIRECTION_ADD_ON'),
+     'RELATION_TO_EXISTING_SIGNAL_INVALID_'+sym);
+    if(opposite){
+     assert(candidate.status==='PENDING','OPPOSITE_IMMEDIATE_ENTRY_REQUIRES_PRIOR_EXIT');
+     assert(has(candidate.transitionOnTouchEvidence)&&has(candidate.existingPositionRiskEvidence),
+      'OPPOSITE_PENDING_SWITCH_PLAN_EVIDENCE_REQUIRED');
+    }else{
+     assert(has(candidate.addOnRiskEvidence)&&has(candidate.existingPositionRiskEvidence),
+      'SAME_DIRECTION_ADD_ON_RISK_EVIDENCE_REQUIRED');
+    }
+   }
    for(const old of earlier){
-    const endEvent=events.find(e=>e.id===old.id&&['STOPPED','TP3_DONE','EARLY_EXIT','REVERSE_EXIT','CANCELLED','REDESIGNED_CANCELLED'].includes(e.kind));
+    const oldExit=events.find(e=>e.id===old.id&&['STOPPED','TP3_DONE','EARLY_EXIT','REVERSE_EXIT','CANCELLED','REDESIGNED_CANCELLED'].includes(e.kind));
     const quarantine=events.find(e=>e.id===old.id&&e.kind==='UNVERIFIED');
-    if(endEvent){assert(ms(endEvent.at)<=ms(next[0].issuedAt),'OLD_EXIT_MUST_PRECEDE_NEW_ISSUE_'+old.id);continue;}
+    if(oldExit){assert(ms(oldExit.at)<=ms(candidate.issuedAt),'OLD_EXIT_MUST_PRECEDE_NEW_ISSUE_'+old.id);continue;}
     if(old.status==='UNVERIFIED'){
-     // The last provable state is retained in the append-only UNVERIFIED event.
-     // No claim that a previously ENTERED position is flat is permitted.
      assert(old.unverifiedFrom==='PENDING','CONFIRMED_OLD_ENTRY_CANNOT_BE_IGNORED_'+old.id);
-     assert(next[0].historicalExposureUnknownIds?.includes(old.id),'NEW_SIGNAL_MUST_DISCLOSE_UNKNOWN_OLD_EXPOSURE_'+old.id);
+     assert(candidate.historicalExposureUnknownIds?.includes(old.id),
+      'NEW_SIGNAL_MUST_DISCLOSE_UNKNOWN_OLD_EXPOSURE_'+old.id);
      continue;
     }
     if(quarantine){
      assert(q.couldNotVerifySignals.includes(old.id),'UNVERIFIED_ONLY_IF_REAL_GAP_'+old.id);
      assert(ms(quarantine.at)===ms(snapshotAt),'QUARANTINE_TIME_MUST_EQUAL_SNAPSHOT_'+old.id);
-     assert(ms(quarantine.at)<=ms(next[0].issuedAt),'QUARANTINE_MUST_PRECEDE_NEW_ISSUE_'+old.id);
+     assert(ms(quarantine.at)<=ms(candidate.issuedAt),'QUARANTINE_MUST_PRECEDE_NEW_ISSUE_'+old.id);
      assert(old.status==='PENDING','CONFIRMED_OLD_ENTRY_CANNOT_BE_IGNORED_'+old.id);
      continue;
+    }
+    if(ENTERED_STATES.has(old.status)){
+     if(old.original.direction===candidate.direction&&candidate.relationToExisting==='SAME_DIRECTION_ADD_ON')continue;
+     if(old.original.direction!==candidate.direction&&candidate.status==='PENDING'&&
+       candidate.relationToExisting==='OPPOSITE_PENDING')continue;
     }
     assert(false,'OLD_SIGNAL_MUST_BE_ACCOUNTED_FOR_BEFORE_NEW_PLAN_'+old.id);
    }
@@ -325,9 +380,28 @@ export function validateOfficialSubmission(args,ledger,previousSnapshot=null,car
  let lastEventAt=null;
  for(const event of events){
   if(lastEventAt)assert(ms(event.at)>=ms(lastEventAt),'EVENTS_NOT_IN_TIME_ORDER');
+  const eventRow=staged.find(x=>x.id===event.id);
+  assert(eventRow,'EVENT_UNKNOWN_SIGNAL');
+  const observedAt=eventRow.symbol==='BTCUSDT'?shot.btcTime:shot.ethTime;
+  assert(ms(event.at)<=ms(observedAt),'EVENT_AFTER_SNAPSHOT_FORBIDDEN');
+  if(event.kind==='REVISION'){
+   const eventSnapshotAt=event.id&&staged.find(x=>x.id===event.id)?.symbol==='BTCUSDT'?shot.btcTime:shot.ethTime;
+   assert(event.at===eventSnapshotAt,'REVISION_MUST_START_AT_CURRENT_SNAPSHOT');
+   assert(event.observedPrice===(staged.find(x=>x.id===event.id)?.symbol==='BTCUSDT'?shot.btcPrice:shot.ethPrice),
+     'REVISION_OBSERVED_PRICE_MUST_EQUAL_SNAPSHOT');
+  }
   checkEvent(event,staged);
   const row=staged.find(r=>r.id===event.id);
-  if(event.kind==='REVISION')row.version=(row.version??0)+1;
+  if(event.kind==='ENTERED'){
+   // A pending opposite-side plan is permitted. Two opposed active positions are not.
+   const opponents=staged.filter(s=>s.id!==row.id&&s.symbol===row.symbol&&
+      ENTERED_STATES.has(s.status)&&s.original.direction!==row.original.direction&&
+      // New plans are staged for transaction validation but must not appear
+      // as live positions before their actual issuedAt timestamps.
+      ms(s.original.issuedAt)<=ms(event.at));
+   assert(!opponents.length,'OPPOSITE_ENTRY_REQUIRES_PRIOR_VERIFIED_EXIT_'+opponents.map(s=>s.id).join(','));
+  }
+  if(event.kind==='REVISION'){row.version=(row.version??0)+1;row.effectivePlan=structuredClone(event.plan);row.planEffectiveAt=event.at;}
   else row.status=event.kind;
   row.verifiedUntil=event.at;
   lastEventAt=event.at;
@@ -336,10 +410,13 @@ export function validateOfficialSubmission(args,ledger,previousSnapshot=null,car
   const syms=new Set(news.map(x=>x.symbol));
   for(const sym of syms){const existing=ledger.filter(x=>x.symbol===sym&&!TERMINAL.has(x.status)&&x.status!=='UNVERIFIED');const inMarket=existing.some(x=>['NEW_ENTRY','ENTERED','TP1','TP2'].includes(x.status));const next=news.filter(x=>x.symbol===sym);
    if(inMarket){
-    const was=existing.find(x=>['NEW_ENTRY','ENTERED','TP1','TP2'].includes(x.status));
-    for(const s of next.filter(x=>x.status==='NEW_ENTRY'&&x.direction!==was.original.direction)) {
-     const exited=events.some(e=>e.id===was.id&&e.kind==='REVERSE_EXIT'&&ms(e.at)<=ms(s.issuedAt));
-     assert(exited,'OPPOSITE_SIMULTANEOUS_ENTRY_FORBIDDEN');
+    // For an immediate opposite entry every conflicting tranche must have a
+    // prior verified terminal event, not just the first one in the ledger.
+    for(const s of next.filter(x=>x.status==='NEW_ENTRY')){
+     for(const was of existing.filter(x=>ENTERED_STATES.has(x.status)&&x.original.direction!==s.direction)){
+      const exited=events.some(e=>e.id===was.id&&['REVERSE_EXIT','EARLY_EXIT','STOPPED','TP3_DONE'].includes(e.kind)&&ms(e.at)<=ms(s.issuedAt));
+      assert(exited,'OPPOSITE_SIMULTANEOUS_ENTRY_FORBIDDEN');
+     }
     }
    }
    assert(next.filter(x=>x.status==='NEW_ENTRY').length<=1,'MULTIPLE_SIMULTANEOUS_ENTRY_FORBIDDEN');
