@@ -1,6 +1,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import {analyze,parse,sha,stable,verifySignal} from './engine.mjs';
+import {makeOAuth} from './oauth.mjs';
 
 const MODE=process.env.DEPLOYMENT_MODE||'local';
 const SECRET=process.env.SIGNAL_API_KEY||'';
@@ -8,6 +9,9 @@ const DB_URL=process.env.DATABASE_URL||'';
 const PORT=Number(process.env.PORT||3000);
 const MAX=500000;
 let pool;
+let oauth;
+const PUBLIC_ORIGIN=process.env.PUBLIC_ORIGIN||'https://btc-eth-v17-canonical-api.onrender.com';
+async function getOAuth(){if(oauth)return oauth;const db=await database();if(!db)throw Error('OAuth requires persistent database');const built=makeOAuth({origin:PUBLIC_ORIGIN,pool:db,ownerSecret:SECRET});await built.init();oauth=built;return oauth;}
 const liveMemory=new Map();
 function guarded(){if(MODE==='cloud'&&(!SECRET||!DB_URL))throw Error('production requires API key and durable database')}
 function isAuthorized(req){
@@ -77,9 +81,9 @@ async function compute(payload){
  }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
 }
 const tools=[
- {name:'run_official_btc_eth_snapshot',description:'Use this canonical shared V1.7 companion engine to evaluate both pasted BTC/ETH snapshots and retrieve the one common deterministic verdict with formal ledger, chronological price-touch audits, calculated SL and TP percentages. NOT guaranteed complete discretionary V1.7 semantic equivalence or profitable trading.',inputSchema:{type:'object',properties:{raw:{type:'string',description:'Complete BTC and ETH raw snapshots pasted by the user'},session:{type:'string',description:'Shared official ledger identifier, default OFFICIAL_V17'}},required:['raw']}},
- {name:'read_official_btc_eth_ledger',description:'Get the original immutable BTC/ETH formal signal ledger for the given canonical session.',inputSchema:{type:'object',properties:{session:{type:'string'}},required:[]}},
- {name:'register_formal_btc_eth_signal',description:'Explicitly register an authorized original formal LONG/SHORT signal. Never guess old signals, prices, or fills.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
+ {name:'run_official_btc_eth_snapshot',securitySchemes:[{type:'oauth2',scopes:['signals:read','signals:write']}],description:'Use this canonical shared V1.7 companion engine to evaluate both pasted BTC/ETH snapshots and retrieve the one common deterministic verdict with formal ledger, chronological price-touch audits, calculated SL and TP percentages. NOT guaranteed complete discretionary V1.7 semantic equivalence or profitable trading.',inputSchema:{type:'object',properties:{raw:{type:'string',description:'Complete BTC and ETH raw snapshots pasted by the user'},session:{type:'string',description:'Shared official ledger identifier, default OFFICIAL_V17'}},required:['raw']}},
+ {name:'read_official_btc_eth_ledger',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Get the original immutable BTC/ETH formal signal ledger for the given canonical session.',inputSchema:{type:'object',properties:{session:{type:'string'}},required:[]}},
+ {name:'register_formal_btc_eth_signal',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'Explicitly register an authorized original formal LONG/SHORT signal. Never guess old signals, prices, or fills.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
 ];
 async function mcp(req,res){
  const body=await readJSON(req);if(body.method==='notifications/initialized'){res.writeHead(202);res.end();return;}
@@ -88,7 +92,6 @@ async function mcp(req,res){
  if(body.method==='ping')return json(res,200,{jsonrpc:'2.0',id,result:{}});
  if(body.method==='tools/list')return json(res,200,{jsonrpc:'2.0',id,result:{tools}});
  if(body.method==='tools/call'){
-  if(!isAuthorized(req))return json(res,200,{jsonrpc:'2.0',id,result:{isError:true,content:[{type:'text',text:'Unauthorized: configure secret credential in connection'}]}});
   const name=body.params?.name,args=body.params?.arguments||{};
   try{
    let output;if(name==='run_official_btc_eth_snapshot')output=await compute(args);
@@ -105,7 +108,8 @@ const server=http.createServer(async(req,res)=>{
  try{
   if(req.url==='/health'&&req.method==='GET')return json(res,200,{status:!SECRET||!DB_URL?'not_ready':'ready',engine:'V1.7_SHARED_VERDICT_V1',db:!!DB_URL,authentication:!!SECRET});
   if(req.url==='/'&&req.method==='GET'){res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff','content-security-policy':"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'"});return res.end(PAGE);}
-  if(req.url==='/mcp'&&req.method==='POST')return await mcp(req,res);
+  if((req.url.startsWith('/.well-known/')||req.url.startsWith('/oauth/'))){const a=await getOAuth();const handled=await a.handle(req,res);if(handled!==false)return;}
+  if(req.url==='/mcp'&&req.method==='POST'){const a=await getOAuth();const principal=await a.authenticate(req);if(!principal)return json(res,401,{error:'invalid_token'},{'WWW-Authenticate':a.challenge});return await mcp(req,res);}
   if(req.url==='/mcp'&&req.method==='GET'){res.writeHead(405,{'allow':'POST'});return res.end();}
   if(req.url.startsWith('/api/')){
    if(!isAuthorized(req))return fail(res,401,'invalid authentication');
@@ -117,7 +121,7 @@ const server=http.createServer(async(req,res)=>{
  }catch(e){return fail(res,400,e.message||'invalid request');}
 });
 if(process.env.V17_NO_LISTEN!=='1'){
- try{guarded();await database();server.listen(PORT,'0.0.0.0',()=>process.stderr.write('v17-server-listening:'+PORT+'\n'));}
+ try{guarded();await getOAuth();server.listen(PORT,'0.0.0.0',()=>process.stderr.write('v17-server-listening:'+PORT+'\n'));}
  catch(e){process.stderr.write('startup-failed:'+e.message+'\n');process.exit(1);}
 }
 export {server,compute,addSignal,getLedger};
