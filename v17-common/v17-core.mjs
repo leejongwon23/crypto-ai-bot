@@ -39,7 +39,7 @@ export function prepare({raw,session='OFFICIAL_V17',ledger=[],saved=null}){
   role:'AI must read and apply THE ENTIRE original Korean V1.7 policy below, not approximate with fixed indicator gates.',
   noExternalScriptedSignals:true,noNewIndicatorThresholds:true,noHistoricalSignalImport:true,
   requiredDirections:DIRECTIONS,requiredAlternatives:ALTERNATIVES,requiredSteps:STEPS,requiredClauses:CLAUSES,
-  next:'After complete V1.7 analysis call publish_official_v17_analysis with exact prompt sha, snapshot and ledger hashes, decisionKey and structured decision. Never present an unpublished preliminary candidate as an official signal.',
+  next:'After complete V1.7 analysis call publish_official_v17_analysis with exact prompt sha, snapshot and ledger hashes, decisionKey and structured decision. If the installed plugin has not refreshed its tools list, use existing register_formal_btc_eth_signal with signal={kind:V17_OFFICIAL_SUBMISSION,raw,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis}. Never present an unpublished preliminary candidate as official.',
   noOutcomeIfDataMissing:'If evidence is insufficient, use HOLD/NONE and report what is unverified; never fabricate prices.'}};
 }
 function err(s){throw Error(s);}
