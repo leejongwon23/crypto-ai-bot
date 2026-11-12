@@ -1,0 +1,24 @@
+databases:
+  - name: btc-eth-v17-official-ledger
+    region: oregon
+    plan: free
+    postgresMajorVersion: '18'
+services:
+  - type: web
+    name: btc-eth-v17-canonical-api
+    runtime: node
+    region: oregon
+    plan: free
+    rootDir: v17-common
+    buildCommand: npm install --omit=dev
+    startCommand: node server.mjs
+    healthCheckPath: /health
+    envVars:
+      - key: DEPLOYMENT_MODE
+        value: cloud
+      - key: SIGNAL_API_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: btc-eth-v17-official-ledger
+          property: connectionString
