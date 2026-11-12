@@ -40,12 +40,17 @@ async function selectOfficial(db,session,snapshotSha,stateSha){
  const q=await db.query('SELECT official FROM v17_ai_analyses WHERE session=$1 AND snapshot_sha=$2 AND (before_sha=$3 OR after_sha=$3) ORDER BY created_at ASC LIMIT 1',[session,snapshotSha,stateSha]);
  return q.rows[0]?.official||null;
 }
+async function latestOfficialSnapshot(db,session){
+ const r=await db.query("SELECT official->'snapshot' AS snapshot FROM v17_ai_analyses WHERE session=$1 ORDER BY created_at DESC LIMIT 1",[session]);
+ return r.rows[0]?.snapshot||null;
+}
 async function beginAnalysis(body){
  const raw=body.raw,session=sessionId(body.session||'OFFICIAL_V17');
  const snapshot=validateSnapshot(raw);const db=await database();
  const ledger=await readLedger(db,session);
  const saved=await selectOfficial(db,session,snapshot.sha256,ledgerHash(ledger));
- return prepare({raw,session,ledger,saved});
+ const previousSnapshot=await latestOfficialSnapshot(db,session);
+ return prepare({raw,session,ledger,saved,previousSnapshot});
 }
 async function publishAnalysis(body){
  const raw=body.raw,session=sessionId(body.session||'OFFICIAL_V17');const shot=validateSnapshot(raw);
@@ -59,7 +64,8 @@ async function publishAnalysis(body){
   // At most one official result per snapshot and current ledger state.
   const prior=await selectOfficial(client,session,shot.sha256,before);
   if(prior){await client.query('COMMIT');return {status:'OFFICIAL_REPLAY',officialDecision:prior,sameState:true,notReanalyzed:true};}
-  const verified=validateOfficialSubmission(body,ledger);
+  const previousSnapshot=await latestOfficialSnapshot(client,session);
+  const verified=validateOfficialSubmission(body,ledger,previousSnapshot);
   const newSignals=verified.newSignals,events=verified.events;
   for(const s of newSignals){
    await client.query('INSERT INTO v17_ai_signals(session,id,symbol,original,status,verified_until,plan_version) VALUES($1,$2,$3,$4,$5,$6,0)',[session,s.id,s.symbol,JSON.stringify(s),s.status,s.issuedAt]);
@@ -78,6 +84,7 @@ async function publishAnalysis(body){
    notAutomatedServerTradeModel:true,
    policy:OFFICIAL_POLICY,
    snapshot:shot,
+   evidenceQuality:verified.evidenceQuality,
    session,
    beforeLedgerSha256:before,
    afterLedgerSha256:after,
@@ -98,13 +105,23 @@ async function publishAnalysis(body){
  }catch(e){try{await client.query('ROLLBACK');}catch{}throw e;}finally{client.release();}
 }
 async function ledgerView(args){const session=sessionId(args.session||'OFFICIAL_V17'),db=await database(),ledger=await readLedger(db,session);return {session,policy:OFFICIAL_POLICY,ledgerSha256:ledgerHash(ledger),signals:ledger,events:(await db.query('SELECT id,event,at_kst FROM v17_ai_events WHERE session=$1 ORDER BY seq DESC LIMIT 500',[session])).rows};}
+// Read-only audit trail. The official signal/event ledger is never rewritten.
+async function decisionHistory(args={}){
+ const session=sessionId(args.session||'OFFICIAL_V17'),db=await database();
+ const limit=Math.max(1,Math.min(100,Number.isSafeInteger(args.limit)?args.limit:30));
+ const r=await db.query("SELECT created_at, official->'snapshot' AS snapshot, official->'conclusions' AS conclusions, official->'directions' AS directions, official->'newSignals' AS new_signals, official->'events' AS events FROM v17_ai_analyses WHERE session=$1 ORDER BY created_at DESC LIMIT $2",[session,limit]);
+ return {session,limit,officialHistory:r.rows.map(x=>({createdAt:x.created_at,snapshot:x.snapshot,conclusions:x.conclusions,
+  directions:args.includeDirections===true?x.directions:undefined,newSignals:x.new_signals,events:x.events})),
+  warning:'Decisions were made as of each snapshot. A later favorable price move does not retroactively prove an earlier candidate had been eligible.'};
+}
 async function showPolicy(){return {engine:VERSION,policy:sourcePolicy(),instruction:'Use every source section 0–23, appendices A and B and final integrated execution instruction. No substitutions.'};}
 const requiredSchema={type:'object',properties:{raw:{type:'string',description:'Verbatim BTC and ETH snapshots, as pasted by the user'},session:{type:'string',description:'Use shared OFFICIAL_V17 for a single official signal ledger. Separate arbitrary sessions must not import old signals.'}},required:['raw']};
 const tools=[
- {name:'run_official_btc_eth_snapshot',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'FIRST STEP (MANDATORY). Fetch the ENTIRE unchanged V1.7 MASTER PROMPT, official session ledger and any already stored official analysis for these BTC+ETH raw snapshots. If OFFICIAL_REPLAY, show officialDecision.reportMarkdown VERBATIM; do not reanalyze. If NEEDS_AI_ANALYSIS, analyze strictly by every original V1.7 section (0–23, A, B, final instructions) using the returned full policy text, then call publish_official_v17_analysis. NEVER generate an independent heuristic EMA/CVD signal or call anything an official signal before publish.',inputSchema:requiredSchema},
+ {name:'run_official_btc_eth_snapshot',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'FIRST STEP (MANDATORY). Fetch the ENTIRE unchanged V1.7 MASTER PROMPT, official session ledger, deterministic evidenceQuality gaps/rate-limit report and any already stored official analysis for these BTC+ETH raw snapshots. If OFFICIAL_REPLAY, show officialDecision.reportMarkdown VERBATIM; do not reanalyze. If NEEDS_AI_ANALYSIS, analyze strictly by every original V1.7 section (0–23, A, B, final instructions) using the returned full policy text, then call publish_official_v17_analysis. NEVER generate an independent heuristic EMA/CVD signal or call anything an official signal before publish.',inputSchema:requiredSchema},
  {name:'get_original_v17_full_prompt',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Fetch EXACT full 902-line user-supplied V1.7 source, CRLF and original punctuation preserved. Must be the sole authoritative strategy; no new indicator thresholds, no removed functionality.',inputSchema:{type:'object',properties:{},additionalProperties:false}},
- {name:'publish_official_v17_analysis',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'SECOND STEP after run_official_btc_eth_snapshot returned NEEDS_AI_ANALYSIS. Publish the full, AI-reasoned, ORIGINAL V1.7 analysis and immutable new signals and chronological management events to the official shared ledger; validates 16 execution steps and four directions A-E. If another chat already published this snapshot with same ledger, returns that authoritative result. Do not invent a signal; do not submit if any essential evidence missing. Must supply original V1.7 policy sha, raw snapshot sha, pre-ledger sha, decisionKey, analysis.',inputSchema:{type:'object',properties:{raw:{type:'string'},session:{type:'string'},policySha256:{type:'string'},snapshotSha256:{type:'string'},beforeLedgerSha256:{type:'string'},decisionKey:{type:'string'},analysis:{type:'object',description:'Full V1.7 decision: reportMarkdown; directions BTC_LONG/BTC_SHORT/ETH_LONG/ETH_SHORT each marketEvidence,counterEvidence,alternatives A-E {judgement,evidence}; coupling {status,evidence}; checks 1..16 {status=CONFIRMED|UNVERIFIED|VIOLATION,evidence}; clauses 0..23,APPENDIX_A,APPENDIX_B,FINAL_EXECUTION {status=CONFIRMED|UNVERIFIED|VIOLATION,evidence}; audit20 {rules,bias,evidence}; conclusions BTC/ETH {decision=LONG|SHORT|HOLD|MANAGE|UNVERIFIED,evidence}; newSignals[]; events[]'}},required:['raw','policySha256','snapshotSha256','beforeLedgerSha256','decisionKey','analysis']}},
+ {name:'publish_official_v17_analysis',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'SECOND STEP after run_official_btc_eth_snapshot returned NEEDS_AI_ANALYSIS. Evidence audit is mandatory: any confirmed continuous old-PENDING entry touch must produce ENTERED, and any unambiguous stop/TP touch on an active trade must produce its event. An aggregated path crossing both entry/exit or stop/TP is UNVERIFIED until event order is known. An incomplete prior path must NOT produce guessed entry, stop, target or cancellation. If evidenceQuality.perSymbol.*.couldNotVerifySignals is nonempty, that symbol conclusion MUST be UNVERIFIED and official historical signal state MUST NOT be asserted as confirmed. Re-assess HOLD versus actual entry alternatives: a future retest is not a prerequisite to issue a PENDING limit signal; support for the level must be known at issuance. Keep retrospective audits separate from formal ledger.  Publish the full, AI-reasoned, ORIGINAL V1.7 analysis and immutable new signals and chronological management events to the official shared ledger; validates 16 execution steps and four directions A-E. If another chat already published this snapshot with same ledger, returns that authoritative result. Do not invent a signal; do not submit if any essential evidence missing. Must supply original V1.7 policy sha, raw snapshot sha, pre-ledger sha, decisionKey, analysis.',inputSchema:{type:'object',properties:{raw:{type:'string'},session:{type:'string'},policySha256:{type:'string'},snapshotSha256:{type:'string'},beforeLedgerSha256:{type:'string'},decisionKey:{type:'string'},analysis:{type:'object',description:'Full V1.7 decision: reportMarkdown; directions BTC_LONG/BTC_SHORT/ETH_LONG/ETH_SHORT each marketEvidence,counterEvidence,alternatives A-E {judgement,evidence}; coupling {status,evidence}; checks 1..16 {status=CONFIRMED|UNVERIFIED|VIOLATION,evidence}; clauses 0..23,APPENDIX_A,APPENDIX_B,FINAL_EXECUTION {status=CONFIRMED|UNVERIFIED|VIOLATION,evidence}; audit20 {rules,bias,evidence}; conclusions BTC/ETH {decision=LONG|SHORT|HOLD|MANAGE|UNVERIFIED,evidence}; newSignals[]; events[]'}},required:['raw','policySha256','snapshotSha256','beforeLedgerSha256','decisionKey','analysis']}},
  {name:'read_official_btc_eth_ledger',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Retrieve NEW V1.7 source-exact official signal ledger and chronological immutable events for this session. Previous noncompliant legacy companion signals remain isolated, not silently imported.',inputSchema:{type:'object',properties:{session:{type:'string'}},required:[]}},
+ {name:'read_official_v17_decision_history',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Read-only chronological OFFICIAL_V17 AI decision history for missed-opportunity review. Never convert hypothetical candidates to historical trades or alter immutable signal outcomes.',inputSchema:{type:'object',properties:{session:{type:'string'},limit:{type:'integer',minimum:1,maximum:100},includeDirections:{type:'boolean'}},required:[]}},
  {name:'register_formal_btc_eth_signal',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'COMPATIBILITY path for previously installed plugins: use signal={kind:V17_OFFICIAL_SUBMISSION,raw,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis} to publish complete original V1.7 AI analysis. Standalone signal writing is forbidden.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
 ];
 async function mcp(req,res,principal){
@@ -124,6 +141,7 @@ async function mcp(req,res,principal){
   else if(n==='get_original_v17_full_prompt')result=await showPolicy();
   else if(n==='publish_official_v17_analysis')result=await publishAnalysis(args);
   else if(n==='read_official_btc_eth_ledger')result=await ledgerView(args);
+  else if(n==='read_official_v17_decision_history')result=await decisionHistory(args);
   else if(n==='register_formal_btc_eth_signal'){
    // Backward-compatible path for existing installed ChatGPT plugins whose MCP tool list is cached.
    // Standalone signal creation remains forbidden: only a complete source-verified AI analysis may be published.
@@ -156,6 +174,7 @@ const server=http.createServer(async(req,res)=>{
    if(req.method==='POST'&&req.url==='/api/publish')return json(res,200,await publishAnalysis(await readJSON(req)));
    if(req.method==='GET'&&req.url==='/api/ledger'){return json(res,200,await ledgerView({}));}
    if(req.method==='GET'&&req.url==='/api/policy')return json(res,200,await showPolicy());
+   if(req.method==='GET'&&req.url==='/api/history')return json(res,200,await decisionHistory({}));
   }
   return responseError(res,404,'NOT_FOUND');
  }catch(e){return responseError(res,400,e.message||'BAD_REQUEST');}
@@ -166,4 +185,4 @@ if(process.env.V17_NO_LISTEN!=='1'){
   await getOAuth();server.listen(PORT,'0.0.0.0',()=>process.stderr.write('v17-verbatim-listening:'+PORT+'\n'));
  }catch(e){process.stderr.write('v17-startup-failed:'+e.message+'\n');process.exit(1);}
 }
-export {server,beginAnalysis,publishAnalysis,ledgerView,tools};
+export {server,beginAnalysis,publishAnalysis,ledgerView,decisionHistory,tools};

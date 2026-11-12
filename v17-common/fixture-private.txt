@@ -1,0 +1,8 @@
+========== BTC (BTCUSDT) ==========
+timestamp_kst: 2026-11-12 11:26:01
+[1] REALTIME PRICE (AUTO)
+lastPrice: 73850.00 | mark: 73850.00
+========== ETH (ETHUSDT) ==========
+timestamp_kst: 2026-11-12 11:26:07
+[1] REALTIME PRICE (AUTO)
+lastPrice: 2100.00 | mark: 2100.00

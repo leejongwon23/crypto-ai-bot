@@ -4,7 +4,7 @@ import {readFileSync} from 'node:fs';
 import {POLICY_SHA256,POLICY_TEXT,POLICY_BYTES,POLICY_LINES} from './policy-v17.mjs';
 import {OFFICIAL_POLICY,sessionId,validateSnapshot,prepare,ledgerHash,digest,validateSignal,validateOfficialSubmission,checkEvent,signalMetrics,CLAUSES} from './v17-core.mjs';
 const raw=readFileSync(new URL('./fixture-private.txt',import.meta.url),'utf8');
-const full=readFileSync('/mnt/data/붙여넣은 텍스트(1)(4).txt');
+const full=Buffer.from(POLICY_TEXT,'utf8'); // Pinned SHA256 is checked independently in evidence-audit.test.mjs
 const shot=validateSnapshot(raw);
 const empty=[];
 const base=prepare({raw,ledger:empty});
