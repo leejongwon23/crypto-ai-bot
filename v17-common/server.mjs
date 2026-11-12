@@ -105,7 +105,7 @@ const tools=[
  {name:'get_original_v17_full_prompt',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Fetch EXACT full 902-line user-supplied V1.7 source, CRLF and original punctuation preserved. Must be the sole authoritative strategy; no new indicator thresholds, no removed functionality.',inputSchema:{type:'object',properties:{},additionalProperties:false}},
  {name:'publish_official_v17_analysis',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'SECOND STEP after run_official_btc_eth_snapshot returned NEEDS_AI_ANALYSIS. Publish the full, AI-reasoned, ORIGINAL V1.7 analysis and immutable new signals and chronological management events to the official shared ledger; validates 16 execution steps and four directions A-E. If another chat already published this snapshot with same ledger, returns that authoritative result. Do not invent a signal; do not submit if any essential evidence missing. Must supply original V1.7 policy sha, raw snapshot sha, pre-ledger sha, decisionKey, analysis.',inputSchema:{type:'object',properties:{raw:{type:'string'},session:{type:'string'},policySha256:{type:'string'},snapshotSha256:{type:'string'},beforeLedgerSha256:{type:'string'},decisionKey:{type:'string'},analysis:{type:'object',description:'Full V1.7 decision: reportMarkdown; directions BTC_LONG/BTC_SHORT/ETH_LONG/ETH_SHORT each marketEvidence,counterEvidence,alternatives A-E {judgement,evidence}; coupling {status,evidence}; checks 1..16 {status=CONFIRMED|UNVERIFIED|VIOLATION,evidence}; clauses 0..23,APPENDIX_A,APPENDIX_B,FINAL_EXECUTION {status=CONFIRMED|UNVERIFIED|VIOLATION,evidence}; audit20 {rules,bias,evidence}; conclusions BTC/ETH {decision=LONG|SHORT|HOLD|MANAGE|UNVERIFIED,evidence}; newSignals[]; events[]'}},required:['raw','policySha256','snapshotSha256','beforeLedgerSha256','decisionKey','analysis']}},
  {name:'read_official_btc_eth_ledger',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Retrieve NEW V1.7 source-exact official signal ledger and chronological immutable events for this session. Previous noncompliant legacy companion signals remain isolated, not silently imported.',inputSchema:{type:'object',properties:{session:{type:'string'}},required:[]}},
- {name:'register_formal_btc_eth_signal',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'DEPRECATED/SAFETY-LOCKED. Never write standalone signals. To preserve full original V1.7 workflow, submit the entire AI decision with publish_official_v17_analysis instead.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
+ {name:'register_formal_btc_eth_signal',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'COMPATIBILITY path for previously installed plugins: use signal={kind:V17_OFFICIAL_SUBMISSION,raw,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis} to publish complete original V1.7 AI analysis. Standalone signal writing is forbidden.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
 ];
 async function mcp(req,res,principal){
  const b=await readJSON(req),id=b.id;
@@ -124,7 +124,14 @@ async function mcp(req,res,principal){
   else if(n==='get_original_v17_full_prompt')result=await showPolicy();
   else if(n==='publish_official_v17_analysis')result=await publishAnalysis(args);
   else if(n==='read_official_btc_eth_ledger')result=await ledgerView(args);
-  else if(n==='register_formal_btc_eth_signal')throw Error('Standalone signal writing is disabled; use source-exact V1.7 AI analysis publication.');
+  else if(n==='register_formal_btc_eth_signal'){
+   // Backward-compatible path for existing installed ChatGPT plugins whose MCP tool list is cached.
+   // Standalone signal creation remains forbidden: only a complete source-verified AI analysis may be published.
+   if(args.signal?.kind!=='V17_OFFICIAL_SUBMISSION')throw Error('Standalone signal writing is forbidden. Supply signal.kind=V17_OFFICIAL_SUBMISSION with the complete V1.7 analysis envelope.');
+   const payload={...args.signal,session:args.session||args.signal.session||'OFFICIAL_V17'};
+   delete payload.kind;
+   result=await publishAnalysis(payload);
+  }
   else return json(res,200,{jsonrpc:'2.0',id,error:{code:-32601,message:'Unknown tool'}});
   return json(res,200,{jsonrpc:'2.0',id,result:{content:[{type:'text',text:JSON.stringify(result)}],isError:false}});
  }catch(e){return json(res,200,{jsonrpc:'2.0',id,result:{content:[{type:'text',text:String(e.message||e)}],isError:true}});}
