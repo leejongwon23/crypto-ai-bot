@@ -8,6 +8,9 @@ const SECRET=process.env.SIGNAL_API_KEY||'';
 const DB_URL=process.env.DATABASE_URL||'';
 const PORT=Number(process.env.PORT||3000);
 const MAX=500000;
+// Safety lock: this companion does not implement the supplied V1.7 decision policy.
+const LIVE_V17_SIGNALS_ENABLED=false;
+const DISABLED_REASON='V1.7 원본과 다른 임의 계산 로직이 확인되어 신규 신호 산출과 등록을 중단했습니다. 원문 V1.7의 공식 분석 결과가 아닙니다.';
 let pool;
 let oauth;
 const PUBLIC_ORIGIN=process.env.PUBLIC_ORIGIN||'https://btc-eth-v17-canonical-api.onrender.com';
@@ -40,7 +43,7 @@ async function getLedger(session){
  const r=await db.query('SELECT id,original,status,verified_until FROM v17_signals WHERE session=$1 ORDER BY id',[session]);
  return r.rows.map(v=>({...v.original,status:v.status,verifiedUntil:v.verified_until}));
 }
-async function addSignal(payload){
+async function addSignal(payload){if(!LIVE_V17_SIGNALS_ENABLED)throw Error(DISABLED_REASON);
  const session=standardSession(payload.session||'OFFICIAL_V17');const source=payload.signal;
  verifySignal(source);const s={...source};delete s.status;delete s.verifiedUntil;
  if(!['PENDING','ENTERED','TP1','TP2','STOPPED','TP3_DONE','UNKNOWN'].includes(source.status||'PENDING'))throw Error('invalid formal state');
@@ -54,7 +57,7 @@ async function addSignal(payload){
   await client.query('COMMIT');return {ok:true,id:source.id,session};
  }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
 }
-async function compute(payload){
+async function compute(payload){if(!LIVE_V17_SIGNALS_ENABLED)throw Error(DISABLED_REASON);
  const raw=payload.raw;if(typeof raw!=='string')throw Error('raw snapshot required');const markets=parse(raw);const session=standardSession(payload.session||'OFFICIAL_V17');
  const db=await database();if(!db){const ledger=await getLedger(session);return {session,rawSha:sha(raw),official:analyze(raw,ledger),ledger:ledger.map(x=>({id:x.id,status:x.status})),consistency:'LOCAL_ONLY_EPHEMERAL'};}
  const client=await db.connect();try{
@@ -81,9 +84,9 @@ async function compute(payload){
  }catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
 }
 const tools=[
- {name:'run_official_btc_eth_snapshot',securitySchemes:[{type:'oauth2',scopes:['signals:read','signals:write']}],description:'Use this canonical shared V1.7 companion engine to evaluate both pasted BTC/ETH snapshots and retrieve the one common deterministic verdict with formal ledger, chronological price-touch audits, calculated SL and TP percentages. NOT guaranteed complete discretionary V1.7 semantic equivalence or profitable trading.',inputSchema:{type:'object',properties:{raw:{type:'string',description:'Complete BTC and ETH raw snapshots pasted by the user'},session:{type:'string',description:'Shared official ledger identifier, default OFFICIAL_V17'}},required:['raw']}},
+ {name:'run_official_btc_eth_snapshot',securitySchemes:[{type:'oauth2',scopes:['signals:read','signals:write']}],description:'DISABLED: this service does not implement the V1.7 original prompt. Do not issue or infer any LONG/SHORT/entry/stop/targets from this tool. Returns noncompliance error. Existing ledger remains readable.',inputSchema:{type:'object',properties:{raw:{type:'string',description:'Complete BTC and ETH raw snapshots pasted by the user'},session:{type:'string',description:'Shared official ledger identifier, default OFFICIAL_V17'}},required:['raw']}},
  {name:'read_official_btc_eth_ledger',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Get the original immutable BTC/ETH formal signal ledger for the given canonical session.',inputSchema:{type:'object',properties:{session:{type:'string'}},required:[]}},
- {name:'register_formal_btc_eth_signal',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'Explicitly register an authorized original formal LONG/SHORT signal. Never guess old signals, prices, or fills.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
+ {name:'register_formal_btc_eth_signal',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'DISABLED: formal signal registration is locked to prevent non-V1.7 entries while the engine is corrected. Existing ledger is retained.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
 ];
 async function mcp(req,res){
  const body=await readJSON(req);if(body.method==='notifications/initialized'){res.writeHead(202);res.end();return;}
@@ -103,7 +106,7 @@ async function mcp(req,res){
  }
  return json(res,200,{jsonrpc:'2.0',id,error:{code:-32601,message:'Method not found'}});
 }
-const PAGE=`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BTC·ETH V1.7 공통 판정 엔진</title><style>body{font-family:system-ui,sans-serif;max-width:950px;margin:25px auto;padding:0 15px;background:#0f172a;color:#f8fafc}textarea,input,button{box-sizing:border-box;width:100%;padding:12px;border-radius:9px;border:1px solid #475569;background:#1e293b;color:white;font-size:15px}textarea{height:200px}button{margin-top:12px;background:#2563eb;font-weight:700;cursor:pointer}label{display:block;margin-top:15px;margin-bottom:5px;font-weight:600}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#111827;padding:15px;border:1px solid #334155;border-radius:9px}small{color:#cbd5e1}</style></head><body><h2>BTC·ETH V1.7 공통 판정</h2><p>BTC·ETH 데이터를 그대로 붙여넣으면 같은 공식 원장과 정량 판정 결과를 확인합니다.</p><small>이 도구는 V1.7을 수정하지 않는 별도 정량 보조판정입니다. 주관적 V1.7 전체와의 동치 또는 수익성을 보장하지 않습니다. 거래소 주문을 실행하지 않습니다.</small><label>연결 암호</label><input type="password" id="key" autocomplete="off" placeholder="본인 전용 서버 암호"/><label>공식 원장</label><input id="session" value="OFFICIAL_V17"/><label>BTC·ETH 원본 데이터</label><textarea id="raw" placeholder="========== BTC (BTCUSDT) =========="></textarea><button onclick="run()">공식 분석 실행</button><pre id="result">진입가·손절·목표 및 분석 결과가 이곳에 표시됩니다.</pre><script>async function run(){const o=document.getElementById('result');o.textContent='분석 중...';try{const r=await fetch('/api/run',{method:'POST',headers:{'content-type':'application/json','authorization':'Bearer '+document.getElementById('key').value},body:JSON.stringify({raw:document.getElementById('raw').value,session:document.getElementById('session').value})});const j=await r.json();if(!r.ok)throw Error(j.error||r.status);if(!j.official){o.textContent=JSON.stringify(j,null,2);return}let s='';for(const [k,v] of Object.entries(j.official.results)){s+='\\n'+k+' | $'+v.last+' | '+v.recommendation+'\\n';for(const sig of v.officialSignals)s+=sig.id+' '+sig.state+' | SL '+sig.metrics.stopPct+'% | TP1 '+sig.metrics.tp1Pct+'% / TP2 '+sig.metrics.tp2Pct+'% / TP3 '+sig.metrics.tp3Pct+'%\\n';if(v.selectedPlan)s+='진입 '+v.selectedPlan.entryLow+' | 손절 '+v.selectedPlan.stop+' | TP1 '+v.selectedPlan.tp1+' | TP2 '+v.selectedPlan.tp2+' | TP3 '+v.selectedPlan.tp3+'\\n';}o.textContent=s+'\\n\\n참고: '+j.official.policy;}catch(e){o.textContent='오류: '+e.message}}</script></body></html>`;
+const PAGE=`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BTC·ETH V1.7 공통 판정 엔진</title><style>body{font-family:system-ui,sans-serif;max-width:950px;margin:25px auto;padding:0 15px;background:#0f172a;color:#f8fafc}textarea,input,button{box-sizing:border-box;width:100%;padding:12px;border-radius:9px;border:1px solid #475569;background:#1e293b;color:white;font-size:15px}textarea{height:200px}button{margin-top:12px;background:#2563eb;font-weight:700;cursor:pointer}label{display:block;margin-top:15px;margin-bottom:5px;font-weight:600}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#111827;padding:15px;border:1px solid #334155;border-radius:9px}small{color:#cbd5e1}</style></head><body><h2>BTC·ETH V1.7 공통 판정</h2><p>안전 중지: 이 서버의 계산법이 원본 V1.7과 다르므로 신규 매매 신호 분석을 중단했습니다. 기존 기록은 보존합니다.</p><small>이 도구는 V1.7을 수정하지 않는 별도 정량 보조판정입니다. 주관적 V1.7 전체와의 동치 또는 수익성을 보장하지 않습니다. 거래소 주문을 실행하지 않습니다.</small><label>연결 암호</label><input type="password" id="key" autocomplete="off" placeholder="본인 전용 서버 암호"/><label>공식 원장</label><input id="session" value="OFFICIAL_V17"/><label>BTC·ETH 원본 데이터</label><textarea id="raw" placeholder="========== BTC (BTCUSDT) =========="></textarea><button onclick="run()">공식 분석 실행</button><pre id="result">진입가·손절·목표 및 분석 결과가 이곳에 표시됩니다.</pre><script>async function run(){const o=document.getElementById('result');o.textContent='분석 중...';try{const r=await fetch('/api/run',{method:'POST',headers:{'content-type':'application/json','authorization':'Bearer '+document.getElementById('key').value},body:JSON.stringify({raw:document.getElementById('raw').value,session:document.getElementById('session').value})});const j=await r.json();if(!r.ok)throw Error(j.error||r.status);if(!j.official){o.textContent=JSON.stringify(j,null,2);return}let s='';for(const [k,v] of Object.entries(j.official.results)){s+='\\n'+k+' | $'+v.last+' | '+v.recommendation+'\\n';for(const sig of v.officialSignals)s+=sig.id+' '+sig.state+' | SL '+sig.metrics.stopPct+'% | TP1 '+sig.metrics.tp1Pct+'% / TP2 '+sig.metrics.tp2Pct+'% / TP3 '+sig.metrics.tp3Pct+'%\\n';if(v.selectedPlan)s+='진입 '+v.selectedPlan.entryLow+' | 손절 '+v.selectedPlan.stop+' | TP1 '+v.selectedPlan.tp1+' | TP2 '+v.selectedPlan.tp2+' | TP3 '+v.selectedPlan.tp3+'\\n';}o.textContent=s+'\\n\\n참고: '+j.official.policy;}catch(e){o.textContent='오류: '+e.message}}</script></body></html>`;
 const server=http.createServer(async(req,res)=>{
  try{
   if(req.url==='/health'&&req.method==='GET')return json(res,200,{status:!SECRET||!DB_URL?'not_ready':'ready',engine:'V1.7_SHARED_VERDICT_V1',db:!!DB_URL,authentication:!!SECRET});
