@@ -15,7 +15,7 @@ const sides=['BTC_LONG','BTC_SHORT','ETH_LONG','ETH_SHORT'];
 const directions=Object.fromEntries(sides.map(d=>[d,{marketEvidence:'market data and structure',counterEvidence:'counterevidence examined',alternatives:Object.fromEntries('ABCDE'.split('').map(x=>[x,{judgement:'HOLD',evidence:'analysed against original V1.7'}]))}]));
 const checks=Object.fromEntries(Array.from({length:16},(_,i)=>[String(i+1),{status:'CONFIRMED',evidence:'reviewed'}]));
 const clauses=Object.fromEntries([...Array.from({length:24},(_,i)=>String(i)),'APPENDIX_A','APPENDIX_B','FINAL_EXECUTION'].map(x=>[x,{status:'CONFIRMED',evidence:'reviewed'}]));
-const ana=()=>({reportMarkdown:'Current official report with prices and status',directions,coupling:{status:'MIXED',evidence:'independent BTC ETH price relationship checked'},checks,clauses,audit20:{rules:'check original signal ledger',bias:'considered bullish and bearish',evidence:'price path analysed'},conclusions:{BTC:{decision:'HOLD',evidence:'quality unproven'},ETH:{decision:'SHORT',evidence:'existing signal checked'}},newSignals:[],events:[]});
+const ana=()=>({reportMarkdown:'Current official report with prices and status; prior historical outcome 미확인',directions,coupling:{status:'MIXED',evidence:'independent BTC ETH price relationship checked'},checks,clauses,audit20:{rules:'check original signal ledger',bias:'considered bullish and bearish',evidence:'price path analysed'},conclusions:{BTC:{decision:'HOLD',evidence:'quality unproven'},ETH:{decision:'SHORT',evidence:'existing signal checked'}},newSignals:[],events:[]});
 function submission(input,decision){const prepared=prepare({raw:input,ledger:[old],previousSnapshot:prev});return {raw:input,session:'OFFICIAL_V17',policySha256:POLICY_SHA256,snapshotSha256:prepared.snapshot.sha256,beforeLedgerSha256:ledgerHash([old]),decisionKey:prepared.decisionKey,analysis:decision};}
 
 test('continuous post-issue short entry touch is reported as required',()=>{
@@ -41,13 +41,21 @@ test('entry+stop overlap in one aggregated path is ambiguous, not auto-success',
  assert.deepEqual(a.perSymbol.ETH.ambiguousSignals,[old.id]);
  assert.deepEqual(a.perSymbol.ETH.requiredEntrySignals,[]);
  assert.throws(()=>validateOfficialSubmission(submission(inp,ana()),[old],prev),/ENTRY_EXIT_ORDER_REQUIRES_UNVERIFIED/);
- const unverified=ana();unverified.conclusions.ETH.decision='UNVERIFIED';
+ const unverified=ana();unverified.conclusions.ETH.decision='UNVERIFIED';unverified.historicalUncertainty={ETH:{unresolvedIds:[old.id],evidence:'same interval entry and stop crossing cannot be ordered'}};
  assert.equal(validateOfficialSubmission(submission(inp,unverified),[old],prev).events.length,0);
 });
-test('unverified gap blocks new conflicting signal for same asset',()=>{
- const inp=raw({ethStart:'2026-11-12 22:24:00',ethHigh:2043,ethLow:2041,ethHigh24:2084.59,ethLast:2041.7});const a=ana();a.conclusions.ETH.decision='UNVERIFIED';
- a.newSignals.push({id:'ETH-NEW-DURING-GAP',issuedAt:t,dataAt:t,symbol:'ETHUSDT',direction:'SHORT',tradeType:'지지·저항 반응형',exchange:'Bybit',product:'USDT perpetual',entryLow:2045.2,entryHigh:2045.7,stop:2052, tp1:2038.34,tp2:2020,tp3:2000,status:'PENDING',invalidation:'Need prior cancellation',supportingEvidence:'structure',opposingEvidence:'bull flow',issuedVersion:'V1.7',comparisonEvidence:'alternatives A-E reviewed',couplingEvidence:'BTC ETH compared'});
- assert.throws(()=>validateOfficialSubmission(submission(inp,a),[old],prev),/NEW_SIGNAL_BLOCKED_BY_UNVERIFIED_EXISTING_STATE/);
+test('unknown history is disclosed and can be quarantined before new current signal',()=>{
+ const inp=raw({ethStart:'2026-11-12 22:24:00',ethHigh:2043,ethLow:2041,ethHigh24:2084.59,ethLast:2041.7});
+ const a=ana();a.conclusions.ETH.decision='SHORT';
+ a.historicalUncertainty={ETH:{unresolvedIds:[old.id],evidence:'unobserved previous minutes may have contained entry/stop/TP; actual outcome unknown'}};
+ const current={id:'ETH-NEW-DURING-GAP',issuedAt:'2026-11-12 22:25:20',dataAt:t,symbol:'ETHUSDT',direction:'SHORT',tradeType:'지지·저항 반응형',exchange:'Bybit',product:'USDT perpetual',entryLow:2041,entryHigh:2042,stop:2050,tp1:2035,tp2:2020,tp3:2000,status:'NEW_ENTRY',invalidation:'prior to first entry touch new structure invalidated',supportingEvidence:'new observed market structure',opposingEvidence:'opposing flow',issuedVersion:'V1.7',comparisonEvidence:'A/B/C/D/E reviewed',couplingEvidence:'BTC ETH independently examined',historicalExposureUnknownIds:[old.id],historicalExposureRiskDisclosure:'Old historical position may already be entered and not closed; no exchange account flatness is verified.',independentCurrentMarketEvidence:'Current direction derived from new snapshot; original historical outcome is not assumed.'};
+ a.newSignals=[current];
+ assert.throws(()=>validateOfficialSubmission(submission(inp,a),[old],prev),/OLD_SIGNAL_MUST_BE_ACCOUNTED_FOR_BEFORE_NEW_PLAN/);
+ a.events=[{id:old.id,kind:'UNVERIFIED',at:t,reason:'Historical PENDING outcome cannot be settled across a real gap',evidence:'22:20:56 to 22:24:00 source gap, 24h high includes trade zone, exact touch/exit chronology unavailable',priorConfirmedState:'PENDING',uncertaintyScope:'ENTRY_OR_STOP_OR_TARGET_DURING_MISSING_WINDOW',marketReassessment:'New market data assessed independently; original trade not deemed closed.'}];
+ const out=validateOfficialSubmission(submission(inp,a),[old],prev);
+ assert.equal(out.newSignals.length,1);assert.equal(out.events[0].kind,'UNVERIFIED');assert.equal(old.status,'PENDING');
+ const changed=structuredClone(a);changed.events[0].at='2026-11-12 22:24:55';
+ assert.throws(()=>validateOfficialSubmission(submission(inp,changed),[old],prev),/QUARANTINE_TIME_MUST_EQUAL_SNAPSHOT/);
 });
 test('out-of-order historical snapshot cannot silently rewrite ledger',()=>{
  const inp=raw();const future={btcTime:'2026-11-12 22:50:00',ethTime:'2026-11-12 22:50:00'};

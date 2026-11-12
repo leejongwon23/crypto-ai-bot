@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import {POLICY_TEXT,POLICY_SHA256,POLICY_BYTES,POLICY_LINES} from './policy-v17.mjs';
 
 export const OFFICIAL_POLICY={name:'MASTER PROMPT V1.7 FINAL',sha256:POLICY_SHA256,bytes:POLICY_BYTES,lines:POLICY_LINES};
-export const VERSION='V17_VERBATIM_AI_OFFICIAL_REGISTRY_1.0.0';
+export const VERSION='V17_VERBATIM_AI_OFFICIAL_REGISTRY_1.0.1';
 const STATES=new Set(['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','TP3_DONE','STOPPED','CANCELLED','REDESIGNED_CANCELLED','EARLY_EXIT','REVERSE_EXIT','UNVERIFIED']);
 const TERMINAL=new Set(['TP3_DONE','STOPPED','CANCELLED','REDESIGNED_CANCELLED','EARLY_EXIT','REVERSE_EXIT']);
 const DIRECTIONS=['BTC_LONG','BTC_SHORT','ETH_LONG','ETH_SHORT'];
@@ -34,7 +34,7 @@ export function validateSnapshot(raw){
  * The previous official snapshot timestamp is essential: original signal verifiedUntil
  * does not advance when an analysis has no state-change event.
  */
-export function assessSnapshotEvidence(raw,{previousSnapshot=null,ledger=[]}={}){
+export function assessSnapshotEvidence(raw,{previousSnapshot=null,ledger=[],carriedUncertaintyBySymbol={}}={}){
  const snapshot=validateSnapshot(raw);
  const entryKeys=['[1]','[2]','[2B]','[3]','[5]','[8]','[CVD]','[10]','[7]'];
  const btcI=raw.indexOf('========== BTC (BTCUSDT) ==========');
@@ -89,6 +89,12 @@ export function assessSnapshotEvidence(raw,{previousSnapshot=null,ledger=[]}={})
      else if(hitTP1&&!['TP1','TP2'].includes(sig.status))requiredExitSignals.push({id:sig.id,kind:'TP1'});
    }
   }
+  // Old unresolved gaps remain uncertain after a subsequent continuous snapshot.
+  // A continuous *new* interval cannot reconstruct a missed *earlier* interval.
+  const oldIds=new Set(priorActive.map(x=>x.id));
+  const carried=(carriedUncertaintyBySymbol[symbol]||[]).filter(id=>oldIds.has(id));
+  for(const id of carried)if(!uncertainSignals.includes(id))uncertainSignals.push(id);
+  const historicalUnknownIds=[...new Set([...uncertainSignals,...ledger.filter(s=>s.symbol===symbol+'USDT'&&s.status==='UNVERIFIED').map(s=>s.id)])];
   const flags=[];
   if(missing.length)flags.push('MISSING_MARKET_SECTIONS');
   if(hasVWAP)flags.push('VWAP_TAKER_RATE_LIMIT');
@@ -97,31 +103,34 @@ export function assessSnapshotEvidence(raw,{previousSnapshot=null,ledger=[]}={})
   if(gap)flags.push('PRICE_PATH_GAP');
   if(reversed)flags.push('OUT_OF_ORDER_SNAPSHOT');
   if(uncertainSignals.length)flags.push('EXISTING_SIGNAL_STATE_UNVERIFIED');
+  if(carried.length)flags.push('CARRIED_HISTORICAL_GAP');
+  if(historicalUnknownIds.length)flags.push('HISTORICAL_POSITION_EXPOSURE_UNKNOWN');
   if(requiredEntrySignals.length)flags.push('PENDING_ENTRY_TOUCH_MUST_BE_REGISTERED');
   if(requiredExitSignals.length)flags.push('EXISTING_TP_OR_STOP_MUST_BE_REGISTERED');
   if(ambiguousSignals.length)flags.push('ENTRY_AND_EXIT_SEQUENCE_AMBIGUOUS');
   perSymbol[symbol]={snapshotAt,priorOfficialAt:prev,pathStart,pathEnd,gapSeconds,
    pathHigh:high,pathLow:low,knownContinuous,missingSections:missing,flags,
    rateLimitVWAP:hasVWAP,couldNotVerifySignals:uncertainSignals,
-   requiredEntrySignals,requiredExitSignals,ambiguousSignals};
+   requiredEntrySignals,requiredExitSignals,ambiguousSignals,historicalUnknownIds,carriedUncertaintyIds:carried};
   for(const flag of flags)warnings.push(symbol+':'+flag);
  }
  return {snapshotSha256:snapshot.sha256,perSymbol,warnings,hasMaterialWarnings:warnings.length>0};
 }
 export function ledgerHash(rows){return digest(rows.map(r=>({id:r.id,symbol:r.symbol,original:r.original,status:r.status,verifiedUntil:r.verifiedUntil||null,version:r.version??0})).sort((a,b)=>a.id.localeCompare(b.id)));}
 export const sourcePolicy=()=>({ ...OFFICIAL_POLICY,text:POLICY_TEXT });
-export function prepare({raw,session='OFFICIAL_V17',ledger=[],saved=null,previousSnapshot=null}){
+export function prepare({raw,session='OFFICIAL_V17',ledger=[],saved=null,previousSnapshot=null,carriedUncertaintyBySymbol={}}){
  const snapshot=validateSnapshot(raw),id=sessionId(session),beforeLedgerSha256=ledgerHash(ledger);
- const evidenceQuality=assessSnapshotEvidence(raw,{previousSnapshot,ledger});
+ const evidenceQuality=assessSnapshotEvidence(raw,{previousSnapshot,ledger,carriedUncertaintyBySymbol});
  const key=digest({session:id,snapshotSha256:snapshot.sha256,ledgerSha256:beforeLedgerSha256,policySha256:POLICY_SHA256});
  if(saved)return {status:'OFFICIAL_REPLAY',session:id,snapshot,policy:OFFICIAL_POLICY,officialDecision:saved,evidenceQuality,source:'PERSISTED_FIRST_OFFICIAL_RESULT',sameState:true};
  return {status:'NEEDS_AI_ANALYSIS',session:id,snapshot,policy:sourcePolicy(),ledger:ledger.map(r=>({...r})),evidenceQuality,beforeLedgerSha256,decisionKey:key,requirements:{
   role:'AI must read and apply THE ENTIRE original Korean V1.7 policy below, not approximate with fixed indicator gates.',
   noExternalScriptedSignals:true,noNewIndicatorThresholds:true,noHistoricalSignalImport:true,
-  interpretationSafeguards:{pendingSignalMayBeIssuedBeforeFutureTouch:true,futureRetestIsNotRequiredBeforeFormalPendingIssue:true,requiresPresentStructuralReasonForPlannedRetest:true,holdMustCompareExecutableOptionsNotDefaultToWaiting:true,neverBackfillHypotheticalMissedProfit:true},
+  interpretationSafeguards:{pendingSignalMayBeIssuedBeforeFutureTouch:true,futureRetestIsNotRequiredBeforeFormalPendingIssue:true,requiresPresentStructuralReasonForPlannedRetest:true,holdMustCompareExecutableOptionsNotDefaultToWaiting:true,neverBackfillHypotheticalMissedProfit:true,gapDoesNotBlockCurrentIndependentAnalysis:true,unknownHistoryMustRemainAuditable:true,quarantinePriorPendingBeforeNewSignal:true,neverPresumeExchangeAccountFlat:true},
   requiredDirections:DIRECTIONS,requiredAlternatives:ALTERNATIVES,requiredSteps:STEPS,requiredClauses:CLAUSES,
   next:'After complete V1.7 analysis call publish_official_v17_analysis with exact prompt sha, snapshot and ledger hashes, decisionKey and structured decision. If the installed plugin has not refreshed its tools list, use existing register_formal_btc_eth_signal with signal={kind:V17_OFFICIAL_SUBMISSION,raw,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis}. Never present an unpublished preliminary candidate as official.',
-  noOutcomeIfDataMissing:'If evidence is insufficient, use HOLD/NONE and report what is unverified; never fabricate prices.'}};
+  noOutcomeIfDataMissing:'Unknown historical trade outcome must be reported separately from the current market decision. If present market evidence is insufficient use HOLD; never fabricate prices or a closed/flat account.',
+  gapAwareSwitch:'If a historical PENDING trade has a real unresolved price gap, current LONG/SHORT decision must still be independently assessed. A new formal plan may only be published atomically with an auditable UNVERIFIED quarantine of the old PENDING record (or after it was already quarantined), explicit old ID risk disclosure, and no confirmed competing live position. This is analytical signal registration, NOT proof the exchange account is flat.'}};
 }
 function err(s){throw Error(s);}
 function assert(c,s){if(!c)err(s);}
@@ -180,13 +189,22 @@ export function checkEvent(evt,ledger){
  assert((transitions[from]||[]).includes(evt.kind),'INVALID_STATUS_TRANSITION_'+from+'_TO_'+evt.kind);
  if(['ENTERED','TP1','TP2','TP3_DONE','STOPPED'].includes(evt.kind))assert(has(evt.pricePathEvidence),'PRICE_PATH_EVIDENCE_REQUIRED');
  if(['CANCELLED','REDESIGNED_CANCELLED','EARLY_EXIT','REVERSE_EXIT'].includes(evt.kind))assert(has(evt.strongCounterEvidence),'CANCELLATION_OR_EXIT_REQUIRES_POLICY_EVIDENCE');
+  if(from==='UNVERIFIED'&&evt.kind!=='UNVERIFIED')
+   assert(has(evt.gapResolutionEvidence),'UNKNOWN_OLD_STATE_CANNOT_BE_RESOLVED_WITHOUT_PRICE_PATH');
+  if(evt.kind==='UNVERIFIED'){
+   assert(has(evt.uncertaintyScope)&&has(evt.priorConfirmedState)&&has(evt.marketReassessment),
+    'UNVERIFIED_REQUIRES_OLD_STATE_AND_SCOPE');
+   assert(evt.priorConfirmedState===from,'UNVERIFIED_PRIOR_STATUS_MISMATCH');
+   assert(['PENDING','NEW_ENTRY','ENTERED','TP1','TP2'].includes(from),
+    'UNVERIFIED_CAN_ONLY_QUARANTINE_PREVIOUSLY_KNOWN_STATE');
+  }
  return true;
 }
-export function validateOfficialSubmission(args,ledger,previousSnapshot=null){
+export function validateOfficialSubmission(args,ledger,previousSnapshot=null,carriedUncertaintyBySymbol={}){
  assert(args&&typeof args==='object','SUBMISSION_MISSING');
  const {raw,session='OFFICIAL_V17',policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis}=args;
  const shot=validateSnapshot(raw),sess=sessionId(session),lhs=ledgerHash(ledger);
- const evidenceQuality=assessSnapshotEvidence(raw,{previousSnapshot,ledger});
+ const evidenceQuality=assessSnapshotEvidence(raw,{previousSnapshot,ledger,carriedUncertaintyBySymbol});
  for(const sym of ['BTC','ETH']){
   assert(!evidenceQuality.perSymbol[sym].flags.includes('OUT_OF_ORDER_SNAPSHOT'),
    'OUT_OF_ORDER_SNAPSHOT_CANNOT_CHANGE_OFFICIAL_LEDGER_'+sym);
@@ -211,11 +229,18 @@ export function validateOfficialSubmission(args,ledger,previousSnapshot=null){
  assert(analysis.audit20&&has(analysis.audit20.rules)&&has(analysis.audit20.bias)&&has(analysis.audit20.evidence),'FINAL_20_AUDIT_REQUIRED');
  assert(analysis.conclusions&&analysis.conclusions.BTC&&analysis.conclusions.ETH,'BTC_ETH_CONCLUSION_REQUIRED');
  for(const sym of ['BTC','ETH'])assert(['LONG','SHORT','HOLD','MANAGE','UNVERIFIED'].includes(analysis.conclusions[sym].decision)&&has(analysis.conclusions[sym].evidence),'INVALID_CONCLUSION_'+sym);
- // Do not allow a confidently asserted status when the previous official snapshot
- // and incoming price path leave an active signal's intervening events unknowable.
+ // Separate retrospective historical exposure uncertainty from the new-market LONG/SHORT/HOLD decision.
+ // The user must see both; a gap never proves that the exchange account is flat.
  for(const sym of ['BTC','ETH']){
-  if(evidenceQuality.perSymbol[sym].couldNotVerifySignals.length){
-   assert(analysis.conclusions[sym].decision==='UNVERIFIED','GAP_REQUIRES_UNVERIFIED_CONCLUSION_'+sym);
+  const q=evidenceQuality.perSymbol[sym];
+  if(q.historicalUnknownIds.length){
+   const h=analysis.historicalUncertainty?.[sym];
+   assert(h&&has(h.evidence)&&Array.isArray(h.unresolvedIds),
+    'HISTORICAL_UNCERTAINTY_DISCLOSURE_REQUIRED_'+sym);
+   for(const id of q.historicalUnknownIds)assert(h.unresolvedIds.includes(id),
+    'HISTORICAL_UNCERTAIN_ID_NOT_DISCLOSED_'+id);
+   assert(/미확인|UNVERIFIED|unknown/i.test(analysis.reportMarkdown),
+    'REPORT_MUST_SHOW_UNKNOWN_HISTORICAL_EXPOSURE_'+sym);
   }
  }
  const news=analysis.newSignals??[],events=analysis.events??[];
@@ -224,10 +249,19 @@ export function validateOfficialSubmission(args,ledger,previousSnapshot=null){
  for(const s of news){
   validateSignal(s,shot);
   const sym=s.symbol==='BTCUSDT'?'BTC':'ETH';
-  assert(!evidenceQuality.perSymbol[sym].couldNotVerifySignals.length,
-   'NEW_SIGNAL_BLOCKED_BY_UNVERIFIED_EXISTING_STATE_'+sym);
   assert(!evidenceQuality.perSymbol[sym].ambiguousSignals.length,
    'NEW_SIGNAL_BLOCKED_BY_AMBIGUOUS_OLD_ENTRY_'+sym);
+  // Never silently replace an old trade. If a historical PENDING gap prevents
+  // proving entry, formally quarantine its UNKNOWN outcome, then publish a
+  // prospective new analysis separately with explicit exposure-risk disclosure.
+  const q=evidenceQuality.perSymbol[sym];
+  if(q.historicalUnknownIds.length){
+   const disclosed=Array.isArray(s.historicalExposureUnknownIds)?s.historicalExposureUnknownIds:[];
+   for(const id of q.historicalUnknownIds)assert(disclosed.includes(id),
+    'NEW_SIGNAL_MUST_DISCLOSE_UNKNOWN_OLD_EXPOSURE_'+id);
+   assert(has(s.historicalExposureRiskDisclosure)&&has(s.independentCurrentMarketEvidence),
+    'NEW_SIGNAL_UNKNOWN_EXPOSURE_RISK_DISCLOSURE_REQUIRED_'+sym);
+  }
   assert(!ids.has(s.id),'FORMAL_SIGNAL_ID_COLLISION');ids.add(s.id);
  }
  // A nonconflicting, continuous post-issuance price-zone crossing must not be
@@ -244,8 +278,8 @@ export function validateOfficialSubmission(args,ledger,previousSnapshot=null){
     'CONFIRMED_EXIT_OR_TP_EVENT_MISSING_'+target.id+'_'+target.kind);
   }
   if(q.ambiguousSignals.length){
-   assert(analysis.conclusions[sym].decision==='UNVERIFIED',
-    'ENTRY_EXIT_ORDER_REQUIRES_UNVERIFIED_'+sym);
+   assert(analysis.historicalUncertainty?.[sym]?.unresolvedIds?.some(id=>q.ambiguousSignals.includes(id)),
+    'ENTRY_EXIT_ORDER_REQUIRES_UNVERIFIED_HISTORICAL_STATE_'+sym);
    assert(!events.some(e=>q.ambiguousSignals.includes(e.id)&&e.kind!=='UNVERIFIED'),
     'AMBIGUOUS_EVENT_REQUIRES_ORDERED_TRADE_EVIDENCE_'+sym);
   }
@@ -254,6 +288,37 @@ export function validateOfficialSubmission(args,ledger,previousSnapshot=null){
     'GAP_EVENT_REQUIRES_MISSING_PRICE_PATH_'+sym);
   }
  }
+  // Validate quarantine and transitions before creating a competing current plan.
+  // A position already proven ENTERED cannot be assumed closed merely because
+  // a later candle series is missing. It requires a separately verified exit.
+  for(const sym of ['BTC','ETH']){
+   const next=news.filter(s=>s.symbol===sym+'USDT');
+   if(!next.length)continue;
+   assert(next.length<=1,'MULTIPLE_NEW_PLANS_SAME_SYMBOL_FORBIDDEN_'+sym);
+   const q=evidenceQuality.perSymbol[sym];
+   const snapshotAt=sym==='BTC'?shot.btcTime:shot.ethTime;
+   const earlier=ledger.filter(s=>s.symbol===sym+'USDT'&&!TERMINAL.has(s.status));
+   for(const old of earlier){
+    const endEvent=events.find(e=>e.id===old.id&&['STOPPED','TP3_DONE','EARLY_EXIT','REVERSE_EXIT','CANCELLED','REDESIGNED_CANCELLED'].includes(e.kind));
+    const quarantine=events.find(e=>e.id===old.id&&e.kind==='UNVERIFIED');
+    if(endEvent){assert(ms(endEvent.at)<=ms(next[0].issuedAt),'OLD_EXIT_MUST_PRECEDE_NEW_ISSUE_'+old.id);continue;}
+    if(old.status==='UNVERIFIED'){
+     // The last provable state is retained in the append-only UNVERIFIED event.
+     // No claim that a previously ENTERED position is flat is permitted.
+     assert(old.unverifiedFrom==='PENDING','CONFIRMED_OLD_ENTRY_CANNOT_BE_IGNORED_'+old.id);
+     assert(next[0].historicalExposureUnknownIds?.includes(old.id),'NEW_SIGNAL_MUST_DISCLOSE_UNKNOWN_OLD_EXPOSURE_'+old.id);
+     continue;
+    }
+    if(quarantine){
+     assert(q.couldNotVerifySignals.includes(old.id),'UNVERIFIED_ONLY_IF_REAL_GAP_'+old.id);
+     assert(ms(quarantine.at)===ms(snapshotAt),'QUARANTINE_TIME_MUST_EQUAL_SNAPSHOT_'+old.id);
+     assert(ms(quarantine.at)<=ms(next[0].issuedAt),'QUARANTINE_MUST_PRECEDE_NEW_ISSUE_'+old.id);
+     assert(old.status==='PENDING','CONFIRMED_OLD_ENTRY_CANNOT_BE_IGNORED_'+old.id);
+     continue;
+    }
+    assert(false,'OLD_SIGNAL_MUST_BE_ACCOUNTED_FOR_BEFORE_NEW_PLAN_'+old.id);
+   }
+  }
  // Events are checked sequentially against the preceding committed or in-flight state.
  const staged=ledger.map(r=>({...r}));
  for(const newSignal of news)staged.push({id:newSignal.id,symbol:newSignal.symbol,original:newSignal,status:newSignal.status,verifiedUntil:newSignal.issuedAt,version:0});

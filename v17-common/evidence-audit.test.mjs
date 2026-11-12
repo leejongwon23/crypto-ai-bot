@@ -43,11 +43,13 @@ const keys=[...Array.from({length:24},(_,i)=>String(i)),'APPENDIX_A','APPENDIX_B
 const clauses=Object.fromEntries(keys.map(k=>[k,{status:'CONFIRMED',evidence:'checked'}]));
 const analysis={reportMarkdown:'BTC HOLD / ETH UNVERIFIED',directions:alts,coupling:{status:'MIXED',evidence:'time alignment checked'},checks,clauses,audit20:{rules:'test',bias:'test',evidence:'test'},conclusions:{BTC:{decision:'HOLD',evidence:'incomplete'},ETH:{decision:'HOLD',evidence:'incorrect confident outcome'}},newSignals:[],events:[]};
 function args(){const raw=snap(),s=prepare({raw,ledger:[old],previousSnapshot:previous});return {raw,session:'OFFICIAL_V17',policySha256:POLICY_SHA256,snapshotSha256:s.snapshot.sha256,beforeLedgerSha256:ledgerHash([old]),decisionKey:s.decisionKey,analysis:structuredClone(analysis)};}
-test('official publish rejects false confidence in pending signal across unverified gap',()=>{
- assert.throws(()=>validateOfficialSubmission(args(),[old],previous),/GAP_REQUIRES_UNVERIFIED_CONCLUSION_ETH/);
+test('historical uncertainty must be disclosed, even when current market outcome is HOLD',()=>{
+ assert.throws(()=>validateOfficialSubmission(args(),[old],previous),/HISTORICAL_UNCERTAINTY_DISCLOSURE_REQUIRED_ETH/);
 });
-test('official publish accepts UNVERIFIED result with immutable prior signal',()=>{
- const a=args();a.analysis.conclusions.ETH.decision='UNVERIFIED';const b=validateOfficialSubmission(a,[old],previous);
+test('current analysis can be HOLD without falsely confirming old PENDING during gap',()=>{
+ const a=args();a.analysis.historicalUncertainty={ETH:{unresolvedIds:['ET-OLD'],evidence:'old pending entry/outcome cannot be verified in missing path'}};
+ const b=validateOfficialSubmission(a,[old],previous);
+ assert.equal(b.analysis.conclusions.ETH.decision,'HOLD');
  assert.equal(b.evidenceQuality.perSymbol.ETH.couldNotVerifySignals[0],'ET-OLD');
  assert.equal(b.newSignals.length,0);
 });

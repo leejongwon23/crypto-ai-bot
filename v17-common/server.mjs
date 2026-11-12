@@ -34,8 +34,33 @@ const KEY_CHECK=x=>{
  return crypto.timingSafeEqual(Buffer.from(x),Buffer.from(MASTER_SECRET));
 };
 function isAuthorized(req){const header=String(req.headers.authorization||'');const provided=header.replace(/^Bearer\s+/i,'')||String(req.headers['x-api-key']||'');return KEY_CHECK(provided);}
-const rowToLedger=r=>({id:r.id,symbol:r.symbol,original:r.original,status:r.status,verifiedUntil:r.verified_until,version:r.plan_version});
-async function readLedger(db,session){const r=await db.query('SELECT id,symbol,original,status,verified_until,plan_version FROM v17_ai_signals WHERE session=$1 ORDER BY id',[session]);return r.rows.map(rowToLedger);}
+const rowToLedger=r=>({id:r.id,symbol:r.symbol,original:r.original,status:r.status,verifiedUntil:r.verified_until,version:r.plan_version,unverifiedFrom:r.unverified_from??undefined});
+async function readLedger(db,session){
+ const r=await db.query(`SELECT s.id,s.symbol,s.original,s.status,s.verified_until,s.plan_version,
+ (SELECT e.event->>'priorConfirmedState' FROM v17_ai_events e
+  WHERE e.session=s.session AND e.id=s.id AND e.event->>'kind'='UNVERIFIED'
+  ORDER BY e.seq DESC LIMIT 1) AS unverified_from
+ FROM v17_ai_signals s WHERE s.session=$1 ORDER BY s.id`,[session]);
+ return r.rows.map(rowToLedger);
+}
+// Recover previously detected gaps from the immutable analysis history, even if
+// the latest *new* time window is continuous. A later candle never repairs an
+// unobserved older interval by itself. No schema or historical rows are changed.
+async function carriedUncertainty(db,session,ledger){
+ const ids=new Set(ledger.filter(s=>['PENDING','NEW_ENTRY','ENTERED','TP1','TP2'].includes(s.status)).map(s=>s.id));
+ const result={BTC:[],ETH:[]};
+ if(!ids.size)return result;
+ const r=await db.query("SELECT official->'evidenceQuality' AS evidence FROM v17_ai_analyses WHERE session=$1 AND official->'evidenceQuality' IS NOT NULL ORDER BY created_at DESC LIMIT 1000",[session]);
+ for(const row of r.rows){
+  for(const sym of ['BTC','ETH']){
+   const q=row.evidence?.perSymbol?.[sym]||{};
+   for(const id of [...(q.couldNotVerifySignals||[]),...(q.ambiguousSignals||[]),...(q.carriedUncertaintyIds||[])]){
+    if(ids.has(id)&&!result[sym].includes(id))result[sym].push(id);
+   }
+  }
+ }
+ return result;
+}
 async function selectOfficial(db,session,snapshotSha,stateSha){
  const q=await db.query('SELECT official FROM v17_ai_analyses WHERE session=$1 AND snapshot_sha=$2 AND (before_sha=$3 OR after_sha=$3) ORDER BY created_at ASC LIMIT 1',[session,snapshotSha,stateSha]);
  return q.rows[0]?.official||null;
@@ -50,7 +75,8 @@ async function beginAnalysis(body){
  const ledger=await readLedger(db,session);
  const saved=await selectOfficial(db,session,snapshot.sha256,ledgerHash(ledger));
  const previousSnapshot=await latestOfficialSnapshot(db,session);
- return prepare({raw,session,ledger,saved,previousSnapshot});
+ const carry=await carriedUncertainty(db,session,ledger);
+ return prepare({raw,session,ledger,saved,previousSnapshot,carriedUncertaintyBySymbol:carry});
 }
 async function publishAnalysis(body){
  const raw=body.raw,session=sessionId(body.session||'OFFICIAL_V17');const shot=validateSnapshot(raw);
@@ -65,7 +91,8 @@ async function publishAnalysis(body){
   const prior=await selectOfficial(client,session,shot.sha256,before);
   if(prior){await client.query('COMMIT');return {status:'OFFICIAL_REPLAY',officialDecision:prior,sameState:true,notReanalyzed:true};}
   const previousSnapshot=await latestOfficialSnapshot(client,session);
-  const verified=validateOfficialSubmission(body,ledger,previousSnapshot);
+  const carry=await carriedUncertainty(client,session,ledger);
+  const verified=validateOfficialSubmission(body,ledger,previousSnapshot,carry);
   const newSignals=verified.newSignals,events=verified.events;
   for(const s of newSignals){
    await client.query('INSERT INTO v17_ai_signals(session,id,symbol,original,status,verified_until,plan_version) VALUES($1,$2,$3,$4,$5,$6,0)',[session,s.id,s.symbol,JSON.stringify(s),s.status,s.issuedAt]);
@@ -96,6 +123,7 @@ async function publishAnalysis(body){
    checks:verified.analysis.checks,
    audit20:verified.analysis.audit20,
    conclusions:verified.analysis.conclusions,
+   historicalUncertainty:verified.analysis.historicalUncertainty||{},
    newSignals,
    events,
    caveat:'The same snapshot and same ledger state replays this official result. AI analytical correctness and complete semantic compliance require independent review; no exchange orders are placed.'
@@ -117,9 +145,9 @@ async function decisionHistory(args={}){
 async function showPolicy(){return {engine:VERSION,policy:sourcePolicy(),instruction:'Use every source section 0–23, appendices A and B and final integrated execution instruction. No substitutions.'};}
 const requiredSchema={type:'object',properties:{raw:{type:'string',description:'Verbatim BTC and ETH snapshots, as pasted by the user'},session:{type:'string',description:'Use shared OFFICIAL_V17 for a single official signal ledger. Separate arbitrary sessions must not import old signals.'}},required:['raw']};
 const tools=[
- {name:'run_official_btc_eth_snapshot',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'FIRST STEP (MANDATORY). Fetch the ENTIRE unchanged V1.7 MASTER PROMPT, official session ledger, deterministic evidenceQuality gaps/rate-limit report and any already stored official analysis for these BTC+ETH raw snapshots. If OFFICIAL_REPLAY, show officialDecision.reportMarkdown VERBATIM; do not reanalyze. If NEEDS_AI_ANALYSIS, analyze strictly by every original V1.7 section (0–23, A, B, final instructions) using the returned full policy text, then call publish_official_v17_analysis. NEVER generate an independent heuristic EMA/CVD signal or call anything an official signal before publish.',inputSchema:requiredSchema},
+ {name:'run_official_btc_eth_snapshot',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'FIRST STEP (MANDATORY). Fetch ENTIRE unchanged V1.7 MASTER PROMPT, official ledger and evidenceQuality, including carried historical unknown periods. If OFFICIAL_REPLAY show officialDecision.reportMarkdown verbatim. Analyze current LONG/SHORT and A-E independently of unknown old trade outcome; preserve and report historicalUnknownIds separately, with no guessed fills or flat positions. Old pending can be quarantined with documented UNVERIFIED event before prospective replacement if it cannot be resolved. Publish via full original V1.7 analysis. Never bypass risk/exposure checks.',inputSchema:requiredSchema},
  {name:'get_original_v17_full_prompt',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Fetch EXACT full 902-line user-supplied V1.7 source, CRLF and original punctuation preserved. Must be the sole authoritative strategy; no new indicator thresholds, no removed functionality.',inputSchema:{type:'object',properties:{},additionalProperties:false}},
- {name:'publish_official_v17_analysis',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'SECOND STEP after run_official_btc_eth_snapshot returned NEEDS_AI_ANALYSIS. Evidence audit is mandatory: any confirmed continuous old-PENDING entry touch must produce ENTERED, and any unambiguous stop/TP touch on an active trade must produce its event. An aggregated path crossing both entry/exit or stop/TP is UNVERIFIED until event order is known. An incomplete prior path must NOT produce guessed entry, stop, target or cancellation. If evidenceQuality.perSymbol.*.couldNotVerifySignals is nonempty, that symbol conclusion MUST be UNVERIFIED and official historical signal state MUST NOT be asserted as confirmed. Re-assess HOLD versus actual entry alternatives: a future retest is not a prerequisite to issue a PENDING limit signal; support for the level must be known at issuance. Keep retrospective audits separate from formal ledger.  Publish the full, AI-reasoned, ORIGINAL V1.7 analysis and immutable new signals and chronological management events to the official shared ledger; validates 16 execution steps and four directions A-E. If another chat already published this snapshot with same ledger, returns that authoritative result. Do not invent a signal; do not submit if any essential evidence missing. Must supply original V1.7 policy sha, raw snapshot sha, pre-ledger sha, decisionKey, analysis.',inputSchema:{type:'object',properties:{raw:{type:'string'},session:{type:'string'},policySha256:{type:'string'},snapshotSha256:{type:'string'},beforeLedgerSha256:{type:'string'},decisionKey:{type:'string'},analysis:{type:'object',description:'Full V1.7 decision: reportMarkdown; directions BTC_LONG/BTC_SHORT/ETH_LONG/ETH_SHORT each marketEvidence,counterEvidence,alternatives A-E {judgement,evidence}; coupling {status,evidence}; checks 1..16 {status=CONFIRMED|UNVERIFIED|VIOLATION,evidence}; clauses 0..23,APPENDIX_A,APPENDIX_B,FINAL_EXECUTION {status=CONFIRMED|UNVERIFIED|VIOLATION,evidence}; audit20 {rules,bias,evidence}; conclusions BTC/ETH {decision=LONG|SHORT|HOLD|MANAGE|UNVERIFIED,evidence}; newSignals[]; events[]'}},required:['raw','policySha256','snapshotSha256','beforeLedgerSha256','decisionKey','analysis']}},
+ {name:'publish_official_v17_analysis',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'SECOND STEP after NEEDS_AI_ANALYSIS. Existing confirmed price-touch and stop/TP event checks still mandatory. IMPORTANT GAP FIX: unknown historical signal outcome does NOT force current BTC/ETH conclusion=UNVERIFIED or block fresh independent market analysis. Include analysis.historicalUncertainty.{BTC|ETH}={unresolvedIds:[...],evidence:string} for each affected symbol; do not claim old position closed or account flat. To replace old PENDING with unresolved gap, include an old-ID UNVERIFIED quarantine event (uncertaintyScope,priorConfirmedState,marketReassessment, at current snapshot time) in same atomic submission, and new formal plan historicalExposureUnknownIds, historicalExposureRiskDisclosure, independentCurrentMarketEvidence. New plan is an analytical signal, NOT exchange account position certainty. Old proven ENTERED cannot be silently replaced; verified exit needed. Never retroactively cancel or claim TP/SL in gaps. Four directions A-E, original V1.7 unchanged, original stop/TP unchanged. Supply exact hashes and full 16-step+clause audit.',inputSchema:{type:'object',properties:{raw:{type:'string'},session:{type:'string'},policySha256:{type:'string'},snapshotSha256:{type:'string'},beforeLedgerSha256:{type:'string'},decisionKey:{type:'string'},analysis:{type:'object',description:'Full V1.7 decision: reportMarkdown; directions BTC_LONG/BTC_SHORT/ETH_LONG/ETH_SHORT each marketEvidence,counterEvidence,alternatives A-E; coupling; checks 1..16; clauses 0..23,A,B,FINAL; audit20; conclusions BTC/ETH {decision=LONG|SHORT|HOLD|MANAGE|UNVERIFIED,evidence}; historicalUncertainty (only when affected) {BTC|ETH:{unresolvedIds:[old IDs],evidence:string}}; newSignals[]; events[] with prior PENDING UNVERIFIED quarantine if a gap blocks historical state. Keep current decisions independent of unknown outcomes.'}},required:['raw','policySha256','snapshotSha256','beforeLedgerSha256','decisionKey','analysis']}},
  {name:'read_official_btc_eth_ledger',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Retrieve NEW V1.7 source-exact official signal ledger and chronological immutable events for this session. Previous noncompliant legacy companion signals remain isolated, not silently imported.',inputSchema:{type:'object',properties:{session:{type:'string'}},required:[]}},
  {name:'read_official_v17_decision_history',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Read-only chronological OFFICIAL_V17 AI decision history for missed-opportunity review. Never convert hypothetical candidates to historical trades or alter immutable signal outcomes.',inputSchema:{type:'object',properties:{session:{type:'string'},limit:{type:'integer',minimum:1,maximum:100},includeDirections:{type:'boolean'}},required:[]}},
  {name:'register_formal_btc_eth_signal',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'COMPATIBILITY path for previously installed plugins: use signal={kind:V17_OFFICIAL_SUBMISSION,raw,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis} to publish complete original V1.7 AI analysis. Standalone signal writing is forbidden.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
@@ -185,4 +213,4 @@ if(process.env.V17_NO_LISTEN!=='1'){
   await getOAuth();server.listen(PORT,'0.0.0.0',()=>process.stderr.write('v17-verbatim-listening:'+PORT+'\n'));
  }catch(e){process.stderr.write('v17-startup-failed:'+e.message+'\n');process.exit(1);}
 }
-export {server,beginAnalysis,publishAnalysis,ledgerView,decisionHistory,tools};
+export {server,beginAnalysis,publishAnalysis,ledgerView,decisionHistory,carriedUncertainty,tools};
