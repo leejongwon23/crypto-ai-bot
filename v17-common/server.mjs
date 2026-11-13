@@ -2,6 +2,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import {makeOAuth} from './oauth.mjs';
 import {applyCachedPolicyResponse} from './cached-policy-response.mjs';
+import {storePreparedSnapshot,recoverOfficialSubmissionRaw} from './prepared-snapshot.mjs';
 import {OFFICIAL_POLICY,VERSION,prepare,sourcePolicy,validateSnapshot,validateOfficialSubmission,ledgerHash,sessionId,digest,checkEvent} from './v17-core.mjs';
 
 const PORT=Number(process.env.PORT||3000);
@@ -17,6 +18,13 @@ CREATE TABLE IF NOT EXISTS v17_ai_signals (session TEXT NOT NULL, id TEXT NOT NU
 CREATE TABLE IF NOT EXISTS v17_ai_events (session TEXT NOT NULL, seq BIGSERIAL PRIMARY KEY, id TEXT NOT NULL, event JSONB NOT NULL, at_kst TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS v17_ai_analyses (session TEXT NOT NULL, snapshot_sha TEXT NOT NULL, before_sha TEXT NOT NULL, after_sha TEXT NOT NULL, policy_sha TEXT NOT NULL, raw TEXT NOT NULL, official JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY(session,snapshot_sha,before_sha));
 CREATE INDEX IF NOT EXISTS v17_ai_analyses_after ON v17_ai_analyses (session,snapshot_sha,after_sha);
+CREATE TABLE IF NOT EXISTS v17_ai_prepared_snapshots (
+ session TEXT NOT NULL,
+ snapshot_sha TEXT NOT NULL,
+ raw TEXT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY(session,snapshot_sha)
+);
 CREATE TABLE IF NOT EXISTS v17_ai_reset_archives (
  reset_id TEXT PRIMARY KEY,
  session TEXT NOT NULL,
@@ -89,6 +97,9 @@ async function beginAnalysis(body){
  const startMs=Date.now();
  const raw=body.raw,session=sessionId(body.session||'OFFICIAL_V17');
  const snapshot=validateSnapshot(raw);const db=await database();
+ // Store the original bytes before returning a submission reference. An AI
+ // publisher must never need to reconstruct this original input again.
+ await storePreparedSnapshot(db,session,snapshot.sha256,raw);
  const ledger=await readLedger(db,session);
  const saved=await selectOfficial(db,session,snapshot.sha256,ledgerHash(ledger));
  const previousSnapshot=await latestOfficialSnapshot(db,session);
@@ -97,7 +108,7 @@ async function beginAnalysis(body){
  // Transport-only optimization. By default this is the exact previous response.
  // Only omit policy text if the caller supplies the matching SHA of a prompt
  // already read verbatim in this same conversation; hash mismatch falls back.
- const delivered=applyCachedPolicyResponse(full,body.cachedPolicySha256);
+ const delivered={...applyCachedPolicyResponse(full,body.cachedPolicySha256),preparedRaw:{persisted:true,snapshotSha256:snapshot.sha256,submitWithoutRaw:true}};
  if(body.debugTimings!==true)return delivered;
  return {...delivered,serverTimings:{
   backendMs:Date.now()-startMs,
@@ -107,12 +118,16 @@ async function beginAnalysis(body){
  }};
 }
 async function publishAnalysis(body){
- const raw=body.raw,session=sessionId(body.session||'OFFICIAL_V17');const shot=validateSnapshot(raw);
+ const session=sessionId(body.session||'OFFICIAL_V17');
  const db=await database(),client=await db.connect();
  try{
   await client.query('BEGIN');
   await client.query('INSERT INTO v17_ai_sessions(name) VALUES($1) ON CONFLICT DO NOTHING',[session]);
   await client.query('SELECT name FROM v17_ai_sessions WHERE name=$1 FOR UPDATE',[session]);
+  // The SHA256 reference is scoped to the official session and resolves to
+  // the exact text first received by prepare; no AI reconstruction is needed.
+  const raw=await recoverOfficialSubmissionRaw(client,session,body);
+  const shot=validateSnapshot(raw);
   const ledger=await readLedger(client,session);
   const before=ledgerHash(ledger);
   // At most one official result per snapshot and current ledger state.
@@ -120,7 +135,7 @@ async function publishAnalysis(body){
   if(prior){await client.query('COMMIT');return {status:'OFFICIAL_REPLAY',officialDecision:prior,sameState:true,notReanalyzed:true};}
   const previousSnapshot=await latestOfficialSnapshot(client,session);
   const carry=await carriedUncertainty(client,session,ledger);
-  const verified=validateOfficialSubmission(body,ledger,previousSnapshot,carry);
+  const verified=validateOfficialSubmission({...body,raw},ledger,previousSnapshot,carry);
   const newSignals=verified.newSignals,events=verified.events;
   for(const s of newSignals){
    await client.query('INSERT INTO v17_ai_signals(session,id,symbol,original,status,verified_until,plan_version) VALUES($1,$2,$3,$4,$5,$6,0)',[session,s.id,s.symbol,JSON.stringify(s),s.status,s.issuedAt]);
@@ -218,7 +233,7 @@ const tools=[
  {name:'publish_official_v17_analysis',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'SECOND STEP after NEEDS_AI_ANALYSIS. Existing confirmed price-touch and stop/TP event checks still mandatory. IMPORTANT GAP FIX: unknown historical signal outcome does NOT force current BTC/ETH conclusion=UNVERIFIED or block fresh independent market analysis. Include analysis.historicalUncertainty.{BTC|ETH}={unresolvedIds:[...],evidence:string} for each affected symbol; do not claim old position closed or account flat. To replace old PENDING with unresolved gap, include an old-ID UNVERIFIED quarantine event (uncertaintyScope,priorConfirmedState,marketReassessment, at current snapshot time) in same atomic submission, and new formal plan historicalExposureUnknownIds, historicalExposureRiskDisclosure, independentCurrentMarketEvidence. New plan is an analytical signal, NOT exchange account position certainty. An old ENTERED can coexist with separately justified same-direction ADD_ON or opposite PENDING switch plan; new signal must identify parentSignalId, relationToExisting SAME_DIRECTION_ADD_ON with addOnRiskEvidence and existingPositionRiskEvidence, OR OPPOSITE_PENDING with transitionOnTouchEvidence and existingPositionRiskEvidence. Old proven ENTERED cannot be silently replaced or counted flat; any opposite ENTERED event needs all opposed positions to have verified exit events first. REVERSE_EXIT/EARLY_EXIT requires strongCounterEvidence, structureEvidence, flowEvidence, contextEvidence, and outcomeUnverified=true if no verified entry/exit prices; actual PnL requires verifiedEntryPrice and entryPriceEvidence matching calculated PnL. REVISION event requires observedPrice=current snapshot, new plan stop/TP1/TP2/TP3, immutable previous achieved milestones and tighter effective stop; revised plan is read from ledger on following runs. Never retroactively cancel or claim TP/SL in gaps. Four directions A-E, original V1.7 unchanged, original stop/TP unchanged. For live PENDING with current ATR/EMA structure, supply analysis.autoSwitchAudit.BTC/ETH as described in run response requirements, with each old ID, observed distance in ATR/percent, numeric immediate+near alternatives, source anchors, stop/TP/RR and quantified KEEP rejection or atomic REDESIGN. Prose-only HOLD or LOW CVD-only justification is rejected. Supply exact hashes and full 16-step+clause audit.',inputSchema:{type:'object',properties:{raw:{type:'string'},session:{type:'string'},policySha256:{type:'string'},snapshotSha256:{type:'string'},beforeLedgerSha256:{type:'string'},decisionKey:{type:'string'},analysis:{type:'object',description:'Full V1.7 decision: reportMarkdown; directions BTC_LONG/BTC_SHORT/ETH_LONG/ETH_SHORT each marketEvidence,counterEvidence,alternatives A-E; coupling; checks 1..16; clauses 0..23,A,B,FINAL; audit20; conclusions BTC/ETH {decision=LONG|SHORT|HOLD|MANAGE|UNVERIFIED,evidence}; historicalUncertainty (only when affected) {BTC|ETH:{unresolvedIds:[old IDs],evidence:string}}; newSignals[]; events[] with prior PENDING UNVERIFIED quarantine if a gap blocks historical state. Keep current decisions independent of unknown outcomes. Use parentSignalId and relationToExisting for add-on or opposite pending. Event ordering is chronological and exit must precede opposed ENTERED; revisions require observedPrice matching the current snapshot.'}},required:['raw','policySha256','snapshotSha256','beforeLedgerSha256','decisionKey','analysis']}},
  {name:'read_official_btc_eth_ledger',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Retrieve NEW V1.7 source-exact official signal ledger and chronological immutable events for this session. Previous noncompliant legacy companion signals remain isolated, not silently imported.',inputSchema:{type:'object',properties:{session:{type:'string'}},required:[]}},
  {name:'read_official_v17_decision_history',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Read-only chronological OFFICIAL_V17 AI decision history for missed-opportunity review. Never convert hypothetical candidates to historical trades or alter immutable signal outcomes.',inputSchema:{type:'object',properties:{session:{type:'string'},limit:{type:'integer',minimum:1,maximum:100},includeDirections:{type:'boolean'}},required:[]}},
- {name:'register_formal_btc_eth_signal',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'COMPATIBILITY path for previously installed plugins: use signal={kind:V17_OFFICIAL_SUBMISSION,raw,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis} to publish complete original V1.7 AI analysis. Standalone signal writing is forbidden. The complete analysis must include autoSwitchAudit when live pending entries exist.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
+ {name:'register_formal_btc_eth_signal',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'COMPATIBILITY path for installed plugins: call run_official_btc_eth_snapshot ONCE with exact user raw. Then submit signal={kind:V17_OFFICIAL_SUBMISSION,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis} WITHOUT raw; server recovers the identical prepared raw securely by session plus SHA. Older raw submissions remain supported. Standalone signal writing is forbidden. Include autoSwitchAudit for live pending entries.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
 ];
 async function mcp(req,res,principal){
  const b=await readJSON(req),id=b.id;
