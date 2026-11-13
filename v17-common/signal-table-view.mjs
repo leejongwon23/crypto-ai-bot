@@ -2,6 +2,10 @@
 // a signal, a price touch, a position, a target, or a formal outcome.
 const TERMINAL = new Set(['TP3_DONE','STOPPED','CANCELLED','REDESIGNED_CANCELLED','EARLY_EXIT','REVERSE_EXIT']);
 const ENTERED = new Set(['NEW_ENTRY','ENTERED','TP1','TP2']);
+// UNVERIFIED may mean an earlier entry was PROVEN, while a later exit is not.
+// Never erase the observed entry or declare the still-open position as fact.
+const enteredEarlier = row=>row.status==='UNVERIFIED'&&ENTERED.has(row.unverifiedFrom);
+const hasKnownEntry = row=>ENTERED.has(row.status)||enteredEarlier(row);
 const LABEL = {
  PENDING:'대기',NEW_ENTRY:'신규 진입',ENTERED:'진입',
  TP1:'TP1 도달',TP2:'TP2 도달',UNVERIFIED:'미확인'
@@ -18,7 +22,7 @@ export const SIGNAL_TABLE_OUTPUT_RULE =
  '최종 사용자 응답은 signalView.markdown 표만 출력한다. 시장설명·검수·미확인 사유·분석과정의 별도 문단을 쓰지 않는다. '+
  '새 진입/대기→진입 자동전환, 취소, 재설계, 추가진입, 방향 스위칭, 손절/익절/관리변경이 실제 공식원장에서 일어난 경우에만 signalView.changeNotices를 표 밑에 짧게 추가한다. '+
  '종료되지 않은 기존 BTC/ETH 정식 신호는 UNVERIFIED도 포함하여 모두 표시한다. 손절과 TP1/2/3에 최초 진입범위 대비 예상 손익률(%)을 병기한다. '+
- '대기 신호의 미체결 수익은 계산하지 않고, 미확인 신호의 실현/현재 수익도 확정하지 않는다. '+
+ '대기 신호의 미체결 수익은 계산하지 않는다. 과거 진입이 확인된 UNVERIFIED 신호는 현재가 대비 손익률을 반드시 계산하되 (보유 가정·청산 미확인)으로 표시하고 실제 보유·실현수익으로 단정하지 않는다. '+
  '실제 분석·4방향 비교·V1.7 검수·원장 등록 단계는 축약하거나 생략하지 않는다. 새 대화창에서도 동일 규칙이다.';
 const num=x=>typeof x==='number'&&Number.isFinite(x);
 const money=x=>num(x)?'$'+x.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'—';
@@ -32,8 +36,15 @@ function pctInterval(row,price){
  return signedPct(values[0])+'~'+signedPct(values[1]);
 }
 const cell=(row,value)=>money(value)+' ('+pctInterval(row,value)+')';
+function currentPctDisplay(row,price){
+ if(row.status==='PENDING')return '— (미진입)';
+ if(!num(price)||!hasKnownEntry(row))return '미확인';
+ const pct=pctInterval(row,price);
+ if(enteredEarlier(row))return pct+' (보유 가정·청산 미확인)';
+ return pct+' (진입범위·현재가 기준)';
+}
 const status=row=>{
- if(row.status==='UNVERIFIED')return row.unverifiedFrom==='ENTERED'||row.unverifiedFrom==='NEW_ENTRY'||row.unverifiedFrom==='TP1'||row.unverifiedFrom==='TP2'?'진입 이력·미확인':'대기 이력·미확인';
+ if(row.status==='UNVERIFIED')return enteredEarlier(row)?'진입 확인·이후 청산 미확인':'진입 여부 미확인';
  return LABEL[row.status]||row.status||'—';
 };
 function notes(changes=[],ledger=[]){
@@ -59,7 +70,7 @@ export function buildSignalView({ledger=[],snapshot=null,changes=[]}={}){
  if(active.length){
   lines.push(mk('현재가',row=>money(current(row))));
   lines.push(mk('진입가',row=>row.original.entryLow===row.original.entryHigh?money(row.original.entryLow):money(row.original.entryLow)+'~'+money(row.original.entryHigh)));
-  lines.push(mk('현재손익률',row=>ENTERED.has(row.status)&&num(current(row))?pctInterval(row,current(row))+' (진입범위 기준)':row.status==='PENDING'?'— (미진입)':'미확인'));
+  lines.push(mk('현재가 대비 손익률',row=>currentPctDisplay(row,current(row))));
   lines.push(mk('손절',row=>cell(row,plan(row).stop)));
   for(const k of ['tp1','tp2','tp3'])lines.push(mk(k.toUpperCase(),row=>cell(row,plan(row)[k])));
   lines.push(mk('상태',status));
@@ -71,6 +82,8 @@ export function buildSignalView({ledger=[],snapshot=null,changes=[]}={}){
    entryLow:row.original.entryLow,entryHigh:row.original.entryHigh,
    stop:plan(row).stop,tp1:plan(row).tp1,tp2:plan(row).tp2,tp3:plan(row).tp3,
    stopPct:pctInterval(row,plan(row).stop),tp1Pct:pctInterval(row,plan(row).tp1),tp2Pct:pctInterval(row,plan(row).tp2),tp3Pct:pctInterval(row,plan(row).tp3),
-   currentIndicativePct:ENTERED.has(row.status)&&num(current(row))?pctInterval(row,current(row)):null
+   currentIndicativePct:hasKnownEntry(row)&&num(current(row))?pctInterval(row,current(row)):null,
+   currentIndicativeConditional:enteredEarlier(row),
+   historicalExitUnknown:row.status==='UNVERIFIED'
   }))};
 }
