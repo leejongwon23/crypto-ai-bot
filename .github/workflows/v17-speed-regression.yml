@@ -37,3 +37,7 @@ jobs:
         run: |
           node --input-type=module -e "const ac=new AbortController(); const t=setTimeout(()=>ac.abort(),5000); try{const u=new URL('https://api.bybit.com/v5/market/kline');for(const [k,v] of Object.entries({category:'linear',symbol:'ETHUSDT',interval:'1',limit:'2'}))u.searchParams.set(k,v);const r=await fetch(u,{signal:ac.signal});const x=await r.json().catch(()=>({}));console.log('BYBIT_PUBLIC_PROBE HTTP',r.status,'retCode',x.retCode,'count',x.result?.list?.length??0)}catch(e){console.log('BYBIT_PUBLIC_PROBE ERROR',String(e.message||e))}finally{clearTimeout(t)}"
 
+
+      - name: Probe provider-owned Bybit fallback domains (diagnostic)
+        run: |
+          node --input-type=module -e "for(const host of ['api.bytick.com','api.bybit.nl','api.bybit.com']){const ac=new AbortController();const t=setTimeout(()=>ac.abort(),3000);try{const u='https://'+host+'/v5/market/kline?category=linear&symbol=ETHUSDT&interval=1&limit=2';const r=await fetch(u,{signal:ac.signal});const x=await r.json().catch(()=>({}));console.log('BYBIT_DOMAIN_PROBE',host,'HTTP',r.status,'retCode',x.retCode,'items',x.result?.list?.length??0)}catch(e){console.log('BYBIT_DOMAIN_PROBE',host,'ERROR',String(e.message||e))}finally{clearTimeout(t)}}"
