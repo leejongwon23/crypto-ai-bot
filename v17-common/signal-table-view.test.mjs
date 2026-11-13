@@ -18,18 +18,20 @@ test('BTC and still-open UNVERIFIED ETH are both visible with entry-relative sto
  assert.match(x.markdown,/\$68,820\.00 \(\+0\.98%~\+1\.04%\)/);
  assert.match(x.markdown,/\$1,969\.00 \(-1\.24%~-1\.07%\)/);
  assert.match(x.markdown,/\$1,894\.10 \(\+2\.61%~\+2\.78%\)/);
- assert.match(x.markdown,/진입 이력·미확인/);
+assert.match(x.markdown,/진입 확인·이후 청산 미확인/);
  assert.match(x.markdown,/— \(미진입\)/);
- assert.match(x.markdown,/\| 미확인 \|/);
+assert.match(x.markdown,/-0\.70%~-0\.52% \(보유 가정·청산 미확인\)/);
  assert.deepEqual(x.changeNotices,[]);
  assert.equal(x.entries.length,2);
  assert.equal(x.entries[0].currentIndicativePct,null);
- assert.equal(x.entries[1].currentIndicativePct,null);
+assert.equal(x.entries[1].currentIndicativePct,'-0.70%~-0.52%');
+ assert.equal(x.entries[1].currentIndicativeConditional,true);
+ assert.equal(x.entries[1].historicalExitUnknown,true);
 });
 test('verified entered position displays indicative current price percentage, never a fill claim',()=>{
  const entered={...BTC,status:'ENTERED'};
  const result=buildSignalView({ledger:[entered],snapshot:{btcPrice:69234.2}});
- assert.match(result.markdown,/\+0\.38%~\+0\.44% \(진입범위 기준\)/);
+ assert.match(result.markdown,/\+0\.38%~\+0\.44% \(진입범위·현재가 기준\)/);
  assert.equal(result.entries[0].currentIndicativePct,'+0.38%~+0.44%');
 });
 test('terminal signals omitted from default table, but changes carry concise notifications',()=>{
@@ -56,7 +58,7 @@ test('LONG and revised effective stop/targets use correct percentage sign and or
  const r=buildSignalView({ledger:[long],snapshot:{btcPrice:108}});
  assert.match(r.markdown,/\$99\.00 \(-2\.94%~-1\.00%\)/);
  assert.match(r.markdown,/\$112\.00 \(\+9\.80%~\+12\.00%\)/);
- assert.match(r.markdown,/\+5\.88%~\+8\.00% \(진입범위 기준\)/);
+ assert.match(r.markdown,/\+5\.88%~\+8\.00% \(진입범위·현재가 기준\)/);
 });
 test('view generation does not alter the official ledger or invent a record',()=>{
  const input=[structuredClone(BTC),structuredClone(ETH)];
@@ -67,4 +69,38 @@ test('view generation does not alter the official ledger or invent a record',()=
  const empty=buildSignalView({ledger:[],snapshot:shot});
  assert.match(empty.markdown,/활성 정식 신호 없음/);
  assert.match(SIGNAL_TABLE_OUTPUT_RULE,/새 대화창/);
+});
+
+test('confirmed historical ETH SHORT entry above its range yields negative conditional valuation',()=>{
+ const ledger=[structuredClone(BTC),structuredClone(ETH)];
+ const before=JSON.stringify(ledger);
+ const x=buildSignalView({ledger,snapshot:{btcPrice:69288.10,ethPrice:1961.64}});
+ assert.match(x.markdown,/\$1,961\.64/);
+ assert.match(x.markdown,/-0\.87%~-0\.69% \(보유 가정·청산 미확인\)/);
+ assert.match(x.markdown,/진입 확인·이후 청산 미확인/);
+ assert.equal(x.entries[1].currentIndicativePct,'-0.87%~-0.69%');
+ assert.equal(x.entries[1].currentIndicativeConditional,true);
+ assert.equal(x.entries[1].status,'UNVERIFIED');
+ assert.equal(JSON.stringify(ledger),before);
+});
+test('historically uncertain PENDING is not treated as confirmed entry',()=>{
+ const x=buildSignalView({ledger:[{...ETH,unverifiedFrom:'PENDING'}],snapshot:{ethPrice:1961.64}});
+ assert.match(x.markdown,/\| 미확인 \|/);
+ assert.match(x.markdown,/진입 여부 미확인/);
+ assert.equal(x.entries[0].currentIndicativePct,null);
+ assert.equal(x.entries[0].currentIndicativeConditional,false);
+});
+test('price beyond stop in a historical gap never fabricates a STOPPED event',()=>{
+ const x=buildSignalView({ledger:[ETH],snapshot:{ethPrice:1975}});
+ assert.match(x.markdown,/보유 가정·청산 미확인/);
+ assert.equal(x.entries[0].status,'UNVERIFIED');
+ assert.deepEqual(x.changeNotices,[]);
+ assert.ok(x.entries[0].currentIndicativePct.startsWith('-'));
+});
+test('UNVERIFIED with a prior confirmed TP1/TP2 or NEW_ENTRY keeps conditional current price math',()=>{
+ for(const from of ['NEW_ENTRY','TP1','TP2']){
+  const x=buildSignalView({ledger:[{...ETH,unverifiedFrom:from}],snapshot:{ethPrice:1961.64}});
+  assert.equal(x.entries[0].currentIndicativePct,'-0.87%~-0.69%');
+  assert.equal(x.entries[0].currentIndicativeConditional,true);
+ }
 });
