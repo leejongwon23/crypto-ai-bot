@@ -106,7 +106,7 @@ export function validateRecoveredProof(raw,previousSnapshot,proofs){
   const prev=previousSnapshot?.[symbol==='BTC'?'btcTime':'ethTime'];
   if(!p?.recovered||!prev){result[symbol]={recovered:false};continue;}
   const from=kstMs(prev),start=kstMs(market[symbol].pathStart);
-  const bridge=p.bridgeCovered&&p.coveredFrom<=kstTime(floorMinute(from))
+  const bridge=['BYBIT_LINEAR_PUBLIC_1M','USER_PREPARED_SNAPSHOT_PATH_CHAIN'].includes(p.source)&&p.bridgeCovered&&p.coveredFrom<=kstTime(floorMinute(from))
    &&p.coveredThrough>=kstTime(floorMinute(start));
   result[symbol]=bridge?{recovered:true,source:p.source,coveredFrom:p.coveredFrom,coveredThrough:p.coveredThrough}
    :{recovered:false};
