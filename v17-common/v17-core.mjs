@@ -43,7 +43,7 @@ export function validateSnapshot(raw){
  * The previous official snapshot timestamp is essential: original signal verifiedUntil
  * does not advance when an analysis has no state-change event.
  */
-export function assessSnapshotEvidence(raw,{previousSnapshot=null,ledger=[],carriedUncertaintyBySymbol={}}={}){
+export function assessSnapshotEvidence(raw,{previousSnapshot=null,ledger=[],carriedUncertaintyBySymbol={},verifiedGapRecoveryBySymbol={}}={}){
  const snapshot=validateSnapshot(raw);
  const entryKeys=['[1]','[2]','[2B]','[3]','[5]','[8]','[CVD]','[10]','[7]'];
  const btcI=raw.indexOf('========== BTC (BTCUSDT) ==========');
@@ -60,7 +60,11 @@ export function assessSnapshotEvidence(raw,{previousSnapshot=null,ledger=[],carr
   const pathStart=path?.[2]??null,pathEnd=path?.[4]??null;
   const gapSeconds=prev&&pathStart?Math.max(0,Math.round((ms(pathStart)-ms(prev))/1000)):null;
   const reversed=Boolean(prev&&ms(snapshotAt)<ms(prev));
-  const gap=Boolean(gapSeconds!==null&&gapSeconds>60);
+  const gapDetected=Boolean(gapSeconds!==null&&gapSeconds>60);
+  // A price-path gap is resolved only by independently verified, complete exchange 1m evidence.
+  const recovery=verifiedGapRecoveryBySymbol[symbol];
+  const gapRecovered=Boolean(gapDetected&&recovery?.recovered===true&&['BYBIT_LINEAR_PUBLIC_1M','USER_PREPARED_SNAPSHOT_PATH_CHAIN'].includes(recovery.source));
+  const gap=gapDetected&&!gapRecovered;
   // The interval extremes are not a tick-by-tick trace. They can prove
   // a post-issuance zone crossing in a continuous, nonconflicting path,
   // but cannot establish the chronology of simultaneous entry and stop/TP.
@@ -118,7 +122,7 @@ export function assessSnapshotEvidence(raw,{previousSnapshot=null,ledger=[],carr
   if(requiredEntrySignals.length)flags.push('PENDING_ENTRY_TOUCH_MUST_BE_REGISTERED');
   if(requiredExitSignals.length)flags.push('EXISTING_TP_OR_STOP_MUST_BE_REGISTERED');
   if(ambiguousSignals.length)flags.push('ENTRY_AND_EXIT_SEQUENCE_AMBIGUOUS');
-  perSymbol[symbol]={snapshotAt,priorOfficialAt:prev,pathStart,pathEnd,gapSeconds,
+  perSymbol[symbol]={snapshotAt,priorOfficialAt:prev,pathStart,pathEnd,gapSeconds,gapRecovered,gapRecoverySource:gapRecovered?recovery.source:null,
    pathHigh:high,pathLow:low,knownContinuous,missingSections:missing,flags,
    rateLimitVWAP:hasVWAP,couldNotVerifySignals:uncertainSignals,
    requiredEntrySignals,requiredExitSignals,ambiguousSignals,historicalUnknownIds,carriedUncertaintyIds:carried};
@@ -163,9 +167,9 @@ export function submissionContract(){
  };
 }
 
-export function prepare({raw,session='OFFICIAL_V17',ledger=[],saved=null,previousSnapshot=null,carriedUncertaintyBySymbol={}}){
+export function prepare({raw,session='OFFICIAL_V17',ledger=[],saved=null,previousSnapshot=null,carriedUncertaintyBySymbol={},verifiedGapRecoveryBySymbol={}}){
  const snapshot=validateSnapshot(raw),id=sessionId(session),beforeLedgerSha256=ledgerHash(ledger);
- const evidenceQuality=assessSnapshotEvidence(raw,{previousSnapshot,ledger,carriedUncertaintyBySymbol});
+ const evidenceQuality=assessSnapshotEvidence(raw,{previousSnapshot,ledger,carriedUncertaintyBySymbol,verifiedGapRecoveryBySymbol});
  const key=digest({session:id,snapshotSha256:snapshot.sha256,ledgerSha256:beforeLedgerSha256,policySha256:POLICY_SHA256});
  if(saved)return {status:'OFFICIAL_REPLAY',session:id,snapshot,policy:OFFICIAL_POLICY,officialDecision:saved,evidenceQuality,source:'PERSISTED_FIRST_OFFICIAL_RESULT',sameState:true};
  return {status:'NEEDS_AI_ANALYSIS',session:id,snapshot,policy:sourcePolicy(),ledger:ledger.map(r=>({...r})),evidenceQuality,
@@ -272,11 +276,11 @@ export function checkEvent(evt,ledger){
   }
  return true;
 }
-export function validateOfficialSubmission(args,ledger,previousSnapshot=null,carriedUncertaintyBySymbol={}){
+export function validateOfficialSubmission(args,ledger,previousSnapshot=null,carriedUncertaintyBySymbol={},verifiedGapRecoveryBySymbol={}){
  assert(args&&typeof args==='object','SUBMISSION_MISSING');
  const {raw,session='OFFICIAL_V17',policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis}=args;
  const shot=validateSnapshot(raw),sess=sessionId(session),lhs=ledgerHash(ledger);
- const evidenceQuality=assessSnapshotEvidence(raw,{previousSnapshot,ledger,carriedUncertaintyBySymbol});
+ const evidenceQuality=assessSnapshotEvidence(raw,{previousSnapshot,ledger,carriedUncertaintyBySymbol,verifiedGapRecoveryBySymbol});
  for(const sym of ['BTC','ETH']){
   assert(!evidenceQuality.perSymbol[sym].flags.includes('OUT_OF_ORDER_SNAPSHOT'),
    'OUT_OF_ORDER_SNAPSHOT_CANNOT_CHANGE_OFFICIAL_LEDGER_'+sym);

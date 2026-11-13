@@ -3,6 +3,9 @@ import crypto from 'node:crypto';
 import {makeOAuth} from './oauth.mjs';
 import {applyCachedPolicyResponse} from './cached-policy-response.mjs';
 import {storePreparedSnapshot,recoverOfficialSubmissionRaw} from './prepared-snapshot.mjs';
+import {rawMarketWindows,recoverActiveSignalWindows} from './price-path-recovery.mjs';
+import {planVerifiedMechanicalEvents,validateRecoveredProof} from './official-price-tracker.mjs';
+import {assemblePreparedChains,planPreparedEvents} from './prepared-path-chain.mjs';
 import {OFFICIAL_POLICY,VERSION,prepare,sourcePolicy,validateSnapshot,validateOfficialSubmission,ledgerHash,sessionId,digest,checkEvent} from './v17-core.mjs';
 
 const PORT=Number(process.env.PORT||3000);
@@ -22,6 +25,13 @@ CREATE TABLE IF NOT EXISTS v17_ai_prepared_snapshots (
  session TEXT NOT NULL,
  snapshot_sha TEXT NOT NULL,
  raw TEXT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY(session,snapshot_sha)
+);
+CREATE TABLE IF NOT EXISTS v17_ai_gap_proofs (
+ session TEXT NOT NULL,
+ snapshot_sha TEXT NOT NULL,
+ proof JSONB NOT NULL,
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
  PRIMARY KEY(session,snapshot_sha)
 );
@@ -74,17 +84,135 @@ async function carriedUncertainty(db,session,ledger){
  const ids=new Set(ledger.filter(s=>['PENDING','NEW_ENTRY','ENTERED','TP1','TP2'].includes(s.status)).map(s=>s.id));
  const result={BTC:[],ETH:[]};
  if(!ids.size)return result;
+ // Verified gap-resolution events supersede older historical warnings.
+ const recent=await db.query("SELECT DISTINCT ON(id) id,event FROM v17_ai_events WHERE session=$1 AND ((event->>'kind')='UNVERIFIED' OR event ? 'gapResolutionEvidence') ORDER BY id,seq DESC",[session]);
+ const resolved=new Set(recent.rows.filter(x=>typeof x.event?.gapResolutionEvidence==='string'&&x.event.gapResolutionEvidence.length>0).map(x=>x.id));
  const r=await db.query("SELECT official->'evidenceQuality' AS evidence FROM v17_ai_analyses WHERE session=$1 AND official->'evidenceQuality' IS NOT NULL ORDER BY created_at DESC LIMIT 1000",[session]);
  for(const row of r.rows){
   for(const sym of ['BTC','ETH']){
    const q=row.evidence?.perSymbol?.[sym]||{};
    for(const id of [...(q.couldNotVerifySignals||[]),...(q.ambiguousSignals||[]),...(q.carriedUncertaintyIds||[])]){
-    if(ids.has(id)&&!result[sym].includes(id))result[sym].push(id);
+    if(ids.has(id)&&!resolved.has(id)&&!result[sym].includes(id))result[sym].push(id);
    }
   }
  }
  return result;
 }
+// Resolve the first known gap origin for an already quarantined signal. A later
+// complete candle cannot silently erase an old unresolved interval.
+async function unverifiedOrigins(db,session,ledger){
+ const wanted=ledger.filter(s=>s.status==='UNVERIFIED'),origins={};
+ if(!wanted.length)return origins;
+ const r=await db.query("SELECT official->'evidenceQuality' AS evidence FROM v17_ai_analyses WHERE session=$1 AND official->'evidenceQuality' IS NOT NULL ORDER BY created_at DESC LIMIT 1000",[session]);
+ for(const s of wanted){
+  const sym=s.symbol==='BTCUSDT'?'BTC':'ETH';
+  const found=r.rows.map(x=>x.evidence?.perSymbol?.[sym])
+   .filter(x=>x&&x.gapSeconds>60&&x.priorOfficialAt&&
+    (x.couldNotVerifySignals||[]).includes(s.id));
+  if(found.length)origins[s.id]=found.reduce((a,x)=>a<x.priorOfficialAt?a:x.priorOfficialAt,found[0].priorOfficialAt);
+ }
+ return origins;
+}
+async function readVerifiedGapProof(db,session,snapshotSha){
+ const r=await db.query('SELECT proof FROM v17_ai_gap_proofs WHERE session=$1 AND snapshot_sha=$2',[session,snapshotSha]);
+ return r.rows[0]?.proof||{};
+}
+async function storeVerifiedGapProof(db,session,snapshotSha,proof){
+ await db.query('INSERT INTO v17_ai_gap_proofs(session,snapshot_sha,proof) VALUES($1,$2,$3) ON CONFLICT(session,snapshot_sha) DO UPDATE SET proof=EXCLUDED.proof',[session,snapshotSha,JSON.stringify(proof)]);
+}
+// The only automatic transitions are verifiable mechanical level crossings.
+// Discretionary entries, directions, revisions and early exits still belong to
+// the AI and must pass the original V1.7 publication validator.
+async function reconcileVerifiedPricePath(db,session,raw,snapshot,previousSnapshot){
+ const at={BTC:snapshot.btcTime,ETH:snapshot.ethTime};
+ const ledger=await readLedger(db,session);
+ if(!ledger.some(s=>['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(s.status)))
+  return {proof:{},events:[],notes:['NO_ACTIVE_SIGNAL'],backendRecoveryMs:0};
+ const begin=Date.now(),origins=await unverifiedOrigins(db,session,ledger);
+ const needIntermediate=ledger.some(x=>x.status==='UNVERIFIED')||
+  ['BTC','ETH'].some(sym=>{
+   const prev=previousSnapshot?.[sym==='BTC'?'btcTime':'ethTime'];
+   const path=rawMarketWindows(raw)[sym].pathStart;
+   return prev&&(Date.parse(path.replace(' ','T')+'+09:00')-Date.parse(prev.replace(' ','T')+'+09:00')>60000);
+  });
+ let preparedRaws=[];
+ if(needIntermediate){
+  const q=await db.query("SELECT raw FROM v17_ai_prepared_snapshots WHERE session=$1 AND created_at>NOW()-INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 160",[session]);
+  preparedRaws=q.rows.map(x=>x.raw);
+ }
+ const base={...previousSnapshot};
+ for(const s of ledger.filter(x=>x.status==='UNVERIFIED')){
+  const origin=origins[s.id],field=s.symbol==='BTCUSDT'?'btcTime':'ethTime';
+  if(origin&&(!base[field]||origin<base[field]))base[field]=origin;
+ }
+ const prepared=assemblePreparedChains(preparedRaws,base,raw);
+ // A prior stored official analysis already checked the path through its own timestamp.
+ // Do not rescan earlier PENDING history or omit recent entry crosses.
+ const auditStarts=Object.fromEntries(ledger.map(sig=>{
+  const sym=sig.symbol==='BTCUSDT'?'BTC':'ETH';
+  const previous=previousSnapshot?.[sym==='BTC'?'btcTime':'ethTime'];
+  const from=sig.verifiedUntil||sig.original?.issuedAt;
+  return [sig.id,previous&&from?(previous>from?previous:from):previous||from];
+ }));
+ let planned=planPreparedEvents({ledger,history:prepared,currentAtBySymbol:at,unverifiedOrigins:origins,auditStarts});
+ const needsRemote=ledger.some(s=>['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(s.status)&&
+  !prepared[s.symbol==='BTCUSDT'?'BTC':'ETH']?.recovered);
+ let remote={BTC:{needed:false},ETH:{needed:false}};
+ if(needsRemote){
+  remote=await recoverActiveSignalWindows(raw,previousSnapshot,ledger,{unverifiedOrigins:origins});
+  const remotePlan=planVerifiedMechanicalEvents({ledger,history:remote,currentAtBySymbol:at,unverifiedOrigins:origins,auditStarts});
+  const preparedSymbols=new Set(['BTC','ETH'].filter(sym=>prepared[sym]?.recovered));
+  for(const e of remotePlan.events){
+   const row=ledger.find(x=>x.id===e.id);
+   if(row&&!preparedSymbols.has(row.symbol==='BTCUSDT'?'BTC':'ETH'))planned.events.push(e);
+  }
+  planned.events.sort((x,y)=>Date.parse(x.at.replace(' ','T')+'+09:00')-Date.parse(y.at.replace(' ','T')+'+09:00'));
+  planned.notes.push(...remotePlan.notes);
+ }
+ const sourceProofs=Object.fromEntries(['BTC','ETH'].map(sym=>[sym,prepared[sym]?.recovered?planned.proofs[sym]:{
+  ...(remote[sym]?.recovered?{recovered:true,source:remote[sym].source,bridgeCovered:remote[sym].bridgeCovered,
+    coveredFrom:remote[sym].coveredFrom,coveredThrough:remote[sym].coveredThrough,barCount:remote[sym].barCount}:{recovered:false})
+ }]));
+ const verified=validateRecoveredProof(raw,previousSnapshot,sourceProofs);
+ const auditSummary=Object.fromEntries(['BTC','ETH'].map(sym=>[sym,{
+  ...verified[sym],
+  needed:ledger.some(s=>s.symbol===sym+'USDT'&&['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(s.status)),
+  status:sourceProofs[sym]?.recovered?(sourceProofs[sym].source==='USER_PREPARED_SNAPSHOT_PATH_CHAIN'?'VERIFIED_PREPARED_CHAIN':'VERIFIED_SOURCE_1M'):'RECOVERY_UNAVAILABLE',
+  reason:sourceProofs[sym]?.recovered?undefined:remote[sym]?.reason||'NO_CONTIGUOUS_PREPARED_PATH',
+  coveredThrough:sourceProofs[sym]?.coveredThrough,
+  barCount:sourceProofs[sym]?.barCount,
+ }]));
+ // No DB mutation on an unavailable, incomplete, or ambiguous source.
+ if(!planned.events.length){
+  return {proof:auditSummary,events:[],notes:planned.notes,backendRecoveryMs:Date.now()-begin};
+ }
+ const client=await db.connect();
+ try{
+  await client.query('BEGIN');
+  await client.query('INSERT INTO v17_ai_sessions(name) VALUES($1) ON CONFLICT DO NOTHING',[session]);
+  await client.query('SELECT name FROM v17_ai_sessions WHERE name=$1 FOR UPDATE',[session]);
+  const locked=await readLedger(client,session);
+  if(ledgerHash(locked)!==ledgerHash(ledger)){
+   await client.query('ROLLBACK');
+   return {proof:{},events:[],notes:['CONCURRENT_LEDGER_CHANGE_RETRY_PREPARE'],backendRecoveryMs:Date.now()-begin};
+  }
+  const staged=locked.map(x=>({...x}));
+  for(const evt of planned.events){
+   checkEvent(evt,staged);
+   await client.query('INSERT INTO v17_ai_events(session,id,event,at_kst) VALUES($1,$2,$3,$4)',[session,evt.id,JSON.stringify(evt),evt.at]);
+   await client.query('UPDATE v17_ai_signals SET status=$3,verified_until=$4 WHERE session=$1 AND id=$2',[session,evt.id,evt.kind,evt.at]);
+   const row=staged.find(x=>x.id===evt.id);
+   row.status=evt.kind;row.verifiedUntil=evt.at;
+  }
+  await client.query('COMMIT');
+  return {proof:auditSummary,events:planned.events,notes:planned.notes,backendRecoveryMs:Date.now()-begin};
+ }catch(err){
+  try{await client.query('ROLLBACK');}catch{}
+  // Never mutate the official ledger on unexpected validation/database errors.
+  return {proof:{},events:[],notes:['AUTO_TRACKER_ROLLBACK:'+String(err.message||err).slice(0,160)],backendRecoveryMs:Date.now()-begin};
+ }finally{client.release();}
+}
+
 async function selectOfficial(db,session,snapshotSha,stateSha){
  const q=await db.query('SELECT official FROM v17_ai_analyses WHERE session=$1 AND snapshot_sha=$2 AND (before_sha=$3 OR after_sha=$3) ORDER BY created_at ASC LIMIT 1',[session,snapshotSha,stateSha]);
  return q.rows[0]?.official||null;
@@ -97,11 +225,16 @@ async function beginAnalysis(body){
  const startMs=Date.now();
  const raw=body.raw,session=sessionId(body.session||'OFFICIAL_V17');
  const snapshot=validateSnapshot(raw);const db=await database();
- // Store the original bytes before returning a submission reference. An AI
- // publisher must never need to reconstruct this original input again.
+ // The pasted source is permanent and byte-exact. Exchange OHLC is supplementary proof.
  await storePreparedSnapshot(db,session,snapshot.sha256,raw);
- // Read-only queries are independent. Execute them concurrently without
- // changing ledger contents, event chronology, or the V1.7 audit contract.
+ const oldOfficial=await latestOfficialSnapshot(db,session);
+ const outOfOrder=Boolean(oldOfficial&&(snapshot.btcTime<oldOfficial.btcTime||snapshot.ethTime<oldOfficial.ethTime));
+ let tracked={proof:{},events:[],notes:outOfOrder?['OUT_OF_ORDER_NO_AUTO_MUTATION']:[],backendRecoveryMs:0};
+ if(!outOfOrder){
+  try{tracked=await reconcileVerifiedPricePath(db,session,raw,snapshot,oldOfficial);}
+  catch(e){tracked={proof:{},events:[],notes:['RECOVERY_ERROR_NO_LEDGER_MUTATION:'+String(e.message||e).slice(0,160)],backendRecoveryMs:0};}
+ }
+ // Concurrent independent reads preserve original official registry behavior.
  const [ledger,previousSnapshot]=await Promise.all([
   readLedger(db,session),latestOfficialSnapshot(db,session)
  ]);
@@ -109,14 +242,16 @@ async function beginAnalysis(body){
   selectOfficial(db,session,snapshot.sha256,ledgerHash(ledger)),
   carriedUncertainty(db,session,ledger)
  ]);
- const full=prepare({raw,session,ledger,saved,previousSnapshot,carriedUncertaintyBySymbol:carry});
- // Transport-only optimization. By default this is the exact previous response.
- // Only omit policy text if the caller supplies the matching SHA of a prompt
- // already read verbatim in this same conversation; hash mismatch falls back.
- const delivered={...applyCachedPolicyResponse(full,body.cachedPolicySha256),preparedRaw:{persisted:true,snapshotSha256:snapshot.sha256,submitWithoutRaw:true}};
+ await storeVerifiedGapProof(db,session,snapshot.sha256,tracked.proof);
+ const full=prepare({raw,session,ledger,saved,previousSnapshot,carriedUncertaintyBySymbol:carry,verifiedGapRecoveryBySymbol:tracked.proof});
+ const delivered={...applyCachedPolicyResponse(full,body.cachedPolicySha256),
+  preparedRaw:{persisted:true,snapshotSha256:snapshot.sha256,submitWithoutRaw:true},
+  automaticTracking:{events:tracked.events.map(e=>({id:e.id,kind:e.kind,at:e.at,source:e.source||'VERIFIED_GAP_RECOVERY'})),
+   sourceBySymbol:Object.fromEntries(['BTC','ETH'].map(sym=>[sym,{status:tracked.proof[sym]?.status||'NOT_NEEDED',coveredThrough:tracked.proof[sym]?.coveredThrough,reason:tracked.proof[sym]?.reason}])),
+   recoveryMs:tracked.backendRecoveryMs,notes:tracked.notes.slice(0,8)}};
  if(body.debugTimings!==true)return delivered;
  return {...delivered,serverTimings:{
-  backendMs:Date.now()-startMs,
+  backendMs:Date.now()-startMs,recoveryMs:tracked.backendRecoveryMs,
   fullBytes:Buffer.byteLength(JSON.stringify(full),'utf8'),
   deliveredBytes:Buffer.byteLength(JSON.stringify(delivered),'utf8'),
   policyTextOmitted:delivered.policyCache?.used===true,
@@ -140,7 +275,8 @@ async function publishAnalysis(body){
   if(prior){await client.query('COMMIT');return {status:'OFFICIAL_REPLAY',officialDecision:prior,sameState:true,notReanalyzed:true};}
   const previousSnapshot=await latestOfficialSnapshot(client,session);
   const carry=await carriedUncertainty(client,session,ledger);
-  const verified=validateOfficialSubmission({...body,raw},ledger,previousSnapshot,carry);
+  const verifiedGapRecoveryBySymbol=await readVerifiedGapProof(client,session,shot.sha256);
+  const verified=validateOfficialSubmission({...body,raw},ledger,previousSnapshot,carry,verifiedGapRecoveryBySymbol);
   const newSignals=verified.newSignals,events=verified.events;
   for(const s of newSignals){
    await client.query('INSERT INTO v17_ai_signals(session,id,symbol,original,status,verified_until,plan_version) VALUES($1,$2,$3,$4,$5,$6,0)',[session,s.id,s.symbol,JSON.stringify(s),s.status,s.issuedAt]);
