@@ -3,6 +3,8 @@ import crypto from 'node:crypto';
 import {makeOAuth} from './oauth.mjs';
 import {applyCachedPolicyResponse} from './cached-policy-response.mjs';
 import {storePreparedSnapshot,recoverOfficialSubmissionRaw} from './prepared-snapshot.mjs';
+import {rawMarketWindows,recoverActiveSignalWindows} from './price-path-recovery.mjs';
+import {planVerifiedMechanicalEvents,validateRecoveredProof} from './official-price-tracker.mjs';
 import {OFFICIAL_POLICY,VERSION,prepare,sourcePolicy,validateSnapshot,validateOfficialSubmission,ledgerHash,sessionId,digest,checkEvent} from './v17-core.mjs';
 
 const PORT=Number(process.env.PORT||3000);
@@ -22,6 +24,13 @@ CREATE TABLE IF NOT EXISTS v17_ai_prepared_snapshots (
  session TEXT NOT NULL,
  snapshot_sha TEXT NOT NULL,
  raw TEXT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY(session,snapshot_sha)
+);
+CREATE TABLE IF NOT EXISTS v17_ai_gap_proofs (
+ session TEXT NOT NULL,
+ snapshot_sha TEXT NOT NULL,
+ proof JSONB NOT NULL,
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
  PRIMARY KEY(session,snapshot_sha)
 );
