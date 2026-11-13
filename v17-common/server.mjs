@@ -17,6 +17,15 @@ CREATE TABLE IF NOT EXISTS v17_ai_signals (session TEXT NOT NULL, id TEXT NOT NU
 CREATE TABLE IF NOT EXISTS v17_ai_events (session TEXT NOT NULL, seq BIGSERIAL PRIMARY KEY, id TEXT NOT NULL, event JSONB NOT NULL, at_kst TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS v17_ai_analyses (session TEXT NOT NULL, snapshot_sha TEXT NOT NULL, before_sha TEXT NOT NULL, after_sha TEXT NOT NULL, policy_sha TEXT NOT NULL, raw TEXT NOT NULL, official JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY(session,snapshot_sha,before_sha));
 CREATE INDEX IF NOT EXISTS v17_ai_analyses_after ON v17_ai_analyses (session,snapshot_sha,after_sha);
+CREATE TABLE IF NOT EXISTS v17_ai_reset_archives (
+ reset_id TEXT PRIMARY KEY,
+ session TEXT NOT NULL,
+ before_ledger_sha TEXT NOT NULL,
+ signals JSONB NOT NULL,
+ events JSONB NOT NULL,
+ analyses JSONB NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 `;
 const json=(res,code,payload,headers={})=>{res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff',...headers});res.end(JSON.stringify(payload));};
 const responseError=(res,code,m)=>json(res,code,{error:String(m)});
@@ -151,6 +160,46 @@ async function publishAnalysis(body){
   await client.query('COMMIT');return {status:'OFFICIAL_STORED',officialDecision:official,sameState:true};
  }catch(e){try{await client.query('ROLLBACK');}catch{}throw e;}finally{client.release();}
 }
+// Administrative one-time full reset of the default official ledger only.
+// Preserve an immutable database backup before deleting live signals, events and
+// snapshot analyses, so prior snapshots cannot rehydrate the old state.
+export async function resetOfficialLedger(args={}) {
+ const session=sessionId(args.session);
+ if(session!=='OFFICIAL_V17')throw Error('RESET_DEFAULT_OFFICIAL_SESSION_ONLY');
+ if(args.kind!=='V17_RESET_ALL_OFFICIAL')throw Error('RESET_KIND_REQUIRED');
+ if(args.confirmation!=='RESET_ALL_OFFICIAL_V17_2026_11_13')throw Error('RESET_EXPLICIT_CONFIRMATION_REQUIRED');
+ if(!/^[0-9a-f]{64}$/.test(args.expectedLedgerSha256||''))throw Error('RESET_EXPECTED_LEDGER_SHA_REQUIRED');
+ const db=await database(),client=await db.connect();
+ try {
+  await client.query('BEGIN');
+  await client.query('INSERT INTO v17_ai_sessions(name) VALUES($1) ON CONFLICT DO NOTHING',[session]);
+  await client.query('SELECT name FROM v17_ai_sessions WHERE name=$1 FOR UPDATE',[session]);
+  const ledger=await readLedger(client,session);
+  const before=ledgerHash(ledger);
+  if(before!==args.expectedLedgerSha256)throw Error('RESET_LEDGER_CHANGED_ABORT');
+  const backup=await client.query(String.raw`SELECT
+   (SELECT COALESCE(jsonb_agg(to_jsonb(s) ORDER BY s.id),'[]'::jsonb) FROM v17_ai_signals s WHERE s.session=$1) AS signals,
+   (SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY e.seq),'[]'::jsonb) FROM v17_ai_events e WHERE e.session=$1) AS events,
+   (SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY a.created_at),'[]'::jsonb) FROM v17_ai_analyses a WHERE a.session=$1) AS analyses`,[session]);
+  const copy=backup.rows[0];
+  const resetId='V17_RESET_20261113_'+before.slice(0,16);
+  await client.query('INSERT INTO v17_ai_reset_archives(reset_id,session,before_ledger_sha,signals,events,analyses) VALUES($1,$2,$3,$4,$5,$6)',
+   [resetId,session,before,JSON.stringify(copy.signals),JSON.stringify(copy.events),JSON.stringify(copy.analyses)]);
+  const analyses=await client.query('DELETE FROM v17_ai_analyses WHERE session=$1',[session]);
+  const events=await client.query('DELETE FROM v17_ai_events WHERE session=$1',[session]);
+  const signals=await client.query('DELETE FROM v17_ai_signals WHERE session=$1',[session]);
+  const after=await readLedger(client,session);
+  const remain=await client.query(String.raw`SELECT
+   (SELECT COUNT(*)::integer FROM v17_ai_signals WHERE session=$1) AS signals,
+   (SELECT COUNT(*)::integer FROM v17_ai_events WHERE session=$1) AS events,
+   (SELECT COUNT(*)::integer FROM v17_ai_analyses WHERE session=$1) AS analyses`,[session]);
+  if(after.length||Object.values(remain.rows[0]).some(x=>x!==0))throw Error('RESET_VERIFICATION_NONEMPTY_ROLLBACK');
+  await client.query('COMMIT');
+  return {status:'OFFICIAL_FULL_RESET',session,archiveId:resetId,archivedCounts:{signals:copy.signals.length,events:copy.events.length,analyses:copy.analyses.length},
+   deletedCounts:{signals:signals.rowCount,events:events.rowCount,analyses:analyses.rowCount},
+   beforeLedgerSha256:before,afterLedgerSha256:ledgerHash(after),remaining:remain.rows[0],sourcePolicySha256:OFFICIAL_POLICY.sha256};
+ }catch(e){try{await client.query('ROLLBACK')}catch{}throw e}finally{client.release()}
+}
 async function ledgerView(args){const session=sessionId(args.session||'OFFICIAL_V17'),db=await database(),ledger=await readLedger(db,session);return {session,policy:OFFICIAL_POLICY,ledgerSha256:ledgerHash(ledger),signals:ledger,events:(await db.query('SELECT id,event,at_kst FROM v17_ai_events WHERE session=$1 ORDER BY seq DESC LIMIT 500',[session])).rows};}
 // Read-only audit trail. The official signal/event ledger is never rewritten.
 async function decisionHistory(args={}){
@@ -192,10 +241,14 @@ async function mcp(req,res,principal){
   else if(n==='register_formal_btc_eth_signal'){
    // Backward-compatible path for existing installed ChatGPT plugins whose MCP tool list is cached.
    // Standalone signal creation remains forbidden: only a complete source-verified AI analysis may be published.
+   if(args.signal?.kind==='V17_RESET_ALL_OFFICIAL'){
+    result=await resetOfficialLedger({...args.signal,session:args.session||args.signal.session});
+   }else{
    if(args.signal?.kind!=='V17_OFFICIAL_SUBMISSION')throw Error('Standalone signal writing is forbidden. Supply signal.kind=V17_OFFICIAL_SUBMISSION with the complete V1.7 analysis envelope.');
    const payload={...args.signal,session:args.session||args.signal.session||'OFFICIAL_V17'};
    delete payload.kind;
    result=await publishAnalysis(payload);
+   }
   }
   else return json(res,200,{jsonrpc:'2.0',id,error:{code:-32601,message:'Unknown tool'}});
   return json(res,200,{jsonrpc:'2.0',id,result:{content:[{type:'text',text:JSON.stringify(result)}],isError:false}});
