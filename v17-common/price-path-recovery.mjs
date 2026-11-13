@@ -123,3 +123,45 @@ export async function recoverMarketGaps(raw,previousSnapshot,{fetcher=globalThis
  }));
  return result;
 }
+
+
+// Fetch full, closed minute bars only for symbols with live formal signals.
+// A missing 1m candle invalidates the whole recovery; no interpolation.
+export async function recoverActiveSignalWindows(raw,previousSnapshot,ledger,{
+ fetcher=globalThis.fetch,timeoutMs=2500,maxMinutes=1000,unverifiedOrigins={}
+}={}){
+ const m=rawMarketWindows(raw),result={BTC:{needed:false},ETH:{needed:false}};
+ await Promise.all(['BTC','ETH'].map(async symbol=>{
+  const active=ledger.filter(s=>s.symbol===symbol+'USDT'&&
+   ['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(s.status));
+  if(!active.length)return;
+  const prev=previousSnapshot?.[symbol==='BTC'?'btcTime':'ethTime'];
+  const candidate=[...(prev?[kstMs(prev)]:[])];
+  for(const signal of active){
+   const back=unverifiedOrigins[signal.id];
+   if(signal.status==='UNVERIFIED'&&back)candidate.push(kstMs(back));
+   if(!prev)candidate.push(kstMs(signal.verifiedUntil||signal.original?.issuedAt||m[symbol].pathStart));
+  }
+  const fromMs=Math.min(...candidate);
+  const atMs=kstMs(m[symbol].timestamp);
+  const untilMs=floorMinute(atMs)-60000; // Never treat a still-open candle as complete.
+  if(untilMs<floorMinute(fromMs)){
+   result[symbol]={needed:true,recovered:false,reason:'NO_CLOSED_1M_AFTER_PREVIOUS_OBSERVATION'};
+   return;
+  }
+  try{
+   const bars=await fetchBybitCandles({symbol,fromMs,toMs:untilMs,fetcher,timeoutMs,maxMinutes});
+   const rawGap=prev?Math.max(0,Math.round((kstMs(m[symbol].pathStart)-kstMs(prev))/1000)):0;
+   // Complete OHLC can disprove a crossing in a previously unobserved interval.
+   const bridgeCovered=Boolean(prev&&rawGap>60&&verifyCandleCoverage(bars,kstMs(prev),kstMs(m[symbol].pathStart)));
+   result[symbol]={needed:true,recovered:true,source:'BYBIT_LINEAR_PUBLIC_1M',
+    barCount:bars.length,coveredFrom:kstTime(bars[0].start),
+    coveredThrough:kstTime(bars[bars.length-1].start),
+    coveredFromMs:bars[0].start,coveredThroughMs:bars[bars.length-1].start,
+    bridgeCovered,rawGapSeconds:rawGap,bars};
+  }catch(e){
+   result[symbol]={needed:true,recovered:false,reason:String(e.message||e).slice(0,180)};
+  }
+ }));
+ return result;
+}
