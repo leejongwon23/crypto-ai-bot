@@ -83,12 +83,15 @@ async function carriedUncertainty(db,session,ledger){
  const ids=new Set(ledger.filter(s=>['PENDING','NEW_ENTRY','ENTERED','TP1','TP2'].includes(s.status)).map(s=>s.id));
  const result={BTC:[],ETH:[]};
  if(!ids.size)return result;
+ // Verified gap-resolution events supersede older historical warnings.
+ const recent=await db.query("SELECT DISTINCT ON(id) id,event FROM v17_ai_events WHERE session=$1 AND ((event->>'kind')='UNVERIFIED' OR event ? 'gapResolutionEvidence') ORDER BY id,seq DESC",[session]);
+ const resolved=new Set(recent.rows.filter(x=>typeof x.event?.gapResolutionEvidence==='string'&&x.event.gapResolutionEvidence.length>0).map(x=>x.id));
  const r=await db.query("SELECT official->'evidenceQuality' AS evidence FROM v17_ai_analyses WHERE session=$1 AND official->'evidenceQuality' IS NOT NULL ORDER BY created_at DESC LIMIT 1000",[session]);
  for(const row of r.rows){
   for(const sym of ['BTC','ETH']){
    const q=row.evidence?.perSymbol?.[sym]||{};
    for(const id of [...(q.couldNotVerifySignals||[]),...(q.ambiguousSignals||[]),...(q.carriedUncertaintyIds||[])]){
-    if(ids.has(id)&&!result[sym].includes(id))result[sym].push(id);
+    if(ids.has(id)&&!resolved.has(id)&&!result[sym].includes(id))result[sym].push(id);
    }
   }
  }
