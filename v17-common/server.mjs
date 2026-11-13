@@ -100,10 +100,15 @@ async function beginAnalysis(body){
  // Store the original bytes before returning a submission reference. An AI
  // publisher must never need to reconstruct this original input again.
  await storePreparedSnapshot(db,session,snapshot.sha256,raw);
- const ledger=await readLedger(db,session);
- const saved=await selectOfficial(db,session,snapshot.sha256,ledgerHash(ledger));
- const previousSnapshot=await latestOfficialSnapshot(db,session);
- const carry=await carriedUncertainty(db,session,ledger);
+ // Read-only queries are independent. Execute them concurrently without
+ // changing ledger contents, event chronology, or the V1.7 audit contract.
+ const [ledger,previousSnapshot]=await Promise.all([
+  readLedger(db,session),latestOfficialSnapshot(db,session)
+ ]);
+ const [saved,carry]=await Promise.all([
+  selectOfficial(db,session,snapshot.sha256,ledgerHash(ledger)),
+  carriedUncertainty(db,session,ledger)
+ ]);
  const full=prepare({raw,session,ledger,saved,previousSnapshot,carriedUncertaintyBySymbol:carry});
  // Transport-only optimization. By default this is the exact previous response.
  // Only omit policy text if the caller supplies the matching SHA of a prompt
