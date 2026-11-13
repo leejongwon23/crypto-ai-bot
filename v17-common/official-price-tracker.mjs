@@ -16,7 +16,7 @@ function eventEvidence(s,proof,change){
  * under a session lock, validate with checkEvent(), and store them append-only.
  * A quote-level historic fill is never synthesized from minute bars.
  */
-export function planVerifiedMechanicalEvents({ledger,history,currentAtBySymbol,unverifiedOrigins={}}){
+export function planVerifiedMechanicalEvents({ledger,history,currentAtBySymbol,unverifiedOrigins={},auditStarts={}}){
  const result={events:[],notes:[],proofs:{}};
  const market=['BTC','ETH'];
  for(const sym of market){
@@ -32,7 +32,7 @@ export function planVerifiedMechanicalEvents({ledger,history,currentAtBySymbol,u
   for(const signal of signals){
    const state=initial(signal);
    const historyFrom=signal.status==='UNVERIFIED'?
-    unverifiedOrigins[signal.id]:signal.verifiedUntil||signal.original?.issuedAt;
+    unverifiedOrigins[signal.id]:auditStarts[signal.id]||signal.verifiedUntil||signal.original?.issuedAt;
    if(!has(historyFrom)||!ACTIVE.has(state)){
     result.notes.push(signal.id+':PRIOR_STATE_OR_ORIGIN_UNKNOWN');continue;
    }
