@@ -182,21 +182,29 @@ async function beginAnalysis(body){
  const startMs=Date.now();
  const raw=body.raw,session=sessionId(body.session||'OFFICIAL_V17');
  const snapshot=validateSnapshot(raw);const db=await database();
- // Store the original bytes before returning a submission reference. An AI
- // publisher must never need to reconstruct this original input again.
+ // The pasted source is permanent and byte-exact. Exchange OHLC is supplementary proof.
  await storePreparedSnapshot(db,session,snapshot.sha256,raw);
+ const oldOfficial=await latestOfficialSnapshot(db,session);
+ const outOfOrder=Boolean(oldOfficial&&(snapshot.btcTime<oldOfficial.btcTime||snapshot.ethTime<oldOfficial.ethTime));
+ let tracked={proof:{},events:[],notes:outOfOrder?['OUT_OF_ORDER_NO_AUTO_MUTATION']:[],backendRecoveryMs:0};
+ if(!outOfOrder){
+  try{tracked=await reconcileVerifiedPricePath(db,session,raw,snapshot,oldOfficial);}
+  catch(e){tracked={proof:{},events:[],notes:['RECOVERY_ERROR_NO_LEDGER_MUTATION:'+String(e.message||e).slice(0,160)],backendRecoveryMs:0};}
+ }
  const ledger=await readLedger(db,session);
  const saved=await selectOfficial(db,session,snapshot.sha256,ledgerHash(ledger));
  const previousSnapshot=await latestOfficialSnapshot(db,session);
  const carry=await carriedUncertainty(db,session,ledger);
- const full=prepare({raw,session,ledger,saved,previousSnapshot,carriedUncertaintyBySymbol:carry});
- // Transport-only optimization. By default this is the exact previous response.
- // Only omit policy text if the caller supplies the matching SHA of a prompt
- // already read verbatim in this same conversation; hash mismatch falls back.
- const delivered={...applyCachedPolicyResponse(full,body.cachedPolicySha256),preparedRaw:{persisted:true,snapshotSha256:snapshot.sha256,submitWithoutRaw:true}};
+ await storeVerifiedGapProof(db,session,snapshot.sha256,tracked.proof);
+ const full=prepare({raw,session,ledger,saved,previousSnapshot,carriedUncertaintyBySymbol:carry,verifiedGapRecoveryBySymbol:tracked.proof});
+ const delivered={...applyCachedPolicyResponse(full,body.cachedPolicySha256),
+  preparedRaw:{persisted:true,snapshotSha256:snapshot.sha256,submitWithoutRaw:true},
+  automaticTracking:{events:tracked.events.map(e=>({id:e.id,kind:e.kind,at:e.at,source:e.source||'VERIFIED_GAP_RECOVERY'})),
+   sourceBySymbol:Object.fromEntries(['BTC','ETH'].map(sym=>[sym,{status:tracked.proof[sym]?.status||'NOT_NEEDED',coveredThrough:tracked.proof[sym]?.coveredThrough,reason:tracked.proof[sym]?.reason}])),
+   recoveryMs:tracked.backendRecoveryMs,notes:tracked.notes.slice(0,8)}};
  if(body.debugTimings!==true)return delivered;
  return {...delivered,serverTimings:{
-  backendMs:Date.now()-startMs,
+  backendMs:Date.now()-startMs,recoveryMs:tracked.backendRecoveryMs,
   fullBytes:Buffer.byteLength(JSON.stringify(full),'utf8'),
   deliveredBytes:Buffer.byteLength(JSON.stringify(delivered),'utf8'),
   policyTextOmitted:delivered.policyCache?.used===true,
@@ -220,7 +228,8 @@ async function publishAnalysis(body){
   if(prior){await client.query('COMMIT');return {status:'OFFICIAL_REPLAY',officialDecision:prior,sameState:true,notReanalyzed:true};}
   const previousSnapshot=await latestOfficialSnapshot(client,session);
   const carry=await carriedUncertainty(client,session,ledger);
-  const verified=validateOfficialSubmission({...body,raw},ledger,previousSnapshot,carry);
+  const verifiedGapRecoveryBySymbol=await readVerifiedGapProof(client,session,shot.sha256);
+  const verified=validateOfficialSubmission({...body,raw},ledger,previousSnapshot,carry,verifiedGapRecoveryBySymbol);
   const newSignals=verified.newSignals,events=verified.events;
   for(const s of newSignals){
    await client.query('INSERT INTO v17_ai_signals(session,id,symbol,original,status,verified_until,plan_version) VALUES($1,$2,$3,$4,$5,$6,0)',[session,s.id,s.symbol,JSON.stringify(s),s.status,s.issuedAt]);
