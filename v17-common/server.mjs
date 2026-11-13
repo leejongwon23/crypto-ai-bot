@@ -13,11 +13,11 @@ const MAX_BODY=600000;
 const COMPACT_USER_VIEW=Object.freeze({
  version:'SIGNAL_TABLE_V1',
  appliesTo:'USER_VISIBLE_CHAT_REPLY_ONLY',
- columns:['종목','방향','현재가','진입가(구간)','손절','TP1','TP2','TP3','손익비(TP2)','상태'],
+ columns:['종목','방향·상태','현재가','진입가','손절','TP1/TP2/TP3','손익비(TP2)'],
  instructions:'답변은 진입 시그널 표 한 개와 BTC 코멘트 한 문장, ETH 코멘트 한 문장만 표시한다. 내부 분석 과정, A-E 비교, 상세 검수표, 내부 지표 및 로그는 표시하지 않는다. 정식 신규/기존 신호의 실제 상태와 가격 시각을 표에 표시한다. 공식 미발행 후보는 정식 신호로 표시하지 않고, 적격한 신호가 없으면 신규 보류로 표시한다. 가격 경로 공백·미확인 진입·저장 실패 등 의사결정에 필요한 제한사항은 상태 열이나 추가 한 줄로만 표시한다.',
  internalAudit:'출력만 간소화한다. V1.7의 네 방향 독립 분석, A-E 진입 대안, 정식 원본 신호, 자동전환, 가격경로, TP/SL, 전체 검수, analysis.reportMarkdown의 공식 저장 내용과 검증은 반드시 그대로 수행한다. NEEDS_AI_ANALYSIS에서 정식 발행 단계를 생략하지 않는다. 실패를 완료로 표기하지 않는다.',
 });
-const COMPACT_TOOL_INSTRUCTION=' USER-VISIBLE OUTPUT RULE: AFTER ALL FULL V1.7 INTERNAL CHECKS AND OFFICIAL PUBLICATION ATTEMPT, display ONLY one Korean entry-signal markdown table with columns symbol, direction, last price, entry, stop, TP1, TP2, TP3, TP2 RR, FORMAL state, followed by one concise BTC comment and one concise ETH comment. Do not print internal A-E matrices, audit details or raw data. If no formally approved new signal, show 신규 보류 with empty price cells, not hypothetical signals. An unregistered candidate must NEVER appear as formal. Crucial historical uncertainty or publication failure may be disclosed in one additional short note. Original signal ledger, complete analysis.reportMarkdown and all original V1.7 checks stay unchanged.';
+const COMPACT_TOOL_INSTRUCTION=' USER-VISIBLE OUTPUT RULE: AFTER ALL FULL V1.7 INTERNAL CHECKS AND OFFICIAL PUBLICATION ATTEMPT, display ONLY one Korean entry-signal markdown table with exactly 7 mobile-friendly columns: symbol, direction+FORMAL state, last price, entry, stop, TP1/TP2/TP3 in ONE cell, TP2 RR, followed by one concise BTC comment and one concise ETH comment. Do not print internal A-E matrices, audit details or raw data. If no formally approved new signal, show 신규 보류 with empty price cells, not hypothetical signals. An unregistered candidate must NEVER appear as formal. Crucial historical uncertainty or publication failure may be disclosed in one additional short note. Original signal ledger, complete analysis.reportMarkdown and all original V1.7 checks stay unchanged.';
 let pool;let oauth;
 const sql=`
 CREATE TABLE IF NOT EXISTS v17_ai_sessions (name TEXT PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
