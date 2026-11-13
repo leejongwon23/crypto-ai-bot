@@ -146,13 +146,21 @@ async function reconcileVerifiedPricePath(db,session,raw,snapshot,previousSnapsh
   if(origin&&(!base[field]||origin<base[field]))base[field]=origin;
  }
  const prepared=assemblePreparedChains(preparedRaws,base,raw);
- let planned=planPreparedEvents({ledger,history:prepared,currentAtBySymbol:at,unverifiedOrigins:origins});
+ // A prior stored official analysis already checked the path through its own timestamp.
+ // Do not rescan earlier PENDING history or omit recent entry crosses.
+ const auditStarts=Object.fromEntries(ledger.map(sig=>{
+  const sym=sig.symbol==='BTCUSDT'?'BTC':'ETH';
+  const previous=previousSnapshot?.[sym==='BTC'?'btcTime':'ethTime'];
+  const from=sig.verifiedUntil||sig.original?.issuedAt;
+  return [sig.id,previous&&from?(previous>from?previous:from):previous||from];
+ }));
+ let planned=planPreparedEvents({ledger,history:prepared,currentAtBySymbol:at,unverifiedOrigins:origins,auditStarts});
  const needsRemote=ledger.some(s=>['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(s.status)&&
   !prepared[s.symbol==='BTCUSDT'?'BTC':'ETH']?.recovered);
  let remote={BTC:{needed:false},ETH:{needed:false}};
  if(needsRemote){
   remote=await recoverActiveSignalWindows(raw,previousSnapshot,ledger,{unverifiedOrigins:origins});
-  const remotePlan=planVerifiedMechanicalEvents({ledger,history:remote,currentAtBySymbol:at,unverifiedOrigins:origins});
+  const remotePlan=planVerifiedMechanicalEvents({ledger,history:remote,currentAtBySymbol:at,unverifiedOrigins:origins,auditStarts});
   const preparedSymbols=new Set(['BTC','ETH'].filter(sym=>prepared[sym]?.recovered));
   for(const e of remotePlan.events){
    const row=ledger.find(x=>x.id===e.id);
