@@ -63,7 +63,7 @@ export function assessSnapshotEvidence(raw,{previousSnapshot=null,ledger=[],carr
   const gapDetected=Boolean(gapSeconds!==null&&gapSeconds>60);
   // A price-path gap is resolved only by independently verified, complete exchange 1m evidence.
   const recovery=verifiedGapRecoveryBySymbol[symbol];
-  const gapRecovered=Boolean(gapDetected&&recovery?.recovered===true&&recovery.source==='BYBIT_LINEAR_PUBLIC_1M');
+  const gapRecovered=Boolean(gapDetected&&recovery?.recovered===true&&['BYBIT_LINEAR_PUBLIC_1M','USER_PREPARED_SNAPSHOT_PATH_CHAIN'].includes(recovery.source));
   const gap=gapDetected&&!gapRecovered;
   // The interval extremes are not a tick-by-tick trace. They can prove
   // a post-issuance zone crossing in a continuous, nonconflicting path,
