@@ -5,6 +5,7 @@ import {applyCachedPolicyResponse} from './cached-policy-response.mjs';
 import {storePreparedSnapshot,recoverOfficialSubmissionRaw} from './prepared-snapshot.mjs';
 import {rawMarketWindows,recoverActiveSignalWindows} from './price-path-recovery.mjs';
 import {planVerifiedMechanicalEvents,validateRecoveredProof} from './official-price-tracker.mjs';
+import {assemblePreparedChains,planPreparedEvents} from './prepared-path-chain.mjs';
 import {OFFICIAL_POLICY,VERSION,prepare,sourcePolicy,validateSnapshot,validateOfficialSubmission,ledgerHash,sessionId,digest,checkEvent} from './v17-core.mjs';
 
 const PORT=Number(process.env.PORT||3000);
@@ -128,16 +129,50 @@ async function reconcileVerifiedPricePath(db,session,raw,snapshot,previousSnapsh
  if(!ledger.some(s=>['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(s.status)))
   return {proof:{},events:[],notes:['NO_ACTIVE_SIGNAL'],backendRecoveryMs:0};
  const begin=Date.now(),origins=await unverifiedOrigins(db,session,ledger);
- const history=await recoverActiveSignalWindows(raw,previousSnapshot,ledger,{unverifiedOrigins:origins});
- const planned=planVerifiedMechanicalEvents({ledger,history,currentAtBySymbol:at,unverifiedOrigins:origins});
- const verified=validateRecoveredProof(raw,previousSnapshot,planned.proofs);
+ const needIntermediate=ledger.some(x=>x.status==='UNVERIFIED')||
+  ['BTC','ETH'].some(sym=>{
+   const prev=previousSnapshot?.[sym==='BTC'?'btcTime':'ethTime'];
+   const path=rawMarketWindows(raw)[sym].pathStart;
+   return prev&&(Date.parse(path.replace(' ','T')+'+09:00')-Date.parse(prev.replace(' ','T')+'+09:00')>60000);
+  });
+ let preparedRaws=[];
+ if(needIntermediate){
+  const q=await db.query("SELECT raw FROM v17_ai_prepared_snapshots WHERE session=$1 AND created_at>NOW()-INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 160",[session]);
+  preparedRaws=q.rows.map(x=>x.raw);
+ }
+ const base={...previousSnapshot};
+ for(const s of ledger.filter(x=>x.status==='UNVERIFIED')){
+  const origin=origins[s.id],field=s.symbol==='BTCUSDT'?'btcTime':'ethTime';
+  if(origin&&(!base[field]||origin<base[field]))base[field]=origin;
+ }
+ const prepared=assemblePreparedChains(preparedRaws,base,raw);
+ let planned=planPreparedEvents({ledger,history:prepared,currentAtBySymbol:at,unverifiedOrigins:origins});
+ const needsRemote=ledger.some(s=>['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(s.status)&&
+  !prepared[s.symbol==='BTCUSDT'?'BTC':'ETH']?.recovered);
+ let remote={BTC:{needed:false},ETH:{needed:false}};
+ if(needsRemote){
+  remote=await recoverActiveSignalWindows(raw,previousSnapshot,ledger,{unverifiedOrigins:origins});
+  const remotePlan=planVerifiedMechanicalEvents({ledger,history:remote,currentAtBySymbol:at,unverifiedOrigins:origins});
+  const preparedSymbols=new Set(['BTC','ETH'].filter(sym=>prepared[sym]?.recovered));
+  for(const e of remotePlan.events){
+   const row=ledger.find(x=>x.id===e.id);
+   if(row&&!preparedSymbols.has(row.symbol==='BTCUSDT'?'BTC':'ETH'))planned.events.push(e);
+  }
+  planned.events.sort((x,y)=>Date.parse(x.at.replace(' ','T')+'+09:00')-Date.parse(y.at.replace(' ','T')+'+09:00'));
+  planned.notes.push(...remotePlan.notes);
+ }
+ const sourceProofs=Object.fromEntries(['BTC','ETH'].map(sym=>[sym,prepared[sym]?.recovered?planned.proofs[sym]:{
+  ...(remote[sym]?.recovered?{recovered:true,source:remote[sym].source,bridgeCovered:remote[sym].bridgeCovered,
+    coveredFrom:remote[sym].coveredFrom,coveredThrough:remote[sym].coveredThrough,barCount:remote[sym].barCount}:{recovered:false})
+ }]));
+ const verified=validateRecoveredProof(raw,previousSnapshot,sourceProofs);
  const auditSummary=Object.fromEntries(['BTC','ETH'].map(sym=>[sym,{
   ...verified[sym],
-  needed:history[sym]?.needed===true,
-  status:history[sym]?.recovered?'VERIFIED_SOURCE_1M':history[sym]?.needed?'RECOVERY_UNAVAILABLE':'NO_ACTIVE_SIGNAL',
-  reason:history[sym]?.recovered?undefined:history[sym]?.reason,
-  coveredThrough:history[sym]?.coveredThrough,
-  barCount:history[sym]?.barCount,
+  needed:ledger.some(s=>s.symbol===sym+'USDT'&&['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(s.status)),
+  status:sourceProofs[sym]?.recovered?(sourceProofs[sym].source==='USER_PREPARED_SNAPSHOT_PATH_CHAIN'?'VERIFIED_PREPARED_CHAIN':'VERIFIED_SOURCE_1M'):'RECOVERY_UNAVAILABLE',
+  reason:sourceProofs[sym]?.recovered?undefined:remote[sym]?.reason||'NO_CONTIGUOUS_PREPARED_PATH',
+  coveredThrough:sourceProofs[sym]?.coveredThrough,
+  barCount:sourceProofs[sym]?.barCount,
  }]));
  // No DB mutation on an unavailable, incomplete, or ambiguous source.
  if(!planned.events.length){
