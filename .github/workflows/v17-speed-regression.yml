@@ -27,5 +27,13 @@ jobs:
           node --check cached-policy-response.mjs
           node --check cached-policy-response.test.mjs
           node --check server-fast-integration.test.mjs
+          node --check price-path-recovery.mjs
+          node --check official-price-tracker.mjs
+          node --check price-path-recovery.test.mjs
+          node --check official-price-tracker.test.mjs
       - name: Run all V1.7 existing and performance tests
         run: npm test
+      - name: Read-only public Bybit 1m connectivity probe (diagnostic)
+        run: |
+          node --input-type=module -e "const ac=new AbortController(); const t=setTimeout(()=>ac.abort(),5000); try{const u=new URL('https://api.bybit.com/v5/market/kline');for(const [k,v] of Object.entries({category:'linear',symbol:'ETHUSDT',interval:'1',limit:'2'}))u.searchParams.set(k,v);const r=await fetch(u,{signal:ac.signal});const x=await r.json().catch(()=>({}));console.log('BYBIT_PUBLIC_PROBE HTTP',r.status,'retCode',x.retCode,'count',x.result?.list?.length??0)}catch(e){console.log('BYBIT_PUBLIC_PROBE ERROR',String(e.message||e))}finally{clearTimeout(t)}"
+
