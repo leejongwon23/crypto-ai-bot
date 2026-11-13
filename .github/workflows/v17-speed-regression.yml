@@ -1,0 +1,31 @@
+name: V1.7 speed optimization regression
+on:
+  push:
+    branches: [v17-performance-opt-20261113]
+  pull_request:
+    branches: [v17-canonical-engine]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      V17_NO_LISTEN: '1'
+    defaults:
+      run:
+        working-directory: v17-common
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install service dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Syntax check of all edited modules
+        run: |
+          node --check server.mjs
+          node --check cached-policy-response.mjs
+          node --check cached-policy-response.test.mjs
+          node --check server-fast-integration.test.mjs
+      - name: Run all V1.7 existing and performance tests
+        run: npm test
