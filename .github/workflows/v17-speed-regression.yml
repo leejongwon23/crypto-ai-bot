@@ -9,6 +9,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      V17_NO_LISTEN: '1'
     defaults:
       run:
         working-directory: v17-common
