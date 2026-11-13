@@ -2,6 +2,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import {makeOAuth} from './oauth.mjs';
 import {applyCachedPolicyResponse} from './cached-policy-response.mjs';
+import {buildSignalView,SIGNAL_TABLE_OUTPUT_RULE} from './signal-table-view.mjs';
 import {storePreparedSnapshot,recoverOfficialSubmissionRaw} from './prepared-snapshot.mjs';
 import {rawMarketWindows,recoverActiveSignalWindows} from './price-path-recovery.mjs';
 import {planVerifiedMechanicalEvents,validateRecoveredProof} from './official-price-tracker.mjs';
@@ -245,6 +246,8 @@ async function beginAnalysis(body){
  await storeVerifiedGapProof(db,session,snapshot.sha256,tracked.proof);
  const full=prepare({raw,session,ledger,saved,previousSnapshot,carriedUncertaintyBySymbol:carry,verifiedGapRecoveryBySymbol:tracked.proof});
  const delivered={...applyCachedPolicyResponse(full,body.cachedPolicySha256),
+  signalView:buildSignalView({ledger,snapshot,changes:tracked.events}),
+  userOutputRule:SIGNAL_TABLE_OUTPUT_RULE,
   preparedRaw:{persisted:true,snapshotSha256:snapshot.sha256,submitWithoutRaw:true},
   automaticTracking:{events:tracked.events.map(e=>({id:e.id,kind:e.kind,at:e.at,source:e.source||'VERIFIED_GAP_RECOVERY'})),
    sourceBySymbol:Object.fromEntries(['BTC','ETH'].map(sym=>[sym,{status:tracked.proof[sym]?.status||'NOT_NEEDED',coveredThrough:tracked.proof[sym]?.coveredThrough,reason:tracked.proof[sym]?.reason}])),
@@ -272,7 +275,7 @@ async function publishAnalysis(body){
   const before=ledgerHash(ledger);
   // At most one official result per snapshot and current ledger state.
   const prior=await selectOfficial(client,session,shot.sha256,before);
-  if(prior){await client.query('COMMIT');return {status:'OFFICIAL_REPLAY',officialDecision:prior,sameState:true,notReanalyzed:true};}
+  if(prior){await client.query('COMMIT');return {status:'OFFICIAL_REPLAY',officialDecision:{...prior,signalView:prior.signalView||buildSignalView({ledger,snapshot:shot}),userOutputRule:SIGNAL_TABLE_OUTPUT_RULE},sameState:true,notReanalyzed:true};}
   const previousSnapshot=await latestOfficialSnapshot(client,session);
   const carry=await carriedUncertainty(client,session,ledger);
   const verifiedGapRecoveryBySymbol=await readVerifiedGapProof(client,session,shot.sha256);
@@ -287,7 +290,9 @@ async function publishAnalysis(body){
    if(event.kind==='REVISION')await client.query('UPDATE v17_ai_signals SET plan_version=plan_version+1,verified_until=$3 WHERE session=$1 AND id=$2',[session,event.id,event.at]);
    else await client.query('UPDATE v17_ai_signals SET status=$3,verified_until=$4 WHERE session=$1 AND id=$2',[session,event.id,event.kind,event.at]);
   }
-  const after=ledgerHash(await readLedger(client,session));
+  const afterLedger=await readLedger(client,session);
+  const after=ledgerHash(afterLedger);
+  const signalView=buildSignalView({ledger:afterLedger,snapshot:shot,changes:[...newSignals,...events]});
   const official={
    engine:VERSION,
    status:'OFFICIAL_STORED',
@@ -301,6 +306,8 @@ async function publishAnalysis(body){
    afterLedgerSha256:after,
    decisionKey:verified.decisionKey,
    reportMarkdown:verified.analysis.reportMarkdown,
+   signalView,
+   userOutputRule:SIGNAL_TABLE_OUTPUT_RULE,
    directions:verified.analysis.directions,
    clauses:verified.analysis.clauses,
    coupling:verified.analysis.coupling,
@@ -356,7 +363,11 @@ export async function resetOfficialLedger(args={}) {
    beforeLedgerSha256:before,afterLedgerSha256:ledgerHash(after),remaining:remain.rows[0],sourcePolicySha256:OFFICIAL_POLICY.sha256};
  }catch(e){try{await client.query('ROLLBACK')}catch{}throw e}finally{client.release()}
 }
-async function ledgerView(args){const session=sessionId(args.session||'OFFICIAL_V17'),db=await database(),ledger=await readLedger(db,session);return {session,policy:OFFICIAL_POLICY,ledgerSha256:ledgerHash(ledger),signals:ledger,events:(await db.query('SELECT id,event,at_kst FROM v17_ai_events WHERE session=$1 ORDER BY seq DESC LIMIT 500',[session])).rows};}
+async function ledgerView(args){const session=sessionId(args.session||'OFFICIAL_V17'),db=await database();
+ const [ledger,snapshot]=await Promise.all([readLedger(db,session),latestOfficialSnapshot(db,session)]);
+ return {session,policy:OFFICIAL_POLICY,ledgerSha256:ledgerHash(ledger),signals:ledger,
+  signalView:buildSignalView({ledger,snapshot}),userOutputRule:SIGNAL_TABLE_OUTPUT_RULE,
+  events:(await db.query('SELECT id,event,at_kst FROM v17_ai_events WHERE session=$1 ORDER BY seq DESC LIMIT 500',[session])).rows};}
 // Read-only audit trail. The official signal/event ledger is never rewritten.
 async function decisionHistory(args={}){
  const session=sessionId(args.session||'OFFICIAL_V17'),db=await database();
@@ -376,6 +387,14 @@ const tools=[
  {name:'read_official_v17_decision_history',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Read-only chronological OFFICIAL_V17 AI decision history for missed-opportunity review. Never convert hypothetical candidates to historical trades or alter immutable signal outcomes.',inputSchema:{type:'object',properties:{session:{type:'string'},limit:{type:'integer',minimum:1,maximum:100},includeDirections:{type:'boolean'}},required:[]}},
  {name:'register_formal_btc_eth_signal',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'COMPATIBILITY path for installed plugins: call run_official_btc_eth_snapshot ONCE with exact user raw. Then submit signal={kind:V17_OFFICIAL_SUBMISSION,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis} WITHOUT raw; server recovers the identical prepared raw securely by session plus SHA. Older raw submissions remain supported. Standalone signal writing is forbidden. Include autoSwitchAudit for live pending entries.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
 ];
+// This is a user-facing output preference only; core V1.7 analysis,
+// validator, safety audits, and immutable signal state are unchanged.
+for(const t of tools){
+ if(['run_official_btc_eth_snapshot','publish_official_v17_analysis','register_formal_btc_eth_signal','read_official_btc_eth_ledger'].includes(t.name)){
+  const display='USER DISPLAY CONTRACT FOR ALL CHATS: after official analysis is stored, show ONLY officialDecision.signalView.markdown (or the top-level signalView.markdown). It includes every nonterminal BTC/ETH original signal including UNVERIFIED, entry-relative stop/TP1-3 % and no unconfirmed PnL. Append signalView.changeNotices ONLY on an actual auto-entry, cancellation, addition, redesign, switch, or exit. Do not show commentary, market narrative, checks, or reportMarkdown in the final answer. Perform all original V1.7 calculations and validations internally before rendering the table. ';
+  t.description=display+t.description.replace('If OFFICIAL_REPLAY show officialDecision.reportMarkdown verbatim.','If OFFICIAL_REPLAY show officialDecision.signalView.markdown only.');
+ }
+}
 async function mcp(req,res,principal){
  const b=await readJSON(req),id=b.id;
  if(b.method==='notifications/initialized'){res.writeHead(202);return res.end();}
