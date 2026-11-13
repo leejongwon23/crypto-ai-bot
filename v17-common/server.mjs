@@ -164,8 +164,8 @@ async function publishAnalysis(body){
 // Preserve an immutable database backup before deleting live signals, events and
 // snapshot analyses, so prior snapshots cannot rehydrate the old state.
 export async function resetOfficialLedger(args={}) {
+ if(args.session!=='OFFICIAL_V17')throw Error('RESET_DEFAULT_OFFICIAL_SESSION_ONLY');
  const session=sessionId(args.session);
- if(session!=='OFFICIAL_V17')throw Error('RESET_DEFAULT_OFFICIAL_SESSION_ONLY');
  if(args.kind!=='V17_RESET_ALL_OFFICIAL')throw Error('RESET_KIND_REQUIRED');
  if(args.confirmation!=='RESET_ALL_OFFICIAL_V17_2026_11_13')throw Error('RESET_EXPLICIT_CONFIRMATION_REQUIRED');
  if(!/^[0-9a-f]{64}$/.test(args.expectedLedgerSha256||''))throw Error('RESET_EXPECTED_LEDGER_SHA_REQUIRED');
