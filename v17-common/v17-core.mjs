@@ -128,6 +128,41 @@ export function assessSnapshotEvidence(raw,{previousSnapshot=null,ledger=[],carr
 }
 export function ledgerHash(rows){return digest(rows.map(r=>({id:r.id,symbol:r.symbol,original:r.original,status:r.status,verifiedUntil:r.verifiedUntil||null,version:r.version??0,...(r.effectivePlan?{effectivePlan:r.effectivePlan,planEffectiveAt:r.planEffectiveAt||null}:{})})).sort((a,b)=>a.id.localeCompare(b.id)));}
 export const sourcePolicy=()=>({ ...OFFICIAL_POLICY,text:POLICY_TEXT });
+// Machine-readable publication contract for both current and cached MCP clients.
+// This is descriptive metadata only. It must never generate a trade or bypass
+// validateOfficialSubmission(), assessSnapshotEvidence(), or auto-switch audits.
+export function submissionContract(){
+ const byDirection=Object.fromEntries(DIRECTIONS.map(name=>[name,{
+  marketEvidence:null,counterEvidence:null,
+  alternatives:Object.fromEntries(ALTERNATIVES.map(k=>[k,{judgement:null,evidence:null}]))
+ }]));
+ const checks=Object.fromEntries(STEPS.map(n=>[String(n),{status:null,evidence:null}]));
+ const clauses=Object.fromEntries(CLAUSES.map(k=>[k,{status:null,evidence:null}]));
+ return {
+  version:'V17_STRUCTURED_SUBMISSION_CONTRACT_V1',
+  compatTool:'register_formal_btc_eth_signal accepts signal={kind:"V17_OFFICIAL_SUBMISSION",raw,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis}; newer clients use publish_official_v17_analysis.',
+  requiredEnvelope:['raw','session','policySha256','snapshotSha256','beforeLedgerSha256','decisionKey','analysis'],
+  snapshotIntegrity:'Pass the EXACT identical raw string submitted to run_official_btc_eth_snapshot, including spacing, ordering, and all sections. A reconstructed or abbreviated copy is invalid.',
+  exactReportField:'analysis.reportMarkdown (not report, userReport, finalReport, completeUserReport, or summary)',
+  requiredAnalysis:['reportMarkdown','directions','coupling','checks','clauses','audit20','conclusions','historicalUncertainty if required by evidenceQuality','autoSwitchAudit if required by autoSwitchContext','newSignals','events'],
+  statusesForChecksAndClauses:['CONFIRMED','UNVERIFIED','VIOLATION'],
+  outcomePrinciple:'A price-data gap does not cancel current independent BTC/ETH analysis. Mark historical trade outcomes UNVERIFIED with exact affected IDs and distinguish them from new-market LONG/SHORT/HOLD.',
+  autoSwitchPrinciple:'Follow requirements.autoSwitchAudit and autoSwitchContext; source-anchored immediate and near candidates must be compared for EACH old pending ID. Never default to KEEP merely because price is distant or CVD reliability is LOW.',
+  proofPrinciple:'Populate evidence only after actual source-based evaluation. Empty strings, copied generic claims or invented evidence are prohibited. Never backfill earlier entries or imply exchange account is flat.',
+  mutationPrinciple:'newSignals and events may be [] for an evidence-based HOLD; original signal IDs, chronology, V1.7 policy, and numeric audits remain protected by unchanged validator.',
+  completionPrinciple:'Only report a formal result after OFFICIAL_STORED or OFFICIAL_REPLAY, then confirm persistent ledger. NEVER report NEEDS_AI_ANALYSIS or any validation failure as a KEEP/HOLD or successful switch.',
+  skeleton:{
+   reportMarkdown:null,directions:byDirection,
+   coupling:{status:null,evidence:null},checks,clauses,
+   audit20:{rules:null,bias:null,evidence:null},
+   conclusions:{BTC:{decision:null,evidence:null},ETH:{decision:null,evidence:null}},
+   historicalUncertainty:{BTC:{unresolvedIds:[],evidence:null},ETH:{unresolvedIds:[],evidence:null}},
+   autoSwitchAudit:{BTC:{snapshotAt:null,price:null,reviews:[]},ETH:{snapshotAt:null,price:null,reviews:[]}},
+   newSignals:[],events:[]
+  }
+ };
+}
+
 export function prepare({raw,session='OFFICIAL_V17',ledger=[],saved=null,previousSnapshot=null,carriedUncertaintyBySymbol={}}){
  const snapshot=validateSnapshot(raw),id=sessionId(session),beforeLedgerSha256=ledgerHash(ledger);
  const evidenceQuality=assessSnapshotEvidence(raw,{previousSnapshot,ledger,carriedUncertaintyBySymbol});
@@ -135,6 +170,7 @@ export function prepare({raw,session='OFFICIAL_V17',ledger=[],saved=null,previou
  if(saved)return {status:'OFFICIAL_REPLAY',session:id,snapshot,policy:OFFICIAL_POLICY,officialDecision:saved,evidenceQuality,source:'PERSISTED_FIRST_OFFICIAL_RESULT',sameState:true};
  return {status:'NEEDS_AI_ANALYSIS',session:id,snapshot,policy:sourcePolicy(),ledger:ledger.map(r=>({...r})),evidenceQuality,
   autoSwitchContext:buildAutoSwitchContext(raw,ledger,snapshot),beforeLedgerSha256,decisionKey:key,requirements:{
+  submissionContract:submissionContract(),
   role:'AI must read and apply THE ENTIRE original Korean V1.7 policy below, not approximate with fixed indicator gates.',
   noExternalScriptedSignals:true,noNewIndicatorThresholds:true,noHistoricalSignalImport:true,
   interpretationSafeguards:{pendingSignalMayBeIssuedBeforeFutureTouch:true,futureRetestIsNotRequiredBeforeFormalPendingIssue:true,requiresPresentStructuralReasonForPlannedRetest:true,holdMustCompareExecutableOptionsNotDefaultToWaiting:true,neverBackfillHypotheticalMissedProfit:true,gapDoesNotBlockCurrentIndependentAnalysis:true,unknownHistoryMustRemainAuditable:true,quarantinePriorPendingBeforeNewSignal:true,neverPresumeExchangeAccountFlat:true},
