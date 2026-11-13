@@ -83,7 +83,7 @@ export function auditPreparedSegments(signal,segments,{from,initialState}={}){
  }
  return {status:state,events,ambiguous};
 }
-export function planPreparedEvents({ledger,history,currentAtBySymbol,unverifiedOrigins={}}){
+export function planPreparedEvents({ledger,history,currentAtBySymbol,unverifiedOrigins={},auditStarts={}}){
  const result={events:[],notes:[],proofs:{}};
  for(const sym of ['BTC','ETH']){
   const proof=history[sym],signals=ledger.filter(x=>x.symbol===sym+'USDT'&&live.has(x.status));
@@ -93,7 +93,7 @@ export function planPreparedEvents({ledger,history,currentAtBySymbol,unverifiedO
    coveredFrom:proof.coveredFrom,coveredThrough:proof.coveredThrough,barCount:proof.barCount};
   for(const s of signals){
    const prior=s.status==='UNVERIFIED'?s.unverifiedFrom:s.status;
-   const from=s.status==='UNVERIFIED'?unverifiedOrigins[s.id]:s.verifiedUntil||s.original?.issuedAt;
+   const from=s.status==='UNVERIFIED'?unverifiedOrigins[s.id]:auditStarts[s.id]||s.verifiedUntil||s.original?.issuedAt;
    if(!from||!prior){result.notes.push(s.id+':NO_TRUSTWORTHY_BASELINE');continue;}
    if(time(proof.coveredFrom)>time(from)){
     result.notes.push(s.id+':PREPARED_CHAIN_NOT_FROM_CONFIRMED_STATE');continue;
