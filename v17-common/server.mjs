@@ -234,10 +234,14 @@ async function beginAnalysis(body){
   try{tracked=await reconcileVerifiedPricePath(db,session,raw,snapshot,oldOfficial);}
   catch(e){tracked={proof:{},events:[],notes:['RECOVERY_ERROR_NO_LEDGER_MUTATION:'+String(e.message||e).slice(0,160)],backendRecoveryMs:0};}
  }
- const ledger=await readLedger(db,session);
- const saved=await selectOfficial(db,session,snapshot.sha256,ledgerHash(ledger));
- const previousSnapshot=await latestOfficialSnapshot(db,session);
- const carry=await carriedUncertainty(db,session,ledger);
+ // Concurrent independent reads preserve original official registry behavior.
+ const [ledger,previousSnapshot]=await Promise.all([
+  readLedger(db,session),latestOfficialSnapshot(db,session)
+ ]);
+ const [saved,carry]=await Promise.all([
+  selectOfficial(db,session,snapshot.sha256,ledgerHash(ledger)),
+  carriedUncertainty(db,session,ledger)
+ ]);
  await storeVerifiedGapProof(db,session,snapshot.sha256,tracked.proof);
  const full=prepare({raw,session,ledger,saved,previousSnapshot,carriedUncertaintyBySymbol:carry,verifiedGapRecoveryBySymbol:tracked.proof});
  const delivered={...applyCachedPolicyResponse(full,body.cachedPolicySha256),
