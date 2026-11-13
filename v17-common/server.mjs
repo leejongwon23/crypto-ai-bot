@@ -94,6 +94,79 @@ async function carriedUncertainty(db,session,ledger){
  }
  return result;
 }
+// Resolve the first known gap origin for an already quarantined signal. A later
+// complete candle cannot silently erase an old unresolved interval.
+async function unverifiedOrigins(db,session,ledger){
+ const wanted=ledger.filter(s=>s.status==='UNVERIFIED'),origins={};
+ if(!wanted.length)return origins;
+ const r=await db.query("SELECT official->'evidenceQuality' AS evidence FROM v17_ai_analyses WHERE session=$1 AND official->'evidenceQuality' IS NOT NULL ORDER BY created_at DESC LIMIT 1000",[session]);
+ for(const s of wanted){
+  const sym=s.symbol==='BTCUSDT'?'BTC':'ETH';
+  const found=r.rows.map(x=>x.evidence?.perSymbol?.[sym])
+   .filter(x=>x&&x.gapSeconds>60&&x.priorOfficialAt&&
+    (x.couldNotVerifySignals||[]).includes(s.id));
+  if(found.length)origins[s.id]=found.reduce((a,x)=>a<x.priorOfficialAt?a:x.priorOfficialAt,found[0].priorOfficialAt);
+ }
+ return origins;
+}
+async function readVerifiedGapProof(db,session,snapshotSha){
+ const r=await db.query('SELECT proof FROM v17_ai_gap_proofs WHERE session=$1 AND snapshot_sha=$2',[session,snapshotSha]);
+ return r.rows[0]?.proof||{};
+}
+async function storeVerifiedGapProof(db,session,snapshotSha,proof){
+ await db.query('INSERT INTO v17_ai_gap_proofs(session,snapshot_sha,proof) VALUES($1,$2,$3) ON CONFLICT(session,snapshot_sha) DO UPDATE SET proof=EXCLUDED.proof',[session,snapshotSha,JSON.stringify(proof)]);
+}
+// The only automatic transitions are verifiable mechanical level crossings.
+// Discretionary entries, directions, revisions and early exits still belong to
+// the AI and must pass the original V1.7 publication validator.
+async function reconcileVerifiedPricePath(db,session,raw,snapshot,previousSnapshot){
+ const at={BTC:snapshot.btcTime,ETH:snapshot.ethTime};
+ const ledger=await readLedger(db,session);
+ if(!ledger.some(s=>['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(s.status)))
+  return {proof:{},events:[],notes:['NO_ACTIVE_SIGNAL'],backendRecoveryMs:0};
+ const begin=Date.now(),origins=await unverifiedOrigins(db,session,ledger);
+ const history=await recoverActiveSignalWindows(raw,previousSnapshot,ledger,{unverifiedOrigins:origins});
+ const planned=planVerifiedMechanicalEvents({ledger,history,currentAtBySymbol:at,unverifiedOrigins:origins});
+ const verified=validateRecoveredProof(raw,previousSnapshot,planned.proofs);
+ const auditSummary=Object.fromEntries(['BTC','ETH'].map(sym=>[sym,{
+  ...verified[sym],
+  needed:history[sym]?.needed===true,
+  status:history[sym]?.recovered?'VERIFIED_SOURCE_1M':history[sym]?.needed?'RECOVERY_UNAVAILABLE':'NO_ACTIVE_SIGNAL',
+  reason:history[sym]?.recovered?undefined:history[sym]?.reason,
+  coveredThrough:history[sym]?.coveredThrough,
+  barCount:history[sym]?.barCount,
+ }]));
+ // No DB mutation on an unavailable, incomplete, or ambiguous source.
+ if(!planned.events.length){
+  return {proof:auditSummary,events:[],notes:planned.notes,backendRecoveryMs:Date.now()-begin};
+ }
+ const client=await db.connect();
+ try{
+  await client.query('BEGIN');
+  await client.query('INSERT INTO v17_ai_sessions(name) VALUES($1) ON CONFLICT DO NOTHING',[session]);
+  await client.query('SELECT name FROM v17_ai_sessions WHERE name=$1 FOR UPDATE',[session]);
+  const locked=await readLedger(client,session);
+  if(ledgerHash(locked)!==ledgerHash(ledger)){
+   await client.query('ROLLBACK');
+   return {proof:{},events:[],notes:['CONCURRENT_LEDGER_CHANGE_RETRY_PREPARE'],backendRecoveryMs:Date.now()-begin};
+  }
+  const staged=locked.map(x=>({...x}));
+  for(const evt of planned.events){
+   checkEvent(evt,staged);
+   await client.query('INSERT INTO v17_ai_events(session,id,event,at_kst) VALUES($1,$2,$3,$4)',[session,evt.id,JSON.stringify(evt),evt.at]);
+   await client.query('UPDATE v17_ai_signals SET status=$3,verified_until=$4 WHERE session=$1 AND id=$2',[session,evt.id,evt.kind,evt.at]);
+   const row=staged.find(x=>x.id===evt.id);
+   row.status=evt.kind;row.verifiedUntil=evt.at;
+  }
+  await client.query('COMMIT');
+  return {proof:auditSummary,events:planned.events,notes:planned.notes,backendRecoveryMs:Date.now()-begin};
+ }catch(err){
+  try{await client.query('ROLLBACK');}catch{}
+  // Never mutate the official ledger on unexpected validation/database errors.
+  return {proof:{},events:[],notes:['AUTO_TRACKER_ROLLBACK:'+String(err.message||err).slice(0,160)],backendRecoveryMs:Date.now()-begin};
+ }finally{client.release();}
+}
+
 async function selectOfficial(db,session,snapshotSha,stateSha){
  const q=await db.query('SELECT official FROM v17_ai_analyses WHERE session=$1 AND snapshot_sha=$2 AND (before_sha=$3 OR after_sha=$3) ORDER BY created_at ASC LIMIT 1',[session,snapshotSha,stateSha]);
  return q.rows[0]?.official||null;
