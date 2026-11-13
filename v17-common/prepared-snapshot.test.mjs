@@ -59,3 +59,9 @@ test('stored snapshot is not overwritten by later same-sha prepare',async()=>{
  await storePreparedSnapshot(db,'OFFICIAL_V17',shaA,'DIFFERENT');
  assert.equal(await recoverOfficialSubmissionRaw(db,'OFFICIAL_V17',{snapshotSha256:shaA}),raw);
 });
+
+test('a legacy client that mistakenly retypes raw cannot override the byte-exact prepared source',async()=>{
+ const db=mockDb();await storePreparedSnapshot(db,'OFFICIAL_V17',shaA,raw);
+ const mistakenlyRetyped=raw+'\\nextra accidental whitespace';
+ assert.equal(await recoverOfficialSubmissionRaw(db,'OFFICIAL_V17',{raw:mistakenlyRetyped,snapshotSha256:shaA}),raw);
+});
