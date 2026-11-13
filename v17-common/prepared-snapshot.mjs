@@ -17,19 +17,24 @@ export async function storePreparedSnapshot(db,session,snapshotSha256,raw) {
 }
 
 export async function recoverOfficialSubmissionRaw(db,session,submission) {
- // Preserve backwards compatibility for older clients that still supply raw.
- // The existing full V1.7 validator independently checks its digest.
+ const sha=submission.snapshotSha256;
+ // Always use the byte-exact server copy if a prepared SHA is available.
+ // In particular, ignore a mistakenly retyped 'raw' from legacy clients.
+ // The original V1.7 validator still checks SHA, ledger and decision keys.
+ if(SHA256.test(sha||'')) {
+  const result=await db.query(
+   'SELECT raw FROM v17_ai_prepared_snapshots WHERE session=$1 AND snapshot_sha=$2',
+   [session,sha]
+  );
+  if(result.rows.length===1&&typeof result.rows[0].raw==='string')
+   return result.rows[0].raw;
+ }
+ // Before this feature was deployed, older clients could publish exact raw
+ // without first persisting it; retain that backwards-compatible fallback.
  if(Object.prototype.hasOwnProperty.call(submission,'raw')&&submission.raw!=null) {
   if(typeof submission.raw!=='string'||!submission.raw)throw Error('SUBMISSION_RAW_INVALID');
   return submission.raw;
  }
- const sha=submission.snapshotSha256;
  if(!SHA256.test(sha||''))throw Error('PREPARED_SNAPSHOT_SHA_REQUIRED');
- const result=await db.query(
-  'SELECT raw FROM v17_ai_prepared_snapshots WHERE session=$1 AND snapshot_sha=$2',
-  [session,sha]
- );
- if(result.rows.length!==1||typeof result.rows[0].raw!=='string')
-  throw Error('PREPARED_SNAPSHOT_NOT_FOUND_REPREPARE_REQUIRED');
- return result.rows[0].raw;
+ throw Error('PREPARED_SNAPSHOT_NOT_FOUND_REPREPARE_REQUIRED');
 }
