@@ -7,6 +7,7 @@ import {storePreparedSnapshot,recoverOfficialSubmissionRaw} from './prepared-sna
 import {rawMarketWindows,recoverActiveSignalWindows,earliestUnknownGapOrigins} from './price-path-recovery.mjs';
 import {planVerifiedMechanicalEvents,validateRecoveredProof} from './official-price-tracker.mjs';
 import {assemblePreparedChains,planPreparedEvents} from './prepared-path-chain.mjs';
+import {parseSubmittedMinutePaths} from './submitted-minute-path.mjs';
 import {OFFICIAL_POLICY,VERSION,prepare,sourcePolicy,validateSnapshot,validateOfficialSubmission,ledgerHash,sessionId,digest,checkEvent} from './v17-core.mjs';
 import {ATTEST_CONFIRM,TWO_USER_TP3_IDS,planUserAttestedTp3} from './user-attested-tp3.mjs';
 import {USER_NO_ENTRY_KIND,USER_NO_ENTRY_CONFIRM,USER_NO_ENTRY_IDS,planUserNoEntryAttestation} from './user-attested-no-entry.mjs';
@@ -133,58 +134,72 @@ async function reconcileVerifiedPricePath(db,session,raw,snapshot,previousSnapsh
  if(!ledger.some(s=>['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(s.status)))
   return {proof:{},events:[],notes:['NO_ACTIVE_SIGNAL'],backendRecoveryMs:0};
  const begin=Date.now(),origins=await unverifiedOrigins(db,session,ledger);
- const needIntermediate=Object.keys(origins).length>0||ledger.some(x=>x.status==='UNVERIFIED')||
-  ['BTC','ETH'].some(sym=>{
-   const prev=previousSnapshot?.[sym==='BTC'?'btcTime':'ethTime'];
-   const path=rawMarketWindows(raw)[sym].pathStart;
-   return prev&&(Date.parse(path.replace(' ','T')+'+09:00')-Date.parse(prev.replace(' ','T')+'+09:00')>60000);
-  });
- let preparedRaws=[];
- if(needIntermediate){
-  const q=await db.query("SELECT raw FROM v17_ai_prepared_snapshots WHERE session=$1 AND created_at>NOW()-INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 160",[session]);
-  preparedRaws=q.rows.map(x=>x.raw);
- }
  const base={...previousSnapshot};
  for(const s of ledger.filter(x=>origins[x.id])){
   const origin=origins[s.id],field=s.symbol==='BTCUSDT'?'btcTime':'ethTime';
   if(origin&&(!base[field]||origin<base[field]))base[field]=origin;
  }
+ // User-supplied [10B] closed 1m OHLC beats aggregated high/low segments.
+ const submitted=parseSubmittedMinutePaths(raw,base,ledger);
+ const active=new Set(['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED']);
+ const needsOtherSource=ledger.some(s=>active.has(s.status)&&
+  !submitted[s.symbol==='BTCUSDT'?'BTC':'ETH']?.recovered);
+ const needIntermediate=needsOtherSource&&(Object.keys(origins).length>0||
+  ledger.some(x=>x.status==='UNVERIFIED')||
+  ['BTC','ETH'].some(sym=>{
+   const prev=previousSnapshot?.[sym==='BTC'?'btcTime':'ethTime'];
+   const path=rawMarketWindows(raw)[sym].pathStart;
+   return prev&&(Date.parse(path.replace(' ','T')+'+09:00')-Date.parse(prev.replace(' ','T')+'+09:00')>60000);
+  }));
+ let preparedRaws=[];
+ if(needIntermediate){
+  const q=await db.query("SELECT raw FROM v17_ai_prepared_snapshots WHERE session=$1 AND created_at>NOW()-INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 160",[session]);
+  preparedRaws=q.rows.map(x=>x.raw);
+ }
  const prepared=assemblePreparedChains(preparedRaws,base,raw);
- // A prior stored official analysis already checked the path through its own timestamp.
- // Do not rescan earlier PENDING history or omit recent entry crosses.
  const auditStarts=Object.fromEntries(ledger.map(sig=>{
   const sym=sig.symbol==='BTCUSDT'?'BTC':'ETH';
   const previous=previousSnapshot?.[sym==='BTC'?'btcTime':'ethTime'];
   const from=sig.verifiedUntil||sig.original?.issuedAt;
   const ordinary=previous&&from?(previous>from?previous:from):previous||from;
-  // A prior missing interval belongs to this exact original signal, and
-  // must be replayed before any later TP/STOP event may be finalized.
   return [sig.id,origins[sig.id]||ordinary];
  }));
- let planned=planPreparedEvents({ledger,history:prepared,currentAtBySymbol:at,unverifiedOrigins:origins,auditStarts});
- const needsRemote=ledger.some(s=>['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(s.status)&&
+ const minutePlan=planVerifiedMechanicalEvents({ledger,history:submitted,currentAtBySymbol:at,unverifiedOrigins:origins,auditStarts});
+ const preparedPlan=planPreparedEvents({ledger,history:prepared,currentAtBySymbol:at,unverifiedOrigins:origins,auditStarts});
+ const planned={events:[],notes:[],proofs:{}};
+ for(const sym of ['BTC','ETH']){
+  const selected=submitted[sym]?.recovered?minutePlan:preparedPlan;
+  planned.events.push(...selected.events.filter(e=>ledger.some(s=>s.id===e.id&&s.symbol===sym+'USDT')));
+  if(selected.proofs[sym])planned.proofs[sym]=selected.proofs[sym];
+  planned.notes.push(...selected.notes.filter(note=>{
+   const id=String(note).split(':')[0];
+   return id===sym||ledger.some(s=>s.id===id&&s.symbol===sym+'USDT');
+  }));
+  if(!submitted[sym]?.recovered&&submitted[sym]?.needed)
+   planned.notes.push(sym+':'+submitted[sym].reason);
+ }
+ const needsRemote=ledger.some(s=>active.has(s.status)&&
+  !submitted[s.symbol==='BTCUSDT'?'BTC':'ETH']?.recovered&&
   !prepared[s.symbol==='BTCUSDT'?'BTC':'ETH']?.recovered);
  let remote={BTC:{needed:false},ETH:{needed:false}};
  if(needsRemote){
   remote=await recoverActiveSignalWindows(raw,previousSnapshot,ledger,{unverifiedOrigins:origins});
   const remotePlan=planVerifiedMechanicalEvents({ledger,history:remote,currentAtBySymbol:at,unverifiedOrigins:origins,auditStarts});
-  const preparedSymbols=new Set(['BTC','ETH'].filter(sym=>prepared[sym]?.recovered));
   for(const e of remotePlan.events){
-   const row=ledger.find(x=>x.id===e.id);
-   if(row&&!preparedSymbols.has(row.symbol==='BTCUSDT'?'BTC':'ETH'))planned.events.push(e);
+   const row=ledger.find(x=>x.id===e.id),sym=row?.symbol==='BTCUSDT'?'BTC':'ETH';
+   if(row&&!submitted[sym]?.recovered&&!prepared[sym]?.recovered)planned.events.push(e);
   }
-  planned.events.sort((x,y)=>Date.parse(x.at.replace(' ','T')+'+09:00')-Date.parse(y.at.replace(' ','T')+'+09:00'));
+  for(const sym of ['BTC','ETH'])if(remotePlan.proofs[sym]&&!planned.proofs[sym])
+   planned.proofs[sym]=remotePlan.proofs[sym];
   planned.notes.push(...remotePlan.notes);
  }
- const sourceProofs=Object.fromEntries(['BTC','ETH'].map(sym=>[sym,prepared[sym]?.recovered?planned.proofs[sym]:{
-  ...(remote[sym]?.recovered?{recovered:true,source:remote[sym].source,bridgeCovered:remote[sym].bridgeCovered,
-    coveredFrom:remote[sym].coveredFrom,coveredThrough:remote[sym].coveredThrough,barCount:remote[sym].barCount}:{recovered:false})
- }]));
+ planned.events.sort((x,y)=>Date.parse(x.at.replace(' ','T')+'+09:00')-Date.parse(y.at.replace(' ','T')+'+09:00'));
+ const sourceProofs=Object.fromEntries(['BTC','ETH'].map(sym=>[sym,planned.proofs[sym]||{recovered:false}]));
  const verified=validateRecoveredProof(raw,previousSnapshot,sourceProofs);
  const auditSummary=Object.fromEntries(['BTC','ETH'].map(sym=>[sym,{
   ...verified[sym],
   needed:ledger.some(s=>s.symbol===sym+'USDT'&&['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(s.status)),
-  status:sourceProofs[sym]?.recovered?(sourceProofs[sym].source==='USER_PREPARED_SNAPSHOT_PATH_CHAIN'?'VERIFIED_PREPARED_CHAIN':'VERIFIED_SOURCE_1M'):'RECOVERY_UNAVAILABLE',
+  status:sourceProofs[sym]?.recovered?(sourceProofs[sym].source==='USER_PREPARED_SNAPSHOT_PATH_CHAIN'?'VERIFIED_PREPARED_CHAIN':sourceProofs[sym].source==='USER_SUBMITTED_BYBIT_1M'?'VERIFIED_USER_SUBMITTED_1M':'VERIFIED_SOURCE_1M'):'RECOVERY_UNAVAILABLE',
   reason:sourceProofs[sym]?.recovered?undefined:remote[sym]?.reason||'NO_CONTIGUOUS_PREPARED_PATH',
   coveredThrough:sourceProofs[sym]?.coveredThrough,
   barCount:sourceProofs[sym]?.barCount,

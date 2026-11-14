@@ -5,7 +5,7 @@ const has=x=>typeof x==='string'&&x.trim().length>0;
 const endOfMinute=t=>kstTime(kstMs(t)+60000);
 const initial=s=>s.status==='UNVERIFIED'?s.unverifiedFrom:s.status;
 function eventEvidence(s,proof,change){
- return 'Public Bybit USDT-linear '+s.symbol+' 1m OHLC (all minutes verified), '
+ return (proof.source==='USER_SUBMITTED_BYBIT_1M'?'User-submitted Bybit-labelled ':'Public Bybit USDT-linear ')+s.symbol+' 1m OHLC (contiguous minutes verified within source), '
   +proof.coveredFrom+' through '+proof.coveredThrough
   +'; observed minute '+change.minute+' high '+change.high+' low '+change.low
   +'; crossed original '+change.kind+' level '+change.level
@@ -74,7 +74,7 @@ export function planVerifiedMechanicalEvents({ledger,history,currentAtBySymbol,u
    for(const change of verdict.events){
     const evt={
      id:signal.id,kind:change.kind,at:endOfMinute(change.minute),
-     reason:'Automatic mechanical V1.7 price-level crossing verified from Bybit public 1m OHLC; no AI opinion or further trigger.',
+     reason:'Automatic mechanical V1.7 price-level crossing from complete contiguous 1m OHLC; user-submitted path is not independently exchange authenticated.',
      evidence:eventEvidence(signal,proof,change),
      pricePathEvidence:eventEvidence(signal,proof,change),
      observedMinute:change.minute,source:proof.source,
@@ -106,7 +106,7 @@ export function validateRecoveredProof(raw,previousSnapshot,proofs){
   const prev=previousSnapshot?.[symbol==='BTC'?'btcTime':'ethTime'];
   if(!p?.recovered||!prev){result[symbol]={recovered:false};continue;}
   const from=kstMs(prev),start=kstMs(market[symbol].pathStart);
-  const bridge=['BYBIT_LINEAR_PUBLIC_1M','USER_PREPARED_SNAPSHOT_PATH_CHAIN'].includes(p.source)&&p.bridgeCovered&&p.coveredFrom<=kstTime(floorMinute(from))
+  const bridge=['BYBIT_LINEAR_PUBLIC_1M','USER_PREPARED_SNAPSHOT_PATH_CHAIN','USER_SUBMITTED_BYBIT_1M'].includes(p.source)&&p.bridgeCovered&&p.coveredFrom<=kstTime(floorMinute(from))
    &&p.coveredThrough>=kstTime(floorMinute(start));
   result[symbol]=bridge?{recovered:true,source:p.source,coveredFrom:p.coveredFrom,coveredThrough:p.coveredThrough}
    :{recovered:false};
