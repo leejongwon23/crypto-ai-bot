@@ -8,6 +8,7 @@ import {rawMarketWindows,recoverActiveSignalWindows,earliestUnknownGapOrigins} f
 import {planVerifiedMechanicalEvents,validateRecoveredProof} from './official-price-tracker.mjs';
 import {assemblePreparedChains,planPreparedEvents} from './prepared-path-chain.mjs';
 import {OFFICIAL_POLICY,VERSION,prepare,sourcePolicy,validateSnapshot,validateOfficialSubmission,ledgerHash,sessionId,digest,checkEvent} from './v17-core.mjs';
+import {ATTEST_CONFIRM,TWO_USER_TP3_IDS,planUserAttestedTp3} from './user-attested-tp3.mjs';
 
 const PORT=Number(process.env.PORT||3000);
 const MODE=process.env.DEPLOYMENT_MODE||'local';
@@ -321,6 +322,67 @@ async function publishAnalysis(body){
   await client.query('COMMIT');return {status:'OFFICIAL_STORED',officialDecision:official,sameState:true};
  }catch(e){try{await client.query('ROLLBACK');}catch{}throw e;}finally{client.release();}
 }
+// Narrow, explicit user-confirmed closure of the two November 14 originals.
+// This does NOT weaken checkEvent() or verified chronological tracking.
+export async function closeTwoUserAttestedTp3(args={}){
+ const session=sessionId(args.session||'OFFICIAL_V17');
+ if(session!=='OFFICIAL_V17'||args.kind!=='V17_USER_ATTESTED_TP3_TWO_ONLY')
+  throw Error('ATTEST_SCOPE_FORBIDDEN');
+ if(args.confirmation!==ATTEST_CONFIRM)throw Error('USER_TP3_CONFIRMATION_REQUIRED');
+ const sha='9932522f124bfb0c5350f9e7acc1058d6472a5fbd5a6e6f7ed639d42dba8a2dc';
+ if(args.sourceSnapshotSha256!==sha)throw Error('ATTEST_USE_EXACT_SAVED_NOV14_SNAPSHOT');
+ const db=await database(),client=await db.connect();
+ try{
+  await client.query('BEGIN');
+  await client.query('SELECT name FROM v17_ai_sessions WHERE name=$1 FOR UPDATE',[session]);
+  const ledger=await readLedger(client,session),before=ledgerHash(ledger);
+  const already=ledger.filter(x=>TWO_USER_TP3_IDS.includes(x.id)&&x.status==='TP3_DONE');
+  if(already.length===2){
+   const events=await client.query(
+    "SELECT id,event FROM v17_ai_events WHERE session=$1 AND id=ANY($2::text[]) AND event->>'provenance'='USER_ATTESTED_NOT_CHRONOLOGICALLY_VERIFIED' ORDER BY seq DESC",
+    [session,TWO_USER_TP3_IDS]);
+   if(new Set(events.rows.map(x=>x.id)).size===2){
+    await client.query('COMMIT');
+    return {status:'OFFICIAL_USER_ATTESTED_TP3_REPLAY',session,ids:TWO_USER_TP3_IDS,
+     afterLedgerSha256:before,events:events.rows.slice(0,2).map(x=>x.event),
+     source:'USER_ATTESTED_NOT_CHRONOLOGICALLY_VERIFIED',
+     signalView:buildSignalView({ledger,snapshot:await latestOfficialSnapshot(client,session)})};
+   }
+  }
+  const saved=await client.query(
+   'SELECT raw FROM v17_ai_prepared_snapshots WHERE session=$1 AND snapshot_sha=$2 LIMIT 1',
+   [session,sha]);
+  const fallback=saved.rows.length?saved:await client.query(
+   'SELECT raw FROM v17_ai_analyses WHERE session=$1 AND snapshot_sha=$2 ORDER BY created_at DESC LIMIT 1',
+   [session,sha]);
+  if(fallback.rows.length!==1)throw Error('ATTEST_IMMUTABLE_SOURCE_SNAPSHOT_NOT_FOUND');
+  const now=await client.query("SELECT to_char(NOW() AT TIME ZONE 'Asia/Seoul','YYYY-MM-DD HH24:MI:SS') AS at");
+  const events=planUserAttestedTp3({
+   ledger,sourceRaw:fallback.rows[0].raw,sourceSnapshotSha256:sha,
+   expectedLedgerSha256:args.expectedLedgerSha256,
+   signalIds:args.signalIds,confirmation:args.confirmation,at:now.rows[0].at
+  });
+  if(args.expectedLedgerSha256!==before)throw Error('ATTEST_LEDGER_CHANGED_RETRY');
+  for(const event of events){
+   await client.query('INSERT INTO v17_ai_events(session,id,event,at_kst) VALUES($1,$2,$3,$4)',
+    [session,event.id,JSON.stringify(event),event.at]);
+   const update=await client.query(
+    "UPDATE v17_ai_signals SET status='TP3_DONE', verified_until=$3 WHERE session=$1 AND id=$2 AND status IN ('ENTERED','TP1','TP2')",
+    [session,event.id,event.at]);
+   if(update.rowCount!==1)throw Error('ATTEST_CONCURRENT_SIGNAL_CHANGE_ROLLBACK');
+  }
+  const after=await readLedger(client,session);
+  if(events.some(x=>after.find(s=>s.id===x.id)?.status!=='TP3_DONE'))
+   throw Error('ATTEST_CLOSURE_NOT_PERSISTED');
+  await client.query('COMMIT');
+  return {status:'OFFICIAL_USER_ATTESTED_TP3_STORED',session,ids:TWO_USER_TP3_IDS,
+   beforeLedgerSha256:before,afterLedgerSha256:ledgerHash(after),events,
+   source:'USER_ATTESTED_NOT_CHRONOLOGICALLY_VERIFIED',independentStopOrderVerified:false,
+   signalView:buildSignalView({ledger:after,snapshot:await latestOfficialSnapshot(db,session),changes:events})};
+ }catch(e){try{await client.query('ROLLBACK')}catch{}throw e;}
+ finally{client.release();}
+}
+
 // Administrative one-time full reset of the default official ledger only.
 // Preserve an immutable database backup before deleting live signals, events and
 // snapshot analyses, so prior snapshots cannot rehydrate the old state.
@@ -414,7 +476,9 @@ async function mcp(req,res,principal){
   else if(n==='register_formal_btc_eth_signal'){
    // Backward-compatible path for existing installed ChatGPT plugins whose MCP tool list is cached.
    // Standalone signal creation remains forbidden: only a complete source-verified AI analysis may be published.
-   if(args.signal?.kind==='V17_RESET_ALL_OFFICIAL'){
+   if(args.signal?.kind==='V17_USER_ATTESTED_TP3_TWO_ONLY'){
+    result=await closeTwoUserAttestedTp3({...args.signal,session:args.session||args.signal.session});
+   }else if(args.signal?.kind==='V17_RESET_ALL_OFFICIAL'){
     result=await resetOfficialLedger({...args.signal,session:args.session||args.signal.session});
    }else{
    if(args.signal?.kind!=='V17_OFFICIAL_SUBMISSION')throw Error('Standalone signal writing is forbidden. Supply signal.kind=V17_OFFICIAL_SUBMISSION with the complete V1.7 analysis envelope.');
