@@ -48,26 +48,38 @@ export function verifyCandleCoverage(candles,fromMs,toMs){
  for(let t=start;t<=end;t+=60000)if(!map.has(t))return false;
  return true;
 }
+// Both hosts are official Bybit mainnet REST endpoints. Never replace exchange
+// OHLC with another venue's prices when resolving an original Bybit signal.
+export const BYBIT_PUBLIC_ENDPOINTS=Object.freeze([
+ 'https://api.bybit.com','https://api.bytick.com'
+]);
 export async function fetchBybitCandles({symbol,fromMs,toMs,fetcher=globalThis.fetch,timeoutMs=2500,maxMinutes=1000}){
  if(!['BTC','ETH'].includes(symbol))throw Error('INVALID_RECOVERY_SYMBOL');
  if(toMs<fromMs||toMs-fromMs>maxMinutes*60000)throw Error('RECOVERY_WINDOW_OUT_OF_RANGE');
  const start=floorMinute(fromMs),end=floorMinute(toMs),count=(end-start)/60000+1;
  if(count>1000)throw Error('RECOVERY_TOO_MANY_MINUTES');
- const url=new URL('https://api.bybit.com/v5/market/kline');
- url.searchParams.set('category','linear');url.searchParams.set('symbol',symbol+'USDT');
- url.searchParams.set('interval','1');url.searchParams.set('start',String(start));
- url.searchParams.set('end',String(end+60000-1));url.searchParams.set('limit',String(count));
- const ac=new AbortController();
- const timeout=setTimeout(()=>ac.abort(),timeoutMs);
- try{
-  const result=await fetcher(url.toString(),{signal:ac.signal,headers:{accept:'application/json'}});
-  if(!result.ok)throw Error('BYBIT_HTTP_'+result.status);
-  const data=await result.json();
-  const candles=parseBybitCandles(data,symbol);
-  if(!verifyCandleCoverage(candles,fromMs,toMs))throw Error('BYBIT_INCOMPLETE_1M_COVERAGE');
-  return candles.filter(c=>c.start>=start&&c.start<=end);
- }finally{clearTimeout(timeout);}
+ const failures=[];
+ for(const base of BYBIT_PUBLIC_ENDPOINTS){
+  const url=new URL('/v5/market/kline',base);
+  url.searchParams.set('category','linear');url.searchParams.set('symbol',symbol+'USDT');
+  url.searchParams.set('interval','1');url.searchParams.set('start',String(start));
+  url.searchParams.set('end',String(end+60000-1));url.searchParams.set('limit',String(count));
+  const ac=new AbortController();
+  const timeout=setTimeout(()=>ac.abort(),timeoutMs);
+  try{
+   const result=await fetcher(url.toString(),{signal:ac.signal,headers:{accept:'application/json'}});
+   if(!result.ok)throw Error('BYBIT_HTTP_'+result.status);
+   const data=await result.json();
+   const candles=parseBybitCandles(data,symbol);
+   if(!verifyCandleCoverage(candles,fromMs,toMs))throw Error('BYBIT_INCOMPLETE_1M_COVERAGE');
+   return candles.filter(c=>c.start>=start&&c.start<=end);
+  }catch(e){
+   failures.push(new URL(base).hostname+':'+String(e?.message||e));
+  }finally{clearTimeout(timeout);}
+ }
+ throw Error('BYBIT_PUBLIC_1M_ALL_ENDPOINTS_FAILED: '+failures.join(' | '));
 }
+
 // Compute only mechanical crossings. Intraminute stop/TP conflicts remain unresolved.
 export function auditMinuteCandles(signal,candles,{initialStatus=null,afterMs=null}={}){
  const o=signal.original||signal;
@@ -127,6 +139,27 @@ export async function recoverMarketGaps(raw,previousSnapshot,{fetcher=globalThis
 
 // Fetch full, closed minute bars only for symbols with live formal signals.
 // A missing 1m candle invalidates the whole recovery; no interpolation.
+// Revisit the earliest unresolved priced path for every active signal, not only
+// signals explicitly marked UNVERIFIED. Historical evidence is immutable and
+// cannot be cleared by a later contiguous snapshot.
+export function earliestUnknownGapOrigins(ledger,evidenceRows){
+ const live=new Set(['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED']);
+ const origins={};
+ for(const signal of ledger){
+  if(!live.has(signal.status))continue;
+  const sym=signal.symbol==='BTCUSDT'?'BTC':signal.symbol==='ETHUSDT'?'ETH':null;
+  if(!sym)continue;
+  for(const row of evidenceRows){
+   const e=row?.evidence?.perSymbol?.[sym]||row?.perSymbol?.[sym];
+   if(!e||!(e.gapSeconds>60)||!e.priorOfficialAt||
+     !(e.couldNotVerifySignals||[]).includes(signal.id))continue;
+   if(!origins[signal.id]||kstMs(e.priorOfficialAt)<kstMs(origins[signal.id]))
+    origins[signal.id]=e.priorOfficialAt;
+  }
+ }
+ return origins;
+}
+
 export async function recoverActiveSignalWindows(raw,previousSnapshot,ledger,{
  fetcher=globalThis.fetch,timeoutMs=2500,maxMinutes=1000,unverifiedOrigins={}
 }={}){
@@ -139,7 +172,8 @@ export async function recoverActiveSignalWindows(raw,previousSnapshot,ledger,{
   const candidate=[...(prev?[kstMs(prev)]:[])];
   for(const signal of active){
    const back=unverifiedOrigins[signal.id];
-   if(signal.status==='UNVERIFIED'&&back)candidate.push(kstMs(back));
+   // Rewind even when an old ENTERED/TP1/TP2 remained in the ledger after a failed recovery.
+   if(back)candidate.push(kstMs(back));
    if(!prev)candidate.push(kstMs(signal.verifiedUntil||signal.original?.issuedAt||m[symbol].pathStart));
   }
   const fromMs=Math.min(...candidate);
