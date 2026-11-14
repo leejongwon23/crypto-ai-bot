@@ -6,6 +6,8 @@ const ENTERED = new Set(['NEW_ENTRY','ENTERED','TP1','TP2']);
 // Never erase the observed entry or declare the still-open position as fact.
 const enteredEarlier = row=>row.status==='UNVERIFIED'&&ENTERED.has(row.unverifiedFrom);
 const hasKnownEntry = row=>ENTERED.has(row.status)||enteredEarlier(row);
+// This is a separate user account claim; it never resolves the exchange price-path gap.
+const userConfirmedNoAccountEntry = row => row.status==='UNVERIFIED' && row.unverifiedFrom==='PENDING' && row.userAccountEntry==='NOT_ENTERED';
 const LABEL = {
  PENDING:'대기',NEW_ENTRY:'신규 진입',ENTERED:'진입',
  TP1:'TP1 도달',TP2:'TP2 도달',UNVERIFIED:'미확인'
@@ -23,6 +25,7 @@ export const SIGNAL_TABLE_OUTPUT_RULE =
  '새 진입/대기→진입 자동전환, 취소, 재설계, 추가진입, 방향 스위칭, 손절/익절/관리변경이 실제 공식원장에서 일어난 경우에만 signalView.changeNotices를 표 밑에 짧게 추가한다. '+
  '종료되지 않은 기존 BTC/ETH 정식 신호는 UNVERIFIED도 포함하여 모두 표시한다. 손절과 TP1/2/3에 최초 진입범위 대비 예상 손익률(%)을 병기한다. '+
  '대기 신호의 미체결 수익은 계산하지 않는다. 과거 진입이 확인된 UNVERIFIED 신호는 현재가 대비 손익률을 반드시 계산하되 (보유 가정·청산 미확인)으로 표시하고 실제 보유·실현수익으로 단정하지 않는다. '+
+ '사용자가 계좌 미진입을 명시해 별도 원장 기록이 있는 경우 상태에 미진입(사용자 확인)을 표시하고 시장가격경로 미확인 사실도 구분한다. ' +
  '실제 분석·4방향 비교·V1.7 검수·원장 등록 단계는 축약하거나 생략하지 않는다. 새 대화창에서도 동일 규칙이다.';
 const num=x=>typeof x==='number'&&Number.isFinite(x);
 const money=x=>num(x)?'$'+x.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'—';
@@ -37,6 +40,7 @@ function pctInterval(row,price){
 }
 const cell=(row,value)=>money(value)+' ('+pctInterval(row,value)+')';
 function currentPctDisplay(row,price){
+ if(userConfirmedNoAccountEntry(row))return '— (미진입·사용자 확인)';
  if(row.status==='PENDING')return '— (미진입)';
  if(!num(price)||!hasKnownEntry(row))return '미확인';
  const pct=pctInterval(row,price);
@@ -44,7 +48,7 @@ function currentPctDisplay(row,price){
  return pct+' (진입범위·현재가 기준)';
 }
 const status=row=>{
- if(row.status==='UNVERIFIED')return enteredEarlier(row)?'진입 확인·이후 청산 미확인':'진입 여부 미확인';
+ if(row.status==='UNVERIFIED')return userConfirmedNoAccountEntry(row)?'미진입 (사용자 확인·시장경로 미확인)':enteredEarlier(row)?'진입 확인·이후 청산 미확인':'진입 여부 미확인';
  return LABEL[row.status]||row.status||'—';
 };
 function notes(changes=[],ledger=[]){
@@ -78,6 +82,7 @@ export function buildSignalView({ledger=[],snapshot=null,changes=[]}={}){
  const changeNotices=notes(changes,ledger);
  return {mode:'SIGNAL_TABLE_ONLY',markdown:lines.join('\n'),changeNotices,
   entries:active.map(row=>({id:row.id,symbol:row.symbol,direction:row.original.direction,status:row.status,unverifiedFrom:row.unverifiedFrom||null,
+   userAccountEntry:row.userAccountEntry||null,userAccountEntryAt:row.userAccountEntryAt||null,
    currentPrice:num(current(row))?current(row):null,
    entryLow:row.original.entryLow,entryHigh:row.original.entryHigh,
    stop:plan(row).stop,tp1:plan(row).tp1,tp2:plan(row).tp2,tp3:plan(row).tp3,
