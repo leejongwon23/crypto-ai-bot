@@ -9,6 +9,7 @@ import {planVerifiedMechanicalEvents,validateRecoveredProof} from './official-pr
 import {assemblePreparedChains,planPreparedEvents} from './prepared-path-chain.mjs';
 import {OFFICIAL_POLICY,VERSION,prepare,sourcePolicy,validateSnapshot,validateOfficialSubmission,ledgerHash,sessionId,digest,checkEvent} from './v17-core.mjs';
 import {ATTEST_CONFIRM,TWO_USER_TP3_IDS,planUserAttestedTp3} from './user-attested-tp3.mjs';
+import {USER_NO_ENTRY_KIND,USER_NO_ENTRY_CONFIRM,USER_NO_ENTRY_IDS,planUserNoEntryAttestation} from './user-attested-no-entry.mjs';
 
 const PORT=Number(process.env.PORT||3000);
 const MODE=process.env.DEPLOYMENT_MODE||'local';
@@ -64,12 +65,18 @@ const KEY_CHECK=x=>{
  return crypto.timingSafeEqual(Buffer.from(x),Buffer.from(MASTER_SECRET));
 };
 function isAuthorized(req){const header=String(req.headers.authorization||'');const provided=header.replace(/^Bearer\s+/i,'')||String(req.headers['x-api-key']||'');return KEY_CHECK(provided);}
-export const rowToLedger=r=>({id:r.id,symbol:r.symbol,original:r.original,status:r.status,verifiedUntil:r.verified_until,version:r.plan_version,unverifiedFrom:r.unverified_from??undefined,...(r.effective_plan?{effectivePlan:r.effective_plan,planEffectiveAt:r.plan_effective_at}:{})});
+export const rowToLedger=r=>({id:r.id,symbol:r.symbol,original:r.original,status:r.status,verifiedUntil:r.verified_until,version:r.plan_version,userAccountEntry:r.user_account_entry??undefined,userAccountEntryAt:r.user_account_entry_at??undefined,unverifiedFrom:r.unverified_from??undefined,...(r.effective_plan?{effectivePlan:r.effective_plan,planEffectiveAt:r.plan_effective_at}:{})});
 async function readLedger(db,session){
  const r=await db.query(`SELECT s.id,s.symbol,s.original,s.status,s.verified_until,s.plan_version,
  (SELECT e.event->>'priorConfirmedState' FROM v17_ai_events e
   WHERE e.session=s.session AND e.id=s.id AND e.event->>'kind'='UNVERIFIED'
   ORDER BY e.seq DESC LIMIT 1) AS unverified_from,
+ (SELECT e.event->>'report' FROM v17_ai_events e
+  WHERE e.session=s.session AND e.id=s.id AND e.event->>'kind'='USER_ACCOUNT_ENTRY_NOT_EXECUTED'
+  ORDER BY e.seq DESC LIMIT 1) AS user_account_entry,
+ (SELECT e.at_kst FROM v17_ai_events e
+  WHERE e.session=s.session AND e.id=s.id AND e.event->>'kind'='USER_ACCOUNT_ENTRY_NOT_EXECUTED'
+  ORDER BY e.seq DESC LIMIT 1) AS user_account_entry_at,
  (SELECT e.event->'plan' FROM v17_ai_events e
   WHERE e.session=s.session AND e.id=s.id AND e.event->>'kind'='REVISION'
   ORDER BY e.seq DESC LIMIT 1) AS effective_plan,
@@ -322,6 +329,52 @@ async function publishAnalysis(body){
   await client.query('COMMIT');return {status:'OFFICIAL_STORED',officialDecision:official,sameState:true};
  }catch(e){try{await client.query('ROLLBACK');}catch{}throw e;}finally{client.release();}
 }
+// User account execution status is stored separately from exchange price-touch verification.
+export async function attestUserNoAccountEntry(args={}){
+ const session=sessionId(args.session||'OFFICIAL_V17');
+ if(session!=='OFFICIAL_V17'||args.kind!==USER_NO_ENTRY_KIND)throw Error('USER_NO_ENTRY_SCOPE_FORBIDDEN');
+ if(args.confirmation!==USER_NO_ENTRY_CONFIRM)throw Error('USER_NO_ENTRY_CONFIRMATION_REQUIRED');
+ if(!Array.isArray(args.signalIds)||args.signalIds.length!==2||new Set(args.signalIds).size!==2||
+    !USER_NO_ENTRY_IDS.every(id=>args.signalIds.includes(id)))throw Error('USER_NO_ENTRY_EXACT_ORIGINAL_IDS_REQUIRED');
+ if(typeof args.expectedLedgerSha256!=='string'||!/^[a-f0-9]{64}$/.test(args.expectedLedgerSha256))
+  throw Error('USER_NO_ENTRY_LEDGER_SHA_REQUIRED');
+ const db=await database(),client=await db.connect();
+ try{
+  await client.query('BEGIN');
+  await client.query('SELECT name FROM v17_ai_sessions WHERE name=$1 FOR UPDATE',[session]);
+  const beforeRows=await readLedger(client,session),before=ledgerHash(beforeRows);
+  if(args.expectedLedgerSha256!==before)throw Error('USER_NO_ENTRY_LEDGER_CHANGED_RETRY');
+  if(USER_NO_ENTRY_IDS.every(id=>{
+   const row=beforeRows.find(s=>s.id===id);
+   return row?.status==='UNVERIFIED'&&row?.unverifiedFrom==='PENDING'&&row.userAccountEntry==='NOT_ENTERED';
+  })){
+   const snapshot=await latestOfficialSnapshot(client,session);
+   await client.query('COMMIT');
+   return {status:'OFFICIAL_USER_NO_ENTRY_REPLAY',session,ids:USER_NO_ENTRY_IDS,
+    afterLedgerSha256:before,accountEntry:'NOT_ENTERED',historicalMarketTouch:'UNVERIFIED',
+    signalView:buildSignalView({ledger:beforeRows,snapshot})};
+  }
+  if(USER_NO_ENTRY_IDS.some(id=>beforeRows.find(s=>s.id===id)?.userAccountEntry==='NOT_ENTERED'))
+   throw Error('USER_NO_ENTRY_PARTIAL_CONFLICT_REQUIRES_REVIEW');
+  const time=await client.query("SELECT to_char(NOW() AT TIME ZONE 'Asia/Seoul','YYYY-MM-DD HH24:MI:SS') AS at");
+  const events=planUserNoEntryAttestation({session,kind:args.kind,confirmation:args.confirmation,
+   signalIds:args.signalIds,ledger:beforeRows,at:time.rows[0].at});
+  for(const e of events){
+   await client.query('INSERT INTO v17_ai_events(session,id,event,at_kst) VALUES($1,$2,$3,$4)',
+    [session,e.id,JSON.stringify(e),e.at]);
+  }
+  const afterRows=await readLedger(client,session);
+  if(ledgerHash(afterRows)!==before)throw Error('USER_NO_ENTRY_FORMAL_LEDGER_MUTATED_ROLLBACK');
+  if(!USER_NO_ENTRY_IDS.every(id=>afterRows.find(s=>s.id===id)?.userAccountEntry==='NOT_ENTERED'))
+   throw Error('USER_NO_ENTRY_PERSISTENCE_CHECK_FAILED');
+  const snapshot=await latestOfficialSnapshot(client,session);
+  await client.query('COMMIT');
+  return {status:'OFFICIAL_USER_NO_ENTRY_STORED',session,ids:USER_NO_ENTRY_IDS,
+   afterLedgerSha256:before,accountEntry:'NOT_ENTERED',historicalMarketTouch:'UNVERIFIED',
+   formalSignalStatusUnchanged:true,events,signalView:buildSignalView({ledger:afterRows,snapshot})};
+ }catch(e){try{await client.query('ROLLBACK');}catch{}throw e;}finally{client.release();}
+}
+
 // Narrow, explicit user-confirmed closure of the two November 14 originals.
 // This does NOT weaken checkEvent() or verified chronological tracking.
 export async function closeTwoUserAttestedTp3(args={}){
@@ -445,7 +498,7 @@ const tools=[
  {name:'publish_official_v17_analysis',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'SECOND STEP after NEEDS_AI_ANALYSIS. Existing confirmed price-touch and stop/TP event checks still mandatory. IMPORTANT GAP FIX: unknown historical signal outcome does NOT force current BTC/ETH conclusion=UNVERIFIED or block fresh independent market analysis. Include analysis.historicalUncertainty.{BTC|ETH}={unresolvedIds:[...],evidence:string} for each affected symbol; do not claim old position closed or account flat. To replace old PENDING with unresolved gap, include an old-ID UNVERIFIED quarantine event (uncertaintyScope,priorConfirmedState,marketReassessment, at current snapshot time) in same atomic submission, and new formal plan historicalExposureUnknownIds, historicalExposureRiskDisclosure, independentCurrentMarketEvidence. New plan is an analytical signal, NOT exchange account position certainty. An old ENTERED can coexist with separately justified same-direction ADD_ON or opposite PENDING switch plan; new signal must identify parentSignalId, relationToExisting SAME_DIRECTION_ADD_ON with addOnRiskEvidence and existingPositionRiskEvidence, OR OPPOSITE_PENDING with transitionOnTouchEvidence and existingPositionRiskEvidence. Old proven ENTERED cannot be silently replaced or counted flat; any opposite ENTERED event needs all opposed positions to have verified exit events first. REVERSE_EXIT/EARLY_EXIT requires strongCounterEvidence, structureEvidence, flowEvidence, contextEvidence, and outcomeUnverified=true if no verified entry/exit prices; actual PnL requires verifiedEntryPrice and entryPriceEvidence matching calculated PnL. REVISION event requires observedPrice=current snapshot, new plan stop/TP1/TP2/TP3, immutable previous achieved milestones and tighter effective stop; revised plan is read from ledger on following runs. Never retroactively cancel or claim TP/SL in gaps. Four directions A-E, original V1.7 unchanged, original stop/TP unchanged. For live PENDING with current ATR/EMA structure, supply analysis.autoSwitchAudit.BTC/ETH as described in run response requirements, with each old ID, observed distance in ATR/percent, numeric immediate+near alternatives, source anchors, stop/TP/RR and quantified KEEP rejection or atomic REDESIGN. Prose-only HOLD or LOW CVD-only justification is rejected. Supply exact hashes and full 16-step+clause audit.',inputSchema:{type:'object',properties:{raw:{type:'string'},session:{type:'string'},policySha256:{type:'string'},snapshotSha256:{type:'string'},beforeLedgerSha256:{type:'string'},decisionKey:{type:'string'},analysis:{type:'object',description:'Full V1.7 decision: reportMarkdown; directions BTC_LONG/BTC_SHORT/ETH_LONG/ETH_SHORT each marketEvidence,counterEvidence,alternatives A-E; coupling; checks 1..16; clauses 0..23,A,B,FINAL; audit20; conclusions BTC/ETH {decision=LONG|SHORT|HOLD|MANAGE|UNVERIFIED,evidence}; historicalUncertainty (only when affected) {BTC|ETH:{unresolvedIds:[old IDs],evidence:string}}; newSignals[]; events[] with prior PENDING UNVERIFIED quarantine if a gap blocks historical state. Keep current decisions independent of unknown outcomes. Use parentSignalId and relationToExisting for add-on or opposite pending. Event ordering is chronological and exit must precede opposed ENTERED; revisions require observedPrice matching the current snapshot.'}},required:['raw','policySha256','snapshotSha256','beforeLedgerSha256','decisionKey','analysis']}},
  {name:'read_official_btc_eth_ledger',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Retrieve NEW V1.7 source-exact official signal ledger and chronological immutable events for this session. Previous noncompliant legacy companion signals remain isolated, not silently imported.',inputSchema:{type:'object',properties:{session:{type:'string'}},required:[]}},
  {name:'read_official_v17_decision_history',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Read-only chronological OFFICIAL_V17 AI decision history for missed-opportunity review. Never convert hypothetical candidates to historical trades or alter immutable signal outcomes.',inputSchema:{type:'object',properties:{session:{type:'string'},limit:{type:'integer',minimum:1,maximum:100},includeDirections:{type:'boolean'}},required:[]}},
- {name:'register_formal_btc_eth_signal',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'COMPATIBILITY path for installed plugins: call run_official_btc_eth_snapshot ONCE with exact user raw. Then submit signal={kind:V17_OFFICIAL_SUBMISSION,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis} WITHOUT raw; server recovers the identical prepared raw securely by session plus SHA. Older raw submissions remain supported. Standalone signal writing is forbidden. Include autoSwitchAudit for live pending entries.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
+ {name:'register_formal_btc_eth_signal',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'COMPATIBILITY path for installed plugins: call run_official_btc_eth_snapshot ONCE with exact user raw. Then submit signal={kind:V17_OFFICIAL_SUBMISSION,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis} WITHOUT raw; server recovers the identical prepared raw securely by session plus SHA. Older raw submissions remain supported. Standalone signal writing is forbidden. Include autoSwitchAudit for live pending entries. For explicit user-confirmed account nonentry only, use signal.kind=V17_USER_ATTESTED_NO_ENTRY_TWO_ONLY with confirmation=USER_CONFIRMS_BTC_AND_ETH_NO_ACCOUNT_ENTRY, both exact 2026-11-14 signal IDs and expectedLedgerSha256 from ledger view; historical price-touch remains unverified.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
 ];
 // This is a user-facing output preference only; core V1.7 analysis,
 // validator, safety audits, and immutable signal state are unchanged.
@@ -480,6 +533,8 @@ async function mcp(req,res,principal){
     result=await closeTwoUserAttestedTp3({...args.signal,session:args.session||args.signal.session});
    }else if(args.signal?.kind==='V17_RESET_ALL_OFFICIAL'){
     result=await resetOfficialLedger({...args.signal,session:args.session||args.signal.session});
+   }else if(args.signal?.kind===USER_NO_ENTRY_KIND){
+    result=await attestUserNoAccountEntry({...args.signal,session:args.session||args.signal.session});
    }else{
    if(args.signal?.kind!=='V17_OFFICIAL_SUBMISSION')throw Error('Standalone signal writing is forbidden. Supply signal.kind=V17_OFFICIAL_SUBMISSION with the complete V1.7 analysis envelope.');
    const payload={...args.signal,session:args.session||args.signal.session||'OFFICIAL_V17'};
