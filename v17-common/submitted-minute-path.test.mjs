@@ -17,7 +17,7 @@ function source({missingMinute=null,entryAndStopSameMinute=false,corruptRange=fa
  const start=kstMs(t+'18:59:00'),end=kstMs(current.ETH),lines=[];
  let last=1912.1;
  for(let at=start;at<=end;at+=60000){
-  const time=kstTime(at),key=time.slice(-5);
+  const time=kstTime(at),key=time.slice(11,16);
   const open=last;
   let high=open,low=open,close=open;
   if(key==='19:02'){high=1914.02;close=1911.84;low=1911.71;}
