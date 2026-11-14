@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {kstMs,kstTime,floorMinute,rawMarketWindows,parseBybitCandles,verifyCandleCoverage,auditMinuteCandles,recoverMarketGaps} from './price-path-recovery.mjs';
+import {kstMs,kstTime,floorMinute,rawMarketWindows,parseBybitCandles,verifyCandleCoverage,auditMinuteCandles,recoverMarketGaps,fetchBybitCandles,recoverActiveSignalWindows,earliestUnknownGapOrigins} from './price-path-recovery.mjs';
 const when=(s)=>kstMs('2026-11-13 '+s);
 const candle=(time,lo=1940,hi=1950)=>({start:when(time),open:(lo+hi)/2,high:hi,low:lo,close:(lo+hi)/2});
 const eth={symbol:'ETHUSDT',status:'ENTERED',original:{direction:'SHORT',issuedAt:'2026-11-13 19:01:00',entryLow:1944.8,entryHigh:1948.2,stop:1969,tp1:1933,tp2:1894.1,tp3:1882.5}};
@@ -89,4 +89,46 @@ test('LONG stop and TP in same minute stays ambiguous',()=>{
 test('terminal stop precludes later target milestone',()=>{
  const a=auditMinuteCandles(eth,[candle('19:05:00',1940,1971),candle('19:06:00',1880,1900)],{afterMs:when('19:04:20')});
  assert.deepEqual(a.events.map(e=>e.kind),['STOPPED']);
+});
+
+test('fallback uses official Bybit backup only after primary HTTP 403 and verifies every 1m candle',async()=>{
+ const start=when('19:04:00'),list=[0,1].map(i=>[String(start+i*60000),'1945','1950','1940','1944','1','100']);
+ const seen=[];
+ const result=await fetchBybitCandles({symbol:'ETH',fromMs:start,toMs:start+60000,
+  fetcher:async url=>{seen.push(url);return seen.length===1?{ok:false,status:403}:{ok:true,json:async()=>({retCode:0,result:{list}})};}});
+ assert.equal(result.length,2);
+ assert.equal(new URL(seen[0]).hostname,'api.bybit.com');
+ assert.equal(new URL(seen[1]).hostname,'api.bytick.com');
+});
+test('backup rejects incomplete 1m coverage and never invents a winning trade',async()=>{
+ const start=when('19:04:00'),seen=[];
+ await assert.rejects(fetchBybitCandles({symbol:'ETH',fromMs:start,toMs:start+120000,
+  fetcher:async url=>{seen.push(url);return {ok:true,json:async()=>({retCode:0,result:{list:[
+   [String(start),'1945','1950','1940','1944'],[String(start+120000),'1944','1950','1940','1945']
+  ]}})};}}),/BYBIT_INCOMPLETE_1M_COVERAGE/);
+ assert.equal(seen.length,2);
+});
+test('an ENTERED original has its earlier failed gap retained across later snapshots',()=>{
+ const original={id:'ETH-LIVE',symbol:'ETHUSDT',status:'ENTERED'};
+ const row=[{evidence:{perSymbol:{ETH:{priorOfficialAt:'2026-11-13 19:04:20',gapSeconds:519,
+  couldNotVerifySignals:['ETH-LIVE']}}}}];
+ const found=earliestUnknownGapOrigins([original],row);
+ assert.equal(found['ETH-LIVE'],'2026-11-13 19:04:20');
+ const terminal=earliestUnknownGapOrigins([{...original,status:'TP3_DONE'}],row);
+ assert.deepEqual(terminal,{});
+});
+test('later 1m recovery includes old missing minute instead of querying only recent period',async()=>{
+ const old=when('19:04:00'),list=Array.from({length:12},(_,i)=>[
+  String(old+i*60000),'1945','1950','1940','1944','1','100']);
+ const starts=[];
+ const result=await recoverActiveSignalWindows(raw(),{ethTime:'2026-11-13 19:12:20',
+  btcTime:'2026-11-13 19:12:20'},[{id:'ETH-LIVE',symbol:'ETHUSDT',
+  status:'ENTERED',verifiedUntil:'2026-11-13 19:12:20'}],{
+  unverifiedOrigins:{'ETH-LIVE':'2026-11-13 19:04:20'},
+  fetcher:async url=>{starts.push(new URL(url).searchParams.get('start'));
+   return {ok:true,json:async()=>({retCode:0,result:{list}})};}
+ });
+ assert.equal(result.ETH.recovered,true);
+ assert.equal(result.ETH.coveredFrom,'2026-11-13 19:04:00');
+ assert.equal(starts[0],String(old));
 });
