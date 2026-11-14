@@ -4,7 +4,7 @@ import {makeOAuth} from './oauth.mjs';
 import {applyCachedPolicyResponse} from './cached-policy-response.mjs';
 import {buildSignalView,SIGNAL_TABLE_OUTPUT_RULE} from './signal-table-view.mjs';
 import {storePreparedSnapshot,recoverOfficialSubmissionRaw} from './prepared-snapshot.mjs';
-import {rawMarketWindows,recoverActiveSignalWindows} from './price-path-recovery.mjs';
+import {rawMarketWindows,recoverActiveSignalWindows,earliestUnknownGapOrigins} from './price-path-recovery.mjs';
 import {planVerifiedMechanicalEvents,validateRecoveredProof} from './official-price-tracker.mjs';
 import {assemblePreparedChains,planPreparedEvents} from './prepared-path-chain.mjs';
 import {OFFICIAL_POLICY,VERSION,prepare,sourcePolicy,validateSnapshot,validateOfficialSubmission,ledgerHash,sessionId,digest,checkEvent} from './v17-core.mjs';
@@ -102,17 +102,12 @@ async function carriedUncertainty(db,session,ledger){
 // Resolve the first known gap origin for an already quarantined signal. A later
 // complete candle cannot silently erase an old unresolved interval.
 async function unverifiedOrigins(db,session,ledger){
- const wanted=ledger.filter(s=>s.status==='UNVERIFIED'),origins={};
- if(!wanted.length)return origins;
+ const wanted=ledger.filter(s=>['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(s.status));
+ if(!wanted.length)return {};
  const r=await db.query("SELECT official->'evidenceQuality' AS evidence FROM v17_ai_analyses WHERE session=$1 AND official->'evidenceQuality' IS NOT NULL ORDER BY created_at DESC LIMIT 1000",[session]);
- for(const s of wanted){
-  const sym=s.symbol==='BTCUSDT'?'BTC':'ETH';
-  const found=r.rows.map(x=>x.evidence?.perSymbol?.[sym])
-   .filter(x=>x&&x.gapSeconds>60&&x.priorOfficialAt&&
-    (x.couldNotVerifySignals||[]).includes(s.id));
-  if(found.length)origins[s.id]=found.reduce((a,x)=>a<x.priorOfficialAt?a:x.priorOfficialAt,found[0].priorOfficialAt);
- }
- return origins;
+ // The failed 11:02→11:31 history must be retried even if the status still
+ // says ENTERED. A new verified snapshot does not erase missing past minutes.
+ return earliestUnknownGapOrigins(wanted,r.rows);
 }
 async function readVerifiedGapProof(db,session,snapshotSha){
  const r=await db.query('SELECT proof FROM v17_ai_gap_proofs WHERE session=$1 AND snapshot_sha=$2',[session,snapshotSha]);
@@ -130,7 +125,7 @@ async function reconcileVerifiedPricePath(db,session,raw,snapshot,previousSnapsh
  if(!ledger.some(s=>['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(s.status)))
   return {proof:{},events:[],notes:['NO_ACTIVE_SIGNAL'],backendRecoveryMs:0};
  const begin=Date.now(),origins=await unverifiedOrigins(db,session,ledger);
- const needIntermediate=ledger.some(x=>x.status==='UNVERIFIED')||
+ const needIntermediate=Object.keys(origins).length>0||ledger.some(x=>x.status==='UNVERIFIED')||
   ['BTC','ETH'].some(sym=>{
    const prev=previousSnapshot?.[sym==='BTC'?'btcTime':'ethTime'];
    const path=rawMarketWindows(raw)[sym].pathStart;
@@ -142,7 +137,7 @@ async function reconcileVerifiedPricePath(db,session,raw,snapshot,previousSnapsh
   preparedRaws=q.rows.map(x=>x.raw);
  }
  const base={...previousSnapshot};
- for(const s of ledger.filter(x=>x.status==='UNVERIFIED')){
+ for(const s of ledger.filter(x=>origins[x.id])){
   const origin=origins[s.id],field=s.symbol==='BTCUSDT'?'btcTime':'ethTime';
   if(origin&&(!base[field]||origin<base[field]))base[field]=origin;
  }
@@ -153,7 +148,10 @@ async function reconcileVerifiedPricePath(db,session,raw,snapshot,previousSnapsh
   const sym=sig.symbol==='BTCUSDT'?'BTC':'ETH';
   const previous=previousSnapshot?.[sym==='BTC'?'btcTime':'ethTime'];
   const from=sig.verifiedUntil||sig.original?.issuedAt;
-  return [sig.id,previous&&from?(previous>from?previous:from):previous||from];
+  const ordinary=previous&&from?(previous>from?previous:from):previous||from;
+  // A prior missing interval belongs to this exact original signal, and
+  // must be replayed before any later TP/STOP event may be finalized.
+  return [sig.id,origins[sig.id]||ordinary];
  }));
  let planned=planPreparedEvents({ledger,history:prepared,currentAtBySymbol:at,unverifiedOrigins:origins,auditStarts});
  const needsRemote=ledger.some(s=>['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(s.status)&&
