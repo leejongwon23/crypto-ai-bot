@@ -32,12 +32,15 @@ function screenOne(t,symbol){
  const [prevHigh,prevLow]=pair(t,/^prev_day_high\/low:\s*([\d.]+)\s*\/\s*([\d.]+)/m);
  const [swingHigh,swingLow]=pair(t,/^15m:\s*atr14=[^\n]*\bswingHigh=([\d.]+)\s*\|\s*swingLow=([\d.]+)/m);
  const order=str(t,/^path_range_pct:[^\n]*\border:\s*(LOW_FIRST|HIGH_FIRST|UNKNOWN)/m);
+ const moment=/^path_high\/low:\s*[\d.]+\s*@\s*(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s*\/\s*[\d.]+\s*@\s*(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)/m.exec(t);
+ const highAt=moment?.[1]??null,lowAt=moment?.[2]??null;
+ const distinctClosed=Boolean(highAt&&lowAt&&at&&highAt.slice(0,16)<at.slice(0,16)&&lowAt.slice(0,16)<at.slice(0,16)&&highAt!==lowAt);
  const complete=[price,at,cvd5,cvd15,hist1,hist5,ema5,ema15,ema4h,ema1d,vwap,atr,pathHigh,pathLow,order].every(x=>x!==null&&x!==undefined);
  const result={symbol:symbol+'USDT',snapshotAt:at,price,source:'USER_PASTED_SNAPSHOT',
   countertrendLong:ema4h==='BEAR'||ema1d==='BEAR',countertrendShort:ema4h==='BULL'||ema1d==='BULL'};
  for(const direction of ['LONG','SHORT']){
   const long=direction==='LONG';
-  const structural=long?order==='LOW_FIRST'&&pos(pathLow)&&price>pathLow:order==='HIGH_FIRST'&&pos(pathHigh)&&price<pathHigh;
+  const structural=distinctClosed&&(long?order==='LOW_FIRST'&&highAt>lowAt&&pos(pathLow)&&price>pathLow:order==='HIGH_FIRST'&&highAt<lowAt&&pos(pathHigh)&&price<pathHigh);
   const flow=cvdQuality==='HIGH'&&(long?cvd5>0&&cvd15>0:cvd5<0&&cvd15<0);
   // Deliberately no 30m, 1h, 4h or 1D trend alignment requirement.
   const momentum=long?hist1>0&&(hist5>0||ema5==='BULL'):hist1<0&&(hist5<0||ema5==='BEAR');
