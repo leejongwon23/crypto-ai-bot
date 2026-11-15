@@ -2,11 +2,12 @@ import crypto from 'node:crypto';
 import {POLICY_TEXT,POLICY_SHA256,POLICY_BYTES,POLICY_LINES} from './policy-v17.mjs';
 import {buildAutoSwitchContext,validateAutoSwitchAudit} from './auto-switch-audit.mjs';
 import {screenReversalEntries,validateReversalReview} from './reversal-entry-audit.mjs';
+import {USER_CLOSED} from './user-close-shorts.mjs';
 
 export const OFFICIAL_POLICY={name:'MASTER PROMPT V1.7 FINAL',sha256:POLICY_SHA256,bytes:POLICY_BYTES,lines:POLICY_LINES};
 export const VERSION='V17_VERBATIM_AI_OFFICIAL_REGISTRY_1.0.3_AUDITED_AUTO_SWITCH';
-const STATES=new Set(['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','TP3_DONE','STOPPED','CANCELLED','REDESIGNED_CANCELLED','EARLY_EXIT','REVERSE_EXIT','UNVERIFIED']);
-const TERMINAL=new Set(['TP3_DONE','STOPPED','CANCELLED','REDESIGNED_CANCELLED','EARLY_EXIT','REVERSE_EXIT']);
+const STATES=new Set(['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','TP3_DONE','STOPPED','CANCELLED','REDESIGNED_CANCELLED','EARLY_EXIT','REVERSE_EXIT','UNVERIFIED',USER_CLOSED]);
+const TERMINAL=new Set(['TP3_DONE','STOPPED','CANCELLED','REDESIGNED_CANCELLED','EARLY_EXIT','REVERSE_EXIT',USER_CLOSED]);
 const ENTERED_STATES=new Set(['NEW_ENTRY','ENTERED','TP1','TP2']);
 // Separate immutable issued prices from the last valid, effective-at revision.
 export function effectivePlanOf(row){
@@ -231,6 +232,18 @@ export function checkEvent(evt,ledger){
  assert(!TERMINAL.has(signal.status),'TERMINAL_SIGNAL_IMMUTABLE');
  assert(ms(evt.at)>=ms(signal.original?.issuedAt||signal.issuedAt),'RETROACTIVE_EVENT_FORBIDDEN');
  if(signal.verifiedUntil&&ms(evt.at)<ms(signal.verifiedUntil))err('EVENT_TIME_BEFORE_PREVIOUS_EVENT');
+ if(evt.kind===USER_CLOSED){
+  assert(signal.original?.direction==='SHORT'&&['BTCUSDT','ETHUSDT'].includes(signal.symbol),'USER_CLOSE_SHORT_ONLY');
+  assert(['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(signal.status),'USER_CLOSE_ONLY_LIVE_SIGNAL');
+  assert(evt.provenance==='USER_DIRECTED_ADMINISTRATIVE_TRACKING_CLOSURE'&&
+   evt.explicitUserInstruction==='CLOSE_ALL_EXISTING_SHORT_SIGNALS'&&
+   evt.noTradeExecutionClaim===true&&evt.accountPositionUnverified===true&&
+   evt.historicalOutcomeUnverified===true&&evt.originalSignalPreserved===true&&evt.noPnLClaim===true,
+   'USER_CLOSE_PROVENANCE_AND_UNVERIFIED_OUTCOME_REQUIRED');
+  assert(evt.exitPrice===undefined&&evt.realizedPnlPct===undefined&&evt.pricePathEvidence===undefined,
+   'USER_CLOSE_CANNOT_CLAIM_VERIFIED_MARKET_EXIT');
+  return true;
+ }
  if(evt.kind==='REVISION'){
   assert(['NEW_ENTRY','ENTERED','TP1','TP2'].includes(signal.status),'REVISION_REQUIRES_ENTERED_SIGNAL');
   assert(evt.plan&&typeof evt.plan==='object','REVISION_PLAN_REQUIRED');
@@ -325,6 +338,7 @@ export function validateOfficialSubmission(args,ledger,previousSnapshot=null,car
  }
  const news=analysis.newSignals??[],events=analysis.events??[];
  assert(Array.isArray(news)&&Array.isArray(events),'SIGNAL_EVENTS_ARRAY_REQUIRED');
+ assert(!events.some(e=>e.kind===USER_CLOSED),'USER_CLOSE_MUST_USE_EXPLICIT_ADMINISTRATIVE_COMMAND');
  validateReversalReview(analysis,screenReversalEntries(raw));
  // V1.7 clause 21: reject a prose-only HOLD that omits source-anchored,
  // numerically checked immediate and nearer entry comparison.
