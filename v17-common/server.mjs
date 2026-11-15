@@ -12,6 +12,7 @@ import {assembleSubmittedMinuteChains} from './submitted-minute-chain.mjs';
 import {OFFICIAL_POLICY,VERSION,prepare,sourcePolicy,validateSnapshot,validateOfficialSubmission,ledgerHash,sessionId,digest,checkEvent} from './v17-core.mjs';
 import {ATTEST_CONFIRM,TWO_USER_TP3_IDS,planUserAttestedTp3} from './user-attested-tp3.mjs';
 import {USER_NO_ENTRY_KIND,USER_NO_ENTRY_CONFIRM,USER_NO_ENTRY_IDS,planUserNoEntryAttestation} from './user-attested-no-entry.mjs';
+import {USER_CLOSE_SHORTS_KIND,USER_CLOSE_SHORTS_CONFIRM,USER_CLOSED,closeableShorts,planUserCloseShorts} from './user-close-shorts.mjs';
 
 const PORT=Number(process.env.PORT||3000);
 const MODE=process.env.DEPLOYMENT_MODE||'local';
@@ -495,6 +496,55 @@ export async function resetOfficialLedger(args={}) {
    beforeLedgerSha256:before,afterLedgerSha256:ledgerHash(after),remaining:remain.rows[0],sourcePolicySha256:OFFICIAL_POLICY.sha256};
  }catch(e){try{await client.query('ROLLBACK')}catch{}throw e}finally{client.release()}
 }
+
+ // Dedicated user-authorized ledger administration; NOT an exchange-account trade close.
+export async function closeAllUserShorts(args={}){
+ const session=sessionId(args.session||'OFFICIAL_V17');
+ if(session!=='OFFICIAL_V17'||args.kind!==USER_CLOSE_SHORTS_KIND)throw Error('USER_SHORT_CLOSE_SCOPE_FORBIDDEN');
+ if(args.confirmation!==USER_CLOSE_SHORTS_CONFIRM)throw Error('USER_SHORT_CLOSE_EXPLICIT_CONFIRMATION_REQUIRED');
+ if(!/^[0-9a-f]{64}$/.test(args.expectedLedgerSha256||''))throw Error('USER_SHORT_CLOSE_EXPECTED_LEDGER_HASH_REQUIRED');
+ const db=await database(),client=await db.connect();
+ try{
+  await client.query('BEGIN');
+  await client.query('INSERT INTO v17_ai_sessions(name) VALUES($1) ON CONFLICT DO NOTHING',[session]);
+  await client.query('SELECT name FROM v17_ai_sessions WHERE name=$1 FOR UPDATE',[session]);
+  const old=await readLedger(client,session),before=ledgerHash(old);
+  if(args.expectedLedgerSha256!==before)throw Error('USER_SHORT_CLOSE_LEDGER_CHANGED_RETRY');
+  const active=closeableShorts(old);
+  if(!active.length){
+   if(!Array.isArray(args.signalIds)||!args.signalIds.length||
+      !args.signalIds.every(id=>old.some(x=>x.id===id&&x.status===USER_CLOSED)))
+    throw Error('USER_SHORT_CLOSE_ALREADY_EMPTY_WITH_UNMATCHED_IDS');
+   const snapshot=await latestOfficialSnapshot(client,session);
+   await client.query('COMMIT');
+   return {status:'OFFICIAL_USER_SHORTS_ALREADY_CLOSED',session,closedIds:args.signalIds,
+    afterLedgerSha256:before,accountTradeExecution:false,accountPositionsVerifiedClosed:false,
+    historicalTradeOutcomeVerified:false,signalView:buildSignalView({ledger:old,snapshot})};
+  }
+  const time=await client.query("SELECT to_char(NOW() AT TIME ZONE 'Asia/Seoul','YYYY-MM-DD HH24:MI:SS') AS at");
+  const events=planUserCloseShorts({ledger:old,signalIds:args.signalIds,at:time.rows[0].at});
+  const staged=old.map(x=>({...x}));
+  for(const e of events){
+   checkEvent(e,staged);
+   await client.query('INSERT INTO v17_ai_events(session,id,event,at_kst) VALUES($1,$2,$3,$4)',[session,e.id,JSON.stringify(e),e.at]);
+   const updated=await client.query(
+    'UPDATE v17_ai_signals SET status=$3,verified_until=$4 WHERE session=$1 AND id=$2 AND status=$5',
+    [session,e.id,USER_CLOSED,e.at,staged.find(x=>x.id===e.id).status]);
+   if(updated.rowCount!==1)throw Error('USER_SHORT_CLOSE_CONCURRENT_STATUS_CHANGE');
+   const row=staged.find(x=>x.id===e.id);row.status=USER_CLOSED;row.verifiedUntil=e.at;
+  }
+  const after=await readLedger(client,session);
+  if(closeableShorts(after).length||!events.every(e=>after.some(x=>x.id===e.id&&x.status===USER_CLOSED)))
+   throw Error('USER_SHORT_CLOSE_PERSISTENCE_VERIFICATION_FAILED');
+  const snapshot=await latestOfficialSnapshot(client,session);
+  await client.query('COMMIT');
+  return {status:'OFFICIAL_USER_SHORTS_CLOSED_STORED',session,closedIds:events.map(e=>e.id),
+   beforeLedgerSha256:before,afterLedgerSha256:ledgerHash(after),closeAt:time.rows[0].at,
+   administrativeSignalTrackingClosed:true,accountTradeExecution:false,accountPositionsVerifiedClosed:false,
+   historicalTradeOutcomeVerified:false,events,signalView:buildSignalView({ledger:after,snapshot,changes:events})};
+ }catch(e){try{await client.query('ROLLBACK');}catch{}throw e;}finally{client.release();}
+}
+
 async function ledgerView(args){const session=sessionId(args.session||'OFFICIAL_V17'),db=await database();
  const [ledger,snapshot]=await Promise.all([readLedger(db,session),latestOfficialSnapshot(db,session)]);
  return {session,policy:OFFICIAL_POLICY,ledgerSha256:ledgerHash(ledger),signals:ledger,
@@ -517,7 +567,7 @@ const tools=[
  {name:'publish_official_v17_analysis',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'SECOND STEP after NEEDS_AI_ANALYSIS. Existing confirmed price-touch and stop/TP event checks still mandatory. IMPORTANT GAP FIX: unknown historical signal outcome does NOT force current BTC/ETH conclusion=UNVERIFIED or block fresh independent market analysis. Include analysis.historicalUncertainty.{BTC|ETH}={unresolvedIds:[...],evidence:string} for each affected symbol; do not claim old position closed or account flat. To replace old PENDING with unresolved gap, include an old-ID UNVERIFIED quarantine event (uncertaintyScope,priorConfirmedState,marketReassessment, at current snapshot time) in same atomic submission, and new formal plan historicalExposureUnknownIds, historicalExposureRiskDisclosure, independentCurrentMarketEvidence. New plan is an analytical signal, NOT exchange account position certainty. An old ENTERED can coexist with separately justified same-direction ADD_ON or opposite PENDING switch plan; new signal must identify parentSignalId, relationToExisting SAME_DIRECTION_ADD_ON with addOnRiskEvidence and existingPositionRiskEvidence, OR OPPOSITE_PENDING with transitionOnTouchEvidence and existingPositionRiskEvidence. Old proven ENTERED cannot be silently replaced or counted flat; any opposite ENTERED event needs all opposed positions to have verified exit events first. REVERSE_EXIT/EARLY_EXIT requires strongCounterEvidence, structureEvidence, flowEvidence, contextEvidence, and outcomeUnverified=true if no verified entry/exit prices; actual PnL requires verifiedEntryPrice and entryPriceEvidence matching calculated PnL. REVISION event requires observedPrice=current snapshot, new plan stop/TP1/TP2/TP3, immutable previous achieved milestones and tighter effective stop; revised plan is read from ledger on following runs. Never retroactively cancel or claim TP/SL in gaps. Four directions A-E, original V1.7 unchanged, original stop/TP unchanged. If reversalScreen returned REVIEW_REQUIRED, include analysis.reversalReview for the matching symbol and side: ISSUE_NOW, ISSUE_PENDING, or HOLD with nontrend structural/risk blocker and opposing evidence; ISSUE requires an otherwise fully valid formal reversal signal. For live PENDING with current ATR/EMA structure, supply analysis.autoSwitchAudit.BTC/ETH as described in run response requirements, with each old ID, observed distance in ATR/percent, numeric immediate+near alternatives, source anchors, stop/TP/RR and quantified KEEP rejection or atomic REDESIGN. Prose-only HOLD or LOW CVD-only justification is rejected. Supply exact hashes and full 16-step+clause audit.',inputSchema:{type:'object',properties:{raw:{type:'string'},session:{type:'string'},policySha256:{type:'string'},snapshotSha256:{type:'string'},beforeLedgerSha256:{type:'string'},decisionKey:{type:'string'},analysis:{type:'object',description:'Full V1.7 decision: reportMarkdown; directions BTC_LONG/BTC_SHORT/ETH_LONG/ETH_SHORT each marketEvidence,counterEvidence,alternatives A-E; coupling; checks 1..16; clauses 0..23,A,B,FINAL; audit20; conclusions BTC/ETH {decision=LONG|SHORT|HOLD|MANAGE|UNVERIFIED,evidence}; historicalUncertainty (only when affected) {BTC|ETH:{unresolvedIds:[old IDs],evidence:string}}; newSignals[]; events[] with prior PENDING UNVERIFIED quarantine if a gap blocks historical state. Keep current decisions independent of unknown outcomes. Use parentSignalId and relationToExisting for add-on or opposite pending. Event ordering is chronological and exit must precede opposed ENTERED; revisions require observedPrice matching the current snapshot.'}},required:['raw','policySha256','snapshotSha256','beforeLedgerSha256','decisionKey','analysis']}},
  {name:'read_official_btc_eth_ledger',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Retrieve NEW V1.7 source-exact official signal ledger and chronological immutable events for this session. Previous noncompliant legacy companion signals remain isolated, not silently imported.',inputSchema:{type:'object',properties:{session:{type:'string'}},required:[]}},
  {name:'read_official_v17_decision_history',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Read-only chronological OFFICIAL_V17 AI decision history for missed-opportunity review. Never convert hypothetical candidates to historical trades or alter immutable signal outcomes.',inputSchema:{type:'object',properties:{session:{type:'string'},limit:{type:'integer',minimum:1,maximum:100},includeDirections:{type:'boolean'}},required:[]}},
- {name:'register_formal_btc_eth_signal',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'COMPATIBILITY path for installed plugins: call run_official_btc_eth_snapshot ONCE with exact user raw. Then submit signal={kind:V17_OFFICIAL_SUBMISSION,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis} WITHOUT raw; server recovers the identical prepared raw securely by session plus SHA. Older raw submissions remain supported. Standalone signal writing is forbidden. Include autoSwitchAudit for live pending entries. When reversalScreen reports REVIEW_REQUIRED include analysis.reversalReview with source-based ISSUED/HOLD justification and a V1.7-compliant reversal newSignal for ISSUE_NOW/PENDING. For explicit user-confirmed account nonentry only, use signal.kind=V17_USER_ATTESTED_NO_ENTRY_TWO_ONLY with confirmation=USER_CONFIRMS_BTC_AND_ETH_NO_ACCOUNT_ENTRY, both exact 2026-11-14 signal IDs and expectedLedgerSha256 from ledger view; historical price-touch remains unverified.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
+ {name:'register_formal_btc_eth_signal',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'COMPATIBILITY path for installed plugins: call run_official_btc_eth_snapshot ONCE with exact user raw. Then submit signal={kind:V17_OFFICIAL_SUBMISSION,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis} WITHOUT raw; server recovers the identical prepared raw securely by session plus SHA. Older raw submissions remain supported. Standalone signal writing is forbidden. Include autoSwitchAudit for live pending entries. When reversalScreen reports REVIEW_REQUIRED include analysis.reversalReview with source-based ISSUED/HOLD justification and a V1.7-compliant reversal newSignal for ISSUE_NOW/PENDING. For explicit user-directed closure of all existing BTC/ETH SHORT analytical signals, use register_formal_btc_eth_signal signal={kind:V17_USER_CLOSE_ALL_EXISTING_SHORT_SIGNALS,confirmation:USER_DIRECTS_CLOSE_ALL_EXISTING_BTC_ETH_SHORT_SIGNALS,expectedLedgerSha256:<read ledger hash>,signalIds:<exact current active SHORT IDs>}; this is administrative tracking closure and MUST NOT claim any exchange account order, fill, PnL or historical trade exit. For explicit user-confirmed account nonentry only, use signal.kind=V17_USER_ATTESTED_NO_ENTRY_TWO_ONLY with confirmation=USER_CONFIRMS_BTC_AND_ETH_NO_ACCOUNT_ENTRY, both exact 2026-11-14 signal IDs and expectedLedgerSha256 from ledger view; historical price-touch remains unverified.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
 ];
 // This is a user-facing output preference only; core V1.7 analysis,
 // validator, safety audits, and immutable signal state are unchanged.
@@ -554,6 +604,8 @@ async function mcp(req,res,principal){
     result=await resetOfficialLedger({...args.signal,session:args.session||args.signal.session});
    }else if(args.signal?.kind===USER_NO_ENTRY_KIND){
     result=await attestUserNoAccountEntry({...args.signal,session:args.session||args.signal.session});
+   }else if(args.signal?.kind===USER_CLOSE_SHORTS_KIND){
+    result=await closeAllUserShorts({...args.signal,session:args.session||args.signal.session});
    }else{
    if(args.signal?.kind!=='V17_OFFICIAL_SUBMISSION')throw Error('Standalone signal writing is forbidden. Supply signal.kind=V17_OFFICIAL_SUBMISSION with the complete V1.7 analysis envelope.');
    const payload={...args.signal,session:args.session||args.signal.session||'OFFICIAL_V17'};
