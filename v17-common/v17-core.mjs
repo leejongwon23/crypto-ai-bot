@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import {POLICY_TEXT,POLICY_SHA256,POLICY_BYTES,POLICY_LINES} from './policy-v17.mjs';
 import {buildAutoSwitchContext,validateAutoSwitchAudit} from './auto-switch-audit.mjs';
+import {screenReversalEntries,validateReversalReview} from './reversal-entry-audit.mjs';
 
 export const OFFICIAL_POLICY={name:'MASTER PROMPT V1.7 FINAL',sha256:POLICY_SHA256,bytes:POLICY_BYTES,lines:POLICY_LINES};
 export const VERSION='V17_VERBATIM_AI_OFFICIAL_REGISTRY_1.0.3_AUDITED_AUTO_SWITCH';
@@ -148,7 +149,7 @@ export function submissionContract(){
   requiredEnvelope:['raw','session','policySha256','snapshotSha256','beforeLedgerSha256','decisionKey','analysis'],
   snapshotIntegrity:'Pass the EXACT identical raw string submitted to run_official_btc_eth_snapshot, including spacing, ordering, and all sections. A reconstructed or abbreviated copy is invalid.',
   exactReportField:'analysis.reportMarkdown (not report, userReport, finalReport, completeUserReport, or summary)',
-  requiredAnalysis:['reportMarkdown','directions','coupling','checks','clauses','audit20','conclusions','historicalUncertainty if required by evidenceQuality','autoSwitchAudit if required by autoSwitchContext','newSignals','events'],
+  requiredAnalysis:['reportMarkdown','directions','coupling','checks','clauses','audit20','conclusions','historicalUncertainty if required by evidenceQuality','autoSwitchAudit if required by autoSwitchContext','reversalReview if reversalScreen has REVIEW_REQUIRED','newSignals','events'],
   statusesForChecksAndClauses:['CONFIRMED','UNVERIFIED','VIOLATION'],
   outcomePrinciple:'A price-data gap does not cancel current independent BTC/ETH analysis. Mark historical trade outcomes UNVERIFIED with exact affected IDs and distinguish them from new-market LONG/SHORT/HOLD.',
   autoSwitchPrinciple:'Follow requirements.autoSwitchAudit and autoSwitchContext; source-anchored immediate and near candidates must be compared for EACH old pending ID. Never default to KEEP merely because price is distant or CVD reliability is LOW.',
@@ -162,6 +163,7 @@ export function submissionContract(){
    conclusions:{BTC:{decision:null,evidence:null},ETH:{decision:null,evidence:null}},
    historicalUncertainty:{BTC:{unresolvedIds:[],evidence:null},ETH:{unresolvedIds:[],evidence:null}},
    autoSwitchAudit:{BTC:{snapshotAt:null,price:null,reviews:[]},ETH:{snapshotAt:null,price:null,reviews:[]}},
+   reversalReview:{BTC:{LONG:null,SHORT:null},ETH:{LONG:null,SHORT:null}},
    newSignals:[],events:[]
   }
  };
@@ -169,10 +171,11 @@ export function submissionContract(){
 
 export function prepare({raw,session='OFFICIAL_V17',ledger=[],saved=null,previousSnapshot=null,carriedUncertaintyBySymbol={},verifiedGapRecoveryBySymbol={}}){
  const snapshot=validateSnapshot(raw),id=sessionId(session),beforeLedgerSha256=ledgerHash(ledger);
+ const reversalScreen=screenReversalEntries(raw);
  const evidenceQuality=assessSnapshotEvidence(raw,{previousSnapshot,ledger,carriedUncertaintyBySymbol,verifiedGapRecoveryBySymbol});
  const key=digest({session:id,snapshotSha256:snapshot.sha256,ledgerSha256:beforeLedgerSha256,policySha256:POLICY_SHA256});
  if(saved)return {status:'OFFICIAL_REPLAY',session:id,snapshot,policy:OFFICIAL_POLICY,officialDecision:saved,evidenceQuality,source:'PERSISTED_FIRST_OFFICIAL_RESULT',sameState:true};
- return {status:'NEEDS_AI_ANALYSIS',session:id,snapshot,policy:sourcePolicy(),ledger:ledger.map(r=>({...r})),evidenceQuality,
+ return {status:'NEEDS_AI_ANALYSIS',session:id,snapshot,policy:sourcePolicy(),ledger:ledger.map(r=>({...r})),evidenceQuality,reversalScreen,
   autoSwitchContext:buildAutoSwitchContext(raw,ledger,snapshot),beforeLedgerSha256,decisionKey:key,requirements:{
   submissionContract:submissionContract(),
   role:'AI must read and apply THE ENTIRE original Korean V1.7 policy below, not approximate with fixed indicator gates.',
@@ -182,6 +185,7 @@ export function prepare({raw,session='OFFICIAL_V17',ledger=[],saved=null,previou
   next:'After complete V1.7 analysis call publish_official_v17_analysis with exact prompt sha, snapshot and ledger hashes, decisionKey and structured decision. If the installed plugin has not refreshed its tools list, use existing register_formal_btc_eth_signal with signal={kind:V17_OFFICIAL_SUBMISSION,raw,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis}. Never present an unpublished preliminary candidate as official.',
   noOutcomeIfDataMissing:'Unknown historical trade outcome must be reported separately from the current market decision. If present market evidence is insufficient use HOLD; never fabricate prices or a closed/flat account.',
   autoSwitchExecution:'At each new snapshot compare KEEP, PENDING REDESIGN, SAME_DIRECTION_ADD_ON, OPPOSITE_PENDING, EARLY_EXIT/REVERSE_EXIT, and REVISION. Separate parentSignalId metadata required. An opposite pending touch needs prior opposing exits before entered; it never silently opens a simultaneous opposite trade. Newly revised stop/TP values take effect only prospectively; original v0 preserved.',
+  reversalEntryAudit:'MANDATORY when reversalScreen marks a LONG/SHORT REVIEW_REQUIRED. Independently review early bottom LONG or early top SHORT even if 30m/1h/4h/1D EMA disagrees. Submit analysis.reversalReview.<BTC|ETH>.<LONG|SHORT>={action:ISSUE_NOW|ISSUE_PENDING|HOLD,evidence,counterEvidence}; HOLD additionally requires blocker:STRUCTURE|STOP|TARGET|RR|RETEST|EXECUTION_TIMING|COUPLING|EXPOSURE|CONFLICTING_FLOW|DATA_QUALITY and rejectionEvidence. Higher-timeframe downtrend alone cannot justify HOLD. ISSUE_NOW/PENDING requires a fully validated formal newSignal of tradeType 추세 반전형, with real entry stop TP1-3 and V1.7 full approval. Never auto-publish solely based on this preliminary screen. Legacy trend-following decisions and immutable original ledger are unchanged.',
   autoSwitchAudit:'MANDATORY when a PENDING signal has ATR/EMA source: use autoSwitchContext source values and submit analysis.autoSwitchAudit.BTC/ETH with snapshotAt,price,reviews[] covering EVERY pending ID. Review {id,distanceAtr,distancePct,immediate,near,farEvidence,oppositeEvidence,keepEvidence,executionTimingEvidence,candidateComparison,couplingEvidence,selection:KEEP|REDESIGN|CANCEL|QUARANTINE}. Immediate and near must each use a priced same-direction PLAN {kind:PLAN,anchor,anchorPrice,evidence,counterEvidence,plan:{direction,entryLow,entryHigh,stop,tp1,tp2,tp3,rr2,stopPct,tp2Pct},stopEvidence,tp1Evidence,tp2Evidence,tp3Evidence,retestEvidence,tp2Kind,tp3Kind} OR NO_PLAN {kind:NO_PLAN,anchor,anchorPrice,evidence,counterEvidence,missingLeg,blockers}. Use exact available observed anchors in autoSwitchContext (SPOT, EMA_1m_12, EMA_5m_26, VWAP_6h, PATH_LOW etc); compute TP2 RR and stop/TP2 percent at worst entry. NEAR must be closer than old, source anchored. For KEEP with priced PLAN require rejectionEvidence,rejectionFactors (at least one structural/risk factor beyond CVD),rejectionAnchor,rejectionAnchorPrice matching source. CVD LOW alone never suffices. If prices cannot be grounded, NO_PLAN must name missing structural leg and observed source anchor. FAR/OPPOSITE evaluated in original four-direction A-E and review evidence. REDESIGN requires atomic old termination and distinct full new ID. Original 902-line V1.7, signals, and account positions must not change.',
   gapAwareSwitch:'If a historical PENDING trade has a real unresolved price gap, current LONG/SHORT decision must still be independently assessed. A new formal plan may only be published atomically with an auditable UNVERIFIED quarantine of the old PENDING record (or after it was already quarantined), explicit old ID risk disclosure, and no confirmed competing live position. This is analytical signal registration, NOT proof the exchange account is flat.'}};
 }
@@ -321,6 +325,7 @@ export function validateOfficialSubmission(args,ledger,previousSnapshot=null,car
  }
  const news=analysis.newSignals??[],events=analysis.events??[];
  assert(Array.isArray(news)&&Array.isArray(events),'SIGNAL_EVENTS_ARRAY_REQUIRED');
+ validateReversalReview(analysis,screenReversalEntries(raw));
  // V1.7 clause 21: reject a prose-only HOLD that omits source-anchored,
  // numerically checked immediate and nearer entry comparison.
  validateAutoSwitchAudit(analysis,raw,ledger,shot,news,events);
