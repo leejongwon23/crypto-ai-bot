@@ -1,6 +1,6 @@
 // Read-only presentation of the official V1.7 ledger. Never creates or changes
 // a signal, a price touch, a position, a target, or a formal outcome.
-const TERMINAL = new Set(['TP3_DONE','STOPPED','CANCELLED','REDESIGNED_CANCELLED','EARLY_EXIT','REVERSE_EXIT']);
+const TERMINAL = new Set(['TP3_DONE','STOPPED','CANCELLED','REDESIGNED_CANCELLED','EARLY_EXIT','REVERSE_EXIT','USER_CLOSED']);
 const ENTERED = new Set(['NEW_ENTRY','ENTERED','TP1','TP2']);
 // UNVERIFIED may mean an earlier entry was PROVEN, while a later exit is not.
 // Never erase the observed entry or declare the still-open position as fact.
@@ -10,7 +10,7 @@ const hasKnownEntry = row=>ENTERED.has(row.status)||enteredEarlier(row);
 const userConfirmedNoAccountEntry = row => row.status==='UNVERIFIED' && row.unverifiedFrom==='PENDING' && row.userAccountEntry==='NOT_ENTERED';
 const LABEL = {
  PENDING:'대기',NEW_ENTRY:'신규 진입',ENTERED:'진입',
- TP1:'TP1 도달',TP2:'TP2 도달',UNVERIFIED:'미확인'
+ TP1:'TP1 도달',TP2:'TP2 도달',UNVERIFIED:'미확인',USER_CLOSED:'사용자 요청 추적 종료'
 };
 const CHANGE_LABEL = {
  ENTERED:'대기 → 진입 자동전환',NEW_ENTRY:'즉시 진입',
@@ -18,7 +18,7 @@ const CHANGE_LABEL = {
  EARLY_EXIT:'조기 종료',REVERSE_EXIT:'반대 방향 전환 종료',
  TP1:'TP1 도달',TP2:'TP2 도달',TP3_DONE:'TP3 완료',
  STOPPED:'손절 종료',UNVERIFIED:'과거 상태 미확인 전환',
- REVISION:'손절·목표 관리변경'
+ REVISION:'손절·목표 관리변경',USER_CLOSED:'사용자 요청 추적 종료'
 };
 export const SIGNAL_TABLE_OUTPUT_RULE =
  '최종 사용자 응답은 signalView.markdown 표만 출력한다. 시장설명·검수·미확인 사유·분석과정의 별도 문단을 쓰지 않는다. '+
