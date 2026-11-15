@@ -64,3 +64,13 @@ test('V1.7 requires NEW_ENTRY only if current price is in range',()=>{const s=si
 test('V1.7 requires PENDING when observed price is outside range',()=>{const s=signal();s.entryLow=73849;s.entryHigh=73851;s.stop=74330;assert.throws(()=>validateSignal(s,shot),/PENDING_PRICE_ALREADY_IN_RANGE/)});
 test('new signal data time must match BTC snapshot',()=>{const s=signal();s.dataAt='2026-11-12 11:26:07';assert.throws(()=>validateSignal(s,shot),/SIGNAL_DATA_TIME_MUST_EQUAL/)});
 test('rule violation forbids official signal modification',()=>{const a=args();a.analysis.newSignals=[signal()];a.analysis.clauses['17']={status:'VIOLATION',evidence:'Failed step'};assert.throws(()=>validateOfficialSubmission(a,empty),/RULE_VIOLATION_BLOCKS_SIGNAL_MUTATION/)});
+
+// Opportunity-first regression: additive search must never remove original V1.7 checks or prevent legitimate opposition-flow candidates.
+test('opportunity context is available alongside untouched V1.7 policy and official ledger',()=>{
+ const out=prepare({raw,ledger:[]});
+ assert.equal(out.policy.sha256,POLICY_SHA256);
+ assert.equal(out.opportunityContext.version,'V17_OPPORTUNITY_EXPLORER_V1');
+ assert.equal(out.ledger.length,0);
+ assert.equal(out.requirements.interpretationSafeguards.holdMustCompareExecutableOptionsNotDefaultToWaiting,true);
+ assert.ok(out.requirements.opportunityFirst.includes('Do not default to HOLD'));
+});

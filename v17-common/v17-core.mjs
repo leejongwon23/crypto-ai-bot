@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import {POLICY_TEXT,POLICY_SHA256,POLICY_BYTES,POLICY_LINES} from './policy-v17.mjs';
 import {buildAutoSwitchContext,validateAutoSwitchAudit} from './auto-switch-audit.mjs';
 import {screenReversalEntries,validateReversalReview} from './reversal-entry-audit.mjs';
+import {buildOpportunityContext} from './opportunity-engine.mjs';
 import {USER_CLOSED} from './user-close-shorts.mjs';
 
 export const OFFICIAL_POLICY={name:'MASTER PROMPT V1.7 FINAL',sha256:POLICY_SHA256,bytes:POLICY_BYTES,lines:POLICY_LINES};
@@ -173,14 +174,16 @@ export function submissionContract(){
 export function prepare({raw,session='OFFICIAL_V17',ledger=[],saved=null,previousSnapshot=null,carriedUncertaintyBySymbol={},verifiedGapRecoveryBySymbol={}}){
  const snapshot=validateSnapshot(raw),id=sessionId(session),beforeLedgerSha256=ledgerHash(ledger);
  const reversalScreen=screenReversalEntries(raw);
+ const opportunityContext=buildOpportunityContext(raw);
  const evidenceQuality=assessSnapshotEvidence(raw,{previousSnapshot,ledger,carriedUncertaintyBySymbol,verifiedGapRecoveryBySymbol});
  const key=digest({session:id,snapshotSha256:snapshot.sha256,ledgerSha256:beforeLedgerSha256,policySha256:POLICY_SHA256});
  if(saved)return {status:'OFFICIAL_REPLAY',session:id,snapshot,policy:OFFICIAL_POLICY,officialDecision:saved,evidenceQuality,source:'PERSISTED_FIRST_OFFICIAL_RESULT',sameState:true};
  return {status:'NEEDS_AI_ANALYSIS',session:id,snapshot,policy:sourcePolicy(),ledger:ledger.map(r=>({...r})),evidenceQuality,reversalScreen,
-  autoSwitchContext:buildAutoSwitchContext(raw,ledger,snapshot),beforeLedgerSha256,decisionKey:key,requirements:{
+  opportunityContext,autoSwitchContext:buildAutoSwitchContext(raw,ledger,snapshot),beforeLedgerSha256,decisionKey:key,requirements:{
   submissionContract:submissionContract(),
   role:'AI must read and apply THE ENTIRE original Korean V1.7 policy below, not approximate with fixed indicator gates.',
   noExternalScriptedSignals:true,noNewIndicatorThresholds:true,noHistoricalSignalImport:true,
+  opportunityFirst:'Do not default to HOLD or blanket-countertrend/CVD bans. opportunityContext searches immediate, nearby EMA/VWAP pullback, structural retest, and breakout candidates for BTC/ETH LONG and SHORT. Compare numerical alternatives at multiple source-anchored stop scales and try a better entry/direction before HOLD. Numerical candidates are NOT formal signals, a winning probability, or a performance claim. Preserve all V1.7 formal registration, original ledger and event chronology.',
   interpretationSafeguards:{pendingSignalMayBeIssuedBeforeFutureTouch:true,futureRetestIsNotRequiredBeforeFormalPendingIssue:true,requiresPresentStructuralReasonForPlannedRetest:true,holdMustCompareExecutableOptionsNotDefaultToWaiting:true,neverBackfillHypotheticalMissedProfit:true,gapDoesNotBlockCurrentIndependentAnalysis:true,unknownHistoryMustRemainAuditable:true,quarantinePriorPendingBeforeNewSignal:true,neverPresumeExchangeAccountFlat:true},
   requiredDirections:DIRECTIONS,requiredAlternatives:ALTERNATIVES,requiredSteps:STEPS,requiredClauses:CLAUSES,
   next:'After complete V1.7 analysis call publish_official_v17_analysis with exact prompt sha, snapshot and ledger hashes, decisionKey and structured decision. If the installed plugin has not refreshed its tools list, use existing register_formal_btc_eth_signal with signal={kind:V17_OFFICIAL_SUBMISSION,raw,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis}. Never present an unpublished preliminary candidate as official.',
