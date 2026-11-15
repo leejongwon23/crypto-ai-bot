@@ -8,6 +8,7 @@ import {rawMarketWindows,recoverActiveSignalWindows,earliestUnknownGapOrigins} f
 import {planVerifiedMechanicalEvents,validateRecoveredProof} from './official-price-tracker.mjs';
 import {assemblePreparedChains,planPreparedEvents} from './prepared-path-chain.mjs';
 import {parseSubmittedMinutePaths} from './submitted-minute-path.mjs';
+import {assembleSubmittedMinuteChains} from './submitted-minute-chain.mjs';
 import {OFFICIAL_POLICY,VERSION,prepare,sourcePolicy,validateSnapshot,validateOfficialSubmission,ledgerHash,sessionId,digest,checkEvent} from './v17-core.mjs';
 import {ATTEST_CONFIRM,TWO_USER_TP3_IDS,planUserAttestedTp3} from './user-attested-tp3.mjs';
 import {USER_NO_ENTRY_KIND,USER_NO_ENTRY_CONFIRM,USER_NO_ENTRY_IDS,planUserNoEntryAttestation} from './user-attested-no-entry.mjs';
@@ -157,6 +158,7 @@ async function reconcileVerifiedPricePath(db,session,raw,snapshot,previousSnapsh
   preparedRaws=q.rows.map(x=>x.raw);
  }
  const prepared=assemblePreparedChains(preparedRaws,base,raw);
+ const stitched=assembleSubmittedMinuteChains(preparedRaws,previousSnapshot,raw,ledger);
  const auditStarts=Object.fromEntries(ledger.map(sig=>{
   const sym=sig.symbol==='BTCUSDT'?'BTC':'ETH';
   const previous=previousSnapshot?.[sym==='BTC'?'btcTime':'ethTime'];
@@ -165,21 +167,23 @@ async function reconcileVerifiedPricePath(db,session,raw,snapshot,previousSnapsh
   return [sig.id,origins[sig.id]||ordinary];
  }));
  const minutePlan=planVerifiedMechanicalEvents({ledger,history:submitted,currentAtBySymbol:at,unverifiedOrigins:origins,auditStarts});
+ const stitchedPlan=planVerifiedMechanicalEvents({ledger,history:stitched,currentAtBySymbol:at,unverifiedOrigins:origins,auditStarts});
  const preparedPlan=planPreparedEvents({ledger,history:prepared,currentAtBySymbol:at,unverifiedOrigins:origins,auditStarts});
  const planned={events:[],notes:[],proofs:{}};
  for(const sym of ['BTC','ETH']){
-  const selected=submitted[sym]?.recovered?minutePlan:preparedPlan;
+  const selected=submitted[sym]?.recovered?minutePlan:stitched[sym]?.recovered?stitchedPlan:preparedPlan;
   planned.events.push(...selected.events.filter(e=>ledger.some(s=>s.id===e.id&&s.symbol===sym+'USDT')));
   if(selected.proofs[sym])planned.proofs[sym]=selected.proofs[sym];
   planned.notes.push(...selected.notes.filter(note=>{
    const id=String(note).split(':')[0];
    return id===sym||ledger.some(s=>s.id===id&&s.symbol===sym+'USDT');
   }));
-  if(!submitted[sym]?.recovered&&submitted[sym]?.needed)
+  if(!submitted[sym]?.recovered&&!stitched[sym]?.recovered&&submitted[sym]?.needed)
    planned.notes.push(sym+':'+submitted[sym].reason);
  }
  const needsRemote=ledger.some(s=>active.has(s.status)&&
   !submitted[s.symbol==='BTCUSDT'?'BTC':'ETH']?.recovered&&
+  !stitched[s.symbol==='BTCUSDT'?'BTC':'ETH']?.recovered&&
   !prepared[s.symbol==='BTCUSDT'?'BTC':'ETH']?.recovered);
  let remote={BTC:{needed:false},ETH:{needed:false}};
  if(needsRemote){
@@ -187,7 +191,7 @@ async function reconcileVerifiedPricePath(db,session,raw,snapshot,previousSnapsh
   const remotePlan=planVerifiedMechanicalEvents({ledger,history:remote,currentAtBySymbol:at,unverifiedOrigins:origins,auditStarts});
   for(const e of remotePlan.events){
    const row=ledger.find(x=>x.id===e.id),sym=row?.symbol==='BTCUSDT'?'BTC':'ETH';
-   if(row&&!submitted[sym]?.recovered&&!prepared[sym]?.recovered)planned.events.push(e);
+   if(row&&!submitted[sym]?.recovered&&!stitched[sym]?.recovered&&!prepared[sym]?.recovered)planned.events.push(e);
   }
   for(const sym of ['BTC','ETH'])if(remotePlan.proofs[sym]&&!planned.proofs[sym])
    planned.proofs[sym]=remotePlan.proofs[sym];
