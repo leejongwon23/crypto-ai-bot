@@ -153,8 +153,19 @@ function optionsFor(m,side){
  // and have arithmetic RR2 and TP1 economics; this is not a success prediction.
  // Do not fill the primary slot with a distant hypothetical just to avoid HOLD.
  const primaryCandidate=ranked.find(x=>tier(x)<=1&&x.meetsArithmeticRR2&&x.tp1AtLeastOneR)||null;
- const nearbyAlternatives=ranked.filter(x=>tier(x)<=1).slice(0,8);
- const distantContingencies=ranked.filter(x=>tier(x)===2).slice(0,4);
+ // A long list of stop-cushion variants from the same entry must not crowd
+ // actual other nearby prices out of the displayed opportunity comparison.
+ const distinctAnchors=(xs,limit)=>{
+   const seen=new Set(),out=[];
+   for(const x of xs){
+     if(seen.has(x.entryAnchor))continue;
+     out.push(x);seen.add(x.entryAnchor);
+     if(out.length>=limit)break;
+   }
+   return out;
+ };
+ const nearbyAlternatives=distinctAnchors(ranked.filter(x=>tier(x)<=1),10);
+ const distantContingencies=distinctAnchors(ranked.filter(x=>tier(x)===2),6);
  const chosen=[],groups=new Set();
  for(const x of ranked){const group=x.method+(x.origin==='NOW'?':NOW':'');if(!groups.has(group)){chosen.push(x);groups.add(group);}}
  for(const x of ranked){if(chosen.length>=8)break;if(!chosen.includes(x))chosen.push(x);}
