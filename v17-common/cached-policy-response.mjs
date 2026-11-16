@@ -1,5 +1,5 @@
 /**
- * Opt-in transport optimization only. This never changes the verbatim V1.7
+ * Opt-in transport optimization only. This never changes the verbatim V1.8
  * policy, official snapshot, ledger, trading rules, or publication validator.
  *
  * The caller may use cachedPolicySha256 ONLY after the whole source prompt
@@ -19,7 +19,7 @@ export function applyCachedPolicyResponse(prepared, cachedPolicySha256) {
     policyCache: {
       used: true,
       policySha256: policy.sha256,
-      prerequisite: 'Full original V1.7 policy must already have been read in this same conversation. If not, fetch get_original_v17_full_prompt before analyzing.',
+      prerequisite: 'Full original V1.8 policy must already have been read in this same conversation. If not, fetch get_original_v17_full_prompt before analyzing.',
       originalRulesUnchanged: true,
     },
   };

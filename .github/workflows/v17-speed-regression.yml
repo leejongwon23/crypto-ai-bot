@@ -1,7 +1,7 @@
 name: V1.7 speed optimization regression
 on:
   push:
-    branches: [v17-performance-opt-20261113]
+    branches: [v17-performance-opt-20261113, v18-upgrade-candidate-20261117]
   pull_request:
     branches: [v17-canonical-engine]
   workflow_dispatch:
