@@ -88,12 +88,32 @@ function directionEvidence(m,side){
    cvd5:m.cvd5,cvd15:m.cvd15,cvd30:m.cvd30,cvdQuality:m.cvdQuality,
    caution:'Describes present evidence only. Not a forecast, success probability, or mandatory veto. Countertrend reversals require separate structure review.'};
 }
+// These are relative-distance labels, NOT measured chances of an order filling.
+// The existing 1x ATR nearby comparison is a practical screen, not a trade veto.
+function accessContext(m,entry){
+ const delta=entry-m.price,dist=Math.abs(delta);
+ const travelDirection=delta>0?'UP':delta<0?'DOWN':'NONE';
+ const deltaPct=round(dist/m.price*100);
+ const distAtr=round(dist/m.atr);
+ const momentum=m.priceChange15;
+ return {
+   distancePct:deltaPct, distanceAtr:distAtr,
+   accessTier:travelDirection==='NONE'?'NOW':distAtr<=1?'NEAR_WITHIN_1ATR':'DISTANT_OVER_1ATR',
+   pathToEntry:travelDirection,
+   preEntryCounterDirection:travelDirection==='UP'?'LONG':travelDirection==='DOWN'?'SHORT':null,
+   current15mPriceChangePct:momentum,
+   momentumSupportsPath:Number.isFinite(momentum)&&travelDirection!=='NONE'?
+     (travelDirection==='UP'?momentum>0:momentum<0):null,
+   retestArrivalConfirmed:false
+ };
+}
 function optionsFor(m,side){
  const long=side==='LONG',sign=long?1:-1;
  const ranked=[];
  const evidence=directionEvidence(m,side);
  for(const a of anchors(m,side)){
-   const distAtr=round(Math.abs(a.entry-m.price)/m.atr);
+   const access=accessContext(m,a.entry);
+   const distAtr=access.distanceAtr;
    const origin=a.method==='IMMEDIATE'?'NOW':((long?a.entry<m.price:a.entry>m.price)?'PULLBACK': 'BREAKOUT_OR_LATE');
    const targets=targetAnchors(m,side).filter(t=>positive(t.v)&&sign*(t.v-a.entry)>0).sort((x,y)=>sign*(x.v-y.v));
    const dedup=[];for(const target of targets){if(!dedup.some(t=>Math.abs(t.v-target.v)<m.atr*0.05))dedup.push(target)}
@@ -109,6 +129,7 @@ function optionsFor(m,side){
        const flow=[m.cvd5,m.cvd15,m.cvd30].filter(Number.isFinite);
        const favorable=flow.filter(v=>sign*v>0).length,unfavorable=flow.filter(v=>sign*v<0).length;
        ranked.push({method:a.method,origin,entryAnchor:a.anchor,side,entry:round(a.entry),priceDistanceAtr:distAtr,
+         entryAccess:access,
          stopAnchor:k.name,stop,cushionAtr,stopRisk:round(risk),tp1:round(tp1.v),tp1Anchor:tp1.name,
          tp2:round(tp2.v),tp2Anchor:tp2.name,rr2,tp1R,meetsArithmeticRR2:rr2>=2,
          tp1AtLeastOneR:tp1R>=1,marketDirectionEvidence:evidence.regime,
@@ -117,23 +138,44 @@ function optionsFor(m,side){
      }
    }
  }
- // Do NOT rank the highest mathematical RR ahead of a barely useful TP1.
- // Both RR2 and a first target worth >=1 initial risk are transparency checks,
- // not calibrated performance filters: retain every alternative, including counterflow trades.
- // Source-grounded proximity wins before oversized hypothetical reward.
- ranked.sort((a,b)=>Number(b.meetsArithmeticRR2)-Number(a.meetsArithmeticRR2)
+ // First evaluate whether the market must travel far *before* the trade can start.
+ // Do not let an attractive far-away RR2 trump a possible source-anchored nearby entry.
+ // Show remote conditional levels for comparison; never silently delete countertrend cases.
+ const tier=x=>x.entryAccess.accessTier==='NOW'?0:
+   x.entryAccess.accessTier==='NEAR_WITHIN_1ATR'?1:2;
+ ranked.sort((a,b)=>tier(a)-tier(b)
+     ||Number(b.meetsArithmeticRR2)-Number(a.meetsArithmeticRR2)
      ||Number(b.tp1AtLeastOneR)-Number(a.tp1AtLeastOneR)
      ||a.priceDistanceAtr-b.priceDistanceAtr ||b.flowAlignedWindows-a.flowAlignedWindows
      ||b.tp1R-a.tp1R ||b.rr2-a.rr2 ||a.cushionAtr-b.cushionAtr);
  const viable=ranked.filter(x=>x.meetsArithmeticRR2);
+ // A primary opportunity MUST be within the observable near-price search region
+ // and have arithmetic RR2 and TP1 economics; this is not a success prediction.
+ // Do not fill the primary slot with a distant hypothetical just to avoid HOLD.
+ const primaryCandidate=ranked.find(x=>tier(x)<=1&&x.meetsArithmeticRR2&&x.tp1AtLeastOneR)||null;
+ // A long list of stop-cushion variants from the same entry must not crowd
+ // actual other nearby prices out of the displayed opportunity comparison.
+ const distinctAnchors=(xs,limit)=>{
+   const seen=new Set(),out=[];
+   for(const x of xs){
+     if(seen.has(x.entryAnchor))continue;
+     out.push(x);seen.add(x.entryAnchor);
+     if(out.length>=limit)break;
+   }
+   return out;
+ };
+ const nearbyAlternatives=distinctAnchors(ranked.filter(x=>tier(x)<=1),10);
+ const distantContingencies=distinctAnchors(ranked.filter(x=>tier(x)===2),6);
  const chosen=[],groups=new Set();
  for(const x of ranked){const group=x.method+(x.origin==='NOW'?':NOW':'');if(!groups.has(group)){chosen.push(x);groups.add(group);}}
  for(const x of ranked){if(chosen.length>=8)break;if(!chosen.includes(x))chosen.push(x);}
  return {direction:side,directionalEvidence:evidence,generated:ranked.length,arithmeticViable:viable.length,
    nowCandidates:ranked.filter(x=>x.origin==='NOW').length,
    nearbyPending:viable.filter(x=>x.origin==='PULLBACK'&&x.priceDistanceAtr<=1).length,
+   primaryCandidate,nearbyAlternatives,distantContingencies,
+   remoteScenarioRule:'Distant entry is a CONDITIONAL scenario, not a primary recommendation. If entry requires upward travel, independently compare LONG-now opportunity and opposite-side risk first; vice versa for downward travel. No arrival probability is inferred.',
    availableMethods:[...new Set(ranked.map(x=>x.method))],bestAlternatives:chosen.slice(0,8),
-   caveat:'Evidence is contemporaneous only, NOT a proven direction predictor. 1R TP1 screening is descriptive and has NOT been validated out of sample. No automatic signals or historical account fills.'};
+   caveat:'One ATR is a descriptive proximity screen, not a calibrated fill probability or mandatory trade prohibition. If no nearby candidate has sensible TP1 and TP2 risk economics, explicitly report no primary candidate; do not promote a distant hypothetical. No new official signal, probability, exchange fill or performance claim.'};
 }
 export function buildOpportunityContext(raw){
  const result={version:'V17_OPPORTUNITY_EXPLORER_V1',policy:'PRESERVE_ISSUED_SIGNALS_AND_ORIGINAL_V17',
