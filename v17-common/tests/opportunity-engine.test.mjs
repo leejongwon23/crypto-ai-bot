@@ -53,3 +53,62 @@ test('opposing data remains reviewable with a directional evidence warning, neve
  assert.ok(x.symbols.BTC.SHORT.bestAlternatives.length>0);
  assert.equal(x.symbols.BTC.LONG.directionalEvidence.regime,'DATA_LIMITED');
 });
+
+
+const realistic10am= (sym,spot,atr,ema5,ema5b,ema15,ema15b,pathHigh,pathLow,sessionHigh,sessionLow,prevLow,swLow,vwap6,vwap24,cvd5,cvd15,cvd30)=>\`========== \${sym} (\${sym}USDT) ==========
+timestamp_kst: 2026-11-16 10:03:09
+lastPrice: \${spot} | mark: \${spot}
+1m: n=200 close=\${spot} ema12=\${spot+1} ema26=\${spot+2} hist=-2 align=BEAR
+5m: n=200 close=\${spot} ema12=\${ema5} ema26=\${ema5b} hist=-2 align=BEAR
+15m: n=200 close=\${spot} ema12=\${ema15} ema26=\${ema15b} hist=-2 align=BEAR
+30m: n=200 close=\${spot} ema12=\${ema15} ema26=\${ema15b} hist=-2 align=BULL
+4h: n=200 close=\${spot} ema12=\${spot+30} ema26=\${spot+50} hist=-2 align=BEAR
+1D: n=200 close=\${spot} ema12=\${spot+80} ema26=\${spot+100} hist=-2 align=BEAR
+15m: atr14=\${atr} | swingHigh=\${sessionHigh} | swingLow=\${swLow}
+vwap_24h: \${vwap24} | vwap_session_6h: \${vwap6}
+session_6h_high/low: \${sessionHigh} / \${sessionLow}
+prev_day_high/low: \${sessionHigh} / \${prevLow}
+cvd_net_snapshot(5m): \${cvd5}
+cvd_net_snapshot(15m): \${cvd15}
+cvd_net_snapshot(30m): \${cvd30}
+cvd_fetch_fallbacks: 0 | cvd_reliability: HIGH | cvd_state_neutralize: FALSE
+path_high/low: \${pathHigh} @ 2026-11-16 09:04:00 / \${pathLow} @ 2026-11-16 09:43:00
+price_change_5m/15m/30m/1h/4h: -0.2% / -0.3% / -0.5% / -0.9% / -1.0%
+candle_structure_5m/15m: DOWN(HH2/HL2/LH10/LL10) / MIXED(HH2/HL4/LH6/LL4)
+\`;
+const case10am=realistic10am('BTC',64806.30,285.657,64946.87,65015.36,64978.69,64977.62,65371.5,64630.3,65485,64630.3,61899.2,64234.6,65048.45,64411.8,-0.7,2.95,-174.27)+
+ realistic10am('ETH',1809.99,10.325,1818.06,1821.84,1820.13,1820.89,1837.99,1805.44,1842.5,1805.44,1709.06,1793,1824.47,1801.29,28.50,122.10,-745.21);
+test('10:03 ETH does not promote 1837.99 SHORT retest requiring 2.71 ATR over nearby entry exploration',()=>{
+ const x=buildOpportunityContext(case10am).symbols.ETH.SHORT;
+ assert.equal(x.bestAlternatives[0].entryAccess.accessTier,'NOW');
+ assert.ok(x.nearbyAlternatives.some(a=>a.entry===1818.06&&a.priceDistanceAtr<1));
+ const far=x.distantContingencies.find(a=>a.entry===1837.99);
+ assert.ok(far);
+ assert.ok(far.entryAccess.distanceAtr>2.7);
+ assert.equal(far.entryAccess.pathToEntry,'UP');
+ assert.equal(far.entryAccess.preEntryCounterDirection,'LONG');
+ assert.equal(far.entryAccess.momentumSupportsPath,false);
+ assert.ok(x.primaryCandidate===null || x.primaryCandidate.priceDistanceAtr<=1);
+ assert.equal(x.remoteScenarioRule.includes('CONDITIONAL'),true);
+});
+test('10:03 BTC source-anchored near retest precedes old remote swing-high retest',()=>{
+ const x=buildOpportunityContext(case10am).symbols.BTC.SHORT;
+ assert.ok(x.nearbyAlternatives.some(a=>a.entry===65048.45&&a.priceDistanceAtr<1));
+ assert.ok(x.distantContingencies.some(a=>a.entry===65371.5&&a.priceDistanceAtr>1));
+ assert.ok(x.bestAlternatives[0].priceDistanceAtr<=1);
+});
+test('near opportunity output is never silently replaced with far RR even when no near RR2 qualifies',()=>{
+ const x=buildOpportunityContext(case10am);
+ for(const s of ['BTC','ETH'])for(const d of ['LONG','SHORT']){
+  const a=x.symbols[s][d];
+  assert.ok(a.nearbyAlternatives.length>0);
+  assert.ok(a.bestAlternatives.every(y=>y.entryAccess&&y.entryAccess.retestArrivalConfirmed===false));
+  assert.ok(a.primaryCandidate===null||(a.primaryCandidate.meetsArithmeticRR2&&a.primaryCandidate.tp1AtLeastOneR&&a.primaryCandidate.priceDistanceAtr<=1));
+ }
+});
+test('opposite direction remains independently available, not automatically labeled profitable',()=>{
+ const x=buildOpportunityContext(case10am);
+ assert.equal(x.symbols.ETH.LONG.directionalEvidence.price15mChangePct,-0.3);
+ assert.ok(x.symbols.ETH.LONG.bestAlternatives.length>0);
+ assert.ok(x.symbols.ETH.SHORT.distantContingencies.every(a=>!('winRate' in a)));
+});
