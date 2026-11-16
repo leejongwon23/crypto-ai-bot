@@ -1,0 +1,5 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';
+import {POLICY_SHA256,POLICY_BYTES,POLICY_LINES,POLICY_TEXT} from './policy-v19.mjs';
+import {OFFICIAL_POLICY,CLAUSES,VERSION,submissionContract} from './v19-core.mjs';
+test('V1.9 full policy identity',()=>{assert.equal(POLICY_SHA256,'03910e1c418de6a83ed8191ec59801481c933fd1358b33b6b3071a8d81d8505a');assert.equal(POLICY_BYTES,96602);assert.equal(POLICY_LINES,1263);assert.equal(CLAUSES.length,35);assert.equal(OFFICIAL_POLICY.name,'MASTER PROMPT V1.9 FINAL');assert.ok(VERSION.startsWith('V19'));assert.ok(POLICY_TEXT.includes('# 31.'));});
+test('regime fields both coins and both directions required',()=>{const a=submissionContract().skeleton;for(const sym of ['BTC','ETH'])assert(a.regimeAudit[sym].directionReviews.LONG&&a.regimeAudit[sym].directionReviews.SHORT);});
