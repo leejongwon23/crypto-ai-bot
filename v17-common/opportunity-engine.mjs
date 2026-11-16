@@ -136,7 +136,7 @@ function optionsFor(m,side){
    caveat:'Evidence is contemporaneous only, NOT a proven direction predictor. 1R TP1 screening is descriptive and has NOT been validated out of sample. No automatic signals or historical account fills.'};
 }
 export function buildOpportunityContext(raw){
- const result={version:'V17_OPPORTUNITY_EXPLORER_V2_DIRECTION_AUDIT',policy:'PRESERVE_ISSUED_SIGNALS_AND_ORIGINAL_V17',
+ const result={version:'V17_OPPORTUNITY_EXPLORER_V1',policy:'PRESERVE_ISSUED_SIGNALS_AND_ORIGINAL_V17',
     method:'Search NOW/EMA_PULLBACK/VWAP_RETEST/PRICE_RETEST/BREAKOUT for BOTH directions before choosing HOLD.',symbols:{}};
  for(const sym of ['BTC','ETH']){
    const market=parseMarket(symbolSection(raw,sym),sym);
