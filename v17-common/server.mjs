@@ -13,7 +13,7 @@ import {OFFICIAL_POLICY,VERSION,prepare,sourcePolicy,validateSnapshot,validateOf
 import {ATTEST_CONFIRM,TWO_USER_TP3_IDS,planUserAttestedTp3} from './user-attested-tp3.mjs';
 import {USER_NO_ENTRY_KIND,USER_NO_ENTRY_CONFIRM,USER_NO_ENTRY_IDS,planUserNoEntryAttestation} from './user-attested-no-entry.mjs';
 import {USER_CLOSE_SHORTS_KIND,USER_CLOSE_SHORTS_CONFIRM,USER_CLOSED,closeableShorts,planUserCloseShorts} from './user-close-shorts.mjs';
-import {FORECAST_TABLE_SQL,persistForecastEvidence,researchForecast} from './empirical-forecast-store.mjs';
+import {FORECAST_TABLE_SQL,persistForecastEvidence,backfillPreparedForecast,researchForecast} from './empirical-forecast-store.mjs';
 
 const PORT=Number(process.env.PORT||3000);
 const MODE=process.env.DEPLOYMENT_MODE||'local';
@@ -277,8 +277,14 @@ async function beginAnalysis(body){
  let empiricalForecast={status:'DATA_PIPELINE_UNAVAILABLE',source:'NOT_A_TRADE_SIGNAL'};
  try{
   const ingestion=await persistForecastEvidence(db,session,snapshot.sha256,raw);
+  // Backfill the user's existing stored observations before querying the model.
+  // Bound work to 100 raws per call; import receipts make this resumable.
+  let backfill;
+  try{backfill=await backfillPreparedForecast(db,session,100);}
+  catch(e){backfill={processed:0,status:'INCOMPLETE',reason:String(e.message||e).slice(0,100)};}
   empiricalForecast=await researchForecast(db,session,raw,full.opportunityContext);
   empiricalForecast.ingestion=ingestion;
+  empiricalForecast.backfill=backfill;
  }catch(e){
   empiricalForecast={status:'DATA_PIPELINE_UNAVAILABLE',reason:String(e.message||e).slice(0,140),source:'NOT_A_TRADE_SIGNAL'};
  }
