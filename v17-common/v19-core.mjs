@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import {evaluateRangeStopContext} from './regime-entry-risk.mjs';
 import {POLICY_TEXT,POLICY_SHA256,POLICY_BYTES,POLICY_LINES} from './policy-v19.mjs';
 import {buildAutoSwitchContext,validateAutoSwitchAudit} from './auto-switch-audit.mjs';
 import {screenReversalEntries,validateReversalReview} from './reversal-entry-audit.mjs';
@@ -406,6 +407,10 @@ export function validateOfficialSubmission(args,ledger,previousSnapshot=null,car
  const ids=new Set(ledger.map(s=>s.id));
  for(const s of news){
   validateSignal(s,shot);
+  // Source-anchored, symmetrical narrow-stop gate; only newly issued RANGE_BOUNDARY signals.
+  // No historical ledger rewrite, no blanket veto on trend or confirmed opposite evidence.
+  const rangeRisk=evaluateRangeStopContext({raw,signal:s});
+  assert(rangeRisk.allowed,'V19_'+rangeRisk.reason);
   const sym=s.symbol==='BTCUSDT'?'BTC':'ETH';
   const ra=analysis.regimeAudit[sym],rd=ra.directionReviews[s.direction];
   assert(rd.selection==='ISSUE'&&rd.tactic===s.entryTactic,'V19_ENTRY_TACTIC_NOT_VERIFIED_'+sym);
