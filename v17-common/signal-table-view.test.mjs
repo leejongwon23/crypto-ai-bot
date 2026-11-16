@@ -11,7 +11,7 @@ const ETH={id:'eth-short',symbol:'ETHUSDT',status:'UNVERIFIED',unverifiedFrom:'E
 const shot={btcPrice:69234.20,ethPrice:1958.37};
 test('BTC and still-open UNVERIFIED ETH are both visible with entry-relative stop/TP percentages',()=>{
  const x=buildSignalView({ledger:[ETH,BTC],snapshot:shot});
- assert.equal(x.mode,'SIGNAL_TABLE_ONLY');
+ assert.equal(x.mode,'BTC_ETH_HORIZONTAL_WITH_OUTLOOK');
  assert.match(x.markdown,/BTC SHORT \| ETH SHORT/);
  assert.match(x.markdown,/\$69,500\.00~\$69,540\.00/);
  assert.match(x.markdown,/\$69,820\.00 \(-0\.46%~-0\.40%\)/);
@@ -40,7 +40,7 @@ test('terminal signals omitted from default table, but changes carry concise not
   {id:'eth-short',kind:'CANCELLED',at:'2026-11-13 21:30:00'},
   {id:'btc-short',kind:'ENTERED',at:'2026-11-13 21:31:00'}]});
  assert.equal(result.entries.length,1);
- assert.doesNotMatch(result.markdown,/ETH SHORT/);
+ assert.match(result.markdown,/\| 항목 \| BTC \| ETH \|/);
  assert.ok(result.changeNotices.includes('ETH 신호 취소'));
  assert.ok(result.changeNotices.includes('BTC 대기 → 진입 자동전환'));
 });
@@ -67,7 +67,7 @@ test('view generation does not alter the official ledger or invent a record',()=
  assert.equal(JSON.stringify(input),orig);
  assert.equal(x.entries.length,2);
  const empty=buildSignalView({ledger:[],snapshot:shot});
- assert.match(empty.markdown,/활성 정식 신호 없음/);
+ assert.match(empty.markdown,/진입 시그널 없음/);
  assert.match(SIGNAL_TABLE_OUTPUT_RULE,/새 대화창/);
 });
 
@@ -104,3 +104,6 @@ test('UNVERIFIED with a prior confirmed TP1/TP2 or NEW_ENTRY keeps conditional c
   assert.equal(x.entries[0].currentIndicativeConditional,true);
  }
 });
+
+test('fixed BTC/ETH columns when only ETH signal exists',()=>{const r=buildSignalView({ledger:[ETH],snapshot:shot});assert.match(r.markdown,/\| 진입 시그널 \| 진입 시그널 없음 \| SHORT/);assert.match(r.markdown,/시황·전망 코멘트 미기록/);});
+test('two market comments are separate and conditional',()=>{const r=buildSignalView({ledger:[],snapshot:shot,outlook:{BTC:{currentSituation:'상위 하락',expectedPath:'반등 가능',alternative:'추가 하락'},ETH:{currentSituation:'횡보',expectedPath:'하락 가능',alternative:'저항 돌파'}}});assert.match(r.markdown,/BTC 현재 시황/);assert.match(r.markdown,/ETH 예상 흐름/);});
