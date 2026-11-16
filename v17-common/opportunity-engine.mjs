@@ -27,6 +27,8 @@ function parseMarket(text,symbol){
   const quality=text.match(/^cvd_fetch_fallbacks:\s*\d+[^\n]*?cvd_reliability:\s*(HIGH|MEDIUM|LOW)/m)?.[1]||'UNKNOWN';
   return {symbol,at:dated,price:p,atr,
     ema1:timeframe(text,'1m'),ema5:timeframe(text,'5m'),ema15:timeframe(text,'15m'),ema30:timeframe(text,'30m'),ema4h:timeframe(text,'4h'),ema1d:timeframe(text,'1D'),
+    priceChange15:num(text,/^price_change_5m\/15m\/30m\/1h\/4h:\s*[-\d.]+%\s*\/\s*([-\d.]+)%/m),
+    candle15:text.match(/^candle_structure_5m\/15m:[^\n]*\/\s*(UP|DOWN|MIXED)/m)?.[1]||null,
     vwap6:num(text,/^vwap_24h:[^\n]*?vwap_session_6h:\s*([\d.]+)/m),vwap24:num(text,/^vwap_24h:\s*([\d.]+)/m),
     pathHigh:path?Number(path[1]):null,pathLow:path?Number(path[2]):null,
     sessionHigh:session?Number(session[1]):null,sessionLow:session?Number(session[2]):null,
@@ -59,9 +61,37 @@ const stopAnchors=(m,side)=>side==='LONG'?
 const targetAnchors=(m,side)=>side==='LONG'?
  [{name:'PATH_HIGH',v:m.pathHigh},{name:'VWAP_6H',v:m.vwap6},{name:'EMA_15M_26',v:m.ema15.ema26},{name:'SESSION_6H_HIGH',v:m.sessionHigh},{name:'SWING_15M_HIGH',v:m.swingHigh},{name:'PREV_DAY_HIGH',v:m.prevHigh}]:
  [{name:'PATH_LOW',v:m.pathLow},{name:'VWAP_6H',v:m.vwap6},{name:'EMA_15M_26',v:m.ema15.ema26},{name:'SESSION_6H_LOW',v:m.sessionLow},{name:'SWING_15M_LOW',v:m.swingLow},{name:'PREV_DAY_LOW',v:m.prevLow}];
+// Evidence is observable context, not a trained probability model, hard gate,
+// or independent CVD+taker vote. No score/weights, no claim of profitability.
+function directionEvidence(m,side){
+ const trend=side==='LONG'?'BULL':'BEAR',opposite=side==='LONG'?'BEAR':'BULL',sgn=side==='LONG'?1:-1;
+ const structural = [m.ema5.align,m.ema15.align,m.ema30.align];
+ const flow=[m.cvd5,m.cvd15,m.cvd30];
+ const priceMomentum=Number.isFinite(m.priceChange15)?Math.sign(m.priceChange15*sgn):null;
+ const structure15=m.candle15==='UP'?1:m.candle15==='DOWN'?-1:null;
+ const priceStructure=structure15===null?null:structure15*sgn;
+ const nearPriceSupports=structural.filter(x=>x===trend).length;
+ const nearPriceOpposes=structural.filter(x=>x===opposite).length;
+ const reliableFlow=m.cvdQuality==='HIGH'||m.cvdQuality==='MEDIUM';
+ const alignedFlow=reliableFlow&&flow.every(Number.isFinite)&&flow.every(x=>x*sgn>0);
+ const opposingFlow=reliableFlow&&flow.every(Number.isFinite)&&flow.every(x=>x*sgn<0);
+ const priceAligned=nearPriceSupports===3&&priceMomentum===1&&priceStructure!==-1;
+ const priceOpposed=nearPriceOpposes===3&&priceMomentum===-1&&priceStructure!==1;
+ let regime='MIXED';
+ if(priceAligned&&alignedFlow)regime='PRICE_AND_FLOW_ALIGNED';
+ else if(priceOpposed&&opposingFlow)regime='PRICE_AND_FLOW_OPPOSE';
+ else if(!reliableFlow||priceMomentum===null)regime='DATA_LIMITED';
+ return {regime,source:'EMA_5_15_30+CVD_5_15_30+OBSERVED_15M_PRICE_CHANGE',
+   price15mChangePct:m.priceChange15,price15mStructure:m.candle15,
+   ema5:m.ema5.align,ema15:m.ema15.align,ema30:m.ema30.align,
+   macro4h:m.ema4h.align,macro1d:m.ema1d.align,
+   cvd5:m.cvd5,cvd15:m.cvd15,cvd30:m.cvd30,cvdQuality:m.cvdQuality,
+   caution:'Describes present evidence only. Not a forecast, success probability, or mandatory veto. Countertrend reversals require separate structure review.'};
+}
 function optionsFor(m,side){
  const long=side==='LONG',sign=long?1:-1;
  const ranked=[];
+ const evidence=directionEvidence(m,side);
  for(const a of anchors(m,side)){
    const distAtr=round(Math.abs(a.entry-m.price)/m.atr);
    const origin=a.method==='IMMEDIATE'?'NOW':((long?a.entry<m.price:a.entry>m.price)?'PULLBACK': 'BREAKOUT_OR_LATE');
@@ -75,30 +105,35 @@ function optionsFor(m,side){
        if(!positive(risk)||dedup.length<2)continue;
        const tp1=dedup[0],tp2=dedup[1];
        const rr2=round(Math.abs(tp2.v-a.entry)/risk);
+       const tp1R=round(Math.abs(tp1.v-a.entry)/risk);
        const flow=[m.cvd5,m.cvd15,m.cvd30].filter(Number.isFinite);
        const favorable=flow.filter(v=>sign*v>0).length,unfavorable=flow.filter(v=>sign*v<0).length;
        ranked.push({method:a.method,origin,entryAnchor:a.anchor,side,entry:round(a.entry),priceDistanceAtr:distAtr,
          stopAnchor:k.name,stop,cushionAtr,stopRisk:round(risk),tp1:round(tp1.v),tp1Anchor:tp1.name,
-         tp2:round(tp2.v),tp2Anchor:tp2.name,rr2,meetsArithmeticRR2:rr2>=2,
+         tp2:round(tp2.v),tp2Anchor:tp2.name,rr2,tp1R,meetsArithmeticRR2:rr2>=2,
+         tp1AtLeastOneR:tp1R>=1,marketDirectionEvidence:evidence.regime,
          cvdQuality:m.cvdQuality,flowAlignedWindows:favorable,flowOpposingWindows:unfavorable,
          aboveBelowSpot:origin, warning:'Counterfactual candidate only. Target is not a price forecast; stop cushion is not calibrated; pending first touch not confirmed.'});
      }
    }
  }
- // Never filter out an option solely because its direction conflicts with 4h/1D or CVD.
- // Rank ALL viable entry alternatives by objective entry proximity and actual flow alignment.
+ // Do NOT rank the highest mathematical RR ahead of a barely useful TP1.
+ // Both RR2 and a first target worth >=1 initial risk are transparency checks,
+ // not calibrated performance filters: retain every alternative, including counterflow trades.
+ // Source-grounded proximity wins before oversized hypothetical reward.
  ranked.sort((a,b)=>Number(b.meetsArithmeticRR2)-Number(a.meetsArithmeticRR2)
-     ||b.flowAlignedWindows-a.flowAlignedWindows ||a.priceDistanceAtr-b.priceDistanceAtr
-     ||b.rr2-a.rr2 ||a.cushionAtr-b.cushionAtr);
+     ||Number(b.tp1AtLeastOneR)-Number(a.tp1AtLeastOneR)
+     ||a.priceDistanceAtr-b.priceDistanceAtr ||b.flowAlignedWindows-a.flowAlignedWindows
+     ||b.tp1R-a.tp1R ||b.rr2-a.rr2 ||a.cushionAtr-b.cushionAtr);
  const viable=ranked.filter(x=>x.meetsArithmeticRR2);
  const chosen=[],groups=new Set();
  for(const x of ranked){const group=x.method+(x.origin==='NOW'?':NOW':'');if(!groups.has(group)){chosen.push(x);groups.add(group);}}
  for(const x of ranked){if(chosen.length>=8)break;if(!chosen.includes(x))chosen.push(x);}
- return {direction:side,generated:ranked.length,arithmeticViable:viable.length,
+ return {direction:side,directionalEvidence:evidence,generated:ranked.length,arithmeticViable:viable.length,
    nowCandidates:ranked.filter(x=>x.origin==='NOW').length,
    nearbyPending:viable.filter(x=>x.origin==='PULLBACK'&&x.priceDistanceAtr<=1).length,
    availableMethods:[...new Set(ranked.map(x=>x.method))],bestAlternatives:chosen.slice(0,8),
-   caveat:'Numerical opportunity exploration is NOT a formal signal. Viability by RR alone never proves success. Check preissue flow, moving barriers, time horizon, order chronology, and actual risk.'};
+   caveat:'Evidence is contemporaneous only, NOT a proven direction predictor. 1R TP1 screening is descriptive and has NOT been validated out of sample. No automatic signals or historical account fills.'};
 }
 export function buildOpportunityContext(raw){
  const result={version:'V17_OPPORTUNITY_EXPLORER_V1',policy:'PRESERVE_ISSUED_SIGNALS_AND_ORIGINAL_V17',

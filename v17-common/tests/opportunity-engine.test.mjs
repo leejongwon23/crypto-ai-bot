@@ -28,3 +28,28 @@ test('candidate anchors never manufacture price levels beyond given structures',
 test('ranking does not collapse after changing CVD sign',()=>{const x=buildOpportunityContext(one('BTC',64927.9,279.714,77)+one('ETH',1824.22,10.1636,-92));assert.ok(x.symbols.BTC.SHORT.generated>0);assert.ok(x.symbols.ETH.LONG.generated>0)});
 test('missing ATR remains explicitly unverified',()=>{const x=buildOpportunityContext(one('BTC',64927.9,279.714,77)+one('ETH',1824.22,10.1636,-92).replace('atr14=10.1636','atr14=notavailable'));assert.equal(x.symbols.ETH.status,'UNVERIFIED')});
 test('no past signal or stop mutation',()=>{const x=buildOpportunityContext(raw);assert.equal(x.policy,'PRESERVE_ISSUED_SIGNALS_AND_ORIGINAL_V17');assert.ok(!('newSignals' in x)&&!('events' in x))});
+
+test('directional evidence reads price and CVD separately without fabricating win odds',()=>{
+ const a=one('BTC',64927.9,279.714,77)
+  .replace('15m: n=200 close=64927.9 ema12=64924.9 ema26=64922.9 hist=3 align=BEAR', '15m: n=200 close=64927.9 ema12=64924.9 ema26=64922.9 hist=3 align=BULL')
+  .replace('30m: n=200 close=64927.9 ema12=64924.9 ema26=64922.9 hist=1 align=BEAR', '30m: n=200 close=64927.9 ema12=64924.9 ema26=64922.9 hist=1 align=BULL')
+  +'price_change_5m/15m/30m/1h/4h: 0.02% / 0.15% / 0.31% / 0.12% / -0.9%\n'
+  +'candle_structure_5m/15m: MIXED(HH5/HL5/LH5/LL5) / UP(HH5/HL6/LH3/LL2)\n';
+ const r=buildOpportunityContext(a+one('ETH',1824.22,10.1636,-92));
+ assert.equal(r.symbols.BTC.LONG.directionalEvidence.regime,'PRICE_AND_FLOW_ALIGNED');
+ assert.equal(r.symbols.BTC.SHORT.directionalEvidence.regime,'PRICE_AND_FLOW_OPPOSE');
+ assert.ok(!('winRate' in r.symbols.BTC.LONG.directionalEvidence));
+});
+test('first target reward vs stop risk is measured and visible, not hidden by TP2 RR',()=>{
+ const a=buildOpportunityContext(raw).symbols.BTC.SHORT;
+ for(const x of a.bestAlternatives){
+  assert.ok(Number.isFinite(x.tp1R));
+  assert.equal(x.tp1AtLeastOneR,x.tp1R>=1);
+ }
+});
+test('opposing data remains reviewable with a directional evidence warning, never auto-pruned',()=>{
+ const x=buildOpportunityContext(raw);
+ assert.ok(x.symbols.BTC.LONG.bestAlternatives.length>0);
+ assert.ok(x.symbols.BTC.SHORT.bestAlternatives.length>0);
+ assert.equal(x.symbols.BTC.LONG.directionalEvidence.regime,'DATA_LIMITED');
+});
