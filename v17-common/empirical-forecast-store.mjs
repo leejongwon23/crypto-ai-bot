@@ -21,6 +21,11 @@ CREATE TABLE IF NOT EXISTS v17_ai_forecast_minutes (
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
  PRIMARY KEY(session,symbol,at_ms)
 );
+CREATE TABLE IF NOT EXISTS v17_ai_forecast_imported (
+ session TEXT NOT NULL, snapshot_sha TEXT NOT NULL,
+ imported_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY(session,snapshot_sha)
+);
 `;
 export async function persistForecastEvidence(db,session,sha,raw){
  const results={};
@@ -42,7 +47,46 @@ export async function persistForecastEvidence(db,session,sha,raw){
   }
   results[sym]={status:'STORED',atMs:o.atMs,closedMinutesReceived:bars.length,source:'USER_SUBMITTED_NOT_AUTHENTICATED'};
  }
+ await db.query('INSERT INTO v17_ai_forecast_imported(session,snapshot_sha) VALUES($1,$2) ON CONFLICT DO NOTHING',[session,sha]);
  return results;
+}
+async function insertBatched(db,sqlPrefix,records){
+ if(!records.length)return;
+ const width=records[0].length;
+ for(let offset=0;offset<records.length;offset+=300){
+  const batch=records.slice(offset,offset+300),args=[];
+  const placeholders=batch.map((row,i)=>{
+   args.push(...row);
+   const p=String.fromCharCode(36);
+   return '('+row.map((_,j)=>p+(i*width+j+1)).join(',')+')';
+  });
+  await db.query(sqlPrefix+placeholders.join(',')+' ON CONFLICT DO NOTHING',args);
+ }
+}
+/**
+ * Import existing prepared raw snapshots, in bounded batches, without any
+ * hindsight edits to original source, prior signals, or official result.
+ */
+export async function backfillPreparedForecast(db,session,limit=100){
+ const q='SELECT p.snapshot_sha,p.raw FROM v17_ai_prepared_snapshots p WHERE p.session=$1 AND NOT EXISTS (SELECT 1 FROM v17_ai_forecast_imported i WHERE i.session=p.session AND i.snapshot_sha=p.snapshot_sha) ORDER BY p.created_at ASC LIMIT $2';
+ const r=await db.query(q,[session,limit]);
+ if(!r.rows.length)return {processed:0,observations:0,uniqueClosedMinutes:0,morePossible:false};
+ const observations=[],candles=new Map(),receipts=[];
+ for(const row of r.rows){
+  for(const sym of ['BTC','ETH']){
+   const o=extractObservation(row.raw,sym);
+   if(o)observations.push([session,sym,row.snapshot_sha,o.atMs,o.price,o.atr,JSON.stringify(o.features),o.source]);
+   for(const c of extractClosedMinuteCandles(row.raw,sym)){
+    const key=sym+':'+c.t;
+    if(!candles.has(key))candles.set(key,[session,sym,c.t,c.open,c.high,c.low,c.close,'USER_SUBMITTED_BYBIT_1M_UNVERIFIED']);
+   }
+  }
+  receipts.push([session,row.snapshot_sha]);
+ }
+ await insertBatched(db,'INSERT INTO v17_ai_forecast_observations(session,symbol,snapshot_sha,at_ms,price,atr,features,source) VALUES ',observations);
+ await insertBatched(db,'INSERT INTO v17_ai_forecast_minutes(session,symbol,at_ms,o,h,l,c,source) VALUES ',[...candles.values()]);
+ await insertBatched(db,'INSERT INTO v17_ai_forecast_imported(session,snapshot_sha) VALUES ',receipts);
+ return {processed:receipts.length,observations:observations.length,uniqueClosedMinutes:candles.size,morePossible:receipts.length>=limit};
 }
 function normalizeRows(rows,sym){
  return rows.map(x=>({symbol:sym,atMs:Number(x.at_ms),price:Number(x.price),atr:Number(x.atr),features:x.features})).filter(x=>Number.isFinite(x.atMs)&&Number.isFinite(x.price)&&x.price>0);
