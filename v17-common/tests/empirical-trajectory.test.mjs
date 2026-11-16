@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {extractObservation,extractClosedMinuteCandles,buildEmpiricalForecast,publicForecast} from '../empirical-trajectory.mjs';
+import {backfillPreparedForecast} from '../empirical-forecast-store.mjs';
 const fmt=x=>new Date(x+9*3600000).toISOString().slice(0,19).replace('T',' ');
 const base=Date.parse('2026-11-01T00:00:00+09:00');
 const one=(sym,at,partialRows=true)=>{const t=fmt(at),from=fmt(at-2*60000),mid=fmt(at-60000),now=fmt(at);
@@ -75,4 +76,25 @@ test('future-dated labels are excluded even if the database wrongly contains the
  const x=buildEmpiricalForecast({raw,symbol:'BTC',history:[future],candles:[]});
  assert.equal(x.horizons[15].samples,0);
  assert.equal(x.horizons[60].status,'INSUFFICIENT_INDEPENDENT_SAMPLES');
+});
+
+test('backfill imports existing prepared user snapshots once, deduplicating closed minutes',async()=>{
+ const calls=[];
+ const db={query:async(sql,args)=>{
+  calls.push({sql,args});
+  if(sql.startsWith('SELECT p.snapshot_sha'))return {rows:[{snapshot_sha:'a'.repeat(64),raw},{snapshot_sha:'b'.repeat(64),raw}]};
+  return {rows:[]};
+ }};
+ const result=await backfillPreparedForecast(db,'OFFICIAL_V17',100);
+ assert.equal(result.processed,2);
+ assert.equal(result.observations,4);
+ assert.equal(result.uniqueClosedMinutes,2);
+ assert.equal(result.morePossible,false);
+ assert.ok(calls.some(x=>x.sql.startsWith('INSERT INTO v17_ai_forecast_imported')));
+ assert.ok(calls.some(x=>x.sql.startsWith('INSERT INTO v17_ai_forecast_minutes')));
+});
+test('backfill no-rows is a fast safe no-op',async()=>{
+ const db={query:async()=>({rows:[]})};
+ const x=await backfillPreparedForecast(db,'OFFICIAL_V17');
+ assert.equal(x.processed,0);assert.equal(x.morePossible,false);
 });
