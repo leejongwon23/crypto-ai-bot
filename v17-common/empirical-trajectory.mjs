@@ -33,16 +33,19 @@ export function extractObservation(raw,symbol){
  const t=/^timestamp_kst:\s*(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)/m.exec(s)?.[1];
  if(!t)return null;
  const price=n(s,/^lastPrice:\s*([\d.]+)/m),atr=n(s,/^15m:\s*atr14=([\d.]+)/m);
- const ch=change(s),oi=n(s,/^oi_change_5m\/15m\/30m\/1h\/4h:[^\n]*?\/\s*([-\d.]+)%\s*\/\s*[-\d.]+%$/m);
+ const ch=change(s),other=change(section(raw,symbol==='BTC'?'ETH':'BTC'));
+ const oi=n(s,/^oi_change_5m\/15m\/30m\/1h\/4h:[^\n]*?\/\s*([-\d.]+)%\s*\/\s*[-\d.]+%$/m);
  const vwap=n(s,/^vwap_24h:[^\n]*vwap_session_6h:\s*([\d.]+)/m);
- if(!(price>0&&atr>0)||!ch||!ok(vwap)||!ok(oi))return null;
+ if(!(price>0&&atr>0)||!ch||!other||!ok(vwap)||!ok(oi))return null;
  const atrPct=100*atr/price;
  const f=[
   ch[0]/atrPct,ch[1]/atrPct,ch[3]/atrPct,
   (price-pt(s,'5m','ema26'))/atr,(price-pt(s,'15m','ema26'))/atr,
   (price-vwap)/atr,
   cvdImbalance(s,5)/0.25,cvdImbalance(s,15)/0.25,cvdImbalance(s,30)/0.25,
-  oi/atrPct
+  oi/atrPct,
+  (ch[1]-other[1])/atrPct,
+  (ch[3]-other[3])/atrPct
  ];
  if(!f.every(ok))return null;
  return {symbol,atMs:kstMs(t),price,atr,features:f.map(clip),source:'USER_SUBMITTED_MARKET_SNAPSHOT'};
@@ -84,7 +87,7 @@ function closedPath(obs,bars,h){
 function makeLabeled(rows,bars,h){
  const out=[];let latestAccepted=-Infinity;
  for(const o of rows.sort((a,b)=>a.atMs-b.atMs)){
-  if(!o||!ok(o.atMs)||o.atMs-latestAccepted<h*60000||!(o.price>0&&o.atr>0)||!Array.isArray(o.features)||o.features.length!==10||!o.features.every(ok))continue;
+  if(!o||!ok(o.atMs)||o.atMs-latestAccepted<h*60000||!(o.price>0&&o.atr>0)||!Array.isArray(o.features)||o.features.length!==12||!o.features.every(ok))continue;
   const path=closedPath(o,bars,h);if(!path)continue;
   const p=path.at(-1),hi=Math.max(...path.map(x=>x.high)),lo=Math.min(...path.map(x=>x.low));
   out.push({...o,targetEndMs:path.at(-1).t+60000,moveR:(p.close-o.price)/o.atr,
@@ -160,7 +163,7 @@ export function buildEmpiricalForecast({raw,symbol,history=[],candles=[],maxHori
  const query=extractObservation(raw,symbol);
  if(!query)return {symbol,status:'SOURCE_FEATURES_INCOMPLETE'};
  const bars=new Map(candles.filter(x=>ok(x.t)&&x.t<floorMinute(query.atMs)).map(x=>[x.t,x]));
- const observed=history.filter(x=>x.symbol===symbol&&x.atMs<query.atMs&&x.atMs>=query.atMs-14*86400000&&x.features?.length===10);
+ const observed=history.filter(x=>x.symbol===symbol&&x.atMs<query.atMs&&x.atMs>=query.atMs-14*86400000&&x.features?.length===12);
  const horizons={},candidates={};
  for(const h of TF.filter(x=>x<=maxHorizon)){
   const eligible=observed.filter(x=>x.atMs+h*60000<=query.atMs);
