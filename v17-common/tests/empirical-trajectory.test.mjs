@@ -25,7 +25,7 @@ const one=(sym,at,partialRows=true)=>{const t=fmt(at),from=fmt(at-2*60000),mid=f
 const raw=one('BTC',base+100*60000)+one('ETH',base+100*60000);
 test('source features are ATR-normalized and preserve observed negative historical returns',()=>{
  const b=extractObservation(raw,'BTC');
- assert.equal(b.price,100);assert.equal(b.atr,2);assert.equal(b.features.length,10);
+ assert.equal(b.price,100);assert.equal(b.atr,2);assert.equal(b.features.length,12);
  assert.equal(b.features[0]<0,true);assert.equal(b.features[8]<0,true);
  assert.equal(b.atMs,base+100*60000);
 });
@@ -53,7 +53,7 @@ test('chronological 1m outcomes can train only on genuinely prior non-overlappin
  for(let i=0;i<51;i++){
   const t=base+i*3600000;
   const trend=i%4===0?1:-1;
-  h.push({symbol:'BTC',atMs:t,price:100,atr:2,features:[trend,0,trend,0,0,0,0,0,0,0]});
+  h.push({symbol:'BTC',atMs:t,price:100,atr:2,features:[trend,0,trend,0,0,0,0,0,0,0,0,0]});
   for(let j=1;j<=60;j++){
    const p=100+trend*2*j/60;
    bars.push({t:t+j*60000,open:p,high:p+.02,low:p-.02,close:p});
@@ -71,7 +71,7 @@ test('chronological 1m outcomes can train only on genuinely prior non-overlappin
  assert.ok(!('probabilityOfProfit' in published.candidates[0].evidence));
 });
 test('future-dated labels are excluded even if the database wrongly contains them',()=>{
- const future={symbol:'BTC',atMs:base+999*3600000,price:100,atr:2,features:Array(10).fill(0)};
+ const future={symbol:'BTC',atMs:base+999*3600000,price:100,atr:2,features:Array(12).fill(0)};
  const x=buildEmpiricalForecast({raw,symbol:'BTC',history:[future],candles:[]});
  assert.equal(x.horizons[15].samples,0);
  assert.equal(x.horizons[60].status,'INSUFFICIENT_INDEPENDENT_SAMPLES');
