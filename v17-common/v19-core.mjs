@@ -151,7 +151,7 @@ export function submissionContract(){
   requiredEnvelope:['raw','session','policySha256','snapshotSha256','beforeLedgerSha256','decisionKey','analysis'],
   snapshotIntegrity:'Pass the EXACT identical raw string submitted to run_official_btc_eth_snapshot, including spacing, ordering, and all sections. A reconstructed or abbreviated copy is invalid.',
   exactReportField:'analysis.reportMarkdown (not report, userReport, finalReport, completeUserReport, or summary)',
-  requiredAnalysis:['reportMarkdown','directions','coupling','checks','clauses','audit20','conclusions','dynamicManagement','regimeAudit','historicalUncertainty if required by evidenceQuality','autoSwitchAudit if required by autoSwitchContext','reversalReview if reversalScreen has REVIEW_REQUIRED','newSignals','events'],
+  requiredAnalysis:['reportMarkdown','directions','coupling','checks','clauses','audit20','conclusions','dynamicManagement','regimeAudit','marketOutlook','historicalUncertainty if required by evidenceQuality','autoSwitchAudit if required by autoSwitchContext','reversalReview if reversalScreen has REVIEW_REQUIRED','newSignals','events'],
   statusesForChecksAndClauses:['CONFIRMED','UNVERIFIED','VIOLATION'],
   outcomePrinciple:'A price-data gap does not cancel current independent BTC/ETH analysis. Mark historical trade outcomes UNVERIFIED with exact affected IDs and distinguish them from new-market LONG/SHORT/HOLD.',
   autoSwitchPrinciple:'Follow requirements.autoSwitchAudit and autoSwitchContext; source-anchored immediate and near candidates must be compared for EACH old pending ID. Never default to KEEP merely because price is distant or CVD reliability is LOW.',
@@ -163,6 +163,7 @@ export function submissionContract(){
    coupling:{status:null,evidence:null},checks,clauses,
    audit20:{rules:null,bias:null,evidence:null},
    conclusions:{BTC:{decision:null,evidence:null},ETH:{decision:null,evidence:null}},
+   marketOutlook:{BTC:{asOf:null,bias:null,currentSituation:null,expectedPath:null,alternative:null},ETH:{asOf:null,bias:null,currentSituation:null,expectedPath:null,alternative:null}},
    historicalUncertainty:{BTC:{unresolvedIds:[],evidence:null},ETH:{unresolvedIds:[],evidence:null}},
    autoSwitchAudit:{BTC:{snapshotAt:null,price:null,reviews:[]},ETH:{snapshotAt:null,price:null,reviews:[]}},
    reversalReview:{BTC:{LONG:null,SHORT:null},ETH:{LONG:null,SHORT:null}},
@@ -328,6 +329,17 @@ export function validateOfficialSubmission(args,ledger,previousSnapshot=null,car
  for(const n of STEPS){const c=analysis.checks[String(n)];assert(c&&['CONFIRMED','UNVERIFIED','VIOLATION'].includes(c.status)&&has(c.evidence),'MISSING_V17_EXECUTION_STEP_'+n);}
  assert(analysis.clauses&&typeof analysis.clauses==='object','V17_ALL_0_TO_23_CLAUSES_REQUIRED');
  for(const id of CLAUSES){const c=analysis.clauses[id];assert(c&&['CONFIRMED','UNVERIFIED','VIOLATION'].includes(c.status)&&has(c.evidence),'V17_CLAUSE_MISSING_'+id);}
+ // Fixed BTC/ETH output: each official snapshot must provide observed current market state and conditional forecast.
+ assert(analysis.marketOutlook&&typeof analysis.marketOutlook==='object','BTC_ETH_MARKET_OUTLOOK_REQUIRED');
+ const outlookBiases=new Set(['UP','DOWN','SIDEWAYS','TRANSITION','MIXED','UNVERIFIED']);
+ for(const sym of ['BTC','ETH']){
+  const note=analysis.marketOutlook[sym],at=sym==='BTC'?shot.btcTime:shot.ethTime;
+  assert(note&&note.asOf===at,'MARKET_OUTLOOK_TIMESTAMP_MISMATCH_'+sym);
+  assert(outlookBiases.has(note.bias),'MARKET_OUTLOOK_BIAS_INVALID_'+sym);
+  for(const k of ['currentSituation','expectedPath','alternative']){
+   assert(has(note[k])&&note[k].trim().length<=260,'MARKET_OUTLOOK_TEXT_MISSING_OR_TOO_LONG_'+sym+'_'+k);
+  }
+ }
  assert(analysis.audit20&&has(analysis.audit20.rules)&&has(analysis.audit20.bias)&&has(analysis.audit20.evidence),'FINAL_20_AUDIT_REQUIRED');
  assert(analysis.conclusions&&analysis.conclusions.BTC&&analysis.conclusions.ETH,'BTC_ETH_CONCLUSION_REQUIRED');
  for(const sym of ['BTC','ETH'])assert(['LONG','SHORT','HOLD','MANAGE','UNVERIFIED'].includes(analysis.conclusions[sym].decision)&&has(analysis.conclusions[sym].evidence),'INVALID_CONCLUSION_'+sym);

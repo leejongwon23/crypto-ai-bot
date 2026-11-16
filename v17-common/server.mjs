@@ -272,7 +272,7 @@ async function beginAnalysis(body){
  await storeVerifiedGapProof(db,session,snapshot.sha256,tracked.proof);
  const full=prepare({raw,session,ledger,saved,previousSnapshot,carriedUncertaintyBySymbol:carry,verifiedGapRecoveryBySymbol:tracked.proof});
  const delivered={...applyCachedPolicyResponse(full,body.cachedPolicySha256),
-  signalView:buildSignalView({ledger,snapshot,changes:tracked.events}),
+  signalView:buildSignalView({ledger,snapshot,changes:tracked.events,outlook:saved?.marketOutlook||null,management:saved?.dynamicManagement||null}),
   userOutputRule:SIGNAL_TABLE_OUTPUT_RULE,
   preparedRaw:{persisted:true,snapshotSha256:snapshot.sha256,submitWithoutRaw:true},
   automaticTracking:{events:tracked.events.map(e=>({id:e.id,kind:e.kind,at:e.at,source:e.source||'VERIFIED_GAP_RECOVERY'})),
@@ -301,7 +301,7 @@ async function publishAnalysis(body){
   const before=ledgerHash(ledger);
   // At most one official result per snapshot and current ledger state.
   const prior=await selectOfficial(client,session,shot.sha256,before);
-  if(prior){await client.query('COMMIT');return {status:'OFFICIAL_REPLAY',officialDecision:{...prior,signalView:prior.signalView||buildSignalView({ledger,snapshot:shot}),userOutputRule:SIGNAL_TABLE_OUTPUT_RULE},sameState:true,notReanalyzed:true};}
+  if(prior){await client.query('COMMIT');return {status:'OFFICIAL_REPLAY',officialDecision:{...prior,signalView:buildSignalView({ledger,snapshot:shot,outlook:prior.marketOutlook||null,management:prior.dynamicManagement||null}),userOutputRule:SIGNAL_TABLE_OUTPUT_RULE},sameState:true,notReanalyzed:true};}
   const previousSnapshot=await latestOfficialSnapshot(client,session);
   const carry=await carriedUncertainty(client,session,ledger);
   const verifiedGapRecoveryBySymbol=await readVerifiedGapProof(client,session,shot.sha256);
@@ -318,7 +318,7 @@ async function publishAnalysis(body){
   }
   const afterLedger=await readLedger(client,session);
   const after=ledgerHash(afterLedger);
-  const signalView=buildSignalView({ledger:afterLedger,snapshot:shot,changes:[...newSignals,...events]});
+  const signalView=buildSignalView({ledger:afterLedger,snapshot:shot,changes:[...newSignals,...events],outlook:verified.analysis.marketOutlook,management:verified.analysis.dynamicManagement});
   const official={
    engine:VERSION,
    status:'OFFICIAL_STORED',
@@ -343,6 +343,7 @@ async function publishAnalysis(body){
    historicalUncertainty:verified.analysis.historicalUncertainty||{},
    dynamicManagement:verified.analysis.dynamicManagement,
    regimeAudit:verified.analysis.regimeAudit,
+   marketOutlook:verified.analysis.marketOutlook,
    newSignals,
    events,
    caveat:'The same snapshot and same ledger state replays this official result. AI analytical correctness and complete semantic compliance require independent review; no exchange orders are placed.'
@@ -548,9 +549,9 @@ export async function closeAllUserShorts(args={}){
 }
 
 async function ledgerView(args){const session=sessionId(args.session||'OFFICIAL_V17'),db=await database();
- const [ledger,snapshot]=await Promise.all([readLedger(db,session),latestOfficialSnapshot(db,session)]);
+ const [ledger,snapshot,note]=await Promise.all([readLedger(db,session),latestOfficialSnapshot(db,session),db.query("SELECT official->'marketOutlook' AS outlook, official->'dynamicManagement' AS management FROM v17_ai_analyses WHERE session=$1 ORDER BY created_at DESC LIMIT 1",[session])]);
  return {session,policy:OFFICIAL_POLICY,ledgerSha256:ledgerHash(ledger),signals:ledger,
-  signalView:buildSignalView({ledger,snapshot}),userOutputRule:SIGNAL_TABLE_OUTPUT_RULE,
+  signalView:buildSignalView({ledger,snapshot,outlook:note.rows[0]?.outlook||null,management:note.rows[0]?.management||null}),userOutputRule:SIGNAL_TABLE_OUTPUT_RULE,
   events:(await db.query('SELECT id,event,at_kst FROM v17_ai_events WHERE session=$1 ORDER BY seq DESC LIMIT 500',[session])).rows};}
 // Read-only audit trail. The official signal/event ledger is never rewritten.
 async function decisionHistory(args={}){
@@ -590,8 +591,8 @@ for(const [oldName,newName,description] of [
 // validator, safety audits, and immutable signal state are unchanged.
 for(const t of tools){
  if(['run_official_btc_eth_snapshot','publish_official_v17_analysis','register_formal_btc_eth_signal','read_official_btc_eth_ledger'].includes(t.name)){
-  const display='USER DISPLAY CONTRACT FOR ALL CHATS: after official analysis is stored, show ONLY officialDecision.signalView.markdown (or the top-level signalView.markdown). It includes every nonterminal BTC/ETH original signal including UNVERIFIED, entry-relative stop/TP1-3 % and no unconfirmed PnL. Append signalView.changeNotices ONLY on an actual auto-entry, cancellation, addition, redesign, switch, or exit. Do not show commentary, market narrative, checks, or reportMarkdown in the final answer. Perform all original V1.9 calculations and validations internally before rendering the table. ';
-  t.description=display+t.description.replace('If OFFICIAL_REPLAY show officialDecision.reportMarkdown verbatim.','If OFFICIAL_REPLAY show officialDecision.signalView.markdown only.');
+  const display='USER DISPLAY CONTRACT FOR ALL CHATS: show the ENTIRE officialDecision.signalView.markdown (or top-level signalView.markdown). It ALWAYS contains BTC and ETH in fixed horizontal columns, including 진입 시그널 없음 for a coin with no active formal signal, plus separate concise BTC/ETH observed market situations and conditional expected paths with opposing scenarios. The outlook is stored official analysis.marketOutlook, not an invented backfilled forecast. Never assert guaranteed returns or live account fills. Append genuine signalView.changeNotices for confirmed ledger events. V1.9 analytical logic and 35-clause verification remain mandatory. ';
+  t.description=display+t.description.replace('If OFFICIAL_REPLAY show officialDecision.reportMarkdown verbatim.','If OFFICIAL_REPLAY show officialDecision.signalView.markdown including both BTC and ETH columns and saved outlook commentary.');
  }
 }
 async function mcp(req,res,principal){
