@@ -1,0 +1,69 @@
+{
+  "completedAtKst": "2026-11-17",
+  "scope": "Validated operational repairs and plugin instruction replacement; research trading models not promoted",
+  "repository": "leejongwon23/crypto-ai-bot",
+  "productionBranch": "v17-canonical-engine",
+  "productionCommit": "8b50e0781a8fc13666bca319bc7659c588728ca4",
+  "sourcePullRequest": 23,
+  "ci": {
+    "url": "https://github.com/leejongwon23/crypto-ai-bot/actions/runs/43998631098",
+    "conclusion": "success",
+    "localService": {
+      "passed": 252,
+      "failed": 0
+    },
+    "localResearch": {
+      "passed": 17,
+      "failed": 0
+    }
+  },
+  "render": {
+    "workspaceId": "tea-d5nj03cmrvns73fp6520",
+    "serviceId": "srv-dbqlb95bedkc73e043q0",
+    "deployId": "dep-dbtr6f5bedkc73em75lg",
+    "status": "live",
+    "commit": "8b50e0781a8fc13666bca319bc7659c588728ca4",
+    "healthHttp": 200,
+    "healthStatus": "ready",
+    "errorLogsSinceDeploy": 0,
+    "databaseDirectQuery": "BLOCKED_BY_EXISTING_EXTERNAL_IP_ALLOWLIST_NOT_CHANGED"
+  },
+  "plugin": {
+    "id": "plugin_asdk_app_6af55fe9f77c8191b938f4418ebc3913",
+    "version": "1.4.3",
+    "releaseId": "pluginrel_6afbb383a08c81919ed91e2ce4b52123",
+    "url": "https://chatgpt.com/plugins/plugin_asdk_app_6af55fe9f77c8191b938f4418ebc3913",
+    "scope": "USER",
+    "discoverability": "PRIVATE",
+    "promptReadbackExact": true,
+    "legacyManifestReadback": "SEMANTICALLY_IDENTICAL_SERVER_REGENERATED_FORMATTING"
+  },
+  "policy": {
+    "baseName": "MASTER PROMPT V1.9 FINAL",
+    "baseSha256": "03910e1c418de6a83ed8191ec59801481c933fd1358b33b6b3071a8d81d8505a",
+    "activePluginPromptSha256": "7c74e126ef19960f661093386d99cd11517a20925d7504c569d5f3c864004df8",
+    "originalPreserved": true
+  },
+  "ledger": {
+    "session": "OFFICIAL_V17",
+    "beforeSha256": "8bbcfe954e7f04326d30114afd4692c691cf5addb4e7c22f14062405a92d67cf",
+    "afterSha256": "8bbcfe954e7f04326d30114afd4692c691cf5addb4e7c22f14062405a92d67cf",
+    "ledgerSha256Same": true,
+    "originalsIdentical": true,
+    "eventsIdentical": true,
+    "signals": 27,
+    "events": 58
+  },
+  "limitations": [
+    "New mathematical trading models remain unpromoted.",
+    "No measured market-performance improvement claimed.",
+    "No exchange orders or new formal signals issued for deployment testing.",
+    "Host conversational behavior on a new market snapshot not independently tested after package publication."
+  ],
+  "rollback": {
+    "previousDeployId": "dep-dbto0rajnfac73di1lng",
+    "previousCommit": "4cb79078ebef4dc5f113e20dd44e25068a9e34ec",
+    "previousPluginRelease": "pluginrel_6afb81b633f88191ae2a3a315c3e89ed",
+    "ledgerRollbackForbidden": true
+  }
+}
