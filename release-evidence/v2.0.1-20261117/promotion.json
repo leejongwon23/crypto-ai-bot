@@ -1,0 +1,13 @@
+{
+  "reports": [
+    {
+      "eligible": false,
+      "reasons": [
+        "FROZEN_INDEPENDENT_STUDY_NOT_AVAILABLE"
+      ],
+      "ordersEnabled": false
+    }
+  ],
+  "registryVersion": 0,
+  "ordersEnabled": false
+}

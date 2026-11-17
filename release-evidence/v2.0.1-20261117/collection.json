@@ -1,0 +1,15 @@
+{
+  "connected": true,
+  "records": 123,
+  "proposals": 6,
+  "rejected": 0,
+  "complete": true,
+  "next": null,
+  "datasetSha256": "de86a9d961f744aab6df86e068178c682e992eef064db649f519fdb52a903a31",
+  "rawUserTextExported": false,
+  "independentExchangeAuthentication": false,
+  "frozenStudyCreated": false,
+  "marketPerformanceVerified": false,
+  "ordersEnabled": false,
+  "rejectedSources": []
+}

@@ -1,0 +1,54 @@
+{
+  "recordedAtKst": "2026-11-17T20:10:46.911787+09:00",
+  "productionCommit": "c4bc05936767b6c5333187d2df4e534d6c4fd96b",
+  "renderDeployId": "dep-dbu39jlbedkc73evq500",
+  "live": true,
+  "engine": "V20_MATHEMATICAL_HYPOTHESIS_ENGINE_1.1.0",
+  "pluginVersion": "2.0.1",
+  "pluginRelease": "pluginrel_6afc333bfc508191b0d69f57436a4bb6",
+  "pluginPromptExactReadbackMatch": true,
+  "policySha256": "a6b389650a36e5140bab2929824d13b2c60fe0ec74648a1989e94fe095943265",
+  "originalV19Sha256": "03910e1c418de6a83ed8191ec59801481c933fd1358b33b6b3071a8d81d8505a",
+  "originalUploadBytesMatched": true,
+  "unitRegressionTests": 289,
+  "disposableDatabaseTests": 1,
+  "ledger": {
+    "signals": 27,
+    "events": 58,
+    "ledgerSha256": "8bbcfe954e7f04326d30114afd4692c691cf5addb4e7c22f14062405a92d67cf",
+    "ledgerIdentical": true,
+    "originalsIdentical": true,
+    "eventsIdentical": true
+  },
+  "rollback": {
+    "controlled": true,
+    "status": "ROLLED_BACK",
+    "candidate": "a99eceefe21aee238f92fc6c8608b43235449acf",
+    "restoredCommit": "c4bc05936767b6c5333187d2df4e534d6c4fd96b",
+    "verified": true,
+    "integrity": {
+      "intact": true,
+      "originalsIntact": true,
+      "eventsIntact": true,
+      "beforeSignals": 27,
+      "currentSignals": 27,
+      "beforeEvents": 58,
+      "currentEvents": 58
+    }
+  },
+  "CI": [
+    44069324028,
+    44069324159,
+    44070231738,
+    44070231823,
+    44070380879,
+    44070595118
+  ],
+  "marketStudyPromotion": {
+    "promotedModels": 0,
+    "netMarketPerformanceVerified": false,
+    "independentStudyAvailable": false,
+    "fullyAutonomousStudyAssemblyVerified": false
+  },
+  "exchangeOrdersEnabled": false
+}

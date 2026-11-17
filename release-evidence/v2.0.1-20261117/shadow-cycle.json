@@ -1,0 +1,19 @@
+{
+  "schema": "V20_RESEARCH_CONTROL_1",
+  "observations": 122,
+  "forecasts": 488,
+  "candidates": 6,
+  "reviews": 0,
+  "counterexamples": 0,
+  "statuses": [],
+  "netPerformanceVerified": false,
+  "promotionBlocked": true,
+  "reasons": [
+    "INDEPENDENT_BASELINE_COST_AND_LOCKED_PROTOCOL_REQUIRED"
+  ],
+  "ordersEnabled": false,
+  "newReviews": 0,
+  "backfilled": 22,
+  "backfillMayRemain": false,
+  "truncated": false
+}

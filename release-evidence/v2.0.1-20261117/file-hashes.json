@@ -1,0 +1,126 @@
+{
+  "baselineCommit": "c5095a6326b4a6a8a9fc652a059d9043583ab2d3",
+  "finalCommit": "c4bc05936767b6c5333187d2df4e534d6c4fd96b",
+  "files": [
+    {
+      "path": ".github/workflows/v20-mathematical-evolution.yml",
+      "beforeSha256": "a02d126a500a39306de87fdad9a4f96fef2dab11aaa65c21f31dfb460927394a",
+      "afterSha256": "0b4e065a04d6e42a8c58679dc2fdd5dfba9a03aa741f37b75672c4b459147388"
+    },
+    {
+      "path": ".github/workflows/v20-schema-verification.yml",
+      "beforeSha256": "c8562a549a1915f280784dfad1e64774f1030f91d517a7be82c63e3e70a7948f",
+      "afterSha256": "acd9938c61ee77ebc6dc828f34e69689c40f0ea4fc6806ac1ae85fbfbb29825f"
+    },
+    {
+      "path": "V2_AUTONOMY_COMPLETION.md",
+      "beforeSha256": null,
+      "afterSha256": "0fc3f436622bef7c602d638771bc7b9cdb4a46a18b9d14427272de2144af22e4"
+    },
+    {
+      "path": "plugin-v2/.codex-plugin/plugin.json",
+      "beforeSha256": "8f720133397daa84b7eb9183d9706a2ac00431e1a34b18d1d6bc67f9c0180ab9",
+      "afterSha256": "8bdd5a46063d66e6b8a5d2caab72e68bbaeb8ac5a2eacbbf432ecd1c81b2f503"
+    },
+    {
+      "path": "plugin-v2/plugin.json",
+      "beforeSha256": "ce4a4609252a4a47556ce66c14404befe94fa0046aa03b811981d4a9384aba30",
+      "afterSha256": "e641a22cc896f892ebdd54e32e80b1dbcbc678df8b32279a881b59d173566f80"
+    },
+    {
+      "path": "plugin-v2/skills/btc-eth-risk-audit/SKILL.md",
+      "beforeSha256": "ce53a17826c062c0cc8011fa9ea8eebce3f298a2ba132793ad0cb868e796a609",
+      "afterSha256": "fe39e21f2740164267618130507f84b18c44ba7234fa34ddb583020f3b7a204c"
+    },
+    {
+      "path": "plugin-v2/skills/btc-eth-risk-audit/references/AUTONOMY_2.0.1.md",
+      "beforeSha256": null,
+      "afterSha256": "bb6bfddf5df98134f2e9c454455ffa2b9a2df32164275f1a4a76017ff71335de"
+    },
+    {
+      "path": "plugin-v2/skills/btc-eth-risk-audit/references/ENGINE_V2_MANIFEST.json",
+      "beforeSha256": "54d3d7b2c9a753183b4ad9d0e46525692039416edf95640de9c3a40b24288bdd",
+      "afterSha256": "896a17d9eb568629ce91dbebe5fad495c4cbb17cae701c96f9972cf5e8bcd6d3"
+    },
+    {
+      "path": "quant-evolution/control-client.mjs",
+      "beforeSha256": null,
+      "afterSha256": "e5f06ee4bb2afc8c262ac2e60ceeaf6df5edeaff8d26c730ed94b93f70bb9015"
+    },
+    {
+      "path": "quant-evolution/cycle.mjs",
+      "beforeSha256": null,
+      "afterSha256": "75fd3b7b50fbf30d294c175469798b1fa3f64c839bb5672b79165338ca7b88b6"
+    },
+    {
+      "path": "quant-evolution/database.test.mjs",
+      "beforeSha256": "dff9b6d23cce9800cbf1b76cbedc1866fb4600390220c31978da02aa28b2ae93",
+      "afterSha256": "808def0252d4ba42aab82165709b4a8550aac5d9acb593ba028ccebc2fe62c28"
+    },
+    {
+      "path": "quant-evolution/guard-core.mjs",
+      "beforeSha256": null,
+      "afterSha256": "49e269ecbc550fc3e33bf5f9e9d0a4e7b67f4380c9e504ac5e09b820328993e3"
+    },
+    {
+      "path": "quant-evolution/guard-core.test.mjs",
+      "beforeSha256": null,
+      "afterSha256": "19ab1dbae1ff3f846458db128c13286e78b563efb5c6facc6d3a59a24149ffca"
+    },
+    {
+      "path": "quant-evolution/guard.mjs",
+      "beforeSha256": null,
+      "afterSha256": "b9461eeee940dce8c047ac25b555e99bbfe43d399ea985a0b47019efe12e5a4d"
+    },
+    {
+      "path": "quant-evolution/run.mjs",
+      "beforeSha256": "892934c5b1dc6141be0d361118f2540c4a772bc1bf323115a3b4738be86dc9df",
+      "afterSha256": "4b1319e667c0d872d76875b740709c9da70089180da46af59bc6be8aeeb15753"
+    },
+    {
+      "path": "quant-evolution/stamp-ci.mjs",
+      "beforeSha256": null,
+      "afterSha256": "fddb4bc182a5b932c266789a6f06dc25f12cd05ce99c6b8d8051a83ec8c0071e"
+    },
+    {
+      "path": "quant-evolution/study-proof.mjs",
+      "beforeSha256": null,
+      "afterSha256": "87d86267fb5ec06bded6dc31a349bd6ccdcfe6ea4b3b912b7bbf1be0216e8cf3"
+    },
+    {
+      "path": "quant-evolution/study-proof.test.mjs",
+      "beforeSha256": null,
+      "afterSha256": "a40c9077a74cbbe91272891804593c9030fda534f1e1dc3f7af46ee76b24e4c0"
+    },
+    {
+      "path": "v17-common/quant-evolution.mjs",
+      "beforeSha256": "78ea996f2facc475d0f0c8ea2eb3dba8c47d6588363d1f1dc6d40e26e40ede01",
+      "afterSha256": "13b68a5b9cda2324d0688b63aa6ab158764e168d6074e7e4306a59e53cc14e25"
+    },
+    {
+      "path": "v17-common/quant-lifecycle.mjs",
+      "beforeSha256": null,
+      "afterSha256": "aed99f818fed6a2d08c6826cd1a25c45656270de7d0a739d5462f007daa0cc89"
+    },
+    {
+      "path": "v17-common/quant-lifecycle.test.mjs",
+      "beforeSha256": null,
+      "afterSha256": "297eada0f97b6c6de906dd35dafb0ec4248929dab1242dff77ddf344d6955917"
+    },
+    {
+      "path": "v17-common/research-control.mjs",
+      "beforeSha256": null,
+      "afterSha256": "3e9ccec61c741f997028fd4068d835ba83ed9d0d81b934f31f6850debb6fc7ee"
+    },
+    {
+      "path": "v17-common/server.mjs",
+      "beforeSha256": "23190d7db3b3e98dceb76f794e941c8e118e74ee8fd0dbb9a26191adc145b31b",
+      "afterSha256": "88faf94a5f11d1a9e7bd1ee004f6a50c3135d48e1d2fbb3b03aa2db07350c6e9"
+    },
+    {
+      "path": "v17-common/v20-core.mjs",
+      "beforeSha256": "1a800caad5576f2d82edc5754d242fde93c431dc73f8644a464347b074a74160",
+      "afterSha256": "b5fd64cd6e6ff9ea89e69ef18e755f8b5acb8c3f0a26aa4f29346ebbc975d413"
+    }
+  ]
+}

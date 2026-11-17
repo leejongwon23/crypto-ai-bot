@@ -1,0 +1,1744 @@
+TAP version 13
+# Subtest: guard requires live commit, exact policy and model bytes, no orders, intact ledger
+ok 1 - guard requires live commit, exact policy and model bytes, no orders, intact ledger
+  ---
+  duration_ms: 0.908009
+  type: 'test'
+  ...
+# Subtest: three actual consecutive matching checks finish a rollout without rollback
+ok 2 - three actual consecutive matching checks finish a rollout without rollback
+  ---
+  duration_ms: 1.00181
+  type: 'test'
+  ...
+# Subtest: policy mismatch triggers rollback and reports successful verification only after callback proof
+ok 3 - policy mismatch triggers rollback and reports successful verification only after callback proof
+  ---
+  duration_ms: 0.192578
+  type: 'test'
+  ...
+# Subtest: concurrent source collision or failed restored health remains explicitly unverified
+ok 4 - concurrent source collision or failed restored health remains explicitly unverified
+  ---
+  duration_ms: 0.203365
+  type: 'test'
+  ...
+# Subtest: controlled rehearsal exercises the same rollback path without corrupting trading logic
+ok 5 - controlled rehearsal exercises the same rollback path without corrupting trading logic
+  ---
+  duration_ms: 0.210435
+  type: 'test'
+  ...
+# Subtest: deployment timeout does not masquerade as live
+ok 6 - deployment timeout does not masquerade as live
+  ---
+  duration_ms: 0.197175
+  type: 'test'
+  ...
+# Subtest: real Git rollback restores source while preserving every consumed holdout
+ok 7 - real Git rollback restores source while preserving every consumed holdout
+  ---
+  duration_ms: 85.390947
+  type: 'test'
+  ...
+# Subtest: net study return actually subtracts documented fees, adverse slippage and signed funding
+ok 8 - net study return actually subtracts documented fees, adverse slippage and signed funding
+  ---
+  duration_ms: 1.285305
+  type: 'test'
+  ...
+# Subtest: unknown minute order or absent costs cannot acquire a net performance number
+ok 9 - unknown minute order or absent costs cannot acquire a net performance number
+  ---
+  duration_ms: 0.203013
+  type: 'test'
+  ...
+# Subtest: a green boolean and arbitrary matching text files cannot pass actual study proof
+ok 10 - a green boolean and arbitrary matching text files cannot pass actual study proof
+  ---
+  duration_ms: 0.909501
+  type: 'test'
+  ...
+# Subtest: uses actual 12:25 prices and ATR instead of frozen original entry
+ok 11 - uses actual 12:25 prices and ATR instead of frozen original entry
+  ---
+  duration_ms: 2.585671
+  type: 'test'
+  ...
+# Subtest: existing PENDING with market structure cannot submit prose-only HOLD
+ok 12 - existing PENDING with market structure cannot submit prose-only HOLD
+  ---
+  duration_ms: 0.876792
+  type: 'test'
+  ...
+# Subtest: full immediate and nearer numerical comparisons allow evidence-based KEEP
+ok 13 - full immediate and nearer numerical comparisons allow evidence-based KEEP
+  ---
+  duration_ms: 1.112676
+  type: 'test'
+  ...
+# Subtest: do not accept CVD LOW alone as rejection
+ok 14 - do not accept CVD LOW alone as rejection
+  ---
+  duration_ms: 0.61405
+  type: 'test'
+  ...
+# Subtest: wrong old distance ATR is rejected
+ok 15 - wrong old distance ATR is rejected
+  ---
+  duration_ms: 0.504926
+  type: 'test'
+  ...
+# Subtest: near must be closer than original signal and source anchored
+ok 16 - near must be closer than original signal and source anchored
+  ---
+  duration_ms: 0.411626
+  type: 'test'
+  ...
+# Subtest: server recomputes stop percent, TP2 percent and R:R
+ok 17 - server recomputes stop percent, TP2 percent and R:R
+  ---
+  duration_ms: 0.433569
+  type: 'test'
+  ...
+# Subtest: invented entry anchor cannot pass current raw evidence check
+ok 18 - invented entry anchor cannot pass current raw evidence check
+  ---
+  duration_ms: 0.344276
+  type: 'test'
+  ...
+# Subtest: redesign without atomic old terminal event and new ID rejected
+ok 19 - redesign without atomic old terminal event and new ID rejected
+  ---
+  duration_ms: 0.585166
+  type: 'test'
+  ...
+# Subtest: source-anchored NO_PLAN can acknowledge a missing TP2, not just CVD
+ok 20 - source-anchored NO_PLAN can acknowledge a missing TP2, not just CVD
+  ---
+  duration_ms: 2.138832
+  type: 'test'
+  ...
+# Subtest: no pending trade keeps legacy 4-direction workflow compatible
+ok 21 - no pending trade keeps legacy 4-direction workflow compatible
+  ---
+  duration_ms: 0.244466
+  type: 'test'
+  ...
+# Subtest: no stale snapshot timestamp passes as a fresh auto-switch audit
+ok 22 - no stale snapshot timestamp passes as a fresh auto-switch audit
+  ---
+  duration_ms: 0.345117
+  type: 'test'
+  ...
+# Subtest: same-direction add-on NEW_ENTRY is permitted with parent and exposure evidence
+ok 23 - same-direction add-on NEW_ENTRY is permitted with parent and exposure evidence
+  ---
+  duration_ms: 13.526933
+  type: 'test'
+  ...
+# Subtest: same-direction add-on PENDING is permitted without closing entered original
+ok 24 - same-direction add-on PENDING is permitted without closing entered original
+  ---
+  duration_ms: 1.964511
+  type: 'test'
+  ...
+# Subtest: same-direction add-on requires explicit parent and risk evidence
+ok 25 - same-direction add-on requires explicit parent and risk evidence
+  ---
+  duration_ms: 4.562832
+  type: 'test'
+  ...
+# Subtest: opposite PENDING is allowed alongside an entered LONG but cannot execute yet
+ok 26 - opposite PENDING is allowed alongside an entered LONG but cannot execute yet
+  ---
+  duration_ms: 1.100127
+  type: 'test'
+  ...
+# Subtest: opposite pending requires independently documented switch risk
+ok 27 - opposite pending requires independently documented switch risk
+  ---
+  duration_ms: 0.856872
+  type: 'test'
+  ...
+# Subtest: no instantaneous opposite NEW_ENTRY before exiting old LONG
+ok 28 - no instantaneous opposite NEW_ENTRY before exiting old LONG
+  ---
+  duration_ms: 0.953007
+  type: 'test'
+  ...
+# Subtest: opposite NEW_ENTRY works after verified REVERSE_EXIT on current snapshot
+ok 29 - opposite NEW_ENTRY works after verified REVERSE_EXIT on current snapshot
+  ---
+  duration_ms: 1.424783
+  type: 'test'
+  ...
+# Subtest: direct discretionary exit requires independent structure, flow, context and explicit unknown outcome
+ok 30 - direct discretionary exit requires independent structure, flow, context and explicit unknown outcome
+  ---
+  duration_ms: 1.721417
+  type: 'test'
+  ...
+# Subtest: pending opposite touch cannot create simultaneous active LONG+SHORT
+ok 31 - pending opposite touch cannot create simultaneous active LONG+SHORT
+  ---
+  duration_ms: 13.703246
+  type: 'test'
+  ...
+# Subtest: pending opposite touch may enter after same-time verified original REVERSE_EXIT
+ok 32 - pending opposite touch may enter after same-time verified original REVERSE_EXIT
+  ---
+  duration_ms: 1.431673
+  type: 'test'
+  ...
+# Subtest: if two opposing confirmed tranches exist, all must exit before opposite NEW_ENTRY
+ok 33 - if two opposing confirmed tranches exist, all must exit before opposite NEW_ENTRY
+  ---
+  duration_ms: 1.847146
+  type: 'test'
+  ...
+# Subtest: new same-direction add-on does not bypass pending old signal redesign rules
+ok 34 - new same-direction add-on does not bypass pending old signal redesign rules
+  ---
+  duration_ms: 1.220097
+  type: 'test'
+  ...
+# Subtest: revision target order and protection use most recent effective stop
+ok 35 - revision target order and protection use most recent effective stop
+  ---
+  duration_ms: 0.387039
+  type: 'test'
+  ...
+# Subtest: revision cannot rewrite already achieved TP1
+ok 36 - revision cannot rewrite already achieved TP1
+  ---
+  duration_ms: 0.204907
+  type: 'test'
+  ...
+# Subtest: revision cannot move future target behind current price or move stop through market
+ok 37 - revision cannot move future target behind current price or move stop through market
+  ---
+  duration_ms: 0.335392
+  type: 'test'
+  ...
+# Subtest: REVISION requires snapshot-time and exact current price
+ok 38 - REVISION requires snapshot-time and exact current price
+  ---
+  duration_ms: 2.767303
+  type: 'test'
+  ...
+# Subtest: revision persistence projection exposes effective stop/TP without changing original
+ok 39 - revision persistence projection exposes effective stop/TP without changing original
+  ---
+  duration_ms: 0.495582
+  type: 'test'
+  ...
+# Subtest: post-revision price audit uses revised stop, not immutable original stop
+ok 40 - post-revision price audit uses revised stop, not immutable original stop
+  ---
+  duration_ms: 0.942331
+  type: 'test'
+  ...
+# Subtest: original V1.7 policy hash and plugin API remain unchanged
+ok 41 - original V1.7 policy hash and plugin API remain unchanged
+  ---
+  duration_ms: 0.344175
+  type: 'test'
+  ...
+# Subtest: pre-issue old ENTERED event is not blocked by a new opposite signal issued later
+ok 42 - pre-issue old ENTERED event is not blocked by a new opposite signal issued later
+  ---
+  duration_ms: 1.051804
+  type: 'test'
+  ...
+# Subtest: future-dated exit event cannot be backfilled into an earlier snapshot
+ok 43 - future-dated exit event cannot be backfilled into an earlier snapshot
+  ---
+  duration_ms: 0.905125
+  type: 'test'
+  ...
+# Subtest: discretionary exit PnL is never accepted without verified entry and correct arithmetic
+ok 44 - discretionary exit PnL is never accepted without verified entry and correct arithmetic
+  ---
+  duration_ms: 0.323985
+  type: 'test'
+  ...
+# Subtest: server ledger query reconstructs revised effective plan from immutable event stream
+ok 45 - server ledger query reconstructs revised effective plan from immutable event stream
+  ---
+  duration_ms: 0.443554
+  type: 'test'
+  ...
+# Subtest: sequential same-snapshot revisions cannot loosen the preceding revision stop
+ok 46 - sequential same-snapshot revisions cannot loosen the preceding revision stop
+  ---
+  duration_ms: 2.183479
+  type: 'test'
+  ...
+# Subtest: default response remains strictly identical without opt-in
+ok 47 - default response remains strictly identical without opt-in
+  ---
+  duration_ms: 1.717822
+  type: 'test'
+  ...
+# Subtest: valid cached hash skips only verbatim policy text
+ok 48 - valid cached hash skips only verbatim policy text
+  ---
+  duration_ms: 0.298727
+  type: 'test'
+  ...
+# Subtest: wrong or outdated hash safely returns full V1.7 policy
+ok 49 - wrong or outdated hash safely returns full V1.7 policy
+  ---
+  duration_ms: 0.186239
+  type: 'test'
+  ...
+# Subtest: OFFICIAL_REPLAY remains original response even when cached hash set
+ok 50 - OFFICIAL_REPLAY remains original response even when cached hash set
+  ---
+  duration_ms: 0.124677
+  type: 'test'
+  ...
+# Subtest: policy source, ledger and signal fields stay immutable
+ok 51 - policy source, ledger and signal fields stay immutable
+  ---
+  duration_ms: 0.09962
+  type: 'test'
+  ...
+# Subtest: JSON response shrinks and hashes remain identical, using real 902-line policy
+ok 52 - JSON response shrinks and hashes remain identical, using real 902-line policy
+  ---
+  duration_ms: 0.278757
+  type: 'test'
+  ...
+# Subtest: continuous post-issue short entry touch is reported as required
+ok 53 - continuous post-issue short entry touch is reported as required
+  ---
+  duration_ms: 6.490051
+  type: 'test'
+  ...
+# Subtest: official HOLD without required ENTERED event is rejected
+ok 54 - official HOLD without required ENTERED event is rejected
+  ---
+  duration_ms: 11.409562
+  type: 'test'
+  ...
+# Subtest: ENTERED event with price path evidence passes original immutable plan audit
+ok 55 - ENTERED event with price path evidence passes original immutable plan audit
+  ---
+  duration_ms: 2.055948
+  type: 'test'
+  ...
+# Subtest: no touched entry in continuous path does not force event
+ok 56 - no touched entry in continuous path does not force event
+  ---
+  duration_ms: 1.924031
+  type: 'test'
+  ...
+# Subtest: entry+stop overlap in one aggregated path is ambiguous, not auto-success
+ok 57 - entry+stop overlap in one aggregated path is ambiguous, not auto-success
+  ---
+  duration_ms: 2.253033
+  type: 'test'
+  ...
+# Subtest: unknown history is disclosed and can be quarantined before new current signal
+ok 58 - unknown history is disclosed and can be quarantined before new current signal
+  ---
+  duration_ms: 4.793927
+  type: 'test'
+  ...
+# Subtest: out-of-order historical snapshot cannot silently rewrite ledger
+ok 59 - out-of-order historical snapshot cannot silently rewrite ledger
+  ---
+  duration_ms: 0.717344
+  type: 'test'
+  ...
+# Subtest: do not infer entry from 24h high alone when interval path is below entry
+ok 60 - do not infer entry from 24h high alone when interval path is below entry
+  ---
+  duration_ms: 0.251847
+  type: 'test'
+  ...
+# Subtest: continuous entered SHORT stop touch is detected independently from AI wording
+ok 61 - continuous entered SHORT stop touch is detected independently from AI wording
+  ---
+  duration_ms: 1.239956
+  type: 'test'
+  ...
+# Subtest: continuous entered SHORT TP1 touch must be reported
+ok 62 - continuous entered SHORT TP1 touch must be reported
+  ---
+  duration_ms: 1.244463
+  type: 'test'
+  ...
+# Subtest: continuous entered SHORT TP3 touch requires terminal completion or ambiguity
+ok 63 - continuous entered SHORT TP3 touch requires terminal completion or ambiguity
+  ---
+  duration_ms: 1.547768
+  type: 'test'
+  ...
+# Subtest: both stop and TP touched: chronology ambiguous, no fabricated completion
+ok 64 - both stop and TP touched: chronology ambiguous, no fabricated completion
+  ---
+  duration_ms: 0.735131
+  type: 'test'
+  ...
+# Subtest: post-revision low94 hits effective STOP95 while preserving original STOP90
+ok 65 - post-revision low94 hits effective STOP95 while preserving original STOP90
+  ---
+  duration_ms: 1.990711
+  type: 'test'
+  ...
+# Subtest: earlier low94 does not use a future STOP95 retroactively
+ok 66 - earlier low94 does not use a future STOP95 retroactively
+  ---
+  duration_ms: 0.330255
+  type: 'test'
+  ...
+# Subtest: multiple revisions select the plan at each observation, not the latest plan for all history
+ok 67 - multiple revisions select the plan at each observation, not the latest plan for all history
+  ---
+  duration_ms: 0.322914
+  type: 'test'
+  ...
+# Subtest: intraminute revision with potential crossing remains ambiguous
+ok 68 - intraminute revision with potential crossing remains ambiguous
+  ---
+  duration_ms: 0.277255
+  type: 'test'
+  ...
+# Subtest: missing multi-version history cannot silently apply last plan
+ok 69 - missing multi-version history cannot silently apply last plan
+  ---
+  duration_ms: 0.552057
+  type: 'test'
+  ...
+# Subtest: reversed history and latest-plan mismatch reject
+ok 70 - reversed history and latest-plan mismatch reject
+  ---
+  duration_ms: 0.296524
+  type: 'test'
+  ...
+# Subtest: SHORT mirrored protective stop is applied prospectively
+ok 71 - SHORT mirrored protective stop is applied prospectively
+  ---
+  duration_ms: 0.412027
+  type: 'test'
+  ...
+# Subtest: automatic event planner receives effective history without backdating first partial minute
+ok 72 - automatic event planner receives effective history without backdating first partial minute
+  ---
+  duration_ms: 1.069862
+  type: 'test'
+  ...
+# Subtest: prepared aggregate path also uses effective plan; overlapping revision never inferred
+ok 73 - prepared aggregate path also uses effective plan; overlapping revision never inferred
+  ---
+  duration_ms: 0.75491
+  type: 'test'
+  ...
+# Subtest: no revision preserves original events and same-minute STOP/TP ambiguity
+ok 74 - no revision preserves original events and same-minute STOP/TP ambiguity
+  ---
+  duration_ms: 0.526589
+  type: 'test'
+  ...
+# Subtest: gap from 22:21 to 03:43 correctly exposes uncertain ETH PENDING status
+ok 75 - gap from 22:21 to 03:43 correctly exposes uncertain ETH PENDING status
+  ---
+  duration_ms: 3.725938
+  type: 'test'
+  ...
+# Subtest: API rate limit on BTC 5B is detected, not mistaken for complete data
+ok 76 - API rate limit on BTC 5B is detected, not mistaken for complete data
+  ---
+  duration_ms: 0.33401
+  type: 'test'
+  ...
+# Subtest: gap is not misclassified as pending touch if the inclusive 24h high disproves entry
+ok 77 - gap is not misclassified as pending touch if the inclusive 24h high disproves entry
+  ---
+  duration_ms: 0.914039
+  type: 'test'
+  ...
+# Subtest: no gap when incoming path overlaps last official snapshot
+ok 78 - no gap when incoming path overlaps last official snapshot
+  ---
+  duration_ms: 0.299669
+  type: 'test'
+  ...
+# Subtest: missing core market sections does not silently pass completeness
+ok 79 - missing core market sections does not silently pass completeness
+  ---
+  duration_ms: 0.298637
+  type: 'test'
+  ...
+# Subtest: historical uncertainty must be disclosed, even when current market outcome is HOLD
+ok 80 - historical uncertainty must be disclosed, even when current market outcome is HOLD
+  ---
+  duration_ms: 7.272458
+  type: 'test'
+  ...
+# Subtest: current analysis can be HOLD without falsely confirming old PENDING during gap
+ok 81 - current analysis can be HOLD without falsely confirming old PENDING during gap
+  ---
+  duration_ms: 3.281182
+  type: 'test'
+  ...
+# Subtest: original V1.7 SHA unchanged after deterministic audit patch
+ok 82 - original V1.7 SHA unchanged after deterministic audit patch
+  ---
+  duration_ms: 0.143575
+  type: 'test'
+  ...
+# Subtest: unknown past trade does not force the current independent decision to UNVERIFIED
+ok 83 - unknown past trade does not force the current independent decision to UNVERIFIED
+  ---
+  duration_ms: 20.010901
+  type: 'test'
+  ...
+# Subtest: atomic quarantine of uncertain PENDING and prospectively issued NEW_ENTRY is allowed
+ok 84 - atomic quarantine of uncertain PENDING and prospectively issued NEW_ENTRY is allowed
+  ---
+  duration_ms: 2.753452
+  type: 'test'
+  ...
+# Subtest: past potentially open trade is always disclosed in report and signal
+ok 85 - past potentially open trade is always disclosed in report and signal
+  ---
+  duration_ms: 2.715035
+  type: 'test'
+  ...
+# Subtest: unresolved old PENDING cannot be silently cancelled or replaced
+ok 86 - unresolved old PENDING cannot be silently cancelled or replaced
+  ---
+  duration_ms: 3.15247
+  type: 'test'
+  ...
+# Subtest: gap quarantine cannot be invented without gap or carried evidence
+ok 87 - gap quarantine cannot be invented without gap or carried evidence
+  ---
+  duration_ms: 1.047568
+  type: 'test'
+  ...
+# Subtest: confirmed active position remains protected from unknown-gap reverse-entry
+ok 88 - confirmed active position remains protected from unknown-gap reverse-entry
+  ---
+  duration_ms: 0.907679
+  type: 'test'
+  ...
+# Subtest: an old UNVERIFIED originally PENDING may be disclosed in future clean-window decisions
+ok 89 - an old UNVERIFIED originally PENDING may be disclosed in future clean-window decisions
+  ---
+  duration_ms: 0.826387
+  type: 'test'
+  ...
+# Subtest: an old UNVERIFIED previously ENTERED cannot be ignored by a NEW_ENTRY opposite
+ok 90 - an old UNVERIFIED previously ENTERED cannot be ignored by a NEW_ENTRY opposite
+  ---
+  duration_ms: 0.874069
+  type: 'test'
+  ...
+# Subtest: historic unresolved gap survives later gap-free input via carried uncertainty
+ok 91 - historic unresolved gap survives later gap-free input via carried uncertainty
+  ---
+  duration_ms: 1.205334
+  type: 'test'
+  ...
+# Subtest: archived terminated old signal is never resurrected by stale history
+ok 92 - archived terminated old signal is never resurrected by stale history
+  ---
+  duration_ms: 0.509453
+  type: 'test'
+  ...
+# Subtest: UNVERIFIED previously known outcome cannot be arbitrarily switched back without recovery evidence
+ok 93 - UNVERIFIED previously known outcome cannot be arbitrarily switched back without recovery evidence
+  ---
+  duration_ms: 0.278166
+  type: 'test'
+  ...
+# Subtest: server carries historical uncertainty from persisted official decisions across snapshot gaps
+ok 94 - server carries historical uncertainty from persisted official decisions across snapshot gaps
+  ---
+  duration_ms: 0.362043
+  type: 'test'
+  ...
+# Subtest: server ignores prior uncertainties for terminal signals
+ok 95 - server ignores prior uncertainties for terminal signals
+  ---
+  duration_ms: 0.132068
+  type: 'test'
+  ...
+# Subtest: OAuth discovery, DCR, PKCE S256, login, code reuse, refresh and audience isolation
+ok 96 - OAuth discovery, DCR, PKCE S256, login, code reuse, refresh and audience isolation
+  ---
+  duration_ms: 97.017455
+  type: 'test'
+  ...
+# Subtest: server syntax is valid
+ok 97 - server syntax is valid
+  ---
+  duration_ms: 33.390183
+  type: 'test'
+  ...
+# Subtest: reset rejects missing or alternate sessions before database access
+ok 98 - reset rejects missing or alternate sessions before database access
+  ---
+  duration_ms: 0.860588
+  type: 'test'
+  ...
+# Subtest: reset rejects missing exact operation and explicit confirmation
+ok 99 - reset rejects missing exact operation and explicit confirmation
+  ---
+  duration_ms: 0.309494
+  type: 'test'
+  ...
+# Subtest: reset rejects missing and malformed expected ledger fingerprint
+ok 100 - reset rejects missing and malformed expected ledger fingerprint
+  ---
+  duration_ms: 0.317626
+  type: 'test'
+  ...
+# Subtest: no signal means no automatic events and no network dependence
+ok 101 - no signal means no automatic events and no network dependence
+  ---
+  duration_ms: 1.590171
+  type: 'test'
+  ...
+# Subtest: entered short remains unchanged when every recovered candle is between SL and TP
+ok 102 - entered short remains unchanged when every recovered candle is between SL and TP
+  ---
+  duration_ms: 4.345426
+  type: 'test'
+  ...
+# Subtest: pending entry at 19:05 becomes ENTERED at minute-end 19:06
+ok 103 - pending entry at 19:05 becomes ENTERED at minute-end 19:06
+  ---
+  duration_ms: 0.761931
+  type: 'test'
+  ...
+# Subtest: entered stop on a later minute is STOPPED and valid by original validator
+ok 104 - entered stop on a later minute is STOPPED and valid by original validator
+  ---
+  duration_ms: 0.453529
+  type: 'test'
+  ...
+# Subtest: unknown old ENTERED is restored with complete proof of no exit
+ok 105 - unknown old ENTERED is restored with complete proof of no exit
+  ---
+  duration_ms: 0.629943
+  type: 'test'
+  ...
+# Subtest: unknown old ENTERED with observed stop resolves STOPPED
+ok 106 - unknown old ENTERED with observed stop resolves STOPPED
+  ---
+  duration_ms: 0.329183
+  type: 'test'
+  ...
+# Subtest: ambiguous stop+target minute leaves recovered unknown unresolved
+ok 107 - ambiguous stop+target minute leaves recovered unknown unresolved
+  ---
+  duration_ms: 0.391165
+  type: 'test'
+  ...
+# Subtest: not enough minutes at the beginning must not infer healthy position
+ok 108 - not enough minutes at the beginning must not infer healthy position
+  ---
+  duration_ms: 0.212779
+  type: 'test'
+  ...
+# Subtest: first partial minute with stop touch is not backdated
+ok 109 - first partial minute with stop touch is not backdated
+  ---
+  duration_ms: 0.614991
+  type: 'test'
+  ...
+# Subtest: parse each saved BTC ETH segment without confusing symbols
+ok 110 - parse each saved BTC ETH segment without confusing symbols
+  ---
+  duration_ms: 1.848267
+  type: 'test'
+  ...
+# Subtest: overlapping saved snapshots close earlier official path gap
+ok 111 - overlapping saved snapshots close earlier official path gap
+  ---
+  duration_ms: 0.922661
+  type: 'test'
+  ...
+# Subtest: gaps bigger than 1m stay uncovered, even if latest quote is current
+ok 112 - gaps bigger than 1m stay uncovered, even if latest quote is current
+  ---
+  duration_ms: 0.265217
+  type: 'test'
+  ...
+# Subtest: no SL/TP in continuous path preserves entered state
+ok 113 - no SL/TP in continuous path preserves entered state
+  ---
+  duration_ms: 1.414648
+  type: 'test'
+  ...
+# Subtest: PENDING crossed once becomes entered by proof of original path
+ok 114 - PENDING crossed once becomes entered by proof of original path
+  ---
+  duration_ms: 1.070893
+  type: 'test'
+  ...
+# Subtest: stop and profit within same segment are not classified as either
+ok 115 - stop and profit within same segment are not classified as either
+  ---
+  duration_ms: 0.229964
+  type: 'test'
+  ...
+# Subtest: already UNVERIFIED is restored only after a full historical chain
+ok 116 - already UNVERIFIED is restored only after a full historical chain
+  ---
+  duration_ms: 0.675512
+  type: 'test'
+  ...
+# Subtest: never record guessed entry when interval starts before last confirmed state
+ok 117 - never record guessed entry when interval starts before last confirmed state
+  ---
+  duration_ms: 1.383972
+  type: 'test'
+  ...
+# Subtest: server stores and restores the EXACT original input including CRLF and whitespace
+ok 118 - server stores and restores the EXACT original input including CRLF and whitespace
+  ---
+  duration_ms: 1.156021
+  type: 'test'
+  ...
+# Subtest: same digest and session are idempotent; alternative sessions stay isolated
+ok 119 - same digest and session are idempotent; alternative sessions stay isolated
+  ---
+  duration_ms: 0.712957
+  type: 'test'
+  ...
+# Subtest: unknown digest does not silently use the previous snapshot
+ok 120 - unknown digest does not silently use the previous snapshot
+  ---
+  duration_ms: 1.430231
+  type: 'test'
+  ...
+# Subtest: missing or malformed digests cannot resolve a raw
+ok 121 - missing or malformed digests cannot resolve a raw
+  ---
+  duration_ms: 0.313339
+  type: 'test'
+  ...
+# Subtest: legacy submit-with-raw remains backwards compatible
+ok 122 - legacy submit-with-raw remains backwards compatible
+  ---
+  duration_ms: 0.246719
+  type: 'test'
+  ...
+# Subtest: stored snapshot is not overwritten by later same-sha prepare
+ok 123 - stored snapshot is not overwritten by later same-sha prepare
+  ---
+  duration_ms: 0.294191
+  type: 'test'
+  ...
+# Subtest: a legacy client that mistakenly retypes raw cannot override the byte-exact prepared source
+ok 124 - a legacy client that mistakenly retypes raw cannot override the byte-exact prepared source
+  ---
+  duration_ms: 0.30054
+  type: 'test'
+  ...
+# Subtest: KST times map to UTC
+ok 125 - KST times map to UTC
+  ---
+  duration_ms: 2.695536
+  type: 'test'
+  ...
+# Subtest: window parser extracts BTC and ETH independently
+ok 126 - window parser extracts BTC and ETH independently
+  ---
+  duration_ms: 0.651917
+  type: 'test'
+  ...
+# Subtest: Bybit response validation rejects broken and incomplete candles
+ok 127 - Bybit response validation rejects broken and incomplete candles
+  ---
+  duration_ms: 0.864354
+  type: 'test'
+  ...
+# Subtest: no target crossed preserves ENTERED with full path
+ok 128 - no target crossed preserves ENTERED with full path
+  ---
+  duration_ms: 1.133187
+  type: 'test'
+  ...
+# Subtest: PENDING first touch enters without additional signal gates
+ok 129 - PENDING first touch enters without additional signal gates
+  ---
+  duration_ms: 0.539348
+  type: 'test'
+  ...
+# Subtest: pending entry plus exit in one minute is ambiguous
+ok 130 - pending entry plus exit in one minute is ambiguous
+  ---
+  duration_ms: 0.229594
+  type: 'test'
+  ...
+# Subtest: SHORT traverses TP1, TP2 and TP3 in chronological minutes
+ok 131 - SHORT traverses TP1, TP2 and TP3 in chronological minutes
+  ---
+  duration_ms: 0.463804
+  type: 'test'
+  ...
+# Subtest: stop after TP1 wins later correctly
+ok 132 - stop after TP1 wins later correctly
+  ---
+  duration_ms: 0.340349
+  type: 'test'
+  ...
+# Subtest: same-minute stop and TP cannot be falsely labeled as win
+ok 133 - same-minute stop and TP cannot be falsely labeled as win
+  ---
+  duration_ms: 0.485007
+  type: 'test'
+  ...
+# Subtest: full missing gap is recovered without any imagined trades
+ok 134 - full missing gap is recovered without any imagined trades
+  ---
+  duration_ms: 1.739514
+  type: 'test'
+  ...
+# Subtest: incomplete API range never treated as covered
+ok 135 - incomplete API range never treated as covered
+  ---
+  duration_ms: 1.176953
+  type: 'test'
+  ...
+# Subtest: HTTP failure cannot fabricate recovered price path
+ok 136 - HTTP failure cannot fabricate recovered price path
+  ---
+  duration_ms: 0.849141
+  type: 'test'
+  ...
+# Subtest: LONG stop and TP in same minute stays ambiguous
+ok 137 - LONG stop and TP in same minute stays ambiguous
+  ---
+  duration_ms: 0.163054
+  type: 'test'
+  ...
+# Subtest: terminal stop precludes later target milestone
+ok 138 - terminal stop precludes later target milestone
+  ---
+  duration_ms: 0.155773
+  type: 'test'
+  ...
+# Subtest: fallback uses official Bybit backup only after primary HTTP 403 and verifies every 1m candle
+ok 139 - fallback uses official Bybit backup only after primary HTTP 403 and verifies every 1m candle
+  ---
+  duration_ms: 0.457015
+  type: 'test'
+  ...
+# Subtest: backup rejects incomplete 1m coverage and never invents a winning trade
+ok 140 - backup rejects incomplete 1m coverage and never invents a winning trade
+  ---
+  duration_ms: 0.460059
+  type: 'test'
+  ...
+# Subtest: an ENTERED original has its earlier failed gap retained across later snapshots
+ok 141 - an ENTERED original has its earlier failed gap retained across later snapshots
+  ---
+  duration_ms: 0.210395
+  type: 'test'
+  ...
+# Subtest: later 1m recovery includes old missing minute instead of querying only recent period
+ok 142 - later 1m recovery includes old missing minute instead of querying only recent period
+  ---
+  duration_ms: 0.82145
+  type: 'test'
+  ...
+# Subtest: paper forecast uses only first price touch after actual freeze
+ok 143 - paper forecast uses only first price touch after actual freeze
+  ---
+  duration_ms: 1.144434
+  type: 'test'
+  ...
+# Subtest: entry and exit within one minute stays unknown in both directions
+ok 144 - entry and exit within one minute stays unknown in both directions
+  ---
+  duration_ms: 0.22068
+  type: 'test'
+  ...
+# Subtest: TP1 and TP2 accumulate, STOP/TP3 collision never chooses profitable ordering
+ok 145 - TP1 and TP2 accumulate, STOP/TP3 collision never chooses profitable ordering
+  ---
+  duration_ms: 0.2207
+  type: 'test'
+  ...
+# Subtest: data gap and adverse stop gap never become a favorable assumed fill
+ok 146 - data gap and adverse stop gap never become a favorable assumed fill
+  ---
+  duration_ms: 0.131717
+  type: 'test'
+  ...
+# Subtest: stop before first touch invalidates a pending research setup
+ok 147 - stop before first touch invalidates a pending research setup
+  ---
+  duration_ms: 0.144065
+  type: 'test'
+  ...
+# Subtest: unsupported plans abstain independently for all four directions
+ok 148 - unsupported plans abstain independently for all four directions
+  ---
+  duration_ms: 1.510281
+  type: 'test'
+  ...
+# Subtest: newly frozen setups use supplied structure, never a fabricated price or score
+ok 149 - newly frozen setups use supplied structure, never a fabricated price or score
+  ---
+  duration_ms: 0.764735
+  type: 'test'
+  ...
+# Subtest: shadow cannot influence formal analysis, canary is confined to its explicit asset
+ok 150 - shadow cannot influence formal analysis, canary is confined to its explicit asset
+  ---
+  duration_ms: 0.328031
+  type: 'test'
+  ...
+# Subtest: missing proof, reused holdout and quarantine cannot auto-promote
+ok 151 - missing proof, reused holdout and quarantine cannot auto-promote
+  ---
+  duration_ms: 0.511105
+  type: 'test'
+  ...
+# Subtest: ledger checkpoint tolerates new entries but rejects edited originals or removed events
+ok 152 - ledger checkpoint tolerates new entries but rejects edited originals or removed events
+  ---
+  duration_ms: 0.521471
+  type: 'test'
+  ...
+# Subtest: observed contrary structure can trigger research before a STOP, never causal certainty
+ok 153 - observed contrary structure can trigger research before a STOP, never causal certainty
+  ---
+  duration_ms: 2.86507
+  type: 'test'
+  ...
+# Subtest: n200 summaries never become full candles or an invented regime
+ok 154 - n200 summaries never become full candles or an invented regime
+  ---
+  duration_ms: 3.384918
+  type: 'test'
+  ...
+# Subtest: open candles excluded; future known-at and duplicate or gap observations exposed
+ok 155 - open candles excluded; future known-at and duplicate or gap observations exposed
+  ---
+  duration_ms: 0.812076
+  type: 'test'
+  ...
+# Subtest: pivots become known after the confirming candle closes
+ok 156 - pivots become known after the confirming candle closes
+  ---
+  duration_ms: 0.629993
+  type: 'test'
+  ...
+# Subtest: negative aggression and rising price is a competing absorption hypothesis, never a short command
+ok 157 - negative aggression and rising price is a competing absorption hypothesis, never a short command
+  ---
+  duration_ms: 1.634764
+  type: 'test'
+  ...
+# Subtest: symbols keep independent actual structures and no fabricated entry plan
+ok 158 - symbols keep independent actual structures and no fabricated entry plan
+  ---
+  duration_ms: 0.939056
+  type: 'test'
+  ...
+# Subtest: context hash changes with real data and tampering is rejected
+ok 159 - context hash changes with real data and tampering is rejected
+  ---
+  duration_ms: 0.967889
+  type: 'test'
+  ...
+# Subtest: research candidates change explicit mechanisms, not weights, and never auto approve
+ok 160 - research candidates change explicit mechanisms, not weights, and never auto approve
+  ---
+  duration_ms: 2.685942
+  type: 'test'
+  ...
+# Subtest: unobserved mechanism requirements remain unidentified; unsupported mutation rejects
+ok 161 - unobserved mechanism requirements remain unidentified; unsupported mutation rejects
+  ---
+  duration_ms: 0.281201
+  type: 'test'
+  ...
+# Subtest: no data or green technical tests cannot pass independent performance promotion
+ok 162 - no data or green technical tests cannot pass independent performance promotion
+  ---
+  duration_ms: 0.710624
+  type: 'test'
+  ...
+# Subtest: reusing a locked holdout is rejected without selecting a favorable outcome
+ok 163 - reusing a locked holdout is rejected without selecting a favorable outcome
+  ---
+  duration_ms: 0.456213
+  type: 'test'
+  ...
+# Subtest: symbolic mechanism can be structurally changed and mirrored without numerical weights
+ok 164 - symbolic mechanism can be structurally changed and mirrored without numerical weights
+  ---
+  duration_ms: 0.296384
+  type: 'test'
+  ...
+# Subtest: counterexample synthesis changes the mathematical condition graph, not a numerical score
+ok 165 - counterexample synthesis changes the mathematical condition graph, not a numerical score
+  ---
+  duration_ms: 0.919847
+  type: 'test'
+  ...
+# Subtest: higher timeframes use only complete observed minutes; EMA summaries are not fabricated candles
+ok 166 - higher timeframes use only complete observed minutes; EMA summaries are not fabricated candles
+  ---
+  duration_ms: 0.356043
+  type: 'test'
+  ...
+# Subtest: Original 2026-11-17 06:35 ETH SHORT narrow stop is blocked
+ok 167 - Original 2026-11-17 06:35 ETH SHORT narrow stop is blocked
+  ---
+  duration_ms: 1.550031
+  type: 'test'
+  ...
+# Subtest: Wider ETH stop passes only this context gate; RR2 must still be checked separately
+ok 168 - Wider ETH stop passes only this context gate; RR2 must still be checked separately
+  ---
+  duration_ms: 0.546408
+  type: 'test'
+  ...
+# Subtest: Not a blanket short veto when trend alignment reverses
+ok 169 - Not a blanket short veto when trend alignment reverses
+  ---
+  duration_ms: 0.238467
+  type: 'test'
+  ...
+# Subtest: Trend continuation not affected
+ok 170 - Trend continuation not affected
+  ---
+  duration_ms: 1.450762
+  type: 'test'
+  ...
+# Subtest: Missing VWAP evidence cannot approve countertrend range stop
+ok 171 - Missing VWAP evidence cannot approve countertrend range stop
+  ---
+  duration_ms: 0.301752
+  type: 'test'
+  ...
+# Subtest: Mirrored BTC long stop inside 6h lower structure blocked in bearish context
+ok 172 - Mirrored BTC long stop inside 6h lower structure blocked in bearish context
+  ---
+  duration_ms: 0.239638
+  type: 'test'
+  ...
+# Subtest: real RSA signature accepts only the pinned repo and research workflow
+ok 173 - real RSA signature accepts only the pinned repo and research workflow
+  ---
+  duration_ms: 3.98064
+  type: 'test'
+  ...
+# Subtest: cross-repository, fork, alternate workflow and PR identities reject
+ok 174 - cross-repository, fork, alternate workflow and PR identities reject
+  ---
+  duration_ms: 3.662964
+  type: 'test'
+  ...
+# Subtest: expired tokens, wrong audience, algorithm substitution and altered signatures reject
+ok 175 - expired tokens, wrong audience, algorithm substitution and altered signatures reject
+  ---
+  duration_ms: 3.436876
+  type: 'test'
+  ...
+# Subtest: market export strips user prose, account data, plans and signal identifiers
+ok 176 - market export strips user prose, account data, plans and signal identifiers
+  ---
+  duration_ms: 3.984115
+  type: 'test'
+  ...
+# Subtest: read-only SQL uses fixed official session and parameters; cursor and page are bounded
+ok 177 - read-only SQL uses fixed official session and parameters; cursor and page are bounded
+  ---
+  duration_ms: 1.733546
+  type: 'test'
+  ...
+# Subtest: changed stored raw source is quarantined rather than treated as valid evidence
+ok 178 - changed stored raw source is quarantined rather than treated as valid evidence
+  ---
+  duration_ms: 0.21995
+  type: 'test'
+  ...
+# Subtest: legacy original V1.7 policy hash preserved
+ok 179 - legacy original V1.7 policy hash preserved
+  ---
+  duration_ms: 2.11781
+  type: 'test'
+  ...
+# Subtest: bottom LONG must be examined with bearish higher timeframe
+ok 180 - bottom LONG must be examined with bearish higher timeframe
+  ---
+  duration_ms: 2.09718
+  type: 'test'
+  ...
+# Subtest: top SHORT must be examined before 5m EMA turns bearish
+ok 181 - top SHORT must be examined before 5m EMA turns bearish
+  ---
+  duration_ms: 0.361141
+  type: 'test'
+  ...
+# Subtest: invalid or same-minute turning chronology cannot issue screen
+ok 182 - invalid or same-minute turning chronology cannot issue screen
+  ---
+  duration_ms: 0.557494
+  type: 'test'
+  ...
+# Subtest: unreliable CVD cannot produce automatic high confidence screen
+ok 183 - unreliable CVD cannot produce automatic high confidence screen
+  ---
+  duration_ms: 0.284026
+  type: 'test'
+  ...
+# Subtest: bare HOLD when reversal qualifies must be rejected
+ok 184 - bare HOLD when reversal qualifies must be rejected
+  ---
+  duration_ms: 1.046627
+  type: 'test'
+  ...
+# Subtest: screen never manufactures an executable or formal signal
+ok 185 - screen never manufactures an executable or formal signal
+  ---
+  duration_ms: 0.499117
+  type: 'test'
+  ...
+# Subtest: MCP tool publishes optional cache and timing flags without changing required input
+ok 186 - MCP tool publishes optional cache and timing flags without changing required input
+  ---
+  duration_ms: 1.120588
+  type: 'test'
+  ...
+# Subtest: cache is opt-in, never bypasses the policy digest and never alters official signal fields
+ok 187 - cache is opt-in, never bypasses the policy digest and never alters official signal fields
+  ---
+  duration_ms: 0.221892
+  type: 'test'
+  ...
+# Subtest: BTC and still-open UNVERIFIED ETH are both visible with entry-relative stop/TP percentages
+ok 188 - BTC and still-open UNVERIFIED ETH are both visible with entry-relative stop/TP percentages
+  ---
+  duration_ms: 38.409857
+  type: 'test'
+  ...
+# Subtest: verified entered position displays indicative current price percentage, never a fill claim
+ok 189 - verified entered position displays indicative current price percentage, never a fill claim
+  ---
+  duration_ms: 0.511777
+  type: 'test'
+  ...
+# Subtest: terminal signals omitted from default table, but changes carry concise notifications
+ok 190 - terminal signals omitted from default table, but changes carry concise notifications
+  ---
+  duration_ms: 0.671997
+  type: 'test'
+  ...
+# Subtest: add-on and opposite-side switching alerts are exceptional notes
+ok 191 - add-on and opposite-side switching alerts are exceptional notes
+  ---
+  duration_ms: 0.707249
+  type: 'test'
+  ...
+# Subtest: LONG and revised effective stop/targets use correct percentage sign and original entry range
+ok 192 - LONG and revised effective stop/targets use correct percentage sign and original entry range
+  ---
+  duration_ms: 0.642892
+  type: 'test'
+  ...
+# Subtest: view generation does not alter the official ledger or invent a record
+ok 193 - view generation does not alter the official ledger or invent a record
+  ---
+  duration_ms: 1.039877
+  type: 'test'
+  ...
+# Subtest: confirmed historical ETH SHORT entry above its range yields negative conditional valuation
+ok 194 - confirmed historical ETH SHORT entry above its range yields negative conditional valuation
+  ---
+  duration_ms: 1.384583
+  type: 'test'
+  ...
+# Subtest: historically uncertain PENDING is not treated as confirmed entry
+ok 195 - historically uncertain PENDING is not treated as confirmed entry
+  ---
+  duration_ms: 0.489132
+  type: 'test'
+  ...
+# Subtest: price beyond stop in a historical gap never fabricates a STOPPED event
+ok 196 - price beyond stop in a historical gap never fabricates a STOPPED event
+  ---
+  duration_ms: 0.739166
+  type: 'test'
+  ...
+# Subtest: UNVERIFIED with a prior confirmed TP1/TP2 or NEW_ENTRY keeps conditional current price math
+ok 197 - UNVERIFIED with a prior confirmed TP1/TP2 or NEW_ENTRY keeps conditional current price math
+  ---
+  duration_ms: 1.466125
+  type: 'test'
+  ...
+# Subtest: fixed BTC/ETH columns when only ETH signal exists
+ok 198 - fixed BTC/ETH columns when only ETH signal exists
+  ---
+  duration_ms: 0.64813
+  type: 'test'
+  ...
+# Subtest: two market comments are separate and conditional
+ok 199 - two market comments are separate and conditional
+  ---
+  duration_ms: 0.321661
+  type: 'test'
+  ...
+# Subtest: full typed contract is available with current V1.7 and no signal mutation
+ok 200 - full typed contract is available with current V1.7 and no signal mutation
+  ---
+  duration_ms: 1.508128
+  type: 'test'
+  ...
+# Subtest: correct official report key is required, alias stays rejected
+ok 201 - correct official report key is required, alias stays rejected
+  ---
+  duration_ms: 2.020224
+  type: 'test'
+  ...
+# Subtest: exact raw checksum and unchanged ledger/key are still mandatory
+ok 202 - exact raw checksum and unchanged ledger/key are still mandatory
+  ---
+  duration_ms: 0.730874
+  type: 'test'
+  ...
+# Subtest: complete evidence-shaped HOLD remains accepted without inventing a signal
+ok 203 - complete evidence-shaped HOLD remains accepted without inventing a signal
+  ---
+  duration_ms: 2.778079
+  type: 'test'
+  ...
+# Subtest: cached policy response preserves the contract and all hashes
+ok 204 - cached policy response preserves the contract and all hashes
+  ---
+  duration_ms: 0.204847
+  type: 'test'
+  ...
+# Subtest: saved replay never reopens an already persisted decision
+ok 205 - saved replay never reopens an already persisted decision
+  ---
+  duration_ms: 0.44726
+  type: 'test'
+  ...
+# Subtest: real 2026-11-14 ETH regression: enter 19:05, stop 21:58, never TP1
+ok 206 - real 2026-11-14 ETH regression: enter 19:05, stop 21:58, never TP1
+  ---
+  duration_ms: 10.130087
+  type: 'test'
+  ...
+# Subtest: missing one of the 384 rows is rejected, never turned into confirmed entry
+ok 207 - missing one of the 384 rows is rejected, never turned into confirmed entry
+  ---
+  duration_ms: 2.032813
+  type: 'test'
+  ...
+# Subtest: incorrect claimed minute range is rejected
+ok 208 - incorrect claimed minute range is rejected
+  ---
+  duration_ms: 3.173932
+  type: 'test'
+  ...
+# Subtest: entry and stop inside same 1m cannot fabricate their order
+ok 209 - entry and stop inside same 1m cannot fabricate their order
+  ---
+  duration_ms: 2.557349
+  type: 'test'
+  ...
+# Subtest: without user 1m evidence fallback remains unverified, no fake events
+ok 210 - without user 1m evidence fallback remains unverified, no fake events
+  ---
+  duration_ms: 1.354268
+  type: 'test'
+  ...
+# Subtest: after losing a live signal, an original terminal is never reopened
+ok 211 - after losing a live signal, an original terminal is never reopened
+  ---
+  duration_ms: 0.806808
+  type: 'test'
+  ...
+# Subtest: both symbols, both LONG and SHORT searched
+ok 212 - both symbols, both LONG and SHORT searched
+  ---
+  duration_ms: 8.351404
+  type: 'test'
+  ...
+# Subtest: opposing flow NEVER removes an entire direction
+ok 213 - opposing flow NEVER removes an entire direction
+  ---
+  duration_ms: 1.849639
+  type: 'test'
+  ...
+# Subtest: screen ranks arithmetic candidate without inventing success probabilities
+ok 214 - screen ranks arithmetic candidate without inventing success probabilities
+  ---
+  duration_ms: 1.332976
+  type: 'test'
+  ...
+# Subtest: explores at least one near and one now option
+ok 215 - explores at least one near and one now option
+  ---
+  duration_ms: 1.338875
+  type: 'test'
+  ...
+# Subtest: candidate anchors never manufacture price levels beyond given structures
+ok 216 - candidate anchors never manufacture price levels beyond given structures
+  ---
+  duration_ms: 2.316559
+  type: 'test'
+  ...
+# Subtest: ranking does not collapse after changing CVD sign
+ok 217 - ranking does not collapse after changing CVD sign
+  ---
+  duration_ms: 0.829161
+  type: 'test'
+  ...
+# Subtest: missing ATR remains explicitly unverified
+ok 218 - missing ATR remains explicitly unverified
+  ---
+  duration_ms: 0.73508
+  type: 'test'
+  ...
+# Subtest: no past signal or stop mutation
+ok 219 - no past signal or stop mutation
+  ---
+  duration_ms: 1.165806
+  type: 'test'
+  ...
+# Subtest: directional evidence reads price and CVD separately without fabricating win odds
+ok 220 - directional evidence reads price and CVD separately without fabricating win odds
+  ---
+  duration_ms: 1.271304
+  type: 'test'
+  ...
+# Subtest: first target reward vs stop risk is measured and visible, not hidden by TP2 RR
+ok 221 - first target reward vs stop risk is measured and visible, not hidden by TP2 RR
+  ---
+  duration_ms: 1.138845
+  type: 'test'
+  ...
+# Subtest: opposing data remains reviewable with a directional evidence warning, never auto-pruned
+ok 222 - opposing data remains reviewable with a directional evidence warning, never auto-pruned
+  ---
+  duration_ms: 0.878526
+  type: 'test'
+  ...
+# Subtest: exact original two signals close as user-attested TP3, not exchange-proven wins
+ok 223 - exact original two signals close as user-attested TP3, not exchange-proven wins
+  ---
+  duration_ms: 9.270299
+  type: 'test'
+  ...
+# Subtest: does not allow mutation for old completed signal or non-entered original
+ok 224 - does not allow mutation for old completed signal or non-entered original
+  ---
+  duration_ms: 0.735351
+  type: 'test'
+  ...
+# Subtest: requires both exact IDs, explicit stop-order user attestation, and unchanged ledger
+ok 225 - requires both exact IDs, explicit stop-order user attestation, and unchanged ledger
+  ---
+  duration_ms: 0.365998
+  type: 'test'
+  ...
+# Subtest: low above target or missing price source never produces a success
+ok 226 - low above target or missing price source never produces a success
+  ---
+  duration_ms: 0.372507
+  type: 'test'
+  ...
+# Subtest: the administrative attestation does not change original entry stop or TP levels
+ok 227 - the administrative attestation does not change original entry stop or TP levels
+  ---
+  duration_ms: 0.222303
+  type: 'test'
+  ...
+# Subtest: original V1.7 is byte for byte identical including CRLF
+ok 228 - original V1.7 is byte for byte identical including CRLF
+  ---
+  duration_ms: 3.07192
+  type: 'test'
+  ...
+# Subtest: policy hash used by code is user supplied original
+ok 229 - policy hash used by code is user supplied original
+  ---
+  duration_ms: 0.195092
+  type: 'test'
+  ...
+# Subtest: source is not truncated
+ok 230 - source is not truncated
+  ---
+  duration_ms: 0.190245
+  type: 'test'
+  ...
+# Subtest: complete BTC and ETH parse
+ok 231 - complete BTC and ETH parse
+  ---
+  duration_ms: 0.115413
+  type: 'test'
+  ...
+# Subtest: missing ETH rejected
+ok 232 - missing ETH rejected
+  ---
+  duration_ms: 0.4541
+  type: 'test'
+  ...
+# Subtest: duplicate BTC rejected
+ok 233 - duplicate BTC rejected
+  ---
+  duration_ms: 0.160751
+  type: 'test'
+  ...
+# Subtest: invalid date rejected
+ok 234 - invalid date rejected
+  ---
+  duration_ms: 0.148953
+  type: 'test'
+  ...
+# Subtest: shared canonical session permitted
+ok 235 - shared canonical session permitted
+  ---
+  duration_ms: 0.157636
+  type: 'test'
+  ...
+# Subtest: injection session rejected
+ok 236 - injection session rejected
+  ---
+  duration_ms: 0.330415
+  type: 'test'
+  ...
+# Subtest: first use returns whole policy and not arbitrary signal
+ok 237 - first use returns whole policy and not arbitrary signal
+  ---
+  duration_ms: 0.397676
+  type: 'test'
+  ...
+# Subtest: same snapshot / same ledger yields same decision key 100 times
+ok 238 - same snapshot / same ledger yields same decision key 100 times
+  ---
+  duration_ms: 25.669803
+  type: 'test'
+  ...
+# Subtest: official replay returns stored prior verbatim
+ok 239 - official replay returns stored prior verbatim
+  ---
+  duration_ms: 0.392788
+  type: 'test'
+  ...
+# Subtest: full 16 steps, four directions and alternatives accepted
+ok 240 - full 16 steps, four directions and alternatives accepted
+  ---
+  duration_ms: 1.697071
+  type: 'test'
+  ...
+# Subtest: wrong policy version rejected
+ok 241 - wrong policy version rejected
+  ---
+  duration_ms: 0.392748
+  type: 'test'
+  ...
+# Subtest: wrong raw sha rejected
+ok 242 - wrong raw sha rejected
+  ---
+  duration_ms: 0.327691
+  type: 'test'
+  ...
+# Subtest: changed ledger rejected
+ok 243 - changed ledger rejected
+  ---
+  duration_ms: 0.542582
+  type: 'test'
+  ...
+# Subtest: wrong decision key rejected
+ok 244 - wrong decision key rejected
+  ---
+  duration_ms: 0.30088
+  type: 'test'
+  ...
+# Subtest: missing one direction rejected
+ok 245 - missing one direction rejected
+  ---
+  duration_ms: 0.371417
+  type: 'test'
+  ...
+# Subtest: missing immediate option rejected
+ok 246 - missing immediate option rejected
+  ---
+  duration_ms: 0.346479
+  type: 'test'
+  ...
+# Subtest: missing 16th step rejected
+ok 247 - missing 16th step rejected
+  ---
+  duration_ms: 0.302873
+  type: 'test'
+  ...
+# Subtest: missing final audit20 rejected
+ok 248 - missing final audit20 rejected
+  ---
+  duration_ms: 0.316594
+  type: 'test'
+  ...
+# Subtest: no claim of autonomous server LLM
+ok 249 - no claim of autonomous server LLM
+  ---
+  duration_ms: 0.314972
+  type: 'test'
+  ...
+# Subtest: short original price ordering accepted
+ok 250 - short original price ordering accepted
+  ---
+  duration_ms: 0.361741
+  type: 'test'
+  ...
+# Subtest: short stop wrong side rejected
+ok 251 - short stop wrong side rejected
+  ---
+  duration_ms: 0.169113
+  type: 'test'
+  ...
+# Subtest: long stop wrong side rejected
+ok 252 - long stop wrong side rejected
+  ---
+  duration_ms: 0.169464
+  type: 'test'
+  ...
+# Subtest: source version string mandatory
+ok 253 - source version string mandatory
+  ---
+  duration_ms: 0.154652
+  type: 'test'
+  ...
+# Subtest: same existing ID cannot be minted again
+ok 254 - same existing ID cannot be minted again
+  ---
+  duration_ms: 0.857564
+  type: 'test'
+  ...
+# Subtest: positive signal requires A/B/C/D/E and coupling evidence
+ok 255 - positive signal requires A/B/C/D/E and coupling evidence
+  ---
+  duration_ms: 0.188733
+  type: 'test'
+  ...
+# Subtest: RR under 2 not automatically rejected if evidence present
+ok 256 - RR under 2 not automatically rejected if evidence present
+  ---
+  duration_ms: 0.148041
+  type: 'test'
+  ...
+# Subtest: RR under 2 without justification rejected
+ok 257 - RR under 2 without justification rejected
+  ---
+  duration_ms: 0.197836
+  type: 'test'
+  ...
+# Subtest: no event without original formal signal
+ok 258 - no event without original formal signal
+  ---
+  duration_ms: 0.411066
+  type: 'test'
+  ...
+# Subtest: pending can enter on proven touch
+ok 259 - pending can enter on proven touch
+  ---
+  duration_ms: 0.152479
+  type: 'test'
+  ...
+# Subtest: no extra price confirmation mandatory
+ok 260 - no extra price confirmation mandatory
+  ---
+  duration_ms: 0.128933
+  type: 'test'
+  ...
+# Subtest: event before issuance rejected
+ok 261 - event before issuance rejected
+  ---
+  duration_ms: 0.1804
+  type: 'test'
+  ...
+# Subtest: pending may not jump straight to TP3
+ok 262 - pending may not jump straight to TP3
+  ---
+  duration_ms: 0.150255
+  type: 'test'
+  ...
+# Subtest: terminal result cannot be overwritten
+ok 263 - terminal result cannot be overwritten
+  ---
+  duration_ms: 0.150105
+  type: 'test'
+  ...
+# Subtest: early exit requires strong counter evidence
+ok 264 - early exit requires strong counter evidence
+  ---
+  duration_ms: 0.22739
+  type: 'test'
+  ...
+# Subtest: management revision cannot loosen short protection
+ok 265 - management revision cannot loosen short protection
+  ---
+  duration_ms: 0.23364
+  type: 'test'
+  ...
+# Subtest: management revision accepts tightened stop with evidence
+ok 266 - management revision accepts tightened stop with evidence
+  ---
+  duration_ms: 0.18724
+  type: 'test'
+  ...
+# Subtest: same timestamp with changed formal ledger yields different cache key
+ok 267 - same timestamp with changed formal ledger yields different cache key
+  ---
+  duration_ms: 0.420469
+  type: 'test'
+  ...
+# Subtest: coupling status is required even if UNVERIFIED
+ok 268 - coupling status is required even if UNVERIFIED
+  ---
+  duration_ms: 0.337555
+  type: 'test'
+  ...
+# Subtest: all 0–23 clauses plus appendices A/B/final required
+ok 269 - all 0–23 clauses plus appendices A/B/final required
+  ---
+  duration_ms: 0.362983
+  type: 'test'
+  ...
+# Subtest: all 27 clause markers are present in accepted analysis
+ok 270 - all 27 clause markers are present in accepted analysis
+  ---
+  duration_ms: 0.107511
+  type: 'test'
+  ...
+# Subtest: V1.7 requires NEW_ENTRY only if current price is in range
+ok 271 - V1.7 requires NEW_ENTRY only if current price is in range
+  ---
+  duration_ms: 0.149193
+  type: 'test'
+  ...
+# Subtest: V1.7 requires PENDING when observed price is outside range
+ok 272 - V1.7 requires PENDING when observed price is outside range
+  ---
+  duration_ms: 0.145338
+  type: 'test'
+  ...
+# Subtest: new signal data time must match BTC snapshot
+ok 273 - new signal data time must match BTC snapshot
+  ---
+  duration_ms: 0.177906
+  type: 'test'
+  ...
+# Subtest: rule violation forbids official signal modification
+ok 274 - rule violation forbids official signal modification
+  ---
+  duration_ms: 1.053187
+  type: 'test'
+  ...
+# Subtest: opportunity context is available alongside untouched V1.7 policy and official ledger
+ok 275 - opportunity context is available alongside untouched V1.7 policy and official ledger
+  ---
+  duration_ms: 0.911945
+  type: 'test'
+  ...
+# Subtest: exact full V1.8 user policy with sections 24-26
+ok 276 - exact full V1.8 user policy with sections 24-26
+  ---
+  duration_ms: 1.119806
+  type: 'test'
+  ...
+# Subtest: existing OFFICIAL_V17 ledger session survives V1.8 update
+ok 277 - existing OFFICIAL_V17 ledger session survives V1.8 update
+  ---
+  duration_ms: 0.162453
+  type: 'test'
+  ...
+# Subtest: complete V1.8 independent review can hold without fabricating signals
+ok 278 - complete V1.8 independent review can hold without fabricating signals
+  ---
+  duration_ms: 2.655836
+  type: 'test'
+  ...
+# Subtest: dynamic management is required by server validator
+ok 279 - dynamic management is required by server validator
+  ---
+  duration_ms: 1.180607
+  type: 'test'
+  ...
+# Subtest: stale snapshot management is rejected
+ok 280 - stale snapshot management is rejected
+  ---
+  duration_ms: 0.691986
+  type: 'test'
+  ...
+# Subtest: V1.7 as a *new* signal is not allowed under V1.8
+ok 281 - V1.7 as a *new* signal is not allowed under V1.8
+  ---
+  duration_ms: 0.470905
+  type: 'test'
+  ...
+# Subtest: V1.9 full policy identity
+ok 282 - V1.9 full policy identity
+  ---
+  duration_ms: 0.951093
+  type: 'test'
+  ...
+# Subtest: market outlook fields are mandatory for both coins
+ok 283 - market outlook fields are mandatory for both coins
+  ---
+  duration_ms: 0.361151
+  type: 'test'
+  ...
+# Subtest: regime fields both coins and both directions required
+ok 284 - regime fields both coins and both directions required
+  ---
+  duration_ms: 0.248792
+  type: 'test'
+  ...
+# Subtest: actual active policy is V2.0 with complete original safeguards and mathematical 0..43 audit
+ok 285 - actual active policy is V2.0 with complete original safeguards and mathematical 0..43 audit
+  ---
+  duration_ms: 7.423945
+  type: 'test'
+  ...
+# Subtest: preparation actually computes mathematical context and proposals without issuing trades
+ok 286 - preparation actually computes mathematical context and proposals without issuing trades
+  ---
+  duration_ms: 1.205425
+  type: 'test'
+  ...
+# Subtest: full unverified no-data analysis can be stored without fabricating candles or trades
+ok 287 - full unverified no-data analysis can be stored without fabricating candles or trades
+  ---
+  duration_ms: 3.215064
+  type: 'test'
+  ...
+# Subtest: mathematical audit cannot be omitted or use another source hash
+ok 288 - mathematical audit cannot be omitted or use another source hash
+  ---
+  duration_ms: 3.280933
+  type: 'test'
+  ...
+# Subtest: invisible participant identity and missing opposing-direction evidence reject
+ok 289 - invisible participant identity and missing opposing-direction evidence reject
+  ---
+  duration_ms: 3.414893
+  type: 'test'
+  ...
+1..289
+# tests 289
+# suites 0
+# pass 289
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1094.849655
