@@ -12,8 +12,11 @@ function manifest(commit){
 }
 const wait=()=>new Promise(r=>setTimeout(r,10000));
 let checkpoint=null,bootstrap=false;
-try{checkpoint=(await control({action:'CHECKPOINT'})).checkpoint;}
+try{checkpoint=(await control({action:'BASELINE'})).checkpoint;}
 catch(e){
+ const current=await liveHealth();
+ if(current.buildCommit&&current.buildCommit!==expectedCommit){checkpoint=(await control({action:'CHECKPOINT'})).checkpoint;}
+ else{
  // This single bootstrap is needed when upgrading from the pre-controller
  // release. The user-directed release is separately checked by official read.
  const parent=git('rev-parse',expectedCommit+'^1');
@@ -21,6 +24,7 @@ catch(e){
  bootstrap=true;
  for(let n=0;n<90;n++){try{const h=await liveHealth();if(h.buildCommit===expectedCommit){checkpoint=(await control({action:'CHECKPOINT'})).checkpoint;break;}}catch{}await wait();}
  if(!checkpoint)throw Error('RESEARCH_CONTROL_BOOTSTRAP_FAILED');
+ }
 }
 let drill=false;try{const f=JSON.parse(git('show',expectedCommit+':v17-common/deployment-drill.json'));drill=f.kind==='CONTROLLED_ROLLBACK_REHEARSAL'&&f.expectedFailure===true;}catch{}
 const expected=manifest(expectedCommit);
@@ -45,6 +49,7 @@ if(result.status==='VERIFIED_LIVE'){
  if(live!==expectedCommit)throw Error('CONCURRENT_RELEASE_DO_NOT_MARK_VERIFIED');
  // The ref moves only forward in the production history, without rewriting it.
  git('push','origin',expectedCommit+':refs/heads/v20-verified-production');
+ await control({action:'CHECKPOINT'});
 }
 const report={...result,expected,checkpoint,bootstrap,drill,checkedAt:new Date().toISOString(),ordersEnabled:false};
 await writeFile(out+'/deployment-guard.json',JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify({status:result.status,commit:expectedCommit,rollbackCommit:result.rollback?.commit,bootstrap,drill}));

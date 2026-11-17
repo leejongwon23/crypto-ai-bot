@@ -15,6 +15,16 @@ DO $$ DECLARE t TEXT; BEGIN FOREACH t IN ARRAY ARRAY['v20_research_observations'
  EXECUTE format('DROP TRIGGER IF EXISTS v20_research_immutable ON %I',t);
  EXECUTE format('CREATE TRIGGER v20_research_immutable BEFORE UPDATE OR DELETE OR TRUNCATE ON %I FOR EACH STATEMENT EXECUTE FUNCTION v20_research_reject_mutation()',t);
 END LOOP; END $$;
+CREATE OR REPLACE FUNCTION v20_preserve_official_original() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+ IF TG_OP='DELETE' THEN RAISE EXCEPTION 'V20_OFFICIAL_ORIGINAL_IMMUTABLE'; END IF;
+ IF OLD.id IS DISTINCT FROM NEW.id OR OLD.session IS DISTINCT FROM NEW.session OR OLD.symbol IS DISTINCT FROM NEW.symbol OR OLD.original IS DISTINCT FROM NEW.original THEN RAISE EXCEPTION 'V20_OFFICIAL_ORIGINAL_IMMUTABLE'; END IF;
+ RETURN NEW; END $$;
+DROP TRIGGER IF EXISTS v20_official_original_guard ON v17_ai_signals;
+CREATE TRIGGER v20_official_original_guard BEFORE UPDATE OR DELETE ON v17_ai_signals FOR EACH ROW EXECUTE FUNCTION v20_preserve_official_original();
+DROP TRIGGER IF EXISTS v20_official_signals_truncate_guard ON v17_ai_signals;
+CREATE TRIGGER v20_official_signals_truncate_guard BEFORE TRUNCATE ON v17_ai_signals FOR EACH STATEMENT EXECUTE FUNCTION v20_research_reject_mutation();
+DROP TRIGGER IF EXISTS v20_official_events_guard ON v17_ai_events;
+CREATE TRIGGER v20_official_events_guard BEFORE UPDATE OR DELETE OR TRUNCATE ON v17_ai_events FOR EACH STATEMENT EXECUTE FUNCTION v20_research_reject_mutation();
 `;
 function minuteBars(raw,symbol,asOf){
  const start=raw.indexOf('========== '+symbol+' ('+symbol+'USDT) =========='),next=raw.indexOf('========== ',start+12),part=raw.slice(start,next<0?undefined:next);
@@ -82,6 +92,11 @@ export async function researchControl(db,body){
   const checkpoint=await takeIntegritySnapshot(db),id=sha(checkpoint);
   await db.query('INSERT INTO v20_integrity_checkpoints(id,checkpoint) VALUES($1,$2) ON CONFLICT DO NOTHING',[id,JSON.stringify(checkpoint)]);
   return {checkpoint:id,signals:checkpoint.originals.length,events:checkpoint.events.length};
+ }
+ if(body.action==='BASELINE'){
+  const prior=await db.query('SELECT id,checkpoint FROM v20_integrity_checkpoints ORDER BY created_at DESC,id DESC LIMIT 1');
+  if(!prior.rows.length)throw Error('PREVIOUS_INTEGRITY_BASELINE_REQUIRED');
+  const p=prior.rows[0];return {checkpoint:p.id,signals:p.checkpoint.originals.length,events:p.checkpoint.events.length,previouslyPersisted:true};
  }
  if(body.action==='VERIFY'){
   if(!/^[a-f0-9]{64}$/.test(body.checkpoint??''))throw Error('CHECKPOINT_HASH_REQUIRED');

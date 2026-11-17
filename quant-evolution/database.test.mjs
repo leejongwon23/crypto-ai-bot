@@ -30,7 +30,10 @@ test('V2 schema preserves original signals/events/analyses and accepts versioned
    await assert.rejects(db.query('DELETE FROM '+table),/V20_RESEARCH_APPEND_ONLY/);await assert.rejects(db.query('TRUNCATE '+table),/V20_RESEARCH_APPEND_ONLY/);
   }
   await assert.rejects(researchControl(db,{action:'RESET'}),/FORBIDDEN/);
-  const changed=await db.query("UPDATE v17_ai_signals SET original='{\"stop\":91}' WHERE session='SYNTHETIC'");assert.equal(changed.rowCount,1);
+  await assert.rejects(db.query("UPDATE v17_ai_signals SET original='{\"stop\":91}' WHERE session='SYNTHETIC'"),/V20_OFFICIAL_ORIGINAL_IMMUTABLE/);
+  await assert.rejects(db.query('DELETE FROM v17_ai_events'),/V20_RESEARCH_APPEND_ONLY/);
+  await assert.rejects(db.query('TRUNCATE v17_ai_signals'),/V20_RESEARCH_APPEND_ONLY/);
+  const changed=await db.query("UPDATE v17_ai_signals SET status='CANCELLED' WHERE session='SYNTHETIC'");assert.equal(changed.rowCount,1);
   // Checkpoint protects only OFFICIAL_V17 and permits unrelated test sessions.
   assert.equal((await researchControl(db,{action:'VERIFY',checkpoint:checkpoint.checkpoint})).intact,true);
  }finally{await db.end();}
