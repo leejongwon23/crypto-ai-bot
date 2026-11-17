@@ -610,7 +610,7 @@ async function mcp(req,res,principal){
   let result;
   if(n==='run_official_btc_eth_snapshot')result=await beginAnalysis(args);
   else if((n==='get_original_v17_full_prompt'||n==='get_original_v18_full_prompt'||n==='get_original_v19_full_prompt'))result=await showPolicy();
-  else if((n==='publish_official_v17_analysis'||n==='publish_official_v18_analysis'))result=await publishAnalysis(args);
+  else if((n==='publish_official_v17_analysis'||n==='publish_official_v18_analysis'||n==='publish_official_v19_analysis'))result=await publishAnalysis(args);
   else if(n==='read_official_btc_eth_ledger')result=await ledgerView(args);
   else if((n==='read_official_v17_decision_history'||n==='read_official_v18_decision_history'||n==='read_official_v19_decision_history'))result=await decisionHistory(args);
   else if(n==='register_formal_btc_eth_signal'){
@@ -666,4 +666,4 @@ if(process.env.V17_NO_LISTEN!=='1'){
   await getOAuth();server.listen(PORT,'0.0.0.0',()=>process.stderr.write('v17-verbatim-listening:'+PORT+'\n'));
  }catch(e){process.stderr.write('v17-startup-failed:'+e.message+'\n');process.exit(1);}
 }
-export {server,beginAnalysis,publishAnalysis,ledgerView,readLedger,decisionHistory,carriedUncertainty,tools};
+export {server,beginAnalysis,publishAnalysis,ledgerView,readLedger,decisionHistory,carriedUncertainty,tools,mcp};

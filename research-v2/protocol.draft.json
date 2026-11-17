@@ -1,0 +1,31 @@
+{
+  "status": "DRAFT_NOT_APPROVED",
+  "protocolHash": null,
+  "spec": {
+    "userApproved": false,
+    "purpose": "Research only; no policy replacement or official issuance",
+    "baselineCommit": "4cb79078ebef4dc5f113e20dd44e25068a9e34ec",
+    "baselinePolicySha256": "03910e1c418de6a83ed8191ec59801481c933fd1358b33b6b3071a8d81d8505a",
+    "venue": "Bybit",
+    "category": "linear",
+    "symbols": [
+      "BTCUSDT",
+      "ETHUSDT"
+    ],
+    "researchStart": null,
+    "researchEnd": null,
+    "holdoutStart": null,
+    "holdoutEnd": null,
+    "minTradesPerRegime": null,
+    "maxDrawdown": null,
+    "maxMissingRatio": null,
+    "alpha": null,
+    "embargoMs": null,
+    "blockLength": null,
+    "feeSchedule": null,
+    "slippageModel": null,
+    "fundingModel": null,
+    "familyOfTests": null
+  },
+  "promotion": "BLOCKED_UNTIL_MEASUREMENT_PERIOD_CRITERIA_AND_LIMITS_APPROVED"
+}

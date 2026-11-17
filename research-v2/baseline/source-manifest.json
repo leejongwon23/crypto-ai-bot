@@ -1,0 +1,319 @@
+{
+  "repository": "leejongwon23/crypto-ai-bot",
+  "branch": "v17-canonical-engine",
+  "commit": "4cb79078ebef4dc5f113e20dd44e25068a9e34ec",
+  "tree": "f359615970411da84100ad6006ebe1c131e3fde9",
+  "files": [
+    {
+      "path": "v17-common/README.md",
+      "gitBlobSha": "a34518d8f420bd97775501071f0966a67de245e5",
+      "bytes": 1554
+    },
+    {
+      "path": "v17-common/README_V17_VERBATIM.md",
+      "gitBlobSha": "f5d26f79e7d9e6872a20847e831c60d88d2cf238",
+      "bytes": 3380
+    },
+    {
+      "path": "v17-common/auto-switch-audit.mjs",
+      "gitBlobSha": "07909e9d944a0e701005a52f1710e589d7527dd2",
+      "bytes": 8757,
+      "sha256": "bad75c37a2c0115bd98af9404900af9097ccb3820563a6cec806371699571d4b"
+    },
+    {
+      "path": "v17-common/auto-switch-numerical.test.mjs",
+      "gitBlobSha": "b99e0faec476c8336b05092859cbc03b7787ca98",
+      "bytes": 7452
+    },
+    {
+      "path": "v17-common/auto-switch.test.mjs",
+      "gitBlobSha": "99999ea060ce10a2696ecf4ffe175e8716ebdda7",
+      "bytes": 15724
+    },
+    {
+      "path": "v17-common/cached-policy-response.mjs",
+      "gitBlobSha": "070c235b8b98de9b62410d58017e88b818c48c69",
+      "bytes": 1191
+    },
+    {
+      "path": "v17-common/cached-policy-response.test.mjs",
+      "gitBlobSha": "1a9dc323e64ab51c72606da3d1ce19e4d5507693",
+      "bytes": 2579
+    },
+    {
+      "path": "v17-common/chronological-regression.test.mjs",
+      "gitBlobSha": "00c9eaa7e9d59ea309f36c56d67298536eececdd",
+      "bytes": 10400
+    },
+    {
+      "path": "v17-common/engine.mjs",
+      "gitBlobSha": "b379f6bac7a4f17c9b0d3220a43523bb5dc08e21",
+      "bytes": 11207,
+      "sha256": "ceeeeeb7425cadd86664801cfe00c0bc5ac51c0440281b6a4b61638f1db4cfb6"
+    },
+    {
+      "path": "v17-common/evidence-audit.test.mjs",
+      "gitBlobSha": "808c0e6619c800328e4f875dfb0121dc7d844944",
+      "bytes": 5607
+    },
+    {
+      "path": "v17-common/fixture-private.txt",
+      "gitBlobSha": "c238838ac9f500367b0aee9c24cf23051a53011a",
+      "bytes": 266
+    },
+    {
+      "path": "v17-common/gap-switch.test.mjs",
+      "gitBlobSha": "c5b6fee64d1637b376b215ab0a2bf5aeb642160c",
+      "bytes": 9092
+    },
+    {
+      "path": "v17-common/oauth.mjs",
+      "gitBlobSha": "261185490a471a79d9019be622d890d750ed09cd",
+      "bytes": 10981
+    },
+    {
+      "path": "v17-common/oauth.test.mjs",
+      "gitBlobSha": "28811ea8110c84ec8ecd73de9c0501e7e1304962",
+      "bytes": 5353
+    },
+    {
+      "path": "v17-common/official-full-reset.test.mjs",
+      "gitBlobSha": "4856e86d408f540db50dd520206995a4a3e408d5",
+      "bytes": 1801
+    },
+    {
+      "path": "v17-common/official-price-tracker.mjs",
+      "gitBlobSha": "69644e70d4e534958d47d0ca51312b4258f021e0",
+      "bytes": 6610,
+      "sha256": "4d662bf7569df08d3052a8f3a49c41ecc56e99180a3b56c5f5b8d4cc8ba4b7cc"
+    },
+    {
+      "path": "v17-common/official-price-tracker.test.mjs",
+      "gitBlobSha": "d95cd253253f7d88def255de078344601bcc2f9a",
+      "bytes": 4796
+    },
+    {
+      "path": "v17-common/opportunity-engine.mjs",
+      "gitBlobSha": "ca0150d79f1abefa042f763e53af842b306665e9",
+      "bytes": 10695,
+      "sha256": "a2aab9710b878cf7b90d34f917f21540a6db0a8cfc47ac7173d738a05c19e969"
+    },
+    {
+      "path": "v17-common/package.json",
+      "gitBlobSha": "c6519c7957597f5fa7bb53043595eddc72673622",
+      "bytes": 226
+    },
+    {
+      "path": "v17-common/policy-v17.mjs",
+      "gitBlobSha": "2f57fd68ceb03823723ab2be012441ca0e689e12",
+      "bytes": 73415
+    },
+    {
+      "path": "v17-common/policy-v18.mjs",
+      "gitBlobSha": "bca3938b301e1c6d6ed87fc1ccb37d8baaa29817",
+      "bytes": 76116
+    },
+    {
+      "path": "v17-common/policy-v19.mjs",
+      "gitBlobSha": "2b7a1e8ab0ed590e480fe8a2f77591990d5e2a2c",
+      "bytes": 98391,
+      "sha256": "0c3d712dbc16b6e2d8b882309c32d291827810f232af7da6b4a415c2f00dff48"
+    },
+    {
+      "path": "v17-common/prepared-path-chain.mjs",
+      "gitBlobSha": "f08f1029d358c5e5cfa47429bffdab81cf1630dd",
+      "bytes": 7129
+    },
+    {
+      "path": "v17-common/prepared-path-chain.test.mjs",
+      "gitBlobSha": "efae0cba876e3df4cd02bff126eff241a23f92b0",
+      "bytes": 4021
+    },
+    {
+      "path": "v17-common/prepared-snapshot.mjs",
+      "gitBlobSha": "51dc410494bd74efebb0add02d24dda2b9bab5f1",
+      "bytes": 1932
+    },
+    {
+      "path": "v17-common/prepared-snapshot.test.mjs",
+      "gitBlobSha": "779f91001770b6ddf75320f1555d6ddbc5323447",
+      "bytes": 3657
+    },
+    {
+      "path": "v17-common/price-path-recovery.mjs",
+      "gitBlobSha": "d72b74c813ba12103e6cc2e13056c19bf2adb7d5",
+      "bytes": 10283,
+      "sha256": "ba96a02fe117ddc93dc11aa958eb68bbed8244c72c0256b7f241ee1064bf1340"
+    },
+    {
+      "path": "v17-common/price-path-recovery.test.mjs",
+      "gitBlobSha": "ac1ba330a0bc49347755b071a9c9ac5d0b8660fb",
+      "bytes": 8530
+    },
+    {
+      "path": "v17-common/regime-entry-risk.mjs",
+      "gitBlobSha": "1a3dc362df3d3ffadbaab1a2fac17a1b87dd6793",
+      "bytes": 2118,
+      "sha256": "615ae5f3db45764f7d80becd4af8ad12f6b6a9e15944e8a6df635806231fde67"
+    },
+    {
+      "path": "v17-common/regime-entry-risk.test.mjs",
+      "gitBlobSha": "eedc142710bccd41c3191e4296434ea730afc8a8",
+      "bytes": 2891,
+      "sha256": "7881653dc8ab17951e9fe56452b30044dda0d37a8b5a396e6b94b4fd19998ebb"
+    },
+    {
+      "path": "v17-common/render.yaml",
+      "gitBlobSha": "8ce74506084b88e432781d9e6340e6c53b1a0730",
+      "bytes": 601,
+      "sha256": "1801cb486ad2bfab7ca782281a34db1c84dfc2be0ae27606083bbfa49b90d59c"
+    },
+    {
+      "path": "v17-common/reversal-entry-audit.mjs",
+      "gitBlobSha": "54cd9d9d5bbd4726b88eeb5b4a0e3848ec2facbf",
+      "bytes": 6478,
+      "sha256": "c26eae4a6160c2b7d920e81e0aa02d975993c47e663ffaf3cc5d6836fc8b3a6e"
+    },
+    {
+      "path": "v17-common/reversal-entry-audit.test.mjs",
+      "gitBlobSha": "656e7f6a31b62b4622240bd68a1b658b97b8e0e6",
+      "bytes": 4929
+    },
+    {
+      "path": "v17-common/server-fast-integration.test.mjs",
+      "gitBlobSha": "6dc1b42dc10b85b64834b20d6601cd46e44b53a6",
+      "bytes": 1943,
+      "sha256": "0a764bb0bd792fd3f0ed1fd177aedfe84fb40f2b3cfb40e263f86db2d5fd152d"
+    },
+    {
+      "path": "v17-common/server.mjs",
+      "gitBlobSha": "3660d0418b9f74acb47f2e69671f339366a41fe1",
+      "bytes": 58499,
+      "sha256": "9776d3f3fca46d01dc4d42c6300eeb9d0f0cc2e172edb272f90d39d7aad7b24d"
+    },
+    {
+      "path": "v17-common/signal-table-view.mjs",
+      "gitBlobSha": "d0e8a2f0efc1881c50cd328effa06854d0b5932b",
+      "bytes": 7934,
+      "sha256": "30cee7d0688533f334e80748132649b2b6f650c62a6fdb0e83d131628c812e19"
+    },
+    {
+      "path": "v17-common/signal-table-view.test.mjs",
+      "gitBlobSha": "e925bd61264cdf07b46d1eba0313c6dac87bf5ab",
+      "bytes": 6841,
+      "sha256": "34c24286bf92b3453d0d3e40c2774c4ef567c0f3e52fff1c24176d6c2e313661"
+    },
+    {
+      "path": "v17-common/submission-contract.test.mjs",
+      "gitBlobSha": "495915fcd413757f24c5bd62ef93268b8fe78af4",
+      "bytes": 4799
+    },
+    {
+      "path": "v17-common/submitted-minute-chain.mjs",
+      "gitBlobSha": "50a77950bc8927136d20d604a7615af35630a118",
+      "bytes": 2748
+    },
+    {
+      "path": "v17-common/submitted-minute-path.mjs",
+      "gitBlobSha": "33c094f0fe03f62bc05c597eef14c4c1a9d320ad",
+      "bytes": 4541
+    },
+    {
+      "path": "v17-common/submitted-minute-path.test.mjs",
+      "gitBlobSha": "c52c8433d288c622cc4e814de6de0741cadd9909",
+      "bytes": 4960
+    },
+    {
+      "path": "v17-common/tests/opportunity-engine.test.mjs",
+      "gitBlobSha": "4caa6af3dd7df904ac35889041de967180b1e391",
+      "bytes": 4770
+    },
+    {
+      "path": "v17-common/user-attested-no-entry.mjs",
+      "gitBlobSha": "de9b11b1a0bf53a18f9739684560ca98f02c441c",
+      "bytes": 1803
+    },
+    {
+      "path": "v17-common/user-attested-tp3.mjs",
+      "gitBlobSha": "b7d50ae01ed03dc3141623e29bc6f9deee5aa51b",
+      "bytes": 3143
+    },
+    {
+      "path": "v17-common/user-attested-tp3.test.mjs",
+      "gitBlobSha": "7b137786dca57f4f0f4c863e784ab936749051ca",
+      "bytes": 3035
+    },
+    {
+      "path": "v17-common/user-close-shorts.mjs",
+      "gitBlobSha": "8be56145733489195174693e73fb6016f4f20d20",
+      "bytes": 1847
+    },
+    {
+      "path": "v17-common/v17-core.mjs",
+      "gitBlobSha": "34c48bd2dae1dc33ccd8fda9b9a1b02b36847429",
+      "bytes": 41211
+    },
+    {
+      "path": "v17-common/v17-core.test.mjs",
+      "gitBlobSha": "2a6d461e63c107f609e2bdcc6c7c26afe3f20720",
+      "bytes": 12849
+    },
+    {
+      "path": "v17-common/v18-core.mjs",
+      "gitBlobSha": "eb9f2f39e57bba098df3a27b3cc0263fd330eabd",
+      "bytes": 43551
+    },
+    {
+      "path": "v17-common/v18-core.test.mjs",
+      "gitBlobSha": "f311608df7b579674621645cb821f751282f57c9",
+      "bytes": 4146,
+      "sha256": "187844c29ee947ef17e252aee12f79b9e678e7c906e3ad7c11420ad8ccaef198"
+    },
+    {
+      "path": "v17-common/v19-core.mjs",
+      "gitBlobSha": "2c1e68c688a0e25a92de054b52066de66d481b20",
+      "bytes": 47894,
+      "sha256": "523a24bef6ca5e8a3cc775d59c73c60e2e787fe3c68b37bf4fa462317f8874cd"
+    },
+    {
+      "path": "v17-common/v19-core.test.mjs",
+      "gitBlobSha": "8354db294b2afd169076a500687d1d0b9dda684a",
+      "bytes": 1115,
+      "sha256": "6115c92dc9bf80402ef5364296b740a666623e1cd26954734590d69cb5230ed5"
+    }
+  ],
+  "plugin": {
+    "plugin_id": "plugin_asdk_app_6af55fe9f77c8191b938f4418ebc3913",
+    "name": "dev-6af55fe9f77c8191b938f4418ebc3913",
+    "description": "BTC ETH 공통 분석 엔진",
+    "version": "1.4.2",
+    "current_release_id": "pluginrel_6afb81b633f88191ae2a3a315c3e89ed",
+    "scope": "USER",
+    "discoverability": "PRIVATE"
+  },
+  "policy": {
+    "sha256": "03910e1c418de6a83ed8191ec59801481c933fd1358b33b6b3071a8d81d8505a",
+    "bytes": 96602,
+    "lines": 1263
+  },
+  "officialLedger": {
+    "session": "OFFICIAL_V17",
+    "beforeLedgerSha256": "8bbcfe954e7f04326d30114afd4692c691cf5addb4e7c22f14062405a92d67cf",
+    "signalCount": 27,
+    "eventCount": 58,
+    "eventsReadLimit": 500,
+    "note": "Fingerprint only. Private official records are not published in this public repository."
+  },
+  "attachment": {
+    "filename": "붙여넣은 텍스트(1)(7).txt",
+    "status": "UNREAD_EXECUTOR_UNAVAILABLE"
+  },
+  "render": {
+    "status": "BLOCKED_WORKSPACE_SELECTION_REQUIRED",
+    "discoveredWorkspace": "tea-d5nj03cmrvns73fp6520",
+    "name": "My Workspace",
+    "serviceId": null,
+    "deployId": null,
+    "deployedCommit": null
+  }
+}
