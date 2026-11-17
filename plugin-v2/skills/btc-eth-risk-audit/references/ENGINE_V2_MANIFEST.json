@@ -1,0 +1,13 @@
+{
+  "version": "2.0.0",
+  "policyName": "MASTER PROMPT V2.0 FINAL",
+  "policySha256": "a6b389650a36e5140bab2929824d13b2c60fe0ec74648a1989e94fe095943265",
+  "policyBytes": 118535,
+  "policyLines": 1492,
+  "originalV19Sha256": "03910e1c418de6a83ed8191ec59801481c933fd1358b33b6b3071a8d81d8505a",
+  "requiredClauses": 47,
+  "engine": "V20_MATHEMATICAL_HYPOTHESIS_ENGINE_1.0.0",
+  "weightsOrScores": false,
+  "promotedResearchModels": 0,
+  "exchangeOrdersEnabled": false
+}
