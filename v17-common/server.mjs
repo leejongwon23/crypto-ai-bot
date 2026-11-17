@@ -68,7 +68,7 @@ const KEY_CHECK=x=>{
  return crypto.timingSafeEqual(Buffer.from(x),Buffer.from(MASTER_SECRET));
 };
 function isAuthorized(req){const header=String(req.headers.authorization||'');const provided=header.replace(/^Bearer\s+/i,'')||String(req.headers['x-api-key']||'');return KEY_CHECK(provided);}
-export const rowToLedger=r=>({id:r.id,symbol:r.symbol,original:r.original,status:r.status,verifiedUntil:r.verified_until,version:r.plan_version,userAccountEntry:r.user_account_entry??undefined,userAccountEntryAt:r.user_account_entry_at??undefined,unverifiedFrom:r.unverified_from??undefined,...(r.effective_plan?{effectivePlan:r.effective_plan,planEffectiveAt:r.plan_effective_at}:{})});
+export const rowToLedger=r=>({id:r.id,symbol:r.symbol,original:r.original,status:r.status,verifiedUntil:r.verified_until,version:r.plan_version,userAccountEntry:r.user_account_entry??undefined,userAccountEntryAt:r.user_account_entry_at??undefined,unverifiedFrom:r.unverified_from??undefined,...(r.effective_plan?{effectivePlan:r.effective_plan,planEffectiveAt:r.plan_effective_at,managementRevisions:r.plan_revisions}:{})});
 async function readLedger(db,session){
  const r=await db.query(`SELECT s.id,s.symbol,s.original,s.status,s.verified_until,s.plan_version,
  (SELECT e.event->>'priorConfirmedState' FROM v17_ai_events e
@@ -85,7 +85,9 @@ async function readLedger(db,session){
   ORDER BY e.seq DESC LIMIT 1) AS effective_plan,
  (SELECT e.at_kst FROM v17_ai_events e
   WHERE e.session=s.session AND e.id=s.id AND e.event->>'kind'='REVISION'
-  ORDER BY e.seq DESC LIMIT 1) AS plan_effective_at
+  ORDER BY e.seq DESC LIMIT 1) AS plan_effective_at,
+ (SELECT jsonb_agg(e.event ORDER BY e.seq) FROM v17_ai_events e
+  WHERE e.session=s.session AND e.id=s.id AND e.event->>'kind'='REVISION') AS plan_revisions
  FROM v17_ai_signals s WHERE s.session=$1 ORDER BY s.id`,[session]);
  return r.rows.map(rowToLedger);
 }

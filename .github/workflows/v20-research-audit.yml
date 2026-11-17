@@ -60,6 +60,9 @@ jobs:
       - name: Bounded real public market data capture
         if: always()
         run: node research-v2/collect.mjs research-output/data
+      - name: Public archived trades (bounded separate source)
+        if: always()
+        run: node research-v2/archive.mjs research-output/archive
       - name: Read-only live health diagnostic (no deployment)
         if: always()
         run: |
@@ -73,7 +76,7 @@ jobs:
       - name: Bundle inspectable source and findings
         if: always()
         run: |
-          tar -czf research-output/BTC_ETH_RESEARCH_AUDIT_BUNDLE.tar.gz research-v2 v17-common/server.mjs v17-common/mcp-publication-alias.test.mjs v17-common/regime-entry-risk.mjs
+          tar -czf research-output/BTC_ETH_RESEARCH_AUDIT_BUNDLE.tar.gz research-v2 v17-common
       - uses: actions/upload-artifact@v4
         if: always()
         with:

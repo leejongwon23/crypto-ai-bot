@@ -1,3 +1,4 @@
+import {planForSpan} from './effective-plan-timeline.mjs';
 // Public market-data recovery for V1.7. No exchange account credentials, orders,
 // policy edits or guesswork. Recovery is proof only when every 1m interval exists.
 const OFFSET=9*3600000;
@@ -94,25 +95,32 @@ export function auditMinuteCandles(signal,candles,{initialStatus=null,afterMs=nu
  const entry=(c)=>c.high>=o.entryLow&&c.low<=o.entryHigh;
  for(const c of checked){
   if(['STOPPED','TP3_DONE'].includes(status))break;
+  let span;
+  try{span=planForSpan(signal,c.start,c.start+60000);}
+  catch(e){ambiguous={minute:kstTime(c.start),reason:String(e.message),high:c.high,low:c.low};break;}
+  if(span.hasInteriorRevision&&span.plans.some(p=>crossed(c,p.stop,'stop')||crossed(c,p.tp1,'target'))){
+   ambiguous={minute:kstTime(c.start),reason:'MANAGEMENT_REVISION_INSIDE_1M_WITH_CROSSING',high:c.high,low:c.low};break;
+  }
+  const p=span.plan;
   const wasPending=status==='PENDING';
   if(wasPending){
    if(!entry(c))continue;
    // Full-minute OHLC cannot prove whether an exit came before first entry.
-   if(crossed(c,o.stop,'stop')||crossed(c,o.tp1,'target')){
+   if(crossed(c,p.stop,'stop')||crossed(c,p.tp1,'target')){
     ambiguous={minute:kstTime(c.start),reason:'ENTRY_AND_EXIT_SAME_1M',high:c.high,low:c.low};
     break;
    }
    events.push({kind:'ENTERED',minute:kstTime(c.start),high:c.high,low:c.low,level:o.entryLow});
    status='ENTERED';continue;
   }
-  const stop=crossed(c,o.stop,'stop');
-  const t1=crossed(c,o.tp1,'target');
-  const t2=crossed(c,o.tp2,'target');
-  const t3=crossed(c,o.tp3,'target');
+  const stop=crossed(c,p.stop,'stop');
+  const t1=crossed(c,p.tp1,'target');
+  const t2=crossed(c,p.tp2,'target');
+  const t3=crossed(c,p.tp3,'target');
   if(stop&&t1){ambiguous={minute:kstTime(c.start),reason:'STOP_AND_TARGET_SAME_1M',high:c.high,low:c.low};break;}
   const kind=stop?'STOPPED':t3?'TP3_DONE':t2?'TP2':t1?'TP1':null;
   if(!kind||kind===status||(status==='TP2'&&kind==='TP1'))continue;
-  events.push({kind,minute:kstTime(c.start),high:c.high,low:c.low,level:kind==='STOPPED'?o.stop:o[kind==='TP3_DONE'?'tp3':kind.toLowerCase()]});
+  events.push({kind,minute:kstTime(c.start),high:c.high,low:c.low,level:kind==='STOPPED'?p.stop:p[kind==='TP3_DONE'?'tp3':kind.toLowerCase()]});
   status=kind;
  }
  return {status,events,ambiguous,minutesChecked:checked.length};
