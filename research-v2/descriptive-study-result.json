@@ -1,0 +1,97 @@
+{
+  "purpose": "DESCRIPTIVE_RESEARCH_ONLY",
+  "dataYearsActuallyExamined": [
+    2026
+  ],
+  "strategyPerformance": "UNVERIFIED",
+  "symbols": [
+    {
+      "symbol": "BTCUSDT",
+      "date": "2026-11-15",
+      "rawTrades": 3580461,
+      "observedMinutes": 1440,
+      "fullIntervals": [
+        {
+          "minutes": 1,
+          "count": 1440,
+          "omitted": 0
+        },
+        {
+          "minutes": 5,
+          "count": 288,
+          "omitted": 0
+        },
+        {
+          "minutes": 15,
+          "count": 96,
+          "omitted": 0
+        },
+        {
+          "minutes": 60,
+          "count": 24,
+          "omitted": 0
+        },
+        {
+          "minutes": 240,
+          "count": 6,
+          "omitted": 0
+        },
+        {
+          "minutes": 1440,
+          "count": 1,
+          "omitted": 0
+        }
+      ],
+      "sessionVwap": 64325.19294569313,
+      "windows15m": 96,
+      "sellAggressionWithNonnegativeResponse": 13,
+      "buyAggressionWithNonpositiveResponse": 8,
+      "inference": "These contemporaneous counts challenge a CVD-sign-only interpretation; they do not establish absorption, intent, future direction or a profitable strategy.",
+      "dataHash": "4d4f32c50dd70694fffe192a34d4b49b140a820351cf7bfb7d863fe728f7066b"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "date": "2026-11-15",
+      "rawTrades": 2203441,
+      "observedMinutes": 1440,
+      "fullIntervals": [
+        {
+          "minutes": 1,
+          "count": 1440,
+          "omitted": 0
+        },
+        {
+          "minutes": 5,
+          "count": 288,
+          "omitted": 0
+        },
+        {
+          "minutes": 15,
+          "count": 96,
+          "omitted": 0
+        },
+        {
+          "minutes": 60,
+          "count": 24,
+          "omitted": 0
+        },
+        {
+          "minutes": 240,
+          "count": 6,
+          "omitted": 0
+        },
+        {
+          "minutes": 1440,
+          "count": 1,
+          "omitted": 0
+        }
+      ],
+      "sessionVwap": 1796.1598291377666,
+      "windows15m": 96,
+      "sellAggressionWithNonnegativeResponse": 10,
+      "buyAggressionWithNonpositiveResponse": 18,
+      "inference": "These contemporaneous counts challenge a CVD-sign-only interpretation; they do not establish absorption, intent, future direction or a profitable strategy.",
+      "dataHash": "d017e65051190ef706ba96f08581461cc8de83a3c7c599d4955f96fe4f009fe0"
+    }
+  ]
+}

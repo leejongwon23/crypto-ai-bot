@@ -1,0 +1,15 @@
+{
+  "session": "OFFICIAL_V17",
+  "beforeLedgerSha256": "8bbcfe954e7f04326d30114afd4692c691cf5addb4e7c22f14062405a92d67cf",
+  "afterLedgerSha256": "8bbcfe954e7f04326d30114afd4692c691cf5addb4e7c22f14062405a92d67cf",
+  "ledgerSame": true,
+  "beforeSignals": 27,
+  "afterSignals": 27,
+  "beforeEvents": 58,
+  "afterEvents": 58,
+  "beforeOriginalsSha256": "e4a402a0dc2c008e5378bcefe7328440446abe1800a4ab89d2063d4576ca2e21",
+  "afterOriginalsSha256": "e4a402a0dc2c008e5378bcefe7328440446abe1800a4ab89d2063d4576ca2e21",
+  "beforeEventsSha256": "c5377047c43083f0343c95d9c3922bee315330ce615075a915e68a3fcf34747e",
+  "afterEventsSha256": "c5377047c43083f0343c95d9c3922bee315330ce615075a915e68a3fcf34747e",
+  "source": "Authenticated read-only official API; returned 58 events below API cap500; not a full DB backup"
+}
