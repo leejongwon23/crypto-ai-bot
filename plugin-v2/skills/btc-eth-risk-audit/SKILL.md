@@ -44,6 +44,8 @@ Current policy name must be `MASTER PROMPT V2.0 FINAL`. Verify the exact policy 
 
 ## Autonomous research and deployment truthfulness
 
+Read `references/AUTONOMY_2.0.1.md` for the implemented prospective observation loop, immutable research history, staged model exposure and deployment guard. A new formal signal carrying modelId must refer to a model actually released for that symbol; SHADOW and QUARANTINED models cannot authorize a formal signal. The full V2.0 policy text and original official ledger semantics remain authoritative.
+
 The runtime generates explicit supported-family mechanism proposals from observed new data. The repository contains an evidence-gated study/promotion runner and a workflow that can commit validated future model-registry changes, with Render deploying the linked production branch.
 
 Distinguish these capability states: proposal generated; frozen real study available; independent validation run; shadow/rollback proof verified; promotion eligible; registry changed; actual deploy live. Never infer the later states from the earlier ones. If the real frozen study/data feed/protocol/proofs are absent, promotion remains blocked. The initial registry has no promoted research model; do not pretend it has learned a profitable model already.

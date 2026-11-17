@@ -14,6 +14,7 @@ import {ATTEST_CONFIRM,TWO_USER_TP3_IDS,planUserAttestedTp3} from './user-attest
 import {USER_NO_ENTRY_KIND,USER_NO_ENTRY_CONFIRM,USER_NO_ENTRY_IDS,planUserNoEntryAttestation} from './user-attested-no-entry.mjs';
 import {USER_CLOSE_SHORTS_KIND,USER_CLOSE_SHORTS_CONFIRM,USER_CLOSED,closeableShorts,planUserCloseShorts} from './user-close-shorts.mjs';
 import {verifyResearchIdentity,readMarketResearchPage} from './research-feed.mjs';
+import {RESEARCH_DDL,captureResearchObservation,researchControl} from './research-control.mjs';
 
 const SIGNAL_TABLE_OUTPUT_RULE=LEGACY_OUTPUT_RULE.replaceAll('V1.9','V2.0');
 const PORT=Number(process.env.PORT||3000);
@@ -72,7 +73,7 @@ async function database(){
  if(!DB_URL)throw Error('PERSISTENT_DATABASE_REQUIRED');
  const {Pool}=await import('pg');
  const p=new Pool({connectionString:DB_URL,ssl:DB_URL.includes('localhost')?false:{rejectUnauthorized:false},connectionTimeoutMillis:10000,max:3});
- try{await p.query(sql);}catch(e){await p.end();throw e;}
+ try{await p.query(sql);await p.query(RESEARCH_DDL);}catch(e){await p.end();throw e;}
  pool=p;return p;
 }
 async function getOAuth(){if(oauth)return oauth;const db=await database();const x=makeOAuth({origin:PUBLIC_ORIGIN,pool:db,ownerSecret:MASTER_SECRET});await x.init();oauth=x;return oauth;}
@@ -286,7 +287,15 @@ async function beginAnalysis(body){
  ]);
  await storeVerifiedGapProof(db,session,snapshot.sha256,tracked.proof);
  const full=prepare({raw,session,ledger,saved,previousSnapshot,carriedUncertaintyBySymbol:carry,verifiedGapRecoveryBySymbol:tracked.proof});
+ let autonomousResearch={status:'NOT_OFFICIAL_SESSION'};
+ if(session==='OFFICIAL_V17'){
+  const researchClient=await db.connect();
+  try{await researchClient.query('BEGIN');await researchClient.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[snapshot.sha256]);autonomousResearch={status:'OBSERVATION_FROZEN',...await captureResearchObservation(researchClient,raw)};await researchClient.query('COMMIT');}
+  catch(e){await researchClient.query('ROLLBACK');autonomousResearch={status:'RESEARCH_BLOCKED',reason:String(e.message||e).slice(0,120),promotionAllowed:false};}
+  finally{researchClient.release();}
+ }
  const delivered={...applyCachedPolicyResponse(full,body.cachedPolicySha256),
+  autonomousResearch,
   signalView:buildSignalView({ledger,snapshot,changes:tracked.events,outlook:saved?.marketOutlook||null,management:saved?.dynamicManagement||null}),
   userOutputRule:SIGNAL_TABLE_OUTPUT_RULE,
   preparedRaw:{persisted:true,snapshotSha256:snapshot.sha256,submitWithoutRaw:true},
@@ -656,7 +665,14 @@ async function mcp(req,res,principal){
 const webPage=`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>V2.0 수학적 분석 서버</title><style>body{font:16px/1.7 system-ui,sans-serif;max-width:680px;margin:8vh auto;padding:20px;background:#0b1220;color:#eee}code{overflow-wrap:anywhere}a{color:#93c5fd}</style></head><body><h2>BTC·ETH MASTER PROMPT V2.0 수학적 분석 서버</h2><p>이 서버는 V2.0 전문과 실제 수학 컨텍스트를 전달하고, AI가 수행한 공식 분석을 최초 1회 저장해 다른 대화창에서 조회합니다.</p><p><strong>주의:</strong> 서버 자체는 매매 방향을 임의 계산하지 않습니다. ChatGPT 플러그인에서 자료를 전달하고 수학적 경쟁 가설과 반증 분석을 완료한 뒤 저장해야 공식 결과가 생성됩니다.</p><p>연결 주소: <code>/mcp</code></p><p>원본 SHA-256: <code>${OFFICIAL_POLICY.sha256}</code></p></body></html>`;
 const server=http.createServer(async(req,res)=>{
  try{
-  if(req.url==='/health'&&req.method==='GET')return json(res,200,{status:!DB_URL||!MASTER_SECRET?'not_ready':'ready',engine:VERSION,policyName:OFFICIAL_POLICY.name,quantEngine:quantEngineStatus(),policySha256:OFFICIAL_POLICY.sha256,policyBytes:OFFICIAL_POLICY.bytes,mode:'AI_VERBATIM_POLICY_OFFICIAL_CACHE',dbConfigured:!!DB_URL,authenticationConfigured:!!MASTER_SECRET});
+  if(req.url==='/health'&&req.method==='GET')return json(res,200,{status:!DB_URL||!MASTER_SECRET?'not_ready':'ready',engine:VERSION,policyName:OFFICIAL_POLICY.name,quantEngine:quantEngineStatus(),policySha256:OFFICIAL_POLICY.sha256,policyBytes:OFFICIAL_POLICY.bytes,buildCommit:process.env.RENDER_GIT_COMMIT||null,autonomy:{observationFreeze:true,prospectiveShadow:true,stagedModels:true,sourceRollbackGuard:true,exchangeOrders:false},mode:'AI_VERBATIM_POLICY_OFFICIAL_CACHE',dbConfigured:!!DB_URL,authenticationConfigured:!!MASTER_SECRET});
+  if(req.method==='POST'&&req.url==='/research/control'){
+   try{await verifyResearchIdentity(String(req.headers.authorization||'').replace(/^Bearer\s+/i,''),{audience:PUBLIC_ORIGIN});}
+   catch{return responseError(res,401,'RESEARCH_WORKFLOW_IDENTITY_REQUIRED');}
+   const body=await readJSON(req),client=await(await database()).connect();
+   try{await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');await client.query('SELECT pg_advisory_xact_lock(778201100)');const result=await researchControl(client,body);await client.query('COMMIT');return json(res,200,result);}
+   catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
+  }
   if(req.method==='GET'&&new URL(req.url,PUBLIC_ORIGIN).pathname==='/research/market'){
    try{await verifyResearchIdentity(String(req.headers.authorization||'').replace(/^Bearer\s+/i,''),{audience:PUBLIC_ORIGIN});}
    catch{return responseError(res,401,'RESEARCH_WORKFLOW_IDENTITY_REQUIRED');}

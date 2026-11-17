@@ -60,11 +60,14 @@ export function evaluatePromotion({protocol,cases,candidate,usedHoldouts=[]}){
  check(protocol?.status==='LOCKED','PROTOCOL_NOT_LOCKED');check(protocol?.sha256===sha(protocol?.spec??{}),'PROTOCOL_HASH_MISMATCH');
  const p=protocol?.spec??{};check(Number.isFinite(p.lockedAt)&&Number.isFinite(p.holdoutStart)&&Number.isFinite(p.holdoutEnd)&&p.lockedAt<p.holdoutStart&&p.holdoutStart<p.holdoutEnd,'PRELOCKED_UNTOUCHED_HOLDOUT_REQUIRED');
  check(Number.isFinite(p.alpha)&&p.alpha>0&&p.alpha<1&&Number.isInteger(p.blockLength)&&p.blockLength>0&&Number.isInteger(p.testFamilySize)&&p.testFamilySize>0,'STATISTICAL_PROTOCOL_MISSING');
+ check(Number.isInteger(p.minCasesPerStratum)&&p.minCasesPerStratum>=2&&Number.isInteger(p.minimumIndependentBlocks)&&p.minimumIndependentBlocks>=2&&typeof p.sampleAdequacyJustification==='string'&&p.sampleAdequacyJustification.trim().length>0,'PRELOCKED_SAMPLE_ADEQUACY_REQUIRED');
+ check(Number.isFinite(p.maximumDrawdown)&&p.maximumDrawdown>=0,'PRELOCKED_LOSS_LIMIT_REQUIRED');
  check(!usedHoldouts.includes(p.holdoutId)&&typeof p.holdoutId==='string','HOLDOUT_ALREADY_USED_OR_MISSING');
  check(supportedLogic(candidate),'UNSUPPORTED_SYMBOLIC_MODEL');
  check(Array.isArray(cases)&&cases.length>0,'NO_REAL_CASES');
- const holdout=[];
+ const holdout=[],seen=new Set();
  for(const c of cases??[]){
+  const key=String(c.symbol)+':'+String(c.decisionAt)+':'+String(c.rawSourceSha256);check(!seen.has(key),'DUPLICATE_RESEARCH_CASE');seen.add(key);
   check(c.synthetic===false&&/^[a-f0-9]{64}$/.test(c.rawSourceSha256??''),'CASE_PROVENANCE_MISSING');
   check([c.featureStart,c.featureEnd,c.decisionAt,c.labelEnd,c.trainLabelEnd].every(Number.isFinite)&&c.featureStart<=c.featureEnd&&c.featureEnd<=c.decisionAt&&c.decisionAt<=c.labelEnd&&Number.isFinite(p.embargoMs)&&c.trainLabelEnd+p.embargoMs<c.featureStart,'TIME_LEAKAGE_OR_PURGE_FAILURE');
   check(c.costsVerified===true&&c.pathOrderVerified===true&&c.positionOverlapVerified===true,'COST_PATH_OR_OVERLAP_UNVERIFIED');
@@ -72,14 +75,17 @@ export function evaluatePromotion({protocol,cases,candidate,usedHoldouts=[]}){
   if(c.decisionAt>=p.holdoutStart&&c.labelEnd<p.holdoutEnd)holdout.push(c);
  }
  check(holdout.length>1,'INSUFFICIENT_INDEPENDENT_HOLDOUT');
+ for(const symbol of ['BTC','ETH']){const ordered=holdout.filter(c=>c.symbol===symbol).sort((a,b)=>a.featureStart-b.featureStart);for(let i=1;i<ordered.length;i++)check(ordered[i-1].labelEnd+(p.embargoMs??Infinity)<ordered[i].featureStart,'OVERLAPPING_HOLDOUT_INFORMATION_SPANS');}
  const strata=[];for(const symbol of ['BTC','ETH'])for(const regime of p.requiredRegimes??[]){const rows=holdout.filter(c=>c.symbol===symbol&&c.regime===regime);
-  if(rows.length<2||rows.length<(p.blockLength??Infinity)){reasons.push('UNVERIFIED_STRATUM_'+symbol+'_'+regime);continue;}
+  rows.sort((a,b)=>a.decisionAt-b.decisionAt);
+  if(rows.length<2||rows.length<(p.minCasesPerStratum??Infinity)||Math.floor(rows.length/(p.blockLength??Infinity))<(p.minimumIndependentBlocks??Infinity)){reasons.push('UNVERIFIED_STRATUM_'+symbol+'_'+regime);continue;}
   if(!(p.alpha>0&&p.alpha<1&&Number.isInteger(p.testFamilySize)&&p.testFamilySize>0))continue;
-  for(const control of ['baselineNet','oppositeNet','abstainNet']){const differences=rows.map(c=>c.candidateNet-c[control]);if(!differences.every(Number.isFinite)){reasons.push('INVALID_PAIRED_COST_OUTCOME');continue;}const ci=blockMeanInterval(differences,p.blockLength,p.alpha/p.testFamilySize);strata.push({symbol,regime,control,...ci});check(ci.lower>0,'NET_IMPROVEMENT_NOT_ESTABLISHED_'+symbol+'_'+regime+'_'+control);}
+  for(const control of ['baselineNet','oppositeNet','abstainNet']){const differences=rows.map(c=>c.candidateNet-c[control]);if(!differences.every(Number.isFinite)){reasons.push('INVALID_PAIRED_COST_OUTCOME');continue;}const alpha=p.alpha/p.testFamilySize,repetitions=Math.max(1000,Math.ceil(20/alpha));if(repetitions>200000){reasons.push('MONTE_CARLO_TAIL_RESOLUTION_INSUFFICIENT');continue;}const ci=blockMeanInterval(differences,p.blockLength,alpha,repetitions);strata.push({symbol,regime,control,...ci});check(ci.lower>0,'NET_IMPROVEMENT_NOT_ESTABLISHED_'+symbol+'_'+regime+'_'+control);}
  }
  check(Array.isArray(p.requiredRegimes)&&p.requiredRegimes.length>0,'REGIME_COVERAGE_NOT_LOCKED');
  check(Number.isInteger(p.registeredModels)&&p.registeredModels>0&&p.testFamilySize>=p.registeredModels*(p.requiredRegimes?.length??0)*2*3,'MULTIPLE_SEARCH_FAMILY_UNDERCOUNTED');
  check(Number.isFinite(candidate?.drawdown)&&Number.isFinite(candidate?.baselineDrawdown)&&candidate.drawdown<=candidate.baselineDrawdown,'DRAWDOWN_NOT_NONINFERIOR');
+ check(Number.isFinite(candidate?.drawdown)&&candidate.drawdown<=p.maximumDrawdown,'LOCKED_LOSS_LIMIT_EXCEEDED_OR_UNVERIFIED');
  check(candidate?.unitTests===true&&candidate?.integrationTests===true&&candidate?.ledgerInvariant===true&&candidate?.shadowVerified===true&&candidate?.rollbackRehearsed===true,'ENGINE_SHADOW_ROLLBACK_PROOF_MISSING');
  return {eligible:reasons.length===0,reasons,strata,holdoutId:p.holdoutId??null,ordersEnabled:false,rule:'NO_WINRATE_ONLY_PROMOTION_NO_WEIGHTS_NO_SCORES'};
 }
