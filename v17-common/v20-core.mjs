@@ -1,6 +1,7 @@
 import {readFileSync} from 'node:fs';
 import {buildQuantContext,validateQuantAudit,sha as quantSha} from './quant-structure.mjs';
 import {generateResearchProposals,evaluateSymbolicModel} from './quant-evolution.mjs';
+import {modelExposure} from './quant-lifecycle.mjs';
 import crypto from 'node:crypto';
 import {evaluateRangeStopContext} from './regime-entry-risk.mjs';
 import {POLICY_TEXT,POLICY_SHA256,POLICY_BYTES,POLICY_LINES} from './policy-v20.mjs';
@@ -10,7 +11,7 @@ import {buildOpportunityContext} from './opportunity-engine.mjs';
 import {USER_CLOSED} from './user-close-shorts.mjs';
 
 export const OFFICIAL_POLICY={name:'MASTER PROMPT V2.0 FINAL',sha256:POLICY_SHA256,bytes:POLICY_BYTES,lines:POLICY_LINES};
-export const VERSION='V20_MATHEMATICAL_HYPOTHESIS_ENGINE_1.0.0';
+export const VERSION='V20_MATHEMATICAL_HYPOTHESIS_ENGINE_1.1.0';
 const STATES=new Set(['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','TP3_DONE','STOPPED','CANCELLED','REDESIGNED_CANCELLED','EARLY_EXIT','REVERSE_EXIT','UNVERIFIED',USER_CLOSED]);
 const TERMINAL=new Set(['TP3_DONE','STOPPED','CANCELLED','REDESIGNED_CANCELLED','EARLY_EXIT','REVERSE_EXIT',USER_CLOSED]);
 const ENTERED_STATES=new Set(['NEW_ENTRY','ENTERED','TP1','TP2']);
@@ -139,10 +140,10 @@ export function assessSnapshotEvidence(raw,{previousSnapshot=null,ledger=[],carr
 }
 export function ledgerHash(rows){return digest(rows.map(r=>({id:r.id,symbol:r.symbol,original:r.original,status:r.status,verifiedUntil:r.verifiedUntil||null,version:r.version??0,...(r.effectivePlan?{effectivePlan:r.effectivePlan,planEffectiveAt:r.planEffectiveAt||null}:{})})).sort((a,b)=>a.id.localeCompare(b.id)));}
 const registry=JSON.parse(readFileSync(new URL('./quant-model-registry.json',import.meta.url),'utf8'));
-export const quantEngineStatus=()=>({version:'V2.0',registryVersion:registry.version,registrySha256:quantSha(registry),promotedModels:registry.models.length,modelEvolution:'EVIDENCE_GATED_SYMBOLIC_MECHANISM_REVISION',weightedScores:false,automaticOrders:false});
+export const quantEngineStatus=()=>({version:'V2.0',registryVersion:registry.version,registrySha256:quantSha(registry),promotedModels:registry.models.filter(m=>['CANARY','LIVE'].includes(m.rollout?.stage)).length,stages:Object.fromEntries(['SHADOW','CANARY','LIVE','QUARANTINED'].map(stage=>[stage,registry.models.filter(m=>(m.rollout?.stage??'SHADOW')===stage).length])),modelEvolution:'EVIDENCE_GATED_SYMBOLIC_MECHANISM_REVISION',weightedScores:false,automaticOrders:false});
 export function mathematicalContext(raw,ledger){
  const base=buildQuantContext(raw,ledger),{sha256,...context}=base;
- const activeModels=Object.fromEntries(['BTC','ETH'].map(sym=>[sym,registry.models.map(model=>({id:model.id,family:model.family,logic:model.logic,version:model.version,result:evaluateSymbolicModel(model,{confirmedHigherHighs:context.symbols[sym].structure.structuralEvents?.higherHighs,confirmedHigherLows:context.symbols[sym].structure.structuralEvents?.higherLows,breakLastConfirmedLow:context.symbols[sym].structure.structuralEvents?.invalidatedUp,confirmedLowerHighs:context.symbols[sym].structure.structuralEvents?.lowerHighs,confirmedLowerLows:context.symbols[sym].structure.structuralEvents?.lowerLows,breakLastConfirmedHigh:context.symbols[sym].structure.structuralEvents?.invalidatedDown})}))]));
+ const activeModels=Object.fromEntries(['BTC','ETH'].map(sym=>[sym,registry.models.map(model=>({id:model.id,family:model.family,logic:model.logic,version:model.version,exposure:modelExposure(model,sym),result:evaluateSymbolicModel(model,{confirmedHigherHighs:context.symbols[sym].structure.structuralEvents?.higherHighs,confirmedHigherLows:context.symbols[sym].structure.structuralEvents?.higherLows,breakLastConfirmedLow:context.symbols[sym].structure.structuralEvents?.invalidatedUp,confirmedLowerHighs:context.symbols[sym].structure.structuralEvents?.lowerHighs,confirmedLowerLows:context.symbols[sym].structure.structuralEvents?.lowerLows,breakLastConfirmedHigh:context.symbols[sym].structure.structuralEvents?.invalidatedDown})}))]));
  const full={...context,activeModels,registry:quantEngineStatus()};return {...full,sha256:quantSha(full)};
 }
 export const sourcePolicy=()=>({ ...OFFICIAL_POLICY,text:POLICY_TEXT });
@@ -233,6 +234,7 @@ export function validateSignal(s,snapshot){
  assert(STATES.has(s.status)&&['PENDING','NEW_ENTRY'].includes(s.status),'NEW_SIGNAL_STATUS_INVALID');
  assert(s.issuedVersion==='V2.0','SOURCE_POLICY_VERSION_MISMATCH');
  assert(s.frozenSourceSha256===snapshot.sha256,'V20_FROZEN_SIGNAL_SOURCE_REQUIRED');
+ if(s.modelId!==undefined){const model=registry.models.find(m=>m.id===s.modelId);assert(model&&modelExposure(model,s.symbol==='BTCUSDT'?'BTC':'ETH').useForFormalAnalysis,'V20_MODEL_NOT_RELEASED_FOR_SYMBOL');}
  for(const k of ['entryTactic','regimeEvidence','regimeRiskEvidence','modelHypothesis','modelVersion','structuralInvalidation','predictionIntervalEvidence'])assert(has(s[k]),'V19_NEW_SIGNAL_REGIME_FIELD_REQUIRED_'+k);
  assert(['TREND_CONTINUATION','RANGE_BOUNDARY','COMPRESSION_BREAKOUT','FAILED_BREAKOUT_REVERSAL','STRUCTURAL_REVERSAL'].includes(s.entryTactic),'V19_INVALID_ENTRY_TACTIC');
  const observed=s.symbol==='BTCUSDT'?snapshot.btcPrice:snapshot.ethPrice;

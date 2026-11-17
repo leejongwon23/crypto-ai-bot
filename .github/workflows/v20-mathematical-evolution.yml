@@ -2,9 +2,9 @@ name: Mathematical mechanism research and guarded model deployment
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 1 * * 1'
+    - cron: '17 * * * *'
   push:
-    branches: [main, v20-mathematical-engine-20261117, v20-research-feed-20261117]
+    branches: [main, v17-canonical-engine, v20-mathematical-engine-20261117, v20-research-feed-20261117, v20-autonomy-completion-20261117]
 permissions:
   contents: write
   id-token: write
@@ -12,29 +12,73 @@ concurrency:
   group: btc-eth-mathematical-evolution
   cancel-in-progress: false
 jobs:
-  research:
+  verify:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env: {POSTGRES_USER: quant, POSTGRES_PASSWORD: quant_test, POSTGRES_DB: quant_test}
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       V17_NO_LISTEN: '1'
+      QUANT_TEST_DATABASE_URL: postgresql://quant:quant_test@localhost:5432/quant_test
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ (github.event_name == 'schedule' || github.ref == 'refs/heads/main') && 'v17-canonical-engine' || github.ref }}
+          ref: ${{ (github.event_name == 'schedule' || github.ref == 'refs/heads/main') && 'v17-canonical-engine' || github.sha }}
       - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+        with: {node-version: '22'}
       - run: npm install --prefix v17-common --ignore-scripts --no-audit --no-fund
-      - name: Verify new mathematical engine
-        run: node --test v17-common/*.test.mjs v17-common/tests/*.test.mjs
-      - name: Collect preserved market observations and competing mechanisms
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/v17-canonical-engine' || github.event_name == 'schedule'
+      - name: Actual unit and regression tests
+        run: |
+          mkdir -p quant-evolution/output
+          node --test --test-reporter=tap v17-common/*.test.mjs v17-common/tests/*.test.mjs quant-evolution/guard-core.test.mjs quant-evolution/study-proof.test.mjs | tee quant-evolution/output/unit.tap
+      - name: Actual disposable database integration
+        run: node --test --test-reporter=tap quant-evolution/database.test.mjs | tee quant-evolution/output/integration.tap
+      - run: node quant-evolution/stamp-ci.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: mathematical-ci-proof, path: quant-evolution/output}
+  source-guard:
+    if: always() && github.ref == 'refs/heads/v17-canonical-engine'
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0, ref: '${{ github.sha }}'}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - name: Verify actual deployment or restore previous verified source
+        env:
+          EXPECTED_DEPLOY_COMMIT: ${{ github.sha }}
+          ENGINE_TEST_STATUS: ${{ needs.verify.result }}
+        run: node quant-evolution/guard.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: source-deployment-guard, path: quant-evolution/output}
+  research:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0, ref: v17-canonical-engine}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - uses: actions/download-artifact@v4
+        with: {name: mathematical-ci-proof, path: quant-evolution/output}
+      - name: Capture market observations and mechanism proposals
         run: node quant-evolution/collect.mjs
-      - name: Run independent study and reject missing evidence
+      - name: Observe prospective frozen forecasts without writing official signals
+        run: node quant-evolution/cycle.mjs
+      - name: Validate studies and separate shadow/canary/live phases
         run: node quant-evolution/run.mjs
-      - name: Publish validated mechanism revision only from production branch
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/v17-canonical-engine' || github.event_name == 'schedule'
+      - name: Publish only validated registry revisions and verify their real deployment
         run: |
           if git diff --quiet -- v17-common/quant-model-registry.json && test -z "$(git ls-files --others --exclude-standard quant-evolution/holdout-consumption.json)" && git diff --quiet -- quant-evolution/holdout-consumption.json; then exit 0; fi
           git config user.name 'btc-eth-mathematical-research'
@@ -43,12 +87,13 @@ jobs:
           if test -f quant-evolution/holdout-consumption.json; then git add quant-evolution/holdout-consumption.json; fi
           if git diff --cached --quiet -- v17-common/quant-model-registry.json; then
             git commit -m 'Record spent research holdout [skip render]'
+            git push origin HEAD:v17-canonical-engine
           else
-            git commit -m 'Promote independently validated mathematical mechanism (no weights or scores)'
+            node --test v17-common/*.test.mjs v17-common/tests/*.test.mjs quant-evolution/guard-core.test.mjs quant-evolution/study-proof.test.mjs
+            git commit -m 'Advance independently verified mathematical model stage (no weights or scores)'
+            git push origin HEAD:v17-canonical-engine
+            node quant-evolution/guard.mjs
           fi
-          git push origin HEAD:v17-canonical-engine
       - uses: actions/upload-artifact@v4
         if: always()
-        with:
-          name: mathematical-evolution-proof
-          path: quant-evolution/output
+        with: {name: mathematical-evolution-proof, path: quant-evolution/output}
