@@ -37,6 +37,21 @@ jobs:
       - name: Run research infrastructure tests
         if: always()
         run: node --test research-v2/*.test.mjs > research-output/tests/research.tap 2>&1
+      - name: Summarize actual test results
+        if: always()
+        run: |
+          node --input-type=module <<'JS'
+          import {readFile,writeFile} from 'node:fs/promises';
+          const summaries=[];
+          for(const kind of ['baseline','candidate','research']){
+            let log;try{log=await readFile('research-output/tests/'+kind+'.tap','utf8');}catch{summaries.push({kind,status:'MISSING'});continue;}
+            const lines=log.split('\n');const failures=[];
+            for(let i=0;i<lines.length;i++)if(/^not ok /.test(lines[i]))failures.push(lines.slice(i,i+35).join('\n'));
+            summaries.push({kind,counts:lines.filter(x=>/^# (tests|pass|fail|skipped|cancelled)/.test(x)),failures});
+          }
+          console.log(JSON.stringify(summaries,null,2));
+          await writeFile('research-output/tests/summary.json',JSON.stringify(summaries,null,2)+'\n');
+          JS
       - name: Frozen source hashes, minimal diff and pending protocol
         if: always()
         run: |
@@ -53,7 +68,7 @@ jobs:
           const result={url:'https://btc-eth-v17-canonical-api.onrender.com/health',capturedAt:new Date().toISOString()};
           try{const r=await fetch(result.url,{signal:AbortSignal.timeout(10000)});result.httpStatus=r.status;result.body=await r.text();}
           catch(e){result.error=String(e.message);}
-          await writeFile('research-output/live-health.json',JSON.stringify(result,null,2)+'\n');
+          await writeFile('research-output/live-health.json',JSON.stringify(result,null,2)+'\n');console.log(JSON.stringify(result));
           JS
       - name: Bundle inspectable source and findings
         if: always()
