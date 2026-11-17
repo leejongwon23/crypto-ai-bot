@@ -1,0 +1,69 @@
+{
+  "asOfKst": "2026-11-17 12:35",
+  "restoration": {
+    "commit": "ac586b331ce5311108b76dc222c750622c1e38c1",
+    "baselineTree": "f359615970411da84100ad6006ebe1c131e3fde9",
+    "deploy": "dep-dbtrsnlbedkc73en0bdg"
+  },
+  "production": {
+    "commit": "c5095a6326b4a6a8a9fc652a059d9043583ab2d3",
+    "deploy": "dep-dbtsk83m8hqs73f7unvg",
+    "state": "live",
+    "healthStatus": 200,
+    "policy": "MASTER PROMPT V2.0 FINAL",
+    "sha256": "a6b389650a36e5140bab2929824d13b2c60fe0ec74648a1989e94fe095943265",
+    "bytes": 118535,
+    "lines": 1492
+  },
+  "plugin": {
+    "version": "2.0.0",
+    "release": "pluginrel_6afbc78bbc388191ab9083d5b7f6dc47",
+    "promptExactMatch": true
+  },
+  "ledger": {
+    "signals": 27,
+    "events": 58,
+    "ledgerSha256": "8bbcfe954e7f04326d30114afd4692c691cf5addb4e7c22f14062405a92d67cf",
+    "ledgerSame": true,
+    "originalsSame": true,
+    "eventsSame": true
+  },
+  "testing": {
+    "unitRegressionPassed": 268,
+    "failed": 0,
+    "skipped": 0,
+    "disposablePostgresqlCI": 44010508021,
+    "liveCollectorCI": 44010655845,
+    "liveCollectorJob": 133796605680
+  },
+  "research": [
+    {
+      "connected": true,
+      "records": 123,
+      "proposals": 6,
+      "rejected": 0,
+      "complete": true,
+      "next": null,
+      "datasetSha256": "de86a9d961f744aab6df86e068178c682e992eef064db649f519fdb52a903a31",
+      "rawUserTextExported": false,
+      "independentExchangeAuthentication": false,
+      "frozenStudyCreated": false,
+      "marketPerformanceVerified": false,
+      "ordersEnabled": false
+    },
+    {
+      "eligible": false,
+      "reasons": [
+        "FROZEN_INDEPENDENT_STUDY_NOT_AVAILABLE"
+      ],
+      "ordersEnabled": false
+    }
+  ],
+  "remaining": [
+    "LONG_TERM_INDEPENDENT_PERFORMANCE_NOT_MEASURED",
+    "FROZEN_PROTOCOL_AND_LOSS_BUDGET_NOT_LOCKED",
+    "LIVE_SHADOW_CANARY_AND_AUTO_ROLLBACK_NOT_PROVEN",
+    "GENERAL_ARBITRARY_ALGORITHM_SOURCE_GENERATOR_NOT_IMPLEMENTED"
+  ],
+  "exchangeOrdersEnabled": false
+}

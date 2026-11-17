@@ -1,0 +1,197 @@
+{
+  "baselineCommit": "ac586b331ce5311108b76dc222c750622c1e38c1",
+  "files": [
+    {
+      "path": ".github/workflows/v20-mathematical-evolution.yml",
+      "beforeSha256": null,
+      "afterSha256": "a02d126a500a39306de87fdad9a4f96fef2dab11aaa65c21f31dfb460927394a",
+      "bytes": 2599
+    },
+    {
+      "path": ".github/workflows/v20-schema-verification.yml",
+      "beforeSha256": null,
+      "afterSha256": "c8562a549a1915f280784dfad1e64774f1030f91d517a7be82c63e3e70a7948f",
+      "bytes": 923
+    },
+    {
+      "path": "V2_UPGRADE.md",
+      "beforeSha256": null,
+      "afterSha256": "12ef4e8ea111d20d3ff180c4030e94e5c2bf19a1059a61894b5aa756cc80853a",
+      "bytes": 5190
+    },
+    {
+      "path": "plugin-v2/.app.json",
+      "beforeSha256": null,
+      "afterSha256": "15334f24373a8fb67e6c9757bf8a9b5688fb76f48683e12344a466b27dfa769e",
+      "bytes": 128
+    },
+    {
+      "path": "plugin-v2/.codex-plugin/plugin.json",
+      "beforeSha256": null,
+      "afterSha256": "8f720133397daa84b7eb9183d9706a2ac00431e1a34b18d1d6bc67f9c0180ab9",
+      "bytes": 535
+    },
+    {
+      "path": "plugin-v2/plugin.json",
+      "beforeSha256": null,
+      "afterSha256": "ce4a4609252a4a47556ce66c14404befe94fa0046aa03b811981d4a9384aba30",
+      "bytes": 656
+    },
+    {
+      "path": "plugin-v2/skills/btc-eth-risk-audit/SKILL.md",
+      "beforeSha256": null,
+      "afterSha256": "ce53a17826c062c0cc8011fa9ea8eebce3f298a2ba132793ad0cb868e796a609",
+      "bytes": 9968
+    },
+    {
+      "path": "plugin-v2/skills/btc-eth-risk-audit/references/ENGINE_V2_MANIFEST.json",
+      "beforeSha256": null,
+      "afterSha256": "54d3d7b2c9a753183b4ad9d0e46525692039416edf95640de9c3a40b24288bdd",
+      "bytes": 468
+    },
+    {
+      "path": "plugin-v2/skills/btc-eth-risk-audit/references/MASTER_PROMPT_V1.9_FINAL.txt",
+      "beforeSha256": null,
+      "afterSha256": "03910e1c418de6a83ed8191ec59801481c933fd1358b33b6b3071a8d81d8505a",
+      "bytes": 96602
+    },
+    {
+      "path": "plugin-v2/skills/btc-eth-risk-audit/references/MASTER_PROMPT_V2.0_FINAL.txt",
+      "beforeSha256": null,
+      "afterSha256": "a6b389650a36e5140bab2929824d13b2c60fe0ec74648a1989e94fe095943265",
+      "bytes": 118535
+    },
+    {
+      "path": "quant-evolution/.gitignore",
+      "beforeSha256": null,
+      "afterSha256": "b5726d3ec9335a09c124469eca039523847a6b0f08a083efaefd002b83326600",
+      "bytes": 8
+    },
+    {
+      "path": "quant-evolution/collect.mjs",
+      "beforeSha256": null,
+      "afterSha256": "75f6424a85dff9e2af2428da1589bbcd1cdc596201b3bb2cd95d174f70d3f542",
+      "bytes": 2603
+    },
+    {
+      "path": "quant-evolution/database.test.mjs",
+      "beforeSha256": null,
+      "afterSha256": "dff9b6d23cce9800cbf1b76cbedc1866fb4600390220c31978da02aa28b2ae93",
+      "bytes": 3256
+    },
+    {
+      "path": "quant-evolution/run.mjs",
+      "beforeSha256": null,
+      "afterSha256": "892934c5b1dc6141be0d361118f2540c4a772bc1bf323115a3b4738be86dc9df",
+      "bytes": 2652
+    },
+    {
+      "path": "v17-common/MASTER_PROMPT_V1.9_ORIGINAL.txt",
+      "beforeSha256": null,
+      "afterSha256": "03910e1c418de6a83ed8191ec59801481c933fd1358b33b6b3071a8d81d8505a",
+      "bytes": 96602
+    },
+    {
+      "path": "v17-common/MASTER_PROMPT_V2.0_FINAL.txt",
+      "beforeSha256": null,
+      "afterSha256": "a6b389650a36e5140bab2929824d13b2c60fe0ec74648a1989e94fe095943265",
+      "bytes": 118535
+    },
+    {
+      "path": "v17-common/effective-plan-timeline.mjs",
+      "beforeSha256": null,
+      "afterSha256": "64909e7f52379a7a42fe997577aa49822e1ae7e9385eaf69927bcd3876d00080",
+      "bytes": 1977
+    },
+    {
+      "path": "v17-common/effective-plan-timeline.test.mjs",
+      "beforeSha256": null,
+      "afterSha256": "f6d60566fe661e12633847070e89c314e05c0dff65aeabbcf0a7b66c05d28bb0",
+      "bytes": 5316
+    },
+    {
+      "path": "v17-common/official-price-tracker.mjs",
+      "beforeSha256": "4d662bf7569df08d3052a8f3a49c41ecc56e99180a3b56c5f5b8d4cc8ba4b7cc",
+      "afterSha256": "2a0f78818b626acef0d724d1b84cdf902ced8da656cad161daa8b869da0aea9d",
+      "bytes": 6888
+    },
+    {
+      "path": "v17-common/policy-v20.mjs",
+      "beforeSha256": null,
+      "afterSha256": "8e2ef11fa419014d4662403383c97e43ea218871c80c6b630d14a4c92182ff0b",
+      "bytes": 120470
+    },
+    {
+      "path": "v17-common/prepared-path-chain.mjs",
+      "beforeSha256": "a0db9d8d6a4232abe5b17a47bbb627e2342c30e3438df75fdcb165d466ca7632",
+      "afterSha256": "7eb510413ffaf3b1e76c4a330b6671f913c3ec53ae0ca05a6923bbe600e6c569",
+      "bytes": 7541
+    },
+    {
+      "path": "v17-common/price-path-recovery.mjs",
+      "beforeSha256": "ba96a02fe117ddc93dc11aa958eb68bbed8244c72c0256b7f241ee1064bf1340",
+      "afterSha256": "f068e66b62947c24874d6be0d0e57bcb81d543012d523bc0ff5eb5e97ae541e9",
+      "bytes": 10762
+    },
+    {
+      "path": "v17-common/quant-evolution.mjs",
+      "beforeSha256": null,
+      "afterSha256": "78ea996f2facc475d0f0c8ea2eb3dba8c47d6588363d1f1dc6d40e26e40ede01",
+      "bytes": 9812
+    },
+    {
+      "path": "v17-common/quant-model-registry.json",
+      "beforeSha256": null,
+      "afterSha256": "76af596e862f46f9a380108419f796f7c51879a3bedf2adf895f438e1a7c26ff",
+      "bytes": 125
+    },
+    {
+      "path": "v17-common/quant-structure.mjs",
+      "beforeSha256": null,
+      "afterSha256": "758135b3689f870bb8f400e634d5e47611749d4df5c9cffbc7367f363dad6ad1",
+      "bytes": 14874
+    },
+    {
+      "path": "v17-common/quant-structure.test.mjs",
+      "beforeSha256": null,
+      "afterSha256": "cd7ed4cc31e673614fd0e9867cbad5fb1d82425cc8b100c3b2dc98699120397b",
+      "bytes": 6756
+    },
+    {
+      "path": "v17-common/research-feed.mjs",
+      "beforeSha256": null,
+      "afterSha256": "5260eb3e1217370233fe7ee82a1515b519874e8b04f6bd953f32218a97b16352",
+      "bytes": 4864
+    },
+    {
+      "path": "v17-common/research-feed.test.mjs",
+      "beforeSha256": null,
+      "afterSha256": "e479346b3967e750dece99233a54bd5cfc02e83b84e5918907899b4c8ec470c3",
+      "bytes": 4344
+    },
+    {
+      "path": "v17-common/server.mjs",
+      "beforeSha256": "9776d3f3fca46d01dc4d42c6300eeb9d0f0cc2e172edb272f90d39d7aad7b24d",
+      "afterSha256": "23190d7db3b3e98dceb76f794e941c8e118e74ee8fd0dbb9a26191adc145b31b",
+      "bytes": 60882
+    },
+    {
+      "path": "v17-common/signal-table-view.test.mjs",
+      "beforeSha256": "34c24286bf92b3453d0d3e40c2774c4ef567c0f3e52fff1c24176d6c2e313661",
+      "afterSha256": "d690aa7abdfc8431771005d064e0a3b5e64eb43dd01c7b83ce0f1a25ec79d6c0",
+      "bytes": 6967
+    },
+    {
+      "path": "v17-common/v20-core.mjs",
+      "beforeSha256": null,
+      "afterSha256": "1a800caad5576f2d82edc5754d242fde93c431dc73f8644a464347b074a74160",
+      "bytes": 50322
+    },
+    {
+      "path": "v17-common/v20-core.test.mjs",
+      "beforeSha256": null,
+      "afterSha256": "cf2f9e197741a52905265d2ee6e59076dabd9a51ba984e4e874f967b0e5fb76c",
+      "bytes": 4201
+    }
+  ]
+}
