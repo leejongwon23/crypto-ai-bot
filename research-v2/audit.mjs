@@ -21,4 +21,4 @@ await writeFile(join(dir,'promotion-status.json'),JSON.stringify(promotionGate(p
 const paths=['v17-common/server.mjs','v17-common/v19-core.mjs','v17-common/regime-entry-risk.mjs','v17-common/signal-table-view.mjs','research-v2/lib.mjs','research-v2/collect.mjs'];
 const manifest=[];for(const path of paths){const content=await readFile(path,'utf8');manifest.push({path,sha256:hash(content),bytes:Buffer.byteLength(content)});}
 await writeFile(join(dir,'candidate-file-hashes.json'),JSON.stringify(manifest,null,2)+'\n');
-console.log(JSON.stringify({policySha256:POLICY_SHA256,examples:examples.length,realCases:1,promotion:'BLOCKED',runtimeTradeLogicChanged:false}));
+console.log(JSON.stringify({policySha256:POLICY_SHA256,examples:examples.length,realCases:1,promotion:'BLOCKED',signalGenerationModelChanged:false,priceTrackingChanged:true}));

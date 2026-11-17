@@ -2,6 +2,10 @@ name: V2 research audit (no deploy)
 on:
   push:
     branches: [v20-research-audit-20261117]
+    paths:
+      - 'v17-common/**'
+      - 'research-v2/**/*.mjs'
+      - '.github/workflows/v20-research-audit.yml'
   workflow_dispatch:
 permissions:
   contents: read
@@ -63,6 +67,9 @@ jobs:
       - name: Public archived trades (bounded separate source)
         if: always()
         run: node research-v2/archive.mjs research-output/archive
+      - name: Descriptive archive study (no strategy performance claim)
+        if: always()
+        run: node research-v2/describe.mjs research-output/archive
       - name: Read-only live health diagnostic (no deployment)
         if: always()
         run: |

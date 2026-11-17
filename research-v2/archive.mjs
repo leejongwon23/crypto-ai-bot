@@ -21,8 +21,8 @@ function aggregator(symbol){
  if(x[index.symbol]!==symbol||!Number.isFinite(timestamp)||timestamp<previous||![price,size].every(v=>Number.isFinite(v)&&v>0)||!['Buy','Sell'].includes(side)||!id||seen.has(id))throw Error('ARCHIVE_TRADE_INVALID_OR_UNORDERED');
  seen.add(id);previous=timestamp;count++;if(first===null)first=timestamp;last=timestamp;
  const start=Math.floor(timestamp/60000)*60000;
- let b=bars.get(start);if(!b){b={start,open:price,high:price,low:price,close:price,volume:0,buy:0,sell:0,count:0};bars.set(start,b);}
- b.high=Math.max(b.high,price);b.low=Math.min(b.low,price);b.close=price;b.volume+=size;b.count++;b[side==='Buy'?'buy':'sell']+=size;
+ let b=bars.get(start);if(!b){b={start,open:price,high:price,low:price,close:price,volume:0,turnover:0,buy:0,sell:0,count:0};bars.set(start,b);}
+ b.high=Math.max(b.high,price);b.low=Math.min(b.low,price);b.close=price;b.volume+=size;b.turnover+=size*price;b.count++;b[side==='Buy'?'buy':'sell']+=size;
  },
  result(){
  if(index===null||count===0)throw Error('EMPTY_ARCHIVE');
