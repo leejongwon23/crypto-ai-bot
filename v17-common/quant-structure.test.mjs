@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {validateBars,confirmedPivots,measureStructure,analyzeTrades,buildQuantContext,validateQuantAudit,sha} from './quant-structure.mjs';
+import {validateBars,confirmedPivots,measureStructure,analyzeTrades,buildQuantContext,validateQuantAudit,sha,aggregateObservedMinutes} from './quant-structure.mjs';
 import {generateResearchProposals,evaluatePromotion,evaluateSymbolicModel,synthesizeMechanismRevisions} from './quant-evolution.mjs';
 const time=Date.parse('2026-11-17T00:00:00Z');
 const bar=(i,c=100)=>({t:time+i*60000,open:c,high:c+1,low:c-1,close:c,volume:10});
@@ -22,3 +22,5 @@ test('symbolic mechanism can be structurally changed and mirrored without numeri
 });
 
 test('counterexample synthesis changes the mathematical condition graph, not a numerical score',()=>{const model={id:'parent',family:'ORDERED_STRUCTURE_CONTINUATION',logic:{all:['confirmedHigherHighs','confirmedHigherLows'],invalidates:['breakLastConfirmedLow']}};const revisions=synthesizeMechanismRevisions(model,[{facts:{aggressorFlowPriceDisagreement:true},frozenSourceSha256:'a'.repeat(64),forecastAt:10,errorObservedAt:20}]);assert.equal(revisions.length,1);assert.ok(revisions[0].mechanism.logic.invalidates.includes('aggressorFlowPriceDisagreement'));assert.equal(revisions[0].status,'RESEARCH_ONLY');assert.equal(revisions[0].deployEligible,false);assert.deepEqual(model.logic.invalidates,['breakLastConfirmedLow']);});
+
+test('higher timeframes use only complete observed minutes; EMA summaries are not fabricated candles',()=>{const rows=validateBars([bar(0),bar(1),bar(2),bar(3),bar(4)],time+600000).bars;const agg=aggregateObservedMinutes(rows,300000);assert.equal(agg.length,1);assert.equal(agg[0].volume,50);assert.equal(aggregateObservedMinutes(rows.slice(1),300000).length,0);const q=buildQuantContext(raw);assert.equal(q.symbols.BTC.timeframes['1D'].closedBars,0);assert.equal(q.symbols.BTC.timeframes['1h'].structure.regime,'UNVERIFIED');});

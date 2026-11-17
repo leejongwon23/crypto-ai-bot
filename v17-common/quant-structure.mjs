@@ -82,6 +82,15 @@ export function directionCandidates({bars,price,structure,ledger=[],symbol}){
   return [dir,{A:plan(dir,price,stops,targets,'CURRENT_PRICE'),B:finite(near)?plan(dir,near,stops,targets,'NEAR_OBSERVED_PIVOT'):{kind:'NO_PLAN',missing:'NEAR_ANCHOR'},C:finite(far)?plan(dir,far,stops,targets,'FAR_OBSERVED_PIVOT'):{kind:'NO_PLAN',missing:'FAR_ANCHOR'},D:ledger.filter(s=>s.symbol===symbol+'USDT'&&s.original?.direction===dir&&s.status==='PENDING').map(s=>({id:s.id,original:s.original})),E:{kind:'NO_NEW_SIGNAL',reason:'COMPARE_A_TO_D_WITH_COUNTEREVIDENCE_BEFORE_DECISION'}}];
  }));
 }
+const FRAMES={'1m':60000,'5m':300000,'15m':900000,'1h':3600000,'4h':14400000,'1D':86400000};
+export function aggregateObservedMinutes(bars,intervalMs){
+ const groups=new Map();for(const b of bars){if(b.intervalMs!==60000)continue;const t=Math.floor(b.t/intervalMs)*intervalMs;if(!groups.has(t))groups.set(t,[]);groups.get(t).push(b);}
+ const result=[];for(const [t,rows]of groups){if(rows.length!==intervalMs/60000||rows.some((b,i)=>b.t!==t+i*60000))continue;const volume=rows.every(b=>'volume' in b)?{volume:rows.reduce((n,b)=>n+b.volume,0)}:{};
+ result.push({t,intervalMs,open:rows[0].open,close:rows.at(-1).close,high:Math.max(...rows.map(b=>b.high)),low:Math.min(...rows.map(b=>b.low)),...volume});}return result;
+}
+function timeframeContexts(json,primary,asOf){
+ return Object.fromEntries(Object.entries(FRAMES).map(([tf,dt])=>{const supplied=json.timeframes?.[tf];const rows=supplied?supplied.map(b=>({...b,intervalMs:dt})):primary.every(b=>b.intervalMs===60000)?aggregateObservedMinutes(primary,dt):[];const checked=validateBars(rows,asOf);return [tf,{provenance:supplied?'USER_SUPPLIED_RAW':'DERIVED_ONLY_FROM_COMPLETE_OBSERVED_MINUTES',closedBars:checked.bars.length,gaps:checked.gaps,structure:checked.gaps.length?{status:'UNVERIFIED',reason:'TIMEFRAME_GAPS'}:measureStructure(checked.bars)}];}));
+}
 function rawSections(raw){const match=raw.match(/\[QUANT_RAW_JSON\]\s*([\s\S]*?)\s*\[\/QUANT_RAW_JSON\]/);if(!match)return {};try{return JSON.parse(match[1]);}catch{throw Error('QUANT_RAW_JSON_INVALID');}}
 export function buildQuantContext(raw,ledger=[]){
  const json=rawSections(raw),symbols={};
@@ -89,10 +98,10 @@ export function buildQuantContext(raw,ledger=[]){
   const start=raw.indexOf('========== '+sym+' ('+sym+'USDT) =========='),next=raw.indexOf('========== ',start+12),part=raw.slice(start,next<0?undefined:next);
   const at=part.match(/^timestamp_kst:\s*(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)/m)?.[1],asOf=ms(at),price=Number(part.match(/^lastPrice:\s*([\d.]+)/m)?.[1]);
   const j=json[sym]??{};if(j.exchange!==undefined&&(j.exchange!=='Bybit'||j.category!=='linear'||j.symbol!==sym+'USDT'))throw Error('QUANT_MARKET_IDENTITY_MISMATCH');
-  let rows=j.bars??[];if(!rows.length&&part.includes('[10B]')){const text=part.slice(part.indexOf('minute_OHLC_KST:'));rows=text.split(/\r?\n/).flatMap(l=>{const m=l.match(/^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),([\d.]+),([\d.]+),([\d.]+),([\d.]+)$/);return m?[{t:m[1],open:+m[2],high:+m[3],low:+m[4],close:+m[5]}]:[];});}
+  let rows=j.bars??j.timeframes?.['1m']??[];if(!rows.length&&part.includes('[10B]')){const text=part.slice(part.indexOf('minute_OHLC_KST:'));rows=text.split(/\r?\n/).flatMap(l=>{const m=l.match(/^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),([\d.]+),([\d.]+),([\d.]+),([\d.]+)$/);return m?[{t:m[1],open:+m[2],high:+m[3],low:+m[4],close:+m[5]}]:[];});}
   const checked=validateBars(rows,asOf),structure=checked.gaps.length?{status:'UNVERIFIED',reason:'NONCONTIGUOUS_BARS',regime:'UNVERIFIED',pivots:[]}:measureStructure(checked.bars);
   const flow=analyzeTrades(j.trades,asOf,sym);
-  symbols[sym]={asOf:at,identity:'Bybit linear '+sym+'USDT',provenance:'USER_SUPPLIED_NOT_INDEPENDENTLY_AUTHENTICATED',dataStatus:{closedBars:checked.bars.length,gaps:checked.gaps,fullOHLCV:checked.bars.length>0&&checked.bars.every(b=>'volume' in b),rawTrades:flow.trades??0,bookUpdates:'UNAVAILABLE',orderCancellationIdentity:'UNIDENTIFIABLE',liquidations:'UNAVAILABLE',knownAtVintage:j.liveVintageVerified===true?'USER_ASSERTED_NOT_ATTESTED':'UNVERIFIED'},structure,flow,
+  symbols[sym]={asOf:at,identity:'Bybit linear '+sym+'USDT',provenance:'USER_SUPPLIED_NOT_INDEPENDENTLY_AUTHENTICATED',dataStatus:{closedBars:checked.bars.length,gaps:checked.gaps,fullOHLCV:checked.bars.length>0&&checked.bars.every(b=>'volume' in b),rawTrades:flow.trades??0,bookUpdates:'UNAVAILABLE',orderCancellationIdentity:'UNIDENTIFIABLE',liquidations:'UNAVAILABLE',knownAtVintage:j.liveVintageVerified===true?'USER_ASSERTED_NOT_ATTESTED':'UNVERIFIED'},structure,flow,timeframes:timeframeContexts(j,checked.bars,asOf),
    directions:directionCandidates({bars:checked.bars,price,structure,ledger,symbol:sym}),
    modelErrorReview:ledger.filter(x=>x.symbol===sym+'USDT'&&['NEW_ENTRY','ENTERED','TP1','TP2','PENDING'].includes(x.status)).map(x=>({id:x.id,modelId:x.original.modelId??null,forecastAt:x.original.issuedAt,frozenSourceSha256:x.original.frozenSourceSha256??null,reviewRequiredBeforeStop:true,observedStructuralEvents:structure.structuralEvents??{},predictionInterval:x.original.predictionInterval??null,intervalBreached:x.original.predictionInterval?price<x.original.predictionInterval.low||price>x.original.predictionInterval.high:null,action:'INDEPENDENT_MATHEMATICAL_COUNTEREVIDENCE_REVIEW_REQUIRED'}))};
  }
