@@ -1,0 +1,23 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "dev-6af55fe9f77c8191b938f4418ebc3913",
+  "version": "1.4.2",
+  "author": {
+    "name": "App developer"
+  },
+  "description": "BTC ETH 공통 분석 엔진",
+  "extensions": {
+    "com.openai": {
+      "apps": "./.app.json",
+      "interface": {
+        "capabilities": [],
+        "category": "Other",
+        "defaultPrompt": null,
+        "developerName": "App developer",
+        "displayName": "BTC ETH 공통 분석 엔진",
+        "longDescription": "BTC ETH 공통 분석 엔진",
+        "shortDescription": "BTC ETH 공통 분석 엔진"
+      }
+    }
+  }
+}

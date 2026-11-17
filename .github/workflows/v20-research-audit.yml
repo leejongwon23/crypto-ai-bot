@@ -1,0 +1,92 @@
+name: V2 research audit (no deploy)
+on:
+  push:
+    branches: [v20-research-audit-20261117]
+    paths:
+      - 'v17-common/**'
+      - 'research-v2/**/*.mjs'
+      - '.github/workflows/v20-research-audit.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      V17_NO_LISTEN: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Create evidence output
+        run: mkdir -p research-output/tests
+      - name: Syntax of candidate modules
+        run: |
+          find v17-common research-v2 -name '*.mjs' -print0 | xargs -0 -n1 node --check
+      - name: Run baseline separately at frozen commit
+        continue-on-error: true
+        run: |
+          git worktree add /tmp/btc-eth-frozen-baseline 4cb79078ebef4dc5f113e20dd44e25068a9e34ec
+          cd /tmp/btc-eth-frozen-baseline/v17-common
+          npm install --ignore-scripts --no-audit --no-fund
+          npm test > "$GITHUB_WORKSPACE/research-output/tests/baseline.tap" 2>&1
+      - name: Install candidate service dependencies
+        run: npm install --prefix v17-common --ignore-scripts --no-audit --no-fund
+      - name: Run complete candidate service regression
+        run: node --test v17-common/*.test.mjs v17-common/tests/*.test.mjs > research-output/tests/candidate.tap 2>&1
+      - name: Run research infrastructure tests
+        if: always()
+        run: node --test research-v2/*.test.mjs > research-output/tests/research.tap 2>&1
+      - name: Summarize actual test results
+        if: always()
+        run: |
+          node --input-type=module <<'JS'
+          import {readFile,writeFile} from 'node:fs/promises';
+          const summaries=[];
+          for(const kind of ['baseline','candidate','research']){
+            let log;try{log=await readFile('research-output/tests/'+kind+'.tap','utf8');}catch{summaries.push({kind,status:'MISSING'});continue;}
+            const lines=log.split('\n');const failures=[];
+            for(let i=0;i<lines.length;i++)if(/^not ok /.test(lines[i]))failures.push(lines.slice(i,i+35).join('\n'));
+            summaries.push({kind,counts:lines.filter(x=>/^# (tests|pass|fail|skipped|cancelled)/.test(x)),failures});
+          }
+          console.log(JSON.stringify(summaries,null,2));
+          await writeFile('research-output/tests/summary.json',JSON.stringify(summaries,null,2)+'\n');
+          JS
+      - name: Frozen source hashes, minimal diff and pending protocol
+        if: always()
+        run: |
+          node research-v2/audit.mjs research-output
+          git diff 4cb79078ebef4dc5f113e20dd44e25068a9e34ec -- v17-common > research-output/runtime.diff
+      - name: Bounded real public market data capture
+        if: always()
+        run: node research-v2/collect.mjs research-output/data
+      - name: Public archived trades (bounded separate source)
+        if: always()
+        run: node research-v2/archive.mjs research-output/archive
+      - name: Descriptive archive study (no strategy performance claim)
+        if: always()
+        run: node research-v2/describe.mjs research-output/archive
+      - name: Read-only live health diagnostic (no deployment)
+        if: always()
+        run: |
+          node --input-type=module <<'JS'
+          import {writeFile} from 'node:fs/promises';
+          const result={url:'https://btc-eth-v17-canonical-api.onrender.com/health',capturedAt:new Date().toISOString()};
+          try{const r=await fetch(result.url,{signal:AbortSignal.timeout(10000)});result.httpStatus=r.status;result.body=await r.text();}
+          catch(e){result.error=String(e.message);}
+          await writeFile('research-output/live-health.json',JSON.stringify(result,null,2)+'\n');console.log(JSON.stringify(result));
+          JS
+      - name: Bundle inspectable source and findings
+        if: always()
+        run: |
+          tar -czf research-output/BTC_ETH_RESEARCH_AUDIT_BUNDLE.tar.gz research-v2 v17-common
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: btc-eth-research-audit
+          path: research-output
+          retention-days: 30
