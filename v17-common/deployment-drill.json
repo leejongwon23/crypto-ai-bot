@@ -1,0 +1,5 @@
+{
+  "kind": "CONTROLLED_ROLLBACK_REHEARSAL",
+  "expectedFailure": true,
+  "purpose": "Exercise deployment verification and source restoration only; trading analysis and official records remain untouched"
+}
