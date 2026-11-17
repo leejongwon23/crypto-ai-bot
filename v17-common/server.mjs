@@ -13,6 +13,7 @@ import {OFFICIAL_POLICY,VERSION,prepare,sourcePolicy,validateSnapshot,validateOf
 import {ATTEST_CONFIRM,TWO_USER_TP3_IDS,planUserAttestedTp3} from './user-attested-tp3.mjs';
 import {USER_NO_ENTRY_KIND,USER_NO_ENTRY_CONFIRM,USER_NO_ENTRY_IDS,planUserNoEntryAttestation} from './user-attested-no-entry.mjs';
 import {USER_CLOSE_SHORTS_KIND,USER_CLOSE_SHORTS_CONFIRM,USER_CLOSED,closeableShorts,planUserCloseShorts} from './user-close-shorts.mjs';
+import {verifyResearchIdentity,readMarketResearchPage} from './research-feed.mjs';
 
 const SIGNAL_TABLE_OUTPUT_RULE=LEGACY_OUTPUT_RULE.replaceAll('V1.9','V2.0');
 const PORT=Number(process.env.PORT||3000);
@@ -656,6 +657,12 @@ const webPage=`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta 
 const server=http.createServer(async(req,res)=>{
  try{
   if(req.url==='/health'&&req.method==='GET')return json(res,200,{status:!DB_URL||!MASTER_SECRET?'not_ready':'ready',engine:VERSION,policyName:OFFICIAL_POLICY.name,quantEngine:quantEngineStatus(),policySha256:OFFICIAL_POLICY.sha256,policyBytes:OFFICIAL_POLICY.bytes,mode:'AI_VERBATIM_POLICY_OFFICIAL_CACHE',dbConfigured:!!DB_URL,authenticationConfigured:!!MASTER_SECRET});
+  if(req.method==='GET'&&new URL(req.url,PUBLIC_ORIGIN).pathname==='/research/market'){
+   try{await verifyResearchIdentity(String(req.headers.authorization||'').replace(/^Bearer\s+/i,''),{audience:PUBLIC_ORIGIN});}
+   catch{return responseError(res,401,'RESEARCH_WORKFLOW_IDENTITY_REQUIRED');}
+   const q=new URL(req.url,PUBLIC_ORIGIN).searchParams;
+   return json(res,200,await readMarketResearchPage(await database(),{limit:Number(q.get('limit')??25),...(q.has('beforeAt')?{beforeAt:q.get('beforeAt'),beforeSha:q.get('beforeSha')}:{})}));
+  }
   if(req.url==='/'&&req.method==='GET'){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"});return res.end(webPage);}
   if(req.url.startsWith('/.well-known/')||req.url.startsWith('/oauth/')){const o=await getOAuth();const handled=await o.handle(req,res);if(handled!==false)return;}
   if(req.url==='/mcp'&&req.method==='POST'){
