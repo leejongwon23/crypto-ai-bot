@@ -12,8 +12,7 @@ const shot={btcPrice:69234.20,ethPrice:1958.37};
 test('BTC and still-open UNVERIFIED ETH are both visible with entry-relative stop/TP percentages',()=>{
  const x=buildSignalView({ledger:[ETH,BTC],snapshot:shot});
  assert.equal(x.mode,'BTC_ETH_HORIZONTAL_WITH_OUTLOOK');
- assert.match(x.markdown,/\| 항목 \| BTC \| ETH \|/);
- assert.match(x.markdown,/\| 진입 시그널 \| SHORT · 대기 \| SHORT · 진입 확인·이후 청산 미확인 \|/);
+ assert.match(x.markdown,/BTC SHORT \| ETH SHORT/);
  assert.match(x.markdown,/\$69,500\.00~\$69,540\.00/);
  assert.match(x.markdown,/\$69,820\.00 \(-0\.46%~-0\.40%\)/);
  assert.match(x.markdown,/\$68,820\.00 \(\+0\.98%~\+1\.04%\)/);

@@ -1,4 +1,3 @@
-import {planForSpan} from './effective-plan-timeline.mjs';
 import {auditMinuteCandles,kstMs,kstTime,floorMinute,verifyCandleCoverage,rawMarketWindows} from './price-path-recovery.mjs';
 const ACTIVE=new Set(['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED']);
 const DONE=new Set(['STOPPED','TP3_DONE']);
@@ -9,7 +8,7 @@ function eventEvidence(s,proof,change){
  return (proof.source==='USER_SUBMITTED_BYBIT_1M'?'User-submitted Bybit-labelled ':'Public Bybit USDT-linear ')+s.symbol+' 1m OHLC (contiguous minutes verified within source), '
   +proof.coveredFrom+' through '+proof.coveredThrough
   +'; observed minute '+change.minute+' high '+change.high+' low '+change.low
-  +'; crossed effective '+change.kind+' level '+change.level
+  +'; crossed original '+change.kind+' level '+change.level
   +'; exact tick timestamp and actual account fill not asserted.';
 }
 /**
@@ -46,11 +45,8 @@ export function planVerifiedMechanicalEvents({ledger,history,currentAtBySymbol,u
    // If the first minute was already in progress at the last official check,
    // an observed SL/TP there might have preceded that check. Never backdate it.
    const o=signal.original||signal;
-   let firstPlans;
-   try{firstPlans=planForSpan(signal,first.start,first.start+60000).plans;}
-   catch(e){result.notes.push(signal.id+':'+String(e.message));continue;}
-   const stopHit=firstPlans.some(p=>o.direction==='SHORT'?first.high>=p.stop:first.low<=p.stop);
-   const tpHit=firstPlans.some(p=>o.direction==='SHORT'?first.low<=p.tp1:first.high>=p.tp1);
+   const stopHit=o.direction==='SHORT'?first.high>=o.stop:first.low<=o.stop;
+   const tpHit=o.direction==='SHORT'?first.low<=o.tp1:first.high>=o.tp1;
    const entryHit=first.high>=o.entryLow&&first.low<=o.entryHigh;
    if((state==='PENDING'&&entryHit)||(state!=='PENDING'&&(stopHit||tpHit))){
     result.notes.push(signal.id+':FIRST_PARTIAL_MINUTE_CONFLICT');continue;
@@ -89,7 +85,7 @@ export function planVerifiedMechanicalEvents({ledger,history,currentAtBySymbol,u
    if(verdict.ambiguous){
     result.events.push({
      id:signal.id,kind:'UNVERIFIED',at:now,
-     reason:'The candle path or effective-at management history does not establish an unambiguous price-event sequence.',
+     reason:'The same minute contains competing entry/stop/TP price levels without reliable intraminute order.',
      evidence:'Public Bybit 1m OHLC '+proof.coveredFrom+' ... '+proof.coveredThrough+
       ': '+verdict.ambiguous.minute+', high='+verdict.ambiguous.high+', low='+verdict.ambiguous.low,
      uncertaintyScope:verdict.ambiguous.reason,
