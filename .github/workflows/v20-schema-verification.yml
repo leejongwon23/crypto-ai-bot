@@ -1,0 +1,28 @@
+name: V2 immutable history and database verification
+on:
+  push:
+    branches: [v20-mathematical-engine-20261117]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  database:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: quant
+          POSTGRES_PASSWORD: quant_test
+          POSTGRES_DB: quant_test
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      V17_NO_LISTEN: '1'
+      QUANT_TEST_DATABASE_URL: postgresql://quant:quant_test@localhost:5432/quant_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - run: npm install --prefix v17-common --ignore-scripts --no-audit --no-fund
+      - run: node --test quant-evolution/database.test.mjs

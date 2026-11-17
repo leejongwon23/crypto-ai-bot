@@ -1,0 +1,50 @@
+name: Mathematical mechanism research and guarded model deployment
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 1 * * 1'
+  push:
+    branches: [v20-mathematical-engine-20261117]
+permissions:
+  contents: write
+concurrency:
+  group: btc-eth-mathematical-evolution
+  cancel-in-progress: false
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      V17_NO_LISTEN: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'schedule' && 'v17-canonical-engine' || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --prefix v17-common --ignore-scripts --no-audit --no-fund
+      - name: Verify new mathematical engine
+        run: node --test v17-common/*.test.mjs v17-common/tests/*.test.mjs
+      - name: Run independent study and reject missing evidence
+        run: node quant-evolution/run.mjs
+      - name: Publish validated mechanism revision only from production branch
+        if: github.ref == 'refs/heads/v17-canonical-engine' || github.event_name == 'schedule'
+        run: |
+          if git diff --quiet -- v17-common/quant-model-registry.json && test -z "$(git ls-files --others --exclude-standard quant-evolution/holdout-consumption.json)" && git diff --quiet -- quant-evolution/holdout-consumption.json; then exit 0; fi
+          git config user.name 'btc-eth-mathematical-research'
+          git config user.email 'btc-eth-research@users.noreply.github.com'
+          git add v17-common/quant-model-registry.json
+          if test -f quant-evolution/holdout-consumption.json; then git add quant-evolution/holdout-consumption.json; fi
+          if git diff --cached --quiet -- v17-common/quant-model-registry.json; then
+            git commit -m 'Record spent research holdout [skip render]'
+          else
+            git commit -m 'Promote independently validated mathematical mechanism (no weights or scores)'
+          fi
+          git push origin HEAD:v17-canonical-engine
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mathematical-evolution-proof
+          path: quant-evolution/output

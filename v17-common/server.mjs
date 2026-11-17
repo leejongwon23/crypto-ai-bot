@@ -2,18 +2,19 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import {makeOAuth} from './oauth.mjs';
 import {applyCachedPolicyResponse} from './cached-policy-response.mjs';
-import {buildSignalView,SIGNAL_TABLE_OUTPUT_RULE} from './signal-table-view.mjs';
+import {buildSignalView,SIGNAL_TABLE_OUTPUT_RULE as LEGACY_OUTPUT_RULE} from './signal-table-view.mjs';
 import {storePreparedSnapshot,recoverOfficialSubmissionRaw} from './prepared-snapshot.mjs';
 import {rawMarketWindows,recoverActiveSignalWindows,earliestUnknownGapOrigins} from './price-path-recovery.mjs';
 import {planVerifiedMechanicalEvents,validateRecoveredProof} from './official-price-tracker.mjs';
 import {assemblePreparedChains,planPreparedEvents} from './prepared-path-chain.mjs';
 import {parseSubmittedMinutePaths} from './submitted-minute-path.mjs';
 import {assembleSubmittedMinuteChains} from './submitted-minute-chain.mjs';
-import {OFFICIAL_POLICY,VERSION,prepare,sourcePolicy,validateSnapshot,validateOfficialSubmission,ledgerHash,sessionId,digest,checkEvent} from './v19-core.mjs';
+import {OFFICIAL_POLICY,VERSION,prepare,sourcePolicy,validateSnapshot,validateOfficialSubmission,ledgerHash,sessionId,digest,checkEvent,quantEngineStatus} from './v20-core.mjs';
 import {ATTEST_CONFIRM,TWO_USER_TP3_IDS,planUserAttestedTp3} from './user-attested-tp3.mjs';
 import {USER_NO_ENTRY_KIND,USER_NO_ENTRY_CONFIRM,USER_NO_ENTRY_IDS,planUserNoEntryAttestation} from './user-attested-no-entry.mjs';
 import {USER_CLOSE_SHORTS_KIND,USER_CLOSE_SHORTS_CONFIRM,USER_CLOSED,closeableShorts,planUserCloseShorts} from './user-close-shorts.mjs';
 
+const SIGNAL_TABLE_OUTPUT_RULE=LEGACY_OUTPUT_RULE.replaceAll('V1.9','V2.0');
 const PORT=Number(process.env.PORT||3000);
 const MODE=process.env.DEPLOYMENT_MODE||'local';
 const MASTER_SECRET=process.env.SIGNAL_API_KEY||'';
@@ -27,6 +28,17 @@ CREATE TABLE IF NOT EXISTS v17_ai_signals (session TEXT NOT NULL, id TEXT NOT NU
 CREATE TABLE IF NOT EXISTS v17_ai_events (session TEXT NOT NULL, seq BIGSERIAL PRIMARY KEY, id TEXT NOT NULL, event JSONB NOT NULL, at_kst TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS v17_ai_analyses (session TEXT NOT NULL, snapshot_sha TEXT NOT NULL, before_sha TEXT NOT NULL, after_sha TEXT NOT NULL, policy_sha TEXT NOT NULL, raw TEXT NOT NULL, official JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY(session,snapshot_sha,before_sha));
 CREATE INDEX IF NOT EXISTS v17_ai_analyses_after ON v17_ai_analyses (session,snapshot_sha,after_sha);
+CREATE TABLE IF NOT EXISTS v20_ai_analyses (
+ session TEXT NOT NULL,snapshot_sha TEXT NOT NULL,before_sha TEXT NOT NULL,after_sha TEXT NOT NULL,
+ policy_sha TEXT NOT NULL,raw TEXT NOT NULL,official JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY(session,snapshot_sha,before_sha,policy_sha)
+);
+CREATE INDEX IF NOT EXISTS v20_ai_analyses_after ON v20_ai_analyses(session,snapshot_sha,after_sha);
+CREATE OR REPLACE VIEW v20_ai_analysis_history AS
+ SELECT session,snapshot_sha,before_sha,after_sha,policy_sha,raw,official,created_at FROM v17_ai_analyses
+ UNION ALL
+ SELECT session,snapshot_sha,before_sha,after_sha,policy_sha,raw,official,created_at FROM v20_ai_analyses;
+
 CREATE TABLE IF NOT EXISTS v17_ai_prepared_snapshots (
  session TEXT NOT NULL,
  snapshot_sha TEXT NOT NULL,
@@ -68,7 +80,7 @@ const KEY_CHECK=x=>{
  return crypto.timingSafeEqual(Buffer.from(x),Buffer.from(MASTER_SECRET));
 };
 function isAuthorized(req){const header=String(req.headers.authorization||'');const provided=header.replace(/^Bearer\s+/i,'')||String(req.headers['x-api-key']||'');return KEY_CHECK(provided);}
-export const rowToLedger=r=>({id:r.id,symbol:r.symbol,original:r.original,status:r.status,verifiedUntil:r.verified_until,version:r.plan_version,userAccountEntry:r.user_account_entry??undefined,userAccountEntryAt:r.user_account_entry_at??undefined,unverifiedFrom:r.unverified_from??undefined,...(r.effective_plan?{effectivePlan:r.effective_plan,planEffectiveAt:r.plan_effective_at}:{})});
+export const rowToLedger=r=>({id:r.id,symbol:r.symbol,original:r.original,status:r.status,verifiedUntil:r.verified_until,version:r.plan_version,userAccountEntry:r.user_account_entry??undefined,userAccountEntryAt:r.user_account_entry_at??undefined,unverifiedFrom:r.unverified_from??undefined,...(r.effective_plan?{effectivePlan:r.effective_plan,planEffectiveAt:r.plan_effective_at,managementRevisions:r.plan_revisions}:{})});
 async function readLedger(db,session){
  const r=await db.query(`SELECT s.id,s.symbol,s.original,s.status,s.verified_until,s.plan_version,
  (SELECT e.event->>'priorConfirmedState' FROM v17_ai_events e
@@ -85,7 +97,9 @@ async function readLedger(db,session){
   ORDER BY e.seq DESC LIMIT 1) AS effective_plan,
  (SELECT e.at_kst FROM v17_ai_events e
   WHERE e.session=s.session AND e.id=s.id AND e.event->>'kind'='REVISION'
-  ORDER BY e.seq DESC LIMIT 1) AS plan_effective_at
+  ORDER BY e.seq DESC LIMIT 1) AS plan_effective_at,
+ (SELECT jsonb_agg(e.event ORDER BY e.seq) FROM v17_ai_events e
+  WHERE e.session=s.session AND e.id=s.id AND e.event->>'kind'='REVISION') AS plan_revisions
  FROM v17_ai_signals s WHERE s.session=$1 ORDER BY s.id`,[session]);
  return r.rows.map(rowToLedger);
 }
@@ -99,7 +113,7 @@ async function carriedUncertainty(db,session,ledger){
  // Verified gap-resolution events supersede older historical warnings.
  const recent=await db.query("SELECT DISTINCT ON(id) id,event FROM v17_ai_events WHERE session=$1 AND ((event->>'kind')='UNVERIFIED' OR event ? 'gapResolutionEvidence') ORDER BY id,seq DESC",[session]);
  const resolved=new Set(recent.rows.filter(x=>typeof x.event?.gapResolutionEvidence==='string'&&x.event.gapResolutionEvidence.length>0).map(x=>x.id));
- const r=await db.query("SELECT official->'evidenceQuality' AS evidence FROM v17_ai_analyses WHERE session=$1 AND official->'evidenceQuality' IS NOT NULL ORDER BY created_at DESC LIMIT 1000",[session]);
+ const r=await db.query("SELECT official->'evidenceQuality' AS evidence FROM v20_ai_analysis_history WHERE session=$1 AND official->'evidenceQuality' IS NOT NULL ORDER BY created_at DESC LIMIT 1000",[session]);
  for(const row of r.rows){
   for(const sym of ['BTC','ETH']){
    const q=row.evidence?.perSymbol?.[sym]||{};
@@ -115,7 +129,7 @@ async function carriedUncertainty(db,session,ledger){
 async function unverifiedOrigins(db,session,ledger){
  const wanted=ledger.filter(s=>['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED'].includes(s.status));
  if(!wanted.length)return {};
- const r=await db.query("SELECT official->'evidenceQuality' AS evidence FROM v17_ai_analyses WHERE session=$1 AND official->'evidenceQuality' IS NOT NULL ORDER BY created_at DESC LIMIT 1000",[session]);
+ const r=await db.query("SELECT official->'evidenceQuality' AS evidence FROM v20_ai_analysis_history WHERE session=$1 AND official->'evidenceQuality' IS NOT NULL ORDER BY created_at DESC LIMIT 1000",[session]);
  // The failed 11:02→11:31 history must be retried even if the status still
  // says ENTERED. A new verified snapshot does not erase missing past minutes.
  return earliestUnknownGapOrigins(wanted,r.rows);
@@ -241,11 +255,11 @@ async function reconcileVerifiedPricePath(db,session,raw,snapshot,previousSnapsh
 }
 
 async function selectOfficial(db,session,snapshotSha,stateSha){
- const q=await db.query('SELECT official FROM v17_ai_analyses WHERE session=$1 AND snapshot_sha=$2 AND (before_sha=$3 OR after_sha=$3) AND policy_sha=$4 ORDER BY created_at ASC LIMIT 1',[session,snapshotSha,stateSha,OFFICIAL_POLICY.sha256]);
+ const q=await db.query('SELECT official FROM v20_ai_analysis_history WHERE session=$1 AND snapshot_sha=$2 AND (before_sha=$3 OR after_sha=$3) AND policy_sha=$4 ORDER BY created_at ASC LIMIT 1',[session,snapshotSha,stateSha,OFFICIAL_POLICY.sha256]);
  return q.rows[0]?.official||null;
 }
 async function latestOfficialSnapshot(db,session){
- const r=await db.query("SELECT official->'snapshot' AS snapshot FROM v17_ai_analyses WHERE session=$1 ORDER BY created_at DESC LIMIT 1",[session]);
+ const r=await db.query("SELECT official->'snapshot' AS snapshot FROM v20_ai_analysis_history WHERE session=$1 ORDER BY created_at DESC LIMIT 1",[session]);
  return r.rows[0]?.snapshot||null;
 }
 async function beginAnalysis(body){
@@ -322,8 +336,9 @@ async function publishAnalysis(body){
   const official={
    engine:VERSION,
    status:'OFFICIAL_STORED',
-   origin:'CHATGPT_AI_APPLIED_FULL_VERBATIM_V19_PROMPT',
+   origin:'CHATGPT_WITH_V20_OBSERVED_MATHEMATICAL_CONTEXT',
    notAutomatedServerTradeModel:true,
+   quantEngine:quantEngineStatus(),quantContext:verified.quantContext,quantAudit:verified.analysis.quantAudit,researchProposals:verified.researchProposals,
    policy:OFFICIAL_POLICY,
    snapshot:shot,
    evidenceQuality:verified.evidenceQuality,
@@ -348,7 +363,7 @@ async function publishAnalysis(body){
    events,
    caveat:'The same snapshot and same ledger state replays this official result. AI analytical correctness and complete semantic compliance require independent review; no exchange orders are placed.'
   };
-  await client.query('INSERT INTO v17_ai_analyses(session,snapshot_sha,before_sha,after_sha,policy_sha,raw,official) VALUES($1,$2,$3,$4,$5,$6,$7)',[session,shot.sha256,before,after,OFFICIAL_POLICY.sha256,raw,JSON.stringify(official)]);
+  await client.query('INSERT INTO v20_ai_analyses(session,snapshot_sha,before_sha,after_sha,policy_sha,raw,official) VALUES($1,$2,$3,$4,$5,$6,$7)',[session,shot.sha256,before,after,OFFICIAL_POLICY.sha256,raw,JSON.stringify(official)]);
   await client.query('COMMIT');return {status:'OFFICIAL_STORED',officialDecision:official,sameState:true};
  }catch(e){try{await client.query('ROLLBACK');}catch{}throw e;}finally{client.release();}
 }
@@ -429,7 +444,7 @@ export async function closeTwoUserAttestedTp3(args={}){
    'SELECT raw FROM v17_ai_prepared_snapshots WHERE session=$1 AND snapshot_sha=$2 LIMIT 1',
    [session,sha]);
   const fallback=saved.rows.length?saved:await client.query(
-   'SELECT raw FROM v17_ai_analyses WHERE session=$1 AND snapshot_sha=$2 ORDER BY created_at DESC LIMIT 1',
+   'SELECT raw FROM v20_ai_analysis_history WHERE session=$1 AND snapshot_sha=$2 ORDER BY created_at DESC LIMIT 1',
    [session,sha]);
   if(fallback.rows.length!==1)throw Error('ATTEST_IMMUTABLE_SOURCE_SNAPSHOT_NOT_FOUND');
   const now=await client.query("SELECT to_char(NOW() AT TIME ZONE 'Asia/Seoul','YYYY-MM-DD HH24:MI:SS') AS at");
@@ -479,19 +494,19 @@ export async function resetOfficialLedger(args={}) {
   const backup=await client.query(String.raw`SELECT
    (SELECT COALESCE(jsonb_agg(to_jsonb(s) ORDER BY s.id),'[]'::jsonb) FROM v17_ai_signals s WHERE s.session=$1) AS signals,
    (SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY e.seq),'[]'::jsonb) FROM v17_ai_events e WHERE e.session=$1) AS events,
-   (SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY a.created_at),'[]'::jsonb) FROM v17_ai_analyses a WHERE a.session=$1) AS analyses`,[session]);
+   (SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY a.created_at),'[]'::jsonb) FROM v20_ai_analysis_history a WHERE a.session=$1) AS analyses`,[session]);
   const copy=backup.rows[0];
   const resetId='V17_RESET_20261113_'+before.slice(0,16);
   await client.query('INSERT INTO v17_ai_reset_archives(reset_id,session,before_ledger_sha,signals,events,analyses) VALUES($1,$2,$3,$4,$5,$6)',
    [resetId,session,before,JSON.stringify(copy.signals),JSON.stringify(copy.events),JSON.stringify(copy.analyses)]);
-  const analyses=await client.query('DELETE FROM v17_ai_analyses WHERE session=$1',[session]);
+  const analyses=await client.query('DELETE FROM v20_ai_analysis_history WHERE session=$1',[session]);
   const events=await client.query('DELETE FROM v17_ai_events WHERE session=$1',[session]);
   const signals=await client.query('DELETE FROM v17_ai_signals WHERE session=$1',[session]);
   const after=await readLedger(client,session);
   const remain=await client.query(String.raw`SELECT
    (SELECT COUNT(*)::integer FROM v17_ai_signals WHERE session=$1) AS signals,
    (SELECT COUNT(*)::integer FROM v17_ai_events WHERE session=$1) AS events,
-   (SELECT COUNT(*)::integer FROM v17_ai_analyses WHERE session=$1) AS analyses`,[session]);
+   (SELECT COUNT(*)::integer FROM v20_ai_analysis_history WHERE session=$1) AS analyses`,[session]);
   if(after.length||Object.values(remain.rows[0]).some(x=>x!==0))throw Error('RESET_VERIFICATION_NONEMPTY_ROLLBACK');
   await client.query('COMMIT');
   return {status:'OFFICIAL_FULL_RESET',session,archiveId:resetId,archivedCounts:{signals:copy.signals.length,events:copy.events.length,analyses:copy.analyses.length},
@@ -549,49 +564,51 @@ export async function closeAllUserShorts(args={}){
 }
 
 async function ledgerView(args){const session=sessionId(args.session||'OFFICIAL_V17'),db=await database();
- const [ledger,snapshot,note]=await Promise.all([readLedger(db,session),latestOfficialSnapshot(db,session),db.query("SELECT official->'marketOutlook' AS outlook, official->'dynamicManagement' AS management FROM v17_ai_analyses WHERE session=$1 ORDER BY created_at DESC LIMIT 1",[session])]);
- return {session,policy:OFFICIAL_POLICY,ledgerSha256:ledgerHash(ledger),signals:ledger,
+ const [ledger,snapshot,note]=await Promise.all([readLedger(db,session),latestOfficialSnapshot(db,session),db.query("SELECT official->'marketOutlook' AS outlook, official->'dynamicManagement' AS management FROM v20_ai_analysis_history WHERE session=$1 ORDER BY created_at DESC LIMIT 1",[session])]);
+ return {session,policy:OFFICIAL_POLICY,quantEngine:quantEngineStatus(),ledgerSha256:ledgerHash(ledger),signals:ledger,
   signalView:buildSignalView({ledger,snapshot,outlook:note.rows[0]?.outlook||null,management:note.rows[0]?.management||null}),userOutputRule:SIGNAL_TABLE_OUTPUT_RULE,
   events:(await db.query('SELECT id,event,at_kst FROM v17_ai_events WHERE session=$1 ORDER BY seq DESC LIMIT 500',[session])).rows};}
 // Read-only audit trail. The official signal/event ledger is never rewritten.
 async function decisionHistory(args={}){
  const session=sessionId(args.session||'OFFICIAL_V17'),db=await database();
  const limit=Math.max(1,Math.min(100,Number.isSafeInteger(args.limit)?args.limit:30));
- const r=await db.query("SELECT created_at, official->'snapshot' AS snapshot, official->'conclusions' AS conclusions, official->'directions' AS directions, official->'newSignals' AS new_signals, official->'events' AS events FROM v17_ai_analyses WHERE session=$1 ORDER BY created_at DESC LIMIT $2",[session,limit]);
+ const r=await db.query("SELECT created_at, official->'snapshot' AS snapshot, official->'conclusions' AS conclusions, official->'directions' AS directions, official->'newSignals' AS new_signals, official->'events' AS events FROM v20_ai_analysis_history WHERE session=$1 ORDER BY created_at DESC LIMIT $2",[session,limit]);
  return {session,limit,officialHistory:r.rows.map(x=>({createdAt:x.created_at,snapshot:x.snapshot,conclusions:x.conclusions,
   directions:args.includeDirections===true?x.directions:undefined,newSignals:x.new_signals,events:x.events})),
   warning:'Decisions were made as of each snapshot. A later favorable price move does not retroactively prove an earlier candidate had been eligible.'};
 }
-async function showPolicy(){return {engine:VERSION,policy:sourcePolicy(),instruction:'Use every V1.9 section 0–31, appendices A and B, and final execution instruction. Never rewrite older V1.7 signals.'};}
-const requiredSchema={type:'object',properties:{raw:{type:'string',description:'Verbatim BTC and ETH snapshots, as pasted by the user'},session:{type:'string',description:'Use shared OFFICIAL_V17 for a single official signal ledger. Separate arbitrary sessions must not import old signals.'},cachedPolicySha256:{type:'string',description:'OPTIONAL SPEED OPTIMIZATION. Supply exact 64-character V1.9 SHA-256 ONLY when the complete unchanged 1263-line original prompt has ALREADY been read in this same conversation. The server then omits only the repeated verbatim policy text; active ledger, path evidence, mandatory four directions, full 16 checks/35 clauses and official publication remain unchanged. Never invent a hash. Wrong hashes safely return full policy.'},debugTimings:{type:'boolean',description:'Optional read-only server timing diagnostic. Does not affect trade decisions or ledger.'}},required:['raw']};
+async function showPolicy(){return {engine:VERSION,policy:sourcePolicy(),instruction:'Use every V2.0 section 0–43, appendices A and B, and final execution instruction. Never rewrite older V1.7 signals.'};}
+const requiredSchema={type:'object',properties:{raw:{type:'string',description:'Verbatim BTC and ETH snapshots, as pasted by the user'},session:{type:'string',description:'Use shared OFFICIAL_V17 for a single official signal ledger. Separate arbitrary sessions must not import old signals.'},cachedPolicySha256:{type:'string',description:'OPTIONAL SPEED OPTIMIZATION. Supply exact 64-character V2.0 SHA-256 ONLY when the complete unchanged complete original prompt has ALREADY been read in this same conversation. The server then omits only the repeated verbatim policy text; active ledger, path evidence, mandatory four directions, full 16 checks/47 clauses and official publication remain unchanged. Never invent a hash. Wrong hashes safely return full policy.'},debugTimings:{type:'boolean',description:'Optional read-only server timing diagnostic. Does not affect trade decisions or ledger.'}},required:['raw']};
 const tools=[
- {name:'run_official_btc_eth_snapshot',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'FIRST STEP (MANDATORY). Fetch entire unchanged V1.9 source, official ledger and evidenceQuality. For faster repeated analyses in the SAME conversation only, pass cachedPolicySha256 equal to the exactly previously read full 1263-line prompt hash: this omits solely duplicate policy text while retaining full ledger/evidence and ALL original rules, decisions, A-E, 16 checks, 35 clauses and publication validation. If no full prompt has been read in this conversation omit cachedPolicySha256 and receive ENTIRE verbatim source. If the cached hash mismatches the server sends the full source. The initial run response already includes full ledger, so do NOT make a redundant read_official_btc_eth_ledger call unless troubleshooting the ledger. OPPORTUNITY-FIRST: use the returned opportunityContext for BOTH BTC/ETH and BOTH LONG/SHORT. It contains explicit candidate prices for NOW, EMA/VWAP pullback, structure retest and breakout across several stop scenarios. When current-price RR is poor, search a better source-anchored near entry or another direction/timeframe before deciding HOLD; do not simply ban countertrend trades or opposite CVD, because verified TP3 winners also had temporary opposing flow. These are numerical candidates only, not official signals or measured win probabilities; never fabricate confirmed fill/retest. Do not ignore returned reversalScreen: when BTC or ETH LONG/SHORT has status REVIEW_REQUIRED, run an independent early-turnaround A-E comparison and require concrete structural/risk evidence to HOLD rather than higher-timeframe trend disagreement alone. This preliminary screen never issues a formal trade. No server-side trade-model shortcuts. If any PENDING signal exists, use the returned autoSwitchContext from THIS snapshot and provide numeric analysis.autoSwitchAudit for each pending ID: recompute current-price and nearer-source-anchored candidate entry/SL/TP1-3 and TP2 RR, or document the missing structural leg with an observed source anchor. CVD LOW alone is not a sufficient HOLD rejection. Include carried historical unknown periods. If OFFICIAL_REPLAY show officialDecision.reportMarkdown verbatim. Analyze current LONG/SHORT and A-E independently of unknown old trade outcome; preserve and report historicalUnknownIds separately, with no guessed fills or flat positions. Old pending can be quarantined with documented UNVERIFIED event before prospective replacement if it cannot be resolved. AUTO-SWITCH: on each latest snapshot compare existing KEEP, old pending redesign (terminate old then mint complete new ID), same-direction ADD_ON, opposite-side PENDING switch candidate, verified EARLY_EXIT or REVERSE_EXIT, and prospective REVISION. Same-direction and opposite pending can coexist with a proven entered trade when evidence and metadata meet policy; never claim both sides entered. Publish via full original V1.9 analysis. Never bypass risk/exposure checks.',inputSchema:requiredSchema},
- {name:'get_original_v17_full_prompt',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Fetch EXACT full 1263-line user-supplied V1.9 source, CRLF and original punctuation preserved. Must be the sole authoritative strategy; no new indicator thresholds, no removed functionality.',inputSchema:{type:'object',properties:{},additionalProperties:false}},
- {name:'publish_official_v17_analysis',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'SECOND STEP after NEEDS_AI_ANALYSIS. Existing confirmed price-touch and stop/TP event checks still mandatory. IMPORTANT GAP FIX: unknown historical signal outcome does NOT force current BTC/ETH conclusion=UNVERIFIED or block fresh independent market analysis. Include analysis.historicalUncertainty.{BTC|ETH}={unresolvedIds:[...],evidence:string} for each affected symbol; do not claim old position closed or account flat. To replace old PENDING with unresolved gap, include an old-ID UNVERIFIED quarantine event (uncertaintyScope,priorConfirmedState,marketReassessment, at current snapshot time) in same atomic submission, and new formal plan historicalExposureUnknownIds, historicalExposureRiskDisclosure, independentCurrentMarketEvidence. New plan is an analytical signal, NOT exchange account position certainty. An old ENTERED can coexist with separately justified same-direction ADD_ON or opposite PENDING switch plan; new signal must identify parentSignalId, relationToExisting SAME_DIRECTION_ADD_ON with addOnRiskEvidence and existingPositionRiskEvidence, OR OPPOSITE_PENDING with transitionOnTouchEvidence and existingPositionRiskEvidence. Old proven ENTERED cannot be silently replaced or counted flat; any opposite ENTERED event needs all opposed positions to have verified exit events first. REVERSE_EXIT/EARLY_EXIT requires strongCounterEvidence, structureEvidence, flowEvidence, contextEvidence, and outcomeUnverified=true if no verified entry/exit prices; actual PnL requires verifiedEntryPrice and entryPriceEvidence matching calculated PnL. REVISION event requires observedPrice=current snapshot, new plan stop/TP1/TP2/TP3, immutable previous achieved milestones and tighter effective stop; revised plan is read from ledger on following runs. Never retroactively cancel or claim TP/SL in gaps. Four directions A-E, original V1.9 unchanged, original stop/TP unchanged. If reversalScreen returned REVIEW_REQUIRED, include analysis.reversalReview for the matching symbol and side: ISSUE_NOW, ISSUE_PENDING, or HOLD with nontrend structural/risk blocker and opposing evidence; ISSUE requires an otherwise fully valid formal reversal signal. For live PENDING with current ATR/EMA structure, supply analysis.autoSwitchAudit.BTC/ETH as described in run response requirements, with each old ID, observed distance in ATR/percent, numeric immediate+near alternatives, source anchors, stop/TP/RR and quantified KEEP rejection or atomic REDESIGN. Prose-only HOLD or LOW CVD-only justification is rejected. Supply exact hashes and full 16-step+clause audit.',inputSchema:{type:'object',properties:{raw:{type:'string'},session:{type:'string'},policySha256:{type:'string'},snapshotSha256:{type:'string'},beforeLedgerSha256:{type:'string'},decisionKey:{type:'string'},analysis:{type:'object',description:'Full V1.9 decision: reportMarkdown; directions BTC_LONG/BTC_SHORT/ETH_LONG/ETH_SHORT each marketEvidence,counterEvidence,alternatives A-E; coupling; checks 1..16; clauses 0..26,A,B,FINAL; audit20; conclusions BTC/ETH {decision=LONG|SHORT|HOLD|MANAGE|UNVERIFIED,evidence}; historicalUncertainty (only when affected) {BTC|ETH:{unresolvedIds:[old IDs],evidence:string}}; newSignals[]; events[] with prior PENDING UNVERIFIED quarantine if a gap blocks historical state. Keep current decisions independent of unknown outcomes. Use parentSignalId and relationToExisting for add-on or opposite pending. Event ordering is chronological and exit must precede opposed ENTERED; revisions require observedPrice matching the current snapshot.'}},required:['raw','policySha256','snapshotSha256','beforeLedgerSha256','decisionKey','analysis']}},
- {name:'read_official_btc_eth_ledger',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Retrieve NEW V1.9 source-exact official signal ledger and chronological immutable events for this session. Previous noncompliant legacy companion signals remain isolated, not silently imported.',inputSchema:{type:'object',properties:{session:{type:'string'}},required:[]}},
+ {name:'run_official_btc_eth_snapshot',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'FIRST STEP (MANDATORY). Fetch entire unchanged V2.0 source, official ledger and evidenceQuality. For faster repeated analyses in the SAME conversation only, pass cachedPolicySha256 equal to the exactly previously read full complete prompt hash: this omits solely duplicate policy text while retaining full ledger/evidence and ALL original rules, decisions, A-E, 16 checks, 47 clauses and publication validation. If no full prompt has been read in this conversation omit cachedPolicySha256 and receive ENTIRE verbatim source. If the cached hash mismatches the server sends the full source. The initial run response already includes full ledger, so do NOT make a redundant read_official_btc_eth_ledger call unless troubleshooting the ledger. OPPORTUNITY-FIRST: use the returned opportunityContext for BOTH BTC/ETH and BOTH LONG/SHORT. It contains explicit candidate prices for NOW, EMA/VWAP pullback, structure retest and breakout across several stop scenarios. When current-price RR is poor, search a better source-anchored near entry or another direction/timeframe before deciding HOLD; do not simply ban countertrend trades or opposite CVD, because verified TP3 winners also had temporary opposing flow. These are numerical candidates only, not official signals or measured win probabilities; never fabricate confirmed fill/retest. Do not ignore returned reversalScreen: when BTC or ETH LONG/SHORT has status REVIEW_REQUIRED, run an independent early-turnaround A-E comparison and require concrete structural/risk evidence to HOLD rather than higher-timeframe trend disagreement alone. This preliminary screen never issues a formal trade. No server-side trade-model shortcuts. If any PENDING signal exists, use the returned autoSwitchContext from THIS snapshot and provide numeric analysis.autoSwitchAudit for each pending ID: recompute current-price and nearer-source-anchored candidate entry/SL/TP1-3 and TP2 RR, or document the missing structural leg with an observed source anchor. CVD LOW alone is not a sufficient HOLD rejection. Include carried historical unknown periods. If OFFICIAL_REPLAY show officialDecision.reportMarkdown verbatim. Analyze current LONG/SHORT and A-E independently of unknown old trade outcome; preserve and report historicalUnknownIds separately, with no guessed fills or flat positions. Old pending can be quarantined with documented UNVERIFIED event before prospective replacement if it cannot be resolved. AUTO-SWITCH: on each latest snapshot compare existing KEEP, old pending redesign (terminate old then mint complete new ID), same-direction ADD_ON, opposite-side PENDING switch candidate, verified EARLY_EXIT or REVERSE_EXIT, and prospective REVISION. Same-direction and opposite pending can coexist with a proven entered trade when evidence and metadata meet policy; never claim both sides entered. Publish via full original V2.0 analysis. Never bypass risk/exposure checks.',inputSchema:requiredSchema},
+ {name:'get_original_v17_full_prompt',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Fetch EXACT full complete user-supplied V2.0 source, CRLF and original punctuation preserved. Must be the sole authoritative strategy; no new indicator thresholds, no removed functionality.',inputSchema:{type:'object',properties:{},additionalProperties:false}},
+ {name:'publish_official_v17_analysis',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'SECOND STEP after NEEDS_AI_ANALYSIS. Existing confirmed price-touch and stop/TP event checks still mandatory. IMPORTANT GAP FIX: unknown historical signal outcome does NOT force current BTC/ETH conclusion=UNVERIFIED or block fresh independent market analysis. Include analysis.historicalUncertainty.{BTC|ETH}={unresolvedIds:[...],evidence:string} for each affected symbol; do not claim old position closed or account flat. To replace old PENDING with unresolved gap, include an old-ID UNVERIFIED quarantine event (uncertaintyScope,priorConfirmedState,marketReassessment, at current snapshot time) in same atomic submission, and new formal plan historicalExposureUnknownIds, historicalExposureRiskDisclosure, independentCurrentMarketEvidence. New plan is an analytical signal, NOT exchange account position certainty. An old ENTERED can coexist with separately justified same-direction ADD_ON or opposite PENDING switch plan; new signal must identify parentSignalId, relationToExisting SAME_DIRECTION_ADD_ON with addOnRiskEvidence and existingPositionRiskEvidence, OR OPPOSITE_PENDING with transitionOnTouchEvidence and existingPositionRiskEvidence. Old proven ENTERED cannot be silently replaced or counted flat; any opposite ENTERED event needs all opposed positions to have verified exit events first. REVERSE_EXIT/EARLY_EXIT requires strongCounterEvidence, structureEvidence, flowEvidence, contextEvidence, and outcomeUnverified=true if no verified entry/exit prices; actual PnL requires verifiedEntryPrice and entryPriceEvidence matching calculated PnL. REVISION event requires observedPrice=current snapshot, new plan stop/TP1/TP2/TP3, immutable previous achieved milestones and tighter effective stop; revised plan is read from ledger on following runs. Never retroactively cancel or claim TP/SL in gaps. Four directions A-E, original V2.0 unchanged, original stop/TP unchanged. If reversalScreen returned REVIEW_REQUIRED, include analysis.reversalReview for the matching symbol and side: ISSUE_NOW, ISSUE_PENDING, or HOLD with nontrend structural/risk blocker and opposing evidence; ISSUE requires an otherwise fully valid formal reversal signal. For live PENDING with current ATR/EMA structure, supply analysis.autoSwitchAudit.BTC/ETH as described in run response requirements, with each old ID, observed distance in ATR/percent, numeric immediate+near alternatives, source anchors, stop/TP/RR and quantified KEEP rejection or atomic REDESIGN. Prose-only HOLD or LOW CVD-only justification is rejected. Supply exact hashes and full 16-step+clause audit.',inputSchema:{type:'object',properties:{raw:{type:'string'},session:{type:'string'},policySha256:{type:'string'},snapshotSha256:{type:'string'},beforeLedgerSha256:{type:'string'},decisionKey:{type:'string'},analysis:{type:'object',description:'Full V2.0 decision: reportMarkdown; directions BTC_LONG/BTC_SHORT/ETH_LONG/ETH_SHORT each marketEvidence,counterEvidence,alternatives A-E; coupling; checks 1..16; clauses 0..26,A,B,FINAL; audit20; conclusions BTC/ETH {decision=LONG|SHORT|HOLD|MANAGE|UNVERIFIED,evidence}; historicalUncertainty (only when affected) {BTC|ETH:{unresolvedIds:[old IDs],evidence:string}}; newSignals[]; events[] with prior PENDING UNVERIFIED quarantine if a gap blocks historical state. Keep current decisions independent of unknown outcomes. Use parentSignalId and relationToExisting for add-on or opposite pending. Event ordering is chronological and exit must precede opposed ENTERED; revisions require observedPrice matching the current snapshot.'}},required:['raw','policySha256','snapshotSha256','beforeLedgerSha256','decisionKey','analysis']}},
+ {name:'read_official_btc_eth_ledger',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Retrieve NEW V2.0 source-exact official signal ledger and chronological immutable events for this session. Previous noncompliant legacy companion signals remain isolated, not silently imported.',inputSchema:{type:'object',properties:{session:{type:'string'}},required:[]}},
  {name:'read_official_v17_decision_history',securitySchemes:[{type:'oauth2',scopes:['signals:read']}],description:'Read-only chronological OFFICIAL_V17 AI decision history for missed-opportunity review. Never convert hypothetical candidates to historical trades or alter immutable signal outcomes.',inputSchema:{type:'object',properties:{session:{type:'string'},limit:{type:'integer',minimum:1,maximum:100},includeDirections:{type:'boolean'}},required:[]}},
- {name:'register_formal_btc_eth_signal',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'COMPATIBILITY path for installed plugins: call run_official_btc_eth_snapshot ONCE with exact user raw. Then submit signal={kind:V17_OFFICIAL_SUBMISSION,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis} WITHOUT raw; server recovers the identical prepared raw securely by session plus SHA. Older raw submissions remain supported. Standalone signal writing is forbidden. Include autoSwitchAudit for live pending entries. When reversalScreen reports REVIEW_REQUIRED include analysis.reversalReview with source-based ISSUED/HOLD justification and a V1.9-compliant reversal newSignal for ISSUE_NOW/PENDING. For explicit user-directed closure of all existing BTC/ETH SHORT analytical signals, use register_formal_btc_eth_signal signal={kind:V17_USER_CLOSE_ALL_EXISTING_SHORT_SIGNALS,confirmation:USER_DIRECTS_CLOSE_ALL_EXISTING_BTC_ETH_SHORT_SIGNALS,expectedLedgerSha256:<read ledger hash>,signalIds:<exact current active SHORT IDs>}; this is administrative tracking closure and MUST NOT claim any exchange account order, fill, PnL or historical trade exit. For explicit user-confirmed account nonentry only, use signal.kind=V17_USER_ATTESTED_NO_ENTRY_TWO_ONLY with confirmation=USER_CONFIRMS_BTC_AND_ETH_NO_ACCOUNT_ENTRY, both exact 2026-11-14 signal IDs and expectedLedgerSha256 from ledger view; historical price-touch remains unverified.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
+ {name:'register_formal_btc_eth_signal',securitySchemes:[{type:'oauth2',scopes:['signals:write']}],description:'COMPATIBILITY path for installed plugins: call run_official_btc_eth_snapshot ONCE with exact user raw. Then submit signal={kind:V17_OFFICIAL_SUBMISSION,policySha256,snapshotSha256,beforeLedgerSha256,decisionKey,analysis} WITHOUT raw; server recovers the identical prepared raw securely by session plus SHA. Older raw submissions remain supported. Standalone signal writing is forbidden. Include autoSwitchAudit for live pending entries. When reversalScreen reports REVIEW_REQUIRED include analysis.reversalReview with source-based ISSUED/HOLD justification and a V2.0-compliant reversal newSignal for ISSUE_NOW/PENDING. For explicit user-directed closure of all existing BTC/ETH SHORT analytical signals, use register_formal_btc_eth_signal signal={kind:V17_USER_CLOSE_ALL_EXISTING_SHORT_SIGNALS,confirmation:USER_DIRECTS_CLOSE_ALL_EXISTING_BTC_ETH_SHORT_SIGNALS,expectedLedgerSha256:<read ledger hash>,signalIds:<exact current active SHORT IDs>}; this is administrative tracking closure and MUST NOT claim any exchange account order, fill, PnL or historical trade exit. For explicit user-confirmed account nonentry only, use signal.kind=V17_USER_ATTESTED_NO_ENTRY_TWO_ONLY with confirmation=USER_CONFIRMS_BTC_AND_ETH_NO_ACCOUNT_ENTRY, both exact 2026-11-14 signal IDs and expectedLedgerSha256 from ledger view; historical price-touch remains unverified.',inputSchema:{type:'object',properties:{session:{type:'string'},signal:{type:'object'}},required:['signal']}}
 ];
-// Canonical V1.9 tool aliases. Historical V1.7 tool names are retained for cached clients.
+// Canonical V2.0 tool aliases. Historical V1.7 tool names are retained for cached clients.
 for(const [oldName,newName,desc] of [
- ['get_original_v17_full_prompt','get_original_v18_full_prompt','Fetch exact full latest V1.9 policy.'],
- ['publish_official_v17_analysis','publish_official_v18_analysis','Publish complete verified V1.9 analysis including dynamicManagement and clauses 0–31.'],
- ['read_official_v17_decision_history','read_official_v18_decision_history','Read preserved official historical decisions across V1.7 and V1.9.']]){
+ ['get_original_v17_full_prompt','get_original_v18_full_prompt','Fetch exact full latest V2.0 policy.'],
+ ['publish_official_v17_analysis','publish_official_v18_analysis','Publish complete verified V2.0 analysis including dynamicManagement and clauses 0–43.'],
+ ['read_official_v17_decision_history','read_official_v18_decision_history','Read preserved official historical decisions across V1.7 and V2.0.']]){
  const old=tools.find(t=>t.name===oldName);if(old)tools.push({...old,name:newName,description:desc});
 }
-// V1.9 official aliases, old v17/v18 aliases preserved.
+// V2.0 official aliases, old v17/v18 aliases preserved.
 for(const [oldName,newName,description] of [
- ['get_original_v17_full_prompt','get_original_v19_full_prompt','Exact complete V1.9 policy.'],
- ['publish_official_v17_analysis','publish_official_v19_analysis','V1.9 regime audited official submission.'],
+ ['get_original_v17_full_prompt','get_original_v20_full_prompt','Complete V2.0 mathematical hypothesis and self-revision policy.'],
+ ['publish_official_v17_analysis','publish_official_v20_analysis','Publish V2.0 with mandatory actual quantContext hash and quantAudit.'],
+ ['get_original_v17_full_prompt','get_original_v19_full_prompt','Exact complete V2.0 policy.'],
+ ['publish_official_v17_analysis','publish_official_v19_analysis','V2.0 regime audited official submission.'],
  ['read_official_v17_decision_history','read_official_v19_decision_history','Preserved past decision ledger.']]){
  const old=tools.find(t=>t.name===oldName);
  if(old)tools.push({...old,name:newName,description});
 }
-// This is a user-facing output preference only; core V1.9 analysis,
+// This is a user-facing output preference only; core V2.0 analysis,
 // validator, safety audits, and immutable signal state are unchanged.
 for(const t of tools){
  if(['run_official_btc_eth_snapshot','publish_official_v17_analysis','register_formal_btc_eth_signal','read_official_btc_eth_ledger'].includes(t.name)){
-  const display='USER DISPLAY CONTRACT FOR ALL CHATS: show the ENTIRE officialDecision.signalView.markdown (or top-level signalView.markdown). It ALWAYS contains BTC and ETH in fixed horizontal columns, including 진입 시그널 없음 for a coin with no active formal signal, plus separate concise BTC/ETH observed market situations and conditional expected paths with opposing scenarios. The outlook is stored official analysis.marketOutlook, not an invented backfilled forecast. Never assert guaranteed returns or live account fills. Append genuine signalView.changeNotices for confirmed ledger events. V1.9 analytical logic and 35-clause verification remain mandatory. ';
+  const display='USER DISPLAY CONTRACT FOR ALL CHATS: show the ENTIRE officialDecision.signalView.markdown (or top-level signalView.markdown). It ALWAYS contains BTC and ETH in fixed horizontal columns, including 진입 시그널 없음 for a coin with no active formal signal, plus separate concise BTC/ETH observed market situations and conditional expected paths with opposing scenarios. The outlook is stored official analysis.marketOutlook, not an invented backfilled forecast. Never assert guaranteed returns or live account fills. Append genuine signalView.changeNotices for confirmed ledger events. V2.0 analytical logic and 47-clause verification remain mandatory. ';
   t.description=display+t.description.replace('If OFFICIAL_REPLAY show officialDecision.reportMarkdown verbatim.','If OFFICIAL_REPLAY show officialDecision.signalView.markdown including both BTC and ETH columns and saved outlook commentary.');
  }
 }
@@ -604,13 +621,13 @@ async function mcp(req,res,principal){
  if(b.method!=='tools/call')return json(res,200,{jsonrpc:'2.0',id,error:{code:-32601,message:'Unknown method'}});
  const n=b.params?.name,args=b.params?.arguments||{};
  const granted=String(principal?.scope||'').split(/\s+/);
- if((n==='publish_official_v17_analysis'||n==='publish_official_v18_analysis'||n==='publish_official_v19_analysis'||n==='register_formal_btc_eth_signal')&&!granted.includes('signals:write'))return json(res,200,{jsonrpc:'2.0',id,result:{content:[{type:'text',text:'OAUTH_SCOPE_SIGNALS_WRITE_REQUIRED'}],isError:true}});
+ if((n==='publish_official_v17_analysis'||n==='publish_official_v18_analysis'||n==='publish_official_v19_analysis'||n==='publish_official_v20_analysis'||n==='register_formal_btc_eth_signal')&&!granted.includes('signals:write'))return json(res,200,{jsonrpc:'2.0',id,result:{content:[{type:'text',text:'OAUTH_SCOPE_SIGNALS_WRITE_REQUIRED'}],isError:true}});
  if(!granted.includes('signals:read'))return json(res,200,{jsonrpc:'2.0',id,result:{content:[{type:'text',text:'OAUTH_SCOPE_SIGNALS_READ_REQUIRED'}],isError:true}});
  try{
   let result;
   if(n==='run_official_btc_eth_snapshot')result=await beginAnalysis(args);
-  else if((n==='get_original_v17_full_prompt'||n==='get_original_v18_full_prompt'||n==='get_original_v19_full_prompt'))result=await showPolicy();
-  else if((n==='publish_official_v17_analysis'||n==='publish_official_v18_analysis'))result=await publishAnalysis(args);
+  else if((n==='get_original_v17_full_prompt'||n==='get_original_v18_full_prompt'||n==='get_original_v19_full_prompt'||n==='get_original_v20_full_prompt'))result=await showPolicy();
+  else if((n==='publish_official_v17_analysis'||n==='publish_official_v18_analysis'||n==='publish_official_v19_analysis'||n==='publish_official_v20_analysis'))result=await publishAnalysis(args);
   else if(n==='read_official_btc_eth_ledger')result=await ledgerView(args);
   else if((n==='read_official_v17_decision_history'||n==='read_official_v18_decision_history'||n==='read_official_v19_decision_history'))result=await decisionHistory(args);
   else if(n==='register_formal_btc_eth_signal'){
@@ -619,7 +636,7 @@ async function mcp(req,res,principal){
    if(args.signal?.kind==='V17_USER_ATTESTED_TP3_TWO_ONLY'){
     result=await closeTwoUserAttestedTp3({...args.signal,session:args.session||args.signal.session});
    }else if(args.signal?.kind==='V17_RESET_ALL_OFFICIAL'){
-    result=await resetOfficialLedger({...args.signal,session:args.session||args.signal.session});
+    throw Error('V20_OFFICIAL_LEDGER_RESET_DISABLED');
    }else if(args.signal?.kind===USER_NO_ENTRY_KIND){
     result=await attestUserNoAccountEntry({...args.signal,session:args.session||args.signal.session});
    }else if(args.signal?.kind===USER_CLOSE_SHORTS_KIND){
@@ -635,10 +652,10 @@ async function mcp(req,res,principal){
   return json(res,200,{jsonrpc:'2.0',id,result:{content:[{type:'text',text:JSON.stringify(result)}],isError:false}});
  }catch(e){return json(res,200,{jsonrpc:'2.0',id,result:{content:[{type:'text',text:String(e.message||e)}],isError:true}});}
 }
-const webPage=`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>V1.7 공식 분석 서버</title><style>body{font:16px/1.7 system-ui,sans-serif;max-width:680px;margin:8vh auto;padding:20px;background:#0b1220;color:#eee}code{overflow-wrap:anywhere}a{color:#93c5fd}</style></head><body><h2>BTC·ETH MASTER PROMPT V1.7 공식 분석 서버</h2><p>이 서버는 원본 V1.7 전체를 그대로 전달하고, AI가 수행한 공식 분석을 최초 1회 저장해 다른 대화창에서 조회합니다.</p><p><strong>주의:</strong> 서버 자체는 매매 방향을 임의 계산하지 않습니다. ChatGPT 플러그인에서 자료를 전달하고 원문 기준 분석을 완료한 뒤 저장해야 공식 결과가 생성됩니다.</p><p>연결 주소: <code>/mcp</code></p><p>원본 SHA-256: <code>${OFFICIAL_POLICY.sha256}</code></p></body></html>`;
+const webPage=`<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>V2.0 수학적 분석 서버</title><style>body{font:16px/1.7 system-ui,sans-serif;max-width:680px;margin:8vh auto;padding:20px;background:#0b1220;color:#eee}code{overflow-wrap:anywhere}a{color:#93c5fd}</style></head><body><h2>BTC·ETH MASTER PROMPT V2.0 수학적 분석 서버</h2><p>이 서버는 V2.0 전문과 실제 수학 컨텍스트를 전달하고, AI가 수행한 공식 분석을 최초 1회 저장해 다른 대화창에서 조회합니다.</p><p><strong>주의:</strong> 서버 자체는 매매 방향을 임의 계산하지 않습니다. ChatGPT 플러그인에서 자료를 전달하고 수학적 경쟁 가설과 반증 분석을 완료한 뒤 저장해야 공식 결과가 생성됩니다.</p><p>연결 주소: <code>/mcp</code></p><p>원본 SHA-256: <code>${OFFICIAL_POLICY.sha256}</code></p></body></html>`;
 const server=http.createServer(async(req,res)=>{
  try{
-  if(req.url==='/health'&&req.method==='GET')return json(res,200,{status:!DB_URL||!MASTER_SECRET?'not_ready':'ready',engine:VERSION,policySha256:OFFICIAL_POLICY.sha256,policyBytes:OFFICIAL_POLICY.bytes,mode:'AI_VERBATIM_POLICY_OFFICIAL_CACHE',dbConfigured:!!DB_URL,authenticationConfigured:!!MASTER_SECRET});
+  if(req.url==='/health'&&req.method==='GET')return json(res,200,{status:!DB_URL||!MASTER_SECRET?'not_ready':'ready',engine:VERSION,policyName:OFFICIAL_POLICY.name,quantEngine:quantEngineStatus(),policySha256:OFFICIAL_POLICY.sha256,policyBytes:OFFICIAL_POLICY.bytes,mode:'AI_VERBATIM_POLICY_OFFICIAL_CACHE',dbConfigured:!!DB_URL,authenticationConfigured:!!MASTER_SECRET});
   if(req.url==='/'&&req.method==='GET'){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"});return res.end(webPage);}
   if(req.url.startsWith('/.well-known/')||req.url.startsWith('/oauth/')){const o=await getOAuth();const handled=await o.handle(req,res);if(handled!==false)return;}
   if(req.url==='/mcp'&&req.method==='POST'){

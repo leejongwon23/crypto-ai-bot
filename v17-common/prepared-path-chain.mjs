@@ -1,3 +1,4 @@
+import {planForSpan} from './effective-plan-timeline.mjs';
 import {kstMs,kstTime,rawMarketWindows} from './price-path-recovery.mjs';
 const live=new Set(['PENDING','NEW_ENTRY','ENTERED','TP1','TP2','UNVERIFIED']);
 const tpState=new Set(['STOPPED','TP3_DONE']);
@@ -59,7 +60,14 @@ export function auditPreparedSegments(signal,segments,{from,initialState}={}){
  let prev=time(from);
  for(const seg of segments){
   if(tpState.has(state))break;
-  const exitStop=crossed(seg,o.stop,true),exitT1=crossed(seg,o.tp1),exitT2=crossed(seg,o.tp2),exitT3=crossed(seg,o.tp3);
+  let span;
+  try{span=planForSpan(signal,time(seg.start),time(seg.end)+1);}
+  catch(e){ambiguous={segment:seg,reason:String(e.message)};break;}
+  if(span.hasInteriorRevision&&span.plans.some(p=>crossed(seg,p.stop,true)||crossed(seg,p.tp1))){
+   ambiguous={segment:seg,reason:'MANAGEMENT_REVISION_INSIDE_AGGREGATE_PATH'};break;
+  }
+  const p=span.plan;
+  const exitStop=crossed(seg,p.stop,true),exitT1=crossed(seg,p.tp1),exitT2=crossed(seg,p.tp2),exitT3=crossed(seg,p.tp3);
   const entry=seg.high>=o.entryLow&&seg.low<=o.entryHigh;
   if(state==='PENDING'){
    if(!entry)continue;
