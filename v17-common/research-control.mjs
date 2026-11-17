@@ -26,7 +26,7 @@ function minuteBars(raw,symbol,asOf){
 export async function captureResearchObservation(db,raw,{now=Date.now()}={}){
  const context=buildQuantContext(raw,[]),source=context.sourceSha256;
  const exists=await db.query('SELECT source_sha FROM v20_research_observations WHERE source_sha=$1',[source]);if(exists.rows.length)return {replay:true,sourceSha256:source};
- const symbols={};for(const symbol of ['BTC','ETH']){const s=context.symbols[symbol],at=Date.parse(s.asOf.replace(' ','T')+'+09:00'),start=raw.indexOf('========== '+symbol+' ('+symbol+'USDT) =========='),next=raw.indexOf('========== ',start+12),part=raw.slice(start,next<0?undefined:next);symbols[symbol]={asOf:s.asOf,lastPrice:Number(part.match(/^lastPrice:\s*([\d.]+)/m)?.[1]),structuralEvents:s.structure.structuralEvents??{},bars:minuteBars(raw,symbol,at)};}
+ const symbols={};for(const symbol of ['BTC','ETH']){const s=context.symbols[symbol],at=Date.parse(s.asOf.replace(' ','T')+'+09:00'),start=raw.indexOf('========== '+symbol+' ('+symbol+'USDT) =========='),next=raw.indexOf('========== ',start+12),part=raw.slice(start,next<0?undefined:next);if(!Number.isFinite(at)||at>now)throw Error('RESEARCH_FUTURE_SOURCE_NOT_AVAILABLE_AT_RECEIVE');symbols[symbol]={asOf:s.asOf,lastPrice:Number(part.match(/^lastPrice:\s*([\d.]+)/m)?.[1]),structuralEvents:s.structure.structuralEvents??{},bars:minuteBars(raw,symbol,at)};}
  // Only the DB retains source observations and prospective research plans.
  // The official ledger is never written by these functions.
  const forecasts=freezeResearchForecasts(context,{frozenAt:now});

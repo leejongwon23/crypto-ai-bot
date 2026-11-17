@@ -1,7 +1,7 @@
 import {execFileSync} from 'node:child_process';
 import {readFile,writeFile,mkdir} from 'node:fs/promises';
 import {sha} from '../v17-common/quant-structure.mjs';
-import {guardedRollout,inspectDeployment} from './guard-core.mjs';
+import {guardedRollout,inspectDeployment,buildRollbackTree} from './guard-core.mjs';
 import {control,liveHealth} from './control-client.mjs';
 const git=(...args)=>execFileSync('git',args,{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
 const expectedCommit=process.env.EXPECTED_DEPLOY_COMMIT||git('rev-parse','HEAD');
@@ -27,11 +27,10 @@ const expected=manifest(expectedCommit);
 const result=await guardedRollout({expected,checkpoint,readHealth:liveHealth,verifyIntegrity:id=>control({action:'VERIFY',checkpoint:id}),wait,drill,forcedFailure:!!process.env.ENGINE_TEST_STATUS&&process.env.ENGINE_TEST_STATUS!=='success',rollback:async()=>{
  if(git('ls-remote','origin',branch).split(/\s+/)[0]!==expectedCommit)return {verified:false,reason:'CONCURRENT_SOURCE_CHANGE_NO_OVERWRITE'};
  let known;
- try{git('fetch','origin','v20-verified-production');known=git('rev-parse','FETCH_HEAD');}catch{known=git('rev-parse',expectedCommit+'^1');}
+ try{git('fetch','origin','v20-verified-production');known=git('rev-parse','FETCH_HEAD');}
+ catch{try{known=git('rev-parse','refs/remotes/origin/v20-verified-production');}catch{const parent=git('rev-parse',expectedCommit+'^1');if(parent!=='c5095a6326b4a6a8a9fc652a059d9043583ab2d3')throw Error('NO_PREVIOUS_VERIFIED_ROLLBACK_TARGET');known=parent;}}
  if(known===expectedCommit)return {verified:false,reason:'NO_PRIOR_DISTINCT_VERIFIED_RELEASE'};
- git('read-tree',known+'^{tree}');
- try{const journalBlob=git('rev-parse',expectedCommit+':quant-evolution/holdout-consumption.json');git('update-index','--add','--cacheinfo','100644,'+journalBlob+',quant-evolution/holdout-consumption.json');}catch{}
- const tree=git('write-tree');
+ const tree=buildRollbackTree(git,{verifiedCommit:known,failedCommit:expectedCommit});
  const rollbackCommit=git('-c','user.name=btc-eth-deployment-guard','-c','user.email=btc-eth-research@users.noreply.github.com','commit-tree',tree,'-p',expectedCommit,'-m','Automatically restore verified source after failed V2 deployment checks');
  git('push','origin',rollbackCommit+':'+branch);
  const target=manifest(rollbackCommit);

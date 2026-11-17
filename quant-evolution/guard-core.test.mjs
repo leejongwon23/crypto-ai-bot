@@ -1,5 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {guardedRollout,inspectDeployment} from './guard-core.mjs';
+import {guardedRollout,inspectDeployment,buildRollbackTree} from './guard-core.mjs';
+import {mkdtemp,writeFile,mkdir,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';import {execFileSync} from 'node:child_process';
 const expected={commit:'candidate',policySha256:'policy',registrySha256:'registry'};
 const good={status:'ready',buildCommit:'candidate',policySha256:'policy',quantEngine:{registrySha256:'registry',automaticOrders:false}};
 const intact={intact:true,originalsIntact:true,eventsIntact:true};
@@ -23,4 +24,13 @@ test('controlled rehearsal exercises the same rollback path without corrupting t
 });
 test('deployment timeout does not masquerade as live',async()=>{
  const r=await guardedRollout({expected,attempts:2,readHealth:async()=>{throw Error('offline');},verifyIntegrity:async()=>intact,wait:async()=>{},rollback:async()=>({verified:false})});assert.equal(r.status,'ROLLBACK_UNVERIFIED');
+});
+test('real Git rollback restores source while preserving every consumed holdout',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'v20-rollback-test-')),git=(...args)=>execFileSync('git',args,{cwd:dir,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
+ try{
+  git('init','-q');git('config','user.name','Synthetic Test');git('config','user.email','synthetic@example.invalid');await mkdir(join(dir,'quant-evolution'));
+  await writeFile(join(dir,'engine.txt'),'verified source');await writeFile(join(dir,'quant-evolution/holdout-consumption.json'),'["spent-1"]');git('add','.');git('commit','-qm','verified');const verifiedCommit=git('rev-parse','HEAD');
+  await writeFile(join(dir,'engine.txt'),'failed source');await writeFile(join(dir,'quant-evolution/holdout-consumption.json'),'["spent-1","spent-2"]');git('add','.');git('commit','-qm','failed');const failedCommit=git('rev-parse','HEAD');
+  const tree=buildRollbackTree(git,{verifiedCommit,failedCommit});assert.equal(git('show',tree+':engine.txt'),'verified source');assert.deepEqual(JSON.parse(git('show',tree+':quant-evolution/holdout-consumption.json')),['spent-1','spent-2']);
+ }finally{await rm(dir,{recursive:true,force:true});}
 });

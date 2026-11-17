@@ -10,6 +10,12 @@ export function inspectDeployment({health,expected,integrity,forcedFailure=false
  if(drill)reasons.push('CONTROLLED_ROLLBACK_REHEARSAL');
  return {passed:reasons.length===0,reasons};
 }
+export function buildRollbackTree(git,{verifiedCommit,failedCommit}){
+ git('read-tree',verifiedCommit+'^{tree}');
+ let blob;try{blob=git('rev-parse',failedCommit+':quant-evolution/holdout-consumption.json');}catch{}
+ if(blob)git('update-index','--add','--cacheinfo','100644,'+blob+',quant-evolution/holdout-consumption.json');
+ return git('write-tree');
+}
 export async function guardedRollout({expected,checkpoint,readHealth,verifyIntegrity,rollback,wait,attempts=90,drill=false,forcedFailure=false}){
  let last=null,consecutive=0;
  for(let i=0;i<attempts;i++){
