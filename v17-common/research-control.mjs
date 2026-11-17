@@ -1,6 +1,6 @@
 import {buildQuantContext,sha} from './quant-structure.mjs';
-import {generateResearchProposals} from './quant-evolution.mjs';
-import {freezeResearchForecasts,reviewResearchPath} from './quant-lifecycle.mjs';
+import {generateResearchProposals,synthesizeMechanismRevisions} from './quant-evolution.mjs';
+import {freezeResearchForecasts,reviewResearchPath,observedCounterexamples} from './quant-lifecycle.mjs';
 
 export const RESEARCH_DDL=`
 CREATE TABLE IF NOT EXISTS v20_research_observations(source_sha TEXT PRIMARY KEY,observed JSONB NOT NULL,received_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
@@ -8,9 +8,10 @@ CREATE TABLE IF NOT EXISTS v20_research_forecasts(id TEXT PRIMARY KEY,source_sha
 CREATE TABLE IF NOT EXISTS v20_research_reviews(forecast_id TEXT NOT NULL,observation_sha TEXT NOT NULL,review JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),PRIMARY KEY(forecast_id,observation_sha));
 CREATE TABLE IF NOT EXISTS v20_research_candidates(id TEXT PRIMARY KEY,candidate JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS v20_research_rejections(source_sha TEXT PRIMARY KEY,reason TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS v20_research_counterexamples(id TEXT PRIMARY KEY,counterexample JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS v20_integrity_checkpoints(id TEXT PRIMARY KEY,checkpoint JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 CREATE OR REPLACE FUNCTION v20_research_reject_mutation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'V20_RESEARCH_APPEND_ONLY'; END $$;
-DO $$ DECLARE t TEXT; BEGIN FOREACH t IN ARRAY ARRAY['v20_research_observations','v20_research_forecasts','v20_research_reviews','v20_research_candidates','v20_research_rejections','v20_integrity_checkpoints'] LOOP
+DO $$ DECLARE t TEXT; BEGIN FOREACH t IN ARRAY ARRAY['v20_research_observations','v20_research_forecasts','v20_research_reviews','v20_research_candidates','v20_research_counterexamples','v20_research_rejections','v20_integrity_checkpoints'] LOOP
  EXECUTE format('DROP TRIGGER IF EXISTS v20_research_immutable ON %I',t);
  EXECUTE format('CREATE TRIGGER v20_research_immutable BEFORE UPDATE OR DELETE OR TRUNCATE ON %I FOR EACH STATEMENT EXECUTE FUNCTION v20_research_reject_mutation()',t);
 END LOOP; END $$;
@@ -25,7 +26,7 @@ function minuteBars(raw,symbol,asOf){
 export async function captureResearchObservation(db,raw,{now=Date.now()}={}){
  const context=buildQuantContext(raw,[]),source=context.sourceSha256;
  const exists=await db.query('SELECT source_sha FROM v20_research_observations WHERE source_sha=$1',[source]);if(exists.rows.length)return {replay:true,sourceSha256:source};
- const symbols={};for(const symbol of ['BTC','ETH']){const s=context.symbols[symbol],at=Date.parse(s.asOf.replace(' ','T')+'+09:00');symbols[symbol]={asOf:s.asOf,bars:minuteBars(raw,symbol,at)};}
+ const symbols={};for(const symbol of ['BTC','ETH']){const s=context.symbols[symbol],at=Date.parse(s.asOf.replace(' ','T')+'+09:00'),start=raw.indexOf('========== '+symbol+' ('+symbol+'USDT) =========='),next=raw.indexOf('========== ',start+12),part=raw.slice(start,next<0?undefined:next);symbols[symbol]={asOf:s.asOf,lastPrice:Number(part.match(/^lastPrice:\s*([\d.]+)/m)?.[1]),structuralEvents:s.structure.structuralEvents??{},bars:minuteBars(raw,symbol,at)};}
  // Only the DB retains source observations and prospective research plans.
  // The official ledger is never written by these functions.
  const forecasts=freezeResearchForecasts(context,{frozenAt:now});
@@ -49,13 +50,18 @@ export async function runShadowCycle(db){
   const received=obs.rows.filter(o=>o.observed.receivedAt>f.forecast.frozenAt),bars=new Map(),conflicts=new Set();
   for(const row of received){for(const b of row.observed.symbols[f.forecast.symbol]?.bars??[]){const old=bars.get(b.t);if(old&&sha(old)!==sha(b))conflicts.add(b.t);else bars.set(b.t,b);}}
   const sourceSetSha=sha(received.map(o=>o.source_sha));
+  const counterexamples=observedCounterexamples(f.forecast,received.map(x=>x.observed));
+  for(const example of counterexamples)await db.query('INSERT INTO v20_research_counterexamples(id,counterexample) VALUES($1,$2) ON CONFLICT DO NOTHING',[sha({forecast:f.id,...example}),JSON.stringify({forecastId:f.id,...example})]);
+  for(const revision of synthesizeMechanismRevisions({...f.forecast.mechanism,id:f.forecast.modelSha256},counterexamples)){
+   const candidate={...revision,symbol:f.forecast.symbol,sourceForecastId:f.id};await db.query('INSERT INTO v20_research_candidates(id,candidate) VALUES($1,$2) ON CONFLICT DO NOTHING',[sha(candidate),JSON.stringify(candidate)]);
+  }
   const review=conflicts.size?{status:'UNVERIFIED',reason:'CONFLICTING_OBSERVED_CANDLES'}:reviewResearchPath(f.forecast,[...bars.values()]);
   const r=await db.query('INSERT INTO v20_research_reviews(forecast_id,observation_sha,review) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',[f.id,sourceSetSha,JSON.stringify({...review,modelSha256:f.forecast.modelSha256,symbol:f.forecast.symbol,regime:f.forecast.regime,sourceSetSha})]);reviews+=r.rowCount;
  }
  return {...await researchStatus(db),newReviews:reviews,backfilled:backlog.rows.length,backfillMayRemain:backlog.rows.length===25,truncated:obs.rows.length===1000||forecasts.rows.length===64};
 }
 export async function researchStatus(db){
- const count=await db.query(`SELECT (SELECT COUNT(*)::int FROM v20_research_observations) AS observations,(SELECT COUNT(*)::int FROM v20_research_forecasts) AS forecasts,(SELECT COUNT(*)::int FROM v20_research_candidates) AS candidates,(SELECT COUNT(*)::int FROM v20_research_reviews) AS reviews`);
+ const count=await db.query(`SELECT (SELECT COUNT(*)::int FROM v20_research_observations) AS observations,(SELECT COUNT(*)::int FROM v20_research_forecasts) AS forecasts,(SELECT COUNT(*)::int FROM v20_research_candidates) AS candidates,(SELECT COUNT(*)::int FROM v20_research_reviews) AS reviews,(SELECT COUNT(*)::int FROM v20_research_counterexamples) AS counterexamples`);
  const statuses=await db.query("SELECT review->>'status' AS status,COUNT(*)::int AS n FROM (SELECT DISTINCT ON(forecast_id) forecast_id,review FROM v20_research_reviews ORDER BY forecast_id,created_at DESC,observation_sha) r GROUP BY review->>'status'");
  return {schema:'V20_RESEARCH_CONTROL_1',...count.rows[0],statuses:statuses.rows,netPerformanceVerified:false,promotionBlocked:true,reasons:['INDEPENDENT_BASELINE_COST_AND_LOCKED_PROTOCOL_REQUIRED'],ordersEnabled:false};
 }

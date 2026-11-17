@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {sha} from './quant-structure.mjs';
-import {modelExposure,planModelTransition,reviewResearchPath,freezeResearchForecasts} from './quant-lifecycle.mjs';
+import {modelExposure,planModelTransition,reviewResearchPath,freezeResearchForecasts,observedCounterexamples} from './quant-lifecycle.mjs';
 import {compareIntegrity} from './research-control.mjs';
 const t=Date.parse('2026-11-17T05:00:00Z');
 const plan={entryLow:100,entryHigh:100,stop:95,tp1:110,tp2:120,tp3:130};
@@ -51,4 +51,10 @@ test('ledger checkpoint tolerates new entries but rejects edited originals or re
  assert.equal(compareIntegrity(before,{originals:[...before.originals,{idSha256:'b',sha256:'new'}],events:['e1','e2','e3']}).intact,true);
  assert.equal(compareIntegrity(before,{originals:[{idSha256:'a',sha256:'changed'}],events:['e1','e2']}).intact,false);
  assert.equal(compareIntegrity(before,{originals:before.originals,events:['e2']}).intact,false);
+});
+test('observed contrary structure can trigger research before a STOP, never causal certainty',()=>{
+ const forecast={...f,symbol:'BTC',sourceSha256:'old',anchors:{lastLow:{price:95,knownAt:t-60000}}};
+ const obs={sourceSha256:'new',receivedAt:t+60000,symbols:{BTC:{asOf:'2026-11-17 14:01:00',lastPrice:99,structuralEvents:{lowerHighs:true,lowerLows:true}}}};
+ const r=observedCounterexamples(forecast,[obs]);assert.equal(r.length,1);assert.equal(r[0].kind,'OBSERVED_OPPOSING_STRUCTURE_REVIEW');assert.equal(r[0].facts.breakLastConfirmedLow,false);assert.match(r[0].causalAttribution,/UNCONFIRMED/);
+ assert.equal(observedCounterexamples(forecast,[{...obs,receivedAt:t-1}]).length,0);
 });

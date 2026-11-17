@@ -61,11 +61,23 @@ export function freezeResearchForecasts(context,{frozenAt,sourceReceivedAt=froze
    const up=direction==='LONG',supported=up?events.higherHighs&&events.higherLows&&!events.invalidatedUp:events.lowerHighs&&events.lowerLows&&!events.invalidatedDown;
    const logic={all:up?['confirmedHigherHighs','confirmedHigherLows']:['confirmedLowerHighs','confirmedLowerLows'],invalidates:[up?'breakLastConfirmedLow':'breakLastConfirmedHigh']};
    const mechanism={family:'ORDERED_STRUCTURE_CONTINUATION',logic},plan=s.directions?.[direction]?.A;
-   const row={symbol,direction,regime:s.structure.regime??'UNVERIFIED',mechanism,modelSha256:sha(mechanism),sourceSha256:context.sourceSha256,sourceAsOf:s.asOf,frozenAt,sourceReceivedAt,mode:'PROSPECTIVE_RESEARCH_ONLY',officialSignal:false,exchangeOrdersEnabled:false};
+   const row={symbol,direction,regime:s.structure.regime??'UNVERIFIED',mechanism,modelSha256:sha(mechanism),sourceSha256:context.sourceSha256,sourceAsOf:s.asOf,frozenAt,sourceReceivedAt,anchors:{lastHigh:s.structure.lastHigh??null,lastLow:s.structure.lastLow??null},mode:'PROSPECTIVE_RESEARCH_ONLY',officialSignal:false,exchangeOrdersEnabled:false};
    const sourceTime=Date.parse(String(s.asOf).replace(' ','T')+'+09:00');
    const reason=!Number.isFinite(sourceTime)||sourceTime>frozenAt||sourceTime+60000<frozenAt?'SOURCE_NOT_CURRENT_AT_ACTUAL_FREEZE':!supported?'MATHEMATICAL_STRUCTURE_NOT_SUPPORTED':plan?.kind!=='ARITHMETIC_CANDIDATE_NOT_FORMAL'?'STRUCTURAL_PLAN_UNAVAILABLE':plan.rr2<2?'TP2_RR_BELOW_EXISTING_POLICY':null;
    out.push({...row,id:sha({symbol,direction,sourceSha256:context.sourceSha256,modelSha256:row.modelSha256}),status:reason?'ABSTAIN':'FROZEN_PENDING',reason,plan:reason?null:plan});
   }
  }
  return out;
+}
+export function observedCounterexamples(forecast,observations){
+ const out=[];
+ for(const o of observations){const s=o.symbols?.[forecast.symbol],at=Date.parse(String(s?.asOf).replace(' ','T')+'+09:00');
+  if(!s||!Number.isFinite(s.lastPrice)||!Number.isFinite(at)||at<forecast.frozenAt||at>o.receivedAt||o.receivedAt<=forecast.frozenAt)continue;
+  const e=s.structuralEvents??{},low=forecast.anchors?.lastLow,high=forecast.anchors?.lastHigh;
+  const brokenLow=low&&low.knownAt<=forecast.frozenAt?s.lastPrice<low.price:false,brokenHigh=high&&high.knownAt<=forecast.frozenAt?s.lastPrice>high.price:false;
+  const opposing=forecast.direction==='LONG'?e.lowerHighs&&e.lowerLows:e.higherHighs&&e.higherLows;
+  if(!(forecast.direction==='LONG'?brokenLow:brokenHigh)&&!opposing)continue;
+  const facts={confirmedHigherHighs:e.higherHighs,confirmedHigherLows:e.higherLows,confirmedLowerHighs:e.lowerHighs,confirmedLowerLows:e.lowerLows,breakLastConfirmedLow:!!brokenLow,breakLastConfirmedHigh:!!brokenHigh,priorStructureInvalidated:forecast.direction==='LONG'?!!brokenLow:!!brokenHigh,newOpposingStructureObserved:!!opposing};
+  out.push({frozenSourceSha256:forecast.sourceSha256,observedSourceSha256:o.sourceSha256,forecastAt:forecast.frozenAt,errorObservedAt:at,facts,kind:opposing?'OBSERVED_OPPOSING_STRUCTURE_REVIEW':'FROZEN_STRUCTURE_INVALIDATED',causalAttribution:'UNCONFIRMED_RESEARCH_COUNTEREXAMPLE'});
+ }return out;
 }
